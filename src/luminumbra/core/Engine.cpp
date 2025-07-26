@@ -3,6 +3,7 @@
 #include "luminumbra/rendering/Shader.h"
 #include "luminumbra/rendering/Camera.h"
 #include "luminumbra/world/Chunk.h"
+#include "luminumbra/world/World.h"
 #include "luminumbra/core/Debug.h"
 
 #include <glad/gl.h>
@@ -76,15 +77,32 @@ Engine::~Engine() {
     LOG("Engine::Destructor - Finish");
 }
 
-// --- NEW: Input Initialization ---
 void Engine::initInput() {
-    // Set cursor position callback
+    // We need to store the last position to calculate the offset
+    glfwGetCursorPos(m_Window, &m_LastMouseX, &m_LastMouseY);
+
     auto cursor_pos_callback = [](GLFWwindow* window, double xpos, double ypos) {
         Engine* engine = static_cast<Engine*>(glfwGetWindowUserPointer(window));
+        
+        float xoffset = xpos - engine->m_LastMouseX;
+        float yoffset = engine->m_LastMouseY - ypos; // Reversed since y-coordinates go from top to bottom
+        
         engine->m_LastMouseX = xpos;
         engine->m_LastMouseY = ypos;
+
+        engine->m_Camera->processMouseMovement(xoffset, yoffset);
     };
+
+    auto scroll_callback = [](GLFWwindow* window, double xoffset, double yoffset) {
+        Engine* engine = static_cast<Engine*>(glfwGetWindowUserPointer(window));
+        engine->m_Camera->processMouseScroll(yoffset);
+    };
+
     glfwSetCursorPosCallback(m_Window, cursor_pos_callback);
+    glfwSetScrollCallback(m_Window, scroll_callback);
+
+    // Optional: Hide and lock the cursor for a better camera feel
+    // glfwSetInputMode(m_Window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 }
 
 // --- NEW: Input Processing ---
@@ -92,11 +110,6 @@ void Engine::processInput() {
     if (glfwGetKey(m_Window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
         glfwSetWindowShouldClose(m_Window, true);
     }
-    
-    // Normalize mouse coordinates to [-1, 1] range for camera control
-    float normMouseX = (2.0f * (float)m_LastMouseX) / m_ScreenWidth - 1.0f;
-    float normMouseY = 1.0f - (2.0f * (float)m_LastMouseY) / m_ScreenHeight;
-    m_Camera->update(normMouseX, normMouseY);
 }
 
 // --- NEW: initRendering ---
@@ -106,8 +119,8 @@ void Engine::initRendering() {
     m_BasicShader = std::make_unique<Luminumbra::Rendering::Shader>("res/shaders/basic.vert", "res/shaders/basic.frag");
 
     LOG("Engine::initRendering - Shader created.");
-    m_TestChunk = std::make_unique<Luminumbra::World::Chunk>(glm::ivec3(0, 0, 0));
-    LOG("Engine::initRendering - Chunk created.");
+    m_World = std::make_unique<Luminumbra::World::World>();
+    LOG("Engine::initRendering - World created.");
     
     // Enable depth testing so the terrain draws correctly
     glEnable(GL_DEPTH_TEST);
@@ -121,13 +134,17 @@ void Engine::render() {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     m_BasicShader->use();
+    // Set lighting uniforms (we only need to do this once per frame)
+    m_BasicShader->setVec3("lightPos", glm::vec3(16.0f, 50.0f, 16.0f)); // A light high up in the "sky"
+    m_BasicShader->setVec3("viewPos", m_Camera->getPosition());
+    m_BasicShader->setVec3("lightColor", glm::vec3(1.0f, 1.0f, 1.0f));
+    m_BasicShader->setVec3("objectColor", glm::vec3(0.8f, 0.8f, 0.9f)); // A pale rock color
 
-    // Set up MVP matrices
     m_BasicShader->setMat4("projection", m_Camera->getProjectionMatrix());
     m_BasicShader->setMat4("view", m_Camera->getViewMatrix());
-    m_BasicShader->setMat4("model", m_TestChunk->getModelMatrix());
-
-    m_TestChunk->render();
+    if (m_World) {
+        m_World->render(*m_BasicShader); // Tell the world to render itself
+    }
 }
 
 // --- NEW: shutdown ---
