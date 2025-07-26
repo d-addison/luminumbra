@@ -21,7 +21,8 @@ find_package(OpenGL REQUIRED)
 
 add_executable(Luminumbra
     src/luminumbra/main.cpp
-    src/luminumbra/core/Engine.cpp  # Add our new source file
+    src/luminumbra/core/Engine.cpp
+    src/luminumbra/rendering/Shader.cpp # <-- ADD THIS LINE
     ${GLAD_SRC}
 )
 
