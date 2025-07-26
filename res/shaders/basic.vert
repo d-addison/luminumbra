@@ -1,11 +1,14 @@
 // res/shaders/basic.vert
 #version 330 core
-
-// Input vertex attribute. The '0' corresponds to the location we'll set in C++.
 layout (location = 0) in vec3 aPos;
+
+// Uniforms are global variables for a shader program
+uniform mat4 model;
+uniform mat4 view;
+uniform mat4 projection;
 
 void main()
 {
-    // gl_Position is a special output variable that determines the final position.
-    gl_Position = vec4(aPos, 1.0);
+    // Transform vertex position into clip space
+    gl_Position = projection * view * model * vec4(aPos, 1.0);
 }
