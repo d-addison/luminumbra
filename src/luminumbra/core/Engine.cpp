@@ -1,7 +1,9 @@
 // src/luminumbra/core/Engine.cpp
 #include "luminumbra/core/Engine.h"
-#include "luminumbra/rendering/Shader.h" // Include our new shader class
+#include "luminumbra/rendering/Shader.h"
 #include "luminumbra/rendering/Camera.h"
+#include "luminumbra/world/Chunk.h"
+#include "luminumbra/core/Debug.h"
 
 #include <glad/gl.h>
 #define GLFW_INCLUDE_NONE
@@ -22,7 +24,7 @@ namespace Luminumbra::Core {
 
 // --- Constructor ---
 Engine::Engine(int width, int height, const char* title) : m_ScreenWidth(width), m_ScreenHeight(height) {
-    std::cout << "Luminumbra Engine Initializing..." << std::endl;
+    LOG("Engine::Constructor - Start");
 
     if (!glfwInit()) {
         throw std::runtime_error("Failed to initialize GLFW");
@@ -50,21 +52,28 @@ Engine::Engine(int width, int height, const char* title) : m_ScreenWidth(width),
 
     std::cout << "OpenGL Version: " << glGetString(GL_VERSION) << std::endl;
     glViewport(0, 0, width, height);
+    LOG("Engine::Constructor - GLFW and GLAD initialized.");
     
     // Associate this Engine instance with the GLFW window
     glfwSetWindowUserPointer(m_Window, this);
     initInput(); // Call new init function
+    LOG("Engine::Constructor - Input initialized.");
 
     m_Camera = std::make_unique<Luminumbra::Rendering::Camera>((float)width, (float)height);
+    LOG("Engine::Constructor - Camera created.");
     initRendering();
+    LOG("Engine::Constructor - Rendering initialized.");
+    LOG("Engine::Constructor - Finish");
 }
 
 // --- Destructor ---
 Engine::~Engine() {
+    LOG("Engine::Destructor - Start");
     shutdown();
-    std::cout << "Shutting down." << std::endl;
+    LOG("Engine::Destructor - Shutdown complete.");
     glfwDestroyWindow(m_Window);
     glfwTerminate();
+    LOG("Engine::Destructor - Finish");
 }
 
 // --- NEW: Input Initialization ---
@@ -92,65 +101,43 @@ void Engine::processInput() {
 
 // --- NEW: initRendering ---
 void Engine::initRendering() {
+    LOG("Engine::initRendering - Start");
     // Create the shader program
     m_BasicShader = std::make_unique<Luminumbra::Rendering::Shader>("res/shaders/basic.vert", "res/shaders/basic.frag");
 
-    // Define the vertices for a triangle
-    float vertices[] = {
-        -0.5f, -0.5f, 0.0f, // left  
-         0.5f, -0.5f, 0.0f, // right 
-         0.0f,  0.5f, 0.0f  // top   
-    };
-
-    // 1. Create VAO and VBO
-    glGenVertexArrays(1, &m_TriangleVAO);
-    glGenBuffers(1, &m_TriangleVBO);
-
-    // 2. Bind VAO first, then bind and set VBO(s), and then configure vertex attributes(s).
-    glBindVertexArray(m_TriangleVAO);
-
-    glBindBuffer(GL_ARRAY_BUFFER, m_TriangleVBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-
-    // 3. Tell OpenGL how to interpret the vertex data
-    // Corresponds to 'layout (location = 0)' in the vertex shader
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-
-    // Unbind the VBO and VAO
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glBindVertexArray(0);
+    LOG("Engine::initRendering - Shader created.");
+    m_TestChunk = std::make_unique<Luminumbra::World::Chunk>(glm::ivec3(0, 0, 0));
+    LOG("Engine::initRendering - Chunk created.");
+    
+    // Enable depth testing so the terrain draws correctly
+    glEnable(GL_DEPTH_TEST);
+    LOG("Engine::initRendering - Depth Test enabled.");
+    LOG("Engine::initRendering - Finish");
 }
 
 // --- NEW: render ---
 void Engine::render() {
     glClearColor(0.28f, 0.24f, 0.55f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     m_BasicShader->use();
 
     // Set up MVP matrices
-    glm::mat4 model = glm::mat4(1.0f); // Identity matrix
-    // You could rotate the triangle over time like this:
-    // model = glm::rotate(model, (float)glfwGetTime(), glm::vec3(0.0f, 1.0f, 0.0f));
-
     m_BasicShader->setMat4("projection", m_Camera->getProjectionMatrix());
     m_BasicShader->setMat4("view", m_Camera->getViewMatrix());
-    m_BasicShader->setMat4("model", model);
+    m_BasicShader->setMat4("model", m_TestChunk->getModelMatrix());
 
-    glBindVertexArray(m_TriangleVAO);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
+    m_TestChunk->render();
 }
 
 // --- NEW: shutdown ---
 void Engine::shutdown() {
-    glDeleteVertexArrays(1, &m_TriangleVAO);
-    glDeleteBuffers(1, &m_TriangleVBO);
-    // m_BasicShader is cleaned up automatically by unique_ptr
+
 }
 
 // --- run loop ---
 void Engine::run() {
+    LOG("Engine::run - Starting main loop.");
     while (!glfwWindowShouldClose(m_Window)) {
         glfwPollEvents();
         processInput();
@@ -159,6 +146,7 @@ void Engine::run() {
 
         glfwSwapBuffers(m_Window);
     }
+    LOG("Engine::run - Main loop finished.");
 }
 
 } // namespace Luminumbra::Core

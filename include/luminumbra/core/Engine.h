@@ -10,6 +10,7 @@ namespace Luminumbra::Rendering {
     class Camera;
 }
 
+namespace Luminumbra::World { class Chunk; }
 namespace Luminumbra::Core {
 
 class Engine {
@@ -38,8 +39,7 @@ private:
     // Rendering resources
     std::unique_ptr<Luminumbra::Rendering::Shader> m_BasicShader;
     std::unique_ptr<Luminumbra::Rendering::Camera> m_Camera;
-    unsigned int m_TriangleVAO = 0;
-    unsigned int m_TriangleVBO = 0;
+    std::unique_ptr<Luminumbra::World::Chunk> m_TestChunk;
 };
 
 } // namespace Luminumbra::Core
