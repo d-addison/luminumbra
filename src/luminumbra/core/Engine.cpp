@@ -1,6 +1,7 @@
 // src/luminumbra/core/Engine.cpp
 #include "luminumbra/core/Engine.h"
 #include "luminumbra/rendering/Shader.h" // Include our new shader class
+#include "luminumbra/rendering/Camera.h"
 
 #include <glad/gl.h>
 #define GLFW_INCLUDE_NONE
@@ -9,6 +10,8 @@
 #include <iostream>
 #include <stdexcept>
 #include <vector>
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 // Private free function for the error callback
 void error_callback(int error, const char* description) {
@@ -18,7 +21,7 @@ void error_callback(int error, const char* description) {
 namespace Luminumbra::Core {
 
 // --- Constructor ---
-Engine::Engine(int width, int height, const char* title) {
+Engine::Engine(int width, int height, const char* title) : m_ScreenWidth(width), m_ScreenHeight(height) {
     std::cout << "Luminumbra Engine Initializing..." << std::endl;
 
     if (!glfwInit()) {
@@ -48,6 +51,11 @@ Engine::Engine(int width, int height, const char* title) {
     std::cout << "OpenGL Version: " << glGetString(GL_VERSION) << std::endl;
     glViewport(0, 0, width, height);
     
+    // Associate this Engine instance with the GLFW window
+    glfwSetWindowUserPointer(m_Window, this);
+    initInput(); // Call new init function
+
+    m_Camera = std::make_unique<Luminumbra::Rendering::Camera>((float)width, (float)height);
     initRendering();
 }
 
@@ -57,6 +65,29 @@ Engine::~Engine() {
     std::cout << "Shutting down." << std::endl;
     glfwDestroyWindow(m_Window);
     glfwTerminate();
+}
+
+// --- NEW: Input Initialization ---
+void Engine::initInput() {
+    // Set cursor position callback
+    auto cursor_pos_callback = [](GLFWwindow* window, double xpos, double ypos) {
+        Engine* engine = static_cast<Engine*>(glfwGetWindowUserPointer(window));
+        engine->m_LastMouseX = xpos;
+        engine->m_LastMouseY = ypos;
+    };
+    glfwSetCursorPosCallback(m_Window, cursor_pos_callback);
+}
+
+// --- NEW: Input Processing ---
+void Engine::processInput() {
+    if (glfwGetKey(m_Window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
+        glfwSetWindowShouldClose(m_Window, true);
+    }
+    
+    // Normalize mouse coordinates to [-1, 1] range for camera control
+    float normMouseX = (2.0f * (float)m_LastMouseX) / m_ScreenWidth - 1.0f;
+    float normMouseY = 1.0f - (2.0f * (float)m_LastMouseY) / m_ScreenHeight;
+    m_Camera->update(normMouseX, normMouseY);
 }
 
 // --- NEW: initRendering ---
@@ -93,12 +124,20 @@ void Engine::initRendering() {
 
 // --- NEW: render ---
 void Engine::render() {
-    // Clear the screen to a color from the Umbra palette (#483D8B)
     glClearColor(0.28f, 0.24f, 0.55f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    // Draw the triangle
     m_BasicShader->use();
+
+    // Set up MVP matrices
+    glm::mat4 model = glm::mat4(1.0f); // Identity matrix
+    // You could rotate the triangle over time like this:
+    // model = glm::rotate(model, (float)glfwGetTime(), glm::vec3(0.0f, 1.0f, 0.0f));
+
+    m_BasicShader->setMat4("projection", m_Camera->getProjectionMatrix());
+    m_BasicShader->setMat4("view", m_Camera->getViewMatrix());
+    m_BasicShader->setMat4("model", model);
+
     glBindVertexArray(m_TriangleVAO);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 }
@@ -114,9 +153,7 @@ void Engine::shutdown() {
 void Engine::run() {
     while (!glfwWindowShouldClose(m_Window)) {
         glfwPollEvents();
-        if (glfwGetKey(m_Window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
-            glfwSetWindowShouldClose(m_Window, true);
-        }
+        processInput();
 
         render();
 

@@ -22,15 +22,20 @@ find_package(OpenGL REQUIRED)
 add_executable(Luminumbra
     src/luminumbra/main.cpp
     src/luminumbra/core/Engine.cpp
-    src/luminumbra/rendering/Shader.cpp # <-- ADD THIS LINE
+    src/luminumbra/rendering/Shader.cpp
+    src/luminumbra/rendering/Camera.cpp
     ${GLAD_SRC}
 )
 
 # --- Link Dependencies ---
 
+# Find GLM header-only library
+set(GLM_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/glm-1.0.1)
+
 target_include_directories(Luminumbra PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include # <-- IMPORTANT: Make our new /include dir available
     ${GLAD_INCLUDE_DIR}
+    ${GLM_INCLUDE_DIR}
 )
 
 # Link our game against GLFW and OpenGL
