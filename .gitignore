@@ -1,0 +1,9 @@
+# Build folder
+/build/
+
+# VS Code user settings
+.vscode/
+
+# Common OS files
+.DS_Store
+Thumbs.db
