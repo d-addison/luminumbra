@@ -7,12 +7,41 @@
 namespace Luminumbra::Rendering {
 
 Camera::Camera(float screenWidth, float screenHeight) {
-    // Set up the projection matrix
-    // Field of View: 45 degrees
-    // Aspect Ratio: screen width / screen height
-    // Near clipping plane: 0.1 units
-    // Far clipping plane: 100.0 units
-    m_ProjectionMatrix = glm::perspective(glm::radians(45.0f), screenWidth / screenHeight, 0.1f, 100.0f);
+    m_ProjectionMatrix = glm::perspective(glm::radians(45.0f), screenWidth / screenHeight, 0.1f, 1000.0f); // Increase far plane
+
+    // --- NEW STARTING VALUES ---
+    m_FocalPoint = glm::vec3(16.0f, 0.0f, 16.0f); // Look at the center of a chunk
+    m_Distance = 100.0f; // Start further away
+    m_Pitch = 30.0f; // Start with a 30-degree downward angle
+    m_Yaw = 45.0f;   // Start at a 45-degree side angle
+    
+    recalculateViewMatrix();
+}
+
+// NEW MOUSE HANDLING LOGIC
+void Camera::processMouseMovement(float xoffset, float yoffset) {
+    float sensitivity = 0.2f;
+    xoffset *= sensitivity;
+    yoffset *= sensitivity;
+
+    m_Yaw += xoffset;
+    m_Pitch += yoffset;
+
+    // Clamp pitch
+    if (m_Pitch > 89.0f)
+        m_Pitch = 89.0f;
+    if (m_Pitch < -89.0f)
+        m_Pitch = -89.0f;
+    
+    recalculateViewMatrix();
+}
+
+void Camera::processMouseScroll(float yoffset) {
+    m_Distance -= yoffset * 5.0f; // Zoom in/out
+    if (m_Distance < 1.0f)
+        m_Distance = 1.0f;
+    if (m_Distance > 1000.0f)
+        m_Distance = 1000.0f;
     
     recalculateViewMatrix();
 }
