@@ -1,8 +1,10 @@
 // src/luminumbra/main.cpp
 #include "luminumbra/core/Engine.h"
+#include "luminumbra/core/Debug.h"
 #include <iostream>
 
 int main() {
+    LOG("Starting Luminumbra Engine...");
     try {
         Luminumbra::Core::Engine engine(1280, 720, "Luminumbra");
         engine.run();
@@ -11,5 +13,6 @@ int main() {
         return -1;
     }
 
+    LOG("Main function finished gracefully.");
     return 0;
 }
