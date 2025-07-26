@@ -1,17 +1,31 @@
-// include/luminumbra/core/Debug.h
-#pragma once
+#ifndef DEBUG_H
+#define DEBUG_H
 
 #include <iostream>
-#include <string> // Add this
+#define LOG(message) std::cout << message << std::endl;
 
-// Define a simple logging macro
-#ifdef NDEBUG
-    #define LOG(message) ((void)0)
-#else
-    // Using a template allows it to accept various types that can be streamed to std::cout
-    template<typename T>
-    void LogMessage(const T& message) {
-        std::cout << "[LOG] " << message << std::endl;
-    }
-    #define LOG(message) LogMessage(message)
-#endif
+#include <glad/gl.h>
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+#include "luminumbra/rendering/Shader.h"
+
+namespace Luminumbra::Debug {
+
+class Debug {
+public:
+    Debug();
+    ~Debug();
+
+    void drawAxes(const glm::mat4& projection, const glm::mat4& view);
+
+private:
+    Luminumbra::Rendering::Shader shader;
+    GLuint VAO, VBO;
+
+    void setupAxes();
+};
+
+} // namespace Luminumbra::Debug
+
+#endif // DEBUG_H
