@@ -6,11 +6,13 @@
 // Forward declarations
 struct GLFWwindow;
 namespace Luminumbra::Rendering { 
-    class Shader; 
-    class Camera;
+    class Shader;
 }
-
+namespace Luminumbra::Player { class Player; }
 namespace Luminumbra::World { class World; }
+namespace Luminumbra::Debug { class Debug; }
+namespace Luminumbra::UI { class UIManager; }
+
 namespace Luminumbra::Core {
 
 class Engine {
@@ -38,8 +40,14 @@ private:
 
     // Rendering resources
     std::unique_ptr<Luminumbra::Rendering::Shader> m_BasicShader;
-    std::unique_ptr<Luminumbra::Rendering::Camera> m_Camera;
+    std::unique_ptr<Luminumbra::Player::Player> m_Player;
     std::unique_ptr<Luminumbra::World::World> m_World; 
+    std::unique_ptr<Luminumbra::Debug::Debug> m_Debug;
+    std::unique_ptr<Luminumbra::UI::UIManager> m_UIManager;
+    
+    // UI state
+    bool m_ShowMenu = true;
+    bool m_ShowDebugInfo = true;
 };
 
 } // namespace Luminumbra::Core

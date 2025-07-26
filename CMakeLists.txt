@@ -22,13 +22,22 @@ find_package(OpenGL REQUIRED)
 add_executable(Luminumbra
     src/luminumbra/main.cpp
     src/luminumbra/core/Engine.cpp
-    src/luminumbra/core/ExternalImplementations.cpp
+    src/luminumbra/core/Debug.cpp
     src/luminumbra/rendering/Shader.cpp
     src/luminumbra/rendering/Camera.cpp
+    src/luminumbra/player/Player.cpp
     src/luminumbra/world/Chunk.cpp
     src/luminumbra/world/MarchingCubes.cpp
     src/luminumbra/world/World.cpp
+    src/luminumbra/ui/UIManager.cpp
     ${GLAD_SRC}
+    external/FastNoiseLite/FastNoiseLite.h
+    external/imgui/imgui.cpp
+    external/imgui/imgui_draw.cpp
+    external/imgui/imgui_tables.cpp
+    external/imgui/imgui_widgets.cpp
+    external/imgui/backends/imgui_impl_glfw.cpp
+    external/imgui/backends/imgui_impl_opengl3.cpp
 )
 
 # --- Link Dependencies ---
@@ -36,13 +45,16 @@ add_executable(Luminumbra
 # Header-only libraries
 set(GLM_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/glm-1.0.1)
 set(FASTNOISE_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/FastNoiseLite)
-target_compile_definitions(Luminumbra PRIVATE GLM_ENABLE_EXPERIMENTAL)
+set(IMGUI_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/imgui)
+target_compile_definitions(Luminumbra PRIVATE GLM_ENABLE_EXPERIMENTAL FNL_IMPL)
 
 target_include_directories(Luminumbra PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include # <-- IMPORTANT: Make our new /include dir available
     ${GLAD_INCLUDE_DIR}
     ${GLM_INCLUDE_DIR}
     ${FASTNOISE_INCLUDE_DIR}
+    ${IMGUI_INCLUDE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/external/imgui/backends
 )
 
 # Link our game against GLFW and OpenGL

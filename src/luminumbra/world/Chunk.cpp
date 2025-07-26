@@ -37,6 +37,22 @@ void Chunk::generateNoiseData(fnl_state& noise) { // Updated function signature
     LOG("Chunk::generateNoiseData - Start");
     m_NoiseData.resize((CHUNK_SIZE + 1) * (CHUNK_SIZE + 1) * (CHUNK_SIZE + 1));
     
+    // Create multiple noise states for different features
+    fnl_state terrainNoise = noise;
+    terrainNoise.frequency = 0.01f;
+    terrainNoise.octaves = 4;
+    terrainNoise.lacunarity = 2.0f;
+    terrainNoise.gain = 0.5f;
+    
+    fnl_state caveNoise = fnlCreateState();
+    caveNoise.noise_type = FNL_NOISE_PERLIN;
+    caveNoise.frequency = 0.03f;
+    caveNoise.octaves = 2;
+    
+    fnl_state detailNoise = fnlCreateState();
+    detailNoise.noise_type = FNL_NOISE_VALUE;
+    detailNoise.frequency = 0.1f;
+    
     for (int x = 0; x <= CHUNK_SIZE; ++x) {
         for (int y = 0; y <= CHUNK_SIZE; ++y) {
             for (int z = 0; z <= CHUNK_SIZE; ++z) {
@@ -44,10 +60,33 @@ void Chunk::generateNoiseData(fnl_state& noise) { // Updated function signature
                 float worldY = (float)(m_Position.y + y);
                 float worldZ = (float)(m_Position.z + z);
 
-                // Simple 3D noise + a gradient to make it look like terrain
-                float density = -worldY; 
-                // Use the C-style function call, passing a pointer to the state
-                density += fnlGetNoise3D(&noise, worldX, worldY, worldZ) * 10.0f;
+                // Base terrain height using 2D noise for more consistent ground
+                float terrainHeight = fnlGetNoise2D(&terrainNoise, worldX * 0.5f, worldZ * 0.5f) * 20.0f + 30.0f;
+                
+                // Base density based on height
+                float density = (terrainHeight - worldY) * 0.1f;
+                
+                // Add 3D noise for terrain variation
+                density += fnlGetNoise3D(&terrainNoise, worldX, worldY * 0.5f, worldZ) * 5.0f;
+                
+                // Add caves (subtract density where cave noise is high)
+                float caveValue = fnlGetNoise3D(&caveNoise, worldX, worldY, worldZ);
+                if (caveValue > 0.4f && worldY < terrainHeight - 5.0f) {
+                    density -= (caveValue - 0.4f) * 20.0f;
+                }
+                
+                // Add surface detail
+                if (worldY < terrainHeight + 10.0f && worldY > terrainHeight - 10.0f) {
+                    density += fnlGetNoise3D(&detailNoise, worldX * 2.0f, worldY * 2.0f, worldZ * 2.0f) * 2.0f;
+                }
+                
+                // Create overhangs and cliffs
+                if (worldY > 20.0f && worldY < 40.0f) {
+                    float overhangNoise = fnlGetNoise2D(&terrainNoise, worldX * 0.1f, worldZ * 0.1f);
+                    if (overhangNoise > 0.3f) {
+                        density += sin((worldY - 20.0f) * 0.3f) * overhangNoise * 5.0f;
+                    }
+                }
                 
                 int index = x + z * (CHUNK_SIZE + 1) + y * (CHUNK_SIZE + 1) * (CHUNK_SIZE + 1);
                 m_NoiseData[index] = density;
@@ -142,6 +181,31 @@ void Chunk::render() const {
     if (m_VertexCount == 0) return;
     glBindVertexArray(m_VAO);
     glDrawArrays(GL_TRIANGLES, 0, m_VertexCount);
+}
+
+bool Chunk::isSolid(const glm::vec3& worldPosition) const {
+    // Convert world position to local chunk coordinates
+    glm::vec3 localPos = worldPosition - glm::vec3(m_Position);
+
+    // Check bounds
+    if (localPos.x < 0 || localPos.x >= CHUNK_SIZE ||
+        localPos.y < 0 || localPos.y >= CHUNK_SIZE ||
+        localPos.z < 0 || localPos.z >= CHUNK_SIZE) {
+        return false; // Not in this chunk
+    }
+
+    // Convert to integer coordinates for array access
+    glm::ivec3 voxelPos = glm::floor(localPos);
+
+    // Get the noise value at that position
+    int index = voxelPos.x + voxelPos.z * (CHUNK_SIZE + 1) + voxelPos.y * (CHUNK_SIZE + 1) * (CHUNK_SIZE + 1);
+    
+    if (index < 0 || index >= m_NoiseData.size()) {
+        return false; // Out of bounds of the noise data
+    }
+
+    // If the density is below the isolevel, it's considered "solid"
+    return m_NoiseData[index] < 0.0f;
 }
 
 } // namespace Luminumbra::World

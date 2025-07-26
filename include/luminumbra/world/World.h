@@ -27,6 +27,9 @@ public:
     ~World();
 
     void render(Luminumbra::Rendering::Shader& shader) const;
+    bool isSolid(const glm::vec3& worldPosition) const;
+
+    const std::map<glm::ivec3, std::unique_ptr<Chunk>, IVec3Compare>& getChunks() const { return m_Chunks; }
 
 private:
     // Using a map to store chunks by their grid coordinates

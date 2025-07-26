@@ -18,6 +18,7 @@ public:
     Chunk& operator=(const Chunk&) = delete;
     
     void render() const;
+    bool isSolid(const glm::vec3& worldPosition) const;
 
     const glm::mat4& getModelMatrix() const { return m_ModelMatrix; }
     static constexpr int CHUNK_SIZE = 32;
