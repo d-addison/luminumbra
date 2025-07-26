@@ -21,15 +21,28 @@ find_package(OpenGL REQUIRED)
 
 add_executable(Luminumbra
     src/luminumbra/main.cpp
-    src/luminumbra/core/Engine.cpp  # Add our new source file
+    src/luminumbra/core/Engine.cpp
+    src/luminumbra/core/ExternalImplementations.cpp
+    src/luminumbra/rendering/Shader.cpp
+    src/luminumbra/rendering/Camera.cpp
+    src/luminumbra/world/Chunk.cpp
+    src/luminumbra/world/MarchingCubes.cpp
+    src/luminumbra/world/World.cpp
     ${GLAD_SRC}
 )
 
 # --- Link Dependencies ---
 
+# Header-only libraries
+set(GLM_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/glm-1.0.1)
+set(FASTNOISE_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/FastNoiseLite)
+target_compile_definitions(Luminumbra PRIVATE GLM_ENABLE_EXPERIMENTAL)
+
 target_include_directories(Luminumbra PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include # <-- IMPORTANT: Make our new /include dir available
     ${GLAD_INCLUDE_DIR}
+    ${GLM_INCLUDE_DIR}
+    ${FASTNOISE_INCLUDE_DIR}
 )
 
 # Link our game against GLFW and OpenGL
