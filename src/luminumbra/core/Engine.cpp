@@ -1,5 +1,6 @@
 // src/luminumbra/core/Engine.cpp
 #include "luminumbra/core/Engine.h"
+#include "luminumbra/rendering/Shader.h" // Include our new shader class
 
 #include <glad/gl.h>
 #define GLFW_INCLUDE_NONE
@@ -7,6 +8,7 @@
 
 #include <iostream>
 #include <stdexcept>
+#include <vector>
 
 // Private free function for the error callback
 void error_callback(int error, const char* description) {
@@ -15,6 +17,7 @@ void error_callback(int error, const char* description) {
 
 namespace Luminumbra::Core {
 
+// --- Constructor ---
 Engine::Engine(int width, int height, const char* title) {
     std::cout << "Luminumbra Engine Initializing..." << std::endl;
 
@@ -43,35 +46,80 @@ Engine::Engine(int width, int height, const char* title) {
     }
 
     std::cout << "OpenGL Version: " << glGetString(GL_VERSION) << std::endl;
-
     glViewport(0, 0, width, height);
+    
+    initRendering();
 }
 
+// --- Destructor ---
 Engine::~Engine() {
+    shutdown();
     std::cout << "Shutting down." << std::endl;
     glfwDestroyWindow(m_Window);
     glfwTerminate();
 }
 
+// --- NEW: initRendering ---
+void Engine::initRendering() {
+    // Create the shader program
+    m_BasicShader = std::make_unique<Luminumbra::Rendering::Shader>("res/shaders/basic.vert", "res/shaders/basic.frag");
+
+    // Define the vertices for a triangle
+    float vertices[] = {
+        -0.5f, -0.5f, 0.0f, // left  
+         0.5f, -0.5f, 0.0f, // right 
+         0.0f,  0.5f, 0.0f  // top   
+    };
+
+    // 1. Create VAO and VBO
+    glGenVertexArrays(1, &m_TriangleVAO);
+    glGenBuffers(1, &m_TriangleVBO);
+
+    // 2. Bind VAO first, then bind and set VBO(s), and then configure vertex attributes(s).
+    glBindVertexArray(m_TriangleVAO);
+
+    glBindBuffer(GL_ARRAY_BUFFER, m_TriangleVBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+
+    // 3. Tell OpenGL how to interpret the vertex data
+    // Corresponds to 'layout (location = 0)' in the vertex shader
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+
+    // Unbind the VBO and VAO
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+}
+
+// --- NEW: render ---
+void Engine::render() {
+    // Clear the screen to a color from the Umbra palette (#483D8B)
+    glClearColor(0.28f, 0.24f, 0.55f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    // Draw the triangle
+    m_BasicShader->use();
+    glBindVertexArray(m_TriangleVAO);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+}
+
+// --- NEW: shutdown ---
+void Engine::shutdown() {
+    glDeleteVertexArrays(1, &m_TriangleVAO);
+    glDeleteBuffers(1, &m_TriangleVBO);
+    // m_BasicShader is cleaned up automatically by unique_ptr
+}
+
+// --- run loop ---
 void Engine::run() {
     while (!glfwWindowShouldClose(m_Window)) {
-        // --- Input ---
         glfwPollEvents();
         if (glfwGetKey(m_Window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
             glfwSetWindowShouldClose(m_Window, true);
         }
 
-        // --- Logic Update (for later) ---
-        // update(deltaTime);
+        render();
 
-        // --- Rendering ---
-        // Clear the screen to a color from the Umbra palette (#483D8B)
-        glClearColor(0.28f, 0.24f, 0.55f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-
-        // render();
-
-        // --- Swap Buffers ---
         glfwSwapBuffers(m_Window);
     }
 }
