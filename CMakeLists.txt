@@ -27,6 +27,7 @@ add_executable(Luminumbra
     src/luminumbra/rendering/Camera.cpp
     src/luminumbra/world/Chunk.cpp
     src/luminumbra/world/MarchingCubes.cpp
+    src/luminumbra/world/World.cpp
     ${GLAD_SRC}
 )
 
@@ -35,6 +36,7 @@ add_executable(Luminumbra
 # Header-only libraries
 set(GLM_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/glm-1.0.1)
 set(FASTNOISE_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/FastNoiseLite)
+target_compile_definitions(Luminumbra PRIVATE GLM_ENABLE_EXPERIMENTAL)
 
 target_include_directories(Luminumbra PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include # <-- IMPORTANT: Make our new /include dir available

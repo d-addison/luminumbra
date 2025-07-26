@@ -20,6 +20,7 @@ public:
     void render() const;
 
     const glm::mat4& getModelMatrix() const { return m_ModelMatrix; }
+    static constexpr int CHUNK_SIZE = 32;
 
 private:
     void generateNoiseData(fnl_state& noise);
@@ -34,7 +35,6 @@ private:
 
     // Voxel data
     std::vector<float> m_NoiseData;
-    static constexpr int CHUNK_SIZE = 32;
 };
 
 } // namespace Luminumbra::World

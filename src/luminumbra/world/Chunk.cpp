@@ -49,7 +49,7 @@ void Chunk::generateNoiseData(fnl_state& noise) { // Updated function signature
                 // Use the C-style function call, passing a pointer to the state
                 density += fnlGetNoise3D(&noise, worldX, worldY, worldZ) * 10.0f;
                 
-                int index = x + y * (CHUNK_SIZE + 1) + z * (CHUNK_SIZE + 1) * (CHUNK_SIZE + 1);
+                int index = x + z * (CHUNK_SIZE + 1) + y * (CHUNK_SIZE + 1) * (CHUNK_SIZE + 1);
                 m_NoiseData[index] = density;
             }
         }
@@ -77,8 +77,8 @@ void Chunk::generateMesh() {
                 for (int i = 0; i < 8; ++i) {
                     // Calculate the position of each corner in the chunk
                     glm::ivec3 cornerPos = glm::ivec3(x, y, z) + cornerOffsets[i];
-                    
-                    int index = cornerPos.x + cornerPos.y * (CHUNK_SIZE + 1) + cornerPos.z * (CHUNK_SIZE + 1) * (CHUNK_SIZE + 1);
+
+                    int index = cornerPos.x + cornerPos.z * (CHUNK_SIZE + 1) + cornerPos.y * (CHUNK_SIZE + 1) * (CHUNK_SIZE + 1);
                     
                     cell.p[i] = glm::vec3(cornerPos);
                     cell.val[i] = m_NoiseData.at(index); // Using .at() can give better debug info than []
@@ -99,15 +99,21 @@ void Chunk::generateMesh() {
 
     m_VertexCount = triangles.size() * 3;
     
-    // Using a more efficient way to copy data
-    std::vector<glm::vec3> vertices;
+    struct Vertex {
+        glm::vec3 position;
+        glm::vec3 normal;
+    };
+    std::vector<Vertex> vertices;
     vertices.reserve(m_VertexCount);
-    for(const auto& tri : triangles) {
-        vertices.push_back(tri.p[0]);
-        vertices.push_back(tri.p[1]);
-        vertices.push_back(tri.p[2]);
-    }
 
+    for(const auto& tri : triangles) {
+        // Calculate the normal of the triangle face
+        glm::vec3 normal = glm::normalize(glm::cross(tri.p[1] - tri.p[0], tri.p[2] - tri.p[0]));
+        
+        vertices.push_back({tri.p[0], normal});
+        vertices.push_back({tri.p[1], normal});
+        vertices.push_back({tri.p[2], normal});
+    }
     LOG("Chunk::generateMesh - Vertex vector created.");
 
     // Create VAO and VBO
@@ -117,13 +123,16 @@ void Chunk::generateMesh() {
 
     glBindVertexArray(m_VAO);
     glBindBuffer(GL_ARRAY_BUFFER, m_VBO);
-    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(glm::vec3), vertices.data(), GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex), vertices.data(), GL_STATIC_DRAW);
     LOG("Chunk::generateMesh - Buffer data sent to GPU.");
 
     // Position attribute
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
     glEnableVertexAttribArray(0);
-    LOG("Chunk::generateMesh - Vertex attributes configured.");
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, position));
+
+    // Normal attribute
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, normal));
 
     glBindVertexArray(0);
     LOG("Chunk::generateMesh - Finish");

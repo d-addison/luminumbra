@@ -10,9 +10,12 @@ public:
     Camera(float screenWidth, float screenHeight);
 
     void update(float mouseX, float mouseY);
+    void processMouseMovement(float xoffset, float yoffset);
+    void processMouseScroll(float yoffset);
     
     const glm::mat4& getViewMatrix() const { return m_ViewMatrix; }
     const glm::mat4& getProjectionMatrix() const { return m_ProjectionMatrix; }
+    const glm::vec3& getPosition() const { return m_Position; }
 
 private:
     void recalculateViewMatrix();
