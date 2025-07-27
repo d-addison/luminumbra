@@ -3,6 +3,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "luminumbra/rendering/Shader.h"
 #include "luminumbra/core/InputManager.h"
 
 // Forward declarations
@@ -56,7 +57,10 @@ private:
     // --- Rendering & Debug ---
     std::unique_ptr<Luminumbra::Rendering::Shader> m_BasicShader;
     std::unique_ptr<Luminumbra::Debug::Debug> m_Debug;
-    std::unique_ptr<Rendering::Shader> m_CelestialShader; // New celestial shader for sky rendering
+    std::unique_ptr<Rendering::Shader> m_CelestialShader;
+    std::unique_ptr<Rendering::Shader> m_FoliageShader;
+    std::unique_ptr<Rendering::Shader> m_ParticleShader;
+    std::unique_ptr<Rendering::Shader> m_WaterShader;
     
     // --- State Management ---
     GameState m_GameState = GameState::SplashScreen;
