@@ -23,7 +23,9 @@ void InputManager::loadKeybinds(const std::string& filePath) {
         { GameAction::Pause,          GLFW_KEY_ESCAPE },
         { GameAction::ToggleNoclip,   GLFW_KEY_V },
         { GameAction::ShowDebug,      GLFW_KEY_F3 },
-        { GameAction::ToggleWireframe,GLFW_KEY_F4 }
+        { GameAction::ToggleWireframe,GLFW_KEY_F4 },
+        { GameAction::ToggleWeather,  GLFW_KEY_F6 },
+        { GameAction::StartFire,      GLFW_KEY_F7 }
     };
     std::cout << "InputManager: Loaded default keybinds." << std::endl;
 }

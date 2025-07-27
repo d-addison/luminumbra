@@ -5,6 +5,7 @@
 #include "luminumbra/rendering/Skybox.h"
 #include "luminumbra/rendering/CloudManager.h"
 #include "luminumbra/core/Debug.h"
+#include "luminumbra/rendering/particles/Particle.h"
 #include <glm/gtc/color_space.hpp>
 #include <algorithm>
 #include <cmath>
@@ -19,6 +20,7 @@ World::World(const std::string& slotName, const std::string& seed, int screenWid
     LOG("World::Constructor - Creating world '" + m_SlotName + "' with seed: " + m_Seed);
     
     m_Player = std::make_unique<Luminumbra::Player::Player>(screenWidth, screenHeight);
+    m_ParticleSystem = std::make_unique<Luminumbra::Rendering::ParticleSystem>();
     // m_Skybox = std::make_unique<Luminumbra::Rendering::Skybox>();
     m_CloudManager = std::make_unique<Luminumbra::Rendering::CloudManager>();
     m_CloudManager->init();
@@ -33,10 +35,10 @@ World::World(const std::string& slotName, const std::string& seed, int screenWid
     // Load initial chunks around origin before finding spawn point
     loadChunksAroundPosition(glm::vec3(0.0f));
 
-    float spawnY = 0.0f;
+    float spawnY = 30.0f;
     int wait_attempts = 0;
     const int max_wait_attempts = 100; // Wait for max 5 seconds
-    const float expected_min_spawn_y = 60.0f; // Don't accept ground below this!
+    const float expected_min_spawn_y = 0.0f; // Don't accept ground below this!
 
     LOG("Waiting for spawn chunk to generate...");
     while (wait_attempts < max_wait_attempts) {
@@ -58,10 +60,9 @@ World::World(const std::string& slotName, const std::string& seed, int screenWid
     }
 
     // Now spawn the player at the correct height
-    m_Player->reset(glm::vec3(0.0f, spawnY + 10.0f, 0.0f));
+    m_Player->reset(glm::vec3(0.0f, spawnY + 2.0f, 0.0f));
     initCelestials();
     initFoliage();
-    initParticles();
     LOG("World::Constructor - Finish");
 }
 
@@ -84,11 +85,6 @@ World::~World() {
     glDeleteBuffers(1, &m_BushVBO);
     glDeleteBuffers(1, &m_BushEBO);
     glDeleteBuffers(1, &m_FoliageInstanceVBO);
-
-    // NEW: Clean up particle resources
-    glDeleteVertexArrays(1, &m_ParticleVAO);
-    glDeleteBuffers(1, &m_ParticleVBO);
-    LOG("World::Destructor - Finish");
 }
 
 void World::initCelestials() {
@@ -142,52 +138,60 @@ void World::initCelestials() {
     glBindVertexArray(0);
 }
 
+struct Vertex {
+    glm::vec3 Position;
+    glm::vec3 Normal;
+};
+
+
 void World::initFoliage() {
+    // A local struct to hold interleaved vertex data for position and normal
+    struct Vertex {
+        glm::vec3 Position;
+        glm::vec3 Normal;
+    };
+
     // --- Tree Trunk (Cylinder) ---
-    std::vector<glm::vec3> trunkVertices;
+    std::vector<Vertex> trunkVertices;
     std::vector<unsigned int> trunkIndices;
     const int segments = 8;
     const float radius = 0.5f;
     const float height = 8.0f;
     for (int i = 0; i < segments; ++i) {
-        float angle = (float)i / segments * 2.0f * 3.14159f;
+        float angle = (float)i / segments * 2.0f * glm::pi<float>();
         float x = cos(angle) * radius;
         float z = sin(angle) * radius;
-        trunkVertices.push_back({x, 0, z}); // Bottom vertex
-        trunkVertices.push_back({x, height, z}); // Top vertex
+        // The normal for a cylinder vertex points horizontally out from the center
+        glm::vec3 normal = glm::normalize(glm::vec3(x, 0.0f, z)); 
+        trunkVertices.push_back({{x, -1*0.5, z}, normal});      // Bottom vertex
+        trunkVertices.push_back({{x, height, z}, normal}); // Top vertex
     }
     for (unsigned int i = 0; i < segments; ++i) {
-        unsigned int b_l = i * 2;
-        unsigned int t_l = b_l + 1;
-        unsigned int b_r = ((i + 1) % segments) * 2;
-        unsigned int t_r = b_r + 1;
-        trunkIndices.insert(trunkIndices.end(), {b_l, b_r, t_l});
-        trunkIndices.insert(trunkIndices.end(), {t_l, b_r, t_r});
+        unsigned int b_l = i * 2;       // bottom-left
+        unsigned int t_l = b_l + 1;     // top-left
+        unsigned int b_r = ((i + 1) % segments) * 2; // bottom-right
+        unsigned int t_r = b_r + 1;     // top-right
+        
+        // Define triangles with Counter-Clockwise (CCW) winding order
+        trunkIndices.insert(trunkIndices.end(), {b_l, t_l, b_r});
+        trunkIndices.insert(trunkIndices.end(), {b_r, t_l, t_r});
     }
     m_TreeTrunkIndexCount = trunkIndices.size();
-    glGenVertexArrays(1, &m_TreeTrunkVAO);
-    glGenBuffers(1, &m_TreeTrunkVBO);
-    glGenBuffers(1, &m_TreeTrunkEBO);
-    glBindVertexArray(m_TreeTrunkVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, m_TreeTrunkVBO);
-    glBufferData(GL_ARRAY_BUFFER, trunkVertices.size() * sizeof(glm::vec3), trunkVertices.data(), GL_STATIC_DRAW);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_TreeTrunkEBO);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, trunkIndices.size() * sizeof(unsigned int), trunkIndices.data(), GL_STATIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
 
     // --- Tree Leaves & Bush (Icosphere) ---
+    std::vector<Vertex> icoVertices;
     const float t = (1.0f + sqrt(5.0f)) / 2.0f;
-    std::vector<glm::vec3> icoVertices = {
+    std::vector<glm::vec3> initialPositions = {
         {-1, t, 0}, {1, t, 0}, {-1, -t, 0}, {1, -t, 0},
         {0, -1, t}, {0, 1, t}, {0, -1, -t}, {0, 1, -t},
         {t, 0, -1}, {t, 0, 1}, {-t, 0, -1}, {-t, 0, 1}
     };
-    for(auto& v : icoVertices) {
-        v = glm::normalize(v) * 4.0f; // Scale the icosphere model
-        // FIX: Add the trunk's height to the leaves' y-position.
-        // We use 7.0f so the canopy sits nicely on the top of the trunk.
-        v.y += 7.0f; 
+    for(auto& pos : initialPositions) {
+        // For a sphere centered at the origin, the normal is just the normalized position vector
+        glm::vec3 normal = glm::normalize(pos); 
+        glm::vec3 scaledPos = normal * 4.0f; // Scale the icosphere model
+        scaledPos.y += 7.0f;                 // Sit canopy on top of the trunk
+        icoVertices.push_back({scaledPos, normal});
     }
     std::vector<unsigned int> icoIndices = {
         0, 11, 5,  0, 5, 1,  0, 1, 7,  0, 7, 10,  0, 10, 11,
@@ -197,54 +201,73 @@ void World::initFoliage() {
     };
     m_TreeLeavesIndexCount = m_BushIndexCount = icoIndices.size();
 
-    // Leaves VAO
-    glGenVertexArrays(1, &m_TreeLeavesVAO);
+    // --- GPU Buffer and VAO Setup ---
+    
+    // Create VBOs and EBOs
+    glGenBuffers(1, &m_TreeTrunkVBO);
+    glGenBuffers(1, &m_TreeTrunkEBO);
     glGenBuffers(1, &m_TreeLeavesVBO);
     glGenBuffers(1, &m_TreeLeavesEBO);
+    // Instance VBO is shared
+    glGenBuffers(1, &m_FoliageInstanceVBO);
+    
+    // Setup Tree Trunk VAO
+    glGenVertexArrays(1, &m_TreeTrunkVAO);
+    glBindVertexArray(m_TreeTrunkVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, m_TreeTrunkVBO);
+    glBufferData(GL_ARRAY_BUFFER, trunkVertices.size() * sizeof(Vertex), trunkVertices.data(), GL_STATIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_TreeTrunkEBO);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, trunkIndices.size() * sizeof(unsigned int), trunkIndices.data(), GL_STATIC_DRAW);
+    // Location 0: Vertex Position
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, Position));
+    // Location 1: Vertex Normal
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, Normal));
+
+    // Setup Tree Leaves VAO
+    glGenVertexArrays(1, &m_TreeLeavesVAO);
     glBindVertexArray(m_TreeLeavesVAO);
     glBindBuffer(GL_ARRAY_BUFFER, m_TreeLeavesVBO);
-    glBufferData(GL_ARRAY_BUFFER, icoVertices.size() * sizeof(glm::vec3), icoVertices.data(), GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, icoVertices.size() * sizeof(Vertex), icoVertices.data(), GL_STATIC_DRAW);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_TreeLeavesEBO);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, icoIndices.size() * sizeof(unsigned int), icoIndices.data(), GL_STATIC_DRAW);
+    // Location 0: Vertex Position
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, Position));
+    // Location 1: Vertex Normal
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, Normal));
 
-    // Bush VAO
+    // Setup Bush VAO (reuses leaves mesh data)
     glGenVertexArrays(1, &m_BushVAO);
     glBindVertexArray(m_BushVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, m_TreeLeavesVBO);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_TreeLeavesEBO);
+    glBindBuffer(GL_ARRAY_BUFFER, m_TreeLeavesVBO); // Use same VBO
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_TreeLeavesEBO); // Use same EBO
+    // Location 0: Vertex Position
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, Position));
+    // Location 1: Vertex Normal
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, Normal));
 
-    // --- Instance VBO Setup ---
-    glGenBuffers(1, &m_FoliageInstanceVBO);
+    // --- Instance VBO Setup for all Foliage VAOs ---
     glBindBuffer(GL_ARRAY_BUFFER, m_FoliageInstanceVBO);
+    // Allocate space for instance matrices (will be filled each frame)
     glBufferData(GL_ARRAY_BUFFER, 10000 * sizeof(glm::mat4), nullptr, GL_STREAM_DRAW);
 
     for (auto vao : {m_TreeTrunkVAO, m_TreeLeavesVAO, m_BushVAO}) {
         glBindVertexArray(vao);
         glBindBuffer(GL_ARRAY_BUFFER, m_FoliageInstanceVBO);
+        // Set up the instanced model matrix, starting at attribute location 2
         for (int i = 0; i < 4; ++i) {
-            glEnableVertexAttribArray(1 + i);
-            glVertexAttribPointer(1 + i, 4, GL_FLOAT, GL_FALSE, sizeof(glm::mat4), (void*)(sizeof(glm::vec4) * i));
-            glVertexAttribDivisor(1 + i, 1);
+            // Locations 2, 3, 4, 5 for the four vec4s of the mat4
+            glEnableVertexAttribArray(2 + i);
+            glVertexAttribPointer(2 + i, 4, GL_FLOAT, GL_FALSE, sizeof(glm::mat4), (void*)(sizeof(glm::vec4) * i));
+            // Tell OpenGL this is an instanced vertex attribute.
+            glVertexAttribDivisor(2 + i, 1);
         }
     }
-    glBindVertexArray(0);
-}
-
-void World::initParticles() {
-    m_Particles.resize(MAX_PARTICLES);
-    glGenVertexArrays(1, &m_ParticleVAO);
-    glGenBuffers(1, &m_ParticleVBO);
-
-    glBindVertexArray(m_ParticleVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, m_ParticleVBO);
-    glBufferData(GL_ARRAY_BUFFER, MAX_PARTICLES * sizeof(glm::vec3), nullptr, GL_STREAM_DRAW);
-
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
     glBindVertexArray(0);
 }
 
@@ -328,10 +351,6 @@ glm::vec3 World::getSkyColor() const {
     // This factor is 0.0 at night and 1.0 during the day/sunset.
     float lightFactor = glm::smoothstep(-0.15f, 0.0f, sunHeight);
     glm::vec3 finalSky = glm::mix(nightColor, daySunsetMix, lightFactor);
-    
-    // Optional: Log the final, meaningful factors
-    LOG("[TIME: " + std::to_string(m_TimeOfDay) + " / " + std::to_string(sunHeight) + "] Day Factor: " + std::to_string(dayFactor) + ", Light Factor: " + std::to_string(lightFactor) + ", Final Sky Color: (" + 
-        std::to_string(finalSky.r) + ", " + std::to_string(finalSky.g) + ", " + std::to_string(finalSky.b) + ")");
 
     return finalSky;
 }
@@ -372,11 +391,9 @@ glm::vec3 World::getSunDirection() const {
     return glm::normalize(direction);
 }
 
-// in src/luminumbra/world/World.cpp
-
 void World::update(float deltaTime) {
-    // 1. UPLOAD STAGE: Check for chunks that worker threads have finished generating
-    // and upload their mesh data to the GPU. This must be on the main thread.
+    // 1. GPU UPLOAD STAGE
+    // Upload mesh data for newly generated chunks.
     {
         std::lock_guard<std::mutex> lock(m_ChunkMutex);
         for (auto const& [pos, chunk] : m_Chunks) {
@@ -386,22 +403,167 @@ void World::update(float deltaTime) {
         }
     }
 
-    // 2. STATE UPDATE STAGE: Update time, clouds, etc.
+    // 2. CORE STATE UPDATE
+    // Update player position (for this frame's logic) and time of day.
     const glm::vec3 viewerPosition = m_Player->getPosition();
-    m_CloudManager->update(deltaTime);
-    updateParticles(deltaTime);
-
     m_TimeOfDay += deltaTime / DAY_DURATION;
     if (m_TimeOfDay > 1.0f) {
         m_TimeOfDay -= 1.0f;
     }
 
-    // 3. CHUNK MANAGEMENT STAGE: If the player has moved far enough,
-    // queue new chunks to be generated and unload ones that are too far away.
+    // 3. GAMEPLAY & EFFECTS LOGIC
+    // A) Emit new particles based on the current world state (rain, fire, etc.).
+    updateParticles(deltaTime);
+
+    // B) Update the particle system and process death events (e.g., rain splashes).
+    auto deathEvents = m_ParticleSystem->update(deltaTime, *this);
+    for (const auto& event : deathEvents) {
+        if (event.type == Luminumbra::Rendering::ParticleType::Rain) {
+            // Create 5 splash droplets on impact
+            for (int i = 0; i < 5; ++i) {
+                Luminumbra::Rendering::ParticleProps splashProps = m_ParticleSystem->getPresetProperties(Luminumbra::Rendering::ParticleType::Splash);
+                splashProps.position = event.position;
+                m_ParticleSystem->emit(splashProps);
+            }
+        }
+    }
+
+    // C) Update other dynamic systems like clouds.
+    m_CloudManager->update(deltaTime);
+
+
+    // 4. CHUNK MANAGEMENT STAGE
+    // Check if the player has moved far enough to load/unload chunks.
     if (glm::length(viewerPosition - m_LastViewerPosition) > UPDATE_THRESHOLD) {
         m_LastViewerPosition = viewerPosition;
         loadChunksAroundPosition(viewerPosition);
         unloadDistantChunks(viewerPosition);
+    }
+}
+
+void World::setWeather(WeatherType type) {
+    m_CurrentWeather = type;
+}
+
+void World::startFireNearPlayer() {
+    glm::vec3 playerPos = m_Player->getPosition();
+    float closestDist = std::numeric_limits<float>::max();
+    BurningTree closestTree;
+    bool foundTree = false;
+
+    // Find the closest tree to the player (within 128 units)
+    for (const auto& pair : m_Chunks) {
+        if (getChunkDistance(pair.first, playerPos) > 128.0f) continue;
+        
+        const auto& treeInstances = pair.second->getTreeInstances();
+        for (size_t i = 0; i < treeInstances.size(); ++i) {
+            glm::vec3 treePos = glm::vec3(pair.second->getModelMatrix() * glm::vec4(treeInstances[i].position, 1.0));
+            float dist = glm::distance(playerPos, treePos);
+            if (dist < closestDist) {
+                closestDist = dist;
+                closestTree = {pair.first, i, 0.0f};
+                foundTree = true;
+            }
+        }
+    }
+
+    if (foundTree) {
+        // Check if the tree is already in the vector before adding it
+        if (std::find(m_BurningTrees.begin(), m_BurningTrees.end(), closestTree) == m_BurningTrees.end()) {
+            m_BurningTrees.push_back(closestTree);
+        }
+    }
+}
+
+void World::updateParticles(float deltaTime) {
+    static std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+    static std::mt19937 gen(std::random_device{}());
+
+    // 1. Weather System: Rain
+    if (m_CurrentWeather == WeatherType::Rainy) {
+        int rainDensity = 20;
+        for (int i = 0; i < rainDensity; ++i) {
+            // Get preset and customize position
+            Luminumbra::Rendering::ParticleProps props = m_ParticleSystem->getPresetProperties(Luminumbra::Rendering::ParticleType::Rain);
+            float offsetX = (dist(gen) - 0.5f) * 80.0f;
+            float offsetZ = (dist(gen) - 0.5f) * 80.0f;
+            props.position = m_Player->getPosition() + glm::vec3(offsetX, 50.0f, offsetZ);
+            m_ParticleSystem->emit(props);
+        }
+
+        if (!m_BurningTrees.empty()) {
+            for (const auto& tree : m_BurningTrees) {
+                 auto chunkIt = m_Chunks.find(tree.chunkCoord);
+                 if (chunkIt == m_Chunks.end()) continue;
+                 glm::vec3 treePos = glm::vec3(chunkIt->second->getModelMatrix() * glm::vec4(chunkIt->second->getTreeInstances()[tree.treeIndex].position, 1.0));
+                
+                 // Emit a final puff of smoke as the fire goes out
+                 for (int i = 0; i < 20; ++i) {
+                    Luminumbra::Rendering::ParticleProps smokeProps = m_ParticleSystem->getPresetProperties(Luminumbra::Rendering::ParticleType::Smoke);
+                    smokeProps.position = treePos + glm::vec3((dist(gen) - 0.5f) * 5.0f, 6.0f + dist(gen) * 5.0f, (dist(gen) - 0.5f) * 5.0f);
+                    smokeProps.lifeTime = 1.5f; // Short-lived puff
+                    m_ParticleSystem->emit(smokeProps);
+                 }
+            }
+            m_BurningTrees.clear();
+        }
+    } else if (m_CurrentWeather == WeatherType::Clear) {
+        m_LeafEmitTimer += deltaTime;
+        if (m_LeafEmitTimer > 0.1f) {
+            m_LeafEmitTimer = 0.0f;
+
+            // Loop through chunks near the player
+            for (const auto& pair : m_Chunks) {
+                if (getChunkDistance(pair.first, m_Player->getPosition()) > 128.0f) continue;
+                
+                // Check trees within the chunk
+                for (const auto& tree : pair.second->getTreeInstances()) {
+                    if (dist(gen) < 0.05f) { // 5% chance per update cycle
+                        // Get the preset for a leaf and set its position
+                        Luminumbra::Rendering::ParticleProps props = m_ParticleSystem->getPresetProperties(Luminumbra::Rendering::ParticleType::Leaf);
+                        glm::vec3 treePos = glm::vec3(pair.second->getModelMatrix() * glm::vec4(tree.position, 1.0));
+                        props.position = treePos + glm::vec3((dist(gen) - 0.5f) * 4.0f, 7.0f, (dist(gen) - 0.5f) * 4.0f);
+                        m_ParticleSystem->emit(props);
+                    }
+                }
+            }
+        }
+    }
+    
+    // 2. Fire & Spark System
+    for (auto& tree : m_BurningTrees) {
+        tree.timeBurning += deltaTime;
+        
+        // FIX: Replaced placeholder comment with functional code.
+        auto chunkIt = m_Chunks.find(tree.chunkCoord);
+        if (chunkIt == m_Chunks.end() || tree.treeIndex >= chunkIt->second->getTreeInstances().size()) continue;
+        glm::vec3 treePos = glm::vec3(chunkIt->second->getModelMatrix() * glm::vec4(chunkIt->second->getTreeInstances()[tree.treeIndex].position, 1.0));
+
+        // Emit Smoke
+        Luminumbra::Rendering::ParticleProps smokeProps = m_ParticleSystem->getPresetProperties(Luminumbra::Rendering::ParticleType::Smoke);
+        smokeProps.position = treePos + glm::vec3((dist(gen) - 0.5f) * 5.0f, 6.0f + dist(gen) * 5.0f, (dist(gen) - 0.5f) * 5.0f);
+        m_ParticleSystem->emit(smokeProps);
+
+        if (tree.timeBurning > 3.0f) {
+            // Emit Fire
+            Luminumbra::Rendering::ParticleProps fireProps = m_ParticleSystem->getPresetProperties(Luminumbra::Rendering::ParticleType::Fire);
+            fireProps.position = treePos + glm::vec3((dist(gen) - 0.5f) * 6.0f, dist(gen) * 10.0f, (dist(gen) - 0.5f) * 6.0f);
+            m_ParticleSystem->emit(fireProps);
+
+            // Emit Sparks
+            if (dist(gen) < 0.2f) {
+                Luminumbra::Rendering::ParticleProps sparkProps = m_ParticleSystem->getPresetProperties(Luminumbra::Rendering::ParticleType::Spark);
+                sparkProps.position = fireProps.position;
+                m_ParticleSystem->emit(sparkProps);
+            }
+        }
+    }
+
+    // 3. Magic Zone (example at world origin)
+    if (dist(gen) < 0.3f) { // Emit magic particles continuously
+        Luminumbra::Rendering::ParticleProps props = m_ParticleSystem->getPresetProperties(Luminumbra::Rendering::ParticleType::Magic);
+        props.position = glm::vec3(0.0f, 10.0f, 0.0f) + glm::vec3((dist(gen) - 0.5f) * 50.f, dist(gen) * 3.f, (dist(gen) - 0.5f) * 10.f);
+        m_ParticleSystem->emit(props);
     }
 }
 
@@ -410,71 +572,21 @@ Luminumbra::Player::Player* World::getPlayer() const {
 }
 
 float World::getSurfaceHeight(float x, float z) const {
-    // Start checking from a high altitude and move down
-    for (float y = 255.0f; y > 0.0f; --y) {
+    // Start from the top of the world and check downwards
+    for (float y = 255.0f; y >= 0.0f; --y) {
         if (isSolid(glm::vec3(x, y, z))) {
-            return y;
+            // This is the highest solid block. The surface is just above it.
+            return y + 1.0f;
         }
     }
-    return 0.0f; // Return 0 if no ground is found (e.g., void)
+    // If no solid ground is found, return 0
+    return 0.0f;
 }
 
 glm::vec3 World::getSpawnPoint() const {
     // Get surface height at origin and add a small buffer for the player
     float spawnY = getSurfaceHeight(0.0f, 0.0f);
     return glm::vec3(0.0f, spawnY + 2.0f, 0.0f);
-}
-
-void World::updateParticles(float deltaTime) {
-    std::mt19937 rng(std::random_device{}());
-    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-    std::uniform_real_distribution<float> spawnChance(0.0f, 1.0f);
-    std::uniform_real_distribution<float> lifeDist(4.0f, 8.0f);
-
-    // 1. Update all existing active particles
-    for (auto& p : m_Particles) {
-        if (p.life > 0.0f) {
-            p.life -= deltaTime;
-            p.position += p.velocity * deltaTime;
-            p.velocity.x += sin(p.life * 2.0f) * 0.1f * deltaTime; // Flutter
-        }
-    }
-
-    // 2. Spawn new particles from nearby trees
-    m_ParticleSpawnTimer -= deltaTime;
-    if (m_ParticleSpawnTimer <= 0.0f) {
-        m_ParticleSpawnTimer = 0.1f; // Check to spawn every 0.1s
-
-        // The properties for our leaf particles
-        const float spawnProbability = 0.05f; // 5% chance per tree per check
-        glm::vec3 playerPos = m_Player->getPosition();
-
-        for (const auto& pair : m_Chunks) {
-            const auto& chunk = pair.second;
-            if (!chunk) continue;
-
-            // Only spawn from chunks reasonably close to the player
-            if (getChunkDistance(pair.first, playerPos) > 128.0f) continue;
-
-            for (const auto& tree : chunk->getTreeInstances()) {
-                // Give each tree a small chance to spawn a particle on this frame
-                if (spawnChance(rng) < spawnProbability) {
-                    // Find an inactive particle to recycle
-                    auto it = std::find_if(m_Particles.begin(), m_Particles.end(), [](const LeafParticle& p){ return p.life <= 0.0f; });
-                    if (it != m_Particles.end()) {
-                        // Position is the tree's base + canopy height + random offset
-                        glm::vec3 canopyBasePos = glm::vec3(chunk->getModelMatrix() * glm::vec4(tree.position, 1.0));
-                        canopyBasePos.y += 7.0f; // Move up to the leaves
-
-                        it->life = lifeDist(rng);
-                        it->maxLife = it->life;
-                        it->position = canopyBasePos + glm::vec3(dist(rng) * 3.0f, dist(rng), dist(rng) * 3.0f);
-                        it->velocity = glm::vec3(dist(rng) * 0.5f, -1.0f, dist(rng) * 0.5f);
-                    }
-                }
-            }
-        }
-    }
 }
 
 void World::renderTerrain(Rendering::Shader& shader, const glm::vec3& viewPos) const {
@@ -562,38 +674,6 @@ void World::renderFoliage(Luminumbra::Rendering::Shader& foliageShader) const {
     glBindVertexArray(0);
 }
 
-void World::renderParticles(Luminumbra::Rendering::Shader& particleShader) const {
-    particleShader.use();
-    particleShader.setMat4("projection", m_Player->getCamera().getProjectionMatrix());
-    particleShader.setMat4("view", m_Player->getCamera().getViewMatrix());
-
-    std::vector<glm::vec3> activeParticlePositions;
-    for (const auto& p : m_Particles) {
-        if (p.life > 0.0f) {
-            activeParticlePositions.push_back(p.position);
-        }
-    }
-
-    if (activeParticlePositions.empty()) return;
-
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glEnable(GL_PROGRAM_POINT_SIZE);
-    glDepthMask(GL_FALSE);
-
-    glBindVertexArray(m_ParticleVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, m_ParticleVBO);
-    glBufferData(GL_ARRAY_BUFFER, activeParticlePositions.size() * sizeof(glm::vec3), activeParticlePositions.data(), GL_STREAM_DRAW);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
-
-    glDrawArrays(GL_POINTS, 0, activeParticlePositions.size());
-
-    glDepthMask(GL_TRUE);
-    glDisable(GL_PROGRAM_POINT_SIZE);
-    glDisable(GL_BLEND);
-    glBindVertexArray(0);
-}
-
 void World::renderSkyboxAndClouds(const glm::mat4& view, const glm::mat4& projection) const {
     // m_Skybox->render(view, projection);
     m_CloudManager->render(view, projection);
@@ -634,8 +714,8 @@ void World::loadChunksAroundPosition(const glm::vec3& position) {
 
     // --- NEW: Load chunks in a simple square pattern ---
     // This is much more reliable than the complex spiral algorithm.
-    const int VIEW_DISTANCE = 16; // Example view distance in chunks
-    const int LOD_DISTANCE = 12;  // Example LOD distance
+    const int VIEW_DISTANCE = 30; // Example view distance in chunks
+    const int LOD_DISTANCE = 16;  // Example LOD distance
 
     for (int x = -VIEW_DISTANCE; x <= VIEW_DISTANCE; ++x) {
         for (int z = -VIEW_DISTANCE; z <= VIEW_DISTANCE; ++z) {

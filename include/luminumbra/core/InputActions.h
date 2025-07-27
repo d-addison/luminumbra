@@ -22,5 +22,7 @@ enum class GameAction {
     // Debug
     ToggleNoclip,
     ShowDebug,
-    ToggleWireframe
+    ToggleWireframe,
+    ToggleWeather,
+    StartFire,
 };

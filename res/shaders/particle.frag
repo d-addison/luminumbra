@@ -1,13 +1,19 @@
-#version 410
+#version 410 core
 out vec4 FragColor;
+
+in vec2 v_TexCoord;
+in vec4 v_Color;
 
 void main()
 {
-    // Use point coordinates to draw a circle instead of a square
-    vec2 circ = gl_PointCoord - vec2(0.5);
-    if (dot(circ, circ) > 0.25) {
+    // Procedural soft circle alpha
+    float dist_from_center = distance(v_TexCoord, vec2(0.5));
+    float alpha = 1.0 - smoothstep(0.45, 0.5, dist_from_center);
+
+    if (alpha < 0.01) {
         discard;
     }
-    // A nice leafy green/yellow color with some transparency
-    FragColor = vec4(0.4, 0.6, 0.2, 0.6);
+
+    // Combine interpolated color alpha with the procedural circle alpha
+    FragColor = vec4(v_Color.rgb, v_Color.a * alpha);
 }
