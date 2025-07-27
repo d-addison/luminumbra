@@ -55,4 +55,8 @@ void Debug::drawAxes(const glm::mat4& projection, const glm::mat4& view) {
     glBindVertexArray(0);
 }
 
+Luminumbra::Rendering::Shader& Debug::getShader() {
+    return shader;
+}
+
 } // namespace Luminumbra::Debug

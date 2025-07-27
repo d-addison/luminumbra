@@ -3,97 +3,87 @@
 #include "luminumbra/world/MarchingCubes.h"
 #include "FastNoiseLite.h"
 #include "luminumbra/core/Debug.h"
+#include "luminumbra/core/GLError.h"
 
 #include <glad/gl.h>
 #include <glm/gtc/type_ptr.hpp>
 
 #include <vector>
+#include <algorithm>
+#include <cmath>
+#include <functional> // for std::hash
 
 namespace Luminumbra::World {
 
-Chunk::Chunk(const glm::ivec3& position) : m_Position(position) {
-    LOG("Chunk::Constructor - Start");
+// Import GL error checking functions for the GLCall macro
+using Luminumbra::Core::GLClearError;
+using Luminumbra::Core::GLCheckError;
+
+Chunk::Chunk(const glm::ivec3& position, const std::string& seed, int lod) : m_Position(position), m_LOD(lod) {
     m_ModelMatrix = glm::translate(glm::mat4(1.0f), glm::vec3(m_Position));
 
-    // Create and configure noise state using the C API
     fnl_state noise = fnlCreateState();
-    noise.noise_type = FNL_NOISE_OPENSIMPLEX2;
-    noise.frequency = 0.02f;
-    LOG("Chunk::Constructor - Noise state created.");
-
-    generateNoiseData(noise); // Pass the struct by reference
-    LOG("Chunk::Constructor - Noise data generated.");
-    generateMesh();
-    LOG("Chunk::Constructor - Mesh generated.");
-    LOG("Chunk::Constructor - Finish");
+    noise.seed = static_cast<int>(std::hash<std::string>{}(seed));
+    
+    // This part is CPU-only and safe for worker threads.
+    generateNoiseData(noise); 
+    generateMesh(m_LOD);      // This will now just prepare the data vectors.
+    generateWaterMesh();
 }
 
 Chunk::~Chunk() {
     glDeleteVertexArrays(1, &m_VAO);
     glDeleteBuffers(1, &m_VBO);
+    glDeleteBuffers(1, &m_EBO);
+    glDeleteVertexArrays(1, &m_WaterVAO);
+    glDeleteBuffers(1, &m_WaterVBO);
 }
 
-void Chunk::generateNoiseData(fnl_state& noise) { // Updated function signature
-    LOG("Chunk::generateNoiseData - Start");
-    m_NoiseData.resize((CHUNK_SIZE + 1) * (CHUNK_SIZE + 1) * (CHUNK_SIZE + 1));
-    
-    // Create multiple noise states for different features
-    fnl_state terrainNoise = noise;
-    terrainNoise.frequency = 0.01f;
-    terrainNoise.octaves = 4;
-    terrainNoise.lacunarity = 2.0f;
-    terrainNoise.gain = 0.5f;
-    
-    fnl_state caveNoise = fnlCreateState();
-    caveNoise.noise_type = FNL_NOISE_PERLIN;
-    caveNoise.frequency = 0.03f;
-    caveNoise.octaves = 2;
-    
-    fnl_state detailNoise = fnlCreateState();
-    detailNoise.noise_type = FNL_NOISE_VALUE;
-    detailNoise.frequency = 0.1f;
-    
-    for (int x = 0; x <= CHUNK_SIZE; ++x) {
-        for (int y = 0; y <= CHUNK_SIZE; ++y) {
-            for (int z = 0; z <= CHUNK_SIZE; ++z) {
-                float worldX = (float)(m_Position.x + x);
-                float worldY = (float)(m_Position.y + y);
-                float worldZ = (float)(m_Position.z + z);
+// in src/luminumbra/world/Chunk.cpp
 
-                // Base terrain height using 2D noise for more consistent ground
-                float terrainHeight = fnlGetNoise2D(&terrainNoise, worldX * 0.5f, worldZ * 0.5f) * 20.0f + 30.0f;
-                
-                // Base density based on height
-                float density = (terrainHeight - worldY) * 0.1f;
-                
-                // Add 3D noise for terrain variation
-                density += fnlGetNoise3D(&terrainNoise, worldX, worldY * 0.5f, worldZ) * 5.0f;
-                
-                // Add caves (subtract density where cave noise is high)
-                float caveValue = fnlGetNoise3D(&caveNoise, worldX, worldY, worldZ);
-                if (caveValue > 0.4f && worldY < terrainHeight - 5.0f) {
-                    density -= (caveValue - 0.4f) * 20.0f;
-                }
-                
-                // Add surface detail
-                if (worldY < terrainHeight + 10.0f && worldY > terrainHeight - 10.0f) {
-                    density += fnlGetNoise3D(&detailNoise, worldX * 2.0f, worldY * 2.0f, worldZ * 2.0f) * 2.0f;
-                }
-                
-                // Create overhangs and cliffs
-                if (worldY > 20.0f && worldY < 40.0f) {
-                    float overhangNoise = fnlGetNoise2D(&terrainNoise, worldX * 0.1f, worldZ * 0.1f);
-                    if (overhangNoise > 0.3f) {
-                        density += sin((worldY - 20.0f) * 0.3f) * overhangNoise * 5.0f;
-                    }
-                }
-                
+void Chunk::generateNoiseData(fnl_state& noise) {
+    // This part is the same: resize the data vectors
+    m_NoiseData.resize((CHUNK_SIZE + 1) * (CHUNK_SIZE + 1) * (CHUNK_SIZE + 1));
+    m_BiomeData.resize((CHUNK_SIZE + 1) * (CHUNK_SIZE + 1), BiomeType::WHISPERING_GLADE);
+
+    // --- Configure the noise state directly ---
+    noise.noise_type = FNL_NOISE_OPENSIMPLEX2; // Use a standard noise type
+    noise.frequency = 0.005f;                 // Controls the scale of the terrain features
+
+    // Configure fractal settings for more detail
+    noise.fractal_type = FNL_FRACTAL_FBM;       // Use Fractal Brownian Motion
+    noise.octaves = 4;                          // Number of noise layers
+    noise.lacunarity = 2.0f;                      // How quickly frequency increases for each octave
+    noise.gain = 0.5f;                          // How much each octave contributes
+
+    // --- Define terrain shape ---
+    float baseGroundHeight = 4.0f;   // The average sea level for the terrain
+    float terrainAmplitude = 12.0f;   // The max height of hills and depth of valleys
+
+    // --- Loop through every point in the chunk's data grid ---
+    for (int y = 0; y <= CHUNK_SIZE; ++y) {
+        for (int z = 0; z <= CHUNK_SIZE; ++z) {
+            for (int x = 0; x <= CHUNK_SIZE; ++x) {
+                // Get the absolute world position of the current point
+                float worldX = (float)(m_Position.x + x);
+                float worldZ = (float)(m_Position.z + z);
+                float worldY = (float)(m_Position.y + y);
+
+                // 1. Get a 2D noise value to define the ground's height at this (X, Z) location
+                float groundHeightNoise = fnlGetNoise2D(&noise, worldX, worldZ);
+                float groundHeight = baseGroundHeight + (groundHeightNoise * terrainAmplitude);
+
+                // 2. The density is the point's vertical distance from the ground.
+                //    - Negative density is "solid" (underground)
+                //    - Positive density is "air" (above ground)
+                float density = worldY - groundHeight;
+
+                // 3. Store the density value in the 1D array
                 int index = x + z * (CHUNK_SIZE + 1) + y * (CHUNK_SIZE + 1) * (CHUNK_SIZE + 1);
                 m_NoiseData[index] = density;
             }
         }
     }
-    LOG("Chunk::generateNoiseData - Finish");
 }
 
 // Helper array to get the 8 corner offsets of a cube.
@@ -102,85 +92,140 @@ const glm::ivec3 cornerOffsets[8] = {
     {0, 1, 0}, {1, 1, 0}, {1, 1, 1}, {0, 1, 1}
 };
 
-void Chunk::generateMesh() {
+// in src/luminumbra/world/Chunk.cpp
+
+void Chunk::generateMesh(int lod) {
     LOG("Chunk::generateMesh - Start");
-    std::vector<MarchingCubes::Triangle> triangles;
-    float isolevel = 0.0f; // The "surface" level of our noise field
+    MarchingCubes::IndexedMesh mesh;
+    float isolevel = 0.0f;
+    int step = 1 << lod;
 
-    for (int x = 0; x < CHUNK_SIZE; ++x) {
-        for (int y = 0; y < CHUNK_SIZE; ++y) {
-            for (int z = 0; z < CHUNK_SIZE; ++z) {
+    for (int x = 0; x < CHUNK_SIZE; x += step) {
+        for (int y = 0; y < CHUNK_SIZE; y += step) {
+            for (int z = 0; z < CHUNK_SIZE; z += step) {
                 MarchingCubes::GridCell cell;
-                
-                // Populate grid cell vertices and values
                 for (int i = 0; i < 8; ++i) {
-                    // Calculate the position of each corner in the chunk
-                    glm::ivec3 cornerPos = glm::ivec3(x, y, z) + cornerOffsets[i];
-
+                    glm::ivec3 cornerPos = glm::ivec3(x, y, z) + cornerOffsets[i] * step;
                     int index = cornerPos.x + cornerPos.z * (CHUNK_SIZE + 1) + cornerPos.y * (CHUNK_SIZE + 1) * (CHUNK_SIZE + 1);
-                    
                     cell.p[i] = glm::vec3(cornerPos);
-                    cell.val[i] = m_NoiseData.at(index); // Using .at() can give better debug info than []
+                    cell.val[i] = m_NoiseData.at(index);
                 }
-
-                MarchingCubes::Polygonise(cell, isolevel, triangles);
+                MarchingCubes::Polygonise(cell, isolevel, mesh);
             }
         }
     }
 
-    LOG("Chunk::generateMesh - Polygonization loop finished.");
-    LOG("Chunk::generateMesh - Generated " + std::to_string(triangles.size()) + " triangles for chunk.");
-    if (triangles.empty()) {
-        m_VertexCount = 0;
-        LOG("Chunk::generateMesh - No triangles, exiting early.");
+    LOG("Chunk::generateMesh - Polygonization finished. Vertices: " + std::to_string(mesh.vertices.size()) + ", Indices: " + std::to_string(mesh.indices.size()));
+
+    if (mesh.indices.empty()) {
+        m_IndexCount = 0;
+        LOG("Chunk::generateMesh - No indices, exiting early.");
         return;
     }
 
-    m_VertexCount = triangles.size() * 3;
-    
-    struct Vertex {
-        glm::vec3 position;
-        glm::vec3 normal;
-    };
-    std::vector<Vertex> vertices;
-    vertices.reserve(m_VertexCount);
-
-    for(const auto& tri : triangles) {
-        // Calculate the normal of the triangle face
-        glm::vec3 normal = glm::normalize(glm::cross(tri.p[1] - tri.p[0], tri.p[2] - tri.p[0]));
-        
-        vertices.push_back({tri.p[0], normal});
-        vertices.push_back({tri.p[1], normal});
-        vertices.push_back({tri.p[2], normal});
+    // --- NEW: Fix the triangle winding order ---
+    // This loop swaps the 2nd and 3rd index of each triangle, fixing the culling issue.
+    for (size_t i = 0; i < mesh.indices.size(); i += 3) {
+        std::swap(mesh.indices[i + 1], mesh.indices[i + 2]);
     }
-    LOG("Chunk::generateMesh - Vertex vector created.");
 
-    // Create VAO and VBO
-    glGenVertexArrays(1, &m_VAO);
-    glGenBuffers(1, &m_VBO);
-    LOG("Chunk::generateMesh - VAO/VBO generated.");
+    m_IndexCount = mesh.indices.size();
+    
+    struct Vertex { glm::vec3 p, n, c; };
+    std::vector<Vertex> vertices(mesh.vertices.size());
+    std::vector<glm::vec3> normals(mesh.vertices.size(), glm::vec3(0.0f));
 
-    glBindVertexArray(m_VAO);
-    glBindBuffer(GL_ARRAY_BUFFER, m_VBO);
-    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex), vertices.data(), GL_STATIC_DRAW);
-    LOG("Chunk::generateMesh - Buffer data sent to GPU.");
+    // Calculate normals (this logic is now correct again)
+    for (size_t i = 0; i < mesh.indices.size(); i += 3) {
+        unsigned int i0 = mesh.indices[i], i1 = mesh.indices[i+1], i2 = mesh.indices[i+2];
+        glm::vec3 v0 = mesh.vertices[i0], v1 = mesh.vertices[i1], v2 = mesh.vertices[i2];
+        glm::vec3 faceNormal = glm::normalize(glm::cross(v1 - v0, v2 - v0));
+        normals[i0] += faceNormal;
+        normals[i1] += faceNormal;
+        normals[i2] += faceNormal;
+    }
 
-    // Position attribute
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, position));
+    // Populate the vertex buffer with all data
+    for (size_t i = 0; i < mesh.vertices.size(); ++i) {
+        // --- FIX: Use the correct member names: p, n, c ---
+        vertices[i].p = mesh.vertices[i];
+        vertices[i].n = glm::normalize(normals[i]);
+        
+        glm::vec3 worldPos = glm::vec3(m_Position) + vertices[i].p;
+        int biomeX = glm::clamp((int)vertices[i].p.x, 0, CHUNK_SIZE);
+        int biomeZ = glm::clamp((int)vertices[i].p.z, 0, CHUNK_SIZE);
+        int biomeIndex = biomeX + biomeZ * (CHUNK_SIZE + 1);
+        BiomeType biome = m_BiomeData[biomeIndex];
 
-    // Normal attribute
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, normal));
+        float density = 0.0f; // Default density
+        int voxelX = (int)vertices[i].p.x, voxelY = (int)vertices[i].p.y, voxelZ = (int)vertices[i].p.z;
+        int voxelIndex = voxelX + voxelZ * (CHUNK_SIZE + 1) + voxelY * (CHUNK_SIZE + 1) * (CHUNK_SIZE + 1);
+        if (voxelIndex >= 0 && voxelIndex < m_NoiseData.size()) {
+            density = m_NoiseData[voxelIndex];
+        }
+        vertices[i].c = getTerrainColor(worldPos.y, density, biome);
+    }
 
-    glBindVertexArray(0);
-    LOG("Chunk::generateMesh - Finish");
+    // --- FIX: Copy the CORRECT `vertices` vector into m_VertexData ---
+    m_VertexData.resize(vertices.size() * sizeof(Vertex) / sizeof(float));
+    memcpy(m_VertexData.data(), vertices.data(), vertices.size() * sizeof(Vertex));
+    
+    m_IndexData = mesh.indices;
+    m_GpuStatus = GpuStatus::NeedsGpuUpload;
+}
+
+void Chunk::uploadToGpu() {
+    if (m_IndexCount == 0) return;
+
+    struct Vertex { glm::vec3 p, n, c; };
+
+    GLCall(glGenVertexArrays(1, &m_VAO));
+    GLCall(glGenBuffers(1, &m_VBO));
+    GLCall(glGenBuffers(1, &m_EBO));
+
+    GLCall(glBindVertexArray(m_VAO));
+    GLCall(glBindBuffer(GL_ARRAY_BUFFER, m_VBO));
+    GLCall(glBufferData(GL_ARRAY_BUFFER, m_VertexData.size() * sizeof(float), m_VertexData.data(), GL_STATIC_DRAW));
+
+    GLCall(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_EBO));
+    GLCall(glBufferData(GL_ELEMENT_ARRAY_BUFFER, m_IndexData.size() * sizeof(unsigned int), m_IndexData.data(), GL_STATIC_DRAW));
+
+    GLCall(glEnableVertexAttribArray(0));
+    GLCall(glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, p)));
+    GLCall(glEnableVertexAttribArray(1));
+    GLCall(glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, n)));
+    GLCall(glEnableVertexAttribArray(2));
+    GLCall(glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, c)));
+
+    GLCall(glBindVertexArray(0));
+
+    // Clear the CPU-side data after uploading to free up RAM
+    m_VertexData.clear();
+    m_IndexData.clear();
+    m_VertexData.shrink_to_fit();
+    m_IndexData.shrink_to_fit();
+    m_GpuStatus = GpuStatus::Uploaded;
 }
 
 void Chunk::render() const {
-    if (m_VertexCount == 0) return;
-    glBindVertexArray(m_VAO);
-    glDrawArrays(GL_TRIANGLES, 0, m_VertexCount);
+    // Render terrain
+    if (m_GpuStatus == GpuStatus::Uploaded && m_IndexCount > 0) {
+        GLCall(glBindVertexArray(m_VAO));
+        GLCall(glDrawElements(GL_TRIANGLES, m_IndexCount, GL_UNSIGNED_INT, 0));
+    }
+    
+    // Render water
+    if (m_WaterVertexCount > 0) {
+        // Enable blending for transparency
+        GLCall(glEnable(GL_BLEND));
+        GLCall(glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+
+        GLCall(glBindVertexArray(m_WaterVAO));
+        GLCall(glDrawArrays(GL_TRIANGLES, 0, m_WaterVertexCount));
+
+        // Disable blending after rendering
+        GLCall(glDisable(GL_BLEND));
+    }
 }
 
 bool Chunk::isSolid(const glm::vec3& worldPosition) const {
@@ -204,8 +249,169 @@ bool Chunk::isSolid(const glm::vec3& worldPosition) const {
         return false; // Out of bounds of the noise data
     }
 
-    // If the density is below the isolevel, it's considered "solid"
+    // If the density is below the isolevel (0.0), it's considered "solid"
+    // This matches the marching cubes logic
     return m_NoiseData[index] < 0.0f;
+}
+
+BiomeType Chunk::getBiomeAt(float worldX, float worldZ, float height) {
+    // Use cellular noise for distinct biome regions
+    fnl_state biomeNoise = fnlCreateState();
+    biomeNoise.noise_type = FNL_NOISE_CELLULAR;
+    biomeNoise.frequency = 0.003f;
+    biomeNoise.cellular_distance_func = FNL_CELLULAR_DISTANCE_MANHATTAN;
+    biomeNoise.cellular_return_type = FNL_CELLULAR_RETURN_TYPE_CELLVALUE;
+    biomeNoise.seed = 42;
+    
+    float biomeValue = fnlGetNoise2D(&biomeNoise, worldX, worldZ);
+    
+    // Also factor in height for more realistic biome distribution
+    float heightInfluence = height / 100.0f;
+    
+    // Map noise values to biomes
+    if (biomeValue < -0.3f) {
+        if (heightInfluence < 0.3f) {
+            return BiomeType::SUNKEN_HOLLOWS;
+        } else {
+            return BiomeType::WHISPERING_GLADE;
+        }
+    } else if (biomeValue < 0.1f) {
+        return BiomeType::WHISPERING_GLADE;
+    } else if (biomeValue < 0.5f) {
+        if (heightInfluence > 0.5f) {
+            return BiomeType::CRYSTAL_GROVES;
+        } else {
+            return BiomeType::WHISPERING_GLADE;
+        }
+    } else {
+        if (heightInfluence > 0.6f) {
+            return BiomeType::CANOPY_BRIDGES;
+        } else {
+            return BiomeType::CRYSTAL_GROVES;
+        }
+    }
+}
+
+glm::vec3 Chunk::getTerrainColor(float worldY, float density, BiomeType biome) {
+    // Base colors for different biomes based on the README's color palettes
+    glm::vec3 baseColor;
+    
+    switch (biome) {
+        case BiomeType::WHISPERING_GLADE:
+            // Gentle greens and golds
+            if (worldY < 20.0f) {
+                baseColor = glm::vec3(0.42f, 0.56f, 0.14f); // Living green (#6B8E23)
+            } else if (worldY < 40.0f) {
+                baseColor = glm::vec3(0.52f, 0.60f, 0.25f); // Lighter green
+            } else {
+                baseColor = glm::vec3(0.70f, 0.65f, 0.40f); // Sandy/rocky
+            }
+            break;
+            
+        case BiomeType::CRYSTAL_GROVES:
+            // Crystalline blues and purples
+            if (density > 5.0f) {
+                baseColor = glm::vec3(0.60f, 0.40f, 0.80f); // Amethyst (#9932CC)
+            } else if (worldY < 30.0f) {
+                baseColor = glm::vec3(0.28f, 0.24f, 0.55f); // Deep indigo (#483D8B)
+            } else {
+                baseColor = glm::vec3(0.45f, 0.35f, 0.65f); // Crystal blue-purple
+            }
+            break;
+            
+        case BiomeType::SUNKEN_HOLLOWS:
+            // Dark, mysterious colors with bioluminescence hints
+            if (worldY < 15.0f) {
+                baseColor = glm::vec3(0.15f, 0.20f, 0.25f); // Very dark blue-grey
+            } else if (worldY < 25.0f) {
+                baseColor = glm::vec3(0.13f, 0.70f, 0.67f); // Bioluminescent teal (#20B2AA)
+            } else {
+                baseColor = glm::vec3(0.25f, 0.30f, 0.35f); // Dark stone
+            }
+            break;
+            
+        case BiomeType::CANOPY_BRIDGES:
+            // High altitude, ethereal colors
+            if (worldY > 60.0f) {
+                baseColor = glm::vec3(1.00f, 0.84f, 0.00f); // Warm gold (#FFD700)
+            } else if (worldY > 45.0f) {
+                baseColor = glm::vec3(1.00f, 0.87f, 0.68f); // Dawn peach (#FFDAB9)
+            } else {
+                baseColor = glm::vec3(0.85f, 0.75f, 0.60f); // Light stone
+            }
+            break;
+            
+        default:
+        case BiomeType::SKY_VOID:
+            baseColor = glm::vec3(0.5f, 0.6f, 0.7f); // Sky blue-grey
+            break;
+    }
+    
+    // Add some variation based on noise density
+    float variation = (density + 10.0f) / 20.0f;
+    variation = glm::clamp(variation, 0.8f, 1.2f);
+    
+    return baseColor * variation;
+}
+
+void Chunk::generateWaterMesh() {
+    // Only generate a water mesh if the chunk is below or at water level
+    if (m_Position.y + CHUNK_SIZE < WATER_LEVEL) {
+        // The entire chunk is underwater, so the water surface is above it.
+        // We don't need to render a water surface inside a fully submerged chunk.
+        m_WaterVertexCount = 0;
+        return;
+    }
+    if (m_Position.y > WATER_LEVEL) {
+        // The entire chunk is above water, no water mesh needed.
+        m_WaterVertexCount = 0;
+        return;
+    }
+
+    struct WaterVertex {
+        glm::vec3 position;
+        glm::vec4 color;
+    };
+
+    std::vector<WaterVertex> vertices;
+
+    // The water surface is a simple quad at the WATER_LEVEL.
+    // The y-coordinate is relative to the chunk's origin.
+    float waterY = WATER_LEVEL - m_Position.y;
+
+    glm::vec4 waterColor = glm::vec4(0.1f, 0.3f, 0.8f, 0.7f); // Translucent blue
+
+    // Define the quad for the water surface
+    vertices.push_back({glm::vec3(0, waterY, 0), waterColor});
+    vertices.push_back({glm::vec3(CHUNK_SIZE, waterY, 0), waterColor});
+    vertices.push_back({glm::vec3(CHUNK_SIZE, waterY, CHUNK_SIZE), waterColor});
+
+    vertices.push_back({glm::vec3(0, waterY, 0), waterColor});
+    vertices.push_back({glm::vec3(CHUNK_SIZE, waterY, CHUNK_SIZE), waterColor});
+    vertices.push_back({glm::vec3(0, waterY, CHUNK_SIZE), waterColor});
+    
+    m_WaterVertexCount = vertices.size();
+
+    if (m_WaterVertexCount == 0) {
+        return;
+    }
+
+    GLCall(glGenVertexArrays(1, &m_WaterVAO));
+    GLCall(glGenBuffers(1, &m_WaterVBO));
+
+    GLCall(glBindVertexArray(m_WaterVAO));
+    GLCall(glBindBuffer(GL_ARRAY_BUFFER, m_WaterVBO));
+    GLCall(glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(WaterVertex), vertices.data(), GL_STATIC_DRAW));
+
+    // Position attribute
+    GLCall(glEnableVertexAttribArray(0));
+    GLCall(glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(WaterVertex), (void*)offsetof(WaterVertex, position)));
+
+    // Color attribute
+    GLCall(glEnableVertexAttribArray(2)); // Use attribute location 2 for color
+    GLCall(glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(WaterVertex), (void*)offsetof(WaterVertex, color)));
+
+    GLCall(glBindVertexArray(0));
 }
 
 } // namespace Luminumbra::World

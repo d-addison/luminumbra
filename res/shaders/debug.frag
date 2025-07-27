@@ -1,9 +1,12 @@
 #version 330 core
 out vec4 FragColor;
 
-in vec3 ourColor;
+in vec3 Normal;
 
 void main()
 {
-    FragColor = vec4(ourColor, 1.0);
+    // Visualize normals by mapping them to RGB colors
+    vec3 norm = normalize(Normal);
+    vec3 color = norm * 0.5 + 0.5; // Transform normals from [-1,1] to [0,1] range
+    FragColor = vec4(color, 1.0);
 }

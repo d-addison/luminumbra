@@ -18,12 +18,17 @@ public:
     ~Debug();
 
     void drawAxes(const glm::mat4& projection, const glm::mat4& view);
+    void drawWireframeCube(const glm::mat4& projection, const glm::mat4& view, const glm::vec3& position, float size);
+
+    Luminumbra::Rendering::Shader& getShader();
 
 private:
     Luminumbra::Rendering::Shader shader;
     GLuint VAO, VBO;
+    GLuint cubeVAO, cubeVBO;
 
     void setupAxes();
+    void setupCube();
 };
 
 } // namespace Luminumbra::Debug

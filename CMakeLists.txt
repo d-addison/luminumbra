@@ -1,37 +1,31 @@
-cmake_minimum_required(VERSION 3.10)
-
+cmake_minimum_required(VERSION 3.12)
 project(Luminumbra LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# --- Add Dependencies ---
+# --- Automatically find all our source files ---
+file(GLOB_RECURSE LUMINUMBRA_SOURCES "src/luminumbra/*.cpp")
 
-# Add GLFW from the external directory
+# --- Define Dependencies as Targets for Cleaner Linking ---
+
+# GLM (already a modern target)
+add_subdirectory(external/glm-1.0.1 EXCLUDE_FROM_ALL)
+
+# GLFW (already a modern target)
 add_subdirectory(external/glfw-3.4 EXCLUDE_FROM_ALL)
 
-# Add GLAD source files
-set(GLAD_SRC ${CMAKE_CURRENT_SOURCE_DIR}/external/glad/src/gl.c)
-set(GLAD_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/glad/include)
-
-# Find the OpenGL library itself
+# OpenGL
 find_package(OpenGL REQUIRED)
 
-# --- Our Executable ---
+# GLAD
+# We create a simple library for GLAD to group its source and include path.
+add_library(glad external/glad/src/gl.c)
+target_include_directories(glad PUBLIC external/glad/include)
 
-add_executable(Luminumbra
-    src/luminumbra/main.cpp
-    src/luminumbra/core/Engine.cpp
-    src/luminumbra/core/Debug.cpp
-    src/luminumbra/rendering/Shader.cpp
-    src/luminumbra/rendering/Camera.cpp
-    src/luminumbra/player/Player.cpp
-    src/luminumbra/world/Chunk.cpp
-    src/luminumbra/world/MarchingCubes.cpp
-    src/luminumbra/world/World.cpp
-    src/luminumbra/ui/UIManager.cpp
-    ${GLAD_SRC}
-    external/FastNoiseLite/FastNoiseLite.h
+# ImGui
+# We compile ImGui into its own library instead of adding sources to our exe.
+add_library(imgui
     external/imgui/imgui.cpp
     external/imgui/imgui_draw.cpp
     external/imgui/imgui_tables.cpp
@@ -39,26 +33,54 @@ add_executable(Luminumbra
     external/imgui/backends/imgui_impl_glfw.cpp
     external/imgui/backends/imgui_impl_opengl3.cpp
 )
-
-# --- Link Dependencies ---
-
-# Header-only libraries
-set(GLM_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/glm-1.0.1)
-set(FASTNOISE_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/FastNoiseLite)
-set(IMGUI_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/imgui)
-target_compile_definitions(Luminumbra PRIVATE GLM_ENABLE_EXPERIMENTAL FNL_IMPL)
-
-target_include_directories(Luminumbra PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include # <-- IMPORTANT: Make our new /include dir available
-    ${GLAD_INCLUDE_DIR}
-    ${GLM_INCLUDE_DIR}
-    ${FASTNOISE_INCLUDE_DIR}
-    ${IMGUI_INCLUDE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/external/imgui/backends
+target_include_directories(imgui PUBLIC
+    external/imgui
+    external/imgui/backends
 )
+# ImGui needs to know where GLFW and OpenGL are
+target_link_libraries(imgui PRIVATE glfw ${OpenGL_LIBRARIES})
 
-# Link our game against GLFW and OpenGL
+
+# Header-only dependencies are defined as INTERFACE libraries.
+# They don't compile anything, but they hold properties like include paths.
+
+# nlohmann-json
+add_library(nlohmann_json INTERFACE)
+target_include_directories(nlohmann_json INTERFACE external/nlohmann)
+
+# FastNoiseLite
+add_library(fastnoise INTERFACE)
+target_include_directories(fastnoise INTERFACE external/FastNoiseLite)
+
+# STB
+add_library(stb INTERFACE)
+target_include_directories(stb INTERFACE external/stb)
+
+# --- Define Our Executable ---
+
+add_executable(Luminumbra ${LUMINUMBRA_SOURCES})
+
+# Add our project's own include directory
+target_include_directories(Luminumbra PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+
+# Add any compile definitions specific to our executable
+target_compile_definitions(Luminumbra PRIVATE GLM_ENABLE_EXPERIMENTAL)
+
+# --- Link All Dependencies ---
+
 target_link_libraries(Luminumbra PRIVATE
-    glfw
-    ${OPENGL_LIBRARIES}
+    # Our compiled dependency targets
+    glad
+    imgui
+    glfw      # From add_subdirectory
+    glm::glm  # From add_subdirectory
+
+    # Interface (header-only) targets
+    nlohmann_json
+    fastnoise
+    stb
+
+    # System libraries
+    OpenGL::GL # Modern way to link OpenGL
+    stdc++fs
 )

@@ -1,5 +1,6 @@
 // src/luminumbra/rendering/Shader.cpp
 #include "luminumbra/rendering/Shader.h"
+#include "luminumbra/core/ResourceManager.h"
 #include <glm/gtc/type_ptr.hpp>
 
 #include <glad/gl.h>
@@ -10,7 +11,7 @@
 
 namespace Luminumbra::Rendering {
 
-Shader::Shader(const char* vertexPath, const char* fragmentPath) {
+Shader::Shader(const char* vertexPath, const char* fragmentPath) : m_VertexPath(vertexPath), m_FragmentPath(fragmentPath) {
     // 1. Retrieve the vertex/fragment source code from filePath
     std::string vertexCode;
     std::string fragmentCode;
@@ -22,8 +23,10 @@ Shader::Shader(const char* vertexPath, const char* fragmentPath) {
     fShaderFile.exceptions(std::ifstream::failbit | std::ifstream::badbit);
     try {
         // Open files
-        vShaderFile.open(vertexPath);
-        fShaderFile.open(fragmentPath);
+        std::string fullVertexPath = Core::ResourceManager::getInstance().getResourcePath(vertexPath);
+        std::string fullFragmentPath = Core::ResourceManager::getInstance().getResourcePath(fragmentPath);
+        vShaderFile.open(fullVertexPath);
+        fShaderFile.open(fullFragmentPath);
         std::stringstream vShaderStream, fShaderStream;
         // Read file's buffer contents into streams
         vShaderStream << vShaderFile.rdbuf();
@@ -62,6 +65,13 @@ Shader::Shader(const char* vertexPath, const char* fragmentPath) {
     m_ID = glCreateProgram();
     glAttachShader(m_ID, vertex);
     glAttachShader(m_ID, fragment);
+
+    // --- ADD THIS LINE ---
+    // Manually bind the fragment shader output variable "FragColor" to color output location 0.
+    // This is the correct, unambiguous way for GLSL 3.30.
+    glBindFragDataLocation(m_ID, 0, "FragColor");
+
+    // Now, link the program
     glLinkProgram(m_ID);
     checkCompileErrors(m_ID, "PROGRAM");
 
@@ -82,8 +92,16 @@ void Shader::setMat4(const std::string &name, const glm::mat4 &mat) const {
     glUniformMatrix4fv(glGetUniformLocation(m_ID, name.c_str()), 1, GL_FALSE, glm::value_ptr(mat));
 }
 
-void Shader::setVec3(const std::string &name, const glm::vec3 &value) const { 
+void Shader::setVec3(const std::string &name, const glm::vec3 &value) const {
     glUniform3fv(glGetUniformLocation(m_ID, name.c_str()), 1, &value[0]);
+}
+
+void Shader::setInt(const std::string &name, int value) const {
+    glUniform1i(glGetUniformLocation(m_ID, name.c_str()), value);
+}
+
+void Shader::setFloat(const std::string &name, float value) const {
+    glUniform1f(glGetUniformLocation(m_ID, name.c_str()), value);
 }
 
 void Shader::checkCompileErrors(unsigned int shader, const std::string& type) {
