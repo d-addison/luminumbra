@@ -284,7 +284,6 @@ void World::renderCelestials(Luminumbra::Rendering::Shader& celestialShader, con
 
     // --- Render Stars ---
     float starBrightness = glm::smoothstep(0.0f, -0.25f, -1*sunDir.y);
-    LOG("World::renderCelestials - Star Brightness: " + std::to_string(starBrightness));
     if (starBrightness > 0.0f) {
         celestialShader.setMat4("model", glm::mat4(1.0f));
         celestialShader.setVec3("objectColor", glm::vec3(1.0f, 1.0f, 0.95f));
@@ -296,7 +295,6 @@ void World::renderCelestials(Luminumbra::Rendering::Shader& celestialShader, con
     glm::mat4 billboardRotation = glm::mat4(glm::mat3(view));
 
     // --- Render Sun ---
-    LOG("World::renderCelestials - Sun Direction: " + std::to_string(sunDir.y));
     if (sunDir.y < 0.0f) {
         glm::mat4 model = glm::translate(glm::mat4(1.0f), sunDir * 100.0f); 
         model = model * billboardRotation; // Apply billboarding to face the camera
@@ -475,6 +473,26 @@ void World::startFireNearPlayer() {
     }
 }
 
+void World::teleportToEffect(const std::string& effect) {
+    if (!m_Player) return;
+    
+    glm::vec3 targetPos;
+    if (effect == "campfire") {
+        targetPos = CAMPFIRE_POS + glm::vec3(0.0f, 2.0f, 0.0f);
+    }
+    else if (effect == "portal") {
+        targetPos = PORTAL_POS + glm::vec3(0.0f, 2.0f, 0.0f);
+    }
+    else if (effect == "aurora") {
+        targetPos = AURORA_HEIGHT + glm::vec3(0.0f, -150.0f, 0.0f);
+    }
+    else if (effect == "clouds") {
+        targetPos = CLOUD_SPAWN_POINTS[0] + glm::vec3(0.0f, -20.0f, 0.0f);
+    }
+    
+    m_Player->setPosition(targetPos);
+}
+
 void World::updateParticles(float deltaTime) {
     static std::uniform_real_distribution<float> dist(0.0f, 1.0f);
     static std::mt19937 gen(std::random_device{}());
@@ -529,8 +547,128 @@ void World::updateParticles(float deltaTime) {
             }
         }
     }
+
+    // Cloud Test Zone
+    {
+        static float cloudTimer = 0.0f;
+        cloudTimer += deltaTime;
+        if (cloudTimer > 2.0f) {  // Spawn new cloud every 2 seconds
+            cloudTimer = 0.0f;
+            
+            // Create a cloud formation at fixed positions
+            const glm::vec3 cloudSpawnPoints[] = {
+                glm::vec3(100.0f, 100.0f, 100.0f),
+                glm::vec3(-100.0f, 120.0f, -100.0f),
+                glm::vec3(0.0f, 110.0f, 200.0f)
+            };
+
+            for (const auto& spawnPoint : cloudSpawnPoints) {
+                // Create main cloud body
+                Luminumbra::Rendering::ParticleProps cloudProps = 
+                    m_ParticleSystem->getPresetProperties(Luminumbra::Rendering::ParticleType::Cloud);
+                
+                // Randomize position slightly
+                cloudProps.position = spawnPoint + glm::vec3(
+                    dist(gen) * 20.0f - 10.0f,
+                    dist(gen) * 10.0f - 5.0f,
+                    dist(gen) * 20.0f - 10.0f
+                );
+                
+                m_ParticleSystem->emit(cloudProps);
+            }
+        }
+    }
+
+    // Volumetric Fire Test Zone
+    {
+        static const glm::vec3 campfirePos(50.0f, 10.0f, 50.0f);
+        
+        // Main fire
+        if (dist(gen) < 0.3f) {
+            Luminumbra::Rendering::ParticleProps fireProps = 
+                m_ParticleSystem->getPresetProperties(Luminumbra::Rendering::ParticleType::VolumetricFire);
+            fireProps.position = campfirePos + glm::vec3(
+                dist(gen) * 2.0f - 1.0f,
+                0.0f,
+                dist(gen) * 2.0f - 1.0f
+            );
+            m_ParticleSystem->emit(fireProps);
+            
+            // Add volumetric smoke above the fire
+            Luminumbra::Rendering::ParticleProps smokeProps = 
+                m_ParticleSystem->getPresetProperties(Luminumbra::Rendering::ParticleType::VolumetricSmoke);
+            smokeProps.position = fireProps.position + glm::vec3(0.0f, 3.0f, 0.0f);
+            m_ParticleSystem->emit(smokeProps);
+        }
+    }
+
+    // Magic Portal Test Zone
+    {
+        static const glm::vec3 portalCenter(0.0f, 20.0f, 0.0f);
+        static float portalAngle = 0.0f;
+        portalAngle += deltaTime;
+
+        // Create a swirling portal effect
+        if (dist(gen) < 0.4f) {
+            float radius = 3.0f;
+            float angle = portalAngle + dist(gen) * glm::two_pi<float>();
+            
+            glm::vec3 offset(
+                cos(angle) * radius,
+                sin(angle * 2.0f) * 2.0f,  // Figure-8 pattern
+                sin(angle) * radius
+            );
+
+            Luminumbra::Rendering::ParticleProps portalProps = 
+                m_ParticleSystem->getPresetProperties(Luminumbra::Rendering::ParticleType::Magic);
+            portalProps.isVolumetric = true;
+            portalProps.volumetricLayers = 6;
+            portalProps.volumeDepth = 2.0f;
+            portalProps.position = portalCenter + offset;
+            portalProps.velocity = glm::vec3(0.0f);
+            portalProps.colorBegin = glm::vec4(0.5f + 0.5f * sin(angle), 0.2f, 0.8f, 0.8f);
+            portalProps.sizeBegin = 0.5f;
+            portalProps.sizeEnd = 0.1f;
+            portalProps.lifeTime = 1.0f;
+            
+            m_ParticleSystem->emit(portalProps);
+        }
+    }
+
+    // Aurora Borealis Test Zone
+    {
+        static const float auroraY = 200.0f;
+        static float auroraTime = 0.0f;
+        auroraTime += deltaTime;
+
+        if (dist(gen) < 0.2f) {
+            float baseX = sin(auroraTime * 0.1f) * 100.0f;
+            
+            for (int i = 0; i < 3; i++) {
+                Luminumbra::Rendering::ParticleProps auroraProps = 
+                    m_ParticleSystem->getPresetProperties(Luminumbra::Rendering::ParticleType::Magic);
+                auroraProps.isVolumetric = true;
+                auroraProps.volumetricLayers = 4;
+                auroraProps.volumeDepth = 10.0f;
+                
+                float x = baseX + dist(gen) * 200.0f - 100.0f;
+                float z = dist(gen) * 200.0f - 100.0f;
+                float wave = sin(x * 0.02f + auroraTime) * 20.0f;
+                
+                auroraProps.position = glm::vec3(x, auroraY + wave, z);
+                auroraProps.velocity = glm::vec3(0.0f, sin(auroraTime + x * 0.1f) * 2.0f, 0.0f);
+                auroraProps.colorBegin = glm::vec4(0.1f, 0.8f, 0.3f, 0.3f);
+                auroraProps.colorEnd = glm::vec4(0.2f, 0.5f, 0.8f, 0.0f);
+                auroraProps.sizeBegin = 20.0f;
+                auroraProps.sizeEnd = 25.0f;
+                auroraProps.lifeTime = 4.0f;
+                
+                m_ParticleSystem->emit(auroraProps);
+            }
+        }
+    }
     
-    // 2. Fire & Spark System
+    // 3. Fire & Spark System
     for (auto& tree : m_BurningTrees) {
         tree.timeBurning += deltaTime;
         
@@ -557,13 +695,6 @@ void World::updateParticles(float deltaTime) {
                 m_ParticleSystem->emit(sparkProps);
             }
         }
-    }
-
-    // 3. Magic Zone (example at world origin)
-    if (dist(gen) < 0.3f) { // Emit magic particles continuously
-        Luminumbra::Rendering::ParticleProps props = m_ParticleSystem->getPresetProperties(Luminumbra::Rendering::ParticleType::Magic);
-        props.position = glm::vec3(0.0f, 10.0f, 0.0f) + glm::vec3((dist(gen) - 0.5f) * 50.f, dist(gen) * 3.f, (dist(gen) - 0.5f) * 10.f);
-        m_ParticleSystem->emit(props);
     }
 }
 

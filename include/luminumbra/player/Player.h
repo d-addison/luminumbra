@@ -58,6 +58,10 @@ public:
     bool isClimbing() const { return m_IsClimbing; }
     bool isSliding() const { return m_IsSliding; }
     float getFallDistance() const { return m_FallDistance; }
+    void setPosition(const glm::vec3& pos) { 
+        m_Position = pos;
+        m_Camera.setPosition(glm::vec3(pos.x, pos.y + m_CurrentEyeHeight, pos.z));
+    }
 
     Core::PlayerSaveData serialize() const;
     void applySaveData(const Core::PlayerSaveData& data);

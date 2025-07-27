@@ -1,4 +1,4 @@
-#version 410 core
+#version 410
 layout (location = 0) in vec2 a_VertexPos;
 layout (location = 1) in vec2 a_TexCoord;
 

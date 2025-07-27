@@ -9,6 +9,10 @@ namespace Luminumbra::World {
 }
 
 namespace Luminumbra::Rendering {
+    class Camera; 
+}
+
+namespace Luminumbra::Rendering {
 
 // Enum for different particle behaviors, allowing for specialized updates.
 enum class ParticleType {
@@ -18,7 +22,13 @@ enum class ParticleType {
     Spark,
     Magic,
     Rain,
-    Splash
+    Splash,
+    Snow,
+    Explosion,
+    Firework,
+    Cloud,
+    VolumetricSmoke,
+    VolumetricFire,
 };
 
 // Represents the state of a single particle in the system.
@@ -39,6 +49,11 @@ struct Particle {
 
     ParticleType type       = ParticleType::Leaf;
     bool active             = false;
+
+    // Volumetric properties
+    bool isVolumetric       = false;
+    int volumetricLayers    = 8; // Number of layers for volumetric particles
+    float volumeDepth       = 2.0f; // Depth of the volumetric particle volume
 };
 
 struct ParticleDeathEvent {
@@ -60,6 +75,9 @@ struct ParticleProps {
     float lifeTime              = 1.0f;
     float angularVelocity       = 0.0f;
     float angularVelocityVariation = 0.0f;
+    bool isVolumetric = false;
+    int volumetricLayers = 8;
+    float volumeDepth = 2.0f; 
 };
 
 // Data sent to the GPU for each particle instance. Optimized for size.
@@ -70,6 +88,9 @@ struct ParticleInstanceData {
     float rotation;
     // Padding to ensure vec4 alignment
     float padding[3];
+    float layer = 0.0f; // For volumetric particles, layer index
+    float lifeRemaining = 0.0f; // Remaining life time of the particle
+    ParticleType type = ParticleType::Leaf; // Type of the particle for behavior handling
 };
 
 class ParticleSystem {
@@ -78,7 +99,7 @@ public:
     ~ParticleSystem();
 
     std::vector<ParticleDeathEvent> update(float dt, Luminumbra::World::World& world);
-    void render(Shader& shader, const glm::mat4& viewMatrix);
+    void render(Shader& shader, const Luminumbra::Rendering::Camera& camera);
 
     void emit(const ParticleProps& particleProps);
     ParticleProps getPresetProperties(ParticleType type) const;

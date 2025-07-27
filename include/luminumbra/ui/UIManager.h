@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include "luminumbra/core/PostProcessSettings.h" 
 
 struct GLFWwindow;
 
@@ -64,10 +65,18 @@ namespace Luminumbra {
             void ShowRequestBoard();
 
             // HUD / Overlays
-            void ShowDebugOverlay(const glm::vec3& playerPos, const glm::vec3& playerVel, float gravity, bool isNoClip, const World::World& world, const Rendering::Shader& worldShader);
             void ShowStaminaBar(float stamina, float maxStamina, bool isSprinting);
             void ShowCameraViewfinder(const std::string& lens, float aperture, float shutterSpeed);
             void ShowInteractionPrompt(const std::string& prompt);
+            void ShowDebugOverlay(
+                const glm::vec3& playerPos,
+                const glm::vec3& playerVel,
+                float gravity,
+                bool isNoClip,
+                const World::World& world,
+                const Rendering::Shader& worldShader,
+                Core::PostProcessSettings& settings
+            );
 
             // State mutators
             void ToggleCodex() { m_ShowCodex = !m_ShowCodex; }
@@ -85,6 +94,8 @@ namespace Luminumbra {
             std::vector<Photo> m_Photos;
             std::vector<Request> m_Requests;
             int m_SelectedPhoto = -1;
+
+            void ShowPostProcessingSettings(Core::PostProcessSettings& settings);
         };
 
     } // namespace UI

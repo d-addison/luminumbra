@@ -5,6 +5,10 @@
 #include <vector>
 #include "luminumbra/rendering/Shader.h"
 #include "luminumbra/core/InputManager.h"
+#include <glad/gl.h>  // Add this for GLuint type
+#include "luminumbra/rendering/Camera.h"
+#include <glm/glm.hpp>
+#include "luminumbra/core/PostProcessSettings.h"
 
 // Forward declarations
 struct GLFWwindow;
@@ -35,6 +39,9 @@ public:
 
     void run();
 
+    glm::vec3 getPosition() const;
+    glm::vec3 getFront() const;
+
 private:
     void initRendering();
     void initInput();
@@ -61,6 +68,37 @@ private:
     std::unique_ptr<Rendering::Shader> m_FoliageShader;
     std::unique_ptr<Rendering::Shader> m_ParticleShader;
     std::unique_ptr<Rendering::Shader> m_WaterShader;
+
+    // Post-processing shaders
+    std::unique_ptr<Rendering::Shader> m_BloomShader;
+    std::unique_ptr<Rendering::Shader> m_BlurShader;
+    std::unique_ptr<Rendering::Shader> m_DofShader;
+    std::unique_ptr<Rendering::Shader> m_GodRaysShader;
+    std::unique_ptr<Rendering::Shader> m_FinalPassShader;
+
+    // Framebuffer objects and textures
+    GLuint m_SceneFramebuffer = 0;
+    GLuint m_SceneTexture = 0;
+    GLuint m_DepthTexture = 0;
+    GLuint m_PingPongFBO;
+    GLuint m_PingPongTextures[2];
+    
+    // Post-processing framebuffers
+    GLuint m_PostProcessFBO = 0;
+    GLuint m_PostProcessTextures[2] = {0, 0};
+
+    void initFramebuffers();
+    void deleteFramebuffers();
+    void bindSceneFramebuffer() const;
+    void renderPostProcess(GLuint sourceTexture, GLuint depthTexture = 0);
+    void renderFullscreenQuad();
+    Rendering::Shader* m_CurrentShader = nullptr;
+    void renderScene(const Luminumbra::Rendering::Camera& camera);
+    float calculateFocusDepth() const;
+
+    static constexpr int SHADOW_MAP_SIZE = 2048;
+    int m_CurrentPostProcessBuffer = 0;
+    PostProcessSettings m_PostProcessSettings;
     
     // --- State Management ---
     GameState m_GameState = GameState::SplashScreen;

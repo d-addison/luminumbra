@@ -17,10 +17,14 @@ public:
     const glm::vec3& getPosition() const { return m_Position; }
     const glm::vec3& getFront() const { return m_Front; }
     const glm::vec3& getRight() const { return m_Right; }
+    const glm::vec3& getUp() const { return m_Up; }
     float getFov() const { return m_Fov; }
 
     void setPosition(const glm::vec3& position);
     void setFov(float fov);
+
+    float getNearPlane() const { return m_NearPlane; }
+    float getFarPlane() const { return m_FarPlane; }
 
 private:
     void recalculateViewMatrix();
