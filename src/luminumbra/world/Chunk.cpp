@@ -11,11 +11,12 @@
 #include <vector>
 #include <algorithm>
 #include <cmath>
-#include <functional> // for std::hash
+#include <functional>
+#include <random>
+#include <map>
 
 namespace Luminumbra::World {
 
-// Import GL error checking functions for the GLCall macro
 using Luminumbra::Core::GLClearError;
 using Luminumbra::Core::GLCheckError;
 
@@ -27,7 +28,7 @@ Chunk::Chunk(const glm::ivec3& position, const std::string& seed, int lod) : m_P
     
     // This part is CPU-only and safe for worker threads.
     generateNoiseData(noise); 
-    generateMesh(m_LOD);      // This will now just prepare the data vectors.
+    generateMesh(m_LOD);
     generateWaterMesh();
 }
 
@@ -39,18 +40,12 @@ Chunk::~Chunk() {
     glDeleteBuffers(1, &m_WaterVBO);
 }
 
-// in src/luminumbra/world/Chunk.cpp
-
 void Chunk::generateNoiseData(fnl_state& noise) {
-    // This part is the same: resize the data vectors
     m_NoiseData.resize((CHUNK_SIZE + 1) * (CHUNK_SIZE + 1) * (CHUNK_SIZE + 1));
     m_BiomeData.resize((CHUNK_SIZE + 1) * (CHUNK_SIZE + 1), BiomeType::WHISPERING_GLADE);
 
-    // --- Configure the noise state directly ---
-    noise.noise_type = FNL_NOISE_OPENSIMPLEX2; // Use a standard noise type
-    noise.frequency = 0.005f;                 // Controls the scale of the terrain features
-
-    // Configure fractal settings for more detail
+    noise.noise_type = FNL_NOISE_OPENSIMPLEX2;
+    noise.frequency = 0.005f;
     noise.fractal_type = FNL_FRACTAL_FBM;       // Use Fractal Brownian Motion
     noise.octaves = 4;                          // Number of noise layers
     noise.lacunarity = 2.0f;                      // How quickly frequency increases for each octave
@@ -92,8 +87,6 @@ const glm::ivec3 cornerOffsets[8] = {
     {0, 1, 0}, {1, 1, 0}, {1, 1, 1}, {0, 1, 1}
 };
 
-// in src/luminumbra/world/Chunk.cpp
-
 void Chunk::generateMesh(int lod) {
     LOG("Chunk::generateMesh - Start");
     MarchingCubes::IndexedMesh mesh;
@@ -123,11 +116,13 @@ void Chunk::generateMesh(int lod) {
         return;
     }
 
-    // --- NEW: Fix the triangle winding order ---
-    // This loop swaps the 2nd and 3rd index of each triangle, fixing the culling issue.
     for (size_t i = 0; i < mesh.indices.size(); i += 3) {
         std::swap(mesh.indices[i + 1], mesh.indices[i + 2]);
     }
+
+    fnl_state foliage_noise = fnlCreateState();
+    foliage_noise.seed = m_Position.x * 1337 + m_Position.z * 7331; // Unique seed for foliage
+    generateFoliage(foliage_noise, mesh);
 
     m_IndexCount = mesh.indices.size();
     
@@ -135,7 +130,6 @@ void Chunk::generateMesh(int lod) {
     std::vector<Vertex> vertices(mesh.vertices.size());
     std::vector<glm::vec3> normals(mesh.vertices.size(), glm::vec3(0.0f));
 
-    // Calculate normals (this logic is now correct again)
     for (size_t i = 0; i < mesh.indices.size(); i += 3) {
         unsigned int i0 = mesh.indices[i], i1 = mesh.indices[i+1], i2 = mesh.indices[i+2];
         glm::vec3 v0 = mesh.vertices[i0], v1 = mesh.vertices[i1], v2 = mesh.vertices[i2];
@@ -147,7 +141,6 @@ void Chunk::generateMesh(int lod) {
 
     // Populate the vertex buffer with all data
     for (size_t i = 0; i < mesh.vertices.size(); ++i) {
-        // --- FIX: Use the correct member names: p, n, c ---
         vertices[i].p = mesh.vertices[i];
         vertices[i].n = glm::normalize(normals[i]);
         
@@ -157,7 +150,7 @@ void Chunk::generateMesh(int lod) {
         int biomeIndex = biomeX + biomeZ * (CHUNK_SIZE + 1);
         BiomeType biome = m_BiomeData[biomeIndex];
 
-        float density = 0.0f; // Default density
+        float density = 0.0f;
         int voxelX = (int)vertices[i].p.x, voxelY = (int)vertices[i].p.y, voxelZ = (int)vertices[i].p.z;
         int voxelIndex = voxelX + voxelZ * (CHUNK_SIZE + 1) + voxelY * (CHUNK_SIZE + 1) * (CHUNK_SIZE + 1);
         if (voxelIndex >= 0 && voxelIndex < m_NoiseData.size()) {
@@ -166,13 +159,76 @@ void Chunk::generateMesh(int lod) {
         vertices[i].c = getTerrainColor(worldPos.y, density, biome);
     }
 
-    // --- FIX: Copy the CORRECT `vertices` vector into m_VertexData ---
     m_VertexData.resize(vertices.size() * sizeof(Vertex) / sizeof(float));
     memcpy(m_VertexData.data(), vertices.data(), vertices.size() * sizeof(Vertex));
     
     m_IndexData = mesh.indices;
     m_GpuStatus = GpuStatus::NeedsGpuUpload;
 }
+
+void Chunk::generateFoliage(fnl_state& noise, const MarchingCubes::IndexedMesh& terrainMesh) {
+    noise.noise_type = FNL_NOISE_PERLIN;
+    noise.frequency = 0.8f;
+    // noise.frequency = 0.1f;
+    // noise.cellular_return_type = FNL_CELLULAR_RETURN_TYPE_CELLVALUE;
+    // noise.cellular_jitter_mod = 1.0f;
+
+    std::mt19937 rng(static_cast<unsigned int>(std::hash<std::string>{}(std::to_string(m_Position.x) + "_" + std::to_string(m_Position.z))));
+    std::uniform_real_distribution<float> scaleDist(0.8f, 1.5f);
+    std::uniform_real_distribution<float> rotDist(0.0f, 2.0f * 3.14159f);
+
+    std::map<std::pair<int, int>, float> highestY;
+    std::map<std::pair<int, int>, glm::vec3> surfaceNormals;
+
+    // First pass: find the highest point and average normal for each (x, z) grid cell
+    for (size_t i = 0; i < terrainMesh.indices.size(); i += 3) {
+        unsigned int i0 = terrainMesh.indices[i];
+        unsigned int i1 = terrainMesh.indices[i + 1];
+        unsigned int i2 = terrainMesh.indices[i + 2];
+
+        glm::vec3 v0 = terrainMesh.vertices[i0];
+        glm::vec3 v1 = terrainMesh.vertices[i1];
+        glm::vec3 v2 = terrainMesh.vertices[i2];
+
+        glm::vec3 faceNormal = glm::normalize(glm::cross(v1 - v0, v2 - v0));
+
+        // Process all three vertices of the triangle
+        for (const auto& v : { v0, v1, v2 }) {
+            int ix = static_cast<int>(floor(v.x));
+            int iz = static_cast<int>(floor(v.z));
+            auto key = std::make_pair(ix, iz);
+
+            if (highestY.find(key) == highestY.end() || v.y > highestY[key]) {
+                highestY[key] = v.y;
+                surfaceNormals[key] = faceNormal;
+            }
+        }
+    }
+
+    for (int x = 1; x < CHUNK_SIZE - 1; ++x) {
+        for (int z = 1; z < CHUNK_SIZE - 1; ++z) {
+            auto key = std::make_pair(x, z);
+            if (highestY.find(key) == highestY.end()) continue;
+
+            float y = highestY[key];
+            glm::vec3 worldPos = glm::vec3(m_Position) + glm::vec3(x, y, z);
+
+            //  if (worldPos.y > WATER_LEVEL + 1.0f) { // Don't spawn foliage underwater
+                glm::vec3 normal = surfaceNormals[key];
+                if (normal.y > 0.85f) { // Only on relatively flat ground
+                    float foliageValue = fnlGetNoise2D(&noise, worldPos.x, worldPos.z);
+
+                    if (foliageValue > 0.7f) { // Threshold for trees
+                        m_TreeInstances.push_back({ glm::vec3(x, y, z), scaleDist(rng), rotDist(rng) });
+                    } else if (foliageValue > 0.6f) { // Threshold for bushes
+                        m_BushInstances.push_back({ glm::vec3(x, y - 4.0f, z), scaleDist(rng) * 0.5f, rotDist(rng) });
+                    }
+                }
+            // }
+        }
+    }
+}
+
 
 void Chunk::uploadToGpu() {
     if (m_IndexCount == 0) return;
@@ -207,23 +263,29 @@ void Chunk::uploadToGpu() {
     m_GpuStatus = GpuStatus::Uploaded;
 }
 
-void Chunk::render() const {
-    // Render terrain
+void Chunk::renderTerrain() const {
+    // This function now ONLY renders the solid terrain mesh.
     if (m_GpuStatus == GpuStatus::Uploaded && m_IndexCount > 0) {
         GLCall(glBindVertexArray(m_VAO));
         GLCall(glDrawElements(GL_TRIANGLES, m_IndexCount, GL_UNSIGNED_INT, 0));
+        GLCall(glBindVertexArray(0));
     }
-    
-    // Render water
+}
+
+void Chunk::renderWater() const {
+    // This function now ONLY renders the water plane.
     if (m_WaterVertexCount > 0) {
-        // Enable blending for transparency
+        // State for transparency is now managed here
         GLCall(glEnable(GL_BLEND));
         GLCall(glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+        GLCall(glDepthMask(GL_FALSE)); // Don't write to depth buffer
 
         GLCall(glBindVertexArray(m_WaterVAO));
         GLCall(glDrawArrays(GL_TRIANGLES, 0, m_WaterVertexCount));
+        GLCall(glBindVertexArray(0));
 
-        // Disable blending after rendering
+        // Reset state
+        GLCall(glDepthMask(GL_TRUE));
         GLCall(glDisable(GL_BLEND));
     }
 }

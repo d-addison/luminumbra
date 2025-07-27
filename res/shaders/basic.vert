@@ -1,4 +1,4 @@
-#version 330 core
+#version 410
 layout (location = 0) in vec3 aPos;
 layout (location = 1) in vec3 aNormal;
 layout (location = 2) in vec3 aColor;
@@ -6,12 +6,12 @@ layout (location = 2) in vec3 aColor;
 out vec3 FragPos;
 out vec3 Normal;
 out vec3 Color;
-out vec4 FragPosLightSpace; // Keep for shadow map compatibility
+out vec4 FragPosLightSpace;
 
 uniform mat4 model;
 uniform mat4 view;
 uniform mat4 projection;
-uniform mat4 lightSpaceMatrix; // Keep for shadow map compatibility
+uniform mat4 lightSpaceMatrix;
 
 void main()
 {

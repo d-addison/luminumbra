@@ -40,34 +40,39 @@ struct ChunkLoadRequest {
     }
 };
 
+struct LeafParticle {
+    glm::vec3 position;
+    glm::vec3 velocity;
+    float life = 0.0f;
+    float maxLife = 1.0f;
+};
+
+
 class World {
 public:
-    // Constructor now takes screen dimensions to create the Player's camera
     World(const std::string& slotName, const std::string& seed, int screenWidth, int screenHeight);
     ~World();
 
-    // Update no longer needs viewerPosition; it gets it from its own Player
     void update(float deltaTime);
 
-    void render(Luminumbra::Rendering::Shader& shader, const glm::mat4& view, const glm::mat4& projection, const glm::vec3& viewPos) const;
+    void renderTerrain(Rendering::Shader& shader, const glm::vec3& viewPos) const;
+    void renderWater(Rendering::Shader& shader, const glm::vec3& viewPos) const;
     void renderSkyboxAndClouds(const glm::mat4& view, const glm::mat4& projection) const;
+    void renderFoliage(Luminumbra::Rendering::Shader& foliageShader) const;
+    void renderParticles(Luminumbra::Rendering::Shader& particleShader) const;
     bool isSolid(const glm::vec3& worldPosition) const;
     const char* getBiome(const glm::vec3& position) const;
     const std::string& getSlotName() const { return m_SlotName; }
     float getTimeOfDay() const { return m_TimeOfDay; }
     glm::vec3 getSunDirection() const;
-
-    // --- NEW: Methods for Player interaction and spawning ---
     Luminumbra::Player::Player* getPlayer() const;
     glm::vec3 getSpawnPoint() const;
     float getSurfaceHeight(float x, float z) const;
 
-    // Getters
     const std::map<glm::ivec3, std::unique_ptr<Chunk>, IVec3Compare>& getChunks() const { return m_Chunks; }
     // Luminumbra::Rendering::Skybox& getSkybox() const { return *m_Skybox; }
     Luminumbra::Rendering::CloudManager& getCloudManager() const { return *m_CloudManager; }
 
-    // Constants
     static constexpr int VIEW_DISTANCE = 8;
     static constexpr int LOD_DISTANCE = 5;
     static constexpr int UNLOAD_DISTANCE = 10;
@@ -87,14 +92,29 @@ private:
     float getChunkDistance(const glm::ivec3& chunkPos, const glm::vec3& viewPos) const;
 
     void initCelestials();
+    void initFoliage();
+    void initParticles();
+    void updateParticles(float deltaTime);
+
     GLuint m_SunVAO, m_SunVBO;
     GLuint m_MoonVAO, m_MoonVBO;
     GLuint m_StarVAO, m_StarVBO;
     size_t m_StarVertexCount;
 
+    GLuint m_TreeTrunkVAO = 0, m_TreeTrunkVBO = 0, m_TreeTrunkEBO = 0;
+    GLuint m_TreeLeavesVAO = 0, m_TreeLeavesVBO = 0, m_TreeLeavesEBO = 0;
+    GLuint m_BushVAO = 0, m_BushVBO = 0, m_BushEBO = 0;
+    GLuint m_FoliageInstanceVBO = 0;
+    size_t m_TreeTrunkIndexCount = 0, m_TreeLeavesIndexCount = 0, m_BushIndexCount = 0;
+
+    std::vector<LeafParticle> m_Particles;
+    GLuint m_ParticleVAO = 0, m_ParticleVBO = 0;
+    const size_t MAX_PARTICLES = 500;
+    float m_ParticleSpawnTimer = 0.0f;
+
     // World generation
     std::string m_Seed;
-    std::string m_SlotName; // The name of the save slot for this world
+    std::string m_SlotName;
     
     // The world now owns its player
     std::unique_ptr<Luminumbra::Player::Player> m_Player;

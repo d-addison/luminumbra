@@ -60,6 +60,8 @@ World::World(const std::string& slotName, const std::string& seed, int screenWid
     // Now spawn the player at the correct height
     m_Player->reset(glm::vec3(0.0f, spawnY + 10.0f, 0.0f));
     initCelestials();
+    initFoliage();
+    initParticles();
     LOG("World::Constructor - Finish");
 }
 
@@ -71,6 +73,21 @@ World::~World() {
             thread.join();
         }
     }
+    // NEW: Clean up foliage resources
+    glDeleteVertexArrays(1, &m_TreeTrunkVAO);
+    glDeleteBuffers(1, &m_TreeTrunkVBO);
+    glDeleteBuffers(1, &m_TreeTrunkEBO);
+    glDeleteVertexArrays(1, &m_TreeLeavesVAO);
+    glDeleteBuffers(1, &m_TreeLeavesVBO);
+    glDeleteBuffers(1, &m_TreeLeavesEBO);
+    glDeleteVertexArrays(1, &m_BushVAO);
+    glDeleteBuffers(1, &m_BushVBO);
+    glDeleteBuffers(1, &m_BushEBO);
+    glDeleteBuffers(1, &m_FoliageInstanceVBO);
+
+    // NEW: Clean up particle resources
+    glDeleteVertexArrays(1, &m_ParticleVAO);
+    glDeleteBuffers(1, &m_ParticleVBO);
     LOG("World::Destructor - Finish");
 }
 
@@ -122,6 +139,112 @@ void World::initCelestials() {
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
 
+    glBindVertexArray(0);
+}
+
+void World::initFoliage() {
+    // --- Tree Trunk (Cylinder) ---
+    std::vector<glm::vec3> trunkVertices;
+    std::vector<unsigned int> trunkIndices;
+    const int segments = 8;
+    const float radius = 0.5f;
+    const float height = 8.0f;
+    for (int i = 0; i < segments; ++i) {
+        float angle = (float)i / segments * 2.0f * 3.14159f;
+        float x = cos(angle) * radius;
+        float z = sin(angle) * radius;
+        trunkVertices.push_back({x, 0, z}); // Bottom vertex
+        trunkVertices.push_back({x, height, z}); // Top vertex
+    }
+    for (unsigned int i = 0; i < segments; ++i) {
+        unsigned int b_l = i * 2;
+        unsigned int t_l = b_l + 1;
+        unsigned int b_r = ((i + 1) % segments) * 2;
+        unsigned int t_r = b_r + 1;
+        trunkIndices.insert(trunkIndices.end(), {b_l, b_r, t_l});
+        trunkIndices.insert(trunkIndices.end(), {t_l, b_r, t_r});
+    }
+    m_TreeTrunkIndexCount = trunkIndices.size();
+    glGenVertexArrays(1, &m_TreeTrunkVAO);
+    glGenBuffers(1, &m_TreeTrunkVBO);
+    glGenBuffers(1, &m_TreeTrunkEBO);
+    glBindVertexArray(m_TreeTrunkVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, m_TreeTrunkVBO);
+    glBufferData(GL_ARRAY_BUFFER, trunkVertices.size() * sizeof(glm::vec3), trunkVertices.data(), GL_STATIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_TreeTrunkEBO);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, trunkIndices.size() * sizeof(unsigned int), trunkIndices.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
+
+    // --- Tree Leaves & Bush (Icosphere) ---
+    const float t = (1.0f + sqrt(5.0f)) / 2.0f;
+    std::vector<glm::vec3> icoVertices = {
+        {-1, t, 0}, {1, t, 0}, {-1, -t, 0}, {1, -t, 0},
+        {0, -1, t}, {0, 1, t}, {0, -1, -t}, {0, 1, -t},
+        {t, 0, -1}, {t, 0, 1}, {-t, 0, -1}, {-t, 0, 1}
+    };
+    for(auto& v : icoVertices) {
+        v = glm::normalize(v) * 4.0f; // Scale the icosphere model
+        // FIX: Add the trunk's height to the leaves' y-position.
+        // We use 7.0f so the canopy sits nicely on the top of the trunk.
+        v.y += 7.0f; 
+    }
+    std::vector<unsigned int> icoIndices = {
+        0, 11, 5,  0, 5, 1,  0, 1, 7,  0, 7, 10,  0, 10, 11,
+        1, 5, 9,  5, 11, 4, 11, 10, 2, 10, 7, 6,  7, 1, 8,
+        3, 9, 4,  3, 4, 2,  3, 2, 6,  3, 6, 8,  3, 8, 9,
+        4, 9, 5,  2, 4, 11, 6, 2, 10, 8, 6, 7,  9, 8, 1
+    };
+    m_TreeLeavesIndexCount = m_BushIndexCount = icoIndices.size();
+
+    // Leaves VAO
+    glGenVertexArrays(1, &m_TreeLeavesVAO);
+    glGenBuffers(1, &m_TreeLeavesVBO);
+    glGenBuffers(1, &m_TreeLeavesEBO);
+    glBindVertexArray(m_TreeLeavesVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, m_TreeLeavesVBO);
+    glBufferData(GL_ARRAY_BUFFER, icoVertices.size() * sizeof(glm::vec3), icoVertices.data(), GL_STATIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_TreeLeavesEBO);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, icoIndices.size() * sizeof(unsigned int), icoIndices.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
+
+    // Bush VAO
+    glGenVertexArrays(1, &m_BushVAO);
+    glBindVertexArray(m_BushVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, m_TreeLeavesVBO);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_TreeLeavesEBO);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
+
+    // --- Instance VBO Setup ---
+    glGenBuffers(1, &m_FoliageInstanceVBO);
+    glBindBuffer(GL_ARRAY_BUFFER, m_FoliageInstanceVBO);
+    glBufferData(GL_ARRAY_BUFFER, 10000 * sizeof(glm::mat4), nullptr, GL_STREAM_DRAW);
+
+    for (auto vao : {m_TreeTrunkVAO, m_TreeLeavesVAO, m_BushVAO}) {
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, m_FoliageInstanceVBO);
+        for (int i = 0; i < 4; ++i) {
+            glEnableVertexAttribArray(1 + i);
+            glVertexAttribPointer(1 + i, 4, GL_FLOAT, GL_FALSE, sizeof(glm::mat4), (void*)(sizeof(glm::vec4) * i));
+            glVertexAttribDivisor(1 + i, 1);
+        }
+    }
+    glBindVertexArray(0);
+}
+
+void World::initParticles() {
+    m_Particles.resize(MAX_PARTICLES);
+    glGenVertexArrays(1, &m_ParticleVAO);
+    glGenBuffers(1, &m_ParticleVBO);
+
+    glBindVertexArray(m_ParticleVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, m_ParticleVBO);
+    glBufferData(GL_ARRAY_BUFFER, MAX_PARTICLES * sizeof(glm::vec3), nullptr, GL_STREAM_DRAW);
+
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
     glBindVertexArray(0);
 }
 
@@ -196,18 +319,21 @@ glm::vec3 World::getSkyColor() const {
 
     float sunHeight = getSunDirection().y;
 
-    // Blend between daytime and sunset colors
-    // CORRECTED: Added glm:: prefix
-    float dayFactor = glm::smoothstep(0.0f, 0.05f, sunHeight);
-    glm::vec3 sky = glm::mix(sunsetColor, dayColor, dayFactor);
+    // Step 1: Blend between pure day color and sunset color.
+    // This factor is 0.0 at the horizon (sunset) and 1.0 higher up (full day).
+    float dayFactor = glm::smoothstep(0.0f, 0.2f, sunHeight);
+    glm::vec3 daySunsetMix = glm::mix(sunsetColor, dayColor, dayFactor);
 
-    // Blend between the current sky color and night color
-    // CORRECTED: Added glm:: prefix
-    float nightFactor = glm::smoothstep(-0.05f, 0.0f, -1 * sunHeight);
-    sky = glm::mix(nightColor, sky, nightFactor);
-    LOG("World::getSkyColor - Sun Height: " + std::to_string(sunHeight) + ", Sky Color: (" + std::to_string(sky.x) + ", " + std::to_string(sky.y) + ", " + std::to_string(sky.z) + ")");
+    // Step 2: Blend the result of Step 1 with the night color.
+    // This factor is 0.0 at night and 1.0 during the day/sunset.
+    float lightFactor = glm::smoothstep(-0.15f, 0.0f, sunHeight);
+    glm::vec3 finalSky = glm::mix(nightColor, daySunsetMix, lightFactor);
+    
+    // Optional: Log the final, meaningful factors
+    LOG("[TIME: " + std::to_string(m_TimeOfDay) + " / " + std::to_string(sunHeight) + "] Day Factor: " + std::to_string(dayFactor) + ", Light Factor: " + std::to_string(lightFactor) + ", Final Sky Color: (" + 
+        std::to_string(finalSky.r) + ", " + std::to_string(finalSky.g) + ", " + std::to_string(finalSky.b) + ")");
 
-    return sky;
+    return finalSky;
 }
 
 void World::applySaveData(const Core::WorldSaveData& data) {
@@ -222,9 +348,28 @@ void World::setTimeOfDay(float time) {
     m_TimeOfDay = std::clamp(time, 0.0f, 1.0f);
 }
 
+#include <glm/gtc/constants.hpp> // For glm::two_pi()
+
 glm::vec3 World::getSunDirection() const {
-    float angle = m_TimeOfDay * 2.0f * 3.14159f;
-    return glm::normalize(glm::vec3(sin(angle), cos(angle), 0.1f));
+    // m_TimeOfDay is a value from 0.0 (midnight) to 1.0 (next midnight)
+    float angle = m_TimeOfDay * glm::two_pi<float>();
+
+    glm::vec3 direction;
+    
+    // Use -cos(angle) for height.
+    // -cos(0) = -1.0 (midnight)
+    // -cos(pi) = +1.0 (midday at time = 0.5)
+    // -cos(2*pi) = -1.0 (next midnight at time = 1.0)
+    direction.y = -glm::cos(angle);
+
+    // Use sin(angle) for east-west movement along the X-axis.
+    direction.x = glm::sin(angle);
+    
+    // Optional: Tilt the sun's path on the Z-axis so it's not directly overhead.
+    direction.z = 0.3f;
+
+    // Return a normalized vector, as is standard for directions.
+    return glm::normalize(direction);
 }
 
 // in src/luminumbra/world/World.cpp
@@ -244,6 +389,7 @@ void World::update(float deltaTime) {
     // 2. STATE UPDATE STAGE: Update time, clouds, etc.
     const glm::vec3 viewerPosition = m_Player->getPosition();
     m_CloudManager->update(deltaTime);
+    updateParticles(deltaTime);
 
     m_TimeOfDay += deltaTime / DAY_DURATION;
     if (m_TimeOfDay > 1.0f) {
@@ -279,28 +425,173 @@ glm::vec3 World::getSpawnPoint() const {
     return glm::vec3(0.0f, spawnY + 2.0f, 0.0f);
 }
 
-// (The rest of the functions from your original file remain largely unchanged)
+void World::updateParticles(float deltaTime) {
+    std::mt19937 rng(std::random_device{}());
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    std::uniform_real_distribution<float> spawnChance(0.0f, 1.0f);
+    std::uniform_real_distribution<float> lifeDist(4.0f, 8.0f);
 
-// in src/luminumbra/world/World.cpp
+    // 1. Update all existing active particles
+    for (auto& p : m_Particles) {
+        if (p.life > 0.0f) {
+            p.life -= deltaTime;
+            p.position += p.velocity * deltaTime;
+            p.velocity.x += sin(p.life * 2.0f) * 0.1f * deltaTime; // Flutter
+        }
+    }
 
-void World::render(Luminumbra::Rendering::Shader& shader, const glm::mat4& view, const glm::mat4& projection, const glm::vec3& viewPos) const {
-    // Set all the uniforms that are the same for every chunk
-    shader.setVec3("viewPos", viewPos);
-    shader.setMat4("view", view);             // <-- ADD THIS LINE
-    shader.setMat4("projection", projection); // <-- ADD THIS LINE
+    // 2. Spawn new particles from nearby trees
+    m_ParticleSpawnTimer -= deltaTime;
+    if (m_ParticleSpawnTimer <= 0.0f) {
+        m_ParticleSpawnTimer = 0.1f; // Check to spawn every 0.1s
 
-    // Now loop through and render each chunk
+        // The properties for our leaf particles
+        const float spawnProbability = 0.05f; // 5% chance per tree per check
+        glm::vec3 playerPos = m_Player->getPosition();
+
+        for (const auto& pair : m_Chunks) {
+            const auto& chunk = pair.second;
+            if (!chunk) continue;
+
+            // Only spawn from chunks reasonably close to the player
+            if (getChunkDistance(pair.first, playerPos) > 128.0f) continue;
+
+            for (const auto& tree : chunk->getTreeInstances()) {
+                // Give each tree a small chance to spawn a particle on this frame
+                if (spawnChance(rng) < spawnProbability) {
+                    // Find an inactive particle to recycle
+                    auto it = std::find_if(m_Particles.begin(), m_Particles.end(), [](const LeafParticle& p){ return p.life <= 0.0f; });
+                    if (it != m_Particles.end()) {
+                        // Position is the tree's base + canopy height + random offset
+                        glm::vec3 canopyBasePos = glm::vec3(chunk->getModelMatrix() * glm::vec4(tree.position, 1.0));
+                        canopyBasePos.y += 7.0f; // Move up to the leaves
+
+                        it->life = lifeDist(rng);
+                        it->maxLife = it->life;
+                        it->position = canopyBasePos + glm::vec3(dist(rng) * 3.0f, dist(rng), dist(rng) * 3.0f);
+                        it->velocity = glm::vec3(dist(rng) * 0.5f, -1.0f, dist(rng) * 0.5f);
+                    }
+                }
+            }
+        }
+    }
+}
+
+void World::renderTerrain(Rendering::Shader& shader, const glm::vec3& viewPos) const {
     for (const auto& pair : m_Chunks) {
         const auto& chunk = pair.second;
         if (chunk) {
             float distance = getChunkDistance(pair.first, viewPos);
             if (distance <= VIEW_DISTANCE * Chunk::CHUNK_SIZE) {
-                // Set the per-chunk uniform (the model matrix)
                 shader.setMat4("model", chunk->getModelMatrix());
-                chunk->render();
+                chunk->renderTerrain();
             }
         }
     }
+}
+
+void World::renderWater(Rendering::Shader& shader, const glm::vec3& viewPos) const {
+    for (const auto& pair : m_Chunks) {
+        const auto& chunk = pair.second;
+        if (chunk) {
+            float distance = getChunkDistance(pair.first, viewPos);
+            if (distance <= VIEW_DISTANCE * Chunk::CHUNK_SIZE) {
+                shader.setMat4("model", chunk->getModelMatrix());
+                chunk->renderWater();
+            }
+        }
+    }
+}
+
+void World::renderFoliage(Luminumbra::Rendering::Shader& foliageShader) const {
+    foliageShader.use();
+    foliageShader.setMat4("projection", m_Player->getCamera().getProjectionMatrix());
+    foliageShader.setMat4("view", m_Player->getCamera().getViewMatrix());
+
+    std::vector<glm::mat4> treeMatrices;
+    std::vector<glm::mat4> bushMatrices;
+
+    // Collect all instance data from visible chunks
+    for (const auto& pair : m_Chunks) {
+        const auto& chunk = pair.second;
+        if (chunk) {
+            float distance = getChunkDistance(pair.first, m_Player->getPosition());
+            if (distance <= (VIEW_DISTANCE - 1) * Chunk::CHUNK_SIZE) {
+                for (const auto& inst : chunk->getTreeInstances()) {
+                    glm::mat4 model = glm::translate(chunk->getModelMatrix(), inst.position);
+                    model = glm::rotate(model, inst.rotationY, glm::vec3(0, 1, 0));
+                    model = glm::scale(model, glm::vec3(inst.scale));
+                    treeMatrices.push_back(model);
+                }
+                for (const auto& inst : chunk->getBushInstances()) {
+                    glm::mat4 model = glm::translate(chunk->getModelMatrix(), inst.position);
+                    model = glm::rotate(model, inst.rotationY, glm::vec3(0, 1, 0));
+                    model = glm::scale(model, glm::vec3(inst.scale));
+                    bushMatrices.push_back(model);
+                }
+            }
+        }
+    }
+
+    if (treeMatrices.empty() && bushMatrices.empty()) return;
+
+    glBindBuffer(GL_ARRAY_BUFFER, m_FoliageInstanceVBO);
+    glBufferData(GL_ARRAY_BUFFER, (treeMatrices.size() + bushMatrices.size()) * sizeof(glm::mat4), nullptr, GL_STREAM_DRAW);
+
+    // Render Trees
+    if (!treeMatrices.empty()) {
+        glBufferSubData(GL_ARRAY_BUFFER, 0, treeMatrices.size() * sizeof(glm::mat4), treeMatrices.data());
+        // Trunk
+        foliageShader.setVec3("objectColor", glm::vec3(0.4f, 0.26f, 0.13f));
+        glBindVertexArray(m_TreeTrunkVAO);
+        glDrawElementsInstanced(GL_TRIANGLES, m_TreeTrunkIndexCount, GL_UNSIGNED_INT, 0, treeMatrices.size());
+        // Leaves
+        foliageShader.setVec3("objectColor", glm::vec3(0.13f, 0.54f, 0.13f));
+        glBindVertexArray(m_TreeLeavesVAO);
+        glDrawElementsInstanced(GL_TRIANGLES, m_TreeLeavesIndexCount, GL_UNSIGNED_INT, 0, treeMatrices.size());
+    }
+
+    // Render Bushes
+    if (!bushMatrices.empty()) {
+        glBufferSubData(GL_ARRAY_BUFFER, treeMatrices.size() * sizeof(glm::mat4), bushMatrices.size() * sizeof(glm::mat4), bushMatrices.data());
+        foliageShader.setVec3("objectColor", glm::vec3(0.2f, 0.6f, 0.2f));
+        glBindVertexArray(m_BushVAO);
+        glDrawElementsInstanced(GL_TRIANGLES, m_BushIndexCount, GL_UNSIGNED_INT, 0, bushMatrices.size());
+    }
+
+    glBindVertexArray(0);
+}
+
+void World::renderParticles(Luminumbra::Rendering::Shader& particleShader) const {
+    particleShader.use();
+    particleShader.setMat4("projection", m_Player->getCamera().getProjectionMatrix());
+    particleShader.setMat4("view", m_Player->getCamera().getViewMatrix());
+
+    std::vector<glm::vec3> activeParticlePositions;
+    for (const auto& p : m_Particles) {
+        if (p.life > 0.0f) {
+            activeParticlePositions.push_back(p.position);
+        }
+    }
+
+    if (activeParticlePositions.empty()) return;
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_PROGRAM_POINT_SIZE);
+    glDepthMask(GL_FALSE);
+
+    glBindVertexArray(m_ParticleVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, m_ParticleVBO);
+    glBufferData(GL_ARRAY_BUFFER, activeParticlePositions.size() * sizeof(glm::vec3), activeParticlePositions.data(), GL_STREAM_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
+
+    glDrawArrays(GL_POINTS, 0, activeParticlePositions.size());
+
+    glDepthMask(GL_TRUE);
+    glDisable(GL_PROGRAM_POINT_SIZE);
+    glDisable(GL_BLEND);
+    glBindVertexArray(0);
 }
 
 void World::renderSkyboxAndClouds(const glm::mat4& view, const glm::mat4& projection) const {

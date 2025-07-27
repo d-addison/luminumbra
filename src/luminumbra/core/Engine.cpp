@@ -180,7 +180,10 @@ void Engine::initInput() {
 void Engine::initRendering() {
     LOG("Engine::initRendering - Start");
     m_BasicShader = std::make_unique<Rendering::Shader>("res/shaders/basic.vert", "res/shaders/basic.frag");
-    m_CelestialShader = std::make_unique<Rendering::Shader>("res/shaders/celestial.vert", "res/shaders/celestial.frag"); // Add this
+    m_CelestialShader = std::make_unique<Rendering::Shader>("res/shaders/celestial.vert", "res/shaders/celestial.frag");
+    m_FoliageShader = std::make_unique<Rendering::Shader>("res/shaders/foliage.vert", "res/shaders/foliage.frag");
+    m_ParticleShader = std::make_unique<Rendering::Shader>("res/shaders/particle.vert", "res/shaders/particle.frag");
+    m_WaterShader = std::make_unique<Rendering::Shader>("res/shaders/water.vert", "res/shaders/water.frag");
     m_Debug = std::make_unique<Debug::Debug>();
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
@@ -291,16 +294,37 @@ void Engine::render() {
         const auto& camera = player->getCamera();
         glPolygonMode(GL_FRONT_AND_BACK, m_WireframeMode ? GL_LINE : GL_FILL);
 
-        Rendering::Shader& shader = m_WireframeMode ? m_Debug->getShader() : *m_BasicShader;
-        shader.use();
-        shader.setMat4("projection", camera.getProjectionMatrix());
-        shader.setMat4("view", camera.getViewMatrix());
-        shader.setVec3("sunDirection", m_World->getSunDirection());
-        shader.setVec3("viewPos", camera.getPosition());
-        shader.setVec3("fogColor", glm::vec3(0.5f, 0.6f, 0.7f));
-        m_World->render(shader, camera.getViewMatrix(), camera.getProjectionMatrix(), camera.getPosition());
-        m_World->renderSkyboxAndClouds(camera.getViewMatrix(), camera.getProjectionMatrix());
-        m_World->renderCelestials(*m_CelestialShader, camera.getViewMatrix(), camera.getProjectionMatrix());
+        // --- Render Terrain ---
+        Rendering::Shader& terrainShader = m_WireframeMode ? m_Debug->getShader() : *m_BasicShader;
+        terrainShader.use();
+        terrainShader.setMat4("projection", camera.getProjectionMatrix());
+        terrainShader.setMat4("view", camera.getViewMatrix());
+        terrainShader.setVec3("sunDirection", m_World->getSunDirection());
+        terrainShader.setVec3("viewPos", camera.getPosition());
+        terrainShader.setVec3("fogColor", skyColor);
+        m_World->renderTerrain(terrainShader, camera.getPosition());
+
+        // 3b. Foliage
+        if (!m_WireframeMode) {
+             m_FoliageShader->use();
+             m_FoliageShader->setVec3("sunDirection", m_World->getSunDirection());
+             m_FoliageShader->setVec3("viewPos", camera.getPosition());
+             m_FoliageShader->setVec3("fogColor", skyColor);
+             m_World->renderFoliage(*m_FoliageShader);
+        }
+
+        // 4. Render Transparent Geometry
+        if (!m_WireframeMode) {
+            // 4a. Water (re-uses the terrain shader)
+            m_WaterShader->use();
+            m_WaterShader->setMat4("projection", camera.getProjectionMatrix());
+            m_WaterShader->setMat4("view", camera.getViewMatrix());
+            m_World->renderWater(*m_WaterShader, camera.getPosition());
+            
+            // 4b. Particles
+            m_World->renderParticles(*m_ParticleShader);
+        }
+        
         if (m_Debug) m_Debug->drawAxes(camera.getProjectionMatrix(), camera.getViewMatrix());
 
     } else {
@@ -322,10 +346,10 @@ void Engine::render() {
             break;
         case GameState::NewGameSetup:
             m_UIManager->ShowNewGameWindow(
-                m_LaunchGame, 
-                m_SaveName, 
-                sizeof(m_SaveName), 
-                m_Seed, 
+                m_LaunchGame,
+                m_SaveName,
+                sizeof(m_SaveName),
+                m_Seed,
                 sizeof(m_Seed)
             );
             break;
@@ -344,7 +368,7 @@ void Engine::render() {
                 Player::Player* player = m_World->getPlayer();
                 if (m_ShowDebugInfo && !m_ShowMenu) {
                     m_UIManager->ShowDebugOverlay(player->getPosition(), player->getVelocity(), player->getGravity(),
-                                                 player->isNoClipMode(), *m_World, *m_BasicShader);
+                                                  player->isNoClipMode(), *m_World, *m_BasicShader);
                 }
                 if (!m_ShowMenu && !player->isNoClipMode()) {
                     m_UIManager->ShowStaminaBar(player->getStamina(), player->getMaxStamina(), player->isSprinting());
@@ -364,7 +388,7 @@ void Engine::render() {
                 Player::Player* player = m_World->getPlayer();
                 if (m_ShowDebugInfo && !m_ShowMenu) {
                     m_UIManager->ShowDebugOverlay(player->getPosition(), player->getVelocity(), player->getGravity(),
-                                                 player->isNoClipMode(), *m_World, *m_BasicShader);
+                                                  player->isNoClipMode(), *m_World, *m_BasicShader);
                 }
                 if (!m_ShowMenu && !player->isNoClipMode()) {
                     m_UIManager->ShowStaminaBar(player->getStamina(), player->getMaxStamina(), player->isSprinting());
