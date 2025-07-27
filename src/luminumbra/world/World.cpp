@@ -147,25 +147,31 @@ void World::renderCelestials(Luminumbra::Rendering::Shader& celestialShader, con
         glDrawArrays(GL_POINTS, 0, m_StarVertexCount);
     }
 
+    glm::mat4 billboardRotation = glm::mat4(glm::mat3(view));
+
     // --- Render Sun ---
     LOG("World::renderCelestials - Sun Direction: " + std::to_string(sunDir.y));
     if (sunDir.y < 0.0f) {
-        glm::mat4 model = glm::translate(glm::mat4(1.0f), sunDir * 500.0f); // Move it along its direction vector
-        model = glm::scale(model, glm::vec3(100.0f)); // Make it bigger
+        glm::mat4 model = glm::translate(glm::mat4(1.0f), sunDir * 100.0f); 
+        model = model * billboardRotation; // Apply billboarding to face the camera
+        model = glm::scale(model, glm::vec3(50.0f)); // Scale it up
+        
         celestialShader.setMat4("model", model);
         celestialShader.setVec3("objectColor", glm::vec3(1.0f, 1.0f, 0.8f));
-        celestialShader.setFloat("brightness", 2.0f);
+        celestialShader.setFloat("brightness", 5.0f);
         glBindVertexArray(m_SunVAO);
         glDrawArrays(GL_TRIANGLES, 0, 6);
     }
     
     // --- Render Moon ---
     if (sunDir.y > 0.0f) {
-        glm::mat4 model = glm::translate(glm::mat4(1.0f), -sunDir * 500.0f); // Opposite direction of the sun
-        model = glm::scale(model, glm::vec3(80.0f));
+        glm::mat4 model = glm::translate(glm::mat4(1.0f), -sunDir * 100.0f); 
+        model = model * billboardRotation; // Apply billboarding to face the camera
+        model = glm::scale(model, glm::vec3(40.0f)); // Scale it up
+
         celestialShader.setMat4("model", model);
         celestialShader.setVec3("objectColor", glm::vec3(0.8f, 0.8f, 0.9f));
-        celestialShader.setFloat("brightness", 2.0f);
+        celestialShader.setFloat("brightness", 5.0f);
         glBindVertexArray(m_MoonVAO);
         glDrawArrays(GL_TRIANGLES, 0, 6);
     }
