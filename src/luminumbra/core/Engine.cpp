@@ -247,6 +247,16 @@ void Engine::processInput() {
         LOG("Toggling wireframe mode: " + std::to_string(m_WireframeMode));
         m_WireframeMode = !m_WireframeMode;
     }
+
+    if (m_InputManager->isActionPressed(GameAction::ToggleWeather)) { // Using raw key for simplicity
+        static bool isRainy = false;
+        isRainy = !isRainy;
+        m_World->setWeather(isRainy ? World::World::WeatherType::Rainy : World::World::WeatherType::Clear);
+    }
+
+    if (m_InputManager->isActionPressed(GameAction::StartFire)) {
+        m_World->startFireNearPlayer();
+    }
 }
 
 void Engine::update(float deltaTime) {
@@ -322,7 +332,9 @@ void Engine::render() {
             m_World->renderWater(*m_WaterShader, camera.getPosition());
             
             // 4b. Particles
-            m_World->renderParticles(*m_ParticleShader);
+            m_ParticleShader->use();
+            m_ParticleShader->setMat4("u_Projection", camera.getProjectionMatrix());
+            m_World->getParticleSystem()->render(*m_ParticleShader, camera.getViewMatrix());
         }
         
         if (m_Debug) m_Debug->drawAxes(camera.getProjectionMatrix(), camera.getViewMatrix());

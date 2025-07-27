@@ -10,7 +10,9 @@
 #include <atomic>
 #include <string>
 #include <glad/gl.h>
+#include <set>
 #include "luminumbra/core/SaveData.h"
+#include "luminumbra/rendering/particles/Particle.h" 
 
 // Forward declarations
 namespace Luminumbra::Rendering {
@@ -47,6 +49,16 @@ struct LeafParticle {
     float maxLife = 1.0f;
 };
 
+struct BurningTree {
+    glm::ivec3 chunkCoord; // The coordinate of the chunk the tree is in
+    size_t treeIndex;      // The index of the tree in the chunk's instance vector
+    float timeBurning = 0.0f;
+    
+    // For using in std::set/map
+    bool operator==(const BurningTree& other) const {
+        return chunkCoord == other.chunkCoord && treeIndex == other.treeIndex;
+    }
+};
 
 class World {
 public:
@@ -54,12 +66,12 @@ public:
     ~World();
 
     void update(float deltaTime);
+    enum class WeatherType { Clear, Rainy };
 
     void renderTerrain(Rendering::Shader& shader, const glm::vec3& viewPos) const;
     void renderWater(Rendering::Shader& shader, const glm::vec3& viewPos) const;
     void renderSkyboxAndClouds(const glm::mat4& view, const glm::mat4& projection) const;
     void renderFoliage(Luminumbra::Rendering::Shader& foliageShader) const;
-    void renderParticles(Luminumbra::Rendering::Shader& particleShader) const;
     bool isSolid(const glm::vec3& worldPosition) const;
     const char* getBiome(const glm::vec3& position) const;
     const std::string& getSlotName() const { return m_SlotName; }
@@ -72,6 +84,7 @@ public:
     const std::map<glm::ivec3, std::unique_ptr<Chunk>, IVec3Compare>& getChunks() const { return m_Chunks; }
     // Luminumbra::Rendering::Skybox& getSkybox() const { return *m_Skybox; }
     Luminumbra::Rendering::CloudManager& getCloudManager() const { return *m_CloudManager; }
+    Luminumbra::Rendering::ParticleSystem* getParticleSystem() const { return m_ParticleSystem.get(); }
 
     static constexpr int VIEW_DISTANCE = 8;
     static constexpr int LOD_DISTANCE = 5;
@@ -83,6 +96,8 @@ public:
     glm::vec3 getSkyColor() const;
 
     void renderCelestials(Luminumbra::Rendering::Shader& celestialShader, const glm::mat4& view, const glm::mat4& projection) const;
+    void setWeather(WeatherType type);
+    void startFireNearPlayer();
 
 private:
     void loadChunksAroundPosition(const glm::vec3& position);
@@ -93,8 +108,6 @@ private:
 
     void initCelestials();
     void initFoliage();
-    void initParticles();
-    void updateParticles(float deltaTime);
 
     GLuint m_SunVAO, m_SunVBO;
     GLuint m_MoonVAO, m_MoonVBO;
@@ -106,11 +119,6 @@ private:
     GLuint m_BushVAO = 0, m_BushVBO = 0, m_BushEBO = 0;
     GLuint m_FoliageInstanceVBO = 0;
     size_t m_TreeTrunkIndexCount = 0, m_TreeLeavesIndexCount = 0, m_BushIndexCount = 0;
-
-    std::vector<LeafParticle> m_Particles;
-    GLuint m_ParticleVAO = 0, m_ParticleVBO = 0;
-    const size_t MAX_PARTICLES = 500;
-    float m_ParticleSpawnTimer = 0.0f;
 
     // World generation
     std::string m_Seed;
@@ -136,6 +144,13 @@ private:
     // Scenery
     // std::unique_ptr<Luminumbra::Rendering::Skybox> m_Skybox;
     std::unique_ptr<Luminumbra::Rendering::CloudManager> m_CloudManager;
+    std::unique_ptr<Luminumbra::Rendering::ParticleSystem> m_ParticleSystem;
+
+    // Particles
+    void updateParticles(float deltaTime);
+    WeatherType m_CurrentWeather = WeatherType::Clear;
+    float m_LeafEmitTimer = 0.0f;
+    std::vector<BurningTree> m_BurningTrees;
 };
 
 } // namespace Luminumbra::World
