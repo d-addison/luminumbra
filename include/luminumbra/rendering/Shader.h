@@ -19,15 +19,19 @@ public:
     void setMat4(const std::string &name, const glm::mat4 &mat) const;
     void setVec3(const std::string &name, const glm::vec3 &value) const;
     // void setBool(const std::string &name, bool value) const;
-    // void setInt(const std::string &name, int value) const;
-    // void setFloat(const std::string &name, float value) const;
+    void setInt(const std::string &name, int value) const;
+    void setFloat(const std::string &name, float value) const;
 
     unsigned int getID() const { return m_ID; }
+    std::string getVertexPath() const { return m_VertexPath; }
+    std::string getFragmentPath() const { return m_FragmentPath; }
 
 private:
     void checkCompileErrors(unsigned int shader, const std::string& type);
 
     unsigned int m_ID; // The shader program ID
+    std::string m_VertexPath;
+    std::string m_FragmentPath;
 };
 
 } // namespace Luminumbra::Rendering

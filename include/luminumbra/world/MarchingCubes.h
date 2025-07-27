@@ -6,8 +6,14 @@
 
 #include <glm/glm.hpp>
 #include <vector>
+#include <map>
 
 namespace Luminumbra::World::MarchingCubes {
+
+struct IndexedMesh {
+    std::vector<glm::vec3> vertices;
+    std::vector<unsigned int> indices;
+};
 
 struct Triangle {
     glm::vec3 p[3];
@@ -22,6 +28,6 @@ extern const int edgeTable[256];
 extern const int triTable[256][16];
 
 glm::vec3 VertexInterp(float isolevel, glm::vec3 p1, glm::vec3 p2, float valp1, float valp2);
-int Polygonise(GridCell grid, float isolevel, std::vector<Triangle>& triangles);
+void Polygonise(GridCell grid, float isolevel, IndexedMesh& mesh);
 
 } // namespace Luminumbra::World::MarchingCubes

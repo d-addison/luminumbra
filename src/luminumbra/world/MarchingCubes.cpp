@@ -328,7 +328,7 @@ glm::vec3 VertexInterp(float isolevel, glm::vec3 p1, glm::vec3 p2, float valp1, 
 */
 // src/luminumbra/world/MarchingCubes.cpp
 
-int Polygonise(GridCell grid, float isolevel, std::vector<Triangle>& triangles) {
+void Polygonise(GridCell grid, float isolevel, IndexedMesh& mesh) {
     int cubeindex = 0;
     if (grid.val[0] < isolevel) cubeindex |= 1;
     if (grid.val[1] < isolevel) cubeindex |= 2;
@@ -340,35 +340,41 @@ int Polygonise(GridCell grid, float isolevel, std::vector<Triangle>& triangles) 
     if (grid.val[7] < isolevel) cubeindex |= 128;
 
     if (edgeTable[cubeindex] == 0) {
-        return 0;
+        return;
     }
 
-    glm::vec3 vertlist[12];
+    unsigned int vert_indices[12];
+    std::map<int, unsigned int> edge_to_vertex_map;
 
-    if (edgeTable[cubeindex] & 1)   vertlist[0] = VertexInterp(isolevel, grid.p[0], grid.p[1], grid.val[0], grid.val[1]);
-    if (edgeTable[cubeindex] & 2)   vertlist[1] = VertexInterp(isolevel, grid.p[1], grid.p[2], grid.val[1], grid.val[2]);
-    if (edgeTable[cubeindex] & 4)   vertlist[2] = VertexInterp(isolevel, grid.p[2], grid.p[3], grid.val[2], grid.val[3]);
-    if (edgeTable[cubeindex] & 8)   vertlist[3] = VertexInterp(isolevel, grid.p[3], grid.p[0], grid.val[3], grid.val[0]);
-    if (edgeTable[cubeindex] & 16)  vertlist[4] = VertexInterp(isolevel, grid.p[4], grid.p[5], grid.val[4], grid.val[5]);
-    if (edgeTable[cubeindex] & 32)  vertlist[5] = VertexInterp(isolevel, grid.p[5], grid.p[6], grid.val[5], grid.val[6]);
-    if (edgeTable[cubeindex] & 64)  vertlist[6] = VertexInterp(isolevel, grid.p[6], grid.p[7], grid.val[6], grid.val[7]);
-    if (edgeTable[cubeindex] & 128) vertlist[7] = VertexInterp(isolevel, grid.p[7], grid.p[4], grid.val[7], grid.val[4]);
-    if (edgeTable[cubeindex] & 256) vertlist[8] = VertexInterp(isolevel, grid.p[0], grid.p[4], grid.val[0], grid.val[4]);
-    if (edgeTable[cubeindex] & 512) vertlist[9] = VertexInterp(isolevel, grid.p[1], grid.p[5], grid.val[1], grid.val[5]);
-    if (edgeTable[cubeindex] & 1024) vertlist[10] = VertexInterp(isolevel, grid.p[2], grid.p[6], grid.val[2], grid.val[6]);
-    if (edgeTable[cubeindex] & 2048) vertlist[11] = VertexInterp(isolevel, grid.p[3], grid.p[7], grid.val[3], grid.val[7]);
+    auto get_vertex = [&](int edge_idx, const glm::vec3& p1, const glm::vec3& p2, float v1, float v2) {
+        if (edge_to_vertex_map.count(edge_idx)) {
+            return edge_to_vertex_map[edge_idx];
+        }
+        glm::vec3 vert = VertexInterp(isolevel, p1, p2, v1, v2);
+        mesh.vertices.push_back(vert);
+        unsigned int new_idx = mesh.vertices.size() - 1;
+        edge_to_vertex_map[edge_idx] = new_idx;
+        return new_idx;
+    };
 
-    int ntriang = 0;
+    if (edgeTable[cubeindex] & 1)   vert_indices[0] = get_vertex(0, grid.p[0], grid.p[1], grid.val[0], grid.val[1]);
+    if (edgeTable[cubeindex] & 2)   vert_indices[1] = get_vertex(1, grid.p[1], grid.p[2], grid.val[1], grid.val[2]);
+    if (edgeTable[cubeindex] & 4)   vert_indices[2] = get_vertex(2, grid.p[2], grid.p[3], grid.val[2], grid.val[3]);
+    if (edgeTable[cubeindex] & 8)   vert_indices[3] = get_vertex(3, grid.p[3], grid.p[0], grid.val[3], grid.val[0]);
+    if (edgeTable[cubeindex] & 16)  vert_indices[4] = get_vertex(4, grid.p[4], grid.p[5], grid.val[4], grid.val[5]);
+    if (edgeTable[cubeindex] & 32)  vert_indices[5] = get_vertex(5, grid.p[5], grid.p[6], grid.val[5], grid.val[6]);
+    if (edgeTable[cubeindex] & 64)  vert_indices[6] = get_vertex(6, grid.p[6], grid.p[7], grid.val[6], grid.val[7]);
+    if (edgeTable[cubeindex] & 128) vert_indices[7] = get_vertex(7, grid.p[7], grid.p[4], grid.val[7], grid.val[4]);
+    if (edgeTable[cubeindex] & 256) vert_indices[8] = get_vertex(8, grid.p[0], grid.p[4], grid.val[0], grid.val[4]);
+    if (edgeTable[cubeindex] & 512) vert_indices[9] = get_vertex(9, grid.p[1], grid.p[5], grid.val[1], grid.val[5]);
+    if (edgeTable[cubeindex] & 1024) vert_indices[10] = get_vertex(10, grid.p[2], grid.p[6], grid.val[2], grid.val[6]);
+    if (edgeTable[cubeindex] & 2048) vert_indices[11] = get_vertex(11, grid.p[3], grid.p[7], grid.val[3], grid.val[7]);
+
     for (int i = 0; triTable[cubeindex][i] != -1; i += 3) {
-        Triangle tri;
-        tri.p[0] = vertlist[triTable[cubeindex][i]];
-        tri.p[1] = vertlist[triTable[cubeindex][i + 1]];
-        tri.p[2] = vertlist[triTable[cubeindex][i + 2]];
-        triangles.push_back(tri);
-        ntriang++;
+        mesh.indices.push_back(vert_indices[triTable[cubeindex][i + 2]]);
+        mesh.indices.push_back(vert_indices[triTable[cubeindex][i + 1]]);
+        mesh.indices.push_back(vert_indices[triTable[cubeindex][i]]);
     }
-
-    return ntriang;
 }
 
 } // namespace Luminumbra::World::MarchingCubes
