@@ -1,27 +1,30 @@
 #version 410
-layout (location = 0) in vec3 aPos;
-layout (location = 1) in vec3 aNormal;
-layout (location = 2) in vec3 aColor;
+layout (location = 0) in vec3 a_Pos;
+layout (location = 1) in vec3 a_Normal;
+layout (location = 2) in vec3 a_Color;
 
-out vec3 FragPos;
-out vec3 Normal;
-out vec3 Color;
-out vec4 FragPosLightSpace;
+out vec3 v_FragPos;
+out vec3 v_Normal;
+out vec3 v_Color;
+out float v_ClipDistance;
+out vec4 v_FragPosLightSpace;
 
-uniform mat4 model;
-uniform mat4 view;
-uniform mat4 projection;
-uniform mat4 lightSpaceMatrix;
+uniform mat4 u_model;
+uniform mat4 u_view;
+uniform mat4 u_projection;
+uniform vec4 u_ClipPlane;
+uniform mat4 u_lightSpaceMatrix;
 
 void main()
 {
-    FragPos = vec3(model * vec4(aPos, 1.0));
-    Normal = mat3(transpose(inverse(model))) * aNormal;
-    Color = aColor;
-    
-    // This line is the critical fix.
-    gl_Position = projection * view * vec4(FragPos, 1.0);
-    
-    // This part is for shadow mapping, which you can re-enable later
-    FragPosLightSpace = lightSpaceMatrix * vec4(FragPos, 1.0);
+    // FIX: Use the correct, case-sensitive uniform names
+    v_FragPos = vec3(u_model * vec4(a_Pos, 1.0));
+    v_Normal = mat3(transpose(inverse(u_model))) * a_Normal;
+    v_Color = a_Color;
+
+    gl_Position = u_projection * u_view * vec4(v_FragPos, 1.0);
+
+    v_FragPosLightSpace = u_lightSpaceMatrix * vec4(v_FragPos, 1.0);
+
+    gl_ClipDistance[0] = dot(vec4(v_FragPos, 1.0), u_ClipPlane);
 }

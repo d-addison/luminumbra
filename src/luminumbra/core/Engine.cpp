@@ -22,6 +22,8 @@
 #include <filesystem>
 #include <fstream>
 #include "json.hpp"
+#include "luminumbra/rendering/WaterRenderer.h"
+#include "luminumbra/rendering/TextureLoader.h"
 
 void error_callback(int error, const char* description) {
     fprintf(stderr, "GLFW Error: %s\n", description);
@@ -195,6 +197,30 @@ void Engine::initRendering() {
     m_DofShader = std::make_unique<Rendering::Shader>("res/shaders/post_process.vert", "res/shaders/dof.frag");
     m_GodRaysShader = std::make_unique<Rendering::Shader>("res/shaders/post_process.vert", "res/shaders/god_rays.frag");
     m_FinalPassShader = std::make_unique<Rendering::Shader>("res/shaders/post_process.vert", "res/shaders/final_pass.frag");
+    m_DepthShader = std::make_unique<Rendering::Shader>("res/shaders/depth.vert", "res/shaders/depth.frag");
+
+    // Initialize water renderer and load textures
+    m_WaterRenderer = std::make_unique<Rendering::WaterRenderer>();
+    m_WaterDudvMap = Rendering::loadTexture("../res/textures/water_dudv.png");
+    m_WaterNormalMap = Rendering::loadTexture("../res/textures/water_normal.png");
+
+    glGenFramebuffers(1, &m_DepthMapFBO);
+
+    glGenTextures(1, &m_DepthMapTexture);
+    glBindTexture(GL_TEXTURE_2D, m_DepthMapTexture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, SHADOW_WIDTH, SHADOW_HEIGHT, 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    float borderColor[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, m_DepthMapFBO);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_DepthMapTexture, 0);
+    glDrawBuffer(GL_NONE);
+    glReadBuffer(GL_NONE);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
@@ -452,71 +478,73 @@ float Engine::calculateFocusDepth() const {
     return m_PostProcessSettings.dofFocalDistance;
 }
 
-void Engine::renderScene(const Luminumbra::Rendering::Camera& camera) {
+void Engine::renderScene(const Luminumbra::Rendering::Camera& camera, const glm::vec4& clipPlane) {
     const glm::mat4& view = camera.getViewMatrix();
     const glm::mat4& projection = camera.getProjectionMatrix();
     const glm::vec3 sunDirection = m_World->getSunDirection();
     const float gameTime = static_cast<float>(glfwGetTime());
 
-    // 1. Render all opaque objects first
-    
     // Opaque Terrain
     m_BasicShader->use();
     m_BasicShader->setMat4("view", view);
     m_BasicShader->setMat4("projection", projection);
     m_BasicShader->setVec3("viewPos", camera.getPosition());
-    m_BasicShader->setVec3("sunDirection", sunDirection); // Use consistent uniform name
+    m_BasicShader->setVec3("sunDirection", sunDirection);
+    m_BasicShader->setVec4("u_ClipPlane", clipPlane);
     m_World->renderTerrain(*m_BasicShader, camera.getPosition());
 
     // Opaque Foliage
     m_FoliageShader->use();
     m_FoliageShader->setVec3("viewPos", camera.getPosition());
     m_FoliageShader->setVec3("sunDirection", sunDirection);
-    m_FoliageShader->setFloat("time", gameTime); // For wind effects
+    m_FoliageShader->setFloat("time", gameTime);
+    m_FoliageShader->setVec4("u_ClipPlane", clipPlane);
     m_World->renderFoliage(*m_FoliageShader);
-
-    // 2. Render the skybox and celestials. Depth testing ensures they are drawn behind opaque objects.
-    m_World->renderSkyboxAndClouds(view, projection);
-    m_CelestialShader->use();
-    m_CelestialShader->setMat4("view", view);
-    m_CelestialShader->setMat4("projection", projection);
-    m_World->renderCelestials(*m_CelestialShader, view, projection);
-
-
-    // 3. Render all transparent objects last, from back to front if possible.
-
-    // Transparent Water
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); // Standard alpha blending
-    m_WaterShader->use();
-    m_WaterShader->setMat4("view", view);
-    m_WaterShader->setMat4("projection", projection);
-    m_WaterShader->setVec3("viewPos", camera.getPosition());
-    m_WaterShader->setVec3("sunDirection", sunDirection);
-    m_WaterShader->setFloat("time", gameTime);
-    m_World->renderWater(*m_WaterShader, camera.getPosition());
-    glDisable(GL_BLEND);
-
-    // Transparent Particles
-    glEnable(GL_BLEND);
-    // Additive blending is great for fire, sparks, and magic effects
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE); 
-    m_ParticleShader->use();
-    if (m_World->getParticleSystem()) {
-        // Pass the camera object itself, as the particle system needs its vectors for billboarding
-        m_World->getParticleSystem()->render(*m_ParticleShader, camera);
-    }
-    glDisable(GL_BLEND);
-    
-    // Reset blend function to default
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 }
 
-// In Engine.cpp
+void Engine::renderWorld(const Luminumbra::Rendering::Camera& camera, const glm::mat4& lightSpaceMatrix, const glm::vec4& clipPlane) {
+    const glm::mat4& view = camera.getViewMatrix();
+    const glm::mat4& projection = camera.getProjectionMatrix();
+    const glm::vec3 sunDirection = m_World->getSunDirection();
+    const float gameTime = static_cast<float>(glfwGetTime());
+
+    // --- Opaque Terrain ---
+    m_BasicShader->use();
+    m_BasicShader->setMat4("u_view", view);
+    m_BasicShader->setMat4("u_projection", projection);
+    m_BasicShader->setVec3("viewPos", camera.getPosition());
+    m_BasicShader->setVec3("sunDirection", sunDirection);
+    m_BasicShader->setVec4("u_ClipPlane", clipPlane);
+    m_BasicShader->setMat4("u_lightSpaceMatrix", lightSpaceMatrix); // Pass shadow matrix
+    
+    // Bind the shadow map texture to a free texture unit
+    glActiveTexture(GL_TEXTURE4); 
+    glBindTexture(GL_TEXTURE_2D, m_DepthMapTexture);
+    m_BasicShader->setInt("shadowMap", 4);
+
+    m_World->renderTerrain(*m_BasicShader, camera.getPosition());
+
+    // --- Opaque Foliage ---
+    m_FoliageShader->use();
+    // (You would add similar uniforms for the foliage shader if you want it to receive shadows)
+    m_FoliageShader->setVec3("viewPos", camera.getPosition());
+    m_FoliageShader->setVec3("sunDirection", sunDirection);
+    m_FoliageShader->setFloat("time", gameTime);
+    m_FoliageShader->setVec4("u_ClipPlane", clipPlane);
+    m_FoliageShader->setMat4("u_lightSpaceMatrix", lightSpaceMatrix); // Pass shadow matrix
+    
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_2D, m_DepthMapTexture);
+    // m_FoliageShader->setInt("shadowMap", 4); // Make sure foliage shader has a shadowMap sampler
+    
+    m_World->renderFoliage(*m_FoliageShader);
+}
+
+// REFACTORED: The entire render loop is restructured for water effects and post-processing.
 void Engine::render() {
-    if (m_GameState != GameState::InGame && m_GameState != GameState::Paused) {
-        // For menus, just clear the screen and render UI
-        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    if ((m_GameState != GameState::InGame && m_GameState != GameState::Paused) || !m_World) {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         m_UIManager->NewFrame();
         switch (m_GameState) {
@@ -583,20 +611,119 @@ void Engine::render() {
         return;
     }
 
-    const auto& camera = m_World->getPlayer()->getCamera();
+    glEnable(GL_CLIP_DISTANCE0);
 
-    // 1. Render scene to primary HDR framebuffer
+    Player::Player* player = m_World->getPlayer();
+    Rendering::Camera& camera = player->getCamera();
+    const float gameTime = static_cast<float>(glfwGetTime());
+    const glm::vec3 sunDirection = m_World->getSunDirection();
+
+    // --- 0. SHADOW MAP PASS ---
+    glm::mat4 lightProjection = glm::ortho(-50.0f, 50.0f, -50.0f, 50.0f, 1.0f, 150.0f);
+    glm::vec3 lightPos = player->getPosition() - (sunDirection * 50.0f); // Increased distance slightly
+
+    // FIX: Make the light's view matrix robust
+    glm::vec3 up = glm::vec3(0.0, 1.0, 0.0);
+    // If the sun direction is nearly vertical, use a different 'up' vector to avoid issues
+    if (glm::abs(glm::dot(sunDirection, up)) > 0.99f) {
+        up = glm::vec3(0.0, 0.0, 1.0); 
+    }
+    glm::mat4 lightView = glm::lookAt(lightPos, player->getPosition(), up);
+
+    glm::mat4 lightSpaceMatrix = lightProjection * lightView;
+
+    m_DepthShader->use();
+    m_DepthShader->setMat4("u_LightSpaceMatrix", lightSpaceMatrix);
+    
+    glViewport(0, 0, SHADOW_WIDTH, SHADOW_HEIGHT);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_DepthMapFBO);
+    glClear(GL_DEPTH_BUFFER_BIT);
+
+    // FIX: Set culling to FRONT for the shadow pass to prevent peter panning
+    glCullFace(GL_FRONT);
+
+    // Render shadow-casting objects to the depth map
+    m_World->renderTerrain(*m_DepthShader, player->getPosition());
+    m_World->renderFoliage(*m_DepthShader);
+
+    // FIX: Crucially, set culling back to BACK for all subsequent render passes
+    glCullFace(GL_BACK); 
+    
+    // Unbind the shadow map FBO
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, m_ScreenWidth, m_ScreenHeight);
+
+    // --- 1. REFLECTION PASS ---
+    m_WaterRenderer->bindReflectionFBO();
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    
+    glm::vec3 originalPos = camera.getPosition();
+    float originalPitch = camera.getPitch();
+    float distance = 2 * (originalPos.y - Luminumbra::World::Chunk::WATER_LEVEL);
+    
+    camera.setPosition(originalPos - glm::vec3(0, distance, 0));
+    camera.setPitch(-originalPitch); // Invert pitch
+    
+    // NOTE: Reflections don't need shadows, so pass an identity matrix for lightSpaceMatrix
+    renderWorld(camera, glm::mat4(1.0f), glm::vec4(0, 1, 0, -Luminumbra::World::Chunk::WATER_LEVEL + 0.1f));
+    m_World->renderSkyboxAndClouds(camera.getViewMatrix(), camera.getProjectionMatrix());
+    
+    camera.setPosition(originalPos);
+    camera.setPitch(originalPitch); // Restore camera
+
+    // --- 2. REFRACTION PASS ---
+    m_WaterRenderer->bindRefractionFBO();
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    renderWorld(camera, glm::mat4(1.0f), glm::vec4(0, -1, 0, Luminumbra::World::Chunk::WATER_LEVEL));
+
+    // --- 3. MAIN SCENE PASS ---
     bindSceneFramebuffer();
     glm::vec3 skyColor = m_World->getSkyColor();
     glClearColor(skyColor.r, skyColor.g, skyColor.b, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    renderScene(camera);
 
-    // --- Post-Processing Chain ---
+    m_World->renderSkyboxAndClouds(camera.getViewMatrix(), camera.getProjectionMatrix());
+    m_World->renderCelestials(*m_CelestialShader, camera.getViewMatrix(), camera.getProjectionMatrix());
+    
+    // Render the world normally, but now with shadow information
+    renderWorld(camera, glm::mat4(1.0f)); 
+
+
+    // RENDER THE WATER SURFACE
+    // Set blend state ONCE before rendering all water
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE); // Don't write to depth buffer
+    m_WaterShader->use();
+    m_WaterShader->setMat4("u_View", camera.getViewMatrix());
+    m_WaterShader->setMat4("u_Projection", camera.getProjectionMatrix());
+    m_WaterShader->setVec3("u_CameraPosition", camera.getPosition());
+    m_WaterShader->setVec3("u_LightDirection", m_World->getSunDirection());
+    m_WaterShader->setFloat("u_Time", gameTime);
+    
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m_WaterRenderer->getReflectionTexture());
+    m_WaterShader->setInt("u_ReflectionTexture", 0);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m_WaterRenderer->getRefractionTexture());
+    m_WaterShader->setInt("u_RefractionTexture", 1);
+    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_WaterDudvMap);
+    m_WaterShader->setInt("u_DudvMap", 2);
+    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, m_WaterNormalMap);
+    m_WaterShader->setInt("u_NormalMap", 3);
+    m_World->renderWater(*m_WaterShader, camera.getPosition());
+    
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+
+    // RENDER PARTICLES (into the same scene FBO to be post-processed)
+    if (m_World->getParticleSystem()) {
+        m_World->getParticleSystem()->render(*m_ParticleShader, camera);
+    }
+
+    // --- 4. POST-PROCESSING CHAIN (using the scene texture) ---
+    // (This part is taken directly from your provided Engine.cpp)
     GLuint sceneResultTexture = m_SceneTexture;
-    GLuint bloomTexture = 0; // Will hold the final blurred bloom texture
+    GLuint bloomTexture = 0;
 
-    // 2. BLOOM EFFECT
     if (m_PostProcessSettings.enableBloom) {
         // Pass 1: Extract bright colors from the scene into ping-pong texture 0
         glBindFramebuffer(GL_FRAMEBUFFER, m_PingPongFBO);
@@ -629,13 +756,9 @@ void Engine::render() {
         bloomTexture = m_PingPongTextures[!horizontal]; // The final blurred texture
     }
 
-    // (DoF and God Rays would go here, operating on m_SceneTexture)
-    // For simplicity, we will skip them for this example and combine directly.
-
-    // 3. FINAL COMPOSITE
-    glBindFramebuffer(GL_FRAMEBUFFER, 0); // Bind back to default framebuffer
+    // FINAL COMPOSITE
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
     m_FinalPassShader->use();
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, sceneResultTexture); // The original scene

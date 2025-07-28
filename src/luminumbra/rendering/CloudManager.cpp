@@ -1,7 +1,6 @@
 #include "luminumbra/rendering/CloudManager.h"
 #include "luminumbra/core/GLError.h"
 #include "luminumbra/core/ResourceManager.h"
-#define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #include <glad/gl.h>
 #include <glm/gtc/matrix_transform.hpp>
@@ -9,9 +8,6 @@
 #include <iostream>
 
 namespace Luminumbra::Rendering {
-
-using Luminumbra::Core::GLClearError;
-using Luminumbra::Core::GLCheckError;
 
 float quadVertices[] = {
     // positions        // texture Coords

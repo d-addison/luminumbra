@@ -13,9 +13,6 @@
 
 namespace Luminumbra::Rendering {
 
-using Luminumbra::Core::GLClearError;
-using Luminumbra::Core::GLCheckError;
-
 // Static random number generators for variations
 static std::random_device rd;
 static std::mt19937 s_RandomEngine(rd());
@@ -334,16 +331,32 @@ ParticleProps ParticleSystem::getPresetProperties(ParticleType type) const {
 
         case ParticleType::Cloud:
             props.isVolumetric = true;
-            props.volumetricLayers = 12;
-            props.volumeDepth = 4.0f;
-            props.velocity = {0.5f, 0.0f, 0.0f};
-            props.velocityVariation = {0.2f, 0.1f, 0.2f};
+            props.volumetricLayers = 24;           // Increased from 12 to 24 for more depth
+            props.volumeDepth = 8.0f;             // Doubled from 4.0f for wider clouds
+            props.velocity = {0.3f, 0.0f, 0.0f};  // Slowed horizontal movement
+            props.velocityVariation = {0.2f, 0.15f, 0.2f};
             props.gravity = {0.0f, 0.0f, 0.0f};
-            props.colorBegin = {0.95f, 0.95f, 0.95f, 0.3f};
-            props.colorEnd = {0.9f, 0.9f, 0.9f, 0.0f};
-            props.sizeBegin = 20.0f;
-            props.sizeEnd = 25.0f;
-            props.lifeTime = 20.0f;
+            
+            // Base color with slight blue tint for sky reflection
+            props.colorBegin = {
+                0.95f + s_Distribution(s_RandomEngine) * 0.05f,  // Red
+                0.95f + s_Distribution(s_RandomEngine) * 0.05f,  // Green
+                1.00f + s_Distribution(s_RandomEngine) * 0.05f,  // Blue (slightly higher)
+                0.2f + s_Distribution(s_RandomEngine) * 0.1f     // Variable opacity
+            };
+            
+            // Slightly darker end color
+            props.colorEnd = {
+                0.85f + s_Distribution(s_RandomEngine) * 0.05f,
+                0.85f + s_Distribution(s_RandomEngine) * 0.05f,
+                0.90f + s_Distribution(s_RandomEngine) * 0.05f,
+                0.0f
+            };
+            
+            props.sizeBegin = 35.0f + s_Distribution(s_RandomEngine) * 10.0f;  // 20.0f -> 35.0f, with variation
+            props.sizeEnd = 40.0f + s_Distribution(s_RandomEngine) * 15.0f;    // 25.0f -> 40.0f, with variation
+            props.sizeVariation = 5.0f;  // Add size variation
+            props.lifeTime = 30.0f;      // Increased from 20.0f for longer-lasting clouds
             break;
 
         case ParticleType::VolumetricSmoke:

@@ -7,9 +7,6 @@
 
 namespace Luminumbra::Rendering {
 
-using Luminumbra::Core::GLClearError;
-using Luminumbra::Core::GLCheckError;
-
 // Cube vertices for the skybox
 float skyboxVertices[] = {
     // positions          

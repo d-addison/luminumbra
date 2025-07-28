@@ -43,7 +43,7 @@ public:
 
     const glm::mat4& getModelMatrix() const { return m_ModelMatrix; }
     static constexpr int CHUNK_SIZE = 32;
-    static constexpr float WATER_LEVEL = 84.0f;
+    static constexpr float WATER_LEVEL = 5.0f;
 
     void uploadToGpu();
     bool isReadyForGpu() const { return m_GpuStatus == GpuStatus::NeedsGpuUpload; }
@@ -78,6 +78,7 @@ private:
 
     std::vector<float> m_VertexData;
     std::vector<unsigned int> m_IndexData;
+    std::vector<float> m_WaterVertexData;
     std::atomic<GpuStatus> m_GpuStatus{GpuStatus::NeedsGpuUpload};
 };
 

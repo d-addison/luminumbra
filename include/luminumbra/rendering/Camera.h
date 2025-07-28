@@ -25,6 +25,8 @@ public:
 
     float getNearPlane() const { return m_NearPlane; }
     float getFarPlane() const { return m_FarPlane; }
+    float getPitch() const { return m_Pitch; }
+    void setPitch(float pitch);
 
 private:
     void recalculateViewMatrix();
