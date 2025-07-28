@@ -108,7 +108,8 @@ void World::initCelestials() {
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
     glEnableVertexAttribArray(0);
 
-    // --- Sun & Moon (a simple quad) ---
+    // --- Sun & Moon ---
+    // Vertices for a 3D quad
     float quadVertices[] = {
         // positions
         -0.5f, -0.5f, 0.0f,
@@ -817,22 +818,22 @@ void World::renderFoliage(Luminumbra::Rendering::Shader& foliageShader) const {
         // --- Render Trees for this chunk ---
         const auto& treeInstances = chunk->getTreeInstances();
         if (!treeInstances.empty()) {
-            // Map the instance transforms directly to the VBO
             std::vector<glm::mat4> treeTransforms;
             treeTransforms.reserve(treeInstances.size());
             for(const auto& inst : treeInstances) {
                 treeTransforms.push_back(inst.transform);
             }
             
-            // Upload data for this chunk's trees
             glBufferSubData(GL_ARRAY_BUFFER, 0, treeTransforms.size() * sizeof(glm::mat4), treeTransforms.data());
 
-            // Draw trunks
+            // Draw trunks (Brown for wireframe)
+            foliageShader.setVec4("u_color", glm::vec4(0.55f, 0.27f, 0.07f, 1.0f));
             foliageShader.setVec3("u_objectColor", glm::vec3(0.4f, 0.26f, 0.13f));
             glBindVertexArray(m_TreeTrunkVAO);
             glDrawElementsInstanced(GL_TRIANGLES, m_TreeTrunkIndexCount, GL_UNSIGNED_INT, 0, treeInstances.size());
             
-            // Draw leaves
+            // Draw leaves (Dark Green for wireframe)
+            foliageShader.setVec4("u_color", glm::vec4(0.0f, 0.5f, 0.0f, 1.0f));
             foliageShader.setVec3("u_objectColor", glm::vec3(0.13f, 0.54f, 0.13f));
             glBindVertexArray(m_TreeLeavesVAO);
             glDrawElementsInstanced(GL_TRIANGLES, m_TreeLeavesIndexCount, GL_UNSIGNED_INT, 0, treeInstances.size());
@@ -847,10 +848,10 @@ void World::renderFoliage(Luminumbra::Rendering::Shader& foliageShader) const {
                 bushTransforms.push_back(inst.transform);
             }
 
-            // Upload data for this chunk's bushes
             glBufferSubData(GL_ARRAY_BUFFER, 0, bushTransforms.size() * sizeof(glm::mat4), bushTransforms.data());
 
-            // Draw bushes
+            // Draw bushes (Light Green for wireframe)
+            foliageShader.setVec4("u_color", glm::vec4(0.56f, 0.93f, 0.56f, 1.0f));
             foliageShader.setVec3("u_objectColor", glm::vec3(0.2f, 0.6f, 0.2f));
             glBindVertexArray(m_BushVAO);
             glDrawElementsInstanced(GL_TRIANGLES, m_BushIndexCount, GL_UNSIGNED_INT, 0, bushInstances.size());

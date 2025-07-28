@@ -72,6 +72,7 @@ private:
     std::unique_ptr<Rendering::Shader> m_ParticleShader;
     std::unique_ptr<Rendering::Shader> m_WaterShader;
     std::unique_ptr<Rendering::Shader> m_UnderwaterShader;
+    std::unique_ptr<Rendering::Shader> m_WireframeShader;
 
     // Post-processing shaders
     std::unique_ptr<Rendering::Shader> m_BloomShader;
