@@ -27,6 +27,8 @@ Chunk::Chunk(const glm::ivec3& position, const std::string& seed, int lod) : m_P
     generateNoiseData(noise); 
     generateMesh(m_LOD);
     generateWaterMesh();
+
+    m_GpuStatus = GpuStatus::ReadyForUpload;
 }
 
 Chunk::~Chunk() {
@@ -48,31 +50,43 @@ void Chunk::generateNoiseData(fnl_state& noise) {
     noise.lacunarity = 2.0f;                      // How quickly frequency increases for each octave
     noise.gain = 0.5f;                          // How much each octave contributes
 
+    // --- NEW: Setup a second noise generator for caves ---
+    fnl_state caveNoise = fnlCreateState();
+    caveNoise.seed = noise.seed + 1; // Use a different seed
+    caveNoise.noise_type = FNL_NOISE_PERLIN;
+    caveNoise.frequency = 0.025f; // Caves should have a higher frequency
+    caveNoise.fractal_type = FNL_FRACTAL_FBM;
+    caveNoise.octaves = 2; // Fewer octaves for simpler cave shapes
+
     // --- Define terrain shape ---
-    float baseGroundHeight = 4.0f;   // The average sea level for the terrain
-    float terrainAmplitude = 12.0f;   // The max height of hills and depth of valleys
+    float baseGroundHeight = 8.0f;   // The average sea level for the terrain
+    float terrainAmplitude = 22.0f;   // The max height of hills and depth of valleys
 
     // --- Loop through every point in the chunk's data grid ---
     for (int y = 0; y <= CHUNK_SIZE; ++y) {
         for (int z = 0; z <= CHUNK_SIZE; ++z) {
             for (int x = 0; x <= CHUNK_SIZE; ++x) {
-                // Get the absolute world position of the current point
                 float worldX = (float)(m_Position.x + x);
                 float worldZ = (float)(m_Position.z + z);
                 float worldY = (float)(m_Position.y + y);
 
-                // 1. Get a 2D noise value to define the ground's height at this (X, Z) location
+                // 1. Calculate the base terrain density as before
                 float groundHeightNoise = fnlGetNoise2D(&noise, worldX, worldZ);
                 float groundHeight = baseGroundHeight + (groundHeightNoise * terrainAmplitude);
+                float groundDensity = worldY - groundHeight;
 
-                // 2. The density is the point's vertical distance from the ground.
-                //    - Negative density is "solid" (underground)
-                //    - Positive density is "air" (above ground)
-                float density = worldY - groundHeight;
+                // 2. NEW: Calculate a 3D "carver" value for caves
+                // We get a value from [-1, 1]. Positive values will carve away terrain.
+                float caveCarver = fnlGetNoise3D(&caveNoise, worldX, worldY, worldZ);
 
-                // 3. Store the density value in the 1D array
+                // 3. Combine the densities
+                // We subtract the carver value from the ground density.
+                // This "hollows out" areas where caveCarver is high.
+                float finalDensity = groundDensity - caveCarver;
+
+                // Store the final density value
                 int index = x + z * (CHUNK_SIZE + 1) + y * (CHUNK_SIZE + 1) * (CHUNK_SIZE + 1);
-                m_NoiseData[index] = density;
+                m_NoiseData[index] = finalDensity;
             }
         }
     }
@@ -110,7 +124,7 @@ void Chunk::generateMesh(int lod) {
     }
 
     for (size_t i = 0; i < mesh.indices.size(); i += 3) {
-        std::swap(mesh.indices[i + 1], mesh.indices[i + 2]);
+        std::swap(mesh.indices[i], mesh.indices[i + 1]);
     }
 
     fnl_state foliage_noise = fnlCreateState();
@@ -156,41 +170,28 @@ void Chunk::generateMesh(int lod) {
     memcpy(m_VertexData.data(), vertices.data(), vertices.size() * sizeof(Vertex));
     
     m_IndexData = mesh.indices;
-    m_GpuStatus = GpuStatus::NeedsGpuUpload;
+    m_GpuStatus = GpuStatus::Generating;
 }
 
 void Chunk::generateFoliage(fnl_state& noise, const MarchingCubes::IndexedMesh& terrainMesh) {
     noise.noise_type = FNL_NOISE_PERLIN;
     noise.frequency = 0.8f;
-    // noise.frequency = 0.1f;
-    // noise.cellular_return_type = FNL_CELLULAR_RETURN_TYPE_CELLVALUE;
-    // noise.cellular_jitter_mod = 1.0f;
 
     std::mt19937 rng(static_cast<unsigned int>(std::hash<std::string>{}(std::to_string(m_Position.x) + "_" + std::to_string(m_Position.z))));
     std::uniform_real_distribution<float> scaleDist(0.8f, 1.5f);
-    std::uniform_real_distribution<float> rotDist(0.0f, 2.0f * 3.14159f);
+    std::uniform_real_distribution<float> rotDist(0.0f, 2.0f * glm::pi<float>());
 
     std::map<std::pair<int, int>, float> highestY;
     std::map<std::pair<int, int>, glm::vec3> surfaceNormals;
 
-    // First pass: find the highest point and average normal for each (x, z) grid cell
     for (size_t i = 0; i < terrainMesh.indices.size(); i += 3) {
-        unsigned int i0 = terrainMesh.indices[i];
-        unsigned int i1 = terrainMesh.indices[i + 1];
-        unsigned int i2 = terrainMesh.indices[i + 2];
-
-        glm::vec3 v0 = terrainMesh.vertices[i0];
-        glm::vec3 v1 = terrainMesh.vertices[i1];
-        glm::vec3 v2 = terrainMesh.vertices[i2];
-
+        glm::vec3 v0 = terrainMesh.vertices[terrainMesh.indices[i]];
+        glm::vec3 v1 = terrainMesh.vertices[terrainMesh.indices[i + 1]];
+        glm::vec3 v2 = terrainMesh.vertices[terrainMesh.indices[i + 2]];
         glm::vec3 faceNormal = glm::normalize(glm::cross(v1 - v0, v2 - v0));
 
-        // Process all three vertices of the triangle
         for (const auto& v : { v0, v1, v2 }) {
-            int ix = static_cast<int>(floor(v.x));
-            int iz = static_cast<int>(floor(v.z));
-            auto key = std::make_pair(ix, iz);
-
+            auto key = std::make_pair((int)floor(v.x), (int)floor(v.z));
             if (highestY.find(key) == highestY.end() || v.y > highestY[key]) {
                 highestY[key] = v.y;
                 surfaceNormals[key] = faceNormal;
@@ -204,18 +205,31 @@ void Chunk::generateFoliage(fnl_state& noise, const MarchingCubes::IndexedMesh& 
             if (highestY.find(key) == highestY.end()) continue;
 
             float y = highestY[key];
-            glm::vec3 worldPos = glm::vec3(m_Position) + glm::vec3(x, y, z);
+            glm::vec3 localPos(x, y, z);
+            glm::vec3 worldPos = glm::vec3(m_Position) + localPos;
 
-            if (worldPos.y > WATER_LEVEL + 1.0f) { // Don't spawn foliage underwater
-                glm::vec3 normal = surfaceNormals[key];
-                if (normal.y > 0.85f) { // Only on relatively flat ground
-                    float foliageValue = fnlGetNoise2D(&noise, worldPos.x, worldPos.z);
+            if (worldPos.y > WATER_LEVEL + 1.0f && surfaceNormals[key].y > 0.85f) {
+                float foliageValue = fnlGetNoise2D(&noise, worldPos.x, worldPos.z);
 
-                    if (foliageValue > 0.7f) { // Threshold for trees
-                        m_TreeInstances.push_back({ glm::vec3(x, y, z), scaleDist(rng), rotDist(rng) });
-                    } else if (foliageValue > 0.6f) { // Threshold for bushes
-                        m_BushInstances.push_back({ glm::vec3(x, y - 4.0f, z), scaleDist(rng) * 0.5f, rotDist(rng) });
-                    }
+                // This lambda creates the local transformation matrix for an instance
+                auto createTransform = [&](const glm::vec3& pos, float scale, float rotation) {
+                    glm::mat4 transform = glm::translate(glm::mat4(1.0f), pos);
+                    transform = glm::rotate(transform, rotation, glm::vec3(0.0f, 1.0f, 0.0f));
+                    transform = glm::scale(transform, glm::vec3(scale));
+                    return transform;
+                };
+
+                if (foliageValue > 0.7f) { // Trees
+                    float scale = scaleDist(rng);
+                    float rotation = rotDist(rng);
+                    // The transform is now correctly calculated based on the instance's position *within* the chunk
+                    glm::mat4 transform = createTransform(localPos, scale, rotation);
+                    m_TreeInstances.push_back({ localPos, scale, rotation, transform });
+                } else if (foliageValue > 0.6f) { // Bushes
+                    float scale = scaleDist(rng) * 0.5f;
+                    float rotation = rotDist(rng);
+                    glm::mat4 transform = createTransform(localPos, scale, rotation);
+                    m_BushInstances.push_back({ localPos, scale, rotation, transform });
                 }
             }
         }
@@ -223,7 +237,10 @@ void Chunk::generateFoliage(fnl_state& noise, const MarchingCubes::IndexedMesh& 
 }
 
 
+
 void Chunk::uploadToGpu() {
+    if (m_GpuStatus != GpuStatus::ReadyForUpload) return;
+
     if (m_IndexCount > 0) {
         struct Vertex { glm::vec3 p, n, c; };
 
@@ -269,11 +286,13 @@ void Chunk::uploadToGpu() {
         m_WaterVertexData.shrink_to_fit();
     }
 
-    // Clear the CPU-side data after uploading to free up RAM
     m_VertexData.clear();
-    m_IndexData.clear();
     m_VertexData.shrink_to_fit();
+    m_IndexData.clear();
     m_IndexData.shrink_to_fit();
+    m_WaterVertexData.clear();
+    m_WaterVertexData.shrink_to_fit();
+
     m_GpuStatus = GpuStatus::Uploaded;
 }
 
@@ -284,6 +303,10 @@ void Chunk::renderTerrain() const {
         GLCall(glDrawElements(GL_TRIANGLES, m_IndexCount, GL_UNSIGNED_INT, 0));
         GLCall(glBindVertexArray(0));
     }
+}
+
+Chunk::GpuStatus Chunk::getGpuStatus() const {
+    return m_GpuStatus.load();
 }
 
 bool Chunk::isSolid(const glm::vec3& worldPosition) const {
@@ -423,36 +446,31 @@ void Chunk::renderWater() const {
 }
 
 void Chunk::generateWaterMesh() {
-    // Only generate a water mesh if the chunk intersects the water level
     if (m_Position.y > WATER_LEVEL || m_Position.y + CHUNK_SIZE < WATER_LEVEL) {
         m_WaterVertexCount = 0;
         return;
     }
 
-    // This struct should only contain what the shader needs.
-    // The shader only needs position.
-    struct WaterVertex {
-        glm::vec3 position;
-    };
-
+    struct WaterVertex { glm::vec3 position; };
     std::vector<WaterVertex> vertices;
     float waterY = WATER_LEVEL - m_Position.y;
 
-    // Define the quad for the water surface
+    // FIX #2: Define the quad with a Counter-Clockwise (CCW) winding order
+    // so it is considered a front-face when viewed from above.
+    
+    // Triangle 1
     vertices.push_back({glm::vec3(0, waterY, 0)});
-    vertices.push_back({glm::vec3(0, waterY, CHUNK_SIZE)});
     vertices.push_back({glm::vec3(CHUNK_SIZE, waterY, 0)});
+    vertices.push_back({glm::vec3(0, waterY, CHUNK_SIZE)});
 
+    // Triangle 2
     vertices.push_back({glm::vec3(CHUNK_SIZE, waterY, 0)});
-    vertices.push_back({glm::vec3(0, waterY, CHUNK_SIZE)});
     vertices.push_back({glm::vec3(CHUNK_SIZE, waterY, CHUNK_SIZE)});
+    vertices.push_back({glm::vec3(0, waterY, CHUNK_SIZE)});
     
     m_WaterVertexCount = vertices.size();
-    if (m_WaterVertexCount == 0) {
-        return;
-    }
+    if (m_WaterVertexCount == 0) return;
 
-    // Store the data for later upload
     m_WaterVertexData.resize(vertices.size() * sizeof(WaterVertex) / sizeof(float));
     memcpy(m_WaterVertexData.data(), vertices.data(), vertices.size() * sizeof(WaterVertex));
 }

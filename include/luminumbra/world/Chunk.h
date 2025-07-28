@@ -24,6 +24,7 @@ struct FoliageInstance {
     glm::vec3 position;
     float scale;
     float rotationY;
+    glm::mat4 transform;
 };
 
 class Chunk {
@@ -31,7 +32,11 @@ public:
     Chunk(const glm::ivec3& position, const std::string& seed, int lod);
     ~Chunk();
 
-    enum class GpuStatus { NeedsGpuUpload, Uploaded };
+    enum class GpuStatus {
+        Generating,      // Data is being generated on a worker thread
+        ReadyForUpload,  // Generation is complete, ready for main thread upload
+        Uploaded         // Data is on the GPU, CPU data is freed
+    };
 
     // No copying chunks
     Chunk(const Chunk&) = delete;
@@ -46,7 +51,7 @@ public:
     static constexpr float WATER_LEVEL = 5.0f;
 
     void uploadToGpu();
-    bool isReadyForGpu() const { return m_GpuStatus == GpuStatus::NeedsGpuUpload; }
+    GpuStatus getGpuStatus() const;
 
     const std::vector<FoliageInstance>& getTreeInstances() const { return m_TreeInstances; }
     const std::vector<FoliageInstance>& getBushInstances() const { return m_BushInstances; }
@@ -79,7 +84,8 @@ private:
     std::vector<float> m_VertexData;
     std::vector<unsigned int> m_IndexData;
     std::vector<float> m_WaterVertexData;
-    std::atomic<GpuStatus> m_GpuStatus{GpuStatus::NeedsGpuUpload};
+
+    std::atomic<GpuStatus> m_GpuStatus{GpuStatus::Generating}; 
 };
 
 } // namespace Luminumbra::World

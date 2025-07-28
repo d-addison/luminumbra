@@ -88,6 +88,20 @@ void Shader::use() const {
     glUseProgram(m_ID);
 }
 
+int Shader::getUniformLocation(const std::string& name) const {
+    if (m_UniformLocationCache.find(name) != m_UniformLocationCache.end()) {
+        return m_UniformLocationCache[name];
+    }
+    int location = glGetUniformLocation(m_ID, name.c_str());
+    if (location == -1) {
+        // This is not an error, just means the uniform is not used or optimized out.
+        // std::cout << "Warning: uniform '" << name << "' not found in shader " << m_VertexPath << std::endl;
+    }
+    m_UniformLocationCache[name] = location;
+    return location;
+}
+
+
 void Shader::setMat4(const std::string &name, const glm::mat4 &mat) const {
     glUniformMatrix4fv(glGetUniformLocation(m_ID, name.c_str()), 1, GL_FALSE, glm::value_ptr(mat));
 }

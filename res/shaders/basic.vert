@@ -1,5 +1,5 @@
 #version 410
-layout (location = 0) in vec3 a_Pos;
+layout (location = 0) in vec3 a_Position;
 layout (location = 1) in vec3 a_Normal;
 layout (location = 2) in vec3 a_Color;
 
@@ -12,13 +12,12 @@ out vec4 v_FragPosLightSpace;
 uniform mat4 u_model;
 uniform mat4 u_view;
 uniform mat4 u_projection;
-uniform vec4 u_ClipPlane;
+uniform vec4 u_clipPlane;
 uniform mat4 u_lightSpaceMatrix;
 
 void main()
 {
-    // FIX: Use the correct, case-sensitive uniform names
-    v_FragPos = vec3(u_model * vec4(a_Pos, 1.0));
+    v_FragPos = vec3(u_model * vec4(a_Position, 1.0));
     v_Normal = mat3(transpose(inverse(u_model))) * a_Normal;
     v_Color = a_Color;
 
@@ -26,5 +25,5 @@ void main()
 
     v_FragPosLightSpace = u_lightSpaceMatrix * vec4(v_FragPos, 1.0);
 
-    gl_ClipDistance[0] = dot(vec4(v_FragPos, 1.0), u_ClipPlane);
+    gl_ClipDistance[0] = dot(vec4(v_FragPos, 1.0), u_clipPlane);
 }

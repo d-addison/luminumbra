@@ -1,49 +1,36 @@
-#version 410
+#version 410 core
 out vec4 FragColor;
 
-// Input texture coordinates from the vertex shader
-in vec2 TexCoords;
+in vec2 v_TexCoords;
 
-uniform sampler2D screenTexture;
-uniform vec2 lightScreenPos;
-uniform float decay;
-uniform float exposure;
-uniform float density;
-uniform float weight;
-uniform int samples;
+uniform sampler2D u_screenTexture;
+uniform vec2 u_lightScreenPos;
+uniform float u_density;
+
+// Using constants as the C++ code doesn't set them.
+// These could be converted to uniforms for more control.
+const float DECAY = 0.97;
+const float EXPOSURE = 0.25;
+const float WEIGHT = 0.4;
+const int SAMPLES = 100;
 
 void main()
 {
-    // A local variable to march along the ray from the fragment to the light source
-    vec2 sampleCoord = TexCoords;
-
-    // Calculate the direction and step size for sampling
-    vec2 delta = TexCoords - lightScreenPos;
-    delta *= 1.0 / float(samples) * density;
+    vec2 delta = v_TexCoords - u_lightScreenPos;
+    delta *= 1.0 / float(SAMPLES) * u_density;
 
     float illuminationDecay = 1.0;
+    vec3 color = texture(u_screenTexture, v_TexCoords).rgb;
+    vec2 sampleCoord = v_TexCoords;
 
-    // Start with the color at the fragment's original position
-    vec3 color = texture(screenTexture, sampleCoord).rgb;
-
-    // Loop 'samples' times, stepping towards the light source
-    for(int i = 0; i < samples; i++)
+    for(int i = 0; i < SAMPLES; i++)
     {
-        // Move the sampling coordinate for the next sample
         sampleCoord -= delta;
-
-        // Sample the texture at the new coordinate
-        vec3 sampleColor = texture(screenTexture, sampleCoord).rgb;
-
-        // Attenuate the sample's contribution by the decay factor
-        sampleColor *= illuminationDecay * weight;
-
-        // Add to the total color
+        vec3 sampleColor = texture(u_screenTexture, sampleCoord).rgb;
+        sampleColor *= illuminationDecay * WEIGHT;
         color += sampleColor;
-
-        // The further we are from the fragment, the less light contributes
-        illuminationDecay *= decay;
+        illuminationDecay *= DECAY;
     }
 
-    FragColor = vec4(color * exposure, 1.0);
+    FragColor = vec4(color * EXPOSURE, 1.0);
 }

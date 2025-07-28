@@ -23,11 +23,11 @@ namespace Luminumbra {
 
             // Add placeholder data for testing UI elements
             m_Photos.push_back({
-                "res/textures/placeholder_photo1.png", "Grove-Strider", "Lumin", 
+                "res/textures/lumin.png", "Grove-Strider", "Lumin", 
                 50.f, "Standard Lens", "First sighting. Very shy."
             });
             m_Photos.push_back({
-                "res/textures/placeholder_photo2.png", "Flutterwing", "Umbra", 
+                "res/textures/umbra.png", "Flutterwing", "Umbra", 
                 15.f, "Macro Lens", "Caught it feeding on glowing moss."
             });
 

@@ -1,77 +1,65 @@
-#version 410
-
-// Output color
+#version 410 core
 out vec4 FragColor;
 
-// Inputs from Vertex Shader
-in vec3 FragPos;
-in vec3 Normal;
-in float v_ClipDistance;
-in vec4 FragPosLightSpace;
+in vec3 v_FragPos;
+in vec3 v_Normal;
+in vec4 v_FragPosLightSpace;
 
-// Uniforms
-uniform vec3 objectColor;
-uniform vec3 sunDirection;
-uniform vec3 viewPos;
-uniform vec3 fogColor;
-uniform sampler2D shadowMap;
+uniform vec3 u_viewPos;
+uniform vec3 u_sunDirection;
+uniform vec3 u_fogColor;
+uniform sampler2D u_shadowMap;
 
-float calculateShadow()
+// Consistent PCF shadow calculation
+float calculateShadow(vec4 fragPosLightSpace)
 {
-    if (v_ClipDistance < 0.0) {
-        discard;
-    }
-    // Perform perspective divide to get normalized device coordinates
-    vec3 projCoords = FragPosLightSpace.xyz / FragPosLightSpace.w;
-    
-    // Transform to [0,1] texture coordinate range
+    vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
     projCoords = projCoords * 0.5 + 0.5;
-    
-    // Get depth of the closest shadow-casting object from the light's POV
-    float closestDepth = texture(shadowMap, projCoords.xy).r;
-    
-    // Get current fragment's depth from the light's POV
-    float currentDepth = projCoords.z;
-    
-    // Check if the current fragment is behind the closest object (and thus in shadow)
-    // Add a small bias to prevent shadow acne artifacts
-    float bias = 0.005;
-    float shadow = currentDepth - bias > closestDepth ? 1.0 : 0.0;
-    
-    // Don't cast shadows on fragments that are outside the light's view
-    if(projCoords.z > 1.0) {
-        shadow = 0.0;
+
+    if (projCoords.z > 1.0) {
+        return 0.0;
     }
-        
+
+    float shadow = 0.0;
+    float bias = max(0.05 * (1.0 - dot(normalize(v_Normal), -u_sunDirection)), 0.005);
+    vec2 texelSize = 1.0 / textureSize(u_shadowMap, 0);
+
+    for(int x = -1; x <= 1; ++x) {
+        for(int y = -1; y <= 1; ++y) {
+            float pcfDepth = texture(u_shadowMap, projCoords.xy + vec2(x, y) * texelSize).r; 
+            shadow += projCoords.z - bias > pcfDepth ? 1.0 : 0.0;        
+        }
+    }
+    shadow /= 9.0;
+    
     return shadow;
 }
 
 void main()
 {
-    // 1. Calculate Shadow
-    float shadow = calculateShadow();
+    // For foliage, we often use alpha testing to cut out shapes.
+    // Assuming a texture could be used, but for now just lighting.
+    // if (texture(u_albedo, v_TexCoords).a < 0.5) discard;
 
-    // 2. Calculate Lighting
-    // Ambient
-    float ambientStrength = 0.4;
-    vec3 ambient = ambientStrength * objectColor;
+    float shadow = calculateShadow(v_FragPosLightSpace);
 
-    // Diffuse
-    vec3 norm = normalize(Normal);
-    vec3 lightDir = normalize(-sunDirection);
+    // Simplified lighting for performance, more ambient.
+    float ambientStrength = 0.5;
+    vec3 ambient = ambientStrength * vec3(1.0); // Assuming white foliage color
+
+    vec3 norm = normalize(v_Normal);
+    vec3 lightDir = normalize(-u_sunDirection);
     float diff = max(dot(norm, lightDir), 0.0);
-    vec3 diffuse = diff * objectColor;
+    vec3 diffuse = diff * vec3(1.0);
     
-    // Combine lighting, applying shadow only to the diffuse component
     vec3 lighting = ambient + (1.0 - shadow) * diffuse;
 
-    // 3. Apply Fog
-    float dist = length(viewPos - FragPos);
+    float dist = length(u_viewPos - v_FragPos);
     float fogStart = 80.0;
     float fogEnd = 160.0;
     float fogFactor = clamp((dist - fogStart) / (fogEnd - fogStart), 0.0, 1.0);
     
-    vec3 finalColor = mix(lighting, fogColor, fogFactor);
+    vec3 finalColor = mix(lighting, u_fogColor, fogFactor);
     
     FragColor = vec4(finalColor, 1.0);
 }

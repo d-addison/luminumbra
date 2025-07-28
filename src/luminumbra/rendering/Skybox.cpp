@@ -98,18 +98,24 @@ void Skybox::loadCubemap(const std::vector<std::string>& faces) {
 }
 
 void Skybox::render(const glm::mat4& view, const glm::mat4& projection) {
-    GLCall(glDepthFunc(GL_LEQUAL)); // Change depth function so depth test passes when values are equal to depth buffer's content
+    // Change depth function so depth test passes when values are equal to depth buffer's content
+    GLCall(glDepthFunc(GL_LEQUAL)); 
+    
     m_Shader.use();
-    m_Shader.setMat4("view", glm::mat4(glm::mat3(view))); // Remove translation from the view matrix
-    m_Shader.setMat4("projection", projection);
+    // The skybox.vert shader now handles removing the translation from the view matrix.
+    m_Shader.setMat4("u_view", view);
+    m_Shader.setMat4("u_projection", projection);
 
     GLCall(glBindVertexArray(m_VAO));
     GLCall(glActiveTexture(GL_TEXTURE0));
     GLCall(glBindTexture(GL_TEXTURE_CUBE_MAP, m_CubemapTexture));
-    m_Shader.setInt("skybox", 0);
+    m_Shader.setInt("u_skybox", 0);
+
     GLCall(glDrawArrays(GL_TRIANGLES, 0, 36));
     GLCall(glBindVertexArray(0));
-    GLCall(glDepthFunc(GL_LESS)); // Set depth function back to default
+    
+    // Set depth function back to default
+    GLCall(glDepthFunc(GL_LESS));
 }
 
 } // namespace Luminumbra::Rendering

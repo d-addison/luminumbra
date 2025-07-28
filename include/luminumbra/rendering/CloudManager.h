@@ -1,8 +1,9 @@
 #pragma once
-
-#include <vector>
+#include <glad/gl.h>
 #include <glm/glm.hpp>
-#include "Shader.h"
+#include <vector>
+#include "luminumbra/rendering/Shader.h"
+#include "luminumbra/rendering/Camera.h" 
 
 namespace Luminumbra::Rendering {
 
@@ -13,7 +14,7 @@ public:
 
     void init();
     void update(float deltaTime);
-    void render(const glm::mat4& view, const glm::mat4& projection);
+    void render(const Camera& camera);
 
     Shader& getShader() { return m_Shader; }
 
@@ -25,8 +26,8 @@ private:
     };
 
     std::vector<Cloud> m_Clouds;
-    unsigned int m_VAO = 0, m_VBO = 0;
-    unsigned int m_Texture = 0;
+    GLuint m_VAO, m_VBO, m_EBO;
+    GLuint m_Texture;
     Shader m_Shader;
 };
 

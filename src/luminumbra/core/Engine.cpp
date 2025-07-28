@@ -190,6 +190,7 @@ void Engine::initRendering() {
     m_FoliageShader = std::make_unique<Rendering::Shader>("res/shaders/foliage.vert", "res/shaders/foliage.frag");
     m_ParticleShader = std::make_unique<Rendering::Shader>("res/shaders/particle.vert", "res/shaders/particle.frag");
     m_WaterShader = std::make_unique<Rendering::Shader>("res/shaders/water.vert", "res/shaders/water.frag");
+    m_UnderwaterShader = std::make_unique<Rendering::Shader>("res/shaders/post_process.vert", "res/shaders/underwater.frag");
     m_Debug = std::make_unique<Debug::Debug>();
     // Post-processing shaders
     m_BloomShader = std::make_unique<Rendering::Shader>("res/shaders/post_process.vert", "res/shaders/bloom.frag");
@@ -198,6 +199,7 @@ void Engine::initRendering() {
     m_GodRaysShader = std::make_unique<Rendering::Shader>("res/shaders/post_process.vert", "res/shaders/god_rays.frag");
     m_FinalPassShader = std::make_unique<Rendering::Shader>("res/shaders/post_process.vert", "res/shaders/final_pass.frag");
     m_DepthShader = std::make_unique<Rendering::Shader>("res/shaders/depth.vert", "res/shaders/depth.frag");
+    m_StaminaShader = std::make_unique<Rendering::Shader>("res/shaders/post_process.vert", "res/shaders/stamina_effect.frag");
 
     // Initialize water renderer and load textures
     m_WaterRenderer = std::make_unique<Rendering::WaterRenderer>();
@@ -478,306 +480,11 @@ float Engine::calculateFocusDepth() const {
     return m_PostProcessSettings.dofFocalDistance;
 }
 
-void Engine::renderScene(const Luminumbra::Rendering::Camera& camera, const glm::vec4& clipPlane) {
-    const glm::mat4& view = camera.getViewMatrix();
-    const glm::mat4& projection = camera.getProjectionMatrix();
-    const glm::vec3 sunDirection = m_World->getSunDirection();
-    const float gameTime = static_cast<float>(glfwGetTime());
-
-    // Opaque Terrain
-    m_BasicShader->use();
-    m_BasicShader->setMat4("view", view);
-    m_BasicShader->setMat4("projection", projection);
-    m_BasicShader->setVec3("viewPos", camera.getPosition());
-    m_BasicShader->setVec3("sunDirection", sunDirection);
-    m_BasicShader->setVec4("u_ClipPlane", clipPlane);
-    m_World->renderTerrain(*m_BasicShader, camera.getPosition());
-
-    // Opaque Foliage
-    m_FoliageShader->use();
-    m_FoliageShader->setVec3("viewPos", camera.getPosition());
-    m_FoliageShader->setVec3("sunDirection", sunDirection);
-    m_FoliageShader->setFloat("time", gameTime);
-    m_FoliageShader->setVec4("u_ClipPlane", clipPlane);
-    m_World->renderFoliage(*m_FoliageShader);
-}
-
-void Engine::renderWorld(const Luminumbra::Rendering::Camera& camera, const glm::mat4& lightSpaceMatrix, const glm::vec4& clipPlane) {
-    const glm::mat4& view = camera.getViewMatrix();
-    const glm::mat4& projection = camera.getProjectionMatrix();
-    const glm::vec3 sunDirection = m_World->getSunDirection();
-    const float gameTime = static_cast<float>(glfwGetTime());
-
-    // --- Opaque Terrain ---
-    m_BasicShader->use();
-    m_BasicShader->setMat4("u_view", view);
-    m_BasicShader->setMat4("u_projection", projection);
-    m_BasicShader->setVec3("viewPos", camera.getPosition());
-    m_BasicShader->setVec3("sunDirection", sunDirection);
-    m_BasicShader->setVec4("u_ClipPlane", clipPlane);
-    m_BasicShader->setMat4("u_lightSpaceMatrix", lightSpaceMatrix); // Pass shadow matrix
-    
-    // Bind the shadow map texture to a free texture unit
-    glActiveTexture(GL_TEXTURE4); 
-    glBindTexture(GL_TEXTURE_2D, m_DepthMapTexture);
-    m_BasicShader->setInt("shadowMap", 4);
-
-    m_World->renderTerrain(*m_BasicShader, camera.getPosition());
-
-    // --- Opaque Foliage ---
-    m_FoliageShader->use();
-    // (You would add similar uniforms for the foliage shader if you want it to receive shadows)
-    m_FoliageShader->setVec3("viewPos", camera.getPosition());
-    m_FoliageShader->setVec3("sunDirection", sunDirection);
-    m_FoliageShader->setFloat("time", gameTime);
-    m_FoliageShader->setVec4("u_ClipPlane", clipPlane);
-    m_FoliageShader->setMat4("u_lightSpaceMatrix", lightSpaceMatrix); // Pass shadow matrix
-    
-    glActiveTexture(GL_TEXTURE4);
-    glBindTexture(GL_TEXTURE_2D, m_DepthMapTexture);
-    // m_FoliageShader->setInt("shadowMap", 4); // Make sure foliage shader has a shadowMap sampler
-    
-    m_World->renderFoliage(*m_FoliageShader);
-}
-
-// REFACTORED: The entire render loop is restructured for water effects and post-processing.
-void Engine::render() {
-    if ((m_GameState != GameState::InGame && m_GameState != GameState::Paused) || !m_World) {
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        m_UIManager->NewFrame();
-        switch (m_GameState) {
-            case GameState::SplashScreen: m_UIManager->ShowSplashScreen(); break;
-            case GameState::MainMenu:
-                m_UIManager->ShowMainMenu(
-                    [&](){ m_GameState = GameState::NewGameSetup; },
-                    [&](){ m_GameState = GameState::LoadGameMenu; },
-                    [&](){ QuitGame(); }
-                );
-                break;
-            case GameState::NewGameSetup:
-                m_UIManager->ShowNewGameWindow(
-                    m_LaunchGame,
-                    m_SaveName,
-                    sizeof(m_SaveName),
-                    m_Seed,
-                    sizeof(m_Seed)
-                );
-                break;
-            case GameState::LoadGameMenu:
-                {
-                    auto saves = ListSaveGames();
-                    m_UIManager->ShowLoadGameWindow(saves,
-                        [&](const std::string& slotName) { LoadGame(slotName); },
-                        [&]() { m_GameState = GameState::MainMenu; }
-                    );
-                }
-                break;
-            case GameState::Paused:
-                // Keep rendering the game world in the background to show it's paused
-                if (m_World && m_World->getPlayer()) {
-                    Player::Player* player = m_World->getPlayer();
-                    if (m_ShowDebugInfo && !m_ShowMenu) {
-                        m_UIManager->ShowDebugOverlay(player->getPosition(), player->getVelocity(), player->getGravity(), player->isNoClipMode(), *m_World, *m_BasicShader, m_PostProcessSettings);
-                    }
-                    if (!m_ShowMenu && !player->isNoClipMode()) {
-                        m_UIManager->ShowStaminaBar(player->getStamina(), player->getMaxStamina(), player->isSprinting());
-                    }
-                }
-
-                // Draw the pause menu over the top
-                m_UIManager->ShowPauseMenu(
-                    [&]() { m_GameState = GameState::InGame; glfwSetInputMode(m_Window, GLFW_CURSOR, GLFW_CURSOR_DISABLED); },
-                    [&]() { /* TODO: Show settings window */ },
-                    [&]() { SaveGame(); },
-                    [&]() { m_World.reset(); m_GameState = GameState::MainMenu; glfwSetInputMode(m_Window, GLFW_CURSOR, GLFW_CURSOR_NORMAL); }
-                );
-                break;
-            case GameState::InGame:
-                if (m_World && m_World->getPlayer()) {
-                    Player::Player* player = m_World->getPlayer();
-                    if (m_ShowDebugInfo && !m_ShowMenu) {
-                        m_UIManager->ShowDebugOverlay(player->getPosition(), player->getVelocity(), player->getGravity(), player->isNoClipMode(), *m_World, *m_BasicShader, m_PostProcessSettings);
-                    }
-                    if (!m_ShowMenu && !player->isNoClipMode()) {
-                        m_UIManager->ShowStaminaBar(player->getStamina(), player->getMaxStamina(), player->isSprinting());
-                    }
-                }
-                break;
-            default: break;
-        }
-        m_UIManager->Render();
-        return;
-    }
-
-    glEnable(GL_CLIP_DISTANCE0);
-
-    Player::Player* player = m_World->getPlayer();
-    Rendering::Camera& camera = player->getCamera();
-    const float gameTime = static_cast<float>(glfwGetTime());
-    const glm::vec3 sunDirection = m_World->getSunDirection();
-
-    // --- 0. SHADOW MAP PASS ---
-    glm::mat4 lightProjection = glm::ortho(-50.0f, 50.0f, -50.0f, 50.0f, 1.0f, 150.0f);
-    glm::vec3 lightPos = player->getPosition() - (sunDirection * 50.0f); // Increased distance slightly
-
-    // FIX: Make the light's view matrix robust
-    glm::vec3 up = glm::vec3(0.0, 1.0, 0.0);
-    // If the sun direction is nearly vertical, use a different 'up' vector to avoid issues
-    if (glm::abs(glm::dot(sunDirection, up)) > 0.99f) {
-        up = glm::vec3(0.0, 0.0, 1.0); 
-    }
-    glm::mat4 lightView = glm::lookAt(lightPos, player->getPosition(), up);
-
-    glm::mat4 lightSpaceMatrix = lightProjection * lightView;
-
-    m_DepthShader->use();
-    m_DepthShader->setMat4("u_LightSpaceMatrix", lightSpaceMatrix);
-    
-    glViewport(0, 0, SHADOW_WIDTH, SHADOW_HEIGHT);
-    glBindFramebuffer(GL_FRAMEBUFFER, m_DepthMapFBO);
-    glClear(GL_DEPTH_BUFFER_BIT);
-
-    // FIX: Set culling to FRONT for the shadow pass to prevent peter panning
-    glCullFace(GL_FRONT);
-
-    // Render shadow-casting objects to the depth map
-    m_World->renderTerrain(*m_DepthShader, player->getPosition());
-    m_World->renderFoliage(*m_DepthShader);
-
-    // FIX: Crucially, set culling back to BACK for all subsequent render passes
-    glCullFace(GL_BACK); 
-    
-    // Unbind the shadow map FBO
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glViewport(0, 0, m_ScreenWidth, m_ScreenHeight);
-
-    // --- 1. REFLECTION PASS ---
-    m_WaterRenderer->bindReflectionFBO();
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    
-    glm::vec3 originalPos = camera.getPosition();
-    float originalPitch = camera.getPitch();
-    float distance = 2 * (originalPos.y - Luminumbra::World::Chunk::WATER_LEVEL);
-    
-    camera.setPosition(originalPos - glm::vec3(0, distance, 0));
-    camera.setPitch(-originalPitch); // Invert pitch
-    
-    // NOTE: Reflections don't need shadows, so pass an identity matrix for lightSpaceMatrix
-    renderWorld(camera, glm::mat4(1.0f), glm::vec4(0, 1, 0, -Luminumbra::World::Chunk::WATER_LEVEL + 0.1f));
-    m_World->renderSkyboxAndClouds(camera.getViewMatrix(), camera.getProjectionMatrix());
-    
-    camera.setPosition(originalPos);
-    camera.setPitch(originalPitch); // Restore camera
-
-    // --- 2. REFRACTION PASS ---
-    m_WaterRenderer->bindRefractionFBO();
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    renderWorld(camera, glm::mat4(1.0f), glm::vec4(0, -1, 0, Luminumbra::World::Chunk::WATER_LEVEL));
-
-    // --- 3. MAIN SCENE PASS ---
-    bindSceneFramebuffer();
-    glm::vec3 skyColor = m_World->getSkyColor();
-    glClearColor(skyColor.r, skyColor.g, skyColor.b, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-    m_World->renderSkyboxAndClouds(camera.getViewMatrix(), camera.getProjectionMatrix());
-    m_World->renderCelestials(*m_CelestialShader, camera.getViewMatrix(), camera.getProjectionMatrix());
-    
-    // Render the world normally, but now with shadow information
-    renderWorld(camera, glm::mat4(1.0f)); 
-
-
-    // RENDER THE WATER SURFACE
-    // Set blend state ONCE before rendering all water
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDepthMask(GL_FALSE); // Don't write to depth buffer
-    m_WaterShader->use();
-    m_WaterShader->setMat4("u_View", camera.getViewMatrix());
-    m_WaterShader->setMat4("u_Projection", camera.getProjectionMatrix());
-    m_WaterShader->setVec3("u_CameraPosition", camera.getPosition());
-    m_WaterShader->setVec3("u_LightDirection", m_World->getSunDirection());
-    m_WaterShader->setFloat("u_Time", gameTime);
-    
-    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m_WaterRenderer->getReflectionTexture());
-    m_WaterShader->setInt("u_ReflectionTexture", 0);
-    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m_WaterRenderer->getRefractionTexture());
-    m_WaterShader->setInt("u_RefractionTexture", 1);
-    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_WaterDudvMap);
-    m_WaterShader->setInt("u_DudvMap", 2);
-    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, m_WaterNormalMap);
-    m_WaterShader->setInt("u_NormalMap", 3);
-    m_World->renderWater(*m_WaterShader, camera.getPosition());
-    
-    glDepthMask(GL_TRUE);
-    glDisable(GL_BLEND);
-
-    // RENDER PARTICLES (into the same scene FBO to be post-processed)
-    if (m_World->getParticleSystem()) {
-        m_World->getParticleSystem()->render(*m_ParticleShader, camera);
-    }
-
-    // --- 4. POST-PROCESSING CHAIN (using the scene texture) ---
-    // (This part is taken directly from your provided Engine.cpp)
-    GLuint sceneResultTexture = m_SceneTexture;
-    GLuint bloomTexture = 0;
-
-    if (m_PostProcessSettings.enableBloom) {
-        // Pass 1: Extract bright colors from the scene into ping-pong texture 0
-        glBindFramebuffer(GL_FRAMEBUFFER, m_PingPongFBO);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_PingPongTextures[0], 0);
-        m_BloomShader->use();
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, m_SceneTexture);
-        renderFullscreenQuad();
-
-        // Pass 2 & 3: Blur the bright texture using a two-pass Gaussian blur
-        m_BlurShader->use();
-        bool horizontal = true;
-        bool first_iteration = true;
-        unsigned int amount = 10; // Number of blur iterations
-        for (unsigned int i = 0; i < amount; i++) {
-            glBindFramebuffer(GL_FRAMEBUFFER, m_PingPongFBO);
-            // Output to the other texture
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_PingPongTextures[horizontal], 0);
-            
-            m_BlurShader->setInt("horizontal", horizontal);
-            
-            glActiveTexture(GL_TEXTURE0);
-            // Input from the previous pass
-            glBindTexture(GL_TEXTURE_2D, first_iteration ? m_PingPongTextures[0] : m_PingPongTextures[!horizontal]);
-            
-            renderFullscreenQuad();
-            horizontal = !horizontal;
-            if (first_iteration) first_iteration = false;
-        }
-        bloomTexture = m_PingPongTextures[!horizontal]; // The final blurred texture
-    }
-
-    // FINAL COMPOSITE
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    m_FinalPassShader->use();
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, sceneResultTexture); // The original scene
-    m_FinalPassShader->setInt("screenTexture", 0);
-
-    if (bloomTexture != 0) {
-        glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, bloomTexture); // The blurred bright spots
-        m_FinalPassShader->setInt("bloomTexture", 1);
-        m_FinalPassShader->setBool("useBloom", true);
-    } else {
-        m_FinalPassShader->setBool("useBloom", false);
-    }
-    
-    m_FinalPassShader->setFloat("exposure", m_PostProcessSettings.exposure);
-    renderFullscreenQuad();
-
-    // UI Rendering
+// This new helper consolidates all UI rendering to be called once at the end.
+void Engine::renderUI() {
     m_UIManager->NewFrame();
+    
+    // The switch determines WHAT to draw, but the function is only called once.
     switch (m_GameState) {
         case GameState::SplashScreen: m_UIManager->ShowSplashScreen(); break;
         case GameState::MainMenu:
@@ -788,13 +495,7 @@ void Engine::render() {
             );
             break;
         case GameState::NewGameSetup:
-            m_UIManager->ShowNewGameWindow(
-                m_LaunchGame,
-                m_SaveName,
-                sizeof(m_SaveName),
-                m_Seed,
-                sizeof(m_Seed)
-            );
+            m_UIManager->ShowNewGameWindow(m_LaunchGame, m_SaveName, sizeof(m_SaveName), m_Seed, sizeof(m_Seed));
             break;
         case GameState::LoadGameMenu:
             {
@@ -806,39 +507,255 @@ void Engine::render() {
             }
             break;
         case GameState::Paused:
-            // Keep rendering the game world in the background to show it's paused
+        case GameState::InGame: // In-game HUD and Pause Menu share logic
             if (m_World && m_World->getPlayer()) {
                 Player::Player* player = m_World->getPlayer();
-                if (m_ShowDebugInfo && !m_ShowMenu) {
+                if (m_ShowDebugInfo) {
                     m_UIManager->ShowDebugOverlay(player->getPosition(), player->getVelocity(), player->getGravity(), player->isNoClipMode(), *m_World, *m_BasicShader, m_PostProcessSettings);
                 }
-                if (!m_ShowMenu && !player->isNoClipMode()) {
+                if (!player->isNoClipMode()) {
                     m_UIManager->ShowStaminaBar(player->getStamina(), player->getMaxStamina(), player->isSprinting());
                 }
-            }
-
-            // Draw the pause menu over the top
-            m_UIManager->ShowPauseMenu(
-                [&]() { m_GameState = GameState::InGame; glfwSetInputMode(m_Window, GLFW_CURSOR, GLFW_CURSOR_DISABLED); },
-                [&]() { /* TODO: Show settings window */ },
-                [&]() { SaveGame(); },
-                [&]() { m_World.reset(); m_GameState = GameState::MainMenu; glfwSetInputMode(m_Window, GLFW_CURSOR, GLFW_CURSOR_NORMAL); }
-            );
-            break;
-        case GameState::InGame:
-            if (m_World && m_World->getPlayer()) {
-                Player::Player* player = m_World->getPlayer();
-                if (m_ShowDebugInfo && !m_ShowMenu) {
-                    m_UIManager->ShowDebugOverlay(player->getPosition(), player->getVelocity(), player->getGravity(), player->isNoClipMode(), *m_World, *m_BasicShader, m_PostProcessSettings);
-                }
-                if (!m_ShowMenu && !player->isNoClipMode()) {
-                    m_UIManager->ShowStaminaBar(player->getStamina(), player->getMaxStamina(), player->isSprinting());
+                if (m_GameState == GameState::Paused) {
+                    m_UIManager->ShowPauseMenu(
+                        [&]() { m_GameState = GameState::InGame; glfwSetInputMode(m_Window, GLFW_CURSOR, GLFW_CURSOR_DISABLED); },
+                        [&]() { /* TODO: Settings */ },
+                        [&]() { SaveGame(); },
+                        [&]() { m_World.reset(); m_GameState = GameState::MainMenu; glfwSetInputMode(m_Window, GLFW_CURSOR, GLFW_CURSOR_NORMAL); }
+                    );
                 }
             }
             break;
         default: break;
     }
     m_UIManager->Render();
+}
+
+void Engine::renderWorld(const Luminumbra::Rendering::Camera& camera, const glm::mat4& lightSpaceMatrix, const glm::vec4& clipPlane) {
+    const glm::mat4& view = camera.getViewMatrix();
+    const glm::mat4& projection = camera.getProjectionMatrix();
+    const glm::vec3 sunDirection = m_World->getSunDirection();
+    const float gameTime = static_cast<float>(glfwGetTime());
+    const glm::vec3 fogColor = m_World->getSkyColor(); // Use sky color for fog
+
+    // --- Opaque Terrain ---
+    m_BasicShader->use();
+    m_BasicShader->setMat4("u_view", view);
+    m_BasicShader->setMat4("u_projection", projection);
+    m_BasicShader->setVec3("u_viewPos", camera.getPosition());
+    m_BasicShader->setVec3("u_sunDirection", -sunDirection);
+    m_BasicShader->setVec4("u_clipPlane", clipPlane);
+    m_BasicShader->setMat4("u_lightSpaceMatrix", lightSpaceMatrix);
+    m_BasicShader->setVec3("u_fogColor", fogColor);
+    
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_2D, m_DepthMapTexture);
+    m_BasicShader->setInt("u_shadowMap", 4);
+
+    m_World->renderTerrain(*m_BasicShader, camera.getPosition());
+
+    // --- Opaque Foliage ---
+    m_FoliageShader->use();
+    m_FoliageShader->setMat4("u_view", view);
+    m_FoliageShader->setMat4("u_projection", projection);
+    m_FoliageShader->setVec3("u_viewPos", camera.getPosition());
+    m_FoliageShader->setVec3("u_sunDirection", -sunDirection);
+    m_FoliageShader->setFloat("u_time", gameTime);
+    m_FoliageShader->setVec4("u_clipPlane", clipPlane);
+    m_FoliageShader->setMat4("u_lightSpaceMatrix", lightSpaceMatrix);
+    m_FoliageShader->setVec3("u_fogColor", fogColor);
+    m_FoliageShader->setMat4("u_model", glm::mat4(1.0f));
+
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_2D, m_DepthMapTexture);
+    m_FoliageShader->setInt("u_shadowMap", 4);
+    
+    m_World->renderFoliage(*m_FoliageShader);
+}
+
+void Engine::renderScenePass(const glm::mat4& lightSpaceMatrix) {
+    Player::Player* player = m_World->getPlayer();
+    Rendering::Camera& camera = player->getCamera();
+
+    bindSceneFramebuffer();
+
+    glm::vec3 skyColor = m_World->getSkyColor();
+    glClearColor(skyColor.r, skyColor.g, skyColor.b, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    m_World->renderSkyboxAndClouds(camera);
+    m_World->renderCelestials(*m_CelestialShader, camera.getViewMatrix(), camera.getProjectionMatrix());
+    
+    renderWorld(camera, lightSpaceMatrix, glm::vec4(0.0f, 0.0f, 0.0f, 0.0f));
+
+    if (m_World->getParticleSystem()) {
+        m_World->getParticleSystem()->render(*m_ParticleShader, camera);
+    }
+}
+
+void Engine::render() {
+    // 1. Handle non-game states or missing world
+    if ((m_GameState != GameState::InGame && m_GameState != GameState::Paused) || !m_World) {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        renderUI();
+        return;
+    }
+
+    // 2. Setup common variables for the frame
+    glEnable(GL_CLIP_DISTANCE0);
+    Player::Player* player = m_World->getPlayer();
+    Rendering::Camera& camera = player->getCamera();
+    const glm::vec3 sunDirection = m_World->getSunDirection();
+    const float gameTime = static_cast<float>(glfwGetTime());
+
+    // 3. Shadow Pass
+    const float SHADOW_FRUSTUM_SIZE = 50.0f;
+    const float SHADOW_NEAR_PLANE = 1.0f;
+    const float SHADOW_FAR_PLANE = 150.0f;
+    const float SHADOW_DISTANCE_FROM_PLAYER = 50.0f;
+
+    glm::mat4 lightProjection = glm::ortho(-SHADOW_FRUSTUM_SIZE, SHADOW_FRUSTUM_SIZE, -SHADOW_FRUSTUM_SIZE, SHADOW_FRUSTUM_SIZE, SHADOW_NEAR_PLANE, SHADOW_FAR_PLANE);
+    glm::vec3 lightPos = player->getPosition() - (sunDirection * SHADOW_DISTANCE_FROM_PLAYER);
+    glm::vec3 up = (glm::abs(glm::dot(sunDirection, glm::vec3(0.0, 1.0, 0.0))) > 0.99f) ? glm::vec3(0.0, 0.0, 1.0) : glm::vec3(0.0, 1.0, 0.0);
+    glm::mat4 lightView = glm::lookAt(lightPos, player->getPosition(), up);
+    glm::mat4 lightSpaceMatrix = lightProjection * lightView;
+
+    glViewport(0, 0, SHADOW_WIDTH, SHADOW_HEIGHT);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_DepthMapFBO);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    glCullFace(GL_FRONT);
+
+    // Render terrain to depth map (This is correct)
+    m_DepthShader->use();
+    m_DepthShader->setMat4("u_lightSpaceMatrix", lightSpaceMatrix);
+    m_World->renderTerrain(*m_DepthShader, player->getPosition());
+
+    m_FoliageShader->use();
+    m_FoliageShader->setMat4("u_view", lightView);
+    m_FoliageShader->setMat4("u_projection", lightProjection);
+    m_FoliageShader->setVec4("u_clipPlane", glm::vec4(0.0f));
+    m_FoliageShader->setVec3("u_sunDirection", -sunDirection);
+    m_FoliageShader->setFloat("u_time", gameTime);
+    m_FoliageShader->setVec3("u_viewPos", player->getPosition());
+    m_FoliageShader->setMat4("u_model", glm::mat4(1.0f));
+    m_FoliageShader->setMat4("u_lightSpaceMatrix", lightSpaceMatrix);
+    m_World->renderFoliage(*m_FoliageShader);
+
+    glCullFace(GL_BACK); 
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, m_ScreenWidth, m_ScreenHeight);
+
+    // 4. Water Passes
+    m_WaterRenderer->bindReflectionFBO();
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glm::vec3 originalPos = camera.getPosition();
+    float originalPitch = camera.getPitch();
+    camera.setPosition(originalPos - glm::vec3(0, 2 * (originalPos.y - World::Chunk::WATER_LEVEL), 0));
+    camera.setPitch(-originalPitch);
+    renderWorld(camera, lightSpaceMatrix, glm::vec4(0, 1, 0, -World::Chunk::WATER_LEVEL + 0.1f));
+    m_World->renderSkyboxAndClouds(camera);
+    camera.setPosition(originalPos);
+    camera.setPitch(originalPitch);
+    m_WaterRenderer->bindRefractionFBO();
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    renderWorld(camera, lightSpaceMatrix, glm::vec4(0, -1, 0, World::Chunk::WATER_LEVEL));
+
+    // 5. Main Scene Pass
+    renderScenePass(lightSpaceMatrix);
+
+    // 6. Water Surface Pass
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    m_WaterShader->use();
+    m_WaterShader->setMat4("u_view", camera.getViewMatrix());
+    m_WaterShader->setMat4("u_projection", camera.getProjectionMatrix());
+    m_WaterShader->setVec3("u_cameraPosition", camera.getPosition());
+    m_WaterShader->setVec3("u_lightDirection", sunDirection);
+    m_WaterShader->setFloat("u_time", gameTime);
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m_WaterRenderer->getReflectionTexture()); m_WaterShader->setInt("u_reflectionTexture", 0);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m_WaterRenderer->getRefractionTexture()); m_WaterShader->setInt("u_refractionTexture", 1);
+    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_WaterDudvMap); m_WaterShader->setInt("u_dudvMap", 2);
+    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, m_WaterNormalMap); m_WaterShader->setInt("u_normalMap", 3);
+    m_World->renderWater(*m_WaterShader, camera.getPosition());
+    glDisable(GL_BLEND);
+
+    // 7. Post-Processing and Final Composite
+    if (player->getPosition().y < World::Chunk::WATER_LEVEL) {
+        // --- UNDERWATER EFFECT ---
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        m_UnderwaterShader->use();
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m_SceneTexture); m_UnderwaterShader->setInt("u_sceneTexture", 0);
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m_DepthTexture); m_UnderwaterShader->setInt("u_depthTexture", 1);
+        glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_WaterDudvMap); m_UnderwaterShader->setInt("u_dudvMap", 2);
+        m_UnderwaterShader->setFloat("u_time", gameTime);
+        
+        m_UnderwaterShader->setFloat("u_farPlane", camera.getFarPlane());
+        m_UnderwaterShader->setVec3("u_fogColor", glm::vec3(0.1f, 0.3f, 0.4f));
+        m_UnderwaterShader->setFloat("u_fogDensity", 0.08f);
+
+        renderFullscreenQuad();
+
+    } else {
+        // --- NORMAL (ABOVE WATER) POST-PROCESSING ---
+        GLuint bloomTexture = 0;
+
+        if (m_PostProcessSettings.enableBloom) {
+            glBindFramebuffer(GL_FRAMEBUFFER, m_PingPongFBO);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_PingPongTextures[0], 0);
+            
+            m_BloomShader->use();
+            m_BloomShader->setInt("u_screenTexture", 0);
+            m_BloomShader->setFloat("u_threshold", 1.0f);
+            m_BloomShader->setFloat("u_intensity", 1.5f);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, m_SceneTexture);
+            renderFullscreenQuad();
+
+            m_BlurShader->use();
+            m_BlurShader->setInt("u_image", 0);
+            bool horizontal = true;
+            for (unsigned int i = 0; i < 10; i++) {
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_PingPongTextures[horizontal], 0);
+                m_BlurShader->setInt("u_horizontal", horizontal);
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, i == 0 ? m_PingPongTextures[0] : m_PingPongTextures[!horizontal]);
+                renderFullscreenQuad();
+                horizontal = !horizontal;
+            }
+            bloomTexture = m_PingPongTextures[!horizontal];
+        }
+
+        glBindFramebuffer(GL_FRAMEBUFFER, m_PostProcessFBO);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_PostProcessTextures[0], 0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        m_FinalPassShader->use();
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m_SceneTexture); m_FinalPassShader->setInt("u_screenTexture", 0);
+        m_FinalPassShader->setBool("u_useBloom", bloomTexture != 0);
+        if (bloomTexture != 0) {
+            glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, bloomTexture); m_FinalPassShader->setInt("u_bloomTexture", 1);
+        }
+        m_FinalPassShader->setFloat("u_exposure", m_PostProcessSettings.exposure);
+        renderFullscreenQuad();
+
+        glBindFramebuffer(GL_FRAMEBUFFER, 0); 
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        m_StaminaShader->use();
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, m_PostProcessTextures[0]); 
+        m_StaminaShader->setInt("u_screenTexture", 0);
+
+        float staminaRatio = player->getStamina() / player->getMaxStamina();
+        m_StaminaShader->setFloat("u_staminaRatio", staminaRatio);
+        m_StaminaShader->setFloat("u_time", gameTime);
+
+        renderFullscreenQuad();
+    }
+
+    // 8. UI Pass
+    renderUI();
 }
 
 void Engine::StartNewGame(const std::string& saveName, const std::string& seed) {

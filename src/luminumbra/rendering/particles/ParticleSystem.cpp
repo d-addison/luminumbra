@@ -129,83 +129,57 @@ std::vector<ParticleDeathEvent> ParticleSystem::update(float dt, Luminumbra::Wor
 void ParticleSystem::render(Shader& shader, const Luminumbra::Rendering::Camera& camera) {
     if (m_ActiveParticleCount == 0) return;
 
-    // Setup state
     GLCall(glEnable(GL_BLEND));
     GLCall(glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
     GLCall(glDepthMask(GL_FALSE));
 
-    // Bind shader and set uniforms
     shader.use();
-    shader.setMat4("u_Projection", camera.getProjectionMatrix());
-    shader.setMat4("u_View", camera.getViewMatrix()); 
-    shader.setVec3("u_CameraRight", camera.getRight());
-    shader.setVec3("u_CameraUp", camera.getUp());
-    shader.setVec3("u_ViewPos", camera.getPosition());
-    shader.setFloat("u_Time", static_cast<float>(glfwGetTime()));
+    shader.setMat4("u_projection", camera.getProjectionMatrix());
+    shader.setMat4("u_view", camera.getViewMatrix());
+    shader.setVec3("u_cameraRight", camera.getRight());
+    shader.setVec3("u_cameraUp", camera.getUp());
+    shader.setVec3("u_viewPos", camera.getPosition());
+    shader.setFloat("u_time", static_cast<float>(glfwGetTime()));
 
-    // Bind VAO and prepare instance buffer
-    GLCall(glBindVertexArray(m_QuadVAO));
     GLCall(glBindBuffer(GL_ARRAY_BUFFER, m_InstanceVBO));
 
-    // Prepare instance data on CPU side first
-    std::vector<ParticleInstanceData> regularInstances;
-    std::vector<ParticleInstanceData> volumetricInstances;
-    regularInstances.reserve(m_ActiveParticleCount);
-    volumetricInstances.reserve(m_ActiveParticleCount * 12); // Max layers
+    // OPTIMIZATION: Use glMapBufferRange to write directly to GPU memory
+    // This avoids creating a temporary std::vector on the CPU every frame.
+    ParticleInstanceData* instanceDataPtr = (ParticleInstanceData*)glMapBufferRange(
+        GL_ARRAY_BUFFER, 0, m_ParticlePool.size() * sizeof(ParticleInstanceData),
+        GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT
+    );
 
-    // First pass: Regular particles
+    if (!instanceDataPtr) {
+        // Handle error if mapping fails
+        GLCall(glBindBuffer(GL_ARRAY_BUFFER, 0));
+        GLCall(glDepthMask(GL_TRUE));
+        GLCall(glDisable(GL_BLEND));
+        return;
+    }
+
+    uint32_t instanceCount = 0;
     for (uint32_t i = 0; i < m_ActiveParticleCount; ++i) {
         const Particle& p = m_ParticlePool[i];
-        if (p.isVolumetric) continue;
-        
-        ParticleInstanceData instance;
+        if (instanceCount >= m_ParticlePool.size()) break; // Safety break
+
         float lifeRatio = glm::clamp(1.0f - (p.lifeRemaining / p.lifeTime), 0.0f, 1.0f);
-        instance.color = glm::mix(p.colorBegin, p.colorEnd, lifeRatio);
-        instance.size = glm::mix(p.sizeBegin, p.sizeEnd, lifeRatio);
+
+        ParticleInstanceData& instance = instanceDataPtr[instanceCount++];
         instance.worldPosition = p.position;
+        instance.size = glm::mix(p.sizeBegin, p.sizeEnd, lifeRatio);
+        instance.color = glm::mix(p.colorBegin, p.colorEnd, lifeRatio);
         instance.rotation = p.rotation;
-        regularInstances.push_back(instance);
+        instance.lifeRemaining = p.lifeRemaining;
+        instance.type = p.type;
+        // Padding and layer are implicitly handled by the struct layout
     }
 
-    // Draw regular particles
-    if (!regularInstances.empty()) {
-        GLCall(glBufferData(GL_ARRAY_BUFFER, regularInstances.size() * sizeof(ParticleInstanceData), 
-            regularInstances.data(), GL_DYNAMIC_DRAW));
-        GLCall(glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr, 
-            static_cast<GLsizei>(regularInstances.size())));
-    }
+    GLCall(glUnmapBuffer(GL_ARRAY_BUFFER));
 
-    // Second pass: Volumetric particles
-    for (uint32_t i = 0; i < m_ActiveParticleCount; ++i) {
-        const Particle& p = m_ParticlePool[i];
-        if (!p.isVolumetric) continue;
-
-        float lifeRatio = glm::clamp(1.0f - (p.lifeRemaining / p.lifeTime), 0.0f, 1.0f);
-        glm::vec4 color = glm::mix(p.colorBegin, p.colorEnd, lifeRatio);
-        float size = glm::mix(p.sizeBegin, p.sizeEnd, lifeRatio);
-
-        for (int layer = 0; layer < p.volumetricLayers; layer++) {
-            ParticleInstanceData instance;
-            float layerRatio = static_cast<float>(layer) / static_cast<float>(p.volumetricLayers);
-            instance.color = color;
-            instance.size = size;
-            instance.worldPosition = p.position + 
-                camera.getRight() * (layerRatio - 0.5f) * p.volumeDepth;
-            instance.rotation = p.rotation;
-            instance.layer = layerRatio;
-            volumetricInstances.push_back(instance);
-        }
-    }
-
-    // Draw volumetric particles
-    if (!volumetricInstances.empty()) {
-        GLCall(glBufferData(GL_ARRAY_BUFFER, volumetricInstances.size() * sizeof(ParticleInstanceData), 
-            volumetricInstances.data(), GL_DYNAMIC_DRAW));
-        GLCall(glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr, 
-            static_cast<GLsizei>(volumetricInstances.size())));
-    }
-
-    // Cleanup state
+    GLCall(glBindVertexArray(m_QuadVAO));
+    GLCall(glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr, instanceCount));
+    
     GLCall(glBindBuffer(GL_ARRAY_BUFFER, 0));
     GLCall(glBindVertexArray(0));
     GLCall(glDepthMask(GL_TRUE));

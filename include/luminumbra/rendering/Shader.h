@@ -2,6 +2,7 @@
 #pragma once
 
 #include <glm/glm.hpp>
+#include <unordered_map>
 #include <string>
 
 namespace Luminumbra::Rendering {
@@ -34,6 +35,8 @@ private:
     unsigned int m_ID; // The shader program ID
     std::string m_VertexPath;
     std::string m_FragmentPath;
+    int getUniformLocation(const std::string& name) const;
+    mutable std::unordered_map<std::string, int> m_UniformLocationCache;
 };
 
 } // namespace Luminumbra::Rendering

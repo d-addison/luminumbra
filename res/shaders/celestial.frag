@@ -1,10 +1,10 @@
-#version 410
+#version 410 core
 out vec4 FragColor;
 
-uniform vec3 objectColor;
-uniform float brightness;
+uniform vec3 u_objectColor;
+uniform float u_brightness;
 
 void main()
 {
-    FragColor = vec4(objectColor, brightness);
+    FragColor = vec4(u_objectColor, u_brightness);
 }

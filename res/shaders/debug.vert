@@ -1,16 +1,16 @@
 #version 410
-layout (location = 0) in vec3 aPos;
-layout (location = 1) in vec3 aNormal;
-layout (location = 2) in vec3 aColor;
+layout (location = 0) in vec3 a_Position;
+layout (location = 1) in vec3 a_Normal;
+layout (location = 2) in vec3 a_Color;
 
 out vec3 Normal;
 
-uniform mat4 model;
-uniform mat4 view;
-uniform mat4 projection;
+uniform mat4 u_model;
+uniform mat4 u_view;
+uniform mat4 u_projection;
 
 void main()
 {
-    Normal = mat3(transpose(inverse(model))) * aNormal;
-    gl_Position = projection * view * model * vec4(aPos, 1.0);
+    Normal = mat3(transpose(inverse(u_model))) * a_Normal;
+    gl_Position = u_projection * u_view * u_model * vec4(a_Position, 1.0);
 }

@@ -13,6 +13,7 @@
 #include <set>
 #include "luminumbra/core/SaveData.h"
 #include "luminumbra/rendering/particles/Particle.h" 
+#include "luminumbra/rendering/Camera.h"
 
 // Forward declarations
 namespace Luminumbra::Rendering {
@@ -70,7 +71,7 @@ public:
 
     void renderTerrain(Rendering::Shader& shader, const glm::vec3& viewPos) const;
     void renderWater(Rendering::Shader& shader, const glm::vec3& viewPos) const;
-    void renderSkyboxAndClouds(const glm::mat4& view, const glm::mat4& projection) const;
+    void renderSkyboxAndClouds(const Rendering::Camera& camera) const;
     void renderFoliage(Luminumbra::Rendering::Shader& foliageShader) const;
     bool isSolid(const glm::vec3& worldPosition) const;
     const char* getBiome(const glm::vec3& position) const;

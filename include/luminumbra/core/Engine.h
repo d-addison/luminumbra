@@ -71,6 +71,7 @@ private:
     std::unique_ptr<Rendering::Shader> m_FoliageShader;
     std::unique_ptr<Rendering::Shader> m_ParticleShader;
     std::unique_ptr<Rendering::Shader> m_WaterShader;
+    std::unique_ptr<Rendering::Shader> m_UnderwaterShader;
 
     // Post-processing shaders
     std::unique_ptr<Rendering::Shader> m_BloomShader;
@@ -79,6 +80,7 @@ private:
     std::unique_ptr<Rendering::Shader> m_GodRaysShader;
     std::unique_ptr<Rendering::Shader> m_FinalPassShader;
     std::unique_ptr<Rendering::Shader> m_DepthShader;
+    std::unique_ptr<Rendering::Shader> m_StaminaShader;
 
     // Framebuffer objects and textures
     GLuint m_SceneFramebuffer = 0;
@@ -140,6 +142,9 @@ private:
     GLuint m_DepthMapFBO;
     GLuint m_DepthMapTexture;
     const unsigned int SHADOW_WIDTH = 2048, SHADOW_HEIGHT = 2048;
+
+    void renderScenePass(const glm::mat4& lightSpaceMatrix);
+    void renderUI();
 };
 
 } // namespace Luminumbra::Core

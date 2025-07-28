@@ -1,28 +1,32 @@
-// In res/shaders/final_pass.frag
-#version 410
+#version 410 core
 out vec4 FragColor;
-in vec2 TexCoords;
 
-uniform sampler2D screenTexture;
-uniform sampler2D bloomTexture;
-uniform bool useBloom;
-uniform float exposure;
+in vec2 v_TexCoords;
+
+uniform sampler2D u_screenTexture;
+uniform sampler2D u_bloomTexture;
+uniform bool u_useBloom;
+uniform float u_exposure;
+
+const float GAMMA = 2.2;
 
 void main()
 {
-    const float gamma = 2.2;
-    vec3 hdrColor = texture(screenTexture, TexCoords).rgb;
+    vec3 hdrColor = texture(u_screenTexture, v_TexCoords).rgb;
     
-    if (useBloom) {
-        vec3 bloomColor = texture(bloomTexture, TexCoords).rgb;
+    if (u_useBloom) {
+        vec3 bloomColor = texture(u_bloomTexture, v_TexCoords).rgb;
         hdrColor += bloomColor; // Additive blending
     }
     
-    // Tone mapping
-    vec3 result = vec3(1.0) - exp(-hdrColor * exposure);
+    // Reinhard tone mapping
+    vec3 mappedColor = hdrColor / (hdrColor + vec3(1.0));
+    
+    // Alternative: Exposure tone mapping
+    // vec3 mappedColor = vec3(1.0) - exp(-hdrColor * u_exposure);
     
     // Gamma correction
-    result = pow(result, vec3(1.0 / gamma));
+    vec3 finalColor = pow(mappedColor, vec3(1.0 / GAMMA));
     
-    FragColor = vec4(result, 1.0);
+    FragColor = vec4(finalColor, 1.0);
 }

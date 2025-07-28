@@ -271,59 +271,6 @@ void World::initFoliage() {
     glBindVertexArray(0);
 }
 
-// Add this new function to render the celestial objects each frame
-void World::renderCelestials(Luminumbra::Rendering::Shader& celestialShader, const glm::mat4& view, const glm::mat4& projection) const {
-    glDepthFunc(GL_LEQUAL);
-    celestialShader.use();
-
-    glm::mat4 skyView = glm::mat4(glm::mat3(view));
-    celestialShader.setMat4("projection", projection);
-    celestialShader.setMat4("view", skyView);
-
-    glm::vec3 sunDir = getSunDirection();
-
-    // --- Render Stars ---
-    float starBrightness = glm::smoothstep(0.0f, -0.25f, -1*sunDir.y);
-    if (starBrightness > 0.0f) {
-        celestialShader.setMat4("model", glm::mat4(1.0f));
-        celestialShader.setVec3("objectColor", glm::vec3(1.0f, 1.0f, 0.95f));
-        celestialShader.setFloat("brightness", starBrightness);
-        glBindVertexArray(m_StarVAO);
-        glDrawArrays(GL_POINTS, 0, m_StarVertexCount);
-    }
-
-    glm::mat4 billboardRotation = glm::mat4(glm::mat3(view));
-
-    // --- Render Sun ---
-    if (sunDir.y < 0.0f) {
-        glm::mat4 model = glm::translate(glm::mat4(1.0f), sunDir * 100.0f); 
-        model = model * billboardRotation; // Apply billboarding to face the camera
-        model = glm::scale(model, glm::vec3(50.0f)); // Scale it up
-        
-        celestialShader.setMat4("model", model);
-        celestialShader.setVec3("objectColor", glm::vec3(1.0f, 1.0f, 0.8f));
-        celestialShader.setFloat("brightness", 5.0f);
-        glBindVertexArray(m_SunVAO);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
-    }
-    
-    // --- Render Moon ---
-    if (sunDir.y > 0.0f) {
-        glm::mat4 model = glm::translate(glm::mat4(1.0f), -sunDir * 100.0f); 
-        model = model * billboardRotation; // Apply billboarding to face the camera
-        model = glm::scale(model, glm::vec3(40.0f)); // Scale it up
-
-        celestialShader.setMat4("model", model);
-        celestialShader.setVec3("objectColor", glm::vec3(0.8f, 0.8f, 0.9f));
-        celestialShader.setFloat("brightness", 5.0f);
-        glBindVertexArray(m_MoonVAO);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
-    }
-
-    glBindVertexArray(0);
-    glDepthFunc(GL_LESS);
-}
-
 Core::WorldSaveData World::serialize() const {
     Core::WorldSaveData data;
     data.slotName = m_SlotName; // <-- ADD THIS
@@ -342,12 +289,12 @@ glm::vec3 World::getSkyColor() const {
 
     // Step 1: Blend between pure day color and sunset color.
     // This factor is 0.0 at the horizon (sunset) and 1.0 higher up (full day).
-    float dayFactor = glm::smoothstep(0.0f, 0.2f, sunHeight);
+    float dayFactor = glm::smoothstep(0.0f, -0.2f, sunHeight);
     glm::vec3 daySunsetMix = glm::mix(sunsetColor, dayColor, dayFactor);
 
     // Step 2: Blend the result of Step 1 with the night color.
     // This factor is 0.0 at night and 1.0 during the day/sunset.
-    float lightFactor = glm::smoothstep(-0.15f, 0.0f, sunHeight);
+    float lightFactor = glm::smoothstep(0.15f, 0.0f, sunHeight);
     glm::vec3 finalSky = glm::mix(nightColor, daySunsetMix, lightFactor);
 
     return finalSky;
@@ -368,25 +315,12 @@ void World::setTimeOfDay(float time) {
 #include <glm/gtc/constants.hpp> // For glm::two_pi()
 
 glm::vec3 World::getSunDirection() const {
-    // m_TimeOfDay is a value from 0.0 (midnight) to 1.0 (next midnight)
     float angle = m_TimeOfDay * glm::two_pi<float>();
-
     glm::vec3 direction;
-    
-    // Use -cos(angle) for height.
-    // -cos(0) = -1.0 (midnight)
-    // -cos(pi) = +1.0 (midday at time = 0.5)
-    // -cos(2*pi) = -1.0 (next midnight at time = 1.0)
-    direction.y = -glm::cos(angle);
-
-    // Use sin(angle) for east-west movement along the X-axis.
+    direction.y = glm::cos(angle); // FIX: Use positive cos. cos(0)=1 (high), cos(pi)=-1 (low)
     direction.x = glm::sin(angle);
-    
-    // Optional: Tilt the sun's path on the Z-axis so it's not directly overhead.
-    direction.z = 0.3f;
-
-    // Return a normalized vector, as is standard for directions.
-    return glm::normalize(direction);
+    direction.z = 0.3f; 
+    return glm::normalize(direction); // Light direction now comes from above
 }
 
 void World::update(float deltaTime) {
@@ -395,7 +329,7 @@ void World::update(float deltaTime) {
     {
         std::lock_guard<std::mutex> lock(m_ChunkMutex);
         for (auto const& [pos, chunk] : m_Chunks) {
-            if (chunk && chunk->isReadyForGpu()) {
+            if (chunk && chunk->getGpuStatus() == Chunk::GpuStatus::ReadyForUpload) {
                 chunk->uploadToGpu();
             }
         }
@@ -795,14 +729,55 @@ glm::vec3 World::getSpawnPoint() const {
     return glm::vec3(0.0f, spawnY + 2.0f, 0.0f);
 }
 
+void World::renderCelestials(Luminumbra::Rendering::Shader& celestialShader, const glm::mat4& view, const glm::mat4& projection) const {
+    glDepthFunc(GL_LEQUAL);
+    celestialShader.use();
+
+    // The celestial.vert shader handles removing translation
+    celestialShader.setMat4("u_projection", projection);
+    celestialShader.setMat4("u_view", view);
+
+    glm::vec3 sunDir = getSunDirection();
+
+    // --- Render Stars ---
+    float starBrightness = glm::smoothstep(0.0f, -0.25f, sunDir.y);
+    if (starBrightness > 0.01f) {
+        celestialShader.setMat4("u_model", glm::mat4(1.0f));
+        celestialShader.setVec3("u_objectColor", glm::vec3(1.0f, 1.0f, 0.95f));
+        celestialShader.setFloat("u_brightness", starBrightness);
+        glBindVertexArray(m_StarVAO);
+        glDrawArrays(GL_POINTS, 0, m_StarVertexCount);
+    }
+    
+    // --- Render Sun ---
+    glm::mat4 model = glm::translate(glm::mat4(1.0f), -sunDir * 100.0f);
+    model = glm::scale(model, glm::vec3(30.0f)); // Sun size
+    celestialShader.setMat4("u_model", model);
+    celestialShader.setVec3("u_objectColor", glm::vec3(1.0f, 1.0f, 0.8f));
+    celestialShader.setFloat("u_brightness", 1.0f);
+    glBindVertexArray(m_SunVAO);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    
+    // --- Render Moon ---
+    model = glm::translate(glm::mat4(1.0f), sunDir * 100.0f); 
+    model = glm::scale(model, glm::vec3(20.0f)); // Moon size
+    celestialShader.setMat4("u_model", model);
+    celestialShader.setVec3("u_objectColor", glm::vec3(0.8f, 0.85f, 0.9f));
+    celestialShader.setFloat("u_brightness", 1.0f);
+    glBindVertexArray(m_MoonVAO);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+
+    glBindVertexArray(0);
+    glDepthFunc(GL_LESS);
+}
+
 void World::renderTerrain(Rendering::Shader& shader, const glm::vec3& viewPos) const {
     for (const auto& pair : m_Chunks) {
         const auto& chunk = pair.second;
-        if (chunk) {
+        if (chunk && chunk->getGpuStatus() == Chunk::GpuStatus::ReadyForUpload) {
             float distance = getChunkDistance(pair.first, viewPos);
             if (distance <= VIEW_DISTANCE * Chunk::CHUNK_SIZE) {
-                // FIX: Changed "model" to "u_model" to match the shader
-                shader.setMat4("u_model", chunk->getModelMatrix()); 
+                shader.setMat4("u_model", chunk->getModelMatrix()); // Corrected uniform name
                 chunk->renderTerrain();
             }
         }
@@ -811,76 +786,83 @@ void World::renderTerrain(Rendering::Shader& shader, const glm::vec3& viewPos) c
 
 void World::renderWater(Rendering::Shader& shader, const glm::vec3& viewPos) const {
     for (const auto& [position, chunk] : m_Chunks) {
-        // Set the unique model matrix for this specific chunk
-        shader.setMat4("u_Model", chunk->getModelMatrix());
-        
-        // Now tell the chunk to draw itself
-        chunk->renderWater(); 
+        if(chunk && chunk->getGpuStatus() == Chunk::GpuStatus::ReadyForUpload){
+             shader.setMat4("u_model", chunk->getModelMatrix()); // Corrected uniform name
+             chunk->renderWater(); 
+        }
     }
 }
 
 void World::renderFoliage(Luminumbra::Rendering::Shader& foliageShader) const {
-    foliageShader.use();
-    foliageShader.setMat4("projection", m_Player->getCamera().getProjectionMatrix());
-    foliageShader.setMat4("view", m_Player->getCamera().getViewMatrix());
+    // Shader is already bound by the Engine's renderWorld function.
+    // View, projection, and other global uniforms are also already set.
 
-    std::vector<glm::mat4> treeMatrices;
-    std::vector<glm::mat4> bushMatrices;
-
-    // Collect all instance data from visible chunks
-    for (const auto& pair : m_Chunks) {
-        const auto& chunk = pair.second;
-        if (chunk) {
-            float distance = getChunkDistance(pair.first, m_Player->getPosition());
-            if (distance <= (VIEW_DISTANCE - 1) * Chunk::CHUNK_SIZE) {
-                for (const auto& inst : chunk->getTreeInstances()) {
-                    glm::mat4 model = glm::translate(chunk->getModelMatrix(), inst.position);
-                    model = glm::rotate(model, inst.rotationY, glm::vec3(0, 1, 0));
-                    model = glm::scale(model, glm::vec3(inst.scale));
-                    treeMatrices.push_back(model);
-                }
-                for (const auto& inst : chunk->getBushInstances()) {
-                    glm::mat4 model = glm::translate(chunk->getModelMatrix(), inst.position);
-                    model = glm::rotate(model, inst.rotationY, glm::vec3(0, 1, 0));
-                    model = glm::scale(model, glm::vec3(inst.scale));
-                    bushMatrices.push_back(model);
-                }
-            }
-        }
-    }
-
-    if (treeMatrices.empty() && bushMatrices.empty()) return;
-
+    // This VBO will be updated for each chunk that has foliage.
     glBindBuffer(GL_ARRAY_BUFFER, m_FoliageInstanceVBO);
-    glBufferData(GL_ARRAY_BUFFER, (treeMatrices.size() + bushMatrices.size()) * sizeof(glm::mat4), nullptr, GL_STREAM_DRAW);
 
-    // Render Trees
-    if (!treeMatrices.empty()) {
-        glBufferSubData(GL_ARRAY_BUFFER, 0, treeMatrices.size() * sizeof(glm::mat4), treeMatrices.data());
-        // Trunk
-        foliageShader.setVec3("objectColor", glm::vec3(0.4f, 0.26f, 0.13f));
-        glBindVertexArray(m_TreeTrunkVAO);
-        glDrawElementsInstanced(GL_TRIANGLES, m_TreeTrunkIndexCount, GL_UNSIGNED_INT, 0, treeMatrices.size());
-        // Leaves
-        foliageShader.setVec3("objectColor", glm::vec3(0.13f, 0.54f, 0.13f));
-        glBindVertexArray(m_TreeLeavesVAO);
-        glDrawElementsInstanced(GL_TRIANGLES, m_TreeLeavesIndexCount, GL_UNSIGNED_INT, 0, treeMatrices.size());
-    }
+    // Iterate through visible chunks
+    for (const auto& [pos, chunk] : m_Chunks) {
+        if (!chunk || chunk->getGpuStatus() != Chunk::GpuStatus::Uploaded) {
+            continue;
+        }
 
-    // Render Bushes
-    if (!bushMatrices.empty()) {
-        glBufferSubData(GL_ARRAY_BUFFER, treeMatrices.size() * sizeof(glm::mat4), bushMatrices.size() * sizeof(glm::mat4), bushMatrices.data());
-        foliageShader.setVec3("objectColor", glm::vec3(0.2f, 0.6f, 0.2f));
-        glBindVertexArray(m_BushVAO);
-        glDrawElementsInstanced(GL_TRIANGLES, m_BushIndexCount, GL_UNSIGNED_INT, 0, bushMatrices.size());
+        float distance = getChunkDistance(pos, m_Player->getPosition());
+        if (distance > (VIEW_DISTANCE - 1) * Chunk::CHUNK_SIZE) {
+            continue;
+        }
+
+        // Set the chunk's model matrix once for all instances within it.
+        foliageShader.setMat4("u_model", chunk->getModelMatrix());
+
+        // --- Render Trees for this chunk ---
+        const auto& treeInstances = chunk->getTreeInstances();
+        if (!treeInstances.empty()) {
+            // Map the instance transforms directly to the VBO
+            std::vector<glm::mat4> treeTransforms;
+            treeTransforms.reserve(treeInstances.size());
+            for(const auto& inst : treeInstances) {
+                treeTransforms.push_back(inst.transform);
+            }
+            
+            // Upload data for this chunk's trees
+            glBufferSubData(GL_ARRAY_BUFFER, 0, treeTransforms.size() * sizeof(glm::mat4), treeTransforms.data());
+
+            // Draw trunks
+            foliageShader.setVec3("u_objectColor", glm::vec3(0.4f, 0.26f, 0.13f));
+            glBindVertexArray(m_TreeTrunkVAO);
+            glDrawElementsInstanced(GL_TRIANGLES, m_TreeTrunkIndexCount, GL_UNSIGNED_INT, 0, treeInstances.size());
+            
+            // Draw leaves
+            foliageShader.setVec3("u_objectColor", glm::vec3(0.13f, 0.54f, 0.13f));
+            glBindVertexArray(m_TreeLeavesVAO);
+            glDrawElementsInstanced(GL_TRIANGLES, m_TreeLeavesIndexCount, GL_UNSIGNED_INT, 0, treeInstances.size());
+        }
+
+        // --- Render Bushes for this chunk ---
+        const auto& bushInstances = chunk->getBushInstances();
+        if (!bushInstances.empty()) {
+            std::vector<glm::mat4> bushTransforms;
+            bushTransforms.reserve(bushInstances.size());
+            for(const auto& inst : bushInstances) {
+                bushTransforms.push_back(inst.transform);
+            }
+
+            // Upload data for this chunk's bushes
+            glBufferSubData(GL_ARRAY_BUFFER, 0, bushTransforms.size() * sizeof(glm::mat4), bushTransforms.data());
+
+            // Draw bushes
+            foliageShader.setVec3("u_objectColor", glm::vec3(0.2f, 0.6f, 0.2f));
+            glBindVertexArray(m_BushVAO);
+            glDrawElementsInstanced(GL_TRIANGLES, m_BushIndexCount, GL_UNSIGNED_INT, 0, bushInstances.size());
+        }
     }
 
     glBindVertexArray(0);
 }
 
-void World::renderSkyboxAndClouds(const glm::mat4& view, const glm::mat4& projection) const {
-    // m_Skybox->render(view, projection);
-    m_CloudManager->render(view, projection);
+void World::renderSkyboxAndClouds(const Rendering::Camera& camera) const {
+    // m_Skybox->render(camera.getViewMatrix(), camera.getProjectionMatrix());
+    m_CloudManager->render(camera); // Pass the full camera object
 }
 
 bool World::isSolid(const glm::vec3& worldPosition) const {

@@ -1,29 +1,32 @@
-#version 410
+#version 410 core
+layout (location = 0) in vec3 a_Position;
+layout (location = 1) in vec3 a_Normal;
+layout (location = 2) in mat4 a_InstanceMatrix; // This will now be the instance's LOCAL transform
 
-// Vertex attributes from C++
-layout (location = 0) in vec3 aPos;
-layout (location = 1) in vec3 aNormal;
-layout (location = 2) in mat4 aInstanceMatrix;
+out vec3 v_FragPos;
+out vec3 v_Normal;
+out vec4 v_FragPosLightSpace;
 
-// Outputs to Fragment Shader
-out vec3 FragPos;
-out vec3 Normal;
-out vec4 FragPosLightSpace;
-
-// Uniforms
-uniform mat4 projection;
-uniform mat4 view;
-uniform mat4 lightSpaceMatrix;
+uniform mat4 u_view;
+uniform mat4 u_projection;
+uniform mat4 u_lightSpaceMatrix;
+uniform vec4 u_clipPlane;
+uniform mat4 u_model; // NEW: The chunk's model matrix
 
 void main()
 {
-    // Transform position and normal to world space
-    FragPos = vec3(aInstanceMatrix * vec4(aPos, 1.0));
-    Normal = mat3(transpose(inverse(aInstanceMatrix))) * aNormal;
-    
-    // Transform world position to light space for shadow mapping
-    FragPosLightSpace = lightSpaceMatrix * vec4(FragPos, 1.0);
-    
-    // Final screen position
-    gl_Position = projection * view * vec4(FragPos, 1.0);
+    // Combine the chunk's model matrix with the instance's local transform
+    mat4 finalModelMatrix = u_model * a_InstanceMatrix;
+
+    vec4 worldPos = finalModelMatrix * vec4(a_Position, 1.0);
+    v_FragPos = worldPos.xyz;
+
+    // Correctly calculate the normal using the final combined matrix
+    v_Normal = mat3(transpose(inverse(finalModelMatrix))) * a_Normal;
+
+    v_FragPosLightSpace = u_lightSpaceMatrix * worldPos;
+
+    gl_Position = u_projection * u_view * worldPos;
+
+    gl_ClipDistance[0] = dot(worldPos, u_clipPlane);
 }

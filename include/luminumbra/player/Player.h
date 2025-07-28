@@ -114,9 +114,9 @@ private:
     // Stamina
     float m_Stamina = 100.0f;
     float m_MaxStamina = 100.0f;
-    float m_StaminaDrainRate = 20.0f;
+    float m_StaminaDrainRate = 2.0f;
     float m_StaminaRegenRate = 15.0f;
-    float m_StaminaRegenDelay = 1.0f;
+    float m_StaminaRegenDelay = 5.0f;
     float m_TimeSinceStaminaUse = 0.0f;
     
     // Crouch
