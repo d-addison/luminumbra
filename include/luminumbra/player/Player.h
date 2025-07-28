@@ -76,6 +76,7 @@ private:
     glm::vec3 calculateSurfaceNormal(const World::World& world, const glm::vec3& position) const;
     bool checkForClimbableSurface(const World::World& world);
     void updateSliding(float deltaTime);
+    void handleAutoStepUp(const World::World& world);
 
     // Camera
     Rendering::Camera m_Camera;
