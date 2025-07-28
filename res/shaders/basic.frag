@@ -34,13 +34,11 @@ float ShadowCalculation(vec4 fragPosLightSpace)
     }
     shadow /= 9.0;
     
-    // FIX: Return the calculated shadow value
     return shadow;
 }
 
 void main()
 {
-    // ... (lighting color calculation code is correct) ...
     vec3 lightDir = normalize(-sunDirection);
     vec3 dayLightColor = vec3(1.0, 0.95, 0.85);
     vec3 sunriseSunsetColor = vec3(1.0, 0.6, 0.3);
@@ -69,7 +67,6 @@ void main()
     float spec = pow(max(dot(viewDir, reflectDir), 0.0), 32);
     vec3 specular = specularStrength * spec * lightColor;
     
-    // FIX: Uncomment the shadow calculation and use it to affect lighting
     float shadow = ShadowCalculation(FragPosLightSpace);
     vec3 lighting = (ambient + (1.0 - shadow) * (diffuse + specular));
     

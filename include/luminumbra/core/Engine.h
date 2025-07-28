@@ -54,15 +54,15 @@ private:
     
     void StartNewGame(const std::string& saveName, const std::string& seed);
     void SaveGame() const;
-    void LoadGame(const std::string& slotName); // Add this
-    std::vector<std::string> ListSaveGames() const; // Add this
+    void LoadGame(const std::string& slotName);
+    std::vector<std::string> ListSaveGames() const;
     void QuitGame();
     
     // --- Core Components ---
     GLFWwindow* m_Window = nullptr;
     int m_ScreenWidth, m_ScreenHeight;
     std::unique_ptr<Luminumbra::UI::UIManager> m_UIManager;
-    std::unique_ptr<Luminumbra::World::World> m_World; // The currently active world
+    std::unique_ptr<Luminumbra::World::World> m_World;
 
     // --- Rendering & Debug ---
     std::unique_ptr<Luminumbra::Rendering::Shader> m_BasicShader;
@@ -123,11 +123,11 @@ private:
     // --- Game Settings ---
     struct GameSettings {
         bool vsync = true;
-        int shadowQuality = 2;
+        int shadowQuality = 4;
         int textureFiltering = 1;
-        float masterVolume = 1.0f;
-        float musicVolume = 0.7f;
-        float effectsVolume = 0.9f;
+        float masterVolume = 0.6f;
+        float musicVolume = 0.3f;
+        float effectsVolume = 0.5f;
         float mouseSensitivity = 0.1f;
         bool invertY = false;
     };

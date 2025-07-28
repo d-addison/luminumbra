@@ -12,6 +12,7 @@
 #include <glad/gl.h>
 #include <set>
 #include "luminumbra/core/SaveData.h"
+#include "luminumbra/audio/AudioManager.h"
 #include "luminumbra/rendering/particles/Particle.h" 
 
 // Forward declarations
@@ -53,6 +54,7 @@ struct BurningTree {
     glm::ivec3 chunkCoord; // The coordinate of the chunk the tree is in
     size_t treeIndex;      // The index of the tree in the chunk's instance vector
     float timeBurning = 0.0f;
+    uint32_t soundID = 0; // ID for the looping fire sound
     
     // For using in std::set/map
     bool operator==(const BurningTree& other) const {
@@ -100,6 +102,8 @@ public:
     void startFireNearPlayer();
     void teleportToEffect(const std::string& effect);
 
+    Audio::SoundEvent getFootstepSoundForPosition(const glm::vec3& position) const;
+
 private:
     void loadChunksAroundPosition(const glm::vec3& position);
     void unloadDistantChunks(const glm::vec3& position);
@@ -109,6 +113,8 @@ private:
 
     void initCelestials();
     void initFoliage();
+
+     Audio::SoundEvent getAmbientSoundForBiome(const char* biomeName, bool isNight) const;
 
     GLuint m_SunVAO, m_SunVBO;
     GLuint m_MoonVAO, m_MoonVBO;
@@ -169,6 +175,11 @@ private:
         glm::vec3(-100.0f, 120.0f, -100.0f),
         glm::vec3(0.0f, 110.0f, 200.0f)
     };
+
+    uint32_t m_WeatherSoundID = 0;
+    float m_RainSplashTimer = 0.0f;
+    uint32_t m_AmbientSoundID = 0;
+    Audio::SoundEvent m_CurrentAmbientEvent = Audio::SoundEvent::UIClick;
 };
 
 } // namespace Luminumbra::World

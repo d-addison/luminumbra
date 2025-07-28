@@ -2,10 +2,12 @@
 #include "luminumbra/world/World.h"
 #include "luminumbra/rendering/Skybox.h"
 #include "luminumbra/rendering/CloudManager.h"
+#include "luminumbra/audio/AudioManager.h"
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 #include <GLFW/glfw3.h>
+
 
 // For std::snprintf
 #include <cstdio>
@@ -60,6 +62,9 @@ namespace Luminumbra {
         }
 
         void UIManager::ShowSplashScreen() {
+            if (m_SplashScreenMusicID == 0) {
+                m_SplashScreenMusicID = Audio::AudioManager::getInstance().playLoopingSound(Audio::SoundEvent::MusicSplashScreen);
+            }
             ImGuiIO& io = ImGui::GetIO();
             ImVec2 center = ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
             ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
@@ -78,6 +83,16 @@ namespace Luminumbra {
         }
 
         void UIManager::ShowMainMenu(const std::function<void()>& newGameCallback, const std::function<void()>& loadGameCallback, const std::function<void()>& quitCallback) {
+            // Stop splash music when the main menu appears
+            if (m_SplashScreenMusicID != 0) {
+                Audio::AudioManager::getInstance().stopSound(m_SplashScreenMusicID);
+                m_SplashScreenMusicID = 0;
+            }
+            // Start main menu music
+            if (m_MainMenuMusicID == 0) {
+                m_MainMenuMusicID = Audio::AudioManager::getInstance().playLoopingSound(Audio::SoundEvent::MusicMainMenu);
+            }
+
             ImGui::Begin("Main Menu");
             if (ImGui::Button("New Game")) {
                 newGameCallback();

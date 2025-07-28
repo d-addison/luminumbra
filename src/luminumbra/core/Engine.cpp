@@ -11,6 +11,7 @@
 #include "luminumbra/world/Chunk.h"
 #include "luminumbra/core/SaveData.h"
 #include "luminumbra/core/InputManager.h"
+#include "luminumbra/audio/AudioManager.h"
 #include <glad/gl.h> 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -55,6 +56,7 @@ Engine::Engine(int width, int height, const char* title) : m_ScreenWidth(width),
     glViewport(0, 0, width, height);
 
     glfwSetWindowUserPointer(m_Window, this);
+    Audio::AudioManager::getInstance().init(); 
     initRendering();
     initFramebuffers();
     initInput();
@@ -297,6 +299,19 @@ void Engine::processInput() {
 }
 
 void Engine::update(float deltaTime) {
+    if (m_GameState == GameState::InGame && m_World && m_World->getPlayer()) {
+        auto& camera = m_World->getPlayer()->getCamera();
+        Audio::AudioManager::getInstance().setListenerPosition(camera.getPosition(), camera.getFront(), camera.getUp());
+        
+        // Pass settings to the audio manager
+        Audio::AudioManager::getInstance().setGroupVolume(Audio::SoundGroup::Master, m_Settings.masterVolume);
+        // Note: Music volume is handled in playMusic for simplicity, but could be grouped too.
+        Audio::AudioManager::getInstance().setGroupVolume(Audio::SoundGroup::Player, m_Settings.effectsVolume);
+        Audio::AudioManager::getInstance().setGroupVolume(Audio::SoundGroup::SFX, m_Settings.effectsVolume);
+        Audio::AudioManager::getInstance().setGroupVolume(Audio::SoundGroup::Ambience, m_Settings.effectsVolume * 0.6f); // Ambience is quieter
+    }
+    Audio::AudioManager::getInstance().update();
+
     switch (m_GameState) {
         case GameState::SplashScreen:
             m_SplashTime += deltaTime;
@@ -412,7 +427,6 @@ void Engine::renderPostProcess(GLuint sourceTexture, GLuint depthTexture) {
         m_DofShader->setFloat("farPlane", camera.getFarPlane());
     }
     else if (m_CurrentShader == m_GodRaysShader.get()) {
-        // NEW: Calculate sun position in screen space for god rays
         const auto& camera = m_World->getPlayer()->getCamera();
         // Project the sun's world position into normalized device coordinates (NDC)
         glm::vec4 sunClipSpace = camera.getProjectionMatrix() * camera.getViewMatrix() * glm::vec4(m_World->getSunDirection() * -1.0f, 0.0f);
@@ -621,8 +635,6 @@ void Engine::render() {
     // --- 0. SHADOW MAP PASS ---
     glm::mat4 lightProjection = glm::ortho(-50.0f, 50.0f, -50.0f, 50.0f, 1.0f, 150.0f);
     glm::vec3 lightPos = player->getPosition() - (sunDirection * 50.0f); // Increased distance slightly
-
-    // FIX: Make the light's view matrix robust
     glm::vec3 up = glm::vec3(0.0, 1.0, 0.0);
     // If the sun direction is nearly vertical, use a different 'up' vector to avoid issues
     if (glm::abs(glm::dot(sunDirection, up)) > 0.99f) {
@@ -639,14 +651,12 @@ void Engine::render() {
     glBindFramebuffer(GL_FRAMEBUFFER, m_DepthMapFBO);
     glClear(GL_DEPTH_BUFFER_BIT);
 
-    // FIX: Set culling to FRONT for the shadow pass to prevent peter panning
     glCullFace(GL_FRONT);
 
     // Render shadow-casting objects to the depth map
     m_World->renderTerrain(*m_DepthShader, player->getPosition());
     m_World->renderFoliage(*m_DepthShader);
 
-    // FIX: Crucially, set culling back to BACK for all subsequent render passes
     glCullFace(GL_BACK); 
     
     // Unbind the shadow map FBO

@@ -8,6 +8,7 @@
 #include <vector>
 #include <functional>
 #include "luminumbra/core/PostProcessSettings.h" 
+#include "luminumbra/audio/AudioManager.h"
 
 struct GLFWwindow;
 
@@ -96,6 +97,9 @@ namespace Luminumbra {
             int m_SelectedPhoto = -1;
 
             void ShowPostProcessingSettings(Core::PostProcessSettings& settings);
+
+            uint32_t m_SplashScreenMusicID = 0;
+            uint32_t m_MainMenuMusicID = 0;
         };
 
     } // namespace UI

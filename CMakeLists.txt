@@ -62,6 +62,10 @@ target_include_directories(fastnoise INTERFACE external/FastNoiseLite)
 add_library(stb INTERFACE)
 target_include_directories(stb INTERFACE external/stb)
 
+# minaudio
+add_library(minaudio INTERFACE)
+target_include_directories(minaudio INTERFACE external/minaudio)
+
 # --- Define Our Executable ---
 
 add_executable(Luminumbra ${LUMINUMBRA_SOURCES})
@@ -85,6 +89,7 @@ target_link_libraries(Luminumbra PRIVATE
     nlohmann_json
     fastnoise
     stb
+    minaudio
 
     # System libraries
     OpenGL::GL # Modern way to link OpenGL

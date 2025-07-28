@@ -6,6 +6,7 @@
 #include "luminumbra/rendering/CloudManager.h"
 #include "luminumbra/core/Debug.h"
 #include "luminumbra/rendering/particles/Particle.h"
+#include "luminumbra/audio/AudioManager.h"
 #include <glm/gtc/color_space.hpp>
 #include <algorithm>
 #include <cmath>
@@ -74,7 +75,7 @@ World::~World() {
             thread.join();
         }
     }
-    // NEW: Clean up foliage resources
+
     glDeleteVertexArrays(1, &m_TreeTrunkVAO);
     glDeleteBuffers(1, &m_TreeTrunkVBO);
     glDeleteBuffers(1, &m_TreeTrunkEBO);
@@ -271,7 +272,6 @@ void World::initFoliage() {
     glBindVertexArray(0);
 }
 
-// Add this new function to render the celestial objects each frame
 void World::renderCelestials(Luminumbra::Rendering::Shader& celestialShader, const glm::mat4& view, const glm::mat4& projection) const {
     glDepthFunc(GL_LEQUAL);
     celestialShader.use();
@@ -389,6 +389,23 @@ glm::vec3 World::getSunDirection() const {
     return glm::normalize(direction);
 }
 
+Audio::SoundEvent World::getAmbientSoundForBiome(const char* biomeName, bool isNight) const {
+    std::string biome(biomeName);
+    if (biome == "Forest") {
+        return isNight ? Audio::SoundEvent::AmbienceForestNight : Audio::SoundEvent::AmbienceForestDay;
+    }
+    if (biome == "Jungle" || biome == "Taiga") { // Use forest sounds for similar biomes for now
+        return isNight ? Audio::SoundEvent::AmbienceForestNight : Audio::SoundEvent::AmbienceForestDay;
+    }
+    if (biome == "Snowy Peaks" || biome == "Tundra") {
+        return Audio::SoundEvent::AmbienceWindLight; // A windy sound is great for cold, sparse areas
+    }
+    // Add more mappings for Swamp, Cave, Ocean, etc.
+    
+    // Fallback
+    return isNight ? Audio::SoundEvent::AmbienceForestNight : Audio::SoundEvent::AmbienceForestDay;
+}
+
 void World::update(float deltaTime) {
     // 1. GPU UPLOAD STAGE
     // Upload mesh data for newly generated chunks.
@@ -409,6 +426,23 @@ void World::update(float deltaTime) {
         m_TimeOfDay -= 1.0f;
     }
 
+    // 2.1 AUDIO LOGIC
+    bool isNight = getSunDirection().y > 0.1f; // Check if sun is below the horizon
+    const char* currentBiome = getBiome(viewerPosition);
+    Audio::SoundEvent desiredSound = getAmbientSoundForBiome(currentBiome, isNight);
+
+    if (desiredSound != m_CurrentAmbientEvent) {
+        // The biome or time of day has changed, so we need a new sound.
+        if (m_AmbientSoundID != 0) {
+            Audio::AudioManager::getInstance().stopSound(m_AmbientSoundID);
+        }
+        m_AmbientSoundID = Audio::AudioManager::getInstance().playLoopingSound(desiredSound, viewerPosition);
+        m_CurrentAmbientEvent = desiredSound;
+    } else if (m_AmbientSoundID != 0) {
+        // Update the position of the ambient sound to follow the player
+        Audio::AudioManager::getInstance().updateSoundPosition(m_AmbientSoundID, viewerPosition);
+    }
+
     // 3. GAMEPLAY & EFFECTS LOGIC
     // A) Emit new particles based on the current world state (rain, fire, etc.).
     updateParticles(deltaTime);
@@ -422,6 +456,12 @@ void World::update(float deltaTime) {
                 Luminumbra::Rendering::ParticleProps splashProps = m_ParticleSystem->getPresetProperties(Luminumbra::Rendering::ParticleType::Splash);
                 splashProps.position = event.position;
                 m_ParticleSystem->emit(splashProps);
+            }
+
+            if (m_RainSplashTimer <= 0.0f) {
+                Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::RainSplash, event.position);
+                m_RainSplashTimer = 0.05f; // Reset timer: at most 20 splash sounds per second
+                break; // IMPORTANT: Stop processing other rain deaths this frame.
             }
         }
     }
@@ -440,7 +480,22 @@ void World::update(float deltaTime) {
 }
 
 void World::setWeather(WeatherType type) {
+    if (m_CurrentWeather == type) return; // No change
+
     m_CurrentWeather = type;
+
+    // Stop the old weather sound if it exists
+    if (m_WeatherSoundID != 0) {
+        Audio::AudioManager::getInstance().stopSound(m_WeatherSoundID);
+        m_WeatherSoundID = 0;
+    }
+
+    // Start a new sound
+    if (type == WeatherType::Rainy) {
+        // Rain is ambient, so it plays at the listener's position (no specific vec3 needed for now)
+        // A better implementation would attach it to the listener. For now, this is fine.
+        m_WeatherSoundID = Audio::AudioManager::getInstance().playLoopingSound(Audio::SoundEvent::RainLoop, m_Player->getPosition());
+    }
 }
 
 void World::startFireNearPlayer() {
@@ -466,8 +521,15 @@ void World::startFireNearPlayer() {
     }
 
     if (foundTree) {
-        // Check if the tree is already in the vector before adding it
         if (std::find(m_BurningTrees.begin(), m_BurningTrees.end(), closestTree) == m_BurningTrees.end()) {
+            // Get the world position of the tree to play the sound
+            auto chunkIt = m_Chunks.find(closestTree.chunkCoord);
+            if (chunkIt != m_Chunks.end()) {
+                glm::vec3 treePos = glm::vec3(chunkIt->second->getModelMatrix() * glm::vec4(chunkIt->second->getTreeInstances()[closestTree.treeIndex].position, 1.0));
+                
+                // Play looping fire sound and store its ID
+                closestTree.soundID = Audio::AudioManager::getInstance().playLoopingSound(Audio::SoundEvent::ObjectFireLoop, treePos);
+            }
             m_BurningTrees.push_back(closestTree);
         }
     }
@@ -491,6 +553,30 @@ void World::teleportToEffect(const std::string& effect) {
     }
     
     m_Player->setPosition(targetPos);
+}
+
+Audio::SoundEvent World::getFootstepSoundForPosition(const glm::vec3& position) const {
+    // Check the block directly under the given position
+    glm::vec3 blockPos = position - glm::vec3(0.0f, 0.5f, 0.0f);
+    
+    // This is a simplified check. A better system would have chunks store material types per block.
+    // For now, we can derive it from the biome.
+    const char* biomeName = getBiome(blockPos);
+    std::string biome(biomeName);
+
+    if (biome == "Snowy Peaks" || biome == "Tundra") {
+        return Audio::SoundEvent::FootstepSnow;
+    }
+    if (biome == "Rocky Mountains") {
+        return Audio::SoundEvent::FootstepStone;
+    }
+    // In a forest, it could be dirt or grass
+    if (biome == "Forest" || biome == "Plains") {
+        // You could add more logic here, e.g., check noise value for patches of dirt vs grass
+        return Audio::SoundEvent::FootstepGrass;
+    }
+
+    return Audio::SoundEvent::FootstepDirt; // Default fallback
 }
 
 void World::updateParticles(float deltaTime) {
@@ -756,6 +842,15 @@ void World::updateParticles(float deltaTime) {
 
         // Handle rain extinguishing the fire
         if (m_CurrentWeather == WeatherType::Rainy) {
+            if (tree.soundID != 0) {
+                Audio::AudioManager::getInstance().stopSound(tree.soundID);
+                tree.soundID = 0; 
+                
+                // NEW: Play the extinguish sound effect
+                // NOTE: You'll need to add SoundEvent::ObjectFireExtinguish and map it
+                // to "res/audio/Fire and Explosions/Fire Torch Sizzle Water Extinguish 01.wav"
+                Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::ObjectFireExtinguish, treePos);
+            }
             // Final puff of volumetric smoke as fire goes out
             for (int i = 0; i < 15; ++i) {
                 Luminumbra::Rendering::ParticleProps smokeProps = 
@@ -771,6 +866,8 @@ void World::updateParticles(float deltaTime) {
             }
         }
     }
+    m_BurningTrees.erase(std::remove_if(m_BurningTrees.begin(), m_BurningTrees.end(), 
+        [this](const BurningTree& tree){ return m_CurrentWeather == WeatherType::Rainy; }), m_BurningTrees.end());
 }
 
 Luminumbra::Player::Player* World::getPlayer() const {
@@ -801,7 +898,6 @@ void World::renderTerrain(Rendering::Shader& shader, const glm::vec3& viewPos) c
         if (chunk) {
             float distance = getChunkDistance(pair.first, viewPos);
             if (distance <= VIEW_DISTANCE * Chunk::CHUNK_SIZE) {
-                // FIX: Changed "model" to "u_model" to match the shader
                 shader.setMat4("u_model", chunk->getModelMatrix()); 
                 chunk->renderTerrain();
             }
@@ -916,8 +1012,6 @@ void World::loadChunksAroundPosition(const glm::vec3& position) {
     
     std::lock_guard<std::mutex> queueLock(m_QueueMutex);
 
-    // --- NEW: Load chunks in a simple square pattern ---
-    // This is much more reliable than the complex spiral algorithm.
     const int VIEW_DISTANCE = 16; // Example view distance in chunks
     const int LOD_DISTANCE = 8;  // Example LOD distance in chunks
 

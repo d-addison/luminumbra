@@ -17,7 +17,6 @@ uniform mat4 u_lightSpaceMatrix;
 
 void main()
 {
-    // FIX: Use the correct, case-sensitive uniform names
     v_FragPos = vec3(u_model * vec4(a_Pos, 1.0));
     v_Normal = mat3(transpose(inverse(u_model))) * a_Normal;
     v_Color = a_Color;

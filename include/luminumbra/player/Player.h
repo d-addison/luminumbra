@@ -148,6 +148,15 @@ private:
     float m_FallStartY = 0.0f;
     bool m_WasInAir = false;
     float m_TerminalVelocity = -50.0f;
+
+    float m_FootstepSoundID  = 0.0f;
+    uint32_t m_SlideSoundID = 0;
+    uint32_t m_GlideSoundID = 0;
+    float m_LastYVelocity = 0.0f;
+
+    float m_FootstepTimer = 0.0f;
+
+    bool m_JustRanOutOfStamina = false;
 };
 
 } // namespace Luminumbra::Player

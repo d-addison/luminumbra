@@ -1,4 +1,5 @@
 #include "luminumbra/player/Player.h"
+#include "luminumbra/audio/AudioManager.h"
 #include <algorithm>
 #include <cmath>
 
@@ -80,6 +81,7 @@ void Player::processAction(Action action, const World::World& world) {
                     m_Velocity.y = m_JumpForce;
                     m_IsOnGround = false;
                     m_TimeSinceLastGrounded = m_CoyoteTime; // Prevent double-jumps
+                    Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::PlayerJump, m_Position);
                 }
             }
             break;
@@ -143,15 +145,13 @@ void Player::processMovement(const std::vector<Movement>& directions, float delt
     }
 }
 
-
-// --- NEW: Main Physics & State Update ---
-
 void Player::update(float deltaTime, const World::World& world) {
     if (m_NoclipEnabled) {
-        // In noclip, we only update camera position. All movement is handled by processMovement.
         m_Camera.setPosition(glm::vec3(m_Position.x, m_Position.y + m_CurrentEyeHeight, m_Position.z));
         return;
     }
+
+    m_LastYVelocity = m_Velocity.y;
 
     // Update internal states (crouching, stamina, sliding, climbing, etc.)
     handleAutoStepUp(world);
@@ -177,6 +177,14 @@ void Player::update(float deltaTime, const World::World& world) {
 
     // Resolve collisions with the world
     resolveCollisions(world, deltaTime);
+
+    // Update looping sound positions
+    if (m_SlideSoundID != 0) {
+        Audio::AudioManager::getInstance().updateSoundPosition(m_SlideSoundID, m_Position);
+    }
+    if (m_GlideSoundID != 0) {
+        Audio::AudioManager::getInstance().updateSoundPosition(m_GlideSoundID, m_Position);
+    }
     
     // Final camera update
     m_Camera.setPosition(glm::vec3(m_Position.x, m_Position.y + m_CurrentEyeHeight, m_Position.z));
@@ -250,6 +258,27 @@ void Player::applyMovement(const glm::vec3& wishDir, float deltaTime) {
 }
 
 void Player::updateState(float deltaTime, const World::World& world) {
+    // --- Footstep Sound Logic ---
+    // 1. If our footstep sound ID is valid, check if it has finished playing.
+    float horizontalSpeed = glm::length(glm::vec2(m_Velocity.x, m_Velocity.z));
+    if (m_IsOnGround && horizontalSpeed > 1.5f) {
+        m_FootstepTimer -= deltaTime;
+        if (m_FootstepTimer <= 0.0f) {
+            // Get the correct sound for the surface we're on
+            Audio::SoundEvent stepSound = world.getFootstepSoundForPosition(m_Position);
+            Audio::AudioManager::getInstance().playSound(stepSound, m_Position);
+            
+            // Reset timer based on sprint/walk speed
+            m_FootstepTimer = m_IsSprinting ? 0.35f : 0.6f;
+        }
+    }
+
+    // 2. Check if we should play a new footstep sound.
+    if (m_IsOnGround && horizontalSpeed > 1.5f && m_FootstepSoundID == 0) {
+        // We are on the ground, moving, and no other footstep sound is playing.
+        // The sound played here is a full walking sequence, not a single step.
+        m_FootstepSoundID = Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::FootstepDirt, m_Position);
+    }
     m_TimeSinceLastGrounded = m_IsOnGround ? 0.0f : m_TimeSinceLastGrounded + deltaTime;
     
     updateStamina(deltaTime);
@@ -272,6 +301,22 @@ void Player::updateState(float deltaTime, const World::World& world) {
 
     // Update sliding state
     updateSliding(deltaTime);
+
+    // --- Sliding Sound ---
+    if (m_IsSliding && m_SlideSoundID == 0) {
+        m_SlideSoundID = Audio::AudioManager::getInstance().playLoopingSound(Audio::SoundEvent::SlideLoop, m_Position);
+    } else if (!m_IsSliding && m_SlideSoundID != 0) {
+        Audio::AudioManager::getInstance().stopSound(m_SlideSoundID);
+        m_SlideSoundID = 0;
+    }
+
+    // --- Gliding Sound ---
+    if (m_IsGliding && m_GlideSoundID == 0) {
+        m_GlideSoundID = Audio::AudioManager::getInstance().playLoopingSound(Audio::SoundEvent::GlideLoop, m_Position);
+    } else if (!m_IsGliding && m_GlideSoundID != 0) {
+        Audio::AudioManager::getInstance().stopSound(m_GlideSoundID);
+        m_GlideSoundID = 0;
+    }
 
     // Update fall distance tracking
     if (!m_IsOnGround && !m_IsClimbing && !m_IsGliding) {
@@ -331,6 +376,14 @@ void Player::updateStamina(float deltaTime) {
             m_Stamina = std::min(m_MaxStamina, m_Stamina + m_StaminaRegenRate * deltaTime);
         }
     }
+
+    if (m_Stamina <= 0.0f && !m_JustRanOutOfStamina) {
+        Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::PlayerOutOfStamina, m_Position);
+        m_JustRanOutOfStamina = true;
+    } else if (m_Stamina > 0.0f) {
+        // Reset the flag once stamina starts regenerating.
+        m_JustRanOutOfStamina = false;
+    }
 }
 
 void Player::updateSliding(float deltaTime) {
@@ -384,6 +437,7 @@ glm::vec3 Player::calculateSurfaceNormal(const World::World& world, const glm::v
 
 void Player::resolveCollisions(const World::World& world, float deltaTime) {
     glm::vec3 halfSize = m_PlayerSize * 0.5f;
+    bool wasOnGround = m_IsOnGround;
 
     // --- Y-axis (Vertical) ---
     m_Position.y += m_Velocity.y * deltaTime;
@@ -419,6 +473,17 @@ void Player::resolveCollisions(const World::World& world, float deltaTime) {
             m_Position.y = std::floor(headPos.y) - m_PlayerSize.y - 0.01f; // Snap below ceiling
             m_Velocity.y = 0;
         }
+    }
+
+    // --- Landing Sound Logic ---
+    if (!wasOnGround && m_IsOnGround) {
+        if (m_FallDistance > 20.0f) { // A long, damaging fall
+            Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::PlayerHurt, m_Position);
+            // You would also apply damage here
+        } else if (m_FallDistance > 2.0f) { // A standard landing
+            Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::PlayerLand, m_Position);
+        }
+        // A tiny hop (fallDistance <= 2.0f) makes no sound.
     }
 
     // --- X-axis (Horizontal) ---

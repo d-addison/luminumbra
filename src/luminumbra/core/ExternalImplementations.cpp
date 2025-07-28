@@ -5,3 +5,7 @@
 
 #define FNL_IMPL 
 #include <FastNoiseLite.h>
+
+// Add these two lines for miniaudio
+#define MINIAUDIO_IMPLEMENTATION
+#include <minaudio.h>
