@@ -4,8 +4,14 @@ project(Luminumbra LANGUAGES CXX C)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+
 # --- Automatically find all our source files ---
 file(GLOB_RECURSE LUMINUMBRA_SOURCES "src/luminumbra/*.cpp")
+
+message(STATUS "Found source files:")
+foreach(SOURCE ${LUMINUMBRA_SOURCES})
+    message(STATUS "  ${SOURCE}")
+endforeach()
 
 # --- Define Dependencies as Targets for Cleaner Linking ---
 

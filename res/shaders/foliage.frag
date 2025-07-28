@@ -6,6 +6,7 @@ out vec4 FragColor;
 // Inputs from Vertex Shader
 in vec3 FragPos;
 in vec3 Normal;
+in float v_ClipDistance;
 in vec4 FragPosLightSpace;
 
 // Uniforms
@@ -17,6 +18,9 @@ uniform sampler2D shadowMap;
 
 float calculateShadow()
 {
+    if (v_ClipDistance < 0.0) {
+        discard;
+    }
     // Perform perspective divide to get normalized device coordinates
     vec3 projCoords = FragPosLightSpace.xyz / FragPosLightSpace.w;
     

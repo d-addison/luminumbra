@@ -98,6 +98,7 @@ public:
     void renderCelestials(Luminumbra::Rendering::Shader& celestialShader, const glm::mat4& view, const glm::mat4& projection) const;
     void setWeather(WeatherType type);
     void startFireNearPlayer();
+    void teleportToEffect(const std::string& effect);
 
 private:
     void loadChunksAroundPosition(const glm::vec3& position);
@@ -151,6 +152,23 @@ private:
     WeatherType m_CurrentWeather = WeatherType::Clear;
     float m_LeafEmitTimer = 0.0f;
     std::vector<BurningTree> m_BurningTrees;
+
+    bool m_ShowClouds = true;
+    bool m_ShowCampfire = true;
+    bool m_ShowPortal = true;
+    bool m_ShowAurora = false;
+
+    // Test zone positions (so we can find them easily)
+    const glm::vec3 CAMPFIRE_POS = glm::vec3(50.0f, 10.0f, 50.0f);
+    const glm::vec3 PORTAL_POS = glm::vec3(0.0f, 20.0f, 0.0f);
+    const glm::vec3 AURORA_HEIGHT = glm::vec3(0.0f, 200.0f, 0.0f);
+    
+    // Cloud spawn points
+    const std::vector<glm::vec3> CLOUD_SPAWN_POINTS = {
+        glm::vec3(100.0f, 100.0f, 100.0f),
+        glm::vec3(-100.0f, 120.0f, -100.0f),
+        glm::vec3(0.0f, 110.0f, 200.0f)
+    };
 };
 
 } // namespace Luminumbra::World

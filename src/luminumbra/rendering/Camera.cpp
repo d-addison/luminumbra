@@ -44,6 +44,12 @@ void Camera::setPosition(const glm::vec3& position) {
     recalculateViewMatrix();
 }
 
+void Camera::setPitch(float pitch) {
+    m_Pitch = glm::clamp(pitch, -89.0f, 89.0f);
+    recalculateVectors();
+    recalculateViewMatrix();
+}
+
 void Camera::setFov(float fov) {
     m_Fov = fov;
     recalculateProjectionMatrix();

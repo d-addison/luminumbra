@@ -280,7 +280,7 @@ namespace Luminumbra {
             ImGui::End();
         }
 
-        void UIManager::ShowDebugOverlay(const glm::vec3& playerPos, const glm::vec3& playerVel, float gravity, bool isNoClip, const World::World& world, const Rendering::Shader& worldShader) {
+        void UIManager::ShowDebugOverlay(const glm::vec3& playerPos, const glm::vec3& playerVel, float gravity, bool isNoClip, const World::World& world, const Rendering::Shader& worldShader, Core::PostProcessSettings& settings) {
             ImGui::SetNextWindowPos(ImVec2(10, 10));
             ImGui::SetNextWindowBgAlpha(0.35f);
             ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
@@ -323,6 +323,47 @@ namespace Luminumbra {
 
                 // Settings
                 ImGui::Text("F3: Toggle Debug | F4: Wireframe");
+            }
+
+            if (ImGui::CollapsingHeader("Post-Processing")) {
+                // Enable/disable effects
+                ImGui::Checkbox("Enable Bloom", &settings.enableBloom);
+                ImGui::Checkbox("Enable Depth of Field", &settings.enableDof);
+                ImGui::Checkbox("Enable God Rays", &settings.enableGodRays);
+                
+                ImGui::Separator();
+                
+                // Bloom settings
+                if (settings.enableBloom) {
+                    if (ImGui::TreeNode("Bloom Settings")) {
+                        ImGui::SliderFloat("Threshold", &settings.bloomThreshold, 0.0f, 2.0f, "%.2f");
+                        ImGui::SliderFloat("Intensity", &settings.bloomIntensity, 0.0f, 2.0f, "%.2f");
+                        ImGui::TreePop();
+                    }
+                }
+                
+                // DoF settings
+                if (settings.enableDof) {
+                    if (ImGui::TreeNode("Depth of Field Settings")) {
+                        ImGui::SliderFloat("Focal Distance", &settings.dofFocalDistance, 0.1f, 100.0f, "%.1f");
+                        ImGui::SliderFloat("Focal Range", &settings.dofFocalRange, 0.1f, 50.0f, "%.1f");
+                        ImGui::TreePop();
+                    }
+                }
+                
+                // God Rays settings
+                if (settings.enableGodRays) {
+                    if (ImGui::TreeNode("God Rays Settings")) {
+                        ImGui::SliderFloat("Density", &settings.godRaysDensity, 0.0f, 1.0f, "%.2f");
+                        ImGui::TreePop();
+                    }
+                }
+                
+                // Global post-processing settings
+                if (ImGui::TreeNode("Global Settings")) {
+                    ImGui::SliderFloat("Exposure", &settings.exposure, 0.1f, 5.0f, "%.2f");
+                    ImGui::TreePop();
+                }
             }
             ImGui::End();
         }
@@ -421,6 +462,17 @@ namespace Luminumbra {
             if (ImGui::Begin("InteractionPrompt", nullptr, flags)) {
                 ImGui::Text("%s", prompt.c_str());
             }
+            ImGui::End();
+        }
+
+        void UIManager::ShowPostProcessingSettings(Core::PostProcessSettings& settings) {
+            ImGui::Begin("Post-Processing");
+            ImGui::SliderFloat("Bloom Threshold", &settings.bloomThreshold, 0.0f, 2.0f);
+            ImGui::SliderFloat("Bloom Intensity", &settings.bloomIntensity, 0.0f, 2.0f);
+            ImGui::SliderFloat("DoF Focal Distance", &settings.dofFocalDistance, 0.1f, 100.0f);
+            ImGui::SliderFloat("DoF Focal Range", &settings.dofFocalRange, 0.1f, 50.0f);
+            ImGui::SliderFloat("God Rays Density", &settings.godRaysDensity, 0.0f, 1.0f);
+            ImGui::SliderFloat("Exposure", &settings.exposure, 0.1f, 5.0f);
             ImGui::End();
         }
 

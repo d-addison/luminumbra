@@ -17,9 +17,6 @@
 
 namespace Luminumbra::World {
 
-using Luminumbra::Core::GLClearError;
-using Luminumbra::Core::GLCheckError;
-
 Chunk::Chunk(const glm::ivec3& position, const std::string& seed, int lod) : m_Position(position), m_LOD(lod) {
     m_ModelMatrix = glm::translate(glm::mat4(1.0f), glm::vec3(m_Position));
 
@@ -88,7 +85,6 @@ const glm::ivec3 cornerOffsets[8] = {
 };
 
 void Chunk::generateMesh(int lod) {
-    LOG("Chunk::generateMesh - Start");
     MarchingCubes::IndexedMesh mesh;
     float isolevel = 0.0f;
     int step = 1 << lod;
@@ -108,11 +104,8 @@ void Chunk::generateMesh(int lod) {
         }
     }
 
-    LOG("Chunk::generateMesh - Polygonization finished. Vertices: " + std::to_string(mesh.vertices.size()) + ", Indices: " + std::to_string(mesh.indices.size()));
-
     if (mesh.indices.empty()) {
         m_IndexCount = 0;
-        LOG("Chunk::generateMesh - No indices, exiting early.");
         return;
     }
 
@@ -213,7 +206,7 @@ void Chunk::generateFoliage(fnl_state& noise, const MarchingCubes::IndexedMesh& 
             float y = highestY[key];
             glm::vec3 worldPos = glm::vec3(m_Position) + glm::vec3(x, y, z);
 
-            //  if (worldPos.y > WATER_LEVEL + 1.0f) { // Don't spawn foliage underwater
+            if (worldPos.y > WATER_LEVEL + 1.0f) { // Don't spawn foliage underwater
                 glm::vec3 normal = surfaceNormals[key];
                 if (normal.y > 0.85f) { // Only on relatively flat ground
                     float foliageValue = fnlGetNoise2D(&noise, worldPos.x, worldPos.z);
@@ -224,36 +217,57 @@ void Chunk::generateFoliage(fnl_state& noise, const MarchingCubes::IndexedMesh& 
                         m_BushInstances.push_back({ glm::vec3(x, y - 4.0f, z), scaleDist(rng) * 0.5f, rotDist(rng) });
                     }
                 }
-            // }
+            }
         }
     }
 }
 
 
 void Chunk::uploadToGpu() {
-    if (m_IndexCount == 0) return;
+    if (m_IndexCount > 0) {
+        struct Vertex { glm::vec3 p, n, c; };
 
-    struct Vertex { glm::vec3 p, n, c; };
+        GLCall(glGenVertexArrays(1, &m_VAO));
+        GLCall(glGenBuffers(1, &m_VBO));
+        GLCall(glGenBuffers(1, &m_EBO));
 
-    GLCall(glGenVertexArrays(1, &m_VAO));
-    GLCall(glGenBuffers(1, &m_VBO));
-    GLCall(glGenBuffers(1, &m_EBO));
+        GLCall(glBindVertexArray(m_VAO));
+        GLCall(glBindBuffer(GL_ARRAY_BUFFER, m_VBO));
+        GLCall(glBufferData(GL_ARRAY_BUFFER, m_VertexData.size() * sizeof(float), m_VertexData.data(), GL_STATIC_DRAW));
 
-    GLCall(glBindVertexArray(m_VAO));
-    GLCall(glBindBuffer(GL_ARRAY_BUFFER, m_VBO));
-    GLCall(glBufferData(GL_ARRAY_BUFFER, m_VertexData.size() * sizeof(float), m_VertexData.data(), GL_STATIC_DRAW));
+        GLCall(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_EBO));
+        GLCall(glBufferData(GL_ELEMENT_ARRAY_BUFFER, m_IndexData.size() * sizeof(unsigned int), m_IndexData.data(), GL_STATIC_DRAW));
 
-    GLCall(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_EBO));
-    GLCall(glBufferData(GL_ELEMENT_ARRAY_BUFFER, m_IndexData.size() * sizeof(unsigned int), m_IndexData.data(), GL_STATIC_DRAW));
+        GLCall(glEnableVertexAttribArray(0));
+        GLCall(glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, p)));
+        GLCall(glEnableVertexAttribArray(1));
+        GLCall(glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, n)));
+        GLCall(glEnableVertexAttribArray(2));
+        GLCall(glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, c)));
 
-    GLCall(glEnableVertexAttribArray(0));
-    GLCall(glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, p)));
-    GLCall(glEnableVertexAttribArray(1));
-    GLCall(glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, n)));
-    GLCall(glEnableVertexAttribArray(2));
-    GLCall(glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, c)));
+        GLCall(glBindVertexArray(0));
+    }
 
-    GLCall(glBindVertexArray(0));
+    if (m_WaterVertexCount > 0) {
+        struct WaterVertex { glm::vec3 position; };
+
+        GLCall(glGenVertexArrays(1, &m_WaterVAO));
+        GLCall(glGenBuffers(1, &m_WaterVBO));
+
+        GLCall(glBindVertexArray(m_WaterVAO));
+        GLCall(glBindBuffer(GL_ARRAY_BUFFER, m_WaterVBO));
+        GLCall(glBufferData(GL_ARRAY_BUFFER, m_WaterVertexData.size() * sizeof(float), m_WaterVertexData.data(), GL_STATIC_DRAW));
+
+        // Position attribute
+        GLCall(glEnableVertexAttribArray(0));
+        GLCall(glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(WaterVertex), (void*)offsetof(WaterVertex, position)));
+
+        GLCall(glBindVertexArray(0));
+
+        // Clear water data after upload
+        m_WaterVertexData.clear();
+        m_WaterVertexData.shrink_to_fit();
+    }
 
     // Clear the CPU-side data after uploading to free up RAM
     m_VertexData.clear();
@@ -269,24 +283,6 @@ void Chunk::renderTerrain() const {
         GLCall(glBindVertexArray(m_VAO));
         GLCall(glDrawElements(GL_TRIANGLES, m_IndexCount, GL_UNSIGNED_INT, 0));
         GLCall(glBindVertexArray(0));
-    }
-}
-
-void Chunk::renderWater() const {
-    // This function now ONLY renders the water plane.
-    if (m_WaterVertexCount > 0) {
-        // State for transparency is now managed here
-        GLCall(glEnable(GL_BLEND));
-        GLCall(glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
-        GLCall(glDepthMask(GL_FALSE)); // Don't write to depth buffer
-
-        GLCall(glBindVertexArray(m_WaterVAO));
-        GLCall(glDrawArrays(GL_TRIANGLES, 0, m_WaterVertexCount));
-        GLCall(glBindVertexArray(0));
-
-        // Reset state
-        GLCall(glDepthMask(GL_TRUE));
-        GLCall(glDisable(GL_BLEND));
     }
 }
 
@@ -416,64 +412,49 @@ glm::vec3 Chunk::getTerrainColor(float worldY, float density, BiomeType biome) {
     return baseColor * variation;
 }
 
-void Chunk::generateWaterMesh() {
-    // Only generate a water mesh if the chunk is below or at water level
-    if (m_Position.y + CHUNK_SIZE < WATER_LEVEL) {
-        // The entire chunk is underwater, so the water surface is above it.
-        // We don't need to render a water surface inside a fully submerged chunk.
-        m_WaterVertexCount = 0;
-        return;
+void Chunk::renderWater() const {
+    // This function should ONLY be responsible for the draw call.
+    // Blending state should be managed in the main render loop.
+    if (m_WaterVertexCount > 0) {
+        glBindVertexArray(m_WaterVAO);
+        glDrawArrays(GL_TRIANGLES, 0, m_WaterVertexCount);
+        glBindVertexArray(0);
     }
-    if (m_Position.y > WATER_LEVEL) {
-        // The entire chunk is above water, no water mesh needed.
+}
+
+void Chunk::generateWaterMesh() {
+    // Only generate a water mesh if the chunk intersects the water level
+    if (m_Position.y > WATER_LEVEL || m_Position.y + CHUNK_SIZE < WATER_LEVEL) {
         m_WaterVertexCount = 0;
         return;
     }
 
+    // This struct should only contain what the shader needs.
+    // The shader only needs position.
     struct WaterVertex {
         glm::vec3 position;
-        glm::vec4 color;
     };
 
     std::vector<WaterVertex> vertices;
-
-    // The water surface is a simple quad at the WATER_LEVEL.
-    // The y-coordinate is relative to the chunk's origin.
     float waterY = WATER_LEVEL - m_Position.y;
 
-    glm::vec4 waterColor = glm::vec4(0.1f, 0.3f, 0.8f, 0.7f); // Translucent blue
-
     // Define the quad for the water surface
-    vertices.push_back({glm::vec3(0, waterY, 0), waterColor});
-    vertices.push_back({glm::vec3(CHUNK_SIZE, waterY, 0), waterColor});
-    vertices.push_back({glm::vec3(CHUNK_SIZE, waterY, CHUNK_SIZE), waterColor});
+    vertices.push_back({glm::vec3(0, waterY, 0)});
+    vertices.push_back({glm::vec3(0, waterY, CHUNK_SIZE)});
+    vertices.push_back({glm::vec3(CHUNK_SIZE, waterY, 0)});
 
-    vertices.push_back({glm::vec3(0, waterY, 0), waterColor});
-    vertices.push_back({glm::vec3(CHUNK_SIZE, waterY, CHUNK_SIZE), waterColor});
-    vertices.push_back({glm::vec3(0, waterY, CHUNK_SIZE), waterColor});
+    vertices.push_back({glm::vec3(CHUNK_SIZE, waterY, 0)});
+    vertices.push_back({glm::vec3(0, waterY, CHUNK_SIZE)});
+    vertices.push_back({glm::vec3(CHUNK_SIZE, waterY, CHUNK_SIZE)});
     
     m_WaterVertexCount = vertices.size();
-
     if (m_WaterVertexCount == 0) {
         return;
     }
 
-    GLCall(glGenVertexArrays(1, &m_WaterVAO));
-    GLCall(glGenBuffers(1, &m_WaterVBO));
-
-    GLCall(glBindVertexArray(m_WaterVAO));
-    GLCall(glBindBuffer(GL_ARRAY_BUFFER, m_WaterVBO));
-    GLCall(glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(WaterVertex), vertices.data(), GL_STATIC_DRAW));
-
-    // Position attribute
-    GLCall(glEnableVertexAttribArray(0));
-    GLCall(glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(WaterVertex), (void*)offsetof(WaterVertex, position)));
-
-    // Color attribute
-    GLCall(glEnableVertexAttribArray(2)); // Use attribute location 2 for color
-    GLCall(glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(WaterVertex), (void*)offsetof(WaterVertex, color)));
-
-    GLCall(glBindVertexArray(0));
+    // Store the data for later upload
+    m_WaterVertexData.resize(vertices.size() * sizeof(WaterVertex) / sizeof(float));
+    memcpy(m_WaterVertexData.data(), vertices.data(), vertices.size() * sizeof(WaterVertex));
 }
 
 } // namespace Luminumbra::World

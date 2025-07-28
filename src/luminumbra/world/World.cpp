@@ -284,7 +284,6 @@ void World::renderCelestials(Luminumbra::Rendering::Shader& celestialShader, con
 
     // --- Render Stars ---
     float starBrightness = glm::smoothstep(0.0f, -0.25f, -1*sunDir.y);
-    LOG("World::renderCelestials - Star Brightness: " + std::to_string(starBrightness));
     if (starBrightness > 0.0f) {
         celestialShader.setMat4("model", glm::mat4(1.0f));
         celestialShader.setVec3("objectColor", glm::vec3(1.0f, 1.0f, 0.95f));
@@ -296,7 +295,6 @@ void World::renderCelestials(Luminumbra::Rendering::Shader& celestialShader, con
     glm::mat4 billboardRotation = glm::mat4(glm::mat3(view));
 
     // --- Render Sun ---
-    LOG("World::renderCelestials - Sun Direction: " + std::to_string(sunDir.y));
     if (sunDir.y < 0.0f) {
         glm::mat4 model = glm::translate(glm::mat4(1.0f), sunDir * 100.0f); 
         model = model * billboardRotation; // Apply billboarding to face the camera
@@ -475,6 +473,26 @@ void World::startFireNearPlayer() {
     }
 }
 
+void World::teleportToEffect(const std::string& effect) {
+    if (!m_Player) return;
+    
+    glm::vec3 targetPos;
+    if (effect == "campfire") {
+        targetPos = CAMPFIRE_POS + glm::vec3(0.0f, 2.0f, 0.0f);
+    }
+    else if (effect == "portal") {
+        targetPos = PORTAL_POS + glm::vec3(0.0f, 2.0f, 0.0f);
+    }
+    else if (effect == "aurora") {
+        targetPos = AURORA_HEIGHT + glm::vec3(0.0f, -150.0f, 0.0f);
+    }
+    else if (effect == "clouds") {
+        targetPos = CLOUD_SPAWN_POINTS[0] + glm::vec3(0.0f, -20.0f, 0.0f);
+    }
+    
+    m_Player->setPosition(targetPos);
+}
+
 void World::updateParticles(float deltaTime) {
     static std::uniform_real_distribution<float> dist(0.0f, 1.0f);
     static std::mt19937 gen(std::random_device{}());
@@ -529,41 +547,229 @@ void World::updateParticles(float deltaTime) {
             }
         }
     }
-    
-    // 2. Fire & Spark System
-    for (auto& tree : m_BurningTrees) {
-        tree.timeBurning += deltaTime;
-        
-        // FIX: Replaced placeholder comment with functional code.
-        auto chunkIt = m_Chunks.find(tree.chunkCoord);
-        if (chunkIt == m_Chunks.end() || tree.treeIndex >= chunkIt->second->getTreeInstances().size()) continue;
-        glm::vec3 treePos = glm::vec3(chunkIt->second->getModelMatrix() * glm::vec4(chunkIt->second->getTreeInstances()[tree.treeIndex].position, 1.0));
 
-        // Emit Smoke
-        Luminumbra::Rendering::ParticleProps smokeProps = m_ParticleSystem->getPresetProperties(Luminumbra::Rendering::ParticleType::Smoke);
-        smokeProps.position = treePos + glm::vec3((dist(gen) - 0.5f) * 5.0f, 6.0f + dist(gen) * 5.0f, (dist(gen) - 0.5f) * 5.0f);
-        m_ParticleSystem->emit(smokeProps);
+    // Cloud System
+    {
+        static float cloudTimer = 0.0f;
+        cloudTimer += deltaTime;
 
-        if (tree.timeBurning > 3.0f) {
-            // Emit Fire
-            Luminumbra::Rendering::ParticleProps fireProps = m_ParticleSystem->getPresetProperties(Luminumbra::Rendering::ParticleType::Fire);
-            fireProps.position = treePos + glm::vec3((dist(gen) - 0.5f) * 6.0f, dist(gen) * 10.0f, (dist(gen) - 0.5f) * 6.0f);
-            m_ParticleSystem->emit(fireProps);
+        // Cloud spawn points in a grid pattern
+        const glm::vec3 CLOUD_BASE_POSITIONS[] = {
+            glm::vec3(100.0f, 100.0f, 100.0f),
+            glm::vec3(-100.0f, 120.0f, -100.0f),
+            glm::vec3(0.0f, 110.0f, 200.0f),
+            glm::vec3(200.0f, 115.0f, -150.0f),
+            glm::vec3(-150.0f, 105.0f, 150.0f)
+        };
 
-            // Emit Sparks
-            if (dist(gen) < 0.2f) {
-                Luminumbra::Rendering::ParticleProps sparkProps = m_ParticleSystem->getPresetProperties(Luminumbra::Rendering::ParticleType::Spark);
-                sparkProps.position = fireProps.position;
-                m_ParticleSystem->emit(sparkProps);
+        if (cloudTimer > 0.5f) {  // Spawn more frequently
+            cloudTimer = 0.0f;
+            
+            for (const auto& basePos : CLOUD_BASE_POSITIONS) {
+                // Create main cloud body with multiple layers
+                for (int i = 0; i < 3; i++) { // Multiple particles per cloud
+                    Luminumbra::Rendering::ParticleProps cloudProps = 
+                        m_ParticleSystem->getPresetProperties(Luminumbra::Rendering::ParticleType::Cloud);
+                    
+                    // Vary the position within the cloud volume
+                    glm::vec3 offset = glm::vec3(
+                        dist(gen) * 30.0f - 15.0f,  // Wider spread
+                        dist(gen) * 15.0f - 7.5f,   // Variable height
+                        dist(gen) * 30.0f - 15.0f   // Wider spread
+                    );
+                    
+                    cloudProps.position = basePos + offset;
+                    cloudProps.isVolumetric = true;
+                    cloudProps.volumetricLayers = 16;  // More layers for better volume
+                    cloudProps.volumeDepth = 12.0f;    // Deeper volume
+                    
+                    // Vary the colors slightly for more natural look
+                    float whiteness = 0.95f + dist(gen) * 0.05f;
+                    cloudProps.colorBegin = glm::vec4(whiteness, whiteness, whiteness, 0.3f);
+                    cloudProps.colorEnd = glm::vec4(whiteness * 0.9f, whiteness * 0.9f, whiteness * 0.95f, 0.0f);
+                    
+                    // Larger size variation
+                    cloudProps.sizeBegin = 35.0f + dist(gen) * 15.0f;
+                    cloudProps.sizeEnd = cloudProps.sizeBegin * 1.2f;
+                    
+                    // Longer lifetime
+                    cloudProps.lifeTime = 8.0f + dist(gen) * 4.0f;
+                    
+                    // Gentle random movement
+                    cloudProps.velocity = glm::vec3(
+                        dist(gen) * 2.0f - 1.0f,
+                        dist(gen) * 0.5f - 0.25f,
+                        dist(gen) * 2.0f - 1.0f
+                    );
+                    
+                    m_ParticleSystem->emit(cloudProps);
+                }
             }
         }
     }
 
-    // 3. Magic Zone (example at world origin)
-    if (dist(gen) < 0.3f) { // Emit magic particles continuously
-        Luminumbra::Rendering::ParticleProps props = m_ParticleSystem->getPresetProperties(Luminumbra::Rendering::ParticleType::Magic);
-        props.position = glm::vec3(0.0f, 10.0f, 0.0f) + glm::vec3((dist(gen) - 0.5f) * 50.f, dist(gen) * 3.f, (dist(gen) - 0.5f) * 10.f);
-        m_ParticleSystem->emit(props);
+    // Volumetric Fire Test Zone
+    {
+        static const glm::vec3 campfirePos(50.0f, 10.0f, 50.0f);
+        
+        // Main fire
+        if (dist(gen) < 0.3f) {
+            Luminumbra::Rendering::ParticleProps fireProps = 
+                m_ParticleSystem->getPresetProperties(Luminumbra::Rendering::ParticleType::VolumetricFire);
+            fireProps.position = campfirePos + glm::vec3(
+                dist(gen) * 2.0f - 1.0f,
+                0.0f,
+                dist(gen) * 2.0f - 1.0f
+            );
+            m_ParticleSystem->emit(fireProps);
+            
+            // Add volumetric smoke above the fire
+            Luminumbra::Rendering::ParticleProps smokeProps = 
+                m_ParticleSystem->getPresetProperties(Luminumbra::Rendering::ParticleType::VolumetricSmoke);
+            smokeProps.position = fireProps.position + glm::vec3(0.0f, 3.0f, 0.0f);
+            m_ParticleSystem->emit(smokeProps);
+        }
+    }
+
+    // Magic Portal Test Zone
+    {
+        static const glm::vec3 portalCenter(0.0f, 20.0f, 0.0f);
+        static float portalAngle = 0.0f;
+        portalAngle += deltaTime;
+
+        // Create a swirling portal effect
+        if (dist(gen) < 0.4f) {
+            float radius = 3.0f;
+            float angle = portalAngle + dist(gen) * glm::two_pi<float>();
+            
+            glm::vec3 offset(
+                cos(angle) * radius,
+                sin(angle * 2.0f) * 2.0f,  // Figure-8 pattern
+                sin(angle) * radius
+            );
+
+            Luminumbra::Rendering::ParticleProps portalProps = 
+                m_ParticleSystem->getPresetProperties(Luminumbra::Rendering::ParticleType::Magic);
+            portalProps.isVolumetric = true;
+            portalProps.volumetricLayers = 6;
+            portalProps.volumeDepth = 2.0f;
+            portalProps.position = portalCenter + offset;
+            portalProps.velocity = glm::vec3(0.0f);
+            portalProps.colorBegin = glm::vec4(0.5f + 0.5f * sin(angle), 0.2f, 0.8f, 0.8f);
+            portalProps.sizeBegin = 0.5f;
+            portalProps.sizeEnd = 0.1f;
+            portalProps.lifeTime = 1.0f;
+            
+            m_ParticleSystem->emit(portalProps);
+        }
+    }
+
+    // Aurora Borealis Test Zone
+    {
+        static const float auroraY = 200.0f;
+        static float auroraTime = 0.0f;
+        auroraTime += deltaTime;
+
+        if (dist(gen) < 0.2f) {
+            float baseX = sin(auroraTime * 0.1f) * 100.0f;
+            
+            for (int i = 0; i < 3; i++) {
+                Luminumbra::Rendering::ParticleProps auroraProps = 
+                    m_ParticleSystem->getPresetProperties(Luminumbra::Rendering::ParticleType::Magic);
+                auroraProps.isVolumetric = true;
+                auroraProps.volumetricLayers = 4;
+                auroraProps.volumeDepth = 10.0f;
+                
+                float x = baseX + dist(gen) * 200.0f - 100.0f;
+                float z = dist(gen) * 200.0f - 100.0f;
+                float wave = sin(x * 0.02f + auroraTime) * 20.0f;
+                
+                auroraProps.position = glm::vec3(x, auroraY + wave, z);
+                auroraProps.velocity = glm::vec3(0.0f, sin(auroraTime + x * 0.1f) * 2.0f, 0.0f);
+                auroraProps.colorBegin = glm::vec4(0.1f, 0.8f, 0.3f, 0.3f);
+                auroraProps.colorEnd = glm::vec4(0.2f, 0.5f, 0.8f, 0.0f);
+                auroraProps.sizeBegin = 20.0f;
+                auroraProps.sizeEnd = 25.0f;
+                auroraProps.lifeTime = 4.0f;
+                
+                m_ParticleSystem->emit(auroraProps);
+            }
+        }
+    }
+    
+    // Fire & Spark System for Trees
+    for (auto& tree : m_BurningTrees) {
+        tree.timeBurning += deltaTime;
+        
+        auto chunkIt = m_Chunks.find(tree.chunkCoord);
+        if (chunkIt == m_Chunks.end() || tree.treeIndex >= chunkIt->second->getTreeInstances().size()) continue;
+        glm::vec3 treePos = glm::vec3(chunkIt->second->getModelMatrix() * 
+            glm::vec4(chunkIt->second->getTreeInstances()[tree.treeIndex].position, 1.0));
+
+        // Emit volumetric smoke
+        if (dist(gen) < 0.3f) {
+            Luminumbra::Rendering::ParticleProps smokeProps = 
+                m_ParticleSystem->getPresetProperties(Luminumbra::Rendering::ParticleType::VolumetricSmoke);
+            smokeProps.position = treePos + glm::vec3(
+                (dist(gen) - 0.5f) * 3.0f,  // Spread around tree
+                6.0f + dist(gen) * 4.0f,     // Height variation
+                (dist(gen) - 0.5f) * 3.0f    // Spread around tree
+            );
+            smokeProps.volumetricLayers = 12;  // More layers for better volume
+            smokeProps.volumeDepth = 4.0f;     // Wider smoke column
+            smokeProps.sizeBegin = 3.0f + dist(gen);  // Larger initial size
+            smokeProps.sizeEnd = 6.0f + dist(gen) * 2.0f;  // Even larger as it rises
+            smokeProps.lifeTime = 4.0f + dist(gen) * 2.0f;  // Longer lifetime
+            m_ParticleSystem->emit(smokeProps);
+        }
+
+        if (tree.timeBurning > 1.0f) {  // Start fire after initial smoke
+            // Emit volumetric fire
+            if (dist(gen) < 0.4f) {
+                Luminumbra::Rendering::ParticleProps fireProps = 
+                    m_ParticleSystem->getPresetProperties(Luminumbra::Rendering::ParticleType::VolumetricFire);
+                fireProps.position = treePos + glm::vec3(
+                    (dist(gen) - 0.5f) * 4.0f,  // Spread around tree
+                    dist(gen) * 8.0f,           // Variable height up the tree
+                    (dist(gen) - 0.5f) * 4.0f   // Spread around tree
+                );
+                fireProps.volumetricLayers = 16;  // More layers for better volume
+                fireProps.volumeDepth = 3.0f;     // Deeper fire effect
+                fireProps.sizeBegin = 2.0f + dist(gen);  // Larger flames
+                fireProps.sizeEnd = 4.0f + dist(gen) * 2.0f;
+                fireProps.lifeTime = 2.0f + dist(gen);
+                m_ParticleSystem->emit(fireProps);
+            }
+
+            // Add some sparks for extra effect
+            if (dist(gen) < 0.1f) {
+                Luminumbra::Rendering::ParticleProps sparkProps = 
+                    m_ParticleSystem->getPresetProperties(Luminumbra::Rendering::ParticleType::Spark);
+                sparkProps.position = treePos + glm::vec3(
+                    (dist(gen) - 0.5f) * 3.0f,
+                    3.0f + dist(gen) * 6.0f,
+                    (dist(gen) - 0.5f) * 3.0f
+                );
+                m_ParticleSystem->emit(sparkProps);
+            }
+        }
+
+        // Handle rain extinguishing the fire
+        if (m_CurrentWeather == WeatherType::Rainy) {
+            // Final puff of volumetric smoke as fire goes out
+            for (int i = 0; i < 15; ++i) {
+                Luminumbra::Rendering::ParticleProps smokeProps = 
+                    m_ParticleSystem->getPresetProperties(Luminumbra::Rendering::ParticleType::VolumetricSmoke);
+                smokeProps.position = treePos + glm::vec3(
+                    (dist(gen) - 0.5f) * 5.0f,
+                    4.0f + dist(gen) * 6.0f,
+                    (dist(gen) - 0.5f) * 5.0f
+                );
+                smokeProps.lifeTime = 2.0f;
+                smokeProps.colorBegin.a = 0.4f;  // More opaque smoke for dramatic effect
+                m_ParticleSystem->emit(smokeProps);
+            }
+        }
     }
 }
 
@@ -576,7 +782,7 @@ float World::getSurfaceHeight(float x, float z) const {
     for (float y = 255.0f; y >= 0.0f; --y) {
         if (isSolid(glm::vec3(x, y, z))) {
             // This is the highest solid block. The surface is just above it.
-            return y + 1.0f;
+            return y;
         }
     }
     // If no solid ground is found, return 0
@@ -595,7 +801,8 @@ void World::renderTerrain(Rendering::Shader& shader, const glm::vec3& viewPos) c
         if (chunk) {
             float distance = getChunkDistance(pair.first, viewPos);
             if (distance <= VIEW_DISTANCE * Chunk::CHUNK_SIZE) {
-                shader.setMat4("model", chunk->getModelMatrix());
+                // FIX: Changed "model" to "u_model" to match the shader
+                shader.setMat4("u_model", chunk->getModelMatrix()); 
                 chunk->renderTerrain();
             }
         }
@@ -603,15 +810,12 @@ void World::renderTerrain(Rendering::Shader& shader, const glm::vec3& viewPos) c
 }
 
 void World::renderWater(Rendering::Shader& shader, const glm::vec3& viewPos) const {
-    for (const auto& pair : m_Chunks) {
-        const auto& chunk = pair.second;
-        if (chunk) {
-            float distance = getChunkDistance(pair.first, viewPos);
-            if (distance <= VIEW_DISTANCE * Chunk::CHUNK_SIZE) {
-                shader.setMat4("model", chunk->getModelMatrix());
-                chunk->renderWater();
-            }
-        }
+    for (const auto& [position, chunk] : m_Chunks) {
+        // Set the unique model matrix for this specific chunk
+        shader.setMat4("u_Model", chunk->getModelMatrix());
+        
+        // Now tell the chunk to draw itself
+        chunk->renderWater(); 
     }
 }
 
@@ -714,8 +918,8 @@ void World::loadChunksAroundPosition(const glm::vec3& position) {
 
     // --- NEW: Load chunks in a simple square pattern ---
     // This is much more reliable than the complex spiral algorithm.
-    const int VIEW_DISTANCE = 30; // Example view distance in chunks
-    const int LOD_DISTANCE = 16;  // Example LOD distance
+    const int VIEW_DISTANCE = 16; // Example view distance in chunks
+    const int LOD_DISTANCE = 8;  // Example LOD distance in chunks
 
     for (int x = -VIEW_DISTANCE; x <= VIEW_DISTANCE; ++x) {
         for (int z = -VIEW_DISTANCE; z <= VIEW_DISTANCE; ++z) {
@@ -752,10 +956,6 @@ void World::unloadDistantChunks(const glm::vec3& position) {
         float distance = getChunkDistance(it->first, position);
         
         if (distance > UNLOAD_DISTANCE * Chunk::CHUNK_SIZE) {
-            LOG("World::unloadDistantChunks - Unloading chunk at " + 
-                std::to_string(it->first.x) + ", " + 
-                std::to_string(it->first.y) + ", " + 
-                std::to_string(it->first.z));
             it = m_Chunks.erase(it);
         } else {
             ++it;
@@ -787,11 +987,7 @@ void World::processChunkQueue() {
                 std::lock_guard<std::mutex> lock(m_ChunkMutex);
                 m_Chunks[request.position] = std::move(chunk);
             }
-            
-            LOG("World::processChunkQueue - Generated chunk at " + 
-                std::to_string(request.position.x) + ", " + 
-                std::to_string(request.position.y) + ", " + 
-                std::to_string(request.position.z));
+        
         } else {
             // No work, sleep briefly
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
