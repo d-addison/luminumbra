@@ -103,7 +103,8 @@ GLint Shader::getUniformLocation(const std::string& name) const {
     return location;
 }
 
-void Shader::setMat4(const std::string &name, const glm::mat4 &mat) const     glUniformMatrix4fv(getUniformLocation(name), 1, GL_FALSE, glm::value_ptr(mat));
+void Shader::setMat4(const std::string &name, const glm::mat4 &mat) const {
+    glUniformMatrix4fv(getUniformLocation(name), 1, GL_FALSE, glm::value_ptr(mat));
 }
 
 void Shader::setVec4(const std::string &name, const glm::vec4 &value) const {
