@@ -103,6 +103,7 @@ public:
 
     void emit(const ParticleProps& particleProps);
     ParticleProps getPresetProperties(ParticleType type) const;
+    uint32_t getActiveParticleCount() const { return m_ActiveParticleCount; }
 
 private:
     void init();

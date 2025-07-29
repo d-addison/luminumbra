@@ -56,7 +56,7 @@ private:
     void generateMesh(int lod);
     void generateWaterMesh();
     void generateFoliage(fnl_state& noise, const MarchingCubes::IndexedMesh& terrainMesh);
-    BiomeType getBiomeAt(float worldX, float worldZ, float height);
+    BiomeType getBiomeAt(float worldX, float worldZ);
     glm::vec3 getTerrainColor(float worldY, float density, BiomeType biome);
 
     glm::ivec3 m_Position;

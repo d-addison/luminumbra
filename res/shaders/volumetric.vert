@@ -16,6 +16,8 @@ uniform vec3 u_CameraRight;
 uniform vec3 u_CameraUp;
 uniform mat4 u_Projection;
 uniform vec3 u_ViewPos;
+uniform mat4 u_View;
+uniform float u_VolumeDepth;
 
 void main() {
     vec2 pos = aPos;
@@ -27,12 +29,13 @@ void main() {
     );
     
     vec3 centerWorldPos = aWorldPos;
+    vec3 viewVec = normalize(u_ViewPos - centerWorldPos);
     vec3 vertPos = centerWorldPos 
         + u_CameraRight * pos.x * aSize
         + u_CameraUp * pos.y * aSize
-        + normalize(centerWorldPos - u_ViewPos) * aLayer;  // Offset by layer depth
+        - viewVec * (aLayer - 0.5) * u_VolumeDepth;
 
-    gl_Position = u_Projection * vec4(vertPos - u_ViewPos, 1.0);
+    gl_Position = u_Projection * u_View * vec4(vertPos, 1.0);
     
     TexCoords = aTexCoords;
     WorldPos = vertPos;

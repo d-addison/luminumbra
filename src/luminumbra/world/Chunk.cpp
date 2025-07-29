@@ -41,38 +41,72 @@ void Chunk::generateNoiseData(fnl_state& noise) {
     m_NoiseData.resize((CHUNK_SIZE + 1) * (CHUNK_SIZE + 1) * (CHUNK_SIZE + 1));
     m_BiomeData.resize((CHUNK_SIZE + 1) * (CHUNK_SIZE + 1), BiomeType::WHISPERING_GLADE);
 
+    // PRE-CALCULATE BIOMES FOR THE CHUNK
+    for (int z = 0; z <= CHUNK_SIZE; ++z) {
+        for (int x = 0; x <= CHUNK_SIZE; ++x) {
+            float worldX = (float)(m_Position.x + x);
+            float worldZ = (float)(m_Position.z + z);
+            m_BiomeData[x + z * (CHUNK_SIZE + 1)] = getBiomeAt(worldX, worldZ);
+        }
+    }
+
+    // --- Terrain Noise ---
     noise.noise_type = FNL_NOISE_OPENSIMPLEX2;
     noise.frequency = 0.005f;
-    noise.fractal_type = FNL_FRACTAL_FBM;       // Use Fractal Brownian Motion
-    noise.octaves = 4;                          // Number of noise layers
-    noise.lacunarity = 2.0f;                      // How quickly frequency increases for each octave
-    noise.gain = 0.5f;                          // How much each octave contributes
+    noise.fractal_type = FNL_FRACTAL_FBM;
+    noise.octaves = 4;
+    noise.lacunarity = 2.0f;
+    noise.gain = 0.5f;
+
+    // --- 3D Cave Noise ---
+    fnl_state cave_noise = fnlCreateState();
+    cave_noise.seed = noise.seed + 1; // Use a different seed
+    cave_noise.noise_type = FNL_NOISE_PERLIN;
+    cave_noise.fractal_type = FNL_FRACTAL_RIDGED; // Ridged is great for tunnels
+    cave_noise.frequency = 0.02f;
+    cave_noise.octaves = 2;
 
     // --- Define terrain shape ---
-    float baseGroundHeight = 4.0f;   // The average sea level for the terrain
-    float terrainAmplitude = 12.0f;   // The max height of hills and depth of valleys
+    float baseGroundHeight = 10.0f;   // The average sea level for the terrain
+    float terrainAmplitude = 30.0f;   // The max height of hills and depth of valleys
 
     // --- Loop through every point in the chunk's data grid ---
     for (int y = 0; y <= CHUNK_SIZE; ++y) {
         for (int z = 0; z <= CHUNK_SIZE; ++z) {
             for (int x = 0; x <= CHUNK_SIZE; ++x) {
-                // Get the absolute world position of the current point
                 float worldX = (float)(m_Position.x + x);
-                float worldZ = (float)(m_Position.z + z);
                 float worldY = (float)(m_Position.y + y);
+                float worldZ = (float)(m_Position.z + z);
 
-                // 1. Get a 2D noise value to define the ground's height at this (X, Z) location
+                // 1. Calculate base terrain height (like before)
                 float groundHeightNoise = fnlGetNoise2D(&noise, worldX, worldZ);
                 float groundHeight = baseGroundHeight + (groundHeightNoise * terrainAmplitude);
 
-                // 2. The density is the point's vertical distance from the ground.
-                //    - Negative density is "solid" (underground)
-                //    - Positive density is "air" (above ground)
-                float density = worldY - groundHeight;
+                // 2. Base terrain density is the distance from the ground surface
+                float terrain_density = worldY - groundHeight;
+                
+                // ADDED LOGIC FOR CAVES AND FLOATING ISLANDS
+                // Make the base terrain fade out at the bottom to create floating islands
+                float island_fade_factor = 1.0f - glm::smoothstep(0.0f, 15.0f, worldY);
+                terrain_density += island_fade_factor * 20.0f; // Push density towards air at the bottom
 
-                // 3. Store the density value in the 1D array
+                // 3. Calculate 3D cave noise
+                float cave_density = fnlGetNoise3D(&cave_noise, worldX, worldY, worldZ);
+
+                // 4. Combine the densities
+                // We will add the cave noise. Since ridged noise is mostly negative,
+                // this will carve out areas (make them more "air-like").
+                // We only apply cave carving below the surface.
+                float final_density = terrain_density;
+                if (terrain_density < 0.0f) { // If underground
+                    // The closer to 0 cave_density is, the more "hollow" it is.
+                    // We can add it to make the terrain less dense.
+                    // A multiplier strengthens the effect.
+                    final_density += (cave_density + 0.2f) * 2.0f;
+                }
+
                 int index = x + z * (CHUNK_SIZE + 1) + y * (CHUNK_SIZE + 1) * (CHUNK_SIZE + 1);
-                m_NoiseData[index] = density;
+                m_NoiseData[index] = final_density;
             }
         }
     }
@@ -312,42 +346,34 @@ bool Chunk::isSolid(const glm::vec3& worldPosition) const {
     return m_NoiseData[index] < 0.0f;
 }
 
-BiomeType Chunk::getBiomeAt(float worldX, float worldZ, float height) {
-    // Use cellular noise for distinct biome regions
-    fnl_state biomeNoise = fnlCreateState();
-    biomeNoise.noise_type = FNL_NOISE_CELLULAR;
-    biomeNoise.frequency = 0.003f;
-    biomeNoise.cellular_distance_func = FNL_CELLULAR_DISTANCE_MANHATTAN;
-    biomeNoise.cellular_return_type = FNL_CELLULAR_RETURN_TYPE_CELLVALUE;
-    biomeNoise.seed = 42;
-    
-    float biomeValue = fnlGetNoise2D(&biomeNoise, worldX, worldZ);
-    
-    // Also factor in height for more realistic biome distribution
-    float heightInfluence = height / 100.0f;
-    
-    // Map noise values to biomes
-    if (biomeValue < -0.3f) {
-        if (heightInfluence < 0.3f) {
-            return BiomeType::SUNKEN_HOLLOWS;
-        } else {
-            return BiomeType::WHISPERING_GLADE;
-        }
-    } else if (biomeValue < 0.1f) {
-        return BiomeType::WHISPERING_GLADE;
-    } else if (biomeValue < 0.5f) {
-        if (heightInfluence > 0.5f) {
-            return BiomeType::CRYSTAL_GROVES;
-        } else {
-            return BiomeType::WHISPERING_GLADE;
-        }
-    } else {
-        if (heightInfluence > 0.6f) {
-            return BiomeType::CANOPY_BRIDGES;
-        } else {
-            return BiomeType::CRYSTAL_GROVES;
-        }
+BiomeType Chunk::getBiomeAt(float worldX, float worldZ) { // Remove height, as it's often a result of biome
+    // --- Temperature Noise (Continental Scale) ---
+    fnl_state temp_noise = fnlCreateState();
+    temp_noise.seed = 1337;
+    temp_noise.noise_type = FNL_NOISE_OPENSIMPLEX2;
+    temp_noise.frequency = 0.0005f; // Very low frequency for large regions
+    float temperature = fnlGetNoise2D(&temp_noise, worldX, worldZ); // Range [-1, 1]
+
+    // --- Humidity Noise (Regional Scale) ---
+    fnl_state humidity_noise = fnlCreateState();
+    humidity_noise.seed = 42;
+    humidity_noise.noise_type = FNL_NOISE_OPENSIMPLEX2;
+    humidity_noise.frequency = 0.001f;
+    float humidity = fnlGetNoise2D(&humidity_noise, worldX, worldZ); // Range [-1, 1]
+
+    // --- Whittaker Diagram Logic ---
+    if (temperature > 0.4f) { // Hot
+        if (humidity > 0.3f) return BiomeType::CANOPY_BRIDGES; // Tropical/Jungle-like
+        else return BiomeType::CRYSTAL_GROVES; // Hot & Dry -> Crystalline Desert
+    } else if (temperature > -0.3f) { // Temperate
+        if (humidity > 0.0f) return BiomeType::WHISPERING_GLADE; // Forest
+        else return BiomeType::WHISPERING_GLADE; // Plains (could be a separate biome)
+    } else { // Cold
+        if (humidity > -0.2f) return BiomeType::SUNKEN_HOLLOWS; // Taiga/Swampy
+        else return BiomeType::CRYSTAL_GROVES; // Tundra/Icy
     }
+    
+    return BiomeType::WHISPERING_GLADE; // Fallback
 }
 
 glm::vec3 Chunk::getTerrainColor(float worldY, float density, BiomeType biome) {

@@ -1,24 +1,21 @@
 #include "luminumbra/audio/AudioManager.h"
 #include "luminumbra/core/ResourceManager.h"
-#include "luminumbra/core/Debug.h"
+#include "luminumbra/core/Debug.h" // Assuming LOG() is defined here
 #include <stdexcept>
 #include <random>
+#include <fstream>
+#include <algorithm> // For std::erase_if
 
 namespace Luminumbra::Audio {
 
 // Helper to get a random number
 static std::mt19937 s_RandomEngine(std::random_device{}());
 static int getRandomInt(int min, int max) {
-    std::uniform_int_distribution<std::mt19937::result_type> dist(min, max);
-    return dist(s_RandomEngine);
-}
-
-// --- Deleter ---
-void MAEngineDeleter::operator()(ma_engine* pEngine) const {
-    if (pEngine) {
-        ma_engine_uninit(pEngine);
-        delete pEngine;
+    if (min > max) {
+        return min;
     }
+    std::uniform_int_distribution<int> dist(min, max);
+    return dist(s_RandomEngine);
 }
 
 // --- Singleton ---
@@ -30,8 +27,10 @@ AudioManager& AudioManager::getInstance() {
 // --- Constructor & Destructor ---
 AudioManager::AudioManager() {
     m_Engine.reset(new ma_engine());
-    if (ma_engine_init(NULL, m_Engine.get()) != MA_SUCCESS) {
-        m_Engine.reset();
+    ma_engine_config engineConfig = ma_engine_config_init();
+    
+    if (ma_engine_init(&engineConfig, m_Engine.get()) != MA_SUCCESS) {
+        m_Engine.reset(); // Deleter will not be called if reset, so no double-uninit.
         throw std::runtime_error("Failed to initialize audio engine.");
     }
 
@@ -53,7 +52,11 @@ AudioManager::AudioManager() {
 
 AudioManager::~AudioManager() {
     stopMusic();
-    m_ActiveSounds.clear(); // This will uninit sounds via ActiveSound destructor
+
+    for (auto const& [id, activeSound] : m_ActiveSounds) {
+        ma_sound_uninit(activeSound.sound.get());
+    }
+    m_ActiveSounds.clear();
     
     // Groups must be uninitialized before the engine
     ma_sound_group_uninit(m_SfxGroup.get());
@@ -62,56 +65,122 @@ AudioManager::~AudioManager() {
     ma_sound_group_uninit(m_MusicGroup.get());
     ma_sound_group_uninit(m_MasterGroup.get());
 
-    // m_Engine is cleaned up automatically by its custom deleter.
+    // m_Engine is cleaned up automatically by its custom MAEngineDeleter.
     LOG("Audio Manager Shutdown.");
 }
 
 void AudioManager::init() {
     initializeSoundMap();
+    preloadSounds();
+}
+
+void AudioManager::preloadSounds() {
+    LOG("Preloading sound effects into memory...");
+    for (const auto& [event, paths] : m_SoundMap) {
+        // Music is streamed, not preloaded.
+        if (event == SoundEvent::MusicSplashScreen || event == SoundEvent::MusicMainMenu || event == SoundEvent::MusicGameplay) {
+            continue;
+        }
+
+        for (const auto& relativePath : paths) {
+            if (m_SoundDataCache.count(relativePath)) continue;
+
+            std::string fullPath = Core::ResourceManager::getInstance().getResourcePath(relativePath);
+            std::ifstream file(fullPath, std::ios::binary | std::ios::ate);
+
+            if (!file.is_open()) {
+                LOG("ERROR: Failed to open audio file for preloading: " + fullPath);
+                continue;
+            }
+
+            std::streamsize size = file.tellg();
+            file.seekg(0, std::ios::beg);
+
+            std::vector<char> buffer(static_cast<size_t>(size));
+            if (file.read(buffer.data(), size)) {
+                m_SoundDataCache[relativePath] = std::move(buffer);
+
+                // Now, register the encoded data with the engine's resource manager
+                ma_resource_manager* pResourceManager = ma_engine_get_resource_manager(m_Engine.get());
+                const auto& cachedData = m_SoundDataCache.at(relativePath);
+                ma_result result = ma_resource_manager_register_encoded_data(pResourceManager, relativePath.c_str(), cachedData.data(), cachedData.size());
+                if (result != MA_SUCCESS) {
+                    LOG("ERROR: Failed to register sound data: " + relativePath);
+                }
+            }
+        }
+    }
+    LOG("Finished preloading " + std::to_string(m_SoundDataCache.size()) + " sound effects.");
 }
 
 // --- Main Update ---
 void AudioManager::update() {
-    std::vector<uint32_t> finishedSounds;
-    for (auto const& [id, activeSound] : m_ActiveSounds) {
+    for (auto it = m_ActiveSounds.begin(); it != m_ActiveSounds.end(); /* no increment */) {
+        auto& activeSound = it->second;
         if (!activeSound.isLooping && ma_sound_at_end(activeSound.sound.get())) {
-            finishedSounds.push_back(id);
+            ma_sound_uninit(activeSound.sound.get());
+            it = m_ActiveSounds.erase(it); // Erase and advance iterator
+        } else {
+            ++it; // Advance iterator
         }
     }
-
-    for (uint32_t id : finishedSounds) {
-        stopSound(id);
-    }
 }
+
 
 // --- Sound Playback ---
 uint32_t AudioManager::playSound(SoundEvent event) {
-    std::string fullPath = Core::ResourceManager::getInstance().getResourcePath(getRandomSoundPath(event));
-    ma_engine_play_sound(m_Engine.get(), fullPath.c_str(), m_SfxGroup.get());
-    return 0; // 2D sounds don't need an ID for now
-}
-
-uint32_t AudioManager::playSound(SoundEvent event, const glm::vec3& position) {
     uint32_t id = m_NextSoundID++;
-    auto& activeSound = m_ActiveSounds[id];
+    auto& activeSound = m_ActiveSounds.try_emplace(id).first->second;
     
     activeSound.sound = std::make_unique<ma_sound>();
     activeSound.id = id;
     activeSound.isLooping = false;
 
-    std::string fullPath = Core::ResourceManager::getInstance().getResourcePath(getRandomSoundPath(event));
+    std::string path = getRandomSoundPath(event);
+    if (path.empty() || m_SoundDataCache.find(path) == m_SoundDataCache.end()) {
+        m_ActiveSounds.erase(id);
+        LOG("Failed to find preloaded 2D sound for event.");
+        return 0;
+    }
     
-    // For 3D sounds, we need to disable the default spatializer and use our own coordinates.
-    ma_uint32 flags = MA_SOUND_FLAG_NO_SPATIALIZATION;
-    ma_result result = ma_sound_init_from_file(m_Engine.get(), fullPath.c_str(), flags, m_PlayerGroup.get(), NULL, activeSound.sound.get());
+    ma_result result = ma_sound_init_from_file(m_Engine.get(), path.c_str(), MA_SOUND_FLAG_DECODE, m_SfxGroup.get(), NULL, activeSound.sound.get());
 
     if (result != MA_SUCCESS) {
         m_ActiveSounds.erase(id);
-        LOG("Failed to load 3D sound: " + fullPath);
+        LOG("Failed to init 2D sound from memory.");
+        return 0;
+    }
+    
+    ma_sound_start(activeSound.sound.get());
+    return id;
+}
+
+uint32_t AudioManager::playSound(SoundEvent event, const glm::vec3& position) {
+    uint32_t id = m_NextSoundID++;
+    auto& activeSound = m_ActiveSounds.try_emplace(id).first->second;
+    
+    activeSound.sound = std::make_unique<ma_sound>();
+    activeSound.id = id;
+    activeSound.isLooping = false;
+
+    std::string path = getRandomSoundPath(event);
+    if (path.empty() || m_SoundDataCache.find(path) == m_SoundDataCache.end()) {
+        m_ActiveSounds.erase(id);
+        LOG("Failed to find preloaded 3D sound for event.");
+        return 0;
+    }
+    
+    ma_uint32 flags = MA_SOUND_FLAG_DECODE; // Use DECODE, not 0. No spatialization flags needed by default.
+    ma_result result = ma_sound_init_from_file(m_Engine.get(), path.c_str(), flags, m_PlayerGroup.get(), NULL, activeSound.sound.get());
+
+    if (result != MA_SUCCESS) {
+        m_ActiveSounds.erase(id);
+        LOG("Failed to init 3D sound from memory.");
         return 0;
     }
 
-    ma_sound_set_positioning(activeSound.sound.get(), ma_positioning_relative);
+    // FIX: Changed positioning to absolute, assuming 'position' is in world coordinates.
+    ma_sound_set_positioning(activeSound.sound.get(), ma_positioning_absolute);
     ma_sound_set_position(activeSound.sound.get(), position.x, position.y, position.z);
     ma_sound_start(activeSound.sound.get());
 
@@ -120,25 +189,28 @@ uint32_t AudioManager::playSound(SoundEvent event, const glm::vec3& position) {
 
 uint32_t AudioManager::playLoopingSound(SoundEvent event) {
     uint32_t id = m_NextSoundID++;
-    auto& activeSound = m_ActiveSounds[id];
+    auto& activeSound = m_ActiveSounds.try_emplace(id).first->second;
     
     activeSound.sound = std::make_unique<ma_sound>();
     activeSound.id = id;
     activeSound.isLooping = true;
 
-    std::string fullPath = Core::ResourceManager::getInstance().getResourcePath(getRandomSoundPath(event));
-    
-    // Initialize the sound without positional flags, attached to the Music group.
-    // The '0' for flags means we use default behavior for a non-positional sound.
-    ma_result result = ma_sound_init_from_file(m_Engine.get(), fullPath.c_str(), 0, m_MusicGroup.get(), NULL, activeSound.sound.get());
+    std::string path = getRandomSoundPath(event);
+    if (path.empty() || m_SoundDataCache.find(path) == m_SoundDataCache.end()) {
+        m_ActiveSounds.erase(id);
+        LOG("Failed to find preloaded looping 2D sound for event.");
+        return 0;
+    }
+
+    ma_result result = ma_sound_init_from_file(m_Engine.get(), path.c_str(), MA_SOUND_FLAG_DECODE, m_AmbienceGroup.get(), NULL, activeSound.sound.get());
 
     if (result != MA_SUCCESS) {
         m_ActiveSounds.erase(id);
-        LOG("Failed to load looping 2D sound: " + fullPath);
+        LOG("Failed to init looping 2D sound from memory.");
         return 0;
     }
     
-    ma_sound_set_looping(activeSound.sound.get(), true);
+    ma_sound_set_looping(activeSound.sound.get(), MA_TRUE);
     ma_sound_start(activeSound.sound.get());
 
     return id;
@@ -146,24 +218,30 @@ uint32_t AudioManager::playLoopingSound(SoundEvent event) {
 
 uint32_t AudioManager::playLoopingSound(SoundEvent event, const glm::vec3& position) {
     uint32_t id = m_NextSoundID++;
-    auto& activeSound = m_ActiveSounds[id];
+    auto& activeSound = m_ActiveSounds.try_emplace(id).first->second;
     
     activeSound.sound = std::make_unique<ma_sound>();
     activeSound.id = id;
     activeSound.isLooping = true;
 
-    std::string fullPath = Core::ResourceManager::getInstance().getResourcePath(getRandomSoundPath(event));
-    ma_uint32 flags = MA_SOUND_FLAG_NO_SPATIALIZATION;
-    ma_result result = ma_sound_init_from_file(m_Engine.get(), fullPath.c_str(), flags, m_PlayerGroup.get(), NULL, activeSound.sound.get());
+    std::string path = getRandomSoundPath(event);
+    if (path.empty() || m_SoundDataCache.find(path) == m_SoundDataCache.end()) {
+        m_ActiveSounds.erase(id);
+        LOG("Failed to find preloaded looping 3D sound for event.");
+        return 0;
+    }
+
+    ma_uint32 flags = MA_SOUND_FLAG_DECODE; // Use DECODE, not 0.
+    ma_result result = ma_sound_init_from_file(m_Engine.get(), path.c_str(), flags, m_PlayerGroup.get(), NULL, activeSound.sound.get());
 
     if (result != MA_SUCCESS) {
         m_ActiveSounds.erase(id);
-        LOG("Failed to load looping 3D sound: " + fullPath);
+        LOG("Failed to init looping 3D sound from memory.");
         return 0;
     }
     
-    ma_sound_set_looping(activeSound.sound.get(), true);
-    ma_sound_set_positioning(activeSound.sound.get(), ma_positioning_relative);
+    ma_sound_set_looping(activeSound.sound.get(), MA_TRUE);
+    ma_sound_set_positioning(activeSound.sound.get(), ma_positioning_absolute);
     ma_sound_set_position(activeSound.sound.get(), position.x, position.y, position.z);
     ma_sound_start(activeSound.sound.get());
 
@@ -173,6 +251,7 @@ uint32_t AudioManager::playLoopingSound(SoundEvent event, const glm::vec3& posit
 void AudioManager::stopSound(uint32_t id) {
     auto it = m_ActiveSounds.find(id);
     if (it != m_ActiveSounds.end()) {
+        // Uninit the sound resource, then erase it from the map.
         ma_sound_uninit(it->second.sound.get());
         m_ActiveSounds.erase(it);
     }
@@ -186,8 +265,15 @@ void AudioManager::updateSoundPosition(uint32_t id, const glm::vec3& position) {
 }
 
 // --- Music ---
-void AudioManager::playMusic(const std::string& relativePath) {
+void AudioManager::playMusic(SoundEvent event) {
     stopMusic();
+    
+    std::string relativePath = getRandomSoundPath(event);
+    if (relativePath.empty()) {
+        LOG("Failed to find music for event.");
+        return;
+    }
+
     m_Music = std::make_unique<ma_sound>();
     std::string fullPath = Core::ResourceManager::getInstance().getResourcePath(relativePath);
 
@@ -197,7 +283,7 @@ void AudioManager::playMusic(const std::string& relativePath) {
         LOG("Failed to load music: " + fullPath);
         return;
     }
-    ma_sound_set_looping(m_Music.get(), true);
+    ma_sound_set_looping(m_Music.get(), MA_TRUE);
     ma_sound_start(m_Music.get());
 }
 
@@ -227,7 +313,6 @@ bool AudioManager::isSoundActive(uint32_t id) const {
     return m_ActiveSounds.count(id) > 0;
 }
 
-
 // --- Listener ---
 void AudioManager::setListenerPosition(const glm::vec3& pos, const glm::vec3& forward, const glm::vec3& up) {
     ma_engine_listener_set_position(m_Engine.get(), 0, pos.x, pos.y, pos.z);
@@ -242,7 +327,7 @@ std::string AudioManager::getRandomSoundPath(SoundEvent event) {
         LOG("Sound event has no audio files: " + std::to_string(static_cast<int>(event)));
         return "";
     }
-    int randIndex = getRandomInt(0, it->second.size() - 1);
+    int randIndex = getRandomInt(0, static_cast<int>(it->second.size() - 1));
     return it->second[randIndex];
 }
 
@@ -251,12 +336,15 @@ void AudioManager::initializeSoundMap() {
 
     // == Player Actions ==
     m_SoundMap[SoundEvent::PlayerJump] = {
-        "res/audio/Human Elements/Human Male Grunt 01.wav",
-        "res/audio/Human Elements/Human Male Karate Yell Hey-Yah 01.wav"
+        "res/audio/Foley Footsteps/Foley Footstep Slide Boot Single 01.wav",
+    };
+    m_SoundMap[SoundEvent::PlayerSprint] = {
+        "res/audio/Human Elements/Human Male Heavy Breathing 01.wav",
+        "res/audio/Human Elements/Human Male Heavy Breathing 02.wav"
     };
     m_SoundMap[SoundEvent::PlayerHurt] = {
-        "res/audio/Human Elements/Human Male Yell Grunt In Pain 01.wav",
-        "res/audio/Human Elements/Human Male Yell Grunt In Pain 02.wav"
+        "res/audio/Human Elements/Human Fingers Cracking 01.wav",
+        "res/audio/Human Elements/Human Male Troll Scream 01.wav"
     };
     m_SoundMap[SoundEvent::PlayerLand] = {
         "res/audio/Foley Footsteps/Foley Footstep Work Boots Dirt Debris Jump 01.wav",
@@ -266,9 +354,8 @@ void AudioManager::initializeSoundMap() {
 
     // == Footsteps ==
     m_SoundMap[SoundEvent::FootstepDirt] = {
-        "res/audio/Foley Footsteps/Foley Footstep Work Boots Dirt Debris Walking 01.wav",
-        "res/audio/Foley Footsteps/Foley Footstep Work Boots Dirt Debris Walking 02.wav",
-        "res/audio/Foley Footsteps/Foley Footstep Cowboy Boots Dirt Debris Waking 02.wav"
+        "res/audio/Foley Footsteps/Foley Footstep Boot Single Step Left On Leaves 01.wav",
+        "res/audio/Foley Footsteps/Foley Footstep Boot Single Step Right On Leaves 01.wav",
     };
     m_SoundMap[SoundEvent::FootstepStone] = {
         "res/audio/Foley Footsteps/Foley Footstep Work Boots Concrete Walking 01.wav",
@@ -288,6 +375,14 @@ void AudioManager::initializeSoundMap() {
         "res/audio/Weather/Weather Snow Footstep Single 04.wav",
         "res/audio/Weather/Weather Snow Footstep Single 06.wav",
         "res/audio/Weather/Weather Snow Shoe Stepping On Snow 05.wav"
+    };
+    m_SoundMap[SoundEvent::FootstepSand] = {
+        "res/audio/Foley Footsteps/Foley Footstep Work Boots Sand Walking 01.wav",
+        "res/audio/Foley Footsteps/Foley Footstep Work Boots Sand Walking 02.wav"
+    };
+    m_SoundMap[SoundEvent::FootstepMetal] = {
+        "res/audio/Foley Footsteps/Foley Footstep Work Boots Metal Single Step 01.wav",
+        "res/audio/Foley Footsteps/Foley Footstep Work Boots Metal Single Step 02.wav"
     };
     m_SoundMap[SoundEvent::FootstepWater] = {
         "res/audio/Ambience_2/Ambience Water Hands Splashing Slow 01.wav" // Simulates wading
@@ -317,7 +412,7 @@ void AudioManager::initializeSoundMap() {
         "res/audio/Weather/Weather Ambience Rain Drips Water 01.wav",
         "res/audio/Weather/Weather Ambience Rain Drips Water 02.wav"
     };
-    m_SoundMap[SoundEvent::AmbienceOcean] = { "res/audio/Ambience_2/Ambience Ocean Shore 01.wav" };
+    m_SoundMap[SoundEvent::AmbienceOcean] = { "res/audio/Ambience_1/Ambience Ducks Water And Bugs Near City 01.wav" };
 
     // == Weather ==
     m_SoundMap[SoundEvent::RainLoop] = { "res/audio/Weather/Weather Rain 01.wav" };

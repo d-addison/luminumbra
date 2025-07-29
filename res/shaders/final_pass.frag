@@ -5,8 +5,10 @@ in vec2 TexCoords;
 
 uniform sampler2D screenTexture;
 uniform sampler2D bloomTexture;
+uniform sampler2D godRayTexture;
 uniform bool useBloom;
 uniform float exposure;
+uniform bool useGodRays; 
 
 void main()
 {
@@ -14,8 +16,11 @@ void main()
     vec3 hdrColor = texture(screenTexture, TexCoords).rgb;
     
     if (useBloom) {
-        vec3 bloomColor = texture(bloomTexture, TexCoords).rgb;
-        hdrColor += bloomColor; // Additive blending
+        hdrColor += texture(bloomTexture, TexCoords).rgb;
+    }
+    if (useGodRays) {
+        // Additive blend for the god rays
+        hdrColor += texture(godRayTexture, TexCoords).rgb;
     }
     
     // Tone mapping

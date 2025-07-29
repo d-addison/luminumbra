@@ -71,6 +71,7 @@ private:
     std::unique_ptr<Rendering::Shader> m_FoliageShader;
     std::unique_ptr<Rendering::Shader> m_ParticleShader;
     std::unique_ptr<Rendering::Shader> m_WaterShader;
+    std::unique_ptr<Rendering::Shader> m_UniversalDepthShader;
 
     // Post-processing shaders
     std::unique_ptr<Rendering::Shader> m_BloomShader;
@@ -86,6 +87,8 @@ private:
     GLuint m_DepthTexture = 0;
     GLuint m_PingPongFBO;
     GLuint m_PingPongTextures[2];
+    GLuint m_HalfResFBO;
+    GLuint m_HalfResTextures[2];
     
     // Post-processing framebuffers
     GLuint m_PostProcessFBO = 0;

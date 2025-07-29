@@ -1,6 +1,8 @@
 // src/luminumbra/world/MarchingCubes.cpp
 #include "luminumbra/world/MarchingCubes.h"
 #include "luminumbra/core/Debug.h"
+#include "luminumbra/core/Hash.h"
+#include <unordered_map>
 
 namespace Luminumbra::World::MarchingCubes {
 
@@ -344,7 +346,7 @@ void Polygonise(GridCell grid, float isolevel, IndexedMesh& mesh) {
     }
 
     unsigned int vert_indices[12];
-    std::map<int, unsigned int> edge_to_vertex_map;
+    std::unordered_map<int, unsigned int> edge_to_vertex_map;
 
     auto get_vertex = [&](int edge_idx, const glm::vec3& p1, const glm::vec3& p2, float v1, float v2) {
         if (edge_to_vertex_map.count(edge_idx)) {

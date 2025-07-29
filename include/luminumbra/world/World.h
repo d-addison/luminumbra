@@ -14,12 +14,18 @@
 #include "luminumbra/core/SaveData.h"
 #include "luminumbra/audio/AudioManager.h"
 #include "luminumbra/rendering/particles/Particle.h" 
+#include "luminumbra/world/Chunk.h"
+#include "luminumbra/world/WeatherManager.h"
+#include "luminumbra/player/Player.h"
+#include "luminumbra/rendering/Shader.h"
 
 // Forward declarations
 namespace Luminumbra::Rendering {
     class Shader;
     class Skybox;
     class CloudManager;
+    class ParticleSystem;
+    class WeatherManager;
 }
 namespace Luminumbra::World { class Chunk; }
 namespace Luminumbra::Player { class Player; }
@@ -68,7 +74,6 @@ public:
     ~World();
 
     void update(float deltaTime);
-    enum class WeatherType { Clear, Rainy };
 
     void renderTerrain(Rendering::Shader& shader, const glm::vec3& viewPos) const;
     void renderWater(Rendering::Shader& shader, const glm::vec3& viewPos) const;
@@ -103,6 +108,8 @@ public:
     void teleportToEffect(const std::string& effect);
 
     Audio::SoundEvent getFootstepSoundForPosition(const glm::vec3& position) const;
+
+    WeatherManager* getWeatherManager() const { return m_WeatherManager.get(); }
 
 private:
     void loadChunksAroundPosition(const glm::vec3& position);
@@ -155,7 +162,6 @@ private:
 
     // Particles
     void updateParticles(float deltaTime);
-    WeatherType m_CurrentWeather = WeatherType::Clear;
     float m_LeafEmitTimer = 0.0f;
     std::vector<BurningTree> m_BurningTrees;
 
@@ -176,7 +182,7 @@ private:
         glm::vec3(0.0f, 110.0f, 200.0f)
     };
 
-    uint32_t m_WeatherSoundID = 0;
+    std::unique_ptr<WeatherManager> m_WeatherManager;
     float m_RainSplashTimer = 0.0f;
     uint32_t m_AmbientSoundID = 0;
     Audio::SoundEvent m_CurrentAmbientEvent = Audio::SoundEvent::UIClick;

@@ -9,3 +9,6 @@
 // Add these two lines for miniaudio
 #define MINIAUDIO_IMPLEMENTATION
 #include <minaudio.h>
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"

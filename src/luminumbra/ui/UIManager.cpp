@@ -63,7 +63,8 @@ namespace Luminumbra {
 
         void UIManager::ShowSplashScreen() {
             if (m_SplashScreenMusicID == 0) {
-                m_SplashScreenMusicID = Audio::AudioManager::getInstance().playLoopingSound(Audio::SoundEvent::MusicSplashScreen);
+                Audio::AudioManager::getInstance().playMusic(Audio::SoundEvent::MusicSplashScreen);
+                m_SplashScreenMusicID = 1;
             }
             ImGuiIO& io = ImGui::GetIO();
             ImVec2 center = ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
@@ -85,12 +86,15 @@ namespace Luminumbra {
         void UIManager::ShowMainMenu(const std::function<void()>& newGameCallback, const std::function<void()>& loadGameCallback, const std::function<void()>& quitCallback) {
             // Stop splash music when the main menu appears
             if (m_SplashScreenMusicID != 0) {
-                Audio::AudioManager::getInstance().stopSound(m_SplashScreenMusicID);
+                // Stop the music and reset the flag
+                Audio::AudioManager::getInstance().stopMusic();
                 m_SplashScreenMusicID = 0;
             }
             // Start main menu music
             if (m_MainMenuMusicID == 0) {
-                m_MainMenuMusicID = Audio::AudioManager::getInstance().playLoopingSound(Audio::SoundEvent::MusicMainMenu);
+                // Use playMusic here as well
+                Audio::AudioManager::getInstance().playMusic(Audio::SoundEvent::MusicMainMenu);
+                m_MainMenuMusicID = 1; // Use a simple flag
             }
 
             ImGui::Begin("Main Menu");
@@ -331,110 +335,75 @@ namespace Luminumbra {
             ImGui::End();
         }
 
-        void UIManager::ShowDebugOverlay(const glm::vec3& playerPos, const glm::vec3& playerVel, float gravity, bool isNoClip, const World::World& world, const Rendering::Shader& worldShader, Core::PostProcessSettings& settings) {
+        void UIManager::ShowDebugOverlay(float deltaTime, const Player::Player& player, World::World& world, Core::PostProcessSettings& settings) {
             ImGui::SetNextWindowPos(ImVec2(10, 10));
-            ImGui::SetNextWindowBgAlpha(0.35f);
+            ImGui::SetNextWindowBgAlpha(0.65f);
             ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
             
             if (ImGui::Begin("Debug Info", nullptr, window_flags)) {
-                ImGui::Text("Luminumbra Debug");
+                ImGui::Text("Luminumbra Debug Panel (F3 to hide)");
                 ImGui::Separator();
+                
+                // Performance
+                ImGui::Text("FPS: %.1f (%.3f ms)", 1.0f / deltaTime, deltaTime * 1000.0f);
                 
                 // Player Info
-                ImGui::Text("Pos (XYZ): %.2f, %.2f, %.2f", playerPos.x, playerPos.y, playerPos.z);
-                ImGui::Text("Vel (XYZ): %.2f, %.2f, %.2f", playerVel.x, playerVel.y, playerVel.z);
-                ImGui::Text("Speed: %.2f m/s", glm::length(glm::vec2(playerVel.x, playerVel.z)));
-                ImGui::Text("Mode: %s", isNoClip ? "NoClip" : "Normal");
-                ImGui::Text("Gravity: %.2f", gravity);
-                
-                ImGui::Separator();
-                
+                if (ImGui::CollapsingHeader("Player State")) {
+                    const auto& pos = player.getPosition();
+                    const auto& vel = player.getVelocity();
+                    ImGui::Text("Pos: %.2f, %.2f, %.2f", pos.x, pos.y, pos.z);
+                    ImGui::Text("Vel: %.2f, %.2f, %.2f | Speed: %.2f", vel.x, vel.y, vel.z, glm::length(glm::vec2(vel.x, vel.z)));
+                    ImGui::Text("Stamina: %.1f / %.1f", player.getStamina(), player.getMaxStamina());
+                    ImGui::Text("Fall Distance: %.2f", player.getFallDistance());
+                    ImGui::Text("OnGround: %s, Sprint: %s, Crouch: %s", player.isSliding() ? "Yes" : "No", player.isSprinting() ? "Yes" : "No", player.isCrouching() ? "Yes" : "No");
+                    ImGui::Text("Glide: %s, Climb: %s, Slide: %s", player.isGliding() ? "Yes" : "No", player.isClimbing() ? "Yes" : "No", player.isSliding() ? "Yes" : "No");
+                }
+
                 // World Info
-                ImGui::Text("Biome: %s", world.getBiome(playerPos));
-                float time = world.getTimeOfDay();
-                int hours = (int)(time * 24.0f) % 24;
-                int minutes = (int)((time * 24.0f - hours) * 60.0f);
-                ImGui::Text("Time: %02d:%02d (%.2f)", hours, minutes, time);
-                
-                ImGui::Separator();
+                if (ImGui::CollapsingHeader("World State")) {
+                    ImGui::Text("Loaded Chunks: %zu", world.getChunks().size());
+                    ImGui::Text("Active Particles: %u", world.getParticleSystem()->getActiveParticleCount());
+                    float time = world.getTimeOfDay();
+                    if (ImGui::SliderFloat("Time of Day", &time, 0.0f, 1.0f)) {
+                        world.setTimeOfDay(time);
+                    }
 
-                // Shader Info
-                ImGui::Text("World Shader:");
-                ImGui::Text("  Vert: %s", worldShader.getVertexPath().c_str());
-                ImGui::Text("  Frag: %s", worldShader.getFragmentPath().c_str());
+                    // Weather Controls
+                    auto weatherManager = world.getWeatherManager();
+                    const char* weatherNames[] = { "Clear", "Rain", "Thunderstorm", "Snow" };
+                    int currentItem = static_cast<int>(weatherManager->getCurrentWeatherType());
+                    if (ImGui::Combo("Weather", &currentItem, weatherNames, IM_ARRAYSIZE(weatherNames))) {
+                        world.setWeather(static_cast<World::WeatherType>(currentItem));
+                    }
+                    ImGui::Text("Weather Intensity: %.2f", weatherManager->getIntensity());
+                    ImGui::Text("Wetness: %.2f", weatherManager->getWetness());
+                }
 
-                ImGui::Separator();
-                ImGui::Text("Auxiliary Shaders:");
-                // const auto& skyboxShader = world.getSkybox().getShader();
-                // ImGui::Text("  Skybox: %s, %s", skyboxShader.getVertexPath().c_str(), skyboxShader.getFragmentPath().c_str());
-                const auto& cloudShader = world.getCloudManager().getShader();
-                ImGui::Text("  Clouds: %s, %s", cloudShader.getVertexPath().c_str(), cloudShader.getFragmentPath().c_str());
+                // Camera Info
+                if (ImGui::CollapsingHeader("Camera State")) {
+                    const auto& camera = player.getCamera();
+                    const auto& pos = camera.getPosition();
+                    const auto& front = camera.getFront();
+                    ImGui::Text("Cam Pos: %.2f, %.2f, %.2f", pos.x, pos.y, pos.z);
+                    ImGui::Text("Cam Front: %.2f, %.2f, %.2f", front.x, front.y, front.z);
+                    ImGui::Text("Pitch: %.2f | Yaw: (Implicit)", camera.getPitch());
+                    ImGui::Text("FOV: %.1f", camera.getFov());
+                }
 
-                ImGui::Separator();
+                // Post-Processing
+                if (ImGui::CollapsingHeader("Post-Processing")) {
+                    ShowPostProcessingSettings(settings);
+                }
 
-                // Settings
-                ImGui::Text("F3: Toggle Debug | F4: Wireframe");
-            }
-
-            if (ImGui::CollapsingHeader("Post-Processing")) {
-                // Enable/disable effects
-                if (ImGui::Checkbox("Enable Bloom", &settings.enableBloom)) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
-                if (ImGui::Checkbox("Enable Depth of Field", &settings.enableDof)) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
-                if (ImGui::Checkbox("Enable God Rays", &settings.enableGodRays)) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
-                
-                ImGui::Separator();
-                
-                // Bloom settings
-                if (settings.enableBloom) {
-                    bool bloomNodeOpen = ImGui::TreeNode("Bloom Settings");
-                    if (ImGui::IsItemClicked()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
-                    if (bloomNodeOpen) {
-                        ImGui::SliderFloat("Threshold", &settings.bloomThreshold, 0.0f, 2.0f, "%.2f");
-                        if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
-                        ImGui::SliderFloat("Intensity", &settings.bloomIntensity, 0.0f, 2.0f, "%.2f");
-                        if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
+                // Debug Actions
+                if (ImGui::CollapsingHeader("Actions")) {
+                    if (ImGui::Button("Start Fire")) { world.startFireNearPlayer(); }
+                    if (ImGui::TreeNode("Teleport")) {
+                        if (ImGui::Button("To Origin Spawn")) { world.teleportToEffect("spawn"); }
+                        if (ImGui::Button("To Campfire")) { world.teleportToEffect("campfire"); }
+                        if (ImGui::Button("To Portal")) { world.teleportToEffect("portal"); }
                         ImGui::TreePop();
                     }
-                }
-                
-                // DoF settings
-                if (settings.enableDof) {
-                    bool dofNodeOpen = ImGui::TreeNode("Depth of Field Settings");
-                    if (ImGui::IsItemClicked()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
-                    if (dofNodeOpen) {
-                        ImGui::SliderFloat("Focal Distance", &settings.dofFocalDistance, 0.1f, 100.0f, "%.1f");
-                        if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
-                        ImGui::SliderFloat("Focal Range", &settings.dofFocalRange, 0.1f, 50.0f, "%.1f");
-                        if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
-                        ImGui::TreePop();
-                    }
-                }
-                
-                // God Rays settings
-                if (settings.enableGodRays) {
-                    if (ImGui::TreeNode("God Rays Settings")) {
-                        ImGui::SliderFloat("Density", &settings.godRaysDensity, 0.0f, 1.0f, "%.2f");
-                        if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
-                        ImGui::SliderFloat("Weight", &settings.godRaysWeight, 0.0f, 1.0f, "%.2f");
-                        if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
-                        ImGui::TreePop();
-                    }
-                }
-                
-                // Global post-processing settings
-                if (ImGui::TreeNode("Global Settings")) {
-                    ImGui::SliderFloat("Gamma", &settings.gamma, 0.1f, 3.0f, "%.2f");
-                    if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
-                    ImGui::SliderFloat("Saturation", &settings.saturation, 0.0f, 2.0f, "%.2f");
-                    if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
-                    ImGui::SliderFloat("Exposure", &settings.exposure, 0.1f, 5.0f, "%.2f");
-                    if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
-                    ImGui::SliderFloat("Contrast", &settings.contrast, 0.0f, 2.0f, "%.2f");
-                    if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
-                    ImGui::SliderFloat("Brightness", &settings.brightness, 0.0f, 2.0f, "%.2f");
-                    if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
-                    ImGui::Checkbox("Enable Color Grading", &settings.enableColorGrading);
-                    ImGui::TreePop();
                 }
             }
             ImGui::End();

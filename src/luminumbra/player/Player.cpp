@@ -381,6 +381,7 @@ void Player::updateStamina(float deltaTime) {
         Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::PlayerOutOfStamina, m_Position);
         m_JustRanOutOfStamina = true;
     } else if (m_Stamina > 0.0f) {
+        // Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::PlayerSprint, m_Position);
         // Reset the flag once stamina starts regenerating.
         m_JustRanOutOfStamina = false;
     }

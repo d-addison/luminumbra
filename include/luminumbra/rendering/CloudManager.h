@@ -6,6 +6,11 @@
 
 namespace Luminumbra::Rendering {
 
+struct Cloud {
+    glm::vec3 position;
+    glm::vec2 scale;
+    float speed;
+};
 class CloudManager {
 public:
     CloudManager();
@@ -18,16 +23,10 @@ public:
     Shader& getShader() { return m_Shader; }
 
 private:
-    struct Cloud {
-        glm::vec3 position;
-        glm::vec2 scale;
-        float speed;
-    };
-
     std::vector<Cloud> m_Clouds;
-    unsigned int m_VAO = 0, m_VBO = 0;
-    unsigned int m_Texture = 0;
     Shader m_Shader;
+    GLuint m_VAO, m_VBO, m_Texture;
+    GLuint m_InstanceVBO;
 };
 
 } // namespace Luminumbra::Rendering

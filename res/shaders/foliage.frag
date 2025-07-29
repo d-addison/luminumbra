@@ -58,7 +58,7 @@ void main()
 
     // Diffuse
     vec3 norm = normalize(Normal);
-    vec3 lightDir = normalize(-sunDirection);
+    vec3 lightDir = normalize(sunDirection.y < 0.0 ? -sunDirection : sunDirection);
     float diff = max(dot(norm, lightDir), 0.0);
     vec3 diffuse = diff * objectColor;
     
@@ -67,8 +67,8 @@ void main()
 
     // 3. Apply Fog
     float dist = length(viewPos - FragPos);
-    float fogStart = 80.0;
-    float fogEnd = 160.0;
+    float fogStart = 300.0;
+    float fogEnd = 500.0;
     float fogFactor = clamp((dist - fogStart) / (fogEnd - fogStart), 0.0, 1.0);
     
     vec3 finalColor = mix(lighting, fogColor, fogFactor);

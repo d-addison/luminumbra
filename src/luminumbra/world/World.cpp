@@ -4,6 +4,7 @@
 #include "luminumbra/rendering/Shader.h"
 #include "luminumbra/rendering/Skybox.h"
 #include "luminumbra/rendering/CloudManager.h"
+#include "luminumbra/world/WeatherManager.h"
 #include "luminumbra/core/Debug.h"
 #include "luminumbra/rendering/particles/Particle.h"
 #include "luminumbra/audio/AudioManager.h"
@@ -22,6 +23,7 @@ World::World(const std::string& slotName, const std::string& seed, int screenWid
     
     m_Player = std::make_unique<Luminumbra::Player::Player>(screenWidth, screenHeight);
     m_ParticleSystem = std::make_unique<Luminumbra::Rendering::ParticleSystem>();
+    m_WeatherManager = std::make_unique<WeatherManager>(this);
     // m_Skybox = std::make_unique<Luminumbra::Rendering::Skybox>();
     m_CloudManager = std::make_unique<Luminumbra::Rendering::CloudManager>();
     m_CloudManager->init();
@@ -350,7 +352,11 @@ glm::vec3 World::getSkyColor() const {
     float lightFactor = glm::smoothstep(-0.15f, 0.0f, sunHeight);
     glm::vec3 finalSky = glm::mix(nightColor, daySunsetMix, lightFactor);
 
-    return finalSky;
+    // Mix with weather fog color
+    glm::vec3 weatherFogColor = m_WeatherManager->getFogColor();
+    float weatherIntensity = m_WeatherManager->getIntensity();
+    
+    return glm::mix(finalSky, weatherFogColor, weatherIntensity);
 }
 
 void World::applySaveData(const Core::WorldSaveData& data) {
@@ -421,6 +427,7 @@ void World::update(float deltaTime) {
     // 2. CORE STATE UPDATE
     // Update player position (for this frame's logic) and time of day.
     const glm::vec3 viewerPosition = m_Player->getPosition();
+    m_WeatherManager->update(deltaTime, viewerPosition);
     m_TimeOfDay += deltaTime / DAY_DURATION;
     if (m_TimeOfDay > 1.0f) {
         m_TimeOfDay -= 1.0f;
@@ -445,7 +452,7 @@ void World::update(float deltaTime) {
 
     // 3. GAMEPLAY & EFFECTS LOGIC
     // A) Emit new particles based on the current world state (rain, fire, etc.).
-    updateParticles(deltaTime);
+    // updateParticles(deltaTime);
 
     // B) Update the particle system and process death events (e.g., rain splashes).
     auto deathEvents = m_ParticleSystem->update(deltaTime, *this);
@@ -469,7 +476,6 @@ void World::update(float deltaTime) {
     // C) Update other dynamic systems like clouds.
     m_CloudManager->update(deltaTime);
 
-
     // 4. CHUNK MANAGEMENT STAGE
     // Check if the player has moved far enough to load/unload chunks.
     if (glm::length(viewerPosition - m_LastViewerPosition) > UPDATE_THRESHOLD) {
@@ -480,22 +486,8 @@ void World::update(float deltaTime) {
 }
 
 void World::setWeather(WeatherType type) {
-    if (m_CurrentWeather == type) return; // No change
-
-    m_CurrentWeather = type;
-
-    // Stop the old weather sound if it exists
-    if (m_WeatherSoundID != 0) {
-        Audio::AudioManager::getInstance().stopSound(m_WeatherSoundID);
-        m_WeatherSoundID = 0;
-    }
-
-    // Start a new sound
-    if (type == WeatherType::Rainy) {
-        // Rain is ambient, so it plays at the listener's position (no specific vec3 needed for now)
-        // A better implementation would attach it to the listener. For now, this is fine.
-        m_WeatherSoundID = Audio::AudioManager::getInstance().playLoopingSound(Audio::SoundEvent::RainLoop, m_Player->getPosition());
-    }
+    // Cast 'type' to the correct WeatherType enum that WeatherManager expects.
+    m_WeatherManager->setWeather(type, 15.0f);
 }
 
 void World::startFireNearPlayer() {
@@ -584,7 +576,7 @@ void World::updateParticles(float deltaTime) {
     static std::mt19937 gen(std::random_device{}());
 
     // 1. Weather System: Rain
-    if (m_CurrentWeather == WeatherType::Rainy) {
+    if (m_WeatherManager->getCurrentWeatherType() == WeatherType::Rain) {
         int rainDensity = 20;
         for (int i = 0; i < rainDensity; ++i) {
             // Get preset and customize position
@@ -611,7 +603,7 @@ void World::updateParticles(float deltaTime) {
             }
             m_BurningTrees.clear();
         }
-    } else if (m_CurrentWeather == WeatherType::Clear) {
+    } else if (m_WeatherManager->getCurrentWeatherType() == WeatherType::Clear) {
         m_LeafEmitTimer += deltaTime;
         if (m_LeafEmitTimer > 0.1f) {
             m_LeafEmitTimer = 0.0f;
@@ -841,7 +833,7 @@ void World::updateParticles(float deltaTime) {
         }
 
         // Handle rain extinguishing the fire
-        if (m_CurrentWeather == WeatherType::Rainy) {
+        if (m_WeatherManager->getCurrentWeatherType() == WeatherType::Rain) {
             if (tree.soundID != 0) {
                 Audio::AudioManager::getInstance().stopSound(tree.soundID);
                 tree.soundID = 0; 
@@ -867,7 +859,7 @@ void World::updateParticles(float deltaTime) {
         }
     }
     m_BurningTrees.erase(std::remove_if(m_BurningTrees.begin(), m_BurningTrees.end(), 
-        [this](const BurningTree& tree){ return m_CurrentWeather == WeatherType::Rainy; }), m_BurningTrees.end());
+        [this](const BurningTree& tree){ return m_WeatherManager->getCurrentWeatherType() == WeatherType::Rain; }), m_BurningTrees.end());
 }
 
 Luminumbra::Player::Player* World::getPlayer() const {
@@ -893,13 +885,20 @@ glm::vec3 World::getSpawnPoint() const {
 }
 
 void World::renderTerrain(Rendering::Shader& shader, const glm::vec3& viewPos) const {
+    const auto& camera = m_Player->getCamera(); // Get the camera
     for (const auto& pair : m_Chunks) {
         const auto& chunk = pair.second;
         if (chunk) {
             float distance = getChunkDistance(pair.first, viewPos);
             if (distance <= VIEW_DISTANCE * Chunk::CHUNK_SIZE) {
-                shader.setMat4("u_model", chunk->getModelMatrix()); 
-                chunk->renderTerrain();
+                const float chunkSize = static_cast<float>(Chunk::CHUNK_SIZE);
+                glm::vec3 minAABB = glm::vec3(pair.first);
+                glm::vec3 maxAABB = minAABB + glm::vec3(chunkSize);
+
+                if (camera.isBoxInFrustum(minAABB, maxAABB)) {
+                    shader.setMat4("u_model", chunk->getModelMatrix());
+                    chunk->renderTerrain();
+                }
             }
         }
     }
@@ -920,52 +919,76 @@ void World::renderFoliage(Luminumbra::Rendering::Shader& foliageShader) const {
     foliageShader.setMat4("projection", m_Player->getCamera().getProjectionMatrix());
     foliageShader.setMat4("view", m_Player->getCamera().getViewMatrix());
 
+    const auto& camera = m_Player->getCamera();
+    
     std::vector<glm::mat4> treeMatrices;
     std::vector<glm::mat4> bushMatrices;
 
-    // Collect all instance data from visible chunks
+    // 1. Collect instance data ONLY from visible chunks
     for (const auto& pair : m_Chunks) {
         const auto& chunk = pair.second;
         if (chunk) {
+            // A. Cheap distance check first
             float distance = getChunkDistance(pair.first, m_Player->getPosition());
             if (distance <= (VIEW_DISTANCE - 1) * Chunk::CHUNK_SIZE) {
-                for (const auto& inst : chunk->getTreeInstances()) {
-                    glm::mat4 model = glm::translate(chunk->getModelMatrix(), inst.position);
-                    model = glm::rotate(model, inst.rotationY, glm::vec3(0, 1, 0));
-                    model = glm::scale(model, glm::vec3(inst.scale));
-                    treeMatrices.push_back(model);
-                }
-                for (const auto& inst : chunk->getBushInstances()) {
-                    glm::mat4 model = glm::translate(chunk->getModelMatrix(), inst.position);
-                    model = glm::rotate(model, inst.rotationY, glm::vec3(0, 1, 0));
-                    model = glm::scale(model, glm::vec3(inst.scale));
-                    bushMatrices.push_back(model);
+                
+                // B. OPTIMIZATION: Perform view frustum culling on the entire chunk
+                const float chunkSize = static_cast<float>(Chunk::CHUNK_SIZE);
+                glm::vec3 minAABB = glm::vec3(pair.first);
+                glm::vec3 maxAABB = minAABB + glm::vec3(chunkSize);
+
+                if (camera.isBoxInFrustum(minAABB, maxAABB)) {
+                    // This chunk is visible, so collect its foliage matrices.
+                    for (const auto& inst : chunk->getTreeInstances()) {
+                        glm::mat4 model = glm::translate(chunk->getModelMatrix(), inst.position);
+                        model = glm::rotate(model, inst.rotationY, glm::vec3(0, 1, 0));
+                        model = glm::scale(model, glm::vec3(inst.scale));
+                        treeMatrices.push_back(model);
+                    }
+                    for (const auto& inst : chunk->getBushInstances()) {
+                        glm::mat4 model = glm::translate(chunk->getModelMatrix(), inst.position);
+                        model = glm::rotate(model, inst.rotationY, glm::vec3(0, 1, 0));
+                        model = glm::scale(model, glm::vec3(inst.scale));
+                        bushMatrices.push_back(model);
+                    }
                 }
             }
         }
     }
 
-    if (treeMatrices.empty() && bushMatrices.empty()) return;
+    // 2. Exit early if no foliage is visible to render
+    if (treeMatrices.empty() && bushMatrices.empty()) {
+        return;
+    }
 
+    // 3. Upload the collected instance data to the GPU
     glBindBuffer(GL_ARRAY_BUFFER, m_FoliageInstanceVBO);
+    // Orphan the buffer (a common performance trick) by re-allocating it with glBufferData
     glBufferData(GL_ARRAY_BUFFER, (treeMatrices.size() + bushMatrices.size()) * sizeof(glm::mat4), nullptr, GL_STREAM_DRAW);
 
-    // Render Trees
+    size_t currentOffset = 0;
+
+    // 4. Render Trees
     if (!treeMatrices.empty()) {
-        glBufferSubData(GL_ARRAY_BUFFER, 0, treeMatrices.size() * sizeof(glm::mat4), treeMatrices.data());
-        // Trunk
+        glBufferSubData(GL_ARRAY_BUFFER, currentOffset, treeMatrices.size() * sizeof(glm::mat4), treeMatrices.data());
+        
+        // Render Trunk
         foliageShader.setVec3("objectColor", glm::vec3(0.4f, 0.26f, 0.13f));
         glBindVertexArray(m_TreeTrunkVAO);
         glDrawElementsInstanced(GL_TRIANGLES, m_TreeTrunkIndexCount, GL_UNSIGNED_INT, 0, treeMatrices.size());
-        // Leaves
+        
+        // Render Leaves
         foliageShader.setVec3("objectColor", glm::vec3(0.13f, 0.54f, 0.13f));
         glBindVertexArray(m_TreeLeavesVAO);
         glDrawElementsInstanced(GL_TRIANGLES, m_TreeLeavesIndexCount, GL_UNSIGNED_INT, 0, treeMatrices.size());
+        
+        currentOffset += treeMatrices.size() * sizeof(glm::mat4);
     }
 
-    // Render Bushes
+    // 5. Render Bushes
     if (!bushMatrices.empty()) {
-        glBufferSubData(GL_ARRAY_BUFFER, treeMatrices.size() * sizeof(glm::mat4), bushMatrices.size() * sizeof(glm::mat4), bushMatrices.data());
+        glBufferSubData(GL_ARRAY_BUFFER, currentOffset, bushMatrices.size() * sizeof(glm::mat4), bushMatrices.data());
+        
         foliageShader.setVec3("objectColor", glm::vec3(0.2f, 0.6f, 0.2f));
         glBindVertexArray(m_BushVAO);
         glDrawElementsInstanced(GL_TRIANGLES, m_BushIndexCount, GL_UNSIGNED_INT, 0, bushMatrices.size());
@@ -1012,8 +1035,8 @@ void World::loadChunksAroundPosition(const glm::vec3& position) {
     
     std::lock_guard<std::mutex> queueLock(m_QueueMutex);
 
-    const int VIEW_DISTANCE = 16; // Example view distance in chunks
-    const int LOD_DISTANCE = 8;  // Example LOD distance in chunks
+    const int VIEW_DISTANCE = 32; // Example view distance in chunks
+    const int LOD_DISTANCE = 16;  // Example LOD distance in chunks
 
     for (int x = -VIEW_DISTANCE; x <= VIEW_DISTANCE; ++x) {
         for (int z = -VIEW_DISTANCE; z <= VIEW_DISTANCE; ++z) {

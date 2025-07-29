@@ -70,12 +70,9 @@ namespace Luminumbra {
             void ShowCameraViewfinder(const std::string& lens, float aperture, float shutterSpeed);
             void ShowInteractionPrompt(const std::string& prompt);
             void ShowDebugOverlay(
-                const glm::vec3& playerPos,
-                const glm::vec3& playerVel,
-                float gravity,
-                bool isNoClip,
-                const World::World& world,
-                const Rendering::Shader& worldShader,
+                float deltaTime, // ADD THIS
+                const Player::Player& player, // Pass by const reference
+                World::World& world, // Pass by non-const reference to allow changes
                 Core::PostProcessSettings& settings
             );
 

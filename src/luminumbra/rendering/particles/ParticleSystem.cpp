@@ -77,6 +77,10 @@ void ParticleSystem::init() {
     GLCall(glVertexAttribDivisor(4, 1));
     GLCall(glVertexAttribDivisor(5, 1));
 
+    GLCall(glEnableVertexAttribArray(6));
+    GLCall(glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, stride, (const void*)offsetof(ParticleInstanceData, layer)));
+    GLCall(glVertexAttribDivisor(6, 1));
+
     GLCall(glBindVertexArray(0));
 }
 
@@ -143,66 +147,50 @@ void ParticleSystem::render(Shader& shader, const Luminumbra::Rendering::Camera&
     shader.setVec3("u_ViewPos", camera.getPosition());
     shader.setFloat("u_Time", static_cast<float>(glfwGetTime()));
 
-    // Bind VAO and prepare instance buffer
-    GLCall(glBindVertexArray(m_QuadVAO));
-    GLCall(glBindBuffer(GL_ARRAY_BUFFER, m_InstanceVBO));
+    std::vector<ParticleInstanceData> instances;
+    instances.reserve(m_ActiveParticleCount * 2); // Pre-allocate a reasonable guess
 
-    // Prepare instance data on CPU side first
-    std::vector<ParticleInstanceData> regularInstances;
-    std::vector<ParticleInstanceData> volumetricInstances;
-    regularInstances.reserve(m_ActiveParticleCount);
-    volumetricInstances.reserve(m_ActiveParticleCount * 12); // Max layers
-
-    // First pass: Regular particles
     for (uint32_t i = 0; i < m_ActiveParticleCount; ++i) {
         const Particle& p = m_ParticlePool[i];
-        if (p.isVolumetric) continue;
-        
-        ParticleInstanceData instance;
-        float lifeRatio = glm::clamp(1.0f - (p.lifeRemaining / p.lifeTime), 0.0f, 1.0f);
-        instance.color = glm::mix(p.colorBegin, p.colorEnd, lifeRatio);
-        instance.size = glm::mix(p.sizeBegin, p.sizeEnd, lifeRatio);
-        instance.worldPosition = p.position;
-        instance.rotation = p.rotation;
-        regularInstances.push_back(instance);
-    }
-
-    // Draw regular particles
-    if (!regularInstances.empty()) {
-        GLCall(glBufferData(GL_ARRAY_BUFFER, regularInstances.size() * sizeof(ParticleInstanceData), 
-            regularInstances.data(), GL_DYNAMIC_DRAW));
-        GLCall(glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr, 
-            static_cast<GLsizei>(regularInstances.size())));
-    }
-
-    // Second pass: Volumetric particles
-    for (uint32_t i = 0; i < m_ActiveParticleCount; ++i) {
-        const Particle& p = m_ParticlePool[i];
-        if (!p.isVolumetric) continue;
-
         float lifeRatio = glm::clamp(1.0f - (p.lifeRemaining / p.lifeTime), 0.0f, 1.0f);
         glm::vec4 color = glm::mix(p.colorBegin, p.colorEnd, lifeRatio);
         float size = glm::mix(p.sizeBegin, p.sizeEnd, lifeRatio);
 
-        for (int layer = 0; layer < p.volumetricLayers; layer++) {
+        if (p.isVolumetric) {
+            for (int layer = 0; layer < p.volumetricLayers; layer++) {
+                ParticleInstanceData instance;
+                float layerRatio = (p.volumetricLayers > 1) ?
+                    static_cast<float>(layer) / static_cast<float>(p.volumetricLayers - 1) : 0.0f;
+
+                // The worldPosition is ALWAYS the particle's center.
+                // The GPU will use 'layer' and 'volumeDepth' to calculate the offset.
+                instance.worldPosition = p.position;
+                instance.layer = layerRatio;         // Pass the 0-1 ratio
+                
+                instance.color = color;
+                instance.size = size;
+                instance.rotation = p.rotation;
+                instances.push_back(instance);
+            }
+        } else {
             ParticleInstanceData instance;
-            float layerRatio = static_cast<float>(layer) / static_cast<float>(p.volumetricLayers);
             instance.color = color;
             instance.size = size;
-            instance.worldPosition = p.position + 
-                camera.getRight() * (layerRatio - 0.5f) * p.volumeDepth;
+            instance.worldPosition = p.position;
             instance.rotation = p.rotation;
-            instance.layer = layerRatio;
-            volumetricInstances.push_back(instance);
+            instance.layer = 0.0f; // Default value for non-volumetric
+            instances.push_back(instance);
         }
     }
 
-    // Draw volumetric particles
-    if (!volumetricInstances.empty()) {
-        GLCall(glBufferData(GL_ARRAY_BUFFER, volumetricInstances.size() * sizeof(ParticleInstanceData), 
-            volumetricInstances.data(), GL_DYNAMIC_DRAW));
-        GLCall(glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr, 
-            static_cast<GLsizei>(volumetricInstances.size())));
+    if (!instances.empty()) {
+        GLCall(glBindBuffer(GL_ARRAY_BUFFER, m_InstanceVBO));
+        // Use glBufferSubData if buffer size doesn't change, it's faster.
+        // For simplicity, glBufferData is shown here if instance count varies wildly.
+        GLCall(glBufferData(GL_ARRAY_BUFFER, instances.size() * sizeof(ParticleInstanceData), instances.data(), GL_DYNAMIC_DRAW));
+
+        GLCall(glBindVertexArray(m_QuadVAO));
+        GLCall(glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr, static_cast<GLsizei>(instances.size())));
     }
 
     // Cleanup state
@@ -297,14 +285,16 @@ ParticleProps ParticleSystem::getPresetProperties(ParticleType type) const {
             break;
 
         case ParticleType::Snow:
-            props.velocity = {0.0f, -1.0f, 0.0f}; // Fall slowly
-            props.velocityVariation = {0.5f, 0.5f, 0.5f};
-            props.gravity = {0.0f, -0.5f, 0.0f}; // Light downward force
-            props.colorBegin = {1.0f, 1.0f, 1.0f, 1.0f}; // White
+            props.velocity = {0.0f, -0.8f, 0.0f}; // Fall slowly
+            props.velocityVariation = {0.5f, 0.3f, 0.5f};
+            props.gravity = {0.0f, 0.0f, 0.0f}; // No extra gravity
+            props.colorBegin = {0.9f, 0.9f, 1.0f, 0.9f}; // White with a hint of blue
             props.colorEnd = {1.0f, 1.0f, 1.0f, 0.0f};   // Fades out
-            props.sizeBegin = 0.1f;
-            props.sizeEnd = 0.2f; // Slightly larger
-            props.lifeTime = 3.0f;
+            props.sizeBegin = 0.08f;
+            props.sizeVariation = 0.04f;
+            props.sizeEnd = 0.02f;
+            props.lifeTime = 8.0f; // Long lifetime to reach the ground
+            props.angularVelocityVariation = 1.5f;
             break;
         
         case ParticleType::Explosion:
