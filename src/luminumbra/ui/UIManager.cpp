@@ -95,10 +95,15 @@ namespace Luminumbra {
 
             ImGui::Begin("Main Menu");
             if (ImGui::Button("New Game")) {
+                Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick);
                 newGameCallback();
             }
-            if (ImGui::Button("Load Game")) { loadGameCallback(); }
+            if (ImGui::Button("Load Game")) {
+                Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick);
+                loadGameCallback();
+            }
             if (ImGui::Button("Quit")) {
+                Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick);
                 quitCallback();
             }
             ImGui::End();
@@ -114,13 +119,19 @@ namespace Luminumbra {
             ImGui::Begin("Paused", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize);
 
             if (ImGui::Button("Resume", ImVec2(150, 0))) {
+                Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick);
                 resumeCallback();
             }
             if (ImGui::Button("Settings", ImVec2(150, 0))) {
-                settingsCallback(); // We can wire this up later
+                Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick);
+                settingsCallback();
             }
-            if (ImGui::Button("Save Game", ImVec2(150, 0))) { saveGameCallback(); }
+            if (ImGui::Button("Save Game", ImVec2(150, 0))) {
+                Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick);
+                saveGameCallback();
+            }
             if (ImGui::Button("Quit to Main Menu", ImVec2(150, 0))) {
+                Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick);
                 quitCallback();
             }
 
@@ -143,6 +154,7 @@ namespace Luminumbra {
             } else {
                 for (const auto& saveName : saveFiles) {
                     if (ImGui::Selectable(saveName.c_str())) {
+                        Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick);
                         loadCallback(saveName);
                     }
                 }
@@ -150,6 +162,7 @@ namespace Luminumbra {
 
             ImGui::Separator();
             if (ImGui::Button("Back", ImVec2(120, 0))) {
+                Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick);
                 backCallback();
             }
             ImGui::End();
@@ -162,14 +175,19 @@ namespace Luminumbra {
             // Pass the local variable to ImGui::Begin
             if (ImGui::Begin("New Game", &window_is_open)) {
                 ImGui::InputText("Save Name", saveName, saveNameSize);
+                if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
+
                 ImGui::InputText("Seed (optional)", seed, seedSize);
+                if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
 
                 if (ImGui::Button("Launch")) {
+                    Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick);
                     launchGame = true;
                     window_is_open = false; // Close window on launch
                 }
                 ImGui::SameLine();
                 if (ImGui::Button("Back")) {
+                    Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick);
                     window_is_open = false; // Close window on back
                 }
             }
@@ -184,26 +202,43 @@ namespace Luminumbra {
             ImGui::SetNextWindowSize(ImVec2(450, 550), ImGuiCond_FirstUseEver);
             if (ImGui::Begin("Settings", &m_ShowSettingsWindow)) {
                 if (ImGui::BeginTabBar("SettingsTabs")) {
-                    if (ImGui::BeginTabItem("Graphics")) {
-                        ImGui::Checkbox("V-Sync", &vsync);
+                    bool graphicsTabOpen = ImGui::BeginTabItem("Graphics");
+                    if (ImGui::IsItemClicked()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
+                    if (graphicsTabOpen) {
+                        if (ImGui::Checkbox("V-Sync", &vsync)) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
 
                         const char* shadowLevels[] = { "Low", "Medium", "High" };
-                        ImGui::Combo("Shadow Quality", &shadowQuality, shadowLevels, IM_ARRAYSIZE(shadowLevels));
+                        if (ImGui::Combo("Shadow Quality", &shadowQuality, shadowLevels, IM_ARRAYSIZE(shadowLevels))) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
 
                         const char* filterLevels[] = { "Bilinear", "Trilinear" };
-                        ImGui::Combo("Texture Filtering", &textureFiltering, filterLevels, IM_ARRAYSIZE(filterLevels));
+                        if (ImGui::Combo("Texture Filtering", &textureFiltering, filterLevels, IM_ARRAYSIZE(filterLevels))) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
                         
                         ImGui::EndTabItem();
                     }
-                    if (ImGui::BeginTabItem("Audio")) {
+
+                    bool audioTabOpen = ImGui::BeginTabItem("Audio");
+                    if (ImGui::IsItemClicked()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
+                    if (audioTabOpen) {
                         ImGui::SliderFloat("Master Volume", &masterVolume, 0.0f, 1.0f, "%.2f");
+                        if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
+
                         ImGui::SliderFloat("Music Volume", &musicVolume, 0.0f, 1.0f, "%.2f");
+                        if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
+
                         ImGui::SliderFloat("Effects Volume", &effectsVolume, 0.0f, 1.0f, "%.2f");
+                        if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
+
                         ImGui::EndTabItem();
                     }
-                    if (ImGui::BeginTabItem("Controls")) {
+
+                    bool controlsTabOpen = ImGui::BeginTabItem("Controls");
+                    if (ImGui::IsItemClicked()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
+                    if (controlsTabOpen) {
                         ImGui::SliderFloat("Mouse Sensitivity", &mouseSensitivity, 0.01f, 1.0f, "%.2f");
-                        ImGui::Checkbox("Invert Y-Axis", &invertY);
+                        if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
+
+                        if (ImGui::Checkbox("Invert Y-Axis", &invertY)) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
+                        
                         ImGui::EndTabItem();
                     }
                     ImGui::EndTabBar();
@@ -211,6 +246,7 @@ namespace Luminumbra {
 
                 ImGui::Separator();
                 if (ImGui::Button("Close", ImVec2(120, 0))) {
+                    Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick);
                     m_ShowSettingsWindow = false;
                 }
             }
@@ -342,26 +378,34 @@ namespace Luminumbra {
 
             if (ImGui::CollapsingHeader("Post-Processing")) {
                 // Enable/disable effects
-                ImGui::Checkbox("Enable Bloom", &settings.enableBloom);
-                ImGui::Checkbox("Enable Depth of Field", &settings.enableDof);
-                ImGui::Checkbox("Enable God Rays", &settings.enableGodRays);
+                if (ImGui::Checkbox("Enable Bloom", &settings.enableBloom)) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
+                if (ImGui::Checkbox("Enable Depth of Field", &settings.enableDof)) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
+                if (ImGui::Checkbox("Enable God Rays", &settings.enableGodRays)) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
                 
                 ImGui::Separator();
                 
                 // Bloom settings
                 if (settings.enableBloom) {
-                    if (ImGui::TreeNode("Bloom Settings")) {
+                    bool bloomNodeOpen = ImGui::TreeNode("Bloom Settings");
+                    if (ImGui::IsItemClicked()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
+                    if (bloomNodeOpen) {
                         ImGui::SliderFloat("Threshold", &settings.bloomThreshold, 0.0f, 2.0f, "%.2f");
+                        if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
                         ImGui::SliderFloat("Intensity", &settings.bloomIntensity, 0.0f, 2.0f, "%.2f");
+                        if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
                         ImGui::TreePop();
                     }
                 }
                 
                 // DoF settings
                 if (settings.enableDof) {
-                    if (ImGui::TreeNode("Depth of Field Settings")) {
+                    bool dofNodeOpen = ImGui::TreeNode("Depth of Field Settings");
+                    if (ImGui::IsItemClicked()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
+                    if (dofNodeOpen) {
                         ImGui::SliderFloat("Focal Distance", &settings.dofFocalDistance, 0.1f, 100.0f, "%.1f");
+                        if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
                         ImGui::SliderFloat("Focal Range", &settings.dofFocalRange, 0.1f, 50.0f, "%.1f");
+                        if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
                         ImGui::TreePop();
                     }
                 }
@@ -370,13 +414,26 @@ namespace Luminumbra {
                 if (settings.enableGodRays) {
                     if (ImGui::TreeNode("God Rays Settings")) {
                         ImGui::SliderFloat("Density", &settings.godRaysDensity, 0.0f, 1.0f, "%.2f");
+                        if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
+                        ImGui::SliderFloat("Weight", &settings.godRaysWeight, 0.0f, 1.0f, "%.2f");
+                        if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
                         ImGui::TreePop();
                     }
                 }
                 
                 // Global post-processing settings
                 if (ImGui::TreeNode("Global Settings")) {
+                    ImGui::SliderFloat("Gamma", &settings.gamma, 0.1f, 3.0f, "%.2f");
+                    if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
+                    ImGui::SliderFloat("Saturation", &settings.saturation, 0.0f, 2.0f, "%.2f");
+                    if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
                     ImGui::SliderFloat("Exposure", &settings.exposure, 0.1f, 5.0f, "%.2f");
+                    if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
+                    ImGui::SliderFloat("Contrast", &settings.contrast, 0.0f, 2.0f, "%.2f");
+                    if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
+                    ImGui::SliderFloat("Brightness", &settings.brightness, 0.0f, 2.0f, "%.2f");
+                    if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
+                    ImGui::Checkbox("Enable Color Grading", &settings.enableColorGrading);
                     ImGui::TreePop();
                 }
             }

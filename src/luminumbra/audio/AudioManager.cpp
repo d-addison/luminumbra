@@ -302,8 +302,8 @@ void AudioManager::initializeSoundMap() {
 
     // == Player Actions ==
     m_SoundMap[SoundEvent::PlayerOutOfStamina] = {
-        "res/audio/Player/Player Out Of Stamina 01.wav",
-        "res/audio/Player/Player Out Of Stamina 02.wav"
+        "res/audio/Human Elements/Human Male Cough Out Of Breath Cough 01.wav",
+        "res/audio/Human Elements/Human Male Swallowing 01.wav"
     };
 
     // == Ambience & Environment ==
@@ -346,6 +346,9 @@ void AudioManager::initializeSoundMap() {
     m_SoundMap[SoundEvent::MusicSplashScreen] = { "res/audio/Music/splash.wav" };
     m_SoundMap[SoundEvent::MusicMainMenu] = { "res/audio/Music/menu.wav" };
     m_SoundMap[SoundEvent::MusicGameplay] = { "res/audio/Music/soundtrack.wav" };
+
+    // == UI Sounds ==
+    m_SoundMap[SoundEvent::UIClick] = { "res/audio/UI/click.wav" };
 
     LOG("Sound Map Initialized with " + std::to_string(m_SoundMap.size()) + " event types.");
 }
