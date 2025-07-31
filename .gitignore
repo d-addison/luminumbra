@@ -1,9 +1,22 @@
-# Build folder
-/build/
+# Build files
+build/
+*.exe
+*.dll
+*.so
+*.a
+*.lib
+*.pdb
 
-# VS Code user settings
+# IDE-specific
 .vscode/
+.vs/
+*.VC.db
+*.suo
 
-# Common OS files
-.DS_Store
-Thumbs.db
+# User-specific
+/worlds/saves/
+/docs/internal/
+
+# Other
+*.log
+*.DS_Store

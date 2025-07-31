@@ -1,0 +1,12 @@
+{
+  "bank_id": "music",
+  "streaming": true,
+  "events": {
+    "music_main_menu": {
+      "files": ["assets/audio/music/themes/menu_theme.ogg"],
+      "volume": 0.6,
+      "is_2d": true,
+      "looping": true
+    }
+  }
+}

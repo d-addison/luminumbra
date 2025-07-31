@@ -1,0 +1,24 @@
+{
+  "bank_id": "sfx_main",
+  "events": {
+    "ui_button_click": {
+      "files": ["assets/audio/sfx/ui/button_click.mp3"],
+      "volume": 0.8,
+      "pitch_variation": 0.05,
+      "is_2d": true
+    },
+    "creature_grovestrider_footstep": {
+      "files": [
+        "assets/audio/sfx/creatures/grovestrider/footstep_1.wav",
+        "assets/audio/sfx/creatures/grovestrider/footstep_2.wav",
+        "assets/audio/sfx/creatures/grovestrider/footstep_3.wav"
+      ],
+      "volume": 1.0,
+      "strategy": "random",
+      "is_3d": true,
+      "attenuation_model": "linear",
+      "min_distance": 1.0,
+      "max_distance": 50.0
+    }
+  }
+}
