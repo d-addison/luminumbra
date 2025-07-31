@@ -1,0 +1,10 @@
+{
+  "archetype_id": "creature_grovestrider",
+  "components": [
+    { "type": "TransformComponent", "position": [0, 0, 0], "scale": [1, 1, 1] },
+    { "type": "PhysicsComponent", "shape": "capsule", "mass": 80.0 },
+    { "type": "NeedsComponent", "hunger_rate": 0.01, "safety_decay": 0.05 },
+    { "type": "RenderMeshComponent", "mesh": "models/creatures/grovestrider.lmesh" },
+    { "type": "ScriptedAgentComponent", "script": "scripts/common/ai/agents/grovestrider.lua" }
+  ]
+}

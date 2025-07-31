@@ -1,0 +1,1 @@
+add_executable(asset_processor asset_processor.cpp)
