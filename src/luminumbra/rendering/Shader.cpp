@@ -95,8 +95,10 @@ GLint Shader::getUniformLocation(const std::string& name) const {
 
     GLint location = glGetUniformLocation(m_ID, name.c_str());
     if (location == -1) {
-        // Optional: Log a warning if a uniform is not found.
-        std::cerr << "Warning: Uniform '" << name << "' not found in shader." << std::endl;
+        // only print if the file is NOT empty
+        if (!getFragmentPath().empty() && !getVertexPath().empty()) {
+            std::cerr << "Warning: Uniform '" << name << "' not found in shader frag/vert file: '" << getFragmentPath() << " / " << getVertexPath() << "'." << std::endl;
+        }
     }
 
     m_UniformLocationCache[name] = location;

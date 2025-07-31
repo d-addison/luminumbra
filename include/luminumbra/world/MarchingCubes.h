@@ -7,6 +7,8 @@
 #include <glm/glm.hpp>
 #include <vector>
 #include <map>
+#include <unordered_map>
+#include "luminumbra/core/Hash.h"
 
 namespace Luminumbra::World::MarchingCubes {
 
@@ -28,6 +30,9 @@ extern const int edgeTable[256];
 extern const int triTable[256][16];
 
 glm::vec3 VertexInterp(float isolevel, glm::vec3 p1, glm::vec3 p2, float valp1, float valp2);
-void Polygonise(GridCell grid, float isolevel, IndexedMesh& mesh);
+void Polygonise(GridCell grid, float isolevel, IndexedMesh& mesh,
+                std::unordered_map<glm::ivec3, unsigned int>& cacheX,
+                std::unordered_map<glm::ivec3, unsigned int>& cacheY,
+                std::unordered_map<glm::ivec3, unsigned int>& cacheZ);
 
 } // namespace Luminumbra::World::MarchingCubes

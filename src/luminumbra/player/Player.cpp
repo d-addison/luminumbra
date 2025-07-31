@@ -121,7 +121,7 @@ void Player::processMovement(const std::vector<Movement>& directions, float delt
             }
         }
         if (glm::length(wishDir) > 0.0f) {
-            m_Position += glm::normalize(wishDir) * m_BaseMovementSpeed * (m_WantsToSprint ? 3.0f : 1.0f) * deltaTime;
+            m_Position += glm::normalize(wishDir) * m_BaseMovementSpeed * (m_WantsToSprint ? 5.0f : 1.0f) * deltaTime;
         }
     } else {
         // Standard movement uses wishDir for ground/air acceleration

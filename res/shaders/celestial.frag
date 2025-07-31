@@ -6,5 +6,6 @@ uniform float brightness;
 
 void main()
 {
-    FragColor = vec4(objectColor, brightness);
+    // Apply brightness to the color channels and set alpha to 1.0 for opaque objects.
+    FragColor = vec4(objectColor * brightness, 1.0);
 }

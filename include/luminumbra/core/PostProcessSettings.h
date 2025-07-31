@@ -16,8 +16,8 @@ struct PostProcessSettings {
     float contrast = 1.0f;
     float brightness = 1.0f;
     bool enableBloom = true;
-    bool enableDof = true;
-    bool enableGodRays = true;
+    bool enableDof = false;
+    bool enableGodRays = false;
     bool enableColorGrading = true;
 };
 

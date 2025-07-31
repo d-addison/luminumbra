@@ -7,8 +7,10 @@
 #include "luminumbra/world/WeatherManager.h"
 #include "luminumbra/core/Debug.h"
 #include "luminumbra/rendering/particles/Particle.h"
+#include "luminumbra/world/GenerationProfile.h"
 #include "luminumbra/audio/AudioManager.h"
 #include <glm/gtc/color_space.hpp>
+#include "luminumbra/rendering/model/ModelManager.h"
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -16,15 +18,17 @@
 
 namespace Luminumbra::World {
 
-World::World(const std::string& slotName, const std::string& seed, int screenWidth, int screenHeight) 
-    : m_SlotName(slotName), m_Seed(seed) 
+World::World(const std::string& slotName, const std::string& seed, std::shared_ptr<GenerationProfile> profile, int screenWidth, int screenHeight) 
+    : m_SlotName(slotName), 
+      m_Seed(seed),
+      m_GenerationProfile(profile)
 {
     LOG("World::Constructor - Creating world '" + m_SlotName + "' with seed: " + m_Seed);
     
     m_Player = std::make_unique<Luminumbra::Player::Player>(screenWidth, screenHeight);
     m_ParticleSystem = std::make_unique<Luminumbra::Rendering::ParticleSystem>();
     m_WeatherManager = std::make_unique<WeatherManager>(this);
-    // m_Skybox = std::make_unique<Luminumbra::Rendering::Skybox>();
+    m_Skybox = std::make_unique<Luminumbra::Rendering::Skybox>();
     m_CloudManager = std::make_unique<Luminumbra::Rendering::CloudManager>();
     m_CloudManager->init();
     
@@ -62,6 +66,8 @@ World::World(const std::string& slotName, const std::string& seed, int screenWid
         LOG("Spawn surface found at Y: " + std::to_string(spawnY));
     }
 
+    m_TreeModel = Rendering::ModelManager::getInstance().getModel("res/models/converted/tree/tree.lbm");
+
     // Now spawn the player at the correct height
     m_Player->reset(glm::vec3(0.0f, spawnY + 2.0f, 0.0f));
     initCelestials();
@@ -88,6 +94,24 @@ World::~World() {
     glDeleteBuffers(1, &m_BushVBO);
     glDeleteBuffers(1, &m_BushEBO);
     glDeleteBuffers(1, &m_FoliageInstanceVBO);
+}
+
+void World::regenerate() {
+    LOG("Regenerating world with new profile...");
+    std::lock_guard<std::mutex> chunkLock(m_ChunkMutex);
+    std::lock_guard<std::mutex> queueLock(m_QueueMutex);
+
+    // 1. Clear all existing chunk data
+    m_Chunks.clear();
+
+    // 2. Clear the generation queue to prevent old chunks from loading
+    while (!m_ChunkLoadQueue.empty()) {
+        m_ChunkLoadQueue.pop();
+    }
+
+    // 3. Immediately queue new chunks around the player with the new settings
+    // Use m_LastViewerPosition as it's updated every frame
+    loadChunksAroundPosition(m_LastViewerPosition);
 }
 
 void World::initCelestials() {
@@ -146,7 +170,22 @@ struct Vertex {
     glm::vec3 Normal;
 };
 
+void World::initFoliage() {
+    // This function now only creates the shared instance buffer
+    // and connects it to our loaded models.
+    glGenBuffers(1, &m_FoliageInstanceVBO);
+    glBindBuffer(GL_ARRAY_BUFFER, m_FoliageInstanceVBO);
+    glBufferData(GL_ARRAY_BUFFER, 10000 * sizeof(glm::mat4), nullptr, GL_STREAM_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
 
+    // Link this buffer to our model's meshes
+    if (m_TreeModel) {
+        m_TreeModel->setupInstancing(m_FoliageInstanceVBO);
+    }
+}
+
+
+/*
 void World::initFoliage() {
     // A local struct to hold interleaved vertex data for position and normal
     struct Vertex {
@@ -271,6 +310,53 @@ void World::initFoliage() {
             glVertexAttribDivisor(2 + i, 1);
         }
     }
+    glBindVertexArray(0);
+}
+*/
+
+void World::renderFoliage(Rendering::Shader& modelShader) const {
+    modelShader.use();
+    modelShader.setMat4("projection", m_Player->getCamera().getProjectionMatrix());
+    modelShader.setMat4("view", m_Player->getCamera().getViewMatrix());
+
+    const auto& camera = m_Player->getCamera();
+    std::vector<glm::mat4> treeMatrices;
+
+    // 1. Collect instance data from visible chunks (same logic as before)
+    for (const auto& pair : m_Chunks) {
+        const auto& chunk = pair.second;
+        if (chunk) {
+            float distance = getChunkDistance(pair.first, m_Player->getPosition());
+            if (distance <= (VIEW_DISTANCE - 1) * Chunk::CHUNK_SIZE) {
+                const float chunkSize = static_cast<float>(Chunk::CHUNK_SIZE);
+                glm::vec3 minAABB = glm::vec3(pair.first);
+                glm::vec3 maxAABB = minAABB + glm::vec3(chunkSize);
+                if (camera.isBoxInFrustum(minAABB, maxAABB)) {
+                    for (const auto& inst : chunk->getTreeInstances()) {
+                        glm::mat4 model = glm::translate(chunk->getModelMatrix(), inst.position);
+                        model = glm::rotate(model, inst.rotationY, glm::vec3(0, 1, 0));
+                        model = glm::scale(model, glm::vec3(inst.scale));
+                        treeMatrices.push_back(model);
+                    }
+                }
+            }
+        }
+    }
+
+    if (treeMatrices.empty()) {
+        return;
+    }
+
+    // 2. Upload the collected instance matrices to the GPU
+    glBindBuffer(GL_ARRAY_BUFFER, m_FoliageInstanceVBO);
+    // Orphan the old buffer and upload the new data
+    glBufferData(GL_ARRAY_BUFFER, treeMatrices.size() * sizeof(glm::mat4), treeMatrices.data(), GL_STREAM_DRAW);
+
+    // 3. Render all tree instances with a single draw call
+    if (m_TreeModel) {
+        m_TreeModel->drawInstanced(modelShader, treeMatrices.size());
+    }
+
     glBindVertexArray(0);
 }
 
@@ -913,7 +999,7 @@ void World::renderWater(Rendering::Shader& shader, const glm::vec3& viewPos) con
         chunk->renderWater(); 
     }
 }
-
+/*
 void World::renderFoliage(Luminumbra::Rendering::Shader& foliageShader) const {
     foliageShader.use();
     foliageShader.setMat4("projection", m_Player->getCamera().getProjectionMatrix());
@@ -997,9 +1083,11 @@ void World::renderFoliage(Luminumbra::Rendering::Shader& foliageShader) const {
     glBindVertexArray(0);
 }
 
+*/
+
 void World::renderSkyboxAndClouds(const glm::mat4& view, const glm::mat4& projection) const {
-    // m_Skybox->render(view, projection);
-    m_CloudManager->render(view, projection);
+    m_Skybox->render(view, projection);
+    // m_CloudManager->render(view, projection);
 }
 
 bool World::isSolid(const glm::vec3& worldPosition) const {
@@ -1035,8 +1123,8 @@ void World::loadChunksAroundPosition(const glm::vec3& position) {
     
     std::lock_guard<std::mutex> queueLock(m_QueueMutex);
 
-    const int VIEW_DISTANCE = 32; // Example view distance in chunks
-    const int LOD_DISTANCE = 16;  // Example LOD distance in chunks
+    const int VIEW_DISTANCE = 64; // Example view distance in chunks
+    const int LOD_DISTANCE = 32;  // Example LOD distance in chunks
 
     for (int x = -VIEW_DISTANCE; x <= VIEW_DISTANCE; ++x) {
         for (int z = -VIEW_DISTANCE; z <= VIEW_DISTANCE; ++z) {
@@ -1097,7 +1185,7 @@ void World::processChunkQueue() {
         
         if (hasWork) {
             // Generate chunk (this is the expensive operation)
-            auto chunk = std::make_unique<Chunk>(request.position, m_Seed, request.lod);
+            auto chunk = std::make_unique<Chunk>(request.position, m_Seed, request.lod, m_GenerationProfile);
             
             // Add to world
             {

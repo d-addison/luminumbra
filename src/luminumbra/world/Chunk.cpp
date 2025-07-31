@@ -8,6 +8,7 @@
 #include <glad/gl.h>
 #include <glm/gtc/type_ptr.hpp>
 
+
 #include <vector>
 #include <algorithm>
 #include <cmath>
@@ -17,16 +18,25 @@
 
 namespace Luminumbra::World {
 
-Chunk::Chunk(const glm::ivec3& position, const std::string& seed, int lod) : m_Position(position), m_LOD(lod) {
+Chunk::Chunk(const glm::ivec3& position, const std::string& seed, int lod, std::shared_ptr<const GenerationProfile> profile) 
+    : m_Position(position), m_LOD(lod) 
+{
     m_ModelMatrix = glm::translate(glm::mat4(1.0f), glm::vec3(m_Position));
 
-    fnl_state noise = fnlCreateState();
-    noise.seed = static_cast<int>(std::hash<std::string>{}(seed));
+    // CORRECTED ORDER AND CALLS
+    // 1. Generate the 3D density data using the profile
+    generateNoiseData(*profile);
     
-    // This part is CPU-only and safe for worker threads.
-    generateNoiseData(noise); 
+    // 2. Determine foliage positions based on the density data (before meshing)
+    fnl_state foliage_noise = fnlCreateState();
+    foliage_noise.seed = m_Position.x * 1337 + m_Position.z * 7331;
+    generateFoliage(foliage_noise, *profile);
+
+    // 3. Generate the terrain mesh from the density data
     generateMesh(m_LOD);
-    generateWaterMesh();
+
+    // 4. Generate the water mesh
+    generateWaterMesh(*profile);
 }
 
 Chunk::~Chunk() {
@@ -37,11 +47,11 @@ Chunk::~Chunk() {
     glDeleteBuffers(1, &m_WaterVBO);
 }
 
-void Chunk::generateNoiseData(fnl_state& noise) {
+void Chunk::generateNoiseData(const GenerationProfile& profile) {
     m_NoiseData.resize((CHUNK_SIZE + 1) * (CHUNK_SIZE + 1) * (CHUNK_SIZE + 1));
-    m_BiomeData.resize((CHUNK_SIZE + 1) * (CHUNK_SIZE + 1), BiomeType::WHISPERING_GLADE);
+    m_BiomeData.resize((CHUNK_SIZE + 1) * (CHUNK_SIZE + 1));
 
-    // PRE-CALCULATE BIOMES FOR THE CHUNK
+    // 1. Pre-calculate biomes for the chunk
     for (int z = 0; z <= CHUNK_SIZE; ++z) {
         for (int x = 0; x <= CHUNK_SIZE; ++x) {
             float worldX = (float)(m_Position.x + x);
@@ -50,27 +60,7 @@ void Chunk::generateNoiseData(fnl_state& noise) {
         }
     }
 
-    // --- Terrain Noise ---
-    noise.noise_type = FNL_NOISE_OPENSIMPLEX2;
-    noise.frequency = 0.005f;
-    noise.fractal_type = FNL_FRACTAL_FBM;
-    noise.octaves = 4;
-    noise.lacunarity = 2.0f;
-    noise.gain = 0.5f;
-
-    // --- 3D Cave Noise ---
-    fnl_state cave_noise = fnlCreateState();
-    cave_noise.seed = noise.seed + 1; // Use a different seed
-    cave_noise.noise_type = FNL_NOISE_PERLIN;
-    cave_noise.fractal_type = FNL_FRACTAL_RIDGED; // Ridged is great for tunnels
-    cave_noise.frequency = 0.02f;
-    cave_noise.octaves = 2;
-
-    // --- Define terrain shape ---
-    float baseGroundHeight = 10.0f;   // The average sea level for the terrain
-    float terrainAmplitude = 30.0f;   // The max height of hills and depth of valleys
-
-    // --- Loop through every point in the chunk's data grid ---
+    // 2. Loop through every point and calculate density
     for (int y = 0; y <= CHUNK_SIZE; ++y) {
         for (int z = 0; z <= CHUNK_SIZE; ++z) {
             for (int x = 0; x <= CHUNK_SIZE; ++x) {
@@ -78,32 +68,57 @@ void Chunk::generateNoiseData(fnl_state& noise) {
                 float worldY = (float)(m_Position.y + y);
                 float worldZ = (float)(m_Position.z + z);
 
-                // 1. Calculate base terrain height (like before)
-                float groundHeightNoise = fnlGetNoise2D(&noise, worldX, worldZ);
-                float groundHeight = baseGroundHeight + (groundHeightNoise * terrainAmplitude);
+                // This is a simplified blending example. A real implementation of
+                // getBlendedBiomeAt would use Voronoi noise or multiple noise layers
+                // to determine the two dominant biomes and a blend factor.
+                BiomeType primary_type = getBiomeAt(worldX, worldZ); // Your existing function
+                BiomeType secondary_type = getBiomeAt(worldX + 150.f, worldZ - 150.f); // Sample a nearby point for a secondary biome
 
-                // 2. Base terrain density is the distance from the ground surface
-                float terrain_density = worldY - groundHeight;
+                fnl_state blend_noise = fnlCreateState();
+                blend_noise.frequency = 0.002f; // A different frequency for the blend map
+                float blend_factor = (fnlGetNoise2D(&blend_noise, worldX, worldZ) + 1.0f) / 2.0f; // Noise in [0, 1] range
+
+                const BiomeProfile& primary_biome = profile.biome_profiles.at(primary_type);
+                const BiomeProfile& secondary_biome = profile.biome_profiles.at(secondary_type);
+
+                // --- INTERPOLATE BIOME PARAMETERS ---
+                float base_height      = glm::mix(primary_biome.base_height, secondary_biome.base_height, blend_factor);
+                float terrain_variance = glm::mix(primary_biome.terrain_variance, secondary_biome.terrain_variance, blend_factor);
+                float mountains_amp    = glm::mix(primary_biome.mountains.amplitude, secondary_biome.mountains.amplitude, blend_factor);
+                float caves_amp        = glm::mix(primary_biome.caves.amplitude, secondary_biome.caves.amplitude, blend_factor);
+
+                // For noise states, you can't easily mix them.
+                // A common approach is to calculate the noise for both biomes and then mix the *results*.
+
+                // --- BASE TERRAIN (blended) ---
+                float primary_height_noise = fnlGetNoise2D(&primary_biome.base_terrain.noise, worldX, worldZ);
+                float secondary_height_noise = fnlGetNoise2D(&secondary_biome.base_terrain.noise, worldX, worldZ);
+                float heightmap_noise = glm::mix(primary_height_noise, secondary_height_noise, blend_factor);
                 
-                // ADDED LOGIC FOR CAVES AND FLOATING ISLANDS
-                // Make the base terrain fade out at the bottom to create floating islands
-                float island_fade_factor = 1.0f - glm::smoothstep(0.0f, 15.0f, worldY);
-                terrain_density += island_fade_factor * 20.0f; // Push density towards air at the bottom
+                // --- MOUNTAINS (blended) ---
+                float primary_mountain_noise = pow(glm::abs(fnlGetNoise2D(&primary_biome.mountains.noise, worldX, worldZ)), 2.0f);
+                float secondary_mountain_noise = pow(glm::abs(fnlGetNoise2D(&secondary_biome.mountains.noise, worldX, worldZ)), 2.0f);
+                float mountain_noise = glm::mix(primary_mountain_noise, secondary_mountain_noise, blend_factor);
 
-                // 3. Calculate 3D cave noise
-                float cave_density = fnlGetNoise3D(&cave_noise, worldX, worldY, worldZ);
+                // Combine heightmap and mountains using interpolated parameters
+                float groundHeight = base_height + (heightmap_noise * terrain_variance) + (mountain_noise * mountains_amp);
+                float terrain_density = worldY - groundHeight;
 
-                // 4. Combine the densities
-                // We will add the cave noise. Since ridged noise is mostly negative,
-                // this will carve out areas (make them more "air-like").
-                // We only apply cave carving below the surface.
+                // --- CAVES (blended) ---
+                float primary_cave_noise = fnlGetNoise3D(&primary_biome.caves.noise, worldX, worldY, worldZ);
+                float secondary_cave_noise = fnlGetNoise3D(&secondary_biome.caves.noise, worldX, worldY, worldZ);
+                float cave_noise_raw = glm::mix(primary_cave_noise, secondary_cave_noise, blend_factor);
+                float cave_density = glm::smoothstep(0.5f, 0.6f, cave_noise_raw) * caves_amp;
+
+                // --- FINAL DENSITY CALCULATION (Same as before) ---
                 float final_density = terrain_density;
-                if (terrain_density < 0.0f) { // If underground
-                    // The closer to 0 cave_density is, the more "hollow" it is.
-                    // We can add it to make the terrain less dense.
-                    // A multiplier strengthens the effect.
-                    final_density += (cave_density + 0.2f) * 2.0f;
+                if (terrain_density < 0.0f) {
+                    final_density = glm::max(terrain_density, -cave_density);
                 }
+                
+                // --- FLOATING ISLANDS (Same as before) ---
+                float island_fade = 1.0f - glm::smoothstep(profile.island_fade_start, profile.island_fade_end, worldY);
+                final_density += island_fade * 20.0f;
 
                 int index = x + z * (CHUNK_SIZE + 1) + y * (CHUNK_SIZE + 1) * (CHUNK_SIZE + 1);
                 m_NoiseData[index] = final_density;
@@ -119,13 +134,17 @@ const glm::ivec3 cornerOffsets[8] = {
 };
 
 void Chunk::generateMesh(int lod) {
-    MarchingCubes::IndexedMesh mesh;
+    MarchingCubes::IndexedMesh raw_mesh; // We'll generate a raw, hole-free mesh first.
     float isolevel = 0.0f;
     int step = 1 << lod;
 
-    for (int x = 0; x < CHUNK_SIZE; x += step) {
-        for (int y = 0; y < CHUNK_SIZE; y += step) {
-            for (int z = 0; z < CHUNK_SIZE; z += step) {
+    // --- 1. Generate Raw Mesh WITHOUT Vertex Sharing ---
+    // By declaring the caches inside the loop, we prevent the buggy sharing
+    // between cells, guaranteeing a topologically sound (hole-free) mesh.
+    for (int y = 0; y < CHUNK_SIZE; y += step) {
+        for (int z = 0; z < CHUNK_SIZE; z += step) {
+            for (int x = 0; x < CHUNK_SIZE; x += step) {
+                std::unordered_map<glm::ivec3, unsigned int> cacheX, cacheY, cacheZ; // Fresh cache every time
                 MarchingCubes::GridCell cell;
                 for (int i = 0; i < 8; ++i) {
                     glm::ivec3 cornerPos = glm::ivec3(x, y, z) + cornerOffsets[i] * step;
@@ -133,123 +152,159 @@ void Chunk::generateMesh(int lod) {
                     cell.p[i] = glm::vec3(cornerPos);
                     cell.val[i] = m_NoiseData.at(index);
                 }
-                MarchingCubes::Polygonise(cell, isolevel, mesh);
+                MarchingCubes::Polygonise(cell, isolevel, raw_mesh, cacheX, cacheY, cacheZ);
             }
         }
     }
 
-    if (mesh.indices.empty()) {
+    if (raw_mesh.indices.empty()) {
         m_IndexCount = 0;
         return;
     }
 
-    for (size_t i = 0; i < mesh.indices.size(); i += 3) {
-        std::swap(mesh.indices[i + 1], mesh.indices[i + 2]);
-    }
+    // --- 2. Vertex Welding Post-Process ---
+    // Now, we'll merge the duplicate vertices from the raw mesh to create a
+    // clean, indexed mesh suitable for smooth shading and LOD skirts.
+    MarchingCubes::IndexedMesh welded_mesh;
+    std::map<glm::vec3, unsigned int> position_to_new_index;
 
-    fnl_state foliage_noise = fnlCreateState();
-    foliage_noise.seed = m_Position.x * 1337 + m_Position.z * 7331; // Unique seed for foliage
-    generateFoliage(foliage_noise, mesh);
-
-    m_IndexCount = mesh.indices.size();
-    
-    struct Vertex { glm::vec3 p, n, c; };
-    std::vector<Vertex> vertices(mesh.vertices.size());
-    std::vector<glm::vec3> normals(mesh.vertices.size(), glm::vec3(0.0f));
-
-    for (size_t i = 0; i < mesh.indices.size(); i += 3) {
-        unsigned int i0 = mesh.indices[i], i1 = mesh.indices[i+1], i2 = mesh.indices[i+2];
-        glm::vec3 v0 = mesh.vertices[i0], v1 = mesh.vertices[i1], v2 = mesh.vertices[i2];
-        glm::vec3 faceNormal = glm::normalize(glm::cross(v1 - v0, v2 - v0));
-        normals[i0] += faceNormal;
-        normals[i1] += faceNormal;
-        normals[i2] += faceNormal;
-    }
-
-    // Populate the vertex buffer with all data
-    for (size_t i = 0; i < mesh.vertices.size(); ++i) {
-        vertices[i].p = mesh.vertices[i];
-        vertices[i].n = glm::normalize(normals[i]);
-        
-        glm::vec3 worldPos = glm::vec3(m_Position) + vertices[i].p;
-        int biomeX = glm::clamp((int)vertices[i].p.x, 0, CHUNK_SIZE);
-        int biomeZ = glm::clamp((int)vertices[i].p.z, 0, CHUNK_SIZE);
-        int biomeIndex = biomeX + biomeZ * (CHUNK_SIZE + 1);
-        BiomeType biome = m_BiomeData[biomeIndex];
-
-        float density = 0.0f;
-        int voxelX = (int)vertices[i].p.x, voxelY = (int)vertices[i].p.y, voxelZ = (int)vertices[i].p.z;
-        int voxelIndex = voxelX + voxelZ * (CHUNK_SIZE + 1) + voxelY * (CHUNK_SIZE + 1) * (CHUNK_SIZE + 1);
-        if (voxelIndex >= 0 && voxelIndex < m_NoiseData.size()) {
-            density = m_NoiseData[voxelIndex];
+    // Custom comparator for glm::vec3 to use it in a std::map
+    struct vec3comp {
+        bool operator()(const glm::vec3& a, const glm::vec3& b) const {
+            if (a.x != b.x) return a.x < b.x;
+            if (a.y != b.y) return a.y < b.y;
+            return a.z < b.z;
         }
-        vertices[i].c = getTerrainColor(worldPos.y, density, biome);
+    };
+    std::map<glm::vec3, unsigned int, vec3comp> unique_vertices;
+
+    for (const auto& old_index : raw_mesh.indices) {
+        glm::vec3 pos = raw_mesh.vertices[old_index];
+
+        // If we haven't seen a vertex at this exact position before...
+        if (unique_vertices.find(pos) == unique_vertices.end()) {
+            // ...add it to our new vertex list and store its new index.
+            unique_vertices[pos] = welded_mesh.vertices.size();
+            welded_mesh.vertices.push_back(pos);
+        }
+        // Add the new, correct index to our final index list.
+        welded_mesh.indices.push_back(unique_vertices[pos]);
+    }
+    
+    // --- 3. Generate LOD Skirt on the Clean, Welded Mesh ---
+    // (This logic is identical to before, but now operates on the 'welded_mesh')
+    if (m_LOD > 0) {
+        // ... (The entire skirt generation block from the previous answer goes here) ...
+        // Note: Make sure it operates on 'welded_mesh', not 'raw_mesh'.
+        const float skirt_depth = (float)CHUNK_SIZE;
+        std::vector<unsigned int> skirt_indices;
+        std::map<unsigned int, unsigned int> edge_vertex_to_skirt_vertex;
+        for (size_t i = 0; i < welded_mesh.indices.size(); i += 3) {
+            unsigned int indices[3] = { welded_mesh.indices[i], welded_mesh.indices[i+1], welded_mesh.indices[i+2] };
+            glm::vec3 points[3] = { welded_mesh.vertices[indices[0]], welded_mesh.vertices[indices[1]], welded_mesh.vertices[indices[2]] };
+            for (int j = 0; j < 3; ++j) {
+                glm::vec3 p1 = points[j]; glm::vec3 p2 = points[(j + 1) % 3];
+                bool is_on_boundary = (p1.x == p2.x && (p1.x == 0 || p1.x == CHUNK_SIZE)) || (p1.z == p2.z && (p1.z == 0 || p1.z == CHUNK_SIZE));
+                if (is_on_boundary) {
+                    unsigned int idx1 = indices[j], idx2 = indices[(j + 1) % 3], skirt_idx1, skirt_idx2;
+                    if (edge_vertex_to_skirt_vertex.find(idx1) == edge_vertex_to_skirt_vertex.end()) {
+                        welded_mesh.vertices.push_back(p1 - glm::vec3(0, skirt_depth, 0));
+                        skirt_idx1 = welded_mesh.vertices.size() - 1; edge_vertex_to_skirt_vertex[idx1] = skirt_idx1;
+                    } else { skirt_idx1 = edge_vertex_to_skirt_vertex[idx1]; }
+                    if (edge_vertex_to_skirt_vertex.find(idx2) == edge_vertex_to_skirt_vertex.end()) {
+                        welded_mesh.vertices.push_back(p2 - glm::vec3(0, skirt_depth, 0));
+                        skirt_idx2 = welded_mesh.vertices.size() - 1; edge_vertex_to_skirt_vertex[idx2] = skirt_idx2;
+                    } else { skirt_idx2 = edge_vertex_to_skirt_vertex[idx2]; }
+                    skirt_indices.push_back(idx1); skirt_indices.push_back(idx2); skirt_indices.push_back(skirt_idx1);
+                    skirt_indices.push_back(skirt_idx1); skirt_indices.push_back(idx2); skirt_indices.push_back(skirt_idx2);
+                }
+            }
+        }
+        welded_mesh.indices.insert(welded_mesh.indices.end(), skirt_indices.begin(), skirt_indices.end());
     }
 
-    m_VertexData.resize(vertices.size() * sizeof(Vertex) / sizeof(float));
-    memcpy(m_VertexData.data(), vertices.data(), vertices.size() * sizeof(Vertex));
-    
-    m_IndexData = mesh.indices;
+    // --- 4. Calculate Normals and Prepare Final GPU Buffers ---
+    struct Vertex { glm::vec3 p, n; };
+    std::vector<Vertex> final_vertices(welded_mesh.vertices.size());
+    std::vector<glm::vec3> final_normals(welded_mesh.vertices.size(), glm::vec3(0.0f));
+
+    for (size_t i = 0; i < welded_mesh.indices.size(); i += 3) {
+        unsigned int i0 = welded_mesh.indices[i], i1 = welded_mesh.indices[i+1], i2 = welded_mesh.indices[i+2];
+        const glm::vec3& v0 = welded_mesh.vertices[i0];
+        const glm::vec3& v1 = welded_mesh.vertices[i1];
+        const glm::vec3& v2 = welded_mesh.vertices[i2];
+        glm::vec3 faceNormal = glm::cross(v1 - v0, v2 - v0);
+        final_normals[i0] += faceNormal;
+        final_normals[i1] += faceNormal;
+        final_normals[i2] += faceNormal;
+    }
+
+    for (size_t i = 0; i < welded_mesh.vertices.size(); ++i) {
+        final_vertices[i].p = welded_mesh.vertices[i];
+        if (glm::length(final_normals[i]) > 0.0f) {
+            final_vertices[i].n = glm::normalize(final_normals[i]);
+        } else {
+            final_vertices[i].n = glm::vec3(0.0, 1.0, 0.0);
+        }
+    }
+
+    m_VertexData.resize(final_vertices.size() * sizeof(Vertex) / sizeof(float));
+    memcpy(m_VertexData.data(), final_vertices.data(), final_vertices.size() * sizeof(Vertex));
+
+    m_IndexData = welded_mesh.indices;
+    m_IndexCount = m_IndexData.size();
     m_GpuStatus = GpuStatus::NeedsGpuUpload;
 }
 
-void Chunk::generateFoliage(fnl_state& noise, const MarchingCubes::IndexedMesh& terrainMesh) {
+void Chunk::generateFoliage(fnl_state& noise, const GenerationProfile& profile) {
     noise.noise_type = FNL_NOISE_PERLIN;
     noise.frequency = 0.8f;
-    // noise.frequency = 0.1f;
-    // noise.cellular_return_type = FNL_CELLULAR_RETURN_TYPE_CELLVALUE;
-    // noise.cellular_jitter_mod = 1.0f;
 
     std::mt19937 rng(static_cast<unsigned int>(std::hash<std::string>{}(std::to_string(m_Position.x) + "_" + std::to_string(m_Position.z))));
     std::uniform_real_distribution<float> scaleDist(0.8f, 1.5f);
     std::uniform_real_distribution<float> rotDist(0.0f, 2.0f * 3.14159f);
 
-    std::map<std::pair<int, int>, float> highestY;
-    std::map<std::pair<int, int>, glm::vec3> surfaceNormals;
-
-    // First pass: find the highest point and average normal for each (x, z) grid cell
-    for (size_t i = 0; i < terrainMesh.indices.size(); i += 3) {
-        unsigned int i0 = terrainMesh.indices[i];
-        unsigned int i1 = terrainMesh.indices[i + 1];
-        unsigned int i2 = terrainMesh.indices[i + 2];
-
-        glm::vec3 v0 = terrainMesh.vertices[i0];
-        glm::vec3 v1 = terrainMesh.vertices[i1];
-        glm::vec3 v2 = terrainMesh.vertices[i2];
-
-        glm::vec3 faceNormal = glm::normalize(glm::cross(v1 - v0, v2 - v0));
-
-        // Process all three vertices of the triangle
-        for (const auto& v : { v0, v1, v2 }) {
-            int ix = static_cast<int>(floor(v.x));
-            int iz = static_cast<int>(floor(v.z));
-            auto key = std::make_pair(ix, iz);
-
-            if (highestY.find(key) == highestY.end() || v.y > highestY[key]) {
-                highestY[key] = v.y;
-                surfaceNormals[key] = faceNormal;
-            }
-        }
-    }
+    auto get_density = [&](int x, int y, int z) {
+        if (x < 0 || x > CHUNK_SIZE || y < 0 || y > CHUNK_SIZE || z < 0 || z > CHUNK_SIZE) return 1.0f; // Treat out of bounds as air
+        int index = x + z * (CHUNK_SIZE + 1) + y * (CHUNK_SIZE + 1) * (CHUNK_SIZE + 1);
+        return m_NoiseData[index];
+    };
 
     for (int x = 1; x < CHUNK_SIZE - 1; ++x) {
         for (int z = 1; z < CHUNK_SIZE - 1; ++z) {
-            auto key = std::make_pair(x, z);
-            if (highestY.find(key) == highestY.end()) continue;
+            // Scan downwards from the top of the chunk to find the surface
+            for (int y = CHUNK_SIZE - 1; y >= 1; --y) {
+                float density_here = get_density(x, y, z);
+                float density_below = get_density(x, y - 1, z);
 
-            float y = highestY[key];
-            glm::vec3 worldPos = glm::vec3(m_Position) + glm::vec3(x, y, z);
+                // Check for a transition from air (positive density) to solid (negative density)
+                if (density_here >= 0.0f && density_below < 0.0f) {
+                    float worldY = m_Position.y + y;
+                    if (worldY < profile.water_level + 1.0f) break;
 
-            if (worldPos.y > WATER_LEVEL + 1.0f) { // Don't spawn foliage underwater
-                glm::vec3 normal = surfaceNormals[key];
-                if (normal.y > 0.85f) { // Only on relatively flat ground
-                    float foliageValue = fnlGetNoise2D(&noise, worldPos.x, worldPos.z);
+                    // Approximate the surface normal using the gradient of the density field
+                    glm::vec3 normal = glm::normalize(glm::vec3(
+                        get_density(x - 1, y, z) - get_density(x + 1, y, z),
+                        get_density(x, y - 1, z) - get_density(x, y + 1, z),
+                        get_density(x, y, z - 1) - get_density(x, y, z + 1)
+                    ));
 
-                    if (foliageValue > 0.7f) { // Threshold for trees
-                        m_TreeInstances.push_back({ glm::vec3(x, y, z), scaleDist(rng), rotDist(rng) });
-                    } else if (foliageValue > 0.6f) { // Threshold for bushes
-                        m_BushInstances.push_back({ glm::vec3(x, y - 4.0f, z), scaleDist(rng) * 0.5f, rotDist(rng) });
+                    // Only place foliage on relatively flat ground (normal pointing up)
+                    if (normal.y > 0.85f) {
+                        float worldX_foliage = m_Position.x + x;
+                        float worldZ_foliage = m_Position.z + z;
+                        float foliage_value = fnlGetNoise2D(&noise, worldX_foliage, worldZ_foliage);
+                        
+                        // Use noise to decide whether to place a tree or bush
+                        if (foliage_value > 0.7f) {
+                            m_TreeInstances.push_back({ glm::vec3(x, y, z), scaleDist(rng), rotDist(rng) });
+                        } else if (foliage_value > 0.6f) {
+                            m_BushInstances.push_back({ glm::vec3(x, y - 0.5f, z), scaleDist(rng) * 0.5f, rotDist(rng) });
+                        }
                     }
+                    
+                    // We found the surface for this (x,z) column, so we can stop scanning down
+                    break; 
                 }
             }
         }
@@ -259,7 +314,7 @@ void Chunk::generateFoliage(fnl_state& noise, const MarchingCubes::IndexedMesh& 
 
 void Chunk::uploadToGpu() {
     if (m_IndexCount > 0) {
-        struct Vertex { glm::vec3 p, n, c; };
+        struct Vertex { glm::vec3 p, n; };
 
         GLCall(glGenVertexArrays(1, &m_VAO));
         GLCall(glGenBuffers(1, &m_VBO));
@@ -276,8 +331,6 @@ void Chunk::uploadToGpu() {
         GLCall(glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, p)));
         GLCall(glEnableVertexAttribArray(1));
         GLCall(glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, n)));
-        GLCall(glEnableVertexAttribArray(2));
-        GLCall(glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, c)));
 
         GLCall(glBindVertexArray(0));
     }
@@ -448,9 +501,10 @@ void Chunk::renderWater() const {
     }
 }
 
-void Chunk::generateWaterMesh() {
-    // Only generate a water mesh if the chunk intersects the water level
-    if (m_Position.y > WATER_LEVEL || m_Position.y + CHUNK_SIZE < WATER_LEVEL) {
+void Chunk::generateWaterMesh(const GenerationProfile& profile) {
+    float waterY = profile.water_level - m_Position.y;
+
+    if (m_Position.y > profile.water_level || m_Position.y + CHUNK_SIZE < profile.water_level) {
         m_WaterVertexCount = 0;
         return;
     }
@@ -462,7 +516,6 @@ void Chunk::generateWaterMesh() {
     };
 
     std::vector<WaterVertex> vertices;
-    float waterY = WATER_LEVEL - m_Position.y;
 
     // Define the quad for the water surface
     vertices.push_back({glm::vec3(0, waterY, 0)});

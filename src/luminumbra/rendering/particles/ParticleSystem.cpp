@@ -144,8 +144,8 @@ void ParticleSystem::render(Shader& shader, const Luminumbra::Rendering::Camera&
     shader.setMat4("u_View", camera.getViewMatrix()); 
     shader.setVec3("u_CameraRight", camera.getRight());
     shader.setVec3("u_CameraUp", camera.getUp());
-    shader.setVec3("u_ViewPos", camera.getPosition());
-    shader.setFloat("u_Time", static_cast<float>(glfwGetTime()));
+    // shader.setVec3("u_ViewPos", camera.getPosition());
+    // shader.setFloat("u_Time", static_cast<float>(glfwGetTime()));
 
     std::vector<ParticleInstanceData> instances;
     instances.reserve(m_ActiveParticleCount * 2); // Pre-allocate a reasonable guess

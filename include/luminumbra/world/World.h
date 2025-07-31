@@ -18,6 +18,8 @@
 #include "luminumbra/world/WeatherManager.h"
 #include "luminumbra/player/Player.h"
 #include "luminumbra/rendering/Shader.h"
+#include "luminumbra/world/GenerationProfile.h"
+#include "luminumbra/rendering/model/Model.h"
 
 // Forward declarations
 namespace Luminumbra::Rendering {
@@ -70,7 +72,7 @@ struct BurningTree {
 
 class World {
 public:
-    World(const std::string& slotName, const std::string& seed, int screenWidth, int screenHeight);
+    World(const std::string& slotName, const std::string& seed, std::shared_ptr<GenerationProfile> profile, int screenWidth, int screenHeight);
     ~World();
 
     void update(float deltaTime);
@@ -110,6 +112,9 @@ public:
     Audio::SoundEvent getFootstepSoundForPosition(const glm::vec3& position) const;
 
     WeatherManager* getWeatherManager() const { return m_WeatherManager.get(); }
+    GenerationProfile& getGenerationProfile() { return *m_GenerationProfile; }
+
+    void regenerate();
 
 private:
     void loadChunksAroundPosition(const glm::vec3& position);
@@ -121,7 +126,7 @@ private:
     void initCelestials();
     void initFoliage();
 
-     Audio::SoundEvent getAmbientSoundForBiome(const char* biomeName, bool isNight) const;
+    Audio::SoundEvent getAmbientSoundForBiome(const char* biomeName, bool isNight) const;
 
     GLuint m_SunVAO, m_SunVBO;
     GLuint m_MoonVAO, m_MoonVBO;
@@ -136,6 +141,7 @@ private:
 
     // World generation
     std::string m_Seed;
+    std::shared_ptr<GenerationProfile> m_GenerationProfile;
     std::string m_SlotName;
     
     // The world now owns its player
@@ -156,7 +162,7 @@ private:
     static constexpr float DAY_DURATION = 100.0f;
 
     // Scenery
-    // std::unique_ptr<Luminumbra::Rendering::Skybox> m_Skybox;
+    std::unique_ptr<Luminumbra::Rendering::Skybox> m_Skybox;
     std::unique_ptr<Luminumbra::Rendering::CloudManager> m_CloudManager;
     std::unique_ptr<Luminumbra::Rendering::ParticleSystem> m_ParticleSystem;
 
@@ -186,6 +192,9 @@ private:
     float m_RainSplashTimer = 0.0f;
     uint32_t m_AmbientSoundID = 0;
     Audio::SoundEvent m_CurrentAmbientEvent = Audio::SoundEvent::UIClick;
+
+    std::shared_ptr<Rendering::Model> m_TreeModel;
+    // std::shared_ptr<Rendering::Model> m_BushModel;
 };
 
 } // namespace Luminumbra::World

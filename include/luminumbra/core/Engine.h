@@ -5,11 +5,14 @@
 #include <vector>
 #include "luminumbra/rendering/Shader.h"
 #include "luminumbra/core/InputManager.h"
-#include <glad/gl.h>  // Add this for GLuint type
+#include "luminumbra/core/GameSettings.h"
+#include <glad/gl.h> 
 #include "luminumbra/rendering/Camera.h"
 #include <glm/glm.hpp>
 #include "luminumbra/core/PostProcessSettings.h"
-#include "luminumbra/rendering/WaterRenderer.h" 
+#include "luminumbra/rendering/model/Model.h"
+#include "luminumbra/rendering/WaterRenderer.h"
+#include "luminumbra/rendering/model/Model.h"
 
 // Forward declarations
 struct GLFWwindow;
@@ -72,6 +75,7 @@ private:
     std::unique_ptr<Rendering::Shader> m_ParticleShader;
     std::unique_ptr<Rendering::Shader> m_WaterShader;
     std::unique_ptr<Rendering::Shader> m_UniversalDepthShader;
+    std::unique_ptr<Rendering::Shader> m_VolumetricCloudsShader;
 
     // Post-processing shaders
     std::unique_ptr<Rendering::Shader> m_BloomShader;
@@ -80,6 +84,9 @@ private:
     std::unique_ptr<Rendering::Shader> m_GodRaysShader;
     std::unique_ptr<Rendering::Shader> m_FinalPassShader;
     std::unique_ptr<Rendering::Shader> m_DepthShader;
+    std::unique_ptr<Rendering::Shader> m_ModelShader;
+    
+    std::shared_ptr<Rendering::Model> m_TestTreeModel;
 
     // Framebuffer objects and textures
     GLuint m_SceneFramebuffer = 0;
@@ -105,7 +112,6 @@ private:
 
     static constexpr int SHADOW_MAP_SIZE = 2048;
     int m_CurrentPostProcessBuffer = 0;
-    PostProcessSettings m_PostProcessSettings;
     
     // --- State Management ---
     GameState m_GameState = GameState::SplashScreen;
@@ -119,22 +125,14 @@ private:
     char m_SaveName[128] = "My World";
     char m_Seed[128] = "luminumbra";
     bool m_ShowDebugInfo = true;
+    bool m_ShowSettingsWindow = false;
     bool m_WireframeMode = false;
     bool m_InCameraView = false;
     std::string m_InteractionPrompt = "";
 
     // --- Game Settings ---
-    struct GameSettings {
-        bool vsync = true;
-        int shadowQuality = 4;
-        int textureFiltering = 1;
-        float masterVolume = 0.6f;
-        float musicVolume = 0.3f;
-        float effectsVolume = 0.5f;
-        float mouseSensitivity = 0.1f;
-        bool invertY = false;
-    };
     GameSettings m_Settings;
+    PostProcessSettings m_PostProcessSettings;
     std::unique_ptr<InputManager> m_InputManager;
 
     std::unique_ptr<Rendering::WaterRenderer> m_WaterRenderer;

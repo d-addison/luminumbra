@@ -5,21 +5,17 @@
 #include <glm/glm.hpp>
 #include <string>
 #include <atomic>
+#include <memory>
 
 #include "luminumbra/world/MarchingCubes.h"
+#include "luminumbra/world/Biome.h"
+#include "luminumbra/world/GenerationProfile.h"
+#include "luminumbra/core/Hash.h"
+#include <unordered_map>
 
 struct fnl_state; 
 
 namespace Luminumbra::World {
-
-enum class BiomeType {
-    WHISPERING_GLADE,    // Gentle rolling hills with grass
-    CRYSTAL_GROVES,      // Jagged crystalline formations
-    SUNKEN_HOLLOWS,      // Valley/depression areas
-    CANOPY_BRIDGES,      // High altitude connecting structures
-    SKY_VOID            // Empty sky areas between islands
-};
-
 struct FoliageInstance {
     glm::vec3 position;
     float scale;
@@ -28,7 +24,7 @@ struct FoliageInstance {
 
 class Chunk {
 public:
-    Chunk(const glm::ivec3& position, const std::string& seed, int lod);
+    Chunk(const glm::ivec3& position, const std::string& seed, int lod, std::shared_ptr<const GenerationProfile> profile);
     ~Chunk();
 
     enum class GpuStatus { NeedsGpuUpload, Uploaded };
@@ -42,8 +38,8 @@ public:
     bool isSolid(const glm::vec3& worldPosition) const;
 
     const glm::mat4& getModelMatrix() const { return m_ModelMatrix; }
-    static constexpr int CHUNK_SIZE = 32;
-    static constexpr float WATER_LEVEL = 5.0f;
+    static constexpr int CHUNK_SIZE = 64;
+    static constexpr float WATER_LEVEL = 18.0f;
 
     void uploadToGpu();
     bool isReadyForGpu() const { return m_GpuStatus == GpuStatus::NeedsGpuUpload; }
@@ -52,10 +48,10 @@ public:
     const std::vector<FoliageInstance>& getBushInstances() const { return m_BushInstances; }
 
 private:
-    void generateNoiseData(fnl_state& noise);
+    void generateNoiseData(const GenerationProfile& profile);
     void generateMesh(int lod);
-    void generateWaterMesh();
-    void generateFoliage(fnl_state& noise, const MarchingCubes::IndexedMesh& terrainMesh);
+    void generateWaterMesh(const GenerationProfile& profile);
+    void generateFoliage(fnl_state& noise, const GenerationProfile& profile);
     BiomeType getBiomeAt(float worldX, float worldZ);
     glm::vec3 getTerrainColor(float worldY, float density, BiomeType biome);
 

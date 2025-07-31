@@ -97,24 +97,26 @@ void main()
     // Your finding: "sun is below ground at day", so sunDirection.y is negative during the day.
     float celestialY = sunDirection.y;
 
-    if (celestialY < -0.1) { 
-        // DAYTIME: The sun is "below" the horizon (in your coordinate system)
+    if (celestialY > 0.1) { // Sun is high in the sky
+        // DAYTIME
         lightColor = sunColor;
         ambientStrength = 0.5;
         specularStrength = 0.6;
     } 
-    else if (celestialY > 0.1) { 
-        // NIGHTTIME: The celestial object (moon) is in the sky
+    else if (celestialY < -0.1) { // Sun is below the horizon
+        // NIGHTTIME
         lightColor = moonColor;
         ambientStrength = 0.15;
-        specularStrength = 0.1; // Less specular from moonlight
+        specularStrength = 0.1;
     } 
     else { 
         // DAWN / DUSK: A smooth transition period
-        float t = (celestialY + 0.1) / 0.2; // Map [-0.1, 0.1] range to [0, 1]
-        lightColor = mix(sunriseColor, moonColor, t);
-        ambientStrength = mix(0.35, 0.15, t);
-        specularStrength = mix(0.4, 0.1, t);
+        float t = (celestialY + 0.1) / 0.2; // This maps [-0.1, 0.1] to [0, 1]
+        // This mix is now Night -> Day. It should be Day -> Night as the sun sets.
+        // Let's mix from sunriseColor to moonColor as 't' goes from 0 to 1
+        lightColor = mix(sunColor, moonColor, smoothstep(0.25, 0.75, t)); // Smoother transition
+        ambientStrength = mix(0.5, 0.15, t);
+        specularStrength = mix(0.6, 0.1, t);
     }
 
     // In Blinn-Phong, a lower roughness translates to a higher shininess exponent

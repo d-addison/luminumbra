@@ -3,6 +3,8 @@
 #include "luminumbra/rendering/Skybox.h"
 #include "luminumbra/rendering/CloudManager.h"
 #include "luminumbra/audio/AudioManager.h"
+#include "luminumbra/core/GameSettings.h"
+#include "luminumbra/core/PostProcessSettings.h"
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
@@ -83,7 +85,10 @@ namespace Luminumbra {
             ImGui::End();
         }
 
-        void UIManager::ShowMainMenu(const std::function<void()>& newGameCallback, const std::function<void()>& loadGameCallback, const std::function<void()>& quitCallback) {
+        void UIManager::ShowMainMenu(const std::function<void()>& newGameCallback,
+                                     const std::function<void()>& loadGameCallback,
+                                     const std::function<void()>& settingsCallback,
+                                     const std::function<void()>& quitCallback) {
             // Stop splash music when the main menu appears
             if (m_SplashScreenMusicID != 0) {
                 // Stop the music and reset the flag
@@ -105,6 +110,10 @@ namespace Luminumbra {
             if (ImGui::Button("Load Game")) {
                 Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick);
                 loadGameCallback();
+            }
+            if (ImGui::Button("Settings")) {
+                Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick);
+                settingsCallback();
             }
             if (ImGui::Button("Quit")) {
                 Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick);
@@ -200,58 +209,63 @@ namespace Luminumbra {
             return window_is_open; // Return whether the window is still open
         }
 
-        void UIManager::ShowSettingsWindow(bool& vsync, int& shadowQuality, int& textureFiltering, float& masterVolume, float& musicVolume, float& effectsVolume, float& mouseSensitivity, bool& invertY) {
-            if (!m_ShowSettingsWindow) return;
+        void UIManager::ShowSettingsWindow(bool& showWindow, Core::GameSettings& settings, Core::PostProcessSettings& ppSettings) {
+            if (!showWindow) return;
 
-            ImGui::SetNextWindowSize(ImVec2(450, 550), ImGuiCond_FirstUseEver);
-            if (ImGui::Begin("Settings", &m_ShowSettingsWindow)) {
+            ImGui::SetNextWindowSize(ImVec2(550, 450), ImGuiCond_FirstUseEver);
+            if (ImGui::Begin("Settings", &showWindow)) {
                 if (ImGui::BeginTabBar("SettingsTabs")) {
-                    bool graphicsTabOpen = ImGui::BeginTabItem("Graphics");
-                    if (ImGui::IsItemClicked()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
-                    if (graphicsTabOpen) {
-                        if (ImGui::Checkbox("V-Sync", &vsync)) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
+                    // --- GRAPHICS TAB ---
+                    if (ImGui::BeginTabItem("Graphics")) {
+                        ImGui::Text("Display");
+                        ImGui::Separator();
+                        ImGui::Checkbox("V-Sync", &settings.vsync);
 
-                        const char* shadowLevels[] = { "Low", "Medium", "High" };
-                        if (ImGui::Combo("Shadow Quality", &shadowQuality, shadowLevels, IM_ARRAYSIZE(shadowLevels))) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
+                        ImGui::Dummy(ImVec2(0.0f, 15.0f));
+                        ImGui::Text("Quality");
+                        ImGui::Separator();
+                        const char* shadowLevels[] = { "Low", "Medium", "High", "Ultra" };
+                        ImGui::Combo("Shadow Quality", &settings.shadowQuality, shadowLevels, IM_ARRAYSIZE(shadowLevels));
 
                         const char* filterLevels[] = { "Bilinear", "Trilinear" };
-                        if (ImGui::Combo("Texture Filtering", &textureFiltering, filterLevels, IM_ARRAYSIZE(filterLevels))) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
+                        ImGui::Combo("Texture Filtering", &settings.textureFiltering, filterLevels, IM_ARRAYSIZE(filterLevels));
+
+                        ImGui::Dummy(ImVec2(0.0f, 15.0f));
+                        ImGui::Text("Post-Processing");
+                        ImGui::Separator();
+                        ImGui::Checkbox("Enable Bloom", &ppSettings.enableBloom);
+                        ImGui::Checkbox("Enable Depth of Field", &ppSettings.enableDof);
+                        ImGui::Checkbox("Enable God Rays", &ppSettings.enableGodRays);
                         
-                        ImGui::EndTabItem();
-                    }
-
-                    bool audioTabOpen = ImGui::BeginTabItem("Audio");
-                    if (ImGui::IsItemClicked()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
-                    if (audioTabOpen) {
-                        ImGui::SliderFloat("Master Volume", &masterVolume, 0.0f, 1.0f, "%.2f");
-                        if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
-
-                        ImGui::SliderFloat("Music Volume", &musicVolume, 0.0f, 1.0f, "%.2f");
-                        if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
-
-                        ImGui::SliderFloat("Effects Volume", &effectsVolume, 0.0f, 1.0f, "%.2f");
-                        if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
+                        ImGui::Dummy(ImVec2(0.0f, 15.0f));
+                        ImGui::Text("Tone Mapping");
+                        ImGui::Separator();
+                        ImGui::SliderFloat("Exposure", &ppSettings.exposure, 0.1f, 5.0f);
 
                         ImGui::EndTabItem();
                     }
 
-                    bool controlsTabOpen = ImGui::BeginTabItem("Controls");
-                    if (ImGui::IsItemClicked()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
-                    if (controlsTabOpen) {
-                        ImGui::SliderFloat("Mouse Sensitivity", &mouseSensitivity, 0.01f, 1.0f, "%.2f");
-                        if (ImGui::IsItemDeactivatedAfterEdit()) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
-
-                        if (ImGui::Checkbox("Invert Y-Axis", &invertY)) { Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick); }
-                        
+                    // --- AUDIO TAB ---
+                    if (ImGui::BeginTabItem("Audio")) {
+                        ImGui::SliderFloat("Master Volume", &settings.masterVolume, 0.0f, 1.0f, "%.2f");
+                        ImGui::SliderFloat("Music Volume", &settings.musicVolume, 0.0f, 1.0f, "%.2f");
+                        ImGui::SliderFloat("Effects Volume", &settings.effectsVolume, 0.0f, 1.0f, "%.2f");
                         ImGui::EndTabItem();
                     }
+
+                    // --- CONTROLS TAB ---
+                    if (ImGui::BeginTabItem("Controls")) {
+                        ImGui::SliderFloat("Mouse Sensitivity", &settings.mouseSensitivity, 0.01f, 1.0f, "%.3f");
+                        ImGui::Checkbox("Invert Y-Axis", &settings.invertY);
+                        ImGui::EndTabItem();
+                    }
+
                     ImGui::EndTabBar();
                 }
 
                 ImGui::Separator();
                 if (ImGui::Button("Close", ImVec2(120, 0))) {
-                    Audio::AudioManager::getInstance().playSound(Audio::SoundEvent::UIClick);
-                    m_ShowSettingsWindow = false;
+                    showWindow = false;
                 }
             }
             ImGui::End();
@@ -390,6 +404,72 @@ namespace Luminumbra {
                     ImGui::Text("FOV: %.1f", camera.getFov());
                 }
 
+                if (ImGui::CollapsingHeader("World Generation")) {
+                    auto& profile = world.getGenerationProfile();
+
+                    ImGui::Text("Global Settings");
+                    ImGui::SliderFloat("Water Level", &profile.water_level, 0.0f, 50.0f);
+                    ImGui::SliderFloat("Island Fade End", &profile.island_fade_end, 5.0f, 100.0f);
+                    
+                    ImGui::Separator();
+                    
+                    if (ImGui::TreeNode("Whispering Glade Profile")) {
+                        auto& biome = profile.biome_profiles.at(World::BiomeType::WHISPERING_GLADE);
+                        ImGui::SliderFloat("Base Height##WG", &biome.base_height, -50.0f, 50.0f);
+                        ImGui::SliderFloat("Variance##WG", &biome.terrain_variance, 5.0f, 100.0f);
+                        ImGui::SliderFloat("Mountain Amp##WG", &biome.mountains.amplitude, 0.0f, 500.0f);
+                        ImGui::SliderFloat("Cave Amp##WG", &biome.caves.amplitude, 0.0f, 50.0f);
+                        ImGui::SliderFloat("Base Freq##WG", &biome.base_terrain.noise.frequency, 0.001f, 0.02f);
+                        ImGui::TreePop();
+                    }
+
+                    if (ImGui::TreeNode("Crystal Groves Profile")) {
+                        auto& biome = profile.biome_profiles.at(World::BiomeType::CRYSTAL_GROVES);
+                        ImGui::SliderFloat("Base Height##CG", &biome.base_height, -50.0f, 50.0f);
+                        ImGui::SliderFloat("Variance##CG", &biome.terrain_variance, 5.0f, 100.0f);
+                        ImGui::SliderFloat("Mountain Amp##CG", &biome.mountains.amplitude, 0.0f, 500.0f);
+                        ImGui::SliderFloat("Cave Amp##CG", &biome.caves.amplitude, 0.0f, 50.0f);
+                        ImGui::SliderFloat("Base Freq##CG", &biome.base_terrain.noise.frequency, 0.001f, 0.02f);
+                        ImGui::TreePop();
+                    }
+
+                    if (ImGui::TreeNode("Sunken Hollows Profile")) {
+                        auto& biome = profile.biome_profiles.at(World::BiomeType::SUNKEN_HOLLOWS);
+                        ImGui::SliderFloat("Base Height##SH", &biome.base_height, -50.0f, 50.0f);
+                        ImGui::SliderFloat("Variance##SH", &biome.terrain_variance, 5.0f, 100.0f);
+                        ImGui::SliderFloat("Mountain Amp##SH", &biome.mountains.amplitude, 0.0f, 500.0f);
+                        ImGui::SliderFloat("Cave Amp##SH", &biome.caves.amplitude, 0.0f, 50.0f);
+                        ImGui::SliderFloat("Base Freq##SH", &biome.base_terrain.noise.frequency, 0.001f, 0.02f);
+                        ImGui::TreePop();
+                    }
+
+                    if (ImGui::TreeNode("Canopy Bridges Profile")) {
+                        auto& biome = profile.biome_profiles.at(World::BiomeType::CANOPY_BRIDGES);
+                        ImGui::SliderFloat("Base Height##CB", &biome.base_height, -50.0f, 50.0f);
+                        ImGui::SliderFloat("Variance##CB", &biome.terrain_variance, 5.0f, 100.0f);
+                        ImGui::SliderFloat("Mountain Amp##CB", &biome.mountains.amplitude, 0.0f, 500.0f);
+                        ImGui::SliderFloat("Cave Amp##CB", &biome.caves.amplitude, 0.0f, 50.0f);
+                        ImGui::SliderFloat("Base Freq##CB", &biome.base_terrain.noise.frequency, 0.001f, 0.02f);
+                        ImGui::TreePop();
+                    }
+
+                    if (ImGui::TreeNode("Sky Void Profile")) {
+                        auto& biome = profile.biome_profiles.at(World::BiomeType::SKY_VOID);
+                        ImGui::SliderFloat("Base Height##SV", &biome.base_height, -50.0f, 50.0f);
+                        ImGui::SliderFloat("Variance##SV", &biome.terrain_variance, 5.0f, 100.0f);
+                        ImGui::SliderFloat("Mountain Amp##SV", &biome.mountains.amplitude, 0.0f, 500.0f);
+                        ImGui::SliderFloat("Cave Amp##SV", &biome.caves.amplitude, 0.0f, 50.0f);
+                        ImGui::SliderFloat("Base Freq##SV", &biome.base_terrain.noise.frequency, 0.001f, 0.02f);
+                        ImGui::TreePop();
+                    }
+
+                    if (ImGui::Button("APPLY & REGENERATE WORLD")) {
+                        // This function needs to be implemented in World.cpp
+                        // It should clear all chunks and re-queue those around the player.
+                        profile.applyChanges(world);
+                    }
+                }
+
                 // Post-Processing
                 if (ImGui::CollapsingHeader("Post-Processing")) {
                     ShowPostProcessingSettings(settings);
@@ -422,7 +502,7 @@ namespace Luminumbra {
             ImGui::SetNextWindowBgAlpha(0.0f);
             
             ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | 
-                                           ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
+                                            ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
             
             if (ImGui::Begin("Stamina Bar", nullptr, window_flags)) {
                 // Calculate stamina percentage
@@ -442,14 +522,14 @@ namespace Luminumbra {
                 ImDrawList* draw_list = ImGui::GetWindowDrawList();
                 ImVec2 p = ImGui::GetCursorScreenPos();
                 draw_list->AddRectFilled(p, ImVec2(p.x + barWidth, p.y + barHeight), 
-                                        IM_COL32(50, 50, 50, 200));
+                                         IM_COL32(50, 50, 50, 200));
                 draw_list->AddRect(p, ImVec2(p.x + barWidth, p.y + barHeight), 
-                                  IM_COL32(255, 255, 255, 150));
+                                   IM_COL32(255, 255, 255, 150));
                 
                 // Draw stamina fill
                 if (staminaPercent > 0.0f) {
                     draw_list->AddRectFilled(p, ImVec2(p.x + barWidth * staminaPercent, p.y + barHeight),
-                                           ImGui::GetColorU32(barColor));
+                                             ImGui::GetColorU32(barColor));
                 }
                 
                 // Add text label
@@ -507,14 +587,19 @@ namespace Luminumbra {
         }
 
         void UIManager::ShowPostProcessingSettings(Core::PostProcessSettings& settings) {
-            ImGui::Begin("Post-Processing");
+            // This is now just for the debug menu, so it doesn't need a Begin/End block.
+            ImGui::Checkbox("Enable Bloom", &settings.enableBloom);
             ImGui::SliderFloat("Bloom Threshold", &settings.bloomThreshold, 0.0f, 2.0f);
             ImGui::SliderFloat("Bloom Intensity", &settings.bloomIntensity, 0.0f, 2.0f);
+            ImGui::Separator();
+            ImGui::Checkbox("Enable DoF", &settings.enableDof);
             ImGui::SliderFloat("DoF Focal Distance", &settings.dofFocalDistance, 0.1f, 100.0f);
             ImGui::SliderFloat("DoF Focal Range", &settings.dofFocalRange, 0.1f, 50.0f);
+            ImGui::Separator();
+            ImGui::Checkbox("Enable God Rays", &settings.enableGodRays);
             ImGui::SliderFloat("God Rays Density", &settings.godRaysDensity, 0.0f, 1.0f);
+            ImGui::Separator();
             ImGui::SliderFloat("Exposure", &settings.exposure, 0.1f, 5.0f);
-            ImGui::End();
         }
 
     } // namespace UI

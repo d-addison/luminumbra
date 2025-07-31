@@ -330,7 +330,11 @@ glm::vec3 VertexInterp(float isolevel, glm::vec3 p1, glm::vec3 p2, float valp1, 
 */
 // src/luminumbra/world/MarchingCubes.cpp
 
-void Polygonise(GridCell grid, float isolevel, IndexedMesh& mesh) {
+void Polygonise(GridCell grid, float isolevel, IndexedMesh& mesh,
+                std::unordered_map<glm::ivec3, unsigned int>& cacheX,
+                std::unordered_map<glm::ivec3, unsigned int>& cacheY,
+                std::unordered_map<glm::ivec3, unsigned int>& cacheZ)
+{
     int cubeindex = 0;
     if (grid.val[0] < isolevel) cubeindex |= 1;
     if (grid.val[1] < isolevel) cubeindex |= 2;
@@ -346,36 +350,50 @@ void Polygonise(GridCell grid, float isolevel, IndexedMesh& mesh) {
     }
 
     unsigned int vert_indices[12];
-    std::unordered_map<int, unsigned int> edge_to_vertex_map;
-
-    auto get_vertex = [&](int edge_idx, const glm::vec3& p1, const glm::vec3& p2, float v1, float v2) {
-        if (edge_to_vertex_map.count(edge_idx)) {
-            return edge_to_vertex_map[edge_idx];
+    
+    // Lambda to get or create a vertex for a given edge
+    auto get_vertex = [&](const glm::ivec3& p1_idx, const glm::vec3& p1, const glm::vec3& p2, float v1, float v2,
+                         std::unordered_map<glm::ivec3, unsigned int>& cache) {
+        
+        auto it = cache.find(p1_idx);
+        if (it != cache.end()) {
+            return it->second; // Return cached index
         }
+
+        // Vertex not in cache, so create it
         glm::vec3 vert = VertexInterp(isolevel, p1, p2, v1, v2);
         mesh.vertices.push_back(vert);
         unsigned int new_idx = mesh.vertices.size() - 1;
-        edge_to_vertex_map[edge_idx] = new_idx;
+        cache[p1_idx] = new_idx; // Add to cache
         return new_idx;
     };
+    
+    // --- Create vertices on the 12 edges of the cube ---
+    // The key for the cache is always the grid-space integer coordinate of the edge's starting point.
 
-    if (edgeTable[cubeindex] & 1)   vert_indices[0] = get_vertex(0, grid.p[0], grid.p[1], grid.val[0], grid.val[1]);
-    if (edgeTable[cubeindex] & 2)   vert_indices[1] = get_vertex(1, grid.p[1], grid.p[2], grid.val[1], grid.val[2]);
-    if (edgeTable[cubeindex] & 4)   vert_indices[2] = get_vertex(2, grid.p[2], grid.p[3], grid.val[2], grid.val[3]);
-    if (edgeTable[cubeindex] & 8)   vert_indices[3] = get_vertex(3, grid.p[3], grid.p[0], grid.val[3], grid.val[0]);
-    if (edgeTable[cubeindex] & 16)  vert_indices[4] = get_vertex(4, grid.p[4], grid.p[5], grid.val[4], grid.val[5]);
-    if (edgeTable[cubeindex] & 32)  vert_indices[5] = get_vertex(5, grid.p[5], grid.p[6], grid.val[5], grid.val[6]);
-    if (edgeTable[cubeindex] & 64)  vert_indices[6] = get_vertex(6, grid.p[6], grid.p[7], grid.val[6], grid.val[7]);
-    if (edgeTable[cubeindex] & 128) vert_indices[7] = get_vertex(7, grid.p[7], grid.p[4], grid.val[7], grid.val[4]);
-    if (edgeTable[cubeindex] & 256) vert_indices[8] = get_vertex(8, grid.p[0], grid.p[4], grid.val[0], grid.val[4]);
-    if (edgeTable[cubeindex] & 512) vert_indices[9] = get_vertex(9, grid.p[1], grid.p[5], grid.val[1], grid.val[5]);
-    if (edgeTable[cubeindex] & 1024) vert_indices[10] = get_vertex(10, grid.p[2], grid.p[6], grid.val[2], grid.val[6]);
-    if (edgeTable[cubeindex] & 2048) vert_indices[11] = get_vertex(11, grid.p[3], grid.p[7], grid.val[3], grid.val[7]);
+    // Edges along Z-axis (use cacheZ)
+    if (edgeTable[cubeindex] & 4)   vert_indices[2] = get_vertex(glm::ivec3(grid.p[2]), grid.p[2], grid.p[3], grid.val[2], grid.val[3], cacheZ);
+    if (edgeTable[cubeindex] & 2)   vert_indices[1] = get_vertex(glm::ivec3(grid.p[1]), grid.p[1], grid.p[2], grid.val[1], grid.val[2], cacheZ);
+    if (edgeTable[cubeindex] & 64)  vert_indices[6] = get_vertex(glm::ivec3(grid.p[6]), grid.p[6], grid.p[7], grid.val[6], grid.val[7], cacheZ);
+    if (edgeTable[cubeindex] & 32)  vert_indices[5] = get_vertex(glm::ivec3(grid.p[5]), grid.p[5], grid.p[6], grid.val[5], grid.val[6], cacheZ);
+    
+    // Edges along X-axis (use cacheX)
+    if (edgeTable[cubeindex] & 1)   vert_indices[0] = get_vertex(glm::ivec3(grid.p[0]), grid.p[0], grid.p[1], grid.val[0], grid.val[1], cacheX);
+    if (edgeTable[cubeindex] & 8)   vert_indices[3] = get_vertex(glm::ivec3(grid.p[3]), grid.p[3], grid.p[0], grid.val[3], grid.val[0], cacheX);
+    if (edgeTable[cubeindex] & 16)  vert_indices[4] = get_vertex(glm::ivec3(grid.p[4]), grid.p[4], grid.p[5], grid.val[4], grid.val[5], cacheX);
+    if (edgeTable[cubeindex] & 128) vert_indices[7] = get_vertex(glm::ivec3(grid.p[7]), grid.p[7], grid.p[4], grid.val[7], grid.val[4], cacheX);
 
+    // Edges along Y-axis (use cacheY)
+    if (edgeTable[cubeindex] & 256)  vert_indices[8] = get_vertex(glm::ivec3(grid.p[0]), grid.p[0], grid.p[4], grid.val[0], grid.val[4], cacheY);
+    if (edgeTable[cubeindex] & 512)  vert_indices[9] = get_vertex(glm::ivec3(grid.p[1]), grid.p[1], grid.p[5], grid.val[1], grid.val[5], cacheY);
+    if (edgeTable[cubeindex] & 1024) vert_indices[10] = get_vertex(glm::ivec3(grid.p[2]), grid.p[2], grid.p[6], grid.val[2], grid.val[6], cacheY);
+    if (edgeTable[cubeindex] & 2048) vert_indices[11] = get_vertex(glm::ivec3(grid.p[3]), grid.p[3], grid.p[7], grid.val[3], grid.val[7], cacheY);
+
+    // Create triangles from the vertices
     for (int i = 0; triTable[cubeindex][i] != -1; i += 3) {
-        mesh.indices.push_back(vert_indices[triTable[cubeindex][i + 2]]);
-        mesh.indices.push_back(vert_indices[triTable[cubeindex][i + 1]]);
         mesh.indices.push_back(vert_indices[triTable[cubeindex][i]]);
+        mesh.indices.push_back(vert_indices[triTable[cubeindex][i + 1]]);
+        mesh.indices.push_back(vert_indices[triTable[cubeindex][i + 2]]);
     }
 }
 

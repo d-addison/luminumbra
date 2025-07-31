@@ -32,6 +32,19 @@ void WaterRenderer::unbindCurrentFBO(int screenWidth, int screenHeight) {
     GLCall(glViewport(0, 0, screenWidth, screenHeight));
 }
 
+GLuint WaterRenderer::createDepthTextureAttachment(int width, int height) {
+    GLuint texture;
+    GLCall(glGenTextures(1, &texture));
+    GLCall(glBindTexture(GL_TEXTURE_2D, texture));
+    // Use GL_DEPTH_COMPONENT as the internal format and provide a depth-compatible type
+    GLCall(glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr));
+    GLCall(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
+    GLCall(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
+    // Attach it as a depth texture
+    GLCall(glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, texture, 0));
+    return texture;
+}
+
 void WaterRenderer::initFBOs() {
     // Reflection FBO
     m_ReflectionFBO = createFBO();
@@ -42,7 +55,13 @@ void WaterRenderer::initFBOs() {
     // Refraction FBO
     m_RefractionFBO = createFBO();
     m_RefractionTexture = createTextureAttachment(REFRACTION_WIDTH, REFRACTION_HEIGHT);
-    m_RefractionDepthTexture = createDepthBufferAttachment(REFRACTION_WIDTH, REFRACTION_HEIGHT);
+    // CRITICAL CHANGE: Call the new function to create a depth TEXTURE
+    m_RefractionDepthTexture = createDepthTextureAttachment(REFRACTION_WIDTH, REFRACTION_HEIGHT); // <-- FIX
+
+    // Check if framebuffer is complete
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        // Handle error: Framebuffer is not complete!
+    }
     GLCall(glBindFramebuffer(GL_FRAMEBUFFER, 0));
 }
 

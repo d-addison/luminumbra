@@ -36,6 +36,7 @@ private:
     GLuint m_RefractionFBO = 0;
     GLuint m_RefractionTexture = 0;
     GLuint m_RefractionDepthTexture = 0; // Use a texture for refraction depth
+    GLuint createDepthTextureAttachment(int width, int height);
 };
 
 } // namespace Luminumbra::Rendering

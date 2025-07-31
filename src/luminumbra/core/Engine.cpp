@@ -1,5 +1,6 @@
 #include "luminumbra/core/Engine.h"
-#include "luminumbra/core/PostProcessSettings.h" 
+#include "luminumbra/core/PostProcessSettings.h"
+#include "luminumbra/core/GameSettings.h"
 #include "luminumbra/core/Debug.h"
 #include "luminumbra/core/GLError.h"
 #include "luminumbra/player/Player.h"
@@ -12,7 +13,7 @@
 #include "luminumbra/core/SaveData.h"
 #include "luminumbra/core/InputManager.h"
 #include "luminumbra/audio/AudioManager.h"
-#include <glad/gl.h> 
+#include <glad/gl.h>
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 #include <iostream>
@@ -25,6 +26,9 @@
 #include "json.hpp"
 #include "luminumbra/rendering/WaterRenderer.h"
 #include "luminumbra/rendering/TextureLoader.h"
+#include "luminumbra/rendering/model/ModelManager.h"
+#include "luminumbra/rendering/model/Model.h"
+
 
 void error_callback(int error, const char* description) {
     fprintf(stderr, "GLFW Error: %s\n", description);
@@ -56,7 +60,7 @@ Engine::Engine(int width, int height, const char* title) : m_ScreenWidth(width),
     glViewport(0, 0, width, height);
 
     glfwSetWindowUserPointer(m_Window, this);
-    Audio::AudioManager::getInstance().init(); 
+    Audio::AudioManager::getInstance().init();
     initRendering();
     initFramebuffers();
     initInput();
@@ -142,7 +146,8 @@ void Engine::LoadGame(const std::string& slotName) {
         auto playerData = saveFileJson.at("player").get<Core::PlayerSaveData>();
 
         // Create a new world with the saved seed
-        m_World = std::make_unique<World::World>(worldData.seed, worldData.slotName, m_ScreenWidth, m_ScreenHeight);
+        auto generationProfile = std::make_shared<Luminumbra::World::GenerationProfile>();
+        m_World = std::make_unique<World::World>(worldData.seed, worldData.slotName, generationProfile, m_ScreenWidth, m_ScreenHeight);
         
         // Apply the loaded state
         m_World->setTimeOfDay(worldData.timeOfDay);
@@ -165,13 +170,27 @@ void Engine::initInput() {
 
     auto cursor_pos_callback = [](GLFWwindow* window, double xpos, double ypos) {
         auto* engine = static_cast<Engine*>(glfwGetWindowUserPointer(window));
-        if (engine->m_World && engine->m_World->getPlayer()) {
-            float xoffset = xpos - engine->m_LastMouseX;
-            float yoffset = engine->m_LastMouseY - ypos;
-            engine->m_LastMouseX = xpos;
-            engine->m_LastMouseY = ypos;
-            engine->m_World->getPlayer()->processMouseMovement(xoffset, yoffset);
+        
+        // Only process mouse look when the cursor is disabled (i.e., in game)
+        if (glfwGetInputMode(window, GLFW_CURSOR) == GLFW_CURSOR_DISABLED) {
+            if (engine->m_World && engine->m_World->getPlayer()) {
+                float xoffset = static_cast<float>(xpos - engine->m_LastMouseX);
+                float yoffset = static_cast<float>(engine->m_LastMouseY - ypos);
+
+                // Apply sensitivity and inversion settings
+                if (engine->m_Settings.invertY) {
+                    yoffset = -yoffset;
+                }
+                xoffset *= engine->m_Settings.mouseSensitivity;
+                yoffset *= engine->m_Settings.mouseSensitivity;
+
+                engine->m_World->getPlayer()->processMouseMovement(xoffset, yoffset);
+            }
         }
+
+        // Always update last mouse position to prevent camera jumps
+        engine->m_LastMouseX = xpos;
+        engine->m_LastMouseY = ypos;
     };
     glfwSetCursorPosCallback(m_Window, cursor_pos_callback);
 
@@ -192,6 +211,7 @@ void Engine::initRendering() {
     m_FoliageShader = std::make_unique<Rendering::Shader>("res/shaders/foliage.vert", "res/shaders/foliage.frag");
     m_ParticleShader = std::make_unique<Rendering::Shader>("res/shaders/particle.vert", "res/shaders/particle.frag");
     m_WaterShader = std::make_unique<Rendering::Shader>("res/shaders/water.vert", "res/shaders/water.frag");
+    m_ModelShader = std::make_unique<Rendering::Shader>("res/shaders/model.vert", "res/shaders/model.frag");
     m_Debug = std::make_unique<Debug::Debug>();
     // Post-processing shaders
     m_BloomShader = std::make_unique<Rendering::Shader>("res/shaders/post_process.vert", "res/shaders/bloom.frag");
@@ -200,6 +220,7 @@ void Engine::initRendering() {
     m_GodRaysShader = std::make_unique<Rendering::Shader>("res/shaders/post_process.vert", "res/shaders/god_rays.frag");
     m_FinalPassShader = std::make_unique<Rendering::Shader>("res/shaders/post_process.vert", "res/shaders/final_pass.frag");
     m_UniversalDepthShader = std::make_unique<Rendering::Shader>("res/shaders/universal_depth.vert", "res/shaders/universal_depth.frag");
+    m_VolumetricCloudsShader = std::make_unique<Rendering::Shader>("res/shaders/volumetric_clouds.vert", "res/shaders/volumetric_clouds.frag");
 
     // Initialize water renderer and load textures
     m_WaterRenderer = std::make_unique<Rendering::WaterRenderer>();
@@ -227,6 +248,7 @@ void Engine::initRendering() {
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
+    glFrontFace(GL_CCW); // Counter-clockwise winding order
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     LOG("Engine::initRendering - Finish");
 }
@@ -236,9 +258,11 @@ void Engine::processInput() {
     if (m_InputManager->isActionPressed(GameAction::Pause)) {
         if (m_GameState == GameState::InGame) {
             m_GameState = GameState::Paused;
+            m_ShowSettingsWindow = false; // Ensure settings closes on pause
             glfwSetInputMode(m_Window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
         } else if (m_GameState == GameState::Paused) {
             m_GameState = GameState::InGame;
+            m_ShowSettingsWindow = false; // Ensure settings closes on resume
             glfwSetInputMode(m_Window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
         }
     }
@@ -307,7 +331,6 @@ void Engine::update(float deltaTime) {
         
         // Pass settings to the audio manager
         Audio::AudioManager::getInstance().setGroupVolume(Audio::SoundGroup::Master, m_Settings.masterVolume);
-        // Note: Music volume is handled in playMusic for simplicity, but could be grouped too.
         Audio::AudioManager::getInstance().setGroupVolume(Audio::SoundGroup::Player, m_Settings.effectsVolume);
         Audio::AudioManager::getInstance().setGroupVolume(Audio::SoundGroup::SFX, m_Settings.effectsVolume);
         Audio::AudioManager::getInstance().setGroupVolume(Audio::SoundGroup::Ambience, m_Settings.effectsVolume * 0.6f); // Ambience is quieter
@@ -339,7 +362,7 @@ void Engine::update(float deltaTime) {
             break;
 
         default:
-            // MainMenu, NewGameSetup, etc. are state-only, no updates needed.
+            // MainMenu, Paused, etc. are state-only for updates, logic is in render/input.
             break;
     }
 }
@@ -559,11 +582,13 @@ void Engine::renderScene(const Luminumbra::Rendering::Camera& camera, const glm:
 
     // Opaque Foliage
     m_FoliageShader->use();
+    m_FoliageShader->setMat4("u_projection", projection);
+    m_FoliageShader->setMat4("u_view", view);
     m_FoliageShader->setVec3("viewPos", camera.getPosition());
-    m_FoliageShader->setVec3("sunDirection", sunDirection);
-    m_FoliageShader->setFloat("time", gameTime);
-    m_FoliageShader->setVec4("u_ClipPlane", clipPlane);
-    m_World->renderFoliage(*m_FoliageShader);
+    // m_FoliageShader->setVec3("u_sunDirection", sunDirection);
+    // m_FoliageShader->setFloat("time", gameTime);
+     m_FoliageShader->setVec4("u_ClipPlane", clipPlane);
+    m_World->renderFoliage(*m_ModelShader);
 }
 
 void Engine::renderWorld(const Luminumbra::Rendering::Camera& camera, const glm::mat4& lightSpaceMatrix, const glm::vec4& clipPlane) {
@@ -586,8 +611,8 @@ void Engine::renderWorld(const Luminumbra::Rendering::Camera& camera, const glm:
     // Set the colors for each layer
     m_BasicShader->setVec3("u_sandColor", glm::vec3(0.85f, 0.75f, 0.55f));  // Sandy yellow
     m_BasicShader->setVec3("u_grassColor", glm::vec3(0.45f, 0.65f, 0.25f)); // Grassy green
-    m_BasicShader->setVec3("u_rockColor", glm::vec3(0.5f, 0.5f, 0.5f));      // Rocky grey
-    m_BasicShader->setVec3("u_snowColor", glm::vec3(0.95f, 0.95f, 1.0f));     // Bright white for snow
+    m_BasicShader->setVec3("u_rockColor", glm::vec3(0.5f, 0.5f, 0.5f));    // Rocky grey
+    m_BasicShader->setVec3("u_snowColor", glm::vec3(0.95f, 0.95f, 1.0f));    // Bright white for snow
     m_BasicShader->setFloat("u_Wetness", m_World->getWeatherManager()->getWetness());
 
     // Set the blend sharpness between layers. Higher values = sharper transitions.
@@ -614,23 +639,22 @@ void Engine::renderWorld(const Luminumbra::Rendering::Camera& camera, const glm:
     m_FoliageShader->setMat4("projection", projection);
     m_FoliageShader->setVec3("viewPos", camera.getPosition());
     m_FoliageShader->setVec3("sunDirection", sunDirection);
-    m_FoliageShader->setFloat("time", gameTime);
+    // m_FoliageShader->setFloat("time", gameTime);
     m_FoliageShader->setVec4("u_ClipPlane", clipPlane);
     m_FoliageShader->setMat4("lightSpaceMatrix", lightSpaceMatrix);
     m_FoliageShader->setVec3("objectColor", glm::vec3(0.1f, 0.5f, 0.15f));
     m_FoliageShader->setVec3("fogColor", skyColor);
-    m_FoliageShader->setFloat("u_Wetness", m_World->getWeatherManager()->getWetness());
+    // m_FoliageShader->setFloat("u_Wetness", m_World->getWeatherManager()->getWetness());
     
     glActiveTexture(GL_TEXTURE4);
     glBindTexture(GL_TEXTURE_2D, m_DepthMapTexture);
     m_FoliageShader->setInt("shadowMap", 4);
     
-    m_World->renderFoliage(*m_FoliageShader);
+    m_World->renderFoliage(*m_ModelShader);
 }
 
 void Engine::render() {
     // --- 1. HANDLE NON-GAME STATES & UI-ONLY RENDERING ---
-    // If we aren't in a playable game state, we only need to render the UI.
     if (!m_World || (m_GameState != GameState::InGame && m_GameState != GameState::Paused)) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glViewport(0, 0, m_ScreenWidth, m_ScreenHeight);
@@ -644,6 +668,7 @@ void Engine::render() {
                 m_UIManager->ShowMainMenu(
                     [&](){ m_GameState = GameState::NewGameSetup; },
                     [&](){ m_GameState = GameState::LoadGameMenu; },
+                    [&](){ m_ShowSettingsWindow = true; },
                     [&](){ QuitGame(); }
                 );
                 break;
@@ -665,39 +690,14 @@ void Engine::render() {
                     );
                 }
                 break;
-            case GameState::Paused:
-                // Keep rendering the game world in the background to show it's paused
-                if (m_World && m_World->getPlayer()) {
-                    Player::Player* player = m_World->getPlayer();
-                    if (m_ShowDebugInfo && !m_ShowMenu) {
-                        m_UIManager->ShowDebugOverlay(m_DeltaTime, *player, *m_World, m_PostProcessSettings);
-                    }
-                    if (!m_ShowMenu && !player->isNoClipMode()) {
-                        m_UIManager->ShowStaminaBar(player->getStamina(), player->getMaxStamina(), player->isSprinting());
-                    }
-                }
-
-                // Draw the pause menu over the top
-                m_UIManager->ShowPauseMenu(
-                    [&]() { m_GameState = GameState::InGame; glfwSetInputMode(m_Window, GLFW_CURSOR, GLFW_CURSOR_DISABLED); },
-                    [&]() { /* TODO: Show settings window */ },
-                    [&]() { SaveGame(); },
-                    [&]() { m_World.reset(); m_GameState = GameState::MainMenu; glfwSetInputMode(m_Window, GLFW_CURSOR, GLFW_CURSOR_NORMAL); }
-                );
-                break;
-            case GameState::InGame:
-                if (m_World && m_World->getPlayer()) {
-                    Player::Player* player = m_World->getPlayer();
-                    if (m_ShowDebugInfo && !m_ShowMenu) {
-                        m_UIManager->ShowDebugOverlay(m_DeltaTime, *player, *m_World, m_PostProcessSettings);
-                    }
-                    if (!m_ShowMenu && !player->isNoClipMode()) {
-                        m_UIManager->ShowStaminaBar(player->getStamina(), player->getMaxStamina(), player->isSprinting());
-                    }
-                }
-                break;
-            default: break;
+            default: break; // Paused and InGame are handled later
         }
+
+        // Always check if the settings window should be shown in a menu state
+        if (m_ShowSettingsWindow) {
+            m_UIManager->ShowSettingsWindow(m_ShowSettingsWindow, m_Settings, m_PostProcessSettings);
+        }
+
         m_UIManager->Render();
         return;
     }
@@ -759,10 +759,32 @@ void Engine::render() {
     glClearColor(skyColor.r, skyColor.g, skyColor.b, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    m_World->renderSkyboxAndClouds(camera.getViewMatrix(), camera.getProjectionMatrix());
     m_World->renderCelestials(*m_CelestialShader, camera.getViewMatrix(), camera.getProjectionMatrix());
     camera.updateFrustum();
     renderWorld(camera, lightSpaceMatrix); // Render main world with shadows
+
+    m_World->renderSkyboxAndClouds(camera.getViewMatrix(), camera.getProjectionMatrix());
+
+    // --- RENDER VOLUMETRIC CLOUDS ---
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+
+    m_VolumetricCloudsShader->use();
+    m_VolumetricCloudsShader->setMat4("u_inverseView", glm::inverse(camera.getViewMatrix()));
+    m_VolumetricCloudsShader->setMat4("u_inverseProjection", glm::inverse(camera.getProjectionMatrix()));
+    m_VolumetricCloudsShader->setVec3("u_cameraPos", camera.getPosition());
+    m_VolumetricCloudsShader->setVec3("u_sunDirection", m_World->getSunDirection());
+    m_VolumetricCloudsShader->setFloat("u_time", gameTime);
+
+    glActiveTexture(GL_TEXTURE5); // Use a free texture unit
+    glBindTexture(GL_TEXTURE_2D, m_DepthTexture);
+    m_VolumetricCloudsShader->setInt("u_depthMap", 5);
+
+    renderFullscreenQuad();
+
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
 
     // Render water surface
     glEnable(GL_BLEND);
@@ -778,8 +800,8 @@ void Engine::render() {
     m_WaterShader->setFloat("u_FarPlane", camera.getFarPlane());
     glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m_WaterRenderer->getReflectionTexture());   m_WaterShader->setInt("u_ReflectionTexture", 0);
     glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m_WaterRenderer->getRefractionTexture());  m_WaterShader->setInt("u_RefractionTexture", 1);
-    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_WaterDudvMap);                          m_WaterShader->setInt("u_DudvMap", 2);
-    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, m_WaterNormalMap);                        m_WaterShader->setInt("u_NormalMap", 3);
+    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_WaterDudvMap);                         m_WaterShader->setInt("u_DudvMap", 2);
+    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, m_WaterNormalMap);                       m_WaterShader->setInt("u_NormalMap", 3);
     glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, m_WaterRenderer->getRefractionDepthTexture()); m_WaterShader->setInt("u_RefractionDepthTexture", 4);
     m_World->renderWater(*m_WaterShader, camera.getPosition());
     glDepthMask(GL_TRUE);
@@ -845,8 +867,19 @@ void Engine::render() {
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_HalfResTextures[1], 0);
 
         m_GodRaysShader->use();
-        // Project sun's world position to screen space for the shader
-        glm::vec4 sunClipSpace = camera.getProjectionMatrix() * camera.getViewMatrix() * glm::vec4(sunDirection * -1000.0f, 1.0f);
+        // 1. Get the view matrix without the camera's translation.
+        glm::mat4 viewNoTranslation = glm::mat4(glm::mat3(camera.getViewMatrix()));
+
+        // 2. The sun's "position" is just its direction. We use -sunDirection
+        //    because we need the vector pointing TO the sun from the camera.
+        //    The w component is 0.0 to indicate it's a direction.
+        glm::vec4 sunDirectionForShader = glm::vec4(-sunDirection, 0.0f);
+
+        // 3. Transform the direction into clip space. Since we removed the translation
+        //    from the view matrix, the sun will always be rendered correctly at the
+        //    edge of the screen, as if it were infinitely far away.
+        glm::vec4 sunClipSpace = camera.getProjectionMatrix() * viewNoTranslation * sunDirectionForShader;
+        
         glm::vec2 sunNDC = glm::vec2(sunClipSpace.x, sunClipSpace.y) / sunClipSpace.w;
         glm::vec2 sunScreenPos = sunNDC * 0.5f + 0.5f;
 
@@ -919,30 +952,35 @@ void Engine::render() {
     m_FinalPassShader->setInt("screenTexture", 0);
 
     m_FinalPassShader->setBool("useBloom", m_PostProcessSettings.enableBloom);
-    if (m_PostProcessSettings.enableBloom) {
+    if (m_PostProcessSettings.enableBloom && bloomTexture > 0) {
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, bloomTexture);
         m_FinalPassShader->setInt("bloomTexture", 1);
+    }
+    
+    m_FinalPassShader->setBool("useGodRays", m_PostProcessSettings.enableGodRays && godRayResultTexture > 0);
+    if (m_PostProcessSettings.enableGodRays && godRayResultTexture > 0) {
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, godRayResultTexture);
+        m_FinalPassShader->setInt("godRaysTexture", 2);
     }
     m_FinalPassShader->setFloat("exposure", m_PostProcessSettings.exposure);
     
     // Draw the final image BEFORE enabling depth testing
     renderFullscreenQuad();
     
-    // =================== THIS LINE WAS MOVED ===================
     // Re-enable depth testing for the UI and any potential 3D debug overlays.
     glEnable(GL_DEPTH_TEST); 
-    // =========================================================
 
     // --- 7. UI RENDERING ---
     // Render UI on top of the final scene
     m_UIManager->NewFrame();
     if (m_GameState == GameState::Paused) {
         m_UIManager->ShowPauseMenu(
-            [&]() { m_GameState = GameState::InGame; glfwSetInputMode(m_Window, GLFW_CURSOR, GLFW_CURSOR_DISABLED); },
-            [&]() { /* TODO: Show settings window */ },
+            [&]() { m_GameState = GameState::InGame; glfwSetInputMode(m_Window, GLFW_CURSOR, GLFW_CURSOR_DISABLED); m_ShowSettingsWindow = false; },
+            [&]() { m_ShowSettingsWindow = true; },
             [&]() { SaveGame(); },
-            [&]() { m_World.reset(); m_GameState = GameState::MainMenu; glfwSetInputMode(m_Window, GLFW_CURSOR, GLFW_CURSOR_NORMAL); }
+            [&]() { m_World.reset(); m_GameState = GameState::MainMenu; glfwSetInputMode(m_Window, GLFW_CURSOR, GLFW_CURSOR_NORMAL); m_ShowSettingsWindow = false; }
         );
     }
     if (m_ShowDebugInfo) {
@@ -951,6 +989,12 @@ void Engine::render() {
     if (!player->isNoClipMode()) {
         m_UIManager->ShowStaminaBar(player->getStamina(), player->getMaxStamina(), player->isSprinting());
     }
+    
+    // Show settings if requested
+    if (m_ShowSettingsWindow) {
+        m_UIManager->ShowSettingsWindow(m_ShowSettingsWindow, m_Settings, m_PostProcessSettings);
+    }
+    
     m_UIManager->Render();
 }
 
@@ -958,7 +1002,11 @@ void Engine::StartNewGame(const std::string& saveName, const std::string& seed) 
     LOG("Engine::StartNewGame - Starting new game '" + saveName + "'...");
     m_ShowMenu = false;
     // Pass the saveName as the slotName to the World constructor
-    m_World = std::make_unique<World::World>(saveName, seed, m_ScreenWidth, m_ScreenHeight);
+    // Create a new generation profile for the new world
+    auto generationProfile = std::make_shared<Luminumbra::World::GenerationProfile>();
+
+    // Pass the profile to the World constructor
+    m_World = std::make_unique<World::World>(saveName, seed, generationProfile, m_ScreenWidth, m_ScreenHeight);
     
     m_SplashTime = 0.0f; // Reset loading timer
     glfwSetInputMode(m_Window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
@@ -995,6 +1043,9 @@ void Engine::run() {
 
         update(m_DeltaTime);
         render();
+
+        // Apply VSync setting
+        glfwSwapInterval(m_Settings.vsync ? 1 : 0);
 
         glfwSwapBuffers(m_Window);
     }
