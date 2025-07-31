@@ -1,5 +1,5 @@
 #pragma once
-#include "luminumbra_common/audio/AudioTypes.h"
+#include "components/audio/AudioTypes.h"
 
 // Use the common namespace
 using namespace Luminumbra::Common;

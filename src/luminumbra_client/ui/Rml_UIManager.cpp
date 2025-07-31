@@ -188,6 +188,9 @@ void Rml_UIManager::Init(GLFWwindow* window, IAudioManager* audioManager) {
         std::cerr << "UI WARNING: Failed to load one or more Lora font faces. Check paths." << std::endl;
     }
 
+    int width, height;
+    glfwGetWindowSize(m_window, &width, &height);
+
     // Set Lora as the default font family
     // The second parameter 'false' means it's a fallback font.
     Rml::SetFontFamily("Lora", "Lora"); 

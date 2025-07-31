@@ -13,7 +13,7 @@ public:
     Rml_UIManager();
     ~Rml_UIManager();
 
-    void Init(GLFWwindow* windo, IAudioManager* audioManager);
+    void Init(GLFWwindow* window, IAudioManager* audioManager);
     void Shutdown();
 
     void Update();
