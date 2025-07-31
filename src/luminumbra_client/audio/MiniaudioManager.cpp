@@ -38,7 +38,12 @@ void MiniaudioManager::Update() {
 
 void MiniaudioManager::Shutdown() {
     if (m_engine) {
-        m_activeSounds.clear(); // This will call destructors which should uninit sounds
+        // FIX: Explicitly uninitialize all active sounds before clearing the map.
+        for (auto& [handle, sound_ptr] : m_activeSounds) {
+            ma_sound_uninit(sound_ptr.get());
+        }
+        m_activeSounds.clear(); // Now this is safe.
+
         m_eventDefinitions.clear();
         ma_engine_uninit(m_engine.get());
         m_engine = nullptr;

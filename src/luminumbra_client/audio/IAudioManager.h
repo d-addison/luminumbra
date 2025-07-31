@@ -1,7 +1,7 @@
 #pragma once
 #include <string>
 #include <cstdint>
-#include "luminumbra_common/audio/AudioTypes.h"
+#include "components/audio/AudioTypes.h"
 #include "glm/glm.hpp"
 #include <memory>
 
