@@ -4,167 +4,25 @@
 #include <RmlUi/Core/Element.h>
 #include <RmlUi/Core/EventListener.h>
 #include <RmlUi/Debugger.h>
+#include <RmlUi/Core/StyleTypes.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/glm.hpp>
-
-#define SOIL_IMPLEMENTATION
-#include <SOIL2/SOIL2.h> 
-
+#include <cassert>
 #include <iostream>
+#include <unordered_map>
 
 namespace Luminumbra::Client {
 
-// --- RmlRenderer Implementation ---
-
-RmlRenderer::RmlRenderer() {
-    // Minimal shaders for UI rendering
-    const char* vs = R"GLSL(
-        #version 330 core
-        in vec2 aPos;
-        in vec2 aTexCoord;
-        in vec4 aColor;
-        out vec2 TexCoord;
-        out vec4 FragColor;
-        uniform mat4 uProjection;
-        uniform vec2 uTranslation;
-        void main() {
-            FragColor = aColor;
-            TexCoord = aTexCoord;
-            gl_Position = uProjection * vec4(aPos + uTranslation, 0.0, 1.0);
-        }
-    )GLSL";
-    const char* fs = R"GLSL(
-        #version 330 core
-        in vec2 TexCoord;
-        in vec4 FragColor;
-        out vec4 OutColor;
-        uniform sampler2D uTexture;
-        void main() {
-            vec4 texColor = texture(uTexture, TexCoord);
-            OutColor = FragColor * texColor;
-        }
-    )GLSL";
-
-    // Compile and link shaders
-    GLuint vertShader = glCreateShader(GL_VERTEX_SHADER);
-    glShaderSource(vertShader, 1, &vs, NULL);
-    glCompileShader(vertShader);
-
-    GLuint fragShader = glCreateShader(GL_FRAGMENT_SHADER);
-    glShaderSource(fragShader, 1, &fs, NULL);
-    glCompileShader(fragShader);
-
-    m_program = glCreateProgram();
-    glAttachShader(m_program, vertShader);
-    glAttachShader(m_program, fragShader);
-    glLinkProgram(m_program);
-
-    glDeleteShader(vertShader);
-    glDeleteShader(fragShader);
-
-    m_translation_loc = glGetUniformLocation(m_program, "uTranslation");
-    m_projection_loc = glGetUniformLocation(m_program, "uProjection");
-
-    glGenVertexArrays(1, &m_vao);
-    glGenBuffers(1, &m_vbo);
-    glGenBuffers(1, &m_ebo);
-}
-
-void RmlRenderer::SetViewport(int width, int height) {
-    m_width = width;
-    m_height = height;
-    glViewport(0, 0, width, height);
-}
-
-void RmlRenderer::RenderGeometry(Rml::Vertex* vertices, int num_vertices, int* indices, int num_indices, Rml::TextureHandle texture, const Rml::Vector2f& translation) {
-    glUseProgram(m_program);
-
-    glBindVertexArray(m_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(Rml::Vertex) * num_vertices, vertices, GL_DYNAMIC_DRAW);
-
-    glEnableVertexAttribArray(0); // aPos
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(Rml::Vertex), (void*)offsetof(Rml::Vertex, position));
-    glEnableVertexAttribArray(1); // aTexCoord
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Rml::Vertex), (void*)offsetof(Rml::Vertex, tex_coord));
-    glEnableVertexAttribArray(2); // aColor
-    glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(Rml::Vertex), (void*)offsetof(Rml::Vertex, colour));
-
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(int) * num_indices, indices, GL_DYNAMIC_DRAW);
-
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    
-    glm::mat4 projection = glm::ortho(0.0f, (float)m_width, (float)m_height, 0.0f, -1.0f, 1.0f);
-    glUniformMatrix4fv(m_projection_loc, 1, GL_FALSE, &projection[0][0]);
-    glUniform2fv(m_translation_loc, 1, &translation.x);
-    
-    if (texture) {
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, (GLuint)texture);
-    } else {
-        glBindTexture(GL_TEXTURE_2D, 0);
-    }
-
-    glDrawElements(GL_TRIANGLES, num_indices, GL_UNSIGNED_INT, 0);
-
-    glBindVertexArray(0);
-    glDisable(GL_BLEND);
-}
-
-void RmlRenderer::EnableScissorRegion(bool enable) {
-    if (enable)
-        glEnable(GL_SCISSOR_TEST);
-    else
-        glDisable(GL_SCISSOR_TEST);
-}
-
-void RmlRenderer::SetScissorRegion(int x, int y, int width, int height) {
-    glScissor(x, m_height - (y + height), width, height);
-}
-
-bool RmlRenderer::LoadTexture(Rml::TextureHandle& texture_handle, Rml::Vector2i& texture_dimensions, const Rml::String& source) {
-    // Our TDD specifies data comes from the `data/` dir, not `assets/`
-    Rml::String full_path = "data/" + source;
-    
-    int width, height, channels;
-    unsigned char* image_data = SOIL_load_image(full_path.c_str(), &width, &height, &channels, SOIL_LOAD_RGBA);
-    if (!image_data) {
-        std::cerr << "RmlUi ERROR: Could not load texture: " << full_path << std::endl;
-        return false;
-    }
-
-    texture_dimensions = { width, height };
-    return GenerateTexture(texture_handle, image_data, texture_dimensions);
-}
-
-bool RmlRenderer::GenerateTexture(Rml::TextureHandle& texture_handle, const Rml::byte* source, const Rml::Vector2i& source_dimensions) {
-    GLuint texture_id = 0;
-    glGenTextures(1, &texture_id);
-    if (texture_id == 0) return false;
-
-    glBindTexture(GL_TEXTURE_2D, texture_id);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, source_dimensions.x, source_dimensions.y, 0, GL_RGBA, GL_UNSIGNED_BYTE, source);
-    
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    texture_handle = (Rml::TextureHandle)texture_id;
-    return true;
-}
-
-void RmlRenderer::ReleaseTexture(Rml::TextureHandle texture_handle) {
-    glDeleteTextures(1, (GLuint*)&texture_handle);
-}
+// Forward declarations
+class NewWorldButtonListener;
+class BackButtonListener;
+class CreateWorldButtonListener;
 
 // --- Rml_UIManager Implementation ---
 
 Rml::Context* Rml_UIManager::s_activeContext = nullptr;
 
-Rml_UIManager::Rml_UIManager() {}
+Rml_UIManager::Rml_UIManager(const std::string& root_path) : m_fileInterface(root_path) {}
 Rml_UIManager::~Rml_UIManager() {}
 
 void Rml_UIManager::Init(GLFWwindow* window, IAudioManager* audioManager) {
@@ -173,27 +31,22 @@ void Rml_UIManager::Init(GLFWwindow* window, IAudioManager* audioManager) {
     std::cout << "UI Manager Initializing..." << std::endl;
 
     Rml::SetSystemInterface(&m_systemInterface);
+    Rml::SetFileInterface(&m_fileInterface);
     Rml::SetRenderInterface(&m_renderInterface);
 
     Rml::Initialise();
 
     // Load fonts - This makes the entire "Lora" family available to CSS
     bool fonts_loaded = true;
-    fonts_loaded &= Rml::LoadFontFace("assets/fonts/Lora/static/Lora-Regular.ttf",      false);
-    fonts_loaded &= Rml::LoadFontFace("assets/fonts/Lora/static/Lora-Italic.ttf",        true);
-    fonts_loaded &= Rml::LoadFontFace("assets/fonts/Lora/static/Lora-Bold.ttf",          false);
-    fonts_loaded &= Rml::LoadFontFace("assets/fonts/Lora/static/Lora-BoldItalic.ttf",    true);
+    fonts_loaded &= Rml::LoadFontFace("data/fonts/Lora/Lora-VariableFont_wght.ttf");
+    fonts_loaded &= Rml::LoadFontFace("data/fonts/Lora/Lora-Italic-VariableFont_wght.ttf");
 
     if (!fonts_loaded) {
-        std::cerr << "UI WARNING: Failed to load one or more Lora font faces. Check paths." << std::endl;
+        std::cerr << "FATAL ERROR: One or more fonts failed to load." << std::endl;
     }
 
     int width, height;
     glfwGetWindowSize(m_window, &width, &height);
-
-    // Set Lora as the default font family
-    // The second parameter 'false' means it's a fallback font.
-    Rml::SetFontFamily("Lora", "Lora"); 
 
     m_context = Rml::CreateContext("main", Rml::Vector2i(width, height));
     s_activeContext = m_context; // For static callbacks
@@ -247,46 +100,188 @@ private:
     GLFWwindow* m_window;
 };
 
+class NewWorldButtonListener : public Rml::EventListener {
+public:
+    NewWorldButtonListener(Rml_UIManager* uiManager, IAudioManager* audioManager) 
+        : m_uiManager(uiManager), m_audioManager(audioManager) {}
+    void ProcessEvent(Rml::Event& event) override {
+        if (event.GetType() == "click") {
+            std::cout << "New World button clicked!" << std::endl;
+            if (m_audioManager) {
+                m_audioManager->PlayOneShot2D("ui_button_click");
+            }
+            // Load the world creation screen
+            m_uiManager->LoadDocument("world_creation.rml");
+        }
+    }
+private:
+    Rml_UIManager* m_uiManager;
+    IAudioManager* m_audioManager;
+};
+
+class LoadWorldButtonListener : public Rml::EventListener {
+public:
+    LoadWorldButtonListener(IAudioManager* audioManager) : m_audioManager(audioManager) {}
+    void ProcessEvent(Rml::Event& event) override {
+        if (event.GetType() == "click") {
+            std::cout << "Load World button clicked!" << std::endl;
+            // TODO: Load world selection screen
+            // For now, just log and play a sound
+            if (m_audioManager) {
+                m_audioManager->PlayOneShot2D("ui_button_click");
+            }
+            std::cout << "Load World not yet implemented - would show world selection screen here" << std::endl;
+        }
+    }
+private:
+    IAudioManager* m_audioManager;
+};
+
 class ButtonSoundListener : public Rml::EventListener {
 public:
     ButtonSoundListener(IAudioManager* audio) : m_audio(audio) {}
     void ProcessEvent(Rml::Event& event) override {
         if (event.GetType() == "mouseover" && m_audio) {
-            m_audio->PlayOneShot2D("ui_button_click");
+            m_audio->PlayOneShot2D("ui_button_hover");
         }
     }
 private:
     IAudioManager* m_audio;
 };
 
+class BackButtonListener : public Rml::EventListener {
+public:
+    BackButtonListener(Rml_UIManager* uiManager, IAudioManager* audioManager) 
+        : m_uiManager(uiManager), m_audioManager(audioManager) {}
+    void ProcessEvent(Rml::Event& event) override {
+        if (event.GetType() == "click") {
+            std::cout << "Back button clicked!" << std::endl;
+            if (m_audioManager) {
+                m_audioManager->PlayOneShot2D("ui_button_click");
+            }
+            // Go back to main menu
+            m_uiManager->LoadDocument("main_menu.rml");
+        }
+    }
+private:
+    Rml_UIManager* m_uiManager;
+    IAudioManager* m_audioManager;
+};
+
+class CreateWorldButtonListener : public Rml::EventListener {
+public:
+    CreateWorldButtonListener(Rml_UIManager* uiManager, IAudioManager* audioManager)
+        : m_uiManager(uiManager), m_audioManager(audioManager) {}
+    void ProcessEvent(Rml::Event& event) override {
+        if (event.GetType() == "click") {
+            std::cout << "Create World button clicked!" << std::endl;
+            if (m_audioManager) {
+                m_audioManager->PlayOneShot2D("ui_button_click");
+            }
+            
+            // Get the world creation form data
+            Rml::ElementDocument* document = event.GetTargetElement()->GetOwnerDocument();
+            if (document) {
+                // Get world name
+                Rml::Element* nameInput = document->GetElementById("world_name");
+                std::string worldName = "New World";
+                if (nameInput) {
+                    const Rml::Variant* value = nameInput->GetAttribute("value");
+                    if (value && value->GetType() == Rml::Variant::STRING) {
+                        worldName = value->Get<Rml::String>();
+                    }
+                }
+                
+                // Get seed
+                Rml::Element* seedInput = document->GetElementById("world_seed");
+                std::string seed = "";
+                if (seedInput) {
+                    const Rml::Variant* value = seedInput->GetAttribute("value");
+                    if (value && value->GetType() == Rml::Variant::STRING) {
+                        seed = value->Get<Rml::String>();
+                    }
+                }
+                
+                // Get world type
+                Rml::Element* typeSelect = document->GetElementById("world_type");
+                std::string worldType = "default";
+                if (typeSelect) {
+                    const Rml::Variant* value = typeSelect->GetAttribute("value");
+                    if (value && value->GetType() == Rml::Variant::STRING) {
+                        worldType = value->Get<Rml::String>();
+                    }
+                }
+                
+                std::cout << "Creating world:" << std::endl;
+                std::cout << "  Name: " << worldName << std::endl;
+                std::cout << "  Seed: " << (seed.empty() ? "(random)" : seed) << std::endl;
+                std::cout << "  Type: " << worldType << std::endl;
+                
+                // Call the world creation callback if set
+                if (m_uiManager->m_worldCreationCallback) {
+                    m_uiManager->m_worldCreationCallback(worldName, seed, worldType);
+                } else {
+                    std::cout << "Warning: No world creation callback set!" << std::endl;
+                }
+            }
+        }
+    }
+private:
+    Rml_UIManager* m_uiManager;
+    IAudioManager* m_audioManager;
+};
+
 void Rml_UIManager::LoadDocument(const std::string& rml_path) {
     if (!m_context) return;
-    
-    // Unload previous documents if any
-    for (int i = 0; i < m_context->GetNumDocuments(); ++i) {
-        m_context->GetDocument(i)->Close();
+
+    // Remove previous documents (non-debug) and their listeners
+    // IMPORTANT: Clear listeners BEFORE destroying docs so no dangling calls can happen.
+    m_activeListeners.clear();
+
+    for (int i = m_context->GetNumDocuments() - 1; i >= 0; --i) {
+        Rml::ElementDocument* doc = m_context->GetDocument(i);
+        if (doc && doc->GetId().find("rmlui-debug") == Rml::String::npos) {
+            doc->Close();
+        }
     }
-    
+
     Rml::ElementDocument* document = m_context->LoadDocument("data/ui/" + rml_path);
-    if (document) {
-        document->Show();
-
-        // Add event listeners
-        Rml::Element* quit_button = document->GetElementById("quit_button");
-        if (quit_button) {
-            quit_button->AddEventListener("click", new QuitButtonListener(m_window));
-        }
-        
-        // Add sound to all buttons
-        Rml::ElementList buttons;
-        document->GetElementsByTagName(buttons, "button");
-        for(Rml::Element* button : buttons) {
-            // FIX: Pass the audio manager to the listener's constructor
-            button->AddEventListener("mouseover", new ButtonSoundListener(m_audioManager));
-        }
-
-    } else {
+    if (!document) {
         std::cerr << "UI ERROR: Could not load document: " << rml_path << std::endl;
+        assert(document != nullptr && "RML DOCUMENT FAILED TO LOAD!");
+        return;
+    }
+
+    document->Show();
+
+    if (rml_path == "main_menu.rml" && m_audioManager) {
+        m_audioManager->PlayMusic("music_main_menu");
+    }
+
+    if (rml_path == "main_menu.rml") {
+        if (auto* new_world_button = document->GetElementById("new_world_btn")) {
+            new_world_button->AddEventListener("click", MakeListener<NewWorldButtonListener>(this, m_audioManager));
+        }
+        if (auto* load_world_button = document->GetElementById("load_world_btn")) {
+            load_world_button->AddEventListener("click", MakeListener<LoadWorldButtonListener>(m_audioManager));
+        }
+        if (auto* quit_button = document->GetElementById("quit_btn")) {
+            quit_button->AddEventListener("click", MakeListener<QuitButtonListener>(m_window));
+        }
+    } else if (rml_path == "world_creation.rml") {
+        if (auto* back_button = document->GetElementById("back_btn")) {
+            back_button->AddEventListener("click", MakeListener<BackButtonListener>(this, m_audioManager));
+        }
+        if (auto* create_button = document->GetElementById("create_btn")) {
+            create_button->AddEventListener("click", MakeListener<CreateWorldButtonListener>(this, m_audioManager));
+        }
+    }
+
+    // Add sound to all buttons
+    Rml::ElementList buttons;
+    document->GetElementsByTagName(buttons, "button");
+    for (Rml::Element* button : buttons) {
+        button->AddEventListener("mouseover", MakeListener<ButtonSoundListener>(m_audioManager));
     }
 }
 

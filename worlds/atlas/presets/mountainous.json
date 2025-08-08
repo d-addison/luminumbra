@@ -1,0 +1,24 @@
+{
+  "name": "Mountainous",
+  "description": "Extreme mountain ranges and deep valleys",
+  "generation_params": {
+    "terrain": {
+      "base_frequency": 0.008,
+      "base_amplitude": 120.0,
+      "octaves": 6,
+      "persistence": 0.65,
+      "lacunarity": 2.2,
+      "height_offset": 20.0
+    },
+    "biomes": {
+      "temperature_frequency": 0.003,
+      "humidity_frequency": 0.004
+    },
+    "features": {
+      "caves_enabled": true,
+      "cave_frequency": 0.03,
+      "rivers_enabled": true,
+      "structures_enabled": true
+    }
+  }
+}

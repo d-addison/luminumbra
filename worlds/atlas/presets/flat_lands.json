@@ -1,0 +1,24 @@
+{
+  "name": "Flat Lands",
+  "description": "Mostly flat terrain with gentle rolling hills",
+  "generation_params": {
+    "terrain": {
+      "base_frequency": 0.02,
+      "base_amplitude": 10.0,
+      "octaves": 2,
+      "persistence": 0.3,
+      "lacunarity": 2.0,
+      "height_offset": 5.0
+    },
+    "biomes": {
+      "temperature_frequency": 0.008,
+      "humidity_frequency": 0.008
+    },
+    "features": {
+      "caves_enabled": false,
+      "cave_frequency": 0.0,
+      "rivers_enabled": true,
+      "structures_enabled": true
+    }
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "name": "Default",
+  "description": "Standard world generation with varied terrain",
+  "generation_params": {
+    "terrain": {
+      "base_frequency": 0.01,
+      "base_amplitude": 50.0,
+      "octaves": 4,
+      "persistence": 0.5,
+      "lacunarity": 2.0,
+      "height_offset": 0.0
+    },
+    "biomes": {
+      "temperature_frequency": 0.005,
+      "humidity_frequency": 0.005
+    },
+    "features": {
+      "caves_enabled": true,
+      "cave_frequency": 0.02,
+      "rivers_enabled": true,
+      "structures_enabled": true
+    }
+  }
+}

@@ -1,3 +1,5 @@
+# This file lists all source files for the 'luminumbra_common' target.
+# Paths are relative to the 'src/luminumbra_common' directory.
 set(COMMON_SOURCES
     # Core
     core/EventBus.cpp
@@ -5,7 +7,7 @@ set(COMMON_SOURCES
 
     # Net
     net/NetworkManager.cpp
-    
+
     # Scripting
     scripting/LuaState.cpp
 
@@ -14,7 +16,13 @@ set(COMMON_SOURCES
 
     # Systems
     systems/PhysicsSystem.cpp
+    systems/SHIELD_WorldSystem.cpp
+
+    # Vendor
+    vendor/FastNoiseLite.cpp
 
     # World
+    world/Chunk.cpp
     world/GameSession.cpp
+    world/MarchingCubes.cpp
 )

@@ -7,6 +7,12 @@
       "pitch_variation": 0.05,
       "is_2d": true
     },
+    "ui_button_hover": {
+      "files": ["assets/audio/sfx/ui/button_click.mp3"],
+      "volume": 0.8,
+      "pitch_variation": 0.05,
+      "is_2d": true
+    },
     "creature_grovestrider_footstep": {
       "files": [
         "assets/audio/sfx/creatures/grovestrider/footstep_1.wav",
