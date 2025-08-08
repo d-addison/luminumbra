@@ -1,16 +1,15 @@
 <rml>
     <head>
         <title>Main Menu</title>
-        <link type="text/template" href="window.rml" />
-        <link type="text/css" href="style.rcss" />
+        <link type="text/css" href="game_theme.rcss" />
     </head>
     <body id="main_menu">
         <h1>Luminumbra</h1>
         <p class="subtitle">The Quantum Engine</p>
         <div id="nav">
-            <button id="start_button">Start Game</button>
-            <button>Options</button>
-            <button id="quit_button">Quit</button>
+            <button id="new_world_btn">New World</button>
+            <button id="load_world_btn">Load World</button>
+            <button id="quit_btn">Quit</button>
         </div>
     </body>
 </rml>

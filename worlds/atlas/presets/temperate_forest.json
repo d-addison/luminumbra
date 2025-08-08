@@ -1,0 +1,51 @@
+{
+  "preset_name": "Temperate Forest",
+  "generation_params": {
+    "terrain": {
+      "base_frequency": 0.008,
+      "base_amplitude": 70.0,
+      "octaves": 6,
+      "persistence": 0.5,
+      "lacunarity": 2.1,
+      "height_offset": 32.0
+    },
+    "features": {
+      "caves_enabled": true,
+      "cave_frequency": 0.025
+    },
+    "materials": {
+      "strata": [
+        {
+          "material": "Soil",
+          "max_depth": 1,
+          "thickness": 4
+        },
+        {
+          "material": "Stone",
+          "max_depth": 5,
+          "thickness": 200
+        },
+        {
+          "material": "Deepslate",
+          "max_depth": 201,
+          "thickness": 512
+        }
+      ],
+      "veins": [
+        {
+          "material": "LuminCrystal",
+          "host_materials": ["Stone", "Deepslate"],
+          "noise_frequency": 0.08,
+          "noise_threshold": 0.85
+        },
+        {
+          "material": "Sand",
+          "host_materials": ["Soil", "Stone"],
+          "noise_frequency": 0.05,
+          "noise_threshold": 0.6,
+          "max_altitude": 40.0
+        }
+      ]
+    }
+  }
+}

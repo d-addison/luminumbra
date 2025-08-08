@@ -5,7 +5,7 @@
 
 namespace Luminumbra::Client {
 
-MiniaudioManager::MiniaudioManager() : m_engine(nullptr), m_rng(std::random_device{}()) {}
+MiniaudioManager::MiniaudioManager(const std::string& root_path) : m_rootPath(root_path), m_engine(nullptr), m_rng(std::random_device{}()) {}
 MiniaudioManager::~MiniaudioManager() {
     // Shutdown should be called explicitly
 }
@@ -38,13 +38,18 @@ void MiniaudioManager::Update() {
 
 void MiniaudioManager::Shutdown() {
     if (m_engine) {
+        // Stop and clear music
+        if (m_currentMusic) {
+            ma_sound_uninit(m_currentMusic.get());
+            m_currentMusic.reset();
+        }
+
         // FIX: Explicitly uninitialize all active sounds before clearing the map.
         for (auto& [handle, sound_ptr] : m_activeSounds) {
             ma_sound_uninit(sound_ptr.get());
         }
         m_activeSounds.clear(); // Now this is safe.
 
-        m_eventDefinitions.clear();
         ma_engine_uninit(m_engine.get());
         m_engine = nullptr;
         std::cout << "Miniaudio Manager Shutdown." << std::endl;
@@ -74,6 +79,7 @@ bool MiniaudioManager::LoadBank(const std::string& bankPath) {
         def.pitch_variation = event_def_json.value("pitch_variation", 0.0f);
         def.is_2d = event_def_json.value("is_2d", false);
         def.is_looping = event_def_json.value("looping", false);
+        def.is_streaming = is_streaming;
         
         m_eventDefinitions[event_id] = def;
     }
@@ -92,28 +98,27 @@ void MiniaudioManager::SetListenerTransform(const glm::vec3& position, const glm
     if (!m_engine) return;
     ma_engine_listener_set_position(m_engine.get(), 0, position.x, position.y, position.z);
     ma_engine_listener_set_direction(m_engine.get(), 0, forward.x, forward.y, forward.z);
-    ma_engine_listener_set_up(m_engine.get(), 0, up.x, up.y, up.z);
+    ma_engine_listener_set_world_up(m_engine.get(), 0, up.x, up.y, up.z);
 }
 
 bool MiniaudioManager::PlayEvent(const AudioEventID& eventID, AudioEventHandle& outHandle) {
     if (!m_engine) return false;
-
     const AudioEventDefinition* def = GetEventDefinition(eventID);
-    if (!def) return false;
+    if (!def || def->files.empty()) return false;
 
     auto sound = std::make_unique<ma_sound>();
     uint32_t flags = MA_SOUND_FLAG_NO_PITCH;
-    if (def->is_2d) {
-        flags |= MA_SOUND_FLAG_NO_SPATIALIZATION;
-    }
+    if (def->is_2d)        flags |= MA_SOUND_FLAG_NO_SPATIALIZATION;
+    if (def->is_streaming) flags |= MA_SOUND_FLAG_STREAM;
 
-    std::uniform_int_distribution<> dist(0, def->files.size() - 1);
-    const std::string& file_path = def->files[dist(m_rng)];
+    std::uniform_int_distribution<> dist(0, static_cast<int>(def->files.size()) - 1);
+    const std::string& rel_path = def->files[dist(m_rng)];
 
-    if (LoadSoundResource(file_path, sound.get(), flags) != MA_SUCCESS) {
+    // Pass only the relative path; LoadSoundResource will prefix m_rootPath
+    if (LoadSoundResource(rel_path, sound.get(), flags) != MA_SUCCESS) {
         return false;
     }
-    
+
     ma_sound_set_volume(sound.get(), def->volume);
     ma_sound_set_looping(sound.get(), def->is_looping);
     ma_sound_start(sound.get());
@@ -123,22 +128,60 @@ bool MiniaudioManager::PlayEvent(const AudioEventID& eventID, AudioEventHandle& 
     return true;
 }
 
+
 bool MiniaudioManager::PlayOneShot2D(const AudioEventID& eventID) {
     if (!m_engine) return false;
-
     const AudioEventDefinition* def = GetEventDefinition(eventID);
-    if (!def) return false;
-    
-    std::uniform_int_distribution<> dist(0, def->files.size() - 1);
-    const std::string& file_path = def->files[dist(m_rng)];
-    
-    ma_engine_play_sound(m_engine.get(), file_path.c_str(), NULL);
+    if (!def || def->files.empty()) return false;
+
+    std::uniform_int_distribution<> dist(0, static_cast<int>(def->files.size()) - 1);
+    const std::string& rel = def->files[dist(m_rng)];
+    const std::string full_path = m_rootPath + rel;
+
+    ma_engine_play_sound(m_engine.get(), full_path.c_str(), nullptr);
     return true;
 }
 
 bool MiniaudioManager::PlayOneShot(const AudioEventID& eventID, const glm::vec3& position) {
     // Not implemented yet, requires creating a temporary sound
     return false;
+}
+
+void MiniaudioManager::PlayMusic(const AudioEventID& musicEventID) {
+    if (!m_engine || musicEventID == m_currentMusicID) return;
+
+    StopMusic(); // ensure previous is stopped
+
+    const AudioEventDefinition* def = GetEventDefinition(musicEventID);
+    if (!def || def->files.empty()) {
+        std::cerr << "AUDIO ERROR: Music event not found or has no files: " << musicEventID << std::endl;
+        return;
+    }
+
+    uint32_t flags = MA_SOUND_FLAG_STREAM | MA_SOUND_FLAG_NO_PITCH;
+    if (def->is_2d) flags |= MA_SOUND_FLAG_NO_SPATIALIZATION;
+
+    m_currentMusic = std::make_unique<ma_sound>();
+    if (LoadSoundResource(def->files[0], m_currentMusic.get(), flags) != MA_SUCCESS) {
+        m_currentMusic.reset();
+        return;
+    }
+
+    ma_sound_set_looping(m_currentMusic.get(), true);
+    ma_sound_set_volume(m_currentMusic.get(), def->volume);
+    ma_sound_start(m_currentMusic.get());
+
+    m_currentMusicID = musicEventID;
+    std::cout << "Music started: " << musicEventID << std::endl;
+}
+
+void MiniaudioManager::StopMusic() {
+    if (m_currentMusic) {
+        ma_sound_stop(m_currentMusic.get());
+        ma_sound_uninit(m_currentMusic.get());
+        m_currentMusic.reset();
+        m_currentMusicID.clear();
+    }
 }
 
 bool MiniaudioManager::StopEvent(AudioEventHandle handle, bool immediate) {
@@ -170,7 +213,9 @@ bool MiniaudioManager::SetEventParameter(AudioEventHandle handle, const AudioPar
 }
 
 ma_result MiniaudioManager::LoadSoundResource(const std::string& path, ma_sound* sound, uint32_t flags) {
-    return ma_sound_init_from_file(m_engine.get(), path.c_str(), flags, NULL, NULL, sound);
+    // Ensure exactly one concatenation
+    const std::string full_path = m_rootPath + path;
+    return ma_sound_init_from_file(m_engine.get(), full_path.c_str(), flags, nullptr, nullptr, sound);
 }
 
 const AudioEventDefinition* MiniaudioManager::GetEventDefinition(const AudioEventID& eventID) {
