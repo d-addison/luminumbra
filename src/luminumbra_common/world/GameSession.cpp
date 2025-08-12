@@ -2,6 +2,7 @@
 #include "../systems/SHIELD_WorldSystem.h" // This includes TerrainGenParams
 #include "../core/JobSystem.h"
 #include "nlohmann/json.hpp" // For parsing JSON
+#include "../systems/PhysicsSystem.h"
 
 #include <fstream>
 #include <iostream>
@@ -10,6 +11,7 @@
 #include <random>
 #include <filesystem>
 #include <chrono>
+#include "../core/Log.h"
 
 namespace fs = std::filesystem;
 
@@ -49,6 +51,10 @@ bool GameSession::CreateWorld(const std::string& name, const std::string& seed, 
         return false;
     }
 
+    // Initialize Physics System
+    m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
+    m_physicsSystem->startup();
+
     // Load the generation preset based on worldType
     std::string presetPath = m_rootPath + "worlds/atlas/presets/" + worldType + ".json";
     std::ifstream f(presetPath);
@@ -57,7 +63,15 @@ bool GameSession::CreateWorld(const std::string& name, const std::string& seed, 
         return false;
     }
 
-    nlohmann::json data = nlohmann::json::parse(f);
+    nlohmann::json data;
+    try {
+        data = nlohmann::json::parse(f);
+    } catch (const nlohmann::json::parse_error& e) {
+        // Use your logger here if available, otherwise cerr is fine.
+        std::cerr << "FATAL: Failed to parse world preset JSON '" << presetPath << "'. Error: " << e.what() << std::endl;
+        return false; // Return false to prevent the game from entering a broken state
+    }
+
     TerrainGenParams params; // FIX: This now works because of the 'using' declaration above
 
     // Safely parse values from JSON
@@ -68,6 +82,8 @@ bool GameSession::CreateWorld(const std::string& name, const std::string& seed, 
     params.persistence = gen_params["terrain"].value("persistence", 0.5f);
     params.lacunarity = gen_params["terrain"].value("lacunarity", 2.0f);
     params.height_offset = gen_params["terrain"].value("height_offset", 0.0f);
+    params.island_mask_enabled = gen_params["terrain"].value("island_mask_enabled", false);
+    params.island_mask_frequency = gen_params["terrain"].value("island_mask_frequency", 0.004f);
     params.caves_enabled = gen_params["features"].value("caves_enabled", true);
     params.cave_frequency = gen_params["features"].value("cave_frequency", 0.02f);
     
@@ -82,7 +98,7 @@ bool GameSession::CreateWorld(const std::string& name, const std::string& seed, 
         return false;
     }
 
-    std::cout << "World created successfully: " << m_metadata.name << " (ID: " << m_metadata.worldId << ")" << std::endl;
+    LUMINUMBRA_CORE_INFO("World created successfully: {} (ID: {})", m_metadata.name, m_metadata.worldId);
     return true;
 }
 
@@ -101,6 +117,10 @@ bool GameSession::LoadWorld(const std::string& worldId) {
         std::cerr << "Error: World not found: " << worldId << std::endl;
         return false;
     }
+
+    // Initialize Physics System
+    m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
+    m_physicsSystem->startup();
 
     // --- Load Metadata from world_info.json ---
     std::ifstream metadata_file(metadataPath);
@@ -144,6 +164,8 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     params.persistence = gen_params["terrain"].value("persistence", 0.5f);
     params.lacunarity = gen_params["terrain"].value("lacunarity", 2.0f);
     params.height_offset = gen_params["terrain"].value("height_offset", 0.0f);
+    params.island_mask_enabled = gen_params["terrain"].value("island_mask_enabled", false);
+    params.island_mask_frequency = gen_params["terrain"].value("island_mask_frequency", 0.004f);
     params.caves_enabled = gen_params["features"].value("caves_enabled", true);
     params.cave_frequency = gen_params["features"].value("cave_frequency", 0.02f);
 

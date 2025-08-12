@@ -1,7 +1,6 @@
 <rml>
     <head>
         <title>Window</title>
-        <link type="text/css" href="style.rcss" />
         <link type="text/css" href="game_theme.rcss" />
     </head>
     <body>

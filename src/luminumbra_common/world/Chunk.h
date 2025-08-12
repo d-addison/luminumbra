@@ -51,6 +51,13 @@ public:
     // They are empty until the chunk's state is 'Ready'.
     std::vector<VoxelVertex> mesh_vertices;
     std::vector<u32> mesh_indices;
+    std::atomic<bool> has_collision{false};
+
+    // The current LOD level of the generated mesh. -1 means not yet meshed.
+    std::atomic<int> current_lod{ -1 };
+    // A version counter for the mesh data. When we re-mesh at a new LOD,
+    // we increment this. The renderer uses it to detect updated meshes.
+    std::atomic<u32> mesh_version{ 0 };
 
     // Helper function to compute a unique 64-bit ID from 3D coordinates.
     static ChunkID calculate_id(const IVec3& coords);

@@ -3,7 +3,7 @@
   "streaming": true,
   "events": {
     "music_main_menu": {
-      "files": ["../../assets/audio/music/themes/main_menu_theme.ogg"],
+      "files": ["assets/audio/music/themes/main_menu_theme.mp3"],
       "volume": 0.6,
       "is_2d": true,
       "looping": true

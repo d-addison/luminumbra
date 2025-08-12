@@ -4,11 +4,11 @@
   "generation_params": {
     "terrain": {
       "base_frequency": 0.01,
-      "base_amplitude": 50.0,
+      "base_amplitude": 12.0,
       "octaves": 4,
       "persistence": 0.5,
       "lacunarity": 2.0,
-      "height_offset": 0.0
+      "height_offset": 20.0
     },
     "biomes": {
       "temperature_frequency": 0.005,

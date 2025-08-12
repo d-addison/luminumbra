@@ -4,6 +4,7 @@ set(COMMON_SOURCES
     # Core
     core/EventBus.cpp
     core/JobSystem.cpp
+    core/Log.cpp
 
     # Net
     net/NetworkManager.cpp

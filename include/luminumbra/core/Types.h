@@ -70,13 +70,28 @@ constexpr u32 TICKS_PER_SECOND = 30;
 constexpr f32 SECONDS_PER_TICK = 1.0f / static_cast<f32>(TICKS_PER_SECOND);
 
 // World dimensions
-constexpr i32 CHUNK_SIZE_X = 32;
-constexpr i32 CHUNK_SIZE_Y = 32;
-constexpr i32 CHUNK_SIZE_Z = 32;
+constexpr i32 CHUNK_SIZE_X = 16;
+constexpr i32 CHUNK_SIZE_Y = 16;
+constexpr i32 CHUNK_SIZE_Z = 16;
 constexpr i32 CHUNK_VOLUME = CHUNK_SIZE_X * CHUNK_SIZE_Y * CHUNK_SIZE_Z;
+
+const int RENDER_DISTANCE = 32;
+const int RENDER_DISTANCE_UP = 8;
+const int RENDER_DISTANCE_DOWN = 16;
 
 // Rendering distances
 constexpr f32 NEAR_FIELD_DISTANCE = 256.0f;
 constexpr f32 FAR_FIELD_DISTANCE = 8192.0f; // Max render distance for SDFs
+
+enum class MaterialType : u32 {
+    Air       = 0,
+    Stone     = 1,
+    Soil      = 2,
+    Grass     = 3,
+    Sand      = 4,
+    Deepslate = 5,
+    LuminCrystal = 6
+};
+
 
 } // namespace Luminumbra

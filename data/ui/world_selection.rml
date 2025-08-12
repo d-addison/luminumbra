@@ -1,0 +1,76 @@
+<rml>
+    <head>
+        <title>Load World</title>
+        <link type="text/css" href="game_theme.rcss" />
+        <style>
+            body {
+                text-align: center;
+            }
+            h1 {
+                margin-top: 50px;
+                margin-bottom: 30px;
+            }
+            .world-list-container {
+                width: 600px;
+                max-height: 50vh;
+                margin: 40px auto;
+                background-color: #2a2a2a;
+                border: 1px #444; /* RCSS FIX: Removed 'solid' keyword */
+                border-radius: 8px;
+                overflow-y: auto;
+                text-align: left;
+            }
+            .world-entry {
+                padding: 15px 20px;
+                border-bottom: 1px #444; /* RCSS FIX: Removed 'solid' keyword */
+                cursor: pointer;
+            }
+            .world-entry:last-child {
+                border-bottom-width: 0; /* RCSS FIX: Changed 'none' to a width of 0 */
+            }
+            .world-entry:hover {
+                background-color: #383838;
+            }
+            .world-name {
+                font-size: 20px;
+                font-weight: bold;
+                color: #efefef;
+                margin: 0;
+            }
+            .world-details {
+                font-size: 14px;
+                color: #aaa;
+                margin-top: 5px;
+                margin-bottom: 0;
+            }
+            .button-container {
+                text-align: center;
+                margin-top: 20px;
+            }
+            .button-container button {
+                display: inline-block;
+                width: auto;
+                min-width: 120px;
+                margin: 0 10px;
+            }
+        </style>
+    </head>
+    <body id="world_selection">
+        <h1>Load World</h1>
+
+        <div id="world_list" class="world-list-container">
+            <div class="world-entry" data-world-id="world_1661381313_1234">
+                <p class="world-name">My First World</p>
+                <p class="world-details">Type: Default | Seed: 1337</p>
+            </div>
+             <div class="world-entry" data-world-id="world_1661381599_5678">
+                <p class="world-name">Archipelago Adventure</p>
+                <p class="world-details">Type: Archipelago | Seed: 98765</p>
+            </div>
+        </div>
+
+        <div class="button-container">
+            <button id="back_btn">Back</button>
+        </div>
+    </body>
+</rml>

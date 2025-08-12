@@ -13,10 +13,7 @@
 
 namespace Luminumbra {
 
-// Keep your existing alias if different.
 using ChunkID = unsigned long long;
-
-// Forward declare Chunk in the Luminumbra namespace.
 class Chunk;
 
 namespace Systems {
@@ -32,8 +29,6 @@ public:
 
     void startup();
     void shutdown();
-
-    // Main simulation step
     void update(float delta_time);
 
     // --- World Geometry ---
@@ -42,9 +37,12 @@ public:
 
     // --- Player Controller ---
     void create_player_controller(const glm::vec3& initial_position);
-    void update_player(const glm::vec3& movement_input, float delta_time);
-    glm::mat4 get_player_transform() const;
+    void update_player(const glm::vec3& wish_velocity, bool wants_to_jump, float jump_force, float delta_time);
+    void set_player_position(const glm::vec3& position);
     glm::vec3 get_player_position() const;
+    bool is_player_grounded() const;
+    void set_player_crouched(bool is_crouched);
+    bool player_has_space_to_stand() const;
 
 private:
     // Jolt core components
@@ -56,7 +54,6 @@ private:
 
     // Player-specific objects
     std::unique_ptr<JPH::CharacterVirtual> m_player_character;
-    float m_player_speed = 50.0f;
 
     // Track collision bodies for loaded chunks
     std::unordered_map<ChunkID, ChunkCollisionData> m_chunk_bodies;

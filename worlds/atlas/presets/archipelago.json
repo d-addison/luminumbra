@@ -1,0 +1,26 @@
+{
+  "name": "Archipelago",
+  "description": "A world of scattered islands across a deep ocean.",
+  "generation_params": {
+    "terrain": {
+      "base_frequency": 0.009,
+      "base_amplitude": 110.0,
+      "octaves": 6,
+      "persistence": 0.55,
+      "lacunarity": 2.2,
+      "height_offset": -20.0,
+      "island_mask_enabled": true,
+      "island_mask_frequency": 0.004
+    },
+    "biomes": {
+      "temperature_frequency": 0.005,
+      "humidity_frequency": 0.005
+    },
+    "features": {
+      "caves_enabled": true,
+      "cave_frequency": 0.03,
+      "rivers_enabled": false,
+      "structures_enabled": true
+    }
+  }
+}

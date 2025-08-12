@@ -34,10 +34,13 @@
                 padding: 10px;
                 font-size: 16px;
                 background-color: #2a2a2a;
-                border: 1px #444;
+                
+                /* --- FIX IS HERE --- */
+                border-width: 1px;
+                border-color: #444;
+
                 color: #fff;
             }
-
             input[type="text"]:focus {
                 border-color: #667788;
                 background-color: #333;
@@ -48,7 +51,11 @@
                 padding: 10px;
                 font-size: 16px;
                 background-color: #2a2a2a;
-                border: 1px #444;
+                
+                /* --- AND HERE --- */
+                border-width: 1px;
+                border-color: #444;
+                
                 color: #fff;
             }
 
@@ -57,7 +64,10 @@
                 text-align: center;
             }
 
-            button {
+            /* --- FIX FOR BOX-SHADOW WARNING --- */
+            .button-container button {
+                display: inline-block; /* Overrides theme's 'block' */
+                width: auto;           /* Overrides theme's '100%' */
                 margin: 0 10px;
                 min-width: 120px;
             }
@@ -98,7 +108,8 @@
                     <option value="default">Default</option>
                     <option value="archipelago">Archipelago</option>
                     <option value="mountains">Mountainous</option>
-                    <option value="flat">Flat Lands</option>
+                    <option value="flat_lands">Flat Lands</option>
+                    <option value"temperate_forest">Temperate Forest</option>
                 </select>
             </div>
         </div>

@@ -8,6 +8,7 @@
 
 namespace Luminumbra::Systems {
     class SHIELD_WorldSystem;
+    class PhysicsSystem;
 }
 
 namespace Luminumbra {
@@ -44,6 +45,7 @@ public:
 
     // Get the world system for chunk generation
     Systems::SHIELD_WorldSystem* GetWorldSystem() { return m_worldSystem.get(); }
+    Systems::PhysicsSystem* GetPhysicsSystem() { return m_physicsSystem.get(); } 
 
     entt::registry& GetRegistry() { return m_registry; }
 
@@ -59,6 +61,7 @@ private:
 
     // Generate a unique world ID
     std::string GenerateWorldId();
+    std::unique_ptr<Systems::PhysicsSystem> m_physicsSystem; 
 
     // Convert string seed to numeric seed
     uint32_t StringToSeed(const std::string& seedStr);
