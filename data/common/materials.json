@@ -5,14 +5,14 @@
       "name": "Stone",
       "base_color": [0.5, 0.5, 0.52],
       "specular": 0.2,
-      "albedo_map": "data/textures/stone_albedo.png"
+      "albedo_map": "data/textures/terrain/rock/Rock028.png"
     },
     {
       "id": 2,
       "name": "Soil",
       "base_color": [0.45, 0.32, 0.22],
       "specular": 0.05,
-      "albedo_map": "data/textures/soil_albedo.png"
+      "albedo_map": "data/textures/terrain/soil/Grass003.png"
     },
     {
       "id": 3,
@@ -27,14 +27,14 @@
       "name": "Deepslate",
       "base_color": [0.2, 0.2, 0.25],
       "specular": 0.25,
-      "albedo_map": "data/textures/deepslate_albedo.png"
+      "albedo_map": "data/textures/terrain/Gravel040.png"
     },
     {
       "id": 5,
       "name": "Sand",
       "base_color": [0.85, 0.75, 0.55],
       "specular": 0.05,
-      "albedo_map": "data/textures/sand_albedo.png"
+      "albedo_map": "data/textures/terrain/sand/Ground087.png"
     }
   ]
 }

@@ -1,4 +1,4 @@
-#version 330 core
+#version 450 core
 out vec4 FragColor;
 
 in vec3 FragPos;
@@ -15,7 +15,7 @@ void main()
     // Ambient
     float ambientStrength = 0.2; // A constant background light from your "Umbra" palette
     vec3 ambient = ambientStrength * lightColor;
-  	
+      
     // Diffuse 
     vec3 norm = normalize(Normal);
     vec3 lightDir = normalize(lightPos - FragPos);

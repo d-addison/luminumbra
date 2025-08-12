@@ -3,6 +3,7 @@
 #include <string>
 #include <glad/glad.h>
 #include <glm/glm.hpp>
+#include <unordered_map> // Added for the cache
 
 namespace Luminumbra::Rendering {
 
@@ -29,7 +30,11 @@ public:
 
 private:
     void checkCompileErrors(GLuint shader, std::string type);
+    GLint getUniformLocation(const std::string& name) const; // Helper to use the cache
+
     GLuint m_id = 0;
+    // The cache for uniform locations. mutable allows it to be modified in const functions.
+    mutable std::unordered_map<std::string, GLint> m_uniformLocationCache;
 };
 
 } // namespace Luminumbra::Rendering

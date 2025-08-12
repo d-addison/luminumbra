@@ -25,7 +25,6 @@ bool MiniaudioManager::Init() {
 void MiniaudioManager::Update() {
     if (!m_engine) return;
 
-    // Garbage collect any sounds that have finished playing
     for (auto it = m_activeSounds.begin(); it != m_activeSounds.end(); ) {
         if (!ma_sound_is_playing(it->second.get())) {
             ma_sound_uninit(it->second.get());
@@ -38,18 +37,14 @@ void MiniaudioManager::Update() {
 
 void MiniaudioManager::Shutdown() {
     if (m_engine) {
-        // Stop and clear music
         if (m_currentMusic) {
             ma_sound_uninit(m_currentMusic.get());
             m_currentMusic.reset();
         }
-
-        // FIX: Explicitly uninitialize all active sounds before clearing the map.
         for (auto& [handle, sound_ptr] : m_activeSounds) {
             ma_sound_uninit(sound_ptr.get());
         }
-        m_activeSounds.clear(); // Now this is safe.
-
+        m_activeSounds.clear();
         ma_engine_uninit(m_engine.get());
         m_engine = nullptr;
         std::cout << "Miniaudio Manager Shutdown." << std::endl;
@@ -57,16 +52,18 @@ void MiniaudioManager::Shutdown() {
 }
 
 bool MiniaudioManager::LoadBank(const std::string& bankPath) {
-    std::ifstream f(bankPath);
+    const std::string full_path = m_rootPath + bankPath;
+    std::ifstream f(full_path);
     if (!f.is_open()) {
-        std::cerr << "AUDIO ERROR: Failed to open sound bank: " << bankPath << std::endl;
+        std::cerr << "AUDIO ERROR: Failed to open sound bank: " << full_path << std::endl;
         return false;
     }
+    
     nlohmann::json bank_json;
     try {
         bank_json = nlohmann::json::parse(f);
     } catch (nlohmann::json::parse_error& e) {
-        std::cerr << "AUDIO ERROR: Failed to parse sound bank JSON: " << bankPath << " - " << e.what() << std::endl;
+        std::cerr << "AUDIO ERROR: Failed to parse sound bank JSON: " << full_path << " - " << e.what() << std::endl;
         return false;
     }
 
@@ -89,8 +86,6 @@ bool MiniaudioManager::LoadBank(const std::string& bankPath) {
 }
 
 void MiniaudioManager::UnloadBank(const std::string& bankPath) {
-    // For simplicity, we're not unloading banks right now.
-    // A real implementation would need to track which events belong to which bank.
     std::cout << "AUDIO WARNING: Unloading banks is not fully implemented." << std::endl;
 }
 
@@ -107,15 +102,15 @@ bool MiniaudioManager::PlayEvent(const AudioEventID& eventID, AudioEventHandle& 
     if (!def || def->files.empty()) return false;
 
     auto sound = std::make_unique<ma_sound>();
-    uint32_t flags = MA_SOUND_FLAG_NO_PITCH;
-    if (def->is_2d)        flags |= MA_SOUND_FLAG_NO_SPATIALIZATION;
-    if (def->is_streaming) flags |= MA_SOUND_FLAG_STREAM;
-
+    
     std::uniform_int_distribution<> dist(0, static_cast<int>(def->files.size()) - 1);
     const std::string& rel_path = def->files[dist(m_rng)];
+    const std::string full_path = m_rootPath + rel_path;
 
-    // Pass only the relative path; LoadSoundResource will prefix m_rootPath
-    if (LoadSoundResource(rel_path, sound.get(), flags) != MA_SUCCESS) {
+    uint32_t flags = MA_SOUND_FLAG_DECODE; // Let's decode one-shots for performance
+    if (def->is_2d) flags |= MA_SOUND_FLAG_NO_SPATIALIZATION;
+
+    if (ma_sound_init_from_file(m_engine.get(), full_path.c_str(), flags, NULL, NULL, sound.get()) != MA_SUCCESS) {
         return false;
     }
 
@@ -127,7 +122,6 @@ bool MiniaudioManager::PlayEvent(const AudioEventID& eventID, AudioEventHandle& 
     m_activeSounds[outHandle] = std::move(sound);
     return true;
 }
-
 
 bool MiniaudioManager::PlayOneShot2D(const AudioEventID& eventID) {
     if (!m_engine) return false;
@@ -143,14 +137,14 @@ bool MiniaudioManager::PlayOneShot2D(const AudioEventID& eventID) {
 }
 
 bool MiniaudioManager::PlayOneShot(const AudioEventID& eventID, const glm::vec3& position) {
-    // Not implemented yet, requires creating a temporary sound
     return false;
 }
 
+// --- MODIFIED FUNCTION ---
 void MiniaudioManager::PlayMusic(const AudioEventID& musicEventID) {
     if (!m_engine || musicEventID == m_currentMusicID) return;
 
-    StopMusic(); // ensure previous is stopped
+    StopMusic();
 
     const AudioEventDefinition* def = GetEventDefinition(musicEventID);
     if (!def || def->files.empty()) {
@@ -158,22 +152,35 @@ void MiniaudioManager::PlayMusic(const AudioEventID& musicEventID) {
         return;
     }
 
-    uint32_t flags = MA_SOUND_FLAG_STREAM | MA_SOUND_FLAG_NO_PITCH;
-    if (def->is_2d) flags |= MA_SOUND_FLAG_NO_SPATIALIZATION;
+    const std::string full_path = m_rootPath + def->files[0];
+
+    ma_sound_config soundConfig = ma_sound_config_init();
+    soundConfig.pFilePath = full_path.c_str();
+    // Reverted back to STREAM as this is correct for music.
+    soundConfig.flags = MA_SOUND_FLAG_STREAM; 
+    if (def->is_2d) {
+        soundConfig.flags |= MA_SOUND_FLAG_NO_SPATIALIZATION;
+    }
+    soundConfig.isLooping = def->is_looping;
 
     m_currentMusic = std::make_unique<ma_sound>();
-    if (LoadSoundResource(def->files[0], m_currentMusic.get(), flags) != MA_SUCCESS) {
+    ma_result result = ma_sound_init_ex(m_engine.get(), &soundConfig, m_currentMusic.get());
+    
+    if (result != MA_SUCCESS) {
+        std::cerr << "AUDIO ERROR: Failed to init music with ma_sound_init_ex for '" << full_path
+                  << "'. Miniaudio result: " << ma_result_description(result)
+                  << " (" << result << ")" << std::endl;
         m_currentMusic.reset();
         return;
     }
-
-    ma_sound_set_looping(m_currentMusic.get(), true);
+    
     ma_sound_set_volume(m_currentMusic.get(), def->volume);
     ma_sound_start(m_currentMusic.get());
 
     m_currentMusicID = musicEventID;
     std::cout << "Music started: " << musicEventID << std::endl;
 }
+// --- END MODIFICATION ---
 
 void MiniaudioManager::StopMusic() {
     if (m_currentMusic) {
@@ -203,19 +210,11 @@ bool MiniaudioManager::SetEventPosition(AudioEventHandle handle, const glm::vec3
 }
 
 bool MiniaudioManager::SetEventVolume(AudioEventHandle handle, float volume) {
-    // not implemented yet
     return false;
 }
 
 bool MiniaudioManager::SetEventParameter(AudioEventHandle handle, const AudioParamID& paramID, float value) {
-    // not implemented yet, would map to miniaudio effects
     return false;
-}
-
-ma_result MiniaudioManager::LoadSoundResource(const std::string& path, ma_sound* sound, uint32_t flags) {
-    // Ensure exactly one concatenation
-    const std::string full_path = m_rootPath + path;
-    return ma_sound_init_from_file(m_engine.get(), full_path.c_str(), flags, nullptr, nullptr, sound);
 }
 
 const AudioEventDefinition* MiniaudioManager::GetEventDefinition(const AudioEventID& eventID) {

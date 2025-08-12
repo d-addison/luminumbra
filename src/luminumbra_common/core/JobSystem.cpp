@@ -1,6 +1,6 @@
 #include "JobSystem.h"
 #include <iostream>
-#include "../../../include/luminumbra/core/Types.h" // <-- ADDED THIS INCLUDE
+#include "../../../include/luminumbra/core/Types.h"
 
 namespace Luminumbra {
 
@@ -38,17 +38,18 @@ JobHandle JobSystem::dispatch_batch(const std::vector<Job>& jobs) {
     }
 
     int counter_index = m_next_counter_index.fetch_add(1) % m_counters.size();
-    std::atomic<int>& counter = m_counters[counter_index];
-    counter.store((int)jobs.size());
+    std::atomic<int>* counter_ptr = &m_counters[counter_index];
+    counter_ptr->store((int)jobs.size());
 
-    JobHandle handle{&counter};
+    JobHandle handle{counter_ptr}; // The handle now stores this stable pointer.
 
     {
         std::unique_lock<std::mutex> lock(m_queue_mutex);
         for (const auto& job : jobs) {
-            m_job_queue.push([job, &counter]() {
+            // Capture the POINTER by value.
+            m_job_queue.push([job, counter_ptr]() {
                 job();
-                counter.fetch_sub(1);
+                counter_ptr->fetch_sub(1); // Use the pointer, which is valid.
             });
         }
     }

@@ -35,6 +35,10 @@ struct HierarchyComponent {
     // signaling that their world-space transforms need recalculation.
 };
 
+struct StaticMeshComponent {
+    std::string meshPath;
+};
+
 // --- State & Lifecycle ---
 
 // A simple marker component to signal that an entity is scheduled for destruction

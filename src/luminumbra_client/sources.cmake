@@ -1,14 +1,13 @@
 # This file lists all source files for the 'luminumbra_client' target.
+# Paths must be relative to this file's directory (src/luminumbra_client).
 
-# List of source files that are part of the client library itself.
-# These paths are relative to the 'src/luminumbra_client' directory.
-# CRITICAL: main_client.cpp is NOT listed here, as it's the entry point 
-# for the executable, not the library.
 set(CLIENT_INTERNAL_SOURCES
     debug/WorldGenViewer.cpp
 
     # Core
-    core/Log.cpp
+
+    # Player
+    player/PlayerController.cpp
     
     # Audio
     audio/AudioManagerFactory.cpp
@@ -16,13 +15,13 @@ set(CLIENT_INTERNAL_SOURCES
 
     # UI
     ui/Rml_UIManager.cpp
-    ui/RmlUi_Backend.cpp
     ui/Rml_Interfaces.cpp
 
     # Rendering
     rendering/RenderSystem.cpp
     rendering/RenderPipeline.cpp
     rendering/Shader.cpp
+    rendering/Mesh.cpp
 )
 
 # List of vendor source files that need to be compiled with the client.

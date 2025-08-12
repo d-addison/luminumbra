@@ -38,7 +38,7 @@ target_link_libraries(luminumbra_client_app PRIVATE
     freetype
 
     # Audio
-    miniaudio
+    # miniaudio
     nlohmann_json
 
     # System

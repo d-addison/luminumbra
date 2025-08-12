@@ -29,6 +29,7 @@ target_include_directories(luminumbra_client PUBLIC
     
     # Vendor includes specific to the client
     ${CMAKE_SOURCE_DIR}/vendor/imgui
+    ${CMAKE_SOURCE_DIR}/vendor/stb
 )
 
 target_link_libraries(luminumbra_client PUBLIC

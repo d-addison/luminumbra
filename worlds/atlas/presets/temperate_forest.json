@@ -1,9 +1,9 @@
 {
-  "preset_name": "Temperate Forest",
+  "name": "Temperate Forest",
   "generation_params": {
     "terrain": {
       "base_frequency": 0.008,
-      "base_amplitude": 70.0,
+      "base_amplitude": 50.0,
       "octaves": 6,
       "persistence": 0.5,
       "lacunarity": 2.1,
