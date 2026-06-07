@@ -69,22 +69,18 @@ void PolygoniseTerrain(
     float isolevel,
     int step
 ) {
+    const int sample_step = std::max(1, step);
+
     // Debug: Check if chunk has a surface
     bool has_negative = false;
     bool has_positive = false;
-    int neg_count = 0, pos_count = 0;
-    float min_val = 999999.0f, max_val = -999999.0f;
     
     for (float val : chunk.sdf_data) {
-        if (val < min_val) min_val = val;
-        if (val > max_val) max_val = val;
         if (val < isolevel) {
             has_negative = true;
-            neg_count++;
         }
         if (val > isolevel) {
             has_positive = true;
-            pos_count++;
         }
     }
 
@@ -118,15 +114,15 @@ void PolygoniseTerrain(
     };
 
     // --- PASS 1: Generate unique vertices and triangle indices ---
-    for (int z = 0; z < CHUNK_SIZE_Z; z += step) {
-        for (int y = 0; y < CHUNK_SIZE_Y; y += step) {
-            for (int x = 0; x < CHUNK_SIZE_X; x += step) {
+    for (int z = 0; z < CHUNK_SIZE_Z; z += sample_step) {
+        for (int y = 0; y < CHUNK_SIZE_Y; y += sample_step) {
+            for (int x = 0; x < CHUNK_SIZE_X; x += sample_step) {
                 GridCell gridcell;
                 int cube_index = 0;
                 u32 corner_abs_indices[8];
 
                 for (int i = 0; i < 8; ++i) {
-                    IVec3 corner_pos = IVec3(x, y, z) + (corner_offsets[i] * step);
+                    IVec3 corner_pos = IVec3(x, y, z) + (corner_offsets[i] * sample_step);
                     u32 sdf_idx = corner_pos.x + corner_pos.y * y_stride + corner_pos.z * z_stride;
                     corner_abs_indices[i] = sdf_idx;
                     

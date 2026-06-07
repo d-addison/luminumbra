@@ -70,7 +70,13 @@ private:
     std::function<bool(const IVec3&, const TerrainGenParams&, int, std::vector<float>&)> m_gpu_sdf_callback;
 
 private:
-    std::unordered_map<ChunkID, std::shared_ptr<::Luminumbra::Chunk>> m_chunks;
+    struct StreamingState {
+        std::unordered_map<ChunkID, std::shared_ptr<::Luminumbra::Chunk>> chunks;
+        JobHandle generation_job_handle;
+        JobHandle meshing_job_handle;
+    };
+
+    StreamingState m_streaming_state;
 
     const std::vector<ChunkLOD> m_lod_levels = {
         {0, 1, 96.0f},   // LOD 0: Full detail up to 96 meters (~6 chunks)
@@ -78,11 +84,13 @@ private:
         {2, 4, 512.0f}   // LOD 2: Quarter resolution up to 512 meters (~32 chunks)
     };
     int get_lod_level_for_distance(float dist) const;
+    int get_lod_step_for_level(int lod_level) const;
 
     // --- Helper Functions ---
     void update_chunk_activation(const Vec3& player_pos, PhysicsSystem* physics_system);
     // Signature updated to use shared_ptr
     void dispatch_meshing_jobs(const std::vector<std::pair<std::shared_ptr<::Luminumbra::Chunk>, int>>& chunks_to_mesh);
+    void wait_for_generation_jobs();
     void wait_for_meshing_jobs();
     void reinitialize_noise();
 
@@ -90,7 +98,6 @@ private:
 
     // --- Dependencies ---
     JobSystem* m_job_system;
-    JobHandle m_meshing_job_handle;
     TerrainGenParams m_params;
     int m_seed;
 
