@@ -2,6 +2,7 @@
 # Paths are relative to the 'src/luminumbra_common' directory.
 set(COMMON_SOURCES
     # Core
+    core/EngineVersion.cpp
     core/EventBus.cpp
     core/JobSystem.cpp
     core/Log.cpp

@@ -1,6 +1,6 @@
 # CMakeLists.txt
 cmake_minimum_required(VERSION 3.20)
-project(Luminumbra LANGUAGES C CXX)
+project(Luminumbra VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,6 +10,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+include(cmake/engine_version.cmake)
 
 # Fetch all third-party dependencies from a central file
 # This makes our project self-contained and portable.
@@ -58,6 +60,10 @@ endforeach()
 
 # Add the main game source code subdirectory
 add_subdirectory(src)
+
+target_include_directories(luminumbra_common PUBLIC
+    "${LUMINUMBRA_ENGINE_VERSION_INCLUDE_DIR}"
+)
 
 # --- FINAL DEPENDENCY LINK ---
 # Make the main game executable depend on the asset processing target.
