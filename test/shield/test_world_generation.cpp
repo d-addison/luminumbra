@@ -1,13 +1,23 @@
 #include "gtest/gtest.h"
-#include "systems/SHIELD_WorldSystem.h"
-#include "world/Chunk.h"
-#include "world/MarchingCubes.h"
-#include "systems/WaterSystem.h"
-
 #include <chrono>   // For performance testing
-#include <numeric>  // For std::accumulate
+#include <functional>
 #include <iostream> // For printing benchmark results
 #include <memory>   // For std::unique_ptr
+#include <numeric>  // For std::accumulate
+#include <unordered_map>
+#include <vector>
+
+#include "entt/entt.hpp"
+#include "FastNoise/FastNoise.h"
+#include "core/JobSystem.h"
+#include "world/Chunk.h"
+
+#define private public
+#include "systems/SHIELD_WorldSystem.h"
+#undef private
+
+#include "world/MarchingCubes.h"
+#include "systems/WaterSystem.h"
 
 using namespace Luminumbra;
 using namespace Luminumbra::Systems;
@@ -91,6 +101,25 @@ TEST_F(WorldGenerationTest, ChunkIsGeneratedWithSDFAndHeightmap) {
     ASSERT_FALSE(chunk.heightmap_data.empty());
     const size_t expected_heightmap_size = (size_t)(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Z + 1);
     ASSERT_EQ(chunk.heightmap_data.size(), expected_heightmap_size);
+}
+
+TEST_F(WorldGenerationTest, UpdateSkipsMeshingChunksStillLoading) {
+    SHIELD_WorldSystem world_system(nullptr, nullptr, params_guaranteed_surface, 1337);
+    const IVec3 coords{0, 0, 0};
+
+    world_system.dispatch_generation_jobs({coords});
+
+    const ChunkID chunk_id = Chunk::calculate_id(coords);
+    auto chunk_it = world_system.m_streaming_state.chunks.find(chunk_id);
+    ASSERT_NE(chunk_it, world_system.m_streaming_state.chunks.end());
+    ASSERT_EQ(chunk_it->second->get_state(), ChunkState::Loading);
+
+    entt::registry registry;
+    world_system.update(registry, Vec3{0.0f, 0.0f, 0.0f}, nullptr);
+
+    EXPECT_EQ(chunk_it->second->get_state(), ChunkState::Loading);
+    EXPECT_TRUE(chunk_it->second->mesh_vertices.empty());
+    EXPECT_TRUE(chunk_it->second->mesh_indices.empty());
 }
 
 TEST_F(WorldGenerationTest, SurfaceIsGeneratedAtCorrectHeight) {
