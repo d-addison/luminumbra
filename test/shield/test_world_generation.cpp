@@ -127,34 +127,21 @@ TEST_F(WorldGenerationTest, GenerationIsDeterministicWithSameSeed) {
 }
 
 TEST_F(WorldGenerationTest, CavesChangeGeneratedMesh) {
-    TerrainGenParams params_no_caves = params_archipelago;
+    TerrainGenParams params_no_caves = params_guaranteed_surface;
     params_no_caves.caves_enabled = false;
-    // Lower the terrain to ensure it intersects with chunk at (0,0,0)
-    params_no_caves.height_offset = 8.0f;  // Place terrain in middle of chunk
-    params_no_caves.base_amplitude = 4.0f; // Reduce variation to keep it in bounds
+    params_no_caves.height_offset = 12.0f;
 
-    TerrainGenParams params_with_caves = params_archipelago;
+    TerrainGenParams params_with_caves = params_no_caves;
     params_with_caves.caves_enabled = true;
-    params_with_caves.height_offset = 8.0f;  // Same as no caves
-    params_with_caves.base_amplitude = 4.0f; // Same as no caves
-    params_with_caves.cave_threshold = 0.4f;  // Lower threshold = more caves
-    params_with_caves.cave_frequency = 0.04f; // Higher frequency = more caves
+    params_with_caves.cave_threshold = 0.55f;
+    params_with_caves.cave_frequency = 0.15f;
+    params_with_caves.cave_carve_value = 4.0f;
     
     int seed = 12345;
 
     SHIELD_WorldSystem world_no_caves(nullptr, nullptr, params_no_caves, seed);
     Chunk chunk_no_caves({0,0,0});
     world_no_caves.GenerateChunkData(chunk_no_caves);
-    
-    // Debug: Check if the SDF data has both positive and negative values
-    bool has_positive = false;
-    bool has_negative = false;
-    for (float val : chunk_no_caves.sdf_data) {
-        if (val > 0) has_positive = true;
-        if (val < 0) has_negative = true;
-    }
-    ASSERT_TRUE(has_positive && has_negative) << "Chunk SDF should have surface crossing (both + and - values)";
-    
     World::MarchingCubes::PolygoniseTerrain(world_no_caves, chunk_no_caves, 0.0f, 1);
     
     SHIELD_WorldSystem world_caves(nullptr, nullptr, params_with_caves, seed);
@@ -162,8 +149,22 @@ TEST_F(WorldGenerationTest, CavesChangeGeneratedMesh) {
     world_caves.GenerateChunkData(chunk_caves);
     World::MarchingCubes::PolygoniseTerrain(world_caves, chunk_caves, 0.0f, 1);
 
+    size_t carved_air_samples = 0;
+    size_t remaining_solid_samples = 0;
+    ASSERT_EQ(chunk_no_caves.sdf_data.size(), chunk_caves.sdf_data.size());
+    for (size_t i = 0; i < chunk_no_caves.sdf_data.size(); ++i) {
+        if (chunk_no_caves.sdf_data[i] < 0.0f && chunk_caves.sdf_data[i] > 0.0f) {
+            carved_air_samples++;
+        }
+        if (chunk_caves.sdf_data[i] < 0.0f) {
+            remaining_solid_samples++;
+        }
+    }
+
     ASSERT_FALSE(chunk_no_caves.mesh_vertices.empty()) << "No-caves chunk should have vertices";
     ASSERT_FALSE(chunk_caves.mesh_vertices.empty()) << "Caves chunk should have vertices";
+    ASSERT_GT(carved_air_samples, 0u) << "Caves should carve solid SDF samples into air";
+    ASSERT_GT(remaining_solid_samples, 0u) << "Caves should not erase the entire solid terrain volume";
     EXPECT_NE(chunk_caves.mesh_vertices.size(), chunk_no_caves.mesh_vertices.size());
 }
 
