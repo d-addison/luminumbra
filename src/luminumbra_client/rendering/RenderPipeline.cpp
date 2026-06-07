@@ -11,6 +11,7 @@
 #include <cstring>
 #include <exception>
 #include <fstream>
+#include <utility>
 #include <GLFW/glfw3.h>
 #include "Mesh.h"
 #include "../../include/luminumbra/core/Types.h"
@@ -65,18 +66,24 @@ bool has_valid_shadow_cascade_splits(const ShadowMap& shadow_map) {
 
 // --- HIERARCHICAL CULLING IMPLEMENTATION ---
 
-void RenderPipeline::HierarchicalCuller::BuildHierarchy(const std::vector<Chunk*>& chunks) {
+void RenderPipeline::HierarchicalCuller::BuildHierarchy(const std::vector<ChunkMeshSnapshot>& chunks) {
     if (chunks.empty()) {
         m_root.reset();
         return;
+    }
+
+    std::vector<const ChunkMeshSnapshot*> chunk_refs;
+    chunk_refs.reserve(chunks.size());
+    for (const auto& chunk : chunks) {
+        chunk_refs.push_back(&chunk);
     }
     
     // Calculate root bounding box from all chunks
     glm::vec3 min(FLT_MAX);
     glm::vec3 max(-FLT_MAX);
     
-    for (const auto* chunk : chunks) {
-        glm::ivec3 coords = chunk->get_coords();
+    for (const auto* chunk : chunk_refs) {
+        glm::ivec3 coords = chunk->coords;
         glm::vec3 chunk_min(coords.x * CHUNK_SIZE_X, coords.y * CHUNK_SIZE_Y, coords.z * CHUNK_SIZE_Z);
         glm::vec3 chunk_max = chunk_min + glm::vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
         
@@ -85,10 +92,10 @@ void RenderPipeline::HierarchicalCuller::BuildHierarchy(const std::vector<Chunk*
     }
     
     m_root = std::make_unique<CullingNode>(AABB(min, max));
-    BuildRecursive(m_root.get(), chunks, 0);
+    BuildRecursive(m_root.get(), chunk_refs, 0);
 }
 
-void RenderPipeline::HierarchicalCuller::BuildRecursive(CullingNode* node, const std::vector<Chunk*>& chunks, int depth) {
+void RenderPipeline::HierarchicalCuller::BuildRecursive(CullingNode* node, const std::vector<const ChunkMeshSnapshot*>& chunks, int depth) {
     // Base cases: too few chunks or maximum depth reached
     if (chunks.size() <= MAX_CHUNKS_PER_NODE || depth >= MAX_DEPTH) {
         node->chunks = chunks;
@@ -108,10 +115,10 @@ void RenderPipeline::HierarchicalCuller::BuildRecursive(CullingNode* node, const
     };
     
     // Distribute chunks to children
-    std::vector<std::vector<Chunk*>> child_chunks(4);
+    std::vector<std::vector<const ChunkMeshSnapshot*>> child_chunks(4);
     
     for (auto* chunk : chunks) {
-        glm::ivec3 coords = chunk->get_coords();
+        glm::ivec3 coords = chunk->coords;
         glm::vec3 chunk_center(coords.x * CHUNK_SIZE_X + CHUNK_SIZE_X * 0.5f, 
                               coords.y * CHUNK_SIZE_Y + CHUNK_SIZE_Y * 0.5f,
                               coords.z * CHUNK_SIZE_Z + CHUNK_SIZE_Z * 0.5f);
@@ -133,7 +140,7 @@ void RenderPipeline::HierarchicalCuller::BuildRecursive(CullingNode* node, const
     }
 }
 
-void RenderPipeline::HierarchicalCuller::CullRecursive(const glm::vec4 frustum_planes[6], CullingNode* node, std::vector<Chunk*>& visible) {
+void RenderPipeline::HierarchicalCuller::CullRecursive(const glm::vec4 frustum_planes[6], CullingNode* node, std::vector<const ChunkMeshSnapshot*>& visible) {
     if (!node) return;
     
     // Test this node's bounding box against the frustum
@@ -166,7 +173,7 @@ bool RenderPipeline::HierarchicalCuller::AABBFrustumCulled(const AABB& aabb, con
     return false; // Inside all planes
 }
 
-void RenderPipeline::HierarchicalCuller::CullHierarchical(const glm::vec4 frustum_planes[6], std::vector<Chunk*>& visible) {
+void RenderPipeline::HierarchicalCuller::CullHierarchical(const glm::vec4 frustum_planes[6], std::vector<const ChunkMeshSnapshot*>& visible) {
     if (m_root) {
         CullRecursive(frustum_planes, m_root.get(), visible);
     }
@@ -263,6 +270,39 @@ void RenderPipeline::gather_lights(entt::registry& registry) {
     }
 }
 
+std::vector<RenderPipeline::ChunkMeshSnapshot> RenderPipeline::build_chunk_snapshots(const std::vector<Chunk*>& renderable_chunks) const {
+    std::vector<ChunkMeshSnapshot> snapshots;
+    snapshots.reserve(renderable_chunks.size());
+
+    for (const auto* chunk : renderable_chunks) {
+        if (!chunk) {
+            continue;
+        }
+
+        ChunkMeshSnapshot snapshot;
+        snapshot.id = chunk->get_id();
+        snapshot.coords = chunk->get_coords();
+        snapshot.mesh_version = chunk->mesh_version.load(std::memory_order_acquire);
+        snapshot.mesh_vertices = chunk->mesh_vertices;
+        snapshot.mesh_indices = chunk->mesh_indices;
+        snapshot.water_mesh_vertices = chunk->water_mesh_vertices;
+        snapshot.water_mesh_indices = chunk->water_mesh_indices;
+
+        const u32 version_after_copy = chunk->mesh_version.load(std::memory_order_acquire);
+        if (version_after_copy != snapshot.mesh_version) {
+            snapshot.mesh_version = version_after_copy;
+            snapshot.mesh_vertices.clear();
+            snapshot.mesh_indices.clear();
+            snapshot.water_mesh_vertices.clear();
+            snapshot.water_mesh_indices.clear();
+        }
+
+        snapshots.push_back(std::move(snapshot));
+    }
+
+    return snapshots;
+}
+
 void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_WorldSystem& world_system, const Camera& camera, float deltaTime, bool wireframe) {
     if (!m_started) {
         return;
@@ -271,9 +311,10 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     update_time_of_day(deltaTime);
     gather_lights(registry);
     auto renderable_chunks = world_system.get_renderable_chunks();
+    auto renderable_chunk_snapshots = build_chunk_snapshots(renderable_chunks);
 
-    manage_chunk_gpu_resources(renderable_chunks);
-    manage_water_gpu_resources(renderable_chunks);
+    manage_chunk_gpu_resources(renderable_chunk_snapshots);
+    manage_water_gpu_resources(renderable_chunk_snapshots);
 
     // Ensure no VAO is bound at start to prevent artifacts
     glBindVertexArray(0);
@@ -316,11 +357,11 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     std::memcpy(frustum_planes, m_frustumCache.planes, sizeof(frustum_planes));
 
      // 1. SHADOW PASS
-    shadow_pass(renderable_chunks, camera);
+    shadow_pass(renderable_chunk_snapshots, camera);
     glViewport(0, 0, m_screen_width, m_screen_height);
 
     // 2. GEOMETRY / G-BUFFER PASS
-    gbuffer_pass(registry, renderable_chunks, camera, frustum_planes);
+    gbuffer_pass(registry, renderable_chunk_snapshots, camera, frustum_planes);
     glBindVertexArray(0);  // Unbind after gbuffer pass
     glDisable(GL_CULL_FACE);
 
@@ -342,7 +383,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     
     // 6. WATER PASS (Renders to m_lighting_fbo, reads from it for refraction)
     glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_fbo.fbo_id);
-    water_pass(renderable_chunks, camera);
+    water_pass(renderable_chunk_snapshots, camera);
     glBindVertexArray(0);  // Unbind after water pass
 
     // 7. SKYBOX PASS (Renders to m_lighting_fbo)
@@ -362,7 +403,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-void RenderPipeline::gbuffer_pass(entt::registry& registry, const std::vector<Chunk*>& renderable_chunks, const Camera& camera, const glm::vec4 frustum_planes[6]) {
+void RenderPipeline::gbuffer_pass(entt::registry& registry, const std::vector<ChunkMeshSnapshot>& renderable_chunks, const Camera& camera, const glm::vec4 frustum_planes[6]) {
     glBindFramebuffer(GL_FRAMEBUFFER, m_gbuffer.fbo_id);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     
@@ -401,7 +442,7 @@ void RenderPipeline::init_lighting_fbo(u32 width, u32 height) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-void RenderPipeline::water_pass(const std::vector<Chunk*>& renderable_chunks, const Camera& camera) {
+void RenderPipeline::water_pass(const std::vector<ChunkMeshSnapshot>& renderable_chunks, const Camera& camera) {
     // --- 1. Set OpenGL State ---
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -443,12 +484,12 @@ void RenderPipeline::water_pass(const std::vector<Chunk*>& renderable_chunks, co
     m_water_shader->setInt("u_opaque_depth", 1);
     
     // --- 3. Draw Water Meshes ---
-    for (auto* chunk : renderable_chunks) {
-        auto it = m_water_render_data.find(chunk->get_id());
+    for (const auto& chunk : renderable_chunks) {
+        auto it = m_water_render_data.find(chunk.id);
         if (it != m_water_render_data.end() && it->second.element_count > 0) {
             const auto& render_data = it->second;
             
-            glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(chunk->get_coords() * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z)));
+            glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(chunk.coords * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z)));
             m_water_shader->setMat4("u_model", model);
             
             glBindVertexArray(render_data.vao_id);
@@ -486,7 +527,7 @@ void RenderPipeline::clear_all_chunk_data() {
 
 // --- RENDER PASSES ---
 
-void RenderPipeline::geometry_pass_chunks(const std::vector<Luminumbra::Chunk*>& renderable_chunks, const Camera& camera, const glm::vec4 frustum_planes[6]) {
+void RenderPipeline::geometry_pass_chunks(const std::vector<RenderPipeline::ChunkMeshSnapshot>& renderable_chunks, const Camera& camera, const glm::vec4 frustum_planes[6]) {
     m_geometry_shader->use();
     glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)m_screen_width / (float)m_screen_height, camera.GetNearPlane(), camera.GetFarPlane());
     glm::mat4 view = camera.GetViewMatrix();
@@ -503,7 +544,7 @@ void RenderPipeline::geometry_pass_chunks(const std::vector<Luminumbra::Chunk*>&
     m_hierarchicalCuller.BuildHierarchy(renderable_chunks);
     
     // Perform hierarchical frustum culling
-    std::vector<Chunk*> visible_chunks;
+    std::vector<const ChunkMeshSnapshot*> visible_chunks;
     visible_chunks.reserve(renderable_chunks.size());
     m_hierarchicalCuller.CullHierarchical(frustum_planes, visible_chunks);
     
@@ -519,14 +560,14 @@ void RenderPipeline::geometry_pass_chunks(const std::vector<Luminumbra::Chunk*>&
     }
 
     // Render visible chunks
-    for (auto* chunk : visible_chunks) {
-        LUMINUMBRA_CORE_INFO("Rendering chunk: {}", chunk->get_id());
-        if (m_chunk_render_data.find(chunk->get_id()) == m_chunk_render_data.end()) continue;
+    for (const auto* chunk : visible_chunks) {
+        LUMINUMBRA_CORE_INFO("Rendering chunk: {}", chunk->id);
+        if (m_chunk_render_data.find(chunk->id) == m_chunk_render_data.end()) continue;
 
-        const auto& render_data = m_chunk_render_data.at(chunk->get_id());
+        const auto& render_data = m_chunk_render_data.at(chunk->id);
         if (render_data.element_count == 0) continue;
         
-        glm::ivec3 cc = chunk->get_coords();
+        glm::ivec3 cc = chunk->coords;
         glm::vec3 min_aabb(cc.x * CHUNK_SIZE_X, cc.y * CHUNK_SIZE_Y, cc.z * CHUNK_SIZE_Z);
 
         glm::mat4 model = glm::translate(glm::mat4(1.0f), min_aabb);
@@ -596,7 +637,7 @@ void RenderPipeline::geometry_pass_static_meshes(entt::registry& registry, const
     }
 }
 
-void RenderPipeline::shadow_pass(const std::vector<Luminumbra::Chunk*>& renderable_chunks, const Camera& camera) {
+void RenderPipeline::shadow_pass(const std::vector<RenderPipeline::ChunkMeshSnapshot>& renderable_chunks, const Camera& camera) {
     if (!m_shadow_shader || m_shadow_map.fbo_id == 0 || m_shadow_map.depth_texture_array == 0) {
         LUMINUMBRA_CORE_ERROR("Shadow pass skipped because shadow resources are not initialized.");
         return;
@@ -617,10 +658,10 @@ void RenderPipeline::shadow_pass(const std::vector<Luminumbra::Chunk*>& renderab
     for (int i = 0; i < ShadowMap::CASCADE_COUNT; ++i) {
         glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, m_shadow_map.depth_texture_array, 0, i);
         m_shadow_shader->setMat4("u_lightSpaceMatrix", light_space_matrices[i]);
-        for (auto* chunk : renderable_chunks) {
-            if (m_chunk_render_data.count(chunk->get_id()) == 0) continue;
-            const auto& render_data = m_chunk_render_data.at(chunk->get_id());
-            glm::ivec3 cc = chunk->get_coords();
+        for (const auto& chunk : renderable_chunks) {
+            if (m_chunk_render_data.count(chunk.id) == 0) continue;
+            const auto& render_data = m_chunk_render_data.at(chunk.id);
+            glm::ivec3 cc = chunk.coords;
             glm::vec3 base(cc.x * CHUNK_SIZE_X, cc.y * CHUNK_SIZE_Y, cc.z * CHUNK_SIZE_Z);
             glm::mat4 model = glm::translate(glm::mat4(1.0f), base);
             m_shadow_shader->setMat4("u_model", model);
@@ -967,7 +1008,7 @@ void RenderPipeline::cleanup_gpu_resources() {
 
 // --- RESOURCE MANAGEMENT ---
 
-void RenderPipeline::manage_chunk_gpu_resources(const std::vector<Chunk*>& renderable_chunks) {
+void RenderPipeline::manage_chunk_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks) {
     // --- Configuration for the new logic ---
     const int MAX_UPLOADS_PER_FRAME = 8; // Increased budget for faster world streaming
     const u32 INACTIVE_FRAME_TTL = 15;   // Grace period: unload after 15 frames of inactivity
@@ -975,8 +1016,8 @@ void RenderPipeline::manage_chunk_gpu_resources(const std::vector<Chunk*>& rende
     // Step 1: Create a quick-lookup set of chunks that should be active this frame.
     std::unordered_set<ChunkID> active_chunk_ids;
     active_chunk_ids.reserve(renderable_chunks.size());
-    for (const auto* chunk : renderable_chunks) {
-        active_chunk_ids.insert(chunk->get_id());
+    for (const auto& chunk : renderable_chunks) {
+        active_chunk_ids.insert(chunk.id);
     }
 
     // Step 2: Mark-and-sweep stale GPU resources.
@@ -1003,14 +1044,14 @@ void RenderPipeline::manage_chunk_gpu_resources(const std::vector<Chunk*>& rende
 
     // Step 3: Upload new and updated chunk meshes, respecting the budget.
     int uploads_this_frame = 0;
-    for (auto* chunk : renderable_chunks) {
+    for (const auto& chunk : renderable_chunks) {
         // Skip chunks that don't have a mesh ready yet.
-        if (chunk->mesh_vertices.empty() || chunk->mesh_indices.empty()) continue;
+        if (!chunk.has_terrain_mesh()) continue;
 
-        auto it = m_chunk_render_data.find(chunk->get_id());
+        auto it = m_chunk_render_data.find(chunk.id);
 
         bool is_new = (it == m_chunk_render_data.end());
-        bool is_stale = !is_new && (it->second.mesh_version != chunk->mesh_version.load());
+        bool is_stale = !is_new && (it->second.mesh_version != chunk.mesh_version);
 
         if (is_new || is_stale) {
             if (uploads_this_frame >= MAX_UPLOADS_PER_FRAME) {
@@ -1020,25 +1061,25 @@ void RenderPipeline::manage_chunk_gpu_resources(const std::vector<Chunk*>& rende
             
             // If the mesh is stale, we must first free the old GPU resources before uploading the new version.
             if (is_stale) {
-                unload_chunk_resources(chunk->get_id());
+                unload_chunk_resources(chunk.id);
             }
 
-            upload_chunk_mesh(*chunk);
+            upload_chunk_mesh(chunk);
             uploads_this_frame++;
         }
     }
 }
 
-void RenderPipeline::manage_water_gpu_resources(const std::vector<Chunk*>& renderable_chunks) {
+void RenderPipeline::manage_water_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks) {
     const int MAX_UPLOADS_PER_FRAME = 8; // Increased to match chunk upload budget
     const u32 INACTIVE_FRAME_TTL = 30; // A slightly longer TTL for water as it may be just off-screen
 
     // Step 1: Identify all chunks that should have active GPU resources
     std::unordered_set<ChunkID> active_chunk_ids;
     active_chunk_ids.reserve(renderable_chunks.size());
-    for (const auto* chunk : renderable_chunks) {
-        if (!chunk->water_mesh_vertices.empty()) {
-            active_chunk_ids.insert(chunk->get_id());
+    for (const auto& chunk : renderable_chunks) {
+        if (chunk.has_water_mesh()) {
+            active_chunk_ids.insert(chunk.id);
         }
     }
 
@@ -1064,12 +1105,12 @@ void RenderPipeline::manage_water_gpu_resources(const std::vector<Chunk*>& rende
 
     // Step 4: Upload new and updated chunk meshes within budget
     int uploads_this_frame = 0;
-    for (auto* chunk : renderable_chunks) {
-        if (chunk->water_mesh_vertices.empty()) continue; // Skip chunks with no water
+    for (const auto& chunk : renderable_chunks) {
+        if (!chunk.has_water_mesh()) continue; // Skip chunks with no water
 
-        auto it = m_water_render_data.find(chunk->get_id());
+        auto it = m_water_render_data.find(chunk.id);
         bool is_new = (it == m_water_render_data.end());
-        bool is_stale = !is_new && (it->second.mesh_version != chunk->mesh_version.load());
+        bool is_stale = !is_new && (it->second.mesh_version != chunk.mesh_version);
 
         if (is_new || is_stale) {
             if (uploads_this_frame >= MAX_UPLOADS_PER_FRAME) {
@@ -1077,22 +1118,22 @@ void RenderPipeline::manage_water_gpu_resources(const std::vector<Chunk*>& rende
             }
             
             if (is_stale) {
-                unload_water_resources(chunk->get_id());
+                unload_water_resources(chunk.id);
             }
 
-            upload_water_mesh(*chunk);
+            upload_water_mesh(chunk);
             uploads_this_frame++;
         }
     }
 }
 
 
-void RenderPipeline::upload_water_mesh(const Chunk& chunk) {
-    if (chunk.water_mesh_vertices.empty()) return;
+void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk) {
+    if (!chunk.has_water_mesh()) return;
 
     WaterRenderData data;
-    data.element_count = chunk.water_mesh_indices.size();
-    data.mesh_version = chunk.mesh_version.load();
+    data.element_count = static_cast<u32>(chunk.water_mesh_indices.size());
+    data.mesh_version = chunk.mesh_version;
 
     glGenVertexArrays(1, &data.vao_id);
     glGenBuffers(1, &data.vbo_id);
@@ -1111,22 +1152,22 @@ void RenderPipeline::upload_water_mesh(const Chunk& chunk) {
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, normal));
     
     glBindVertexArray(0);
-    m_water_render_data[chunk.get_id()] = data;
+    m_water_render_data[chunk.id] = data;
 }
 
-void RenderPipeline::upload_chunk_mesh(const Chunk& chunk) {
-    if (chunk.mesh_vertices.empty() || chunk.mesh_indices.empty()) { return; }
+void RenderPipeline::upload_chunk_mesh(const ChunkMeshSnapshot& chunk) {
+    if (!chunk.has_terrain_mesh()) { return; }
     
     // Debug mesh upload
     static std::atomic<int> upload_count{0};
     if (upload_count.fetch_add(1) < 5) {
         LUMINUMBRA_CORE_WARN("MESH UPLOAD: Chunk ({},{},{}) - {} vertices, {} indices", 
-            chunk.get_coords().x, chunk.get_coords().y, chunk.get_coords().z,
+            chunk.coords.x, chunk.coords.y, chunk.coords.z,
             chunk.mesh_vertices.size(), chunk.mesh_indices.size());
     }
     ChunkRenderData render_data;
     render_data.element_count = static_cast<u32>(chunk.mesh_indices.size());
-    render_data.mesh_version = chunk.mesh_version.load();
+    render_data.mesh_version = chunk.mesh_version;
     glGenVertexArrays(1, &render_data.vao_id);
     glGenBuffers(1, &render_data.vbo_id);
     glGenBuffers(1, &render_data.ebo_id);
@@ -1142,7 +1183,7 @@ void RenderPipeline::upload_chunk_mesh(const Chunk& chunk) {
     glEnableVertexAttribArray(2);
     glVertexAttribIPointer(2, 1, GL_UNSIGNED_INT, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, material_id));
     glBindVertexArray(0);
-    m_chunk_render_data[chunk.get_id()] = render_data;
+    m_chunk_render_data[chunk.id] = render_data;
 }
 
 void RenderPipeline::unload_water_resources(ChunkID chunk_id) {
