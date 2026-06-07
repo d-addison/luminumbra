@@ -2,8 +2,8 @@
 
 #include <glad/glad.h>
 #include <stb_image.h>
+#include "../../luminumbra_common/core/Log.h"
 #include <string>
-#include <iostream>
 
 class AssetManager {
 public:
@@ -14,7 +14,7 @@ public:
         int width = 0, height = 0, nrComponents = 0;
         unsigned char* data = stbi_load(path, &width, &height, &nrComponents, 0);
         if (!data) {
-            std::cout << "Texture failed to load at path: " << path << std::endl;
+            LUMINUMBRA_CORE_ERROR("Texture failed to load at path: {}", path);
             if (textureID) glDeleteTextures(1, &textureID);
             return 0;
         }
