@@ -11,6 +11,41 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+option(LUMINUMBRA_WARNINGS_AS_ERRORS "Treat first-party compiler warnings as errors" OFF)
+option(LUMINUMBRA_ENABLE_ASAN "Enable AddressSanitizer for first-party targets in Debug builds" OFF)
+
+function(luminumbra_configure_first_party_target TARGET_NAME)
+  if(NOT TARGET ${TARGET_NAME})
+    return()
+  endif()
+
+  target_compile_definitions(${TARGET_NAME} PRIVATE
+    $<$<CONFIG:Debug>:LUMINUMBRA_DEBUG>
+  )
+
+  if(MSVC)
+    target_compile_options(${TARGET_NAME} PRIVATE /W4 /permissive- /Zc:__cplusplus)
+    if(LUMINUMBRA_WARNINGS_AS_ERRORS)
+      target_compile_options(${TARGET_NAME} PRIVATE /WX)
+    endif()
+  else()
+    target_compile_options(${TARGET_NAME} PRIVATE -Wall -Wextra -Wpedantic)
+    if(LUMINUMBRA_WARNINGS_AS_ERRORS)
+      target_compile_options(${TARGET_NAME} PRIVATE -Werror -Wno-error=unused-parameter)
+    endif()
+  endif()
+
+  if(LUMINUMBRA_ENABLE_ASAN)
+    if(MSVC)
+      target_compile_options(${TARGET_NAME} PRIVATE $<$<CONFIG:Debug>:/fsanitize=address>)
+      target_link_options(${TARGET_NAME} PRIVATE $<$<CONFIG:Debug>:/INCREMENTAL:NO>)
+    else()
+      target_compile_options(${TARGET_NAME} PRIVATE $<$<CONFIG:Debug>:-fsanitize=address>)
+      target_link_options(${TARGET_NAME} PRIVATE $<$<CONFIG:Debug>:-fsanitize=address>)
+    endif()
+  endif()
+endfunction()
+
 # Fetch all third-party dependencies from a central file
 # This makes our project self-contained and portable.
 include(cmake/dependencies.cmake)
@@ -19,17 +54,14 @@ add_subdirectory(vendor)
 # 1. Add the tools subdirectory so the asset_processor target is created.
 add_subdirectory(tools)
 
-# 2. Define a custom target to represent the asset processing step.
-#    This target doesn't build anything itself, but other targets can depend on it.
-add_custom_target(process_assets ALL)
-
-# 3. Find all source assets (.glb files) in the 'assets' directory.
+# 2. Find all source assets (.glb files) in the 'assets' directory.
 set(ASSET_SOURCE_DIR ${CMAKE_SOURCE_DIR}/assets)
 set(ASSET_OUTPUT_DIR ${CMAKE_SOURCE_DIR}/data) # We process into the source 'data' dir
 
-file(GLOB_RECURSE SOURCE_ASSETS "${ASSET_SOURCE_DIR}/*.glb")
+file(GLOB_RECURSE SOURCE_ASSETS CONFIGURE_DEPENDS "${ASSET_SOURCE_DIR}/*.glb")
+set(PROCESSED_ASSETS)
 
-# 4. Loop through each found asset and create a custom command to process it.
+# 3. Loop through each found asset and create a custom command to process it.
 foreach(SOURCE_ASSET ${SOURCE_ASSETS})
     # Determine the output path by replacing the directory and extension.
     string(REPLACE "${ASSET_SOURCE_DIR}" "${ASSET_OUTPUT_DIR}" DESTINATION_ASSET ${SOURCE_ASSET})
@@ -51,10 +83,12 @@ foreach(SOURCE_ASSET ${SOURCE_ASSETS})
         VERBATIM
     )
     
-    # Add the generated file as a dependency to our custom target.
-    add_dependencies(process_assets ${DESTINATION_ASSET})
+    list(APPEND PROCESSED_ASSETS ${DESTINATION_ASSET})
 
 endforeach()
+
+# 4. Define a custom target to represent the asset processing step.
+add_custom_target(process_assets ALL DEPENDS ${PROCESSED_ASSETS})
 
 # Add the main game source code subdirectory
 add_subdirectory(src)
@@ -68,18 +102,22 @@ add_dependencies(luminumbra_client_app process_assets)
 enable_testing()
 add_subdirectory(test)
 
-# Copy runtime data assets to the build directory
-file(COPY data DESTINATION ${CMAKE_BINARY_DIR})
+foreach(FIRST_PARTY_TARGET IN ITEMS
+  asset_processor
+  luminumbra_common
+  luminumbra_client_app
+  world_generation_test
+)
+  luminumbra_configure_first_party_target(${FIRST_PARTY_TARGET})
+endforeach()
 
-# Set compiler flags for performance and debugging
-if(CMAKE_BUILD_TYPE STREQUAL "Release")
-  message(STATUS "Build type: Release")
-  set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -DNDEBUG")
-elseif(CMAKE_BUILD_TYPE STREQUAL "Debug")
-  message(STATUS "Build type: Debug")
-  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -Wall")
-  add_compile_definitions(LUMINUMBRA_DEBUG)
-  # Enable address sanitizer for memory safety checks in debug builds
-  # add_link_options(-fsanitize=address)
-  # add_compile_options(-fsanitize=address)
-endif()
+# Copy runtime data assets to the build directory as part of every build.
+add_custom_target(copy_data ALL
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          "${CMAKE_SOURCE_DIR}/data"
+          "${CMAKE_BINARY_DIR}/data"
+  COMMENT "Copying runtime data assets"
+  VERBATIM
+)
+add_dependencies(copy_data process_assets)
+add_dependencies(luminumbra_client_app copy_data)
