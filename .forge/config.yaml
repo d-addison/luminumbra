@@ -5,7 +5,7 @@ project_name: luminumbra
 profile: polyglot-audit
 workflow: polyglot-audit-workflow
 routing:
-  default_tier: sonnet
+  default_tier: standard
   deescalation_window: 3
   model_ceiling: deep
 dispatch:

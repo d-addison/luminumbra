@@ -1,5 +1,5 @@
 {
-  "description": "Retry of the 16 polyglot-audit-roadmap tasks that the calibrator rejected in the first dispatch. Calibrator history reset (.forge/sizing-history.jsonl deleted). The 18 tasks completed in the prior run are already cherry-picked onto feat/polyglot-audit-roadmap and their references are trimmed out of depends_on here.",
+  "description": "HISTORICAL — INTEGRATED 2026-06-07 at fc72760. Retry of the 16 polyglot-audit-roadmap tasks that the calibrator rejected in the first dispatch. Calibrator history reset (.forge/sizing-history.jsonl deleted). The 18 tasks completed in the prior run are already cherry-picked onto feat/polyglot-audit-roadmap and their references are trimmed out of depends_on here. All 16 tasks merged successfully via forge contracts execute with FORGE_INTEGRATION_CARGO_CHECK=0. Kept for audit/retro; do NOT re-dispatch.",
   "feature": "polyglot-audit-roadmap-retry",
   "schema_kind": "forge.task_graph",
   "schema_version": "2",

@@ -25,3 +25,14 @@ change:
 
 Keep manifest paths anchored with `CMAKE_CURRENT_LIST_DIR` so the files can be
 included from either the module directory or the parent `src` directory.
+
+## Forge dispatch
+
+Luminumbra is a C++ project, so Forge's default post-cherry-pick `cargo check`
+integration step must be disabled before running `forge contracts execute`.
+Source `.forge/env.local.example` (or copy it to `.forge/env.local` and source
+that) into your shell first. Without it, every successful task gets reverted
+with `could not find Cargo.toml`.
+
+After pulling a CMake change, `rm -rf build/` once before rebuilding — the
+manual source lists and presets can otherwise mismatch the cached state.
