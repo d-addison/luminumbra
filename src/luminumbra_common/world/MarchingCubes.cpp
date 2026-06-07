@@ -1,4 +1,5 @@
 #include "MarchingCubes.h"
+#include <algorithm>
 #include <vector>
 #include <cmath> 
 #include "world/Chunk.h"
@@ -28,6 +29,17 @@ namespace { // Anonymous namespace for internal implementation details
         if (std::abs(valp1 - valp2) < 0.00001f) return p1;
         f32 mu = (isolevel - valp1) / (valp2 - valp1);
         return p1 + mu * (p2 - p1);
+    }
+
+    Vec3 EstimateDensityGradient(const GridCell& gridcell) {
+        const f32 dx = (gridcell.val[1] + gridcell.val[2] + gridcell.val[5] + gridcell.val[6])
+                     - (gridcell.val[0] + gridcell.val[3] + gridcell.val[4] + gridcell.val[7]);
+        const f32 dy = (gridcell.val[4] + gridcell.val[5] + gridcell.val[6] + gridcell.val[7])
+                     - (gridcell.val[0] + gridcell.val[1] + gridcell.val[2] + gridcell.val[3]);
+        const f32 dz = (gridcell.val[2] + gridcell.val[3] + gridcell.val[6] + gridcell.val[7])
+                     - (gridcell.val[0] + gridcell.val[1] + gridcell.val[4] + gridcell.val[5]);
+
+        return Vec3(dx, dy, dz);
     }
 
     // Determines terrain material based on world position and height
@@ -161,11 +173,24 @@ void PolygoniseTerrain(
                     }
                 }
 
+                const Vec3 density_gradient = EstimateDensityGradient(gridcell);
                 for (int i = 0; triTable[cube_index][i] != -1; i += 3) {
-                    // Use standard marching cubes winding order
-                    indices.push_back(vert_indices[triTable[cube_index][i]]);
-                    indices.push_back(vert_indices[triTable[cube_index][i+1]]);
-                    indices.push_back(vert_indices[triTable[cube_index][i+2]]);
+                    u32 i0 = vert_indices[triTable[cube_index][i]];
+                    u32 i1 = vert_indices[triTable[cube_index][i+1]];
+                    u32 i2 = vert_indices[triTable[cube_index][i+2]];
+
+                    const Vec3 face_normal = glm::cross(
+                        vertices[i1].position - vertices[i0].position,
+                        vertices[i2].position - vertices[i0].position
+                    );
+
+                    if (glm::dot(face_normal, density_gradient) < 0.0f) {
+                        std::swap(i1, i2);
+                    }
+
+                    indices.push_back(i0);
+                    indices.push_back(i1);
+                    indices.push_back(i2);
                 }
             }
         }
