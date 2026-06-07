@@ -12,8 +12,6 @@ namespace Luminumbra::Components { struct TransformComponent; }
 
 namespace Luminumbra::Systems {
 
-namespace { struct WaterSimNeighbors; }
-
 // Adaptive water grid resolution levels
 enum class WaterDetailLevel {
     Off = 0,      // No simulation
@@ -109,15 +107,30 @@ public:
 
 private:
 
+    struct WaterChunkSnapshot {
+        ChunkID id{};
+        IVec3 coords{};
+        int resolution = 0;
+        std::vector<f32> water_levels;
+        std::vector<Vec2> flow_data;
+        std::vector<f32> terrain_height;
+    };
+
+    struct WaterChunkSimulationOutput {
+        std::vector<f32> water_levels;
+        std::vector<Vec2> flow_data;
+        f32 max_delta = 0.0f;
+    };
+
     struct WaterSimNeighbors {
-        const std::vector<float>* north = nullptr;
-        const std::vector<float>* south = nullptr;
-        const std::vector<float>* east  = nullptr;
-        const std::vector<float>* west  = nullptr;
+        const WaterChunkSnapshot* north = nullptr;
+        const WaterChunkSnapshot* south = nullptr;
+        const WaterChunkSnapshot* east  = nullptr;
+        const WaterChunkSnapshot* west  = nullptr;
     };
 
     void dispatch_simulation_jobs(const std::vector<Chunk*>& chunks_to_simulate);
-    void simulate_chunk_water(Chunk& chunk, const WaterSimNeighbors& neighbors);
+    void simulate_chunk_water(const WaterChunkSnapshot& snapshot, const WaterSimNeighbors& neighbors, WaterChunkSimulationOutput& output);
 
 
     JobSystem* m_job_system;
@@ -132,11 +145,7 @@ private:
     const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>* m_active_chunks = nullptr;
 
 
-    // Double buffer for simulation state to avoid read/write conflicts in a single pass.
-
-    std::unordered_map<ChunkID, std::vector<f32>> m_next_water_levels;
-
 };
 
 
-} // namespace Luminumbra::Systems 
+} // namespace Luminumbra::Systems
