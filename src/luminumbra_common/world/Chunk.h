@@ -1,9 +1,9 @@
 #pragma once
 
 #include "../../../include/luminumbra/core/Types.h"
-#include <vector>
 #include <atomic>
 #include <mutex>
+#include <vector>
 #include "core/Log.h"
 
 namespace Luminumbra {
@@ -64,6 +64,8 @@ public:
     int ticks_below_threshold{0};
 
     static ChunkID calculate_id(const IVec3& coords);
+    static bool is_valid_state_transition(ChunkState from, ChunkState to);
+    bool try_set_state(ChunkState expected_state, ChunkState new_state);
 
 private:
     const IVec3 m_coords;

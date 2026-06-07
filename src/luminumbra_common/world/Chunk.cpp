@@ -9,7 +9,38 @@ Chunk::Chunk(const IVec3& coords)
       m_state(ChunkState::Unloaded) {
 }
 
-// In src/luminumbra_common/world/Chunk.cpp
+bool Chunk::is_valid_state_transition(ChunkState from, ChunkState to) {
+    if (from == to) {
+        return true;
+    }
+
+    switch (from) {
+        case ChunkState::Unloaded:
+            return to == ChunkState::Loading;
+        case ChunkState::Loading:
+            return to == ChunkState::Idle || to == ChunkState::Unloading;
+        case ChunkState::Idle:
+            return to == ChunkState::Meshing || to == ChunkState::Unloading;
+        case ChunkState::Meshing:
+            return to == ChunkState::Ready || to == ChunkState::Unloading;
+        case ChunkState::Ready:
+            return to == ChunkState::Meshing || to == ChunkState::Unloading;
+        case ChunkState::Unloading:
+            return to == ChunkState::Unloaded;
+    }
+
+    return false;
+}
+
+bool Chunk::try_set_state(ChunkState expected_state, ChunkState new_state) {
+    std::lock_guard<std::mutex> lock(m_state_mutex);
+    if (m_state != expected_state || !is_valid_state_transition(m_state, new_state)) {
+        return false;
+    }
+
+    m_state = new_state;
+    return true;
+}
 
 ChunkID Chunk::calculate_id(const IVec3& coords) {
     // A robust, collision-free method for generating a unique ID from 3D integer coordinates
