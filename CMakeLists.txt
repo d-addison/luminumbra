@@ -1,6 +1,6 @@
 # CMakeLists.txt
 cmake_minimum_required(VERSION 3.20)
-project(Luminumbra LANGUAGES C CXX)
+project(Luminumbra VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -11,6 +11,7 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+<<<<<<< HEAD
 option(LUMINUMBRA_WARNINGS_AS_ERRORS "Treat first-party compiler warnings as errors" OFF)
 option(LUMINUMBRA_ENABLE_ASAN "Enable AddressSanitizer for first-party targets in Debug builds" OFF)
 
@@ -45,6 +46,8 @@ function(luminumbra_configure_first_party_target TARGET_NAME)
     endif()
   endif()
 endfunction()
+
+include(cmake/engine_version.cmake)
 
 # Fetch all third-party dependencies from a central file
 # This makes our project self-contained and portable.
@@ -123,6 +126,10 @@ add_subdirectory(src)
 target_compile_definitions(luminumbra_client_app PRIVATE
     LUMINUMBRA_BUILD_DATA_DIR="${DATA_OUTPUT_DIR}"
     LUMINUMBRA_SOURCE_DATA_DIR="${DATA_SOURCE_DIR}"
+)
+
+target_include_directories(luminumbra_common PUBLIC
+    "${LUMINUMBRA_ENGINE_VERSION_INCLUDE_DIR}"
 )
 
 # --- FINAL DEPENDENCY LINK ---
