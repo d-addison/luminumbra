@@ -1,0 +1,491 @@
+{
+  "description": "Retry of the 16 polyglot-audit-roadmap tasks that the calibrator rejected in the first dispatch. Calibrator history reset (.forge/sizing-history.jsonl deleted). The 18 tasks completed in the prior run are already cherry-picked onto feat/polyglot-audit-roadmap and their references are trimmed out of depends_on here.",
+  "feature": "polyglot-audit-roadmap-retry",
+  "schema_kind": "forge.task_graph",
+  "schema_version": "2",
+  "tasks": [
+    {
+      "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "src/luminumbra_common/world/MarchingCubes.cpp"
+        ],
+        "reads": [
+          "src/luminumbra_common/world/MarchingCubes.cpp",
+          "src/luminumbra_common/world/MarchingCubes.h",
+          "test/shield/test_world_generation.cpp",
+          ".forge/reports/polyglot-audit/critique.md"
+        ]
+      },
+      "depends_on": [],
+      "id": "T-S0-2-verify-and-fix-normal-winding",
+      "modifies": [
+        "src/luminumbra_common/world/MarchingCubes.cpp"
+      ],
+      "prompt": "After T-S0-1, run ctest --test-dir build --output-on-failure --gtest_filter=*NormalsPointUpwardsOnHorizontalSurface*. If it passes, stop \u00e2\u20ac\u201d there is no work to do. If it fails (normals point down): the embedded MarchingCubesTables.inl may have been authored against inside-positive. Inspect the table-consumption loop at MarchingCubes.cpp:164 (the triTable winding) and the face-normal accumulation at lines 175-185. Apply the minimum change: either swap two indices in the triangle push (e.g., swap vert_indices[i+1] and vert_indices[i+2]) OR negate face_normal before accumulation. Pick whichever isolates the change to a single contiguous block. Document the choice with a one-line comment that names the convention. Verify by running --gtest_filter=*Normals*. Do not modify the SHIELD_WorldSystem or test source.",
+      "tier": "deep",
+      "title": "Verify and fix mesh normal winding after sign flip",
+      "type": "implement"
+    },
+    {
+      "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
+          "test/shield/test_world_generation.cpp"
+        ],
+        "reads": [
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
+          "src/luminumbra_common/world/MarchingCubes.cpp",
+          "test/shield/test_world_generation.cpp",
+          ".forge/reports/polyglot-audit/quality-risks.md"
+        ]
+      },
+      "depends_on": [
+        "T-S0-2-verify-and-fix-normal-winding"
+      ],
+      "id": "T-S0-3-fix-cave-effect-on-mesh",
+      "modifies": [
+        "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+        "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
+        "test/shield/test_world_generation.cpp"
+      ],
+      "prompt": "After the sign flip, audit whether cave_density = cave_carve_value * (cave_val - cave_threshold) still produces values that cross the isolevel (0.0) where the CavesChangeGeneratedMesh test expects them to. Under inside-negative convention, caves should INCREASE the SDF value at carved points so air bubbles appear inside terrain. The current formula adds a positive offset to terrain_density via std::min \u00e2\u20ac\u201d under inside-negative this is the wrong direction. There are TWO call sites that both apply the cave term and must be edited consistently: (a) get_density_at_from_precalculated() at SHIELD_WorldSystem.cpp:287, and (b) GenerateChunkData() CPU fallback path at SHIELD_WorldSystem.cpp:430. Replace std::min(terrain_density, cave_density) with std::max(terrain_density, -cave_density) (or equivalently invert cave_density's sign), so caves push the SDF upward through zero in solid regions. If the test still passes with different vertex counts but with values that disagree with the new physical meaning, update the test's cave_threshold/cave_frequency parameters to ensure measurable mesh divergence. The test's intent \u00e2\u20ac\u201d verify cave generation has an observable effect on geometry \u00e2\u20ac\u201d must be preserved; the exact numeric thresholds may be tuned. Verify with --gtest_filter=*CavesChange*. Do not modify MarchingCubes or other test files.",
+      "tier": "deep",
+      "title": "Fix or redefine cave-carving so caves change generated mesh",
+      "type": "implement"
+    },
+    {
+      "agent_contract": {
+        "creates": [
+          "docs/shield/sdf-contract.md"
+        ],
+        "modifies": [
+          "README.md"
+        ],
+        "reads": [
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
+          "src/luminumbra_common/world/MarchingCubes.cpp",
+          "test/shield/test_world_generation.cpp",
+          "README.md"
+        ]
+      },
+      "creates": [
+        "docs/shield/sdf-contract.md"
+      ],
+      "depends_on": [
+        "T-S0-2-verify-and-fix-normal-winding",
+        "T-S0-3-fix-cave-effect-on-mesh"
+      ],
+      "id": "T-S0-4-document-shield-sdf-contract",
+      "modifies": [
+        "README.md"
+      ],
+      "prompt": "Write docs/shield/sdf-contract.md as the single source of truth for SHIELD terrain semantics. Sections: (1) SDF sign convention (inside-negative, outside-positive). (2) Isolevel: 0.0. (3) SDF grid layout in Chunk::sdf_data (x varies fastest, then y, then z; padded by +1 in each dimension for MC neighborhood). (4) Terrain height contract (GetTerrainHeightAt returns world-space Y at a given x,z; clamped by island_mask if enabled). (5) Cave carve formula and valid threshold ranges (cite the post-T-S0-3 implementation). (6) Marching Cubes step semantics: ChunkLOD.step is the stride between sampled cells; meshing iterates by step, never by 1, for non-LOD-0 chunks. (7) Mesh normal direction (+Y on horizontal surfaces). Add a one-line note: 'If you change any value in this document, every consumer of SDF/mesh data must be re-validated.' Add a link from README.md (in a 'Documentation' or 'Architecture' section) pointing to docs/shield/sdf-contract.md. Do not modify any code.",
+      "tier": "standard",
+      "title": "Write docs/shield/sdf-contract.md and link from README",
+      "type": "doc"
+    },
+    {
+      "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "test/shield/test_world_generation.cpp"
+        ],
+        "reads": [
+          "src/luminumbra_common/world/MarchingCubes.cpp",
+          "src/luminumbra_common/world/Chunk.h",
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
+          "test/shield/test_world_generation.cpp"
+        ]
+      },
+      "depends_on": [
+        "T-S0-2-verify-and-fix-normal-winding",
+        "T-S0-4-document-shield-sdf-contract",
+        "T-S0-3-fix-cave-effect-on-mesh"
+      ],
+      "id": "T-S0-5-add-lod-winding-regression-test",
+      "modifies": [
+        "test/shield/test_world_generation.cpp"
+      ],
+      "prompt": "Add a regression test MeshNormalWindingIsConsistentUnderLodStep to test/shield/test_world_generation.cpp. The test: (1) Generates a flat-surface chunk using params_guaranteed_surface. (2) Polygonises it three times with step=1, step=2, step=4. (3) Asserts that every triangle in each mesh has the same winding direction by computing cross(v2-v1, v3-v1).y > 0 (consistent upward face normals). (4) Asserts that the three meshes have decreasing vertex counts (step=4 < step=2 < step=1). Do not modify production source; this is a test-only change. Verify with ctest --gtest_filter=*MeshNormalWinding*.",
+      "tier": "standard",
+      "title": "Add LOD-step-aware mesh winding regression test",
+      "type": "implement"
+    },
+    {
+      "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "src/luminumbra_common/core/JobSystem.h",
+          "src/luminumbra_common/core/JobSystem.cpp",
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+          "src/luminumbra_common/systems/WaterSystem.cpp",
+          "src/luminumbra_client/main_client.cpp"
+        ],
+        "reads": [
+          "src/luminumbra_common/core/JobSystem.h",
+          "src/luminumbra_common/core/JobSystem.cpp",
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+          "src/luminumbra_common/systems/WaterSystem.cpp",
+          "src/luminumbra_client/main_client.cpp",
+          ".forge/reports/polyglot-audit/quality-risks.md",
+          ".forge/reports/polyglot-audit/critique.md"
+        ]
+      },
+      "depends_on": [
+        "T-S0-3-fix-cave-effect-on-mesh"
+      ],
+      "id": "T-S2-1-jobsystem-counter-ownership",
+      "modifies": [
+        "src/luminumbra_common/core/JobSystem.h",
+        "src/luminumbra_common/core/JobSystem.cpp",
+        "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
+        "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+        "src/luminumbra_common/systems/WaterSystem.cpp",
+        "src/luminumbra_client/main_client.cpp"
+      ],
+      "prompt": "Replace JobSystem's 256-slot ring of atomic counters with per-handle owned counters. Change struct JobHandle { std::atomic<int>* counter = nullptr; } to struct JobHandle { std::shared_ptr<std::atomic<int>> counter; }. Remove the m_counters std::array and m_next_counter_index fields. In dispatch_batch, allocate a fresh std::make_shared<std::atomic<int>>((int)jobs.size()) per call; each job lambda captures the shared_ptr by value (so the counter outlives the workers if necessary). wait() reads .load() through the shared_ptr. JobHandle consumers in src/ are: main_client.cpp (g_world_gen_handle), WaterSystem.cpp (water-sim batches), SHIELD_WorldSystem.cpp (generation + meshing). Audit each \u00e2\u20ac\u201d they likely already store JobHandle by value (the previous struct's raw-pointer was a member, not the storage class), but verify and fix any that stored a JobHandle*. SHIELD_WorldSystem::dispatch_generation_jobs and dispatch_meshing_jobs must still return JobHandles by value \u00e2\u20ac\u201d the caller decides what to keep. Add a comment over the new struct explaining the lifetime model. Verify with cmake --build --preset debug && ctest --preset debug --output-on-failure.",
+      "tier": "deep",
+      "title": "Replace JobSystem counter ring with per-handle owned atomics",
+      "type": "refactor"
+    },
+    {
+      "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "src/luminumbra_common/core/JobSystem.cpp",
+          "src/luminumbra_common/core/JobSystem.h"
+        ],
+        "reads": [
+          "src/luminumbra_common/core/JobSystem.cpp",
+          "src/luminumbra_common/core/JobSystem.h",
+          ".forge/reports/polyglot-audit/quality-risks.md"
+        ]
+      },
+      "depends_on": [
+        "T-S2-1-jobsystem-counter-ownership"
+      ],
+      "id": "T-S2-2-jobsystem-graceful-shutdown",
+      "modifies": [
+        "src/luminumbra_common/core/JobSystem.cpp",
+        "src/luminumbra_common/core/JobSystem.h"
+      ],
+      "prompt": "Make JobSystem::shutdown drain the queue. Sequence: (1) Acquire m_queue_mutex; set m_stop_threads.store(true); release the lock. (2) Notify all workers. (3) Workers continue to pop and run jobs until the queue is empty AND m_stop_threads is true. (4) Wait for all workers to exit via join. (5) Pending JobHandles will see their shared counter drop to zero naturally as jobs complete (or stay non-zero forever if the queue was non-empty at start of shutdown \u00e2\u20ac\u201d that's the caller's problem, not the JobSystem's). After shutdown, JobSystem::dispatch and dispatch_batch log an error and return a default-constructed JobHandle without queuing. Verify with cmake --build --preset debug && ctest. Add a doc comment explaining the drain-then-stop contract.",
+      "tier": "standard",
+      "title": "JobSystem::shutdown drains the queue and rejects new dispatch",
+      "type": "refactor"
+    },
+    {
+      "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp"
+        ],
+        "reads": [
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+          "src/luminumbra_common/core/JobSystem.h"
+        ]
+      },
+      "depends_on": [
+        "T-S2-1-jobsystem-counter-ownership",
+        "T-S0-3-fix-cave-effect-on-mesh"
+      ],
+      "id": "T-S2-3-store-and-wait-meshing-handle",
+      "modifies": [
+        "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
+        "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp"
+      ],
+      "prompt": "Add a member JobHandle m_meshing_handle to SHIELD_WorldSystem. In dispatch_meshing_jobs, replace m_job_system->dispatch_batch(jobs); (discarded return value) with m_meshing_handle = m_job_system->dispatch_batch(jobs);. Add a public method WaitForPendingMeshing() that calls m_job_system->wait(m_meshing_handle) if the handle is valid. Call WaitForPendingMeshing() at the top of clear_world() and from the SHIELD_WorldSystem destructor. Verify with cmake --build --preset debug && ctest.",
+      "tier": "standard",
+      "title": "SHIELD_WorldSystem stores meshing batch handle and waits on shutdown",
+      "type": "refactor"
+    },
+    {
+      "agent_contract": {
+        "creates": [
+          "src/luminumbra_common/world/WorldStreamingState.h",
+          "src/luminumbra_common/world/WorldStreamingState.cpp"
+        ],
+        "modifies": [
+          "src/luminumbra_common/world/Chunk.h",
+          "src/luminumbra_common/world/Chunk.cpp"
+        ],
+        "reads": [
+          "src/luminumbra_common/world/Chunk.h",
+          "src/luminumbra_common/world/Chunk.cpp",
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
+          ".forge/reports/polyglot-audit/quality-risks.md",
+          ".forge/reports/polyglot-audit/critique.md",
+          ".forge/reports/polyglot-audit/data-models.md"
+        ]
+      },
+      "creates": [
+        "src/luminumbra_common/world/WorldStreamingState.h",
+        "src/luminumbra_common/world/WorldStreamingState.cpp"
+      ],
+      "depends_on": [
+        "T-S2-3-store-and-wait-meshing-handle",
+        "T-S0-3-fix-cave-effect-on-mesh"
+      ],
+      "id": "T-S2-4a-introduce-world-streaming-state",
+      "modifies": [
+        "src/luminumbra_common/world/Chunk.h",
+        "src/luminumbra_common/world/Chunk.cpp"
+      ],
+      "prompt": "Introduce only the new TYPES in this task; do not migrate any existing system. (1) Create world/WorldStreamingState.{h,cpp}: owns std::unordered_map<ChunkID, std::shared_ptr<Chunk>> guarded by std::shared_mutex, plus a Snapshot type that is std::vector<std::shared_ptr<const ChunkRenderable>>. Provide insert(id, chunk), erase(id), find(id) under unique_lock; provide snapshot() returning a Snapshot built under shared_lock. (2) Define ChunkRenderable as an immutable struct: ChunkID id, IVec3 coords, int current_lod, u32 mesh_version, std::shared_ptr<const MeshBuffers> terrain_mesh, std::shared_ptr<const MeshBuffers> water_mesh. (3) Add MeshBuffers as a struct holding std::vector<VoxelVertex> vertices, std::vector<u32> indices; place it in Chunk.h or a new MeshBuffers.h. (4) Modify Chunk to hold std::shared_ptr<const MeshBuffers> m_terrain_mesh and m_water_mesh as the publishable mesh; add Chunk::publish_terrain_mesh(std::shared_ptr<const MeshBuffers>) and publish_water_mesh that swap atomically (use std::atomic<std::shared_ptr<...>> if compiler supports C++20 atomic shared_ptr, else guard with a small std::mutex). (5) Keep the existing public std::vector mesh_vertices/mesh_indices/water_mesh_vertices/water_mesh_indices intact in this task \u00e2\u20ac\u201d they remain the legacy write target during generation; the migration to read-via-snapshot happens in T-S2-4c. Add doc comments on the new APIs naming the lifetime + thread-safety contract. Verify with cmake --build --preset debug \u00e2\u20ac\u201d no behavioral change yet.",
+      "tier": "deep",
+      "title": "Introduce WorldStreamingState type + ChunkRenderable + atomic mesh publish on Chunk",
+      "type": "implement"
+    },
+    {
+      "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+          "src/luminumbra_common/world/MarchingCubes.cpp"
+        ],
+        "reads": [
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+          "src/luminumbra_common/world/MarchingCubes.cpp"
+        ]
+      },
+      "depends_on": [
+        "T-S2-4a-introduce-world-streaming-state",
+        "T-S0-3-fix-cave-effect-on-mesh",
+        "T-S0-2-verify-and-fix-normal-winding",
+        "T-S2-1-jobsystem-counter-ownership",
+        "T-S2-3-store-and-wait-meshing-handle"
+      ],
+      "id": "T-S2-4b-migrate-shield-world-system-to-streaming-state",
+      "modifies": [
+        "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
+        "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+        "src/luminumbra_common/world/MarchingCubes.cpp"
+      ],
+      "prompt": "Replace SHIELD_WorldSystem::m_chunks (std::unordered_map<ChunkID, std::shared_ptr<Chunk>>) with a WorldStreamingState m_streaming member. Every direct map operation in SHIELD_WorldSystem.cpp becomes a call through m_streaming (insert/erase/find/snapshot). Rewrite get_renderable_chunks() to call m_streaming.snapshot() and return the resulting Snapshot type instead of std::vector<Chunk*>. In MarchingCubes::PolygoniseTerrain \u00e2\u20ac\u201d after the mesh vectors are populated \u00e2\u20ac\u201d also build a new MeshBuffers from them and call chunk.publish_terrain_mesh(buffers). Similarly for the water mesh path. Do NOT yet change the renderer or water system to consume snapshots \u00e2\u20ac\u201d they continue to read the legacy public vectors until T-S2-4c and T-S2-4d. Verify with cmake --build --preset debug-asan && ctest --preset debug-asan.",
+      "tier": "deep",
+      "title": "Migrate SHIELD_WorldSystem to use WorldStreamingState and publish meshes",
+      "type": "refactor"
+    },
+    {
+      "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "src/luminumbra_client/rendering/RenderPipeline.cpp",
+          "src/luminumbra_client/rendering/RenderPipeline.h"
+        ],
+        "reads": [
+          "src/luminumbra_client/rendering/RenderPipeline.cpp",
+          "src/luminumbra_client/rendering/RenderPipeline.h",
+          "src/luminumbra_common/world/Chunk.h"
+        ]
+      },
+      "depends_on": [
+        "T-S2-4b-migrate-shield-world-system-to-streaming-state",
+        "T-S0-2-verify-and-fix-normal-winding"
+      ],
+      "id": "T-S2-4c-migrate-render-pipeline-to-snapshots",
+      "modifies": [
+        "src/luminumbra_client/rendering/RenderPipeline.cpp",
+        "src/luminumbra_client/rendering/RenderPipeline.h"
+      ],
+      "prompt": "Rewrite RenderPipeline::geometry_pass_chunks and related upload paths to consume std::shared_ptr<const ChunkRenderable> from a WorldStreamingState::Snapshot rather than raw Chunk*. GPU resource cache key remains ChunkID; the renderer reads ChunkRenderable::terrain_mesh / water_mesh shared_ptrs and copies vertex/index data from MeshBuffers (no longer touches Chunk's internal vectors). RenderPipeline::clear_all_chunk_data and the manage_chunk_gpu_resources hot path likewise key off ChunkID + mesh_version. Do NOT change WaterSystem in this task. Verify with cmake --build --preset debug-asan && ctest --preset debug-asan and that the client launches and renders a flat-surface world without crashing.",
+      "tier": "deep",
+      "title": "Migrate RenderPipeline to consume ChunkRenderable snapshots",
+      "type": "refactor"
+    },
+    {
+      "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "src/luminumbra_common/systems/WaterSystem.cpp",
+          "src/luminumbra_common/systems/WaterSystem.h"
+        ],
+        "reads": [
+          "src/luminumbra_common/systems/WaterSystem.cpp",
+          "src/luminumbra_common/systems/WaterSystem.h"
+        ]
+      },
+      "depends_on": [
+        "T-S2-4b-migrate-shield-world-system-to-streaming-state",
+        "T-S2-1-jobsystem-counter-ownership"
+      ],
+      "id": "T-S2-4d-migrate-water-system-to-snapshots",
+      "modifies": [
+        "src/luminumbra_common/systems/WaterSystem.cpp",
+        "src/luminumbra_common/systems/WaterSystem.h"
+      ],
+      "prompt": "Change WaterSystem::update signature to take a const WorldStreamingState::Snapshot& instead of std::unordered_map<ChunkID, std::shared_ptr<Chunk>>. SHIELD_WorldSystem (already migrated in T-S2-4b) passes the snapshot. Water-sim job dispatch continues to write Chunk::water_level_data / water_flow_data through the still-public vectors during the legacy single-writer phase; the publishable mesh is built by MarchingCubes::GenerateWaterMesh and committed via Chunk::publish_water_mesh (the publish hook was added in T-S2-4a). Verify with cmake --build --preset debug-asan && ctest --preset debug-asan.",
+      "tier": "standard",
+      "title": "Migrate WaterSystem to consume Snapshot rather than iterate m_chunks",
+      "type": "refactor"
+    },
+    {
+      "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+          "test/shield/test_world_generation.cpp"
+        ],
+        "reads": [
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
+          "src/luminumbra_common/world/Chunk.h",
+          "test/shield/test_world_generation.cpp",
+          ".forge/reports/polyglot-audit/critique.md"
+        ]
+      },
+      "depends_on": [
+        "T-S2-4b-migrate-shield-world-system-to-streaming-state",
+        "T-S0-5-add-lod-winding-regression-test",
+        "T-S0-3-fix-cave-effect-on-mesh",
+        "T-S2-1-jobsystem-counter-ownership",
+        "T-S2-3-store-and-wait-meshing-handle"
+      ],
+      "id": "T-S2-5-remove-inline-wait-from-generation",
+      "modifies": [
+        "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+        "test/shield/test_world_generation.cpp"
+      ],
+      "prompt": "Remove the synchronous m_job_system->wait(handle) call at SHIELD_WorldSystem.cpp:476 inside dispatch_generation_jobs. Also remove the post-wait debug scan that follows (lines ~480-498). Keep the return of the JobHandle. Add a regression test MeshingPassSkipsLoadingChunks in test/shield/test_world_generation.cpp that: (1) constructs a SHIELD_WorldSystem with a JobSystem; (2) calls dispatch_generation_jobs without waiting; (3) immediately calls update(); (4) asserts that update() did not call PolygoniseTerrain on any chunk still in ChunkState::Loading (verifiable by checking that those chunks' mesh_vertices remain empty). The state machine already prevents this, but the test locks the invariant. Verify with --gtest_filter=*MeshingPassSkips*.",
+      "tier": "standard",
+      "title": "Remove inline wait() from dispatch_generation_jobs; verify state gates meshing",
+      "type": "refactor"
+    },
+    {
+      "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "src/luminumbra_common/world/GameSession.cpp",
+          "src/luminumbra_client/core/AssetManager.h",
+          "src/luminumbra_server/main_server.cpp"
+        ],
+        "reads": [
+          "src/luminumbra_common/world/GameSession.cpp",
+          "src/luminumbra_client/core/AssetManager.h",
+          "src/luminumbra_server/main_server.cpp",
+          "src/luminumbra_common/core/Log.h",
+          "src/luminumbra_common/core/Log.cpp",
+          ".forge/reports/polyglot-audit/quality-risks.md"
+        ]
+      },
+      "depends_on": [
+        "T-S2-2-jobsystem-graceful-shutdown"
+      ],
+      "id": "T-S3-1-replace-runtime-iostreams-with-logging",
+      "modifies": [
+        "src/luminumbra_common/world/GameSession.cpp",
+        "src/luminumbra_client/core/AssetManager.h",
+        "src/luminumbra_server/main_server.cpp"
+      ],
+      "prompt": "Replace every std::cout/std::cerr in: src/luminumbra_common/world/GameSession.cpp (at least 8 sites), src/luminumbra_client/core/AssetManager.h:17, src/luminumbra_server/main_server.cpp:4. Use LUMINUMBRA_CORE_ERROR for failure paths, LUMINUMBRA_CORE_INFO for success messages, LUMINUMBRA_CORE_WARN for soft-degradation cases. In main_server.cpp, ensure Log::Init() is called before the first log message. If Log::Init() pulls in client-only dependencies, factor a Log::InitMinimal() in core/Log.cpp/h that initializes only the spdlog sink without GL/filesystem-rooted dependencies, and have main_server.cpp call that one. Verify with cmake --build --preset release && ctest. Add a CI grep gate (a follow-up task may formalize it) that ensures no std::cout / std::cerr appears outside test/, tools/, and vendor/ paths.",
+      "tier": "standard",
+      "title": "Replace std::cout/std::cerr with engine logger across runtime code",
+      "type": "refactor"
+    },
+    {
+      "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "src/luminumbra_client/sources.cmake",
+          ".forge/architecture.toml"
+        ],
+        "reads": [
+          "src/luminumbra_client/sources.cmake",
+          "src/luminumbra_client/ui/EnhancedUIManager.h",
+          "src/luminumbra_client/ui/EnhancedUIManager.cpp",
+          "src/luminumbra_client/ui/SimpleUIManager.h",
+          "src/luminumbra_client/ui/UIIntegration.cpp",
+          "src/luminumbra_client/ui/core/UIManager.h",
+          "src/luminumbra_client/ui/core/UIManager.cpp",
+          "src/luminumbra_client/ui/core/UIComponent.h",
+          "src/luminumbra_client/ui/core/UIComponent.cpp",
+          "src/luminumbra_client/ui/core/UIStateManager.h",
+          "src/luminumbra_client/main_client.cpp",
+          ".forge/architecture.toml",
+          ".forge/reports/polyglot-audit/architecture.md"
+        ]
+      },
+      "depends_on": [],
+      "id": "T-OD5-delete-dead-ui-scaffolding",
+      "modifies": [
+        "src/luminumbra_client/ui",
+        "src/luminumbra_client/sources.cmake",
+        ".forge/architecture.toml"
+      ],
+      "prompt": "Owner decision recorded: keep legacy Rml_UIManager behind the IUIManager interface (added separately as a sub-task of S4.0 in the roadmap). The component UI system has never been in the active build (sources.cmake confirms) and its wrappers are empty stubs. Delete the dead scaffolding: (1) git rm src/luminumbra_client/ui/EnhancedUIManager.{h,cpp} src/luminumbra_client/ui/SimpleUIManager.h src/luminumbra_client/ui/UIIntegration.cpp src/luminumbra_client/ui/core/ src/luminumbra_client/ui/components/. (2) Remove EnhancedUIManager.cpp from src/luminumbra_client/sources.cmake. (3) Update .forge/architecture.toml: remove the audio_ui_scripting check 'new component UI manager exists' (path src/luminumbra_client/ui/core/UIManager.cpp) \u00e2\u20ac\u201d it would otherwise fail forever after deletion. (4) Verify main_client.cpp does NOT reference any deleted file; if it does (it constructs Rml_UIManager directly today so it should be clean), repair the references. Verify with cmake --preset debug --fresh && cmake --build --preset debug && ctest. The build must succeed and the client must still launch the main menu correctly (validated manually after dispatch).",
+      "tier": "standard",
+      "title": "Delete unbuilt UI scaffolding; commit to legacy Rml_UIManager",
+      "type": "refactor"
+    },
+    {
+      "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "src/luminumbra_common/systems/WaterSystem.cpp",
+          "src/luminumbra_common/systems/WaterSystem.h",
+          "src/luminumbra_common/components/CoreComponents.h"
+        ],
+        "reads": [
+          "src/luminumbra_common/systems/WaterSystem.cpp",
+          "src/luminumbra_common/systems/WaterSystem.h",
+          "src/luminumbra_common/components/CoreComponents.h",
+          "src/luminumbra_client/player/PlayerController.cpp",
+          "src/luminumbra_client/player/PlayerController.h",
+          ".forge/reports/polyglot-audit/quality-risks.md"
+        ]
+      },
+      "depends_on": [
+        "T-S2-4d-migrate-water-system-to-snapshots",
+        "T-S2-1-jobsystem-counter-ownership"
+      ],
+      "id": "T-DR-watersystem-camera-handle-fix",
+      "modifies": [
+        "src/luminumbra_common/systems/WaterSystem.cpp",
+        "src/luminumbra_common/systems/WaterSystem.h",
+        "src/luminumbra_common/components/CoreComponents.h"
+      ],
+      "prompt": "WaterSystem.cpp:36-37 picks transform_view.front() as the camera position with a TODO 'Add proper camera/player tagging system'. Fix: (1) Add a tag component PlayerTag (empty struct) to components/CoreComponents.h. (2) PlayerController on construction emplaces the PlayerTag onto the player entity. (3) WaterSystem::update finds the player via auto player_view = registry.view<const TransformComponent, const PlayerTag>(); if exactly one match, use its transform; if zero or multiple, log a warning and fall back to Vec3(0). Remove the TODO. Verify with cmake --build --preset debug-asan && ctest --preset debug-asan.",
+      "tier": "standard",
+      "title": "Replace WaterSystem first-transform hack with PlayerHandle lookup",
+      "type": "refactor"
+    },
+    {
+      "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "src/luminumbra_common/core/Debug.h"
+        ],
+        "reads": [
+          "src/luminumbra_common/core/Debug.h",
+          "src/luminumbra_client/main_client.cpp",
+          "src/luminumbra_common/core/Log.h",
+          ".forge/reports/polyglot-audit/quality-risks.md"
+        ]
+      },
+      "creates": [
+        "src/luminumbra_common/core/Debug.h"
+      ],
+      "depends_on": [
+        "T-S2-1-jobsystem-counter-ownership"
+      ],
+      "id": "T-DR-luminumbra-assert-release-behavior",
+      "modifies": [
+        "src/luminumbra_client/main_client.cpp"
+      ],
+      "prompt": "Read core/Debug.h. If LUMINUMBRA_ASSERT(x, msg) is the standard 'do nothing in Release' assert(x) wrapper, change it: in Release, on failure, log msg via LUMINUMBRA_CORE_ERROR and call std::abort() (or std::quick_exit). In Debug, retain assert-style trap. The rationale (per quality-risks panel C2): startup paths like main_client.cpp use LUMINUMBRA_ASSERT(window, ...) \u00e2\u20ac\u201d a null window in Release with the current macro silently dereferences. Add a doc comment explaining the Release-vs-Debug behavior. Do NOT change any call site of LUMINUMBRA_ASSERT. Verify with cmake --build --preset release && cmake --build --preset debug; both must compile.",
+      "tier": "quick",
+      "title": "Make LUMINUMBRA_ASSERT log+abort in Release, not no-op",
+      "type": "refactor"
+    }
+  ]
+}
