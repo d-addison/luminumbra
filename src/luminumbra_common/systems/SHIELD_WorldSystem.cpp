@@ -19,6 +19,16 @@ constexpr float FLOW_CONSTANT = 0.1f;
 constexpr float MIN_FLOW_DIFF = 0.001f;
 constexpr float MAX_WATER_COMPRESSION = 0.2f;
 
+namespace {
+
+float apply_cave_field(float terrain_density, float raw_cave_noise, const TerrainGenParams& params) {
+    const float cave_val = std::clamp((raw_cave_noise + 1.0f) * 0.5f, 0.0f, 1.0f);
+    const float cave_density = (cave_val - params.cave_threshold) * params.cave_carve_value;
+    return std::max(terrain_density, cave_density);
+}
+
+}
+
 SHIELD_WorldSystem::SHIELD_WorldSystem(JobSystem* job_system, WaterSystem* water_system, const TerrainGenParams& params, int seed)
     : m_job_system(job_system), m_water_system(water_system), m_params(params), m_seed(seed) {
     reinitialize_noise();
@@ -279,13 +289,8 @@ float SHIELD_WorldSystem::get_density_at_from_precalculated(const Vec3& world_po
     float terrain_density = world_pos.y - terrain_height;
     if (m_params.caves_enabled) {
         // <<< FIX: The function returns the value directly.
-        float cave_val = m_cave_generator->GenSingle3D(world_pos.x * m_params.cave_frequency, world_pos.y * m_params.cave_frequency, world_pos.z * m_params.cave_frequency, m_seed + 1);
-        cave_val = (cave_val + 1.0f) * 0.5f;
-
-        if (cave_val > m_params.cave_threshold) {
-            float cave_density = m_params.cave_carve_value * (cave_val - m_params.cave_threshold);
-            terrain_density = std::max(terrain_density, cave_density);
-        }
+        float cave_noise = m_cave_generator->GenSingle3D(world_pos.x * m_params.cave_frequency, world_pos.y * m_params.cave_frequency, world_pos.z * m_params.cave_frequency, m_seed + 1);
+        terrain_density = apply_cave_field(terrain_density, cave_noise, m_params);
     }
     return terrain_density;
 }
@@ -423,12 +428,7 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk) const {
                if (m_params.caves_enabled) {
                    // For 3D noise buffer in [x][y][z] layout (x varies fastest):
                    size_t cave_read_idx = static_cast<size_t>(x) + static_cast<size_t>(y) * size_x + static_cast<size_t>(z) * size_x * size_y;
-                   
-                   float cave_val = (cave_noise[cave_read_idx] + 1.0f) * 0.5f;
-                   if (cave_val > m_params.cave_threshold) {
-                       float cave_density = m_params.cave_carve_value * (cave_val - m_params.cave_threshold);
-                       terrain_density = std::max(terrain_density, cave_density);
-                   }
+                   terrain_density = apply_cave_field(terrain_density, cave_noise[cave_read_idx], m_params);
                }
                
                if (y == 0) {
