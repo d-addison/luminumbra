@@ -276,7 +276,7 @@ float SHIELD_WorldSystem::GetTerrainHeightAt(float world_x, float world_z) const
 }
 
 float SHIELD_WorldSystem::get_density_at_from_precalculated(const Vec3& world_pos, float terrain_height) const {
-    float terrain_density = terrain_height - world_pos.y;
+    float terrain_density = world_pos.y - terrain_height;
     if (m_params.caves_enabled) {
         // <<< FIX: The function returns the value directly.
         float cave_val = m_cave_generator->GenSingle3D(world_pos.x * m_params.cave_frequency, world_pos.y * m_params.cave_frequency, world_pos.z * m_params.cave_frequency, m_seed + 1);
@@ -284,7 +284,7 @@ float SHIELD_WorldSystem::get_density_at_from_precalculated(const Vec3& world_po
 
         if (cave_val > m_params.cave_threshold) {
             float cave_density = m_params.cave_carve_value * (cave_val - m_params.cave_threshold);
-            terrain_density = std::min(terrain_density, cave_density);
+            terrain_density = std::max(terrain_density, cave_density);
         }
     }
     return terrain_density;
@@ -351,7 +351,7 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk) const {
                float surface_height = base_pos.y + size_y; // Start from top
                for (int y = size_y - 1; y >= 0; --y) {
                    int sdf_idx = z * (size_x * size_y) + y * size_x + x;
-                   if (chunk.sdf_data[sdf_idx] > 0.0f) {
+                   if (chunk.sdf_data[sdf_idx] <= 0.0f) {
                        surface_height = base_pos.y + y;
                        break;
                    }
@@ -417,7 +417,7 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk) const {
 
                // B. Calculate base terrain density
                float current_world_y = base_pos.y + y;
-               float terrain_density = terrain_h - current_world_y;
+               float terrain_density = current_world_y - terrain_h;
 
                // C. Carve caves using the 3D noise buffer
                if (m_params.caves_enabled) {
@@ -427,7 +427,7 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk) const {
                    float cave_val = (cave_noise[cave_read_idx] + 1.0f) * 0.5f;
                    if (cave_val > m_params.cave_threshold) {
                        float cave_density = m_params.cave_carve_value * (cave_val - m_params.cave_threshold);
-                       terrain_density = std::min(terrain_density, cave_density);
+                       terrain_density = std::max(terrain_density, cave_density);
                    }
                }
                
