@@ -450,8 +450,9 @@ std::vector<glm::vec3> PhysicsSystem::calculate_audio_reflection_points(const gl
         // Set up for next bounce
         current_pos = ray.hit_point + ray.surface_normal * 0.01f; // Small offset to avoid self-intersection
         
-        // Reflect towards listener
-        glm::vec3 to_listener = glm::normalize(listener - current_pos);
+        // Reflect towards listener (direction unused for now; kept for future
+        // angle-of-incidence weighting).
+        (void)glm::normalize(listener - current_pos);
         target = current_pos + reflected * 10.0f; // Extend reflection ray
         
         // Early termination if reflection quality becomes too poor

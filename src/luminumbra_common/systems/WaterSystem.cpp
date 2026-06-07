@@ -70,7 +70,7 @@ Vec3 WaterSystem::get_camera_position(entt::registry& registry) const {
     }
 
     auto camera_view = registry.view<const Components::TransformComponent, const Components::ActiveCameraComponent>();
-    if (!camera_view.empty()) {
+    if (camera_view.begin() != camera_view.end()) {
         return camera_view.get<const Components::TransformComponent>(camera_view.front()).position;
     }
 

@@ -209,10 +209,10 @@ int main(int argc, char* argv[]) {
             case GameState::WORLD_LOADING:
             {
                 const int JOBS_PER_FRAME = 64; // Dispatch more jobs per frame for a faster visual fill
-                if (g_generation_dispatch_index < g_initial_chunks_to_load.size()) {
+                if (static_cast<size_t>(g_generation_dispatch_index) < g_initial_chunks_to_load.size()) {
                     std::vector<Luminumbra::IVec3> batch_to_generate;
                     int dispatched_this_frame = 0;
-                    while (g_generation_dispatch_index < g_initial_chunks_to_load.size() && dispatched_this_frame < JOBS_PER_FRAME) {
+                    while (static_cast<size_t>(g_generation_dispatch_index) < g_initial_chunks_to_load.size() && dispatched_this_frame < JOBS_PER_FRAME) {
                         const auto& coords = g_initial_chunks_to_load[g_generation_dispatch_index];
                         batch_to_generate.push_back(coords);
                         g_loading_visualizer->UpdateChunkState(coords, Luminumbra::Client::ChunkLoadVisualState::DISPATCHED);
@@ -230,7 +230,7 @@ int main(int argc, char* argv[]) {
                 glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
                 g_loading_visualizer->UpdateAndRender(deltaTime, "CONSTRUCTING WORLD GEOMETRY...", progress);
 
-                if (g_generation_dispatch_index >= g_initial_chunks_to_load.size()) {
+                if (static_cast<size_t>(g_generation_dispatch_index) >= g_initial_chunks_to_load.size()) {
                     LUMINUMBRA_CORE_INFO("World generation phase complete. Entering world.");
                     audioManager->StopMusic();
                     audioManager->PlayOneShot2D("ui_world_loaded"); // Play a sound on completion

@@ -8,6 +8,14 @@ routing:
   default_tier: standard
   deescalation_window: 3
   model_ceiling: deep
+# Forge's calibrator engages enforcement after 10 samples by default. For a
+# 34-task mixed-shape dispatch (docs + build infra + refactors + tests),
+# 10 samples isn't enough for the MEDIAN calibrator to settle on a stable
+# multiplier — the first run learned a 10.5x multiplier from 18 samples and
+# rejected 16 of 16 subsequent tasks. Raising the project-local threshold to
+# 30 covers the first ~2 waves of heterogeneous tasks before enforcement.
+quality_gate:
+  min_calibration_samples: 30
 dispatch:
   spawner_priority: [codex, gemini, antigravity, local]
   spawner_override: codex
