@@ -1,27 +1,29 @@
 # This file lists all source files for the 'luminumbra_common' target.
-# Paths are relative to the 'src/luminumbra_common' directory.
+# Paths are anchored to this file so the list is safe to include from any
+# CMakeLists.txt in the tree.
 set(COMMON_SOURCES
     # Core
-    core/EventBus.cpp
-    core/JobSystem.cpp
-    core/Log.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/common_placeholder.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/EventBus.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/JobSystem.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/Log.cpp
 
     # Net
-    net/NetworkManager.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/net/NetworkManager.cpp
 
     # Scripting
-    scripting/LuaState.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/scripting/LuaState.cpp
 
     # Shield
-    shield/SHIELDEngine.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/shield/SHIELDEngine.cpp
 
     # Systems
-    systems/PhysicsSystem.cpp
-    systems/SHIELD_WorldSystem.cpp
-    systems/WaterSystem.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/systems/PhysicsSystem.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/systems/SHIELD_WorldSystem.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/systems/WaterSystem.cpp
 
     # World
-    world/Chunk.cpp
-    world/GameSession.cpp
-    world/MarchingCubes.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/world/Chunk.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/world/GameSession.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/world/MarchingCubes.cpp
 )
