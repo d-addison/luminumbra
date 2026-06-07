@@ -135,11 +135,6 @@ type = "exists"
 path = "src/luminumbra_client/ui/Rml_UIManager.cpp"
 
 [[pillars.audio_ui_scripting.checks]]
-name = "new component UI manager exists"
-type = "exists"
-path = "src/luminumbra_client/ui/core/UIManager.cpp"
-
-[[pillars.audio_ui_scripting.checks]]
 name = "Lua state bridge exists"
 type = "exists"
 path = "src/luminumbra_common/scripting/LuaState.cpp"

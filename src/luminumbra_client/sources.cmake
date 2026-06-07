@@ -24,19 +24,9 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/WorldLoadingVisualizer.cpp
 
     # UI
-    ${CMAKE_CURRENT_LIST_DIR}/ui/EnhancedUIManager.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ui/Rml_Interfaces.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ui/Rml_UIManager.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/ui/UIIntegration.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/ui/components/common/Button.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/ui/components/common/Input.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/ui/components/common/Panel.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/ui/components/game/WorldList.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/ui/core/UIComponent.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ui/core/UIDataStream.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/ui/core/UIHotReload.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/ui/core/UIManager.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/ui/core/UIStateManager.cpp
 )
 
 # List of vendor source files that need to be compiled with the client.
