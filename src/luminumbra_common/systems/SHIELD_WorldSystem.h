@@ -42,6 +42,7 @@ class WaterSystem;
 class SHIELD_WorldSystem {
 public:
     SHIELD_WorldSystem(JobSystem* job_system, WaterSystem* water_system, const TerrainGenParams& params, int seed);
+    ~SHIELD_WorldSystem();
 
     void GenerateChunkData(::Luminumbra::Chunk& chunk) const;
     void update(entt::registry& registry, const Vec3& camera_position, PhysicsSystem* physics_system);
@@ -57,7 +58,7 @@ public:
     void set_seed(int seed);
     void regenerate_all_chunks(PhysicsSystem* physics_system);
     void clear_world(PhysicsSystem* physics_system);
-    void SetWaterSystem(WaterSystem* water_system) { m_water_system = water_system; }
+    void SetWaterSystem(WaterSystem* water_system);
     std::vector<IVec3> GetInitialChunkLoadList(const Vec3& center_pos) const; // <<< NEW
     JobHandle dispatch_generation_jobs(const std::vector<IVec3>& chunks_to_generate);
     float get_density_at_from_precalculated(const Vec3& world_pos, float terrain_height) const;
@@ -82,12 +83,14 @@ private:
     void update_chunk_activation(const Vec3& player_pos, PhysicsSystem* physics_system);
     // Signature updated to use shared_ptr
     void dispatch_meshing_jobs(const std::vector<std::pair<std::shared_ptr<::Luminumbra::Chunk>, int>>& chunks_to_mesh);
+    void wait_for_meshing_jobs();
     void reinitialize_noise();
 
     int m_update_tick_counter = 0;
 
     // --- Dependencies ---
     JobSystem* m_job_system;
+    JobHandle m_meshing_job_handle;
     TerrainGenParams m_params;
     int m_seed;
 
