@@ -17,6 +17,9 @@ struct TransformComponent {
     Vec3 scale{1.0f};       // 12 bytes
 }; // Total size: 40 bytes
 
+// Marker for the entity whose transform represents the active camera.
+struct ActiveCameraComponent {};
+
 // --- Identity & Hierarchy ---
 
 // A human-readable name for an entity, primarily for debugging and editor identification.

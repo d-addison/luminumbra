@@ -48,6 +48,12 @@ public:
 
     void update(entt::registry& registry, const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& active_chunks);
 
+    /**
+     * @brief Sets the ECS entity whose TransformComponent drives camera-relative water LOD.
+     * @param camera_entity The active camera entity, or entt::null to clear it.
+     */
+    void set_camera_entity(EntityID camera_entity);
+
 
     // --- Public Queries ---
 
@@ -131,6 +137,7 @@ private:
 
     void dispatch_simulation_jobs(const std::vector<Chunk*>& chunks_to_simulate);
     void simulate_chunk_water(const WaterChunkSnapshot& snapshot, const WaterSimNeighbors& neighbors, WaterChunkSimulationOutput& output);
+    Vec3 get_camera_position(entt::registry& registry) const;
 
 
     JobSystem* m_job_system;
@@ -143,6 +150,7 @@ private:
     // This is updated each frame in the `update` call.
 
     const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>* m_active_chunks = nullptr;
+    EntityID m_camera_entity = entt::null;
 
 
 };
