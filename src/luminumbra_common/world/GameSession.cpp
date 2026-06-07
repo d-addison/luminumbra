@@ -4,15 +4,14 @@
 #include "nlohmann/json.hpp" // For parsing JSON
 #include "../systems/PhysicsSystem.h"
 #include "../systems/WaterSystem.h"
+#include "../core/Log.h"
 
 #include <fstream>
-#include <iostream>
 #include <sstream>
 #include <iomanip>
 #include <random>
 #include <filesystem>
 #include <chrono>
-#include "../core/Log.h"
 
 namespace fs = std::filesystem;
 
@@ -31,7 +30,7 @@ GameSession::~GameSession() {
 
 bool GameSession::CreateWorld(const std::string& name, const std::string& seed, const std::string& worldType) {
     if (!m_jobSystem) {
-        std::cerr << "Error: JobSystem not set before creating world!" << std::endl;
+        LUMINUMBRA_CORE_ERROR("JobSystem not set before creating world");
         return false;
     }
 
@@ -48,7 +47,7 @@ bool GameSession::CreateWorld(const std::string& name, const std::string& seed, 
     try {
         fs::create_directories(worldPath);
     } catch (const std::exception& e) {
-        std::cerr << "Failed to create world directory: " << e.what() << std::endl;
+        LUMINUMBRA_CORE_ERROR("Failed to create world directory '{}': {}", worldPath, e.what());
         return false;
     }
 
@@ -60,7 +59,7 @@ bool GameSession::CreateWorld(const std::string& name, const std::string& seed, 
     std::string presetPath = m_rootPath + "worlds/atlas/presets/" + worldType + ".json";
     std::ifstream f(presetPath);
     if (!f.is_open()) {
-        std::cerr << "Error: Failed to open world preset file: " << presetPath << std::endl;
+        LUMINUMBRA_CORE_ERROR("Failed to open world preset file: {}", presetPath);
         return false;
     }
 
@@ -68,8 +67,7 @@ bool GameSession::CreateWorld(const std::string& name, const std::string& seed, 
     try {
         data = nlohmann::json::parse(f);
     } catch (const nlohmann::json::parse_error& e) {
-        // Use your logger here if available, otherwise cerr is fine.
-        std::cerr << "FATAL: Failed to parse world preset JSON '" << presetPath << "'. Error: " << e.what() << std::endl;
+        LUMINUMBRA_CORE_CRITICAL("Failed to parse world preset JSON '{}': {}", presetPath, e.what());
         return false; // Return false to prevent the game from entering a broken state
     }
 
@@ -117,7 +115,7 @@ bool GameSession::CreateWorld(const std::string& name, const std::string& seed, 
     
     // Save world metadata
     if (!SaveWorld()) {
-        std::cerr << "Failed to save world metadata!" << std::endl;
+        LUMINUMBRA_CORE_ERROR("Failed to save world metadata");
         return false;
     }
     return true;
@@ -125,8 +123,7 @@ bool GameSession::CreateWorld(const std::string& name, const std::string& seed, 
 
 bool GameSession::LoadWorld(const std::string& worldId) {
     if (!m_jobSystem) {
-        // FIX: Replaced logging macro with std::cerr
-        std::cerr << "Error: JobSystem not set before loading world!" << std::endl;
+        LUMINUMBRA_CORE_ERROR("JobSystem not set before loading world");
         return false;
     }
 
@@ -134,8 +131,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     std::string metadataPath = worldPath + "/world_info.json";
 
     if (!fs::exists(metadataPath)) {
-        // FIX: Replaced logging macro with std::cerr
-        std::cerr << "Error: World not found: " << worldId << std::endl;
+        LUMINUMBRA_CORE_ERROR("World not found: {}", worldId);
         return false;
     }
 
@@ -153,8 +149,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
         m_metadata.worldType = metadata_json.value("worldType", "default");
         m_metadata.creationTime = metadata_json.value("creationTime", 0);
     } catch (const nlohmann::json::parse_error& e) {
-        // FIX: Replaced logging macro with std::cerr
-        std::cerr << "Error: Failed to parse world metadata file: " << e.what() << std::endl;
+        LUMINUMBRA_CORE_ERROR("Failed to parse world metadata file '{}': {}", metadataPath, e.what());
         return false;
     }
     
@@ -163,8 +158,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     std::string presetPath = m_rootPath + "worlds/atlas/presets/" + m_metadata.worldType + ".json";
     std::ifstream preset_file(presetPath);
     if (!preset_file.is_open()) {
-        // FIX: Replaced logging macro with std::cerr
-        std::cerr << "Error: Failed to open world preset file for loaded world: " << presetPath << std::endl;
+        LUMINUMBRA_CORE_ERROR("Failed to open world preset file for loaded world: {}", presetPath);
         return false;
     }
     
@@ -172,8 +166,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     try {
         preset_json = nlohmann::json::parse(preset_file);
     } catch (const nlohmann::json::parse_error& e) {
-        // FIX: Replaced logging macro with std::cerr
-        std::cerr << "Error: Failed to parse world preset file '" << presetPath << "': " << e.what() << std::endl;
+        LUMINUMBRA_CORE_ERROR("Failed to parse world preset file '{}': {}", presetPath, e.what());
         return false;
     }
 
@@ -196,8 +189,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     m_waterSystem = std::make_unique<Systems::WaterSystem>(m_jobSystem, m_worldSystem.get());
     m_worldSystem->SetWaterSystem(m_waterSystem.get());
 
-    // FIX: Replaced logging macro with std::cout
-    std::cout << "World loaded successfully: " << m_metadata.name << std::endl;
+    LUMINUMBRA_CORE_INFO("World loaded successfully: {}", m_metadata.name);
     return true;
 }
 
@@ -207,7 +199,7 @@ bool GameSession::SaveWorld() {
 
     std::ofstream file(metadataPath);
     if (!file.is_open()) {
-        std::cerr << "Failed to create world metadata file!" << std::endl;
+        LUMINUMBRA_CORE_ERROR("Failed to create world metadata file: {}", metadataPath);
         return false;
     }
 
