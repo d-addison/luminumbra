@@ -1,88 +1,125 @@
 #include "MarchingCubes.h"
 #include <vector>
 #include <cmath> 
-
 #include "world/Chunk.h"
 #include "../../../include/luminumbra/core/Types.h"
 #include <glm/glm.hpp>
 #include "systems/SHIELD_WorldSystem.h"
+#include "systems/WaterSystem.h"
+#include <unordered_map>
+#include "../core/Log.h"
 
-// --- FIX: Wrap the entire file in the Luminumbra namespace ---
 namespace Luminumbra {
+namespace World::MarchingCubes {
 
-// Anonymous namespace to keep helper structures and tables local to this file
-namespace {
+// ===================== CORE MARCHING CUBES HELPERS (REFACTORED) =====================
+namespace { // Anonymous namespace for internal implementation details
+
     // These tables are the core of the Marching Cubes algorithm
     #include "MarchingCubesTables.inl"
 
-    // Represents a single "cube" cell in the 3D grid
     struct GridCell {
-        Vec3 p[8];    // Position of the 8 corners of the cube
-        f32 val[8];   // SDF value at each of the 8 corners
+        Vec3 p[8];  // Position of the 8 corners of the cube
+        f32 val[8]; // SDF value at each of the 8 corners
     };
 
     // Linearly interpolates to find the point on an edge where the surface crosses
     Vec3 VertexInterp(f32 isolevel, Vec3 p1, Vec3 p2, f32 valp1, f32 valp2) {
-        if (std::abs(isolevel - valp1) < 0.00001f) return p1;
-        if (std::abs(isolevel - valp2) < 0.00001f) return p2;
         if (std::abs(valp1 - valp2) < 0.00001f) return p1;
-
         f32 mu = (isolevel - valp1) / (valp2 - valp1);
         return p1 + mu * (p2 - p1);
     }
-}
 
-MaterialType GetMaterialAt(const Systems::SHIELD_WorldSystem& world_system, const Vec3& world_pos) {
-    // Rule 1: Sand near sea level (y=0)
-    // Check this first, as it should override other materials.
-    if (world_pos.y < 2.0f) {
-        // Only place sand if the terrain is actually near sea level
-        float height = world_system.GetTerrainHeightAt(world_pos.x, world_pos.z);
-        if (height < 2.5f) {
-             return MaterialType::Sand;
+    // Determines terrain material based on world position and height
+    MaterialType GetTerrainMaterialAt(const Systems::SHIELD_WorldSystem& world_system, const Vec3& world_pos) {
+        float terrain_height = world_system.GetTerrainHeightAt(world_pos.x, world_pos.z);
+        
+        // Example material logic:
+        if (world_pos.y < 34.0f && terrain_height < 36.0f) { // Beach level
+            return MaterialType::Sand;
+        }
+
+        float depth = terrain_height - world_pos.y;
+        if (depth < 1.0f) return MaterialType::Grass;
+        if (depth < 5.0f) return MaterialType::Soil;
+        
+        return MaterialType::Stone;
+    }
+
+} // anonymous namespace
+
+
+// ===================== TERRAIN MESH GENERATION =====================
+
+void PolygoniseTerrain(
+    const Systems::SHIELD_WorldSystem& world_system,
+    Chunk& chunk,
+    float isolevel,
+    int step
+) {
+    // Debug: Check if chunk has a surface
+    bool has_negative = false;
+    bool has_positive = false;
+    int neg_count = 0, pos_count = 0;
+    float min_val = 999999.0f, max_val = -999999.0f;
+    
+    for (float val : chunk.sdf_data) {
+        if (val < min_val) min_val = val;
+        if (val > max_val) max_val = val;
+        if (val < isolevel) {
+            has_negative = true;
+            neg_count++;
+        }
+        if (val > isolevel) {
+            has_positive = true;
+            pos_count++;
         }
     }
 
-    // Rule 2: Strata (layers based on depth)
-    float height = world_system.GetTerrainHeightAt(world_pos.x, world_pos.z);
-    float depth = height - world_pos.y;
+    if (!has_negative || !has_positive) {
+        // Chunk is entirely above or below the surface
+        chunk.mesh_vertices.clear();
+        chunk.mesh_indices.clear();
+        return;
+    }
 
-    if (depth < 1.0f) return MaterialType::Grass;
-    if (depth < 5.0f) return MaterialType::Soil;
-    
-    // Default to stone
-    return MaterialType::Stone;
-}
-namespace World::MarchingCubes {
-
-void PolygoniseChunk(const Systems::SHIELD_WorldSystem& world_system, Chunk& chunk, float isolevel, int step) {
+    // NOW continue with the actual mesh generation...
     std::vector<VoxelVertex> vertices;
     std::vector<u32> indices;
+    vertices.reserve(CHUNK_VOLUME / 8); 
+    indices.reserve(CHUNK_VOLUME / 4);
 
-    // Reserve memory to avoid reallocations
-    vertices.reserve(CHUNK_VOLUME / 4); 
-    indices.reserve(CHUNK_VOLUME / 2);
+    std::unordered_map<u64, u32> vertex_cache;
+
+    const IVec3 chunk_base_pos = chunk.get_coords() * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+    const u32 y_stride = CHUNK_SIZE_X + 1;
+    const u32 z_stride = (CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1);
 
     const IVec3 corner_offsets[8] = {
         {0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1},
         {0, 1, 0}, {1, 1, 0}, {1, 1, 1}, {0, 1, 1}
     };
     
+    const int edge_connections[12][2] = {
+        {0,1}, {1,2}, {2,3}, {3,0}, {4,5}, {5,6},
+        {6,7}, {7,4}, {0,4}, {1,5}, {2,6}, {3,7}
+    };
+
+    // --- PASS 1: Generate unique vertices and triangle indices ---
     for (int z = 0; z < CHUNK_SIZE_Z; z += step) {
         for (int y = 0; y < CHUNK_SIZE_Y; y += step) {
             for (int x = 0; x < CHUNK_SIZE_X; x += step) {
                 GridCell gridcell;
                 int cube_index = 0;
+                u32 corner_abs_indices[8];
 
                 for (int i = 0; i < 8; ++i) {
-                    // FIX: Corner positions are scaled by the step size.
                     IVec3 corner_pos = IVec3(x, y, z) + (corner_offsets[i] * step);
+                    u32 sdf_idx = corner_pos.x + corner_pos.y * y_stride + corner_pos.z * z_stride;
+                    corner_abs_indices[i] = sdf_idx;
                     
-                    int sdf_idx = corner_pos.x + corner_pos.y * (CHUNK_SIZE_X + 1) + corner_pos.z * (CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1);
-                    
-                    // Prevent reading out of bounds on chunk edges when step > 1
                     if (corner_pos.x > CHUNK_SIZE_X || corner_pos.y > CHUNK_SIZE_Y || corner_pos.z > CHUNK_SIZE_Z) {
-                        gridcell.val[i] = 1.0f; // Treat as air to avoid meshing artifacts at LOD boundaries
+                        gridcell.val[i] = 1.0f;
                     } else {
                         gridcell.val[i] = chunk.sdf_data[sdf_idx];
                     }
@@ -93,65 +130,144 @@ void PolygoniseChunk(const Systems::SHIELD_WorldSystem& world_system, Chunk& chu
                     }
                 }
 
-                if (edgeTable[cube_index] == 0) {
-                    continue;
+                if (edgeTable[cube_index] == 0) continue;
+
+                u32 vert_indices[12];
+                for (int i = 0; i < 12; ++i) {
+                    if (edgeTable[cube_index] & (1 << i)) {
+                        u32 c1_idx = corner_abs_indices[edge_connections[i][0]];
+                        u32 c2_idx = corner_abs_indices[edge_connections[i][1]];
+                        
+                        u64 edge_key = (static_cast<u64>(std::min(c1_idx, c2_idx)) << 32) | std::max(c1_idx, c2_idx);
+
+                        auto it = vertex_cache.find(edge_key);
+                        if (it != vertex_cache.end()) {
+                            vert_indices[i] = it->second;
+                        } else {
+                            Vec3 p1 = gridcell.p[edge_connections[i][0]];
+                            Vec3 p2 = gridcell.p[edge_connections[i][1]];
+                            f32 v1 = gridcell.val[edge_connections[i][0]];
+                            f32 v2 = gridcell.val[edge_connections[i][1]];
+                            Vec3 new_pos = VertexInterp(isolevel, p1, p2, v1, v2);
+
+                            Vec3 world_pos = Vec3(chunk_base_pos) + new_pos;
+                            MaterialType mat = GetTerrainMaterialAt(world_system, world_pos);
+                            
+                            vertices.push_back({new_pos, Vec3(0.0f), static_cast<u32>(mat)});
+                            u32 new_idx = static_cast<u32>(vertices.size() - 1);
+                            vert_indices[i] = new_idx;
+                            vertex_cache[edge_key] = new_idx;
+                        }
+                    }
                 }
 
-                Vec3 vertlist[12];
-                if (edgeTable[cube_index] & 1)    vertlist[0] = VertexInterp(isolevel, gridcell.p[0], gridcell.p[1], gridcell.val[0], gridcell.val[1]);
-                if (edgeTable[cube_index] & 2)    vertlist[1] = VertexInterp(isolevel, gridcell.p[1], gridcell.p[2], gridcell.val[1], gridcell.val[2]);
-                if (edgeTable[cube_index] & 4)    vertlist[2] = VertexInterp(isolevel, gridcell.p[2], gridcell.p[3], gridcell.val[2], gridcell.val[3]);
-                if (edgeTable[cube_index] & 8)    vertlist[3] = VertexInterp(isolevel, gridcell.p[3], gridcell.p[0], gridcell.val[3], gridcell.val[0]);
-                if (edgeTable[cube_index] & 16)   vertlist[4] = VertexInterp(isolevel, gridcell.p[4], gridcell.p[5], gridcell.val[4], gridcell.val[5]);
-                if (edgeTable[cube_index] & 32)   vertlist[5] = VertexInterp(isolevel, gridcell.p[5], gridcell.p[6], gridcell.val[5], gridcell.val[6]);
-                if (edgeTable[cube_index] & 64)   vertlist[6] = VertexInterp(isolevel, gridcell.p[6], gridcell.p[7], gridcell.val[6], gridcell.val[7]);
-                if (edgeTable[cube_index] & 128)  vertlist[7] = VertexInterp(isolevel, gridcell.p[7], gridcell.p[4], gridcell.val[7], gridcell.val[4]);
-                if (edgeTable[cube_index] & 256)  vertlist[8] = VertexInterp(isolevel, gridcell.p[0], gridcell.p[4], gridcell.val[0], gridcell.val[4]);
-                if (edgeTable[cube_index] & 512)  vertlist[9] = VertexInterp(isolevel, gridcell.p[1], gridcell.p[5], gridcell.val[1], gridcell.val[5]);
-                if (edgeTable[cube_index] & 1024) vertlist[10] = VertexInterp(isolevel, gridcell.p[2], gridcell.p[6], gridcell.val[2], gridcell.val[6]);
-                if (edgeTable[cube_index] & 2048) vertlist[11] = VertexInterp(isolevel, gridcell.p[3], gridcell.p[7], gridcell.val[3], gridcell.val[7]);
-
                 for (int i = 0; triTable[cube_index][i] != -1; i += 3) {
-                    Vec3 p1 = vertlist[triTable[cube_index][i]];
-                    Vec3 p2 = vertlist[triTable[cube_index][i+1]];
-                    Vec3 p3 = vertlist[triTable[cube_index][i+2]];
-
-                    Vec3 edge_u = p2 - p1;
-                    Vec3 edge_v = p3 - p1;
-                    Vec3 normal = glm::normalize(glm::cross(edge_u, edge_v));
-
-                    if (glm::dot(normal, normal) < 1e-12f) {
-                        continue; // Skip this degenerate triangle
-                    }
-                    normal = glm::normalize(normal);
-
-                    // --- MATERIAL LOGIC ---
-                    // Calculate the center of the triangle
-                    Vec3 triangle_center = (p1 + p2 + p3) / 3.0f;
-                    // Convert to world space coordinates
-                    Vec3 world_space_pos = triangle_center + Vec3(chunk.get_coords() * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z));
-                    
-                    // Get the material for this position
-                    MaterialType material = GetMaterialAt(world_system, world_space_pos);
-                    // --- END MATERIAL LOGIC ---
-                    
-                    u32 base_index = static_cast<u32>(vertices.size());
-
-                    vertices.push_back({p1, normal, static_cast<u32>(material)});
-                    vertices.push_back({p2, normal, static_cast<u32>(material)});
-                    vertices.push_back({p3, normal, static_cast<u32>(material)});
-
-                    indices.push_back(base_index);
-                    indices.push_back(base_index + 1);
-                    indices.push_back(base_index + 2);
+                    // Use standard marching cubes winding order
+                    indices.push_back(vert_indices[triTable[cube_index][i]]);
+                    indices.push_back(vert_indices[triTable[cube_index][i+1]]);
+                    indices.push_back(vert_indices[triTable[cube_index][i+2]]);
                 }
             }
         }
     }
     
+    // --- PASS 2: Calculate smoothed normals ---
+    for (size_t i = 0; i < indices.size(); i += 3) {
+        VoxelVertex& v1 = vertices[indices[i]];
+        VoxelVertex& v2 = vertices[indices[i+1]];
+        VoxelVertex& v3 = vertices[indices[i+2]];
+
+        Vec3 face_normal = glm::cross(v2.position - v1.position, v3.position - v1.position);
+
+        v1.normal += face_normal;
+        v2.normal += face_normal;
+        v3.normal += face_normal;
+    }
+
+    // --- PASS 3: Normalize all vertex normals ---
+    for (auto& vertex : vertices) {
+        if (glm::dot(vertex.normal, vertex.normal) > 0.0f) {
+            vertex.normal = glm::normalize(vertex.normal);
+        }
+    }
+    
     chunk.mesh_vertices = std::move(vertices);
     chunk.mesh_indices = std::move(indices);
+    
+    // Mesh generation complete
 }
-} // namespace World::MarchingCubes
 
+// ===================== NEW WATER MESH GENERATION =====================
+
+void GenerateWaterMesh(
+    const Systems::WaterSystem& water_system,
+    const Systems::SHIELD_WorldSystem& world_system,
+    Chunk& chunk
+) {
+    std::vector<VoxelVertex> water_vertices;
+    std::vector<u32> water_indices;
+    water_vertices.reserve(WATER_SIM_RESOLUTION_X * WATER_SIM_RESOLUTION_Z * 4);
+    water_indices.reserve(WATER_SIM_RESOLUTION_X * WATER_SIM_RESOLUTION_Z * 6);
+
+    if (!chunk.has_water_sim.load()) {
+        chunk.water_mesh_vertices.clear();
+        chunk.water_mesh_indices.clear();
+        return;
+    }
+
+    const IVec3 chunk_base_pos = chunk.get_coords() * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+    const Vec3 normal = {0.0f, 1.0f, 0.0f}; // Water surface normal is always up
+    const u32 water_mat_id = static_cast<u32>(MaterialType::Water);
+
+    const float cell_width_x = (float)CHUNK_SIZE_X / WATER_SIM_RESOLUTION_X;
+    const float cell_width_z = (float)CHUNK_SIZE_Z / WATER_SIM_RESOLUTION_Z;
+
+    for (int z = 0; z < WATER_SIM_RESOLUTION_Z; ++z) {
+        for (int x = 0; x < WATER_SIM_RESOLUTION_X; ++x) {
+            // Get the water and terrain heights at the four corners of this water grid cell
+            float world_x0 = chunk_base_pos.x + x * cell_width_x;
+            float world_z0 = chunk_base_pos.z + z * cell_width_z;
+            float world_x1 = world_x0 + cell_width_x;
+            float world_z1 = world_z0 + cell_width_z;
+
+            float water_h00 = water_system.get_water_level_at(world_x0, world_z0);
+            float water_h10 = water_system.get_water_level_at(world_x1, world_z0);
+            float water_h01 = water_system.get_water_level_at(world_x0, world_z1);
+            float water_h11 = water_system.get_water_level_at(world_x1, world_z1);
+
+            float terrain_h00 = world_system.GetTerrainHeightAt(world_x0, world_z0);
+            float terrain_h10 = world_system.GetTerrainHeightAt(world_x1, world_z0);
+            float terrain_h01 = world_system.GetTerrainHeightAt(world_x0, world_z1);
+            float terrain_h11 = world_system.GetTerrainHeightAt(world_x1, world_z1);
+            
+            // Only generate a quad if water is above the terrain at any corner
+            if (water_h00 > terrain_h00 || water_h10 > terrain_h10 || water_h01 > terrain_h01 || water_h11 > terrain_h11) {
+                u32 base_idx = static_cast<u32>(water_vertices.size());
+                
+                // Define vertices relative to chunk origin
+                Vec3 p00 = {x * cell_width_x, water_h00 - chunk_base_pos.y, z * cell_width_z};
+                Vec3 p10 = {(x+1) * cell_width_x, water_h10 - chunk_base_pos.y, z * cell_width_z};
+                Vec3 p01 = {x * cell_width_x, water_h01 - chunk_base_pos.y, (z+1) * cell_width_z};
+                Vec3 p11 = {(x+1) * cell_width_x, water_h11 - chunk_base_pos.y, (z+1) * cell_width_z};
+
+                water_vertices.push_back({p00, normal, water_mat_id});
+                water_vertices.push_back({p01, normal, water_mat_id});
+                water_vertices.push_back({p11, normal, water_mat_id});
+                water_vertices.push_back({p10, normal, water_mat_id});
+
+                water_indices.push_back(base_idx);
+                water_indices.push_back(base_idx + 1);
+                water_indices.push_back(base_idx + 2);
+                water_indices.push_back(base_idx);
+                water_indices.push_back(base_idx + 2);
+                water_indices.push_back(base_idx + 3);
+            }
+        }
+    }
+    
+    chunk.water_mesh_vertices = std::move(water_vertices);
+    chunk.water_mesh_indices = std::move(water_indices);
+}
+
+} // namespace World::MarchingCubes
 } // namespace Luminumbra

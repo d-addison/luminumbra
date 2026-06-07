@@ -31,8 +31,7 @@ WorldGenViewer::~WorldGenViewer() {
 }
 
 void WorldGenViewer::RecreateWorldSystem() {
-    // The viewer's world system doesn't need a job system for this simple preview.
-    m_viewerWorldSystem = std::make_unique<Systems::SHIELD_WorldSystem>(nullptr, m_params, m_seed);
+    m_viewerWorldSystem = std::make_unique<Systems::SHIELD_WorldSystem>(nullptr, nullptr, m_params, m_seed);
 }
 
 void WorldGenViewer::UpdateAndRender(bool& is_open, Systems::SHIELD_WorldSystem* main_world_system) {

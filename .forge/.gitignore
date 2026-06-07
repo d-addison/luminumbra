@@ -1,0 +1,6 @@
+# Forge local state
+cache/
+*.log
+pre-compact-checkpoint-*.json
+symbol-index.bin
+verify-cache.json

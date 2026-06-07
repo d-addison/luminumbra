@@ -9,6 +9,7 @@ uniform sampler2D u_noiseTexture;
 
 uniform vec3 u_samples[64];
 uniform mat4 u_projection;
+uniform vec2 u_screenSize; // Dynamic screen size for proper noise scaling
 // The u_view uniform is no longer needed
 
 // SSAO settings
@@ -16,17 +17,15 @@ const int KERNEL_SIZE = 64;
 const float RADIUS = 0.8;
 const float BIAS = 0.025;
 
-// Tile noise texture over screen based on screen size (e.g., 4x4 noise texture)
-const vec2 NOISE_SCALE = vec2(1280.0/4.0, 720.0/4.0); // Adjust to your default resolution
-
 void main()
 {
     // Get fragment data from G-buffer (fragPos and normal are in VIEW SPACE)
     vec3 fragPos = texture(gPosition, TexCoords).rgb;
     vec3 normal = normalize(texture(gNormal, TexCoords).rgb);
     
-    // Get random vector to rotate the sampling kernel
-    vec3 randomVec = normalize(texture(u_noiseTexture, TexCoords * NOISE_SCALE).rgb);
+    // Get random vector to rotate the sampling kernel (using dynamic screen size)
+    vec2 noiseScale = u_screenSize / 4.0; // 4x4 noise texture tiling
+    vec3 randomVec = normalize(texture(u_noiseTexture, TexCoords * noiseScale).rgb);
     
     // Create TBN matrix from view-space vectors to transform samples from tangent space to view space
     vec3 tangent = normalize(randomVec - normal * dot(randomVec, normal));

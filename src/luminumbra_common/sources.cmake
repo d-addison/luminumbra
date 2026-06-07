@@ -18,9 +18,7 @@ set(COMMON_SOURCES
     # Systems
     systems/PhysicsSystem.cpp
     systems/SHIELD_WorldSystem.cpp
-
-    # Vendor
-    vendor/FastNoiseLite.cpp
+    systems/WaterSystem.cpp
 
     # World
     world/Chunk.cpp

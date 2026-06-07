@@ -65,6 +65,11 @@ public:
     glm::mat4 GetViewMatrix() const {
         return glm::lookAt(Position, Position + Front, Up);
     }
+
+    glm::mat4 GetProjectionMatrix(int screen_width, int screen_height) const {
+        if (screen_height == 0) screen_height = 1; // Prevent division by zero
+        return glm::perspective(glm::radians(Zoom), (float)screen_width / (float)screen_height, NEAR_PLANE, FAR_PLANE);
+    }
     
     // --- ADD THESE TWO GETTERS ---
     float GetNearPlane() const { return NEAR_PLANE; }
@@ -116,19 +121,18 @@ public:
             Zoom = 45.0f;
     }
 
-private:
-    // calculates the front vector from the Camera's (updated) Euler Angles
     void updateCameraVectors()
     {
-        // calculate the new Front vector
         glm::vec3 front;
         front.x = cos(glm::radians(Yaw)) * cos(glm::radians(Pitch));
         front.y = sin(glm::radians(Pitch));
         front.z = sin(glm::radians(Yaw)) * cos(glm::radians(Pitch));
         Front = glm::normalize(front);
-        // also re-calculate the Right and Up vector
-        Right = glm::normalize(glm::cross(Front, WorldUp));  // normalize the vectors, because their length gets closer to 0 the more you look up or down which results in slower movement.
+        Right = glm::normalize(glm::cross(Front, WorldUp));
         Up = glm::normalize(glm::cross(Right, Front));
     }
+
+private:
+
 };
 } // namespace Luminumbra::Rendering

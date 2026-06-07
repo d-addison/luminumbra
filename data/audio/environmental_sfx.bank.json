@@ -1,0 +1,104 @@
+{
+  "bank_id": "environmental_sfx",
+  "events": {
+    "wind_light": {
+      "files": ["assets/audio/sfx/weather/wind_light.ogg"],
+      "volume": 0.4,
+      "is_2d": true,
+      "looping": true,
+      "use_reverb": false
+    },
+    "wind_medium": {
+      "files": ["assets/audio/sfx/weather/wind_medium.ogg"],
+      "volume": 0.6,
+      "is_2d": true,
+      "looping": true,
+      "use_reverb": false
+    },
+    "wind_strong": {
+      "files": ["assets/audio/sfx/weather/wind_strong.ogg"],
+      "volume": 0.8,
+      "is_2d": true,
+      "looping": true,
+      "use_reverb": false
+    },
+    "cave_ambience": {
+      "files": ["assets/audio/sfx/environment/cave_drips.ogg", "assets/audio/sfx/environment/cave_echo.ogg"],
+      "volume": 0.3,
+      "is_3d": true,
+      "looping": true,
+      "min_distance": 5.0,
+      "max_distance": 30.0,
+      "use_reverb": true,
+      "reverb_level": 0.7,
+      "reverb_type": "cave"
+    },
+    "forest_ambience": {
+      "files": ["assets/audio/sfx/environment/forest_birds.ogg", "assets/audio/sfx/environment/forest_rustle.ogg"],
+      "volume": 0.4,
+      "is_3d": true,
+      "looping": true,
+      "min_distance": 10.0,
+      "max_distance": 50.0,
+      "use_reverb": true,
+      "reverb_level": 0.2,
+      "reverb_type": "forest"
+    },
+    "water_flow": {
+      "files": ["assets/audio/sfx/environment/water_stream.ogg"],
+      "volume": 0.5,
+      "is_3d": true,
+      "looping": true,
+      "min_distance": 2.0,
+      "max_distance": 25.0,
+      "use_reverb": true,
+      "reverb_level": 0.3,
+      "reverb_type": "water"
+    },
+    "footstep_grass": {
+      "files": [
+        "assets/audio/sfx/player/footstep_grass_1.ogg",
+        "assets/audio/sfx/player/footstep_grass_2.ogg",
+        "assets/audio/sfx/player/footstep_grass_3.ogg",
+        "assets/audio/sfx/player/footstep_grass_4.ogg"
+      ],
+      "volume": 0.8,
+      "pitch_variation": 0.15,
+      "is_3d": true,
+      "min_distance": 1.0,
+      "max_distance": 15.0,
+      "rolloff_factor": 0.8,
+      "doppler_factor": 0.5,
+      "strategy": "random"
+    },
+    "footstep_stone": {
+      "files": [
+        "assets/audio/sfx/player/footstep_stone_1.ogg",
+        "assets/audio/sfx/player/footstep_stone_2.ogg",
+        "assets/audio/sfx/player/footstep_stone_3.ogg"
+      ],
+      "volume": 0.9,
+      "pitch_variation": 0.1,
+      "is_3d": true,
+      "min_distance": 1.0,
+      "max_distance": 20.0,
+      "rolloff_factor": 0.9,
+      "doppler_factor": 0.3,
+      "use_reverb": true,
+      "reverb_level": 0.4,
+      "reverb_type": "cave",
+      "strategy": "random"
+    },
+    "echo_test": {
+      "files": ["assets/audio/sfx/test/echo_clap.ogg"],
+      "volume": 0.7,
+      "is_3d": true,
+      "min_distance": 3.0,
+      "max_distance": 100.0,
+      "rolloff_factor": 1.2,
+      "use_reverb": true,
+      "reverb_level": 0.8,
+      "reverb_type": "canyon"
+    }
+  }
+}

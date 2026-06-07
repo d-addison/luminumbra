@@ -12,12 +12,17 @@ set(CLIENT_INTERNAL_SOURCES
     # Audio
     audio/AudioManagerFactory.cpp
     audio/MiniaudioManager.cpp
+    audio/AudioSpatialCluster.cpp
 
-    # UI
+    # UI - Legacy RmlUi System
     ui/Rml_UIManager.cpp
     ui/Rml_Interfaces.cpp
+    
+    # UI - Enhanced Manager (Simple wrapper)
+    ui/EnhancedUIManager.cpp
 
     # Rendering
+    rendering/WorldLoadingVisualizer.cpp
     rendering/RenderSystem.cpp
     rendering/RenderPipeline.cpp
     rendering/Shader.cpp
@@ -33,4 +38,11 @@ set(CLIENT_VENDOR_SOURCES
     ${CMAKE_SOURCE_DIR}/vendor/imgui/imgui_widgets.cpp
     ${CMAKE_SOURCE_DIR}/vendor/imgui/backends/imgui_impl_glfw.cpp
     ${CMAKE_SOURCE_DIR}/vendor/imgui/backends/imgui_impl_opengl3.cpp
+)
+
+# Main client executable sources
+set(CLIENT_SOURCES
+    ${CLIENT_INTERNAL_SOURCES}
+    ${CLIENT_VENDOR_SOURCES}
+    main_client.cpp
 )

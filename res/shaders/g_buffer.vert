@@ -22,8 +22,8 @@ void main()
     // Calculate view-space position
     vec4 viewPos = view * model * vec4(aPos, 1.0);
     vs_out.FragPos = vec3(viewPos);
-
     vs_out.Normal = normalize(normalMatrix * aNormal);
+    vs_out.MaterialID = aMaterialID;
 
     // Calculate the final clip-space position for rasterization
     gl_Position = projection * viewPos;

@@ -1,11 +1,13 @@
-#pragma once
+#include "RenderSystem.h"
 
 namespace Luminumbra::rendering {
 
-class RenderSystem {
-public:
-    RenderSystem();
-    ~RenderSystem();
-};
+RenderSystem::RenderSystem() {
+    // Constructor
+}
+
+RenderSystem::~RenderSystem() {
+    // Destructor
+}
 
 } // namespace Luminumbra::rendering

@@ -1,4 +1,5 @@
 #include "Chunk.h"
+#include "../core/Log.h"
 
 namespace Luminumbra {
 

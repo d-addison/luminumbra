@@ -7,6 +7,7 @@
 #include "player/PlayerController.h"
 #include "rendering/Camera.h"
 #include "rendering/RenderPipeline.h"
+#include "rendering/WorldLoadingVisualizer.h"
 #include "ui/Rml_UIManager.h"
 #include "audio/AudioManagerFactory.h"
 #include "audio/IAudioManager.h"
@@ -19,6 +20,7 @@
 #include <backends/imgui_impl_glfw.h>
 #include <backends/imgui_impl_opengl3.h>
 #include <memory>
+#include <algorithm>
 #include <filesystem>
 #include "luminumbra_common/components/CoreComponents.h"
 
@@ -26,6 +28,7 @@
 std::unique_ptr<Luminumbra::Rendering::Camera> g_camera;
 std::unique_ptr<Luminumbra::Client::PlayerController> g_playerController;
 std::unique_ptr<Luminumbra::Client::Rml_UIManager> g_uiManager;
+std::unique_ptr<Luminumbra::Client::WorldLoadingVisualizer> g_loading_visualizer;
 
 // --- Forward Declarations ---
 void framebuffer_size_callback(GLFWwindow* window, int width, int height);
@@ -41,6 +44,11 @@ float lastX = 1280 / 2.0f;
 float lastY = 720 / 2.0f;
 bool firstMouse = true;
 bool show_worldgen_viewer = false;
+bool wireframe_mode = false;
+
+std::vector<Luminumbra::IVec3> g_initial_chunks_to_load;
+int g_generation_dispatch_index = 0;
+Luminumbra::JobHandle g_world_gen_handle;
 
 struct WindowState {
     bool isFullscreen = false;
@@ -123,27 +131,38 @@ int main(int argc, char* argv[]) {
     glfwSetWindowUserPointer(window, &renderPipeline);
     glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
 
+    g_loading_visualizer = std::make_unique<Luminumbra::Client::WorldLoadingVisualizer>();
+    g_loading_visualizer->Startup(root_dir, framebufferWidth, framebufferHeight);
+
     g_uiManager->SetWorldCreationCallback([&](const std::string& name, const std::string& seed, const std::string& worldType) {
+        // 1. Synchronously create the world systems and metadata. This is fast.
         if (gameSession->CreateWorld(name, seed, worldType)) {
-            // Hide the UI instead of closing it, so we can return to it later.
-             for (int i = 0; i < g_uiManager->GetContext()->GetNumDocuments(); ++i) {
-                if (auto* doc = g_uiManager->GetContext()->GetDocument(i)) {
-                    doc->Hide();
-                }
+            // Hide the main menu UI
+            for (int i = 0; i < g_uiManager->GetContext()->GetNumDocuments(); ++i) {
+                if (auto* doc = g_uiManager->GetContext()->GetDocument(i)) { doc->Hide(); }
+            }
+            if (Rml::Element* focused_element = g_uiManager->GetContext()->GetFocusElement()) {
+                focused_element->Blur();
             }
 
-            if (g_uiManager && g_uiManager->GetContext()) {
-                // Get the element that currently has focus.
-                if (Rml::Element* focused_element = g_uiManager->GetContext()->GetFocusElement()) {
-                    // Tell that element to release its focus.
-                    focused_element->Blur();
-                }
-            }
+            // 2. Switch to the loading state
+            SetGameState(window, gameStateManager, GameState::WORLD_LOADING);
+            
+            // 3. Get the list of chunks to generate and start the visualizer
+            auto* world_system = gameSession->GetWorldSystem();
+            // Use the actual spawn position for initial chunk loading
+            Luminumbra::Vec3 spawn_pos = gameSession->GetMetadata().spawnPoint;
+            g_initial_chunks_to_load = world_system->GetInitialChunkLoadList(spawn_pos);
 
-            audioManager->StopMusic();
-            g_camera = std::make_unique<Luminumbra::Rendering::Camera>(gameSession->GetMetadata().spawnPoint);
-            g_playerController = std::make_unique<Luminumbra::Client::PlayerController>(window, g_camera.get(), gameSession->GetPhysicsSystem());
-            SetGameState(window, gameStateManager, GameState::IN_GAME);
+            std::sort(g_initial_chunks_to_load.begin(), g_initial_chunks_to_load.end(), [](const auto& a, const auto& b) {
+                if (a.y != b.y) return a.y < b.y;
+                if (a.x != b.x) return a.x < b.x;
+                return a.z < b.z;
+            });
+
+            g_generation_dispatch_index = 0;
+            g_loading_visualizer->BeginVisualization(g_initial_chunks_to_load);
+
         } else {
             LUMINUMBRA_CORE_ERROR("Failed to create world!");
         }
@@ -164,16 +183,56 @@ int main(int argc, char* argv[]) {
 
         glfwPollEvents();
         audioManager->Update();
+
+        if (g_uiManager) {
+            g_uiManager->Update();
+        }
         
         GameState currentState = gameStateManager.GetCurrentState();
         
-        // --- Start a new ImGui frame ---
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
         
-        // --- Update all game logic ---
         switch (currentState) {
+            case GameState::WORLD_LOADING:
+            {
+                const int JOBS_PER_FRAME = 64; // Dispatch more jobs per frame for a faster visual fill
+                if (g_generation_dispatch_index < g_initial_chunks_to_load.size()) {
+                    std::vector<Luminumbra::IVec3> batch_to_generate;
+                    int dispatched_this_frame = 0;
+                    while (g_generation_dispatch_index < g_initial_chunks_to_load.size() && dispatched_this_frame < JOBS_PER_FRAME) {
+                        const auto& coords = g_initial_chunks_to_load[g_generation_dispatch_index];
+                        batch_to_generate.push_back(coords);
+                        g_loading_visualizer->UpdateChunkState(coords, Luminumbra::Client::ChunkLoadVisualState::DISPATCHED);
+                        g_generation_dispatch_index++;
+                        dispatched_this_frame++;
+                    }
+                    if(!batch_to_generate.empty()) {
+                        gameSession->GetWorldSystem()->dispatch_generation_jobs(batch_to_generate);
+                    }
+                }
+
+                float progress = g_initial_chunks_to_load.empty() ? 1.0f : static_cast<float>(g_generation_dispatch_index) / g_initial_chunks_to_load.size();
+                
+                glClearColor(0.01f, 0.02f, 0.05f, 1.0f); // Dark blue background
+                glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+                g_loading_visualizer->UpdateAndRender(deltaTime, "CONSTRUCTING WORLD GEOMETRY...", progress);
+
+                if (g_generation_dispatch_index >= g_initial_chunks_to_load.size()) {
+                    LUMINUMBRA_CORE_INFO("World generation phase complete. Entering world.");
+                    audioManager->StopMusic();
+                    audioManager->PlayOneShot2D("ui_world_loaded"); // Play a sound on completion
+                    g_loading_visualizer->EndVisualization();
+                    g_camera = std::make_unique<Luminumbra::Rendering::Camera>(gameSession->GetMetadata().spawnPoint);
+                    g_playerController = std::make_unique<Luminumbra::Client::PlayerController>(window, g_camera.get(), gameSession->GetPhysicsSystem());
+                    // Clear any cached render data to ensure fresh uploads after our fixes
+                    renderPipeline.clear_all_chunk_data();
+                    SetGameState(window, gameStateManager, GameState::IN_GAME);
+                }
+                break;
+            }
+
             case GameState::IN_GAME:
                 if (g_playerController) g_playerController->Update(deltaTime);
                 if (auto* physics = gameSession->GetPhysicsSystem()) physics->update(deltaTime);
@@ -194,42 +253,36 @@ int main(int argc, char* argv[]) {
                 break;
         }
 
-        g_uiManager->Update();
-
-        // --- Render the main scene ---
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        if (currentState == GameState::IN_GAME) {
-            if (gameSession->GetWorldSystem() && g_camera) {
-                renderPipeline.render_frame(gameSession->GetRegistry(), *gameSession->GetWorldSystem(), *g_camera, deltaTime);
+        if (currentState != GameState::WORLD_LOADING) {
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            if (currentState == GameState::IN_GAME) {
+                if (gameSession->GetWorldSystem() && g_camera) {
+                    renderPipeline.render_frame(gameSession->GetRegistry(), *gameSession->GetWorldSystem(), *g_camera, deltaTime, wireframe_mode);
+                }
+            } else { // Main Menu, etc.
+                g_uiManager->Render();
             }
-        } else {
-            // Render the RmlUi for the main menu, etc.
-            g_uiManager->Render();
         }
         
-        // --- Render all ImGui overlays on top of the main scene ---
-        // FIX #1: Check if the player controller exists and use the '->' operator.
-        if (g_playerController) {
-            g_playerController->RenderDebugUI();
+        if (currentState == GameState::IN_GAME) {
+            if (g_playerController) {
+                g_playerController->RenderDebugUI();
+            }
+            if (show_worldgen_viewer) {
+                worldGenViewer->UpdateAndRender(show_worldgen_viewer, gameSession->GetWorldSystem());
+            }
         }
         
-        if (show_worldgen_viewer) {
-            worldGenViewer->UpdateAndRender(show_worldgen_viewer, gameSession->GetWorldSystem());
-        }
-
-        // FIX #2: Removed the redundant ImGui::NewFrame() block from here.
-
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
         glfwSwapBuffers(window);
-        // NOTE: You have two glfwPollEvents() per loop. One at the top is usually sufficient.
-        // glfwPollEvents(); 
     }
 
     g_playerController.reset();
     g_camera.reset();
     g_uiManager->Shutdown();
+    g_loading_visualizer->Shutdown(); // <<< NEW
     audioManager->Shutdown();
     jobSystem.shutdown();
     ImGui_ImplOpenGL3_Shutdown();
@@ -250,6 +303,10 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
     }
     if (key == GLFW_KEY_F11 && action == GLFW_PRESS) {
         ToggleFullscreen(window, g_windowState);
+        return;
+    }
+    if (key == GLFW_KEY_F9 && action == GLFW_PRESS) {
+        wireframe_mode = !wireframe_mode;
         return;
     }
 
@@ -311,6 +368,7 @@ void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
         return;
     }
     if (g_camera) g_camera->ProcessMouseScroll((float)yoffset);
+    if (g_playerController) g_playerController->ProcessMouseScroll(yoffset);
 }
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height) {

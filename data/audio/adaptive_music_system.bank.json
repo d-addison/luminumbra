@@ -1,0 +1,545 @@
+{
+  "bank_info": {
+    "name": "Adaptive Music System",
+    "version": "1.0",
+    "description": "Dynamic, layered music system that adapts to gameplay state, environment, and player actions with seamless transitions",
+    "format": "complex_layered",
+    "max_simultaneous_layers": 16,
+    "crossfade_time_default": 2.0
+  },
+
+  "music_contexts": {
+    "exploration_overworld": {
+      "description": "Peaceful exploration in open world areas",
+      "layers": [
+        {
+          "name": "ambient_base",
+          "files": ["assets/audio/music/exploration/ambient_drone_c.ogg"],
+          "volume": 0.4,
+          "pitch": 1.0,
+          "loop": true,
+          "fade_in": 3.0,
+          "fade_out": 2.0,
+          "trigger_condition": "always",
+          "priority": 1
+        },
+        {
+          "name": "melodic_theme",
+          "files": [
+            "assets/audio/music/exploration/main_theme_soft.ogg",
+            "assets/audio/music/exploration/wanderer_melody.ogg",
+            "assets/audio/music/exploration/discovery_theme.ogg"
+          ],
+          "volume": 0.6,
+          "pitch_variation": 0.02,
+          "loop": true,
+          "fade_in": 4.0,
+          "fade_out": 3.0,
+          "trigger_condition": "parameter",
+          "trigger_parameter": "exploration_mood",
+          "trigger_value": 0.3,
+          "strategy": "random",
+          "crossfade_between_variations": true,
+          "crossfade_time": 8.0,
+          "priority": 2
+        },
+        {
+          "name": "nature_harmony",
+          "files": [
+            "assets/audio/music/exploration/wind_chimes.ogg",
+            "assets/audio/music/exploration/bird_harmonics.ogg",
+            "assets/audio/music/exploration/forest_whispers.ogg"
+          ],
+          "volume": 0.3,
+          "pitch": 1.0,
+          "loop": true,
+          "trigger_condition": "environment",
+          "trigger_environment": "forest",
+          "strategy": "layered",
+          "max_simultaneous": 2,
+          "priority": 3
+        }
+      ],
+      "adaptive_parameters": {
+        "time_of_day": {
+          "type": "continuous",
+          "range": [0.0, 24.0],
+          "effects": {
+            "ambient_base": {"volume_curve": "sine_wave", "pitch_range": [0.95, 1.05]},
+            "melodic_theme": {"filter_frequency": [800, 4000]}
+          }
+        },
+        "player_elevation": {
+          "type": "continuous",
+          "range": [-100.0, 500.0],
+          "effects": {
+            "nature_harmony": {"reverb_wet": [0.1, 0.6]},
+            "ambient_base": {"pitch_shift": [-0.1, 0.1]}
+          }
+        }
+      }
+    },
+
+    "exploration_underground": {
+      "description": "Cave and underground exploration with tension",
+      "layers": [
+        {
+          "name": "cave_ambience",
+          "files": ["assets/audio/music/underground/deep_cave_drone.ogg"],
+          "volume": 0.5,
+          "pitch": 0.9,
+          "loop": true,
+          "fade_in": 5.0,
+          "fade_out": 4.0,
+          "trigger_condition": "always",
+          "filter_type": "lowpass",
+          "filter_frequency": 600.0,
+          "priority": 1
+        },
+        {
+          "name": "mystery_melody",
+          "files": [
+            "assets/audio/music/underground/crystal_echoes.ogg",
+            "assets/audio/music/underground/depths_unknown.ogg"
+          ],
+          "volume": 0.4,
+          "pitch_variation": 0.05,
+          "loop": true,
+          "fade_in": 6.0,
+          "fade_out": 5.0,
+          "trigger_condition": "parameter",
+          "trigger_parameter": "depth_level",
+          "trigger_value": 10.0,
+          "strategy": "sequential",
+          "priority": 2
+        },
+        {
+          "name": "tension_layers",
+          "files": [
+            "assets/audio/music/underground/distant_rumble.ogg",
+            "assets/audio/music/underground/whispered_warnings.ogg"
+          ],
+          "volume": 0.2,
+          "pitch": 1.0,
+          "loop": true,
+          "trigger_condition": "parameter",
+          "trigger_parameter": "danger_proximity",
+          "trigger_value": 0.6,
+          "strategy": "layered",
+          "priority": 4
+        }
+      ]
+    },
+
+    "combat_encounter": {
+      "description": "Dynamic combat music with intensity scaling",
+      "layers": [
+        {
+          "name": "combat_base",
+          "files": ["assets/audio/music/combat/battle_drums_base.ogg"],
+          "volume": 0.8,
+          "pitch": 1.0,
+          "loop": true,
+          "fade_in": 0.5,
+          "fade_out": 1.0,
+          "trigger_condition": "always",
+          "priority": 1
+        },
+        {
+          "name": "intensity_low",
+          "files": [
+            "assets/audio/music/combat/skirmish_strings.ogg",
+            "assets/audio/music/combat/light_battle.ogg"
+          ],
+          "volume": 0.6,
+          "pitch": 1.0,
+          "loop": true,
+          "trigger_condition": "parameter",
+          "trigger_parameter": "combat_intensity",
+          "trigger_range": [0.0, 0.4],
+          "priority": 2
+        },
+        {
+          "name": "intensity_medium",
+          "files": [
+            "assets/audio/music/combat/fierce_engagement.ogg",
+            "assets/audio/music/combat/warrior_surge.ogg"
+          ],
+          "volume": 0.7,
+          "pitch": 1.05,
+          "loop": true,
+          "trigger_condition": "parameter",
+          "trigger_parameter": "combat_intensity",
+          "trigger_range": [0.4, 0.7],
+          "priority": 2
+        },
+        {
+          "name": "intensity_high",
+          "files": [
+            "assets/audio/music/combat/epic_battle.ogg",
+            "assets/audio/music/combat/boss_fight_fury.ogg"
+          ],
+          "volume": 0.9,
+          "pitch": 1.1,
+          "loop": true,
+          "trigger_condition": "parameter",
+          "trigger_parameter": "combat_intensity",
+          "trigger_range": [0.7, 1.0],
+          "priority": 2
+        },
+        {
+          "name": "victory_stinger",
+          "files": ["assets/audio/music/combat/victory_flourish.ogg"],
+          "volume": 1.0,
+          "pitch": 1.0,
+          "loop": false,
+          "trigger_condition": "event",
+          "trigger_event": "combat_victory",
+          "priority": 5
+        },
+        {
+          "name": "defeat_transition",
+          "files": ["assets/audio/music/combat/somber_retreat.ogg"],
+          "volume": 0.8,
+          "pitch": 0.9,
+          "loop": false,
+          "trigger_condition": "event",
+          "trigger_event": "player_defeat",
+          "priority": 5
+        }
+      ],
+      "adaptive_parameters": {
+        "enemy_count": {
+          "type": "discrete",
+          "range": [1, 10],
+          "effects": {
+            "combat_base": {"volume_multiplier": [1.0, 1.5]},
+            "intensity_high": {"trigger_threshold_modifier": [-0.2, 0.0]}
+          }
+        },
+        "player_health_percentage": {
+          "type": "continuous",
+          "range": [0.0, 1.0],
+          "effects": {
+            "combat_base": {"pitch_shift": [-0.1, 0.05]},
+            "intensity_high": {"volume_curve": "inverse_health"}
+          }
+        }
+      }
+    },
+
+    "atmospheric_weather": {
+      "description": "Weather-responsive atmospheric music layers",
+      "layers": [
+        {
+          "name": "clear_sky_base",
+          "files": ["assets/audio/music/weather/sunny_ambience.ogg"],
+          "volume": 0.5,
+          "pitch": 1.0,
+          "loop": true,
+          "trigger_condition": "weather",
+          "trigger_weather": "clear",
+          "fade_in": 8.0,
+          "fade_out": 8.0,
+          "priority": 1
+        },
+        {
+          "name": "rain_atmosphere",
+          "files": [
+            "assets/audio/music/weather/gentle_rain_melody.ogg",
+            "assets/audio/music/weather/storm_approaching.ogg"
+          ],
+          "volume": 0.6,
+          "pitch": 0.98,
+          "loop": true,
+          "trigger_condition": "weather",
+          "trigger_weather": ["light_rain", "heavy_rain", "storm"],
+          "strategy": "weather_intensity_scaling",
+          "fade_in": 12.0,
+          "fade_out": 10.0,
+          "priority": 2
+        },
+        {
+          "name": "wind_harmonics",
+          "files": ["assets/audio/music/weather/wind_song.ogg"],
+          "volume": 0.3,
+          "pitch": 1.0,
+          "loop": true,
+          "trigger_condition": "parameter",
+          "trigger_parameter": "wind_strength",
+          "trigger_value": 0.4,
+          "volume_follows_parameter": true,
+          "pitch_follows_parameter": true,
+          "pitch_range": [0.9, 1.15],
+          "priority": 3
+        },
+        {
+          "name": "thunder_accents",
+          "files": [
+            "assets/audio/music/weather/distant_thunder_musical.ogg",
+            "assets/audio/music/weather/storm_crescendo.ogg"
+          ],
+          "volume": 0.4,
+          "pitch": 1.0,
+          "loop": false,
+          "trigger_condition": "event",
+          "trigger_event": "lightning_strike",
+          "strategy": "random",
+          "priority": 6
+        }
+      ]
+    },
+
+    "discovery_wonder": {
+      "description": "Magical discovery and wonder themes for special locations",
+      "layers": [
+        {
+          "name": "wonder_base",
+          "files": ["assets/audio/music/discovery/ethereal_pad.ogg"],
+          "volume": 0.4,
+          "pitch": 1.0,
+          "loop": true,
+          "fade_in": 6.0,
+          "fade_out": 5.0,
+          "trigger_condition": "always",
+          "filter_type": "none",
+          "priority": 1
+        },
+        {
+          "name": "crystalline_melody",
+          "files": [
+            "assets/audio/music/discovery/crystal_cave_symphony.ogg",
+            "assets/audio/music/discovery/ancient_magic_theme.ogg",
+            "assets/audio/music/discovery/lost_civilization.ogg"
+          ],
+          "volume": 0.7,
+          "pitch_variation": 0.03,
+          "loop": true,
+          "fade_in": 8.0,
+          "fade_out": 6.0,
+          "trigger_condition": "location_type",
+          "trigger_location": ["crystal_cave", "ancient_ruins", "magical_grove"],
+          "strategy": "location_appropriate",
+          "priority": 2
+        },
+        {
+          "name": "choir_ethereal",
+          "files": ["assets/audio/music/discovery/voices_of_wonder.ogg"],
+          "volume": 0.3,
+          "pitch": 1.0,
+          "loop": true,
+          "trigger_condition": "parameter",
+          "trigger_parameter": "discovery_significance",
+          "trigger_value": 0.7,
+          "fade_in": 10.0,
+          "fade_out": 8.0,
+          "priority": 3
+        },
+        {
+          "name": "revelation_stinger",
+          "files": [
+            "assets/audio/music/discovery/moment_of_discovery.ogg",
+            "assets/audio/music/discovery/ancient_power_awakens.ogg"
+          ],
+          "volume": 1.0,
+          "pitch": 1.0,
+          "loop": false,
+          "trigger_condition": "event",
+          "trigger_event": "major_discovery",
+          "strategy": "discovery_type_appropriate",
+          "priority": 7
+        }
+      ]
+    },
+
+    "crafting_building": {
+      "description": "Peaceful, focused music for crafting and building activities",
+      "layers": [
+        {
+          "name": "workshop_ambience",
+          "files": ["assets/audio/music/crafting/peaceful_work.ogg"],
+          "volume": 0.5,
+          "pitch": 1.0,
+          "loop": true,
+          "fade_in": 4.0,
+          "fade_out": 3.0,
+          "trigger_condition": "always",
+          "priority": 1
+        },
+        {
+          "name": "rhythmic_working",
+          "files": [
+            "assets/audio/music/crafting/hammer_rhythm.ogg",
+            "assets/audio/music/crafting/steady_progress.ogg"
+          ],
+          "volume": 0.4,
+          "pitch": 1.0,
+          "loop": true,
+          "trigger_condition": "activity",
+          "trigger_activity": "crafting",
+          "strategy": "activity_type_matching",
+          "priority": 2
+        },
+        {
+          "name": "completion_flourish",
+          "files": ["assets/audio/music/crafting/item_completed.ogg"],
+          "volume": 0.8,
+          "pitch": 1.0,
+          "loop": false,
+          "trigger_condition": "event",
+          "trigger_event": "crafting_success",
+          "priority": 5
+        }
+      ]
+    }
+  },
+
+  "transition_rules": {
+    "exploration_to_combat": {
+      "crossfade_time": 1.0,
+      "priority": "combat_takes_precedence",
+      "fade_out_exploration_layers": ["melodic_theme", "nature_harmony"],
+      "keep_exploration_layers": ["ambient_base"],
+      "volume_duck_kept_layers": 0.3
+    },
+    "combat_to_exploration": {
+      "crossfade_time": 4.0,
+      "victory_delay": 2.0,
+      "defeat_delay": 1.0,
+      "gradual_restoration": true,
+      "restoration_time": 8.0
+    },
+    "weather_changes": {
+      "crossfade_time": 15.0,
+      "smooth_parameter_interpolation": true,
+      "maintain_base_layers": true
+    },
+    "underground_surface_transition": {
+      "crossfade_time": 6.0,
+      "depth_threshold": 5.0,
+      "reverb_transition": true
+    }
+  },
+
+  "global_adaptive_parameters": {
+    "time_of_day": {
+      "description": "24-hour cycle affecting all music contexts",
+      "type": "continuous",
+      "range": [0.0, 24.0],
+      "update_frequency": 0.1,
+      "global_effects": {
+        "volume_modifier": {
+          "dawn": {"time": 6.0, "volume": 1.1},
+          "day": {"time": 12.0, "volume": 1.0},
+          "dusk": {"time": 18.0, "volume": 1.2},
+          "night": {"time": 0.0, "volume": 0.8}
+        },
+        "pitch_modifier": {
+          "dawn": {"time": 6.0, "pitch": 1.02},
+          "day": {"time": 12.0, "pitch": 1.0},
+          "dusk": {"time": 18.0, "pitch": 0.98},
+          "night": {"time": 0.0, "pitch": 0.95}
+        }
+      }
+    },
+    "season": {
+      "description": "Seasonal variations in music character",
+      "type": "discrete",
+      "values": ["spring", "summer", "autumn", "winter"],
+      "global_effects": {
+        "spring": {"pitch_shift": 0.02, "reverb_dry": 0.8},
+        "summer": {"volume_boost": 0.1, "brightness": 1.1},
+        "autumn": {"warmth": 1.2, "reverb_wet": 1.1},
+        "winter": {"pitch_shift": -0.03, "brightness": 0.9}
+      }
+    },
+    "player_stress_level": {
+      "description": "Adaptive music based on player stress/tension",
+      "type": "continuous",
+      "range": [0.0, 1.0],
+      "calculation": "weighted_average",
+      "factors": {
+        "health_percentage": {"weight": 0.3, "inverse": true},
+        "recent_damage": {"weight": 0.2, "decay_time": 10.0},
+        "enemy_proximity": {"weight": 0.3, "max_distance": 50.0},
+        "resource_scarcity": {"weight": 0.2}
+      },
+      "global_effects": {
+        "high_stress": {"tempo_increase": 1.1, "volume_boost": 0.15, "tension_layers": true},
+        "low_stress": {"tempo_decrease": 0.95, "volume_duck": 0.9, "calm_enhancement": true}
+      }
+    }
+  },
+
+  "procedural_music_generation": {
+    "enable_procedural": true,
+    "procedural_contexts": ["exploration_extended", "ambient_background"],
+    "generation_parameters": {
+      "base_key": "C_minor",
+      "allowed_keys": ["C_minor", "G_minor", "F_major", "Bb_major"],
+      "tempo_range": [60, 120],
+      "time_signatures": ["4/4", "3/4", "6/8"],
+      "harmonic_complexity": 0.6,
+      "melodic_range": 2.0
+    },
+    "generative_layers": {
+      "harmonic_foundation": {
+        "type": "chord_progression",
+        "complexity": "medium",
+        "progression_length": [4, 8],
+        "voice_count": [2, 4]
+      },
+      "ambient_texture": {
+        "type": "noise_based",
+        "filter_type": "bandpass",
+        "frequency_range": [200, 2000],
+        "modulation_rate": 0.3
+      },
+      "rhythmic_pulse": {
+        "type": "percussive",
+        "density": "sparse",
+        "pattern_complexity": 0.4
+      }
+    }
+  },
+
+  "performance_settings": {
+    "max_simultaneous_contexts": 2,
+    "max_layers_per_context": 8,
+    "crossfade_buffer_size": 2048,
+    "parameter_update_rate": 30,
+    "streaming_lookahead_time": 5.0,
+    "memory_budget_mb": 128,
+    "cpu_budget_percentage": 8.0,
+    "quality_scaling": {
+      "high_performance": {
+        "sample_rate": 48000,
+        "bit_depth": 24,
+        "enable_convolution_reverb": true,
+        "max_simultaneous_layers": 16
+      },
+      "medium_performance": {
+        "sample_rate": 44100,
+        "bit_depth": 16,
+        "enable_convolution_reverb": true,
+        "max_simultaneous_layers": 12
+      },
+      "low_performance": {
+        "sample_rate": 22050,
+        "bit_depth": 16,
+        "enable_convolution_reverb": false,
+        "max_simultaneous_layers": 8
+      }
+    }
+  },
+
+  "debug_features": {
+    "enable_music_debug": true,
+    "visualize_layer_states": true,
+    "parameter_monitoring": true,
+    "transition_logging": true,
+    "performance_profiling": true,
+    "manual_context_override": true,
+    "layer_solo_mute": true
+  }
+}

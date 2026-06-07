@@ -3,6 +3,7 @@
 #include "../core/JobSystem.h"
 #include "nlohmann/json.hpp" // For parsing JSON
 #include "../systems/PhysicsSystem.h"
+#include "../systems/WaterSystem.h"
 
 #include <fstream>
 #include <iostream>
@@ -88,17 +89,37 @@ bool GameSession::CreateWorld(const std::string& name, const std::string& seed, 
     params.cave_frequency = gen_params["features"].value("cave_frequency", 0.02f);
     
     int world_seed = StringToSeed(m_metadata.seed);
+    LUMINUMBRA_CORE_INFO("Loaded world preset '{}': height_offset={}, amplitude={}, caves={}", 
+        worldType, params.height_offset, params.base_amplitude, params.caves_enabled);
 
-    // Initialize world system with the loaded parameters and seed
-    m_worldSystem = std::make_unique<Systems::SHIELD_WorldSystem>(m_jobSystem, params, world_seed);
+     // 1. Create the World System
+    m_worldSystem = std::make_unique<Systems::SHIELD_WorldSystem>(m_jobSystem, nullptr, params, world_seed);
 
+    // 2. Create the Water System
+    m_waterSystem = std::make_unique<Systems::WaterSystem>(m_jobSystem, m_worldSystem.get());
+
+    // 3. Link them together
+    m_worldSystem->SetWaterSystem(m_waterSystem.get());
+
+    // Calculate appropriate spawn point based on actual terrain height
+    float spawn_x = 0.0f;
+    float spawn_z = 0.0f;
+    float terrain_height = m_worldSystem->GetTerrainHeightAt(spawn_x, spawn_z);
+    
+    // TEMP: Spawn much higher to see terrain from above and debug visibility
+    m_metadata.spawnPoint = Vec3(spawn_x, terrain_height + 50.0f, spawn_z);
+    LUMINUMBRA_CORE_WARN("SPAWN DEBUG: Moving player to Y={} (terrain={} + 50)", 
+        m_metadata.spawnPoint.y, terrain_height);
+    
+    LUMINUMBRA_CORE_INFO("World created successfully: {} (ID: {})", m_metadata.name, m_metadata.worldId);
+    LUMINUMBRA_CORE_INFO("Spawn point set to ({}, {}, {}) - terrain height: {}", 
+        m_metadata.spawnPoint.x, m_metadata.spawnPoint.y, m_metadata.spawnPoint.z, terrain_height);
+    
     // Save world metadata
     if (!SaveWorld()) {
         std::cerr << "Failed to save world metadata!" << std::endl;
         return false;
     }
-
-    LUMINUMBRA_CORE_INFO("World created successfully: {} (ID: {})", m_metadata.name, m_metadata.worldId);
     return true;
 }
 
@@ -171,7 +192,9 @@ bool GameSession::LoadWorld(const std::string& worldId) {
 
     int world_seed = StringToSeed(m_metadata.seed);
 
-    m_worldSystem = std::make_unique<Systems::SHIELD_WorldSystem>(m_jobSystem, params, world_seed);
+    m_worldSystem = std::make_unique<Systems::SHIELD_WorldSystem>(m_jobSystem, nullptr, params, world_seed);
+    m_waterSystem = std::make_unique<Systems::WaterSystem>(m_jobSystem, m_worldSystem.get());
+    m_worldSystem->SetWaterSystem(m_waterSystem.get());
 
     // FIX: Replaced logging macro with std::cout
     std::cout << "World loaded successfully: " << m_metadata.name << std::endl;

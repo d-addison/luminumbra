@@ -3,71 +3,73 @@
 #include "../../../include/luminumbra/core/Types.h"
 #include <vector>
 #include <atomic>
+#include <mutex>
+#include "core/Log.h"
 
 namespace Luminumbra {
 
-// Represents the state of a chunk in its lifecycle.
-// This is atomic to allow thread-safe state transitions between the main thread
-// and the job system (e.g., during meshing).
 enum class ChunkState : u8 {
-    Unloaded,      // No data in memory.
-    Loading,       // Data is being loaded from disk or generated.
-    Idle,          // Data is loaded, but no mesh has been generated.
-    Meshing,       // A job is actively generating the mesh for this chunk.
-    Ready,         // Mesh is generated and ready for rendering.
-    Unloading      // Marked for removal, data will be freed soon.
+    Unloaded, Loading, Idle, Meshing, Ready, Unloading
 };
 
-// A single vertex for a chunk's polygonal mesh.
-// This layout is optimized for sending directly to the GPU.
 struct VoxelVertex {
-    Vec3 position;   // 12 bytes
-    Vec3 normal;     // 12 bytes
-    u32 material_id; // 4 bytes (e.g., grass, rock, dirt)
-}; // Total size: 28 bytes
+    Vec3 position;
+    Vec3 normal;
+    u32 material_id;
+};
 
 class Chunk {
 public:
-    // --- Constructor & Identifier ---
     Chunk(const IVec3& coords);
     const IVec3& get_coords() const { return m_coords; }
     ChunkID get_id() const { return m_id; }
 
-    // --- State Management ---
-    ChunkState get_state() const { return m_state.load(); }
-    void set_state(ChunkState new_state) { m_state.store(new_state); }
+    // Thread-safe state management
+    ChunkState get_state() const { 
+        std::lock_guard<std::mutex> lock(m_state_mutex);
+        return m_state; 
+    }
+    
+    void set_state(ChunkState new_state) { 
+        std::lock_guard<std::mutex> lock(m_state_mutex);
+        m_state = new_state; 
+    }
 
-    // --- Voxel Data ---
-    // The core simulation data. A tightly packed array representing the
-    // Signed Distance Field (SDF) value for each voxel in the chunk.
-    // A positive value is "outside" a surface, negative is "inside".
-    // This is the source of truth for both meshing and far-field ray tracing.
-    // **Optimization:** This could be a custom bit-packed array later,
-    // but a simple float array is sufficient for the initial implementation.
+    // --- Voxel & SDF Data ---
     std::vector<f32> sdf_data;
+    std::vector<f32> heightmap_data;
 
     // --- Render Data ---
-    // These vectors are populated by the Marching Cubes algorithm.
-    // They are empty until the chunk's state is 'Ready'.
     std::vector<VoxelVertex> mesh_vertices;
     std::vector<u32> mesh_indices;
+    std::vector<VoxelVertex> water_mesh_vertices;
+    std::vector<u32> water_mesh_indices;
+
     std::atomic<bool> has_collision{false};
+    std::atomic<int> current_lod{-1};
+    std::atomic<u32> mesh_version{0};
+    
+    // --- Water Simulation Data ---
+    std::vector<f32> water_level_data;
+    std::vector<Vec2> water_flow_data;
+    std::vector<f32> water_sim_terrain_height;
+    std::atomic<bool> has_water_sim{false};
+    std::atomic<int> current_water_resolution{8}; // Current water grid resolution (4, 8, 16, or 32)
 
-    // The current LOD level of the generated mesh. -1 means not yet meshed.
-    std::atomic<int> current_lod{ -1 };
-    // A version counter for the mesh data. When we re-mesh at a new LOD,
-    // we increment this. The renderer uses it to detect updated meshes.
-    std::atomic<u32> mesh_version{ 0 };
+    // <<< OPTIMIZATION: Activity Culling State >>>
+    std::atomic<bool> is_water_sleeping{false};
+    // Max change in water level from the last sim tick. Only written by the chunk's own sim job.
+    float max_water_delta_last_tick{0.0f};
+    // How many consecutive ticks the water has been calm. Only accessed by the main thread.
+    int ticks_below_threshold{0};
 
-    // Helper function to compute a unique 64-bit ID from 3D coordinates.
     static ChunkID calculate_id(const IVec3& coords);
 
 private:
-    const IVec3 m_coords; // Integer coordinates in the world grid.
-    const ChunkID m_id;   // Pre-calculated unique ID.
-
-    // Thread-safe state for interaction with the job system.
-    std::atomic<ChunkState> m_state;
+    const IVec3 m_coords;
+    const ChunkID m_id;
+    ChunkState m_state;
+    mutable std::mutex m_state_mutex;  // mutable for use in const getter
 };
 
 } // namespace Luminumbra

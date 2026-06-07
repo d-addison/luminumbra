@@ -9,7 +9,7 @@
 
 constexpr int BASE_WORK_BUDGET_EQUIVALENT = 16;
 const int MAX_CHUNKS_TO_PROCESS_PER_FRAME = std::max(1, 
-    static_cast<int>(BASE_WORK_BUDGET_EQUIVALENT / (static_cast<float>(::Luminumbra::CHUNK_VOLUME) / 4096.0f))
+    static_cast<int>(BASE_WORK_BUDGET_EQUIVALENT / (static_cast<float>(Luminumbra::CHUNK_VOLUME) / 4096.0f))
 );
 const int MAX_COLLISION_MESHES_PER_FRAME = 2;
 constexpr size_t MAX_ACTIVE_CHUNKS = 2048;  // Increased from 5 to support proper world streaming
@@ -59,28 +59,31 @@ std::vector<IVec3> SHIELD_WorldSystem::GetInitialChunkLoadList(const Vec3& cente
     // Get the terrain height at the spawn position
     float terrain_height = GetTerrainHeightAt(center_pos.x, center_pos.z);
     
-    // Calculate which chunk contains the terrain
+    // Calculate which chunk contains the spawn position (not just terrain)
+    const IVec3 spawn_chunk_coords = world_to_chunk_coords(center_pos);
     const IVec3 terrain_chunk_coords = world_to_chunk_coords(Vec3(center_pos.x, terrain_height, center_pos.z));
     
     std::vector<IVec3> initial_chunks;
     
-    // Load a 3x3x5 region centered on the terrain
+    // Load a 3x3 region horizontally, and vertically from terrain to spawn + some extra
     const int INITIAL_LOAD_RADIUS = 1;
-    const int INITIAL_LOAD_RADIUS_Y = 2;
+    int min_y = std::min(spawn_chunk_coords.y - 1, terrain_chunk_coords.y - 1);
+    int max_y = std::max(spawn_chunk_coords.y + 1, terrain_chunk_coords.y + 3);  // Extra chunks above terrain
 
-    for (int dy = -INITIAL_LOAD_RADIUS_Y; dy <= INITIAL_LOAD_RADIUS_Y; ++dy) {
+    for (int dy = min_y; dy <= max_y; ++dy) {
         for (int dz = -INITIAL_LOAD_RADIUS; dz <= INITIAL_LOAD_RADIUS; ++dz) {
             for (int dx = -INITIAL_LOAD_RADIUS; dx <= INITIAL_LOAD_RADIUS; ++dx) {
-                // Simple cylindrical check
+                // Simple cylindrical check around spawn position
                 if (dx * dx + dz * dz <= INITIAL_LOAD_RADIUS * INITIAL_LOAD_RADIUS) {
-                    initial_chunks.emplace_back(terrain_chunk_coords + IVec3(dx, dy, dz));
+                    initial_chunks.emplace_back(spawn_chunk_coords + IVec3(dx, dy - spawn_chunk_coords.y, dz));
                 }
             }
         }
     }
     
     // Debug: Log initial chunk loading
-    LUMINUMBRA_CORE_WARN("Loading {} chunks around terrain at Y={}", initial_chunks.size(), terrain_height);
+    LUMINUMBRA_CORE_WARN("Loading {} chunks - Spawn Y={}, Terrain Y={}, Chunk range Y={}..{}", 
+        initial_chunks.size(), center_pos.y, terrain_height, min_y * CHUNK_SIZE_Y, max_y * CHUNK_SIZE_Y);
     
     return initial_chunks;
 }
@@ -100,7 +103,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
     }
 
      // Step 3: Schedule meshing jobs for chunks that need it
-    std::vector<std::pair<std::shared_ptr<::Luminumbra::Chunk>, int>> chunks_to_mesh_jobs;
+    std::vector<std::pair<std::shared_ptr<Luminumbra::Chunk>, int>> chunks_to_mesh_jobs;
     chunks_to_mesh_jobs.reserve(64);
 
     // Chunk state logging removed from hot path - too expensive
@@ -111,9 +114,9 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
 
         ChunkState state = chunk_ptr->get_state();
         
-        if (state == ::Luminumbra::ChunkState::Idle) {
+        if (state == Luminumbra::ChunkState::Idle) {
             needs_meshing = true;
-        } else if (state == ::Luminumbra::ChunkState::Ready) {
+        } else if (state == Luminumbra::ChunkState::Ready) {
             Vec3 chunk_center = (Vec3(chunk_ptr->get_coords()) + 0.5f) * Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
             float dist = glm::distance(camera_position, chunk_center);
             required_lod = get_lod_level_for_distance(dist);
@@ -273,7 +276,7 @@ float SHIELD_WorldSystem::GetTerrainHeightAt(float world_x, float world_z) const
 }
 
 float SHIELD_WorldSystem::get_density_at_from_precalculated(const Vec3& world_pos, float terrain_height) const {
-    float terrain_density = world_pos.y - terrain_height;
+    float terrain_density = terrain_height - world_pos.y;
     if (m_params.caves_enabled) {
         // <<< FIX: The function returns the value directly.
         float cave_val = m_cave_generator->GenSingle3D(world_pos.x * m_params.cave_frequency, world_pos.y * m_params.cave_frequency, world_pos.z * m_params.cave_frequency, m_seed + 1);
@@ -281,7 +284,7 @@ float SHIELD_WorldSystem::get_density_at_from_precalculated(const Vec3& world_po
 
         if (cave_val > m_params.cave_threshold) {
             float cave_density = m_params.cave_carve_value * (cave_val - m_params.cave_threshold);
-            terrain_density = std::max(terrain_density, cave_density);
+            terrain_density = std::min(terrain_density, cave_density);
         }
     }
     return terrain_density;
@@ -299,8 +302,8 @@ float SHIELD_WorldSystem::get_density_at(const Vec3& world_pos) const {
     return get_density_at_from_precalculated(world_pos, terrain_height);
 }
 
-std::vector<::Luminumbra::Chunk*> SHIELD_WorldSystem::get_renderable_chunks() {
-    std::vector<::Luminumbra::Chunk*> renderable;
+std::vector<Luminumbra::Chunk*> SHIELD_WorldSystem::get_renderable_chunks() {
+    std::vector<Luminumbra::Chunk*> renderable;
     renderable.reserve(m_chunks.size());
     
     int total_chunks = 0;
@@ -309,7 +312,7 @@ std::vector<::Luminumbra::Chunk*> SHIELD_WorldSystem::get_renderable_chunks() {
     
     for (auto const& [id, chunk_ptr] : m_chunks) {
         total_chunks++;
-        if (chunk_ptr->get_state() == ::Luminumbra::ChunkState::Ready) {
+        if (chunk_ptr->get_state() == Luminumbra::ChunkState::Ready) {
             ready_chunks++;
             if (!chunk_ptr->mesh_vertices.empty()) {
                 chunks_with_mesh++;
@@ -325,12 +328,43 @@ std::vector<::Luminumbra::Chunk*> SHIELD_WorldSystem::get_renderable_chunks() {
     return renderable;
 }
 
-void SHIELD_WorldSystem::GenerateChunkData(::Luminumbra::Chunk& chunk) const {
-   const IVec3 base_pos = chunk.get_coords() * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk) const {
+   const IVec3 coords = chunk.get_coords();
+   const IVec3 base_pos = coords * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
    const int size_x = CHUNK_SIZE_X + 1;
    const int size_y = CHUNK_SIZE_Y + 1;
    const int size_z = CHUNK_SIZE_Z + 1;
    const size_t padded_volume = static_cast<size_t>(size_x) * size_y * size_z;
+   
+   // Try GPU generation first
+   if (m_gpu_sdf_callback && m_gpu_sdf_callback(coords, m_params, m_seed, chunk.sdf_data)) {
+       // GPU generation successful - still need to generate heightmap for physics
+       const size_t heightmap_size = static_cast<size_t>(size_x) * size_z;
+       chunk.heightmap_data.resize(heightmap_size);
+       
+       // Generate heightmap from SDF data
+       for (int z = 0; z < size_z; ++z) {
+           for (int x = 0; x < size_x; ++x) {
+               int heightmap_idx = z * size_x + x;
+               
+               // Find surface by marching down through SDF
+               float surface_height = base_pos.y + size_y; // Start from top
+               for (int y = size_y - 1; y >= 0; --y) {
+                   int sdf_idx = z * (size_x * size_y) + y * size_x + x;
+                   if (chunk.sdf_data[sdf_idx] > 0.0f) {
+                       surface_height = base_pos.y + y;
+                       break;
+                   }
+               }
+               chunk.heightmap_data[heightmap_idx] = surface_height;
+           }
+       }
+       
+       chunk.set_state(ChunkState::Idle);
+       return;
+   }
+   
+   // Fallback to CPU generation
    chunk.sdf_data.resize(padded_volume);
 
    const size_t heightmap_size = static_cast<size_t>(size_x) * size_z;
@@ -383,7 +417,7 @@ void SHIELD_WorldSystem::GenerateChunkData(::Luminumbra::Chunk& chunk) const {
 
                // B. Calculate base terrain density
                float current_world_y = base_pos.y + y;
-               float terrain_density = current_world_y - terrain_h;
+               float terrain_density = terrain_h - current_world_y;
 
                // C. Carve caves using the 3D noise buffer
                if (m_params.caves_enabled) {
@@ -393,7 +427,7 @@ void SHIELD_WorldSystem::GenerateChunkData(::Luminumbra::Chunk& chunk) const {
                    float cave_val = (cave_noise[cave_read_idx] + 1.0f) * 0.5f;
                    if (cave_val > m_params.cave_threshold) {
                        float cave_density = m_params.cave_carve_value * (cave_val - m_params.cave_threshold);
-                       terrain_density = std::max(terrain_density, cave_density);
+                       terrain_density = std::min(terrain_density, cave_density);
                    }
                }
                
@@ -410,10 +444,10 @@ void SHIELD_WorldSystem::GenerateChunkData(::Luminumbra::Chunk& chunk) const {
 }
 
 JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<IVec3>& chunks_to_generate) {
-    std::vector<::Luminumbra::Job> jobs;
+    std::vector<Luminumbra::Job> jobs;
     for (const auto& coords : chunks_to_generate) {
-        auto chunk = std::make_shared<::Luminumbra::Chunk>(coords);
-        chunk->set_state(::Luminumbra::ChunkState::Loading);
+        auto chunk = std::make_shared<Luminumbra::Chunk>(coords);
+        chunk->set_state(Luminumbra::ChunkState::Loading);
         m_chunks[chunk->get_id()] = chunk;
 
         // Chunk generation job created
@@ -431,7 +465,7 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<IVec3>&
             }
             // Surface detection debug logging removed to prevent segfault
             
-            chunk->set_state(::Luminumbra::ChunkState::Idle);
+            chunk->set_state(Luminumbra::ChunkState::Idle);
         });
     }
     
@@ -466,19 +500,19 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<IVec3>&
     return handle; // Return the handle (will be default-constructed/invalid if no jobs were dispatched)
 }
 
-void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<std::pair<std::shared_ptr<::Luminumbra::Chunk>, int>>& chunks_to_mesh) {
-    std::vector<::Luminumbra::Job> jobs;
+void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<std::pair<std::shared_ptr<Luminumbra::Chunk>, int>>& chunks_to_mesh) {
+    std::vector<Luminumbra::Job> jobs;
     for (const auto& pair : chunks_to_mesh) {
         auto& chunk = pair.first;
         int step = pair.second; // The LOD level is the step size
 
-        chunk->set_state(::Luminumbra::ChunkState::Meshing);
+        chunk->set_state(Luminumbra::ChunkState::Meshing);
         chunk->current_lod.store(step);
 
         jobs.emplace_back([this, chunk, step]() {
             try {
                 // 1. Generate the terrain mesh from the SDF data
-                ::Luminumbra::World::MarchingCubes::PolygoniseTerrain(*this, *chunk, 0.0f, step);
+                Luminumbra::World::MarchingCubes::PolygoniseTerrain(*this, *chunk, 0.0f, step);
                 
                 // Terrain mesh generation debug logging removed to prevent segfault
                 
@@ -492,7 +526,7 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<std::pair<std::
                     /*
                     // Only generate high-detail water mesh for highest LOD terrain
                     if (step == 0 || step == 1) {  // Changed from step == 1
-                        ::Luminumbra::World::MarchingCubes::GenerateWaterMesh(*m_water_system, *this, *chunk);
+                        Luminumbra::World::MarchingCubes::GenerateWaterMesh(*m_water_system, *this, *chunk);
                     } else {
                         chunk->water_mesh_vertices.clear();
                         chunk->water_mesh_indices.clear();
@@ -502,17 +536,17 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<std::pair<std::
 
                 chunk->mesh_version++;
                 chunk->has_collision.store(false); 
-                chunk->set_state(::Luminumbra::ChunkState::Ready);
+                chunk->set_state(Luminumbra::ChunkState::Ready);
                 
                 // Job completion debug logging removed to prevent segfault
             } catch (const std::exception& e) {
                 LUMINUMBRA_CORE_ERROR("MESHING JOB CRASH: Chunk ({},{},{}) failed: {}", 
                     chunk->get_coords().x, chunk->get_coords().y, chunk->get_coords().z, e.what());
-                chunk->set_state(::Luminumbra::ChunkState::Idle); // Reset to allow retry
+                chunk->set_state(Luminumbra::ChunkState::Idle); // Reset to allow retry
             } catch (...) {
                 LUMINUMBRA_CORE_ERROR("MESHING JOB CRASH: Chunk ({},{},{}) failed with unknown exception", 
                     chunk->get_coords().x, chunk->get_coords().y, chunk->get_coords().z);
-                chunk->set_state(::Luminumbra::ChunkState::Idle); // Reset to allow retry
+                chunk->set_state(Luminumbra::ChunkState::Idle); // Reset to allow retry
             }
         });
     }
@@ -558,6 +592,10 @@ IVec3 SHIELD_WorldSystem::world_to_chunk_coords(const Vec3& position) {
         static_cast<int>(std::floor(position.y / CHUNK_SIZE_Y)),
         static_cast<int>(std::floor(position.z / CHUNK_SIZE_Z))
     );
+}
+
+void SHIELD_WorldSystem::SetGPUSDFCallback(std::function<bool(const IVec3&, const TerrainGenParams&, int, std::vector<float>&)> callback) {
+    m_gpu_sdf_callback = callback;
 }
 
 } // namespace Luminumbra::Systems

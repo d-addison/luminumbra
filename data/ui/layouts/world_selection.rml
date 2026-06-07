@@ -1,7 +1,8 @@
 <rml>
     <head>
         <title>Load World - Luminumbra</title>
-        <link type="text/css" href="game_theme.rcss" />
+        <link type="text/css" href="../themes/quantum/quantum-theme.rcss" />
+        <link type="text/css" href="../themes/quantum/components.rcss" />
     </head>
     <body id="world_selection" class="fade-in">
         <div class="container">

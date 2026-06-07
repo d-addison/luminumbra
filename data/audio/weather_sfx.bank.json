@@ -1,0 +1,73 @@
+{
+  "bank_id": "weather_sfx",
+  "streaming": true,
+  "events": {
+    "rain_light": {
+      "files": ["assets/audio/sfx/weather/rain_light_loop.ogg"],
+      "volume": 0.3,
+      "is_2d": true,
+      "looping": true,
+      "use_reverb": false
+    },
+    "rain_heavy": {
+      "files": ["assets/audio/sfx/weather/rain_heavy_loop.ogg"],
+      "volume": 0.6,
+      "is_2d": true,
+      "looping": true,
+      "use_reverb": false
+    },
+    "thunder_distant": {
+      "files": [
+        "assets/audio/sfx/weather/thunder_1.ogg",
+        "assets/audio/sfx/weather/thunder_2.ogg",
+        "assets/audio/sfx/weather/thunder_3.ogg"
+      ],
+      "volume": 0.8,
+      "pitch_variation": 0.1,
+      "is_3d": true,
+      "min_distance": 100.0,
+      "max_distance": 2000.0,
+      "rolloff_factor": 0.5,
+      "use_reverb": true,
+      "reverb_level": 0.9,
+      "reverb_type": "sky",
+      "strategy": "random"
+    },
+    "thunder_close": {
+      "files": [
+        "assets/audio/sfx/weather/thunder_close_1.ogg",
+        "assets/audio/sfx/weather/thunder_close_2.ogg"
+      ],
+      "volume": 1.0,
+      "pitch_variation": 0.05,
+      "is_3d": true,
+      "min_distance": 50.0,
+      "max_distance": 500.0,
+      "rolloff_factor": 0.8,
+      "use_reverb": true,
+      "reverb_level": 0.7,
+      "reverb_type": "outdoor",
+      "strategy": "random"
+    },
+    "wind_through_trees": {
+      "files": ["assets/audio/sfx/weather/wind_trees_loop.ogg"],
+      "volume": 0.4,
+      "is_3d": true,
+      "looping": true,
+      "min_distance": 10.0,
+      "max_distance": 60.0,
+      "use_reverb": true,
+      "reverb_level": 0.2,
+      "reverb_type": "forest"
+    },
+    "wind_howling": {
+      "files": ["assets/audio/sfx/weather/wind_howl_loop.ogg"],
+      "volume": 0.7,
+      "is_2d": true,
+      "looping": true,
+      "use_reverb": true,
+      "reverb_level": 0.4,
+      "reverb_type": "canyon"
+    }
+  }
+}

@@ -1,0 +1,547 @@
+{
+  "bank_id": "complex_environmental_sfx",
+  "version": "2.0",
+  "description": "Layered environmental audio with procedural generation and adaptive behavior",
+  "events": {
+    "forest_ecosystem_day": {
+      "description": "Complete forest soundscape with multiple layers and time-based variation",
+      "strategy": "layered",
+      "volume": 0.6,
+      "is_2d": false,
+      "is_looping": true,
+      "min_distance": 20.0,
+      "max_distance": 150.0,
+      "rolloff_factor": 0.4,
+      "use_reverb": true,
+      "reverb_level": 0.3,
+      "reverb_type": "forest",
+      "adaptive_volume": true,
+      "adaptation_speed": 0.1,
+      "layers": [
+        {
+          "files": ["assets/audio/environment/forest/wind_through_trees_base.ogg"],
+          "volume": 0.8,
+          "pitch_variation": 0.1,
+          "trigger_condition": "always",
+          "filter_type": "lowpass",
+          "filter_frequency": 3000.0
+        },
+        {
+          "files": [
+            "assets/audio/environment/forest/birds_songbirds_morning.ogg",
+            "assets/audio/environment/forest/birds_songbirds_midday.ogg",
+            "assets/audio/environment/forest/birds_songbirds_evening.ogg"
+          ],
+          "volume": 1.0,
+          "pitch_variation": 0.15,
+          "trigger_condition": "parameter",
+          "trigger_value": 0.0,
+          "filter_type": "highpass",
+          "filter_frequency": 1000.0
+        },
+        {
+          "files": ["assets/audio/environment/forest/leaves_rustling_gentle.ogg"],
+          "volume": 0.7,
+          "pitch_variation": 0.2,
+          "trigger_condition": "parameter",
+          "trigger_value": 0.3,
+          "delay": 0.1
+        },
+        {
+          "files": ["assets/audio/environment/forest/insects_cicadas.ogg"],
+          "volume": 0.5,
+          "pitch": 1.1,
+          "trigger_condition": "parameter",
+          "trigger_value": 0.6,
+          "filter_type": "highpass",
+          "filter_frequency": 2000.0
+        },
+        {
+          "files": ["assets/audio/environment/forest/distant_woodpecker.ogg"],
+          "volume": 0.4,
+          "trigger_condition": "random",
+          "trigger_value": 0.1,
+          "delay": 2.0,
+          "pitch_variation": 0.1
+        },
+        {
+          "files": ["assets/audio/environment/forest/branch_creaking.ogg"],
+          "volume": 0.3,
+          "pitch": 0.8,
+          "trigger_condition": "parameter",
+          "trigger_value": 0.4,
+          "filter_type": "lowpass",
+          "filter_frequency": 800.0
+        }
+      ],
+      "procedural_params": {
+        "time_of_day": 0.5,
+        "season": 0.5,
+        "weather_intensity": 0.2,
+        "forest_density": 0.8,
+        "wildlife_activity": 0.7
+      },
+      "triggered_events": ["forest_floor_rustle", "distant_animal_calls"],
+      "max_simultaneous_instances": 1,
+      "enable_chorus_effect": true,
+      "chorus_voices": 2.0,
+      "chorus_spread": 0.05
+    },
+
+    "cave_system_complex": {
+      "description": "Multi-layered cave ambience with water features and geological sounds",
+      "strategy": "layered",
+      "volume": 0.8,
+      "is_2d": false,
+      "is_looping": true,
+      "min_distance": 15.0,
+      "max_distance": 80.0,
+      "rolloff_factor": 0.6,
+      "use_reverb": true,
+      "reverb_level": 0.8,
+      "reverb_type": "cave",
+      "adaptive_volume": true,
+      "layers": [
+        {
+          "files": ["assets/audio/environment/cave/air_circulation_deep.ogg"],
+          "volume": 0.6,
+          "pitch": 0.9,
+          "trigger_condition": "always",
+          "filter_type": "lowpass",
+          "filter_frequency": 600.0
+        },
+        {
+          "files": ["assets/audio/environment/cave/water_drips_varied.ogg"],
+          "volume": 0.8,
+          "pitch_variation": 0.3,
+          "trigger_condition": "parameter",
+          "trigger_value": 0.3,
+          "delay": 0.5
+        },
+        {
+          "files": ["assets/audio/environment/cave/underground_stream.ogg"],
+          "volume": 0.7,
+          "trigger_condition": "parameter",
+          "trigger_value": 0.6,
+          "filter_type": "bandpass",
+          "filter_frequency": 800.0
+        },
+        {
+          "files": ["assets/audio/environment/cave/rock_settling.ogg"],
+          "volume": 0.4,
+          "pitch": 0.7,
+          "trigger_condition": "random",
+          "trigger_value": 0.05,
+          "filter_type": "lowpass",
+          "filter_frequency": 400.0
+        },
+        {
+          "files": ["assets/audio/environment/cave/crystal_resonance_ambient.ogg"],
+          "volume": 0.3,
+          "pitch": 1.2,
+          "trigger_condition": "parameter",
+          "trigger_value": 0.7,
+          "filter_type": "highpass",
+          "filter_frequency": 1500.0
+        },
+        {
+          "files": ["assets/audio/environment/cave/bat_colony_distant.ogg"],
+          "volume": 0.2,
+          "trigger_condition": "random",
+          "trigger_value": 0.1,
+          "pitch_variation": 0.2,
+          "filter_type": "highpass",
+          "filter_frequency": 3000.0
+        }
+      ],
+      "procedural_params": {
+        "cave_size": 1.5,
+        "humidity": 0.8,
+        "water_presence": 0.6,
+        "mineral_content": 0.4,
+        "air_circulation": 0.3
+      },
+      "triggered_events": ["cave_echo_test", "water_droplet_splash"],
+      "enable_chorus_effect": true,
+      "chorus_voices": 3.0,
+      "chorus_spread": 0.1
+    },
+
+    "ocean_shoreline_dynamic": {
+      "description": "Dynamic ocean shoreline with tide changes and weather interaction",
+      "strategy": "layered",
+      "volume": 1.0,
+      "is_2d": false,
+      "is_looping": true,
+      "min_distance": 10.0,
+      "max_distance": 200.0,
+      "rolloff_factor": 0.5,
+      "use_reverb": true,
+      "reverb_level": 0.4,
+      "reverb_type": "outdoor",
+      "adaptive_volume": true,
+      "adaptation_speed": 0.2,
+      "layers": [
+        {
+          "files": ["assets/audio/environment/ocean/waves_large_consistent.ogg"],
+          "volume": 1.0,
+          "pitch_variation": 0.05,
+          "trigger_condition": "always",
+          "filter_type": "lowpass",
+          "filter_frequency": 2000.0
+        },
+        {
+          "files": ["assets/audio/environment/ocean/waves_foam_hiss.ogg"],
+          "volume": 0.7,
+          "pitch": 1.1,
+          "trigger_condition": "parameter",
+          "trigger_value": 0.4,
+          "filter_type": "highpass",
+          "filter_frequency": 1500.0
+        },
+        {
+          "files": ["assets/audio/environment/ocean/pebbles_rolling.ogg"],
+          "volume": 0.5,
+          "pitch_variation": 0.2,
+          "trigger_condition": "parameter",
+          "trigger_value": 0.6,
+          "delay": 0.2
+        },
+        {
+          "files": ["assets/audio/environment/ocean/seagulls_distant.ogg"],
+          "volume": 0.4,
+          "trigger_condition": "random",
+          "trigger_value": 0.2,
+          "pitch_variation": 0.15,
+          "filter_type": "highpass",
+          "filter_frequency": 1200.0
+        },
+        {
+          "files": ["assets/audio/environment/ocean/wind_coastal.ogg"],
+          "volume": 0.6,
+          "trigger_condition": "parameter",
+          "trigger_value": 0.3,
+          "filter_type": "bandpass",
+          "filter_frequency": 1000.0
+        }
+      ],
+      "procedural_params": {
+        "tide_level": 0.5,
+        "wave_intensity": 0.7,
+        "wind_strength": 0.4,
+        "storm_proximity": 0.0,
+        "time_of_day": 0.5
+      },
+      "triggered_events": ["wave_splash_large", "seabird_calls"],
+      "enable_chorus_effect": true,
+      "chorus_voices": 2.0,
+      "chorus_spread": 0.03
+    },
+
+    "underground_city_ruins": {
+      "description": "Atmospheric ruins with structural sounds and mysterious echoes",
+      "strategy": "layered",
+      "volume": 0.7,
+      "is_2d": false,
+      "is_looping": true,
+      "min_distance": 25.0,
+      "max_distance": 120.0,
+      "rolloff_factor": 0.7,
+      "use_reverb": true,
+      "reverb_level": 0.9,
+      "reverb_type": "hall",
+      "adaptive_volume": true,
+      "layers": [
+        {
+          "files": ["assets/audio/environment/ruins/stone_settling_ambient.ogg"],
+          "volume": 0.8,
+          "pitch": 0.8,
+          "trigger_condition": "always",
+          "filter_type": "lowpass",
+          "filter_frequency": 500.0
+        },
+        {
+          "files": ["assets/audio/environment/ruins/metal_stress_creaking.ogg"],
+          "volume": 0.6,
+          "pitch": 0.9,
+          "trigger_condition": "parameter",
+          "trigger_value": 0.4,
+          "filter_type": "bandpass",
+          "filter_frequency": 800.0
+        },
+        {
+          "files": ["assets/audio/environment/ruins/wind_through_architecture.ogg"],
+          "volume": 0.5,
+          "trigger_condition": "parameter",
+          "trigger_value": 0.3,
+          "filter_type": "highpass",
+          "filter_frequency": 1000.0
+        },
+        {
+          "files": ["assets/audio/environment/ruins/debris_falling_distant.ogg"],
+          "volume": 0.4,
+          "trigger_condition": "random",
+          "trigger_value": 0.03,
+          "pitch_variation": 0.2,
+          "delay": 1.0
+        },
+        {
+          "files": ["assets/audio/environment/ruins/ancient_mechanism_hum.ogg"],
+          "volume": 0.3,
+          "pitch": 1.1,
+          "trigger_condition": "parameter",
+          "trigger_value": 0.7,
+          "filter_type": "lowpass",
+          "filter_frequency": 300.0
+        },
+        {
+          "files": ["assets/audio/environment/ruins/ghostly_whispers.ogg"],
+          "volume": 0.2,
+          "trigger_condition": "random",
+          "trigger_value": 0.02,
+          "pitch_variation": 0.3,
+          "filter_type": "highpass",
+          "filter_frequency": 2000.0
+        }
+      ],
+      "procedural_params": {
+        "structural_integrity": 0.4,
+        "age_factor": 0.9,
+        "magical_resonance": 0.3,
+        "air_circulation": 0.2,
+        "supernatural_activity": 0.1
+      },
+      "triggered_events": ["ruins_echo_chamber", "ancient_magic_pulse"],
+      "enable_chorus_effect": true,
+      "chorus_voices": 4.0,
+      "chorus_spread": 0.2
+    },
+
+    "volcanic_region_active": {
+      "description": "Active volcanic environment with lava flows and geothermal activity",
+      "strategy": "layered",
+      "volume": 1.2,
+      "is_2d": false,
+      "is_looping": true,
+      "min_distance": 30.0,
+      "max_distance": 300.0,
+      "rolloff_factor": 0.6,
+      "use_reverb": true,
+      "reverb_level": 0.5,
+      "reverb_type": "canyon",
+      "adaptive_volume": true,
+      "adaptation_speed": 0.3,
+      "enable_procedural": true,
+      "procedural_type": "fire",
+      "layers": [
+        {
+          "files": ["assets/audio/environment/volcanic/lava_flow_bubbling.ogg"],
+          "volume": 1.0,
+          "pitch": 0.9,
+          "trigger_condition": "always",
+          "filter_type": "lowpass",
+          "filter_frequency": 1500.0
+        },
+        {
+          "files": ["assets/audio/environment/volcanic/steam_vents_hissing.ogg"],
+          "volume": 0.8,
+          "pitch_variation": 0.2,
+          "trigger_condition": "parameter",
+          "trigger_value": 0.5,
+          "filter_type": "highpass",
+          "filter_frequency": 2000.0
+        },
+        {
+          "files": ["assets/audio/environment/volcanic/rock_cracking_thermal.ogg"],
+          "volume": 0.6,
+          "trigger_condition": "random",
+          "trigger_value": 0.1,
+          "pitch_variation": 0.15,
+          "filter_type": "bandpass",
+          "filter_frequency": 1000.0
+        },
+        {
+          "files": ["assets/audio/environment/volcanic/underground_rumbling.ogg"],
+          "volume": 0.9,
+          "pitch": 0.7,
+          "trigger_condition": "parameter",
+          "trigger_value": 0.6,
+          "filter_type": "lowpass",
+          "filter_frequency": 400.0
+        },
+        {
+          "files": ["assets/audio/environment/volcanic/gas_escaping.ogg"],
+          "volume": 0.5,
+          "pitch": 1.2,
+          "trigger_condition": "parameter",
+          "trigger_value": 0.4,
+          "filter_type": "highpass",
+          "filter_frequency": 1800.0
+        },
+        {
+          "files": ["assets/audio/environment/volcanic/distant_explosions.ogg"],
+          "volume": 0.7,
+          "trigger_condition": "random",
+          "trigger_value": 0.05,
+          "delay": 3.0,
+          "pitch_variation": 0.1
+        }
+      ],
+      "procedural_params": {
+        "volcanic_activity": 0.8,
+        "lava_viscosity": 0.6,
+        "temperature": 0.9,
+        "gas_emission": 0.7,
+        "seismic_activity": 0.5
+      },
+      "triggered_events": ["lava_pop_burst", "thermal_updraft_sound"],
+      "interrupt_events": ["volcanic_eruption"],
+      "crossfade_time": 1.0
+    },
+
+    "crystal_cavern_harmonic": {
+      "description": "Magical crystal cavern with harmonic resonance and light refraction sounds",
+      "strategy": "layered",
+      "volume": 0.9,
+      "is_2d": false,
+      "is_looping": true,
+      "min_distance": 12.0,
+      "max_distance": 60.0,
+      "rolloff_factor": 0.8,
+      "use_reverb": true,
+      "reverb_level": 0.9,
+      "reverb_type": "cave",
+      "adaptive_pitch": true,
+      "enable_procedural": true,
+      "procedural_type": "crystal_resonance",
+      "layers": [
+        {
+          "files": ["assets/audio/environment/crystal_cavern/crystal_hum_fundamental.ogg"],
+          "volume": 1.0,
+          "pitch": 1.0,
+          "trigger_condition": "always",
+          "sync_to_master": true
+        },
+        {
+          "files": ["assets/audio/environment/crystal_cavern/crystal_chimes_harmonic.ogg"],
+          "volume": 0.7,
+          "pitch": 1.5,
+          "trigger_condition": "parameter",
+          "trigger_value": 0.4,
+          "filter_type": "highpass",
+          "filter_frequency": 1200.0
+        },
+        {
+          "files": ["assets/audio/environment/crystal_cavern/light_refraction_shimmer.ogg"],
+          "volume": 0.5,
+          "pitch_variation": 0.3,
+          "trigger_condition": "random",
+          "trigger_value": 0.3,
+          "filter_type": "highpass",
+          "filter_frequency": 2000.0
+        },
+        {
+          "files": ["assets/audio/environment/crystal_cavern/energy_pulse_resonance.ogg"],
+          "volume": 0.6,
+          "pitch": 0.8,
+          "trigger_condition": "parameter",
+          "trigger_value": 0.7,
+          "delay": 0.1
+        },
+        {
+          "files": ["assets/audio/environment/crystal_cavern/crystalline_wind_chimes.ogg"],
+          "volume": 0.4,
+          "pitch": 1.8,
+          "trigger_condition": "parameter",
+          "trigger_value": 0.5,
+          "filter_type": "highpass",
+          "filter_frequency": 1500.0
+        }
+      ],
+      "procedural_params": {
+        "crystal_density": 0.8,
+        "energy_level": 0.6,
+        "harmonic_complexity": 0.9,
+        "light_intensity": 0.7,
+        "magical_resonance": 0.8
+      },
+      "triggered_events": ["crystal_activation_chime", "magical_sparkle_sound"],
+      "enable_chorus_effect": true,
+      "chorus_voices": 6.0,
+      "chorus_spread": 0.15
+    },
+
+    "desert_oasis_night": {
+      "description": "Night desert oasis with water features and nocturnal wildlife",
+      "strategy": "layered",
+      "volume": 0.7,
+      "is_2d": false,
+      "is_looping": true,
+      "min_distance": 15.0,
+      "max_distance": 100.0,
+      "rolloff_factor": 0.7,
+      "use_reverb": true,
+      "reverb_level": 0.2,
+      "reverb_type": "outdoor",
+      "adaptive_volume": true,
+      "layers": [
+        {
+          "files": ["assets/audio/environment/desert/gentle_water_flow.ogg"],
+          "volume": 0.8,
+          "trigger_condition": "always",
+          "filter_type": "lowpass",
+          "filter_frequency": 2500.0
+        },
+        {
+          "files": ["assets/audio/environment/desert/palm_fronds_rustling.ogg"],
+          "volume": 0.6,
+          "pitch_variation": 0.15,
+          "trigger_condition": "parameter",
+          "trigger_value": 0.3,
+          "filter_type": "highpass",
+          "filter_frequency": 1000.0
+        },
+        {
+          "files": ["assets/audio/environment/desert/night_insects_chirping.ogg"],
+          "volume": 0.5,
+          "pitch": 1.1,
+          "trigger_condition": "parameter",
+          "trigger_value": 0.6,
+          "filter_type": "highpass",
+          "filter_frequency": 1500.0
+        },
+        {
+          "files": ["assets/audio/environment/desert/owl_hooting_distant.ogg"],
+          "volume": 0.4,
+          "trigger_condition": "random",
+          "trigger_value": 0.1,
+          "delay": 4.0,
+          "pitch_variation": 0.1
+        },
+        {
+          "files": ["assets/audio/environment/desert/desert_wind_gentle.ogg"],
+          "volume": 0.3,
+          "trigger_condition": "parameter",
+          "trigger_value": 0.2,
+          "filter_type": "lowpass",
+          "filter_frequency": 1200.0
+        },
+        {
+          "files": ["assets/audio/environment/desert/sand_shifting_subtle.ogg"],
+          "volume": 0.2,
+          "trigger_condition": "random",
+          "trigger_value": 0.05,
+          "pitch_variation": 0.2
+        }
+      ],
+      "procedural_params": {
+        "water_flow_rate": 0.6,
+        "vegetation_density": 0.4,
+        "wildlife_activity": 0.7,
+        "wind_strength": 0.2,
+        "temperature": 0.3
+      },
+      "triggered_events": ["water_ripple_sound", "nocturnal_animal_call"]
+    }
+  }
+}
