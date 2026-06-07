@@ -5,12 +5,15 @@
 #include <ctime>
 #include "entt/entt.hpp"
 #include "../../../include/luminumbra/core/Types.h"
-#include "systems/SHIELD_WorldSystem.h"
-#include "systems/PhysicsSystem.h"
-#include "systems/WaterSystem.h"
 
 namespace Luminumbra {
     class JobSystem;
+
+    namespace Systems {
+        class SHIELD_WorldSystem;
+        class PhysicsSystem;
+        class WaterSystem;
+    }
 }
 
 namespace Luminumbra::world {
@@ -23,9 +26,6 @@ struct WorldMetadata {
     std::time_t creationTime;
     Vec3 spawnPoint;
 };
-
-namespace Luminumbra::Systems { class SHIELD_WorldSystem; class PhysicsSystem; class WaterSystem; } // <<< WaterSystem added
-
 
 class GameSession {
 public:
