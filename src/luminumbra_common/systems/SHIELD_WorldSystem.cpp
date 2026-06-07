@@ -34,6 +34,18 @@ SHIELD_WorldSystem::SHIELD_WorldSystem(JobSystem* job_system, WaterSystem* water
     reinitialize_noise();
 }
 
+SHIELD_WorldSystem::~SHIELD_WorldSystem() {
+    wait_for_meshing_jobs();
+}
+
+void SHIELD_WorldSystem::wait_for_meshing_jobs() {
+    if (m_job_system && m_meshing_job_handle.counter) {
+        m_job_system->wait(m_meshing_job_handle);
+    }
+
+    m_meshing_job_handle = {};
+}
+
 void SHIELD_WorldSystem::reinitialize_noise() {
     // FastNoise2 uses a node-based system to build complex generators.
     
@@ -99,6 +111,8 @@ std::vector<IVec3> SHIELD_WorldSystem::GetInitialChunkLoadList(const Vec3& cente
 }
 
 void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_position, PhysicsSystem* physics_system) {
+    wait_for_meshing_jobs();
+
     // Decouple the expensive chunk activation/deactivation logic from the frame rate.
     m_update_tick_counter++;
     if (m_update_tick_counter >= 10) { // Run this logic only every 10 frames.
@@ -308,6 +322,8 @@ float SHIELD_WorldSystem::get_density_at(const Vec3& world_pos) const {
 }
 
 std::vector<Luminumbra::Chunk*> SHIELD_WorldSystem::get_renderable_chunks() {
+    wait_for_meshing_jobs();
+
     std::vector<Luminumbra::Chunk*> renderable;
     renderable.reserve(m_chunks.size());
     
@@ -551,21 +567,27 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<std::pair<std::
         });
     }
     if (m_job_system && !jobs.empty()) {
-        m_job_system->dispatch_batch(jobs);
+        m_meshing_job_handle = m_job_system->dispatch_batch(jobs);
     }
 }
 
 void SHIELD_WorldSystem::set_params(const TerrainGenParams& params) {
+    wait_for_meshing_jobs();
+
     m_params = params;
     reinitialize_noise();
 }
 
 void SHIELD_WorldSystem::set_seed(int seed) {
+    wait_for_meshing_jobs();
+
     m_seed = seed;
     reinitialize_noise();
 }
 
 void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
+    wait_for_meshing_jobs();
+
     if (physics_system) {
         for (const auto& [id, chunk] : m_chunks) {
             physics_system->remove_chunk_collision(id);
@@ -576,6 +598,8 @@ void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
 }
 
 void SHIELD_WorldSystem::regenerate_all_chunks(PhysicsSystem* physics_system) {
+    wait_for_meshing_jobs();
+
     LUMINUMBRA_CORE_INFO("Regenerating all active chunks...");
     std::vector<IVec3> coords_to_regenerate;
     coords_to_regenerate.reserve(m_chunks.size());
@@ -584,6 +608,12 @@ void SHIELD_WorldSystem::regenerate_all_chunks(PhysicsSystem* physics_system) {
     }
     clear_world(physics_system);
     dispatch_generation_jobs(coords_to_regenerate);
+}
+
+void SHIELD_WorldSystem::SetWaterSystem(WaterSystem* water_system) {
+    wait_for_meshing_jobs();
+
+    m_water_system = water_system;
 }
 
 IVec3 SHIELD_WorldSystem::world_to_chunk_coords(const Vec3& position) {
