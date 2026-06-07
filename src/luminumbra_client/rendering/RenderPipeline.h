@@ -88,7 +88,7 @@ public:
     RenderPipeline();
     ~RenderPipeline();
 
-    void startup(u32 screen_width, u32 screen_height, const std::filesystem::path& root_path);
+    bool startup(u32 screen_width, u32 screen_height, const std::filesystem::path& root_path);
     void render_frame(entt::registry& registry, Systems::SHIELD_WorldSystem& world_system, const Camera& camera, float deltaTime, bool wireframe = false);
     void on_resize(u32 new_width, u32 new_height);
     void clear_all_chunk_data(); // Force clear all cached chunk render data
@@ -195,6 +195,8 @@ private:
     const int MAX_POINT_LIGHTS = 32;
 
     void gather_lights(entt::registry& registry);
+
+    bool m_started = false;
     
     // Hierarchical frustum culling system
     struct AABB {

@@ -127,7 +127,18 @@ int main(int argc, char* argv[]) {
     g_uiManager->Init(window, audioManager.get());
 
     Luminumbra::Rendering::RenderPipeline renderPipeline;
-    renderPipeline.startup(framebufferWidth, framebufferHeight, root_dir);
+    if (!renderPipeline.startup(framebufferWidth, framebufferHeight, root_dir)) {
+        LUMINUMBRA_CORE_ERROR("FATAL: Render pipeline startup failed.");
+        g_uiManager->Shutdown();
+        audioManager->Shutdown();
+        jobSystem.shutdown();
+        ImGui_ImplOpenGL3_Shutdown();
+        ImGui_ImplGlfw_Shutdown();
+        ImGui::DestroyContext();
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return -1;
+    }
     glfwSetWindowUserPointer(window, &renderPipeline);
     glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
 
