@@ -1,11 +1,9 @@
-# Include the list of source files for this library
-include(sources.cmake)
+# Include the list of source files for this library.
+include("${CMAKE_CURRENT_LIST_DIR}/sources.cmake")
 
 # Create the static library with all its source files at once.
-# The paths in COMMON_SOURCES are relative to this CMakeLists.txt file.
 add_library(luminumbra_common STATIC ${COMMON_SOURCES})
 
-# --- CORRECTED USAGE REQUIREMENTS ---
 target_include_directories(luminumbra_common PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_SOURCE_DIR}/vendor/spdlog/include"
