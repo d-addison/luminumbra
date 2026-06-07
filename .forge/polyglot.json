@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "project": "luminumbra",
+  "description": "Project-local polyglot audit manifest for the Luminumbra C++ engine.",
+  "roots": [
+    "src",
+    "include",
+    "test",
+    "tools",
+    "cmake",
+    "scripts",
+    "res/shaders",
+    "data",
+    "worlds",
+    "docs",
+    "README.md",
+    "CMakeLists.txt"
+  ],
+  "exclude": [
+    ".git",
+    ".forge/cache",
+    ".forge/reports",
+    "build",
+    "external",
+    "vendor",
+    "tools/cgltf.h",
+    "tools/cgltf_write.h",
+    ".claude",
+    ".vscode"
+  ],
+  "languages": {
+    "cpp": [".cpp", ".cc", ".cxx", ".h", ".hh", ".hpp", ".inl"],
+    "c": [".c"],
+    "cmake": [".cmake"],
+    "glsl": [".vert", ".frag", ".geom", ".compute"],
+    "lua": [".lua"],
+    "rml": [".rml"],
+    "rcss": [".rcss"],
+    "json": [".json"],
+    "markdown": [".md", ".MD"]
+  },
+  "special_files": {
+    "cmake": ["CMakeLists.txt"]
+  },
+  "modules": [
+    {
+      "name": "luminumbra_common",
+      "tier": "ship",
+      "paths": ["src/luminumbra_common", "include/luminumbra"],
+      "role": "Deterministic simulation, components, world generation, physics, water, scripting, and networking."
+    },
+    {
+      "name": "luminumbra_client",
+      "tier": "review",
+      "paths": ["src/luminumbra_client", "res/shaders", "data/ui"],
+      "role": "Rendering, audio, UI, player-facing runtime, shaders, and debug views."
+    },
+    {
+      "name": "luminumbra_server",
+      "tier": "incubate",
+      "paths": ["src/luminumbra_server"],
+      "role": "Host authority skeleton and server entry point."
+    },
+    {
+      "name": "tools",
+      "tier": "review",
+      "paths": ["tools"],
+      "role": "Asset processor and developer utilities."
+    },
+    {
+      "name": "tests",
+      "tier": "ship",
+      "paths": ["test"],
+      "role": "GoogleTest validation suites and performance checks."
+    },
+    {
+      "name": "content_and_scripts",
+      "tier": "review",
+      "paths": ["scripts", "data", "worlds"],
+      "role": "Lua behavior, data-driven content, UI documents, audio banks, and world presets."
+    }
+  ],
+  "test_commands": [
+    "cmake --build build",
+    "ctest --test-dir build --output-on-failure"
+  ],
+  "risk_patterns": [
+    {
+      "id": "todo",
+      "severity": "medium",
+      "languages": ["cpp", "c", "cmake", "glsl", "lua"],
+      "regex": "\\bTODO\\b|\\bFIXME\\b|\\bHACK\\b|\\bWIP\\b",
+      "description": "Unresolved implementation or design debt marker."
+    },
+    {
+      "id": "runtime_error",
+      "severity": "medium",
+      "languages": ["cpp", "c"],
+      "regex": "throw\\s+std::runtime_error",
+      "description": "Runtime exception path in engine/client code."
+    },
+    {
+      "id": "std_cout",
+      "severity": "low",
+      "languages": ["cpp", "c"],
+      "regex": "std::cout",
+      "description": "Direct console output instead of the engine logging abstraction."
+    },
+    {
+      "id": "raw_new_delete",
+      "severity": "medium",
+      "languages": ["cpp", "c"],
+      "regex": "\\bnew\\s+[A-Za-z_:][A-Za-z0-9_:<>,\\s]*\\(|\\bdelete\\s+",
+      "description": "Raw allocation/deallocation site that may need RAII review."
+    }
+  ]
+}

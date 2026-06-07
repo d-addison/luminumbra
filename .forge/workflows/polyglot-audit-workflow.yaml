@@ -1,0 +1,192 @@
+# Generic polyglot audit workflow.
+# Loaded via `forge run config/templates/polyglot-audit/workflow.yaml` or copied
+# to `.forge/workflows/polyglot-audit-workflow.yaml` in a project workspace.
+#
+# This workflow is intentionally project-agnostic. It assumes only that the
+# target repository has been initialized with Forge and that dispatch config can
+# route ai_dispatch steps to the desired spawner, typically Codex.
+
+name: polyglot-audit-workflow
+description: |
+  Full repository audit workflow for mixed-language codebases. Builds local
+  structure and symbol context, forms parallel audit panels, synthesizes a
+  roadmap, critiques the roadmap, decomposes approved work into dispatch tasks,
+  and gates execution.
+
+config:
+  timeout_secs: 21600
+  model_ceiling: deep
+  headless: false
+
+tags:
+  - "#workflow:polyglot-audit"
+  - "#runtime:codex"
+  - "#scope:repository"
+
+pipelines:
+  - name: inventory-phase
+    phase: spec
+    description: "Create deterministic repository context before any AI review."
+    aggregate_within_phase: all_must_pass
+    on_phase_fail: stop
+    steps:
+      - name: inventory-structure
+        type: deterministic
+        run: 'forge structure'
+        capabilities:
+          sandbox: workspace-write
+          egress: none
+
+      - name: inventory-index
+        type: deterministic
+        run: 'forge index'
+        capabilities:
+          sandbox: workspace-write
+          egress: none
+
+      - name: inventory-verify
+        type: deterministic
+        run: 'forge verify --validation-policy warn --testing-policy warn'
+        capabilities:
+          sandbox: workspace-write
+          egress: none
+
+  - name: audit-panels-phase
+    phase: plan
+    description: "Run parallel domain audit panels over the repository context."
+    aggregate_within_phase: all_must_pass
+    on_phase_fail: stop
+    steps:
+      - name: architecture-panel
+        type: ai_dispatch
+        model: deep
+        prompt: |
+          Audit the repository architecture from the available Forge context.
+          Focus on module boundaries, dependency direction, runtime lifecycle,
+          layering, framework fit, file layout, and refactor candidates.
+          Write a concise report to .forge/reports/polyglot-audit/architecture.md.
+        capabilities:
+          sandbox: workspace-write
+          egress: [openai-api]
+
+      - name: data-model-panel
+        type: ai_dispatch
+        model: deep
+        prompt: |
+          Audit data types, schemas, state models, serialization formats,
+          ownership rules, API contracts, persistence assumptions, and invariants.
+          Identify missing or weak domain models and recommend target shapes.
+          Write a concise report to .forge/reports/polyglot-audit/data-models.md.
+        capabilities:
+          sandbox: workspace-write
+          egress: [openai-api]
+
+      - name: quality-risk-panel
+        type: ai_dispatch
+        model: deep
+        prompt: |
+          Audit defects, failing tests, undefined behavior risks, memory/resource
+          ownership risks, concurrency risks, error handling, logging, test gaps,
+          and build-system fragility. Rank findings by severity and confidence.
+          Write a concise report to .forge/reports/polyglot-audit/quality-risks.md.
+        capabilities:
+          sandbox: workspace-write
+          egress: [openai-api]
+
+      - name: tooling-panel
+        type: ai_dispatch
+        model: deep
+        prompt: |
+          Audit build tooling, package managers, generated assets, CI readiness,
+          developer workflow, static analysis, formatting, and test execution.
+          Recommend the minimal toolchain structure needed for reliable iteration.
+          Write a concise report to .forge/reports/polyglot-audit/tooling.md.
+        capabilities:
+          sandbox: workspace-write
+          egress: [openai-api]
+
+  - name: consensus-phase
+    phase: tasks
+    description: "Synthesize audit findings into a roadmap and executable task graph."
+    aggregate_within_phase: all_must_pass
+    on_phase_fail: stop
+    steps:
+      - name: consensus-synthesis
+        type: ai_dispatch
+        model: deep
+        prompt: |
+          Read the audit panel reports under .forge/reports/polyglot-audit/.
+          Form a consensus view: ideal repository structure, data model direction,
+          framework/tooling direction, bug list, refactor priorities, and staged
+          roadmap. Separate must-fix blockers from optional improvements.
+          Write .forge/reports/polyglot-audit/roadmap.md.
+        capabilities:
+          sandbox: workspace-write
+          egress: [openai-api]
+
+      - name: critique-panel
+        type: ai_dispatch
+        model: deep
+        prompt: |
+          Critique .forge/reports/polyglot-audit/roadmap.md adversarially.
+          Look for overfitting, risky rewrites, hidden coupling, missing tests,
+          vague tasks, unsupported assumptions, and sequencing mistakes.
+          Write .forge/reports/polyglot-audit/critique.md with concrete changes.
+        capabilities:
+          sandbox: workspace-write
+          egress: [openai-api]
+
+      - name: roadmap-revision
+        type: ai_dispatch
+        model: deep
+        prompt: |
+          Revise the roadmap using .forge/reports/polyglot-audit/critique.md.
+          Produce a final staged roadmap and a Forge task graph v2 dispatch file.
+          Write the final roadmap to .forge/reports/polyglot-audit/final-roadmap.md
+          and write tasks to .forge/tasks/polyglot-audit-roadmap/dispatch.json.
+          Tasks must be scoped, dependency-ordered, testable, and suitable for
+          spawner execution.
+        capabilities:
+          sandbox: workspace-write
+          egress: [openai-api]
+
+      - name: validate-dispatch
+        type: deterministic
+        run: 'forge tasks validate .forge/tasks/polyglot-audit-roadmap/dispatch.json'
+        capabilities:
+          sandbox: read-only
+          egress: none
+
+      - name: approve-execution
+        type: user_interaction
+        prompt: |
+          Review .forge/reports/polyglot-audit/final-roadmap.md and
+          .forge/tasks/polyglot-audit-roadmap/dispatch.json before execution.
+        options:
+          - { value: approve, label: "Approve execution" }
+          - { value: reject,  label: "Revise roadmap" }
+          - { value: diff,    label: "Show task diff" }
+          - { value: quit,    label: "Abort workflow" }
+        capabilities:
+          sandbox: read-only
+          egress: none
+
+  - name: execute-phase
+    phase: execute
+    description: "Execute approved roadmap tasks through Forge dispatch."
+    aggregate_within_phase: all_must_pass
+    on_phase_fail: stop
+    steps:
+      - name: execute-dispatch
+        type: deterministic
+        run: 'forge contracts execute --tasks .forge/tasks/polyglot-audit-roadmap/dispatch.json'
+        capabilities:
+          sandbox: workspace-write
+          egress: [openai-api]
+
+      - name: verify-after-execution
+        type: deterministic
+        run: 'forge verify --validation-policy warn --testing-policy warn'
+        capabilities:
+          sandbox: workspace-write
+          egress: none

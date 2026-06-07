@@ -1,0 +1,70 @@
+[meta]
+project = "luminumbra"
+version = "0.1.0"
+updated = "2026-06-07"
+notes = "Forge uses the historical name crate-manifest.toml for report generation. Entries below represent C++ engine modules/targets, not Rust crates."
+
+[crates.luminumbra-common]
+tier = "ship"
+path = "src/luminumbra_common"
+notes = "Shared deterministic simulation, components, world generation, physics, water, scripting, and networking."
+
+[crates.luminumbra-client]
+tier = "review"
+path = "src/luminumbra_client"
+notes = "Rendering, audio, UI, debug tooling, camera, asset-facing client runtime."
+
+[crates.luminumbra-server]
+tier = "incubate"
+path = "src/luminumbra_server"
+notes = "Host authority skeleton and server entry point."
+
+[crates.luminumbra-tools]
+tier = "review"
+path = "tools"
+notes = "Asset processor and supporting utilities."
+
+[crates.luminumbra-tests]
+tier = "ship"
+path = "test"
+notes = "GoogleTest suites. Current baseline has failing SHIELD tests that block confident refactoring."
+
+[[ship-blockers]]
+description = "SHIELD SDF sign convention and surface tests disagree"
+file = "test/shield/test_world_generation.cpp"
+severity = "critical"
+owning-spec = "CORE-AUDIT-2026-06-07"
+status = "open"
+notes = "CTest failure: SurfaceIsGeneratedAtCorrectHeight expects inside density < 0 and outside density > 0, but observed inside=4 and outside=-4."
+
+[[ship-blockers]]
+description = "Generated mesh normals are inverted for horizontal surfaces"
+file = "test/shield/test_world_generation.cpp"
+severity = "critical"
+owning-spec = "CORE-AUDIT-2026-06-07"
+status = "open"
+notes = "CTest failure: NormalsPointUpwardsOnHorizontalSurface observes vertex.normal.y = -1 where +1 is expected."
+
+[[ship-blockers]]
+description = "Cave generation does not change generated mesh output"
+file = "test/shield/test_world_generation.cpp"
+severity = "high"
+owning-spec = "CORE-AUDIT-2026-06-07"
+status = "open"
+notes = "CTest failure: CavesChangeGeneratedMesh produced identical vertex counts with and without caves."
+
+[[ship-blockers]]
+description = "Documentation describes systems that are not yet first-class C++ architecture"
+file = "README.md"
+severity = "high"
+owning-spec = "CORE-AUDIT-2026-06-07"
+status = "open"
+notes = "Instinct Engine and Aetheric Field are documented as pillars, but current implementation is mostly scripts/data or absent from core C++."
+
+[[ship-blockers]]
+description = "UI refactor has unresolved integration TODOs"
+file = "src/luminumbra_client/ui"
+severity = "medium"
+owning-spec = "CORE-AUDIT-2026-06-07"
+status = "open"
+notes = "World creation/loading, binding unsubscribe, filtering/favorites/loading state, and animation completion are still TODO markers."

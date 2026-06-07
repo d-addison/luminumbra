@@ -1,0 +1,198 @@
+{
+  "schema_kind": "forge.task_graph",
+  "schema_version": "2",
+  "feature": "CORE-AUDIT-2026-06-07",
+  "description": "Luminumbra core audit and polyglot Forge baseline roadmap. PARTIALLY SUPERSEDED 2026-06-07 by .forge/tasks/polyglot-audit-roadmap/dispatch.json. Tasks T-001 (SHIELD audit doc — already produced as .forge/reports/polyglot-audit/critique.md + final-roadmap.md), T-002 (fix three failing tests — now T-S0-1/2/3 with finer granularity), and T-006 (cout cleanup — now T-S3-1 with broader file set) are SUPERSEDED and must NOT be dispatched. Tasks T-003 (polyglot hardening), T-004 (Instinct/Aetheric specs), T-005 (UI roadmap), and T-007 (RenderPipeline plan) remain valid for follow-on dispatch after the polyglot-audit-roadmap must-fix block lands.",
+  "tasks": [
+    {
+      "id": "T-001-shield-contract-audit",
+      "title": "Audit SHIELD SDF, cave, and normal contracts before code changes",
+      "type": "doc",
+      "tier": "standard",
+      "depends_on": [],
+      "files": [],
+      "agent_contract": {
+        "reads": [
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
+          "src/luminumbra_common/world/MarchingCubes.cpp",
+          "src/luminumbra_common/world/Chunk.h",
+          "test/shield/test_world_generation.cpp"
+        ],
+        "modifies": [],
+        "creates": [
+          ".forge/reports/shield-contract-audit.md"
+        ]
+      },
+      "prompt": "PRE-IMPLEMENTATION AUDIT ONLY. Determine the intended SDF sign convention, isolevel meaning, chunk SDF layout, terrain height contract, cave-carving semantics, and mesh winding/normal convention. Explain why the current tests fail and recommend the minimal contract-preserving fix. Write findings to .forge/reports/shield-contract-audit.md. Do not modify source."
+    },
+    {
+      "id": "T-002-fix-shield-test-baseline",
+      "title": "Fix SHIELD terrain test baseline",
+      "type": "implement",
+      "tier": "deep",
+      "depends_on": [
+        "T-001-shield-contract-audit"
+      ],
+      "files": [
+        "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+        "src/luminumbra_common/world/MarchingCubes.cpp",
+        "test/shield/test_world_generation.cpp"
+      ],
+      "agent_contract": {
+        "reads": [
+          ".forge/reports/shield-contract-audit.md"
+        ],
+        "modifies": [
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+          "src/luminumbra_common/world/MarchingCubes.cpp",
+          "test/shield/test_world_generation.cpp"
+        ],
+        "creates": []
+      },
+      "prompt": "Read .forge/reports/shield-contract-audit.md first. Fix the three failing world-generation tests by aligning code and tests to the chosen contract: SDF sign convention, cave-carving effect, and terrain normal orientation. Keep the change scoped to SHIELD/MarchingCubes/tests. Verify with cmake --build build and ctest --test-dir build --output-on-failure."
+    },
+    {
+      "id": "T-003-polyglot-audit-hardening",
+      "title": "Harden Forge polyglot audit support for C/C++ engine work",
+      "type": "implement",
+      "tier": "standard",
+      "depends_on": [],
+      "files": [
+        ".forge/polyglot.json",
+        ".forge/scripts/polyglot-audit.mjs",
+        ".forge/reports/polyglot-audit.md"
+      ],
+      "agent_contract": {
+        "reads": [
+          ".forge/polyglot.json",
+          ".forge/scripts/polyglot-audit.mjs",
+          ".forge/reports/polyglot-audit.json"
+        ],
+        "modifies": [
+          ".forge/polyglot.json",
+          ".forge/scripts/polyglot-audit.mjs"
+        ],
+        "creates": []
+      },
+      "prompt": "Improve the local polyglot audit layer without adding dependencies. Keep vendor/build exclusions, language-specific risk patterns, module LOC summaries, GoogleTest detection, and report generation. Add any missing C/C++/CMake/GLSL/Lua/RmlUi checks that materially improve the roadmap. Verify with node --check .forge/scripts/polyglot-audit.mjs and forge script run polyglot-audit."
+    },
+    {
+      "id": "T-004-architecture-spec-gap",
+      "title": "Define implementation specs for README-only engine pillars",
+      "type": "doc",
+      "tier": "standard",
+      "depends_on": [
+        "T-002-fix-shield-test-baseline"
+      ],
+      "files": [
+        "README.md",
+        "docs/TDD.md",
+        ".forge/specs/CORE-AUDIT-2026-06-07.md"
+      ],
+      "agent_contract": {
+        "reads": [
+          "README.md",
+          "docs/TDD.md",
+          "src/luminumbra_common/components/InstinctComponents.h",
+          "scripts/common/ai",
+          "src/luminumbra_common/components/LightingComponents.h"
+        ],
+        "modifies": [
+          ".forge/specs/CORE-AUDIT-2026-06-07.md"
+        ],
+        "creates": [
+          ".forge/specs/INSTINCT-ENGINE.md",
+          ".forge/specs/AETHERIC-FIELD.md"
+        ]
+      },
+      "prompt": "Convert README-only pillars into implementation specs. Create Instinct Engine and Aetheric Field specs with module boundaries, data contracts, deterministic simulation rules, test strategy, and first implementation slices. Do not implement the systems yet."
+    },
+    {
+      "id": "T-005-ui-debt-roadmap",
+      "title": "Turn UI refactor TODO cluster into a sequenced roadmap",
+      "type": "doc",
+      "tier": "standard",
+      "depends_on": [],
+      "files": [
+        "src/luminumbra_client/ui",
+        "data/ui",
+        "docs/UI_REFACTORING_SUMMARY.md",
+        "docs/UI_USAGE.md"
+      ],
+      "agent_contract": {
+        "reads": [
+          "src/luminumbra_client/ui",
+          "data/ui",
+          "docs/UI_REFACTORING_SUMMARY.md",
+          "docs/UI_USAGE.md"
+        ],
+        "modifies": [],
+        "creates": [
+          ".forge/reports/ui-refactor-roadmap.md"
+        ]
+      },
+      "prompt": "Audit the UI stack and produce .forge/reports/ui-refactor-roadmap.md. Decide whether the active direction is legacy Rml_UIManager, new component UI manager, or staged bridge. Convert TODOs into ordered tasks with file scopes and tests. Do not modify source."
+    },
+    {
+      "id": "T-006-runtime-hygiene-pass",
+      "title": "Replace runtime std::cout and review raw allocation sites",
+      "type": "refactor",
+      "tier": "standard",
+      "depends_on": [
+        "T-002-fix-shield-test-baseline",
+        "T-003-polyglot-audit-hardening"
+      ],
+      "files": [
+        "src/luminumbra_client/core/AssetManager.h",
+        "src/luminumbra_common/world/GameSession.cpp",
+        "src/luminumbra_server/main_server.cpp",
+        "src/luminumbra_client/ui/Rml_Interfaces.cpp",
+        "src/luminumbra_client/ui/Rml_UIManager.cpp",
+        "src/luminumbra_common/systems/PhysicsSystem.cpp"
+      ],
+      "agent_contract": {
+        "reads": [
+          ".forge/reports/polyglot-audit.json"
+        ],
+        "modifies": [
+          "src/luminumbra_client/core/AssetManager.h",
+          "src/luminumbra_common/world/GameSession.cpp",
+          "src/luminumbra_server/main_server.cpp",
+          "src/luminumbra_client/ui/Rml_Interfaces.cpp",
+          "src/luminumbra_client/ui/Rml_UIManager.cpp",
+          "src/luminumbra_common/systems/PhysicsSystem.cpp"
+        ],
+        "creates": []
+      },
+      "prompt": "Use the polyglot audit risk findings to replace direct std::cout in runtime code with the existing logging abstraction and review raw new/delete sites. Keep RmlUi/Jolt ownership constraints intact. Do not chase unrelated UI feature TODOs. Verify with cmake --build build, ctest --test-dir build --output-on-failure, and forge script run polyglot-audit."
+    },
+    {
+      "id": "T-007-render-pipeline-refactor-plan",
+      "title": "Plan RenderPipeline.cpp responsibility split",
+      "type": "doc",
+      "tier": "standard",
+      "depends_on": [
+        "T-002-fix-shield-test-baseline"
+      ],
+      "files": [
+        "src/luminumbra_client/rendering/RenderPipeline.cpp",
+        "src/luminumbra_client/rendering/RenderPipeline.h",
+        "src/luminumbra_client/rendering/RenderSystem.cpp"
+      ],
+      "agent_contract": {
+        "reads": [
+          "src/luminumbra_client/rendering/RenderPipeline.cpp",
+          "src/luminumbra_client/rendering/RenderPipeline.h",
+          "src/luminumbra_client/rendering/RenderSystem.cpp",
+          "res/shaders"
+        ],
+        "modifies": [],
+        "creates": [
+          ".forge/reports/render-pipeline-refactor-plan.md"
+        ]
+      },
+      "prompt": "Audit RenderPipeline.cpp and create a refactor plan that splits responsibilities without changing behavior. Identify pass boundaries, resource lifetime ownership, shader dependencies, tests/smoke checks, and an incremental sequence. Do not modify source."
+    }
+  ]
+}
