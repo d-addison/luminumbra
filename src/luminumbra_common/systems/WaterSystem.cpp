@@ -58,22 +58,31 @@ int PositiveMod(int value, int divisor) {
 WaterSystem::WaterSystem(JobSystem* job_system, SHIELD_WorldSystem* shield_system)
     : m_job_system(job_system), m_shield_system(shield_system) {}
 
+void WaterSystem::set_camera_entity(EntityID camera_entity) {
+    m_camera_entity = camera_entity;
+}
+
+Vec3 WaterSystem::get_camera_position(entt::registry& registry) const {
+    if (m_camera_entity != entt::null && registry.valid(m_camera_entity)) {
+        if (const auto* transform = registry.try_get<const Components::TransformComponent>(m_camera_entity)) {
+            return transform->position;
+        }
+    }
+
+    auto camera_view = registry.view<const Components::TransformComponent, const Components::ActiveCameraComponent>();
+    if (!camera_view.empty()) {
+        return camera_view.get<const Components::TransformComponent>(camera_view.front()).position;
+    }
+
+    return Vec3(0.0f);
+}
+
 void WaterSystem::update(entt::registry& registry, const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& active_chunks) {
     m_active_chunks = &active_chunks;
     if (m_active_chunks->empty()) return;
 
     // --- ADAPTIVE WATER GRID SYSTEM INTEGRATION ---
-    // Get player/camera position for distance-based LOD calculations
-    // For now, use origin as fallback - this should be updated to get actual camera position
-    Vec3 camera_position = Vec3(0.0f);
-    
-    // Try to find player entity with transform component
-    auto transform_view = registry.view<const Components::TransformComponent>();
-    if (!transform_view.empty()) {
-        // Use first transform component as camera position approximation
-        // TODO: Add proper camera/player tagging system
-        camera_position = transform_view.get<const Components::TransformComponent>(transform_view.front()).position;
-    }
+    Vec3 camera_position = get_camera_position(registry);
     
     // Apply adaptive resolution to all active water chunks
     for (const auto& active_chunk : active_chunks) {
