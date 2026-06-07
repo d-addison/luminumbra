@@ -9,6 +9,7 @@
 #include <glm/gtc/constants.hpp>
 #include <random>
 #include <cstring>
+#include <exception>
 #include <fstream>
 #include <GLFW/glfw3.h>
 #include "Mesh.h"
@@ -44,6 +45,23 @@ inline bool AABBFrustumCulled(const glm::vec3& minp, const glm::vec3& maxp, cons
 }
 
 namespace Luminumbra::Rendering {
+
+namespace {
+
+void set_default_shadow_cascade_splits(ShadowMap& shadow_map) {
+    shadow_map.cascade_splits.resize(ShadowMap::CASCADE_COUNT + 1);
+    shadow_map.cascade_splits[0] = 0.1f;
+    shadow_map.cascade_splits[1] = 15.0f;
+    shadow_map.cascade_splits[2] = 40.0f;
+    shadow_map.cascade_splits[3] = 100.0f;
+    shadow_map.cascade_splits[4] = 250.0f;
+}
+
+bool has_valid_shadow_cascade_splits(const ShadowMap& shadow_map) {
+    return shadow_map.cascade_splits.size() >= ShadowMap::CASCADE_COUNT + 1;
+}
+
+} // namespace
 
 // --- HIERARCHICAL CULLING IMPLEMENTATION ---
 
@@ -169,31 +187,45 @@ RenderPipeline::~RenderPipeline() {
 
 // --- PUBLIC INTERFACE ---
 
-void RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::filesystem::path& root_path) {
+bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::filesystem::path& root_path) {
+    m_started = false;
     m_screen_width = screen_width;
     m_screen_height = screen_height;
     m_root_path = root_path;
 
-    init_shaders();
-    init_lighting_fbo(screen_width, screen_height);
-    init_gbuffer(screen_width, screen_height);
-    init_shadow_map();
-    init_ssao();
-    init_screen_quad();
-    init_skybox();
-    init_terrain_textures();
-    init_material_lut();
-    init_gpu_sdf_system();
+    try {
+        set_default_shadow_cascade_splits(m_shadow_map);
 
-    std::string instanced_vert_path = (m_root_path / "res/shaders/instanced_mesh.vert").string();
-    std::string gbuffer_frag_path = (m_root_path / "res/shaders/g_buffer.frag").string();
-    m_instanced_static_mesh_shader = std::make_unique<Shader>(instanced_vert_path.c_str(), gbuffer_frag_path.c_str());
-    glGenBuffers(1, &m_instanceMatrixVBO);
-    glBindBuffer(GL_ARRAY_BUFFER, m_instanceMatrixVBO);
-    glBufferData(GL_ARRAY_BUFFER, 10000 * sizeof(glm::mat4), nullptr, GL_DYNAMIC_DRAW);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
+        init_shaders();
+        init_lighting_fbo(screen_width, screen_height);
+        init_gbuffer(screen_width, screen_height);
+        init_shadow_map();
+        init_ssao();
+        init_screen_quad();
+        init_skybox();
+        init_terrain_textures();
+        init_material_lut();
+        init_gpu_sdf_system();
 
-    LUMINUMBRA_CORE_INFO("Render Pipeline Initialized.");
+        std::string instanced_vert_path = (m_root_path / "res/shaders/instanced_mesh.vert").string();
+        std::string gbuffer_frag_path = (m_root_path / "res/shaders/g_buffer.frag").string();
+        m_instanced_static_mesh_shader = std::make_unique<Shader>(instanced_vert_path.c_str(), gbuffer_frag_path.c_str());
+        glGenBuffers(1, &m_instanceMatrixVBO);
+        glBindBuffer(GL_ARRAY_BUFFER, m_instanceMatrixVBO);
+        glBufferData(GL_ARRAY_BUFFER, 10000 * sizeof(glm::mat4), nullptr, GL_DYNAMIC_DRAW);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+        m_started = true;
+        LUMINUMBRA_CORE_INFO("Render Pipeline Initialized.");
+        return true;
+    } catch (const std::exception& e) {
+        LUMINUMBRA_CORE_ERROR("Render Pipeline startup failed: {}", e.what());
+    } catch (...) {
+        LUMINUMBRA_CORE_ERROR("Render Pipeline startup failed with an unknown exception.");
+    }
+
+    cleanup_gpu_resources();
+    return false;
 }
 
 void RenderPipeline::SetupGPUSDFIntegration(Systems::SHIELD_WorldSystem& world_system) {
@@ -232,6 +264,10 @@ void RenderPipeline::gather_lights(entt::registry& registry) {
 }
 
 void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_WorldSystem& world_system, const Camera& camera, float deltaTime, bool wireframe) {
+    if (!m_started) {
+        return;
+    }
+
     update_time_of_day(deltaTime);
     gather_lights(registry);
     auto renderable_chunks = world_system.get_renderable_chunks();
@@ -561,8 +597,17 @@ void RenderPipeline::geometry_pass_static_meshes(entt::registry& registry, const
 }
 
 void RenderPipeline::shadow_pass(const std::vector<Luminumbra::Chunk*>& renderable_chunks, const Camera& camera) {
-     LUMINUMBRA_CORE_WARN("DIAGNOSTIC (pre-shadow_pass): cascade_splits.size() = {}", m_shadow_map.cascade_splits.size());
+    if (!m_shadow_shader || m_shadow_map.fbo_id == 0 || m_shadow_map.depth_texture_array == 0) {
+        LUMINUMBRA_CORE_ERROR("Shadow pass skipped because shadow resources are not initialized.");
+        return;
+    }
+
     auto light_space_matrices = get_light_space_matrices(camera);
+    if (light_space_matrices.size() < ShadowMap::CASCADE_COUNT) {
+        LUMINUMBRA_CORE_ERROR("Shadow pass skipped because light-space matrices could not be generated.");
+        return;
+    }
+
     m_shadow_map.light_space_matrices = light_space_matrices;
     glViewport(0, 0, m_shadow_map.resolution, m_shadow_map.resolution);
     glBindFramebuffer(GL_FRAMEBUFFER, m_shadow_map.fbo_id);
@@ -629,6 +674,13 @@ void RenderPipeline::lighting_pass(const Camera& camera) {
         m_lighting_shader->setFloat(prefix + "intensity", m_point_lights_this_frame[i].intensity);
     }
     m_lighting_shader->setFloat("u_farPlane", camera.GetFarPlane());
+    if (!has_valid_shadow_cascade_splits(m_shadow_map)) {
+        LUMINUMBRA_CORE_ERROR("Shadow cascade splits were invalid during lighting; restoring defaults.");
+        set_default_shadow_cascade_splits(m_shadow_map);
+    }
+    if (m_shadow_map.light_space_matrices.size() < ShadowMap::CASCADE_COUNT) {
+        m_shadow_map.light_space_matrices = get_light_space_matrices(camera);
+    }
     m_lighting_shader->setVec4("u_cascadeSplits", glm::vec4(m_shadow_map.cascade_splits[1], m_shadow_map.cascade_splits[2], m_shadow_map.cascade_splits[3], m_shadow_map.cascade_splits[4]));
     for (int i = 0; i < ShadowMap::CASCADE_COUNT; ++i) {
         m_lighting_shader->setMat4("u_lightSpaceMatrices[" + std::to_string(i) + "]", m_shadow_map.light_space_matrices[i]);
@@ -778,12 +830,7 @@ void RenderPipeline::init_shadow_map() {
     glReadBuffer(GL_NONE);
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) LUMINUMBRA_CORE_ERROR("Shadow Map FBO not complete!");
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    m_shadow_map.cascade_splits.resize(ShadowMap::CASCADE_COUNT + 1);
-    m_shadow_map.cascade_splits[0] = 0.1f;
-    m_shadow_map.cascade_splits[1] = 15.0f;
-    m_shadow_map.cascade_splits[2] = 40.0f;
-    m_shadow_map.cascade_splits[3] = 100.0f;
-    m_shadow_map.cascade_splits[4] = 250.0f;
+    set_default_shadow_cascade_splits(m_shadow_map);
 }
 
 void RenderPipeline::init_ssao() {
@@ -868,6 +915,8 @@ void RenderPipeline::destroy_gbuffer() {
 void RenderPipeline::destroy_shadow_map() {
     if (m_shadow_map.fbo_id) { glDeleteFramebuffers(1, &m_shadow_map.fbo_id); m_shadow_map.fbo_id = 0; }
     if (m_shadow_map.depth_texture_array) { glDeleteTextures(1, &m_shadow_map.depth_texture_array); m_shadow_map.depth_texture_array = 0; }
+    m_shadow_map.light_space_matrices.clear();
+    m_shadow_map.cascade_splits.clear();
 }
 
 void RenderPipeline::destroy_ssao() {
@@ -885,6 +934,15 @@ void RenderPipeline::cleanup_gpu_resources() {
         if (d.ebo_id) glDeleteBuffers(1, &d.ebo_id);
     }
     m_chunk_render_data.clear();
+    for (auto& [id, d] : m_water_render_data) {
+        if (d.vao_id) glDeleteVertexArrays(1, &d.vao_id);
+        if (d.vbo_id) glDeleteBuffers(1, &d.vbo_id);
+        if (d.ebo_id) glDeleteBuffers(1, &d.ebo_id);
+    }
+    m_water_render_data.clear();
+    if (m_lighting_fbo.fbo_id) { glDeleteFramebuffers(1, &m_lighting_fbo.fbo_id); m_lighting_fbo.fbo_id = 0; }
+    if (m_lighting_fbo.color_texture) { glDeleteTextures(1, &m_lighting_fbo.color_texture); m_lighting_fbo.color_texture = 0; }
+    if (m_lighting_fbo.depth_texture) { glDeleteRenderbuffers(1, &m_lighting_fbo.depth_texture); m_lighting_fbo.depth_texture = 0; }
     destroy_gbuffer();
     destroy_shadow_map();
     destroy_ssao();
@@ -892,6 +950,8 @@ void RenderPipeline::cleanup_gpu_resources() {
     if (m_screen_quad_vbo) { glDeleteBuffers(1, &m_screen_quad_vbo); m_screen_quad_vbo = 0; }
     if (m_skybox_vao) { glDeleteVertexArrays(1, &m_skybox_vao); m_skybox_vao = 0; }
     if (m_skybox_vbo) { glDeleteBuffers(1, &m_skybox_vbo); m_skybox_vbo = 0; }
+    if (m_instanceMatrixVBO) { glDeleteBuffers(1, &m_instanceMatrixVBO); m_instanceMatrixVBO = 0; }
+    if (m_terrainTextureArray) { glDeleteTextures(1, &m_terrainTextureArray); m_terrainTextureArray = 0; }
     if (m_materialLUT) { glDeleteTextures(1, &m_materialLUT); m_materialLUT = 0; }
     cleanup_gpu_sdf_system();
     m_geometry_shader.reset();
@@ -900,6 +960,9 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_shadow_shader.reset();
     m_ssao.ssaoShader.reset();
     m_ssao.blurShader.reset();
+    m_water_shader.reset();
+    m_instanced_static_mesh_shader.reset();
+    m_started = false;
 }
 
 // --- RESOURCE MANAGEMENT ---
@@ -1494,13 +1557,13 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
 }
 
 std::vector<glm::mat4> RenderPipeline::get_light_space_matrices(const Camera& camera) {
-    if (m_shadow_map.cascade_splits.empty()) {
-        // If you see this message, the initialization order is wrong.
-        LUMINUMBRA_CORE_CRITICAL("FATAL: get_light_space_matrices called but cascade_splits is empty! Check that startup() runs before the first render_frame().");
-        throw std::runtime_error("Shadow map cascade splits not initialized!");
+    if (!has_valid_shadow_cascade_splits(m_shadow_map)) {
+        LUMINUMBRA_CORE_ERROR("Shadow cascade splits were not initialized; restoring defaults.");
+        set_default_shadow_cascade_splits(m_shadow_map);
     }
 
     std::vector<glm::mat4> matrices;
+    matrices.reserve(ShadowMap::CASCADE_COUNT);
     for (int i = 0; i < ShadowMap::CASCADE_COUNT; i++) {
         float split_near = (i == 0) ? camera.GetNearPlane() : m_shadow_map.cascade_splits[i];
         float split_far = m_shadow_map.cascade_splits[i + 1];
