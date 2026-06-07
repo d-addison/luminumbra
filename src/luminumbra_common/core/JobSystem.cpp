@@ -1,12 +1,58 @@
 #include "JobSystem.h"
-#include <iostream>
+#include <exception>
+#include <string>
 #include "../../../include/luminumbra/core/Types.h"
 #include "core/Log.h"
 
 namespace Luminumbra {
 
+struct JobCompletionState {
+    explicit JobCompletionState(int job_count)
+        : counter(job_count) {}
+
+    std::atomic<int> counter;
+    std::mutex mutex;
+    std::condition_variable condition;
+};
+
+namespace {
+
+void complete_job(const std::shared_ptr<JobCompletionState>& completion) {
+    if (!completion) {
+        return;
+    }
+
+    if (completion->counter.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        {
+            std::lock_guard<std::mutex> lock(completion->mutex);
+        }
+        completion->condition.notify_all();
+    }
+}
+
+} // namespace
+
+JobSystem::~JobSystem() {
+    shutdown();
+}
+
 void JobSystem::startup() {
-    const u32 num_threads = std::thread::hardware_concurrency();
+    u32 num_threads = std::thread::hardware_concurrency();
+    if (num_threads == 0) {
+        num_threads = 1;
+    }
+
+    {
+        std::unique_lock<std::mutex> lock(m_queue_mutex);
+        if (m_accepting_jobs || !m_workers.empty()) {
+            LUMINUMBRA_CORE_WARN("JobSystem startup requested while already running.");
+            return;
+        }
+
+        m_stop_threads.store(false, std::memory_order_release);
+        m_accepting_jobs = true;
+    }
+
     m_workers.reserve(num_threads);
     for (u32 i = 0; i < num_threads; ++i) {
         m_workers.emplace_back(&JobSystem::worker_loop, this);
@@ -15,20 +61,49 @@ void JobSystem::startup() {
 }
 
 void JobSystem::shutdown() {
-    m_stop_threads.store(true);
+    {
+        std::unique_lock<std::mutex> lock(m_queue_mutex);
+        if (!m_accepting_jobs && m_workers.empty()) {
+            return;
+        }
+
+        m_accepting_jobs = false;
+        m_stop_threads.store(true, std::memory_order_release);
+    }
+
     m_condition.notify_all();
+
     for (std::thread& worker : m_workers) {
         if (worker.joinable()) {
             worker.join();
         }
     }
+
+    {
+        std::unique_lock<std::mutex> lock(m_queue_mutex);
+        m_workers.clear();
+    }
 }
 
 void JobSystem::dispatch(Job job) {
+    if (!job) {
+        return;
+    }
+
+    bool accepted = false;
     {
         std::unique_lock<std::mutex> lock(m_queue_mutex);
-        m_job_queue.push(std::move(job));
+        if (m_accepting_jobs && !m_stop_threads.load(std::memory_order_acquire)) {
+            m_job_queue.push(std::move(job));
+            accepted = true;
+        }
     }
+
+    if (!accepted) {
+        LUMINUMBRA_CORE_WARN("JobSystem rejected job dispatch while shutting down.");
+        return;
+    }
+
     m_condition.notify_one();
 }
 
@@ -37,17 +112,37 @@ JobHandle JobSystem::dispatch_batch(const std::vector<Job>& jobs) {
         return JobHandle{};
     }
 
-    auto counter = std::make_shared<std::atomic<int>>(static_cast<int>(jobs.size()));
-    JobHandle handle{counter};
+    auto completion = std::make_shared<JobCompletionState>(static_cast<int>(jobs.size()));
+    JobHandle handle{std::shared_ptr<std::atomic<int>>(completion, &completion->counter), completion};
+    bool accepted = false;
 
     {
         std::unique_lock<std::mutex> lock(m_queue_mutex);
-        for (const auto& job : jobs) {
-            m_job_queue.push([job, counter]() {
-                job();
-                counter->fetch_sub(1);
-            });
+        if (m_accepting_jobs && !m_stop_threads.load(std::memory_order_acquire)) {
+            for (const auto& job : jobs) {
+                m_job_queue.push([job, completion]() {
+                    struct CompletionGuard {
+                        std::shared_ptr<JobCompletionState> completion;
+
+                        ~CompletionGuard() {
+                            complete_job(completion);
+                        }
+                    } guard{completion};
+
+                    if (job) {
+                        job();
+                    }
+                });
+            }
+            accepted = true;
         }
+    }
+
+    if (!accepted) {
+        completion->counter.store(0, std::memory_order_release);
+        completion->condition.notify_all();
+        LUMINUMBRA_CORE_WARN("JobSystem rejected batch dispatch while shutting down.");
+        return handle;
     }
 
     m_condition.notify_all();
@@ -55,8 +150,13 @@ JobHandle JobSystem::dispatch_batch(const std::vector<Job>& jobs) {
 }
 
 void JobSystem::wait(const JobHandle& handle) {
-    if (handle.counter) {
-        while (handle.counter->load() > 0) {
+    if (handle.completion) {
+        std::unique_lock<std::mutex> lock(handle.completion->mutex);
+        handle.completion->condition.wait(lock, [&handle] {
+            return handle.completion->counter.load(std::memory_order_acquire) <= 0;
+        });
+    } else if (handle.counter) {
+        while (handle.counter->load(std::memory_order_acquire) > 0) {
             std::this_thread::yield();
         }
     }
@@ -80,7 +180,13 @@ void JobSystem::worker_loop() {
         }
 
         if (job) {
-            job();
+            try {
+                job();
+            } catch (const std::exception& exception) {
+                LUMINUMBRA_CORE_ERROR("JobSystem worker caught job exception: " + std::string(exception.what()));
+            } catch (...) {
+                LUMINUMBRA_CORE_ERROR("JobSystem worker caught unknown job exception.");
+            }
         }
     }
 }

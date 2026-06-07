@@ -13,12 +13,17 @@ namespace Luminumbra {
 
 using Job = std::function<void()>;
 
+struct JobCompletionState;
+
 struct JobHandle {
     std::shared_ptr<std::atomic<int>> counter;
+    std::shared_ptr<JobCompletionState> completion;
 };
 
 class JobSystem {
 public:
+    ~JobSystem();
+
     void startup();
     void shutdown();
     void dispatch(Job job);
@@ -33,6 +38,7 @@ private:
     std::mutex m_queue_mutex;
     std::condition_variable m_condition;
     std::atomic<bool> m_stop_threads = false;
+    bool m_accepting_jobs = false;
 
 };
 
