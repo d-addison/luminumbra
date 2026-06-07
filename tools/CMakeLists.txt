@@ -4,6 +4,15 @@ add_executable(asset_processor
     asset_processor.cpp
 )
 
+target_compile_options(asset_processor PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/W4>
+    $<$<CXX_COMPILER_ID:MSVC>:/WX>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wextra>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wpedantic>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Werror>
+)
+
 # Tell the target where to find "meshoptimizer.h"
 target_include_directories(asset_processor PUBLIC
     # Assuming the meshoptimizer src files are in vendor/meshoptimizer/src

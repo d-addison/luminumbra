@@ -5,6 +5,15 @@ include(sources.cmake)
 # The paths in COMMON_SOURCES are relative to this CMakeLists.txt file.
 add_library(luminumbra_common STATIC ${COMMON_SOURCES})
 
+target_compile_options(luminumbra_common PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/W4>
+    $<$<CXX_COMPILER_ID:MSVC>:/WX>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wextra>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wpedantic>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Werror>
+)
+
 # --- CORRECTED USAGE REQUIREMENTS ---
 target_include_directories(luminumbra_common PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}"

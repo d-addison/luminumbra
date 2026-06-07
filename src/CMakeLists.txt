@@ -19,6 +19,15 @@ add_library(luminumbra_client STATIC
     ${CLIENT_VENDOR_SOURCES}
 )
 
+target_compile_options(luminumbra_client PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/W4>
+    $<$<CXX_COMPILER_ID:MSVC>:/WX>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wextra>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wpedantic>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Werror>
+)
+
 # Set up include directories for the client
 target_include_directories(luminumbra_client PUBLIC
     # The client's own root directory
@@ -50,6 +59,15 @@ target_link_libraries(luminumbra_client PUBLIC
 # --- Client Executable ---
 add_executable(luminumbra_client_app
     luminumbra_client/main_client.cpp
+)
+
+target_compile_options(luminumbra_client_app PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/W4>
+    $<$<CXX_COMPILER_ID:MSVC>:/WX>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wextra>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wpedantic>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Werror>
 )
 
 target_link_libraries(luminumbra_client_app PRIVATE
