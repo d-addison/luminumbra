@@ -1,9 +1,91 @@
 #include "Mesh.h"
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
 #include <fstream>
+#include <string_view>
+#include <system_error>
 #include <vector>
 #include "core/Log.h"
 
 namespace Luminumbra::Rendering {
+namespace {
+
+constexpr uint32_t kLMeshMagic =
+    static_cast<uint32_t>('L') |
+    (static_cast<uint32_t>('M') << 8) |
+    (static_cast<uint32_t>('S') << 16) |
+    (static_cast<uint32_t>('H') << 24);
+constexpr std::string_view kDataPrefix = "data/";
+
+bool HasDataPrefix(const std::filesystem::path& path) {
+    return path.generic_string().starts_with(kDataPrefix);
+}
+
+std::filesystem::path DataRelativePath(const std::filesystem::path& path) {
+    const std::string genericPath = path.generic_string();
+
+    if (genericPath.starts_with(kDataPrefix)) {
+        return genericPath.substr(kDataPrefix.size());
+    }
+
+    return path;
+}
+
+void AddCandidate(std::vector<std::filesystem::path>& candidates, const std::filesystem::path& candidate) {
+    for (const auto& existing : candidates) {
+        if (existing == candidate) {
+            return;
+        }
+    }
+
+    candidates.push_back(candidate);
+}
+
+std::vector<std::filesystem::path> BuildMeshPathCandidates(const std::string& path) {
+    std::vector<std::filesystem::path> candidates;
+    const std::filesystem::path requestedPath(path);
+
+    if (requestedPath.is_absolute()) {
+        AddCandidate(candidates, requestedPath);
+        return candidates;
+    }
+
+    const bool hasDataPrefix = HasDataPrefix(requestedPath);
+    const std::filesystem::path dataRelativePath = DataRelativePath(requestedPath);
+
+    if (!hasDataPrefix) {
+        AddCandidate(candidates, requestedPath);
+    }
+
+#ifdef LUMINUMBRA_BUILD_DATA_DIR
+    AddCandidate(candidates, std::filesystem::path(LUMINUMBRA_BUILD_DATA_DIR) / dataRelativePath);
+#endif
+
+#ifdef LUMINUMBRA_SOURCE_DATA_DIR
+    AddCandidate(candidates, std::filesystem::path(LUMINUMBRA_SOURCE_DATA_DIR) / dataRelativePath);
+#endif
+
+    if (hasDataPrefix) {
+        AddCandidate(candidates, requestedPath);
+    }
+
+    return candidates;
+}
+
+std::ifstream OpenMeshFile(const std::string& path, std::filesystem::path& resolvedPath) {
+    for (const auto& candidate : BuildMeshPathCandidates(path)) {
+        std::ifstream file(candidate, std::ios::binary);
+        if (file) {
+            resolvedPath = candidate;
+            return file;
+        }
+    }
+
+    return {};
+}
+
+} // namespace
 
 struct LMeshHeader {
     uint32_t magic;
@@ -13,17 +95,33 @@ struct LMeshHeader {
 };
 
 std::unique_ptr<Mesh> MeshLoader::Load(const std::string& path) {
-    std::ifstream inFile(path, std::ios::binary);
+    std::filesystem::path resolvedPath;
+    std::ifstream inFile = OpenMeshFile(path, resolvedPath);
     if (!inFile) { LUMINUMBRA_CORE_ERROR("Failed to open mesh file: {}", path); return nullptr; }
 
     LMeshHeader header;
     inFile.read(reinterpret_cast<char*>(&header), sizeof(LMeshHeader));
-    if (header.magic != *reinterpret_cast<const uint32_t*>("LMSH")) { LUMINUMBRA_CORE_ERROR("Invalid mesh file format for: {}", path); return nullptr; }
+    if (!inFile) { LUMINUMBRA_CORE_ERROR("Failed to read mesh header: {}", resolvedPath.string()); return nullptr; }
+    if (header.magic != kLMeshMagic) { LUMINUMBRA_CORE_ERROR("Invalid mesh file format for: {}", resolvedPath.string()); return nullptr; }
+    if (header.vertexCount == 0 || header.indexCount == 0) { LUMINUMBRA_CORE_ERROR("Mesh file has no geometry: {}", resolvedPath.string()); return nullptr; }
+
+    const auto vertexBytes = static_cast<std::uintmax_t>(header.vertexCount) * sizeof(Vertex);
+    const auto indexBytes = static_cast<std::uintmax_t>(header.indexCount) * sizeof(uint32_t);
+    const auto expectedSize = static_cast<std::uintmax_t>(sizeof(LMeshHeader)) + vertexBytes + indexBytes;
+
+    std::error_code fileSizeError;
+    const auto actualSize = std::filesystem::file_size(resolvedPath, fileSizeError);
+    if (fileSizeError || actualSize != expectedSize) {
+        LUMINUMBRA_CORE_ERROR("Mesh file size mismatch for: {}", resolvedPath.string());
+        return nullptr;
+    }
 
     std::vector<Vertex> vertices(header.vertexCount);
     std::vector<uint32_t> indices(header.indexCount);
     inFile.read(reinterpret_cast<char*>(vertices.data()), vertices.size() * sizeof(Vertex));
+    if (!inFile) { LUMINUMBRA_CORE_ERROR("Failed to read mesh vertices: {}", resolvedPath.string()); return nullptr; }
     inFile.read(reinterpret_cast<char*>(indices.data()), indices.size() * sizeof(uint32_t));
+    if (!inFile) { LUMINUMBRA_CORE_ERROR("Failed to read mesh indices: {}", resolvedPath.string()); return nullptr; }
 
     auto mesh = std::make_unique<Mesh>();
     mesh->indexCount = header.indexCount;
@@ -47,7 +145,7 @@ std::unique_ptr<Mesh> MeshLoader::Load(const std::string& path) {
     glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, uv));
     glBindVertexArray(0);
 
-    LUMINUMBRA_CORE_INFO("Loaded mesh '{}' ({} verts, {} indices)", path, header.vertexCount, header.indexCount);
+    LUMINUMBRA_CORE_INFO("Loaded mesh '{}' ({} verts, {} indices)", resolvedPath.string(), header.vertexCount, header.indexCount);
     return mesh;
 }
 }
