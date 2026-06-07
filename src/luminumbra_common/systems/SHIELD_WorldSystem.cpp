@@ -35,15 +35,24 @@ SHIELD_WorldSystem::SHIELD_WorldSystem(JobSystem* job_system, WaterSystem* water
 }
 
 SHIELD_WorldSystem::~SHIELD_WorldSystem() {
+    wait_for_generation_jobs();
     wait_for_meshing_jobs();
 }
 
-void SHIELD_WorldSystem::wait_for_meshing_jobs() {
-    if (m_job_system && m_meshing_job_handle.counter) {
-        m_job_system->wait(m_meshing_job_handle);
+void SHIELD_WorldSystem::wait_for_generation_jobs() {
+    if (m_job_system && m_streaming_state.generation_job_handle.counter) {
+        m_job_system->wait(m_streaming_state.generation_job_handle);
     }
 
-    m_meshing_job_handle = {};
+    m_streaming_state.generation_job_handle = {};
+}
+
+void SHIELD_WorldSystem::wait_for_meshing_jobs() {
+    if (m_job_system && m_streaming_state.meshing_job_handle.counter) {
+        m_job_system->wait(m_streaming_state.meshing_job_handle);
+    }
+
+    m_streaming_state.meshing_job_handle = {};
 }
 
 void SHIELD_WorldSystem::reinitialize_noise() {
@@ -75,6 +84,16 @@ int SHIELD_WorldSystem::get_lod_level_for_distance(float dist) const {
     }
     // If it's further than our max LOD distance, use the lowest detail level
     return m_lod_levels.back().level;
+}
+
+int SHIELD_WorldSystem::get_lod_step_for_level(int lod_level) const {
+    for (const auto& lod : m_lod_levels) {
+        if (lod.level == lod_level) {
+            return std::max(1, lod.step);
+        }
+    }
+
+    return std::max(1, m_lod_levels.back().step);
 }
 
 std::vector<IVec3> SHIELD_WorldSystem::GetInitialChunkLoadList(const Vec3& center_pos) const {
@@ -111,6 +130,7 @@ std::vector<IVec3> SHIELD_WorldSystem::GetInitialChunkLoadList(const Vec3& cente
 }
 
 void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_position, PhysicsSystem* physics_system) {
+    wait_for_generation_jobs();
     wait_for_meshing_jobs();
 
     // Decouple the expensive chunk activation/deactivation logic from the frame rate.
@@ -123,7 +143,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
     // Step 2: Update the water system using the now-current list of active chunks.
     // This MUST happen before meshing jobs are dispatched.
     if (m_water_system) {
-        m_water_system->update(registry, m_chunks);
+        m_water_system->update(registry, m_streaming_state.chunks);
     }
 
      // Step 3: Schedule meshing jobs for chunks that need it
@@ -132,7 +152,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
 
     // Chunk state logging removed from hot path - too expensive
 
-    for (auto const& [id, chunk_ptr] : m_chunks) {
+    for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
         bool needs_meshing = false;
         int required_lod = -1;
 
@@ -168,7 +188,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
     // Step 4. Time-slice the creation of expensive physics colliders on the main thread
     if (physics_system) {
         int collision_meshes_created_this_frame = 0;
-        for (auto const& [id, chunk_ptr] : m_chunks) {
+        for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
             if (chunk_ptr->get_state() == ChunkState::Ready && !chunk_ptr->has_collision.load()) {
                 // Only create collision for the highest LOD terrain mesh
                 if (chunk_ptr->current_lod.load() == 0 && !chunk_ptr->mesh_vertices.empty() && !chunk_ptr->mesh_indices.empty()) {
@@ -215,12 +235,12 @@ void SHIELD_WorldSystem::update_chunk_activation(const Vec3& player_pos, Physics
     // 2. Identify which of these candidate chunks are new and need to be created.
     std::vector<std::pair<IVec3, int>> to_create;
     for (const IVec3& c : candidates) {
-        if (m_chunks.size() + to_create.size() >= MAX_ACTIVE_CHUNKS) {
+        if (m_streaming_state.chunks.size() + to_create.size() >= MAX_ACTIVE_CHUNKS) {
             break; 
         }
 
         ChunkID id = Chunk::calculate_id(c);
-        if (m_chunks.find(id) == m_chunks.end()) {
+        if (m_streaming_state.chunks.find(id) == m_streaming_state.chunks.end()) {
             IVec3 d = c - camera_chunk;
             int dist2 = d.x * d.x + d.z * d.z + d.y * d.y;
             to_create.emplace_back(c, dist2);
@@ -244,19 +264,23 @@ void SHIELD_WorldSystem::update_chunk_activation(const Vec3& player_pos, Physics
     }
 
     // 4. Dispatch generation jobs according to priority and budget.
-    if (!high_priority_generate.empty()) {
-        dispatch_generation_jobs(high_priority_generate);
+    std::vector<IVec3> generate_now;
+    generate_now.reserve(MAX_CHUNKS_TO_PROCESS_PER_FRAME);
+
+    const size_t high_priority_budget = std::min(
+        high_priority_generate.size(),
+        static_cast<size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME)
+    );
+    generate_now.insert(generate_now.end(), high_priority_generate.begin(), high_priority_generate.begin() + high_priority_budget);
+
+    if (generate_now.size() < static_cast<size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME)) {
+        const size_t remaining_budget = static_cast<size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME) - generate_now.size();
+        const size_t low_priority_budget = std::min(low_priority_generate.size(), remaining_budget);
+        generate_now.insert(generate_now.end(), low_priority_generate.begin(), low_priority_generate.begin() + low_priority_budget);
     }
 
-    if (!low_priority_generate.empty()) {
-        size_t budget = MAX_CHUNKS_TO_PROCESS_PER_FRAME > high_priority_generate.size() 
-            ? MAX_CHUNKS_TO_PROCESS_PER_FRAME - high_priority_generate.size() 
-            : 0;
-        
-        if (budget > 0) {
-            low_priority_generate.resize(std::min(low_priority_generate.size(), budget));
-            dispatch_generation_jobs(low_priority_generate);
-        }
+    if (!generate_now.empty()) {
+        dispatch_generation_jobs(generate_now);
     }
 
     // <<< OPTIMIZATION START: Efficiently find chunks to unload >>>
@@ -273,7 +297,7 @@ void SHIELD_WorldSystem::update_chunk_activation(const Vec3& player_pos, Physics
     const int UNLOAD_DISTANCE_UP = RENDER_DISTANCE_UP + 2;
     const int UNLOAD_DISTANCE_DOWN = RENDER_DISTANCE_DOWN + 2;
 
-    for (const auto& [id, chunk_ptr] : m_chunks) {
+    for (const auto& [id, chunk_ptr] : m_streaming_state.chunks) {
         const IVec3 d = chunk_ptr->get_coords() - camera_chunk;
         if (std::abs(d.x) > UNLOAD_DISTANCE_XZ ||
             std::abs(d.z) > UNLOAD_DISTANCE_XZ ||
@@ -288,7 +312,7 @@ void SHIELD_WorldSystem::update_chunk_activation(const Vec3& player_pos, Physics
         if (physics_system) {
             physics_system->remove_chunk_collision(id);
         }
-        m_chunks.erase(id);
+        m_streaming_state.chunks.erase(id);
     }
     // <<< OPTIMIZATION END >>>
 }
@@ -322,16 +346,17 @@ float SHIELD_WorldSystem::get_density_at(const Vec3& world_pos) const {
 }
 
 std::vector<Luminumbra::Chunk*> SHIELD_WorldSystem::get_renderable_chunks() {
+    wait_for_generation_jobs();
     wait_for_meshing_jobs();
 
     std::vector<Luminumbra::Chunk*> renderable;
-    renderable.reserve(m_chunks.size());
+    renderable.reserve(m_streaming_state.chunks.size());
     
     int total_chunks = 0;
     int ready_chunks = 0;
     int chunks_with_mesh = 0;
     
-    for (auto const& [id, chunk_ptr] : m_chunks) {
+    for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
         total_chunks++;
         if (chunk_ptr->get_state() == Luminumbra::ChunkState::Ready) {
             ready_chunks++;
@@ -460,27 +485,18 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk) const {
 }
 
 JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<IVec3>& chunks_to_generate) {
+    wait_for_generation_jobs();
+
     std::vector<Luminumbra::Job> jobs;
     for (const auto& coords : chunks_to_generate) {
         auto chunk = std::make_shared<Luminumbra::Chunk>(coords);
         chunk->set_state(Luminumbra::ChunkState::Loading);
-        m_chunks[chunk->get_id()] = chunk;
+        m_streaming_state.chunks[chunk->get_id()] = chunk;
 
         // Chunk generation job created
 
-        jobs.emplace_back([this, chunk, coords]() {
+        jobs.emplace_back([this, chunk]() {
             GenerateChunkData(*chunk);
-            
-            // DEBUG: Check if chunk has valid SDF data
-            bool has_surface = false;
-            for (float val : chunk->sdf_data) {
-                if (val < 0.0f && val > -10.0f) {  // Near-surface values
-                    has_surface = true;
-                    break;
-                }
-            }
-            // Surface detection debug logging removed to prevent segfault
-            
             chunk->set_state(Luminumbra::ChunkState::Idle);
         });
     }
@@ -489,30 +505,8 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<IVec3>&
     
     if (m_job_system && !jobs.empty()) {
         handle = m_job_system->dispatch_batch(jobs);
-        m_job_system->wait(handle);
+        m_streaming_state.generation_job_handle = handle;
     }
-        
-    // DEBUG: After generation completes, check SDF data from main thread
-    for (const auto& coords : chunks_to_generate) {
-        ChunkID id = Chunk::calculate_id(coords);
-        auto it = m_chunks.find(id);
-        if (it != m_chunks.end()) {
-            auto& chunk = it->second;
-            
-            // Check SDF range
-            float min_val = 999999.0f, max_val = -999999.0f;
-            int neg_count = 0, pos_count = 0;
-            for (float val : chunk->sdf_data) {
-                if (val < min_val) min_val = val;
-                if (val > max_val) max_val = val;
-                if (val < 0.0f) neg_count++;
-                if (val > 0.0f) pos_count++;
-            }
-            
-            // SDF analysis logging removed from hot path
-        }
-    }
-    
     return handle; // Return the handle (will be default-constructed/invalid if no jobs were dispatched)
 }
 
@@ -520,10 +514,11 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<std::pair<std::
     std::vector<Luminumbra::Job> jobs;
     for (const auto& pair : chunks_to_mesh) {
         auto& chunk = pair.first;
-        int step = pair.second; // The LOD level is the step size
+        const int lod_level = pair.second;
+        const int step = get_lod_step_for_level(lod_level);
 
         chunk->set_state(Luminumbra::ChunkState::Meshing);
-        chunk->current_lod.store(step);
+        chunk->current_lod.store(lod_level);
 
         jobs.emplace_back([this, chunk, step]() {
             try {
@@ -567,11 +562,12 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<std::pair<std::
         });
     }
     if (m_job_system && !jobs.empty()) {
-        m_meshing_job_handle = m_job_system->dispatch_batch(jobs);
+        m_streaming_state.meshing_job_handle = m_job_system->dispatch_batch(jobs);
     }
 }
 
 void SHIELD_WorldSystem::set_params(const TerrainGenParams& params) {
+    wait_for_generation_jobs();
     wait_for_meshing_jobs();
 
     m_params = params;
@@ -579,6 +575,7 @@ void SHIELD_WorldSystem::set_params(const TerrainGenParams& params) {
 }
 
 void SHIELD_WorldSystem::set_seed(int seed) {
+    wait_for_generation_jobs();
     wait_for_meshing_jobs();
 
     m_seed = seed;
@@ -586,24 +583,26 @@ void SHIELD_WorldSystem::set_seed(int seed) {
 }
 
 void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
+    wait_for_generation_jobs();
     wait_for_meshing_jobs();
 
     if (physics_system) {
-        for (const auto& [id, chunk] : m_chunks) {
+        for (const auto& [id, chunk] : m_streaming_state.chunks) {
             physics_system->remove_chunk_collision(id);
         }
     }
-    m_chunks.clear();
+    m_streaming_state.chunks.clear();
     LUMINUMBRA_CORE_INFO("World cleared.");
 }
 
 void SHIELD_WorldSystem::regenerate_all_chunks(PhysicsSystem* physics_system) {
+    wait_for_generation_jobs();
     wait_for_meshing_jobs();
 
     LUMINUMBRA_CORE_INFO("Regenerating all active chunks...");
     std::vector<IVec3> coords_to_regenerate;
-    coords_to_regenerate.reserve(m_chunks.size());
-    for(const auto& [id, chunk] : m_chunks) {
+    coords_to_regenerate.reserve(m_streaming_state.chunks.size());
+    for(const auto& [id, chunk] : m_streaming_state.chunks) {
         coords_to_regenerate.push_back(chunk->get_coords());
     }
     clear_world(physics_system);
@@ -625,6 +624,8 @@ IVec3 SHIELD_WorldSystem::world_to_chunk_coords(const Vec3& position) {
 }
 
 void SHIELD_WorldSystem::SetGPUSDFCallback(std::function<bool(const IVec3&, const TerrainGenParams&, int, std::vector<float>&)> callback) {
+    wait_for_generation_jobs();
+
     m_gpu_sdf_callback = callback;
 }
 
