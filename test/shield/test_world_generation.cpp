@@ -220,6 +220,33 @@ TEST_F(WorldGenerationTest, LOD_MeshingReducesVertexCount) {
     EXPECT_LT(chunk_lod2.mesh_indices.size(), chunk_lod0.mesh_indices.size());
 }
 
+TEST_F(WorldGenerationTest, LOD_MeshingPreservesUpwardTriangleWindingOnHorizontalSurface) {
+    SHIELD_WorldSystem world_system(nullptr, nullptr, params_guaranteed_surface, 1337);
+    Chunk chunk({0, 0, 0});
+    world_system.GenerateChunkData(chunk);
+    World::MarchingCubes::PolygoniseTerrain(world_system, chunk, 0.0f, 4);
+
+    ASSERT_FALSE(chunk.mesh_vertices.empty());
+    ASSERT_FALSE(chunk.mesh_indices.empty());
+    ASSERT_EQ(chunk.mesh_indices.size() % 3, 0u);
+
+    for (size_t i = 0; i < chunk.mesh_indices.size(); i += 3) {
+        ASSERT_LT(chunk.mesh_indices[i], chunk.mesh_vertices.size());
+        ASSERT_LT(chunk.mesh_indices[i + 1], chunk.mesh_vertices.size());
+        ASSERT_LT(chunk.mesh_indices[i + 2], chunk.mesh_vertices.size());
+
+        const auto& v0 = chunk.mesh_vertices[chunk.mesh_indices[i]];
+        const auto& v1 = chunk.mesh_vertices[chunk.mesh_indices[i + 1]];
+        const auto& v2 = chunk.mesh_vertices[chunk.mesh_indices[i + 2]];
+
+        const Vec3 edge_a = v1.position - v0.position;
+        const Vec3 edge_b = v2.position - v0.position;
+        const float face_normal_y = edge_a.z * edge_b.x - edge_a.x * edge_b.z;
+
+        EXPECT_GT(face_normal_y, 0.0f) << "LOD triangle " << (i / 3) << " has downward winding";
+    }
+}
+
 // =====================================================================================
 // MESHING TESTS (WATER)
 // =====================================================================================
