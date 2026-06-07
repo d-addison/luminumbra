@@ -7,14 +7,14 @@
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
-#include <array> // <-- ADDED
+#include <memory>
 
 namespace Luminumbra {
 
 using Job = std::function<void()>;
 
 struct JobHandle {
-    std::atomic<int>* counter = nullptr;
+    std::shared_ptr<std::atomic<int>> counter;
 };
 
 class JobSystem {
@@ -34,10 +34,6 @@ private:
     std::condition_variable m_condition;
     std::atomic<bool> m_stop_threads = false;
 
-    // For the batch system
-    // CHANGED from std::vector to std::array to solve copy/move issue with std::atomic
-    std::array<std::atomic<int>, 256> m_counters;
-    std::atomic<int> m_next_counter_index = 0;
 };
 
 } // namespace Luminumbra
