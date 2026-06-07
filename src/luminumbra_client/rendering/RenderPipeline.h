@@ -11,6 +11,7 @@
 #include "core/AssetManager.h"
 #include <filesystem>
 #include "luminumbra_common/components/LightingComponents.h"
+#include "luminumbra_common/world/Chunk.h"
 
 // Forward declarations
 namespace Luminumbra { class Chunk; }
@@ -97,18 +98,33 @@ public:
     void SetupGPUSDFIntegration(Systems::SHIELD_WorldSystem& world_system);
 
 private:
-    void manage_chunk_gpu_resources(const std::vector<Chunk*>& renderable_chunks);
-    void upload_chunk_mesh(const Chunk& chunk);
+    struct ChunkMeshSnapshot {
+        ChunkID id = 0;
+        IVec3 coords{};
+        u32 mesh_version = 0;
+        std::vector<VoxelVertex> mesh_vertices;
+        std::vector<u32> mesh_indices;
+        std::vector<VoxelVertex> water_mesh_vertices;
+        std::vector<u32> water_mesh_indices;
+
+        bool has_terrain_mesh() const { return !mesh_vertices.empty() && !mesh_indices.empty(); }
+        bool has_water_mesh() const { return !water_mesh_vertices.empty() && !water_mesh_indices.empty(); }
+    };
+
+    std::vector<ChunkMeshSnapshot> build_chunk_snapshots(const std::vector<Chunk*>& renderable_chunks) const;
+
+    void manage_chunk_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks);
+    void upload_chunk_mesh(const ChunkMeshSnapshot& chunk);
     void unload_chunk_resources(ChunkID chunk_id);
 
-    void shadow_pass(const std::vector<Chunk*>& renderable_chunks, const Camera& camera);
+    void shadow_pass(const std::vector<ChunkMeshSnapshot>& renderable_chunks, const Camera& camera);
     void ssao_pass(const Camera& camera);
     void ssao_blur_pass();
     void lighting_pass(const Camera& camera);
     void skybox_pass(const Camera& camera);
 
-    void manage_water_gpu_resources(const std::vector<Chunk*>& renderable_chunks);
-    void upload_water_mesh(const Chunk& chunk);
+    void manage_water_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks);
+    void upload_water_mesh(const ChunkMeshSnapshot& chunk);
     void unload_water_resources(ChunkID chunk_id);
 
     void init_gbuffer(u32 width, u32 height);
@@ -123,8 +139,8 @@ private:
     void cleanup_gpu_resources();
 
     void init_lighting_fbo(u32 width, u32 height);
-    void gbuffer_pass(entt::registry& registry, const std::vector<Chunk*>& renderable_chunks, const Camera& camera, const glm::vec4 frustum_planes[6]);
-    void water_pass(const std::vector<Chunk*>& renderable_chunks, const Camera& camera);
+    void gbuffer_pass(entt::registry& registry, const std::vector<ChunkMeshSnapshot>& renderable_chunks, const Camera& camera, const glm::vec4 frustum_planes[6]);
+    void water_pass(const std::vector<ChunkMeshSnapshot>& renderable_chunks, const Camera& camera);
     FrameBufferObject m_lighting_fbo;
     
     std::vector<glm::mat4> get_light_space_matrices(const Camera& camera);
@@ -158,7 +174,7 @@ private:
     u32 m_skybox_vao = 0;
     u32 m_skybox_vbo = 0;
 
-    void geometry_pass_chunks(const std::vector<Chunk*>& renderable_chunks, const Camera& camera, const glm::vec4 frustum_planes[6]);
+    void geometry_pass_chunks(const std::vector<ChunkMeshSnapshot>& renderable_chunks, const Camera& camera, const glm::vec4 frustum_planes[6]);
     void geometry_pass_static_meshes(entt::registry& registry, const Camera& camera, const glm::vec4 frustum_planes[6]);
     
     std::unique_ptr<Shader> m_instanced_static_mesh_shader;
@@ -209,7 +225,7 @@ private:
     
     struct CullingNode {
         AABB bounds;
-        std::vector<Chunk*> chunks;
+        std::vector<const ChunkMeshSnapshot*> chunks;
         std::unique_ptr<CullingNode> children[4]; // Quadtree (X-Z plane)
         bool is_leaf = true;
         
@@ -219,9 +235,9 @@ private:
     
     class HierarchicalCuller {
     public:
-        void BuildHierarchy(const std::vector<Chunk*>& chunks);
-        void CullRecursive(const glm::vec4 frustum_planes[6], CullingNode* node, std::vector<Chunk*>& visible);
-        void CullHierarchical(const glm::vec4 frustum_planes[6], std::vector<Chunk*>& visible);
+        void BuildHierarchy(const std::vector<ChunkMeshSnapshot>& chunks);
+        void CullRecursive(const glm::vec4 frustum_planes[6], CullingNode* node, std::vector<const ChunkMeshSnapshot*>& visible);
+        void CullHierarchical(const glm::vec4 frustum_planes[6], std::vector<const ChunkMeshSnapshot*>& visible);
         void Clear();
         
         std::unique_ptr<CullingNode> m_root; // Made public for access
@@ -230,7 +246,7 @@ private:
         static constexpr int MAX_CHUNKS_PER_NODE = 8;
         static constexpr int MAX_DEPTH = 4;
         
-        void BuildRecursive(CullingNode* node, const std::vector<Chunk*>& chunks, int depth);
+        void BuildRecursive(CullingNode* node, const std::vector<const ChunkMeshSnapshot*>& chunks, int depth);
         bool AABBFrustumCulled(const AABB& aabb, const glm::vec4 frustum_planes[6]);
     };
     
