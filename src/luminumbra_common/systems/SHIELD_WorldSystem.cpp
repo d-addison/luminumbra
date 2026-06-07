@@ -41,7 +41,7 @@ bool has_active_job(const JobHandle& handle) {
 }
 
 SHIELD_WorldSystem::SHIELD_WorldSystem(JobSystem* job_system, WaterSystem* water_system, const TerrainGenParams& params, int seed)
-    : m_job_system(job_system), m_water_system(water_system), m_params(params), m_seed(seed) {
+    : m_job_system(job_system), m_params(params), m_seed(seed), m_water_system(water_system) {
     reinitialize_noise();
 }
 
