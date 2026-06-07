@@ -1,6 +1,7 @@
 #include "SHIELD_WorldSystem.h"
 #include "entt/entt.hpp"
 #include "../world/MarchingCubes.h"
+#include <atomic>
 #include <cmath>
 #include <algorithm> // Required for std::max and std::min
 #include "systems/PhysicsSystem.h"
@@ -25,6 +26,16 @@ float apply_cave_field(float terrain_density, float raw_cave_noise, const Terrai
     const float cave_val = std::clamp((raw_cave_noise + 1.0f) * 0.5f, 0.0f, 1.0f);
     const float cave_density = (cave_val - params.cave_threshold) * params.cave_carve_value;
     return std::max(terrain_density, cave_density);
+}
+
+void clear_completed_job_handle(JobHandle& handle) {
+    if (handle.counter && handle.counter->load(std::memory_order_acquire) == 0) {
+        handle = {};
+    }
+}
+
+bool has_active_job(const JobHandle& handle) {
+    return handle.counter && handle.counter->load(std::memory_order_acquire) > 0;
 }
 
 }
@@ -130,7 +141,7 @@ std::vector<IVec3> SHIELD_WorldSystem::GetInitialChunkLoadList(const Vec3& cente
 }
 
 void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_position, PhysicsSystem* physics_system) {
-    wait_for_generation_jobs();
+    clear_completed_job_handle(m_streaming_state.generation_job_handle);
     wait_for_meshing_jobs();
 
     // Decouple the expensive chunk activation/deactivation logic from the frame rate.
@@ -346,7 +357,7 @@ float SHIELD_WorldSystem::get_density_at(const Vec3& world_pos) const {
 }
 
 std::vector<Luminumbra::Chunk*> SHIELD_WorldSystem::get_renderable_chunks() {
-    wait_for_generation_jobs();
+    clear_completed_job_handle(m_streaming_state.generation_job_handle);
     wait_for_meshing_jobs();
 
     std::vector<Luminumbra::Chunk*> renderable;
@@ -485,7 +496,10 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk) const {
 }
 
 JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<IVec3>& chunks_to_generate) {
-    wait_for_generation_jobs();
+    clear_completed_job_handle(m_streaming_state.generation_job_handle);
+    if (has_active_job(m_streaming_state.generation_job_handle)) {
+        return {};
+    }
 
     std::vector<Luminumbra::Job> jobs;
     for (const auto& coords : chunks_to_generate) {
