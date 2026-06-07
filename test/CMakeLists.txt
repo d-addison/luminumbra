@@ -12,6 +12,20 @@ target_link_libraries(world_generation_test PRIVATE
     luminumbra_common
 )
 
+add_executable(sdf_gpu_cpu_parity_test
+    shield/test_sdf_gpu_cpu_parity.cpp
+)
+
+target_include_directories(sdf_gpu_cpu_parity_test PRIVATE
+    ../src
+)
+
+target_link_libraries(sdf_gpu_cpu_parity_test PRIVATE
+    gtest_main
+    luminumbra_common
+)
+
 # Discover and add the tests to CTest for running
 include(GoogleTest)
 gtest_discover_tests(world_generation_test)
+gtest_discover_tests(sdf_gpu_cpu_parity_test)
