@@ -40,10 +40,34 @@ set(MESHOPT_BUILD_DEMO OFF)
 set(MESHOPT_BUILD_BENCHMARKS OFF)
 
 add_subdirectory(EnTT)
-add_subdirectory(fastnoise)
+if (NOT TARGET FastNoise)
+  if (EXISTS "${CMAKE_SOURCE_DIR}/external/FastNoiseLite/FastNoiseLite.h")
+    add_library(FastNoise INTERFACE)
+    if (NOT TARGET FastNoiseLite)
+      add_library(FastNoiseLite ALIAS FastNoise)
+    endif()
+    target_include_directories(FastNoise INTERFACE
+      $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/external/FastNoiseLite>
+    )
+  else()
+    add_subdirectory(fastnoise)
+  endif()
+endif()
 add_subdirectory(glad)
 add_subdirectory(glfw)
-add_subdirectory(glm)
+if (NOT TARGET glm)
+  if (EXISTS "${CMAKE_SOURCE_DIR}/external/glm-1.0.1/CMakeLists.txt")
+    set(GLM_BUILD_LIBRARY OFF CACHE BOOL "Build GLM as a compiled library" FORCE)
+    set(GLM_BUILD_TESTS OFF CACHE BOOL "Build GLM tests" FORCE)
+    set(GLM_BUILD_INSTALL OFF CACHE BOOL "Generate GLM install rules" FORCE)
+    add_subdirectory(
+      "${CMAKE_SOURCE_DIR}/external/glm-1.0.1"
+      "${CMAKE_BINARY_DIR}/external/glm-1.0.1"
+    )
+  else()
+    add_subdirectory(glm)
+  endif()
+endif()
 add_subdirectory(imgui)  # Now ENABLED for Quantum UI!
 add_subdirectory(Jolt)
 
