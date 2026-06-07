@@ -1,20 +1,17 @@
 {
+  "description": "Operationalize the Luminumbra polyglot-audit final roadmap's must-fix block: lock the SHIELD contract (Stage 0), make the build trustworthy (Stage 1), fix concurrency + chunk ownership (Stage 2), and unify runtime logging (Stage 3.1). Optional stages (S3.2+, S4-S8) are deferred to a follow-on dispatch once the must-fix block lands.",
+  "feature": "polyglot-audit-roadmap",
   "schema_kind": "forge.task_graph",
   "schema_version": "2",
-  "feature": "polyglot-audit-roadmap",
-  "description": "Operationalize the Luminumbra polyglot-audit final roadmap's must-fix block: lock the SHIELD contract (Stage 0), make the build trustworthy (Stage 1), fix concurrency + chunk ownership (Stage 2), and unify runtime logging (Stage 3.1). Optional stages (S3.2+, S4-S8) are deferred to a follow-on dispatch once the must-fix block lands.",
   "tasks": [
     {
-      "id": "T-S0-0-add-sdf-parity-test-harness",
-      "title": "Add CPU/GPU SDF parity test harness (initially skipped)",
-      "type": "implement",
-      "tier": "standard",
-      "depends_on": [],
-      "files": [
-        "test/shield/test_sdf_gpu_cpu_parity.cpp",
-        "test/CMakeLists.txt"
-      ],
       "agent_contract": {
+        "creates": [
+          "test/shield/test_sdf_gpu_cpu_parity.cpp"
+        ],
+        "modifies": [
+          "test/CMakeLists.txt"
+        ],
         "reads": [
           "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
           "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
@@ -24,29 +21,27 @@
           "test/CMakeLists.txt",
           ".forge/reports/polyglot-audit/quality-risks.md",
           ".forge/reports/polyglot-audit/final-roadmap.md"
-        ],
-        "modifies": [
-          "test/CMakeLists.txt"
-        ],
-        "creates": [
-          "test/shield/test_sdf_gpu_cpu_parity.cpp"
         ]
       },
-      "prompt": "Add a parity-test harness that compares CPU SDF generation (SHIELD_WorldSystem::GenerateChunkData) to GPU SDF generation (the compute shader path invoked via SHIELD_WorldSystem::m_gpu_sdf_callback / RenderPipeline::generate_chunk_sdf_gpu). The test fixture must enumerate three known seeds and three chunk coordinates, generate SDFs both ways, and assert per-cell agreement within 1e-5 absolute tolerance. Because the GPU path requires an OpenGL context, mark each test case GTEST_SKIP() with a TODO referencing T-S0-6 if no GL context is available; the harness must compile and run cleanly in the existing test binary. Register the new test source in test/CMakeLists.txt. Verify with cmake --build build && ctest --test-dir build --output-on-failure (the skipped tests should report SKIPPED, not FAILED). Do NOT modify any production source in this task."
+      "creates": [
+        "test/shield/test_sdf_gpu_cpu_parity.cpp"
+      ],
+      "depends_on": [],
+      "id": "T-S0-0-add-sdf-parity-test-harness",
+      "modifies": [
+        "test/CMakeLists.txt"
+      ],
+      "prompt": "Add a complete CPU/GPU SDF parity test that always runs when an OpenGL context can be created. (1) In test/shield/test_sdf_gpu_cpu_parity.cpp, create a GoogleTest fixture that builds a minimal headless OpenGL context using GLFW in SetUp (glfwInit, glfwWindowHint(GLFW_VISIBLE, false), GLFW_CONTEXT_VERSION_MAJOR=4 / MINOR=5, GLFW_OPENGL_PROFILE=GLFW_OPENGL_CORE_PROFILE, create a 1x1 hidden window, gladLoadGLLoader(glfwGetProcAddress)) and tears it down in TearDown. (2) If glfwInit or window creation fails (e.g., CI machine without GL), the fixture's SetUp records that the GL path is unavailable and every test case logs a warning then GTEST_SKIP — but a successful GL init means parity violations MUST FAIL. (3) The parity test enumerates three known seeds and three chunk coordinates, invokes both SHIELD_WorldSystem::GenerateChunkData (CPU) and RenderPipeline::generate_chunk_sdf_gpu (or the m_gpu_sdf_callback indirection) (GPU), and asserts per-cell agreement within 1e-5 absolute tolerance. (4) Update test/CMakeLists.txt: register the new source on world_generation_test, and add target_link_libraries(world_generation_test PRIVATE glfw glad) — match whatever luminumbra_client_app pulls for the GL toolchain. Verify with cmake --build build && ctest --test-dir build --output-on-failure --gtest_filter=*SdfParity* — the parity test must either run and pass (with GL) or skip with a logged reason (no GL). Do NOT modify any production source in this task.",
+      "tier": "standard",
+      "title": "Add CPU/GPU SDF parity test (always-on + headless GL)",
+      "type": "implement"
     },
     {
-      "id": "T-S0-1-fix-sdf-sign-convention",
-      "title": "Flip SDF sign convention to inside-negative across CPU + GPU paths",
-      "type": "implement",
-      "tier": "deep",
-      "depends_on": [
-        "T-S0-0-add-sdf-parity-test-harness"
-      ],
-      "files": [
-        "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
-        "res/shaders"
-      ],
       "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp"
+        ],
         "reads": [
           "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
           "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
@@ -56,170 +51,143 @@
           "test/shield/test_world_generation.cpp",
           ".forge/reports/polyglot-audit/quality-risks.md",
           ".forge/reports/polyglot-audit/data-models.md"
-        ],
-        "modifies": [
-          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp"
-        ],
-        "creates": []
+        ]
       },
-      "prompt": "Adopt inside-negative as the SDF sign convention. (1) In SHIELD_WorldSystem::get_density_at_from_precalculated() (around line 279), change terrain_density = terrain_height - world_pos.y to terrain_density = world_pos.y - terrain_height. (2) Mirror the change in SHIELD_WorldSystem::GenerateChunkData() at the SDF write (around lines 420 and 440). (3) Flip the GPU-path post-generation surface-detection loop in SHIELD_WorldSystem::GenerateChunkData() at line 354: change if (chunk.sdf_data[sdf_idx] > 0.0f) to if (chunk.sdf_data[sdf_idx] < 0.0f) so the heightmap reconstruction from GPU SDF still finds the surface under the new sign convention. (4) Audit every other consumer of chunk.sdf_data inside SHIELD_WorldSystem.cpp via Grep — any direct comparison with a literal must be reviewed for sign-direction; document each in the commit message. (5) Audit the GPU compute shader res/shaders/sdf_generation.compute (and any other *.compute file that writes terrain SDF) and apply the same sign flip there. (6) After the change, the SurfaceIsGeneratedAtCorrectHeight test must pass: inside_density < 0 (point at y=4 with terrain_height=8), outside_density > 0 (point at y=12 with terrain_height=8). Do NOT modify MarchingCubes.cpp in this task — that comparison (val < isolevel) is already correct under inside-negative. Do NOT modify any test source in this task. Verify with cmake --build build && ctest --test-dir build --output-on-failure --gtest_filter=*SurfaceIsGeneratedAtCorrectHeight*."
+      "depends_on": [
+        "T-S0-0-add-sdf-parity-test-harness"
+      ],
+      "id": "T-S0-1-fix-sdf-sign-convention",
+      "modifies": [
+        "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+        "res/shaders"
+      ],
+      "prompt": "Adopt inside-negative as the SDF sign convention. (1) In SHIELD_WorldSystem::get_density_at_from_precalculated() (around line 279), change terrain_density = terrain_height - world_pos.y to terrain_density = world_pos.y - terrain_height. (2) Mirror the change in SHIELD_WorldSystem::GenerateChunkData() at the SDF write (around lines 420 and 440). (3) Flip the GPU-path post-generation surface-detection loop in SHIELD_WorldSystem::GenerateChunkData() at line 354: change if (chunk.sdf_data[sdf_idx] > 0.0f) to if (chunk.sdf_data[sdf_idx] < 0.0f) so the heightmap reconstruction from GPU SDF still finds the surface under the new sign convention. (4) Audit every other consumer of chunk.sdf_data inside SHIELD_WorldSystem.cpp via Grep — any direct comparison with a literal must be reviewed for sign-direction; document each in the commit message. (5) Audit the GPU compute shader res/shaders/sdf_generation.compute (and any other *.compute file that writes terrain SDF) and apply the same sign flip there. (6) After the change, the SurfaceIsGeneratedAtCorrectHeight test must pass: inside_density < 0 (point at y=4 with terrain_height=8), outside_density > 0 (point at y=12 with terrain_height=8). Do NOT modify MarchingCubes.cpp in this task — that comparison (val < isolevel) is already correct under inside-negative. Do NOT modify any test source in this task. Verify with cmake --build build && ctest --test-dir build --output-on-failure --gtest_filter=*SurfaceIsGeneratedAtCorrectHeight*.",
+      "tier": "deep",
+      "title": "Flip SDF sign convention to inside-negative across CPU + GPU paths",
+      "type": "implement"
     },
     {
-      "id": "T-S0-2-verify-and-fix-normal-winding",
-      "title": "Verify and fix mesh normal winding after sign flip",
-      "type": "implement",
-      "tier": "deep",
-      "depends_on": [
-        "T-S0-1-fix-sdf-sign-convention"
-      ],
-      "files": [
-        "src/luminumbra_common/world/MarchingCubes.cpp"
-      ],
       "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "src/luminumbra_common/world/MarchingCubes.cpp"
+        ],
         "reads": [
           "src/luminumbra_common/world/MarchingCubes.cpp",
           "src/luminumbra_common/world/MarchingCubes.h",
           "test/shield/test_world_generation.cpp",
           ".forge/reports/polyglot-audit/critique.md"
-        ],
-        "modifies": [
-          "src/luminumbra_common/world/MarchingCubes.cpp"
-        ],
-        "creates": []
+        ]
       },
-      "prompt": "After T-S0-1, run ctest --test-dir build --output-on-failure --gtest_filter=*NormalsPointUpwardsOnHorizontalSurface*. If it passes, stop — there is no work to do. If it fails (normals point down): the embedded MarchingCubesTables.inl may have been authored against inside-positive. Inspect the table-consumption loop at MarchingCubes.cpp:164 (the triTable winding) and the face-normal accumulation at lines 175-185. Apply the minimum change: either swap two indices in the triangle push (e.g., swap vert_indices[i+1] and vert_indices[i+2]) OR negate face_normal before accumulation. Pick whichever isolates the change to a single contiguous block. Document the choice with a one-line comment that names the convention. Verify by running --gtest_filter=*Normals*. Do not modify the SHIELD_WorldSystem or test source."
+      "depends_on": [
+        "T-S0-1-fix-sdf-sign-convention"
+      ],
+      "id": "T-S0-2-verify-and-fix-normal-winding",
+      "modifies": [
+        "src/luminumbra_common/world/MarchingCubes.cpp"
+      ],
+      "prompt": "After T-S0-1, run ctest --test-dir build --output-on-failure --gtest_filter=*NormalsPointUpwardsOnHorizontalSurface*. If it passes, stop — there is no work to do. If it fails (normals point down): the embedded MarchingCubesTables.inl may have been authored against inside-positive. Inspect the table-consumption loop at MarchingCubes.cpp:164 (the triTable winding) and the face-normal accumulation at lines 175-185. Apply the minimum change: either swap two indices in the triangle push (e.g., swap vert_indices[i+1] and vert_indices[i+2]) OR negate face_normal before accumulation. Pick whichever isolates the change to a single contiguous block. Document the choice with a one-line comment that names the convention. Verify by running --gtest_filter=*Normals*. Do not modify the SHIELD_WorldSystem or test source.",
+      "tier": "deep",
+      "title": "Verify and fix mesh normal winding after sign flip",
+      "type": "implement"
     },
     {
-      "id": "T-S0-3-fix-cave-effect-on-mesh",
-      "title": "Fix or redefine cave-carving so caves change generated mesh",
-      "type": "implement",
-      "tier": "deep",
-      "depends_on": [
-        "T-S0-1-fix-sdf-sign-convention",
-        "T-S0-2-verify-and-fix-normal-winding"
-      ],
-      "files": [
-        "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
-        "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
-        "test/shield/test_world_generation.cpp"
-      ],
       "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
+          "test/shield/test_world_generation.cpp"
+        ],
         "reads": [
           "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
           "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
           "src/luminumbra_common/world/MarchingCubes.cpp",
           "test/shield/test_world_generation.cpp",
           ".forge/reports/polyglot-audit/quality-risks.md"
-        ],
-        "modifies": [
-          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
-          "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
-          "test/shield/test_world_generation.cpp"
-        ],
-        "creates": []
+        ]
       },
-      "prompt": "After the sign flip, audit whether cave_density = cave_carve_value * (cave_val - cave_threshold) still produces values that cross the isolevel (0.0) where the CavesChangeGeneratedMesh test expects them to. Under inside-negative convention, caves should INCREASE the SDF value at carved points so air bubbles appear inside terrain. The current formula adds a positive offset to terrain_density via std::min — under inside-negative this is the wrong direction. There are TWO call sites that both apply the cave term and must be edited consistently: (a) get_density_at_from_precalculated() at SHIELD_WorldSystem.cpp:287, and (b) GenerateChunkData() CPU fallback path at SHIELD_WorldSystem.cpp:430. Replace std::min(terrain_density, cave_density) with std::max(terrain_density, -cave_density) (or equivalently invert cave_density's sign), so caves push the SDF upward through zero in solid regions. If the test still passes with different vertex counts but with values that disagree with the new physical meaning, update the test's cave_threshold/cave_frequency parameters to ensure measurable mesh divergence. The test's intent — verify cave generation has an observable effect on geometry — must be preserved; the exact numeric thresholds may be tuned. Verify with --gtest_filter=*CavesChange*. Do not modify MarchingCubes or other test files."
-    },
-    {
-      "id": "T-S0-4-document-shield-sdf-contract",
-      "title": "Write docs/shield/sdf-contract.md and link from README",
-      "type": "doc",
-      "tier": "standard",
       "depends_on": [
         "T-S0-1-fix-sdf-sign-convention",
-        "T-S0-2-verify-and-fix-normal-winding",
-        "T-S0-3-fix-cave-effect-on-mesh"
+        "T-S0-2-verify-and-fix-normal-winding"
       ],
-      "files": [
-        "docs/shield/sdf-contract.md",
-        "README.md"
+      "id": "T-S0-3-fix-cave-effect-on-mesh",
+      "modifies": [
+        "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+        "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
+        "test/shield/test_world_generation.cpp"
       ],
+      "prompt": "After the sign flip, audit whether cave_density = cave_carve_value * (cave_val - cave_threshold) still produces values that cross the isolevel (0.0) where the CavesChangeGeneratedMesh test expects them to. Under inside-negative convention, caves should INCREASE the SDF value at carved points so air bubbles appear inside terrain. The current formula adds a positive offset to terrain_density via std::min — under inside-negative this is the wrong direction. There are TWO call sites that both apply the cave term and must be edited consistently: (a) get_density_at_from_precalculated() at SHIELD_WorldSystem.cpp:287, and (b) GenerateChunkData() CPU fallback path at SHIELD_WorldSystem.cpp:430. Replace std::min(terrain_density, cave_density) with std::max(terrain_density, -cave_density) (or equivalently invert cave_density's sign), so caves push the SDF upward through zero in solid regions. If the test still passes with different vertex counts but with values that disagree with the new physical meaning, update the test's cave_threshold/cave_frequency parameters to ensure measurable mesh divergence. The test's intent — verify cave generation has an observable effect on geometry — must be preserved; the exact numeric thresholds may be tuned. Verify with --gtest_filter=*CavesChange*. Do not modify MarchingCubes or other test files.",
+      "tier": "deep",
+      "title": "Fix or redefine cave-carving so caves change generated mesh",
+      "type": "implement"
+    },
+    {
       "agent_contract": {
+        "creates": [
+          "docs/shield/sdf-contract.md"
+        ],
+        "modifies": [
+          "README.md"
+        ],
         "reads": [
           "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
           "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
           "src/luminumbra_common/world/MarchingCubes.cpp",
           "test/shield/test_world_generation.cpp",
           "README.md"
-        ],
-        "modifies": [
-          "README.md"
-        ],
-        "creates": [
-          "docs/shield/sdf-contract.md"
         ]
       },
-      "prompt": "Write docs/shield/sdf-contract.md as the single source of truth for SHIELD terrain semantics. Sections: (1) SDF sign convention (inside-negative, outside-positive). (2) Isolevel: 0.0. (3) SDF grid layout in Chunk::sdf_data (x varies fastest, then y, then z; padded by +1 in each dimension for MC neighborhood). (4) Terrain height contract (GetTerrainHeightAt returns world-space Y at a given x,z; clamped by island_mask if enabled). (5) Cave carve formula and valid threshold ranges (cite the post-T-S0-3 implementation). (6) Marching Cubes step semantics: ChunkLOD.step is the stride between sampled cells; meshing iterates by step, never by 1, for non-LOD-0 chunks. (7) Mesh normal direction (+Y on horizontal surfaces). Add a one-line note: 'If you change any value in this document, every consumer of SDF/mesh data must be re-validated.' Add a link from README.md (in a 'Documentation' or 'Architecture' section) pointing to docs/shield/sdf-contract.md. Do not modify any code."
+      "creates": [
+        "docs/shield/sdf-contract.md"
+      ],
+      "depends_on": [
+        "T-S0-1-fix-sdf-sign-convention",
+        "T-S0-2-verify-and-fix-normal-winding",
+        "T-S0-3-fix-cave-effect-on-mesh"
+      ],
+      "id": "T-S0-4-document-shield-sdf-contract",
+      "modifies": [
+        "README.md"
+      ],
+      "prompt": "Write docs/shield/sdf-contract.md as the single source of truth for SHIELD terrain semantics. Sections: (1) SDF sign convention (inside-negative, outside-positive). (2) Isolevel: 0.0. (3) SDF grid layout in Chunk::sdf_data (x varies fastest, then y, then z; padded by +1 in each dimension for MC neighborhood). (4) Terrain height contract (GetTerrainHeightAt returns world-space Y at a given x,z; clamped by island_mask if enabled). (5) Cave carve formula and valid threshold ranges (cite the post-T-S0-3 implementation). (6) Marching Cubes step semantics: ChunkLOD.step is the stride between sampled cells; meshing iterates by step, never by 1, for non-LOD-0 chunks. (7) Mesh normal direction (+Y on horizontal surfaces). Add a one-line note: 'If you change any value in this document, every consumer of SDF/mesh data must be re-validated.' Add a link from README.md (in a 'Documentation' or 'Architecture' section) pointing to docs/shield/sdf-contract.md. Do not modify any code.",
+      "tier": "standard",
+      "title": "Write docs/shield/sdf-contract.md and link from README",
+      "type": "doc"
     },
     {
-      "id": "T-S0-5-add-lod-winding-regression-test",
-      "title": "Add LOD-step-aware mesh winding regression test",
-      "type": "implement",
-      "tier": "standard",
+      "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "test/shield/test_world_generation.cpp"
+        ],
+        "reads": [
+          "src/luminumbra_common/world/MarchingCubes.cpp",
+          "src/luminumbra_common/world/Chunk.h",
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
+          "test/shield/test_world_generation.cpp"
+        ]
+      },
       "depends_on": [
         "T-S0-2-verify-and-fix-normal-winding",
         "T-S0-4-document-shield-sdf-contract",
         "T-S0-3-fix-cave-effect-on-mesh"
       ],
-      "files": [
+      "id": "T-S0-5-add-lod-winding-regression-test",
+      "modifies": [
         "test/shield/test_world_generation.cpp"
       ],
-      "agent_contract": {
-        "reads": [
-          "src/luminumbra_common/world/MarchingCubes.cpp",
-          "src/luminumbra_common/world/Chunk.h",
-          "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
-          "test/shield/test_world_generation.cpp",
-          "docs/shield/sdf-contract.md"
-        ],
-        "modifies": [
-          "test/shield/test_world_generation.cpp"
-        ],
-        "creates": []
-      },
-      "prompt": "Add a regression test MeshNormalWindingIsConsistentUnderLodStep to test/shield/test_world_generation.cpp. The test: (1) Generates a flat-surface chunk using params_guaranteed_surface. (2) Polygonises it three times with step=1, step=2, step=4. (3) Asserts that every triangle in each mesh has the same winding direction by computing cross(v2-v1, v3-v1).y > 0 (consistent upward face normals). (4) Asserts that the three meshes have decreasing vertex counts (step=4 < step=2 < step=1). Do not modify production source; this is a test-only change. Verify with ctest --gtest_filter=*MeshNormalWinding*."
-    },
-    {
-      "id": "T-S0-6-enable-sdf-parity-test",
-      "title": "Enable the CPU/GPU SDF parity test in CI",
-      "type": "implement",
+      "prompt": "Add a regression test MeshNormalWindingIsConsistentUnderLodStep to test/shield/test_world_generation.cpp. The test: (1) Generates a flat-surface chunk using params_guaranteed_surface. (2) Polygonises it three times with step=1, step=2, step=4. (3) Asserts that every triangle in each mesh has the same winding direction by computing cross(v2-v1, v3-v1).y > 0 (consistent upward face normals). (4) Asserts that the three meshes have decreasing vertex counts (step=4 < step=2 < step=1). Do not modify production source; this is a test-only change. Verify with ctest --gtest_filter=*MeshNormalWinding*.",
       "tier": "standard",
-      "depends_on": [
-        "T-S0-1-fix-sdf-sign-convention",
-        "T-S0-0-add-sdf-parity-test-harness",
-        "T-DR-asset-processor-round-trip-test"
-      ],
-      "files": [
-        "test/shield/test_sdf_gpu_cpu_parity.cpp",
-        "test/CMakeLists.txt"
-      ],
-      "agent_contract": {
-        "reads": [
-          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
-          "src/luminumbra_client/rendering/RenderPipeline.cpp",
-          "test/shield/test_sdf_gpu_cpu_parity.cpp",
-          "test/CMakeLists.txt",
-          "src/luminumbra_client/CMakeLists.txt",
-          "docs/shield/sdf-contract.md"
-        ],
-        "modifies": [
-          "test/shield/test_sdf_gpu_cpu_parity.cpp",
-          "test/CMakeLists.txt"
-        ],
-        "creates": []
-      },
-      "prompt": "Remove the GTEST_SKIP() guards from the parity test added in T-S0-0. To make GPU SDF reachable from the test binary, the test target must link GLFW + GLAD (today it only links luminumbra_common + gtest_main). Update test/CMakeLists.txt to add target_link_libraries(world_generation_test PRIVATE glfw glad) (and on Linux, opengl32/GL system libs as needed — match what luminumbra_client_app pulls). In the test, create a minimal headless OpenGL context using GLFW (glfwInit, glfwWindowHint(GLFW_VISIBLE, false), glfwWindowHint context-version 4.5, create a 1x1 hidden window, gladLoadGLLoader) within a SetUp/TearDown pair. The parity test invokes RenderPipeline::generate_chunk_sdf_gpu directly (or the m_gpu_sdf_callback indirection) and compares the resulting std::vector<float> to SHIELD_WorldSystem::GenerateChunkData()'s CPU output element-wise with 1e-5 tolerance. If glfwInit fails (CI machine without GL), the test logs a warning and SKIPs instead of failing — but a deliberate parity violation must FAIL. Verify with ctest --gtest_filter=*SdfParity*."
+      "title": "Add LOD-step-aware mesh winding regression test",
+      "type": "implement"
     },
     {
-      "id": "T-S1-0-dependency-policy-decision",
-      "title": "Document dependency-management policy decision",
-      "type": "doc",
-      "tier": "quick",
-      "depends_on": [],
-      "files": [
-        "docs/build/dependency-policy.md"
-      ],
       "agent_contract": {
+        "creates": [
+          "docs/build/dependency-policy.md"
+        ],
+        "modifies": [],
         "reads": [
           "vendor/CMakeLists.txt",
           "cmake/dependencies.cmake",
@@ -227,135 +195,129 @@
           "src/luminumbra_client/CMakeLists.txt",
           ".forge/reports/polyglot-audit/tooling.md",
           ".forge/reports/polyglot-audit/final-roadmap.md"
-        ],
-        "modifies": [],
-        "creates": [
-          "docs/build/dependency-policy.md"
         ]
       },
-      "prompt": "Write docs/build/dependency-policy.md. Default the policy to 'stay-vendored' (the current state) unless an owner override is recorded. Document: (1) Which directories are first-party copies (vendor/, external/). (2) The current divergence between vendor/ and external/ (FastNoise, GLM) and the cleanup plan. (3) The criteria for moving to vcpkg/CPM/FetchContent later (stable upstream releases, CVE bumps becoming frequent, repo size becoming a hiring friction). (4) A note: 'This policy can be revisited at any time; the next migration should be a single PR per dependency.' Do not modify any code."
+      "creates": [
+        "docs/build/dependency-policy.md"
+      ],
+      "depends_on": [],
+      "id": "T-S1-0-dependency-policy-decision",
+      "prompt": "Write docs/build/dependency-policy.md. Default the policy to 'stay-vendored' (the current state) unless an owner override is recorded. Document: (1) Which directories are first-party copies (vendor/, external/). (2) The current divergence between vendor/ and external/ (FastNoise, GLM) and the cleanup plan. (3) The criteria for moving to vcpkg/CPM/FetchContent later (stable upstream releases, CVE bumps becoming frequent, repo size becoming a hiring friction). (4) A note: 'This policy can be revisited at any time; the next migration should be a single PR per dependency.' Do not modify any code.",
+      "tier": "quick",
+      "title": "Document dependency-management policy decision",
+      "type": "doc"
     },
     {
-      "id": "T-S1-1-cmake-presets",
-      "title": "Add CMakePresets.json with debug, debug-asan, release presets",
-      "type": "implement",
-      "tier": "standard",
-      "depends_on": [],
-      "files": [
-        "CMakePresets.json",
-        "CMakeLists.txt"
-      ],
       "agent_contract": {
-        "reads": [
-          "CMakeLists.txt",
-          "vendor/CMakeLists.txt",
-          ".forge/reports/polyglot-audit/tooling.md"
+        "creates": [
+          "CMakePresets.json"
         ],
         "modifies": [
           "CMakeLists.txt"
         ],
-        "creates": [
-          "CMakePresets.json"
+        "reads": [
+          "CMakeLists.txt",
+          "vendor/CMakeLists.txt",
+          ".forge/reports/polyglot-audit/tooling.md"
         ]
       },
-      "prompt": "Land CMakePresets.json at the repo root with three configure presets: 'debug', 'debug-asan', 'release'. Each preset pins generator ('Ninja' on Linux, 'Visual Studio 17 2022' on Windows via 'condition' blocks), build type, and an explicit -DLUMINUMBRA_DEBUG=ON for debug/debug-asan. debug-asan adds -DLUMINUMBRA_ENABLE_ASAN=ON. release adds -DLUMINUMBRA_RUN_PERF_TESTS=OFF. Also add matching build and test presets. In CMakeLists.txt: replace the brittle if(CMAKE_BUILD_TYPE STREQUAL Debug) block (lines 74-85) with target_compile_definitions(luminumbra_common PRIVATE $<$<BOOL:${LUMINUMBRA_DEBUG}>:LUMINUMBRA_DEBUG>) (and the same on luminumbra_client_app) so the macro is independent of generator type. Add option(LUMINUMBRA_DEBUG OFF) and option(LUMINUMBRA_ENABLE_ASAN OFF) and option(LUMINUMBRA_RUN_PERF_TESTS OFF) declarations near the top. When LUMINUMBRA_ENABLE_ASAN is ON and the compiler is GCC/Clang, add add_compile_options(-fsanitize=address) add_link_options(-fsanitize=address) to first-party targets only. Verify with cmake --preset debug && cmake --preset release."
+      "creates": [
+        "CMakePresets.json"
+      ],
+      "depends_on": [],
+      "id": "T-S1-1-cmake-presets",
+      "modifies": [
+        "CMakeLists.txt"
+      ],
+      "prompt": "Land CMakePresets.json at the repo root with three configure presets: 'debug', 'debug-asan', 'release'. Each preset pins generator ('Ninja' on Linux, 'Visual Studio 17 2022' on Windows via 'condition' blocks), build type, and an explicit -DLUMINUMBRA_DEBUG=ON for debug/debug-asan. debug-asan adds -DLUMINUMBRA_ENABLE_ASAN=ON. release adds -DLUMINUMBRA_RUN_PERF_TESTS=OFF. Also add matching build and test presets. In CMakeLists.txt: replace the brittle if(CMAKE_BUILD_TYPE STREQUAL Debug) block (lines 74-85) with target_compile_definitions(luminumbra_common PRIVATE $<$<BOOL:${LUMINUMBRA_DEBUG}>:LUMINUMBRA_DEBUG>) (and the same on luminumbra_client_app) so the macro is independent of generator type. Add option(LUMINUMBRA_DEBUG OFF) and option(LUMINUMBRA_ENABLE_ASAN OFF) and option(LUMINUMBRA_RUN_PERF_TESTS OFF) declarations near the top. When LUMINUMBRA_ENABLE_ASAN is ON and the compiler is GCC/Clang, add add_compile_options(-fsanitize=address) add_link_options(-fsanitize=address) to first-party targets only. Verify with cmake --preset debug && cmake --preset release.",
+      "tier": "standard",
+      "title": "Add CMakePresets.json with debug, debug-asan, release presets",
+      "type": "implement"
     },
     {
-      "id": "T-S1-2-formatter-and-static-analysis-config",
-      "title": "Add .clang-format, .clang-tidy, .editorconfig + lint scripts",
-      "type": "implement",
-      "tier": "standard",
-      "depends_on": [],
-      "files": [
-        ".clang-format",
-        ".clang-tidy",
-        ".editorconfig",
-        "scripts/lint.ps1",
-        "scripts/lint.sh"
-      ],
       "agent_contract": {
-        "reads": [
-          ".forge/reports/polyglot-audit/tooling.md",
-          "src/luminumbra_common/core/JobSystem.cpp",
-          "src/luminumbra_client/main_client.cpp"
-        ],
-        "modifies": [],
         "creates": [
           ".clang-format",
           ".clang-tidy",
           ".editorconfig",
           "scripts/lint.ps1",
           "scripts/lint.sh"
+        ],
+        "modifies": [],
+        "reads": [
+          ".forge/reports/polyglot-audit/tooling.md",
+          "src/luminumbra_common/core/JobSystem.cpp",
+          "src/luminumbra_client/main_client.cpp"
         ]
       },
-      "prompt": "Add .clang-format (LLVM base, ColumnLimit: 120, IndentWidth: 4, AccessModifierOffset: -4). Add .clang-tidy with starting checks: 'bugprone-*,clang-analyzer-*,modernize-use-nullptr,modernize-use-override,performance-*,-modernize-use-trailing-return-type' and HeaderFilterRegex: '^(src|test|tools)/'. Add .editorconfig with [*] indent_style=space indent_size=4 charset=utf-8 end_of_line=lf insert_final_newline=true trim_trailing_whitespace=true; [*.{ps1,bat,cmd}] end_of_line=crlf. Add scripts/lint.ps1 and scripts/lint.sh that: (1) run clang-format --dry-run --Werror on every .cpp/.h under src/, test/, tools/ (excluding vendor/, external/, build/); (2) run clang-tidy -p build/ on the same paths; (3) exit non-zero on any finding. Do NOT run the formatter pass in this task — the format application is a separate change so its diff is reviewable independently."
+      "creates": [
+        ".clang-format",
+        ".clang-tidy",
+        ".editorconfig",
+        "scripts/lint.ps1",
+        "scripts/lint.sh"
+      ],
+      "depends_on": [],
+      "id": "T-S1-2-formatter-and-static-analysis-config",
+      "prompt": "Add .clang-format (LLVM base, ColumnLimit: 120, IndentWidth: 4, AccessModifierOffset: -4). Add .clang-tidy with starting checks: 'bugprone-*,clang-analyzer-*,modernize-use-nullptr,modernize-use-override,performance-*,-modernize-use-trailing-return-type' and HeaderFilterRegex: '^(src|test|tools)/'. Add .editorconfig with [*] indent_style=space indent_size=4 charset=utf-8 end_of_line=lf insert_final_newline=true trim_trailing_whitespace=true; [*.{ps1,bat,cmd}] end_of_line=crlf. Add scripts/lint.ps1 and scripts/lint.sh that: (1) run clang-format --dry-run --Werror on every .cpp/.h under src/, test/, tools/ (excluding vendor/, external/, build/); (2) run clang-tidy -p build/ on the same paths; (3) exit non-zero on any finding. Do NOT run the formatter pass in this task — the format application is a separate change so its diff is reviewable independently.",
+      "tier": "standard",
+      "title": "Add .clang-format, .clang-tidy, .editorconfig + lint scripts",
+      "type": "implement"
     },
     {
-      "id": "T-S1-3-ci-workflow",
-      "title": "Add GitHub Actions CI workflow (build + test + lint)",
-      "type": "implement",
-      "tier": "standard",
+      "agent_contract": {
+        "creates": [
+          ".github/workflows/ci.yml"
+        ],
+        "modifies": [],
+        "reads": [
+          ".forge/reports/polyglot-audit/tooling.md"
+        ]
+      },
+      "creates": [
+        ".github/workflows/ci.yml"
+      ],
       "depends_on": [
         "T-S1-1-cmake-presets",
         "T-S1-2-formatter-and-static-analysis-config"
       ],
-      "files": [
-        ".github/workflows/ci.yml"
-      ],
-      "agent_contract": {
-        "reads": [
-          "CMakePresets.json",
-          "scripts/lint.sh",
-          ".forge/reports/polyglot-audit/tooling.md"
-        ],
-        "modifies": [],
-        "creates": [
-          ".github/workflows/ci.yml"
-        ]
-      },
-      "prompt": "Add .github/workflows/ci.yml. Triggers: push to main and pull_request. Matrix: os in [ubuntu-latest, windows-latest]. Steps per job: (1) checkout with submodules: recursive; (2) setup ninja on Linux, no extra setup on Windows (VS 2022 is preinstalled); (3) cache the vendor build via actions/cache keyed on hashFiles('vendor/**/CMakeLists.txt'); (4) cmake --preset release; (5) cmake --build --preset release; (6) ctest --preset release --output-on-failure; (7) bash scripts/lint.sh on Linux, pwsh scripts/lint.ps1 on Windows; (8) cargo install/run forge if available, then forge verify --validation-policy fail --testing-policy fail (allow this step to be a no-op via continue-on-error: true if forge is not installed in CI yet — we add it later). Workflow file must be <60 lines and use no third-party actions beyond actions/checkout@v4 and actions/cache@v4."
+      "id": "T-S1-3-ci-workflow",
+      "prompt": "Add .github/workflows/ci.yml. Triggers: push to main and pull_request. Matrix: os in [ubuntu-latest, windows-latest]. Steps per job: (1) checkout with submodules: recursive; (2) setup ninja on Linux, no extra setup on Windows (VS 2022 is preinstalled); (3) cache the vendor build via actions/cache keyed on hashFiles('vendor/**/CMakeLists.txt'); (4) cmake --preset release; (5) cmake --build --preset release; (6) ctest --preset release --output-on-failure; (7) bash scripts/lint.sh on Linux, pwsh scripts/lint.ps1 on Windows; (8) cargo install/run forge if available, then forge verify --validation-policy fail --testing-policy fail (allow this step to be a no-op via continue-on-error: true if forge is not installed in CI yet — we add it later). Workflow file must be <60 lines and use no third-party actions beyond actions/checkout@v4 and actions/cache@v4.",
+      "tier": "standard",
+      "title": "Add GitHub Actions CI workflow (build + test + lint)",
+      "type": "implement"
     },
     {
-      "id": "T-S1-4-asan-workflow",
-      "title": "Add nightly ASan workflow",
-      "type": "implement",
-      "tier": "standard",
+      "agent_contract": {
+        "creates": [
+          ".github/workflows/asan.yml"
+        ],
+        "modifies": [],
+        "reads": []
+      },
+      "creates": [
+        ".github/workflows/asan.yml"
+      ],
       "depends_on": [
         "T-S1-1-cmake-presets",
         "T-S1-3-ci-workflow"
       ],
-      "files": [
-        ".github/workflows/asan.yml"
-      ],
-      "agent_contract": {
-        "reads": [
-          "CMakePresets.json",
-          ".github/workflows/ci.yml"
-        ],
-        "modifies": [],
-        "creates": [
-          ".github/workflows/asan.yml"
-        ]
-      },
-      "prompt": "Add .github/workflows/asan.yml. Trigger: schedule (cron daily at 06:00 UTC) plus workflow_dispatch. Single job on ubuntu-latest: (1) checkout submodules: recursive; (2) install ninja and clang-15; (3) cmake --preset debug-asan with CC=clang-15 CXX=clang++-15; (4) cmake --build --preset debug-asan; (5) ctest --preset debug-asan --output-on-failure with env ASAN_OPTIONS=detect_leaks=1:abort_on_error=1. Fail the workflow on any ctest failure. Workflow file must be <50 lines."
+      "id": "T-S1-4-asan-workflow",
+      "prompt": "Add .github/workflows/asan.yml. Trigger: schedule (cron daily at 06:00 UTC) plus workflow_dispatch. Single job on ubuntu-latest: (1) checkout submodules: recursive; (2) install ninja and clang-15; (3) cmake --preset debug-asan with CC=clang-15 CXX=clang++-15; (4) cmake --build --preset debug-asan; (5) ctest --preset debug-asan --output-on-failure with env ASAN_OPTIONS=detect_leaks=1:abort_on_error=1. Fail the workflow on any ctest failure. Workflow file must be <50 lines.",
+      "tier": "standard",
+      "title": "Add nightly ASan workflow",
+      "type": "implement"
     },
     {
-      "id": "T-S1-5-reconcile-sources-and-stale-cmake",
-      "title": "Replace hand-maintained source lists; remove stale client CMakeLists",
-      "type": "refactor",
-      "tier": "standard",
-      "depends_on": [
-        "T-S1-1-cmake-presets"
-      ],
-      "files": [
-        "src/luminumbra_common/sources.cmake",
-        "src/luminumbra_common/CMakeLists.txt",
-        "src/luminumbra_client/sources.cmake",
-        "src/luminumbra_client/CMakeLists.txt",
-        "src/CMakeLists.txt",
-        "CONTRIBUTING.md"
-      ],
       "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "src/luminumbra_common/sources.cmake",
+          "src/luminumbra_common/CMakeLists.txt",
+          "src/luminumbra_client/sources.cmake",
+          "src/CMakeLists.txt",
+          "CONTRIBUTING.md"
+        ],
         "reads": [
           "src/luminumbra_common/sources.cmake",
           "src/luminumbra_common/CMakeLists.txt",
@@ -364,143 +326,146 @@
           "src/CMakeLists.txt",
           ".forge/reports/polyglot-audit/architecture.md",
           ".forge/reports/polyglot-audit/tooling.md"
-        ],
-        "modifies": [
-          "src/luminumbra_common/sources.cmake",
-          "src/luminumbra_common/CMakeLists.txt",
-          "src/luminumbra_client/sources.cmake",
-          "src/CMakeLists.txt",
-          "CONTRIBUTING.md"
-        ],
-        "creates": []
+        ]
       },
-      "prompt": "Replace manual source lists in both sources.cmake files with file(GLOB_RECURSE CONFIGURE_DEPENDS *.cpp) globbing under the respective module's directory. Vendor sources (ImGui in the client) stay explicit. Delete src/luminumbra_client/CMakeLists.txt entirely — the active build is defined in src/CMakeLists.txt and the stale file misleads readers. Add a CONTRIBUTING.md line: 'After pulling a CMake change, rm -rf build/ once before rebuilding.' (Create CONTRIBUTING.md if it does not exist; one paragraph is enough.) Verify with cmake --preset debug --fresh && cmake --build --preset debug; the build must include UIIntegration.cpp, ui/core/*.cpp, ui/components/**/*.cpp, audio/AudioPropagationSystem.cpp, audio/EnvironmentalAudioSystem.cpp that were missing from the manual lists."
+      "creates": [
+        "CONTRIBUTING.md"
+      ],
+      "depends_on": [
+        "T-S1-1-cmake-presets"
+      ],
+      "id": "T-S1-5-reconcile-sources-and-stale-cmake",
+      "modifies": [
+        "src/luminumbra_common/sources.cmake",
+        "src/luminumbra_common/CMakeLists.txt",
+        "src/luminumbra_client/sources.cmake",
+        "src/luminumbra_client/CMakeLists.txt",
+        "src/CMakeLists.txt"
+      ],
+      "prompt": "Replace manual source lists in both sources.cmake files with file(GLOB_RECURSE CONFIGURE_DEPENDS *.cpp) globbing under the respective module's directory. Vendor sources (ImGui in the client) stay explicit. Delete src/luminumbra_client/CMakeLists.txt entirely — the active build is defined in src/CMakeLists.txt and the stale file misleads readers. Add a CONTRIBUTING.md line: 'After pulling a CMake change, rm -rf build/ once before rebuilding.' (Create CONTRIBUTING.md if it does not exist; one paragraph is enough.) Verify with cmake --preset debug --fresh && cmake --build --preset debug; the build must include UIIntegration.cpp, ui/core/*.cpp, ui/components/**/*.cpp, audio/AudioPropagationSystem.cpp, audio/EnvironmentalAudioSystem.cpp that were missing from the manual lists.",
+      "tier": "standard",
+      "title": "Replace hand-maintained source lists; remove stale client CMakeLists",
+      "type": "refactor"
     },
     {
-      "id": "T-S1-6-warnings-as-errors",
-      "title": "Apply /W4 /WX on MSVC and -Wall -Wextra -Werror on GCC/Clang",
-      "type": "implement",
-      "tier": "standard",
-      "depends_on": [
-        "T-S1-1-cmake-presets",
-        "T-S1-5-reconcile-sources-and-stale-cmake",
-        "T-S0-0-add-sdf-parity-test-harness",
-        "T-S0-6-enable-sdf-parity-test",
-        "T-DR-asset-processor-round-trip-test"
-      ],
-      "files": [
-        "src/luminumbra_common/CMakeLists.txt",
-        "src/luminumbra_client/CMakeLists.txt",
-        "tools/CMakeLists.txt",
-        "test/CMakeLists.txt"
-      ],
       "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "src/luminumbra_common/CMakeLists.txt",
+          "src/CMakeLists.txt",
+          "tools/CMakeLists.txt",
+          "test/CMakeLists.txt"
+        ],
         "reads": [
           "src/luminumbra_common/CMakeLists.txt",
           "src/luminumbra_client/CMakeLists.txt",
           "tools/CMakeLists.txt",
           "test/CMakeLists.txt"
-        ],
-        "modifies": [
-          "src/luminumbra_common/CMakeLists.txt",
-          "src/CMakeLists.txt",
-          "tools/CMakeLists.txt",
-          "test/CMakeLists.txt"
-        ],
-        "creates": []
+        ]
       },
-      "prompt": "Add a CMake helper function luminumbra_set_warnings(target) at the top of src/CMakeLists.txt (or in a new cmake/warnings.cmake included from the root). When MSVC: target_compile_options(target PRIVATE /W4 /WX /permissive- /Zc:__cplusplus). When GCC or Clang: target_compile_options(target PRIVATE -Wall -Wextra -Werror -Wno-error=unused-parameter -Wno-error=missing-field-initializers). Apply to first-party targets: luminumbra_common, luminumbra_client_app (located in src/CMakeLists.txt after T-S1-5), asset_processor, world_generation_test. Do NOT apply to vendor targets. If the build produces new warnings exposed by /W4 or -Wextra, FIX them — do not suppress them — unless they originate from a public vendor header included transitively, in which case wrap that include in a system-header pragma. Verify with cmake --preset release && cmake --build --preset release."
+      "depends_on": [
+        "T-S1-1-cmake-presets",
+        "T-S1-5-reconcile-sources-and-stale-cmake",
+        "T-S0-0-add-sdf-parity-test-harness",
+        "T-DR-asset-processor-round-trip-test"
+      ],
+      "id": "T-S1-6-warnings-as-errors",
+      "modifies": [
+        "src/luminumbra_common/CMakeLists.txt",
+        "src/luminumbra_client/CMakeLists.txt",
+        "tools/CMakeLists.txt",
+        "test/CMakeLists.txt"
+      ],
+      "prompt": "Add a CMake helper function luminumbra_set_warnings(target) at the top of src/CMakeLists.txt (or in a new cmake/warnings.cmake included from the root). When MSVC: target_compile_options(target PRIVATE /W4 /WX /permissive- /Zc:__cplusplus). When GCC or Clang: target_compile_options(target PRIVATE -Wall -Wextra -Werror -Wno-error=unused-parameter -Wno-error=missing-field-initializers). Apply to first-party targets: luminumbra_common, luminumbra_client_app (located in src/CMakeLists.txt after T-S1-5), asset_processor, world_generation_test. Do NOT apply to vendor targets. If the build produces new warnings exposed by /W4 or -Wextra, FIX them — do not suppress them — unless they originate from a public vendor header included transitively, in which case wrap that include in a system-header pragma. Verify with cmake --preset release && cmake --build --preset release.",
+      "tier": "standard",
+      "title": "Apply /W4 /WX on MSVC and -Wall -Wextra -Werror on GCC/Clang",
+      "type": "implement"
     },
     {
-      "id": "T-S1-7-asset-pipeline-fixes",
-      "title": "Add CONFIGURE_DEPENDS to asset glob, move .lmesh to build dir",
-      "type": "refactor",
-      "tier": "standard",
-      "depends_on": [
-        "T-S1-1-cmake-presets"
-      ],
-      "files": [
-        "CMakeLists.txt",
-        "src/luminumbra_client/rendering/Mesh.cpp"
-      ],
       "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "CMakeLists.txt",
+          "src/luminumbra_client/rendering/Mesh.cpp"
+        ],
         "reads": [
           "CMakeLists.txt",
           "src/luminumbra_client/rendering/Mesh.cpp",
           "src/luminumbra_client/rendering/Mesh.h",
           "tools/asset_processor.cpp",
           ".forge/reports/polyglot-audit/tooling.md"
-        ],
-        "modifies": [
-          "CMakeLists.txt",
-          "src/luminumbra_client/rendering/Mesh.cpp"
-        ],
-        "creates": []
+        ]
       },
-      "prompt": "(1) In top-level CMakeLists.txt around line 30, change file(GLOB_RECURSE SOURCE_ASSETS ...) to add CONFIGURE_DEPENDS, so adding a new .glb triggers reconfigure. (2) Around line 28, change ASSET_OUTPUT_DIR from ${CMAKE_SOURCE_DIR}/data to ${CMAKE_BINARY_DIR}/data so generated .lmesh files do not pollute the source tree. (3) Replace the configure-time file(COPY data DESTINATION ${CMAKE_BINARY_DIR}) at line 72 with a build-time custom target: add_custom_target(copy_data ALL COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/data ${CMAKE_BINARY_DIR}/data DEPENDS process_assets) so source-data edits propagate on every build and so processed .lmesh files (in build/data) override the source copies. (4) In MeshLoader::Load (Mesh.cpp:15), if the path-as-given fails to open and looks like a relative data/ path, retry with the build-directory data/ prefix — implemented via std::filesystem::exists checks. Verify with cmake --build --preset debug && look at build/data for both copied JSON and generated .lmesh files."
+      "depends_on": [
+        "T-S1-1-cmake-presets"
+      ],
+      "id": "T-S1-7-asset-pipeline-fixes",
+      "modifies": [
+        "CMakeLists.txt",
+        "src/luminumbra_client/rendering/Mesh.cpp"
+      ],
+      "prompt": "(1) In top-level CMakeLists.txt around line 30, change file(GLOB_RECURSE SOURCE_ASSETS ...) to add CONFIGURE_DEPENDS, so adding a new .glb triggers reconfigure. (2) Around line 28, change ASSET_OUTPUT_DIR from ${CMAKE_SOURCE_DIR}/data to ${CMAKE_BINARY_DIR}/data so generated .lmesh files do not pollute the source tree. (3) Replace the configure-time file(COPY data DESTINATION ${CMAKE_BINARY_DIR}) at line 72 with a build-time custom target: add_custom_target(copy_data ALL COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/data ${CMAKE_BINARY_DIR}/data DEPENDS process_assets) so source-data edits propagate on every build and so processed .lmesh files (in build/data) override the source copies. (4) In MeshLoader::Load (Mesh.cpp:15), if the path-as-given fails to open and looks like a relative data/ path, retry with the build-directory data/ prefix — implemented via std::filesystem::exists checks. Verify with cmake --build --preset debug && look at build/data for both copied JSON and generated .lmesh files.",
+      "tier": "standard",
+      "title": "Add CONFIGURE_DEPENDS to asset glob, move .lmesh to build dir",
+      "type": "refactor"
     },
     {
-      "id": "T-S1-8-curated-gitignore",
-      "title": "Replace 8.9K-line .gitignore with curated file",
-      "type": "refactor",
-      "tier": "quick",
-      "depends_on": [],
-      "files": [
-        ".gitignore"
-      ],
       "agent_contract": {
-        "reads": [
-          ".gitignore",
-          ".forge/reports/polyglot-audit/tooling.md"
-        ],
+        "creates": [],
         "modifies": [
           ".gitignore"
         ],
-        "creates": []
+        "reads": [
+          ".gitignore",
+          ".forge/reports/polyglot-audit/tooling.md"
+        ]
       },
-      "prompt": "Replace the 8,958-line .gitignore with a curated ~30-line file. Required ignores: build/, out/, .cache/, .vs/, .vscode/* (with !.vscode/extensions.json if any project-shared config exists), *.user, *.swp, compile_commands.json, .DS_Store, Thumbs.db, build_error.log, *.log, /imgui.ini, .forge/cache/. Owner decision has been recorded: imgui.ini is accidental (8 lines, default layout, touched by 6 unrelated gameplay commits per git log) — add /imgui.ini to the ignore list AND run `git rm --cached imgui.ini` to remove it from the index. Same for build_error.log. Verify with git status — no previously-tracked legitimate file should newly appear as untracked or staged."
+      "depends_on": [],
+      "id": "T-S1-8-curated-gitignore",
+      "modifies": [
+        ".gitignore"
+      ],
+      "prompt": "Replace the 8,958-line .gitignore with a curated ~30-line file. Required ignores: build/, out/, .cache/, .vs/, .vscode/* (with !.vscode/extensions.json if any project-shared config exists), *.user, *.swp, compile_commands.json, .DS_Store, Thumbs.db, build_error.log, *.log, /imgui.ini, .forge/cache/. Owner decision has been recorded: imgui.ini is accidental (8 lines, default layout, touched by 6 unrelated gameplay commits per git log) — add /imgui.ini to the ignore list AND run `git rm --cached imgui.ini` to remove it from the index. Same for build_error.log. Verify with git status — no previously-tracked legitimate file should newly appear as untracked or staged.",
+      "tier": "quick",
+      "title": "Replace 8.9K-line .gitignore with curated file",
+      "type": "refactor"
     },
     {
-      "id": "T-S1-9-reconcile-vendor-external-duplicates",
-      "title": "Reconcile vendor/ vs external/ duplicates for FastNoise and GLM",
-      "type": "refactor",
-      "tier": "standard",
+      "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "src/luminumbra_common/CMakeLists.txt",
+          "vendor/CMakeLists.txt"
+        ],
+        "reads": [
+          "src/luminumbra_common/CMakeLists.txt",
+          "vendor/CMakeLists.txt",
+          "external"
+        ]
+      },
       "depends_on": [
         "T-S1-0-dependency-policy-decision",
         "T-S1-5-reconcile-sources-and-stale-cmake",
         "T-S1-6-warnings-as-errors",
         "T-S1-10-suppress-vendor-test-suites"
       ],
-      "files": [
+      "id": "T-S1-9-reconcile-vendor-external-duplicates",
+      "modifies": [
         "src/luminumbra_common/CMakeLists.txt",
         "vendor/CMakeLists.txt",
         "external"
       ],
-      "agent_contract": {
-        "reads": [
-          "src/luminumbra_common/CMakeLists.txt",
-          "vendor/CMakeLists.txt",
-          "external",
-          "docs/build/dependency-policy.md"
-        ],
-        "modifies": [
-          "src/luminumbra_common/CMakeLists.txt",
-          "vendor/CMakeLists.txt"
-        ],
-        "creates": []
-      },
-      "prompt": "Per docs/build/dependency-policy.md (default: stay-vendored), choose ONE source per duplicated dep. Keep vendor/glm and vendor/fastnoise (they are wired into the CMake target graph as add_subdirectory targets); remove the include reference to external/FastNoiseLite in src/luminumbra_common/CMakeLists.txt line 13 and any other place that points at external/. Owner has confirmed deletion: after the build verifies green without external/, delete the entire external/ directory tree (it duplicates vendor/) AND delete vendor/test/ (31 MB of dead vendor code not referenced in vendor/CMakeLists.txt). Use git rm -r external/ vendor/test/. Verify with cmake --preset debug --fresh && cmake --build --preset debug. If the build breaks because a real consumer of external/FastNoiseLite exists, route it to the vendor/fastnoise FastNoise2 API instead, then proceed with the deletion."
+      "prompt": "Per docs/build/dependency-policy.md (default: stay-vendored), choose ONE source per duplicated dep. Keep vendor/glm and vendor/fastnoise (they are wired into the CMake target graph as add_subdirectory targets); remove the include reference to external/FastNoiseLite in src/luminumbra_common/CMakeLists.txt line 13 and any other place that points at external/. Owner has confirmed deletion: after the build verifies green without external/, delete the entire external/ directory tree (it duplicates vendor/) AND delete vendor/test/ (31 MB of dead vendor code not referenced in vendor/CMakeLists.txt). Use git rm -r external/ vendor/test/. Verify with cmake --preset debug --fresh && cmake --build --preset debug. If the build breaks because a real consumer of external/FastNoiseLite exists, route it to the vendor/fastnoise FastNoise2 API instead, then proceed with the deletion.",
+      "tier": "standard",
+      "title": "Reconcile vendor/ vs external/ duplicates for FastNoise and GLM",
+      "type": "refactor"
     },
     {
-      "id": "T-S1-10-suppress-vendor-test-suites",
-      "title": "Disable vendor test suites in CMake to keep ctest first-party only",
-      "type": "refactor",
-      "tier": "standard",
-      "depends_on": [],
-      "files": [
-        "vendor/CMakeLists.txt"
-      ],
       "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "vendor/CMakeLists.txt"
+        ],
         "reads": [
           "vendor/CMakeLists.txt",
           "vendor/sol2/CMakeLists.txt",
@@ -509,34 +474,28 @@
           "vendor/miniaudio/CMakeLists.txt",
           "vendor/Jolt/CMakeLists.txt",
           "vendor/rmlui/CMakeLists.txt"
-        ],
-        "modifies": [
-          "vendor/CMakeLists.txt"
-        ],
-        "creates": []
+        ]
       },
-      "prompt": "Before each add_subdirectory call in vendor/CMakeLists.txt, set the appropriate vendor-specific options to suppress that dependency's test/example suites. Required settings (set with set(VAR OFF CACHE BOOL ... FORCE) where the variable name exists): SOL2_BUILD_TESTS, SPDLOG_BUILD_TESTS, SPDLOG_BUILD_EXAMPLE, SPDLOG_BUILD_BENCH, JSON_BuildTests (nlohmann), MA_BUILD_TESTS (miniaudio), TARGET_UNIT_TESTS and TARGET_HELLO_WORLD (Jolt), RMLUI_TESTS_ENABLED. Also set BUILD_TESTING OFF globally before the first add_subdirectory in vendor/, so generic CTest-using vendors stop registering. Verify with cmake --preset debug --fresh && ctest --preset debug -N (list-only); only first-party test names should appear (world_generation_test and any new test binaries added by Stage 0)."
+      "depends_on": [],
+      "id": "T-S1-10-suppress-vendor-test-suites",
+      "modifies": [
+        "vendor/CMakeLists.txt"
+      ],
+      "prompt": "Before each add_subdirectory call in vendor/CMakeLists.txt, set the appropriate vendor-specific options to suppress that dependency's test/example suites. Required settings (set with set(VAR OFF CACHE BOOL ... FORCE) where the variable name exists): SOL2_BUILD_TESTS, SPDLOG_BUILD_TESTS, SPDLOG_BUILD_EXAMPLE, SPDLOG_BUILD_BENCH, JSON_BuildTests (nlohmann), MA_BUILD_TESTS (miniaudio), TARGET_UNIT_TESTS and TARGET_HELLO_WORLD (Jolt), RMLUI_TESTS_ENABLED. Also set BUILD_TESTING OFF globally before the first add_subdirectory in vendor/, so generic CTest-using vendors stop registering. Verify with cmake --preset debug --fresh && ctest --preset debug -N (list-only); only first-party test names should appear (world_generation_test and any new test binaries added by Stage 0).",
+      "tier": "standard",
+      "title": "Disable vendor test suites in CMake to keep ctest first-party only",
+      "type": "refactor"
     },
     {
-      "id": "T-S2-1-jobsystem-counter-ownership",
-      "title": "Replace JobSystem counter ring with per-handle owned atomics",
-      "type": "refactor",
-      "tier": "deep",
-      "depends_on": [
-        "T-S1-3-ci-workflow",
-        "T-S0-3-fix-cave-effect-on-mesh",
-        "T-S0-1-fix-sdf-sign-convention",
-        "T-S2-6-render-pipeline-startup-no-throw"
-      ],
-      "files": [
-        "src/luminumbra_common/core/JobSystem.h",
-        "src/luminumbra_common/core/JobSystem.cpp",
-        "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
-        "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
-        "src/luminumbra_common/systems/WaterSystem.cpp",
-        "src/luminumbra_client/main_client.cpp"
-      ],
       "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "src/luminumbra_common/core/JobSystem.h",
+          "src/luminumbra_common/core/JobSystem.cpp",
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+          "src/luminumbra_common/systems/WaterSystem.cpp",
+          "src/luminumbra_client/main_client.cpp"
+        ],
         "reads": [
           "src/luminumbra_common/core/JobSystem.h",
           "src/luminumbra_common/core/JobSystem.cpp",
@@ -546,88 +505,92 @@
           "src/luminumbra_client/main_client.cpp",
           ".forge/reports/polyglot-audit/quality-risks.md",
           ".forge/reports/polyglot-audit/critique.md"
-        ],
-        "modifies": [
-          "src/luminumbra_common/core/JobSystem.h",
-          "src/luminumbra_common/core/JobSystem.cpp",
-          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
-          "src/luminumbra_common/systems/WaterSystem.cpp",
-          "src/luminumbra_client/main_client.cpp"
-        ],
-        "creates": []
+        ]
       },
-      "prompt": "Replace JobSystem's 256-slot ring of atomic counters with per-handle owned counters. Change struct JobHandle { std::atomic<int>* counter = nullptr; } to struct JobHandle { std::shared_ptr<std::atomic<int>> counter; }. Remove the m_counters std::array and m_next_counter_index fields. In dispatch_batch, allocate a fresh std::make_shared<std::atomic<int>>((int)jobs.size()) per call; each job lambda captures the shared_ptr by value (so the counter outlives the workers if necessary). wait() reads .load() through the shared_ptr. JobHandle consumers in src/ are: main_client.cpp (g_world_gen_handle), WaterSystem.cpp (water-sim batches), SHIELD_WorldSystem.cpp (generation + meshing). Audit each — they likely already store JobHandle by value (the previous struct's raw-pointer was a member, not the storage class), but verify and fix any that stored a JobHandle*. SHIELD_WorldSystem::dispatch_generation_jobs and dispatch_meshing_jobs must still return JobHandles by value — the caller decides what to keep. Add a comment over the new struct explaining the lifetime model. Verify with cmake --build --preset debug && ctest --preset debug --output-on-failure."
+      "depends_on": [
+        "T-S1-3-ci-workflow",
+        "T-S0-3-fix-cave-effect-on-mesh",
+        "T-S0-1-fix-sdf-sign-convention",
+        "T-S2-6-render-pipeline-startup-no-throw"
+      ],
+      "id": "T-S2-1-jobsystem-counter-ownership",
+      "modifies": [
+        "src/luminumbra_common/core/JobSystem.h",
+        "src/luminumbra_common/core/JobSystem.cpp",
+        "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
+        "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+        "src/luminumbra_common/systems/WaterSystem.cpp",
+        "src/luminumbra_client/main_client.cpp"
+      ],
+      "prompt": "Replace JobSystem's 256-slot ring of atomic counters with per-handle owned counters. Change struct JobHandle { std::atomic<int>* counter = nullptr; } to struct JobHandle { std::shared_ptr<std::atomic<int>> counter; }. Remove the m_counters std::array and m_next_counter_index fields. In dispatch_batch, allocate a fresh std::make_shared<std::atomic<int>>((int)jobs.size()) per call; each job lambda captures the shared_ptr by value (so the counter outlives the workers if necessary). wait() reads .load() through the shared_ptr. JobHandle consumers in src/ are: main_client.cpp (g_world_gen_handle), WaterSystem.cpp (water-sim batches), SHIELD_WorldSystem.cpp (generation + meshing). Audit each — they likely already store JobHandle by value (the previous struct's raw-pointer was a member, not the storage class), but verify and fix any that stored a JobHandle*. SHIELD_WorldSystem::dispatch_generation_jobs and dispatch_meshing_jobs must still return JobHandles by value — the caller decides what to keep. Add a comment over the new struct explaining the lifetime model. Verify with cmake --build --preset debug && ctest --preset debug --output-on-failure.",
+      "tier": "deep",
+      "title": "Replace JobSystem counter ring with per-handle owned atomics",
+      "type": "refactor"
     },
     {
-      "id": "T-S2-2-jobsystem-graceful-shutdown",
-      "title": "JobSystem::shutdown drains the queue and rejects new dispatch",
-      "type": "refactor",
-      "tier": "standard",
-      "depends_on": [
-        "T-S2-1-jobsystem-counter-ownership"
-      ],
-      "files": [
-        "src/luminumbra_common/core/JobSystem.cpp",
-        "src/luminumbra_common/core/JobSystem.h"
-      ],
       "agent_contract": {
-        "reads": [
-          "src/luminumbra_common/core/JobSystem.cpp",
-          "src/luminumbra_common/core/JobSystem.h",
-          ".forge/reports/polyglot-audit/quality-risks.md"
-        ],
+        "creates": [],
         "modifies": [
           "src/luminumbra_common/core/JobSystem.cpp",
           "src/luminumbra_common/core/JobSystem.h"
         ],
-        "creates": []
+        "reads": [
+          "src/luminumbra_common/core/JobSystem.cpp",
+          "src/luminumbra_common/core/JobSystem.h",
+          ".forge/reports/polyglot-audit/quality-risks.md"
+        ]
       },
-      "prompt": "Make JobSystem::shutdown drain the queue. Sequence: (1) Acquire m_queue_mutex; set m_stop_threads.store(true); release the lock. (2) Notify all workers. (3) Workers continue to pop and run jobs until the queue is empty AND m_stop_threads is true. (4) Wait for all workers to exit via join. (5) Pending JobHandles will see their shared counter drop to zero naturally as jobs complete (or stay non-zero forever if the queue was non-empty at start of shutdown — that's the caller's problem, not the JobSystem's). After shutdown, JobSystem::dispatch and dispatch_batch log an error and return a default-constructed JobHandle without queuing. Verify with cmake --build --preset debug && ctest. Add a doc comment explaining the drain-then-stop contract."
+      "depends_on": [
+        "T-S2-1-jobsystem-counter-ownership"
+      ],
+      "id": "T-S2-2-jobsystem-graceful-shutdown",
+      "modifies": [
+        "src/luminumbra_common/core/JobSystem.cpp",
+        "src/luminumbra_common/core/JobSystem.h"
+      ],
+      "prompt": "Make JobSystem::shutdown drain the queue. Sequence: (1) Acquire m_queue_mutex; set m_stop_threads.store(true); release the lock. (2) Notify all workers. (3) Workers continue to pop and run jobs until the queue is empty AND m_stop_threads is true. (4) Wait for all workers to exit via join. (5) Pending JobHandles will see their shared counter drop to zero naturally as jobs complete (or stay non-zero forever if the queue was non-empty at start of shutdown — that's the caller's problem, not the JobSystem's). After shutdown, JobSystem::dispatch and dispatch_batch log an error and return a default-constructed JobHandle without queuing. Verify with cmake --build --preset debug && ctest. Add a doc comment explaining the drain-then-stop contract.",
+      "tier": "standard",
+      "title": "JobSystem::shutdown drains the queue and rejects new dispatch",
+      "type": "refactor"
     },
     {
-      "id": "T-S2-3-store-and-wait-meshing-handle",
-      "title": "SHIELD_WorldSystem stores meshing batch handle and waits on shutdown",
-      "type": "refactor",
-      "tier": "standard",
+      "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp"
+        ],
+        "reads": [
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+          "src/luminumbra_common/core/JobSystem.h"
+        ]
+      },
       "depends_on": [
         "T-S2-1-jobsystem-counter-ownership",
         "T-S0-3-fix-cave-effect-on-mesh",
         "T-S0-1-fix-sdf-sign-convention"
       ],
-      "files": [
+      "id": "T-S2-3-store-and-wait-meshing-handle",
+      "modifies": [
         "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
         "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp"
       ],
-      "agent_contract": {
-        "reads": [
-          "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
-          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
-          "src/luminumbra_common/core/JobSystem.h"
-        ],
-        "modifies": [
-          "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
-          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp"
-        ],
-        "creates": []
-      },
-      "prompt": "Add a member JobHandle m_meshing_handle to SHIELD_WorldSystem. In dispatch_meshing_jobs, replace m_job_system->dispatch_batch(jobs); (discarded return value) with m_meshing_handle = m_job_system->dispatch_batch(jobs);. Add a public method WaitForPendingMeshing() that calls m_job_system->wait(m_meshing_handle) if the handle is valid. Call WaitForPendingMeshing() at the top of clear_world() and from the SHIELD_WorldSystem destructor. Verify with cmake --build --preset debug && ctest."
+      "prompt": "Add a member JobHandle m_meshing_handle to SHIELD_WorldSystem. In dispatch_meshing_jobs, replace m_job_system->dispatch_batch(jobs); (discarded return value) with m_meshing_handle = m_job_system->dispatch_batch(jobs);. Add a public method WaitForPendingMeshing() that calls m_job_system->wait(m_meshing_handle) if the handle is valid. Call WaitForPendingMeshing() at the top of clear_world() and from the SHIELD_WorldSystem destructor. Verify with cmake --build --preset debug && ctest.",
+      "tier": "standard",
+      "title": "SHIELD_WorldSystem stores meshing batch handle and waits on shutdown",
+      "type": "refactor"
     },
     {
-      "id": "T-S2-4a-introduce-world-streaming-state",
-      "title": "Introduce WorldStreamingState type + ChunkRenderable + atomic mesh publish on Chunk",
-      "type": "implement",
-      "tier": "deep",
-      "depends_on": [
-        "T-S2-3-store-and-wait-meshing-handle",
-        "T-S0-3-fix-cave-effect-on-mesh"
-      ],
-      "files": [
-        "src/luminumbra_common/world/WorldStreamingState.h",
-        "src/luminumbra_common/world/WorldStreamingState.cpp",
-        "src/luminumbra_common/world/Chunk.h",
-        "src/luminumbra_common/world/Chunk.cpp"
-      ],
       "agent_contract": {
+        "creates": [
+          "src/luminumbra_common/world/WorldStreamingState.h",
+          "src/luminumbra_common/world/WorldStreamingState.cpp"
+        ],
+        "modifies": [
+          "src/luminumbra_common/world/Chunk.h",
+          "src/luminumbra_common/world/Chunk.cpp"
+        ],
         "reads": [
           "src/luminumbra_common/world/Chunk.h",
           "src/luminumbra_common/world/Chunk.cpp",
@@ -635,23 +598,40 @@
           ".forge/reports/polyglot-audit/quality-risks.md",
           ".forge/reports/polyglot-audit/critique.md",
           ".forge/reports/polyglot-audit/data-models.md"
-        ],
-        "modifies": [
-          "src/luminumbra_common/world/Chunk.h",
-          "src/luminumbra_common/world/Chunk.cpp"
-        ],
-        "creates": [
-          "src/luminumbra_common/world/WorldStreamingState.h",
-          "src/luminumbra_common/world/WorldStreamingState.cpp"
         ]
       },
-      "prompt": "Introduce only the new TYPES in this task; do not migrate any existing system. (1) Create world/WorldStreamingState.{h,cpp}: owns std::unordered_map<ChunkID, std::shared_ptr<Chunk>> guarded by std::shared_mutex, plus a Snapshot type that is std::vector<std::shared_ptr<const ChunkRenderable>>. Provide insert(id, chunk), erase(id), find(id) under unique_lock; provide snapshot() returning a Snapshot built under shared_lock. (2) Define ChunkRenderable as an immutable struct: ChunkID id, IVec3 coords, int current_lod, u32 mesh_version, std::shared_ptr<const MeshBuffers> terrain_mesh, std::shared_ptr<const MeshBuffers> water_mesh. (3) Add MeshBuffers as a struct holding std::vector<VoxelVertex> vertices, std::vector<u32> indices; place it in Chunk.h or a new MeshBuffers.h. (4) Modify Chunk to hold std::shared_ptr<const MeshBuffers> m_terrain_mesh and m_water_mesh as the publishable mesh; add Chunk::publish_terrain_mesh(std::shared_ptr<const MeshBuffers>) and publish_water_mesh that swap atomically (use std::atomic<std::shared_ptr<...>> if compiler supports C++20 atomic shared_ptr, else guard with a small std::mutex). (5) Keep the existing public std::vector mesh_vertices/mesh_indices/water_mesh_vertices/water_mesh_indices intact in this task — they remain the legacy write target during generation; the migration to read-via-snapshot happens in T-S2-4c. Add doc comments on the new APIs naming the lifetime + thread-safety contract. Verify with cmake --build --preset debug — no behavioral change yet."
+      "creates": [
+        "src/luminumbra_common/world/WorldStreamingState.h",
+        "src/luminumbra_common/world/WorldStreamingState.cpp"
+      ],
+      "depends_on": [
+        "T-S2-3-store-and-wait-meshing-handle",
+        "T-S0-3-fix-cave-effect-on-mesh"
+      ],
+      "id": "T-S2-4a-introduce-world-streaming-state",
+      "modifies": [
+        "src/luminumbra_common/world/Chunk.h",
+        "src/luminumbra_common/world/Chunk.cpp"
+      ],
+      "prompt": "Introduce only the new TYPES in this task; do not migrate any existing system. (1) Create world/WorldStreamingState.{h,cpp}: owns std::unordered_map<ChunkID, std::shared_ptr<Chunk>> guarded by std::shared_mutex, plus a Snapshot type that is std::vector<std::shared_ptr<const ChunkRenderable>>. Provide insert(id, chunk), erase(id), find(id) under unique_lock; provide snapshot() returning a Snapshot built under shared_lock. (2) Define ChunkRenderable as an immutable struct: ChunkID id, IVec3 coords, int current_lod, u32 mesh_version, std::shared_ptr<const MeshBuffers> terrain_mesh, std::shared_ptr<const MeshBuffers> water_mesh. (3) Add MeshBuffers as a struct holding std::vector<VoxelVertex> vertices, std::vector<u32> indices; place it in Chunk.h or a new MeshBuffers.h. (4) Modify Chunk to hold std::shared_ptr<const MeshBuffers> m_terrain_mesh and m_water_mesh as the publishable mesh; add Chunk::publish_terrain_mesh(std::shared_ptr<const MeshBuffers>) and publish_water_mesh that swap atomically (use std::atomic<std::shared_ptr<...>> if compiler supports C++20 atomic shared_ptr, else guard with a small std::mutex). (5) Keep the existing public std::vector mesh_vertices/mesh_indices/water_mesh_vertices/water_mesh_indices intact in this task — they remain the legacy write target during generation; the migration to read-via-snapshot happens in T-S2-4c. Add doc comments on the new APIs naming the lifetime + thread-safety contract. Verify with cmake --build --preset debug — no behavioral change yet.",
+      "tier": "deep",
+      "title": "Introduce WorldStreamingState type + ChunkRenderable + atomic mesh publish on Chunk",
+      "type": "implement"
     },
     {
-      "id": "T-S2-4b-migrate-shield-world-system-to-streaming-state",
-      "title": "Migrate SHIELD_WorldSystem to use WorldStreamingState and publish meshes",
-      "type": "refactor",
-      "tier": "deep",
+      "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+          "src/luminumbra_common/world/MarchingCubes.cpp"
+        ],
+        "reads": [
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+          "src/luminumbra_common/world/MarchingCubes.cpp"
+        ]
+      },
       "depends_on": [
         "T-S2-4a-introduce-world-streaming-state",
         "T-S0-3-fix-cave-effect-on-mesh",
@@ -660,88 +640,86 @@
         "T-S2-1-jobsystem-counter-ownership",
         "T-S2-3-store-and-wait-meshing-handle"
       ],
-      "files": [
+      "id": "T-S2-4b-migrate-shield-world-system-to-streaming-state",
+      "modifies": [
         "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
         "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
         "src/luminumbra_common/world/MarchingCubes.cpp"
       ],
-      "agent_contract": {
-        "reads": [
-          "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
-          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
-          "src/luminumbra_common/world/MarchingCubes.cpp",
-          "src/luminumbra_common/world/WorldStreamingState.h"
-        ],
-        "modifies": [
-          "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
-          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
-          "src/luminumbra_common/world/MarchingCubes.cpp"
-        ],
-        "creates": []
-      },
-      "prompt": "Replace SHIELD_WorldSystem::m_chunks (std::unordered_map<ChunkID, std::shared_ptr<Chunk>>) with a WorldStreamingState m_streaming member. Every direct map operation in SHIELD_WorldSystem.cpp becomes a call through m_streaming (insert/erase/find/snapshot). Rewrite get_renderable_chunks() to call m_streaming.snapshot() and return the resulting Snapshot type instead of std::vector<Chunk*>. In MarchingCubes::PolygoniseTerrain — after the mesh vectors are populated — also build a new MeshBuffers from them and call chunk.publish_terrain_mesh(buffers). Similarly for the water mesh path. Do NOT yet change the renderer or water system to consume snapshots — they continue to read the legacy public vectors until T-S2-4c and T-S2-4d. Verify with cmake --build --preset debug-asan && ctest --preset debug-asan."
+      "prompt": "Replace SHIELD_WorldSystem::m_chunks (std::unordered_map<ChunkID, std::shared_ptr<Chunk>>) with a WorldStreamingState m_streaming member. Every direct map operation in SHIELD_WorldSystem.cpp becomes a call through m_streaming (insert/erase/find/snapshot). Rewrite get_renderable_chunks() to call m_streaming.snapshot() and return the resulting Snapshot type instead of std::vector<Chunk*>. In MarchingCubes::PolygoniseTerrain — after the mesh vectors are populated — also build a new MeshBuffers from them and call chunk.publish_terrain_mesh(buffers). Similarly for the water mesh path. Do NOT yet change the renderer or water system to consume snapshots — they continue to read the legacy public vectors until T-S2-4c and T-S2-4d. Verify with cmake --build --preset debug-asan && ctest --preset debug-asan.",
+      "tier": "deep",
+      "title": "Migrate SHIELD_WorldSystem to use WorldStreamingState and publish meshes",
+      "type": "refactor"
     },
     {
-      "id": "T-S2-4c-migrate-render-pipeline-to-snapshots",
-      "title": "Migrate RenderPipeline to consume ChunkRenderable snapshots",
-      "type": "refactor",
-      "tier": "deep",
+      "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "src/luminumbra_client/rendering/RenderPipeline.cpp",
+          "src/luminumbra_client/rendering/RenderPipeline.h"
+        ],
+        "reads": [
+          "src/luminumbra_client/rendering/RenderPipeline.cpp",
+          "src/luminumbra_client/rendering/RenderPipeline.h",
+          "src/luminumbra_common/world/Chunk.h"
+        ]
+      },
       "depends_on": [
         "T-S2-4b-migrate-shield-world-system-to-streaming-state",
         "T-S2-6-render-pipeline-startup-no-throw",
         "T-S0-2-verify-and-fix-normal-winding"
       ],
-      "files": [
+      "id": "T-S2-4c-migrate-render-pipeline-to-snapshots",
+      "modifies": [
         "src/luminumbra_client/rendering/RenderPipeline.cpp",
         "src/luminumbra_client/rendering/RenderPipeline.h"
       ],
-      "agent_contract": {
-        "reads": [
-          "src/luminumbra_client/rendering/RenderPipeline.cpp",
-          "src/luminumbra_client/rendering/RenderPipeline.h",
-          "src/luminumbra_common/world/WorldStreamingState.h",
-          "src/luminumbra_common/world/Chunk.h"
-        ],
-        "modifies": [
-          "src/luminumbra_client/rendering/RenderPipeline.cpp",
-          "src/luminumbra_client/rendering/RenderPipeline.h"
-        ],
-        "creates": []
-      },
-      "prompt": "Rewrite RenderPipeline::geometry_pass_chunks and related upload paths to consume std::shared_ptr<const ChunkRenderable> from a WorldStreamingState::Snapshot rather than raw Chunk*. GPU resource cache key remains ChunkID; the renderer reads ChunkRenderable::terrain_mesh / water_mesh shared_ptrs and copies vertex/index data from MeshBuffers (no longer touches Chunk's internal vectors). RenderPipeline::clear_all_chunk_data and the manage_chunk_gpu_resources hot path likewise key off ChunkID + mesh_version. Do NOT change WaterSystem in this task. Verify with cmake --build --preset debug-asan && ctest --preset debug-asan and that the client launches and renders a flat-surface world without crashing."
+      "prompt": "Rewrite RenderPipeline::geometry_pass_chunks and related upload paths to consume std::shared_ptr<const ChunkRenderable> from a WorldStreamingState::Snapshot rather than raw Chunk*. GPU resource cache key remains ChunkID; the renderer reads ChunkRenderable::terrain_mesh / water_mesh shared_ptrs and copies vertex/index data from MeshBuffers (no longer touches Chunk's internal vectors). RenderPipeline::clear_all_chunk_data and the manage_chunk_gpu_resources hot path likewise key off ChunkID + mesh_version. Do NOT change WaterSystem in this task. Verify with cmake --build --preset debug-asan && ctest --preset debug-asan and that the client launches and renders a flat-surface world without crashing.",
+      "tier": "deep",
+      "title": "Migrate RenderPipeline to consume ChunkRenderable snapshots",
+      "type": "refactor"
     },
     {
-      "id": "T-S2-4d-migrate-water-system-to-snapshots",
-      "title": "Migrate WaterSystem to consume Snapshot rather than iterate m_chunks",
-      "type": "refactor",
-      "tier": "standard",
-      "depends_on": [
-        "T-S2-4b-migrate-shield-world-system-to-streaming-state",
-        "T-S2-1-jobsystem-counter-ownership"
-      ],
-      "files": [
-        "src/luminumbra_common/systems/WaterSystem.cpp",
-        "src/luminumbra_common/systems/WaterSystem.h"
-      ],
       "agent_contract": {
-        "reads": [
-          "src/luminumbra_common/systems/WaterSystem.cpp",
-          "src/luminumbra_common/systems/WaterSystem.h",
-          "src/luminumbra_common/world/WorldStreamingState.h"
-        ],
+        "creates": [],
         "modifies": [
           "src/luminumbra_common/systems/WaterSystem.cpp",
           "src/luminumbra_common/systems/WaterSystem.h"
         ],
-        "creates": []
+        "reads": [
+          "src/luminumbra_common/systems/WaterSystem.cpp",
+          "src/luminumbra_common/systems/WaterSystem.h"
+        ]
       },
-      "prompt": "Change WaterSystem::update signature to take a const WorldStreamingState::Snapshot& instead of std::unordered_map<ChunkID, std::shared_ptr<Chunk>>. SHIELD_WorldSystem (already migrated in T-S2-4b) passes the snapshot. Water-sim job dispatch continues to write Chunk::water_level_data / water_flow_data through the still-public vectors during the legacy single-writer phase; the publishable mesh is built by MarchingCubes::GenerateWaterMesh and committed via Chunk::publish_water_mesh (the publish hook was added in T-S2-4a). Verify with cmake --build --preset debug-asan && ctest --preset debug-asan."
+      "depends_on": [
+        "T-S2-4b-migrate-shield-world-system-to-streaming-state",
+        "T-S2-1-jobsystem-counter-ownership"
+      ],
+      "id": "T-S2-4d-migrate-water-system-to-snapshots",
+      "modifies": [
+        "src/luminumbra_common/systems/WaterSystem.cpp",
+        "src/luminumbra_common/systems/WaterSystem.h"
+      ],
+      "prompt": "Change WaterSystem::update signature to take a const WorldStreamingState::Snapshot& instead of std::unordered_map<ChunkID, std::shared_ptr<Chunk>>. SHIELD_WorldSystem (already migrated in T-S2-4b) passes the snapshot. Water-sim job dispatch continues to write Chunk::water_level_data / water_flow_data through the still-public vectors during the legacy single-writer phase; the publishable mesh is built by MarchingCubes::GenerateWaterMesh and committed via Chunk::publish_water_mesh (the publish hook was added in T-S2-4a). Verify with cmake --build --preset debug-asan && ctest --preset debug-asan.",
+      "tier": "standard",
+      "title": "Migrate WaterSystem to consume Snapshot rather than iterate m_chunks",
+      "type": "refactor"
     },
     {
-      "id": "T-S2-5-remove-inline-wait-from-generation",
-      "title": "Remove inline wait() from dispatch_generation_jobs; verify state gates meshing",
-      "type": "refactor",
-      "tier": "standard",
+      "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+          "test/shield/test_world_generation.cpp"
+        ],
+        "reads": [
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
+          "src/luminumbra_common/world/Chunk.h",
+          "test/shield/test_world_generation.cpp",
+          ".forge/reports/polyglot-audit/critique.md"
+        ]
+      },
       "depends_on": [
         "T-S2-4b-migrate-shield-world-system-to-streaming-state",
         "T-S0-5-add-lod-winding-regression-test",
@@ -750,104 +728,87 @@
         "T-S2-1-jobsystem-counter-ownership",
         "T-S2-3-store-and-wait-meshing-handle"
       ],
-      "files": [
+      "id": "T-S2-5-remove-inline-wait-from-generation",
+      "modifies": [
         "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
         "test/shield/test_world_generation.cpp"
       ],
-      "agent_contract": {
-        "reads": [
-          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
-          "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
-          "src/luminumbra_common/world/Chunk.h",
-          "test/shield/test_world_generation.cpp",
-          ".forge/reports/polyglot-audit/critique.md"
-        ],
-        "modifies": [
-          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
-          "test/shield/test_world_generation.cpp"
-        ],
-        "creates": []
-      },
-      "prompt": "Remove the synchronous m_job_system->wait(handle) call at SHIELD_WorldSystem.cpp:476 inside dispatch_generation_jobs. Also remove the post-wait debug scan that follows (lines ~480-498). Keep the return of the JobHandle. Add a regression test MeshingPassSkipsLoadingChunks in test/shield/test_world_generation.cpp that: (1) constructs a SHIELD_WorldSystem with a JobSystem; (2) calls dispatch_generation_jobs without waiting; (3) immediately calls update(); (4) asserts that update() did not call PolygoniseTerrain on any chunk still in ChunkState::Loading (verifiable by checking that those chunks' mesh_vertices remain empty). The state machine already prevents this, but the test locks the invariant. Verify with --gtest_filter=*MeshingPassSkips*."
+      "prompt": "Remove the synchronous m_job_system->wait(handle) call at SHIELD_WorldSystem.cpp:476 inside dispatch_generation_jobs. Also remove the post-wait debug scan that follows (lines ~480-498). Keep the return of the JobHandle. Add a regression test MeshingPassSkipsLoadingChunks in test/shield/test_world_generation.cpp that: (1) constructs a SHIELD_WorldSystem with a JobSystem; (2) calls dispatch_generation_jobs without waiting; (3) immediately calls update(); (4) asserts that update() did not call PolygoniseTerrain on any chunk still in ChunkState::Loading (verifiable by checking that those chunks' mesh_vertices remain empty). The state machine already prevents this, but the test locks the invariant. Verify with --gtest_filter=*MeshingPassSkips*.",
+      "tier": "standard",
+      "title": "Remove inline wait() from dispatch_generation_jobs; verify state gates meshing",
+      "type": "refactor"
     },
     {
-      "id": "T-S2-6-render-pipeline-startup-no-throw",
-      "title": "Replace runtime_error in RenderPipeline::startup with logged fatal + ordered shutdown",
-      "type": "refactor",
-      "tier": "standard",
-      "depends_on": [],
-      "files": [
-        "src/luminumbra_client/rendering/RenderPipeline.cpp",
-        "src/luminumbra_client/rendering/RenderPipeline.h",
-        "src/luminumbra_client/main_client.cpp"
-      ],
       "agent_contract": {
-        "reads": [
-          "src/luminumbra_client/rendering/RenderPipeline.cpp",
-          "src/luminumbra_client/rendering/RenderPipeline.h",
-          "src/luminumbra_client/main_client.cpp",
-          ".forge/reports/polyglot-audit/quality-risks.md"
-        ],
+        "creates": [],
         "modifies": [
           "src/luminumbra_client/rendering/RenderPipeline.cpp",
           "src/luminumbra_client/rendering/RenderPipeline.h",
           "src/luminumbra_client/main_client.cpp"
         ],
-        "creates": []
+        "reads": [
+          "src/luminumbra_client/rendering/RenderPipeline.cpp",
+          "src/luminumbra_client/rendering/RenderPipeline.h",
+          "src/luminumbra_client/main_client.cpp",
+          ".forge/reports/polyglot-audit/quality-risks.md"
+        ]
       },
-      "prompt": "Replace the throw std::runtime_error(\"Shadow map cascade splits not initialized!\") at RenderPipeline.cpp:1500 with: LUMINUMBRA_CORE_ERROR(...); return std::nullopt or a bool error from get_light_space_matrices (whichever fits the signature; widen the return type to std::optional<...> if needed). Change RenderPipeline::startup signature to return bool and report success/failure via return value. In main_client::main(), check the return and exit with a logged shutdown of GLFW + ImGui + JobSystem if startup fails. Do not silently swallow the failure. Verify with cmake --build --preset debug && cmake --build --preset release; do not exercise the failure path at test time (it requires a fault-injection harness)."
+      "depends_on": [],
+      "id": "T-S2-6-render-pipeline-startup-no-throw",
+      "modifies": [
+        "src/luminumbra_client/rendering/RenderPipeline.cpp",
+        "src/luminumbra_client/rendering/RenderPipeline.h",
+        "src/luminumbra_client/main_client.cpp"
+      ],
+      "prompt": "Replace the throw std::runtime_error(\"Shadow map cascade splits not initialized!\") at RenderPipeline.cpp:1500 with: LUMINUMBRA_CORE_ERROR(...); return std::nullopt or a bool error from get_light_space_matrices (whichever fits the signature; widen the return type to std::optional<...> if needed). Change RenderPipeline::startup signature to return bool and report success/failure via return value. In main_client::main(), check the return and exit with a logged shutdown of GLFW + ImGui + JobSystem if startup fails. Do not silently swallow the failure. Verify with cmake --build --preset debug && cmake --build --preset release; do not exercise the failure path at test time (it requires a fault-injection harness).",
+      "tier": "standard",
+      "title": "Replace runtime_error in RenderPipeline::startup with logged fatal + ordered shutdown",
+      "type": "refactor"
     },
     {
-      "id": "T-S2-jobsystem-stress-tests",
-      "title": "Add JobSystem and WorldStreamingState stress tests",
-      "type": "implement",
-      "tier": "standard",
+      "agent_contract": {
+        "creates": [
+          "test/common/JobSystem_test.cpp",
+          "test/common/WorldStreamingState_test.cpp"
+        ],
+        "modifies": [
+          "test/CMakeLists.txt"
+        ],
+        "reads": [
+          "src/luminumbra_common/core/JobSystem.h",
+          "src/luminumbra_common/core/JobSystem.cpp",
+          "test/CMakeLists.txt"
+        ]
+      },
+      "creates": [
+        "test/common/JobSystem_test.cpp",
+        "test/common/WorldStreamingState_test.cpp"
+      ],
       "depends_on": [
         "T-S2-2-jobsystem-graceful-shutdown",
         "T-S2-4a-introduce-world-streaming-state",
         "T-S2-4b-migrate-shield-world-system-to-streaming-state",
         "T-S1-6-warnings-as-errors",
         "T-S0-0-add-sdf-parity-test-harness",
-        "T-S0-6-enable-sdf-parity-test",
         "T-DR-asset-processor-round-trip-test"
       ],
-      "files": [
-        "test/common/JobSystem_test.cpp",
-        "test/common/WorldStreamingState_test.cpp",
+      "id": "T-S2-jobsystem-stress-tests",
+      "modifies": [
         "test/CMakeLists.txt"
       ],
-      "agent_contract": {
-        "reads": [
-          "src/luminumbra_common/core/JobSystem.h",
-          "src/luminumbra_common/core/JobSystem.cpp",
-          "src/luminumbra_common/world/WorldStreamingState.h",
-          "src/luminumbra_common/world/WorldStreamingState.cpp",
-          "test/CMakeLists.txt"
-        ],
-        "modifies": [
-          "test/CMakeLists.txt"
-        ],
-        "creates": [
-          "test/common/JobSystem_test.cpp",
-          "test/common/WorldStreamingState_test.cpp"
-        ]
-      },
-      "prompt": "Add stress tests. JobSystem_test.cpp: (1) DispatchOneThousandBatchesIntermixedWaits — dispatch 1000 batches of 10 jobs each, intermix wait() calls on alternating handles, assert every handle's counter reaches 0 exactly once; (2) ShutdownDrainsPendingJobs — queue 100 long jobs, call shutdown, assert all 100 finish before shutdown returns; (3) DispatchAfterShutdownReturnsInvalidHandle — call shutdown then dispatch, assert returned JobHandle is default-constructed. WorldStreamingState_test.cpp: (1) SnapshotIsStableUnderConcurrentMutation — one writer thread inserts/erases 10k entries while a reader takes 1000 snapshots; assert no crash, no UB under ASan, snapshots are internally consistent; (2) PublishMeshIsAtomic — meshing thread calls chunk.publish_mesh(new_buffers) while render thread reads via snapshot; reads always see the previous OR the new buffer, never torn. Register both binaries in test/CMakeLists.txt with gtest_discover_tests. Verify with cmake --build --preset debug-asan && ctest --preset debug-asan --output-on-failure. Both stress tests must pass under ASan."
+      "prompt": "Add stress tests. JobSystem_test.cpp: (1) DispatchOneThousandBatchesIntermixedWaits — dispatch 1000 batches of 10 jobs each, intermix wait() calls on alternating handles, assert every handle's counter reaches 0 exactly once; (2) ShutdownDrainsPendingJobs — queue 100 long jobs, call shutdown, assert all 100 finish before shutdown returns; (3) DispatchAfterShutdownReturnsInvalidHandle — call shutdown then dispatch, assert returned JobHandle is default-constructed. WorldStreamingState_test.cpp: (1) SnapshotIsStableUnderConcurrentMutation — one writer thread inserts/erases 10k entries while a reader takes 1000 snapshots; assert no crash, no UB under ASan, snapshots are internally consistent; (2) PublishMeshIsAtomic — meshing thread calls chunk.publish_mesh(new_buffers) while render thread reads via snapshot; reads always see the previous OR the new buffer, never torn. Register both binaries in test/CMakeLists.txt with gtest_discover_tests. Verify with cmake --build --preset debug-asan && ctest --preset debug-asan --output-on-failure. Both stress tests must pass under ASan.",
+      "tier": "standard",
+      "title": "Add JobSystem and WorldStreamingState stress tests",
+      "type": "implement"
     },
     {
-      "id": "T-S3-1-replace-runtime-iostreams-with-logging",
-      "title": "Replace std::cout/std::cerr with engine logger across runtime code",
-      "type": "refactor",
-      "tier": "standard",
-      "depends_on": [
-        "T-S2-2-jobsystem-graceful-shutdown"
-      ],
-      "files": [
-        "src/luminumbra_common/world/GameSession.cpp",
-        "src/luminumbra_client/core/AssetManager.h",
-        "src/luminumbra_server/main_server.cpp"
-      ],
       "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "src/luminumbra_common/world/GameSession.cpp",
+          "src/luminumbra_client/core/AssetManager.h",
+          "src/luminumbra_server/main_server.cpp"
+        ],
         "reads": [
           "src/luminumbra_common/world/GameSession.cpp",
           "src/luminumbra_client/core/AssetManager.h",
@@ -855,65 +816,66 @@
           "src/luminumbra_common/core/Log.h",
           "src/luminumbra_common/core/Log.cpp",
           ".forge/reports/polyglot-audit/quality-risks.md"
-        ],
-        "modifies": [
-          "src/luminumbra_common/world/GameSession.cpp",
-          "src/luminumbra_client/core/AssetManager.h",
-          "src/luminumbra_server/main_server.cpp"
-        ],
-        "creates": []
+        ]
       },
-      "prompt": "Replace every std::cout/std::cerr in: src/luminumbra_common/world/GameSession.cpp (at least 8 sites), src/luminumbra_client/core/AssetManager.h:17, src/luminumbra_server/main_server.cpp:4. Use LUMINUMBRA_CORE_ERROR for failure paths, LUMINUMBRA_CORE_INFO for success messages, LUMINUMBRA_CORE_WARN for soft-degradation cases. In main_server.cpp, ensure Log::Init() is called before the first log message. If Log::Init() pulls in client-only dependencies, factor a Log::InitMinimal() in core/Log.cpp/h that initializes only the spdlog sink without GL/filesystem-rooted dependencies, and have main_server.cpp call that one. Verify with cmake --build --preset release && ctest. Add a CI grep gate (a follow-up task may formalize it) that ensures no std::cout / std::cerr appears outside test/, tools/, and vendor/ paths."
+      "depends_on": [
+        "T-S2-2-jobsystem-graceful-shutdown"
+      ],
+      "id": "T-S3-1-replace-runtime-iostreams-with-logging",
+      "modifies": [
+        "src/luminumbra_common/world/GameSession.cpp",
+        "src/luminumbra_client/core/AssetManager.h",
+        "src/luminumbra_server/main_server.cpp"
+      ],
+      "prompt": "Replace every std::cout/std::cerr in: src/luminumbra_common/world/GameSession.cpp (at least 8 sites), src/luminumbra_client/core/AssetManager.h:17, src/luminumbra_server/main_server.cpp:4. Use LUMINUMBRA_CORE_ERROR for failure paths, LUMINUMBRA_CORE_INFO for success messages, LUMINUMBRA_CORE_WARN for soft-degradation cases. In main_server.cpp, ensure Log::Init() is called before the first log message. If Log::Init() pulls in client-only dependencies, factor a Log::InitMinimal() in core/Log.cpp/h that initializes only the spdlog sink without GL/filesystem-rooted dependencies, and have main_server.cpp call that one. Verify with cmake --build --preset release && ctest. Add a CI grep gate (a follow-up task may formalize it) that ensures no std::cout / std::cerr appears outside test/, tools/, and vendor/ paths.",
+      "tier": "standard",
+      "title": "Replace std::cout/std::cerr with engine logger across runtime code",
+      "type": "refactor"
     },
     {
-      "id": "T-OD4-embed-git-sha-engine-version",
-      "title": "Embed git SHA + dirty flag as ENGINE_VERSION via CMake configure_file",
-      "type": "implement",
-      "tier": "standard",
-      "depends_on": [
-        "T-S1-1-cmake-presets",
-        "T-S1-5-reconcile-sources-and-stale-cmake",
-        "T-S1-7-asset-pipeline-fixes"
-      ],
-      "files": [
-        "cmake/engine_version.cmake",
-        "src/luminumbra_common/core/EngineVersion.h.in",
-        "src/luminumbra_common/core/EngineVersion.cpp",
-        "src/luminumbra_common/sources.cmake",
-        "CMakeLists.txt"
-      ],
       "agent_contract": {
-        "reads": [
-          "CMakeLists.txt",
-          "src/luminumbra_common/sources.cmake",
-          "src/luminumbra_common/CMakeLists.txt"
+        "creates": [
+          "cmake/engine_version.cmake",
+          "src/luminumbra_common/core/EngineVersion.h.in",
+          "src/luminumbra_common/core/EngineVersion.cpp"
         ],
         "modifies": [
           "CMakeLists.txt",
           "src/luminumbra_common/sources.cmake"
         ],
-        "creates": [
-          "cmake/engine_version.cmake",
-          "src/luminumbra_common/core/EngineVersion.h.in",
-          "src/luminumbra_common/core/EngineVersion.cpp"
+        "reads": [
+          "CMakeLists.txt",
+          "src/luminumbra_common/sources.cmake",
+          "src/luminumbra_common/CMakeLists.txt"
         ]
       },
-      "prompt": "Owner decision recorded: engine_version = git short SHA + dirty flag (e.g. '3f1af0b-dirty'). Implementation: (1) cmake/engine_version.cmake runs execute_process(COMMAND git rev-parse --short HEAD) and execute_process(COMMAND git diff --quiet -- :^.forge :^build :^data RESULT_VARIABLE GIT_DIRTY) to compute LUMINUMBRA_ENGINE_VERSION_STRING and LUMINUMBRA_ENGINE_GIT_DIRTY. Sets fallback 'unknown' if git is unavailable. (2) include(cmake/engine_version.cmake) from top-level CMakeLists.txt before add_subdirectory(src). (3) configure_file generates EngineVersion.h from EngineVersion.h.in into ${CMAKE_BINARY_DIR}/generated/luminumbra/core/EngineVersion.h with #define LUMINUMBRA_ENGINE_VERSION '@LUMINUMBRA_ENGINE_VERSION_STRING@' and LUMINUMBRA_ENGINE_VERSION_DIRTY @LUMINUMBRA_ENGINE_GIT_DIRTY@. (4) Add ${CMAKE_BINARY_DIR}/generated as an include dir on luminumbra_common. (5) EngineVersion.cpp exposes free function const char* Luminumbra::engine_version() returning the macro. This API is consumed by WorldManifestV1 in T-S3-2 (out of scope here) to populate the manifest's engine_version field. Verify with cmake --preset debug && cmake --build --preset debug; grep the build dir for the generated header."
+      "creates": [
+        "cmake/engine_version.cmake",
+        "src/luminumbra_common/core/EngineVersion.h.in",
+        "src/luminumbra_common/core/EngineVersion.cpp"
+      ],
+      "depends_on": [
+        "T-S1-1-cmake-presets",
+        "T-S1-5-reconcile-sources-and-stale-cmake",
+        "T-S1-7-asset-pipeline-fixes"
+      ],
+      "id": "T-OD4-embed-git-sha-engine-version",
+      "modifies": [
+        "src/luminumbra_common/sources.cmake",
+        "CMakeLists.txt"
+      ],
+      "prompt": "Owner decision recorded: engine_version = git short SHA + dirty flag (e.g. '3f1af0b-dirty'). Implementation: (1) cmake/engine_version.cmake runs execute_process(COMMAND git rev-parse --short HEAD) and execute_process(COMMAND git diff --quiet -- :^.forge :^build :^data RESULT_VARIABLE GIT_DIRTY) to compute LUMINUMBRA_ENGINE_VERSION_STRING and LUMINUMBRA_ENGINE_GIT_DIRTY. Sets fallback 'unknown' if git is unavailable. (2) include(cmake/engine_version.cmake) from top-level CMakeLists.txt before add_subdirectory(src). (3) configure_file generates EngineVersion.h from EngineVersion.h.in into ${CMAKE_BINARY_DIR}/generated/luminumbra/core/EngineVersion.h with #define LUMINUMBRA_ENGINE_VERSION '@LUMINUMBRA_ENGINE_VERSION_STRING@' and LUMINUMBRA_ENGINE_VERSION_DIRTY @LUMINUMBRA_ENGINE_GIT_DIRTY@. (4) Add ${CMAKE_BINARY_DIR}/generated as an include dir on luminumbra_common. (5) EngineVersion.cpp exposes free function const char* Luminumbra::engine_version() returning the macro. This API is consumed by WorldManifestV1 in T-S3-2 (out of scope here) to populate the manifest's engine_version field. Verify with cmake --preset debug && cmake --build --preset debug; grep the build dir for the generated header.",
+      "tier": "standard",
+      "title": "Embed git SHA + dirty flag as ENGINE_VERSION via CMake configure_file",
+      "type": "implement"
     },
     {
-      "id": "T-OD5-delete-dead-ui-scaffolding",
-      "title": "Delete unbuilt UI scaffolding; commit to legacy Rml_UIManager",
-      "type": "refactor",
-      "tier": "standard",
-      "depends_on": [
-        "T-S1-5-reconcile-sources-and-stale-cmake"
-      ],
-      "files": [
-        "src/luminumbra_client/ui",
-        "src/luminumbra_client/sources.cmake",
-        ".forge/architecture.toml"
-      ],
       "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "src/luminumbra_client/sources.cmake",
+          ".forge/architecture.toml"
+        ],
         "reads": [
           "src/luminumbra_client/sources.cmake",
           "src/luminumbra_client/ui/EnhancedUIManager.h",
@@ -928,30 +890,30 @@
           "src/luminumbra_client/main_client.cpp",
           ".forge/architecture.toml",
           ".forge/reports/polyglot-audit/architecture.md"
-        ],
-        "modifies": [
-          "src/luminumbra_client/sources.cmake",
-          ".forge/architecture.toml"
-        ],
-        "creates": []
+        ]
       },
-      "prompt": "Owner decision recorded: keep legacy Rml_UIManager behind the IUIManager interface (added separately as a sub-task of S4.0 in the roadmap). The component UI system has never been in the active build (sources.cmake confirms) and its wrappers are empty stubs. Delete the dead scaffolding: (1) git rm src/luminumbra_client/ui/EnhancedUIManager.{h,cpp} src/luminumbra_client/ui/SimpleUIManager.h src/luminumbra_client/ui/UIIntegration.cpp src/luminumbra_client/ui/core/ src/luminumbra_client/ui/components/. (2) Remove EnhancedUIManager.cpp from src/luminumbra_client/sources.cmake. (3) Update .forge/architecture.toml: remove the audio_ui_scripting check 'new component UI manager exists' (path src/luminumbra_client/ui/core/UIManager.cpp) — it would otherwise fail forever after deletion. (4) Verify main_client.cpp does NOT reference any deleted file; if it does (it constructs Rml_UIManager directly today so it should be clean), repair the references. Verify with cmake --preset debug --fresh && cmake --build --preset debug && ctest. The build must succeed and the client must still launch the main menu correctly (validated manually after dispatch)."
+      "depends_on": [
+        "T-S1-5-reconcile-sources-and-stale-cmake"
+      ],
+      "id": "T-OD5-delete-dead-ui-scaffolding",
+      "modifies": [
+        "src/luminumbra_client/ui",
+        "src/luminumbra_client/sources.cmake",
+        ".forge/architecture.toml"
+      ],
+      "prompt": "Owner decision recorded: keep legacy Rml_UIManager behind the IUIManager interface (added separately as a sub-task of S4.0 in the roadmap). The component UI system has never been in the active build (sources.cmake confirms) and its wrappers are empty stubs. Delete the dead scaffolding: (1) git rm src/luminumbra_client/ui/EnhancedUIManager.{h,cpp} src/luminumbra_client/ui/SimpleUIManager.h src/luminumbra_client/ui/UIIntegration.cpp src/luminumbra_client/ui/core/ src/luminumbra_client/ui/components/. (2) Remove EnhancedUIManager.cpp from src/luminumbra_client/sources.cmake. (3) Update .forge/architecture.toml: remove the audio_ui_scripting check 'new component UI manager exists' (path src/luminumbra_client/ui/core/UIManager.cpp) — it would otherwise fail forever after deletion. (4) Verify main_client.cpp does NOT reference any deleted file; if it does (it constructs Rml_UIManager directly today so it should be clean), repair the references. Verify with cmake --preset debug --fresh && cmake --build --preset debug && ctest. The build must succeed and the client must still launch the main menu correctly (validated manually after dispatch).",
+      "tier": "standard",
+      "title": "Delete unbuilt UI scaffolding; commit to legacy Rml_UIManager",
+      "type": "refactor"
     },
     {
-      "id": "T-DR-watersystem-camera-handle-fix",
-      "title": "Replace WaterSystem first-transform hack with PlayerHandle lookup",
-      "type": "refactor",
-      "tier": "standard",
-      "depends_on": [
-        "T-S2-4d-migrate-water-system-to-snapshots",
-        "T-S2-1-jobsystem-counter-ownership"
-      ],
-      "files": [
-        "src/luminumbra_common/systems/WaterSystem.cpp",
-        "src/luminumbra_common/systems/WaterSystem.h",
-        "src/luminumbra_common/components/CoreComponents.h"
-      ],
       "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "src/luminumbra_common/systems/WaterSystem.cpp",
+          "src/luminumbra_common/systems/WaterSystem.h",
+          "src/luminumbra_common/components/CoreComponents.h"
+        ],
         "reads": [
           "src/luminumbra_common/systems/WaterSystem.cpp",
           "src/luminumbra_common/systems/WaterSystem.h",
@@ -959,93 +921,104 @@
           "src/luminumbra_client/player/PlayerController.cpp",
           "src/luminumbra_client/player/PlayerController.h",
           ".forge/reports/polyglot-audit/quality-risks.md"
-        ],
-        "modifies": [
-          "src/luminumbra_common/systems/WaterSystem.cpp",
-          "src/luminumbra_common/systems/WaterSystem.h",
-          "src/luminumbra_common/components/CoreComponents.h"
-        ],
-        "creates": []
+        ]
       },
-      "prompt": "WaterSystem.cpp:36-37 picks transform_view.front() as the camera position with a TODO 'Add proper camera/player tagging system'. Fix: (1) Add a tag component PlayerTag (empty struct) to components/CoreComponents.h. (2) PlayerController on construction emplaces the PlayerTag onto the player entity. (3) WaterSystem::update finds the player via auto player_view = registry.view<const TransformComponent, const PlayerTag>(); if exactly one match, use its transform; if zero or multiple, log a warning and fall back to Vec3(0). Remove the TODO. Verify with cmake --build --preset debug-asan && ctest --preset debug-asan."
+      "depends_on": [
+        "T-S2-4d-migrate-water-system-to-snapshots",
+        "T-S2-1-jobsystem-counter-ownership"
+      ],
+      "id": "T-DR-watersystem-camera-handle-fix",
+      "modifies": [
+        "src/luminumbra_common/systems/WaterSystem.cpp",
+        "src/luminumbra_common/systems/WaterSystem.h",
+        "src/luminumbra_common/components/CoreComponents.h"
+      ],
+      "prompt": "WaterSystem.cpp:36-37 picks transform_view.front() as the camera position with a TODO 'Add proper camera/player tagging system'. Fix: (1) Add a tag component PlayerTag (empty struct) to components/CoreComponents.h. (2) PlayerController on construction emplaces the PlayerTag onto the player entity. (3) WaterSystem::update finds the player via auto player_view = registry.view<const TransformComponent, const PlayerTag>(); if exactly one match, use its transform; if zero or multiple, log a warning and fall back to Vec3(0). Remove the TODO. Verify with cmake --build --preset debug-asan && ctest --preset debug-asan.",
+      "tier": "standard",
+      "title": "Replace WaterSystem first-transform hack with PlayerHandle lookup",
+      "type": "refactor"
     },
     {
-      "id": "T-DR-asset-processor-round-trip-test",
-      "title": "Add round-trip test for asset_processor .lmesh format",
-      "type": "implement",
-      "tier": "standard",
-      "depends_on": [
-        "T-S1-1-cmake-presets",
-        "T-S0-0-add-sdf-parity-test-harness"
-      ],
-      "files": [
-        "test/tools/test_asset_processor_round_trip.cpp",
-        "test/CMakeLists.txt"
-      ],
       "agent_contract": {
+        "creates": [
+          "test/tools/test_asset_processor_round_trip.cpp"
+        ],
+        "modifies": [
+          "test/CMakeLists.txt"
+        ],
         "reads": [
           "tools/asset_processor.cpp",
           "src/luminumbra_client/rendering/Mesh.cpp",
           "src/luminumbra_client/rendering/Mesh.h",
           "test/CMakeLists.txt"
-        ],
-        "modifies": [
-          "test/CMakeLists.txt"
-        ],
-        "creates": [
-          "test/tools/test_asset_processor_round_trip.cpp"
         ]
       },
-      "prompt": "Add a GoogleTest binary asset_processor_test under test/tools/. It (1) constructs a tiny in-memory .glb (or uses a single small fixture .glb under test/tools/fixtures/), (2) invokes asset_processor's core function — refactor asset_processor.cpp if needed to extract its meshopt + lmesh-writing pipeline into a callable function rather than only a main() — to produce a .lmesh in a temp directory, (3) loads the result via MeshLoader::Load, (4) asserts vertex count and index count are reasonable (>0) and the LMeshHeader's magic + counts match what was written. Register the new binary in test/CMakeLists.txt with gtest_discover_tests. Verify with ctest --preset debug --output-on-failure --gtest_filter=*AssetProcessor*."
-    },
-    {
-      "id": "T-DR-luminumbra-assert-release-behavior",
-      "title": "Make LUMINUMBRA_ASSERT log+abort in Release, not no-op",
-      "type": "refactor",
-      "tier": "quick",
+      "creates": [
+        "test/tools/test_asset_processor_round_trip.cpp"
+      ],
       "depends_on": [
         "T-S1-1-cmake-presets",
-        "T-S2-1-jobsystem-counter-ownership",
-        "T-S2-6-render-pipeline-startup-no-throw"
+        "T-S0-0-add-sdf-parity-test-harness"
       ],
-      "files": [
-        "src/luminumbra_common/core/Debug.h",
-        "src/luminumbra_client/main_client.cpp"
+      "id": "T-DR-asset-processor-round-trip-test",
+      "modifies": [
+        "test/CMakeLists.txt"
       ],
+      "prompt": "Add a GoogleTest binary asset_processor_test under test/tools/. It (1) constructs a tiny in-memory .glb (or uses a single small fixture .glb under test/tools/fixtures/), (2) invokes asset_processor's core function — refactor asset_processor.cpp if needed to extract its meshopt + lmesh-writing pipeline into a callable function rather than only a main() — to produce a .lmesh in a temp directory, (3) loads the result via MeshLoader::Load, (4) asserts vertex count and index count are reasonable (>0) and the LMeshHeader's magic + counts match what was written. Register the new binary in test/CMakeLists.txt with gtest_discover_tests. Verify with ctest --preset debug --output-on-failure --gtest_filter=*AssetProcessor*.",
+      "tier": "standard",
+      "title": "Add round-trip test for asset_processor .lmesh format",
+      "type": "implement"
+    },
+    {
       "agent_contract": {
+        "creates": [],
+        "modifies": [
+          "src/luminumbra_common/core/Debug.h"
+        ],
         "reads": [
           "src/luminumbra_common/core/Debug.h",
           "src/luminumbra_client/main_client.cpp",
           "src/luminumbra_common/core/Log.h",
           ".forge/reports/polyglot-audit/quality-risks.md"
-        ],
-        "modifies": [
-          "src/luminumbra_common/core/Debug.h"
-        ],
-        "creates": []
+        ]
       },
-      "prompt": "Read core/Debug.h. If LUMINUMBRA_ASSERT(x, msg) is the standard 'do nothing in Release' assert(x) wrapper, change it: in Release, on failure, log msg via LUMINUMBRA_CORE_ERROR and call std::abort() (or std::quick_exit). In Debug, retain assert-style trap. The rationale (per quality-risks panel C2): startup paths like main_client.cpp use LUMINUMBRA_ASSERT(window, ...) — a null window in Release with the current macro silently dereferences. Add a doc comment explaining the Release-vs-Debug behavior. Do NOT change any call site of LUMINUMBRA_ASSERT. Verify with cmake --build --preset release && cmake --build --preset debug; both must compile."
+      "creates": [
+        "src/luminumbra_common/core/Debug.h"
+      ],
+      "depends_on": [
+        "T-S1-1-cmake-presets",
+        "T-S2-1-jobsystem-counter-ownership",
+        "T-S2-6-render-pipeline-startup-no-throw"
+      ],
+      "id": "T-DR-luminumbra-assert-release-behavior",
+      "modifies": [
+        "src/luminumbra_client/main_client.cpp"
+      ],
+      "prompt": "Read core/Debug.h. If LUMINUMBRA_ASSERT(x, msg) is the standard 'do nothing in Release' assert(x) wrapper, change it: in Release, on failure, log msg via LUMINUMBRA_CORE_ERROR and call std::abort() (or std::quick_exit). In Debug, retain assert-style trap. The rationale (per quality-risks panel C2): startup paths like main_client.cpp use LUMINUMBRA_ASSERT(window, ...) — a null window in Release with the current macro silently dereferences. Add a doc comment explaining the Release-vs-Debug behavior. Do NOT change any call site of LUMINUMBRA_ASSERT. Verify with cmake --build --preset release && cmake --build --preset debug; both must compile.",
+      "tier": "quick",
+      "title": "Make LUMINUMBRA_ASSERT log+abort in Release, not no-op",
+      "type": "refactor"
     },
     {
-      "id": "T-DR-fix-broken-game-session-fwd-decl",
-      "title": "Remove dead nested namespace declaration in GameSession.h",
-      "type": "refactor",
-      "tier": "quick",
-      "depends_on": [],
-      "files": [
-        "src/luminumbra_common/world/GameSession.h"
-      ],
       "agent_contract": {
-        "reads": [
-          "src/luminumbra_common/world/GameSession.h",
-          "src/luminumbra_common/world/GameSession.cpp"
-        ],
+        "creates": [],
         "modifies": [
           "src/luminumbra_common/world/GameSession.h"
         ],
-        "creates": []
+        "reads": [
+          "src/luminumbra_common/world/GameSession.h",
+          "src/luminumbra_common/world/GameSession.cpp"
+        ]
       },
-      "prompt": "GameSession.h:27 contains a forward declaration of namespace Luminumbra::Systems INSIDE namespace Luminumbra::world, which creates the dead nested namespace Luminumbra::world::Luminumbra::Systems. Either (a) move the forward declaration outside the world:: namespace into the proper scope, or (b) delete the broken declaration entirely if GameSession.h already includes a concrete header that brings the real Luminumbra::Systems names into scope. Pick whichever yields the smaller diff. Verify GameSession.cpp still compiles with cmake --build --preset debug."
+      "depends_on": [],
+      "id": "T-DR-fix-broken-game-session-fwd-decl",
+      "modifies": [
+        "src/luminumbra_common/world/GameSession.h"
+      ],
+      "prompt": "GameSession.h:27 contains a forward declaration of namespace Luminumbra::Systems INSIDE namespace Luminumbra::world, which creates the dead nested namespace Luminumbra::world::Luminumbra::Systems. Either (a) move the forward declaration outside the world:: namespace into the proper scope, or (b) delete the broken declaration entirely if GameSession.h already includes a concrete header that brings the real Luminumbra::Systems names into scope. Pick whichever yields the smaller diff. Verify GameSession.cpp still compiles with cmake --build --preset debug.",
+      "tier": "quick",
+      "title": "Remove dead nested namespace declaration in GameSession.h",
+      "type": "refactor"
     }
   ]
 }
