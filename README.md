@@ -24,6 +24,7 @@ The world is a dynamic system where every element interacts with the others thro
 **Purpose**: Generate, stream, render, and persist a procedurally constructed world with infinite detail.
 
 - **Foundation**: Voxel-based geometry using SDFs (Signed Distance Fields) for smooth, scalable terrain.
+- **SDF Contract**: `docs/shield/sdf-contract.md` defines the density sign convention, chunk sample layout, isolevel, and CPU/GPU generation obligations used by SHIELD.
 - **Procedural Generation**: Worlds are seeded from a single integer. The same seed produces identical worlds across all platforms.
 - **Streaming & LOD**:
   - Chunks are loaded dynamically based on camera position.
