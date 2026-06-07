@@ -11,7 +11,6 @@ void JobSystem::startup() {
     for (u32 i = 0; i < num_threads; ++i) {
         m_workers.emplace_back(&JobSystem::worker_loop, this);
     }
-    // No need to resize std::array or initialize atomics, they default to 0.
     LUMINUMBRA_CORE_INFO("JobSystem started with " + std::to_string(num_threads) + " threads.");
 }
 
@@ -38,19 +37,15 @@ JobHandle JobSystem::dispatch_batch(const std::vector<Job>& jobs) {
         return JobHandle{};
     }
 
-    int counter_index = m_next_counter_index.fetch_add(1) % m_counters.size();
-    std::atomic<int>* counter_ptr = &m_counters[counter_index];
-    counter_ptr->store((int)jobs.size());
-
-    JobHandle handle{counter_ptr}; // The handle now stores this stable pointer.
+    auto counter = std::make_shared<std::atomic<int>>(static_cast<int>(jobs.size()));
+    JobHandle handle{counter};
 
     {
         std::unique_lock<std::mutex> lock(m_queue_mutex);
         for (const auto& job : jobs) {
-            // Capture the POINTER by value.
-            m_job_queue.push([job, counter_ptr]() {
+            m_job_queue.push([job, counter]() {
                 job();
-                counter_ptr->fetch_sub(1); // Use the pointer, which is valid.
+                counter->fetch_sub(1);
             });
         }
     }
