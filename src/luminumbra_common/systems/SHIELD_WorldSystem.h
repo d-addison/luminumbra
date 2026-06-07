@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <memory>
 #include <vector>
+#include <functional>
 #include "entt/entt.hpp"
 #include "FastNoise/FastNoise.h"
 
@@ -60,6 +61,12 @@ public:
     std::vector<IVec3> GetInitialChunkLoadList(const Vec3& center_pos) const; // <<< NEW
     JobHandle dispatch_generation_jobs(const std::vector<IVec3>& chunks_to_generate);
     float get_density_at_from_precalculated(const Vec3& world_pos, float terrain_height) const;
+    
+    // GPU SDF generation integration
+    void SetGPUSDFCallback(std::function<bool(const IVec3&, const TerrainGenParams&, int, std::vector<float>&)> callback);
+    
+private:
+    std::function<bool(const IVec3&, const TerrainGenParams&, int, std::vector<float>&)> m_gpu_sdf_callback;
 
 private:
     std::unordered_map<ChunkID, std::shared_ptr<::Luminumbra::Chunk>> m_chunks;

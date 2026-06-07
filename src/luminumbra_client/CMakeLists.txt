@@ -13,6 +13,8 @@ target_sources(luminumbra_client_app PRIVATE ${CLIENT_SOURCES})
 target_include_directories(luminumbra_client_app PUBLIC
     # Allow including local headers relative to this directory (e.g., "audio/IAudioManager.h").
     ${CMAKE_CURRENT_SOURCE_DIR}
+    # ImGui backends for modern UI
+    ${CMAKE_SOURCE_DIR}/vendor/imgui/backends
 )
 
 #-----------------------------------------------------------------------------
@@ -32,7 +34,8 @@ target_link_libraries(luminumbra_client_app PRIVATE
     glm
     
     # UI & UI Dependencies
-    rmlui
+    rmlui        # Legacy UI system (for compatibility)
+    imgui        # New Quantum UI system - now ENABLED!
     soil2
     stb_image
     freetype

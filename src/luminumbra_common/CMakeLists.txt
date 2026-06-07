@@ -23,4 +23,5 @@ target_link_libraries(luminumbra_common PUBLIC
     spdlog
     lz4
     glm
+    FastNoise
 )

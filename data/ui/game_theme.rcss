@@ -1,8 +1,7 @@
 body {
     width: 100%;
     height: 100%;
-    margin: 0;
-    color: #edf2f4;
+    color: #ffffff;
     font-family: Lora;
     background-color: #1a1a1a;
 }
@@ -10,10 +9,8 @@ body {
 h1 {
     font-size: 96px;
     text-align: center;
-    margin-top: 20%;
-    font-weight: bold;
     color: #ffffff;
-    font-effect: shadow(2px 2px #00000088);
+    font-weight: bold;
 }
 
 p.subtitle {
@@ -21,40 +18,53 @@ p.subtitle {
     font-style: italic;
     color: #cccccc;
     font-size: 22px;
-    margin-top: -20px;
-    font-effect: shadow(1px 1px #00000088);
 }
 
 div#nav {
-    display: block;
-    width: 300px;
-    margin: 120px auto;
     text-align: center;
+    width: 300px;
+    margin-left: auto;
+    margin-right: auto;
 }
 
 button {
     display: block;
-    width: 100%;
+    width: 280px;
     height: 50px;
     margin-bottom: 20px;
-    
-    /* --- MODIFIED COLORS --- */
-    background-color: #4f5b66;  /* A much lighter, slate grey */
+    margin-left: auto;
+    margin-right: auto;
+    background-color: #4f5b66;
     border-width: 2px;
-    border-color: #8d99ae;     /* A visible light grey border */
-    /* --- END MODIFICATIONS --- */
-
-    border-radius: 8px;
-    color: #edf2f4;
-    font-size: 24px;
+    border-color: #8d99ae;
+    color: #ffffff;
+    font-size: 20px;
     font-weight: bold;
-    cursor: pointer;
-    box-shadow: 0px 4px 15px #00000044;
+    font-family: Lora;
+    text-align: center;
 }
 
 button:hover {
-    background-color: #d80032; /* This red is fine and will stand out */
+    background-color: #d80032;
     border-color: #ff4d6d;
-    box-shadow: 0px 6px 20px #00000066;
+    color: #ffffff;
 }
 
+button:active {
+    background-color: #b8002a;
+    border-color: #d80032;
+    color: #ffffff;
+}
+
+.container {
+    text-align: center;
+    width: 100%;
+}
+
+.version-info {
+    position: absolute;
+    bottom: 16px;
+    right: 16px;
+    color: #999999;
+    font-size: 12px;
+}

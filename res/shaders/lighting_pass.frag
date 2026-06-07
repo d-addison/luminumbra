@@ -3,26 +3,43 @@ out vec4 FragColor;
 
 in vec2 TexCoords;
 
-// G-Buffer samplers (containing view-space data)
-uniform sampler2D gPosition;
-uniform sampler2D gNormal;
-uniform sampler2D gAlbedo;
-uniform sampler2D gMaterial; 
+// Compressed G-Buffer samplers (match g_buffer.frag output names)
+uniform sampler2D gPositionDepth;     // RG32F: XZ in view space
+uniform sampler2D gNormalMaterial;    // RGB10A2: Octahedral normal + material ID  
+uniform sampler2D gAlbedoRoughness;   // RGBA8: RGB albedo + roughness
+uniform sampler2D gMetallicAO;        // RG16F: Metallic + AO
+uniform sampler2D gDepth;          // Depth buffer for position reconstruction
 uniform sampler2D u_ssao;
 
-// Matrix to transform from view space back to world space
-uniform mat4 u_inverseView;
+// Material lookup
+uniform sampler2D u_materialLUT;
+
+// G-Buffer decoding functions
+vec2 octWrap(vec2 v) {
+    return (1.0 - abs(v.yx)) * (step(0.0, v.xy) * 2.0 - 1.0);
+}
+
+vec3 decode_octahedral(vec2 encoded) {
+    vec2 e = encoded * 2.0 - 1.0;
+    vec3 v = vec3(e.xy, 1.0 - abs(e.x) - abs(e.y));
+    if (v.z < 0) v.xy = octWrap(v.xy);
+    return normalize(v);
+}
 
 // Shadow and other uniforms
 uniform sampler2DArray u_shadowCascades;
 uniform mat4 u_lightSpaceMatrices[4];
-// u_cascadeSplits now contains the linear view-space distances for each cascade end point
 uniform vec4 u_cascadeSplits; 
 
 // Texture and world uniforms
 uniform sampler2DArray u_terrainTextures;
+uniform sampler2D u_causticsTexture;
+uniform float u_time;
+uniform float u_sea_level;
+
 uniform vec3 u_terrainOrigin;
 uniform vec3 u_viewPos;
+uniform mat4 u_inverseView;
 uniform vec3 u_skyAmbientColor;
 struct SunLight {
     vec3 direction;
@@ -42,176 +59,199 @@ uniform int u_pointLightCount;
 
 const float PI = 3.14159265359;
 
-// ----------------------------------------------------------------------------
-// Tri-Planar mapping using terrain-relative coordinates.
-// This projects textures from three axes (X, Y, Z) and blends them based on
-// the surface normal to avoid texture stretching on steep slopes.
-// Using 'relPos' (relative position) prevents texture swimming.
-// ----------------------------------------------------------------------------
-vec3 TriPlanar(vec3 worldPos, vec3 normal, sampler2DArray texArray, float layer, float scale) {
-    vec3 relPos = worldPos - u_terrainOrigin;
-
-    // UV coordinates are the same
-    vec2 uv_y = relPos.xz * scale;
-    vec2 uv_x = relPos.zy * scale;
-    vec2 uv_z = relPos.xy * scale;
-
-    // Sample the texture array using 3D coordinates (u, v, layer)
-    vec3 tex_y = texture(texArray, vec3(uv_y, layer)).rgb;
-    vec3 tex_x = texture(texArray, vec3(uv_x, layer)).rgb;
-    vec3 tex_z = texture(texArray, vec3(uv_z, layer)).rgb;
-
-    // Blending weights are the same
-    vec3 weights = pow(abs(normal), vec3(3.0));
-    weights = normalize(weights);
-
-    return tex_y * weights.y + tex_x * weights.x + tex_z * weights.z;
+// Optimized PBR functions with precalculated values
+float DistributionGGX(float NdotH, float a2) {
+    float NdotH2 = NdotH * NdotH;
+    float denom = NdotH2 * (a2 - 1.0) + 1.0;
+    denom = PI * denom * denom;
+    return a2 / max(denom, 0.0001);
 }
 
-vec3 CalculateLightContribution(vec3 L, vec3 V, vec3 N, vec3 F0, vec3 albedo, float metallic, float roughness, vec3 radiance)
-{
-    vec3 H = normalize(V + L);
+float GeometrySchlickGGX(float NdotV, float k) {
+    return NdotV / (NdotV * (1.0 - k) + k);
+}
 
-    // Cook-Torrance BRDF
-    float NDF = DistributionGGX(N, H, roughness);
-    float G   = GeometrySmith(N, V, L, roughness);
-    vec3  F   = fresnelSchlick(max(dot(H, V), 0.0), F0);
+float GeometrySmith(float NdotV, float NdotL, float k) {
+    return GeometrySchlickGGX(NdotV, k) * GeometrySchlickGGX(NdotL, k);
+}
+vec3 fresnelSchlick(float cosTheta, vec3 F0) {
+    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+float CalculateShadow(vec3 fragPos, vec3 normal, vec3 lightDir, float viewDepth) {
+    // 1. Determine which cascade to use in a branchless way
+    int cascadeIndex = 0;
+    cascadeIndex += (viewDepth > u_cascadeSplits.x) ? 1 : 0;
+    cascadeIndex += (viewDepth > u_cascadeSplits.y) ? 1 : 0;
+    cascadeIndex += (viewDepth > u_cascadeSplits.z) ? 1 : 0;
+
+    // 2. Project fragment into the chosen light space
+    vec4 fragPosLightSpace = u_lightSpaceMatrices[cascadeIndex] * vec4(fragPos, 1.0);
+    vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
+    projCoords = projCoords * 0.5 + 0.5;
+
+    if(projCoords.z > 1.0) {
+        return 0.0; // Outside the far plane of the light's frustum
+    }
+
+    // 3. PCF (Percentage-Closer Filtering)
+    float currentDepth = projCoords.z;
+    float shadow = 0.0;
+    float bias = max(0.005 * (1.0 - dot(normal, lightDir)), 0.001);
+    vec2 texelSize = 1.0 / vec2(textureSize(u_shadowCascades, 0).xy);
+    
+    for(int x = -1; x <= 1; ++x) {
+        for(int y = -1; y <= 1; ++y) {
+            float pcfDepth = texture(u_shadowCascades, vec3(projCoords.xy + vec2(x, y) * texelSize, cascadeIndex)).r; 
+            shadow += currentDepth - bias > pcfDepth ? 1.0 : 0.0;        
+        }
+    }
+    return 1.0 - (shadow / 9.0);
+}
+vec3 TriPlanar(vec3 worldPos, vec3 normal, sampler2DArray texArray, float layer, float scale) {
+    vec3 relPos = worldPos - u_terrainOrigin; vec2 uv_y=relPos.xz*scale; vec2 uv_x=relPos.zy*scale; vec2 uv_z=relPos.xy*scale;
+    vec3 tex_y=texture(texArray,vec3(uv_y,layer)).rgb; vec3 tex_x=texture(texArray,vec3(uv_x,layer)).rgb; vec3 tex_z=texture(texArray,vec3(uv_z,layer)).rgb;
+    vec3 weights=pow(abs(normal),vec3(3.0)); weights=normalize(weights);
+    return tex_y*weights.y+tex_x*weights.x+tex_z*weights.z;
+}
+
+vec3 CalculateLightContribution(vec3 L, vec3 V, vec3 N, vec3 F0, vec3 albedo, float metallic, float a2, float k, vec3 radiance) {
+    vec3 H = normalize(V + L);
+    float NdotV = max(dot(N, V), 0.0);
+    float NdotL = max(dot(N, L), 0.0);
+    float NdotH = max(dot(N, H), 0.0);
+    float HdotV = max(dot(H, V), 0.0);
+
+    // Optimized PBR calculations with precalculated values
+    float NDF = DistributionGGX(NdotH, a2);
+    float G   = GeometrySmith(NdotV, NdotL, k);
+    vec3  F   = fresnelSchlick(HdotV, F0);
     
     vec3 kS = F;
     vec3 kD = vec3(1.0) - kS;
     kD *= 1.0 - metallic;
     
-    float NdotL = max(dot(N, L), 0.0);
-    vec3 specular = (NDF * G * F) / max(4.0 * max(dot(N, V), 0.0) * NdotL, 0.001);
-    
+    // Optimized specular calculation
+    vec3 specular = (NDF * G * F) / max(4.0 * NdotV * NdotL, 0.0001);
+      
     return (kD * albedo / PI + specular) * radiance * NdotL;
 }
 
-// --- PBR HELPER FUNCTIONS (UNCHANGED) ---
-float DistributionGGX(vec3 N, vec3 H, float roughness) {
-    float a = roughness*roughness;
-    float a2 = a*a;
-    float NdotH = max(dot(N, H), 0.0);
-    float NdotH2 = NdotH*NdotH;
-    float num = a2;
-    float denom = (NdotH2 * (a2 - 1.0) + 1.0);
-    denom = PI * denom * denom;
-    return num / max(denom, 0.0001);
-}
-
-float GeometrySchlickGGX(float NdotV, float roughness) {
-    float r = (roughness + 1.0);
-    float k = (r*r) / 8.0;
-    return NdotV / (NdotV * (1.0 - k) + k);
-}
-
-float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
-    float NdotV = max(dot(N, V), 0.0);
-    float NdotL = max(dot(N, L), 0.0);
-    float ggx2 = GeometrySchlickGGX(NdotV, roughness);
-    float ggx1 = GeometrySchlickGGX(NdotL, roughness);
-    return ggx1 * ggx2;
-}
-
-vec3 fresnelSchlick(float cosTheta, vec3 F0) {
-    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
-}
-
-// --- SHADOW CALCULATION (UNCHANGED) ---
-float CalculateShadow(vec3 fragPos, vec3 normal, vec3 lightDir, float viewDepth) {
-    vec4 fragPosLightSpace[4];
-    for(int i = 0; i < 4; ++i) {
-        fragPosLightSpace[i] = u_lightSpaceMatrices[i] * vec4(fragPos, 1.0);
-    }
-
-    int cascadeIndex = 0;
-    if(viewDepth > u_cascadeSplits.x) cascadeIndex = 1;
-    if(viewDepth > u_cascadeSplits.y) cascadeIndex = 2;
-    if(viewDepth > u_cascadeSplits.z) cascadeIndex = 3;
-
-    vec4 projCoords = fragPosLightSpace[cascadeIndex];
-    projCoords.xyz /= projCoords.w;
-    projCoords.xyz = projCoords.xyz * 0.5 + 0.5;
-
-    float currentDepth = projCoords.z;
-    if(currentDepth > 1.0) return 0.0;
-
-    float shadow = 0.0;
-    float bias = max(0.005 * (1.0 - dot(normal, lightDir)), 0.001);
-    vec2 texelSize = 1.0 / vec2(textureSize(u_shadowCascades, 0).xy);
-    for(int x = -1; x <= 1; ++x) {
-        for(int y = -1; y <= 1; ++y) {
-            float pcfDepth = texture(u_shadowCascades, vec3(projCoords.xy + vec2(x, y) * texelSize, cascadeIndex)).r;
-            shadow += currentDepth - bias > pcfDepth ? 1.0 : 0.0;
-        }
-    }
-    return 1.0 - (shadow / 9.0);
-}
-
-
 void main() {
-    // --- Step 1 & 2: Retrieve from G-buffer and reconstruct world space (unchanged) ---
-    vec3 viewPos = texture(gPosition, TexCoords).rgb;
-    vec3 viewNormal = normalize(texture(gNormal, TexCoords).rgb);
+    // --- Step 1: Decode compressed G-Buffer ---
+    
+    // Get depth from depth buffer for position reconstruction
+    float depth = texture(gDepth, TexCoords).r;
+    
+    // Decode position: reconstruct Y from depth and XZ components
+    vec2 positionXZ = texture(gPositionDepth, TexCoords).xy;
+    // Reconstruct view-space Y from depth
+    float viewDepth = (2.0 * 0.1 * 250.0) / (250.0 + 0.1 - (2.0 * depth - 1.0) * (250.0 - 0.1)); // near=0.1, far=250.0
+    vec3 viewPos = vec3(positionXZ, -viewDepth); // Negative because view space Z
+    
+    // Decode octahedral normal and material ID
+    vec4 normalData = texture(gNormalMaterial, TexCoords);
+    vec3 viewNormal = decode_octahedral(normalData.xy);
+    uint MaterialID = uint(round(normalData.a * 255.0));
+    
+    // Get albedo and roughness
+    vec4 albedoData = texture(gAlbedoRoughness, TexCoords);
+    vec3 Albedo = albedoData.rgb;
+    float Roughness = clamp(albedoData.a, 0.05, 1.0);
+    
+    // Get metallic and AO
+    vec2 matData = texture(gMetallicAO, TexCoords).xy;
+    float Metallic = matData.r;
+    float ao = texture(u_ssao, TexCoords).r;
+    
+    // Transform to world space
     vec3 FragPos = vec3(u_inverseView * vec4(viewPos, 1.0));
     vec3 Normal = normalize(mat3(u_inverseView) * viewNormal);
 
-    // --- Step 3: Material and Lighting Calculation ---
-    vec4 matData = texture(gMaterial, TexCoords);
-    float Metallic = matData.r;
-    float Roughness = clamp(matData.g, 0.05, 1.0);
-    float ao = texture(u_ssao, TexCoords).r;
-
-    uint MaterialID = uint(round(matData.a * 255.0));
-    float textureScale = 0.1;
-
-    vec3 Albedo = texture(gAlbedo, TexCoords).rgb; // Default to the G-Buffer albedo
-
-    // OPTIMIZATION: Simplified material selection using the texture array
-    if (MaterialID >= 1u && MaterialID <= 5u) {
-        // MaterialIDs 1-5 map to array layers 0-4
-        float layer_index = float(MaterialID - 1u); 
-        float matTextureScale = textureScale;
-
-        // Optional: Apply material-specific scaling
-        if (MaterialID == 1u) matTextureScale *= 0.5;  // Stone
-        if (MaterialID == 5u) matTextureScale *= 0.75; // Deepslate
-
-        Albedo = TriPlanar(FragPos, Normal, u_terrainTextures, layer_index, matTextureScale);
+    // Use tri-planar textures for terrain materials if MaterialID > 0
+    if (MaterialID > 0u) {
+        Albedo = TriPlanar(FragPos, Normal, u_terrainTextures, float(MaterialID-1u), 0.1);
     }
 
-    // The rest of the PBR lighting calculation remains exactly the same
     vec3 V = normalize(u_viewPos - FragPos);
     vec3 F0 = mix(vec3(0.04), Albedo, Metallic);
+    
+    // Precalculate roughness-dependent values once
+    float a = Roughness * Roughness;
+    float a2 = a * a;
+    float r = Roughness + 1.0;
+    float k = (r * r) / 8.0;
 
-    // ===================== LIGHTING CALCULATION REWORK =====================
-    vec3 Lo = vec3(0.0); // Final outgoing radiance, start at black
-
-    // 1. Directional Sun Light
+    // --- LIGHTING CALCULATION ---
+    vec3 Lo = vec3(0.0);
     vec3 L_sun = normalize(u_sun.direction);
     float shadow = CalculateShadow(FragPos, Normal, L_sun, abs(viewPos.z));
-    Lo += CalculateLightContribution(L_sun, V, Normal, F0, Albedo, Metallic, Roughness, u_sun.color) * shadow;
+    Lo += CalculateLightContribution(L_sun, V, Normal, F0, Albedo, Metallic, a2, k, u_sun.color) * shadow;
 
-    // 2. Point Lights
+    // Point Lights with early rejection
     for (int i = 0; i < u_pointLightCount; ++i) {
         vec3 lightVec = u_pointLights[i].position - FragPos;
         float dist = length(lightVec);
-
-        // Use radius to attenuate light
-        float attenuation = 1.0 - smoothstep(0.0, u_pointLights[i].radius, dist);
-        if (attenuation > 0.0) {
-            vec3 L_point = normalize(lightVec);
+        
+        // Early rejection for lights out of range
+        if (dist < u_pointLights[i].radius) {
+            float attenuation = 1.0 - smoothstep(0.0, u_pointLights[i].radius, dist);
+            vec3 L_point = lightVec / dist; // Avoid normalize when we already have distance
             vec3 radiance = u_pointLights[i].color * u_pointLights[i].intensity * attenuation;
-            Lo += CalculateLightContribution(L_point, V, Normal, F0, Albedo, Metallic, Roughness, radiance);
+            Lo += CalculateLightContribution(L_point, V, Normal, F0, Albedo, Metallic, a2, k, radiance);
         }
     }
 
+    // --- NEW: CAUSTICS CALCULATION ---
+    vec3 caustics = vec3(0.0);
+    // Apply caustics only if fragment is below sea level and on an upward-facing surface
+    if (FragPos.y < u_sea_level && Normal.y > 0.5) {
+        vec2 uv1 = FragPos.xz * 0.2 + vec2(u_time * 0.01, u_time * 0.015);
+        vec2 uv2 = FragPos.xz * 0.15 - vec2(u_time * 0.02, u_time * 0.01);
+        
+        float caustic1 = texture(u_causticsTexture, uv1).r;
+        float caustic2 = texture(u_causticsTexture, uv2).r;
+        
+        // Sum and modulate by sun intensity and shadow
+        caustics = (caustic1 + caustic2) * u_sun.color * shadow * 0.5;
+    }
+
+    // --- MAGICAL CRYSTAL EFFECTS ---
+    vec3 crystalGlow = vec3(0.0);
+    // Fix: MaterialID is already decoded from normalData.a above, not matData.a
+    
+    if (MaterialID == 6u) { // Luminous Crystal
+        // Inner magical glow
+        float glowPulse = sin(u_time * 2.0) * 0.3 + 0.7;
+        vec3 magicColor = vec3(0.6, 0.8, 1.0) * glowPulse * 0.8;
+        
+        // Fresnel-based edge lighting
+        float fresnel = pow(1.0 - max(0.0, dot(V, Normal)), 3.0);
+        vec3 edgeGlow = vec3(0.4, 0.7, 1.0) * fresnel * 1.5;
+        
+        // Prismatic dispersion effect
+        float dispersion = sin(u_time * 1.5 + FragPos.x * 0.1 + FragPos.z * 0.15);
+        vec3 prismColors = vec3(
+            0.8 + 0.4 * sin(dispersion),
+            0.6 + 0.4 * sin(dispersion + 2.0),
+            1.0 + 0.2 * sin(dispersion + 4.0)
+        );
+        
+        // Energy field around crystals
+        float energyField = abs(sin(u_time * 3.0 + length(FragPos) * 0.05)) * 0.3;
+        
+        crystalGlow = magicColor + edgeGlow + prismColors * energyField * 0.2;
+        crystalGlow *= 1.5; // HDR boost for magical effect
+    }
+    
     // --- Final Color Composition ---
     vec3 ambient = u_skyAmbientColor * Albedo * ao;
-    vec3 color = ambient + Lo;
+    vec3 color = ambient + Lo + caustics + crystalGlow; // Add magical crystal glow
 
-    // Basic Reinhard tone mapping and Gamma correction
-    color = color / (color + vec3(1.0));
+    // Enhanced HDR tone mapping for magical effects
+    // Use filmic tone mapping to preserve magical highlights
+    color = color * (2.51 * color + 0.03) / (color * (2.43 * color + 0.59) + 0.14);
+    
+    // Gamma correction
     color = pow(color, vec3(1.0/2.2));
 
     FragColor = vec4(color, 1.0);

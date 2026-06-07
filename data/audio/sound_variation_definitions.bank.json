@@ -1,0 +1,583 @@
+{
+  "bank_info": {
+    "name": "Sound Variation System Definitions",
+    "version": "1.0",
+    "description": "Comprehensive sound variation definitions for procedural and contextual audio generation",
+    "format": "variation_system",
+    "supports_learning": true,
+    "supports_procedural": true
+  },
+
+  "sound_groups": {
+    "player_footsteps": {
+      "group_id": "player_footsteps",
+      "description": "Contextual footstep sounds with material and movement variations",
+      "default_selection_strategy": "contextual",
+      "max_simultaneous_instances": 2,
+      "min_time_between_instances": 0.05,
+      "enable_group_learning": true,
+      "default_parameters": {
+        "pitch_variation": 0.15,
+        "volume_variation": 0.08,
+        "timing_variation": 0.03,
+        "enable_material_variation": true,
+        "avoid_recent_count": 4,
+        "repetition_penalty": 0.6
+      },
+      "variations": [
+        {
+          "id": "stone_walk",
+          "file_paths": [
+            "assets/audio/footsteps/stone/stone_step_01.ogg",
+            "assets/audio/footsteps/stone/stone_step_02.ogg",
+            "assets/audio/footsteps/stone/stone_step_03.ogg",
+            "assets/audio/footsteps/stone/stone_step_04.ogg",
+            "assets/audio/footsteps/stone/stone_step_05.ogg"
+          ],
+          "type": "random",
+          "weight": 1.0,
+          "required_materials": ["stone", "rock", "cobblestone"],
+          "parameters": {
+            "pitch_variation": 0.1,
+            "volume_variation": 0.05,
+            "reverb_variation": 0.2,
+            "spectral_tilt": -0.1
+          }
+        },
+        {
+          "id": "stone_run",
+          "file_paths": [
+            "assets/audio/footsteps/stone/stone_run_01.ogg",
+            "assets/audio/footsteps/stone/stone_run_02.ogg",
+            "assets/audio/footsteps/stone/stone_run_03.ogg"
+          ],
+          "type": "weighted",
+          "weight": 1.0,
+          "required_materials": ["stone", "rock", "cobblestone"],
+          "parameters": {
+            "pitch_variation": 0.12,
+            "volume_variation": 0.08,
+            "timing_variation": 0.04
+          }
+        },
+        {
+          "id": "grass_walk",
+          "file_paths": [
+            "assets/audio/footsteps/grass/grass_step_01.ogg",
+            "assets/audio/footsteps/grass/grass_step_02.ogg",
+            "assets/audio/footsteps/grass/grass_step_03.ogg",
+            "assets/audio/footsteps/grass/grass_rustle_01.ogg"
+          ],
+          "type": "layered",
+          "weight": 1.0,
+          "required_materials": ["grass", "vegetation"],
+          "layer_sounds": ["assets/audio/footsteps/grass/grass_rustle_subtle.ogg"],
+          "layer_volumes": [0.3],
+          "layer_delays": [0.02],
+          "parameters": {
+            "pitch_variation": 0.2,
+            "volume_variation": 0.1,
+            "enable_weather_variation": true
+          }
+        },
+        {
+          "id": "mud_walk",
+          "file_paths": [
+            "assets/audio/footsteps/mud/mud_squelch_01.ogg",
+            "assets/audio/footsteps/mud/mud_squelch_02.ogg",
+            "assets/audio/footsteps/mud/mud_step_01.ogg"
+          ],
+          "type": "contextual",
+          "weight": 1.0,
+          "required_materials": ["mud", "soil"],
+          "weather_conditions": ["rain", "storm", "wet"],
+          "parameters": {
+            "pitch_variation": 0.18,
+            "volume_variation": 0.12,
+            "harmonic_distortion": 0.05
+          }
+        },
+        {
+          "id": "water_wade",
+          "file_paths": [
+            "assets/audio/footsteps/water/water_splash_01.ogg",
+            "assets/audio/footsteps/water/water_splash_02.ogg",
+            "assets/audio/footsteps/water/water_wade_01.ogg"
+          ],
+          "type": "layered",
+          "weight": 1.0,
+          "required_materials": ["water"],
+          "layer_sounds": [
+            "assets/audio/footsteps/water/water_ripples.ogg",
+            "assets/audio/footsteps/water/underwater_bubbles.ogg"
+          ],
+          "layer_volumes": [0.4, 0.2],
+          "layer_delays": [0.01, 0.05],
+          "parameters": {
+            "pitch_variation": 0.15,
+            "volume_variation": 0.2,
+            "reverb_variation": 0.3
+          }
+        },
+        {
+          "id": "snow_crunch",
+          "file_paths": [
+            "assets/audio/footsteps/snow/snow_crunch_01.ogg",
+            "assets/audio/footsteps/snow/snow_crunch_02.ogg",
+            "assets/audio/footsteps/snow/snow_deep_01.ogg"
+          ],
+          "type": "contextual",
+          "weight": 1.0,
+          "required_materials": ["snow", "ice"],
+          "weather_conditions": ["snow", "winter"],
+          "parameters": {
+            "pitch_variation": 0.25,
+            "volume_variation": 0.15,
+            "spectral_tilt": 0.2
+          }
+        }
+      ]
+    },
+
+    "weapon_impacts": {
+      "group_id": "weapon_impacts",
+      "description": "Dynamic weapon impact sounds based on weapon and target material",
+      "default_selection_strategy": "contextual",
+      "max_simultaneous_instances": 8,
+      "min_time_between_instances": 0.02,
+      "variations": [
+        {
+          "id": "sword_metal_clash",
+          "file_paths": [
+            "assets/audio/weapons/sword/metal_clash_01.ogg",
+            "assets/audio/weapons/sword/metal_clash_02.ogg",
+            "assets/audio/weapons/sword/metal_ring_01.ogg"
+          ],
+          "type": "layered",
+          "weight": 1.0,
+          "required_materials": ["metal", "armor"],
+          "layer_sounds": ["assets/audio/weapons/sword/metal_spark.ogg"],
+          "layer_volumes": [0.6],
+          "layer_delays": [0.01],
+          "parameters": {
+            "pitch_variation": 0.1,
+            "volume_variation": 0.08,
+            "reverb_variation": 0.15,
+            "harmonic_distortion": 0.02
+          }
+        },
+        {
+          "id": "sword_flesh_cut",
+          "file_paths": [
+            "assets/audio/weapons/sword/flesh_cut_01.ogg",
+            "assets/audio/weapons/sword/flesh_slice_01.ogg"
+          ],
+          "type": "weighted",
+          "weight": 1.0,
+          "required_materials": ["flesh", "organic"],
+          "parameters": {
+            "pitch_variation": 0.12,
+            "volume_variation": 0.1
+          }
+        },
+        {
+          "id": "bow_arrow_hit",
+          "file_paths": [
+            "assets/audio/weapons/bow/arrow_hit_wood.ogg",
+            "assets/audio/weapons/bow/arrow_thunk.ogg"
+          ],
+          "type": "contextual",
+          "weight": 1.0,
+          "required_materials": ["wood", "organic"],
+          "parameters": {
+            "pitch_variation": 0.15,
+            "volume_variation": 0.12
+          }
+        },
+        {
+          "id": "magic_impact_fire",
+          "file_paths": [
+            "assets/audio/weapons/magic/fire_impact_01.ogg",
+            "assets/audio/weapons/magic/fire_burst.ogg"
+          ],
+          "type": "procedural",
+          "weight": 1.0,
+          "procedural_params": {
+            "fire_intensity": 0.8,
+            "explosion_size": 0.6,
+            "harmonic_complexity": 0.7
+          },
+          "parameters": {
+            "pitch_variation": 0.2,
+            "volume_variation": 0.15,
+            "spectral_tilt": 0.1
+          }
+        }
+      ]
+    },
+
+    "creature_vocalizations": {
+      "group_id": "creature_vocalizations",
+      "description": "Contextual creature sounds based on emotional state and size",
+      "default_selection_strategy": "evolutionary",
+      "enable_group_learning": true,
+      "variations": [
+        {
+          "id": "dragon_roar_aggressive",
+          "file_paths": [
+            "assets/audio/creatures/dragon/roar_aggressive_01.ogg",
+            "assets/audio/creatures/dragon/roar_challenge.ogg"
+          ],
+          "type": "layered",
+          "weight": 2.0,
+          "layer_sounds": [
+            "assets/audio/creatures/dragon/fire_breath_hint.ogg",
+            "assets/audio/creatures/dragon/wing_flutter.ogg"
+          ],
+          "layer_volumes": [0.3, 0.4],
+          "layer_delays": [0.2, 0.1],
+          "distance_range": [0.0, 200.0],
+          "parameters": {
+            "pitch_variation": 0.08,
+            "volume_variation": 0.15,
+            "formant_shift": 0.1,
+            "reverb_variation": 0.4
+          }
+        },
+        {
+          "id": "wolf_howl_pack_call",
+          "file_paths": [
+            "assets/audio/creatures/wolf/howl_long_01.ogg",
+            "assets/audio/creatures/wolf/howl_mournful.ogg"
+          ],
+          "type": "responsive",
+          "weight": 1.0,
+          "time_range": [18.0, 6.0],
+          "required_environments": ["forest", "mountain"],
+          "parameters": {
+            "pitch_variation": 0.12,
+            "volume_variation": 0.1,
+            "enable_distance_variation": true,
+            "reverb_variation": 0.6
+          }
+        },
+        {
+          "id": "bird_song_dawn_chorus",
+          "file_paths": [
+            "assets/audio/creatures/birds/dawn_song_01.ogg",
+            "assets/audio/creatures/birds/chirp_sequence.ogg",
+            "assets/audio/creatures/birds/morning_call.ogg"
+          ],
+          "type": "layered",
+          "weight": 1.0,
+          "time_range": [5.0, 8.0],
+          "required_environments": ["forest", "plains"],
+          "weather_conditions": ["clear", "partly_cloudy"],
+          "layer_sounds": [
+            "assets/audio/creatures/birds/distant_chorus.ogg"
+          ],
+          "layer_volumes": [0.2],
+          "layer_delays": [0.5],
+          "parameters": {
+            "pitch_variation": 0.25,
+            "volume_variation": 0.2,
+            "enable_time_variation": true
+          }
+        }
+      ]
+    },
+
+    "environmental_reactions": {
+      "group_id": "environmental_reactions",
+      "description": "Dynamic environmental sounds that react to player actions",
+      "default_selection_strategy": "responsive",
+      "variations": [
+        {
+          "id": "tree_branch_break",
+          "file_paths": [
+            "assets/audio/environment/tree/branch_snap_01.ogg",
+            "assets/audio/environment/tree/branch_crack.ogg",
+            "assets/audio/environment/tree/wood_break.ogg"
+          ],
+          "type": "sequential",
+          "weight": 1.0,
+          "required_materials": ["wood", "vegetation"],
+          "layer_sounds": ["assets/audio/environment/tree/leaves_rustle.ogg"],
+          "layer_volumes": [0.4],
+          "layer_delays": [0.1],
+          "parameters": {
+            "pitch_variation": 0.15,
+            "volume_variation": 0.12,
+            "enable_material_variation": true
+          }
+        },
+        {
+          "id": "rock_tumble",
+          "file_paths": [
+            "assets/audio/environment/rock/rock_fall_01.ogg",
+            "assets/audio/environment/rock/stone_slide.ogg",
+            "assets/audio/environment/rock/pebbles_scatter.ogg"
+          ],
+          "type": "layered",
+          "weight": 1.0,
+          "required_materials": ["stone", "rock"],
+          "layer_sounds": [
+            "assets/audio/environment/rock/distant_echo.ogg",
+            "assets/audio/environment/rock/dust_settle.ogg"
+          ],
+          "layer_volumes": [0.3, 0.2],
+          "layer_delays": [0.2, 0.8],
+          "parameters": {
+            "pitch_variation": 0.18,
+            "volume_variation": 0.15,
+            "reverb_variation": 0.4
+          }
+        },
+        {
+          "id": "water_ripple_interaction",
+          "file_paths": [
+            "assets/audio/environment/water/ripple_small.ogg",
+            "assets/audio/environment/water/ripple_medium.ogg",
+            "assets/audio/environment/water/splash_gentle.ogg"
+          ],
+          "type": "contextual",
+          "weight": 1.0,
+          "required_materials": ["water"],
+          "procedural_params": {
+            "ripple_size": 0.5,
+            "water_depth": 1.0,
+            "surface_tension": 1.0
+          },
+          "parameters": {
+            "pitch_variation": 0.2,
+            "volume_variation": 0.18,
+            "enable_procedural": true
+          }
+        }
+      ]
+    },
+
+    "ui_feedback_sounds": {
+      "group_id": "ui_feedback_sounds",
+      "description": "Adaptive UI sounds that respond to player actions and context",
+      "default_selection_strategy": "contextual",
+      "max_simultaneous_instances": 4,
+      "variations": [
+        {
+          "id": "button_click_confirm",
+          "file_paths": [
+            "assets/audio/ui/click_soft.ogg",
+            "assets/audio/ui/click_confirm.ogg"
+          ],
+          "type": "weighted",
+          "weight": 1.5,
+          "parameters": {
+            "pitch_variation": 0.05,
+            "volume_variation": 0.03
+          }
+        },
+        {
+          "id": "button_click_cancel",
+          "file_paths": [
+            "assets/audio/ui/click_negative.ogg",
+            "assets/audio/ui/cancel_sound.ogg"
+          ],
+          "type": "weighted",
+          "weight": 1.0,
+          "parameters": {
+            "pitch_variation": 0.08,
+            "volume_variation": 0.05,
+            "spectral_tilt": -0.1
+          }
+        },
+        {
+          "id": "inventory_item_pickup",
+          "file_paths": [
+            "assets/audio/ui/item_pickup_01.ogg",
+            "assets/audio/ui/item_acquire.ogg",
+            "assets/audio/ui/positive_chime.ogg"
+          ],
+          "type": "contextual",
+          "weight": 1.0,
+          "parameters": {
+            "pitch_variation": 0.1,
+            "volume_variation": 0.08,
+            "enable_adaptive_selection": true
+          }
+        },
+        {
+          "id": "notification_alert",
+          "file_paths": [
+            "assets/audio/ui/notification_soft.ogg",
+            "assets/audio/ui/alert_gentle.ogg"
+          ],
+          "type": "adaptive",
+          "weight": 1.0,
+          "parameters": {
+            "volume_variation": 0.12,
+            "enable_learning": true,
+            "learning_rate": 0.02
+          }
+        }
+      ]
+    },
+
+    "ambient_detail_sounds": {
+      "group_id": "ambient_detail_sounds",
+      "description": "Subtle environmental details that enhance immersion",
+      "default_selection_strategy": "procedural",
+      "max_simultaneous_instances": 12,
+      "variations": [
+        {
+          "id": "wind_through_leaves",
+          "file_paths": [
+            "assets/audio/ambient/wind/leaves_gentle.ogg",
+            "assets/audio/ambient/wind/leaves_medium.ogg",
+            "assets/audio/ambient/wind/leaves_strong.ogg"
+          ],
+          "type": "responsive",
+          "weight": 1.0,
+          "required_environments": ["forest"],
+          "procedural_params": {
+            "wind_strength": 0.5,
+            "leaf_density": 0.8,
+            "tree_size": 1.0
+          },
+          "parameters": {
+            "pitch_variation": 0.3,
+            "volume_variation": 0.25,
+            "enable_weather_variation": true,
+            "enable_procedural": true
+          }
+        },
+        {
+          "id": "distant_creature_calls",
+          "file_paths": [
+            "assets/audio/ambient/creatures/distant_bird.ogg",
+            "assets/audio/ambient/creatures/far_howl.ogg",
+            "assets/audio/ambient/creatures/mystery_call.ogg"
+          ],
+          "type": "evolutionary",
+          "weight": 0.8,
+          "distance_range": [100.0, 500.0],
+          "time_range": [19.0, 7.0],
+          "parameters": {
+            "pitch_variation": 0.4,
+            "volume_variation": 0.3,
+            "enable_distance_variation": true,
+            "enable_time_variation": true,
+            "reverb_variation": 0.8
+          }
+        },
+        {
+          "id": "water_drip_cave",
+          "file_paths": [
+            "assets/audio/ambient/cave/drip_01.ogg",
+            "assets/audio/ambient/cave/drip_echo.ogg"
+          ],
+          "type": "procedural",
+          "weight": 1.0,
+          "required_environments": ["cave"],
+          "procedural_params": {
+            "drip_rate": 0.3,
+            "echo_intensity": 0.7,
+            "cave_size": 1.0
+          },
+          "parameters": {
+            "pitch_variation": 0.2,
+            "volume_variation": 0.15,
+            "timing_variation": 0.5,
+            "reverb_variation": 0.6
+          }
+        }
+      ]
+    }
+  },
+
+  "global_variation_settings": {
+    "enable_adaptive_learning": true,
+    "learning_update_frequency": 30.0,
+    "max_learning_history": 1000,
+    "feedback_decay_rate": 0.95,
+    "global_variation_intensity": 1.0,
+    "performance_scaling": {
+      "cpu_budget_percentage": 3.0,
+      "max_concurrent_variations": 32,
+      "enable_quality_scaling": true,
+      "low_performance_simplification": 0.5
+    }
+  },
+
+  "contextual_modifiers": {
+    "time_of_day_effects": {
+      "dawn": {
+        "pitch_modifier": 1.02,
+        "volume_modifier": 1.1,
+        "reverb_modifier": 1.1
+      },
+      "day": {
+        "pitch_modifier": 1.0,
+        "volume_modifier": 1.0,
+        "reverb_modifier": 1.0
+      },
+      "dusk": {
+        "pitch_modifier": 0.98,
+        "volume_modifier": 1.2,
+        "reverb_modifier": 1.2
+      },
+      "night": {
+        "pitch_modifier": 0.95,
+        "volume_modifier": 0.9,
+        "reverb_modifier": 1.4
+      }
+    },
+    "weather_effects": {
+      "clear": {
+        "brightness_modifier": 1.0,
+        "reverb_modifier": 1.0
+      },
+      "rain": {
+        "brightness_modifier": 0.8,
+        "reverb_modifier": 0.7,
+        "high_frequency_rolloff": 0.9
+      },
+      "storm": {
+        "brightness_modifier": 0.6,
+        "reverb_modifier": 0.5,
+        "volume_modifier": 0.8
+      },
+      "fog": {
+        "brightness_modifier": 0.7,
+        "reverb_modifier": 1.5,
+        "distance_attenuation": 1.3
+      }
+    },
+    "material_acoustic_properties": {
+      "stone": {
+        "reverb_multiplier": 1.4,
+        "high_frequency_emphasis": 1.1,
+        "resonant_frequency": 800.0
+      },
+      "wood": {
+        "reverb_multiplier": 0.8,
+        "warmth": 1.2,
+        "resonant_frequency": 400.0
+      },
+      "metal": {
+        "reverb_multiplier": 1.6,
+        "brightness": 1.3,
+        "resonant_frequency": 1200.0
+      },
+      "fabric": {
+        "reverb_multiplier": 0.3,
+        "high_frequency_absorption": 0.6,
+        "warmth": 1.1
+      },
+      "water": {
+        "reverb_multiplier": 1.8,
+        "fluidity": 1.0,
+        "bubble_likelihood": 0.3
+      }
+    }
+  }
+}

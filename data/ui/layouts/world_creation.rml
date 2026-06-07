@@ -1,7 +1,8 @@
 <rml>
     <head>
         <title>Create New World - Luminumbra</title>
-        <link type="text/css" href="game_theme.rcss" />
+        <link type="text/css" href="../themes/quantum/quantum-theme.rcss" />
+        <link type="text/css" href="../themes/quantum/components.rcss" />
     </head>
     <body id="world_creation" class="fade-in">
         <div class="container">
@@ -52,6 +53,35 @@
                         </select>
                         <div class="field-help">
                             Choose the primary terrain type for your world
+                        </div>
+                    </div>
+                    
+                    <!-- Advanced options panel -->
+                    <div id="advanced_options" class="panel panel-transparent">
+                        <div class="panel-header">
+                            <h3 class="panel-title">Advanced Options</h3>
+                        </div>
+                        <div class="panel-body">
+                            <div class="form-group">
+                                <label for="world_size">World Size</label>
+                                <select id="world_size" name="world_size" class="form-control">
+                                    <option value="small">Small (2km x 2km)</option>
+                                    <option value="medium" selected>Medium (4km x 4km)</option>
+                                    <option value="large">Large (8km x 8km)</option>
+                                    <option value="huge">Huge (16km x 16km)</option>
+                                </select>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="difficulty">Difficulty</label>
+                                <select id="difficulty" name="difficulty" class="form-control">
+                                    <option value="peaceful">Peaceful</option>
+                                    <option value="easy">Easy</option>
+                                    <option value="normal" selected>Normal</option>
+                                    <option value="hard">Hard</option>
+                                    <option value="hardcore">Hardcore</option>
+                                </select>
+                            </div>
                         </div>
                     </div>
                 </form>

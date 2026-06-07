@@ -1,6 +1,7 @@
 #include "JobSystem.h"
 #include <iostream>
 #include "../../../include/luminumbra/core/Types.h"
+#include "core/Log.h"
 
 namespace Luminumbra {
 
@@ -11,7 +12,7 @@ void JobSystem::startup() {
         m_workers.emplace_back(&JobSystem::worker_loop, this);
     }
     // No need to resize std::array or initialize atomics, they default to 0.
-    std::cout << "JobSystem started with " << num_threads << " threads." << std::endl;
+    LUMINUMBRA_CORE_INFO("JobSystem started with " + std::to_string(num_threads) + " threads.");
 }
 
 void JobSystem::shutdown() {

@@ -1,9 +1,22 @@
 #version 450 core
-// The G-buffer has multiple output targets.
-layout (location = 0) out vec4 gPosition;  // VIEW-space position
-layout (location = 1) out vec4 gNormal;    // VIEW-space normal
-layout (location = 2) out vec4 gAlbedo;    // Base color (diffuse)
-layout (location = 3) out vec4 gMaterial;  // R: Metallic, G: Roughness, B: AO, A: MaterialID
+// Compressed G-buffer format - 50% memory bandwidth reduction
+layout (location = 0) out vec2 gPositionDepth;     // RG32F: XZ in view space, depth reconstruction
+layout (location = 1) out vec4 gNormalMaterial;    // RGB10A2: Octahedral normal + material ID  
+layout (location = 2) out vec4 gAlbedoRoughness;   // RGBA8: RGB albedo + roughness
+layout (location = 3) out vec2 gMetallicAO;        // RG16F: Metallic + AO
+
+// Octahedral normal encoding functions
+vec2 octWrap(vec2 v) {
+    return (1.0 - abs(v.yx)) * (step(0.0, v.xy) * 2.0 - 1.0);
+}
+
+vec2 encode_octahedral(vec3 n) {
+    n /= (abs(n.x) + abs(n.y) + abs(n.z));
+    return n.z >= 0.0 ? n.xy : octWrap(n.xy);
+}
+
+// Material lookup texture
+uniform sampler2D u_materialLUT;
 
 // Input from the vertex shader, with "flat" interpolation for the integer ID
 in VS_OUT {
@@ -14,45 +27,41 @@ in VS_OUT {
 
 void main()
 {
-    // Store the fragment's view-space position.
-    gPosition = vec4(fs_in.FragPos, 1.0);
-    // Store the normalized view-space normal.
-    gNormal = vec4(normalize(fs_in.Normal), 1.0);
+    if (fs_in.MaterialID == 7u) { // Water
+        discard;
+    }
+    
+    // --- Compressed G-Buffer Output ---
+    
+    // Store XZ components only, Y will be reconstructed from depth
+    gPositionDepth = fs_in.FragPos.xz;
+    
+    // Encode normal using octahedral mapping and pack with material ID
+    vec2 encoded_normal = encode_octahedral(normalize(fs_in.Normal));
+    float material_id_normalized = float(fs_in.MaterialID) / 255.0;
+    gNormalMaterial = vec4(encoded_normal * 0.5 + 0.5, 0.0, material_id_normalized);
 
-    // --- Determine material properties based on the Material ID ---
-    // (This part of the code is unchanged)
-    vec3 albedo = vec3(0.7); // Default color
-    float metallic = 0.1;
-    float roughness = 0.8;
-    float ao = 1.0; // Ambient Occlusion, default to fully lit. SSAO will modify this later.
-
-    if (fs_in.MaterialID == 1u) { // Stone
-        albedo = vec3(0.5);
-        metallic = 0.05;
-        roughness = 0.85;
-    } else if (fs_in.MaterialID == 2u) { // Soil
-        albedo = vec3(0.3, 0.15, 0.05);
-        metallic = 0.0;
-        roughness = 0.9;
-    } else if (fs_in.MaterialID == 3u) { // Grass
-        albedo = vec3(0.2, 0.6, 0.15);
-        metallic = 0.0;
-        roughness = 0.8;
-    } else if (fs_in.MaterialID == 4u) { // Sand
-        albedo = vec3(0.9, 0.8, 0.5);
-        metallic = 0.0;
-        roughness = 0.75;
-    } else if (fs_in.MaterialID == 6u) { // Example: Luminous Crystal
-        albedo = vec3(0.9, 0.9, 1.0);
-        metallic = 0.2;
-        roughness = 0.15;
+    // --- Material properties from lookup texture ---
+    float matIndex = float(fs_in.MaterialID) / 255.0;
+    vec4 matProps = texture(u_materialLUT, vec2(matIndex, 0.5));
+    
+    float metallic = matProps.r;
+    float roughness = matProps.g;
+    float ao = matProps.b;
+    
+    // Default albedo colors (can be replaced with tri-planar textures in lighting pass)
+    vec3 albedo = vec3(0.7); 
+    switch (fs_in.MaterialID) {
+        case 1u: albedo = vec3(0.5); break;                    // Stone
+        case 2u: albedo = vec3(0.3, 0.15, 0.05); break;       // Soil
+        case 3u: albedo = vec3(0.2, 0.6, 0.15); break;        // Grass
+        case 4u: albedo = vec3(0.9, 0.8, 0.5); break;         // Sand
+        case 6u: albedo = vec3(0.85, 0.95, 1.0); break;       // Luminous Crystal
     }
 
-    // Output the determined properties to the G-buffer textures.
-    gAlbedo = vec4(albedo, 1.0);
-    gMaterial.r = metallic;
-    gMaterial.g = roughness;
-    gMaterial.b = ao;
-    // Pack the MaterialID into the alpha channel, normalized to the [0, 1] range.
-    gMaterial.a = float(fs_in.MaterialID) / 255.0;
+    // Pack albedo and roughness
+    gAlbedoRoughness = vec4(albedo, roughness);
+    
+    // Pack metallic and AO
+    gMetallicAO = vec2(metallic, ao);
 }

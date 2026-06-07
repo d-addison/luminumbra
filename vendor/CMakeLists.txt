@@ -7,6 +7,7 @@ add_subdirectory(fastnoise)
 add_subdirectory(glad)
 add_subdirectory(glfw)
 add_subdirectory(glm)
+add_subdirectory(imgui)  # Now ENABLED for Quantum UI!
 add_subdirectory(Jolt)
 
 # Ensure headers like <Jolt/...> resolve correctly when Jolt lives under vendor/Jolt.

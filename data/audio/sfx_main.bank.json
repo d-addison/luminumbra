@@ -13,6 +13,11 @@
       "pitch_variation": 0.05,
       "is_2d": true
     },
+    "ui_world_loaded": {
+      "files": ["assets/audio/sfx/ui/ui_world_loaded.mp3"],
+      "volume": 0.7,
+      "is_2d": true
+    },
     "creature_grovestrider_footstep": {
       "files": [
         "assets/audio/sfx/creatures/grovestrider/footstep_1.wav",
