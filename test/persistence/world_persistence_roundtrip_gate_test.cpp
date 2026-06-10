@@ -13,6 +13,12 @@ int main(int argc, char** argv) {
     const std::filesystem::path chunk_format_output_path =
         argc > 3 ? std::filesystem::path(argv[3])
                  : output_path.parent_path() / "chunk-format-validation.json";
+    const std::filesystem::path world_hash_output_path =
+        argc > 4 ? std::filesystem::path(argv[4])
+                 : output_path.parent_path() / "world-hash.json";
+    const std::filesystem::path entity_snapshot_output_path =
+        argc > 5 ? std::filesystem::path(argv[5])
+                 : output_path.parent_path() / "entity-snapshot.json";
 
     std::vector<std::string> errors;
     if (!Luminumbra::Persistence::WriteWorldPersistenceRoundtripArtifact(output_path, build_preset, &errors)) {
@@ -22,6 +28,20 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (!Luminumbra::Persistence::WriteChunkFormatValidationArtifact(chunk_format_output_path, build_preset, &errors)) {
+        for (const std::string& error : errors) {
+            std::cerr << error << '\n';
+        }
+        return 1;
+    }
+    errors.clear();
+    if (!Luminumbra::Persistence::WriteWorldHashArtifact(world_hash_output_path, build_preset, &errors)) {
+        for (const std::string& error : errors) {
+            std::cerr << error << '\n';
+        }
+        return 1;
+    }
+    errors.clear();
+    if (!Luminumbra::Persistence::WriteEntitySnapshotArtifact(entity_snapshot_output_path, build_preset, &errors)) {
         for (const std::string& error : errors) {
             std::cerr << error << '\n';
         }

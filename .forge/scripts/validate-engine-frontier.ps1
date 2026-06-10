@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "ChunkFormatValidationGate", "FrontierDisabled", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "FrontierDisabled", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug"
@@ -1368,6 +1368,180 @@ function Test-ChunkFormatValidationGate {
     }
 }
 
+function Test-WorldHashEntitySnapshotGate {
+    $artifactDir = "build/$BuildPreset/test-artifacts/persistence"
+    $worldHashPath = Join-Path $artifactDir "world-hash.json"
+    $entitySnapshotPath = Join-Path $artifactDir "entity-snapshot.json"
+    $testScriptPath = "test/persistence/world-hash-entity-snapshot.ps1"
+
+    if (-not (Test-Path $testScriptPath)) {
+        throw "world hash/entity snapshot gate not yet implemented - missing $testScriptPath (produced by task T-EF-25-world-hash-entity-snapshot-gate)"
+    }
+
+    & $testScriptPath -BuildPreset $BuildPreset
+    if (-not $?) {
+        exit 1
+    }
+    if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
+    foreach ($path in @($worldHashPath, $entitySnapshotPath)) {
+        if (-not (Test-Path $path)) {
+            throw "world hash/entity snapshot gate not yet implemented - missing $path (produced by task T-EF-25-world-hash-entity-snapshot-gate)"
+        }
+    }
+
+    $worldHash = Get-Content $worldHashPath -Raw | ConvertFrom-Json
+    if ($worldHash.schema -ne "luminumbra.persistence.world_hash.v1") {
+        throw "Unexpected world hash schema '$($worldHash.schema)'"
+    }
+    if (-not $worldHash.passed) {
+        throw "World hash analysis reported failure"
+    }
+    if ($worldHash.build_preset -ne $BuildPreset) {
+        throw "World hash build_preset '$($worldHash.build_preset)' does not match '$BuildPreset'"
+    }
+    if ($worldHash.persistence.source -ne "src/luminumbra_common/persistence/WorldPersistenceRoundtrip.cpp") {
+        throw "World hash analysis must inspect WorldPersistenceRoundtrip.cpp"
+    }
+    if ($worldHash.persistence.header -ne "src/luminumbra_common/persistence/WorldPersistenceRoundtrip.h") {
+        throw "World hash analysis must inspect WorldPersistenceRoundtrip.h"
+    }
+    if ($worldHash.persistence.snapshot_serializer -ne "SerializeWorldStreamingStateSnapshotJson") {
+        throw "World hash analysis must require SerializeWorldStreamingStateSnapshotJson"
+    }
+    if ($worldHash.persistence.hash_api -ne "BuildWorldHashAnalysis") {
+        throw "World hash analysis must require BuildWorldHashAnalysis"
+    }
+    if ($worldHash.persistence.validation_api -ne "WorldHashMeetsBaseline") {
+        throw "World hash analysis must require WorldHashMeetsBaseline"
+    }
+    if ($worldHash.persistence.artifact_writer -ne "WriteWorldHashArtifact") {
+        throw "World hash analysis must require WriteWorldHashArtifact"
+    }
+    if ($worldHash.persistence.order_contract -ne "chunk_id_ascending") {
+        throw "World hash must preserve chunk_id_ascending ordering"
+    }
+    if ($worldHash.world_hash.snapshot_schema -ne "luminumbra.persistence.world_state_snapshot.v1") {
+        throw "World hash must hash world state snapshot bytes"
+    }
+    if ($worldHash.world_hash.hash_algorithm -ne "fnv1a_64_stable_json") {
+        throw "World hash must declare fnv1a_64_stable_json"
+    }
+    if ([int64]$worldHash.world_hash.chunk_count -lt 3) {
+        throw "World hash fixture must cover at least three chunks"
+    }
+    if ([int64]$worldHash.world_hash.snapshot_byte_count -le 0) {
+        throw "World hash artifact must record the hashed snapshot byte count"
+    }
+    if ([string]::IsNullOrWhiteSpace($worldHash.world_hash.hash) -or
+        $worldHash.world_hash.hash -ne $worldHash.world_hash.roundtrip_hash) {
+        throw "World hash checksums must be present and equal"
+    }
+    if (-not $worldHash.world_hash.stable_hash) {
+        throw "World hash artifact reports unstable hash generation"
+    }
+    if (-not $worldHash.world_hash.roundtrip_hash_matches) {
+        throw "World hash artifact reports a roundtrip hash mismatch"
+    }
+    foreach ($chunkId in @("0", "4194302", "18446739675667234817")) {
+        Assert-ArrayContains -Values $worldHash.world_hash.chunk_ids -Needle $chunkId -Description "World hash chunk_ids"
+    }
+
+    $requiredWorldHashChecks = @(
+        "world hash API is declared",
+        "world hash uses deterministic snapshot bytes",
+        "world hash preserves chunk_id_ascending order",
+        "world hash is stable across save/load/save",
+        "world hash artifact records deterministic hash"
+    )
+    $worldChecks = @($worldHash.checks)
+    foreach ($requiredCheck in $requiredWorldHashChecks) {
+        $matches = @($worldChecks | Where-Object { $_.name -eq $requiredCheck })
+        if ($matches.Count -ne 1) {
+            throw "World hash analysis is missing check '$requiredCheck'"
+        }
+        if (-not $matches[0].passed) {
+            throw "World hash check failed: $requiredCheck"
+        }
+    }
+
+    $entitySnapshot = Get-Content $entitySnapshotPath -Raw | ConvertFrom-Json
+    if ($entitySnapshot.schema -ne "luminumbra.persistence.entity_snapshot.v1") {
+        throw "Unexpected entity snapshot schema '$($entitySnapshot.schema)'"
+    }
+    if (-not $entitySnapshot.passed) {
+        throw "Entity snapshot analysis reported failure"
+    }
+    if ($entitySnapshot.build_preset -ne $BuildPreset) {
+        throw "Entity snapshot build_preset '$($entitySnapshot.build_preset)' does not match '$BuildPreset'"
+    }
+    if ($entitySnapshot.ecs.source -ne "src/luminumbra_common/ecs/EntitySnapshot.h") {
+        throw "Entity snapshot analysis must inspect EntitySnapshot.h"
+    }
+    if ($entitySnapshot.ecs.snapshot_api -ne "SerializeEntityRegistrySnapshotJson") {
+        throw "Entity snapshot analysis must require SerializeEntityRegistrySnapshotJson"
+    }
+    if ($entitySnapshot.ecs.loader -ne "LoadEntityRegistrySnapshotJson") {
+        throw "Entity snapshot analysis must require LoadEntityRegistrySnapshotJson"
+    }
+    if ($entitySnapshot.ecs.validation_api -ne "EntitySnapshotMeetsBaseline") {
+        throw "Entity snapshot analysis must require EntitySnapshotMeetsBaseline"
+    }
+    if ($entitySnapshot.ecs.fixture_api -ne "BuildEntitySnapshotFixture") {
+        throw "Entity snapshot analysis must require BuildEntitySnapshotFixture"
+    }
+    if ($entitySnapshot.ecs.order_contract -ne "entity_id_ascending_component_type_ascending") {
+        throw "Entity snapshot must declare deterministic entity/component ordering"
+    }
+    if ($entitySnapshot.entity_snapshot.snapshot_schema -ne "luminumbra.ecs.entity_snapshot.v1") {
+        throw "Entity snapshot must serialize luminumbra.ecs.entity_snapshot.v1"
+    }
+    if ([int64]$entitySnapshot.entity_snapshot.entity_count -lt 3) {
+        throw "Entity snapshot fixture must cover at least three entities"
+    }
+    if ([int64]$entitySnapshot.entity_snapshot.component_count -lt 6) {
+        throw "Entity snapshot fixture must cover at least six components"
+    }
+    if ([int64]$entitySnapshot.entity_snapshot.snapshot_byte_count -le 0) {
+        throw "Entity snapshot artifact must record the serialized snapshot byte count"
+    }
+    if (-not $entitySnapshot.entity_snapshot.stable_serialization) {
+        throw "Entity snapshot artifact reports unstable serialization"
+    }
+    if ([string]::IsNullOrWhiteSpace($entitySnapshot.entity_snapshot.before_checksum) -or
+        $entitySnapshot.entity_snapshot.before_checksum -ne $entitySnapshot.entity_snapshot.after_checksum) {
+        throw "Entity snapshot checksums must be present and equal"
+    }
+    foreach ($entityId in @("1001", "1002", "1003")) {
+        Assert-ArrayContains -Values $entitySnapshot.entity_snapshot.entity_ids -Needle $entityId -Description "Entity snapshot entity_ids"
+    }
+    foreach ($componentType in @("AethericField", "Instinct", "PersistenceAnchor", "Transform", "WaterAffinity")) {
+        Assert-ArrayContains -Values $entitySnapshot.entity_snapshot.component_types -Needle $componentType -Description "Entity snapshot component_types"
+    }
+
+    $requiredEntitySnapshotChecks = @(
+        "entity snapshot API is declared",
+        "entity snapshot serializer emits deterministic entity order",
+        "entity snapshot serializer emits deterministic component order",
+        "entity snapshot loader restores entity ids and components",
+        "entity snapshot serialization is byte-stable",
+        "entity snapshot artifact records deterministic checksum",
+        "ecs snapshot source is present"
+    )
+    $entityChecks = @($entitySnapshot.checks)
+    foreach ($requiredCheck in $requiredEntitySnapshotChecks) {
+        $matches = @($entityChecks | Where-Object { $_.name -eq $requiredCheck })
+        if ($matches.Count -ne 1) {
+            throw "Entity snapshot analysis is missing check '$requiredCheck'"
+        }
+        if (-not $matches[0].passed) {
+            throw "Entity snapshot check failed: $requiredCheck"
+        }
+    }
+}
+
 function Test-FrontierDisabled {
     Assert-FileExists $FrontierDisabledPath
 
@@ -1408,6 +1582,7 @@ switch ($Mode) {
     "InstinctPlannerGate" { Test-InstinctPlannerGate }
     "PersistenceRoundtripGate" { Test-PersistenceRoundtripGate }
     "ChunkFormatValidationGate" { Test-ChunkFormatValidationGate }
+    "WorldHashEntitySnapshotGate" { Test-WorldHashEntitySnapshotGate }
     "FrontierDisabled" { Test-FrontierDisabled }
     "All" {
         Test-CodexOnly
@@ -1427,6 +1602,7 @@ switch ($Mode) {
         Test-InstinctPlannerGate
         Test-PersistenceRoundtripGate
         Test-ChunkFormatValidationGate
+        Test-WorldHashEntitySnapshotGate
         Test-FrontierDisabled
     }
 }
