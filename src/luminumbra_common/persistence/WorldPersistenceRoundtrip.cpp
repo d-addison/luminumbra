@@ -722,6 +722,10 @@ bool ValidateWorldStreamingChunkFormatJson(
     }
 }
 
+std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state) {
+    return Checksum(SerializeWorldStreamingStateSnapshotJson(state));
+}
+
 WorldPersistenceRoundtripAnalysis BuildWorldPersistenceRoundtripAnalysis(const std::string& build_preset) {
     WorldPersistenceRoundtripAnalysis analysis;
     analysis.build_preset = build_preset;
