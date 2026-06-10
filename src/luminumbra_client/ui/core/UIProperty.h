@@ -1,8 +1,11 @@
 #pragma once
 
+#include <cstddef>
 #include <functional>
-#include <vector>
 #include <memory>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 namespace Luminumbra::Client::UI {
 
@@ -12,6 +15,12 @@ class Property;
 
 template<typename T>
 using PropertyCallback = std::function<void(const T&, const T&)>; // (oldValue, newValue)
+
+template<typename T>
+struct IsVector : std::false_type {};
+
+template<typename T, typename Allocator>
+struct IsVector<std::vector<T, Allocator>> : std::true_type {};
 
 /**
  * Observable property that can notify listeners when its value changes.
@@ -51,25 +60,22 @@ public:
     }
     
     // For container properties, provide mutation methods that trigger notifications
-    template<typename U = T>
-    typename std::enable_if_t<std::is_same_v<U, std::vector<typename U::value_type>>, void>
-    Add(const typename T::value_type& item) {
+    template<typename U = T, typename = std::enable_if_t<IsVector<U>::value>>
+    void Add(const typename U::value_type& item) {
         m_value.push_back(item);
         NotifyObservers(m_value, m_value); // Same value but content changed
     }
     
-    template<typename U = T>
-    typename std::enable_if_t<std::is_same_v<U, std::vector<typename U::value_type>>, void>
-    Remove(size_t index) {
+    template<typename U = T, typename = std::enable_if_t<IsVector<U>::value>>
+    void Remove(std::size_t index) {
         if (index < m_value.size()) {
             m_value.erase(m_value.begin() + index);
             NotifyObservers(m_value, m_value);
         }
     }
     
-    template<typename U = T>
-    typename std::enable_if_t<std::is_same_v<U, std::vector<typename U::value_type>>, void>
-    Clear() {
+    template<typename U = T, typename = std::enable_if_t<IsVector<U>::value>>
+    void Clear() {
         if (!m_value.empty()) {
             T old_value = m_value;
             m_value.clear();

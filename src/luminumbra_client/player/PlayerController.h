@@ -40,7 +40,7 @@ private:
     Rendering::Camera* m_camera;
     Systems::PhysicsSystem* m_physicsSystem;
 
-    MovementMode m_mode = MovementMode::Noclip;
+    MovementMode m_mode = MovementMode::Walking;
     glm::vec3 m_position{16.0f, 100.0f, 16.0f};
     glm::vec3 m_velocity{0.0f};
 

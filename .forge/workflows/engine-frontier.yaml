@@ -1,0 +1,295 @@
+# Engine-frontier workflow: spec out, research, explore, and push the
+# boundaries of the Luminumbra engine across all subsystems.
+#
+# AI research runs through the Codex CLI helper
+# (.forge/scripts/run-codex-engine-frontier.ps1) rather than inline
+# ai_dispatch, following the engine-framework-roadmap precedent.
+# Deterministic steps validate routing, artifacts, the task graph, and
+# post-execution engine health. Execution is gated on user approval.
+
+name: engine-frontier
+description: |
+  Engine-wide frontier workflow. Seven research panels cover every corner of
+  the engine (world/streaming, rendering and the visual-quality loop, physics
+  and player, audio, simulation/AI/scripting, persistence/GPU-SDF/networking,
+  UI/tooling/tests), with emphasis on mature-system deepening and the
+  deterministic material/texture-layer visual gate. Panels are synthesized
+  into a spec, adversarially critiqued, revised into a waved roadmap and a
+  Codex-only dispatch graph, then executed after user approval and verified
+  with deterministic build, test, and visual gates.
+
+config:
+  timeout_secs: 21600
+  model_ceiling: deep
+  headless: false
+
+tags:
+  - "#workflow:engine-frontier"
+  - "#runtime:codex"
+  - "#scope:luminumbra"
+  - "#domain:engine"
+  - "#domain:performance"
+  - "#domain:rendering"
+  - "#domain:worldgen"
+  - "#domain:physics"
+  - "#domain:audio"
+
+pipelines:
+  - name: codex-routing-gate
+    phase: spec
+    description: "Fail fast unless this workflow is configured for Codex-only execution."
+    aggregate_within_phase: all_must_pass
+    on_phase_fail: stop
+    steps:
+      - name: validate-codex-only-routing
+        type: deterministic
+        run: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode CodexOnly'
+        capabilities:
+          sandbox: read-only
+          egress: none
+
+  - name: engine-inventory
+    phase: spec
+    description: "Refresh deterministic repository context before any research panel runs."
+    aggregate_within_phase: all_must_pass
+    on_phase_fail: stop
+    steps:
+      - name: inventory-structure
+        type: deterministic
+        run: 'forge structure'
+        capabilities:
+          sandbox: workspace-write
+          egress: none
+
+      - name: inventory-index
+        type: deterministic
+        run: 'forge index'
+        capabilities:
+          sandbox: workspace-write
+          egress: none
+
+  - name: frontier-research-panels
+    phase: plan
+    description: "Run the seven engine research panels through the Codex CLI helper, one invocation per panel for resumability."
+    aggregate_within_phase: all_must_pass
+    on_phase_fail: stop
+    steps:
+      - name: panel-1-world-streaming
+        type: deterministic
+        run: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/run-codex-engine-frontier.ps1 -Panel WorldStreaming'
+        capabilities:
+          sandbox: off
+          egress: [openai-api]
+
+      - name: panel-2-rendering-visual-loop
+        type: deterministic
+        run: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/run-codex-engine-frontier.ps1 -Panel RenderingVisualLoop'
+        capabilities:
+          sandbox: off
+          egress: [openai-api]
+
+      - name: panel-3-physics-player
+        type: deterministic
+        run: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/run-codex-engine-frontier.ps1 -Panel PhysicsPlayer'
+        capabilities:
+          sandbox: off
+          egress: [openai-api]
+
+      - name: panel-4-audio
+        type: deterministic
+        run: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/run-codex-engine-frontier.ps1 -Panel Audio'
+        capabilities:
+          sandbox: off
+          egress: [openai-api]
+
+      - name: panel-5-simulation-ai-scripting
+        type: deterministic
+        run: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/run-codex-engine-frontier.ps1 -Panel SimulationAiScripting'
+        capabilities:
+          sandbox: off
+          egress: [openai-api]
+
+      - name: panel-6-persistence-gpu-network
+        type: deterministic
+        run: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/run-codex-engine-frontier.ps1 -Panel PersistenceGpuNetwork'
+        capabilities:
+          sandbox: off
+          egress: [openai-api]
+
+      - name: panel-7-ui-tooling-tests
+        type: deterministic
+        run: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/run-codex-engine-frontier.ps1 -Panel UiToolingTests'
+        capabilities:
+          sandbox: off
+          egress: [openai-api]
+
+      - name: validate-panel-artifacts
+        type: deterministic
+        run: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode Panels'
+        capabilities:
+          sandbox: read-only
+          egress: none
+
+  - name: frontier-synthesis
+    phase: plan
+    description: "Synthesize panels into research + spec, critique adversarially, then revise into the roadmap and dispatch graph."
+    aggregate_within_phase: all_must_pass
+    on_phase_fail: stop
+    steps:
+      - name: synthesis-research-and-spec
+        type: deterministic
+        run: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/run-codex-engine-frontier.ps1 -Panel Synthesis'
+        capabilities:
+          sandbox: off
+          egress: [openai-api]
+
+      - name: adversarial-critique
+        type: deterministic
+        run: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/run-codex-engine-frontier.ps1 -Panel Critique'
+        capabilities:
+          sandbox: off
+          egress: [openai-api]
+
+      - name: roadmap-revision-and-dispatch
+        type: deterministic
+        run: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/run-codex-engine-frontier.ps1 -Panel Revision'
+        capabilities:
+          sandbox: off
+          egress: [openai-api]
+
+  - name: frontier-validation
+    phase: tasks
+    description: "Validate artifacts, spec clarity, dispatch graph, workflow shape, and the Codex-only contracts dry-run."
+    aggregate_within_phase: all_must_pass
+    on_phase_fail: stop
+    steps:
+      - name: validate-files
+        type: deterministic
+        run: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode Files'
+        capabilities:
+          sandbox: read-only
+          egress: none
+
+      - name: validate-sections
+        type: deterministic
+        run: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode Sections'
+        capabilities:
+          sandbox: read-only
+          egress: none
+
+      - name: clarify-spec
+        type: deterministic
+        run: 'forge clarify .forge/specs/ENGINE-FRONTIER-2026-06-09.md'
+        capabilities:
+          sandbox: read-only
+          egress: none
+
+      - name: validate-dispatch
+        type: deterministic
+        run: 'forge tasks validate .forge/tasks/engine-frontier/dispatch.json'
+        capabilities:
+          sandbox: read-only
+          egress: none
+
+      - name: validate-workflow
+        type: deterministic
+        run: 'forge workflow validate .forge/workflows/engine-frontier.yaml'
+        capabilities:
+          sandbox: read-only
+          egress: none
+
+      - name: codex-contracts-dry-run
+        type: deterministic
+        run: 'forge contracts execute --tasks .forge/tasks/engine-frontier/dispatch.json --spawner codex --sandbox off --dry-run --json'
+        capabilities:
+          sandbox: read-only
+          egress: none
+
+  - name: frontier-approval
+    phase: tasks
+    description: "User reviews the roadmap and task graph before any metered execution."
+    aggregate_within_phase: all_must_pass
+    on_phase_fail: stop
+    steps:
+      - name: approve-execution
+        type: user_interaction
+        prompt: |
+          Review .forge/artifacts/engine-frontier/ultimate-plan.md and
+          .forge/tasks/engine-frontier/dispatch.json before execution.
+          Execution meters against the daily dispatch budget.
+        options:
+          - { value: approve, label: "Approve execution" }
+          - { value: reject,  label: "Revise roadmap" }
+          - { value: diff,    label: "Show task diff" }
+          - { value: quit,    label: "Abort workflow" }
+        capabilities:
+          sandbox: read-only
+          egress: none
+
+  - name: frontier-execute
+    phase: execute
+    description: "Execute the approved dispatch graph through Codex with C++ integration env overrides."
+    aggregate_within_phase: all_must_pass
+    on_phase_fail: stop
+    steps:
+      - name: execute-dispatch
+        type: deterministic
+        run: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/run-engine-frontier-execute.ps1'
+        capabilities:
+          sandbox: workspace-write
+          egress: [openai-api]
+
+  - name: frontier-post-verify
+    phase: verify
+    description: "Deterministic engine health gates after execution: build, tests, visual gates, and the new material gate."
+    aggregate_within_phase: all_must_pass
+    on_phase_fail: stop
+    steps:
+      - name: verify-build
+        type: deterministic
+        run: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode Build'
+        capabilities:
+          sandbox: workspace-write
+          egress: none
+
+      - name: verify-unit-tests
+        type: deterministic
+        run: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode UnitTests'
+        capabilities:
+          sandbox: workspace-write
+          egress: none
+
+      - name: verify-smoke
+        type: deterministic
+        run: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-runtime-stability-phase-1.ps1 -Mode Smoke -SmokeSeconds 5'
+        capabilities:
+          sandbox: workspace-write
+          egress: none
+
+      - name: verify-lod-ground
+        type: deterministic
+        run: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-runtime-stability-phase-1.ps1 -Mode LodGround -SmokeSeconds 30'
+        capabilities:
+          sandbox: workspace-write
+          egress: none
+
+      - name: verify-water-visual
+        type: deterministic
+        run: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-runtime-stability-phase-1.ps1 -Mode WaterVisual -SmokeSeconds 30'
+        capabilities:
+          sandbox: workspace-write
+          egress: none
+
+      - name: verify-material-visual
+        type: deterministic
+        run: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode MaterialVisual'
+        capabilities:
+          sandbox: workspace-write
+          egress: none
+
+      - name: verify-forge
+        type: deterministic
+        run: 'forge verify --validation-policy warn --testing-policy warn'
+        capabilities:
+          sandbox: workspace-write
+          egress: none

@@ -18,6 +18,8 @@ public:
     WorldGenViewer();
     ~WorldGenViewer();
 
+    static const char* LayerArtifactSchema();
+
     // The main function to call each frame. It draws the ImGui window and handles updates.
     void UpdateAndRender(bool& is_open, Systems::SHIELD_WorldSystem* main_world_system);
 
@@ -44,6 +46,11 @@ private:
     float m_zoom = 1.0f;
     float m_offsetX = 0.0f;
     float m_offsetZ = 0.0f;
+    bool m_showBaseTerrainLayer = true;
+    bool m_showIslandMaskLayer = true;
+    bool m_showCaveLayer = true;
+    bool m_showWaterLayer = true;
+    bool m_showTopologyDeltas = true;
 
     // OpenGL texture for display
     GLuint m_textureID = 0;

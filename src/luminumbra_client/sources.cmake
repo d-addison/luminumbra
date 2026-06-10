@@ -11,12 +11,14 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/audio/MiniaudioManager.cpp
 
     # Debug
+    ${CMAKE_CURRENT_LIST_DIR}/debug/RuntimeOverlaySchema.cpp
     ${CMAKE_CURRENT_LIST_DIR}/debug/WorldGenViewer.cpp
 
     # Player
     ${CMAKE_CURRENT_LIST_DIR}/player/PlayerController.cpp
 
     # Rendering
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/CaptureHooks.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/Mesh.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/RenderPipeline.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/RenderSystem.cpp

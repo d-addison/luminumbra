@@ -3,6 +3,8 @@
 #include <string>
 #include <memory>
 #include <ctime>
+#include <filesystem>
+#include <vector>
 #include "entt/entt.hpp"
 #include "../../../include/luminumbra/core/Types.h"
 
@@ -27,6 +29,12 @@ struct WorldMetadata {
     Vec3 spawnPoint;
 };
 
+struct WorldConfigValidationResult {
+    bool ok = false;
+    std::filesystem::path preset_path;
+    std::vector<std::string> errors;
+};
+
 class GameSession {
 public:
     GameSession();
@@ -40,6 +48,8 @@ public:
 
     // Save the current world state
     bool SaveWorld();
+
+    static WorldConfigValidationResult ValidateWorldConfig(const std::string& root_path, const std::string& worldType);
 
     // Get world metadata
     const WorldMetadata& GetMetadata() const { return m_metadata; }

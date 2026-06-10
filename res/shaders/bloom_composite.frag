@@ -61,7 +61,7 @@ vec3 applyVignette(vec3 color, vec2 uv, float strength) {
 }
 
 // Color grading
-vec3 colorGrade(vec3 color, float contrast, float saturation, vec3 filter) {
+vec3 colorGrade(vec3 color, float contrast, float saturation, vec3 color_filter) {
     // Contrast
     color = (color - 0.5) * contrast + 0.5;
     
@@ -70,7 +70,7 @@ vec3 colorGrade(vec3 color, float contrast, float saturation, vec3 filter) {
     color = mix(vec3(luminance), color, saturation);
     
     // Color filter
-    color *= filter;
+    color *= color_filter;
     
     return color;
 }

@@ -17,6 +17,7 @@ namespace Luminumbra::Systems {
 constexpr float FLOW_CONSTANT = 0.1f;
 constexpr float MIN_FLOW_DIFF = 0.001f;
 constexpr float MAX_WATER_COMPRESSION = 0.2f;
+constexpr int WATER_MESH_DIRTY_TICK_INTERVAL = 60;
 
 namespace {
 
@@ -133,6 +134,8 @@ void WaterSystem::update(entt::registry& registry, const std::unordered_map<Chun
                 }
             }
             chunk_ptr->has_water_sim.store(true);
+            chunk_ptr->water_mesh_generated.store(false);
+            chunk_ptr->water_mesh_dirty_ticks = 0;
         }
     }
 
@@ -319,6 +322,13 @@ void WaterSystem::dispatch_simulation_jobs(const std::vector<Chunk*>& chunks_to_
         task.chunk->water_level_data = std::move(task.output.water_levels);
         task.chunk->water_flow_data = std::move(task.output.flow_data);
         task.chunk->max_water_delta_last_tick = task.output.max_delta;
+        if (task.output.max_delta > 1.0e-4f && task.chunk->water_mesh_generated.load(std::memory_order_relaxed)) {
+            task.chunk->water_mesh_dirty_ticks++;
+        }
+        if (task.chunk->water_mesh_dirty_ticks >= WATER_MESH_DIRTY_TICK_INTERVAL) {
+            task.chunk->water_mesh_generated.store(false);
+            task.chunk->water_mesh_dirty_ticks = 0;
+        }
     }
 }
 
@@ -412,8 +422,7 @@ void WaterSystem::simulate_chunk_water(const WaterChunkSnapshot& snapshot, const
                  total_outflow = 0;
             }
             
-            float new_height = h_center - total_outflow + total_inflow;
-            float final_height = std::max(new_height, terrain_h);
+            float final_height = h_center - total_outflow + total_inflow;
             output.water_levels[idx_center] = final_height;
             
             // <<< OPTIMIZATION: Measure water activity >>>
@@ -613,6 +622,8 @@ void WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
         chunk.water_flow_data.clear();
         chunk.water_sim_terrain_height.clear();
         chunk.has_water_sim.store(false);
+        chunk.water_mesh_generated.store(false);
+        chunk.water_mesh_dirty_ticks = 0;
         chunk.current_water_resolution.store(0);
         return;
     }
@@ -684,6 +695,8 @@ void WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
     }
     
     chunk.has_water_sim.store(true);
+    chunk.water_mesh_generated.store(false);
+    chunk.water_mesh_dirty_ticks = 0;
     chunk.current_water_resolution.store(new_resolution);
 }
 

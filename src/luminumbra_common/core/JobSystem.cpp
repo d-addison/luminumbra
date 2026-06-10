@@ -162,6 +162,16 @@ void JobSystem::wait(const JobHandle& handle) {
     }
 }
 
+JobSystem::RuntimeStats JobSystem::get_runtime_stats() const {
+    std::unique_lock<std::mutex> lock(m_queue_mutex);
+    RuntimeStats stats;
+    stats.worker_count = m_workers.size();
+    stats.queue_depth = m_job_queue.size();
+    stats.accepting_jobs = m_accepting_jobs;
+    stats.stop_requested = m_stop_threads.load(std::memory_order_acquire);
+    return stats;
+}
+
 void JobSystem::worker_loop() {
     while (true) {
         Job job;

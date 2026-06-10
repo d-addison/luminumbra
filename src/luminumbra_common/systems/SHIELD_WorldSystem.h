@@ -3,6 +3,8 @@
 #include "../../../include/luminumbra/core/Types.h"
 #include "../world/Chunk.h"
 #include "../core/JobSystem.h"
+#include <array>
+#include <cstddef>
 #include <unordered_map>
 #include <memory>
 #include <vector>
@@ -31,6 +33,28 @@ struct TerrainGenParams {
     float island_mask_frequency = 0.004f;
 };
 
+struct WorldGenLayerSample {
+    Vec3 world_pos{0.0f};
+
+    float base_noise = 0.0f;
+    float base_height = 0.0f;
+
+    float island_noise = 0.0f;
+    float island_mask = 1.0f;
+    float final_height = 0.0f;
+
+    float terrain_density = 0.0f;
+    float cave_noise = 0.0f;
+    float cave_value = 0.0f;
+    float cave_density = 0.0f;
+    float final_density = 0.0f;
+
+    bool island_applied = false;
+    bool caves_applied = false;
+    bool solid = false;
+    MaterialType material = MaterialType::Air;
+};
+
 struct ChunkLOD {
     int level;      // The LOD identifier (0 = highest detail)
     int step;       // The step size for Marching Cubes (1, 2, 4, etc.)
@@ -41,6 +65,80 @@ class WaterSystem;
 
 class SHIELD_WorldSystem {
 public:
+    struct StreamingBudgetFrameStats {
+        int update_interval_frames = 0;
+        int requested_render_radius = 0;
+        int target_render_radius = 0;
+        int generation_budget = 0;
+        int meshing_budget = 0;
+        std::size_t max_active_chunks_budget = 0;
+        std::size_t active_chunks_before = 0;
+        std::size_t active_chunks_after = 0;
+        std::size_t ready_chunks = 0;
+        std::size_t renderable_chunks = 0;
+        std::size_t idle_chunks = 0;
+        std::size_t loading_chunks = 0;
+        std::size_t meshing_chunks = 0;
+        std::size_t target_surface_columns = 0;
+        std::size_t generation_candidates = 0;
+        std::size_t surface_generation_candidates = 0;
+        std::size_t vertical_generation_candidates = 0;
+        std::size_t scheduled_generation = 0;
+        std::size_t surface_generation_scheduled = 0;
+        std::size_t vertical_generation_scheduled = 0;
+        std::size_t deferred_generation = 0;
+        std::size_t meshing_candidates = 0;
+        std::size_t scheduled_meshing = 0;
+        std::size_t deferred_meshing = 0;
+        std::size_t unloaded_chunks = 0;
+        bool generation_job_active = false;
+        bool meshing_job_active = false;
+    };
+
+    struct RuntimeChunkStats {
+        std::size_t total_chunks = 0;
+        std::size_t unloaded_chunks = 0;
+        std::size_t loading_chunks = 0;
+        std::size_t idle_chunks = 0;
+        std::size_t meshing_chunks = 0;
+        std::size_t ready_chunks = 0;
+        std::size_t unloading_chunks = 0;
+        std::size_t renderable_chunks = 0;
+        std::size_t collision_chunks = 0;
+        std::size_t terrain_vertex_count = 0;
+        std::size_t terrain_index_count = 0;
+        std::size_t water_vertex_count = 0;
+        std::size_t water_index_count = 0;
+        std::size_t terrain_payload_bytes = 0;
+        bool generation_job_active = false;
+        bool meshing_job_active = false;
+    };
+
+    struct CameraLocalCoverageStats {
+        Vec3 camera_position{0.0f};
+        IVec3 camera_chunk{0};
+        IVec3 surface_chunk_under_camera{0};
+        int horizontal_radius = 0;
+        float terrain_height_under_camera = 0.0f;
+        float camera_height_above_terrain = 0.0f;
+        std::size_t expected_surface_chunks = 0;
+        std::size_t present_surface_chunks = 0;
+        std::size_t missing_surface_chunks = 0;
+        std::size_t unloaded_surface_chunks = 0;
+        std::size_t loading_surface_chunks = 0;
+        std::size_t idle_surface_chunks = 0;
+        std::size_t meshing_surface_chunks = 0;
+        std::size_t ready_surface_chunks = 0;
+        std::size_t renderable_surface_chunks = 0;
+        std::size_t collision_surface_chunks = 0;
+        std::size_t pending_lod_chunks = 0;
+        std::array<std::size_t, 3> lod_counts{0u, 0u, 0u};
+        std::size_t lod_unknown_chunks = 0;
+        bool center_chunk_present = false;
+        bool center_chunk_renderable = false;
+        bool near_field_renderable = false;
+    };
+
     SHIELD_WorldSystem(JobSystem* job_system, WaterSystem* water_system, const TerrainGenParams& params, int seed);
     ~SHIELD_WorldSystem();
 
@@ -49,6 +147,7 @@ public:
     std::vector<::Luminumbra::Chunk*> get_renderable_chunks();
     float get_density_at(const Vec3& world_pos) const;
     float GetTerrainHeightAt(float world_x, float world_z) const;
+    WorldGenLayerSample SampleWorldGenLayers(const Vec3& world_pos) const;
 
     static IVec3 world_to_chunk_coords(const Vec3& position);
 
@@ -61,6 +160,11 @@ public:
     void SetWaterSystem(WaterSystem* water_system);
     std::vector<IVec3> GetInitialChunkLoadList(const Vec3& center_pos) const; // <<< NEW
     JobHandle dispatch_generation_jobs(const std::vector<IVec3>& chunks_to_generate);
+    bool EnsureCollisionReadyNear(const Vec3& world_pos, PhysicsSystem* physics_system, int horizontal_radius = 1);
+    bool EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSystem* physics_system, int surface_radius, int collision_radius);
+    const StreamingBudgetFrameStats& get_last_streaming_budget_stats() const { return m_last_streaming_budget_stats; }
+    RuntimeChunkStats get_runtime_chunk_stats() const;
+    CameraLocalCoverageStats get_camera_local_coverage_stats(const Vec3& camera_position, int horizontal_radius) const;
     float get_density_at_from_precalculated(const Vec3& world_pos, float terrain_height) const;
     
     // GPU SDF generation integration
@@ -74,14 +178,20 @@ private:
         std::unordered_map<ChunkID, std::shared_ptr<::Luminumbra::Chunk>> chunks;
         JobHandle generation_job_handle;
         JobHandle meshing_job_handle;
+        struct MeshingJobChunk {
+            std::shared_ptr<::Luminumbra::Chunk> chunk;
+            bool terrain_mesh_required = true;
+        };
+        std::vector<MeshingJobChunk> meshing_job_chunks;
     };
 
     StreamingState m_streaming_state;
+    StreamingBudgetFrameStats m_last_streaming_budget_stats;
 
     const std::vector<ChunkLOD> m_lod_levels = {
-        {0, 1, 96.0f},   // LOD 0: Full detail up to 96 meters (~6 chunks)
-        {1, 2, 192.0f},  // LOD 1: Half resolution up to 192 meters (~12 chunks)
-        {2, 4, 512.0f}   // LOD 2: Quarter resolution up to 512 meters (~32 chunks)
+        {0, 1, 192.0f},  // LOD 0: Full detail up to 192 meters (~12 chunks)
+        {1, 2, 384.0f},  // LOD 1: Half resolution up to 384 meters (~24 chunks)
+        {2, 4, 640.0f}   // LOD 2: Quarter resolution beyond the near visual range
     };
     int get_lod_level_for_distance(float dist) const;
     int get_lod_step_for_level(int lod_level) const;
@@ -89,7 +199,13 @@ private:
     // --- Helper Functions ---
     void update_chunk_activation(const Vec3& player_pos, PhysicsSystem* physics_system);
     // Signature updated to use shared_ptr
-    void dispatch_meshing_jobs(const std::vector<std::pair<std::shared_ptr<::Luminumbra::Chunk>, int>>& chunks_to_mesh);
+    struct MeshingWorkItem {
+        std::shared_ptr<::Luminumbra::Chunk> chunk;
+        int lod_level = 0;
+        bool terrain_mesh_required = true;
+    };
+    void dispatch_meshing_jobs(const std::vector<MeshingWorkItem>& chunks_to_mesh);
+    void process_completed_meshing_jobs();
     void wait_for_generation_jobs();
     void wait_for_meshing_jobs();
     void reinitialize_noise();

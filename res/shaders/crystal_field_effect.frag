@@ -15,6 +15,7 @@ uniform sampler2D gDepth;
 uniform vec3 u_cameraPos;
 uniform float u_time;
 uniform mat4 u_inverseView;
+uniform mat4 u_inverseProjection;
 uniform vec3 u_crystalPositions[16]; // Up to 16 crystal sources
 uniform float u_crystalIntensities[16];
 uniform int u_crystalCount;

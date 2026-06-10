@@ -1,0 +1,3 @@
+Wrote [critique.md](D:/Coding/luminumbra/.forge/artifacts/engine-frontier/critique.md).
+
+It contains 15 adversarial findings, including blockers for material-gate sequencing, endurance, RenderPipeline no-behavior-change gates, missing validator modes, hidden file coupling, persistence-before-networking, and budget realism. I also verified the required structure: 15 findings with `Finding`, `Mitigation`, `Verdict`, plus a blocker-first `Verdict Summary`.

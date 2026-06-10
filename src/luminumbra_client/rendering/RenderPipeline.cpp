@@ -4,6 +4,7 @@
 #include "core/Log.h"
 #include "rendering/Shader.h"
 #include "rendering/Camera.h"
+#include <algorithm>
 #include <unordered_set>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/constants.hpp>
@@ -11,6 +12,7 @@
 #include <cstring>
 #include <exception>
 #include <fstream>
+#include <limits>
 #include <utility>
 #include <GLFW/glfw3.h>
 #include "Mesh.h"
@@ -49,6 +51,11 @@ namespace Luminumbra::Rendering {
 
 namespace {
 
+constexpr bool kEnableExperimentalGpuSdfIntegration = false;
+constexpr size_t kMaxFreeChunkRenderSlots = 2048;
+constexpr size_t kMaxFreeWaterRenderSlots = 1024;
+constexpr int kTerrainFallbackTileSize = 32;
+
 void set_default_shadow_cascade_splits(ShadowMap& shadow_map) {
     shadow_map.cascade_splits.resize(ShadowMap::CASCADE_COUNT + 1);
     shadow_map.cascade_splits[0] = 0.1f;
@@ -62,6 +69,85 @@ bool has_valid_shadow_cascade_splits(const ShadowMap& shadow_map) {
     return shadow_map.cascade_splits.size() >= ShadowMap::CASCADE_COUNT + 1;
 }
 
+void delete_chunk_slot(ChunkRenderData& data) {
+    if (data.vao_id) { glDeleteVertexArrays(1, &data.vao_id); data.vao_id = 0; }
+    if (data.vbo_id) { glDeleteBuffers(1, &data.vbo_id); data.vbo_id = 0; }
+    if (data.ebo_id) { glDeleteBuffers(1, &data.ebo_id); data.ebo_id = 0; }
+    data = {};
+}
+
+void delete_water_slot(WaterRenderData& data) {
+    if (data.vao_id) { glDeleteVertexArrays(1, &data.vao_id); data.vao_id = 0; }
+    if (data.vbo_id) { glDeleteBuffers(1, &data.vbo_id); data.vbo_id = 0; }
+    if (data.ebo_id) { glDeleteBuffers(1, &data.ebo_id); data.ebo_id = 0; }
+    data = {};
+}
+
+bool is_valid_gl_object_name(GLenum identifier, GLuint name) {
+    switch (identifier) {
+        case GL_BUFFER:
+            return glIsBuffer(name) == GL_TRUE;
+        case GL_FRAMEBUFFER:
+            return glIsFramebuffer(name) == GL_TRUE;
+        case GL_PROGRAM:
+            return glIsProgram(name) == GL_TRUE;
+        case GL_RENDERBUFFER:
+            return glIsRenderbuffer(name) == GL_TRUE;
+        case GL_TEXTURE:
+            return glIsTexture(name) == GL_TRUE;
+        case GL_VERTEX_ARRAY:
+            return glIsVertexArray(name) == GL_TRUE;
+        default:
+            return true;
+    }
+}
+
+void label_gl_object(GLenum identifier, GLuint name, const std::string& label) {
+    if (name == 0) {
+        return;
+    }
+    if (!is_valid_gl_object_name(identifier, name)) {
+        return;
+    }
+#ifdef GL_VERSION_4_3
+    if (glObjectLabel) {
+        glObjectLabel(identifier, name, -1, label.c_str());
+    }
+#else
+    (void)identifier;
+    (void)label;
+#endif
+}
+
+std::vector<unsigned char> make_terrain_fallback_texture(int width, int height, int layer) {
+    std::vector<unsigned char> pixels(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const bool bright = (((x / kTerrainFallbackTileSize) + (y / kTerrainFallbackTileSize) + layer) % 2) == 0;
+            const size_t index = (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 4u;
+            pixels[index + 0u] = bright ? 255 : 35;
+            pixels[index + 1u] = bright ? 0 : 35;
+            pixels[index + 2u] = bright ? 220 : 35;
+            pixels[index + 3u] = 255;
+        }
+    }
+    return pixels;
+}
+
+GLuint make_solid_rgba_texture(const unsigned char rgba[4], const std::string& label) {
+    GLuint texture = 0;
+    glGenTextures(1, &texture);
+    label_gl_object(GL_TEXTURE, texture, label);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return texture;
+}
+
 } // namespace
 
 // --- HIERARCHICAL CULLING IMPLEMENTATION ---
@@ -72,30 +158,31 @@ void RenderPipeline::HierarchicalCuller::BuildHierarchy(const std::vector<ChunkM
         return;
     }
 
-    std::vector<const ChunkMeshSnapshot*> chunk_refs;
+    std::vector<ChunkCullEntry> chunk_refs;
     chunk_refs.reserve(chunks.size());
     for (const auto& chunk : chunks) {
-        chunk_refs.push_back(&chunk);
+        glm::vec3 chunk_min(
+            static_cast<float>(chunk.coords.x * CHUNK_SIZE_X),
+            static_cast<float>(chunk.coords.y * CHUNK_SIZE_Y),
+            static_cast<float>(chunk.coords.z * CHUNK_SIZE_Z));
+        glm::vec3 chunk_max = chunk_min + glm::vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+        chunk_refs.push_back(ChunkCullEntry{chunk.id, chunk.coords, AABB(chunk_min, chunk_max)});
     }
     
     // Calculate root bounding box from all chunks
-    glm::vec3 min(FLT_MAX);
-    glm::vec3 max(-FLT_MAX);
+    glm::vec3 min(std::numeric_limits<float>::max());
+    glm::vec3 max(std::numeric_limits<float>::lowest());
     
-    for (const auto* chunk : chunk_refs) {
-        glm::ivec3 coords = chunk->coords;
-        glm::vec3 chunk_min(coords.x * CHUNK_SIZE_X, coords.y * CHUNK_SIZE_Y, coords.z * CHUNK_SIZE_Z);
-        glm::vec3 chunk_max = chunk_min + glm::vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
-        
-        min = glm::min(min, chunk_min);
-        max = glm::max(max, chunk_max);
+    for (const auto& chunk : chunk_refs) {
+        min = glm::min(min, chunk.bounds.min);
+        max = glm::max(max, chunk.bounds.max);
     }
     
     m_root = std::make_unique<CullingNode>(AABB(min, max));
     BuildRecursive(m_root.get(), chunk_refs, 0);
 }
 
-void RenderPipeline::HierarchicalCuller::BuildRecursive(CullingNode* node, const std::vector<const ChunkMeshSnapshot*>& chunks, int depth) {
+void RenderPipeline::HierarchicalCuller::BuildRecursive(CullingNode* node, const std::vector<ChunkCullEntry>& chunks, int depth) {
     // Base cases: too few chunks or maximum depth reached
     if (chunks.size() <= MAX_CHUNKS_PER_NODE || depth >= MAX_DEPTH) {
         node->chunks = chunks;
@@ -115,10 +202,10 @@ void RenderPipeline::HierarchicalCuller::BuildRecursive(CullingNode* node, const
     };
     
     // Distribute chunks to children
-    std::vector<std::vector<const ChunkMeshSnapshot*>> child_chunks(4);
+    std::vector<std::vector<ChunkCullEntry>> child_chunks(4);
     
-    for (auto* chunk : chunks) {
-        glm::ivec3 coords = chunk->coords;
+    for (const auto& chunk : chunks) {
+        glm::ivec3 coords = chunk.coords;
         glm::vec3 chunk_center(coords.x * CHUNK_SIZE_X + CHUNK_SIZE_X * 0.5f, 
                               coords.y * CHUNK_SIZE_Y + CHUNK_SIZE_Y * 0.5f,
                               coords.z * CHUNK_SIZE_Z + CHUNK_SIZE_Z * 0.5f);
@@ -140,7 +227,7 @@ void RenderPipeline::HierarchicalCuller::BuildRecursive(CullingNode* node, const
     }
 }
 
-void RenderPipeline::HierarchicalCuller::CullRecursive(const glm::vec4 frustum_planes[6], CullingNode* node, std::vector<const ChunkMeshSnapshot*>& visible) {
+void RenderPipeline::HierarchicalCuller::CullRecursive(const glm::vec4 frustum_planes[6], CullingNode* node, std::vector<const ChunkCullEntry*>& visible) {
     if (!node) return;
     
     // Test this node's bounding box against the frustum
@@ -149,8 +236,11 @@ void RenderPipeline::HierarchicalCuller::CullRecursive(const glm::vec4 frustum_p
     }
     
     if (node->is_leaf) {
-        // Add all chunks in this leaf node (they're all visible since the node passed the test)
-        visible.insert(visible.end(), node->chunks.begin(), node->chunks.end());
+        for (const auto& chunk : node->chunks) {
+            if (!AABBFrustumCulled(chunk.bounds, frustum_planes)) {
+                visible.push_back(&chunk);
+            }
+        }
     } else {
         // Recursively test children
         for (int i = 0; i < 4; ++i) {
@@ -173,7 +263,7 @@ bool RenderPipeline::HierarchicalCuller::AABBFrustumCulled(const AABB& aabb, con
     return false; // Inside all planes
 }
 
-void RenderPipeline::HierarchicalCuller::CullHierarchical(const glm::vec4 frustum_planes[6], std::vector<const ChunkMeshSnapshot*>& visible) {
+void RenderPipeline::HierarchicalCuller::CullHierarchical(const glm::vec4 frustum_planes[6], std::vector<const ChunkCullEntry*>& visible) {
     if (m_root) {
         CullRecursive(frustum_planes, m_root.get(), visible);
     }
@@ -212,12 +302,15 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         init_skybox();
         init_terrain_textures();
         init_material_lut();
+        init_water_fallback_textures();
         init_gpu_sdf_system();
 
         std::string instanced_vert_path = (m_root_path / "res/shaders/instanced_mesh.vert").string();
         std::string gbuffer_frag_path = (m_root_path / "res/shaders/g_buffer.frag").string();
         m_instanced_static_mesh_shader = std::make_unique<Shader>(instanced_vert_path.c_str(), gbuffer_frag_path.c_str());
+        label_gl_object(GL_PROGRAM, m_instanced_static_mesh_shader ? m_instanced_static_mesh_shader->Id() : 0u, "shader.instanced_static_mesh");
         glGenBuffers(1, &m_instanceMatrixVBO);
+        label_gl_object(GL_BUFFER, m_instanceMatrixVBO, "static_mesh.instance_matrices");
         glBindBuffer(GL_ARRAY_BUFFER, m_instanceMatrixVBO);
         glBufferData(GL_ARRAY_BUFFER, 10000 * sizeof(glm::mat4), nullptr, GL_DYNAMIC_DRAW);
         glBindBuffer(GL_ARRAY_BUFFER, 0);
@@ -235,9 +328,19 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
     return false;
 }
 
+void RenderPipeline::shutdown() {
+    cleanup_gpu_resources();
+}
+
 void RenderPipeline::SetupGPUSDFIntegration(Systems::SHIELD_WorldSystem& world_system) {
     if (!m_gpu_sdf.initialized) {
         LUMINUMBRA_CORE_WARN("GPU SDF system not initialized, cannot set up integration");
+        return;
+    }
+
+    if (!kEnableExperimentalGpuSdfIntegration) {
+        world_system.SetGPUSDFCallback({});
+        LUMINUMBRA_CORE_WARN("GPU SDF integration disabled; using authoritative CPU worldgen path until GPU/CPU parity is implemented");
         return;
     }
     
@@ -249,6 +352,237 @@ void RenderPipeline::SetupGPUSDFIntegration(Systems::SHIELD_WorldSystem& world_s
     );
     
     LUMINUMBRA_CORE_INFO("GPU SDF integration with world system established");
+}
+
+RenderPipeline::RuntimeRenderStats RenderPipeline::get_runtime_render_stats() const {
+    RuntimeRenderStats stats;
+    stats.started = m_started;
+    stats.terrain_gpu_chunks = m_chunk_render_data.size();
+    stats.water_gpu_chunks = m_water_render_data.size();
+    stats.free_terrain_slots = m_free_chunk_render_slots.size();
+    stats.free_water_slots = m_free_water_render_slots.size();
+
+    auto add_chunk_capacity = [](const ChunkRenderData& data, size_t& vertices, size_t& indices) {
+        vertices += data.vertex_capacity;
+        indices += data.index_capacity;
+    };
+    auto add_water_capacity = [](const WaterRenderData& data, size_t& vertices, size_t& indices) {
+        vertices += data.vertex_capacity;
+        indices += data.index_capacity;
+    };
+
+    for (const auto& [id, data] : m_chunk_render_data) {
+        (void)id;
+        add_chunk_capacity(data, stats.terrain_vertex_capacity, stats.terrain_index_capacity);
+    }
+    for (const auto& data : m_free_chunk_render_slots) {
+        add_chunk_capacity(data, stats.terrain_vertex_capacity, stats.terrain_index_capacity);
+    }
+    for (const auto& [id, data] : m_water_render_data) {
+        (void)id;
+        add_water_capacity(data, stats.water_vertex_capacity, stats.water_index_capacity);
+    }
+    for (const auto& data : m_free_water_render_slots) {
+        add_water_capacity(data, stats.water_vertex_capacity, stats.water_index_capacity);
+    }
+
+    const size_t pixel_count = static_cast<size_t>(m_screen_width) * static_cast<size_t>(m_screen_height);
+    size_t estimated_vram_bytes = 0;
+    estimated_vram_bytes += (stats.terrain_vertex_capacity + stats.water_vertex_capacity) * sizeof(VoxelVertex);
+    estimated_vram_bytes += (stats.terrain_index_capacity + stats.water_index_capacity) * sizeof(u32);
+    if (m_lighting_fbo.color_texture) estimated_vram_bytes += pixel_count * 8u; // RGBA16F
+    if (m_lighting_fbo.opaque_color_texture) estimated_vram_bytes += pixel_count * 8u; // RGBA16F
+    if (m_lighting_fbo.depth_texture) estimated_vram_bytes += pixel_count * 4u;
+    if (m_gbuffer.position_texture) estimated_vram_bytes += pixel_count * 6u; // RGB16F
+    if (m_gbuffer.normal_texture) estimated_vram_bytes += pixel_count * 4u;
+    if (m_gbuffer.albedo_texture) estimated_vram_bytes += pixel_count * 4u;
+    if (m_gbuffer.material_texture) estimated_vram_bytes += pixel_count * 4u; // RG16F
+    if (m_gbuffer.depth_texture) estimated_vram_bytes += pixel_count * 4u;
+    if (m_shadow_map.depth_texture_array) {
+        estimated_vram_bytes += static_cast<size_t>(m_shadow_map.resolution) *
+                                static_cast<size_t>(m_shadow_map.resolution) *
+                                static_cast<size_t>(ShadowMap::CASCADE_COUNT) * 4u;
+    }
+    if (m_ssao.ssaoColorBuffer) estimated_vram_bytes += pixel_count * 2u;
+    if (m_ssao.ssaoColorBufferBlur) estimated_vram_bytes += pixel_count * 2u;
+    if (m_ssao.noiseTexture) estimated_vram_bytes += 4u * 4u * 6u;
+    if (m_screen_quad_vbo) estimated_vram_bytes += 20u * sizeof(float);
+    if (m_skybox_vbo) estimated_vram_bytes += 108u * sizeof(float);
+    if (m_instanceMatrixVBO) estimated_vram_bytes += 10000u * sizeof(glm::mat4);
+    if (m_terrainTextureArray) estimated_vram_bytes += 2048u * 2048u * 5u * 4u;
+    if (m_materialLUT) estimated_vram_bytes += 256u * 4u;
+    if (m_water_flat_normal_texture) estimated_vram_bytes += 4u;
+    if (m_water_neutral_flow_texture) estimated_vram_bytes += 4u;
+    if (m_water_black_texture) estimated_vram_bytes += 4u;
+    if (m_water_underwater_texture) estimated_vram_bytes += 4u;
+    if (m_gpu_sdf.sdf_buffer) estimated_vram_bytes += 17u * 17u * 17u * sizeof(float);
+    if (m_gpu_sdf.terrain_noise_texture) estimated_vram_bytes += 128u * 128u * 128u * sizeof(float);
+    if (m_gpu_sdf.cave_noise_texture) estimated_vram_bytes += 128u * 128u * 128u * sizeof(float);
+    if (m_gpu_sdf.island_mask_texture) estimated_vram_bytes += 128u * 128u * sizeof(float);
+    stats.estimated_vram_bytes = estimated_vram_bytes;
+
+    stats.geometry_shader_ok = m_geometry_shader && m_geometry_shader->IsValid();
+    stats.lighting_shader_ok = m_lighting_shader && m_lighting_shader->IsValid();
+    stats.skybox_shader_ok = m_skybox_shader && m_skybox_shader->IsValid();
+    stats.shadow_shader_ok = m_shadow_shader && m_shadow_shader->IsValid();
+    stats.ssao_shader_ok = m_ssao.ssaoShader && m_ssao.ssaoShader->IsValid();
+    stats.ssao_blur_shader_ok = m_ssao.blurShader && m_ssao.blurShader->IsValid();
+    stats.water_shader_ok = m_water_shader && m_water_shader->IsValid();
+    stats.instanced_static_mesh_shader_ok = m_instanced_static_mesh_shader && m_instanced_static_mesh_shader->IsValid();
+    stats.gpu_sdf_initialized = m_gpu_sdf.initialized;
+    stats.terrain_texture_array_ok = m_terrainTextureArray != 0;
+    stats.material_lut_ok = m_materialLUT != 0;
+    stats.terrain_texture_fallback_layers = m_terrain_texture_fallback_layers;
+    return stats;
+}
+
+std::vector<RenderPipeline::ShaderHealthEntry> RenderPipeline::get_shader_health() const {
+    std::vector<ShaderHealthEntry> health;
+    auto add_shader = [&health](const char* name, const std::unique_ptr<Shader>& shader) {
+        ShaderHealthEntry entry;
+        entry.name = name;
+        entry.ok = shader && shader->IsValid();
+        if (shader && !shader->Diagnostic().empty()) {
+            entry.diagnostic = shader->Diagnostic();
+        } else if (!shader) {
+            entry.diagnostic = "not initialized";
+        }
+        health.push_back(std::move(entry));
+    };
+
+    add_shader("geometry", m_geometry_shader);
+    add_shader("lighting", m_lighting_shader);
+    add_shader("skybox", m_skybox_shader);
+    add_shader("shadow", m_shadow_shader);
+    add_shader("ssao", m_ssao.ssaoShader);
+    add_shader("ssao_blur", m_ssao.blurShader);
+    add_shader("water", m_water_shader);
+    add_shader("instanced_static_mesh", m_instanced_static_mesh_shader);
+    health.push_back({"gpu_sdf_compute", m_gpu_sdf.compute_program != 0, m_gpu_sdf.compute_program != 0 ? "" : "not initialized"});
+    return health;
+}
+
+RenderPipeline::RenderResourceRegistryStats RenderPipeline::get_resource_registry_stats() const {
+    RenderResourceRegistryStats stats;
+    auto count = [](GLuint id) -> size_t { return id != 0 ? 1u : 0u; };
+
+    stats.framebuffers += count(m_lighting_fbo.fbo_id);
+    stats.framebuffers += count(m_gbuffer.fbo_id);
+    stats.framebuffers += count(m_shadow_map.fbo_id);
+    stats.framebuffers += count(m_ssao.fbo);
+    stats.framebuffers += count(m_ssao.blurFBO);
+
+    stats.textures += count(m_lighting_fbo.color_texture);
+    stats.textures += count(m_lighting_fbo.opaque_color_texture);
+    stats.textures += count(m_gbuffer.position_texture);
+    stats.textures += count(m_gbuffer.normal_texture);
+    stats.textures += count(m_gbuffer.albedo_texture);
+    stats.textures += count(m_gbuffer.material_texture);
+    stats.textures += count(m_gbuffer.depth_texture);
+    stats.textures += count(m_shadow_map.depth_texture_array);
+    stats.textures += count(m_ssao.ssaoColorBuffer);
+    stats.textures += count(m_ssao.ssaoColorBufferBlur);
+    stats.textures += count(m_ssao.noiseTexture);
+    stats.textures += count(m_terrainTextureArray);
+    stats.textures += count(m_materialLUT);
+    stats.textures += count(m_water_flat_normal_texture);
+    stats.textures += count(m_water_neutral_flow_texture);
+    stats.textures += count(m_water_black_texture);
+    stats.textures += count(m_water_underwater_texture);
+    stats.textures += count(m_gpu_sdf.terrain_noise_texture);
+    stats.textures += count(m_gpu_sdf.cave_noise_texture);
+    stats.textures += count(m_gpu_sdf.island_mask_texture);
+
+    stats.renderbuffers += count(m_lighting_fbo.depth_texture);
+    stats.buffers += count(m_screen_quad_vbo);
+    stats.buffers += count(m_skybox_vbo);
+    stats.buffers += count(m_instanceMatrixVBO);
+    stats.buffers += count(m_gpu_sdf.sdf_buffer);
+    stats.vertex_arrays += count(m_screen_quad_vao);
+    stats.vertex_arrays += count(m_skybox_vao);
+
+    auto count_chunk_slot = [&stats](const ChunkRenderData& data) {
+        stats.vertex_arrays += data.vao_id != 0 ? 1u : 0u;
+        stats.buffers += data.vbo_id != 0 ? 1u : 0u;
+        stats.buffers += data.ebo_id != 0 ? 1u : 0u;
+    };
+    auto count_water_slot = [&stats](const WaterRenderData& data) {
+        stats.vertex_arrays += data.vao_id != 0 ? 1u : 0u;
+        stats.buffers += data.vbo_id != 0 ? 1u : 0u;
+        stats.buffers += data.ebo_id != 0 ? 1u : 0u;
+    };
+
+    stats.terrain_slots = m_chunk_render_data.size() + m_free_chunk_render_slots.size();
+    stats.water_slots = m_water_render_data.size() + m_free_water_render_slots.size();
+    for (const auto& [id, data] : m_chunk_render_data) {
+        (void)id;
+        count_chunk_slot(data);
+    }
+    for (const auto& data : m_free_chunk_render_slots) {
+        count_chunk_slot(data);
+    }
+    for (const auto& [id, data] : m_water_render_data) {
+        (void)id;
+        count_water_slot(data);
+    }
+    for (const auto& data : m_free_water_render_slots) {
+        count_water_slot(data);
+    }
+
+    for (const ShaderHealthEntry& shader : get_shader_health()) {
+        if (shader.ok) {
+            stats.shader_programs++;
+        }
+    }
+
+    const size_t total_resources = stats.framebuffers + stats.textures + stats.renderbuffers +
+        stats.buffers + stats.vertex_arrays + stats.shader_programs + stats.terrain_slots + stats.water_slots;
+    stats.empty_after_shutdown = !m_started && total_resources == 0u;
+    return stats;
+}
+
+void RenderPipeline::refresh_render_pass_metadata() {
+    m_last_render_pass_metadata.clear();
+    auto add_pass = [this](std::string name,
+                           std::vector<std::string> inputs,
+                           std::vector<std::string> outputs,
+                           u32 width,
+                           u32 height,
+                           std::string clear,
+                           std::string load_store,
+                           size_t draw_count,
+                           size_t dispatch_count = 0u) {
+        RenderPassMetadata metadata;
+        metadata.name = std::move(name);
+        metadata.inputs = std::move(inputs);
+        metadata.outputs = std::move(outputs);
+        metadata.width = width;
+        metadata.height = height;
+        metadata.clear = std::move(clear);
+        metadata.load_store = std::move(load_store);
+        metadata.draw_count = draw_count;
+        metadata.dispatch_count = dispatch_count;
+        m_last_render_pass_metadata.push_back(std::move(metadata));
+    };
+
+    add_pass("shadow", {"terrain_depth"}, {"shadow.depth_texture_array"}, m_shadow_map.resolution, m_shadow_map.resolution,
+             "depth", "store depth cascades", m_last_render_pass_stats.shadow_draws);
+    add_pass("gbuffer", {"terrain_meshes", "static_meshes", "material_lut"},
+             {"gbuffer.position", "gbuffer.normal_material", "gbuffer.albedo_roughness", "gbuffer.metallic_ao", "gbuffer.depth"},
+             m_screen_width, m_screen_height, "color+depth", "store deferred attachments", m_last_render_pass_stats.terrain_draws);
+    add_pass("ssao", {"gbuffer.position", "gbuffer.normal_material", "ssao.noise"}, {"ssao.raw"}, m_screen_width, m_screen_height,
+             "color", "store ambient occlusion", m_last_render_pass_stats.ssao_draws);
+    add_pass("ssao_blur", {"ssao.raw"}, {"ssao.blur"}, m_screen_width, m_screen_height,
+             "color", "store blurred ambient occlusion", m_last_render_pass_stats.ssao_blur_draws);
+    add_pass("lighting", {"gbuffer.*", "shadow.depth_texture_array", "ssao.blur", "terrain_texture_array", "material_lut", "water.fallback.black"},
+             {"lighting.color", "lighting.depth"}, m_screen_width, m_screen_height,
+             "color+depth", "store lit scene", m_last_render_pass_stats.lighting_draws);
+    add_pass("water", {"lighting.opaque_color_copy", "gbuffer.depth", "water_meshes", "water.fallback.*"}, {"lighting.color"}, m_screen_width, m_screen_height,
+             "load lighting", "blend water into lighting", m_last_render_pass_stats.water_draws);
+    add_pass("skybox", {"skybox_vertices"}, {"lighting.color"}, m_screen_width, m_screen_height,
+             "load lighting", "store sky contribution", m_last_render_pass_stats.skybox_draws);
+    add_pass("final_blit", {"lighting.color"}, {"swapchain.color"}, m_screen_width, m_screen_height,
+             "default color+depth", "present-ready color", m_last_render_pass_stats.final_blits);
 }
 
 void RenderPipeline::gather_lights(entt::registry& registry) {
@@ -282,25 +616,61 @@ std::vector<RenderPipeline::ChunkMeshSnapshot> RenderPipeline::build_chunk_snaps
         ChunkMeshSnapshot snapshot;
         snapshot.id = chunk->get_id();
         snapshot.coords = chunk->get_coords();
+        snapshot.source_chunk = chunk;
         snapshot.mesh_version = chunk->mesh_version.load(std::memory_order_acquire);
-        snapshot.mesh_vertices = chunk->mesh_vertices;
-        snapshot.mesh_indices = chunk->mesh_indices;
-        snapshot.water_mesh_vertices = chunk->water_mesh_vertices;
-        snapshot.water_mesh_indices = chunk->water_mesh_indices;
+        snapshot.water_mesh_version = chunk->water_mesh_version.load(std::memory_order_acquire);
+        snapshot.terrain_vertex_count = chunk->mesh_vertices.size();
+        snapshot.terrain_index_count = chunk->mesh_indices.size();
+        snapshot.water_vertex_count = chunk->water_mesh_vertices.size();
+        snapshot.water_index_count = chunk->water_mesh_indices.size();
 
-        const u32 version_after_copy = chunk->mesh_version.load(std::memory_order_acquire);
-        if (version_after_copy != snapshot.mesh_version) {
-            snapshot.mesh_version = version_after_copy;
-            snapshot.mesh_vertices.clear();
-            snapshot.mesh_indices.clear();
-            snapshot.water_mesh_vertices.clear();
-            snapshot.water_mesh_indices.clear();
+        const u32 version_after_metadata = chunk->mesh_version.load(std::memory_order_acquire);
+        const u32 water_version_after_metadata = chunk->water_mesh_version.load(std::memory_order_acquire);
+        if (version_after_metadata != snapshot.mesh_version) {
+            snapshot.mesh_version = version_after_metadata;
+            snapshot.terrain_vertex_count = 0;
+            snapshot.terrain_index_count = 0;
+        }
+        if (water_version_after_metadata != snapshot.water_mesh_version) {
+            snapshot.water_mesh_version = water_version_after_metadata;
+            snapshot.water_vertex_count = 0;
+            snapshot.water_index_count = 0;
         }
 
         snapshots.push_back(std::move(snapshot));
     }
 
     return snapshots;
+}
+
+void RenderPipeline::ensure_terrain_culling_hierarchy(const std::vector<ChunkMeshSnapshot>& renderable_chunks) {
+    std::vector<ChunkID> sorted_chunk_ids;
+    sorted_chunk_ids.reserve(renderable_chunks.size());
+    for (const auto& chunk : renderable_chunks) {
+        sorted_chunk_ids.push_back(chunk.id);
+    }
+    std::sort(sorted_chunk_ids.begin(), sorted_chunk_ids.end());
+
+    u64 signature = 1469598103934665603ull;
+    for (const ChunkID id : sorted_chunk_ids) {
+        signature ^= id;
+        signature *= 1099511628211ull;
+    }
+
+    const bool needs_rebuild = !m_terrainCullingCache.valid ||
+                               m_terrainCullingCache.chunk_count != renderable_chunks.size() ||
+                               m_terrainCullingCache.chunk_set_signature != signature;
+    if (!needs_rebuild) {
+        m_last_render_pass_stats.culling_hierarchy_chunks = m_terrainCullingCache.chunk_count;
+        return;
+    }
+
+    m_hierarchicalCuller.BuildHierarchy(renderable_chunks);
+    m_terrainCullingCache.chunk_set_signature = signature;
+    m_terrainCullingCache.chunk_count = renderable_chunks.size();
+    m_terrainCullingCache.valid = true;
+    m_last_render_pass_stats.culling_hierarchy_rebuilds++;
+    m_last_render_pass_stats.culling_hierarchy_chunks = renderable_chunks.size();
 }
 
 void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_WorldSystem& world_system, const Camera& camera, float deltaTime, bool wireframe) {
@@ -312,9 +682,14 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     gather_lights(registry);
     auto renderable_chunks = world_system.get_renderable_chunks();
     auto renderable_chunk_snapshots = build_chunk_snapshots(renderable_chunks);
+    m_last_mesh_upload_stats = {};
+    m_last_mesh_upload_stats.snapshot_count = renderable_chunk_snapshots.size();
+    m_last_render_pass_stats = {};
+    m_last_render_pass_stats.snapshot_count = renderable_chunk_snapshots.size();
 
-    manage_chunk_gpu_resources(renderable_chunk_snapshots);
-    manage_water_gpu_resources(renderable_chunk_snapshots);
+    manage_chunk_gpu_resources(renderable_chunk_snapshots, camera);
+    manage_water_gpu_resources(renderable_chunk_snapshots, camera);
+    ensure_terrain_culling_hierarchy(renderable_chunk_snapshots);
 
     // Ensure no VAO is bound at start to prevent artifacts
     glBindVertexArray(0);
@@ -376,7 +751,8 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     lighting_pass(camera);
     glBindVertexArray(0);  // Unbind after lighting pass
 
-    // 5. COPY DEPTH TO LIGHTING FBO FOR WATER DEPTH TEST
+    // 5. SNAPSHOT THE OPAQUE SCENE, THEN COPY DEPTH TO LIGHTING FBO FOR WATER DEPTH TEST
+    copy_lighting_color_to_opaque_texture();
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_gbuffer.fbo_id);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_lighting_fbo.fbo_id);
     glBlitFramebuffer(0, 0, m_screen_width, m_screen_height, 0, 0, m_screen_width, m_screen_height, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
@@ -399,8 +775,10 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     
     glBlitFramebuffer(0, 0, m_screen_width, m_screen_height, 0, 0, m_screen_width, m_screen_height, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    m_last_render_pass_stats.final_blits++;
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    refresh_render_pass_metadata();
 }
 
 void RenderPipeline::gbuffer_pass(entt::registry& registry, const std::vector<ChunkMeshSnapshot>& renderable_chunks, const Camera& camera, const glm::vec4 frustum_planes[6]) {
@@ -418,10 +796,12 @@ void RenderPipeline::gbuffer_pass(entt::registry& registry, const std::vector<Ch
 
 void RenderPipeline::init_lighting_fbo(u32 width, u32 height) {
     glGenFramebuffers(1, &m_lighting_fbo.fbo_id);
+    label_gl_object(GL_FRAMEBUFFER, m_lighting_fbo.fbo_id, "lighting.fbo");
     glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_fbo.fbo_id);
 
     // Color attachment (for the final lit scene)
     glGenTextures(1, &m_lighting_fbo.color_texture);
+    label_gl_object(GL_TEXTURE, m_lighting_fbo.color_texture, "lighting.color");
     glBindTexture(GL_TEXTURE_2D, m_lighting_fbo.color_texture);
     // Use RGBA16F for HDR lighting to avoid clamping colors between 0 and 1
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
@@ -429,9 +809,19 @@ void RenderPipeline::init_lighting_fbo(u32 width, u32 height) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_lighting_fbo.color_texture, 0);
 
+    glGenTextures(1, &m_lighting_fbo.opaque_color_texture);
+    label_gl_object(GL_TEXTURE, m_lighting_fbo.opaque_color_texture, "lighting.opaque_color_copy");
+    glBindTexture(GL_TEXTURE_2D, m_lighting_fbo.opaque_color_texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
     // We will blit the depth from the G-Buffer later, so we only need a renderbuffer object for depth testing.
     // However, if you wanted to do post-processing on this FBO that needs depth, you would use a depth texture.
     glGenRenderbuffers(1, &m_lighting_fbo.depth_texture); // Note: this is a renderbuffer ID, not a texture ID
+    label_gl_object(GL_RENDERBUFFER, m_lighting_fbo.depth_texture, "lighting.depth");
     glBindRenderbuffer(GL_RENDERBUFFER, m_lighting_fbo.depth_texture);
     glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_lighting_fbo.depth_texture);
@@ -442,12 +832,32 @@ void RenderPipeline::init_lighting_fbo(u32 width, u32 height) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+void RenderPipeline::destroy_lighting_fbo() {
+    if (m_lighting_fbo.fbo_id) { glDeleteFramebuffers(1, &m_lighting_fbo.fbo_id); m_lighting_fbo.fbo_id = 0; }
+    if (m_lighting_fbo.color_texture) { glDeleteTextures(1, &m_lighting_fbo.color_texture); m_lighting_fbo.color_texture = 0; }
+    if (m_lighting_fbo.opaque_color_texture) { glDeleteTextures(1, &m_lighting_fbo.opaque_color_texture); m_lighting_fbo.opaque_color_texture = 0; }
+    if (m_lighting_fbo.depth_texture) { glDeleteRenderbuffers(1, &m_lighting_fbo.depth_texture); m_lighting_fbo.depth_texture = 0; }
+}
+
+void RenderPipeline::copy_lighting_color_to_opaque_texture() {
+    if (!m_lighting_fbo.fbo_id || !m_lighting_fbo.color_texture || !m_lighting_fbo.opaque_color_texture) {
+        return;
+    }
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, m_lighting_fbo.fbo_id);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    glBindTexture(GL_TEXTURE_2D, m_lighting_fbo.opaque_color_texture);
+    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, m_screen_width, m_screen_height);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+}
+
 void RenderPipeline::water_pass(const std::vector<ChunkMeshSnapshot>& renderable_chunks, const Camera& camera) {
     // --- 1. Set OpenGL State ---
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDepthMask(GL_FALSE);
-    glCullFace(GL_BACK);
+    glDisable(GL_CULL_FACE);
 
     // --- 2. Activate Shader and Set Uniforms ---
     m_water_shader->use();
@@ -470,18 +880,38 @@ void RenderPipeline::water_pass(const std::vector<ChunkMeshSnapshot>& renderable
     m_water_shader->setVec3("u_sun_direction", m_sun.direction);
     m_water_shader->setVec3("u_sun_color", m_sun.color);
     m_water_shader->setVec3("u_shallow_color", glm::vec3(0.3, 0.8, 0.7));
-    m_water_shader->setVec3("u_deep_color", glm::vec3(0.0, 0.1, 0.25));
+    m_water_shader->setVec3("u_deep_color", glm::vec3(0.02, 0.18, 0.34));
     m_water_shader->setFloat("u_water_depth_scaler", 0.2f);
     m_water_shader->setFloat("u_reflection_power", 0.7f);
 
     // Bind textures (as before)
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, m_lighting_fbo.color_texture);
+    glBindTexture(GL_TEXTURE_2D, m_lighting_fbo.opaque_color_texture);
     m_water_shader->setInt("u_opaque_scene_color", 0);
 
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, m_gbuffer.depth_texture);
     m_water_shader->setInt("u_opaque_depth", 1);
+
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, m_water_flat_normal_texture);
+    m_water_shader->setInt("u_normal_map", 2);
+
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, m_water_neutral_flow_texture);
+    m_water_shader->setInt("u_flow_map", 3);
+
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_2D, m_water_black_texture);
+    m_water_shader->setInt("u_caustics_texture", 4);
+
+    glActiveTexture(GL_TEXTURE5);
+    glBindTexture(GL_TEXTURE_2D, m_water_underwater_texture);
+    m_water_shader->setInt("u_underwater_texture", 5);
+
+    glActiveTexture(GL_TEXTURE6);
+    glBindTexture(GL_TEXTURE_2D, m_water_black_texture);
+    m_water_shader->setInt("u_foam_texture", 6);
     
     // --- 3. Draw Water Meshes ---
     for (const auto& chunk : renderable_chunks) {
@@ -494,6 +924,8 @@ void RenderPipeline::water_pass(const std::vector<ChunkMeshSnapshot>& renderable
             
             glBindVertexArray(render_data.vao_id);
             glDrawElements(GL_TRIANGLES, render_data.element_count, GL_UNSIGNED_INT, 0);
+            m_last_render_pass_stats.water_draws++;
+            m_last_render_pass_stats.water_indices_drawn += render_data.element_count;
         }
     }
 
@@ -501,6 +933,7 @@ void RenderPipeline::water_pass(const std::vector<ChunkMeshSnapshot>& renderable
     glBindVertexArray(0);
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
+    glEnable(GL_CULL_FACE);
 }
 
 
@@ -508,21 +941,37 @@ void RenderPipeline::on_resize(u32 new_width, u32 new_height) {
     if (new_width == 0 || new_height == 0 || (new_width == m_screen_width && new_height == m_screen_height)) return;
     m_screen_width = new_width;
     m_screen_height = new_height;
+    destroy_lighting_fbo();
+    init_lighting_fbo(new_width, new_height);
     destroy_gbuffer();
     init_gbuffer(new_width, new_height);
     destroy_ssao();
     init_ssao();
+    m_frustumCache.valid = false;
 }
 
 void RenderPipeline::clear_all_chunk_data() {
     // Force clear all cached chunk render data to ensure fresh uploads
     for (auto& [id, data] : m_chunk_render_data) {
-        if (data.vao_id) glDeleteVertexArrays(1, &data.vao_id);
-        if (data.vbo_id) glDeleteBuffers(1, &data.vbo_id);
-        if (data.ebo_id) glDeleteBuffers(1, &data.ebo_id);
+        (void)id;
+        delete_chunk_slot(data);
     }
     m_chunk_render_data.clear();
-    LUMINUMBRA_CORE_WARN("CLEAR DEBUG: Forced clear of all chunk render data");
+    for (auto& data : m_free_chunk_render_slots) {
+        delete_chunk_slot(data);
+    }
+    m_free_chunk_render_slots.clear();
+
+    for (auto& [id, data] : m_water_render_data) {
+        (void)id;
+        delete_water_slot(data);
+    }
+    m_water_render_data.clear();
+    for (auto& data : m_free_water_render_slots) {
+        delete_water_slot(data);
+    }
+    m_free_water_render_slots.clear();
+    LUMINUMBRA_CORE_INFO("Cleared chunk render data cache");
 }
 
 // --- RENDER PASSES ---
@@ -540,28 +989,14 @@ void RenderPipeline::geometry_pass_chunks(const std::vector<RenderPipeline::Chun
     glBindTexture(GL_TEXTURE_2D, m_materialLUT);
     m_geometry_shader->setInt("u_materialLUT", 0);
     
-    // Build hierarchical culling structure
-    m_hierarchicalCuller.BuildHierarchy(renderable_chunks);
-    
     // Perform hierarchical frustum culling
-    std::vector<const ChunkMeshSnapshot*> visible_chunks;
+    std::vector<const ChunkCullEntry*> visible_chunks;
     visible_chunks.reserve(renderable_chunks.size());
     m_hierarchicalCuller.CullHierarchical(frustum_planes, visible_chunks);
-    
-    // Debug render count
-    static int frame_count = 0;
-    int chunks_rendered = 0;
-    
-    // Debug: Log camera position every 60 frames
-    if (frame_count == 0) {
-        LUMINUMBRA_CORE_WARN("CAMERA DEBUG: Player at ({},{},{}) - Hierarchical culling: {}/{} chunks visible", 
-            camera.Position.x, camera.Position.y, camera.Position.z,
-            visible_chunks.size(), renderable_chunks.size());
-    }
+    m_last_render_pass_stats.terrain_visible_chunks = visible_chunks.size();
 
     // Render visible chunks
     for (const auto* chunk : visible_chunks) {
-        LUMINUMBRA_CORE_INFO("Rendering chunk: {}", chunk->id);
         if (m_chunk_render_data.find(chunk->id) == m_chunk_render_data.end()) continue;
 
         const auto& render_data = m_chunk_render_data.at(chunk->id);
@@ -571,21 +1006,14 @@ void RenderPipeline::geometry_pass_chunks(const std::vector<RenderPipeline::Chun
         glm::vec3 min_aabb(cc.x * CHUNK_SIZE_X, cc.y * CHUNK_SIZE_Y, cc.z * CHUNK_SIZE_Z);
 
         glm::mat4 model = glm::translate(glm::mat4(1.0f), min_aabb);
-        glm::mat3 normalMatrix = glm::transpose(glm::inverse(glm::mat3(model)));
+        glm::mat3 normalMatrix = glm::transpose(glm::inverse(glm::mat3(view * model)));
         m_geometry_shader->setMat4("model", model);
         m_geometry_shader->setMat3("normalMatrix", normalMatrix);
 
         glBindVertexArray(render_data.vao_id);
         glDrawElements(GL_TRIANGLES, render_data.element_count, GL_UNSIGNED_INT, 0);
-        chunks_rendered++;
-    }
-    
-    // Debug output every 60 frames  
-    if (++frame_count >= 60) {
-        if (chunks_rendered > 0) {
-            LUMINUMBRA_CORE_WARN("RENDER DEBUG: {} chunks rendered this frame (hierarchical culling)", chunks_rendered);
-        }
-        frame_count = 0;
+        m_last_render_pass_stats.terrain_draws++;
+        m_last_render_pass_stats.terrain_indices_drawn += render_data.element_count;
     }
     
     glBindVertexArray(0);
@@ -658,15 +1086,28 @@ void RenderPipeline::shadow_pass(const std::vector<RenderPipeline::ChunkMeshSnap
     for (int i = 0; i < ShadowMap::CASCADE_COUNT; ++i) {
         glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, m_shadow_map.depth_texture_array, 0, i);
         m_shadow_shader->setMat4("u_lightSpaceMatrix", light_space_matrices[i]);
-        for (const auto& chunk : renderable_chunks) {
-            if (m_chunk_render_data.count(chunk.id) == 0) continue;
-            const auto& render_data = m_chunk_render_data.at(chunk.id);
-            glm::ivec3 cc = chunk.coords;
+
+        glm::vec4 cascade_planes[6];
+        ExtractFrustumPlanes(light_space_matrices[i], cascade_planes);
+        std::vector<const ChunkCullEntry*> visible_chunks;
+        visible_chunks.reserve(renderable_chunks.size());
+        m_hierarchicalCuller.CullHierarchical(cascade_planes, visible_chunks);
+        m_last_render_pass_stats.shadow_cascade_visible_chunks[i] = visible_chunks.size();
+
+        for (const auto* chunk : visible_chunks) {
+            if (m_chunk_render_data.count(chunk->id) == 0) continue;
+            const auto& render_data = m_chunk_render_data.at(chunk->id);
+            if (render_data.element_count == 0) continue;
+
+            glm::ivec3 cc = chunk->coords;
             glm::vec3 base(cc.x * CHUNK_SIZE_X, cc.y * CHUNK_SIZE_Y, cc.z * CHUNK_SIZE_Z);
             glm::mat4 model = glm::translate(glm::mat4(1.0f), base);
             m_shadow_shader->setMat4("u_model", model);
             glBindVertexArray(render_data.vao_id);
             glDrawElements(GL_TRIANGLES, render_data.element_count, GL_UNSIGNED_INT, 0);
+            m_last_render_pass_stats.shadow_cascade_draws[i]++;
+            m_last_render_pass_stats.shadow_draws++;
+            m_last_render_pass_stats.shadow_indices_drawn += render_data.element_count;
         }
     }
     glCullFace(GL_BACK);
@@ -678,29 +1119,27 @@ void RenderPipeline::lighting_pass(const Camera& camera) {
     glViewport(0, 0, m_screen_width, m_screen_height);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     m_lighting_shader->use();
-    // Bind compressed G-Buffer textures
-    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m_gbuffer.position_texture);    // XZ position
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m_gbuffer.position_texture);    // View-space position
     glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m_gbuffer.normal_texture);      // Octahedral normal + material
     glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_gbuffer.albedo_texture);      // Albedo + roughness
     glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, m_gbuffer.material_texture);    // Metallic + AO
-    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, m_gbuffer.depth_texture);       // Depth for Y reconstruction
+    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, m_gbuffer.depth_texture);
     glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D_ARRAY, m_shadow_map.depth_texture_array);
     glActiveTexture(GL_TEXTURE6); glBindTexture(GL_TEXTURE_2D, m_ssao.ssaoColorBufferBlur);
     glActiveTexture(GL_TEXTURE7); glBindTexture(GL_TEXTURE_2D_ARRAY, m_terrainTextureArray);
     glActiveTexture(GL_TEXTURE8); glBindTexture(GL_TEXTURE_2D, m_materialLUT);
-    // TODO: Add caustics texture binding here when caustics texture is implemented
-    // glActiveTexture(GL_TEXTURE8); glBindTexture(GL_TEXTURE_2D, m_causticsTexture);
-    // m_lighting_shader->setInt("u_causticsTexture", 8);
+    glActiveTexture(GL_TEXTURE9); glBindTexture(GL_TEXTURE_2D, m_water_black_texture);
     m_lighting_shader->setMat4("u_inverseView", glm::inverse(camera.GetViewMatrix()));
-    m_lighting_shader->setInt("gPositionDepth", 0);     // XZ position
+    m_lighting_shader->setInt("gPosition", 0);
     m_lighting_shader->setInt("gNormalMaterial", 1);    // Octahedral normal + material
     m_lighting_shader->setInt("gAlbedoRoughness", 2);   // Albedo + roughness
     m_lighting_shader->setInt("gMetallicAO", 3);        // Metallic + AO
-    m_lighting_shader->setInt("gDepth", 4);         // Depth for Y reconstruction
+    m_lighting_shader->setInt("gDepth", 4);
     m_lighting_shader->setInt("u_shadowCascades", 5);
     m_lighting_shader->setInt("u_ssao", 6);
     m_lighting_shader->setInt("u_terrainTextures", 7);
     m_lighting_shader->setInt("u_materialLUT", 8);
+    m_lighting_shader->setInt("u_causticsTexture", 9);
     m_lighting_shader->setVec3("u_skyAmbientColor", m_skyAmbientColor);
     m_lighting_shader->setVec3("u_viewPos", camera.Position);
     m_lighting_shader->setVec3("u_sun.direction", m_sun.direction);
@@ -730,6 +1169,7 @@ void RenderPipeline::lighting_pass(const Camera& camera) {
     m_lighting_shader->setVec3("u_terrainOrigin", terrainOrigin);
     glBindVertexArray(m_screen_quad_vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    m_last_render_pass_stats.lighting_draws++;
     glBindVertexArray(0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
@@ -747,6 +1187,7 @@ void RenderPipeline::skybox_pass(const Rendering::Camera& camera) {
     m_skybox_shader->setFloat("u_time", (float)glfwGetTime());
     glBindVertexArray(m_skybox_vao);
     glDrawArrays(GL_TRIANGLES, 0, 36);
+    m_last_render_pass_stats.skybox_draws++;
     glBindVertexArray(0);
     glDepthFunc(GL_LESS);
 }
@@ -758,7 +1199,7 @@ void RenderPipeline::ssao_pass(const Camera& camera) {
     glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m_gbuffer.position_texture);
     glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m_gbuffer.normal_texture);
     glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_ssao.noiseTexture);
-    m_ssao.ssaoShader->setInt("gPositionDepth", 0);
+    m_ssao.ssaoShader->setInt("gPosition", 0);
     m_ssao.ssaoShader->setInt("gNormalMaterial", 1);
     m_ssao.ssaoShader->setInt("u_noiseTexture", 2);
     for (unsigned int i = 0; i < 64; ++i)
@@ -768,6 +1209,7 @@ void RenderPipeline::ssao_pass(const Camera& camera) {
     m_ssao.ssaoShader->setVec2("u_screenSize", glm::vec2(m_screen_width, m_screen_height));
     glBindVertexArray(m_screen_quad_vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    m_last_render_pass_stats.ssao_draws++;
     glBindVertexArray(0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
@@ -781,6 +1223,7 @@ void RenderPipeline::ssao_blur_pass() {
     m_ssao.blurShader->setInt("u_ssaoInput", 0);
     glBindVertexArray(m_screen_quad_vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    m_last_render_pass_stats.ssao_blur_draws++;
     glBindVertexArray(0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
@@ -795,24 +1238,32 @@ void RenderPipeline::init_shaders() {
     m_ssao.ssaoShader = std::make_unique<Shader>((m_root_path / "res/shaders/ssao.vert").string().c_str(), (m_root_path / "res/shaders/ssao.frag").string().c_str());
     m_ssao.blurShader = std::make_unique<Shader>((m_root_path / "res/shaders/ssao.vert").string().c_str(), (m_root_path / "res/shaders/ssao_blur.frag").string().c_str());
     m_water_shader = std::make_unique<Shader>((m_root_path / "res/shaders/water.vert").string().c_str(), (m_root_path / "res/shaders/water.frag").string().c_str());
+    label_gl_object(GL_PROGRAM, m_geometry_shader ? m_geometry_shader->Id() : 0u, "shader.geometry");
+    label_gl_object(GL_PROGRAM, m_lighting_shader ? m_lighting_shader->Id() : 0u, "shader.lighting");
+    label_gl_object(GL_PROGRAM, m_skybox_shader ? m_skybox_shader->Id() : 0u, "shader.skybox");
+    label_gl_object(GL_PROGRAM, m_shadow_shader ? m_shadow_shader->Id() : 0u, "shader.shadow");
+    label_gl_object(GL_PROGRAM, m_ssao.ssaoShader ? m_ssao.ssaoShader->Id() : 0u, "shader.ssao");
+    label_gl_object(GL_PROGRAM, m_ssao.blurShader ? m_ssao.blurShader->Id() : 0u, "shader.ssao_blur");
+    label_gl_object(GL_PROGRAM, m_water_shader ? m_water_shader->Id() : 0u, "shader.water");
 }
 
 void RenderPipeline::init_gbuffer(u32 width, u32 height) {
     glGenFramebuffers(1, &m_gbuffer.fbo_id);
+    label_gl_object(GL_FRAMEBUFFER, m_gbuffer.fbo_id, "gbuffer.fbo");
     glBindFramebuffer(GL_FRAMEBUFFER, m_gbuffer.fbo_id);
     
-    // Compressed G-Buffer format (50% memory reduction)
-    
-    // Position/Depth: RG32F (8 bytes/pixel -> store XZ, reconstruct Y from depth)
+    // Position: full view-space position for deferred lighting, SSAO, and material projection.
     glGenTextures(1, &m_gbuffer.position_texture);
+    label_gl_object(GL_TEXTURE, m_gbuffer.position_texture, "gbuffer.position");
     glBindTexture(GL_TEXTURE_2D, m_gbuffer.position_texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG32F, width, height, 0, GL_RG, GL_FLOAT, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, width, height, 0, GL_RGB, GL_FLOAT, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_gbuffer.position_texture, 0);
     
     // Normal/Material: RGBA8 (4 bytes/pixel -> octahedral normal + material ID)
     glGenTextures(1, &m_gbuffer.normal_texture);
+    label_gl_object(GL_TEXTURE, m_gbuffer.normal_texture, "gbuffer.normal_material");
     glBindTexture(GL_TEXTURE_2D, m_gbuffer.normal_texture);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -821,6 +1272,7 @@ void RenderPipeline::init_gbuffer(u32 width, u32 height) {
     
     // Albedo/Roughness: RGBA8 (4 bytes/pixel -> RGB albedo + roughness)
     glGenTextures(1, &m_gbuffer.albedo_texture);
+    label_gl_object(GL_TEXTURE, m_gbuffer.albedo_texture, "gbuffer.albedo_roughness");
     glBindTexture(GL_TEXTURE_2D, m_gbuffer.albedo_texture);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -829,6 +1281,7 @@ void RenderPipeline::init_gbuffer(u32 width, u32 height) {
     
     // Metallic/AO: RG16F (4 bytes/pixel -> metallic + ambient occlusion)
     glGenTextures(1, &m_gbuffer.material_texture);
+    label_gl_object(GL_TEXTURE, m_gbuffer.material_texture, "gbuffer.metallic_ao");
     glBindTexture(GL_TEXTURE_2D, m_gbuffer.material_texture);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RG16F, width, height, 0, GL_RG, GL_FLOAT, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -840,6 +1293,7 @@ void RenderPipeline::init_gbuffer(u32 width, u32 height) {
     
     // Depth texture (unchanged)
     glGenTextures(1, &m_gbuffer.depth_texture);
+    label_gl_object(GL_TEXTURE, m_gbuffer.depth_texture, "gbuffer.depth");
     glBindTexture(GL_TEXTURE_2D, m_gbuffer.depth_texture);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -857,6 +1311,8 @@ void RenderPipeline::init_gbuffer(u32 width, u32 height) {
 void RenderPipeline::init_shadow_map() {
     glGenFramebuffers(1, &m_shadow_map.fbo_id);
     glGenTextures(1, &m_shadow_map.depth_texture_array);
+    label_gl_object(GL_FRAMEBUFFER, m_shadow_map.fbo_id, "shadow.fbo");
+    label_gl_object(GL_TEXTURE, m_shadow_map.depth_texture_array, "shadow.depth_cascades");
     glBindTexture(GL_TEXTURE_2D_ARRAY, m_shadow_map.depth_texture_array);
     glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_DEPTH_COMPONENT32F, m_shadow_map.resolution, m_shadow_map.resolution, ShadowMap::CASCADE_COUNT, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -877,8 +1333,11 @@ void RenderPipeline::init_shadow_map() {
 void RenderPipeline::init_ssao() {
     glGenFramebuffers(1, &m_ssao.fbo);
     glGenFramebuffers(1, &m_ssao.blurFBO);
+    label_gl_object(GL_FRAMEBUFFER, m_ssao.fbo, "ssao.fbo");
+    label_gl_object(GL_FRAMEBUFFER, m_ssao.blurFBO, "ssao.blur_fbo");
     glBindFramebuffer(GL_FRAMEBUFFER, m_ssao.fbo);
     glGenTextures(1, &m_ssao.ssaoColorBuffer);
+    label_gl_object(GL_TEXTURE, m_ssao.ssaoColorBuffer, "ssao.raw");
     glBindTexture(GL_TEXTURE_2D, m_ssao.ssaoColorBuffer);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_R16F, m_screen_width, m_screen_height, 0, GL_RED, GL_FLOAT, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -886,6 +1345,7 @@ void RenderPipeline::init_ssao() {
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_ssao.ssaoColorBuffer, 0);
     glBindFramebuffer(GL_FRAMEBUFFER, m_ssao.blurFBO);
     glGenTextures(1, &m_ssao.ssaoColorBufferBlur);
+    label_gl_object(GL_TEXTURE, m_ssao.ssaoColorBufferBlur, "ssao.blur");
     glBindTexture(GL_TEXTURE_2D, m_ssao.ssaoColorBufferBlur);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_R16F, m_screen_width, m_screen_height, 0, GL_RED, GL_FLOAT, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -908,6 +1368,7 @@ void RenderPipeline::init_ssao() {
         ssaoNoise.push_back(glm::vec3(randomFloats(generator) * 2.0 - 1.0, randomFloats(generator) * 2.0 - 1.0, 0.0f));
     }
     glGenTextures(1, &m_ssao.noiseTexture);
+    label_gl_object(GL_TEXTURE, m_ssao.noiseTexture, "ssao.noise");
     glBindTexture(GL_TEXTURE_2D, m_ssao.noiseTexture);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, 4, 4, 0, GL_RGB, GL_FLOAT, &ssaoNoise[0]);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -920,6 +1381,8 @@ void RenderPipeline::init_screen_quad() {
     const float quadVertices[] = { -1.0f,  1.0f, 0.0f, 0.0f, 1.0f, -1.0f, -1.0f, 0.0f, 0.0f, 0.0f, 1.0f,  1.0f, 0.0f, 1.0f, 1.0f, 1.0f, -1.0f, 0.0f, 1.0f, 0.0f, };
     glGenVertexArrays(1, &m_screen_quad_vao);
     glGenBuffers(1, &m_screen_quad_vbo);
+    label_gl_object(GL_VERTEX_ARRAY, m_screen_quad_vao, "screen_quad.vao");
+    label_gl_object(GL_BUFFER, m_screen_quad_vbo, "screen_quad.vbo");
     glBindVertexArray(m_screen_quad_vao);
     glBindBuffer(GL_ARRAY_BUFFER, m_screen_quad_vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
@@ -934,6 +1397,8 @@ void RenderPipeline::init_skybox() {
     float skyboxVertices[] = { -1.0f,1.0f,-1.0f,-1.0f,-1.0f,-1.0f,1.0f,-1.0f,-1.0f,1.0f,-1.0f,-1.0f,1.0f,1.0f,-1.0f,-1.0f,1.0f,-1.0f,-1.0f,-1.0f,1.0f,-1.0f,-1.0f,-1.0f,-1.0f,1.0f,-1.0f,-1.0f,1.0f,-1.0f,-1.0f,1.0f,1.0f,-1.0f,-1.0f,1.0f,1.0f,-1.0f,-1.0f,1.0f,-1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,-1.0f,1.0f,-1.0f,-1.0f,-1.0f,-1.0f,1.0f,-1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,-1.0f,1.0f,1.0f,-1.0f,-1.0f,1.0f,-1.0f,1.0f,-1.0f,1.0f,1.0f,-1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,-1.0f,1.0f,1.0f,-1.0f,1.0f,-1.0f,-1.0f,-1.0f,-1.0f,-1.0f,-1.0f,1.0f,1.0f,-1.0f,-1.0f,1.0f,-1.0f,-1.0f,-1.0f,-1.0f,1.0f,1.0f,-1.0f,1.0f };
     glGenVertexArrays(1, &m_skybox_vao);
     glGenBuffers(1, &m_skybox_vbo);
+    label_gl_object(GL_VERTEX_ARRAY, m_skybox_vao, "skybox.vao");
+    label_gl_object(GL_BUFFER, m_skybox_vbo, "skybox.vbo");
     glBindVertexArray(m_skybox_vao);
     glBindBuffer(GL_ARRAY_BUFFER, m_skybox_vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(skyboxVertices), &skyboxVertices, GL_STATIC_DRAW);
@@ -968,22 +1433,34 @@ void RenderPipeline::destroy_ssao() {
     if (m_ssao.noiseTexture) { glDeleteTextures(1, &m_ssao.noiseTexture); m_ssao.noiseTexture = 0; }
 }
 
+void RenderPipeline::destroy_water_fallback_textures() {
+    if (m_water_flat_normal_texture) { glDeleteTextures(1, &m_water_flat_normal_texture); m_water_flat_normal_texture = 0; }
+    if (m_water_neutral_flow_texture) { glDeleteTextures(1, &m_water_neutral_flow_texture); m_water_neutral_flow_texture = 0; }
+    if (m_water_black_texture) { glDeleteTextures(1, &m_water_black_texture); m_water_black_texture = 0; }
+    if (m_water_underwater_texture) { glDeleteTextures(1, &m_water_underwater_texture); m_water_underwater_texture = 0; }
+}
+
 void RenderPipeline::cleanup_gpu_resources() {
     for (auto& [id, d] : m_chunk_render_data) {
-        if (d.vao_id) glDeleteVertexArrays(1, &d.vao_id);
-        if (d.vbo_id) glDeleteBuffers(1, &d.vbo_id);
-        if (d.ebo_id) glDeleteBuffers(1, &d.ebo_id);
+        (void)id;
+        delete_chunk_slot(d);
     }
     m_chunk_render_data.clear();
+    for (auto& d : m_free_chunk_render_slots) {
+        delete_chunk_slot(d);
+    }
+    m_free_chunk_render_slots.clear();
+
     for (auto& [id, d] : m_water_render_data) {
-        if (d.vao_id) glDeleteVertexArrays(1, &d.vao_id);
-        if (d.vbo_id) glDeleteBuffers(1, &d.vbo_id);
-        if (d.ebo_id) glDeleteBuffers(1, &d.ebo_id);
+        (void)id;
+        delete_water_slot(d);
     }
     m_water_render_data.clear();
-    if (m_lighting_fbo.fbo_id) { glDeleteFramebuffers(1, &m_lighting_fbo.fbo_id); m_lighting_fbo.fbo_id = 0; }
-    if (m_lighting_fbo.color_texture) { glDeleteTextures(1, &m_lighting_fbo.color_texture); m_lighting_fbo.color_texture = 0; }
-    if (m_lighting_fbo.depth_texture) { glDeleteRenderbuffers(1, &m_lighting_fbo.depth_texture); m_lighting_fbo.depth_texture = 0; }
+    for (auto& d : m_free_water_render_slots) {
+        delete_water_slot(d);
+    }
+    m_free_water_render_slots.clear();
+    destroy_lighting_fbo();
     destroy_gbuffer();
     destroy_shadow_map();
     destroy_ssao();
@@ -994,6 +1471,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     if (m_instanceMatrixVBO) { glDeleteBuffers(1, &m_instanceMatrixVBO); m_instanceMatrixVBO = 0; }
     if (m_terrainTextureArray) { glDeleteTextures(1, &m_terrainTextureArray); m_terrainTextureArray = 0; }
     if (m_materialLUT) { glDeleteTextures(1, &m_materialLUT); m_materialLUT = 0; }
+    destroy_water_fallback_textures();
     cleanup_gpu_sdf_system();
     m_geometry_shader.reset();
     m_lighting_shader.reset();
@@ -1003,14 +1481,17 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_ssao.blurShader.reset();
     m_water_shader.reset();
     m_instanced_static_mesh_shader.reset();
+    m_last_render_pass_metadata.clear();
+    m_terrain_texture_fallback_layers = 0;
     m_started = false;
 }
 
 // --- RESOURCE MANAGEMENT ---
 
-void RenderPipeline::manage_chunk_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks) {
+void RenderPipeline::manage_chunk_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks, const Camera& camera) {
     // --- Configuration for the new logic ---
-    const int MAX_UPLOADS_PER_FRAME = 8; // Increased budget for faster world streaming
+    constexpr std::size_t kMinTerrainUploadsPerFrame = 8;
+    constexpr std::size_t kMaxTerrainUploadsPerFrame = 64;
     const u32 INACTIVE_FRAME_TTL = 15;   // Grace period: unload after 15 frames of inactivity
 
     // Step 1: Create a quick-lookup set of chunks that should be active this frame.
@@ -1042,10 +1523,16 @@ void RenderPipeline::manage_chunk_gpu_resources(const std::vector<ChunkMeshSnaps
         unload_chunk_resources(id);
     }
 
-    // Step 3: Upload new and updated chunk meshes, respecting the budget.
-    int uploads_this_frame = 0;
+    struct TerrainUploadCandidate {
+        ChunkMeshSnapshot chunk;
+        bool is_new = false;
+        bool is_stale = false;
+        float distance_sq = 0.0f;
+    };
+
+    std::vector<TerrainUploadCandidate> upload_candidates;
+    upload_candidates.reserve(renderable_chunks.size());
     for (const auto& chunk : renderable_chunks) {
-        // Skip chunks that don't have a mesh ready yet.
         if (!chunk.has_terrain_mesh()) continue;
 
         auto it = m_chunk_render_data.find(chunk.id);
@@ -1054,23 +1541,93 @@ void RenderPipeline::manage_chunk_gpu_resources(const std::vector<ChunkMeshSnaps
         bool is_stale = !is_new && (it->second.mesh_version != chunk.mesh_version);
 
         if (is_new || is_stale) {
-            if (uploads_this_frame >= MAX_UPLOADS_PER_FRAME) {
-                // Stop if we've hit our per-frame upload limit to prevent stuttering.
-                break;
-            }
-            
-            // If the mesh is stale, we must first free the old GPU resources before uploading the new version.
-            if (is_stale) {
-                unload_chunk_resources(chunk.id);
-            }
-
-            upload_chunk_mesh(chunk);
-            uploads_this_frame++;
+            const glm::vec3 center(
+                chunk.coords.x * CHUNK_SIZE_X + CHUNK_SIZE_X * 0.5f,
+                chunk.coords.y * CHUNK_SIZE_Y + CHUNK_SIZE_Y * 0.5f,
+                chunk.coords.z * CHUNK_SIZE_Z + CHUNK_SIZE_Z * 0.5f
+            );
+            const glm::vec3 delta = center - camera.Position;
+            upload_candidates.push_back({chunk, is_new, is_stale, glm::dot(delta, delta)});
         }
+    }
+
+    m_last_mesh_upload_stats.terrain_upload_candidates = upload_candidates.size();
+    if (!upload_candidates.empty()) {
+        float nearest_candidate = std::numeric_limits<float>::max();
+        for (const TerrainUploadCandidate& candidate : upload_candidates) {
+            nearest_candidate = std::min(nearest_candidate, candidate.distance_sq);
+            if (candidate.is_new) {
+                ++m_last_mesh_upload_stats.terrain_new_upload_candidates;
+            } else if (candidate.is_stale) {
+                ++m_last_mesh_upload_stats.terrain_stale_upload_candidates;
+            }
+        }
+        m_last_mesh_upload_stats.terrain_nearest_candidate_distance_sq = nearest_candidate;
+    }
+    std::sort(upload_candidates.begin(), upload_candidates.end(), [](const TerrainUploadCandidate& a, const TerrainUploadCandidate& b) {
+        if (a.distance_sq != b.distance_sq) {
+            return a.distance_sq < b.distance_sq;
+        }
+        if (a.is_new != b.is_new) {
+            return a.is_new;
+        }
+        return a.chunk.id < b.chunk.id;
+    });
+
+    std::size_t upload_budget_limit = kMinTerrainUploadsPerFrame;
+    if (upload_candidates.size() > 2048u) {
+        upload_budget_limit = kMaxTerrainUploadsPerFrame;
+    } else if (upload_candidates.size() > 1024u) {
+        upload_budget_limit = 48u;
+    } else if (upload_candidates.size() > 512u) {
+        upload_budget_limit = 32u;
+    } else if (upload_candidates.size() > 128u) {
+        upload_budget_limit = 16u;
+    }
+    const std::size_t upload_budget = std::min(upload_candidates.size(), upload_budget_limit);
+    float farthest_selected_distance = 0.0f;
+    for (std::size_t i = 0; i < upload_budget; ++i) {
+        const TerrainUploadCandidate& candidate = upload_candidates[i];
+        if (candidate.is_new) {
+            ++m_last_mesh_upload_stats.terrain_new_uploads_selected;
+        } else if (candidate.is_stale) {
+            ++m_last_mesh_upload_stats.terrain_stale_uploads_selected;
+        }
+        farthest_selected_distance = std::max(farthest_selected_distance, candidate.distance_sq);
+        const ChunkMeshSnapshot& chunk = upload_candidates[i].chunk;
+        ChunkMeshPayload payload;
+        if (!copy_terrain_mesh_payload(chunk, payload)) {
+            m_last_mesh_upload_stats.terrain_upload_failures++;
+            continue;
+        }
+
+        m_last_mesh_upload_stats.terrain_payload_copies++;
+        m_last_mesh_upload_stats.terrain_payload_bytes +=
+            payload.vertices.size() * sizeof(VoxelVertex) + payload.indices.size() * sizeof(u32);
+        upload_chunk_mesh(chunk, payload);
+        m_last_mesh_upload_stats.terrain_uploads++;
+    }
+    m_last_mesh_upload_stats.terrain_uploads_deferred = upload_candidates.size() - m_last_mesh_upload_stats.terrain_uploads;
+    m_last_mesh_upload_stats.terrain_farthest_selected_distance_sq = farthest_selected_distance;
+    if (upload_candidates.size() > upload_budget) {
+        float nearest_deferred = std::numeric_limits<float>::max();
+        for (std::size_t i = upload_budget; i < upload_candidates.size(); ++i) {
+            const TerrainUploadCandidate& candidate = upload_candidates[i];
+            if (candidate.is_new) {
+                ++m_last_mesh_upload_stats.terrain_new_uploads_deferred;
+            } else if (candidate.is_stale) {
+                ++m_last_mesh_upload_stats.terrain_stale_uploads_deferred;
+            }
+            nearest_deferred = std::min(nearest_deferred, candidate.distance_sq);
+            if (upload_budget > 0 && candidate.distance_sq < farthest_selected_distance) {
+                ++m_last_mesh_upload_stats.terrain_deferred_nearer_than_selected;
+            }
+        }
+        m_last_mesh_upload_stats.terrain_nearest_deferred_distance_sq = nearest_deferred;
     }
 }
 
-void RenderPipeline::manage_water_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks) {
+void RenderPipeline::manage_water_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks, const Camera& camera) {
     const int MAX_UPLOADS_PER_FRAME = 8; // Increased to match chunk upload budget
     const u32 INACTIVE_FRAME_TTL = 30; // A slightly longer TTL for water as it may be just off-screen
 
@@ -1103,79 +1660,276 @@ void RenderPipeline::manage_water_gpu_resources(const std::vector<ChunkMeshSnaps
         unload_water_resources(id);
     }
 
-    // Step 4: Upload new and updated chunk meshes within budget
-    int uploads_this_frame = 0;
+    struct WaterUploadCandidate {
+        ChunkMeshSnapshot chunk;
+        bool is_new = false;
+        bool is_stale = false;
+        float distance_sq = 0.0f;
+    };
+
+    std::vector<WaterUploadCandidate> upload_candidates;
+    upload_candidates.reserve(renderable_chunks.size());
     for (const auto& chunk : renderable_chunks) {
         if (!chunk.has_water_mesh()) continue; // Skip chunks with no water
 
         auto it = m_water_render_data.find(chunk.id);
         bool is_new = (it == m_water_render_data.end());
-        bool is_stale = !is_new && (it->second.mesh_version != chunk.mesh_version);
+        bool is_stale = !is_new && (it->second.mesh_version != chunk.water_mesh_version);
 
         if (is_new || is_stale) {
-            if (uploads_this_frame >= MAX_UPLOADS_PER_FRAME) {
-                break; // Budget exceeded for this frame
-            }
-            
-            if (is_stale) {
-                unload_water_resources(chunk.id);
-            }
-
-            upload_water_mesh(chunk);
-            uploads_this_frame++;
+            const glm::vec3 center(
+                chunk.coords.x * CHUNK_SIZE_X + CHUNK_SIZE_X * 0.5f,
+                chunk.coords.y * CHUNK_SIZE_Y + CHUNK_SIZE_Y * 0.5f,
+                chunk.coords.z * CHUNK_SIZE_Z + CHUNK_SIZE_Z * 0.5f
+            );
+            const glm::vec3 delta = center - camera.Position;
+            upload_candidates.push_back({chunk, is_new, is_stale, glm::dot(delta, delta)});
         }
+    }
+
+    m_last_mesh_upload_stats.water_upload_candidates = upload_candidates.size();
+    if (!upload_candidates.empty()) {
+        float nearest_candidate = std::numeric_limits<float>::max();
+        for (const WaterUploadCandidate& candidate : upload_candidates) {
+            nearest_candidate = std::min(nearest_candidate, candidate.distance_sq);
+            if (candidate.is_new) {
+                ++m_last_mesh_upload_stats.water_new_upload_candidates;
+            } else if (candidate.is_stale) {
+                ++m_last_mesh_upload_stats.water_stale_upload_candidates;
+            }
+        }
+        m_last_mesh_upload_stats.water_nearest_candidate_distance_sq = nearest_candidate;
+    }
+    std::sort(upload_candidates.begin(), upload_candidates.end(), [](const WaterUploadCandidate& a, const WaterUploadCandidate& b) {
+        if (a.distance_sq != b.distance_sq) {
+            return a.distance_sq < b.distance_sq;
+        }
+        if (a.is_new != b.is_new) {
+            return a.is_new;
+        }
+        return a.chunk.id < b.chunk.id;
+    });
+
+    const std::size_t upload_budget = std::min(upload_candidates.size(), static_cast<std::size_t>(MAX_UPLOADS_PER_FRAME));
+    float farthest_selected_distance = 0.0f;
+    for (std::size_t i = 0; i < upload_budget; ++i) {
+        const WaterUploadCandidate& candidate = upload_candidates[i];
+        if (candidate.is_new) {
+            ++m_last_mesh_upload_stats.water_new_uploads_selected;
+        } else if (candidate.is_stale) {
+            ++m_last_mesh_upload_stats.water_stale_uploads_selected;
+        }
+        farthest_selected_distance = std::max(farthest_selected_distance, candidate.distance_sq);
+        const ChunkMeshSnapshot& chunk = upload_candidates[i].chunk;
+        ChunkMeshPayload payload;
+        if (!copy_water_mesh_payload(chunk, payload)) {
+            m_last_mesh_upload_stats.water_upload_failures++;
+            continue;
+        }
+
+        m_last_mesh_upload_stats.water_payload_copies++;
+        m_last_mesh_upload_stats.water_payload_bytes +=
+            payload.vertices.size() * sizeof(VoxelVertex) + payload.indices.size() * sizeof(u32);
+        upload_water_mesh(chunk, payload);
+        m_last_mesh_upload_stats.water_uploads++;
+    }
+    m_last_mesh_upload_stats.water_uploads_deferred = upload_candidates.size() - m_last_mesh_upload_stats.water_uploads;
+    m_last_mesh_upload_stats.water_farthest_selected_distance_sq = farthest_selected_distance;
+    if (upload_candidates.size() > upload_budget) {
+        float nearest_deferred = std::numeric_limits<float>::max();
+        for (std::size_t i = upload_budget; i < upload_candidates.size(); ++i) {
+            const WaterUploadCandidate& candidate = upload_candidates[i];
+            if (candidate.is_new) {
+                ++m_last_mesh_upload_stats.water_new_uploads_deferred;
+            } else if (candidate.is_stale) {
+                ++m_last_mesh_upload_stats.water_stale_uploads_deferred;
+            }
+            nearest_deferred = std::min(nearest_deferred, candidate.distance_sq);
+            if (upload_budget > 0 && candidate.distance_sq < farthest_selected_distance) {
+                ++m_last_mesh_upload_stats.water_deferred_nearer_than_selected;
+            }
+        }
+        m_last_mesh_upload_stats.water_nearest_deferred_distance_sq = nearest_deferred;
     }
 }
 
+bool RenderPipeline::copy_terrain_mesh_payload(const ChunkMeshSnapshot& chunk, ChunkMeshPayload& payload) const {
+    if (!chunk.source_chunk || !chunk.has_terrain_mesh()) {
+        return false;
+    }
 
-void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk) {
-    if (!chunk.has_water_mesh()) return;
+    const u32 version_before = chunk.source_chunk->mesh_version.load(std::memory_order_acquire);
+    if (version_before != chunk.mesh_version) {
+        return false;
+    }
 
-    WaterRenderData data;
-    data.element_count = static_cast<u32>(chunk.water_mesh_indices.size());
-    data.mesh_version = chunk.mesh_version;
+    payload.mesh_version = version_before;
+    payload.vertices = chunk.source_chunk->mesh_vertices;
+    payload.indices = chunk.source_chunk->mesh_indices;
 
-    glGenVertexArrays(1, &data.vao_id);
-    glGenBuffers(1, &data.vbo_id);
-    glGenBuffers(1, &data.ebo_id);
+    const u32 version_after = chunk.source_chunk->mesh_version.load(std::memory_order_acquire);
+    if (version_after != version_before || !payload.has_mesh()) {
+        payload.vertices.clear();
+        payload.indices.clear();
+        return false;
+    }
+
+    return true;
+}
+
+bool RenderPipeline::copy_water_mesh_payload(const ChunkMeshSnapshot& chunk, ChunkMeshPayload& payload) const {
+    if (!chunk.source_chunk || !chunk.has_water_mesh()) {
+        return false;
+    }
+
+    const u32 version_before = chunk.source_chunk->water_mesh_version.load(std::memory_order_acquire);
+    if (version_before != chunk.water_mesh_version) {
+        return false;
+    }
+
+    payload.mesh_version = version_before;
+    payload.vertices = chunk.source_chunk->water_mesh_vertices;
+    payload.indices = chunk.source_chunk->water_mesh_indices;
+
+    const u32 version_after = chunk.source_chunk->water_mesh_version.load(std::memory_order_acquire);
+    if (version_after != version_before || !payload.has_mesh()) {
+        payload.vertices.clear();
+        payload.indices.clear();
+        return false;
+    }
+
+    return true;
+}
+
+void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk, const ChunkMeshPayload& payload) {
+    if (!payload.has_mesh()) return;
+
+    if (payload.vertices.size() > std::numeric_limits<u32>::max() ||
+        payload.indices.size() > std::numeric_limits<u32>::max())
+    {
+        m_last_mesh_upload_stats.water_upload_failures++;
+        return;
+    }
+
+    auto it = m_water_render_data.find(chunk.id);
+    bool slot_created = false;
+    bool slot_from_pool = false;
+    if (it == m_water_render_data.end()) {
+        WaterRenderData data;
+        if (!m_free_water_render_slots.empty()) {
+            data = m_free_water_render_slots.back();
+            m_free_water_render_slots.pop_back();
+            slot_from_pool = true;
+        } else {
+            glGenVertexArrays(1, &data.vao_id);
+            glGenBuffers(1, &data.vbo_id);
+            glGenBuffers(1, &data.ebo_id);
+            const std::string label_prefix = "water.chunk." + std::to_string(chunk.id);
+            label_gl_object(GL_VERTEX_ARRAY, data.vao_id, label_prefix + ".vao");
+            label_gl_object(GL_BUFFER, data.vbo_id, label_prefix + ".vbo");
+            label_gl_object(GL_BUFFER, data.ebo_id, label_prefix + ".ebo");
+            slot_created = true;
+        }
+        it = m_water_render_data.emplace(chunk.id, data).first;
+    }
+
+    WaterRenderData& data = it->second;
+    const u32 vertex_count = static_cast<u32>(payload.vertices.size());
+    const u32 index_count = static_cast<u32>(payload.indices.size());
+    const bool needs_growth = data.vertex_capacity < vertex_count || data.index_capacity < index_count;
+    const bool version_reused = data.mesh_version != 0 && data.mesh_version != payload.mesh_version;
 
     glBindVertexArray(data.vao_id);
     glBindBuffer(GL_ARRAY_BUFFER, data.vbo_id);
-    glBufferData(GL_ARRAY_BUFFER, chunk.water_mesh_vertices.size() * sizeof(VoxelVertex), chunk.water_mesh_vertices.data(), GL_STATIC_DRAW);
-    
+    if (needs_growth) {
+        glBufferData(GL_ARRAY_BUFFER, payload.vertices.size() * sizeof(VoxelVertex), payload.vertices.data(), GL_STATIC_DRAW);
+        data.vertex_capacity = vertex_count;
+    } else {
+        glBufferSubData(GL_ARRAY_BUFFER, 0, payload.vertices.size() * sizeof(VoxelVertex), payload.vertices.data());
+    }
+
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, data.ebo_id);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, chunk.water_mesh_indices.size() * sizeof(u32), chunk.water_mesh_indices.data(), GL_STATIC_DRAW);
-    
-    glEnableVertexAttribArray(0); // a_pos
+    if (needs_growth) {
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, payload.indices.size() * sizeof(u32), payload.indices.data(), GL_STATIC_DRAW);
+        data.index_capacity = index_count;
+    } else {
+        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, payload.indices.size() * sizeof(u32), payload.indices.data());
+    }
+
+    glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, position));
-    glEnableVertexAttribArray(1); // a_normal
+    glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, normal));
-    
     glBindVertexArray(0);
-    m_water_render_data[chunk.id] = data;
+
+    data.element_count = index_count;
+    data.mesh_version = payload.mesh_version;
+    data.frames_since_inactive = 0;
+
+    if (slot_created) {
+        m_last_mesh_upload_stats.water_slots_created++;
+    } else if (needs_growth) {
+        m_last_mesh_upload_stats.water_slots_grown++;
+    } else if (slot_from_pool || version_reused) {
+        m_last_mesh_upload_stats.water_slots_reused++;
+    }
 }
 
-void RenderPipeline::upload_chunk_mesh(const ChunkMeshSnapshot& chunk) {
-    if (!chunk.has_terrain_mesh()) { return; }
-    
-    // Debug mesh upload
-    static std::atomic<int> upload_count{0};
-    if (upload_count.fetch_add(1) < 5) {
-        LUMINUMBRA_CORE_WARN("MESH UPLOAD: Chunk ({},{},{}) - {} vertices, {} indices", 
-            chunk.coords.x, chunk.coords.y, chunk.coords.z,
-            chunk.mesh_vertices.size(), chunk.mesh_indices.size());
+void RenderPipeline::upload_chunk_mesh(const ChunkMeshSnapshot& chunk, const ChunkMeshPayload& payload) {
+    if (!payload.has_mesh()) { return; }
+
+    if (payload.vertices.size() > std::numeric_limits<u32>::max() ||
+        payload.indices.size() > std::numeric_limits<u32>::max())
+    {
+        m_last_mesh_upload_stats.terrain_upload_failures++;
+        return;
     }
-    ChunkRenderData render_data;
-    render_data.element_count = static_cast<u32>(chunk.mesh_indices.size());
-    render_data.mesh_version = chunk.mesh_version;
-    glGenVertexArrays(1, &render_data.vao_id);
-    glGenBuffers(1, &render_data.vbo_id);
-    glGenBuffers(1, &render_data.ebo_id);
+
+    auto it = m_chunk_render_data.find(chunk.id);
+    bool slot_created = false;
+    bool slot_from_pool = false;
+    if (it == m_chunk_render_data.end()) {
+        ChunkRenderData render_data;
+        if (!m_free_chunk_render_slots.empty()) {
+            render_data = m_free_chunk_render_slots.back();
+            m_free_chunk_render_slots.pop_back();
+            slot_from_pool = true;
+        } else {
+            glGenVertexArrays(1, &render_data.vao_id);
+            glGenBuffers(1, &render_data.vbo_id);
+            glGenBuffers(1, &render_data.ebo_id);
+            const std::string label_prefix = "terrain.chunk." + std::to_string(chunk.id);
+            label_gl_object(GL_VERTEX_ARRAY, render_data.vao_id, label_prefix + ".vao");
+            label_gl_object(GL_BUFFER, render_data.vbo_id, label_prefix + ".vbo");
+            label_gl_object(GL_BUFFER, render_data.ebo_id, label_prefix + ".ebo");
+            slot_created = true;
+        }
+        it = m_chunk_render_data.emplace(chunk.id, render_data).first;
+    }
+
+    ChunkRenderData& render_data = it->second;
+    const u32 vertex_count = static_cast<u32>(payload.vertices.size());
+    const u32 index_count = static_cast<u32>(payload.indices.size());
+    const bool needs_growth = render_data.vertex_capacity < vertex_count || render_data.index_capacity < index_count;
+    const bool version_reused = render_data.mesh_version != 0 && render_data.mesh_version != payload.mesh_version;
+
     glBindVertexArray(render_data.vao_id);
     glBindBuffer(GL_ARRAY_BUFFER, render_data.vbo_id);
-    glBufferData(GL_ARRAY_BUFFER, chunk.mesh_vertices.size() * sizeof(VoxelVertex), chunk.mesh_vertices.data(), GL_STATIC_DRAW);
+    if (needs_growth) {
+        glBufferData(GL_ARRAY_BUFFER, payload.vertices.size() * sizeof(VoxelVertex), payload.vertices.data(), GL_STATIC_DRAW);
+        render_data.vertex_capacity = vertex_count;
+    } else {
+        glBufferSubData(GL_ARRAY_BUFFER, 0, payload.vertices.size() * sizeof(VoxelVertex), payload.vertices.data());
+    }
+
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, render_data.ebo_id);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, chunk.mesh_indices.size() * sizeof(u32), chunk.mesh_indices.data(), GL_STATIC_DRAW);
+    if (needs_growth) {
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, payload.indices.size() * sizeof(u32), payload.indices.data(), GL_STATIC_DRAW);
+        render_data.index_capacity = index_count;
+    } else {
+        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, payload.indices.size() * sizeof(u32), payload.indices.data());
+    }
+
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, position));
     glEnableVertexAttribArray(1);
@@ -1183,16 +1937,32 @@ void RenderPipeline::upload_chunk_mesh(const ChunkMeshSnapshot& chunk) {
     glEnableVertexAttribArray(2);
     glVertexAttribIPointer(2, 1, GL_UNSIGNED_INT, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, material_id));
     glBindVertexArray(0);
-    m_chunk_render_data[chunk.id] = render_data;
+
+    render_data.element_count = index_count;
+    render_data.mesh_version = payload.mesh_version;
+    render_data.frames_since_inactive = 0;
+
+    if (slot_created) {
+        m_last_mesh_upload_stats.terrain_slots_created++;
+    } else if (needs_growth) {
+        m_last_mesh_upload_stats.terrain_slots_grown++;
+    } else if (slot_from_pool || version_reused) {
+        m_last_mesh_upload_stats.terrain_slots_reused++;
+    }
 }
 
 void RenderPipeline::unload_water_resources(ChunkID chunk_id) {
     auto it = m_water_render_data.find(chunk_id);
     if (it != m_water_render_data.end()) {
-        const auto& d = it->second;
-        if (d.vao_id) glDeleteVertexArrays(1, &d.vao_id);
-        if (d.vbo_id) glDeleteBuffers(1, &d.vbo_id);
-        if (d.ebo_id) glDeleteBuffers(1, &d.ebo_id);
+        WaterRenderData data = it->second;
+        data.element_count = 0;
+        data.mesh_version = 0;
+        data.frames_since_inactive = 0;
+        if (m_free_water_render_slots.size() < kMaxFreeWaterRenderSlots) {
+            m_free_water_render_slots.push_back(data);
+        } else {
+            delete_water_slot(data);
+        }
         m_water_render_data.erase(it);
     }
 }
@@ -1200,10 +1970,15 @@ void RenderPipeline::unload_water_resources(ChunkID chunk_id) {
 void RenderPipeline::unload_chunk_resources(ChunkID chunk_id) {
     auto it = m_chunk_render_data.find(chunk_id);
     if (it != m_chunk_render_data.end()) {
-        const auto& d = it->second;
-        if (d.vao_id) glDeleteVertexArrays(1, &d.vao_id);
-        if (d.vbo_id) glDeleteBuffers(1, &d.vbo_id);
-        if (d.ebo_id) glDeleteBuffers(1, &d.ebo_id);
+        ChunkRenderData data = it->second;
+        data.element_count = 0;
+        data.mesh_version = 0;
+        data.frames_since_inactive = 0;
+        if (m_free_chunk_render_slots.size() < kMaxFreeChunkRenderSlots) {
+            m_free_chunk_render_slots.push_back(data);
+        } else {
+            delete_chunk_slot(data);
+        }
         m_chunk_render_data.erase(it);
     }
 }
@@ -1223,8 +1998,10 @@ void RenderPipeline::init_terrain_textures() {
     const int texture_width = 2048;  // Assuming all textures are 2K
     const int texture_height = 2048;
     const int layer_count = texture_paths.size();
+    m_terrain_texture_fallback_layers = 0;
 
     glGenTextures(1, &m_terrainTextureArray);
+    label_gl_object(GL_TEXTURE, m_terrainTextureArray, "terrain.texture_array");
     glBindTexture(GL_TEXTURE_2D_ARRAY, m_terrainTextureArray);
 
     // Allocate storage for the entire texture array
@@ -1235,18 +2012,26 @@ void RenderPipeline::init_terrain_textures() {
         int width, height, channels;
         stbi_set_flip_vertically_on_load(true);
         unsigned char* data = stbi_load(full_path.c_str(), &width, &height, &channels, 4); // Force 4 channels
+        bool uploaded = false;
 
         if (data) {
             if (width != texture_width || height != texture_height) {
                  LUMINUMBRA_CORE_ERROR("Texture '{}' has wrong dimensions!", texture_paths[i]);
                  stbi_image_free(data);
-                 continue;
+                 data = nullptr;
+            } else {
+                // Upload data to the i-th layer of the array
+                glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, i, width, height, 1, GL_RGBA, GL_UNSIGNED_BYTE, data);
+                stbi_image_free(data);
+                uploaded = true;
             }
-            // Upload data to the i-th layer of the array
-            glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, i, width, height, 1, GL_RGBA, GL_UNSIGNED_BYTE, data);
-            stbi_image_free(data);
-        } else {
+        }
+
+        if (!uploaded) {
             LUMINUMBRA_CORE_ERROR("Failed to load texture array layer: {}", texture_paths[i]);
+            const std::vector<unsigned char> fallback = make_terrain_fallback_texture(texture_width, texture_height, i);
+            glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, i, texture_width, texture_height, 1, GL_RGBA, GL_UNSIGNED_BYTE, fallback.data());
+            ++m_terrain_texture_fallback_layers;
         }
     }
 
@@ -1284,6 +2069,7 @@ void RenderPipeline::init_material_lut() {
     // etc.
     
     glGenTextures(1, &m_materialLUT);
+    label_gl_object(GL_TEXTURE, m_materialLUT, "terrain.material_lut");
     glBindTexture(GL_TEXTURE_2D, m_materialLUT);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, MATERIAL_COUNT, 1, 0, GL_RGBA, GL_FLOAT, materialData.data());
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -1292,6 +2078,18 @@ void RenderPipeline::init_material_lut() {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     
     LUMINUMBRA_CORE_INFO("Material LUT initialized with {} materials.", MATERIAL_COUNT);
+}
+
+void RenderPipeline::init_water_fallback_textures() {
+    const unsigned char flat_normal[4] = {128, 128, 255, 255};
+    const unsigned char neutral_flow[4] = {128, 128, 0, 0};
+    const unsigned char black[4] = {0, 0, 0, 255};
+    const unsigned char underwater[4] = {5, 28, 48, 255};
+
+    m_water_flat_normal_texture = make_solid_rgba_texture(flat_normal, "water.fallback.flat_normal");
+    m_water_neutral_flow_texture = make_solid_rgba_texture(neutral_flow, "water.fallback.neutral_flow");
+    m_water_black_texture = make_solid_rgba_texture(black, "water.fallback.black");
+    m_water_underwater_texture = make_solid_rgba_texture(underwater, "water.fallback.underwater");
 }
 
 // --- GPU SDF GENERATION SYSTEM ---
@@ -1353,10 +2151,12 @@ void RenderPipeline::init_gpu_sdf_system() {
         LUMINUMBRA_CORE_ERROR("Failed to create GPU SDF compute program");
         return;
     }
+    label_gl_object(GL_PROGRAM, m_gpu_sdf.compute_program, "gpu_sdf.compute_program");
     
     // Create SDF buffer (17³ floats for chunk + padding)
     const size_t sdf_buffer_size = 17 * 17 * 17 * sizeof(float);
     glGenBuffers(1, &m_gpu_sdf.sdf_buffer);
+    label_gl_object(GL_BUFFER, m_gpu_sdf.sdf_buffer, "gpu_sdf.sdf_buffer");
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_gpu_sdf.sdf_buffer);
     glBufferData(GL_SHADER_STORAGE_BUFFER, sdf_buffer_size, nullptr, GL_DYNAMIC_READ);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, m_gpu_sdf.sdf_buffer);
@@ -1399,6 +2199,7 @@ void RenderPipeline::generate_noise_textures() {
     }
     
     glGenTextures(1, &m_gpu_sdf.terrain_noise_texture);
+    label_gl_object(GL_TEXTURE, m_gpu_sdf.terrain_noise_texture, "gpu_sdf.terrain_noise");
     glBindTexture(GL_TEXTURE_3D, m_gpu_sdf.terrain_noise_texture);
     glTexImage3D(GL_TEXTURE_3D, 0, GL_R32F, NOISE_SIZE, NOISE_SIZE, NOISE_SIZE, 0, GL_RED, GL_FLOAT, terrain_noise.data());
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -1424,6 +2225,7 @@ void RenderPipeline::generate_noise_textures() {
     }
     
     glGenTextures(1, &m_gpu_sdf.cave_noise_texture);
+    label_gl_object(GL_TEXTURE, m_gpu_sdf.cave_noise_texture, "gpu_sdf.cave_noise");
     glBindTexture(GL_TEXTURE_3D, m_gpu_sdf.cave_noise_texture);
     glTexImage3D(GL_TEXTURE_3D, 0, GL_R32F, NOISE_SIZE, NOISE_SIZE, NOISE_SIZE, 0, GL_RED, GL_FLOAT, cave_noise.data());
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -1445,6 +2247,7 @@ void RenderPipeline::generate_noise_textures() {
     }
     
     glGenTextures(1, &m_gpu_sdf.island_mask_texture);
+    label_gl_object(GL_TEXTURE, m_gpu_sdf.island_mask_texture, "gpu_sdf.island_mask");
     glBindTexture(GL_TEXTURE_2D, m_gpu_sdf.island_mask_texture);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, NOISE_SIZE, NOISE_SIZE, 0, GL_RED, GL_FLOAT, island_mask.data());
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -1595,6 +2398,10 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     glm::vec3 dayAmbient(0.1f, 0.15f, 0.2f);
     glm::vec3 nightAmbient(0.01f, 0.02f, 0.04f);
     m_skyAmbientColor = glm::mix(nightAmbient, dayAmbient, m_sun.intensity);
+}
+
+void RenderPipeline::set_time_of_day(float normalized_time) {
+    m_timeOfDay = std::clamp(normalized_time, 0.0f, 1.0f);
 }
 
 std::vector<glm::mat4> RenderPipeline::get_light_space_matrices(const Camera& camera) {

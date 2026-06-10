@@ -1,0 +1,1054 @@
+{
+    "schema_kind":  "forge.task_graph",
+    "schema_version":  "2",
+    "feature":  "engine-frontier",
+    "description":  "Codex-only engine-frontier task graph for gate-first material visuals, world streaming, rendering, physics, audio, UI, simulation, persistence, GPU SDF, networking, and terminal endurance revalidation.",
+    "dispatch_policy":  {
+                            "max_parallel_tasks":  4,
+                            "daily_budget_usd":  30,
+                            "conflict_groups":  [
+                                                    {
+                                                        "name":  "render-pipeline",
+                                                        "files":  [
+                                                                      "src/luminumbra_client/rendering/RenderPipeline.cpp",
+                                                                      "src/luminumbra_client/rendering/RenderPipeline.h"
+                                                                  ]
+                                                    },
+                                                    {
+                                                        "name":  "main-client-runtime",
+                                                        "files":  [
+                                                                      "src/luminumbra_client/main_client.cpp"
+                                                                  ]
+                                                    },
+                                                    {
+                                                        "name":  "validators",
+                                                        "files":  [
+                                                                      ".forge/scripts/validate-engine-frontier.ps1",
+                                                                      ".forge/scripts/validate-runtime-stability-phase-1.ps1"
+                                                                  ]
+                                                    },
+                                                    {
+                                                        "name":  "sources-cmake",
+                                                        "files":  [
+                                                                      "src/luminumbra_client/sources.cmake",
+                                                                      "src/luminumbra_common/sources.cmake",
+                                                                      "test/sources.cmake",
+                                                                      "test/CMakeLists.txt"
+                                                                  ]
+                                                    },
+                                                    {
+                                                        "name":  "world-streaming",
+                                                        "files":  [
+                                                                      "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+                                                                      "src/luminumbra_common/systems/SHIELD_WorldSystem.h",
+                                                                      "src/luminumbra_common/world/MarchingCubes.cpp",
+                                                                      "src/luminumbra_common/world/MarchingCubes.h"
+                                                                  ]
+                                                    },
+                                                    {
+                                                        "name":  "physics-loop",
+                                                        "files":  [
+                                                                      "src/luminumbra_common/physics/PhysicsSystem.cpp",
+                                                                      "src/luminumbra_common/physics/PhysicsSystem.h",
+                                                                      "src/luminumbra_client/player/PlayerController.cpp",
+                                                                      "src/luminumbra_client/player/PlayerController.h"
+                                                                  ]
+                                                    }
+                                                ]
+                        },
+    "tasks":  [
+                  {
+                      "id":  "T-EF-1-material-visual-gate",
+                      "title":  "Wave 1 material texture layer visual gate",
+                      "type":  "code",
+                      "tier":  "deep",
+                      "depends_on":  [
+
+                                     ],
+                      "files":  [
+                                    "src/luminumbra_client/main_client.cpp",
+                                    "src/luminumbra_client/rendering/RenderPipeline.cpp"
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           ".forge/scripts/validate-engine-frontier.ps1",
+                                                           ".forge/artifacts/visual-performance-improvement/next-plan.md",
+                                                           "src/luminumbra_client/main_client.cpp",
+                                                           "src/luminumbra_client/rendering/RenderPipeline.cpp",
+                                                           "data/common/materials.json",
+                                                           "res/shaders/lighting_pass.frag"
+                                                       ],
+                                             "modifies":  [
+                                                              "src/luminumbra_client/main_client.cpp",
+                                                              "src/luminumbra_client/rendering/RenderPipeline.cpp",
+                                                              "src/luminumbra_client/rendering/RenderPipeline.h"
+                                                          ],
+                                             "creates":  [
+                                                             "build/debug/test-artifacts/runtime/material-visual/material-visual-analysis.json",
+                                                             "build/debug/test-artifacts/runtime/material-visual/screenshots/material-visual.ppm",
+                                                             "build/debug/test-artifacts/runtime/material-visual/screenshots/material-id-heatmap.ppm"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Implement the material_visual_smoke runtime scenario and the material-ID or texture-layer heatmap capture. It must produce build/debug/test-artifacts/runtime/material-visual/material-visual-analysis.json with schema luminumbra.material_visual_analysis.v1, per-material ROI entries with Sand mandatory, classified versus grey-fallback pixel counts and thresholds, gl_debug error count, a normal screenshot, and a material-ID heatmap screenshot. Verification commands: cmake --build --preset debug --target luminumbra_client_app --parallel 1; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode MaterialVisual. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-2-material-visual-gate-test",
+                      "title":  "Wave 1 material LOD and water visual gate verification",
+                      "type":  "test",
+                      "tier":  "standard",
+                      "depends_on":  [
+                                         "T-EF-1-material-visual-gate"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           ".forge/scripts/validate-engine-frontier.ps1",
+                                                           ".forge/scripts/validate-runtime-stability-phase-1.ps1",
+                                                           "build/debug/test-artifacts/runtime/material-visual/material-visual-analysis.json"
+                                                       ],
+                                             "modifies":  [
+
+                                                          ],
+                                             "creates":  [
+                                                             ".forge/artifacts/engine-frontier/wave-1-visual-gates.md"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Run the MaterialVisual, LodGround, and WaterVisual gates and record command, exit code, artifact paths, and summary counters in .forge/artifacts/engine-frontier/wave-1-visual-gates.md. Verification commands: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode MaterialVisual; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-runtime-stability-phase-1.ps1 -Mode LodGround -SmokeSeconds 30; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-runtime-stability-phase-1.ps1 -Mode WaterVisual -SmokeSeconds 30. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-3-wave1-ctest-baseline",
+                      "title":  "Wave 1 full debug CTest baseline",
+                      "type":  "test",
+                      "tier":  "standard",
+                      "depends_on":  [
+                                         "T-EF-2-material-visual-gate-test"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           ".forge/artifacts/engine-frontier/wave-1-visual-gates.md"
+                                                       ],
+                                             "modifies":  [
+
+                                                          ],
+                                             "creates":  [
+                                                             ".forge/artifacts/engine-frontier/wave-1-ctest-baseline.md"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Run the full non-placeholder debug CTest lane and record results. During graph authoring this lane passed 58/58, so do not add repair work unless a test fails during execution; any new failure must become a narrow Wave 1 fix before later waves. Verification commands: ctest --preset debug --output-on-failure -E \"_NOT_BUILT$\". Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-4-frontier-disabled-gate",
+                      "title":  "Wave 2 frontier disabled validator",
+                      "type":  "code",
+                      "tier":  "standard",
+                      "depends_on":  [
+                                         "T-EF-3-wave1-ctest-baseline"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           ".forge/scripts/validate-engine-frontier.ps1",
+                                                           ".forge/specs/ENGINE-FRONTIER-2026-06-09.md",
+                                                           "src",
+                                                           "test"
+                                                       ],
+                                             "modifies":  [
+                                                              ".forge/scripts/validate-engine-frontier.ps1"
+                                                          ],
+                                             "creates":  [
+                                                             ".forge/artifacts/engine-frontier/frontier-disabled.md"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Add a FrontierDisabled validator mode that fails if persistence runtime paths, GPU SDF runtime toggle, far-field SDF, networking authority, Aetheric simulation, GOAP/Instinct planning, or Lua hot reload become enabled without an allowlisted deterministic gate. Verification commands: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode FrontierDisabled. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-5-render-health-gate",
+                      "title":  "Wave 2 render health baseline gate",
+                      "type":  "code",
+                      "tier":  "deep",
+                      "depends_on":  [
+                                         "T-EF-4-frontier-disabled-gate"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           ".forge/scripts/validate-engine-frontier.ps1",
+                                                           "src/luminumbra_client/rendering/RenderPipeline.cpp",
+                                                           "src/luminumbra_client/rendering/RenderPipeline.h",
+                                                           "test/rendering"
+                                                       ],
+                                             "modifies":  [
+                                                              ".forge/scripts/validate-engine-frontier.ps1",
+                                                              "src/luminumbra_client/rendering/RenderPipeline.cpp",
+                                                              "src/luminumbra_client/rendering/RenderPipeline.h",
+                                                              "test/rendering"
+                                                          ],
+                                             "creates":  [
+                                                             "build/debug/test-artifacts/render/render-health-analysis.json"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Add RenderHealth before any RenderPipeline extraction. The gate must compare pass metadata, pass stats, shader health, GL debug counters, resource dimensions, draw counts, and structured screenshot classifications while preserving MaterialVisual, LodGround, and WaterVisual. Verification commands: cmake --build --preset debug --target luminumbra_client_app render_smoke_test render_capture_test runtime_world_visual_validation_test --parallel 1; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode RenderHealth; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode MaterialVisual; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-runtime-stability-phase-1.ps1 -Mode LodGround -SmokeSeconds 30; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-runtime-stability-phase-1.ps1 -Mode WaterVisual -SmokeSeconds 30. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-6-streaming-telemetry-schema",
+                      "title":  "Wave 2 streaming telemetry and drain schema",
+                      "type":  "code",
+                      "tier":  "deep",
+                      "depends_on":  [
+                                         "T-EF-5-render-health-gate"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           ".forge/scripts/validate-runtime-stability-phase-1.ps1",
+                                                           "src/luminumbra_client/main_client.cpp",
+                                                           "src/luminumbra_common/core/JobSystem.cpp",
+                                                           "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp"
+                                                       ],
+                                             "modifies":  [
+                                                              ".forge/scripts/validate-runtime-stability-phase-1.ps1",
+                                                              "src/luminumbra_client/main_client.cpp",
+                                                              "src/luminumbra_common/core/JobSystem.cpp",
+                                                              "src/luminumbra_common/core/JobSystem.h",
+                                                              "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+                                                              "src/luminumbra_common/systems/SHIELD_WorldSystem.h"
+                                                          ],
+                                             "creates":  [
+                                                             "build/debug/test-artifacts/runtime/endurance-stream-drain/stream-drain-analysis.json"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Add no-behavior-change streaming telemetry and an EnduranceStreamDrain validator schema for rolling backlog, lane/job stats, upload drain, worker occupancy, queue depth, terrain/water priority inversions, and final drain. Do not change scheduler policy in this task. Verification commands: cmake --build --preset debug --target luminumbra_client_app --parallel 1; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-runtime-stability-phase-1.ps1 -Mode EnduranceStreamDrain; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-runtime-stability-phase-1.ps1 -Mode LodGround -SmokeSeconds 30; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-runtime-stability-phase-1.ps1 -Mode WaterVisual -SmokeSeconds 30. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-7-wave2-integration",
+                      "title":  "Wave 2 integration verification",
+                      "type":  "test",
+                      "tier":  "standard",
+                      "depends_on":  [
+                                         "T-EF-6-streaming-telemetry-schema"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           ".forge/scripts/validate-engine-frontier.ps1",
+                                                           ".forge/scripts/validate-runtime-stability-phase-1.ps1",
+                                                           ".forge/artifacts/engine-frontier/wave-1-visual-gates.md"
+                                                       ],
+                                             "modifies":  [
+
+                                                          ],
+                                             "creates":  [
+                                                             ".forge/artifacts/engine-frontier/wave-2-integration.md"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Run the Wave 2 integration gates from a clean debug state and record command results. Verification commands: ctest --preset debug --output-on-failure -E \"_NOT_BUILT$\"; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode FrontierDisabled; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode RenderHealth; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-runtime-stability-phase-1.ps1 -Mode EnduranceStreamDrain; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode MaterialVisual; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-runtime-stability-phase-1.ps1 -Mode LodGround -SmokeSeconds 30; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-runtime-stability-phase-1.ps1 -Mode WaterVisual -SmokeSeconds 30. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-8-lod-boundary-hysteresis-gate",
+                      "title":  "Wave 3 LOD boundary hysteresis gate",
+                      "type":  "code",
+                      "tier":  "deep",
+                      "depends_on":  [
+                                         "T-EF-7-wave2-integration"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           ".forge/scripts/validate-runtime-stability-phase-1.ps1",
+                                                           "src/luminumbra_client/main_client.cpp",
+                                                           "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp"
+                                                       ],
+                                             "modifies":  [
+                                                              ".forge/scripts/validate-runtime-stability-phase-1.ps1",
+                                                              "src/luminumbra_client/main_client.cpp",
+                                                              "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+                                                              "src/luminumbra_common/systems/SHIELD_WorldSystem.h"
+                                                          ],
+                                             "creates":  [
+                                                             "build/debug/test-artifacts/runtime/lod-boundary-oscillation/lod-boundary-hysteresis.json"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Add lod_boundary_oscillation_smoke and LodBoundaryHysteresis validation before any LOD threshold retune. Measure mesh-version churn, pending LOD count, upload backlog, near-field coverage, GL debug errors, and screenshots while hovering around LOD0/LOD1 and LOD1/LOD2 boundaries. Verification commands: cmake --build --preset debug --target luminumbra_client_app runtime_world_visual_validation_test --parallel 1; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-runtime-stability-phase-1.ps1 -Mode LodBoundaryHysteresis; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-runtime-stability-phase-1.ps1 -Mode LodGround -SmokeSeconds 30. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-9-lod-seam-arrival-gate",
+                      "title":  "Wave 3 asynchronous LOD seam arrival gate",
+                      "type":  "code",
+                      "tier":  "deep",
+                      "depends_on":  [
+                                         "T-EF-8-lod-boundary-hysteresis-gate"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           ".forge/scripts/validate-runtime-stability-phase-1.ps1",
+                                                           "src/luminumbra_common/world/MarchingCubes.cpp",
+                                                           "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp"
+                                                       ],
+                                             "modifies":  [
+                                                              ".forge/scripts/validate-runtime-stability-phase-1.ps1",
+                                                              "src/luminumbra_client/main_client.cpp",
+                                                              "src/luminumbra_common/world/MarchingCubes.cpp",
+                                                              "src/luminumbra_common/world/MarchingCubes.h",
+                                                              "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp"
+                                                          ],
+                                             "creates":  [
+                                                             "build/debug/test-artifacts/runtime/lod-seam-arrival/lod-seam-risk.json"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Add lod_seam_arrival_smoke and LodSeamRisk validation for asynchronous neighbor arrival. Detect late finer neighbors, transition-face masks, crack-risk counts, screenshot pixels, and GL debug errors before changing seam geometry. Verification commands: cmake --build --preset debug --target luminumbra_client_app world_generation_test runtime_world_visual_validation_test --parallel 1; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-runtime-stability-phase-1.ps1 -Mode LodSeamRisk; ctest --preset debug --output-on-failure -R \"WorldGenLayerSnapshotTest|RuntimeWorldVisualValidationTest\". Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-10-render-shader-inventory",
+                      "title":  "Wave 3 shader inventory and suite health gate",
+                      "type":  "code",
+                      "tier":  "standard",
+                      "depends_on":  [
+                                         "T-EF-9-lod-seam-arrival-gate"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           ".forge/scripts/validate-engine-frontier.ps1",
+                                                           "res/shaders",
+                                                           "test/rendering/render_smoke_test.cpp",
+                                                           "src/luminumbra_client/rendering/Shader.cpp"
+                                                       ],
+                                             "modifies":  [
+                                                              ".forge/scripts/validate-engine-frontier.ps1",
+                                                              "test/rendering/render_smoke_test.cpp"
+                                                          ],
+                                             "creates":  [
+                                                             "build/debug/test-artifacts/render/shader-inventory.json",
+                                                             "build/debug/test-artifacts/render/shader-suite-health.json"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Add manifest-backed shader inventory and shader-suite health so every shader is classified as wired, compiled_only, dead_asset, or explicitly exempted. Verification commands: cmake --build --preset debug --target render_smoke_test --parallel 1; ctest --preset debug --output-on-failure -R RenderSmokeTest; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode ShaderInventory. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-11-wave3-integration",
+                      "title":  "Wave 3 integration verification",
+                      "type":  "test",
+                      "tier":  "standard",
+                      "depends_on":  [
+                                         "T-EF-10-render-shader-inventory"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           ".forge/scripts/validate-engine-frontier.ps1",
+                                                           ".forge/scripts/validate-runtime-stability-phase-1.ps1"
+                                                       ],
+                                             "modifies":  [
+
+                                                          ],
+                                             "creates":  [
+                                                             ".forge/artifacts/engine-frontier/wave-3-integration.md"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Run the Wave 3 world/render integration gates and record command results. Verification commands: ctest --preset debug --output-on-failure -E \"_NOT_BUILT$\"; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-runtime-stability-phase-1.ps1 -Mode LodBoundaryHysteresis; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-runtime-stability-phase-1.ps1 -Mode LodSeamRisk; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode ShaderInventory; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode RenderHealth; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode MaterialVisual; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-runtime-stability-phase-1.ps1 -Mode WaterVisual -SmokeSeconds 30. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-12-physics-collision-lifecycle-gate",
+                      "title":  "Wave 4 chunk collision lifecycle gate",
+                      "type":  "code",
+                      "tier":  "deep",
+                      "depends_on":  [
+                                         "T-EF-11-wave3-integration"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           "src/luminumbra_common/physics/PhysicsSystem.cpp",
+                                                           "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+                                                           "test"
+                                                       ],
+                                             "modifies":  [
+                                                              ".forge/scripts/validate-engine-frontier.ps1",
+                                                              "src/luminumbra_common/physics/PhysicsSystem.cpp",
+                                                              "src/luminumbra_common/physics/PhysicsSystem.h",
+                                                              "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+                                                              "test/physics"
+                                                          ],
+                                             "creates":  [
+                                                             "build/debug/test-artifacts/runtime/chunk-collision-lifecycle/chunk-collision-lifecycle.json"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Add a ChunkCollisionLifecycle gate for stale collider replacement across LOD and forced remeshes. Do not combine fixed tick, crouch, water traversal, or audio query fairness in this task. Verification commands: cmake --build --preset debug --target physics_test world_generation_test --parallel 1; ctest --preset debug --output-on-failure -R \"ChunkCollisionLifecycle|WorldGenLayerSnapshotTest\"; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode ChunkCollisionLifecycle. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-13-physics-replay-gate",
+                      "title":  "Wave 4 fixed tick physics replay gate",
+                      "type":  "code",
+                      "tier":  "deep",
+                      "depends_on":  [
+                                         "T-EF-12-physics-collision-lifecycle-gate"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           "src/luminumbra_common/physics/PhysicsSystem.cpp",
+                                                           "src/luminumbra_client/player/PlayerController.cpp",
+                                                           "test/physics"
+                                                       ],
+                                             "modifies":  [
+                                                              ".forge/scripts/validate-engine-frontier.ps1",
+                                                              "src/luminumbra_common/physics/PhysicsSystem.cpp",
+                                                              "src/luminumbra_common/physics/PhysicsSystem.h",
+                                                              "src/luminumbra_client/player/PlayerController.cpp",
+                                                              "src/luminumbra_client/player/PlayerController.h",
+                                                              "test/physics"
+                                                          ],
+                                             "creates":  [
+                                                             "build/debug/test-artifacts/runtime/physics-replay/physics-replay-endstate.json"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Add fixed-tick physics replay with input events, tick index, fixed substep count, max catch-up policy, transforms, velocities, collision add/remove events, and deterministic hashes. Verification commands: cmake --build --preset debug --target physics_test --parallel 1; ctest --preset debug --output-on-failure -R PhysicsReplay; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode PhysicsReplay. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-14-audio-null-telemetry-gate",
+                      "title":  "Wave 4 null audio telemetry gate",
+                      "type":  "code",
+                      "tier":  "standard",
+                      "depends_on":  [
+                                         "T-EF-13-physics-replay-gate"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           "src/luminumbra_client/audio",
+                                                           "src/luminumbra_client/main_client.cpp",
+                                                           "test"
+                                                       ],
+                                             "modifies":  [
+                                                              ".forge/scripts/validate-engine-frontier.ps1",
+                                                              "src/luminumbra_client/audio",
+                                                              "src/luminumbra_client/main_client.cpp",
+                                                              "test/audio"
+                                                          ],
+                                             "creates":  [
+                                                             "build/debug/test-artifacts/audio/audio-telemetry.json"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Add deterministic no-device audio telemetry for active voices, 3D sources, clusters, raycasts queued/processed/dropped, streaming and decoded bytes, underruns, and init_mode null. Do not claim playback-handle volume, pitch, occlusion, reverb, or lifetime application from null telemetry. Verification commands: cmake --build --preset debug --target audio_test luminumbra_client_app --parallel 1; ctest --preset debug --output-on-failure -R Audio; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode AudioNullTelemetry. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-15-audio-handle-application-gate",
+                      "title":  "Wave 4 audio playback handle application gate",
+                      "type":  "code",
+                      "tier":  "deep",
+                      "depends_on":  [
+                                         "T-EF-14-audio-null-telemetry-gate"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           "src/luminumbra_client/audio",
+                                                           "test/audio"
+                                                       ],
+                                             "modifies":  [
+                                                              ".forge/scripts/validate-engine-frontier.ps1",
+                                                              "src/luminumbra_client/audio",
+                                                              "test/audio"
+                                                          ],
+                                             "creates":  [
+                                                             "build/debug/test-artifacts/audio/audio-handle-application.json"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Add a fake-backend or miniaudio-facing handle test proving attenuation, pitch, occlusion, reverb send, and one-shot lifetime updates are applied to playback handles. Verification commands: cmake --build --preset debug --target audio_test --parallel 1; ctest --preset debug --output-on-failure -R AudioHandleApplication; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode AudioHandleApplication. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-16-ui-test-baseline-gates",
+                      "title":  "Wave 4 UI metadata and coverage baseline gates",
+                      "type":  "code",
+                      "tier":  "standard",
+                      "depends_on":  [
+                                         "T-EF-15-audio-handle-application-gate"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           "test",
+                                                           "data/ui",
+                                                           ".forge/scripts/validate-engine-frontier.ps1"
+                                                       ],
+                                             "modifies":  [
+                                                              ".forge/scripts/validate-engine-frontier.ps1",
+                                                              "test"
+                                                          ],
+                                             "creates":  [
+                                                             "build/debug/test-artifacts/testing/ctest_manifest.json",
+                                                             "build/debug/test-artifacts/coverage/coverage_summary.json",
+                                                             "build/debug/test-artifacts/ui/ui_screenshots.json"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Add CTest label/preset metadata reporting, define the first-party fast coverage producer baseline, and define UI screenshot viewports, PPM paths, nonblank thresholds, occupied tile metrics, and clipping heuristics before enforcing stricter thresholds. Verification commands: cmake --build --preset debug --target ui_smoke_test --parallel 1; ctest --preset debug --output-on-failure -R \"UiSmokeTest|CTestMetadataGate|CoverageGate\"; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode UiTestBaseline. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-17-wave4-integration",
+                      "title":  "Wave 4 integration verification",
+                      "type":  "test",
+                      "tier":  "standard",
+                      "depends_on":  [
+                                         "T-EF-16-ui-test-baseline-gates"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           ".forge/scripts/validate-engine-frontier.ps1"
+                                                       ],
+                                             "modifies":  [
+
+                                                          ],
+                                             "creates":  [
+                                                             ".forge/artifacts/engine-frontier/wave-4-integration.md"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Run the Wave 4 physics, audio, UI, and full CTest integration gates and record command results. Verification commands: ctest --preset debug --output-on-failure -E \"_NOT_BUILT$\"; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode ChunkCollisionLifecycle; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode PhysicsReplay; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode AudioNullTelemetry; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode AudioHandleApplication; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode UiTestBaseline. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-18-simulation-eventbus-order-gate",
+                      "title":  "Wave 5 deterministic EventBus replay gate",
+                      "type":  "code",
+                      "tier":  "standard",
+                      "depends_on":  [
+                                         "T-EF-17-wave4-integration"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           "src/luminumbra_common",
+                                                           "test"
+                                                       ],
+                                             "modifies":  [
+                                                              ".forge/scripts/validate-engine-frontier.ps1",
+                                                              "src/luminumbra_common/simulation",
+                                                              "test/simulation",
+                                                              "src/luminumbra_common/sources.cmake",
+                                                              "test/sources.cmake"
+                                                          ],
+                                             "creates":  [
+                                                             "build/debug/test-artifacts/simulation/eventbus-replay.json"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Add deterministic EventBus ordering and replay only: tick, phase, sequence, source entity, event type, payload, stable subscription ordering, and replay JSON. Verification commands: cmake --build --preset debug --target simulation_test --parallel 1; ctest --preset debug --output-on-failure -R EventBusDeterministicOrderTest; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode SimulationEventBus. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-19-lua-api-manifest-gate",
+                      "title":  "Wave 5 Lua sandbox API manifest gate",
+                      "type":  "code",
+                      "tier":  "standard",
+                      "depends_on":  [
+                                         "T-EF-18-simulation-eventbus-order-gate"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           "src/luminumbra_common/scripting",
+                                                           "scripts/common",
+                                                           "test"
+                                                       ],
+                                             "modifies":  [
+                                                              ".forge/scripts/validate-engine-frontier.ps1",
+                                                              "src/luminumbra_common/scripting",
+                                                              "test/scripting",
+                                                              "src/luminumbra_common/sources.cmake",
+                                                              "test/sources.cmake"
+                                                          ],
+                                             "creates":  [
+                                                             "build/debug/test-artifacts/scripting/lua-api-manifest.json"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Add a deterministic Lua sandbox/API manifest gate. Exclude wall-clock time, uncontrolled randomness, unrestricted file/process APIs, threads, coroutines, debug APIs, and direct registry iteration. Verification commands: cmake --build --preset debug --target scripting_test --parallel 1; ctest --preset debug --output-on-failure -R LuaApiManifest; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode LuaApiManifest. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-20-aetheric-diffusion-gate",
+                      "title":  "Wave 5 Aetheric chunk diffusion gate",
+                      "type":  "code",
+                      "tier":  "standard",
+                      "depends_on":  [
+                                         "T-EF-19-lua-api-manifest-gate"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           "src/luminumbra_common",
+                                                           "data/common/materials.json",
+                                                           "test"
+                                                       ],
+                                             "modifies":  [
+                                                              ".forge/scripts/validate-engine-frontier.ps1",
+                                                              "src/luminumbra_common/aetheric",
+                                                              "test/aetheric",
+                                                              "src/luminumbra_common/sources.cmake",
+                                                              "test/sources.cmake"
+                                                          ],
+                                             "creates":  [
+                                                             "build/debug/test-artifacts/aetheric/aetheric-field-diffusion.json"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Add Aetheric Field v1 as chunk-local fixed-point two-channel diffusion with deterministic source injection, 16-tick single-crystal fixture, samples, and checksum. Do not add visual coupling or global streaming. Verification commands: cmake --build --preset debug --target aetheric_test --parallel 1; ctest --preset debug --output-on-failure -R AethericFieldDiffusionTest; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode AethericDiffusion. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-21-instinct-planner-gate",
+                      "title":  "Wave 5 one-need Instinct planner gate",
+                      "type":  "code",
+                      "tier":  "standard",
+                      "depends_on":  [
+                                         "T-EF-20-aetheric-diffusion-gate"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           "src/luminumbra_common/ai",
+                                                           "test"
+                                                       ],
+                                             "modifies":  [
+                                                              ".forge/scripts/validate-engine-frontier.ps1",
+                                                              "src/luminumbra_common/ai",
+                                                              "test/ai",
+                                                              "src/luminumbra_common/sources.cmake",
+                                                              "test/sources.cmake"
+                                                          ],
+                                             "creates":  [
+                                                             "build/debug/test-artifacts/ai/instinct-grovestrider-hunger.json"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Add the smallest Instinct planner gate: deterministic needs component to goal scores to bounded action plan with stable tie-breaks and one hunger satisfaction scenario. Do not broaden GOAP behavior in this task. Verification commands: cmake --build --preset debug --target ai_test --parallel 1; ctest --preset debug --output-on-failure -R InstinctPlannerNeedSatisfactionTest; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode InstinctPlanner. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-22-wave5-integration",
+                      "title":  "Wave 5 integration verification",
+                      "type":  "test",
+                      "tier":  "standard",
+                      "depends_on":  [
+                                         "T-EF-21-instinct-planner-gate"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           ".forge/scripts/validate-engine-frontier.ps1"
+                                                       ],
+                                             "modifies":  [
+
+                                                          ],
+                                             "creates":  [
+                                                             ".forge/artifacts/engine-frontier/wave-5-integration.md"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Run Wave 5 simulation, Lua, Aetheric, Instinct, and full CTest integration gates and record command results. Verification commands: ctest --preset debug --output-on-failure -E \"_NOT_BUILT$\"; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode SimulationEventBus; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode LuaApiManifest; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode AethericDiffusion; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode InstinctPlanner. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-23-persistence-roundtrip-gate",
+                      "title":  "Wave 6 world persistence round trip gate",
+                      "type":  "code",
+                      "tier":  "deep",
+                      "depends_on":  [
+                                         "T-EF-22-wave5-integration"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           "src/luminumbra_common/world",
+                                                           "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+                                                           "test"
+                                                       ],
+                                             "modifies":  [
+                                                              ".forge/scripts/validate-engine-frontier.ps1",
+                                                              "src/luminumbra_common/persistence",
+                                                              "src/luminumbra_common/world",
+                                                              "test/persistence",
+                                                              "src/luminumbra_common/sources.cmake",
+                                                              "test/sources.cmake"
+                                                          ],
+                                             "creates":  [
+                                                             "build/debug/test-artifacts/persistence/world-persistence-roundtrip.json"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Add persistence_round_trip_seed_4242 for complete world identity, generated and mutated chunk data reload, stable spawn point, preset digest, schema version, and strict artifact reporting. Mesh and collision remain derived. Verification commands: cmake --build --preset debug --target persistence_test --parallel 1; ctest --preset debug --output-on-failure -R WorldPersistenceRoundTripTest; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode PersistenceRoundTrip. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-24-chunk-format-validator-gate",
+                      "title":  "Wave 6 chunk format validator gate",
+                      "type":  "code",
+                      "tier":  "standard",
+                      "depends_on":  [
+                                         "T-EF-23-persistence-roundtrip-gate"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           "src/luminumbra_common/persistence",
+                                                           "test/persistence"
+                                                       ],
+                                             "modifies":  [
+                                                              ".forge/scripts/validate-engine-frontier.ps1",
+                                                              "src/luminumbra_common/persistence",
+                                                              "test/persistence"
+                                                          ],
+                                             "creates":  [
+                                                             "build/debug/test-artifacts/persistence/chunk-format-validation.json"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Add chunk persistence format validation for magic, version, coordinates, dimensions, section table, sizes, checksum, truncation, strict decode errors, and atomic write behavior. Verification commands: cmake --build --preset debug --target persistence_test --parallel 1; ctest --preset debug --output-on-failure -R ChunkPersistenceFormatTest; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode ChunkFormat. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-25-world-hash-entity-snapshot-gate",
+                      "title":  "Wave 6 world hash and entity snapshot gate",
+                      "type":  "code",
+                      "tier":  "deep",
+                      "depends_on":  [
+                                         "T-EF-24-chunk-format-validator-gate"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           "src/luminumbra_common/persistence",
+                                                           "src/luminumbra_common/ecs",
+                                                           "test/persistence"
+                                                       ],
+                                             "modifies":  [
+                                                              ".forge/scripts/validate-engine-frontier.ps1",
+                                                              "src/luminumbra_common/persistence",
+                                                              "src/luminumbra_common/ecs",
+                                                              "test/persistence"
+                                                          ],
+                                             "creates":  [
+                                                             "build/debug/test-artifacts/persistence/world-hash.json",
+                                                             "build/debug/test-artifacts/persistence/entity-snapshot.json"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Add deterministic sorted WorldHash plus a limited durable entity snapshot for stable entity IDs, TransformComponent, TagComponent, StaticMeshComponent, and parent/child links. Verification commands: cmake --build --preset debug --target persistence_test --parallel 1; ctest --preset debug --output-on-failure -R \"WorldHashTest|EntitySnapshot\"; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode WorldHash. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-26-wave6-integration",
+                      "title":  "Wave 6 integration verification",
+                      "type":  "test",
+                      "tier":  "standard",
+                      "depends_on":  [
+                                         "T-EF-25-world-hash-entity-snapshot-gate"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           ".forge/scripts/validate-engine-frontier.ps1"
+                                                       ],
+                                             "modifies":  [
+
+                                                          ],
+                                             "creates":  [
+                                                             ".forge/artifacts/engine-frontier/wave-6-integration.md"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Run Wave 6 persistence, world hash, entity snapshot, and full CTest integration gates and record command results. Verification commands: ctest --preset debug --output-on-failure -E \"_NOT_BUILT$\"; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode PersistenceRoundTrip; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode ChunkFormat; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode WorldHash. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-27-gpu-sdf-callback-safety-gate",
+                      "title":  "Wave 7 GPU SDF callback safety gate",
+                      "type":  "code",
+                      "tier":  "deep",
+                      "depends_on":  [
+                                         "T-EF-26-wave6-integration"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           "src/luminumbra_client/rendering",
+                                                           "src/luminumbra_common/world",
+                                                           "test/rendering"
+                                                       ],
+                                             "modifies":  [
+                                                              ".forge/scripts/validate-engine-frontier.ps1",
+                                                              "src/luminumbra_client/rendering",
+                                                              "src/luminumbra_common/world",
+                                                              "test/rendering"
+                                                          ],
+                                             "creates":  [
+                                                             "build/debug/test-artifacts/render/gpu-sdf-callback-safety.json"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Add GPU SDF callback safety so invalid callback output falls back or fails closed, worker generation jobs never call GL compute, and counters record attempted, succeeded, failed, fallback, queue depth, and readback time. Verification commands: cmake --build --preset debug --target sdf_gpu_cpu_parity_test render_smoke_test --parallel 1; ctest --preset debug --output-on-failure -R SdfGpuCallbackTest; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode GpuSdfCallbackSafety. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-28-gpu-sdf-compute-parity-gate",
+                      "title":  "Wave 7 GPU SDF compute parity gate",
+                      "type":  "code",
+                      "tier":  "deep",
+                      "depends_on":  [
+                                         "T-EF-27-gpu-sdf-callback-safety-gate"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           "src/luminumbra_client/rendering",
+                                                           "src/luminumbra_common/world",
+                                                           "test/rendering"
+                                                       ],
+                                             "modifies":  [
+                                                              ".forge/scripts/validate-engine-frontier.ps1",
+                                                              "src/luminumbra_client/rendering",
+                                                              "src/luminumbra_common/world",
+                                                              "test/rendering"
+                                                          ],
+                                             "creates":  [
+                                                             "build/debug/test-artifacts/render/gpu-sdf-compute-parity.json"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Add headless GPU compute parity for known seed/chunk cases after callback safety. The artifact must record CPU/GPU deltas, thresholds, GL debug errors, fallback counts, and driver availability. Verification commands: cmake --build --preset debug --target sdf_gpu_cpu_parity_test --parallel 1; ctest --preset debug --output-on-failure -R SdfGpuCpuParityTest; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode GpuSdfComputeParity. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-29-gpu-sdf-runtime-toggle-gate",
+                      "title":  "Wave 7 GPU SDF runtime visual parity gate",
+                      "type":  "code",
+                      "tier":  "deep",
+                      "depends_on":  [
+                                         "T-EF-28-gpu-sdf-compute-parity-gate"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           "src/luminumbra_client/main_client.cpp",
+                                                           "src/luminumbra_client/rendering",
+                                                           "test/rendering"
+                                                       ],
+                                             "modifies":  [
+                                                              ".forge/scripts/validate-engine-frontier.ps1",
+                                                              "src/luminumbra_client/main_client.cpp",
+                                                              "src/luminumbra_client/rendering",
+                                                              "test/rendering"
+                                                          ],
+                                             "creates":  [
+                                                             "build/debug/test-artifacts/render/gpu-sdf-runtime-parity.json",
+                                                             "build/debug/test-artifacts/render/gpu-sdf-cpu.ppm",
+                                                             "build/debug/test-artifacts/render/gpu-sdf-gpu.ppm"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Add gated runtime GPU SDF visual parity only after callback safety and compute parity. Keep runtime GPU SDF disabled by default and record CPU screenshot, GPU screenshot, parity metrics, GL debug errors, fallback counts, and runtime toggle state. Verification commands: cmake --build --preset debug --target luminumbra_client_app render_capture_test --parallel 1; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode GpuSdfRuntimeParity; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode GpuSdfCallbackSafety; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode GpuSdfComputeParity. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-30-wave7-integration",
+                      "title":  "Wave 7 integration verification",
+                      "type":  "test",
+                      "tier":  "standard",
+                      "depends_on":  [
+                                         "T-EF-29-gpu-sdf-runtime-toggle-gate"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           ".forge/scripts/validate-engine-frontier.ps1"
+                                                       ],
+                                             "modifies":  [
+
+                                                          ],
+                                             "creates":  [
+                                                             ".forge/artifacts/engine-frontier/wave-7-integration.md"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Run Wave 7 GPU SDF and full CTest integration gates and record command results. Verification commands: ctest --preset debug --output-on-failure -E \"_NOT_BUILT$\"; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode GpuSdfCallbackSafety; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode GpuSdfComputeParity; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode GpuSdfRuntimeParity. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-31-network-loopback-authority-gate",
+                      "title":  "Wave 8 loopback authority gate",
+                      "type":  "code",
+                      "tier":  "deep",
+                      "depends_on":  [
+                                         "T-EF-30-wave7-integration"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           "src/luminumbra_common/network",
+                                                           "src/luminumbra_common/persistence",
+                                                           "src/luminumbra_common/physics",
+                                                           "test"
+                                                       ],
+                                             "modifies":  [
+                                                              ".forge/scripts/validate-engine-frontier.ps1",
+                                                              "src/luminumbra_common/network",
+                                                              "test/network",
+                                                              "src/luminumbra_common/sources.cmake",
+                                                              "test/sources.cmake"
+                                                          ],
+                                             "creates":  [
+                                                             "build/debug/test-artifacts/network/network-loopback-convergence.json"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Add in-memory loopback authority for two local sessions using fixed ticks, ordered inputs, server-applied inputs, stable world identity, durable IDs, and state hash broadcast. Do not add sockets, prediction, NAT, multiplayer UI, or session discovery. Verification commands: cmake --build --preset debug --target network_test --parallel 1; ctest --preset debug --output-on-failure -R LoopbackAuthorityTest; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode NetworkLoopback. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-32-network-state-hash-gate",
+                      "title":  "Wave 8 network state hash gate",
+                      "type":  "code",
+                      "tier":  "standard",
+                      "depends_on":  [
+                                         "T-EF-31-network-loopback-authority-gate"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           "src/luminumbra_common/network",
+                                                           "src/luminumbra_common/persistence",
+                                                           "test/network"
+                                                       ],
+                                             "modifies":  [
+                                                              ".forge/scripts/validate-engine-frontier.ps1",
+                                                              "src/luminumbra_common/network",
+                                                              "test/network"
+                                                          ],
+                                             "creates":  [
+                                                             "build/debug/test-artifacts/network/network-state-hash.json"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Add deterministic network state hash validation over authoritative sorted state per tick, using the world hash and durable IDs from persistence gates. Verification commands: cmake --build --preset debug --target network_test --parallel 1; ctest --preset debug --output-on-failure -R NetworkStateHash; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode NetworkStateHash. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-33-wave8-integration",
+                      "title":  "Wave 8 integration verification",
+                      "type":  "test",
+                      "tier":  "standard",
+                      "depends_on":  [
+                                         "T-EF-32-network-state-hash-gate"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           ".forge/scripts/validate-engine-frontier.ps1"
+                                                       ],
+                                             "modifies":  [
+
+                                                          ],
+                                             "creates":  [
+                                                             ".forge/artifacts/engine-frontier/wave-8-integration.md"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Run Wave 8 loopback networking and full CTest integration gates and record command results. Verification commands: ctest --preset debug --output-on-failure -E \"_NOT_BUILT$\"; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode NetworkLoopback; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode NetworkStateHash. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  },
+                  {
+                      "id":  "T-EF-34-endurance-revalidation",
+                      "title":  "Wave 9 terminal Endurance300 revalidation",
+                      "type":  "test",
+                      "tier":  "standard",
+                      "depends_on":  [
+                                         "T-EF-1-material-visual-gate",
+                                         "T-EF-2-material-visual-gate-test",
+                                         "T-EF-3-wave1-ctest-baseline",
+                                         "T-EF-4-frontier-disabled-gate",
+                                         "T-EF-5-render-health-gate",
+                                         "T-EF-6-streaming-telemetry-schema",
+                                         "T-EF-7-wave2-integration",
+                                         "T-EF-8-lod-boundary-hysteresis-gate",
+                                         "T-EF-9-lod-seam-arrival-gate",
+                                         "T-EF-10-render-shader-inventory",
+                                         "T-EF-11-wave3-integration",
+                                         "T-EF-12-physics-collision-lifecycle-gate",
+                                         "T-EF-13-physics-replay-gate",
+                                         "T-EF-14-audio-null-telemetry-gate",
+                                         "T-EF-15-audio-handle-application-gate",
+                                         "T-EF-16-ui-test-baseline-gates",
+                                         "T-EF-17-wave4-integration",
+                                         "T-EF-18-simulation-eventbus-order-gate",
+                                         "T-EF-19-lua-api-manifest-gate",
+                                         "T-EF-20-aetheric-diffusion-gate",
+                                         "T-EF-21-instinct-planner-gate",
+                                         "T-EF-22-wave5-integration",
+                                         "T-EF-23-persistence-roundtrip-gate",
+                                         "T-EF-24-chunk-format-validator-gate",
+                                         "T-EF-25-world-hash-entity-snapshot-gate",
+                                         "T-EF-26-wave6-integration",
+                                         "T-EF-27-gpu-sdf-callback-safety-gate",
+                                         "T-EF-28-gpu-sdf-compute-parity-gate",
+                                         "T-EF-29-gpu-sdf-runtime-toggle-gate",
+                                         "T-EF-30-wave7-integration",
+                                         "T-EF-31-network-loopback-authority-gate",
+                                         "T-EF-32-network-state-hash-gate",
+                                         "T-EF-33-wave8-integration"
+                                     ],
+                      "files":  [
+
+                                ],
+                      "agent_contract":  {
+                                             "reads":  [
+                                                           ".forge/scripts/validate-engine-frontier.ps1",
+                                                           ".forge/scripts/validate-runtime-stability-phase-1.ps1",
+                                                           "build/debug/test-artifacts/runtime/material-visual/material-visual-analysis.json",
+                                                           "build/debug/test-artifacts/runtime/lod-ground-baseline/lod-ground-visual-analysis.json",
+                                                           "build/debug/test-artifacts/runtime/water-visual/water-visual-analysis.json"
+                                                       ],
+                                             "modifies":  [
+
+                                                          ],
+                                             "creates":  [
+                                                             ".forge/artifacts/engine-frontier/endurance-revalidation.md",
+                                                             "build/debug/test-artifacts/runtime/visible-300/last-known-runtime.json"
+                                                         ]
+                                         },
+                      "prompt":  "Codex-only execution. Rerun the terminal Endurance300 gate after all visual-gate tasks are green. Record command results, prior MaterialVisual/LodGround/WaterVisual artifact paths and timestamps or content hashes, readiness, upload/job drain, upload-priority inversions, GL debug errors, and visible-window completion in .forge/artifacts/engine-frontier/endurance-revalidation.md. Verification commands: ctest --preset debug --output-on-failure -E \"_NOT_BUILT$\"; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode MaterialVisual; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-runtime-stability-phase-1.ps1 -Mode LodGround -SmokeSeconds 30; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-runtime-stability-phase-1.ps1 -Mode WaterVisual -SmokeSeconds 30; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-runtime-stability-phase-1.ps1 -Mode Endurance300. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
+                  }
+              ]
+}

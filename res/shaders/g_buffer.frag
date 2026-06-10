@@ -1,6 +1,5 @@
 #version 450 core
-// Compressed G-buffer format - 50% memory bandwidth reduction
-layout (location = 0) out vec2 gPositionDepth;     // RG32F: XZ in view space, depth reconstruction
+layout (location = 0) out vec3 gPosition;          // RGB16F: full view-space position
 layout (location = 1) out vec4 gNormalMaterial;    // RGB10A2: Octahedral normal + material ID  
 layout (location = 2) out vec4 gAlbedoRoughness;   // RGBA8: RGB albedo + roughness
 layout (location = 3) out vec2 gMetallicAO;        // RG16F: Metallic + AO
@@ -33,8 +32,7 @@ void main()
     
     // --- Compressed G-Buffer Output ---
     
-    // Store XZ components only, Y will be reconstructed from depth
-    gPositionDepth = fs_in.FragPos.xz;
+    gPosition = fs_in.FragPos;
     
     // Encode normal using octahedral mapping and pack with material ID
     vec2 encoded_normal = encode_octahedral(normalize(fs_in.Normal));

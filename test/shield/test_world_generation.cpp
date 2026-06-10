@@ -158,7 +158,7 @@ TEST_F(WorldGenerationTest, GenerationIsDeterministicWithSameSeed) {
 TEST_F(WorldGenerationTest, CavesChangeGeneratedMesh) {
     TerrainGenParams params_no_caves = params_guaranteed_surface;
     params_no_caves.caves_enabled = false;
-    params_no_caves.height_offset = 12.0f;
+    params_no_caves.height_offset = 40.0f;
 
     TerrainGenParams params_with_caves = params_no_caves;
     params_with_caves.caves_enabled = true;
@@ -190,11 +190,28 @@ TEST_F(WorldGenerationTest, CavesChangeGeneratedMesh) {
         }
     }
 
-    ASSERT_FALSE(chunk_no_caves.mesh_vertices.empty()) << "No-caves chunk should have vertices";
+    ASSERT_TRUE(chunk_no_caves.mesh_vertices.empty()) << "No-caves deep chunk should have no exposed surface";
     ASSERT_FALSE(chunk_caves.mesh_vertices.empty()) << "Caves chunk should have vertices";
     ASSERT_GT(carved_air_samples, 0u) << "Caves should carve solid SDF samples into air";
     ASSERT_GT(remaining_solid_samples, 0u) << "Caves should not erase the entire solid terrain volume";
     EXPECT_NE(chunk_caves.mesh_vertices.size(), chunk_no_caves.mesh_vertices.size());
+}
+
+TEST_F(WorldGenerationTest, CavesDoNotPunchThroughSurfaceCap) {
+    TerrainGenParams params_with_forced_caves = params_guaranteed_surface;
+    params_with_forced_caves.height_offset = 40.0f;
+    params_with_forced_caves.caves_enabled = true;
+    params_with_forced_caves.cave_threshold = -1.0f;
+    params_with_forced_caves.cave_frequency = 0.15f;
+    params_with_forced_caves.cave_carve_value = 4.0f;
+
+    SHIELD_WorldSystem world_system(nullptr, nullptr, params_with_forced_caves, 12345);
+    EXPECT_LT(world_system.get_density_at({8.0f, 39.0f, 8.0f}), 0.0f)
+        << "surface cap should remain solid one meter below the heightfield";
+    EXPECT_LT(world_system.get_density_at({8.0f, 24.0f, 8.0f}), 0.0f)
+        << "surface cap should remain solid sixteen meters below the heightfield";
+    EXPECT_GT(world_system.get_density_at({8.0f, 0.0f, 8.0f}), 0.0f)
+        << "deep caves should still carve interior terrain";
 }
 
 // =====================================================================================
@@ -208,6 +225,19 @@ TEST_F(WorldGenerationTest, MeshingProducesNonEmptyVertexBuffer) {
     World::MarchingCubes::PolygoniseTerrain(world_system, chunk, 0.0f, 1);
     ASSERT_FALSE(chunk.mesh_vertices.empty());
     ASSERT_FALSE(chunk.mesh_indices.empty());
+}
+
+TEST_F(WorldGenerationTest, TerrainMeshUsesRenderableMaterials) {
+    SHIELD_WorldSystem world_system(nullptr, nullptr, params_guaranteed_surface, 1337);
+    Chunk chunk({0, 0, 0});
+    world_system.GenerateChunkData(chunk);
+    World::MarchingCubes::PolygoniseTerrain(world_system, chunk, 0.0f, 1);
+
+    ASSERT_FALSE(chunk.mesh_vertices.empty());
+    for (const auto& vertex : chunk.mesh_vertices) {
+        EXPECT_NE(vertex.material_id, static_cast<u32>(MaterialType::Air));
+        EXPECT_NE(vertex.material_id, static_cast<u32>(MaterialType::Water));
+    }
 }
 
 TEST_F(WorldGenerationTest, KnownEmptyChunkGeneratesEmptyMesh) {
@@ -299,6 +329,30 @@ TEST_F(WorldAndWaterTest, WaterMeshIsEmptyForHighAltitudeChunk) {
     World::MarchingCubes::GenerateWaterMesh(*water_system, *world_system, chunk);
     ASSERT_TRUE(chunk.water_mesh_vertices.empty());
     ASSERT_TRUE(chunk.water_mesh_indices.empty());
+}
+
+TEST_F(WorldAndWaterTest, DryHighAltitudeCellsStayDryAfterSimulation) {
+    Luminumbra::JobSystem jobs;
+    jobs.startup();
+
+    SHIELD_WorldSystem world(&jobs, nullptr, params_sky_world, 1337);
+    WaterSystem water(&jobs, &world);
+    world.SetWaterSystem(&water);
+
+    auto chunk = std::make_shared<Chunk>(IVec3{0, 6, 0});
+    std::unordered_map<ChunkID, std::shared_ptr<Chunk>> active_chunks;
+    active_chunks.emplace(chunk->get_id(), chunk);
+
+    entt::registry registry;
+    water.update(registry, active_chunks);
+
+    ASSERT_TRUE(chunk->has_water_sim.load());
+    ASSERT_FALSE(chunk->water_level_data.empty());
+    for (float water_level : chunk->water_level_data) {
+        EXPECT_NEAR(water_level, SEA_LEVEL, 1.0e-5f);
+    }
+
+    jobs.shutdown();
 }
 
 TEST_F(WorldAndWaterTest, WaterMeshNormalsPointUp) {

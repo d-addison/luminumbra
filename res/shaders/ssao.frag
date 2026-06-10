@@ -3,8 +3,8 @@ out float FragColor; // Output is a single float (occlusion value)
 
 in vec2 TexCoords;
 
-uniform sampler2D gPosition;      // Now contains VIEW-space positions
-uniform sampler2D gNormal;        // Now contains VIEW-space normals
+uniform sampler2D gPosition;          // View-space positions
+uniform sampler2D gNormalMaterial;    // Octahedral view-space normal + material ID
 uniform sampler2D u_noiseTexture;
 
 uniform vec3 u_samples[64];
@@ -17,11 +17,22 @@ const int KERNEL_SIZE = 64;
 const float RADIUS = 0.8;
 const float BIAS = 0.025;
 
+vec2 octWrap(vec2 v) {
+    return (1.0 - abs(v.yx)) * (step(0.0, v.xy) * 2.0 - 1.0);
+}
+
+vec3 decode_octahedral(vec2 encoded) {
+    vec2 e = encoded * 2.0 - 1.0;
+    vec3 v = vec3(e.xy, 1.0 - abs(e.x) - abs(e.y));
+    if (v.z < 0.0) v.xy = octWrap(v.xy);
+    return normalize(v);
+}
+
 void main()
 {
     // Get fragment data from G-buffer (fragPos and normal are in VIEW SPACE)
     vec3 fragPos = texture(gPosition, TexCoords).rgb;
-    vec3 normal = normalize(texture(gNormal, TexCoords).rgb);
+    vec3 normal = decode_octahedral(texture(gNormalMaterial, TexCoords).xy);
     
     // Get random vector to rotate the sampling kernel (using dynamic screen size)
     vec2 noiseScale = u_screenSize / 4.0; // 4x4 noise texture tiling

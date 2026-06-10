@@ -121,36 +121,24 @@ TEST(JobSystemStressTest, BatchCountersCanBeReusedAcrossSequentialBatches) {
 
     constexpr int kBatchIterations = 512;
     constexpr int kJobsPerBatch = 8;
-    constexpr auto kTimeout = 5s;
 
     RunningJobSystem system;
 
     for (int batch = 0; batch < kBatchIterations; ++batch) {
         std::atomic<int> completed{0};
-        std::mutex mutex;
-        std::condition_variable completed_cv;
         std::vector<Luminumbra::Job> jobs;
         jobs.reserve(kJobsPerBatch);
 
         for (int i = 0; i < kJobsPerBatch; ++i) {
-            jobs.emplace_back([&completed, &completed_cv]() {
-                const int done = completed.fetch_add(1, std::memory_order_relaxed) + 1;
-                if (done == kJobsPerBatch) {
-                    completed_cv.notify_one();
-                }
+            jobs.emplace_back([&completed]() {
+                completed.fetch_add(1, std::memory_order_relaxed);
             });
         }
 
         const Luminumbra::JobHandle handle = system.job_system.dispatch_batch(jobs);
-
-        {
-            std::unique_lock<std::mutex> lock(mutex);
-            ASSERT_TRUE(completed_cv.wait_for(lock, kTimeout, [&completed]() {
-                return completed.load(std::memory_order_relaxed) == kJobsPerBatch;
-            }));
-        }
-
         system.job_system.wait(handle);
+
+        ASSERT_EQ(completed.load(std::memory_order_acquire), kJobsPerBatch) << "batch " << batch;
     }
 }
 
