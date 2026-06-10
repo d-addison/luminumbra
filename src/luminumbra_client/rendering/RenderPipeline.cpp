@@ -23,6 +23,7 @@
 #include "RenderSystem.h"
 #include "passes/GBufferPass.h"
 #include "passes/ShadowPass.h"
+#include "passes/SsaoPass.h"
 #include <stb_image.h>
 
 namespace {
@@ -311,7 +312,8 @@ void RenderPipeline::HierarchicalCuller::Clear() {
 
 RenderPipeline::RenderPipeline()
     : m_gbuffer_pass(std::make_unique<GBufferPass>()),
-      m_shadow_pass(std::make_unique<ShadowPass>()) {}
+      m_shadow_pass(std::make_unique<ShadowPass>()),
+      m_ssao_pass(std::make_unique<SsaoPass>()) {}
 RenderPipeline::~RenderPipeline() {
     cleanup_gpu_resources();
 }
@@ -331,7 +333,7 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         init_lighting_fbo(screen_width, screen_height);
         m_gbuffer_pass->init_gbuffer(screen_width, screen_height);
         m_shadow_pass->init_shadow_map();
-        init_ssao();
+        m_ssao_pass->init_ssao(screen_width, screen_height);
         init_screen_quad();
         init_skybox();
         init_terrain_textures();
@@ -457,9 +459,9 @@ RenderPipeline::RuntimeRenderStats RenderPipeline::get_runtime_render_stats() co
                                 static_cast<size_t>(m_shadow_pass->shadow_map().resolution) *
                                 static_cast<size_t>(ShadowMap::CASCADE_COUNT) * 4u;
     }
-    if (m_ssao.ssaoColorBuffer) estimated_vram_bytes += pixel_count * 2u;
-    if (m_ssao.ssaoColorBufferBlur) estimated_vram_bytes += pixel_count * 2u;
-    if (m_ssao.noiseTexture) estimated_vram_bytes += 4u * 4u * 6u;
+    if (m_ssao_pass->ssao().ssaoColorBuffer) estimated_vram_bytes += pixel_count * 2u;
+    if (m_ssao_pass->ssao().ssaoColorBufferBlur) estimated_vram_bytes += pixel_count * 2u;
+    if (m_ssao_pass->ssao().noiseTexture) estimated_vram_bytes += 4u * 4u * 6u;
     if (m_screen_quad_vbo) estimated_vram_bytes += 20u * sizeof(float);
     if (m_skybox_vbo) estimated_vram_bytes += 108u * sizeof(float);
     if (m_gbuffer_pass->instance_matrix_vbo()) estimated_vram_bytes += 10000u * sizeof(glm::mat4);
@@ -479,8 +481,8 @@ RenderPipeline::RuntimeRenderStats RenderPipeline::get_runtime_render_stats() co
     stats.lighting_shader_ok = m_lighting_shader && m_lighting_shader->IsValid();
     stats.skybox_shader_ok = m_skybox_shader && m_skybox_shader->IsValid();
     stats.shadow_shader_ok = m_shadow_pass->shader() && m_shadow_pass->shader()->IsValid();
-    stats.ssao_shader_ok = m_ssao.ssaoShader && m_ssao.ssaoShader->IsValid();
-    stats.ssao_blur_shader_ok = m_ssao.blurShader && m_ssao.blurShader->IsValid();
+    stats.ssao_shader_ok = m_ssao_pass->ssao().ssaoShader && m_ssao_pass->ssao().ssaoShader->IsValid();
+    stats.ssao_blur_shader_ok = m_ssao_pass->ssao().blurShader && m_ssao_pass->ssao().blurShader->IsValid();
     stats.water_shader_ok = m_water_shader && m_water_shader->IsValid();
     stats.instanced_static_mesh_shader_ok = m_gbuffer_pass->instanced_static_mesh_shader() && m_gbuffer_pass->instanced_static_mesh_shader()->IsValid();
     stats.gpu_sdf_initialized = m_gpu_sdf.initialized;
@@ -514,8 +516,8 @@ std::vector<RenderPipeline::ShaderHealthEntry> RenderPipeline::get_shader_health
     add_shader("lighting", m_lighting_shader);
     add_shader("skybox", m_skybox_shader);
     add_shader("shadow", m_shadow_pass->shader());
-    add_shader("ssao", m_ssao.ssaoShader);
-    add_shader("ssao_blur", m_ssao.blurShader);
+    add_shader("ssao", m_ssao_pass->ssao().ssaoShader);
+    add_shader("ssao_blur", m_ssao_pass->ssao().blurShader);
     add_shader("water", m_water_shader);
     add_shader("instanced_static_mesh", m_gbuffer_pass->instanced_static_mesh_shader());
     health.push_back({"gpu_sdf_compute", m_gpu_sdf.compute_program != 0, m_gpu_sdf.compute_program != 0 ? "" : "not initialized"});
@@ -529,8 +531,8 @@ RenderPipeline::RenderResourceRegistryStats RenderPipeline::get_resource_registr
     stats.framebuffers += count(m_lighting_fbo.fbo_id);
     stats.framebuffers += count(m_gbuffer_pass->gbuffer().fbo_id);
     stats.framebuffers += count(m_shadow_pass->shadow_map().fbo_id);
-    stats.framebuffers += count(m_ssao.fbo);
-    stats.framebuffers += count(m_ssao.blurFBO);
+    stats.framebuffers += count(m_ssao_pass->ssao().fbo);
+    stats.framebuffers += count(m_ssao_pass->ssao().blurFBO);
 
     stats.textures += count(m_lighting_fbo.color_texture);
     stats.textures += count(m_lighting_fbo.opaque_color_texture);
@@ -540,9 +542,9 @@ RenderPipeline::RenderResourceRegistryStats RenderPipeline::get_resource_registr
     stats.textures += count(m_gbuffer_pass->gbuffer().material_texture);
     stats.textures += count(m_gbuffer_pass->gbuffer().depth_texture);
     stats.textures += count(m_shadow_pass->shadow_map().depth_texture_array);
-    stats.textures += count(m_ssao.ssaoColorBuffer);
-    stats.textures += count(m_ssao.ssaoColorBufferBlur);
-    stats.textures += count(m_ssao.noiseTexture);
+    stats.textures += count(m_ssao_pass->ssao().ssaoColorBuffer);
+    stats.textures += count(m_ssao_pass->ssao().ssaoColorBufferBlur);
+    stats.textures += count(m_ssao_pass->ssao().noiseTexture);
     stats.textures += count(m_terrainTextureArray);
     stats.textures += count(m_materialLUT);
     stats.textures += count(m_water_flat_normal_texture);
@@ -1045,11 +1047,11 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
 
     // 3. SSAO PASS
     begin_gpu_pass_timer(GpuTimerPass::Ssao);
-    ssao_pass(camera);
+    m_ssao_pass->execute_ssao(*this, camera);
     end_gpu_pass_timer(GpuTimerPass::Ssao);
     glBindVertexArray(0);  // Unbind after SSAO
     begin_gpu_pass_timer(GpuTimerPass::SsaoBlur);
-    ssao_blur_pass();
+    m_ssao_pass->execute_blur(*this);
     end_gpu_pass_timer(GpuTimerPass::SsaoBlur);
     glBindVertexArray(0);  // Unbind after SSAO blur
 
@@ -1248,8 +1250,8 @@ void RenderPipeline::on_resize(u32 new_width, u32 new_height) {
     init_lighting_fbo(new_width, new_height);
     m_gbuffer_pass->destroy_gbuffer();
     m_gbuffer_pass->init_gbuffer(new_width, new_height);
-    destroy_ssao();
-    init_ssao();
+    m_ssao_pass->destroy_ssao();
+    m_ssao_pass->init_ssao(new_width, new_height);
     m_frustumCache.valid = false;
 }
 
@@ -1291,7 +1293,7 @@ void RenderPipeline::lighting_pass(const Camera& camera) {
     glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, gbuffer.material_texture);    // Metallic + AO
     glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, gbuffer.depth_texture);
     glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D_ARRAY, m_shadow_pass->shadow_map().depth_texture_array);
-    glActiveTexture(GL_TEXTURE6); glBindTexture(GL_TEXTURE_2D, m_ssao.ssaoColorBufferBlur);
+    glActiveTexture(GL_TEXTURE6); glBindTexture(GL_TEXTURE_2D, m_ssao_pass->ssao().ssaoColorBufferBlur);
     glActiveTexture(GL_TEXTURE7); glBindTexture(GL_TEXTURE_2D_ARRAY, m_terrainTextureArray);
     glActiveTexture(GL_TEXTURE8); glBindTexture(GL_TEXTURE_2D, m_materialLUT);
     glActiveTexture(GL_TEXTURE9); glBindTexture(GL_TEXTURE_2D, m_water_black_texture);
@@ -1359,42 +1361,6 @@ void RenderPipeline::skybox_pass(const Rendering::Camera& camera) {
     glDepthFunc(GL_LESS);
 }
 
-void RenderPipeline::ssao_pass(const Camera& camera) {
-    glBindFramebuffer(GL_FRAMEBUFFER, m_ssao.fbo);
-    glClear(GL_COLOR_BUFFER_BIT);
-    m_ssao.ssaoShader->use();
-    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m_gbuffer_pass->gbuffer().position_texture);
-    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m_gbuffer_pass->gbuffer().normal_texture);
-    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_ssao.noiseTexture);
-    m_ssao.ssaoShader->setInt("gPosition", 0);
-    m_ssao.ssaoShader->setInt("gNormalMaterial", 1);
-    m_ssao.ssaoShader->setInt("u_noiseTexture", 2);
-    for (unsigned int i = 0; i < 64; ++i)
-        m_ssao.ssaoShader->setVec3("u_samples[" + std::to_string(i) + "]", m_ssao.kernel[i]);
-    glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)m_screen_width / (float)m_screen_height, camera.GetNearPlane(), camera.GetFarPlane());
-    m_ssao.ssaoShader->setMat4("u_projection", projection);
-    m_ssao.ssaoShader->setVec2("u_screenSize", glm::vec2(m_screen_width, m_screen_height));
-    glBindVertexArray(m_screen_quad_vao);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    m_last_render_pass_stats.ssao_draws++;
-    glBindVertexArray(0);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-}
-
-void RenderPipeline::ssao_blur_pass() {
-    glBindFramebuffer(GL_FRAMEBUFFER, m_ssao.blurFBO);
-    glClear(GL_COLOR_BUFFER_BIT);
-    m_ssao.blurShader->use();
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, m_ssao.ssaoColorBuffer);
-    m_ssao.blurShader->setInt("u_ssaoInput", 0);
-    glBindVertexArray(m_screen_quad_vao);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    m_last_render_pass_stats.ssao_blur_draws++;
-    glBindVertexArray(0);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-}
-
 // --- INITIALIZATION ---
 
 void RenderPipeline::init_shaders() {
@@ -1402,61 +1368,11 @@ void RenderPipeline::init_shaders() {
     m_lighting_shader = std::make_unique<Shader>((m_root_path / "res/shaders/lighting_pass.vert").string().c_str(), (m_root_path / "res/shaders/lighting_pass.frag").string().c_str());
     m_skybox_shader = std::make_unique<Shader>((m_root_path / "res/shaders/skybox.vert").string().c_str(), (m_root_path / "res/shaders/skybox.frag").string().c_str());
     m_shadow_pass->init_shader(m_root_path);
-    m_ssao.ssaoShader = std::make_unique<Shader>((m_root_path / "res/shaders/ssao.vert").string().c_str(), (m_root_path / "res/shaders/ssao.frag").string().c_str());
-    m_ssao.blurShader = std::make_unique<Shader>((m_root_path / "res/shaders/ssao.vert").string().c_str(), (m_root_path / "res/shaders/ssao_blur.frag").string().c_str());
+    m_ssao_pass->init_shaders(m_root_path);
     m_water_shader = std::make_unique<Shader>((m_root_path / "res/shaders/water.vert").string().c_str(), (m_root_path / "res/shaders/water.frag").string().c_str());
     label_gl_object(GL_PROGRAM, m_lighting_shader ? m_lighting_shader->Id() : 0u, "shader.lighting");
     label_gl_object(GL_PROGRAM, m_skybox_shader ? m_skybox_shader->Id() : 0u, "shader.skybox");
-    label_gl_object(GL_PROGRAM, m_ssao.ssaoShader ? m_ssao.ssaoShader->Id() : 0u, "shader.ssao");
-    label_gl_object(GL_PROGRAM, m_ssao.blurShader ? m_ssao.blurShader->Id() : 0u, "shader.ssao_blur");
     label_gl_object(GL_PROGRAM, m_water_shader ? m_water_shader->Id() : 0u, "shader.water");
-}
-
-void RenderPipeline::init_ssao() {
-    glGenFramebuffers(1, &m_ssao.fbo);
-    glGenFramebuffers(1, &m_ssao.blurFBO);
-    label_gl_object(GL_FRAMEBUFFER, m_ssao.fbo, "ssao.fbo");
-    label_gl_object(GL_FRAMEBUFFER, m_ssao.blurFBO, "ssao.blur_fbo");
-    glBindFramebuffer(GL_FRAMEBUFFER, m_ssao.fbo);
-    glGenTextures(1, &m_ssao.ssaoColorBuffer);
-    label_gl_object(GL_TEXTURE, m_ssao.ssaoColorBuffer, "ssao.raw");
-    glBindTexture(GL_TEXTURE_2D, m_ssao.ssaoColorBuffer);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R16F, m_screen_width, m_screen_height, 0, GL_RED, GL_FLOAT, NULL);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_ssao.ssaoColorBuffer, 0);
-    glBindFramebuffer(GL_FRAMEBUFFER, m_ssao.blurFBO);
-    glGenTextures(1, &m_ssao.ssaoColorBufferBlur);
-    label_gl_object(GL_TEXTURE, m_ssao.ssaoColorBufferBlur, "ssao.blur");
-    glBindTexture(GL_TEXTURE_2D, m_ssao.ssaoColorBufferBlur);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R16F, m_screen_width, m_screen_height, 0, GL_RED, GL_FLOAT, NULL);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_ssao.ssaoColorBufferBlur, 0);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    std::uniform_real_distribution<float> randomFloats(0.0, 1.0);
-    std::default_random_engine generator;
-    for (unsigned int i = 0; i < 64; ++i) {
-        glm::vec3 sample(randomFloats(generator) * 2.0 - 1.0, randomFloats(generator) * 2.0 - 1.0, randomFloats(generator));
-        sample = glm::normalize(sample);
-        sample *= randomFloats(generator);
-        float scale = (float)i / 64.0f;
-        scale = std::lerp(0.1f, 1.0f, scale * scale);
-        sample *= scale;
-        m_ssao.kernel.push_back(sample);
-    }
-    std::vector<glm::vec3> ssaoNoise;
-    for (unsigned int i = 0; i < 16; i++) {
-        ssaoNoise.push_back(glm::vec3(randomFloats(generator) * 2.0 - 1.0, randomFloats(generator) * 2.0 - 1.0, 0.0f));
-    }
-    glGenTextures(1, &m_ssao.noiseTexture);
-    label_gl_object(GL_TEXTURE, m_ssao.noiseTexture, "ssao.noise");
-    glBindTexture(GL_TEXTURE_2D, m_ssao.noiseTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, 4, 4, 0, GL_RGB, GL_FLOAT, &ssaoNoise[0]);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
 }
 
 void RenderPipeline::init_screen_quad() {
@@ -1491,14 +1407,6 @@ void RenderPipeline::init_skybox() {
 
 // --- CLEANUP ---
 
-void RenderPipeline::destroy_ssao() {
-    if (m_ssao.fbo) { glDeleteFramebuffers(1, &m_ssao.fbo); m_ssao.fbo = 0; }
-    if (m_ssao.blurFBO) { glDeleteFramebuffers(1, &m_ssao.blurFBO); m_ssao.blurFBO = 0; }
-    if (m_ssao.ssaoColorBuffer) { glDeleteTextures(1, &m_ssao.ssaoColorBuffer); m_ssao.ssaoColorBuffer = 0; }
-    if (m_ssao.ssaoColorBufferBlur) { glDeleteTextures(1, &m_ssao.ssaoColorBufferBlur); m_ssao.ssaoColorBufferBlur = 0; }
-    if (m_ssao.noiseTexture) { glDeleteTextures(1, &m_ssao.noiseTexture); m_ssao.noiseTexture = 0; }
-}
-
 void RenderPipeline::destroy_water_fallback_textures() {
     if (m_water_flat_normal_texture) { glDeleteTextures(1, &m_water_flat_normal_texture); m_water_flat_normal_texture = 0; }
     if (m_water_neutral_flow_texture) { glDeleteTextures(1, &m_water_neutral_flow_texture); m_water_neutral_flow_texture = 0; }
@@ -1529,7 +1437,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     destroy_lighting_fbo();
     m_gbuffer_pass->destroy_gbuffer();
     m_shadow_pass->destroy_shadow_map();
-    destroy_ssao();
+    m_ssao_pass->destroy_ssao();
     if (m_screen_quad_vao) { glDeleteVertexArrays(1, &m_screen_quad_vao); m_screen_quad_vao = 0; }
     if (m_screen_quad_vbo) { glDeleteBuffers(1, &m_screen_quad_vbo); m_screen_quad_vbo = 0; }
     if (m_skybox_vao) { glDeleteVertexArrays(1, &m_skybox_vao); m_skybox_vao = 0; }
@@ -1544,8 +1452,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_lighting_shader.reset();
     m_skybox_shader.reset();
     m_shadow_pass->reset_shader();
-    m_ssao.ssaoShader.reset();
-    m_ssao.blurShader.reset();
+    m_ssao_pass->reset_shaders();
     m_water_shader.reset();
     m_last_render_pass_metadata.clear();
     m_terrain_texture_fallback_layers = 0;
