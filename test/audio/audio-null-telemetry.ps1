@@ -5,6 +5,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $MainPath = "src/luminumbra_client/main_client.cpp"
+$HarnessPath = "src/luminumbra_client/core/RuntimeScenarioHarness.cpp"
 $NullAudioPath = "src/luminumbra_client/audio/NullAudioManager.h"
 $ArtifactPath = "build/$BuildPreset/test-artifacts/audio/audio-telemetry.json"
 
@@ -25,6 +26,9 @@ function New-Check {
 $mainExists = Test-Path $MainPath
 $nullAudioExists = Test-Path $NullAudioPath
 $main = if ($mainExists) { Get-Content $MainPath -Raw } else { "" }
+if (Test-Path $HarnessPath) {
+    $main += "`n" + (Get-Content $HarnessPath -Raw)
+}
 $nullAudio = if ($nullAudioExists) { Get-Content $NullAudioPath -Raw } else { "" }
 
 $checks = @(

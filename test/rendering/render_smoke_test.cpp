@@ -1070,7 +1070,9 @@ TEST(RenderSmokeTest, GpuSdfComputeParityGateEmitsAnalysisArtifact) {
 TEST(RenderSmokeTest, GpuSdfRuntimeToggleGateEmitsAnalysisArtifact) {
     const std::string header = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
     const std::string source = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
-    const std::string main_client = ReadTextFile(SourceRoot() / "src/luminumbra_client/main_client.cpp");
+    const std::string main_client =
+        ReadTextFile(SourceRoot() / "src/luminumbra_client/main_client.cpp") +
+        ReadTextFile(SourceRoot() / "src/luminumbra_client/core/RuntimeScenarioHarness.cpp");
     ASSERT_FALSE(header.empty());
     ASSERT_FALSE(source.empty());
     ASSERT_FALSE(main_client.empty());

@@ -97,12 +97,16 @@ function Test-CodexOnly {
 
 function Test-Source {
     $main = "src/luminumbra_client/main_client.cpp"
+    $harness = "src/luminumbra_client/core/RuntimeScenarioHarness.cpp"
     $jobHeader = "src/luminumbra_common/core/JobSystem.h"
     $jobSource = "src/luminumbra_common/core/JobSystem.cpp"
     $worldHeader = "src/luminumbra_common/systems/SHIELD_WorldSystem.h"
     $renderHeader = "src/luminumbra_client/rendering/RenderPipeline.h"
     $renderSource = "src/luminumbra_client/rendering/RenderPipeline.cpp"
 
+    Assert-FileExists $main
+    Assert-FileExists $harness
+    $scenarioText = (Get-Content $main -Raw) + "`n" + (Get-Content $harness -Raw)
     foreach ($needle in @(
         "--scenario",
         "auto_world_smoke",
@@ -129,7 +133,9 @@ function Test-Source {
         "RuntimeScenarioConfig",
         "RuntimeStateRecorder"
     )) {
-        Assert-Contains -Path $main -Needle $needle
+        if ($scenarioText -notmatch [regex]::Escape($needle)) {
+            throw "Missing '$needle' in $main or $harness"
+        }
     }
 
     Assert-Contains -Path $jobHeader -Needle "RuntimeStats"
