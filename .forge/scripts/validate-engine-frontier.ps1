@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "FrontierDisabled", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug"
@@ -9,6 +9,7 @@ $ErrorActionPreference = "Stop"
 
 $SpecPath = ".forge/specs/ENGINE-FRONTIER-2026-06-09.md"
 $ArtifactDir = ".forge/artifacts/engine-frontier"
+$FrontierDisabledPath = "$ArtifactDir/frontier-disabled.md"
 $WorkflowPath = ".forge/workflows/engine-frontier.yaml"
 $DispatchPath = ".forge/tasks/engine-frontier/dispatch.json"
 $RunnerPath = ".forge/scripts/run-codex-engine-frontier.ps1"
@@ -120,6 +121,7 @@ function Test-Files {
         "$ArtifactDir/critique.md",
         "$ArtifactDir/ultimate-plan.md",
         "$ArtifactDir/handoff.md",
+        $FrontierDisabledPath,
         $DispatchPath,
         $WorkflowPath,
         $RunnerPath,
@@ -137,6 +139,7 @@ function Test-Sections {
         "$ArtifactDir/critique.md" = @("Finding", "Mitigation", "Verdict")
         "$ArtifactDir/ultimate-plan.md" = @("Wave 1", "Success Definition", "Material")
         "$ArtifactDir/handoff.md" = @("Current Status", "Immediate Next Step", "No-Deferral Rules", "Success Definition")
+        $FrontierDisabledPath = @("Status", "Gate", "Disabled by Default", "Allowed Activation", "Verification")
     }
 
     foreach ($path in $checks.Keys) {
@@ -209,6 +212,25 @@ function Test-MaterialVisual {
     Assert-FileExists (Join-Path $visualDir $analysis.heatmap_screenshot)
 }
 
+function Test-FrontierDisabled {
+    Assert-FileExists $FrontierDisabledPath
+
+    foreach ($needle in @(
+        "Gate: disabled by default",
+        "Default state: documentation and validation only",
+        "frontier runtime behavior requires explicit opt-in",
+        "Activation must be documented",
+        "validate-engine-frontier.ps1 -Mode FrontierDisabled"
+    )) {
+        Assert-Contains -Path $FrontierDisabledPath -Needle $needle
+    }
+
+    $text = Get-Content $FrontierDisabledPath -Raw
+    if ($text -match "(?i)\benabled by default\b") {
+        throw "frontier-disabled gate must not declare frontier behavior enabled by default"
+    }
+}
+
 switch ($Mode) {
     "CodexOnly" { Test-CodexOnly }
     "Panels" { Test-Panels }
@@ -217,11 +239,13 @@ switch ($Mode) {
     "Build" { Test-Build }
     "UnitTests" { Test-UnitTests }
     "MaterialVisual" { Test-MaterialVisual }
+    "FrontierDisabled" { Test-FrontierDisabled }
     "All" {
         Test-CodexOnly
         Test-Files
         Test-Sections
         Test-Panels
+        Test-FrontierDisabled
     }
 }
 
