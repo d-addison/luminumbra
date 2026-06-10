@@ -58,46 +58,12 @@
                         },
     "tasks":  [
                   {
-                      "id":  "T-EF-1-material-visual-gate",
-                      "title":  "Wave 1 material texture layer visual gate",
-                      "type":  "code",
-                      "tier":  "deep",
-                      "depends_on":  [
-
-                                     ],
-                      "files":  [
-                                    "src/luminumbra_client/main_client.cpp",
-                                    "src/luminumbra_client/rendering/RenderPipeline.cpp"
-                                ],
-                      "agent_contract":  {
-                                             "reads":  [
-                                                           ".forge/scripts/validate-engine-frontier.ps1",
-                                                           ".forge/artifacts/visual-performance-improvement/next-plan.md",
-                                                           "src/luminumbra_client/main_client.cpp",
-                                                           "src/luminumbra_client/rendering/RenderPipeline.cpp",
-                                                           "data/common/materials.json",
-                                                           "res/shaders/lighting_pass.frag"
-                                                       ],
-                                             "modifies":  [
-                                                              "src/luminumbra_client/main_client.cpp",
-                                                              "src/luminumbra_client/rendering/RenderPipeline.cpp",
-                                                              "src/luminumbra_client/rendering/RenderPipeline.h"
-                                                          ],
-                                             "creates":  [
-                                                             "build/debug/test-artifacts/runtime/material-visual/material-visual-analysis.json",
-                                                             "build/debug/test-artifacts/runtime/material-visual/screenshots/material-visual.ppm",
-                                                             "build/debug/test-artifacts/runtime/material-visual/screenshots/material-id-heatmap.ppm"
-                                                         ]
-                                         },
-                      "prompt":  "Codex-only execution. Implement the material_visual_smoke runtime scenario and the material-ID or texture-layer heatmap capture. It must produce build/debug/test-artifacts/runtime/material-visual/material-visual-analysis.json with schema luminumbra.material_visual_analysis.v1, per-material ROI entries with Sand mandatory, classified versus grey-fallback pixel counts and thresholds, gl_debug error count, a normal screenshot, and a material-ID heatmap screenshot. Verification commands: cmake --build --preset debug --target luminumbra_client_app --parallel 1; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode MaterialVisual. Warning: the build uses warnings-as-errors (cmake --build --preset debug); any new source file must be added to the matching sources.cmake manifest. Do not commit; integration is handled by the dispatch pipeline. Keep this completable by one Codex session; split anything larger."
-                  },
-                  {
                       "id":  "T-EF-2-material-visual-gate-test",
                       "title":  "Wave 1 material LOD and water visual gate verification",
                       "type":  "test",
                       "tier":  "standard",
                       "depends_on":  [
-                                         "T-EF-1-material-visual-gate"
+
                                      ],
                       "files":  [
 
@@ -995,7 +961,6 @@
                       "type":  "test",
                       "tier":  "standard",
                       "depends_on":  [
-                                         "T-EF-1-material-visual-gate",
                                          "T-EF-2-material-visual-gate-test",
                                          "T-EF-3-wave1-ctest-baseline",
                                          "T-EF-4-frontier-disabled-gate",
