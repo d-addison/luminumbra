@@ -19,6 +19,9 @@ set(COMMON_SOURCES
     # Net
     ${CMAKE_CURRENT_LIST_DIR}/net/NetworkManager.cpp
 
+    # Network
+    ${CMAKE_CURRENT_LIST_DIR}/network/NetworkLoopbackAuthority.cpp
+
     # Persistence
     ${CMAKE_CURRENT_LIST_DIR}/persistence/WorldPersistenceRoundtrip.cpp
 
