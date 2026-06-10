@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "FrontierDisabled", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "FrontierDisabled", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug"
@@ -64,6 +64,21 @@ function Assert-ArtifactPassed {
     )
     if (-not $Artifact.passed) {
         throw "$Name artifact reported failure"
+    }
+}
+
+function Assert-PpmArtifact {
+    param([string]$Path)
+    Assert-FileExists $Path
+    $stream = [System.IO.File]::OpenRead((Resolve-Path $Path))
+    try {
+        $first = $stream.ReadByte()
+        $second = $stream.ReadByte()
+        if ($first -ne [byte][char]'P' -or ($second -ne [byte][char]'6' -and $second -ne [byte][char]'3')) {
+            throw "Unexpected PPM magic in $Path"
+        }
+    } finally {
+        $stream.Dispose()
     }
 }
 
@@ -606,6 +621,145 @@ function Test-GpuSdfComputeParityGate {
         }
         if (-not $matches[0].passed) {
             throw "GPU SDF compute parity check failed: $requiredCheck"
+        }
+    }
+}
+
+function Test-GpuSdfRuntimeToggleGate {
+    $renderDir = "build/$BuildPreset/test-artifacts/render"
+    $analysisPath = Join-Path $renderDir "gpu-sdf-runtime-parity.json"
+    $cpuPath = Join-Path $renderDir "gpu-sdf-cpu.ppm"
+    $gpuPath = Join-Path $renderDir "gpu-sdf-gpu.ppm"
+
+    if (-not (Test-Path $analysisPath)) {
+        throw "gpu SDF runtime toggle gate not yet implemented - missing $analysisPath (produced by task T-EF-29-gpu-sdf-runtime-toggle-gate)"
+    }
+
+    Assert-PpmArtifact $cpuPath
+    Assert-PpmArtifact $gpuPath
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.render.gpu_sdf_runtime_toggle.v1") {
+        throw "Unexpected GPU SDF runtime toggle schema '$($analysis.schema)'"
+    }
+    if (-not $analysis.passed) {
+        throw "GPU SDF runtime toggle analysis reported failure"
+    }
+    if ($analysis.runtime_toggle.source -ne "src/luminumbra_client/rendering/RenderPipeline.cpp") {
+        throw "GPU SDF runtime toggle analysis must inspect RenderPipeline.cpp"
+    }
+    if ($analysis.runtime_toggle.header -ne "src/luminumbra_client/rendering/RenderPipeline.h") {
+        throw "GPU SDF runtime toggle analysis must inspect RenderPipeline.h"
+    }
+    if ($analysis.runtime_toggle.entrypoint -ne "src/luminumbra_client/main_client.cpp") {
+        throw "GPU SDF runtime toggle analysis must inspect main_client.cpp"
+    }
+    if ($analysis.runtime_toggle.setter_api -ne "set_gpu_sdf_runtime_enabled") {
+        throw "GPU SDF runtime toggle analysis must require set_gpu_sdf_runtime_enabled"
+    }
+    if ($analysis.runtime_toggle.state_api -ne "get_gpu_sdf_runtime_toggle_state") {
+        throw "GPU SDF runtime toggle analysis must require get_gpu_sdf_runtime_toggle_state"
+    }
+    if ($analysis.runtime_toggle.setup_api -ne "SetupGPUSDFIntegration") {
+        throw "GPU SDF runtime toggle analysis must require SetupGPUSDFIntegration"
+    }
+    if ($analysis.runtime_toggle.opt_in_flag -ne "--enable-gpu-sdf-runtime") {
+        throw "GPU SDF runtime toggle must use the explicit --enable-gpu-sdf-runtime opt-in flag"
+    }
+    if ($analysis.runtime_toggle.disabled_gate -ne "kEnableExperimentalGpuSdfIntegration") {
+        throw "GPU SDF runtime toggle must retain the compile-time disabled gate"
+    }
+    if ($analysis.runtime_toggle.default_enabled -ne $false) {
+        throw "GPU SDF runtime toggle must remain disabled by default"
+    }
+    if ($analysis.runtime_toggle.compile_time_gate_enabled -ne $false) {
+        throw "GPU SDF compile-time parity gate must remain closed by default"
+    }
+    if ($analysis.runtime_toggle.runtime_requested_by_default -ne $false) {
+        throw "GPU SDF runtime must not be requested by default"
+    }
+    if (-not $analysis.runtime_toggle.runtime_requires_explicit_opt_in) {
+        throw "GPU SDF runtime toggle must require explicit opt-in"
+    }
+    if (-not $analysis.runtime_toggle.runtime_allowed_requires_compile_time_gate) {
+        throw "GPU SDF runtime toggle must require the compile-time gate"
+    }
+    if (-not $analysis.runtime_toggle.runtime_allowed_requires_explicit_flag) {
+        throw "GPU SDF runtime toggle must require the explicit runtime flag"
+    }
+    if ($analysis.runtime_toggle.callback_registered_by_default -ne $false) {
+        throw "GPU SDF callback must not be registered by default"
+    }
+    if (-not $analysis.runtime_toggle.cpu_fallback_active_by_default) {
+        throw "GPU SDF runtime toggle must keep the CPU fallback active by default"
+    }
+    if (-not $analysis.runtime_toggle.runtime_setter_present) {
+        throw "GPU SDF runtime toggle analysis reports missing setter API"
+    }
+    if (-not $analysis.runtime_toggle.runtime_state_present) {
+        throw "GPU SDF runtime toggle analysis reports missing state API"
+    }
+    if (-not $analysis.runtime_toggle.runtime_flag_present) {
+        throw "GPU SDF runtime toggle analysis reports missing opt-in flag"
+    }
+    if (-not $analysis.runtime_toggle.main_wires_runtime_flag) {
+        throw "GPU SDF runtime toggle analysis reports missing client-to-renderer wiring"
+    }
+    if (-not $analysis.runtime_toggle.setup_invoked_for_world) {
+        throw "GPU SDF runtime toggle analysis reports missing world callback setup"
+    }
+    if (-not $analysis.runtime_toggle.runtime_gate_blocks_callback) {
+        throw "GPU SDF runtime toggle must block callback registration while disabled"
+    }
+    if (-not $analysis.runtime_toggle.callback_state_tracked) {
+        throw "GPU SDF runtime toggle must track callback registration state"
+    }
+
+    if ($analysis.parity.cpu_reference -ne "gpu-sdf-cpu.ppm") {
+        throw "GPU SDF runtime parity must reference gpu-sdf-cpu.ppm"
+    }
+    if ($analysis.parity.gpu_candidate -ne "gpu-sdf-gpu.ppm") {
+        throw "GPU SDF runtime parity must reference gpu-sdf-gpu.ppm"
+    }
+    if ($analysis.parity.sample_grid -ne "17x17") {
+        throw "GPU SDF runtime parity sample grid must be 17x17"
+    }
+    if ([int64]$analysis.parity.sample_count -ne 289) {
+        throw "GPU SDF runtime parity sample count must be 289"
+    }
+    if ([string]::IsNullOrWhiteSpace($analysis.parity.cpu_checksum) -or
+        $analysis.parity.cpu_checksum -ne $analysis.parity.gpu_checksum) {
+        throw "GPU SDF runtime parity checksums must be present and equal"
+    }
+    if ([int64]$analysis.parity.max_pixel_delta -ne 0) {
+        throw "GPU SDF runtime parity max_pixel_delta must be zero while runtime gate is closed"
+    }
+    if ([double]$analysis.parity.mean_pixel_delta -ne 0.0) {
+        throw "GPU SDF runtime parity mean_pixel_delta must be zero while runtime gate is closed"
+    }
+    if (-not $analysis.parity.images_match) {
+        throw "GPU SDF runtime parity images must match"
+    }
+
+    $requiredChecks = @(
+        "gpu sdf runtime setter API is present",
+        "gpu sdf runtime state API is present",
+        "gpu sdf runtime opt-in flag is parsed",
+        "client wires opt-in flag into render pipeline",
+        "world creation invokes gpu sdf callback setup",
+        "compile-time parity gate remains closed by default",
+        "runtime gate blocks callback unless explicitly allowed",
+        "runtime callback state is tracked",
+        "cpu and gpu runtime parity artifacts match"
+    )
+    $checks = @($analysis.checks)
+    foreach ($requiredCheck in $requiredChecks) {
+        $matches = @($checks | Where-Object { $_.name -eq $requiredCheck })
+        if ($matches.Count -ne 1) {
+            throw "GPU SDF runtime toggle analysis is missing check '$requiredCheck'"
+        }
+        if (-not $matches[0].passed) {
+            throw "GPU SDF runtime toggle check failed: $requiredCheck"
         }
     }
 }
@@ -1754,6 +1908,7 @@ switch ($Mode) {
     "ShaderInventory" { Test-ShaderInventory }
     "GpuSdfCallbackSafetyGate" { Test-GpuSdfCallbackSafetyGate }
     "GpuSdfComputeParityGate" { Test-GpuSdfComputeParityGate }
+    "GpuSdfRuntimeToggleGate" { Test-GpuSdfRuntimeToggleGate }
     "ChunkCollisionLifecycle" { Test-ChunkCollisionLifecycle }
     "PhysicsReplay" { Test-PhysicsReplay }
     "AudioNullTelemetry" { Test-AudioNullTelemetry }
@@ -1776,6 +1931,7 @@ switch ($Mode) {
         Test-ShaderInventory
         Test-GpuSdfCallbackSafetyGate
         Test-GpuSdfComputeParityGate
+        Test-GpuSdfRuntimeToggleGate
         Test-ChunkCollisionLifecycle
         Test-PhysicsReplay
         Test-AudioNullTelemetry

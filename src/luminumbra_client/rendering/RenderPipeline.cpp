@@ -333,15 +333,39 @@ void RenderPipeline::shutdown() {
     cleanup_gpu_resources();
 }
 
+void RenderPipeline::set_gpu_sdf_runtime_enabled(bool enabled) {
+    m_gpu_sdf.runtime_requested = enabled;
+    if (!enabled) {
+        m_gpu_sdf.callback_registered = false;
+    }
+}
+
+RenderPipeline::GpuSdfRuntimeToggleState RenderPipeline::get_gpu_sdf_runtime_toggle_state() const {
+    GpuSdfRuntimeToggleState state;
+    state.compile_time_enabled = kEnableExperimentalGpuSdfIntegration;
+    state.runtime_requested = m_gpu_sdf.runtime_requested;
+    state.runtime_allowed = kEnableExperimentalGpuSdfIntegration && m_gpu_sdf.runtime_requested && m_gpu_sdf.initialized;
+    state.callback_registered = m_gpu_sdf.callback_registered;
+    state.cpu_fallback_active = !m_gpu_sdf.callback_registered;
+    return state;
+}
+
 void RenderPipeline::SetupGPUSDFIntegration(Systems::SHIELD_WorldSystem& world_system) {
-    if (!m_gpu_sdf.initialized) {
-        LUMINUMBRA_CORE_WARN("GPU SDF system not initialized, cannot set up integration");
+    if (!kEnableExperimentalGpuSdfIntegration || !m_gpu_sdf.runtime_requested) {
+        world_system.SetGPUSDFCallback({});
+        m_gpu_sdf.callback_registered = false;
+        if (m_gpu_sdf.runtime_requested) {
+            LUMINUMBRA_CORE_WARN("GPU SDF runtime opt-in requested, but compile-time parity gate is closed; using authoritative CPU worldgen path");
+        } else {
+            LUMINUMBRA_CORE_WARN("GPU SDF integration disabled; using authoritative CPU worldgen path until GPU/CPU parity is implemented; pass --enable-gpu-sdf-runtime only after parity gate approval");
+        }
         return;
     }
 
-    if (!kEnableExperimentalGpuSdfIntegration) {
+    if (!m_gpu_sdf.initialized) {
         world_system.SetGPUSDFCallback({});
-        LUMINUMBRA_CORE_WARN("GPU SDF integration disabled; using authoritative CPU worldgen path until GPU/CPU parity is implemented");
+        m_gpu_sdf.callback_registered = false;
+        LUMINUMBRA_CORE_WARN("GPU SDF system not initialized, cannot set up integration");
         return;
     }
     
@@ -351,6 +375,7 @@ void RenderPipeline::SetupGPUSDFIntegration(Systems::SHIELD_WorldSystem& world_s
             return this->generate_chunk_sdf_gpu(chunk_coords, params, seed, out_sdf);
         }
     );
+    m_gpu_sdf.callback_registered = true;
     
     LUMINUMBRA_CORE_INFO("GPU SDF integration with world system established");
 }
@@ -431,6 +456,12 @@ RenderPipeline::RuntimeRenderStats RenderPipeline::get_runtime_render_stats() co
     stats.water_shader_ok = m_water_shader && m_water_shader->IsValid();
     stats.instanced_static_mesh_shader_ok = m_instanced_static_mesh_shader && m_instanced_static_mesh_shader->IsValid();
     stats.gpu_sdf_initialized = m_gpu_sdf.initialized;
+    const GpuSdfRuntimeToggleState gpu_sdf_runtime = get_gpu_sdf_runtime_toggle_state();
+    stats.gpu_sdf_compile_time_enabled = gpu_sdf_runtime.compile_time_enabled;
+    stats.gpu_sdf_runtime_requested = gpu_sdf_runtime.runtime_requested;
+    stats.gpu_sdf_runtime_allowed = gpu_sdf_runtime.runtime_allowed;
+    stats.gpu_sdf_callback_registered = gpu_sdf_runtime.callback_registered;
+    stats.gpu_sdf_cpu_fallback_active = gpu_sdf_runtime.cpu_fallback_active;
     stats.terrain_texture_array_ok = m_terrainTextureArray != 0;
     stats.material_lut_ok = m_materialLUT != 0;
     stats.terrain_texture_fallback_layers = m_terrain_texture_fallback_layers;
@@ -2467,6 +2498,7 @@ void RenderPipeline::cleanup_gpu_sdf_system() {
     }
     
     m_gpu_sdf.initialized = false;
+    m_gpu_sdf.callback_registered = false;
 }
 
 void RenderPipeline::update_time_of_day(float deltaTime) {
