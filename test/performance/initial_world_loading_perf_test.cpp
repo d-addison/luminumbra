@@ -652,6 +652,17 @@ TEST(InitialWorldLoadingPerfTest, PerformanceFrameworkBenchmarkScenariosWriteBud
         return nlohmann::json{
             {"name", name},
             {"frame_time_ms", FrameStatsToJson(samples_ms)},
+            // Flat per-scenario metric block consumed by the perf-regression gate
+            // (.forge/scripts/validate-engine-frontier.ps1 -Mode PerfRegression) and
+            // the baseline capture helper (.forge/scripts/capture-perf-baseline.ps1).
+            // Keep keys stable: p50_ms, p95_ms, p99_ms, max_ms, mem_high_water_mb.
+            {"regression_metrics", {
+                {"p50_ms", Percentile(samples_ms, 50.0)},
+                {"p95_ms", Percentile(samples_ms, 95.0)},
+                {"p99_ms", Percentile(samples_ms, 99.0)},
+                {"max_ms", samples_ms.empty() ? 0.0 : *std::max_element(samples_ms.begin(), samples_ms.end())},
+                {"mem_high_water_mb", static_cast<double>(world_memory_bytes) / (1024.0 * 1024.0)},
+            }},
             {"memory_high_water", {
                 {"cpu_bytes", 0},
                 {"estimated_vram_bytes", 0},
