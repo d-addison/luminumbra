@@ -205,9 +205,33 @@ public:
         bool water_shader_ok = false;
         bool instanced_static_mesh_shader_ok = false;
         bool gpu_sdf_initialized = false;
+        bool gpu_sdf_compile_time_enabled = false;
+        bool gpu_sdf_runtime_requested = false;
+        bool gpu_sdf_runtime_allowed = false;
+        bool gpu_sdf_callback_registered = false;
+        bool gpu_sdf_cpu_fallback_active = true;
         bool terrain_texture_array_ok = false;
         bool material_lut_ok = false;
         size_t terrain_texture_fallback_layers = 0;
+    };
+
+    struct GpuSdfRuntimeToggleState {
+        bool compile_time_enabled = false;
+        bool runtime_requested = false;
+        bool runtime_allowed = false;
+        bool callback_registered = false;
+        bool cpu_fallback_active = true;
+    };
+
+    struct RenderHealthSnapshot {
+        RuntimeRenderStats runtime;
+        RenderResourceRegistryStats resources;
+        std::vector<ShaderHealthEntry> shaders;
+        std::vector<RenderPassMetadata> passes;
+        size_t gl_debug_errors = 0;
+        bool started = false;
+        bool passed = false;
+        std::vector<std::string> failures;
     };
 
     RenderPipeline();
@@ -224,9 +248,12 @@ public:
     RuntimeRenderStats get_runtime_render_stats() const;
     RenderResourceRegistryStats get_resource_registry_stats() const;
     std::vector<ShaderHealthEntry> get_shader_health() const;
+    RenderHealthSnapshot get_render_health_snapshot(bool drain_gl_errors = false) const;
     void set_time_of_day(float normalized_time);
     
     // GPU SDF integration
+    void set_gpu_sdf_runtime_enabled(bool enabled);
+    GpuSdfRuntimeToggleState get_gpu_sdf_runtime_toggle_state() const;
     void SetupGPUSDFIntegration(Systems::SHIELD_WorldSystem& world_system);
 
 private:
@@ -356,6 +383,8 @@ private:
         GLuint cave_noise_texture = 0;
         GLuint island_mask_texture = 0;
         bool initialized = false;
+        bool runtime_requested = false;
+        bool callback_registered = false;
         
         // Async compute fence for non-blocking operation
         GLsync compute_fence = nullptr;

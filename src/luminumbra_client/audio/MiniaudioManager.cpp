@@ -1,6 +1,7 @@
 #include "audio/MiniaudioManager.h"
 #include "AudioSpatialCluster.h"
 #include "../../luminumbra_common/systems/PhysicsSystem.h"
+#include <algorithm>
 #include <iostream>
 #include <fstream>
 #include <random>
@@ -291,6 +292,13 @@ bool MiniaudioManager::StopEvent(AudioEventHandle handle, bool immediate) {
     auto it = m_activeSounds.find(handle);
     if (it != m_activeSounds.end()) {
         ma_sound_stop(it->second.get());
+        if (m_spatial_clustering_enabled && m_spatial_cluster) {
+            m_spatial_cluster->RemoveAudioSource(handle);
+        }
+        if (immediate) {
+            ma_sound_uninit(it->second.get());
+            m_activeSounds.erase(it);
+        }
         return true;
     }
     return false;
@@ -312,10 +320,38 @@ bool MiniaudioManager::SetEventPosition(AudioEventHandle handle, const glm::vec3
 }
 
 bool MiniaudioManager::SetEventVolume(AudioEventHandle handle, float volume) {
+    auto it = m_activeSounds.find(handle);
+    if (it != m_activeSounds.end()) {
+        ma_sound_set_volume(it->second.get(), volume);
+
+        if (m_spatial_clustering_enabled && m_spatial_cluster) {
+            m_spatial_cluster->UpdateSourceVolume(handle, volume);
+        }
+
+        return true;
+    }
     return false;
 }
 
 bool MiniaudioManager::SetEventParameter(AudioEventHandle handle, const AudioParamID& paramID, float value) {
+    auto it = m_activeSounds.find(handle);
+    if (it == m_activeSounds.end()) {
+        return false;
+    }
+
+    if (paramID == "volume") {
+        ma_sound_set_volume(it->second.get(), value);
+        if (m_spatial_clustering_enabled && m_spatial_cluster) {
+            m_spatial_cluster->UpdateSourceVolume(handle, value);
+        }
+        return true;
+    }
+
+    if (paramID == "pitch") {
+        ma_sound_set_pitch(it->second.get(), value);
+        return true;
+    }
+
     return false;
 }
 

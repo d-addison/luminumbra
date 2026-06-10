@@ -1,0 +1,49 @@
+﻿{
+    "schema":  "luminumbra.physics.chunk_collision_lifecycle.v1",
+    "passed":  true,
+    "generated_at_utc":  "2026-06-10T13:54:00.0877778Z",
+    "build_preset":  "debug",
+    "world_system":  {
+                         "source":  "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+                         "replacement_helper":  "replace_chunk_collision",
+                         "direct_add_chunk_collision_calls":  0,
+                         "helper_add_chunk_collision_calls":  1
+                     },
+    "checks":  [
+                   {
+                       "name":  "replace helper removes stale collision before add",
+                       "passed":  true,
+                       "evidence":  "replace_chunk_collision removes any existing collider before registering a new chunk mesh collider"
+                   },
+                   {
+                       "name":  "runtime update uses lifecycle replacement helper",
+                       "passed":  true,
+                       "evidence":  "SHIELD_WorldSystem::update re-adds chunk collision through replace_chunk_collision"
+                   },
+                   {
+                       "name":  "initial horizon collision uses lifecycle replacement helper",
+                       "passed":  true,
+                       "evidence":  "EnsureSurfaceReadyNear re-adds chunk collision through replace_chunk_collision"
+                   },
+                   {
+                       "name":  "chunk unload removes collision before erasing chunk",
+                       "passed":  true,
+                       "evidence":  "update_chunk_activation unregisters physics collision before erasing unloaded chunks"
+                   },
+                   {
+                       "name":  "clear world removes collisions before clearing chunks",
+                       "passed":  true,
+                       "evidence":  "clear_world unregisters all chunk collisions before clearing streaming chunks"
+                   },
+                   {
+                       "name":  "terrain mesh rebuild invalidates collision flag",
+                       "passed":  true,
+                       "evidence":  "terrain mesh replacement increments mesh_version and marks collision stale"
+                   },
+                   {
+                       "name":  "all collision adds flow through lifecycle replacement",
+                       "passed":  true,
+                       "evidence":  "source contains 0 direct pointer add_chunk_collision calls and 1 helper add_chunk_collision call"
+                   }
+               ]
+}

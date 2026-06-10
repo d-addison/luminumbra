@@ -1,0 +1,29 @@
+{
+  "schema": "luminumbra.testing.ctest_manifest.v1",
+  "generated_by": "test/CMakeLists.txt",
+  "build_preset": "debug",
+  "policy": "baseline gate records the test executables registered through gtest_discover_tests and excludes configure-time *_NOT_BUILT placeholders",
+  "minimum_test_executables": 10,
+  "minimum_registered_tests": 10,
+  "required_executables": [
+    "world_generation_test",
+    "sdf_gpu_cpu_parity_test",
+    "worldgen_layer_snapshot_test",
+    "asset_processor_round_trip_test",
+    "common_tests",
+    "render_smoke_test",
+    "render_capture_test",
+    "ui_smoke_test",
+    "initial_world_loading_perf_test",
+    "runtime_world_visual_validation_test"
+  ],
+  "required_ui_tests": [
+    "UiSmokeTest.AuthoredRmlDocumentsLoadAndExposeRequiredElements",
+    "UiSmokeTest.UiStateNavigationMaintainsDocumentAndGameState",
+    "UiSmokeTest.AuthoredMenuInteractionsNavigateAndInvokeCallbacks"
+  ],
+  "excluded_patterns": [
+    "_NOT_BUILT$"
+  ],
+  "passed": true
+}

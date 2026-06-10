@@ -15,6 +15,7 @@
 #include "ui/Rml_UIManager.h"
 #include "audio/AudioManagerFactory.h"
 #include "audio/IAudioManager.h"
+#include "audio/NullAudioManager.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/world/GameSession.h"
@@ -190,28 +191,6 @@ uint64_t GetCommandLineUInt64Option(int argc, char* argv[], const std::string& f
     }
 }
 
-class NullAudioManager final : public Luminumbra::Client::IAudioManager {
-public:
-    bool Init() override { return true; }
-    void Update() override {}
-    void Shutdown() override {}
-    bool LoadBank(const std::string&) override { return true; }
-    void UnloadBank(const std::string&) override {}
-    void SetListenerTransform(const glm::vec3&, const glm::vec3&, const glm::vec3&) override {}
-    bool PlayEvent(const AudioEventID&, AudioEventHandle& outHandle) override {
-        outHandle = {};
-        return true;
-    }
-    bool PlayOneShot(const AudioEventID&, const glm::vec3&) override { return true; }
-    bool PlayOneShot2D(const AudioEventID&) override { return true; }
-    void PlayMusic(const AudioEventID&) override {}
-    void StopMusic() override {}
-    bool StopEvent(AudioEventHandle, bool = true) override { return true; }
-    bool SetEventPosition(AudioEventHandle, const glm::vec3&) override { return true; }
-    bool SetEventVolume(AudioEventHandle, float) override { return true; }
-    bool SetEventParameter(AudioEventHandle, const AudioParamID&, float) override { return true; }
-};
-
 struct RuntimeScenarioConfig {
     std::string scenario;
     bool auto_create_world = false;
@@ -219,6 +198,7 @@ struct RuntimeScenarioConfig {
     bool no_audio = false;
     bool no_ui = false;
     bool hidden_window = false;
+    bool enable_gpu_sdf_runtime = false;
     int timed_run_seconds = 0;
     int readiness_timeout_seconds = 120;
     int horizon_radius = 12;
@@ -228,6 +208,7 @@ struct RuntimeScenarioConfig {
     size_t min_collision_chunks = 9;
     uint64_t memory_watermark_mb = 0;
     std::filesystem::path artifact_dir;
+    std::filesystem::path audio_telemetry_path;
     std::filesystem::path crash_dir;
 
     bool active() const { return !scenario.empty(); }
@@ -246,6 +227,7 @@ RuntimeScenarioConfig ParseRuntimeScenarioConfig(int argc, char* argv[], const s
     config.no_audio = HasCommandLineFlag(argc, argv, "--no-audio");
     config.no_ui = HasCommandLineFlag(argc, argv, "--no-ui");
     config.hidden_window = HasCommandLineFlag(argc, argv, "--hidden-window");
+    config.enable_gpu_sdf_runtime = HasCommandLineFlag(argc, argv, "--enable-gpu-sdf-runtime");
     config.readiness_timeout_seconds = GetCommandLineIntOption(argc, argv, "--readiness-timeout", config.readiness_timeout_seconds);
     config.horizon_radius = GetCommandLineIntOption(argc, argv, "--horizon-radius", config.horizon_radius);
     config.collision_radius = GetCommandLineIntOption(argc, argv, "--collision-radius", config.collision_radius);
@@ -263,8 +245,10 @@ RuntimeScenarioConfig ParseRuntimeScenarioConfig(int argc, char* argv[], const s
     }
 
     const std::filesystem::path default_artifact_dir = root_dir / "build/debug/test-artifacts/runtime";
+    const std::filesystem::path default_audio_telemetry_path = root_dir / "build/debug/test-artifacts/audio/audio-telemetry.json";
     const std::filesystem::path default_crash_dir = root_dir / "build/debug/crashes";
     config.artifact_dir = GetCommandLineOption(argc, argv, "--runtime-artifact-dir", default_artifact_dir.string());
+    config.audio_telemetry_path = GetCommandLineOption(argc, argv, "--audio-telemetry-path", default_audio_telemetry_path.string());
     config.crash_dir = GetCommandLineOption(argc, argv, "--crash-dir", default_crash_dir.string());
     return config;
 }
@@ -585,6 +569,13 @@ private:
                 {"water", stats.water_shader_ok},
                 {"instanced_static_mesh", stats.instanced_static_mesh_shader_ok},
                 {"gpu_sdf_initialized", stats.gpu_sdf_initialized}
+            }},
+            {"gpu_sdf_runtime", {
+                {"compile_time_enabled", stats.gpu_sdf_compile_time_enabled},
+                {"runtime_requested", stats.gpu_sdf_runtime_requested},
+                {"runtime_allowed", stats.gpu_sdf_runtime_allowed},
+                {"callback_registered", stats.gpu_sdf_callback_registered},
+                {"cpu_fallback_active", stats.gpu_sdf_cpu_fallback_active}
             }}
         };
     }
@@ -653,8 +644,10 @@ private:
                 {"timed_run_seconds", m_config.timed_run_seconds},
                 {"coverage_radius", m_config.coverage_radius},
                 {"no_audio", m_config.no_audio},
+                {"audio_telemetry_path", m_config.audio_telemetry_path.generic_string()},
                 {"no_ui", m_config.no_ui},
                 {"hidden_window", m_config.hidden_window},
+                {"enable_gpu_sdf_runtime", m_config.enable_gpu_sdf_runtime},
                 {"memory_watermark_mb", m_config.memory_watermark_mb}
             }},
             {"memory", MemoryToJson(memory)},
@@ -2322,7 +2315,7 @@ int main(int argc, char* argv[]) {
 
     std::unique_ptr<Luminumbra::Client::IAudioManager> audioManager;
     if (scenario_config.no_audio) {
-        audioManager = std::make_unique<NullAudioManager>();
+        audioManager = std::make_unique<Luminumbra::Client::NullAudioManager>(scenario_config.audio_telemetry_path);
     } else {
         audioManager = Luminumbra::Client::CreateAudioManager(root_path_str);
     }
@@ -2336,6 +2329,7 @@ int main(int argc, char* argv[]) {
     }
 
     Luminumbra::Rendering::RenderPipeline renderPipeline;
+    renderPipeline.set_gpu_sdf_runtime_enabled(scenario_config.enable_gpu_sdf_runtime);
     if (!renderPipeline.startup(framebufferWidth, framebufferHeight, root_dir)) {
         LUMINUMBRA_CORE_ERROR("FATAL: Render pipeline startup failed.");
         runtime_state_recorder.capture("render_pipeline_startup_failed", &jobSystem, gameSession.get(), &renderPipeline, 0, {});
@@ -2370,6 +2364,9 @@ int main(int argc, char* argv[]) {
     auto start_world_creation = [&](const std::string& name, const std::string& seed, const std::string& worldType) {
         // 1. Synchronously create the world systems and metadata. This is fast.
         if (gameSession->CreateWorld(name, seed, worldType)) {
+            if (auto* world_system = gameSession->GetWorldSystem()) {
+                renderPipeline.SetupGPUSDFIntegration(*world_system);
+            }
             const bool bypass_loading_ui = runtime_boot_recorder.enabled() || (scenario_config.active() && scenario_config.auto_enter_world);
             if (bypass_loading_ui) {
                 LUMINUMBRA_CORE_INFO("Runtime scenario mode: created world without loading UI.");
@@ -2444,9 +2441,7 @@ int main(int argc, char* argv[]) {
 
     glfwSetKeyCallback(window, key_callback);
     SetGameState(window, gameStateManager, GameState::MAIN_MENU);
-    if (!scenario_config.no_audio) {
-        audioManager->PlayMusic("music_main_menu");
-    }
+    audioManager->PlayMusic("music_main_menu");
     if (g_uiManager) {
         g_uiManager->RequestLoadDocument("main_menu.rml");
     }

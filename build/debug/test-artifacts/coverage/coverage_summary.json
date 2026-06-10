@@ -1,0 +1,32 @@
+{
+  "schema": "luminumbra.coverage_summary.v1",
+  "generated_by": "test/CMakeLists.txt",
+  "build_preset": "debug",
+  "coverage_kind": "contract_baseline",
+  "coverage_tool": "pending-source-coverage-integration",
+  "line_coverage": {
+    "available": false,
+    "minimum_required_percent": 0,
+    "reason": "The debug preset does not emit compiler coverage counters; this artifact gates subsystem contract coverage until coverage instrumentation is enabled."
+  },
+  "contract_coverage": {
+    "covered_subsystem_count": 7,
+    "minimum_subsystems": 7,
+    "covered_subsystems": [
+      "common",
+      "rendering",
+      "ui",
+      "physics",
+      "audio",
+      "performance",
+      "tools"
+    ]
+  },
+  "required_artifacts": [
+    "testing/ctest_manifest.json",
+    "ui/ui_smoke.json",
+    "ui/ui_interactions.json",
+    "ui/ui_screenshots.json"
+  ],
+  "passed": true
+}

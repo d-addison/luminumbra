@@ -1,0 +1,15 @@
+{
+  "task_id": "T-EF-28-gpu-sdf-compute-parity-gate",
+  "attempt_id": "T-EF-28-gpu-sdf-compute-parity-gate",
+  "status": "completed",
+  "artifacts": [
+    "build/debug/test-artifacts/render/gpu-sdf-compute-parity.json"
+  ],
+  "verification": [
+    ".forge/scripts/validate-engine-frontier.ps1 -Mode GpuSdfComputeParityGate -BuildPreset debug"
+  ],
+  "notes": [
+    "ctest --preset debug -R RenderSmokeTest found zero registered tests in this worktree.",
+    "cmake --build --preset debug could not run because the debug build cache is missing."
+  ]
+}

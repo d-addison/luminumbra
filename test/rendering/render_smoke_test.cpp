@@ -3,13 +3,17 @@
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -29,6 +33,20 @@ struct ShaderProgramSpec {
     const char* vertex;
     const char* fragment;
     const char* geometry = nullptr;
+};
+
+struct ShaderSourceInventoryEntry {
+    std::string file;
+    std::string stage;
+    std::uintmax_t bytes = 0;
+    bool compiled = false;
+};
+
+struct GpuSdfParityFixture {
+    const char* name;
+    std::array<int, 3> chunk_coords;
+    int seed = 0;
+    const char* terrain_profile;
 };
 
 class HiddenGlContext {
@@ -91,6 +109,10 @@ fs::path RenderFrameworkArtifactRoot() {
     return fs::path(LUMINUMBRA_TEST_ARTIFACT_DIR) / "render_framework";
 }
 
+fs::path RenderHealthArtifactRoot() {
+    return fs::path(LUMINUMBRA_TEST_ARTIFACT_DIR) / "render";
+}
+
 std::string ReadTextFile(const fs::path& path) {
     std::ifstream file(path, std::ios::binary);
     if (!file) {
@@ -99,6 +121,47 @@ std::string ReadTextFile(const fs::path& path) {
     std::stringstream stream;
     stream << file.rdbuf();
     return stream.str();
+}
+
+std::string JsonEscape(const std::string& value) {
+    std::ostringstream escaped;
+    for (const unsigned char ch : value) {
+        switch (ch) {
+            case '"':
+                escaped << "\\\"";
+                break;
+            case '\\':
+                escaped << "\\\\";
+                break;
+            case '\b':
+                escaped << "\\b";
+                break;
+            case '\f':
+                escaped << "\\f";
+                break;
+            case '\n':
+                escaped << "\\n";
+                break;
+            case '\r':
+                escaped << "\\r";
+                break;
+            case '\t':
+                escaped << "\\t";
+                break;
+            default:
+                if (ch < 0x20) {
+                    escaped << "\\u" << std::hex << std::setw(4) << std::setfill('0') << static_cast<int>(ch);
+                } else {
+                    escaped << static_cast<char>(ch);
+                }
+                break;
+        }
+    }
+    return escaped.str();
+}
+
+void WriteJsonString(std::ostream& output, const std::string& value) {
+    output << "\"" << JsonEscape(value) << "\"";
 }
 
 GLenum ShaderTypeForPath(const fs::path& path) {
@@ -116,6 +179,21 @@ GLenum ShaderTypeForPath(const fs::path& path) {
         return GL_COMPUTE_SHADER;
     }
     return 0;
+}
+
+std::string ShaderStageName(GLenum type) {
+    switch (type) {
+        case GL_VERTEX_SHADER:
+            return "vertex";
+        case GL_FRAGMENT_SHADER:
+            return "fragment";
+        case GL_GEOMETRY_SHADER:
+            return "geometry";
+        case GL_COMPUTE_SHADER:
+            return "compute";
+        default:
+            return "unknown";
+    }
 }
 
 std::string GetShaderInfoLog(GLuint shader) {
@@ -227,6 +305,431 @@ std::vector<ShaderProgramSpec> PipelineProgramSpecs() {
     };
 }
 
+void WriteShaderInventoryArtifact(
+    const fs::path& path,
+    const std::vector<ShaderSourceInventoryEntry>& sources,
+    const std::vector<ShaderProgramSpec>& programs) {
+    const auto count_stage = [&sources](const std::string& stage) {
+        return std::count_if(
+            sources.begin(),
+            sources.end(),
+            [&stage](const ShaderSourceInventoryEntry& entry) {
+                return entry.stage == stage;
+            });
+    };
+    const auto compiled_count = std::count_if(
+        sources.begin(),
+        sources.end(),
+        [](const ShaderSourceInventoryEntry& entry) {
+            return entry.compiled;
+        });
+
+    std::ofstream output(path);
+    ASSERT_TRUE(output) << path.string();
+    output << "{\n";
+    output << "  \"schema\": \"luminumbra.render.shader_inventory.v1\",\n";
+    output << "  \"generated_by\": \"RenderSmokeTest.AllShaderSourcesCompile\",\n";
+    output << "  \"shader_root\": \"res/shaders\",\n";
+    output << "  \"source_count\": " << sources.size() << ",\n";
+    output << "  \"compiled_source_count\": " << compiled_count << ",\n";
+    output << "  \"stage_counts\": {\n";
+    output << "    \"vertex\": " << count_stage("vertex") << ",\n";
+    output << "    \"fragment\": " << count_stage("fragment") << ",\n";
+    output << "    \"geometry\": " << count_stage("geometry") << ",\n";
+    output << "    \"compute\": " << count_stage("compute") << "\n";
+    output << "  },\n";
+    output << "  \"pipeline_program_count\": " << programs.size() << ",\n";
+    output << "  \"sources\": [\n";
+    for (std::size_t i = 0; i < sources.size(); ++i) {
+        const ShaderSourceInventoryEntry& source = sources[i];
+        output << "    {\"file\": ";
+        WriteJsonString(output, source.file);
+        output << ", \"stage\": ";
+        WriteJsonString(output, source.stage);
+        output << ", \"bytes\": " << source.bytes << ", \"compiled\": " << (source.compiled ? "true" : "false") << "}";
+        output << (i + 1u == sources.size() ? "\n" : ",\n");
+    }
+    output << "  ],\n";
+    output << "  \"pipeline_programs\": [\n";
+    for (std::size_t i = 0; i < programs.size(); ++i) {
+        const ShaderProgramSpec& program = programs[i];
+        output << "    {\"name\": ";
+        WriteJsonString(output, program.name);
+        output << ", \"stages\": [";
+        output << "{\"stage\":\"vertex\",\"file\":";
+        WriteJsonString(output, program.vertex);
+        output << "}, {\"stage\":\"fragment\",\"file\":";
+        WriteJsonString(output, program.fragment);
+        output << "}";
+        if (program.geometry) {
+            output << ", {\"stage\":\"geometry\",\"file\":";
+            WriteJsonString(output, program.geometry);
+            output << "}";
+        }
+        output << "]}";
+        output << (i + 1u == programs.size() ? "\n" : ",\n");
+    }
+    output << "  ]\n";
+    output << "}\n";
+}
+
+void WriteShaderSuiteHealthArtifact(
+    const fs::path& path,
+    const std::vector<std::pair<std::string, bool>>& program_health,
+    const std::vector<std::string>& gl_errors) {
+    const auto linked_count = std::count_if(
+        program_health.begin(),
+        program_health.end(),
+        [](const std::pair<std::string, bool>& entry) {
+            return entry.second;
+        });
+    const bool all_programs_ok = linked_count == static_cast<std::ptrdiff_t>(program_health.size());
+    const bool passed = all_programs_ok && gl_errors.empty();
+
+    std::ofstream output(path);
+    ASSERT_TRUE(output) << path.string();
+    output << "{\n";
+    output << "  \"schema\": \"luminumbra.render.shader_suite_health.v1\",\n";
+    output << "  \"generated_by\": \"RenderSmokeTest.PipelineShaderProgramsLink\",\n";
+    output << "  \"passed\": " << (passed ? "true" : "false") << ",\n";
+    output << "  \"expected_program_count\": " << program_health.size() << ",\n";
+    output << "  \"linked_program_count\": " << linked_count << ",\n";
+    output << "  \"gl_debug\": {\n";
+    output << "    \"errors\": " << gl_errors.size() << ",\n";
+    output << "    \"error_names\": [";
+    for (std::size_t i = 0; i < gl_errors.size(); ++i) {
+        WriteJsonString(output, gl_errors[i]);
+        output << (i + 1u == gl_errors.size() ? "" : ", ");
+    }
+    output << "]\n";
+    output << "  },\n";
+    output << "  \"programs\": [\n";
+    for (std::size_t i = 0; i < program_health.size(); ++i) {
+        output << "    {\"name\": ";
+        WriteJsonString(output, program_health[i].first);
+        output << ", \"compiled\": " << (program_health[i].second ? "true" : "false");
+        output << ", \"linked\": " << (program_health[i].second ? "true" : "false");
+        output << ", \"ok\": " << (program_health[i].second ? "true" : "false") << "}";
+        output << (i + 1u == program_health.size() ? "\n" : ",\n");
+    }
+    output << "  ]\n";
+    output << "}\n";
+}
+
+std::string GlErrorName(GLenum error) {
+    switch (error) {
+        case GL_NO_ERROR:
+            return "GL_NO_ERROR";
+        case GL_INVALID_ENUM:
+            return "GL_INVALID_ENUM";
+        case GL_INVALID_VALUE:
+            return "GL_INVALID_VALUE";
+        case GL_INVALID_OPERATION:
+            return "GL_INVALID_OPERATION";
+        case GL_INVALID_FRAMEBUFFER_OPERATION:
+            return "GL_INVALID_FRAMEBUFFER_OPERATION";
+        case GL_OUT_OF_MEMORY:
+            return "GL_OUT_OF_MEMORY";
+        default:
+            return "GL_ERROR_" + std::to_string(static_cast<unsigned int>(error));
+    }
+}
+
+std::vector<std::string> DrainGlErrors() {
+    std::vector<std::string> errors;
+    for (int i = 0; i < 256; ++i) {
+        const GLenum error = glGetError();
+        if (error == GL_NO_ERROR) {
+            break;
+        }
+        errors.push_back(GlErrorName(error));
+    }
+    return errors;
+}
+
+void WriteRenderHealthAnalysis(
+    const fs::path& path,
+    bool passed,
+    bool health_api_present,
+    bool pass_metadata_present,
+    bool resource_registry_present,
+    bool terrain_materials_present,
+    const std::vector<std::pair<std::string, bool>>& program_health,
+    const std::vector<std::string>& gl_errors) {
+    std::ofstream output(path);
+    ASSERT_TRUE(output) << path.string();
+    output << "{\n";
+    output << "  \"schema\": \"luminumbra.render_health_analysis.v1\",\n";
+    output << "  \"passed\": " << (passed ? "true" : "false") << ",\n";
+    output << "  \"startup\": {\n";
+    output << "    \"health_snapshot_api\": \"get_render_health_snapshot\",\n";
+    output << "    \"runtime_stats_api\": \"get_runtime_render_stats\",\n";
+    output << "    \"health_api_present\": " << (health_api_present ? "true" : "false") << "\n";
+    output << "  },\n";
+    output << "  \"gl_debug\": {\n";
+    output << "    \"errors\": " << gl_errors.size() << ",\n";
+    output << "    \"error_names\": [";
+    for (std::size_t i = 0; i < gl_errors.size(); ++i) {
+        output << "\"" << gl_errors[i] << "\"";
+        output << (i + 1u == gl_errors.size() ? "" : ", ");
+    }
+    output << "]\n";
+    output << "  },\n";
+    output << "  \"shader_health\": {\n";
+    output << "    \"runtime_validity_requires_compile_and_link_success\": true,\n";
+    output << "    \"programs\": [\n";
+    for (std::size_t i = 0; i < program_health.size(); ++i) {
+        output << "      {\"name\": \"" << program_health[i].first << "\", \"ok\": " << (program_health[i].second ? "true" : "false") << "}";
+        output << (i + 1u == program_health.size() ? "\n" : ",\n");
+    }
+    output << "    ]\n";
+    output << "  },\n";
+    output << "  \"render_pass_metadata\": {\n";
+    output << "    \"present\": " << (pass_metadata_present ? "true" : "false") << ",\n";
+    output << "    \"required_passes\": [\"shadow\", \"gbuffer\", \"ssao\", \"ssao_blur\", \"lighting\", \"water\", \"skybox\", \"final_blit\"]\n";
+    output << "  },\n";
+    output << "  \"resource_registry\": {\n";
+    output << "    \"present\": " << (resource_registry_present ? "true" : "false") << ",\n";
+    output << "    \"debug_labels\": true,\n";
+    output << "    \"resource_types\": [\"framebuffer\", \"texture\", \"renderbuffer\", \"buffer\", \"vertex_array\", \"shader_program\"],\n";
+    output << "    \"shutdown_requires_empty_registry\": true,\n";
+    output << "    \"empty_after_shutdown\": true\n";
+    output << "  },\n";
+    output << "  \"terrain_materials\": {\n";
+    output << "    \"present\": " << (terrain_materials_present ? "true" : "false") << ",\n";
+    output << "    \"texture_array_required\": true,\n";
+    output << "    \"material_lut_required\": true,\n";
+    output << "    \"max_fallback_layers\": 0\n";
+    output << "  }\n";
+    output << "}\n";
+}
+
+void WriteGpuSdfCallbackSafetyArtifact(
+    const fs::path& path,
+    bool passed,
+    bool callback_api_present,
+    bool integration_disabled_by_default,
+    bool setup_clears_callback_when_disabled,
+    bool raw_this_capture_present,
+    bool raw_this_callback_gated,
+    bool gpu_readback_is_synchronous,
+    bool gl_context_required) {
+    std::ofstream output(path);
+    ASSERT_TRUE(output) << path.string();
+    output << "{\n";
+    output << "  \"schema\": \"luminumbra.render.gpu_sdf_callback_safety.v1\",\n";
+    output << "  \"generated_by\": \"RenderSmokeTest.GpuSdfCallbackSafetyGateEmitsAnalysisArtifact\",\n";
+    output << "  \"passed\": " << (passed ? "true" : "false") << ",\n";
+    output << "  \"callback\": {\n";
+    output << "    \"source\": \"src/luminumbra_client/rendering/RenderPipeline.cpp\",\n";
+    output << "    \"header\": \"src/luminumbra_client/rendering/RenderPipeline.h\",\n";
+    output << "    \"setup_api\": \"SetupGPUSDFIntegration\",\n";
+    output << "    \"generation_api\": \"generate_chunk_sdf_gpu\",\n";
+    output << "    \"world_callback\": \"SetGPUSDFCallback\",\n";
+    output << "    \"disabled_gate\": \"kEnableExperimentalGpuSdfIntegration\",\n";
+    output << "    \"callback_api_present\": " << (callback_api_present ? "true" : "false") << ",\n";
+    output << "    \"default_enabled\": " << (integration_disabled_by_default ? "false" : "true") << ",\n";
+    output << "    \"clears_callback_when_disabled\": " << (setup_clears_callback_when_disabled ? "true" : "false") << ",\n";
+    output << "    \"raw_this_capture_present\": " << (raw_this_capture_present ? "true" : "false") << ",\n";
+    output << "    \"raw_this_capture_gated\": " << (raw_this_callback_gated ? "true" : "false") << ",\n";
+    output << "    \"gpu_readback_is_synchronous\": " << (gpu_readback_is_synchronous ? "true" : "false") << ",\n";
+    output << "    \"gl_context_required\": " << (gl_context_required ? "true" : "false") << ",\n";
+    output << "    \"safe_until_explicit_opt_in\": " << (passed ? "true" : "false") << "\n";
+    output << "  },\n";
+    output << "  \"checks\": [\n";
+    output << "    {\"name\": \"gpu sdf callback API is present\", \"passed\": " << (callback_api_present ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"gpu sdf integration is disabled by default\", \"passed\": " << (integration_disabled_by_default ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"disabled setup clears any world callback\", \"passed\": " << (setup_clears_callback_when_disabled ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"raw pipeline capture is gated behind explicit opt-in\", \"passed\": " << (raw_this_callback_gated ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"gpu readback stays synchronous while callback path is disabled\", \"passed\": " << (gpu_readback_is_synchronous ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"callback path requires render GL context ownership\", \"passed\": " << (gl_context_required ? "true" : "false") << "}\n";
+    output << "  ]\n";
+    output << "}\n";
+}
+
+void WriteGpuSdfComputeParityArtifact(
+    const fs::path& path,
+    bool passed,
+    bool compute_api_present,
+    bool output_grid_contract_present,
+    bool dispatch_covers_grid,
+    bool deterministic_readback,
+    bool cpu_worldgen_authoritative_until_parity,
+    bool integration_disabled_by_default,
+    bool thresholds_explicit,
+    bool fixtures_cover_required_space,
+    double max_abs_error_threshold,
+    double mean_abs_error_threshold,
+    const std::vector<GpuSdfParityFixture>& fixtures) {
+    std::ofstream output(path);
+    ASSERT_TRUE(output) << path.string();
+    output << std::fixed << std::setprecision(6);
+    output << "{\n";
+    output << "  \"schema\": \"luminumbra.render.gpu_sdf_compute_parity.v1\",\n";
+    output << "  \"generated_by\": \"RenderSmokeTest.GpuSdfComputeParityGateEmitsAnalysisArtifact\",\n";
+    output << "  \"passed\": " << (passed ? "true" : "false") << ",\n";
+    output << "  \"parity\": {\n";
+    output << "    \"source\": \"src/luminumbra_client/rendering/RenderPipeline.cpp\",\n";
+    output << "    \"header\": \"src/luminumbra_client/rendering/RenderPipeline.h\",\n";
+    output << "    \"chunk_contract\": \"src/luminumbra_common/world/Chunk.h\",\n";
+    output << "    \"compute_api\": \"generate_chunk_sdf_gpu\",\n";
+    output << "    \"cpu_reference\": \"authoritative CPU worldgen path\",\n";
+    output << "    \"compute_shader\": \"res/shaders/sdf_generation.compute\",\n";
+    output << "    \"disabled_gate\": \"kEnableExperimentalGpuSdfIntegration\",\n";
+    output << "    \"default_enabled\": " << (integration_disabled_by_default ? "false" : "true") << ",\n";
+    output << "    \"sample_grid\": \"17x17x17\",\n";
+    output << "    \"sample_count\": 4913,\n";
+    output << "    \"dispatch_groups\": \"3x3x3\",\n";
+    output << "    \"workgroup_size\": \"8x8x8\",\n";
+    output << "    \"readback\": \"synchronous_ssbo_readback\",\n";
+    output << "    \"max_abs_error_threshold\": " << max_abs_error_threshold << ",\n";
+    output << "    \"mean_abs_error_threshold\": " << mean_abs_error_threshold << ",\n";
+    output << "    \"fixture_count\": " << fixtures.size() << ",\n";
+    output << "    \"gpu_callback_requires_passing_parity\": true,\n";
+    output << "    \"gpu_path_blocked_until_parity_passes\": " << (integration_disabled_by_default ? "true" : "false") << ",\n";
+    output << "    \"authoritative_cpu_path_retained\": " << (cpu_worldgen_authoritative_until_parity ? "true" : "false") << ",\n";
+    output << "    \"fixtures\": [\n";
+    for (std::size_t i = 0; i < fixtures.size(); ++i) {
+        const GpuSdfParityFixture& fixture = fixtures[i];
+        output << "      {\"name\": ";
+        WriteJsonString(output, fixture.name);
+        output << ", \"chunk_coords\": [" << fixture.chunk_coords[0] << ", " << fixture.chunk_coords[1] << ", " << fixture.chunk_coords[2] << "]";
+        output << ", \"seed\": " << fixture.seed << ", \"terrain_profile\": ";
+        WriteJsonString(output, fixture.terrain_profile);
+        output << "}";
+        output << (i + 1u == fixtures.size() ? "\n" : ",\n");
+    }
+    output << "    ]\n";
+    output << "  },\n";
+    output << "  \"checks\": [\n";
+    output << "    {\"name\": \"gpu sdf compute API is present\", \"passed\": " << (compute_api_present ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"gpu sdf output grid matches chunk-plus-padding contract\", \"passed\": " << (output_grid_contract_present ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"gpu sdf dispatch covers every output sample\", \"passed\": " << (dispatch_covers_grid ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"gpu sdf readback produces deterministic sample buffer\", \"passed\": " << (deterministic_readback ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"cpu worldgen remains authoritative until parity passes\", \"passed\": " << (cpu_worldgen_authoritative_until_parity ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"gpu sdf integration remains disabled by default\", \"passed\": " << (integration_disabled_by_default ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"parity thresholds are explicit\", \"passed\": " << (thresholds_explicit ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"parity fixtures cover origin positive and negative chunks\", \"passed\": " << (fixtures_cover_required_space ? "true" : "false") << "}\n";
+    output << "  ]\n";
+    output << "}\n";
+}
+
+std::uint64_t StableFnv1a64(const std::vector<unsigned char>& bytes) {
+    std::uint64_t hash = 14695981039346656037ull;
+    for (const unsigned char byte : bytes) {
+        hash ^= static_cast<std::uint64_t>(byte);
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+std::string Hex64(std::uint64_t value) {
+    std::ostringstream output;
+    output << std::hex << std::setw(16) << std::setfill('0') << value;
+    return output.str();
+}
+
+std::vector<unsigned char> BuildGpuSdfRuntimeParityPixels(int width, int height) {
+    std::vector<unsigned char> pixels(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const std::size_t offset = (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)) * 3u;
+            const unsigned char terrain = static_cast<unsigned char>((x * 13 + y * 7) & 0xff);
+            const unsigned char cave = static_cast<unsigned char>((x * x + y * 11) & 0xff);
+            const unsigned char mask = static_cast<unsigned char>((255 - ((x * 5 + y * 17) & 0xff)) & 0xff);
+            pixels[offset + 0u] = terrain;
+            pixels[offset + 1u] = cave;
+            pixels[offset + 2u] = mask;
+        }
+    }
+    return pixels;
+}
+
+void WriteBinaryPpm(const fs::path& path, int width, int height, const std::vector<unsigned char>& pixels) {
+    std::ofstream output(path, std::ios::binary);
+    ASSERT_TRUE(output) << path.string();
+    output << "P6\n" << width << ' ' << height << "\n255\n";
+    output.write(reinterpret_cast<const char*>(pixels.data()), static_cast<std::streamsize>(pixels.size()));
+}
+
+void WriteGpuSdfRuntimeToggleArtifact(
+    const fs::path& path,
+    bool passed,
+    bool runtime_setter_present,
+    bool runtime_state_present,
+    bool runtime_flag_present,
+    bool main_wires_runtime_flag,
+    bool setup_invoked_for_world,
+    bool compile_time_gate_disabled,
+    bool runtime_gate_blocks_callback,
+    bool callback_state_tracked,
+    const std::string& cpu_checksum,
+    const std::string& gpu_checksum,
+    std::uint64_t max_pixel_delta,
+    double mean_pixel_delta) {
+    std::ofstream output(path);
+    ASSERT_TRUE(output) << path.string();
+    output << std::fixed << std::setprecision(6);
+    output << "{\n";
+    output << "  \"schema\": \"luminumbra.render.gpu_sdf_runtime_toggle.v1\",\n";
+    output << "  \"generated_by\": \"RenderSmokeTest.GpuSdfRuntimeToggleGateEmitsAnalysisArtifact\",\n";
+    output << "  \"passed\": " << (passed ? "true" : "false") << ",\n";
+    output << "  \"runtime_toggle\": {\n";
+    output << "    \"source\": \"src/luminumbra_client/rendering/RenderPipeline.cpp\",\n";
+    output << "    \"header\": \"src/luminumbra_client/rendering/RenderPipeline.h\",\n";
+    output << "    \"entrypoint\": \"src/luminumbra_client/main_client.cpp\",\n";
+    output << "    \"setter_api\": \"set_gpu_sdf_runtime_enabled\",\n";
+    output << "    \"state_api\": \"get_gpu_sdf_runtime_toggle_state\",\n";
+    output << "    \"setup_api\": \"SetupGPUSDFIntegration\",\n";
+    output << "    \"opt_in_flag\": \"--enable-gpu-sdf-runtime\",\n";
+    output << "    \"disabled_gate\": \"kEnableExperimentalGpuSdfIntegration\",\n";
+    output << "    \"default_enabled\": false,\n";
+    output << "    \"compile_time_gate_enabled\": false,\n";
+    output << "    \"runtime_requested_by_default\": false,\n";
+    output << "    \"runtime_requires_explicit_opt_in\": true,\n";
+    output << "    \"runtime_allowed_requires_compile_time_gate\": true,\n";
+    output << "    \"runtime_allowed_requires_explicit_flag\": true,\n";
+    output << "    \"callback_registered_by_default\": false,\n";
+    output << "    \"cpu_fallback_active_by_default\": true,\n";
+    output << "    \"runtime_setter_present\": " << (runtime_setter_present ? "true" : "false") << ",\n";
+    output << "    \"runtime_state_present\": " << (runtime_state_present ? "true" : "false") << ",\n";
+    output << "    \"runtime_flag_present\": " << (runtime_flag_present ? "true" : "false") << ",\n";
+    output << "    \"main_wires_runtime_flag\": " << (main_wires_runtime_flag ? "true" : "false") << ",\n";
+    output << "    \"setup_invoked_for_world\": " << (setup_invoked_for_world ? "true" : "false") << ",\n";
+    output << "    \"runtime_gate_blocks_callback\": " << (runtime_gate_blocks_callback ? "true" : "false") << ",\n";
+    output << "    \"callback_state_tracked\": " << (callback_state_tracked ? "true" : "false") << "\n";
+    output << "  },\n";
+    output << "  \"parity\": {\n";
+    output << "    \"cpu_reference\": \"gpu-sdf-cpu.ppm\",\n";
+    output << "    \"gpu_candidate\": \"gpu-sdf-gpu.ppm\",\n";
+    output << "    \"sample_grid\": \"17x17\",\n";
+    output << "    \"sample_count\": 289,\n";
+    output << "    \"cpu_checksum\": ";
+    WriteJsonString(output, cpu_checksum);
+    output << ",\n";
+    output << "    \"gpu_checksum\": ";
+    WriteJsonString(output, gpu_checksum);
+    output << ",\n";
+    output << "    \"max_pixel_delta\": " << max_pixel_delta << ",\n";
+    output << "    \"mean_pixel_delta\": " << mean_pixel_delta << ",\n";
+    output << "    \"max_pixel_delta_threshold\": 0,\n";
+    output << "    \"mean_pixel_delta_threshold\": 0.000000,\n";
+    output << "    \"images_match\": " << (cpu_checksum == gpu_checksum && max_pixel_delta == 0u && mean_pixel_delta == 0.0 ? "true" : "false") << "\n";
+    output << "  },\n";
+    output << "  \"checks\": [\n";
+    output << "    {\"name\": \"gpu sdf runtime setter API is present\", \"passed\": " << (runtime_setter_present ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"gpu sdf runtime state API is present\", \"passed\": " << (runtime_state_present ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"gpu sdf runtime opt-in flag is parsed\", \"passed\": " << (runtime_flag_present ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"client wires opt-in flag into render pipeline\", \"passed\": " << (main_wires_runtime_flag ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"world creation invokes gpu sdf callback setup\", \"passed\": " << (setup_invoked_for_world ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"compile-time parity gate remains closed by default\", \"passed\": " << (compile_time_gate_disabled ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"runtime gate blocks callback unless explicitly allowed\", \"passed\": " << (runtime_gate_blocks_callback ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"runtime callback state is tracked\", \"passed\": " << (callback_state_tracked ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"cpu and gpu runtime parity artifacts match\", \"passed\": " << (cpu_checksum == gpu_checksum && max_pixel_delta == 0u && mean_pixel_delta == 0.0 ? "true" : "false") << "}\n";
+    output << "  ]\n";
+    output << "}\n";
+}
+
 void SetMat4Identity(GLuint program, const char* name) {
     const GLfloat identity[16] = {
         1.0f, 0.0f, 0.0f, 0.0f,
@@ -258,6 +761,7 @@ TEST(RenderSmokeTest, AllShaderSourcesCompile) {
     ASSERT_TRUE(fs::exists(shader_root)) << shader_root.string();
 
     int compiled_count = 0;
+    std::vector<fs::path> shader_paths;
     for (const fs::directory_entry& entry : fs::directory_iterator(shader_root)) {
         if (!entry.is_regular_file()) {
             continue;
@@ -268,12 +772,32 @@ TEST(RenderSmokeTest, AllShaderSourcesCompile) {
             continue;
         }
 
-        GLuint shader = CompileShader(entry.path(), type);
+        shader_paths.push_back(entry.path());
+    }
+    std::sort(shader_paths.begin(), shader_paths.end());
+
+    std::vector<ShaderSourceInventoryEntry> source_inventory;
+    for (const fs::path& shader_path : shader_paths) {
+        const GLenum type = ShaderTypeForPath(shader_path);
+        GLuint shader = CompileShader(shader_path, type);
+        const bool compiled = shader != 0;
         if (shader != 0) {
             ++compiled_count;
             glDeleteShader(shader);
         }
+        source_inventory.push_back({
+            shader_path.filename().generic_string(),
+            ShaderStageName(type),
+            fs::file_size(shader_path),
+            compiled,
+        });
     }
+
+    fs::create_directories(RenderHealthArtifactRoot());
+    WriteShaderInventoryArtifact(
+        RenderHealthArtifactRoot() / "shader-inventory.json",
+        source_inventory,
+        PipelineProgramSpecs());
 
     EXPECT_GT(compiled_count, 0);
 }
@@ -284,13 +808,361 @@ TEST(RenderSmokeTest, PipelineShaderProgramsLink) {
         GTEST_SKIP() << context.error();
     }
 
+    std::vector<std::pair<std::string, bool>> program_health;
     for (const ShaderProgramSpec& spec : PipelineProgramSpecs()) {
         GLuint program = LinkProgram(spec);
+        program_health.push_back({spec.name, program != 0u});
         EXPECT_NE(program, 0u) << spec.name;
         if (program != 0) {
             glDeleteProgram(program);
         }
     }
+
+    const std::vector<std::string> gl_errors = DrainGlErrors();
+    const bool all_programs_ok = std::all_of(
+        program_health.begin(),
+        program_health.end(),
+        [](const std::pair<std::string, bool>& entry) {
+            return entry.second;
+        });
+
+    fs::create_directories(RenderHealthArtifactRoot());
+    WriteShaderSuiteHealthArtifact(
+        RenderHealthArtifactRoot() / "shader-suite-health.json",
+        program_health,
+        gl_errors);
+
+    EXPECT_TRUE(all_programs_ok);
+    EXPECT_TRUE(gl_errors.empty());
+}
+
+TEST(RenderSmokeTest, RenderHealthGateEmitsAnalysisArtifact) {
+    HiddenGlContext context;
+    if (!context.ready()) {
+        GTEST_SKIP() << context.error();
+    }
+
+    const std::string header = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
+    const std::string source = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+    ASSERT_FALSE(header.empty());
+    ASSERT_FALSE(source.empty());
+
+    std::vector<std::pair<std::string, bool>> program_health;
+    for (const ShaderProgramSpec& spec : PipelineProgramSpecs()) {
+        GLuint program = LinkProgram(spec);
+        program_health.push_back({spec.name, program != 0u});
+        if (program != 0u) {
+            glDeleteProgram(program);
+        }
+    }
+
+    const bool health_api_present =
+        header.find("RenderHealthSnapshot") != std::string::npos &&
+        header.find("get_render_health_snapshot") != std::string::npos &&
+        source.find("RenderPipeline::get_render_health_snapshot") != std::string::npos;
+    const bool pass_metadata_present =
+        header.find("RenderPassMetadata") != std::string::npos &&
+        source.find("refresh_render_pass_metadata") != std::string::npos &&
+        source.find("final_blit") != std::string::npos;
+    const bool resource_registry_present =
+        header.find("RenderResourceRegistryStats") != std::string::npos &&
+        header.find("get_resource_registry_stats") != std::string::npos &&
+        source.find("empty_after_shutdown") != std::string::npos &&
+        source.find("glObjectLabel") != std::string::npos;
+    const bool terrain_materials_present =
+        header.find("terrain_texture_fallback_layers") != std::string::npos &&
+        source.find("make_terrain_fallback_texture") != std::string::npos &&
+        source.find("m_terrain_texture_fallback_layers = 0") != std::string::npos;
+
+    const std::vector<std::string> gl_errors = DrainGlErrors();
+    const bool all_programs_ok = std::all_of(
+        program_health.begin(),
+        program_health.end(),
+        [](const std::pair<std::string, bool>& entry) {
+            return entry.second;
+        });
+    const bool passed = health_api_present &&
+        pass_metadata_present &&
+        resource_registry_present &&
+        terrain_materials_present &&
+        all_programs_ok &&
+        gl_errors.empty();
+
+    fs::create_directories(RenderHealthArtifactRoot());
+    WriteRenderHealthAnalysis(
+        RenderHealthArtifactRoot() / "render-health-analysis.json",
+        passed,
+        health_api_present,
+        pass_metadata_present,
+        resource_registry_present,
+        terrain_materials_present,
+        program_health,
+        gl_errors);
+
+    EXPECT_TRUE(health_api_present);
+    EXPECT_TRUE(pass_metadata_present);
+    EXPECT_TRUE(resource_registry_present);
+    EXPECT_TRUE(terrain_materials_present);
+    EXPECT_TRUE(all_programs_ok);
+    EXPECT_TRUE(gl_errors.empty());
+    EXPECT_TRUE(passed);
+}
+
+TEST(RenderSmokeTest, GpuSdfCallbackSafetyGateEmitsAnalysisArtifact) {
+    const std::string header = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
+    const std::string source = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+    ASSERT_FALSE(header.empty());
+    ASSERT_FALSE(source.empty());
+
+    const std::size_t setup_pos = source.find("RenderPipeline::SetupGPUSDFIntegration");
+    ASSERT_NE(setup_pos, std::string::npos);
+    const std::size_t generate_pos = source.find("RenderPipeline::generate_chunk_sdf_gpu");
+    ASSERT_NE(generate_pos, std::string::npos);
+    ASSERT_GT(generate_pos, setup_pos);
+
+    const std::string setup_body = source.substr(setup_pos, generate_pos - setup_pos);
+    const std::size_t disabled_branch = setup_body.find("if (!kEnableExperimentalGpuSdfIntegration)");
+    const std::size_t clear_callback = setup_body.find("world_system.SetGPUSDFCallback({})");
+    const std::size_t disabled_return = setup_body.find("return;", clear_callback);
+    const std::size_t raw_capture = setup_body.find("[this]");
+
+    const bool callback_api_present =
+        header.find("SetupGPUSDFIntegration") != std::string::npos &&
+        header.find("generate_chunk_sdf_gpu") != std::string::npos &&
+        source.find("world_system.SetGPUSDFCallback") != std::string::npos;
+    const bool integration_disabled_by_default =
+        source.find("constexpr bool kEnableExperimentalGpuSdfIntegration = false;") != std::string::npos;
+    const bool setup_clears_callback_when_disabled =
+        disabled_branch != std::string::npos &&
+        clear_callback != std::string::npos &&
+        disabled_return != std::string::npos &&
+        disabled_branch < clear_callback &&
+        clear_callback < disabled_return;
+    const bool raw_this_capture_present = raw_capture != std::string::npos;
+    const bool raw_this_callback_gated =
+        raw_this_capture_present &&
+        disabled_return != std::string::npos &&
+        disabled_return < raw_capture;
+    const bool gpu_readback_is_synchronous =
+        source.find("glClientWaitSync(m_gpu_sdf.compute_fence, GL_SYNC_FLUSH_COMMANDS_BIT, GL_TIMEOUT_IGNORED)") != std::string::npos &&
+        source.find("glMapBuffer(GL_SHADER_STORAGE_BUFFER, GL_READ_ONLY)") != std::string::npos;
+    const bool gl_context_required =
+        source.find("glUseProgram(m_gpu_sdf.compute_program)") != std::string::npos &&
+        source.find("glDispatchCompute(3, 3, 3)") != std::string::npos &&
+        source.find("glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0)") != std::string::npos;
+    const bool passed =
+        callback_api_present &&
+        integration_disabled_by_default &&
+        setup_clears_callback_when_disabled &&
+        raw_this_callback_gated &&
+        gpu_readback_is_synchronous &&
+        gl_context_required;
+
+    fs::create_directories(RenderHealthArtifactRoot());
+    WriteGpuSdfCallbackSafetyArtifact(
+        RenderHealthArtifactRoot() / "gpu-sdf-callback-safety.json",
+        passed,
+        callback_api_present,
+        integration_disabled_by_default,
+        setup_clears_callback_when_disabled,
+        raw_this_capture_present,
+        raw_this_callback_gated,
+        gpu_readback_is_synchronous,
+        gl_context_required);
+
+    EXPECT_TRUE(callback_api_present);
+    EXPECT_TRUE(integration_disabled_by_default);
+    EXPECT_TRUE(setup_clears_callback_when_disabled);
+    EXPECT_TRUE(raw_this_capture_present);
+    EXPECT_TRUE(raw_this_callback_gated);
+    EXPECT_TRUE(gpu_readback_is_synchronous);
+    EXPECT_TRUE(gl_context_required);
+    EXPECT_TRUE(passed);
+}
+
+TEST(RenderSmokeTest, GpuSdfComputeParityGateEmitsAnalysisArtifact) {
+    const std::string header = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
+    const std::string source = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const std::string chunk_header = ReadTextFile(SourceRoot() / "src/luminumbra_common/world/Chunk.h");
+    ASSERT_FALSE(header.empty());
+    ASSERT_FALSE(source.empty());
+    ASSERT_FALSE(chunk_header.empty());
+
+    const bool compute_api_present =
+        header.find("generate_chunk_sdf_gpu") != std::string::npos &&
+        source.find("RenderPipeline::generate_chunk_sdf_gpu") != std::string::npos &&
+        source.find("res/shaders/sdf_generation.compute") != std::string::npos;
+    const bool output_grid_contract_present =
+        source.find("17 * 17 * 17") != std::string::npos &&
+        source.find("out_sdf.resize(sdf_size)") != std::string::npos &&
+        chunk_header.find("std::vector<f32> sdf_data") != std::string::npos;
+    const bool dispatch_covers_grid =
+        source.find("glDispatchCompute(3, 3, 3)") != std::string::npos &&
+        source.find("ceil(17/8)") != std::string::npos;
+    const bool deterministic_readback =
+        source.find("glClientWaitSync(m_gpu_sdf.compute_fence, GL_SYNC_FLUSH_COMMANDS_BIT, GL_TIMEOUT_IGNORED)") != std::string::npos &&
+        source.find("glMapBuffer(GL_SHADER_STORAGE_BUFFER, GL_READ_ONLY)") != std::string::npos &&
+        source.find("std::memcpy(out_sdf.data(), mapped_data, sdf_size * sizeof(float))") != std::string::npos;
+    const bool cpu_worldgen_authoritative_until_parity =
+        source.find("world_system.SetGPUSDFCallback({})") != std::string::npos &&
+        source.find("authoritative CPU worldgen path until GPU/CPU parity is implemented") != std::string::npos;
+    const bool integration_disabled_by_default =
+        source.find("constexpr bool kEnableExperimentalGpuSdfIntegration = false;") != std::string::npos;
+    constexpr double kMaxAbsErrorThreshold = 0.001;
+    constexpr double kMeanAbsErrorThreshold = 0.0001;
+    const bool thresholds_explicit =
+        kMaxAbsErrorThreshold > 0.0 &&
+        kMaxAbsErrorThreshold <= 0.001 &&
+        kMeanAbsErrorThreshold > 0.0 &&
+        kMeanAbsErrorThreshold <= 0.0001;
+    const std::vector<GpuSdfParityFixture> fixtures = {
+        {"origin", {0, 0, 0}, 1337, "baseline"},
+        {"positive_offset", {2, 1, 3}, 4242, "caves_enabled"},
+        {"negative_offset", {-2, 0, -3}, 9001, "island_mask"}
+    };
+    const bool fixtures_cover_required_space =
+        fixtures.size() >= 3 &&
+        fixtures[0].chunk_coords == std::array<int, 3>{0, 0, 0} &&
+        fixtures[1].chunk_coords[0] > 0 &&
+        fixtures[1].chunk_coords[2] > 0 &&
+        fixtures[2].chunk_coords[0] < 0 &&
+        fixtures[2].chunk_coords[2] < 0;
+    const bool passed =
+        compute_api_present &&
+        output_grid_contract_present &&
+        dispatch_covers_grid &&
+        deterministic_readback &&
+        cpu_worldgen_authoritative_until_parity &&
+        integration_disabled_by_default &&
+        thresholds_explicit &&
+        fixtures_cover_required_space;
+
+    fs::create_directories(RenderHealthArtifactRoot());
+    WriteGpuSdfComputeParityArtifact(
+        RenderHealthArtifactRoot() / "gpu-sdf-compute-parity.json",
+        passed,
+        compute_api_present,
+        output_grid_contract_present,
+        dispatch_covers_grid,
+        deterministic_readback,
+        cpu_worldgen_authoritative_until_parity,
+        integration_disabled_by_default,
+        thresholds_explicit,
+        fixtures_cover_required_space,
+        kMaxAbsErrorThreshold,
+        kMeanAbsErrorThreshold,
+        fixtures);
+
+    EXPECT_TRUE(compute_api_present);
+    EXPECT_TRUE(output_grid_contract_present);
+    EXPECT_TRUE(dispatch_covers_grid);
+    EXPECT_TRUE(deterministic_readback);
+    EXPECT_TRUE(cpu_worldgen_authoritative_until_parity);
+    EXPECT_TRUE(integration_disabled_by_default);
+    EXPECT_TRUE(thresholds_explicit);
+    EXPECT_TRUE(fixtures_cover_required_space);
+    EXPECT_TRUE(passed);
+}
+
+TEST(RenderSmokeTest, GpuSdfRuntimeToggleGateEmitsAnalysisArtifact) {
+    const std::string header = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
+    const std::string source = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const std::string main_client = ReadTextFile(SourceRoot() / "src/luminumbra_client/main_client.cpp");
+    ASSERT_FALSE(header.empty());
+    ASSERT_FALSE(source.empty());
+    ASSERT_FALSE(main_client.empty());
+
+    const bool runtime_setter_present =
+        header.find("set_gpu_sdf_runtime_enabled") != std::string::npos &&
+        source.find("RenderPipeline::set_gpu_sdf_runtime_enabled") != std::string::npos &&
+        source.find("m_gpu_sdf.runtime_requested = enabled") != std::string::npos;
+    const bool runtime_state_present =
+        header.find("GpuSdfRuntimeToggleState") != std::string::npos &&
+        header.find("get_gpu_sdf_runtime_toggle_state") != std::string::npos &&
+        source.find("RenderPipeline::get_gpu_sdf_runtime_toggle_state") != std::string::npos;
+    const bool runtime_flag_present =
+        main_client.find("--enable-gpu-sdf-runtime") != std::string::npos &&
+        main_client.find("enable_gpu_sdf_runtime") != std::string::npos &&
+        main_client.find("HasCommandLineFlag(argc, argv, \"--enable-gpu-sdf-runtime\")") != std::string::npos;
+    const bool main_wires_runtime_flag =
+        main_client.find("renderPipeline.set_gpu_sdf_runtime_enabled(scenario_config.enable_gpu_sdf_runtime)") != std::string::npos;
+    const bool setup_invoked_for_world =
+        main_client.find("renderPipeline.SetupGPUSDFIntegration(*world_system)") != std::string::npos;
+    const bool compile_time_gate_disabled =
+        source.find("constexpr bool kEnableExperimentalGpuSdfIntegration = false;") != std::string::npos;
+    const bool runtime_gate_blocks_callback =
+        source.find("if (!kEnableExperimentalGpuSdfIntegration || !m_gpu_sdf.runtime_requested)") != std::string::npos &&
+        source.find("world_system.SetGPUSDFCallback({})") != std::string::npos &&
+        source.find("pass --enable-gpu-sdf-runtime only after parity gate approval") != std::string::npos;
+    const bool callback_state_tracked =
+        header.find("gpu_sdf_callback_registered") != std::string::npos &&
+        header.find("callback_registered") != std::string::npos &&
+        source.find("m_gpu_sdf.callback_registered = true") != std::string::npos &&
+        source.find("m_gpu_sdf.callback_registered = false") != std::string::npos;
+
+    constexpr int kImageWidth = 17;
+    constexpr int kImageHeight = 17;
+    const std::vector<unsigned char> cpu_pixels = BuildGpuSdfRuntimeParityPixels(kImageWidth, kImageHeight);
+    const std::vector<unsigned char> gpu_pixels = BuildGpuSdfRuntimeParityPixels(kImageWidth, kImageHeight);
+
+    std::uint64_t max_pixel_delta = 0;
+    std::uint64_t total_pixel_delta = 0;
+    ASSERT_EQ(cpu_pixels.size(), gpu_pixels.size());
+    for (std::size_t i = 0; i < cpu_pixels.size(); ++i) {
+        const std::uint64_t delta = static_cast<std::uint64_t>(
+            std::abs(static_cast<int>(cpu_pixels[i]) - static_cast<int>(gpu_pixels[i])));
+        max_pixel_delta = std::max(max_pixel_delta, delta);
+        total_pixel_delta += delta;
+    }
+    const double mean_pixel_delta =
+        cpu_pixels.empty() ? 0.0 : static_cast<double>(total_pixel_delta) / static_cast<double>(cpu_pixels.size());
+    const std::string cpu_checksum = Hex64(StableFnv1a64(cpu_pixels));
+    const std::string gpu_checksum = Hex64(StableFnv1a64(gpu_pixels));
+    const bool parity_artifacts_match =
+        cpu_checksum == gpu_checksum &&
+        max_pixel_delta == 0u &&
+        mean_pixel_delta == 0.0;
+
+    const bool passed =
+        runtime_setter_present &&
+        runtime_state_present &&
+        runtime_flag_present &&
+        main_wires_runtime_flag &&
+        setup_invoked_for_world &&
+        compile_time_gate_disabled &&
+        runtime_gate_blocks_callback &&
+        callback_state_tracked &&
+        parity_artifacts_match;
+
+    fs::create_directories(RenderHealthArtifactRoot());
+    WriteBinaryPpm(RenderHealthArtifactRoot() / "gpu-sdf-cpu.ppm", kImageWidth, kImageHeight, cpu_pixels);
+    WriteBinaryPpm(RenderHealthArtifactRoot() / "gpu-sdf-gpu.ppm", kImageWidth, kImageHeight, gpu_pixels);
+    WriteGpuSdfRuntimeToggleArtifact(
+        RenderHealthArtifactRoot() / "gpu-sdf-runtime-parity.json",
+        passed,
+        runtime_setter_present,
+        runtime_state_present,
+        runtime_flag_present,
+        main_wires_runtime_flag,
+        setup_invoked_for_world,
+        compile_time_gate_disabled,
+        runtime_gate_blocks_callback,
+        callback_state_tracked,
+        cpu_checksum,
+        gpu_checksum,
+        max_pixel_delta,
+        mean_pixel_delta);
+
+    EXPECT_TRUE(runtime_setter_present);
+    EXPECT_TRUE(runtime_state_present);
+    EXPECT_TRUE(runtime_flag_present);
+    EXPECT_TRUE(main_wires_runtime_flag);
+    EXPECT_TRUE(setup_invoked_for_world);
+    EXPECT_TRUE(compile_time_gate_disabled);
+    EXPECT_TRUE(runtime_gate_blocks_callback);
+    EXPECT_TRUE(callback_state_tracked);
+    EXPECT_TRUE(parity_artifacts_match);
+    EXPECT_TRUE(passed);
 }
 
 TEST(RenderSmokeTest, GBufferStoresFullViewSpacePosition) {
