@@ -5,6 +5,9 @@ set(COMMON_SOURCES
     # Aetheric
     ${CMAKE_CURRENT_LIST_DIR}/aetheric/AethericFieldDiffusion.cpp
 
+    # AI
+    ${CMAKE_CURRENT_LIST_DIR}/ai/InstinctPlanner.cpp
+
     # Core
     ${CMAKE_CURRENT_LIST_DIR}/common_placeholder.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/EngineContracts.cpp
