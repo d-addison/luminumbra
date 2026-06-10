@@ -1,0 +1,46 @@
+﻿{
+    "schema":  "luminumbra.audio.null_telemetry.v1",
+    "timestamp_utc":  "2026-06-10T14:09:51Z",
+    "build_preset":  "debug",
+    "passed":  true,
+    "activation":  {
+                       "flag":  "--no-audio",
+                       "selected":  true,
+                       "manager_type":  "NullAudioManager",
+                       "hardware_backend_initialized":  false,
+                       "bank_files_touched":  false
+                   },
+    "routing":  {
+                    "loads_suppressed":  true,
+                    "playback_suppressed":  true,
+                    "listener_updates_suppressed":  true,
+                    "updates_noop":  true
+                },
+    "checks":  [
+                   {
+                       "name":  "null manager lives in audio module",
+                       "passed":  true,
+                       "detail":  "NullAudioManager must be owned by src/luminumbra_client/audio, not embedded in main_client.cpp"
+                   },
+                   {
+                       "name":  "--no-audio selects null manager",
+                       "passed":  true,
+                       "detail":  "The --no-audio launch flag must construct NullAudioManager"
+                   },
+                   {
+                       "name":  "null manager emits telemetry schema",
+                       "passed":  true,
+                       "detail":  "NullAudioManager must emit the audio telemetry schema"
+                   },
+                   {
+                       "name":  "audio playback routes through null manager",
+                       "passed":  true,
+                       "detail":  "Playback calls should go through IAudioManager so null mode suppresses them centrally"
+                   },
+                   {
+                       "name":  "audio telemetry artifact is written",
+                       "passed":  true,
+                       "detail":  "Null audio telemetry must be configured and declare that no hardware backend is initialized"
+                   }
+               ]
+}

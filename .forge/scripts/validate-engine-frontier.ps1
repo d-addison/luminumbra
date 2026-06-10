@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "ChunkCollisionLifecycle", "PhysicsReplay", "FrontierDisabled", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "FrontierDisabled", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug"
@@ -531,6 +531,66 @@ function Test-PhysicsReplay {
     }
 }
 
+function Test-AudioNullTelemetry {
+    $artifactDir = "build/$BuildPreset/test-artifacts/audio"
+    $analysisPath = Join-Path $artifactDir "audio-telemetry.json"
+    $testScriptPath = "test/audio/audio-null-telemetry.ps1"
+
+    if (-not (Test-Path $testScriptPath)) {
+        throw "audio null telemetry gate not yet implemented - missing $testScriptPath (produced by task T-EF-14-audio-null-telemetry-gate)"
+    }
+
+    & $testScriptPath -BuildPreset $BuildPreset
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
+    if (-not (Test-Path $analysisPath)) {
+        throw "audio null telemetry gate not yet implemented - missing $analysisPath (produced by task T-EF-14-audio-null-telemetry-gate)"
+    }
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.audio.null_telemetry.v1") {
+        throw "Unexpected audio telemetry schema '$($analysis.schema)'"
+    }
+    if (-not $analysis.passed) {
+        throw "Audio null telemetry analysis reported failure"
+    }
+    if ($analysis.activation.flag -ne "--no-audio") {
+        throw "Audio null telemetry must gate the --no-audio launch flag"
+    }
+    if (-not $analysis.activation.selected) {
+        throw "Audio null telemetry must report the null manager selected"
+    }
+    if ($analysis.activation.manager_type -ne "NullAudioManager") {
+        throw "Audio null telemetry manager type must be NullAudioManager"
+    }
+    if ($analysis.activation.hardware_backend_initialized) {
+        throw "Audio null telemetry must prove no hardware backend initialized"
+    }
+    if ($analysis.activation.bank_files_touched) {
+        throw "Audio null telemetry must not touch bank files in null mode"
+    }
+
+    $requiredChecks = @(
+        "null manager lives in audio module",
+        "--no-audio selects null manager",
+        "null manager emits telemetry schema",
+        "audio playback routes through null manager",
+        "audio telemetry artifact is written"
+    )
+    $checks = @($analysis.checks)
+    foreach ($requiredCheck in $requiredChecks) {
+        $matches = @($checks | Where-Object { $_.name -eq $requiredCheck })
+        if ($matches.Count -ne 1) {
+            throw "Audio null telemetry analysis is missing check '$requiredCheck'"
+        }
+        if (-not $matches[0].passed) {
+            throw "Audio null telemetry check failed: $requiredCheck"
+        }
+    }
+}
+
 function Test-FrontierDisabled {
     Assert-FileExists $FrontierDisabledPath
 
@@ -562,6 +622,7 @@ switch ($Mode) {
     "ShaderInventory" { Test-ShaderInventory }
     "ChunkCollisionLifecycle" { Test-ChunkCollisionLifecycle }
     "PhysicsReplay" { Test-PhysicsReplay }
+    "AudioNullTelemetry" { Test-AudioNullTelemetry }
     "FrontierDisabled" { Test-FrontierDisabled }
     "All" {
         Test-CodexOnly
@@ -572,6 +633,7 @@ switch ($Mode) {
         Test-ShaderInventory
         Test-ChunkCollisionLifecycle
         Test-PhysicsReplay
+        Test-AudioNullTelemetry
         Test-FrontierDisabled
     }
 }
