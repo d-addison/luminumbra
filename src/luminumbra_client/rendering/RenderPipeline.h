@@ -18,7 +18,7 @@
 // Forward declarations
 namespace Luminumbra { class Chunk; }
 namespace Luminumbra::Systems { class SHIELD_WorldSystem; struct TerrainGenParams; }
-namespace Luminumbra::Rendering { class Shader; class Camera; class ShadowPass; class GBufferPass; class SsaoPass; class LightingPass; class WaterPass; }
+namespace Luminumbra::Rendering { class Shader; class Camera; class ShadowPass; class GBufferPass; class SsaoPass; class LightingPass; class WaterPass; class SkyboxPass; }
 
 namespace Luminumbra::Rendering {
 
@@ -277,6 +277,7 @@ private:
     friend class SsaoPass;
     friend class LightingPass;
     friend class WaterPass;
+    friend class SkyboxPass;
 
     struct ChunkMeshSnapshot {
         ChunkID id = 0;
@@ -309,15 +310,12 @@ private:
     void upload_chunk_mesh(const ChunkMeshSnapshot& chunk, const ChunkMeshPayload& payload);
     void unload_chunk_resources(ChunkID chunk_id);
 
-    void skybox_pass(const Camera& camera);
-
     void manage_water_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks, const Camera& camera);
     bool copy_water_mesh_payload(const ChunkMeshSnapshot& chunk, ChunkMeshPayload& payload) const;
     void upload_water_mesh(const ChunkMeshSnapshot& chunk, const ChunkMeshPayload& payload);
     void unload_water_resources(ChunkID chunk_id);
 
     void init_shaders();
-    void init_skybox();
     void init_screen_quad();
     void cleanup_gpu_resources();
 
@@ -373,8 +371,6 @@ private:
     u32 m_screen_height = 0;
     std::filesystem::path m_root_path;
 
-    std::unique_ptr<Shader> m_skybox_shader;
-
     DirectionalLight m_sun;
     glm::vec3 m_moonDirection;
     glm::vec3 m_skyAmbientColor;
@@ -383,6 +379,7 @@ private:
     std::unique_ptr<SsaoPass> m_ssao_pass;
     std::unique_ptr<LightingPass> m_lighting_pass;
     std::unique_ptr<WaterPass> m_water_pass;
+    std::unique_ptr<SkyboxPass> m_skybox_pass;
 
     std::unordered_map<ChunkID, ChunkRenderData> m_chunk_render_data;
     std::unordered_map<ChunkID, WaterRenderData> m_water_render_data;
@@ -394,8 +391,6 @@ private:
 
     u32 m_screen_quad_vao = 0;
     u32 m_screen_quad_vbo = 0;
-    u32 m_skybox_vao = 0;
-    u32 m_skybox_vbo = 0;
 
     u32 m_terrainTextureArray = 0;
     u32 m_materialLUT = 0;
