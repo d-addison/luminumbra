@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rendering/RenderPipeline.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "nlohmann/json.hpp"
 #include <atomic>
 #include <cstdint>
@@ -175,5 +176,11 @@ void WriteLodGroundScreenshotIndex(
 void WriteLodGroundVisualAnalysis(
     const std::filesystem::path& artifact_dir,
     const std::vector<LodGroundVisualCapture>& captures);
+
+void WriteStreamingTelemetry(
+    const std::filesystem::path& artifact_dir,
+    const std::string& scenario,
+    double duration_seconds,
+    const Luminumbra::Systems::SHIELD_WorldSystem::StreamingTelemetryStats& stats);
 
 } // namespace Luminumbra::Client::ScenarioHarness

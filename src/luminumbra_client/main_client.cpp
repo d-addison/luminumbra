@@ -1828,6 +1828,18 @@ int main(int argc, char* argv[]) {
             WriteLodGroundVisualAnalysis(scenario_config.artifact_dir, lod_ground_visual_captures);
         }
     }
+    if (scenario_config.active()) {
+        if (auto* world_system = gameSession->GetWorldSystem()) {
+            const double scenario_play_seconds = scenario_ready
+                ? std::chrono::duration<double>(std::chrono::steady_clock::now() - scenario_play_started_at).count()
+                : 0.0;
+            WriteStreamingTelemetry(
+                scenario_config.artifact_dir,
+                scenario_config.scenario,
+                scenario_play_seconds,
+                world_system->get_streaming_telemetry_stats());
+        }
+    }
 
     std::vector<std::string> shutdown_milestones;
     auto mark_shutdown = [&](const std::string& milestone) {
