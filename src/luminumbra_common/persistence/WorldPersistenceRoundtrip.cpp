@@ -17,7 +17,9 @@ namespace {
 
 constexpr const char* kRoundtripSchema = "luminumbra.persistence.world_roundtrip.v1";
 constexpr const char* kSnapshotSchema = "luminumbra.persistence.world_state_snapshot.v1";
+constexpr const char* kChunkFormatValidationSchema = "luminumbra.persistence.chunk_format_validation.v1";
 constexpr const char* kOrderContract = "chunk_id_ascending";
+constexpr const char* kChunkFormatContract = "world_state_snapshot_chunk_v1_required_fields";
 
 const std::vector<std::string>& PersistedFields() {
     static const std::vector<std::string> fields = {
@@ -37,6 +39,37 @@ const std::vector<std::string>& PersistedFields() {
         "has_collision",
         "current_lod",
         "pending_lod",
+        "mesh_version",
+        "water_mesh_version",
+        "water_level_data",
+        "water_flow_data",
+        "water_sim_terrain_height",
+        "water_state"
+    };
+    return fields;
+}
+
+const std::vector<std::string>& RequiredChunkFormatFields() {
+    static const std::vector<std::string> fields = {
+        "coords",
+        "chunk_id",
+        "state",
+        "state_value",
+        "sdf_data",
+        "heightmap_data",
+        "mesh_vertices",
+        "mesh_indices",
+        "water_mesh_vertices",
+        "water_mesh_indices",
+        "pending_mesh_vertices",
+        "pending_mesh_indices",
+        "pending_water_mesh_vertices",
+        "pending_water_mesh_indices",
+        "has_collision",
+        "current_lod",
+        "pending_lod",
+        "pending_mesh_ready",
+        "pending_mesh_failed",
         "mesh_version",
         "water_mesh_version",
         "water_level_data",
@@ -116,6 +149,15 @@ ChunkState ChunkStateFromName(const std::string& name) {
     return ChunkState::Unloaded;
 }
 
+bool IsKnownChunkStateName(const std::string& name) {
+    return name == "Unloaded" ||
+           name == "Loading" ||
+           name == "Idle" ||
+           name == "Meshing" ||
+           name == "Ready" ||
+           name == "Unloading";
+}
+
 nlohmann::json MeshVertexToJson(const VoxelVertex& vertex) {
     return nlohmann::json{
         {"position", Vec3ToJson(vertex.position)},
@@ -165,6 +207,18 @@ std::vector<Vec2> Vec2ArrayFromJson(const nlohmann::json& values) {
     return output;
 }
 
+nlohmann::json WaterStateToJson(const Chunk& chunk) {
+    return nlohmann::json{
+        {"has_water_sim", chunk.has_water_sim.load(std::memory_order_acquire)},
+        {"water_mesh_generated", chunk.water_mesh_generated.load(std::memory_order_acquire)},
+        {"current_water_resolution", chunk.current_water_resolution.load(std::memory_order_acquire)},
+        {"is_water_sleeping", chunk.is_water_sleeping.load(std::memory_order_acquire)},
+        {"max_water_delta_last_tick", chunk.max_water_delta_last_tick},
+        {"ticks_below_threshold", chunk.ticks_below_threshold},
+        {"water_mesh_dirty_ticks", chunk.water_mesh_dirty_ticks}
+    };
+}
+
 nlohmann::json ChunkToJson(const Chunk& chunk) {
     const ChunkState state = chunk.get_state();
     return nlohmann::json{
@@ -198,7 +252,8 @@ nlohmann::json ChunkToJson(const Chunk& chunk) {
         {"is_water_sleeping", chunk.is_water_sleeping.load(std::memory_order_acquire)},
         {"max_water_delta_last_tick", chunk.max_water_delta_last_tick},
         {"ticks_below_threshold", chunk.ticks_below_threshold},
-        {"water_mesh_dirty_ticks", chunk.water_mesh_dirty_ticks}
+        {"water_mesh_dirty_ticks", chunk.water_mesh_dirty_ticks},
+        {"water_state", WaterStateToJson(chunk)}
     };
 }
 
@@ -224,13 +279,14 @@ void ApplyChunkJson(const nlohmann::json& value, Chunk& chunk) {
     chunk.water_level_data = value.at("water_level_data").get<std::vector<float>>();
     chunk.water_flow_data = Vec2ArrayFromJson(value.at("water_flow_data"));
     chunk.water_sim_terrain_height = value.at("water_sim_terrain_height").get<std::vector<float>>();
-    chunk.has_water_sim.store(value.at("has_water_sim").get<bool>(), std::memory_order_release);
-    chunk.water_mesh_generated.store(value.at("water_mesh_generated").get<bool>(), std::memory_order_release);
-    chunk.current_water_resolution.store(value.at("current_water_resolution").get<int>(), std::memory_order_release);
-    chunk.is_water_sleeping.store(value.at("is_water_sleeping").get<bool>(), std::memory_order_release);
-    chunk.max_water_delta_last_tick = value.at("max_water_delta_last_tick").get<float>();
-    chunk.ticks_below_threshold = value.at("ticks_below_threshold").get<int>();
-    chunk.water_mesh_dirty_ticks = value.at("water_mesh_dirty_ticks").get<int>();
+    const nlohmann::json& water_state = value.contains("water_state") ? value.at("water_state") : value;
+    chunk.has_water_sim.store(water_state.at("has_water_sim").get<bool>(), std::memory_order_release);
+    chunk.water_mesh_generated.store(water_state.at("water_mesh_generated").get<bool>(), std::memory_order_release);
+    chunk.current_water_resolution.store(water_state.at("current_water_resolution").get<int>(), std::memory_order_release);
+    chunk.is_water_sleeping.store(water_state.at("is_water_sleeping").get<bool>(), std::memory_order_release);
+    chunk.max_water_delta_last_tick = water_state.at("max_water_delta_last_tick").get<float>();
+    chunk.ticks_below_threshold = water_state.at("ticks_below_threshold").get<int>();
+    chunk.water_mesh_dirty_ticks = water_state.at("water_mesh_dirty_ticks").get<int>();
 }
 
 std::string StableDump(const nlohmann::json& value) {
@@ -252,6 +308,10 @@ std::string Checksum(const std::string& text) {
 }
 
 void AddCheck(WorldPersistenceRoundtripAnalysis& analysis, std::string name, bool passed) {
+    analysis.checks.push_back(WorldPersistenceRoundtripCheck{std::move(name), passed});
+}
+
+void AddCheck(ChunkFormatValidationAnalysis& analysis, std::string name, bool passed) {
     analysis.checks.push_back(WorldPersistenceRoundtripCheck{std::move(name), passed});
 }
 
@@ -318,6 +378,186 @@ bool ChunkIdsAreSorted(const nlohmann::json& snapshot) {
     return std::is_sorted(ids.begin(), ids.end());
 }
 
+bool ValidateVec2Object(const nlohmann::json& value, const std::string& field_name, std::vector<std::string>& errors) {
+    if (!value.is_object() || !value.contains("x") || !value.contains("y") ||
+        !value.at("x").is_number() || !value.at("y").is_number()) {
+        errors.push_back(field_name + " must be an object with numeric x/y fields");
+        return false;
+    }
+    return true;
+}
+
+bool ValidateVec3Object(const nlohmann::json& value, const std::string& field_name, std::vector<std::string>& errors) {
+    if (!value.is_object() || !value.contains("x") || !value.contains("y") || !value.contains("z") ||
+        !value.at("x").is_number() || !value.at("y").is_number() || !value.at("z").is_number()) {
+        errors.push_back(field_name + " must be an object with numeric x/y/z fields");
+        return false;
+    }
+    return true;
+}
+
+bool IsJsonInteger(const nlohmann::json& value) {
+    return value.is_number_integer() || value.is_number_unsigned();
+}
+
+bool ValidateCoordsObject(const nlohmann::json& value, std::vector<std::string>& errors) {
+    if (!value.is_object() || !value.contains("x") || !value.contains("y") || !value.contains("z") ||
+        !IsJsonInteger(value.at("x")) || !IsJsonInteger(value.at("y")) || !IsJsonInteger(value.at("z"))) {
+        errors.push_back("coords must be an object with integer x/y/z fields");
+        return false;
+    }
+    return true;
+}
+
+void RequireNumberArray(const nlohmann::json& chunk, const std::string& field_name, std::vector<std::string>& errors) {
+    if (!chunk.contains(field_name) || !chunk.at(field_name).is_array()) {
+        errors.push_back(field_name + " must be an array");
+        return;
+    }
+
+    for (const nlohmann::json& value : chunk.at(field_name)) {
+        if (!value.is_number()) {
+            errors.push_back(field_name + " must contain only numeric values");
+            return;
+        }
+    }
+}
+
+void RequireIntegerArray(const nlohmann::json& chunk, const std::string& field_name, std::vector<std::string>& errors) {
+    if (!chunk.contains(field_name) || !chunk.at(field_name).is_array()) {
+        errors.push_back(field_name + " must be an array");
+        return;
+    }
+
+    for (const nlohmann::json& value : chunk.at(field_name)) {
+        if (!IsJsonInteger(value)) {
+            errors.push_back(field_name + " must contain only integer values");
+            return;
+        }
+    }
+}
+
+void RequireMeshVertexArray(const nlohmann::json& chunk, const std::string& field_name, std::vector<std::string>& errors) {
+    if (!chunk.contains(field_name) || !chunk.at(field_name).is_array()) {
+        errors.push_back(field_name + " must be an array");
+        return;
+    }
+
+    for (const nlohmann::json& vertex : chunk.at(field_name)) {
+        if (!vertex.is_object() ||
+            !vertex.contains("position") ||
+            !vertex.contains("normal") ||
+            !vertex.contains("material_id") ||
+            !IsJsonInteger(vertex.at("material_id"))) {
+            errors.push_back(field_name + " entries must contain position, normal, and material_id");
+            return;
+        }
+        ValidateVec3Object(vertex.at("position"), field_name + ".position", errors);
+        ValidateVec3Object(vertex.at("normal"), field_name + ".normal", errors);
+    }
+}
+
+void RequireVec2Array(const nlohmann::json& chunk, const std::string& field_name, std::vector<std::string>& errors) {
+    if (!chunk.contains(field_name) || !chunk.at(field_name).is_array()) {
+        errors.push_back(field_name + " must be an array");
+        return;
+    }
+
+    for (const nlohmann::json& value : chunk.at(field_name)) {
+        ValidateVec2Object(value, field_name, errors);
+    }
+}
+
+void ValidateWaterStateObject(const nlohmann::json& chunk, std::vector<std::string>& errors) {
+    if (!chunk.contains("water_state") || !chunk.at("water_state").is_object()) {
+        errors.push_back("water_state must be an object");
+        return;
+    }
+
+    const nlohmann::json& water_state = chunk.at("water_state");
+    for (const char* field : {"has_water_sim", "water_mesh_generated", "is_water_sleeping"}) {
+        if (!water_state.contains(field) || !water_state.at(field).is_boolean()) {
+            errors.push_back(std::string("water_state.") + field + " must be a boolean");
+        }
+    }
+    for (const char* field : {"current_water_resolution", "ticks_below_threshold", "water_mesh_dirty_ticks"}) {
+        if (!water_state.contains(field) || !IsJsonInteger(water_state.at(field))) {
+            errors.push_back(std::string("water_state.") + field + " must be an integer");
+        }
+    }
+    if (!water_state.contains("max_water_delta_last_tick") || !water_state.at("max_water_delta_last_tick").is_number()) {
+        errors.push_back("water_state.max_water_delta_last_tick must be numeric");
+    }
+}
+
+bool ValidateChunkFormatObject(const nlohmann::json& chunk, std::vector<std::string>& errors) {
+    const std::size_t error_count = errors.size();
+    if (!chunk.is_object()) {
+        errors.push_back("chunk payload must be an object");
+        return false;
+    }
+
+    for (const std::string& field : RequiredChunkFormatFields()) {
+        if (!chunk.contains(field)) {
+            errors.push_back("missing required chunk field: " + field);
+        }
+    }
+
+    const bool coords_valid = chunk.contains("coords") && ValidateCoordsObject(chunk.at("coords"), errors);
+    if (!chunk.contains("chunk_id") || !IsJsonInteger(chunk.at("chunk_id"))) {
+        errors.push_back("chunk_id must be an integer");
+    }
+
+    if (chunk.contains("state") && chunk.at("state").is_string()) {
+        const std::string state_name = chunk.at("state").get<std::string>();
+        if (!IsKnownChunkStateName(state_name)) {
+            errors.push_back("state must be a known ChunkState name");
+        } else if (chunk.contains("state_value") &&
+                   IsJsonInteger(chunk.at("state_value")) &&
+                   chunk.at("state_value").get<int>() != static_cast<int>(ChunkStateFromName(state_name))) {
+            errors.push_back("state_value must match state");
+        }
+    } else {
+        errors.push_back("state must be a string");
+    }
+    if (!chunk.contains("state_value") || !IsJsonInteger(chunk.at("state_value"))) {
+        errors.push_back("state_value must be an integer");
+    }
+
+    for (const char* field : {"sdf_data", "heightmap_data", "water_level_data", "water_sim_terrain_height"}) {
+        RequireNumberArray(chunk, field, errors);
+    }
+    for (const char* field : {"mesh_indices", "water_mesh_indices", "pending_mesh_indices", "pending_water_mesh_indices"}) {
+        RequireIntegerArray(chunk, field, errors);
+    }
+    for (const char* field : {"mesh_vertices", "water_mesh_vertices", "pending_mesh_vertices", "pending_water_mesh_vertices"}) {
+        RequireMeshVertexArray(chunk, field, errors);
+    }
+    RequireVec2Array(chunk, "water_flow_data", errors);
+
+    for (const char* field : {"has_collision", "pending_mesh_ready", "pending_mesh_failed"}) {
+        if (!chunk.contains(field) || !chunk.at(field).is_boolean()) {
+            errors.push_back(std::string(field) + " must be a boolean");
+        }
+    }
+    for (const char* field : {"current_lod", "pending_lod", "mesh_version", "water_mesh_version"}) {
+        if (!chunk.contains(field) || !IsJsonInteger(chunk.at(field))) {
+            errors.push_back(std::string(field) + " must be an integer");
+        }
+    }
+    ValidateWaterStateObject(chunk, errors);
+
+    if (coords_valid && chunk.contains("chunk_id") && IsJsonInteger(chunk.at("chunk_id"))) {
+        const IVec3 coords = IVec3FromJson(chunk.at("coords"));
+        const Chunk expected_chunk(coords);
+        if (expected_chunk.get_id() != chunk.at("chunk_id").get<ChunkID>()) {
+            errors.push_back("chunk_id must match serialized coordinates");
+        }
+    }
+
+    return errors.size() == error_count;
+}
+
 } // namespace
 
 const char* WorldPersistenceRoundtripSchema() {
@@ -326,6 +566,14 @@ const char* WorldPersistenceRoundtripSchema() {
 
 const char* WorldStreamingSnapshotSchema() {
     return kSnapshotSchema;
+}
+
+const char* ChunkFormatValidationSchema() {
+    return kChunkFormatValidationSchema;
+}
+
+const char* ChunkFormatContract() {
+    return kChunkFormatContract;
 }
 
 std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state) {
@@ -391,6 +639,17 @@ bool LoadWorldStreamingStateSnapshotJson(
         return true;
     } catch (const std::exception& e) {
         errors.push_back(std::string("failed to load world snapshot: ") + e.what());
+        return false;
+    }
+}
+
+bool ValidateWorldStreamingChunkFormatJson(
+    const std::string& chunk_json,
+    std::vector<std::string>& errors) {
+    try {
+        return ValidateChunkFormatObject(nlohmann::json::parse(chunk_json), errors);
+    } catch (const std::exception& e) {
+        errors.push_back(std::string("failed to parse chunk payload: ") + e.what());
         return false;
     }
 }
@@ -523,6 +782,168 @@ bool WriteWorldPersistenceRoundtripArtifact(
     } catch (const std::exception& e) {
         if (errors) {
             errors->push_back(std::string("failed to write world persistence roundtrip artifact: ") + e.what());
+        }
+        return false;
+    }
+}
+
+ChunkFormatValidationAnalysis BuildChunkFormatValidationAnalysis(const std::string& build_preset) {
+    ChunkFormatValidationAnalysis analysis;
+    analysis.build_preset = build_preset;
+    analysis.required_fields = RequiredChunkFormatFields();
+    analysis.required_field_count = analysis.required_fields.size();
+
+    WorldStreamingState state;
+    PopulateFixtureState(state);
+    const std::string fixture_json = SerializeWorldStreamingStateSnapshotJson(state);
+    const nlohmann::json snapshot = nlohmann::json::parse(fixture_json);
+    const nlohmann::json& chunks = snapshot.at("chunks");
+
+    analysis.snapshot_contract_valid =
+        snapshot.at("schema").get<std::string>() == kSnapshotSchema &&
+        snapshot.at("order_contract").get<std::string>() == kOrderContract &&
+        snapshot.at("chunk_count").get<std::size_t>() == chunks.size() &&
+        ChunkIdsAreSorted(snapshot);
+    analysis.fixture_checksum = Checksum(fixture_json);
+
+    for (const nlohmann::json& chunk : chunks) {
+        std::vector<std::string> errors;
+        if (ValidateChunkFormatObject(chunk, errors)) {
+            ++analysis.accepted_chunk_count;
+        }
+    }
+
+    std::size_t missing_field_rejections = 0;
+    std::size_t chunk_id_rejections = 0;
+    std::size_t water_state_rejections = 0;
+    if (!chunks.empty()) {
+        const nlohmann::json first_chunk = chunks.at(0);
+
+        nlohmann::json missing_field_fixture = first_chunk;
+        missing_field_fixture.erase("sdf_data");
+        std::vector<std::string> missing_field_errors;
+        if (!ValidateChunkFormatObject(missing_field_fixture, missing_field_errors)) {
+            ++missing_field_rejections;
+            ++analysis.rejected_fixture_count;
+        }
+
+        nlohmann::json invalid_chunk_id_fixture = first_chunk;
+        invalid_chunk_id_fixture["chunk_id"] = first_chunk.at("chunk_id").get<ChunkID>() + 1u;
+        std::vector<std::string> invalid_chunk_id_errors;
+        if (!ValidateChunkFormatObject(invalid_chunk_id_fixture, invalid_chunk_id_errors)) {
+            ++chunk_id_rejections;
+            ++analysis.rejected_fixture_count;
+        }
+
+        nlohmann::json incomplete_water_state_fixture = first_chunk;
+        incomplete_water_state_fixture["water_state"].erase("current_water_resolution");
+        std::vector<std::string> incomplete_water_state_errors;
+        if (!ValidateChunkFormatObject(incomplete_water_state_fixture, incomplete_water_state_errors)) {
+            ++water_state_rejections;
+            ++analysis.rejected_fixture_count;
+        }
+    }
+    analysis.negative_fixtures_rejected = missing_field_rejections == 1u &&
+                                          chunk_id_rejections == 1u &&
+                                          water_state_rejections == 1u;
+
+    AddCheck(analysis, "chunk format validator API is declared", true);
+    AddCheck(analysis, "chunk format schema declares required fields", analysis.required_field_count >= 20u);
+    AddCheck(analysis, "world snapshot chunk order contract is enforced", analysis.snapshot_contract_valid);
+    AddCheck(analysis, "chunk validator accepts persisted fixture chunks", analysis.accepted_chunk_count >= 3u);
+    AddCheck(analysis, "chunk validator rejects missing required fields", missing_field_rejections == 1u);
+    AddCheck(analysis, "chunk validator rejects chunk id coordinate mismatches", chunk_id_rejections == 1u);
+    AddCheck(analysis, "chunk validator rejects incomplete water state", water_state_rejections == 1u);
+    AddCheck(analysis, "chunk format artifact records deterministic checksum", !analysis.fixture_checksum.empty());
+
+    analysis.passed = ChunkFormatValidationMeetsBaseline(analysis);
+    return analysis;
+}
+
+std::string SerializeChunkFormatValidationJson(const ChunkFormatValidationAnalysis& analysis) {
+    nlohmann::json checks = nlohmann::json::array();
+    for (const WorldPersistenceRoundtripCheck& check : analysis.checks) {
+        checks.push_back({
+            {"name", check.name},
+            {"passed", check.passed}
+        });
+    }
+
+    nlohmann::json artifact = {
+        {"schema", kChunkFormatValidationSchema},
+        {"passed", analysis.passed},
+        {"build_preset", analysis.build_preset},
+        {"validator", {
+            {"source", "src/luminumbra_common/persistence/WorldPersistenceRoundtrip.cpp"},
+            {"header", "src/luminumbra_common/persistence/WorldPersistenceRoundtrip.h"},
+            {"validation_api", "ValidateWorldStreamingChunkFormatJson"},
+            {"validation_schema_api", "ChunkFormatValidationSchema"},
+            {"serializer", "SerializeChunkFormatValidationJson"},
+            {"artifact_writer", "WriteChunkFormatValidationArtifact"},
+            {"format_contract", kChunkFormatContract},
+            {"required_field_count", analysis.required_field_count},
+            {"required_fields", analysis.required_fields}
+        }},
+        {"format", {
+            {"snapshot_schema", kSnapshotSchema},
+            {"order_contract", kOrderContract},
+            {"snapshot_contract_valid", analysis.snapshot_contract_valid},
+            {"accepted_chunk_count", analysis.accepted_chunk_count},
+            {"rejected_fixture_count", analysis.rejected_fixture_count},
+            {"negative_fixtures_rejected", analysis.negative_fixtures_rejected},
+            {"fixture_checksum", analysis.fixture_checksum}
+        }},
+        {"checks", checks}
+    };
+    return StableDump(artifact);
+}
+
+bool ChunkFormatValidationMeetsBaseline(const ChunkFormatValidationAnalysis& analysis) {
+    const bool checks_passed = std::all_of(
+        analysis.checks.begin(),
+        analysis.checks.end(),
+        [](const WorldPersistenceRoundtripCheck& check) { return check.passed; });
+
+    return analysis.snapshot_contract_valid &&
+           analysis.required_field_count >= 20u &&
+           analysis.accepted_chunk_count >= 3u &&
+           analysis.rejected_fixture_count >= 3u &&
+           analysis.negative_fixtures_rejected &&
+           !analysis.fixture_checksum.empty() &&
+           checks_passed;
+}
+
+bool WriteChunkFormatValidationArtifact(
+    const std::filesystem::path& output_path,
+    const std::string& build_preset,
+    std::vector<std::string>* errors) {
+    try {
+        const ChunkFormatValidationAnalysis analysis = BuildChunkFormatValidationAnalysis(build_preset);
+        if (!analysis.passed) {
+            if (errors) {
+                errors->push_back("chunk format validation analysis did not pass baseline");
+            }
+            return false;
+        }
+
+        const std::filesystem::path parent = output_path.parent_path();
+        if (!parent.empty()) {
+            std::filesystem::create_directories(parent);
+        }
+
+        std::ofstream output(output_path);
+        if (!output.is_open()) {
+            if (errors) {
+                errors->push_back("failed to open chunk format validation artifact for writing: " + output_path.string());
+            }
+            return false;
+        }
+
+        output << SerializeChunkFormatValidationJson(analysis);
+        return true;
+    } catch (const std::exception& e) {
+        if (errors) {
+            errors->push_back(std::string("failed to write chunk format validation artifact: ") + e.what());
         }
         return false;
     }
