@@ -1497,6 +1497,13 @@ int main(int argc, char* argv[]) {
     bool weather_baseline_capture_written = false;
     bool weather_visual_capture_written = false;
     WeatherPixelStats weather_baseline_stats;
+    std::array<bool, 3> timeofday_captures_written{false, false, false};
+    std::vector<TimeOfDayPhaseCapture> timeofday_phase_captures;
+    EmissiveMaterialTarget timeofday_emissive_target;
+    bool timeofday_emissive_target_initialized = false;
+    bool timeofday_emissive_capture_written = false;
+    TimeOfDayPixelStats timeofday_emissive_stats;
+    bool timeofday_analysis_final = false;
     LodBoundaryTransitionRecorder lod_boundary_transition_recorder;
     LodSeamArrivalRecorder lod_seam_arrival_recorder;
     std::array<bool, 4> lod_seam_screenshots_written{false, false, false, false};
@@ -1675,6 +1682,31 @@ int main(int argc, char* argv[]) {
                     if (elapsed_play_seconds / duration >= 0.5) {
                         renderPipeline.set_weather(Luminumbra::Rendering::WeatherType::Rain, 1.0f);
                     }
+                } else if (scenario_config.timeofday_sweep_smoke() && scenario_ready && g_camera) {
+                    const double elapsed_play_seconds = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - scenario_play_started_at).count();
+                    const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
+                    const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
+                    // Discovery reruns while meshes stream in (the first
+                    // frames only carry a fraction of the surface meshes);
+                    // it freezes once found or once the night phase nears so
+                    // the emissive camera target stays stable.
+                    if (!timeofday_emissive_target.found && progress < 0.8 &&
+                        (!timeofday_emissive_target_initialized || (scenario_frame_count % 120) == 0)) {
+                        timeofday_emissive_target_initialized = true;
+                        timeofday_emissive_target = FindEmissiveMaterialTarget(gameSession.get(), root_dir);
+                    }
+                    if (timeofday_emissive_target.found && progress >= 0.92) {
+                        // Final stretch: aim at the discovered surface emissive
+                        // material for the dedicated night-emissive capture.
+                        g_camera->Position = timeofday_emissive_target.position + Luminumbra::Vec3(8.0f, 6.0f, 8.0f);
+                        g_camera->Zoom = 60.0f;
+                        AimCameraAt(g_camera.get(), timeofday_emissive_target.position);
+                    } else {
+                        // Fixed framing across all three phases so the
+                        // luminance comparison measures lighting, not framing.
+                        ApplySkyboxVisualCamera(gameSession.get(), g_camera.get(), 0.04f);
+                    }
                 } else if (scenario_config.lod_boundary_oscillation_smoke() && scenario_ready && g_camera) {
                     const double elapsed_play_seconds = std::chrono::duration<double>(
                         std::chrono::steady_clock::now() - scenario_play_started_at).count();
@@ -1689,7 +1721,7 @@ int main(int argc, char* argv[]) {
                 if (auto* physics = gameSession->GetPhysicsSystem()) physics->update(deltaTime);
                 if (gameSession->GetWorldSystem() && (g_playerController || g_camera)) {
                     const Luminumbra::Vec3 streaming_position =
-                        ((scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.lod_boundary_oscillation_smoke() || scenario_config.lod_seam_arrival_smoke()) && scenario_ready && g_camera)
+                        ((scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.timeofday_sweep_smoke() || scenario_config.lod_boundary_oscillation_smoke() || scenario_config.lod_seam_arrival_smoke()) && scenario_ready && g_camera)
                             ? Luminumbra::Vec3(g_camera->Position)
                             : (g_playerController ? Luminumbra::Vec3(g_playerController->GetPosition()) : Luminumbra::Vec3(g_camera->Position));
                     gameSession->GetWorldSystem()->update(
@@ -1716,6 +1748,14 @@ int main(int argc, char* argv[]) {
                         // time_of_day 0 is noon (sun elevation = cos(2*pi*t));
                         // 0.04 keeps the sun near its zenith for stable captures.
                         renderPipeline.set_time_of_day(0.04f);
+                    } else if (scenario_config.timeofday_sweep_smoke() && scenario_ready) {
+                        // Three equal phase windows pinned at noon/dusk/night;
+                        // re-pinned every frame so update_time_of_day cannot
+                        // drift the phase between settle frames.
+                        const double elapsed_play_seconds = std::chrono::duration<double>(
+                            std::chrono::steady_clock::now() - scenario_play_started_at).count();
+                        const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
+                        renderPipeline.set_time_of_day(TimeOfDaySweepPhaseTime(std::clamp(elapsed_play_seconds / duration, 0.0, 1.0)));
                     }
                     renderPipeline.render_frame(gameSession->GetRegistry(), *gameSession->GetWorldSystem(), *g_camera, deltaTime, wireframe_mode);
                     if (scenario_config.active() && currentState == GameState::IN_GAME) {
@@ -1935,6 +1975,80 @@ int main(int argc, char* argv[]) {
                                                 1.0f,
                                                 render_pass_stats);
                                         }
+                                    }
+                                }
+                            }
+                        }
+                        if (scenario_config.timeofday_sweep_smoke() && scenario_ready && !timeofday_analysis_final) {
+                            const double elapsed_play_seconds = std::chrono::duration<double>(now - scenario_play_started_at).count();
+                            const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
+                            const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
+                            const auto& render_pass_stats = renderPipeline.get_last_render_pass_stats();
+                            // Captures land late in each phase window so the
+                            // pinned time of day has settle frames after each
+                            // transition (phase boundaries at 1/3 and 2/3).
+                            const std::array<double, 3> capture_thresholds{0.28, 0.61, 0.88};
+                            const std::array<const char*, 3> phase_names{"noon", "dusk", "night"};
+                            const std::array<double, 3> phase_times{0.04, 0.22, 0.45};
+                            int capture_index = -1;
+                            for (int i = 0; i < 3; ++i) {
+                                if (!timeofday_captures_written[static_cast<std::size_t>(i)] && progress >= capture_thresholds[static_cast<std::size_t>(i)]) {
+                                    capture_index = i;
+                                    break;
+                                }
+                            }
+                            const bool capture_emissive =
+                                timeofday_captures_written[2] &&
+                                timeofday_emissive_target.found &&
+                                !timeofday_emissive_capture_written &&
+                                progress >= 0.97;
+                            if ((capture_index >= 0 || capture_emissive) && render_pass_stats.skybox_draws > 0) {
+                                int screenshot_width = 0;
+                                int screenshot_height = 0;
+                                glfwGetFramebufferSize(window, &screenshot_width, &screenshot_height);
+                                if (screenshot_width > 0 && screenshot_height > 0) {
+                                    std::vector<unsigned char> frame_pixels(
+                                        static_cast<std::size_t>(screenshot_width) * static_cast<std::size_t>(screenshot_height) * 3u);
+                                    glReadBuffer(GL_BACK);
+                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                                    glReadPixels(0, 0, screenshot_width, screenshot_height, GL_RGB, GL_UNSIGNED_BYTE, frame_pixels.data());
+                                    const TimeOfDayPixelStats stats = AnalyzeTimeOfDayPixels(frame_pixels, screenshot_width, screenshot_height);
+                                    if (capture_index >= 0) {
+                                        const std::string relative_path =
+                                            std::string("screenshots/timeofday-") + phase_names[static_cast<std::size_t>(capture_index)] + ".ppm";
+                                        if (WritePixelBufferPpm(
+                                                scenario_config.artifact_dir / relative_path,
+                                                screenshot_width, screenshot_height, frame_pixels)) {
+                                            timeofday_captures_written[static_cast<std::size_t>(capture_index)] = true;
+                                            timeofday_phase_captures.push_back({
+                                                phase_names[static_cast<std::size_t>(capture_index)],
+                                                phase_times[static_cast<std::size_t>(capture_index)],
+                                                relative_path,
+                                                stats
+                                            });
+                                        }
+                                    } else {
+                                        const std::string emissive_path = "screenshots/timeofday-night-emissive.ppm";
+                                        if (WritePixelBufferPpm(
+                                                scenario_config.artifact_dir / emissive_path,
+                                                screenshot_width, screenshot_height, frame_pixels)) {
+                                            timeofday_emissive_capture_written = true;
+                                            timeofday_emissive_stats = stats;
+                                        }
+                                    }
+                                    if (timeofday_captures_written[0] && timeofday_captures_written[1] && timeofday_captures_written[2]) {
+                                        // Final once the optional emissive capture is in
+                                        // (or no surface emissive target exists).
+                                        timeofday_analysis_final =
+                                            !timeofday_emissive_target.found || timeofday_emissive_capture_written;
+                                        WriteTimeOfDaySweepAnalysis(
+                                            scenario_config.artifact_dir,
+                                            timeofday_phase_captures,
+                                            timeofday_emissive_target,
+                                            timeofday_emissive_capture_written,
+                                            "screenshots/timeofday-night-emissive.ppm",
+                                            timeofday_emissive_stats,
+                                            render_pass_stats);
                                     }
                                 }
                             }

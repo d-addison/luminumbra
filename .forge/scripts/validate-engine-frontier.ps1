@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -2522,6 +2522,80 @@ function Test-WeatherVisual {
     Assert-PpmArtifact (Join-Path $visualDir $analysis.weather_screenshot)
 }
 
+function Test-TimeOfDaySweep {
+    $exe = Get-ClientExe
+    $visualDir = "build/$BuildPreset/test-artifacts/runtime/timeofday-sweep"
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $visualDir
+    New-Item -ItemType Directory -Force -Path $visualDir | Out-Null
+
+    $runSeconds = [Math]::Max(24, $SmokeSeconds)
+    Invoke-Checked -FilePath $exe -ArgumentList @(
+        "--scenario", "timeofday_sweep_smoke",
+        "--auto-create-world",
+        "--auto-enter-world",
+        "--timed-run", "$runSeconds",
+        "--no-audio",
+        "--no-ui",
+        "--runtime-artifact-dir", $visualDir
+    ) -TimeoutSeconds ([Math]::Max(150, $runSeconds + 90))
+
+    $analysisPath = Join-Path $visualDir "timeofday-sweep-analysis.json"
+    if (-not (Test-Path $analysisPath)) {
+        throw "time-of-day sweep run did not produce $analysisPath (gate produced by task T-I2-17c-timeofday-sweep)"
+    }
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.timeofday_sweep.v1") {
+        throw "Unexpected time-of-day sweep analysis schema '$($analysis.schema)'"
+    }
+    if ([int64]$analysis.gl_debug.errors -ne 0) {
+        throw "Time-of-day sweep emitted GL debug errors: $($analysis.gl_debug.errors)"
+    }
+
+    $phases = @($analysis.phases)
+    if ($phases.Count -lt 3) {
+        throw "Time-of-day sweep must capture noon, dusk, and night phases (found $($phases.Count))"
+    }
+    foreach ($phaseName in @("noon", "dusk", "night")) {
+        $matches = @($phases | Where-Object { $_.name -eq $phaseName })
+        if ($matches.Count -ne 1) {
+            throw "Time-of-day sweep is missing the '$phaseName' phase capture"
+        }
+        Assert-PpmArtifact (Join-Path $visualDir $matches[0].screenshot)
+    }
+
+    if (-not $analysis.luminance_ordering.passed) {
+        throw "Time-of-day luminance ordering failed: noon=$($analysis.luminance_ordering.noon_mean_luminance) dusk=$($analysis.luminance_ordering.dusk_mean_luminance) night=$($analysis.luminance_ordering.night_mean_luminance)"
+    }
+    if ([double]$analysis.luminance_ordering.noon_over_dusk_gap -lt [double]$analysis.thresholds.min_noon_over_dusk_gap) {
+        throw "Noon-over-dusk luminance gap $($analysis.luminance_ordering.noon_over_dusk_gap) is below threshold"
+    }
+    if ([double]$analysis.luminance_ordering.dusk_over_night_gap -lt [double]$analysis.thresholds.min_dusk_over_night_gap) {
+        throw "Dusk-over-night luminance gap $($analysis.luminance_ordering.dusk_over_night_gap) is below threshold"
+    }
+    if (-not $analysis.dusk_warm_shift.passed) {
+        throw "Dusk warm-shift check failed: r/b increase $($analysis.dusk_warm_shift.r_b_ratio_increase)"
+    }
+    if ([double]$analysis.dusk_warm_shift.r_b_ratio_increase -lt [double]$analysis.thresholds.min_dusk_warm_shift) {
+        throw "Dusk r/b warm shift $($analysis.dusk_warm_shift.r_b_ratio_increase) is below threshold $($analysis.thresholds.min_dusk_warm_shift)"
+    }
+    if (@("checked_surface_emissive", "not_applicable_no_surface_emissives") -notcontains $analysis.emissive_check.status) {
+        throw "Time-of-day emissive check reported unexpected status '$($analysis.emissive_check.status)'"
+    }
+    if (-not $analysis.emissive_check.passed) {
+        throw "Time-of-day emissive night check failed (status=$($analysis.emissive_check.status))"
+    }
+    if ($analysis.emissive_check.status -eq "checked_surface_emissive") {
+        Assert-PpmArtifact (Join-Path $visualDir $analysis.emissive_check.screenshot)
+        if ([int64]$analysis.emissive_check.center_glow_pixels -lt [int64]$analysis.thresholds.min_emissive_glow_pixels) {
+            throw "Emissive night capture has too few glow pixels: $($analysis.emissive_check.center_glow_pixels)"
+        }
+    }
+    if (-not $analysis.passed) {
+        throw "Time-of-day sweep analysis reported failure"
+    }
+}
+
 switch ($Mode) {
     "CodexOnly" { Test-CodexOnly }
     "Panels" { Test-Panels }
@@ -2554,6 +2628,7 @@ switch ($Mode) {
     "FrontierDisabled" { Test-FrontierDisabled }
     "SkyboxVisual" { Test-SkyboxVisual }
     "WeatherVisual" { Test-WeatherVisual }
+    "TimeOfDaySweep" { Test-TimeOfDaySweep }
     "All" {
         Test-CodexOnly
         Test-Files

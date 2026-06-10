@@ -57,6 +57,7 @@ struct RuntimeScenarioConfig {
     bool material_visual_smoke() const { return scenario == "material_visual_smoke"; }
     bool skybox_visual_smoke() const { return scenario == "skybox_visual_smoke"; }
     bool weather_visual_smoke() const { return scenario == "weather_visual_smoke"; }
+    bool timeofday_sweep_smoke() const { return scenario == "timeofday_sweep_smoke"; }
     bool lod_boundary_oscillation_smoke() const { return scenario == "lod_boundary_oscillation_smoke"; }
     bool lod_seam_arrival_smoke() const { return scenario == "lod_seam_arrival_smoke"; }
     bool persistence_roundtrip_smoke() const { return scenario == "persistence_roundtrip_smoke"; }
@@ -244,6 +245,74 @@ void WriteWeatherVisualAnalysis(
     const WeatherPixelStats& weather_stats,
     const std::string& weather_type,
     float weather_intensity,
+    const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass);
+
+// --- Time-of-day sweep smoke (T-I2-17c) ---
+// Fixed skybox camera; the run is split into three equal phases pinned at
+// t=0.04 (noon), t=0.22 (dusk, sun elevation ~10.8 degrees), t=0.45 (night),
+// each captured near the end of its phase window so settle frames separate
+// the transitions. The analysis checks per-phase mean luminance ordering
+// (noon > dusk > night), the dusk warm shift (r/b rises vs noon), and a
+// generic emissive-material night check with an honest fallback when no
+// emissive registry material is discoverable in a surface capture.
+struct TimeOfDayPixelStats {
+    int width = 0;
+    int height = 0;
+    double frame_mean_luminance = 0.0;
+    double sky_mean_luminance = 0.0;       // top kSkyRoiHeightFraction of the frame
+    double terrain_mean_luminance = 0.0;   // bottom 25% of the frame
+    double frame_mean_r = 0.0;
+    double frame_mean_b = 0.0;
+    double frame_r_b_ratio = 0.0;
+    double terrain_r_b_ratio = 0.0;
+    double max_luminance = 0.0;
+    double max_luminance_y_from_top_norm = 0.0;  // 0 = top of frame
+    double sky_max_luminance = 0.0;              // max within the sky band
+    // Pixels above the emissive glow floor inside the central third of the
+    // frame; only consumed by the optional night-emissive capture.
+    std::uint64_t center_glow_pixels = 0;
+};
+
+TimeOfDayPixelStats AnalyzeTimeOfDayPixels(const std::vector<unsigned char>& pixels, int width, int height);
+
+// Phase time for a normalized sweep progress: noon / dusk / night thirds.
+float TimeOfDaySweepPhaseTime(double progress);
+
+// Generic emissive-material discovery: emissive material ids come from the
+// engine material registry (data/common/materials.json entries with a
+// non-zero "emission"); the streamed terrain meshes are scanned for a
+// near-surface vertex carrying one of those ids. Game content decides which
+// materials are emissive; the engine check stays generic.
+struct EmissiveMaterialTarget {
+    bool found = false;
+    std::vector<std::uint32_t> emissive_material_ids;
+    Luminumbra::Vec3 position{0.0f};
+    std::uint32_t material_id = 0;
+    float distance_from_spawn = 0.0f;
+    float depth_below_surface = 0.0f;
+    std::size_t vertices_scanned = 0;
+    std::size_t emissive_vertices_total = 0;
+    std::size_t emissive_vertices_in_range = 0;
+};
+
+EmissiveMaterialTarget FindEmissiveMaterialTarget(
+    Luminumbra::world::GameSession* game_session,
+    const std::filesystem::path& root_dir);
+
+struct TimeOfDayPhaseCapture {
+    std::string name;
+    double time_of_day = 0.0;
+    std::string file;
+    TimeOfDayPixelStats stats;
+};
+
+void WriteTimeOfDaySweepAnalysis(
+    const std::filesystem::path& artifact_dir,
+    const std::vector<TimeOfDayPhaseCapture>& phases,
+    const EmissiveMaterialTarget& emissive_target,
+    bool emissive_capture_written,
+    const std::string& emissive_screenshot,
+    const TimeOfDayPixelStats& emissive_stats,
     const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass);
 
 ScreenshotPixelStats AnalyzeScreenshotPixels(const std::vector<unsigned char>& pixels, int width, int height);
