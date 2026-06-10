@@ -44,6 +44,11 @@ struct RuntimeScenarioConfig {
     std::filesystem::path artifact_dir;
     std::filesystem::path audio_telemetry_path;
     std::filesystem::path crash_dir;
+    // Persistence runtime roundtrip (T-I2-13): which half of the roundtrip
+    // this process runs ("save" or "load") and the shared session directory
+    // the world snapshot travels through.
+    std::string persistence_phase;
+    std::filesystem::path persistence_session_dir;
 
     bool active() const { return !scenario.empty(); }
     bool auto_world_smoke() const { return scenario == "auto_world_smoke"; }
@@ -52,6 +57,7 @@ struct RuntimeScenarioConfig {
     bool material_visual_smoke() const { return scenario == "material_visual_smoke"; }
     bool lod_boundary_oscillation_smoke() const { return scenario == "lod_boundary_oscillation_smoke"; }
     bool lod_seam_arrival_smoke() const { return scenario == "lod_seam_arrival_smoke"; }
+    bool persistence_roundtrip_smoke() const { return scenario == "persistence_roundtrip_smoke"; }
     bool forced_crash() const { return scenario == "forced_crash"; }
 };
 
@@ -225,6 +231,26 @@ void ApplyLodSeamArrivalCamera(
     Luminumbra::world::GameSession* game_session,
     Luminumbra::Rendering::Camera* camera,
     double elapsed_seconds);
+
+// --- Persistence runtime roundtrip (T-I2-13) ---
+// save phase: applies deterministic scripted voxel edits near spawn, remeshes
+// them through the existing surface path, hashes the edited chunk set, saves
+// the world snapshot to the session dir, and writes the save-phase artifact.
+// load phase: verifies the runtime adopted the snapshot at world enter, then
+// re-loads the snapshot through WorldSaveService::load_world, hashes the same
+// chunk ids recorded by the save phase, and writes the load-phase artifact.
+struct PersistenceRoundtripPhaseResult {
+    bool passed = false;
+    std::string failure_reason;
+};
+
+PersistenceRoundtripPhaseResult RunPersistenceRoundtripSavePhase(
+    const RuntimeScenarioConfig& config,
+    Luminumbra::world::GameSession* game_session);
+
+PersistenceRoundtripPhaseResult RunPersistenceRoundtripLoadPhase(
+    const RuntimeScenarioConfig& config,
+    Luminumbra::world::GameSession* game_session);
 
 class LodSeamArrivalRecorder {
 public:
