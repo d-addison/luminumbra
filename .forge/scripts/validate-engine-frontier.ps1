@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "FrontierDisabled", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "FrontierDisabled", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug"
@@ -1052,6 +1052,106 @@ function Test-AethericDiffusionGate {
     }
 }
 
+function Test-InstinctPlannerGate {
+    $artifactDir = "build/$BuildPreset/test-artifacts/ai"
+    $analysisPath = Join-Path $artifactDir "instinct-grovestrider-hunger.json"
+    $testScriptPath = "test/ai/instinct-planner-gate.ps1"
+
+    if (-not (Test-Path $testScriptPath)) {
+        throw "instinct planner gate not yet implemented - missing $testScriptPath (produced by task T-EF-21-instinct-planner-gate)"
+    }
+
+    & $testScriptPath -BuildPreset $BuildPreset
+    if (-not $?) {
+        exit 1
+    }
+    if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
+    if (-not (Test-Path $analysisPath)) {
+        throw "instinct planner gate not yet implemented - missing $analysisPath (produced by task T-EF-21-instinct-planner-gate)"
+    }
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.ai.instinct_planner.v1") {
+        throw "Unexpected instinct planner schema '$($analysis.schema)'"
+    }
+    if (-not $analysis.passed) {
+        throw "Instinct planner analysis reported failure"
+    }
+    if ($analysis.build_preset -ne $BuildPreset) {
+        throw "Instinct planner build_preset '$($analysis.build_preset)' does not match '$BuildPreset'"
+    }
+    if ($analysis.planner.source -ne "src/luminumbra_common/ai/InstinctPlanner.cpp") {
+        throw "Instinct planner analysis must inspect InstinctPlanner.cpp"
+    }
+    if ($analysis.planner.header -ne "src/luminumbra_common/ai/InstinctPlanner.h") {
+        throw "Instinct planner analysis must inspect InstinctPlanner.h"
+    }
+    if ($analysis.planner.serializer -ne "SerializeInstinctPlanJson") {
+        throw "Instinct planner analysis must require SerializeInstinctPlanJson"
+    }
+    if ($analysis.planner.validation_api -ne "InstinctPlannerMeetsBaseline") {
+        throw "Instinct planner analysis must require InstinctPlannerMeetsBaseline"
+    }
+    if ($analysis.planner.decision_contract -ne "deterministic_priority_then_cost") {
+        throw "Instinct planner must declare deterministic priority/cost ordering"
+    }
+    if ($analysis.fixture.archetype -ne "grovestrider") {
+        throw "Instinct planner fixture must cover the grovestrider archetype"
+    }
+    if ($analysis.fixture.dominant_need -ne "hunger") {
+        throw "Instinct planner fixture must use hunger as the dominant need"
+    }
+    if ([double]$analysis.fixture.hunger_pressure -lt 0.9) {
+        throw "Instinct planner hunger fixture must apply high hunger pressure"
+    }
+    if ($analysis.fixture.selected_action -ne "forage") {
+        throw "Instinct planner hunger fixture must select the forage action"
+    }
+    if ($analysis.fixture.selected_target -ne "mossberry_grove") {
+        throw "Instinct planner hunger fixture must target mossberry_grove"
+    }
+    if ([int64]$analysis.fixture.candidate_count -lt 4) {
+        throw "Instinct planner fixture must rank at least four candidates"
+    }
+    if ([string]::IsNullOrWhiteSpace($analysis.fixture.checksum)) {
+        throw "Instinct planner analysis is missing the deterministic checksum"
+    }
+
+    $candidates = @($analysis.candidates)
+    if ([int64]$analysis.fixture.candidate_count -ne $candidates.Count) {
+        throw "Instinct planner candidate_count does not match candidates array"
+    }
+    if ($candidates[0].rank -ne 1 -or $candidates[0].need -ne "hunger" -or $candidates[0].action -ne "forage") {
+        throw "Instinct planner top-ranked candidate must be hunger forage"
+    }
+    foreach ($need in @("hunger", "safety", "curiosity", "fatigue")) {
+        Assert-ArrayContains -Values $analysis.fixture.required_needs -Needle $need -Description "Instinct planner fixture required_needs"
+    }
+
+    $requiredChecks = @(
+        "instinct planner header declares gate API",
+        "instinct planner source ranks needs deterministically",
+        "grovestrider hunger fixture selects forage intent",
+        "planner serializer emits deterministic candidates",
+        "ai source is wired into common sources",
+        "ai gate test is wired into test sources",
+        "gate test exercises serializer and fixture"
+    )
+    $checks = @($analysis.checks)
+    foreach ($requiredCheck in $requiredChecks) {
+        $matches = @($checks | Where-Object { $_.name -eq $requiredCheck })
+        if ($matches.Count -ne 1) {
+            throw "Instinct planner analysis is missing check '$requiredCheck'"
+        }
+        if (-not $matches[0].passed) {
+            throw "Instinct planner check failed: $requiredCheck"
+        }
+    }
+}
+
 function Test-FrontierDisabled {
     Assert-FileExists $FrontierDisabledPath
 
@@ -1089,6 +1189,7 @@ switch ($Mode) {
     "SimulationEventBusOrderGate" { Test-SimulationEventBusOrderGate }
     "LuaApiManifestGate" { Test-LuaApiManifestGate }
     "AethericDiffusionGate" { Test-AethericDiffusionGate }
+    "InstinctPlannerGate" { Test-InstinctPlannerGate }
     "FrontierDisabled" { Test-FrontierDisabled }
     "All" {
         Test-CodexOnly
@@ -1105,6 +1206,7 @@ switch ($Mode) {
         Test-SimulationEventBusOrderGate
         Test-LuaApiManifestGate
         Test-AethericDiffusionGate
+        Test-InstinctPlannerGate
         Test-FrontierDisabled
     }
 }
