@@ -164,8 +164,12 @@ void SHIELD_WorldSystem::wait_for_meshing_jobs() {
 }
 
 void SHIELD_WorldSystem::reinitialize_noise() {
+    // Terrain height is a pure function of seed/params; drop the cached
+    // per-column surface heights whenever either changes.
+    m_column_surface_chunk_y_cache.clear();
+
     // FastNoise2 uses a node-based system to build complex generators.
-    
+
     // 1. Terrain Height Generator (Fractal Simplex Noise)
     auto terrain_noise = FastNoise::New<FastNoise::Simplex>();
     auto terrain_fractal = FastNoise::New<FastNoise::FractalFBm>();
@@ -184,6 +188,21 @@ void SHIELD_WorldSystem::reinitialize_noise() {
     m_island_mask_generator = island_noise;
 }
 
+int SHIELD_WorldSystem::column_surface_chunk_y(int chunk_x, int chunk_z) {
+    const u64 key = horizontal_chunk_key(chunk_x, chunk_z);
+    const auto it = m_column_surface_chunk_y_cache.find(key);
+    if (it != m_column_surface_chunk_y_cache.end()) {
+        return it->second;
+    }
+
+    const float sample_x = static_cast<float>(chunk_x * CHUNK_SIZE_X) + CHUNK_SIZE_X * 0.5f;
+    const float sample_z = static_cast<float>(chunk_z * CHUNK_SIZE_Z) + CHUNK_SIZE_Z * 0.5f;
+    const float terrain_height = GetTerrainHeightAt(sample_x, sample_z);
+    const int surface_y = world_to_chunk_coords(Vec3(sample_x, terrain_height, sample_z)).y;
+    m_column_surface_chunk_y_cache.emplace(key, surface_y);
+    return surface_y;
+}
+
 int SHIELD_WorldSystem::get_lod_level_for_distance(float dist) const {
     for (const auto& lod : m_lod_levels) {
         if (dist <= lod.distance) {
@@ -192,6 +211,34 @@ int SHIELD_WorldSystem::get_lod_level_for_distance(float dist) const {
     }
     // If it's further than our max LOD distance, use the lowest detail level
     return m_lod_levels.back().level;
+}
+
+int SHIELD_WorldSystem::get_required_lod_for_chunk(
+    const IVec3& coords,
+    const Vec3& chunk_center,
+    const Vec3& camera_position)
+{
+    // Chunks in the surface band of their column (the chunks that actually
+    // contain the terrain isosurface) select LOD from HORIZONTAL distance
+    // only, so the surface never crosses a vertical LOD boundary. With 3D
+    // distance, vertically stacked surface chunks straddle LOD rings and the
+    // surface crossing the horizontal chunk seam is contoured at two
+    // different sample steps, opening void slivers that no X/Z transition
+    // skirt can cover. Chunks far above/below the surface produce little or
+    // no geometry, cannot open surface seams, and keep the cheaper
+    // 3D-distance LOD so deep/air columns do not inflate the meshing load.
+    // This mirrors the per-ring LOD already used by EnsureSurfaceReadyNear.
+    constexpr int kSurfaceLodBandChunks = 1;
+    const int surface_y = column_surface_chunk_y(coords.x, coords.z);
+    float dist;
+    if (std::abs(coords.y - surface_y) <= kSurfaceLodBandChunks) {
+        dist = glm::distance(
+            Vec3(camera_position.x, 0.0f, camera_position.z),
+            Vec3(chunk_center.x, 0.0f, chunk_center.z));
+    } else {
+        dist = glm::distance(camera_position, chunk_center);
+    }
+    return get_lod_level_for_distance(dist);
 }
 
 int SHIELD_WorldSystem::get_lod_step_for_level(int lod_level) const {
@@ -339,6 +386,55 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
     std::vector<MeshingWorkItem> chunks_to_mesh_jobs;
     chunks_to_mesh_jobs.reserve(MAX_CHUNKS_TO_PROCESS_PER_FRAME);
 
+    // Snapshot meshed-chunk LODs per horizontal column so the candidate loop
+    // below can cheaply detect coarse chunks whose transition skirts went
+    // stale because a finer neighbor arrived AFTER this chunk was meshed.
+    // Without this, a seam crack opened by a late-arriving finer neighbor
+    // persists until the coarse chunk happens to remesh for another reason.
+    struct MeshedColumnEntry {
+        int y = 0;
+        int lod = 0;
+    };
+    std::unordered_map<u64, std::vector<MeshedColumnEntry>> meshed_columns;
+    meshed_columns.reserve(m_streaming_state.chunks.size());
+    for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
+        (void)id;
+        if (!chunk_ptr || chunk_ptr->mesh_vertices.empty() || chunk_ptr->mesh_indices.empty()) {
+            continue;
+        }
+        const int lod = chunk_ptr->current_lod.load(std::memory_order_acquire);
+        if (lod < 0) {
+            continue;
+        }
+        const IVec3 coords = chunk_ptr->get_coords();
+        meshed_columns[horizontal_chunk_key(coords.x, coords.z)].push_back({coords.y, lod});
+    }
+
+    // Returns the transition faces this chunk needs against current neighbor
+    // LODs that are NOT yet baked into its mesh. Mirrors the neighbor criteria
+    // used by dispatch_meshing_jobs so a triggered remesh always converges.
+    auto missing_transition_faces = [&](const Luminumbra::Chunk& chunk, int lod_level) -> u8 {
+        const IVec3 coords = chunk.get_coords();
+        u8 required = Luminumbra::World::MarchingCubes::kNoTransitionFaces;
+        auto require_face_if_neighbor_is_finer = [&](int dx, int dz, Luminumbra::World::MarchingCubes::TerrainTransitionFace face) {
+            const auto column_it = meshed_columns.find(horizontal_chunk_key(coords.x + dx, coords.z + dz));
+            if (column_it == meshed_columns.end()) {
+                return;
+            }
+            for (const MeshedColumnEntry& entry : column_it->second) {
+                if (entry.lod < lod_level || (entry.lod != lod_level && entry.y != coords.y)) {
+                    required |= static_cast<Luminumbra::World::MarchingCubes::TerrainTransitionFaceMask>(face);
+                    return;
+                }
+            }
+        };
+        require_face_if_neighbor_is_finer(-1, 0, Luminumbra::World::MarchingCubes::TransitionFaceMinX);
+        require_face_if_neighbor_is_finer(1, 0, Luminumbra::World::MarchingCubes::TransitionFaceMaxX);
+        require_face_if_neighbor_is_finer(0, -1, Luminumbra::World::MarchingCubes::TransitionFaceMinZ);
+        require_face_if_neighbor_is_finer(0, 1, Luminumbra::World::MarchingCubes::TransitionFaceMaxZ);
+        return static_cast<u8>(required & static_cast<u8>(~chunk.applied_transition_faces.load(std::memory_order_acquire)));
+    };
+
     // Chunk state logging removed from hot path - too expensive
 
     for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
@@ -357,8 +453,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
             needs_meshing = true;
         } else if (state == Luminumbra::ChunkState::Ready) {
             Vec3 chunk_center = (Vec3(chunk_ptr->get_coords()) + 0.5f) * Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
-            float dist = glm::distance(camera_position, chunk_center);
-            required_lod = get_lod_level_for_distance(dist);
+            required_lod = get_required_lod_for_chunk(chunk_ptr->get_coords(), chunk_center, camera_position);
 
             if (required_lod != chunk_ptr->current_lod.load()) {
                 needs_meshing = true;
@@ -369,14 +464,22 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
             {
                 needs_meshing = true;
                 terrain_mesh_required = false;
+            } else if (get_lod_step_for_level(required_lod) > 1 &&
+                       !chunk_ptr->mesh_vertices.empty() && !chunk_ptr->mesh_indices.empty() &&
+                       missing_transition_faces(*chunk_ptr, required_lod) != Luminumbra::World::MarchingCubes::kNoTransitionFaces)
+            {
+                // A finer neighbor arrived after this coarse chunk was meshed:
+                // remesh so the now-required boundary transition skirts are
+                // baked in, closing the persistent LOD seam crack.
+                needs_meshing = true;
+                terrain_mesh_required = true;
             }
         }
         
         if (needs_meshing) {
             const Vec3 chunk_center = (Vec3(chunk_ptr->get_coords()) + 0.5f) * Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
             if (required_lod == -1) {
-                float dist = glm::distance(camera_position, chunk_center);
-                required_lod = get_lod_level_for_distance(dist);
+                required_lod = get_required_lod_for_chunk(chunk_ptr->get_coords(), chunk_center, camera_position);
             }
             const float terrain_height = GetTerrainHeightAt(chunk_center.x, chunk_center.z);
             const int surface_y = world_to_chunk_coords(Vec3(chunk_center.x, terrain_height, chunk_center.z)).y;
@@ -739,6 +842,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
             GenerateChunkData(*chunk);
             chunk->set_state(ChunkState::Meshing);
             Luminumbra::World::MarchingCubes::PolygoniseTerrain(*this, *chunk, 0.0f, build_chunk.step);
+            chunk->applied_transition_faces.store(0, std::memory_order_release);
             chunk->water_mesh_vertices.clear();
             chunk->water_mesh_indices.clear();
             chunk->current_lod.store(build_chunk.lod);
@@ -803,6 +907,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
                 surface_chunk.step,
                 transition_faces
             );
+            surface_chunk.chunk->applied_transition_faces.fetch_or(transition_faces, std::memory_order_acq_rel);
         }
     }
 
@@ -1244,7 +1349,6 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
         chunk->pending_mesh_ready.store(false, std::memory_order_release);
         chunk->pending_mesh_failed.store(false, std::memory_order_release);
         chunk->pending_lod.store(lod_level, std::memory_order_release);
-        m_streaming_state.meshing_job_chunks.push_back({chunk, terrain_mesh_required});
 
         auto transition_faces = Luminumbra::World::MarchingCubes::kNoTransitionFaces;
         if (terrain_mesh_required && step > 1) {
@@ -1273,6 +1377,7 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
             add_face_if_neighbor_is_finer(0, -1, Luminumbra::World::MarchingCubes::TransitionFaceMinZ);
             add_face_if_neighbor_is_finer(0, 1, Luminumbra::World::MarchingCubes::TransitionFaceMaxZ);
         }
+        m_streaming_state.meshing_job_chunks.push_back({chunk, terrain_mesh_required, transition_faces});
 
         jobs.emplace_back([this, chunk, step, transition_faces, terrain_mesh_required]() {
             try {
@@ -1363,6 +1468,7 @@ void SHIELD_WorldSystem::process_completed_meshing_jobs() {
                 chunk->mesh_vertices = std::move(chunk->pending_mesh_vertices);
                 chunk->mesh_indices = std::move(chunk->pending_mesh_indices);
                 chunk->current_lod.store(completed_lod, std::memory_order_release);
+                chunk->applied_transition_faces.store(job_chunk.transition_faces, std::memory_order_release);
                 chunk->mesh_version++;
                 chunk->has_collision.store(false, std::memory_order_release);
             }

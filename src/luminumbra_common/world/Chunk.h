@@ -53,6 +53,11 @@ public:
     std::atomic<bool> has_collision{false};
     std::atomic<int> current_lod{-1};
     std::atomic<int> pending_lod{-1};
+    // Bitmask of MarchingCubes::TerrainTransitionFace skirts baked into the
+    // current mesh_vertices. Lets the streaming update detect coarse chunks
+    // whose finer neighbors arrived AFTER this chunk was meshed (persistent
+    // LOD seam cracks) without scanning mesh vertices per frame.
+    std::atomic<u8> applied_transition_faces{0};
     std::atomic<bool> pending_mesh_ready{false};
     std::atomic<bool> pending_mesh_failed{false};
     std::atomic<u32> mesh_version{0};
