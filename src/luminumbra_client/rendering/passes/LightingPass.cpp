@@ -4,6 +4,7 @@
 #include "PassGlHelpers.h"
 #include "ShadowPass.h"
 #include "SsaoPass.h"
+#include "WaterPass.h"
 #include "core/Log.h"
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
@@ -100,7 +101,7 @@ void LightingPass::execute(RenderPipeline& pipeline, const Camera& camera) {
     glActiveTexture(GL_TEXTURE6); glBindTexture(GL_TEXTURE_2D, pipeline.m_ssao_pass->ssao().ssaoColorBufferBlur);
     glActiveTexture(GL_TEXTURE7); glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_terrainTextureArray);
     glActiveTexture(GL_TEXTURE8); glBindTexture(GL_TEXTURE_2D, pipeline.m_materialLUT);
-    glActiveTexture(GL_TEXTURE9); glBindTexture(GL_TEXTURE_2D, pipeline.m_water_black_texture);
+    glActiveTexture(GL_TEXTURE9); glBindTexture(GL_TEXTURE_2D, pipeline.m_water_pass->black_texture());
     m_lighting_shader->setMat4("u_inverseView", glm::inverse(camera.GetViewMatrix()));
     m_lighting_shader->setInt("gPosition", 0);
     m_lighting_shader->setInt("gNormalMaterial", 1);    // Octahedral normal + material

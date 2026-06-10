@@ -18,7 +18,7 @@
 // Forward declarations
 namespace Luminumbra { class Chunk; }
 namespace Luminumbra::Systems { class SHIELD_WorldSystem; struct TerrainGenParams; }
-namespace Luminumbra::Rendering { class Shader; class Camera; class ShadowPass; class GBufferPass; class SsaoPass; class LightingPass; }
+namespace Luminumbra::Rendering { class Shader; class Camera; class ShadowPass; class GBufferPass; class SsaoPass; class LightingPass; class WaterPass; }
 
 namespace Luminumbra::Rendering {
 
@@ -276,6 +276,7 @@ private:
     friend class GBufferPass;
     friend class SsaoPass;
     friend class LightingPass;
+    friend class WaterPass;
 
     struct ChunkMeshSnapshot {
         ChunkID id = 0;
@@ -361,7 +362,6 @@ private:
     void finish_gpu_pass_timer_frame();
 
     void refresh_render_pass_metadata();
-    void water_pass(const std::vector<ChunkMeshSnapshot>& renderable_chunks, const Camera& camera);
 
     std::vector<glm::mat4> get_light_space_matrices(const Camera& camera);
 
@@ -374,7 +374,6 @@ private:
     std::filesystem::path m_root_path;
 
     std::unique_ptr<Shader> m_skybox_shader;
-    std::unique_ptr<Shader> m_water_shader;
 
     DirectionalLight m_sun;
     glm::vec3 m_moonDirection;
@@ -383,6 +382,7 @@ private:
     std::unique_ptr<ShadowPass> m_shadow_pass;
     std::unique_ptr<SsaoPass> m_ssao_pass;
     std::unique_ptr<LightingPass> m_lighting_pass;
+    std::unique_ptr<WaterPass> m_water_pass;
 
     std::unordered_map<ChunkID, ChunkRenderData> m_chunk_render_data;
     std::unordered_map<ChunkID, WaterRenderData> m_water_render_data;
@@ -399,17 +399,11 @@ private:
 
     u32 m_terrainTextureArray = 0;
     u32 m_materialLUT = 0;
-    u32 m_water_flat_normal_texture = 0;
-    u32 m_water_neutral_flow_texture = 0;
-    u32 m_water_black_texture = 0;
-    u32 m_water_underwater_texture = 0;
     size_t m_terrain_texture_fallback_layers = 0;
 
     void init_terrain_textures();
     void init_material_lut();
-    void init_water_fallback_textures();
-    void destroy_water_fallback_textures();
-    
+
     // --- GPU SDF Generation ---
     struct GPUSDFSystem {
         GLuint compute_program = 0;
