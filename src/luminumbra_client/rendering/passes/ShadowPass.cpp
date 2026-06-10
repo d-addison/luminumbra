@@ -1,0 +1,105 @@
+#include "ShadowPass.h"
+
+#include "PassGlHelpers.h"
+#include "core/Log.h"
+#include "rendering/Camera.h"
+#include "rendering/Shader.h"
+#include "luminumbra_common/world/Chunk.h"
+
+#include <glm/gtc/matrix_transform.hpp>
+
+namespace Luminumbra::Rendering {
+
+ShadowPass::ShadowPass() = default;
+ShadowPass::~ShadowPass() = default;
+
+void ShadowPass::init_shader(const std::filesystem::path& root_path) {
+    m_shadow_shader = std::make_unique<Shader>((root_path / "res/shaders/shadow_map.vert").string().c_str(), (root_path / "res/shaders/shadow_map.frag").string().c_str());
+    PassGl::label_gl_object(GL_PROGRAM, m_shadow_shader ? m_shadow_shader->Id() : 0u, "shader.shadow");
+}
+
+void ShadowPass::init_shadow_map() {
+    glGenFramebuffers(1, &m_shadow_map.fbo_id);
+    glGenTextures(1, &m_shadow_map.depth_texture_array);
+    PassGl::label_gl_object(GL_FRAMEBUFFER, m_shadow_map.fbo_id, "shadow.fbo");
+    PassGl::label_gl_object(GL_TEXTURE, m_shadow_map.depth_texture_array, "shadow.depth_cascades");
+    glBindTexture(GL_TEXTURE_2D_ARRAY, m_shadow_map.depth_texture_array);
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_DEPTH_COMPONENT32F, m_shadow_map.resolution, m_shadow_map.resolution, ShadowMap::CASCADE_COUNT, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    float borderColor[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    glTexParameterfv(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BORDER_COLOR, borderColor);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_shadow_map.fbo_id);
+    glFramebufferTexture(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, m_shadow_map.depth_texture_array, 0);
+    glDrawBuffer(GL_NONE);
+    glReadBuffer(GL_NONE);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) LUMINUMBRA_CORE_ERROR("Shadow Map FBO not complete!");
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    PassGl::set_default_shadow_cascade_splits(m_shadow_map);
+}
+
+void ShadowPass::destroy_shadow_map() {
+    if (m_shadow_map.fbo_id) { glDeleteFramebuffers(1, &m_shadow_map.fbo_id); m_shadow_map.fbo_id = 0; }
+    if (m_shadow_map.depth_texture_array) { glDeleteTextures(1, &m_shadow_map.depth_texture_array); m_shadow_map.depth_texture_array = 0; }
+    m_shadow_map.light_space_matrices.clear();
+    m_shadow_map.cascade_splits.clear();
+}
+
+void ShadowPass::reset_shader() {
+    m_shadow_shader.reset();
+}
+
+void ShadowPass::execute(RenderPipeline& pipeline,
+                         const std::vector<RenderPipeline::ChunkMeshSnapshot>& renderable_chunks,
+                         const Camera& camera) {
+    if (!m_shadow_shader || m_shadow_map.fbo_id == 0 || m_shadow_map.depth_texture_array == 0) {
+        LUMINUMBRA_CORE_ERROR("Shadow pass skipped because shadow resources are not initialized.");
+        return;
+    }
+
+    auto light_space_matrices = pipeline.get_light_space_matrices(camera);
+    if (light_space_matrices.size() < ShadowMap::CASCADE_COUNT) {
+        LUMINUMBRA_CORE_ERROR("Shadow pass skipped because light-space matrices could not be generated.");
+        return;
+    }
+
+    m_shadow_map.light_space_matrices = light_space_matrices;
+    glViewport(0, 0, m_shadow_map.resolution, m_shadow_map.resolution);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_shadow_map.fbo_id);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    glCullFace(GL_FRONT);
+    m_shadow_shader->use();
+    for (int i = 0; i < ShadowMap::CASCADE_COUNT; ++i) {
+        glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, m_shadow_map.depth_texture_array, 0, i);
+        m_shadow_shader->setMat4("u_lightSpaceMatrix", light_space_matrices[i]);
+
+        glm::vec4 cascade_planes[6];
+        PassGl::ExtractFrustumPlanes(light_space_matrices[i], cascade_planes);
+        std::vector<const RenderPipeline::ChunkCullEntry*> visible_chunks;
+        visible_chunks.reserve(renderable_chunks.size());
+        pipeline.m_hierarchicalCuller.CullHierarchical(cascade_planes, visible_chunks);
+        pipeline.m_last_render_pass_stats.shadow_cascade_visible_chunks[i] = visible_chunks.size();
+
+        for (const auto* chunk : visible_chunks) {
+            if (pipeline.m_chunk_render_data.count(chunk->id) == 0) continue;
+            const auto& render_data = pipeline.m_chunk_render_data.at(chunk->id);
+            if (render_data.element_count == 0) continue;
+
+            glm::ivec3 cc = chunk->coords;
+            glm::vec3 base(cc.x * CHUNK_SIZE_X, cc.y * CHUNK_SIZE_Y, cc.z * CHUNK_SIZE_Z);
+            glm::mat4 model = glm::translate(glm::mat4(1.0f), base);
+            m_shadow_shader->setMat4("u_model", model);
+            glBindVertexArray(render_data.vao_id);
+            glDrawElements(GL_TRIANGLES, render_data.element_count, GL_UNSIGNED_INT, 0);
+            pipeline.m_last_render_pass_stats.shadow_cascade_draws[i]++;
+            pipeline.m_last_render_pass_stats.shadow_draws++;
+            pipeline.m_last_render_pass_stats.shadow_indices_drawn += render_data.element_count;
+        }
+    }
+    glCullFace(GL_BACK);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+} // namespace Luminumbra::Rendering

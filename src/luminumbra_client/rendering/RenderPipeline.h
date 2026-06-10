@@ -18,7 +18,7 @@
 // Forward declarations
 namespace Luminumbra { class Chunk; }
 namespace Luminumbra::Systems { class SHIELD_WorldSystem; struct TerrainGenParams; }
-namespace Luminumbra::Rendering { class Shader; class Camera; }
+namespace Luminumbra::Rendering { class Shader; class Camera; class ShadowPass; }
 
 namespace Luminumbra::Rendering {
 
@@ -269,6 +269,11 @@ public:
     void SetupGPUSDFIntegration(Systems::SHIELD_WorldSystem& world_system);
 
 private:
+    // Extracted render pass classes (T-I2-11). Passes own their GL resources
+    // (FBOs/textures/shaders); the pipeline keeps orchestration order, shared
+    // state, stats collection, and GPU timer issue/collect calls.
+    friend class ShadowPass;
+
     struct ChunkMeshSnapshot {
         ChunkID id = 0;
         IVec3 coords{};
@@ -300,7 +305,6 @@ private:
     void upload_chunk_mesh(const ChunkMeshSnapshot& chunk, const ChunkMeshPayload& payload);
     void unload_chunk_resources(ChunkID chunk_id);
 
-    void shadow_pass(const std::vector<ChunkMeshSnapshot>& renderable_chunks, const Camera& camera);
     void ssao_pass(const Camera& camera);
     void ssao_blur_pass();
     void lighting_pass(const Camera& camera);
@@ -313,8 +317,6 @@ private:
 
     void init_gbuffer(u32 width, u32 height);
     void destroy_gbuffer();
-    void init_shadow_map();
-    void destroy_shadow_map();
     void init_shaders();
     void init_skybox();
     void init_screen_quad();
@@ -383,14 +385,13 @@ private:
     std::unique_ptr<Shader> m_geometry_shader;
     std::unique_ptr<Shader> m_lighting_shader;
     std::unique_ptr<Shader> m_skybox_shader;
-    std::unique_ptr<Shader> m_shadow_shader;
     std::unique_ptr<Shader> m_water_shader;
 
     DirectionalLight m_sun;
     glm::vec3 m_moonDirection;
     glm::vec3 m_skyAmbientColor;
     GBuffer m_gbuffer;
-    ShadowMap m_shadow_map;
+    std::unique_ptr<ShadowPass> m_shadow_pass;
     SSAOData m_ssao;
 
     std::unordered_map<ChunkID, ChunkRenderData> m_chunk_render_data;

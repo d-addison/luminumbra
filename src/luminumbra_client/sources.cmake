@@ -27,6 +27,7 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/RenderSystem.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/Shader.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/WorldLoadingVisualizer.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/ShadowPass.cpp
 
     # UI
     ${CMAKE_CURRENT_LIST_DIR}/ui/Rml_Interfaces.cpp
