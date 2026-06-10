@@ -1,0 +1,27 @@
+{
+  "schema": "luminumbra.render.shader_suite_health.v1",
+  "generated_by": "RenderSmokeTest.PipelineShaderProgramsLink",
+  "passed": true,
+  "expected_program_count": 14,
+  "linked_program_count": 14,
+  "gl_debug": {
+    "errors": 0,
+    "error_names": []
+  },
+  "programs": [
+    {"name": "basic", "compiled": true, "linked": true, "ok": true},
+    {"name": "g_buffer", "compiled": true, "linked": true, "ok": true},
+    {"name": "instanced_mesh_gbuffer", "compiled": true, "linked": true, "ok": true},
+    {"name": "lighting_pass", "compiled": true, "linked": true, "ok": true},
+    {"name": "skybox", "compiled": true, "linked": true, "ok": true},
+    {"name": "shadow_map", "compiled": true, "linked": true, "ok": true},
+    {"name": "ssao", "compiled": true, "linked": true, "ok": true},
+    {"name": "ssao_blur", "compiled": true, "linked": true, "ok": true},
+    {"name": "water", "compiled": true, "linked": true, "ok": true},
+    {"name": "rml_ui", "compiled": true, "linked": true, "ok": true},
+    {"name": "loading_hologram", "compiled": true, "linked": true, "ok": true},
+    {"name": "loading_visual", "compiled": true, "linked": true, "ok": true},
+    {"name": "volumetric_lighting", "compiled": true, "linked": true, "ok": true},
+    {"name": "magical_particles", "compiled": true, "linked": true, "ok": true}
+  ]
+}
