@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "FrontierDisabled", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "ChunkFormatValidationGate", "FrontierDisabled", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug"
@@ -1255,6 +1255,119 @@ function Test-PersistenceRoundtripGate {
     }
 }
 
+function Test-ChunkFormatValidationGate {
+    $artifactDir = "build/$BuildPreset/test-artifacts/persistence"
+    $analysisPath = Join-Path $artifactDir "chunk-format-validation.json"
+    $testScriptPath = "test/persistence/chunk-format-validation.ps1"
+
+    if (-not (Test-Path $testScriptPath)) {
+        throw "chunk format validation gate not yet implemented - missing $testScriptPath (produced by task T-EF-24-chunk-format-validator-gate)"
+    }
+
+    & $testScriptPath -BuildPreset $BuildPreset
+    if (-not $?) {
+        exit 1
+    }
+    if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
+    if (-not (Test-Path $analysisPath)) {
+        throw "chunk format validation gate not yet implemented - missing $analysisPath (produced by task T-EF-24-chunk-format-validator-gate)"
+    }
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.persistence.chunk_format_validation.v1") {
+        throw "Unexpected chunk format validation schema '$($analysis.schema)'"
+    }
+    if (-not $analysis.passed) {
+        throw "Chunk format validation analysis reported failure"
+    }
+    if ($analysis.build_preset -ne $BuildPreset) {
+        throw "Chunk format validation build_preset '$($analysis.build_preset)' does not match '$BuildPreset'"
+    }
+    if ($analysis.validator.source -ne "src/luminumbra_common/persistence/WorldPersistenceRoundtrip.cpp") {
+        throw "Chunk format validation analysis must inspect WorldPersistenceRoundtrip.cpp"
+    }
+    if ($analysis.validator.header -ne "src/luminumbra_common/persistence/WorldPersistenceRoundtrip.h") {
+        throw "Chunk format validation analysis must inspect WorldPersistenceRoundtrip.h"
+    }
+    if ($analysis.validator.validation_api -ne "ValidateWorldStreamingChunkFormatJson") {
+        throw "Chunk format validation analysis must require ValidateWorldStreamingChunkFormatJson"
+    }
+    if ($analysis.validator.serializer -ne "SerializeChunkFormatValidationJson") {
+        throw "Chunk format validation analysis must require SerializeChunkFormatValidationJson"
+    }
+    if ($analysis.validator.artifact_writer -ne "WriteChunkFormatValidationArtifact") {
+        throw "Chunk format validation analysis must require WriteChunkFormatValidationArtifact"
+    }
+    if ($analysis.validator.format_contract -ne "world_state_snapshot_chunk_v1_required_fields") {
+        throw "Chunk format validation must declare the required-fields chunk format contract"
+    }
+    if ([int64]$analysis.validator.required_field_count -lt 20) {
+        throw "Chunk format validation must cover the baseline required chunk fields"
+    }
+    if ($analysis.format.snapshot_schema -ne "luminumbra.persistence.world_state_snapshot.v1") {
+        throw "Chunk format validation must validate world snapshot chunk payloads"
+    }
+    if ($analysis.format.order_contract -ne "chunk_id_ascending") {
+        throw "Chunk format validation must preserve chunk_id_ascending ordering"
+    }
+    if (-not $analysis.format.snapshot_contract_valid) {
+        throw "Chunk format validation reports invalid snapshot contract"
+    }
+    if ([int64]$analysis.format.accepted_chunk_count -lt 3) {
+        throw "Chunk format validation fixture must accept at least three persisted chunks"
+    }
+    if ([int64]$analysis.format.rejected_fixture_count -lt 3) {
+        throw "Chunk format validation must reject the negative chunk fixtures"
+    }
+    if (-not $analysis.format.negative_fixtures_rejected) {
+        throw "Chunk format validation reports that malformed chunks were not rejected"
+    }
+    if ([string]::IsNullOrWhiteSpace($analysis.format.fixture_checksum)) {
+        throw "Chunk format validation analysis is missing the deterministic checksum"
+    }
+
+    foreach ($field in @(
+        "coords",
+        "chunk_id",
+        "state",
+        "state_value",
+        "sdf_data",
+        "heightmap_data",
+        "mesh_vertices",
+        "mesh_indices",
+        "water_level_data",
+        "water_flow_data",
+        "water_sim_terrain_height",
+        "water_state"
+    )) {
+        Assert-ArrayContains -Values $analysis.validator.required_fields -Needle $field -Description "Chunk format validation required_fields"
+    }
+
+    $requiredChecks = @(
+        "chunk format validator API is declared",
+        "chunk format schema declares required fields",
+        "world snapshot chunk order contract is enforced",
+        "chunk validator accepts persisted fixture chunks",
+        "chunk validator rejects missing required fields",
+        "chunk validator rejects chunk id coordinate mismatches",
+        "chunk validator rejects incomplete water state",
+        "chunk format artifact records deterministic checksum"
+    )
+    $checks = @($analysis.checks)
+    foreach ($requiredCheck in $requiredChecks) {
+        $matches = @($checks | Where-Object { $_.name -eq $requiredCheck })
+        if ($matches.Count -ne 1) {
+            throw "Chunk format validation analysis is missing check '$requiredCheck'"
+        }
+        if (-not $matches[0].passed) {
+            throw "Chunk format validation check failed: $requiredCheck"
+        }
+    }
+}
+
 function Test-FrontierDisabled {
     Assert-FileExists $FrontierDisabledPath
 
@@ -1294,6 +1407,7 @@ switch ($Mode) {
     "AethericDiffusionGate" { Test-AethericDiffusionGate }
     "InstinctPlannerGate" { Test-InstinctPlannerGate }
     "PersistenceRoundtripGate" { Test-PersistenceRoundtripGate }
+    "ChunkFormatValidationGate" { Test-ChunkFormatValidationGate }
     "FrontierDisabled" { Test-FrontierDisabled }
     "All" {
         Test-CodexOnly
@@ -1312,6 +1426,7 @@ switch ($Mode) {
         Test-AethericDiffusionGate
         Test-InstinctPlannerGate
         Test-PersistenceRoundtripGate
+        Test-ChunkFormatValidationGate
         Test-FrontierDisabled
     }
 }
