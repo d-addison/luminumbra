@@ -193,6 +193,7 @@ private:
         struct MeshingJobChunk {
             std::shared_ptr<::Luminumbra::Chunk> chunk;
             bool terrain_mesh_required = true;
+            u8 transition_faces = 0;
         };
         std::vector<MeshingJobChunk> meshing_job_chunks;
     };
@@ -209,6 +210,19 @@ private:
     };
     int get_lod_level_for_distance(float dist) const;
     int get_lod_step_for_level(int lod_level) const;
+
+    // Required streaming LOD for a chunk: horizontal-only distance for
+    // surface-band chunks (keeps the terrain surface on one LOD per column
+    // so vertical LOD seams cannot open), 3D distance for deep/air chunks.
+    int get_required_lod_for_chunk(
+        const IVec3& coords,
+        const Vec3& chunk_center,
+        const Vec3& camera_position);
+
+    // Chunk-y of the terrain surface for a horizontal column, cached for the
+    // lifetime of the current seed/params (terrain height is deterministic).
+    int column_surface_chunk_y(int chunk_x, int chunk_z);
+    std::unordered_map<u64, int> m_column_surface_chunk_y_cache;
 
     // --- Helper Functions ---
     void update_chunk_activation(const Vec3& player_pos, PhysicsSystem* physics_system);
