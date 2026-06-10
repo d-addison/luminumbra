@@ -123,6 +123,29 @@ std::string ReadTextFile(const fs::path& path) {
     return stream.str();
 }
 
+// Render pass implementations are extracted from RenderPipeline.cpp into
+// rendering/passes/ (T-I2-11); source-token contracts that cover pass bodies
+// scan the combined pipeline + pass sources.
+std::string ReadRenderPipelineCombinedSources() {
+    std::string combined =
+        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const fs::path pass_dir = SourceRoot() / "src/luminumbra_client/rendering/passes";
+    if (fs::exists(pass_dir)) {
+        std::vector<fs::path> pass_files;
+        for (const auto& entry : fs::directory_iterator(pass_dir)) {
+            const fs::path extension = entry.path().extension();
+            if (extension == ".cpp" || extension == ".h") {
+                pass_files.push_back(entry.path());
+            }
+        }
+        std::sort(pass_files.begin(), pass_files.end());
+        for (const fs::path& pass_file : pass_files) {
+            combined += ReadTextFile(pass_file);
+        }
+    }
+    return combined;
+}
+
 std::string JsonEscape(const std::string& value) {
     std::ostringstream escaped;
     for (const unsigned char ch : value) {
@@ -1470,7 +1493,7 @@ TEST(RenderSmokeTest, BasicShaderDrawsNonBlackPixels) {
 }
 
 TEST(RenderSmokeTest, RenderPipelineHotPathLogsAreCounterBacked) {
-    const std::string source = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const std::string source = ReadRenderPipelineCombinedSources();
     ASSERT_FALSE(source.empty());
 
     const std::vector<std::string> forbidden_hot_path_messages = {
@@ -1486,7 +1509,7 @@ TEST(RenderSmokeTest, RenderPipelineHotPathLogsAreCounterBacked) {
 
 TEST(RenderSmokeTest, RenderPipelineExposesPassBudgetCounters) {
     const std::string header = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
-    const std::string source = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const std::string source = ReadRenderPipelineCombinedSources();
     ASSERT_FALSE(header.empty());
     ASSERT_FALSE(source.empty());
 
@@ -1517,7 +1540,7 @@ TEST(RenderSmokeTest, RenderPipelineExposesPassBudgetCounters) {
 
 TEST(RenderSmokeTest, RenderFrameworkContractsEmitArtifacts) {
     const std::string header = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
-    const std::string source = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const std::string source = ReadRenderPipelineCombinedSources();
     const std::string shader_header = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/Shader.h");
     const std::string shader_source = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/Shader.cpp");
     const std::string capture_header = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/CaptureHooks.h");
