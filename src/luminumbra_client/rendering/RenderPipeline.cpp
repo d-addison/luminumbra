@@ -91,6 +91,8 @@ bool is_valid_gl_object_name(GLenum identifier, GLuint name) {
             return glIsFramebuffer(name) == GL_TRUE;
         case GL_PROGRAM:
             return glIsProgram(name) == GL_TRUE;
+        case GL_QUERY:
+            return glIsQuery(name) == GL_TRUE;
         case GL_RENDERBUFFER:
             return glIsRenderbuffer(name) == GL_TRUE;
         case GL_TEXTURE:
@@ -133,6 +135,34 @@ std::vector<unsigned char> make_terrain_fallback_texture(int width, int height, 
     }
     return pixels;
 }
+
+bool gl_extension_present(const char* extension_name) {
+    if (glGetStringi != nullptr) {
+        GLint extension_count = 0;
+        glGetIntegerv(GL_NUM_EXTENSIONS, &extension_count);
+        for (GLint i = 0; i < extension_count; ++i) {
+            const char* name = reinterpret_cast<const char*>(glGetStringi(GL_EXTENSIONS, static_cast<GLuint>(i)));
+            if (name != nullptr && std::strcmp(name, extension_name) == 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+    // Legacy (pre-3.0) contexts expose the extension list as a single string.
+    const char* extensions = reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS));
+    return extensions != nullptr && std::strstr(extensions, extension_name) != nullptr;
+}
+
+constexpr const char* kGpuTimerPassNames[] = {
+    "shadow",
+    "gbuffer",
+    "ssao",
+    "ssao_blur",
+    "lighting",
+    "water",
+    "skybox",
+    "final_blit",
+};
 
 GLuint make_solid_rgba_texture(const unsigned char rgba[4], const std::string& label) {
     GLuint texture = 0;
@@ -304,6 +334,7 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         init_material_lut();
         init_water_fallback_textures();
         init_gpu_sdf_system();
+        init_gpu_pass_timers();
 
         std::string instanced_vert_path = (m_root_path / "res/shaders/instanced_mesh.vert").string();
         std::string gbuffer_frag_path = (m_root_path / "res/shaders/g_buffer.frag").string();
@@ -567,6 +598,13 @@ RenderPipeline::RenderResourceRegistryStats RenderPipeline::get_resource_registr
         }
     }
 
+    // GPU timer query objects are intentionally not counted here: the
+    // resource-registry contract enumerates framebuffer/texture/renderbuffer/
+    // buffer/vertex_array/shader_program types only, and timestamp queries are
+    // transient profiling objects with no backing storage. They still receive
+    // debug labels once created and are deleted in cleanup_gpu_resources(), so
+    // the empty-after-shutdown contract holds.
+
     const size_t total_resources = stats.framebuffers + stats.textures + stats.renderbuffers +
         stats.buffers + stats.vertex_arrays + stats.shader_programs + stats.terrain_slots + stats.water_slots;
     stats.empty_after_shutdown = !m_started && total_resources == 0u;
@@ -706,6 +744,145 @@ void RenderPipeline::refresh_render_pass_metadata() {
              "default color+depth", "present-ready color", m_last_render_pass_stats.final_blits);
 }
 
+// --- PER-PASS GPU TIMERS ---
+
+void RenderPipeline::init_gpu_pass_timers() {
+    static_assert(sizeof(kGpuTimerPassNames) / sizeof(kGpuTimerPassNames[0]) == kGpuTimerPassCount,
+                  "GPU timer pass name table must mirror GpuTimerPass");
+
+    m_gpu_timers = {};
+
+    // Capability gate: GL_TIMESTAMP queries require GL 3.3+ or
+    // GL_ARB_timer_query, and the glad-resolved entry points must be non-null.
+    const bool loader_ok =
+        glGenQueries != nullptr &&
+        glDeleteQueries != nullptr &&
+        glQueryCounter != nullptr &&
+        glGetQueryObjectiv != nullptr &&
+        glGetQueryObjectui64v != nullptr;
+    const bool capability_ok = GLAD_GL_VERSION_3_3 != 0 || gl_extension_present("GL_ARB_timer_query");
+    if (!capability_ok || !loader_ok) {
+        LUMINUMBRA_CORE_WARN("Per-pass GPU timers disabled: GL_TIMESTAMP queries are unsupported on this context.");
+        return;
+    }
+
+    for (GpuTimerFrameSlot& slot : m_gpu_timers.slots) {
+        glGenQueries(static_cast<GLsizei>(kGpuTimerPassCount), slot.begin_queries.data());
+        glGenQueries(static_cast<GLsizei>(kGpuTimerPassCount), slot.end_queries.data());
+    }
+    m_gpu_timers.supported = true;
+}
+
+void RenderPipeline::destroy_gpu_pass_timers() {
+    if (glDeleteQueries != nullptr) {
+        for (GpuTimerFrameSlot& slot : m_gpu_timers.slots) {
+            for (size_t pass = 0; pass < kGpuTimerPassCount; ++pass) {
+                if (slot.begin_queries[pass] != 0u) {
+                    glDeleteQueries(1, &slot.begin_queries[pass]);
+                }
+                if (slot.end_queries[pass] != 0u) {
+                    glDeleteQueries(1, &slot.end_queries[pass]);
+                }
+            }
+        }
+    }
+    m_gpu_timers = {};
+}
+
+void RenderPipeline::begin_gpu_pass_timer(GpuTimerPass pass) {
+    if (!m_gpu_timers.supported) {
+        return;
+    }
+    GpuTimerFrameSlot& slot = m_gpu_timers.slots[m_gpu_timers.frame_index % kGpuTimerFrameRing];
+    glQueryCounter(slot.begin_queries[static_cast<size_t>(pass)], GL_TIMESTAMP);
+}
+
+void RenderPipeline::end_gpu_pass_timer(GpuTimerPass pass) {
+    if (!m_gpu_timers.supported) {
+        return;
+    }
+    GpuTimerFrameSlot& slot = m_gpu_timers.slots[m_gpu_timers.frame_index % kGpuTimerFrameRing];
+    glQueryCounter(slot.end_queries[static_cast<size_t>(pass)], GL_TIMESTAMP);
+    slot.issued[static_cast<size_t>(pass)] = true;
+}
+
+void RenderPipeline::collect_gpu_pass_timers() {
+    m_last_render_pass_stats.gpu_timers_supported = m_gpu_timers.supported;
+    bool resolved_sample_this_frame = false;
+    if (m_gpu_timers.supported) {
+        // Read the slot written two frames ago. The slot is not reused until
+        // the next frame, so polling here never has to block the CPU.
+        GpuTimerFrameSlot& read_slot = m_gpu_timers.slots[(m_gpu_timers.frame_index + 1u) % kGpuTimerFrameRing];
+        for (size_t pass = 0; pass < kGpuTimerPassCount; ++pass) {
+            if (!read_slot.issued[pass]) {
+                continue;
+            }
+            GLint begin_available = GL_FALSE;
+            GLint end_available = GL_FALSE;
+            glGetQueryObjectiv(read_slot.begin_queries[pass], GL_QUERY_RESULT_AVAILABLE, &begin_available);
+            glGetQueryObjectiv(read_slot.end_queries[pass], GL_QUERY_RESULT_AVAILABLE, &end_available);
+            if (begin_available != GL_TRUE || end_available != GL_TRUE) {
+                // Not resolved yet: keep the previous sample instead of stalling.
+                continue;
+            }
+            GLuint64 begin_ns = 0;
+            GLuint64 end_ns = 0;
+            glGetQueryObjectui64v(read_slot.begin_queries[pass], GL_QUERY_RESULT, &begin_ns);
+            glGetQueryObjectui64v(read_slot.end_queries[pass], GL_QUERY_RESULT, &end_ns);
+            read_slot.issued[pass] = false;
+            m_gpu_timers.last_gpu_ms[pass] = end_ns >= begin_ns
+                ? static_cast<double>(end_ns - begin_ns) / 1.0e6
+                : 0.0;
+            resolved_sample_this_frame = true;
+        }
+    }
+
+    m_last_render_pass_stats.shadow_gpu_ms = m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::Shadow)];
+    m_last_render_pass_stats.gbuffer_gpu_ms = m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::GBuffer)];
+    m_last_render_pass_stats.ssao_gpu_ms = m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::Ssao)];
+    m_last_render_pass_stats.ssao_blur_gpu_ms = m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::SsaoBlur)];
+    m_last_render_pass_stats.lighting_gpu_ms = m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::Lighting)];
+    m_last_render_pass_stats.water_gpu_ms = m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::Water)];
+    m_last_render_pass_stats.skybox_gpu_ms = m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::Skybox)];
+    m_last_render_pass_stats.final_blit_gpu_ms = m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::FinalBlit)];
+
+    // One-time diagnostic so smoke runs prove the ring resolves real samples.
+    if (resolved_sample_this_frame && !m_gpu_timers.first_sample_logged) {
+        m_gpu_timers.first_sample_logged = true;
+        LUMINUMBRA_CORE_INFO(
+            "Per-pass GPU timers active (ms): shadow={:.4f} gbuffer={:.4f} ssao={:.4f} ssao_blur={:.4f} lighting={:.4f} water={:.4f} skybox={:.4f} final_blit={:.4f}",
+            m_last_render_pass_stats.shadow_gpu_ms,
+            m_last_render_pass_stats.gbuffer_gpu_ms,
+            m_last_render_pass_stats.ssao_gpu_ms,
+            m_last_render_pass_stats.ssao_blur_gpu_ms,
+            m_last_render_pass_stats.lighting_gpu_ms,
+            m_last_render_pass_stats.water_gpu_ms,
+            m_last_render_pass_stats.skybox_gpu_ms,
+            m_last_render_pass_stats.final_blit_gpu_ms);
+    }
+}
+
+void RenderPipeline::finish_gpu_pass_timer_frame() {
+    if (!m_gpu_timers.supported) {
+        return;
+    }
+    // GL query objects only become valid label targets after first use
+    // (glGenQueries reserves names without creating the objects), so debug
+    // labels are applied once every ring slot has issued its timestamps.
+    if (!m_gpu_timers.labeled && m_gpu_timers.frame_index + 1u >= kGpuTimerFrameRing) {
+        for (size_t slot_index = 0; slot_index < kGpuTimerFrameRing; ++slot_index) {
+            const GpuTimerFrameSlot& slot = m_gpu_timers.slots[slot_index];
+            for (size_t pass = 0; pass < kGpuTimerPassCount; ++pass) {
+                const std::string base = "gpu_timer." + std::string(kGpuTimerPassNames[pass]) + "." + std::to_string(slot_index);
+                label_gl_object(GL_QUERY, slot.begin_queries[pass], base + ".begin");
+                label_gl_object(GL_QUERY, slot.end_queries[pass], base + ".end");
+            }
+        }
+        m_gpu_timers.labeled = true;
+    }
+    ++m_gpu_timers.frame_index;
+}
+
 void RenderPipeline::gather_lights(entt::registry& registry) {
     m_point_lights_this_frame.clear();
     auto view = registry.view<const Components::TransformComponent, const Components::PointLightComponent>();
@@ -808,6 +985,10 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     m_last_render_pass_stats = {};
     m_last_render_pass_stats.snapshot_count = renderable_chunk_snapshots.size();
 
+    // Publish GPU timings recorded two frames ago without stalling, then
+    // record this frame's passes into the current ring slot below.
+    collect_gpu_pass_timers();
+
     manage_chunk_gpu_resources(renderable_chunk_snapshots, camera);
     manage_water_gpu_resources(renderable_chunk_snapshots, camera);
     ensure_terrain_culling_hierarchy(renderable_chunk_snapshots);
@@ -853,23 +1034,33 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     std::memcpy(frustum_planes, m_frustumCache.planes, sizeof(frustum_planes));
 
      // 1. SHADOW PASS
+    begin_gpu_pass_timer(GpuTimerPass::Shadow);
     shadow_pass(renderable_chunk_snapshots, camera);
+    end_gpu_pass_timer(GpuTimerPass::Shadow);
     glViewport(0, 0, m_screen_width, m_screen_height);
 
     // 2. GEOMETRY / G-BUFFER PASS
+    begin_gpu_pass_timer(GpuTimerPass::GBuffer);
     gbuffer_pass(registry, renderable_chunk_snapshots, camera, frustum_planes);
+    end_gpu_pass_timer(GpuTimerPass::GBuffer);
     glBindVertexArray(0);  // Unbind after gbuffer pass
     glDisable(GL_CULL_FACE);
 
     // 3. SSAO PASS
+    begin_gpu_pass_timer(GpuTimerPass::Ssao);
     ssao_pass(camera);
+    end_gpu_pass_timer(GpuTimerPass::Ssao);
     glBindVertexArray(0);  // Unbind after SSAO
+    begin_gpu_pass_timer(GpuTimerPass::SsaoBlur);
     ssao_blur_pass();
+    end_gpu_pass_timer(GpuTimerPass::SsaoBlur);
     glBindVertexArray(0);  // Unbind after SSAO blur
 
     // 4. LIGHTING PASS (Renders to m_lighting_fbo)
     glEnable(GL_CULL_FACE);
+    begin_gpu_pass_timer(GpuTimerPass::Lighting);
     lighting_pass(camera);
+    end_gpu_pass_timer(GpuTimerPass::Lighting);
     glBindVertexArray(0);  // Unbind after lighting pass
 
     // 5. SNAPSHOT THE OPAQUE SCENE, THEN COPY DEPTH TO LIGHTING FBO FOR WATER DEPTH TEST
@@ -880,25 +1071,32 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     
     // 6. WATER PASS (Renders to m_lighting_fbo, reads from it for refraction)
     glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_fbo.fbo_id);
+    begin_gpu_pass_timer(GpuTimerPass::Water);
     water_pass(renderable_chunk_snapshots, camera);
+    end_gpu_pass_timer(GpuTimerPass::Water);
     glBindVertexArray(0);  // Unbind after water pass
 
     // 7. SKYBOX PASS (Renders to m_lighting_fbo)
+    begin_gpu_pass_timer(GpuTimerPass::Skybox);
     skybox_pass(camera);
+    end_gpu_pass_timer(GpuTimerPass::Skybox);
     glBindVertexArray(0);  // Unbind after skybox pass
-    
+
     // 8. FINAL BLIT TO SCREEN
+    begin_gpu_pass_timer(GpuTimerPass::FinalBlit);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_lighting_fbo.fbo_id);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0); // Default framebuffer
-    
+
     // Clear the default framebuffer first to prevent artifacts
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    
+
     glBlitFramebuffer(0, 0, m_screen_width, m_screen_height, 0, 0, m_screen_width, m_screen_height, GL_COLOR_BUFFER_BIT, GL_LINEAR);
     m_last_render_pass_stats.final_blits++;
+    end_gpu_pass_timer(GpuTimerPass::FinalBlit);
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    finish_gpu_pass_timer_frame();
     refresh_render_pass_metadata();
 }
 
@@ -1594,6 +1792,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     if (m_materialLUT) { glDeleteTextures(1, &m_materialLUT); m_materialLUT = 0; }
     destroy_water_fallback_textures();
     cleanup_gpu_sdf_system();
+    destroy_gpu_pass_timers();
     m_geometry_shader.reset();
     m_lighting_shader.reset();
     m_skybox_shader.reset();

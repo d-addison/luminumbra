@@ -396,6 +396,31 @@ function Test-RenderHealth {
     if ([int64]$analysis.terrain_materials.max_fallback_layers -ne 0) {
         throw "Render health analysis must require zero terrain texture fallback layers"
     }
+
+    if ($null -eq $analysis.gpu_timers) {
+        throw "Render health analysis is missing the gpu_timers section"
+    }
+    if (-not $analysis.gpu_timers.api_present) {
+        throw "Render health analysis reports missing per-pass GPU timer API"
+    }
+    $gpuTimerPasses = @($analysis.gpu_timers.passes)
+    foreach ($requiredPass in $requiredPasses) {
+        $timerEntries = @($gpuTimerPasses | Where-Object { $_.name -eq $requiredPass })
+        if ($timerEntries.Count -ne 1) {
+            throw "Render health gpu_timers is missing pass '$requiredPass'"
+        }
+        if ([double]$timerEntries[0].gpu_ms -lt 0) {
+            throw "Render health gpu_timers pass '$requiredPass' reports a negative gpu_ms"
+        }
+    }
+    if (-not [bool]$analysis.gpu_timers.supported) {
+        # Unsupported GPU timer hardware is a PASS, but timings must be zeroed.
+        foreach ($timerEntry in $gpuTimerPasses) {
+            if ([double]$timerEntry.gpu_ms -ne 0) {
+                throw "Render health gpu_timers reports non-zero gpu_ms while unsupported"
+            }
+        }
+    }
 }
 
 function Test-ShaderInventory {
