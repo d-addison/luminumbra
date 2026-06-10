@@ -9,7 +9,16 @@ param(
     # catastrophic-regression catcher: real algorithmic regressions are 2-10x,
     # so fail at +50% and warn at +25%. Tighten only with a quieter lane.
     [double]$MarginPercent = 50.0,
-    [double]$WarnPercent = 25.0
+    [double]$WarnPercent = 25.0,
+    # Absolute per-scenario allowance added on top of the relative margins.
+    # The streaming optimizations (T-I2-14) dropped several scenario p99s from
+    # 20-77 ms to 2-13 ms, where a purely relative margin sits below the
+    # debug-build noise floor: identical code measured 3-25 ms p99 swings
+    # between adjacent runs on a developer desktop with typical background
+    # load. The floor is sized to absorb those observed outliers while the
+    # relative margin still catches catastrophic (2-10x) regressions on the
+    # slow scenarios; ceiling = baseline * (1 + margin) + this floor.
+    [double]$NoiseFloorMs = 20.0
 )
 
 $ErrorActionPreference = "Stop"
@@ -2361,7 +2370,7 @@ function Test-PerfRegression {
 
             $observedP99 = [double]$observed.regression_metrics.p99_ms
             $observedRuns[$name] += $observedP99
-            $failCeiling = ([double]$baselineEntry.p99_ms) * (1.0 + $MarginPercent / 100.0)
+            $failCeiling = ([double]$baselineEntry.p99_ms) * (1.0 + $MarginPercent / 100.0) + $NoiseFloorMs
             if ($observedP99 -gt $failCeiling) {
                 $anyOverFail = $true
             }
@@ -2380,8 +2389,8 @@ function Test-PerfRegression {
         $samples = @($observedRuns[$name] | Sort-Object)
         $medianP99 = [double]$samples[[int][Math]::Floor(($samples.Count - 1) / 2)]
         $baselineP99 = [double]$baseline.scenarios.$name.p99_ms
-        $failCeiling = $baselineP99 * (1.0 + $MarginPercent / 100.0)
-        $warnCeiling = $baselineP99 * (1.0 + $WarnPercent / 100.0)
+        $failCeiling = $baselineP99 * (1.0 + $MarginPercent / 100.0) + $NoiseFloorMs
+        $warnCeiling = $baselineP99 * (1.0 + $WarnPercent / 100.0) + $NoiseFloorMs
 
         if ($medianP99 -gt $failCeiling) {
             $regressions += ("scenario '{0}' median p99 {1:N3} ms (of {2} runs) exceeds baseline {3:N3} ms by more than {4}%" -f $name, $medianP99, $samples.Count, $baselineP99, $MarginPercent)
