@@ -159,6 +159,7 @@ void WaterPass::execute(RenderPipeline& pipeline,
     m_water_shader->setFloat("u_time", static_cast<float>(glfwGetTime()));
     m_water_shader->setVec3("u_sun_direction", pipeline.m_sun.direction);
     m_water_shader->setVec3("u_sun_color", pipeline.m_sun.color);
+    m_water_shader->setVec3("u_sky_color", approximate_sky_reflection_color(pipeline.m_sun.intensity));
     m_water_shader->setVec3("u_shallow_color", glm::vec3(0.3, 0.8, 0.7));
     m_water_shader->setVec3("u_deep_color", glm::vec3(0.02, 0.18, 0.34));
     m_water_shader->setFloat("u_water_depth_scaler", 0.2f);

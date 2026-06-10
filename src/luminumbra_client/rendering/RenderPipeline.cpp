@@ -2111,6 +2111,10 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     m_skyAmbientColor = glm::mix(nightAmbient, dayAmbient, m_sun.intensity);
 }
 
+u32 RenderPipeline::water_caustics_texture() const {
+    return m_water_pass ? m_water_pass->caustics_texture() : 0u;
+}
+
 void RenderPipeline::set_time_of_day(float normalized_time) {
     m_timeOfDay = std::clamp(normalized_time, 0.0f, 1.0f);
 }

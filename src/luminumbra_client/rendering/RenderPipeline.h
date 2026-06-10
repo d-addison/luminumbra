@@ -261,6 +261,9 @@ public:
     RenderResourceRegistryStats get_resource_registry_stats() const;
     std::vector<ShaderHealthEntry> get_shader_health() const;
     RenderHealthSnapshot get_render_health_snapshot(bool drain_gl_errors = false) const;
+    // Generated caustics texture id (0 when unavailable). Exposed for the
+    // runtime scenario harness caustics-animation probe (T-I2-16).
+    u32 water_caustics_texture() const;
     void set_time_of_day(float normalized_time);
     
     // GPU SDF integration
