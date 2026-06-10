@@ -739,6 +739,12 @@ TEST(InitialWorldLoadingPerfTest, PerformanceFrameworkBenchmarkScenariosWriteBud
     const auto chunks_after_benchmarks = world.get_runtime_chunk_stats();
     scenario_results.push_back(scenario_result("shader_warmup", {0.0}, chunks_after_benchmarks, 0u, 0u, 0u, 14u));
 
+    // Quiesce the world's streaming jobs before timing JobSystem shutdown.
+    // chunk_churn leaves a meshing batch in flight on 16 background workers;
+    // racing the fresh worker pool's thread startup/join against that churn
+    // measured scheduler contention (0.6 ms vs 40-60 ms bimodal), not
+    // shutdown cost, which made the perf-regression baseline unstable.
+    world.wait_for_streaming_jobs();
     JobSystem shutdown_jobs;
     shutdown_jobs.startup();
     Timer shutdown_timer;

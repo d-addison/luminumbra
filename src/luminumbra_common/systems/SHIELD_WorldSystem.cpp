@@ -481,8 +481,10 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
             if (required_lod == -1) {
                 required_lod = get_required_lod_for_chunk(chunk_ptr->get_coords(), chunk_center, camera_position);
             }
-            const float terrain_height = GetTerrainHeightAt(chunk_center.x, chunk_center.z);
-            const int surface_y = world_to_chunk_coords(Vec3(chunk_center.x, terrain_height, chunk_center.z)).y;
+            // The column-surface cache samples the same chunk-center position,
+            // so this replaces a per-candidate fractal noise evaluation with a
+            // hash lookup (terrain height is a pure function of seed/params).
+            const int surface_y = column_surface_chunk_y(chunk_ptr->get_coords().x, chunk_ptr->get_coords().z);
             const IVec3 delta = chunk_ptr->get_coords() - world_to_chunk_coords(camera_position);
             const float distance_sq = static_cast<float>(horizontal_distance_sq(delta.x, delta.z) + delta.y * delta.y);
             meshing_candidates.push_back({
@@ -505,7 +507,26 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
     }
     const bool meshing_job_active = has_active_job(m_streaming_state.meshing_job_handle);
     m_last_streaming_budget_stats.meshing_job_active = meshing_job_active;
-    m_last_streaming_budget_stats.meshing_budget = meshing_job_active ? 0 : MAX_CHUNKS_TO_PROCESS_PER_FRAME;
+    // Scale the per-dispatch meshing batch with the standing terrain backlog:
+    // deep backlogs (initial load, fast travel) dispatch larger batches so
+    // more of the backlog is in flight per dispatch, while shallow
+    // steady-state backlogs keep the small batches that preserve LOD/hole-fill
+    // responsiveness. The batch is still the sorted-candidate prefix, so the
+    // hole-fill-first ordering and per-chunk LOD selection are unchanged -
+    // only how quickly the same work drains. Measured on the 20s
+    // EnduranceStreamDrain scenario: max_deferred_age_frames 28 -> 12 and
+    // cumulative_deferred_meshing ~15k -> ~5k versus a fixed budget; a 3x cap
+    // adds little over 2x while tripling worst-case batch latency, so cap
+    // at 2x.
+    int meshing_budget = MAX_CHUNKS_TO_PROCESS_PER_FRAME;
+    if (terrain_meshing_backlog > static_cast<std::size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME)) {
+        meshing_budget = static_cast<int>(std::min<std::size_t>(
+            static_cast<std::size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME) * 2u,
+            terrain_meshing_backlog / 2u
+        ));
+        meshing_budget = std::max(meshing_budget, MAX_CHUNKS_TO_PROCESS_PER_FRAME);
+    }
+    m_last_streaming_budget_stats.meshing_budget = meshing_job_active ? 0 : meshing_budget;
 
     if (!meshing_candidates.empty() && !meshing_job_active) {
         std::sort(meshing_candidates.begin(), meshing_candidates.end(), [](const MeshingCandidate& a, const MeshingCandidate& b) {
@@ -660,10 +681,9 @@ void SHIELD_WorldSystem::update_chunk_activation(const Vec3& player_pos, Physics
 
             const int chunk_x = camera_chunk.x + dx;
             const int chunk_z = camera_chunk.z + dz;
-            const float sample_x = static_cast<float>(chunk_x * CHUNK_SIZE_X) + CHUNK_SIZE_X * 0.5f;
-            const float sample_z = static_cast<float>(chunk_z * CHUNK_SIZE_Z) + CHUNK_SIZE_Z * 0.5f;
-            const float terrain_height = GetTerrainHeightAt(sample_x, sample_z);
-            const int surface_y = world_to_chunk_coords(Vec3(sample_x, terrain_height, sample_z)).y;
+            // Same chunk-center sample as the direct noise evaluation this
+            // replaces; the cache persists for the lifetime of seed/params.
+            const int surface_y = column_surface_chunk_y(chunk_x, chunk_z);
             const int ring_distance = horizontal_ring_distance(dx, dz);
 
             ++m_last_streaming_budget_stats.target_surface_columns;
@@ -1353,6 +1373,33 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
         return;
     }
 
+    // Snapshot meshed-chunk LODs per horizontal column once so the
+    // transition-face checks below are hash lookups instead of a full
+    // chunk-map scan per face per work item (O(batch * chunks) before,
+    // which dominated the dispatch frame once backlog-scaled batches
+    // landed). Mirrors the candidate-side snapshot built in update().
+    struct DispatchMeshedColumnEntry {
+        const Luminumbra::Chunk* chunk = nullptr;
+        int y = 0;
+        int lod = 0;
+    };
+    std::unordered_map<u64, std::vector<DispatchMeshedColumnEntry>> meshed_columns;
+    meshed_columns.reserve(m_streaming_state.chunks.size());
+    for (const auto& [neighbor_id, neighbor] : m_streaming_state.chunks) {
+        (void)neighbor_id;
+        if (!neighbor || neighbor->mesh_vertices.empty() || neighbor->mesh_indices.empty()) {
+            continue;
+        }
+        const int neighbor_lod = neighbor->current_lod.load(std::memory_order_acquire);
+        if (neighbor_lod < 0) {
+            continue;
+        }
+        const IVec3 neighbor_coords = neighbor->get_coords();
+        meshed_columns[horizontal_chunk_key(neighbor_coords.x, neighbor_coords.z)].push_back({
+            neighbor.get(), neighbor_coords.y, neighbor_lod
+        });
+    }
+
     std::vector<Luminumbra::Job> jobs;
     m_streaming_state.meshing_job_chunks.clear();
     m_streaming_state.meshing_job_chunks.reserve(chunks_to_mesh.size());
@@ -1379,18 +1426,15 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
         if (terrain_mesh_required && step > 1) {
             const IVec3 coords = chunk->get_coords();
             auto add_face_if_neighbor_is_finer = [&](int dx, int dz, Luminumbra::World::MarchingCubes::TerrainTransitionFace face) {
-                for (const auto& [neighbor_id, neighbor] : m_streaming_state.chunks) {
-                    (void)neighbor_id;
-                    if (!neighbor || neighbor == chunk || neighbor->mesh_vertices.empty() || neighbor->mesh_indices.empty()) {
+                const auto column_it = meshed_columns.find(horizontal_chunk_key(coords.x + dx, coords.z + dz));
+                if (column_it == meshed_columns.end()) {
+                    return;
+                }
+                for (const DispatchMeshedColumnEntry& entry : column_it->second) {
+                    if (entry.chunk == chunk.get()) {
                         continue;
                     }
-                    const IVec3 neighbor_coords = neighbor->get_coords();
-                    const int neighbor_lod = neighbor->current_lod.load(std::memory_order_acquire);
-                    if (neighbor_coords.x == coords.x + dx &&
-                        neighbor_coords.z == coords.z + dz &&
-                        neighbor_lod >= 0 &&
-                        (neighbor_lod < lod_level || (neighbor_lod != lod_level && neighbor_coords.y != coords.y)))
-                    {
+                    if (entry.lod < lod_level || (entry.lod != lod_level && entry.y != coords.y)) {
                         transition_faces |= static_cast<Luminumbra::World::MarchingCubes::TerrainTransitionFaceMask>(face);
                         return;
                     }
