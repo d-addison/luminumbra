@@ -10,7 +10,6 @@
 #include <glm/glm.hpp>
 #include "systems/SHIELD_WorldSystem.h"
 #include "systems/WaterSystem.h"
-#include <unordered_map>
 #include <unordered_set>
 #include "../core/Log.h"
 
@@ -524,13 +523,16 @@ void PolygoniseTerrain(
     // Debug: Check if chunk has a surface
     bool has_negative = false;
     bool has_positive = false;
-    
+
     for (float val : chunk.sdf_data) {
         if (val < isolevel) {
             has_negative = true;
         }
         if (val > isolevel) {
             has_positive = true;
+        }
+        if (has_negative && has_positive) {
+            break;
         }
     }
 
@@ -546,74 +548,105 @@ void PolygoniseTerrain(
     }
 
     // NOW continue with the actual mesh generation...
+    // This path only runs at sample_step == 1 (coarser LODs take the
+    // heightfield path above), so all cell/corner indexing below assumes a
+    // unit step over the full (CHUNK_SIZE+1)^3 SDF lattice.
     std::vector<VoxelVertex> vertices;
     std::vector<u32> indices;
-    const int sample_step_cubed = sample_step * sample_step * sample_step;
-    vertices.reserve(std::max(16, CHUNK_VOLUME / (8 * sample_step_cubed)));
-    indices.reserve(std::max(32, CHUNK_VOLUME / (4 * sample_step_cubed)));
-
-    std::unordered_map<u64, u32> vertex_cache;
-    vertex_cache.reserve(vertices.capacity());
+    vertices.reserve(CHUNK_VOLUME / 4);
+    indices.reserve(CHUNK_VOLUME);
 
     const IVec3 chunk_base_pos = chunk.get_coords() * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
-    const u32 y_stride = CHUNK_SIZE_X + 1;
-    const u32 z_stride = (CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1);
+    constexpr u32 kYStride = CHUNK_SIZE_X + 1;
+    constexpr u32 kZStride = (CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1);
+    constexpr u32 kLatticeCount = (CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
 
     const IVec3 corner_offsets[8] = {
         {0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1},
         {0, 1, 0}, {1, 1, 0}, {1, 1, 1}, {0, 1, 1}
     };
-    
+
+    // SDF-lattice index offsets of the 8 cell corners relative to the cell's
+    // (x, y, z) lattice index. Mirrors corner_offsets above.
+    constexpr u32 kCornerIndexOffsets[8] = {
+        0u,
+        1u,
+        1u + kZStride,
+        kZStride,
+        kYStride,
+        1u + kYStride,
+        1u + kYStride + kZStride,
+        kYStride + kZStride,
+    };
+
     const int edge_connections[12][2] = {
         {0,1}, {1,2}, {2,3}, {3,0}, {4,5}, {5,6},
         {6,7}, {7,4}, {0,4}, {1,5}, {2,6}, {3,7}
     };
 
+    // Flat per-edge vertex cache replacing the previous unordered_map keyed
+    // by corner-index pairs. Every unique cell edge is one of three canonical
+    // axis edges (+X, +Y, +Z) anchored at an SDF lattice point, so the cache
+    // is lattice_point * 3 + axis: O(1) lookups, no hashing, no node
+    // allocations. First-writer-wins semantics are identical to the map
+    // because the cell scan order and the per-cell edge order are unchanged.
+    // Slot offsets relative to (cell lattice index * 3), one per cell edge:
+    // anchor corner's lattice offset * 3 + axis (0 = X, 1 = Y, 2 = Z).
+    constexpr u32 kNoCachedVertex = 0xFFFFFFFFu;
+    constexpr u32 kEdgeCacheSlotOffsets[12] = {
+        0u * 3u + 0u,                          // edge 0: +X edge at corner 0
+        1u * 3u + 2u,                          // edge 1: +Z edge at corner 1
+        kZStride * 3u + 0u,                    // edge 2: +X edge at corner 3
+        0u * 3u + 2u,                          // edge 3: +Z edge at corner 0
+        kYStride * 3u + 0u,                    // edge 4: +X edge at corner 4
+        (1u + kYStride) * 3u + 2u,             // edge 5: +Z edge at corner 5
+        (kYStride + kZStride) * 3u + 0u,       // edge 6: +X edge at corner 7
+        kYStride * 3u + 2u,                    // edge 7: +Z edge at corner 4
+        0u * 3u + 1u,                          // edge 8: +Y edge at corner 0
+        1u * 3u + 1u,                          // edge 9: +Y edge at corner 1
+        (1u + kZStride) * 3u + 1u,             // edge 10: +Y edge at corner 2
+        kZStride * 3u + 1u,                    // edge 11: +Y edge at corner 3
+    };
+    std::vector<u32> edge_vertex_cache(static_cast<std::size_t>(kLatticeCount) * 3u, kNoCachedVertex);
+
+    const float* const sdf = chunk.sdf_data.data();
+
     // --- PASS 1: Generate unique vertices and triangle indices ---
     std::size_t cells_visited = 0;
     std::size_t active_cells = 0;
-    for (int z = 0; z < CHUNK_SIZE_Z; z += sample_step) {
-        for (int y = 0; y < CHUNK_SIZE_Y; y += sample_step) {
-            for (int x = 0; x < CHUNK_SIZE_X; x += sample_step) {
+    for (int z = 0; z < CHUNK_SIZE_Z; ++z) {
+        for (int y = 0; y < CHUNK_SIZE_Y; ++y) {
+            const u32 row_base = static_cast<u32>(y) * kYStride + static_cast<u32>(z) * kZStride;
+            for (int x = 0; x < CHUNK_SIZE_X; ++x) {
                 GridCell gridcell;
                 int cube_index = 0;
-                u32 corner_abs_indices[8];
+                const u32 cell_base = row_base + static_cast<u32>(x);
                 ++cells_visited;
 
+                // At unit step every corner lies inside the SDF lattice, so
+                // values are read directly with hoisted stride offsets.
                 for (int i = 0; i < 8; ++i) {
-                    IVec3 corner_pos = IVec3(x, y, z) + (corner_offsets[i] * sample_step);
-                    u32 sdf_idx = corner_pos.x + corner_pos.y * y_stride + corner_pos.z * z_stride;
-                    corner_abs_indices[i] = sdf_idx;
-                    
-                    if (corner_pos.x > CHUNK_SIZE_X || corner_pos.y > CHUNK_SIZE_Y || corner_pos.z > CHUNK_SIZE_Z) {
-                        gridcell.val[i] = 1.0f;
-                    } else {
-                        gridcell.val[i] = chunk.sdf_data[sdf_idx];
-                    }
-
+                    gridcell.val[i] = sdf[cell_base + kCornerIndexOffsets[i]];
                     if (gridcell.val[i] < isolevel) {
                         cube_index |= (1 << i);
                     }
                 }
 
-                if (edgeTable[cube_index] == 0) continue;
+                const unsigned int edge_mask = edgeTable[cube_index];
+                if (edge_mask == 0) continue;
                 ++active_cells;
 
                 for (int i = 0; i < 8; ++i) {
-                    gridcell.p[i] = Vec3(IVec3(x, y, z) + (corner_offsets[i] * sample_step));
+                    gridcell.p[i] = Vec3(IVec3(x, y, z) + corner_offsets[i]);
                 }
 
+                const u32 cell_slot_base = cell_base * 3u;
                 u32 vert_indices[12];
                 for (int i = 0; i < 12; ++i) {
-                    if (edgeTable[cube_index] & (1 << i)) {
-                        u32 c1_idx = corner_abs_indices[edge_connections[i][0]];
-                        u32 c2_idx = corner_abs_indices[edge_connections[i][1]];
-                        
-                        u64 edge_key = (static_cast<u64>(std::min(c1_idx, c2_idx)) << 32) | std::max(c1_idx, c2_idx);
-
-                        auto it = vertex_cache.find(edge_key);
-                        if (it != vertex_cache.end()) {
-                            vert_indices[i] = it->second;
+                    if (edge_mask & (1u << i)) {
+                        u32& cached_index = edge_vertex_cache[cell_slot_base + kEdgeCacheSlotOffsets[i]];
+                        if (cached_index != kNoCachedVertex) {
+                            vert_indices[i] = cached_index;
                         } else {
                             Vec3 p1 = gridcell.p[edge_connections[i][0]];
                             Vec3 p2 = gridcell.p[edge_connections[i][1]];
@@ -623,20 +656,21 @@ void PolygoniseTerrain(
 
                             Vec3 world_pos = Vec3(chunk_base_pos) + new_pos;
                             MaterialType mat = GetTerrainMaterialAt(world_system, world_pos);
-                            
+
                             vertices.push_back({new_pos, Vec3(0.0f), static_cast<u32>(mat)});
                             u32 new_idx = static_cast<u32>(vertices.size() - 1);
                             vert_indices[i] = new_idx;
-                            vertex_cache[edge_key] = new_idx;
+                            cached_index = new_idx;
                         }
                     }
                 }
 
                 const Vec3 density_gradient = EstimateDensityGradient(gridcell);
-                for (int i = 0; triTable[cube_index][i] != -1; i += 3) {
-                    u32 i0 = vert_indices[triTable[cube_index][i]];
-                    u32 i1 = vert_indices[triTable[cube_index][i+1]];
-                    u32 i2 = vert_indices[triTable[cube_index][i+2]];
+                const auto& tri_row = triTable[cube_index];
+                for (int i = 0; tri_row[i] != -1; i += 3) {
+                    u32 i0 = vert_indices[tri_row[i]];
+                    u32 i1 = vert_indices[tri_row[i+1]];
+                    u32 i2 = vert_indices[tri_row[i+2]];
 
                     if (i0 == i1 || i1 == i2 || i2 == i0) {
                         continue;
