@@ -1,6 +1,7 @@
 # Add the world generation test executable
 add_executable(world_generation_test
     shield/test_world_generation.cpp
+    shield/test_meshing_determinism.cpp
 )
 
 target_include_directories(world_generation_test PRIVATE
