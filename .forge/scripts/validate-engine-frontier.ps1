@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "FrontierDisabled", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "FrontierDisabled", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug"
@@ -1152,6 +1152,109 @@ function Test-InstinctPlannerGate {
     }
 }
 
+function Test-PersistenceRoundtripGate {
+    $artifactDir = "build/$BuildPreset/test-artifacts/persistence"
+    $analysisPath = Join-Path $artifactDir "world-persistence-roundtrip.json"
+    $testScriptPath = "test/persistence/world-persistence-roundtrip.ps1"
+
+    if (-not (Test-Path $testScriptPath)) {
+        throw "persistence roundtrip gate not yet implemented - missing $testScriptPath (produced by task T-EF-23-persistence-roundtrip-gate)"
+    }
+
+    & $testScriptPath -BuildPreset $BuildPreset
+    if (-not $?) {
+        exit 1
+    }
+    if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
+    if (-not (Test-Path $analysisPath)) {
+        throw "persistence roundtrip gate not yet implemented - missing $analysisPath (produced by task T-EF-23-persistence-roundtrip-gate)"
+    }
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.persistence.world_roundtrip.v1") {
+        throw "Unexpected persistence roundtrip schema '$($analysis.schema)'"
+    }
+    if (-not $analysis.passed) {
+        throw "Persistence roundtrip analysis reported failure"
+    }
+    if ($analysis.build_preset -ne $BuildPreset) {
+        throw "Persistence roundtrip build_preset '$($analysis.build_preset)' does not match '$BuildPreset'"
+    }
+    if ($analysis.persistence.source -ne "src/luminumbra_common/persistence/WorldPersistenceRoundtrip.cpp") {
+        throw "Persistence roundtrip analysis must inspect WorldPersistenceRoundtrip.cpp"
+    }
+    if ($analysis.persistence.header -ne "src/luminumbra_common/persistence/WorldPersistenceRoundtrip.h") {
+        throw "Persistence roundtrip analysis must inspect WorldPersistenceRoundtrip.h"
+    }
+    if ($analysis.persistence.serializer -ne "SerializeWorldStreamingStateSnapshotJson") {
+        throw "Persistence roundtrip analysis must require SerializeWorldStreamingStateSnapshotJson"
+    }
+    if ($analysis.persistence.loader -ne "LoadWorldStreamingStateSnapshotJson") {
+        throw "Persistence roundtrip analysis must require LoadWorldStreamingStateSnapshotJson"
+    }
+    if ($analysis.persistence.validation_api -ne "WorldPersistenceRoundtripMeetsBaseline") {
+        throw "Persistence roundtrip analysis must require WorldPersistenceRoundtripMeetsBaseline"
+    }
+    if ($analysis.persistence.order_contract -ne "chunk_id_ascending") {
+        throw "Persistence roundtrip must declare chunk_id_ascending deterministic ordering"
+    }
+    if ([int64]$analysis.persistence.persisted_field_count -lt 20) {
+        throw "Persistence roundtrip must cover the baseline persisted chunk fields"
+    }
+    if ($analysis.roundtrip.snapshot_schema -ne "luminumbra.persistence.world_state_snapshot.v1") {
+        throw "Persistence roundtrip snapshot schema must be luminumbra.persistence.world_state_snapshot.v1"
+    }
+    if ([int64]$analysis.roundtrip.chunk_count -lt 3) {
+        throw "Persistence roundtrip fixture must cover at least three chunks"
+    }
+    if (-not $analysis.roundtrip.stable_serialization) {
+        throw "Persistence roundtrip must be byte-stable after save/load/save"
+    }
+    if ([string]::IsNullOrWhiteSpace($analysis.roundtrip.before_checksum) -or
+        $analysis.roundtrip.before_checksum -ne $analysis.roundtrip.after_checksum) {
+        throw "Persistence roundtrip checksums must be present and equal"
+    }
+
+    foreach ($field in @(
+        "coords",
+        "chunk_id",
+        "state",
+        "sdf_data",
+        "mesh_vertices",
+        "mesh_indices",
+        "water_level_data",
+        "water_flow_data",
+        "water_sim_terrain_height",
+        "water_state"
+    )) {
+        Assert-ArrayContains -Values $analysis.persistence.persisted_fields -Needle $field -Description "Persistence roundtrip persisted_fields"
+    }
+
+    $requiredChecks = @(
+        "persistence header declares gate API",
+        "world state serializer emits deterministic chunk order",
+        "world state loader restores chunk coordinates and state",
+        "roundtrip serialization is byte-stable",
+        "chunk payload preserves terrain, mesh, and water data",
+        "persistence source is wired into common sources",
+        "persistence gate test is wired into test sources",
+        "gate artifact records deterministic checksum"
+    )
+    $checks = @($analysis.checks)
+    foreach ($requiredCheck in $requiredChecks) {
+        $matches = @($checks | Where-Object { $_.name -eq $requiredCheck })
+        if ($matches.Count -ne 1) {
+            throw "Persistence roundtrip analysis is missing check '$requiredCheck'"
+        }
+        if (-not $matches[0].passed) {
+            throw "Persistence roundtrip check failed: $requiredCheck"
+        }
+    }
+}
+
 function Test-FrontierDisabled {
     Assert-FileExists $FrontierDisabledPath
 
@@ -1190,6 +1293,7 @@ switch ($Mode) {
     "LuaApiManifestGate" { Test-LuaApiManifestGate }
     "AethericDiffusionGate" { Test-AethericDiffusionGate }
     "InstinctPlannerGate" { Test-InstinctPlannerGate }
+    "PersistenceRoundtripGate" { Test-PersistenceRoundtripGate }
     "FrontierDisabled" { Test-FrontierDisabled }
     "All" {
         Test-CodexOnly
@@ -1207,6 +1311,7 @@ switch ($Mode) {
         Test-LuaApiManifestGate
         Test-AethericDiffusionGate
         Test-InstinctPlannerGate
+        Test-PersistenceRoundtripGate
         Test-FrontierDisabled
     }
 }
