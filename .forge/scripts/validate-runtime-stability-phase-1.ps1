@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Files", "Sections", "CodexOnly", "Source", "Build", "UnitTests", "Smoke", "LodGround", "WaterVisual", "EnduranceStreamDrain", "Endurance300", "CrashDump", "MemoryWatermark", "RuntimeArtifacts", "All")]
+    [ValidateSet("Files", "Sections", "CodexOnly", "Source", "Build", "UnitTests", "Smoke", "LodGround", "WaterVisual", "EnduranceStreamDrain", "LodBoundaryHysteresis", "Endurance300", "CrashDump", "MemoryWatermark", "RuntimeArtifacts", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -469,6 +469,64 @@ function Test-EnduranceStreamDrain {
     }
 }
 
+function Test-LodBoundaryHysteresis {
+    $exe = Get-ClientExe
+    $artifactRoot = "build/$BuildPreset/test-artifacts/runtime"
+    New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
+
+    $boundaryDir = Join-Path $artifactRoot "lod-boundary-oscillation"
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $boundaryDir
+
+    $runSeconds = [Math]::Max(20, $SmokeSeconds)
+    Invoke-Checked -FilePath $exe -ArgumentList @(
+        "--scenario", "lod_boundary_oscillation_smoke",
+        "--auto-create-world",
+        "--auto-enter-world",
+        "--timed-run", "$runSeconds",
+        "--no-audio",
+        "--no-ui",
+        "--runtime-artifact-dir", $boundaryDir
+    ) -TimeoutSeconds ([Math]::Max(120, $runSeconds + 90)) | Out-Null
+
+    $analysisPath = Join-Path $boundaryDir "lod-boundary-oscillation.json"
+    Assert-FileExists $analysisPath
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.lod_boundary_oscillation.v1") {
+        throw "Unexpected LOD boundary oscillation schema '$($analysis.schema)'"
+    }
+    if ([int64]$analysis.gl_debug.errors -ne 0) {
+        throw "LOD boundary oscillation run emitted GL debug errors: $($analysis.gl_debug.errors)"
+    }
+    if ([int64]$analysis.frames_observed -le 0) {
+        throw "LOD boundary oscillation run observed no frames"
+    }
+    if ([int64]$analysis.chunks_observed -le 0) {
+        throw "LOD boundary oscillation run observed no chunks"
+    }
+    if ([double]$analysis.boundary_distance -le 0.0) {
+        throw "LOD boundary oscillation run recorded no boundary distance"
+    }
+    $baseline = $analysis.known_oscillation_baseline
+    if ($null -eq $baseline) {
+        throw "LOD boundary oscillation analysis is missing known_oscillation_baseline"
+    }
+    if ([double]$analysis.max_transitions_per_chunk_per_s -gt [double]$baseline.max_transitions_per_chunk_per_s) {
+        throw "LOD boundary oscillation exceeded baseline per-chunk transition rate: $($analysis.max_transitions_per_chunk_per_s) > $($baseline.max_transitions_per_chunk_per_s)"
+    }
+    if ([int64]$analysis.oscillating_chunk_count -gt [int64]$baseline.max_oscillating_chunk_count) {
+        throw "LOD boundary oscillation exceeded baseline oscillating chunk count: $($analysis.oscillating_chunk_count) > $($baseline.max_oscillating_chunk_count)"
+    }
+    if ([double]$analysis.total_transitions_per_s -gt [double]$baseline.max_total_transitions_per_s) {
+        throw "LOD boundary oscillation exceeded baseline total transition rate: $($analysis.total_transitions_per_s) > $($baseline.max_total_transitions_per_s)"
+    }
+    if (-not $analysis.passed) {
+        throw "LOD boundary oscillation analysis reported failure"
+    }
+
+    Write-Host "LOD boundary oscillation at $($analysis.boundary_distance)m over $($analysis.duration_seconds)s: chunks_observed=$($analysis.chunks_observed), max_transitions_per_chunk=$($analysis.max_transitions_per_chunk), oscillating_chunk_count=$($analysis.oscillating_chunk_count), total_transitions=$($analysis.total_transitions)"
+}
+
 function Test-Endurance300 {
     $exe = Get-ClientExe
     $artifactRoot = "build/$BuildPreset/test-artifacts/runtime"
@@ -625,6 +683,7 @@ switch ($Mode) {
     "LodGround" { Test-LodGround }
     "WaterVisual" { Test-WaterVisual }
     "EnduranceStreamDrain" { Test-EnduranceStreamDrain }
+    "LodBoundaryHysteresis" { Test-LodBoundaryHysteresis }
     "Endurance300" { Test-Endurance300 }
     "CrashDump" { Test-CrashDump }
     "MemoryWatermark" { Test-MemoryWatermark }

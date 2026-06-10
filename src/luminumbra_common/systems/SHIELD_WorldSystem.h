@@ -174,6 +174,7 @@ public:
     bool EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSystem* physics_system, int surface_radius, int collision_radius);
     const StreamingBudgetFrameStats& get_last_streaming_budget_stats() const { return m_last_streaming_budget_stats; }
     const StreamingTelemetryStats& get_streaming_telemetry_stats() const { return m_streaming_telemetry_stats; }
+    const std::vector<ChunkLOD>& get_lod_levels() const { return m_lod_levels; }
     RuntimeChunkStats get_runtime_chunk_stats() const;
     CameraLocalCoverageStats get_camera_local_coverage_stats(const Vec3& camera_position, int horizontal_radius) const;
     float get_density_at_from_precalculated(const Vec3& world_pos, float terrain_height) const;

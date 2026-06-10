@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace Luminumbra::world { class GameSession; }
@@ -49,6 +50,7 @@ struct RuntimeScenarioConfig {
     bool lod_ground_smoke() const { return scenario == "lod_ground_smoke"; }
     bool water_visual_smoke() const { return scenario == "water_visual_smoke"; }
     bool material_visual_smoke() const { return scenario == "material_visual_smoke"; }
+    bool lod_boundary_oscillation_smoke() const { return scenario == "lod_boundary_oscillation_smoke"; }
     bool forced_crash() const { return scenario == "forced_crash"; }
 };
 
@@ -182,5 +184,32 @@ void WriteStreamingTelemetry(
     const std::string& scenario,
     double duration_seconds,
     const Luminumbra::Systems::SHIELD_WorldSystem::StreamingTelemetryStats& stats);
+
+float LodBoundaryDistance(Luminumbra::Systems::SHIELD_WorldSystem* world_system);
+
+void ApplyLodBoundaryOscillationCamera(
+    Luminumbra::world::GameSession* game_session,
+    Luminumbra::Rendering::Camera* camera,
+    double elapsed_seconds);
+
+class LodBoundaryTransitionRecorder {
+public:
+    void record_frame(Luminumbra::Systems::SHIELD_WorldSystem* world_system);
+
+    uint64_t frames_observed() const { return m_frames_observed; }
+    std::size_t chunks_observed() const { return m_last_lod.size(); }
+    const std::unordered_map<Luminumbra::ChunkID, std::uint64_t>& transitions() const { return m_transitions; }
+
+private:
+    std::unordered_map<Luminumbra::ChunkID, int> m_last_lod;
+    std::unordered_map<Luminumbra::ChunkID, std::uint64_t> m_transitions;
+    uint64_t m_frames_observed = 0;
+};
+
+void WriteLodBoundaryOscillationAnalysis(
+    const std::filesystem::path& artifact_dir,
+    double duration_seconds,
+    float boundary_distance,
+    const LodBoundaryTransitionRecorder& recorder);
 
 } // namespace Luminumbra::Client::ScenarioHarness
