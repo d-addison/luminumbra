@@ -5,6 +5,8 @@
 #include "../systems/PhysicsSystem.h"
 #include "../systems/WaterSystem.h"
 #include "../core/Log.h"
+#include "../persistence/WorldSaveService.h"
+#include "WorldStreamingState.h"
 
 #include <fstream>
 #include <sstream>
@@ -262,6 +264,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
         m_metadata.name = metadata_json.value("name", "Unnamed World");
         m_metadata.seed = metadata_json.value("seed", "0");
         m_metadata.worldType = metadata_json.value("worldType", "default");
+        m_metadata.worldId = worldId;
         m_metadata.creationTime = metadata_json.value("creationTime", 0);
     } catch (const nlohmann::json::parse_error& e) {
         LUMINUMBRA_CORE_ERROR("Failed to parse world metadata file '{}': {}", metadataPath, e.what());
@@ -325,6 +328,154 @@ bool GameSession::SaveWorld() {
 
     file << std::setw(4) << metadata_json << std::endl;
     file.close();
+    return true;
+}
+
+std::filesystem::path GameSession::GetWorldSaveDir() const {
+    if (m_metadata.worldId.empty()) {
+        return {};
+    }
+    return fs::path(m_rootPath + "worlds/saves/" + m_metadata.worldId);
+}
+
+bool GameSession::SaveWorldState(WorldStateSaveReport* report) {
+    if (report) {
+        *report = {};
+    }
+    const fs::path save_dir = GetWorldSaveDir();
+    if (save_dir.empty()) {
+        // No active world session; nothing to persist.
+        return false;
+    }
+    return SaveWorldStateTo(save_dir, report);
+}
+
+bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir, WorldStateSaveReport* report) {
+    WorldStateSaveReport result;
+    if (report) {
+        *report = result;
+    }
+    if (!m_worldSystem || save_dir.empty()) {
+        return false;
+    }
+
+    // Quiesce in-flight generation/meshing so chunk data is stable on disk.
+    m_worldSystem->wait_for_streaming_jobs();
+
+    WorldStreamingState state;
+    for (const auto& chunk : m_worldSystem->snapshot_streamed_chunks()) {
+        state.insert_chunk(chunk);
+    }
+    result.chunks_total = state.size();
+
+    const std::vector<ChunkID> dirty_ids = state.dirty_chunk_ids();
+    result.chunks_dirty = dirty_ids.size();
+    if (dirty_ids.empty()) {
+        // Nothing to persist. Without an existing snapshot this keeps a
+        // save-less world byte-for-byte on the fresh-world path (the chunks/
+        // directory is never created).
+        if (report) {
+            *report = result;
+        }
+        return true;
+    }
+
+    Persistence::WorldSaveService service;
+    std::vector<std::string> errors;
+    std::error_code exists_error;
+    const bool has_snapshot =
+        fs::exists(Persistence::WorldSaveService::world_state_path(save_dir), exists_error) && !exists_error;
+
+    bool ok = false;
+    if (!has_snapshot) {
+        // First save of this world: write the full snapshot, then clear the
+        // dirty flags exactly like the incremental path does.
+        ok = service.save_world(state, save_dir, &errors);
+        if (ok) {
+            for (const ChunkID id : dirty_ids) {
+                if (const auto chunk = state.find_chunk(id)) {
+                    chunk->clear_voxel_data_dirty();
+                }
+            }
+        }
+    } else {
+        const Persistence::WorldSaveDirtyReport dirty_report = service.save_dirty_chunks(state, save_dir, &errors);
+        ok = dirty_report.saved;
+    }
+
+    for (const std::string& error : errors) {
+        LUMINUMBRA_CORE_ERROR("World state save failed: {}", error);
+    }
+    if (ok) {
+        result.saved = true;
+        result.chunks_saved = result.chunks_total; // whole-snapshot layout
+        LUMINUMBRA_CORE_INFO("World state saved: {} chunks ({} dirty) -> {}",
+            result.chunks_total, result.chunks_dirty, save_dir.string());
+    }
+    if (report) {
+        *report = result;
+    }
+    return ok;
+}
+
+bool GameSession::LoadWorldState() {
+    return LoadWorldStateFrom(GetWorldSaveDir());
+}
+
+bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
+    m_lastLoadedChunkCount = 0;
+    if (!m_worldSystem || save_dir.empty()) {
+        return false;
+    }
+
+    Persistence::WorldSaveService service;
+    WorldStreamingState loaded;
+    std::vector<std::string> errors;
+    if (!service.load_world(loaded, save_dir, errors)) {
+        // Missing snapshot is a clean miss: errors stays empty and the world
+        // proceeds on the untouched fresh-generation path.
+        for (const std::string& error : errors) {
+            LUMINUMBRA_CORE_ERROR("World state load failed: {}", error);
+        }
+        return false;
+    }
+
+    std::size_t adopted = 0;
+    for (const auto& chunk : loaded.snapshot_chunks()) {
+        if (!chunk) {
+            continue;
+        }
+
+        // Runtime-only flags do not survive process boundaries: physics
+        // colliders and in-flight mesh jobs from the saving process do not
+        // exist here, so normalize them before the streaming systems see the
+        // chunk. Voxel data (sdf/heightmap) and meshes are kept verbatim.
+        chunk->has_collision.store(false, std::memory_order_release);
+        chunk->pending_mesh_ready.store(false, std::memory_order_release);
+        chunk->pending_mesh_failed.store(false, std::memory_order_release);
+        chunk->pending_lod.store(-1, std::memory_order_release);
+        chunk->pending_mesh_vertices.clear();
+        chunk->pending_mesh_indices.clear();
+        chunk->pending_water_mesh_vertices.clear();
+        chunk->pending_water_mesh_indices.clear();
+
+        // Chunks saved mid-transition (Loading/Meshing/Unloading) settle to a
+        // stable state; Ready and Idle are restored verbatim (a Ready chunk
+        // with an empty mesh is a legitimate air chunk).
+        const bool has_mesh = !chunk->mesh_vertices.empty() && !chunk->mesh_indices.empty();
+        const ChunkState state = chunk->get_state();
+        if (state != ChunkState::Ready && state != ChunkState::Idle) {
+            chunk->set_state(has_mesh ? ChunkState::Ready : ChunkState::Idle);
+        }
+
+        if (m_worldSystem->adopt_streamed_chunk(chunk)) {
+            ++adopted;
+        }
+    }
+
+    m_lastLoadedChunkCount = adopted;
+    LUMINUMBRA_CORE_INFO("World state loaded: {} chunks adopted ({} in snapshot) from {}",
+        adopted, loaded.size(), save_dir.string());
     return true;
 }
 

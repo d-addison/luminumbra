@@ -839,7 +839,15 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
     for (const SurfaceHorizonChunk& build_chunk : chunks_to_build) {
         build_jobs.emplace_back([this, build_chunk]() {
             const auto& chunk = build_chunk.chunk;
-            GenerateChunkData(*chunk);
+            if (chunk->sdf_data.empty()) {
+                // Chunks restored from a world save arrive with voxel data
+                // already populated (possibly carrying player edits);
+                // regeneration would clobber those edits. Generation is a
+                // pure function of seed/params, so skipping it for any chunk
+                // that already has sdf data is also a no-op for fresh chunks
+                // that merely need a LOD rebuild.
+                GenerateChunkData(*chunk);
+            }
             chunk->set_state(ChunkState::Meshing);
             Luminumbra::World::MarchingCubes::PolygoniseTerrain(*this, *chunk, 0.0f, build_chunk.step);
             chunk->applied_transition_faces.store(0, std::memory_order_release);
@@ -1308,6 +1316,16 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<IVec3>&
 
     std::vector<Luminumbra::Job> jobs;
     for (const auto& coords : chunks_to_generate) {
+        // Chunks restored from a world save (or already generated) carry
+        // populated voxel data, possibly with player edits; regeneration would
+        // clobber those edits. Generation is a pure function of seed/params,
+        // so skipping any chunk that already has sdf data is a no-op for
+        // untouched chunks and the load/generation contract for saved ones.
+        const auto existing = m_streaming_state.chunks.find(Chunk::calculate_id(coords));
+        if (existing != m_streaming_state.chunks.end() && existing->second && !existing->second->sdf_data.empty()) {
+            continue;
+        }
+
         auto chunk = std::make_shared<Luminumbra::Chunk>(coords);
         chunk->set_state(Luminumbra::ChunkState::Loading);
         m_streaming_state.chunks[chunk->get_id()] = chunk;
@@ -1564,6 +1582,35 @@ void SHIELD_WorldSystem::SetGPUSDFCallback(std::function<bool(const IVec3&, cons
     wait_for_generation_jobs();
 
     m_gpu_sdf_callback = callback;
+}
+
+void SHIELD_WorldSystem::wait_for_streaming_jobs() {
+    wait_for_generation_jobs();
+    wait_for_meshing_jobs();
+}
+
+std::vector<std::shared_ptr<Luminumbra::Chunk>> SHIELD_WorldSystem::snapshot_streamed_chunks() const {
+    std::vector<std::shared_ptr<Luminumbra::Chunk>> chunks;
+    chunks.reserve(m_streaming_state.chunks.size());
+    for (const auto& [id, chunk_ptr] : m_streaming_state.chunks) {
+        (void)id;
+        if (chunk_ptr) {
+            chunks.push_back(chunk_ptr);
+        }
+    }
+    return chunks;
+}
+
+std::shared_ptr<Luminumbra::Chunk> SHIELD_WorldSystem::find_streamed_chunk(const IVec3& coords) const {
+    const auto it = m_streaming_state.chunks.find(Chunk::calculate_id(coords));
+    return it != m_streaming_state.chunks.end() ? it->second : nullptr;
+}
+
+bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::Chunk>& chunk) {
+    if (!chunk) {
+        return false;
+    }
+    return m_streaming_state.chunks.emplace(chunk->get_id(), chunk).second;
 }
 
 } // namespace Luminumbra::Systems

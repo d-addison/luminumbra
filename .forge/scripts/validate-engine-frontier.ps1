@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -1682,6 +1682,106 @@ function Test-PersistenceRoundtripGate {
     }
 }
 
+function Test-PersistenceRuntimeRoundtrip {
+    # T-I2-13: runtime save/load roundtrip through the live client. The save
+    # phase applies deterministic voxel edits and persists the world to a
+    # session dir; the load phase restores the same world identity from that
+    # session dir and re-hashes the same edited chunk ids.
+    $exe = Get-ClientExe
+    $runtimeDir = "build/$BuildPreset/test-artifacts/persistence/runtime-roundtrip"
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $runtimeDir
+    New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
+    $sessionDir = Join-Path $runtimeDir "session"
+
+    # Small radii keep the whole-world snapshot (and its JSON parse on load)
+    # to a few dozen MB while still covering every scripted edit site.
+    $commonArgs = @(
+        "--scenario", "persistence_roundtrip_smoke",
+        "--auto-create-world",
+        "--auto-enter-world",
+        "--no-audio",
+        "--no-ui",
+        "--hidden-window",
+        "--horizon-radius", "4",
+        "--collision-radius", "2",
+        "--min-renderable-chunks", "32",
+        "--min-collision-chunks", "4",
+        "--persistence-session-dir", $sessionDir,
+        "--runtime-artifact-dir", $runtimeDir
+    )
+
+    Invoke-Checked -FilePath $exe -ArgumentList ($commonArgs + @("--persistence-phase", "save")) -TimeoutSeconds 300
+    Invoke-Checked -FilePath $exe -ArgumentList ($commonArgs + @("--persistence-phase", "load")) -TimeoutSeconds 300
+
+    $savePath = Join-Path $runtimeDir "persistence-runtime-roundtrip-phase-save.json"
+    $loadPath = Join-Path $runtimeDir "persistence-runtime-roundtrip-phase-load.json"
+    foreach ($path in @($savePath, $loadPath)) {
+        if (-not (Test-Path $path)) {
+            throw "persistence runtime roundtrip did not produce $path"
+        }
+    }
+
+    $save = Get-Content $savePath -Raw | ConvertFrom-Json
+    $load = Get-Content $loadPath -Raw | ConvertFrom-Json
+    foreach ($artifact in @($save, $load)) {
+        if ($artifact.schema -ne "luminumbra.persistence_runtime_roundtrip_phase.v1") {
+            throw "Unexpected persistence runtime roundtrip phase schema '$($artifact.schema)'"
+        }
+    }
+    if ($save.phase -ne "save") {
+        throw "save-phase artifact reports phase '$($save.phase)'"
+    }
+    if ($load.phase -ne "load") {
+        throw "load-phase artifact reports phase '$($load.phase)'"
+    }
+    if ([string]::IsNullOrWhiteSpace($save.world_hash)) {
+        throw "persistence runtime roundtrip save phase produced an empty world hash"
+    }
+    if ([string]::IsNullOrWhiteSpace($load.world_hash)) {
+        throw "persistence runtime roundtrip load phase produced an empty world hash"
+    }
+    if ($save.world_hash -ne $load.world_hash) {
+        throw "persistence runtime roundtrip hash mismatch: save=$($save.world_hash) load=$($load.world_hash)"
+    }
+    if ([int64]$save.chunks_saved -le 0) {
+        throw "persistence runtime roundtrip save phase persisted no chunks"
+    }
+    if ([int64]$save.chunks_dirty -le 0) {
+        throw "persistence runtime roundtrip save phase flushed no dirty chunks"
+    }
+    if ([int64]$load.chunks_loaded -le 0) {
+        throw "persistence runtime roundtrip load phase loaded no chunks"
+    }
+    if ([int64]$load.chunks_adopted_runtime -le 0) {
+        throw "persistence runtime roundtrip load phase adopted no chunks into the live world"
+    }
+
+    $combined = [ordered]@{
+        schema = "luminumbra.persistence_runtime_roundtrip.v1"
+        timestamp_utc = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+        hash_before = $save.world_hash
+        hash_after = $load.world_hash
+        chunks_saved = [int64]$save.chunks_saved
+        dirty_chunks_flushed = [int64]$save.chunks_dirty
+        match = ($save.world_hash -eq $load.world_hash)
+    }
+    $combinedPath = Join-Path $runtimeDir "persistence-runtime-roundtrip.json"
+    ($combined | ConvertTo-Json -Depth 4) | Out-File -FilePath $combinedPath -Encoding ascii
+
+    $verify = Get-Content $combinedPath -Raw | ConvertFrom-Json
+    if ($verify.schema -ne "luminumbra.persistence_runtime_roundtrip.v1") {
+        throw "persistence runtime roundtrip combined artifact has unexpected schema '$($verify.schema)'"
+    }
+    if (-not $verify.match -or $verify.hash_before -ne $verify.hash_after) {
+        throw "persistence runtime roundtrip combined artifact failed validation"
+    }
+    if ([int64]$verify.chunks_saved -le 0 -or [int64]$verify.dirty_chunks_flushed -le 0) {
+        throw "persistence runtime roundtrip combined artifact reports no persisted work"
+    }
+
+    Write-Host "persistence runtime roundtrip: hash_before=$($save.world_hash) hash_after=$($load.world_hash) chunks_saved=$($save.chunks_saved) dirty_chunks_flushed=$($save.chunks_dirty)"
+}
+
 function Test-ChunkFormatValidationGate {
     $artifactDir = "build/$BuildPreset/test-artifacts/persistence"
     $analysisPath = Join-Path $artifactDir "chunk-format-validation.json"
@@ -1978,6 +2078,19 @@ function Test-FrontierDisabled {
         "frontier runtime behavior requires explicit opt-in",
         "Activation must be documented",
         "validate-engine-frontier.ps1 -Mode FrontierDisabled"
+    )) {
+        Assert-Contains -Path $FrontierDisabledPath -Needle $needle
+    }
+
+    # T-I2-12/T-I2-13: the persistence runtime save/load path is the first
+    # gate-backed activation. It is allowed to run in default builds because
+    # it is inert without an existing world snapshot or unsaved voxel edits,
+    # and its behavior is enforced by the PersistenceRuntimeRoundtrip mode.
+    # The activation must stay documented in the frontier-disabled artifact.
+    foreach ($needle in @(
+        "Persistence runtime save/load",
+        "PersistenceRuntimeRoundtrip",
+        "persistence_roundtrip_smoke"
     )) {
         Assert-Contains -Path $FrontierDisabledPath -Needle $needle
     }
@@ -2312,6 +2425,7 @@ switch ($Mode) {
     "AethericDiffusionGate" { Test-AethericDiffusionGate }
     "InstinctPlannerGate" { Test-InstinctPlannerGate }
     "PersistenceRoundtripGate" { Test-PersistenceRoundtripGate }
+    "PersistenceRuntimeRoundtrip" { Test-PersistenceRuntimeRoundtrip }
     "ChunkFormatValidationGate" { Test-ChunkFormatValidationGate }
     "WorldHashEntitySnapshotGate" { Test-WorldHashEntitySnapshotGate }
     "NetworkLoopbackAuthorityGate" { Test-NetworkLoopbackAuthorityGate }
