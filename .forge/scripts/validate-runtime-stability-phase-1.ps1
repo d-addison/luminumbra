@@ -559,10 +559,19 @@ function Test-LodSeamRisk {
     if (@($analysis.captures).Count -lt 4) {
         throw "LOD seam arrival run did not capture the p25/p50/p75/p95 screenshots"
     }
+    if ($null -eq $analysis.thresholds.max_near_black_cluster_count) {
+        throw "LOD seam arrival analysis is missing max_near_black_cluster_count threshold (sliver-cluster detection not present)"
+    }
     foreach ($capture in $analysis.captures) {
         Assert-FileExists (Join-Path $seamDir $capture.file)
+        if ($null -eq $capture.pixels.near_black_cluster_count) {
+            throw "LOD seam arrival capture '$($capture.role)' is missing near_black_cluster_count (sliver-cluster detection not present)"
+        }
+        if ([int64]$capture.pixels.near_black_cluster_count -gt [int64]$analysis.thresholds.max_near_black_cluster_count) {
+            throw "LOD seam arrival capture '$($capture.role)' has $($capture.pixels.near_black_cluster_count) near-black sliver clusters (largest $($capture.pixels.largest_near_black_cluster_px)px) - persistent LOD seam cracks detected"
+        }
         if ($capture.enforced -and -not $capture.passed) {
-            throw "LOD seam arrival capture '$($capture.role)' failed pixel thresholds: dark_void_ratio=$($capture.pixels.dark_void_ratio), near_black_ratio=$($capture.pixels.near_black_ratio), background_blue_ratio=$($capture.pixels.background_blue_ratio)"
+            throw "LOD seam arrival capture '$($capture.role)' failed pixel thresholds: dark_void_ratio=$($capture.pixels.dark_void_ratio), near_black_ratio=$($capture.pixels.near_black_ratio), background_blue_ratio=$($capture.pixels.background_blue_ratio), near_black_cluster_count=$($capture.pixels.near_black_cluster_count), largest_near_black_cluster_px=$($capture.pixels.largest_near_black_cluster_px)"
         }
     }
     if ($null -eq $analysis.pending_lod_high_water) {

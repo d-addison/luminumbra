@@ -471,6 +471,21 @@ bool IsNearBlackPixel(unsigned char r, unsigned char g, unsigned char b) {
     return r < 24 && g < 24 && b < 24;
 }
 
+// Sliver-cluster predicate for LOD seam crack detection. True seam cracks are
+// holes through the terrain into the unrendered void, so they capture at
+// RGB <= 10 (pure black, at most slightly lifted by bloom/tonemap). The
+// legitimately dark scene content nearby (shaded crevices, steep trench
+// walls) measures RGB 17-28 in the seam-arrival captures, so the tight bound
+// keeps the gate exact: crack pixels are counted, dark-but-lit geometry is
+// not.
+bool IsSeamSliverPixel(unsigned char r, unsigned char g, unsigned char b) {
+    return r <= 10 && g <= 10 && b <= 10;
+}
+
+// Minimum connected-component size (in pixels) for a near-black run to count
+// as a seam crack sliver instead of legitimate point shadow/noise.
+constexpr std::uint64_t kMinNearBlackClusterPx = 12;
+
 bool IsBackgroundBluePixel(unsigned char r, unsigned char g, unsigned char b) {
     return r >= 38 &&
         r <= 110 &&
@@ -569,6 +584,66 @@ LodHolePixelStats AnalyzeLodHolePixels(const std::vector<unsigned char>& pixels,
         stats.near_black_ratio = static_cast<double>(stats.near_black_pixels) / static_cast<double>(stats.roi_pixels);
         stats.background_blue_ratio = static_cast<double>(stats.background_blue_pixels) / static_cast<double>(stats.roi_pixels);
     }
+
+    // Sliver-cluster pass: connected components (8-connectivity) of void
+    // (RGB <= 10) pixels inside the enforced ROI. Persistent LOD seam cracks
+    // show up as narrow runs of tens of connected pixels while the overall
+    // near-black ratio stays below the area threshold.
+    std::vector<std::uint8_t> sliver_mask(static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0u);
+    for (int y = 0; y < height; ++y) {
+        const int y_from_top = height - 1 - y;
+        if (y_from_top < min_top_y || y_from_top >= max_top_y) {
+            continue;
+        }
+        for (int x = min_x; x < max_x; ++x) {
+            const std::size_t offset = static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
+            if (IsSeamSliverPixel(pixels[offset + 0u], pixels[offset + 1u], pixels[offset + 2u])) {
+                sliver_mask[static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)] = 1u;
+            }
+        }
+    }
+
+    std::vector<std::size_t> flood_stack;
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const std::size_t seed = static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x);
+            if (sliver_mask[seed] != 1u) {
+                continue;
+            }
+
+            std::uint64_t cluster_px = 0;
+            flood_stack.clear();
+            flood_stack.push_back(seed);
+            sliver_mask[seed] = 2u;
+            while (!flood_stack.empty()) {
+                const std::size_t current = flood_stack.back();
+                flood_stack.pop_back();
+                ++cluster_px;
+                const int cx = static_cast<int>(current % static_cast<std::size_t>(width));
+                const int cy = static_cast<int>(current / static_cast<std::size_t>(width));
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const int nx = cx + dx;
+                        const int ny = cy + dy;
+                        if (nx < 0 || ny < 0 || nx >= width || ny >= height) {
+                            continue;
+                        }
+                        const std::size_t neighbor = static_cast<std::size_t>(ny) * static_cast<std::size_t>(width) + static_cast<std::size_t>(nx);
+                        if (sliver_mask[neighbor] == 1u) {
+                            sliver_mask[neighbor] = 2u;
+                            flood_stack.push_back(neighbor);
+                        }
+                    }
+                }
+            }
+
+            stats.largest_near_black_cluster_px = std::max(stats.largest_near_black_cluster_px, cluster_px);
+            if (cluster_px >= kMinNearBlackClusterPx) {
+                ++stats.near_black_cluster_count;
+            }
+        }
+    }
+
     return stats;
 }
 
@@ -626,7 +701,9 @@ nlohmann::json LodHolePixelStatsToJson(const LodHolePixelStats& stats) {
         {"background_blue_pixels", stats.background_blue_pixels},
         {"dark_void_ratio", stats.dark_void_ratio},
         {"near_black_ratio", stats.near_black_ratio},
-        {"background_blue_ratio", stats.background_blue_ratio}
+        {"background_blue_ratio", stats.background_blue_ratio},
+        {"near_black_cluster_count", stats.near_black_cluster_count},
+        {"largest_near_black_cluster_px", stats.largest_near_black_cluster_px}
     };
 }
 
@@ -1221,6 +1298,14 @@ void WriteLodSeamArrivalAnalysis(
     constexpr double kMaxDarkVoidRatio = 0.020;
     constexpr double kMaxNearBlackRatio = 0.0065;
     constexpr double kMaxBackgroundBlueRatio = 0.025;
+    // Seam crack sliver clusters (>= 12 connected void pixels, RGB <= 10) are
+    // the user-visible defect even at near-black ratios far below the area
+    // threshold (pre-fix captures: 505-675 void pixels per frame forming
+    // wedge-shaped holes, at near-black ratios of only 0.0002-0.0013).
+    // Column-aligned LOD selection plus stale-skirt repair keeps the void
+    // cluster count at zero; legitimately dark geometry (RGB 17-28) is not
+    // counted.
+    constexpr std::uint64_t kMaxNearBlackClusterCount = 0;
 
     const GLDebugRuntimeStats gl_debug = CurrentGLDebugRuntimeStats();
     bool passed = captures.size() >= 4 && gl_debug.errors == 0;
@@ -1232,7 +1317,8 @@ void WriteLodSeamArrivalAnalysis(
             capture.pixels.near_black_pixels <= kMaxNearBlackPixels &&
             capture.pixels.near_black_ratio <= kMaxNearBlackRatio &&
             capture.pixels.background_blue_pixels <= kMaxBackgroundBluePixels &&
-            capture.pixels.background_blue_ratio <= kMaxBackgroundBlueRatio;
+            capture.pixels.background_blue_ratio <= kMaxBackgroundBlueRatio &&
+            capture.pixels.near_black_cluster_count <= kMaxNearBlackClusterCount;
         if (!capture_passed) {
             passed = false;
         }
@@ -1259,7 +1345,9 @@ void WriteLodSeamArrivalAnalysis(
             {"max_near_black_pixels", kMaxNearBlackPixels},
             {"max_near_black_ratio", kMaxNearBlackRatio},
             {"max_background_blue_pixels", kMaxBackgroundBluePixels},
-            {"max_background_blue_ratio", kMaxBackgroundBlueRatio}
+            {"max_background_blue_ratio", kMaxBackgroundBlueRatio},
+            {"max_near_black_cluster_count", kMaxNearBlackClusterCount},
+            {"min_near_black_cluster_px", kMinNearBlackClusterPx}
         }},
         {"captures", captures_json},
         {"gl_debug", {
