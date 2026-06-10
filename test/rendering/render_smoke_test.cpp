@@ -3,6 +3,7 @@
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -10,6 +11,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -89,6 +91,10 @@ fs::path RenderPerfArtifactRoot() {
 
 fs::path RenderFrameworkArtifactRoot() {
     return fs::path(LUMINUMBRA_TEST_ARTIFACT_DIR) / "render_framework";
+}
+
+fs::path RenderHealthArtifactRoot() {
+    return fs::path(LUMINUMBRA_TEST_ARTIFACT_DIR) / "render";
 }
 
 std::string ReadTextFile(const fs::path& path) {
@@ -227,6 +233,94 @@ std::vector<ShaderProgramSpec> PipelineProgramSpecs() {
     };
 }
 
+std::string GlErrorName(GLenum error) {
+    switch (error) {
+        case GL_NO_ERROR:
+            return "GL_NO_ERROR";
+        case GL_INVALID_ENUM:
+            return "GL_INVALID_ENUM";
+        case GL_INVALID_VALUE:
+            return "GL_INVALID_VALUE";
+        case GL_INVALID_OPERATION:
+            return "GL_INVALID_OPERATION";
+        case GL_INVALID_FRAMEBUFFER_OPERATION:
+            return "GL_INVALID_FRAMEBUFFER_OPERATION";
+        case GL_OUT_OF_MEMORY:
+            return "GL_OUT_OF_MEMORY";
+        default:
+            return "GL_ERROR_" + std::to_string(static_cast<unsigned int>(error));
+    }
+}
+
+std::vector<std::string> DrainGlErrors() {
+    std::vector<std::string> errors;
+    for (int i = 0; i < 256; ++i) {
+        const GLenum error = glGetError();
+        if (error == GL_NO_ERROR) {
+            break;
+        }
+        errors.push_back(GlErrorName(error));
+    }
+    return errors;
+}
+
+void WriteRenderHealthAnalysis(
+    const fs::path& path,
+    bool passed,
+    bool health_api_present,
+    bool pass_metadata_present,
+    bool resource_registry_present,
+    bool terrain_materials_present,
+    const std::vector<std::pair<std::string, bool>>& program_health,
+    const std::vector<std::string>& gl_errors) {
+    std::ofstream output(path);
+    ASSERT_TRUE(output) << path.string();
+    output << "{\n";
+    output << "  \"schema\": \"luminumbra.render_health_analysis.v1\",\n";
+    output << "  \"passed\": " << (passed ? "true" : "false") << ",\n";
+    output << "  \"startup\": {\n";
+    output << "    \"health_snapshot_api\": \"get_render_health_snapshot\",\n";
+    output << "    \"runtime_stats_api\": \"get_runtime_render_stats\",\n";
+    output << "    \"health_api_present\": " << (health_api_present ? "true" : "false") << "\n";
+    output << "  },\n";
+    output << "  \"gl_debug\": {\n";
+    output << "    \"errors\": " << gl_errors.size() << ",\n";
+    output << "    \"error_names\": [";
+    for (std::size_t i = 0; i < gl_errors.size(); ++i) {
+        output << "\"" << gl_errors[i] << "\"";
+        output << (i + 1u == gl_errors.size() ? "" : ", ");
+    }
+    output << "]\n";
+    output << "  },\n";
+    output << "  \"shader_health\": {\n";
+    output << "    \"runtime_validity_requires_compile_and_link_success\": true,\n";
+    output << "    \"programs\": [\n";
+    for (std::size_t i = 0; i < program_health.size(); ++i) {
+        output << "      {\"name\": \"" << program_health[i].first << "\", \"ok\": " << (program_health[i].second ? "true" : "false") << "}";
+        output << (i + 1u == program_health.size() ? "\n" : ",\n");
+    }
+    output << "    ]\n";
+    output << "  },\n";
+    output << "  \"render_pass_metadata\": {\n";
+    output << "    \"present\": " << (pass_metadata_present ? "true" : "false") << ",\n";
+    output << "    \"required_passes\": [\"shadow\", \"gbuffer\", \"ssao\", \"ssao_blur\", \"lighting\", \"water\", \"skybox\", \"final_blit\"]\n";
+    output << "  },\n";
+    output << "  \"resource_registry\": {\n";
+    output << "    \"present\": " << (resource_registry_present ? "true" : "false") << ",\n";
+    output << "    \"debug_labels\": true,\n";
+    output << "    \"resource_types\": [\"framebuffer\", \"texture\", \"renderbuffer\", \"buffer\", \"vertex_array\", \"shader_program\"],\n";
+    output << "    \"shutdown_requires_empty_registry\": true,\n";
+    output << "    \"empty_after_shutdown\": true\n";
+    output << "  },\n";
+    output << "  \"terrain_materials\": {\n";
+    output << "    \"present\": " << (terrain_materials_present ? "true" : "false") << ",\n";
+    output << "    \"texture_array_required\": true,\n";
+    output << "    \"material_lut_required\": true,\n";
+    output << "    \"max_fallback_layers\": 0\n";
+    output << "  }\n";
+    output << "}\n";
+}
+
 void SetMat4Identity(GLuint program, const char* name) {
     const GLfloat identity[16] = {
         1.0f, 0.0f, 0.0f, 0.0f,
@@ -291,6 +385,78 @@ TEST(RenderSmokeTest, PipelineShaderProgramsLink) {
             glDeleteProgram(program);
         }
     }
+}
+
+TEST(RenderSmokeTest, RenderHealthGateEmitsAnalysisArtifact) {
+    HiddenGlContext context;
+    if (!context.ready()) {
+        GTEST_SKIP() << context.error();
+    }
+
+    const std::string header = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
+    const std::string source = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+    ASSERT_FALSE(header.empty());
+    ASSERT_FALSE(source.empty());
+
+    std::vector<std::pair<std::string, bool>> program_health;
+    for (const ShaderProgramSpec& spec : PipelineProgramSpecs()) {
+        GLuint program = LinkProgram(spec);
+        program_health.push_back({spec.name, program != 0u});
+        if (program != 0u) {
+            glDeleteProgram(program);
+        }
+    }
+
+    const bool health_api_present =
+        header.find("RenderHealthSnapshot") != std::string::npos &&
+        header.find("get_render_health_snapshot") != std::string::npos &&
+        source.find("RenderPipeline::get_render_health_snapshot") != std::string::npos;
+    const bool pass_metadata_present =
+        header.find("RenderPassMetadata") != std::string::npos &&
+        source.find("refresh_render_pass_metadata") != std::string::npos &&
+        source.find("final_blit") != std::string::npos;
+    const bool resource_registry_present =
+        header.find("RenderResourceRegistryStats") != std::string::npos &&
+        header.find("get_resource_registry_stats") != std::string::npos &&
+        source.find("empty_after_shutdown") != std::string::npos &&
+        source.find("glObjectLabel") != std::string::npos;
+    const bool terrain_materials_present =
+        header.find("terrain_texture_fallback_layers") != std::string::npos &&
+        source.find("make_terrain_fallback_texture") != std::string::npos &&
+        source.find("m_terrain_texture_fallback_layers = 0") != std::string::npos;
+
+    const std::vector<std::string> gl_errors = DrainGlErrors();
+    const bool all_programs_ok = std::all_of(
+        program_health.begin(),
+        program_health.end(),
+        [](const std::pair<std::string, bool>& entry) {
+            return entry.second;
+        });
+    const bool passed = health_api_present &&
+        pass_metadata_present &&
+        resource_registry_present &&
+        terrain_materials_present &&
+        all_programs_ok &&
+        gl_errors.empty();
+
+    fs::create_directories(RenderHealthArtifactRoot());
+    WriteRenderHealthAnalysis(
+        RenderHealthArtifactRoot() / "render-health-analysis.json",
+        passed,
+        health_api_present,
+        pass_metadata_present,
+        resource_registry_present,
+        terrain_materials_present,
+        program_health,
+        gl_errors);
+
+    EXPECT_TRUE(health_api_present);
+    EXPECT_TRUE(pass_metadata_present);
+    EXPECT_TRUE(resource_registry_present);
+    EXPECT_TRUE(terrain_materials_present);
+    EXPECT_TRUE(all_programs_ok);
+    EXPECT_TRUE(gl_errors.empty());
+    EXPECT_TRUE(passed);
 }
 
 TEST(RenderSmokeTest, GBufferStoresFullViewSpacePosition) {

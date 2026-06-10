@@ -210,6 +210,17 @@ public:
         size_t terrain_texture_fallback_layers = 0;
     };
 
+    struct RenderHealthSnapshot {
+        RuntimeRenderStats runtime;
+        RenderResourceRegistryStats resources;
+        std::vector<ShaderHealthEntry> shaders;
+        std::vector<RenderPassMetadata> passes;
+        size_t gl_debug_errors = 0;
+        bool started = false;
+        bool passed = false;
+        std::vector<std::string> failures;
+    };
+
     RenderPipeline();
     ~RenderPipeline();
 
@@ -224,6 +235,7 @@ public:
     RuntimeRenderStats get_runtime_render_stats() const;
     RenderResourceRegistryStats get_resource_registry_stats() const;
     std::vector<ShaderHealthEntry> get_shader_health() const;
+    RenderHealthSnapshot get_render_health_snapshot(bool drain_gl_errors = false) const;
     void set_time_of_day(float normalized_time);
     
     // GPU SDF integration
