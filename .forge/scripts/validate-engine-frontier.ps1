@@ -330,6 +330,14 @@ function Test-MaterialVisual {
         throw "Stone ROI entry must be scoped to the rim sub-ROI (legitimate stone is grey-fallback-shaped; see classifier docs)"
     }
 
+    $soilEntries = @($analysis.materials | Where-Object { $_.name -eq "Soil" })
+    if ($soilEntries.Count -lt 1) {
+        throw "Material visual analysis has no Soil ROI entry; the rim sub-ROI must show the depth 1-5 soil band"
+    }
+    if ($soilEntries[0].roi_scope -ne "rim_band") {
+        throw "Soil ROI entry must be scoped to the rim sub-ROI (rim interpolation-error exposure; see classifier docs)"
+    }
+
     foreach ($entry in $analysis.materials) {
         if ($null -eq $entry.pixels -or $null -eq $entry.thresholds) {
             throw "Material ROI entry '$($entry.name)' is missing pixels or thresholds"

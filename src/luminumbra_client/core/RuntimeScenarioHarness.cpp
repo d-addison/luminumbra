@@ -1036,6 +1036,22 @@ bool IsStoneLikePixel(unsigned char r, unsigned char g, unsigned char b) {
            max_channel <= 215;
 }
 
+// Calibrated against noon rim-band captures (seed 424242): rendered soil
+// (base colour (0.3, 0.15, 0.05), depth 1-5 exposure along cliff rims)
+// measures avg RGB(41, 30, 25) - strongly red-led and warm. The r-b >= 13
+// floor keeps it disjoint from the grey-fallback detector (spread <= 12) and
+// from the stone bucket (same spread window); g-b <= 11 excludes sand, whose
+// green channel rides far above blue (measured sand g-b ~ 28). Like stone,
+// soil is counted in the rim sub-ROI, where its population is ~5x the main
+// ROI's (interpolation-error exposure concentrates on the rims).
+bool IsSoilLikePixel(unsigned char r, unsigned char g, unsigned char b) {
+    return r >= 20 && r <= 120 &&
+           static_cast<int>(r) - static_cast<int>(g) >= 7 &&
+           g >= b &&
+           static_cast<int>(g) - static_cast<int>(b) <= 11 &&
+           static_cast<int>(r) - static_cast<int>(b) >= 13;
+}
+
 void MaterialRoiBounds(int width, int height, int& min_x, int& max_x, int& min_top_y, int& max_top_y) {
     min_x = width / 6;
     max_x = width - width / 6;
@@ -1102,6 +1118,8 @@ MaterialPixelStats AnalyzeMaterialPixels(const std::vector<unsigned char>& pixel
                 ++stats.rim_roi_pixels;
                 if (IsStoneLikePixel(r, g, b)) {
                     ++stats.stone_pixels;
+                } else if (IsSoilLikePixel(r, g, b)) {
+                    ++stats.soil_pixels;
                 }
             }
         }
@@ -1114,6 +1132,7 @@ MaterialPixelStats AnalyzeMaterialPixels(const std::vector<unsigned char>& pixel
     }
     if (stats.rim_roi_pixels > 0) {
         stats.stone_ratio = static_cast<double>(stats.stone_pixels) / static_cast<double>(stats.rim_roi_pixels);
+        stats.soil_ratio = static_cast<double>(stats.soil_pixels) / static_cast<double>(stats.rim_roi_pixels);
     }
     return stats;
 }
@@ -1152,8 +1171,8 @@ bool WritePixelBufferPpm(
 
 // Heatmap legend: sand -> gold, grass -> green, grey fallback -> magenta (the
 // failure being gated must be unmissable), water -> blue, stone (rim sub-ROI
-// only) -> slate, other ROI -> dimmed luminance, outside ROI -> heavily
-// dimmed luminance.
+// only) -> slate, soil (rim sub-ROI only) -> brown, other ROI -> dimmed
+// luminance, outside ROI -> heavily dimmed luminance.
 std::vector<unsigned char> BuildMaterialHeatmap(const std::vector<unsigned char>& pixels, int width, int height) {
     std::vector<unsigned char> heatmap(pixels.size());
     int min_x = 0;
@@ -1201,6 +1220,8 @@ std::vector<unsigned char> BuildMaterialHeatmap(const std::vector<unsigned char>
             } else if (in_rim) {
                 if (IsStoneLikePixel(r, g, b)) {
                     out_r = 150; out_g = 150; out_b = 170;
+                } else if (IsSoilLikePixel(r, g, b)) {
+                    out_r = 150; out_g = 90; out_b = 40;
                 } else {
                     out_r = static_cast<unsigned char>(luminance / 2);
                     out_g = out_r;
@@ -1235,6 +1256,11 @@ void WriteMaterialVisualAnalysis(
     // observed ratio as the floor.
     constexpr std::uint64_t kMinStonePixels = 5000;
     constexpr double kMinStoneRatio = 0.066;
+    // Soil calibration (rim sub-ROI, seed 424242, noon): measured soil_ratio
+    // 0.0107-0.0109 across repeated runs; the gate takes half the observed
+    // ratio as the floor.
+    constexpr std::uint64_t kMinSoilPixels = 800;
+    constexpr double kMinSoilRatio = 0.0054;
     constexpr double kMaxGreyFallbackRatio = 0.125;
     const std::uint64_t max_grey_fallback_pixels = static_cast<std::uint64_t>(
         static_cast<double>(pixel_stats.roi_pixels) * kMaxGreyFallbackRatio);
@@ -1249,6 +1275,8 @@ void WriteMaterialVisualAnalysis(
         pixel_stats.grass_ratio >= kMinGrassRatio &&
         pixel_stats.stone_pixels >= kMinStonePixels &&
         pixel_stats.stone_ratio >= kMinStoneRatio &&
+        pixel_stats.soil_pixels >= kMinSoilPixels &&
+        pixel_stats.soil_ratio >= kMinSoilRatio &&
         pixel_stats.grey_fallback_pixels <= max_grey_fallback_pixels &&
         gl_debug.errors == 0;
 
@@ -1321,6 +1349,29 @@ void WriteMaterialVisualAnalysis(
                 {"thresholds", {
                     {"min_classified_pixels", kMinStonePixels},
                     {"min_classified_ratio", kMinStoneRatio},
+                    {"max_grey_fallback_pixels", max_grey_fallback_pixels},
+                    {"max_grey_fallback_ratio", kMaxGreyFallbackRatio}
+                }}
+            },
+            {
+                {"material_id", 2},
+                {"name", "Soil"},
+                // Soil's depth 1-5 band surfaces along the same cliff rims
+                // as stone (5x the main-ROI pixel density), so it is counted
+                // in the rim sub-ROI as well. Unlike stone, its warm hue
+                // (r-b >= 13) keeps it colour-separable from the grey
+                // fallback, whose enforcement remains scoped to the main ROI.
+                {"roi_scope", "rim_band"},
+                {"grey_fallback_scope", "main_roi"},
+                {"pixels", {
+                    {"classified_pixels", pixel_stats.soil_pixels},
+                    {"classified_ratio", pixel_stats.soil_ratio},
+                    {"grey_fallback_pixels", pixel_stats.grey_fallback_pixels},
+                    {"grey_fallback_ratio", pixel_stats.grey_fallback_ratio}
+                }},
+                {"thresholds", {
+                    {"min_classified_pixels", kMinSoilPixels},
+                    {"min_classified_ratio", kMinSoilRatio},
                     {"max_grey_fallback_pixels", max_grey_fallback_pixels},
                     {"max_grey_fallback_ratio", kMaxGreyFallbackRatio}
                 }}
