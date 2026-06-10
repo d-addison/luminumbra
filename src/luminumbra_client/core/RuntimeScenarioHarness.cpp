@@ -97,10 +97,10 @@ RuntimeScenarioConfig ParseRuntimeScenarioConfig(int argc, char* argv[], const s
     config.persistence_phase = GetCommandLineOption(argc, argv, "--persistence-phase", "");
     config.persistence_session_dir = GetCommandLineOption(argc, argv, "--persistence-session-dir", "");
 
-    const int default_timed_run = config.auto_world_smoke() ? 300 : ((config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke() || config.skybox_visual_smoke() || config.weather_visual_smoke() || config.lod_boundary_oscillation_smoke() || config.lod_seam_arrival_smoke()) ? 60 : 0);
+    const int default_timed_run = config.auto_world_smoke() ? 300 : ((config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke() || config.skybox_visual_smoke() || config.weather_visual_smoke() || config.timeofday_sweep_smoke() || config.lod_boundary_oscillation_smoke() || config.lod_seam_arrival_smoke()) ? 60 : 0);
     config.timed_run_seconds = GetCommandLineIntOption(argc, argv, "--timed-run", default_timed_run);
 
-    if (config.auto_world_smoke() || config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke() || config.skybox_visual_smoke() || config.weather_visual_smoke() || config.lod_boundary_oscillation_smoke() || config.lod_seam_arrival_smoke() || config.persistence_roundtrip_smoke()) {
+    if (config.auto_world_smoke() || config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke() || config.skybox_visual_smoke() || config.weather_visual_smoke() || config.timeofday_sweep_smoke() || config.lod_boundary_oscillation_smoke() || config.lod_seam_arrival_smoke() || config.persistence_roundtrip_smoke()) {
         config.auto_create_world = true;
         config.auto_enter_world = true;
     }
@@ -888,6 +888,400 @@ void WriteWeatherVisualAnalysis(
     };
 
     std::ofstream output(artifact_dir / "weather-visual-analysis.json");
+    output << std::setw(2) << artifact << '\n';
+}
+
+// --- Time-of-day sweep smoke (T-I2-17c) ---
+
+namespace {
+
+// Terrain band for the warm-shift measurement: the bottom quarter of the
+// frame is terrain under the skybox-scenario camera framing.
+constexpr double kTerrainRoiHeightFraction = 0.25;
+
+// Emissive glow classification for the optional night-emissive capture.
+constexpr double kEmissiveGlowMinLuminance = 60.0;
+
+} // namespace
+
+float TimeOfDaySweepPhaseTime(double progress) {
+    if (progress < 1.0 / 3.0) {
+        return 0.04f;  // noon (sun elevation = cos(2*pi*t), pinned like the other gates)
+    }
+    if (progress < 2.0 / 3.0) {
+        return 0.22f;  // dusk: sun ~10.8 degrees above the horizon
+    }
+    return 0.45f;      // night: sun well below the horizon, moon up
+}
+
+TimeOfDayPixelStats AnalyzeTimeOfDayPixels(const std::vector<unsigned char>& pixels, int width, int height) {
+    TimeOfDayPixelStats stats;
+    stats.width = width;
+    stats.height = height;
+    if (width <= 0 || height <= 0 || pixels.size() < static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u) {
+        return stats;
+    }
+
+    const int sky_rows = std::max(1, static_cast<int>(static_cast<double>(height) * kSkyRoiHeightFraction));
+    const int terrain_min_y_from_top = height - std::max(1, static_cast<int>(static_cast<double>(height) * kTerrainRoiHeightFraction));
+    const int min_x = width / 64;
+    const int max_x = width - min_x;
+    const int center_min_x = width / 3;
+    const int center_max_x = (width * 2) / 3;
+    const int center_min_y = height / 3;
+    const int center_max_y = (height * 2) / 3;
+    const std::size_t row_stride = static_cast<std::size_t>(width) * 3u;
+
+    double frame_luminance_accum = 0.0;
+    double frame_r_accum = 0.0;
+    double frame_b_accum = 0.0;
+    std::uint64_t frame_pixels = 0;
+    double sky_luminance_accum = 0.0;
+    std::uint64_t sky_pixels = 0;
+    double terrain_luminance_accum = 0.0;
+    double terrain_r_accum = 0.0;
+    double terrain_b_accum = 0.0;
+    std::uint64_t terrain_pixels = 0;
+
+    for (int y = 0; y < height; ++y) {
+        const int y_from_top = height - 1 - y;
+        for (int x = min_x; x < max_x; ++x) {
+            const std::size_t offset = static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
+            const unsigned char r = pixels[offset + 0u];
+            const unsigned char g = pixels[offset + 1u];
+            const unsigned char b = pixels[offset + 2u];
+            const double luminance = PixelLuminance(r, g, b);
+
+            frame_luminance_accum += luminance;
+            frame_r_accum += static_cast<double>(r);
+            frame_b_accum += static_cast<double>(b);
+            ++frame_pixels;
+
+            if (luminance > stats.max_luminance) {
+                stats.max_luminance = luminance;
+                stats.max_luminance_y_from_top_norm = static_cast<double>(y_from_top) / static_cast<double>(height);
+            }
+            if (y_from_top < sky_rows) {
+                sky_luminance_accum += luminance;
+                ++sky_pixels;
+                stats.sky_max_luminance = std::max(stats.sky_max_luminance, luminance);
+            }
+            if (y_from_top >= terrain_min_y_from_top) {
+                terrain_luminance_accum += luminance;
+                terrain_r_accum += static_cast<double>(r);
+                terrain_b_accum += static_cast<double>(b);
+                ++terrain_pixels;
+            }
+            if (x >= center_min_x && x < center_max_x &&
+                y_from_top >= center_min_y && y_from_top < center_max_y &&
+                luminance >= kEmissiveGlowMinLuminance) {
+                ++stats.center_glow_pixels;
+            }
+        }
+    }
+
+    if (frame_pixels > 0) {
+        stats.frame_mean_luminance = frame_luminance_accum / static_cast<double>(frame_pixels);
+        stats.frame_mean_r = frame_r_accum / static_cast<double>(frame_pixels);
+        stats.frame_mean_b = frame_b_accum / static_cast<double>(frame_pixels);
+        if (stats.frame_mean_b > 0.0) {
+            stats.frame_r_b_ratio = stats.frame_mean_r / stats.frame_mean_b;
+        }
+    }
+    if (sky_pixels > 0) {
+        stats.sky_mean_luminance = sky_luminance_accum / static_cast<double>(sky_pixels);
+    }
+    if (terrain_pixels > 0) {
+        stats.terrain_mean_luminance = terrain_luminance_accum / static_cast<double>(terrain_pixels);
+        if (terrain_b_accum > 0.0) {
+            stats.terrain_r_b_ratio = terrain_r_accum / terrain_b_accum;
+        }
+    }
+    return stats;
+}
+
+EmissiveMaterialTarget FindEmissiveMaterialTarget(
+    Luminumbra::world::GameSession* game_session,
+    const std::filesystem::path& root_dir)
+{
+    EmissiveMaterialTarget target;
+    if (!game_session || !game_session->GetWorldSystem()) {
+        return target;
+    }
+
+    // 1. Emissive ids from the generic material registry: any material whose
+    // "emission" carries a non-zero component. Game content (LuminCrystal,
+    // id 6) provides the fixture; the engine check stays material-agnostic.
+    {
+        std::ifstream input(root_dir / "data/common/materials.json");
+        if (!input.is_open()) {
+            return target;
+        }
+        nlohmann::json registry;
+        try {
+            registry = nlohmann::json::parse(input);
+        } catch (const std::exception&) {
+            return target;
+        }
+        if (!registry.contains("materials") || !registry["materials"].is_array()) {
+            return target;
+        }
+        for (const nlohmann::json& material : registry["materials"]) {
+            if (!material.contains("emission") || !material["emission"].is_array() || !material.contains("id")) {
+                continue;
+            }
+            bool emissive = false;
+            for (const nlohmann::json& component : material["emission"]) {
+                if (component.is_number() && component.get<double>() > 0.0) {
+                    emissive = true;
+                    break;
+                }
+            }
+            if (emissive) {
+                target.emissive_material_ids.push_back(material["id"].get<std::uint32_t>());
+            }
+        }
+    }
+    if (target.emissive_material_ids.empty()) {
+        return target;
+    }
+
+    // 2. Scan the streamed terrain meshes for a near-surface emissive vertex
+    // reachable by a surface camera. Among in-range emissive vertices the
+    // most exposed one (smallest depth below the heightmap surface) wins;
+    // cave-mouth crystals can sit a few meters below the column height while
+    // still being visible from above.
+    auto* world_system = game_session->GetWorldSystem();
+    const Luminumbra::Vec3 spawn = game_session->GetMetadata().spawnPoint;
+    constexpr float kMaxSearchDistance = 512.0f;
+    constexpr float kMaxDepthBelowSurface = 4.0f;
+    float best_depth = std::numeric_limits<float>::max();
+
+    for (const Luminumbra::Chunk* chunk : world_system->get_renderable_chunks()) {
+        if (!chunk || chunk->mesh_vertices.empty()) {
+            continue;
+        }
+        const Luminumbra::Vec3 chunk_origin = Luminumbra::Vec3(chunk->get_coords() * Luminumbra::IVec3(
+            Luminumbra::CHUNK_SIZE_X,
+            Luminumbra::CHUNK_SIZE_Y,
+            Luminumbra::CHUNK_SIZE_Z));
+        for (const Luminumbra::VoxelVertex& vertex : chunk->mesh_vertices) {
+            ++target.vertices_scanned;
+            bool emissive = false;
+            for (const std::uint32_t id : target.emissive_material_ids) {
+                if (vertex.material_id == id) {
+                    emissive = true;
+                    break;
+                }
+            }
+            if (!emissive) {
+                continue;
+            }
+            ++target.emissive_vertices_total;
+            const Luminumbra::Vec3 world_pos = chunk_origin + vertex.position;
+            const float horizontal_distance = glm::length(
+                glm::vec2(world_pos.x - spawn.x, world_pos.z - spawn.z));
+            if (horizontal_distance > kMaxSearchDistance) {
+                continue;
+            }
+            ++target.emissive_vertices_in_range;
+            const float surface_height = world_system->GetTerrainHeightAt(world_pos.x, world_pos.z);
+            const float depth_below_surface = surface_height - world_pos.y;
+            if (depth_below_surface > kMaxDepthBelowSurface) {
+                continue;  // deep underground: not visible in a surface capture
+            }
+            if (depth_below_surface < best_depth) {
+                target.found = true;
+                target.position = world_pos;
+                target.material_id = vertex.material_id;
+                target.distance_from_spawn = horizontal_distance;
+                target.depth_below_surface = depth_below_surface;
+                best_depth = depth_below_surface;
+            }
+        }
+    }
+
+    LUMINUMBRA_CORE_INFO(
+        "Emissive material target scan: registry_ids={}, vertices_scanned={}, emissive_total={}, emissive_in_range={}, found={}, material_id={}, distance={:.1f}, depth={:.2f}",
+        target.emissive_material_ids.size(),
+        target.vertices_scanned,
+        target.emissive_vertices_total,
+        target.emissive_vertices_in_range,
+        target.found,
+        target.material_id,
+        target.distance_from_spawn,
+        target.depth_below_surface);
+    return target;
+}
+
+nlohmann::json TimeOfDayPixelStatsToJson(const TimeOfDayPixelStats& stats) {
+    return {
+        {"width", stats.width},
+        {"height", stats.height},
+        {"frame_mean_luminance", stats.frame_mean_luminance},
+        {"sky_mean_luminance", stats.sky_mean_luminance},
+        {"terrain_mean_luminance", stats.terrain_mean_luminance},
+        {"frame_mean_r", stats.frame_mean_r},
+        {"frame_mean_b", stats.frame_mean_b},
+        {"frame_r_b_ratio", stats.frame_r_b_ratio},
+        {"terrain_r_b_ratio", stats.terrain_r_b_ratio},
+        {"max_luminance", stats.max_luminance},
+        {"max_luminance_y_from_top_norm", stats.max_luminance_y_from_top_norm},
+        {"sky_max_luminance", stats.sky_max_luminance},
+        {"center_glow_pixels", stats.center_glow_pixels}
+    };
+}
+
+void WriteTimeOfDaySweepAnalysis(
+    const std::filesystem::path& artifact_dir,
+    const std::vector<TimeOfDayPhaseCapture>& phases,
+    const EmissiveMaterialTarget& emissive_target,
+    bool emissive_capture_written,
+    const std::string& emissive_screenshot,
+    const TimeOfDayPixelStats& emissive_stats,
+    const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass)
+{
+    // Calibrated against the first sweep run; measured values are recorded
+    // next to the thresholds. The ordering gate uses the SKY band: the dusk
+    // sun sits low inside the fixed frame, so its corona lifts the dusk
+    // frame/terrain means to near-noon levels while the sky band darkens
+    // monotonically (measured sky means: noon 216.2, dusk 208.8, night 185.1).
+    constexpr double kMinNoonOverDuskGap = 3.0;     // sky mean luminance units (0-255)
+    constexpr double kMinDuskOverNightGap = 10.0;
+    constexpr double kMinDuskWarmShift = 0.01;      // terrain r/b ratio increase vs noon (measured +0.081)
+    constexpr std::uint64_t kMinEmissiveGlowPixels = 200;
+
+    const TimeOfDayPhaseCapture* noon = nullptr;
+    const TimeOfDayPhaseCapture* dusk = nullptr;
+    const TimeOfDayPhaseCapture* night = nullptr;
+    for (const TimeOfDayPhaseCapture& phase : phases) {
+        if (phase.name == "noon") noon = &phase;
+        else if (phase.name == "dusk") dusk = &phase;
+        else if (phase.name == "night") night = &phase;
+    }
+
+    const bool all_phases_captured = noon && dusk && night;
+    const double noon_luminance = noon ? noon->stats.sky_mean_luminance : 0.0;
+    const double dusk_luminance = dusk ? dusk->stats.sky_mean_luminance : 0.0;
+    const double night_luminance = night ? night->stats.sky_mean_luminance : 0.0;
+    const bool luminance_ordering_passed =
+        all_phases_captured &&
+        (noon_luminance - dusk_luminance) >= kMinNoonOverDuskGap &&
+        (dusk_luminance - night_luminance) >= kMinDuskOverNightGap;
+
+    const double warm_shift = (noon && dusk)
+        ? dusk->stats.terrain_r_b_ratio - noon->stats.terrain_r_b_ratio
+        : 0.0;
+    const bool warm_shift_passed = all_phases_captured && warm_shift >= kMinDuskWarmShift;
+
+    // Emissive night check: when a registry-emissive material is reachable
+    // in a surface capture, the dedicated night-emissive capture must show a
+    // glow cluster. Otherwise the honest fallback asserts the night frame's
+    // brightest pixel comes from the sky band (moon/stars), proving nothing
+    // ground-side fakes an emissive response.
+    // Fallback contract: the night frame's brightest source must be the sky
+    // itself - either positionally inside the sky band, or (for sky leaking
+    // through distant terrain LOD holes, which the LodGround gate tracks
+    // separately) no brighter than the sky band's own maximum plus a small
+    // epsilon. Either way nothing ground-side fakes an emissive response.
+    constexpr double kNightSkyMaxEpsilon = 10.0;
+    std::string emissive_status;
+    bool emissive_passed = false;
+    if (emissive_target.found && emissive_capture_written) {
+        emissive_status = "checked_surface_emissive";
+        emissive_passed = emissive_stats.center_glow_pixels >= kMinEmissiveGlowPixels;
+    } else if (emissive_target.found) {
+        emissive_status = "target_found_capture_missing";
+        emissive_passed = false;
+    } else {
+        emissive_status = "not_applicable_no_surface_emissives";
+        emissive_passed = night &&
+            (night->stats.max_luminance_y_from_top_norm < kSkyRoiHeightFraction ||
+             night->stats.max_luminance <= night->stats.sky_max_luminance + kNightSkyMaxEpsilon);
+    }
+
+    const GLDebugRuntimeStats gl_debug = CurrentGLDebugRuntimeStats();
+    const bool passed =
+        render_pass.skybox_draws > 0 &&
+        luminance_ordering_passed &&
+        warm_shift_passed &&
+        emissive_passed &&
+        gl_debug.errors == 0;
+
+    nlohmann::json phases_json = nlohmann::json::array();
+    for (const TimeOfDayPhaseCapture& phase : phases) {
+        phases_json.push_back({
+            {"name", phase.name},
+            {"time_of_day", phase.time_of_day},
+            {"screenshot", phase.file},
+            {"pixels", TimeOfDayPixelStatsToJson(phase.stats)}
+        });
+    }
+
+    nlohmann::json emissive_ids = nlohmann::json::array();
+    for (const std::uint32_t id : emissive_target.emissive_material_ids) {
+        emissive_ids.push_back(id);
+    }
+
+    nlohmann::json artifact = {
+        {"schema", "luminumbra.timeofday_sweep.v1"},
+        {"timestamp_utc", TimestampUtc()},
+        {"passed", passed},
+        {"phases", phases_json},
+        {"luminance_ordering", {
+            {"passed", luminance_ordering_passed},
+            {"band", "sky"},
+            {"noon_mean_luminance", noon_luminance},
+            {"dusk_mean_luminance", dusk_luminance},
+            {"night_mean_luminance", night_luminance},
+            {"noon_over_dusk_gap", noon_luminance - dusk_luminance},
+            {"dusk_over_night_gap", dusk_luminance - night_luminance}
+        }},
+        {"dusk_warm_shift", {
+            {"passed", warm_shift_passed},
+            {"noon_terrain_r_b_ratio", noon ? noon->stats.terrain_r_b_ratio : 0.0},
+            {"dusk_terrain_r_b_ratio", dusk ? dusk->stats.terrain_r_b_ratio : 0.0},
+            {"r_b_ratio_increase", warm_shift}
+        }},
+        {"emissive_check", {
+            {"status", emissive_status},
+            {"passed", emissive_passed},
+            {"registry_emissive_material_ids", emissive_ids},
+            {"target_found", emissive_target.found},
+            {"target_material_id", emissive_target.material_id},
+            {"target_distance_from_spawn", emissive_target.distance_from_spawn},
+            {"target_depth_below_surface", emissive_target.depth_below_surface},
+            {"vertices_scanned", emissive_target.vertices_scanned},
+            {"emissive_vertices_total", emissive_target.emissive_vertices_total},
+            {"emissive_vertices_in_range", emissive_target.emissive_vertices_in_range},
+            {"screenshot", emissive_capture_written ? emissive_screenshot : ""},
+            {"center_glow_pixels", emissive_capture_written ? emissive_stats.center_glow_pixels : 0},
+            {"night_max_luminance", night ? night->stats.max_luminance : 0.0},
+            {"night_max_luminance_y_from_top_norm", night ? night->stats.max_luminance_y_from_top_norm : 1.0},
+            {"night_sky_max_luminance", night ? night->stats.sky_max_luminance : 0.0},
+            {"night_sky_max_epsilon", kNightSkyMaxEpsilon}
+        }},
+        {"thresholds", {
+            {"min_noon_over_dusk_gap", kMinNoonOverDuskGap},
+            {"min_dusk_over_night_gap", kMinDuskOverNightGap},
+            {"min_dusk_warm_shift", kMinDuskWarmShift},
+            {"min_emissive_glow_pixels", kMinEmissiveGlowPixels},
+            {"emissive_glow_min_luminance", kEmissiveGlowMinLuminance},
+            {"sky_band_height_fraction", kSkyRoiHeightFraction}
+        }},
+        {"render_pass", {
+            {"skybox_draws", render_pass.skybox_draws},
+            {"terrain_draws", render_pass.terrain_draws}
+        }},
+        {"gl_debug", {
+            {"messages", gl_debug.messages},
+            {"errors", gl_debug.errors},
+            {"warnings", gl_debug.warnings},
+            {"notifications", gl_debug.notifications}
+        }}
+    };
+
+    std::ofstream output(artifact_dir / "timeofday-sweep-analysis.json");
     output << std::setw(2) << artifact << '\n';
 }
 
