@@ -36,8 +36,11 @@ JobSystem::~JobSystem() {
     shutdown();
 }
 
-void JobSystem::startup() {
-    u32 num_threads = std::thread::hardware_concurrency();
+void JobSystem::startup(std::size_t worker_count) {
+    std::size_t num_threads = worker_count;
+    if (num_threads == 0) {
+        num_threads = std::thread::hardware_concurrency();
+    }
     if (num_threads == 0) {
         num_threads = 1;
     }
@@ -51,10 +54,11 @@ void JobSystem::startup() {
 
         m_stop_threads.store(false, std::memory_order_release);
         m_accepting_jobs = true;
+        m_consecutive_high_served = 0;
     }
 
     m_workers.reserve(num_threads);
-    for (u32 i = 0; i < num_threads; ++i) {
+    for (std::size_t i = 0; i < num_threads; ++i) {
         m_workers.emplace_back(&JobSystem::worker_loop, this);
     }
     LUMINUMBRA_CORE_INFO("JobSystem started with " + std::to_string(num_threads) + " threads.");
@@ -85,7 +89,11 @@ void JobSystem::shutdown() {
     }
 }
 
-void JobSystem::dispatch(Job job) {
+std::queue<Job>& JobSystem::queue_for(JobPriority priority) {
+    return priority == JobPriority::High ? m_high_queue : m_normal_queue;
+}
+
+void JobSystem::dispatch(Job job, JobPriority priority) {
     if (!job) {
         return;
     }
@@ -94,7 +102,7 @@ void JobSystem::dispatch(Job job) {
     {
         std::unique_lock<std::mutex> lock(m_queue_mutex);
         if (m_accepting_jobs && !m_stop_threads.load(std::memory_order_acquire)) {
-            m_job_queue.push(std::move(job));
+            queue_for(priority).push(std::move(job));
             accepted = true;
         }
     }
@@ -107,7 +115,7 @@ void JobSystem::dispatch(Job job) {
     m_condition.notify_one();
 }
 
-JobHandle JobSystem::dispatch_batch(const std::vector<Job>& jobs) {
+JobHandle JobSystem::dispatch_batch(const std::vector<Job>& jobs, JobPriority priority) {
     if (jobs.empty()) {
         return JobHandle{};
     }
@@ -119,8 +127,9 @@ JobHandle JobSystem::dispatch_batch(const std::vector<Job>& jobs) {
     {
         std::unique_lock<std::mutex> lock(m_queue_mutex);
         if (m_accepting_jobs && !m_stop_threads.load(std::memory_order_acquire)) {
+            std::queue<Job>& queue = queue_for(priority);
             for (const auto& job : jobs) {
-                m_job_queue.push([job, completion]() {
+                queue.push([job, completion]() {
                     struct CompletionGuard {
                         std::shared_ptr<JobCompletionState> completion;
 
@@ -166,7 +175,9 @@ JobSystem::RuntimeStats JobSystem::get_runtime_stats() const {
     std::unique_lock<std::mutex> lock(m_queue_mutex);
     RuntimeStats stats;
     stats.worker_count = m_workers.size();
-    stats.queue_depth = m_job_queue.size();
+    stats.high_priority_queue_depth = m_high_queue.size();
+    stats.normal_priority_queue_depth = m_normal_queue.size();
+    stats.queue_depth = stats.high_priority_queue_depth + stats.normal_priority_queue_depth;
     stats.accepting_jobs = m_accepting_jobs;
     stats.stop_requested = m_stop_threads.load(std::memory_order_acquire);
     return stats;
@@ -178,15 +189,32 @@ void JobSystem::worker_loop() {
         {
             std::unique_lock<std::mutex> lock(m_queue_mutex);
             m_condition.wait(lock, [this] {
-                return !m_job_queue.empty() || m_stop_threads.load();
+                return !m_high_queue.empty() || !m_normal_queue.empty() || m_stop_threads.load();
             });
 
-            if (m_stop_threads.load() && m_job_queue.empty()) {
+            if (m_stop_threads.load() && m_high_queue.empty() && m_normal_queue.empty()) {
                 return;
             }
 
-            job = std::move(m_job_queue.front());
-            m_job_queue.pop();
+            // Prefer the High lane, but serve a Normal job after
+            // kNormalServiceInterval consecutive High jobs so a sustained
+            // High backlog cannot starve Normal work. The counter also
+            // accumulates while only High work exists, so Normal work that
+            // arrives behind a long High burst is served promptly.
+            const bool high_available = !m_high_queue.empty();
+            const bool normal_available = !m_normal_queue.empty();
+            const bool serve_normal = normal_available &&
+                (!high_available || m_consecutive_high_served >= kNormalServiceInterval);
+
+            if (serve_normal) {
+                job = std::move(m_normal_queue.front());
+                m_normal_queue.pop();
+                m_consecutive_high_served = 0;
+            } else {
+                job = std::move(m_high_queue.front());
+                m_high_queue.pop();
+                ++m_consecutive_high_served;
+            }
         }
 
         if (job) {
