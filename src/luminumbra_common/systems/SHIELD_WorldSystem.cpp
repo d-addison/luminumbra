@@ -394,6 +394,12 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
     }
 
     m_last_streaming_budget_stats.meshing_candidates = meshing_candidates.size();
+    std::size_t terrain_meshing_backlog = 0;
+    for (const MeshingCandidate& candidate : meshing_candidates) {
+        if (candidate.terrain_mesh_required) {
+            ++terrain_meshing_backlog;
+        }
+    }
     const bool meshing_job_active = has_active_job(m_streaming_state.meshing_job_handle);
     m_last_streaming_budget_stats.meshing_job_active = meshing_job_active;
     m_last_streaming_budget_stats.meshing_budget = meshing_job_active ? 0 : MAX_CHUNKS_TO_PROCESS_PER_FRAME;
@@ -475,6 +481,26 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
             ++m_last_streaming_budget_stats.meshing_chunks;
         }
     }
+
+    const std::size_t queue_depth = m_last_streaming_budget_stats.loading_chunks + terrain_meshing_backlog;
+    ++m_streaming_telemetry_stats.frames_observed;
+    m_streaming_telemetry_stats.last_queue_depth = queue_depth;
+    m_streaming_telemetry_stats.peak_queue_depth = std::max(m_streaming_telemetry_stats.peak_queue_depth, queue_depth);
+    m_streaming_telemetry_stats.peak_meshing_candidates = std::max(
+        m_streaming_telemetry_stats.peak_meshing_candidates,
+        m_last_streaming_budget_stats.meshing_candidates
+    );
+    m_streaming_telemetry_stats.cumulative_scheduled_meshing += m_last_streaming_budget_stats.scheduled_meshing;
+    m_streaming_telemetry_stats.cumulative_deferred_meshing += m_last_streaming_budget_stats.deferred_meshing;
+    if (m_last_streaming_budget_stats.meshing_candidates > m_last_streaming_budget_stats.scheduled_meshing) {
+        ++m_deferred_backlog_age_frames;
+    } else {
+        m_deferred_backlog_age_frames = 0;
+    }
+    m_streaming_telemetry_stats.max_deferred_age_frames = std::max(
+        m_streaming_telemetry_stats.max_deferred_age_frames,
+        m_deferred_backlog_age_frames
+    );
 }
 
 void SHIELD_WorldSystem::update_chunk_activation(const Vec3& player_pos, PhysicsSystem* physics_system) {

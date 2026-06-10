@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Files", "Sections", "CodexOnly", "Source", "Build", "UnitTests", "Smoke", "LodGround", "WaterVisual", "Endurance300", "CrashDump", "MemoryWatermark", "RuntimeArtifacts", "All")]
+    [ValidateSet("Files", "Sections", "CodexOnly", "Source", "Build", "UnitTests", "Smoke", "LodGround", "WaterVisual", "EnduranceStreamDrain", "Endurance300", "CrashDump", "MemoryWatermark", "RuntimeArtifacts", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -426,6 +426,49 @@ function Test-WaterVisual {
     Assert-FileExists (Join-Path $visualDir $analysis.screenshot)
 }
 
+function Test-EnduranceStreamDrain {
+    $exe = Get-ClientExe
+    $artifactRoot = "build/$BuildPreset/test-artifacts/runtime"
+    New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
+
+    $drainDir = Join-Path $artifactRoot "endurance-stream-drain"
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $drainDir
+
+    $runSeconds = [Math]::Max(20, $SmokeSeconds)
+    Invoke-Checked -FilePath $exe -ArgumentList @(
+        "--scenario", "auto_world_smoke",
+        "--auto-create-world",
+        "--auto-enter-world",
+        "--timed-run", "$runSeconds",
+        "--no-audio",
+        "--no-ui",
+        "--runtime-artifact-dir", $drainDir
+    ) -TimeoutSeconds ([Math]::Max(120, $runSeconds + 90)) | Out-Null
+
+    $telemetryPath = Join-Path $drainDir "streaming-telemetry.json"
+    Assert-FileExists $telemetryPath
+
+    $telemetry = Get-Content $telemetryPath -Raw | ConvertFrom-Json
+    if ($telemetry.schema -ne "luminumbra.streaming_telemetry.v1") {
+        throw "Unexpected streaming telemetry schema '$($telemetry.schema)'"
+    }
+    if ($telemetry.scenario -ne "auto_world_smoke") {
+        throw "Streaming telemetry has unexpected scenario '$($telemetry.scenario)'"
+    }
+    if ([double]$telemetry.duration_seconds -le 0.0) {
+        throw "Streaming telemetry recorded no run duration"
+    }
+    if (-not $telemetry.backlog_bounded) {
+        throw "Streaming backlog is not bounded: final_queue_depth=$($telemetry.final_queue_depth), max_deferred_age_frames=$($telemetry.max_deferred_age_frames)"
+    }
+    if ([int64]$telemetry.final_queue_depth -ne 0) {
+        throw "Streaming queue did not drain: final_queue_depth=$($telemetry.final_queue_depth)"
+    }
+    if ([double]$telemetry.drain_rate_per_s -le 0.0) {
+        throw "Streaming telemetry recorded no meshing drain: drain_rate_per_s=$($telemetry.drain_rate_per_s)"
+    }
+}
+
 function Test-Endurance300 {
     $exe = Get-ClientExe
     $artifactRoot = "build/$BuildPreset/test-artifacts/runtime"
@@ -581,6 +624,7 @@ switch ($Mode) {
     "Smoke" { Test-Smoke }
     "LodGround" { Test-LodGround }
     "WaterVisual" { Test-WaterVisual }
+    "EnduranceStreamDrain" { Test-EnduranceStreamDrain }
     "Endurance300" { Test-Endurance300 }
     "CrashDump" { Test-CrashDump }
     "MemoryWatermark" { Test-MemoryWatermark }

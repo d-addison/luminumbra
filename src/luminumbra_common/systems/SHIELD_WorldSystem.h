@@ -114,6 +114,16 @@ public:
         bool meshing_job_active = false;
     };
 
+    struct StreamingTelemetryStats {
+        std::size_t peak_queue_depth = 0;
+        std::size_t peak_meshing_candidates = 0;
+        std::size_t cumulative_scheduled_meshing = 0;
+        std::size_t cumulative_deferred_meshing = 0;
+        uint64_t max_deferred_age_frames = 0;
+        std::size_t last_queue_depth = 0;
+        uint64_t frames_observed = 0;
+    };
+
     struct CameraLocalCoverageStats {
         Vec3 camera_position{0.0f};
         IVec3 camera_chunk{0};
@@ -163,6 +173,7 @@ public:
     bool EnsureCollisionReadyNear(const Vec3& world_pos, PhysicsSystem* physics_system, int horizontal_radius = 1);
     bool EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSystem* physics_system, int surface_radius, int collision_radius);
     const StreamingBudgetFrameStats& get_last_streaming_budget_stats() const { return m_last_streaming_budget_stats; }
+    const StreamingTelemetryStats& get_streaming_telemetry_stats() const { return m_streaming_telemetry_stats; }
     RuntimeChunkStats get_runtime_chunk_stats() const;
     CameraLocalCoverageStats get_camera_local_coverage_stats(const Vec3& camera_position, int horizontal_radius) const;
     float get_density_at_from_precalculated(const Vec3& world_pos, float terrain_height) const;
@@ -187,6 +198,8 @@ private:
 
     StreamingState m_streaming_state;
     StreamingBudgetFrameStats m_last_streaming_budget_stats;
+    StreamingTelemetryStats m_streaming_telemetry_stats;
+    uint64_t m_deferred_backlog_age_frames = 0;
 
     const std::vector<ChunkLOD> m_lod_levels = {
         {0, 1, 192.0f},  // LOD 0: Full detail up to 192 meters (~12 chunks)

@@ -1001,4 +1001,39 @@ void WriteLodGroundVisualAnalysis(
     output << std::setw(2) << artifact << '\n';
 }
 
+void WriteStreamingTelemetry(
+    const std::filesystem::path& artifact_dir,
+    const std::string& scenario,
+    double duration_seconds,
+    const Luminumbra::Systems::SHIELD_WorldSystem::StreamingTelemetryStats& stats)
+{
+    const double drain_rate_per_s = duration_seconds > 0.0
+        ? static_cast<double>(stats.cumulative_scheduled_meshing) / duration_seconds
+        : 0.0;
+    const bool deferred_age_bounded =
+        stats.frames_observed == 0 || stats.max_deferred_age_frames < stats.frames_observed;
+    const bool backlog_bounded = stats.last_queue_depth == 0 && deferred_age_bounded;
+
+    nlohmann::json artifact = {
+        {"schema", "luminumbra.streaming_telemetry.v1"},
+        {"timestamp_utc", TimestampUtc()},
+        {"scenario", scenario},
+        {"duration_seconds", duration_seconds},
+        {"frames_observed", stats.frames_observed},
+        {"peak_queue_depth", stats.peak_queue_depth},
+        {"peak_meshing_candidates", stats.peak_meshing_candidates},
+        {"cumulative_scheduled_meshing", stats.cumulative_scheduled_meshing},
+        {"cumulative_deferred_meshing", stats.cumulative_deferred_meshing},
+        {"max_deferred_age_frames", stats.max_deferred_age_frames},
+        {"drain_rate_per_s", drain_rate_per_s},
+        {"backlog_bounded", backlog_bounded},
+        {"final_queue_depth", stats.last_queue_depth}
+    };
+
+    std::error_code ec;
+    std::filesystem::create_directories(artifact_dir, ec);
+    std::ofstream output(artifact_dir / "streaming-telemetry.json");
+    output << std::setw(2) << artifact << '\n';
+}
+
 } // namespace Luminumbra::Client::ScenarioHarness
