@@ -1,0 +1,279 @@
+{
+  "schema_kind": "forge.task_graph",
+  "schema_version": "2",
+  "feature": "engine-iteration-2",
+  "description": "Iteration 2 bookkeeping record. Execution model: Claude Code agent teams execute every task (Agent calls + Workflow pipelines, worktree isolation for parallel phases); Forge provides deterministic validation gates, artifact bookkeeping, and forge verify. The Codex dispatch spawner is retired for this iteration. This graph is the planning/tracking record, not a dispatch input.",
+  "metadata": {
+    "executor": "claude-agent-teams",
+    "plan": "C:/Users/David/.claude/plans/you-are-tasked-with-buzzing-wind.md",
+    "phases": "0 bookkeeping; 1 S1 gates || S2a perf infra; 2 S2c gpu timers || S5ab persistence core || S2d meshing; 3 S4 extraction || S5cd runtime persistence, then S2ef; 4 S3 beautification tracks; 5 closeout"
+  },
+  "tasks": [
+    {
+      "id": "T-I2-1-scenario-harness-extraction",
+      "title": "Extract runtime scenario harness from main_client.cpp",
+      "type": "code",
+      "tier": "standard",
+      "depends_on": [],
+      "files": ["src/luminumbra_client/main_client.cpp", "src/luminumbra_client/sources.cmake"],
+      "agent_contract": {
+        "reads": ["src/luminumbra_client/main_client.cpp"],
+        "modifies": ["src/luminumbra_client/main_client.cpp", "src/luminumbra_client/sources.cmake"],
+        "creates": ["src/luminumbra_client/core/RuntimeScenarioHarness.h", "src/luminumbra_client/core/RuntimeScenarioHarness.cpp"]
+      },
+      "prompt": "Claude-agent execution. Pure move of RuntimeScenarioConfig, recorders, and analysis writers out of main_client.cpp. Gate: build + full ctest + Smoke/MaterialVisual/LodGround/WaterVisual unchanged."
+    },
+    {
+      "id": "T-I2-2-streaming-telemetry-endurance-drain",
+      "title": "Streaming telemetry + EnduranceStreamDrain mode (closes T-EF-6)",
+      "type": "code",
+      "tier": "standard",
+      "depends_on": ["T-I2-1-scenario-harness-extraction"],
+      "files": ["src/luminumbra_common/world/WorldStreamingState.h", "src/luminumbra_common/systems/SHIELD_WorldSystem.h", ".forge/scripts/validate-runtime-stability-phase-1.ps1"],
+      "agent_contract": {
+        "reads": ["src/luminumbra_common/systems/SHIELD_WorldSystem.cpp"],
+        "modifies": ["src/luminumbra_common/world/WorldStreamingState.h", "src/luminumbra_common/world/WorldStreamingState.cpp", "src/luminumbra_common/systems/SHIELD_WorldSystem.h", "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp", ".forge/scripts/validate-runtime-stability-phase-1.ps1"],
+        "creates": ["build/debug/test-artifacts/runtime/streaming-telemetry.json"]
+      },
+      "prompt": "Claude-agent execution. No-behavior-change streaming telemetry (drain rate, queue depth high-water, deferred age) emitted as luminumbra.streaming_telemetry.v1; new EnduranceStreamDrain validator mode fails on unbounded backlog."
+    },
+    {
+      "id": "T-I2-3-lod-boundary-hysteresis-gate",
+      "title": "lod_boundary_oscillation_smoke + LodBoundaryHysteresis mode (closes T-EF-8)",
+      "type": "code",
+      "tier": "standard",
+      "depends_on": ["T-I2-2-streaming-telemetry-endurance-drain"],
+      "files": ["src/luminumbra_client/main_client.cpp", ".forge/scripts/validate-runtime-stability-phase-1.ps1"],
+      "agent_contract": {
+        "reads": ["src/luminumbra_client/main_client.cpp"],
+        "modifies": ["src/luminumbra_client/main_client.cpp", ".forge/scripts/validate-runtime-stability-phase-1.ps1"],
+        "creates": ["build/debug/test-artifacts/runtime/lod-boundary-oscillation/lod-boundary-oscillation.json"]
+      },
+      "prompt": "Claude-agent execution. Camera dwell at LOD ring boundary; luminumbra.lod_boundary_oscillation.v1 with per-chunk transition counts; gate fails on oscillation."
+    },
+    {
+      "id": "T-I2-4-lod-seam-arrival-gate",
+      "title": "lod_seam_arrival_smoke + LodSeamRisk mode (closes T-EF-9)",
+      "type": "code",
+      "tier": "standard",
+      "depends_on": ["T-I2-3-lod-boundary-hysteresis-gate"],
+      "files": ["src/luminumbra_client/main_client.cpp", ".forge/scripts/validate-runtime-stability-phase-1.ps1"],
+      "agent_contract": {
+        "reads": ["src/luminumbra_client/main_client.cpp"],
+        "modifies": ["src/luminumbra_client/main_client.cpp", ".forge/scripts/validate-runtime-stability-phase-1.ps1"],
+        "creates": ["build/debug/test-artifacts/runtime/lod-seam-arrival/lod-seam-arrival.json"]
+      },
+      "prompt": "Claude-agent execution. Traversal toward seam, screenshot + crack-pixel ROI analysis; luminumbra.lod_seam_arrival.v1."
+    },
+    {
+      "id": "T-I2-5-perf-regression-infrastructure",
+      "title": "PerfRegression mode + committed perf baseline schema",
+      "type": "code",
+      "tier": "standard",
+      "depends_on": [],
+      "files": ["test/performance/initial_world_loading_perf_test.cpp", ".forge/scripts/validate-engine-frontier.ps1"],
+      "agent_contract": {
+        "reads": ["test/performance/initial_world_loading_perf_test.cpp"],
+        "modifies": ["test/performance/initial_world_loading_perf_test.cpp", ".forge/scripts/validate-engine-frontier.ps1"],
+        "creates": [".forge/artifacts/engine-frontier/perf-baseline.json"]
+      },
+      "prompt": "Claude-agent execution. Replace catastrophic placeholder budgets with baseline-driven ones; luminumbra.perf_baseline.v1 with machine_id; PerfRegression mode fails at +10 percent p99, warns at +5."
+    },
+    {
+      "id": "T-I2-6-perf-baseline-capture",
+      "title": "Capture and commit perf baseline (inline, quiet machine)",
+      "type": "test",
+      "tier": "standard",
+      "depends_on": ["T-I2-5-perf-regression-infrastructure"],
+      "files": [".forge/artifacts/engine-frontier"],
+      "agent_contract": {
+        "reads": ["test/performance/initial_world_loading_perf_test.cpp"],
+        "modifies": [".forge/artifacts/engine-frontier/perf-baseline.json"],
+        "creates": []
+      },
+      "prompt": "Inline orchestrator execution. Median of 3 quiet runs of the 9 benchmark scenarios; commit baseline; PerfRegression green."
+    },
+    {
+      "id": "T-I2-7-gpu-pass-timers",
+      "title": "Per-pass GPU timestamp timers, capability-gated",
+      "type": "code",
+      "tier": "deep",
+      "depends_on": ["T-I2-6-perf-baseline-capture"],
+      "files": ["src/luminumbra_client/rendering/RenderPipeline.h", "src/luminumbra_client/rendering/RenderPipeline.cpp"],
+      "agent_contract": {
+        "reads": ["src/luminumbra_client/rendering/RenderPipeline.cpp"],
+        "modifies": ["src/luminumbra_client/rendering/RenderPipeline.h", "src/luminumbra_client/rendering/RenderPipeline.cpp"],
+        "creates": []
+      },
+      "prompt": "Claude-agent execution. Double-buffered glQueryCounter GL_TIMESTAMP ring per pass, read frame N-2; gpu_timers.supported=false fallback; surface gpu_ms in RenderPassFrameStats, render health, and perf artifacts."
+    },
+    {
+      "id": "T-I2-8-world-save-service",
+      "title": "WorldSaveService bridging WorldPersistenceRoundtrip to live state",
+      "type": "code",
+      "tier": "standard",
+      "depends_on": ["T-I2-6-perf-baseline-capture"],
+      "files": ["src/luminumbra_common/persistence/WorldPersistenceRoundtrip.h", "src/luminumbra_common/sources.cmake"],
+      "agent_contract": {
+        "reads": ["src/luminumbra_common/persistence/WorldPersistenceRoundtrip.cpp"],
+        "modifies": ["src/luminumbra_common/sources.cmake", "test/sources.cmake", "test/CMakeLists.txt"],
+        "creates": ["src/luminumbra_common/persistence/WorldSaveService.h", "src/luminumbra_common/persistence/WorldSaveService.cpp"]
+      },
+      "prompt": "Claude-agent execution. Adapt serializer/hash to live GameSession chunk state; unit test registered with ctest."
+    },
+    {
+      "id": "T-I2-9-chunk-dirty-tracking",
+      "title": "Chunk dirty tracking for persistence",
+      "type": "code",
+      "tier": "standard",
+      "depends_on": ["T-I2-8-world-save-service"],
+      "files": ["src/luminumbra_common/world/Chunk.h", "src/luminumbra_common/world/WorldStreamingState.h"],
+      "agent_contract": {
+        "reads": ["src/luminumbra_common/world/Chunk.cpp"],
+        "modifies": ["src/luminumbra_common/world/Chunk.h", "src/luminumbra_common/world/Chunk.cpp", "src/luminumbra_common/world/WorldStreamingState.h", "src/luminumbra_common/world/WorldStreamingState.cpp"],
+        "creates": []
+      },
+      "prompt": "Claude-agent execution. Dirty flag on voxel edit; mesh rebuild alone is not dirty; dirty set in streaming state; unit tests."
+    },
+    {
+      "id": "T-I2-10-marching-cubes-optimization",
+      "title": "Marching cubes determinism hash + hot path optimization",
+      "type": "code",
+      "tier": "deep",
+      "depends_on": ["T-I2-6-perf-baseline-capture"],
+      "files": ["src/luminumbra_common/world/MarchingCubes.h", "src/luminumbra_common/world/MarchingCubes.cpp"],
+      "agent_contract": {
+        "reads": ["src/luminumbra_common/world/MarchingCubesTables.inl"],
+        "modifies": ["src/luminumbra_common/world/MarchingCubes.h", "src/luminumbra_common/world/MarchingCubes.cpp", "test/sources.cmake", "test/CMakeLists.txt"],
+        "creates": []
+      },
+      "prompt": "Claude-agent execution. FIRST land a mesh-determinism hash test over a fixture chunk, THEN optimize table walk/vertex cache. Hash unchanged, PerfRegression win, baseline re-bless with previous block."
+    },
+    {
+      "id": "T-I2-11-render-pass-extraction",
+      "title": "Six-stage RenderPipeline pass extraction under RenderHealth diff",
+      "type": "code",
+      "tier": "deep",
+      "depends_on": ["T-I2-7-gpu-pass-timers"],
+      "files": ["src/luminumbra_client/rendering/RenderPipeline.cpp", "src/luminumbra_client/sources.cmake", ".forge/artifacts/engine-frontier/render-health-baseline.json"],
+      "agent_contract": {
+        "reads": [".forge/artifacts/engine-frontier/render-health-baseline.json"],
+        "modifies": ["src/luminumbra_client/rendering/RenderPipeline.h", "src/luminumbra_client/rendering/RenderPipeline.cpp", "src/luminumbra_client/sources.cmake"],
+        "creates": ["src/luminumbra_client/rendering/passes/ShadowPass.cpp", "src/luminumbra_client/rendering/passes/GBufferPass.cpp", "src/luminumbra_client/rendering/passes/SsaoPass.cpp", "src/luminumbra_client/rendering/passes/LightingPass.cpp", "src/luminumbra_client/rendering/passes/WaterPass.cpp", "src/luminumbra_client/rendering/passes/PostPass.cpp"]
+      },
+      "prompt": "Claude-agent execution. One pass per commit: Shadow, GBuffer, Ssao, Lighting, Water, Post. Per stage: sources.cmake update, build, full ctest, RenderHealth field diff against committed baseline must be empty, visual trio. Non-empty diff means revert that commit."
+    },
+    {
+      "id": "T-I2-12-runtime-save-load",
+      "title": "Save-on-exit / load-on-enter with versioned chunk payloads",
+      "type": "code",
+      "tier": "deep",
+      "depends_on": ["T-I2-9-chunk-dirty-tracking", "T-I2-4-lod-seam-arrival-gate"],
+      "files": ["src/luminumbra_common/world/GameSession.h", "src/luminumbra_client/main_client.cpp"],
+      "agent_contract": {
+        "reads": ["src/luminumbra_common/persistence/WorldPersistenceRoundtrip.cpp"],
+        "modifies": ["src/luminumbra_common/world/GameSession.h", "src/luminumbra_common/world/GameSession.cpp", "src/luminumbra_client/main_client.cpp"],
+        "creates": []
+      },
+      "prompt": "Claude-agent execution. worlds/saves/<id>/chunks/ layout with versioned header; loading a save-less world unchanged; Smoke green."
+    },
+    {
+      "id": "T-I2-13-persistence-runtime-roundtrip-gate",
+      "title": "persistence_roundtrip_smoke + PersistenceRuntimeRoundtrip mode",
+      "type": "code",
+      "tier": "standard",
+      "depends_on": ["T-I2-12-runtime-save-load"],
+      "files": ["src/luminumbra_client/main_client.cpp", ".forge/scripts/validate-engine-frontier.ps1"],
+      "agent_contract": {
+        "reads": ["src/luminumbra_client/main_client.cpp"],
+        "modifies": ["src/luminumbra_client/main_client.cpp", ".forge/scripts/validate-engine-frontier.ps1"],
+        "creates": ["build/debug/test-artifacts/persistence/persistence-runtime-roundtrip.json"]
+      },
+      "prompt": "Claude-agent execution. Two-invocation scenario: generate, scripted edits, hash, save, exit; reload, re-hash; luminumbra.persistence_runtime_roundtrip.v1 asserts hash equality. Update FrontierDisabled acknowledgment."
+    },
+    {
+      "id": "T-I2-14-streaming-drain-optimization",
+      "title": "Streaming drain/coalescing optimization",
+      "type": "code",
+      "tier": "deep",
+      "depends_on": ["T-I2-2-streaming-telemetry-endurance-drain", "T-I2-9-chunk-dirty-tracking"],
+      "files": ["src/luminumbra_common/systems/SHIELD_WorldSystem.cpp"],
+      "agent_contract": {
+        "reads": ["src/luminumbra_common/world/WorldStreamingState.cpp"],
+        "modifies": ["src/luminumbra_common/systems/SHIELD_WorldSystem.cpp", "src/luminumbra_common/world/WorldStreamingState.cpp"],
+        "creates": []
+      },
+      "prompt": "Claude-agent execution. Gated by EnduranceStreamDrain + PerfRegression + mandatory Endurance300."
+    },
+    {
+      "id": "T-I2-15-jobsystem-priority-lanes",
+      "title": "JobSystem priority lanes",
+      "type": "code",
+      "tier": "deep",
+      "depends_on": ["T-I2-14-streaming-drain-optimization"],
+      "files": ["src/luminumbra_common/core/JobSystem.h", "src/luminumbra_common/core/JobSystem.cpp"],
+      "agent_contract": {
+        "reads": ["test/common/JobSystem_test.cpp"],
+        "modifies": ["src/luminumbra_common/core/JobSystem.h", "src/luminumbra_common/core/JobSystem.cpp", "test/common/JobSystem_test.cpp"],
+        "creates": []
+      },
+      "prompt": "Claude-agent execution. Priority lanes with starvation protection; ctest + PerfRegression + Smoke + Endurance300."
+    },
+    {
+      "id": "T-I2-16-water-beauty-track",
+      "title": "Beautification track A: caustics generation, SSR, depth tint, foam",
+      "type": "code",
+      "tier": "deep",
+      "depends_on": ["T-I2-11-render-pass-extraction"],
+      "files": ["res/shaders/water.frag", "res/shaders/caustics_generator.frag", "res/shaders/screen_space_reflections.frag"],
+      "agent_contract": {
+        "reads": ["src/luminumbra_client/rendering/RenderPipeline.cpp"],
+        "modifies": ["res/shaders/water.frag", "src/luminumbra_client/rendering/passes/WaterPass.cpp", ".forge/scripts/validate-runtime-stability-phase-1.ps1"],
+        "creates": []
+      },
+      "prompt": "Claude-agent execution. Caustics offscreen pass into the bound-but-never-generated u_caustics_texture; SSR pass-vs-inline decision on GPU timer data; water_visual_analysis v2 with caustics/reflection/depth-tint ROIs. RenderHealth re-bless per task; PerfRegression after."
+    },
+    {
+      "id": "T-I2-17-atmosphere-beauty-track",
+      "title": "Beautification track B: enhanced skybox, weather, time-of-day sweep",
+      "type": "code",
+      "tier": "deep",
+      "depends_on": ["T-I2-11-render-pass-extraction"],
+      "files": ["res/shaders/enhanced_skybox.frag", "res/shaders/weather_system.frag", ".forge/scripts/validate-engine-frontier.ps1"],
+      "agent_contract": {
+        "reads": ["src/luminumbra_client/rendering/RenderPipeline.cpp"],
+        "modifies": ["src/luminumbra_client/rendering/passes/PostPass.cpp", "src/luminumbra_client/main_client.cpp", ".forge/scripts/validate-engine-frontier.ps1"],
+        "creates": []
+      },
+      "prompt": "Claude-agent execution. SkyboxVisual, WeatherVisual, TimeOfDaySweep modes with luminance/color-band assertions and LuminCrystal night-emission ROI. RenderHealth re-bless per task; PerfRegression after."
+    },
+    {
+      "id": "T-I2-18-material-richness-track",
+      "title": "Beautification track C: Grass, Stone, Soil material heatmap ROIs",
+      "type": "code",
+      "tier": "standard",
+      "depends_on": ["T-I2-11-render-pass-extraction"],
+      "files": ["src/luminumbra_client/main_client.cpp", ".forge/scripts/validate-engine-frontier.ps1"],
+      "agent_contract": {
+        "reads": ["data/common/materials.json"],
+        "modifies": ["src/luminumbra_client/main_client.cpp", ".forge/scripts/validate-engine-frontier.ps1"],
+        "creates": []
+      },
+      "prompt": "Claude-agent execution. One material per task with its own noon calibration capture; thresholds stored in the analysis artifact; asserted at noon only."
+    },
+    {
+      "id": "T-I2-19-closeout",
+      "title": "Iteration closeout: full sweep, Endurance300, forge verify, handoff",
+      "type": "test",
+      "tier": "standard",
+      "depends_on": ["T-I2-13-persistence-runtime-roundtrip-gate", "T-I2-15-jobsystem-priority-lanes", "T-I2-16-water-beauty-track", "T-I2-17-atmosphere-beauty-track", "T-I2-18-material-richness-track"],
+      "files": [".forge/artifacts/engine-frontier/handoff.md"],
+      "agent_contract": {
+        "reads": [".forge/scripts/validate-engine-frontier.ps1"],
+        "modifies": [".forge/artifacts/engine-frontier/handoff.md"],
+        "creates": []
+      },
+      "prompt": "Inline orchestrator execution. Full validator sweep, Endurance300, forge verify, handoff final status with baseline re-bless log."
+    }
+  ]
+}
