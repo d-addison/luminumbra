@@ -497,6 +497,49 @@ void WriteRenderHealthAnalysis(
     output << "}\n";
 }
 
+void WriteGpuSdfCallbackSafetyArtifact(
+    const fs::path& path,
+    bool passed,
+    bool callback_api_present,
+    bool integration_disabled_by_default,
+    bool setup_clears_callback_when_disabled,
+    bool raw_this_capture_present,
+    bool raw_this_callback_gated,
+    bool gpu_readback_is_synchronous,
+    bool gl_context_required) {
+    std::ofstream output(path);
+    ASSERT_TRUE(output) << path.string();
+    output << "{\n";
+    output << "  \"schema\": \"luminumbra.render.gpu_sdf_callback_safety.v1\",\n";
+    output << "  \"generated_by\": \"RenderSmokeTest.GpuSdfCallbackSafetyGateEmitsAnalysisArtifact\",\n";
+    output << "  \"passed\": " << (passed ? "true" : "false") << ",\n";
+    output << "  \"callback\": {\n";
+    output << "    \"source\": \"src/luminumbra_client/rendering/RenderPipeline.cpp\",\n";
+    output << "    \"header\": \"src/luminumbra_client/rendering/RenderPipeline.h\",\n";
+    output << "    \"setup_api\": \"SetupGPUSDFIntegration\",\n";
+    output << "    \"generation_api\": \"generate_chunk_sdf_gpu\",\n";
+    output << "    \"world_callback\": \"SetGPUSDFCallback\",\n";
+    output << "    \"disabled_gate\": \"kEnableExperimentalGpuSdfIntegration\",\n";
+    output << "    \"callback_api_present\": " << (callback_api_present ? "true" : "false") << ",\n";
+    output << "    \"default_enabled\": " << (integration_disabled_by_default ? "false" : "true") << ",\n";
+    output << "    \"clears_callback_when_disabled\": " << (setup_clears_callback_when_disabled ? "true" : "false") << ",\n";
+    output << "    \"raw_this_capture_present\": " << (raw_this_capture_present ? "true" : "false") << ",\n";
+    output << "    \"raw_this_capture_gated\": " << (raw_this_callback_gated ? "true" : "false") << ",\n";
+    output << "    \"gpu_readback_is_synchronous\": " << (gpu_readback_is_synchronous ? "true" : "false") << ",\n";
+    output << "    \"gl_context_required\": " << (gl_context_required ? "true" : "false") << ",\n";
+    output << "    \"safe_until_explicit_opt_in\": " << (passed ? "true" : "false") << "\n";
+    output << "  },\n";
+    output << "  \"checks\": [\n";
+    output << "    {\"name\": \"gpu sdf callback API is present\", \"passed\": " << (callback_api_present ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"gpu sdf integration is disabled by default\", \"passed\": " << (integration_disabled_by_default ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"disabled setup clears any world callback\", \"passed\": " << (setup_clears_callback_when_disabled ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"raw pipeline capture is gated behind explicit opt-in\", \"passed\": " << (raw_this_callback_gated ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"gpu readback stays synchronous while callback path is disabled\", \"passed\": " << (gpu_readback_is_synchronous ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"callback path requires render GL context ownership\", \"passed\": " << (gl_context_required ? "true" : "false") << "}\n";
+    output << "  ]\n";
+    output << "}\n";
+}
+
 void SetMat4Identity(GLuint program, const char* name) {
     const GLfloat identity[16] = {
         1.0f, 0.0f, 0.0f, 0.0f,
@@ -672,6 +715,78 @@ TEST(RenderSmokeTest, RenderHealthGateEmitsAnalysisArtifact) {
     EXPECT_TRUE(terrain_materials_present);
     EXPECT_TRUE(all_programs_ok);
     EXPECT_TRUE(gl_errors.empty());
+    EXPECT_TRUE(passed);
+}
+
+TEST(RenderSmokeTest, GpuSdfCallbackSafetyGateEmitsAnalysisArtifact) {
+    const std::string header = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
+    const std::string source = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+    ASSERT_FALSE(header.empty());
+    ASSERT_FALSE(source.empty());
+
+    const std::size_t setup_pos = source.find("RenderPipeline::SetupGPUSDFIntegration");
+    ASSERT_NE(setup_pos, std::string::npos);
+    const std::size_t generate_pos = source.find("RenderPipeline::generate_chunk_sdf_gpu");
+    ASSERT_NE(generate_pos, std::string::npos);
+    ASSERT_GT(generate_pos, setup_pos);
+
+    const std::string setup_body = source.substr(setup_pos, generate_pos - setup_pos);
+    const std::size_t disabled_branch = setup_body.find("if (!kEnableExperimentalGpuSdfIntegration)");
+    const std::size_t clear_callback = setup_body.find("world_system.SetGPUSDFCallback({})");
+    const std::size_t disabled_return = setup_body.find("return;", clear_callback);
+    const std::size_t raw_capture = setup_body.find("[this]");
+
+    const bool callback_api_present =
+        header.find("SetupGPUSDFIntegration") != std::string::npos &&
+        header.find("generate_chunk_sdf_gpu") != std::string::npos &&
+        source.find("world_system.SetGPUSDFCallback") != std::string::npos;
+    const bool integration_disabled_by_default =
+        source.find("constexpr bool kEnableExperimentalGpuSdfIntegration = false;") != std::string::npos;
+    const bool setup_clears_callback_when_disabled =
+        disabled_branch != std::string::npos &&
+        clear_callback != std::string::npos &&
+        disabled_return != std::string::npos &&
+        disabled_branch < clear_callback &&
+        clear_callback < disabled_return;
+    const bool raw_this_capture_present = raw_capture != std::string::npos;
+    const bool raw_this_callback_gated =
+        raw_this_capture_present &&
+        disabled_return != std::string::npos &&
+        disabled_return < raw_capture;
+    const bool gpu_readback_is_synchronous =
+        source.find("glClientWaitSync(m_gpu_sdf.compute_fence, GL_SYNC_FLUSH_COMMANDS_BIT, GL_TIMEOUT_IGNORED)") != std::string::npos &&
+        source.find("glMapBuffer(GL_SHADER_STORAGE_BUFFER, GL_READ_ONLY)") != std::string::npos;
+    const bool gl_context_required =
+        source.find("glUseProgram(m_gpu_sdf.compute_program)") != std::string::npos &&
+        source.find("glDispatchCompute(3, 3, 3)") != std::string::npos &&
+        source.find("glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0)") != std::string::npos;
+    const bool passed =
+        callback_api_present &&
+        integration_disabled_by_default &&
+        setup_clears_callback_when_disabled &&
+        raw_this_callback_gated &&
+        gpu_readback_is_synchronous &&
+        gl_context_required;
+
+    fs::create_directories(RenderHealthArtifactRoot());
+    WriteGpuSdfCallbackSafetyArtifact(
+        RenderHealthArtifactRoot() / "gpu-sdf-callback-safety.json",
+        passed,
+        callback_api_present,
+        integration_disabled_by_default,
+        setup_clears_callback_when_disabled,
+        raw_this_capture_present,
+        raw_this_callback_gated,
+        gpu_readback_is_synchronous,
+        gl_context_required);
+
+    EXPECT_TRUE(callback_api_present);
+    EXPECT_TRUE(integration_disabled_by_default);
+    EXPECT_TRUE(setup_clears_callback_when_disabled);
+    EXPECT_TRUE(raw_this_capture_present);
+    EXPECT_TRUE(raw_this_callback_gated);
+    EXPECT_TRUE(gpu_readback_is_synchronous);
+    EXPECT_TRUE(gl_context_required);
     EXPECT_TRUE(passed);
 }
 
