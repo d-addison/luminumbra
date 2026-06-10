@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "FrontierDisabled", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "FrontierDisabled", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug"
@@ -591,6 +591,78 @@ function Test-AudioNullTelemetry {
     }
 }
 
+function Test-AudioHandleApplication {
+    $artifactDir = "build/$BuildPreset/test-artifacts/audio"
+    $analysisPath = Join-Path $artifactDir "audio-handle-application.json"
+    $testScriptPath = "test/audio/audio-handle-application.ps1"
+
+    if (-not (Test-Path $testScriptPath)) {
+        throw "audio handle application gate not yet implemented - missing $testScriptPath (produced by task T-EF-15-audio-handle-application-gate)"
+    }
+
+    & $testScriptPath -BuildPreset $BuildPreset
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
+    if (-not (Test-Path $analysisPath)) {
+        throw "audio handle application gate not yet implemented - missing $analysisPath (produced by task T-EF-15-audio-handle-application-gate)"
+    }
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.audio.handle_application.v1") {
+        throw "Unexpected audio handle application schema '$($analysis.schema)'"
+    }
+    if (-not $analysis.passed) {
+        throw "Audio handle application analysis reported failure"
+    }
+    if ($analysis.manager.source -ne "src/luminumbra_client/audio/MiniaudioManager.cpp") {
+        throw "Audio handle application analysis must inspect MiniaudioManager.cpp"
+    }
+    if ($analysis.manager.interface -ne "src/luminumbra_client/audio/IAudioManager.h") {
+        throw "Audio handle application analysis must inspect IAudioManager.h"
+    }
+    if ($analysis.handle_application.playback_handle_api -ne "PlayEvent") {
+        throw "Audio handle application analysis must require PlayEvent handle issuance"
+    }
+    if (-not $analysis.handle_application.stopped_handles_removed) {
+        throw "Audio handle application must remove immediately stopped handles"
+    }
+    if (-not $analysis.handle_application.spatial_cluster_updated) {
+        throw "Audio handle application must keep spatial cluster state synchronized"
+    }
+    if (-not $analysis.handle_application.invalid_handles_rejected) {
+        throw "Audio handle application must reject unknown handles"
+    }
+    foreach ($parameter in @("volume", "pitch")) {
+        if (@($analysis.handle_application.supported_parameters) -notcontains $parameter) {
+            throw "Audio handle application must support '$parameter' parameter application"
+        }
+    }
+
+    $requiredChecks = @(
+        "interface declares handle mutators",
+        "miniaudio manager stores playable handles",
+        "stop applies handle to active sound",
+        "immediate stop releases active handle",
+        "stop removes spatial cluster source",
+        "position applies handle to ma_sound",
+        "volume applies handle to ma_sound",
+        "parameter applies supported miniaudio controls",
+        "unknown handles are rejected"
+    )
+    $checks = @($analysis.checks)
+    foreach ($requiredCheck in $requiredChecks) {
+        $matches = @($checks | Where-Object { $_.name -eq $requiredCheck })
+        if ($matches.Count -ne 1) {
+            throw "Audio handle application analysis is missing check '$requiredCheck'"
+        }
+        if (-not $matches[0].passed) {
+            throw "Audio handle application check failed: $requiredCheck"
+        }
+    }
+}
+
 function Test-FrontierDisabled {
     Assert-FileExists $FrontierDisabledPath
 
@@ -623,6 +695,7 @@ switch ($Mode) {
     "ChunkCollisionLifecycle" { Test-ChunkCollisionLifecycle }
     "PhysicsReplay" { Test-PhysicsReplay }
     "AudioNullTelemetry" { Test-AudioNullTelemetry }
+    "AudioHandleApplication" { Test-AudioHandleApplication }
     "FrontierDisabled" { Test-FrontierDisabled }
     "All" {
         Test-CodexOnly
@@ -634,6 +707,7 @@ switch ($Mode) {
         Test-ChunkCollisionLifecycle
         Test-PhysicsReplay
         Test-AudioNullTelemetry
+        Test-AudioHandleApplication
         Test-FrontierDisabled
     }
 }
