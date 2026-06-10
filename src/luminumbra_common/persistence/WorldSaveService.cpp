@@ -57,6 +57,32 @@ std::string WorldSaveService::world_hash(const WorldStreamingState& state) const
     return ComputeWorldStreamingStateHash(state);
 }
 
+WorldSaveDirtyReport WorldSaveService::save_dirty_chunks(
+    WorldStreamingState& state,
+    const std::filesystem::path& save_dir,
+    std::vector<std::string>* errors) const {
+    WorldSaveDirtyReport report;
+    report.chunks_total = state.size();
+
+    const std::vector<ChunkID> dirty_ids = state.dirty_chunk_ids();
+    report.chunks_dirty = dirty_ids.size();
+    if (dirty_ids.empty()) {
+        return report;
+    }
+
+    if (!save_world(state, save_dir, errors)) {
+        return report;
+    }
+
+    for (const ChunkID id : dirty_ids) {
+        if (const auto chunk = state.find_chunk(id)) {
+            chunk->clear_voxel_data_dirty();
+        }
+    }
+    report.saved = true;
+    return report;
+}
+
 bool WorldSaveService::write_snapshot(
     const std::string& snapshot_json,
     const std::filesystem::path& save_dir,

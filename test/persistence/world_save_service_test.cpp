@@ -1,6 +1,8 @@
 #include "gtest/gtest.h"
 
 #include "persistence/WorldSaveService.h"
+#include "systems/SHIELD_WorldSystem.h"
+#include "world/MarchingCubes.h"
 #include "world/WorldStreamingState.h"
 
 #include <atomic>
@@ -117,4 +119,94 @@ TEST(WorldSaveService, LoadFromMissingSaveDirIsCleanMissWithoutErrors) {
     std::vector<std::string> errors;
     EXPECT_FALSE(service.load_world(state, missing_dir, errors));
     EXPECT_TRUE(errors.empty());
+}
+
+TEST(ChunkDirtyTracking, DirectVoxelWritePlusMarkIsVisibleThroughStreamingState) {
+    WorldStreamingState state;
+    PopulateFixtureWorld(state);
+
+    for (const auto& chunk : state.snapshot_chunks()) {
+        EXPECT_FALSE(chunk->is_voxel_data_dirty());
+    }
+    EXPECT_TRUE(state.dirty_chunk_ids().empty());
+
+    auto edited = state.find_chunk(IVec3(2, -1, 3));
+    ASSERT_NE(edited, nullptr);
+    edited->sdf_data[0] = -42.0f; // direct voxel mutation post-generation
+    edited->mark_voxel_data_dirty();
+
+    EXPECT_TRUE(edited->is_voxel_data_dirty());
+    const std::vector<Luminumbra::ChunkID> dirty_ids = state.dirty_chunk_ids();
+    ASSERT_EQ(dirty_ids.size(), 1u);
+    EXPECT_EQ(dirty_ids.front(), edited->get_id());
+
+    edited->clear_voxel_data_dirty();
+    EXPECT_FALSE(edited->is_voxel_data_dirty());
+    EXPECT_TRUE(state.dirty_chunk_ids().empty());
+}
+
+TEST(ChunkDirtyTracking, SaveDirtyChunksWritesSnapshotAndClearsFlags) {
+    TempSaveDir save_dir("dirty");
+    WorldSaveService service;
+
+    WorldStreamingState state;
+    PopulateFixtureWorld(state);
+    auto edited = state.find_chunk(IVec3(0, 0, 0));
+    ASSERT_NE(edited, nullptr);
+    edited->sdf_data[1] = 9.5f;
+    edited->mark_voxel_data_dirty();
+
+    std::vector<std::string> errors;
+    const auto report = service.save_dirty_chunks(state, save_dir.path, &errors);
+    EXPECT_TRUE(errors.empty());
+    EXPECT_EQ(report.chunks_total, 3u);
+    EXPECT_EQ(report.chunks_dirty, 1u);
+    EXPECT_TRUE(report.saved);
+    EXPECT_TRUE(std::filesystem::exists(WorldSaveService::world_state_path(save_dir.path)));
+    EXPECT_FALSE(edited->is_voxel_data_dirty());
+    EXPECT_TRUE(state.dirty_chunk_ids().empty());
+
+    // Second pass with nothing dirty performs no save.
+    const auto clean_report = service.save_dirty_chunks(state, save_dir.path, &errors);
+    EXPECT_TRUE(errors.empty());
+    EXPECT_EQ(clean_report.chunks_total, 3u);
+    EXPECT_EQ(clean_report.chunks_dirty, 0u);
+    EXPECT_FALSE(clean_report.saved);
+}
+
+TEST(ChunkDirtyTracking, SaveDirtyChunksWithoutDirtyChunksWritesNothing) {
+    TempSaveDir save_dir("clean");
+    WorldSaveService service;
+
+    WorldStreamingState state;
+    PopulateFixtureWorld(state);
+
+    std::vector<std::string> errors;
+    const auto report = service.save_dirty_chunks(state, save_dir.path, &errors);
+    EXPECT_TRUE(errors.empty());
+    EXPECT_EQ(report.chunks_total, 3u);
+    EXPECT_EQ(report.chunks_dirty, 0u);
+    EXPECT_FALSE(report.saved);
+    EXPECT_FALSE(std::filesystem::exists(WorldSaveService::world_state_path(save_dir.path)));
+}
+
+TEST(ChunkDirtyTracking, GenerationAndMeshingLeaveChunkClean) {
+    Luminumbra::Systems::TerrainGenParams params;
+    params.base_amplitude = 0.0f;
+    params.height_offset = 8.0f;
+    params.caves_enabled = false;
+    const Luminumbra::Systems::SHIELD_WorldSystem world_system(nullptr, nullptr, params, 1337);
+
+    Chunk chunk(IVec3(0, 0, 0));
+    world_system.GenerateChunkData(chunk);
+    EXPECT_FALSE(chunk.is_voxel_data_dirty()) << "generation must leave the chunk clean";
+
+    Luminumbra::World::MarchingCubes::PolygoniseTerrain(world_system, chunk, 0.0f, 1);
+    EXPECT_FALSE(chunk.is_voxel_data_dirty()) << "meshing must not mark voxel data dirty";
+
+    // Regeneration discards unsaved edits, so it clears the flag again.
+    chunk.sdf_data[0] = -100.0f;
+    chunk.mark_voxel_data_dirty();
+    world_system.GenerateChunkData(chunk);
+    EXPECT_FALSE(chunk.is_voxel_data_dirty()) << "regeneration must reset the dirty flag";
 }
