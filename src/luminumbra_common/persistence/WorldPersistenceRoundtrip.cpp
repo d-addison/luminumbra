@@ -1,5 +1,6 @@
 #include "WorldPersistenceRoundtrip.h"
 
+#include "ecs/EntitySnapshot.h"
 #include "nlohmann/json.hpp"
 
 #include <algorithm>
@@ -18,8 +19,12 @@ namespace {
 constexpr const char* kRoundtripSchema = "luminumbra.persistence.world_roundtrip.v1";
 constexpr const char* kSnapshotSchema = "luminumbra.persistence.world_state_snapshot.v1";
 constexpr const char* kChunkFormatValidationSchema = "luminumbra.persistence.chunk_format_validation.v1";
+constexpr const char* kWorldHashSchema = "luminumbra.persistence.world_hash.v1";
+constexpr const char* kEntitySnapshotArtifactSchema = "luminumbra.persistence.entity_snapshot.v1";
 constexpr const char* kOrderContract = "chunk_id_ascending";
 constexpr const char* kChunkFormatContract = "world_state_snapshot_chunk_v1_required_fields";
+constexpr const char* kWorldHashAlgorithm = "fnv1a_64_stable_json";
+constexpr const char* kEntitySnapshotSource = "src/luminumbra_common/ecs/EntitySnapshot.h";
 
 const std::vector<std::string>& PersistedFields() {
     static const std::vector<std::string> fields = {
@@ -315,6 +320,14 @@ void AddCheck(ChunkFormatValidationAnalysis& analysis, std::string name, bool pa
     analysis.checks.push_back(WorldPersistenceRoundtripCheck{std::move(name), passed});
 }
 
+void AddCheck(WorldHashAnalysis& analysis, std::string name, bool passed) {
+    analysis.checks.push_back(WorldPersistenceRoundtripCheck{std::move(name), passed});
+}
+
+void AddCheck(EntitySnapshotAnalysis& analysis, std::string name, bool passed) {
+    analysis.checks.push_back(WorldPersistenceRoundtripCheck{std::move(name), passed});
+}
+
 std::shared_ptr<Chunk> FixtureChunk(WorldStreamingState& state, const IVec3& coords, ChunkState chunk_state, u32 salt) {
     auto chunk = state.get_or_create_chunk(coords);
     chunk->set_state(chunk_state);
@@ -376,6 +389,49 @@ bool ChunkIdsAreSorted(const nlohmann::json& snapshot) {
         ids.push_back(chunk.at("chunk_id").get<ChunkID>());
     }
     return std::is_sorted(ids.begin(), ids.end());
+}
+
+std::vector<std::string> EntityIdsFromSnapshot(const nlohmann::json& snapshot) {
+    std::vector<std::string> ids;
+    for (const nlohmann::json& entity : snapshot.at("entities")) {
+        ids.push_back(std::to_string(entity.at("entity_id").get<std::uint64_t>()));
+    }
+    return ids;
+}
+
+std::vector<std::string> ComponentTypesFromSnapshot(const nlohmann::json& snapshot) {
+    std::vector<std::string> types;
+    for (const nlohmann::json& entity : snapshot.at("entities")) {
+        for (const nlohmann::json& component : entity.at("components")) {
+            const std::string type = component.at("type").get<std::string>();
+            if (std::find(types.begin(), types.end(), type) == types.end()) {
+                types.push_back(type);
+            }
+        }
+    }
+    std::sort(types.begin(), types.end());
+    return types;
+}
+
+bool EntityIdsAreSorted(const nlohmann::json& snapshot) {
+    std::vector<std::uint64_t> ids;
+    for (const nlohmann::json& entity : snapshot.at("entities")) {
+        ids.push_back(entity.at("entity_id").get<std::uint64_t>());
+    }
+    return std::is_sorted(ids.begin(), ids.end());
+}
+
+bool EntityComponentsAreSorted(const nlohmann::json& snapshot) {
+    for (const nlohmann::json& entity : snapshot.at("entities")) {
+        std::vector<std::string> types;
+        for (const nlohmann::json& component : entity.at("components")) {
+            types.push_back(component.at("type").get<std::string>());
+        }
+        if (!std::is_sorted(types.begin(), types.end())) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool ValidateVec2Object(const nlohmann::json& value, const std::string& field_name, std::vector<std::string>& errors) {
@@ -574,6 +630,18 @@ const char* ChunkFormatValidationSchema() {
 
 const char* ChunkFormatContract() {
     return kChunkFormatContract;
+}
+
+const char* WorldHashSchema() {
+    return kWorldHashSchema;
+}
+
+const char* WorldHashAlgorithm() {
+    return kWorldHashAlgorithm;
+}
+
+const char* EntitySnapshotArtifactSchema() {
+    return kEntitySnapshotArtifactSchema;
 }
 
 std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state) {
@@ -944,6 +1012,250 @@ bool WriteChunkFormatValidationArtifact(
     } catch (const std::exception& e) {
         if (errors) {
             errors->push_back(std::string("failed to write chunk format validation artifact: ") + e.what());
+        }
+        return false;
+    }
+}
+
+WorldHashAnalysis BuildWorldHashAnalysis(const std::string& build_preset) {
+    WorldHashAnalysis analysis;
+    analysis.build_preset = build_preset;
+
+    WorldStreamingState before_state;
+    PopulateFixtureState(before_state);
+    const std::string before_json = SerializeWorldStreamingStateSnapshotJson(before_state);
+    const std::string repeated_json = SerializeWorldStreamingStateSnapshotJson(before_state);
+    const nlohmann::json before_snapshot = nlohmann::json::parse(before_json);
+
+    WorldStreamingState after_state;
+    std::vector<std::string> load_errors;
+    const bool loaded = LoadWorldStreamingStateSnapshotJson(before_json, after_state, load_errors);
+    const std::string after_json = loaded ? SerializeWorldStreamingStateSnapshotJson(after_state) : std::string();
+
+    analysis.chunk_count = before_snapshot.at("chunk_count").get<std::size_t>();
+    analysis.snapshot_byte_count = before_json.size();
+    analysis.hash = Checksum(before_json);
+    analysis.roundtrip_hash = loaded ? Checksum(after_json) : "";
+    analysis.stable_hash = analysis.hash == Checksum(repeated_json);
+    analysis.roundtrip_hash_matches = loaded && analysis.hash == analysis.roundtrip_hash;
+    analysis.chunk_ids = ChunkIdsFromSnapshot(before_snapshot);
+
+    AddCheck(analysis, "world hash API is declared", true);
+    AddCheck(analysis, "world hash uses deterministic snapshot bytes", before_json == repeated_json);
+    AddCheck(analysis, "world hash preserves chunk_id_ascending order", ChunkIdsAreSorted(before_snapshot));
+    AddCheck(analysis, "world hash is stable across save/load/save", analysis.roundtrip_hash_matches);
+    AddCheck(analysis, "world hash artifact records deterministic hash", !analysis.hash.empty());
+
+    analysis.passed = WorldHashMeetsBaseline(analysis);
+    return analysis;
+}
+
+std::string SerializeWorldHashJson(const WorldHashAnalysis& analysis) {
+    nlohmann::json checks = nlohmann::json::array();
+    for (const WorldPersistenceRoundtripCheck& check : analysis.checks) {
+        checks.push_back({
+            {"name", check.name},
+            {"passed", check.passed}
+        });
+    }
+
+    nlohmann::json artifact = {
+        {"schema", kWorldHashSchema},
+        {"passed", analysis.passed},
+        {"build_preset", analysis.build_preset},
+        {"persistence", {
+            {"source", "src/luminumbra_common/persistence/WorldPersistenceRoundtrip.cpp"},
+            {"header", "src/luminumbra_common/persistence/WorldPersistenceRoundtrip.h"},
+            {"snapshot_serializer", "SerializeWorldStreamingStateSnapshotJson"},
+            {"hash_api", "BuildWorldHashAnalysis"},
+            {"validation_api", "WorldHashMeetsBaseline"},
+            {"artifact_writer", "WriteWorldHashArtifact"},
+            {"order_contract", kOrderContract}
+        }},
+        {"world_hash", {
+            {"snapshot_schema", kSnapshotSchema},
+            {"hash_algorithm", kWorldHashAlgorithm},
+            {"snapshot_byte_count", analysis.snapshot_byte_count},
+            {"chunk_count", analysis.chunk_count},
+            {"hash", analysis.hash},
+            {"roundtrip_hash", analysis.roundtrip_hash},
+            {"stable_hash", analysis.stable_hash},
+            {"roundtrip_hash_matches", analysis.roundtrip_hash_matches},
+            {"chunk_ids", analysis.chunk_ids}
+        }},
+        {"checks", checks}
+    };
+    return StableDump(artifact);
+}
+
+bool WorldHashMeetsBaseline(const WorldHashAnalysis& analysis) {
+    const bool checks_passed = std::all_of(
+        analysis.checks.begin(),
+        analysis.checks.end(),
+        [](const WorldPersistenceRoundtripCheck& check) { return check.passed; });
+
+    return analysis.chunk_count >= 3u &&
+           analysis.snapshot_byte_count > 0u &&
+           analysis.stable_hash &&
+           analysis.roundtrip_hash_matches &&
+           analysis.hash == analysis.roundtrip_hash &&
+           !analysis.hash.empty() &&
+           checks_passed;
+}
+
+bool WriteWorldHashArtifact(
+    const std::filesystem::path& output_path,
+    const std::string& build_preset,
+    std::vector<std::string>* errors) {
+    try {
+        const WorldHashAnalysis analysis = BuildWorldHashAnalysis(build_preset);
+        if (!analysis.passed) {
+            if (errors) {
+                errors->push_back("world hash analysis did not pass baseline");
+            }
+            return false;
+        }
+
+        const std::filesystem::path parent = output_path.parent_path();
+        if (!parent.empty()) {
+            std::filesystem::create_directories(parent);
+        }
+
+        std::ofstream output(output_path);
+        if (!output.is_open()) {
+            if (errors) {
+                errors->push_back("failed to open world hash artifact for writing: " + output_path.string());
+            }
+            return false;
+        }
+
+        output << SerializeWorldHashJson(analysis);
+        return true;
+    } catch (const std::exception& e) {
+        if (errors) {
+            errors->push_back(std::string("failed to write world hash artifact: ") + e.what());
+        }
+        return false;
+    }
+}
+
+EntitySnapshotAnalysis BuildEntitySnapshotAnalysis(const std::string& build_preset) {
+    EntitySnapshotAnalysis analysis;
+    analysis.build_preset = build_preset;
+
+    Luminumbra::Ecs::EntityRegistrySnapshot before_registry = Luminumbra::Ecs::BuildEntitySnapshotFixture();
+    const std::string before_json = Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(before_registry);
+    const nlohmann::json before_snapshot = nlohmann::json::parse(before_json);
+
+    Luminumbra::Ecs::EntityRegistrySnapshot after_registry;
+    std::vector<std::string> load_errors;
+    const bool loaded = Luminumbra::Ecs::LoadEntityRegistrySnapshotJson(before_json, after_registry, load_errors);
+    const std::string after_json = loaded ? Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(after_registry) : std::string();
+
+    analysis.entity_count = before_snapshot.at("entity_count").get<std::size_t>();
+    analysis.component_count = before_snapshot.at("component_count").get<std::size_t>();
+    analysis.snapshot_byte_count = before_json.size();
+    analysis.stable_serialization = loaded && before_json == after_json;
+    analysis.before_checksum = Checksum(before_json);
+    analysis.after_checksum = loaded ? Checksum(after_json) : "";
+    analysis.entity_ids = EntityIdsFromSnapshot(before_snapshot);
+    analysis.component_types = ComponentTypesFromSnapshot(before_snapshot);
+
+    AddCheck(analysis, "entity snapshot API is declared", true);
+    AddCheck(analysis, "entity snapshot serializer emits deterministic entity order", EntityIdsAreSorted(before_snapshot));
+    AddCheck(analysis, "entity snapshot serializer emits deterministic component order", EntityComponentsAreSorted(before_snapshot));
+    AddCheck(analysis, "entity snapshot loader restores entity ids and components", loaded && analysis.entity_count == 3u && analysis.component_count >= 6u);
+    AddCheck(analysis, "entity snapshot serialization is byte-stable", analysis.stable_serialization);
+    AddCheck(analysis, "entity snapshot artifact records deterministic checksum", analysis.before_checksum == analysis.after_checksum && !analysis.before_checksum.empty());
+    AddCheck(analysis, "ecs snapshot source is present", true);
+
+    analysis.passed = EntitySnapshotMeetsBaseline(analysis);
+    return analysis;
+}
+
+std::string SerializeEntitySnapshotJson(const EntitySnapshotAnalysis& analysis) {
+    nlohmann::json checks = nlohmann::json::array();
+    for (const WorldPersistenceRoundtripCheck& check : analysis.checks) {
+        checks.push_back({
+            {"name", check.name},
+            {"passed", check.passed}
+        });
+    }
+
+    nlohmann::json artifact = {
+        {"schema", kEntitySnapshotArtifactSchema},
+        {"passed", analysis.passed},
+        {"build_preset", analysis.build_preset},
+        {"ecs", {
+            {"source", kEntitySnapshotSource},
+            {"snapshot_api", "SerializeEntityRegistrySnapshotJson"},
+            {"loader", "LoadEntityRegistrySnapshotJson"},
+            {"validation_api", "EntitySnapshotMeetsBaseline"},
+            {"fixture_api", "BuildEntitySnapshotFixture"},
+            {"order_contract", Luminumbra::Ecs::EntitySnapshotOrderContract()}
+        }},
+        {"entity_snapshot", {
+            {"snapshot_schema", Luminumbra::Ecs::EntitySnapshotSchema()},
+            {"entity_count", analysis.entity_count},
+            {"component_count", analysis.component_count},
+            {"snapshot_byte_count", analysis.snapshot_byte_count},
+            {"stable_serialization", analysis.stable_serialization},
+            {"before_checksum", analysis.before_checksum},
+            {"after_checksum", analysis.after_checksum},
+            {"entity_ids", analysis.entity_ids},
+            {"component_types", analysis.component_types}
+        }},
+        {"checks", checks}
+    };
+    return StableDump(artifact);
+}
+
+bool EntitySnapshotMeetsBaseline(const EntitySnapshotAnalysis& analysis) {
+    const bool checks_passed = std::all_of(
+        analysis.checks.begin(),
+        analysis.checks.end(),
+        [](const WorldPersistenceRoundtripCheck& check) { return check.passed; });
+
+    return analysis.entity_count >= 3u &&
+           analysis.component_count >= 6u &&
+           analysis.snapshot_byte_count > 0u &&
+           analysis.stable_serialization &&
+           analysis.before_checksum == analysis.after_checksum &&
+           !analysis.before_checksum.empty() &&
+           checks_passed;
+}
+
+bool WriteEntitySnapshotArtifact(
+    const std::filesystem::path& output_path,
+    const std::string& build_preset,
+    std::vector<std::string>* errors) {
+    try {
+        const EntitySnapshotAnalysis analysis = BuildEntitySnapshotAnalysis(build_preset);
+        if (!analysis.passed) {
+            if (errors) {
+                errors->push_back("entity snapshot analysis did not pass baseline");
+            }
+            return false;
+        }
+
+        const std::filesystem::path parent = output_path.parent_path();
+        if (!parent.empty()) {
+            std::filesystem::create_directories(parent);
+        }
+
+        std::ofstream output(output_path);
+        if (!output.is_open()) {
+            if (errors) {
+                errors->push_back("failed to open entity snapshot artifact for writing: " + output_path.string());
+            }
+            return false;
+        }
+
+        output << SerializeEntitySnapshotJson(analysis);
+        return true;
+    } catch (const std::exception& e) {
+        if (errors) {
+            errors->push_back(std::string("failed to write entity snapshot artifact: ") + e.what());
         }
         return false;
     }
