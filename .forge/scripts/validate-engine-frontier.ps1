@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "FrontierDisabled", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "FrontierDisabled", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug"
@@ -503,6 +503,109 @@ function Test-GpuSdfCallbackSafetyGate {
         }
         if (-not $matches[0].passed) {
             throw "GPU SDF callback safety check failed: $requiredCheck"
+        }
+    }
+}
+
+function Test-GpuSdfComputeParityGate {
+    $renderDir = "build/$BuildPreset/test-artifacts/render"
+    $analysisPath = Join-Path $renderDir "gpu-sdf-compute-parity.json"
+
+    if (-not (Test-Path $analysisPath)) {
+        throw "gpu SDF compute parity gate not yet implemented - missing $analysisPath (produced by task T-EF-28-gpu-sdf-compute-parity-gate)"
+    }
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.render.gpu_sdf_compute_parity.v1") {
+        throw "Unexpected GPU SDF compute parity schema '$($analysis.schema)'"
+    }
+    if (-not $analysis.passed) {
+        throw "GPU SDF compute parity analysis reported failure"
+    }
+    if ($analysis.parity.source -ne "src/luminumbra_client/rendering/RenderPipeline.cpp") {
+        throw "GPU SDF compute parity analysis must inspect RenderPipeline.cpp"
+    }
+    if ($analysis.parity.header -ne "src/luminumbra_client/rendering/RenderPipeline.h") {
+        throw "GPU SDF compute parity analysis must inspect RenderPipeline.h"
+    }
+    if ($analysis.parity.chunk_contract -ne "src/luminumbra_common/world/Chunk.h") {
+        throw "GPU SDF compute parity analysis must inspect Chunk.h"
+    }
+    if ($analysis.parity.compute_api -ne "generate_chunk_sdf_gpu") {
+        throw "GPU SDF compute parity analysis must require generate_chunk_sdf_gpu"
+    }
+    if ($analysis.parity.compute_shader -ne "res/shaders/sdf_generation.compute") {
+        throw "GPU SDF compute parity analysis must require sdf_generation.compute"
+    }
+    if ($analysis.parity.cpu_reference -ne "authoritative CPU worldgen path") {
+        throw "GPU SDF compute parity analysis must retain the authoritative CPU reference path"
+    }
+    if ($analysis.parity.disabled_gate -ne "kEnableExperimentalGpuSdfIntegration") {
+        throw "GPU SDF compute parity analysis must require kEnableExperimentalGpuSdfIntegration"
+    }
+    if ($analysis.parity.default_enabled -ne $false) {
+        throw "GPU SDF compute path must remain disabled by default until parity passes"
+    }
+    if ($analysis.parity.sample_grid -ne "17x17x17") {
+        throw "GPU SDF compute parity sample grid must be 17x17x17"
+    }
+    if ([int64]$analysis.parity.sample_count -ne 4913) {
+        throw "GPU SDF compute parity sample count must be 4913"
+    }
+    if ($analysis.parity.dispatch_groups -ne "3x3x3") {
+        throw "GPU SDF compute parity dispatch groups must be 3x3x3"
+    }
+    if ($analysis.parity.workgroup_size -ne "8x8x8") {
+        throw "GPU SDF compute parity workgroup size must be 8x8x8"
+    }
+    if ($analysis.parity.readback -ne "synchronous_ssbo_readback") {
+        throw "GPU SDF compute parity readback must remain synchronous while the callback path is disabled"
+    }
+    if ([double]$analysis.parity.max_abs_error_threshold -le 0.0 -or [double]$analysis.parity.max_abs_error_threshold -gt 0.001) {
+        throw "GPU SDF compute parity max_abs_error_threshold must be explicit and <= 0.001"
+    }
+    if ([double]$analysis.parity.mean_abs_error_threshold -le 0.0 -or [double]$analysis.parity.mean_abs_error_threshold -gt 0.0001) {
+        throw "GPU SDF compute parity mean_abs_error_threshold must be explicit and <= 0.0001"
+    }
+    if ([int64]$analysis.parity.fixture_count -lt 3) {
+        throw "GPU SDF compute parity must cover at least three fixtures"
+    }
+    if (-not $analysis.parity.gpu_callback_requires_passing_parity) {
+        throw "GPU SDF callback activation must require passing compute parity"
+    }
+    if (-not $analysis.parity.gpu_path_blocked_until_parity_passes) {
+        throw "GPU SDF compute path must stay blocked until parity passes"
+    }
+    if (-not $analysis.parity.authoritative_cpu_path_retained) {
+        throw "GPU SDF compute parity must retain the authoritative CPU path"
+    }
+
+    $fixtures = @($analysis.parity.fixtures)
+    foreach ($fixtureName in @("origin", "positive_offset", "negative_offset")) {
+        $matches = @($fixtures | Where-Object { $_.name -eq $fixtureName })
+        if ($matches.Count -ne 1) {
+            throw "GPU SDF compute parity is missing fixture '$fixtureName'"
+        }
+    }
+
+    $requiredChecks = @(
+        "gpu sdf compute API is present",
+        "gpu sdf output grid matches chunk-plus-padding contract",
+        "gpu sdf dispatch covers every output sample",
+        "gpu sdf readback produces deterministic sample buffer",
+        "cpu worldgen remains authoritative until parity passes",
+        "gpu sdf integration remains disabled by default",
+        "parity thresholds are explicit",
+        "parity fixtures cover origin positive and negative chunks"
+    )
+    $checks = @($analysis.checks)
+    foreach ($requiredCheck in $requiredChecks) {
+        $matches = @($checks | Where-Object { $_.name -eq $requiredCheck })
+        if ($matches.Count -ne 1) {
+            throw "GPU SDF compute parity analysis is missing check '$requiredCheck'"
+        }
+        if (-not $matches[0].passed) {
+            throw "GPU SDF compute parity check failed: $requiredCheck"
         }
     }
 }
@@ -1650,6 +1753,7 @@ switch ($Mode) {
     "RenderHealth" { Test-RenderHealth }
     "ShaderInventory" { Test-ShaderInventory }
     "GpuSdfCallbackSafetyGate" { Test-GpuSdfCallbackSafetyGate }
+    "GpuSdfComputeParityGate" { Test-GpuSdfComputeParityGate }
     "ChunkCollisionLifecycle" { Test-ChunkCollisionLifecycle }
     "PhysicsReplay" { Test-PhysicsReplay }
     "AudioNullTelemetry" { Test-AudioNullTelemetry }
@@ -1671,6 +1775,7 @@ switch ($Mode) {
         Test-RenderHealth
         Test-ShaderInventory
         Test-GpuSdfCallbackSafetyGate
+        Test-GpuSdfComputeParityGate
         Test-ChunkCollisionLifecycle
         Test-PhysicsReplay
         Test-AudioNullTelemetry

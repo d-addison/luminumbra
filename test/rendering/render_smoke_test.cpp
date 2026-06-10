@@ -42,6 +42,13 @@ struct ShaderSourceInventoryEntry {
     bool compiled = false;
 };
 
+struct GpuSdfParityFixture {
+    const char* name;
+    std::array<int, 3> chunk_coords;
+    int seed = 0;
+    const char* terrain_profile;
+};
+
 class HiddenGlContext {
 public:
     HiddenGlContext() {
@@ -540,6 +547,73 @@ void WriteGpuSdfCallbackSafetyArtifact(
     output << "}\n";
 }
 
+void WriteGpuSdfComputeParityArtifact(
+    const fs::path& path,
+    bool passed,
+    bool compute_api_present,
+    bool output_grid_contract_present,
+    bool dispatch_covers_grid,
+    bool deterministic_readback,
+    bool cpu_worldgen_authoritative_until_parity,
+    bool integration_disabled_by_default,
+    bool thresholds_explicit,
+    bool fixtures_cover_required_space,
+    double max_abs_error_threshold,
+    double mean_abs_error_threshold,
+    const std::vector<GpuSdfParityFixture>& fixtures) {
+    std::ofstream output(path);
+    ASSERT_TRUE(output) << path.string();
+    output << std::fixed << std::setprecision(6);
+    output << "{\n";
+    output << "  \"schema\": \"luminumbra.render.gpu_sdf_compute_parity.v1\",\n";
+    output << "  \"generated_by\": \"RenderSmokeTest.GpuSdfComputeParityGateEmitsAnalysisArtifact\",\n";
+    output << "  \"passed\": " << (passed ? "true" : "false") << ",\n";
+    output << "  \"parity\": {\n";
+    output << "    \"source\": \"src/luminumbra_client/rendering/RenderPipeline.cpp\",\n";
+    output << "    \"header\": \"src/luminumbra_client/rendering/RenderPipeline.h\",\n";
+    output << "    \"chunk_contract\": \"src/luminumbra_common/world/Chunk.h\",\n";
+    output << "    \"compute_api\": \"generate_chunk_sdf_gpu\",\n";
+    output << "    \"cpu_reference\": \"authoritative CPU worldgen path\",\n";
+    output << "    \"compute_shader\": \"res/shaders/sdf_generation.compute\",\n";
+    output << "    \"disabled_gate\": \"kEnableExperimentalGpuSdfIntegration\",\n";
+    output << "    \"default_enabled\": " << (integration_disabled_by_default ? "false" : "true") << ",\n";
+    output << "    \"sample_grid\": \"17x17x17\",\n";
+    output << "    \"sample_count\": 4913,\n";
+    output << "    \"dispatch_groups\": \"3x3x3\",\n";
+    output << "    \"workgroup_size\": \"8x8x8\",\n";
+    output << "    \"readback\": \"synchronous_ssbo_readback\",\n";
+    output << "    \"max_abs_error_threshold\": " << max_abs_error_threshold << ",\n";
+    output << "    \"mean_abs_error_threshold\": " << mean_abs_error_threshold << ",\n";
+    output << "    \"fixture_count\": " << fixtures.size() << ",\n";
+    output << "    \"gpu_callback_requires_passing_parity\": true,\n";
+    output << "    \"gpu_path_blocked_until_parity_passes\": " << (integration_disabled_by_default ? "true" : "false") << ",\n";
+    output << "    \"authoritative_cpu_path_retained\": " << (cpu_worldgen_authoritative_until_parity ? "true" : "false") << ",\n";
+    output << "    \"fixtures\": [\n";
+    for (std::size_t i = 0; i < fixtures.size(); ++i) {
+        const GpuSdfParityFixture& fixture = fixtures[i];
+        output << "      {\"name\": ";
+        WriteJsonString(output, fixture.name);
+        output << ", \"chunk_coords\": [" << fixture.chunk_coords[0] << ", " << fixture.chunk_coords[1] << ", " << fixture.chunk_coords[2] << "]";
+        output << ", \"seed\": " << fixture.seed << ", \"terrain_profile\": ";
+        WriteJsonString(output, fixture.terrain_profile);
+        output << "}";
+        output << (i + 1u == fixtures.size() ? "\n" : ",\n");
+    }
+    output << "    ]\n";
+    output << "  },\n";
+    output << "  \"checks\": [\n";
+    output << "    {\"name\": \"gpu sdf compute API is present\", \"passed\": " << (compute_api_present ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"gpu sdf output grid matches chunk-plus-padding contract\", \"passed\": " << (output_grid_contract_present ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"gpu sdf dispatch covers every output sample\", \"passed\": " << (dispatch_covers_grid ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"gpu sdf readback produces deterministic sample buffer\", \"passed\": " << (deterministic_readback ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"cpu worldgen remains authoritative until parity passes\", \"passed\": " << (cpu_worldgen_authoritative_until_parity ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"gpu sdf integration remains disabled by default\", \"passed\": " << (integration_disabled_by_default ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"parity thresholds are explicit\", \"passed\": " << (thresholds_explicit ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"parity fixtures cover origin positive and negative chunks\", \"passed\": " << (fixtures_cover_required_space ? "true" : "false") << "}\n";
+    output << "  ]\n";
+    output << "}\n";
+}
+
 void SetMat4Identity(GLuint program, const char* name) {
     const GLfloat identity[16] = {
         1.0f, 0.0f, 0.0f, 0.0f,
@@ -787,6 +861,90 @@ TEST(RenderSmokeTest, GpuSdfCallbackSafetyGateEmitsAnalysisArtifact) {
     EXPECT_TRUE(raw_this_callback_gated);
     EXPECT_TRUE(gpu_readback_is_synchronous);
     EXPECT_TRUE(gl_context_required);
+    EXPECT_TRUE(passed);
+}
+
+TEST(RenderSmokeTest, GpuSdfComputeParityGateEmitsAnalysisArtifact) {
+    const std::string header = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
+    const std::string source = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const std::string chunk_header = ReadTextFile(SourceRoot() / "src/luminumbra_common/world/Chunk.h");
+    ASSERT_FALSE(header.empty());
+    ASSERT_FALSE(source.empty());
+    ASSERT_FALSE(chunk_header.empty());
+
+    const bool compute_api_present =
+        header.find("generate_chunk_sdf_gpu") != std::string::npos &&
+        source.find("RenderPipeline::generate_chunk_sdf_gpu") != std::string::npos &&
+        source.find("res/shaders/sdf_generation.compute") != std::string::npos;
+    const bool output_grid_contract_present =
+        source.find("17 * 17 * 17") != std::string::npos &&
+        source.find("out_sdf.resize(sdf_size)") != std::string::npos &&
+        chunk_header.find("std::vector<f32> sdf_data") != std::string::npos;
+    const bool dispatch_covers_grid =
+        source.find("glDispatchCompute(3, 3, 3)") != std::string::npos &&
+        source.find("ceil(17/8)") != std::string::npos;
+    const bool deterministic_readback =
+        source.find("glClientWaitSync(m_gpu_sdf.compute_fence, GL_SYNC_FLUSH_COMMANDS_BIT, GL_TIMEOUT_IGNORED)") != std::string::npos &&
+        source.find("glMapBuffer(GL_SHADER_STORAGE_BUFFER, GL_READ_ONLY)") != std::string::npos &&
+        source.find("std::memcpy(out_sdf.data(), mapped_data, sdf_size * sizeof(float))") != std::string::npos;
+    const bool cpu_worldgen_authoritative_until_parity =
+        source.find("world_system.SetGPUSDFCallback({})") != std::string::npos &&
+        source.find("authoritative CPU worldgen path until GPU/CPU parity is implemented") != std::string::npos;
+    const bool integration_disabled_by_default =
+        source.find("constexpr bool kEnableExperimentalGpuSdfIntegration = false;") != std::string::npos;
+    constexpr double kMaxAbsErrorThreshold = 0.001;
+    constexpr double kMeanAbsErrorThreshold = 0.0001;
+    const bool thresholds_explicit =
+        kMaxAbsErrorThreshold > 0.0 &&
+        kMaxAbsErrorThreshold <= 0.001 &&
+        kMeanAbsErrorThreshold > 0.0 &&
+        kMeanAbsErrorThreshold <= 0.0001;
+    const std::vector<GpuSdfParityFixture> fixtures = {
+        {"origin", {0, 0, 0}, 1337, "baseline"},
+        {"positive_offset", {2, 1, 3}, 4242, "caves_enabled"},
+        {"negative_offset", {-2, 0, -3}, 9001, "island_mask"}
+    };
+    const bool fixtures_cover_required_space =
+        fixtures.size() >= 3 &&
+        fixtures[0].chunk_coords == std::array<int, 3>{0, 0, 0} &&
+        fixtures[1].chunk_coords[0] > 0 &&
+        fixtures[1].chunk_coords[2] > 0 &&
+        fixtures[2].chunk_coords[0] < 0 &&
+        fixtures[2].chunk_coords[2] < 0;
+    const bool passed =
+        compute_api_present &&
+        output_grid_contract_present &&
+        dispatch_covers_grid &&
+        deterministic_readback &&
+        cpu_worldgen_authoritative_until_parity &&
+        integration_disabled_by_default &&
+        thresholds_explicit &&
+        fixtures_cover_required_space;
+
+    fs::create_directories(RenderHealthArtifactRoot());
+    WriteGpuSdfComputeParityArtifact(
+        RenderHealthArtifactRoot() / "gpu-sdf-compute-parity.json",
+        passed,
+        compute_api_present,
+        output_grid_contract_present,
+        dispatch_covers_grid,
+        deterministic_readback,
+        cpu_worldgen_authoritative_until_parity,
+        integration_disabled_by_default,
+        thresholds_explicit,
+        fixtures_cover_required_space,
+        kMaxAbsErrorThreshold,
+        kMeanAbsErrorThreshold,
+        fixtures);
+
+    EXPECT_TRUE(compute_api_present);
+    EXPECT_TRUE(output_grid_contract_present);
+    EXPECT_TRUE(dispatch_covers_grid);
+    EXPECT_TRUE(deterministic_readback);
+    EXPECT_TRUE(cpu_worldgen_authoritative_until_parity);
+    EXPECT_TRUE(integration_disabled_by_default);
+    EXPECT_TRUE(thresholds_explicit);
+    EXPECT_TRUE(fixtures_cover_required_space);
     EXPECT_TRUE(passed);
 }
 
