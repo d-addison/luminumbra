@@ -25,6 +25,7 @@
 #include "passes/LightingPass.h"
 #include "passes/ShadowPass.h"
 #include "passes/SsaoPass.h"
+#include "passes/WaterPass.h"
 #include <stb_image.h>
 
 namespace {
@@ -168,20 +169,6 @@ constexpr const char* kGpuTimerPassNames[] = {
     "final_blit",
 };
 
-GLuint make_solid_rgba_texture(const unsigned char rgba[4], const std::string& label) {
-    GLuint texture = 0;
-    glGenTextures(1, &texture);
-    label_gl_object(GL_TEXTURE, texture, label);
-    glBindTexture(GL_TEXTURE_2D, texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    return texture;
-}
-
 } // namespace
 
 // --- HIERARCHICAL CULLING IMPLEMENTATION ---
@@ -315,7 +302,8 @@ RenderPipeline::RenderPipeline()
     : m_gbuffer_pass(std::make_unique<GBufferPass>()),
       m_shadow_pass(std::make_unique<ShadowPass>()),
       m_ssao_pass(std::make_unique<SsaoPass>()),
-      m_lighting_pass(std::make_unique<LightingPass>()) {}
+      m_lighting_pass(std::make_unique<LightingPass>()),
+      m_water_pass(std::make_unique<WaterPass>()) {}
 RenderPipeline::~RenderPipeline() {
     cleanup_gpu_resources();
 }
@@ -340,7 +328,7 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         init_skybox();
         init_terrain_textures();
         init_material_lut();
-        init_water_fallback_textures();
+        m_water_pass->init_water_fallback_textures();
         init_gpu_sdf_system();
         init_gpu_pass_timers();
 
@@ -470,10 +458,10 @@ RenderPipeline::RuntimeRenderStats RenderPipeline::get_runtime_render_stats() co
     if (m_gbuffer_pass->instance_matrix_vbo()) estimated_vram_bytes += 10000u * sizeof(glm::mat4);
     if (m_terrainTextureArray) estimated_vram_bytes += 2048u * 2048u * 5u * 4u;
     if (m_materialLUT) estimated_vram_bytes += 256u * 4u;
-    if (m_water_flat_normal_texture) estimated_vram_bytes += 4u;
-    if (m_water_neutral_flow_texture) estimated_vram_bytes += 4u;
-    if (m_water_black_texture) estimated_vram_bytes += 4u;
-    if (m_water_underwater_texture) estimated_vram_bytes += 4u;
+    if (m_water_pass->flat_normal_texture()) estimated_vram_bytes += 4u;
+    if (m_water_pass->neutral_flow_texture()) estimated_vram_bytes += 4u;
+    if (m_water_pass->black_texture()) estimated_vram_bytes += 4u;
+    if (m_water_pass->underwater_texture()) estimated_vram_bytes += 4u;
     if (m_gpu_sdf.sdf_buffer) estimated_vram_bytes += 17u * 17u * 17u * sizeof(float);
     if (m_gpu_sdf.terrain_noise_texture) estimated_vram_bytes += 128u * 128u * 128u * sizeof(float);
     if (m_gpu_sdf.cave_noise_texture) estimated_vram_bytes += 128u * 128u * 128u * sizeof(float);
@@ -486,7 +474,7 @@ RenderPipeline::RuntimeRenderStats RenderPipeline::get_runtime_render_stats() co
     stats.shadow_shader_ok = m_shadow_pass->shader() && m_shadow_pass->shader()->IsValid();
     stats.ssao_shader_ok = m_ssao_pass->ssao().ssaoShader && m_ssao_pass->ssao().ssaoShader->IsValid();
     stats.ssao_blur_shader_ok = m_ssao_pass->ssao().blurShader && m_ssao_pass->ssao().blurShader->IsValid();
-    stats.water_shader_ok = m_water_shader && m_water_shader->IsValid();
+    stats.water_shader_ok = m_water_pass->shader() && m_water_pass->shader()->IsValid();
     stats.instanced_static_mesh_shader_ok = m_gbuffer_pass->instanced_static_mesh_shader() && m_gbuffer_pass->instanced_static_mesh_shader()->IsValid();
     stats.gpu_sdf_initialized = m_gpu_sdf.initialized;
     const GpuSdfRuntimeToggleState gpu_sdf_runtime = get_gpu_sdf_runtime_toggle_state();
@@ -521,7 +509,7 @@ std::vector<RenderPipeline::ShaderHealthEntry> RenderPipeline::get_shader_health
     add_shader("shadow", m_shadow_pass->shader());
     add_shader("ssao", m_ssao_pass->ssao().ssaoShader);
     add_shader("ssao_blur", m_ssao_pass->ssao().blurShader);
-    add_shader("water", m_water_shader);
+    add_shader("water", m_water_pass->shader());
     add_shader("instanced_static_mesh", m_gbuffer_pass->instanced_static_mesh_shader());
     health.push_back({"gpu_sdf_compute", m_gpu_sdf.compute_program != 0, m_gpu_sdf.compute_program != 0 ? "" : "not initialized"});
     return health;
@@ -550,10 +538,10 @@ RenderPipeline::RenderResourceRegistryStats RenderPipeline::get_resource_registr
     stats.textures += count(m_ssao_pass->ssao().noiseTexture);
     stats.textures += count(m_terrainTextureArray);
     stats.textures += count(m_materialLUT);
-    stats.textures += count(m_water_flat_normal_texture);
-    stats.textures += count(m_water_neutral_flow_texture);
-    stats.textures += count(m_water_black_texture);
-    stats.textures += count(m_water_underwater_texture);
+    stats.textures += count(m_water_pass->flat_normal_texture());
+    stats.textures += count(m_water_pass->neutral_flow_texture());
+    stats.textures += count(m_water_pass->black_texture());
+    stats.textures += count(m_water_pass->underwater_texture());
     stats.textures += count(m_gpu_sdf.terrain_noise_texture);
     stats.textures += count(m_gpu_sdf.cave_noise_texture);
     stats.textures += count(m_gpu_sdf.island_mask_texture);
@@ -1074,7 +1062,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // 6. WATER PASS (Renders to m_lighting_fbo, reads from it for refraction)
     glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
     begin_gpu_pass_timer(GpuTimerPass::Water);
-    water_pass(renderable_chunk_snapshots, camera);
+    m_water_pass->execute(*this, renderable_chunk_snapshots, camera);
     end_gpu_pass_timer(GpuTimerPass::Water);
     glBindVertexArray(0);  // Unbind after water pass
 
@@ -1101,91 +1089,6 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     finish_gpu_pass_timer_frame();
     refresh_render_pass_metadata();
 }
-
-void RenderPipeline::water_pass(const std::vector<ChunkMeshSnapshot>& renderable_chunks, const Camera& camera) {
-    // --- 1. Set OpenGL State ---
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDepthMask(GL_FALSE);
-    glDisable(GL_CULL_FACE);
-
-    // --- 2. Activate Shader and Set Uniforms ---
-    m_water_shader->use();
-
-    glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)m_screen_width / (float)m_screen_height, camera.GetNearPlane(), camera.GetFarPlane());
-    glm::mat4 view = camera.GetViewMatrix();
-
-    // Set matrices
-    m_water_shader->setMat4("u_view", view);
-    m_water_shader->setMat4("u_projection", projection);
-    m_water_shader->setMat4("u_inverse_view", glm::inverse(view));
-    m_water_shader->setMat4("u_inverse_projection", glm::inverse(projection));
-    // <<< OPTIMIZATION: Set the new pre-combined matrix for the SSR loop
-    m_water_shader->setMat4("u_view_projection", projection * view);
-    
-    // Set scene and material properties (as before)
-    m_water_shader->setVec3("u_camera_pos", camera.Position);
-    m_water_shader->setVec2("u_screen_size", glm::vec2(m_screen_width, m_screen_height));
-    m_water_shader->setFloat("u_time", static_cast<float>(glfwGetTime()));
-    m_water_shader->setVec3("u_sun_direction", m_sun.direction);
-    m_water_shader->setVec3("u_sun_color", m_sun.color);
-    m_water_shader->setVec3("u_shallow_color", glm::vec3(0.3, 0.8, 0.7));
-    m_water_shader->setVec3("u_deep_color", glm::vec3(0.02, 0.18, 0.34));
-    m_water_shader->setFloat("u_water_depth_scaler", 0.2f);
-    m_water_shader->setFloat("u_reflection_power", 0.7f);
-
-    // Bind textures (as before)
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, m_lighting_pass->lighting_fbo().opaque_color_texture);
-    m_water_shader->setInt("u_opaque_scene_color", 0);
-
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, m_gbuffer_pass->gbuffer().depth_texture);
-    m_water_shader->setInt("u_opaque_depth", 1);
-
-    glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, m_water_flat_normal_texture);
-    m_water_shader->setInt("u_normal_map", 2);
-
-    glActiveTexture(GL_TEXTURE3);
-    glBindTexture(GL_TEXTURE_2D, m_water_neutral_flow_texture);
-    m_water_shader->setInt("u_flow_map", 3);
-
-    glActiveTexture(GL_TEXTURE4);
-    glBindTexture(GL_TEXTURE_2D, m_water_black_texture);
-    m_water_shader->setInt("u_caustics_texture", 4);
-
-    glActiveTexture(GL_TEXTURE5);
-    glBindTexture(GL_TEXTURE_2D, m_water_underwater_texture);
-    m_water_shader->setInt("u_underwater_texture", 5);
-
-    glActiveTexture(GL_TEXTURE6);
-    glBindTexture(GL_TEXTURE_2D, m_water_black_texture);
-    m_water_shader->setInt("u_foam_texture", 6);
-    
-    // --- 3. Draw Water Meshes ---
-    for (const auto& chunk : renderable_chunks) {
-        auto it = m_water_render_data.find(chunk.id);
-        if (it != m_water_render_data.end() && it->second.element_count > 0) {
-            const auto& render_data = it->second;
-            
-            glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(chunk.coords * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z)));
-            m_water_shader->setMat4("u_model", model);
-            
-            glBindVertexArray(render_data.vao_id);
-            glDrawElements(GL_TRIANGLES, render_data.element_count, GL_UNSIGNED_INT, 0);
-            m_last_render_pass_stats.water_draws++;
-            m_last_render_pass_stats.water_indices_drawn += render_data.element_count;
-        }
-    }
-
-    // --- 4. Restore OpenGL State ---
-    glBindVertexArray(0);
-    glDepthMask(GL_TRUE);
-    glDisable(GL_BLEND);
-    glEnable(GL_CULL_FACE);
-}
-
 
 void RenderPipeline::on_resize(u32 new_width, u32 new_height) {
     if (new_width == 0 || new_height == 0 || (new_width == m_screen_width && new_height == m_screen_height)) return;
@@ -1252,9 +1155,8 @@ void RenderPipeline::init_shaders() {
     m_skybox_shader = std::make_unique<Shader>((m_root_path / "res/shaders/skybox.vert").string().c_str(), (m_root_path / "res/shaders/skybox.frag").string().c_str());
     m_shadow_pass->init_shader(m_root_path);
     m_ssao_pass->init_shaders(m_root_path);
-    m_water_shader = std::make_unique<Shader>((m_root_path / "res/shaders/water.vert").string().c_str(), (m_root_path / "res/shaders/water.frag").string().c_str());
+    m_water_pass->init_shader(m_root_path);
     label_gl_object(GL_PROGRAM, m_skybox_shader ? m_skybox_shader->Id() : 0u, "shader.skybox");
-    label_gl_object(GL_PROGRAM, m_water_shader ? m_water_shader->Id() : 0u, "shader.water");
 }
 
 void RenderPipeline::init_screen_quad() {
@@ -1289,13 +1191,6 @@ void RenderPipeline::init_skybox() {
 
 // --- CLEANUP ---
 
-void RenderPipeline::destroy_water_fallback_textures() {
-    if (m_water_flat_normal_texture) { glDeleteTextures(1, &m_water_flat_normal_texture); m_water_flat_normal_texture = 0; }
-    if (m_water_neutral_flow_texture) { glDeleteTextures(1, &m_water_neutral_flow_texture); m_water_neutral_flow_texture = 0; }
-    if (m_water_black_texture) { glDeleteTextures(1, &m_water_black_texture); m_water_black_texture = 0; }
-    if (m_water_underwater_texture) { glDeleteTextures(1, &m_water_underwater_texture); m_water_underwater_texture = 0; }
-}
-
 void RenderPipeline::cleanup_gpu_resources() {
     for (auto& [id, d] : m_chunk_render_data) {
         (void)id;
@@ -1327,7 +1222,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_gbuffer_pass->destroy_instanced_static_mesh();
     if (m_terrainTextureArray) { glDeleteTextures(1, &m_terrainTextureArray); m_terrainTextureArray = 0; }
     if (m_materialLUT) { glDeleteTextures(1, &m_materialLUT); m_materialLUT = 0; }
-    destroy_water_fallback_textures();
+    m_water_pass->destroy_water_fallback_textures();
     cleanup_gpu_sdf_system();
     destroy_gpu_pass_timers();
     m_gbuffer_pass->reset_shaders();
@@ -1335,7 +1230,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_skybox_shader.reset();
     m_shadow_pass->reset_shader();
     m_ssao_pass->reset_shaders();
-    m_water_shader.reset();
+    m_water_pass->reset_shader();
     m_last_render_pass_metadata.clear();
     m_terrain_texture_fallback_layers = 0;
     m_started = false;
@@ -1933,18 +1828,6 @@ void RenderPipeline::init_material_lut() {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     
     LUMINUMBRA_CORE_INFO("Material LUT initialized with {} materials.", MATERIAL_COUNT);
-}
-
-void RenderPipeline::init_water_fallback_textures() {
-    const unsigned char flat_normal[4] = {128, 128, 255, 255};
-    const unsigned char neutral_flow[4] = {128, 128, 0, 0};
-    const unsigned char black[4] = {0, 0, 0, 255};
-    const unsigned char underwater[4] = {5, 28, 48, 255};
-
-    m_water_flat_normal_texture = make_solid_rgba_texture(flat_normal, "water.fallback.flat_normal");
-    m_water_neutral_flow_texture = make_solid_rgba_texture(neutral_flow, "water.fallback.neutral_flow");
-    m_water_black_texture = make_solid_rgba_texture(black, "water.fallback.black");
-    m_water_underwater_texture = make_solid_rgba_texture(underwater, "water.fallback.underwater");
 }
 
 // --- GPU SDF GENERATION SYSTEM ---
