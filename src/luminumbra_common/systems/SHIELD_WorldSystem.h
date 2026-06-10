@@ -201,7 +201,11 @@ private:
     struct StreamingState {
         std::unordered_map<ChunkID, std::shared_ptr<::Luminumbra::Chunk>> chunks;
         JobHandle generation_job_handle;
+        // Meshing work is split across two batches per dispatch: hole-fill
+        // candidates (no active mesh yet) ride the High job lane so visible
+        // gaps close ahead of bulk LOD/water remeshes on the Normal lane.
         JobHandle meshing_job_handle;
+        JobHandle meshing_job_handle_high;
         struct MeshingJobChunk {
             std::shared_ptr<::Luminumbra::Chunk> chunk;
             bool terrain_mesh_required = true;
@@ -243,9 +247,13 @@ private:
         std::shared_ptr<::Luminumbra::Chunk> chunk;
         int lod_level = 0;
         bool terrain_mesh_required = true;
+        // Near-field hole-fill work rides the High job lane (see
+        // MAX_HIGH_PRIORITY_MESHING_JOBS_PER_DISPATCH in the .cpp).
+        bool high_priority = false;
     };
     void dispatch_meshing_jobs(const std::vector<MeshingWorkItem>& chunks_to_mesh);
     void process_completed_meshing_jobs();
+    bool meshing_jobs_active() const;
     void wait_for_generation_jobs();
     void wait_for_meshing_jobs();
     void reinitialize_noise();

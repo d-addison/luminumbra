@@ -17,6 +17,13 @@ const int MAX_CHUNKS_TO_PROCESS_PER_FRAME = std::max(1,
     static_cast<int>(BASE_WORK_BUDGET_EQUIVALENT / (static_cast<float>(Luminumbra::CHUNK_VOLUME) / 4096.0f))
 );
 const int MAX_COLLISION_MESHES_PER_FRAME = 16;
+// Per dispatch, at most this many sorted-prefix hole-fill candidates ride the
+// High job lane. The cap keeps "High" meaning near-field holes the player can
+// see: during bulk drains (initial load, fast travel) nearly every candidate
+// lacks an active mesh, and routing the whole backlog High starves the Normal
+// lane that generation batches ride on, delaying neighbor arrival and
+// inflating late-neighbor transition remesh churn.
+constexpr std::size_t MAX_HIGH_PRIORITY_MESHING_JOBS_PER_DISPATCH = 32;
 constexpr size_t MAX_ACTIVE_CHUNKS = 20000;
 constexpr size_t STREAMING_MAX_ACTIVE_CHUNKS_BUDGET = 8192;
 constexpr int STREAMING_ACTIVATION_INTERVAL_FRAMES = 4;
@@ -156,11 +163,19 @@ void SHIELD_WorldSystem::wait_for_generation_jobs() {
 }
 
 void SHIELD_WorldSystem::wait_for_meshing_jobs() {
+    if (m_job_system && m_streaming_state.meshing_job_handle_high.counter) {
+        m_job_system->wait(m_streaming_state.meshing_job_handle_high);
+    }
     if (m_job_system && m_streaming_state.meshing_job_handle.counter) {
         m_job_system->wait(m_streaming_state.meshing_job_handle);
     }
 
     process_completed_meshing_jobs();
+}
+
+bool SHIELD_WorldSystem::meshing_jobs_active() const {
+    return has_active_job(m_streaming_state.meshing_job_handle) ||
+           has_active_job(m_streaming_state.meshing_job_handle_high);
 }
 
 void SHIELD_WorldSystem::reinitialize_noise() {
@@ -334,7 +349,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
     m_last_streaming_budget_stats.requested_render_radius = RENDER_DISTANCE;
     m_last_streaming_budget_stats.max_active_chunks_budget = STREAMING_MAX_ACTIVE_CHUNKS_BUDGET;
     m_last_streaming_budget_stats.generation_job_active = has_active_job(m_streaming_state.generation_job_handle);
-    m_last_streaming_budget_stats.meshing_job_active = has_active_job(m_streaming_state.meshing_job_handle);
+    m_last_streaming_budget_stats.meshing_job_active = meshing_jobs_active();
     m_last_streaming_budget_stats.active_chunks_before = m_streaming_state.chunks.size();
     clear_streaming_state_counts(m_last_streaming_budget_stats);
     for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
@@ -505,7 +520,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
             ++terrain_meshing_backlog;
         }
     }
-    const bool meshing_job_active = has_active_job(m_streaming_state.meshing_job_handle);
+    const bool meshing_job_active = meshing_jobs_active();
     m_last_streaming_budget_stats.meshing_job_active = meshing_job_active;
     // Scale the per-dispatch meshing batch with the standing terrain backlog:
     // deep backlogs (initial load, fast travel) dispatch larger batches so
@@ -550,10 +565,16 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
             static_cast<std::size_t>(m_last_streaming_budget_stats.meshing_budget)
         );
         for (std::size_t i = 0; i < budget; ++i) {
+            // The sort places hole-fill candidates (no active mesh) first,
+            // nearest surface band first, so the capped High prefix is
+            // exactly the near-field holes.
+            const bool high_priority = !meshing_candidates[i].has_active_mesh &&
+                i < MAX_HIGH_PRIORITY_MESHING_JOBS_PER_DISPATCH;
             chunks_to_mesh_jobs.push_back({
                 meshing_candidates[i].chunk,
                 meshing_candidates[i].required_lod,
-                meshing_candidates[i].terrain_mesh_required
+                meshing_candidates[i].terrain_mesh_required,
+                high_priority
             });
         }
 
@@ -642,7 +663,7 @@ void SHIELD_WorldSystem::update_chunk_activation(const Vec3& player_pos, Physics
         m_last_streaming_budget_stats.loading_chunks,
         m_last_streaming_budget_stats.idle_chunks,
         has_active_job(m_streaming_state.generation_job_handle),
-        has_active_job(m_streaming_state.meshing_job_handle)
+        meshing_jobs_active()
     );
 
     m_last_streaming_budget_stats.target_render_radius = target_radius;
@@ -1070,7 +1091,7 @@ SHIELD_WorldSystem::RuntimeChunkStats SHIELD_WorldSystem::get_runtime_chunk_stat
     RuntimeChunkStats stats;
     stats.total_chunks = m_streaming_state.chunks.size();
     stats.generation_job_active = has_active_job(m_streaming_state.generation_job_handle);
-    stats.meshing_job_active = has_active_job(m_streaming_state.meshing_job_handle);
+    stats.meshing_job_active = meshing_jobs_active();
 
     for (const auto& [id, chunk_ptr] : m_streaming_state.chunks) {
         (void)id;
@@ -1369,7 +1390,7 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<IVec3>&
 
 void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem>& chunks_to_mesh) {
     process_completed_meshing_jobs();
-    if (has_active_job(m_streaming_state.meshing_job_handle)) {
+    if (meshing_jobs_active()) {
         return;
     }
 
@@ -1400,7 +1421,13 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
         });
     }
 
-    std::vector<Luminumbra::Job> jobs;
+    // Near-field hole-fill candidates (no active mesh yet, capped prefix of
+    // the sorted batch) ride the High job lane so visible gaps close ahead of
+    // bulk meshing, generation, and LOD/water remeshes; everything else stays
+    // on the Normal lane. The sort in update() already places the hole-fill
+    // prefix first, so this mirrors the existing priority order.
+    std::vector<Luminumbra::Job> high_priority_jobs;
+    std::vector<Luminumbra::Job> normal_priority_jobs;
     m_streaming_state.meshing_job_chunks.clear();
     m_streaming_state.meshing_job_chunks.reserve(chunks_to_mesh.size());
     for (const MeshingWorkItem& work_item : chunks_to_mesh) {
@@ -1448,7 +1475,8 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
         }
         m_streaming_state.meshing_job_chunks.push_back({chunk, terrain_mesh_required, transition_faces});
 
-        jobs.emplace_back([this, chunk, step, transition_faces, terrain_mesh_required]() {
+        auto& lane_jobs = work_item.high_priority ? high_priority_jobs : normal_priority_jobs;
+        lane_jobs.emplace_back([this, chunk, step, transition_faces, terrain_mesh_required]() {
             try {
                 Luminumbra::Chunk scratch(chunk->get_coords());
                 scratch.water_level_data = chunk->water_level_data;
@@ -1502,10 +1530,19 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
             }
         });
     }
-    if (m_job_system && !jobs.empty()) {
-        m_streaming_state.meshing_job_handle = m_job_system->dispatch_batch(jobs);
+    if (m_job_system && (!high_priority_jobs.empty() || !normal_priority_jobs.empty())) {
+        if (!high_priority_jobs.empty()) {
+            m_streaming_state.meshing_job_handle_high =
+                m_job_system->dispatch_batch(high_priority_jobs, JobPriority::High);
+        }
+        if (!normal_priority_jobs.empty()) {
+            m_streaming_state.meshing_job_handle = m_job_system->dispatch_batch(normal_priority_jobs);
+        }
     } else {
-        for (auto& job : jobs) {
+        for (auto& job : high_priority_jobs) {
+            job();
+        }
+        for (auto& job : normal_priority_jobs) {
             job();
         }
         m_streaming_state.meshing_job_handle.counter = std::make_shared<std::atomic<int>>(0);
@@ -1514,11 +1551,15 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
 }
 
 void SHIELD_WorldSystem::process_completed_meshing_jobs() {
-    if (!m_streaming_state.meshing_job_handle.counter) {
+    if (!m_streaming_state.meshing_job_handle.counter &&
+        !m_streaming_state.meshing_job_handle_high.counter)
+    {
         return;
     }
 
-    if (m_streaming_state.meshing_job_handle.counter->load(std::memory_order_acquire) > 0) {
+    // Results are published only once BOTH lanes of the dispatch finished, so
+    // mesh application keeps the pre-priority-lane all-or-nothing semantics.
+    if (meshing_jobs_active()) {
         return;
     }
 
@@ -1563,6 +1604,7 @@ void SHIELD_WorldSystem::process_completed_meshing_jobs() {
 
     m_streaming_state.meshing_job_chunks.clear();
     m_streaming_state.meshing_job_handle = {};
+    m_streaming_state.meshing_job_handle_high = {};
 }
 
 void SHIELD_WorldSystem::set_params(const TerrainGenParams& params) {

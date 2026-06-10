@@ -299,7 +299,10 @@ private:
     static nlohmann::json JobStatsToJson(const Luminumbra::JobSystem::RuntimeStats& stats) {
         return {
             {"worker_count", stats.worker_count},
+            // Total across both priority lanes (validators read this field).
             {"queue_depth", stats.queue_depth},
+            {"high_priority_queue_depth", stats.high_priority_queue_depth},
+            {"normal_priority_queue_depth", stats.normal_priority_queue_depth},
             {"accepting_jobs", stats.accepting_jobs},
             {"stop_requested", stats.stop_requested}
         };
@@ -1214,6 +1217,13 @@ int main(int argc, char* argv[]) {
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     if (runtime_boot_recorder.enabled() || scenario_config.hidden_window) {
         glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+    }
+    if (scenario_config.active()) {
+        // Automated gate runs need a visible window (Endurance300 asserts it)
+        // but must not steal focus from whatever the developer is doing.
+        glfwWindowHint(GLFW_FOCUSED, GLFW_FALSE);
+        glfwWindowHint(GLFW_FOCUS_ON_SHOW, GLFW_FALSE);
+        glfwWindowHint(GLFW_FLOATING, GLFW_FALSE);
     }
     #ifdef LUMINUMBRA_DEBUG
         glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GL_TRUE);
