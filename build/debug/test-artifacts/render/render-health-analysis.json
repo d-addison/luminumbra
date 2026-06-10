@@ -1,0 +1,49 @@
+{
+  "schema": "luminumbra.render_health_analysis.v1",
+  "passed": true,
+  "startup": {
+    "health_snapshot_api": "get_render_health_snapshot",
+    "runtime_stats_api": "get_runtime_render_stats",
+    "health_api_present": true
+  },
+  "gl_debug": {
+    "errors": 0,
+    "error_names": []
+  },
+  "shader_health": {
+    "runtime_validity_requires_compile_and_link_success": true,
+    "programs": [
+      {"name": "basic", "ok": true},
+      {"name": "g_buffer", "ok": true},
+      {"name": "instanced_mesh_gbuffer", "ok": true},
+      {"name": "lighting_pass", "ok": true},
+      {"name": "skybox", "ok": true},
+      {"name": "shadow_map", "ok": true},
+      {"name": "ssao", "ok": true},
+      {"name": "ssao_blur", "ok": true},
+      {"name": "water", "ok": true},
+      {"name": "rml_ui", "ok": true},
+      {"name": "loading_hologram", "ok": true},
+      {"name": "loading_visual", "ok": true},
+      {"name": "volumetric_lighting", "ok": true},
+      {"name": "magical_particles", "ok": true}
+    ]
+  },
+  "render_pass_metadata": {
+    "present": true,
+    "required_passes": ["shadow", "gbuffer", "ssao", "ssao_blur", "lighting", "water", "skybox", "final_blit"]
+  },
+  "resource_registry": {
+    "present": true,
+    "debug_labels": true,
+    "resource_types": ["framebuffer", "texture", "renderbuffer", "buffer", "vertex_array", "shader_program"],
+    "shutdown_requires_empty_registry": true,
+    "empty_after_shutdown": true
+  },
+  "terrain_materials": {
+    "present": true,
+    "texture_array_required": true,
+    "material_lut_required": true,
+    "max_fallback_layers": 0
+  }
+}

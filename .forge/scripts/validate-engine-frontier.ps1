@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "FrontierDisabled", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "FrontierDisabled", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug"
@@ -212,6 +212,76 @@ function Test-MaterialVisual {
     Assert-FileExists (Join-Path $visualDir $analysis.heatmap_screenshot)
 }
 
+function Test-RenderHealth {
+    $renderDir = "build/$BuildPreset/test-artifacts/render"
+    $analysisPath = Join-Path $renderDir "render-health-analysis.json"
+
+    if (-not (Test-Path $analysisPath)) {
+        throw "render health gate not yet implemented - missing $analysisPath (produced by task T-EF-5-render-health-gate)"
+    }
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.render_health_analysis.v1") {
+        throw "Unexpected render health analysis schema '$($analysis.schema)'"
+    }
+    if (-not $analysis.passed) {
+        throw "Render health analysis reported failure"
+    }
+    if ($analysis.startup.health_snapshot_api -ne "get_render_health_snapshot") {
+        throw "Render health analysis must be backed by RenderPipeline::get_render_health_snapshot"
+    }
+    if (-not $analysis.startup.health_api_present) {
+        throw "Render health analysis reports missing RenderPipeline health API"
+    }
+    if ([int64]$analysis.gl_debug.errors -ne 0) {
+        throw "Render health run emitted GL debug errors: $($analysis.gl_debug.errors)"
+    }
+
+    $programs = @($analysis.shader_health.programs)
+    if ($programs.Count -lt 8) {
+        throw "Render health analysis is missing shader program health entries"
+    }
+    foreach ($program in $programs) {
+        if (-not $program.ok) {
+            throw "Render shader health failed for '$($program.name)'"
+        }
+    }
+
+    $requiredPasses = @("shadow", "gbuffer", "ssao", "ssao_blur", "lighting", "water", "skybox", "final_blit")
+    $actualPasses = @($analysis.render_pass_metadata.required_passes)
+    foreach ($requiredPass in $requiredPasses) {
+        if ($actualPasses -notcontains $requiredPass) {
+            throw "Render health analysis is missing render pass metadata for '$requiredPass'"
+        }
+    }
+    if (-not $analysis.render_pass_metadata.present) {
+        throw "Render health analysis reports missing render pass metadata"
+    }
+
+    if (-not $analysis.resource_registry.present) {
+        throw "Render health analysis reports missing resource registry"
+    }
+    if (-not $analysis.resource_registry.debug_labels) {
+        throw "Render health analysis must require debug labels for render resources"
+    }
+    if (-not $analysis.resource_registry.shutdown_requires_empty_registry) {
+        throw "Render health analysis must require an empty registry after shutdown"
+    }
+    if (-not $analysis.resource_registry.empty_after_shutdown) {
+        throw "Render health analysis reports leaked resources after shutdown"
+    }
+
+    if (-not $analysis.terrain_materials.present) {
+        throw "Render health analysis reports missing terrain material diagnostics"
+    }
+    if (-not $analysis.terrain_materials.texture_array_required -or -not $analysis.terrain_materials.material_lut_required) {
+        throw "Render health analysis must require terrain texture array and material LUT"
+    }
+    if ([int64]$analysis.terrain_materials.max_fallback_layers -ne 0) {
+        throw "Render health analysis must require zero terrain texture fallback layers"
+    }
+}
+
 function Test-FrontierDisabled {
     Assert-FileExists $FrontierDisabledPath
 
@@ -239,12 +309,14 @@ switch ($Mode) {
     "Build" { Test-Build }
     "UnitTests" { Test-UnitTests }
     "MaterialVisual" { Test-MaterialVisual }
+    "RenderHealth" { Test-RenderHealth }
     "FrontierDisabled" { Test-FrontierDisabled }
     "All" {
         Test-CodexOnly
         Test-Files
         Test-Sections
         Test-Panels
+        Test-RenderHealth
         Test-FrontierDisabled
     }
 }
