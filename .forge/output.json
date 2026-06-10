@@ -1,11 +1,8 @@
 {
-  "task_id": "T-EF-15-audio-handle-application-gate",
-  "attempt_id": "T-EF-15-audio-handle-application-gate",
+  "task_id": "T-EF-17-wave4-integration",
+  "attempt_id": "T-EF-17-wave4-integration",
   "status": "completed",
-  "validation": [
-    ".forge/scripts/validate-engine-frontier.ps1 -Mode AudioHandleApplication -BuildPreset debug"
-  ],
   "artifacts": [
-    "build/debug/test-artifacts/audio/audio-handle-application.json"
+    ".forge/artifacts/engine-frontier/wave-4-integration.md"
   ]
 }
