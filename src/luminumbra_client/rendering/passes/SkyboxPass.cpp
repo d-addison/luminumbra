@@ -1,5 +1,7 @@
 #include "SkyboxPass.h"
 
+#include "GBufferPass.h"
+#include "LightingPass.h"
 #include "PassGlHelpers.h"
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
@@ -21,6 +23,13 @@ void SkyboxPass::init_shader(const std::filesystem::path& root_path) {
         (root_path / "res/shaders/skybox.vert").string().c_str(),
         (root_path / "res/shaders/enhanced_skybox.frag").string().c_str());
     PassGl::label_gl_object(GL_PROGRAM, m_skybox_shader ? m_skybox_shader->Id() : 0u, "shader.skybox");
+
+    // T-I2-17b: screen-space weather overlay (rain/snow/fog/storm). Reuses
+    // the fullscreen-quad vertex stage shared by the SSAO passes.
+    m_weather_shader = std::make_unique<Shader>(
+        (root_path / "res/shaders/ssao.vert").string().c_str(),
+        (root_path / "res/shaders/weather_system.frag").string().c_str());
+    PassGl::label_gl_object(GL_PROGRAM, m_weather_shader ? m_weather_shader->Id() : 0u, "shader.weather_overlay");
 }
 
 void SkyboxPass::init_geometry() {
@@ -68,6 +77,7 @@ void SkyboxPass::destroy_geometry() {
 
 void SkyboxPass::reset_shader() {
     m_skybox_shader.reset();
+    m_weather_shader.reset();
 }
 
 void SkyboxPass::execute(RenderPipeline& pipeline, const Camera& camera) {
@@ -100,6 +110,95 @@ void SkyboxPass::execute(RenderPipeline& pipeline, const Camera& camera) {
         glEnable(GL_CULL_FACE);
     }
     glDepthFunc(GL_LESS);
+
+    if (pipeline.m_weather_type != WeatherType::None && pipeline.m_weather_intensity > 0.0f) {
+        execute_weather_overlay(pipeline, camera, projection);
+    }
+}
+
+void SkyboxPass::execute_weather_overlay(RenderPipeline& pipeline, const Camera& camera, const glm::mat4& projection) {
+    if (!m_weather_shader || !m_weather_shader->IsValid()) {
+        return;
+    }
+    const FrameBufferObject& lighting_fbo = pipeline.m_lighting_pass->lighting_fbo();
+    const GBuffer& gbuffer = pipeline.m_gbuffer_pass->gbuffer();
+    if (!lighting_fbo.fbo_id || !lighting_fbo.opaque_color_texture || !pipeline.m_screen_quad_vao) {
+        return;
+    }
+
+    // Snapshot the post-skybox scene into the opaque color texture (already
+    // consumed by the water pass this frame, so it is free to reuse) so the
+    // overlay can read the full scene while writing back into the lighting
+    // FBO color attachment.
+    pipeline.m_lighting_pass->copy_lighting_color_to_opaque_texture(pipeline);
+    glBindFramebuffer(GL_FRAMEBUFFER, lighting_fbo.fbo_id);
+    glDisable(GL_DEPTH_TEST);
+
+    m_weather_shader->use();
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, lighting_fbo.opaque_color_texture);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, gbuffer.depth_texture);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, gbuffer.position_texture);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, gbuffer.normal_texture);
+    m_weather_shader->setInt("u_sceneColor", 0);
+    m_weather_shader->setInt("u_sceneDepth", 1);
+    m_weather_shader->setInt("gPosition", 2);
+    m_weather_shader->setInt("gNormal", 3);
+    m_weather_shader->setFloat("u_time", (float)glfwGetTime());
+    m_weather_shader->setVec3("u_cameraPos", camera.Position);
+    m_weather_shader->setMat4("u_inverseView", glm::inverse(camera.GetViewMatrix()));
+    m_weather_shader->setMat4("u_inverseProjection", glm::inverse(projection));
+    // Weather fog scattering follows the lighting-pass convention (the
+    // light-travel direction), unlike the skybox disc uniforms above.
+    m_weather_shader->setVec3("u_sunDirection", pipeline.m_sun.direction);
+    m_weather_shader->setVec3("u_sunColor", pipeline.m_sun.color);
+    m_weather_shader->setFloat("u_sunIntensity", pipeline.m_sun.intensity);
+
+    // Map the engine-generic weather type onto the shader's intensity
+    // uniforms. Rain carries a sub-lightning storm component (overcast
+    // darkening without random flashes) and light fog; Storm enables the
+    // full storm path including lightning.
+    const float intensity = pipeline.m_weather_intensity;
+    float rain = 0.0f;
+    float snow = 0.0f;
+    float fog = 0.0f;
+    float storm = 0.0f;
+    switch (pipeline.m_weather_type) {
+        case WeatherType::Rain:
+            rain = intensity;
+            storm = 0.25f * intensity;
+            fog = 0.1f * intensity;
+            break;
+        case WeatherType::Snow:
+            snow = intensity;
+            fog = 0.05f * intensity;
+            break;
+        case WeatherType::Fog:
+            fog = intensity;
+            break;
+        case WeatherType::Storm:
+            rain = intensity;
+            storm = intensity;
+            break;
+        case WeatherType::None:
+        default:
+            break;
+    }
+    m_weather_shader->setFloat("u_rainIntensity", rain);
+    m_weather_shader->setFloat("u_snowIntensity", snow);
+    m_weather_shader->setFloat("u_fogDensity", fog);
+    m_weather_shader->setFloat("u_stormIntensity", storm);
+    m_weather_shader->setVec3("u_windDirection", glm::vec3(1.0f, 0.0f, 0.0f));
+    m_weather_shader->setFloat("u_windStrength", 0.3f * intensity);
+
+    glBindVertexArray(pipeline.m_screen_quad_vao);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glBindVertexArray(0);
+    glActiveTexture(GL_TEXTURE0);
+    glEnable(GL_DEPTH_TEST);
 }
 
 } // namespace Luminumbra::Rendering

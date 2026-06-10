@@ -101,9 +101,11 @@ vec3 renderRain(vec3 sceneColor, vec2 screenUV, vec3 worldPos) {
     float rainPattern = noise(rainUV);
     rainPattern = smoothstep(0.7, 0.95, rainPattern);
     
-    // Distance-based rain density
+    // Distance-based rain density. Clamped: rain falls between the camera
+    // and the background, so sky pixels (reconstructed at the far plane)
+    // must still show near-field streaks instead of exp(-1000*0.01) ~= 0.
     float distance = length(worldPos - u_cameraPos);
-    float rainFalloff = exp(-distance * 0.01);
+    float rainFalloff = exp(-min(distance, 80.0) * 0.01);
     
     // Rain lighting (brighter during storms)
     vec3 rainLight = vec3(0.8, 0.9, 1.0) * (0.3 + u_stormIntensity * 0.4);
@@ -142,9 +144,10 @@ vec3 renderSnow(vec3 sceneColor, vec2 screenUV, vec3 worldPos) {
         float snowPattern = noise(snowUV);
         snowPattern = smoothstep(0.85, 0.95, snowPattern);
         
-        // Distance falloff
+        // Distance falloff. Clamped like rain: near-field flakes stay
+        // visible against far-plane sky pixels.
         float distance = length(worldPos - u_cameraPos);
-        float snowFalloff = exp(-distance * 0.008);
+        float snowFalloff = exp(-min(distance, 100.0) * 0.008);
         
         // Layer depth effect
         float layerIntensity = u_snowIntensity * (1.0 - float(layer) * 0.3);

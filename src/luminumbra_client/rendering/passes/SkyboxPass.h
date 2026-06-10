@@ -13,6 +13,9 @@ class Shader;
 // Skybox render pass extracted from RenderPipeline (T-I2-11g). Owns the
 // skybox shader and cube geometry; the pipeline keeps orchestration order,
 // sun/moon state, stats collection, and the GPU timer issue/collect calls.
+// T-I2-17b: also owns the optional screen-space weather overlay
+// (weather_system.frag), drawn right after the skybox into the lighting FBO
+// when RenderPipeline weather state is active (default off: zero GL work).
 class SkyboxPass {
 public:
     SkyboxPass();
@@ -26,11 +29,15 @@ public:
     void execute(RenderPipeline& pipeline, const Camera& camera);
 
     const std::unique_ptr<Shader>& shader() const { return m_skybox_shader; }
+    const std::unique_ptr<Shader>& weather_shader() const { return m_weather_shader; }
     u32 vao() const { return m_skybox_vao; }
     u32 vbo() const { return m_skybox_vbo; }
 
 private:
+    void execute_weather_overlay(RenderPipeline& pipeline, const Camera& camera, const glm::mat4& projection);
+
     std::unique_ptr<Shader> m_skybox_shader;
+    std::unique_ptr<Shader> m_weather_shader;
     u32 m_skybox_vao = 0;
     u32 m_skybox_vbo = 0;
 };

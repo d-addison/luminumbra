@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -2470,6 +2470,58 @@ function Test-SkyboxVisual {
     Assert-PpmArtifact (Join-Path $visualDir $analysis.screenshot)
 }
 
+function Test-WeatherVisual {
+    $exe = Get-ClientExe
+    $visualDir = "build/$BuildPreset/test-artifacts/runtime/weather-visual"
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $visualDir
+    New-Item -ItemType Directory -Force -Path $visualDir | Out-Null
+
+    $runSeconds = [Math]::Max(20, $SmokeSeconds)
+    Invoke-Checked -FilePath $exe -ArgumentList @(
+        "--scenario", "weather_visual_smoke",
+        "--auto-create-world",
+        "--auto-enter-world",
+        "--timed-run", "$runSeconds",
+        "--no-audio",
+        "--no-ui",
+        "--runtime-artifact-dir", $visualDir
+    ) -TimeoutSeconds ([Math]::Max(120, $runSeconds + 90))
+
+    $analysisPath = Join-Path $visualDir "weather-visual-analysis.json"
+    if (-not (Test-Path $analysisPath)) {
+        throw "weather visual run did not produce $analysisPath (gate produced by task T-I2-17b-weather-overlay)"
+    }
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.weather_visual.v1") {
+        throw "Unexpected weather visual analysis schema '$($analysis.schema)'"
+    }
+    if ([int64]$analysis.gl_debug.errors -ne 0) {
+        throw "Weather visual run emitted GL debug errors: $($analysis.gl_debug.errors)"
+    }
+    if ($analysis.weather.type -ne "rain" -or [double]$analysis.weather.intensity -lt 1.0) {
+        throw "Weather visual run must exercise rain at intensity 1.0"
+    }
+    if (-not $analysis.overcast.passed) {
+        throw "Weather overcast luminance drop check failed: drop=$($analysis.overcast.sky_luminance_drop)"
+    }
+    if ([double]$analysis.overcast.sky_luminance_drop -lt [double]$analysis.thresholds.min_overcast_luminance_drop) {
+        throw "Weather sky luminance drop $($analysis.overcast.sky_luminance_drop) is below threshold $($analysis.thresholds.min_overcast_luminance_drop)"
+    }
+    if (-not $analysis.streaks.passed) {
+        throw "Weather streak structure check failed: gradient_ratio=$($analysis.streaks.sky_horizontal_gradient_ratio)"
+    }
+    if ([double]$analysis.streaks.sky_horizontal_gradient_ratio -lt [double]$analysis.thresholds.min_streak_gradient_ratio) {
+        throw "Weather streak gradient ratio $($analysis.streaks.sky_horizontal_gradient_ratio) is below threshold $($analysis.thresholds.min_streak_gradient_ratio)"
+    }
+    if (-not $analysis.passed) {
+        throw "Weather visual analysis reported failure"
+    }
+
+    Assert-PpmArtifact (Join-Path $visualDir $analysis.baseline_screenshot)
+    Assert-PpmArtifact (Join-Path $visualDir $analysis.weather_screenshot)
+}
+
 switch ($Mode) {
     "CodexOnly" { Test-CodexOnly }
     "Panels" { Test-Panels }
@@ -2501,6 +2553,7 @@ switch ($Mode) {
     "PerfRegression" { Test-PerfRegression }
     "FrontierDisabled" { Test-FrontierDisabled }
     "SkyboxVisual" { Test-SkyboxVisual }
+    "WeatherVisual" { Test-WeatherVisual }
     "All" {
         Test-CodexOnly
         Test-Files
