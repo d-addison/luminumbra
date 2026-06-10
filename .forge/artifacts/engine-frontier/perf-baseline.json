@@ -1,72 +1,72 @@
 {
-  "schema": "luminumbra.perf_baseline.v1",
-  "captured_at": "2026-06-10T13:03:51Z",
-  "machine_id": "UNCAPTURED",
-  "runs_aggregated": 0,
-  "status": "placeholder_pending_capture",
-  "scenarios": {
-    "boot": {
-      "p50_ms": 1.8505,
-      "p95_ms": 1.8505,
-      "p99_ms": 1.8505,
-      "max_ms": 1.8505,
-      "mem_high_water_mb": 0.920628
-    },
-    "create_world": {
-      "p50_ms": 0.1126,
-      "p95_ms": 0.1126,
-      "p99_ms": 0.1126,
-      "max_ms": 0.1126,
-      "mem_high_water_mb": 0.920628
-    },
-    "enter_spawn": {
-      "p50_ms": 105.2086,
-      "p95_ms": 105.2086,
-      "p99_ms": 105.2086,
-      "max_ms": 105.2086,
-      "mem_high_water_mb": 0.920628
-    },
-    "idle_horizon": {
-      "p50_ms": 2.2866,
-      "p95_ms": 19.8212,
-      "p99_ms": 20.23768,
-      "max_ms": 20.3418,
-      "mem_high_water_mb": 3.595909
-    },
-    "pan_camera": {
-      "p50_ms": 4.3957,
-      "p95_ms": 31.112475,
-      "p99_ms": 40.978415,
-      "max_ms": 43.4449,
-      "mem_high_water_mb": 8.985962
-    },
-    "streaming_walk": {
-      "p50_ms": 7.0457,
-      "p95_ms": 66.95369,
-      "p99_ms": 75.526365,
-      "max_ms": 77.5054,
-      "mem_high_water_mb": 13.224735
-    },
-    "chunk_churn": {
-      "p50_ms": 29.07255,
-      "p95_ms": 61.87925,
-      "p99_ms": 66.46009,
-      "max_ms": 67.6053,
-      "mem_high_water_mb": 17.312817
-    },
-    "shader_warmup": {
-      "p50_ms": 0.0,
-      "p95_ms": 0.0,
-      "p99_ms": 0.0,
-      "max_ms": 0.0,
-      "mem_high_water_mb": 17.312817
-    },
-    "shutdown": {
-      "p50_ms": 0.6959,
-      "p95_ms": 0.6959,
-      "p99_ms": 0.6959,
-      "max_ms": 0.6959,
-      "mem_high_water_mb": 17.312817
-    }
-  }
+    "schema":  "luminumbra.perf_baseline.v1",
+    "captured_at":  "2026-06-10T17:41:48Z",
+    "machine_id":  "DESKTOP-FHLP20F",
+    "runs_aggregated":  3,
+    "status":  "blessed",
+    "scenarios":  {
+                      "boot":  {
+                                   "p50_ms":  1.3307,
+                                   "p95_ms":  1.3307,
+                                   "p99_ms":  1.3307,
+                                   "max_ms":  1.3307,
+                                   "mem_high_water_mb":  0.920628
+                               },
+                      "create_world":  {
+                                           "p50_ms":  0.0627,
+                                           "p95_ms":  0.0627,
+                                           "p99_ms":  0.0627,
+                                           "max_ms":  0.0627,
+                                           "mem_high_water_mb":  0.920628
+                                       },
+                      "enter_spawn":  {
+                                          "p50_ms":  99.4488,
+                                          "p95_ms":  99.4488,
+                                          "p99_ms":  99.4488,
+                                          "max_ms":  99.4488,
+                                          "mem_high_water_mb":  0.920628
+                                      },
+                      "idle_horizon":  {
+                                           "p50_ms":  2.25815,
+                                           "p95_ms":  17.12632,
+                                           "p99_ms":  21.451024,
+                                           "max_ms":  22.5322,
+                                           "mem_high_water_mb":  1.014954
+                                       },
+                      "pan_camera":  {
+                                         "p50_ms":  4.71055,
+                                         "p95_ms":  28.204275,
+                                         "p99_ms":  38.846935,
+                                         "max_ms":  41.5076,
+                                         "mem_high_water_mb":  8.957855
+                                     },
+                      "streaming_walk":  {
+                                             "p50_ms":  6.67315,
+                                             "p95_ms":  57.094625,
+                                             "p99_ms":  66.070724,
+                                             "max_ms":  67.4027,
+                                             "mem_high_water_mb":  12.377594
+                                         },
+                      "chunk_churn":  {
+                                          "p50_ms":  21.4361,
+                                          "p95_ms":  69.54235,
+                                          "p99_ms":  76.60391,
+                                          "max_ms":  78.3693,
+                                          "mem_high_water_mb":  15.352211
+                                      },
+                      "shader_warmup":  {
+                                            "p50_ms":  0,
+                                            "p95_ms":  0,
+                                            "p99_ms":  0,
+                                            "max_ms":  0,
+                                            "mem_high_water_mb":  15.352211
+                                        },
+                      "shutdown":  {
+                                       "p50_ms":  28.9903,
+                                       "p95_ms":  28.9903,
+                                       "p99_ms":  28.9903,
+                                       "max_ms":  28.9903,
+                                       "mem_high_water_mb":  15.352211
+                                   }
+                  }
 }
