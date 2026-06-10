@@ -317,12 +317,20 @@ function Test-MaterialVisual {
         throw "Material visual analysis has no Sand ROI entry; sand vs grey fallback is the primary gate target"
     }
 
+    $grassEntries = @($analysis.materials | Where-Object { $_.name -eq "Grass" })
+    if ($grassEntries.Count -lt 1) {
+        throw "Material visual analysis has no Grass ROI entry; the composite vantage must show grass above the beach band"
+    }
+
     foreach ($entry in $analysis.materials) {
         if ($null -eq $entry.pixels -or $null -eq $entry.thresholds) {
             throw "Material ROI entry '$($entry.name)' is missing pixels or thresholds"
         }
         if ([int64]$entry.pixels.classified_pixels -lt [int64]$entry.thresholds.min_classified_pixels) {
             throw "Material ROI '$($entry.name)' has too few classified pixels: $($entry.pixels.classified_pixels) < $($entry.thresholds.min_classified_pixels)"
+        }
+        if ([double]$entry.pixels.classified_ratio -lt [double]$entry.thresholds.min_classified_ratio) {
+            throw "Material ROI '$($entry.name)' has too low a classified ratio: $($entry.pixels.classified_ratio) < $($entry.thresholds.min_classified_ratio)"
         }
         if ([int64]$entry.pixels.grey_fallback_pixels -gt [int64]$entry.thresholds.max_grey_fallback_pixels) {
             throw "Material ROI '$($entry.name)' shows grey fallback pixels above threshold: $($entry.pixels.grey_fallback_pixels) > $($entry.thresholds.max_grey_fallback_pixels)"
