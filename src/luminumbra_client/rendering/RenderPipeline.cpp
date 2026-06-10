@@ -22,6 +22,7 @@
 #include "luminumbra_common/components/LightingComponents.h"
 #include "RenderSystem.h"
 #include "passes/GBufferPass.h"
+#include "passes/LightingPass.h"
 #include "passes/ShadowPass.h"
 #include "passes/SsaoPass.h"
 #include <stb_image.h>
@@ -313,7 +314,8 @@ void RenderPipeline::HierarchicalCuller::Clear() {
 RenderPipeline::RenderPipeline()
     : m_gbuffer_pass(std::make_unique<GBufferPass>()),
       m_shadow_pass(std::make_unique<ShadowPass>()),
-      m_ssao_pass(std::make_unique<SsaoPass>()) {}
+      m_ssao_pass(std::make_unique<SsaoPass>()),
+      m_lighting_pass(std::make_unique<LightingPass>()) {}
 RenderPipeline::~RenderPipeline() {
     cleanup_gpu_resources();
 }
@@ -330,7 +332,7 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         set_default_shadow_cascade_splits(m_shadow_pass->shadow_map());
 
         init_shaders();
-        init_lighting_fbo(screen_width, screen_height);
+        m_lighting_pass->init_lighting_fbo(screen_width, screen_height);
         m_gbuffer_pass->init_gbuffer(screen_width, screen_height);
         m_shadow_pass->init_shadow_map();
         m_ssao_pass->init_ssao(screen_width, screen_height);
@@ -445,9 +447,10 @@ RenderPipeline::RuntimeRenderStats RenderPipeline::get_runtime_render_stats() co
     size_t estimated_vram_bytes = 0;
     estimated_vram_bytes += (stats.terrain_vertex_capacity + stats.water_vertex_capacity) * sizeof(VoxelVertex);
     estimated_vram_bytes += (stats.terrain_index_capacity + stats.water_index_capacity) * sizeof(u32);
-    if (m_lighting_fbo.color_texture) estimated_vram_bytes += pixel_count * 8u; // RGBA16F
-    if (m_lighting_fbo.opaque_color_texture) estimated_vram_bytes += pixel_count * 8u; // RGBA16F
-    if (m_lighting_fbo.depth_texture) estimated_vram_bytes += pixel_count * 4u;
+    const FrameBufferObject& lighting_fbo = m_lighting_pass->lighting_fbo();
+    if (lighting_fbo.color_texture) estimated_vram_bytes += pixel_count * 8u; // RGBA16F
+    if (lighting_fbo.opaque_color_texture) estimated_vram_bytes += pixel_count * 8u; // RGBA16F
+    if (lighting_fbo.depth_texture) estimated_vram_bytes += pixel_count * 4u;
     const GBuffer& gbuffer = m_gbuffer_pass->gbuffer();
     if (gbuffer.position_texture) estimated_vram_bytes += pixel_count * 6u; // RGB16F
     if (gbuffer.normal_texture) estimated_vram_bytes += pixel_count * 4u;
@@ -478,7 +481,7 @@ RenderPipeline::RuntimeRenderStats RenderPipeline::get_runtime_render_stats() co
     stats.estimated_vram_bytes = estimated_vram_bytes;
 
     stats.geometry_shader_ok = m_gbuffer_pass->geometry_shader() && m_gbuffer_pass->geometry_shader()->IsValid();
-    stats.lighting_shader_ok = m_lighting_shader && m_lighting_shader->IsValid();
+    stats.lighting_shader_ok = m_lighting_pass->shader() && m_lighting_pass->shader()->IsValid();
     stats.skybox_shader_ok = m_skybox_shader && m_skybox_shader->IsValid();
     stats.shadow_shader_ok = m_shadow_pass->shader() && m_shadow_pass->shader()->IsValid();
     stats.ssao_shader_ok = m_ssao_pass->ssao().ssaoShader && m_ssao_pass->ssao().ssaoShader->IsValid();
@@ -513,7 +516,7 @@ std::vector<RenderPipeline::ShaderHealthEntry> RenderPipeline::get_shader_health
     };
 
     add_shader("geometry", m_gbuffer_pass->geometry_shader());
-    add_shader("lighting", m_lighting_shader);
+    add_shader("lighting", m_lighting_pass->shader());
     add_shader("skybox", m_skybox_shader);
     add_shader("shadow", m_shadow_pass->shader());
     add_shader("ssao", m_ssao_pass->ssao().ssaoShader);
@@ -528,14 +531,14 @@ RenderPipeline::RenderResourceRegistryStats RenderPipeline::get_resource_registr
     RenderResourceRegistryStats stats;
     auto count = [](GLuint id) -> size_t { return id != 0 ? 1u : 0u; };
 
-    stats.framebuffers += count(m_lighting_fbo.fbo_id);
+    stats.framebuffers += count(m_lighting_pass->lighting_fbo().fbo_id);
     stats.framebuffers += count(m_gbuffer_pass->gbuffer().fbo_id);
     stats.framebuffers += count(m_shadow_pass->shadow_map().fbo_id);
     stats.framebuffers += count(m_ssao_pass->ssao().fbo);
     stats.framebuffers += count(m_ssao_pass->ssao().blurFBO);
 
-    stats.textures += count(m_lighting_fbo.color_texture);
-    stats.textures += count(m_lighting_fbo.opaque_color_texture);
+    stats.textures += count(m_lighting_pass->lighting_fbo().color_texture);
+    stats.textures += count(m_lighting_pass->lighting_fbo().opaque_color_texture);
     stats.textures += count(m_gbuffer_pass->gbuffer().position_texture);
     stats.textures += count(m_gbuffer_pass->gbuffer().normal_texture);
     stats.textures += count(m_gbuffer_pass->gbuffer().albedo_texture);
@@ -555,7 +558,7 @@ RenderPipeline::RenderResourceRegistryStats RenderPipeline::get_resource_registr
     stats.textures += count(m_gpu_sdf.cave_noise_texture);
     stats.textures += count(m_gpu_sdf.island_mask_texture);
 
-    stats.renderbuffers += count(m_lighting_fbo.depth_texture);
+    stats.renderbuffers += count(m_lighting_pass->lighting_fbo().depth_texture);
     stats.buffers += count(m_screen_quad_vbo);
     stats.buffers += count(m_skybox_vbo);
     stats.buffers += count(m_gbuffer_pass->instance_matrix_vbo());
@@ -1058,18 +1061,18 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // 4. LIGHTING PASS (Renders to m_lighting_fbo)
     glEnable(GL_CULL_FACE);
     begin_gpu_pass_timer(GpuTimerPass::Lighting);
-    lighting_pass(camera);
+    m_lighting_pass->execute(*this, camera);
     end_gpu_pass_timer(GpuTimerPass::Lighting);
     glBindVertexArray(0);  // Unbind after lighting pass
 
     // 5. SNAPSHOT THE OPAQUE SCENE, THEN COPY DEPTH TO LIGHTING FBO FOR WATER DEPTH TEST
-    copy_lighting_color_to_opaque_texture();
+    m_lighting_pass->copy_lighting_color_to_opaque_texture(*this);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_gbuffer_pass->gbuffer().fbo_id);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_lighting_fbo.fbo_id);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
     glBlitFramebuffer(0, 0, m_screen_width, m_screen_height, 0, 0, m_screen_width, m_screen_height, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
     
     // 6. WATER PASS (Renders to m_lighting_fbo, reads from it for refraction)
-    glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_fbo.fbo_id);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
     begin_gpu_pass_timer(GpuTimerPass::Water);
     water_pass(renderable_chunk_snapshots, camera);
     end_gpu_pass_timer(GpuTimerPass::Water);
@@ -1083,7 +1086,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
 
     // 8. FINAL BLIT TO SCREEN
     begin_gpu_pass_timer(GpuTimerPass::FinalBlit);
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, m_lighting_fbo.fbo_id);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0); // Default framebuffer
 
     // Clear the default framebuffer first to prevent artifacts
@@ -1097,64 +1100,6 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     finish_gpu_pass_timer_frame();
     refresh_render_pass_metadata();
-}
-
-void RenderPipeline::init_lighting_fbo(u32 width, u32 height) {
-    glGenFramebuffers(1, &m_lighting_fbo.fbo_id);
-    label_gl_object(GL_FRAMEBUFFER, m_lighting_fbo.fbo_id, "lighting.fbo");
-    glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_fbo.fbo_id);
-
-    // Color attachment (for the final lit scene)
-    glGenTextures(1, &m_lighting_fbo.color_texture);
-    label_gl_object(GL_TEXTURE, m_lighting_fbo.color_texture, "lighting.color");
-    glBindTexture(GL_TEXTURE_2D, m_lighting_fbo.color_texture);
-    // Use RGBA16F for HDR lighting to avoid clamping colors between 0 and 1
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_lighting_fbo.color_texture, 0);
-
-    glGenTextures(1, &m_lighting_fbo.opaque_color_texture);
-    label_gl_object(GL_TEXTURE, m_lighting_fbo.opaque_color_texture, "lighting.opaque_color_copy");
-    glBindTexture(GL_TEXTURE_2D, m_lighting_fbo.opaque_color_texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    // We will blit the depth from the G-Buffer later, so we only need a renderbuffer object for depth testing.
-    // However, if you wanted to do post-processing on this FBO that needs depth, you would use a depth texture.
-    glGenRenderbuffers(1, &m_lighting_fbo.depth_texture); // Note: this is a renderbuffer ID, not a texture ID
-    label_gl_object(GL_RENDERBUFFER, m_lighting_fbo.depth_texture, "lighting.depth");
-    glBindRenderbuffer(GL_RENDERBUFFER, m_lighting_fbo.depth_texture);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_lighting_fbo.depth_texture);
-
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-        LUMINUMBRA_CORE_ERROR("Lighting FBO not complete!");
-
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-}
-
-void RenderPipeline::destroy_lighting_fbo() {
-    if (m_lighting_fbo.fbo_id) { glDeleteFramebuffers(1, &m_lighting_fbo.fbo_id); m_lighting_fbo.fbo_id = 0; }
-    if (m_lighting_fbo.color_texture) { glDeleteTextures(1, &m_lighting_fbo.color_texture); m_lighting_fbo.color_texture = 0; }
-    if (m_lighting_fbo.opaque_color_texture) { glDeleteTextures(1, &m_lighting_fbo.opaque_color_texture); m_lighting_fbo.opaque_color_texture = 0; }
-    if (m_lighting_fbo.depth_texture) { glDeleteRenderbuffers(1, &m_lighting_fbo.depth_texture); m_lighting_fbo.depth_texture = 0; }
-}
-
-void RenderPipeline::copy_lighting_color_to_opaque_texture() {
-    if (!m_lighting_fbo.fbo_id || !m_lighting_fbo.color_texture || !m_lighting_fbo.opaque_color_texture) {
-        return;
-    }
-
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, m_lighting_fbo.fbo_id);
-    glReadBuffer(GL_COLOR_ATTACHMENT0);
-    glBindTexture(GL_TEXTURE_2D, m_lighting_fbo.opaque_color_texture);
-    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, m_screen_width, m_screen_height);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 }
 
 void RenderPipeline::water_pass(const std::vector<ChunkMeshSnapshot>& renderable_chunks, const Camera& camera) {
@@ -1191,7 +1136,7 @@ void RenderPipeline::water_pass(const std::vector<ChunkMeshSnapshot>& renderable
 
     // Bind textures (as before)
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, m_lighting_fbo.opaque_color_texture);
+    glBindTexture(GL_TEXTURE_2D, m_lighting_pass->lighting_fbo().opaque_color_texture);
     m_water_shader->setInt("u_opaque_scene_color", 0);
 
     glActiveTexture(GL_TEXTURE1);
@@ -1246,8 +1191,8 @@ void RenderPipeline::on_resize(u32 new_width, u32 new_height) {
     if (new_width == 0 || new_height == 0 || (new_width == m_screen_width && new_height == m_screen_height)) return;
     m_screen_width = new_width;
     m_screen_height = new_height;
-    destroy_lighting_fbo();
-    init_lighting_fbo(new_width, new_height);
+    m_lighting_pass->destroy_lighting_fbo();
+    m_lighting_pass->init_lighting_fbo(new_width, new_height);
     m_gbuffer_pass->destroy_gbuffer();
     m_gbuffer_pass->init_gbuffer(new_width, new_height);
     m_ssao_pass->destroy_ssao();
@@ -1281,68 +1226,6 @@ void RenderPipeline::clear_all_chunk_data() {
 
 // --- RENDER PASSES ---
 
-void RenderPipeline::lighting_pass(const Camera& camera) {
-    glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_fbo.fbo_id);
-    glViewport(0, 0, m_screen_width, m_screen_height);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    m_lighting_shader->use();
-    const GBuffer& gbuffer = m_gbuffer_pass->gbuffer();
-    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, gbuffer.position_texture);    // View-space position
-    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, gbuffer.normal_texture);      // Octahedral normal + material
-    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, gbuffer.albedo_texture);      // Albedo + roughness
-    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, gbuffer.material_texture);    // Metallic + AO
-    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, gbuffer.depth_texture);
-    glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D_ARRAY, m_shadow_pass->shadow_map().depth_texture_array);
-    glActiveTexture(GL_TEXTURE6); glBindTexture(GL_TEXTURE_2D, m_ssao_pass->ssao().ssaoColorBufferBlur);
-    glActiveTexture(GL_TEXTURE7); glBindTexture(GL_TEXTURE_2D_ARRAY, m_terrainTextureArray);
-    glActiveTexture(GL_TEXTURE8); glBindTexture(GL_TEXTURE_2D, m_materialLUT);
-    glActiveTexture(GL_TEXTURE9); glBindTexture(GL_TEXTURE_2D, m_water_black_texture);
-    m_lighting_shader->setMat4("u_inverseView", glm::inverse(camera.GetViewMatrix()));
-    m_lighting_shader->setInt("gPosition", 0);
-    m_lighting_shader->setInt("gNormalMaterial", 1);    // Octahedral normal + material
-    m_lighting_shader->setInt("gAlbedoRoughness", 2);   // Albedo + roughness
-    m_lighting_shader->setInt("gMetallicAO", 3);        // Metallic + AO
-    m_lighting_shader->setInt("gDepth", 4);
-    m_lighting_shader->setInt("u_shadowCascades", 5);
-    m_lighting_shader->setInt("u_ssao", 6);
-    m_lighting_shader->setInt("u_terrainTextures", 7);
-    m_lighting_shader->setInt("u_materialLUT", 8);
-    m_lighting_shader->setInt("u_causticsTexture", 9);
-    m_lighting_shader->setVec3("u_skyAmbientColor", m_skyAmbientColor);
-    m_lighting_shader->setVec3("u_viewPos", camera.Position);
-    m_lighting_shader->setVec3("u_sun.direction", m_sun.direction);
-    m_lighting_shader->setVec3("u_sun.color", m_sun.color);
-    m_lighting_shader->setFloat("u_sea_level", SEA_LEVEL);
-    m_lighting_shader->setInt("u_pointLightCount", static_cast<int>(m_point_lights_this_frame.size()));
-    for(size_t i = 0; i < m_point_lights_this_frame.size(); ++i) {
-        std::string prefix = "u_pointLights[" + std::to_string(i) + "].";
-        m_lighting_shader->setVec3(prefix + "position", m_point_lights_this_frame[i].position);
-        m_lighting_shader->setVec3(prefix + "color", m_point_lights_this_frame[i].color);
-        m_lighting_shader->setFloat(prefix + "radius", m_point_lights_this_frame[i].radius);
-        m_lighting_shader->setFloat(prefix + "intensity", m_point_lights_this_frame[i].intensity);
-    }
-    m_lighting_shader->setFloat("u_farPlane", camera.GetFarPlane());
-    ShadowMap& shadow_map = m_shadow_pass->shadow_map();
-    if (!has_valid_shadow_cascade_splits(shadow_map)) {
-        LUMINUMBRA_CORE_ERROR("Shadow cascade splits were invalid during lighting; restoring defaults.");
-        set_default_shadow_cascade_splits(shadow_map);
-    }
-    if (shadow_map.light_space_matrices.size() < ShadowMap::CASCADE_COUNT) {
-        shadow_map.light_space_matrices = get_light_space_matrices(camera);
-    }
-    m_lighting_shader->setVec4("u_cascadeSplits", glm::vec4(shadow_map.cascade_splits[1], shadow_map.cascade_splits[2], shadow_map.cascade_splits[3], shadow_map.cascade_splits[4]));
-    for (int i = 0; i < ShadowMap::CASCADE_COUNT; ++i) {
-        m_lighting_shader->setMat4("u_lightSpaceMatrices[" + std::to_string(i) + "]", shadow_map.light_space_matrices[i]);
-    }
-    glm::vec3 terrainOrigin(floor(camera.Position.x / CHUNK_SIZE_X) * CHUNK_SIZE_X, 0.0f, floor(camera.Position.z / CHUNK_SIZE_Z) * CHUNK_SIZE_Z);
-    m_lighting_shader->setVec3("u_terrainOrigin", terrainOrigin);
-    glBindVertexArray(m_screen_quad_vao);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    m_last_render_pass_stats.lighting_draws++;
-    glBindVertexArray(0);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-}
-
 void RenderPipeline::skybox_pass(const Rendering::Camera& camera) {
     glDepthFunc(GL_LEQUAL);
     m_skybox_shader->use();
@@ -1365,12 +1248,11 @@ void RenderPipeline::skybox_pass(const Rendering::Camera& camera) {
 
 void RenderPipeline::init_shaders() {
     m_gbuffer_pass->init_geometry_shader(m_root_path);
-    m_lighting_shader = std::make_unique<Shader>((m_root_path / "res/shaders/lighting_pass.vert").string().c_str(), (m_root_path / "res/shaders/lighting_pass.frag").string().c_str());
+    m_lighting_pass->init_shader(m_root_path);
     m_skybox_shader = std::make_unique<Shader>((m_root_path / "res/shaders/skybox.vert").string().c_str(), (m_root_path / "res/shaders/skybox.frag").string().c_str());
     m_shadow_pass->init_shader(m_root_path);
     m_ssao_pass->init_shaders(m_root_path);
     m_water_shader = std::make_unique<Shader>((m_root_path / "res/shaders/water.vert").string().c_str(), (m_root_path / "res/shaders/water.frag").string().c_str());
-    label_gl_object(GL_PROGRAM, m_lighting_shader ? m_lighting_shader->Id() : 0u, "shader.lighting");
     label_gl_object(GL_PROGRAM, m_skybox_shader ? m_skybox_shader->Id() : 0u, "shader.skybox");
     label_gl_object(GL_PROGRAM, m_water_shader ? m_water_shader->Id() : 0u, "shader.water");
 }
@@ -1434,7 +1316,7 @@ void RenderPipeline::cleanup_gpu_resources() {
         delete_water_slot(d);
     }
     m_free_water_render_slots.clear();
-    destroy_lighting_fbo();
+    m_lighting_pass->destroy_lighting_fbo();
     m_gbuffer_pass->destroy_gbuffer();
     m_shadow_pass->destroy_shadow_map();
     m_ssao_pass->destroy_ssao();
@@ -1449,7 +1331,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     cleanup_gpu_sdf_system();
     destroy_gpu_pass_timers();
     m_gbuffer_pass->reset_shaders();
-    m_lighting_shader.reset();
+    m_lighting_pass->reset_shader();
     m_skybox_shader.reset();
     m_shadow_pass->reset_shader();
     m_ssao_pass->reset_shaders();

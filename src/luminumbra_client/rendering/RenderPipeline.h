@@ -18,7 +18,7 @@
 // Forward declarations
 namespace Luminumbra { class Chunk; }
 namespace Luminumbra::Systems { class SHIELD_WorldSystem; struct TerrainGenParams; }
-namespace Luminumbra::Rendering { class Shader; class Camera; class ShadowPass; class GBufferPass; class SsaoPass; }
+namespace Luminumbra::Rendering { class Shader; class Camera; class ShadowPass; class GBufferPass; class SsaoPass; class LightingPass; }
 
 namespace Luminumbra::Rendering {
 
@@ -275,6 +275,7 @@ private:
     friend class ShadowPass;
     friend class GBufferPass;
     friend class SsaoPass;
+    friend class LightingPass;
 
     struct ChunkMeshSnapshot {
         ChunkID id = 0;
@@ -307,7 +308,6 @@ private:
     void upload_chunk_mesh(const ChunkMeshSnapshot& chunk, const ChunkMeshPayload& payload);
     void unload_chunk_resources(ChunkID chunk_id);
 
-    void lighting_pass(const Camera& camera);
     void skybox_pass(const Camera& camera);
 
     void manage_water_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks, const Camera& camera);
@@ -360,13 +360,9 @@ private:
     void collect_gpu_pass_timers();
     void finish_gpu_pass_timer_frame();
 
-    void init_lighting_fbo(u32 width, u32 height);
-    void destroy_lighting_fbo();
-    void copy_lighting_color_to_opaque_texture();
     void refresh_render_pass_metadata();
     void water_pass(const std::vector<ChunkMeshSnapshot>& renderable_chunks, const Camera& camera);
-    FrameBufferObject m_lighting_fbo;
-    
+
     std::vector<glm::mat4> get_light_space_matrices(const Camera& camera);
 
     void update_time_of_day(float deltaTime);
@@ -377,7 +373,6 @@ private:
     u32 m_screen_height = 0;
     std::filesystem::path m_root_path;
 
-    std::unique_ptr<Shader> m_lighting_shader;
     std::unique_ptr<Shader> m_skybox_shader;
     std::unique_ptr<Shader> m_water_shader;
 
@@ -387,6 +382,7 @@ private:
     std::unique_ptr<GBufferPass> m_gbuffer_pass;
     std::unique_ptr<ShadowPass> m_shadow_pass;
     std::unique_ptr<SsaoPass> m_ssao_pass;
+    std::unique_ptr<LightingPass> m_lighting_pass;
 
     std::unordered_map<ChunkID, ChunkRenderData> m_chunk_render_data;
     std::unordered_map<ChunkID, WaterRenderData> m_water_render_data;
