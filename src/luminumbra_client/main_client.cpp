@@ -1470,6 +1470,9 @@ int main(int argc, char* argv[]) {
     bool material_visual_target_initialized = false;
     bool material_visual_capture_written = false;
     LodBoundaryTransitionRecorder lod_boundary_transition_recorder;
+    LodSeamArrivalRecorder lod_seam_arrival_recorder;
+    std::array<bool, 4> lod_seam_screenshots_written{false, false, false, false};
+    std::vector<LodGroundVisualCapture> lod_seam_visual_captures;
     while (!glfwWindowShouldClose(window)) {
         float currentFrame = (float)glfwGetTime();
         float deltaTime = currentFrame - lastFrame;
@@ -1614,13 +1617,17 @@ int main(int argc, char* argv[]) {
                     const double elapsed_play_seconds = std::chrono::duration<double>(
                         std::chrono::steady_clock::now() - scenario_play_started_at).count();
                     ApplyLodBoundaryOscillationCamera(gameSession.get(), g_camera.get(), elapsed_play_seconds);
+                } else if (scenario_config.lod_seam_arrival_smoke() && scenario_ready && g_camera) {
+                    const double elapsed_play_seconds = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - scenario_play_started_at).count();
+                    ApplyLodSeamArrivalCamera(scenario_config, gameSession.get(), g_camera.get(), elapsed_play_seconds);
                 } else if (g_playerController) {
                     g_playerController->Update(deltaTime);
                 }
                 if (auto* physics = gameSession->GetPhysicsSystem()) physics->update(deltaTime);
                 if (gameSession->GetWorldSystem() && (g_playerController || g_camera)) {
                     const Luminumbra::Vec3 streaming_position =
-                        ((scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.lod_boundary_oscillation_smoke()) && scenario_ready && g_camera)
+                        ((scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.lod_boundary_oscillation_smoke() || scenario_config.lod_seam_arrival_smoke()) && scenario_ready && g_camera)
                             ? Luminumbra::Vec3(g_camera->Position)
                             : (g_playerController ? Luminumbra::Vec3(g_playerController->GetPosition()) : Luminumbra::Vec3(g_camera->Position));
                     gameSession->GetWorldSystem()->update(
@@ -1643,7 +1650,7 @@ int main(int argc, char* argv[]) {
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             if (currentState == GameState::IN_GAME) {
                 if (gameSession->GetWorldSystem() && g_camera) {
-                    if (scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke()) {
+                    if (scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.lod_seam_arrival_smoke()) {
                         // time_of_day 0 is noon (sun elevation = cos(2*pi*t));
                         // 0.04 keeps the sun near its zenith for stable captures.
                         renderPipeline.set_time_of_day(0.04f);
@@ -1657,6 +1664,37 @@ int main(int argc, char* argv[]) {
                         }
                         if (scenario_config.lod_boundary_oscillation_smoke() && scenario_ready) {
                             lod_boundary_transition_recorder.record_frame(gameSession->GetWorldSystem());
+                        }
+                        if (scenario_config.lod_seam_arrival_smoke() && scenario_ready) {
+                            lod_seam_arrival_recorder.record_frame(gameSession->GetWorldSystem());
+                            const double elapsed_play_seconds = std::chrono::duration<double>(now - scenario_play_started_at).count();
+                            const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
+                            const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
+                            const std::array<double, 4> thresholds{0.25, 0.50, 0.75, 0.95};
+                            const std::array<const char*, 4> names{"p25", "p50", "p75", "p95"};
+                            for (std::size_t i = 0; i < thresholds.size(); ++i) {
+                                if (lod_seam_screenshots_written[i] || progress < thresholds[i]) {
+                                    continue;
+                                }
+                                lod_seam_screenshots_written[i] = true;
+                                int screenshot_width = 0;
+                                int screenshot_height = 0;
+                                glfwGetFramebufferSize(window, &screenshot_width, &screenshot_height);
+                                const std::string relative_path = std::string("screenshots/lod-seam-") + names[i] + ".ppm";
+                                LodHolePixelStats hole_stats;
+                                if (WriteBackbufferPpm(scenario_config.artifact_dir / relative_path, screenshot_width, screenshot_height, nullptr, &hole_stats)) {
+                                    lod_seam_visual_captures.push_back({
+                                        names[i],
+                                        relative_path,
+                                        hole_stats
+                                    });
+                                    WriteLodSeamArrivalAnalysis(
+                                        scenario_config.artifact_dir,
+                                        elapsed_play_seconds,
+                                        lod_seam_visual_captures,
+                                        lod_seam_arrival_recorder);
+                                }
+                            }
                         }
                         if (scenario_config.lod_ground_smoke() && scenario_ready) {
                             const double elapsed_play_seconds = std::chrono::duration<double>(now - scenario_play_started_at).count();
@@ -1852,6 +1890,13 @@ int main(int argc, char* argv[]) {
                     scenario_play_seconds,
                     LodBoundaryDistance(world_system),
                     lod_boundary_transition_recorder);
+            }
+            if (scenario_config.lod_seam_arrival_smoke()) {
+                WriteLodSeamArrivalAnalysis(
+                    scenario_config.artifact_dir,
+                    scenario_play_seconds,
+                    lod_seam_visual_captures,
+                    lod_seam_arrival_recorder);
             }
         }
     }
