@@ -434,12 +434,30 @@ function Test-WaterVisual {
     if ([double]$caustics.min_sample_spacing_seconds -lt [double]$caustics.thresholds.min_sample_spacing_seconds) {
         throw "Water visual caustics samples are spaced too closely: $($caustics.min_sample_spacing_seconds)s"
     }
-    if ([double]$caustics.luminance_variance -lt [double]$caustics.thresholds.min_luminance_variance) {
-        throw "Water visual caustics luminance did not animate: variance=$($caustics.luminance_variance) (threshold $($caustics.thresholds.min_luminance_variance))"
+    if ([int]$caustics.texture_delta_count -lt 1) {
+        throw "Water visual caustics probe recorded no texture readback deltas"
+    }
+    if ([double]$caustics.texture_mean_abs_delta -lt [double]$caustics.thresholds.min_texture_mean_abs_delta) {
+        throw "Water visual caustics texture did not animate: mean_abs_delta=$($caustics.texture_mean_abs_delta) (threshold $($caustics.thresholds.min_texture_mean_abs_delta))"
     }
     if (-not $caustics.animated) {
         throw "Water visual caustics animation gate failed"
     }
+    # T-I2-16b: upper-band water reflections must correlate with the sky hue.
+    $reflection = $analysis.reflection
+    if ($null -eq $reflection) {
+        throw "Water visual analysis is missing the reflection block"
+    }
+    if ([int64]$reflection.upper_roi_water_pixels -lt [int64]$reflection.thresholds.min_upper_roi_water_pixels) {
+        throw "Water visual reflection probe found too few upper-ROI water pixels: $($reflection.upper_roi_water_pixels)"
+    }
+    if ([double]$reflection.sky_correlation -lt [double]$reflection.thresholds.min_sky_correlation) {
+        throw "Water visual reflections do not correlate with the sky hue: $($reflection.sky_correlation) (threshold $($reflection.thresholds.min_sky_correlation))"
+    }
+    if (-not $reflection.sky_correlated) {
+        throw "Water visual reflection sky-correlation gate failed"
+    }
+    Assert-FileExists (Join-Path $visualDir $reflection.screenshot)
     Assert-FileExists (Join-Path $visualDir $analysis.screenshot)
 }
 

@@ -30,6 +30,18 @@ public:
     // Resolution of the offscreen caustics generation target.
     static constexpr int kCausticsResolution = 256;
 
+    // Approximate sky reflection color for SSR rays that leave the screen
+    // without hitting geometry (T-I2-16b). Tracks the enhanced skybox day
+    // gradient, faded toward the night sky by the sun intensity. Exposed
+    // statically so the water visual analysis can use the exact same
+    // reference when correlating reflected water hue against the sky.
+    static glm::vec3 approximate_sky_reflection_color(float sun_intensity) {
+        const glm::vec3 day_sky(0.45f, 0.68f, 0.95f);
+        const glm::vec3 night_sky(0.02f, 0.04f, 0.10f);
+        const float t = sun_intensity < 0.0f ? 0.0f : (sun_intensity > 1.0f ? 1.0f : sun_intensity);
+        return night_sky + (day_sky - night_sky) * t;
+    }
+
     WaterPass();
     ~WaterPass();
 

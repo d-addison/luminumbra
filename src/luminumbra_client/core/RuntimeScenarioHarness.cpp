@@ -227,6 +227,58 @@ void ApplyLodGroundCameraPath(
     camera->updateCameraVectors();
 }
 
+namespace {
+
+// Fills in both camera framings for the water visual scenario:
+// - camera_position: the original top-down view (pitch ~ -73 deg) used for
+//   the main capture, the caustics-animation samples, and all v1 pixel gates.
+// - reflection_camera_position (T-I2-16b): a grazing view (pitch ~ -18 deg)
+//   facing the azimuth with the most open water beyond the focus. Looking
+//   almost straight down the fresnel term bottoms out and reflections are
+//   invisible, so the SSR/sky-correlation gate captures from this framing
+//   late in the run instead.
+void FrameWaterVisualCameras(
+    Luminumbra::Systems::SHIELD_WorldSystem* world_system,
+    WaterVisualCameraTarget& target)
+{
+    const Luminumbra::Vec3 camera_offset(0.0f, 80.0f, 24.0f);
+    target.camera_position = target.focus + camera_offset;
+    target.camera_terrain_height = world_system->GetTerrainHeightAt(target.camera_position.x, target.camera_position.z);
+    target.camera_position.y = std::max(target.camera_position.y, target.camera_terrain_height + 32.0f);
+
+    constexpr float kReflectionDistance = 56.0f;
+    constexpr float kReflectionHeight = 18.0f;
+    constexpr int kAzimuthCount = 16;
+    constexpr float kProbeStep = 16.0f;
+    constexpr int kProbeSamples = 14; // out to ~224 m beyond the focus
+
+    float best_score = -1.0f;
+    Luminumbra::Vec3 best_dir(0.0f, 0.0f, 1.0f);
+    for (int a = 0; a < kAzimuthCount; ++a) {
+        constexpr float kTwoPi = 6.28318530718f;
+        const float angle = (kTwoPi * static_cast<float>(a)) / static_cast<float>(kAzimuthCount);
+        const Luminumbra::Vec3 dir(std::cos(angle), 0.0f, std::sin(angle));
+        float score = 0.0f;
+        for (int s = 1; s <= kProbeSamples; ++s) {
+            const Luminumbra::Vec3 probe = target.focus + dir * (kProbeStep * static_cast<float>(s));
+            const float water_depth = Luminumbra::SEA_LEVEL - world_system->GetTerrainHeightAt(probe.x, probe.z);
+            if (water_depth > 1.0f) {
+                score += 1.0f;
+            }
+        }
+        if (score > best_score) {
+            best_score = score;
+            best_dir = dir;
+        }
+    }
+
+    target.reflection_camera_position = target.focus - best_dir * kReflectionDistance + Luminumbra::Vec3(0.0f, kReflectionHeight, 0.0f);
+    const float reflection_terrain = world_system->GetTerrainHeightAt(target.reflection_camera_position.x, target.reflection_camera_position.z);
+    target.reflection_camera_position.y = std::max(target.reflection_camera_position.y, reflection_terrain + 12.0f);
+}
+
+} // namespace
+
 WaterVisualCameraTarget FindWaterVisualCameraTarget(Luminumbra::world::GameSession* game_session) {
     WaterVisualCameraTarget target;
     if (!game_session || !game_session->GetWorldSystem()) {
@@ -293,10 +345,7 @@ WaterVisualCameraTarget FindWaterVisualCameraTarget(Luminumbra::world::GameSessi
     }
 
     if (target.found) {
-        const Luminumbra::Vec3 camera_offset(0.0f, 80.0f, 24.0f);
-        target.camera_position = target.focus + camera_offset;
-        target.camera_terrain_height = world_system->GetTerrainHeightAt(target.camera_position.x, target.camera_position.z);
-        target.camera_position.y = std::max(target.camera_position.y, target.camera_terrain_height + 32.0f);
+        FrameWaterVisualCameras(world_system, target);
         return target;
     }
 
@@ -348,10 +397,7 @@ WaterVisualCameraTarget FindWaterVisualCameraTarget(Luminumbra::world::GameSessi
         return target;
     }
 
-    const Luminumbra::Vec3 camera_offset(0.0f, 80.0f, 24.0f);
-    target.camera_position = target.focus + camera_offset;
-    target.camera_terrain_height = world_system->GetTerrainHeightAt(target.camera_position.x, target.camera_position.z);
-    target.camera_position.y = std::max(target.camera_position.y, target.camera_terrain_height + 32.0f);
+    FrameWaterVisualCameras(world_system, target);
     return target;
 }
 
@@ -375,6 +421,18 @@ void ApplyWaterVisualCamera(
     }
 
     camera->Position = target.camera_position;
+    AimCameraAt(camera, target.focus);
+}
+
+void ApplyWaterReflectionCamera(
+    Luminumbra::Rendering::Camera* camera,
+    const WaterVisualCameraTarget& target)
+{
+    if (!camera || !target.found) {
+        return;
+    }
+
+    camera->Position = target.reflection_camera_position;
     AimCameraAt(camera, target.focus);
 }
 
@@ -546,6 +604,70 @@ ScreenshotPixelStats AnalyzeScreenshotPixels(const std::vector<unsigned char>& p
     return stats;
 }
 
+WaterReflectionStats AnalyzeWaterReflection(
+    const std::vector<unsigned char>& pixels,
+    int width,
+    int height,
+    const Luminumbra::Vec3& sky_reference)
+{
+    WaterReflectionStats stats;
+    stats.sky_reference = sky_reference;
+    if (width <= 0 || height <= 0 || pixels.size() < static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u) {
+        return stats;
+    }
+
+    // Upper third of the AnalyzeScreenshotPixels ROI: the shallowest view
+    // angles, where the fresnel term makes the SSR/sky reflection dominate.
+    const int min_x = width / 5;
+    const int max_x = width - min_x;
+    const int min_top_y = height / 4;
+    const int max_top_y = (height * 9) / 10;
+    const int upper_end_y = min_top_y + (max_top_y - min_top_y) / 3;
+    const std::size_t row_stride = static_cast<std::size_t>(width) * 3u;
+
+    double sum_r = 0.0;
+    double sum_g = 0.0;
+    double sum_b = 0.0;
+    for (int y = 0; y < height; ++y) {
+        const int y_from_top = height - 1 - y;
+        if (y_from_top < min_top_y || y_from_top >= upper_end_y) {
+            continue;
+        }
+        for (int x = min_x; x < max_x; ++x) {
+            const std::size_t offset = static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
+            const unsigned char r = pixels[offset + 0u];
+            const unsigned char g = pixels[offset + 1u];
+            const unsigned char b = pixels[offset + 2u];
+            ++stats.upper_roi_pixels;
+            if (IsWaterLikePixel(r, g, b)) {
+                ++stats.upper_roi_water_pixels;
+                sum_r += static_cast<double>(r);
+                sum_g += static_cast<double>(g);
+                sum_b += static_cast<double>(b);
+            }
+        }
+    }
+    if (stats.upper_roi_water_pixels == 0) {
+        return stats;
+    }
+
+    stats.mean_r = sum_r / static_cast<double>(stats.upper_roi_water_pixels);
+    stats.mean_g = sum_g / static_cast<double>(stats.upper_roi_water_pixels);
+    stats.mean_b = sum_b / static_cast<double>(stats.upper_roi_water_pixels);
+
+    const double mean_len = std::sqrt(stats.mean_r * stats.mean_r + stats.mean_g * stats.mean_g + stats.mean_b * stats.mean_b);
+    const double sky_len = std::sqrt(
+        static_cast<double>(sky_reference.x) * sky_reference.x +
+        static_cast<double>(sky_reference.y) * sky_reference.y +
+        static_cast<double>(sky_reference.z) * sky_reference.z);
+    if (mean_len > 0.0 && sky_len > 0.0) {
+        stats.sky_correlation =
+            (stats.mean_r * sky_reference.x + stats.mean_g * sky_reference.y + stats.mean_b * sky_reference.z) /
+            (mean_len * sky_len);
+    }
+    return stats;
+}
+
 // Mean luminance (Rec.601, 0-255) of the water-like pixels inside the same
 // ROI AnalyzeScreenshotPixels gates on. Read back from the back buffer so the
 // caustics-animation probe samples exactly what the screenshot capture sees.
@@ -590,6 +712,40 @@ WaterCausticsSample SampleBackbufferWaterLuminance(int width, int height, double
         sample.water_mean_luminance = luminance_sum / static_cast<double>(sample.water_pixels);
     }
     return sample;
+}
+
+double SampleCausticsTextureDelta(unsigned int texture_id, std::vector<unsigned char>& previous_texels) {
+    if (texture_id == 0) {
+        return -1.0;
+    }
+
+    GLint previous_binding = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_binding);
+    glBindTexture(GL_TEXTURE_2D, texture_id);
+    GLint width = 0;
+    GLint height = 0;
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+    if (width <= 0 || height <= 0) {
+        glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(previous_binding));
+        return -1.0;
+    }
+
+    std::vector<unsigned char> texels(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels.data());
+    glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(previous_binding));
+
+    double delta = -1.0;
+    if (previous_texels.size() == texels.size()) {
+        double sum = 0.0;
+        for (std::size_t i = 0; i < texels.size(); ++i) {
+            sum += std::abs(static_cast<int>(texels[i]) - static_cast<int>(previous_texels[i]));
+        }
+        delta = sum / static_cast<double>(texels.size());
+    }
+    previous_texels = std::move(texels);
+    return delta;
 }
 
 LodHolePixelStats AnalyzeLodHolePixels(const std::vector<unsigned char>& pixels, int width, int height) {
@@ -775,6 +931,7 @@ nlohmann::json WaterVisualTargetToJson(const WaterVisualCameraTarget& target) {
         {"found", target.found},
         {"focus", Vec3ToJson(target.focus)},
         {"camera_position", Vec3ToJson(target.camera_position)},
+        {"reflection_camera_position", Vec3ToJson(target.reflection_camera_position)},
         {"terrain_height", target.terrain_height},
         {"camera_terrain_height", target.camera_terrain_height},
         {"supporting_water_samples", target.supporting_water_samples}
@@ -784,23 +941,36 @@ nlohmann::json WaterVisualTargetToJson(const WaterVisualCameraTarget& target) {
 void WriteWaterVisualAnalysis(
     const std::filesystem::path& artifact_dir,
     const std::string& screenshot,
+    const std::string& reflection_screenshot,
     const WaterVisualCameraTarget& target,
     const ScreenshotPixelStats& pixel_stats,
     const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass,
     const Luminumbra::Rendering::RenderPipeline::MeshUploadFrameStats& upload_queue,
-    const std::vector<WaterCausticsSample>& caustics_samples)
+    const std::vector<WaterCausticsSample>& caustics_samples,
+    const WaterReflectionStats& reflection_stats)
 {
     constexpr std::uint64_t kMinWaterLikePixels = 2500;
     constexpr double kMinWaterLikeRatio = 0.02;
-    // T-I2-16a caustics animation gate, calibrated against 30 s water_visual
-    // runs (per-second ROI water luminance, 0-255 scale): with generated
-    // caustics the temporal variance measured 6.36; with caustics disabled
-    // (static black tint, only wave/streaming motion left) it measured 0.62.
-    // The 2.0 floor sits ~3x above the static baseline and ~3x below the
-    // measured animated signal.
+    // T-I2-16b reflection gate, calibrated against the grazing open-water
+    // reflection capture (noon): with the sky-aware SSR miss color the
+    // upper-band water hue correlates with the sky reference at 0.9895; the
+    // pre-change deep-tint miss color measured 0.9806. The 0.985 floor sits
+    // between the two with comparable margin on both sides.
+    constexpr std::uint64_t kMinReflectionWaterPixels = 500;
+    constexpr double kMinSkyCorrelation = 0.985;
+    // T-I2-16a caustics animation gate (recalibrated in T-I2-16b after the
+    // water normal fix): the enforced signal is the mean absolute texel delta
+    // of the generated caustics texture between per-second readbacks. A
+    // static tint re-renders identical texels (delta measured exactly 0.0)
+    // while the generated pattern measured a mean delta of 3.5 (0-255
+    // scale); the 1.0 floor keeps ~3.5x margin. The screen-side ROI
+    // luminance series is recorded as supporting evidence but not gated:
+    // chunk streaming inside the capture ROI dominates its variance
+    // (measured up to 135 with caustics fully disabled), so it cannot
+    // honestly prove caustics animation on its own.
     constexpr std::size_t kMinCausticsSamples = 2;
     constexpr double kMinCausticsSampleSpacingSeconds = 0.75;
-    constexpr double kMinCausticsLuminanceVariance = 2.0;
+    constexpr double kMinCausticsTextureDelta = 1.0;
 
     std::size_t caustics_valid_samples = 0;
     double caustics_min = 0.0;
@@ -840,10 +1010,28 @@ void WriteWaterVisualAnalysis(
         caustics_min_spacing = (i == 1u) ? spacing : std::min(caustics_min_spacing, spacing);
     }
     const double caustics_peak_to_peak = caustics_max - caustics_min;
+
+    std::size_t caustics_texture_delta_count = 0;
+    double caustics_texture_mean_delta = 0.0;
+    for (const WaterCausticsSample& sample : caustics_samples) {
+        if (sample.texture_mean_abs_delta >= 0.0) {
+            caustics_texture_mean_delta += sample.texture_mean_abs_delta;
+            ++caustics_texture_delta_count;
+        }
+    }
+    if (caustics_texture_delta_count > 0) {
+        caustics_texture_mean_delta /= static_cast<double>(caustics_texture_delta_count);
+    }
+
     const bool caustics_animated =
         caustics_valid_samples >= kMinCausticsSamples &&
         caustics_min_spacing >= kMinCausticsSampleSpacingSeconds &&
-        caustics_variance >= kMinCausticsLuminanceVariance;
+        caustics_texture_delta_count >= 1 &&
+        caustics_texture_mean_delta >= kMinCausticsTextureDelta;
+
+    const bool reflection_sky_correlated =
+        reflection_stats.upper_roi_water_pixels >= kMinReflectionWaterPixels &&
+        reflection_stats.sky_correlation >= kMinSkyCorrelation;
 
     const GLDebugRuntimeStats gl_debug = CurrentGLDebugRuntimeStats();
     const bool passed =
@@ -853,6 +1041,7 @@ void WriteWaterVisualAnalysis(
         pixel_stats.water_like_pixels >= kMinWaterLikePixels &&
         pixel_stats.water_like_ratio >= kMinWaterLikeRatio &&
         caustics_animated &&
+        reflection_sky_correlated &&
         gl_debug.errors == 0;
 
     nlohmann::json caustics_sample_json = nlohmann::json::array();
@@ -860,7 +1049,8 @@ void WriteWaterVisualAnalysis(
         caustics_sample_json.push_back({
             {"elapsed_seconds", sample.elapsed_seconds},
             {"water_mean_luminance", sample.water_mean_luminance},
-            {"water_pixels", sample.water_pixels}
+            {"water_pixels", sample.water_pixels},
+            {"texture_mean_abs_delta", sample.texture_mean_abs_delta}
         });
     }
 
@@ -888,6 +1078,19 @@ void WriteWaterVisualAnalysis(
             {"terrain_upload_candidates", upload_queue.terrain_upload_candidates},
             {"terrain_uploads_deferred", upload_queue.terrain_uploads_deferred}
         }},
+        {"reflection", {
+            {"screenshot", reflection_screenshot},
+            {"upper_roi_pixels", reflection_stats.upper_roi_pixels},
+            {"upper_roi_water_pixels", reflection_stats.upper_roi_water_pixels},
+            {"upper_roi_mean_rgb", {reflection_stats.mean_r, reflection_stats.mean_g, reflection_stats.mean_b}},
+            {"sky_reference_rgb", {reflection_stats.sky_reference.x, reflection_stats.sky_reference.y, reflection_stats.sky_reference.z}},
+            {"sky_correlation", reflection_stats.sky_correlation},
+            {"sky_correlated", reflection_sky_correlated},
+            {"thresholds", {
+                {"min_upper_roi_water_pixels", kMinReflectionWaterPixels},
+                {"min_sky_correlation", kMinSkyCorrelation}
+            }}
+        }},
         {"caustics_animation", {
             {"sample_count", caustics_samples.size()},
             {"valid_sample_count", caustics_valid_samples},
@@ -897,11 +1100,13 @@ void WriteWaterVisualAnalysis(
             {"luminance_mean", caustics_mean},
             {"luminance_variance", caustics_variance},
             {"luminance_peak_to_peak", caustics_peak_to_peak},
+            {"texture_delta_count", caustics_texture_delta_count},
+            {"texture_mean_abs_delta", caustics_texture_mean_delta},
             {"animated", caustics_animated},
             {"thresholds", {
                 {"min_samples", kMinCausticsSamples},
                 {"min_sample_spacing_seconds", kMinCausticsSampleSpacingSeconds},
-                {"min_luminance_variance", kMinCausticsLuminanceVariance}
+                {"min_texture_mean_abs_delta", kMinCausticsTextureDelta}
             }},
             {"samples", caustics_sample_json}
         }},
