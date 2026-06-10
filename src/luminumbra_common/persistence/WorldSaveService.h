@@ -2,11 +2,19 @@
 
 #include "world/WorldStreamingState.h"
 
+#include <cstddef>
 #include <filesystem>
 #include <string>
 #include <vector>
 
 namespace Luminumbra::Persistence {
+
+// Counters describing one incremental save pass over the streaming state.
+struct WorldSaveDirtyReport {
+    std::size_t chunks_total = 0;
+    std::size_t chunks_dirty = 0;
+    bool saved = false;
+};
 
 // Persists WorldStreamingState snapshots beneath a world save directory.
 //
@@ -39,6 +47,15 @@ public:
     // Deterministic hash of the streaming state, reusing the persistence hash
     // machinery (fnv1a_64 over the canonical snapshot bytes).
     std::string world_hash(const WorldStreamingState& state) const;
+
+    // Incremental save pass: when any chunk has unsaved voxel edits the whole
+    // snapshot is written (the per-chunk layout will narrow this later) and
+    // the dirty flags of the saved chunks are cleared after a successful
+    // write. With no dirty chunks nothing is written and saved stays false.
+    WorldSaveDirtyReport save_dirty_chunks(
+        WorldStreamingState& state,
+        const std::filesystem::path& save_dir,
+        std::vector<std::string>* errors = nullptr) const;
 
 private:
     bool write_snapshot(

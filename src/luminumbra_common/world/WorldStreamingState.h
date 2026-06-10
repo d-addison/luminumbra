@@ -34,6 +34,10 @@ public:
 
     std::vector<ChunkPtr> snapshot_chunks() const;
     std::vector<ChunkPtr> snapshot_chunks_with_state(ChunkState state) const;
+    // Ids of chunks whose voxel data is dirty (unsaved post-generation edits),
+    // sorted ascending. Computed from the chunk flags so there is no separate
+    // dirty set to keep in sync.
+    std::vector<ChunkID> dirty_chunk_ids() const;
 
 private:
     mutable std::shared_mutex m_chunks_mutex;
