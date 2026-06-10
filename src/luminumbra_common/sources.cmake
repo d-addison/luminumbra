@@ -2,6 +2,9 @@
 # Paths are anchored to this file so the list is safe to include from any
 # CMakeLists.txt in the tree.
 set(COMMON_SOURCES
+    # Aetheric
+    ${CMAKE_CURRENT_LIST_DIR}/aetheric/AethericFieldDiffusion.cpp
+
     # Core
     ${CMAKE_CURRENT_LIST_DIR}/common_placeholder.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/EngineContracts.cpp
