@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "FrontierDisabled", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "FrontierDisabled", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug"
@@ -41,6 +41,40 @@ function Assert-Contains {
     $text = Get-Content $Path -Raw
     if ($text -notmatch [regex]::Escape($Needle)) {
         throw "Missing '$Needle' in $Path"
+    }
+}
+
+function Read-JsonArtifact {
+    param(
+        [string]$Path,
+        [string]$Schema
+    )
+    Assert-FileExists $Path
+    $artifact = Get-Content $Path -Raw | ConvertFrom-Json
+    if ($artifact.schema -ne $Schema) {
+        throw "Unexpected schema '$($artifact.schema)' in $Path"
+    }
+    return $artifact
+}
+
+function Assert-ArtifactPassed {
+    param(
+        [object]$Artifact,
+        [string]$Name
+    )
+    if (-not $Artifact.passed) {
+        throw "$Name artifact reported failure"
+    }
+}
+
+function Assert-ArrayContains {
+    param(
+        [object]$Values,
+        [string]$Needle,
+        [string]$Description
+    )
+    if (@($Values) -notcontains $Needle) {
+        throw "$Description is missing '$Needle'"
     }
 }
 
@@ -663,6 +697,106 @@ function Test-AudioHandleApplication {
     }
 }
 
+function Test-UiTestBaseline {
+    $artifactRoot = "build/$BuildPreset/test-artifacts"
+    $ctestPath = Join-Path $artifactRoot "testing/ctest_manifest.json"
+    $coveragePath = Join-Path $artifactRoot "coverage/coverage_summary.json"
+    $uiScreenshotsPath = Join-Path $artifactRoot "ui/ui_screenshots.json"
+
+    $ctest = Read-JsonArtifact -Path $ctestPath -Schema "luminumbra.testing.ctest_manifest.v1"
+    Assert-ArtifactPassed -Artifact $ctest -Name "CTest manifest"
+    if ($ctest.build_preset -ne $BuildPreset) {
+        throw "CTest manifest build_preset '$($ctest.build_preset)' does not match '$BuildPreset'"
+    }
+    if ([int64]$ctest.minimum_test_executables -lt 10) {
+        throw "CTest manifest must require at least 10 test executables"
+    }
+    if ([int64]$ctest.minimum_registered_tests -lt 10) {
+        throw "CTest manifest must require at least 10 registered tests"
+    }
+    foreach ($executable in @(
+        "world_generation_test",
+        "sdf_gpu_cpu_parity_test",
+        "worldgen_layer_snapshot_test",
+        "asset_processor_round_trip_test",
+        "common_tests",
+        "render_smoke_test",
+        "render_capture_test",
+        "ui_smoke_test",
+        "initial_world_loading_perf_test",
+        "runtime_world_visual_validation_test"
+    )) {
+        Assert-ArrayContains -Values $ctest.required_executables -Needle $executable -Description "CTest manifest required_executables"
+    }
+    Assert-ArrayContains -Values $ctest.excluded_patterns -Needle "_NOT_BUILT$" -Description "CTest manifest excluded_patterns"
+    foreach ($uiTest in @(
+        "UiSmokeTest.AuthoredRmlDocumentsLoadAndExposeRequiredElements",
+        "UiSmokeTest.UiStateNavigationMaintainsDocumentAndGameState",
+        "UiSmokeTest.AuthoredMenuInteractionsNavigateAndInvokeCallbacks"
+    )) {
+        Assert-ArrayContains -Values $ctest.required_ui_tests -Needle $uiTest -Description "CTest manifest required_ui_tests"
+    }
+
+    $coverage = Read-JsonArtifact -Path $coveragePath -Schema "luminumbra.coverage_summary.v1"
+    Assert-ArtifactPassed -Artifact $coverage -Name "Coverage summary"
+    if ($coverage.build_preset -ne $BuildPreset) {
+        throw "Coverage summary build_preset '$($coverage.build_preset)' does not match '$BuildPreset'"
+    }
+    if ($coverage.coverage_kind -ne "contract_baseline") {
+        throw "Coverage summary must declare contract_baseline coverage kind"
+    }
+    if ($coverage.line_coverage.available) {
+        if ([double]$coverage.line_coverage.percent -lt [double]$coverage.line_coverage.minimum_required_percent) {
+            throw "Line coverage $($coverage.line_coverage.percent) is below required $($coverage.line_coverage.minimum_required_percent)"
+        }
+    } elseif ([string]::IsNullOrWhiteSpace($coverage.line_coverage.reason)) {
+        throw "Coverage summary must explain unavailable line coverage"
+    }
+    if ([int64]$coverage.contract_coverage.covered_subsystem_count -lt [int64]$coverage.contract_coverage.minimum_subsystems) {
+        throw "Coverage summary subsystem coverage is below baseline"
+    }
+    foreach ($subsystem in @("common", "rendering", "ui", "physics", "audio", "performance", "tools")) {
+        Assert-ArrayContains -Values $coverage.contract_coverage.covered_subsystems -Needle $subsystem -Description "Coverage summary covered_subsystems"
+    }
+    foreach ($artifact in @("testing/ctest_manifest.json", "ui/ui_smoke.json", "ui/ui_interactions.json", "ui/ui_screenshots.json")) {
+        Assert-ArrayContains -Values $coverage.required_artifacts -Needle $artifact -Description "Coverage summary required_artifacts"
+    }
+
+    $uiScreenshots = Read-JsonArtifact -Path $uiScreenshotsPath -Schema "luminumbra.ui_screenshots.v1"
+    Assert-ArtifactPassed -Artifact $uiScreenshots -Name "UI screenshots"
+    if ($uiScreenshots.build_preset -ne $BuildPreset) {
+        throw "UI screenshots build_preset '$($uiScreenshots.build_preset)' does not match '$BuildPreset'"
+    }
+    if ([int64]$uiScreenshots.capture_window.width -ne 800 -or [int64]$uiScreenshots.capture_window.height -ne 600) {
+        throw "UI screenshots baseline must use the 800x600 hidden UI smoke window"
+    }
+    $screenshots = @($uiScreenshots.screenshots)
+    if ([int64]$uiScreenshots.screenshot_count -ne $screenshots.Count) {
+        throw "UI screenshots screenshot_count does not match screenshots array"
+    }
+    if ($screenshots.Count -lt 3) {
+        throw "UI screenshots baseline must cover at least three authored menu views"
+    }
+    foreach ($view in @("main_menu", "world_creation", "world_selection")) {
+        $matches = @($screenshots | Where-Object { $_.view -eq $view })
+        if ($matches.Count -ne 1) {
+            throw "UI screenshots baseline is missing view '$view'"
+        }
+        if ([string]::IsNullOrWhiteSpace($matches[0].document)) {
+            throw "UI screenshots view '$view' is missing document"
+        }
+        if ([string]::IsNullOrWhiteSpace($matches[0].expected_file)) {
+            throw "UI screenshots view '$view' is missing expected_file"
+        }
+        if (@($matches[0].required_element_ids).Count -lt 4) {
+            throw "UI screenshots view '$view' does not list enough required UI elements"
+        }
+    }
+    foreach ($artifact in @("ui/ui_smoke.json", "ui/ui_interactions.json")) {
+        Assert-ArrayContains -Values $uiScreenshots.required_artifacts -Needle $artifact -Description "UI screenshots required_artifacts"
+    }
+}
+
 function Test-FrontierDisabled {
     Assert-FileExists $FrontierDisabledPath
 
@@ -696,6 +830,7 @@ switch ($Mode) {
     "PhysicsReplay" { Test-PhysicsReplay }
     "AudioNullTelemetry" { Test-AudioNullTelemetry }
     "AudioHandleApplication" { Test-AudioHandleApplication }
+    "UiTestBaseline" { Test-UiTestBaseline }
     "FrontierDisabled" { Test-FrontierDisabled }
     "All" {
         Test-CodexOnly
@@ -708,6 +843,7 @@ switch ($Mode) {
         Test-PhysicsReplay
         Test-AudioNullTelemetry
         Test-AudioHandleApplication
+        Test-UiTestBaseline
         Test-FrontierDisabled
     }
 }
