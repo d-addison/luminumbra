@@ -2447,8 +2447,13 @@ int main(int argc, char* argv[]) {
     }
 
     if (scenario_config.auto_create_world || HasCommandLineFlag(argc, argv, "--auto-create-world") || runtime_boot_recorder.enabled()) {
+        // The endurance and water gates assert visible water; the default
+        // preset (height_offset 20, sea level 0) generates none near spawn,
+        // so every water-asserting scenario runs in the archipelago world.
+        // lod_ground_smoke keeps the default world its thresholds were tuned on.
         const std::string scenario_world_type =
-            (scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke()) ? "archipelago" : "default";
+            (scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() ||
+             scenario_config.auto_world_smoke()) ? "archipelago" : "default";
         start_world_creation("Automated Test World", "424242", scenario_world_type);
     }
 

@@ -1,22 +1,60 @@
 # Engine Frontier Handoff
 
-## Current Status
+## Current Status (updated 2026-06-10, post-execution)
 
-The research and adversarial critique have been reconciled into a gate-first roadmap and dispatch graph. The immediate blocker remains material appearance: sand versus grey fallback and material/texture-layer agreement are not yet gated.
+The dispatch has been executed. Of the 34-task graph: T-EF-1 (material visual
+gate) was implemented directly after the pre-dispatch quality gate rejected it
+as oversized; 27 tasks merged through the Codex dispatch onto
+`feat/engine-frontier` and were merged back to the working branch; T-EF-32
+(network state hash) was implemented directly after the Codex usage limit
+exhausted mid-run; T-EF-33 and T-EF-34 were executed directly (wave-8 report,
+endurance revalidation).
 
-The current debug CTest lane was run during handoff authoring with:
+The full debug CTest lane passes 68/68 (`ctest --preset debug
+--output-on-failure -E "_NOT_BUILT$"`), including the new frontier gate
+executables. All 20 engine-frontier validator gate modes pass, plus
+MaterialVisual, LodGround, WaterVisual, and Smoke.
 
-```powershell
-ctest --preset debug --output-on-failure -E "_NOT_BUILT$"
-```
+Post-merge defects found and fixed during verification:
+- GPU SDF callback-safety source needle vs the runtime-toggle-strengthened
+  guard (cross-task interaction).
+- `world/WorldStreamingState.cpp` missing from the common sources manifest
+  (latent link break, hidden until the persistence fixtures were linked).
+- Dispatched gate-test fixtures were never compiled by any CMake target; now
+  built and registered with CTest (frontier_gates_test, eventbus and
+  persistence gate programs).
+- Endurance300 asserts visible water, but auto_world_smoke ran in the default
+  preset which generates no water near spawn (height_offset 20, sea level 0);
+  water-asserting scenarios now run in the archipelago world.
 
-It passed 58/58 tests, including `WorldGenLayerSnapshotTest.ExportsLayerMetricsAndImages`, `WorldGenLayerSnapshotTest.LodRemeshKeepsPreviousMeshRenderableWhilePending`, and `RuntimeWorldVisualValidationTest.MixedLodBoundariesAreContinuousAndReported`. No current Wave 1 repair task is required for failing CTests.
+## Remaining Open Work (quality-gate-skipped tasks)
+
+Three tasks were skipped by the pre-dispatch token-estimate ceiling (200k,
+not configurable at the project layer) because their contracts read the large
+engine translation units; the Codex usage limit (resets 2026-06-11 ~05:53)
+prevented re-dispatching them via the shimmed runner:
+
+- `T-EF-6-streaming-telemetry-schema` — EnduranceStreamDrain validator mode +
+  no-behavior-change streaming telemetry.
+- `T-EF-8-lod-boundary-hysteresis-gate` — lod_boundary_oscillation_smoke
+  scenario + LodBoundaryHysteresis mode.
+- `T-EF-9-lod-seam-arrival-gate` — lod_seam_arrival_smoke scenario +
+  LodSeamRisk mode.
+
+Run them via `.forge/scripts/run-codex-engine-frontier.ps1`-style direct
+`codex exec` with their dispatch.json prompts once Codex credits reset, or
+implement directly following the material_visual_smoke pattern.
 
 ## Immediate Next Step
 
-Execute Wave 1 through the approval-gated dispatch: start with `T-EF-1-material-visual-gate`, then run `T-EF-2-material-visual-gate-test`, then preserve the full CTest baseline. The dispatch is Codex-only and must not route work to any other AI agent.
+Close the three skipped gate tasks above, then start the next iteration per
+the Next Iteration Directives below (optimization pass, beautification pass)
+and the staged roadmap in ultimate-plan.md (RenderHealth-gated render
+extraction, persistence-first frontier sequencing).
 
-Contract execution meters against a $30/day budget. Large waves, long runtime gates, and `Endurance300` may need to span days rather than being forced into one budget window.
+Contract execution meters against a $30/day budget. Large waves, long runtime
+gates, and `Endurance300` may need to span days rather than being forced into
+one budget window.
 
 ## No-Deferral Rules
 
