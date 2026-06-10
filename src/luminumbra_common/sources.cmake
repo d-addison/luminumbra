@@ -16,6 +16,9 @@ set(COMMON_SOURCES
     # Scripting
     ${CMAKE_CURRENT_LIST_DIR}/scripting/LuaState.cpp
 
+    # Simulation
+    ${CMAKE_CURRENT_LIST_DIR}/simulation/SimulationEventBus.cpp
+
     # Shield
     ${CMAKE_CURRENT_LIST_DIR}/shield/SHIELDEngine.cpp
 

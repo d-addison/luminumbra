@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "FrontierDisabled", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "FrontierDisabled", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug"
@@ -797,6 +797,96 @@ function Test-UiTestBaseline {
     }
 }
 
+function Test-SimulationEventBusOrderGate {
+    $artifactDir = "build/$BuildPreset/test-artifacts/simulation"
+    $analysisPath = Join-Path $artifactDir "eventbus-replay.json"
+    $testScriptPath = "test/simulation/eventbus-order-gate.ps1"
+
+    if (-not (Test-Path $testScriptPath)) {
+        throw "simulation event bus order gate not yet implemented - missing $testScriptPath (produced by task T-EF-18-simulation-eventbus-order-gate)"
+    }
+
+    & $testScriptPath -BuildPreset $BuildPreset
+    if (-not $? ) {
+        exit 1
+    }
+    if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
+    if (-not (Test-Path $analysisPath)) {
+        throw "simulation event bus order gate not yet implemented - missing $analysisPath (produced by task T-EF-18-simulation-eventbus-order-gate)"
+    }
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.simulation.eventbus_replay.v1") {
+        throw "Unexpected simulation event bus replay schema '$($analysis.schema)'"
+    }
+    if (-not $analysis.passed) {
+        throw "Simulation event bus replay analysis reported failure"
+    }
+    if ($analysis.event_bus.source -ne "src/luminumbra_common/simulation/SimulationEventBus.cpp") {
+        throw "Simulation event bus replay analysis must inspect SimulationEventBus.cpp"
+    }
+    if ($analysis.event_bus.header -ne "src/luminumbra_common/simulation/SimulationEventBus.h") {
+        throw "Simulation event bus replay analysis must inspect SimulationEventBus.h"
+    }
+    if ($analysis.event_bus.order_contract -ne "tick_then_lane_then_sequence") {
+        throw "Simulation event bus replay must declare the tick/lane/sequence ordering contract"
+    }
+    if (-not $analysis.event_bus.same_tick_fifo) {
+        throw "Simulation event bus replay must preserve FIFO order within the same tick and lane"
+    }
+    if (-not $analysis.event_bus.future_ticks_queued) {
+        throw "Simulation event bus replay must prove future tick events stay queued until eligible"
+    }
+    if ([int64]$analysis.replay.frame_count -lt 3) {
+        throw "Simulation event bus replay must cover at least three simulation ticks"
+    }
+    if ([int64]$analysis.replay.delivered_event_count -lt 7) {
+        throw "Simulation event bus replay must deliver the deterministic fixture events"
+    }
+    if ([string]::IsNullOrWhiteSpace($analysis.replay.checksum)) {
+        throw "Simulation event bus replay analysis is missing the replay checksum"
+    }
+
+    $delivered = @($analysis.replay.delivered_events)
+    if ([int64]$analysis.replay.delivered_event_count -ne $delivered.Count) {
+        throw "Simulation event bus replay delivered_event_count does not match delivered_events array"
+    }
+    $expectedOrder = @(
+        "1|-1|3|physics.impulse|crate:push",
+        "1|0|1|input.command|player:move",
+        "1|0|2|script.trigger|door:open",
+        "2|-1|6|ai.intent|npc-2:wait",
+        "2|0|0|ai.intent|npc-1:turn",
+        "2|0|5|script.trigger|torch:light",
+        "3|0|4|audio.event|stone:slide"
+    )
+    $actualOrder = @($delivered | ForEach-Object { "$($_.tick)|$($_.lane)|$($_.sequence)|$($_.topic)|$($_.payload)" })
+    if (($actualOrder -join "`n") -ne ($expectedOrder -join "`n")) {
+        throw "Simulation event bus replay delivered order does not match the deterministic fixture"
+    }
+
+    $requiredChecks = @(
+        "ordered bus assigns monotonic sequence ids",
+        "same tick delivery is stable by lane then sequence",
+        "future tick events remain queued until eligible",
+        "replay emits deterministic checksum",
+        "gate artifact records delivered order"
+    )
+    $checks = @($analysis.checks)
+    foreach ($requiredCheck in $requiredChecks) {
+        $matches = @($checks | Where-Object { $_.name -eq $requiredCheck })
+        if ($matches.Count -ne 1) {
+            throw "Simulation event bus replay analysis is missing check '$requiredCheck'"
+        }
+        if (-not $matches[0].passed) {
+            throw "Simulation event bus replay check failed: $requiredCheck"
+        }
+    }
+}
+
 function Test-FrontierDisabled {
     Assert-FileExists $FrontierDisabledPath
 
@@ -831,6 +921,7 @@ switch ($Mode) {
     "AudioNullTelemetry" { Test-AudioNullTelemetry }
     "AudioHandleApplication" { Test-AudioHandleApplication }
     "UiTestBaseline" { Test-UiTestBaseline }
+    "SimulationEventBusOrderGate" { Test-SimulationEventBusOrderGate }
     "FrontierDisabled" { Test-FrontierDisabled }
     "All" {
         Test-CodexOnly
@@ -844,6 +935,7 @@ switch ($Mode) {
         Test-AudioNullTelemetry
         Test-AudioHandleApplication
         Test-UiTestBaseline
+        Test-SimulationEventBusOrderGate
         Test-FrontierDisabled
     }
 }

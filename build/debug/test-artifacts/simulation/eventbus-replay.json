@@ -1,0 +1,91 @@
+﻿{
+    "schema":  "luminumbra.simulation.eventbus_replay.v1",
+    "passed":  true,
+    "build_preset":  "debug",
+    "event_bus":  {
+                      "source":  "src/luminumbra_common/simulation/SimulationEventBus.cpp",
+                      "header":  "src/luminumbra_common/simulation/SimulationEventBus.h",
+                      "test":  "test/simulation/eventbus_order_gate_test.cpp",
+                      "order_contract":  "tick_then_lane_then_sequence",
+                      "same_tick_fifo":  true,
+                      "future_ticks_queued":  true
+                  },
+    "replay":  {
+                   "frame_count":  3,
+                   "delivered_event_count":  7,
+                   "checksum":  "fnv1a64:fa5d33b602ba9fef",
+                   "delivered_events":  [
+                                            {
+                                                "tick":  1,
+                                                "lane":  -1,
+                                                "sequence":  3,
+                                                "topic":  "physics.impulse",
+                                                "payload":  "crate:push"
+                                            },
+                                            {
+                                                "tick":  1,
+                                                "lane":  0,
+                                                "sequence":  1,
+                                                "topic":  "input.command",
+                                                "payload":  "player:move"
+                                            },
+                                            {
+                                                "tick":  1,
+                                                "lane":  0,
+                                                "sequence":  2,
+                                                "topic":  "script.trigger",
+                                                "payload":  "door:open"
+                                            },
+                                            {
+                                                "tick":  2,
+                                                "lane":  -1,
+                                                "sequence":  6,
+                                                "topic":  "ai.intent",
+                                                "payload":  "npc-2:wait"
+                                            },
+                                            {
+                                                "tick":  2,
+                                                "lane":  0,
+                                                "sequence":  0,
+                                                "topic":  "ai.intent",
+                                                "payload":  "npc-1:turn"
+                                            },
+                                            {
+                                                "tick":  2,
+                                                "lane":  0,
+                                                "sequence":  5,
+                                                "topic":  "script.trigger",
+                                                "payload":  "torch:light"
+                                            },
+                                            {
+                                                "tick":  3,
+                                                "lane":  0,
+                                                "sequence":  4,
+                                                "topic":  "audio.event",
+                                                "payload":  "stone:slide"
+                                            }
+                                        ]
+               },
+    "checks":  [
+                   {
+                       "name":  "ordered bus assigns monotonic sequence ids",
+                       "passed":  true
+                   },
+                   {
+                       "name":  "same tick delivery is stable by lane then sequence",
+                       "passed":  true
+                   },
+                   {
+                       "name":  "future tick events remain queued until eligible",
+                       "passed":  true
+                   },
+                   {
+                       "name":  "replay emits deterministic checksum",
+                       "passed":  true
+                   },
+                   {
+                       "name":  "gate artifact records delivered order",
+                       "passed":  true
+                   }
+               ]
+}
