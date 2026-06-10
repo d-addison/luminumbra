@@ -18,7 +18,7 @@
 // Forward declarations
 namespace Luminumbra { class Chunk; }
 namespace Luminumbra::Systems { class SHIELD_WorldSystem; struct TerrainGenParams; }
-namespace Luminumbra::Rendering { class Shader; class Camera; class ShadowPass; class GBufferPass; }
+namespace Luminumbra::Rendering { class Shader; class Camera; class ShadowPass; class GBufferPass; class SsaoPass; }
 
 namespace Luminumbra::Rendering {
 
@@ -274,6 +274,7 @@ private:
     // state, stats collection, and GPU timer issue/collect calls.
     friend class ShadowPass;
     friend class GBufferPass;
+    friend class SsaoPass;
 
     struct ChunkMeshSnapshot {
         ChunkID id = 0;
@@ -306,8 +307,6 @@ private:
     void upload_chunk_mesh(const ChunkMeshSnapshot& chunk, const ChunkMeshPayload& payload);
     void unload_chunk_resources(ChunkID chunk_id);
 
-    void ssao_pass(const Camera& camera);
-    void ssao_blur_pass();
     void lighting_pass(const Camera& camera);
     void skybox_pass(const Camera& camera);
 
@@ -319,8 +318,6 @@ private:
     void init_shaders();
     void init_skybox();
     void init_screen_quad();
-    void init_ssao();
-    void destroy_ssao();
     void cleanup_gpu_resources();
 
     // --- Per-pass GPU timers (GL_TIMESTAMP query pairs) ---
@@ -389,7 +386,7 @@ private:
     glm::vec3 m_skyAmbientColor;
     std::unique_ptr<GBufferPass> m_gbuffer_pass;
     std::unique_ptr<ShadowPass> m_shadow_pass;
-    SSAOData m_ssao;
+    std::unique_ptr<SsaoPass> m_ssao_pass;
 
     std::unordered_map<ChunkID, ChunkRenderData> m_chunk_render_data;
     std::unordered_map<ChunkID, WaterRenderData> m_water_render_data;
