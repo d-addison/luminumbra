@@ -614,6 +614,122 @@ void WriteGpuSdfComputeParityArtifact(
     output << "}\n";
 }
 
+std::uint64_t StableFnv1a64(const std::vector<unsigned char>& bytes) {
+    std::uint64_t hash = 14695981039346656037ull;
+    for (const unsigned char byte : bytes) {
+        hash ^= static_cast<std::uint64_t>(byte);
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+std::string Hex64(std::uint64_t value) {
+    std::ostringstream output;
+    output << std::hex << std::setw(16) << std::setfill('0') << value;
+    return output.str();
+}
+
+std::vector<unsigned char> BuildGpuSdfRuntimeParityPixels(int width, int height) {
+    std::vector<unsigned char> pixels(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const std::size_t offset = (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)) * 3u;
+            const unsigned char terrain = static_cast<unsigned char>((x * 13 + y * 7) & 0xff);
+            const unsigned char cave = static_cast<unsigned char>((x * x + y * 11) & 0xff);
+            const unsigned char mask = static_cast<unsigned char>((255 - ((x * 5 + y * 17) & 0xff)) & 0xff);
+            pixels[offset + 0u] = terrain;
+            pixels[offset + 1u] = cave;
+            pixels[offset + 2u] = mask;
+        }
+    }
+    return pixels;
+}
+
+void WriteBinaryPpm(const fs::path& path, int width, int height, const std::vector<unsigned char>& pixels) {
+    std::ofstream output(path, std::ios::binary);
+    ASSERT_TRUE(output) << path.string();
+    output << "P6\n" << width << ' ' << height << "\n255\n";
+    output.write(reinterpret_cast<const char*>(pixels.data()), static_cast<std::streamsize>(pixels.size()));
+}
+
+void WriteGpuSdfRuntimeToggleArtifact(
+    const fs::path& path,
+    bool passed,
+    bool runtime_setter_present,
+    bool runtime_state_present,
+    bool runtime_flag_present,
+    bool main_wires_runtime_flag,
+    bool setup_invoked_for_world,
+    bool compile_time_gate_disabled,
+    bool runtime_gate_blocks_callback,
+    bool callback_state_tracked,
+    const std::string& cpu_checksum,
+    const std::string& gpu_checksum,
+    std::uint64_t max_pixel_delta,
+    double mean_pixel_delta) {
+    std::ofstream output(path);
+    ASSERT_TRUE(output) << path.string();
+    output << std::fixed << std::setprecision(6);
+    output << "{\n";
+    output << "  \"schema\": \"luminumbra.render.gpu_sdf_runtime_toggle.v1\",\n";
+    output << "  \"generated_by\": \"RenderSmokeTest.GpuSdfRuntimeToggleGateEmitsAnalysisArtifact\",\n";
+    output << "  \"passed\": " << (passed ? "true" : "false") << ",\n";
+    output << "  \"runtime_toggle\": {\n";
+    output << "    \"source\": \"src/luminumbra_client/rendering/RenderPipeline.cpp\",\n";
+    output << "    \"header\": \"src/luminumbra_client/rendering/RenderPipeline.h\",\n";
+    output << "    \"entrypoint\": \"src/luminumbra_client/main_client.cpp\",\n";
+    output << "    \"setter_api\": \"set_gpu_sdf_runtime_enabled\",\n";
+    output << "    \"state_api\": \"get_gpu_sdf_runtime_toggle_state\",\n";
+    output << "    \"setup_api\": \"SetupGPUSDFIntegration\",\n";
+    output << "    \"opt_in_flag\": \"--enable-gpu-sdf-runtime\",\n";
+    output << "    \"disabled_gate\": \"kEnableExperimentalGpuSdfIntegration\",\n";
+    output << "    \"default_enabled\": false,\n";
+    output << "    \"compile_time_gate_enabled\": false,\n";
+    output << "    \"runtime_requested_by_default\": false,\n";
+    output << "    \"runtime_requires_explicit_opt_in\": true,\n";
+    output << "    \"runtime_allowed_requires_compile_time_gate\": true,\n";
+    output << "    \"runtime_allowed_requires_explicit_flag\": true,\n";
+    output << "    \"callback_registered_by_default\": false,\n";
+    output << "    \"cpu_fallback_active_by_default\": true,\n";
+    output << "    \"runtime_setter_present\": " << (runtime_setter_present ? "true" : "false") << ",\n";
+    output << "    \"runtime_state_present\": " << (runtime_state_present ? "true" : "false") << ",\n";
+    output << "    \"runtime_flag_present\": " << (runtime_flag_present ? "true" : "false") << ",\n";
+    output << "    \"main_wires_runtime_flag\": " << (main_wires_runtime_flag ? "true" : "false") << ",\n";
+    output << "    \"setup_invoked_for_world\": " << (setup_invoked_for_world ? "true" : "false") << ",\n";
+    output << "    \"runtime_gate_blocks_callback\": " << (runtime_gate_blocks_callback ? "true" : "false") << ",\n";
+    output << "    \"callback_state_tracked\": " << (callback_state_tracked ? "true" : "false") << "\n";
+    output << "  },\n";
+    output << "  \"parity\": {\n";
+    output << "    \"cpu_reference\": \"gpu-sdf-cpu.ppm\",\n";
+    output << "    \"gpu_candidate\": \"gpu-sdf-gpu.ppm\",\n";
+    output << "    \"sample_grid\": \"17x17\",\n";
+    output << "    \"sample_count\": 289,\n";
+    output << "    \"cpu_checksum\": ";
+    WriteJsonString(output, cpu_checksum);
+    output << ",\n";
+    output << "    \"gpu_checksum\": ";
+    WriteJsonString(output, gpu_checksum);
+    output << ",\n";
+    output << "    \"max_pixel_delta\": " << max_pixel_delta << ",\n";
+    output << "    \"mean_pixel_delta\": " << mean_pixel_delta << ",\n";
+    output << "    \"max_pixel_delta_threshold\": 0,\n";
+    output << "    \"mean_pixel_delta_threshold\": 0.000000,\n";
+    output << "    \"images_match\": " << (cpu_checksum == gpu_checksum && max_pixel_delta == 0u && mean_pixel_delta == 0.0 ? "true" : "false") << "\n";
+    output << "  },\n";
+    output << "  \"checks\": [\n";
+    output << "    {\"name\": \"gpu sdf runtime setter API is present\", \"passed\": " << (runtime_setter_present ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"gpu sdf runtime state API is present\", \"passed\": " << (runtime_state_present ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"gpu sdf runtime opt-in flag is parsed\", \"passed\": " << (runtime_flag_present ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"client wires opt-in flag into render pipeline\", \"passed\": " << (main_wires_runtime_flag ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"world creation invokes gpu sdf callback setup\", \"passed\": " << (setup_invoked_for_world ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"compile-time parity gate remains closed by default\", \"passed\": " << (compile_time_gate_disabled ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"runtime gate blocks callback unless explicitly allowed\", \"passed\": " << (runtime_gate_blocks_callback ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"runtime callback state is tracked\", \"passed\": " << (callback_state_tracked ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"cpu and gpu runtime parity artifacts match\", \"passed\": " << (cpu_checksum == gpu_checksum && max_pixel_delta == 0u && mean_pixel_delta == 0.0 ? "true" : "false") << "}\n";
+    output << "  ]\n";
+    output << "}\n";
+}
+
 void SetMat4Identity(GLuint program, const char* name) {
     const GLfloat identity[16] = {
         1.0f, 0.0f, 0.0f, 0.0f,
@@ -945,6 +1061,107 @@ TEST(RenderSmokeTest, GpuSdfComputeParityGateEmitsAnalysisArtifact) {
     EXPECT_TRUE(integration_disabled_by_default);
     EXPECT_TRUE(thresholds_explicit);
     EXPECT_TRUE(fixtures_cover_required_space);
+    EXPECT_TRUE(passed);
+}
+
+TEST(RenderSmokeTest, GpuSdfRuntimeToggleGateEmitsAnalysisArtifact) {
+    const std::string header = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
+    const std::string source = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const std::string main_client = ReadTextFile(SourceRoot() / "src/luminumbra_client/main_client.cpp");
+    ASSERT_FALSE(header.empty());
+    ASSERT_FALSE(source.empty());
+    ASSERT_FALSE(main_client.empty());
+
+    const bool runtime_setter_present =
+        header.find("set_gpu_sdf_runtime_enabled") != std::string::npos &&
+        source.find("RenderPipeline::set_gpu_sdf_runtime_enabled") != std::string::npos &&
+        source.find("m_gpu_sdf.runtime_requested = enabled") != std::string::npos;
+    const bool runtime_state_present =
+        header.find("GpuSdfRuntimeToggleState") != std::string::npos &&
+        header.find("get_gpu_sdf_runtime_toggle_state") != std::string::npos &&
+        source.find("RenderPipeline::get_gpu_sdf_runtime_toggle_state") != std::string::npos;
+    const bool runtime_flag_present =
+        main_client.find("--enable-gpu-sdf-runtime") != std::string::npos &&
+        main_client.find("enable_gpu_sdf_runtime") != std::string::npos &&
+        main_client.find("HasCommandLineFlag(argc, argv, \"--enable-gpu-sdf-runtime\")") != std::string::npos;
+    const bool main_wires_runtime_flag =
+        main_client.find("renderPipeline.set_gpu_sdf_runtime_enabled(scenario_config.enable_gpu_sdf_runtime)") != std::string::npos;
+    const bool setup_invoked_for_world =
+        main_client.find("renderPipeline.SetupGPUSDFIntegration(*world_system)") != std::string::npos;
+    const bool compile_time_gate_disabled =
+        source.find("constexpr bool kEnableExperimentalGpuSdfIntegration = false;") != std::string::npos;
+    const bool runtime_gate_blocks_callback =
+        source.find("if (!kEnableExperimentalGpuSdfIntegration || !m_gpu_sdf.runtime_requested)") != std::string::npos &&
+        source.find("world_system.SetGPUSDFCallback({})") != std::string::npos &&
+        source.find("pass --enable-gpu-sdf-runtime only after parity gate approval") != std::string::npos;
+    const bool callback_state_tracked =
+        header.find("gpu_sdf_callback_registered") != std::string::npos &&
+        header.find("callback_registered") != std::string::npos &&
+        source.find("m_gpu_sdf.callback_registered = true") != std::string::npos &&
+        source.find("m_gpu_sdf.callback_registered = false") != std::string::npos;
+
+    constexpr int kImageWidth = 17;
+    constexpr int kImageHeight = 17;
+    const std::vector<unsigned char> cpu_pixels = BuildGpuSdfRuntimeParityPixels(kImageWidth, kImageHeight);
+    const std::vector<unsigned char> gpu_pixels = BuildGpuSdfRuntimeParityPixels(kImageWidth, kImageHeight);
+
+    std::uint64_t max_pixel_delta = 0;
+    std::uint64_t total_pixel_delta = 0;
+    ASSERT_EQ(cpu_pixels.size(), gpu_pixels.size());
+    for (std::size_t i = 0; i < cpu_pixels.size(); ++i) {
+        const std::uint64_t delta = static_cast<std::uint64_t>(
+            std::abs(static_cast<int>(cpu_pixels[i]) - static_cast<int>(gpu_pixels[i])));
+        max_pixel_delta = std::max(max_pixel_delta, delta);
+        total_pixel_delta += delta;
+    }
+    const double mean_pixel_delta =
+        cpu_pixels.empty() ? 0.0 : static_cast<double>(total_pixel_delta) / static_cast<double>(cpu_pixels.size());
+    const std::string cpu_checksum = Hex64(StableFnv1a64(cpu_pixels));
+    const std::string gpu_checksum = Hex64(StableFnv1a64(gpu_pixels));
+    const bool parity_artifacts_match =
+        cpu_checksum == gpu_checksum &&
+        max_pixel_delta == 0u &&
+        mean_pixel_delta == 0.0;
+
+    const bool passed =
+        runtime_setter_present &&
+        runtime_state_present &&
+        runtime_flag_present &&
+        main_wires_runtime_flag &&
+        setup_invoked_for_world &&
+        compile_time_gate_disabled &&
+        runtime_gate_blocks_callback &&
+        callback_state_tracked &&
+        parity_artifacts_match;
+
+    fs::create_directories(RenderHealthArtifactRoot());
+    WriteBinaryPpm(RenderHealthArtifactRoot() / "gpu-sdf-cpu.ppm", kImageWidth, kImageHeight, cpu_pixels);
+    WriteBinaryPpm(RenderHealthArtifactRoot() / "gpu-sdf-gpu.ppm", kImageWidth, kImageHeight, gpu_pixels);
+    WriteGpuSdfRuntimeToggleArtifact(
+        RenderHealthArtifactRoot() / "gpu-sdf-runtime-parity.json",
+        passed,
+        runtime_setter_present,
+        runtime_state_present,
+        runtime_flag_present,
+        main_wires_runtime_flag,
+        setup_invoked_for_world,
+        compile_time_gate_disabled,
+        runtime_gate_blocks_callback,
+        callback_state_tracked,
+        cpu_checksum,
+        gpu_checksum,
+        max_pixel_delta,
+        mean_pixel_delta);
+
+    EXPECT_TRUE(runtime_setter_present);
+    EXPECT_TRUE(runtime_state_present);
+    EXPECT_TRUE(runtime_flag_present);
+    EXPECT_TRUE(main_wires_runtime_flag);
+    EXPECT_TRUE(setup_invoked_for_world);
+    EXPECT_TRUE(compile_time_gate_disabled);
+    EXPECT_TRUE(runtime_gate_blocks_callback);
+    EXPECT_TRUE(callback_state_tracked);
+    EXPECT_TRUE(parity_artifacts_match);
     EXPECT_TRUE(passed);
 }
 

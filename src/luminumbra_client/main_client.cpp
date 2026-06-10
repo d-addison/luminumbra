@@ -198,6 +198,7 @@ struct RuntimeScenarioConfig {
     bool no_audio = false;
     bool no_ui = false;
     bool hidden_window = false;
+    bool enable_gpu_sdf_runtime = false;
     int timed_run_seconds = 0;
     int readiness_timeout_seconds = 120;
     int horizon_radius = 12;
@@ -225,6 +226,7 @@ RuntimeScenarioConfig ParseRuntimeScenarioConfig(int argc, char* argv[], const s
     config.no_audio = HasCommandLineFlag(argc, argv, "--no-audio");
     config.no_ui = HasCommandLineFlag(argc, argv, "--no-ui");
     config.hidden_window = HasCommandLineFlag(argc, argv, "--hidden-window");
+    config.enable_gpu_sdf_runtime = HasCommandLineFlag(argc, argv, "--enable-gpu-sdf-runtime");
     config.readiness_timeout_seconds = GetCommandLineIntOption(argc, argv, "--readiness-timeout", config.readiness_timeout_seconds);
     config.horizon_radius = GetCommandLineIntOption(argc, argv, "--horizon-radius", config.horizon_radius);
     config.collision_radius = GetCommandLineIntOption(argc, argv, "--collision-radius", config.collision_radius);
@@ -566,6 +568,13 @@ private:
                 {"water", stats.water_shader_ok},
                 {"instanced_static_mesh", stats.instanced_static_mesh_shader_ok},
                 {"gpu_sdf_initialized", stats.gpu_sdf_initialized}
+            }},
+            {"gpu_sdf_runtime", {
+                {"compile_time_enabled", stats.gpu_sdf_compile_time_enabled},
+                {"runtime_requested", stats.gpu_sdf_runtime_requested},
+                {"runtime_allowed", stats.gpu_sdf_runtime_allowed},
+                {"callback_registered", stats.gpu_sdf_callback_registered},
+                {"cpu_fallback_active", stats.gpu_sdf_cpu_fallback_active}
             }}
         };
     }
@@ -637,6 +646,7 @@ private:
                 {"audio_telemetry_path", m_config.audio_telemetry_path.generic_string()},
                 {"no_ui", m_config.no_ui},
                 {"hidden_window", m_config.hidden_window},
+                {"enable_gpu_sdf_runtime", m_config.enable_gpu_sdf_runtime},
                 {"memory_watermark_mb", m_config.memory_watermark_mb}
             }},
             {"memory", MemoryToJson(memory)},
@@ -2007,6 +2017,7 @@ int main(int argc, char* argv[]) {
     }
 
     Luminumbra::Rendering::RenderPipeline renderPipeline;
+    renderPipeline.set_gpu_sdf_runtime_enabled(scenario_config.enable_gpu_sdf_runtime);
     if (!renderPipeline.startup(framebufferWidth, framebufferHeight, root_dir)) {
         LUMINUMBRA_CORE_ERROR("FATAL: Render pipeline startup failed.");
         runtime_state_recorder.capture("render_pipeline_startup_failed", &jobSystem, gameSession.get(), &renderPipeline, 0, {});
@@ -2041,6 +2052,9 @@ int main(int argc, char* argv[]) {
     auto start_world_creation = [&](const std::string& name, const std::string& seed, const std::string& worldType) {
         // 1. Synchronously create the world systems and metadata. This is fast.
         if (gameSession->CreateWorld(name, seed, worldType)) {
+            if (auto* world_system = gameSession->GetWorldSystem()) {
+                renderPipeline.SetupGPUSDFIntegration(*world_system);
+            }
             const bool bypass_loading_ui = runtime_boot_recorder.enabled() || (scenario_config.active() && scenario_config.auto_enter_world);
             if (bypass_loading_ui) {
                 LUMINUMBRA_CORE_INFO("Runtime scenario mode: created world without loading UI.");
