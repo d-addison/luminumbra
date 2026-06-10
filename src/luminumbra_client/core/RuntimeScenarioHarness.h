@@ -51,6 +51,7 @@ struct RuntimeScenarioConfig {
     bool water_visual_smoke() const { return scenario == "water_visual_smoke"; }
     bool material_visual_smoke() const { return scenario == "material_visual_smoke"; }
     bool lod_boundary_oscillation_smoke() const { return scenario == "lod_boundary_oscillation_smoke"; }
+    bool lod_seam_arrival_smoke() const { return scenario == "lod_seam_arrival_smoke"; }
     bool forced_crash() const { return scenario == "forced_crash"; }
 };
 
@@ -211,5 +212,31 @@ void WriteLodBoundaryOscillationAnalysis(
     double duration_seconds,
     float boundary_distance,
     const LodBoundaryTransitionRecorder& recorder);
+
+void ApplyLodSeamArrivalCamera(
+    const RuntimeScenarioConfig& config,
+    Luminumbra::world::GameSession* game_session,
+    Luminumbra::Rendering::Camera* camera,
+    double elapsed_seconds);
+
+class LodSeamArrivalRecorder {
+public:
+    void record_frame(Luminumbra::Systems::SHIELD_WorldSystem* world_system);
+
+    uint64_t frames_observed() const { return m_frames_observed; }
+    std::size_t pending_lod_high_water() const { return m_pending_lod_high_water; }
+    std::size_t last_pending_lod() const { return m_last_pending_lod; }
+
+private:
+    std::size_t m_pending_lod_high_water = 0;
+    std::size_t m_last_pending_lod = 0;
+    uint64_t m_frames_observed = 0;
+};
+
+void WriteLodSeamArrivalAnalysis(
+    const std::filesystem::path& artifact_dir,
+    double duration_seconds,
+    const std::vector<LodGroundVisualCapture>& captures,
+    const LodSeamArrivalRecorder& recorder);
 
 } // namespace Luminumbra::Client::ScenarioHarness

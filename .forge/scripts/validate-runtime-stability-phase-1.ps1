@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Files", "Sections", "CodexOnly", "Source", "Build", "UnitTests", "Smoke", "LodGround", "WaterVisual", "EnduranceStreamDrain", "LodBoundaryHysteresis", "Endurance300", "CrashDump", "MemoryWatermark", "RuntimeArtifacts", "All")]
+    [ValidateSet("Files", "Sections", "CodexOnly", "Source", "Build", "UnitTests", "Smoke", "LodGround", "WaterVisual", "EnduranceStreamDrain", "LodBoundaryHysteresis", "LodSeamRisk", "Endurance300", "CrashDump", "MemoryWatermark", "RuntimeArtifacts", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -527,6 +527,54 @@ function Test-LodBoundaryHysteresis {
     Write-Host "LOD boundary oscillation at $($analysis.boundary_distance)m over $($analysis.duration_seconds)s: chunks_observed=$($analysis.chunks_observed), max_transitions_per_chunk=$($analysis.max_transitions_per_chunk), oscillating_chunk_count=$($analysis.oscillating_chunk_count), total_transitions=$($analysis.total_transitions)"
 }
 
+function Test-LodSeamRisk {
+    $exe = Get-ClientExe
+    $artifactRoot = "build/$BuildPreset/test-artifacts/runtime"
+    New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
+
+    $seamDir = Join-Path $artifactRoot "lod-seam-arrival"
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $seamDir
+
+    $runSeconds = [Math]::Max(30, $SmokeSeconds)
+    Invoke-Checked -FilePath $exe -ArgumentList @(
+        "--scenario", "lod_seam_arrival_smoke",
+        "--auto-create-world",
+        "--auto-enter-world",
+        "--timed-run", "$runSeconds",
+        "--no-audio",
+        "--no-ui",
+        "--runtime-artifact-dir", $seamDir
+    ) -TimeoutSeconds ([Math]::Max(120, $runSeconds + 90)) | Out-Null
+
+    $analysisPath = Join-Path $seamDir "lod-seam-arrival.json"
+    Assert-FileExists $analysisPath
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.lod_seam_arrival.v1") {
+        throw "Unexpected LOD seam arrival schema '$($analysis.schema)'"
+    }
+    if ([int64]$analysis.gl_debug.errors -ne 0) {
+        throw "LOD seam arrival run emitted GL debug errors: $($analysis.gl_debug.errors)"
+    }
+    if (@($analysis.captures).Count -lt 4) {
+        throw "LOD seam arrival run did not capture the p25/p50/p75/p95 screenshots"
+    }
+    foreach ($capture in $analysis.captures) {
+        Assert-FileExists (Join-Path $seamDir $capture.file)
+        if ($capture.enforced -and -not $capture.passed) {
+            throw "LOD seam arrival capture '$($capture.role)' failed pixel thresholds: dark_void_ratio=$($capture.pixels.dark_void_ratio), near_black_ratio=$($capture.pixels.near_black_ratio), background_blue_ratio=$($capture.pixels.background_blue_ratio)"
+        }
+    }
+    if ($null -eq $analysis.pending_lod_high_water) {
+        throw "LOD seam arrival analysis is missing pending_lod_high_water"
+    }
+    if (-not $analysis.passed) {
+        throw "LOD seam arrival analysis reported failure"
+    }
+
+    Write-Host "LOD seam arrival over $($analysis.duration_seconds)s: captures=$(@($analysis.captures).Count), pending_lod_high_water=$($analysis.pending_lod_high_water), final_pending_lod=$($analysis.final_pending_lod)"
+}
+
 function Test-Endurance300 {
     $exe = Get-ClientExe
     $artifactRoot = "build/$BuildPreset/test-artifacts/runtime"
@@ -684,6 +732,7 @@ switch ($Mode) {
     "WaterVisual" { Test-WaterVisual }
     "EnduranceStreamDrain" { Test-EnduranceStreamDrain }
     "LodBoundaryHysteresis" { Test-LodBoundaryHysteresis }
+    "LodSeamRisk" { Test-LodSeamRisk }
     "Endurance300" { Test-Endurance300 }
     "CrashDump" { Test-CrashDump }
     "MemoryWatermark" { Test-MemoryWatermark }

@@ -92,10 +92,10 @@ RuntimeScenarioConfig ParseRuntimeScenarioConfig(int argc, char* argv[], const s
     config.min_collision_chunks = static_cast<size_t>(GetCommandLineUInt64Option(argc, argv, "--min-collision-chunks", config.min_collision_chunks));
     config.memory_watermark_mb = GetCommandLineUInt64Option(argc, argv, "--memory-watermark-mb", 0);
 
-    const int default_timed_run = config.auto_world_smoke() ? 300 : ((config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke() || config.lod_boundary_oscillation_smoke()) ? 60 : 0);
+    const int default_timed_run = config.auto_world_smoke() ? 300 : ((config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke() || config.lod_boundary_oscillation_smoke() || config.lod_seam_arrival_smoke()) ? 60 : 0);
     config.timed_run_seconds = GetCommandLineIntOption(argc, argv, "--timed-run", default_timed_run);
 
-    if (config.auto_world_smoke() || config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke() || config.lod_boundary_oscillation_smoke()) {
+    if (config.auto_world_smoke() || config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke() || config.lod_boundary_oscillation_smoke() || config.lod_seam_arrival_smoke()) {
         config.auto_create_world = true;
         config.auto_enter_world = true;
     }
@@ -1162,6 +1162,117 @@ void WriteLodBoundaryOscillationAnalysis(
     std::error_code ec;
     std::filesystem::create_directories(artifact_dir, ec);
     std::ofstream output(artifact_dir / "lod-boundary-oscillation.json");
+    output << std::setw(2) << artifact << '\n';
+}
+
+void ApplyLodSeamArrivalCamera(
+    const RuntimeScenarioConfig& config,
+    Luminumbra::world::GameSession* game_session,
+    Luminumbra::Rendering::Camera* camera,
+    double elapsed_seconds)
+{
+    if (!camera || !game_session) {
+        return;
+    }
+
+    auto* world_system = game_session->GetWorldSystem();
+    const Luminumbra::Vec3 spawn = game_session->GetMetadata().spawnPoint;
+    const double duration = static_cast<double>(std::max(1, config.timed_run_seconds));
+    const double progress = std::clamp(elapsed_seconds / duration, 0.0, 1.0);
+
+    constexpr float kStartDistanceMeters = 350.0f;
+    constexpr float kEndDistanceMeters = 40.0f;
+    const float distance = kStartDistanceMeters - static_cast<float>(progress) * (kStartDistanceMeters - kEndDistanceMeters);
+    const float x = spawn.x + distance;
+    const float z = spawn.z;
+    const float terrain_height = world_system ? world_system->GetTerrainHeightAt(x, z) : spawn.y;
+    camera->Position = Luminumbra::Vec3(x, terrain_height + 180.0f, z);
+
+    const float focus_x = x - 120.0f;
+    const float focus_height = world_system ? world_system->GetTerrainHeightAt(focus_x, z) : terrain_height;
+    AimCameraAt(camera, Luminumbra::Vec3(focus_x, focus_height, z));
+}
+
+void LodSeamArrivalRecorder::record_frame(Luminumbra::Systems::SHIELD_WorldSystem* world_system) {
+    if (!world_system) {
+        return;
+    }
+
+    ++m_frames_observed;
+    std::size_t pending = 0;
+    for (const Luminumbra::Chunk* chunk : world_system->get_renderable_chunks()) {
+        if (chunk && chunk->pending_lod.load(std::memory_order_acquire) >= 0) {
+            ++pending;
+        }
+    }
+    m_last_pending_lod = pending;
+    m_pending_lod_high_water = std::max(m_pending_lod_high_water, pending);
+}
+
+void WriteLodSeamArrivalAnalysis(
+    const std::filesystem::path& artifact_dir,
+    double duration_seconds,
+    const std::vector<LodGroundVisualCapture>& captures,
+    const LodSeamArrivalRecorder& recorder)
+{
+    constexpr std::uint64_t kMaxDarkVoidPixels = 18000;
+    constexpr std::uint64_t kMaxNearBlackPixels = 4000;
+    constexpr std::uint64_t kMaxBackgroundBluePixels = 22000;
+    constexpr double kMaxDarkVoidRatio = 0.020;
+    constexpr double kMaxNearBlackRatio = 0.0065;
+    constexpr double kMaxBackgroundBlueRatio = 0.025;
+
+    const GLDebugRuntimeStats gl_debug = CurrentGLDebugRuntimeStats();
+    bool passed = captures.size() >= 4 && gl_debug.errors == 0;
+    nlohmann::json captures_json = nlohmann::json::array();
+    for (const LodGroundVisualCapture& capture : captures) {
+        const bool capture_passed =
+            capture.pixels.dark_void_pixels <= kMaxDarkVoidPixels &&
+            capture.pixels.dark_void_ratio <= kMaxDarkVoidRatio &&
+            capture.pixels.near_black_pixels <= kMaxNearBlackPixels &&
+            capture.pixels.near_black_ratio <= kMaxNearBlackRatio &&
+            capture.pixels.background_blue_pixels <= kMaxBackgroundBluePixels &&
+            capture.pixels.background_blue_ratio <= kMaxBackgroundBlueRatio;
+        if (!capture_passed) {
+            passed = false;
+        }
+        captures_json.push_back({
+            {"role", capture.role},
+            {"file", capture.file},
+            {"enforced", true},
+            {"passed", capture_passed},
+            {"pixels", LodHolePixelStatsToJson(capture.pixels)}
+        });
+    }
+
+    nlohmann::json artifact = {
+        {"schema", "luminumbra.lod_seam_arrival.v1"},
+        {"timestamp_utc", TimestampUtc()},
+        {"passed", passed},
+        {"duration_seconds", duration_seconds},
+        {"frames_observed", recorder.frames_observed()},
+        {"pending_lod_high_water", recorder.pending_lod_high_water()},
+        {"final_pending_lod", recorder.last_pending_lod()},
+        {"thresholds", {
+            {"max_dark_void_pixels", kMaxDarkVoidPixels},
+            {"max_dark_void_ratio", kMaxDarkVoidRatio},
+            {"max_near_black_pixels", kMaxNearBlackPixels},
+            {"max_near_black_ratio", kMaxNearBlackRatio},
+            {"max_background_blue_pixels", kMaxBackgroundBluePixels},
+            {"max_background_blue_ratio", kMaxBackgroundBlueRatio}
+        }},
+        {"captures", captures_json},
+        {"gl_debug", {
+            {"messages", gl_debug.messages},
+            {"errors", gl_debug.errors},
+            {"warnings", gl_debug.warnings},
+            {"notifications", gl_debug.notifications}
+        }}
+    };
+
+    std::error_code ec;
+    std::filesystem::create_directories(artifact_dir, ec);
+    std::ofstream output(artifact_dir / "lod-seam-arrival.json");
     output << std::setw(2) << artifact << '\n';
 }
 
