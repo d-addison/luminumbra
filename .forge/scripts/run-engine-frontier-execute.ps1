@@ -16,6 +16,11 @@ if (Test-Path $envLocal) {
 $env:FORGE_INTEGRATION_CARGO_CHECK = '0'
 $env:FORGE_INTEGRATION_HYGIENE = '0'
 
+# The dispatch spawner hardcodes a retired model id; route codex invocations
+# through the shim that rewrites it to a supported model.
+$shimDir = Join-Path $PSScriptRoot "codex-shim"
+$env:Path = "$shimDir;" + $env:Path
+
 $dispatchPath = ".forge/tasks/engine-frontier/dispatch.json"
 if (-not (Test-Path $dispatchPath)) {
     throw "Missing engine-frontier dispatch graph: $dispatchPath"

@@ -2,7 +2,8 @@ param(
     [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "All")]
     [string]$Mode = "All",
 
-    [string]$BuildPreset = "debug"
+    [string]$BuildPreset = "debug",
+    [int]$SmokeSeconds = 30
 )
 
 $ErrorActionPreference = "Stop"
@@ -165,12 +166,72 @@ function Test-UnitTests {
     }
 }
 
-function Test-MaterialVisual {
-    $visualDir = "build/$BuildPreset/test-artifacts/runtime/material-visual"
-    $analysisPath = Join-Path $visualDir "material-visual-analysis.json"
+function Invoke-Checked {
+    param(
+        [string]$FilePath,
+        [string[]]$ArgumentList,
+        [int[]]$AllowedExitCodes = @(0),
+        [int]$TimeoutSeconds = 120
+    )
 
+    $argumentsText = ($ArgumentList | ForEach-Object {
+        '"' + ($_ -replace '"', '\"') + '"'
+    }) -join " "
+    $stdoutPath = [System.IO.Path]::GetTempFileName()
+    $stderrPath = [System.IO.Path]::GetTempFileName()
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = "cmd.exe"
+        $psi.Arguments = '/d /s /c ""{0}" {1} > "{2}" 2> "{3}""' -f $FilePath, $argumentsText, $stdoutPath, $stderrPath
+        $psi.WorkingDirectory = (Get-Location).Path
+        $psi.UseShellExecute = $false
+        $process = [System.Diagnostics.Process]::Start($psi)
+
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            try { $process.Kill($true) } catch { }
+            throw "Command timed out after $TimeoutSeconds seconds: $FilePath $($ArgumentList -join ' ')"
+        }
+
+        $stdout = Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue
+        $stderr = Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue
+        $exitCode = $process.ExitCode
+        if ($AllowedExitCodes -notcontains $exitCode) {
+            throw "Command failed with exit code $($exitCode): $FilePath $($ArgumentList -join ' ')`nstdout=$stdout`nstderr=$stderr"
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-ClientExe {
+    $exe = "build/$BuildPreset/bin/luminumbra_client_app.exe"
+    if (-not (Test-Path $exe)) {
+        throw "Missing client executable. Run -Mode Build first: $exe"
+    }
+    return $exe
+}
+
+function Test-MaterialVisual {
+    $exe = Get-ClientExe
+    $visualDir = "build/$BuildPreset/test-artifacts/runtime/material-visual"
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $visualDir
+    New-Item -ItemType Directory -Force -Path $visualDir | Out-Null
+
+    $runSeconds = [Math]::Max(20, $SmokeSeconds)
+    Invoke-Checked -FilePath $exe -ArgumentList @(
+        "--scenario", "material_visual_smoke",
+        "--auto-create-world",
+        "--auto-enter-world",
+        "--timed-run", "$runSeconds",
+        "--no-audio",
+        "--no-ui",
+        "--runtime-artifact-dir", $visualDir
+    ) -TimeoutSeconds ([Math]::Max(120, $runSeconds + 90))
+
+    $analysisPath = Join-Path $visualDir "material-visual-analysis.json"
     if (-not (Test-Path $analysisPath)) {
-        throw "material visual gate not yet implemented - missing $analysisPath (produced by task T-EF-1-material-visual-gate)"
+        throw "material visual run did not produce $analysisPath (gate produced by task T-EF-1-material-visual-gate)"
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json

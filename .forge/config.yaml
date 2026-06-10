@@ -24,6 +24,11 @@ dispatch:
   sandbox_required: true
   max_parallel_default: 4
   agent_timeout_secs: 1800
+# The spawner's built-in default (gpt-5.3-codex) is no longer supported by
+# ChatGPT-account Codex CLI; pin the model that codex itself defaults to.
+decomposition:
+  default_agent_config:
+    model: gpt-5.5
 budget:
   on_exceed: warn
 tdd:

@@ -234,6 +234,7 @@ struct RuntimeScenarioConfig {
     bool auto_world_smoke() const { return scenario == "auto_world_smoke"; }
     bool lod_ground_smoke() const { return scenario == "lod_ground_smoke"; }
     bool water_visual_smoke() const { return scenario == "water_visual_smoke"; }
+    bool material_visual_smoke() const { return scenario == "material_visual_smoke"; }
     bool forced_crash() const { return scenario == "forced_crash"; }
 };
 
@@ -253,10 +254,10 @@ RuntimeScenarioConfig ParseRuntimeScenarioConfig(int argc, char* argv[], const s
     config.min_collision_chunks = static_cast<size_t>(GetCommandLineUInt64Option(argc, argv, "--min-collision-chunks", config.min_collision_chunks));
     config.memory_watermark_mb = GetCommandLineUInt64Option(argc, argv, "--memory-watermark-mb", 0);
 
-    const int default_timed_run = config.auto_world_smoke() ? 300 : ((config.lod_ground_smoke() || config.water_visual_smoke()) ? 60 : 0);
+    const int default_timed_run = config.auto_world_smoke() ? 300 : ((config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke()) ? 60 : 0);
     config.timed_run_seconds = GetCommandLineIntOption(argc, argv, "--timed-run", default_timed_run);
 
-    if (config.auto_world_smoke() || config.lod_ground_smoke() || config.water_visual_smoke()) {
+    if (config.auto_world_smoke() || config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke()) {
         config.auto_create_world = true;
         config.auto_enter_world = true;
     }
@@ -1260,6 +1261,83 @@ void ApplyWaterVisualCamera(
     AimCameraAt(camera, target.focus);
 }
 
+// Material visual targets reuse the water target shape: a focus point, a
+// raised camera position, and a count of supporting samples that prove the
+// surrounding area really is the expected material.
+WaterVisualCameraTarget FindMaterialVisualCameraTarget(Luminumbra::world::GameSession* game_session) {
+    WaterVisualCameraTarget target;
+    if (!game_session || !game_session->GetWorldSystem()) {
+        return target;
+    }
+
+    auto* world_system = game_session->GetWorldSystem();
+    const Luminumbra::Vec3 spawn = game_session->GetMetadata().spawnPoint;
+
+    // Sand band per GetTerrainMaterialAt: dry terrain near sea level. Look for
+    // the broadest beach reachable; fall back to the best candidate seen so a
+    // narrow fringe beach still produces an honest capture for the pixel gate.
+    constexpr float kBeachMinHeight = 0.25f;  // above SEA_LEVEL offset
+    constexpr float kBeachMaxHeight = 12.0f;  // comfortably inside the <36 beach band
+    constexpr int kSearchRadius = 512;
+    constexpr int kSearchStep = 8;
+    float best_score = -std::numeric_limits<float>::max();
+    std::size_t in_band_candidates = 0;
+
+    for (int dz = -kSearchRadius; dz <= kSearchRadius; dz += kSearchStep) {
+        for (int dx = -kSearchRadius; dx <= kSearchRadius; dx += kSearchStep) {
+            const float x = spawn.x + static_cast<float>(dx);
+            const float z = spawn.z + static_cast<float>(dz);
+            const float terrain_height = world_system->GetTerrainHeightAt(x, z);
+            const float height_above_sea = terrain_height - Luminumbra::SEA_LEVEL;
+            if (height_above_sea < kBeachMinHeight || height_above_sea > kBeachMaxHeight) {
+                continue;
+            }
+            ++in_band_candidates;
+
+            int supporting_sand_samples = 0;
+            for (int oz = -2; oz <= 2; ++oz) {
+                for (int ox = -2; ox <= 2; ++ox) {
+                    const float sx = x + static_cast<float>(ox * 6);
+                    const float sz = z + static_cast<float>(oz * 6);
+                    const float sample_height = world_system->GetTerrainHeightAt(sx, sz) - Luminumbra::SEA_LEVEL;
+                    if (sample_height >= kBeachMinHeight && sample_height <= kBeachMaxHeight) {
+                        ++supporting_sand_samples;
+                    }
+                }
+            }
+
+            const float distance = std::sqrt(static_cast<float>(dx * dx + dz * dz));
+            const float score =
+                static_cast<float>(supporting_sand_samples) * 100.0f -
+                distance * 0.05f;
+            if (!target.found || score > best_score) {
+                target.found = true;
+                target.focus = Luminumbra::Vec3(x, terrain_height, z);
+                target.terrain_height = terrain_height;
+                target.supporting_water_samples = supporting_sand_samples;
+                best_score = score;
+            }
+        }
+    }
+
+    LUMINUMBRA_CORE_INFO(
+        "Material visual target scan: in_band_candidates={}, found={}, focus=({:.1f},{:.1f},{:.1f}), supporting={}",
+        in_band_candidates,
+        target.found,
+        target.focus.x, target.focus.y, target.focus.z,
+        target.supporting_water_samples);
+
+    if (!target.found) {
+        return target;
+    }
+
+    const Luminumbra::Vec3 camera_offset(0.0f, 26.0f, 12.0f);
+    target.camera_position = target.focus + camera_offset;
+    target.camera_terrain_height = world_system->GetTerrainHeightAt(target.camera_position.x, target.camera_position.z);
+    target.camera_position.y = std::max(target.camera_position.y, target.camera_terrain_height + 14.0f);
+    return target;
+}
+
 struct ScreenshotPixelStats {
     int width = 0;
     int height = 0;
@@ -1542,6 +1620,240 @@ void WriteWaterVisualAnalysis(
     };
 
     std::ofstream output(artifact_dir / "water-visual-analysis.json");
+    output << std::setw(2) << artifact << '\n';
+}
+
+struct MaterialPixelStats {
+    int width = 0;
+    int height = 0;
+    std::uint64_t roi_pixels = 0;
+    std::uint64_t sand_pixels = 0;
+    std::uint64_t grey_fallback_pixels = 0;
+    std::uint64_t water_like_pixels = 0;
+    std::uint64_t other_pixels = 0;
+    double sand_ratio = 0.0;
+    double grey_fallback_ratio = 0.0;
+};
+
+// Calibrated against noon captures: lit sand measures around RGB(67,67,39) -
+// red and green track together while blue trails by a wide margin. Grass is
+// green-led (g far above r), soil and shadows fall below the brightness
+// floor, so neither aliases into this bucket.
+bool IsSandLikePixel(unsigned char r, unsigned char g, unsigned char b) {
+    return r >= 45 &&
+           static_cast<int>(r) + 5 >= static_cast<int>(g) &&
+           static_cast<int>(g) - static_cast<int>(b) >= 12 &&
+           static_cast<int>(r) - static_cast<int>(b) >= 18;
+}
+
+// The grey fallback failure renders as a flat grey: all channels within a
+// narrow spread, above shadow black and below sky white.
+bool IsGreyFallbackPixel(unsigned char r, unsigned char g, unsigned char b) {
+    const int max_channel = std::max({static_cast<int>(r), static_cast<int>(g), static_cast<int>(b)});
+    const int min_channel = std::min({static_cast<int>(r), static_cast<int>(g), static_cast<int>(b)});
+    return (max_channel - min_channel) <= 12 && max_channel >= 30 && max_channel <= 215;
+}
+
+void MaterialRoiBounds(int width, int height, int& min_x, int& max_x, int& min_top_y, int& max_top_y) {
+    min_x = width / 6;
+    max_x = width - width / 6;
+    min_top_y = (height * 2) / 5;
+    max_top_y = height;
+}
+
+MaterialPixelStats AnalyzeMaterialPixels(const std::vector<unsigned char>& pixels, int width, int height) {
+    MaterialPixelStats stats;
+    stats.width = width;
+    stats.height = height;
+    if (width <= 0 || height <= 0 || pixels.size() < static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u) {
+        return stats;
+    }
+
+    int min_x = 0;
+    int max_x = 0;
+    int min_top_y = 0;
+    int max_top_y = 0;
+    MaterialRoiBounds(width, height, min_x, max_x, min_top_y, max_top_y);
+    const std::size_t row_stride = static_cast<std::size_t>(width) * 3u;
+
+    for (int y = 0; y < height; ++y) {
+        const int y_from_top = height - 1 - y;
+        if (y_from_top < min_top_y || y_from_top >= max_top_y) {
+            continue;
+        }
+        for (int x = min_x; x < max_x; ++x) {
+            const std::size_t offset = static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
+            const unsigned char r = pixels[offset + 0u];
+            const unsigned char g = pixels[offset + 1u];
+            const unsigned char b = pixels[offset + 2u];
+            ++stats.roi_pixels;
+            if (IsSandLikePixel(r, g, b)) {
+                ++stats.sand_pixels;
+            } else if (IsWaterLikePixel(r, g, b)) {
+                ++stats.water_like_pixels;
+            } else if (IsGreyFallbackPixel(r, g, b)) {
+                ++stats.grey_fallback_pixels;
+            } else {
+                ++stats.other_pixels;
+            }
+        }
+    }
+
+    if (stats.roi_pixels > 0) {
+        stats.sand_ratio = static_cast<double>(stats.sand_pixels) / static_cast<double>(stats.roi_pixels);
+        stats.grey_fallback_ratio = static_cast<double>(stats.grey_fallback_pixels) / static_cast<double>(stats.roi_pixels);
+    }
+    return stats;
+}
+
+bool WritePixelBufferPpm(
+    const std::filesystem::path& path,
+    int width,
+    int height,
+    const std::vector<unsigned char>& pixels)
+{
+    if (width <= 0 || height <= 0) {
+        return false;
+    }
+
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    if (ec) {
+        LUMINUMBRA_CORE_ERROR("Failed to create screenshot directory '{}': {}", path.parent_path().string(), ec.message());
+        return false;
+    }
+
+    std::ofstream output(path, std::ios::binary);
+    if (!output) {
+        LUMINUMBRA_CORE_ERROR("Failed to write screenshot artifact: {}", path.string());
+        return false;
+    }
+
+    output << "P6\n" << width << ' ' << height << "\n255\n";
+    const std::size_t row_stride = static_cast<std::size_t>(width) * 3u;
+    for (int row = height - 1; row >= 0; --row) {
+        const std::size_t offset = static_cast<std::size_t>(row) * row_stride;
+        output.write(reinterpret_cast<const char*>(pixels.data() + offset), static_cast<std::streamsize>(row_stride));
+    }
+    return true;
+}
+
+// Heatmap legend: sand -> gold, grey fallback -> magenta (the failure being
+// gated must be unmissable), water -> blue, other ROI -> dimmed luminance,
+// outside ROI -> heavily dimmed luminance.
+std::vector<unsigned char> BuildMaterialHeatmap(const std::vector<unsigned char>& pixels, int width, int height) {
+    std::vector<unsigned char> heatmap(pixels.size());
+    int min_x = 0;
+    int max_x = 0;
+    int min_top_y = 0;
+    int max_top_y = 0;
+    MaterialRoiBounds(width, height, min_x, max_x, min_top_y, max_top_y);
+    const std::size_t row_stride = static_cast<std::size_t>(width) * 3u;
+
+    for (int y = 0; y < height; ++y) {
+        const int y_from_top = height - 1 - y;
+        const bool row_in_roi = y_from_top >= min_top_y && y_from_top < max_top_y;
+        for (int x = 0; x < width; ++x) {
+            const std::size_t offset = static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
+            const unsigned char r = pixels[offset + 0u];
+            const unsigned char g = pixels[offset + 1u];
+            const unsigned char b = pixels[offset + 2u];
+            const unsigned char luminance = static_cast<unsigned char>((static_cast<int>(r) + g + b) / 3);
+            const bool in_roi = row_in_roi && x >= min_x && x < max_x;
+
+            unsigned char out_r = static_cast<unsigned char>(luminance / 4);
+            unsigned char out_g = out_r;
+            unsigned char out_b = out_r;
+            if (in_roi) {
+                if (IsSandLikePixel(r, g, b)) {
+                    out_r = 240; out_g = 200; out_b = 40;
+                } else if (IsWaterLikePixel(r, g, b)) {
+                    out_r = 40; out_g = 80; out_b = 220;
+                } else if (IsGreyFallbackPixel(r, g, b)) {
+                    out_r = 255; out_g = 0; out_b = 255;
+                } else {
+                    out_r = static_cast<unsigned char>(luminance / 2);
+                    out_g = out_r;
+                    out_b = out_r;
+                }
+            }
+            heatmap[offset + 0u] = out_r;
+            heatmap[offset + 1u] = out_g;
+            heatmap[offset + 2u] = out_b;
+        }
+    }
+    return heatmap;
+}
+
+void WriteMaterialVisualAnalysis(
+    const std::filesystem::path& artifact_dir,
+    const std::string& screenshot,
+    const std::string& heatmap_screenshot,
+    const WaterVisualCameraTarget& target,
+    const MaterialPixelStats& pixel_stats,
+    const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass)
+{
+    constexpr std::uint64_t kMinSandPixels = 2000;
+    constexpr double kMinSandRatio = 0.02;
+    constexpr double kMaxGreyFallbackRatio = 0.125;
+    const std::uint64_t max_grey_fallback_pixels = static_cast<std::uint64_t>(
+        static_cast<double>(pixel_stats.roi_pixels) * kMaxGreyFallbackRatio);
+    const GLDebugRuntimeStats gl_debug = CurrentGLDebugRuntimeStats();
+    const bool passed =
+        target.found &&
+        render_pass.terrain_draws > 0 &&
+        render_pass.terrain_indices_drawn > 0 &&
+        pixel_stats.sand_pixels >= kMinSandPixels &&
+        pixel_stats.sand_ratio >= kMinSandRatio &&
+        pixel_stats.grey_fallback_pixels <= max_grey_fallback_pixels &&
+        gl_debug.errors == 0;
+
+    nlohmann::json artifact = {
+        {"schema", "luminumbra.material_visual_analysis.v1"},
+        {"timestamp_utc", TimestampUtc()},
+        {"passed", passed},
+        {"screenshot", screenshot},
+        {"heatmap_screenshot", heatmap_screenshot},
+        {"target", WaterVisualTargetToJson(target)},
+        {"roi", {
+            {"width", pixel_stats.width},
+            {"height", pixel_stats.height},
+            {"roi_pixels", pixel_stats.roi_pixels},
+            {"water_like_pixels", pixel_stats.water_like_pixels},
+            {"other_pixels", pixel_stats.other_pixels}
+        }},
+        {"materials", nlohmann::json::array({
+            {
+                {"material_id", 4},
+                {"name", "Sand"},
+                {"pixels", {
+                    {"classified_pixels", pixel_stats.sand_pixels},
+                    {"classified_ratio", pixel_stats.sand_ratio},
+                    {"grey_fallback_pixels", pixel_stats.grey_fallback_pixels},
+                    {"grey_fallback_ratio", pixel_stats.grey_fallback_ratio}
+                }},
+                {"thresholds", {
+                    {"min_classified_pixels", kMinSandPixels},
+                    {"min_classified_ratio", kMinSandRatio},
+                    {"max_grey_fallback_pixels", max_grey_fallback_pixels},
+                    {"max_grey_fallback_ratio", kMaxGreyFallbackRatio}
+                }}
+            }
+        })},
+        {"render_pass", {
+            {"terrain_draws", render_pass.terrain_draws},
+            {"terrain_indices_drawn", render_pass.terrain_indices_drawn},
+            {"water_draws", render_pass.water_draws}
+        }},
+        {"gl_debug", {
+            {"messages", gl_debug.messages},
+            {"errors", gl_debug.errors},
+            {"warnings", gl_debug.warnings},
+            {"notifications", gl_debug.notifications}
+        }}
+    };
+
+    std::ofstream output(artifact_dir / "material-visual-analysis.json");
     output << std::setw(2) << artifact << '\n';
 }
 
@@ -2140,7 +2452,8 @@ int main(int argc, char* argv[]) {
     }
 
     if (scenario_config.auto_create_world || HasCommandLineFlag(argc, argv, "--auto-create-world") || runtime_boot_recorder.enabled()) {
-        const std::string scenario_world_type = scenario_config.water_visual_smoke() ? "archipelago" : "default";
+        const std::string scenario_world_type =
+            (scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke()) ? "archipelago" : "default";
         start_world_creation("Automated Test World", "424242", scenario_world_type);
     }
 
@@ -2213,6 +2526,9 @@ int main(int argc, char* argv[]) {
     WaterVisualCameraTarget water_visual_target;
     bool water_visual_target_initialized = false;
     bool water_visual_capture_written = false;
+    WaterVisualCameraTarget material_visual_target;
+    bool material_visual_target_initialized = false;
+    bool material_visual_capture_written = false;
     while (!glfwWindowShouldClose(window)) {
         float currentFrame = (float)glfwGetTime();
         float deltaTime = currentFrame - lastFrame;
@@ -2347,13 +2663,19 @@ int main(int argc, char* argv[]) {
                         water_visual_target_initialized = water_visual_target.found;
                     }
                     ApplyWaterVisualCamera(g_camera.get(), water_visual_target);
+                } else if (scenario_config.material_visual_smoke() && scenario_ready && g_camera) {
+                    if (!material_visual_target_initialized || !material_visual_target.found) {
+                        material_visual_target = FindMaterialVisualCameraTarget(gameSession.get());
+                        material_visual_target_initialized = material_visual_target.found;
+                    }
+                    ApplyWaterVisualCamera(g_camera.get(), material_visual_target);
                 } else if (g_playerController) {
                     g_playerController->Update(deltaTime);
                 }
                 if (auto* physics = gameSession->GetPhysicsSystem()) physics->update(deltaTime);
                 if (gameSession->GetWorldSystem() && (g_playerController || g_camera)) {
                     const Luminumbra::Vec3 streaming_position =
-                        ((scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke()) && scenario_ready && g_camera)
+                        ((scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke()) && scenario_ready && g_camera)
                             ? Luminumbra::Vec3(g_camera->Position)
                             : (g_playerController ? Luminumbra::Vec3(g_playerController->GetPosition()) : Luminumbra::Vec3(g_camera->Position));
                     gameSession->GetWorldSystem()->update(
@@ -2376,7 +2698,9 @@ int main(int argc, char* argv[]) {
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             if (currentState == GameState::IN_GAME) {
                 if (gameSession->GetWorldSystem() && g_camera) {
-                    if (scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke()) {
+                    if (scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke()) {
+                        // time_of_day 0 is noon (sun elevation = cos(2*pi*t));
+                        // 0.04 keeps the sun near its zenith for stable captures.
                         renderPipeline.set_time_of_day(0.04f);
                     }
                     renderPipeline.render_frame(gameSession->GetRegistry(), *gameSession->GetWorldSystem(), *g_camera, deltaTime, wireframe_mode);
@@ -2435,6 +2759,48 @@ int main(int argc, char* argv[]) {
                                         render_pass_stats,
                                         renderPipeline.get_last_mesh_upload_stats()
                                     );
+                                }
+                            }
+                        }
+                        if (scenario_config.material_visual_smoke() && scenario_ready && !material_visual_capture_written) {
+                            const double elapsed_play_seconds = std::chrono::duration<double>(now - scenario_play_started_at).count();
+                            const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
+                            const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
+                            const auto& render_pass_stats = renderPipeline.get_last_render_pass_stats();
+                            if (progress >= 0.50 && render_pass_stats.terrain_draws > 0 && material_visual_target.found) {
+                                int screenshot_width = 0;
+                                int screenshot_height = 0;
+                                glfwGetFramebufferSize(window, &screenshot_width, &screenshot_height);
+                                if (screenshot_width > 0 && screenshot_height > 0) {
+                                    std::vector<unsigned char> frame_pixels(
+                                        static_cast<std::size_t>(screenshot_width) * static_cast<std::size_t>(screenshot_height) * 3u);
+                                    glReadBuffer(GL_BACK);
+                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                                    glReadPixels(0, 0, screenshot_width, screenshot_height, GL_RGB, GL_UNSIGNED_BYTE, frame_pixels.data());
+
+                                    const std::string screenshot_path = "screenshots/material-visual.ppm";
+                                    const std::string heatmap_path = "screenshots/material-id-heatmap.ppm";
+                                    const MaterialPixelStats material_stats =
+                                        AnalyzeMaterialPixels(frame_pixels, screenshot_width, screenshot_height);
+                                    const std::vector<unsigned char> heatmap_pixels =
+                                        BuildMaterialHeatmap(frame_pixels, screenshot_width, screenshot_height);
+                                    const bool wrote_screenshot = WritePixelBufferPpm(
+                                        scenario_config.artifact_dir / screenshot_path,
+                                        screenshot_width, screenshot_height, frame_pixels);
+                                    const bool wrote_heatmap = WritePixelBufferPpm(
+                                        scenario_config.artifact_dir / heatmap_path,
+                                        screenshot_width, screenshot_height, heatmap_pixels);
+                                    if (wrote_screenshot && wrote_heatmap) {
+                                        material_visual_capture_written = true;
+                                        WriteMaterialVisualAnalysis(
+                                            scenario_config.artifact_dir,
+                                            screenshot_path,
+                                            heatmap_path,
+                                            material_visual_target,
+                                            material_stats,
+                                            render_pass_stats
+                                        );
+                                    }
                                 }
                             }
                         }
