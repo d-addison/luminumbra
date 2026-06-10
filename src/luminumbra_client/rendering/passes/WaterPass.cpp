@@ -37,6 +37,11 @@ WaterPass::~WaterPass() = default;
 void WaterPass::init_shader(const std::filesystem::path& root_path) {
     m_water_shader = std::make_unique<Shader>((root_path / "res/shaders/water.vert").string().c_str(), (root_path / "res/shaders/water.frag").string().c_str());
     PassGl::label_gl_object(GL_PROGRAM, m_water_shader ? m_water_shader->Id() : 0u, "shader.water");
+    // T-I2-16a: offscreen caustics generation reuses the shared fullscreen
+    // quad layout (lighting_pass.vert) with the dormant caustics fragment
+    // shader.
+    m_caustics_shader = std::make_unique<Shader>((root_path / "res/shaders/lighting_pass.vert").string().c_str(), (root_path / "res/shaders/caustics_generator.frag").string().c_str());
+    PassGl::label_gl_object(GL_PROGRAM, m_caustics_shader ? m_caustics_shader->Id() : 0u, "shader.water_caustics");
 }
 
 void WaterPass::init_water_fallback_textures() {
@@ -49,6 +54,36 @@ void WaterPass::init_water_fallback_textures() {
     m_water_neutral_flow_texture = make_solid_rgba_texture(neutral_flow, "water.fallback.neutral_flow");
     m_water_black_texture = make_solid_rgba_texture(black, "water.fallback.black");
     m_water_underwater_texture = make_solid_rgba_texture(underwater, "water.fallback.underwater");
+
+    // Offscreen caustics target. Zero-initialized so consumers that sample it
+    // before the first generated frame read black, exactly matching the old
+    // fallback behavior. Mirrored repeat avoids hard tile seams: the
+    // wave-interference pattern is not toroidally tileable.
+    const std::vector<unsigned char> zeroed(
+        static_cast<std::size_t>(kCausticsResolution) * static_cast<std::size_t>(kCausticsResolution) * 4u, 0u);
+    glGenTextures(1, &m_caustics_texture);
+    PassGl::label_gl_object(GL_TEXTURE, m_caustics_texture, "water.caustics.texture");
+    glBindTexture(GL_TEXTURE_2D, m_caustics_texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, kCausticsResolution, kCausticsResolution, 0, GL_RGBA, GL_UNSIGNED_BYTE, zeroed.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_MIRRORED_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_MIRRORED_REPEAT);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    glGenFramebuffers(1, &m_caustics_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_caustics_fbo);
+    PassGl::label_gl_object(GL_FRAMEBUFFER, m_caustics_fbo, "water.caustics.fbo");
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_caustics_texture, 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDeleteFramebuffers(1, &m_caustics_fbo);
+        m_caustics_fbo = 0;
+        glDeleteTextures(1, &m_caustics_texture);
+        m_caustics_texture = 0;
+        return;
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 void WaterPass::destroy_water_fallback_textures() {
@@ -56,15 +91,48 @@ void WaterPass::destroy_water_fallback_textures() {
     if (m_water_neutral_flow_texture) { glDeleteTextures(1, &m_water_neutral_flow_texture); m_water_neutral_flow_texture = 0; }
     if (m_water_black_texture) { glDeleteTextures(1, &m_water_black_texture); m_water_black_texture = 0; }
     if (m_water_underwater_texture) { glDeleteTextures(1, &m_water_underwater_texture); m_water_underwater_texture = 0; }
+    if (m_caustics_fbo) { glDeleteFramebuffers(1, &m_caustics_fbo); m_caustics_fbo = 0; }
+    if (m_caustics_texture) { glDeleteTextures(1, &m_caustics_texture); m_caustics_texture = 0; }
 }
 
 void WaterPass::reset_shader() {
     m_water_shader.reset();
+    m_caustics_shader.reset();
+}
+
+// Renders the animated caustics pattern into the offscreen target. Runs at
+// the start of execute(), so the cost is reported inside water_gpu_ms. The
+// lighting pass (which runs earlier in the frame) samples the previous
+// frame's pattern through black_texture(); a one-frame lag is invisible for
+// a slowly-flowing intensity field.
+void WaterPass::generate_caustics(RenderPipeline& pipeline) {
+    if (m_caustics_fbo == 0 || !m_caustics_shader || !m_caustics_shader->IsValid()) {
+        return;
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, m_caustics_fbo);
+    glViewport(0, 0, kCausticsResolution, kCausticsResolution);
+    glDisable(GL_DEPTH_TEST);
+
+    m_caustics_shader->use();
+    m_caustics_shader->setFloat("u_time", static_cast<float>(glfwGetTime()));
+    m_caustics_shader->setVec2("u_resolution", glm::vec2(kCausticsResolution, kCausticsResolution));
+
+    glBindVertexArray(pipeline.m_screen_quad_vao);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glBindVertexArray(0);
+
+    glEnable(GL_DEPTH_TEST);
+    glBindFramebuffer(GL_FRAMEBUFFER, pipeline.m_lighting_pass->lighting_fbo().fbo_id);
+    glViewport(0, 0, pipeline.m_screen_width, pipeline.m_screen_height);
 }
 
 void WaterPass::execute(RenderPipeline& pipeline,
                         const std::vector<RenderPipeline::ChunkMeshSnapshot>& renderable_chunks,
                         const Camera& camera) {
+    // --- 0. Generate the animated caustics pattern (offscreen) ---
+    generate_caustics(pipeline);
+
     // --- 1. Set OpenGL State ---
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -114,7 +182,7 @@ void WaterPass::execute(RenderPipeline& pipeline,
     m_water_shader->setInt("u_flow_map", 3);
 
     glActiveTexture(GL_TEXTURE4);
-    glBindTexture(GL_TEXTURE_2D, m_water_black_texture);
+    glBindTexture(GL_TEXTURE_2D, black_texture()); // generated caustics, black fallback otherwise
     m_water_shader->setInt("u_caustics_texture", 4);
 
     glActiveTexture(GL_TEXTURE5);

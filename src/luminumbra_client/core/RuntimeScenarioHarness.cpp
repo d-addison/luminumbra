@@ -546,6 +546,52 @@ ScreenshotPixelStats AnalyzeScreenshotPixels(const std::vector<unsigned char>& p
     return stats;
 }
 
+// Mean luminance (Rec.601, 0-255) of the water-like pixels inside the same
+// ROI AnalyzeScreenshotPixels gates on. Read back from the back buffer so the
+// caustics-animation probe samples exactly what the screenshot capture sees.
+WaterCausticsSample SampleBackbufferWaterLuminance(int width, int height, double elapsed_seconds) {
+    WaterCausticsSample sample;
+    sample.elapsed_seconds = elapsed_seconds;
+    if (width <= 0 || height <= 0) {
+        return sample;
+    }
+
+    std::vector<unsigned char> pixels(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u);
+    glReadBuffer(GL_BACK);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+
+    const int min_x = width / 5;
+    const int max_x = width - min_x;
+    const int min_top_y = height / 4;
+    const int max_top_y = (height * 9) / 10;
+    const std::size_t row_stride = static_cast<std::size_t>(width) * 3u;
+
+    double luminance_sum = 0.0;
+    for (int y = 0; y < height; ++y) {
+        const int y_from_top = height - 1 - y;
+        if (y_from_top < min_top_y || y_from_top >= max_top_y) {
+            continue;
+        }
+        for (int x = min_x; x < max_x; ++x) {
+            const std::size_t offset = static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
+            const unsigned char r = pixels[offset + 0u];
+            const unsigned char g = pixels[offset + 1u];
+            const unsigned char b = pixels[offset + 2u];
+            if (IsWaterLikePixel(r, g, b)) {
+                ++sample.water_pixels;
+                luminance_sum += 0.299 * static_cast<double>(r) +
+                                 0.587 * static_cast<double>(g) +
+                                 0.114 * static_cast<double>(b);
+            }
+        }
+    }
+    if (sample.water_pixels > 0) {
+        sample.water_mean_luminance = luminance_sum / static_cast<double>(sample.water_pixels);
+    }
+    return sample;
+}
+
 LodHolePixelStats AnalyzeLodHolePixels(const std::vector<unsigned char>& pixels, int width, int height) {
     LodHolePixelStats stats;
     stats.width = width;
@@ -741,10 +787,64 @@ void WriteWaterVisualAnalysis(
     const WaterVisualCameraTarget& target,
     const ScreenshotPixelStats& pixel_stats,
     const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass,
-    const Luminumbra::Rendering::RenderPipeline::MeshUploadFrameStats& upload_queue)
+    const Luminumbra::Rendering::RenderPipeline::MeshUploadFrameStats& upload_queue,
+    const std::vector<WaterCausticsSample>& caustics_samples)
 {
     constexpr std::uint64_t kMinWaterLikePixels = 2500;
     constexpr double kMinWaterLikeRatio = 0.02;
+    // T-I2-16a caustics animation gate, calibrated against 30 s water_visual
+    // runs (per-second ROI water luminance, 0-255 scale): with generated
+    // caustics the temporal variance measured 6.36; with caustics disabled
+    // (static black tint, only wave/streaming motion left) it measured 0.62.
+    // The 2.0 floor sits ~3x above the static baseline and ~3x below the
+    // measured animated signal.
+    constexpr std::size_t kMinCausticsSamples = 2;
+    constexpr double kMinCausticsSampleSpacingSeconds = 0.75;
+    constexpr double kMinCausticsLuminanceVariance = 2.0;
+
+    std::size_t caustics_valid_samples = 0;
+    double caustics_min = 0.0;
+    double caustics_max = 0.0;
+    double caustics_mean = 0.0;
+    for (const WaterCausticsSample& sample : caustics_samples) {
+        if (sample.water_pixels == 0) {
+            continue;
+        }
+        if (caustics_valid_samples == 0) {
+            caustics_min = sample.water_mean_luminance;
+            caustics_max = sample.water_mean_luminance;
+        } else {
+            caustics_min = std::min(caustics_min, sample.water_mean_luminance);
+            caustics_max = std::max(caustics_max, sample.water_mean_luminance);
+        }
+        caustics_mean += sample.water_mean_luminance;
+        ++caustics_valid_samples;
+    }
+    if (caustics_valid_samples > 0) {
+        caustics_mean /= static_cast<double>(caustics_valid_samples);
+    }
+    double caustics_variance = 0.0;
+    for (const WaterCausticsSample& sample : caustics_samples) {
+        if (sample.water_pixels == 0) {
+            continue;
+        }
+        const double delta = sample.water_mean_luminance - caustics_mean;
+        caustics_variance += delta * delta;
+    }
+    if (caustics_valid_samples > 0) {
+        caustics_variance /= static_cast<double>(caustics_valid_samples);
+    }
+    double caustics_min_spacing = 0.0;
+    for (std::size_t i = 1; i < caustics_samples.size(); ++i) {
+        const double spacing = caustics_samples[i].elapsed_seconds - caustics_samples[i - 1u].elapsed_seconds;
+        caustics_min_spacing = (i == 1u) ? spacing : std::min(caustics_min_spacing, spacing);
+    }
+    const double caustics_peak_to_peak = caustics_max - caustics_min;
+    const bool caustics_animated =
+        caustics_valid_samples >= kMinCausticsSamples &&
+        caustics_min_spacing >= kMinCausticsSampleSpacingSeconds &&
+        caustics_variance >= kMinCausticsLuminanceVariance;
+
     const GLDebugRuntimeStats gl_debug = CurrentGLDebugRuntimeStats();
     const bool passed =
         target.found &&
@@ -752,10 +852,20 @@ void WriteWaterVisualAnalysis(
         render_pass.water_indices_drawn > 0 &&
         pixel_stats.water_like_pixels >= kMinWaterLikePixels &&
         pixel_stats.water_like_ratio >= kMinWaterLikeRatio &&
+        caustics_animated &&
         gl_debug.errors == 0;
 
+    nlohmann::json caustics_sample_json = nlohmann::json::array();
+    for (const WaterCausticsSample& sample : caustics_samples) {
+        caustics_sample_json.push_back({
+            {"elapsed_seconds", sample.elapsed_seconds},
+            {"water_mean_luminance", sample.water_mean_luminance},
+            {"water_pixels", sample.water_pixels}
+        });
+    }
+
     nlohmann::json artifact = {
-        {"schema", "luminumbra.water_visual_analysis.v1"},
+        {"schema", "luminumbra.water_visual_analysis.v2"},
         {"timestamp_utc", TimestampUtc()},
         {"passed", passed},
         {"screenshot", screenshot},
@@ -769,13 +879,31 @@ void WriteWaterVisualAnalysis(
             {"water_draws", render_pass.water_draws},
             {"water_indices_drawn", render_pass.water_indices_drawn},
             {"terrain_draws", render_pass.terrain_draws},
-            {"terrain_indices_drawn", render_pass.terrain_indices_drawn}
+            {"terrain_indices_drawn", render_pass.terrain_indices_drawn},
+            {"water_gpu_ms", render_pass.water_gpu_ms}
         }},
         {"upload_queue", {
             {"water_upload_candidates", upload_queue.water_upload_candidates},
             {"water_uploads_deferred", upload_queue.water_uploads_deferred},
             {"terrain_upload_candidates", upload_queue.terrain_upload_candidates},
             {"terrain_uploads_deferred", upload_queue.terrain_uploads_deferred}
+        }},
+        {"caustics_animation", {
+            {"sample_count", caustics_samples.size()},
+            {"valid_sample_count", caustics_valid_samples},
+            {"min_sample_spacing_seconds", caustics_min_spacing},
+            {"luminance_min", caustics_min},
+            {"luminance_max", caustics_max},
+            {"luminance_mean", caustics_mean},
+            {"luminance_variance", caustics_variance},
+            {"luminance_peak_to_peak", caustics_peak_to_peak},
+            {"animated", caustics_animated},
+            {"thresholds", {
+                {"min_samples", kMinCausticsSamples},
+                {"min_sample_spacing_seconds", kMinCausticsSampleSpacingSeconds},
+                {"min_luminance_variance", kMinCausticsLuminanceVariance}
+            }},
+            {"samples", caustics_sample_json}
         }},
         {"gl_debug", {
             {"messages", gl_debug.messages},

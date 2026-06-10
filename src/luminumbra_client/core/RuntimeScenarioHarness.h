@@ -147,6 +147,19 @@ struct MaterialPixelStats {
     double grey_fallback_ratio = 0.0;
 };
 
+// T-I2-16a: temporal caustics-animation probe for the water visual scenario.
+// Each sample records the mean luminance (0-255) of the water-like pixels in
+// the screenshot ROI at a given elapsed time; samples taken at least a second
+// apart must vary if the caustics pattern really animates (a static tint
+// produces a flat series).
+struct WaterCausticsSample {
+    double elapsed_seconds = 0.0;
+    double water_mean_luminance = 0.0;
+    std::uint64_t water_pixels = 0;
+};
+
+WaterCausticsSample SampleBackbufferWaterLuminance(int width, int height, double elapsed_seconds);
+
 ScreenshotPixelStats AnalyzeScreenshotPixels(const std::vector<unsigned char>& pixels, int width, int height);
 LodHolePixelStats AnalyzeLodHolePixels(const std::vector<unsigned char>& pixels, int width, int height);
 MaterialPixelStats AnalyzeMaterialPixels(const std::vector<unsigned char>& pixels, int width, int height);
@@ -175,7 +188,8 @@ void WriteWaterVisualAnalysis(
     const WaterVisualCameraTarget& target,
     const ScreenshotPixelStats& pixel_stats,
     const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass,
-    const Luminumbra::Rendering::RenderPipeline::MeshUploadFrameStats& upload_queue);
+    const Luminumbra::Rendering::RenderPipeline::MeshUploadFrameStats& upload_queue,
+    const std::vector<WaterCausticsSample>& caustics_samples);
 
 void WriteMaterialVisualAnalysis(
     const std::filesystem::path& artifact_dir,

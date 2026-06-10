@@ -1490,6 +1490,8 @@ int main(int argc, char* argv[]) {
     WaterVisualCameraTarget water_visual_target;
     bool water_visual_target_initialized = false;
     bool water_visual_capture_written = false;
+    std::vector<WaterCausticsSample> water_caustics_samples;
+    double water_caustics_next_sample_seconds = 0.0;
     WaterVisualCameraTarget material_visual_target;
     bool material_visual_target_initialized = false;
     bool material_visual_capture_written = false;
@@ -1774,7 +1776,21 @@ int main(int argc, char* argv[]) {
                             const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
                             const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
                             const auto& render_pass_stats = renderPipeline.get_last_render_pass_stats();
-                            if (progress >= 0.50 && render_pass_stats.water_draws > 0 && water_visual_target.found) {
+                            // T-I2-16a: sample the ROI water luminance roughly once a
+                            // second while water is rendering; the analysis requires
+                            // temporal variance across these samples (animated
+                            // caustics, not a static tint).
+                            if (render_pass_stats.water_draws > 0 && water_visual_target.found &&
+                                elapsed_play_seconds >= water_caustics_next_sample_seconds) {
+                                int sample_width = 0;
+                                int sample_height = 0;
+                                glfwGetFramebufferSize(window, &sample_width, &sample_height);
+                                water_caustics_samples.push_back(
+                                    SampleBackbufferWaterLuminance(sample_width, sample_height, elapsed_play_seconds));
+                                water_caustics_next_sample_seconds = elapsed_play_seconds + 1.0;
+                            }
+                            if (progress >= 0.50 && render_pass_stats.water_draws > 0 && water_visual_target.found &&
+                                water_caustics_samples.size() >= 2) {
                                 int screenshot_width = 0;
                                 int screenshot_height = 0;
                                 glfwGetFramebufferSize(window, &screenshot_width, &screenshot_height);
@@ -1788,7 +1804,8 @@ int main(int argc, char* argv[]) {
                                         water_visual_target,
                                         pixel_stats,
                                         render_pass_stats,
-                                        renderPipeline.get_last_mesh_upload_stats()
+                                        renderPipeline.get_last_mesh_upload_stats(),
+                                        water_caustics_samples
                                     );
                                 }
                             }

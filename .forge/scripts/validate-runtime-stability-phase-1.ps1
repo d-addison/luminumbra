@@ -402,7 +402,7 @@ function Test-WaterVisual {
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
-    if ($analysis.schema -ne "luminumbra.water_visual_analysis.v1") {
+    if ($analysis.schema -ne "luminumbra.water_visual_analysis.v2") {
         throw "Unexpected water visual analysis schema '$($analysis.schema)'"
     }
     if (-not $analysis.target.found) {
@@ -422,6 +422,23 @@ function Test-WaterVisual {
     }
     if ([int64]$analysis.gl_debug.errors -ne 0) {
         throw "Water visual analysis recorded GL debug errors: $($analysis.gl_debug.errors)"
+    }
+    # T-I2-16a: caustics must be animated, not a static tint.
+    $caustics = $analysis.caustics_animation
+    if ($null -eq $caustics) {
+        throw "Water visual analysis is missing the caustics_animation block"
+    }
+    if ([int]$caustics.valid_sample_count -lt [int]$caustics.thresholds.min_samples) {
+        throw "Water visual caustics probe collected too few samples: $($caustics.valid_sample_count)"
+    }
+    if ([double]$caustics.min_sample_spacing_seconds -lt [double]$caustics.thresholds.min_sample_spacing_seconds) {
+        throw "Water visual caustics samples are spaced too closely: $($caustics.min_sample_spacing_seconds)s"
+    }
+    if ([double]$caustics.luminance_variance -lt [double]$caustics.thresholds.min_luminance_variance) {
+        throw "Water visual caustics luminance did not animate: variance=$($caustics.luminance_variance) (threshold $($caustics.thresholds.min_luminance_variance))"
+    }
+    if (-not $caustics.animated) {
+        throw "Water visual caustics animation gate failed"
     }
     Assert-FileExists (Join-Path $visualDir $analysis.screenshot)
 }
