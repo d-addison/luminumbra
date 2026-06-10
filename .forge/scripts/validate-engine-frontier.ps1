@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "FrontierDisabled", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "ChunkCollisionLifecycle", "FrontierDisabled", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug"
@@ -395,6 +395,65 @@ function Test-ShaderInventory {
     }
 }
 
+function Test-ChunkCollisionLifecycle {
+    $artifactDir = "build/$BuildPreset/test-artifacts/runtime/chunk-collision-lifecycle"
+    $analysisPath = Join-Path $artifactDir "chunk-collision-lifecycle.json"
+    $testScriptPath = "test/physics/chunk-collision-lifecycle.ps1"
+
+    if (-not (Test-Path $testScriptPath)) {
+        throw "chunk collision lifecycle gate not yet implemented - missing $testScriptPath (produced by task T-EF-12-physics-collision-lifecycle-gate)"
+    }
+
+    & $testScriptPath -BuildPreset $BuildPreset
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
+    if (-not (Test-Path $analysisPath)) {
+        throw "chunk collision lifecycle gate not yet implemented - missing $analysisPath (produced by task T-EF-12-physics-collision-lifecycle-gate)"
+    }
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.physics.chunk_collision_lifecycle.v1") {
+        throw "Unexpected chunk collision lifecycle schema '$($analysis.schema)'"
+    }
+    if (-not $analysis.passed) {
+        throw "Chunk collision lifecycle analysis reported failure"
+    }
+    if ($analysis.world_system.source -ne "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp") {
+        throw "Chunk collision lifecycle analysis must inspect SHIELD_WorldSystem.cpp"
+    }
+    if ($analysis.world_system.replacement_helper -ne "replace_chunk_collision") {
+        throw "Chunk collision lifecycle analysis must require replace_chunk_collision"
+    }
+    if ([int64]$analysis.world_system.direct_add_chunk_collision_calls -ne 0) {
+        throw "Chunk collision lifecycle must not leave direct pointer add_chunk_collision calls"
+    }
+    if ([int64]$analysis.world_system.helper_add_chunk_collision_calls -ne 1) {
+        throw "Chunk collision lifecycle must centralize add_chunk_collision in one helper"
+    }
+
+    $requiredChecks = @(
+        "replace helper removes stale collision before add",
+        "runtime update uses lifecycle replacement helper",
+        "initial horizon collision uses lifecycle replacement helper",
+        "chunk unload removes collision before erasing chunk",
+        "clear world removes collisions before clearing chunks",
+        "terrain mesh rebuild invalidates collision flag",
+        "all collision adds flow through lifecycle replacement"
+    )
+    $checks = @($analysis.checks)
+    foreach ($requiredCheck in $requiredChecks) {
+        $matches = @($checks | Where-Object { $_.name -eq $requiredCheck })
+        if ($matches.Count -ne 1) {
+            throw "Chunk collision lifecycle analysis is missing check '$requiredCheck'"
+        }
+        if (-not $matches[0].passed) {
+            throw "Chunk collision lifecycle check failed: $requiredCheck"
+        }
+    }
+}
+
 function Test-FrontierDisabled {
     Assert-FileExists $FrontierDisabledPath
 
@@ -424,6 +483,7 @@ switch ($Mode) {
     "MaterialVisual" { Test-MaterialVisual }
     "RenderHealth" { Test-RenderHealth }
     "ShaderInventory" { Test-ShaderInventory }
+    "ChunkCollisionLifecycle" { Test-ChunkCollisionLifecycle }
     "FrontierDisabled" { Test-FrontierDisabled }
     "All" {
         Test-CodexOnly
@@ -432,6 +492,7 @@ switch ($Mode) {
         Test-Panels
         Test-RenderHealth
         Test-ShaderInventory
+        Test-ChunkCollisionLifecycle
         Test-FrontierDisabled
     }
 }

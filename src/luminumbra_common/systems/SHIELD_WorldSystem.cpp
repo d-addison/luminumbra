@@ -128,6 +128,13 @@ void clear_streaming_state_counts(SHIELD_WorldSystem::StreamingBudgetFrameStats&
     stats.meshing_chunks = 0;
 }
 
+void replace_chunk_collision(PhysicsSystem& physics_system, Luminumbra::Chunk& chunk) {
+    const ChunkID id = chunk.get_id();
+    physics_system.remove_chunk_collision(id);
+    physics_system.add_chunk_collision(chunk);
+    chunk.has_collision.store(true, std::memory_order_release);
+}
+
 }
 
 SHIELD_WorldSystem::SHIELD_WorldSystem(JobSystem* job_system, WaterSystem* water_system, const TerrainGenParams& params, int seed)
@@ -435,8 +442,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
             if (chunk_ptr->get_state() == ChunkState::Ready && !chunk_ptr->has_collision.load()) {
                 // Only create collision for the highest LOD terrain mesh
                 if (chunk_ptr->current_lod.load() == 0 && !chunk_ptr->mesh_vertices.empty() && !chunk_ptr->mesh_indices.empty()) {
-                    physics_system->add_chunk_collision(*chunk_ptr);
-                    chunk_ptr->has_collision.store(true);
+                    replace_chunk_collision(*physics_system, *chunk_ptr);
 
                     collision_meshes_created_this_frame++;
                     if (collision_meshes_created_this_frame >= MAX_COLLISION_MESHES_PER_FRAME) {
@@ -783,8 +789,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
             std::abs(offset.x) <= collision_range && std::abs(offset.y) <= collision_range &&
             !chunk->has_collision.load())
         {
-            physics_system->add_chunk_collision(*chunk);
-            chunk->has_collision.store(true);
+            replace_chunk_collision(*physics_system, *chunk);
             ++collision_count;
         }
     }
