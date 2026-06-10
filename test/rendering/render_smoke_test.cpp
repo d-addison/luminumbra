@@ -7,8 +7,10 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -31,6 +33,13 @@ struct ShaderProgramSpec {
     const char* vertex;
     const char* fragment;
     const char* geometry = nullptr;
+};
+
+struct ShaderSourceInventoryEntry {
+    std::string file;
+    std::string stage;
+    std::uintmax_t bytes = 0;
+    bool compiled = false;
 };
 
 class HiddenGlContext {
@@ -107,6 +116,47 @@ std::string ReadTextFile(const fs::path& path) {
     return stream.str();
 }
 
+std::string JsonEscape(const std::string& value) {
+    std::ostringstream escaped;
+    for (const unsigned char ch : value) {
+        switch (ch) {
+            case '"':
+                escaped << "\\\"";
+                break;
+            case '\\':
+                escaped << "\\\\";
+                break;
+            case '\b':
+                escaped << "\\b";
+                break;
+            case '\f':
+                escaped << "\\f";
+                break;
+            case '\n':
+                escaped << "\\n";
+                break;
+            case '\r':
+                escaped << "\\r";
+                break;
+            case '\t':
+                escaped << "\\t";
+                break;
+            default:
+                if (ch < 0x20) {
+                    escaped << "\\u" << std::hex << std::setw(4) << std::setfill('0') << static_cast<int>(ch);
+                } else {
+                    escaped << static_cast<char>(ch);
+                }
+                break;
+        }
+    }
+    return escaped.str();
+}
+
+void WriteJsonString(std::ostream& output, const std::string& value) {
+    output << "\"" << JsonEscape(value) << "\"";
+}
+
 GLenum ShaderTypeForPath(const fs::path& path) {
     const std::string ext = path.extension().string();
     if (ext == ".vert") {
@@ -122,6 +172,21 @@ GLenum ShaderTypeForPath(const fs::path& path) {
         return GL_COMPUTE_SHADER;
     }
     return 0;
+}
+
+std::string ShaderStageName(GLenum type) {
+    switch (type) {
+        case GL_VERTEX_SHADER:
+            return "vertex";
+        case GL_FRAGMENT_SHADER:
+            return "fragment";
+        case GL_GEOMETRY_SHADER:
+            return "geometry";
+        case GL_COMPUTE_SHADER:
+            return "compute";
+        default:
+            return "unknown";
+    }
 }
 
 std::string GetShaderInfoLog(GLuint shader) {
@@ -231,6 +296,117 @@ std::vector<ShaderProgramSpec> PipelineProgramSpecs() {
         {"volumetric_lighting", "volumetric_lighting.vert", "volumetric_lighting.frag"},
         {"magical_particles", "magical_particles.vert", "magical_particles.frag", "magical_particles.geom"},
     };
+}
+
+void WriteShaderInventoryArtifact(
+    const fs::path& path,
+    const std::vector<ShaderSourceInventoryEntry>& sources,
+    const std::vector<ShaderProgramSpec>& programs) {
+    const auto count_stage = [&sources](const std::string& stage) {
+        return std::count_if(
+            sources.begin(),
+            sources.end(),
+            [&stage](const ShaderSourceInventoryEntry& entry) {
+                return entry.stage == stage;
+            });
+    };
+    const auto compiled_count = std::count_if(
+        sources.begin(),
+        sources.end(),
+        [](const ShaderSourceInventoryEntry& entry) {
+            return entry.compiled;
+        });
+
+    std::ofstream output(path);
+    ASSERT_TRUE(output) << path.string();
+    output << "{\n";
+    output << "  \"schema\": \"luminumbra.render.shader_inventory.v1\",\n";
+    output << "  \"generated_by\": \"RenderSmokeTest.AllShaderSourcesCompile\",\n";
+    output << "  \"shader_root\": \"res/shaders\",\n";
+    output << "  \"source_count\": " << sources.size() << ",\n";
+    output << "  \"compiled_source_count\": " << compiled_count << ",\n";
+    output << "  \"stage_counts\": {\n";
+    output << "    \"vertex\": " << count_stage("vertex") << ",\n";
+    output << "    \"fragment\": " << count_stage("fragment") << ",\n";
+    output << "    \"geometry\": " << count_stage("geometry") << ",\n";
+    output << "    \"compute\": " << count_stage("compute") << "\n";
+    output << "  },\n";
+    output << "  \"pipeline_program_count\": " << programs.size() << ",\n";
+    output << "  \"sources\": [\n";
+    for (std::size_t i = 0; i < sources.size(); ++i) {
+        const ShaderSourceInventoryEntry& source = sources[i];
+        output << "    {\"file\": ";
+        WriteJsonString(output, source.file);
+        output << ", \"stage\": ";
+        WriteJsonString(output, source.stage);
+        output << ", \"bytes\": " << source.bytes << ", \"compiled\": " << (source.compiled ? "true" : "false") << "}";
+        output << (i + 1u == sources.size() ? "\n" : ",\n");
+    }
+    output << "  ],\n";
+    output << "  \"pipeline_programs\": [\n";
+    for (std::size_t i = 0; i < programs.size(); ++i) {
+        const ShaderProgramSpec& program = programs[i];
+        output << "    {\"name\": ";
+        WriteJsonString(output, program.name);
+        output << ", \"stages\": [";
+        output << "{\"stage\":\"vertex\",\"file\":";
+        WriteJsonString(output, program.vertex);
+        output << "}, {\"stage\":\"fragment\",\"file\":";
+        WriteJsonString(output, program.fragment);
+        output << "}";
+        if (program.geometry) {
+            output << ", {\"stage\":\"geometry\",\"file\":";
+            WriteJsonString(output, program.geometry);
+            output << "}";
+        }
+        output << "]}";
+        output << (i + 1u == programs.size() ? "\n" : ",\n");
+    }
+    output << "  ]\n";
+    output << "}\n";
+}
+
+void WriteShaderSuiteHealthArtifact(
+    const fs::path& path,
+    const std::vector<std::pair<std::string, bool>>& program_health,
+    const std::vector<std::string>& gl_errors) {
+    const auto linked_count = std::count_if(
+        program_health.begin(),
+        program_health.end(),
+        [](const std::pair<std::string, bool>& entry) {
+            return entry.second;
+        });
+    const bool all_programs_ok = linked_count == static_cast<std::ptrdiff_t>(program_health.size());
+    const bool passed = all_programs_ok && gl_errors.empty();
+
+    std::ofstream output(path);
+    ASSERT_TRUE(output) << path.string();
+    output << "{\n";
+    output << "  \"schema\": \"luminumbra.render.shader_suite_health.v1\",\n";
+    output << "  \"generated_by\": \"RenderSmokeTest.PipelineShaderProgramsLink\",\n";
+    output << "  \"passed\": " << (passed ? "true" : "false") << ",\n";
+    output << "  \"expected_program_count\": " << program_health.size() << ",\n";
+    output << "  \"linked_program_count\": " << linked_count << ",\n";
+    output << "  \"gl_debug\": {\n";
+    output << "    \"errors\": " << gl_errors.size() << ",\n";
+    output << "    \"error_names\": [";
+    for (std::size_t i = 0; i < gl_errors.size(); ++i) {
+        WriteJsonString(output, gl_errors[i]);
+        output << (i + 1u == gl_errors.size() ? "" : ", ");
+    }
+    output << "]\n";
+    output << "  },\n";
+    output << "  \"programs\": [\n";
+    for (std::size_t i = 0; i < program_health.size(); ++i) {
+        output << "    {\"name\": ";
+        WriteJsonString(output, program_health[i].first);
+        output << ", \"compiled\": " << (program_health[i].second ? "true" : "false");
+        output << ", \"linked\": " << (program_health[i].second ? "true" : "false");
+        output << ", \"ok\": " << (program_health[i].second ? "true" : "false") << "}";
+        output << (i + 1u == program_health.size() ? "\n" : ",\n");
+    }
+    output << "  ]\n";
+    output << "}\n";
 }
 
 std::string GlErrorName(GLenum error) {
@@ -352,6 +528,7 @@ TEST(RenderSmokeTest, AllShaderSourcesCompile) {
     ASSERT_TRUE(fs::exists(shader_root)) << shader_root.string();
 
     int compiled_count = 0;
+    std::vector<fs::path> shader_paths;
     for (const fs::directory_entry& entry : fs::directory_iterator(shader_root)) {
         if (!entry.is_regular_file()) {
             continue;
@@ -362,12 +539,32 @@ TEST(RenderSmokeTest, AllShaderSourcesCompile) {
             continue;
         }
 
-        GLuint shader = CompileShader(entry.path(), type);
+        shader_paths.push_back(entry.path());
+    }
+    std::sort(shader_paths.begin(), shader_paths.end());
+
+    std::vector<ShaderSourceInventoryEntry> source_inventory;
+    for (const fs::path& shader_path : shader_paths) {
+        const GLenum type = ShaderTypeForPath(shader_path);
+        GLuint shader = CompileShader(shader_path, type);
+        const bool compiled = shader != 0;
         if (shader != 0) {
             ++compiled_count;
             glDeleteShader(shader);
         }
+        source_inventory.push_back({
+            shader_path.filename().generic_string(),
+            ShaderStageName(type),
+            fs::file_size(shader_path),
+            compiled,
+        });
     }
+
+    fs::create_directories(RenderHealthArtifactRoot());
+    WriteShaderInventoryArtifact(
+        RenderHealthArtifactRoot() / "shader-inventory.json",
+        source_inventory,
+        PipelineProgramSpecs());
 
     EXPECT_GT(compiled_count, 0);
 }
@@ -378,13 +575,32 @@ TEST(RenderSmokeTest, PipelineShaderProgramsLink) {
         GTEST_SKIP() << context.error();
     }
 
+    std::vector<std::pair<std::string, bool>> program_health;
     for (const ShaderProgramSpec& spec : PipelineProgramSpecs()) {
         GLuint program = LinkProgram(spec);
+        program_health.push_back({spec.name, program != 0u});
         EXPECT_NE(program, 0u) << spec.name;
         if (program != 0) {
             glDeleteProgram(program);
         }
     }
+
+    const std::vector<std::string> gl_errors = DrainGlErrors();
+    const bool all_programs_ok = std::all_of(
+        program_health.begin(),
+        program_health.end(),
+        [](const std::pair<std::string, bool>& entry) {
+            return entry.second;
+        });
+
+    fs::create_directories(RenderHealthArtifactRoot());
+    WriteShaderSuiteHealthArtifact(
+        RenderHealthArtifactRoot() / "shader-suite-health.json",
+        program_health,
+        gl_errors);
+
+    EXPECT_TRUE(all_programs_ok);
+    EXPECT_TRUE(gl_errors.empty());
 }
 
 TEST(RenderSmokeTest, RenderHealthGateEmitsAnalysisArtifact) {

@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "FrontierDisabled", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "FrontierDisabled", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug"
@@ -282,6 +282,119 @@ function Test-RenderHealth {
     }
 }
 
+function Test-ShaderInventory {
+    $renderDir = "build/$BuildPreset/test-artifacts/render"
+    $inventoryPath = Join-Path $renderDir "shader-inventory.json"
+    $suiteHealthPath = Join-Path $renderDir "shader-suite-health.json"
+
+    foreach ($path in @($inventoryPath, $suiteHealthPath)) {
+        if (-not (Test-Path $path)) {
+            throw "render shader inventory gate not yet implemented - missing $path (produced by task T-EF-10-render-shader-inventory)"
+        }
+    }
+
+    $inventory = Get-Content $inventoryPath -Raw | ConvertFrom-Json
+    if ($inventory.schema -ne "luminumbra.render.shader_inventory.v1") {
+        throw "Unexpected shader inventory schema '$($inventory.schema)'"
+    }
+
+    $sources = @($inventory.sources)
+    if ($sources.Count -lt 20) {
+        throw "Shader inventory is missing source entries: found $($sources.Count)"
+    }
+    if ([int64]$inventory.source_count -ne $sources.Count) {
+        throw "Shader inventory source_count does not match sources array"
+    }
+    if ([int64]$inventory.compiled_source_count -ne $sources.Count) {
+        throw "Shader inventory must compile every listed shader source"
+    }
+
+    foreach ($source in $sources) {
+        if ([string]::IsNullOrWhiteSpace($source.file)) {
+            throw "Shader inventory contains a source entry without a file"
+        }
+        if ([string]::IsNullOrWhiteSpace($source.stage)) {
+            throw "Shader inventory source '$($source.file)' is missing a stage"
+        }
+        if (-not $source.compiled) {
+            throw "Shader inventory source '$($source.file)' did not compile"
+        }
+        if ([int64]$source.bytes -le 0) {
+            throw "Shader inventory source '$($source.file)' has no byte size"
+        }
+    }
+
+    foreach ($stage in @("vertex", "fragment", "geometry")) {
+        if ([int64]$inventory.stage_counts.$stage -lt 1) {
+            throw "Shader inventory is missing $stage shader coverage"
+        }
+    }
+
+    $requiredPrograms = @(
+        "basic",
+        "g_buffer",
+        "instanced_mesh_gbuffer",
+        "lighting_pass",
+        "skybox",
+        "shadow_map",
+        "ssao",
+        "ssao_blur",
+        "water",
+        "rml_ui",
+        "loading_hologram",
+        "loading_visual",
+        "volumetric_lighting",
+        "magical_particles"
+    )
+
+    $inventoryPrograms = @($inventory.pipeline_programs)
+    if ([int64]$inventory.pipeline_program_count -ne $inventoryPrograms.Count) {
+        throw "Shader inventory pipeline_program_count does not match pipeline_programs array"
+    }
+    foreach ($requiredProgram in $requiredPrograms) {
+        $matches = @($inventoryPrograms | Where-Object { $_.name -eq $requiredProgram })
+        if ($matches.Count -ne 1) {
+            throw "Shader inventory is missing pipeline program '$requiredProgram'"
+        }
+        if (@($matches[0].stages).Count -lt 2) {
+            throw "Shader inventory program '$requiredProgram' must list at least vertex and fragment stages"
+        }
+    }
+
+    $magicalParticles = @($inventoryPrograms | Where-Object { $_.name -eq "magical_particles" })
+    if (@($magicalParticles[0].stages | Where-Object { $_.stage -eq "geometry" }).Count -ne 1) {
+        throw "Shader inventory must record the magical_particles geometry stage"
+    }
+
+    $suiteHealth = Get-Content $suiteHealthPath -Raw | ConvertFrom-Json
+    if ($suiteHealth.schema -ne "luminumbra.render.shader_suite_health.v1") {
+        throw "Unexpected shader suite health schema '$($suiteHealth.schema)'"
+    }
+    if (-not $suiteHealth.passed) {
+        throw "Shader suite health reported failure"
+    }
+    if ([int64]$suiteHealth.gl_debug.errors -ne 0) {
+        throw "Shader suite health emitted GL debug errors: $($suiteHealth.gl_debug.errors)"
+    }
+
+    $healthPrograms = @($suiteHealth.programs)
+    if ([int64]$suiteHealth.expected_program_count -ne $requiredPrograms.Count) {
+        throw "Shader suite health expected_program_count must cover the required render pipeline programs"
+    }
+    if ([int64]$suiteHealth.linked_program_count -ne $healthPrograms.Count) {
+        throw "Shader suite health linked_program_count does not match programs array"
+    }
+    foreach ($requiredProgram in $requiredPrograms) {
+        $matches = @($healthPrograms | Where-Object { $_.name -eq $requiredProgram })
+        if ($matches.Count -ne 1) {
+            throw "Shader suite health is missing program '$requiredProgram'"
+        }
+        if (-not $matches[0].compiled -or -not $matches[0].linked -or -not $matches[0].ok) {
+            throw "Shader suite health failed for '$requiredProgram'"
+        }
+    }
+}
+
 function Test-FrontierDisabled {
     Assert-FileExists $FrontierDisabledPath
 
@@ -310,6 +423,7 @@ switch ($Mode) {
     "UnitTests" { Test-UnitTests }
     "MaterialVisual" { Test-MaterialVisual }
     "RenderHealth" { Test-RenderHealth }
+    "ShaderInventory" { Test-ShaderInventory }
     "FrontierDisabled" { Test-FrontierDisabled }
     "All" {
         Test-CodexOnly
@@ -317,6 +431,7 @@ switch ($Mode) {
         Test-Sections
         Test-Panels
         Test-RenderHealth
+        Test-ShaderInventory
         Test-FrontierDisabled
     }
 }
