@@ -56,6 +56,7 @@ struct RuntimeScenarioConfig {
     bool water_visual_smoke() const { return scenario == "water_visual_smoke"; }
     bool material_visual_smoke() const { return scenario == "material_visual_smoke"; }
     bool skybox_visual_smoke() const { return scenario == "skybox_visual_smoke"; }
+    bool weather_visual_smoke() const { return scenario == "weather_visual_smoke"; }
     bool lod_boundary_oscillation_smoke() const { return scenario == "lod_boundary_oscillation_smoke"; }
     bool lod_seam_arrival_smoke() const { return scenario == "lod_seam_arrival_smoke"; }
     bool persistence_roundtrip_smoke() const { return scenario == "persistence_roundtrip_smoke"; }
@@ -213,6 +214,36 @@ void WriteSkyboxVisualAnalysis(
     double sun_screen_x_norm,
     double sun_screen_y_norm,
     bool sun_on_screen,
+    const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass);
+
+// --- Weather visual smoke (T-I2-17b) ---
+// Same camera as the skybox scenario. A clear-sky baseline frame is captured
+// in the first half of the run; weather (Rain at intensity 1.0) is enabled at
+// the midpoint and the weather frame captured near the end. The analysis
+// compares the two captures: overcast luminance drop in the sky ROI and rain
+// streak structure (horizontal luminance gradient energy, since vertical
+// streaks create high-frequency variation across columns).
+struct WeatherPixelStats {
+    int width = 0;
+    int height = 0;
+    std::uint64_t sky_roi_pixels = 0;
+    double sky_mean_luminance = 0.0;
+    // Mean |L(x+1,y) - L(x,y)| over the sky ROI: vertical rain streaks
+    // produce horizontal high-frequency luminance transitions.
+    double sky_horizontal_gradient_mean = 0.0;
+    double frame_mean_luminance = 0.0;
+};
+
+WeatherPixelStats AnalyzeWeatherPixels(const std::vector<unsigned char>& pixels, int width, int height);
+
+void WriteWeatherVisualAnalysis(
+    const std::filesystem::path& artifact_dir,
+    const std::string& baseline_screenshot,
+    const std::string& weather_screenshot,
+    const WeatherPixelStats& baseline_stats,
+    const WeatherPixelStats& weather_stats,
+    const std::string& weather_type,
+    float weather_intensity,
     const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass);
 
 ScreenshotPixelStats AnalyzeScreenshotPixels(const std::vector<unsigned char>& pixels, int width, int height);

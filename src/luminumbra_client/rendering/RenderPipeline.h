@@ -91,6 +91,16 @@ struct SSAOData {
     std::unique_ptr<Shader> blurShader;
 };
 
+// Engine-generic runtime weather state (T-I2-17b). Default Off: the weather
+// overlay issues zero GL work unless a weather type with intensity > 0 is set.
+enum class WeatherType {
+    None = 0,
+    Rain,
+    Snow,
+    Fog,
+    Storm,
+};
+
 class RenderPipeline {
 public:
     struct MeshUploadFrameStats {
@@ -262,6 +272,11 @@ public:
     std::vector<ShaderHealthEntry> get_shader_health() const;
     RenderHealthSnapshot get_render_health_snapshot(bool drain_gl_errors = false) const;
     void set_time_of_day(float normalized_time);
+    // Runtime weather control (engine-generic). Intensity is clamped to
+    // [0, 1]; WeatherType::None or intensity 0 disables the overlay entirely.
+    void set_weather(WeatherType type, float intensity);
+    WeatherType get_weather_type() const { return m_weather_type; }
+    float get_weather_intensity() const { return m_weather_intensity; }
     
     // GPU SDF integration
     void set_gpu_sdf_runtime_enabled(bool enabled);
@@ -374,6 +389,8 @@ private:
     DirectionalLight m_sun;
     glm::vec3 m_moonDirection;
     glm::vec3 m_skyAmbientColor;
+    WeatherType m_weather_type = WeatherType::None;
+    float m_weather_intensity = 0.0f;
     std::unique_ptr<GBufferPass> m_gbuffer_pass;
     std::unique_ptr<ShadowPass> m_shadow_pass;
     std::unique_ptr<SsaoPass> m_ssao_pass;
