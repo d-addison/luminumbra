@@ -64,10 +64,20 @@ void PlayerController::RenderDebugUI() {
 }
 
 void PlayerController::Update(float deltaTime) {
-    // 1. Get Input Wish Direction from keyboard
+    ApplyReplayInput(deltaTime, ReadLiveInputFrame());
+    m_wantsToJump = false;
+    m_wantsToCrouch = false;
+}
+
+PlayerReplayInputFrame PlayerController::ReadLiveInputFrame() const {
+    PlayerReplayInputFrame input{};
+
     glm::vec3 wishDir(0.0f);
-    // Use a ground-plane projected forward vector for walking/strafing
-    glm::vec3 forward = glm::normalize(glm::vec3(m_camera->Front.x, 0.0f, m_camera->Front.z));
+    glm::vec3 forward(m_camera->Front.x, 0.0f, m_camera->Front.z);
+    if (glm::length(forward) > 0.0f) {
+        forward = glm::normalize(forward);
+    }
+
     glm::vec3 right = m_camera->Right;
 
     if (glfwGetKey(m_window, GLFW_KEY_W) == GLFW_PRESS) wishDir += forward;
@@ -75,40 +85,63 @@ void PlayerController::Update(float deltaTime) {
     if (glfwGetKey(m_window, GLFW_KEY_A) == GLFW_PRESS) wishDir -= right;
     if (glfwGetKey(m_window, GLFW_KEY_D) == GLFW_PRESS) wishDir += right;
 
-    // For noclip, we also check for vertical movement keys.
     if (m_mode == MovementMode::Noclip) {
-        // Jump key moves straight up
         if (glfwGetKey(m_window, GLFW_KEY_SPACE) == GLFW_PRESS) {
             wishDir += m_camera->WorldUp;
         }
-        // Crouch keys move straight down
         if (glfwGetKey(m_window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS || glfwGetKey(m_window, GLFW_KEY_C) == GLFW_PRESS) {
             wishDir -= m_camera->WorldUp;
         }
     }
 
-    // Normalize the final direction vector if there's any movement
+    input.wishDirection = wishDir;
+    input.jumpPressed = m_wantsToJump;
+    input.crouchPressed = m_wantsToCrouch;
+    input.sprintHeld = glfwGetKey(m_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
+    return input;
+}
+
+void PlayerController::ApplyReplayInput(float deltaTime, const PlayerReplayInputFrame& inputFrame) {
+    glm::vec3 wishDir = inputFrame.wishDirection;
     if (glm::length(wishDir) > 0.0f) {
         wishDir = glm::normalize(wishDir);
     }
 
-    // 2. Update player position based on the current movement mode
     if (m_mode == MovementMode::Walking) {
-        UpdateWalking(deltaTime, wishDir);
+        UpdateWalking(deltaTime, wishDir, inputFrame.jumpPressed, inputFrame.crouchPressed, inputFrame.sprintHeld);
     } else { // Noclip
-        UpdateNoclip(deltaTime, wishDir);
+        UpdateNoclip(deltaTime, wishDir, inputFrame.sprintHeld);
     }
 
-    // --- (FIXED) 3. Update Camera position ---
+    UpdateCameraFromControllerPosition();
+    ++m_replayFrameCounter;
+}
+
+PlayerReplaySnapshot PlayerController::CaptureReplaySnapshot() const {
+    PlayerReplaySnapshot snapshot{};
+    snapshot.frame = m_replayFrameCounter;
+    snapshot.mode = m_mode;
+    snapshot.position = m_position;
+    snapshot.velocity = m_velocity;
+    snapshot.isCrouching = m_isCrouching;
+    snapshot.wantsToJump = m_wantsToJump;
+    snapshot.wantsToCrouch = m_wantsToCrouch;
+    snapshot.hasInitializedPhysicsPlayer = m_hasInitializedPhysicsPlayer;
+    snapshot.noclipSpeedMultiplier = m_noclipSpeedMultiplier;
+    return snapshot;
+}
+
+void PlayerController::ResetReplayFrameCounter(std::uint64_t frame) {
+    m_replayFrameCounter = frame;
+}
+
+void PlayerController::UpdateCameraFromControllerPosition() {
     if (m_mode == MovementMode::Walking) {
-        // In walking mode, the camera is positioned at eye-level, relative to the player's feet (m_position).
-        // We derive the eye height from the character's total height for consistency.
-        const float standingEyeHeight = m_standingHeight * 0.95f; // Approx 95% of total height
-        const float crouchingEyeHeight = m_crouchHeight * 0.9f;   // Approx 90% of total height
-        float currentEyeHeight = m_isCrouching ? crouchingEyeHeight : standingEyeHeight;
+        const float standingEyeHeight = m_standingHeight * 0.95f;
+        const float crouchingEyeHeight = m_crouchHeight * 0.9f;
+        const float currentEyeHeight = m_isCrouching ? crouchingEyeHeight : standingEyeHeight;
         m_camera->Position = m_position + glm::vec3(0.0f, currentEyeHeight, 0.0f);
-    } else { // Noclip
-        // In noclip mode, the camera's position IS the player's position. There is no offset.
+    } else {
         m_camera->Position = m_position;
     }
 }
@@ -167,11 +200,14 @@ void PlayerController::ProcessMouseScroll(double yoffset) {
 }
 
 
-void PlayerController::UpdateWalking(float deltaTime, const glm::vec3& wishDir) {
-    if (!m_physicsSystem) return;
+void PlayerController::UpdateWalking(float deltaTime, const glm::vec3& wishDir, bool jumpPressed, bool crouchPressed, bool sprintHeld) {
+    if (!m_physicsSystem) {
+        m_velocity = glm::vec3(0.0f);
+        return;
+    }
 
     // Crouching is a toggle. Check if the player wants to change state.
-    if (m_wantsToCrouch) {
+    if (crouchPressed) {
         if (m_isCrouching) { // If currently crouching, try to stand up
             if (m_physicsSystem->player_has_space_to_stand()) {
                 m_isCrouching = false;
@@ -182,30 +218,31 @@ void PlayerController::UpdateWalking(float deltaTime, const glm::vec3& wishDir) 
             m_isCrouching = true;
             m_physicsSystem->set_player_crouched(true);
         }
-        m_wantsToCrouch = false; // Consume the crouch intent
     }
 
     // Sprinting is only possible when not crouched
-    bool is_sprinting = glfwGetKey(m_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS && !m_isCrouching;
+    bool is_sprinting = sprintHeld && !m_isCrouching;
     float current_speed = m_isCrouching ? m_crouchSpeed : (is_sprinting ? m_sprintSpeed : m_walkSpeed);
 
     // Let the physics system handle the actual movement
-    m_physicsSystem->update_player(wishDir * current_speed, m_wantsToJump, m_jumpForce, deltaTime);
-    m_wantsToJump = false; // Consume the jump intent every frame
+    const glm::vec3 previousPosition = m_position;
+    m_physicsSystem->update_player(wishDir * current_speed, jumpPressed, m_jumpForce, deltaTime);
 
     // Update our controller's position from the physics simulation
     m_position = m_physicsSystem->get_player_position();
+    m_velocity = (deltaTime > 0.0f) ? (m_position - previousPosition) / deltaTime : glm::vec3(0.0f);
 }
 
-void PlayerController::UpdateNoclip(float deltaTime, const glm::vec3& wishDir) {
+void PlayerController::UpdateNoclip(float deltaTime, const glm::vec3& wishDir, bool sprintHeld) {
     // Calculate speed based on the base speed, the scroll-wheel multiplier, and a sprint key boost
     float current_speed = m_noclipBaseSpeed * m_noclipSpeedMultiplier;
-    if (glfwGetKey(m_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) {
+    if (sprintHeld) {
         current_speed *= 2.0f; // Sprinting doubles the current noclip speed
     }
 
     // Noclip directly modifies the position, bypassing physics
-    m_position += wishDir * current_speed * deltaTime;
+    m_velocity = wishDir * current_speed;
+    m_position += m_velocity * deltaTime;
 }
 
 } // namespace Luminumbra::Client

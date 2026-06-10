@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "ChunkCollisionLifecycle", "FrontierDisabled", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "ChunkCollisionLifecycle", "PhysicsReplay", "FrontierDisabled", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug"
@@ -454,6 +454,83 @@ function Test-ChunkCollisionLifecycle {
     }
 }
 
+function Test-PhysicsReplay {
+    $artifactDir = "build/$BuildPreset/test-artifacts/runtime/physics-replay"
+    $analysisPath = Join-Path $artifactDir "physics-replay-endstate.json"
+    $testScriptPath = "test/physics/physics-replay.ps1"
+
+    if (-not (Test-Path $testScriptPath)) {
+        throw "physics replay gate not yet implemented - missing $testScriptPath (produced by task T-EF-13-physics-replay-gate)"
+    }
+
+    & $testScriptPath -BuildPreset $BuildPreset
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
+    if (-not (Test-Path $analysisPath)) {
+        throw "physics replay gate not yet implemented - missing $analysisPath (produced by task T-EF-13-physics-replay-gate)"
+    }
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.physics.replay_endstate.v1") {
+        throw "Unexpected physics replay schema '$($analysis.schema)'"
+    }
+    if (-not $analysis.passed) {
+        throw "Physics replay analysis reported failure"
+    }
+    if ($analysis.controller.input_api -ne "ApplyReplayInput") {
+        throw "Physics replay analysis must require PlayerController::ApplyReplayInput"
+    }
+    if ($analysis.controller.snapshot_api -ne "CaptureReplaySnapshot") {
+        throw "Physics replay analysis must require PlayerController::CaptureReplaySnapshot"
+    }
+    if ($analysis.controller.frame_counter_api -ne "ResetReplayFrameCounter") {
+        throw "Physics replay analysis must require PlayerController::ResetReplayFrameCounter"
+    }
+    if ($analysis.physics.include_bridge -ne "../systems/PhysicsSystem.h") {
+        throw "Physics replay analysis must preserve the assigned PhysicsSystem include bridge"
+    }
+    if ([int64]$analysis.replay.frame_count -lt 10) {
+        throw "Physics replay must execute at least 10 deterministic frames"
+    }
+    if ($analysis.replay.fixed_delta_seconds -ne 0.016666667) {
+        throw "Physics replay must use the fixed 60Hz replay timestep"
+    }
+    if ([string]::IsNullOrWhiteSpace($analysis.replay.checksum)) {
+        throw "Physics replay analysis is missing the replay checksum"
+    }
+    if ($null -eq $analysis.replay.endstate.position -or @($analysis.replay.endstate.position).Count -ne 3) {
+        throw "Physics replay endstate must include a 3D position"
+    }
+    if ($null -eq $analysis.replay.endstate.velocity -or @($analysis.replay.endstate.velocity).Count -ne 3) {
+        throw "Physics replay endstate must include a 3D velocity"
+    }
+
+    $requiredChecks = @(
+        "replay input frame contract declared",
+        "replay snapshot contract declared",
+        "replay frame application api declared",
+        "replay frame application api implemented",
+        "live update routes through replay api",
+        "replay snapshot captures endstate",
+        "replay frame counter reset api implemented",
+        "walking reducer avoids live sprint polling",
+        "noclip reducer avoids live sprint polling",
+        "physics include bridge remains intact"
+    )
+    $checks = @($analysis.checks)
+    foreach ($requiredCheck in $requiredChecks) {
+        $matches = @($checks | Where-Object { $_.name -eq $requiredCheck })
+        if ($matches.Count -ne 1) {
+            throw "Physics replay analysis is missing check '$requiredCheck'"
+        }
+        if (-not $matches[0].passed) {
+            throw "Physics replay check failed: $requiredCheck"
+        }
+    }
+}
+
 function Test-FrontierDisabled {
     Assert-FileExists $FrontierDisabledPath
 
@@ -484,6 +561,7 @@ switch ($Mode) {
     "RenderHealth" { Test-RenderHealth }
     "ShaderInventory" { Test-ShaderInventory }
     "ChunkCollisionLifecycle" { Test-ChunkCollisionLifecycle }
+    "PhysicsReplay" { Test-PhysicsReplay }
     "FrontierDisabled" { Test-FrontierDisabled }
     "All" {
         Test-CodexOnly
@@ -493,6 +571,7 @@ switch ($Mode) {
         Test-RenderHealth
         Test-ShaderInventory
         Test-ChunkCollisionLifecycle
+        Test-PhysicsReplay
         Test-FrontierDisabled
     }
 }
