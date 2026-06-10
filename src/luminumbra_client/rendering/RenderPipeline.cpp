@@ -21,6 +21,7 @@
 #include <cmath>
 #include "luminumbra_common/components/LightingComponents.h"
 #include "RenderSystem.h"
+#include "passes/GBufferPass.h"
 #include "passes/ShadowPass.h"
 #include <stb_image.h>
 
@@ -309,7 +310,8 @@ void RenderPipeline::HierarchicalCuller::Clear() {
 // --- CONSTRUCTOR / DESTRUCTOR ---
 
 RenderPipeline::RenderPipeline()
-    : m_shadow_pass(std::make_unique<ShadowPass>()) {}
+    : m_gbuffer_pass(std::make_unique<GBufferPass>()),
+      m_shadow_pass(std::make_unique<ShadowPass>()) {}
 RenderPipeline::~RenderPipeline() {
     cleanup_gpu_resources();
 }
@@ -327,7 +329,7 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
 
         init_shaders();
         init_lighting_fbo(screen_width, screen_height);
-        init_gbuffer(screen_width, screen_height);
+        m_gbuffer_pass->init_gbuffer(screen_width, screen_height);
         m_shadow_pass->init_shadow_map();
         init_ssao();
         init_screen_quad();
@@ -338,15 +340,7 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         init_gpu_sdf_system();
         init_gpu_pass_timers();
 
-        std::string instanced_vert_path = (m_root_path / "res/shaders/instanced_mesh.vert").string();
-        std::string gbuffer_frag_path = (m_root_path / "res/shaders/g_buffer.frag").string();
-        m_instanced_static_mesh_shader = std::make_unique<Shader>(instanced_vert_path.c_str(), gbuffer_frag_path.c_str());
-        label_gl_object(GL_PROGRAM, m_instanced_static_mesh_shader ? m_instanced_static_mesh_shader->Id() : 0u, "shader.instanced_static_mesh");
-        glGenBuffers(1, &m_instanceMatrixVBO);
-        label_gl_object(GL_BUFFER, m_instanceMatrixVBO, "static_mesh.instance_matrices");
-        glBindBuffer(GL_ARRAY_BUFFER, m_instanceMatrixVBO);
-        glBufferData(GL_ARRAY_BUFFER, 10000 * sizeof(glm::mat4), nullptr, GL_DYNAMIC_DRAW);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        m_gbuffer_pass->init_instanced_static_mesh(m_root_path);
 
         refresh_render_pass_metadata();
         m_started = true;
@@ -452,11 +446,12 @@ RenderPipeline::RuntimeRenderStats RenderPipeline::get_runtime_render_stats() co
     if (m_lighting_fbo.color_texture) estimated_vram_bytes += pixel_count * 8u; // RGBA16F
     if (m_lighting_fbo.opaque_color_texture) estimated_vram_bytes += pixel_count * 8u; // RGBA16F
     if (m_lighting_fbo.depth_texture) estimated_vram_bytes += pixel_count * 4u;
-    if (m_gbuffer.position_texture) estimated_vram_bytes += pixel_count * 6u; // RGB16F
-    if (m_gbuffer.normal_texture) estimated_vram_bytes += pixel_count * 4u;
-    if (m_gbuffer.albedo_texture) estimated_vram_bytes += pixel_count * 4u;
-    if (m_gbuffer.material_texture) estimated_vram_bytes += pixel_count * 4u; // RG16F
-    if (m_gbuffer.depth_texture) estimated_vram_bytes += pixel_count * 4u;
+    const GBuffer& gbuffer = m_gbuffer_pass->gbuffer();
+    if (gbuffer.position_texture) estimated_vram_bytes += pixel_count * 6u; // RGB16F
+    if (gbuffer.normal_texture) estimated_vram_bytes += pixel_count * 4u;
+    if (gbuffer.albedo_texture) estimated_vram_bytes += pixel_count * 4u;
+    if (gbuffer.material_texture) estimated_vram_bytes += pixel_count * 4u; // RG16F
+    if (gbuffer.depth_texture) estimated_vram_bytes += pixel_count * 4u;
     if (m_shadow_pass->shadow_map().depth_texture_array) {
         estimated_vram_bytes += static_cast<size_t>(m_shadow_pass->shadow_map().resolution) *
                                 static_cast<size_t>(m_shadow_pass->shadow_map().resolution) *
@@ -467,7 +462,7 @@ RenderPipeline::RuntimeRenderStats RenderPipeline::get_runtime_render_stats() co
     if (m_ssao.noiseTexture) estimated_vram_bytes += 4u * 4u * 6u;
     if (m_screen_quad_vbo) estimated_vram_bytes += 20u * sizeof(float);
     if (m_skybox_vbo) estimated_vram_bytes += 108u * sizeof(float);
-    if (m_instanceMatrixVBO) estimated_vram_bytes += 10000u * sizeof(glm::mat4);
+    if (m_gbuffer_pass->instance_matrix_vbo()) estimated_vram_bytes += 10000u * sizeof(glm::mat4);
     if (m_terrainTextureArray) estimated_vram_bytes += 2048u * 2048u * 5u * 4u;
     if (m_materialLUT) estimated_vram_bytes += 256u * 4u;
     if (m_water_flat_normal_texture) estimated_vram_bytes += 4u;
@@ -480,14 +475,14 @@ RenderPipeline::RuntimeRenderStats RenderPipeline::get_runtime_render_stats() co
     if (m_gpu_sdf.island_mask_texture) estimated_vram_bytes += 128u * 128u * sizeof(float);
     stats.estimated_vram_bytes = estimated_vram_bytes;
 
-    stats.geometry_shader_ok = m_geometry_shader && m_geometry_shader->IsValid();
+    stats.geometry_shader_ok = m_gbuffer_pass->geometry_shader() && m_gbuffer_pass->geometry_shader()->IsValid();
     stats.lighting_shader_ok = m_lighting_shader && m_lighting_shader->IsValid();
     stats.skybox_shader_ok = m_skybox_shader && m_skybox_shader->IsValid();
     stats.shadow_shader_ok = m_shadow_pass->shader() && m_shadow_pass->shader()->IsValid();
     stats.ssao_shader_ok = m_ssao.ssaoShader && m_ssao.ssaoShader->IsValid();
     stats.ssao_blur_shader_ok = m_ssao.blurShader && m_ssao.blurShader->IsValid();
     stats.water_shader_ok = m_water_shader && m_water_shader->IsValid();
-    stats.instanced_static_mesh_shader_ok = m_instanced_static_mesh_shader && m_instanced_static_mesh_shader->IsValid();
+    stats.instanced_static_mesh_shader_ok = m_gbuffer_pass->instanced_static_mesh_shader() && m_gbuffer_pass->instanced_static_mesh_shader()->IsValid();
     stats.gpu_sdf_initialized = m_gpu_sdf.initialized;
     const GpuSdfRuntimeToggleState gpu_sdf_runtime = get_gpu_sdf_runtime_toggle_state();
     stats.gpu_sdf_compile_time_enabled = gpu_sdf_runtime.compile_time_enabled;
@@ -515,14 +510,14 @@ std::vector<RenderPipeline::ShaderHealthEntry> RenderPipeline::get_shader_health
         health.push_back(std::move(entry));
     };
 
-    add_shader("geometry", m_geometry_shader);
+    add_shader("geometry", m_gbuffer_pass->geometry_shader());
     add_shader("lighting", m_lighting_shader);
     add_shader("skybox", m_skybox_shader);
     add_shader("shadow", m_shadow_pass->shader());
     add_shader("ssao", m_ssao.ssaoShader);
     add_shader("ssao_blur", m_ssao.blurShader);
     add_shader("water", m_water_shader);
-    add_shader("instanced_static_mesh", m_instanced_static_mesh_shader);
+    add_shader("instanced_static_mesh", m_gbuffer_pass->instanced_static_mesh_shader());
     health.push_back({"gpu_sdf_compute", m_gpu_sdf.compute_program != 0, m_gpu_sdf.compute_program != 0 ? "" : "not initialized"});
     return health;
 }
@@ -532,18 +527,18 @@ RenderPipeline::RenderResourceRegistryStats RenderPipeline::get_resource_registr
     auto count = [](GLuint id) -> size_t { return id != 0 ? 1u : 0u; };
 
     stats.framebuffers += count(m_lighting_fbo.fbo_id);
-    stats.framebuffers += count(m_gbuffer.fbo_id);
+    stats.framebuffers += count(m_gbuffer_pass->gbuffer().fbo_id);
     stats.framebuffers += count(m_shadow_pass->shadow_map().fbo_id);
     stats.framebuffers += count(m_ssao.fbo);
     stats.framebuffers += count(m_ssao.blurFBO);
 
     stats.textures += count(m_lighting_fbo.color_texture);
     stats.textures += count(m_lighting_fbo.opaque_color_texture);
-    stats.textures += count(m_gbuffer.position_texture);
-    stats.textures += count(m_gbuffer.normal_texture);
-    stats.textures += count(m_gbuffer.albedo_texture);
-    stats.textures += count(m_gbuffer.material_texture);
-    stats.textures += count(m_gbuffer.depth_texture);
+    stats.textures += count(m_gbuffer_pass->gbuffer().position_texture);
+    stats.textures += count(m_gbuffer_pass->gbuffer().normal_texture);
+    stats.textures += count(m_gbuffer_pass->gbuffer().albedo_texture);
+    stats.textures += count(m_gbuffer_pass->gbuffer().material_texture);
+    stats.textures += count(m_gbuffer_pass->gbuffer().depth_texture);
     stats.textures += count(m_shadow_pass->shadow_map().depth_texture_array);
     stats.textures += count(m_ssao.ssaoColorBuffer);
     stats.textures += count(m_ssao.ssaoColorBufferBlur);
@@ -561,7 +556,7 @@ RenderPipeline::RenderResourceRegistryStats RenderPipeline::get_resource_registr
     stats.renderbuffers += count(m_lighting_fbo.depth_texture);
     stats.buffers += count(m_screen_quad_vbo);
     stats.buffers += count(m_skybox_vbo);
-    stats.buffers += count(m_instanceMatrixVBO);
+    stats.buffers += count(m_gbuffer_pass->instance_matrix_vbo());
     stats.buffers += count(m_gpu_sdf.sdf_buffer);
     stats.vertex_arrays += count(m_screen_quad_vao);
     stats.vertex_arrays += count(m_skybox_vao);
@@ -1043,7 +1038,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
 
     // 2. GEOMETRY / G-BUFFER PASS
     begin_gpu_pass_timer(GpuTimerPass::GBuffer);
-    gbuffer_pass(registry, renderable_chunk_snapshots, camera, frustum_planes);
+    m_gbuffer_pass->execute(*this, registry, renderable_chunk_snapshots, camera, frustum_planes);
     end_gpu_pass_timer(GpuTimerPass::GBuffer);
     glBindVertexArray(0);  // Unbind after gbuffer pass
     glDisable(GL_CULL_FACE);
@@ -1067,7 +1062,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
 
     // 5. SNAPSHOT THE OPAQUE SCENE, THEN COPY DEPTH TO LIGHTING FBO FOR WATER DEPTH TEST
     copy_lighting_color_to_opaque_texture();
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, m_gbuffer.fbo_id);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, m_gbuffer_pass->gbuffer().fbo_id);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_lighting_fbo.fbo_id);
     glBlitFramebuffer(0, 0, m_screen_width, m_screen_height, 0, 0, m_screen_width, m_screen_height, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
     
@@ -1100,19 +1095,6 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     finish_gpu_pass_timer_frame();
     refresh_render_pass_metadata();
-}
-
-void RenderPipeline::gbuffer_pass(entt::registry& registry, const std::vector<ChunkMeshSnapshot>& renderable_chunks, const Camera& camera, const glm::vec4 frustum_planes[6]) {
-    glBindFramebuffer(GL_FRAMEBUFFER, m_gbuffer.fbo_id);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    
-    // Pass 1: Render all the terrain chunks
-    geometry_pass_chunks(renderable_chunks, camera, frustum_planes);
-
-    // Pass 2: Render all instanced static meshes
-    geometry_pass_static_meshes(registry, camera, frustum_planes);
-
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 void RenderPipeline::init_lighting_fbo(u32 width, u32 height) {
@@ -1211,7 +1193,7 @@ void RenderPipeline::water_pass(const std::vector<ChunkMeshSnapshot>& renderable
     m_water_shader->setInt("u_opaque_scene_color", 0);
 
     glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, m_gbuffer.depth_texture);
+    glBindTexture(GL_TEXTURE_2D, m_gbuffer_pass->gbuffer().depth_texture);
     m_water_shader->setInt("u_opaque_depth", 1);
 
     glActiveTexture(GL_TEXTURE2);
@@ -1264,8 +1246,8 @@ void RenderPipeline::on_resize(u32 new_width, u32 new_height) {
     m_screen_height = new_height;
     destroy_lighting_fbo();
     init_lighting_fbo(new_width, new_height);
-    destroy_gbuffer();
-    init_gbuffer(new_width, new_height);
+    m_gbuffer_pass->destroy_gbuffer();
+    m_gbuffer_pass->init_gbuffer(new_width, new_height);
     destroy_ssao();
     init_ssao();
     m_frustumCache.valid = false;
@@ -1297,105 +1279,17 @@ void RenderPipeline::clear_all_chunk_data() {
 
 // --- RENDER PASSES ---
 
-void RenderPipeline::geometry_pass_chunks(const std::vector<RenderPipeline::ChunkMeshSnapshot>& renderable_chunks, const Camera& camera, const glm::vec4 frustum_planes[6]) {
-    m_geometry_shader->use();
-    glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)m_screen_width / (float)m_screen_height, camera.GetNearPlane(), camera.GetFarPlane());
-    glm::mat4 view = camera.GetViewMatrix();
-
-    m_geometry_shader->setMat4("projection", projection);
-    m_geometry_shader->setMat4("view", view);
-    
-    // Bind material LUT for G-Buffer pass
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, m_materialLUT);
-    m_geometry_shader->setInt("u_materialLUT", 0);
-    
-    // Perform hierarchical frustum culling
-    std::vector<const ChunkCullEntry*> visible_chunks;
-    visible_chunks.reserve(renderable_chunks.size());
-    m_hierarchicalCuller.CullHierarchical(frustum_planes, visible_chunks);
-    m_last_render_pass_stats.terrain_visible_chunks = visible_chunks.size();
-
-    // Render visible chunks
-    for (const auto* chunk : visible_chunks) {
-        if (m_chunk_render_data.find(chunk->id) == m_chunk_render_data.end()) continue;
-
-        const auto& render_data = m_chunk_render_data.at(chunk->id);
-        if (render_data.element_count == 0) continue;
-        
-        glm::ivec3 cc = chunk->coords;
-        glm::vec3 min_aabb(cc.x * CHUNK_SIZE_X, cc.y * CHUNK_SIZE_Y, cc.z * CHUNK_SIZE_Z);
-
-        glm::mat4 model = glm::translate(glm::mat4(1.0f), min_aabb);
-        glm::mat3 normalMatrix = glm::transpose(glm::inverse(glm::mat3(view * model)));
-        m_geometry_shader->setMat4("model", model);
-        m_geometry_shader->setMat3("normalMatrix", normalMatrix);
-
-        glBindVertexArray(render_data.vao_id);
-        glDrawElements(GL_TRIANGLES, render_data.element_count, GL_UNSIGNED_INT, 0);
-        m_last_render_pass_stats.terrain_draws++;
-        m_last_render_pass_stats.terrain_indices_drawn += render_data.element_count;
-    }
-    
-    glBindVertexArray(0);
-}
-
-void RenderPipeline::geometry_pass_static_meshes(entt::registry& registry, const Camera& camera, const glm::vec4 frustum_planes[6]) {
-    m_instanced_static_mesh_shader->use();
-    m_instanced_static_mesh_shader->setMat4("projection", glm::perspective(glm::radians(camera.Zoom), (float)m_screen_width / (float)m_screen_height, camera.GetNearPlane(), camera.GetFarPlane()));
-    m_instanced_static_mesh_shader->setMat4("view", camera.GetViewMatrix());
-    auto view = registry.view<const Components::TransformComponent, const Components::StaticMeshComponent>();
-    std::map<std::string, std::vector<glm::mat4>> visible_instance_groups;
-    for (auto entity : view) {
-        auto const& transform = view.get<const Components::TransformComponent>(entity);
-        auto const& mesh_info = view.get<const Components::StaticMeshComponent>(entity);
-        if (m_meshCache.find(mesh_info.meshPath) == m_meshCache.end()) {
-            std::string full_mesh_path = (m_root_path / mesh_info.meshPath).string();
-            m_meshCache[mesh_info.meshPath] = MeshLoader::Load(full_mesh_path);
-        }
-        Mesh* mesh = m_meshCache[mesh_info.meshPath].get();
-        if (!mesh) continue;
-        glm::vec3 world_sphere_center = transform.position + glm::vec3(mesh->boundingSphere);
-        float radius = mesh->boundingSphere.w * glm::max(glm::max(transform.scale.x, transform.scale.y), transform.scale.z);
-        bool culled = false;
-        for (int i = 0; i < 6; i++) {
-            if (glm::dot(glm::vec4(world_sphere_center, 1.0f), frustum_planes[i]) < -radius) {
-                culled = true;
-                break;
-            }
-        }
-        if (!culled) {
-            glm::mat4 model = glm::translate(glm::mat4(1.0f), transform.position);
-            model = glm::scale(model, transform.scale);
-            visible_instance_groups[mesh_info.meshPath].push_back(model);
-        }
-    }
-    for (const auto& [meshPath, matrices] : visible_instance_groups) {
-        Mesh* mesh = m_meshCache[meshPath].get();
-        if (!mesh || matrices.empty()) continue;
-        glBindBuffer(GL_ARRAY_BUFFER, m_instanceMatrixVBO);
-        glBufferSubData(GL_ARRAY_BUFFER, 0, matrices.size() * sizeof(glm::mat4), matrices.data());
-        glBindVertexArray(mesh->vao);
-        for (int i = 0; i < 4; i++) {
-            glEnableVertexAttribArray(3 + i);
-            glVertexAttribPointer(3 + i, 4, GL_FLOAT, GL_FALSE, sizeof(glm::mat4), (void*)(sizeof(glm::vec4) * i));
-            glVertexAttribDivisor(3 + i, 1);
-        }
-        glDrawElementsInstanced(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, 0, matrices.size());
-        glBindVertexArray(0);
-    }
-}
-
 void RenderPipeline::lighting_pass(const Camera& camera) {
     glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_fbo.fbo_id);
     glViewport(0, 0, m_screen_width, m_screen_height);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     m_lighting_shader->use();
-    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m_gbuffer.position_texture);    // View-space position
-    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m_gbuffer.normal_texture);      // Octahedral normal + material
-    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_gbuffer.albedo_texture);      // Albedo + roughness
-    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, m_gbuffer.material_texture);    // Metallic + AO
-    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, m_gbuffer.depth_texture);
+    const GBuffer& gbuffer = m_gbuffer_pass->gbuffer();
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, gbuffer.position_texture);    // View-space position
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, gbuffer.normal_texture);      // Octahedral normal + material
+    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, gbuffer.albedo_texture);      // Albedo + roughness
+    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, gbuffer.material_texture);    // Metallic + AO
+    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, gbuffer.depth_texture);
     glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D_ARRAY, m_shadow_pass->shadow_map().depth_texture_array);
     glActiveTexture(GL_TEXTURE6); glBindTexture(GL_TEXTURE_2D, m_ssao.ssaoColorBufferBlur);
     glActiveTexture(GL_TEXTURE7); glBindTexture(GL_TEXTURE_2D_ARRAY, m_terrainTextureArray);
@@ -1469,8 +1363,8 @@ void RenderPipeline::ssao_pass(const Camera& camera) {
     glBindFramebuffer(GL_FRAMEBUFFER, m_ssao.fbo);
     glClear(GL_COLOR_BUFFER_BIT);
     m_ssao.ssaoShader->use();
-    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m_gbuffer.position_texture);
-    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m_gbuffer.normal_texture);
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m_gbuffer_pass->gbuffer().position_texture);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m_gbuffer_pass->gbuffer().normal_texture);
     glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_ssao.noiseTexture);
     m_ssao.ssaoShader->setInt("gPosition", 0);
     m_ssao.ssaoShader->setInt("gNormalMaterial", 1);
@@ -1504,80 +1398,18 @@ void RenderPipeline::ssao_blur_pass() {
 // --- INITIALIZATION ---
 
 void RenderPipeline::init_shaders() {
-    m_geometry_shader = std::make_unique<Shader>((m_root_path / "res/shaders/g_buffer.vert").string().c_str(), (m_root_path / "res/shaders/g_buffer.frag").string().c_str());
+    m_gbuffer_pass->init_geometry_shader(m_root_path);
     m_lighting_shader = std::make_unique<Shader>((m_root_path / "res/shaders/lighting_pass.vert").string().c_str(), (m_root_path / "res/shaders/lighting_pass.frag").string().c_str());
     m_skybox_shader = std::make_unique<Shader>((m_root_path / "res/shaders/skybox.vert").string().c_str(), (m_root_path / "res/shaders/skybox.frag").string().c_str());
     m_shadow_pass->init_shader(m_root_path);
     m_ssao.ssaoShader = std::make_unique<Shader>((m_root_path / "res/shaders/ssao.vert").string().c_str(), (m_root_path / "res/shaders/ssao.frag").string().c_str());
     m_ssao.blurShader = std::make_unique<Shader>((m_root_path / "res/shaders/ssao.vert").string().c_str(), (m_root_path / "res/shaders/ssao_blur.frag").string().c_str());
     m_water_shader = std::make_unique<Shader>((m_root_path / "res/shaders/water.vert").string().c_str(), (m_root_path / "res/shaders/water.frag").string().c_str());
-    label_gl_object(GL_PROGRAM, m_geometry_shader ? m_geometry_shader->Id() : 0u, "shader.geometry");
     label_gl_object(GL_PROGRAM, m_lighting_shader ? m_lighting_shader->Id() : 0u, "shader.lighting");
     label_gl_object(GL_PROGRAM, m_skybox_shader ? m_skybox_shader->Id() : 0u, "shader.skybox");
     label_gl_object(GL_PROGRAM, m_ssao.ssaoShader ? m_ssao.ssaoShader->Id() : 0u, "shader.ssao");
     label_gl_object(GL_PROGRAM, m_ssao.blurShader ? m_ssao.blurShader->Id() : 0u, "shader.ssao_blur");
     label_gl_object(GL_PROGRAM, m_water_shader ? m_water_shader->Id() : 0u, "shader.water");
-}
-
-void RenderPipeline::init_gbuffer(u32 width, u32 height) {
-    glGenFramebuffers(1, &m_gbuffer.fbo_id);
-    label_gl_object(GL_FRAMEBUFFER, m_gbuffer.fbo_id, "gbuffer.fbo");
-    glBindFramebuffer(GL_FRAMEBUFFER, m_gbuffer.fbo_id);
-    
-    // Position: full view-space position for deferred lighting, SSAO, and material projection.
-    glGenTextures(1, &m_gbuffer.position_texture);
-    label_gl_object(GL_TEXTURE, m_gbuffer.position_texture, "gbuffer.position");
-    glBindTexture(GL_TEXTURE_2D, m_gbuffer.position_texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, width, height, 0, GL_RGB, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_gbuffer.position_texture, 0);
-    
-    // Normal/Material: RGBA8 (4 bytes/pixel -> octahedral normal + material ID)
-    glGenTextures(1, &m_gbuffer.normal_texture);
-    label_gl_object(GL_TEXTURE, m_gbuffer.normal_texture, "gbuffer.normal_material");
-    glBindTexture(GL_TEXTURE_2D, m_gbuffer.normal_texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, m_gbuffer.normal_texture, 0);
-    
-    // Albedo/Roughness: RGBA8 (4 bytes/pixel -> RGB albedo + roughness)
-    glGenTextures(1, &m_gbuffer.albedo_texture);
-    label_gl_object(GL_TEXTURE, m_gbuffer.albedo_texture, "gbuffer.albedo_roughness");
-    glBindTexture(GL_TEXTURE_2D, m_gbuffer.albedo_texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, m_gbuffer.albedo_texture, 0);
-    
-    // Metallic/AO: RG16F (4 bytes/pixel -> metallic + ambient occlusion)
-    glGenTextures(1, &m_gbuffer.material_texture);
-    label_gl_object(GL_TEXTURE, m_gbuffer.material_texture, "gbuffer.metallic_ao");
-    glBindTexture(GL_TEXTURE_2D, m_gbuffer.material_texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG16F, width, height, 0, GL_RG, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT3, GL_TEXTURE_2D, m_gbuffer.material_texture, 0);
-    
-    const GLenum attachments[4] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3 };
-    glDrawBuffers(4, attachments);
-    
-    // Depth texture (unchanged)
-    glGenTextures(1, &m_gbuffer.depth_texture);
-    label_gl_object(GL_TEXTURE, m_gbuffer.depth_texture, "gbuffer.depth");
-    glBindTexture(GL_TEXTURE_2D, m_gbuffer.depth_texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-    float borderColor[] = { 1.0f, 1.0f, 1.0f, 1.0f };
-    glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_gbuffer.depth_texture, 0);
-
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) LUMINUMBRA_CORE_ERROR("G-Buffer FBO not complete!");
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 void RenderPipeline::init_ssao() {
@@ -1659,15 +1491,6 @@ void RenderPipeline::init_skybox() {
 
 // --- CLEANUP ---
 
-void RenderPipeline::destroy_gbuffer() {
-    if (m_gbuffer.fbo_id) { glDeleteFramebuffers(1, &m_gbuffer.fbo_id); m_gbuffer.fbo_id = 0; }
-    if (m_gbuffer.position_texture) { glDeleteTextures(1, &m_gbuffer.position_texture); m_gbuffer.position_texture = 0; }
-    if (m_gbuffer.normal_texture) { glDeleteTextures(1, &m_gbuffer.normal_texture); m_gbuffer.normal_texture = 0; }
-    if (m_gbuffer.albedo_texture) { glDeleteTextures(1, &m_gbuffer.albedo_texture); m_gbuffer.albedo_texture = 0; }
-    if (m_gbuffer.material_texture) { glDeleteTextures(1, &m_gbuffer.material_texture); m_gbuffer.material_texture = 0; }
-    if (m_gbuffer.depth_texture) { glDeleteTextures(1, &m_gbuffer.depth_texture); m_gbuffer.depth_texture = 0; }
-}
-
 void RenderPipeline::destroy_ssao() {
     if (m_ssao.fbo) { glDeleteFramebuffers(1, &m_ssao.fbo); m_ssao.fbo = 0; }
     if (m_ssao.blurFBO) { glDeleteFramebuffers(1, &m_ssao.blurFBO); m_ssao.blurFBO = 0; }
@@ -1704,27 +1527,26 @@ void RenderPipeline::cleanup_gpu_resources() {
     }
     m_free_water_render_slots.clear();
     destroy_lighting_fbo();
-    destroy_gbuffer();
+    m_gbuffer_pass->destroy_gbuffer();
     m_shadow_pass->destroy_shadow_map();
     destroy_ssao();
     if (m_screen_quad_vao) { glDeleteVertexArrays(1, &m_screen_quad_vao); m_screen_quad_vao = 0; }
     if (m_screen_quad_vbo) { glDeleteBuffers(1, &m_screen_quad_vbo); m_screen_quad_vbo = 0; }
     if (m_skybox_vao) { glDeleteVertexArrays(1, &m_skybox_vao); m_skybox_vao = 0; }
     if (m_skybox_vbo) { glDeleteBuffers(1, &m_skybox_vbo); m_skybox_vbo = 0; }
-    if (m_instanceMatrixVBO) { glDeleteBuffers(1, &m_instanceMatrixVBO); m_instanceMatrixVBO = 0; }
+    m_gbuffer_pass->destroy_instanced_static_mesh();
     if (m_terrainTextureArray) { glDeleteTextures(1, &m_terrainTextureArray); m_terrainTextureArray = 0; }
     if (m_materialLUT) { glDeleteTextures(1, &m_materialLUT); m_materialLUT = 0; }
     destroy_water_fallback_textures();
     cleanup_gpu_sdf_system();
     destroy_gpu_pass_timers();
-    m_geometry_shader.reset();
+    m_gbuffer_pass->reset_shaders();
     m_lighting_shader.reset();
     m_skybox_shader.reset();
     m_shadow_pass->reset_shader();
     m_ssao.ssaoShader.reset();
     m_ssao.blurShader.reset();
     m_water_shader.reset();
-    m_instanced_static_mesh_shader.reset();
     m_last_render_pass_metadata.clear();
     m_terrain_texture_fallback_layers = 0;
     m_started = false;

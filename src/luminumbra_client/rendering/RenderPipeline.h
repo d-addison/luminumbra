@@ -18,7 +18,7 @@
 // Forward declarations
 namespace Luminumbra { class Chunk; }
 namespace Luminumbra::Systems { class SHIELD_WorldSystem; struct TerrainGenParams; }
-namespace Luminumbra::Rendering { class Shader; class Camera; class ShadowPass; }
+namespace Luminumbra::Rendering { class Shader; class Camera; class ShadowPass; class GBufferPass; }
 
 namespace Luminumbra::Rendering {
 
@@ -273,6 +273,7 @@ private:
     // (FBOs/textures/shaders); the pipeline keeps orchestration order, shared
     // state, stats collection, and GPU timer issue/collect calls.
     friend class ShadowPass;
+    friend class GBufferPass;
 
     struct ChunkMeshSnapshot {
         ChunkID id = 0;
@@ -315,8 +316,6 @@ private:
     void upload_water_mesh(const ChunkMeshSnapshot& chunk, const ChunkMeshPayload& payload);
     void unload_water_resources(ChunkID chunk_id);
 
-    void init_gbuffer(u32 width, u32 height);
-    void destroy_gbuffer();
     void init_shaders();
     void init_skybox();
     void init_screen_quad();
@@ -368,7 +367,6 @@ private:
     void destroy_lighting_fbo();
     void copy_lighting_color_to_opaque_texture();
     void refresh_render_pass_metadata();
-    void gbuffer_pass(entt::registry& registry, const std::vector<ChunkMeshSnapshot>& renderable_chunks, const Camera& camera, const glm::vec4 frustum_planes[6]);
     void water_pass(const std::vector<ChunkMeshSnapshot>& renderable_chunks, const Camera& camera);
     FrameBufferObject m_lighting_fbo;
     
@@ -382,7 +380,6 @@ private:
     u32 m_screen_height = 0;
     std::filesystem::path m_root_path;
 
-    std::unique_ptr<Shader> m_geometry_shader;
     std::unique_ptr<Shader> m_lighting_shader;
     std::unique_ptr<Shader> m_skybox_shader;
     std::unique_ptr<Shader> m_water_shader;
@@ -390,7 +387,7 @@ private:
     DirectionalLight m_sun;
     glm::vec3 m_moonDirection;
     glm::vec3 m_skyAmbientColor;
-    GBuffer m_gbuffer;
+    std::unique_ptr<GBufferPass> m_gbuffer_pass;
     std::unique_ptr<ShadowPass> m_shadow_pass;
     SSAOData m_ssao;
 
@@ -406,14 +403,6 @@ private:
     u32 m_screen_quad_vbo = 0;
     u32 m_skybox_vao = 0;
     u32 m_skybox_vbo = 0;
-
-    void geometry_pass_chunks(const std::vector<ChunkMeshSnapshot>& renderable_chunks, const Camera& camera, const glm::vec4 frustum_planes[6]);
-    void geometry_pass_static_meshes(entt::registry& registry, const Camera& camera, const glm::vec4 frustum_planes[6]);
-    
-    std::unique_ptr<Shader> m_instanced_static_mesh_shader;
-    
-    std::map<std::string, std::unique_ptr<Mesh>> m_meshCache;
-    GLuint m_instanceMatrixVBO = 0;
 
     u32 m_terrainTextureArray = 0;
     u32 m_materialLUT = 0;
