@@ -155,6 +155,12 @@ struct MaterialPixelStats {
     std::uint64_t rim_roi_pixels = 0;
     std::uint64_t stone_pixels = 0;
     double stone_ratio = 0.0;
+    // Soil is also measured in the rim sub-ROI: the depth 1-5 band surfaces
+    // along the same cliff rims (5x the pixel density of the main ROI). Its
+    // warm hue (r-b >= 13) keeps it separable from both the grey fallback and
+    // the stone bucket.
+    std::uint64_t soil_pixels = 0;
+    double soil_ratio = 0.0;
 };
 
 ScreenshotPixelStats AnalyzeScreenshotPixels(const std::vector<unsigned char>& pixels, int width, int height);
