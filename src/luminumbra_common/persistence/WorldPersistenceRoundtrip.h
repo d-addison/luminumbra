@@ -83,6 +83,9 @@ bool LoadWorldStreamingStateSnapshotJson(
 bool ValidateWorldStreamingChunkFormatJson(
     const std::string& chunk_json,
     std::vector<std::string>& errors);
+// Deterministic world hash over the canonical snapshot bytes (same
+// fnv1a_64_stable_json machinery the WorldHash gate artifact records).
+std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state);
 
 WorldPersistenceRoundtripAnalysis BuildWorldPersistenceRoundtripAnalysis(const std::string& build_preset);
 std::string SerializeWorldPersistenceRoundtripJson(const WorldPersistenceRoundtripAnalysis& analysis);

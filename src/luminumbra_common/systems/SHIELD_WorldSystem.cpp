@@ -1215,10 +1215,13 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk) const {
            }
        }
        
+       // Generation produces the canonical voxel data; only post-generation
+       // edits count as unsaved dirty state.
+       chunk.clear_voxel_data_dirty();
        chunk.set_state(ChunkState::Idle);
        return;
    }
-   
+
    // Fallback to CPU generation
    chunk.sdf_data.resize(padded_volume);
 
@@ -1291,6 +1294,10 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk) const {
            }
        }
    }
+
+   // Generation produces the canonical voxel data; only post-generation edits
+   // count as unsaved dirty state.
+   chunk.clear_voxel_data_dirty();
 }
 
 JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<IVec3>& chunks_to_generate) {

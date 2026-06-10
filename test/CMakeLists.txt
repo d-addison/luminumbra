@@ -259,6 +259,7 @@ add_executable(frontier_gates_test
     ai/instinct_planner_gate_test.cpp
     scripting/lua_api_manifest_gate_test.cpp
     aetheric/aetheric_field_diffusion_gate_test.cpp
+    persistence/world_save_service_test.cpp
 )
 
 target_compile_definitions(frontier_gates_test PRIVATE

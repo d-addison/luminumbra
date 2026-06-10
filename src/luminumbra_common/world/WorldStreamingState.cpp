@@ -1,5 +1,6 @@
 #include "WorldStreamingState.h"
 
+#include <algorithm>
 #include <mutex>
 #include <utility>
 
@@ -85,6 +86,22 @@ std::vector<WorldStreamingState::ChunkPtr> WorldStreamingState::snapshot_chunks(
     }
 
     return chunks;
+}
+
+std::vector<ChunkID> WorldStreamingState::dirty_chunk_ids() const {
+    std::vector<ChunkID> ids;
+
+    {
+        std::shared_lock<std::shared_mutex> lock(m_chunks_mutex);
+        for (const auto& [id, chunk] : m_chunks) {
+            if (chunk && chunk->is_voxel_data_dirty()) {
+                ids.push_back(id);
+            }
+        }
+    }
+
+    std::sort(ids.begin(), ids.end());
+    return ids;
 }
 
 std::vector<WorldStreamingState::ChunkPtr> WorldStreamingState::snapshot_chunks_with_state(ChunkState state) const {

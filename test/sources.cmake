@@ -19,6 +19,7 @@ set(AI_TEST_SOURCES
 
 set(PERSISTENCE_TEST_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/persistence/world_persistence_roundtrip_gate_test.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/persistence/world_save_service_test.cpp
 )
 
 set(NETWORK_TEST_SOURCES
