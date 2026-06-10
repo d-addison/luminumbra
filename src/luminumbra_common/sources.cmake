@@ -19,6 +19,9 @@ set(COMMON_SOURCES
     # Net
     ${CMAKE_CURRENT_LIST_DIR}/net/NetworkManager.cpp
 
+    # Persistence
+    ${CMAKE_CURRENT_LIST_DIR}/persistence/WorldPersistenceRoundtrip.cpp
+
     # Scripting
     ${CMAKE_CURRENT_LIST_DIR}/scripting/LuaApiManifest.cpp
     ${CMAKE_CURRENT_LIST_DIR}/scripting/LuaState.cpp
