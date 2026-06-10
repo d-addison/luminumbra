@@ -315,6 +315,7 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         glBufferData(GL_ARRAY_BUFFER, 10000 * sizeof(glm::mat4), nullptr, GL_DYNAMIC_DRAW);
         glBindBuffer(GL_ARRAY_BUFFER, 0);
 
+        refresh_render_pass_metadata();
         m_started = true;
         LUMINUMBRA_CORE_INFO("Render Pipeline Initialized.");
         return true;
@@ -332,15 +333,39 @@ void RenderPipeline::shutdown() {
     cleanup_gpu_resources();
 }
 
+void RenderPipeline::set_gpu_sdf_runtime_enabled(bool enabled) {
+    m_gpu_sdf.runtime_requested = enabled;
+    if (!enabled) {
+        m_gpu_sdf.callback_registered = false;
+    }
+}
+
+RenderPipeline::GpuSdfRuntimeToggleState RenderPipeline::get_gpu_sdf_runtime_toggle_state() const {
+    GpuSdfRuntimeToggleState state;
+    state.compile_time_enabled = kEnableExperimentalGpuSdfIntegration;
+    state.runtime_requested = m_gpu_sdf.runtime_requested;
+    state.runtime_allowed = kEnableExperimentalGpuSdfIntegration && m_gpu_sdf.runtime_requested && m_gpu_sdf.initialized;
+    state.callback_registered = m_gpu_sdf.callback_registered;
+    state.cpu_fallback_active = !m_gpu_sdf.callback_registered;
+    return state;
+}
+
 void RenderPipeline::SetupGPUSDFIntegration(Systems::SHIELD_WorldSystem& world_system) {
-    if (!m_gpu_sdf.initialized) {
-        LUMINUMBRA_CORE_WARN("GPU SDF system not initialized, cannot set up integration");
+    if (!kEnableExperimentalGpuSdfIntegration || !m_gpu_sdf.runtime_requested) {
+        world_system.SetGPUSDFCallback({});
+        m_gpu_sdf.callback_registered = false;
+        if (m_gpu_sdf.runtime_requested) {
+            LUMINUMBRA_CORE_WARN("GPU SDF runtime opt-in requested, but compile-time parity gate is closed; using authoritative CPU worldgen path");
+        } else {
+            LUMINUMBRA_CORE_WARN("GPU SDF integration disabled; using authoritative CPU worldgen path until GPU/CPU parity is implemented; pass --enable-gpu-sdf-runtime only after parity gate approval");
+        }
         return;
     }
 
-    if (!kEnableExperimentalGpuSdfIntegration) {
+    if (!m_gpu_sdf.initialized) {
         world_system.SetGPUSDFCallback({});
-        LUMINUMBRA_CORE_WARN("GPU SDF integration disabled; using authoritative CPU worldgen path until GPU/CPU parity is implemented");
+        m_gpu_sdf.callback_registered = false;
+        LUMINUMBRA_CORE_WARN("GPU SDF system not initialized, cannot set up integration");
         return;
     }
     
@@ -350,6 +375,7 @@ void RenderPipeline::SetupGPUSDFIntegration(Systems::SHIELD_WorldSystem& world_s
             return this->generate_chunk_sdf_gpu(chunk_coords, params, seed, out_sdf);
         }
     );
+    m_gpu_sdf.callback_registered = true;
     
     LUMINUMBRA_CORE_INFO("GPU SDF integration with world system established");
 }
@@ -430,6 +456,12 @@ RenderPipeline::RuntimeRenderStats RenderPipeline::get_runtime_render_stats() co
     stats.water_shader_ok = m_water_shader && m_water_shader->IsValid();
     stats.instanced_static_mesh_shader_ok = m_instanced_static_mesh_shader && m_instanced_static_mesh_shader->IsValid();
     stats.gpu_sdf_initialized = m_gpu_sdf.initialized;
+    const GpuSdfRuntimeToggleState gpu_sdf_runtime = get_gpu_sdf_runtime_toggle_state();
+    stats.gpu_sdf_compile_time_enabled = gpu_sdf_runtime.compile_time_enabled;
+    stats.gpu_sdf_runtime_requested = gpu_sdf_runtime.runtime_requested;
+    stats.gpu_sdf_runtime_allowed = gpu_sdf_runtime.runtime_allowed;
+    stats.gpu_sdf_callback_registered = gpu_sdf_runtime.callback_registered;
+    stats.gpu_sdf_cpu_fallback_active = gpu_sdf_runtime.cpu_fallback_active;
     stats.terrain_texture_array_ok = m_terrainTextureArray != 0;
     stats.material_lut_ok = m_materialLUT != 0;
     stats.terrain_texture_fallback_layers = m_terrain_texture_fallback_layers;
@@ -539,6 +571,95 @@ RenderPipeline::RenderResourceRegistryStats RenderPipeline::get_resource_registr
         stats.buffers + stats.vertex_arrays + stats.shader_programs + stats.terrain_slots + stats.water_slots;
     stats.empty_after_shutdown = !m_started && total_resources == 0u;
     return stats;
+}
+
+RenderPipeline::RenderHealthSnapshot RenderPipeline::get_render_health_snapshot(bool drain_gl_errors) const {
+    RenderHealthSnapshot snapshot;
+    snapshot.runtime = get_runtime_render_stats();
+    snapshot.resources = get_resource_registry_stats();
+    snapshot.shaders = get_shader_health();
+    snapshot.passes = m_last_render_pass_metadata;
+    snapshot.started = m_started;
+
+    auto fail = [&snapshot](std::string message) {
+        snapshot.failures.push_back(std::move(message));
+    };
+
+    if (drain_gl_errors) {
+        constexpr size_t kMaxDrainedGlErrors = 256;
+        for (size_t drained = 0; drained < kMaxDrainedGlErrors; ++drained) {
+            const GLenum error = glGetError();
+            if (error == GL_NO_ERROR) {
+                break;
+            }
+            ++snapshot.gl_debug_errors;
+        }
+        if (snapshot.gl_debug_errors == kMaxDrainedGlErrors) {
+            fail("GL error drain reached the safety limit");
+        }
+    }
+
+    if (snapshot.gl_debug_errors != 0u) {
+        fail("GL debug error count is non-zero");
+    }
+
+    if (m_started) {
+        if (m_screen_width == 0u || m_screen_height == 0u) {
+            fail("render target dimensions are not initialized");
+        }
+        if (!snapshot.runtime.terrain_texture_array_ok) {
+            fail("terrain texture array is not initialized");
+        }
+        if (!snapshot.runtime.material_lut_ok) {
+            fail("material LUT is not initialized");
+        }
+        if (snapshot.runtime.terrain_texture_fallback_layers != 0u) {
+            fail("terrain texture array used fallback layers");
+        }
+
+        for (const ShaderHealthEntry& shader : snapshot.shaders) {
+            if (!shader.ok) {
+                fail("shader health failed: " + shader.name);
+            }
+        }
+
+        const std::array<const char*, 8> required_passes = {
+            "shadow",
+            "gbuffer",
+            "ssao",
+            "ssao_blur",
+            "lighting",
+            "water",
+            "skybox",
+            "final_blit",
+        };
+        for (const char* required_pass : required_passes) {
+            const bool found = std::any_of(
+                snapshot.passes.begin(),
+                snapshot.passes.end(),
+                [required_pass](const RenderPassMetadata& pass) {
+                    return pass.name == required_pass;
+                });
+            if (!found) {
+                fail(std::string("missing render pass metadata: ") + required_pass);
+            }
+        }
+
+        if (snapshot.resources.framebuffers == 0u) {
+            fail("resource registry has no framebuffers while started");
+        }
+        if (snapshot.resources.textures == 0u) {
+            fail("resource registry has no textures while started");
+        }
+        if (snapshot.resources.shader_programs == 0u) {
+            fail("resource registry has no shader programs while started");
+        }
+    } else if (!snapshot.resources.empty_after_shutdown) {
+        fail("resource registry is not empty after shutdown");
+    }
+
+    snapshot.passed = snapshot.failures.empty();
+    return snapshot;
 }
 
 void RenderPipeline::refresh_render_pass_metadata() {
@@ -2377,6 +2498,7 @@ void RenderPipeline::cleanup_gpu_sdf_system() {
     }
     
     m_gpu_sdf.initialized = false;
+    m_gpu_sdf.callback_registered = false;
 }
 
 void RenderPipeline::update_time_of_day(float deltaTime) {

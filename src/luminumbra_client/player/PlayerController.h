@@ -2,6 +2,7 @@
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+#include <cstdint>
 #include <glm/glm.hpp>
 #include "imgui.h"
 
@@ -20,11 +21,33 @@ enum class MovementMode {
     Noclip
 };
 
+struct PlayerReplayInputFrame {
+    glm::vec3 wishDirection{0.0f};
+    bool jumpPressed = false;
+    bool crouchPressed = false;
+    bool sprintHeld = false;
+};
+
+struct PlayerReplaySnapshot {
+    std::uint64_t frame = 0;
+    MovementMode mode = MovementMode::Walking;
+    glm::vec3 position{0.0f};
+    glm::vec3 velocity{0.0f};
+    bool isCrouching = false;
+    bool wantsToJump = false;
+    bool wantsToCrouch = false;
+    bool hasInitializedPhysicsPlayer = false;
+    float noclipSpeedMultiplier = 1.0f;
+};
+
 class PlayerController {
 public:
     PlayerController(GLFWwindow* window, Rendering::Camera* camera, Systems::PhysicsSystem* physicsSystem);
 
     void Update(float deltaTime);
+    void ApplyReplayInput(float deltaTime, const PlayerReplayInputFrame& inputFrame);
+    PlayerReplaySnapshot CaptureReplaySnapshot() const;
+    void ResetReplayFrameCounter(std::uint64_t frame = 0);
     void ProcessKeyInput(int key, int action);
 
     MovementMode GetMovementMode() const { return m_mode; }
@@ -33,8 +56,10 @@ public:
     void RenderDebugUI();
 
 private:
-    void UpdateWalking(float deltaTime, const glm::vec3& wishDir);
-    void UpdateNoclip(float deltaTime, const glm::vec3& wishDir);
+    PlayerReplayInputFrame ReadLiveInputFrame() const;
+    void UpdateWalking(float deltaTime, const glm::vec3& wishDir, bool jumpPressed, bool crouchPressed, bool sprintHeld);
+    void UpdateNoclip(float deltaTime, const glm::vec3& wishDir, bool sprintHeld);
+    void UpdateCameraFromControllerPosition();
 
     GLFWwindow* m_window;
     Rendering::Camera* m_camera;
@@ -59,6 +84,7 @@ private:
     bool m_isCrouching = false;
     bool m_wantsToCrouch = false;
     bool m_hasInitializedPhysicsPlayer = false;
+    std::uint64_t m_replayFrameCounter = 0;
 };
 
 } // namespace Luminumbra::Client

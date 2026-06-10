@@ -2,6 +2,12 @@
 # Paths are anchored to this file so the list is safe to include from any
 # CMakeLists.txt in the tree.
 set(COMMON_SOURCES
+    # Aetheric
+    ${CMAKE_CURRENT_LIST_DIR}/aetheric/AethericFieldDiffusion.cpp
+
+    # AI
+    ${CMAKE_CURRENT_LIST_DIR}/ai/InstinctPlanner.cpp
+
     # Core
     ${CMAKE_CURRENT_LIST_DIR}/common_placeholder.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/EngineContracts.cpp
@@ -13,8 +19,18 @@ set(COMMON_SOURCES
     # Net
     ${CMAKE_CURRENT_LIST_DIR}/net/NetworkManager.cpp
 
+    # Network
+    ${CMAKE_CURRENT_LIST_DIR}/network/NetworkLoopbackAuthority.cpp
+
+    # Persistence
+    ${CMAKE_CURRENT_LIST_DIR}/persistence/WorldPersistenceRoundtrip.cpp
+
     # Scripting
+    ${CMAKE_CURRENT_LIST_DIR}/scripting/LuaApiManifest.cpp
     ${CMAKE_CURRENT_LIST_DIR}/scripting/LuaState.cpp
+
+    # Simulation
+    ${CMAKE_CURRENT_LIST_DIR}/simulation/SimulationEventBus.cpp
 
     # Shield
     ${CMAKE_CURRENT_LIST_DIR}/shield/SHIELDEngine.cpp

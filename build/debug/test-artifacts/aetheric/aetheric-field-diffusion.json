@@ -1,0 +1,62 @@
+﻿{
+    "schema":  "luminumbra.aetheric.field_diffusion.v1",
+    "passed":  true,
+    "build_preset":  "debug",
+    "field":  {
+                  "source":  "src/luminumbra_common/aetheric/AethericFieldDiffusion.cpp",
+                  "header":  "src/luminumbra_common/aetheric/AethericFieldDiffusion.h",
+                  "width":  5,
+                  "height":  5,
+                  "cell_count":  25,
+                  "boundary":  "sealed_edges",
+                  "permeability_model":  "per_cell_min_edge",
+                  "fixture":  "central_impulse_with_low_permeability_boundary"
+              },
+    "diffusion":  {
+                      "solver":  "conservative_pairwise_flux",
+                      "order_contract":  "deterministic_row_major_edges",
+                      "iterations":  10,
+                      "initial_energy":  20,
+                      "final_energy":  20,
+                      "conservation_error":  0,
+                      "maximum_cell_energy":  5,
+                      "stable":  true
+                  },
+    "required_files":  [
+                           "src/luminumbra_common/aetheric/AethericFieldDiffusion.h",
+                           "src/luminumbra_common/aetheric/AethericFieldDiffusion.cpp",
+                           "test/aetheric/aetheric_field_diffusion_gate_test.cpp",
+                           "src/luminumbra_common/sources.cmake",
+                           "test/sources.cmake"
+                       ],
+    "checks":  [
+                   {
+                       "name":  "field diffusion header declares gate API",
+                       "passed":  true
+                   },
+                   {
+                       "name":  "field diffusion source conserves pairwise flux",
+                       "passed":  true
+                   },
+                   {
+                       "name":  "fixture declares deterministic diffusion order",
+                       "passed":  true
+                   },
+                   {
+                       "name":  "diffusion gate validates conservation tolerance",
+                       "passed":  true
+                   },
+                   {
+                       "name":  "aetheric source is wired into common sources",
+                       "passed":  true
+                   },
+                   {
+                       "name":  "aetheric gate test is wired into test sources",
+                       "passed":  true
+                   },
+                   {
+                       "name":  "gate test exercises serializer and fixture",
+                       "passed":  true
+                   }
+               ]
+}

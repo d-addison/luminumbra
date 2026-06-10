@@ -1,13 +1,17 @@
 #include "LuaState.h"
 
+#include "LuaApiManifest.h"
+
 namespace Luminumbra::scripting {
 
 LuaState::LuaState() {
-    // Constructor
 }
 
 LuaState::~LuaState() {
-    // Destructor
+}
+
+const LuaApiManifest& LuaState::api_manifest() {
+    return GetLuaApiManifest();
 }
 
 } // namespace Luminumbra::scripting
