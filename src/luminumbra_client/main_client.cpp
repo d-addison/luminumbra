@@ -1493,6 +1493,7 @@ int main(int argc, char* argv[]) {
     WaterVisualCameraTarget material_visual_target;
     bool material_visual_target_initialized = false;
     bool material_visual_capture_written = false;
+    bool skybox_visual_capture_written = false;
     LodBoundaryTransitionRecorder lod_boundary_transition_recorder;
     LodSeamArrivalRecorder lod_seam_arrival_recorder;
     std::array<bool, 4> lod_seam_screenshots_written{false, false, false, false};
@@ -1658,6 +1659,8 @@ int main(int argc, char* argv[]) {
                         material_visual_target_initialized = material_visual_target.found;
                     }
                     ApplyWaterVisualCamera(g_camera.get(), material_visual_target);
+                } else if (scenario_config.skybox_visual_smoke() && scenario_ready && g_camera) {
+                    ApplySkyboxVisualCamera(gameSession.get(), g_camera.get(), 0.04f);
                 } else if (scenario_config.lod_boundary_oscillation_smoke() && scenario_ready && g_camera) {
                     const double elapsed_play_seconds = std::chrono::duration<double>(
                         std::chrono::steady_clock::now() - scenario_play_started_at).count();
@@ -1672,7 +1675,7 @@ int main(int argc, char* argv[]) {
                 if (auto* physics = gameSession->GetPhysicsSystem()) physics->update(deltaTime);
                 if (gameSession->GetWorldSystem() && (g_playerController || g_camera)) {
                     const Luminumbra::Vec3 streaming_position =
-                        ((scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.lod_boundary_oscillation_smoke() || scenario_config.lod_seam_arrival_smoke()) && scenario_ready && g_camera)
+                        ((scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.lod_boundary_oscillation_smoke() || scenario_config.lod_seam_arrival_smoke()) && scenario_ready && g_camera)
                             ? Luminumbra::Vec3(g_camera->Position)
                             : (g_playerController ? Luminumbra::Vec3(g_playerController->GetPosition()) : Luminumbra::Vec3(g_camera->Position));
                     gameSession->GetWorldSystem()->update(
@@ -1695,7 +1698,7 @@ int main(int argc, char* argv[]) {
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             if (currentState == GameState::IN_GAME) {
                 if (gameSession->GetWorldSystem() && g_camera) {
-                    if (scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.lod_seam_arrival_smoke()) {
+                    if (scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.lod_seam_arrival_smoke()) {
                         // time_of_day 0 is noon (sun elevation = cos(2*pi*t));
                         // 0.04 keeps the sun near its zenith for stable captures.
                         renderPipeline.set_time_of_day(0.04f);
@@ -1831,6 +1834,47 @@ int main(int argc, char* argv[]) {
                                             material_stats,
                                             render_pass_stats
                                         );
+                                    }
+                                }
+                            }
+                        }
+                        if (scenario_config.skybox_visual_smoke() && scenario_ready && !skybox_visual_capture_written) {
+                            const double elapsed_play_seconds = std::chrono::duration<double>(now - scenario_play_started_at).count();
+                            const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
+                            const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
+                            const auto& render_pass_stats = renderPipeline.get_last_render_pass_stats();
+                            if (progress >= 0.50 && render_pass_stats.skybox_draws > 0) {
+                                int screenshot_width = 0;
+                                int screenshot_height = 0;
+                                glfwGetFramebufferSize(window, &screenshot_width, &screenshot_height);
+                                if (screenshot_width > 0 && screenshot_height > 0) {
+                                    std::vector<unsigned char> frame_pixels(
+                                        static_cast<std::size_t>(screenshot_width) * static_cast<std::size_t>(screenshot_height) * 3u);
+                                    glReadBuffer(GL_BACK);
+                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                                    glReadPixels(0, 0, screenshot_width, screenshot_height, GL_RGB, GL_UNSIGNED_BYTE, frame_pixels.data());
+
+                                    double sun_screen_x = 0.0;
+                                    double sun_screen_y = 0.0;
+                                    const bool sun_on_screen = ProjectDirectionToScreen(
+                                        *g_camera, screenshot_width, screenshot_height,
+                                        TowardSunDirection(0.04f), sun_screen_x, sun_screen_y);
+                                    const SkyboxPixelStats skybox_stats = AnalyzeSkyboxPixels(
+                                        frame_pixels, screenshot_width, screenshot_height,
+                                        sun_screen_x, sun_screen_y, sun_on_screen);
+                                    const std::string screenshot_path = "screenshots/skybox-visual.ppm";
+                                    if (WritePixelBufferPpm(
+                                            scenario_config.artifact_dir / screenshot_path,
+                                            screenshot_width, screenshot_height, frame_pixels)) {
+                                        skybox_visual_capture_written = true;
+                                        WriteSkyboxVisualAnalysis(
+                                            scenario_config.artifact_dir,
+                                            screenshot_path,
+                                            skybox_stats,
+                                            sun_screen_x,
+                                            sun_screen_y,
+                                            sun_on_screen,
+                                            render_pass_stats);
                                     }
                                 }
                             }

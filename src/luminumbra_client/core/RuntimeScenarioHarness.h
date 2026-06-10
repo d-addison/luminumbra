@@ -55,6 +55,7 @@ struct RuntimeScenarioConfig {
     bool lod_ground_smoke() const { return scenario == "lod_ground_smoke"; }
     bool water_visual_smoke() const { return scenario == "water_visual_smoke"; }
     bool material_visual_smoke() const { return scenario == "material_visual_smoke"; }
+    bool skybox_visual_smoke() const { return scenario == "skybox_visual_smoke"; }
     bool lod_boundary_oscillation_smoke() const { return scenario == "lod_boundary_oscillation_smoke"; }
     bool lod_seam_arrival_smoke() const { return scenario == "lod_seam_arrival_smoke"; }
     bool persistence_roundtrip_smoke() const { return scenario == "persistence_roundtrip_smoke"; }
@@ -146,6 +147,73 @@ struct MaterialPixelStats {
     double sand_ratio = 0.0;
     double grey_fallback_ratio = 0.0;
 };
+
+// --- Skybox visual smoke (T-I2-17a) ---
+// Camera sits over open terrain near spawn, tilted up 30 degrees with a wide
+// (90 degree) vertical FOV aimed at the sun azimuth so the noon sun disc is
+// inside the frame. The analysis measures the atmospheric gradient and the
+// sun disc directly from backbuffer pixels.
+struct SkyboxVisualBandStats {
+    double mean_luminance = 0.0;
+    std::uint64_t pixels = 0;
+};
+
+struct SkyboxPixelStats {
+    int width = 0;
+    int height = 0;
+    std::uint64_t sky_roi_pixels = 0;
+    // Bands run from the horizon end of the sky ROI (index 0) to the zenith
+    // end (last index). Sun-disc pixels are excluded from the band means so
+    // the gradient check measures atmosphere, not the disc.
+    std::vector<SkyboxVisualBandStats> bands;
+    double horizon_band_mean = 0.0;
+    double zenith_band_mean = 0.0;
+    int monotonic_violations = 0;
+    double max_luminance = 0.0;
+    std::uint64_t sun_disc_pixels = 0;
+    double sun_disc_centroid_x = 0.0;   // normalized [0,1], 0 = left
+    double sun_disc_centroid_y = 0.0;   // normalized [0,1], 0 = top
+    // Disc pixels within the expected-sun-position cluster radius; the
+    // localization metric (a half/quadrant split breaks when the sun sits on
+    // the frame centerline).
+    std::uint64_t sun_disc_pixels_near_expected = 0;
+};
+
+// Toward-sun unit vector for a normalized time of day, mirroring
+// RenderPipeline::update_time_of_day (t=0 is noon, elevation = cos(2*pi*t)).
+Luminumbra::Vec3 TowardSunDirection(float time_of_day);
+
+void ApplySkyboxVisualCamera(
+    Luminumbra::world::GameSession* game_session,
+    Luminumbra::Rendering::Camera* camera,
+    float pinned_time_of_day);
+
+// Projects a world-space direction (point at infinity) to normalized screen
+// coordinates; returns true when the direction lands inside the frame.
+bool ProjectDirectionToScreen(
+    const Luminumbra::Rendering::Camera& camera,
+    int width,
+    int height,
+    const Luminumbra::Vec3& direction,
+    double& x_norm,
+    double& y_norm_from_top);
+
+SkyboxPixelStats AnalyzeSkyboxPixels(
+    const std::vector<unsigned char>& pixels,
+    int width,
+    int height,
+    double sun_screen_x_norm,
+    double sun_screen_y_norm,
+    bool sun_on_screen);
+
+void WriteSkyboxVisualAnalysis(
+    const std::filesystem::path& artifact_dir,
+    const std::string& screenshot,
+    const SkyboxPixelStats& pixel_stats,
+    double sun_screen_x_norm,
+    double sun_screen_y_norm,
+    bool sun_on_screen,
+    const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass);
 
 ScreenshotPixelStats AnalyzeScreenshotPixels(const std::vector<unsigned char>& pixels, int width, int height);
 LodHolePixelStats AnalyzeLodHolePixels(const std::vector<unsigned char>& pixels, int width, int height);

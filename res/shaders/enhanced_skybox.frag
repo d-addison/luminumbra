@@ -46,13 +46,17 @@ float fbm(vec2 p, int octaves) {
 vec3 atmosphericScattering(vec3 viewDir, vec3 sunDir, float sunIntensity) {
     float cosTheta = dot(viewDir, sunDir);
     float scattering = pow(max(0.0, cosTheta), 8.0) * sunIntensity;
-    
-    // Rayleigh scattering (blue sky)
-    vec3 rayleigh = vec3(0.3, 0.6, 1.0) * (1.0 - sunIntensity * 0.5);
-    
+
+    // Rayleigh scattering (blue haze). Weighted toward the horizon where the
+    // optical path through the atmosphere is longest; a flat additive term
+    // washed the whole sky toward white and erased the horizon->zenith
+    // luminance gradient (caught by skybox_visual_smoke).
+    float horizonFactor = pow(1.0 - clamp(viewDir.y, 0.0, 1.0), 2.0);
+    vec3 rayleigh = vec3(0.3, 0.6, 1.0) * (1.0 - sunIntensity * 0.5) * (0.15 + 0.85 * horizonFactor);
+
     // Mie scattering (sun glow)
     vec3 mie = vec3(1.0, 0.8, 0.6) * scattering * 0.5;
-    
+
     return rayleigh + mie;
 }
 
@@ -64,9 +68,10 @@ vec3 renderClouds(vec3 viewDir, vec3 baseColor) {
     float cloudTime = u_time * 0.02;
     vec2 cloudUV = viewDir.xz / (viewDir.y + 0.5) * 0.5;
     
-    // High altitude wispy clouds
+    // High altitude wispy clouds (weight reduced so the zenith keeps its
+    // deep-blue gradient instead of whitewashing under cloud cover)
     float highClouds = fbm(cloudUV * 2.0 + vec2(cloudTime, cloudTime * 0.7), 4);
-    highClouds = smoothstep(0.4, 0.8, highClouds) * 0.7;
+    highClouds = smoothstep(0.4, 0.8, highClouds) * 0.45;
     
     // Mid altitude puffy clouds
     float midClouds = fbm(cloudUV * 1.0 + vec2(cloudTime * 0.5, -cloudTime * 0.3), 5);
@@ -149,7 +154,9 @@ void main()
     float nightFactor = 1.0 - u_sunIntensity;
     
     // --- 1. BASE ATMOSPHERIC GRADIENT ---
-    vec3 dayTopColor = vec3(0.4, 0.7, 1.0) * u_skyTint;
+    // Deeper zenith blue: the daytime sky must stay measurably darker at the
+    // zenith than at the horizon (horizon-gradient gate).
+    vec3 dayTopColor = vec3(0.22, 0.45, 0.92) * u_skyTint;
     vec3 dayBottomColor = vec3(0.9, 0.95, 1.0) * u_skyTint;
     
     // Sunset/sunrise colors
