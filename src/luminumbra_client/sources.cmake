@@ -3,6 +3,9 @@
 # CMakeLists.txt in the tree.
 
 set(CLIENT_INTERNAL_SOURCES
+    # Core
+    ${CMAKE_CURRENT_LIST_DIR}/core/RuntimeScenarioHarness.cpp
+
     # Audio
     ${CMAKE_CURRENT_LIST_DIR}/audio/AudioManagerFactory.cpp
     ${CMAKE_CURRENT_LIST_DIR}/audio/AudioPropagationSystem.cpp
