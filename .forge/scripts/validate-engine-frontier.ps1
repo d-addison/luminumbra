@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "FrontierDisabled", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "FrontierDisabled", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug"
@@ -1896,6 +1896,142 @@ function Test-FrontierDisabled {
     }
 }
 
+function Test-NetworkLoopbackAuthorityGate {
+    $artifactDir = "build/$BuildPreset/test-artifacts/network"
+    $analysisPath = Join-Path $artifactDir "network-loopback-convergence.json"
+    $testScriptPath = "test/network/network-loopback-authority-gate.ps1"
+
+    if (-not (Test-Path $testScriptPath)) {
+        throw "network loopback authority gate not yet implemented - missing $testScriptPath (produced by task T-EF-31-network-loopback-authority-gate)"
+    }
+
+    & $testScriptPath -BuildPreset $BuildPreset
+    if (-not $?) {
+        exit 1
+    }
+    if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
+    if (-not (Test-Path $analysisPath)) {
+        throw "network loopback authority gate not yet implemented - missing $analysisPath (produced by task T-EF-31-network-loopback-authority-gate)"
+    }
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.network.loopback_convergence.v1") {
+        throw "Unexpected network loopback convergence schema '$($analysis.schema)'"
+    }
+    if (-not $analysis.passed) {
+        throw "Network loopback convergence analysis reported failure"
+    }
+    if ($analysis.build_preset -ne $BuildPreset) {
+        throw "Network loopback convergence build_preset '$($analysis.build_preset)' does not match '$BuildPreset'"
+    }
+    if ($analysis.network.source -ne "src/luminumbra_common/network/NetworkLoopbackAuthority.cpp") {
+        throw "Network loopback analysis must inspect NetworkLoopbackAuthority.cpp"
+    }
+    if ($analysis.network.header -ne "src/luminumbra_common/network/NetworkLoopbackAuthority.h") {
+        throw "Network loopback analysis must inspect NetworkLoopbackAuthority.h"
+    }
+    if ($analysis.network.serializer -ne "SerializeNetworkLoopbackConvergenceJson") {
+        throw "Network loopback analysis must require SerializeNetworkLoopbackConvergenceJson"
+    }
+    if ($analysis.network.validation_api -ne "NetworkLoopbackAuthorityMeetsBaseline") {
+        throw "Network loopback analysis must require NetworkLoopbackAuthorityMeetsBaseline"
+    }
+    if ($analysis.network.artifact_writer -ne "WriteNetworkLoopbackConvergenceArtifact") {
+        throw "Network loopback analysis must require WriteNetworkLoopbackConvergenceArtifact"
+    }
+    if ($analysis.network.authority_contract -ne "server_authoritative_loopback_reconciliation") {
+        throw "Network loopback must declare server_authoritative_loopback_reconciliation"
+    }
+    if ($analysis.network.order_contract -ne "tick_then_sequence_then_client_id") {
+        throw "Network loopback must declare tick_then_sequence_then_client_id ordering"
+    }
+    if ($analysis.loopback.transport -ne "in_process_loopback") {
+        throw "Network loopback fixture must use the in-process loopback transport"
+    }
+    if ($analysis.loopback.simulation -ne "authoritative_server_with_predicted_client") {
+        throw "Network loopback fixture must simulate an authoritative server with a predicted client"
+    }
+    if ($analysis.loopback.authoritative_client_id -ne "client-alpha") {
+        throw "Network loopback fixture must use client-alpha as the authorized client"
+    }
+    if ([int64]$analysis.loopback.submitted_frame_count -lt 6) {
+        throw "Network loopback fixture must submit at least six loopback frames"
+    }
+    if ([int64]$analysis.loopback.accepted_frame_count -lt 5) {
+        throw "Network loopback fixture must accept the authorized client frames"
+    }
+    if ([int64]$analysis.loopback.rejected_frame_count -lt 1) {
+        throw "Network loopback fixture must reject at least one unauthorized frame"
+    }
+    if (-not $analysis.loopback.unauthorized_authority_claim_rejected) {
+        throw "Network loopback fixture must reject unauthorized client authority claims"
+    }
+    if (-not $analysis.loopback.client_prediction_reconciled) {
+        throw "Network loopback fixture must reconcile client prediction to authority"
+    }
+    if (-not $analysis.loopback.converged) {
+        throw "Network loopback fixture did not converge"
+    }
+    if ([int64]$analysis.loopback.prediction_error_before_reconcile_mm -le 0) {
+        throw "Network loopback fixture must record prediction error before reconciliation"
+    }
+    if ([int64]$analysis.loopback.prediction_error_after_reconcile_mm -ne 0) {
+        throw "Network loopback fixture must eliminate prediction error after reconciliation"
+    }
+    if ([string]::IsNullOrWhiteSpace($analysis.loopback.authoritative_checksum)) {
+        throw "Network loopback convergence analysis is missing the authoritative checksum"
+    }
+    if ([int64]$analysis.final_authoritative_state.tick -ne [int64]$analysis.reconciled_client_state.tick -or
+        [int64]$analysis.final_authoritative_state.authoritative_revision -ne [int64]$analysis.reconciled_client_state.authoritative_revision -or
+        [int64]$analysis.final_authoritative_state.position_x_mm -ne [int64]$analysis.reconciled_client_state.position_x_mm -or
+        [int64]$analysis.final_authoritative_state.position_y_mm -ne [int64]$analysis.reconciled_client_state.position_y_mm) {
+        throw "Network loopback final authoritative state must match the reconciled client state"
+    }
+
+    $decisions = @($analysis.decisions)
+    if ([int64]$analysis.loopback.submitted_frame_count -ne $decisions.Count) {
+        throw "Network loopback submitted_frame_count does not match decisions array"
+    }
+    $expectedDecisions = @(
+        "1|1|client-alpha|accepted|authoritative_frame_applied",
+        "2|2|client-alpha|accepted|authoritative_frame_applied",
+        "2|1|client-beta|rejected|client_authority_claim_rejected",
+        "3|3|client-alpha|accepted|authoritative_frame_applied",
+        "4|4|client-alpha|accepted|authoritative_frame_applied",
+        "5|5|client-alpha|accepted|authoritative_frame_applied"
+    )
+    $actualDecisions = @($decisions | ForEach-Object {
+        $status = if ($_.accepted) { "accepted" } else { "rejected" }
+        "$($_.tick)|$($_.sequence)|$($_.client_id)|$status|$($_.reason)"
+    })
+    if (($actualDecisions -join "`n") -ne ($expectedDecisions -join "`n")) {
+        throw "Network loopback decisions do not match the deterministic authority fixture"
+    }
+
+    $requiredChecks = @(
+        "network loopback authority API is declared",
+        "loopback source applies server authority over client claims",
+        "loopback fixture rejects client authority escalation",
+        "loopback convergence reaches deterministic state",
+        "network source is wired into common sources",
+        "network gate test is wired into test sources",
+        "gate artifact records authoritative checksum"
+    )
+    $checks = @($analysis.checks)
+    foreach ($requiredCheck in $requiredChecks) {
+        $matches = @($checks | Where-Object { $_.name -eq $requiredCheck })
+        if ($matches.Count -ne 1) {
+            throw "Network loopback convergence analysis is missing check '$requiredCheck'"
+        }
+        if (-not $matches[0].passed) {
+            throw "Network loopback convergence check failed: $requiredCheck"
+        }
+    }
+}
+
 switch ($Mode) {
     "CodexOnly" { Test-CodexOnly }
     "Panels" { Test-Panels }
@@ -1921,6 +2057,7 @@ switch ($Mode) {
     "PersistenceRoundtripGate" { Test-PersistenceRoundtripGate }
     "ChunkFormatValidationGate" { Test-ChunkFormatValidationGate }
     "WorldHashEntitySnapshotGate" { Test-WorldHashEntitySnapshotGate }
+    "NetworkLoopbackAuthorityGate" { Test-NetworkLoopbackAuthorityGate }
     "FrontierDisabled" { Test-FrontierDisabled }
     "All" {
         Test-CodexOnly
@@ -1944,6 +2081,7 @@ switch ($Mode) {
         Test-PersistenceRoundtripGate
         Test-ChunkFormatValidationGate
         Test-WorldHashEntitySnapshotGate
+        Test-NetworkLoopbackAuthorityGate
         Test-FrontierDisabled
     }
 }
