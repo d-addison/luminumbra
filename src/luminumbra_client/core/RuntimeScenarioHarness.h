@@ -114,6 +114,13 @@ struct LodHolePixelStats {
     double dark_void_ratio = 0.0;
     double near_black_ratio = 0.0;
     double background_blue_ratio = 0.0;
+    // Connected components (8-connectivity) of void (RGB <= 10) ROI pixels
+    // with at least kMinNearBlackClusterPx pixels. Narrow LOD seam crack
+    // slivers form connected runs of pure-black hole pixels even when the
+    // total near-black ratio stays below the area threshold, so the seam
+    // gate enforces the cluster count directly.
+    std::uint64_t near_black_cluster_count = 0;
+    std::uint64_t largest_near_black_cluster_px = 0;
 };
 
 struct LodGroundVisualCapture {
