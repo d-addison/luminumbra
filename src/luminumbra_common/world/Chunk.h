@@ -30,10 +30,19 @@ public:
         return m_state; 
     }
     
-    void set_state(ChunkState new_state) { 
+    void set_state(ChunkState new_state) {
         std::lock_guard<std::mutex> lock(m_state_mutex);
-        m_state = new_state; 
+        m_state = new_state;
     }
+
+    // --- Voxel edit tracking ---
+    // True when sdf/heightmap voxel data was mutated AFTER generation and has
+    // not been persisted yet. Generation, loading, and meshing leave the flag
+    // clear; runtime voxel edits must call mark_voxel_data_dirty(), and a
+    // successful save clears it again.
+    void mark_voxel_data_dirty() { m_voxel_data_dirty.store(true, std::memory_order_release); }
+    void clear_voxel_data_dirty() { m_voxel_data_dirty.store(false, std::memory_order_release); }
+    bool is_voxel_data_dirty() const { return m_voxel_data_dirty.load(std::memory_order_acquire); }
 
     // --- Voxel & SDF Data ---
     std::vector<f32> sdf_data;
@@ -89,6 +98,7 @@ private:
     const ChunkID m_id;
     ChunkState m_state;
     mutable std::mutex m_state_mutex;  // mutable for use in const getter
+    std::atomic<bool> m_voxel_data_dirty{false};
 };
 
 } // namespace Luminumbra

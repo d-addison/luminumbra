@@ -25,6 +25,7 @@ set(COMMON_SOURCES
 
     # Persistence
     ${CMAKE_CURRENT_LIST_DIR}/persistence/WorldPersistenceRoundtrip.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/persistence/WorldSaveService.cpp
 
     # Scripting
     ${CMAKE_CURRENT_LIST_DIR}/scripting/LuaApiManifest.cpp
