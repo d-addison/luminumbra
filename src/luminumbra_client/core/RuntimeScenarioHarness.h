@@ -147,6 +147,14 @@ struct MaterialPixelStats {
     double sand_ratio = 0.0;
     double grass_ratio = 0.0;
     double grey_fallback_ratio = 0.0;
+    // Stone presence is measured in a separate rim sub-ROI (top quarter of
+    // the frame, same horizontal band): the high-altitude cliff rims are the
+    // only natural stone exposure, and legitimate dim stone is colour-shaped
+    // like the grey fallback, so it is counted there instead of competing
+    // with the fallback detector inside the main beach/flank ROI.
+    std::uint64_t rim_roi_pixels = 0;
+    std::uint64_t stone_pixels = 0;
+    double stone_ratio = 0.0;
 };
 
 ScreenshotPixelStats AnalyzeScreenshotPixels(const std::vector<unsigned char>& pixels, int width, int height);
