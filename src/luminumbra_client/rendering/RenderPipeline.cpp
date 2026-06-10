@@ -462,8 +462,12 @@ RenderPipeline::RuntimeRenderStats RenderPipeline::get_runtime_render_stats() co
     if (m_materialLUT) estimated_vram_bytes += 256u * 4u;
     if (m_water_pass->flat_normal_texture()) estimated_vram_bytes += 4u;
     if (m_water_pass->neutral_flow_texture()) estimated_vram_bytes += 4u;
-    if (m_water_pass->black_texture()) estimated_vram_bytes += 4u;
+    if (m_water_pass->black_fallback_texture()) estimated_vram_bytes += 4u;
     if (m_water_pass->underwater_texture()) estimated_vram_bytes += 4u;
+    if (m_water_pass->caustics_texture()) {
+        estimated_vram_bytes += static_cast<size_t>(WaterPass::kCausticsResolution) *
+                                static_cast<size_t>(WaterPass::kCausticsResolution) * 4u; // RGBA8
+    }
     if (m_gpu_sdf.sdf_buffer) estimated_vram_bytes += 17u * 17u * 17u * sizeof(float);
     if (m_gpu_sdf.terrain_noise_texture) estimated_vram_bytes += 128u * 128u * 128u * sizeof(float);
     if (m_gpu_sdf.cave_noise_texture) estimated_vram_bytes += 128u * 128u * 128u * sizeof(float);
@@ -526,6 +530,7 @@ RenderPipeline::RenderResourceRegistryStats RenderPipeline::get_resource_registr
     stats.framebuffers += count(m_shadow_pass->shadow_map().fbo_id);
     stats.framebuffers += count(m_ssao_pass->ssao().fbo);
     stats.framebuffers += count(m_ssao_pass->ssao().blurFBO);
+    stats.framebuffers += count(m_water_pass->caustics_fbo());
 
     stats.textures += count(m_lighting_pass->lighting_fbo().color_texture);
     stats.textures += count(m_lighting_pass->lighting_fbo().opaque_color_texture);
@@ -542,8 +547,9 @@ RenderPipeline::RenderResourceRegistryStats RenderPipeline::get_resource_registr
     stats.textures += count(m_materialLUT);
     stats.textures += count(m_water_pass->flat_normal_texture());
     stats.textures += count(m_water_pass->neutral_flow_texture());
-    stats.textures += count(m_water_pass->black_texture());
+    stats.textures += count(m_water_pass->black_fallback_texture());
     stats.textures += count(m_water_pass->underwater_texture());
+    stats.textures += count(m_water_pass->caustics_texture());
     stats.textures += count(m_gpu_sdf.terrain_noise_texture);
     stats.textures += count(m_gpu_sdf.cave_noise_texture);
     stats.textures += count(m_gpu_sdf.island_mask_texture);
