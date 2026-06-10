@@ -250,6 +250,67 @@ else()
     target_link_libraries(runtime_world_visual_validation_test PRIVATE OpenGL::GL)
 endif()
 
+# Frontier gate fixtures: the lua-api-manifest and aetheric-diffusion gates
+# assert at static initialization, the instinct and loopback gates are called
+# from the gtest cases in network_state_hash_gate_test.cpp.
+add_executable(frontier_gates_test
+    network/network_state_hash_gate_test.cpp
+    network/network_loopback_authority_gate_test.cpp
+    ai/instinct_planner_gate_test.cpp
+    scripting/lua_api_manifest_gate_test.cpp
+    aetheric/aetheric_field_diffusion_gate_test.cpp
+)
+
+target_compile_definitions(frontier_gates_test PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+    LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts"
+)
+
+target_include_directories(frontier_gates_test PRIVATE
+    ../src
+)
+
+target_link_libraries(frontier_gates_test PRIVATE
+    gtest_main
+    luminumbra_common
+)
+
+# Standalone main() gate programs registered directly with CTest.
+add_executable(eventbus_order_gate_test
+    simulation/eventbus_order_gate_test.cpp
+)
+
+target_include_directories(eventbus_order_gate_test PRIVATE
+    ../src
+)
+
+target_link_libraries(eventbus_order_gate_test PRIVATE
+    luminumbra_common
+)
+
+add_executable(world_persistence_roundtrip_gate_test
+    persistence/world_persistence_roundtrip_gate_test.cpp
+)
+
+target_include_directories(world_persistence_roundtrip_gate_test PRIVATE
+    ../src
+)
+
+target_link_libraries(world_persistence_roundtrip_gate_test PRIVATE
+    luminumbra_common
+)
+
+set(LUMINUMBRA_GATE_BUILD_PRESET "${CMAKE_BUILD_TYPE}")
+string(TOLOWER "${LUMINUMBRA_GATE_BUILD_PRESET}" LUMINUMBRA_GATE_BUILD_PRESET)
+
+add_test(NAME SimulationEventBusOrderGate COMMAND eventbus_order_gate_test)
+add_test(
+    NAME WorldPersistenceRoundtripGate
+    COMMAND world_persistence_roundtrip_gate_test
+        "${CMAKE_BINARY_DIR}/test-artifacts/persistence/world-persistence-roundtrip.json"
+        "${LUMINUMBRA_GATE_BUILD_PRESET}"
+)
+
 # Discover and add the tests to CTest for running
 include(GoogleTest)
 gtest_discover_tests(world_generation_test)
@@ -262,6 +323,7 @@ gtest_discover_tests(render_capture_test)
 gtest_discover_tests(ui_smoke_test)
 gtest_discover_tests(initial_world_loading_perf_test)
 gtest_discover_tests(runtime_world_visual_validation_test)
+gtest_discover_tests(frontier_gates_test)
 
 set(LUMINUMBRA_TEST_BASELINE_BUILD_PRESET "${CMAKE_BUILD_TYPE}")
 string(TOLOWER "${LUMINUMBRA_TEST_BASELINE_BUILD_PRESET}" LUMINUMBRA_TEST_BASELINE_BUILD_PRESET)

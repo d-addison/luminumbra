@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "FrontierDisabled", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "FrontierDisabled", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -2093,6 +2093,71 @@ function Test-NetworkLoopbackAuthorityGate {
     }
 }
 
+function Test-NetworkStateHash {
+    $artifactDir = "build/$BuildPreset/test-artifacts/network"
+    $analysisPath = Join-Path $artifactDir "network-state-hash.json"
+    $testScriptPath = "test/network/network-state-hash-gate.ps1"
+
+    if (-not (Test-Path $testScriptPath)) {
+        throw "network state hash gate not yet implemented - missing $testScriptPath (produced by task T-EF-32-network-state-hash-gate)"
+    }
+
+    & $testScriptPath -BuildPreset $BuildPreset
+    if (-not $?) {
+        exit 1
+    }
+    if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
+    if (-not (Test-Path $analysisPath)) {
+        throw "network state hash gate not yet implemented - missing $analysisPath (produced by task T-EF-32-network-state-hash-gate)"
+    }
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.network.state_hash.v1") {
+        throw "Unexpected network state hash schema '$($analysis.schema)'"
+    }
+    if (-not $analysis.passed) {
+        throw "Network state hash analysis reported failure"
+    }
+    if ($analysis.build_preset -ne $BuildPreset) {
+        throw "Network state hash build_preset '$($analysis.build_preset)' does not match '$BuildPreset'"
+    }
+    if ($analysis.network.state_contract -ne "authoritative_sorted_state_per_tick") {
+        throw "Network state hash must declare authoritative_sorted_state_per_tick"
+    }
+    if ($analysis.network.order_contract -ne "tick_ascending_sorted_state_fields") {
+        throw "Network state hash must declare tick_ascending_sorted_state_fields ordering"
+    }
+    if ($analysis.state_hash.hash_algorithm -ne "fnv1a_64_canonical_state_string") {
+        throw "Network state hash must use fnv1a_64_canonical_state_string"
+    }
+    if ([string]::IsNullOrWhiteSpace($analysis.state_hash.world_hash)) {
+        throw "Network state hash must embed the persistence world hash"
+    }
+    if ([int64]$analysis.state_hash.durable_entity_id_count -lt 1) {
+        throw "Network state hash must cover durable entity ids"
+    }
+    if ([int64]$analysis.state_hash.tick_count -lt 5) {
+        throw "Network state hash must cover at least five authoritative ticks"
+    }
+    if (-not $analysis.state_hash.deterministic_replay) {
+        throw "Network state hash replay was not deterministic"
+    }
+    if (-not $analysis.state_hash.monotonic_ticks) {
+        throw "Network state hash ticks were not monotonically ascending"
+    }
+    if ($analysis.state_hash.final_state_hash -ne $analysis.state_hash.replay_final_state_hash) {
+        throw "Network state hash final hash does not match the replay hash"
+    }
+    foreach ($tick in @($analysis.ticks)) {
+        if ([string]::IsNullOrWhiteSpace($tick.state_hash) -or $tick.state_hash.Length -ne 16) {
+            throw "Network state hash tick $($tick.tick) is missing a 64-bit hash"
+        }
+    }
+}
+
 switch ($Mode) {
     "CodexOnly" { Test-CodexOnly }
     "Panels" { Test-Panels }
@@ -2119,6 +2184,7 @@ switch ($Mode) {
     "ChunkFormatValidationGate" { Test-ChunkFormatValidationGate }
     "WorldHashEntitySnapshotGate" { Test-WorldHashEntitySnapshotGate }
     "NetworkLoopbackAuthorityGate" { Test-NetworkLoopbackAuthorityGate }
+    "NetworkStateHash" { Test-NetworkStateHash }
     "FrontierDisabled" { Test-FrontierDisabled }
     "All" {
         Test-CodexOnly
@@ -2143,6 +2209,7 @@ switch ($Mode) {
         Test-ChunkFormatValidationGate
         Test-WorldHashEntitySnapshotGate
         Test-NetworkLoopbackAuthorityGate
+        Test-NetworkStateHash
         Test-FrontierDisabled
     }
 }

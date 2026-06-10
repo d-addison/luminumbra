@@ -23,6 +23,7 @@ set(PERSISTENCE_TEST_SOURCES
 
 set(NETWORK_TEST_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/network/network_loopback_authority_gate_test.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/network/network_state_hash_gate_test.cpp
 )
 
 set(LUMINUMBRA_TEST_SOURCES
