@@ -14,6 +14,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/net/NetworkManager.cpp
 
     # Scripting
+    ${CMAKE_CURRENT_LIST_DIR}/scripting/LuaApiManifest.cpp
     ${CMAKE_CURRENT_LIST_DIR}/scripting/LuaState.cpp
 
     # Simulation
