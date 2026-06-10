@@ -1,0 +1,69 @@
+﻿{
+    "schema":  "luminumbra.scripting.lua_api_manifest.v1",
+    "build_preset":  "debug",
+    "passed":  true,
+    "manifest":  {
+                     "source":  "src/luminumbra_common/scripting/LuaApiManifest.cpp",
+                     "header":  "src/luminumbra_common/scripting/LuaApiManifest.h",
+                     "lua_state_header":  "src/luminumbra_common/scripting/LuaState.h",
+                     "serializer":  "SerializeLuaApiManifestJson",
+                     "validation_api":  "LuaApiManifestMeetsBaseline",
+                     "deterministic_order":  "module_then_name",
+                     "entry_count":  9,
+                     "required_modules":  [
+                                              "core",
+                                              "entity",
+                                              "simulation",
+                                              "time",
+                                              "world"
+                                          ],
+                     "required_entries":  [
+                                              "core.log",
+                                              "core.version",
+                                              "entity.destroy",
+                                              "entity.spawn",
+                                              "simulation.emit_event",
+                                              "simulation.subscribe",
+                                              "time.delta_seconds",
+                                              "world.get_block",
+                                              "world.set_block"
+                                          ]
+                 },
+    "checks":  [
+                   {
+                       "name":  "manifest schema declared",
+                       "passed":  true,
+                       "detail":  "LuaApiManifest.cpp must declare the stable manifest schema."
+                   },
+                   {
+                       "name":  "manifest header declares API descriptors",
+                       "passed":  true,
+                       "detail":  "LuaApiManifest.h must expose descriptor, serializer, and baseline validation APIs."
+                   },
+                   {
+                       "name":  "LuaState exposes manifest API",
+                       "passed":  true,
+                       "detail":  "LuaState must expose the manifest for script host integration."
+                   },
+                   {
+                       "name":  "manifest source lists required entries",
+                       "passed":  true,
+                       "detail":  "Missing entries: none"
+                   },
+                   {
+                       "name":  "manifest entries are wired into common sources",
+                       "passed":  true,
+                       "detail":  "src/luminumbra_common/sources.cmake must compile LuaApiManifest.cpp."
+                   },
+                   {
+                       "name":  "manifest gate test is wired into test sources",
+                       "passed":  true,
+                       "detail":  "test/sources.cmake must register the scripting manifest gate test source."
+                   },
+                   {
+                       "name":  "manifest serializer emits deterministic order contract",
+                       "passed":  true,
+                       "detail":  "The serializer must publish the deterministic order contract."
+                   }
+               ]
+}

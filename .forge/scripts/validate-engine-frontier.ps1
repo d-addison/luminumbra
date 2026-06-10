@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "FrontierDisabled", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "FrontierDisabled", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug"
@@ -887,6 +887,97 @@ function Test-SimulationEventBusOrderGate {
     }
 }
 
+function Test-LuaApiManifestGate {
+    $artifactDir = "build/$BuildPreset/test-artifacts/scripting"
+    $analysisPath = Join-Path $artifactDir "lua-api-manifest.json"
+    $testScriptPath = "test/scripting/lua-api-manifest-gate.ps1"
+
+    if (-not (Test-Path $testScriptPath)) {
+        throw "lua api manifest gate not yet implemented - missing $testScriptPath (produced by task T-EF-19-lua-api-manifest-gate)"
+    }
+
+    & $testScriptPath -BuildPreset $BuildPreset
+    if (-not $?) {
+        exit 1
+    }
+    if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
+    if (-not (Test-Path $analysisPath)) {
+        throw "lua api manifest gate not yet implemented - missing $analysisPath (produced by task T-EF-19-lua-api-manifest-gate)"
+    }
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.scripting.lua_api_manifest.v1") {
+        throw "Unexpected lua api manifest schema '$($analysis.schema)'"
+    }
+    if (-not $analysis.passed) {
+        throw "Lua API manifest analysis reported failure"
+    }
+    if ($analysis.build_preset -ne $BuildPreset) {
+        throw "Lua API manifest build_preset '$($analysis.build_preset)' does not match '$BuildPreset'"
+    }
+    if ($analysis.manifest.source -ne "src/luminumbra_common/scripting/LuaApiManifest.cpp") {
+        throw "Lua API manifest analysis must inspect LuaApiManifest.cpp"
+    }
+    if ($analysis.manifest.header -ne "src/luminumbra_common/scripting/LuaApiManifest.h") {
+        throw "Lua API manifest analysis must inspect LuaApiManifest.h"
+    }
+    if ($analysis.manifest.lua_state_header -ne "src/luminumbra_common/scripting/LuaState.h") {
+        throw "Lua API manifest analysis must inspect LuaState.h"
+    }
+    if ($analysis.manifest.serializer -ne "SerializeLuaApiManifestJson") {
+        throw "Lua API manifest analysis must require SerializeLuaApiManifestJson"
+    }
+    if ($analysis.manifest.validation_api -ne "LuaApiManifestMeetsBaseline") {
+        throw "Lua API manifest analysis must require LuaApiManifestMeetsBaseline"
+    }
+    if ($analysis.manifest.deterministic_order -ne "module_then_name") {
+        throw "Lua API manifest must declare module_then_name deterministic ordering"
+    }
+    if ([int64]$analysis.manifest.entry_count -lt 9) {
+        throw "Lua API manifest must cover the baseline scripting API entries"
+    }
+
+    foreach ($module in @("core", "entity", "simulation", "time", "world")) {
+        Assert-ArrayContains -Values $analysis.manifest.required_modules -Needle $module -Description "Lua API manifest required_modules"
+    }
+    foreach ($entry in @(
+        "core.log",
+        "core.version",
+        "entity.destroy",
+        "entity.spawn",
+        "simulation.emit_event",
+        "simulation.subscribe",
+        "time.delta_seconds",
+        "world.get_block",
+        "world.set_block"
+    )) {
+        Assert-ArrayContains -Values $analysis.manifest.required_entries -Needle $entry -Description "Lua API manifest required_entries"
+    }
+
+    $requiredChecks = @(
+        "manifest schema declared",
+        "manifest header declares API descriptors",
+        "LuaState exposes manifest API",
+        "manifest source lists required entries",
+        "manifest entries are wired into common sources",
+        "manifest gate test is wired into test sources",
+        "manifest serializer emits deterministic order contract"
+    )
+    $checks = @($analysis.checks)
+    foreach ($requiredCheck in $requiredChecks) {
+        $matches = @($checks | Where-Object { $_.name -eq $requiredCheck })
+        if ($matches.Count -ne 1) {
+            throw "Lua API manifest analysis is missing check '$requiredCheck'"
+        }
+        if (-not $matches[0].passed) {
+            throw "Lua API manifest check failed: $requiredCheck"
+        }
+    }
+}
+
 function Test-FrontierDisabled {
     Assert-FileExists $FrontierDisabledPath
 
@@ -922,6 +1013,7 @@ switch ($Mode) {
     "AudioHandleApplication" { Test-AudioHandleApplication }
     "UiTestBaseline" { Test-UiTestBaseline }
     "SimulationEventBusOrderGate" { Test-SimulationEventBusOrderGate }
+    "LuaApiManifestGate" { Test-LuaApiManifestGate }
     "FrontierDisabled" { Test-FrontierDisabled }
     "All" {
         Test-CodexOnly
@@ -936,6 +1028,7 @@ switch ($Mode) {
         Test-AudioHandleApplication
         Test-UiTestBaseline
         Test-SimulationEventBusOrderGate
+        Test-LuaApiManifestGate
         Test-FrontierDisabled
     }
 }
