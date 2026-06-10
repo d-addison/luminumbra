@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "FrontierDisabled", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "FrontierDisabled", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug"
@@ -425,6 +425,84 @@ function Test-ShaderInventory {
         }
         if (-not $matches[0].compiled -or -not $matches[0].linked -or -not $matches[0].ok) {
             throw "Shader suite health failed for '$requiredProgram'"
+        }
+    }
+}
+
+function Test-GpuSdfCallbackSafetyGate {
+    $renderDir = "build/$BuildPreset/test-artifacts/render"
+    $analysisPath = Join-Path $renderDir "gpu-sdf-callback-safety.json"
+
+    if (-not (Test-Path $analysisPath)) {
+        throw "gpu SDF callback safety gate not yet implemented - missing $analysisPath (produced by task T-EF-27-gpu-sdf-callback-safety-gate)"
+    }
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.render.gpu_sdf_callback_safety.v1") {
+        throw "Unexpected GPU SDF callback safety schema '$($analysis.schema)'"
+    }
+    if (-not $analysis.passed) {
+        throw "GPU SDF callback safety analysis reported failure"
+    }
+    if ($analysis.callback.source -ne "src/luminumbra_client/rendering/RenderPipeline.cpp") {
+        throw "GPU SDF callback safety analysis must inspect RenderPipeline.cpp"
+    }
+    if ($analysis.callback.header -ne "src/luminumbra_client/rendering/RenderPipeline.h") {
+        throw "GPU SDF callback safety analysis must inspect RenderPipeline.h"
+    }
+    if ($analysis.callback.setup_api -ne "SetupGPUSDFIntegration") {
+        throw "GPU SDF callback safety analysis must require SetupGPUSDFIntegration"
+    }
+    if ($analysis.callback.generation_api -ne "generate_chunk_sdf_gpu") {
+        throw "GPU SDF callback safety analysis must require generate_chunk_sdf_gpu"
+    }
+    if ($analysis.callback.world_callback -ne "SetGPUSDFCallback") {
+        throw "GPU SDF callback safety analysis must require SetGPUSDFCallback"
+    }
+    if ($analysis.callback.disabled_gate -ne "kEnableExperimentalGpuSdfIntegration") {
+        throw "GPU SDF callback safety analysis must require kEnableExperimentalGpuSdfIntegration"
+    }
+    if ($analysis.callback.default_enabled -ne $false) {
+        throw "GPU SDF callback integration must remain disabled by default"
+    }
+    if (-not $analysis.callback.callback_api_present) {
+        throw "GPU SDF callback safety analysis reports missing callback API"
+    }
+    if (-not $analysis.callback.clears_callback_when_disabled) {
+        throw "GPU SDF callback setup must clear the world callback while disabled"
+    }
+    if (-not $analysis.callback.raw_this_capture_present) {
+        throw "GPU SDF callback safety analysis must report the raw pipeline capture risk"
+    }
+    if (-not $analysis.callback.raw_this_capture_gated) {
+        throw "Raw RenderPipeline capture must stay gated behind explicit opt-in"
+    }
+    if (-not $analysis.callback.gpu_readback_is_synchronous) {
+        throw "GPU SDF callback safety analysis must record synchronous readback while callback path is disabled"
+    }
+    if (-not $analysis.callback.gl_context_required) {
+        throw "GPU SDF callback safety analysis must record render GL context ownership"
+    }
+    if (-not $analysis.callback.safe_until_explicit_opt_in) {
+        throw "GPU SDF callback path must be safe until explicit opt-in"
+    }
+
+    $requiredChecks = @(
+        "gpu sdf callback API is present",
+        "gpu sdf integration is disabled by default",
+        "disabled setup clears any world callback",
+        "raw pipeline capture is gated behind explicit opt-in",
+        "gpu readback stays synchronous while callback path is disabled",
+        "callback path requires render GL context ownership"
+    )
+    $checks = @($analysis.checks)
+    foreach ($requiredCheck in $requiredChecks) {
+        $matches = @($checks | Where-Object { $_.name -eq $requiredCheck })
+        if ($matches.Count -ne 1) {
+            throw "GPU SDF callback safety analysis is missing check '$requiredCheck'"
+        }
+        if (-not $matches[0].passed) {
+            throw "GPU SDF callback safety check failed: $requiredCheck"
         }
     }
 }
@@ -1571,6 +1649,7 @@ switch ($Mode) {
     "MaterialVisual" { Test-MaterialVisual }
     "RenderHealth" { Test-RenderHealth }
     "ShaderInventory" { Test-ShaderInventory }
+    "GpuSdfCallbackSafetyGate" { Test-GpuSdfCallbackSafetyGate }
     "ChunkCollisionLifecycle" { Test-ChunkCollisionLifecycle }
     "PhysicsReplay" { Test-PhysicsReplay }
     "AudioNullTelemetry" { Test-AudioNullTelemetry }
@@ -1591,6 +1670,7 @@ switch ($Mode) {
         Test-Panels
         Test-RenderHealth
         Test-ShaderInventory
+        Test-GpuSdfCallbackSafetyGate
         Test-ChunkCollisionLifecycle
         Test-PhysicsReplay
         Test-AudioNullTelemetry
