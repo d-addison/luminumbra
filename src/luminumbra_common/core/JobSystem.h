@@ -22,6 +22,13 @@ struct JobHandle {
 
 class JobSystem {
 public:
+    struct RuntimeStats {
+        size_t worker_count = 0;
+        size_t queue_depth = 0;
+        bool accepting_jobs = false;
+        bool stop_requested = false;
+    };
+
     ~JobSystem();
 
     void startup();
@@ -29,13 +36,14 @@ public:
     void dispatch(Job job);
     JobHandle dispatch_batch(const std::vector<Job>& jobs);
     void wait(const JobHandle& handle);
+    RuntimeStats get_runtime_stats() const;
 
 private:
     void worker_loop();
 
     std::vector<std::thread> m_workers;
     std::queue<Job> m_job_queue;
-    std::mutex m_queue_mutex;
+    mutable std::mutex m_queue_mutex;
     std::condition_variable m_condition;
     std::atomic<bool> m_stop_threads = false;
     bool m_accepting_jobs = false;

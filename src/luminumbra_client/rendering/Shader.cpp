@@ -1,11 +1,14 @@
 #include "Shader.h"
 #include "core/Log.h"
+#include <algorithm>
 #include <fstream>
 #include <sstream>
+#include <vector>
 
 namespace Luminumbra::Rendering {
 
 Shader::Shader(const char* vertexPath, const char* fragmentPath) {
+    m_debug_name = std::string(vertexPath) + " | " + fragmentPath;
     std::string vertexCode, fragmentCode;
     std::ifstream vShaderFile, fShaderFile;
     vShaderFile.exceptions(std::ifstream::failbit | std::ifstream::badbit);
@@ -21,6 +24,7 @@ Shader::Shader(const char* vertexPath, const char* fragmentPath) {
         fragmentCode = fShaderStream.str();
     } catch (const std::exception& e) {
         LUMINUMBRA_CORE_ERROR("SHADER IO ERROR ({} / {}): {}", vertexPath, fragmentPath, e.what());
+        m_diagnostic = e.what();
         m_id = 0;
         return;
     }
@@ -33,24 +37,41 @@ Shader::Shader(const char* vertexPath, const char* fragmentPath) {
     vertex = glCreateShader(GL_VERTEX_SHADER);
     glShaderSource(vertex, 1, &vShaderCode, nullptr);
     glCompileShader(vertex);
-    checkCompileErrors(vertex, "VERTEX");
+    const bool vertex_ok = checkCompileErrors(vertex, "VERTEX");
 
     // Compile Fragment Shader
     fragment = glCreateShader(GL_FRAGMENT_SHADER);
     glShaderSource(fragment, 1, &fShaderCode, nullptr);
     glCompileShader(fragment);
-    checkCompileErrors(fragment, "FRAGMENT");
+    const bool fragment_ok = checkCompileErrors(fragment, "FRAGMENT");
+
+    if (!vertex_ok || !fragment_ok) {
+        glDeleteShader(vertex);
+        glDeleteShader(fragment);
+        m_id = 0;
+        m_valid = false;
+        return;
+    }
 
     // Link Program
     m_id = glCreateProgram();
     glAttachShader(m_id, vertex);
     glAttachShader(m_id, fragment);
     glLinkProgram(m_id);
-    checkCompileErrors(m_id, "PROGRAM");
+    const bool program_ok = checkCompileErrors(m_id, "PROGRAM");
 
     // Delete the shaders as they're linked into our program now and no longer necessary
     glDeleteShader(vertex);
     glDeleteShader(fragment);
+
+    if (!program_ok) {
+        glDeleteProgram(m_id);
+        m_id = 0;
+        m_valid = false;
+        return;
+    }
+
+    m_valid = true;
 }
 
 Shader::~Shader() {
@@ -124,22 +145,31 @@ void Shader::setMat4(const std::string& name, const glm::mat4& mat) const {
 }
 
 // checkCompileErrors implementation remains the same
-void Shader::checkCompileErrors(GLuint shader, std::string type) {
+bool Shader::checkCompileErrors(GLuint shader, const std::string& type) {
     GLint success;
-    GLchar infoLog[1024];
+    GLint log_length = 0;
     if (type != "PROGRAM") {
         glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
         if (!success) {
-            glGetShaderInfoLog(shader, 1024, NULL, infoLog);
-            LUMINUMBRA_CORE_ERROR("SHADER_COMPILATION_ERROR of type: {0}\n{1}", type, infoLog);
+            glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &log_length);
+            std::vector<GLchar> info_log(static_cast<size_t>(std::max(log_length, 1)));
+            glGetShaderInfoLog(shader, static_cast<GLsizei>(info_log.size()), NULL, info_log.data());
+            m_diagnostic = std::string(info_log.data());
+            LUMINUMBRA_CORE_ERROR("SHADER_COMPILATION_ERROR of type: {0} ({1})\n{2}", type, m_debug_name, m_diagnostic);
+            return false;
         }
     } else {
         glGetProgramiv(shader, GL_LINK_STATUS, &success);
         if (!success) {
-            glGetProgramInfoLog(shader, 1024, NULL, infoLog);
-            LUMINUMBRA_CORE_ERROR("PROGRAM_LINKING_ERROR of type: {0}\n{1}", type, infoLog);
+            glGetProgramiv(shader, GL_INFO_LOG_LENGTH, &log_length);
+            std::vector<GLchar> info_log(static_cast<size_t>(std::max(log_length, 1)));
+            glGetProgramInfoLog(shader, static_cast<GLsizei>(info_log.size()), NULL, info_log.data());
+            m_diagnostic = std::string(info_log.data());
+            LUMINUMBRA_CORE_ERROR("PROGRAM_LINKING_ERROR of type: {0} ({1})\n{2}", type, m_debug_name, m_diagnostic);
+            return false;
         }
     }
+    return true;
 }
 
 } // namespace Luminumbra::Rendering

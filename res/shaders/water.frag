@@ -164,11 +164,18 @@ void main()
     
     // --- 12. Enhanced Final Composition ---
     vec3 final_color = mix(refracted_color, reflected_color, fresnel);
-    final_color = mix(final_color, water_color, absorption_factor * 0.8);
+    final_color = mix(final_color, water_color, clamp(0.22 + absorption_factor * 0.68, 0.22, 0.9));
     final_color += underwater_color; // Add underwater environment
     final_color += caustics_color * 0.6; // Add caustics
     final_color += specular_highlight;
     final_color = mix(final_color, foam_color, foam_factor); // Blend foam on top
 
-    o_frag_color = vec4(final_color, 1.0);
+    vec3 minimum_water_tint = max(
+        mix(u_shallow_color, u_deep_color, clamp(absorption_factor, 0.0, 1.0)) * 0.72,
+        vec3(0.025, 0.14, 0.24)
+    );
+    final_color = max(final_color, minimum_water_tint);
+
+    float alpha = clamp(0.58 + absorption_factor * 0.22 + fresnel * 0.12, 0.58, 0.86);
+    o_frag_color = vec4(final_color, alpha);
 }

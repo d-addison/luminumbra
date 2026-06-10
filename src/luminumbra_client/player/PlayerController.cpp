@@ -9,6 +9,13 @@ PlayerController::PlayerController(GLFWwindow* window, Rendering::Camera* camera
     : m_window(window), m_camera(camera), m_physicsSystem(physicsSystem) {
     if (m_mode == MovementMode::Noclip) {
         m_position = m_camera->Position;
+    } else {
+        const float standingEyeHeight = m_standingHeight * 0.95f;
+        m_position = m_camera->Position - glm::vec3(0.0f, standingEyeHeight, 0.0f);
+        if (m_physicsSystem) {
+            m_physicsSystem->create_player_controller(m_position);
+            m_hasInitializedPhysicsPlayer = true;
+        }
     }
 }
 

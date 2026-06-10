@@ -6,6 +6,10 @@
 
 namespace Luminumbra::Client {
 
+const char* WorldGenViewer::LayerArtifactSchema() {
+    return "luminumbra.worldgen_layers.v1";
+}
+
 WorldGenViewer::WorldGenViewer() {
     // Start with default params. In a real app, these might come from the main world system.
     m_params = Systems::TerrainGenParams();
@@ -79,6 +83,16 @@ void WorldGenViewer::UpdateAndRender(bool& is_open, Systems::SHIELD_WorldSystem*
         }
     }
 
+    if (ImGui::CollapsingHeader("Artifact Layers", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Text("Schema: %s", LayerArtifactSchema());
+        if (ImGui::Checkbox("01 Base Terrain", &m_showBaseTerrainLayer)) m_paramsChanged = true;
+        if (ImGui::Checkbox("02 Island Mask", &m_showIslandMaskLayer)) m_paramsChanged = true;
+        if (ImGui::Checkbox("03 Caves", &m_showCaveLayer)) m_paramsChanged = true;
+        if (ImGui::Checkbox("05 Submerged Water", &m_showWaterLayer)) m_paramsChanged = true;
+        ImGui::Checkbox("Topology Deltas", &m_showTopologyDeltas);
+        ImGui::Text("Delta signals: changed SDF samples, SDF sign flips, height deltas");
+    }
+
 
     if (ImGui::CollapsingHeader("Terrain Shape", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (ImGui::SliderFloat("Frequency", &m_params.base_frequency, 0.0001f, 0.05f, "%.4f")) m_paramsChanged = true;
@@ -116,8 +130,8 @@ void WorldGenViewer::RegenerateTexture() {
             float worldZ = (y - m_textureSize / 2.0f) * m_zoom + m_offsetZ;
             Vec3 world_pos(worldX, m_sliceY, worldZ);
 
-            // Get the density value from our internal world generator
-            float density = m_viewerWorldSystem->get_density_at(world_pos);
+            const Systems::WorldGenLayerSample sample = m_viewerWorldSystem->SampleWorldGenLayers(world_pos);
+            const float density = sample.final_density;
 
             // Color the pixel based on density
             uint8_t r = 0, g = 0, b = 0;

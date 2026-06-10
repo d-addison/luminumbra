@@ -145,6 +145,9 @@ foreach(FIRST_PARTY_TARGET IN ITEMS
   luminumbra_common
   luminumbra_client_app
   world_generation_test
+  worldgen_layer_snapshot_test
+  render_smoke_test
+  render_capture_test
 )
   luminumbra_configure_first_party_target(${FIRST_PARTY_TARGET})
 endforeach()

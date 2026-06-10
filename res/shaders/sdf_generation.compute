@@ -43,6 +43,8 @@ uniform float u_seedOffset;
 // Constants
 const int CHUNK_SIZE = 17; // 16 + 1 for padding
 const float SEA_LEVEL = 0.0;
+const float CAVE_SURFACE_CAP_DEPTH = 18.0;
+const float CAVE_SURFACE_FULL_DEPTH = 24.0;
 
 // Multi-octave noise sampling with hardware acceleration
 float sampleTerrainNoise(vec3 pos) {
@@ -88,19 +90,25 @@ float sampleIslandMask(vec2 pos) {
     return smoothstep(0.1, 0.25, island_value);
 }
 
+float caveSurfaceBlend(float terrain_density) {
+    float depth_below_surface = max(0.0, -terrain_density);
+    return smoothstep(CAVE_SURFACE_CAP_DEPTH, CAVE_SURFACE_FULL_DEPTH, depth_below_surface);
+}
+
 float calculateSDF(vec3 world_pos, float terrain_height, float cave_factor, float island_mask) {
     // Apply island mask to terrain height
     if (u_islandMaskEnabled) {
         terrain_height = mix(u_heightOffset, terrain_height, island_mask);
     }
     
-    // Basic terrain SDF: distance to terrain surface
-    float terrain_density = terrain_height - world_pos.y;
+    // CPU SDF convention: negative is solid, positive is empty.
+    float terrain_density = world_pos.y - terrain_height;
     
     // Apply cave carving
     if (u_cavesEnabled && cave_factor > u_caveThreshold) {
         float cave_density = u_caveCarveValue * (cave_factor - u_caveThreshold);
-        terrain_density = min(terrain_density, cave_density);
+        float capped_cave_density = mix(terrain_density, cave_density, caveSurfaceBlend(terrain_density));
+        terrain_density = max(terrain_density, capped_cave_density);
     }
     
     return terrain_density;

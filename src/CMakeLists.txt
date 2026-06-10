@@ -54,7 +54,7 @@ target_link_libraries(luminumbra_client_app PRIVATE
 
 # Link OpenGL
 if(WIN32)
-    target_link_libraries(luminumbra_client_app PRIVATE opengl32)
+    target_link_libraries(luminumbra_client_app PRIVATE opengl32 DbgHelp Psapi)
 elseif(APPLE)
     find_package(OpenGL REQUIRED)
     target_link_libraries(luminumbra_client_app PRIVATE ${OPENGL_LIBRARIES})

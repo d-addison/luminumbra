@@ -67,6 +67,7 @@ private:
     
     std::string m_documentToLoad;
     std::string m_activeDocument;
+    std::string m_selectedWorldId;
 
     // Static pointer to the active instance for callbacks
     static Rml_UIManager* s_active_manager;

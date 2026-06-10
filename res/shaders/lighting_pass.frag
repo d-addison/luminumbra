@@ -3,12 +3,11 @@ out vec4 FragColor;
 
 in vec2 TexCoords;
 
-// Compressed G-Buffer samplers (match g_buffer.frag output names)
-uniform sampler2D gPositionDepth;     // RG32F: XZ in view space
+// G-Buffer samplers (match g_buffer.frag output names)
+uniform sampler2D gPosition;          // RGB16F: full view-space position
 uniform sampler2D gNormalMaterial;    // RGB10A2: Octahedral normal + material ID  
 uniform sampler2D gAlbedoRoughness;   // RGBA8: RGB albedo + roughness
 uniform sampler2D gMetallicAO;        // RG16F: Metallic + AO
-uniform sampler2D gDepth;          // Depth buffer for position reconstruction
 uniform sampler2D u_ssao;
 
 // Material lookup
@@ -139,14 +138,7 @@ vec3 CalculateLightContribution(vec3 L, vec3 V, vec3 N, vec3 F0, vec3 albedo, fl
 void main() {
     // --- Step 1: Decode compressed G-Buffer ---
     
-    // Get depth from depth buffer for position reconstruction
-    float depth = texture(gDepth, TexCoords).r;
-    
-    // Decode position: reconstruct Y from depth and XZ components
-    vec2 positionXZ = texture(gPositionDepth, TexCoords).xy;
-    // Reconstruct view-space Y from depth
-    float viewDepth = (2.0 * 0.1 * 250.0) / (250.0 + 0.1 - (2.0 * depth - 1.0) * (250.0 - 0.1)); // near=0.1, far=250.0
-    vec3 viewPos = vec3(positionXZ, -viewDepth); // Negative because view space Z
+    vec3 viewPos = texture(gPosition, TexCoords).rgb;
     
     // Decode octahedral normal and material ID
     vec4 normalData = texture(gNormalMaterial, TexCoords);
@@ -167,9 +159,12 @@ void main() {
     vec3 FragPos = vec3(u_inverseView * vec4(viewPos, 1.0));
     vec3 Normal = normalize(mat3(u_inverseView) * viewNormal);
 
-    // Use tri-planar textures for terrain materials if MaterialID > 0
-    if (MaterialID > 0u) {
-        Albedo = TriPlanar(FragPos, Normal, u_terrainTextures, float(MaterialID-1u), 0.1);
+    // Use tri-planar textures only for material IDs backed by terrain texture layers.
+    // Crystal, water, or invalid IDs keep their G-buffer albedo instead of sampling
+    // outside the texture array and producing undefined material patches.
+    int terrainLayerCount = textureSize(u_terrainTextures, 0).z;
+    if (MaterialID > 0u && int(MaterialID) <= terrainLayerCount) {
+        Albedo = TriPlanar(FragPos, Normal, u_terrainTextures, float(MaterialID - 1u), 0.1);
     }
 
     vec3 V = normalize(u_viewPos - FragPos);

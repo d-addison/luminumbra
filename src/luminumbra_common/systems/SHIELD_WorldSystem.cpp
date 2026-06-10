@@ -1,19 +1,27 @@
 #include "SHIELD_WorldSystem.h"
 #include "entt/entt.hpp"
 #include "../world/MarchingCubes.h"
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <algorithm> // Required for std::max and std::min
+#include <limits>
+#include <unordered_map>
+#include <unordered_set>
 #include "systems/PhysicsSystem.h"
 #include "../core/Log.h"
 #include "WaterSystem.h"
 
-constexpr int BASE_WORK_BUDGET_EQUIVALENT = 16;
+constexpr int BASE_WORK_BUDGET_EQUIVALENT = 192;
 const int MAX_CHUNKS_TO_PROCESS_PER_FRAME = std::max(1, 
     static_cast<int>(BASE_WORK_BUDGET_EQUIVALENT / (static_cast<float>(Luminumbra::CHUNK_VOLUME) / 4096.0f))
 );
-const int MAX_COLLISION_MESHES_PER_FRAME = 2;
-constexpr size_t MAX_ACTIVE_CHUNKS = 2048;  // Increased from 5 to support proper world streaming
+const int MAX_COLLISION_MESHES_PER_FRAME = 16;
+constexpr size_t MAX_ACTIVE_CHUNKS = 20000;
+constexpr size_t STREAMING_MAX_ACTIVE_CHUNKS_BUDGET = 8192;
+constexpr int STREAMING_ACTIVATION_INTERVAL_FRAMES = 4;
+constexpr int STREAMING_NEAR_VERTICAL_STACK_RADIUS = 4;
+constexpr int STREAMING_MID_VERTICAL_STACK_RADIUS = 12;
 namespace Luminumbra::Systems {
 
 constexpr float FLOW_CONSTANT = 0.1f;
@@ -22,10 +30,49 @@ constexpr float MAX_WATER_COMPRESSION = 0.2f;
 
 namespace {
 
-float apply_cave_field(float terrain_density, float raw_cave_noise, const TerrainGenParams& params) {
+constexpr float kCaveSurfaceCapDepth = 18.0f;
+constexpr float kCaveSurfaceFullDepth = 24.0f;
+
+float smoothstep01(float value) {
+    const float t = std::clamp(value, 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+float cave_surface_blend(float terrain_density) {
+    const float depth_below_surface = std::max(0.0f, -terrain_density);
+    return smoothstep01((depth_below_surface - kCaveSurfaceCapDepth) /
+                        (kCaveSurfaceFullDepth - kCaveSurfaceCapDepth));
+}
+
+float surface_capped_cave_density(float terrain_density, float raw_cave_noise, const TerrainGenParams& params) {
     const float cave_val = std::clamp((raw_cave_noise + 1.0f) * 0.5f, 0.0f, 1.0f);
     const float cave_density = (cave_val - params.cave_threshold) * params.cave_carve_value;
-    return std::max(terrain_density, cave_density);
+    const float cap_blend = cave_surface_blend(terrain_density);
+    return terrain_density + (cave_density - terrain_density) * cap_blend;
+}
+
+float apply_cave_field(float terrain_density, float raw_cave_noise, const TerrainGenParams& params) {
+    return std::max(terrain_density, surface_capped_cave_density(terrain_density, raw_cave_noise, params));
+}
+
+MaterialType classify_material(const WorldGenLayerSample& sample) {
+    if (!sample.solid) {
+        return MaterialType::Air;
+    }
+
+    if (sample.world_pos.y < 34.0f && sample.final_height < 36.0f) {
+        return MaterialType::Sand;
+    }
+
+    const float depth = sample.final_height - sample.world_pos.y;
+    if (depth < 1.0f) {
+        return MaterialType::Grass;
+    }
+    if (depth < 5.0f) {
+        return MaterialType::Soil;
+    }
+
+    return MaterialType::Stone;
 }
 
 void clear_completed_job_handle(JobHandle& handle) {
@@ -36,6 +83,49 @@ void clear_completed_job_handle(JobHandle& handle) {
 
 bool has_active_job(const JobHandle& handle) {
     return handle.counter && handle.counter->load(std::memory_order_acquire) > 0;
+}
+
+int horizon_lod_for_ring(int ring_distance, int surface_radius, int collision_radius) {
+    if (ring_distance <= collision_radius) {
+        return 0;
+    }
+
+    const int mid_lod_ring = std::max(collision_radius, (surface_radius * 2) / 3);
+    return ring_distance <= mid_lod_ring ? 1 : 2;
+}
+
+int horizontal_ring_distance(int dx, int dz) {
+    return std::max(std::abs(dx), std::abs(dz));
+}
+
+int horizontal_distance_sq(int dx, int dz) {
+    return dx * dx + dz * dz;
+}
+
+u64 horizontal_chunk_key(int x, int z) {
+    return (static_cast<u64>(static_cast<u32>(x)) << 32u) | static_cast<u32>(z);
+}
+
+int streaming_radius_for_pressure(std::size_t active_chunks, std::size_t loading_chunks, std::size_t idle_chunks, bool generation_active, bool meshing_active) {
+    const std::size_t pending_chunks = loading_chunks + idle_chunks;
+    if (active_chunks < 800u && !generation_active) {
+        return std::min(RENDER_DISTANCE, 24);
+    }
+    if (generation_active || meshing_active || pending_chunks > static_cast<std::size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME * 8)) {
+        return std::min(RENDER_DISTANCE, 20);
+    }
+    if (active_chunks > STREAMING_MAX_ACTIVE_CHUNKS_BUDGET * 3u / 4u) {
+        return std::min(RENDER_DISTANCE, 24);
+    }
+    return RENDER_DISTANCE;
+}
+
+void clear_streaming_state_counts(SHIELD_WorldSystem::StreamingBudgetFrameStats& stats) {
+    stats.ready_chunks = 0;
+    stats.renderable_chunks = 0;
+    stats.idle_chunks = 0;
+    stats.loading_chunks = 0;
+    stats.meshing_chunks = 0;
 }
 
 }
@@ -63,7 +153,7 @@ void SHIELD_WorldSystem::wait_for_meshing_jobs() {
         m_job_system->wait(m_streaming_state.meshing_job_handle);
     }
 
-    m_streaming_state.meshing_job_handle = {};
+    process_completed_meshing_jobs();
 }
 
 void SHIELD_WorldSystem::reinitialize_noise() {
@@ -108,45 +198,115 @@ int SHIELD_WorldSystem::get_lod_step_for_level(int lod_level) const {
 }
 
 std::vector<IVec3> SHIELD_WorldSystem::GetInitialChunkLoadList(const Vec3& center_pos) const {
-    // Get the terrain height at the spawn position
-    float terrain_height = GetTerrainHeightAt(center_pos.x, center_pos.z);
-    
-    // Calculate which chunk contains the spawn position (not just terrain)
     const IVec3 spawn_chunk_coords = world_to_chunk_coords(center_pos);
-    const IVec3 terrain_chunk_coords = world_to_chunk_coords(Vec3(center_pos.x, terrain_height, center_pos.z));
-    
-    std::vector<IVec3> initial_chunks;
-    
-    // Load a 3x3 region horizontally, and vertically from terrain to spawn + some extra
-    const int INITIAL_LOAD_RADIUS = 1;
-    int min_y = std::min(spawn_chunk_coords.y - 1, terrain_chunk_coords.y - 1);
-    int max_y = std::max(spawn_chunk_coords.y + 1, terrain_chunk_coords.y + 3);  // Extra chunks above terrain
 
-    for (int dy = min_y; dy <= max_y; ++dy) {
-        for (int dz = -INITIAL_LOAD_RADIUS; dz <= INITIAL_LOAD_RADIUS; ++dz) {
-            for (int dx = -INITIAL_LOAD_RADIUS; dx <= INITIAL_LOAD_RADIUS; ++dx) {
-                // Simple cylindrical check around spawn position
-                if (dx * dx + dz * dz <= INITIAL_LOAD_RADIUS * INITIAL_LOAD_RADIUS) {
-                    initial_chunks.emplace_back(spawn_chunk_coords + IVec3(dx, dy - spawn_chunk_coords.y, dz));
-                }
+    const int INITIAL_LOAD_RADIUS = 12;
+    int min_y = std::numeric_limits<int>::max();
+    int max_y = std::numeric_limits<int>::min();
+
+    struct InitialChunkCandidate {
+        IVec3 coords;
+        int vertical_rank = 0;
+        int ring_distance = 0;
+        int horizontal_distance_sq = 0;
+    };
+
+    std::vector<InitialChunkCandidate> candidates;
+    candidates.reserve(1875);
+
+    for (int dz = -INITIAL_LOAD_RADIUS; dz <= INITIAL_LOAD_RADIUS; ++dz) {
+        for (int dx = -INITIAL_LOAD_RADIUS; dx <= INITIAL_LOAD_RADIUS; ++dx) {
+            const int chunk_x = spawn_chunk_coords.x + dx;
+            const int chunk_z = spawn_chunk_coords.z + dz;
+            const float sample_x = static_cast<float>(chunk_x * CHUNK_SIZE_X) + CHUNK_SIZE_X * 0.5f;
+            const float sample_z = static_cast<float>(chunk_z * CHUNK_SIZE_Z) + CHUNK_SIZE_Z * 0.5f;
+            const float terrain_height = GetTerrainHeightAt(sample_x, sample_z);
+            const int surface_y = world_to_chunk_coords(Vec3(sample_x, terrain_height, sample_z)).y;
+
+            const std::array<int, 3> vertical_offsets{0, -1, 1};
+            for (const int offset : vertical_offsets) {
+                const int y = surface_y + offset;
+                candidates.push_back({
+                    IVec3(chunk_x, y, chunk_z),
+                    std::abs(offset),
+                    horizontal_ring_distance(dx, dz),
+                    horizontal_distance_sq(dx, dz)
+                });
+                min_y = std::min(min_y, y);
+                max_y = std::max(max_y, y);
             }
         }
     }
-    
+
+    std::sort(candidates.begin(), candidates.end(), [](const InitialChunkCandidate& a, const InitialChunkCandidate& b) {
+        if (a.vertical_rank != b.vertical_rank) {
+            return a.vertical_rank < b.vertical_rank;
+        }
+        if (a.ring_distance != b.ring_distance) {
+            return a.ring_distance < b.ring_distance;
+        }
+        if (a.horizontal_distance_sq != b.horizontal_distance_sq) {
+            return a.horizontal_distance_sq < b.horizontal_distance_sq;
+        }
+        if (a.coords.y != b.coords.y) {
+            return a.coords.y < b.coords.y;
+        }
+        if (a.coords.x != b.coords.x) {
+            return a.coords.x < b.coords.x;
+        }
+        return a.coords.z < b.coords.z;
+    });
+
+    std::vector<IVec3> initial_chunks;
+    initial_chunks.reserve(candidates.size());
+    for (const InitialChunkCandidate& candidate : candidates) {
+        initial_chunks.push_back(candidate.coords);
+    }
+
     // Debug: Log initial chunk loading
+    const float spawn_terrain_height = GetTerrainHeightAt(center_pos.x, center_pos.z);
     LUMINUMBRA_CORE_WARN("Loading {} chunks - Spawn Y={}, Terrain Y={}, Chunk range Y={}..{}", 
-        initial_chunks.size(), center_pos.y, terrain_height, min_y * CHUNK_SIZE_Y, max_y * CHUNK_SIZE_Y);
+        initial_chunks.size(), center_pos.y, spawn_terrain_height, min_y * CHUNK_SIZE_Y, max_y * CHUNK_SIZE_Y);
     
     return initial_chunks;
 }
 
 void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_position, PhysicsSystem* physics_system) {
     clear_completed_job_handle(m_streaming_state.generation_job_handle);
-    wait_for_meshing_jobs();
+    process_completed_meshing_jobs();
+
+    m_last_streaming_budget_stats = {};
+    m_last_streaming_budget_stats.update_interval_frames = STREAMING_ACTIVATION_INTERVAL_FRAMES;
+    m_last_streaming_budget_stats.requested_render_radius = RENDER_DISTANCE;
+    m_last_streaming_budget_stats.max_active_chunks_budget = STREAMING_MAX_ACTIVE_CHUNKS_BUDGET;
+    m_last_streaming_budget_stats.generation_job_active = has_active_job(m_streaming_state.generation_job_handle);
+    m_last_streaming_budget_stats.meshing_job_active = has_active_job(m_streaming_state.meshing_job_handle);
+    m_last_streaming_budget_stats.active_chunks_before = m_streaming_state.chunks.size();
+    clear_streaming_state_counts(m_last_streaming_budget_stats);
+    for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
+        (void)id;
+        if (!chunk_ptr) {
+            continue;
+        }
+
+        const ChunkState state = chunk_ptr->get_state();
+        if (state == ChunkState::Ready) {
+            ++m_last_streaming_budget_stats.ready_chunks;
+            if (!chunk_ptr->mesh_vertices.empty() && !chunk_ptr->mesh_indices.empty()) {
+                ++m_last_streaming_budget_stats.renderable_chunks;
+            }
+        } else if (state == ChunkState::Idle) {
+            ++m_last_streaming_budget_stats.idle_chunks;
+        } else if (state == ChunkState::Loading) {
+            ++m_last_streaming_budget_stats.loading_chunks;
+        } else if (state == ChunkState::Meshing) {
+            ++m_last_streaming_budget_stats.meshing_chunks;
+        }
+    }
 
     // Decouple the expensive chunk activation/deactivation logic from the frame rate.
     m_update_tick_counter++;
-    if (m_update_tick_counter >= 10) { // Run this logic only every 10 frames.
+    if (m_update_tick_counter >= STREAMING_ACTIVATION_INTERVAL_FRAMES) {
         update_chunk_activation(camera_position, physics_system);
         m_update_tick_counter = 0;
     }
@@ -157,17 +317,34 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
         m_water_system->update(registry, m_streaming_state.chunks);
     }
 
-     // Step 3: Schedule meshing jobs for chunks that need it
-    std::vector<std::pair<std::shared_ptr<Luminumbra::Chunk>, int>> chunks_to_mesh_jobs;
-    chunks_to_mesh_jobs.reserve(64);
+    // Step 3: Schedule meshing jobs for chunks that need it.
+    struct MeshingCandidate {
+        std::shared_ptr<Luminumbra::Chunk> chunk;
+        int required_lod = 0;
+        bool has_active_mesh = false;
+        bool terrain_mesh_required = true;
+        int vertical_surface_distance = 0;
+        float distance_sq = 0.0f;
+    };
+
+    std::vector<MeshingCandidate> meshing_candidates;
+    meshing_candidates.reserve(MAX_CHUNKS_TO_PROCESS_PER_FRAME * 2);
+    std::vector<MeshingWorkItem> chunks_to_mesh_jobs;
+    chunks_to_mesh_jobs.reserve(MAX_CHUNKS_TO_PROCESS_PER_FRAME);
 
     // Chunk state logging removed from hot path - too expensive
 
     for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
+        (void)id;
         bool needs_meshing = false;
+        bool terrain_mesh_required = true;
         int required_lod = -1;
 
         ChunkState state = chunk_ptr->get_state();
+        const int pending_lod = chunk_ptr->pending_lod.load(std::memory_order_acquire);
+        if (pending_lod >= 0) {
+            continue;
+        }
         
         if (state == Luminumbra::ChunkState::Idle) {
             needs_meshing = true;
@@ -178,21 +355,76 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
 
             if (required_lod != chunk_ptr->current_lod.load()) {
                 needs_meshing = true;
+                terrain_mesh_required = true;
+            } else if (required_lod == 0 &&
+                       chunk_ptr->has_water_sim.load(std::memory_order_acquire) &&
+                       !chunk_ptr->water_mesh_generated.load(std::memory_order_acquire))
+            {
+                needs_meshing = true;
+                terrain_mesh_required = false;
             }
         }
         
         if (needs_meshing) {
+            const Vec3 chunk_center = (Vec3(chunk_ptr->get_coords()) + 0.5f) * Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
             if (required_lod == -1) {
-                Vec3 chunk_center = (Vec3(chunk_ptr->get_coords()) + 0.5f) * Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
                 float dist = glm::distance(camera_position, chunk_center);
                 required_lod = get_lod_level_for_distance(dist);
             }
-            chunks_to_mesh_jobs.push_back({chunk_ptr, required_lod});
-            if (chunks_to_mesh_jobs.size() >= MAX_CHUNKS_TO_PROCESS_PER_FRAME) break;
+            const float terrain_height = GetTerrainHeightAt(chunk_center.x, chunk_center.z);
+            const int surface_y = world_to_chunk_coords(Vec3(chunk_center.x, terrain_height, chunk_center.z)).y;
+            const IVec3 delta = chunk_ptr->get_coords() - world_to_chunk_coords(camera_position);
+            const float distance_sq = static_cast<float>(horizontal_distance_sq(delta.x, delta.z) + delta.y * delta.y);
+            meshing_candidates.push_back({
+                chunk_ptr,
+                required_lod,
+                state == Luminumbra::ChunkState::Ready && !chunk_ptr->mesh_vertices.empty() && !chunk_ptr->mesh_indices.empty(),
+                terrain_mesh_required,
+                std::abs(chunk_ptr->get_coords().y - surface_y),
+                distance_sq
+            });
         }
     }
 
-    if (!chunks_to_mesh_jobs.empty()) {
+    m_last_streaming_budget_stats.meshing_candidates = meshing_candidates.size();
+    const bool meshing_job_active = has_active_job(m_streaming_state.meshing_job_handle);
+    m_last_streaming_budget_stats.meshing_job_active = meshing_job_active;
+    m_last_streaming_budget_stats.meshing_budget = meshing_job_active ? 0 : MAX_CHUNKS_TO_PROCESS_PER_FRAME;
+
+    if (!meshing_candidates.empty() && !meshing_job_active) {
+        std::sort(meshing_candidates.begin(), meshing_candidates.end(), [](const MeshingCandidate& a, const MeshingCandidate& b) {
+            if (a.has_active_mesh != b.has_active_mesh) {
+                return !a.has_active_mesh;
+            }
+            if (a.vertical_surface_distance != b.vertical_surface_distance) {
+                return a.vertical_surface_distance < b.vertical_surface_distance;
+            }
+            if (a.distance_sq != b.distance_sq) {
+                return a.distance_sq < b.distance_sq;
+            }
+            if (a.required_lod != b.required_lod) {
+                return a.required_lod < b.required_lod;
+            }
+            return a.chunk->get_id() < b.chunk->get_id();
+        });
+
+        const std::size_t budget = std::min(
+            meshing_candidates.size(),
+            static_cast<std::size_t>(m_last_streaming_budget_stats.meshing_budget)
+        );
+        for (std::size_t i = 0; i < budget; ++i) {
+            chunks_to_mesh_jobs.push_back({
+                meshing_candidates[i].chunk,
+                meshing_candidates[i].required_lod,
+                meshing_candidates[i].terrain_mesh_required
+            });
+        }
+
+        m_last_streaming_budget_stats.scheduled_meshing = chunks_to_mesh_jobs.size();
+        m_last_streaming_budget_stats.deferred_meshing = meshing_candidates.size() - chunks_to_mesh_jobs.size();
+    }
+
+    if (!chunks_to_mesh_jobs.empty() && !meshing_job_active) {
         dispatch_meshing_jobs(chunks_to_mesh_jobs);
     }
     
@@ -214,92 +446,159 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
             }
         }
     }
+
+    m_last_streaming_budget_stats.active_chunks_after = m_streaming_state.chunks.size();
+    clear_streaming_state_counts(m_last_streaming_budget_stats);
+    for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
+        (void)id;
+        if (!chunk_ptr) {
+            continue;
+        }
+
+        const ChunkState state = chunk_ptr->get_state();
+        if (state == ChunkState::Ready) {
+            ++m_last_streaming_budget_stats.ready_chunks;
+            if (!chunk_ptr->mesh_vertices.empty() && !chunk_ptr->mesh_indices.empty()) {
+                ++m_last_streaming_budget_stats.renderable_chunks;
+            }
+        } else if (state == ChunkState::Idle) {
+            ++m_last_streaming_budget_stats.idle_chunks;
+        } else if (state == ChunkState::Loading) {
+            ++m_last_streaming_budget_stats.loading_chunks;
+        } else if (state == ChunkState::Meshing) {
+            ++m_last_streaming_budget_stats.meshing_chunks;
+        }
+    }
 }
 
 void SHIELD_WorldSystem::update_chunk_activation(const Vec3& player_pos, PhysicsSystem* physics_system) {
     const IVec3 camera_chunk = world_to_chunk_coords(player_pos);
-    
-    // Also get the terrain chunk for reference
-    float terrain_height = GetTerrainHeightAt(player_pos.x, player_pos.z);
-    const IVec3 terrain_chunk = world_to_chunk_coords(Vec3(player_pos.x, terrain_height, player_pos.z));
+    struct GenerationCandidate {
+        IVec3 coords;
+        bool surface = false;
+        int ring_distance = 0;
+        int horizontal_distance_sq = 0;
+        int vertical_rank = 0;
+    };
 
-    // 1. Determine all chunks that *should* be loaded
-    std::vector<IVec3> candidates;
-    candidates.reserve((2 * RENDER_DISTANCE + 1) * (2 * RENDER_DISTANCE + 1) * (RENDER_DISTANCE_UP + RENDER_DISTANCE_DOWN + 1));
-    
-    // Use a blend of player position and terrain position for vertical range
-    int min_y_chunk = std::min(camera_chunk.y - RENDER_DISTANCE_DOWN, terrain_chunk.y - 2);
-    int max_y_chunk = std::max(camera_chunk.y + RENDER_DISTANCE_UP, terrain_chunk.y + 2);
-    
-    for (int dy = min_y_chunk; dy <= max_y_chunk; ++dy) {
-        for (int dz = camera_chunk.z - RENDER_DISTANCE; dz <= camera_chunk.z + RENDER_DISTANCE; ++dz) {
-            for (int dx = camera_chunk.x - RENDER_DISTANCE; dx <= camera_chunk.x + RENDER_DISTANCE; ++dx) {
-                // Only load chunks within horizontal render distance
-                int hdist_x = dx - camera_chunk.x;
-                int hdist_z = dz - camera_chunk.z;
-                if (hdist_x * hdist_x + hdist_z * hdist_z <= RENDER_DISTANCE * RENDER_DISTANCE) {
-                    candidates.emplace_back(IVec3(dx, dy, dz));
-                }
+    const int target_radius = streaming_radius_for_pressure(
+        m_streaming_state.chunks.size(),
+        m_last_streaming_budget_stats.loading_chunks,
+        m_last_streaming_budget_stats.idle_chunks,
+        has_active_job(m_streaming_state.generation_job_handle),
+        has_active_job(m_streaming_state.meshing_job_handle)
+    );
+
+    m_last_streaming_budget_stats.target_render_radius = target_radius;
+    m_last_streaming_budget_stats.generation_job_active = has_active_job(m_streaming_state.generation_job_handle);
+    m_last_streaming_budget_stats.generation_budget = m_last_streaming_budget_stats.generation_job_active
+        ? 0
+        : MAX_CHUNKS_TO_PROCESS_PER_FRAME;
+
+    std::vector<GenerationCandidate> to_create;
+    to_create.reserve(static_cast<std::size_t>((target_radius * 2 + 1) * (target_radius * 2 + 1)));
+    std::unordered_set<ChunkID> seen_candidate_ids;
+    seen_candidate_ids.reserve(to_create.capacity() * 2u);
+
+    auto add_candidate = [&](const IVec3& coords, bool surface, int ring_distance, int horizontal_dist2, int vertical_rank) {
+        if (m_streaming_state.chunks.size() + to_create.size() >= STREAMING_MAX_ACTIVE_CHUNKS_BUDGET) {
+            return;
+        }
+
+        const ChunkID id = Chunk::calculate_id(coords);
+        if (m_streaming_state.chunks.find(id) != m_streaming_state.chunks.end()) {
+            return;
+        }
+        if (!seen_candidate_ids.insert(id).second) {
+            return;
+        }
+
+        to_create.push_back({coords, surface, ring_distance, horizontal_dist2, vertical_rank});
+    };
+
+    for (int dz = -target_radius; dz <= target_radius; ++dz) {
+        for (int dx = -target_radius; dx <= target_radius; ++dx) {
+            const int horizontal_dist2 = horizontal_distance_sq(dx, dz);
+            if (horizontal_dist2 > target_radius * target_radius) {
+                continue;
+            }
+
+            const int chunk_x = camera_chunk.x + dx;
+            const int chunk_z = camera_chunk.z + dz;
+            const float sample_x = static_cast<float>(chunk_x * CHUNK_SIZE_X) + CHUNK_SIZE_X * 0.5f;
+            const float sample_z = static_cast<float>(chunk_z * CHUNK_SIZE_Z) + CHUNK_SIZE_Z * 0.5f;
+            const float terrain_height = GetTerrainHeightAt(sample_x, sample_z);
+            const int surface_y = world_to_chunk_coords(Vec3(sample_x, terrain_height, sample_z)).y;
+            const int ring_distance = horizontal_ring_distance(dx, dz);
+
+            ++m_last_streaming_budget_stats.target_surface_columns;
+            add_candidate(IVec3(chunk_x, surface_y, chunk_z), true, ring_distance, horizontal_dist2, 0);
+
+            if (ring_distance <= STREAMING_NEAR_VERTICAL_STACK_RADIUS) {
+                add_candidate(IVec3(chunk_x, surface_y - 1, chunk_z), false, ring_distance, horizontal_dist2, 1);
+                add_candidate(IVec3(chunk_x, surface_y + 1, chunk_z), false, ring_distance, horizontal_dist2, 1);
+            } else if (ring_distance <= STREAMING_MID_VERTICAL_STACK_RADIUS) {
+                add_candidate(IVec3(chunk_x, surface_y - 1, chunk_z), false, ring_distance, horizontal_dist2, 2);
+                add_candidate(IVec3(chunk_x, surface_y + 1, chunk_z), false, ring_distance, horizontal_dist2, 2);
             }
         }
     }
-    // 2. Identify which of these candidate chunks are new and need to be created.
-    std::vector<std::pair<IVec3, int>> to_create;
-    for (const IVec3& c : candidates) {
-        if (m_streaming_state.chunks.size() + to_create.size() >= MAX_ACTIVE_CHUNKS) {
-            break; 
+
+    std::sort(to_create.begin(), to_create.end(), [](const GenerationCandidate& a, const GenerationCandidate& b) {
+        if (a.surface != b.surface) {
+            return a.surface;
         }
-
-        ChunkID id = Chunk::calculate_id(c);
-        if (m_streaming_state.chunks.find(id) == m_streaming_state.chunks.end()) {
-            IVec3 d = c - camera_chunk;
-            int dist2 = d.x * d.x + d.z * d.z + d.y * d.y;
-            to_create.emplace_back(c, dist2);
+        if (a.ring_distance != b.ring_distance) {
+            return a.ring_distance < b.ring_distance;
         }
-    }
+        if (a.horizontal_distance_sq != b.horizontal_distance_sq) {
+            return a.horizontal_distance_sq < b.horizontal_distance_sq;
+        }
+        if (a.vertical_rank != b.vertical_rank) {
+            return a.vertical_rank < b.vertical_rank;
+        }
+        if (a.coords.y != b.coords.y) {
+            return a.coords.y < b.coords.y;
+        }
+        if (a.coords.x != b.coords.x) {
+            return a.coords.x < b.coords.x;
+        }
+        return a.coords.z < b.coords.z;
+    });
 
-    // 3. Prioritize the creation of chunks closest to the player.
-    std::sort(to_create.begin(), to_create.end(),
-        [](const auto& a, const auto& b) { return a.second < b.second; });
-
-    std::vector<IVec3> high_priority_generate;
-    std::vector<IVec3> low_priority_generate;
-    const int PRIORITY_DISTANCE_SQ = 4 * 4;
-
-    for (const auto& pair : to_create) {
-        if (pair.second <= PRIORITY_DISTANCE_SQ) {
-            high_priority_generate.push_back(pair.first);
+    m_last_streaming_budget_stats.generation_candidates = to_create.size();
+    for (const GenerationCandidate& candidate : to_create) {
+        if (candidate.surface) {
+            ++m_last_streaming_budget_stats.surface_generation_candidates;
         } else {
-            low_priority_generate.push_back(pair.first);
+            ++m_last_streaming_budget_stats.vertical_generation_candidates;
         }
     }
 
-    // 4. Dispatch generation jobs according to priority and budget.
     std::vector<IVec3> generate_now;
-    generate_now.reserve(MAX_CHUNKS_TO_PROCESS_PER_FRAME);
-
-    const size_t high_priority_budget = std::min(
-        high_priority_generate.size(),
-        static_cast<size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME)
-    );
-    generate_now.insert(generate_now.end(), high_priority_generate.begin(), high_priority_generate.begin() + high_priority_budget);
-
-    if (generate_now.size() < static_cast<size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME)) {
-        const size_t remaining_budget = static_cast<size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME) - generate_now.size();
-        const size_t low_priority_budget = std::min(low_priority_generate.size(), remaining_budget);
-        generate_now.insert(generate_now.end(), low_priority_generate.begin(), low_priority_generate.begin() + low_priority_budget);
+    generate_now.reserve(static_cast<std::size_t>(m_last_streaming_budget_stats.generation_budget));
+    if (m_last_streaming_budget_stats.generation_budget > 0) {
+        const std::size_t budget = std::min(
+            to_create.size(),
+            static_cast<std::size_t>(m_last_streaming_budget_stats.generation_budget)
+        );
+        for (std::size_t i = 0; i < budget; ++i) {
+            generate_now.push_back(to_create[i].coords);
+            if (to_create[i].surface) {
+                ++m_last_streaming_budget_stats.surface_generation_scheduled;
+            } else {
+                ++m_last_streaming_budget_stats.vertical_generation_scheduled;
+            }
+        }
     }
 
+    m_last_streaming_budget_stats.scheduled_generation = generate_now.size();
+    m_last_streaming_budget_stats.deferred_generation = to_create.size() - generate_now.size();
     if (!generate_now.empty()) {
         dispatch_generation_jobs(generate_now);
     }
 
-    // <<< OPTIMIZATION START: Efficiently find chunks to unload >>>
-    //
     // 5. Unload chunks that are now out of range.
-    // Instead of building a large set of required chunks, we iterate the active
-    // chunks and check if they are outside an expanded unload radius.
-    // This avoids a costly data structure creation and many hash lookups.
     std::vector<ChunkID> to_unload;
 
     // Add a small buffer (hysteresis) to the render distance to prevent rapid
@@ -319,19 +618,245 @@ void SHIELD_WorldSystem::update_chunk_activation(const Vec3& player_pos, Physics
         }
     }
 
+    m_last_streaming_budget_stats.unloaded_chunks = to_unload.size();
     for (ChunkID id : to_unload) {
         if (physics_system) {
             physics_system->remove_chunk_collision(id);
         }
         m_streaming_state.chunks.erase(id);
     }
-    // <<< OPTIMIZATION END >>>
+}
+
+bool SHIELD_WorldSystem::EnsureCollisionReadyNear(const Vec3& world_pos, PhysicsSystem* physics_system, int horizontal_radius) {
+    return EnsureSurfaceReadyNear(world_pos, physics_system, horizontal_radius, horizontal_radius);
+}
+
+bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSystem* physics_system, int surface_radius, int collision_radius) {
+    if (!physics_system) {
+        return false;
+    }
+
+    wait_for_generation_jobs();
+    wait_for_meshing_jobs();
+
+    const IVec3 center_chunk = world_to_chunk_coords(world_pos);
+    const int radius = std::max(0, surface_radius);
+    const int collision_range = std::max(0, collision_radius);
+    struct SurfaceHorizonChunk {
+        std::shared_ptr<Luminumbra::Chunk> chunk;
+        IVec2 offset{0};
+        int vertical_rank = 0;
+        int lod = 0;
+        int step = 1;
+    };
+
+    std::vector<SurfaceHorizonChunk> chunks_to_build;
+    std::vector<SurfaceHorizonChunk> chunks_to_consider_for_collision;
+    std::array<std::size_t, 3> lod_counts{0u, 0u, 0u};
+    const std::size_t surface_capacity = static_cast<std::size_t>((radius * 2 + 1) * (radius * 2 + 1) * 3);
+    chunks_to_build.reserve(surface_capacity);
+    chunks_to_consider_for_collision.reserve(surface_capacity);
+
+    for (int dz = -radius; dz <= radius; ++dz) {
+        for (int dx = -radius; dx <= radius; ++dx) {
+            const int chunk_x = center_chunk.x + dx;
+            const int chunk_z = center_chunk.z + dz;
+            const float sample_x = static_cast<float>(chunk_x * CHUNK_SIZE_X) + CHUNK_SIZE_X * 0.5f;
+            const float sample_z = static_cast<float>(chunk_z * CHUNK_SIZE_Z) + CHUNK_SIZE_Z * 0.5f;
+            const float terrain_height = GetTerrainHeightAt(sample_x, sample_z);
+            const int chunk_y = world_to_chunk_coords(Vec3(sample_x, terrain_height, sample_z)).y;
+            const int ring_distance = std::max(std::abs(dx), std::abs(dz));
+            const int lod = horizon_lod_for_ring(ring_distance, radius, collision_range);
+            const int step = get_lod_step_for_level(lod);
+            lod_counts[static_cast<std::size_t>(std::clamp(lod, 0, 2))]++;
+
+            for (const int vertical_offset : {-1, 0, 1}) {
+                const IVec3 coords(chunk_x, chunk_y + vertical_offset, chunk_z);
+                const ChunkID id = Chunk::calculate_id(coords);
+
+                auto it = m_streaming_state.chunks.find(id);
+                if (it == m_streaming_state.chunks.end()) {
+                    auto chunk = std::make_shared<Luminumbra::Chunk>(coords);
+                    it = m_streaming_state.chunks.emplace(id, std::move(chunk)).first;
+                }
+
+                auto& chunk = it->second;
+                SurfaceHorizonChunk surface_chunk{
+                    chunk,
+                    IVec2(dx, dz),
+                    std::abs(vertical_offset),
+                    lod,
+                    step
+                };
+                chunks_to_consider_for_collision.push_back(surface_chunk);
+                if (chunk->get_state() != ChunkState::Ready || chunk->current_lod.load() != lod ||
+                    chunk->mesh_vertices.empty() || chunk->mesh_indices.empty())
+                {
+                    chunk->set_state(ChunkState::Loading);
+                    chunks_to_build.push_back(surface_chunk);
+                }
+            }
+        }
+    }
+
+    std::vector<Luminumbra::Job> build_jobs;
+    build_jobs.reserve(chunks_to_build.size());
+    for (const SurfaceHorizonChunk& build_chunk : chunks_to_build) {
+        build_jobs.emplace_back([this, build_chunk]() {
+            const auto& chunk = build_chunk.chunk;
+            GenerateChunkData(*chunk);
+            chunk->set_state(ChunkState::Meshing);
+            Luminumbra::World::MarchingCubes::PolygoniseTerrain(*this, *chunk, 0.0f, build_chunk.step);
+            chunk->water_mesh_vertices.clear();
+            chunk->water_mesh_indices.clear();
+            chunk->current_lod.store(build_chunk.lod);
+            chunk->mesh_version++;
+            chunk->has_collision.store(false);
+            chunk->set_state(ChunkState::Ready);
+        });
+    }
+
+    if (m_job_system && build_jobs.size() > 128u) {
+        m_job_system->wait(m_job_system->dispatch_batch(build_jobs));
+    } else {
+        for (auto& job : build_jobs) {
+            job();
+        }
+    }
+
+    std::unordered_map<u64, const SurfaceHorizonChunk*> surface_by_xz;
+    surface_by_xz.reserve(chunks_to_consider_for_collision.size());
+    for (const SurfaceHorizonChunk& surface_chunk : chunks_to_consider_for_collision) {
+        if (surface_chunk.vertical_rank != 0) {
+            continue;
+        }
+        const IVec3 coords = surface_chunk.chunk->get_coords();
+        surface_by_xz[horizontal_chunk_key(coords.x, coords.z)] = &surface_chunk;
+    }
+
+    for (const SurfaceHorizonChunk& surface_chunk : chunks_to_consider_for_collision) {
+        // Per-cell surface ownership can split a column's coarse mesh across
+        // vertically adjacent chunks, so every meshed coarse chunk needs its
+        // boundary transition skirts - not just the vertical_rank==0 chunk.
+        if (surface_chunk.step <= 1 || surface_chunk.chunk->mesh_vertices.empty()) {
+            continue;
+        }
+
+        const IVec3 coords = surface_chunk.chunk->get_coords();
+        auto transition_faces = Luminumbra::World::MarchingCubes::kNoTransitionFaces;
+        auto add_face_if_neighbor_is_finer = [&](int dx, int dz, Luminumbra::World::MarchingCubes::TerrainTransitionFace face) {
+            const auto neighbor_it = surface_by_xz.find(horizontal_chunk_key(coords.x + dx, coords.z + dz));
+            if (neighbor_it == surface_by_xz.end()) {
+                return;
+            }
+
+            const SurfaceHorizonChunk& neighbor = *neighbor_it->second;
+            const bool neighbor_is_finer = neighbor.lod < surface_chunk.lod;
+            const bool vertical_mixed_lod_pair =
+                neighbor.lod != surface_chunk.lod &&
+                neighbor.chunk->get_coords().y != coords.y;
+            if (neighbor_is_finer || vertical_mixed_lod_pair) {
+                transition_faces |= static_cast<Luminumbra::World::MarchingCubes::TerrainTransitionFaceMask>(face);
+            }
+        };
+
+        add_face_if_neighbor_is_finer(-1, 0, Luminumbra::World::MarchingCubes::TransitionFaceMinX);
+        add_face_if_neighbor_is_finer(1, 0, Luminumbra::World::MarchingCubes::TransitionFaceMaxX);
+        add_face_if_neighbor_is_finer(0, -1, Luminumbra::World::MarchingCubes::TransitionFaceMinZ);
+        add_face_if_neighbor_is_finer(0, 1, Luminumbra::World::MarchingCubes::TransitionFaceMaxZ);
+
+        if (transition_faces != Luminumbra::World::MarchingCubes::kNoTransitionFaces) {
+            Luminumbra::World::MarchingCubes::AddBoundaryTransitionSkirts(
+                *surface_chunk.chunk,
+                surface_chunk.step,
+                transition_faces
+            );
+        }
+    }
+
+    std::size_t collision_count = 0;
+    for (const SurfaceHorizonChunk& surface_chunk : chunks_to_consider_for_collision) {
+        const auto& chunk = surface_chunk.chunk;
+        const IVec2& offset = surface_chunk.offset;
+        if (surface_chunk.lod == 0 &&
+            surface_chunk.vertical_rank == 0 &&
+            std::abs(offset.x) <= collision_range && std::abs(offset.y) <= collision_range &&
+            !chunk->has_collision.load())
+        {
+            physics_system->add_chunk_collision(*chunk);
+            chunk->has_collision.store(true);
+            ++collision_count;
+        }
+    }
+
+    LUMINUMBRA_CORE_INFO("Initial surface horizon ready: radius={}, surface_chunks={}, rebuilt={}, lod0={}, lod1={}, lod2={}, collision_radius={}, collisions={}",
+        radius, chunks_to_consider_for_collision.size(), chunks_to_build.size(),
+        lod_counts[0], lod_counts[1], lod_counts[2], collision_range, collision_count);
+    return true;
 }
 
 float SHIELD_WorldSystem::GetTerrainHeightAt(float world_x, float world_z) const {
-    // <<< FIX: The function returns the value directly.
-    float noise_value = m_terrain_generator->GenSingle2D(world_x * m_params.base_frequency, world_z * m_params.base_frequency, m_seed);
-    return m_params.height_offset + noise_value * m_params.base_amplitude;
+    const float noise_value = m_terrain_generator->GenSingle2D(
+        world_x * m_params.base_frequency,
+        world_z * m_params.base_frequency,
+        m_seed
+    );
+    float terrain_height = m_params.height_offset + noise_value * m_params.base_amplitude;
+    if (m_params.island_mask_enabled) {
+        const float island_value = m_island_mask_generator->GenSingle2D(
+            world_x * m_params.island_mask_frequency,
+            world_z * m_params.island_mask_frequency,
+            m_seed + 2
+        );
+        const float island_mask = glm::smoothstep(0.1f, 0.25f, island_value);
+        terrain_height = glm::mix(m_params.height_offset, terrain_height, island_mask);
+    }
+    return terrain_height;
+}
+
+WorldGenLayerSample SHIELD_WorldSystem::SampleWorldGenLayers(const Vec3& world_pos) const {
+    WorldGenLayerSample sample;
+    sample.world_pos = world_pos;
+
+    sample.base_noise = m_terrain_generator->GenSingle2D(
+        world_pos.x * m_params.base_frequency,
+        world_pos.z * m_params.base_frequency,
+        m_seed
+    );
+    sample.base_height = m_params.height_offset + sample.base_noise * m_params.base_amplitude;
+    sample.final_height = sample.base_height;
+
+    if (m_params.island_mask_enabled) {
+        sample.island_applied = true;
+        sample.island_noise = m_island_mask_generator->GenSingle2D(
+            world_pos.x * m_params.island_mask_frequency,
+            world_pos.z * m_params.island_mask_frequency,
+            m_seed + 2
+        );
+        sample.island_mask = glm::smoothstep(0.1f, 0.25f, sample.island_noise);
+        sample.final_height = glm::mix(m_params.height_offset, sample.base_height, sample.island_mask);
+    }
+
+    sample.terrain_density = world_pos.y - sample.final_height;
+    sample.final_density = sample.terrain_density;
+    sample.cave_density = sample.terrain_density;
+
+    if (m_params.caves_enabled) {
+        sample.caves_applied = true;
+        sample.cave_noise = m_cave_generator->GenSingle3D(
+            world_pos.x * m_params.cave_frequency,
+            world_pos.y * m_params.cave_frequency,
+            world_pos.z * m_params.cave_frequency,
+            m_seed + 1
+        );
+        sample.cave_value = std::clamp((sample.cave_noise + 1.0f) * 0.5f, 0.0f, 1.0f);
+        sample.cave_density = surface_capped_cave_density(sample.terrain_density, sample.cave_noise, m_params);
+        sample.final_density = std::max(sample.terrain_density, sample.cave_density);
+    }
+
+    sample.solid = sample.final_density < 0.0f;
+    sample.material = classify_material(sample);
+    return sample;
 }
 
 float SHIELD_WorldSystem::get_density_at_from_precalculated(const Vec3& world_pos, float terrain_height) const {
@@ -345,20 +870,12 @@ float SHIELD_WorldSystem::get_density_at_from_precalculated(const Vec3& world_po
 }
 
 float SHIELD_WorldSystem::get_density_at(const Vec3& world_pos) const {
-    float terrain_height = GetTerrainHeightAt(world_pos.x, world_pos.z);
-    if (m_params.island_mask_enabled) {
-        // <<< FIX: The function returns the value directly.
-        float island_value = m_island_mask_generator->GenSingle2D(world_pos.x * m_params.island_mask_frequency, world_pos.z * m_params.island_mask_frequency, m_seed + 2);
-        float island_mask = glm::smoothstep(0.1f, 0.25f, island_value);
-        terrain_height = glm::mix(m_params.height_offset, terrain_height, island_mask);
-    }
-    
-    return get_density_at_from_precalculated(world_pos, terrain_height);
+    return SampleWorldGenLayers(world_pos).final_density;
 }
 
 std::vector<Luminumbra::Chunk*> SHIELD_WorldSystem::get_renderable_chunks() {
     clear_completed_job_handle(m_streaming_state.generation_job_handle);
-    wait_for_meshing_jobs();
+    process_completed_meshing_jobs();
 
     std::vector<Luminumbra::Chunk*> renderable;
     renderable.reserve(m_streaming_state.chunks.size());
@@ -383,6 +900,151 @@ std::vector<Luminumbra::Chunk*> SHIELD_WorldSystem::get_renderable_chunks() {
     // Performance logging removed from hot path - use profiler instead
     
     return renderable;
+}
+
+SHIELD_WorldSystem::RuntimeChunkStats SHIELD_WorldSystem::get_runtime_chunk_stats() const {
+    RuntimeChunkStats stats;
+    stats.total_chunks = m_streaming_state.chunks.size();
+    stats.generation_job_active = has_active_job(m_streaming_state.generation_job_handle);
+    stats.meshing_job_active = has_active_job(m_streaming_state.meshing_job_handle);
+
+    for (const auto& [id, chunk_ptr] : m_streaming_state.chunks) {
+        (void)id;
+        if (!chunk_ptr) {
+            continue;
+        }
+
+        switch (chunk_ptr->get_state()) {
+            case ChunkState::Unloaded:
+                ++stats.unloaded_chunks;
+                break;
+            case ChunkState::Loading:
+                ++stats.loading_chunks;
+                break;
+            case ChunkState::Idle:
+                ++stats.idle_chunks;
+                break;
+            case ChunkState::Meshing:
+                ++stats.meshing_chunks;
+                break;
+            case ChunkState::Ready:
+                ++stats.ready_chunks;
+                break;
+            case ChunkState::Unloading:
+                ++stats.unloading_chunks;
+                break;
+        }
+
+        if (!chunk_ptr->mesh_vertices.empty() && !chunk_ptr->mesh_indices.empty()) {
+            ++stats.renderable_chunks;
+        }
+        if (chunk_ptr->has_collision.load(std::memory_order_acquire)) {
+            ++stats.collision_chunks;
+        }
+
+        stats.terrain_vertex_count += chunk_ptr->mesh_vertices.size();
+        stats.terrain_index_count += chunk_ptr->mesh_indices.size();
+        stats.water_vertex_count += chunk_ptr->water_mesh_vertices.size();
+        stats.water_index_count += chunk_ptr->water_mesh_indices.size();
+        stats.terrain_payload_bytes +=
+            (chunk_ptr->mesh_vertices.size() + chunk_ptr->water_mesh_vertices.size()) * sizeof(VoxelVertex) +
+            (chunk_ptr->mesh_indices.size() + chunk_ptr->water_mesh_indices.size()) * sizeof(u32);
+    }
+
+    return stats;
+}
+
+SHIELD_WorldSystem::CameraLocalCoverageStats SHIELD_WorldSystem::get_camera_local_coverage_stats(
+    const Vec3& camera_position,
+    int horizontal_radius) const
+{
+    CameraLocalCoverageStats stats;
+    stats.camera_position = camera_position;
+    stats.camera_chunk = world_to_chunk_coords(camera_position);
+    stats.horizontal_radius = std::max(0, horizontal_radius);
+    stats.terrain_height_under_camera = GetTerrainHeightAt(camera_position.x, camera_position.z);
+    stats.camera_height_above_terrain = camera_position.y - stats.terrain_height_under_camera;
+    stats.surface_chunk_under_camera = world_to_chunk_coords(Vec3(
+        camera_position.x,
+        stats.terrain_height_under_camera,
+        camera_position.z
+    ));
+
+    const IVec3 center_chunk = stats.camera_chunk;
+    for (int dz = -stats.horizontal_radius; dz <= stats.horizontal_radius; ++dz) {
+        for (int dx = -stats.horizontal_radius; dx <= stats.horizontal_radius; ++dx) {
+            const int chunk_x = center_chunk.x + dx;
+            const int chunk_z = center_chunk.z + dz;
+            const float sample_x = static_cast<float>(chunk_x * CHUNK_SIZE_X) + CHUNK_SIZE_X * 0.5f;
+            const float sample_z = static_cast<float>(chunk_z * CHUNK_SIZE_Z) + CHUNK_SIZE_Z * 0.5f;
+            const float terrain_height = GetTerrainHeightAt(sample_x, sample_z);
+            const int chunk_y = world_to_chunk_coords(Vec3(sample_x, terrain_height, sample_z)).y;
+            const IVec3 coords(chunk_x, chunk_y, chunk_z);
+            const bool is_center_surface_chunk =
+                coords.x == stats.surface_chunk_under_camera.x &&
+                coords.y == stats.surface_chunk_under_camera.y &&
+                coords.z == stats.surface_chunk_under_camera.z;
+
+            ++stats.expected_surface_chunks;
+            const auto it = m_streaming_state.chunks.find(Chunk::calculate_id(coords));
+            if (it == m_streaming_state.chunks.end() || !it->second) {
+                ++stats.missing_surface_chunks;
+                continue;
+            }
+
+            ++stats.present_surface_chunks;
+            const auto& chunk = it->second;
+            if (is_center_surface_chunk) {
+                stats.center_chunk_present = true;
+            }
+
+            switch (chunk->get_state()) {
+                case ChunkState::Unloaded:
+                    ++stats.unloaded_surface_chunks;
+                    break;
+                case ChunkState::Loading:
+                    ++stats.loading_surface_chunks;
+                    break;
+                case ChunkState::Idle:
+                    ++stats.idle_surface_chunks;
+                    break;
+                case ChunkState::Meshing:
+                    ++stats.meshing_surface_chunks;
+                    break;
+                case ChunkState::Ready:
+                    ++stats.ready_surface_chunks;
+                    break;
+                case ChunkState::Unloading:
+                    break;
+            }
+
+            if (!chunk->mesh_vertices.empty() && !chunk->mesh_indices.empty()) {
+                ++stats.renderable_surface_chunks;
+                if (is_center_surface_chunk) {
+                    stats.center_chunk_renderable = true;
+                }
+            }
+            if (chunk->has_collision.load(std::memory_order_acquire)) {
+                ++stats.collision_surface_chunks;
+            }
+            if (chunk->pending_lod.load(std::memory_order_acquire) >= 0) {
+                ++stats.pending_lod_chunks;
+            }
+
+            const int lod = chunk->current_lod.load(std::memory_order_acquire);
+            if (lod >= 0 && lod < static_cast<int>(stats.lod_counts.size())) {
+                ++stats.lod_counts[static_cast<std::size_t>(lod)];
+            } else {
+                ++stats.lod_unknown_chunks;
+            }
+        }
+    }
+
+    stats.near_field_renderable =
+        stats.expected_surface_chunks > 0 &&
+        stats.missing_surface_chunks == 0 &&
+        stats.renderable_surface_chunks == stats.expected_surface_chunks;
+    return stats;
 }
 
 void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk) const {
@@ -524,60 +1186,177 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<IVec3>&
     return handle; // Return the handle (will be default-constructed/invalid if no jobs were dispatched)
 }
 
-void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<std::pair<std::shared_ptr<Luminumbra::Chunk>, int>>& chunks_to_mesh) {
+void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem>& chunks_to_mesh) {
+    process_completed_meshing_jobs();
+    if (has_active_job(m_streaming_state.meshing_job_handle)) {
+        return;
+    }
+
     std::vector<Luminumbra::Job> jobs;
-    for (const auto& pair : chunks_to_mesh) {
-        auto& chunk = pair.first;
-        const int lod_level = pair.second;
+    m_streaming_state.meshing_job_chunks.clear();
+    m_streaming_state.meshing_job_chunks.reserve(chunks_to_mesh.size());
+    for (const MeshingWorkItem& work_item : chunks_to_mesh) {
+        auto& chunk = work_item.chunk;
+        const int lod_level = work_item.lod_level;
+        const bool terrain_mesh_required = work_item.terrain_mesh_required;
         const int step = get_lod_step_for_level(lod_level);
+        const bool has_active_mesh = chunk->get_state() == Luminumbra::ChunkState::Ready &&
+            !chunk->mesh_vertices.empty() && !chunk->mesh_indices.empty();
 
-        chunk->set_state(Luminumbra::ChunkState::Meshing);
-        chunk->current_lod.store(lod_level);
+        if (!has_active_mesh) {
+            chunk->set_state(Luminumbra::ChunkState::Meshing);
+        }
+        chunk->pending_mesh_vertices.clear();
+        chunk->pending_mesh_indices.clear();
+        chunk->pending_water_mesh_vertices.clear();
+        chunk->pending_water_mesh_indices.clear();
+        chunk->pending_mesh_ready.store(false, std::memory_order_release);
+        chunk->pending_mesh_failed.store(false, std::memory_order_release);
+        chunk->pending_lod.store(lod_level, std::memory_order_release);
+        m_streaming_state.meshing_job_chunks.push_back({chunk, terrain_mesh_required});
 
-        jobs.emplace_back([this, chunk, step]() {
+        auto transition_faces = Luminumbra::World::MarchingCubes::kNoTransitionFaces;
+        if (terrain_mesh_required && step > 1) {
+            const IVec3 coords = chunk->get_coords();
+            auto add_face_if_neighbor_is_finer = [&](int dx, int dz, Luminumbra::World::MarchingCubes::TerrainTransitionFace face) {
+                for (const auto& [neighbor_id, neighbor] : m_streaming_state.chunks) {
+                    (void)neighbor_id;
+                    if (!neighbor || neighbor == chunk || neighbor->mesh_vertices.empty() || neighbor->mesh_indices.empty()) {
+                        continue;
+                    }
+                    const IVec3 neighbor_coords = neighbor->get_coords();
+                    const int neighbor_lod = neighbor->current_lod.load(std::memory_order_acquire);
+                    if (neighbor_coords.x == coords.x + dx &&
+                        neighbor_coords.z == coords.z + dz &&
+                        neighbor_lod >= 0 &&
+                        (neighbor_lod < lod_level || (neighbor_lod != lod_level && neighbor_coords.y != coords.y)))
+                    {
+                        transition_faces |= static_cast<Luminumbra::World::MarchingCubes::TerrainTransitionFaceMask>(face);
+                        return;
+                    }
+                }
+            };
+
+            add_face_if_neighbor_is_finer(-1, 0, Luminumbra::World::MarchingCubes::TransitionFaceMinX);
+            add_face_if_neighbor_is_finer(1, 0, Luminumbra::World::MarchingCubes::TransitionFaceMaxX);
+            add_face_if_neighbor_is_finer(0, -1, Luminumbra::World::MarchingCubes::TransitionFaceMinZ);
+            add_face_if_neighbor_is_finer(0, 1, Luminumbra::World::MarchingCubes::TransitionFaceMaxZ);
+        }
+
+        jobs.emplace_back([this, chunk, step, transition_faces, terrain_mesh_required]() {
             try {
-                // 1. Generate the terrain mesh from the SDF data
-                Luminumbra::World::MarchingCubes::PolygoniseTerrain(*this, *chunk, 0.0f, step);
+                Luminumbra::Chunk scratch(chunk->get_coords());
+                scratch.water_level_data = chunk->water_level_data;
+                scratch.water_flow_data = chunk->water_flow_data;
+                scratch.water_sim_terrain_height = chunk->water_sim_terrain_height;
+                scratch.has_water_sim.store(chunk->has_water_sim.load(std::memory_order_acquire), std::memory_order_release);
+                scratch.water_mesh_generated.store(false, std::memory_order_release);
+                scratch.current_water_resolution.store(chunk->current_water_resolution.load(std::memory_order_acquire), std::memory_order_release);
+
+                if (terrain_mesh_required) {
+                    scratch.sdf_data = chunk->sdf_data;
+                    scratch.heightmap_data = chunk->heightmap_data;
+
+                    // 1. Generate the terrain mesh from the SDF data into a scratch chunk.
+                    Luminumbra::World::MarchingCubes::PolygoniseTerrain(*this, scratch, 0.0f, step);
+                    Luminumbra::World::MarchingCubes::AddBoundaryTransitionSkirts(scratch, step, transition_faces);
+                }
                 
                 // Terrain mesh generation debug logging removed to prevent segfault
                 
                 // 2. Generate the water surface mesh if the water system exists
                 if (m_water_system) {
-                    // TEMP: Disable water mesh generation to test terrain rendering
-                    // LUMINUMBRA_CORE_WARN("WATER DEBUG: Skipping water mesh for chunk ({},{},{})", 
-                    //     chunk->get_coords().x, chunk->get_coords().y, chunk->get_coords().z);
-                    chunk->water_mesh_vertices.clear();
-                    chunk->water_mesh_indices.clear();
-                    /*
                     // Only generate high-detail water mesh for highest LOD terrain
-                    if (step == 0 || step == 1) {  // Changed from step == 1
-                        Luminumbra::World::MarchingCubes::GenerateWaterMesh(*m_water_system, *this, *chunk);
+                    if (step <= 1) {
+                        Luminumbra::World::MarchingCubes::GenerateWaterMesh(*m_water_system, *this, scratch);
                     } else {
-                        chunk->water_mesh_vertices.clear();
-                        chunk->water_mesh_indices.clear();
+                        scratch.water_mesh_vertices.clear();
+                        scratch.water_mesh_indices.clear();
+                        scratch.water_mesh_generated.store(false, std::memory_order_release);
                     }
-                    */
                 }
 
-                chunk->mesh_version++;
-                chunk->has_collision.store(false); 
-                chunk->set_state(Luminumbra::ChunkState::Ready);
+                if (terrain_mesh_required) {
+                    chunk->pending_mesh_vertices = std::move(scratch.mesh_vertices);
+                    chunk->pending_mesh_indices = std::move(scratch.mesh_indices);
+                }
+                chunk->pending_water_mesh_vertices = std::move(scratch.water_mesh_vertices);
+                chunk->pending_water_mesh_indices = std::move(scratch.water_mesh_indices);
+                chunk->water_mesh_generated.store(scratch.water_mesh_generated.load(std::memory_order_acquire), std::memory_order_release);
+                chunk->pending_mesh_ready.store(true, std::memory_order_release);
                 
                 // Job completion debug logging removed to prevent segfault
             } catch (const std::exception& e) {
                 LUMINUMBRA_CORE_ERROR("MESHING JOB CRASH: Chunk ({},{},{}) failed: {}", 
                     chunk->get_coords().x, chunk->get_coords().y, chunk->get_coords().z, e.what());
-                chunk->set_state(Luminumbra::ChunkState::Idle); // Reset to allow retry
+                chunk->pending_mesh_failed.store(true, std::memory_order_release);
             } catch (...) {
                 LUMINUMBRA_CORE_ERROR("MESHING JOB CRASH: Chunk ({},{},{}) failed with unknown exception", 
                     chunk->get_coords().x, chunk->get_coords().y, chunk->get_coords().z);
-                chunk->set_state(Luminumbra::ChunkState::Idle); // Reset to allow retry
+                chunk->pending_mesh_failed.store(true, std::memory_order_release);
             }
         });
     }
     if (m_job_system && !jobs.empty()) {
         m_streaming_state.meshing_job_handle = m_job_system->dispatch_batch(jobs);
+    } else {
+        for (auto& job : jobs) {
+            job();
+        }
+        m_streaming_state.meshing_job_handle.counter = std::make_shared<std::atomic<int>>(0);
+        process_completed_meshing_jobs();
     }
+}
+
+void SHIELD_WorldSystem::process_completed_meshing_jobs() {
+    if (!m_streaming_state.meshing_job_handle.counter) {
+        return;
+    }
+
+    if (m_streaming_state.meshing_job_handle.counter->load(std::memory_order_acquire) > 0) {
+        return;
+    }
+
+    for (const auto& job_chunk : m_streaming_state.meshing_job_chunks) {
+        const auto& chunk = job_chunk.chunk;
+        if (!chunk) {
+            continue;
+        }
+
+        const int completed_lod = chunk->pending_lod.load(std::memory_order_acquire);
+        const bool mesh_ready = chunk->pending_mesh_ready.load(std::memory_order_acquire);
+        const bool mesh_failed = chunk->pending_mesh_failed.load(std::memory_order_acquire);
+
+        if (mesh_ready && !mesh_failed) {
+            if (job_chunk.terrain_mesh_required) {
+                chunk->mesh_vertices = std::move(chunk->pending_mesh_vertices);
+                chunk->mesh_indices = std::move(chunk->pending_mesh_indices);
+                chunk->current_lod.store(completed_lod, std::memory_order_release);
+                chunk->mesh_version++;
+                chunk->has_collision.store(false, std::memory_order_release);
+            }
+            chunk->water_mesh_vertices = std::move(chunk->pending_water_mesh_vertices);
+            chunk->water_mesh_indices = std::move(chunk->pending_water_mesh_indices);
+            chunk->water_mesh_version++;
+            chunk->water_mesh_dirty_ticks = 0;
+            chunk->set_state(Luminumbra::ChunkState::Ready);
+        } else if (chunk->mesh_vertices.empty() || chunk->mesh_indices.empty()) {
+            chunk->set_state(Luminumbra::ChunkState::Idle);
+        } else {
+            chunk->set_state(Luminumbra::ChunkState::Ready);
+        }
+
+        chunk->pending_mesh_vertices.clear();
+        chunk->pending_mesh_indices.clear();
+        chunk->pending_water_mesh_vertices.clear();
+        chunk->pending_water_mesh_indices.clear();
+        chunk->pending_mesh_ready.store(false, std::memory_order_release);
+        chunk->pending_mesh_failed.store(false, std::memory_order_release);
+        chunk->pending_lod.store(-1, std::memory_order_release);
+    }
+
+    m_streaming_state.meshing_job_chunks.clear();
+    m_streaming_state.meshing_job_handle = {};
 }
 
 void SHIELD_WorldSystem::set_params(const TerrainGenParams& params) {

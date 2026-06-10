@@ -2,9 +2,11 @@
 
 #include "../../include/luminumbra/core/Types.h"
 #include <glad/glad.h>
+#include <array>
 #include <vector>
 #include <memory>
 #include <unordered_map>
+#include <string>
 #include <glm/glm.hpp>
 #include "Mesh.h"
 #include <map>
@@ -57,6 +59,8 @@ struct ChunkRenderData {
     u32 ebo_id = 0;
     u32 element_count = 0;
     u32 mesh_version = 0;
+    u32 vertex_capacity = 0;
+    u32 index_capacity = 0;
     u32 frames_since_inactive = 0;
 };
 
@@ -66,12 +70,15 @@ struct WaterRenderData {
     u32 ebo_id = 0;
     u32 element_count = 0;
     u32 mesh_version = 0;
+    u32 vertex_capacity = 0;
+    u32 index_capacity = 0;
     u32 frames_since_inactive = 0;
 };
 
 struct FrameBufferObject {
     u32 fbo_id = 0;
     u32 color_texture = 0;
+    u32 opaque_color_texture = 0;
     u32 depth_texture = 0;
 };
 
@@ -86,13 +93,138 @@ struct SSAOData {
 
 class RenderPipeline {
 public:
+    struct MeshUploadFrameStats {
+        size_t snapshot_count = 0;
+        size_t terrain_upload_candidates = 0;
+        size_t terrain_uploads = 0;
+        size_t terrain_payload_copies = 0;
+        size_t terrain_payload_bytes = 0;
+        size_t terrain_uploads_deferred = 0;
+        size_t terrain_new_upload_candidates = 0;
+        size_t terrain_stale_upload_candidates = 0;
+        size_t terrain_new_uploads_selected = 0;
+        size_t terrain_stale_uploads_selected = 0;
+        size_t terrain_new_uploads_deferred = 0;
+        size_t terrain_stale_uploads_deferred = 0;
+        size_t terrain_deferred_nearer_than_selected = 0;
+        float terrain_nearest_candidate_distance_sq = 0.0f;
+        float terrain_farthest_selected_distance_sq = 0.0f;
+        float terrain_nearest_deferred_distance_sq = 0.0f;
+        size_t terrain_slots_created = 0;
+        size_t terrain_slots_reused = 0;
+        size_t terrain_slots_grown = 0;
+        size_t terrain_upload_failures = 0;
+        size_t water_upload_candidates = 0;
+        size_t water_uploads = 0;
+        size_t water_payload_copies = 0;
+        size_t water_payload_bytes = 0;
+        size_t water_uploads_deferred = 0;
+        size_t water_new_upload_candidates = 0;
+        size_t water_stale_upload_candidates = 0;
+        size_t water_new_uploads_selected = 0;
+        size_t water_stale_uploads_selected = 0;
+        size_t water_new_uploads_deferred = 0;
+        size_t water_stale_uploads_deferred = 0;
+        size_t water_deferred_nearer_than_selected = 0;
+        float water_nearest_candidate_distance_sq = 0.0f;
+        float water_farthest_selected_distance_sq = 0.0f;
+        float water_nearest_deferred_distance_sq = 0.0f;
+        size_t water_slots_created = 0;
+        size_t water_slots_reused = 0;
+        size_t water_slots_grown = 0;
+        size_t water_upload_failures = 0;
+    };
+
+    struct RenderPassFrameStats {
+        size_t snapshot_count = 0;
+        size_t culling_hierarchy_rebuilds = 0;
+        size_t culling_hierarchy_chunks = 0;
+        size_t terrain_visible_chunks = 0;
+        size_t terrain_draws = 0;
+        size_t terrain_indices_drawn = 0;
+        std::array<size_t, ShadowMap::CASCADE_COUNT> shadow_cascade_visible_chunks{};
+        std::array<size_t, ShadowMap::CASCADE_COUNT> shadow_cascade_draws{};
+        size_t shadow_draws = 0;
+        size_t shadow_indices_drawn = 0;
+        size_t ssao_draws = 0;
+        size_t ssao_blur_draws = 0;
+        size_t lighting_draws = 0;
+        size_t water_draws = 0;
+        size_t water_indices_drawn = 0;
+        size_t skybox_draws = 0;
+        size_t final_blits = 0;
+    };
+
+    struct RenderPassMetadata {
+        std::string name;
+        std::vector<std::string> inputs;
+        std::vector<std::string> outputs;
+        u32 width = 0;
+        u32 height = 0;
+        std::string clear;
+        std::string load_store;
+        size_t draw_count = 0;
+        size_t dispatch_count = 0;
+    };
+
+    struct RenderResourceRegistryStats {
+        size_t framebuffers = 0;
+        size_t textures = 0;
+        size_t renderbuffers = 0;
+        size_t buffers = 0;
+        size_t vertex_arrays = 0;
+        size_t shader_programs = 0;
+        size_t terrain_slots = 0;
+        size_t water_slots = 0;
+        bool empty_after_shutdown = false;
+    };
+
+    struct ShaderHealthEntry {
+        std::string name;
+        bool ok = false;
+        std::string diagnostic;
+    };
+
+    struct RuntimeRenderStats {
+        size_t terrain_gpu_chunks = 0;
+        size_t water_gpu_chunks = 0;
+        size_t free_terrain_slots = 0;
+        size_t free_water_slots = 0;
+        size_t terrain_vertex_capacity = 0;
+        size_t terrain_index_capacity = 0;
+        size_t water_vertex_capacity = 0;
+        size_t water_index_capacity = 0;
+        size_t estimated_vram_bytes = 0;
+        bool started = false;
+        bool geometry_shader_ok = false;
+        bool lighting_shader_ok = false;
+        bool skybox_shader_ok = false;
+        bool shadow_shader_ok = false;
+        bool ssao_shader_ok = false;
+        bool ssao_blur_shader_ok = false;
+        bool water_shader_ok = false;
+        bool instanced_static_mesh_shader_ok = false;
+        bool gpu_sdf_initialized = false;
+        bool terrain_texture_array_ok = false;
+        bool material_lut_ok = false;
+        size_t terrain_texture_fallback_layers = 0;
+    };
+
     RenderPipeline();
     ~RenderPipeline();
 
     bool startup(u32 screen_width, u32 screen_height, const std::filesystem::path& root_path);
+    void shutdown();
     void render_frame(entt::registry& registry, Systems::SHIELD_WorldSystem& world_system, const Camera& camera, float deltaTime, bool wireframe = false);
     void on_resize(u32 new_width, u32 new_height);
     void clear_all_chunk_data(); // Force clear all cached chunk render data
+    const MeshUploadFrameStats& get_last_mesh_upload_stats() const { return m_last_mesh_upload_stats; }
+    const RenderPassFrameStats& get_last_render_pass_stats() const { return m_last_render_pass_stats; }
+    const std::vector<RenderPassMetadata>& get_last_render_pass_metadata() const { return m_last_render_pass_metadata; }
+    RuntimeRenderStats get_runtime_render_stats() const;
+    RenderResourceRegistryStats get_resource_registry_stats() const;
+    std::vector<ShaderHealthEntry> get_shader_health() const;
+    void set_time_of_day(float normalized_time);
     
     // GPU SDF integration
     void SetupGPUSDFIntegration(Systems::SHIELD_WorldSystem& world_system);
@@ -101,20 +233,32 @@ private:
     struct ChunkMeshSnapshot {
         ChunkID id = 0;
         IVec3 coords{};
+        const Chunk* source_chunk = nullptr;
         u32 mesh_version = 0;
-        std::vector<VoxelVertex> mesh_vertices;
-        std::vector<u32> mesh_indices;
-        std::vector<VoxelVertex> water_mesh_vertices;
-        std::vector<u32> water_mesh_indices;
+        u32 water_mesh_version = 0;
+        size_t terrain_vertex_count = 0;
+        size_t terrain_index_count = 0;
+        size_t water_vertex_count = 0;
+        size_t water_index_count = 0;
 
-        bool has_terrain_mesh() const { return !mesh_vertices.empty() && !mesh_indices.empty(); }
-        bool has_water_mesh() const { return !water_mesh_vertices.empty() && !water_mesh_indices.empty(); }
+        bool has_terrain_mesh() const { return terrain_vertex_count > 0 && terrain_index_count > 0; }
+        bool has_water_mesh() const { return water_vertex_count > 0 && water_index_count > 0; }
+    };
+
+    struct ChunkMeshPayload {
+        u32 mesh_version = 0;
+        std::vector<VoxelVertex> vertices;
+        std::vector<u32> indices;
+
+        bool has_mesh() const { return !vertices.empty() && !indices.empty(); }
     };
 
     std::vector<ChunkMeshSnapshot> build_chunk_snapshots(const std::vector<Chunk*>& renderable_chunks) const;
 
-    void manage_chunk_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks);
-    void upload_chunk_mesh(const ChunkMeshSnapshot& chunk);
+    void ensure_terrain_culling_hierarchy(const std::vector<ChunkMeshSnapshot>& renderable_chunks);
+    void manage_chunk_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks, const Camera& camera);
+    bool copy_terrain_mesh_payload(const ChunkMeshSnapshot& chunk, ChunkMeshPayload& payload) const;
+    void upload_chunk_mesh(const ChunkMeshSnapshot& chunk, const ChunkMeshPayload& payload);
     void unload_chunk_resources(ChunkID chunk_id);
 
     void shadow_pass(const std::vector<ChunkMeshSnapshot>& renderable_chunks, const Camera& camera);
@@ -123,8 +267,9 @@ private:
     void lighting_pass(const Camera& camera);
     void skybox_pass(const Camera& camera);
 
-    void manage_water_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks);
-    void upload_water_mesh(const ChunkMeshSnapshot& chunk);
+    void manage_water_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks, const Camera& camera);
+    bool copy_water_mesh_payload(const ChunkMeshSnapshot& chunk, ChunkMeshPayload& payload) const;
+    void upload_water_mesh(const ChunkMeshSnapshot& chunk, const ChunkMeshPayload& payload);
     void unload_water_resources(ChunkID chunk_id);
 
     void init_gbuffer(u32 width, u32 height);
@@ -139,6 +284,9 @@ private:
     void cleanup_gpu_resources();
 
     void init_lighting_fbo(u32 width, u32 height);
+    void destroy_lighting_fbo();
+    void copy_lighting_color_to_opaque_texture();
+    void refresh_render_pass_metadata();
     void gbuffer_pass(entt::registry& registry, const std::vector<ChunkMeshSnapshot>& renderable_chunks, const Camera& camera, const glm::vec4 frustum_planes[6]);
     void water_pass(const std::vector<ChunkMeshSnapshot>& renderable_chunks, const Camera& camera);
     FrameBufferObject m_lighting_fbo;
@@ -168,6 +316,11 @@ private:
 
     std::unordered_map<ChunkID, ChunkRenderData> m_chunk_render_data;
     std::unordered_map<ChunkID, WaterRenderData> m_water_render_data;
+    std::vector<ChunkRenderData> m_free_chunk_render_slots;
+    std::vector<WaterRenderData> m_free_water_render_slots;
+    MeshUploadFrameStats m_last_mesh_upload_stats;
+    RenderPassFrameStats m_last_render_pass_stats;
+    std::vector<RenderPassMetadata> m_last_render_pass_metadata;
 
     u32 m_screen_quad_vao = 0;
     u32 m_screen_quad_vbo = 0;
@@ -184,9 +337,16 @@ private:
 
     u32 m_terrainTextureArray = 0;
     u32 m_materialLUT = 0;
+    u32 m_water_flat_normal_texture = 0;
+    u32 m_water_neutral_flow_texture = 0;
+    u32 m_water_black_texture = 0;
+    u32 m_water_underwater_texture = 0;
+    size_t m_terrain_texture_fallback_layers = 0;
 
     void init_terrain_textures();
     void init_material_lut();
+    void init_water_fallback_textures();
+    void destroy_water_fallback_textures();
     
     // --- GPU SDF Generation ---
     struct GPUSDFSystem {
@@ -222,10 +382,16 @@ private:
         AABB() = default;
         AABB(const glm::vec3& min, const glm::vec3& max) : min(min), max(max) {}
     };
+
+    struct ChunkCullEntry {
+        ChunkID id = 0;
+        IVec3 coords{};
+        AABB bounds;
+    };
     
     struct CullingNode {
         AABB bounds;
-        std::vector<const ChunkMeshSnapshot*> chunks;
+        std::vector<ChunkCullEntry> chunks;
         std::unique_ptr<CullingNode> children[4]; // Quadtree (X-Z plane)
         bool is_leaf = true;
         
@@ -236,8 +402,8 @@ private:
     class HierarchicalCuller {
     public:
         void BuildHierarchy(const std::vector<ChunkMeshSnapshot>& chunks);
-        void CullRecursive(const glm::vec4 frustum_planes[6], CullingNode* node, std::vector<const ChunkMeshSnapshot*>& visible);
-        void CullHierarchical(const glm::vec4 frustum_planes[6], std::vector<const ChunkMeshSnapshot*>& visible);
+        void CullRecursive(const glm::vec4 frustum_planes[6], CullingNode* node, std::vector<const ChunkCullEntry*>& visible);
+        void CullHierarchical(const glm::vec4 frustum_planes[6], std::vector<const ChunkCullEntry*>& visible);
         void Clear();
         
         std::unique_ptr<CullingNode> m_root; // Made public for access
@@ -246,11 +412,17 @@ private:
         static constexpr int MAX_CHUNKS_PER_NODE = 8;
         static constexpr int MAX_DEPTH = 4;
         
-        void BuildRecursive(CullingNode* node, const std::vector<const ChunkMeshSnapshot*>& chunks, int depth);
+        void BuildRecursive(CullingNode* node, const std::vector<ChunkCullEntry>& chunks, int depth);
         bool AABBFrustumCulled(const AABB& aabb, const glm::vec4 frustum_planes[6]);
     };
     
     HierarchicalCuller m_hierarchicalCuller;
+
+    struct TerrainCullingCache {
+        u64 chunk_set_signature = 0;
+        size_t chunk_count = 0;
+        bool valid = false;
+    } m_terrainCullingCache;
 
     // Frustum culling cache
     struct FrustumCache {

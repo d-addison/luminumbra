@@ -5,9 +5,18 @@
 
 class Log {
 public:
+    /// Explicit one-time initializer. Optional: GetCoreLogger() lazy-inits
+    /// to the same configuration on first use if Init() hasn't been called.
+    /// Callers in main_client/main_server still call Init() explicitly for
+    /// clarity and to pin the pattern early; tests and isolated tools don't
+    /// have to.
     static void Init();
 
-    static std::shared_ptr<spdlog::logger>& GetCoreLogger() { return s_CoreLogger; }
+    /// Lazy accessor: returns a valid logger even if Init() was never called
+    /// (test binaries that use gtest_main, ad-hoc tooling, etc.). Calling this
+    /// from a hot path is the same cost as the pre-lazy-init version once the
+    /// logger is set.
+    static std::shared_ptr<spdlog::logger>& GetCoreLogger();
 
 private:
     static std::shared_ptr<spdlog::logger> s_CoreLogger;

@@ -1,6 +1,7 @@
 #include "ui/Rml_UIManager.h"
 #include "audio/IAudioManager.h"
 #include <RmlUi/Core.h>
+#include <RmlUi/Core/Elements/ElementFormControl.h>
 #include <RmlUi/Debugger.h>
 #include <utility>
 #include <functional>
@@ -143,6 +144,13 @@ private:
     Callback m_callback;
 };
 
+static std::string ReadFormControlValue(Rml::Element* element, const std::string& fallback) {
+    if (auto* control = dynamic_cast<Rml::ElementFormControl*>(element)) {
+        return control->GetValue();
+    }
+    return element ? element->GetAttribute<Rml::String>("value", fallback) : fallback;
+}
+
 // --- Static Instance for Callbacks ---
 Rml_UIManager* Rml_UIManager::s_active_manager = nullptr;
 
@@ -262,6 +270,7 @@ void Rml_UIManager::LoadDocument(const std::string& rml_path) {
     }
 
     m_activeDocument = rml_path;
+    m_selectedWorldId.clear();
     BindEventListeners(document);
     document->Show();
 }
@@ -283,6 +292,47 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
     if (auto* e = document->GetElementById("load_world_btn")) AddClickSoundListener(e, [this](Rml::Event&){ this->RequestLoadDocument("world_selection.rml"); });
     if (auto* e = document->GetElementById("quit_btn")) AddClickSoundListener(e, [this](Rml::Event&){ glfwSetWindowShouldClose(this->m_window, true); });
     if (auto* e = document->GetElementById("back_btn")) AddClickSoundListener(e, [this](Rml::Event&){ this->RequestLoadDocument("main_menu.rml"); });
+
+    if (auto* load_button = document->GetElementById("load_selected_btn")) {
+        AddClickSoundListener(load_button, [this](Rml::Event&){
+            if (m_loadWorldCallback && !m_selectedWorldId.empty()) {
+                m_loadWorldCallback(m_selectedWorldId);
+            }
+        });
+    }
+
+    Rml::ElementList world_items;
+    document->GetElementsByClassName(world_items, "list-item");
+    for (Rml::Element* item : world_items) {
+        if (!item) {
+            continue;
+        }
+        AddClickSoundListener(item, [this, document](Rml::Event& event){
+            Rml::Element* selected = event.GetTargetElement();
+            while (selected && selected->GetAttribute<Rml::String>("data-world-id", "").empty()) {
+                selected = selected->GetParentNode();
+            }
+            if (!selected) {
+                return;
+            }
+
+            Rml::ElementList all_items;
+            document->GetElementsByClassName(all_items, "list-item");
+            for (Rml::Element* item_to_clear : all_items) {
+                if (item_to_clear) {
+                    item_to_clear->RemoveAttribute("data-selected");
+                    item_to_clear->SetClass("selected", false);
+                }
+            }
+
+            m_selectedWorldId = selected->GetAttribute<Rml::String>("data-world-id", "");
+            selected->SetAttribute("data-selected", "true");
+            selected->SetClass("selected", true);
+            if (auto* load_button = document->GetElementById("load_selected_btn")) {
+                load_button->RemoveAttribute("disabled");
+            }
+        });
+    }
     
     if (auto* e = document->GetElementById("create_btn")) {
         AddClickSoundListener(e, [this](Rml::Event& event){
@@ -291,9 +341,9 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
                 Rml::Element* name_input = doc->GetElementById("world_name");
                 Rml::Element* seed_input = doc->GetElementById("world_seed");
                 Rml::Element* type_select = doc->GetElementById("world_type");
-                std::string name = name_input ? name_input->GetAttribute<Rml::String>("value", "New World") : "New World";
-                std::string seed = seed_input ? seed_input->GetAttribute<Rml::String>("value", "") : "";
-                std::string type = type_select ? type_select->GetAttribute<Rml::String>("value", "default") : "default";
+                std::string name = ReadFormControlValue(name_input, "New World");
+                std::string seed = ReadFormControlValue(seed_input, "");
+                std::string type = ReadFormControlValue(type_select, "default");
                 m_worldCreationCallback(name, seed, type);
             }
         });

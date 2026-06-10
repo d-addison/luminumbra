@@ -253,20 +253,16 @@ void MiniaudioManager::PlayMusic(const AudioEventID& musicEventID) {
 
     const std::string full_path = m_rootPath + def->files[0];
 
-    ma_sound_config soundConfig = ma_sound_config_init();
-    soundConfig.pFilePath = full_path.c_str();
-    // Reverted back to STREAM as this is correct for music.
-    soundConfig.flags = MA_SOUND_FLAG_STREAM; 
+    uint32_t flags = MA_SOUND_FLAG_STREAM;
     if (def->is_2d) {
-        soundConfig.flags |= MA_SOUND_FLAG_NO_SPATIALIZATION;
+        flags |= MA_SOUND_FLAG_NO_SPATIALIZATION;
     }
-    soundConfig.isLooping = def->is_looping;
 
     m_currentMusic = std::make_unique<ma_sound>();
-    ma_result result = ma_sound_init_ex(m_engine.get(), &soundConfig, m_currentMusic.get());
+    ma_result result = ma_sound_init_from_file(m_engine.get(), full_path.c_str(), flags, NULL, NULL, m_currentMusic.get());
     
     if (result != MA_SUCCESS) {
-        LUMINUMBRA_CORE_ERROR("Failed to init music with ma_sound_init_ex for '" + full_path
+        LUMINUMBRA_CORE_ERROR("Failed to init music with ma_sound_init_from_file for '" + full_path
                   + "'. Miniaudio result: " + ma_result_description(result)
                   + " (" + std::to_string(result) + ")");
         m_currentMusic.reset();
@@ -274,9 +270,11 @@ void MiniaudioManager::PlayMusic(const AudioEventID& musicEventID) {
     }
     
     ma_sound_set_volume(m_currentMusic.get(), def->volume);
+    ma_sound_set_looping(m_currentMusic.get(), def->is_looping);
     ma_sound_start(m_currentMusic.get());
 
     m_currentMusicID = musicEventID;
+    LUMINUMBRA_CORE_INFO("Started music event '{}' from '{}'.", musicEventID, full_path);
 }
 // --- END MODIFICATION ---
 

@@ -93,6 +93,11 @@ PhysicsSystem::PhysicsSystem() = default;
 PhysicsSystem::~PhysicsSystem() { shutdown(); }
 
 void PhysicsSystem::startup() {
+    if (m_started) {
+        LUMINUMBRA_CORE_WARN("PhysicsSystem startup requested while already running.");
+        return;
+    }
+
     RegisterDefaultAllocator();
     Factory::sInstance = new Factory();
     RegisterTypes();
@@ -105,10 +110,23 @@ void PhysicsSystem::startup() {
     static ObjectLayerPairFilterImpl object_vs_object_layer_filter;
     m_jolt_system->Init(10240, 0, 10240, 10240, broad_phase_layer_interface, object_vs_broadphase_layer_filter, object_vs_object_layer_filter);
     m_body_interface = &m_jolt_system->GetBodyInterface();
+    m_started = true;
     LUMINUMBRA_CORE_INFO("Jolt Physics System Initialized.");
 }
 
 void PhysicsSystem::shutdown() {
+    if (!m_started) {
+        return;
+    }
+
+    if (m_body_interface) {
+        for (const auto& [chunk_id, collision] : m_chunk_bodies) {
+            (void)chunk_id;
+            m_body_interface->RemoveBody(collision.body_id);
+            m_body_interface->DestroyBody(collision.body_id);
+        }
+    }
+    m_chunk_bodies.clear();
     m_player_character.reset();
     // Properly release the reference-counted shapes
     m_player_stand_shape = nullptr; 
@@ -120,6 +138,7 @@ void PhysicsSystem::shutdown() {
     UnregisterTypes();
     delete Factory::sInstance;
     Factory::sInstance = nullptr;
+    m_started = false;
 }
 
 void PhysicsSystem::update(float delta_time) {
@@ -133,11 +152,8 @@ void PhysicsSystem::update(float delta_time) {
 
 void PhysicsSystem::add_chunk_collision(Chunk& chunk) {
     if (!m_body_interface) return;
+    if (m_chunk_bodies.find(chunk.get_id()) != m_chunk_bodies.end()) return;
     
-    // TEMPORARY: Disable collision creation to prevent crashes while debugging
-    LUMINUMBRA_CORE_WARN("TEMP: Collision creation disabled for chunk ({},{},{})", 
-        chunk.get_coords().x, chunk.get_coords().y, chunk.get_coords().z);
-    return;
     if (chunk.heightmap_data.empty()) {
         LUMINUMBRA_CORE_WARN("Attempted to add chunk collision for chunk ({}, {}, {}) with no heightmap data.", 
             chunk.get_coords().x, chunk.get_coords().y, chunk.get_coords().z);
@@ -160,11 +176,13 @@ void PhysicsSystem::add_chunk_collision(Chunk& chunk) {
         if (h > max_h) max_h = h;
     }
     
-    // If the entire surface of the chunk is below its own volume, it's effectively empty space (e.g. a high-altitude air chunk).
     glm::ivec3 cc = chunk.get_coords();
     float chunk_min_y = cc.y * CHUNK_SIZE_Y;
-    if (max_h < chunk_min_y) {
-        return; // Nothing to collide with
+    float chunk_max_y = (cc.y + 1) * CHUNK_SIZE_Y;
+    const int center_index = (CHUNK_SIZE_Z / 2) * resolution + (CHUNK_SIZE_X / 2);
+    const float center_height = chunk.heightmap_data[center_index];
+    if (center_height < chunk_min_y || center_height >= chunk_max_y) {
+        return;
     }
 
     // 2. Create the HeightFieldShape.

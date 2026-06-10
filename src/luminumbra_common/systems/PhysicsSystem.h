@@ -33,6 +33,7 @@ public:
     void startup();
     void shutdown();
     void update(float delta_time);
+    bool is_started() const { return m_started; }
 
     // --- World Geometry ---
     void add_chunk_collision(Chunk& chunk);
@@ -130,6 +131,7 @@ private:
     
     // Batched physics queries
     BatchedPhysicsQueries m_batched_queries;
+    bool m_started = false;
 };
 
 } // namespace Systems

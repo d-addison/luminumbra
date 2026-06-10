@@ -1,40 +1,66 @@
 {
+  "schema": "luminumbra.material_registry.v1",
   "materials": [
+    {
+      "id": 0,
+      "name": "Air",
+      "render_kind": "none"
+    },
     {
       "id": 1,
       "name": "Stone",
       "base_color": [0.5, 0.5, 0.52],
-      "specular": 0.2,
-      "albedo_map": "data/textures/terrain/rock/Rock028.png"
+      "roughness": 0.85,
+      "metallic": 0.05,
+      "albedo_map": "data/textures/terrain/rock/Rock028_2K-PNG_Color.png"
     },
     {
       "id": 2,
       "name": "Soil",
-      "base_color": [0.45, 0.32, 0.22],
-      "specular": 0.05,
-      "albedo_map": "data/textures/terrain/soil/Grass003.png"
+      "base_color": [0.3, 0.15, 0.05],
+      "roughness": 0.9,
+      "metallic": 0.0,
+      "albedo_map": "data/textures/terrain/soil/Ground048_2K-PNG_Color.png"
     },
     {
       "id": 3,
-      "name": "LuminCrystal",
-      "base_color": [0.7, 0.9, 1.0],
-      "specular": 1.0,
-      "emission": [0.4, 0.6, 0.8],
-      "albedo_map": "data/textures/crystal_albedo.png"
+      "name": "Grass",
+      "base_color": [0.2, 0.6, 0.15],
+      "roughness": 0.8,
+      "metallic": 0.0,
+      "albedo_map": "data/textures/terrain/grass/Grass003_2K-PNG_Color.png"
     },
     {
       "id": 4,
-      "name": "Deepslate",
-      "base_color": [0.2, 0.2, 0.25],
-      "specular": 0.25,
-      "albedo_map": "data/textures/terrain/Gravel040.png"
+      "name": "Sand",
+      "base_color": [0.9, 0.8, 0.5],
+      "roughness": 0.75,
+      "metallic": 0.0,
+      "albedo_map": "data/textures/terrain/sand/Ground087_2K-PNG_Color.png"
     },
     {
       "id": 5,
-      "name": "Sand",
-      "base_color": [0.85, 0.75, 0.55],
-      "specular": 0.05,
-      "albedo_map": "data/textures/terrain/sand/Ground087.png"
+      "name": "Deepslate",
+      "base_color": [0.2, 0.2, 0.25],
+      "roughness": 0.95,
+      "metallic": 0.02,
+      "albedo_map": "data/textures/terrain/deepslate/Gravel040_2K-PNG_Color.png"
+    },
+    {
+      "id": 6,
+      "name": "LuminCrystal",
+      "base_color": [0.85, 0.95, 1.0],
+      "roughness": 0.05,
+      "metallic": 0.1,
+      "emission": [0.4, 0.6, 0.8]
+    },
+    {
+      "id": 7,
+      "name": "Water",
+      "base_color": [0.0, 0.1, 0.25],
+      "roughness": 0.1,
+      "metallic": 0.0,
+      "render_kind": "water"
     }
   ]
 }
