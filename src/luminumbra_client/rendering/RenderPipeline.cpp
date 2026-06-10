@@ -24,6 +24,7 @@
 #include "passes/GBufferPass.h"
 #include "passes/LightingPass.h"
 #include "passes/ShadowPass.h"
+#include "passes/SkyboxPass.h"
 #include "passes/SsaoPass.h"
 #include "passes/WaterPass.h"
 #include <stb_image.h>
@@ -303,7 +304,8 @@ RenderPipeline::RenderPipeline()
       m_shadow_pass(std::make_unique<ShadowPass>()),
       m_ssao_pass(std::make_unique<SsaoPass>()),
       m_lighting_pass(std::make_unique<LightingPass>()),
-      m_water_pass(std::make_unique<WaterPass>()) {}
+      m_water_pass(std::make_unique<WaterPass>()),
+      m_skybox_pass(std::make_unique<SkyboxPass>()) {}
 RenderPipeline::~RenderPipeline() {
     cleanup_gpu_resources();
 }
@@ -325,7 +327,7 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         m_shadow_pass->init_shadow_map();
         m_ssao_pass->init_ssao(screen_width, screen_height);
         init_screen_quad();
-        init_skybox();
+        m_skybox_pass->init_geometry();
         init_terrain_textures();
         init_material_lut();
         m_water_pass->init_water_fallback_textures();
@@ -454,7 +456,7 @@ RenderPipeline::RuntimeRenderStats RenderPipeline::get_runtime_render_stats() co
     if (m_ssao_pass->ssao().ssaoColorBufferBlur) estimated_vram_bytes += pixel_count * 2u;
     if (m_ssao_pass->ssao().noiseTexture) estimated_vram_bytes += 4u * 4u * 6u;
     if (m_screen_quad_vbo) estimated_vram_bytes += 20u * sizeof(float);
-    if (m_skybox_vbo) estimated_vram_bytes += 108u * sizeof(float);
+    if (m_skybox_pass->vbo()) estimated_vram_bytes += 108u * sizeof(float);
     if (m_gbuffer_pass->instance_matrix_vbo()) estimated_vram_bytes += 10000u * sizeof(glm::mat4);
     if (m_terrainTextureArray) estimated_vram_bytes += 2048u * 2048u * 5u * 4u;
     if (m_materialLUT) estimated_vram_bytes += 256u * 4u;
@@ -470,7 +472,7 @@ RenderPipeline::RuntimeRenderStats RenderPipeline::get_runtime_render_stats() co
 
     stats.geometry_shader_ok = m_gbuffer_pass->geometry_shader() && m_gbuffer_pass->geometry_shader()->IsValid();
     stats.lighting_shader_ok = m_lighting_pass->shader() && m_lighting_pass->shader()->IsValid();
-    stats.skybox_shader_ok = m_skybox_shader && m_skybox_shader->IsValid();
+    stats.skybox_shader_ok = m_skybox_pass->shader() && m_skybox_pass->shader()->IsValid();
     stats.shadow_shader_ok = m_shadow_pass->shader() && m_shadow_pass->shader()->IsValid();
     stats.ssao_shader_ok = m_ssao_pass->ssao().ssaoShader && m_ssao_pass->ssao().ssaoShader->IsValid();
     stats.ssao_blur_shader_ok = m_ssao_pass->ssao().blurShader && m_ssao_pass->ssao().blurShader->IsValid();
@@ -505,7 +507,7 @@ std::vector<RenderPipeline::ShaderHealthEntry> RenderPipeline::get_shader_health
 
     add_shader("geometry", m_gbuffer_pass->geometry_shader());
     add_shader("lighting", m_lighting_pass->shader());
-    add_shader("skybox", m_skybox_shader);
+    add_shader("skybox", m_skybox_pass->shader());
     add_shader("shadow", m_shadow_pass->shader());
     add_shader("ssao", m_ssao_pass->ssao().ssaoShader);
     add_shader("ssao_blur", m_ssao_pass->ssao().blurShader);
@@ -548,11 +550,11 @@ RenderPipeline::RenderResourceRegistryStats RenderPipeline::get_resource_registr
 
     stats.renderbuffers += count(m_lighting_pass->lighting_fbo().depth_texture);
     stats.buffers += count(m_screen_quad_vbo);
-    stats.buffers += count(m_skybox_vbo);
+    stats.buffers += count(m_skybox_pass->vbo());
     stats.buffers += count(m_gbuffer_pass->instance_matrix_vbo());
     stats.buffers += count(m_gpu_sdf.sdf_buffer);
     stats.vertex_arrays += count(m_screen_quad_vao);
-    stats.vertex_arrays += count(m_skybox_vao);
+    stats.vertex_arrays += count(m_skybox_pass->vao());
 
     auto count_chunk_slot = [&stats](const ChunkRenderData& data) {
         stats.vertex_arrays += data.vao_id != 0 ? 1u : 0u;
@@ -1068,7 +1070,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
 
     // 7. SKYBOX PASS (Renders to m_lighting_fbo)
     begin_gpu_pass_timer(GpuTimerPass::Skybox);
-    skybox_pass(camera);
+    m_skybox_pass->execute(*this, camera);
     end_gpu_pass_timer(GpuTimerPass::Skybox);
     glBindVertexArray(0);  // Unbind after skybox pass
 
@@ -1127,36 +1129,15 @@ void RenderPipeline::clear_all_chunk_data() {
     LUMINUMBRA_CORE_INFO("Cleared chunk render data cache");
 }
 
-// --- RENDER PASSES ---
-
-void RenderPipeline::skybox_pass(const Rendering::Camera& camera) {
-    glDepthFunc(GL_LEQUAL);
-    m_skybox_shader->use();
-    glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)m_screen_width / (float)m_screen_height, camera.GetNearPlane(), camera.GetFarPlane());
-    glm::mat4 view = glm::mat4(glm::mat3(camera.GetViewMatrix())); // remove translation
-    m_skybox_shader->setMat4("view", view);
-    m_skybox_shader->setMat4("projection", projection);
-    m_skybox_shader->setVec3("u_sunDirection", m_sun.direction);
-    m_skybox_shader->setVec3("u_moonDirection", m_moonDirection);
-    m_skybox_shader->setFloat("u_sunIntensity", m_sun.intensity);
-    m_skybox_shader->setFloat("u_time", (float)glfwGetTime());
-    glBindVertexArray(m_skybox_vao);
-    glDrawArrays(GL_TRIANGLES, 0, 36);
-    m_last_render_pass_stats.skybox_draws++;
-    glBindVertexArray(0);
-    glDepthFunc(GL_LESS);
-}
-
 // --- INITIALIZATION ---
 
 void RenderPipeline::init_shaders() {
     m_gbuffer_pass->init_geometry_shader(m_root_path);
     m_lighting_pass->init_shader(m_root_path);
-    m_skybox_shader = std::make_unique<Shader>((m_root_path / "res/shaders/skybox.vert").string().c_str(), (m_root_path / "res/shaders/skybox.frag").string().c_str());
+    m_skybox_pass->init_shader(m_root_path);
     m_shadow_pass->init_shader(m_root_path);
     m_ssao_pass->init_shaders(m_root_path);
     m_water_pass->init_shader(m_root_path);
-    label_gl_object(GL_PROGRAM, m_skybox_shader ? m_skybox_shader->Id() : 0u, "shader.skybox");
 }
 
 void RenderPipeline::init_screen_quad() {
@@ -1172,20 +1153,6 @@ void RenderPipeline::init_screen_quad() {
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
-    glBindVertexArray(0);
-}
-
-void RenderPipeline::init_skybox() {
-    float skyboxVertices[] = { -1.0f,1.0f,-1.0f,-1.0f,-1.0f,-1.0f,1.0f,-1.0f,-1.0f,1.0f,-1.0f,-1.0f,1.0f,1.0f,-1.0f,-1.0f,1.0f,-1.0f,-1.0f,-1.0f,1.0f,-1.0f,-1.0f,-1.0f,-1.0f,1.0f,-1.0f,-1.0f,1.0f,-1.0f,-1.0f,1.0f,1.0f,-1.0f,-1.0f,1.0f,1.0f,-1.0f,-1.0f,1.0f,-1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,-1.0f,1.0f,-1.0f,-1.0f,-1.0f,-1.0f,1.0f,-1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,-1.0f,1.0f,1.0f,-1.0f,-1.0f,1.0f,-1.0f,1.0f,-1.0f,1.0f,1.0f,-1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,-1.0f,1.0f,1.0f,-1.0f,1.0f,-1.0f,-1.0f,-1.0f,-1.0f,-1.0f,-1.0f,1.0f,1.0f,-1.0f,-1.0f,1.0f,-1.0f,-1.0f,-1.0f,-1.0f,1.0f,1.0f,-1.0f,1.0f };
-    glGenVertexArrays(1, &m_skybox_vao);
-    glGenBuffers(1, &m_skybox_vbo);
-    label_gl_object(GL_VERTEX_ARRAY, m_skybox_vao, "skybox.vao");
-    label_gl_object(GL_BUFFER, m_skybox_vbo, "skybox.vbo");
-    glBindVertexArray(m_skybox_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, m_skybox_vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(skyboxVertices), &skyboxVertices, GL_STATIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
     glBindVertexArray(0);
 }
 
@@ -1217,8 +1184,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_ssao_pass->destroy_ssao();
     if (m_screen_quad_vao) { glDeleteVertexArrays(1, &m_screen_quad_vao); m_screen_quad_vao = 0; }
     if (m_screen_quad_vbo) { glDeleteBuffers(1, &m_screen_quad_vbo); m_screen_quad_vbo = 0; }
-    if (m_skybox_vao) { glDeleteVertexArrays(1, &m_skybox_vao); m_skybox_vao = 0; }
-    if (m_skybox_vbo) { glDeleteBuffers(1, &m_skybox_vbo); m_skybox_vbo = 0; }
+    m_skybox_pass->destroy_geometry();
     m_gbuffer_pass->destroy_instanced_static_mesh();
     if (m_terrainTextureArray) { glDeleteTextures(1, &m_terrainTextureArray); m_terrainTextureArray = 0; }
     if (m_materialLUT) { glDeleteTextures(1, &m_materialLUT); m_materialLUT = 0; }
@@ -1227,7 +1193,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     destroy_gpu_pass_timers();
     m_gbuffer_pass->reset_shaders();
     m_lighting_pass->reset_shader();
-    m_skybox_shader.reset();
+    m_skybox_pass->reset_shader();
     m_shadow_pass->reset_shader();
     m_ssao_pass->reset_shaders();
     m_water_pass->reset_shader();
