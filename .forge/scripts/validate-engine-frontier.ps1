@@ -1,9 +1,11 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "FrontierDisabled", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
-    [int]$SmokeSeconds = 30
+    [int]$SmokeSeconds = 30,
+    [double]$MarginPercent = 10.0,
+    [double]$WarnPercent = 5.0
 )
 
 $ErrorActionPreference = "Stop"
@@ -2158,6 +2160,77 @@ function Test-NetworkStateHash {
     }
 }
 
+function Test-PerfRegression {
+    $baselinePath = "$ArtifactDir/perf-baseline.json"
+    $baseline = Read-JsonArtifact -Path $baselinePath -Schema "luminumbra.perf_baseline.v1"
+
+    $placeholderBaseline = ($baseline.status -eq "placeholder_pending_capture")
+    if (-not $placeholderBaseline -and $baseline.status -ne "blessed") {
+        throw "perf baseline has unexpected status '$($baseline.status)' (expected 'blessed' or 'placeholder_pending_capture')"
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($baseline.machine_id) -and
+        $baseline.machine_id -ne "UNCAPTURED" -and
+        $baseline.machine_id -ne $env:COMPUTERNAME) {
+        throw "perf baseline captured on different machine ('$($baseline.machine_id)' vs '$($env:COMPUTERNAME)') - recapture required via .forge/scripts/capture-perf-baseline.ps1"
+    }
+
+    $exe = "build/$BuildPreset/bin/initial_world_loading_perf_test.exe"
+    if (-not (Test-Path $exe)) {
+        throw "Missing perf test executable. Run -Mode Build first: $exe"
+    }
+    Invoke-Checked -FilePath $exe -ArgumentList @(
+        "--gtest_filter=InitialWorldLoadingPerfTest.PerformanceFrameworkBenchmarkScenariosWriteBudgetArtifacts"
+    ) -TimeoutSeconds 300
+
+    $summaryPath = "build/$BuildPreset/test-artifacts/performance_framework/benchmark_summary.json"
+    $summary = Read-JsonArtifact -Path $summaryPath -Schema "luminumbra.performance_framework.benchmark_summary.v1"
+
+    $requiredScenarios = @(
+        "boot", "create_world", "enter_spawn", "idle_horizon", "pan_camera",
+        "streaming_walk", "chunk_churn", "shader_warmup", "shutdown"
+    )
+
+    $regressions = @()
+    foreach ($name in $requiredScenarios) {
+        $observedEntries = @($summary.scenarios | Where-Object { $_.name -eq $name })
+        if ($observedEntries.Count -ne 1) {
+            throw "benchmark summary must contain exactly one '$name' scenario, found $($observedEntries.Count)"
+        }
+        $observed = $observedEntries[0]
+        if ($null -eq $observed.regression_metrics) {
+            throw "benchmark summary scenario '$name' is missing the regression_metrics block"
+        }
+
+        $baselineEntry = $baseline.scenarios.$name
+        if ($null -eq $baselineEntry) {
+            throw "perf baseline is missing scenario '$name'"
+        }
+
+        $observedP99 = [double]$observed.regression_metrics.p99_ms
+        $baselineP99 = [double]$baselineEntry.p99_ms
+        $failCeiling = $baselineP99 * (1.0 + $MarginPercent / 100.0)
+        $warnCeiling = $baselineP99 * (1.0 + $WarnPercent / 100.0)
+
+        if ($observedP99 -gt $failCeiling) {
+            $regressions += ("scenario '{0}' p99 {1:N3} ms exceeds baseline {2:N3} ms by more than {3}%" -f $name, $observedP99, $baselineP99, $MarginPercent)
+        } elseif ($observedP99 -gt $warnCeiling) {
+            Write-Host ("perf-regression warning: scenario '{0}' p99 {1:N3} ms exceeds baseline {2:N3} ms by more than {3}% (fail threshold {4}%)" -f $name, $observedP99, $baselineP99, $WarnPercent, $MarginPercent)
+        }
+    }
+
+    if ($regressions.Count -gt 0) {
+        if ($placeholderBaseline) {
+            foreach ($regression in $regressions) {
+                Write-Host "perf-regression warning (placeholder baseline, not enforced): $regression"
+            }
+            Write-Host "perf baseline status is 'placeholder_pending_capture'; regressions are reported as warnings until the baseline is blessed via .forge/scripts/capture-perf-baseline.ps1"
+        } else {
+            throw "perf regression gate failed:`n$($regressions -join "`n")"
+        }
+    }
+}
+
 switch ($Mode) {
     "CodexOnly" { Test-CodexOnly }
     "Panels" { Test-Panels }
@@ -2185,6 +2258,7 @@ switch ($Mode) {
     "WorldHashEntitySnapshotGate" { Test-WorldHashEntitySnapshotGate }
     "NetworkLoopbackAuthorityGate" { Test-NetworkLoopbackAuthorityGate }
     "NetworkStateHash" { Test-NetworkStateHash }
+    "PerfRegression" { Test-PerfRegression }
     "FrontierDisabled" { Test-FrontierDisabled }
     "All" {
         Test-CodexOnly
