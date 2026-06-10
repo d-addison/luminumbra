@@ -153,6 +153,18 @@ public:
         size_t water_indices_drawn = 0;
         size_t skybox_draws = 0;
         size_t final_blits = 0;
+        // Per-pass GPU timings sampled from a GL_TIMESTAMP query ring
+        // (frame N publishes the timings recorded at frame N-2). Values stay
+        // 0.0 when timers are unsupported or no sample has resolved yet.
+        bool gpu_timers_supported = false;
+        double shadow_gpu_ms = 0.0;
+        double gbuffer_gpu_ms = 0.0;
+        double ssao_gpu_ms = 0.0;
+        double ssao_blur_gpu_ms = 0.0;
+        double lighting_gpu_ms = 0.0;
+        double water_gpu_ms = 0.0;
+        double skybox_gpu_ms = 0.0;
+        double final_blit_gpu_ms = 0.0;
     };
 
     struct RenderPassMetadata {
@@ -309,6 +321,46 @@ private:
     void init_ssao();
     void destroy_ssao();
     void cleanup_gpu_resources();
+
+    // --- Per-pass GPU timers (GL_TIMESTAMP query pairs) ---
+    enum class GpuTimerPass : size_t {
+        Shadow = 0,
+        GBuffer,
+        Ssao,
+        SsaoBlur,
+        Lighting,
+        Water,
+        Skybox,
+        FinalBlit,
+        Count,
+    };
+    static constexpr size_t kGpuTimerPassCount = static_cast<size_t>(GpuTimerPass::Count);
+    // Ring of 3 frame slots so frame N polls the queries issued at frame N-2
+    // without ever stalling on GL_QUERY_RESULT_AVAILABLE.
+    static constexpr size_t kGpuTimerFrameRing = 3;
+
+    struct GpuTimerFrameSlot {
+        std::array<GLuint, kGpuTimerPassCount> begin_queries{};
+        std::array<GLuint, kGpuTimerPassCount> end_queries{};
+        std::array<bool, kGpuTimerPassCount> issued{};
+    };
+
+    struct GpuPassTimers {
+        bool supported = false;
+        bool labeled = false;
+        bool first_sample_logged = false;
+        u64 frame_index = 0;
+        std::array<GpuTimerFrameSlot, kGpuTimerFrameRing> slots{};
+        std::array<double, kGpuTimerPassCount> last_gpu_ms{};
+    };
+    GpuPassTimers m_gpu_timers;
+
+    void init_gpu_pass_timers();
+    void destroy_gpu_pass_timers();
+    void begin_gpu_pass_timer(GpuTimerPass pass);
+    void end_gpu_pass_timer(GpuTimerPass pass);
+    void collect_gpu_pass_timers();
+    void finish_gpu_pass_timer_frame();
 
     void init_lighting_fbo(u32 width, u32 height);
     void destroy_lighting_fbo();

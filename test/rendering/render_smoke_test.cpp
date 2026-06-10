@@ -447,6 +447,66 @@ std::vector<std::string> DrainGlErrors() {
     return errors;
 }
 
+struct GpuTimerProbeResult {
+    bool supported = false;
+    std::vector<std::pair<std::string, double>> passes;
+};
+
+// Probes the same capability gate the render pipeline uses (GL 3.3+ timestamp
+// queries with glad-resolved entry points) and, when supported, measures a
+// small real GPU workload per render pass name with glQueryCounter pairs so
+// the render-health artifact carries observed gpu_ms values.
+GpuTimerProbeResult MeasureGpuTimerProbe(bool context_ready) {
+    static constexpr std::array<const char*, 8> kPassNames = {
+        "shadow", "gbuffer", "ssao", "ssao_blur", "lighting", "water", "skybox", "final_blit"};
+
+    GpuTimerProbeResult probe;
+    const bool loader_ok = context_ready &&
+        glGenQueries != nullptr &&
+        glDeleteQueries != nullptr &&
+        glQueryCounter != nullptr &&
+        glGetQueryObjectiv != nullptr &&
+        glGetQueryObjectui64v != nullptr;
+    probe.supported = loader_ok && GLAD_GL_VERSION_3_3 != 0;
+    if (!probe.supported) {
+        for (const char* name : kPassNames) {
+            probe.passes.push_back({name, 0.0});
+        }
+        return probe;
+    }
+
+    glViewport(0, 0, 64, 64);
+    for (const char* name : kPassNames) {
+        GLuint queries[2] = {0u, 0u};
+        glGenQueries(2, queries);
+        glQueryCounter(queries[0], GL_TIMESTAMP);
+        // Representative micro-workload so the timestamp pair brackets real
+        // GPU commands.
+        for (int i = 0; i < 8; ++i) {
+            glClearColor(0.1f + 0.1f * static_cast<float>(i % 4), 0.2f, 0.3f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+        }
+        glQueryCounter(queries[1], GL_TIMESTAMP);
+        glFinish(); // test-only: force availability so the artifact reports resolved numbers
+
+        GLint available = GL_FALSE;
+        glGetQueryObjectiv(queries[1], GL_QUERY_RESULT_AVAILABLE, &available);
+        double gpu_ms = 0.0;
+        if (available == GL_TRUE) {
+            GLuint64 begin_ns = 0;
+            GLuint64 end_ns = 0;
+            glGetQueryObjectui64v(queries[0], GL_QUERY_RESULT, &begin_ns);
+            glGetQueryObjectui64v(queries[1], GL_QUERY_RESULT, &end_ns);
+            if (end_ns >= begin_ns) {
+                gpu_ms = static_cast<double>(end_ns - begin_ns) / 1.0e6;
+            }
+        }
+        glDeleteQueries(2, queries);
+        probe.passes.push_back({name, gpu_ms});
+    }
+    return probe;
+}
+
 void WriteRenderHealthAnalysis(
     const fs::path& path,
     bool passed,
@@ -454,6 +514,9 @@ void WriteRenderHealthAnalysis(
     bool pass_metadata_present,
     bool resource_registry_present,
     bool terrain_materials_present,
+    bool gpu_timer_api_present,
+    bool gpu_timers_supported,
+    const std::vector<std::pair<std::string, double>>& gpu_timer_passes,
     const std::vector<std::pair<std::string, bool>>& program_health,
     const std::vector<std::string>& gl_errors) {
     std::ofstream output(path);
@@ -500,6 +563,19 @@ void WriteRenderHealthAnalysis(
     output << "    \"texture_array_required\": true,\n";
     output << "    \"material_lut_required\": true,\n";
     output << "    \"max_fallback_layers\": 0\n";
+    output << "  },\n";
+    output << "  \"gpu_timers\": {\n";
+    output << "    \"supported\": " << (gpu_timers_supported ? "true" : "false") << ",\n";
+    output << "    \"api_present\": " << (gpu_timer_api_present ? "true" : "false") << ",\n";
+    output << "    \"stats_api\": \"RenderPassFrameStats.gpu_timers_supported\",\n";
+    output << "    \"query_mechanism\": \"glQueryCounter(GL_TIMESTAMP) ring, non-blocking GL_QUERY_RESULT_AVAILABLE polls\",\n";
+    output << "    \"passes\": [\n";
+    output << std::fixed << std::setprecision(6);
+    for (std::size_t i = 0; i < gpu_timer_passes.size(); ++i) {
+        output << "      {\"name\": \"" << gpu_timer_passes[i].first << "\", \"gpu_ms\": " << gpu_timer_passes[i].second << "}";
+        output << (i + 1u == gpu_timer_passes.size() ? "\n" : ",\n");
+    }
+    output << "    ]\n";
     output << "  }\n";
     output << "}\n";
 }
@@ -873,6 +949,15 @@ TEST(RenderSmokeTest, RenderHealthGateEmitsAnalysisArtifact) {
         header.find("terrain_texture_fallback_layers") != std::string::npos &&
         source.find("make_terrain_fallback_texture") != std::string::npos &&
         source.find("m_terrain_texture_fallback_layers = 0") != std::string::npos;
+    const bool gpu_timer_api_present =
+        header.find("gpu_timers_supported") != std::string::npos &&
+        header.find("kGpuTimerFrameRing") != std::string::npos &&
+        source.find("glQueryCounter") != std::string::npos &&
+        source.find("GL_TIMESTAMP") != std::string::npos &&
+        source.find("GL_QUERY_RESULT_AVAILABLE") != std::string::npos &&
+        source.find("init_gpu_pass_timers") != std::string::npos &&
+        source.find("destroy_gpu_pass_timers") != std::string::npos;
+    const GpuTimerProbeResult gpu_timer_probe = MeasureGpuTimerProbe(context.ready());
 
     const std::vector<std::string> gl_errors = DrainGlErrors();
     const bool all_programs_ok = std::all_of(
@@ -885,6 +970,7 @@ TEST(RenderSmokeTest, RenderHealthGateEmitsAnalysisArtifact) {
         pass_metadata_present &&
         resource_registry_present &&
         terrain_materials_present &&
+        gpu_timer_api_present &&
         all_programs_ok &&
         gl_errors.empty();
 
@@ -896,6 +982,9 @@ TEST(RenderSmokeTest, RenderHealthGateEmitsAnalysisArtifact) {
         pass_metadata_present,
         resource_registry_present,
         terrain_materials_present,
+        gpu_timer_api_present,
+        gpu_timer_probe.supported,
+        gpu_timer_probe.passes,
         program_health,
         gl_errors);
 
@@ -903,6 +992,14 @@ TEST(RenderSmokeTest, RenderHealthGateEmitsAnalysisArtifact) {
     EXPECT_TRUE(pass_metadata_present);
     EXPECT_TRUE(resource_registry_present);
     EXPECT_TRUE(terrain_materials_present);
+    EXPECT_TRUE(gpu_timer_api_present);
+    EXPECT_EQ(gpu_timer_probe.passes.size(), 8u);
+    for (const auto& [pass_name, gpu_ms] : gpu_timer_probe.passes) {
+        EXPECT_GE(gpu_ms, 0.0) << pass_name;
+        if (!gpu_timer_probe.supported) {
+            EXPECT_EQ(gpu_ms, 0.0) << pass_name;
+        }
+    }
     EXPECT_TRUE(all_programs_ok);
     EXPECT_TRUE(gl_errors.empty());
     EXPECT_TRUE(passed);
