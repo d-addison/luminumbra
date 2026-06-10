@@ -1469,6 +1469,7 @@ int main(int argc, char* argv[]) {
     WaterVisualCameraTarget material_visual_target;
     bool material_visual_target_initialized = false;
     bool material_visual_capture_written = false;
+    LodBoundaryTransitionRecorder lod_boundary_transition_recorder;
     while (!glfwWindowShouldClose(window)) {
         float currentFrame = (float)glfwGetTime();
         float deltaTime = currentFrame - lastFrame;
@@ -1609,13 +1610,17 @@ int main(int argc, char* argv[]) {
                         material_visual_target_initialized = material_visual_target.found;
                     }
                     ApplyWaterVisualCamera(g_camera.get(), material_visual_target);
+                } else if (scenario_config.lod_boundary_oscillation_smoke() && scenario_ready && g_camera) {
+                    const double elapsed_play_seconds = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - scenario_play_started_at).count();
+                    ApplyLodBoundaryOscillationCamera(gameSession.get(), g_camera.get(), elapsed_play_seconds);
                 } else if (g_playerController) {
                     g_playerController->Update(deltaTime);
                 }
                 if (auto* physics = gameSession->GetPhysicsSystem()) physics->update(deltaTime);
                 if (gameSession->GetWorldSystem() && (g_playerController || g_camera)) {
                     const Luminumbra::Vec3 streaming_position =
-                        ((scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke()) && scenario_ready && g_camera)
+                        ((scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.lod_boundary_oscillation_smoke()) && scenario_ready && g_camera)
                             ? Luminumbra::Vec3(g_camera->Position)
                             : (g_playerController ? Luminumbra::Vec3(g_playerController->GetPosition()) : Luminumbra::Vec3(g_camera->Position));
                     gameSession->GetWorldSystem()->update(
@@ -1649,6 +1654,9 @@ int main(int argc, char* argv[]) {
                         const auto now = std::chrono::steady_clock::now();
                         if (lod_ground_frame_recorder.enabled()) {
                             lod_ground_frame_recorder.record_frame(deltaTime, gameSession.get(), renderPipeline, scenario_frame_count);
+                        }
+                        if (scenario_config.lod_boundary_oscillation_smoke() && scenario_ready) {
+                            lod_boundary_transition_recorder.record_frame(gameSession->GetWorldSystem());
                         }
                         if (scenario_config.lod_ground_smoke() && scenario_ready) {
                             const double elapsed_play_seconds = std::chrono::duration<double>(now - scenario_play_started_at).count();
@@ -1838,6 +1846,13 @@ int main(int argc, char* argv[]) {
                 scenario_config.scenario,
                 scenario_play_seconds,
                 world_system->get_streaming_telemetry_stats());
+            if (scenario_config.lod_boundary_oscillation_smoke()) {
+                WriteLodBoundaryOscillationAnalysis(
+                    scenario_config.artifact_dir,
+                    scenario_play_seconds,
+                    LodBoundaryDistance(world_system),
+                    lod_boundary_transition_recorder);
+            }
         }
     }
 

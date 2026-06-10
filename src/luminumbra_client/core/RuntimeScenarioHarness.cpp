@@ -92,10 +92,10 @@ RuntimeScenarioConfig ParseRuntimeScenarioConfig(int argc, char* argv[], const s
     config.min_collision_chunks = static_cast<size_t>(GetCommandLineUInt64Option(argc, argv, "--min-collision-chunks", config.min_collision_chunks));
     config.memory_watermark_mb = GetCommandLineUInt64Option(argc, argv, "--memory-watermark-mb", 0);
 
-    const int default_timed_run = config.auto_world_smoke() ? 300 : ((config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke()) ? 60 : 0);
+    const int default_timed_run = config.auto_world_smoke() ? 300 : ((config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke() || config.lod_boundary_oscillation_smoke()) ? 60 : 0);
     config.timed_run_seconds = GetCommandLineIntOption(argc, argv, "--timed-run", default_timed_run);
 
-    if (config.auto_world_smoke() || config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke()) {
+    if (config.auto_world_smoke() || config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke() || config.lod_boundary_oscillation_smoke()) {
         config.auto_create_world = true;
         config.auto_enter_world = true;
     }
@@ -1033,6 +1033,135 @@ void WriteStreamingTelemetry(
     std::error_code ec;
     std::filesystem::create_directories(artifact_dir, ec);
     std::ofstream output(artifact_dir / "streaming-telemetry.json");
+    output << std::setw(2) << artifact << '\n';
+}
+
+float LodBoundaryDistance(Luminumbra::Systems::SHIELD_WorldSystem* world_system) {
+    if (world_system && !world_system->get_lod_levels().empty()) {
+        return world_system->get_lod_levels().front().distance;
+    }
+    return 192.0f;
+}
+
+void ApplyLodBoundaryOscillationCamera(
+    Luminumbra::world::GameSession* game_session,
+    Luminumbra::Rendering::Camera* camera,
+    double elapsed_seconds)
+{
+    if (!camera || !game_session) {
+        return;
+    }
+
+    auto* world_system = game_session->GetWorldSystem();
+    const Luminumbra::Vec3 spawn = game_session->GetMetadata().spawnPoint;
+    constexpr double kPi = 3.14159265358979323846;
+    constexpr double kDriftAmplitudeMeters = 6.0;
+    constexpr double kDriftPeriodSeconds = 4.0;
+    const float x = spawn.x + static_cast<float>(kDriftAmplitudeMeters * std::sin(elapsed_seconds * 2.0 * kPi / kDriftPeriodSeconds));
+    const float z = spawn.z;
+    const float terrain_height = world_system ? world_system->GetTerrainHeightAt(x, z) : spawn.y;
+    camera->Position = Luminumbra::Vec3(x, terrain_height + 80.0f, z);
+
+    const float boundary_distance = LodBoundaryDistance(world_system);
+    const float focus_x = x + boundary_distance;
+    const float focus_height = world_system ? world_system->GetTerrainHeightAt(focus_x, z) : terrain_height;
+    AimCameraAt(camera, Luminumbra::Vec3(focus_x, focus_height, z));
+}
+
+void LodBoundaryTransitionRecorder::record_frame(Luminumbra::Systems::SHIELD_WorldSystem* world_system) {
+    if (!world_system) {
+        return;
+    }
+
+    ++m_frames_observed;
+    for (const Luminumbra::Chunk* chunk : world_system->get_renderable_chunks()) {
+        if (!chunk) {
+            continue;
+        }
+        const int lod = chunk->current_lod.load(std::memory_order_acquire);
+        const Luminumbra::ChunkID id = chunk->get_id();
+        const auto [it, inserted] = m_last_lod.try_emplace(id, lod);
+        if (!inserted && it->second != lod) {
+            ++m_transitions[id];
+            it->second = lod;
+        }
+    }
+}
+
+void WriteLodBoundaryOscillationAnalysis(
+    const std::filesystem::path& artifact_dir,
+    double duration_seconds,
+    float boundary_distance,
+    const LodBoundaryTransitionRecorder& recorder)
+{
+    // Baseline thresholds: current behavior plus margin. There is no LOD
+    // hysteresis yet, so chunks dwelling on the boundary remesh on every
+    // drift crossing (observed: 0.5 transitions/s per boundary chunk, 116
+    // oscillating chunks and 75 total transitions/s over a 30s run). The
+    // per-second rates keep the gate stable across run lengths; the gate
+    // locks in no-worse-than-today so a future hysteresis fix can tighten
+    // these numbers.
+    constexpr std::uint64_t kOscillatingTransitionThreshold = 4;
+    constexpr double kBaselineMaxTransitionsPerChunkPerSecond = 0.75;
+    constexpr std::uint64_t kBaselineMaxOscillatingChunks = 240;
+    constexpr double kBaselineMaxTotalTransitionsPerSecond = 115.0;
+
+    std::uint64_t max_transitions_per_chunk = 0;
+    std::uint64_t total_transitions = 0;
+    std::uint64_t oscillating_chunk_count = 0;
+    for (const auto& [id, transitions] : recorder.transitions()) {
+        (void)id;
+        max_transitions_per_chunk = std::max(max_transitions_per_chunk, transitions);
+        total_transitions += transitions;
+        if (transitions > kOscillatingTransitionThreshold) {
+            ++oscillating_chunk_count;
+        }
+    }
+
+    const double max_transitions_per_chunk_per_s = duration_seconds > 0.0
+        ? static_cast<double>(max_transitions_per_chunk) / duration_seconds
+        : 0.0;
+    const double total_transitions_per_s = duration_seconds > 0.0
+        ? static_cast<double>(total_transitions) / duration_seconds
+        : 0.0;
+
+    const GLDebugRuntimeStats gl_debug = CurrentGLDebugRuntimeStats();
+    const bool passed =
+        gl_debug.errors == 0 &&
+        max_transitions_per_chunk_per_s <= kBaselineMaxTransitionsPerChunkPerSecond &&
+        oscillating_chunk_count <= kBaselineMaxOscillatingChunks &&
+        total_transitions_per_s <= kBaselineMaxTotalTransitionsPerSecond;
+
+    nlohmann::json artifact = {
+        {"schema", "luminumbra.lod_boundary_oscillation.v1"},
+        {"timestamp_utc", TimestampUtc()},
+        {"passed", passed},
+        {"duration_seconds", duration_seconds},
+        {"boundary_distance", boundary_distance},
+        {"frames_observed", recorder.frames_observed()},
+        {"chunks_observed", recorder.chunks_observed()},
+        {"max_transitions_per_chunk", max_transitions_per_chunk},
+        {"max_transitions_per_chunk_per_s", max_transitions_per_chunk_per_s},
+        {"oscillating_transition_threshold", kOscillatingTransitionThreshold},
+        {"oscillating_chunk_count", oscillating_chunk_count},
+        {"total_transitions", total_transitions},
+        {"total_transitions_per_s", total_transitions_per_s},
+        {"known_oscillation_baseline", {
+            {"max_transitions_per_chunk_per_s", kBaselineMaxTransitionsPerChunkPerSecond},
+            {"max_oscillating_chunk_count", kBaselineMaxOscillatingChunks},
+            {"max_total_transitions_per_s", kBaselineMaxTotalTransitionsPerSecond}
+        }},
+        {"gl_debug", {
+            {"messages", gl_debug.messages},
+            {"errors", gl_debug.errors},
+            {"warnings", gl_debug.warnings},
+            {"notifications", gl_debug.notifications}
+        }}
+    };
+
+    std::error_code ec;
+    std::filesystem::create_directories(artifact_dir, ec);
+    std::ofstream output(artifact_dir / "lod-boundary-oscillation.json");
     output << std::setw(2) << artifact << '\n';
 }
 
