@@ -127,6 +127,25 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .forge/scripts/validate-
 
 Feature success requires Wave 1 visual gates green first, all later frontier streams gate-first, and terminal `Endurance300` revalidation after the visual gates.
 
+## Architectural Principle: Engine/Game Decoupling (owner, 2026-06-10)
+
+Two decoupled deliverables: an optimized, powerful, generic ENGINE and a GAME
+concept built on it. Game-world concepts must not be baked into engine code.
+
+- LuminCrystal is game content; the engine feature is light-emitting material
+  support (emissive materials in the registry + lighting integration). Gates
+  assert "emissive material visible in night capture" generically; the
+  LuminCrystal entry in data/common/materials.json is merely the fixture.
+- Aetheric Field is a game concept; the engine piece is a generic scalar
+  field diffusion system.
+- Instinct/GOAP archetypes (grovestrider etc.) are game data; the engine
+  planner API stays data-driven.
+- New game concepts go in data/common/, worlds/, scripts/ (Lua) — never in
+  src/luminumbra_common or src/luminumbra_client.
+- Existing engine code carrying game names (AethericFieldDiffusion's naming,
+  grovestrider fixture data inside InstinctPlanner.cpp) are rename/relocation
+  candidates for a cleanup task — do not entrench further.
+
 ## Iteration 2 Kickoff (2026-06-10)
 
 Execution model: Claude Code agent teams execute all implementation (Agent + Workflow, worktree isolation for parallel phases); Forge provides gates, bookkeeping (.forge/tasks/engine-iteration-2/dispatch.json, 19 tasks / 7 waves), and forge verify. Codex dispatch retired this iteration. Phase order: S1 gates || S2a perf infra -> baseline capture -> GPU timers || persistence core || meshing opt -> pass extraction || runtime persistence -> streaming/jobs optimization -> beautification tracks -> closeout. render-health-baseline.json committed as the extraction diff anchor.

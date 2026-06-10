@@ -245,7 +245,7 @@
         "modifies": ["src/luminumbra_client/rendering/passes/PostPass.cpp", "src/luminumbra_client/main_client.cpp", ".forge/scripts/validate-engine-frontier.ps1"],
         "creates": []
       },
-      "prompt": "Claude-agent execution. SkyboxVisual, WeatherVisual, TimeOfDaySweep modes with luminance/color-band assertions and LuminCrystal night-emission ROI. RenderHealth re-bless per task; PerfRegression after."
+      "prompt": "Claude-agent execution. SkyboxVisual, WeatherVisual, TimeOfDaySweep modes with luminance/color-band assertions and a generic emissive-material night-visibility ROI (the LuminCrystal registry entry is game content serving as the fixture; the engine feature under test is emissive material support). RenderHealth re-bless per task; PerfRegression after."
     },
     {
       "id": "T-I2-18-material-richness-track",
