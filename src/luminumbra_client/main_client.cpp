@@ -1307,6 +1307,20 @@ int main(int argc, char* argv[]) {
             if (auto* world_system = gameSession->GetWorldSystem()) {
                 renderPipeline.SetupGPUSDFIntegration(*world_system);
             }
+
+            // T-I2-12: restore persisted chunk state AFTER the world systems
+            // initialize but BEFORE any chunk generation runs, so saved voxel
+            // edits cannot be clobbered by regeneration (generation skips
+            // chunks that already carry voxel data). A world without a
+            // snapshot is a clean miss and proceeds on the byte-for-byte
+            // unchanged fresh-world path.
+            if (scenario_config.persistence_roundtrip_smoke() &&
+                scenario_config.persistence_phase == "load" &&
+                !scenario_config.persistence_session_dir.empty()) {
+                gameSession->LoadWorldStateFrom(scenario_config.persistence_session_dir);
+            } else {
+                gameSession->LoadWorldState();
+            }
             const bool bypass_loading_ui = runtime_boot_recorder.enabled() || (scenario_config.active() && scenario_config.auto_enter_world);
             if (bypass_loading_ui) {
                 LUMINUMBRA_CORE_INFO("Runtime scenario mode: created world without loading UI.");
@@ -1393,7 +1407,7 @@ int main(int argc, char* argv[]) {
         // lod_ground_smoke keeps the default world its thresholds were tuned on.
         const std::string scenario_world_type =
             (scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() ||
-             scenario_config.auto_world_smoke()) ? "archipelago" : "default";
+             scenario_config.auto_world_smoke() || scenario_config.persistence_roundtrip_smoke()) ? "archipelago" : "default";
         start_world_creation("Automated Test World", "424242", scenario_world_type);
     }
 
@@ -1473,6 +1487,7 @@ int main(int argc, char* argv[]) {
     LodSeamArrivalRecorder lod_seam_arrival_recorder;
     std::array<bool, 4> lod_seam_screenshots_written{false, false, false, false};
     std::vector<LodGroundVisualCapture> lod_seam_visual_captures;
+    bool persistence_phase_attempted = false;
     while (!glfwWindowShouldClose(window)) {
         float currentFrame = (float)glfwGetTime();
         float deltaTime = currentFrame - lastFrame;
@@ -1597,6 +1612,26 @@ int main(int argc, char* argv[]) {
             }
 
             case GameState::IN_GAME:
+                // T-I2-13: persistence runtime roundtrip phases run once on
+                // the first ready frame and exit cleanly; the streaming
+                // update is skipped so the hashed/saved chunk set is exactly
+                // the deterministic post-readiness world.
+                if (scenario_config.persistence_roundtrip_smoke() && scenario_ready && !persistence_phase_attempted) {
+                    persistence_phase_attempted = true;
+                    PersistenceRoundtripPhaseResult phase_result;
+                    if (scenario_config.persistence_phase == "load") {
+                        phase_result = RunPersistenceRoundtripLoadPhase(scenario_config, gameSession.get());
+                    } else {
+                        phase_result = RunPersistenceRoundtripSavePhase(scenario_config, gameSession.get());
+                    }
+                    if (!phase_result.passed) {
+                        scenario_failed = true;
+                        scenario_failure_reason = "persistence_phase_" + phase_result.failure_reason;
+                        runtime_state_recorder.capture(scenario_failure_reason, &jobSystem, gameSession.get(), &renderPipeline, scenario_frame_count, last_readiness_report);
+                    }
+                    glfwSetWindowShouldClose(window, true);
+                    break;
+                }
                 if (scenario_config.lod_ground_smoke() && scenario_ready && g_camera) {
                     const double elapsed_play_seconds = std::chrono::duration<double>(
                         std::chrono::steady_clock::now() - scenario_play_started_at).count();
@@ -1905,6 +1940,13 @@ int main(int argc, char* argv[]) {
     auto mark_shutdown = [&](const std::string& milestone) {
         shutdown_milestones.push_back(milestone);
     };
+
+    // T-I2-12: persist unsaved voxel edits on the world-exit/shutdown path,
+    // before the streamed chunks are torn down. No-op when no world session
+    // is active or when no chunk carries unsaved edits.
+    if (gameSession && gameSession->SaveWorldState()) {
+        mark_shutdown("world_state_saved");
+    }
 
     if (auto* world_system = gameSession->GetWorldSystem()) {
         world_system->clear_world(gameSession->GetPhysicsSystem());

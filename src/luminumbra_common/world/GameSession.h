@@ -35,6 +35,16 @@ struct WorldConfigValidationResult {
     std::vector<std::string> errors;
 };
 
+// Counters for one runtime world-state save pass (T-I2-12). The on-disk layout
+// is a whole-world snapshot, so chunks_saved is the full streamed chunk count
+// whenever a write happened and zero otherwise.
+struct WorldStateSaveReport {
+    std::size_t chunks_total = 0;
+    std::size_t chunks_dirty = 0;
+    std::size_t chunks_saved = 0;
+    bool saved = false;
+};
+
 class GameSession {
 public:
     GameSession();
@@ -48,6 +58,27 @@ public:
 
     // Save the current world state
     bool SaveWorld();
+
+    // --- Runtime world-state persistence (T-I2-12) ---
+    // Persists streamed chunk voxel state under the canonical world save dir
+    // (worlds/saves/<world_id>). Incremental contract: nothing is written when
+    // no chunk carries unsaved voxel edits, so a never-edited world stays
+    // byte-for-byte on the fresh-world path. The first write of an edited
+    // world emits a full snapshot; later writes flush through
+    // WorldSaveService::save_dirty_chunks.
+    bool SaveWorldState(WorldStateSaveReport* report = nullptr);
+    bool SaveWorldStateTo(const std::filesystem::path& save_dir, WorldStateSaveReport* report = nullptr);
+
+    // Loads a previously saved snapshot into the live streaming state. Must be
+    // called AFTER the world systems initialize but BEFORE chunk streaming
+    // generates fresh state: loaded chunks are adopted into the streaming map,
+    // and generation skips chunks that already carry voxel data, so loaded
+    // edits are never clobbered by regeneration. A missing snapshot is a clean
+    // miss (returns false, fresh-world path unchanged).
+    bool LoadWorldState();
+    bool LoadWorldStateFrom(const std::filesystem::path& save_dir);
+    std::size_t GetLastLoadedChunkCount() const { return m_lastLoadedChunkCount; }
+    std::filesystem::path GetWorldSaveDir() const;
 
     static WorldConfigValidationResult ValidateWorldConfig(const std::string& root_path, const std::string& worldType);
 
@@ -77,7 +108,8 @@ private:
 
     // Generate a unique world ID
     std::string GenerateWorldId();
-    std::unique_ptr<Systems::PhysicsSystem> m_physicsSystem; 
+    std::unique_ptr<Systems::PhysicsSystem> m_physicsSystem;
+    std::size_t m_lastLoadedChunkCount = 0;
 
     // Convert string seed to numeric seed
     uint32_t StringToSeed(const std::string& seedStr);
