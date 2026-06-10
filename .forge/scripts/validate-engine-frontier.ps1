@@ -322,6 +322,14 @@ function Test-MaterialVisual {
         throw "Material visual analysis has no Grass ROI entry; the composite vantage must show grass above the beach band"
     }
 
+    $stoneEntries = @($analysis.materials | Where-Object { $_.name -eq "Stone" })
+    if ($stoneEntries.Count -lt 1) {
+        throw "Material visual analysis has no Stone ROI entry; the rim sub-ROI must show the cliff-rim stone band"
+    }
+    if ($stoneEntries[0].roi_scope -ne "rim_band") {
+        throw "Stone ROI entry must be scoped to the rim sub-ROI (legitimate stone is grey-fallback-shaped; see classifier docs)"
+    }
+
     foreach ($entry in $analysis.materials) {
         if ($null -eq $entry.pixels -or $null -eq $entry.thresholds) {
             throw "Material ROI entry '$($entry.name)' is missing pixels or thresholds"
