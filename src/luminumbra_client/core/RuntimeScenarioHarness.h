@@ -140,10 +140,12 @@ struct MaterialPixelStats {
     int height = 0;
     std::uint64_t roi_pixels = 0;
     std::uint64_t sand_pixels = 0;
+    std::uint64_t grass_pixels = 0;
     std::uint64_t grey_fallback_pixels = 0;
     std::uint64_t water_like_pixels = 0;
     std::uint64_t other_pixels = 0;
     double sand_ratio = 0.0;
+    double grass_ratio = 0.0;
     double grey_fallback_ratio = 0.0;
 };
 
