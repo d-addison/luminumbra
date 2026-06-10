@@ -146,6 +146,33 @@ concept built on it. Game-world concepts must not be baked into engine code.
   grovestrider fixture data inside InstinctPlanner.cpp) are rename/relocation
   candidates for a cleanup task — do not entrench further.
 
+## Iteration 3 Directives (owner, 2026-06-10)
+
+Mandated streams for the iteration after iteration 2, all gate-first:
+
+1. **Client/server decoupling**: simulation authority runs headless —
+   luminumbra_server (currently a stub) must tick a real world with zero
+   GL/GLFW/audio. Watch items: GameSession save/load hooks live in
+   main_client; keep new sim features out of client code. Gate: headless
+   server tick smoke (boot world, tick N frames, emit world hash). Precedes
+   networking transport work.
+2. **World generation improvements**: presets already declare unbuilt
+   features (biome temperature/humidity params unused, rivers_enabled,
+   structures_enabled). Stream: biome system driving material/vegetation
+   variation, rivers, structures, richer 3D terrain beyond
+   heightfield+capped-caves. Gated via the worldgen atlas/snapshot machinery.
+   Biome/structure CONTENT is game data; generation systems are engine.
+3. **Character models / animations**: engine side = skeletal mesh +
+   animation sampling/blending through the extracted pass architecture, with
+   the asset_processor/.lmesh pipeline as the import seam; game side = the
+   actual models/clips. Gates: deterministic pose-sampling test +
+   skinned-mesh render capture. Pairs with the GOAP runtime phase (brains +
+   bodies).
+4. (Carried) Engine/game split per the Architectural Principle above; cash
+   in built gates (LOD hysteresis implementation, GPU SDF runtime
+   enablement, release perf lane); gameplay systems runtime; vertical
+   slice; networking last.
+
 ## Iteration 2 Kickoff (2026-06-10)
 
 Execution model: Claude Code agent teams execute all implementation (Agent + Workflow, worktree isolation for parallel phases); Forge provides gates, bookkeeping (.forge/tasks/engine-iteration-2/dispatch.json, 19 tasks / 7 waves), and forge verify. Codex dispatch retired this iteration. Phase order: S1 gates || S2a perf infra -> baseline capture -> GPU timers || persistence core || meshing opt -> pass extraction || runtime persistence -> streaming/jobs optimization -> beautification tracks -> closeout. render-health-baseline.json committed as the extraction diff anchor.
