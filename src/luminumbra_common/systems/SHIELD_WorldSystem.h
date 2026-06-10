@@ -181,7 +181,19 @@ public:
     
     // GPU SDF generation integration
     void SetGPUSDFCallback(std::function<bool(const IVec3&, const TerrainGenParams&, int, std::vector<float>&)> callback);
-    
+
+    // --- Persistence integration (runtime save/load, T-I2-12) ---
+    // Blocks until in-flight generation and meshing jobs complete so chunk
+    // voxel/mesh data is stable for hashing and serialization.
+    void wait_for_streaming_jobs();
+    // Shared-ownership snapshot of every streamed chunk (save path).
+    std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_streamed_chunks() const;
+    std::shared_ptr<::Luminumbra::Chunk> find_streamed_chunk(const IVec3& coords) const;
+    // Adopts an externally loaded chunk when its slot is empty. Returns false
+    // (without clobbering the streamed chunk) when a chunk with the same id
+    // is already active.
+    bool adopt_streamed_chunk(const std::shared_ptr<::Luminumbra::Chunk>& chunk);
+
 private:
     std::function<bool(const IVec3&, const TerrainGenParams&, int, std::vector<float>&)> m_gpu_sdf_callback;
 
