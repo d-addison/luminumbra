@@ -21,6 +21,7 @@ set(COMMON_SOURCES
 
     # Network
     ${CMAKE_CURRENT_LIST_DIR}/network/NetworkLoopbackAuthority.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/network/NetworkStateHash.cpp
 
     # Persistence
     ${CMAKE_CURRENT_LIST_DIR}/persistence/WorldPersistenceRoundtrip.cpp
@@ -44,4 +45,5 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/world/Chunk.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/GameSession.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/MarchingCubes.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/world/WorldStreamingState.cpp
 )

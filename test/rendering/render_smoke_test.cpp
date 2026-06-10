@@ -921,7 +921,10 @@ TEST(RenderSmokeTest, GpuSdfCallbackSafetyGateEmitsAnalysisArtifact) {
     ASSERT_GT(generate_pos, setup_pos);
 
     const std::string setup_body = source.substr(setup_pos, generate_pos - setup_pos);
-    const std::size_t disabled_branch = setup_body.find("if (!kEnableExperimentalGpuSdfIntegration)");
+    // The disabled branch must be guarded by the compile-time flag first; the
+    // runtime toggle gate strengthens it with additional conditions, so match
+    // the guard prefix rather than the exact original literal.
+    const std::size_t disabled_branch = setup_body.find("if (!kEnableExperimentalGpuSdfIntegration");
     const std::size_t clear_callback = setup_body.find("world_system.SetGPUSDFCallback({})");
     const std::size_t disabled_return = setup_body.find("return;", clear_callback);
     const std::size_t raw_capture = setup_body.find("[this]");
