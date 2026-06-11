@@ -15,6 +15,9 @@ out VS_OUT {
 
 uniform mat4 projection;
 uniform mat4 view;
+// T-I3-16: per-draw-group material id from StaticMeshComponent (the previous
+// hardcoded MaterialID = 3u painted every static mesh as grass).
+uniform int u_materialId;
 
 void main()
 {
@@ -29,8 +32,7 @@ void main()
     mat3 normalMatrix = mat3(transpose(inverse(viewModel)));
     vs_out.Normal = normalize(normalMatrix * aNormal); // Also includes the fix from last time
 
-    // Hardcode MaterialID (e.g. 3 for Grass)
-    vs_out.MaterialID = 3u; 
+    vs_out.MaterialID = uint(u_materialId);
 
     gl_Position = projection * viewPos;
 }

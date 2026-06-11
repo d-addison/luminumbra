@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "SkinnedMeshVisual", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -508,6 +508,7 @@ function Test-ShaderInventory {
         "basic",
         "g_buffer",
         "instanced_mesh_gbuffer",
+        "skinned_mesh_gbuffer",
         "lighting_pass",
         "skybox",
         "shadow_map",
@@ -2822,6 +2823,66 @@ function Test-FarLodHorizon {
     }
 }
 
+function Test-SkinnedMeshVisual {
+    # T-I3-16: skinned G-Buffer stage gate. A procedurally generated rigged
+    # test mesh is spawned near spawn; two captures at different clip times
+    # must differ in the mesh ROI and the skinned draw stage must have run.
+    $exe = Get-ClientExe
+    $visualDir = "build/$BuildPreset/test-artifacts/runtime/skinned-mesh-visual"
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $visualDir
+    New-Item -ItemType Directory -Force -Path $visualDir | Out-Null
+
+    $runSeconds = [Math]::Max(20, $SmokeSeconds)
+    Invoke-Checked -FilePath $exe -ArgumentList @(
+        "--scenario", "skinned_mesh_visual_smoke",
+        "--auto-create-world",
+        "--auto-enter-world",
+        "--timed-run", "$runSeconds",
+        "--no-audio",
+        "--no-ui",
+        "--runtime-artifact-dir", $visualDir
+    ) -TimeoutSeconds ([Math]::Max(120, $runSeconds + 90))
+
+    $analysisPath = Join-Path $visualDir "skinned-mesh-visual-analysis.json"
+    if (-not (Test-Path $analysisPath)) {
+        throw "skinned mesh visual run did not produce $analysisPath (gate produced by task T-I3-16)"
+    }
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.skinned_mesh_visual_analysis.v1") {
+        throw "Unexpected skinned mesh visual analysis schema '$($analysis.schema)'"
+    }
+    if (-not $analysis.rig.spawned) {
+        throw "Skinned mesh visual scenario failed to spawn the rigged test mesh"
+    }
+    if ([int64]$analysis.gl_debug.errors -ne 0) {
+        throw "Skinned mesh visual run emitted GL debug errors: $($analysis.gl_debug.errors)"
+    }
+    foreach ($capture in @($analysis.capture_a, $analysis.capture_b)) {
+        if ([int64]$capture.skinned_draws -lt 1) {
+            throw "Skinned mesh visual capture '$($capture.file)' rendered no skinned draws"
+        }
+        Assert-PpmArtifact (Join-Path $visualDir $capture.file)
+    }
+    if ([double]$analysis.capture_b.animation_time_seconds -le [double]$analysis.capture_a.animation_time_seconds) {
+        throw "Skinned mesh visual captures do not advance the animation clock: $($analysis.capture_a.animation_time_seconds) -> $($analysis.capture_b.animation_time_seconds)"
+    }
+    if ([int64]$analysis.diff.changed_pixels -lt [int64]$analysis.thresholds.min_changed_pixels) {
+        throw "Skinned mesh ROI diff below threshold: $($analysis.diff.changed_pixels) < $($analysis.thresholds.min_changed_pixels) changed pixels"
+    }
+    if ([double]$analysis.diff.changed_ratio -lt [double]$analysis.thresholds.min_changed_ratio) {
+        throw "Skinned mesh ROI diff ratio below threshold: $($analysis.diff.changed_ratio) < $($analysis.thresholds.min_changed_ratio)"
+    }
+    if (-not $analysis.passed) {
+        throw "Skinned mesh visual analysis reported failure: $($analysis.failures -join ', ')"
+    }
+    Write-Host ("skinned mesh visual: draws a={0} b={1} anim_time a={2}s b={3}s changed_pixels={4} (ratio {5}) mesh_like a={6} b={7}" -f `
+        $analysis.capture_a.skinned_draws, $analysis.capture_b.skinned_draws, `
+        $analysis.capture_a.animation_time_seconds, $analysis.capture_b.animation_time_seconds, `
+        $analysis.diff.changed_pixels, $analysis.diff.changed_ratio, `
+        $analysis.diff.mesh_like_pixels_a, $analysis.diff.mesh_like_pixels_b)
+}
+
 switch ($Mode) {
     "CodexOnly" { Test-CodexOnly }
     "Panels" { Test-Panels }
@@ -2857,6 +2918,7 @@ switch ($Mode) {
     "TimeOfDaySweep" { Test-TimeOfDaySweep }
     "PlayerView" { Test-PlayerView }
     "FarLodHorizon" { Test-FarLodHorizon }
+    "SkinnedMeshVisual" { Test-SkinnedMeshVisual }
     "All" {
         Test-CodexOnly
         Test-Files

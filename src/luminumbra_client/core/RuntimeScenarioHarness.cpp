@@ -7,6 +7,8 @@
 #include "core/RuntimeScenarioHarness.h"
 #include "core/Log.h"
 #include "rendering/Camera.h"
+#include "luminumbra_common/animation/AnimationRuntime.h"
+#include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
@@ -99,10 +101,10 @@ RuntimeScenarioConfig ParseRuntimeScenarioConfig(int argc, char* argv[], const s
     config.persistence_session_dir = GetCommandLineOption(argc, argv, "--persistence-session-dir", "");
     config.world_preset = GetCommandLineOption(argc, argv, "--world-preset", "");
 
-    const int default_timed_run = config.auto_world_smoke() ? 300 : ((config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke() || config.skybox_visual_smoke() || config.weather_visual_smoke() || config.timeofday_sweep_smoke() || config.lod_boundary_oscillation_smoke() || config.lod_seam_arrival_smoke() || config.player_view_smoke() || config.farlod_horizon_smoke()) ? 60 : 0);
+    const int default_timed_run = config.auto_world_smoke() ? 300 : ((config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke() || config.skybox_visual_smoke() || config.weather_visual_smoke() || config.timeofday_sweep_smoke() || config.lod_boundary_oscillation_smoke() || config.lod_seam_arrival_smoke() || config.player_view_smoke() || config.farlod_horizon_smoke() || config.skinned_mesh_visual_smoke()) ? 60 : 0);
     config.timed_run_seconds = GetCommandLineIntOption(argc, argv, "--timed-run", default_timed_run);
 
-    if (config.auto_world_smoke() || config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke() || config.skybox_visual_smoke() || config.weather_visual_smoke() || config.timeofday_sweep_smoke() || config.lod_boundary_oscillation_smoke() || config.lod_seam_arrival_smoke() || config.persistence_roundtrip_smoke() || config.player_view_smoke() || config.farlod_horizon_smoke()) {
+    if (config.auto_world_smoke() || config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke() || config.skybox_visual_smoke() || config.weather_visual_smoke() || config.timeofday_sweep_smoke() || config.lod_boundary_oscillation_smoke() || config.lod_seam_arrival_smoke() || config.persistence_roundtrip_smoke() || config.player_view_smoke() || config.farlod_horizon_smoke() || config.skinned_mesh_visual_smoke()) {
         config.auto_create_world = true;
         config.auto_enter_world = true;
     }
@@ -4138,6 +4140,402 @@ void WriteFarLodHorizonAnalysis(
     std::error_code ec;
     std::filesystem::create_directories(artifact_dir, ec);
     std::ofstream output(artifact_dir / "farlod-horizon-analysis.json");
+    output << std::setw(2) << artifact << '\n';
+}
+
+// --- skinned_mesh_visual_smoke (T-I3-16) ---
+
+namespace {
+
+namespace anim = luminumbra::animation;
+
+// Stable storage for the runtime skeleton/clip the spawned entity's
+// AnimationPlayerComponent points at (the scenario spawns exactly once).
+anim::Skeleton g_skinned_test_skeleton;
+anim::AnimationClip g_skinned_test_clip;
+
+// Appends an axis-aligned box (24 vertices, 36 indices, per-face normals)
+// fully weighted to a single joint.
+void AppendSkinnedBox(
+    std::vector<anim::SkinnedVertexData>& vertices,
+    std::vector<uint32_t>& indices,
+    const Luminumbra::Vec3& min,
+    const Luminumbra::Vec3& max,
+    uint8_t joint) {
+    struct Face {
+        float normal[3];
+        // Corner selector per vertex: 0 -> min component, 1 -> max component.
+        int corners[4][3];
+    };
+    static const Face kFaces[6] = {
+        {{ 1, 0, 0}, {{1,0,0},{1,1,0},{1,1,1},{1,0,1}}},
+        {{-1, 0, 0}, {{0,0,1},{0,1,1},{0,1,0},{0,0,0}}},
+        {{ 0, 1, 0}, {{0,1,0},{0,1,1},{1,1,1},{1,1,0}}},
+        {{ 0,-1, 0}, {{0,0,0},{1,0,0},{1,0,1},{0,0,1}}},
+        {{ 0, 0, 1}, {{1,0,1},{1,1,1},{0,1,1},{0,0,1}}},
+        {{ 0, 0,-1}, {{0,0,0},{0,1,0},{1,1,0},{1,0,0}}},
+    };
+    const float mins[3] = {min.x, min.y, min.z};
+    const float maxs[3] = {max.x, max.y, max.z};
+    for (const Face& face : kFaces) {
+        const uint32_t base = static_cast<uint32_t>(vertices.size());
+        for (int v = 0; v < 4; ++v) {
+            anim::SkinnedVertexData vertex{};
+            for (int c = 0; c < 3; ++c) {
+                vertex.pos[c] = face.corners[v][c] ? maxs[c] : mins[c];
+                vertex.norm[c] = face.normal[c];
+            }
+            vertex.uv[0] = (v == 1 || v == 2) ? 1.0f : 0.0f;
+            vertex.uv[1] = (v >= 2) ? 1.0f : 0.0f;
+            vertex.joints[0] = joint;
+            vertex.weights[0] = 255;
+            vertices.push_back(vertex);
+        }
+        indices.push_back(base + 0);
+        indices.push_back(base + 1);
+        indices.push_back(base + 2);
+        indices.push_back(base + 0);
+        indices.push_back(base + 2);
+        indices.push_back(base + 3);
+    }
+}
+
+bool WriteSkinnedTestAssets(
+    const std::filesystem::path& mesh_path,
+    const std::filesystem::path& clip_path) {
+    // Geometry: a static post (joint 0 "root") from y = 0..2 and an arm
+    // (joint 1 "arm") hinged at (0, 2, 0) extending +X. The arm joint
+    // rotates about Z from 0 to 120 degrees over the 60 s clip, so any two
+    // captures several seconds apart show the arm at visibly different
+    // angles with no looping-phase coincidence inside a smoke run.
+    std::vector<anim::SkinnedVertexData> vertices;
+    std::vector<uint32_t> indices;
+    AppendSkinnedBox(vertices, indices, {-0.25f, 0.0f, -0.25f}, {0.25f, 2.0f, 0.25f}, 0);
+    AppendSkinnedBox(vertices, indices, {0.1f, 1.8f, -0.2f}, {1.9f, 2.2f, 0.2f}, 1);
+
+    anim::SkinnedMeshAsset mesh{};
+    mesh.header.vertexCount = static_cast<uint32_t>(vertices.size());
+    mesh.header.indexCount = static_cast<uint32_t>(indices.size());
+    mesh.header.jointCount = 2;
+    mesh.header.boundingSphere[0] = 0.0f;
+    mesh.header.boundingSphere[1] = 1.6f;
+    mesh.header.boundingSphere[2] = 0.0f;
+    mesh.header.boundingSphere[3] = 3.0f;
+    mesh.vertices = std::move(vertices);
+    mesh.indices = std::move(indices);
+
+    anim::Lms2Joint root{};
+    root.nameHash = anim::HashJointName("root");
+    root.parentIndex = -1;
+    anim::Lms2Joint arm{};
+    arm.nameHash = anim::HashJointName("arm");
+    arm.parentIndex = 0;
+    arm.localTranslation[1] = 2.0f;
+    arm.inverseBind[13] = -2.0f; // column-major translate(0, -2, 0)
+    mesh.joints = {root, arm};
+
+    {
+        std::ofstream out(mesh_path, std::ios::binary);
+        if (!out) return false;
+        out.write(reinterpret_cast<const char*>(&mesh.header), sizeof(mesh.header));
+        out.write(reinterpret_cast<const char*>(mesh.vertices.data()),
+                  static_cast<std::streamsize>(mesh.vertices.size() * sizeof(anim::SkinnedVertexData)));
+        out.write(reinterpret_cast<const char*>(mesh.indices.data()),
+                  static_cast<std::streamsize>(mesh.indices.size() * sizeof(uint32_t)));
+        out.write(reinterpret_cast<const char*>(mesh.joints.data()),
+                  static_cast<std::streamsize>(mesh.joints.size() * sizeof(anim::Lms2Joint)));
+        if (!out) return false;
+    }
+
+    anim::AnimClipAsset clip{};
+    clip.header.duration = 60.0f;
+    clip.header.trackCount = 1;
+    anim::AnimTrack track{};
+    track.header.jointNameHash = anim::HashJointName("arm");
+    track.header.targetType = static_cast<uint32_t>(anim::AnimTargetType::Rotation);
+    track.header.keyCount = 2;
+    track.header.componentCount = 4;
+    track.times = {0.0f, 60.0f};
+    // Quaternions x, y, z, w: identity -> 120 degrees about Z.
+    track.values = {0.0f, 0.0f, 0.0f, 1.0f,
+                    0.0f, 0.0f, 0.86602540f, 0.5f};
+    clip.tracks = {track};
+
+    {
+        std::ofstream out(clip_path, std::ios::binary);
+        if (!out) return false;
+        out.write(reinterpret_cast<const char*>(&clip.header), sizeof(clip.header));
+        for (const anim::AnimTrack& t : clip.tracks) {
+            out.write(reinterpret_cast<const char*>(&t.header), sizeof(t.header));
+            out.write(reinterpret_cast<const char*>(t.times.data()),
+                      static_cast<std::streamsize>(t.times.size() * sizeof(float)));
+            out.write(reinterpret_cast<const char*>(t.values.data()),
+                      static_cast<std::streamsize>(t.values.size() * sizeof(float)));
+        }
+        if (!out) return false;
+    }
+    return true;
+}
+
+// Sky predicate for the diff gate: blue-led bright pixels (sky and drifting
+// clouds). The test mesh renders with the warm sand material, which this
+// never matches.
+bool IsSkinnedSkyPixel(unsigned char r, unsigned char g, unsigned char b) {
+    return b > 110 && static_cast<int>(b) > static_cast<int>(r) + 12;
+}
+
+// Warm-toned opaque geometry pixel (the rig's sand material renders in the
+// same dim olive band as the surrounding terrain under the current tone
+// mapping, measured r/g/b ~ 64/60/33). Counts rig AND terrain — recorded as
+// supporting evidence only; the enforced visibility signal is
+// skinned_draws > 0 plus the non-sky temporal ROI diff (terrain is static,
+// so only the animated rig can move non-sky pixels between captures).
+bool IsSkinnedMeshLikePixel(unsigned char r, unsigned char g, unsigned char b) {
+    return r >= 30 && r <= 150 &&
+           static_cast<int>(r) >= static_cast<int>(b) &&
+           static_cast<int>(g) >= static_cast<int>(b);
+}
+
+} // namespace
+
+SkinnedMeshVisualTarget SpawnSkinnedMeshVisualEntity(
+    Luminumbra::world::GameSession* game_session,
+    const std::filesystem::path& artifact_dir) {
+    SkinnedMeshVisualTarget target;
+    if (!game_session || !game_session->GetWorldSystem()) {
+        target.failure_reason = "no_world_system";
+        return target;
+    }
+    auto* world_system = game_session->GetWorldSystem();
+    const Luminumbra::Vec3 spawn = game_session->GetMetadata().spawnPoint;
+
+    const float mesh_x = spawn.x + 5.0f;
+    const float mesh_z = spawn.z + 3.0f;
+    const float mesh_y = world_system->GetTerrainHeightAt(mesh_x, mesh_z);
+    target.mesh_position = {mesh_x, mesh_y, mesh_z};
+    target.focus = target.mesh_position + Luminumbra::Vec3(0.4f, 1.9f, 0.0f);
+
+    // Camera: fixed framing ~9 m south of the rig, slightly above the arm
+    // hinge, lifted clear of the local terrain.
+    const float cam_x = mesh_x;
+    const float cam_z = mesh_z + 9.0f;
+    const float cam_terrain = world_system->GetTerrainHeightAt(cam_x, cam_z);
+    const float cam_y = std::max(mesh_y + 2.6f, cam_terrain + 1.7f);
+    target.camera_position = {cam_x, cam_y, cam_z};
+
+    std::error_code ec;
+    std::filesystem::create_directories(artifact_dir / "assets", ec);
+    const std::filesystem::path mesh_path = artifact_dir / "assets" / "skinned-test-rig.lmesh";
+    const std::filesystem::path clip_path = artifact_dir / "assets" / "skinned-test-rig-wave.lanim";
+    if (!WriteSkinnedTestAssets(mesh_path, clip_path)) {
+        target.failure_reason = "asset_write_failed";
+        return target;
+    }
+    target.mesh_path = mesh_path.string();
+    target.clip_path = clip_path.string();
+
+    // Round-trip through the on-disk formats: the same loaders the renderer
+    // and the animation runtime consume.
+    anim::SkinnedMeshAsset mesh_asset;
+    anim::AnimClipAsset clip_asset;
+    if (!anim::LoadSkinnedMeshAsset(target.mesh_path, mesh_asset) ||
+        !anim::LoadAnimClipAsset(target.clip_path, clip_asset)) {
+        target.failure_reason = "asset_reload_failed";
+        return target;
+    }
+    g_skinned_test_skeleton = anim::BuildSkeleton(mesh_asset);
+    g_skinned_test_clip = anim::BuildClip(clip_asset);
+
+    entt::registry& registry = game_session->GetRegistry();
+    const auto entity = registry.create();
+    auto& transform = registry.emplace<Luminumbra::Components::TransformComponent>(entity);
+    transform.position = target.mesh_position;
+    auto& mesh_component = registry.emplace<Luminumbra::Components::SkinnedMeshComponent>(entity);
+    mesh_component.meshPath = target.mesh_path;
+    mesh_component.materialId = 4; // Sand: warm and bright against grass/sky
+    auto& player = registry.emplace<anim::AnimationPlayerComponent>(entity);
+    player.skeleton = &g_skinned_test_skeleton;
+    player.clip = &g_skinned_test_clip;
+    player.time = 0.0;
+    player.looping = true;
+
+    target.entity = entity;
+    target.spawned = true;
+    LUMINUMBRA_CORE_INFO(
+        "skinned_mesh_visual_smoke: spawned test rig at ({:.1f}, {:.1f}, {:.1f})",
+        target.mesh_position.x, target.mesh_position.y, target.mesh_position.z);
+    return target;
+}
+
+void ApplySkinnedMeshVisualCamera(
+    Luminumbra::Rendering::Camera* camera,
+    const SkinnedMeshVisualTarget& target) {
+    if (!camera || !target.spawned) {
+        return;
+    }
+    camera->Position = target.camera_position;
+    camera->Zoom = 45.0f;
+    AimCameraAt(camera, target.focus);
+}
+
+double SkinnedMeshVisualAnimationTime(
+    Luminumbra::world::GameSession* game_session,
+    const SkinnedMeshVisualTarget& target) {
+    if (!game_session || !target.spawned) {
+        return -1.0;
+    }
+    entt::registry& registry = game_session->GetRegistry();
+    if (!registry.valid(target.entity) ||
+        !registry.all_of<anim::AnimationPlayerComponent>(target.entity)) {
+        return -1.0;
+    }
+    return registry.get<anim::AnimationPlayerComponent>(target.entity).time;
+}
+
+SkinnedMeshDiffStats AnalyzeSkinnedMeshCaptures(
+    const std::vector<unsigned char>& pixels_a,
+    const std::vector<unsigned char>& pixels_b,
+    int width,
+    int height) {
+    SkinnedMeshDiffStats stats;
+    stats.width = width;
+    stats.height = height;
+    const std::size_t expected = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u;
+    if (width <= 0 || height <= 0 || pixels_a.size() < expected || pixels_b.size() < expected) {
+        return stats;
+    }
+
+    // Central ROI around the framed rig; the top band is excluded so open
+    // sky never dominates the diff.
+    stats.roi_x0 = width / 4;
+    stats.roi_x1 = width - width / 4;
+    stats.roi_y0 = height / 5;          // from top
+    stats.roi_y1 = (height * 9) / 10;   // from top
+
+    constexpr int kChangedChannelDelta = 16;
+    const std::size_t row_stride = static_cast<std::size_t>(width) * 3u;
+    for (int y = 0; y < height; ++y) {
+        const int y_from_top = height - 1 - y;
+        if (y_from_top < stats.roi_y0 || y_from_top >= stats.roi_y1) {
+            continue;
+        }
+        for (int x = stats.roi_x0; x < stats.roi_x1; ++x) {
+            const std::size_t offset = static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
+            const unsigned char ra = pixels_a[offset + 0u];
+            const unsigned char ga = pixels_a[offset + 1u];
+            const unsigned char ba = pixels_a[offset + 2u];
+            const unsigned char rb = pixels_b[offset + 0u];
+            const unsigned char gb = pixels_b[offset + 1u];
+            const unsigned char bb = pixels_b[offset + 2u];
+            ++stats.roi_pixels;
+            if (IsSkinnedMeshLikePixel(ra, ga, ba)) {
+                ++stats.mesh_like_pixels_a;
+            }
+            if (IsSkinnedMeshLikePixel(rb, gb, bb)) {
+                ++stats.mesh_like_pixels_b;
+            }
+            const int delta = std::max({
+                std::abs(static_cast<int>(ra) - static_cast<int>(rb)),
+                std::abs(static_cast<int>(ga) - static_cast<int>(gb)),
+                std::abs(static_cast<int>(ba) - static_cast<int>(bb))});
+            if (delta >= kChangedChannelDelta &&
+                !(IsSkinnedSkyPixel(ra, ga, ba) && IsSkinnedSkyPixel(rb, gb, bb))) {
+                ++stats.changed_pixels;
+            }
+        }
+    }
+    if (stats.roi_pixels > 0) {
+        stats.changed_ratio = static_cast<double>(stats.changed_pixels) / static_cast<double>(stats.roi_pixels);
+    }
+    return stats;
+}
+
+void WriteSkinnedMeshVisualAnalysis(
+    const std::filesystem::path& artifact_dir,
+    const SkinnedMeshVisualTarget& target,
+    const SkinnedMeshVisualCapture& capture_a,
+    const SkinnedMeshVisualCapture& capture_b,
+    const SkinnedMeshDiffStats& diff) {
+    constexpr std::uint64_t kMinChangedPixels = 500;
+    constexpr double kMinChangedRatio = 0.001;
+
+    const GLDebugRuntimeStats gl_debug = CurrentGLDebugRuntimeStats();
+
+    std::vector<std::string> failures;
+    if (!target.spawned) {
+        failures.push_back("spawn_failed:" + target.failure_reason);
+    }
+    if (capture_a.skinned_draws == 0 || capture_b.skinned_draws == 0) {
+        failures.push_back("skinned_draws_zero");
+    }
+    if (diff.changed_pixels < kMinChangedPixels) {
+        failures.push_back("roi_diff_below_min_pixels");
+    }
+    if (diff.changed_ratio < kMinChangedRatio) {
+        failures.push_back("roi_diff_below_min_ratio");
+    }
+    if (capture_b.animation_time_seconds >= 0.0 &&
+        capture_b.animation_time_seconds <= capture_a.animation_time_seconds) {
+        failures.push_back("animation_clock_not_advancing");
+    }
+    if (gl_debug.errors != 0) {
+        failures.push_back("gl_debug_errors");
+    }
+    const bool passed = failures.empty();
+
+    const auto capture_json = [](const SkinnedMeshVisualCapture& capture) {
+        return nlohmann::json{
+            {"file", capture.file},
+            {"elapsed_seconds", capture.elapsed_seconds},
+            {"animation_time_seconds", capture.animation_time_seconds},
+            {"skinned_draws", capture.skinned_draws},
+            {"skinned_indices_drawn", capture.skinned_indices_drawn},
+        };
+    };
+
+    const nlohmann::json artifact = {
+        {"schema", "luminumbra.skinned_mesh_visual_analysis.v1"},
+        {"timestamp_utc", TimestampUtc()},
+        {"scenario", "skinned_mesh_visual_smoke"},
+        {"rig", {
+            {"spawned", target.spawned},
+            {"mesh_path", target.mesh_path},
+            {"clip_path", target.clip_path},
+            {"mesh_position", Vec3ToJson(target.mesh_position)},
+            {"camera_position", Vec3ToJson(target.camera_position)},
+        }},
+        {"capture_a", capture_json(capture_a)},
+        {"capture_b", capture_json(capture_b)},
+        {"roi", {
+            {"x0", diff.roi_x0},
+            {"y0_from_top", diff.roi_y0},
+            {"x1", diff.roi_x1},
+            {"y1_from_top", diff.roi_y1},
+            {"pixels", diff.roi_pixels},
+        }},
+        {"diff", {
+            {"changed_pixels", diff.changed_pixels},
+            {"changed_ratio", diff.changed_ratio},
+            {"mesh_like_pixels_a", diff.mesh_like_pixels_a},
+            {"mesh_like_pixels_b", diff.mesh_like_pixels_b},
+        }},
+        {"thresholds", {
+            {"min_changed_pixels", kMinChangedPixels},
+            {"min_changed_ratio", kMinChangedRatio},
+        }},
+        {"gl_debug", {
+            {"messages", gl_debug.messages},
+            {"errors", gl_debug.errors},
+            {"warnings", gl_debug.warnings},
+            {"notifications", gl_debug.notifications},
+        }},
+        {"failures", failures},
+        {"passed", passed},
+    };
+
+    std::error_code ec;
+    std::filesystem::create_directories(artifact_dir, ec);
+    std::ofstream output(artifact_dir / "skinned-mesh-visual-analysis.json");
     output << std::setw(2) << artifact << '\n';
 }
 

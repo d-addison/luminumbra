@@ -67,6 +67,7 @@ struct RuntimeScenarioConfig {
     bool persistence_roundtrip_smoke() const { return scenario == "persistence_roundtrip_smoke"; }
     bool player_view_smoke() const { return scenario == "player_view_smoke"; }
     bool farlod_horizon_smoke() const { return scenario == "farlod_horizon_smoke"; }
+    bool skinned_mesh_visual_smoke() const { return scenario == "skinned_mesh_visual_smoke"; }
     bool forced_crash() const { return scenario == "forced_crash"; }
 };
 
@@ -731,5 +732,79 @@ void WriteFarLodHorizonAnalysis(
     double far_gbuffer_gpu_ms,
     bool gpu_timers_supported,
     bool enforce_sky_ratio);
+
+// --- skinned_mesh_visual_smoke (T-I3-16): skinned G-Buffer stage gate ---
+// Spawns a procedurally generated rigged test mesh (LMS2 + .lanim written
+// into the artifact dir at scenario start: a static post with an arm hinged
+// at the top, the arm joint rotating slowly about Z over a 60 s clip) near
+// the world spawn, frames it with a fixed camera, and captures the frame at
+// two different clip times. The gate asserts the skinned draw stage ran
+// (skinned_draws > 0 at both captures) and that the two captures differ in
+// the mesh ROI (the deformation is visible), excluding sky-colored pixels so
+// drifting clouds cannot pass the gate by themselves.
+struct SkinnedMeshVisualTarget {
+    bool spawned = false;
+    Luminumbra::EntityID entity{entt::null};
+    Luminumbra::Vec3 mesh_position{0.0f};   // base of the post
+    Luminumbra::Vec3 focus{0.0f};           // arm hinge (camera aim point)
+    Luminumbra::Vec3 camera_position{0.0f};
+    std::string mesh_path;                  // absolute LMS2 path
+    std::string clip_path;                  // absolute .lanim path
+    std::string failure_reason;
+};
+
+SkinnedMeshVisualTarget SpawnSkinnedMeshVisualEntity(
+    Luminumbra::world::GameSession* game_session,
+    const std::filesystem::path& artifact_dir);
+
+void ApplySkinnedMeshVisualCamera(
+    Luminumbra::Rendering::Camera* camera,
+    const SkinnedMeshVisualTarget& target);
+
+// Animation clock of the spawned entity's player component (seconds), -1.0
+// when the entity is gone.
+double SkinnedMeshVisualAnimationTime(
+    Luminumbra::world::GameSession* game_session,
+    const SkinnedMeshVisualTarget& target);
+
+struct SkinnedMeshVisualCapture {
+    std::string file;
+    double elapsed_seconds = 0.0;
+    double animation_time_seconds = -1.0;
+    std::size_t skinned_draws = 0;
+    std::size_t skinned_indices_drawn = 0;
+};
+
+struct SkinnedMeshDiffStats {
+    int width = 0;
+    int height = 0;
+    int roi_x0 = 0;
+    int roi_y0 = 0; // from top
+    int roi_x1 = 0;
+    int roi_y1 = 0;
+    std::uint64_t roi_pixels = 0;
+    // Pixels whose max channel delta >= threshold AND that are not
+    // sky-colored in both captures.
+    std::uint64_t changed_pixels = 0;
+    double changed_ratio = 0.0;
+    // Warm-toned opaque-geometry pixels (rig + terrain band) inside the ROI;
+    // recorded as supporting evidence only — the enforced visibility signal
+    // is skinned_draws > 0 plus the non-sky temporal diff.
+    std::uint64_t mesh_like_pixels_a = 0;
+    std::uint64_t mesh_like_pixels_b = 0;
+};
+
+SkinnedMeshDiffStats AnalyzeSkinnedMeshCaptures(
+    const std::vector<unsigned char>& pixels_a,
+    const std::vector<unsigned char>& pixels_b,
+    int width,
+    int height);
+
+void WriteSkinnedMeshVisualAnalysis(
+    const std::filesystem::path& artifact_dir,
+    const SkinnedMeshVisualTarget& target,
+    const SkinnedMeshVisualCapture& capture_a,
+    const SkinnedMeshVisualCapture& capture_b,
+    const SkinnedMeshDiffStats& diff);
 
 } // namespace Luminumbra::Client::ScenarioHarness
