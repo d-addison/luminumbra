@@ -464,21 +464,35 @@ private:
     static constexpr float kEmissiveLutScale = 8.0f;
 
     // --- Skinned/creature UV-mapped textures (T-I4-8) ---
-    // GL_TEXTURE_2D_ARRAY of UV-sampled creature textures; layer 0 = grovestrider
-    // albedo, layer 1 = grovestrider normal. Sampled by the skinned-mesh G-buffer
-    // path (skinned_mesh.vert + g_buffer.frag u_skinnedTextures). Separate from
-    // the terrain triplanar arrays (different sampling model).
+    // GL_TEXTURE_2D_ARRAY of UV-sampled creature textures; layer 0 = albedo,
+    // layer 1 = tangent-space normal. Sampled by the skinned-mesh G-buffer path
+    // (skinned_mesh.vert + g_buffer.frag u_skinnedTextures). Separate from the
+    // terrain triplanar arrays (different sampling model). The engine names no
+    // creature here: the texture *set* is supplied by the caller (the scenario
+    // harness reads paths from the game archetype JSON — T-I4-DR-split-lint).
     u32 m_skinnedTextureArray = 0;
     static constexpr int kSkinnedTextureResolution = 256;
     // Layer indices within m_skinnedTextureArray (-1 = absent).
-    int m_grovestriderAlbedoLayer = -1;
-    int m_grovestriderNormalLayer = -1;
-    void init_skinned_textures();
+    int m_skinnedAlbedoLayer = -1;
+    int m_skinnedNormalLayer = -1;
+    // Allocates the skinned texture array with flat fallback layers (mid-grey
+    // albedo / up-normal) so the skinned mesh is always drawable even before a
+    // texture set is loaded.
+    void init_skinned_texture_array();
     // Accessor for GBufferPass (friend) skinned-pass binding.
 public:
     u32 skinned_texture_array() const { return m_skinnedTextureArray; }
-    int grovestrider_albedo_layer() const { return m_grovestriderAlbedoLayer; }
-    int grovestrider_normal_layer() const { return m_grovestriderNormalLayer; }
+    int skinned_albedo_layer() const { return m_skinnedAlbedoLayer; }
+    int skinned_normal_layer() const { return m_skinnedNormalLayer; }
+    // Generic, data-driven texture-set loader. Uploads the albedo (.ltex) into
+    // layer 0 and the tangent-space normal (.ltex) into layer 1 of the skinned
+    // array, returning the layer indices through albedo_layer_out/normal_layer_out.
+    // A missing/mismatched file keeps that layer's flat fallback. Returns true if
+    // the albedo loaded (the mesh is then UV-textured). Paths are caller-supplied,
+    // so the engine carries no creature/asset names.
+    bool load_skinned_texture_set(const std::filesystem::path& albedo_path,
+                                  const std::filesystem::path& normal_path,
+                                  int& albedo_layer_out, int& normal_layer_out);
 private:
 
     // Per-material LUT columns parsed from data/common/materials.json

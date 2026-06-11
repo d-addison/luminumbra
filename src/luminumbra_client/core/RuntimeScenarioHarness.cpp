@@ -103,6 +103,33 @@ RuntimeScenarioConfig ParseRuntimeScenarioConfig(int argc, char* argv[], const s
     config.world_preset = GetCommandLineOption(argc, argv, "--world-preset", "");
     config.creature_archetype = GetCommandLineOption(argc, argv, "--creature-archetype", "");
 
+    // T-I4-DR-split-lint: resolve the skinned-mesh UV texture set data-drivenly.
+    // Explicit flags win; otherwise the creature slice reads its texture paths
+    // from the game archetype JSON, and the noun-free skinned-mesh visual falls
+    // back to a generic test texture. RenderPipeline never names this content.
+    config.skinned_albedo_texture = GetCommandLineOption(argc, argv, "--skinned-albedo-texture", "");
+    config.skinned_normal_texture = GetCommandLineOption(argc, argv, "--skinned-normal-texture", "");
+    if (config.skinned_albedo_texture.empty() && !config.creature_archetype.empty()) {
+        std::ifstream archetype_in(root_dir / config.creature_archetype);
+        if (archetype_in.is_open()) {
+            try {
+                nlohmann::json archetype;
+                archetype_in >> archetype;
+                if (archetype.contains("creature")) {
+                    const auto& creature = archetype.at("creature");
+                    config.skinned_albedo_texture = creature.value("albedo_texture", std::string{});
+                    config.skinned_normal_texture = creature.value("normal_texture", std::string{});
+                }
+            } catch (...) {
+                // Leave empty: RenderPipeline keeps the flat fallback.
+            }
+        }
+    }
+    if (config.skinned_albedo_texture.empty() && config.skinned_mesh_visual_smoke()) {
+        config.skinned_albedo_texture = "data/textures/test/skinned_test_albedo_256.ltex";
+        config.skinned_normal_texture = "data/textures/test/skinned_test_normal_256.ltex";
+    }
+
     const int default_timed_run = config.auto_world_smoke() ? 300 : ((config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke() || config.skybox_visual_smoke() || config.weather_visual_smoke() || config.timeofday_sweep_smoke() || config.lod_boundary_oscillation_smoke() || config.lod_seam_arrival_smoke() || config.player_view_smoke() || config.farlod_horizon_smoke() || config.skinned_mesh_visual_smoke() || config.creature_slice_smoke()) ? 60 : 0);
     config.timed_run_seconds = GetCommandLineIntOption(argc, argv, "--timed-run", default_timed_run);
 
@@ -4562,7 +4589,7 @@ SkinnedMeshDiffStats AnalyzeSkinnedMeshCaptures(
     }
 
     // T-I4-8 textured-response: spatial color variance across the GREENEST
-    // mesh pixels in a tight central sub-ROI of capture A. The grovestrider is
+    // mesh pixels in a tight central sub-ROI of capture A. The creature is
     // framed centrally; restricting to a central box and to green-dominant
     // (creature body) pixels isolates the creature from the warm terrain band so
     // the authored texture's banding/spots drive the variance, while a flat-
@@ -4621,7 +4648,7 @@ void WriteSkinnedMeshVisualAnalysis(
     const SkinnedMeshDiffStats& diff) {
     constexpr std::uint64_t kMinChangedPixels = 500;
     constexpr double kMinChangedRatio = 0.001;
-    // T-I4-8: the textured grovestrider drives a strong per-channel color
+    // T-I4-8: the textured creature drives a strong per-channel color
     // variance across its mesh ROI; a flat-colored creature would sit far below
     // this. Calibrated conservatively (authored texture measures ~20-40).
     constexpr double kMinMeshColorStddev = 6.0;

@@ -1352,6 +1352,20 @@ int main(int argc, char* argv[]) {
         glfwTerminate();
         return -1;
     }
+    // T-I4-DR-split-lint: data-driven skinned-mesh texture set. The scenario
+    // config resolved the .ltex paths (from the game archetype JSON or a generic
+    // test texture); hand them to the generic RenderPipeline loader so no
+    // creature/content name lives in engine source.
+    if (!scenario_config.skinned_albedo_texture.empty()) {
+        int skinned_albedo_layer = -1;
+        int skinned_normal_layer = -1;
+        renderPipeline.load_skinned_texture_set(
+            root_dir / scenario_config.skinned_albedo_texture,
+            scenario_config.skinned_normal_texture.empty()
+                ? std::filesystem::path{}
+                : (root_dir / scenario_config.skinned_normal_texture),
+            skinned_albedo_layer, skinned_normal_layer);
+    }
     glfwSetWindowUserPointer(window, &renderPipeline);
     glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
 

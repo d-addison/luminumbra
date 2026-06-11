@@ -17,6 +17,9 @@
   ],
   "creature": {
     "mesh": "data/models/creatures/grovestrider/grovestrider.lmesh",
+    "comment_texture": "T-I4-DR-split-lint: UV-mapped skinned-texture set (256x256 .ltex). The engine RenderPipeline names no creature; the scenario harness reads these paths from this game archetype and hands them to the generic load_skinned_texture_set API.",
+    "albedo_texture": "data/textures/creatures/grovestrider/grovestrider_albedo_256.ltex",
+    "normal_texture": "data/textures/creatures/grovestrider/grovestrider_normal_256.ltex",
     "comment_material": "T-I3-22 slice polish: dark moss tone (material 3) for high contrast against the sandy archipelago shore. Material 4 (Sand) made the creature read invisibly against its own ground.",
     "material_id": 3,
     "replan_interval_ticks": 10,

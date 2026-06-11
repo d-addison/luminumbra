@@ -57,6 +57,13 @@ struct RuntimeScenarioConfig {
     // archetype JSON to spawn (--creature-archetype). The engine harness
     // carries no game nouns; the validator supplies the content path.
     std::string creature_archetype;
+    // Skinned-mesh UV texture set (T-I4-DR-split-lint): root-relative .ltex
+    // paths handed to RenderPipeline::load_skinned_texture_set. Data-driven:
+    // for the creature slice these are read from the creature archetype JSON;
+    // for the noun-free skinned-mesh visual they default to a generic test
+    // texture under data/textures/test/. Empty = keep the flat fallback.
+    std::string skinned_albedo_texture;
+    std::string skinned_normal_texture;
 
     bool active() const { return !scenario.empty(); }
     bool auto_world_smoke() const { return scenario == "auto_world_smoke"; }
@@ -824,7 +831,7 @@ struct SkinnedMeshDiffStats {
     std::uint64_t mesh_like_pixels_b = 0;
     // T-I4-8 textured-response: spatial color variation across the mesh-like
     // pixels in capture A (mean per-channel std-dev, 0..255). A flat-colored
-    // (untextured) creature reads near-uniform; the authored grovestrider
+    // (untextured) creature reads near-uniform; the authored creature
     // texture drives this well above the flat bound.
     double mesh_color_stddev_a = 0.0;
 };
