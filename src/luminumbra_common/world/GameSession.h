@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <memory>
 #include <ctime>
@@ -7,6 +8,8 @@
 #include <vector>
 #include "entt/entt.hpp"
 #include "../../../include/luminumbra/core/Types.h"
+#include "../core/SimulationClock.h"
+#include "../simulation/SimulationEventBus.h"
 
 namespace Luminumbra {
     class JobSystem;
@@ -80,7 +83,26 @@ public:
     std::size_t GetLastLoadedChunkCount() const { return m_lastLoadedChunkCount; }
     std::filesystem::path GetWorldSaveDir() const;
 
-    static WorldConfigValidationResult ValidateWorldConfig(const std::string& root_path, const std::string& worldType);
+    // --- Asset-manifest split (T-I3-6) ---
+    // The engine validates SIMULATION requirements only: a safe world type
+    // and a readable, parseable world preset. Callers that additionally need
+    // runtime assets (the CLIENT's shaders/RML/fonts) supply them as paths
+    // relative to root_path; a headless host supplies none.
+    static WorldConfigValidationResult ValidateWorldConfig(
+        const std::string& root_path,
+        const std::string& worldType,
+        const std::vector<std::filesystem::path>& required_assets = {});
+
+    // Registers the caller's required runtime assets (relative to the root
+    // path) checked by CreateWorld/LoadWorld validation. The client populates
+    // this with its shader/UI/font manifest before world create; the engine
+    // default is empty (simulation-only validation).
+    void SetRequiredClientAssets(std::vector<std::filesystem::path> relative_paths) {
+        m_requiredClientAssets = std::move(relative_paths);
+    }
+    const std::vector<std::filesystem::path>& GetRequiredClientAssets() const {
+        return m_requiredClientAssets;
+    }
 
     // Get world metadata
     const WorldMetadata& GetMetadata() const { return m_metadata; }
@@ -95,6 +117,25 @@ public:
 
     entt::registry& GetRegistry() { return m_registry; }
 
+    // --- Fixed-rate simulation (T-I3-4) ---
+    // Advances the 30 Hz simulation clock by one variable-dt frame and runs
+    // the produced fixed ticks (clamped to the clock's catch-up limit). Per
+    // fixed tick the deterministic system order is executed (placeholder
+    // slots until the owning iteration-3 tasks land), then the ordered event
+    // bus drains every event published for that tick. Returns the number of
+    // fixed ticks executed this frame.
+    std::uint32_t TickSimulation(double frame_dt);
+
+    [[nodiscard]] std::uint64_t GetSimulationTickCount() const noexcept {
+        return m_simulationClock.tick_count();
+    }
+    [[nodiscard]] const luminumbra::core::SimulationClock& GetSimulationClock() const noexcept {
+        return m_simulationClock;
+    }
+    luminumbra::simulation::OrderedEventBus& GetSimulationEventBus() noexcept {
+        return m_simulationEventBus;
+    }
+
     // Set the job system (must be called before CreateWorld/LoadWorld)
     void SetJobSystem(JobSystem* jobSystem) { m_jobSystem = jobSystem; }
     void SetRootPath(const std::string& root_path) { m_rootPath = root_path; }
@@ -102,6 +143,8 @@ public:
 private:
     entt::registry m_registry;
     WorldMetadata m_metadata;
+    luminumbra::core::SimulationClock m_simulationClock;
+    luminumbra::simulation::OrderedEventBus m_simulationEventBus;
     std::unique_ptr<Systems::SHIELD_WorldSystem> m_worldSystem;
     std::unique_ptr<Systems::WaterSystem> m_waterSystem;
     JobSystem* m_jobSystem = nullptr;
@@ -110,6 +153,7 @@ private:
     std::string GenerateWorldId();
     std::unique_ptr<Systems::PhysicsSystem> m_physicsSystem;
     std::size_t m_lastLoadedChunkCount = 0;
+    std::vector<std::filesystem::path> m_requiredClientAssets;
 
     // Convert string seed to numeric seed
     uint32_t StringToSeed(const std::string& seedStr);

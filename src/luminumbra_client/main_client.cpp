@@ -1266,6 +1266,17 @@ int main(int argc, char* argv[]) {
     auto gameSession = std::make_unique<Luminumbra::world::GameSession>();
     gameSession->SetJobSystem(&jobSystem);
     gameSession->SetRootPath(root_path_str);
+    // T-I3-6 asset-manifest split: the engine validates simulation
+    // requirements only; the CLIENT declares the renderer/UI assets it needs
+    // before any world create/load. This list matches the pre-split
+    // engine-side manifest byte for byte.
+    gameSession->SetRequiredClientAssets({
+        std::filesystem::path("res") / "shaders" / "basic.vert",
+        std::filesystem::path("res") / "shaders" / "g_buffer.frag",
+        std::filesystem::path("res") / "shaders" / "sdf_generation.compute",
+        std::filesystem::path("data") / "ui" / "main_menu.rml",
+        std::filesystem::path("data") / "fonts" / "Lora" / "static" / "Lora-Regular.ttf",
+    });
 
     std::unique_ptr<Luminumbra::Client::IAudioManager> audioManager;
     if (scenario_config.no_audio) {
@@ -1807,6 +1818,10 @@ int main(int argc, char* argv[]) {
                     g_playerController->Update(deltaTime);
                 }
                 if (auto* physics = gameSession->GetPhysicsSystem()) physics->update(deltaTime);
+                // T-I3-4: fixed 30 Hz simulation tick (SimulationClock +
+                // OrderedEventBus drain) hosted by GameSession. Render,
+                // physics, and scenario paths above remain variable-dt.
+                gameSession->TickSimulation(static_cast<double>(deltaTime));
                 if (gameSession->GetWorldSystem() && (g_playerController || g_camera)) {
                     const Luminumbra::Vec3 streaming_position =
                         ((scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.timeofday_sweep_smoke() || scenario_config.lod_boundary_oscillation_smoke() || scenario_config.lod_seam_arrival_smoke() || scenario_config.player_view_smoke()) && scenario_ready && g_camera)

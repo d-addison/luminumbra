@@ -15,6 +15,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/core/EventBus.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/JobSystem.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/Log.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/SimulationClock.cpp
 
     # Net
     ${CMAKE_CURRENT_LIST_DIR}/net/NetworkManager.cpp
@@ -46,5 +47,6 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/world/Chunk.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/GameSession.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/MarchingCubes.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/world/TerrainPresetLoader.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/WorldStreamingState.cpp
 )
