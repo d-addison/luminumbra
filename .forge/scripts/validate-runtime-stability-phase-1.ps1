@@ -583,6 +583,25 @@ function Test-LodBoundaryHysteresis {
         throw "LOD boundary oscillation analysis reported failure"
     }
 
+    # T-I3-19 ratchet: asymmetric demote hysteresis (promote at D, demote at
+    # D + one chunk) landed in SHIELD_WorldSystem; the 20s drift scenario now
+    # measures max_transitions_per_chunk_per_s ~0.10, oscillating_chunk_count
+    # 0 and total_transitions_per_s ~41 (previously ~0.5 / 116 / ~75 against
+    # caps 0.75 / 240 / 115). These tightened caps lock the win in; loosening
+    # them again requires a deliberate ratchet revert in review.
+    $ratchetMaxTransitionsPerChunkPerS = 0.25
+    $ratchetMaxOscillatingChunks = 4
+    $ratchetMaxTotalTransitionsPerS = 60.0
+    if ([double]$analysis.max_transitions_per_chunk_per_s -gt $ratchetMaxTransitionsPerChunkPerS) {
+        throw "LOD boundary oscillation exceeded ratcheted per-chunk transition rate: $($analysis.max_transitions_per_chunk_per_s) > $ratchetMaxTransitionsPerChunkPerS"
+    }
+    if ([int64]$analysis.oscillating_chunk_count -gt $ratchetMaxOscillatingChunks) {
+        throw "LOD boundary oscillation exceeded ratcheted oscillating chunk count: $($analysis.oscillating_chunk_count) > $ratchetMaxOscillatingChunks"
+    }
+    if ([double]$analysis.total_transitions_per_s -gt $ratchetMaxTotalTransitionsPerS) {
+        throw "LOD boundary oscillation exceeded ratcheted total transition rate: $($analysis.total_transitions_per_s) > $ratchetMaxTotalTransitionsPerS"
+    }
+
     Write-Host "LOD boundary oscillation at $($analysis.boundary_distance)m over $($analysis.duration_seconds)s: chunks_observed=$($analysis.chunks_observed), max_transitions_per_chunk=$($analysis.max_transitions_per_chunk), oscillating_chunk_count=$($analysis.oscillating_chunk_count), total_transitions=$($analysis.total_transitions)"
 }
 

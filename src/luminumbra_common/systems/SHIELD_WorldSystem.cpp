@@ -383,7 +383,8 @@ int SHIELD_WorldSystem::get_lod_level_for_distance(float dist) const {
 int SHIELD_WorldSystem::get_required_lod_for_chunk(
     const IVec3& coords,
     const Vec3& chunk_center,
-    const Vec3& camera_position)
+    const Vec3& camera_position,
+    int current_lod)
 {
     // Chunks in the surface band of their column (the chunks that actually
     // contain the terrain isosurface) select LOD from HORIZONTAL distance
@@ -410,7 +411,32 @@ int SHIELD_WorldSystem::get_required_lod_for_chunk(
     } else {
         dist = glm::distance(camera_position, chunk_center);
     }
-    return get_lod_level_for_distance(dist);
+
+    const int band_lod = get_lod_level_for_distance(dist);
+
+    // Asymmetric hysteresis (T-I3-19): a chunk PROMOTES to a finer LOD the
+    // moment it enters the finer band (dist <= D, unchanged), but DEMOTES to
+    // a coarser LOD only once the camera has receded one full chunk past the
+    // band edge it currently occupies (dist > D + margin). Margin = one chunk
+    // footprint (CHUNK_SIZE_X = 16 m): chunk centers are quantized to 16 m,
+    // so camera dither smaller than a chunk (the oscillation failure mode)
+    // can no longer flip a band-edge chunk back and forth, while the margin
+    // stays far below the narrowest band width (192 m) so a receding camera
+    // demotes after at most one extra chunk of travel. The hysteresis only
+    // applies to chunks that already hold a meshed LOD (current_lod >= 0);
+    // first-time assignment, the generation/initial-load path and every
+    // static-camera (settled) configuration use the raw band thresholds, so
+    // steady-state LOD assignment - and therefore settled snapshot/meshing
+    // determinism - is byte-identical to the pre-hysteresis behavior.
+    if (current_lod >= 0 && band_lod > current_lod) {
+        constexpr float kDemoteHysteresisMeters = static_cast<float>(CHUNK_SIZE_X);
+        const float hold_distance = m_lod_levels[static_cast<std::size_t>(current_lod)].distance
+                                    + kDemoteHysteresisMeters;
+        if (dist <= hold_distance) {
+            return current_lod;
+        }
+    }
+    return band_lod;
 }
 
 int SHIELD_WorldSystem::get_lod_step_for_level(int lod_level) const {
@@ -623,7 +649,11 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
             needs_meshing = true;
         } else if (state == Luminumbra::ChunkState::Ready) {
             Vec3 chunk_center = (Vec3(chunk_ptr->get_coords()) + 0.5f) * Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
-            required_lod = get_required_lod_for_chunk(chunk_ptr->get_coords(), chunk_center, camera_position);
+            // T-I3-19: pass the meshed LOD so demotions go through the
+            // asymmetric hysteresis band (promote at D, demote at D + margin).
+            required_lod = get_required_lod_for_chunk(
+                chunk_ptr->get_coords(), chunk_center, camera_position,
+                chunk_ptr->current_lod.load());
 
             if (required_lod != chunk_ptr->current_lod.load()) {
                 needs_meshing = true;
@@ -649,7 +679,12 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
         if (needs_meshing) {
             const Vec3 chunk_center = (Vec3(chunk_ptr->get_coords()) + 0.5f) * Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
             if (required_lod == -1) {
-                required_lod = get_required_lod_for_chunk(chunk_ptr->get_coords(), chunk_center, camera_position);
+                // Never-meshed chunks carry current_lod == -1, so this stays
+                // the raw band assignment; a previously meshed chunk that
+                // re-enters here keeps the same hysteresis as the Ready path.
+                required_lod = get_required_lod_for_chunk(
+                    chunk_ptr->get_coords(), chunk_center, camera_position,
+                    chunk_ptr->current_lod.load());
             }
             // The column-surface cache samples the same chunk positions, so
             // this replaces per-candidate fractal noise evaluations with a
