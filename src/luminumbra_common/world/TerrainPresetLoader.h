@@ -40,9 +40,17 @@ struct TerrainShapingPreset {
     std::vector<std::array<float, 2>> peaks_spline;
 };
 
-// generation_params.biomes — reserved for iteration 4.
+// generation_params.biomes (T-I4-1). A preset opts INTO biomes by naming a
+// table: "biomes": {"table": "common/biomes.json"}. The table path is relative
+// to the data/ root and resolved to an absolute path against the preset's
+// location at load time (presets live at <root>/worlds/atlas/presets/, data at
+// <root>/data/). With no "table" key biomes stay disabled and the consumed
+// params drift byte-zero from the pre-biome implementation.
 struct TerrainBiomesPreset {
     bool present = false;
+    bool enabled = false; // a non-empty "table" was supplied
+    std::string table;    // verbatim relative path from the preset
+    std::string resolved_table_path; // absolute path handed to TerrainGenParams
     float temperature_frequency = 0.005f;
     float humidity_frequency = 0.005f;
 };

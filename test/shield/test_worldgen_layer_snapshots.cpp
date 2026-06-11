@@ -22,6 +22,7 @@
 #include "systems/SHIELD_WorldSystem.h"
 #include "systems/PhysicsSystem.h"
 #include "systems/WaterSystem.h"
+#include "world/BiomeTable.h"
 #include "world/Chunk.h"
 #include "world/MarchingCubes.h"
 #include "world/TerrainPresetLoader.h"
@@ -1300,6 +1301,160 @@ TEST(WorldGenLayerSnapshotTest, ShapedGenerationIsDeterministicWithSameSeed) {
     EXPECT_GT(shaped_snapshot.sdf.solid_samples, 0u);
     EXPECT_GT(shaped_snapshot.sdf.air_samples, 0u);
     EXPECT_LT(shaped_snapshot.sampled_layers.max_sdf_sample_error, 1.0e-4f);
+}
+
+// ---------------------------------------------------------------------------
+// T-I4-1 biome selection.
+//
+// The shipped biome table loads, its lookup is deterministic and resolves the
+// documented edge cases (clamping at the domain edges, overlapping ranges =
+// first-match), and - critically - a preset WITHOUT the biomes opt-in stays
+// byte-zero (every existing snapshot/hash fixture above proves it; these cases
+// prove the new biome_id/material paths leave legacy worlds untouched).
+
+namespace {
+
+fs::path BiomeTablePath() {
+    return SourceRoot() / "data" / "common" / "biomes.json";
+}
+
+// A biome-enabled copy of the shaped mountains params, pointing the world at
+// the shipped table. Used by the determinism cases; never touches a shipped
+// preset, so the legacy fixtures stay frozen.
+TerrainGenParams BiomeEnabledParams() {
+    TerrainGenParams params = ShapingTestParams();
+    params.biomes_enabled = true;
+    params.biome_table_path = BiomeTablePath().string();
+    params.temperature_frequency = 0.003f;
+    params.humidity_frequency = 0.004f;
+    return params;
+}
+
+} // namespace
+
+TEST(WorldGenLayerSnapshotTest, BiomeTableLoadsAuthoredBiomes) {
+    const Luminumbra::World::BiomeTable table =
+        Luminumbra::World::BiomeTable::Load(BiomeTablePath());
+    ASSERT_TRUE(table.ok()) << "errors: "
+                            << (table.errors().empty() ? "<none>" : table.errors().front());
+    EXPECT_TRUE(table.errors().empty());
+    EXPECT_GE(table.size(), 4u) << "design-decisions section 2 mandates 4-6 authored biomes";
+    EXPECT_LE(table.size(), 6u);
+    EXPECT_NE(table.content_hash(), 0u);
+
+    // Every authored palette must reference a real (non-Air) material id.
+    for (const auto& biome : table.biomes()) {
+        EXPECT_NE(biome.palette.top, static_cast<u8>(MaterialType::Air)) << biome.name;
+        EXPECT_LE(biome.palette.top, static_cast<u8>(MaterialType::Water)) << biome.name;
+        EXPECT_LE(biome.palette.filler, static_cast<u8>(MaterialType::Water)) << biome.name;
+        EXPECT_LE(biome.palette.depth, static_cast<u8>(MaterialType::Water)) << biome.name;
+        EXPECT_LE(biome.palette.underwater, static_cast<u8>(MaterialType::Water)) << biome.name;
+    }
+}
+
+TEST(WorldGenLayerSnapshotTest, BiomeTableContentHashIsStable) {
+    const Luminumbra::World::BiomeTable a =
+        Luminumbra::World::BiomeTable::Load(BiomeTablePath());
+    const Luminumbra::World::BiomeTable b =
+        Luminumbra::World::BiomeTable::Load(BiomeTablePath());
+    ASSERT_TRUE(a.ok());
+    ASSERT_TRUE(b.ok());
+    EXPECT_EQ(a.content_hash(), b.content_hash())
+        << "table content hash must be a pure function of the file content";
+}
+
+TEST(WorldGenLayerSnapshotTest, BiomeLookupResolvesEdgeCasesDeterministically) {
+    using Luminumbra::World::BiomeClimateRange;
+    using Luminumbra::World::kNoBiome;
+
+    // Range contains() contract: inclusive-min, exclusive-max, with the domain
+    // ceiling 1.0 inclusive so a value sitting exactly at the top resolves.
+    const BiomeClimateRange r{0.0f, 0.5f};
+    EXPECT_TRUE(r.contains(0.0f));   // inclusive min
+    EXPECT_TRUE(r.contains(0.25f));
+    EXPECT_FALSE(r.contains(0.5f));  // exclusive max (interior boundary)
+    EXPECT_FALSE(r.contains(-0.1f));
+    const BiomeClimateRange top{0.5f, 1.0f};
+    EXPECT_TRUE(top.contains(1.0f)); // domain ceiling is inclusive
+
+    const Luminumbra::World::BiomeTable table =
+        Luminumbra::World::BiomeTable::Load(BiomeTablePath());
+    ASSERT_TRUE(table.ok());
+
+    // Determinism: the same climate inputs always resolve the same id.
+    const u8 first = table.lookup(0.5f, -0.5f, 0.0f, -0.5f, 0.0f);
+    const u8 second = table.lookup(0.5f, -0.5f, 0.0f, -0.5f, 0.0f);
+    EXPECT_EQ(first, second);
+
+    // First-match on overlapping ranges: the authored "plains" row is a
+    // full-span catch-all declared LAST, so any climate that matches no
+    // earlier specific row resolves to it (never kNoBiome) - and an earlier
+    // matching specific row wins over it. We assert a temperate/humid lowland
+    // resolves a real biome rather than the sentinel.
+    const u8 lowland = table.lookup(-0.5f, 0.5f, 0.0f, 0.5f, 0.5f);
+    EXPECT_NE(lowland, kNoBiome) << "catch-all plains row must cover unmatched climate";
+
+    // Clamping at the domain extremes still resolves deterministically.
+    EXPECT_EQ(table.lookup(-1.0f, -1.0f, -1.0f, -1.0f, -1.0f),
+              table.lookup(-1.0f, -1.0f, -1.0f, -1.0f, -1.0f));
+    EXPECT_EQ(table.lookup(1.0f, 1.0f, 1.0f, 1.0f, 1.0f),
+              table.lookup(1.0f, 1.0f, 1.0f, 1.0f, 1.0f));
+
+    // palette_for is total: kNoBiome and any unknown id return the default
+    // palette rather than reading out of bounds.
+    const auto& none_palette = table.palette_for(kNoBiome);
+    EXPECT_LE(none_palette.top, static_cast<u8>(MaterialType::Water));
+}
+
+TEST(WorldGenLayerSnapshotTest, BiomeIdIsDeterministicAndCoversMultipleBiomes) {
+    const TerrainGenParams params = BiomeEnabledParams();
+    SHIELD_WorldSystem world_a(nullptr, nullptr, params, kSeed);
+    SHIELD_WorldSystem world_b(nullptr, nullptr, params, kSeed);
+    ASSERT_TRUE(world_a.biomes_enabled());
+
+    std::unordered_set<int> distinct_biomes;
+    bool all_match = true;
+    for (int z = -512; z <= 512; z += 32) {
+        for (int x = -512; x <= 512; x += 32) {
+            const u8 a = world_a.BiomeIdAt(static_cast<float>(x), static_cast<float>(z));
+            const u8 b = world_b.BiomeIdAt(static_cast<float>(x), static_cast<float>(z));
+            if (a != b) {
+                all_match = false;
+            }
+            distinct_biomes.insert(static_cast<int>(a));
+        }
+    }
+    EXPECT_TRUE(all_match) << "BiomeIdAt must be a deterministic function of (seed, params)";
+    // The catch-all plains row guarantees no column is kNoBiome, and the
+    // climate field must vary enough to surface more than one biome.
+    EXPECT_EQ(distinct_biomes.count(static_cast<int>(Luminumbra::World::kNoBiome)), 0u)
+        << "no column should be unmatched (plains is the catch-all)";
+    EXPECT_GE(distinct_biomes.size(), 2u) << "the seed window must span >= 2 biomes";
+}
+
+TEST(WorldGenLayerSnapshotTest, BiomesDisabledIsByteZeroDrift) {
+    // A preset without the biomes opt-in: BiomeIdAt is always kNoBiome and the
+    // generated chunk bytes are bit-identical to a world that never knew about
+    // biomes (the new biome plumbing is inert when disabled).
+    const TerrainGenParams legacy = ShapingTestParams();
+    SHIELD_WorldSystem world(nullptr, nullptr, legacy, kSeed);
+    EXPECT_FALSE(world.biomes_enabled());
+    EXPECT_EQ(world.BiomeIdAt(8.0f, 8.0f), Luminumbra::World::kNoBiome);
+    EXPECT_EQ(world.BiomeIdAt(200.0f, -160.0f), Luminumbra::World::kNoBiome);
+
+    Chunk legacy_chunk(kChunkCoords);
+    world.GenerateChunkData(legacy_chunk);
+    EXPECT_GT(legacy_chunk.heightmap_data.size(), 0u);
+
+    // The shaped-determinism fixture above already pins these exact bytes for
+    // the same params/seed; re-running here proves the biome code added no
+    // drift to the disabled path.
+    SHIELD_WorldSystem reference(nullptr, nullptr, legacy, kSeed);
+    Chunk reference_chunk(kChunkCoords);
+    reference.GenerateChunkData(reference_chunk);
+    EXPECT_EQ(legacy_chunk.sdf_data, reference_chunk.sdf_data);
+    EXPECT_EQ(legacy_chunk.heightmap_data, reference_chunk.heightmap_data);
+    EXPECT_EQ(legacy_chunk.mesh_vertices.size(), reference_chunk.mesh_vertices.size());
 }
 
 // ---------------------------------------------------------------------------

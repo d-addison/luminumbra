@@ -7,10 +7,12 @@
 #include <cstddef>
 #include <unordered_map>
 #include <memory>
+#include <string>
 #include <vector>
 #include <functional>
 #include "entt/entt.hpp"
 #include "FastNoise/FastNoise.h"
+#include "../world/BiomeTable.h"
 
 namespace Luminumbra::Systems {
 
@@ -56,6 +58,20 @@ struct TerrainGenParams {
     std::vector<std::array<float, 2>> continental_spline;
     std::vector<std::array<float, 2>> erosion_spline;
     std::vector<std::array<float, 2>> peaks_spline;
+
+    // --- T-I4-1 biome selection (default-off) ---
+    // Biomes are opt-in via the preset block "biomes": {"table": "..."}. When
+    // biomes_enabled is false the world system never builds the temperature
+    // (+8) / humidity (+9) climate noises and never loads a biome table, so
+    // every height AND material path is bit-identical to the pre-biome
+    // implementation (the worldgen snapshot/hash fixtures prove byte-zero
+    // drift). biome_table_path is relative to data/ (e.g. "common/biomes.json").
+    // T-I4-2 mixes the loaded table's content hash into ComputeTerrainParamsHash
+    // so pristine far-LOD tiles self-invalidate on a table content change.
+    bool biomes_enabled = false;
+    std::string biome_table_path;
+    float temperature_frequency = 0.005f;
+    float humidity_frequency = 0.005f;
 };
 
 struct WorldGenLayerSample {
@@ -218,6 +234,18 @@ public:
     float GetTerrainHeightAt(float world_x, float world_z) const;
     WorldGenLayerSample SampleWorldGenLayers(const Vec3& world_pos) const;
 
+    // --- T-I4-1 biome selection ---
+    // Whether biomes are active (preset opted in AND the table loaded).
+    bool biomes_enabled() const { return m_biomes_enabled; }
+    const World::BiomeTable& biome_table() const { return m_biome_table; }
+    // Per-column biome id at the surface (u8, 255 = none). Pure function of
+    // (seed, params): samples the five climate dimensions (continentalness,
+    // erosion, peaks/valleys reuse the +3/+4/+5 shaping noises; temperature
+    // +8, humidity +9) and resolves the first matching biome row. Returns
+    // kNoBiome (255) when biomes are disabled or no row matches, so callers
+    // fall back to the legacy single-material classifier.
+    u8 BiomeIdAt(float world_x, float world_z) const;
+
     static IVec3 world_to_chunk_coords(const Vec3& position);
 
     // --- API for WorldGenViewer ---
@@ -325,6 +353,9 @@ private:
         int min_y = 0;
         int max_y = 0;
         int center_y = 0;
+        // T-I4-1: cached surface biome id for the column (u8, 255 = none).
+        // Filled from BiomeIdAt when biomes are enabled, kNoBiome otherwise.
+        u8 biome_id = 255u;
     };
     // Pure 5-point sampling (no cache) - usable from const initial-load paths.
     ColumnSurfaceSpan compute_column_surface_span(int chunk_x, int chunk_z) const;
@@ -372,6 +403,21 @@ private:
     };
     ShapedHeightSample ComputeShapedHeightSample(float world_x, float world_z) const;
     float ComputeShapedHeight(float world_x, float world_z) const;
+
+    // T-I4-1: the five normalized climate dimensions consumed by the biome
+    // lookup. continentalness/erosion/peaks_valleys REUSE the +3/+4/+5 shaping
+    // control noises (sampled at the unwarped column, exactly as
+    // ComputeShapedHeightSample reads them) so terrain and biomes agree;
+    // temperature/humidity are the new +8/+9 climate noises. Only meaningful
+    // when m_biomes_enabled.
+    struct ClimateSample {
+        float continentalness = 0.0f;
+        float erosion = 0.0f;
+        float peaks_valleys = 0.0f;
+        float temperature = 0.0f;
+        float humidity = 0.0f;
+    };
+    ClimateSample ComputeClimateSample(float world_x, float world_z) const;
     // Monotone piecewise-linear spline over sorted [input, output] control
     // points: endpoint-clamped, plain lerp between neighbors, `fallback` when
     // the point list is empty.
@@ -397,6 +443,15 @@ private:
     FastNoise::SmartNode<FastNoise::Generator> m_erosion_generator;
     FastNoise::SmartNode<FastNoise::Generator> m_peaks_generator;
     FastNoise::SmartNode<FastNoise::Generator> m_warp_generator;
+    // T-I4-1 climate noises (seed registry: +8 temperature, +9 humidity).
+    // Only built when biomes are enabled; legacy worlds never construct them.
+    FastNoise::SmartNode<FastNoise::Generator> m_temperature_generator;
+    FastNoise::SmartNode<FastNoise::Generator> m_humidity_generator;
+
+    // T-I4-1 biome table (game data). Loaded from m_params.biome_table_path on
+    // (re)init when biomes are enabled; empty/disabled otherwise.
+    World::BiomeTable m_biome_table;
+    bool m_biomes_enabled = false;
 
     WaterSystem* m_water_system;
 };

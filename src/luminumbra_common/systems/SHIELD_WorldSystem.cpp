@@ -227,6 +227,41 @@ void SHIELD_WorldSystem::reinitialize_noise() {
 
         m_warp_generator = FastNoise::New<FastNoise::Simplex>();
     }
+
+    // 5. T-I4-1 biome climate noises (seed registry: +8 temperature,
+    //    +9 humidity) and the biome table. Built/loaded only when the preset
+    //    opted in (m_params.biomes_enabled); legacy worlds construct nothing
+    //    here, so every height and material path stays bit-identical.
+    m_temperature_generator = {};
+    m_humidity_generator = {};
+    m_biome_table = World::BiomeTable{};
+    m_biomes_enabled = false;
+    if (m_params.biomes_enabled) {
+        auto temperature_fractal = FastNoise::New<FastNoise::FractalFBm>();
+        temperature_fractal->SetSource(FastNoise::New<FastNoise::Simplex>());
+        temperature_fractal->SetOctaveCount(2);
+        m_temperature_generator = temperature_fractal;
+
+        auto humidity_fractal = FastNoise::New<FastNoise::FractalFBm>();
+        humidity_fractal->SetSource(FastNoise::New<FastNoise::Simplex>());
+        humidity_fractal->SetOctaveCount(2);
+        m_humidity_generator = humidity_fractal;
+
+        m_biome_table = World::BiomeTable::Load(m_params.biome_table_path);
+        if (!m_biome_table.ok() || m_biome_table.empty()) {
+            for (const std::string& error : m_biome_table.errors()) {
+                LUMINUMBRA_CORE_WARN("biome table load error: {}", error);
+            }
+            LUMINUMBRA_CORE_WARN(
+                "biomes requested but table '{}' failed to load; falling back to legacy single-material classification",
+                m_params.biome_table_path);
+            // Table failed: disable biomes so the world is still byte-zero
+            // (legacy) rather than half-applied.
+            m_biomes_enabled = false;
+        } else {
+            m_biomes_enabled = true;
+        }
+    }
 }
 
 float SHIELD_WorldSystem::EvaluateShapingSpline(
@@ -331,6 +366,67 @@ float SHIELD_WorldSystem::ComputeShapedHeight(float world_x, float world_z) cons
     return ComputeShapedHeightSample(world_x, world_z).final_height;
 }
 
+SHIELD_WorldSystem::ClimateSample SHIELD_WorldSystem::ComputeClimateSample(
+    float world_x, float world_z) const {
+    ClimateSample climate;
+
+    // continentalness/erosion REUSE the +3/+4 shaping noises sampled at the
+    // unwarped column, and peaks/valleys reuses the +5 ridged noise at the
+    // warped coords - byte-identical to how ComputeShapedHeightSample reads
+    // them, so biome selection and terrain height agree on the same fields.
+    // When shaping is off the three control noises are not built; biomes then
+    // see a flat (0) control field, which still selects deterministically.
+    if (m_params.shaping_enabled) {
+        const float warp_x = m_params.domain_warp_amplitude * m_warp_generator->GenSingle2D(
+            world_x * m_params.domain_warp_frequency,
+            world_z * m_params.domain_warp_frequency,
+            m_seed + 6);
+        const float warp_z = m_params.domain_warp_amplitude * m_warp_generator->GenSingle2D(
+            world_x * m_params.domain_warp_frequency,
+            world_z * m_params.domain_warp_frequency,
+            m_seed + 7);
+        const float sample_x = world_x + warp_x;
+        const float sample_z = world_z + warp_z;
+
+        climate.continentalness = m_continentalness_generator->GenSingle2D(
+            world_x * m_params.continentalness_frequency,
+            world_z * m_params.continentalness_frequency,
+            m_seed + 3);
+        climate.erosion = m_erosion_generator->GenSingle2D(
+            world_x * m_params.erosion_frequency,
+            world_z * m_params.erosion_frequency,
+            m_seed + 4);
+        climate.peaks_valleys = m_peaks_generator->GenSingle2D(
+            sample_x * m_params.peaks_frequency,
+            sample_z * m_params.peaks_frequency,
+            m_seed + 5);
+    }
+
+    // Temperature (+8) and humidity (+9) are new 2D climate noises, sampled at
+    // the unwarped column so the climate macro-structure is stable.
+    climate.temperature = m_temperature_generator->GenSingle2D(
+        world_x * m_params.temperature_frequency,
+        world_z * m_params.temperature_frequency,
+        m_seed + 8);
+    climate.humidity = m_humidity_generator->GenSingle2D(
+        world_x * m_params.humidity_frequency,
+        world_z * m_params.humidity_frequency,
+        m_seed + 9);
+    return climate;
+}
+
+u8 SHIELD_WorldSystem::BiomeIdAt(float world_x, float world_z) const {
+    if (!m_biomes_enabled || m_biome_table.empty()) {
+        return World::kNoBiome;
+    }
+    const ClimateSample climate = ComputeClimateSample(world_x, world_z);
+    return m_biome_table.lookup(climate.continentalness,
+                                climate.erosion,
+                                climate.peaks_valleys,
+                                climate.temperature,
+                                climate.humidity);
+}
+
 SHIELD_WorldSystem::ColumnSurfaceSpan SHIELD_WorldSystem::compute_column_surface_span(int chunk_x, int chunk_z) const {
     const float base_x = static_cast<float>(chunk_x * CHUNK_SIZE_X);
     const float base_z = static_cast<float>(chunk_z * CHUNK_SIZE_Z);
@@ -355,6 +451,9 @@ SHIELD_WorldSystem::ColumnSurfaceSpan SHIELD_WorldSystem::compute_column_surface
     span.center_y = world_to_chunk_coords(Vec3(center_x, center_height, center_z)).y;
     span.min_y = world_to_chunk_coords(Vec3(center_x, min_height, center_z)).y;
     span.max_y = world_to_chunk_coords(Vec3(center_x, max_height, center_z)).y;
+    // T-I4-1: cache the surface biome id for the column (kNoBiome when biomes
+    // are disabled). Sampled at the column center, matching center_y.
+    span.biome_id = BiomeIdAt(center_x, center_z);
     return span;
 }
 
