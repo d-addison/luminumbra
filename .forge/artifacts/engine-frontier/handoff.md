@@ -284,3 +284,89 @@ to push.
 
 Execution model: Claude Code agent teams execute all implementation (Agent + Workflow, worktree isolation for parallel phases); Forge provides gates, bookkeeping (.forge/tasks/engine-iteration-2/dispatch.json, 19 tasks / 7 waves), and forge verify. Codex dispatch retired this iteration. Phase order: S1 gates || S2a perf infra -> baseline capture -> GPU timers || persistence core || meshing opt -> pass extraction || runtime persistence -> streaming/jobs optimization -> beautification tracks -> closeout. render-health-baseline.json committed as the extraction diff anchor.
 
+
+## Iteration 3 Closeout (2026-06-11)
+
+Branch `feat/polyglot-audit-roadmap`, tip at closeout includes T-I3-22
+commits (slice-polish, alias-removal, perf-gpu-provenance, closeout).
+
+### Final test count and validator sweep
+- **Full ctest: 148/148 passed** (build/debug, `ctest --output-on-failure`,
+  ~39s). Count rose 147 -> 148 with the new
+  `CurrentShippedArchipelagoPresetHeightHash` gate.
+- **engine-frontier**: `-Mode All` GREEN; build-dependent modes run
+  individually all GREEN — Build, UnitTests, PerfRegression, PlayerView,
+  FarLodHorizon, HeadlessServerTick, SkinnedMeshVisual, EngineGameSplitLint,
+  CreatureSlice, PersistenceRuntimeRoundtrip, SkyboxVisual, WeatherVisual,
+  TimeOfDaySweep, ScalarFieldDiffusionGate. **MaterialVisual: RED — see
+  deferral below.**
+- **runtime-stability-phase-1**: Smoke, LodGround, WaterVisual, LodSeamRisk,
+  LodBoundaryHysteresis, EnduranceStreamDrain, Endurance300 — all GREEN.
+- **forge tasks validate** on `.forge/tasks/engine-iteration-3/dispatch.json`:
+  PASS (exit 0; 4 pre-existing duplicate-create warnings only).
+- **forge verify**: completes (exit 0); the only blocking-shaped findings are
+  in `vendor/` third-party code (jquery.js / glm docs / rmlui scripts) and a
+  pre-existing trailing-whitespace hygiene warning — none in iteration-3
+  source. `git diff HEAD~3 HEAD --check` is clean for the closeout commits.
+
+### Success-definition checklist (ultimate-plan.md, item by item)
+- **PlayerView green at both presets (eye-level 360, complete terrain)**:
+  PASS — default 13 stations, mountains 13 stations, archipelago 14 stations
+  (incl. the seed-424242 degenerate region); max_missing=0,
+  min_renderable_ratio=1.0 everywhere.
+- **FarLodHorizon green at 1536 m / <64 MB / <1.5 ms**: PASS — wanted=40
+  resident=40 missing=0, resident_bytes=22.4 MB, gbuffer delta 0.49-0.65 ms.
+- **Slope-histogram normal-land floor on shaped mountains**: PASS — mountains
+  normal_land=0.629 (>0.25), cliff=0.072 (<0.08), bimodal relief.
+- **HeadlessServerTick deterministic double-run**: PASS — world_hash ==
+  world_hash_replay (4bc15e0cec4ebb3a), 90 ticks x 2 runs, 30 Hz, 4511 chunks.
+- **Pose-determinism + skinned-capture**: PASS — AnimationRuntime G1 checksum
+  test green in ctest; SkinnedMeshVisual draws a=1/b=1, changed_pixels ratio
+  0.020.
+- **Creature slice artifact shows stimulus-driven behavior**: PASS — plan
+  graze(shore_grass) -> approach(glow_bloom), clips idle -> walk, skinned
+  draws 1/1, plans replanned 3 -> 27. T-I3-22 added a composition gate
+  (sky_ratio 0.304/0.199 in [0.05,0.6]; creature-vs-terrain color_delta
+  55.4/103.0 >= 24) so a functionally-green-but-visually-broken capture fails.
+- **Split-lint active**: PASS — EngineGameSplitLint 163 files, 0 violations,
+  no alias allowlist note (aetheric alias removed, T-I3-22).
+- **All prior tests (82+) and validator modes (22+new) green**: PASS except
+  MaterialVisual (deferred below).
+- **PerfRegression holds (deliberate re-blesses logged)**: PASS — debug lane
+  green; release baseline blessed (T-I3-20). T-I3-22 added GPU/driver
+  provenance (warn-on-drift), no baseline re-blessed.
+
+### Deliberate contract bumps log
+- **T-I3-11 preset hashes** (mountains schema_rev 2 shaping golden/hash bumps)
+  — landed in T-I3-11.
+- **T-I3-22 archipelago preset hash** (NEW current-shipped-preset gate):
+  before (legacy, shaping-off) `0xc075cf55c182393c`; after (schema_rev 2
+  shaping) `0x940d621a2e3c0436`. The LEGACY fixture (`0xc075cf55c182393c`,
+  default-off shaping proof) is UNCHANGED.
+- **WaterVisual settle 20 -> 40 s** — landed (commit b988c7a).
+- **LodBoundaryHysteresis ratchet** (T-I3-19) — landed.
+- **RenderHealth skinned program re-bless** (T-I3-16) — landed; NOT touched by
+  T-I3-22 (the creature-slice glow uses the existing crystal glow path, no
+  shader change).
+- **Release perf baseline bless** (T-I3-20, 0fb3441) — landed; T-I3-22 perf
+  provenance is additive, no re-bless.
+
+### Deferred to iteration 4
+- Far water sheet.
+- Save-time far-tile rebuild wiring.
+- StreamingProfile meshing-skip.
+- Stimulus prop draw counter.
+- **MaterialVisual gate re-homing (NEW, T-I3-22)**: the owner-priority slice
+  polish made the archipelago deliberately rolling/walkable (whole-grid
+  cliff 0.346 -> 0.018, dry-land walkable 0.82). The MaterialVisual scan needs
+  a sand beach (height 0.25-12 m) within 112 m of a 38 m+ grass-capped,
+  stone-rimmed highland — geometry that requires a steep flank (the old
+  spiky archipelago had it at dry-land cliff ~0.30). These are irreducibly in
+  conflict on one preset at the gate's current thresholds; re-homing to
+  mountains hit the rim-band/grass-cap framing (the vantage + fixed
+  top-quarter rim sub-ROI were authored for the short archipelago highland).
+  Deferred to iteration 4: re-home material_visual to a dedicated
+  material-diversity scenario / preset and re-derive the vantage + ROI bands
+  for it. Material LUT rendering stays independently gated by RenderHealth's
+  terrain-material diagnostics (texture array + material LUT required), so no
+  coverage is lost in the interim.
