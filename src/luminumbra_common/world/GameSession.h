@@ -83,7 +83,26 @@ public:
     std::size_t GetLastLoadedChunkCount() const { return m_lastLoadedChunkCount; }
     std::filesystem::path GetWorldSaveDir() const;
 
-    static WorldConfigValidationResult ValidateWorldConfig(const std::string& root_path, const std::string& worldType);
+    // --- Asset-manifest split (T-I3-6) ---
+    // The engine validates SIMULATION requirements only: a safe world type
+    // and a readable, parseable world preset. Callers that additionally need
+    // runtime assets (the CLIENT's shaders/RML/fonts) supply them as paths
+    // relative to root_path; a headless host supplies none.
+    static WorldConfigValidationResult ValidateWorldConfig(
+        const std::string& root_path,
+        const std::string& worldType,
+        const std::vector<std::filesystem::path>& required_assets = {});
+
+    // Registers the caller's required runtime assets (relative to the root
+    // path) checked by CreateWorld/LoadWorld validation. The client populates
+    // this with its shader/UI/font manifest before world create; the engine
+    // default is empty (simulation-only validation).
+    void SetRequiredClientAssets(std::vector<std::filesystem::path> relative_paths) {
+        m_requiredClientAssets = std::move(relative_paths);
+    }
+    const std::vector<std::filesystem::path>& GetRequiredClientAssets() const {
+        return m_requiredClientAssets;
+    }
 
     // Get world metadata
     const WorldMetadata& GetMetadata() const { return m_metadata; }
@@ -134,6 +153,7 @@ private:
     std::string GenerateWorldId();
     std::unique_ptr<Systems::PhysicsSystem> m_physicsSystem;
     std::size_t m_lastLoadedChunkCount = 0;
+    std::vector<std::filesystem::path> m_requiredClientAssets;
 
     // Convert string seed to numeric seed
     uint32_t StringToSeed(const std::string& seedStr);
