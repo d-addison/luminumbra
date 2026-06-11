@@ -6,11 +6,13 @@ add_executable(asset_processor
 
 # Tell the target where to find "meshoptimizer.h"
 target_include_directories(asset_processor PUBLIC
-    # Assuming the meshoptimizer src files are in vendor/meshoptimizer/src
-    ${CMAKE_SOURCE_DIR}/vendor/meshoptimizer/src
     # For luminumbra_common/animation/SkinnedMeshFormat.h (LMS2/.lanim formats)
     ${CMAKE_SOURCE_DIR}/src
-    # For stb_image.h (PNG -> .ltex texture import, T-I4-6)
+)
+# Vendor headers are SYSTEM includes: third-party code (stb, meshoptimizer)
+# is not held to the project's -Werror warning policy.
+target_include_directories(asset_processor SYSTEM PUBLIC
+    ${CMAKE_SOURCE_DIR}/vendor/meshoptimizer/src
     ${CMAKE_SOURCE_DIR}/vendor/stb
 )
 
