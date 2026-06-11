@@ -210,9 +210,30 @@ inheriting this verbatim): **engine first; the gameplay loop is 100% last.**
    loopback + LAN, one remote client, desync detection. NOT matchmaking.
    Sequencing note from the iteration-3 sketch: Wave A touches worldgen
    determinism/world_hash — run A first, C after A's hashes re-bless.
+   Research amendments (2026-06-11, engine-research/worldgen-lockstep-
+   sdfrt.md): (a) **session replay is a COMMITTED Wave C deliverable**,
+   not a candidate — near-zero cost during lockstep construction vs
+   ~1 engineer-year retrofitted (Riot), and it is the primary desync-repro
+   tool (Factorio); (b) Wave C is PRECEDED by a determinism-prevention
+   contract task: pinned FP flags (precise, contraction off) for
+   common/server targets, deterministic trig wrappers, lint bans on libm
+   transcendentals + unordered-container iteration in sim code (Factorio's
+   first production desync was an ambiguous std::sort comparator, not
+   floats); (c) world_hash oracle gains per-system sub-hashes + a
+   heavy-mode save/load/resimulate/compare variant; (d) delay-based
+   lockstep with adaptive input horizon (1500 Archers) — rollback
+   REJECTED with rationale recorded; camera look stays render-side.
 3. **SHIELD-RT spike**: timeboxed raymarch prototype against existing SDF
    data. Evidence-only, no gates, no production wiring — keeps the
    far-field end-state road open without gold-plating the waypoint.
+   Research amendments: benchmark heightfield ray-marching of FarLodStore
+   tiles AGAINST generic sphere tracing (terrain-only far fields likely
+   favor heightfield marching — may flip iteration 6's "tiles retire"
+   assumption into "tiles become the raymarch source"); conservative
+   min-filtered SDF mips are a spike SUCCESS CRITERION (naive mips make
+   sphere tracing silently overshoot); storage direction: camera-centered
+   clipmaps of sparse 8^3 bricks, GPU-resident (UE-Lumen/Claybook
+   convergent pattern).
 4. Extras where owners have slack (engine): Lua bindings/hot-reload,
    StreamingProfile meshing-skip (server stops meshing chunks it never
    renders), GPU SDF enablement behind its parity gate.
