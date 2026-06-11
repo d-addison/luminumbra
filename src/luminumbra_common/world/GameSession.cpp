@@ -225,6 +225,18 @@ bool GameSession::LoadWorld(const std::string& worldId) {
         m_metadata.worldType = metadata_json.value("worldType", "default");
         m_metadata.worldId = worldId;
         m_metadata.creationTime = metadata_json.value("creationTime", 0);
+        // T-I3-13 (minimal additive hook): restore the persisted spawn point
+        // so a headless host booting an existing save anchors its chunk
+        // streaming where the world was created, not at the origin. Saves
+        // written before spawnPoint existed fall through to the terrain
+        // sample below.
+        if (metadata_json.contains("spawnPoint")) {
+            const nlohmann::json& spawn_json = metadata_json.at("spawnPoint");
+            m_metadata.spawnPoint = Vec3(
+                spawn_json.value("x", 0.0f),
+                spawn_json.value("y", 0.0f),
+                spawn_json.value("z", 0.0f));
+        }
     } catch (const nlohmann::json::parse_error& e) {
         LUMINUMBRA_CORE_ERROR("Failed to parse world metadata file '{}': {}", metadataPath, e.what());
         return false;
@@ -257,6 +269,15 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     m_worldSystem = std::make_unique<Systems::SHIELD_WorldSystem>(m_jobSystem, nullptr, params, world_seed);
     m_waterSystem = std::make_unique<Systems::WaterSystem>(m_jobSystem, m_worldSystem.get());
     m_worldSystem->SetWaterSystem(m_waterSystem.get());
+
+    // Legacy saves without a persisted spawnPoint: derive it from terrain
+    // height exactly like CreateWorld does (pure function of seed/params).
+    if (!metadata_json.contains("spawnPoint")) {
+        const float spawn_x = 8.0f;
+        const float spawn_z = 8.0f;
+        const float terrain_height = m_worldSystem->GetTerrainHeightAt(spawn_x, spawn_z);
+        m_metadata.spawnPoint = Vec3(spawn_x, terrain_height + kSpawnEyeHeight, spawn_z);
+    }
 
     LUMINUMBRA_CORE_INFO("World loaded successfully: {}", m_metadata.name);
     return true;
