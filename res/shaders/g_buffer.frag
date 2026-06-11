@@ -29,6 +29,13 @@ uniform sampler2DArray u_terrainNormals;    // tangent-space (OpenGL) normal map
 // keeps storing a VIEW-SPACE octahedral normal (lighting pass unchanged).
 uniform mat3 u_normalViewMatrix;
 
+// T-I4-8 skinned (UV-mapped) texturing. Skinned creatures sample an albedo (and
+// optional normal) layer by their mesh UVs instead of the terrain triplanar
+// path. Layers < 0 disable it (terrain/static draws set these to -1).
+uniform sampler2DArray u_skinnedTextures;
+uniform int u_skinnedAlbedoLayer = -1;
+uniform int u_skinnedNormalLayer = -1;
+
 // T-I3-9 far-LOD: view-space radius (meters) inside which far-region mesh
 // fragments are discarded - the live chunk ring owns that space (live wins;
 // the under-terrain far fill must not show through live LOD seam cracks at
@@ -42,6 +49,7 @@ in VS_OUT {
     vec3 Normal;       // VIEW SPACE
     vec3 WorldPos;     // WORLD SPACE (triplanar projection)
     vec3 WorldNormal;  // WORLD SPACE
+    vec2 UV;           // mesh UV (skinned/static texturing, T-I4-8)
     flat uint MaterialID;
 } fs_in;
 
@@ -119,7 +127,24 @@ void main()
     // shadows/specular). Gated by the LUT has_texture flag so crystal/water and
     // untextured ids keep their flat base color and geometric normal.
     vec3 worldN = normalize(fs_in.WorldNormal);
-    if (texInfo.a > 0.5) {
+    bool textured = false;
+    if (u_skinnedAlbedoLayer >= 0) {
+        // T-I4-8: UV-mapped skinned/creature texturing. Samples the skinned
+        // texture array by the mesh UVs; optionally perturbs the normal by a
+        // tangent-derivative-free approximation (UV-space normal map, applied in
+        // world space via the geometric normal as the z axis).
+        albedo = texture(u_skinnedTextures, vec3(fs_in.UV, float(u_skinnedAlbedoLayer))).rgb;
+        if (u_skinnedNormalLayer >= 0) {
+            vec3 tn = texture(u_skinnedTextures, vec3(fs_in.UV, float(u_skinnedNormalLayer))).xyz * 2.0 - 1.0;
+            // Build an ad-hoc tangent basis from the geometric world normal so
+            // the tangent-space perturbation maps into world space.
+            vec3 up = abs(worldN.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+            vec3 t = normalize(cross(up, worldN));
+            vec3 b = cross(worldN, t);
+            worldN = normalize(t * tn.x + b * tn.y + worldN * max(tn.z, 0.1));
+        }
+        textured = true;
+    } else if (texInfo.a > 0.5) {
         float texLayer = floor(texInfo.r * 255.0 + 0.5);
         float normLayer = floor(texInfo.g * 255.0 + 0.5);
         float tiling = max(texInfo.b * 64.0, 0.0625);
@@ -127,6 +152,7 @@ void main()
         vec3 weights = triplanar_weights(worldN);
         albedo = triplanar_albedo(fs_in.WorldPos, weights, texLayer, scale);
         worldN = triplanar_normal(fs_in.WorldPos, worldN, weights, normLayer, scale);
+        textured = true;
     }
 
     // --- G-Buffer output ---
@@ -135,8 +161,8 @@ void main()
     // The flat-shaded path keeps the interpolated view-space normal exactly as
     // before (byte-identical for untextured ids); the textured path rotates the
     // normal-mapped world normal into view space so the encoding stays uniform.
-    vec3 viewN = (texInfo.a > 0.5) ? normalize(u_normalViewMatrix * worldN)
-                                   : normalize(fs_in.Normal);
+    vec3 viewN = textured ? normalize(u_normalViewMatrix * worldN)
+                          : normalize(fs_in.Normal);
     vec2 encoded_normal = encode_octahedral(viewN);
     float material_id_normalized = float(fs_in.MaterialID) / 255.0;
     gNormalMaterial = vec4(encoded_normal * 0.5 + 0.5, 0.0, material_id_normalized);

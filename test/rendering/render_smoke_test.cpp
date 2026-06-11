@@ -1624,9 +1624,18 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     glUniform1i(glGetUniformLocation(program, "u_materialLUT"), 0);
     glUniform1i(glGetUniformLocation(program, "u_terrainTextures"), 1);
     glUniform1i(glGetUniformLocation(program, "u_terrainNormals"), 2);
+    // Terrain plates use the triplanar path; disable the skinned UV path
+    // (GLSL uniform initializers are not reliably honored, so set it explicitly).
+    // u_skinnedTextures must still point at a DISTINCT unit (3): leaving it at the
+    // default unit 0 collides a sampler2DArray with the sampler2D LUT on the same
+    // unit, which is undefined and renders the whole draw black on some drivers.
+    glUniform1i(glGetUniformLocation(program, "u_skinnedTextures"), 3);
+    glUniform1i(glGetUniformLocation(program, "u_skinnedAlbedoLayer"), -1);
+    glUniform1i(glGetUniformLocation(program, "u_skinnedNormalLayer"), -1);
     glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, material_lut);
     glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D_ARRAY, albedo_array);
     glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D_ARRAY, normal_array);
+    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D_ARRAY, albedo_array); // dummy, unsampled
 
     glViewport(0, 0, kRes, kRes);
     glDisable(GL_DEPTH_TEST);

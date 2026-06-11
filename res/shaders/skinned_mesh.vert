@@ -24,6 +24,7 @@ out VS_OUT {
     vec3 Normal;       // VIEW SPACE
     vec3 WorldPos;     // WORLD SPACE
     vec3 WorldNormal;  // WORLD SPACE
+    vec2 UV;           // mesh UV (skinned/creature texturing, T-I4-8)
     flat uint MaterialID;
 } vs_out;
 
@@ -55,6 +56,7 @@ void main()
 
     mat3 normalMatrix = mat3(transpose(inverse(viewModel)));
     vs_out.Normal = normalize(normalMatrix * (skinNormal * aNormal));
+    vs_out.UV = aUV;
 
     vs_out.MaterialID = uint(u_materialId);
 

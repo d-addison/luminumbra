@@ -797,6 +797,11 @@ struct SkinnedMeshDiffStats {
     // is skinned_draws > 0 plus the non-sky temporal diff.
     std::uint64_t mesh_like_pixels_a = 0;
     std::uint64_t mesh_like_pixels_b = 0;
+    // T-I4-8 textured-response: spatial color variation across the mesh-like
+    // pixels in capture A (mean per-channel std-dev, 0..255). A flat-colored
+    // (untextured) creature reads near-uniform; the authored grovestrider
+    // texture drives this well above the flat bound.
+    double mesh_color_stddev_a = 0.0;
 };
 
 SkinnedMeshDiffStats AnalyzeSkinnedMeshCaptures(
