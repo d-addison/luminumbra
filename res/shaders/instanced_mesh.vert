@@ -6,10 +6,12 @@ layout (location = 1) in vec3 aNormal;
 // Instanced model matrix (each mat4 is 4 vec4s)
 layout (location = 3) in mat4 aInstanceMatrix;
 
-// Output interface block
+// Output interface block (must match g_buffer.frag VS_OUT, T-I4-7).
 out VS_OUT {
-    vec3 FragPos; // Transformed to VIEW SPACE
-    vec3 Normal;  // Transformed to VIEW SPACE
+    vec3 FragPos;      // VIEW SPACE
+    vec3 Normal;       // VIEW SPACE
+    vec3 WorldPos;     // WORLD SPACE (triplanar projection)
+    vec3 WorldNormal;  // WORLD SPACE
     flat uint MaterialID;
 } vs_out;
 
@@ -21,6 +23,11 @@ uniform int u_materialId;
 
 void main()
 {
+    // World-space position/normal for triplanar terrain sampling (T-I4-7).
+    vec4 worldPos = aInstanceMatrix * vec4(aPos, 1.0);
+    vs_out.WorldPos = vec3(worldPos);
+    vs_out.WorldNormal = normalize(mat3(aInstanceMatrix) * aNormal);
+
     // Combine view and instance matrices
     mat4 viewModel = view * aInstanceMatrix;
 
