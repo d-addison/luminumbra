@@ -11,7 +11,6 @@ in VS_OUT {
 uniform sampler2D u_opaque_scene_color;
 uniform sampler2D u_opaque_depth;
 uniform sampler2D u_normal_map;
-uniform sampler2D u_foam_texture;
 uniform sampler2D u_flow_map; // R,G for flow direction, B for foam mask, A for speed
 uniform sampler2D u_caustics_texture; // Generated caustics pattern
 uniform sampler2D u_underwater_texture; // Underwater environment map
@@ -31,6 +30,7 @@ uniform vec3 u_shallow_color;
 uniform vec3 u_deep_color;
 uniform float u_water_depth_scaler;
 uniform float u_reflection_power;
+uniform vec3 u_sky_color; // approximate sky reflection color (time-of-day driven)
 
 vec3 world_pos_from_depth(float depth, vec2 screen_uv) {
     float z = depth * 2.0 - 1.0;
@@ -57,7 +57,13 @@ void main()
 
     vec3 normal1 = texture(u_normal_map, normal_uv1).rgb * 2.0 - 1.0;
     vec3 normal2 = texture(u_normal_map, normal_uv2).rgb * 2.0 - 1.0;
-    vec3 surface_normal = normalize(fs_in.world_normal + normal1 * 0.6 + normal2 * 0.4);
+    // Tangent-space samples (+Z = unperturbed) mapped onto the horizontal
+    // water plane: only the XY wobble tilts the world normal. The previous
+    // code added the raw tangent vector to the world normal, which tilted a
+    // perfectly flat surface 45 degrees toward +Z and broke the fresnel and
+    // reflection directions (T-I2-16b).
+    vec3 bump = vec3(normal1.x * 0.6 + normal2.x * 0.4, 0.0, normal1.y * 0.6 + normal2.y * 0.4);
+    vec3 surface_normal = normalize(fs_in.world_normal + bump);
 
     // --- 3. Depth & Scene Reconstruction ---
     float background_depth_sample = texture(u_opaque_depth, screen_uv).r;
@@ -66,53 +72,104 @@ void main()
 
     // --- 4. Refraction ---
     vec2 refraction_offset = surface_normal.xz * (0.05 + flow_data.a * 0.02);
-    vec3 refracted_color = texture(u_opaque_scene_color, screen_uv + refraction_offset).rgb;
+    vec2 refraction_uv = screen_uv + refraction_offset;
+    // Fall back to the deep water tint when nothing opaque is rendered behind
+    // the surface (unstreamed chunks / sky at the far plane); sampling the
+    // unrendered opaque buffer there produces grey-white blotches.
+    float refraction_depth = texture(u_opaque_depth, refraction_uv).r;
+    vec3 refracted_color = refraction_depth < 1.0
+        ? texture(u_opaque_scene_color, refraction_uv).rgb
+        : u_deep_color;
     
-    // --- 5. Reflection (Optimized SSR with early exit) ---
-    vec3 reflected_color = u_deep_color; // Fallback color
+    // --- 5. Reflection (inline SSR: 8-step raymarch + binary refinement + edge fade) ---
+    // T-I2-16b decision: the whole water pass (caustics + SSR + shading)
+    // measures ~0.2 ms GPU, so the inline march is improved in place instead
+    // of promoting the dormant screen_space_reflections.frag to its own pass.
     vec3 reflection_vector = reflect(view_dir, surface_normal);
+    // Rays that leave the screen without hitting geometry reflect the sky for
+    // upward directions and the deep water tint for grazing/downward ones.
+    vec3 miss_color = mix(u_deep_color, u_sky_color, clamp(reflection_vector.y * 2.0 + 0.2, 0.0, 1.0));
+    vec3 reflected_color = miss_color;
 
     // Reduced steps and adaptive quality based on fresnel
     float fresnel_preview = pow(1.0 - max(0.0, dot(-view_dir, surface_normal)), 2.0);
-    const int max_steps = 8; // Reduced from 16
+    const int max_steps = 8;
     int num_steps = int(mix(4.0, float(max_steps), fresnel_preview)); // Adaptive quality
-    const float step_size = 0.15; // Larger steps
+    const float step_size = 0.15;
     const float thickness = 0.2;
 
     // Early exit if reflection vector points down
     if (reflection_vector.y < -0.1) {
-        reflected_color = u_deep_color * u_reflection_power;
+        reflected_color = u_deep_color;
     } else {
         vec3 ray_pos = fs_in.world_pos;
+        vec3 prev_pos = ray_pos;
         for (int i = 0; i < num_steps; ++i) {
+            prev_pos = ray_pos;
             ray_pos += reflection_vector * step_size * (1.0 + float(i) * 0.1); // Progressive step size
-            
+
             vec4 ray_clip_pos = u_view_projection * vec4(ray_pos, 1.0);
             vec2 ray_uv = ray_clip_pos.xy / ray_clip_pos.w * 0.5 + 0.5;
-            
-            // Early boundary check
-            if (any(lessThan(ray_uv, vec2(0.05))) || any(greaterThan(ray_uv, vec2(0.95)))) {
+
+            // Boundary check: off-screen rays keep the miss color
+            if (any(lessThan(ray_uv, vec2(0.02))) || any(greaterThan(ray_uv, vec2(0.98)))) {
                 break;
             }
-            
+
             float scene_depth = texture(u_opaque_depth, ray_uv).r;
+            // No opaque geometry at this sample (sky): keep marching. Without
+            // this, far-plane reconstructions register as fake hits and the
+            // reflection samples the unrendered region of the opaque buffer
+            // (grey-white blotches instead of sky).
+            if (scene_depth >= 1.0) {
+                continue;
+            }
             vec3 scene_pos = world_pos_from_depth(scene_depth, ray_uv);
-            
+
             if (ray_pos.y < scene_pos.y && scene_pos.y - ray_pos.y < thickness) {
-                reflected_color = texture(u_opaque_scene_color, ray_uv).rgb;
+                // Binary-search refinement between the last miss and the hit
+                // for a sharper intersection (4 bisections ~= 16x the march
+                // precision for 4 extra depth samples on hit only).
+                vec3 lo = prev_pos;
+                vec3 hi = ray_pos;
+                for (int j = 0; j < 4; ++j) {
+                    vec3 mid = 0.5 * (lo + hi);
+                    vec4 mid_clip = u_view_projection * vec4(mid, 1.0);
+                    vec2 mid_uv = mid_clip.xy / mid_clip.w * 0.5 + 0.5;
+                    vec3 mid_scene = world_pos_from_depth(texture(u_opaque_depth, mid_uv).r, mid_uv);
+                    if (mid.y < mid_scene.y) {
+                        hi = mid;
+                    } else {
+                        lo = mid;
+                    }
+                }
+                vec4 hit_clip = u_view_projection * vec4(hi, 1.0);
+                vec2 hit_uv = clamp(hit_clip.xy / hit_clip.w * 0.5 + 0.5, vec2(0.0), vec2(1.0));
+
+                // Edge fade: hits near the screen border blend back into the
+                // miss color so reflections do not cut off harshly where the
+                // SSR information runs out.
+                float border_distance = min(min(hit_uv.x, 1.0 - hit_uv.x), min(hit_uv.y, 1.0 - hit_uv.y));
+                float edge_fade = smoothstep(0.0, 0.08, border_distance);
+                reflected_color = mix(miss_color, texture(u_opaque_scene_color, hit_uv).rgb, edge_fade);
                 break;
             }
         }
-        reflected_color *= u_reflection_power;
     }
+    reflected_color *= u_reflection_power;
 
     // --- 6. Fresnel Term ---
     float fresnel = pow(1.0 - max(0.0, dot(-view_dir, surface_normal)), 4.0);
     fresnel = clamp(fresnel, 0.05, 0.95);
 
-    // --- 7. Water Color & Absorption ---
+    // --- 7. Water Color & Absorption (T-I2-16c) ---
     float absorption_factor = 1.0 - exp(-water_depth * u_water_depth_scaler);
-    vec3 water_color = mix(u_shallow_color, u_deep_color, absorption_factor);
+    // Smooth depth tint curve: the eased exponential keeps the first couple
+    // of meters bright teal and rolls smoothly into the dark deep tint
+    // instead of the old quasi-linear ramp.
+    float tint_curve = smoothstep(0.0, 1.0, absorption_factor);
+    vec3 shallow_tint = u_shallow_color * 1.08; // slight lift so the shallows read bright
+    vec3 water_color = mix(shallow_tint, u_deep_color, tint_curve);
     
     // --- 8. Specular Highlight ---
     vec3 half_vector = normalize(u_sun_direction - view_dir);
@@ -136,22 +193,21 @@ void main()
         caustics_color *= max(0.3, dot(u_sun_direction, vec3(0, -1, 0))); // Sun angle modulation
     }
     
-    // --- 10. Enhanced Foam ---
-    float depth_foam = smoothstep(0.8, 0.0, water_depth);
-    float wave_foam = length(surface_normal.xz) * 2.0; // Foam on wave crests
+    // --- 10. Shoreline Foam (procedural, T-I2-16c) ---
+    // The old path multiplied by u_foam_texture, whose engine fallback is
+    // solid black, so foam never rendered. The band is now generated
+    // procedurally: a depth-bounded shoreline band, animated wave fronts
+    // rolling shoreward (u_time + flow), and hashed sparkle so it reads as
+    // broken foam rather than a solid stripe.
+    float shoreline_band = smoothstep(0.9, 0.1, water_depth);
+    float foam_phase = water_depth * 8.0 - u_time * 1.6 + (flow_vector.x + flow_vector.y) * 4.0;
+    float foam_wave = 0.5 + 0.5 * sin(foam_phase);
+    vec2 foam_cell = floor(fs_in.world_pos.xz * 6.0 + flow_vector * u_time * 2.0);
+    float foam_sparkle = fract(sin(dot(foam_cell, vec2(127.1, 311.7)) + floor(u_time * 3.0) * 0.731) * 43758.5453);
     float flow_foam = flow_data.b;
-    
-    float foam_factor = clamp(depth_foam + wave_foam + flow_foam, 0.0, 1.0);
-    
-    // Multi-layer foam for realism
-    vec2 foam_uv1 = fs_in.world_pos.xz * 0.3 + flow_vector * u_time * 0.5;
-    vec2 foam_uv2 = fs_in.world_pos.xz * 0.8 - flow_vector * u_time * 0.2;
-    
-    float foam_tex1 = texture(u_foam_texture, foam_uv1).r;
-    float foam_tex2 = texture(u_foam_texture, foam_uv2).g;
-    
-    vec3 foam_color = vec3(1.0, 1.0, 0.95) * (foam_tex1 * 0.7 + foam_tex2 * 0.3) * foam_factor;
-    foam_color *= (1.0 + 0.3 * sin(u_time * 2.0 + foam_uv1.x * 10.0)); // Subtle animation
+
+    float foam_factor = clamp(shoreline_band * (0.70 + 0.45 * foam_wave + 0.45 * foam_sparkle) + flow_foam * 0.5, 0.0, 1.0);
+    vec3 foam_color = vec3(0.92, 0.96, 0.94);
     
     // --- 11. Underwater Environment ---
     vec3 underwater_color = vec3(0.0);
@@ -177,5 +233,8 @@ void main()
     final_color = max(final_color, minimum_water_tint);
 
     float alpha = clamp(0.58 + absorption_factor * 0.22 + fresnel * 0.12, 0.58, 0.86);
+    // Foam is opaque froth on the surface; lift alpha with the foam factor so
+    // the band stays bright over any background (T-I2-16c).
+    alpha = clamp(alpha + foam_factor * 0.25, 0.58, 0.97);
     o_frag_color = vec4(final_color, alpha);
 }

@@ -52,9 +52,9 @@
     "stats_api": "RenderPassFrameStats.gpu_timers_supported",
     "query_mechanism": "glQueryCounter(GL_TIMESTAMP) ring, non-blocking GL_QUERY_RESULT_AVAILABLE polls",
     "passes": [
-      {"name": "shadow", "gpu_ms": 0.001632},
+      {"name": "shadow", "gpu_ms": 0.002144},
       {"name": "gbuffer", "gpu_ms": 0.000192},
-      {"name": "ssao", "gpu_ms": 0.000160},
+      {"name": "ssao", "gpu_ms": 0.000192},
       {"name": "ssao_blur", "gpu_ms": 0.000192},
       {"name": "lighting", "gpu_ms": 0.000160},
       {"name": "water", "gpu_ms": 0.000192},

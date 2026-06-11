@@ -88,6 +88,22 @@ struct WaterVisualCameraTarget {
     bool found = false;
     Luminumbra::Vec3 focus{0.0f};
     Luminumbra::Vec3 camera_position{0.0f};
+    // T-I2-16b: grazing-angle framing toward the most open water, used for
+    // the late-run reflection capture (the top-down camera_position view has
+    // no usable fresnel reflection signal).
+    Luminumbra::Vec3 reflection_camera_position{0.0f};
+    // T-I2-16c: water-surface points (y = sea level) near the focus,
+    // projected into the main capture to gate the depth tint gradient and
+    // the shoreline foam band:
+    // - shallow_point: 0.8-1.6 m of water (bright teal tint, clear of sand)
+    // - foam_point: 0.25-0.6 m of water (middle of the foam band)
+    // - deep_point: >= 3 m of water (dark deep tint)
+    bool shallow_point_found = false;
+    bool deep_point_found = false;
+    bool foam_point_found = false;
+    Luminumbra::Vec3 shallow_point{0.0f};
+    Luminumbra::Vec3 deep_point{0.0f};
+    Luminumbra::Vec3 foam_point{0.0f};
     float terrain_height = 0.0f;
     float camera_terrain_height = 0.0f;
     int supporting_water_samples = 0;
@@ -97,6 +113,9 @@ WaterVisualCameraTarget FindWaterVisualCameraTarget(Luminumbra::world::GameSessi
 WaterVisualCameraTarget FindMaterialVisualCameraTarget(Luminumbra::world::GameSession* game_session);
 void AimCameraAt(Luminumbra::Rendering::Camera* camera, const Luminumbra::Vec3& focus);
 void ApplyWaterVisualCamera(
+    Luminumbra::Rendering::Camera* camera,
+    const WaterVisualCameraTarget& target);
+void ApplyWaterReflectionCamera(
     Luminumbra::Rendering::Camera* camera,
     const WaterVisualCameraTarget& target);
 
@@ -147,6 +166,77 @@ struct MaterialPixelStats {
     double grey_fallback_ratio = 0.0;
 };
 
+// T-I2-16a: temporal caustics-animation probe for the water visual scenario.
+// Each sample records:
+// - the mean luminance (0-255) of the water-like pixels in the screenshot
+//   ROI at a given elapsed time (scene-side supporting evidence), and
+// - the mean absolute texel delta of the generated caustics texture against
+//   the previous sample's readback (texture_mean_abs_delta, -1 when there is
+//   no previous readback). The texture delta is the enforced animation gate:
+//   a static tint reproduces the same texels every second (delta exactly 0)
+//   while generated caustics keep moving, and unlike the screen luminance it
+//   is immune to chunk-streaming noise in the capture ROI.
+struct WaterCausticsSample {
+    double elapsed_seconds = 0.0;
+    double water_mean_luminance = 0.0;
+    std::uint64_t water_pixels = 0;
+    double texture_mean_abs_delta = -1.0;
+};
+
+WaterCausticsSample SampleBackbufferWaterLuminance(int width, int height, double elapsed_seconds);
+
+// Reads back the generated caustics texture (RGBA8) and computes the mean
+// absolute per-channel delta against `previous_texels` (when non-empty),
+// then replaces `previous_texels` with the fresh readback. Returns -1.0 when
+// the texture is unavailable or there is no previous readback to compare.
+double SampleCausticsTextureDelta(unsigned int texture_id, std::vector<unsigned char>& previous_texels);
+
+// T-I2-16b: SSR sky-correlation probe. Measures the mean color of the
+// water-like pixels in the upper third of the screenshot ROI (where the view
+// angle is shallowest, so the fresnel-weighted reflection dominates) and
+// correlates its hue (normalized RGB cosine similarity) against the sky
+// reflection reference color the water shader uses for SSR misses.
+struct WaterReflectionStats {
+    std::uint64_t upper_roi_pixels = 0;
+    std::uint64_t upper_roi_water_pixels = 0;
+    double mean_r = 0.0;
+    double mean_g = 0.0;
+    double mean_b = 0.0;
+    Luminumbra::Vec3 sky_reference{0.0f};
+    double sky_correlation = 0.0;
+};
+
+WaterReflectionStats AnalyzeWaterReflection(
+    const std::vector<unsigned char>& pixels,
+    int width,
+    int height,
+    const Luminumbra::Vec3& sky_reference);
+
+// T-I2-16c: mean color of a square pixel patch around a projected water
+// point, plus the fraction of foam-like (bright, low-saturation) pixels in
+// it. gb_balance ((g-b)/(g+b)) separates the bright-teal shallow tint
+// (green-led) from the deep blue tint (blue-led).
+struct WaterRegionPatch {
+    bool sampled = false;
+    int center_x = 0;          // pixels from the left edge
+    int center_y_from_top = 0; // pixels from the top edge
+    std::uint64_t pixels = 0;
+    double mean_r = 0.0;
+    double mean_g = 0.0;
+    double mean_b = 0.0;
+    double gb_balance = 0.0;
+    std::uint64_t foam_pixels = 0;
+    double foam_ratio = 0.0;
+};
+
+WaterRegionPatch AnalyzeWaterRegionPatch(
+    const std::vector<unsigned char>& pixels,
+    int width,
+    int height,
+    int center_x,
+    int center_y_from_top,
+    int radius);
+
 ScreenshotPixelStats AnalyzeScreenshotPixels(const std::vector<unsigned char>& pixels, int width, int height);
 LodHolePixelStats AnalyzeLodHolePixels(const std::vector<unsigned char>& pixels, int width, int height);
 MaterialPixelStats AnalyzeMaterialPixels(const std::vector<unsigned char>& pixels, int width, int height);
@@ -172,10 +262,16 @@ nlohmann::json ScreenshotPixelStatsToJson(const ScreenshotPixelStats& stats);
 void WriteWaterVisualAnalysis(
     const std::filesystem::path& artifact_dir,
     const std::string& screenshot,
+    const std::string& reflection_screenshot,
     const WaterVisualCameraTarget& target,
     const ScreenshotPixelStats& pixel_stats,
     const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass,
-    const Luminumbra::Rendering::RenderPipeline::MeshUploadFrameStats& upload_queue);
+    const Luminumbra::Rendering::RenderPipeline::MeshUploadFrameStats& upload_queue,
+    const std::vector<WaterCausticsSample>& caustics_samples,
+    const WaterReflectionStats& reflection_stats,
+    const WaterRegionPatch& shallow_patch,
+    const WaterRegionPatch& deep_patch,
+    const WaterRegionPatch& foam_patch);
 
 void WriteMaterialVisualAnalysis(
     const std::filesystem::path& artifact_dir,

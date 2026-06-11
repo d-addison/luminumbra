@@ -402,7 +402,7 @@ function Test-WaterVisual {
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
-    if ($analysis.schema -ne "luminumbra.water_visual_analysis.v1") {
+    if ($analysis.schema -ne "luminumbra.water_visual_analysis.v2") {
         throw "Unexpected water visual analysis schema '$($analysis.schema)'"
     }
     if (-not $analysis.target.found) {
@@ -423,6 +423,65 @@ function Test-WaterVisual {
     if ([int64]$analysis.gl_debug.errors -ne 0) {
         throw "Water visual analysis recorded GL debug errors: $($analysis.gl_debug.errors)"
     }
+    # T-I2-16a: caustics must be animated, not a static tint.
+    $caustics = $analysis.caustics_animation
+    if ($null -eq $caustics) {
+        throw "Water visual analysis is missing the caustics_animation block"
+    }
+    if ([int]$caustics.valid_sample_count -lt [int]$caustics.thresholds.min_samples) {
+        throw "Water visual caustics probe collected too few samples: $($caustics.valid_sample_count)"
+    }
+    if ([double]$caustics.min_sample_spacing_seconds -lt [double]$caustics.thresholds.min_sample_spacing_seconds) {
+        throw "Water visual caustics samples are spaced too closely: $($caustics.min_sample_spacing_seconds)s"
+    }
+    if ([int]$caustics.texture_delta_count -lt 1) {
+        throw "Water visual caustics probe recorded no texture readback deltas"
+    }
+    if ([double]$caustics.texture_mean_abs_delta -lt [double]$caustics.thresholds.min_texture_mean_abs_delta) {
+        throw "Water visual caustics texture did not animate: mean_abs_delta=$($caustics.texture_mean_abs_delta) (threshold $($caustics.thresholds.min_texture_mean_abs_delta))"
+    }
+    if (-not $caustics.animated) {
+        throw "Water visual caustics animation gate failed"
+    }
+    # T-I2-16b: upper-band water reflections must correlate with the sky hue.
+    $reflection = $analysis.reflection
+    if ($null -eq $reflection) {
+        throw "Water visual analysis is missing the reflection block"
+    }
+    if ([int64]$reflection.upper_roi_water_pixels -lt [int64]$reflection.thresholds.min_upper_roi_water_pixels) {
+        throw "Water visual reflection probe found too few upper-ROI water pixels: $($reflection.upper_roi_water_pixels)"
+    }
+    if ([double]$reflection.sky_correlation -lt [double]$reflection.thresholds.min_sky_correlation) {
+        throw "Water visual reflections do not correlate with the sky hue: $($reflection.sky_correlation) (threshold $($reflection.thresholds.min_sky_correlation))"
+    }
+    if (-not $reflection.sky_correlated) {
+        throw "Water visual reflection sky-correlation gate failed"
+    }
+    # T-I2-16c: shallow-to-deep tint gradient and shoreline foam band.
+    $depthGradient = $analysis.depth_gradient
+    if ($null -eq $depthGradient) {
+        throw "Water visual analysis is missing the depth_gradient block"
+    }
+    if (-not $depthGradient.shallow.sampled -or -not $depthGradient.deep.sampled) {
+        throw "Water visual depth gradient probe did not sample both patches (shallow=$($depthGradient.shallow.sampled), deep=$($depthGradient.deep.sampled))"
+    }
+    if ([double]$depthGradient.hue_separation -lt [double]$depthGradient.thresholds.min_hue_separation) {
+        throw "Water visual depth tint gradient too weak: hue_separation=$($depthGradient.hue_separation) (threshold $($depthGradient.thresholds.min_hue_separation))"
+    }
+    if (-not $depthGradient.present) {
+        throw "Water visual depth gradient gate failed"
+    }
+    $foam = $analysis.foam_presence
+    if ($null -eq $foam) {
+        throw "Water visual analysis is missing the foam_presence block"
+    }
+    if ([double]$foam.foam_ratio -lt [double]$foam.thresholds.min_foam_ratio) {
+        throw "Water visual shoreline foam missing: foam_ratio=$($foam.foam_ratio) (threshold $($foam.thresholds.min_foam_ratio))"
+    }
+    if (-not $foam.present) {
+        throw "Water visual foam presence gate failed"
+    }
+    Assert-FileExists (Join-Path $visualDir $reflection.screenshot)
     Assert-FileExists (Join-Path $visualDir $analysis.screenshot)
 }
 
