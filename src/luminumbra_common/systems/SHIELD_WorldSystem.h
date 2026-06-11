@@ -110,6 +110,12 @@ public:
         std::size_t water_vertex_count = 0;
         std::size_t water_index_count = 0;
         std::size_t terrain_payload_bytes = 0;
+        // Voxel-field storage telemetry (T-I3-1): resident SDF/heightmap
+        // bytes plus the count of chunks generated surface-band-only (empty
+        // SDF), proving the step>1 SDF skip is active and sizing its savings.
+        std::size_t sdf_payload_bytes = 0;
+        std::size_t heightmap_payload_bytes = 0;
+        std::size_t sdf_skipped_chunks = 0;
         bool generation_job_active = false;
         bool meshing_job_active = false;
     };
@@ -152,7 +158,14 @@ public:
     SHIELD_WorldSystem(JobSystem* job_system, WaterSystem* water_system, const TerrainGenParams& params, int seed);
     ~SHIELD_WorldSystem();
 
-    void GenerateChunkData(::Luminumbra::Chunk& chunk) const;
+    // Generates voxel data for a chunk. target_step is the meshing step this
+    // generation must support: step <= 1 (default) generates the full 17^3
+    // SDF + heightmap (LOD0 marching cubes, collision, edits, persistence);
+    // step > 1 generates ONLY the 17x17 heightmap (the coarse heightfield
+    // mesher and its boundary seam fallback never read interior SDF), leaving
+    // sdf_data empty and skipping the 3D cave-noise grid entirely. All
+    // existing callers default to full generation.
+    void GenerateChunkData(::Luminumbra::Chunk& chunk, int target_step = 1) const;
     void update(entt::registry& registry, const Vec3& camera_position, PhysicsSystem* physics_system);
     std::vector<::Luminumbra::Chunk*> get_renderable_chunks();
     float get_density_at(const Vec3& world_pos) const;
@@ -170,6 +183,14 @@ public:
     void SetWaterSystem(WaterSystem* water_system);
     std::vector<IVec3> GetInitialChunkLoadList(const Vec3& center_pos) const; // <<< NEW
     JobHandle dispatch_generation_jobs(const std::vector<IVec3>& chunks_to_generate);
+    // Generation request carrying the meshing step the chunk is being
+    // generated for, so far-ring (step > 1) chunks can skip the interior SDF
+    // and 3D cave-noise grid (see GenerateChunkData target_step).
+    struct ChunkGenerationRequest {
+        IVec3 coords{0};
+        int target_step = 1;
+    };
+    JobHandle dispatch_generation_jobs(const std::vector<ChunkGenerationRequest>& chunks_to_generate);
     bool EnsureCollisionReadyNear(const Vec3& world_pos, PhysicsSystem* physics_system, int horizontal_radius = 1);
     bool EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSystem* physics_system, int surface_radius, int collision_radius);
     const StreamingBudgetFrameStats& get_last_streaming_budget_stats() const { return m_last_streaming_budget_stats; }

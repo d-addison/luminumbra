@@ -656,6 +656,7 @@ void SHIELD_WorldSystem::update_chunk_activation(const Vec3& player_pos, Physics
         int ring_distance = 0;
         int horizontal_distance_sq = 0;
         int vertical_rank = 0;
+        int target_step = 1;
     };
 
     const int target_radius = streaming_radius_for_pressure(
@@ -690,7 +691,15 @@ void SHIELD_WorldSystem::update_chunk_activation(const Vec3& player_pos, Physics
             return;
         }
 
-        to_create.push_back({coords, surface, ring_distance, horizontal_dist2, vertical_rank});
+        // Generation intent (T-I3-1): chunks whose required meshing step is
+        // coarse (> 1) generate surface-band data only - no interior SDF, no
+        // 3D cave grid. Promotion to LOD0 backfills the full SDF via the
+        // meshing dispatch, so a conservative step here is only a perf cost.
+        const Vec3 chunk_center = (Vec3(coords) + 0.5f) * Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+        const int required_lod = get_required_lod_for_chunk(coords, chunk_center, player_pos);
+        const int target_step = get_lod_step_for_level(required_lod);
+
+        to_create.push_back({coords, surface, ring_distance, horizontal_dist2, vertical_rank, target_step});
     };
 
     for (int dz = -target_radius; dz <= target_radius; ++dz) {
@@ -751,7 +760,7 @@ void SHIELD_WorldSystem::update_chunk_activation(const Vec3& player_pos, Physics
         }
     }
 
-    std::vector<IVec3> generate_now;
+    std::vector<ChunkGenerationRequest> generate_now;
     generate_now.reserve(static_cast<std::size_t>(m_last_streaming_budget_stats.generation_budget));
     if (m_last_streaming_budget_stats.generation_budget > 0) {
         const std::size_t budget = std::min(
@@ -759,7 +768,7 @@ void SHIELD_WorldSystem::update_chunk_activation(const Vec3& player_pos, Physics
             static_cast<std::size_t>(m_last_streaming_budget_stats.generation_budget)
         );
         for (std::size_t i = 0; i < budget; ++i) {
-            generate_now.push_back(to_create[i].coords);
+            generate_now.push_back({to_create[i].coords, to_create[i].target_step});
             if (to_create[i].surface) {
                 ++m_last_streaming_budget_stats.surface_generation_scheduled;
             } else {
@@ -880,14 +889,21 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
     for (const SurfaceHorizonChunk& build_chunk : chunks_to_build) {
         build_jobs.emplace_back([this, build_chunk]() {
             const auto& chunk = build_chunk.chunk;
-            if (chunk->sdf_data.empty()) {
+            const bool needs_full_sdf = build_chunk.step <= 1;
+            const bool missing_required_data = needs_full_sdf
+                ? chunk->sdf_data.empty()
+                : (chunk->sdf_data.empty() && chunk->heightmap_data.empty());
+            if (missing_required_data) {
                 // Chunks restored from a world save arrive with voxel data
                 // already populated (possibly carrying player edits);
                 // regeneration would clobber those edits. Generation is a
                 // pure function of seed/params, so skipping it for any chunk
-                // that already has sdf data is also a no-op for fresh chunks
-                // that merely need a LOD rebuild.
-                GenerateChunkData(*chunk);
+                // that already has the data its step needs is also a no-op
+                // for fresh chunks that merely need a LOD rebuild. Coarse
+                // (step > 1) horizon chunks generate the surface band only
+                // (T-I3-1): the heightfield mesher and seam fallback never
+                // read interior SDF.
+                GenerateChunkData(*chunk, build_chunk.step);
             }
             chunk->set_state(ChunkState::Meshing);
             Luminumbra::World::MarchingCubes::PolygoniseTerrain(*this, *chunk, 0.0f, build_chunk.step);
@@ -1134,6 +1150,11 @@ SHIELD_WorldSystem::RuntimeChunkStats SHIELD_WorldSystem::get_runtime_chunk_stat
         stats.terrain_payload_bytes +=
             (chunk_ptr->mesh_vertices.size() + chunk_ptr->water_mesh_vertices.size()) * sizeof(VoxelVertex) +
             (chunk_ptr->mesh_indices.size() + chunk_ptr->water_mesh_indices.size()) * sizeof(u32);
+        stats.sdf_payload_bytes += chunk_ptr->sdf_data.size() * sizeof(f32);
+        stats.heightmap_payload_bytes += chunk_ptr->heightmap_data.size() * sizeof(f32);
+        if (chunk_ptr->sdf_data.empty() && !chunk_ptr->heightmap_data.empty()) {
+            ++stats.sdf_skipped_chunks;
+        }
     }
 
     return stats;
@@ -1232,14 +1253,51 @@ SHIELD_WorldSystem::CameraLocalCoverageStats SHIELD_WorldSystem::get_camera_loca
     return stats;
 }
 
-void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk) const {
+void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_step) const {
    const IVec3 coords = chunk.get_coords();
    const IVec3 base_pos = coords * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
    const int size_x = CHUNK_SIZE_X + 1;
    const int size_y = CHUNK_SIZE_Y + 1;
    const int size_z = CHUNK_SIZE_Z + 1;
    const size_t padded_volume = static_cast<size_t>(size_x) * size_y * size_z;
-   
+
+   // T-I3-1 SDF skip: chunks generated for a coarse meshing step (> 1) are
+   // only ever meshed by GenerateCoarseHeightfieldTerrain (which samples
+   // GetTerrainHeightAt analytically) and by the seam-fallback face patches
+   // (which read terrain density derived from heightmap_data). Neither reads
+   // the interior 17^3 SDF, so generate only the 17x17 heightmap: no SDF
+   // allocation (19.65 KB/chunk) and no 3D cave-noise grid. Cave carving is
+   // surface-capped at 18 m depth (kCaveSurfaceCapDepth), so every face SDF
+   // value within the seam fallback's +-0.75 near-surface band equals the
+   // pure terrain density (y - heightmap) exactly - the heightmap IS the
+   // boundary-face band for seam purposes.
+   if (target_step > 1) {
+       chunk.sdf_data.clear();
+       chunk.sdf_data.shrink_to_fit();
+
+       const size_t heightmap_size = static_cast<size_t>(size_x) * size_z;
+       chunk.heightmap_data.resize(heightmap_size);
+
+       std::vector<float> heightmap_noise(heightmap_size);
+       std::vector<float> island_mask_noise(heightmap_size);
+       m_terrain_generator->GenUniformGrid2D(heightmap_noise.data(), base_pos.x, base_pos.z, size_x, size_z, m_params.base_frequency, m_seed);
+       m_island_mask_generator->GenUniformGrid2D(island_mask_noise.data(), base_pos.x, base_pos.z, size_x, size_z, m_params.island_mask_frequency, m_seed + 2);
+
+       for (size_t index = 0; index < heightmap_size; ++index) {
+           // Identical combine math to the full path below so heightmap bytes
+           // are bit-equal regardless of which generation mode ran.
+           float terrain_h = m_params.height_offset + heightmap_noise[index] * m_params.base_amplitude;
+           if (m_params.island_mask_enabled) {
+               const float island_mask = glm::smoothstep(0.1f, 0.25f, island_mask_noise[index]);
+               terrain_h = glm::mix(m_params.height_offset, terrain_h, island_mask);
+           }
+           chunk.heightmap_data[index] = terrain_h;
+       }
+
+       chunk.clear_voxel_data_dirty();
+       return;
+   }
+
    // Try GPU generation first
    if (m_gpu_sdf_callback && m_gpu_sdf_callback(coords, m_params, m_seed, chunk.sdf_data)) {
        // GPU generation successful - still need to generate heightmap for physics
@@ -1350,20 +1408,35 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk) const {
 }
 
 JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<IVec3>& chunks_to_generate) {
+    // Coordinate-only callers (initial world load, regeneration, tests,
+    // persistence) always want full voxel generation.
+    std::vector<ChunkGenerationRequest> requests;
+    requests.reserve(chunks_to_generate.size());
+    for (const IVec3& coords : chunks_to_generate) {
+        requests.push_back({coords, 1});
+    }
+    return dispatch_generation_jobs(requests);
+}
+
+JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<ChunkGenerationRequest>& chunks_to_generate) {
     clear_completed_job_handle(m_streaming_state.generation_job_handle);
     if (has_active_job(m_streaming_state.generation_job_handle)) {
         return {};
     }
 
     std::vector<Luminumbra::Job> jobs;
-    for (const auto& coords : chunks_to_generate) {
+    for (const auto& request : chunks_to_generate) {
+        const IVec3 coords = request.coords;
         // Chunks restored from a world save (or already generated) carry
         // populated voxel data, possibly with player edits; regeneration would
         // clobber those edits. Generation is a pure function of seed/params,
-        // so skipping any chunk that already has sdf data is a no-op for
-        // untouched chunks and the load/generation contract for saved ones.
+        // so skipping any chunk that already has voxel data (full SDF or the
+        // surface-band heightmap) is a no-op for untouched chunks and the
+        // load/generation contract for saved ones. A surface-band chunk later
+        // promoted to LOD0 gets its full SDF backfilled by the meshing path.
         const auto existing = m_streaming_state.chunks.find(Chunk::calculate_id(coords));
-        if (existing != m_streaming_state.chunks.end() && existing->second && !existing->second->sdf_data.empty()) {
+        if (existing != m_streaming_state.chunks.end() && existing->second &&
+            (!existing->second->sdf_data.empty() || !existing->second->heightmap_data.empty())) {
             continue;
         }
 
@@ -1373,8 +1446,9 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<IVec3>&
 
         // Chunk generation job created
 
-        jobs.emplace_back([this, chunk]() {
-            GenerateChunkData(*chunk);
+        const int target_step = request.target_step;
+        jobs.emplace_back([this, chunk, target_step]() {
+            GenerateChunkData(*chunk, target_step);
             chunk->set_state(Luminumbra::ChunkState::Idle);
         });
     }
@@ -1486,9 +1560,21 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
                 scratch.water_mesh_generated.store(false, std::memory_order_release);
                 scratch.current_water_resolution.store(chunk->current_water_resolution.load(std::memory_order_acquire), std::memory_order_release);
 
+                bool backfilled_voxel_data = false;
                 if (terrain_mesh_required) {
-                    scratch.sdf_data = chunk->sdf_data;
-                    scratch.heightmap_data = chunk->heightmap_data;
+                    if (step <= 1 && chunk->sdf_data.empty()) {
+                        // LOD0 promotion of a chunk generated surface-band
+                        // only (T-I3-1): build the full voxel field into the
+                        // scratch chunk here and stage it for main-thread
+                        // publication alongside the mesh, so the previous
+                        // coarse mesh stays renderable while pending and the
+                        // live chunk's sdf_data is never touched off-thread.
+                        GenerateChunkData(scratch, 1);
+                        backfilled_voxel_data = true;
+                    } else {
+                        scratch.sdf_data = chunk->sdf_data;
+                        scratch.heightmap_data = chunk->heightmap_data;
+                    }
 
                     // 1. Generate the terrain mesh from the SDF data into a scratch chunk.
                     Luminumbra::World::MarchingCubes::PolygoniseTerrain(*this, scratch, 0.0f, step);
@@ -1512,6 +1598,10 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
                 if (terrain_mesh_required) {
                     chunk->pending_mesh_vertices = std::move(scratch.mesh_vertices);
                     chunk->pending_mesh_indices = std::move(scratch.mesh_indices);
+                    if (backfilled_voxel_data) {
+                        chunk->pending_sdf_data = std::move(scratch.sdf_data);
+                        chunk->pending_heightmap_data = std::move(scratch.heightmap_data);
+                    }
                 }
                 chunk->pending_water_mesh_vertices = std::move(scratch.water_mesh_vertices);
                 chunk->pending_water_mesh_indices = std::move(scratch.water_mesh_indices);
@@ -1575,6 +1665,15 @@ void SHIELD_WorldSystem::process_completed_meshing_jobs() {
 
         if (mesh_ready && !mesh_failed) {
             if (job_chunk.terrain_mesh_required) {
+                if (!chunk->pending_sdf_data.empty()) {
+                    // LOD0-promotion backfill (T-I3-1): publish the full
+                    // voxel field generated inside the meshing job. Pure
+                    // generation output, not an edit - the dirty flag stays
+                    // clear (matching GenerateChunkData's contract).
+                    chunk->sdf_data = std::move(chunk->pending_sdf_data);
+                    chunk->heightmap_data = std::move(chunk->pending_heightmap_data);
+                    chunk->clear_voxel_data_dirty();
+                }
                 chunk->mesh_vertices = std::move(chunk->pending_mesh_vertices);
                 chunk->mesh_indices = std::move(chunk->pending_mesh_indices);
                 chunk->current_lod.store(completed_lod, std::memory_order_release);
@@ -1597,6 +1696,8 @@ void SHIELD_WorldSystem::process_completed_meshing_jobs() {
         chunk->pending_mesh_indices.clear();
         chunk->pending_water_mesh_vertices.clear();
         chunk->pending_water_mesh_indices.clear();
+        chunk->pending_sdf_data.clear();
+        chunk->pending_heightmap_data.clear();
         chunk->pending_mesh_ready.store(false, std::memory_order_release);
         chunk->pending_mesh_failed.store(false, std::memory_order_release);
         chunk->pending_lod.store(-1, std::memory_order_release);

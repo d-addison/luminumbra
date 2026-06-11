@@ -1,4 +1,4 @@
-#include "MarchingCubes.h"
+﻿#include "MarchingCubes.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -203,24 +203,6 @@ namespace { // Anonymous namespace for internal implementation details
         return true;
     }
 
-    std::size_t SdfIndex(int x, int y, int z) {
-        return static_cast<std::size_t>(x)
-            + static_cast<std::size_t>(y) * static_cast<std::size_t>(CHUNK_SIZE_X + 1)
-            + static_cast<std::size_t>(z) * static_cast<std::size_t>(CHUNK_SIZE_X + 1) * static_cast<std::size_t>(CHUNK_SIZE_Y + 1);
-    }
-
-    bool ReadSdfValue(const Chunk& chunk, int x, int y, int z, float& value) {
-        if (x < 0 || x > CHUNK_SIZE_X || y < 0 || y > CHUNK_SIZE_Y || z < 0 || z > CHUNK_SIZE_Z) {
-            return false;
-        }
-        const std::size_t index = SdfIndex(x, y, z);
-        if (index >= chunk.sdf_data.size()) {
-            return false;
-        }
-        value = chunk.sdf_data[index];
-        return true;
-    }
-
     Vec3 TransitionFacePosition(TerrainTransitionFace face, int major, int y) {
         switch (face) {
         case TransitionFaceMinX:
@@ -235,18 +217,49 @@ namespace { // Anonymous namespace for internal implementation details
         return Vec3(0.0f);
     }
 
-    bool ReadTransitionFaceSdf(const Chunk& chunk, TerrainTransitionFace face, int major, int y, float& value) {
+    // Terrain density (y - terrain_height) at a lattice point on a horizontal
+    // chunk face, derived from the stored 17x17 heightmap instead of the 17^3
+    // SDF. Evidence for the swap (T-I3-1): cave carving is surface-capped -
+    // cave_surface_blend() is exactly 0 within kCaveSurfaceCapDepth (18 m) of
+    // the surface, so every stored face SDF value inside this fallback's
+    // near-surface emission band (|density| <= 0.75) equals the pure terrain
+    // density bit-for-bit. The only divergence is >= 18 m below the surface,
+    // where stored SDF could cross zero on deep cave walls; those patches
+    // were buried inside solid terrain under the coarse heightfield surface
+    // (the only mesh coarse chunks have) and covered nothing. This keeps the
+    // seam fallback working on chunks generated surface-band-only (no SDF).
+    bool ReadTransitionFaceTerrainDensity(const Chunk& chunk, TerrainTransitionFace face, int major, int y, float& value) {
+        if (major < 0 || major > CHUNK_SIZE_X || y < 0 || y > CHUNK_SIZE_Y) {
+            return false;
+        }
+        int x = 0;
+        int z = 0;
         switch (face) {
         case TransitionFaceMinX:
-            return ReadSdfValue(chunk, 0, y, major, value);
+            x = 0;
+            z = major;
+            break;
         case TransitionFaceMaxX:
-            return ReadSdfValue(chunk, CHUNK_SIZE_X, y, major, value);
+            x = CHUNK_SIZE_X;
+            z = major;
+            break;
         case TransitionFaceMinZ:
-            return ReadSdfValue(chunk, major, y, 0, value);
+            x = major;
+            z = 0;
+            break;
         case TransitionFaceMaxZ:
-            return ReadSdfValue(chunk, major, y, CHUNK_SIZE_Z, value);
+            x = major;
+            z = CHUNK_SIZE_Z;
+            break;
         }
-        return false;
+        const std::size_t index = static_cast<std::size_t>(x)
+            + static_cast<std::size_t>(z) * static_cast<std::size_t>(CHUNK_SIZE_X + 1);
+        if (index >= chunk.heightmap_data.size()) {
+            return false;
+        }
+        const float world_y = static_cast<float>(chunk.get_coords().y * CHUNK_SIZE_Y + y);
+        value = world_y - chunk.heightmap_data[index];
+        return true;
     }
 
     bool HasCompleteWaterGrid(const Chunk& chunk, int resolution) {
@@ -293,7 +306,7 @@ namespace { // Anonymous namespace for internal implementation details
     }
 
     void AppendFallbackFacePatches(Chunk& chunk, int step, TerrainTransitionFace face, TerrainTransitionSkirtStats& stats) {
-        if (chunk.sdf_data.empty()) {
+        if (chunk.heightmap_data.empty()) {
             return;
         }
 
@@ -308,10 +321,10 @@ namespace { // Anonymous namespace for internal implementation details
                 float v10 = 0.0f;
                 float v01 = 0.0f;
                 float v11 = 0.0f;
-                if (!ReadTransitionFaceSdf(chunk, face, major, y, v00) ||
-                    !ReadTransitionFaceSdf(chunk, face, major + sample_step, y, v10) ||
-                    !ReadTransitionFaceSdf(chunk, face, major, y + sample_step, v01) ||
-                    !ReadTransitionFaceSdf(chunk, face, major + sample_step, y + sample_step, v11))
+                if (!ReadTransitionFaceTerrainDensity(chunk, face, major, y, v00) ||
+                    !ReadTransitionFaceTerrainDensity(chunk, face, major + sample_step, y, v10) ||
+                    !ReadTransitionFaceTerrainDensity(chunk, face, major, y + sample_step, v01) ||
+                    !ReadTransitionFaceTerrainDensity(chunk, face, major + sample_step, y + sample_step, v11))
                 {
                     continue;
                 }
@@ -325,7 +338,7 @@ namespace { // Anonymous namespace for internal implementation details
                 for (int local_major = 0; local_major <= sample_step && !near_surface; ++local_major) {
                     for (int local_y = 0; local_y <= sample_step; ++local_y) {
                         float sample = 0.0f;
-                        if (ReadTransitionFaceSdf(chunk, face, major + local_major, y + local_y, sample) &&
+                        if (ReadTransitionFaceTerrainDensity(chunk, face, major + local_major, y + local_y, sample) &&
                             std::abs(sample) <= 0.75f)
                         {
                             near_surface = true;
