@@ -8,6 +8,9 @@ set(COMMON_SOURCES
     # AI
     ${CMAKE_CURRENT_LIST_DIR}/ai/InstinctPlanner.cpp
 
+    # Animation
+    ${CMAKE_CURRENT_LIST_DIR}/animation/AnimationRuntime.cpp
+
     # Core
     ${CMAKE_CURRENT_LIST_DIR}/common_placeholder.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/EngineContracts.cpp
@@ -51,3 +54,10 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/world/TerrainPresetLoader.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/WorldStreamingState.cpp
 )
+
+# G1 pose-determinism gate (T-I3-15): forbid FP contraction in the animation
+# runtime so debug and release sample bit-identical poses. GCC enables
+# -ffp-contract=fast at -O2 by default; pinning it off here keeps the
+# committed pose checksum preset-independent.
+set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/animation/AnimationRuntime.cpp
+    PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
