@@ -43,6 +43,28 @@ target_link_libraries(luminumbra_client PUBLIC
     lua
 )
 
+# --- Headless Server Executable (T-I3-12) ---
+# Simulation authority only: links luminumbra_common and NOTHING client-side
+# (no OpenGL, GLFW, miniaudio, imgui, RmlUi). The ServerHeadlessHygiene ctest
+# and the HeadlessServerTick validator mode enforce the include boundary.
+include("${CMAKE_CURRENT_LIST_DIR}/luminumbra_server/sources.cmake")
+
+add_executable(luminumbra_server_app
+    ${SERVER_APP_SOURCES}
+)
+
+target_include_directories(luminumbra_server_app PRIVATE
+    # The 'src' directory, the root for includes like "luminumbra_common/...".
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_link_libraries(luminumbra_server_app PRIVATE
+    luminumbra_common
+)
+
+# First-party hygiene (warnings-as-errors per the build preset).
+luminumbra_configure_first_party_target(luminumbra_server_app)
+
 # --- Client Executable ---
 add_executable(luminumbra_client_app
     ${CLIENT_APP_SOURCES}
