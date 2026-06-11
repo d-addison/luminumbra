@@ -470,9 +470,118 @@ void ApplyWaterReflectionCamera(
     AimCameraAt(camera, target.focus);
 }
 
+// True when the column at (x, z) sits on a steep high-altitude rim. The
+// marching-cubes skin follows the height graph (depth ~0), so soil/stone
+// (depth 1-5 / >= 5 per classify_material) only become visible where vertex
+// interpolation error is large: along the rims of grass-topped cliffs, where
+// the height field drops several meters within one cell. The cave field is
+// surface-capped (kCaveSurfaceCapDepth = 18) and never opens to the sky, so
+// rims are the only reliable natural stone/soil exposure. Rims face upward
+// and catch the near-zenith noon sun.
+bool ColumnOnSteepRim(Luminumbra::Systems::SHIELD_WorldSystem* world_system, float x, float z) {
+    const float column_height = world_system->GetTerrainHeightAt(x, z);
+    if (column_height < 37.0f) {
+        return false;
+    }
+    constexpr float kStep = 6.0f;
+    constexpr float kMinDrop = 6.0f;
+    const float drops[4] = {
+        column_height - world_system->GetTerrainHeightAt(x + kStep, z),
+        column_height - world_system->GetTerrainHeightAt(x - kStep, z),
+        column_height - world_system->GetTerrainHeightAt(x, z + kStep),
+        column_height - world_system->GetTerrainHeightAt(x, z - kStep),
+    };
+    for (const float drop : drops) {
+        if (drop >= kMinDrop) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Camera/focus composition shared by candidate evaluation and the final
+// target: camera seaward of the beach looking up-slope, focus partway up the
+// highland flank.
+struct MaterialVantage {
+    Luminumbra::Vec3 camera{0.0f};
+    Luminumbra::Vec3 focus{0.0f};
+};
+
+MaterialVantage ComposeMaterialVantage(
+    Luminumbra::Systems::SHIELD_WorldSystem* world_system,
+    const Luminumbra::Vec3& beach,
+    const Luminumbra::Vec3& highland)
+{
+    Luminumbra::Vec3 slope_dir(highland.x - beach.x, 0.0f, highland.z - beach.z);
+    const float slope_len = std::sqrt(slope_dir.x * slope_dir.x + slope_dir.z * slope_dir.z);
+    if (slope_len > 0.01f) {
+        slope_dir.x /= slope_len;
+        slope_dir.z /= slope_len;
+    } else {
+        slope_dir = Luminumbra::Vec3(0.0f, 0.0f, 1.0f);
+    }
+
+    MaterialVantage vantage;
+    vantage.focus = Luminumbra::Vec3(
+        beach.x + slope_dir.x * slope_len * 0.45f,
+        beach.y + (highland.y - beach.y) * 0.35f,
+        beach.z + slope_dir.z * slope_len * 0.45f);
+    vantage.camera = beach - slope_dir * 46.0f;
+    vantage.camera.y = beach.y + 22.0f;
+    const float camera_terrain = world_system->GetTerrainHeightAt(vantage.camera.x, vantage.camera.z);
+    vantage.camera.y = std::max(vantage.camera.y, camera_terrain + 14.0f);
+    return vantage;
+}
+
+// The camera must actually see the flank instead of staring into an
+// intervening hillside (which captures as a near-black unlit wall or a
+// texture-magnified flat close-up). Check the center ray to the focus plus
+// rays swung +/-35 degrees toward the frame edges; each samples the
+// camera-side stretch of the segment and requires clearance above the height
+// field. The height field is the cave-uncarved graph top, so a clear path
+// here is a conservative occlusion proxy.
+bool MaterialVantageHasLineOfSight(
+    Luminumbra::Systems::SHIELD_WorldSystem* world_system,
+    const MaterialVantage& vantage)
+{
+    const Luminumbra::Vec3 ray = vantage.focus - vantage.camera;
+    constexpr float kEdgeAngles[] = {-0.61f, 0.0f, 0.61f};  // ~35 degrees
+    for (const float angle : kEdgeAngles) {
+        const float cos_a = std::cos(angle);
+        const float sin_a = std::sin(angle);
+        const Luminumbra::Vec3 swung(
+            ray.x * cos_a - ray.z * sin_a,
+            ray.y,
+            ray.x * sin_a + ray.z * cos_a);
+        // Side rays do not end on the flank, so only their nearer stretch must
+        // be clear; the center ray is enforced almost to the focus.
+        const float max_t = angle == 0.0f ? 0.7f : 0.5f;
+        for (int step = 0; step <= 7; ++step) {
+            const float t = static_cast<float>(step) * 0.1f;
+            if (t > max_t) {
+                break;
+            }
+            const Luminumbra::Vec3 pos = vantage.camera + swung * t;
+            if (pos.y < world_system->GetTerrainHeightAt(pos.x, pos.z) + 2.0f) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 // Material visual targets reuse the water target shape: a focus point, a
 // raised camera position, and a count of supporting samples that prove the
 // surrounding area really is the expected material.
+//
+// The vantage is a composite designed to show several terrain materials in a
+// single capture (one frame, one ROI): a beach (sand band per
+// GetTerrainMaterialAt: dry terrain near sea level) in the foreground with a
+// grass-topped highland (terrain comfortably above the y<34/terrain<36 sand
+// band) rising behind it. The camera sits seaward of the beach, raised, and
+// aims up-slope at the highland so the bottom-3/5 analysis ROI contains
+// foreground sand, the highland's cliff flank (soil/stone exposure), and the
+// grass top.
 WaterVisualCameraTarget FindMaterialVisualCameraTarget(Luminumbra::world::GameSession* game_session) {
     WaterVisualCameraTarget target;
     if (!game_session || !game_session->GetWorldSystem()) {
@@ -482,15 +591,21 @@ WaterVisualCameraTarget FindMaterialVisualCameraTarget(Luminumbra::world::GameSe
     auto* world_system = game_session->GetWorldSystem();
     const Luminumbra::Vec3 spawn = game_session->GetMetadata().spawnPoint;
 
-    // Sand band per GetTerrainMaterialAt: dry terrain near sea level. Look for
-    // the broadest beach reachable; fall back to the best candidate seen so a
-    // narrow fringe beach still produces an honest capture for the pixel gate.
     constexpr float kBeachMinHeight = 0.25f;  // above SEA_LEVEL offset
     constexpr float kBeachMaxHeight = 12.0f;  // comfortably inside the <36 beach band
+    // classify_material assigns Grass only above the sand band (terrain >= 36
+    // with depth < 1); 38 keeps a margin so noise jitter cannot flip the top
+    // back into the sand classification.
+    constexpr float kGrassMinTerrain = 38.0f;
     constexpr int kSearchRadius = 512;
     constexpr int kSearchStep = 8;
     float best_score = -std::numeric_limits<float>::max();
     std::size_t in_band_candidates = 0;
+
+    Luminumbra::Vec3 best_beach{0.0f};
+    Luminumbra::Vec3 best_highland{0.0f};
+    int best_grass_support = 0;
+    int best_stone_support = 0;
 
     for (int dz = -kSearchRadius; dz <= kSearchRadius; dz += kSearchStep) {
         for (int dx = -kSearchRadius; dx <= kSearchRadius; dx += kSearchStep) {
@@ -514,36 +629,115 @@ WaterVisualCameraTarget FindMaterialVisualCameraTarget(Luminumbra::world::GameSe
                     }
                 }
             }
+            if (supporting_sand_samples < 8) {
+                continue;
+            }
+
+            // Highland scan: walk rings of directions around the beach point
+            // and keep the tallest sample; the grass gate needs terrain that
+            // actually rises above the sand band within camera range.
+            float highland_height = -std::numeric_limits<float>::max();
+            Luminumbra::Vec3 highland_pos{0.0f};
+            for (int ring = 1; ring <= 4; ++ring) {
+                const float radius = static_cast<float>(ring) * 28.0f;
+                for (int dir = 0; dir < 8; ++dir) {
+                    const float angle = static_cast<float>(dir) * 0.78539816f;  // pi/4
+                    const float hx = x + std::cos(angle) * radius;
+                    const float hz = z + std::sin(angle) * radius;
+                    const float h = world_system->GetTerrainHeightAt(hx, hz);
+                    if (h > highland_height) {
+                        highland_height = h;
+                        highland_pos = Luminumbra::Vec3(hx, h, hz);
+                    }
+                }
+            }
+            if (highland_height < kGrassMinTerrain) {
+                continue;
+            }
+
+            // Grass support: flat-top samples around the highland that stay
+            // above the grass floor keep depth < 1 across the visible cap.
+            int grass_support = 0;
+            for (int oz = -1; oz <= 1; ++oz) {
+                for (int ox = -1; ox <= 1; ++ox) {
+                    const float gx = highland_pos.x + static_cast<float>(ox * 10);
+                    const float gz = highland_pos.z + static_cast<float>(oz * 10);
+                    if (world_system->GetTerrainHeightAt(gx, gz) >= kGrassMinTerrain) {
+                        ++grass_support;
+                    }
+                }
+            }
+            if (grass_support < 4) {
+                continue;
+            }
+
+            // Stone/soil rim exposure: sample around the highland cap for
+            // steep rim columns. No sun-alignment term: rims face upward and
+            // are zenith-lit regardless of flank orientation.
+            int stone_support = 0;
+            for (int oz = -2; oz <= 2; ++oz) {
+                for (int ox = -2; ox <= 2; ++ox) {
+                    const float sx = highland_pos.x + static_cast<float>(ox * 8);
+                    const float sz = highland_pos.z + static_cast<float>(oz * 8);
+                    if (ColumnOnSteepRim(world_system, sx, sz)) {
+                        ++stone_support;
+                    }
+                }
+            }
+            if (stone_support < 1) {
+                continue;
+            }
 
             const float distance = std::sqrt(static_cast<float>(dx * dx + dz * dz));
             const float score =
-                static_cast<float>(supporting_sand_samples) * 100.0f -
+                static_cast<float>(supporting_sand_samples) * 220.0f +
+                static_cast<float>(grass_support) * 150.0f +
+                static_cast<float>(stone_support) * 60.0f +
+                std::min(highland_height, 70.0f) * 4.0f -
                 distance * 0.05f;
-            if (!target.found || score > best_score) {
-                target.found = true;
-                target.focus = Luminumbra::Vec3(x, terrain_height, z);
-                target.terrain_height = terrain_height;
-                target.supporting_water_samples = supporting_sand_samples;
-                best_score = score;
+            if (target.found && score <= best_score) {
+                continue;
             }
+
+            const Luminumbra::Vec3 beach(x, terrain_height, z);
+            if (!MaterialVantageHasLineOfSight(
+                    world_system, ComposeMaterialVantage(world_system, beach, highland_pos))) {
+                continue;
+            }
+
+            target.found = true;
+            best_beach = beach;
+            best_highland = highland_pos;
+            best_grass_support = grass_support;
+            best_stone_support = stone_support;
+            target.terrain_height = terrain_height;
+            target.supporting_water_samples = supporting_sand_samples;
+            best_score = score;
         }
     }
 
     LUMINUMBRA_CORE_INFO(
-        "Material visual target scan: in_band_candidates={}, found={}, focus=({:.1f},{:.1f},{:.1f}), supporting={}",
+        "Material visual target scan: in_band_candidates={}, found={}, beach=({:.1f},{:.1f},{:.1f}), highland=({:.1f},{:.1f},{:.1f}), sand_support={}, grass_support={}, stone_support={}",
         in_band_candidates,
         target.found,
-        target.focus.x, target.focus.y, target.focus.z,
-        target.supporting_water_samples);
+        best_beach.x, best_beach.y, best_beach.z,
+        best_highland.x, best_highland.y, best_highland.z,
+        target.supporting_water_samples,
+        best_grass_support,
+        best_stone_support);
 
     if (!target.found) {
         return target;
     }
 
-    const Luminumbra::Vec3 camera_offset(0.0f, 26.0f, 12.0f);
-    target.camera_position = target.focus + camera_offset;
+    // Camera seaward of the beach looking up-slope: focus partway up the
+    // highland flank so the frame stacks foreground beach sand in the lower
+    // ROI, the slope (grass/soil/stone) in the middle, and keeps the horizon
+    // and sky above the analysis ROI.
+    const MaterialVantage vantage = ComposeMaterialVantage(world_system, best_beach, best_highland);
+    target.focus = vantage.focus;
+    target.camera_position = vantage.camera;
     target.camera_terrain_height = world_system->GetTerrainHeightAt(target.camera_position.x, target.camera_position.z);
-    target.camera_position.y = std::max(target.camera_position.y, target.camera_terrain_height + 14.0f);
     return target;
 }
 
@@ -2144,11 +2338,71 @@ bool IsGreyFallbackPixel(unsigned char r, unsigned char g, unsigned char b) {
     return (max_channel - min_channel) <= 12 && max_channel >= 30 && max_channel <= 215;
 }
 
+// Calibrated against noon captures at the composite beach+highland vantage:
+// rendered grass averages RGB(16,24,11) - green leads both other channels by
+// a small but consistent margin (g-r p5..p95 = 3..12, g-b p5..p95 = 7..20) and
+// stays dim (g p95 = 33), so the brightness ceiling excludes sky/haze (r 155+)
+// while the floor excludes the near-black void. Classification keeps grey
+// fallback primacy: AnalyzeMaterialPixels tests IsGreyFallbackPixel before
+// this predicate so a flat-grey fallback can never be absorbed into the grass
+// bucket (measured collision on real grass: 385 of 188034 ROI pixels, 0.2%).
+bool IsGrassLikePixel(unsigned char r, unsigned char g, unsigned char b) {
+    return g >= 12 &&
+           static_cast<int>(g) - static_cast<int>(r) >= 2 &&
+           static_cast<int>(g) - static_cast<int>(b) >= 5 &&
+           r <= 90;
+}
+
+// Stone vs grey-fallback resolution (measured, documented): stone's base
+// colour (0.5, 0.5, 0.52) is itself neutral, and the steep faces where
+// classify_material exposes stone (depth >= 5) stay dim at noon, so rendered
+// stone measures avg RGB(26, 22, 20) with a per-pixel channel spread of
+// 3..11 - inside the grey-fallback detector's <= 12 spread window. They are
+// genuinely inseparable by colour alone. Resolution: stone is gated on
+// presence in the rim sub-ROI (top quarter of the frame), where high
+// altitude excludes sand (y < 34 band) and the only neutral warm-ordered
+// (r >= g >= b, sun-tinted) pixels are the stone/soil rim bands; the grey
+// fallback detector keeps exclusive ownership of the main beach/flank ROI.
+bool IsStoneLikePixel(unsigned char r, unsigned char g, unsigned char b) {
+    const int max_channel = std::max({static_cast<int>(r), static_cast<int>(g), static_cast<int>(b)});
+    const int min_channel = std::min({static_cast<int>(r), static_cast<int>(g), static_cast<int>(b)});
+    return r >= g && g >= b &&
+           (max_channel - min_channel) <= 12 &&
+           max_channel >= 20 &&
+           max_channel <= 215;
+}
+
+// Calibrated against noon rim-band captures (seed 424242): rendered soil
+// (base colour (0.3, 0.15, 0.05), depth 1-5 exposure along cliff rims)
+// measures avg RGB(41, 30, 25) - strongly red-led and warm. The r-b >= 13
+// floor keeps it disjoint from the grey-fallback detector (spread <= 12) and
+// from the stone bucket (same spread window); g-b <= 11 excludes sand, whose
+// green channel rides far above blue (measured sand g-b ~ 28). Like stone,
+// soil is counted in the rim sub-ROI, where its population is ~5x the main
+// ROI's (interpolation-error exposure concentrates on the rims).
+bool IsSoilLikePixel(unsigned char r, unsigned char g, unsigned char b) {
+    return r >= 20 && r <= 120 &&
+           static_cast<int>(r) - static_cast<int>(g) >= 7 &&
+           g >= b &&
+           static_cast<int>(g) - static_cast<int>(b) <= 11 &&
+           static_cast<int>(r) - static_cast<int>(b) >= 13;
+}
+
 void MaterialRoiBounds(int width, int height, int& min_x, int& max_x, int& min_top_y, int& max_top_y) {
     min_x = width / 6;
     max_x = width - width / 6;
     min_top_y = (height * 2) / 5;
     max_top_y = height;
+}
+
+// Rim sub-ROI: same horizontal band, top quarter of the frame. The composite
+// vantage places the grass-topped cliff rims (the only natural soil/stone
+// exposure) against the sky in this band.
+void MaterialRimRoiBounds(int width, int height, int& min_x, int& max_x, int& min_top_y, int& max_top_y) {
+    min_x = width / 6;
+    max_x = width - width / 6;
+    min_top_y = 0;
+    max_top_y = height / 4;
 }
 
 MaterialPixelStats AnalyzeMaterialPixels(const std::vector<unsigned char>& pixels, int width, int height) {
@@ -2164,11 +2418,18 @@ MaterialPixelStats AnalyzeMaterialPixels(const std::vector<unsigned char>& pixel
     int min_top_y = 0;
     int max_top_y = 0;
     MaterialRoiBounds(width, height, min_x, max_x, min_top_y, max_top_y);
+    int rim_min_x = 0;
+    int rim_max_x = 0;
+    int rim_min_top_y = 0;
+    int rim_max_top_y = 0;
+    MaterialRimRoiBounds(width, height, rim_min_x, rim_max_x, rim_min_top_y, rim_max_top_y);
     const std::size_t row_stride = static_cast<std::size_t>(width) * 3u;
 
     for (int y = 0; y < height; ++y) {
         const int y_from_top = height - 1 - y;
-        if (y_from_top < min_top_y || y_from_top >= max_top_y) {
+        const bool in_main_band = y_from_top >= min_top_y && y_from_top < max_top_y;
+        const bool in_rim_band = y_from_top >= rim_min_top_y && y_from_top < rim_max_top_y;
+        if (!in_main_band && !in_rim_band) {
             continue;
         }
         for (int x = min_x; x < max_x; ++x) {
@@ -2176,22 +2437,38 @@ MaterialPixelStats AnalyzeMaterialPixels(const std::vector<unsigned char>& pixel
             const unsigned char r = pixels[offset + 0u];
             const unsigned char g = pixels[offset + 1u];
             const unsigned char b = pixels[offset + 2u];
-            ++stats.roi_pixels;
-            if (IsSandLikePixel(r, g, b)) {
-                ++stats.sand_pixels;
-            } else if (IsWaterLikePixel(r, g, b)) {
-                ++stats.water_like_pixels;
-            } else if (IsGreyFallbackPixel(r, g, b)) {
-                ++stats.grey_fallback_pixels;
+            if (in_main_band) {
+                ++stats.roi_pixels;
+                if (IsSandLikePixel(r, g, b)) {
+                    ++stats.sand_pixels;
+                } else if (IsWaterLikePixel(r, g, b)) {
+                    ++stats.water_like_pixels;
+                } else if (IsGreyFallbackPixel(r, g, b)) {
+                    ++stats.grey_fallback_pixels;
+                } else if (IsGrassLikePixel(r, g, b)) {
+                    ++stats.grass_pixels;
+                } else {
+                    ++stats.other_pixels;
+                }
             } else {
-                ++stats.other_pixels;
+                ++stats.rim_roi_pixels;
+                if (IsStoneLikePixel(r, g, b)) {
+                    ++stats.stone_pixels;
+                } else if (IsSoilLikePixel(r, g, b)) {
+                    ++stats.soil_pixels;
+                }
             }
         }
     }
 
     if (stats.roi_pixels > 0) {
         stats.sand_ratio = static_cast<double>(stats.sand_pixels) / static_cast<double>(stats.roi_pixels);
+        stats.grass_ratio = static_cast<double>(stats.grass_pixels) / static_cast<double>(stats.roi_pixels);
         stats.grey_fallback_ratio = static_cast<double>(stats.grey_fallback_pixels) / static_cast<double>(stats.roi_pixels);
+    }
+    if (stats.rim_roi_pixels > 0) {
+        stats.stone_ratio = static_cast<double>(stats.stone_pixels) / static_cast<double>(stats.rim_roi_pixels);
+        stats.soil_ratio = static_cast<double>(stats.soil_pixels) / static_cast<double>(stats.rim_roi_pixels);
     }
     return stats;
 }
@@ -2228,9 +2505,10 @@ bool WritePixelBufferPpm(
     return true;
 }
 
-// Heatmap legend: sand -> gold, grey fallback -> magenta (the failure being
-// gated must be unmissable), water -> blue, other ROI -> dimmed luminance,
-// outside ROI -> heavily dimmed luminance.
+// Heatmap legend: sand -> gold, grass -> green, grey fallback -> magenta (the
+// failure being gated must be unmissable), water -> blue, stone (rim sub-ROI
+// only) -> slate, soil (rim sub-ROI only) -> brown, other ROI -> dimmed
+// luminance, outside ROI -> heavily dimmed luminance.
 std::vector<unsigned char> BuildMaterialHeatmap(const std::vector<unsigned char>& pixels, int width, int height) {
     std::vector<unsigned char> heatmap(pixels.size());
     int min_x = 0;
@@ -2238,11 +2516,17 @@ std::vector<unsigned char> BuildMaterialHeatmap(const std::vector<unsigned char>
     int min_top_y = 0;
     int max_top_y = 0;
     MaterialRoiBounds(width, height, min_x, max_x, min_top_y, max_top_y);
+    int rim_min_x = 0;
+    int rim_max_x = 0;
+    int rim_min_top_y = 0;
+    int rim_max_top_y = 0;
+    MaterialRimRoiBounds(width, height, rim_min_x, rim_max_x, rim_min_top_y, rim_max_top_y);
     const std::size_t row_stride = static_cast<std::size_t>(width) * 3u;
 
     for (int y = 0; y < height; ++y) {
         const int y_from_top = height - 1 - y;
         const bool row_in_roi = y_from_top >= min_top_y && y_from_top < max_top_y;
+        const bool row_in_rim = y_from_top >= rim_min_top_y && y_from_top < rim_max_top_y;
         for (int x = 0; x < width; ++x) {
             const std::size_t offset = static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
             const unsigned char r = pixels[offset + 0u];
@@ -2250,6 +2534,7 @@ std::vector<unsigned char> BuildMaterialHeatmap(const std::vector<unsigned char>
             const unsigned char b = pixels[offset + 2u];
             const unsigned char luminance = static_cast<unsigned char>((static_cast<int>(r) + g + b) / 3);
             const bool in_roi = row_in_roi && x >= min_x && x < max_x;
+            const bool in_rim = row_in_rim && x >= rim_min_x && x < rim_max_x;
 
             unsigned char out_r = static_cast<unsigned char>(luminance / 4);
             unsigned char out_g = out_r;
@@ -2261,6 +2546,18 @@ std::vector<unsigned char> BuildMaterialHeatmap(const std::vector<unsigned char>
                     out_r = 40; out_g = 80; out_b = 220;
                 } else if (IsGreyFallbackPixel(r, g, b)) {
                     out_r = 255; out_g = 0; out_b = 255;
+                } else if (IsGrassLikePixel(r, g, b)) {
+                    out_r = 60; out_g = 220; out_b = 60;
+                } else {
+                    out_r = static_cast<unsigned char>(luminance / 2);
+                    out_g = out_r;
+                    out_b = out_r;
+                }
+            } else if (in_rim) {
+                if (IsStoneLikePixel(r, g, b)) {
+                    out_r = 150; out_g = 150; out_b = 170;
+                } else if (IsSoilLikePixel(r, g, b)) {
+                    out_r = 150; out_g = 90; out_b = 40;
                 } else {
                     out_r = static_cast<unsigned char>(luminance / 2);
                     out_g = out_r;
@@ -2285,6 +2582,21 @@ void WriteMaterialVisualAnalysis(
 {
     constexpr std::uint64_t kMinSandPixels = 2000;
     constexpr double kMinSandRatio = 0.02;
+    // Grass calibration (composite beach+highland vantage, seed 424242, noon):
+    // measured grass_ratio 0.50 across repeated runs; the gate takes half the
+    // observed ratio as the floor.
+    constexpr std::uint64_t kMinGrassPixels = 2000;
+    constexpr double kMinGrassRatio = 0.25;
+    // Stone calibration (rim sub-ROI, seed 424242, noon): measured
+    // stone_ratio 0.132-0.134 across repeated runs; the gate takes half the
+    // observed ratio as the floor.
+    constexpr std::uint64_t kMinStonePixels = 5000;
+    constexpr double kMinStoneRatio = 0.066;
+    // Soil calibration (rim sub-ROI, seed 424242, noon): measured soil_ratio
+    // 0.0107-0.0109 across repeated runs; the gate takes half the observed
+    // ratio as the floor.
+    constexpr std::uint64_t kMinSoilPixels = 800;
+    constexpr double kMinSoilRatio = 0.0054;
     constexpr double kMaxGreyFallbackRatio = 0.125;
     const std::uint64_t max_grey_fallback_pixels = static_cast<std::uint64_t>(
         static_cast<double>(pixel_stats.roi_pixels) * kMaxGreyFallbackRatio);
@@ -2295,6 +2607,12 @@ void WriteMaterialVisualAnalysis(
         render_pass.terrain_indices_drawn > 0 &&
         pixel_stats.sand_pixels >= kMinSandPixels &&
         pixel_stats.sand_ratio >= kMinSandRatio &&
+        pixel_stats.grass_pixels >= kMinGrassPixels &&
+        pixel_stats.grass_ratio >= kMinGrassRatio &&
+        pixel_stats.stone_pixels >= kMinStonePixels &&
+        pixel_stats.stone_ratio >= kMinStoneRatio &&
+        pixel_stats.soil_pixels >= kMinSoilPixels &&
+        pixel_stats.soil_ratio >= kMinSoilRatio &&
         pixel_stats.grey_fallback_pixels <= max_grey_fallback_pixels &&
         gl_debug.errors == 0;
 
@@ -2309,6 +2627,7 @@ void WriteMaterialVisualAnalysis(
             {"width", pixel_stats.width},
             {"height", pixel_stats.height},
             {"roi_pixels", pixel_stats.roi_pixels},
+            {"rim_roi_pixels", pixel_stats.rim_roi_pixels},
             {"water_like_pixels", pixel_stats.water_like_pixels},
             {"other_pixels", pixel_stats.other_pixels}
         }},
@@ -2325,6 +2644,70 @@ void WriteMaterialVisualAnalysis(
                 {"thresholds", {
                     {"min_classified_pixels", kMinSandPixels},
                     {"min_classified_ratio", kMinSandRatio},
+                    {"max_grey_fallback_pixels", max_grey_fallback_pixels},
+                    {"max_grey_fallback_ratio", kMaxGreyFallbackRatio}
+                }}
+            },
+            {
+                {"material_id", 3},
+                {"name", "Grass"},
+                {"pixels", {
+                    {"classified_pixels", pixel_stats.grass_pixels},
+                    {"classified_ratio", pixel_stats.grass_ratio},
+                    {"grey_fallback_pixels", pixel_stats.grey_fallback_pixels},
+                    {"grey_fallback_ratio", pixel_stats.grey_fallback_ratio}
+                }},
+                {"thresholds", {
+                    {"min_classified_pixels", kMinGrassPixels},
+                    {"min_classified_ratio", kMinGrassRatio},
+                    {"max_grey_fallback_pixels", max_grey_fallback_pixels},
+                    {"max_grey_fallback_ratio", kMaxGreyFallbackRatio}
+                }}
+            },
+            {
+                {"material_id", 1},
+                {"name", "Stone"},
+                // Presence-in-expected-ROI gate: legitimate dim stone shares
+                // the grey-fallback colour shape (neutral, channel spread
+                // <= 12), so stone is counted only inside the rim sub-ROI
+                // (top quarter of the frame, where high altitude excludes
+                // sand and the cliff rims are the only neutral warm-ordered
+                // surfaces), while grey-fallback enforcement stays scoped to
+                // the main beach/flank ROI reported below.
+                {"roi_scope", "rim_band"},
+                {"grey_fallback_scope", "main_roi"},
+                {"pixels", {
+                    {"classified_pixels", pixel_stats.stone_pixels},
+                    {"classified_ratio", pixel_stats.stone_ratio},
+                    {"grey_fallback_pixels", pixel_stats.grey_fallback_pixels},
+                    {"grey_fallback_ratio", pixel_stats.grey_fallback_ratio}
+                }},
+                {"thresholds", {
+                    {"min_classified_pixels", kMinStonePixels},
+                    {"min_classified_ratio", kMinStoneRatio},
+                    {"max_grey_fallback_pixels", max_grey_fallback_pixels},
+                    {"max_grey_fallback_ratio", kMaxGreyFallbackRatio}
+                }}
+            },
+            {
+                {"material_id", 2},
+                {"name", "Soil"},
+                // Soil's depth 1-5 band surfaces along the same cliff rims
+                // as stone (5x the main-ROI pixel density), so it is counted
+                // in the rim sub-ROI as well. Unlike stone, its warm hue
+                // (r-b >= 13) keeps it colour-separable from the grey
+                // fallback, whose enforcement remains scoped to the main ROI.
+                {"roi_scope", "rim_band"},
+                {"grey_fallback_scope", "main_roi"},
+                {"pixels", {
+                    {"classified_pixels", pixel_stats.soil_pixels},
+                    {"classified_ratio", pixel_stats.soil_ratio},
+                    {"grey_fallback_pixels", pixel_stats.grey_fallback_pixels},
+                    {"grey_fallback_ratio", pixel_stats.grey_fallback_ratio}
+                }},
+                {"thresholds", {
+                    {"min_classified_pixels", kMinSoilPixels},
+                    {"min_classified_ratio", kMinSoilRatio},
                     {"max_grey_fallback_pixels", max_grey_fallback_pixels},
                     {"max_grey_fallback_ratio", kMaxGreyFallbackRatio}
                 }}

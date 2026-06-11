@@ -162,11 +162,27 @@ struct MaterialPixelStats {
     int height = 0;
     std::uint64_t roi_pixels = 0;
     std::uint64_t sand_pixels = 0;
+    std::uint64_t grass_pixels = 0;
     std::uint64_t grey_fallback_pixels = 0;
     std::uint64_t water_like_pixels = 0;
     std::uint64_t other_pixels = 0;
     double sand_ratio = 0.0;
+    double grass_ratio = 0.0;
     double grey_fallback_ratio = 0.0;
+    // Stone presence is measured in a separate rim sub-ROI (top quarter of
+    // the frame, same horizontal band): the high-altitude cliff rims are the
+    // only natural stone exposure, and legitimate dim stone is colour-shaped
+    // like the grey fallback, so it is counted there instead of competing
+    // with the fallback detector inside the main beach/flank ROI.
+    std::uint64_t rim_roi_pixels = 0;
+    std::uint64_t stone_pixels = 0;
+    double stone_ratio = 0.0;
+    // Soil is also measured in the rim sub-ROI: the depth 1-5 band surfaces
+    // along the same cliff rims (5x the pixel density of the main ROI). Its
+    // warm hue (r-b >= 13) keeps it separable from both the grey fallback and
+    // the stone bucket.
+    std::uint64_t soil_pixels = 0;
+    double soil_ratio = 0.0;
 };
 
 // T-I2-16a: temporal caustics-animation probe for the water visual scenario.

@@ -317,12 +317,36 @@ function Test-MaterialVisual {
         throw "Material visual analysis has no Sand ROI entry; sand vs grey fallback is the primary gate target"
     }
 
+    $grassEntries = @($analysis.materials | Where-Object { $_.name -eq "Grass" })
+    if ($grassEntries.Count -lt 1) {
+        throw "Material visual analysis has no Grass ROI entry; the composite vantage must show grass above the beach band"
+    }
+
+    $stoneEntries = @($analysis.materials | Where-Object { $_.name -eq "Stone" })
+    if ($stoneEntries.Count -lt 1) {
+        throw "Material visual analysis has no Stone ROI entry; the rim sub-ROI must show the cliff-rim stone band"
+    }
+    if ($stoneEntries[0].roi_scope -ne "rim_band") {
+        throw "Stone ROI entry must be scoped to the rim sub-ROI (legitimate stone is grey-fallback-shaped; see classifier docs)"
+    }
+
+    $soilEntries = @($analysis.materials | Where-Object { $_.name -eq "Soil" })
+    if ($soilEntries.Count -lt 1) {
+        throw "Material visual analysis has no Soil ROI entry; the rim sub-ROI must show the depth 1-5 soil band"
+    }
+    if ($soilEntries[0].roi_scope -ne "rim_band") {
+        throw "Soil ROI entry must be scoped to the rim sub-ROI (rim interpolation-error exposure; see classifier docs)"
+    }
+
     foreach ($entry in $analysis.materials) {
         if ($null -eq $entry.pixels -or $null -eq $entry.thresholds) {
             throw "Material ROI entry '$($entry.name)' is missing pixels or thresholds"
         }
         if ([int64]$entry.pixels.classified_pixels -lt [int64]$entry.thresholds.min_classified_pixels) {
             throw "Material ROI '$($entry.name)' has too few classified pixels: $($entry.pixels.classified_pixels) < $($entry.thresholds.min_classified_pixels)"
+        }
+        if ([double]$entry.pixels.classified_ratio -lt [double]$entry.thresholds.min_classified_ratio) {
+            throw "Material ROI '$($entry.name)' has too low a classified ratio: $($entry.pixels.classified_ratio) < $($entry.thresholds.min_classified_ratio)"
         }
         if ([int64]$entry.pixels.grey_fallback_pixels -gt [int64]$entry.thresholds.max_grey_fallback_pixels) {
             throw "Material ROI '$($entry.name)' shows grey fallback pixels above threshold: $($entry.pixels.grey_fallback_pixels) > $($entry.thresholds.max_grey_fallback_pixels)"
