@@ -2376,6 +2376,33 @@ function Test-PerfRegression {
         throw "perf baseline captured on different machine ('$($baseline.machine_id)' vs '$($env:COMPUTERNAME)') - recapture required via .forge/scripts/capture-perf-baseline.ps1"
     }
 
+    # T-I3-22: GPU provenance check. Perf timings are GPU/driver-sensitive, so a
+    # baseline recorded on a different adapter/driver may explain (or mask) a
+    # regression. WARN — never fail — and stay silent when the baseline predates
+    # the provenance block (old baselines have no $baseline.gpu).
+    if ($null -ne $baseline.gpu) {
+        $currentGpu = $null
+        try {
+            $currentGpu = Get-CimInstance -ClassName Win32_VideoController -ErrorAction Stop |
+                Where-Object { $_.Name -and $_.AdapterRAM -ne $null } |
+                Sort-Object -Property AdapterRAM -Descending |
+                Select-Object -First 1
+        } catch {
+            $currentGpu = $null
+        }
+        if ($null -ne $currentGpu) {
+            $curRenderer = [string]$currentGpu.Name
+            $curDriver = if ($currentGpu.DriverVersion) { [string]$currentGpu.DriverVersion } else { "unknown" }
+            $baseRenderer = if ($baseline.gpu.gpu_renderer) { [string]$baseline.gpu.gpu_renderer } else { "unknown" }
+            $baseDriver = if ($baseline.gpu.driver_version) { [string]$baseline.gpu.driver_version } else { "unknown" }
+            if ($baseRenderer -ne "unknown" -and $curRenderer -ne "" -and $baseRenderer -ne $curRenderer) {
+                Write-Host ("perf-regression warning: GPU differs from baseline ('{0}' now vs '{1}' recorded); perf timings are GPU-sensitive, consider recapturing the baseline" -f $curRenderer, $baseRenderer)
+            } elseif ($baseDriver -ne "unknown" -and $curDriver -ne "unknown" -and $baseDriver -ne $curDriver) {
+                Write-Host ("perf-regression warning: GPU driver differs from baseline ('{0}' now vs '{1}' recorded); perf timings are driver-sensitive, consider recapturing the baseline" -f $curDriver, $baseDriver)
+            }
+        }
+    }
+
     $exe = "build/$perfBuildPreset/bin/initial_world_loading_perf_test.exe"
     if (-not (Test-Path $exe)) {
         throw "Missing perf test executable. Run -Mode Build first: $exe"

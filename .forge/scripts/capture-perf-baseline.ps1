@@ -55,6 +55,59 @@ $ScenarioNames = @(
 )
 $MetricNames = @("p50_ms", "p95_ms", "p99_ms", "max_ms", "mem_high_water_mb")
 
+# T-I3-22: GPU provenance. Perf timings are GPU/driver-sensitive, so the
+# baseline records which adapter produced them. The headless perf test reports
+# gpu="unknown" (no GL context), so we query the OS video controller directly.
+# Best-effort: on failure or a non-Windows host the fields fall back to
+# "unknown" and the gate treats them as absent (warn, never fail).
+function Get-GpuProvenance {
+    $provenance = [ordered]@{
+        gpu_vendor = "unknown"
+        gpu_renderer = "unknown"
+        driver_version = "unknown"
+        source = "unavailable"
+    }
+    try {
+        $controller = $null
+        try {
+            $controller = Get-CimInstance -ClassName Win32_VideoController -ErrorAction Stop |
+                Where-Object { $_.Name -and $_.AdapterRAM -ne $null } |
+                Sort-Object -Property AdapterRAM -Descending |
+                Select-Object -First 1
+        } catch {
+            $controller = $null
+        }
+        if ($null -ne $controller) {
+            $provenance.gpu_renderer = [string]$controller.Name
+            if ($controller.AdapterCompatibility) {
+                $provenance.gpu_vendor = [string]$controller.AdapterCompatibility
+            }
+            if ($controller.DriverVersion) {
+                $provenance.driver_version = [string]$controller.DriverVersion
+            }
+            $provenance.source = "win32_videocontroller"
+            return $provenance
+        }
+        # Fallback to wmic when CIM is unavailable.
+        $wmic = & wmic path win32_VideoController get name,driverversion /format:csv 2>$null
+        if ($LASTEXITCODE -eq 0 -and $wmic) {
+            $row = @($wmic | Where-Object { $_ -match "," -and $_ -notmatch "^Node,|DriverVersion" }) |
+                Select-Object -First 1
+            if ($row) {
+                $parts = $row.Split(",")
+                if ($parts.Count -ge 3) {
+                    $provenance.driver_version = $parts[1].Trim()
+                    $provenance.gpu_renderer = $parts[2].Trim()
+                    $provenance.source = "wmic"
+                }
+            }
+        }
+    } catch {
+        # leave defaults
+    }
+    return $provenance
+}
+
 function Get-Median {
     param([double[]]$Values)
     $sorted = @($Values | Sort-Object)
@@ -129,11 +182,17 @@ foreach ($scenario in $ScenarioNames) {
     $scenarioBlock[$scenario] = $entry
 }
 
+$gpuProvenance = Get-GpuProvenance
+
 $baseline = [ordered]@{
     schema = "luminumbra.perf_baseline.v1"
     captured_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
     machine_id = $env:COMPUTERNAME
     runs_aggregated = $Runs
+    # T-I3-22 (additive, schema-compatible): GPU/driver provenance. Old
+    # baselines without this block are still valid; Test-PerfRegression warns
+    # (never fails) when the recording machine's GPU/driver differs.
+    gpu = $gpuProvenance
     status = $(if ($Provisional) { "provisional" } else { "blessed" })
     scenarios = $scenarioBlock
 }
