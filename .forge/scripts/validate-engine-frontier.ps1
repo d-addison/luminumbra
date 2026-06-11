@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -2822,6 +2822,87 @@ function Test-FarLodHorizon {
     }
 }
 
+function Test-HeadlessServerTick {
+    # T-I3-13: headless server boot + fixed 30 Hz tick determinism gate.
+    # Hygiene first (script-side mirror of the ServerHeadlessHygiene ctest so
+    # the gate is self-contained): nothing under src/luminumbra_server may
+    # include a client-side library. "glm" stays allowed, hence gl/gl +
+    # opengl patterns instead of bare "gl".
+    $serverRoot = "src/luminumbra_server"
+    if (-not (Test-Path $serverRoot)) {
+        throw "headless server gate: missing $serverRoot"
+    }
+    $forbiddenIncludeTokens = @("glfw", "glad", "imgui", "miniaudio", "rmlui", "rml/", "soil2", "opengl", "gl/gl", "gles", "luminumbra_client")
+    $serverSources = @(Get-ChildItem -Path $serverRoot -Recurse -File | Where-Object { $_.Extension -in @(".h", ".hpp", ".cpp", ".inl", ".c") })
+    if ($serverSources.Count -lt 1) {
+        throw "headless server gate: no sources found under $serverRoot"
+    }
+    foreach ($sourceFile in $serverSources) {
+        $includeMatches = Select-String -Path $sourceFile.FullName -Pattern '^\s*#\s*include\s*[<"]([^">]+)[">]'
+        foreach ($includeMatch in $includeMatches) {
+            $includeTarget = $includeMatch.Matches[0].Groups[1].Value.ToLowerInvariant()
+            foreach ($token in $forbiddenIncludeTokens) {
+                if ($includeTarget.Contains($token)) {
+                    throw "headless server hygiene violation: $($sourceFile.FullName):$($includeMatch.LineNumber) includes forbidden client dependency '$($includeMatch.Matches[0].Groups[1].Value)'"
+                }
+            }
+        }
+    }
+    Write-Host ("headless server hygiene: {0} server sources clean of client-library includes" -f $serverSources.Count)
+
+    $serverExe = "build/$BuildPreset/bin/luminumbra_server_app.exe"
+    if (-not (Test-Path $serverExe)) {
+        throw "headless server gate not yet built - missing $serverExe (cmake --build build/$BuildPreset)"
+    }
+
+    $artifactPath = "build/$BuildPreset/test-artifacts/server/server-tick.json"
+    if (Test-Path $artifactPath) {
+        Remove-Item $artifactPath
+    }
+
+    & $serverExe --smoke --ticks 90 --artifact $artifactPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "headless server smoke exited with code $LASTEXITCODE"
+    }
+
+    $analysis = Read-JsonArtifact $artifactPath "luminumbra.server_tick.v1"
+    Assert-ArtifactPassed $analysis "HeadlessServerTick"
+    if (-not $analysis.deterministic) {
+        throw "headless server smoke reported a non-deterministic double-run"
+    }
+    if ([string]::IsNullOrEmpty($analysis.world_hash) -or [string]::IsNullOrEmpty($analysis.world_hash_replay)) {
+        throw "headless server smoke produced an empty world hash"
+    }
+    if ($analysis.world_hash -ne $analysis.world_hash_replay) {
+        throw "headless server world_hash mismatch: $($analysis.world_hash) != $($analysis.world_hash_replay)"
+    }
+    if ($analysis.tick_rate_hz -ne 30.0) {
+        throw "headless server must tick at the canonical 30 Hz (got $($analysis.tick_rate_hz))"
+    }
+    if ($analysis.ticks_requested -lt 90) {
+        throw "headless server smoke must run at least 90 ticks per determinism run (got $($analysis.ticks_requested))"
+    }
+    if (@($analysis.runs).Count -ne 2) {
+        throw "headless server smoke must contain exactly two determinism runs (got $(@($analysis.runs).Count))"
+    }
+    foreach ($run in $analysis.runs) {
+        if (-not $run.ok) {
+            throw "headless server determinism run reported failure"
+        }
+        if ($run.ticks_executed -ne $analysis.ticks_requested) {
+            throw "headless server run completed $($run.ticks_executed)/$($analysis.ticks_requested) ticks"
+        }
+        if ($run.frames_executed -ne $run.ticks_executed) {
+            throw "headless server fixed loop must execute exactly one tick per frame ($($run.frames_executed) frames for $($run.ticks_executed) ticks)"
+        }
+        if ($run.chunks_streamed -lt 1) {
+            throw "headless server streamed no chunks around the spawn anchor"
+        }
+    }
+    Write-Host ("headless server tick gate passed: world_hash={0} == world_hash_replay, {1} ticks x 2 runs, {2} chunks streamed per run" -f `
+        $analysis.world_hash, $analysis.ticks_requested, $analysis.runs[0].chunks_streamed)
+}
+
 switch ($Mode) {
     "CodexOnly" { Test-CodexOnly }
     "Panels" { Test-Panels }
@@ -2857,6 +2938,7 @@ switch ($Mode) {
     "TimeOfDaySweep" { Test-TimeOfDaySweep }
     "PlayerView" { Test-PlayerView }
     "FarLodHorizon" { Test-FarLodHorizon }
+    "HeadlessServerTick" { Test-HeadlessServerTick }
     "All" {
         Test-CodexOnly
         Test-Files

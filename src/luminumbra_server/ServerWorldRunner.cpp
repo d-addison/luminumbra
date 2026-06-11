@@ -1,0 +1,192 @@
+#include "ServerWorldRunner.h"
+
+#include <chrono>
+#include <utility>
+
+#include "luminumbra_common/core/Log.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
+#include "luminumbra_common/systems/PhysicsSystem.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/world/WorldStreamingState.h"
+
+namespace Luminumbra::Server {
+
+ServerWorldRunner::ServerWorldRunner(ServerWorldRunnerConfig config)
+    : m_config(std::move(config)) {}
+
+ServerWorldRunner::~ServerWorldRunner() {
+    Shutdown();
+}
+
+bool ServerWorldRunner::Boot() {
+    if (m_booted) {
+        return true;
+    }
+
+    m_jobSystem.startup();
+
+    m_session = std::make_unique<world::GameSession>();
+    m_session->SetJobSystem(&m_jobSystem);
+    m_session->SetRootPath(m_config.root_path);
+    // Headless host: NO SetRequiredClientAssets call (T-I3-6 asset-manifest
+    // split - simulation-only validation) and the GPU SDF callback is never
+    // registered (SetGPUSDFCallback is client/RenderPipeline territory), so
+    // every voxel field is generated on the CPU path.
+
+    bool world_ready = false;
+    if (!m_config.world_id.empty()) {
+        world_ready = m_session->LoadWorld(m_config.world_id);
+    } else {
+        world_ready = m_session->CreateWorld(m_config.world_name, m_config.seed, m_config.preset);
+    }
+    if (!world_ready) {
+        LUMINUMBRA_CORE_ERROR("ServerWorldRunner: world boot failed (preset='{}', world_id='{}')",
+            m_config.preset, m_config.world_id);
+        m_session.reset();
+        m_jobSystem.shutdown();
+        return false;
+    }
+
+    // Contract: LoadWorldState BEFORE generation. Saved chunks are adopted
+    // into the streaming map first, so the spawn-anchor generation below only
+    // fills gaps and can never clobber authoritative saved voxel data. A
+    // fresh world is a clean miss here.
+    m_session->LoadWorldState();
+
+    auto* world_system = m_session->GetWorldSystem();
+    auto* physics_system = m_session->GetPhysicsSystem();
+    if (!world_system || !physics_system) {
+        LUMINUMBRA_CORE_ERROR("ServerWorldRunner: world systems missing after boot");
+        m_session.reset();
+        m_jobSystem.shutdown();
+        return false;
+    }
+
+    // Spawn-anchor streaming: synchronous surface horizon with collision
+    // ready so the physics system can query terrain from tick 1. Meshing
+    // stays ON (StreamingProfile meshing-skip is deferred to iteration 4).
+    const Vec3 spawn_anchor = m_session->GetMetadata().spawnPoint;
+    const bool horizon_ready = world_system->EnsureSurfaceReadyNear(
+        spawn_anchor, physics_system, m_config.surface_radius, m_config.collision_radius);
+    if (!horizon_ready) {
+        LUMINUMBRA_CORE_ERROR("ServerWorldRunner: spawn-anchor surface horizon failed to become ready");
+        m_session.reset();
+        m_jobSystem.shutdown();
+        return false;
+    }
+
+    LUMINUMBRA_CORE_INFO(
+        "ServerWorldRunner: booted world '{}' (id {}, preset {}, seed {}) - spawn anchor ({}, {}, {}), {} chunks loaded from save",
+        m_session->GetMetadata().name, m_session->GetMetadata().worldId,
+        m_config.preset, m_session->GetMetadata().seed,
+        spawn_anchor.x, spawn_anchor.y, spawn_anchor.z,
+        m_session->GetLastLoadedChunkCount());
+
+    m_booted = true;
+    return true;
+}
+
+ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
+    ServerTickReport report;
+    if (!m_booted || !m_session) {
+        return report;
+    }
+
+    auto* world_system = m_session->GetWorldSystem();
+    auto* physics_system = m_session->GetPhysicsSystem();
+    const Vec3 spawn_anchor = m_session->GetMetadata().spawnPoint;
+    const double fixed_dt = m_session->GetSimulationClock().fixed_dt();
+
+    const auto wall_start = std::chrono::steady_clock::now();
+    while (report.ticks_executed < tick_count) {
+        // One frame == one fixed tick: feeding the clock exactly fixed_dt
+        // keeps the frame/tick mapping 1:1 and removes wall-clock timing from
+        // the simulation entirely (determinism discipline).
+        physics_system->update(static_cast<float>(fixed_dt));
+        report.ticks_executed += m_session->TickSimulation(fixed_dt);
+        report.frames_executed += 1;
+
+        // Spawn-anchor streaming, then quiesce in-flight generation/meshing
+        // so every scheduler decision next frame observes the identical
+        // settled state in both determinism runs.
+        world_system->update(m_session->GetRegistry(), spawn_anchor, physics_system);
+        world_system->wait_for_streaming_jobs();
+
+        if (m_config.autosave_interval_ticks > 0 &&
+            report.ticks_executed > 0 &&
+            (report.ticks_executed % m_config.autosave_interval_ticks) == 0) {
+            world::WorldStateSaveReport save_report;
+            if (m_session->SaveWorldState(&save_report)) {
+                report.autosave_passes += 1;
+                if (save_report.saved && save_report.chunks_dirty > 0) {
+                    report.autosave_writes += 1;
+                }
+            }
+        }
+    }
+    const auto wall_end = std::chrono::steady_clock::now();
+
+    report.simulated_seconds = static_cast<double>(report.ticks_executed) * fixed_dt;
+    report.wall_seconds = std::chrono::duration<double>(wall_end - wall_start).count();
+    return report;
+}
+
+std::string ServerWorldRunner::ComputeWorldHash() {
+    if (!m_booted || !m_session || !m_session->GetWorldSystem()) {
+        return {};
+    }
+
+    auto* world_system = m_session->GetWorldSystem();
+    world_system->wait_for_streaming_jobs();
+
+    WorldStreamingState state;
+    for (const auto& chunk : world_system->snapshot_streamed_chunks()) {
+        state.insert_chunk(chunk);
+    }
+
+    Persistence::WorldSaveService service;
+    return service.world_hash(state);
+}
+
+std::size_t ServerWorldRunner::StreamedChunkCount() {
+    if (!m_session || !m_session->GetWorldSystem()) {
+        return 0;
+    }
+    return m_session->GetWorldSystem()->snapshot_streamed_chunks().size();
+}
+
+std::size_t ServerWorldRunner::LoadedChunkCount() const {
+    return m_session ? m_session->GetLastLoadedChunkCount() : 0;
+}
+
+std::uint64_t ServerWorldRunner::TickCount() const {
+    return m_session ? m_session->GetSimulationTickCount() : 0;
+}
+
+void ServerWorldRunner::Shutdown(world::WorldStateSaveReport* shutdown_save_report) {
+    if (m_shutdown) {
+        return;
+    }
+    m_shutdown = true;
+
+    if (m_booted && m_session) {
+        // Save on shutdown via WorldSaveService (incremental contract: a
+        // never-edited world writes nothing and stays on the fresh path).
+        world::WorldStateSaveReport save_report;
+        m_session->SaveWorldState(&save_report);
+        if (shutdown_save_report) {
+            *shutdown_save_report = save_report;
+        }
+        LUMINUMBRA_CORE_INFO(
+            "ServerWorldRunner: shutdown save - {} chunks total, {} dirty, saved={}",
+            save_report.chunks_total, save_report.chunks_dirty, save_report.saved);
+    }
+
+    m_session.reset();
+    if (m_booted) {
+        m_jobSystem.shutdown();
+    }
+    m_booted = false;
+}
+
+} // namespace Luminumbra::Server
