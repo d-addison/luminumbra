@@ -333,7 +333,7 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         m_skybox_pass->init_geometry();
         load_material_texture_lut();
         init_terrain_textures();
-        init_skinned_textures();
+        init_skinned_texture_array();
         init_material_lut();
         init_texture_residency();
         m_water_pass->init_water_fallback_textures();
@@ -1876,49 +1876,36 @@ void RenderPipeline::init_terrain_textures() {
                          layer_count, layer_count, res, res);
 }
 
-void RenderPipeline::init_skinned_textures() {
-    // T-I4-8: UV-mapped creature texture array. Layer 0 grovestrider albedo,
-    // layer 1 grovestrider normal. Loaded from the committed 256x256 .ltex.
+void RenderPipeline::init_skinned_texture_array() {
+    // T-I4-8 / T-I4-DR-split-lint: UV-mapped skinned-mesh texture array. Two
+    // layers (0 = albedo, 1 = tangent-space normal). The engine allocates the
+    // array with a flat fallback so a skinned mesh is always drawable; the
+    // actual texture set is supplied later by the caller via
+    // load_skinned_texture_set(), which reads paths from GAME data (the
+    // scenario harness pulls them from the creature archetype JSON). No
+    // creature/asset path is named in engine source.
     const int res = kSkinnedTextureResolution;
-    struct SkinnedAsset { const char* path; bool is_normal; };
-    const std::array<SkinnedAsset, 2> assets = {{
-        {"data/textures/creatures/grovestrider/grovestrider_albedo_256.ltex", false},
-        {"data/textures/creatures/grovestrider/grovestrider_normal_256.ltex", true},
-    }};
-    const int layer_count = static_cast<int>(assets.size());
+    constexpr int layer_count = 2;
 
     glGenTextures(1, &m_skinnedTextureArray);
-    label_gl_object(GL_TEXTURE, m_skinnedTextureArray, "creature.texture_array");
+    label_gl_object(GL_TEXTURE, m_skinnedTextureArray, "skinned.texture_array");
     glBindTexture(GL_TEXTURE_2D_ARRAY, m_skinnedTextureArray);
     glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_SRGB8_ALPHA8, res, res, layer_count, 0,
                  GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
 
-    bool albedo_ok = false;
-    bool normal_ok = false;
+    // Flat fallback: layer 0 mid-grey albedo, layer 1 up-normal.
     for (int i = 0; i < layer_count; ++i) {
-        LtexCpuImage img;
-        if (load_ltex_cpu_image(m_root_path / assets[i].path, img) &&
-            img.width == static_cast<uint32_t>(res) &&
-            img.height == static_cast<uint32_t>(res) && img.channels == 4u) {
-            glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, i,
-                            static_cast<GLsizei>(img.width), static_cast<GLsizei>(img.height), 1,
-                            GL_RGBA, GL_UNSIGNED_BYTE, img.bytes.data());
-            if (assets[i].is_normal) normal_ok = true; else albedo_ok = true;
-        } else {
-            // Flat fallback so the layer is still valid (mid-grey albedo /
-            // up-normal); the skinned mesh stays visible, just untextured.
-            std::vector<unsigned char> fill(static_cast<size_t>(res) * res * 4u);
-            for (size_t p = 0; p < static_cast<size_t>(res) * res; ++p) {
-                if (assets[i].is_normal) {
-                    fill[p*4+0] = 128; fill[p*4+1] = 128; fill[p*4+2] = 255; fill[p*4+3] = 255;
-                } else {
-                    fill[p*4+0] = 120; fill[p*4+1] = 150; fill[p*4+2] = 90; fill[p*4+3] = 255;
-                }
+        const bool is_normal = (i == 1);
+        std::vector<unsigned char> fill(static_cast<size_t>(res) * res * 4u);
+        for (size_t p = 0; p < static_cast<size_t>(res) * res; ++p) {
+            if (is_normal) {
+                fill[p*4+0] = 128; fill[p*4+1] = 128; fill[p*4+2] = 255; fill[p*4+3] = 255;
+            } else {
+                fill[p*4+0] = 120; fill[p*4+1] = 150; fill[p*4+2] = 90; fill[p*4+3] = 255;
             }
-            glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, i, res, res, 1,
-                            GL_RGBA, GL_UNSIGNED_BYTE, fill.data());
-            LUMINUMBRA_CORE_WARN("Creature texture: failed to load '{}', using flat fallback.", assets[i].path);
         }
+        glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, i, res, res, 1,
+                        GL_RGBA, GL_UNSIGNED_BYTE, fill.data());
     }
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -1928,10 +1915,54 @@ void RenderPipeline::init_skinned_textures() {
     glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
     glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
 
-    m_grovestriderAlbedoLayer = albedo_ok ? 0 : 0; // layer 0 regardless (fallback valid)
-    m_grovestriderNormalLayer = 1;                  // layer 1 (fallback flat-normal valid)
-    (void)normal_ok;
-    LUMINUMBRA_CORE_INFO("Creature texture array loaded ({} layers, {}x{}).", layer_count, res, res);
+    // Layers are valid (flat fallback) even before a set is loaded.
+    m_skinnedAlbedoLayer = 0;
+    m_skinnedNormalLayer = 1;
+    LUMINUMBRA_CORE_INFO("Skinned texture array allocated ({} layers, {}x{}, flat fallback).",
+                         layer_count, res, res);
+}
+
+bool RenderPipeline::load_skinned_texture_set(const std::filesystem::path& albedo_path,
+                                              const std::filesystem::path& normal_path,
+                                              int& albedo_layer_out, int& normal_layer_out) {
+    // Generic, data-driven loader (T-I4-DR-split-lint). Uploads the supplied
+    // albedo into layer 0 and normal into layer 1; a missing/mismatched file
+    // leaves that layer's existing fallback in place. Callers (scenario harness)
+    // pass paths read from game data, so no content name lives in engine source.
+    if (m_skinnedTextureArray == 0) {
+        init_skinned_texture_array();
+    }
+    const int res = kSkinnedTextureResolution;
+    glBindTexture(GL_TEXTURE_2D_ARRAY, m_skinnedTextureArray);
+
+    struct SetLayer { const std::filesystem::path& path; int layer; };
+    const std::array<SetLayer, 2> set = {{ {albedo_path, 0}, {normal_path, 1} }};
+    bool albedo_ok = false;
+    for (const auto& s : set) {
+        if (s.path.empty()) continue;
+        LtexCpuImage img;
+        if (load_ltex_cpu_image(s.path, img) &&
+            img.width == static_cast<uint32_t>(res) &&
+            img.height == static_cast<uint32_t>(res) && img.channels == 4u) {
+            glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, s.layer,
+                            static_cast<GLsizei>(img.width), static_cast<GLsizei>(img.height), 1,
+                            GL_RGBA, GL_UNSIGNED_BYTE, img.bytes.data());
+            if (s.layer == 0) albedo_ok = true;
+        } else {
+            LUMINUMBRA_CORE_WARN("Skinned texture set: failed to load '{}', keeping flat fallback.",
+                                 s.path.string());
+        }
+    }
+    glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+
+    m_skinnedAlbedoLayer = 0;
+    m_skinnedNormalLayer = 1;
+    albedo_layer_out = m_skinnedAlbedoLayer;
+    normal_layer_out = m_skinnedNormalLayer;
+    LUMINUMBRA_CORE_INFO("Skinned texture set loaded (albedo {}, {}x{}).",
+                         albedo_ok ? "textured" : "fallback", res, res);
+    return albedo_ok;
 }
 
 void RenderPipeline::load_material_texture_lut() {

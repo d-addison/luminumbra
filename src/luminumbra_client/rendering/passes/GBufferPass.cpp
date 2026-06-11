@@ -337,13 +337,13 @@ void GBufferPass::geometry_pass_skinned_meshes(RenderPipeline& pipeline,
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_terrainNormalArray);
     m_skinned_mesh_shader->setInt("u_terrainNormals", 2);
-    // T-I4-8: UV-mapped creature texture array on unit 3. Skinned creatures take
-    // the UV-sampled path (precedence over the terrain LUT triplanar path).
+    // T-I4-8: UV-mapped skinned-mesh texture array on unit 3. Skinned creatures
+    // take the UV-sampled path (precedence over the terrain LUT triplanar path).
     glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_skinnedTextureArray);
     m_skinned_mesh_shader->setInt("u_skinnedTextures", 3);
-    m_skinned_mesh_shader->setInt("u_skinnedAlbedoLayer", pipeline.m_skinnedTextureArray ? pipeline.m_grovestriderAlbedoLayer : -1);
-    m_skinned_mesh_shader->setInt("u_skinnedNormalLayer", pipeline.m_skinnedTextureArray ? pipeline.m_grovestriderNormalLayer : -1);
+    m_skinned_mesh_shader->setInt("u_skinnedAlbedoLayer", pipeline.m_skinnedTextureArray ? pipeline.m_skinnedAlbedoLayer : -1);
+    m_skinned_mesh_shader->setInt("u_skinnedNormalLayer", pipeline.m_skinnedTextureArray ? pipeline.m_skinnedNormalLayer : -1);
 
     for (auto entity : view) {
         auto const& transform = view.get<const Components::TransformComponent>(entity);
