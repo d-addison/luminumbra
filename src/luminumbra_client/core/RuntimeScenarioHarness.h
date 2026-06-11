@@ -25,6 +25,30 @@ std::string GetCommandLineOption(int argc, char* argv[], const std::string& flag
 int GetCommandLineIntOption(int argc, char* argv[], const std::string& flag, int fallback);
 uint64_t GetCommandLineUInt64Option(int argc, char* argv[], const std::string& flag, uint64_t fallback);
 
+// --- Window modes (T-I4-DR-window-modes) ---
+// The client renders into one of these top-level window arrangements. Headless
+// is a first-class mode (no GL context window is shown) that gates/servers use.
+// borderless is the interactive default (monitor work-area fullscreen window).
+enum class WindowMode {
+    Windowed = 0,    // resizable, decorated window at the requested resolution
+    Borderless,      // borderless window covering the monitor work-area (default)
+    Fullscreen,      // exclusive fullscreen at the monitor's native video mode
+    Headless,        // hidden window / offscreen (gates + server effectively use)
+};
+
+// CLI string -> WindowMode. Unknown/empty strings return the supplied fallback.
+WindowMode ParseWindowMode(const std::string& value, WindowMode fallback);
+const char* WindowModeName(WindowMode mode);
+
+// --- Capture-pin contract (T-I4-DR-window-modes, gate protection) ---
+// Every pixel-ROI gate depends on captures running at exactly this size. When a
+// scenario/capture run is active the harness PINS the framebuffer to this size
+// regardless of --window-mode / --resolution, and records the active window
+// mode + framebuffer size into each capture analysis artifact so the offline
+// analysis can hard-fail if a capture ever ran at a non-pinned size.
+inline constexpr int kCapturePinnedWidth = 1280;
+inline constexpr int kCapturePinnedHeight = 720;
+
 struct RuntimeScenarioConfig {
     std::string scenario;
     bool auto_create_world = false;
@@ -65,6 +89,15 @@ struct RuntimeScenarioConfig {
     std::string skinned_albedo_texture;
     std::string skinned_normal_texture;
 
+    // --- Window modes (T-I4-DR-window-modes) ---
+    // Requested top-level window arrangement (--window-mode) and windowed-mode
+    // resolution (--resolution WxH). These describe the INTERACTIVE window only;
+    // when a scenario/capture run is active the framebuffer is pinned to
+    // kCapturePinnedWidth x kCapturePinnedHeight regardless of these values.
+    WindowMode window_mode = WindowMode::Borderless;
+    int windowed_width = kCapturePinnedWidth;
+    int windowed_height = kCapturePinnedHeight;
+
     bool active() const { return !scenario.empty(); }
     bool auto_world_smoke() const { return scenario == "auto_world_smoke"; }
     bool lod_ground_smoke() const { return scenario == "lod_ground_smoke"; }
@@ -80,13 +113,25 @@ struct RuntimeScenarioConfig {
     bool farlod_horizon_smoke() const { return scenario == "farlod_horizon_smoke"; }
     bool skinned_mesh_visual_smoke() const { return scenario == "skinned_mesh_visual_smoke"; }
     bool creature_slice_smoke() const { return scenario == "creature_slice_smoke"; }
+    bool window_mode_stress_smoke() const { return scenario == "window_mode_stress_smoke"; }
     bool forced_crash() const { return scenario == "forced_crash"; }
+
+    // True for any scenario that captures pixel-ROI screenshots and therefore
+    // requires the framebuffer pinned to kCapturePinnedWidth/Height. The
+    // window-mode stress run toggles modes mid-run but still PINS the
+    // framebuffer for its capture phase, so it is included here.
+    bool requires_pinned_capture() const { return active(); }
 };
 
 RuntimeScenarioConfig ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& root_dir);
 
 std::string TimestampUtc();
 std::string TimestampForFile();
+
+// Capture-pin metadata block embedded in every capture analysis artifact
+// (T-I4-DR-window-modes). The offline gate asserts pinned == true and that
+// {capture_width, capture_height} == {kCapturePinnedWidth, kCapturePinnedHeight}.
+nlohmann::json CapturePinMetadata(WindowMode active_window_mode, int capture_width, int capture_height);
 
 nlohmann::json Vec3ToJson(const Luminumbra::Vec3& value);
 nlohmann::json IVec3ToJson(const Luminumbra::IVec3& value);
@@ -1000,5 +1045,47 @@ void WriteCreatureSliceAnalysis(
     const CreatureSliceScene& scene,
     const CreatureSliceCapture& before,
     const CreatureSliceCapture& after);
+
+// --- window_mode_stress_smoke (T-I4-DR-window-modes): resize-stress gate ---
+// A scripted run that exercises the render-target resize chain mid-run: it
+// drives RenderPipeline::on_resize through a sequence of framebuffer sizes
+// (simulating windowed->borderless->windowed plus several resolutions) and
+// records, per step, the resize-generation delta and the GL error count. After
+// the resize cycle the framebuffer is restored to the pinned capture size and a
+// Smoke-equivalent screenshot is captured. The gate asserts:
+//   - every step that changed the size reallocated targets (generation bumped),
+//   - zero GL errors across the whole cycle,
+//   - the final state is restored to the pinned 1280x720 targets, and
+//   - the pinned capture meets the visual-Smoke water/sky expectations
+//     (ScreenshotPixelStats, same predicates the auto-world smoke uses).
+struct WindowModeStressStep {
+    std::string label;     // e.g. "borderless_1920x1080"
+    int width = 0;
+    int height = 0;
+    bool size_changed = false;     // did this step change the framebuffer size?
+    std::uint64_t resize_generation_before = 0;
+    std::uint64_t resize_generation_after = 0;
+    std::uint64_t gl_errors_after = 0;
+    int targets_width_after = 0;   // RenderPipeline::screen_width() after
+    int targets_height_after = 0;
+};
+
+// The scripted resize sequence (label/width/height). The pinned capture size is
+// the final entry. Intermediate sizes intentionally stress non-pinned targets.
+std::vector<WindowModeStressStep> BuildWindowModeStressSequence();
+
+struct WindowModeStressCapture {
+    std::string file;
+    int width = 0;
+    int height = 0;
+    ScreenshotPixelStats pixels;
+};
+
+void WriteWindowModeStressAnalysis(
+    const std::filesystem::path& artifact_dir,
+    double duration_seconds,
+    WindowMode requested_window_mode,
+    const std::vector<WindowModeStressStep>& steps,
+    const WindowModeStressCapture& final_capture);
 
 } // namespace Luminumbra::Client::ScenarioHarness
