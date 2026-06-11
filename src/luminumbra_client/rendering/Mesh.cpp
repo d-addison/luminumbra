@@ -1,4 +1,5 @@
 #include "Mesh.h"
+#include "luminumbra_common/animation/SkinnedMeshFormat.h"
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -146,6 +147,65 @@ std::unique_ptr<Mesh> MeshLoader::Load(const std::string& path) {
     glBindVertexArray(0);
 
     LUMINUMBRA_CORE_INFO("Loaded mesh '{}' ({} verts, {} indices)", resolvedPath.string(), header.vertexCount, header.indexCount);
+    return mesh;
+}
+
+std::unique_ptr<Mesh> MeshLoader::LoadSkinned(const std::string& path) {
+    namespace anim = luminumbra::animation;
+
+    std::filesystem::path resolvedPath;
+    {
+        // Reuse the candidate resolution the v1 loader uses, then hand the
+        // resolved file to the shared LMS2 reader.
+        std::ifstream probe = OpenMeshFile(path, resolvedPath);
+        if (!probe) { LUMINUMBRA_CORE_ERROR("Failed to open skinned mesh file: {}", path); return nullptr; }
+    }
+
+    anim::SkinnedMeshAsset asset;
+    if (!anim::LoadSkinnedMeshAsset(resolvedPath.string(), asset)) {
+        LUMINUMBRA_CORE_ERROR("Invalid LMS2 skinned mesh file: {}", resolvedPath.string());
+        return nullptr;
+    }
+    if (asset.header.vertexCount == 0 || asset.header.indexCount == 0 || asset.header.jointCount == 0) {
+        LUMINUMBRA_CORE_ERROR("Skinned mesh file has no geometry or skeleton: {}", resolvedPath.string());
+        return nullptr;
+    }
+
+    auto mesh = std::make_unique<Mesh>();
+    mesh->indexCount = asset.header.indexCount;
+    mesh->jointCount = asset.header.jointCount;
+    mesh->boundingSphere = {
+        asset.header.boundingSphere[0],
+        asset.header.boundingSphere[1],
+        asset.header.boundingSphere[2],
+        asset.header.boundingSphere[3]};
+
+    glGenVertexArrays(1, &mesh->vao);
+    glGenBuffers(1, &mesh->vbo);
+    glGenBuffers(1, &mesh->ebo);
+
+    glBindVertexArray(mesh->vao);
+    glBindBuffer(GL_ARRAY_BUFFER, mesh->vbo);
+    glBufferData(GL_ARRAY_BUFFER, asset.vertices.size() * sizeof(anim::SkinnedVertexData), asset.vertices.data(), GL_STATIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh->ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, asset.indices.size() * sizeof(uint32_t), asset.indices.data(), GL_STATIC_DRAW);
+
+    const GLsizei stride = static_cast<GLsizei>(sizeof(anim::SkinnedVertexData));
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(anim::SkinnedVertexData, pos));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(anim::SkinnedVertexData, norm));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(anim::SkinnedVertexData, uv));
+    glEnableVertexAttribArray(3);
+    glVertexAttribIPointer(3, 4, GL_UNSIGNED_BYTE, stride, (void*)offsetof(anim::SkinnedVertexData, joints));
+    glEnableVertexAttribArray(4);
+    glVertexAttribPointer(4, 4, GL_UNSIGNED_BYTE, GL_TRUE, stride, (void*)offsetof(anim::SkinnedVertexData, weights));
+    glBindVertexArray(0);
+
+    LUMINUMBRA_CORE_INFO(
+        "Loaded skinned mesh '{}' ({} verts, {} indices, {} joints)",
+        resolvedPath.string(), asset.header.vertexCount, asset.header.indexCount, asset.header.jointCount);
     return mesh;
 }
 }

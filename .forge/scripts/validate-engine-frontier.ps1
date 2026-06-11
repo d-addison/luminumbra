@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "SkinnedMeshVisual", "EngineGameSplitLint", "CreatureSlice", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -515,6 +515,7 @@ function Test-ShaderInventory {
         "basic",
         "g_buffer",
         "instanced_mesh_gbuffer",
+        "skinned_mesh_gbuffer",
         "lighting_pass",
         "skybox",
         "shadow_map",
@@ -2925,6 +2926,241 @@ function Test-HeadlessServerTick {
         $analysis.world_hash, $analysis.ticks_requested, $analysis.runs[0].chunks_streamed)
 }
 
+function Test-SkinnedMeshVisual {
+    # T-I3-16: skinned G-Buffer stage gate. A procedurally generated rigged
+    # test mesh is spawned near spawn; two captures at different clip times
+    # must differ in the mesh ROI and the skinned draw stage must have run.
+    $exe = Get-ClientExe
+    $visualDir = "build/$BuildPreset/test-artifacts/runtime/skinned-mesh-visual"
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $visualDir
+    New-Item -ItemType Directory -Force -Path $visualDir | Out-Null
+
+    $runSeconds = [Math]::Max(20, $SmokeSeconds)
+    Invoke-Checked -FilePath $exe -ArgumentList @(
+        "--scenario", "skinned_mesh_visual_smoke",
+        "--auto-create-world",
+        "--auto-enter-world",
+        "--timed-run", "$runSeconds",
+        "--no-audio",
+        "--no-ui",
+        "--runtime-artifact-dir", $visualDir
+    ) -TimeoutSeconds ([Math]::Max(120, $runSeconds + 90))
+
+    $analysisPath = Join-Path $visualDir "skinned-mesh-visual-analysis.json"
+    if (-not (Test-Path $analysisPath)) {
+        throw "skinned mesh visual run did not produce $analysisPath (gate produced by task T-I3-16)"
+    }
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.skinned_mesh_visual_analysis.v1") {
+        throw "Unexpected skinned mesh visual analysis schema '$($analysis.schema)'"
+    }
+    if (-not $analysis.rig.spawned) {
+        throw "Skinned mesh visual scenario failed to spawn the rigged test mesh"
+    }
+    if ([int64]$analysis.gl_debug.errors -ne 0) {
+        throw "Skinned mesh visual run emitted GL debug errors: $($analysis.gl_debug.errors)"
+    }
+    foreach ($capture in @($analysis.capture_a, $analysis.capture_b)) {
+        if ([int64]$capture.skinned_draws -lt 1) {
+            throw "Skinned mesh visual capture '$($capture.file)' rendered no skinned draws"
+        }
+        Assert-PpmArtifact (Join-Path $visualDir $capture.file)
+    }
+    if ([double]$analysis.capture_b.animation_time_seconds -le [double]$analysis.capture_a.animation_time_seconds) {
+        throw "Skinned mesh visual captures do not advance the animation clock: $($analysis.capture_a.animation_time_seconds) -> $($analysis.capture_b.animation_time_seconds)"
+    }
+    if ([int64]$analysis.diff.changed_pixels -lt [int64]$analysis.thresholds.min_changed_pixels) {
+        throw "Skinned mesh ROI diff below threshold: $($analysis.diff.changed_pixels) < $($analysis.thresholds.min_changed_pixels) changed pixels"
+    }
+    if ([double]$analysis.diff.changed_ratio -lt [double]$analysis.thresholds.min_changed_ratio) {
+        throw "Skinned mesh ROI diff ratio below threshold: $($analysis.diff.changed_ratio) < $($analysis.thresholds.min_changed_ratio)"
+    }
+    if (-not $analysis.passed) {
+        throw "Skinned mesh visual analysis reported failure: $($analysis.failures -join ', ')"
+    }
+    Write-Host ("skinned mesh visual: draws a={0} b={1} anim_time a={2}s b={3}s changed_pixels={4} (ratio {5}) mesh_like a={6} b={7}" -f `
+        $analysis.capture_a.skinned_draws, $analysis.capture_b.skinned_draws, `
+        $analysis.capture_a.animation_time_seconds, $analysis.capture_b.animation_time_seconds, `
+        $analysis.diff.changed_pixels, $analysis.diff.changed_ratio, `
+        $analysis.diff.mesh_like_pixels_a, $analysis.diff.mesh_like_pixels_b)
+}
+
+function Test-EngineGameSplitLint {
+    # T-I3-17: engine/game decoupling lint. The engine (src/) must carry no
+    # Project Capture game nouns — content lives under data/ and worlds/.
+    # (a) path lint: no game noun in any path under src/;
+    # (b) content lint: no game noun in any engine source file.
+    # The aetheric compatibility alias (T-I3-17, removal at iteration close)
+    # is the single allowlisted exception.
+    $gameNouns = @(
+        "lumincrystal",
+        "grovestrider",
+        "glimmer",
+        "mossberry",
+        "glowcap",
+        "thunder_hollow",
+        "stream_reeds",
+        "lantern_wisp",
+        "aetheric"
+    )
+
+    # Allowlist: (path regex, noun) pairs that are legitimate during the
+    # alias window. Path separators normalized to '/'.
+    $allowlist = @(
+        @{ path = "^src/luminumbra_common/aetheric/"; noun = "aetheric" },
+        @{ path = "^src/luminumbra_common/sources\.cmake$"; noun = "aetheric" }
+    )
+
+    function Test-Allowlisted {
+        param([string]$RelativePath, [string]$Noun)
+        foreach ($entry in $allowlist) {
+            if ($RelativePath -match $entry.path -and $Noun -eq $entry.noun) {
+                return $true
+            }
+        }
+        return $false
+    }
+
+    $violations = New-Object 'System.Collections.Generic.List[string]'
+    $srcRoot = (Resolve-Path "src").Path
+    $files = Get-ChildItem -Path "src" -Recurse -File |
+        Where-Object { $_.Extension -in @(".h", ".hpp", ".c", ".cpp", ".inl", ".cmake", ".txt") -or $_.Name -eq "sources.cmake" }
+
+    $scannedFiles = 0
+    foreach ($file in $files) {
+        $relative = $file.FullName.Substring($srcRoot.Length - 3).Replace("\", "/")
+        $scannedFiles++
+
+        # (a) path lint.
+        foreach ($noun in $gameNouns) {
+            if ($relative.ToLowerInvariant().Contains($noun)) {
+                if (-not (Test-Allowlisted -RelativePath $relative -Noun $noun)) {
+                    $violations.Add("path: $relative contains game noun '$noun'")
+                }
+            }
+        }
+
+        # (b) content lint.
+        $content = Get-Content $file.FullName -Raw
+        if ($null -eq $content) { continue }
+        $lower = $content.ToLowerInvariant()
+        foreach ($noun in $gameNouns) {
+            if ($lower.Contains($noun)) {
+                if (-not (Test-Allowlisted -RelativePath $relative -Noun $noun)) {
+                    $violations.Add("content: $relative contains game noun '$noun'")
+                }
+            }
+        }
+    }
+
+    if ($scannedFiles -lt 50) {
+        throw "engine-game split lint scanned suspiciously few files ($scannedFiles); src/ scan is broken"
+    }
+
+    # Relocated game content must exist where it belongs.
+    foreach ($dataFile in @("data/common/archetypes/grovestrider.json")) {
+        if (-not (Test-Path $dataFile)) {
+            throw "engine-game split lint: relocated game content missing: $dataFile"
+        }
+    }
+
+    if ($violations.Count -gt 0) {
+        foreach ($violation in $violations) {
+            Write-Host "  $violation"
+        }
+        throw "engine-game split lint found $($violations.Count) violation(s) in src/"
+    }
+
+    Write-Host "engine-game split lint: $scannedFiles engine files scanned, 0 game-noun violations (aetheric alias allowlisted until iteration close)"
+}
+
+function Test-CreatureSlice {
+    # T-I3-18: Project Capture game slice. One data-driven creature
+    # (grovestrider archetype) rendered through the skinned G-Buffer stage,
+    # planned by the fixed-tick InstinctSystem, switching behavior on a light
+    # stimulus (graze -> approach). The artifact records the planner state
+    # before/after the stimulus plus the two screenshots.
+    $exe = Get-ClientExe
+    $sliceDir = "build/$BuildPreset/test-artifacts/runtime/creature-slice"
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $sliceDir
+    New-Item -ItemType Directory -Force -Path $sliceDir | Out-Null
+
+    # .lmesh files are generated assets (gitignored); rebuild them from the
+    # committed glTF sources when missing. The asset processor is bitwise
+    # deterministic, so regenerated outputs match the authored content.
+    $assetProcessor = "build/$BuildPreset/bin/asset_processor.exe"
+    foreach ($asset in @(
+        @{ gltf = "data/models/creatures/grovestrider/grovestrider.gltf"; lmesh = "data/models/creatures/grovestrider/grovestrider.lmesh" },
+        @{ gltf = "data/models/props/glow_bloom/glow_bloom.gltf"; lmesh = "data/models/props/glow_bloom/glow_bloom.lmesh" }
+    )) {
+        if (-not (Test-Path $asset.lmesh)) {
+            if (-not (Test-Path $assetProcessor)) {
+                throw "creature slice needs $($asset.lmesh); build asset_processor first ($assetProcessor missing)"
+            }
+            Invoke-Checked -FilePath $assetProcessor -ArgumentList @($asset.gltf, $asset.lmesh) -TimeoutSeconds 120
+        }
+    }
+
+    $runSeconds = [Math]::Max(30, $SmokeSeconds)
+    Invoke-Checked -FilePath $exe -ArgumentList @(
+        "--scenario", "creature_slice_smoke",
+        "--creature-archetype", "data/common/archetypes/grovestrider.json",
+        "--auto-create-world",
+        "--auto-enter-world",
+        "--timed-run", "$runSeconds",
+        "--no-audio",
+        "--no-ui",
+        "--runtime-artifact-dir", $sliceDir
+    ) -TimeoutSeconds ([Math]::Max(150, $runSeconds + 90))
+
+    $analysisPath = Join-Path $sliceDir "creature-slice-analysis.json"
+    if (-not (Test-Path $analysisPath)) {
+        throw "creature slice run did not produce $analysisPath (gate produced by task T-I3-18)"
+    }
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.creature_slice_analysis.v1") {
+        throw "Unexpected creature slice analysis schema '$($analysis.schema)'"
+    }
+    if ($analysis.archetype -ne "grovestrider") {
+        throw "Creature slice must spawn the grovestrider archetype from game data"
+    }
+    if ([int64]$analysis.gl_debug.errors -ne 0) {
+        throw "Creature slice run emitted GL debug errors: $($analysis.gl_debug.errors)"
+    }
+    if (-not $analysis.scene.stimulus_spawned) {
+        throw "Creature slice never spawned the light stimulus"
+    }
+    foreach ($capture in @($analysis.before_stimulus, $analysis.after_stimulus)) {
+        if (-not $capture.plan.valid) {
+            throw "Creature slice capture '$($capture.file)' has no valid planner state"
+        }
+        if ([int64]$capture.skinned_draws -lt 1) {
+            throw "Creature slice capture '$($capture.file)' rendered no skinned draws"
+        }
+        Assert-PpmArtifact (Join-Path $sliceDir $capture.file)
+    }
+    if ($analysis.before_stimulus.plan.action -ne $analysis.expected.before_action) {
+        throw "Creature slice pre-stimulus plan is '$($analysis.before_stimulus.plan.action)', expected '$($analysis.expected.before_action)'"
+    }
+    if ($analysis.after_stimulus.plan.action -ne $analysis.expected.after_action) {
+        throw "Creature slice post-stimulus plan is '$($analysis.after_stimulus.plan.action)', expected '$($analysis.expected.after_action)'"
+    }
+    if ([int64]$analysis.after_stimulus.plan.plans_executed -le [int64]$analysis.before_stimulus.plan.plans_executed) {
+        throw "Creature slice planner did not replan after the stimulus"
+    }
+    if (-not $analysis.passed) {
+        throw "Creature slice analysis reported failure: $($analysis.failures -join ', ')"
+    }
+    Write-Host ("creature slice: plan {0} ({1}) -> {2} ({3}); clips {4} -> {5}; skinned draws {6}/{7}; plans {8} -> {9}" -f `
+        $analysis.before_stimulus.plan.action, $analysis.before_stimulus.plan.target, `
+        $analysis.after_stimulus.plan.action, $analysis.after_stimulus.plan.target, `
+        $analysis.before_stimulus.plan.active_clip, $analysis.after_stimulus.plan.active_clip, `
+        $analysis.before_stimulus.skinned_draws, $analysis.after_stimulus.skinned_draws, `
+        $analysis.before_stimulus.plan.plans_executed, $analysis.after_stimulus.plan.plans_executed)
+}
+
 switch ($Mode) {
     "CodexOnly" { Test-CodexOnly }
     "Panels" { Test-Panels }
@@ -2961,6 +3197,9 @@ switch ($Mode) {
     "PlayerView" { Test-PlayerView }
     "FarLodHorizon" { Test-FarLodHorizon }
     "HeadlessServerTick" { Test-HeadlessServerTick }
+    "SkinnedMeshVisual" { Test-SkinnedMeshVisual }
+    "EngineGameSplitLint" { Test-EngineGameSplitLint }
+    "CreatureSlice" { Test-CreatureSlice }
     "All" {
         Test-CodexOnly
         Test-Files

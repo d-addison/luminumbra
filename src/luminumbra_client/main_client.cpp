@@ -1469,7 +1469,8 @@ int main(int argc, char* argv[]) {
         (scenario_config.player_view_smoke() || scenario_config.farlod_horizon_smoke())
             ? (scenario_config.world_preset.empty() ? std::string("mountains") : scenario_config.world_preset)
             : ((scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() ||
-                scenario_config.auto_world_smoke() || scenario_config.persistence_roundtrip_smoke()) ? "archipelago" : "default");
+                scenario_config.auto_world_smoke() || scenario_config.persistence_roundtrip_smoke() ||
+                scenario_config.creature_slice_smoke()) ? "archipelago" : "default");
     if (scenario_config.auto_create_world || HasCommandLineFlag(argc, argv, "--auto-create-world") || runtime_boot_recorder.enabled()) {
         start_world_creation("Automated Test World", "424242", scenario_world_type);
     }
@@ -1617,6 +1618,21 @@ int main(int argc, char* argv[]) {
     bool farlod_horizon_sky_enforced = true;
     std::vector<double> farlod_baseline_gbuffer_samples;
     std::vector<double> farlod_far_gbuffer_samples;
+    // skinned_mesh_visual_smoke (T-I3-16): rig spawned once after readiness;
+    // captures at two clip times prove the skinned stage renders and animates.
+    SkinnedMeshVisualTarget skinned_mesh_visual_target;
+    bool skinned_mesh_spawn_attempted = false;
+    bool skinned_mesh_capture_a_written = false;
+    bool skinned_mesh_analysis_written = false;
+    SkinnedMeshVisualCapture skinned_mesh_capture_a;
+    std::vector<unsigned char> skinned_mesh_pixels_a;
+    // creature_slice_smoke (T-I3-18): data-driven creature game slice. The
+    // stimulus appears at 55% progress; captures at 45% and 85%.
+    CreatureSliceScene creature_slice_scene;
+    bool creature_slice_spawn_attempted = false;
+    bool creature_slice_before_written = false;
+    bool creature_slice_analysis_written = false;
+    CreatureSliceCapture creature_slice_before;
     const auto median_of = [](std::vector<double> samples) -> double {
         if (samples.empty()) {
             return 0.0;
@@ -1889,6 +1905,33 @@ int main(int argc, char* argv[]) {
                             static_cast<std::size_t>(sweep * static_cast<double>(farlod_horizon_stations.size())));
                     }
                     ApplyFarLodHorizonCamera(gameSession.get(), g_camera.get(), farlod_horizon_stations[station_index]);
+                } else if (scenario_config.skinned_mesh_visual_smoke() && scenario_ready && g_camera) {
+                    // T-I3-16: spawn the rigged test mesh once, then hold the
+                    // fixed framing for both captures.
+                    if (!skinned_mesh_spawn_attempted) {
+                        skinned_mesh_spawn_attempted = true;
+                        skinned_mesh_visual_target = SpawnSkinnedMeshVisualEntity(
+                            gameSession.get(), scenario_config.artifact_dir);
+                    }
+                    ApplySkinnedMeshVisualCamera(g_camera.get(), skinned_mesh_visual_target);
+                } else if (scenario_config.creature_slice_smoke() && scenario_ready && g_camera) {
+                    // T-I3-18: spawn the creature scene once, hold the fixed
+                    // photographic framing, run the game glue every frame and
+                    // bring in the light stimulus at 55% progress.
+                    if (!creature_slice_spawn_attempted) {
+                        creature_slice_spawn_attempted = true;
+                        creature_slice_scene = SpawnCreatureSliceScene(
+                            gameSession.get(), root_dir, scenario_config.creature_archetype);
+                    }
+                    const double elapsed_play_seconds = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - scenario_play_started_at).count();
+                    const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
+                    const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
+                    if (progress >= 0.55 && creature_slice_scene.spawned && !creature_slice_scene.stimulus_spawned) {
+                        SpawnCreatureSliceStimulus(gameSession.get(), creature_slice_scene);
+                    }
+                    UpdateCreatureSliceScene(gameSession.get(), creature_slice_scene, static_cast<double>(deltaTime));
+                    ApplyCreatureSliceCamera(gameSession.get(), g_camera.get(), creature_slice_scene);
                 } else if (g_playerController) {
                     g_playerController->Update(deltaTime);
                 }
@@ -1899,7 +1942,7 @@ int main(int argc, char* argv[]) {
                 gameSession->TickSimulation(static_cast<double>(deltaTime));
                 if (gameSession->GetWorldSystem() && (g_playerController || g_camera)) {
                     const Luminumbra::Vec3 streaming_position =
-                        ((scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.timeofday_sweep_smoke() || scenario_config.lod_boundary_oscillation_smoke() || scenario_config.lod_seam_arrival_smoke() || scenario_config.player_view_smoke() || scenario_config.farlod_horizon_smoke()) && scenario_ready && g_camera)
+                        ((scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.timeofday_sweep_smoke() || scenario_config.lod_boundary_oscillation_smoke() || scenario_config.lod_seam_arrival_smoke() || scenario_config.player_view_smoke() || scenario_config.farlod_horizon_smoke() || scenario_config.skinned_mesh_visual_smoke() || scenario_config.creature_slice_smoke()) && scenario_ready && g_camera)
                             ? Luminumbra::Vec3(g_camera->Position)
                             : (g_playerController ? Luminumbra::Vec3(g_playerController->GetPosition()) : Luminumbra::Vec3(g_camera->Position));
                     gameSession->GetWorldSystem()->update(
@@ -1922,7 +1965,7 @@ int main(int argc, char* argv[]) {
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             if (currentState == GameState::IN_GAME) {
                 if (gameSession->GetWorldSystem() && g_camera) {
-                    if (scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.lod_seam_arrival_smoke() || scenario_config.player_view_smoke() || scenario_config.farlod_horizon_smoke()) {
+                    if (scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.lod_seam_arrival_smoke() || scenario_config.player_view_smoke() || scenario_config.farlod_horizon_smoke() || scenario_config.skinned_mesh_visual_smoke() || scenario_config.creature_slice_smoke()) {
                         // time_of_day 0 is noon (sun elevation = cos(2*pi*t));
                         // 0.04 keeps the sun near its zenith for stable captures.
                         renderPipeline.set_time_of_day(0.04f);
@@ -2498,6 +2541,102 @@ int main(int argc, char* argv[]) {
                                                 median_of(farlod_far_gbuffer_samples),
                                                 render_pass_stats.gpu_timers_supported,
                                                 farlod_horizon_sky_enforced);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (scenario_config.skinned_mesh_visual_smoke() && scenario_ready &&
+                            !skinned_mesh_analysis_written && skinned_mesh_visual_target.spawned) {
+                            // T-I3-16: capture A at 50% progress, capture B at
+                            // 85%; the two clip times must differ visibly in
+                            // the rig ROI.
+                            const double elapsed_play_seconds = std::chrono::duration<double>(now - scenario_play_started_at).count();
+                            const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
+                            const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
+                            const auto& render_pass_stats = renderPipeline.get_last_render_pass_stats();
+                            const bool want_capture_a = !skinned_mesh_capture_a_written && progress >= 0.50;
+                            const bool want_capture_b = skinned_mesh_capture_a_written && progress >= 0.85;
+                            if (want_capture_a || want_capture_b) {
+                                int screenshot_width = 0;
+                                int screenshot_height = 0;
+                                glfwGetFramebufferSize(window, &screenshot_width, &screenshot_height);
+                                if (screenshot_width > 0 && screenshot_height > 0) {
+                                    std::vector<unsigned char> frame_pixels(
+                                        static_cast<std::size_t>(screenshot_width) * static_cast<std::size_t>(screenshot_height) * 3u);
+                                    glReadBuffer(GL_BACK);
+                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                                    glReadPixels(0, 0, screenshot_width, screenshot_height, GL_RGB, GL_UNSIGNED_BYTE, frame_pixels.data());
+
+                                    SkinnedMeshVisualCapture capture;
+                                    capture.elapsed_seconds = elapsed_play_seconds;
+                                    capture.animation_time_seconds =
+                                        SkinnedMeshVisualAnimationTime(gameSession.get(), skinned_mesh_visual_target);
+                                    capture.skinned_draws = render_pass_stats.skinned_draws;
+                                    capture.skinned_indices_drawn = render_pass_stats.skinned_indices_drawn;
+                                    const std::string relative_path = want_capture_a
+                                        ? "screenshots/skinned-mesh-a.ppm"
+                                        : "screenshots/skinned-mesh-b.ppm";
+                                    if (WritePixelBufferPpm(scenario_config.artifact_dir / relative_path,
+                                                            screenshot_width, screenshot_height, frame_pixels)) {
+                                        capture.file = relative_path;
+                                        if (want_capture_a) {
+                                            skinned_mesh_capture_a = capture;
+                                            skinned_mesh_pixels_a = std::move(frame_pixels);
+                                            skinned_mesh_capture_a_written = true;
+                                        } else {
+                                            const SkinnedMeshDiffStats diff = AnalyzeSkinnedMeshCaptures(
+                                                skinned_mesh_pixels_a, frame_pixels,
+                                                screenshot_width, screenshot_height);
+                                            WriteSkinnedMeshVisualAnalysis(
+                                                scenario_config.artifact_dir,
+                                                skinned_mesh_visual_target,
+                                                skinned_mesh_capture_a,
+                                                capture,
+                                                diff);
+                                            skinned_mesh_analysis_written = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (scenario_config.creature_slice_smoke() && scenario_ready &&
+                            !creature_slice_analysis_written && creature_slice_scene.spawned) {
+                            // T-I3-18: planner state + screenshot before the
+                            // stimulus (45%) and after it (85%).
+                            const double elapsed_play_seconds = std::chrono::duration<double>(now - scenario_play_started_at).count();
+                            const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
+                            const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
+                            const auto& render_pass_stats = renderPipeline.get_last_render_pass_stats();
+                            const bool want_before = !creature_slice_before_written && progress >= 0.45 && progress < 0.55;
+                            const bool want_after = creature_slice_before_written &&
+                                creature_slice_scene.stimulus_spawned && progress >= 0.85;
+                            if (want_before || want_after) {
+                                int screenshot_width = 0;
+                                int screenshot_height = 0;
+                                glfwGetFramebufferSize(window, &screenshot_width, &screenshot_height);
+                                if (screenshot_width > 0 && screenshot_height > 0) {
+                                    CreatureSliceCapture capture;
+                                    capture.elapsed_seconds = elapsed_play_seconds;
+                                    capture.plan = ProbeCreatureSlicePlan(gameSession.get(), creature_slice_scene);
+                                    capture.skinned_draws = render_pass_stats.skinned_draws;
+                                    capture.skinned_indices_drawn = render_pass_stats.skinned_indices_drawn;
+                                    const std::string relative_path = want_before
+                                        ? "screenshots/creature-slice-before.ppm"
+                                        : "screenshots/creature-slice-after.ppm";
+                                    if (WriteBackbufferPpm(scenario_config.artifact_dir / relative_path,
+                                                           screenshot_width, screenshot_height)) {
+                                        capture.file = relative_path;
+                                        if (want_before) {
+                                            creature_slice_before = capture;
+                                            creature_slice_before_written = true;
+                                        } else {
+                                            WriteCreatureSliceAnalysis(
+                                                scenario_config.artifact_dir,
+                                                creature_slice_scene,
+                                                creature_slice_before,
+                                                capture);
+                                            creature_slice_analysis_written = true;
                                         }
                                     }
                                 }

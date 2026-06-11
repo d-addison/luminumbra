@@ -107,7 +107,9 @@ ReplayTrace BuildReplayTrace(
 
 } // namespace
 
-NetworkStateHashReport BuildNetworkStateHashFixture(const std::string& buildPreset)
+NetworkStateHashReport BuildNetworkStateHashFixture(
+    const Luminumbra::Ecs::EntityRegistrySnapshot& entities_fixture,
+    const std::string& buildPreset)
 {
     NetworkStateHashReport report;
     report.schema = kSchema;
@@ -125,7 +127,7 @@ NetworkStateHashReport BuildNetworkStateHashFixture(const std::string& buildPres
         Luminumbra::Persistence::BuildWorldHashAnalysis(buildPreset);
     report.worldHash = world_hash.hash;
 
-    Luminumbra::Ecs::EntityRegistrySnapshot entities = Luminumbra::Ecs::BuildEntitySnapshotFixture();
+    Luminumbra::Ecs::EntityRegistrySnapshot entities = entities_fixture;
     Luminumbra::Ecs::SortEntityRegistrySnapshot(entities);
     for (const auto& entity : entities.entities) {
         report.durableEntityIds.push_back(std::to_string(entity.entity_id));
@@ -248,9 +250,12 @@ bool NetworkStateHashMeetsBaseline(const NetworkStateHashReport& report)
         report.finalStateHash == report.replayFinalStateHash;
 }
 
-bool WriteNetworkStateHashArtifact(const std::string& path, const std::string& buildPreset)
+bool WriteNetworkStateHashArtifact(
+    const std::string& path,
+    const Luminumbra::Ecs::EntityRegistrySnapshot& entities,
+    const std::string& buildPreset)
 {
-    const NetworkStateHashReport report = BuildNetworkStateHashFixture(buildPreset);
+    const NetworkStateHashReport report = BuildNetworkStateHashFixture(entities, buildPreset);
     const std::filesystem::path output_path(path);
     std::error_code ec;
     std::filesystem::create_directories(output_path.parent_path(), ec);

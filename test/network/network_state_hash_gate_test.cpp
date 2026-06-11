@@ -2,6 +2,8 @@
 
 #include "luminumbra_common/network/NetworkStateHash.h"
 
+#include "../support/EntitySnapshotFixture.h"
+
 #include <filesystem>
 #include <string>
 
@@ -27,7 +29,8 @@ std::filesystem::path NetworkArtifactDir() {
 } // namespace
 
 TEST(NetworkStateHash, FixtureIsDeterministicAndMeetsBaseline) {
-    const auto report = luminumbra::network::BuildNetworkStateHashFixture("debug");
+    const auto report = luminumbra::network::BuildNetworkStateHashFixture(
+        Luminumbra::TestSupport::BuildEntitySnapshotFixture(), "debug");
     EXPECT_TRUE(report.passed);
     EXPECT_TRUE(report.deterministicReplay);
     EXPECT_TRUE(report.monotonicTicks);
@@ -46,7 +49,8 @@ TEST(NetworkStateHash, FixtureIsDeterministicAndMeetsBaseline) {
 
 TEST(NetworkStateHash, WritesAnalysisArtifact) {
     const std::filesystem::path artifact_path = NetworkArtifactDir() / "network-state-hash.json";
-    ASSERT_TRUE(luminumbra::network::WriteNetworkStateHashArtifact(artifact_path.string(), "debug"));
+    ASSERT_TRUE(luminumbra::network::WriteNetworkStateHashArtifact(
+        artifact_path.string(), Luminumbra::TestSupport::BuildEntitySnapshotFixture(), "debug"));
     ASSERT_TRUE(std::filesystem::exists(artifact_path));
 }
 

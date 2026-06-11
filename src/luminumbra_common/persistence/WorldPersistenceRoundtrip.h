@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ecs/EntitySnapshot.h"
 #include "world/WorldStreamingState.h"
 
 #include <cstddef>
@@ -108,12 +109,18 @@ bool WriteWorldHashArtifact(
     const std::filesystem::path& output_path,
     const std::string& build_preset,
     std::vector<std::string>* errors = nullptr);
-EntitySnapshotAnalysis BuildEntitySnapshotAnalysis(const std::string& build_preset);
+// T-I3-17: the game-flavored snapshot fixture moved to test-support code
+// (test/support/EntitySnapshotFixture.h); the analysis/artifact builders now
+// receive the fixture registry as a parameter.
+EntitySnapshotAnalysis BuildEntitySnapshotAnalysis(
+    const std::string& build_preset,
+    const Luminumbra::Ecs::EntityRegistrySnapshot& fixture);
 std::string SerializeEntitySnapshotJson(const EntitySnapshotAnalysis& analysis);
 bool EntitySnapshotMeetsBaseline(const EntitySnapshotAnalysis& analysis);
 bool WriteEntitySnapshotArtifact(
     const std::filesystem::path& output_path,
     const std::string& build_preset,
+    const Luminumbra::Ecs::EntityRegistrySnapshot& fixture,
     std::vector<std::string>* errors = nullptr);
 
 } // namespace Luminumbra::Persistence

@@ -1143,12 +1143,16 @@ bool WriteWorldHashArtifact(
     }
 }
 
-EntitySnapshotAnalysis BuildEntitySnapshotAnalysis(const std::string& build_preset) {
+EntitySnapshotAnalysis BuildEntitySnapshotAnalysis(
+    const std::string& build_preset,
+    const Luminumbra::Ecs::EntityRegistrySnapshot& fixture) {
     EntitySnapshotAnalysis analysis;
     analysis.build_preset = build_preset;
 
-    Luminumbra::Ecs::EntityRegistrySnapshot before_registry = Luminumbra::Ecs::BuildEntitySnapshotFixture();
-    const std::string before_json = Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(before_registry);
+    // T-I3-17: the fixture is test-supplied (game-flavored data relocated to
+    // test/support/EntitySnapshotFixture.h); this builder only validates the
+    // engine serialize/load/order contracts over it.
+    const std::string before_json = Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(fixture);
     const nlohmann::json before_snapshot = nlohmann::json::parse(before_json);
 
     Luminumbra::Ecs::EntityRegistrySnapshot after_registry;
@@ -1232,9 +1236,10 @@ bool EntitySnapshotMeetsBaseline(const EntitySnapshotAnalysis& analysis) {
 bool WriteEntitySnapshotArtifact(
     const std::filesystem::path& output_path,
     const std::string& build_preset,
+    const Luminumbra::Ecs::EntityRegistrySnapshot& fixture,
     std::vector<std::string>* errors) {
     try {
-        const EntitySnapshotAnalysis analysis = BuildEntitySnapshotAnalysis(build_preset);
+        const EntitySnapshotAnalysis analysis = BuildEntitySnapshotAnalysis(build_preset, fixture);
         if (!analysis.passed) {
             if (errors) {
                 errors->push_back("entity snapshot analysis did not pass baseline");

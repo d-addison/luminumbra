@@ -10,6 +10,9 @@
 #include "luminumbra_common/world/Chunk.h"
 
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
+
+#include "luminumbra_common/animation/AnimationRuntime.h"
 
 namespace Luminumbra::Rendering {
 
@@ -31,6 +34,20 @@ void GBufferPass::init_instanced_static_mesh(const std::filesystem::path& root_p
     glBindBuffer(GL_ARRAY_BUFFER, m_instanceMatrixVBO);
     glBufferData(GL_ARRAY_BUFFER, 10000 * sizeof(glm::mat4), nullptr, GL_DYNAMIC_DRAW);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+void GBufferPass::init_skinned_mesh(const std::filesystem::path& root_path) {
+    std::string skinned_vert_path = (root_path / "res/shaders/skinned_mesh.vert").string();
+    std::string gbuffer_frag_path = (root_path / "res/shaders/g_buffer.frag").string();
+    m_skinned_mesh_shader = std::make_unique<Shader>(skinned_vert_path.c_str(), gbuffer_frag_path.c_str());
+    PassGl::label_gl_object(GL_PROGRAM, m_skinned_mesh_shader ? m_skinned_mesh_shader->Id() : 0u, "shader.skinned_mesh");
+    glGenBuffers(1, &m_jointPaletteSSBO);
+    PassGl::label_gl_object(GL_BUFFER, m_jointPaletteSSBO, "skinned_mesh.joint_palette");
+    // 256 joints (the LMS2 skeleton cap) of column-major mat4.
+    m_jointPaletteSSBOCapacityBytes = 256u * sizeof(glm::mat4);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_jointPaletteSSBO);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(m_jointPaletteSSBOCapacityBytes), nullptr, GL_DYNAMIC_DRAW);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 }
 
 void GBufferPass::init_gbuffer(u32 width, u32 height) {
@@ -107,9 +124,16 @@ void GBufferPass::destroy_instanced_static_mesh() {
     if (m_instanceMatrixVBO) { glDeleteBuffers(1, &m_instanceMatrixVBO); m_instanceMatrixVBO = 0; }
 }
 
+void GBufferPass::destroy_skinned_mesh() {
+    if (m_jointPaletteSSBO) { glDeleteBuffers(1, &m_jointPaletteSSBO); m_jointPaletteSSBO = 0; }
+    m_jointPaletteSSBOCapacityBytes = 0;
+    m_skinnedMeshCache.clear();
+}
+
 void GBufferPass::reset_shaders() {
     m_geometry_shader.reset();
     m_instanced_static_mesh_shader.reset();
+    m_skinned_mesh_shader.reset();
 }
 
 void GBufferPass::execute(RenderPipeline& pipeline,
@@ -125,6 +149,10 @@ void GBufferPass::execute(RenderPipeline& pipeline,
 
     // Pass 2: Render all instanced static meshes
     geometry_pass_static_meshes(pipeline, registry, camera, frustum_planes);
+
+    // Pass 3 (T-I3-16): non-instanced skinned meshes (CPU-sampled joint
+    // palettes from the fixed-tick animation runtime, GPU skinning).
+    geometry_pass_skinned_meshes(pipeline, registry, camera, frustum_planes);
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
@@ -196,7 +224,10 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
     m_instanced_static_mesh_shader->setMat4("projection", glm::perspective(glm::radians(camera.Zoom), (float)pipeline.m_screen_width / (float)pipeline.m_screen_height, camera.GetNearPlane(), camera.GetFarPlane()));
     m_instanced_static_mesh_shader->setMat4("view", camera.GetViewMatrix());
     auto view = registry.view<const Components::TransformComponent, const Components::StaticMeshComponent>();
-    std::map<std::string, std::vector<glm::mat4>> visible_instance_groups;
+    // T-I3-16: groups carry the material id (per-group uniform) so each
+    // static mesh renders with its component material instead of the old
+    // hardcoded grass id.
+    std::map<std::pair<std::string, std::uint32_t>, std::vector<glm::mat4>> visible_instance_groups;
     for (auto entity : view) {
         auto const& transform = view.get<const Components::TransformComponent>(entity);
         auto const& mesh_info = view.get<const Components::StaticMeshComponent>(entity);
@@ -216,14 +247,18 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
             }
         }
         if (!culled) {
+            // T-I3-16 fix: the instance transform previously dropped the
+            // rotation quaternion (translate * scale only).
             glm::mat4 model = glm::translate(glm::mat4(1.0f), transform.position);
+            model *= glm::mat4_cast(transform.rotation);
             model = glm::scale(model, transform.scale);
-            visible_instance_groups[mesh_info.meshPath].push_back(model);
+            visible_instance_groups[{mesh_info.meshPath, mesh_info.materialId}].push_back(model);
         }
     }
-    for (const auto& [meshPath, matrices] : visible_instance_groups) {
-        Mesh* mesh = m_meshCache[meshPath].get();
+    for (const auto& [group_key, matrices] : visible_instance_groups) {
+        Mesh* mesh = m_meshCache[group_key.first].get();
         if (!mesh || matrices.empty()) continue;
+        m_instanced_static_mesh_shader->setInt("u_materialId", static_cast<int>(group_key.second));
         glBindBuffer(GL_ARRAY_BUFFER, m_instanceMatrixVBO);
         glBufferSubData(GL_ARRAY_BUFFER, 0, matrices.size() * sizeof(glm::mat4), matrices.data());
         glBindVertexArray(mesh->vao);
@@ -235,6 +270,80 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
         glDrawElementsInstanced(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, 0, matrices.size());
         glBindVertexArray(0);
     }
+}
+
+void GBufferPass::geometry_pass_skinned_meshes(RenderPipeline& pipeline,
+                                               entt::registry& registry,
+                                               const Camera& camera,
+                                               const glm::vec4 frustum_planes[6]) {
+    namespace anim = luminumbra::animation;
+    auto view = registry.view<const Components::TransformComponent,
+                              const Components::SkinnedMeshComponent,
+                              const anim::AnimationPlayerComponent>();
+    if (view.begin() == view.end()) {
+        return;
+    }
+    if (!m_skinned_mesh_shader || !m_skinned_mesh_shader->IsValid()) {
+        return;
+    }
+
+    m_skinned_mesh_shader->use();
+    m_skinned_mesh_shader->setMat4("projection", glm::perspective(glm::radians(camera.Zoom), (float)pipeline.m_screen_width / (float)pipeline.m_screen_height, camera.GetNearPlane(), camera.GetFarPlane()));
+    m_skinned_mesh_shader->setMat4("view", camera.GetViewMatrix());
+
+    for (auto entity : view) {
+        auto const& transform = view.get<const Components::TransformComponent>(entity);
+        auto const& mesh_info = view.get<const Components::SkinnedMeshComponent>(entity);
+        auto const& player = view.get<const anim::AnimationPlayerComponent>(entity);
+
+        if (m_skinnedMeshCache.find(mesh_info.meshPath) == m_skinnedMeshCache.end()) {
+            std::string full_mesh_path = (pipeline.m_root_path / mesh_info.meshPath).string();
+            m_skinnedMeshCache[mesh_info.meshPath] = MeshLoader::LoadSkinned(full_mesh_path);
+        }
+        Mesh* mesh = m_skinnedMeshCache[mesh_info.meshPath].get();
+        if (!mesh || mesh->jointCount == 0) continue;
+
+        // The T-I3-15 runtime emits 16 floats per joint; a palette that does
+        // not match the mesh skeleton is a wiring bug, skip the draw.
+        const std::size_t expected_floats = static_cast<std::size_t>(mesh->jointCount) * 16u;
+        if (player.palette.size() != expected_floats) continue;
+
+        // Sphere culling: bounds are bind-pose, padded for animation sway.
+        glm::vec3 world_sphere_center = transform.position + glm::vec3(mesh->boundingSphere);
+        float radius = 1.5f * mesh->boundingSphere.w *
+            glm::max(glm::max(transform.scale.x, transform.scale.y), transform.scale.z);
+        bool culled = false;
+        for (int i = 0; i < 6; i++) {
+            if (glm::dot(glm::vec4(world_sphere_center, 1.0f), frustum_planes[i]) < -radius) {
+                culled = true;
+                break;
+            }
+        }
+        if (culled) continue;
+
+        glm::mat4 model = glm::translate(glm::mat4(1.0f), transform.position);
+        model *= glm::mat4_cast(transform.rotation);
+        model = glm::scale(model, transform.scale);
+        m_skinned_mesh_shader->setMat4("model", model);
+        m_skinned_mesh_shader->setInt("u_materialId", static_cast<int>(mesh_info.materialId));
+
+        const std::size_t palette_bytes = player.palette.size() * sizeof(float);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_jointPaletteSSBO);
+        if (palette_bytes > m_jointPaletteSSBOCapacityBytes) {
+            m_jointPaletteSSBOCapacityBytes = palette_bytes;
+            glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(palette_bytes), player.palette.data(), GL_DYNAMIC_DRAW);
+        } else {
+            glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, static_cast<GLsizeiptr>(palette_bytes), player.palette.data());
+        }
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, m_jointPaletteSSBO);
+
+        glBindVertexArray(mesh->vao);
+        glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, 0);
+        glBindVertexArray(0);
+        pipeline.m_last_render_pass_stats.skinned_draws++;
+        pipeline.m_last_render_pass_stats.skinned_indices_drawn += mesh->indexCount;
+    }
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 }
 
 } // namespace Luminumbra::Rendering
