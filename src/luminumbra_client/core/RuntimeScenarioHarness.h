@@ -757,7 +757,26 @@ struct FarLodHorizonStationCapture {
     std::size_t resident_bytes = 0;
     std::size_t region_draws = 0;
     std::size_t far_indices_drawn = 0;
+    // T-I4-DR-far-water-sheet: far water sheet draw/index counts at capture
+    // time (proves the far water continues past the live water ring), plus the
+    // boundary-band water-pixel coverage (deep-water-tinted pixels in the
+    // live/far boundary ROI — non-zero where the ring ends over water).
+    std::size_t water_sheet_draws = 0;
+    std::size_t water_sheet_indices = 0;
+    std::uint64_t boundary_band_water_pixels = 0;
+    double boundary_band_water_ratio = 0.0;
 };
+
+// T-I4-DR-far-water-sheet: counts deep-water-tinted pixels in the live/far
+// boundary band ROI (proves far water continues where the live ring ends).
+void AnalyzeFarLodBoundaryBandWater(
+    const std::vector<unsigned char>& pixels,
+    int width,
+    int height,
+    int band_top_row_from_top,
+    int band_bottom_row_from_top,
+    std::uint64_t& out_water_pixels,
+    std::uint64_t& out_band_pixels);
 
 void WriteFarLodHorizonAnalysis(
     const std::filesystem::path& artifact_dir,

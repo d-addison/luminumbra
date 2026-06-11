@@ -48,6 +48,59 @@ bool aabb_outside_frustum(const glm::vec3& aabb_min, const glm::vec3& aabb_max, 
     return false;
 }
 
+// T-I4-DR-far-water-sheet: build a flat water sheet for a far tile. Emits one
+// quad per sample-grid cell that touches a water-flagged sample, placed at the
+// global waterline (SEA_LEVEL). Vertices are region-local in X/Z (matching the
+// terrain mesh convention) and absolute in Y; normals point up; the material id
+// is the dedicated far-water id (G-buffer tints it deep water). Cell-level
+// coverage (any of the 4 corners water-flagged) keeps the sheet continuous
+// across the channel/sea boundary instead of leaving sub-cell gaps.
+void BuildFarLodWaterSheet(const Luminumbra::World::FarLodTile& tile,
+                           Luminumbra::World::FarLodRegionMesh& out) {
+    out.vertices.clear();
+    out.indices.clear();
+    const u32 n = tile.samples_per_side;
+    if (n < 2 || tile.flags.size() < static_cast<std::size_t>(n) * n) {
+        return;
+    }
+    const int step = Luminumbra::World::FarLodSampleStepMeters(tile.tier);
+    const float waterline = Luminumbra::SEA_LEVEL;
+
+    const auto water_at = [&](u32 x, u32 z) -> bool {
+        return (tile.flags[static_cast<std::size_t>(z) * n + x] &
+                Luminumbra::World::kFarLodSampleFlagWater) != 0u;
+    };
+
+    // Reserve a rough upper bound (every cell wet) to avoid reallocation churn.
+    out.vertices.reserve(static_cast<std::size_t>(n) * n);
+    out.indices.reserve(static_cast<std::size_t>(n - 1) * (n - 1) * 6u);
+
+    for (u32 z = 0; z + 1 < n; ++z) {
+        for (u32 x = 0; x + 1 < n; ++x) {
+            if (!water_at(x, z) && !water_at(x + 1, z) &&
+                !water_at(x, z + 1) && !water_at(x + 1, z + 1)) {
+                continue;
+            }
+            const float x0 = static_cast<float>(x * static_cast<u32>(step));
+            const float x1 = static_cast<float>((x + 1) * static_cast<u32>(step));
+            const float z0 = static_cast<float>(z * static_cast<u32>(step));
+            const float z1 = static_cast<float>((z + 1) * static_cast<u32>(step));
+            const u32 base = static_cast<u32>(out.vertices.size());
+            const Vec3 up(0.0f, 1.0f, 0.0f);
+            out.vertices.push_back({Vec3(x0, waterline, z0), up, FarLodSystem::kFarWaterMaterialId});
+            out.vertices.push_back({Vec3(x1, waterline, z0), up, FarLodSystem::kFarWaterMaterialId});
+            out.vertices.push_back({Vec3(x1, waterline, z1), up, FarLodSystem::kFarWaterMaterialId});
+            out.vertices.push_back({Vec3(x0, waterline, z1), up, FarLodSystem::kFarWaterMaterialId});
+            out.indices.push_back(base + 0u);
+            out.indices.push_back(base + 1u);
+            out.indices.push_back(base + 2u);
+            out.indices.push_back(base + 0u);
+            out.indices.push_back(base + 2u);
+            out.indices.push_back(base + 3u);
+        }
+    }
+}
+
 } // namespace
 
 FarLodSystem::FarLodSystem() = default;
@@ -85,7 +138,11 @@ void FarLodSystem::release_region(ResidentRegion& region) {
     if (region.vao) { glDeleteVertexArrays(1, &region.vao); region.vao = 0; }
     if (region.vbo) { glDeleteBuffers(1, &region.vbo); region.vbo = 0; }
     if (region.ebo) { glDeleteBuffers(1, &region.ebo); region.ebo = 0; }
+    if (region.water_vao) { glDeleteVertexArrays(1, &region.water_vao); region.water_vao = 0; }
+    if (region.water_vbo) { glDeleteBuffers(1, &region.water_vbo); region.water_vbo = 0; }
+    if (region.water_ebo) { glDeleteBuffers(1, &region.water_ebo); region.water_ebo = 0; }
     region.element_count = 0;
+    region.water_element_count = 0;
     region.resident_bytes = 0;
 }
 
@@ -183,6 +240,35 @@ void FarLodSystem::integrate_completed_builds() {
         glBindVertexArray(0);
 
         region.element_count = static_cast<u32>(result.mesh.indices.size());
+
+        // T-I4-DR-far-water-sheet: upload the flat water sheet (separate VAO so
+        // it draws with the far-water material in its own depth-biased sub-pass).
+        if (!result.water_mesh.vertices.empty() && !result.water_mesh.indices.empty()) {
+            glGenVertexArrays(1, &region.water_vao);
+            glGenBuffers(1, &region.water_vbo);
+            glGenBuffers(1, &region.water_ebo);
+            PassGl::label_gl_object(GL_VERTEX_ARRAY, region.water_vao, label_prefix + ".water.vao");
+            PassGl::label_gl_object(GL_BUFFER, region.water_vbo, label_prefix + ".water.vbo");
+            PassGl::label_gl_object(GL_BUFFER, region.water_ebo, label_prefix + ".water.ebo");
+            glBindVertexArray(region.water_vao);
+            glBindBuffer(GL_ARRAY_BUFFER, region.water_vbo);
+            glBufferData(GL_ARRAY_BUFFER,
+                         static_cast<GLsizeiptr>(result.water_mesh.vertices.size() * sizeof(VoxelVertex)),
+                         result.water_mesh.vertices.data(), GL_STATIC_DRAW);
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, region.water_ebo);
+            glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                         static_cast<GLsizeiptr>(result.water_mesh.indices.size() * sizeof(u32)),
+                         result.water_mesh.indices.data(), GL_STATIC_DRAW);
+            glEnableVertexAttribArray(0);
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, position));
+            glEnableVertexAttribArray(1);
+            glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, normal));
+            glEnableVertexAttribArray(2);
+            glVertexAttribIPointer(2, 1, GL_UNSIGNED_INT, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, material_id));
+            glBindVertexArray(0);
+            region.water_element_count = static_cast<u32>(result.water_mesh.indices.size());
+        }
+
         const float origin_x = static_cast<float>(result.rx) * kRegionSize;
         const float origin_z = static_cast<float>(result.rz) * kRegionSize;
         region.aabb_min = glm::vec3(
@@ -191,12 +277,17 @@ void FarLodSystem::integrate_completed_builds() {
             origin_z);
         region.aabb_max = glm::vec3(
             origin_x + kRegionSize,
-            result.max_height + 1.0f,
+            // The water sheet sits at the global waterline; include it so a
+            // fully-submerged region (max terrain height below SEA_LEVEL) is not
+            // frustum-culled and drops its water sheet (T-I4-DR-far-water-sheet).
+            std::max(result.max_height, Luminumbra::SEA_LEVEL) + 1.0f,
             origin_z + kRegionSize);
         region.resident_bytes =
             result.tile_bytes +
             result.mesh.vertices.size() * sizeof(VoxelVertex) +
-            result.mesh.indices.size() * sizeof(u32);
+            result.mesh.indices.size() * sizeof(u32) +
+            result.water_mesh.vertices.size() * sizeof(VoxelVertex) +
+            result.water_mesh.indices.size() * sizeof(u32);
         region.last_wanted_frame = m_frame;
 
         auto existing = m_residents.find(key);
@@ -323,6 +414,9 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system, const
                 static_cast<float>(World::FarLodSampleStepMeters(tier));
             result.max_height = World::DequantizeFarLodHeight(max_q);
             World::MarchingCubes::GenerateFarLodRegionMesh(tile, result.mesh);
+            // T-I4-DR-far-water-sheet: build the flat water sheet from the same
+            // tile's water flags (river channels + seabeds beyond the live ring).
+            BuildFarLodWaterSheet(tile, result.water_mesh);
 
             std::lock_guard<std::mutex> lock(shared->mutex);
             shared->completed.push_back(std::move(result));
@@ -393,6 +487,8 @@ void FarLodSystem::draw_gbuffer(
     glPolygonOffset(2.0f, 4.0f);
     geometry_shader.setFloat("u_farClipInnerRadius", kFarClipInnerRadiusMeters);
 
+    std::size_t water_draws = 0;
+    std::size_t water_indices = 0;
     for (const auto& [key, region] : m_residents) {
         (void)key;
         if (region.element_count == 0 ||
@@ -413,6 +509,34 @@ void FarLodSystem::draw_gbuffer(
         indices_out += region.element_count;
     }
 
+    // T-I4-DR-far-water-sheet: the flat water sheets draw after the far terrain,
+    // at the global waterline, with the same inner-radius discard so the live
+    // water ring owns the close range. A slightly smaller depth bias than the
+    // terrain keeps the sheet from z-fighting the seabed beneath it while still
+    // sitting under the live surface. Material id kFarWaterMaterialId tints them
+    // deep water in the G-buffer (no live water.frag reflections far out).
+    for (const auto& [key, region] : m_residents) {
+        (void)key;
+        if (region.water_element_count == 0 ||
+            aabb_outside_frustum(region.aabb_min, region.aabb_max, frustum_planes)) {
+            continue;
+        }
+        const glm::vec3 origin(
+            static_cast<float>(region.rx) * kRegionSize,
+            -kFarWaterDepthBiasMeters,
+            static_cast<float>(region.rz) * kRegionSize);
+        const glm::mat4 model = glm::translate(glm::mat4(1.0f), origin);
+        const glm::mat3 normal_matrix = glm::transpose(glm::inverse(glm::mat3(view * model)));
+        geometry_shader.setMat4("model", model);
+        geometry_shader.setMat3("normalMatrix", normal_matrix);
+        glBindVertexArray(region.water_vao);
+        glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(region.water_element_count), GL_UNSIGNED_INT, 0);
+        ++draws_out;
+        indices_out += region.water_element_count;
+        ++water_draws;
+        water_indices += region.water_element_count;
+    }
+
     glBindVertexArray(0);
     glDisable(GL_POLYGON_OFFSET_FILL);
     glPolygonOffset(0.0f, 0.0f);
@@ -422,6 +546,8 @@ void FarLodSystem::draw_gbuffer(
 
     m_stats.region_draws = draws_out;
     m_stats.indices_drawn = indices_out;
+    m_stats.water_sheet_draws = water_draws;
+    m_stats.water_sheet_indices = water_indices;
 }
 
 } // namespace Luminumbra::Rendering

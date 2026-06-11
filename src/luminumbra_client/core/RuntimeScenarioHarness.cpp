@@ -4114,6 +4114,52 @@ FarLodHorizonSkySliverStats AnalyzeFarLodHorizonSkySliver(
     return stats;
 }
 
+// T-I4-DR-far-water-sheet: count deep-water-tinted pixels in the live/far
+// boundary band ROI. The far water sheet renders with a deep-water albedo
+// (blue-dominant, mid brightness): B markedly above R, not the near-white of
+// dry far terrain nor the high-value pale skybox. Returns the count and the
+// fraction of band pixels reading as water; non-zero on a water-bearing preset
+// proves the far water continues where the live water ring ends (no dry band).
+void AnalyzeFarLodBoundaryBandWater(
+    const std::vector<unsigned char>& pixels,
+    int width,
+    int height,
+    int band_top_row_from_top,
+    int band_bottom_row_from_top,
+    std::uint64_t& out_water_pixels,
+    std::uint64_t& out_band_pixels)
+{
+    out_water_pixels = 0;
+    out_band_pixels = 0;
+    if (width <= 0 || height <= 0 ||
+        band_bottom_row_from_top <= band_top_row_from_top ||
+        pixels.size() < static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u) {
+        return;
+    }
+    const int min_x = width / 64;
+    const int max_x = width - min_x;
+    const std::size_t row_stride = static_cast<std::size_t>(width) * 3u;
+    const auto is_far_water = [](unsigned char r, unsigned char g, unsigned char b) {
+        // Blue-dominant, mid brightness: excludes near-white terrain (b<=r) and
+        // the pale skybox (r high). Tuned against the rendered far-water albedo.
+        return b > static_cast<int>(r) + 25 && g >= r && b > 150 && r < 205;
+    };
+    for (int y_from_top = band_top_row_from_top; y_from_top <= band_bottom_row_from_top; ++y_from_top) {
+        if (y_from_top < 0 || y_from_top >= height) {
+            continue;
+        }
+        const int y = height - 1 - y_from_top; // bottom-up buffer row
+        for (int x = min_x; x < max_x; ++x) {
+            const std::size_t offset =
+                static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
+            ++out_band_pixels;
+            if (is_far_water(pixels[offset], pixels[offset + 1u], pixels[offset + 2u])) {
+                ++out_water_pixels;
+            }
+        }
+    }
+}
+
 void WriteFarLodHorizonAnalysis(
     const std::filesystem::path& artifact_dir,
     const std::string& world_preset,
@@ -4139,6 +4185,11 @@ void WriteFarLodHorizonAnalysis(
     std::uint64_t max_band_void_clusters = 0;
     std::size_t bands_resolved = 0;
     int max_sky_sliver_px = 0;
+    // T-I4-DR-far-water-sheet aggregates.
+    std::size_t total_water_sheet_draws = 0;
+    std::size_t max_water_sheet_draws = 0;
+    double max_boundary_band_water_ratio = 0.0;
+    std::uint64_t total_boundary_band_water_pixels = 0;
     bool all_stations_passed = captures.size() == expected_station_count;
 
     nlohmann::json station_rows = nlohmann::json::array();
@@ -4160,6 +4211,11 @@ void WriteFarLodHorizonAnalysis(
             max_band_void_clusters = std::max(max_band_void_clusters, capture.boundary.void_cluster_count);
         }
         max_sky_ratio = std::max(max_sky_ratio, capture.sky.below_horizon_sky_ratio);
+        max_water_sheet_draws = std::max(max_water_sheet_draws, capture.water_sheet_draws);
+        total_water_sheet_draws += capture.water_sheet_draws;
+        max_boundary_band_water_ratio =
+            std::max(max_boundary_band_water_ratio, capture.boundary_band_water_ratio);
+        total_boundary_band_water_pixels += capture.boundary_band_water_pixels;
         final_missing = capture.regions_missing;
         final_resident_bytes = capture.resident_bytes;
         final_wanted = capture.regions_wanted;
@@ -4207,6 +4263,12 @@ void WriteFarLodHorizonAnalysis(
                 {"resident_bytes", capture.resident_bytes},
                 {"region_draws", capture.region_draws},
                 {"far_indices_drawn", capture.far_indices_drawn},
+                {"water_sheet_draws", capture.water_sheet_draws},
+                {"water_sheet_indices", capture.water_sheet_indices},
+            }},
+            {"far_water", {
+                {"boundary_band_water_pixels", capture.boundary_band_water_pixels},
+                {"boundary_band_water_ratio", capture.boundary_band_water_ratio},
             }},
             {"passed", station_passed},
         });
@@ -4249,6 +4311,15 @@ void WriteFarLodHorizonAnalysis(
             {"far_region_draws", final_draws},
             {"far_indices_drawn", final_indices},
         }},
+        {"far_water", {
+            // T-I4-DR-far-water-sheet continuity telemetry. On a water-bearing
+            // preset max_water_sheet_draws > 0 (the far water continues past the
+            // live ring) and the boundary band shows far-water pixels.
+            {"total_water_sheet_draws", total_water_sheet_draws},
+            {"max_water_sheet_draws", max_water_sheet_draws},
+            {"total_boundary_band_water_pixels", total_boundary_band_water_pixels},
+            {"max_boundary_band_water_ratio", max_boundary_band_water_ratio},
+        }},
         {"gbuffer", {
             // Honest in-run A/B: the committed perf baseline records frame
             // times, not per-pass GPU times, so the reference gbuffer time is
@@ -4267,6 +4338,8 @@ void WriteFarLodHorizonAnalysis(
             {"max_boundary_band_sky_ratio", max_band_sky_ratio},
             {"max_boundary_band_void_clusters", max_band_void_clusters},
             {"max_sky_sliver_px", max_sky_sliver_px},
+            {"max_water_sheet_draws", max_water_sheet_draws},
+            {"max_boundary_band_water_ratio", max_boundary_band_water_ratio},
         }},
         {"gl_debug", {
             {"messages", gl_debug.messages},

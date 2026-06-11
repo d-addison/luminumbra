@@ -2537,6 +2537,17 @@ int main(int argc, char* argv[]) {
                                                 128.0f, 384.0f, horizon_row_from_top, band_top, band_bottom)) {
                                             capture.boundary = AnalyzeFarLodBoundaryBand(
                                                 frame_pixels, screenshot_width, screenshot_height, band_top, band_bottom);
+                                            // T-I4-DR-far-water-sheet: far water coverage in the band.
+                                            std::uint64_t band_water_px = 0;
+                                            std::uint64_t band_total_px = 0;
+                                            AnalyzeFarLodBoundaryBandWater(
+                                                frame_pixels, screenshot_width, screenshot_height, band_top, band_bottom,
+                                                band_water_px, band_total_px);
+                                            capture.boundary_band_water_pixels = band_water_px;
+                                            capture.boundary_band_water_ratio =
+                                                band_total_px > 0 ? static_cast<double>(band_water_px) /
+                                                                        static_cast<double>(band_total_px)
+                                                                  : 0.0;
                                         }
                                         // T-I4-DR-river-seam-sliver: above-horizon thin-sliver scan.
                                         capture.sky_sliver = AnalyzeFarLodHorizonSkySliver(
@@ -2549,6 +2560,9 @@ int main(int argc, char* argv[]) {
                                             capture.resident_bytes = farlod_stats.resident_bytes;
                                             capture.region_draws = farlod_stats.region_draws;
                                             capture.far_indices_drawn = farlod_stats.indices_drawn;
+                                            // T-I4-DR-far-water-sheet: far water sheet draw counts.
+                                            capture.water_sheet_draws = farlod_stats.water_sheet_draws;
+                                            capture.water_sheet_indices = farlod_stats.water_sheet_indices;
                                         }
 
                                         const std::string relative_path =
