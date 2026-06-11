@@ -82,6 +82,15 @@ u64 ComputeTerrainParamsHash(const Systems::TerrainGenParams& params, int seed) 
     FnvMixValue(hash, params.cave_carve_value);
     FnvMixValue(hash, static_cast<u8>(params.island_mask_enabled ? 1 : 0));
     FnvMixValue(hash, params.island_mask_frequency);
+    // T-I4-2: mix the biome-table content hash ONLY when biomes are enabled, so
+    // pristine far-LOD tiles self-invalidate on a table content change
+    // (design-decisions section 2). Worlds without biomes contribute nothing
+    // here, keeping every pre-biome far-tile cache key byte-identical (the
+    // disabled path stays byte-zero; FarLodStore fixtures pass unchanged).
+    if (params.biomes_enabled && params.biome_table_content_hash != 0) {
+        FnvMixValue(hash, static_cast<u8>(1));
+        FnvMixValue(hash, params.biome_table_content_hash);
+    }
     return hash;
 }
 

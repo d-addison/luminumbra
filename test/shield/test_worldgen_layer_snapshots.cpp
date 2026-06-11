@@ -1457,6 +1457,134 @@ TEST(WorldGenLayerSnapshotTest, BiomesDisabledIsByteZeroDrift) {
     EXPECT_EQ(legacy_chunk.mesh_vertices.size(), reference_chunk.mesh_vertices.size());
 }
 
+// T-I4-2 BiomeCoverage source: a CPU atlas sweep over the shipped mountains
+// preset (biomes ENABLED) at the fixed atlas seed. Asserts every authored
+// biome is present in the window and per-biome surface-material distribution
+// bands hold, then writes biome-coverage.json for the BiomeCoverage validator
+// mode. The same artifact pins the mountains biome material-distribution
+// contract (deliberate bump on a table/preset change).
+TEST(WorldGenLayerSnapshotTest, MountainsBiomeCoverageAtlas) {
+    const fs::path preset = SourceRoot() / "worlds/atlas/presets/mountains.json";
+    ASSERT_TRUE(fs::exists(preset)) << preset.string();
+    const TerrainGenParams params = LoadPresetParams(preset);
+    ASSERT_TRUE(params.biomes_enabled) << "mountains must opt into biomes (T-I4-2)";
+
+    SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
+    ASSERT_TRUE(world.biomes_enabled());
+    const auto& table = world.biome_table();
+    ASSERT_GE(table.size(), 4u);
+
+    // Atlas window: 1024 m square at 8 m spacing, centered on the origin.
+    constexpr int kHalf = 512;
+    constexpr int kStep = 8;
+    std::unordered_map<int, std::size_t> biome_columns;       // biome id -> column count
+    std::unordered_map<int, std::array<std::size_t, 8>> material_hist; // biome id -> material counts
+    std::size_t total_columns = 0;
+    for (int z = -kHalf; z <= kHalf; z += kStep) {
+        for (int x = -kHalf; x <= kHalf; x += kStep) {
+            const float fx = static_cast<float>(x);
+            const float fz = static_cast<float>(z);
+            const u8 biome_id = world.BiomeIdAt(fx, fz);
+            const float height = world.GetTerrainHeightAt(fx, fz);
+            // Classify the surface skin (depth 0) for the distribution band.
+            const MaterialType material = world.SurfaceMaterialForColumn(height, height, biome_id);
+            const int bid = static_cast<int>(biome_id);
+            ++biome_columns[bid];
+            const auto mat_index = static_cast<std::size_t>(material);
+            if (mat_index < 8) {
+                ++material_hist[bid][mat_index];
+            }
+            ++total_columns;
+        }
+    }
+    ASSERT_GT(total_columns, 0u);
+
+    // Every authored biome must appear at least once over the fixed window.
+    for (const auto& biome : table.biomes()) {
+        EXPECT_GT(biome_columns[static_cast<int>(biome.id)], 0u)
+            << "authored biome '" << biome.name << "' (id " << static_cast<int>(biome.id)
+            << ") is absent from the mountains atlas window";
+    }
+    // No column should be unmatched: plains is the full-span catch-all.
+    EXPECT_EQ(biome_columns[static_cast<int>(Luminumbra::World::kNoBiome)], 0u);
+
+    // Per-biome material band: a biome's surface-skin columns must be drawn
+    // ENTIRELY from its own palette (top above the waterline, underwater below
+    // it) - the measurable proof that the palette is actually applied and that
+    // no biome leaks a foreign material into the G-buffer. Above-water columns
+    // carry the top; below-water columns carry underwater; the two together
+    // must account for essentially all of the biome's columns.
+    for (const auto& biome : table.biomes()) {
+        const int bid = static_cast<int>(biome.id);
+        const std::size_t cols = biome_columns[bid];
+        if (cols == 0) {
+            continue;
+        }
+        const std::size_t palette_count =
+            material_hist[bid][biome.palette.top] + material_hist[bid][biome.palette.underwater];
+        const double palette_ratio = static_cast<double>(palette_count) / static_cast<double>(cols);
+        EXPECT_GT(palette_ratio, 0.99)
+            << "biome '" << biome.name << "' surface skin carries materials outside its palette (in-palette ratio "
+            << palette_ratio << ")";
+    }
+
+    // Distinct biomes actually realized in the window.
+    std::size_t distinct = 0;
+    for (const auto& [bid, count] : biome_columns) {
+        if (bid != static_cast<int>(Luminumbra::World::kNoBiome) && count > 0) {
+            ++distinct;
+        }
+    }
+    EXPECT_GE(distinct, 3u) << "mountains atlas should realize >= 3 biomes";
+
+    // Write the BiomeCoverage artifact.
+    const fs::path out_dir = fs::path(LUMINUMBRA_TEST_ARTIFACT_DIR) / "worldgen_layers" / "biome";
+    fs::create_directories(out_dir);
+    nlohmann::json doc;
+    doc["schema"] = "luminumbra.biome_coverage.v1";
+    doc["preset"] = "mountains";
+    doc["seed"] = kSeed;
+    doc["total_columns"] = total_columns;
+    doc["authored_biome_count"] = table.size();
+    doc["distinct_biomes_realized"] = distinct;
+    doc["biome_table_content_hash"] =
+        (std::ostringstream{} << std::hex << std::setw(16) << std::setfill('0') << table.content_hash()).str();
+    nlohmann::json biome_array = nlohmann::json::array();
+    bool all_present = true;
+    for (const auto& biome : table.biomes()) {
+        const int bid = static_cast<int>(biome.id);
+        const std::size_t cols = biome_columns[bid];
+        if (cols == 0) {
+            all_present = false;
+        }
+        nlohmann::json entry;
+        entry["id"] = bid;
+        entry["name"] = biome.name;
+        entry["columns"] = cols;
+        entry["column_ratio"] = static_cast<double>(cols) / static_cast<double>(total_columns);
+        nlohmann::json materials = nlohmann::json::object();
+        for (std::size_t m = 0; m < 8; ++m) {
+            if (material_hist[bid][m] > 0) {
+                materials[std::to_string(m)] = material_hist[bid][m];
+            }
+        }
+        entry["surface_material_histogram"] = materials;
+        biome_array.push_back(std::move(entry));
+    }
+    doc["biomes"] = std::move(biome_array);
+    doc["all_authored_biomes_present"] = all_present;
+    doc["passed"] = all_present && distinct >= 3u;
+    std::ofstream out(out_dir / "biome-coverage.json");
+    ASSERT_TRUE(out.is_open());
+    out << doc.dump(2) << "\n";
+    out.close();
+    EXPECT_TRUE(all_present);
+
+    std::cout << "[ BIOMECOVERAGE ] mountains seed=" << kSeed << " columns=" << total_columns
+              << " distinct_biomes=" << distinct << " table_hash=0x" << std::hex
+              << std::setw(16) << std::setfill('0') << table.content_hash() << std::dec << "\n";
+}
+
 // ---------------------------------------------------------------------------
 // T-I3-11 slope-histogram atlas gate.
 //

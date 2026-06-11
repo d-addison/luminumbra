@@ -72,6 +72,12 @@ struct TerrainGenParams {
     std::string biome_table_path;
     float temperature_frequency = 0.005f;
     float humidity_frequency = 0.005f;
+    // fnv1a64 of the canonicalized biome table content, stamped by the world
+    // system when it loads the table (0 when biomes are disabled or the table
+    // failed to load). ComputeTerrainParamsHash mixes this in so pristine
+    // far-LOD tiles self-invalidate when the table content changes even though
+    // the path is unchanged (design-decisions section 2).
+    u64 biome_table_content_hash = 0;
 };
 
 struct WorldGenLayerSample {
@@ -245,6 +251,21 @@ public:
     // kNoBiome (255) when biomes are disabled or no row matches, so callers
     // fall back to the legacy single-material classifier.
     u8 BiomeIdAt(float world_x, float world_z) const;
+
+    // T-I4-2 biome-aware surface material. Given a solid surface sample (its
+    // world Y, the column's final terrain height, and the column biome id from
+    // BiomeIdAt), returns the palette material for the band the sample sits in:
+    //   below the waterline -> palette.underwater
+    //   depth < 1 m (top)   -> palette.top
+    //   depth < 5 m (filler)-> palette.filler
+    //   deeper (depth)      -> palette.depth
+    // With biome_id == kNoBiome (biomes disabled or unmatched) this reproduces
+    // the legacy Sand/Grass/Soil/Stone classifier BIT-FOR-BIT, so disabled
+    // worlds keep byte-zero drift. The plains palette maps to exactly the
+    // legacy materials, so a plains column is also unchanged.
+    MaterialType SurfaceMaterialForColumn(float world_y,
+                                          float final_height,
+                                          u8 biome_id) const;
 
     static IVec3 world_to_chunk_coords(const Vec3& position);
 

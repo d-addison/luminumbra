@@ -1,7 +1,7 @@
 {
   "name": "Mountainous",
   "description": "Dramatic shaped mountain ranges rising from walkable valleys and plateaus",
-  "schema_rev": 2,
+  "schema_rev": 3,
   "generation_params": {
     "terrain": {
       "base_frequency": 0.008,
@@ -24,6 +24,7 @@
       }
     },
     "biomes": {
+      "table": "common/biomes.json",
       "temperature_frequency": 0.003,
       "humidity_frequency": 0.004
     },

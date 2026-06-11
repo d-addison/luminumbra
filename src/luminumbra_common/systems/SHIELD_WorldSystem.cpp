@@ -62,23 +62,20 @@ float apply_cave_field(float terrain_density, float raw_cave_noise, const Terrai
     return std::max(terrain_density, surface_capped_cave_density(terrain_density, raw_cave_noise, params));
 }
 
-MaterialType classify_material(const WorldGenLayerSample& sample) {
-    if (!sample.solid) {
-        return MaterialType::Air;
-    }
-
-    if (sample.world_pos.y < 34.0f && sample.final_height < 36.0f) {
+// Legacy single-material classifier (biome_id == kNoBiome). Kept as the exact
+// float-op sequence the pre-biome implementation used so disabled worlds stay
+// byte-zero; SurfaceMaterialForColumn dispatches here when no biome applies.
+MaterialType classify_material_legacy(float world_y, float final_height) {
+    if (world_y < 34.0f && final_height < 36.0f) {
         return MaterialType::Sand;
     }
-
-    const float depth = sample.final_height - sample.world_pos.y;
+    const float depth = final_height - world_y;
     if (depth < 1.0f) {
         return MaterialType::Grass;
     }
     if (depth < 5.0f) {
         return MaterialType::Soil;
     }
-
     return MaterialType::Stone;
 }
 
@@ -236,6 +233,9 @@ void SHIELD_WorldSystem::reinitialize_noise() {
     m_humidity_generator = {};
     m_biome_table = World::BiomeTable{};
     m_biomes_enabled = false;
+    // Stamp the table content hash into params (0 unless a table actually
+    // loads) so ComputeTerrainParamsHash mixes it into the far-LOD cache key.
+    m_params.biome_table_content_hash = 0;
     if (m_params.biomes_enabled) {
         auto temperature_fractal = FastNoise::New<FastNoise::FractalFBm>();
         temperature_fractal->SetSource(FastNoise::New<FastNoise::Simplex>());
@@ -260,6 +260,7 @@ void SHIELD_WorldSystem::reinitialize_noise() {
             m_biomes_enabled = false;
         } else {
             m_biomes_enabled = true;
+            m_params.biome_table_content_hash = m_biome_table.content_hash();
         }
     }
 }
@@ -425,6 +426,31 @@ u8 SHIELD_WorldSystem::BiomeIdAt(float world_x, float world_z) const {
                                 climate.peaks_valleys,
                                 climate.temperature,
                                 climate.humidity);
+}
+
+MaterialType SHIELD_WorldSystem::SurfaceMaterialForColumn(
+    float world_y, float final_height, u8 biome_id) const {
+    // No biome (disabled / unmatched): the exact legacy classifier.
+    if (!m_biomes_enabled || biome_id == World::kNoBiome || m_biome_table.empty()) {
+        return classify_material_legacy(world_y, final_height);
+    }
+
+    const World::BiomeSurfacePalette& palette = m_biome_table.palette_for(biome_id);
+    // Band selection mirrors the legacy classifier exactly (same thresholds,
+    // same float-op sequence) but maps each band to the biome palette: the
+    // waterline/sand band -> underwater, the surface skin -> top, the shallow
+    // subsurface -> filler, the deep interior -> depth.
+    if (world_y < 34.0f && final_height < 36.0f) {
+        return static_cast<MaterialType>(palette.underwater);
+    }
+    const float depth = final_height - world_y;
+    if (depth < 1.0f) {
+        return static_cast<MaterialType>(palette.top);
+    }
+    if (depth < 5.0f) {
+        return static_cast<MaterialType>(palette.filler);
+    }
+    return static_cast<MaterialType>(palette.depth);
 }
 
 SHIELD_WorldSystem::ColumnSurfaceSpan SHIELD_WorldSystem::compute_column_surface_span(int chunk_x, int chunk_z) const {
@@ -1379,7 +1405,16 @@ WorldGenLayerSample SHIELD_WorldSystem::SampleWorldGenLayers(const Vec3& world_p
     }
 
     sample.solid = sample.final_density < 0.0f;
-    sample.material = classify_material(sample);
+    if (!sample.solid) {
+        sample.material = MaterialType::Air;
+    } else {
+        // T-I4-2: biome-aware surface material. When biomes are disabled the
+        // biome id is kNoBiome and SurfaceMaterialForColumn reproduces the
+        // legacy classifier bit-for-bit. The column biome is resolved from the
+        // surface (world_x/world_z), not the sample's depth.
+        const u8 biome_id = BiomeIdAt(world_pos.x, world_pos.z);
+        sample.material = SurfaceMaterialForColumn(world_pos.y, sample.final_height, biome_id);
+    }
     return sample;
 }
 

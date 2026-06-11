@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "SkinnedMeshVisual", "EngineGameSplitLint", "CreatureSlice", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "SkinnedMeshVisual", "EngineGameSplitLint", "CreatureSlice", "BiomeCoverage", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -3205,6 +3205,63 @@ function Test-CreatureSlice {
         $analysis.before_stimulus.plan.plans_executed, $analysis.after_stimulus.plan.plans_executed)
 }
 
+# --- T-I4-2 BiomeCoverage mode: append-only ---
+# Atlas coverage gate for biomes. Runs the MountainsBiomeCoverageAtlas gtest
+# (which sweeps the shipped mountains preset - biomes enabled - at the fixed
+# atlas seed and emits biome-coverage.json), then asserts every authored biome
+# is present and the per-biome surface-material distribution holds. Append-only;
+# no existing gate behavior changes.
+function Test-BiomeCoverage {
+    $exe = "build/$BuildPreset/bin/worldgen_layer_snapshot_test.exe"
+    if (-not (Test-Path $exe)) {
+        throw "BiomeCoverage gate: missing $exe (cmake --build --preset $BuildPreset)"
+    }
+    & $exe "--gtest_filter=WorldGenLayerSnapshotTest.MountainsBiomeCoverageAtlas"
+    if ($LASTEXITCODE -ne 0) {
+        throw "BiomeCoverage gtest (MountainsBiomeCoverageAtlas) failed with exit code $LASTEXITCODE"
+    }
+
+    $analysisPath = "build/$BuildPreset/test-artifacts/worldgen_layers/biome/biome-coverage.json"
+    if (-not (Test-Path $analysisPath)) {
+        throw "BiomeCoverage gate: missing $analysisPath (produced by MountainsBiomeCoverageAtlas)"
+    }
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.biome_coverage.v1") {
+        throw "Unexpected biome coverage schema '$($analysis.schema)'"
+    }
+    if ($analysis.preset -ne "mountains") {
+        throw "BiomeCoverage must analyze the mountains preset (got '$($analysis.preset)')"
+    }
+    if (-not $analysis.all_authored_biomes_present) {
+        throw "BiomeCoverage: not every authored biome is present in the atlas window"
+    }
+    if ([int64]$analysis.authored_biome_count -lt 4) {
+        throw "BiomeCoverage: expected >= 4 authored biomes (got $($analysis.authored_biome_count))"
+    }
+    if ([int64]$analysis.distinct_biomes_realized -lt 3) {
+        throw "BiomeCoverage: fewer than 3 biomes realized in the window ($($analysis.distinct_biomes_realized))"
+    }
+    if (-not $analysis.passed) {
+        throw "BiomeCoverage analysis reported failure"
+    }
+
+    $biomes = @($analysis.biomes)
+    if ($biomes.Count -lt 4) {
+        throw "BiomeCoverage: biome entry array too small ($($biomes.Count))"
+    }
+    foreach ($biome in $biomes) {
+        if ([int64]$biome.columns -le 0) {
+            throw "BiomeCoverage: authored biome '$($biome.name)' has zero columns"
+        }
+        if ($null -eq $biome.surface_material_histogram) {
+            throw "BiomeCoverage: biome '$($biome.name)' is missing its surface material histogram"
+        }
+    }
+    Write-Host ("biome coverage gate passed: preset={0} columns={1} authored={2} realized={3} table_hash={4}" -f `
+        $analysis.preset, $analysis.total_columns, $analysis.authored_biome_count, `
+        $analysis.distinct_biomes_realized, $analysis.biome_table_content_hash)
+}
+
 switch ($Mode) {
     "CodexOnly" { Test-CodexOnly }
     "Panels" { Test-Panels }
@@ -3244,6 +3301,7 @@ switch ($Mode) {
     "SkinnedMeshVisual" { Test-SkinnedMeshVisual }
     "EngineGameSplitLint" { Test-EngineGameSplitLint }
     "CreatureSlice" { Test-CreatureSlice }
+    "BiomeCoverage" { Test-BiomeCoverage }
     "All" {
         Test-CodexOnly
         Test-Files
