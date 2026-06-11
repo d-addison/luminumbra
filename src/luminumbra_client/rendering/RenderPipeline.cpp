@@ -29,6 +29,7 @@
 #include "passes/SsaoPass.h"
 #include "passes/WaterPass.h"
 #include <stb_image.h>
+#include <nlohmann/json.hpp>
 
 namespace {
 // Helper for frustum culling
@@ -330,7 +331,9 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         m_ssao_pass->init_ssao(screen_width, screen_height);
         init_screen_quad();
         m_skybox_pass->init_geometry();
+        load_material_texture_lut();
         init_terrain_textures();
+        init_skinned_textures();
         init_material_lut();
         init_texture_residency();
         m_water_pass->init_water_fallback_textures();
@@ -474,8 +477,10 @@ RenderPipeline::RuntimeRenderStats RenderPipeline::get_runtime_render_stats() co
     if (m_screen_quad_vbo) estimated_vram_bytes += 20u * sizeof(float);
     if (m_skybox_pass->vbo()) estimated_vram_bytes += 108u * sizeof(float);
     if (m_gbuffer_pass->instance_matrix_vbo()) estimated_vram_bytes += 10000u * sizeof(glm::mat4);
-    if (m_terrainTextureArray) estimated_vram_bytes += 2048u * 2048u * 5u * 4u;
-    if (m_materialLUT) estimated_vram_bytes += 256u * 4u;
+    if (m_terrainTextureArray) estimated_vram_bytes += static_cast<size_t>(kTerrainTextureResolution) * kTerrainTextureResolution * 5u * 4u;
+    if (m_terrainNormalArray) estimated_vram_bytes += static_cast<size_t>(kTerrainTextureResolution) * kTerrainTextureResolution * 5u * 4u;
+    if (m_skinnedTextureArray) estimated_vram_bytes += static_cast<size_t>(kSkinnedTextureResolution) * kSkinnedTextureResolution * 2u * 4u;
+    if (m_materialLUT) estimated_vram_bytes += 256u * 2u * 4u;
     if (m_water_pass->flat_normal_texture()) estimated_vram_bytes += 4u;
     if (m_water_pass->neutral_flow_texture()) estimated_vram_bytes += 4u;
     if (m_water_pass->black_fallback_texture()) estimated_vram_bytes += 4u;
@@ -577,6 +582,8 @@ RenderPipeline::RenderResourceRegistryStats RenderPipeline::get_resource_registr
     stats.textures += count(m_ssao_pass->ssao().ssaoColorBufferBlur);
     stats.textures += count(m_ssao_pass->ssao().noiseTexture);
     stats.textures += count(m_terrainTextureArray);
+    stats.textures += count(m_terrainNormalArray);
+    stats.textures += count(m_skinnedTextureArray);
     stats.textures += count(m_materialLUT);
     stats.textures += count(m_water_pass->flat_normal_texture());
     stats.textures += count(m_water_pass->neutral_flow_texture());
@@ -771,7 +778,7 @@ void RenderPipeline::refresh_render_pass_metadata() {
 
     add_pass("shadow", {"terrain_depth"}, {"shadow.depth_texture_array"}, m_shadow_pass->shadow_map().resolution, m_shadow_pass->shadow_map().resolution,
              "depth", "store depth cascades", m_last_render_pass_stats.shadow_draws);
-    add_pass("gbuffer", {"terrain_meshes", "farlod_region_meshes", "static_meshes", "skinned_meshes", "material_lut"},
+    add_pass("gbuffer", {"terrain_meshes", "farlod_region_meshes", "static_meshes", "skinned_meshes", "material_lut", "terrain_texture_array", "terrain_normal_array"},
              {"gbuffer.position", "gbuffer.normal_material", "gbuffer.albedo_roughness", "gbuffer.metallic_ao", "gbuffer.depth"},
              m_screen_width, m_screen_height, "color+depth", "store deferred attachments",
              m_last_render_pass_stats.terrain_draws + m_last_render_pass_stats.far_region_draws + m_last_render_pass_stats.skinned_draws);
@@ -1252,6 +1259,8 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_gbuffer_pass->destroy_instanced_static_mesh();
     m_gbuffer_pass->destroy_skinned_mesh();
     if (m_terrainTextureArray) { glDeleteTextures(1, &m_terrainTextureArray); m_terrainTextureArray = 0; }
+    if (m_terrainNormalArray) { glDeleteTextures(1, &m_terrainNormalArray); m_terrainNormalArray = 0; }
+    if (m_skinnedTextureArray) { glDeleteTextures(1, &m_skinnedTextureArray); m_skinnedTextureArray = 0; }
     if (m_materialLUT) { glDeleteTextures(1, &m_materialLUT); m_materialLUT = 0; }
     destroy_texture_residency();
     m_water_pass->destroy_water_fallback_textures();
@@ -1767,99 +1776,287 @@ void RenderPipeline::unload_chunk_resources(ChunkID chunk_id) {
 
 // --- HELPERS ---
 void RenderPipeline::init_terrain_textures() {
-    // List of textures to load in order. This order MUST match the MaterialID enum,
-    // starting from MaterialID = 1.
-    const std::vector<std::string> texture_paths = {
-        "data/textures/terrain/rock/Rock028_2K-PNG_Color.png",      // MaterialID = 1 (Stone) -> Index 0
-        "data/textures/terrain/soil/Ground048_2K-PNG_Color.png",       // MaterialID = 2 (Soil) -> Index 1
-        "data/textures/terrain/grass/Grass003_2K-PNG_Color.png",      // MaterialID = 3 (Grass) -> Index 2
-        "data/textures/terrain/sand/Ground087_2K-PNG_Color.png",       // MaterialID = 4 (Sand) -> Index 3
-        "data/textures/terrain/deepslate/Gravel040_2K-PNG_Color.png" // MaterialID = 5 (Deepslate) -> Index 4
+    // T-I4-7: triplanar terrain fidelity. Two GL_TEXTURE_2D_ARRAY objects keyed
+    // by the material-LUT layer indices (design §3/§10): an sRGB albedo array
+    // and a linear tangent-space (OpenGL convention) normal-map array. The
+    // committed 256x256 .ltex plates carry their own box-filtered mip chains, so
+    // the whole terrain set stays far inside the 96 MB residency budget. Texture
+    // arrays (not bindless) per design §10.
+    //
+    // Layer order matches the material LUT texture_layer/normal_layer columns:
+    //   layer 0 Stone, 1 Soil, 2 Grass, 3 Sand, 4 Deepslate.
+    struct TerrainLayerAssets {
+        const char* albedo;
+        const char* normal;
+    };
+    const std::array<TerrainLayerAssets, 5> assets = {{
+        {"data/textures/terrain/rock/stone_albedo_256.ltex",        "data/textures/terrain/rock/stone_normal_256.ltex"},
+        {"data/textures/terrain/soil/soil_albedo_256.ltex",         "data/textures/terrain/soil/soil_normal_256.ltex"},
+        {"data/textures/terrain/grass/grass_albedo_256.ltex",       "data/textures/terrain/grass/grass_normal_256.ltex"},
+        {"data/textures/terrain/sand/sand_albedo_256.ltex",         "data/textures/terrain/sand/sand_normal_256.ltex"},
+        {"data/textures/terrain/deepslate/deepslate_albedo_256.ltex","data/textures/terrain/deepslate/deepslate_normal_256.ltex"},
+    }};
+
+    const int res = kTerrainTextureResolution;
+    const int layer_count = static_cast<int>(assets.size());
+    m_terrain_texture_fallback_layers = 0;
+    m_material_texture_lut.terrain_layer_count = layer_count;
+
+    // Uploads a .ltex (or a checker fallback) into one layer of a bound array,
+    // mip level by mip level. Returns true if the .ltex loaded cleanly.
+    auto upload_layer = [&](const std::filesystem::path& rel, int layer,
+                            bool is_normal) -> bool {
+        LtexCpuImage img;
+        if (load_ltex_cpu_image(m_root_path / rel, img) &&
+            img.width == static_cast<uint32_t>(res) &&
+            img.height == static_cast<uint32_t>(res) && img.channels == 4u) {
+            // Upload mip 0 only; the array is allocated with glTexImage3D (which
+            // reserves level 0) and glGenerateMipmap below rebuilds the chain.
+            // (The .ltex carries pre-built mips, but uploading them to an array
+            // that only has level 0 storage is a GL error, and generated mips
+            // are equivalent here.)
+            glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, layer,
+                            static_cast<GLsizei>(img.width), static_cast<GLsizei>(img.height), 1,
+                            GL_RGBA, GL_UNSIGNED_BYTE, img.bytes.data());
+            return true;
+        }
+        // Fallback: magenta checker (albedo) or flat up-normal (normal map).
+        if (is_normal) {
+            std::vector<unsigned char> flat(static_cast<size_t>(res) * res * 4u);
+            for (size_t p = 0; p < static_cast<size_t>(res) * res; ++p) {
+                flat[p * 4 + 0] = 128; flat[p * 4 + 1] = 128;
+                flat[p * 4 + 2] = 255; flat[p * 4 + 3] = 255;
+            }
+            glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, layer, res, res, 1,
+                            GL_RGBA, GL_UNSIGNED_BYTE, flat.data());
+        } else {
+            const std::vector<unsigned char> fallback = make_terrain_fallback_texture(res, res, layer);
+            glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, layer, res, res, 1,
+                            GL_RGBA, GL_UNSIGNED_BYTE, fallback.data());
+            ++m_terrain_texture_fallback_layers;
+        }
+        LUMINUMBRA_CORE_ERROR("Terrain texture: failed to load .ltex layer '{}'", rel.string());
+        return false;
     };
 
-    const int texture_width = 2048;  // Assuming all textures are 2K
-    const int texture_height = 2048;
-    const int layer_count = texture_paths.size();
-    m_terrain_texture_fallback_layers = 0;
-
+    // --- Albedo array (sRGB) ---
     glGenTextures(1, &m_terrainTextureArray);
     label_gl_object(GL_TEXTURE, m_terrainTextureArray, "terrain.texture_array");
     glBindTexture(GL_TEXTURE_2D_ARRAY, m_terrainTextureArray);
-
-    // Allocate storage for the entire texture array
-    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_SRGB8_ALPHA8, texture_width, texture_height, layer_count, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_SRGB8_ALPHA8, res, res, layer_count, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     for (int i = 0; i < layer_count; ++i) {
-        std::string full_path = (m_root_path / texture_paths[i]).string();
-        int width, height, channels;
-        stbi_set_flip_vertically_on_load(true);
-        unsigned char* data = stbi_load(full_path.c_str(), &width, &height, &channels, 4); // Force 4 channels
-        bool uploaded = false;
-
-        if (data) {
-            if (width != texture_width || height != texture_height) {
-                 LUMINUMBRA_CORE_ERROR("Texture '{}' has wrong dimensions!", texture_paths[i]);
-                 stbi_image_free(data);
-                 data = nullptr;
-            } else {
-                // Upload data to the i-th layer of the array
-                glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, i, width, height, 1, GL_RGBA, GL_UNSIGNED_BYTE, data);
-                stbi_image_free(data);
-                uploaded = true;
-            }
-        }
-
-        if (!uploaded) {
-            LUMINUMBRA_CORE_ERROR("Failed to load texture array layer: {}", texture_paths[i]);
-            const std::vector<unsigned char> fallback = make_terrain_fallback_texture(texture_width, texture_height, i);
-            glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, i, texture_width, texture_height, 1, GL_RGBA, GL_UNSIGNED_BYTE, fallback.data());
-            ++m_terrain_texture_fallback_layers;
-        }
+        upload_layer(assets[i].albedo, i, /*is_normal=*/false);
     }
-
-    // Set texture parameters
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    
-    glGenerateMipmap(GL_TEXTURE_2D_ARRAY); // Generate mipmaps for the entire array
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 8); // 256 -> 1 is 9 levels
+    glGenerateMipmap(GL_TEXTURE_2D_ARRAY); // build full mip chain from level 0
 
-    LUMINUMBRA_CORE_INFO("Terrain texture array loaded with {} layers.", layer_count);
+    // --- Normal-map array (linear RGBA8, tangent space) ---
+    glGenTextures(1, &m_terrainNormalArray);
+    label_gl_object(GL_TEXTURE, m_terrainNormalArray, "terrain.normal_array");
+    glBindTexture(GL_TEXTURE_2D_ARRAY, m_terrainNormalArray);
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8, res, res, layer_count, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    for (int i = 0; i < layer_count; ++i) {
+        upload_layer(assets[i].normal, i, /*is_normal=*/true);
+    }
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 8);
+    glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+
+    LUMINUMBRA_CORE_INFO("Terrain texture arrays loaded ({} albedo + {} normal layers, {}x{}).",
+                         layer_count, layer_count, res, res);
+}
+
+void RenderPipeline::init_skinned_textures() {
+    // T-I4-8: UV-mapped creature texture array. Layer 0 grovestrider albedo,
+    // layer 1 grovestrider normal. Loaded from the committed 256x256 .ltex.
+    const int res = kSkinnedTextureResolution;
+    struct SkinnedAsset { const char* path; bool is_normal; };
+    const std::array<SkinnedAsset, 2> assets = {{
+        {"data/textures/creatures/grovestrider/grovestrider_albedo_256.ltex", false},
+        {"data/textures/creatures/grovestrider/grovestrider_normal_256.ltex", true},
+    }};
+    const int layer_count = static_cast<int>(assets.size());
+
+    glGenTextures(1, &m_skinnedTextureArray);
+    label_gl_object(GL_TEXTURE, m_skinnedTextureArray, "creature.texture_array");
+    glBindTexture(GL_TEXTURE_2D_ARRAY, m_skinnedTextureArray);
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_SRGB8_ALPHA8, res, res, layer_count, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+
+    bool albedo_ok = false;
+    bool normal_ok = false;
+    for (int i = 0; i < layer_count; ++i) {
+        LtexCpuImage img;
+        if (load_ltex_cpu_image(m_root_path / assets[i].path, img) &&
+            img.width == static_cast<uint32_t>(res) &&
+            img.height == static_cast<uint32_t>(res) && img.channels == 4u) {
+            glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, i,
+                            static_cast<GLsizei>(img.width), static_cast<GLsizei>(img.height), 1,
+                            GL_RGBA, GL_UNSIGNED_BYTE, img.bytes.data());
+            if (assets[i].is_normal) normal_ok = true; else albedo_ok = true;
+        } else {
+            // Flat fallback so the layer is still valid (mid-grey albedo /
+            // up-normal); the skinned mesh stays visible, just untextured.
+            std::vector<unsigned char> fill(static_cast<size_t>(res) * res * 4u);
+            for (size_t p = 0; p < static_cast<size_t>(res) * res; ++p) {
+                if (assets[i].is_normal) {
+                    fill[p*4+0] = 128; fill[p*4+1] = 128; fill[p*4+2] = 255; fill[p*4+3] = 255;
+                } else {
+                    fill[p*4+0] = 120; fill[p*4+1] = 150; fill[p*4+2] = 90; fill[p*4+3] = 255;
+                }
+            }
+            glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, i, res, res, 1,
+                            GL_RGBA, GL_UNSIGNED_BYTE, fill.data());
+            LUMINUMBRA_CORE_WARN("Creature texture: failed to load '{}', using flat fallback.", assets[i].path);
+        }
+    }
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 8);
+    glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+
+    m_grovestriderAlbedoLayer = albedo_ok ? 0 : 0; // layer 0 regardless (fallback valid)
+    m_grovestriderNormalLayer = 1;                  // layer 1 (fallback flat-normal valid)
+    (void)normal_ok;
+    LUMINUMBRA_CORE_INFO("Creature texture array loaded ({} layers, {}x{}).", layer_count, res, res);
+}
+
+void RenderPipeline::load_material_texture_lut() {
+    // Parse the texture_layer/normal_layer/tiling columns from materials.json
+    // (design §3). Defaults (untextured/flat, tiling 4) are kept for any
+    // material that omits the columns or for a missing file.
+    m_material_texture_lut = MaterialTextureLut{};
+    const std::filesystem::path path = m_root_path / "data/common/materials.json";
+    std::ifstream in(path);
+    if (!in) {
+        LUMINUMBRA_CORE_WARN("Material texture LUT: materials.json not found at '{}', terrain stays untextured.", path.string());
+        return;
+    }
+    try {
+        nlohmann::json doc = nlohmann::json::parse(in);
+        if (!doc.contains("materials") || !doc["materials"].is_array()) {
+            LUMINUMBRA_CORE_WARN("Material texture LUT: materials.json missing 'materials' array.");
+            return;
+        }
+        int textured = 0;
+        for (const auto& mat : doc["materials"]) {
+            if (!mat.contains("id")) continue;
+            const int id = mat["id"].get<int>();
+            if (id < 0 || id >= 256) continue;
+            if (mat.contains("texture_layer")) {
+                m_material_texture_lut.texture_layer[static_cast<size_t>(id)] = mat["texture_layer"].get<int>();
+                if (m_material_texture_lut.texture_layer[static_cast<size_t>(id)] >= 0) ++textured;
+            }
+            if (mat.contains("normal_layer")) {
+                m_material_texture_lut.normal_layer[static_cast<size_t>(id)] = mat["normal_layer"].get<int>();
+            }
+            if (mat.contains("tiling")) {
+                const float t = mat["tiling"].get<float>();
+                if (t > 0.0f) m_material_texture_lut.tiling[static_cast<size_t>(id)] = t;
+            }
+            if (mat.contains("emissive_intensity")) {
+                m_material_texture_lut.emissive_intensity[static_cast<size_t>(id)] =
+                    std::max(0.0f, mat["emissive_intensity"].get<float>());
+            } else if (mat.contains("emission")) {
+                // A material with authored emission but no explicit intensity
+                // defaults to unit intensity so legacy emissive materials glow.
+                m_material_texture_lut.emissive_intensity[static_cast<size_t>(id)] = 1.0f;
+            }
+            if (mat.contains("roughness")) {
+                m_material_texture_lut.roughness[static_cast<size_t>(id)] =
+                    glm::clamp(mat["roughness"].get<float>(), 0.0f, 1.0f);
+                m_material_texture_lut.roughness_set[static_cast<size_t>(id)] = true;
+            }
+        }
+        LUMINUMBRA_CORE_INFO("Material texture LUT parsed: {} textured material(s) from materials.json.", textured);
+    } catch (const std::exception& e) {
+        LUMINUMBRA_CORE_WARN("Material texture LUT: failed to parse materials.json ({}); terrain stays untextured.", e.what());
+        m_material_texture_lut = MaterialTextureLut{};
+    }
 }
 
 void RenderPipeline::init_material_lut() {
-    // Create material properties lookup texture (256x4 RGBA8 = 1KB)
+    // Material properties LUT (T-I4-7 two rows; T-I4-9 adds row 2). Sampled by
+    // material id (u = id/255) at the row centers:
+    //   row 0 (v=1/6): [R metallic, G roughness, B AO, A magical-flag]
+    //   row 1 (v=1/2): [R texture_layer/255, G normal_layer/255, B tiling/64,
+    //                   A has_texture]
+    //   row 2 (v=5/6): [R emissive_intensity/kEmissiveLutScale, G/B/A reserved]
+    // The texture/emissive columns come from materials.json
+    // (load_material_texture_lut). The emissive_intensity column drives the
+    // emission->lighting->glow chain (T-I4-9 calibration); it is stored
+    // normalized by kEmissiveLutScale so the 0..1 RGBA8 LUT covers intensities
+    // up to that ceiling, and the lighting pass rescales it back.
     const int MATERIAL_COUNT = 256;
-    
-    // Material properties: [R: Metallic, G: Roughness, B: AO, A: Reserved]
-    std::vector<glm::vec4> materialData(MATERIAL_COUNT, glm::vec4(0.1f, 0.8f, 1.0f, 0.0f)); // Default values
-    
-    // Define specific materials matching the G-Buffer shader
-    materialData[0] = glm::vec4(0.1f, 0.8f, 1.0f, 0.0f);   // Air/Default
-    materialData[1] = glm::vec4(0.05f, 0.85f, 1.0f, 0.0f); // Stone
-    materialData[2] = glm::vec4(0.0f, 0.9f, 1.0f, 0.0f);   // Soil
-    materialData[3] = glm::vec4(0.0f, 0.8f, 1.0f, 0.0f);   // Grass
-    materialData[4] = glm::vec4(0.0f, 0.75f, 1.0f, 0.0f);  // Sand
-    materialData[5] = glm::vec4(0.02f, 0.95f, 1.0f, 0.0f); // Deepslate
-    materialData[6] = glm::vec4(0.1f, 0.05f, 1.0f, 1.0f);  // Luminous Crystal (marked as magical in alpha)
-    materialData[7] = glm::vec4(0.0f, 0.1f, 1.0f, 0.0f);   // Water
-    
-    // Additional materials can be added here for future expansion
-    // materialData[8] = glm::vec4(...);  // Wood
-    // materialData[9] = glm::vec4(...);  // Metal
-    // etc.
-    
+    const int ROWS = 3;
+
+    std::vector<glm::vec4> materialData(static_cast<size_t>(MATERIAL_COUNT) * ROWS, glm::vec4(0.1f, 0.8f, 1.0f, 0.0f));
+    auto row0 = [&](int id) -> glm::vec4& { return materialData[static_cast<size_t>(id)]; };
+    auto row1 = [&](int id) -> glm::vec4& { return materialData[static_cast<size_t>(MATERIAL_COUNT + id)]; };
+    auto row2 = [&](int id) -> glm::vec4& { return materialData[static_cast<size_t>(2 * MATERIAL_COUNT + id)]; };
+
+    // Row 0 (metallic / roughness / AO / magical). T-I4-10: the G (roughness)
+    // channel is now DRIVEN by the materials.json roughness column (default 0.85)
+    // via the parsed LUT; metallic/AO/magical keep their authored values. The
+    // roughness feeds the G-buffer and the lighting specular response.
+    row0(0) = glm::vec4(0.1f, 0.8f, 1.0f, 0.0f);   // Air/Default
+    row0(1) = glm::vec4(0.05f, 0.85f, 1.0f, 0.0f); // Stone
+    row0(2) = glm::vec4(0.0f, 0.9f, 1.0f, 0.0f);   // Soil
+    row0(3) = glm::vec4(0.0f, 0.8f, 1.0f, 0.0f);   // Grass
+    row0(4) = glm::vec4(0.0f, 0.75f, 1.0f, 0.0f);  // Sand
+    row0(5) = glm::vec4(0.02f, 0.95f, 1.0f, 0.0f); // Deepslate
+    row0(6) = glm::vec4(0.1f, 0.05f, 1.0f, 1.0f);  // Luminous Crystal (magical in alpha)
+    row0(7) = glm::vec4(0.0f, 0.1f, 1.0f, 0.0f);   // Water
+    // Override the roughness channel from the data-driven column. Materials that
+    // do not declare roughness keep the 0.85 default (matching the authored
+    // values above for the common terrain ids).
+    for (int id = 0; id < MATERIAL_COUNT; ++id) {
+        if (m_material_texture_lut.roughness_set[static_cast<size_t>(id)]) {
+            row0(id).g = m_material_texture_lut.roughness[static_cast<size_t>(id)];
+        } else if (id != 0) {
+            // Unknown materials default to 0.85 (design §3 roughness default).
+            row0(id).g = 0.85f;
+        }
+    }
+
+    // Rows 1 + 2 (texture + emissive columns) — baked from the parsed LUT.
+    for (int id = 0; id < MATERIAL_COUNT; ++id) {
+        const int tl = m_material_texture_lut.texture_layer[static_cast<size_t>(id)];
+        const int nl = m_material_texture_lut.normal_layer[static_cast<size_t>(id)];
+        const float tiling = m_material_texture_lut.tiling[static_cast<size_t>(id)];
+        const bool has_tex = tl >= 0;
+        row1(id) = glm::vec4(
+            has_tex ? static_cast<float>(tl) / 255.0f : 0.0f,
+            (nl >= 0) ? static_cast<float>(nl) / 255.0f : 0.0f,
+            glm::clamp(tiling / 64.0f, 0.0f, 1.0f),
+            has_tex ? 1.0f : 0.0f);
+        const float ei = m_material_texture_lut.emissive_intensity[static_cast<size_t>(id)];
+        row2(id) = glm::vec4(glm::clamp(ei / kEmissiveLutScale, 0.0f, 1.0f), 0.0f, 0.0f, 0.0f);
+    }
+
     glGenTextures(1, &m_materialLUT);
     label_gl_object(GL_TEXTURE, m_materialLUT, "terrain.material_lut");
     glBindTexture(GL_TEXTURE_2D, m_materialLUT);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, MATERIAL_COUNT, 1, 0, GL_RGBA, GL_FLOAT, materialData.data());
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, MATERIAL_COUNT, ROWS, 0, GL_RGBA, GL_FLOAT, materialData.data());
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    
-    LUMINUMBRA_CORE_INFO("Material LUT initialized with {} materials.", MATERIAL_COUNT);
+
+    LUMINUMBRA_CORE_INFO("Material LUT initialized ({} materials x {} rows).", MATERIAL_COUNT, ROWS);
 }
 
 // --- TEXTURE-ARRAY RESIDENCY MANAGER (T-I4-6) ---
