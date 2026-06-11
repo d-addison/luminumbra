@@ -301,10 +301,16 @@ private:
     // Required streaming LOD for a chunk: horizontal-only distance for
     // surface-band chunks (keeps the terrain surface on one LOD per column
     // so vertical LOD seams cannot open), 3D distance for deep/air chunks.
+    // current_lod (T-I3-19): the chunk's already-meshed LOD, or -1 if the
+    // chunk has never been meshed. When >= 0, demotions (finer -> coarser)
+    // apply an asymmetric hysteresis margin so chunks dwelling on a band
+    // edge do not oscillate; promotions and first-time assignment are
+    // unaffected (see implementation comment).
     int get_required_lod_for_chunk(
         const IVec3& coords,
         const Vec3& chunk_center,
-        const Vec3& camera_position);
+        const Vec3& camera_position,
+        int current_lod = -1);
 
     // Chunk-Y span of the terrain surface for a horizontal column (T-I3-2).
     // Sampled at 5 points - the column center plus its 4 footprint corners -
