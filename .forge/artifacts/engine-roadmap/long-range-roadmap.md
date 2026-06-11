@@ -225,6 +225,15 @@ cavern ecosystems (night/cave photography x light fields); volumetric
 clouds as a second SHIELD-RT raymarch consumer; deterministic erosion
 detail pass (thermal+hydraulic) feeding river valleys.
 
+Standing worldgen discipline — DEM statistical grounding (owner-mandated
+2026-06-11): terrain params calibrate against real-world DEM reference
+statistics (slope histograms, hypsometry, ~1/f^2 spectral slope) per
+landscape class, enforced by a TerrainRealism gate; first calibration in
+iteration 4 (task T-I4-DR-terrain-realism); the iteration-6 erosion pass
+tunes against the same references' drainage/valley-network signatures.
+Statistics are grounded, never literal heightmaps — terrain stays
+procedural, seeded, infinite.
+
 Game loop (iter 7+): field-guide commissions (gentle goals, no quests);
 real photo export to disk from the capture path; hides/camouflage tools
 (pairs with wariness).
