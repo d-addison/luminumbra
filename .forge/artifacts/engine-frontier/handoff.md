@@ -150,6 +150,25 @@ concept built on it. Game-world concepts must not be baked into engine code.
 
 Mandated streams for the iteration after iteration 2, all gate-first:
 
+0. **World scale & fidelity (LEAD STREAM)**:
+   (a) 6x+ view distance, hyper-optimized — reference model: Minecraft
+   Distant Horizons. Persistent far-LOD store (low-res region data built
+   from live chunks / pre-generated, persisted via WorldSaveService)
+   rendered as merged static meshes decoupled from live simulation; near
+   field stays full-sim. GPU SDF far-field as complementary horizon path.
+   Gated by PerfRegression/GPU timers/stream-drain/memory watermarks at the
+   new distance.
+   (b) Player-view coverage defect: unloaded chunks/faces visible in play —
+   all current visual gates use elevated downward cameras (blind spot).
+   New eye-level 360-degree player_view_smoke gate + vertical-band and
+   horizon coverage fixes (neighboring columns' cliff faces, RENDER
+   DISTANCE UP/DOWN audit). Includes the deterministic degenerate-geometry
+   chunk near (-120..-160, 180..230) seed 424242 archipelago.
+   (c) Terrain shaping for "normal land": continentalness/erosion control
+   noises, domain warp, spline height remap so plains/hills/mountains
+   coexist; slope-histogram gate (% area below slope threshold) in the
+   worldgen atlas; preset params remain game data.
+
 1. **Client/server decoupling**: simulation authority runs headless —
    luminumbra_server (currently a stub) must tick a real world with zero
    GL/GLFW/audio. Watch items: GameSession save/load hooks live in
