@@ -1,6 +1,7 @@
 #include "GBufferPass.h"
 
 #include "PassGlHelpers.h"
+#include "../FarLodSystem.h"
 #include "core/Log.h"
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
@@ -169,6 +170,19 @@ void GBufferPass::geometry_pass_chunks(RenderPipeline& pipeline,
         glDrawElements(GL_TRIANGLES, render_data.element_count, GL_UNSIGNED_INT, 0);
         pipeline.m_last_render_pass_stats.terrain_draws++;
         pipeline.m_last_render_pass_stats.terrain_indices_drawn += render_data.element_count;
+    }
+
+    // Far-LOD region meshes AFTER the live chunks (T-I3-9): same geometry
+    // shader/material LUT (VoxelVertex layout is identical), region-AABB
+    // frustum culling, depth-biased so overlapping live terrain wins. Far
+    // draws stay inside the gbuffer GPU timer window; they are excluded from
+    // the shadow cascades (ShadowPass never sees them).
+    if (pipeline.m_farlod) {
+        std::size_t far_draws = 0;
+        std::size_t far_indices = 0;
+        pipeline.m_farlod->draw_gbuffer(*m_geometry_shader, view, frustum_planes, far_draws, far_indices);
+        pipeline.m_last_render_pass_stats.far_region_draws += far_draws;
+        pipeline.m_last_render_pass_stats.far_indices_drawn += far_indices;
     }
 
     glBindVertexArray(0);

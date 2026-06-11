@@ -88,8 +88,13 @@ float CalculateShadow(vec3 fragPos, vec3 normal, vec3 lightDir, float viewDepth)
     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
     projCoords = projCoords * 0.5 + 0.5;
 
-    if(projCoords.z > 1.0) {
-        return 0.0; // Outside the far plane of the light's frustum
+    if(projCoords.z > 1.0 || projCoords.x < 0.0 || projCoords.x > 1.0 || projCoords.y < 0.0 || projCoords.y > 1.0) {
+        // Outside the last cascade's light frustum: no shadow information
+        // exists, so treat the fragment as LIT (standard CSM out-of-range
+        // convention). Returning 0.0 here rendered everything beyond the
+        // shadow range sun-unlit - invisible before the far-LOD horizon
+        // existed (T-I3-9), pitch-black mountains after it.
+        return 1.0;
     }
 
     // 3. PCF (Percentage-Closer Filtering)

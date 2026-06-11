@@ -11,6 +11,7 @@
 #include "core/RuntimeScenarioHarness.h"
 #include "player/PlayerController.h"
 #include "rendering/Camera.h"
+#include "rendering/FarLodSystem.h"
 #include "rendering/RenderPipeline.h"
 #include "rendering/passes/WaterPass.h"
 #include "rendering/WorldLoadingVisualizer.h"
@@ -377,6 +378,10 @@ private:
             {"terrain_visible_chunks", stats.terrain_visible_chunks},
             {"terrain_draws", stats.terrain_draws},
             {"terrain_indices_drawn", stats.terrain_indices_drawn},
+            {"far_region_draws", stats.far_region_draws},
+            {"far_indices_drawn", stats.far_indices_drawn},
+            {"gpu_timers_supported", stats.gpu_timers_supported},
+            {"gbuffer_gpu_ms", stats.gbuffer_gpu_ms},
             {"water_draws", stats.water_draws},
             {"water_indices_drawn", stats.water_indices_drawn},
             {"shadow_draws", stats.shadow_draws},
@@ -559,6 +564,22 @@ private:
             state["shader_health"] = render_json["shader_health"];
             state["upload_queue"] = UploadStatsToJson(render_pipeline->get_last_mesh_upload_stats());
             state["render_pass"] = RenderPassStatsToJson(render_pipeline->get_last_render_pass_stats());
+            // Far-LOD scheduler telemetry (T-I3-9, FarLodHorizon gate inputs).
+            if (const auto* farlod = render_pipeline->farlod()) {
+                const auto& farlod_stats = farlod->stats();
+                state["farlod"] = {
+                    {"enabled", farlod_stats.enabled},
+                    {"farlod_regions_wanted", farlod_stats.regions_wanted},
+                    {"farlod_regions_resident", farlod_stats.regions_resident},
+                    {"farlod_regions_missing", farlod_stats.regions_missing},
+                    {"farlod_regions_building", farlod_stats.regions_building},
+                    {"farlod_resident_bytes", farlod_stats.resident_bytes},
+                    {"farlod_region_draws", farlod_stats.region_draws},
+                    {"farlod_indices_drawn", farlod_stats.indices_drawn},
+                    {"farlod_builds_completed_total", farlod_stats.builds_completed_total},
+                    {"farlod_evictions_total", farlod_stats.evictions_total}
+                };
+            }
         }
 
         return state;
@@ -1295,6 +1316,8 @@ int main(int argc, char* argv[]) {
 
     Luminumbra::Rendering::RenderPipeline renderPipeline;
     renderPipeline.set_gpu_sdf_runtime_enabled(scenario_config.enable_gpu_sdf_runtime);
+    // T-I3-9: far-LOD tile builds ride the JobSystem Normal lane.
+    renderPipeline.attach_farlod_job_system(&jobSystem);
     if (!renderPipeline.startup(framebufferWidth, framebufferHeight, root_dir)) {
         LUMINUMBRA_CORE_ERROR("FATAL: Render pipeline startup failed.");
         runtime_state_recorder.capture("render_pipeline_startup_failed", &jobSystem, gameSession.get(), &renderPipeline, 0, {});
@@ -1327,6 +1350,9 @@ int main(int argc, char* argv[]) {
     RuntimeReadinessReport last_readiness_report;
 
     auto start_world_creation = [&](const std::string& name, const std::string& seed, const std::string& worldType) {
+        // T-I3-9: drain in-flight far-LOD tile builds before CreateWorld
+        // replaces the world system they sample.
+        renderPipeline.prepare_world_swap();
         // 1. Synchronously create the world systems and metadata. This is fast.
         if (gameSession->CreateWorld(name, seed, worldType)) {
             if (auto* world_system = gameSession->GetWorldSystem()) {
@@ -1433,7 +1459,7 @@ int main(int argc, char* argv[]) {
     // (default mountains, the worst case for surface-span coverage) and runs
     // once per preset from the PlayerView validator mode.
     const std::string scenario_world_type =
-        scenario_config.player_view_smoke()
+        (scenario_config.player_view_smoke() || scenario_config.farlod_horizon_smoke())
             ? (scenario_config.world_preset.empty() ? std::string("mountains") : scenario_config.world_preset)
             : ((scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() ||
                 scenario_config.auto_world_smoke() || scenario_config.persistence_roundtrip_smoke()) ? "archipelago" : "default");
@@ -1574,6 +1600,23 @@ int main(int argc, char* argv[]) {
     std::vector<bool> player_view_captures_written;
     std::vector<PlayerViewStationCapture> player_view_station_captures;
     bool player_view_sky_enforced = true;
+    // farlod_horizon_smoke (T-I3-9): phase A (far-LOD disabled) measures the
+    // honest in-run gbuffer GPU baseline, phase B enables far-LOD and sweeps
+    // the stations across the live/far boundary.
+    constexpr double kFarLodHorizonPhaseSplit = 0.30;
+    std::vector<FarLodHorizonStation> farlod_horizon_stations;
+    std::vector<bool> farlod_horizon_captures_written;
+    std::vector<FarLodHorizonStationCapture> farlod_horizon_station_captures;
+    bool farlod_horizon_sky_enforced = true;
+    std::vector<double> farlod_baseline_gbuffer_samples;
+    std::vector<double> farlod_far_gbuffer_samples;
+    const auto median_of = [](std::vector<double> samples) -> double {
+        if (samples.empty()) {
+            return 0.0;
+        }
+        std::sort(samples.begin(), samples.end());
+        return samples[(samples.size() - 1) / 2];
+    };
     while (!glfwWindowShouldClose(window)) {
         float currentFrame = (float)glfwGetTime();
         float deltaTime = currentFrame - lastFrame;
@@ -1814,6 +1857,31 @@ int main(int argc, char* argv[]) {
                         player_view_stations.size() - 1u,
                         static_cast<std::size_t>(progress * static_cast<double>(player_view_stations.size())));
                     ApplyPlayerViewCamera(gameSession.get(), g_camera.get(), player_view_stations[station_index]);
+                } else if (scenario_config.farlod_horizon_smoke() && scenario_ready && g_camera) {
+                    // T-I3-9: phase A holds station 0 with far-LOD disabled
+                    // (gbuffer GPU baseline); phase B enables far-LOD and
+                    // divides the remaining time among the stations.
+                    if (farlod_horizon_stations.empty()) {
+                        farlod_horizon_stations = BuildFarLodHorizonStations();
+                        farlod_horizon_captures_written.assign(farlod_horizon_stations.size(), false);
+                        farlod_horizon_sky_enforced = !PlayerViewSeaWaterInNearField(gameSession.get());
+                    }
+                    const double elapsed_play_seconds = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - scenario_play_started_at).count();
+                    const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
+                    const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 0.999);
+                    if (auto* farlod = renderPipeline.farlod()) {
+                        farlod->set_enabled(progress >= kFarLodHorizonPhaseSplit);
+                    }
+                    std::size_t station_index = 0;
+                    if (progress >= kFarLodHorizonPhaseSplit) {
+                        const double sweep =
+                            (progress - kFarLodHorizonPhaseSplit) / (1.0 - kFarLodHorizonPhaseSplit);
+                        station_index = std::min(
+                            farlod_horizon_stations.size() - 1u,
+                            static_cast<std::size_t>(sweep * static_cast<double>(farlod_horizon_stations.size())));
+                    }
+                    ApplyFarLodHorizonCamera(gameSession.get(), g_camera.get(), farlod_horizon_stations[station_index]);
                 } else if (g_playerController) {
                     g_playerController->Update(deltaTime);
                 }
@@ -1824,7 +1892,7 @@ int main(int argc, char* argv[]) {
                 gameSession->TickSimulation(static_cast<double>(deltaTime));
                 if (gameSession->GetWorldSystem() && (g_playerController || g_camera)) {
                     const Luminumbra::Vec3 streaming_position =
-                        ((scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.timeofday_sweep_smoke() || scenario_config.lod_boundary_oscillation_smoke() || scenario_config.lod_seam_arrival_smoke() || scenario_config.player_view_smoke()) && scenario_ready && g_camera)
+                        ((scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.timeofday_sweep_smoke() || scenario_config.lod_boundary_oscillation_smoke() || scenario_config.lod_seam_arrival_smoke() || scenario_config.player_view_smoke() || scenario_config.farlod_horizon_smoke()) && scenario_ready && g_camera)
                             ? Luminumbra::Vec3(g_camera->Position)
                             : (g_playerController ? Luminumbra::Vec3(g_playerController->GetPosition()) : Luminumbra::Vec3(g_camera->Position));
                     gameSession->GetWorldSystem()->update(
@@ -1847,7 +1915,7 @@ int main(int argc, char* argv[]) {
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             if (currentState == GameState::IN_GAME) {
                 if (gameSession->GetWorldSystem() && g_camera) {
-                    if (scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.lod_seam_arrival_smoke() || scenario_config.player_view_smoke()) {
+                    if (scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.lod_seam_arrival_smoke() || scenario_config.player_view_smoke() || scenario_config.farlod_horizon_smoke()) {
                         // time_of_day 0 is noon (sun elevation = cos(2*pi*t));
                         // 0.04 keeps the sun near its zenith for stable captures.
                         renderPipeline.set_time_of_day(0.04f);
@@ -2327,6 +2395,103 @@ int main(int argc, char* argv[]) {
                                             station_count,
                                             gameSession->GetWorldSystem()->get_runtime_chunk_stats(),
                                             player_view_sky_enforced);
+                                    }
+                                }
+                            }
+                        }
+                        if (scenario_config.farlod_horizon_smoke() && scenario_ready && !farlod_horizon_stations.empty() && g_camera) {
+                            const double elapsed_play_seconds = std::chrono::duration<double>(now - scenario_play_started_at).count();
+                            const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
+                            const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 0.999);
+                            const auto& render_pass_stats = renderPipeline.get_last_render_pass_stats();
+
+                            // gbuffer GPU samples: phase-A tail = far-disabled
+                            // baseline; run tail = far-enabled comparison.
+                            if (render_pass_stats.gpu_timers_supported && render_pass_stats.gbuffer_gpu_ms > 0.0) {
+                                if (progress >= 0.15 && progress < kFarLodHorizonPhaseSplit) {
+                                    farlod_baseline_gbuffer_samples.push_back(render_pass_stats.gbuffer_gpu_ms);
+                                } else if (progress >= 0.85) {
+                                    farlod_far_gbuffer_samples.push_back(render_pass_stats.gbuffer_gpu_ms);
+                                }
+                            }
+
+                            if (progress >= kFarLodHorizonPhaseSplit) {
+                                const double sweep =
+                                    (progress - kFarLodHorizonPhaseSplit) / (1.0 - kFarLodHorizonPhaseSplit);
+                                const std::size_t station_count = farlod_horizon_stations.size();
+                                const std::size_t station_index = std::min(
+                                    station_count - 1u,
+                                    static_cast<std::size_t>(sweep * static_cast<double>(station_count)));
+                                const double station_progress =
+                                    sweep * static_cast<double>(station_count) - static_cast<double>(station_index);
+                                if (!farlod_horizon_captures_written[station_index] && station_progress >= 0.7) {
+                                    int screenshot_width = 0;
+                                    int screenshot_height = 0;
+                                    glfwGetFramebufferSize(window, &screenshot_width, &screenshot_height);
+                                    if (screenshot_width > 0 && screenshot_height > 0) {
+                                        std::vector<unsigned char> frame_pixels(
+                                            static_cast<std::size_t>(screenshot_width) * static_cast<std::size_t>(screenshot_height) * 3u);
+                                        glReadBuffer(GL_BACK);
+                                        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                                        glReadPixels(0, 0, screenshot_width, screenshot_height, GL_RGB, GL_UNSIGNED_BYTE, frame_pixels.data());
+
+                                        // Eye-level horizon row (same construction
+                                        // as the player-view gate).
+                                        glm::vec3 horizontal_forward = g_camera->Front;
+                                        horizontal_forward.y = 0.0f;
+                                        int horizon_row_from_top = screenshot_height / 2;
+                                        if (glm::dot(horizontal_forward, horizontal_forward) > 1.0e-6f) {
+                                            horizontal_forward = glm::normalize(horizontal_forward);
+                                            double horizon_x_norm = 0.0;
+                                            double horizon_y_norm = 0.0;
+                                            if (ProjectDirectionToScreen(*g_camera, screenshot_width, screenshot_height,
+                                                                         horizontal_forward, horizon_x_norm, horizon_y_norm)) {
+                                                horizon_row_from_top = static_cast<int>(horizon_y_norm * screenshot_height);
+                                            } else {
+                                                horizon_row_from_top = g_camera->Pitch > 0.0f ? screenshot_height : 0;
+                                            }
+                                        }
+
+                                        FarLodHorizonStationCapture capture;
+                                        capture.station = farlod_horizon_stations[station_index];
+                                        capture.sky = AnalyzePlayerViewPixels(
+                                            frame_pixels, screenshot_width, screenshot_height, horizon_row_from_top);
+                                        int band_top = 0;
+                                        int band_bottom = 0;
+                                        if (ComputeFarLodBoundaryBandRows(
+                                                gameSession.get(), *g_camera, screenshot_width, screenshot_height,
+                                                128.0f, 384.0f, horizon_row_from_top, band_top, band_bottom)) {
+                                            capture.boundary = AnalyzeFarLodBoundaryBand(
+                                                frame_pixels, screenshot_width, screenshot_height, band_top, band_bottom);
+                                        }
+                                        if (const auto* farlod = renderPipeline.farlod()) {
+                                            const auto& farlod_stats = farlod->stats();
+                                            capture.regions_wanted = farlod_stats.regions_wanted;
+                                            capture.regions_resident = farlod_stats.regions_resident;
+                                            capture.regions_missing = farlod_stats.regions_missing;
+                                            capture.resident_bytes = farlod_stats.resident_bytes;
+                                            capture.region_draws = farlod_stats.region_draws;
+                                            capture.far_indices_drawn = farlod_stats.indices_drawn;
+                                        }
+
+                                        const std::string relative_path =
+                                            "screenshots/farlod-horizon-" + farlod_horizon_stations[station_index].name + ".ppm";
+                                        if (WritePixelBufferPpm(scenario_config.artifact_dir / relative_path,
+                                                                screenshot_width, screenshot_height, frame_pixels)) {
+                                            capture.file = relative_path;
+                                            farlod_horizon_station_captures.push_back(capture);
+                                            farlod_horizon_captures_written[station_index] = true;
+                                            WriteFarLodHorizonAnalysis(
+                                                scenario_config.artifact_dir,
+                                                scenario_world_type,
+                                                elapsed_play_seconds,
+                                                farlod_horizon_station_captures,
+                                                farlod_horizon_stations.size(),
+                                                median_of(farlod_baseline_gbuffer_samples),
+                                                median_of(farlod_far_gbuffer_samples),
+                                                render_pass_stats.gpu_timers_supported,
+                                                farlod_horizon_sky_enforced);
+                                        }
                                     }
                                 }
                             }

@@ -22,6 +22,7 @@ set(CLIENT_INTERNAL_SOURCES
 
     # Rendering
     ${CMAKE_CURRENT_LIST_DIR}/rendering/CaptureHooks.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarLodSystem.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/Mesh.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/RenderPipeline.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/RenderSystem.cpp

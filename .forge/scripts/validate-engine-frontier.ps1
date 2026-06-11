@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -2707,6 +2707,121 @@ function Test-PlayerView {
     }
 }
 
+# --- T-I3-9 FarLodHorizon mode: append-only ---
+# Far-LOD horizon + live/far seam gate (farlod_horizon_smoke). Phase A of the
+# run measures the gbuffer GPU time with far-LOD DISABLED (the honest in-run
+# baseline; the committed perf baseline records frame times, not per-pass GPU
+# times); phase B enables far-LOD and sweeps eye-level + elevated stations.
+# Gates (design-decisions.md section 4): zero missing wanted regions to
+# 1536 m after settle; farlod_resident_bytes < 64 MB; gbuffer_gpu_ms delta
+# < 1.5 ms; horizon screenshots show terrain to the horizon (below-horizon
+# sky ratio bounded); the live/far boundary band ROI (~192 m at the smoke
+# radii) shows no sky-leak band and no strict void clusters (the
+# Distant-Horizons failure mode).
+
+function Test-FarLodHorizon {
+    $exe = Get-ClientExe
+    $runSeconds = [Math]::Max(50, $SmokeSeconds)
+
+    foreach ($preset in @("mountains", "default")) {
+        $viewDir = "build/$BuildPreset/test-artifacts/runtime/farlod-horizon-$preset"
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $viewDir
+        New-Item -ItemType Directory -Force -Path $viewDir | Out-Null
+
+        Invoke-Checked -FilePath $exe -ArgumentList @(
+            "--scenario", "farlod_horizon_smoke",
+            "--auto-create-world",
+            "--auto-enter-world",
+            "--timed-run", "$runSeconds",
+            "--world-preset", $preset,
+            "--no-audio",
+            "--no-ui",
+            "--runtime-artifact-dir", $viewDir
+        ) -TimeoutSeconds ([Math]::Max(180, $runSeconds + 120))
+
+        $analysisPath = Join-Path $viewDir "farlod-horizon-analysis.json"
+        $analysis = Read-JsonArtifact -Path $analysisPath -Schema "luminumbra.farlod_horizon.v1"
+
+        if ($analysis.world_preset -ne $preset) {
+            throw "farlod horizon ($preset) artifact has unexpected world_preset '$($analysis.world_preset)'"
+        }
+        if ([int64]$analysis.gl_debug.errors -ne 0) {
+            throw "farlod horizon ($preset) run emitted GL debug errors: $($analysis.gl_debug.errors)"
+        }
+        if ([int64]$analysis.aggregates.captured_stations -ne [int64]$analysis.aggregates.expected_stations) {
+            throw "farlod horizon ($preset) captured $($analysis.aggregates.captured_stations) of $($analysis.aggregates.expected_stations) stations"
+        }
+
+        # After settle: zero missing wanted regions out to 1536 m.
+        if ([int64]$analysis.farlod.regions_missing -gt 0) {
+            throw "farlod horizon ($preset) has $($analysis.farlod.regions_missing) missing wanted far regions after settle"
+        }
+        if ([int64]$analysis.farlod.regions_resident -le 0 -or [int64]$analysis.farlod.regions_wanted -le 0) {
+            throw "farlod horizon ($preset) reports no resident/wanted far regions - the far path did not run"
+        }
+        # Resident byte budget.
+        if ([int64]$analysis.farlod.farlod_resident_bytes -le 0 -or
+            [int64]$analysis.farlod.farlod_resident_bytes -ge [int64]$analysis.thresholds.resident_budget_bytes) {
+            throw "farlod horizon ($preset) resident bytes $($analysis.farlod.farlod_resident_bytes) outside (0, $($analysis.thresholds.resident_budget_bytes))"
+        }
+        if ([int64]$analysis.farlod.far_region_draws -le 0 -or [int64]$analysis.farlod.far_indices_drawn -le 0) {
+            throw "farlod horizon ($preset) drew no far region meshes at capture time"
+        }
+
+        # gbuffer GPU delta vs the in-run far-disabled baseline.
+        if ([bool]$analysis.gbuffer.gpu_timers_supported) {
+            if ([double]$analysis.gbuffer.baseline_gbuffer_gpu_ms -le 0) {
+                throw "farlod horizon ($preset) recorded no far-disabled gbuffer baseline samples"
+            }
+            if ([double]$analysis.gbuffer.gbuffer_delta_ms -ge [double]$analysis.thresholds.max_gbuffer_delta_ms) {
+                throw "farlod horizon ($preset) gbuffer GPU delta $($analysis.gbuffer.gbuffer_delta_ms) ms exceeds $($analysis.thresholds.max_gbuffer_delta_ms) ms (baseline $($analysis.gbuffer.baseline_gbuffer_gpu_ms), far $($analysis.gbuffer.far_gbuffer_gpu_ms))"
+            }
+        } else {
+            Write-Host "farlod horizon ($preset): GPU timers unsupported on this context; gbuffer delta gate not applicable"
+        }
+
+        # Live/far boundary seam: at least one station must resolve the
+        # boundary band, and every resolved band must be free of sky leaks
+        # (where enforced) and strict void clusters.
+        if ([int64]$analysis.aggregates.bands_resolved -le 0) {
+            throw "farlod horizon ($preset) resolved no boundary-band ROI on any station"
+        }
+        $skyEnforced = [bool]$analysis.thresholds.sky_ratio_enforced
+        foreach ($station in $analysis.stations) {
+            Assert-PpmArtifact (Join-Path $viewDir $station.file)
+            if ([bool]$station.boundary_band.resolved) {
+                if ($skyEnforced -and [double]$station.boundary_band.band_sky_ratio -ge [double]$analysis.thresholds.max_boundary_band_sky_ratio) {
+                    throw "farlod horizon ($preset) station '$($station.name)' shows a sky band at the live/far boundary: ratio $($station.boundary_band.band_sky_ratio)"
+                }
+                if ([int64]$station.boundary_band.void_cluster_count -gt 0) {
+                    throw "farlod horizon ($preset) station '$($station.name)' has $($station.boundary_band.void_cluster_count) void clusters at the live/far boundary"
+                }
+            }
+            if ($skyEnforced -and [double]$station.horizon.below_horizon_sky_ratio -ge [double]$analysis.thresholds.max_below_horizon_sky_ratio) {
+                throw "farlod horizon ($preset) station '$($station.name)' shows sky below the horizon with far-LOD active: ratio $($station.horizon.below_horizon_sky_ratio)"
+            }
+            if (-not $station.passed) {
+                throw "farlod horizon ($preset) station '$($station.name)' failed its thresholds"
+            }
+        }
+
+        # Telemetry surfaces in last-known-runtime.json.
+        $runtimeState = Get-Content (Join-Path $viewDir "last-known-runtime.json") -Raw | ConvertFrom-Json
+        if ($null -eq $runtimeState.farlod -or $null -eq $runtimeState.farlod.farlod_resident_bytes) {
+            throw "farlod horizon ($preset) last-known-runtime.json is missing the farlod telemetry section"
+        }
+
+        if (-not $analysis.passed) {
+            throw "farlod horizon ($preset) analysis reported failure"
+        }
+        Write-Host ("farlod horizon ({0}): wanted={1} resident={2} missing={3} resident_bytes={4} draws={5} indices={6} gbuffer baseline={7}ms far={8}ms delta={9}ms max_sky={10} bands_resolved={11}" -f `
+            $preset, $analysis.farlod.regions_wanted, $analysis.farlod.regions_resident, $analysis.farlod.regions_missing, `
+            $analysis.farlod.farlod_resident_bytes, $analysis.farlod.far_region_draws, $analysis.farlod.far_indices_drawn, `
+            $analysis.gbuffer.baseline_gbuffer_gpu_ms, $analysis.gbuffer.far_gbuffer_gpu_ms, $analysis.gbuffer.gbuffer_delta_ms, `
+            $analysis.aggregates.max_below_horizon_sky_ratio, $analysis.aggregates.bands_resolved)
+    }
+}
+
 switch ($Mode) {
     "CodexOnly" { Test-CodexOnly }
     "Panels" { Test-Panels }
@@ -2741,6 +2856,7 @@ switch ($Mode) {
     "WeatherVisual" { Test-WeatherVisual }
     "TimeOfDaySweep" { Test-TimeOfDaySweep }
     "PlayerView" { Test-PlayerView }
+    "FarLodHorizon" { Test-FarLodHorizon }
     "All" {
         Test-CodexOnly
         Test-Files

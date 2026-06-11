@@ -1516,6 +1516,9 @@ TEST(RenderSmokeTest, RenderPipelineExposesPassBudgetCounters) {
     EXPECT_NE(header.find("RenderPassFrameStats"), std::string::npos);
     EXPECT_NE(header.find("get_last_render_pass_stats"), std::string::npos);
     EXPECT_NE(header.find("shadow_cascade_draws"), std::string::npos);
+    // T-I3-9: far-LOD region draws are counter-backed like every other pass.
+    EXPECT_NE(header.find("far_region_draws"), std::string::npos);
+    EXPECT_NE(header.find("far_indices_drawn"), std::string::npos);
     EXPECT_NE(source.find("ensure_terrain_culling_hierarchy"), std::string::npos);
     EXPECT_NE(source.find("shadow_cascade_visible_chunks"), std::string::npos);
 
@@ -1526,6 +1529,8 @@ TEST(RenderSmokeTest, RenderPipelineExposesPassBudgetCounters) {
     output << "  \"counter_contract\": {\n";
     output << "    \"terrain_draws\": true,\n";
     output << "    \"terrain_visible_chunks\": true,\n";
+    output << "    \"far_region_draws\": true,\n";
+    output << "    \"far_indices_drawn\": true,\n";
     output << "    \"culling_hierarchy_rebuilds\": true,\n";
     output << "    \"shadow_cascade_draws\": true,\n";
     output << "    \"shadow_cascade_visible_chunks\": true,\n";
