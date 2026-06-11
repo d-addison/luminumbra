@@ -325,6 +325,9 @@ private:
             {"water_vertex_count", stats.water_vertex_count},
             {"water_index_count", stats.water_index_count},
             {"terrain_payload_bytes", stats.terrain_payload_bytes},
+            {"sdf_payload_bytes", stats.sdf_payload_bytes},
+            {"heightmap_payload_bytes", stats.heightmap_payload_bytes},
+            {"sdf_skipped_chunks", stats.sdf_skipped_chunks},
             {"generation_job_active", stats.generation_job_active},
             {"meshing_job_active", stats.meshing_job_active}
         };
@@ -1411,14 +1414,19 @@ int main(int argc, char* argv[]) {
         g_uiManager->RequestLoadDocument("main_menu.rml");
     }
 
+    // The endurance and water gates assert visible water; the default
+    // preset (height_offset 20, sea level 0) generates none near spawn,
+    // so every water-asserting scenario runs in the archipelago world.
+    // lod_ground_smoke keeps the default world its thresholds were tuned on.
+    // player_view_smoke (T-I3-3) takes its preset from --world-preset
+    // (default mountains, the worst case for surface-span coverage) and runs
+    // once per preset from the PlayerView validator mode.
+    const std::string scenario_world_type =
+        scenario_config.player_view_smoke()
+            ? (scenario_config.world_preset.empty() ? std::string("mountains") : scenario_config.world_preset)
+            : ((scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() ||
+                scenario_config.auto_world_smoke() || scenario_config.persistence_roundtrip_smoke()) ? "archipelago" : "default");
     if (scenario_config.auto_create_world || HasCommandLineFlag(argc, argv, "--auto-create-world") || runtime_boot_recorder.enabled()) {
-        // The endurance and water gates assert visible water; the default
-        // preset (height_offset 20, sea level 0) generates none near spawn,
-        // so every water-asserting scenario runs in the archipelago world.
-        // lod_ground_smoke keeps the default world its thresholds were tuned on.
-        const std::string scenario_world_type =
-            (scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() ||
-             scenario_config.auto_world_smoke() || scenario_config.persistence_roundtrip_smoke()) ? "archipelago" : "default";
         start_world_creation("Automated Test World", "424242", scenario_world_type);
     }
 
@@ -1551,6 +1559,10 @@ int main(int argc, char* argv[]) {
     std::array<bool, 4> lod_seam_screenshots_written{false, false, false, false};
     std::vector<LodGroundVisualCapture> lod_seam_visual_captures;
     bool persistence_phase_attempted = false;
+    std::vector<PlayerViewStation> player_view_stations;
+    std::vector<bool> player_view_captures_written;
+    std::vector<PlayerViewStationCapture> player_view_station_captures;
+    bool player_view_sky_enforced = true;
     while (!glfwWindowShouldClose(window)) {
         float currentFrame = (float)glfwGetTime();
         float deltaTime = currentFrame - lastFrame;
@@ -1767,13 +1779,37 @@ int main(int argc, char* argv[]) {
                     const double elapsed_play_seconds = std::chrono::duration<double>(
                         std::chrono::steady_clock::now() - scenario_play_started_at).count();
                     ApplyLodSeamArrivalCamera(scenario_config, gameSession.get(), g_camera.get(), elapsed_play_seconds);
+                } else if (scenario_config.player_view_smoke() && scenario_ready && g_camera) {
+                    // T-I3-3: eye-level 360-degree sweep. Stations are built
+                    // once after readiness (the peak station scans the loaded
+                    // span field); each station holds its window so streaming
+                    // and uploads settle before the capture at 70% progress.
+                    if (player_view_stations.empty()) {
+                        player_view_stations = BuildPlayerViewStations(gameSession.get(), scenario_world_type);
+                        player_view_captures_written.assign(player_view_stations.size(), false);
+                        player_view_sky_enforced = !PlayerViewSeaWaterInNearField(gameSession.get());
+                    }
+                    const double elapsed_play_seconds = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - scenario_play_started_at).count();
+                    const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
+                    // Warmup lead before station 0: the post-readiness LOD0
+                    // promotion of the near ring is still draining during the
+                    // first seconds; stations divide the remaining time.
+                    const double warmup_seconds = std::min(8.0, duration * 0.2);
+                    const double effective_seconds = std::max(0.0, elapsed_play_seconds - warmup_seconds);
+                    const double progress = std::clamp(
+                        effective_seconds / std::max(1.0, duration - warmup_seconds), 0.0, 0.999);
+                    const std::size_t station_index = std::min(
+                        player_view_stations.size() - 1u,
+                        static_cast<std::size_t>(progress * static_cast<double>(player_view_stations.size())));
+                    ApplyPlayerViewCamera(gameSession.get(), g_camera.get(), player_view_stations[station_index]);
                 } else if (g_playerController) {
                     g_playerController->Update(deltaTime);
                 }
                 if (auto* physics = gameSession->GetPhysicsSystem()) physics->update(deltaTime);
                 if (gameSession->GetWorldSystem() && (g_playerController || g_camera)) {
                     const Luminumbra::Vec3 streaming_position =
-                        ((scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.timeofday_sweep_smoke() || scenario_config.lod_boundary_oscillation_smoke() || scenario_config.lod_seam_arrival_smoke()) && scenario_ready && g_camera)
+                        ((scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.timeofday_sweep_smoke() || scenario_config.lod_boundary_oscillation_smoke() || scenario_config.lod_seam_arrival_smoke() || scenario_config.player_view_smoke()) && scenario_ready && g_camera)
                             ? Luminumbra::Vec3(g_camera->Position)
                             : (g_playerController ? Luminumbra::Vec3(g_playerController->GetPosition()) : Luminumbra::Vec3(g_camera->Position));
                     gameSession->GetWorldSystem()->update(
@@ -1796,7 +1832,7 @@ int main(int argc, char* argv[]) {
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             if (currentState == GameState::IN_GAME) {
                 if (gameSession->GetWorldSystem() && g_camera) {
-                    if (scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.lod_seam_arrival_smoke()) {
+                    if (scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.lod_seam_arrival_smoke() || scenario_config.player_view_smoke()) {
                         // time_of_day 0 is noon (sun elevation = cos(2*pi*t));
                         // 0.04 keeps the sun near its zenith for stable captures.
                         renderPipeline.set_time_of_day(0.04f);
@@ -2199,6 +2235,83 @@ int main(int argc, char* argv[]) {
                                             "screenshots/timeofday-night-emissive.ppm",
                                             timeofday_emissive_stats,
                                             render_pass_stats);
+                                    }
+                                }
+                            }
+                        }
+                        if (scenario_config.player_view_smoke() && scenario_ready && !player_view_stations.empty() && g_camera) {
+                            const double elapsed_play_seconds = std::chrono::duration<double>(now - scenario_play_started_at).count();
+                            const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
+                            // Mirror the camera branch's warmup-adjusted schedule.
+                            const double warmup_seconds = std::min(8.0, duration * 0.2);
+                            const double effective_seconds = std::max(0.0, elapsed_play_seconds - warmup_seconds);
+                            const double progress = std::clamp(
+                                effective_seconds / std::max(1.0, duration - warmup_seconds), 0.0, 0.999);
+                            const std::size_t station_count = player_view_stations.size();
+                            const std::size_t station_index = std::min(
+                                station_count - 1u,
+                                static_cast<std::size_t>(progress * static_cast<double>(station_count)));
+                            const double station_progress =
+                                progress * static_cast<double>(station_count) - static_cast<double>(station_index);
+                            if (!player_view_captures_written[station_index] && station_progress >= 0.7) {
+                                int screenshot_width = 0;
+                                int screenshot_height = 0;
+                                glfwGetFramebufferSize(window, &screenshot_width, &screenshot_height);
+                                if (screenshot_width > 0 && screenshot_height > 0) {
+                                    std::vector<unsigned char> frame_pixels(
+                                        static_cast<std::size_t>(screenshot_width) * static_cast<std::size_t>(screenshot_height) * 3u);
+                                    glReadBuffer(GL_BACK);
+                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                                    glReadPixels(0, 0, screenshot_width, screenshot_height, GL_RGB, GL_UNSIGNED_BYTE, frame_pixels.data());
+
+                                    // Horizon row: project the camera's horizontal
+                                    // forward direction (the eye-level horizon) into
+                                    // the frame; everything below it must be geometry.
+                                    glm::vec3 horizontal_forward = g_camera->Front;
+                                    horizontal_forward.y = 0.0f;
+                                    int horizon_row_from_top = screenshot_height / 2;
+                                    if (glm::dot(horizontal_forward, horizontal_forward) > 1.0e-6f) {
+                                        horizontal_forward = glm::normalize(horizontal_forward);
+                                        double horizon_x_norm = 0.0;
+                                        double horizon_y_norm = 0.0;
+                                        if (ProjectDirectionToScreen(*g_camera, screenshot_width, screenshot_height,
+                                                                     horizontal_forward, horizon_x_norm, horizon_y_norm)) {
+                                            horizon_row_from_top = static_cast<int>(horizon_y_norm * screenshot_height);
+                                        } else {
+                                            // Horizon outside the frame: pitched far up
+                                            // (all sky legitimate, ROI empty) or far down
+                                            // (all terrain, full-frame ROI).
+                                            horizon_row_from_top = g_camera->Pitch > 0.0f ? screenshot_height : 0;
+                                        }
+                                    }
+
+                                    PlayerViewStationCapture capture;
+                                    capture.station = player_view_stations[station_index];
+                                    capture.station.yaw_degrees = g_camera->Yaw;
+                                    capture.station.pitch_degrees = g_camera->Pitch;
+                                    capture.sky = AnalyzePlayerViewPixels(
+                                        frame_pixels, screenshot_width, screenshot_height, horizon_row_from_top);
+                                    capture.holes = AnalyzeLodHolePixels(frame_pixels, screenshot_width, screenshot_height);
+                                    capture.coverage = gameSession->GetWorldSystem()->get_frustum_surface_coverage_stats(
+                                        g_camera->Position,
+                                        ExtractCameraFrustumPlanes(*g_camera, screenshot_width, screenshot_height),
+                                        192.0f);
+
+                                    const std::string relative_path =
+                                        "screenshots/player-view-" + player_view_stations[station_index].name + ".ppm";
+                                    if (WritePixelBufferPpm(scenario_config.artifact_dir / relative_path,
+                                                            screenshot_width, screenshot_height, frame_pixels)) {
+                                        capture.file = relative_path;
+                                        player_view_station_captures.push_back(capture);
+                                        player_view_captures_written[station_index] = true;
+                                        WritePlayerViewAnalysis(
+                                            scenario_config.artifact_dir,
+                                            scenario_world_type,
+                                            elapsed_play_seconds,
+                                            player_view_station_captures,
+                                            station_count,
+                                            gameSession->GetWorldSystem()->get_runtime_chunk_stats(),
+                                            player_view_sky_enforced);
                                     }
                                 }
                             }

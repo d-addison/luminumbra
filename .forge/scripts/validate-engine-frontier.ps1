@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -2620,6 +2620,93 @@ function Test-TimeOfDaySweep {
     }
 }
 
+# --- T-I3-3 PlayerView mode: append-only ---
+# Eye-level 360-degree player-view coverage gate (player_view_smoke): 12 yaw
+# stations + a peak-aimed station per preset, plus the seed-424242
+# archipelago degenerate-geometry region station. Per station:
+# missing_frustum_surface_chunks == 0, renderable_frustum_ratio >= 0.98,
+# near_black_cluster_count == 0 (strict max(r,g,b) <= 2 voids), and
+# below_horizon_sky_ratio < 0.005 where the sky/water hue ambiguity does not
+# apply (sky_ratio_enforced in the artifact). The mountains run also proves
+# the surface-span streaming stays inside the 8192 active-chunk budget.
+
+function Test-PlayerView {
+    $exe = Get-ClientExe
+    $runSeconds = [Math]::Max(45, $SmokeSeconds)
+
+    foreach ($preset in @("default", "mountains", "archipelago")) {
+        $viewDir = "build/$BuildPreset/test-artifacts/runtime/player-view-$preset"
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $viewDir
+        New-Item -ItemType Directory -Force -Path $viewDir | Out-Null
+
+        Invoke-Checked -FilePath $exe -ArgumentList @(
+            "--scenario", "player_view_smoke",
+            "--auto-create-world",
+            "--auto-enter-world",
+            "--timed-run", "$runSeconds",
+            "--world-preset", $preset,
+            "--no-audio",
+            "--no-ui",
+            "--runtime-artifact-dir", $viewDir
+        ) -TimeoutSeconds ([Math]::Max(180, $runSeconds + 120))
+
+        $analysisPath = Join-Path $viewDir "player-view-analysis.json"
+        $analysis = Read-JsonArtifact -Path $analysisPath -Schema "luminumbra.player_view.v1"
+
+        if ($analysis.world_preset -ne $preset) {
+            throw "player view ($preset) artifact has unexpected world_preset '$($analysis.world_preset)'"
+        }
+        if ([int64]$analysis.gl_debug.errors -ne 0) {
+            throw "player view ($preset) run emitted GL debug errors: $($analysis.gl_debug.errors)"
+        }
+        if ([int64]$analysis.aggregates.captured_stations -ne [int64]$analysis.aggregates.expected_stations) {
+            throw "player view ($preset) captured $($analysis.aggregates.captured_stations) of $($analysis.aggregates.expected_stations) stations"
+        }
+        $expectedStations = if ($preset -eq "archipelago") { 14 } else { 13 }
+        if ([int64]$analysis.aggregates.expected_stations -ne $expectedStations) {
+            throw "player view ($preset) expected $expectedStations stations (12 yaw + peak$(if ($preset -eq 'archipelago') { ' + degenerate region' })), found $($analysis.aggregates.expected_stations)"
+        }
+
+        $skyEnforced = [bool]$analysis.thresholds.sky_ratio_enforced
+        foreach ($station in $analysis.stations) {
+            Assert-PpmArtifact (Join-Path $viewDir $station.file)
+            if ([int64]$station.coverage.missing_frustum_surface_chunks -gt 0) {
+                throw "player view ($preset) station '$($station.name)' is missing $($station.coverage.missing_frustum_surface_chunks) frustum surface chunks"
+            }
+            if ([double]$station.coverage.renderable_frustum_ratio -lt 0.98) {
+                throw "player view ($preset) station '$($station.name)' renderable frustum ratio $($station.coverage.renderable_frustum_ratio) below 0.98"
+            }
+            if ($skyEnforced -and [double]$station.pixels.below_horizon_sky_ratio -ge 0.005) {
+                throw "player view ($preset) station '$($station.name)' shows sky below the horizon: ratio $($station.pixels.below_horizon_sky_ratio)"
+            }
+            if ([int64]$station.pixels.near_black_cluster_count -gt 0) {
+                throw "player view ($preset) station '$($station.name)' has $($station.pixels.near_black_cluster_count) degenerate void clusters (largest $($station.pixels.largest_near_black_cluster_px)px)"
+            }
+            if (-not $station.passed) {
+                throw "player view ($preset) station '$($station.name)' failed its thresholds"
+            }
+        }
+
+        if ($preset -eq "archipelago") {
+            $degenerate = @($analysis.stations | Where-Object { $_.name -eq "degenerate_region" })
+            if ($degenerate.Count -ne 1) {
+                throw "player view (archipelago) is missing the seed-424242 degenerate_region station"
+            }
+        }
+        if ($preset -eq "mountains") {
+            if ([int64]$analysis.runtime_chunks.total_chunks -gt [int64]$analysis.runtime_chunks.active_chunk_budget) {
+                throw "player view (mountains) exceeded the active chunk budget: $($analysis.runtime_chunks.total_chunks) > $($analysis.runtime_chunks.active_chunk_budget)"
+            }
+            Write-Host "player view (mountains): active chunks $($analysis.runtime_chunks.total_chunks) of budget $($analysis.runtime_chunks.active_chunk_budget) (sdf skipped on $($analysis.runtime_chunks.sdf_skipped_chunks))"
+        }
+
+        if (-not $analysis.passed) {
+            throw "player view ($preset) analysis reported failure"
+        }
+        Write-Host "player view ($preset): stations=$($analysis.aggregates.captured_stations), max_missing=$($analysis.aggregates.max_missing_frustum_surface_chunks), min_renderable_ratio=$($analysis.aggregates.min_renderable_frustum_ratio), max_sky_ratio=$($analysis.aggregates.max_below_horizon_sky_ratio) (enforced=$skyEnforced), max_void_clusters=$($analysis.aggregates.max_near_black_cluster_count)"
+    }
+}
+
 switch ($Mode) {
     "CodexOnly" { Test-CodexOnly }
     "Panels" { Test-Panels }
@@ -2653,6 +2740,7 @@ switch ($Mode) {
     "SkyboxVisual" { Test-SkyboxVisual }
     "WeatherVisual" { Test-WeatherVisual }
     "TimeOfDaySweep" { Test-TimeOfDaySweep }
+    "PlayerView" { Test-PlayerView }
     "All" {
         Test-CodexOnly
         Test-Files

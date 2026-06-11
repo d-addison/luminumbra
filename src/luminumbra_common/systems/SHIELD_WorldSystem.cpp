@@ -1336,6 +1336,100 @@ SHIELD_WorldSystem::CameraLocalCoverageStats SHIELD_WorldSystem::get_camera_loca
     return stats;
 }
 
+SHIELD_WorldSystem::FrustumSurfaceCoverageStats SHIELD_WorldSystem::get_frustum_surface_coverage_stats(
+    const Vec3& camera_position,
+    const std::array<Vec4, 6>& frustum_planes,
+    float max_distance) const
+{
+    FrustumSurfaceCoverageStats stats;
+
+    // Positive-vertex AABB/frustum intersection: the box is outside when its
+    // most-positive corner against a plane normal is still behind the plane.
+    const auto aabb_intersects_frustum = [&frustum_planes](const Vec3& min_corner, const Vec3& max_corner) {
+        for (const Vec4& plane : frustum_planes) {
+            const Vec3 positive_corner(
+                plane.x >= 0.0f ? max_corner.x : min_corner.x,
+                plane.y >= 0.0f ? max_corner.y : min_corner.y,
+                plane.z >= 0.0f ? max_corner.z : min_corner.z);
+            if (plane.x * positive_corner.x + plane.y * positive_corner.y +
+                plane.z * positive_corner.z + plane.w < 0.0f) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    const IVec3 camera_chunk = world_to_chunk_coords(camera_position);
+    const int radius = std::max(0, static_cast<int>(std::ceil(max_distance / static_cast<float>(CHUNK_SIZE_X))));
+    const float max_distance_sq = max_distance * max_distance;
+
+    for (int dz = -radius; dz <= radius; ++dz) {
+        for (int dx = -radius; dx <= radius; ++dx) {
+            const int chunk_x = camera_chunk.x + dx;
+            const int chunk_z = camera_chunk.z + dz;
+            const float base_x = static_cast<float>(chunk_x * CHUNK_SIZE_X);
+            const float base_z = static_cast<float>(chunk_z * CHUNK_SIZE_Z);
+            const float center_x = base_x + CHUNK_SIZE_X * 0.5f;
+            const float center_z = base_z + CHUNK_SIZE_Z * 0.5f;
+
+            const float horizontal_dx = center_x - camera_position.x;
+            const float horizontal_dz = center_z - camera_position.z;
+            if (horizontal_dx * horizontal_dx + horizontal_dz * horizontal_dz > max_distance_sq) {
+                continue;
+            }
+
+            // Inline 5-point span sample (column center + footprint corners);
+            // deliberately independent of the streaming span cache so the
+            // gate measures the policy from the outside.
+            float min_height = std::numeric_limits<float>::max();
+            float max_height = std::numeric_limits<float>::lowest();
+            const std::array<std::pair<float, float>, 5> sample_points{{
+                {center_x, center_z},
+                {base_x, base_z},
+                {base_x + CHUNK_SIZE_X, base_z},
+                {base_x, base_z + CHUNK_SIZE_Z},
+                {base_x + CHUNK_SIZE_X, base_z + CHUNK_SIZE_Z},
+            }};
+            for (const auto& [px, pz] : sample_points) {
+                const float h = GetTerrainHeightAt(px, pz);
+                min_height = std::min(min_height, h);
+                max_height = std::max(max_height, h);
+            }
+            const int span_min = world_to_chunk_coords(Vec3(center_x, min_height, center_z)).y;
+            const int span_max = world_to_chunk_coords(Vec3(center_x, max_height, center_z)).y;
+
+            bool column_considered = false;
+            for (int chunk_y = span_min; chunk_y <= span_max; ++chunk_y) {
+                const Vec3 min_corner(base_x, static_cast<float>(chunk_y * CHUNK_SIZE_Y), base_z);
+                const Vec3 max_corner = min_corner + Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+                if (!aabb_intersects_frustum(min_corner, max_corner)) {
+                    continue;
+                }
+
+                column_considered = true;
+                ++stats.expected_chunks;
+                const auto it = m_streaming_state.chunks.find(Chunk::calculate_id(IVec3(chunk_x, chunk_y, chunk_z)));
+                if (it == m_streaming_state.chunks.end() || !it->second) {
+                    ++stats.missing_chunks;
+                    continue;
+                }
+                ++stats.present_chunks;
+                if (!it->second->mesh_vertices.empty() && !it->second->mesh_indices.empty()) {
+                    ++stats.renderable_chunks;
+                }
+            }
+            if (column_considered) {
+                ++stats.columns_considered;
+            }
+        }
+    }
+
+    stats.renderable_ratio = stats.expected_chunks > 0
+        ? static_cast<double>(stats.renderable_chunks) / static_cast<double>(stats.expected_chunks)
+        : 1.0;
+    return stats;
+}
+
 void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_step) const {
    const IVec3 coords = chunk.get_coords();
    const IVec3 base_pos = coords * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);

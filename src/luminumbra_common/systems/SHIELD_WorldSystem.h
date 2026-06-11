@@ -155,6 +155,27 @@ public:
         bool near_field_renderable = false;
     };
 
+    // Sim-side frustum surface coverage (T-I3-3, player_view_smoke gate):
+    // for every horizontal column within max_distance of the camera whose
+    // 5-point surface span (column center + 4 footprint corners) intersects
+    // the view frustum, is the owning chunk streamed and renderable? The
+    // span is sampled directly from GetTerrainHeightAt (pure function of
+    // seed/params), so the metric is independent of the streaming policy it
+    // measures. frustum_planes are inward-facing (ax+by+cz+d >= 0 inside),
+    // e.g. Gribb-Hartmann extraction from the camera view-projection.
+    struct FrustumSurfaceCoverageStats {
+        std::size_t columns_considered = 0;
+        std::size_t expected_chunks = 0;
+        std::size_t present_chunks = 0;
+        std::size_t missing_chunks = 0;
+        std::size_t renderable_chunks = 0;
+        double renderable_ratio = 1.0;
+    };
+    FrustumSurfaceCoverageStats get_frustum_surface_coverage_stats(
+        const Vec3& camera_position,
+        const std::array<Vec4, 6>& frustum_planes,
+        float max_distance) const;
+
     SHIELD_WorldSystem(JobSystem* job_system, WaterSystem* water_system, const TerrainGenParams& params, int seed);
     ~SHIELD_WorldSystem();
 

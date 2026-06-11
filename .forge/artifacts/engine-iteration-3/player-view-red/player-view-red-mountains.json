@@ -1,0 +1,597 @@
+{
+  "aggregates": {
+    "captured_stations": 13,
+    "expected_stations": 13,
+    "max_below_horizon_sky_ratio": 0.04379545030766362,
+    "max_missing_frustum_surface_chunks": 165,
+    "max_near_black_cluster_count": 0,
+    "min_renderable_frustum_ratio": 0.5915841584158416
+  },
+  "coverage_distance": 192.0,
+  "duration_seconds": 44.1516848,
+  "gl_debug": {
+    "errors": 0,
+    "messages": 12,
+    "notifications": 0,
+    "warnings": 12
+  },
+  "passed": false,
+  "runtime_chunks": {
+    "active_chunk_budget": 8192,
+    "renderable_chunks": 4323,
+    "sdf_skipped_chunks": 3136,
+    "total_chunks": 4459
+  },
+  "scenario": "player_view_smoke",
+  "schema": "luminumbra.player_view.v1",
+  "stations": [
+    {
+      "aim_at_target": false,
+      "coverage": {
+        "columns_considered": 127,
+        "expected_chunks": 434,
+        "missing_frustum_surface_chunks": 163,
+        "present_chunks": 271,
+        "renderable_chunks": 271,
+        "renderable_frustum_ratio": 0.6244239631336406
+      },
+      "file": "screenshots/player-view-yaw_000.ppm",
+      "name": "yaw_000",
+      "passed": false,
+      "pitch_degrees": 0.0,
+      "pixels": {
+        "below_horizon_pixels": 429040,
+        "below_horizon_sky_pixels": 281,
+        "below_horizon_sky_ratio": 0.0006549505873578222,
+        "holes": {
+          "background_blue_pixels": 36,
+          "background_blue_ratio": 5.3763440860215054e-05,
+          "dark_void_pixels": 2,
+          "dark_void_ratio": 2.986857825567503e-06,
+          "height": 720,
+          "largest_near_black_cluster_px": 7115,
+          "near_black_cluster_count": 12,
+          "near_black_pixels": 520248,
+          "near_black_ratio": 0.7769534050179211,
+          "roi_pixels": 669600,
+          "width": 1280
+        },
+        "horizon_row_from_top": 360,
+        "largest_near_black_cluster_px": 0,
+        "near_black_cluster_count": 0,
+        "void_predicate": "max_rgb<=2"
+      },
+      "target": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "yaw_degrees": 0.0
+    },
+    {
+      "aim_at_target": false,
+      "coverage": {
+        "columns_considered": 120,
+        "expected_chunks": 400,
+        "missing_frustum_surface_chunks": 149,
+        "present_chunks": 251,
+        "renderable_chunks": 251,
+        "renderable_frustum_ratio": 0.6275
+      },
+      "file": "screenshots/player-view-yaw_030.ppm",
+      "name": "yaw_030",
+      "passed": false,
+      "pitch_degrees": 0.0,
+      "pixels": {
+        "below_horizon_pixels": 429040,
+        "below_horizon_sky_pixels": 0,
+        "below_horizon_sky_ratio": 0.0,
+        "holes": {
+          "background_blue_pixels": 0,
+          "background_blue_ratio": 0.0,
+          "dark_void_pixels": 0,
+          "dark_void_ratio": 0.0,
+          "height": 720,
+          "largest_near_black_cluster_px": 4397,
+          "near_black_cluster_count": 11,
+          "near_black_pixels": 524656,
+          "near_black_ratio": 0.7835364396654719,
+          "roi_pixels": 669600,
+          "width": 1280
+        },
+        "horizon_row_from_top": 360,
+        "largest_near_black_cluster_px": 0,
+        "near_black_cluster_count": 0,
+        "void_predicate": "max_rgb<=2"
+      },
+      "target": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "yaw_degrees": 30.0
+    },
+    {
+      "aim_at_target": false,
+      "coverage": {
+        "columns_considered": 123,
+        "expected_chunks": 396,
+        "missing_frustum_surface_chunks": 145,
+        "present_chunks": 251,
+        "renderable_chunks": 251,
+        "renderable_frustum_ratio": 0.6338383838383839
+      },
+      "file": "screenshots/player-view-yaw_060.ppm",
+      "name": "yaw_060",
+      "passed": false,
+      "pitch_degrees": 0.0,
+      "pixels": {
+        "below_horizon_pixels": 429040,
+        "below_horizon_sky_pixels": 0,
+        "below_horizon_sky_ratio": 0.0,
+        "holes": {
+          "background_blue_pixels": 0,
+          "background_blue_ratio": 0.0,
+          "dark_void_pixels": 3,
+          "dark_void_ratio": 4.4802867383512545e-06,
+          "height": 720,
+          "largest_near_black_cluster_px": 1381,
+          "near_black_cluster_count": 93,
+          "near_black_pixels": 509547,
+          "near_black_ratio": 0.7609722222222223,
+          "roi_pixels": 669600,
+          "width": 1280
+        },
+        "horizon_row_from_top": 360,
+        "largest_near_black_cluster_px": 4,
+        "near_black_cluster_count": 0,
+        "void_predicate": "max_rgb<=2"
+      },
+      "target": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "yaw_degrees": 60.0
+    },
+    {
+      "aim_at_target": false,
+      "coverage": {
+        "columns_considered": 122,
+        "expected_chunks": 392,
+        "missing_frustum_surface_chunks": 137,
+        "present_chunks": 255,
+        "renderable_chunks": 255,
+        "renderable_frustum_ratio": 0.6505102040816326
+      },
+      "file": "screenshots/player-view-yaw_090.ppm",
+      "name": "yaw_090",
+      "passed": false,
+      "pitch_degrees": 0.0,
+      "pixels": {
+        "below_horizon_pixels": 429040,
+        "below_horizon_sky_pixels": 0,
+        "below_horizon_sky_ratio": 0.0,
+        "holes": {
+          "background_blue_pixels": 0,
+          "background_blue_ratio": 0.0,
+          "dark_void_pixels": 28,
+          "dark_void_ratio": 4.181600955794504e-05,
+          "height": 720,
+          "largest_near_black_cluster_px": 1889,
+          "near_black_cluster_count": 101,
+          "near_black_pixels": 434325,
+          "near_black_ratio": 0.6486335125448028,
+          "roi_pixels": 669600,
+          "width": 1280
+        },
+        "horizon_row_from_top": 360,
+        "largest_near_black_cluster_px": 0,
+        "near_black_cluster_count": 0,
+        "void_predicate": "max_rgb<=2"
+      },
+      "target": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "yaw_degrees": 90.0
+    },
+    {
+      "aim_at_target": false,
+      "coverage": {
+        "columns_considered": 117,
+        "expected_chunks": 350,
+        "missing_frustum_surface_chunks": 124,
+        "present_chunks": 226,
+        "renderable_chunks": 226,
+        "renderable_frustum_ratio": 0.6457142857142857
+      },
+      "file": "screenshots/player-view-yaw_120.ppm",
+      "name": "yaw_120",
+      "passed": false,
+      "pitch_degrees": 0.0,
+      "pixels": {
+        "below_horizon_pixels": 429040,
+        "below_horizon_sky_pixels": 1242,
+        "below_horizon_sky_ratio": 0.0028948349804214057,
+        "holes": {
+          "background_blue_pixels": 197,
+          "background_blue_ratio": 0.00029420549581839905,
+          "dark_void_pixels": 6,
+          "dark_void_ratio": 8.960573476702509e-06,
+          "height": 720,
+          "largest_near_black_cluster_px": 1626,
+          "near_black_cluster_count": 94,
+          "near_black_pixels": 304762,
+          "near_black_ratio": 0.4551403823178017,
+          "roi_pixels": 669600,
+          "width": 1280
+        },
+        "horizon_row_from_top": 360,
+        "largest_near_black_cluster_px": 0,
+        "near_black_cluster_count": 0,
+        "void_predicate": "max_rgb<=2"
+      },
+      "target": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "yaw_degrees": 120.0
+    },
+    {
+      "aim_at_target": false,
+      "coverage": {
+        "columns_considered": 115,
+        "expected_chunks": 371,
+        "missing_frustum_surface_chunks": 134,
+        "present_chunks": 237,
+        "renderable_chunks": 237,
+        "renderable_frustum_ratio": 0.6388140161725068
+      },
+      "file": "screenshots/player-view-yaw_150.ppm",
+      "name": "yaw_150",
+      "passed": false,
+      "pitch_degrees": 0.0,
+      "pixels": {
+        "below_horizon_pixels": 429040,
+        "below_horizon_sky_pixels": 1783,
+        "below_horizon_sky_ratio": 0.004155789669960843,
+        "holes": {
+          "background_blue_pixels": 311,
+          "background_blue_ratio": 0.0004644563918757467,
+          "dark_void_pixels": 6,
+          "dark_void_ratio": 8.960573476702509e-06,
+          "height": 720,
+          "largest_near_black_cluster_px": 46,
+          "near_black_cluster_count": 8,
+          "near_black_pixels": 174615,
+          "near_black_ratio": 0.26077508960573476,
+          "roi_pixels": 669600,
+          "width": 1280
+        },
+        "horizon_row_from_top": 360,
+        "largest_near_black_cluster_px": 0,
+        "near_black_cluster_count": 0,
+        "void_predicate": "max_rgb<=2"
+      },
+      "target": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "yaw_degrees": 150.0
+    },
+    {
+      "aim_at_target": false,
+      "coverage": {
+        "columns_considered": 115,
+        "expected_chunks": 370,
+        "missing_frustum_surface_chunks": 149,
+        "present_chunks": 221,
+        "renderable_chunks": 221,
+        "renderable_frustum_ratio": 0.5972972972972973
+      },
+      "file": "screenshots/player-view-yaw_180.ppm",
+      "name": "yaw_180",
+      "passed": false,
+      "pitch_degrees": 0.0,
+      "pixels": {
+        "below_horizon_pixels": 429040,
+        "below_horizon_sky_pixels": 15343,
+        "below_horizon_sky_ratio": 0.035761234383740445,
+        "holes": {
+          "background_blue_pixels": 3074,
+          "background_blue_ratio": 0.004590800477897252,
+          "dark_void_pixels": 2,
+          "dark_void_ratio": 2.986857825567503e-06,
+          "height": 720,
+          "largest_near_black_cluster_px": 10,
+          "near_black_cluster_count": 0,
+          "near_black_pixels": 159183,
+          "near_black_ratio": 0.23772849462365592,
+          "roi_pixels": 669600,
+          "width": 1280
+        },
+        "horizon_row_from_top": 360,
+        "largest_near_black_cluster_px": 0,
+        "near_black_cluster_count": 0,
+        "void_predicate": "max_rgb<=2"
+      },
+      "target": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "yaw_degrees": 180.0
+    },
+    {
+      "aim_at_target": false,
+      "coverage": {
+        "columns_considered": 116,
+        "expected_chunks": 404,
+        "missing_frustum_surface_chunks": 165,
+        "present_chunks": 239,
+        "renderable_chunks": 239,
+        "renderable_frustum_ratio": 0.5915841584158416
+      },
+      "file": "screenshots/player-view-yaw_210.ppm",
+      "name": "yaw_210",
+      "passed": false,
+      "pitch_degrees": 0.0,
+      "pixels": {
+        "below_horizon_pixels": 429040,
+        "below_horizon_sky_pixels": 18790,
+        "below_horizon_sky_ratio": 0.04379545030766362,
+        "holes": {
+          "background_blue_pixels": 3113,
+          "background_blue_ratio": 0.004649044205495818,
+          "dark_void_pixels": 16,
+          "dark_void_ratio": 2.3894862604540025e-05,
+          "height": 720,
+          "largest_near_black_cluster_px": 2,
+          "near_black_cluster_count": 0,
+          "near_black_pixels": 222344,
+          "near_black_ratio": 0.33205495818399045,
+          "roi_pixels": 669600,
+          "width": 1280
+        },
+        "horizon_row_from_top": 360,
+        "largest_near_black_cluster_px": 0,
+        "near_black_cluster_count": 0,
+        "void_predicate": "max_rgb<=2"
+      },
+      "target": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "yaw_degrees": 210.0
+    },
+    {
+      "aim_at_target": false,
+      "coverage": {
+        "columns_considered": 117,
+        "expected_chunks": 400,
+        "missing_frustum_surface_chunks": 158,
+        "present_chunks": 242,
+        "renderable_chunks": 242,
+        "renderable_frustum_ratio": 0.605
+      },
+      "file": "screenshots/player-view-yaw_240.ppm",
+      "name": "yaw_240",
+      "passed": false,
+      "pitch_degrees": 0.0,
+      "pixels": {
+        "below_horizon_pixels": 429040,
+        "below_horizon_sky_pixels": 18112,
+        "below_horizon_sky_ratio": 0.04221517807197464,
+        "holes": {
+          "background_blue_pixels": 3262,
+          "background_blue_ratio": 0.004871565113500597,
+          "dark_void_pixels": 9,
+          "dark_void_ratio": 1.3440860215053763e-05,
+          "height": 720,
+          "largest_near_black_cluster_px": 4,
+          "near_black_cluster_count": 0,
+          "near_black_pixels": 295378,
+          "near_black_ratio": 0.441126045400239,
+          "roi_pixels": 669600,
+          "width": 1280
+        },
+        "horizon_row_from_top": 360,
+        "largest_near_black_cluster_px": 0,
+        "near_black_cluster_count": 0,
+        "void_predicate": "max_rgb<=2"
+      },
+      "target": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "yaw_degrees": 240.0
+    },
+    {
+      "aim_at_target": false,
+      "coverage": {
+        "columns_considered": 124,
+        "expected_chunks": 422,
+        "missing_frustum_surface_chunks": 165,
+        "present_chunks": 257,
+        "renderable_chunks": 257,
+        "renderable_frustum_ratio": 0.6090047393364929
+      },
+      "file": "screenshots/player-view-yaw_270.ppm",
+      "name": "yaw_270",
+      "passed": false,
+      "pitch_degrees": 0.0,
+      "pixels": {
+        "below_horizon_pixels": 429040,
+        "below_horizon_sky_pixels": 2845,
+        "below_horizon_sky_ratio": 0.0066310833488719,
+        "holes": {
+          "background_blue_pixels": 894,
+          "background_blue_ratio": 0.0013351254480286738,
+          "dark_void_pixels": 13,
+          "dark_void_ratio": 1.941457586618877e-05,
+          "height": 720,
+          "largest_near_black_cluster_px": 15,
+          "near_black_cluster_count": 2,
+          "near_black_pixels": 351013,
+          "near_black_ratio": 0.5242129629629629,
+          "roi_pixels": 669600,
+          "width": 1280
+        },
+        "horizon_row_from_top": 360,
+        "largest_near_black_cluster_px": 0,
+        "near_black_cluster_count": 0,
+        "void_predicate": "max_rgb<=2"
+      },
+      "target": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "yaw_degrees": 270.0
+    },
+    {
+      "aim_at_target": false,
+      "coverage": {
+        "columns_considered": 121,
+        "expected_chunks": 414,
+        "missing_frustum_surface_chunks": 158,
+        "present_chunks": 256,
+        "renderable_chunks": 256,
+        "renderable_frustum_ratio": 0.6183574879227053
+      },
+      "file": "screenshots/player-view-yaw_300.ppm",
+      "name": "yaw_300",
+      "passed": false,
+      "pitch_degrees": 0.0,
+      "pixels": {
+        "below_horizon_pixels": 429040,
+        "below_horizon_sky_pixels": 81,
+        "below_horizon_sky_ratio": 0.0001887935856796569,
+        "holes": {
+          "background_blue_pixels": 2,
+          "background_blue_ratio": 2.986857825567503e-06,
+          "dark_void_pixels": 37,
+          "dark_void_ratio": 5.52568697729988e-05,
+          "height": 720,
+          "largest_near_black_cluster_px": 3587,
+          "near_black_cluster_count": 171,
+          "near_black_pixels": 490601,
+          "near_black_ratio": 0.7326777180406213,
+          "roi_pixels": 669600,
+          "width": 1280
+        },
+        "horizon_row_from_top": 360,
+        "largest_near_black_cluster_px": 0,
+        "near_black_cluster_count": 0,
+        "void_predicate": "max_rgb<=2"
+      },
+      "target": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "yaw_degrees": 300.0
+    },
+    {
+      "aim_at_target": false,
+      "coverage": {
+        "columns_considered": 121,
+        "expected_chunks": 402,
+        "missing_frustum_surface_chunks": 152,
+        "present_chunks": 250,
+        "renderable_chunks": 250,
+        "renderable_frustum_ratio": 0.6218905472636815
+      },
+      "file": "screenshots/player-view-yaw_330.ppm",
+      "name": "yaw_330",
+      "passed": false,
+      "pitch_degrees": 0.0,
+      "pixels": {
+        "below_horizon_pixels": 429040,
+        "below_horizon_sky_pixels": 0,
+        "below_horizon_sky_ratio": 0.0,
+        "holes": {
+          "background_blue_pixels": 0,
+          "background_blue_ratio": 0.0,
+          "dark_void_pixels": 74,
+          "dark_void_ratio": 0.0001105137395459976,
+          "height": 720,
+          "largest_near_black_cluster_px": 7227,
+          "near_black_cluster_count": 149,
+          "near_black_pixels": 487109,
+          "near_black_ratio": 0.7274626642771804,
+          "roi_pixels": 669600,
+          "width": 1280
+        },
+        "horizon_row_from_top": 360,
+        "largest_near_black_cluster_px": 1,
+        "near_black_cluster_count": 0,
+        "void_predicate": "max_rgb<=2"
+      },
+      "target": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "yaw_degrees": 330.0
+    },
+    {
+      "aim_at_target": true,
+      "coverage": {
+        "columns_considered": 72,
+        "expected_chunks": 135,
+        "missing_frustum_surface_chunks": 43,
+        "present_chunks": 92,
+        "renderable_chunks": 92,
+        "renderable_frustum_ratio": 0.6814814814814815
+      },
+      "file": "screenshots/player-view-peak.ppm",
+      "name": "peak",
+      "passed": false,
+      "pitch_degrees": 24.902755737304688,
+      "pixels": {
+        "below_horizon_pixels": 70680,
+        "below_horizon_sky_pixels": 0,
+        "below_horizon_sky_ratio": 0.0,
+        "holes": {
+          "background_blue_pixels": 0,
+          "background_blue_ratio": 0.0,
+          "dark_void_pixels": 0,
+          "dark_void_ratio": 0.0,
+          "height": 720,
+          "largest_near_black_cluster_px": 11144,
+          "near_black_cluster_count": 56,
+          "near_black_pixels": 550641,
+          "near_black_ratio": 0.8223431899641577,
+          "roi_pixels": 669600,
+          "width": 1280
+        },
+        "horizon_row_from_top": 649,
+        "largest_near_black_cluster_px": 0,
+        "near_black_cluster_count": 0,
+        "void_predicate": "max_rgb<=2"
+      },
+      "target": {
+        "x": 96.0,
+        "y": 119.43074798583984,
+        "z": 88.0
+      },
+      "yaw_degrees": 42.273685455322266
+    }
+  ],
+  "thresholds": {
+    "max_below_horizon_sky_ratio": 0.005,
+    "max_missing_frustum_surface_chunks": 0,
+    "max_near_black_cluster_count": 0,
+    "min_renderable_frustum_ratio": 0.98,
+    "sky_ratio_enforced": false
+  },
+  "timestamp_utc": "2026-06-11T03:56:25Z",
+  "world_preset": "mountains"
+}
