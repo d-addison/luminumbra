@@ -1,5 +1,6 @@
 {
   "schema": "luminumbra.material_registry.v1",
+  "_albedo_calibration": "T-I4-DR-albedo-calibration: base_color values are the MEASURED LINEAR albedo means of each material's AmbientCG source texture (the photographic PBR albedo), so the metadata is truthful against what the triplanar terrain sampler bakes into the G-buffer. The exposure root fix lives in res/shaders/lighting_pass.frag (sun COLOR -> IRRADIANCE, x PI); textures were NOT brightened because they are already physically accurate. Reference bands + sources: data/common/albedo_calibration_reference.json.",
   "materials": [
     {
       "id": 0,
@@ -9,7 +10,7 @@
     {
       "id": 1,
       "name": "Stone",
-      "base_color": [0.5, 0.5, 0.52],
+      "base_color": [0.087, 0.083, 0.065],
       "roughness": 0.85,
       "metallic": 0.05,
       "albedo_map": "data/textures/terrain/rock/Rock028_2K-PNG_Color.png",
@@ -20,7 +21,7 @@
     {
       "id": 2,
       "name": "Soil",
-      "base_color": [0.3, 0.15, 0.05],
+      "base_color": [0.114, 0.061, 0.041],
       "roughness": 0.9,
       "metallic": 0.0,
       "albedo_map": "data/textures/terrain/soil/Ground048_2K-PNG_Color.png",
@@ -31,7 +32,7 @@
     {
       "id": 3,
       "name": "Grass",
-      "base_color": [0.2, 0.6, 0.15],
+      "base_color": [0.056, 0.071, 0.014],
       "roughness": 0.8,
       "metallic": 0.0,
       "albedo_map": "data/textures/terrain/grass/Grass003_2K-PNG_Color.png",
@@ -42,7 +43,7 @@
     {
       "id": 4,
       "name": "Sand",
-      "base_color": [0.9, 0.8, 0.5],
+      "base_color": [0.517, 0.323, 0.106],
       "roughness": 0.75,
       "metallic": 0.0,
       "albedo_map": "data/textures/terrain/sand/Ground087_2K-PNG_Color.png",
@@ -53,7 +54,7 @@
     {
       "id": 5,
       "name": "Deepslate",
-      "base_color": [0.2, 0.2, 0.25],
+      "base_color": [0.135, 0.134, 0.113],
       "roughness": 0.95,
       "metallic": 0.02,
       "albedo_map": "data/textures/terrain/deepslate/Gravel040_2K-PNG_Color.png",
