@@ -31,6 +31,31 @@ struct TerrainGenParams {
 
     bool island_mask_enabled = false;
     float island_mask_frequency = 0.004f;
+
+    // --- T-I3-10 terrain shaping (default-off) ---
+    // With shaping_enabled == false every height path is bit-identical to the
+    // pre-shaping implementation (legacy regression hashes in
+    // test_worldgen_layer_snapshots.cpp prove it). When enabled, three 2D
+    // control channels modulate the base FBM detail channel:
+    //   continentalness (m_seed + 3) -> continental_spline -> base elevation
+    //   erosion         (m_seed + 4) -> erosion_spline     -> amplitude mult
+    //   peaks/valleys   (m_seed + 5) -> peaks_spline       -> ridge term
+    // plus a 2-channel simplex domain warp (m_seed + 6 / + 7) applied to the
+    // BASE noise (and pv) sample coordinates. Seed offsets are pinned by the
+    // iteration-3 seed registry (design-decisions.md section 2).
+    // Splines are monotone piecewise-linear [input, output] control points
+    // evaluated with plain lerp + endpoint clamping (no smoothstep, so the
+    // scalar and batch paths cannot diverge).
+    bool shaping_enabled = false;
+    float continentalness_frequency = 0.0008f;
+    float erosion_frequency = 0.0015f;
+    float peaks_frequency = 0.004f;
+    float peaks_amplitude = 90.0f;
+    float domain_warp_amplitude = 30.0f;
+    float domain_warp_frequency = 0.006f;
+    std::vector<std::array<float, 2>> continental_spline;
+    std::vector<std::array<float, 2>> erosion_spline;
+    std::vector<std::array<float, 2>> peaks_spline;
 };
 
 struct WorldGenLayerSample {
@@ -316,6 +341,34 @@ private:
     void wait_for_meshing_jobs();
     void reinitialize_noise();
 
+    // --- T-I3-10: the ONE shared height implementation ---
+    // Every terrain-height consumer (GetTerrainHeightAt, SampleWorldGenLayers,
+    // GenerateChunkData full + step>1 batch loops, and the column-span cache
+    // through GetTerrainHeightAt) derives its height from this helper so the
+    // scalar and batch paths cannot diverge. All noise reads use GenSingle2D
+    // (never batch SIMD Gen* grids) when shaping is enabled, making the batch
+    // heightmap bytes EXACTLY equal to the scalar value at the same world
+    // coordinate. With shaping disabled the helper reproduces the legacy
+    // float-op sequence bit-for-bit, while GenerateChunkData keeps its
+    // GenUniformGrid2D fast path (legacy heights/hashes untouched, covered by
+    // the existing max_sdf_sample_error < 1e-4 snapshot gate).
+    struct ShapedHeightSample {
+        float base_noise = 0.0f;        // detail FBM (at warped coords when shaping)
+        float pre_island_height = 0.0f; // combined height before the island mask
+        float island_noise = 0.0f;
+        float island_mask = 1.0f;
+        float final_height = 0.0f;
+        bool island_applied = false;
+    };
+    ShapedHeightSample ComputeShapedHeightSample(float world_x, float world_z) const;
+    float ComputeShapedHeight(float world_x, float world_z) const;
+    // Monotone piecewise-linear spline over sorted [input, output] control
+    // points: endpoint-clamped, plain lerp between neighbors, `fallback` when
+    // the point list is empty.
+    static float EvaluateShapingSpline(const std::vector<std::array<float, 2>>& points,
+                                       float input,
+                                       float fallback);
+
     int m_update_tick_counter = 0;
 
     // --- Dependencies ---
@@ -327,6 +380,13 @@ private:
     FastNoise::SmartNode<FastNoise::Generator> m_terrain_generator;
     FastNoise::SmartNode<FastNoise::Generator> m_cave_generator;
     FastNoise::SmartNode<FastNoise::Generator> m_island_mask_generator;
+    // T-I3-10 shaping control noises (only built when shaping_enabled; seed
+    // offsets +3/+4/+5 for continentalness/erosion/peaks, the single warp
+    // simplex is sampled with seeds +6 and +7 for the X/Z warp channels).
+    FastNoise::SmartNode<FastNoise::Generator> m_continentalness_generator;
+    FastNoise::SmartNode<FastNoise::Generator> m_erosion_generator;
+    FastNoise::SmartNode<FastNoise::Generator> m_peaks_generator;
+    FastNoise::SmartNode<FastNoise::Generator> m_warp_generator;
 
     WaterSystem* m_water_system;
 };
