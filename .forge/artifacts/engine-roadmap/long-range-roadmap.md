@@ -43,7 +43,21 @@ Standing cross-iteration spine (every iteration, non-negotiable):
    desync oracle; loopback + LAN, one remote client. A before C (hash
    re-bless ordering).
 3. SHIELD-RT spike: timeboxed raymarch prototype, evidence-only.
-4. Slack extras: Lua bindings/hot-reload, StreamingProfile meshing-skip,
+4. **Wave B — Surface detail & material fidelity (engine, owner-flagged
+   2026-06-11 after the T-I3-18 capture review)**: the engine renders flat
+   LUT colors only — no textures, normal maps, or detail variation; at
+   photography distance (the game's core distance) there is nothing on
+   screen but lighting. Scope: triplanar terrain texturing + normal/detail
+   maps wired through the materials LUT; textured + normal-mapped skinned
+   meshes; roughness variation; emissive->bloom calibration (the T-I3-18
+   glow prop does not visibly glow). Gates: close-range material capture
+   gate (the MaterialVisual pattern at 2-8 m), RenderHealth re-bless,
+   PerfRegression. Precursor evidence: T-I3-18 creature captures.
+   Related now-item at T-I3-22 closeout: shape the archipelago preset
+   (left on legacy params by T-I3-11), re-frame creature capture
+   eye-level, high-contrast creature material, composition check in the
+   CreatureSlice gate.
+5. Slack extras: Lua bindings/hot-reload, StreamingProfile meshing-skip,
    GPU SDF enablement behind parity gate.
 
 ## Iteration 5 — ATMOSPHERIC PILLAR (LEAD) + Instinct/ecology coupling
