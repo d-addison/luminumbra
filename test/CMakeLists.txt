@@ -55,6 +55,7 @@ set_source_files_properties("${ASSET_PROCESSOR_SOURCE}" PROPERTIES
 
 add_executable(asset_processor_round_trip_test
     tools/test_asset_processor_round_trip.cpp
+    tools/test_skeletal_asset_round_trip.cpp
     "${ASSET_PROCESSOR_SOURCE}"
 )
 
