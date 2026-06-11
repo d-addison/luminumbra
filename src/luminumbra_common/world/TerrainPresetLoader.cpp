@@ -1,0 +1,250 @@
+#include "TerrainPresetLoader.h"
+
+#include <fstream>
+#include <initializer_list>
+
+#include "nlohmann/json.hpp"
+
+#include "../core/Log.h"
+
+namespace Luminumbra::world {
+namespace {
+
+void WarnUnknownKeys(const nlohmann::json& object,
+                     const char* scope,
+                     std::initializer_list<const char*> known_keys,
+                     const std::filesystem::path& preset_path,
+                     std::vector<std::string>& warnings) {
+    if (!object.is_object()) {
+        return;
+    }
+    for (const auto& item : object.items()) {
+        bool known = false;
+        for (const char* key : known_keys) {
+            if (item.key() == key) {
+                known = true;
+                break;
+            }
+        }
+        if (!known) {
+            std::string warning = "world preset '" + preset_path.string() +
+                                  "' has unknown key " + scope + "." + item.key();
+            LUMINUMBRA_CORE_WARN("{}", warning);
+            warnings.push_back(std::move(warning));
+        }
+    }
+}
+
+bool JsonHasObject(const nlohmann::json& data, const char* key) {
+    return data.contains(key) && data[key].is_object();
+}
+
+std::vector<std::array<float, 2>> ParseSplinePoints(const nlohmann::json& block, const char* key) {
+    std::vector<std::array<float, 2>> points;
+    if (!block.contains(key) || !block[key].is_array()) {
+        return points;
+    }
+    for (const auto& entry : block[key]) {
+        if (entry.is_array() && entry.size() == 2 && entry[0].is_number() && entry[1].is_number()) {
+            points.push_back({entry[0].get<float>(), entry[1].get<float>()});
+        }
+    }
+    return points;
+}
+
+void ParseShapingBlock(const nlohmann::json& terrain,
+                       TerrainShapingPreset& shaping,
+                       const std::filesystem::path& preset_path,
+                       std::vector<std::string>& warnings) {
+    if (!JsonHasObject(terrain, "shaping")) {
+        return;
+    }
+    const nlohmann::json& block = terrain["shaping"];
+    shaping.present = true;
+    shaping.enabled = block.value("enabled", shaping.enabled);
+    shaping.continentalness_frequency = block.value("continentalness_frequency", shaping.continentalness_frequency);
+    shaping.erosion_frequency = block.value("erosion_frequency", shaping.erosion_frequency);
+    shaping.peaks_frequency = block.value("peaks_frequency", shaping.peaks_frequency);
+    shaping.peaks_amplitude = block.value("peaks_amplitude", shaping.peaks_amplitude);
+    shaping.domain_warp_amplitude = block.value("domain_warp_amplitude", shaping.domain_warp_amplitude);
+    shaping.domain_warp_frequency = block.value("domain_warp_frequency", shaping.domain_warp_frequency);
+    shaping.continental_spline = ParseSplinePoints(block, "continental_spline");
+    shaping.erosion_spline = ParseSplinePoints(block, "erosion_spline");
+    shaping.peaks_spline = ParseSplinePoints(block, "peaks_spline");
+    WarnUnknownKeys(block, "generation_params.terrain.shaping",
+                    {"enabled", "continentalness_frequency", "erosion_frequency",
+                     "peaks_frequency", "peaks_amplitude", "domain_warp_amplitude",
+                     "domain_warp_frequency", "continental_spline", "erosion_spline",
+                     "peaks_spline"},
+                    preset_path, warnings);
+}
+
+void ParseBiomesBlock(const nlohmann::json& gen_params,
+                      TerrainBiomesPreset& biomes,
+                      const std::filesystem::path& preset_path,
+                      std::vector<std::string>& warnings) {
+    if (!JsonHasObject(gen_params, "biomes")) {
+        return;
+    }
+    const nlohmann::json& block = gen_params["biomes"];
+    biomes.present = true;
+    biomes.temperature_frequency = block.value("temperature_frequency", biomes.temperature_frequency);
+    biomes.humidity_frequency = block.value("humidity_frequency", biomes.humidity_frequency);
+    WarnUnknownKeys(block, "generation_params.biomes",
+                    {"temperature_frequency", "humidity_frequency"},
+                    preset_path, warnings);
+}
+
+void ParseMaterialsBlock(const nlohmann::json& gen_params,
+                         TerrainMaterialsPreset& materials,
+                         const std::filesystem::path& preset_path,
+                         std::vector<std::string>& warnings) {
+    if (!JsonHasObject(gen_params, "materials")) {
+        return;
+    }
+    const nlohmann::json& block = gen_params["materials"];
+    materials.present = true;
+    WarnUnknownKeys(block, "generation_params.materials", {"strata", "veins"},
+                    preset_path, warnings);
+
+    if (block.contains("strata") && block["strata"].is_array()) {
+        for (const auto& entry : block["strata"]) {
+            if (!entry.is_object()) {
+                continue;
+            }
+            TerrainStratumPreset stratum;
+            stratum.material = entry.value("material", std::string{});
+            stratum.max_depth = entry.value("max_depth", 0);
+            stratum.thickness = entry.value("thickness", 0);
+            WarnUnknownKeys(entry, "generation_params.materials.strata[]",
+                            {"material", "max_depth", "thickness"},
+                            preset_path, warnings);
+            materials.strata.push_back(std::move(stratum));
+        }
+    }
+
+    if (block.contains("veins") && block["veins"].is_array()) {
+        for (const auto& entry : block["veins"]) {
+            if (!entry.is_object()) {
+                continue;
+            }
+            TerrainVeinPreset vein;
+            vein.material = entry.value("material", std::string{});
+            vein.noise_frequency = entry.value("noise_frequency", 0.0f);
+            vein.noise_threshold = entry.value("noise_threshold", 0.0f);
+            vein.has_max_altitude = entry.contains("max_altitude") && entry["max_altitude"].is_number();
+            if (vein.has_max_altitude) {
+                vein.max_altitude = entry["max_altitude"].get<float>();
+            }
+            if (entry.contains("host_materials") && entry["host_materials"].is_array()) {
+                for (const auto& host : entry["host_materials"]) {
+                    if (host.is_string()) {
+                        vein.host_materials.push_back(host.get<std::string>());
+                    }
+                }
+            }
+            WarnUnknownKeys(entry, "generation_params.materials.veins[]",
+                            {"material", "host_materials", "noise_frequency",
+                             "noise_threshold", "max_altitude"},
+                            preset_path, warnings);
+            materials.veins.push_back(std::move(vein));
+        }
+    }
+}
+
+} // namespace
+
+TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path) {
+    TerrainPresetLoadResult result;
+
+    std::ifstream file(preset_path);
+    if (!file.is_open()) {
+        result.errors.push_back("failed to open world preset: " + preset_path.string());
+        return result;
+    }
+
+    nlohmann::json data;
+    try {
+        data = nlohmann::json::parse(file);
+    } catch (const nlohmann::json::parse_error& e) {
+        result.errors.push_back("failed to parse world preset JSON '" + preset_path.string() + "': " + e.what());
+        return result;
+    }
+
+    if (!JsonHasObject(data, "generation_params")) {
+        result.errors.push_back("world preset is missing object generation_params: " + preset_path.string());
+        return result;
+    }
+
+    const nlohmann::json& gen_params = data["generation_params"];
+    if (!JsonHasObject(gen_params, "terrain")) {
+        result.errors.push_back("world preset is missing object generation_params.terrain: " + preset_path.string());
+        return result;
+    }
+    if (!JsonHasObject(gen_params, "features")) {
+        result.errors.push_back("world preset is missing object generation_params.features: " + preset_path.string());
+        return result;
+    }
+
+    const nlohmann::json& terrain = gen_params["terrain"];
+    const nlohmann::json& features = gen_params["features"];
+    for (const char* key : {"base_frequency", "base_amplitude", "octaves", "persistence", "lacunarity", "height_offset"}) {
+        if (!terrain.contains(key) || !terrain[key].is_number()) {
+            result.errors.push_back(std::string("world preset terrain field must be numeric: ") + key);
+        }
+    }
+    if (!features.contains("caves_enabled") || !features["caves_enabled"].is_boolean()) {
+        result.errors.push_back("world preset feature caves_enabled must be boolean");
+    }
+    if (!features.contains("cave_frequency") || !features["cave_frequency"].is_number()) {
+        result.errors.push_back("world preset feature cave_frequency must be numeric");
+    }
+
+    if (!result.errors.empty()) {
+        return result;
+    }
+
+    // Consumed generation parameters. Defaults match Systems::TerrainGenParams
+    // so an absent optional key never drifts behavior.
+    Systems::TerrainGenParams& params = result.params;
+    params.base_frequency = terrain.value("base_frequency", params.base_frequency);
+    params.base_amplitude = terrain.value("base_amplitude", params.base_amplitude);
+    params.octaves = terrain.value("octaves", params.octaves);
+    params.persistence = terrain.value("persistence", params.persistence);
+    params.lacunarity = terrain.value("lacunarity", params.lacunarity);
+    params.height_offset = terrain.value("height_offset", params.height_offset);
+    params.island_mask_enabled = terrain.value("island_mask_enabled", false);
+    params.island_mask_frequency = terrain.value("island_mask_frequency", 0.004f);
+    params.caves_enabled = features.value("caves_enabled", true);
+    params.cave_frequency = features.value("cave_frequency", 0.02f);
+    params.cave_threshold = features.value("cave_threshold", params.cave_threshold);
+    params.cave_carve_value = features.value("cave_carve_value", params.cave_carve_value);
+
+    // Forthcoming blocks: parsed and stored, not yet consumed by generation.
+    ParseShapingBlock(terrain, result.extras.shaping, preset_path, result.warnings);
+    ParseBiomesBlock(gen_params, result.extras.biomes, preset_path, result.warnings);
+    result.extras.features.present = true;
+    result.extras.features.rivers_enabled = features.value("rivers_enabled", false);
+    result.extras.features.structures_enabled = features.value("structures_enabled", false);
+    ParseMaterialsBlock(gen_params, result.extras.materials, preset_path, result.warnings);
+
+    // Unknown-key audit over every consumed scope.
+    WarnUnknownKeys(data, "$", {"name", "description", "schema_rev", "generation_params"},
+                    preset_path, result.warnings);
+    WarnUnknownKeys(gen_params, "generation_params", {"terrain", "biomes", "features", "materials"},
+                    preset_path, result.warnings);
+    WarnUnknownKeys(terrain, "generation_params.terrain",
+                    {"base_frequency", "base_amplitude", "octaves", "persistence",
+                     "lacunarity", "height_offset", "island_mask_enabled",
+                     "island_mask_frequency", "shaping"},
+                    preset_path, result.warnings);
+    WarnUnknownKeys(features, "generation_params.features",
+                    {"caves_enabled", "cave_frequency", "cave_threshold",
+                     "cave_carve_value", "rivers_enabled", "structures_enabled"},
+                    preset_path, result.warnings);
+
+    result.ok = true;
+    return result;
+}
+
+} // namespace Luminumbra::world

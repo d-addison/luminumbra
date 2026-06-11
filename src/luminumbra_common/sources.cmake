@@ -47,5 +47,6 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/world/Chunk.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/GameSession.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/MarchingCubes.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/world/TerrainPresetLoader.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/WorldStreamingState.cpp
 )

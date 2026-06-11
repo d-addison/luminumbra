@@ -1,0 +1,100 @@
+#pragma once
+
+// T-I3-5: the one canonical world-preset parser. Replaces the four duplicate
+// parsers that previously lived in GameSession.cpp,
+// test_worldgen_layer_snapshots.cpp, runtime_world_visual_validation_test.cpp
+// and initial_world_loading_perf_test.cpp.
+//
+// Consumed parameters land in Systems::TerrainGenParams (byte-stable with the
+// legacy parsers). Forthcoming blocks — `terrain.shaping` (reserved keys per
+// the iteration-3 design doc), `biomes`, `features` river/structure flags and
+// `materials` — are parsed into TerrainPresetExtras: stored, not yet consumed
+// by generation. Unknown keys produce LUMINUMBRA_CORE_WARN warnings.
+
+#include <array>
+#include <filesystem>
+#include <string>
+#include <vector>
+
+#include "../systems/SHIELD_WorldSystem.h" // Systems::TerrainGenParams
+
+namespace Luminumbra::world {
+
+// generation_params.terrain.shaping — reserved keys pinned by
+// .forge/artifacts/engine-iteration-3/panel-1-world-scale.md (spline points
+// are monotone piecewise-linear control points, [input, output] pairs).
+struct TerrainShapingPreset {
+    bool present = false; // block existed in the preset file
+    bool enabled = false;
+    float continentalness_frequency = 0.0008f;
+    float erosion_frequency = 0.0015f;
+    float peaks_frequency = 0.004f;
+    float peaks_amplitude = 90.0f;
+    float domain_warp_amplitude = 30.0f;
+    float domain_warp_frequency = 0.006f;
+    std::vector<std::array<float, 2>> continental_spline;
+    std::vector<std::array<float, 2>> erosion_spline;
+    std::vector<std::array<float, 2>> peaks_spline;
+};
+
+// generation_params.biomes — reserved for iteration 4.
+struct TerrainBiomesPreset {
+    bool present = false;
+    float temperature_frequency = 0.005f;
+    float humidity_frequency = 0.005f;
+};
+
+// generation_params.features flags beyond the cave params consumed through
+// TerrainGenParams — reserved for iteration 4.
+struct TerrainFeaturesPreset {
+    bool present = false;
+    bool rivers_enabled = false;
+    bool structures_enabled = false;
+};
+
+// generation_params.materials — strata + veins authoring data.
+struct TerrainStratumPreset {
+    std::string material;
+    int max_depth = 0;
+    int thickness = 0;
+};
+
+struct TerrainVeinPreset {
+    std::string material;
+    std::vector<std::string> host_materials;
+    float noise_frequency = 0.0f;
+    float noise_threshold = 0.0f;
+    float max_altitude = 0.0f;
+    bool has_max_altitude = false;
+};
+
+struct TerrainMaterialsPreset {
+    bool present = false;
+    std::vector<TerrainStratumPreset> strata;
+    std::vector<TerrainVeinPreset> veins;
+};
+
+struct TerrainPresetExtras {
+    TerrainShapingPreset shaping;
+    TerrainBiomesPreset biomes;
+    TerrainFeaturesPreset features;
+    TerrainMaterialsPreset materials;
+};
+
+struct TerrainPresetLoadResult {
+    bool ok = false;
+    Systems::TerrainGenParams params;
+    TerrainPresetExtras extras;
+    std::vector<std::string> errors;
+    std::vector<std::string> warnings; // unknown-key reports (also logged)
+};
+
+// Loads and validates a world preset JSON file. Validation contract matches
+// the historical GameSession parser: generation_params, terrain and features
+// must be objects, the six terrain noise fields must be numeric and
+// caves_enabled/cave_frequency must be present and typed. On any error the
+// result carries ok=false and human-readable messages; params/extras are only
+// meaningful when ok=true.
+TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path);
+
+} // namespace Luminumbra::world

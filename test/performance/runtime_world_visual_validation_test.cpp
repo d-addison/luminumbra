@@ -27,6 +27,7 @@
 #include "systems/PhysicsSystem.h"
 #include "systems/SHIELD_WorldSystem.h"
 #include "world/Chunk.h"
+#include "world/TerrainPresetLoader.h"
 
 namespace fs = std::filesystem;
 
@@ -176,28 +177,14 @@ fs::path ArtifactRoot() {
 }
 
 TerrainGenParams LoadPresetParams(const fs::path& path) {
-    std::ifstream input(path);
-    EXPECT_TRUE(input) << path.string();
-    const nlohmann::json data = nlohmann::json::parse(input);
-
-    const nlohmann::json& gen_params = data.at("generation_params");
-    const nlohmann::json& terrain = gen_params.at("terrain");
-    const nlohmann::json& features = gen_params.value("features", nlohmann::json::object());
-
-    TerrainGenParams params;
-    params.base_frequency = terrain.value("base_frequency", params.base_frequency);
-    params.base_amplitude = terrain.value("base_amplitude", params.base_amplitude);
-    params.octaves = terrain.value("octaves", params.octaves);
-    params.persistence = terrain.value("persistence", params.persistence);
-    params.lacunarity = terrain.value("lacunarity", params.lacunarity);
-    params.height_offset = terrain.value("height_offset", params.height_offset);
-    params.island_mask_enabled = terrain.value("island_mask_enabled", params.island_mask_enabled);
-    params.island_mask_frequency = terrain.value("island_mask_frequency", params.island_mask_frequency);
-    params.caves_enabled = features.value("caves_enabled", params.caves_enabled);
-    params.cave_frequency = features.value("cave_frequency", params.cave_frequency);
-    params.cave_threshold = features.value("cave_threshold", params.cave_threshold);
-    params.cave_carve_value = features.value("cave_carve_value", params.cave_carve_value);
-    return params;
+    // T-I3-5: delegate to the canonical engine preset parser.
+    const Luminumbra::world::TerrainPresetLoadResult result =
+        Luminumbra::world::LoadTerrainPreset(path);
+    EXPECT_TRUE(result.ok) << path.string();
+    for (const std::string& error : result.errors) {
+        ADD_FAILURE() << "preset parse error: " << error;
+    }
+    return result.params;
 }
 
 Vec3 ChunkBase(const Chunk& chunk) {
