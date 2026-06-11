@@ -3,13 +3,18 @@
 #include <fstream>
 #include <string>
 #include <cmath>
+#include <cctype>
 #include <cfloat>
+#include <cstdint>
 #include <algorithm>
 #include <unordered_map>
 
 #define CGLTF_IMPLEMENTATION
 #include "cgltf.h"
 #include "meshoptimizer.h" // This will now be found via the include path in CMake
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
 
 #include "luminumbra_common/animation/SkinnedMeshFormat.h"
 
@@ -345,7 +350,138 @@ void process_skinned_gltf(cgltf_data* data, const std::string& input_path, const
     WriteAnimationClips(data, output_path);
 }
 
+// ----------------------------------------------------------------------------
+// Texture import: PNG -> .ltex (T-I4-6)
+//
+// .ltex is a minimal, self-describing mip-chained 8-bit texture container. The
+// header is written field-by-field (no struct padding) so the on-disk layout
+// is unambiguous and trivially round-trippable:
+//
+//   u32 magic    = 'LTEX' little-endian (0x5845544C)
+//   u16 version  = 1
+//   u16 mip_count
+//   u32 width    (mip 0)
+//   u32 height   (mip 0)
+//   u8  channels (1..4)
+//   <raw mip chain> : for each level, width*height*channels bytes, dimensions
+//                     halve (floored, min 1) per level, box-filtered from the
+//                     previous level. Layout matches glTexSubImage3D upload.
+//
+// KTX2 is deferred (design-decisions.md §10).
+// ----------------------------------------------------------------------------
+
+constexpr uint32_t kLtexMagic = 0x5845544C; // 'LTEX' little-endian
+constexpr uint16_t kLtexVersion = 1;
+
+struct LtexMip {
+    uint32_t width = 0;
+    uint32_t height = 0;
+    std::vector<uint8_t> pixels; // width * height * channels
+};
+
+// Box-filter downsample by 2 (floored, min 1). Averages the up-to-4 source
+// texels covering each destination texel; deterministic integer rounding.
+LtexMip BoxFilterDownsample(const LtexMip& src, uint32_t channels) {
+    LtexMip dst;
+    dst.width = std::max(1u, src.width / 2u);
+    dst.height = std::max(1u, src.height / 2u);
+    dst.pixels.resize(static_cast<size_t>(dst.width) * dst.height * channels);
+
+    for (uint32_t y = 0; y < dst.height; ++y) {
+        const uint32_t sy0 = std::min(y * 2u, src.height - 1u);
+        const uint32_t sy1 = std::min(sy0 + 1u, src.height - 1u);
+        for (uint32_t x = 0; x < dst.width; ++x) {
+            const uint32_t sx0 = std::min(x * 2u, src.width - 1u);
+            const uint32_t sx1 = std::min(sx0 + 1u, src.width - 1u);
+            for (uint32_t c = 0; c < channels; ++c) {
+                auto at = [&](uint32_t px, uint32_t py) -> uint32_t {
+                    return src.pixels[(static_cast<size_t>(py) * src.width + px) * channels + c];
+                };
+                const uint32_t sum = at(sx0, sy0) + at(sx1, sy0) + at(sx0, sy1) + at(sx1, sy1);
+                // Round-to-nearest of the 4-texel average.
+                dst.pixels[(static_cast<size_t>(y) * dst.width + x) * channels + c] =
+                    static_cast<uint8_t>((sum + 2u) / 4u);
+            }
+        }
+    }
+    return dst;
+}
+
+// Build the full mip chain down to 1x1.
+std::vector<LtexMip> BuildMipChain(LtexMip base, uint32_t channels) {
+    std::vector<LtexMip> chain;
+    chain.push_back(std::move(base));
+    while (chain.back().width > 1u || chain.back().height > 1u) {
+        chain.push_back(BoxFilterDownsample(chain.back(), channels));
+    }
+    return chain;
+}
+
+bool WriteLtex(const std::string& output_path, uint32_t width, uint32_t height,
+               uint32_t channels, const std::vector<LtexMip>& mips) {
+    std::ofstream out(output_path, std::ios::binary);
+    if (!out) {
+        std::cerr << "Error: Could not open output file " << output_path << std::endl;
+        return false;
+    }
+
+    const uint16_t mip_count = static_cast<uint16_t>(mips.size());
+    const uint8_t channels8 = static_cast<uint8_t>(channels);
+
+    out.write(reinterpret_cast<const char*>(&kLtexMagic), sizeof(kLtexMagic));
+    out.write(reinterpret_cast<const char*>(&kLtexVersion), sizeof(kLtexVersion));
+    out.write(reinterpret_cast<const char*>(&mip_count), sizeof(mip_count));
+    out.write(reinterpret_cast<const char*>(&width), sizeof(width));
+    out.write(reinterpret_cast<const char*>(&height), sizeof(height));
+    out.write(reinterpret_cast<const char*>(&channels8), sizeof(channels8));
+
+    for (const LtexMip& mip : mips) {
+        out.write(reinterpret_cast<const char*>(mip.pixels.data()),
+                  static_cast<std::streamsize>(mip.pixels.size()));
+    }
+    return static_cast<bool>(out);
+}
+
 } // namespace
+
+// Public entry point (also used by the round-trip test, which re-declares this
+// signature). Imports a PNG and writes a box-filter mip-chained .ltex.
+bool process_texture(const std::string& input_path, const std::string& output_path) {
+    int width = 0;
+    int height = 0;
+    int source_channels = 0;
+    // Do NOT flip: .ltex stores PNG row order; the runtime upload path applies
+    // any flip it needs. Force 4 channels (RGBA) for the texture-array path.
+    constexpr int kForcedChannels = 4;
+    stbi_set_flip_vertically_on_load(false);
+    unsigned char* data = stbi_load(input_path.c_str(), &width, &height, &source_channels, kForcedChannels);
+    if (!data) {
+        std::cerr << "Error: Could not load image: " << input_path << " (" << stbi_failure_reason() << ")" << std::endl;
+        return false;
+    }
+    if (width <= 0 || height <= 0) {
+        std::cerr << "Error: Image has invalid dimensions: " << input_path << std::endl;
+        stbi_image_free(data);
+        return false;
+    }
+
+    const uint32_t channels = static_cast<uint32_t>(kForcedChannels);
+    LtexMip base;
+    base.width = static_cast<uint32_t>(width);
+    base.height = static_cast<uint32_t>(height);
+    base.pixels.assign(data, data + static_cast<size_t>(width) * height * channels);
+    stbi_image_free(data);
+
+    const std::vector<LtexMip> mips = BuildMipChain(std::move(base), channels);
+    if (!WriteLtex(output_path, static_cast<uint32_t>(width), static_cast<uint32_t>(height), channels, mips)) {
+        return false;
+    }
+
+    std::cout << "Successfully processed texture '" << input_path << "' -> '" << output_path << "' (LTEX)" << std::endl;
+    std::cout << "  - Dimensions: " << width << "x" << height << ", channels: " << channels << std::endl;
+    std::cout << "  - Mip levels: " << mips.size() << std::endl;
+    return true;
+}
 
 void process_gltf(const std::string& input_path, const std::string& output_path) {
     cgltf_options options = {};
@@ -486,9 +622,22 @@ void process_gltf(const std::string& input_path, const std::string& output_path)
 
 int main(int argc, char* argv[]) {
     if (argc != 3) {
-        std::cerr << "Usage: AssetProcessor.exe <input.glb> <output.lmesh>" << std::endl;
+        std::cerr << "Usage: AssetProcessor.exe <input.glb|input.png> <output.lmesh|output.ltex>" << std::endl;
         return 1;
     }
-    process_gltf(argv[1], argv[2]);
+
+    const std::string output_path = argv[2];
+    auto ends_with = [](const std::string& s, const std::string& suffix) {
+        if (s.size() < suffix.size()) return false;
+        return std::equal(suffix.rbegin(), suffix.rend(), s.rbegin(),
+                          [](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) ==
+                                                      std::tolower(static_cast<unsigned char>(b)); });
+    };
+
+    if (ends_with(output_path, ".ltex")) {
+        return process_texture(argv[1], output_path) ? 0 : 1;
+    }
+
+    process_gltf(argv[1], output_path);
     return 0;
 }

@@ -418,6 +418,16 @@ private:
                 {"runtime_allowed", stats.gpu_sdf_runtime_allowed},
                 {"callback_registered", stats.gpu_sdf_callback_registered},
                 {"cpu_fallback_active", stats.gpu_sdf_cpu_fallback_active}
+            }},
+            // Texture-array residency telemetry (T-I4-6). texture_resident_bytes
+            // is gated against the 96 MB iteration budget by the
+            // TextureResidency validator mode.
+            {"texture_residency", {
+                {"texture_resident_bytes", stats.texture_resident_bytes},
+                {"texture_resident_budget_bytes", stats.texture_resident_budget_bytes},
+                {"within_budget", stats.texture_resident_within_budget},
+                {"array_count", stats.texture_residency_array_count},
+                {"layer_count", stats.texture_residency_layer_count}
             }}
         };
     }
