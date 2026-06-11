@@ -131,6 +131,36 @@ sensible seed: IK/gait after iteration 5; parametric bodies as an
 iteration 6/7 stretch or first post-photography feature. Gets its own
 spec/critique round before any scheduling.
 
+## Candidate expansions backlog (recorded 2026-06-11; each needs its own
+## spec/critique round; listed by natural home + why it is cheap here)
+
+Lockstep dividends (iter 4+): **session replay** (seed + input stream =
+perfect replay; re-photograph missed moments, ghosts, trailers, desync
+repro — consider inside the iter-4 transport wave, same machinery);
+trap/remote cameras (headless sim + deferred render of a recorded tick);
+time-lapse photo mode (SimulationClock fast-forward under authority).
+
+Atmospheric (iter 5): microclimates (valley fog/rain shadows from wind
+grid + heightfield); snow/season accumulation as persisted terrain state
+(dirty-chunk machinery); deterministic celestial rare events per seed
+(auroras/meteors/eclipses — rare-event photography pull).
+
+Instinct (iter 5/6): creature memory/wariness (startled creatures flee
+earlier next time — THE zen stalking mechanic); herds/flocking/predator-
+prey; nests/territories/lifecycles + mating displays (rare Codex shots).
+
+Aetheric/SHIELD (iter 6): underground biome volumes w/ bioluminescent
+cavern ecosystems (night/cave photography x light fields); volumetric
+clouds as a second SHIELD-RT raymarch consumer; deterministic erosion
+detail pass (thermal+hydraulic) feeding river valleys.
+
+Game loop (iter 7+): field-guide commissions (gentle goals, no quests);
+real photo export to disk from the capture path; hides/camouflage tools
+(pairs with wariness).
+
+Owner-flagged highest leverage: replay, creature memory, celestial
+events. Also recorded: procedural/evolved creatures (section above).
+
 ## Explicitly unscheduled (revisit at iteration-7 close)
 
 F3/3 km tier (superseded by SHIELD-RT), matchmaking/WAN networking, mod
