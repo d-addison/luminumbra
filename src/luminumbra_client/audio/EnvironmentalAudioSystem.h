@@ -1,6 +1,8 @@
 #pragma once
 #include "MiniaudioManager.h"
 #include "glm/glm.hpp"
+#include <cstdint>
+#include <string>
 #include <unordered_map>
 #include <memory>
 
@@ -27,7 +29,24 @@ public:
     // Real-time environmental audio adjustments
     void SetTimeOfDay(float timeNormalized); // 0.0 = midnight, 0.5 = noon
     void SetSeasonalEffects(float seasonFactor); // 0.0 = winter, 1.0 = summer
-    
+
+    // T-I4-5: apply the active biome's reverb profile. preset is the authored
+    // label (opaque to the engine); wet/dry/decay drive the audio manager's
+    // global reverb. Idempotent: re-applying the same profile is a no-op so the
+    // per-tick Update path does not churn the backend. The last applied profile
+    // is exposed for the audio telemetry artifact (reverb block).
+    void ApplyBiomeReverb(const std::string& preset, float wet, float dry, float decay);
+
+    struct BiomeReverbState {
+        bool applied = false;
+        std::string preset;
+        float wet = 0.0f;
+        float dry = 0.0f;
+        float decay = 0.0f;
+        std::uint64_t apply_count = 0; // distinct profile transitions
+    };
+    const BiomeReverbState& CurrentBiomeReverb() const { return m_biomeReverb; }
+
 private:
     struct AmbientZone {
         std::string id;
@@ -65,6 +84,8 @@ private:
     
     float m_updateTimer = 0.0f;
     const float UPDATE_INTERVAL = 0.1f; // Update every 100ms
+
+    BiomeReverbState m_biomeReverb; // T-I4-5: last applied per-biome reverb
 };
 
 } // namespace Luminumbra::Client
