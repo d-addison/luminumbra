@@ -192,6 +192,34 @@ Mandated streams for the iteration after iteration 2, all gate-first:
    enablement, release perf lane); gameplay systems runtime; vertical
    slice; networking last.
 
+## Iteration 4 Directives (owner, 2026-06-11)
+
+Priority order is a USER DECISION, binding for the iteration-4 planning
+round (spec/research/critique/ultimate-plan happens after T-I3-22 closes,
+inheriting this verbatim): **engine first; the gameplay loop is 100% last.**
+
+1. **Wave A — World identity (engine, LEAD)**: biomes via temperature/
+   humidity control noises (seed offsets +8/+9, already reserved in the
+   registry), rivers (+10), surface structures. Unlocks audio reverb
+   (recorded trigger: biomes), feeds material variety into far-LOD tiles
+   (horizon stops being monochrome), gives creatures habitats. Biome/
+   structure CONTENT is game data; generation systems are engine.
+2. **Wave C — Lockstep transport (engine)**: input-based lockstep over a
+   real socket against the headless server; world-hash exchange as the
+   desync oracle (oracle + loopback authority gates already exist). Scope:
+   loopback + LAN, one remote client, desync detection. NOT matchmaking.
+   Sequencing note from the iteration-3 sketch: Wave A touches worldgen
+   determinism/world_hash — run A first, C after A's hashes re-bless.
+3. **SHIELD-RT spike**: timeboxed raymarch prototype against existing SDF
+   data. Evidence-only, no gates, no production wiring — keeps the
+   far-field end-state road open without gold-plating the waypoint.
+4. Extras where owners have slack (engine): Lua bindings/hot-reload,
+   StreamingProfile meshing-skip (server stops meshing chunks it never
+   renders), GPU SDF enablement behind its parity gate.
+5. **DEFERRED — photography/gameplay core loop (camera/lenses/DoF/shutter,
+   capture scoring, Codex)**: explicitly LAST, after the engine waves.
+   Also still deferred: seasons/wind/foliage, multi-anchor streaming, F3.
+
 ## Iteration 2 Closeout (2026-06-10)
 
 All five phases complete on feat/polyglot-audit-roadmap. Final state: 82/82
