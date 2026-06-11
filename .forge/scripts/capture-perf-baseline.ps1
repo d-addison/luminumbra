@@ -1,13 +1,26 @@
 param(
     [int]$Runs = 3,
-    [string]$BuildPreset = "debug"
+    [string]$BuildPreset = "",
+    # T-I3-20: preset-aware lane selection. -Preset picks BOTH the build dir
+    # and the baseline file: debug -> perf-baseline.json + build/debug,
+    # release -> perf-baseline-release.json + build/release. Default (empty)
+    # preserves the historical behavior exactly: build dir from -BuildPreset
+    # (default debug) and the debug baseline file, so existing callers are
+    # unchanged. An explicit -BuildPreset still overrides the build dir.
+    [ValidateSet("", "debug", "release")]
+    [string]$Preset = "",
+    # T-I3-20: write status="provisional" + provisional=true instead of
+    # "blessed" (used by run-release-perf-lane.ps1 on noisy machines; the
+    # orchestrator re-runs without this switch to bless for real).
+    [switch]$Provisional
 )
 
 # Captures a blessed perf baseline for the PerfRegression gate
 # (.forge/scripts/validate-engine-frontier.ps1 -Mode PerfRegression).
 # Runs the perf benchmark $Runs times and writes the per-scenario MEDIAN of
 # p50/p95/p99/max/mem into .forge/artifacts/engine-frontier/perf-baseline.json
-# with machine_id=$env:COMPUTERNAME and status="blessed". Any previously
+# (or perf-baseline-release.json for -Preset release) with
+# machine_id=$env:COMPUTERNAME and status="blessed". Any previously
 # blessed values are preserved in a "previous" block.
 
 $ErrorActionPreference = "Stop"
@@ -16,7 +29,19 @@ if ($Runs -lt 1) {
     throw "Runs must be at least 1"
 }
 
-$BaselinePath = ".forge/artifacts/engine-frontier/perf-baseline.json"
+if ([string]::IsNullOrWhiteSpace($BuildPreset)) {
+    if ([string]::IsNullOrWhiteSpace($Preset)) {
+        $BuildPreset = "debug"
+    } else {
+        $BuildPreset = $Preset
+    }
+}
+
+if ($Preset -eq "release") {
+    $BaselinePath = ".forge/artifacts/engine-frontier/perf-baseline-release.json"
+} else {
+    $BaselinePath = ".forge/artifacts/engine-frontier/perf-baseline.json"
+}
 $SummaryPath = "build/$BuildPreset/test-artifacts/performance_framework/benchmark_summary.json"
 $Exe = "build/$BuildPreset/bin/initial_world_loading_perf_test.exe"
 
@@ -109,8 +134,11 @@ $baseline = [ordered]@{
     captured_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
     machine_id = $env:COMPUTERNAME
     runs_aggregated = $Runs
-    status = "blessed"
+    status = $(if ($Provisional) { "provisional" } else { "blessed" })
     scenarios = $scenarioBlock
+}
+if ($Provisional) {
+    $baseline.provisional = $true
 }
 if ($null -ne $previous) {
     $baseline.previous = $previous
@@ -121,4 +149,5 @@ $resolvedDir = Resolve-Path (Split-Path $BaselinePath -Parent)
 $outputPath = Join-Path $resolvedDir (Split-Path $BaselinePath -Leaf)
 [System.IO.File]::WriteAllText($outputPath, $json + "`n", (New-Object System.Text.UTF8Encoding($false)))
 
-Write-Host "capture-perf-baseline: wrote blessed baseline ($Runs runs, machine $env:COMPUTERNAME) to $BaselinePath"
+$statusLabel = if ($Provisional) { "provisional" } else { "blessed" }
+Write-Host "capture-perf-baseline: wrote $statusLabel baseline ($Runs runs, machine $env:COMPUTERNAME, build preset $BuildPreset) to $BaselinePath"

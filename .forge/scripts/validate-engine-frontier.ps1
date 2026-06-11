@@ -3,6 +3,13 @@ param(
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
+    # T-I3-20: perf-lane preset selection (PerfRegression mode only).
+    # "release" compares the release build (build/release) against
+    # perf-baseline-release.json; "debug" or default (empty) preserves the
+    # historical behavior exactly: build dir from -BuildPreset and the debug
+    # baseline perf-baseline.json. Existing callers are unchanged.
+    [ValidateSet("", "debug", "release")]
+    [string]$Preset = "",
     [int]$SmokeSeconds = 30,
     # Debug-build wall-clock on a developer desktop drifts ~30% between
     # adjacent median-of-3 batches (background load, thermals). The gate is a
@@ -2336,12 +2343,27 @@ function Test-NetworkStateHash {
 }
 
 function Test-PerfRegression {
-    $baselinePath = "$ArtifactDir/perf-baseline.json"
+    # T-I3-20: preset-aware lane. -Preset release selects the release build
+    # dir and the release baseline file; default/empty keeps the historical
+    # debug lane (build/$BuildPreset + perf-baseline.json) untouched.
+    $perfBuildPreset = $BuildPreset
+    if (-not [string]::IsNullOrWhiteSpace($Preset)) {
+        $perfBuildPreset = $Preset
+    }
+    $baselineLeaf = "perf-baseline.json"
+    if ($Preset -eq "release") {
+        $baselineLeaf = "perf-baseline-release.json"
+    }
+    $baselinePath = "$ArtifactDir/$baselineLeaf"
     $baseline = Read-JsonArtifact -Path $baselinePath -Schema "luminumbra.perf_baseline.v1"
 
-    $placeholderBaseline = ($baseline.status -eq "placeholder_pending_capture")
+    # A provisional baseline (written by run-release-perf-lane.ps1 on a noisy
+    # machine) is treated like a placeholder: regressions warn, never fail,
+    # until the orchestrator blesses a real baseline on a quiet machine.
+    $placeholderBaseline = ($baseline.status -eq "placeholder_pending_capture") -or
+        ($baseline.status -eq "provisional") -or ($baseline.provisional -eq $true)
     if (-not $placeholderBaseline -and $baseline.status -ne "blessed") {
-        throw "perf baseline has unexpected status '$($baseline.status)' (expected 'blessed' or 'placeholder_pending_capture')"
+        throw "perf baseline has unexpected status '$($baseline.status)' (expected 'blessed', 'provisional' or 'placeholder_pending_capture')"
     }
 
     if (-not [string]::IsNullOrWhiteSpace($baseline.machine_id) -and
@@ -2350,7 +2372,7 @@ function Test-PerfRegression {
         throw "perf baseline captured on different machine ('$($baseline.machine_id)' vs '$($env:COMPUTERNAME)') - recapture required via .forge/scripts/capture-perf-baseline.ps1"
     }
 
-    $exe = "build/$BuildPreset/bin/initial_world_loading_perf_test.exe"
+    $exe = "build/$perfBuildPreset/bin/initial_world_loading_perf_test.exe"
     if (-not (Test-Path $exe)) {
         throw "Missing perf test executable. Run -Mode Build first: $exe"
     }
@@ -2373,7 +2395,7 @@ function Test-PerfRegression {
             "--gtest_filter=InitialWorldLoadingPerfTest.PerformanceFrameworkBenchmarkScenariosWriteBudgetArtifacts"
         ) -TimeoutSeconds 300
 
-        $summaryPath = "build/$BuildPreset/test-artifacts/performance_framework/benchmark_summary.json"
+        $summaryPath = "build/$perfBuildPreset/test-artifacts/performance_framework/benchmark_summary.json"
         $summary = Read-JsonArtifact -Path $summaryPath -Schema "luminumbra.performance_framework.benchmark_summary.v1"
 
         $anyOverFail = $false
