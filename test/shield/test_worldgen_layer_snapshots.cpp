@@ -1273,6 +1273,88 @@ TEST(WorldGenLayerSnapshotTest, ShapedHeightBatchPathsExactlyMatchScalarPath) {
     }
 }
 
+// T-I4-DR-shaping-perf: the SIMD-batched position-array shaped-height helper
+// (ComputeShapedHeightsAtPositions, used to batch the per-column surface-span
+// corner samples) must return heights BYTE-IDENTICAL to the scalar
+// GetTerrainHeightAt at arbitrary (warped, non-grid) world coordinates. If a
+// future FastNoise/SIMD-level change ever makes GenPositionArray2D diverge from
+// GenSingle2D, this gate (==, no epsilon) fails before any terrain drift ships.
+TEST(WorldGenLayerSnapshotTest, ShapedHeightPositionArrayPathExactlyMatchesScalar) {
+    const TerrainGenParams params = ShapingTestParams();
+    SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
+
+    std::vector<float> xs, zs;
+    for (int z = -200; z <= 200; z += 7) {
+        for (int x = -200; x <= 200; x += 11) {
+            // Deliberately fractional, off-grid coordinates.
+            xs.push_back(static_cast<float>(x) + 0.37f);
+            zs.push_back(static_cast<float>(z) - 0.61f);
+        }
+    }
+    std::vector<float> batched(xs.size());
+    world.ComputeShapedHeightsAtPositions(xs.data(), zs.data(), xs.size(), batched.data());
+    for (std::size_t i = 0; i < xs.size(); ++i) {
+        EXPECT_EQ(batched[i], world.GetTerrainHeightAt(xs[i], zs[i]))
+            << "ComputeShapedHeightsAtPositions diverged from scalar at (" << xs[i] << ", " << zs[i] << ")";
+    }
+}
+
+// T-I4-DR-shaping-perf: the SIMD-batched material classifier
+// (ClassifyVertexMaterials, used by the LOD0 marching-cubes mesher) must return
+// the SAME material id per vertex as the per-vertex surface classification it
+// replaced. Verified against the public-API equivalent of
+// MarchingCubes::GetTerrainMaterialAt over a y-spread around the surface (where
+// isosurface vertices sit) for both a biome-enabled and a biome-disabled world.
+TEST(WorldGenLayerSnapshotTest, BatchedVertexMaterialsMatchPerVertexClassification) {
+    auto run = [](const TerrainGenParams& params) {
+        SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
+        std::vector<Vec3> pos;
+        for (int z = -96; z <= 96; z += 5) {
+            for (int x = -96; x <= 96; x += 5) {
+                const float h = world.GetTerrainHeightAt(static_cast<float>(x), static_cast<float>(z));
+                for (float dy : {-3.0f, -1.0f, -0.25f, 0.0f, 0.25f, 1.0f, 3.0f}) {
+                    pos.emplace_back(static_cast<float>(x), h + dy, static_cast<float>(z));
+                }
+            }
+        }
+        std::vector<u32> batched(pos.size());
+        world.ClassifyVertexMaterials(pos.data(), pos.size(), batched.data());
+        std::size_t mismatches = 0;
+        for (std::size_t i = 0; i < pos.size(); ++i) {
+            const auto s = world.SampleWorldGenLayers(pos[i] - Vec3(0.0f, 0.25f, 0.0f));
+            MaterialType ref = s.material;
+            if (ref == MaterialType::Air || ref == MaterialType::Water) {
+                const float th = world.GetTerrainHeightAt(pos[i].x, pos[i].z);
+                const u8 bid = world.BiomeIdAt(pos[i].x, pos[i].z);
+                const bool rb = world.RiverInfluenceAt(pos[i].x, pos[i].z) > 0.25f;
+                ref = world.SurfaceMaterialForColumn(pos[i].y - 0.1f, th, bid, rb);
+            }
+            if (batched[i] != static_cast<u32>(ref)) {
+                ++mismatches;
+            }
+        }
+        EXPECT_EQ(mismatches, 0u)
+            << "ClassifyVertexMaterials diverged from per-vertex classification in "
+            << mismatches << "/" << pos.size() << " positions";
+    };
+
+    // Biome-disabled (legacy classifier) path. The biome-enabled material path
+    // is additionally pinned by MountainsBiomeCoverageAtlas, which meshes the
+    // biome-enabled mountains preset and asserts per-biome palette bands.
+    run(ShapingTestParams());
+
+    // Biome-enabled path: synthetic shaped params pointed at the shipped table.
+    {
+        TerrainGenParams biome_params = ShapingTestParams();
+        biome_params.biomes_enabled = true;
+        biome_params.biome_table_path =
+            (SourceRoot() / "data" / "common" / "biomes.json").string();
+        biome_params.temperature_frequency = 0.003f;
+        biome_params.humidity_frequency = 0.004f;
+        run(biome_params);
+    }
+}
+
 // T-I3-10: generation with shaping ON stays deterministic for a fixed seed
 // (two independent systems produce byte-identical SDF + heightmap), and a
 // different seed produces different terrain (the control channels actually
