@@ -151,7 +151,12 @@ FarLodTile BuildPristineFarLodTile(
         const float world_z = origin_z + static_cast<float>(z * step);
         for (u32 x = 0; x < n; ++x, ++index) {
             const float world_x = origin_x + static_cast<float>(x * step);
-            const float height = world_system.GetTerrainHeightAt(world_x, world_z);
+            // T-I4-DR-river-seam-sliver: coarse sampler anti-aliases the river
+            // carve over the tile's sample step so a sub-step-width channel no
+            // longer aliases into an isolated deep notch (the FarLodHorizon
+            // sliver). Non-river worlds are byte-identical (the coarse path
+            // falls through to GetTerrainHeightAt).
+            const float height = world_system.GetTerrainHeightAtCoarse(world_x, world_z, step);
             tile.height_q[index] = QuantizeFarLodHeight(height);
             // The same surface classification the coarse chunk mesher uses,
             // so the far field matches the live field at the seam.

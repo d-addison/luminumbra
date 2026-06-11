@@ -380,19 +380,59 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
     // sits in the final surface, and inside this ONE shared height helper so
     // near chunks and far tiles carve identically at the seam. The branch is
     // skipped entirely when rivers are disabled (byte-zero drift).
+    sample.pre_carve_height = sample.final_height;
     if (m_params.rivers_enabled) {
         const float influence = RiverInfluenceFromNoise(world_x, world_z);
-        if (influence > 0.0f) {
-            const float channel_floor = SEA_LEVEL - m_params.river_depth * influence;
-            if (sample.final_height > channel_floor) {
-                const float carve = std::min(sample.final_height - channel_floor,
-                                             m_params.river_max_carve * influence);
-                sample.final_height -= carve;
-            }
-        }
+        sample.final_height -= RiverCarveAmount(sample.final_height, influence);
     }
 
     return sample;
+}
+
+float SHIELD_WorldSystem::RiverCarveAmount(float final_height, float influence) const {
+    // Carve depth at a single column given its river influence [0, 1]. Pure
+    // function: lowers the surface toward a per-influence channel floor below
+    // SEA_LEVEL, clamped by river_max_carve * influence so a high ridge in the
+    // band drops a bounded amount. Zero when not in the river band.
+    if (influence <= 0.0f) {
+        return 0.0f;
+    }
+    const float channel_floor = SEA_LEVEL - m_params.river_depth * influence;
+    if (final_height <= channel_floor) {
+        return 0.0f;
+    }
+    return std::min(final_height - channel_floor, m_params.river_max_carve * influence);
+}
+
+float SHIELD_WorldSystem::GetTerrainHeightAtCoarse(
+    float world_x, float world_z, int sample_step) const {
+    // Full-res path is byte-identical to GetTerrainHeightAt (the carve is a
+    // single point sample), so near chunks and the worldgen gates are
+    // unaffected. The coarse anti-alias only runs for step > 1 river worlds.
+    if (sample_step <= 1 || !m_params.rivers_enabled) {
+        return GetTerrainHeightAt(world_x, world_z);
+    }
+
+    const ShapedHeightSample shaped = ComputeShapedHeightSample(world_x, world_z);
+    const float h = shaped.pre_carve_height;
+    // Average the carve over a 3x3 stencil spanning the sample_step cell so a
+    // channel narrower than the step contributes only its coverage fraction of
+    // the depth: the isolated full-depth notch that aliased into a near-vertical
+    // sliver becomes a shallow, resolution-appropriate dip. The carve is
+    // evaluated against the shared pre-carve surface (h) so every stencil tap
+    // uses the same reference height; border samples of adjacent coarse tiles
+    // land on the same world stencil, so a tile's shared border row still agrees
+    // with its neighbor (no new tile-boundary seam).
+    const float r = static_cast<float>(sample_step) * 0.5f;
+    float carve_sum = 0.0f;
+    for (int dz = -1; dz <= 1; ++dz) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            const float sx = world_x + static_cast<float>(dx) * r;
+            const float sz = world_z + static_cast<float>(dz) * r;
+            carve_sum += RiverCarveAmount(h, RiverInfluenceFromNoise(sx, sz));
+        }
+    }
+    return h - carve_sum / 9.0f;
 }
 
 float SHIELD_WorldSystem::ComputeShapedHeight(float world_x, float world_z) const {

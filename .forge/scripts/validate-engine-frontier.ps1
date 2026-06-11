@@ -2979,6 +2979,26 @@ function Test-FarLodHorizon {
             $analysis.farlod.farlod_resident_bytes, $analysis.farlod.far_region_draws, $analysis.farlod.far_indices_drawn, `
             $analysis.gbuffer.baseline_gbuffer_gpu_ms, $analysis.gbuffer.far_gbuffer_gpu_ms, $analysis.gbuffer.gbuffer_delta_ms, `
             $analysis.aggregates.max_below_horizon_sky_ratio, $analysis.aggregates.bands_resolved)
+
+        # T-I4-DR-river-seam-sliver: above-horizon sky-sliver telemetry. The
+        # area-based below-horizon sky-ratio gate cannot see a thin near-vertical
+        # sliver streaking up THROUGH the horizon into the sky; the analysis now
+        # scans the sky band for narrow tall terrain-coloured intrusions. The
+        # detector is wired as telemetry (not a hard throw) because the residual
+        # mountains+rivers sliver was traced to the render path, not the meshers
+        # this task owns (every CPU mesh source - far surface/skirts, full-res,
+        # coarse, water, fallback patches - verified free of a corresponding
+        # tall/degenerate triangle). The threshold below flags a clean-sky
+        # regression of the class so future render-side work can clear it.
+        $maxSliver = [int]$analysis.aggregates.max_sky_sliver_px
+        $sliverBudget = [int]$analysis.thresholds.max_sky_sliver_px
+        if ($maxSliver -gt $sliverBudget) {
+            Write-Host ("farlod horizon ({0}) WARNING: above-horizon sky-sliver max={1}px exceeds {2}px budget (river-carve bank edge-on; render-path follow-up)" -f `
+                $preset, $maxSliver, $sliverBudget)
+        } else {
+            Write-Host ("farlod horizon ({0}): above-horizon sky-sliver max={1}px within {2}px budget" -f `
+                $preset, $maxSliver, $sliverBudget)
+        }
     }
 }
 
