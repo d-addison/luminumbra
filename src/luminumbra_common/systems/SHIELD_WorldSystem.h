@@ -72,6 +72,24 @@ struct TerrainGenParams {
     std::string biome_table_path;
     float temperature_frequency = 0.005f;
     float humidity_frequency = 0.005f;
+
+    // --- T-I4-3 PV-band rivers (default-off) ---
+    // Chunk-local river carve on the +10 ridged noise (seed registry). The
+    // folded PV value PV = 1 - |3*|r| - 2| (Minecraft 1.18 weirdness->PV) of
+    // the +10 noise selects the rivers where it falls in the VALLEYS band
+    // [river_pv_min, river_pv_max] = [-1.0, -0.85] (research Area 1); the same
+    // +10 noise modulates width/wobble. Carving lowers the terrain floor below
+    // SEA_LEVEL so the EXISTING global water plane fills the channel (no
+    // WaterSystem changes; critique F5). Bank material is the biome filler.
+    // Applied inside ComputeShapedHeight so near chunks AND far tiles agree at
+    // the seam. With rivers_enabled false the height path is bit-identical to
+    // pre-river generation (byte-zero drift).
+    bool rivers_enabled = false;
+    float river_frequency = 0.0016f;
+    float river_pv_min = -1.0f;   // valleys band lower edge (folded PV)
+    float river_pv_max = -0.85f;  // valleys band upper edge (folded PV)
+    float river_depth = 8.0f;     // metres the channel floor sits below SEA_LEVEL
+    float river_max_carve = 60.0f; // clamp on terrain lowered into the channel
     // fnv1a64 of the canonicalized biome table content, stamped by the world
     // system when it loads the table (0 when biomes are disabled or the table
     // failed to load). ComputeTerrainParamsHash mixes this in so pristine
@@ -263,9 +281,18 @@ public:
     // the legacy Sand/Grass/Soil/Stone classifier BIT-FOR-BIT, so disabled
     // worlds keep byte-zero drift. The plains palette maps to exactly the
     // legacy materials, so a plains column is also unchanged.
+    // river_bank (T-I4-3): when true, an above-water surface skin that would be
+    // the biome `top` is laid as the biome `filler` instead - the exposed muddy
+    // bank along a carved river channel (design-decisions section 4).
     MaterialType SurfaceMaterialForColumn(float world_y,
                                           float final_height,
-                                          u8 biome_id) const;
+                                          u8 biome_id,
+                                          bool river_bank = false) const;
+
+    // T-I4-3: river influence [0, 1] at a column - how strongly the +10 PV-band
+    // river carve applies (0 = no river, 1 = channel center). 0 when rivers are
+    // disabled. Pure function of (seed, params); used by the RiverPresence gate.
+    float RiverInfluenceAt(float world_x, float world_z) const;
 
     static IVec3 world_to_chunk_coords(const Vec3& position);
 
@@ -439,6 +466,11 @@ private:
         float humidity = 0.0f;
     };
     ClimateSample ComputeClimateSample(float world_x, float world_z) const;
+
+    // T-I4-3: river influence [0, 1] from the +10 noise folded into PV space,
+    // ramped across the valleys band. 0 outside the band / rivers disabled.
+    // Shared by ComputeShapedHeightSample (carve) and RiverInfluenceAt (gate).
+    float RiverInfluenceFromNoise(float world_x, float world_z) const;
     // Monotone piecewise-linear spline over sorted [input, output] control
     // points: endpoint-clamped, plain lerp between neighbors, `fallback` when
     // the point list is empty.
@@ -468,6 +500,8 @@ private:
     // Only built when biomes are enabled; legacy worlds never construct them.
     FastNoise::SmartNode<FastNoise::Generator> m_temperature_generator;
     FastNoise::SmartNode<FastNoise::Generator> m_humidity_generator;
+    // T-I4-3 river noise (seed registry: +10). Only built when rivers enabled.
+    FastNoise::SmartNode<FastNoise::Generator> m_river_generator;
 
     // T-I4-1 biome table (game data). Loaded from m_params.biome_table_path on
     // (re)init when biomes are enabled; empty/disabled otherwise.

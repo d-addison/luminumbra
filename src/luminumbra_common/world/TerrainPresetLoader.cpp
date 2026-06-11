@@ -261,9 +261,20 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
         params.temperature_frequency = biomes.temperature_frequency;
         params.humidity_frequency = biomes.humidity_frequency;
     }
+    // Features river/structure flags: rivers are CONSUMED (T-I4-3) when the
+    // preset opts in; an absent flag keeps rivers_enabled=false -> byte-zero
+    // drift. Structures stay parsed-not-consumed (Agent WA2 / T-I4-4).
     result.extras.features.present = true;
     result.extras.features.rivers_enabled = features.value("rivers_enabled", false);
     result.extras.features.structures_enabled = features.value("structures_enabled", false);
+    if (result.extras.features.rivers_enabled) {
+        params.rivers_enabled = true;
+        params.river_frequency = features.value("river_frequency", params.river_frequency);
+        params.river_depth = features.value("river_depth", params.river_depth);
+        params.river_pv_min = features.value("river_pv_min", params.river_pv_min);
+        params.river_pv_max = features.value("river_pv_max", params.river_pv_max);
+        params.river_max_carve = features.value("river_max_carve", params.river_max_carve);
+    }
     ParseMaterialsBlock(gen_params, result.extras.materials, preset_path, result.warnings);
 
     // Unknown-key audit over every consumed scope.
@@ -278,7 +289,9 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
                     preset_path, result.warnings);
     WarnUnknownKeys(features, "generation_params.features",
                     {"caves_enabled", "cave_frequency", "cave_threshold",
-                     "cave_carve_value", "rivers_enabled", "structures_enabled"},
+                     "cave_carve_value", "rivers_enabled", "structures_enabled",
+                     "river_frequency", "river_depth", "river_pv_min",
+                     "river_pv_max", "river_max_carve"},
                     preset_path, result.warnings);
 
     result.ok = true;

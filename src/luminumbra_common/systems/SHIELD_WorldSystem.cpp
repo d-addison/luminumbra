@@ -225,6 +225,17 @@ void SHIELD_WorldSystem::reinitialize_noise() {
         m_warp_generator = FastNoise::New<FastNoise::Simplex>();
     }
 
+    // 4b. T-I4-3 river noise (seed registry: +10). A ridged FBm whose folded
+    //     PV near-zero band carves the river channels. Built only when the
+    //     preset opts in; legacy worlds never construct it.
+    m_river_generator = {};
+    if (m_params.rivers_enabled) {
+        auto river_fractal = FastNoise::New<FastNoise::FractalRidged>();
+        river_fractal->SetSource(FastNoise::New<FastNoise::Simplex>());
+        river_fractal->SetOctaveCount(2);
+        m_river_generator = river_fractal;
+    }
+
     // 5. T-I4-1 biome climate noises (seed registry: +8 temperature,
     //    +9 humidity) and the biome table. Built/loaded only when the preset
     //    opted in (m_params.biomes_enabled); legacy worlds construct nothing
@@ -360,6 +371,27 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
         sample.final_height = glm::mix(m_params.height_offset, terrain_height, sample.island_mask);
     }
 
+    // T-I4-3: river carve. Where the +10 PV-band river noise is in the valleys
+    // band, lower the final height toward a channel floor below SEA_LEVEL so
+    // the existing global water plane (SEA_LEVEL) fills the channel - no
+    // WaterSystem changes (critique F5). The carve depth scales with river
+    // influence (channel center deepest) and is clamped so a high ridge in the
+    // band drops a bounded amount. Applied after the island mask so the channel
+    // sits in the final surface, and inside this ONE shared height helper so
+    // near chunks and far tiles carve identically at the seam. The branch is
+    // skipped entirely when rivers are disabled (byte-zero drift).
+    if (m_params.rivers_enabled) {
+        const float influence = RiverInfluenceFromNoise(world_x, world_z);
+        if (influence > 0.0f) {
+            const float channel_floor = SEA_LEVEL - m_params.river_depth * influence;
+            if (sample.final_height > channel_floor) {
+                const float carve = std::min(sample.final_height - channel_floor,
+                                             m_params.river_max_carve * influence);
+                sample.final_height -= carve;
+            }
+        }
+    }
+
     return sample;
 }
 
@@ -428,9 +460,42 @@ u8 SHIELD_WorldSystem::BiomeIdAt(float world_x, float world_z) const {
                                 climate.humidity);
 }
 
+float SHIELD_WorldSystem::RiverInfluenceFromNoise(float world_x, float world_z) const {
+    if (!m_params.rivers_enabled || !m_river_generator) {
+        return 0.0f;
+    }
+    // +10 ridged noise -> Minecraft 1.18 weirdness->PV fold: PV = 1 - |3|r| - 2|.
+    // The valleys band [river_pv_min, river_pv_max] selects the river course;
+    // the influence ramps from 0 at the band edge to 1 at the band center, so
+    // the channel has a soft width/wobble driven by the same noise.
+    const float r = m_river_generator->GenSingle2D(
+        world_x * m_params.river_frequency,
+        world_z * m_params.river_frequency,
+        m_seed + 10);
+    const float pv = 1.0f - std::abs(3.0f * std::abs(r) - 2.0f);
+    if (pv < m_params.river_pv_min || pv > m_params.river_pv_max) {
+        return 0.0f;
+    }
+    const float band = m_params.river_pv_max - m_params.river_pv_min;
+    if (band <= 0.0f) {
+        return 1.0f;
+    }
+    // Triangular ramp peaking at the band center (channel thalweg).
+    const float t = (pv - m_params.river_pv_min) / band; // 0..1 across the band
+    const float influence = 1.0f - std::abs(2.0f * t - 1.0f);
+    return std::clamp(influence, 0.0f, 1.0f);
+}
+
+float SHIELD_WorldSystem::RiverInfluenceAt(float world_x, float world_z) const {
+    return RiverInfluenceFromNoise(world_x, world_z);
+}
+
 MaterialType SHIELD_WorldSystem::SurfaceMaterialForColumn(
-    float world_y, float final_height, u8 biome_id) const {
-    // No biome (disabled / unmatched): the exact legacy classifier.
+    float world_y, float final_height, u8 biome_id, bool river_bank) const {
+    // No biome (disabled / unmatched): the exact legacy classifier. River banks
+    // need a palette, so with no biome they keep the legacy classification
+    // (rivers only ship on biome-enabled presets; the bank distinction is a
+    // no-op for legacy worlds, preserving byte-zero drift).
     if (!m_biomes_enabled || biome_id == World::kNoBiome || m_biome_table.empty()) {
         return classify_material_legacy(world_y, final_height);
     }
@@ -445,7 +510,9 @@ MaterialType SHIELD_WorldSystem::SurfaceMaterialForColumn(
     }
     const float depth = final_height - world_y;
     if (depth < 1.0f) {
-        return static_cast<MaterialType>(palette.top);
+        // T-I4-3: above-water river bank skin uses the filler (muddy bank)
+        // rather than the top (grass).
+        return static_cast<MaterialType>(river_bank ? palette.filler : palette.top);
     }
     if (depth < 5.0f) {
         return static_cast<MaterialType>(palette.filler);
@@ -1413,7 +1480,11 @@ WorldGenLayerSample SHIELD_WorldSystem::SampleWorldGenLayers(const Vec3& world_p
         // legacy classifier bit-for-bit. The column biome is resolved from the
         // surface (world_x/world_z), not the sample's depth.
         const u8 biome_id = BiomeIdAt(world_pos.x, world_pos.z);
-        sample.material = SurfaceMaterialForColumn(world_pos.y, sample.final_height, biome_id);
+        // River banks (T-I4-3): a column under meaningful river influence lays
+        // its above-water skin as the biome filler. The threshold keeps the
+        // bank a thin rim around the channel rather than the whole valley.
+        const bool river_bank = RiverInfluenceFromNoise(world_pos.x, world_pos.z) > 0.25f;
+        sample.material = SurfaceMaterialForColumn(world_pos.y, sample.final_height, biome_id, river_bank);
     }
     return sample;
 }

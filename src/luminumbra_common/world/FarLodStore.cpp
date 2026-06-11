@@ -91,6 +91,17 @@ u64 ComputeTerrainParamsHash(const Systems::TerrainGenParams& params, int seed) 
         FnvMixValue(hash, static_cast<u8>(1));
         FnvMixValue(hash, params.biome_table_content_hash);
     }
+    // T-I4-3: mix river params ONLY when rivers are enabled, so river presets'
+    // pristine far tiles invalidate on a river-tuning change while non-river
+    // worlds keep byte-identical far-tile cache keys.
+    if (params.rivers_enabled) {
+        FnvMixValue(hash, static_cast<u8>(2));
+        FnvMixValue(hash, params.river_frequency);
+        FnvMixValue(hash, params.river_pv_min);
+        FnvMixValue(hash, params.river_pv_max);
+        FnvMixValue(hash, params.river_depth);
+        FnvMixValue(hash, params.river_max_carve);
+    }
     return hash;
 }
 

@@ -68,12 +68,40 @@ TEST(TerrainPresetLoaderTest, LoadsShippedDefaultPreset) {
 
     EXPECT_TRUE(result.extras.biomes.present);
     EXPECT_FLOAT_EQ(result.extras.biomes.temperature_frequency, 0.005f);
+    // Default ships a biomes block WITHOUT a table, so biomes stay disabled
+    // (byte-zero) and the consumed params keep biomes_enabled false.
+    EXPECT_FALSE(result.extras.biomes.enabled);
+    EXPECT_FALSE(result.params.biomes_enabled);
     EXPECT_TRUE(result.extras.features.present);
-    EXPECT_TRUE(result.extras.features.rivers_enabled);
+    // T-I4-3: default does NOT opt into rivers (rivers ship only on mountains),
+    // so the consumed params keep rivers_enabled false -> byte-zero drift.
+    EXPECT_FALSE(result.extras.features.rivers_enabled);
+    EXPECT_FALSE(result.params.rivers_enabled);
     EXPECT_TRUE(result.extras.features.structures_enabled);
     EXPECT_FALSE(result.extras.shaping.present);
     EXPECT_FALSE(result.extras.materials.present);
     EXPECT_TRUE(result.warnings.empty()) << result.warnings.front();
+}
+
+TEST(TerrainPresetLoaderTest, MountainsOptsIntoBiomesAndRivers) {
+    // T-I4-1/2/3: mountains is the showcase preset - it opts into the biome
+    // table (consumed) and into rivers (consumed). Loading it must warn on
+    // nothing (every key is recognized).
+    const TerrainPresetLoadResult result = LoadTerrainPreset(PresetDir() / "mountains.json");
+    ASSERT_TRUE(result.ok) << (result.errors.empty() ? "" : result.errors.front());
+    EXPECT_TRUE(result.warnings.empty()) << (result.warnings.empty() ? "" : result.warnings.front());
+
+    ASSERT_TRUE(result.extras.biomes.present);
+    EXPECT_TRUE(result.extras.biomes.enabled);
+    EXPECT_EQ(result.extras.biomes.table, "common/biomes.json");
+    EXPECT_TRUE(result.params.biomes_enabled);
+    EXPECT_FALSE(result.params.biome_table_path.empty());
+
+    EXPECT_TRUE(result.extras.features.rivers_enabled);
+    EXPECT_TRUE(result.params.rivers_enabled);
+    EXPECT_FLOAT_EQ(result.params.river_pv_min, -1.0f);
+    EXPECT_FLOAT_EQ(result.params.river_pv_max, -0.82f);
+    EXPECT_FLOAT_EQ(result.params.river_depth, 4.0f);
 }
 
 TEST(TerrainPresetLoaderTest, AllShippedPresetsLoadWithoutErrorsOrWarnings) {

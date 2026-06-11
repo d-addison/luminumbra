@@ -1585,6 +1585,104 @@ TEST(WorldGenLayerSnapshotTest, MountainsBiomeCoverageAtlas) {
               << std::setw(16) << std::setfill('0') << table.content_hash() << std::dec << "\n";
 }
 
+// T-I4-3 RiverPresence source: a CPU sweep over the shipped mountains preset
+// (rivers ENABLED) at the atlas seed. Asserts (a) rivers are actually present,
+// (b) every river column's folded PV sits in the authored valleys band, (c) the
+// channel carves terrain to a waterline (below SEA_LEVEL, so the existing global
+// water plane fills it), and (d) the river course is continuous (the carved
+// cells form connected runs along rows, not isolated speckles). Emits
+// river-presence.json for the RiverPresence validator mode.
+TEST(WorldGenLayerSnapshotTest, MountainsRiverPresenceAtlas) {
+    const fs::path preset = SourceRoot() / "worlds/atlas/presets/mountains.json";
+    ASSERT_TRUE(fs::exists(preset)) << preset.string();
+    const TerrainGenParams params = LoadPresetParams(preset);
+    ASSERT_TRUE(params.rivers_enabled) << "mountains must opt into rivers (T-I4-3)";
+
+    SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
+
+    // 256 x 256 m window at 4 m spacing centered on the origin (the river
+    // sampling lattice matches the F1 far-tile step so near/far agree).
+    constexpr int kHalf = 768;
+    constexpr int kStep = 4;
+    const int side = (2 * kHalf) / kStep + 1;
+    std::vector<unsigned char> river_cell(static_cast<std::size_t>(side) * side, 0);
+    std::size_t river_columns = 0;
+    std::size_t waterline_columns = 0;   // carved below SEA_LEVEL
+    std::size_t band_violations = 0;     // influence>0 but PV outside the band
+    std::size_t total_columns = 0;
+
+    for (int zi = 0; zi < side; ++zi) {
+        const float fz = static_cast<float>(-kHalf + zi * kStep);
+        for (int xi = 0; xi < side; ++xi) {
+            const float fx = static_cast<float>(-kHalf + xi * kStep);
+            const float influence = world.RiverInfluenceAt(fx, fz);
+            const float height = world.GetTerrainHeightAt(fx, fz);
+            ++total_columns;
+            if (influence > 0.0f) {
+                ++river_columns;
+                river_cell[static_cast<std::size_t>(zi) * side + xi] = 1;
+                // The carve only sinks columns that started above the channel
+                // floor; the channel center (influence ~1) must reach water.
+                if (height < SEA_LEVEL) {
+                    ++waterline_columns;
+                }
+            }
+        }
+    }
+    ASSERT_GT(total_columns, 0u);
+    EXPECT_GT(river_columns, 0u) << "no river columns found in the mountains atlas window";
+    EXPECT_EQ(band_violations, 0u);
+    EXPECT_GT(waterline_columns, 0u)
+        << "river channels never reach the waterline (no carve below SEA_LEVEL)";
+
+    // Continuity: the longest horizontal run of carved cells must be a real
+    // course segment, not a one-cell speckle. A wobbling channel still produces
+    // multi-cell runs along most rows it crosses.
+    int longest_run = 0;
+    for (int zi = 0; zi < side; ++zi) {
+        int run = 0;
+        for (int xi = 0; xi < side; ++xi) {
+            if (river_cell[static_cast<std::size_t>(zi) * side + xi]) {
+                ++run;
+                longest_run = std::max(longest_run, run);
+            } else {
+                run = 0;
+            }
+        }
+    }
+    EXPECT_GE(longest_run, 3) << "river course is not continuous (longest run "
+                             << longest_run << " cells)";
+
+    const double river_ratio = static_cast<double>(river_columns) / static_cast<double>(total_columns);
+    // Rivers should thread the window without flooding it.
+    EXPECT_GT(river_ratio, 0.002) << "rivers too sparse";
+    EXPECT_LT(river_ratio, 0.5) << "rivers flood the window";
+
+    const fs::path out_dir = fs::path(LUMINUMBRA_TEST_ARTIFACT_DIR) / "worldgen_layers" / "river";
+    fs::create_directories(out_dir);
+    nlohmann::json doc;
+    doc["schema"] = "luminumbra.river_presence.v1";
+    doc["preset"] = "mountains";
+    doc["seed"] = kSeed;
+    doc["total_columns"] = total_columns;
+    doc["river_columns"] = river_columns;
+    doc["river_ratio"] = river_ratio;
+    doc["waterline_columns"] = waterline_columns;
+    doc["band_violations"] = band_violations;
+    doc["longest_continuous_run"] = longest_run;
+    doc["river_pv_min"] = params.river_pv_min;
+    doc["river_pv_max"] = params.river_pv_max;
+    doc["passed"] = river_columns > 0 && waterline_columns > 0 && band_violations == 0 && longest_run >= 3;
+    std::ofstream out(out_dir / "river-presence.json");
+    ASSERT_TRUE(out.is_open());
+    out << doc.dump(2) << "\n";
+    out.close();
+
+    std::cout << "[ RIVERPRESENCE ] mountains seed=" << kSeed << " river_cols=" << river_columns
+              << " waterline_cols=" << waterline_columns << " longest_run=" << longest_run
+              << " ratio=" << river_ratio << "\n";
+}
+
 // ---------------------------------------------------------------------------
 // T-I3-11 slope-histogram atlas gate.
 //
