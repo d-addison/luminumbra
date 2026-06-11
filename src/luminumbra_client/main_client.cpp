@@ -1771,6 +1771,10 @@ int main(int argc, char* argv[]) {
                     g_playerController->Update(deltaTime);
                 }
                 if (auto* physics = gameSession->GetPhysicsSystem()) physics->update(deltaTime);
+                // T-I3-4: fixed 30 Hz simulation tick (SimulationClock +
+                // OrderedEventBus drain) hosted by GameSession. Render,
+                // physics, and scenario paths above remain variable-dt.
+                gameSession->TickSimulation(static_cast<double>(deltaTime));
                 if (gameSession->GetWorldSystem() && (g_playerController || g_camera)) {
                     const Luminumbra::Vec3 streaming_position =
                         ((scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.timeofday_sweep_smoke() || scenario_config.lod_boundary_oscillation_smoke() || scenario_config.lod_seam_arrival_smoke()) && scenario_ready && g_camera)

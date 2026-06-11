@@ -120,6 +120,31 @@ GameSession::~GameSession() {
     // Destructor
 }
 
+std::uint32_t GameSession::TickSimulation(double frame_dt) {
+    const std::uint32_t ticks_executed = m_simulationClock.advance(frame_dt);
+    if (ticks_executed == 0) {
+        return 0;
+    }
+
+    // Tick ids are 1-based; the clock already advanced past this frame's
+    // ticks, so recover the id of the first one.
+    const std::uint64_t first_tick = m_simulationClock.tick_count() - ticks_executed + 1;
+    for (std::uint32_t i = 0; i < ticks_executed; ++i) {
+        const std::uint64_t current_tick = first_tick + i;
+
+        // Deterministic per-tick system order (design-decisions.md §1).
+        // Placeholder slots until the owning iteration-3/4 tasks land:
+        //   1. Animation pose sampling (T-I3 animation core)
+        //   2. Instinct planning (T-I3 planner runtime)
+        //   3. Field budget (iteration 4)
+        //   4. Queued world edits
+        // Finally, the ordered event bus drains everything published for
+        // this tick (tick -> lane -> sequence order).
+        m_simulationEventBus.drain(current_tick);
+    }
+    return ticks_executed;
+}
+
 WorldConfigValidationResult GameSession::ValidateWorldConfig(const std::string& root_path, const std::string& worldType) {
     WorldConfigValidationResult result;
     result.ok = true;
