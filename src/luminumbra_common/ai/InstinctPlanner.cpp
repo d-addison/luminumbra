@@ -123,25 +123,6 @@ void JsonNumber(std::ostringstream& out, const std::string& key, double value, b
 
 } // namespace
 
-InstinctPlanRequest MakeGrovestriderHungerFixture() {
-    InstinctPlanRequest request;
-    request.actor_id = "grovestrider-01";
-    request.archetype = "grovestrider";
-    request.needs = {
-        {"hunger", 0.92},
-        {"safety", 0.28},
-        {"curiosity", 0.18},
-        {"fatigue", 0.22},
-    };
-    request.opportunities = {
-        {"mossberry-cache", "forage", "mossberry_grove", "hunger", 0.94, 0.85, 2.0, 0.08, 0.18},
-        {"stream-reeds", "graze", "stream_reeds", "hunger", 0.42, 0.60, 1.0, 0.03, 0.08},
-        {"thunder-hollow", "shelter", "thunder_hollow", "safety", 0.70, 0.40, 0.8, 0.02, 0.10},
-        {"glowcap-ring", "inspect", "glowcap_ring", "curiosity", 0.55, 0.35, 1.2, 0.15, 0.20},
-    };
-    return request;
-}
-
 InstinctPlan PlanInstincts(const InstinctPlanRequest& request) {
     InstinctPlan plan;
     plan.actor_id = request.actor_id;
@@ -187,11 +168,10 @@ InstinctPlan PlanInstincts(const InstinctPlanRequest& request) {
 
     plan.selected_index = plan.candidates.empty() ? -1 : 0;
     plan.checksum = BuildChecksum(plan);
-    plan.passed = plan.selected_index == 0 &&
-                  !plan.candidates.empty() &&
-                  plan.candidates.front().need == "hunger" &&
-                  plan.candidates.front().action == "forage" &&
-                  plan.candidates.front().target == "mossberry_grove";
+    // Generic pass semantics (T-I3-17): a non-empty deterministic ranking
+    // with the top candidate selected. Content-specific expectations live in
+    // the game-data `expected` block consumed by the gate.
+    plan.passed = plan.selected_index == 0 && !plan.candidates.empty();
     return plan;
 }
 
@@ -243,24 +223,6 @@ std::string SerializeInstinctPlanJson(const InstinctPlan& plan, const std::strin
     out << "]";
     out << "}";
     return out.str();
-}
-
-bool InstinctPlannerMeetsBaseline() {
-    const auto request = MakeGrovestriderHungerFixture();
-    const auto plan = PlanInstincts(request);
-    if (!plan.passed || plan.candidates.size() < 4u) {
-        return false;
-    }
-    if (plan.decision_contract != kDecisionContract) {
-        return false;
-    }
-    if (plan.candidates.front().rank != 1 || plan.candidates.front().need != "hunger") {
-        return false;
-    }
-    if (plan.candidates.front().action != "forage" || plan.candidates.front().target != "mossberry_grove") {
-        return false;
-    }
-    return SerializeInstinctPlanJson(plan, "debug").find("\"decision_contract\":\"deterministic_priority_then_cost\"") != std::string::npos;
 }
 
 } // namespace luminumbra::ai

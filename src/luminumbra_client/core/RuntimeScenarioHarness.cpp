@@ -1300,8 +1300,8 @@ EmissiveMaterialTarget FindEmissiveMaterialTarget(
     }
 
     // 1. Emissive ids from the generic material registry: any material whose
-    // "emission" carries a non-zero component. Game content (LuminCrystal,
-    // id 6) provides the fixture; the engine check stays material-agnostic.
+    // "emission" carries a non-zero component. Game data under data/ decides
+    // which materials are emissive; the engine check stays material-agnostic.
     {
         std::ifstream input(root_dir / "data/common/materials.json");
         if (!input.is_open()) {

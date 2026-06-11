@@ -1,5 +1,7 @@
 #include "persistence/WorldPersistenceRoundtrip.h"
 
+#include "../support/EntitySnapshotFixture.h"
+
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -41,7 +43,9 @@ int main(int argc, char** argv) {
         return 1;
     }
     errors.clear();
-    if (!Luminumbra::Persistence::WriteEntitySnapshotArtifact(entity_snapshot_output_path, build_preset, &errors)) {
+    if (!Luminumbra::Persistence::WriteEntitySnapshotArtifact(
+            entity_snapshot_output_path, build_preset,
+            Luminumbra::TestSupport::BuildEntitySnapshotFixture(), &errors)) {
         for (const std::string& error : errors) {
             std::cerr << error << '\n';
         }
