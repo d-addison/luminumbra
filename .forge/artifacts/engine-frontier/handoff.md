@@ -220,6 +220,11 @@ inheriting this verbatim): **engine first; the gameplay loop is 100% last.**
    capture scoring, Codex)**: explicitly LAST, after the engine waves.
    Also still deferred: seasons/wind/foliage, multi-anchor streaming, F3.
 
+Long-range plan for iterations 5-7 (Atmospheric pillar leads iteration 5 —
+owner-flagged IMPORTANT; Aetheric + SHIELD-RT productionization in 6;
+Project Capture photography loop in 7, last by design):
+see `.forge/artifacts/engine-roadmap/long-range-roadmap.md`.
+
 ## Iteration 2 Closeout (2026-06-10)
 
 All five phases complete on feat/polyglot-audit-roadmap. Final state: 82/82
