@@ -332,6 +332,7 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         m_skybox_pass->init_geometry();
         init_terrain_textures();
         init_material_lut();
+        init_texture_residency();
         m_water_pass->init_water_fallback_textures();
         init_gpu_sdf_system();
         init_gpu_pass_timers();
@@ -488,6 +489,7 @@ RenderPipeline::RuntimeRenderStats RenderPipeline::get_runtime_render_stats() co
     if (m_gpu_sdf.terrain_noise_texture) estimated_vram_bytes += 128u * 128u * 128u * sizeof(float);
     if (m_gpu_sdf.cave_noise_texture) estimated_vram_bytes += 128u * 128u * 128u * sizeof(float);
     if (m_gpu_sdf.island_mask_texture) estimated_vram_bytes += 128u * 128u * sizeof(float);
+    estimated_vram_bytes += m_texture_residency.resident_bytes;
     stats.estimated_vram_bytes = estimated_vram_bytes;
 
     stats.geometry_shader_ok = m_gbuffer_pass->geometry_shader() && m_gbuffer_pass->geometry_shader()->IsValid();
@@ -508,6 +510,19 @@ RenderPipeline::RuntimeRenderStats RenderPipeline::get_runtime_render_stats() co
     stats.terrain_texture_array_ok = m_terrainTextureArray != 0;
     stats.material_lut_ok = m_materialLUT != 0;
     stats.terrain_texture_fallback_layers = m_terrain_texture_fallback_layers;
+
+    stats.texture_resident_bytes = m_texture_residency.resident_bytes;
+    stats.texture_resident_budget_bytes = kTextureResidentBudgetBytes;
+    stats.texture_resident_within_budget =
+        m_texture_residency.resident_bytes <= kTextureResidentBudgetBytes;
+    stats.texture_residency_array_count = m_texture_residency.arrays.size();
+    {
+        size_t layer_total = 0;
+        for (const TextureResidencyArray& array : m_texture_residency.arrays) {
+            layer_total += array.layer_count;
+        }
+        stats.texture_residency_layer_count = layer_total;
+    }
     return stats;
 }
 
@@ -571,6 +586,13 @@ RenderPipeline::RenderResourceRegistryStats RenderPipeline::get_resource_registr
     stats.textures += count(m_gpu_sdf.terrain_noise_texture);
     stats.textures += count(m_gpu_sdf.cave_noise_texture);
     stats.textures += count(m_gpu_sdf.island_mask_texture);
+
+    // Texture-array residency manager: one GL_TEXTURE_2D_ARRAY per size class
+    // (T-I4-6). These register under the existing "texture" resource type, so
+    // the render-health resource_types contract is unchanged.
+    for (const TextureResidencyArray& array : m_texture_residency.arrays) {
+        stats.textures += count(array.texture_id);
+    }
 
     stats.renderbuffers += count(m_lighting_pass->lighting_fbo().depth_texture);
     stats.buffers += count(m_screen_quad_vbo);
@@ -1231,6 +1253,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_gbuffer_pass->destroy_skinned_mesh();
     if (m_terrainTextureArray) { glDeleteTextures(1, &m_terrainTextureArray); m_terrainTextureArray = 0; }
     if (m_materialLUT) { glDeleteTextures(1, &m_materialLUT); m_materialLUT = 0; }
+    destroy_texture_residency();
     m_water_pass->destroy_water_fallback_textures();
     cleanup_gpu_sdf_system();
     destroy_gpu_pass_timers();
@@ -1837,6 +1860,224 @@ void RenderPipeline::init_material_lut() {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     
     LUMINUMBRA_CORE_INFO("Material LUT initialized with {} materials.", MATERIAL_COUNT);
+}
+
+// --- TEXTURE-ARRAY RESIDENCY MANAGER (T-I4-6) ---
+
+namespace {
+
+constexpr uint32_t kLtexMagic = 0x5845544C; // 'LTEX' little-endian
+constexpr uint16_t kLtexVersion = 1;
+// Layers reserved per size-class array. Over-provisioning is cheap (storage is
+// allocated lazily per uploaded layer in this iteration; growth reallocates).
+constexpr uint32_t kResidencyArrayInitialCapacity = 8;
+
+template <typename T>
+bool ReadPod(std::ifstream& in, T& value) {
+    in.read(reinterpret_cast<char*>(&value), sizeof(T));
+    return static_cast<bool>(in);
+}
+
+} // namespace
+
+bool RenderPipeline::load_ltex_cpu_image(const std::filesystem::path& path, LtexCpuImage& out) const {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        LUMINUMBRA_CORE_ERROR("Texture residency: could not open .ltex '{}'", path.string());
+        return false;
+    }
+
+    uint32_t magic = 0;
+    uint16_t version = 0;
+    uint16_t mip_count = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint8_t channels = 0;
+    if (!ReadPod(in, magic) || !ReadPod(in, version) || !ReadPod(in, mip_count) ||
+        !ReadPod(in, width) || !ReadPod(in, height) || !ReadPod(in, channels)) {
+        LUMINUMBRA_CORE_ERROR("Texture residency: truncated .ltex header '{}'", path.string());
+        return false;
+    }
+    if (magic != kLtexMagic) {
+        LUMINUMBRA_CORE_ERROR("Texture residency: bad .ltex magic in '{}'", path.string());
+        return false;
+    }
+    if (version != kLtexVersion) {
+        LUMINUMBRA_CORE_ERROR("Texture residency: unsupported .ltex version {} in '{}'", version, path.string());
+        return false;
+    }
+    if (width == 0 || height == 0 || channels == 0 || channels > 4 || mip_count == 0) {
+        LUMINUMBRA_CORE_ERROR("Texture residency: invalid .ltex dimensions in '{}'", path.string());
+        return false;
+    }
+
+    // Compute the total mip-chain byte count (dimensions halve, floored, min 1).
+    size_t total_bytes = 0;
+    {
+        uint32_t w = width;
+        uint32_t h = height;
+        for (uint16_t level = 0; level < mip_count; ++level) {
+            total_bytes += static_cast<size_t>(w) * h * channels;
+            w = std::max(1u, w / 2u);
+            h = std::max(1u, h / 2u);
+        }
+    }
+
+    out.width = width;
+    out.height = height;
+    out.channels = channels;
+    out.mip_count = mip_count;
+    out.bytes.resize(total_bytes);
+    in.read(reinterpret_cast<char*>(out.bytes.data()), static_cast<std::streamsize>(total_bytes));
+    if (!in) {
+        LUMINUMBRA_CORE_ERROR("Texture residency: truncated .ltex mip data '{}'", path.string());
+        return false;
+    }
+    return true;
+}
+
+bool RenderPipeline::upload_ltex_to_residency(const std::string& name, const std::filesystem::path& path) {
+    if (m_texture_residency.layer_by_name.count(name)) {
+        LUMINUMBRA_CORE_WARN("Texture residency: '{}' already resident; skipping", name);
+        return true;
+    }
+
+    LtexCpuImage image;
+    if (!load_ltex_cpu_image(path, image)) {
+        return false;
+    }
+
+    // Budget gate: reject an upload that would exceed the resident budget.
+    const size_t upload_bytes = image.bytes.size();
+    if (m_texture_residency.resident_bytes + upload_bytes > kTextureResidentBudgetBytes) {
+        LUMINUMBRA_CORE_ERROR(
+            "Texture residency: uploading '{}' ({} bytes) would exceed the {} MB budget (resident {} bytes); rejected",
+            name, upload_bytes, kTextureResidentBudgetBytes / (1024u * 1024u), m_texture_residency.resident_bytes);
+        return false;
+    }
+
+    const std::string size_class_key =
+        std::to_string(image.width) + "x" + std::to_string(image.height) + "x" + std::to_string(image.channels);
+
+    // Find or create the size-class array. A size class is keyed by
+    // {width, height, channels}; mip_count is implied by the dimensions.
+    size_t array_index = m_texture_residency.arrays.size();
+    for (size_t i = 0; i < m_texture_residency.arrays.size(); ++i) {
+        if (m_texture_residency.arrays[i].size_class_key == size_class_key) {
+            array_index = i;
+            break;
+        }
+    }
+
+    const GLenum internal_format = (image.channels == 4) ? GL_SRGB8_ALPHA8 : GL_RGBA8;
+    const GLenum upload_format = GL_RGBA;
+
+    if (array_index == m_texture_residency.arrays.size()) {
+        TextureResidencyArray array;
+        array.width = image.width;
+        array.height = image.height;
+        array.channels = image.channels;
+        array.mip_count = image.mip_count;
+        array.layer_capacity = kResidencyArrayInitialCapacity;
+        array.size_class_key = size_class_key;
+        glGenTextures(1, &array.texture_id);
+        label_gl_object(GL_TEXTURE, array.texture_id, "residency.array." + size_class_key);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, array.texture_id);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BASE_LEVEL, 0);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, image.mip_count - 1);
+        // Allocate immutable-style storage for the size class across all mips.
+        uint32_t w = image.width;
+        uint32_t h = image.height;
+        for (uint16_t level = 0; level < image.mip_count; ++level) {
+            glTexImage3D(GL_TEXTURE_2D_ARRAY, level, internal_format,
+                         static_cast<GLsizei>(w), static_cast<GLsizei>(h),
+                         static_cast<GLsizei>(array.layer_capacity), 0,
+                         upload_format, GL_UNSIGNED_BYTE, nullptr);
+            w = std::max(1u, w / 2u);
+            h = std::max(1u, h / 2u);
+        }
+        m_texture_residency.arrays.push_back(array);
+    }
+
+    TextureResidencyArray& array = m_texture_residency.arrays[array_index];
+    glBindTexture(GL_TEXTURE_2D_ARRAY, array.texture_id);
+
+    const uint32_t layer = array.layer_count;
+    // Upload each mip level of the new layer from the CPU mip chain.
+    uint32_t w = image.width;
+    uint32_t h = image.height;
+    size_t offset = 0;
+    for (uint16_t level = 0; level < image.mip_count; ++level) {
+        const size_t level_bytes = static_cast<size_t>(w) * h * image.channels;
+        glTexSubImage3D(GL_TEXTURE_2D_ARRAY, level, 0, 0, static_cast<GLint>(layer),
+                        static_cast<GLsizei>(w), static_cast<GLsizei>(h), 1,
+                        upload_format, GL_UNSIGNED_BYTE, image.bytes.data() + offset);
+        offset += level_bytes;
+        w = std::max(1u, w / 2u);
+        h = std::max(1u, h / 2u);
+    }
+
+    array.layer_count += 1;
+    array.resident_bytes += upload_bytes;
+    m_texture_residency.resident_bytes += upload_bytes;
+    m_texture_residency.layer_by_name[name] = TextureResidencyLayer{array_index, layer};
+    return true;
+}
+
+void RenderPipeline::init_texture_residency() {
+    // Load the committed iteration-4 .ltex test assets. Nothing samples these
+    // layers yet; T-I4-7 wires shaders to the material-LUT layer indices.
+    const std::array<std::pair<const char*, const char*>, 3> assets = {{
+        {"test/checker", "data/textures/test/checker_16.ltex"},
+        {"test/gradient", "data/textures/test/gradient_16.ltex"},
+        {"test/framed", "data/textures/test/framed_32x8.ltex"},
+    }};
+
+    size_t loaded = 0;
+    for (const auto& [name, rel_path] : assets) {
+        const std::filesystem::path path = m_root_path / rel_path;
+        if (!std::filesystem::exists(path)) {
+            // Missing optional test asset is not fatal — the residency manager
+            // stays empty and telemetry reports zero resident bytes.
+            LUMINUMBRA_CORE_WARN("Texture residency: .ltex asset not found '{}'", path.string());
+            continue;
+        }
+        if (upload_ltex_to_residency(name, path)) {
+            ++loaded;
+        }
+    }
+
+    LUMINUMBRA_CORE_INFO(
+        "Texture residency: {} layer(s) across {} size-class array(s), {} resident bytes (budget {} MB).",
+        m_texture_residency.layer_by_name.size(), m_texture_residency.arrays.size(),
+        m_texture_residency.resident_bytes, kTextureResidentBudgetBytes / (1024u * 1024u));
+    (void)loaded;
+}
+
+void RenderPipeline::destroy_texture_residency() {
+    for (TextureResidencyArray& array : m_texture_residency.arrays) {
+        if (array.texture_id) {
+            glDeleteTextures(1, &array.texture_id);
+            array.texture_id = 0;
+        }
+    }
+    m_texture_residency.arrays.clear();
+    m_texture_residency.layer_by_name.clear();
+    m_texture_residency.resident_bytes = 0;
+}
+
+bool RenderPipeline::find_resident_texture_layer(const std::string& name, size_t& out_array_index, uint32_t& out_layer) const {
+    const auto it = m_texture_residency.layer_by_name.find(name);
+    if (it == m_texture_residency.layer_by_name.end()) {
+        return false;
+    }
+    out_array_index = it->second.array_index;
+    out_layer = it->second.layer;
+    return true;
 }
 
 // --- GPU SDF GENERATION SYSTEM ---

@@ -10,6 +10,8 @@ target_include_directories(asset_processor PUBLIC
     ${CMAKE_SOURCE_DIR}/vendor/meshoptimizer/src
     # For luminumbra_common/animation/SkinnedMeshFormat.h (LMS2/.lanim formats)
     ${CMAKE_SOURCE_DIR}/src
+    # For stb_image.h (PNG -> .ltex texture import, T-I4-6)
+    ${CMAKE_SOURCE_DIR}/vendor/stb
 )
 
 # Add the required meshoptimizer .cpp files to be compiled with your tool.

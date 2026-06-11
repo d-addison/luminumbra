@@ -242,6 +242,16 @@ public:
         bool terrain_texture_array_ok = false;
         bool material_lut_ok = false;
         size_t terrain_texture_fallback_layers = 0;
+        // --- Texture-array residency (T-I4-6) ---
+        // Resident .ltex texture bytes (mip chains included) across all
+        // size-class arrays, the configured budget, and array/layer counts.
+        // Surfaced in render telemetry; nothing samples the layers yet
+        // (T-I4-7 wires shaders to the LUT layer indices).
+        size_t texture_resident_bytes = 0;
+        size_t texture_resident_budget_bytes = 0;
+        bool texture_resident_within_budget = true;
+        size_t texture_residency_array_count = 0;
+        size_t texture_residency_layer_count = 0;
     };
 
     struct GpuSdfRuntimeToggleState {
@@ -276,6 +286,13 @@ public:
     const std::vector<RenderPassMetadata>& get_last_render_pass_metadata() const { return m_last_render_pass_metadata; }
     RuntimeRenderStats get_runtime_render_stats() const;
     RenderResourceRegistryStats get_resource_registry_stats() const;
+    // Texture-array residency layer lookup by name (T-I4-6). Returns the
+    // {array, layer} index of a resident .ltex texture, or false if the name
+    // is not resident. T-I4-7 wires these layer indices through the material
+    // LUT; nothing samples them yet.
+    bool find_resident_texture_layer(const std::string& name, size_t& out_array_index, uint32_t& out_layer) const;
+    size_t texture_resident_bytes() const { return m_texture_residency.resident_bytes; }
+    static constexpr size_t texture_resident_budget_bytes() { return kTextureResidentBudgetBytes; }
     std::vector<ShaderHealthEntry> get_shader_health() const;
     RenderHealthSnapshot get_render_health_snapshot(bool drain_gl_errors = false) const;
     // Generated caustics texture id (0 when unavailable). Exposed for the
@@ -436,6 +453,61 @@ private:
 
     void init_terrain_textures();
     void init_material_lut();
+
+    // --- Texture-array residency manager (T-I4-6) ---
+    // Imports .ltex assets into GL_TEXTURE_2D_ARRAY objects bucketed by size
+    // class {width, height, channels}. Each distinct size class gets its own
+    // array; textures of that class become layers. Layer lookup by name feeds
+    // the material LUT layer indices (consumed by T-I4-7). Texture arrays were
+    // chosen over bindless deliberately (design-decisions §10; research Area 1
+    // — bindless is AMD-fragile/Intel-absent on GL).
+    //
+    // 96 MB resident-texture budget this iteration (design-decisions §10).
+    static constexpr size_t kTextureResidentBudgetBytes = 96u * 1024u * 1024u;
+
+    struct LtexCpuImage {
+        uint32_t width = 0;
+        uint32_t height = 0;
+        uint32_t channels = 0;
+        uint16_t mip_count = 0;
+        std::vector<unsigned char> bytes; // full mip chain, level 0 first
+    };
+
+    struct TextureResidencyArray {
+        u32 texture_id = 0;        // GL_TEXTURE_2D_ARRAY
+        uint32_t width = 0;
+        uint32_t height = 0;
+        uint32_t channels = 0;
+        uint16_t mip_count = 0;
+        uint32_t layer_count = 0;  // populated layers
+        uint32_t layer_capacity = 0;
+        size_t resident_bytes = 0; // sum of uploaded mip bytes
+        std::string size_class_key; // e.g. "16x16x4"
+    };
+
+    struct TextureResidencyLayer {
+        size_t array_index = 0;
+        uint32_t layer = 0;
+    };
+
+    struct TextureResidencyManager {
+        std::vector<TextureResidencyArray> arrays;
+        std::unordered_map<std::string, TextureResidencyLayer> layer_by_name;
+        size_t resident_bytes = 0;
+    };
+    TextureResidencyManager m_texture_residency;
+
+    // Loads a .ltex file from disk into a CPU image (full mip chain). Returns
+    // false on any header/size error.
+    bool load_ltex_cpu_image(const std::filesystem::path& path, LtexCpuImage& out) const;
+    // Imports a .ltex asset, allocating/growing a size-class array as needed and
+    // uploading its mip chain into a fresh layer. Records layer-by-name lookup
+    // and resident-byte accounting. Respects the resident budget (an over-budget
+    // upload is rejected and logged). Returns the layer name's resident state.
+    bool upload_ltex_to_residency(const std::string& name, const std::filesystem::path& path);
+    // Loads the committed iteration-4 .ltex test assets into residency arrays.
+    void init_texture_residency();
+    void destroy_texture_residency();
 
     // --- GPU SDF Generation ---
     struct GPUSDFSystem {

@@ -59,11 +59,16 @@ add_executable(asset_processor_round_trip_test
     "${ASSET_PROCESSOR_SOURCE}"
 )
 
+target_compile_definitions(asset_processor_round_trip_test PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+)
+
 target_include_directories(asset_processor_round_trip_test PRIVATE
     ../src
     ../tools
     ../vendor/cgltf
     ../vendor/meshoptimizer/src
+    ../vendor/stb
     ../third_party/cgltf
     ../third_party/meshoptimizer/src
     ../external/cgltf

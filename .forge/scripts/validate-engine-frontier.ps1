@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "SkinnedMeshVisual", "EngineGameSplitLint", "CreatureSlice", "BiomeCoverage", "RiverPresence", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "SkinnedMeshVisual", "EngineGameSplitLint", "CreatureSlice", "BiomeCoverage", "RiverPresence", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -575,6 +575,113 @@ function Test-ShaderInventory {
             throw "Shader suite health failed for '$requiredProgram'"
         }
     }
+}
+
+function Test-TextureResidency {
+    # T-I4-6 texture-array residency gate. Self-contained (no GL context): it
+    # (1) asserts the RenderPipeline residency contract via source inspection
+    # and (2) parses the committed .ltex assets, summing their resident bytes
+    # and asserting they fit the 96 MB iteration budget (design-decisions §10).
+    $budgetBytes = 96 * 1024 * 1024
+
+    $headerPath = "src/luminumbra_client/rendering/RenderPipeline.h"
+    $sourcePath = "src/luminumbra_client/rendering/RenderPipeline.cpp"
+    foreach ($path in @($headerPath, $sourcePath)) {
+        if (-not (Test-Path $path)) {
+            throw "Texture residency gate: missing $path"
+        }
+    }
+
+    $header = Get-Content $headerPath -Raw
+    $source = Get-Content $sourcePath -Raw
+
+    # Budget constant present and set to 96 MB.
+    if ($header -notmatch "kTextureResidentBudgetBytes\s*=\s*96u\s*\*\s*1024u\s*\*\s*1024u") {
+        throw "Texture residency gate: RenderPipeline.h must declare the 96 MB kTextureResidentBudgetBytes budget"
+    }
+    # Residency manager + layer-by-name lookup + telemetry surface.
+    foreach ($symbol in @(
+        "TextureResidencyManager",
+        "find_resident_texture_layer",
+        "texture_resident_bytes",
+        "init_texture_residency",
+        "destroy_texture_residency")) {
+        if ($header -notmatch [regex]::Escape($symbol)) {
+            throw "Texture residency gate: RenderPipeline.h is missing '$symbol'"
+        }
+    }
+    # Arrays register under the existing texture resource type and clean up.
+    if ($source -notmatch "m_texture_residency\.arrays") {
+        throw "Texture residency gate: RenderPipeline.cpp must register residency arrays"
+    }
+    if ($source -notmatch "stats\.textures\s*\+=\s*count\(array\.texture_id\)") {
+        throw "Texture residency gate: residency arrays must register under the texture resource type"
+    }
+    if ($source -notmatch "destroy_texture_residency") {
+        throw "Texture residency gate: residency arrays must be released in cleanup"
+    }
+    # Budget gate enforced at upload time.
+    if ($source -notmatch "would exceed the .* budget") {
+        throw "Texture residency gate: upload path must reject over-budget textures"
+    }
+
+    # Parse the committed .ltex assets and sum resident bytes (full mip chains).
+    $textureDir = "data/textures/test"
+    if (-not (Test-Path $textureDir)) {
+        throw "Texture residency gate: missing committed test textures under $textureDir"
+    }
+    $ltexFiles = @(Get-ChildItem -Path $textureDir -Filter "*.ltex" -File)
+    if ($ltexFiles.Count -lt 2) {
+        throw "Texture residency gate: expected at least 2 committed .ltex test assets, found $($ltexFiles.Count)"
+    }
+
+    $totalResidentBytes = 0
+    foreach ($file in $ltexFiles) {
+        # .ltex header: u32 magic + u16 version + u16 mip_count + u32 width +
+        # u32 height + u8 channels = 17 bytes, then the raw mip chain.
+        $headerSize = 17
+        $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
+        if ($bytes.Length -lt $headerSize) {
+            throw "Texture residency gate: '$($file.Name)' is too small to be a valid .ltex"
+        }
+        $magic = [System.BitConverter]::ToUInt32($bytes, 0)
+        if ($magic -ne 0x5845544C) {
+            throw "Texture residency gate: '$($file.Name)' has a bad LTEX magic"
+        }
+        $version = [System.BitConverter]::ToUInt16($bytes, 4)
+        if ($version -ne 1) {
+            throw "Texture residency gate: '$($file.Name)' has unsupported version $version"
+        }
+        $mipCount = [System.BitConverter]::ToUInt16($bytes, 6)
+        $width = [System.BitConverter]::ToUInt32($bytes, 8)
+        $height = [System.BitConverter]::ToUInt32($bytes, 12)
+        $channels = $bytes[16]
+        if ($width -le 0 -or $height -le 0 -or $channels -le 0 -or $mipCount -le 0) {
+            throw "Texture residency gate: '$($file.Name)' has invalid header dimensions"
+        }
+
+        $w = $width
+        $h = $height
+        $mipBytes = 0
+        for ($level = 0; $level -lt $mipCount; $level++) {
+            $mipBytes += $w * $h * $channels
+            $w = [Math]::Max(1, [Math]::Floor($w / 2))
+            $h = [Math]::Max(1, [Math]::Floor($h / 2))
+        }
+        # Header + mip chain must equal the on-disk size.
+        $expectedSize = $headerSize + $mipBytes
+        if ($bytes.Length -ne $expectedSize) {
+            throw "Texture residency gate: '$($file.Name)' size $($bytes.Length) does not match header (expected $expectedSize)"
+        }
+        $totalResidentBytes += $mipBytes
+    }
+
+    if ($totalResidentBytes -gt $budgetBytes) {
+        throw "Texture residency gate: committed resident bytes $totalResidentBytes exceed the 96 MB budget ($budgetBytes)"
+    }
+
+    Write-Host ("texture residency: {0} .ltex asset(s), {1} resident bytes (budget {2} bytes); arrays registered under texture type" -f `
+        $ltexFiles.Count, $totalResidentBytes, $budgetBytes)
 }
 
 function Test-GpuSdfCallbackSafetyGate {
@@ -3319,6 +3426,7 @@ switch ($Mode) {
     "MaterialVisual" { Test-MaterialVisual }
     "RenderHealth" { Test-RenderHealth }
     "ShaderInventory" { Test-ShaderInventory }
+    "TextureResidency" { Test-TextureResidency }
     "GpuSdfCallbackSafetyGate" { Test-GpuSdfCallbackSafetyGate }
     "GpuSdfComputeParityGate" { Test-GpuSdfComputeParityGate }
     "GpuSdfRuntimeToggleGate" { Test-GpuSdfRuntimeToggleGate }
