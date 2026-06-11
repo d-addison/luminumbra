@@ -341,9 +341,9 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir, WorldS
 
     Persistence::WorldSaveService service;
     std::vector<std::string> errors;
-    std::error_code exists_error;
-    const bool has_snapshot =
-        fs::exists(Persistence::WorldSaveService::world_state_path(save_dir), exists_error) && !exists_error;
+    // T-I3-7: detects both the legacy v1 snapshot and the v2 LMR1 region
+    // container so subsequent saves take the O(edited regions) path.
+    const bool has_snapshot = Persistence::WorldSaveService::has_world_save(save_dir);
 
     bool ok = false;
     if (!has_snapshot) {
