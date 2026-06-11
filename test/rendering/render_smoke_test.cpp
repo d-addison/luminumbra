@@ -315,7 +315,7 @@ std::vector<ShaderProgramSpec> PipelineProgramSpecs() {
         {"g_buffer", "g_buffer.vert", "g_buffer.frag"},
         {"instanced_mesh_gbuffer", "instanced_mesh.vert", "g_buffer.frag"},
         {"lighting_pass", "lighting_pass.vert", "lighting_pass.frag"},
-        {"skybox", "skybox.vert", "skybox.frag"},
+        {"skybox", "skybox.vert", "enhanced_skybox.frag"},
         {"shadow_map", "shadow_map.vert", "shadow_map.frag"},
         {"ssao", "ssao.vert", "ssao.frag"},
         {"ssao_blur", "ssao.vert", "ssao_blur.frag"},

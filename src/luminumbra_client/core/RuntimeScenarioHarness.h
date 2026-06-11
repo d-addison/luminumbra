@@ -55,6 +55,9 @@ struct RuntimeScenarioConfig {
     bool lod_ground_smoke() const { return scenario == "lod_ground_smoke"; }
     bool water_visual_smoke() const { return scenario == "water_visual_smoke"; }
     bool material_visual_smoke() const { return scenario == "material_visual_smoke"; }
+    bool skybox_visual_smoke() const { return scenario == "skybox_visual_smoke"; }
+    bool weather_visual_smoke() const { return scenario == "weather_visual_smoke"; }
+    bool timeofday_sweep_smoke() const { return scenario == "timeofday_sweep_smoke"; }
     bool lod_boundary_oscillation_smoke() const { return scenario == "lod_boundary_oscillation_smoke"; }
     bool lod_seam_arrival_smoke() const { return scenario == "lod_seam_arrival_smoke"; }
     bool persistence_roundtrip_smoke() const { return scenario == "persistence_roundtrip_smoke"; }
@@ -236,6 +239,171 @@ WaterRegionPatch AnalyzeWaterRegionPatch(
     int center_x,
     int center_y_from_top,
     int radius);
+
+// --- Skybox visual smoke (T-I2-17a) ---
+// Camera sits over open terrain near spawn, tilted up 30 degrees with a wide
+// (90 degree) vertical FOV aimed at the sun azimuth so the noon sun disc is
+// inside the frame. The analysis measures the atmospheric gradient and the
+// sun disc directly from backbuffer pixels.
+struct SkyboxVisualBandStats {
+    double mean_luminance = 0.0;
+    std::uint64_t pixels = 0;
+};
+
+struct SkyboxPixelStats {
+    int width = 0;
+    int height = 0;
+    std::uint64_t sky_roi_pixels = 0;
+    // Bands run from the horizon end of the sky ROI (index 0) to the zenith
+    // end (last index). Sun-disc pixels are excluded from the band means so
+    // the gradient check measures atmosphere, not the disc.
+    std::vector<SkyboxVisualBandStats> bands;
+    double horizon_band_mean = 0.0;
+    double zenith_band_mean = 0.0;
+    int monotonic_violations = 0;
+    double max_luminance = 0.0;
+    std::uint64_t sun_disc_pixels = 0;
+    double sun_disc_centroid_x = 0.0;   // normalized [0,1], 0 = left
+    double sun_disc_centroid_y = 0.0;   // normalized [0,1], 0 = top
+    // Disc pixels within the expected-sun-position cluster radius; the
+    // localization metric (a half/quadrant split breaks when the sun sits on
+    // the frame centerline).
+    std::uint64_t sun_disc_pixels_near_expected = 0;
+};
+
+// Toward-sun unit vector for a normalized time of day, mirroring
+// RenderPipeline::update_time_of_day (t=0 is noon, elevation = cos(2*pi*t)).
+Luminumbra::Vec3 TowardSunDirection(float time_of_day);
+
+void ApplySkyboxVisualCamera(
+    Luminumbra::world::GameSession* game_session,
+    Luminumbra::Rendering::Camera* camera,
+    float pinned_time_of_day);
+
+// Projects a world-space direction (point at infinity) to normalized screen
+// coordinates; returns true when the direction lands inside the frame.
+bool ProjectDirectionToScreen(
+    const Luminumbra::Rendering::Camera& camera,
+    int width,
+    int height,
+    const Luminumbra::Vec3& direction,
+    double& x_norm,
+    double& y_norm_from_top);
+
+SkyboxPixelStats AnalyzeSkyboxPixels(
+    const std::vector<unsigned char>& pixels,
+    int width,
+    int height,
+    double sun_screen_x_norm,
+    double sun_screen_y_norm,
+    bool sun_on_screen);
+
+void WriteSkyboxVisualAnalysis(
+    const std::filesystem::path& artifact_dir,
+    const std::string& screenshot,
+    const SkyboxPixelStats& pixel_stats,
+    double sun_screen_x_norm,
+    double sun_screen_y_norm,
+    bool sun_on_screen,
+    const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass);
+
+// --- Weather visual smoke (T-I2-17b) ---
+// Same camera as the skybox scenario. A clear-sky baseline frame is captured
+// in the first half of the run; weather (Rain at intensity 1.0) is enabled at
+// the midpoint and the weather frame captured near the end. The analysis
+// compares the two captures: overcast luminance drop in the sky ROI and rain
+// streak structure (horizontal luminance gradient energy, since vertical
+// streaks create high-frequency variation across columns).
+struct WeatherPixelStats {
+    int width = 0;
+    int height = 0;
+    std::uint64_t sky_roi_pixels = 0;
+    double sky_mean_luminance = 0.0;
+    // Mean |L(x+1,y) - L(x,y)| over the sky ROI: vertical rain streaks
+    // produce horizontal high-frequency luminance transitions.
+    double sky_horizontal_gradient_mean = 0.0;
+    double frame_mean_luminance = 0.0;
+};
+
+WeatherPixelStats AnalyzeWeatherPixels(const std::vector<unsigned char>& pixels, int width, int height);
+
+void WriteWeatherVisualAnalysis(
+    const std::filesystem::path& artifact_dir,
+    const std::string& baseline_screenshot,
+    const std::string& weather_screenshot,
+    const WeatherPixelStats& baseline_stats,
+    const WeatherPixelStats& weather_stats,
+    const std::string& weather_type,
+    float weather_intensity,
+    const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass);
+
+// --- Time-of-day sweep smoke (T-I2-17c) ---
+// Fixed skybox camera; the run is split into three equal phases pinned at
+// t=0.04 (noon), t=0.22 (dusk, sun elevation ~10.8 degrees), t=0.45 (night),
+// each captured near the end of its phase window so settle frames separate
+// the transitions. The analysis checks per-phase mean luminance ordering
+// (noon > dusk > night), the dusk warm shift (r/b rises vs noon), and a
+// generic emissive-material night check with an honest fallback when no
+// emissive registry material is discoverable in a surface capture.
+struct TimeOfDayPixelStats {
+    int width = 0;
+    int height = 0;
+    double frame_mean_luminance = 0.0;
+    double sky_mean_luminance = 0.0;       // top kSkyRoiHeightFraction of the frame
+    double terrain_mean_luminance = 0.0;   // bottom 25% of the frame
+    double frame_mean_r = 0.0;
+    double frame_mean_b = 0.0;
+    double frame_r_b_ratio = 0.0;
+    double terrain_r_b_ratio = 0.0;
+    double max_luminance = 0.0;
+    double max_luminance_y_from_top_norm = 0.0;  // 0 = top of frame
+    double sky_max_luminance = 0.0;              // max within the sky band
+    // Pixels above the emissive glow floor inside the central third of the
+    // frame; only consumed by the optional night-emissive capture.
+    std::uint64_t center_glow_pixels = 0;
+};
+
+TimeOfDayPixelStats AnalyzeTimeOfDayPixels(const std::vector<unsigned char>& pixels, int width, int height);
+
+// Phase time for a normalized sweep progress: noon / dusk / night thirds.
+float TimeOfDaySweepPhaseTime(double progress);
+
+// Generic emissive-material discovery: emissive material ids come from the
+// engine material registry (data/common/materials.json entries with a
+// non-zero "emission"); the streamed terrain meshes are scanned for a
+// near-surface vertex carrying one of those ids. Game content decides which
+// materials are emissive; the engine check stays generic.
+struct EmissiveMaterialTarget {
+    bool found = false;
+    std::vector<std::uint32_t> emissive_material_ids;
+    Luminumbra::Vec3 position{0.0f};
+    std::uint32_t material_id = 0;
+    float distance_from_spawn = 0.0f;
+    float depth_below_surface = 0.0f;
+    std::size_t vertices_scanned = 0;
+    std::size_t emissive_vertices_total = 0;
+    std::size_t emissive_vertices_in_range = 0;
+};
+
+EmissiveMaterialTarget FindEmissiveMaterialTarget(
+    Luminumbra::world::GameSession* game_session,
+    const std::filesystem::path& root_dir);
+
+struct TimeOfDayPhaseCapture {
+    std::string name;
+    double time_of_day = 0.0;
+    std::string file;
+    TimeOfDayPixelStats stats;
+};
+
+void WriteTimeOfDaySweepAnalysis(
+    const std::filesystem::path& artifact_dir,
+    const std::vector<TimeOfDayPhaseCapture>& phases,
+    const EmissiveMaterialTarget& emissive_target,
+    bool emissive_capture_written,
+    const std::string& emissive_screenshot,
+    const TimeOfDayPixelStats& emissive_stats,
+    const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass);
 
 ScreenshotPixelStats AnalyzeScreenshotPixels(const std::vector<unsigned char>& pixels, int width, int height);
 LodHolePixelStats AnalyzeLodHolePixels(const std::vector<unsigned char>& pixels, int width, int height);
