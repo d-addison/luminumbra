@@ -9,6 +9,24 @@ substitute for them. The four TDD pillars — SHIELD (world/SDF), Instinct
 (creature minds), Atmospheric (weather/wind/seasons/time), Aetheric (scalar
 fields/light) — each get a home below.
 
+## Execution-model tiering (owner-mandated 2026-06-11)
+
+Fable (the frontier model) is reserved for PLANNING-TIER work only:
+spec/research/critique/ultimate-plan rounds, dispatch authoring, merge
+adjudication, gate-failure diagnosis, recovery from stuck executors.
+IMPLEMENTATION is delegated down-tier: Opus 4.8 subagents (Agent tool
+`model: "opus"`) for well-specified coding tasks; Codex dispatch (the
+original forge executor path — infrastructure retained in .forge/) may be
+revived for mechanical, fully-gate-defined tasks. The enabler is dispatch
+quality: every task record must be self-contained (binding design-doc
+refs, file-ownership map, inherited state, operating rules, verification
+ladder, exact gate commands) so a lesser executor cannot go wrong in an
+unbounded way — the gates, not the executor's judgment, define done.
+Tasks whose dispatch cannot be written that tightly are planning-tier
+work that hasn't finished; tighten the spec rather than upgrading the
+executor. dispatch.json task records gain an `executor` field
+(codex | opus-agent | fable) from iteration 4 on.
+
 Standing cross-iteration spine (every iteration, non-negotiable):
 - Gate-first discipline; determinism contracts only move via deliberate
   versioned bumps; PerfRegression + RenderHealth re-bless protocol.
