@@ -1,4 +1,5 @@
 ﻿#include "MarchingCubes.h"
+#include "FarLodStore.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -488,6 +489,129 @@ namespace { // Anonymous namespace for internal implementation details
     }
 
 } // anonymous namespace
+
+MaterialType TerrainSurfaceMaterialAt(
+    const Systems::SHIELD_WorldSystem& world_system,
+    float world_x,
+    float world_z,
+    float terrain_height) {
+    // Identical sampling to GenerateCoarseHeightfieldTerrain: just below the
+    // surface so the classifier never lands on Air/Water.
+    return GetTerrainMaterialAt(world_system, Vec3(world_x, terrain_height - 0.1f, world_z));
+}
+
+FarLodRegionMeshStats GenerateFarLodRegionMesh(
+    const World::FarLodTile& tile,
+    World::FarLodRegionMesh& out_mesh) {
+    FarLodRegionMeshStats stats;
+    out_mesh.vertices.clear();
+    out_mesh.indices.clear();
+
+    const u32 n = tile.samples_per_side;
+    if (n < 2u || tile.height_q.size() < tile.sample_count() ||
+        tile.material.size() < tile.sample_count()) {
+        return stats;
+    }
+
+    const float step = static_cast<float>(World::FarLodSampleStepMeters(tile.tier));
+    std::vector<VoxelVertex>& vertices = out_mesh.vertices;
+    std::vector<u32>& indices = out_mesh.indices;
+    const std::size_t surface_vertex_count = tile.sample_count();
+    vertices.reserve(surface_vertex_count + static_cast<std::size_t>(4u * (n - 1u)) * 4u);
+    indices.reserve(static_cast<std::size_t>(n - 1u) * (n - 1u) * 6u + static_cast<std::size_t>(4u * (n - 1u)) * 6u);
+
+    // Surface lattice: region-local X/Z, absolute (dequantized) world Y.
+    std::size_t sample_index = 0;
+    for (u32 z = 0; z < n; ++z) {
+        for (u32 x = 0; x < n; ++x, ++sample_index) {
+            vertices.push_back({
+                Vec3(static_cast<float>(x) * step,
+                     World::DequantizeFarLodHeight(tile.height_q[sample_index]),
+                     static_cast<float>(z) * step),
+                Vec3(0.0f),
+                static_cast<u32>(tile.material[sample_index])
+            });
+        }
+    }
+
+    const auto vertex_index = [n](u32 x, u32 z) {
+        return z * n + x;
+    };
+
+    // Whole-tile heightfield: every cell is emitted (a region tile owns its
+    // full vertical extent - no chunk-Y ownership test, no ownership holes).
+    for (u32 z = 0; z + 1u < n; ++z) {
+        for (u32 x = 0; x + 1u < n; ++x) {
+            const u32 i00 = vertex_index(x, z);
+            const u32 i10 = vertex_index(x + 1u, z);
+            const u32 i01 = vertex_index(x, z + 1u);
+            const u32 i11 = vertex_index(x + 1u, z + 1u);
+            indices.push_back(i00);
+            indices.push_back(i11);
+            indices.push_back(i10);
+            indices.push_back(i00);
+            indices.push_back(i01);
+            indices.push_back(i11);
+        }
+    }
+
+    // Accumulated face normals over the surface lattice (same smoothing the
+    // coarse chunk mesher uses).
+    for (std::size_t i = 0; i + 2u < indices.size(); i += 3u) {
+        VoxelVertex& v0 = vertices[indices[i]];
+        VoxelVertex& v1 = vertices[indices[i + 1u]];
+        VoxelVertex& v2 = vertices[indices[i + 2u]];
+        const Vec3 face_normal = glm::cross(v1.position - v0.position, v2.position - v0.position);
+        v0.normal += face_normal;
+        v1.normal += face_normal;
+        v2.normal += face_normal;
+    }
+    for (VoxelVertex& vertex : vertices) {
+        if (glm::dot(vertex.normal, vertex.normal) > 0.0f) {
+            vertex.normal = glm::normalize(vertex.normal);
+        } else {
+            vertex.normal = Vec3(0.0f, 1.0f, 0.0f);
+        }
+    }
+
+    // Perimeter skirts dropped one sample-step deep: tile borders share
+    // sample positions with the neighboring region (no crack on same-tier
+    // boundaries), and the skirt masks the residual mismatch on tier
+    // boundaries (F1 vs F2 sample density, live ring vs F1).
+    const float drop = step;
+    const auto add_skirt_edge = [&](u32 top_a, u32 top_b, const Vec3& outward) {
+        const VoxelVertex& a = vertices[top_a];
+        const VoxelVertex& b = vertices[top_b];
+        const u32 base = static_cast<u32>(vertices.size());
+        vertices.push_back({a.position, outward, a.material_id});
+        vertices.push_back({b.position, outward, b.material_id});
+        vertices.push_back({b.position - Vec3(0.0f, drop, 0.0f), outward, b.material_id});
+        vertices.push_back({a.position - Vec3(0.0f, drop, 0.0f), outward, a.material_id});
+        const bool first = AppendOrientedTriangle(indices, vertices, base, base + 1u, base + 2u, outward);
+        const bool second = AppendOrientedTriangle(indices, vertices, base, base + 2u, base + 3u, outward);
+        if (!first && !second) {
+            vertices.pop_back();
+            vertices.pop_back();
+            vertices.pop_back();
+            vertices.pop_back();
+            return;
+        }
+        ++stats.skirt_quads;
+    };
+    for (u32 x = 0; x + 1u < n; ++x) {
+        add_skirt_edge(vertex_index(x, 0), vertex_index(x + 1u, 0), Vec3(0.0f, 0.0f, -1.0f));
+        add_skirt_edge(vertex_index(x, n - 1u), vertex_index(x + 1u, n - 1u), Vec3(0.0f, 0.0f, 1.0f));
+    }
+    for (u32 z = 0; z + 1u < n; ++z) {
+        add_skirt_edge(vertex_index(0, z), vertex_index(0, z + 1u), Vec3(-1.0f, 0.0f, 0.0f));
+        add_skirt_edge(vertex_index(n - 1u, z), vertex_index(n - 1u, z + 1u), Vec3(1.0f, 0.0f, 0.0f));
+    }
+
+    stats.vertices = vertices.size();
+    stats.indices = indices.size();
+    stats.triangles = indices.size() / 3u;
+    return stats;
+}
 
 void ResetTerrainMeshBuildStats() {
     g_terrain_mesh_build_stats.jobs.store(0, std::memory_order_relaxed);

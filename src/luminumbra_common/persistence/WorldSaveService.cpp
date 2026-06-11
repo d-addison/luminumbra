@@ -398,6 +398,82 @@ bool WorldSaveService::has_world_save(const std::filesystem::path& save_dir) {
     return false;
 }
 
+bool WorldSaveService::read_container_records(
+    const std::filesystem::path& region_file,
+    std::vector<ContainerRecord>& out_records,
+    std::vector<std::string>* errors) {
+    out_records.clear();
+    std::error_code exists_error;
+    if (!std::filesystem::exists(region_file, exists_error) || exists_error) {
+        return true; // clean miss
+    }
+
+    std::vector<RegionRecord> raw_records;
+    if (!ReadRegionFile(region_file, raw_records, errors)) {
+        return false;
+    }
+    out_records.reserve(raw_records.size());
+    for (const RegionRecord& raw : raw_records) {
+        ContainerRecord record;
+        record.id = raw.id;
+        record.lod_level = raw.lod_level;
+        record.flags = raw.flags;
+        if (!DecompressPayload(raw, record.payload, errors)) {
+            out_records.clear();
+            return false;
+        }
+        out_records.push_back(std::move(record));
+    }
+    return true;
+}
+
+bool WorldSaveService::upsert_container_records(
+    const std::filesystem::path& region_file,
+    const std::vector<ContainerRecord>& records,
+    std::vector<std::string>* errors) {
+    try {
+        const std::filesystem::path parent = region_file.parent_path();
+        if (!parent.empty()) {
+            std::filesystem::create_directories(parent);
+        }
+
+        std::vector<RegionRecord> raw_records;
+        std::error_code exists_error;
+        if (std::filesystem::exists(region_file, exists_error) && !exists_error) {
+            if (!ReadRegionFile(region_file, raw_records, errors)) {
+                return false;
+            }
+        }
+
+        std::map<std::pair<std::uint8_t, std::uint64_t>, std::size_t> record_index;
+        for (std::size_t i = 0; i < raw_records.size(); ++i) {
+            record_index[{raw_records[i].lod_level, raw_records[i].id}] = i;
+        }
+
+        for (const ContainerRecord& record : records) {
+            RegionRecord raw;
+            raw.id = record.id;
+            raw.lod_level = record.lod_level;
+            raw.flags = record.flags;
+            if (!CompressPayload(record.payload, raw, errors)) {
+                return false;
+            }
+            const auto existing = record_index.find({raw.lod_level, raw.id});
+            if (existing != record_index.end()) {
+                raw_records[existing->second] = std::move(raw);
+            } else {
+                record_index[{raw.lod_level, raw.id}] = raw_records.size();
+                raw_records.push_back(std::move(raw));
+            }
+        }
+
+        return WriteRegionFile(region_file, raw_records, errors);
+    } catch (const std::exception& e) {
+        AddError(errors, std::string("failed to upsert region records: ") + e.what());
+        return false;
+    }
+}
+
 bool WorldSaveService::save_world(
     const WorldStreamingState& state,
     const std::filesystem::path& save_dir,

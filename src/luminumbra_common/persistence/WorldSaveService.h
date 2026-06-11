@@ -60,6 +60,30 @@ public:
     // v1 or the v2 format.
     static bool has_world_save(const std::filesystem::path& save_dir);
 
+    // --- Raw LMR1 record access (far-LOD tiles, T-I3-8) ---
+    // Non-chunk payloads (lod_level 1/2 far tier records) share the chunk
+    // region files; these helpers expose the container at record granularity
+    // without duplicating the LZ4/layout code. Chunk writes preserve records
+    // they do not own and vice versa (merge keyed on (lod_level, id)).
+    struct ContainerRecord {
+        u64 id = 0;
+        u8 lod_level = 0;
+        u8 flags = 0;
+        std::string payload; // uncompressed payload bytes
+    };
+    // Reads and decompresses every record of a region file. A missing file is
+    // a clean miss: returns true with out_records empty.
+    static bool read_container_records(
+        const std::filesystem::path& region_file,
+        std::vector<ContainerRecord>& out_records,
+        std::vector<std::string>* errors = nullptr);
+    // Inserts/replaces the given records keyed (lod_level, id), preserving
+    // all other records of the file verbatim.
+    static bool upsert_container_records(
+        const std::filesystem::path& region_file,
+        const std::vector<ContainerRecord>& records,
+        std::vector<std::string>* errors = nullptr);
+
     // Serializes the full streaming state into the save directory, creating
     // intermediate directories as needed. Returns false (with diagnostics in
     // errors when provided) if the snapshot could not be written.
