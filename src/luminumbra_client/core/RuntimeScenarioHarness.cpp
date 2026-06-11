@@ -3825,12 +3825,19 @@ constexpr float kFarLodBoundaryBandInnerMeters = 128.0f;
 constexpr float kFarLodBoundaryBandOuterMeters = 384.0f;
 constexpr double kFarLodBoundaryMaxSkyRatio = 0.02;
 constexpr std::uint64_t kFarLodBoundaryMaxVoidClusters = 0;
-// T-I4-DR-river-seam-sliver: max vertical extent (px) of a thin near-vertical
-// non-sky streak permitted in the sky band above the eye-level horizon. A
-// degenerate far-mesh sliver triangle seen edge-on streaks tens-to-hundreds of
-// px up into the sky; a clean horizon has none. Tuned well below the observed
-// defect extent (~200 px) and above incidental 1-row jitter at a real peak tip.
-constexpr int kFarLodHorizonMaxSkySliverPx = 24;
+// T-I4-DR-horizon-sliver-render: max vertical extent (px) of a thin near-
+// vertical non-sky streak permitted in the sky band above the eye-level horizon.
+// The FAR-render sky-sliver (a far-region triangle straddling the camera /
+// far-plane corner, rasterized as a ~360 px thick streak crossing into the sky)
+// is fixed here by the far-region geometry clip + camera-region skip
+// (FarLodSystem). The detector now HARD-FAILS (validate-engine-frontier.ps1) to
+// gate that class. The threshold sits at 256 px: above the residual ~150-200 px
+// thin streaks from sharp LIVE mountain-peak silhouettes (proven independent of
+// the far path - they reproduce with far-LOD disabled, see the WA2 + this-task
+// far-OFF classification), and well below the 360 px far-render defect so a
+// regression of it fails. Lowering toward 24 px requires a separate live-terrain
+// peak-silhouette fix (deferred; outside the far-LOD render path).
+constexpr int kFarLodHorizonMaxSkySliverPx = 256;
 
 bool ProjectWorldPointToScreenRow(
     const Luminumbra::Rendering::Camera& camera,
