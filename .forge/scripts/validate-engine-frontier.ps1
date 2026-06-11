@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "SkinnedMeshVisual", "EngineGameSplitLint", "CreatureSlice", "BiomeCoverage", "RiverPresence", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "SkinnedMeshVisual", "EngineGameSplitLint", "CreatureSlice", "BiomeCoverage", "RiverPresence", "EmissiveCalibration", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -350,6 +350,35 @@ function Test-MaterialVisual {
     if (-not $analysis.passed) {
         throw "Material visual (calibration-plate) analysis reported failure"
     }
+}
+
+function Test-EmissiveCalibration {
+    # T-I4-9: the emission -> lighting -> on-screen-glow chain calibration table
+    # (RenderSmokeTest.EmissiveCalibrationMonotonic emits this artifact). The
+    # authored emissive_intensity must map monotonically to measured luminance.
+    $renderDir = "build/$BuildPreset/test-artifacts/render"
+    $analysisPath = Join-Path $renderDir "emissive-calibration.json"
+    if (-not (Test-Path $analysisPath)) {
+        throw "emissive calibration artifact missing $analysisPath - run the render smoke ctest (RenderSmokeTest.EmissiveCalibrationMonotonic) first"
+    }
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.emissive_calibration.v1") {
+        throw "Unexpected emissive calibration schema '$($analysis.schema)'"
+    }
+    $table = @($analysis.table)
+    if ($table.Count -lt 3) {
+        throw "Emissive calibration table must have at least 3 intensity samples"
+    }
+    for ($i = 1; $i -lt $table.Count; $i++) {
+        if ([double]$table[$i].measured_luminance -le [double]$table[$i - 1].measured_luminance) {
+            throw "Emissive calibration not monotonic at intensity $($table[$i].emissive_intensity): $($table[$i].measured_luminance) <= $($table[$i-1].measured_luminance)"
+        }
+    }
+    if (-not $analysis.passed) {
+        throw "Emissive calibration analysis reported failure"
+    }
+    Write-Host ("emissive calibration: monotonic over {0} samples (scale {1}); {2}" -f `
+        $table.Count, $analysis.emissive_lut_scale, $analysis.transfer_curve)
 }
 
 function Test-RenderHealth {
@@ -3286,6 +3315,16 @@ function Test-CreatureSlice {
         if ([double]$comp.creature_terrain_color_delta -lt $minColorDelta) {
             throw "Creature slice capture '$($capture.file)' creature_terrain_color_delta $($comp.creature_terrain_color_delta) is below $minColorDelta (creature reads invisibly against the terrain)"
         }
+        # T-I4-9 emissive glow halo: when the glow_bloom stimulus is framed, its
+        # emission must read as a luminance gradient (bright core/ring above a
+        # falling-off background), not a flat patch.
+        if ($comp.glow_measured) {
+            $lums = @([double]$comp.glow_core_luminance, [double]$comp.glow_ring_luminance, [double]$comp.glow_background_luminance)
+            $span = ($lums | Measure-Object -Maximum).Maximum - ($lums | Measure-Object -Minimum).Minimum
+            if ($span -lt 8.0) {
+                throw "Creature slice capture '$($capture.file)' glow halo is flat (luminance span $span < 8): no visible bloom falloff ring"
+            }
+        }
     }
 
     if (-not $analysis.passed) {
@@ -3415,6 +3454,7 @@ switch ($Mode) {
     "UnitTests" { Test-UnitTests }
     "MaterialVisual" { Test-MaterialVisual }
     "RenderHealth" { Test-RenderHealth }
+    "EmissiveCalibration" { Test-EmissiveCalibration }
     "ShaderInventory" { Test-ShaderInventory }
     "TextureResidency" { Test-TextureResidency }
     "GpuSdfCallbackSafetyGate" { Test-GpuSdfCallbackSafetyGate }

@@ -68,6 +68,7 @@
       "roughness": 0.05,
       "metallic": 0.1,
       "emission": [0.4, 0.6, 0.8],
+      "emissive_intensity": 3.0,
       "texture_layer": -1,
       "normal_layer": -1
     },

@@ -2667,8 +2667,24 @@ int main(int argc, char* argv[]) {
                                             sy = static_cast<int>((1.0f - (ndc.y * 0.5f + 0.5f)) *
                                                                   static_cast<float>(screenshot_height));
                                         }
+                                        // T-I4-9: project the emissive glow_bloom stimulus prop too so
+                                        // the glow-halo (bright core -> falloff ring) can be measured.
+                                        int stim_x = -1, stim_y = -1;
+                                        if (creature_slice_scene.stimulus_spawned) {
+                                            const Luminumbra::Vec3 sp = creature_slice_scene.stimulus_position;
+                                            const glm::vec4 sclip = proj * view *
+                                                glm::vec4(sp.x, sp.y + 0.5f, sp.z, 1.0f);
+                                            if (sclip.w > 0.0f) {
+                                                const glm::vec3 sndc = glm::vec3(sclip) / sclip.w;
+                                                stim_x = static_cast<int>((sndc.x * 0.5f + 0.5f) *
+                                                                          static_cast<float>(screenshot_width));
+                                                stim_y = static_cast<int>((1.0f - (sndc.y * 0.5f + 0.5f)) *
+                                                                          static_cast<float>(screenshot_height));
+                                            }
+                                        }
                                         capture.composition = AnalyzeCreatureSliceComposition(
-                                            comp_pixels, screenshot_width, screenshot_height, sx, sy);
+                                            comp_pixels, screenshot_width, screenshot_height, sx, sy,
+                                            stim_x, stim_y);
                                     }
                                     const std::string relative_path = want_before
                                         ? "screenshots/creature-slice-before.ppm"

@@ -14,9 +14,11 @@ vec2 encode_octahedral(vec3 n) {
     return n.z >= 0.0 ? n.xy : octWrap(n.xy);
 }
 
-// Material lookup texture (256 x 2 rows, T-I4-7):
-//   row 0 (v=0.25): [metallic, roughness, ao, magical]
-//   row 1 (v=0.75): [texture_layer/255, normal_layer/255, tiling/64, has_texture]
+// Material lookup texture (256 x 3 rows, T-I4-7/T-I4-9). Row centers for a
+// 3-tall NEAREST texture are v = 1/6, 1/2, 5/6:
+//   row 0 (v=0.1667): [metallic, roughness, ao, magical]
+//   row 1 (v=0.5):    [texture_layer/255, normal_layer/255, tiling/64, has_texture]
+//   row 2 (v=0.8333): [emissive_intensity/scale, reserved...]  (read by lighting)
 uniform sampler2D u_materialLUT;
 
 // T-I4-7 triplanar terrain arrays (texture arrays, not bindless — design §10).
@@ -104,8 +106,8 @@ void main()
 
     // --- Material properties from lookup texture ---
     float matIndex = float(fs_in.MaterialID) / 255.0;
-    vec4 matProps = texture(u_materialLUT, vec2(matIndex, 0.25)); // row 0
-    vec4 texInfo  = texture(u_materialLUT, vec2(matIndex, 0.75)); // row 1
+    vec4 matProps = texture(u_materialLUT, vec2(matIndex, 0.16667)); // row 0
+    vec4 texInfo  = texture(u_materialLUT, vec2(matIndex, 0.5));     // row 1
 
     float metallic = matProps.r;
     float roughness = matProps.g;
