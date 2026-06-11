@@ -49,6 +49,10 @@ struct RuntimeScenarioConfig {
     // the world snapshot travels through.
     std::string persistence_phase;
     std::filesystem::path persistence_session_dir;
+    // player_view_smoke (T-I3-3): world preset to create the automated test
+    // world from (--world-preset; empty falls back to "mountains", the
+    // worst-case preset for surface-span coverage).
+    std::string world_preset;
 
     bool active() const { return !scenario.empty(); }
     bool auto_world_smoke() const { return scenario == "auto_world_smoke"; }
@@ -61,6 +65,7 @@ struct RuntimeScenarioConfig {
     bool lod_boundary_oscillation_smoke() const { return scenario == "lod_boundary_oscillation_smoke"; }
     bool lod_seam_arrival_smoke() const { return scenario == "lod_seam_arrival_smoke"; }
     bool persistence_roundtrip_smoke() const { return scenario == "persistence_roundtrip_smoke"; }
+    bool player_view_smoke() const { return scenario == "player_view_smoke"; }
     bool forced_crash() const { return scenario == "forced_crash"; }
 };
 
@@ -551,5 +556,95 @@ void WriteLodSeamArrivalAnalysis(
     double duration_seconds,
     const std::vector<LodGroundVisualCapture>& captures,
     const LodSeamArrivalRecorder& recorder);
+
+// --- player_view_smoke (T-I3-3): eye-level 360-degree coverage gate ---
+// Camera stands at spawn at eye level (terrain + 1.8 m) and sweeps 12 yaw
+// stations 30 degrees apart at pitch 0, plus one station aimed at the highest
+// visible peak within the near field (and, on the archipelago preset, one
+// station framing the seed-424242 degenerate-geometry investigation region).
+// Per station after a settle window the gate records (a) the sim-side frustum
+// surface coverage (SHIELD_WorldSystem::get_frustum_surface_coverage_stats)
+// and (b) a screenshot analyzed for sky-colored pixels below the projected
+// horizon line plus the existing near-black seam-cluster detection.
+struct PlayerViewStation {
+    std::string name;
+    float yaw_degrees = 0.0f;
+    float pitch_degrees = 0.0f;
+    // When set, the camera is aimed at `target` instead of using the fixed
+    // yaw/pitch (peak + archipelago degenerate-region stations).
+    bool aim_at_target = false;
+    Luminumbra::Vec3 target{0.0f};
+};
+
+// Eye-level camera position at the world spawn: (spawn.x, terrain + 1.8 m,
+// spawn.z).
+Luminumbra::Vec3 PlayerViewEyePosition(Luminumbra::world::GameSession* game_session);
+
+std::vector<PlayerViewStation> BuildPlayerViewStations(
+    Luminumbra::world::GameSession* game_session,
+    const std::string& world_preset);
+
+void ApplyPlayerViewCamera(
+    Luminumbra::world::GameSession* game_session,
+    Luminumbra::Rendering::Camera* camera,
+    const PlayerViewStation& station);
+
+// Inward-facing frustum planes (ax+by+cz+d >= 0 inside) extracted from the
+// camera's projection*view matrix (Gribb-Hartmann).
+std::array<Luminumbra::Vec4, 6> ExtractCameraFrustumPlanes(
+    const Luminumbra::Rendering::Camera& camera,
+    int width,
+    int height);
+
+struct PlayerViewPixelStats {
+    int width = 0;
+    int height = 0;
+    // Projected horizon row (pixels from the top); pixels below this row at
+    // eye level over loaded terrain must be geometry, never sky.
+    int horizon_row_from_top = 0;
+    std::uint64_t below_horizon_pixels = 0;
+    std::uint64_t below_horizon_sky_pixels = 0;
+    double below_horizon_sky_ratio = 0.0;
+    // Degenerate-void clusters (8-connectivity, >= 12 px) under the STRICT
+    // void predicate max(r,g,b) <= 2. The LOD-seam gate's RGB <= 10 sliver
+    // predicate was tuned on the default preset; on the mountains preset
+    // legitimately shadowed cliff faces have a continuous dark tail (~5% of
+    // frame pixels <= 10 at noon, measured) while true voids - backface
+    // peeks through missing geometry - stay at RGB 0-2. Missing chunks that
+    // open to the skybox are caught by the sky classifier instead.
+    std::uint64_t void_cluster_count = 0;
+    std::uint64_t largest_void_cluster_px = 0;
+};
+
+PlayerViewPixelStats AnalyzePlayerViewPixels(
+    const std::vector<unsigned char>& pixels,
+    int width,
+    int height,
+    int horizon_row_from_top);
+
+struct PlayerViewStationCapture {
+    PlayerViewStation station;
+    std::string file;
+    PlayerViewPixelStats sky;
+    LodHolePixelStats holes;
+    Luminumbra::Systems::SHIELD_WorldSystem::FrustumSurfaceCoverageStats coverage;
+};
+
+// True when any column within the player-view coverage range holds open
+// sea-level water. The skybox and the water surface share hue at the pinned
+// time of day, so the below-horizon sky-leak classifier cannot distinguish a
+// leak from legitimate sea; the sky-ratio threshold is only enforced when no
+// sea water is visible in the near field (coverage + void clusters always
+// are).
+bool PlayerViewSeaWaterInNearField(Luminumbra::world::GameSession* game_session);
+
+void WritePlayerViewAnalysis(
+    const std::filesystem::path& artifact_dir,
+    const std::string& world_preset,
+    double duration_seconds,
+    const std::vector<PlayerViewStationCapture>& captures,
+    std::size_t expected_station_count,
+    const Luminumbra::Systems::SHIELD_WorldSystem::RuntimeChunkStats& chunk_stats,
+    bool enforce_sky_ratio);
 
 } // namespace Luminumbra::Client::ScenarioHarness
