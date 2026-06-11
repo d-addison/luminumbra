@@ -55,19 +55,14 @@ namespace { // Anonymous namespace for internal implementation details
             return sample.material;
         }
 
+        // Fallback when isosurface interpolation landed just outside the solid
+        // side (sample classified Air/Water): reclassify from the column height
+        // through the SAME biome-aware band selector (T-I4-2). With biomes
+        // disabled this reproduces the legacy Sand/Grass/Soil/Stone bands
+        // bit-for-bit.
         const float terrain_height = world_system.GetTerrainHeightAt(world_pos.x, world_pos.z);
-        if (world_pos.y < 34.0f && terrain_height < 36.0f) {
-            return MaterialType::Sand;
-        }
-
-        const float depth = terrain_height - world_pos.y;
-        if (depth < 1.0f) {
-            return MaterialType::Grass;
-        }
-        if (depth < 5.0f) {
-            return MaterialType::Soil;
-        }
-        return MaterialType::Stone;
+        const u8 biome_id = world_system.BiomeIdAt(world_pos.x, world_pos.z);
+        return world_system.SurfaceMaterialForColumn(world_pos.y, terrain_height, biome_id);
     }
 
     struct AtomicTerrainMeshBuildStats {
