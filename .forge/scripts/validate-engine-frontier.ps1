@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "SkinnedMeshVisual", "EngineGameSplitLint", "CreatureSlice", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "SkinnedMeshVisual", "EngineGameSplitLint", "CreatureSlice", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -1446,13 +1446,16 @@ function Test-LuaApiManifestGate {
     }
 }
 
-function Test-AethericDiffusionGate {
-    $artifactDir = "build/$BuildPreset/test-artifacts/aetheric"
-    $analysisPath = Join-Path $artifactDir "aetheric-field-diffusion.json"
-    $testScriptPath = "test/aetheric/aetheric-field-diffusion.ps1"
+function Test-ScalarFieldDiffusionGate {
+    # T-I3-22: the game-flavored "aetheric" compatibility alias was removed at
+    # iteration close. This gate now inspects the generic engine fields module
+    # directly under its own schema (luminumbra.fields.scalar_diffusion.v1).
+    $artifactDir = "build/$BuildPreset/test-artifacts/fields"
+    $analysisPath = Join-Path $artifactDir "scalar-field-diffusion.json"
+    $testScriptPath = "test/fields/scalar-field-diffusion.ps1"
 
     if (-not (Test-Path $testScriptPath)) {
-        throw "aetheric field diffusion gate not yet implemented - missing $testScriptPath (produced by task T-EF-20-aetheric-diffusion-gate)"
+        throw "scalar field diffusion gate not yet implemented - missing $testScriptPath"
     }
 
     & $testScriptPath -BuildPreset $BuildPreset
@@ -1464,39 +1467,39 @@ function Test-AethericDiffusionGate {
     }
 
     if (-not (Test-Path $analysisPath)) {
-        throw "aetheric field diffusion gate not yet implemented - missing $analysisPath (produced by task T-EF-20-aetheric-diffusion-gate)"
+        throw "scalar field diffusion gate not yet implemented - missing $analysisPath"
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
-    if ($analysis.schema -ne "luminumbra.aetheric.field_diffusion.v1") {
-        throw "Unexpected aetheric field diffusion schema '$($analysis.schema)'"
+    if ($analysis.schema -ne "luminumbra.fields.scalar_diffusion.v1") {
+        throw "Unexpected scalar field diffusion schema '$($analysis.schema)'"
     }
     if (-not $analysis.passed) {
-        throw "Aetheric field diffusion analysis reported failure"
+        throw "Scalar field diffusion analysis reported failure"
     }
     if ($analysis.build_preset -ne $BuildPreset) {
-        throw "Aetheric field diffusion build_preset '$($analysis.build_preset)' does not match '$BuildPreset'"
+        throw "Scalar field diffusion build_preset '$($analysis.build_preset)' does not match '$BuildPreset'"
     }
-    if ($analysis.field.source -ne "src/luminumbra_common/aetheric/AethericFieldDiffusion.cpp") {
-        throw "Aetheric field diffusion analysis must inspect AethericFieldDiffusion.cpp"
+    if ($analysis.field.source -ne "src/luminumbra_common/fields/ScalarFieldDiffusion.cpp") {
+        throw "Scalar field diffusion analysis must inspect ScalarFieldDiffusion.cpp"
     }
-    if ($analysis.field.header -ne "src/luminumbra_common/aetheric/AethericFieldDiffusion.h") {
-        throw "Aetheric field diffusion analysis must inspect AethericFieldDiffusion.h"
+    if ($analysis.field.header -ne "src/luminumbra_common/fields/ScalarFieldDiffusion.h") {
+        throw "Scalar field diffusion analysis must inspect ScalarFieldDiffusion.h"
     }
     if ($analysis.diffusion.solver -ne "conservative_pairwise_flux") {
-        throw "Aetheric field diffusion must use the conservative pairwise flux solver"
+        throw "Scalar field diffusion must use the conservative pairwise flux solver"
     }
     if ($analysis.diffusion.order_contract -ne "deterministic_row_major_edges") {
-        throw "Aetheric field diffusion must declare deterministic row-major edge ordering"
+        throw "Scalar field diffusion must declare deterministic row-major edge ordering"
     }
     if ([int64]$analysis.diffusion.iterations -lt 8) {
-        throw "Aetheric field diffusion fixture must cover at least eight iterations"
+        throw "Scalar field diffusion fixture must cover at least eight iterations"
     }
     if (-not $analysis.diffusion.stable) {
-        throw "Aetheric field diffusion fixture reported an unstable solve"
+        throw "Scalar field diffusion fixture reported an unstable solve"
     }
     if ([double]$analysis.diffusion.conservation_error -gt 1.0e-9) {
-        throw "Aetheric field diffusion conservation error exceeded tolerance"
+        throw "Scalar field diffusion conservation error exceeded tolerance"
     }
 
     $requiredChecks = @(
@@ -1504,18 +1507,18 @@ function Test-AethericDiffusionGate {
         "field diffusion source conserves pairwise flux",
         "fixture declares deterministic diffusion order",
         "diffusion gate validates conservation tolerance",
-        "aetheric source is wired into common sources",
-        "aetheric gate test is wired into test sources",
+        "field source is wired into common sources",
+        "field gate test is wired into test sources",
         "gate test exercises serializer and fixture"
     )
     $checks = @($analysis.checks)
     foreach ($requiredCheck in $requiredChecks) {
         $matches = @($checks | Where-Object { $_.name -eq $requiredCheck })
         if ($matches.Count -ne 1) {
-            throw "Aetheric field diffusion analysis is missing check '$requiredCheck'"
+            throw "Scalar field diffusion analysis is missing check '$requiredCheck'"
         }
         if (-not $matches[0].passed) {
-            throw "Aetheric field diffusion check failed: $requiredCheck"
+            throw "Scalar field diffusion check failed: $requiredCheck"
         }
     }
 }
@@ -2991,8 +2994,8 @@ function Test-EngineGameSplitLint {
     # Project Capture game nouns — content lives under data/ and worlds/.
     # (a) path lint: no game noun in any path under src/;
     # (b) content lint: no game noun in any engine source file.
-    # The aetheric compatibility alias (T-I3-17, removal at iteration close)
-    # is the single allowlisted exception.
+    # T-I3-22: the aetheric compatibility alias was removed at iteration close;
+    # 'aetheric' is now an UNCONDITIONAL violation under src/ (no allowlist).
     $gameNouns = @(
         "lumincrystal",
         "grovestrider",
@@ -3005,20 +3008,8 @@ function Test-EngineGameSplitLint {
         "aetheric"
     )
 
-    # Allowlist: (path regex, noun) pairs that are legitimate during the
-    # alias window. Path separators normalized to '/'.
-    $allowlist = @(
-        @{ path = "^src/luminumbra_common/aetheric/"; noun = "aetheric" },
-        @{ path = "^src/luminumbra_common/sources\.cmake$"; noun = "aetheric" }
-    )
-
     function Test-Allowlisted {
         param([string]$RelativePath, [string]$Noun)
-        foreach ($entry in $allowlist) {
-            if ($RelativePath -match $entry.path -and $Noun -eq $entry.noun) {
-                return $true
-            }
-        }
         return $false
     }
 
@@ -3072,7 +3063,7 @@ function Test-EngineGameSplitLint {
         throw "engine-game split lint found $($violations.Count) violation(s) in src/"
     }
 
-    Write-Host "engine-game split lint: $scannedFiles engine files scanned, 0 game-noun violations (aetheric alias allowlisted until iteration close)"
+    Write-Host "engine-game split lint: $scannedFiles engine files scanned, 0 game-noun violations"
 }
 
 function Test-CreatureSlice {
@@ -3207,7 +3198,7 @@ switch ($Mode) {
     "UiTestBaseline" { Test-UiTestBaseline }
     "SimulationEventBusOrderGate" { Test-SimulationEventBusOrderGate }
     "LuaApiManifestGate" { Test-LuaApiManifestGate }
-    "AethericDiffusionGate" { Test-AethericDiffusionGate }
+    "ScalarFieldDiffusionGate" { Test-ScalarFieldDiffusionGate }
     "InstinctPlannerGate" { Test-InstinctPlannerGate }
     "PersistenceRoundtripGate" { Test-PersistenceRoundtripGate }
     "PersistenceRuntimeRoundtrip" { Test-PersistenceRuntimeRoundtrip }
@@ -3243,7 +3234,7 @@ switch ($Mode) {
         Test-UiTestBaseline
         Test-SimulationEventBusOrderGate
         Test-LuaApiManifestGate
-        Test-AethericDiffusionGate
+        Test-ScalarFieldDiffusionGate
         Test-InstinctPlannerGate
         Test-PersistenceRoundtripGate
         Test-ChunkFormatValidationGate
