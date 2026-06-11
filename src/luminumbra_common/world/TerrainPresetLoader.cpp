@@ -220,8 +220,25 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
     params.cave_threshold = features.value("cave_threshold", params.cave_threshold);
     params.cave_carve_value = features.value("cave_carve_value", params.cave_carve_value);
 
-    // Forthcoming blocks: parsed and stored, not yet consumed by generation.
+    // Shaping block: parsed into extras AND consumed (T-I3-10) - the loader is
+    // the one place preset shaping data lands in TerrainGenParams, so every
+    // host (GameSession, tests, headless server) gets identical params.
     ParseShapingBlock(terrain, result.extras.shaping, preset_path, result.warnings);
+    if (result.extras.shaping.present) {
+        const TerrainShapingPreset& shaping = result.extras.shaping;
+        params.shaping_enabled = shaping.enabled;
+        params.continentalness_frequency = shaping.continentalness_frequency;
+        params.erosion_frequency = shaping.erosion_frequency;
+        params.peaks_frequency = shaping.peaks_frequency;
+        params.peaks_amplitude = shaping.peaks_amplitude;
+        params.domain_warp_amplitude = shaping.domain_warp_amplitude;
+        params.domain_warp_frequency = shaping.domain_warp_frequency;
+        params.continental_spline = shaping.continental_spline;
+        params.erosion_spline = shaping.erosion_spline;
+        params.peaks_spline = shaping.peaks_spline;
+    }
+
+    // Remaining forthcoming blocks: parsed and stored, not yet consumed.
     ParseBiomesBlock(gen_params, result.extras.biomes, preset_path, result.warnings);
     result.extras.features.present = true;
     result.extras.features.rivers_enabled = features.value("rivers_enabled", false);

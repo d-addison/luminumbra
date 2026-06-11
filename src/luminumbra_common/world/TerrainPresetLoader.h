@@ -6,7 +6,10 @@
 // and initial_world_loading_perf_test.cpp.
 //
 // Consumed parameters land in Systems::TerrainGenParams (byte-stable with the
-// legacy parsers). Forthcoming blocks — `terrain.shaping` (reserved keys per
+// legacy parsers). The `terrain.shaping` block is parsed into
+// TerrainPresetExtras AND consumed into TerrainGenParams (T-I3-10 terrain
+// shaping; an absent block leaves shaping_enabled=false -> bit-identical
+// legacy heights). Remaining forthcoming blocks — `terrain.shaping` (reserved keys per
 // the iteration-3 design doc), `biomes`, `features` river/structure flags and
 // `materials` — are parsed into TerrainPresetExtras: stored, not yet consumed
 // by generation. Unknown keys produce LUMINUMBRA_CORE_WARN warnings.

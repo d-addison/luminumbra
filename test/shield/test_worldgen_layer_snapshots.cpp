@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -961,7 +962,10 @@ TEST(WorldGenLayerSnapshotTest, VerticalUnloadExemptsColumnSurfaceSpanChunks) {
 TEST(WorldGenLayerSnapshotTest, MountainsSurfaceSpanWantedSetStaysUnderChunkBudget) {
     // T-I3-2 budget proof: the steady-state activation wanted set with
     // 5-point surface spans must fit the 8192 active-chunk budget on the
-    // worst-case shipped preset (mountains: amplitude 120, 6 octaves). The
+    // worst-case params (frozen copy of the pre-T-I3-11 mountains preset:
+    // amplitude 120, 6 octaves, no shaping - the shipped shaped mountains
+    // is strictly gentler, so this stays the upper bound; the PlayerView
+    // gate checks the live budget on the shipped preset at runtime). The
     // count mirrors update_chunk_activation's candidate rule: every chunk-Y
     // in the column span at every ring, plus the +-1 stack inside ring 12.
     TerrainGenParams params;
@@ -1033,6 +1037,473 @@ TEST(WorldGenLayerSnapshotTest, MountainsSurfaceSpanWantedSetStaysUnderChunkBudg
     // beyond the near field.
     EXPECT_LT(wanted_radius_20, 8192u);
     EXPECT_LT(wanted_player_core, 4096u);
+}
+
+// ---------------------------------------------------------------------------
+// T-I3-10 terrain shaping gates
+// ---------------------------------------------------------------------------
+
+namespace {
+
+constexpr std::uint64_t kFnvOffsetBasis = 14695981039346656037ull;
+constexpr std::uint64_t kFnvPrime = 1099511628211ull;
+
+std::uint64_t Fnv1a64Bytes(std::uint64_t hash, const void* data, std::size_t size) {
+    const auto* bytes = static_cast<const unsigned char*>(data);
+    for (std::size_t i = 0; i < size; ++i) {
+        hash ^= static_cast<std::uint64_t>(bytes[i]);
+        hash *= kFnvPrime;
+    }
+    return hash;
+}
+
+// FNV-1a-64 over the raw float bytes of GetTerrainHeightAt sampled on a fixed
+// 64x64 grid (step 16.25 m so fractional world coordinates are exercised).
+std::uint64_t HashTerrainHeightGrid(const SHIELD_WorldSystem& world) {
+    std::uint64_t hash = kFnvOffsetBasis;
+    for (int j = 0; j < 64; ++j) {
+        for (int i = 0; i < 64; ++i) {
+            const float x = -512.0f + static_cast<float>(i) * 16.25f;
+            const float z = -512.0f + static_cast<float>(j) * 16.25f;
+            const float height = world.GetTerrainHeightAt(x, z);
+            hash = Fnv1a64Bytes(hash, &height, sizeof(height));
+        }
+    }
+    return hash;
+}
+
+struct LegacyPresetHeightFixture {
+    const char* name;
+    TerrainGenParams params;
+    std::uint64_t expected_hash;
+};
+
+// Frozen copies of the five shipped presets' terrain params as of the commit
+// BEFORE T-I3-10 (shaping defaults off). These fixtures deliberately do NOT
+// load the preset JSON files: shipped presets may later opt into shaping
+// (T-I3-11), but legacy params must keep producing bit-identical heights
+// forever. The expected hashes were captured by running this exact grid hash
+// against the pre-shaping GetTerrainHeightAt implementation.
+std::vector<LegacyPresetHeightFixture> LegacyPresetHeightFixtures() {
+    std::vector<LegacyPresetHeightFixture> fixtures;
+
+    TerrainGenParams default_params;
+    default_params.base_frequency = 0.01f;
+    default_params.base_amplitude = 12.0f;
+    default_params.octaves = 4;
+    default_params.persistence = 0.5f;
+    default_params.lacunarity = 2.0f;
+    default_params.height_offset = 20.0f;
+    default_params.caves_enabled = true;
+    default_params.cave_frequency = 0.02f;
+    fixtures.push_back({"default", default_params, 0xe585505dedeba6c9ull});
+
+    TerrainGenParams flat_params;
+    flat_params.base_frequency = 0.02f;
+    flat_params.base_amplitude = 10.0f;
+    flat_params.octaves = 2;
+    flat_params.persistence = 0.3f;
+    flat_params.lacunarity = 2.0f;
+    flat_params.height_offset = 5.0f;
+    flat_params.caves_enabled = false;
+    flat_params.cave_frequency = 0.0f;
+    fixtures.push_back({"flat_lands", flat_params, 0x5f0afd93c41d6b51ull});
+
+    TerrainGenParams mountains_params;
+    mountains_params.base_frequency = 0.008f;
+    mountains_params.base_amplitude = 120.0f;
+    mountains_params.octaves = 6;
+    mountains_params.persistence = 0.65f;
+    mountains_params.lacunarity = 2.2f;
+    mountains_params.height_offset = 20.0f;
+    mountains_params.caves_enabled = true;
+    mountains_params.cave_frequency = 0.03f;
+    fixtures.push_back({"mountains", mountains_params, 0xc7d4205d48faabb7ull});
+
+    TerrainGenParams archipelago_params;
+    archipelago_params.base_frequency = 0.009f;
+    archipelago_params.base_amplitude = 110.0f;
+    archipelago_params.octaves = 6;
+    archipelago_params.persistence = 0.55f;
+    archipelago_params.lacunarity = 2.2f;
+    archipelago_params.height_offset = -20.0f;
+    archipelago_params.island_mask_enabled = true;
+    archipelago_params.island_mask_frequency = 0.004f;
+    archipelago_params.caves_enabled = true;
+    archipelago_params.cave_frequency = 0.03f;
+    fixtures.push_back({"archipelago", archipelago_params, 0xc075cf55c182393cull});
+
+    TerrainGenParams forest_params;
+    forest_params.base_frequency = 0.008f;
+    forest_params.base_amplitude = 50.0f;
+    forest_params.octaves = 6;
+    forest_params.persistence = 0.5f;
+    forest_params.lacunarity = 2.1f;
+    forest_params.height_offset = 32.0f;
+    forest_params.caves_enabled = true;
+    forest_params.cave_frequency = 0.025f;
+    fixtures.push_back({"temperate_forest", forest_params, 0xb9b8b2f79e44b42dull});
+
+    return fixtures;
+}
+
+} // namespace
+
+// T-I3-10 zero-hash-drift proof: legacy params (shaping_enabled == false, the
+// default) must produce heights bit-identical to the pre-shaping
+// implementation. Hashes captured pre-change; any drift here is a
+// review-blocking defect, never a re-bless.
+TEST(WorldGenLayerSnapshotTest, LegacyPresetHeightsAreBitIdenticalToPreShaping) {
+    for (const LegacyPresetHeightFixture& fixture : LegacyPresetHeightFixtures()) {
+        SHIELD_WorldSystem world(nullptr, nullptr, fixture.params, kSeed);
+        const std::uint64_t hash = HashTerrainHeightGrid(world);
+        std::cout << "[ LEGACYHEIGHT ] " << fixture.name << " seed=" << kSeed
+                  << " hash=0x" << std::hex << std::setfill('0') << std::setw(16) << hash
+                  << std::dec << std::setfill(' ') << std::endl;
+        EXPECT_EQ(hash, fixture.expected_hash)
+            << fixture.name << ": legacy (shaping-off) terrain heights drifted from the "
+            << "pre-shaping implementation - this is a hard determinism break";
+    }
+}
+
+namespace {
+
+// Synthetic shaping params for the T-I3-10 parity/determinism gates (engine
+// tests must not depend on game preset data choices).
+TerrainGenParams ShapingTestParams() {
+    TerrainGenParams params;
+    params.base_frequency = 0.008f;
+    params.base_amplitude = 60.0f;
+    params.octaves = 5;
+    params.persistence = 0.55f;
+    params.lacunarity = 2.1f;
+    params.height_offset = 12.0f;
+    params.caves_enabled = true;
+    params.cave_frequency = 0.03f;
+    params.shaping_enabled = true;
+    params.continentalness_frequency = 0.0008f;
+    params.erosion_frequency = 0.0015f;
+    params.peaks_frequency = 0.004f;
+    params.peaks_amplitude = 90.0f;
+    params.domain_warp_amplitude = 30.0f;
+    params.domain_warp_frequency = 0.006f;
+    params.continental_spline = {{-1.0f, -40.0f}, {-0.3f, -12.0f}, {-0.1f, 2.0f}, {0.3f, 14.0f}, {1.0f, 42.0f}};
+    params.erosion_spline = {{-1.0f, 1.0f}, {0.0f, 0.55f}, {0.6f, 0.18f}, {1.0f, 0.05f}};
+    params.peaks_spline = {{-1.0f, 0.0f}, {0.4f, 0.05f}, {0.8f, 0.45f}, {1.0f, 1.0f}};
+    return params;
+}
+
+} // namespace
+
+// T-I3-10 batch-vs-scalar parity: with shaping enabled, every generation path
+// computes heights through the one shared scalar helper (GenSingle* APIs in
+// both the scalar and batch paths), so the batch heightmap bytes must be
+// EXACTLY equal (==, no epsilon) to GetTerrainHeightAt at the same world
+// coordinates - for the full-SDF path, the step>1 heightmap-only path, and
+// SampleWorldGenLayers. FastNoise SIMD grid batches (GenUniformGrid2D) are
+// deliberately NOT used for shaped heights precisely so no SIMD-lane epsilon
+// is needed here; the legacy (shaping-off) grid batches stay covered by the
+// existing max_sdf_sample_error < 1e-4 snapshot gate.
+TEST(WorldGenLayerSnapshotTest, ShapedHeightBatchPathsExactlyMatchScalarPath) {
+    const TerrainGenParams params = ShapingTestParams();
+    SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
+
+    const std::array<IVec3, 4> chunk_coords{{
+        IVec3(0, 0, 0), IVec3(-3, 1, 2), IVec3(7, -1, -5), IVec3(-11, 0, 9),
+    }};
+    for (const IVec3& coords : chunk_coords) {
+        const IVec3 base_pos = coords * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+
+        Chunk full_chunk(coords);
+        world.GenerateChunkData(full_chunk, 1);
+        Chunk coarse_chunk(coords);
+        world.GenerateChunkData(coarse_chunk, 4);
+        ASSERT_TRUE(coarse_chunk.sdf_data.empty());
+
+        for (int z = 0; z <= CHUNK_SIZE_Z; ++z) {
+            for (int x = 0; x <= CHUNK_SIZE_X; ++x) {
+                const float world_x = static_cast<float>(base_pos.x + x);
+                const float world_z = static_cast<float>(base_pos.z + z);
+                const float scalar_height = world.GetTerrainHeightAt(world_x, world_z);
+                const std::size_t index = static_cast<std::size_t>(x)
+                    + static_cast<std::size_t>(z) * (CHUNK_SIZE_X + 1);
+
+                EXPECT_EQ(full_chunk.heightmap_data[index], scalar_height)
+                    << "full-path heightmap diverged from scalar at (" << world_x << ", " << world_z << ")";
+                EXPECT_EQ(coarse_chunk.heightmap_data[index], scalar_height)
+                    << "step>1 heightmap diverged from scalar at (" << world_x << ", " << world_z << ")";
+
+                const WorldGenLayerSample sample =
+                    world.SampleWorldGenLayers(Vec3(world_x, 0.0f, world_z));
+                EXPECT_EQ(sample.final_height, scalar_height)
+                    << "SampleWorldGenLayers diverged from scalar at (" << world_x << ", " << world_z << ")";
+            }
+        }
+    }
+}
+
+// T-I3-10: generation with shaping ON stays deterministic for a fixed seed
+// (two independent systems produce byte-identical SDF + heightmap), and a
+// different seed produces different terrain (the control channels actually
+// consume the seed offsets).
+TEST(WorldGenLayerSnapshotTest, ShapedGenerationIsDeterministicWithSameSeed) {
+    const TerrainGenParams params = ShapingTestParams();
+    SHIELD_WorldSystem world_a(nullptr, nullptr, params, kSeed);
+    SHIELD_WorldSystem world_b(nullptr, nullptr, params, kSeed);
+    SHIELD_WorldSystem world_c(nullptr, nullptr, params, kSeed + 1);
+
+    Chunk chunk_a(kChunkCoords);
+    Chunk chunk_b(kChunkCoords);
+    Chunk chunk_c(kChunkCoords);
+    world_a.GenerateChunkData(chunk_a);
+    world_b.GenerateChunkData(chunk_b);
+    world_c.GenerateChunkData(chunk_c);
+
+    EXPECT_EQ(chunk_a.sdf_data, chunk_b.sdf_data);
+    EXPECT_EQ(chunk_a.heightmap_data, chunk_b.heightmap_data);
+    EXPECT_NE(chunk_a.heightmap_data, chunk_c.heightmap_data);
+
+    // The shaped-height snapshot keeps the sample-path consistency gate green
+    // with shaping ON (cave noise is still grid-batched, hence the 1e-4
+    // tolerance rather than exact equality for full SDF samples).
+    const LayerSnapshot shaped_snapshot = GenerateSnapshot("06_shaping", params, 1, false);
+    EXPECT_GT(shaped_snapshot.sdf.solid_samples, 0u);
+    EXPECT_GT(shaped_snapshot.sdf.air_samples, 0u);
+    EXPECT_LT(shaped_snapshot.sampled_layers.max_sdf_sample_error, 1.0e-4f);
+}
+
+// ---------------------------------------------------------------------------
+// T-I3-11 slope-histogram atlas gate.
+//
+// Decision (T-I3-11): the slope gate is folded into the worldgen atlas ctest
+// (this file / worldgen_layer_snapshot_test target) rather than wired as a new
+// validator mode - it is a pure deterministic function of preset params + the
+// fixed kSeed, needs no client executable, and therefore runs on every full
+// ctest invocation. The validator scripts stay untouched (append-only rule
+// respected by not appending what a ctest already gates).
+//
+// Per preset: heights sampled on a deterministic 256x256 grid at 4 m spacing
+// (centered on the origin) via GetTerrainHeightAt; slope = atan(|grad h|) from
+// central differences (8 m baseline). Assertions encode the ultimate-plan
+// walkability budget - the measurable form of the owner complaint "lots of
+// really jagged mountains, no normal land".
+// ---------------------------------------------------------------------------
+
+namespace {
+
+constexpr int kSlopeGridSize = 256;
+constexpr float kSlopeSampleSpacing = 4.0f;
+
+struct SlopeHistogramMetrics {
+    std::string preset;
+    std::size_t samples = 0;
+    // Slope percentiles/fractions (degrees).
+    float slope_p50 = 0.0f;
+    float slope_p95 = 0.0f;
+    double flat_fraction = 0.0;        // slope < 15 deg
+    double normal_slope_fraction = 0.0; // slope < 20 deg
+    double walkable_fraction = 0.0;    // slope < 25 deg
+    double steep_fraction = 0.0;       // slope > 35 deg
+    double cliff_fraction = 0.0;       // slope > 60 deg
+    // Normal land: walkable-ish slope at habitable height (owner complaint).
+    double normal_land_fraction = 0.0; // slope < 20 deg AND height in [sea+2, sea+40]
+    // Height distribution (relief spectrum).
+    float height_p10 = 0.0f;
+    float height_p50 = 0.0f;
+    float height_p95 = 0.0f;
+    // 5-degree slope histogram bins [0,5), [5,10), ... [85,90].
+    std::array<std::size_t, 18> slope_bins{};
+};
+
+float PercentileOfSorted(const std::vector<float>& sorted, double percentile) {
+    if (sorted.empty()) {
+        return 0.0f;
+    }
+    const double rank = percentile * static_cast<double>(sorted.size() - 1);
+    const std::size_t low = static_cast<std::size_t>(rank);
+    const std::size_t high = std::min(low + 1, sorted.size() - 1);
+    const float t = static_cast<float>(rank - static_cast<double>(low));
+    return sorted[low] + t * (sorted[high] - sorted[low]);
+}
+
+SlopeHistogramMetrics ComputeSlopeHistogram(const std::string& preset_name,
+                                            const SHIELD_WorldSystem& world) {
+    SlopeHistogramMetrics metrics;
+    metrics.preset = preset_name;
+
+    // Heights on a (grid + 2)-wide lattice so every interior sample has
+    // central-difference neighbors.
+    constexpr int lattice = kSlopeGridSize + 2;
+    const float origin = -0.5f * kSlopeGridSize * kSlopeSampleSpacing - kSlopeSampleSpacing;
+    std::vector<float> heights(static_cast<std::size_t>(lattice) * lattice);
+    for (int j = 0; j < lattice; ++j) {
+        for (int i = 0; i < lattice; ++i) {
+            const float x = origin + static_cast<float>(i) * kSlopeSampleSpacing;
+            const float z = origin + static_cast<float>(j) * kSlopeSampleSpacing;
+            heights[static_cast<std::size_t>(i) + static_cast<std::size_t>(j) * lattice] =
+                world.GetTerrainHeightAt(x, z);
+        }
+    }
+
+    std::vector<float> slopes;
+    std::vector<float> sample_heights;
+    slopes.reserve(static_cast<std::size_t>(kSlopeGridSize) * kSlopeGridSize);
+    sample_heights.reserve(slopes.capacity());
+
+    std::size_t flat = 0, normal_slope = 0, walkable = 0, steep = 0, cliff = 0, normal_land = 0;
+    for (int j = 1; j <= kSlopeGridSize; ++j) {
+        for (int i = 1; i <= kSlopeGridSize; ++i) {
+            const auto at = [&](int ii, int jj) {
+                return heights[static_cast<std::size_t>(ii) + static_cast<std::size_t>(jj) * lattice];
+            };
+            const float h = at(i, j);
+            const float dh_dx = (at(i + 1, j) - at(i - 1, j)) / (2.0f * kSlopeSampleSpacing);
+            const float dh_dz = (at(i, j + 1) - at(i, j - 1)) / (2.0f * kSlopeSampleSpacing);
+            const float gradient = std::sqrt(dh_dx * dh_dx + dh_dz * dh_dz);
+            const float slope_deg = glm::degrees(std::atan(gradient));
+
+            slopes.push_back(slope_deg);
+            sample_heights.push_back(h);
+            const std::size_t bin = std::min<std::size_t>(
+                static_cast<std::size_t>(slope_deg / 5.0f), metrics.slope_bins.size() - 1);
+            ++metrics.slope_bins[bin];
+
+            if (slope_deg < 15.0f) ++flat;
+            if (slope_deg < 20.0f) ++normal_slope;
+            if (slope_deg < 25.0f) ++walkable;
+            if (slope_deg > 35.0f) ++steep;
+            if (slope_deg > 60.0f) ++cliff;
+            if (slope_deg < 20.0f && h >= SEA_LEVEL + 2.0f && h <= SEA_LEVEL + 40.0f) {
+                ++normal_land;
+            }
+        }
+    }
+
+    metrics.samples = slopes.size();
+    const double count = static_cast<double>(metrics.samples);
+    metrics.flat_fraction = flat / count;
+    metrics.normal_slope_fraction = normal_slope / count;
+    metrics.walkable_fraction = walkable / count;
+    metrics.steep_fraction = steep / count;
+    metrics.cliff_fraction = cliff / count;
+    metrics.normal_land_fraction = normal_land / count;
+
+    std::sort(slopes.begin(), slopes.end());
+    std::sort(sample_heights.begin(), sample_heights.end());
+    metrics.slope_p50 = PercentileOfSorted(slopes, 0.50);
+    metrics.slope_p95 = PercentileOfSorted(slopes, 0.95);
+    metrics.height_p10 = PercentileOfSorted(sample_heights, 0.10);
+    metrics.height_p50 = PercentileOfSorted(sample_heights, 0.50);
+    metrics.height_p95 = PercentileOfSorted(sample_heights, 0.95);
+    return metrics;
+}
+
+void WriteSlopeHistogramJson(const fs::path& path, const std::vector<SlopeHistogramMetrics>& rows) {
+    std::ofstream output(path);
+    ASSERT_TRUE(output) << path.string();
+    output << "{\n";
+    output << "  \"schema\": \"luminumbra.worldgen_slope_histograms.v1\",\n";
+    output << "  \"seed\": " << kSeed << ",\n";
+    output << "  \"grid\": {\"size\": " << kSlopeGridSize << ", \"spacing_m\": "
+           << JsonNumber(kSlopeSampleSpacing) << "},\n";
+    output << "  \"presets\": [\n";
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        const SlopeHistogramMetrics& row = rows[i];
+        output << "    {\"preset\": \"" << row.preset << "\", ";
+        output << "\"samples\": " << row.samples << ", ";
+        output << "\"slope_p50_deg\": " << JsonNumber(row.slope_p50) << ", ";
+        output << "\"slope_p95_deg\": " << JsonNumber(row.slope_p95) << ", ";
+        output << "\"flat_fraction_lt15\": " << JsonNumber(row.flat_fraction) << ", ";
+        output << "\"normal_slope_fraction_lt20\": " << JsonNumber(row.normal_slope_fraction) << ", ";
+        output << "\"walkable_fraction_lt25\": " << JsonNumber(row.walkable_fraction) << ", ";
+        output << "\"steep_fraction_gt35\": " << JsonNumber(row.steep_fraction) << ", ";
+        output << "\"cliff_fraction_gt60\": " << JsonNumber(row.cliff_fraction) << ", ";
+        output << "\"normal_land_fraction\": " << JsonNumber(row.normal_land_fraction) << ", ";
+        output << "\"height_p10\": " << JsonNumber(row.height_p10) << ", ";
+        output << "\"height_p50\": " << JsonNumber(row.height_p50) << ", ";
+        output << "\"height_p95\": " << JsonNumber(row.height_p95) << ", ";
+        output << "\"slope_bins_5deg\": [";
+        for (std::size_t bin = 0; bin < row.slope_bins.size(); ++bin) {
+            output << row.slope_bins[bin] << (bin + 1u == row.slope_bins.size() ? "" : ", ");
+        }
+        output << "]}" << (i + 1u == rows.size() ? "\n" : ",\n");
+    }
+    output << "  ]\n";
+    output << "}\n";
+}
+
+void PrintSlopeHistogram(const SlopeHistogramMetrics& m) {
+    std::cout << "[ SLOPEHIST ] " << m.preset
+              << " p50=" << m.slope_p50 << "deg p95=" << m.slope_p95
+              << "deg flat<15=" << m.flat_fraction
+              << " walkable<25=" << m.walkable_fraction
+              << " steep>35=" << m.steep_fraction
+              << " cliff>60=" << m.cliff_fraction
+              << " normal_land=" << m.normal_land_fraction
+              << " height_p10/p50/p95=" << m.height_p10 << "/" << m.height_p50
+              << "/" << m.height_p95 << std::endl;
+}
+
+} // namespace
+
+TEST(WorldGenLayerSnapshotTest, AuthoredPresetSlopeHistogramsMeetWalkabilityGates) {
+    const fs::path atlas_root = ArtifactRoot() / "atlas";
+    fs::create_directories(atlas_root);
+
+    const fs::path preset_root = SourceRoot() / "worlds/atlas/presets";
+    ASSERT_TRUE(fs::exists(preset_root)) << preset_root.string();
+
+    std::vector<SlopeHistogramMetrics> rows;
+    for (const fs::directory_entry& entry : fs::directory_iterator(preset_root)) {
+        if (!entry.is_regular_file() || entry.path().extension() != ".json") {
+            continue;
+        }
+        const std::string preset_name = entry.path().stem().string();
+        const TerrainGenParams params = LoadPresetParams(entry.path());
+        SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
+        SlopeHistogramMetrics metrics = ComputeSlopeHistogram(preset_name, world);
+        PrintSlopeHistogram(metrics);
+        rows.push_back(std::move(metrics));
+    }
+    ASSERT_GE(rows.size(), 5u);
+    WriteSlopeHistogramJson(atlas_root / "worldgen_slope_histograms.json", rows);
+
+    const auto find_preset = [&rows](const char* name) -> const SlopeHistogramMetrics& {
+        for (const SlopeHistogramMetrics& row : rows) {
+            if (row.preset == name) {
+                return row;
+            }
+        }
+        ADD_FAILURE() << "missing preset " << name;
+        static const SlopeHistogramMetrics empty;
+        return empty;
+    };
+
+    // Flat preset: gentle rolling hills everywhere.
+    const SlopeHistogramMetrics& flat_lands = find_preset("flat_lands");
+    EXPECT_LT(flat_lands.slope_p95, 15.0f) << "flat_lands p95 slope";
+
+    // Default: a majority-walkable overworld.
+    const SlopeHistogramMetrics& default_preset = find_preset("default");
+    EXPECT_GT(default_preset.walkable_fraction, 0.60) << "default walkable(<25deg) fraction";
+
+    // Shaped mountains (T-I3-11): dramatic peaks BUT walkable valleys and
+    // plateaus - the measurable encoding of "lots of really jagged mountains,
+    // no normal land".
+    const SlopeHistogramMetrics& mountains = find_preset("mountains");
+    EXPECT_LT(mountains.cliff_fraction, 0.08) << "mountains cliff(>60deg) fraction";
+    EXPECT_GT(mountains.normal_land_fraction, 0.25)
+        << "mountains normal-land fraction (slope<20deg AND height in [sea+2, sea+40])";
+    // Relief-spectrum bimodality: the slope mass must include BOTH flat land
+    // and real mountains, not a uniform mid-slope scramble...
+    EXPECT_GT(mountains.flat_fraction, 0.20) << "mountains flat(<15deg) mass";
+    EXPECT_GT(mountains.steep_fraction, 0.05) << "mountains steep(>35deg) mass";
+    // ...and the height distribution must be plains-mode-heavy with a long
+    // peak tail (panel-1 bimodality approximation: the p10->p50 height span
+    // stays under 35% of the p10->p95 relief span).
+    EXPECT_LT(mountains.height_p50 - mountains.height_p10,
+              0.35f * (mountains.height_p95 - mountains.height_p10))
+        << "mountains relief spectrum is not bimodal (no plains mode)";
 }
 
 TEST(WorldGenLayerSnapshotTest, AuthoredPresetAtlasHasSaneSpawnAndCleanTopology) {
