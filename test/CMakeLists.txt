@@ -259,7 +259,7 @@ else()
     target_link_libraries(runtime_world_visual_validation_test PRIVATE OpenGL::GL)
 endif()
 
-# Frontier gate fixtures: the lua-api-manifest and aetheric-diffusion gates
+# Frontier gate fixtures: the lua-api-manifest and scalar-field-diffusion gates
 # assert at static initialization, the instinct and loopback gates are called
 # from the gtest cases in network_state_hash_gate_test.cpp.
 add_executable(frontier_gates_test
@@ -268,7 +268,7 @@ add_executable(frontier_gates_test
     ai/instinct_planner_gate_test.cpp
     ai/instinct_system_test.cpp
     scripting/lua_api_manifest_gate_test.cpp
-    aetheric/aetheric_field_diffusion_gate_test.cpp
+    fields/scalar_field_diffusion_gate_test.cpp
     persistence/world_save_service_test.cpp
     persistence/world_save_region_format_test.cpp
 )
