@@ -23,7 +23,10 @@ const float SPEED = 2.5f;
 const float SENSITIVITY = 0.1f;
 const float ZOOM = 45.0f;
 const float NEAR_PLANE = 0.1f;
-const float FAR_PLANE = 1000.0f;
+// Must exceed the far-LOD F2 outer edge (1536 m) plus diagonal margin:
+// far-region triangles straddling the projection far plane rasterize as
+// sky-crossing sliver streaks (T-I4-DR-horizon-sliver root cause).
+const float FAR_PLANE = 1800.0f;
 
 // An abstract camera class that processes input and calculates the corresponding Euler Angles, Vectors and Matrices for use in OpenGL
 class Camera

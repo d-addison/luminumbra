@@ -1900,9 +1900,21 @@ int main(int argc, char* argv[]) {
                     const double effective_seconds = std::max(0.0, elapsed_play_seconds - warmup_seconds);
                     const double progress = std::clamp(
                         effective_seconds / std::max(1.0, duration - warmup_seconds), 0.0, 0.999);
-                    const std::size_t station_index = std::min(
+                    const std::size_t wall_clock_index = std::min(
                         player_view_stations.size() - 1u,
                         static_cast<std::size_t>(progress * static_cast<double>(player_view_stations.size())));
+                    // Hitch tolerance (mirrors the capture branch): hold the
+                    // camera on the first un-captured station so a passed-over
+                    // station is framed when its catch-up capture fires.
+                    std::size_t first_unwritten = 0;
+                    while (first_unwritten < player_view_captures_written.size() &&
+                           player_view_captures_written[first_unwritten]) {
+                        ++first_unwritten;
+                    }
+                    const std::size_t station_index =
+                        first_unwritten >= player_view_stations.size()
+                            ? wall_clock_index
+                            : std::min(wall_clock_index, first_unwritten);
                     ApplyPlayerViewCamera(gameSession.get(), g_camera.get(), player_view_stations[station_index]);
                 } else if (scenario_config.farlod_horizon_smoke() && scenario_ready && g_camera) {
                     // T-I3-9: phase A holds station 0 with far-LOD disabled
@@ -2405,11 +2417,28 @@ int main(int argc, char* argv[]) {
                             const double progress = std::clamp(
                                 effective_seconds / std::max(1.0, duration - warmup_seconds), 0.0, 0.999);
                             const std::size_t station_count = player_view_stations.size();
-                            const std::size_t station_index = std::min(
+                            const std::size_t wall_clock_index = std::min(
                                 station_count - 1u,
                                 static_cast<std::size_t>(progress * static_cast<double>(station_count)));
+                            // Hitch tolerance: the sweep may not advance past the
+                            // first un-captured station — a frame hitch that jumps
+                            // a whole window otherwise orphans that station's
+                            // capture (observed: yaw_030 skipped on heavier
+                            // generation). A passed-over station captures
+                            // immediately (progress treated as 1.0 = max settle).
+                            std::size_t first_unwritten = 0;
+                            while (first_unwritten < player_view_captures_written.size() &&
+                                   player_view_captures_written[first_unwritten]) {
+                                ++first_unwritten;
+                            }
+                            const std::size_t station_index =
+                                first_unwritten >= station_count
+                                    ? wall_clock_index
+                                    : std::min(wall_clock_index, first_unwritten);
                             const double station_progress =
-                                progress * static_cast<double>(station_count) - static_cast<double>(station_index);
+                                wall_clock_index > station_index
+                                    ? 1.0
+                                    : progress * static_cast<double>(station_count) - static_cast<double>(station_index);
                             if (!player_view_captures_written[station_index] && station_progress >= 0.7) {
                                 int screenshot_width = 0;
                                 int screenshot_height = 0;
