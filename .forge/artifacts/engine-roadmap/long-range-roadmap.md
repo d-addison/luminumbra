@@ -80,6 +80,17 @@ wants instanced draws) and creature planner (ecology wants stimuli).
 3. **Seasons + celestial model (engine)**: long-period time scale driving
    sun path, day length, biome material/foliage palettes; time-of-day
    sweep gates extend to season sweep gates.
+   **Owner-mandated additions (2026-06-11)**: (a) physically-based
+   atmospheric scattering sky (Bruneton/Hillaire precompute) replacing the
+   authored gradient — sunrise/sunset palettes (pinks/purples/oranges)
+   emerge from Rayleigh/Mie at low sun angles and drive sky + sun + ambient
+   + fog coherently; TimeOfDaySweep gains dawn/dusk hue-band assertions.
+   (b) Cloud layer TIER 1: wind-advected 2.5D coverage clouds
+   (weather/biome-aware) with REAL cast shadows — cloud-shadow projection
+   modulating sunlight in the lighting pass (crawling terrain shadows);
+   fluffy imposter/sky visuals at landscape distance. TIER 2 (iteration 6,
+   unchanged): full Nubis-style volumetric raymarch upgrade sharing
+   SHIELD-RT infrastructure.
 4. **Instanced foliage with wind response (engine path, game assets)**:
    grass/canopy instancing budgeted via PerfRegression; vertex-level wind
    displacement sampling the wind grid; pairs with biome vegetation maps.
