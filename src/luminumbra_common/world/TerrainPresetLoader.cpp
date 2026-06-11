@@ -90,8 +90,20 @@ void ParseBiomesBlock(const nlohmann::json& gen_params,
     biomes.present = true;
     biomes.temperature_frequency = block.value("temperature_frequency", biomes.temperature_frequency);
     biomes.humidity_frequency = block.value("humidity_frequency", biomes.humidity_frequency);
+    biomes.table = block.value("table", std::string{});
+    biomes.enabled = !biomes.table.empty();
+    if (biomes.enabled) {
+        // The table path is relative to the data/ root. Presets live at
+        // <root>/worlds/atlas/presets/<name>.json, so the data root is four
+        // parents up from the preset file. Resolve to an absolute path here so
+        // the world system never needs the runtime root.
+        std::error_code ec;
+        const std::filesystem::path preset_dir = std::filesystem::absolute(preset_path, ec).parent_path();
+        const std::filesystem::path data_root = preset_dir.parent_path().parent_path().parent_path() / "data";
+        biomes.resolved_table_path = (data_root / biomes.table).lexically_normal().string();
+    }
     WarnUnknownKeys(block, "generation_params.biomes",
-                    {"temperature_frequency", "humidity_frequency"},
+                    {"temperature_frequency", "humidity_frequency", "table"},
                     preset_path, warnings);
 }
 
@@ -238,8 +250,17 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
         params.peaks_spline = shaping.peaks_spline;
     }
 
-    // Remaining forthcoming blocks: parsed and stored, not yet consumed.
+    // Biomes block: parsed into extras AND consumed when it opts in via a
+    // table. With no table the consumed params keep biomes_enabled=false ->
+    // byte-zero drift from the pre-biome implementation.
     ParseBiomesBlock(gen_params, result.extras.biomes, preset_path, result.warnings);
+    if (result.extras.biomes.present && result.extras.biomes.enabled) {
+        const TerrainBiomesPreset& biomes = result.extras.biomes;
+        params.biomes_enabled = true;
+        params.biome_table_path = biomes.resolved_table_path;
+        params.temperature_frequency = biomes.temperature_frequency;
+        params.humidity_frequency = biomes.humidity_frequency;
+    }
     result.extras.features.present = true;
     result.extras.features.rivers_enabled = features.value("rivers_enabled", false);
     result.extras.features.structures_enabled = features.value("structures_enabled", false);
