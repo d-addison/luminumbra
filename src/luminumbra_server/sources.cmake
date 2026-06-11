@@ -4,4 +4,5 @@
 # ServerHeadlessHygiene ctest and the HeadlessServerTick validator mode).
 set(SERVER_APP_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/main_server.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/ServerWorldRunner.cpp"
 )
