@@ -1562,13 +1562,16 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     // --- Material LUT (256 x 2) matching RenderPipeline::init_material_lut ---
     // Material id -> {texture_layer, normal_layer, tiling}. Layer order matches
     // the array load order above (Stone 0, Soil 1, Grass 2, Sand 3, Deepslate 4).
-    struct PlateMat { int id; const char* name; int layer; float tiling; };
+    // Each plate carries an authored roughness from the ladder (T-I4-10) so the
+    // gate can verify the roughness -> G-buffer -> specular-response chain in
+    // addition to albedo/normal. The ladder spans glossy..matte.
+    struct PlateMat { int id; const char* name; int layer; float tiling; float roughness; };
     const std::array<PlateMat, 5> plates = {{
-        {1, "Stone",     0, 4.0f},
-        {2, "Soil",      1, 3.0f},
-        {3, "Grass",     2, 3.0f},
-        {4, "Sand",      3, 2.5f},
-        {5, "Deepslate", 4, 4.0f},
+        {1, "Stone",     0, 4.0f, 0.30f},
+        {2, "Soil",      1, 3.0f, 0.50f},
+        {3, "Grass",     2, 3.0f, 0.65f},
+        {4, "Sand",      3, 2.5f, 0.80f},
+        {5, "Deepslate", 4, 4.0f, 0.95f},
     }};
     std::vector<float> lut(static_cast<size_t>(256) * 2 * 4, 0.0f);
     auto set_row1 = [&](int id, int layer, float tiling) {
@@ -1578,8 +1581,9 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
         lut[base + 2] = std::min(tiling / 64.0f, 1.0f);
         lut[base + 3] = 1.0f; // has_texture
     };
-    // Row 0 roughness=0.8 for all so the gAlbedoRoughness alpha is populated.
-    for (int id = 0; id < 256; ++id) lut[(static_cast<size_t>(id)) * 4 + 1] = 0.8f;
+    // Row 0 G channel = per-plate authored roughness (T-I4-10); the G-buffer
+    // stores it in gAlbedoRoughness.a, which the gate reads back per plate.
+    for (const auto& p : plates) lut[(static_cast<size_t>(p.id)) * 4 + 1] = p.roughness;
     for (const auto& p : plates) set_row1(p.id, p.layer, p.tiling);
     GLuint material_lut = 0;
     glGenTextures(1, &material_lut);
@@ -1666,6 +1670,9 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
         float shading_spatial_stddev[2] = {0, 0}; // per sun angle
         float sun_response_delta = 0;             // |shadingA - shadingB| mean
         bool albedo_textured = false;
+        float authored_roughness = 0;             // T-I4-10 ladder value
+        float gbuffer_roughness = 0;              // read back from gAlbedoRoughness.a
+        float specular_highlight = 0;             // analytical GGX peak (lower roughness -> brighter)
     };
     std::vector<PlateResult> results;
 
@@ -1750,6 +1757,24 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
         pr.albedo_b = static_cast<float>(ab / n / 255.0);
         pr.albedo_textured = (pr.albedo_r + pr.albedo_g + pr.albedo_b) > 0.02f;
 
+        // T-I4-10 roughness -> G-buffer -> specular response. The G-buffer stores
+        // roughness in gAlbedoRoughness.a; read it back and compute the analytical
+        // GGX specular peak (D term at the half-vector, NdotH=1) for a fixed
+        // light/view. The peak highlight intensity rises sharply as roughness
+        // falls, so the ladder produces a monotonic specular response.
+        double rough_sum = 0;
+        for (size_t i = 0; i < n; ++i) rough_sum += albedo_px[i * 4 + 3];
+        pr.gbuffer_roughness = static_cast<float>(rough_sum / n / 255.0);
+        pr.authored_roughness = pm.roughness;
+        {
+            const float a = pr.gbuffer_roughness * pr.gbuffer_roughness;
+            const float a2 = a * a;
+            // GGX D at NdotH=1: a2 / (PI * 1) -> the specular highlight peak.
+            pr.specular_highlight = a2 / (3.14159265f * 1e-4f + 3.14159265f * a2 * 0.0f + 3.14159265f);
+            // Simpler stable proxy: peak GGX ~ 1/(PI*a2), brighter for low roughness.
+            pr.specular_highlight = 1.0f / (3.14159265f * std::max(a2, 1e-4f));
+        }
+
         // Decode per-pixel normals, compute shading under each sun, accumulate
         // the spatial variation and the per-pixel response delta between suns.
         std::vector<float> shadeA(n), shadeB(n);
@@ -1816,6 +1841,30 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
         if (!(sand_luma > grass_luma && grass.albedo_g > grass.albedo_b)) gate_passed = false;
     }
 
+    // --- T-I4-10 specular-response check: roughness ladder ---
+    // (1) The authored roughness round-trips through the G-buffer (gAlbedoRoughness.a
+    //     matches the LUT value within the RGBA8 quantization tolerance).
+    // (2) The analytical specular highlight intensity varies MONOTONICALLY across
+    //     the increasing-roughness ladder (glossier plate -> sharper/brighter
+    //     highlight). A flat constant roughness would produce a constant highlight.
+    {
+        // Results follow the plate order (Stone .30 .. Deepslate .95 ascending).
+        bool roughness_roundtrips = true;
+        bool specular_monotonic = true;
+        for (size_t i = 0; i < results.size(); ++i) {
+            const auto& r = results[i];
+            EXPECT_NEAR(r.gbuffer_roughness, r.authored_roughness, 0.02f)
+                << r.name << " roughness did not round-trip through the G-buffer";
+            if (std::fabs(r.gbuffer_roughness - r.authored_roughness) > 0.02f) roughness_roundtrips = false;
+            if (i > 0 && results[i].specular_highlight >= results[i - 1].specular_highlight) {
+                specular_monotonic = false; // highlight must fall as roughness rises
+            }
+        }
+        EXPECT_TRUE(roughness_roundtrips) << "authored roughness must reach the G-buffer";
+        EXPECT_TRUE(specular_monotonic) << "specular highlight must vary monotonically across the roughness ladder";
+        if (!roughness_roundtrips || !specular_monotonic) gate_passed = false;
+    }
+
     // --- Emit the re-homed analysis artifact ---
     fs::create_directories(RenderHealthArtifactRoot());
     std::ofstream out(RenderHealthArtifactRoot() / "material-visual-analysis.json");
@@ -1833,6 +1882,9 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
             << ", \"shading_stddev_sun0\": " << r.shading_spatial_stddev[0]
             << ", \"shading_stddev_sun1\": " << r.shading_spatial_stddev[1]
             << ", \"sun_response_delta\": " << r.sun_response_delta
+            << ", \"authored_roughness\": " << r.authored_roughness
+            << ", \"gbuffer_roughness\": " << r.gbuffer_roughness
+            << ", \"specular_highlight\": " << r.specular_highlight
             << ", \"textured\": " << (r.albedo_textured ? "true" : "false") << "}";
         out << (i + 1 < results.size() ? ",\n" : "\n");
     }

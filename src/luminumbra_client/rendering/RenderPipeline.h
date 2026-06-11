@@ -490,12 +490,16 @@ private:
         std::array<int, 256> normal_layer;         // -1 = flat
         std::array<float, 256> tiling;             // world-units per repeat (>0)
         std::array<float, 256> emissive_intensity; // 0 = non-emissive (T-I4-9)
+        std::array<float, 256> roughness;          // 0..1, default 0.85 (T-I4-10)
+        std::array<bool, 256> roughness_set;       // material declared roughness
         int terrain_layer_count = 0;               // distinct albedo layers loaded
         MaterialTextureLut() {
             texture_layer.fill(-1);
             normal_layer.fill(-1);
             tiling.fill(4.0f);
             emissive_intensity.fill(0.0f);
+            roughness.fill(0.85f);
+            roughness_set.fill(false);
         }
     };
     MaterialTextureLut m_material_texture_lut;

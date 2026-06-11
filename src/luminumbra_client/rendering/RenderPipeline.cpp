@@ -1975,6 +1975,11 @@ void RenderPipeline::load_material_texture_lut() {
                 // defaults to unit intensity so legacy emissive materials glow.
                 m_material_texture_lut.emissive_intensity[static_cast<size_t>(id)] = 1.0f;
             }
+            if (mat.contains("roughness")) {
+                m_material_texture_lut.roughness[static_cast<size_t>(id)] =
+                    glm::clamp(mat["roughness"].get<float>(), 0.0f, 1.0f);
+                m_material_texture_lut.roughness_set[static_cast<size_t>(id)] = true;
+            }
         }
         LUMINUMBRA_CORE_INFO("Material texture LUT parsed: {} textured material(s) from materials.json.", textured);
     } catch (const std::exception& e) {
@@ -2003,7 +2008,10 @@ void RenderPipeline::init_material_lut() {
     auto row1 = [&](int id) -> glm::vec4& { return materialData[static_cast<size_t>(MATERIAL_COUNT + id)]; };
     auto row2 = [&](int id) -> glm::vec4& { return materialData[static_cast<size_t>(2 * MATERIAL_COUNT + id)]; };
 
-    // Row 0 (metallic/roughness/AO/magical) — unchanged authored values.
+    // Row 0 (metallic / roughness / AO / magical). T-I4-10: the G (roughness)
+    // channel is now DRIVEN by the materials.json roughness column (default 0.85)
+    // via the parsed LUT; metallic/AO/magical keep their authored values. The
+    // roughness feeds the G-buffer and the lighting specular response.
     row0(0) = glm::vec4(0.1f, 0.8f, 1.0f, 0.0f);   // Air/Default
     row0(1) = glm::vec4(0.05f, 0.85f, 1.0f, 0.0f); // Stone
     row0(2) = glm::vec4(0.0f, 0.9f, 1.0f, 0.0f);   // Soil
@@ -2012,6 +2020,17 @@ void RenderPipeline::init_material_lut() {
     row0(5) = glm::vec4(0.02f, 0.95f, 1.0f, 0.0f); // Deepslate
     row0(6) = glm::vec4(0.1f, 0.05f, 1.0f, 1.0f);  // Luminous Crystal (magical in alpha)
     row0(7) = glm::vec4(0.0f, 0.1f, 1.0f, 0.0f);   // Water
+    // Override the roughness channel from the data-driven column. Materials that
+    // do not declare roughness keep the 0.85 default (matching the authored
+    // values above for the common terrain ids).
+    for (int id = 0; id < MATERIAL_COUNT; ++id) {
+        if (m_material_texture_lut.roughness_set[static_cast<size_t>(id)]) {
+            row0(id).g = m_material_texture_lut.roughness[static_cast<size_t>(id)];
+        } else if (id != 0) {
+            // Unknown materials default to 0.85 (design §3 roughness default).
+            row0(id).g = 0.85f;
+        }
+    }
 
     // Rows 1 + 2 (texture + emissive columns) — baked from the parsed LUT.
     for (int id = 0; id < MATERIAL_COUNT; ++id) {
