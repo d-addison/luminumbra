@@ -17,10 +17,14 @@ layout (std430, binding = 0) readonly buffer JointPalette {
     mat4 u_jointMatrices[];
 };
 
-// Output interface block matching g_buffer.frag.
+// Output interface block matching g_buffer.frag (T-I4-7 adds world-space
+// members; T-I4-8 will route UV/textured sampling for skinned creatures).
 out VS_OUT {
-    vec3 FragPos; // VIEW SPACE
-    vec3 Normal;  // VIEW SPACE
+    vec3 FragPos;      // VIEW SPACE
+    vec3 Normal;       // VIEW SPACE
+    vec3 WorldPos;     // WORLD SPACE
+    vec3 WorldNormal;  // WORLD SPACE
+    vec2 UV;           // mesh UV (skinned/creature texturing, T-I4-8)
     flat uint MaterialID;
 } vs_out;
 
@@ -41,12 +45,18 @@ void main()
     vec4 skinnedPos = skin * vec4(aPos, 1.0);
     mat3 skinNormal = mat3(skin);
 
+    // World-space position/normal (triplanar fallback; T-I4-7 interface match).
+    vec4 worldPos = model * skinnedPos;
+    vs_out.WorldPos = vec3(worldPos);
+    vs_out.WorldNormal = normalize(mat3(model) * (skinNormal * aNormal));
+
     mat4 viewModel = view * model;
     vec4 viewPos = viewModel * skinnedPos;
     vs_out.FragPos = vec3(viewPos);
 
     mat3 normalMatrix = mat3(transpose(inverse(viewModel)));
     vs_out.Normal = normalize(normalMatrix * (skinNormal * aNormal));
+    vs_out.UV = aUV;
 
     vs_out.MaterialID = uint(u_materialId);
 

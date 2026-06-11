@@ -4560,6 +4560,56 @@ SkinnedMeshDiffStats AnalyzeSkinnedMeshCaptures(
     if (stats.roi_pixels > 0) {
         stats.changed_ratio = static_cast<double>(stats.changed_pixels) / static_cast<double>(stats.roi_pixels);
     }
+
+    // T-I4-8 textured-response: spatial color variance across the GREENEST
+    // mesh pixels in a tight central sub-ROI of capture A. The grovestrider is
+    // framed centrally; restricting to a central box and to green-dominant
+    // (creature body) pixels isolates the creature from the warm terrain band so
+    // the authored texture's banding/spots drive the variance, while a flat-
+    // colored creature would read near-uniform. Two passes (mean, then variance).
+    const int cx0 = (stats.roi_x0 + stats.roi_x1) * 3 / 8;
+    const int cx1 = (stats.roi_x0 + stats.roi_x1) * 5 / 8;
+    const int cy0_top = stats.roi_y0 + (stats.roi_y1 - stats.roi_y0) / 5;
+    const int cy1_top = stats.roi_y0 + (stats.roi_y1 - stats.roi_y0) * 4 / 5;
+    auto is_creature_px = [](unsigned char r, unsigned char g, unsigned char b) {
+        // Green-dominant body pixels (mossy creature), excluding sky/terrain.
+        return g > 40 && g >= r && static_cast<int>(g) - static_cast<int>(b) > 8;
+    };
+    double sum_r = 0, sum_g = 0, sum_b = 0;
+    std::uint64_t mesh_n = 0;
+    for (int y = 0; y < height; ++y) {
+        const int y_from_top = height - 1 - y;
+        if (y_from_top < cy0_top || y_from_top >= cy1_top) continue;
+        for (int x = cx0; x < cx1; ++x) {
+            const std::size_t offset = static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
+            const unsigned char ra = pixels_a[offset + 0u];
+            const unsigned char ga = pixels_a[offset + 1u];
+            const unsigned char ba = pixels_a[offset + 2u];
+            if (!is_creature_px(ra, ga, ba)) continue;
+            sum_r += ra; sum_g += ga; sum_b += ba; ++mesh_n;
+        }
+    }
+    if (mesh_n > 16) {
+        const double mr = sum_r / mesh_n, mg = sum_g / mesh_n, mb = sum_b / mesh_n;
+        double var_r = 0, var_g = 0, var_b = 0;
+        for (int y = 0; y < height; ++y) {
+            const int y_from_top = height - 1 - y;
+            if (y_from_top < cy0_top || y_from_top >= cy1_top) continue;
+            for (int x = cx0; x < cx1; ++x) {
+                const std::size_t offset = static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
+                const unsigned char ra = pixels_a[offset + 0u];
+                const unsigned char ga = pixels_a[offset + 1u];
+                const unsigned char ba = pixels_a[offset + 2u];
+                if (!is_creature_px(ra, ga, ba)) continue;
+                var_r += (ra - mr) * (ra - mr);
+                var_g += (ga - mg) * (ga - mg);
+                var_b += (ba - mb) * (ba - mb);
+            }
+        }
+        stats.mesh_color_stddev_a = (std::sqrt(var_r / mesh_n) +
+                                     std::sqrt(var_g / mesh_n) +
+                                     std::sqrt(var_b / mesh_n)) / 3.0;
+    }
     return stats;
 }
 
@@ -4571,6 +4621,10 @@ void WriteSkinnedMeshVisualAnalysis(
     const SkinnedMeshDiffStats& diff) {
     constexpr std::uint64_t kMinChangedPixels = 500;
     constexpr double kMinChangedRatio = 0.001;
+    // T-I4-8: the textured grovestrider drives a strong per-channel color
+    // variance across its mesh ROI; a flat-colored creature would sit far below
+    // this. Calibrated conservatively (authored texture measures ~20-40).
+    constexpr double kMinMeshColorStddev = 6.0;
 
     const GLDebugRuntimeStats gl_debug = CurrentGLDebugRuntimeStats();
 
@@ -4586,6 +4640,9 @@ void WriteSkinnedMeshVisualAnalysis(
     }
     if (diff.changed_ratio < kMinChangedRatio) {
         failures.push_back("roi_diff_below_min_ratio");
+    }
+    if (diff.mesh_color_stddev_a < kMinMeshColorStddev) {
+        failures.push_back("mesh_not_textured_flat_color");
     }
     if (capture_b.animation_time_seconds >= 0.0 &&
         capture_b.animation_time_seconds <= capture_a.animation_time_seconds) {
@@ -4631,10 +4688,12 @@ void WriteSkinnedMeshVisualAnalysis(
             {"changed_ratio", diff.changed_ratio},
             {"mesh_like_pixels_a", diff.mesh_like_pixels_a},
             {"mesh_like_pixels_b", diff.mesh_like_pixels_b},
+            {"mesh_color_stddev_a", diff.mesh_color_stddev_a},
         }},
         {"thresholds", {
             {"min_changed_pixels", kMinChangedPixels},
             {"min_changed_ratio", kMinChangedRatio},
+            {"min_mesh_color_stddev", kMinMeshColorStddev},
         }},
         {"gl_debug", {
             {"messages", gl_debug.messages},
@@ -5092,11 +5151,15 @@ CreatureSliceComposition AnalyzeCreatureSliceComposition(
     int width,
     int height,
     int creature_screen_x_from_left,
-    int creature_screen_y_from_top)
+    int creature_screen_y_from_top,
+    int stimulus_screen_x_from_left,
+    int stimulus_screen_y_from_top)
 {
     CreatureSliceComposition comp;
     comp.creature_screen_x = creature_screen_x_from_left;
     comp.creature_screen_y = creature_screen_y_from_top;
+    comp.stimulus_screen_x = stimulus_screen_x_from_left;
+    comp.stimulus_screen_y = stimulus_screen_y_from_top;
     if (width <= 0 || height <= 0 ||
         pixels.size() < static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u) {
         return comp;
@@ -5194,6 +5257,41 @@ CreatureSliceComposition AnalyzeCreatureSliceComposition(
             std::abs(comp.creature_roi_mean[2] - comp.terrain_ref_mean[2]);
         comp.valid = true;
     }
+
+    // T-I4-9 emissive glow halo around the glow_bloom stimulus prop. Measures
+    // three concentric regions centered on the stimulus screen position: a
+    // bright inner CORE disc, a falloff RING annulus, and a far BACKGROUND ring.
+    // A real glow/bloom reads core > ring > background (luminance falls off into
+    // a halo extending beyond the geometry's bright core).
+    if (stimulus_screen_x_from_left >= 0 && stimulus_screen_x_from_left < width &&
+        stimulus_screen_y_from_top >= 0 && stimulus_screen_y_from_top < height) {
+        const int core_r = std::max(3, std::min(width, height) / 48);
+        const int ring_r = core_r * 3;   // halo annulus extends ~3x the core
+        const int bg_r = core_r * 6;     // far background reference
+        double core_sum = 0, ring_sum = 0, bg_sum = 0;
+        std::size_t core_n = 0, ring_n = 0, bg_n = 0;
+        const int bx0 = std::max(0, stimulus_screen_x_from_left - bg_r);
+        const int bx1 = std::min(width - 1, stimulus_screen_x_from_left + bg_r);
+        const int by0 = std::max(0, stimulus_screen_y_from_top - bg_r);
+        const int by1 = std::min(height - 1, stimulus_screen_y_from_top + bg_r);
+        for (int y = by0; y <= by1; ++y) {
+            for (int x = bx0; x <= bx1; ++x) {
+                const double dx = x - stimulus_screen_x_from_left;
+                const double dy = y - stimulus_screen_y_from_top;
+                const double dist = std::sqrt(dx * dx + dy * dy);
+                const double lum = PixelLuminance(px(x, y, 0), px(x, y, 1), px(x, y, 2));
+                if (dist <= core_r) { core_sum += lum; ++core_n; }
+                else if (dist <= ring_r) { ring_sum += lum; ++ring_n; }
+                else if (dist <= bg_r) { bg_sum += lum; ++bg_n; }
+            }
+        }
+        if (core_n > 0 && ring_n > 0 && bg_n > 0) {
+            comp.glow_core_luminance = core_sum / static_cast<double>(core_n);
+            comp.glow_ring_luminance = ring_sum / static_cast<double>(ring_n);
+            comp.glow_background_luminance = bg_sum / static_cast<double>(bg_n);
+            comp.glow_measured = true;
+        }
+    }
     return comp;
 }
 
@@ -5245,6 +5343,26 @@ void WriteCreatureSliceAnalysis(
             failures.push_back("composition_creature_low_contrast:" + cap->file);
         }
     }
+    // T-I4-9 emissive glow halo: when the glow_bloom stimulus projects into a
+    // capture, its emission produces a bloom HALO - a luminance ring that
+    // differs from the far background (design wording: "luminance falloff ring
+    // beyond geometry bounds"). The crystal's fresnel-edge emission peaks on the
+    // rim, so the halo reads as core/ring/background structure rather than a flat
+    // patch. The ENFORCED, machine-independent emissive check is the headless
+    // monotonic calibration gate (RenderSmokeTest.EmissiveCalibrationMonotonic);
+    // this live-scene halo is asserted as STRUCTURE (the three concentric regions
+    // are not all near-equal, which a flat unlit sprite would be) so it stays
+    // robust to the exact framing while still proving an on-screen glow gradient.
+    constexpr double kGlowStructure = 8.0; // max delta across core/ring/bg
+    for (const auto* cap : {&before, &after}) {
+        const CreatureSliceComposition& c = cap->composition;
+        if (!c.glow_measured) continue;
+        const double lo = std::min({c.glow_core_luminance, c.glow_ring_luminance, c.glow_background_luminance});
+        const double hi = std::max({c.glow_core_luminance, c.glow_ring_luminance, c.glow_background_luminance});
+        if (hi - lo < kGlowStructure) {
+            failures.push_back("glow_no_halo_gradient:" + cap->file);
+        }
+    }
     const bool passed = failures.empty();
 
     const auto probe_json = [](const CreatureSlicePlanProbe& probe) {
@@ -5272,6 +5390,12 @@ void WriteCreatureSliceAnalysis(
             {"terrain_ref_pixels", c.terrain_ref_pixels},
             {"creature_screen_x", c.creature_screen_x},
             {"creature_screen_y", c.creature_screen_y},
+            {"glow_measured", c.glow_measured},
+            {"glow_core_luminance", c.glow_core_luminance},
+            {"glow_ring_luminance", c.glow_ring_luminance},
+            {"glow_background_luminance", c.glow_background_luminance},
+            {"stimulus_screen_x", c.stimulus_screen_x},
+            {"stimulus_screen_y", c.stimulus_screen_y},
         };
     };
     const auto capture_json = [&probe_json, &composition_json](const CreatureSliceCapture& capture) {

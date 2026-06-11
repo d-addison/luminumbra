@@ -167,11 +167,28 @@ void GBufferPass::geometry_pass_chunks(RenderPipeline& pipeline,
 
     m_geometry_shader->setMat4("projection", projection);
     m_geometry_shader->setMat4("view", view);
+    // View rotation: triplanar normal mapping (T-I4-7) perturbs the normal in
+    // world space then rotates it into view space for the octahedral G-buffer.
+    m_geometry_shader->setMat3("u_normalViewMatrix", glm::mat3(view));
 
-    // Bind material LUT for G-Buffer pass
+    // Bind material LUT + triplanar terrain arrays for the G-Buffer pass.
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, pipeline.m_materialLUT);
     m_geometry_shader->setInt("u_materialLUT", 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_terrainTextureArray);
+    m_geometry_shader->setInt("u_terrainTextures", 1);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_terrainNormalArray);
+    m_geometry_shader->setInt("u_terrainNormals", 2);
+    // u_skinnedTextures must point at a distinct unit (3) even though terrain
+    // never samples it: a sampler2DArray sharing unit 0 with the sampler2D LUT is
+    // undefined (black draws on some drivers). Bind a valid 2D array there.
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_skinnedTextureArray ? pipeline.m_skinnedTextureArray : pipeline.m_terrainTextureArray);
+    m_geometry_shader->setInt("u_skinnedTextures", 3);
+    m_geometry_shader->setInt("u_skinnedAlbedoLayer", -1); // terrain uses triplanar, not UV
+    m_geometry_shader->setInt("u_skinnedNormalLayer", -1);
 
     // Perform hierarchical frustum culling
     std::vector<const RenderPipeline::ChunkCullEntry*> visible_chunks;
@@ -221,8 +238,26 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
                                               const Camera& camera,
                                               const glm::vec4 frustum_planes[6]) {
     m_instanced_static_mesh_shader->use();
+    const glm::mat4 static_view = camera.GetViewMatrix();
     m_instanced_static_mesh_shader->setMat4("projection", glm::perspective(glm::radians(camera.Zoom), (float)pipeline.m_screen_width / (float)pipeline.m_screen_height, camera.GetNearPlane(), camera.GetFarPlane()));
-    m_instanced_static_mesh_shader->setMat4("view", camera.GetViewMatrix());
+    m_instanced_static_mesh_shader->setMat4("view", static_view);
+    m_instanced_static_mesh_shader->setMat3("u_normalViewMatrix", glm::mat3(static_view));
+    // Triplanar terrain arrays + LUT (T-I4-7): a static mesh tagged with a
+    // textured material id (e.g. grass props) reuses the terrain triplanar path.
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, pipeline.m_materialLUT);
+    m_instanced_static_mesh_shader->setInt("u_materialLUT", 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_terrainTextureArray);
+    m_instanced_static_mesh_shader->setInt("u_terrainTextures", 1);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_terrainNormalArray);
+    m_instanced_static_mesh_shader->setInt("u_terrainNormals", 2);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_skinnedTextureArray ? pipeline.m_skinnedTextureArray : pipeline.m_terrainTextureArray);
+    m_instanced_static_mesh_shader->setInt("u_skinnedTextures", 3);
+    m_instanced_static_mesh_shader->setInt("u_skinnedAlbedoLayer", -1);
+    m_instanced_static_mesh_shader->setInt("u_skinnedNormalLayer", -1);
     auto view = registry.view<const Components::TransformComponent, const Components::StaticMeshComponent>();
     // T-I3-16: groups carry the material id (per-group uniform) so each
     // static mesh renders with its component material instead of the old
@@ -288,8 +323,27 @@ void GBufferPass::geometry_pass_skinned_meshes(RenderPipeline& pipeline,
     }
 
     m_skinned_mesh_shader->use();
+    const glm::mat4 skinned_view = camera.GetViewMatrix();
     m_skinned_mesh_shader->setMat4("projection", glm::perspective(glm::radians(camera.Zoom), (float)pipeline.m_screen_width / (float)pipeline.m_screen_height, camera.GetNearPlane(), camera.GetFarPlane()));
-    m_skinned_mesh_shader->setMat4("view", camera.GetViewMatrix());
+    m_skinned_mesh_shader->setMat4("view", skinned_view);
+    m_skinned_mesh_shader->setMat3("u_normalViewMatrix", glm::mat3(skinned_view));
+    // Triplanar terrain arrays + LUT (T-I4-7).
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, pipeline.m_materialLUT);
+    m_skinned_mesh_shader->setInt("u_materialLUT", 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_terrainTextureArray);
+    m_skinned_mesh_shader->setInt("u_terrainTextures", 1);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_terrainNormalArray);
+    m_skinned_mesh_shader->setInt("u_terrainNormals", 2);
+    // T-I4-8: UV-mapped creature texture array on unit 3. Skinned creatures take
+    // the UV-sampled path (precedence over the terrain LUT triplanar path).
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_skinnedTextureArray);
+    m_skinned_mesh_shader->setInt("u_skinnedTextures", 3);
+    m_skinned_mesh_shader->setInt("u_skinnedAlbedoLayer", pipeline.m_skinnedTextureArray ? pipeline.m_grovestriderAlbedoLayer : -1);
+    m_skinned_mesh_shader->setInt("u_skinnedNormalLayer", pipeline.m_skinnedTextureArray ? pipeline.m_grovestriderNormalLayer : -1);
 
     for (auto entity : view) {
         auto const& transform = view.get<const Components::TransformComponent>(entity);

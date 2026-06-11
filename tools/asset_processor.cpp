@@ -16,6 +16,12 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
+#include "stb_image_resize2.h"
+
 #include "luminumbra_common/animation/SkinnedMeshFormat.h"
 
 struct Vertex {
@@ -446,7 +452,21 @@ bool WriteLtex(const std::string& output_path, uint32_t width, uint32_t height,
 
 // Public entry point (also used by the round-trip test, which re-declares this
 // signature). Imports a PNG and writes a box-filter mip-chained .ltex.
-bool process_texture(const std::string& input_path, const std::string& output_path) {
+//
+// target_size (T-I4-7): when > 0 the source is resized to target_size x
+// target_size (sRGB-correct box/Mitchell resample via stb_image_resize2) before
+// the mip chain is built. Terrain albedo/normal source plates are 2K PBR maps;
+// the committed iteration-4 terrain arrays are 256x256 so the whole terrain set
+// stays well inside the 96 MB residency budget. When target_size == 0 the source
+// is imported at its native size (the T-I4-6 round-trip behaviour, byte-stable).
+//
+// emit_preview_png (T-I4-7): when true a sibling <stem>.png is written next to
+// the .ltex holding the (possibly resized) mip-0 image, so the downsized terrain
+// plate is committable/reviewable as a PNG alongside the binary .ltex.
+// 4-arg worker (T-I4-7). The 2-arg public overload below preserves the T-I4-6
+// ABI/declaration the round-trip test links against.
+bool process_texture_resized(const std::string& input_path, const std::string& output_path,
+                             uint32_t target_size, bool emit_preview_png) {
     int width = 0;
     int height = 0;
     int source_channels = 0;
@@ -467,10 +487,40 @@ bool process_texture(const std::string& input_path, const std::string& output_pa
 
     const uint32_t channels = static_cast<uint32_t>(kForcedChannels);
     LtexMip base;
-    base.width = static_cast<uint32_t>(width);
-    base.height = static_cast<uint32_t>(height);
-    base.pixels.assign(data, data + static_cast<size_t>(width) * height * channels);
+
+    if (target_size > 0 && (static_cast<uint32_t>(width) != target_size ||
+                            static_cast<uint32_t>(height) != target_size)) {
+        std::vector<uint8_t> resized(static_cast<size_t>(target_size) * target_size * channels);
+        unsigned char* out = stbir_resize_uint8_srgb(
+            data, width, height, 0,
+            resized.data(), static_cast<int>(target_size), static_cast<int>(target_size), 0,
+            STBIR_RGBA);
+        if (!out) {
+            std::cerr << "Error: Could not resize image: " << input_path << std::endl;
+            stbi_image_free(data);
+            return false;
+        }
+        base.width = target_size;
+        base.height = target_size;
+        base.pixels = std::move(resized);
+        width = static_cast<int>(target_size);
+        height = static_cast<int>(target_size);
+    } else {
+        base.width = static_cast<uint32_t>(width);
+        base.height = static_cast<uint32_t>(height);
+        base.pixels.assign(data, data + static_cast<size_t>(width) * height * channels);
+    }
     stbi_image_free(data);
+
+    if (emit_preview_png) {
+        const std::string preview = OutputStem(output_path) + ".png";
+        if (!stbi_write_png(preview.c_str(), width, height, static_cast<int>(channels),
+                            base.pixels.data(), width * static_cast<int>(channels))) {
+            std::cerr << "Warning: Could not write preview PNG: " << preview << std::endl;
+        } else {
+            std::cout << "  - Preview PNG: " << preview << std::endl;
+        }
+    }
 
     const std::vector<LtexMip> mips = BuildMipChain(std::move(base), channels);
     if (!WriteLtex(output_path, static_cast<uint32_t>(width), static_cast<uint32_t>(height), channels, mips)) {
@@ -481,6 +531,12 @@ bool process_texture(const std::string& input_path, const std::string& output_pa
     std::cout << "  - Dimensions: " << width << "x" << height << ", channels: " << channels << std::endl;
     std::cout << "  - Mip levels: " << mips.size() << std::endl;
     return true;
+}
+
+// T-I4-6 ABI: native-size PNG -> .ltex import. Stable signature the round-trip
+// test re-declares and links against.
+bool process_texture(const std::string& input_path, const std::string& output_path) {
+    return process_texture_resized(input_path, output_path, 0, false);
 }
 
 void process_gltf(const std::string& input_path, const std::string& output_path) {
@@ -621,8 +677,13 @@ void process_gltf(const std::string& input_path, const std::string& output_path)
 }
 
 int main(int argc, char* argv[]) {
-    if (argc != 3) {
-        std::cerr << "Usage: AssetProcessor.exe <input.glb|input.png> <output.lmesh|output.ltex>" << std::endl;
+    if (argc < 3) {
+        std::cerr << "Usage: AssetProcessor.exe <input.glb|input.png> <output.lmesh|output.ltex> "
+                     "[target_size] [--preview-png]" << std::endl;
+        std::cerr << "  target_size : for .ltex output, resize the source to N x N before mipping "
+                     "(0 / omitted = native)" << std::endl;
+        std::cerr << "  --preview-png : for .ltex output, also write a sibling <stem>.png of the "
+                     "(resized) mip-0 image" << std::endl;
         return 1;
     }
 
@@ -635,7 +696,22 @@ int main(int argc, char* argv[]) {
     };
 
     if (ends_with(output_path, ".ltex")) {
-        return process_texture(argv[1], output_path) ? 0 : 1;
+        uint32_t target_size = 0;
+        bool emit_preview_png = false;
+        for (int a = 3; a < argc; ++a) {
+            const std::string arg = argv[a];
+            if (arg == "--preview-png") {
+                emit_preview_png = true;
+            } else {
+                try {
+                    target_size = static_cast<uint32_t>(std::stoul(arg));
+                } catch (...) {
+                    std::cerr << "Error: unrecognized argument '" << arg << "'" << std::endl;
+                    return 1;
+                }
+            }
+        }
+        return process_texture_resized(argv[1], output_path, target_size, emit_preview_png) ? 0 : 1;
     }
 
     process_gltf(argv[1], output_path);

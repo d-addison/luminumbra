@@ -822,6 +822,11 @@ struct SkinnedMeshDiffStats {
     // is skinned_draws > 0 plus the non-sky temporal diff.
     std::uint64_t mesh_like_pixels_a = 0;
     std::uint64_t mesh_like_pixels_b = 0;
+    // T-I4-8 textured-response: spatial color variation across the mesh-like
+    // pixels in capture A (mean per-channel std-dev, 0..255). A flat-colored
+    // (untextured) creature reads near-uniform; the authored grovestrider
+    // texture drives this well above the flat bound.
+    double mesh_color_stddev_a = 0.0;
 };
 
 SkinnedMeshDiffStats AnalyzeSkinnedMeshCaptures(
@@ -930,6 +935,16 @@ struct CreatureSliceComposition {
     std::size_t terrain_ref_pixels = 0;
     int creature_screen_x = 0;     // from left
     int creature_screen_y = 0;     // from top
+    // T-I4-9 emissive glow halo around the glow_bloom stimulus prop. A real
+    // bloom/glow reads as a bright core with luminance that FALLS OFF into a
+    // surrounding ring still brighter than the far background (a halo). These
+    // are 0 when the stimulus is absent/off-frame.
+    bool glow_measured = false;
+    double glow_core_luminance = 0.0;       // mean luminance of the inner disc
+    double glow_ring_luminance = 0.0;       // mean luminance of the falloff annulus
+    double glow_background_luminance = 0.0;  // mean luminance of the far background
+    int stimulus_screen_x = -1;
+    int stimulus_screen_y = -1;
 };
 
 // Analyzes a captured RGB framebuffer (bottom-up glReadPixels layout) for the
@@ -941,7 +956,9 @@ CreatureSliceComposition AnalyzeCreatureSliceComposition(
     int width,
     int height,
     int creature_screen_x_from_left,
-    int creature_screen_y_from_top);
+    int creature_screen_y_from_top,
+    int stimulus_screen_x_from_left = -1,
+    int stimulus_screen_y_from_top = -1);
 
 struct CreatureSliceCapture {
     std::string file;

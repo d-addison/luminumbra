@@ -10,8 +10,11 @@ uniform sampler2D gAlbedoRoughness;   // RGBA8: RGB albedo + roughness
 uniform sampler2D gMetallicAO;        // RG16F: Metallic + AO
 uniform sampler2D u_ssao;
 
-// Material lookup
+// Material lookup (256 x 3 rows; row 2 v=0.8333 holds emissive_intensity/scale)
 uniform sampler2D u_materialLUT;
+// Rescales the normalized emissive_intensity LUT column back to world units.
+// Must match RenderPipeline::kEmissiveLutScale.
+uniform float u_emissiveLutScale = 8.0;
 
 // G-Buffer decoding functions
 vec2 octWrap(vec2 v) {
@@ -164,13 +167,11 @@ void main() {
     vec3 FragPos = vec3(u_inverseView * vec4(viewPos, 1.0));
     vec3 Normal = normalize(mat3(u_inverseView) * viewNormal);
 
-    // Use tri-planar textures only for material IDs backed by terrain texture layers.
-    // Crystal, water, or invalid IDs keep their G-buffer albedo instead of sampling
-    // outside the texture array and producing undefined material patches.
-    int terrainLayerCount = textureSize(u_terrainTextures, 0).z;
-    if (MaterialID > 0u && int(MaterialID) <= terrainLayerCount) {
-        Albedo = TriPlanar(FragPos, Normal, u_terrainTextures, float(MaterialID - 1u), 0.1);
-    }
+    // T-I4-7: triplanar terrain albedo + normal mapping now happen in
+    // g_buffer.frag (the textured albedo and normal-mapped normal are baked into
+    // the G-buffer), so the lighting pass consumes the G-buffer albedo directly.
+    // The legacy lighting-pass TriPlanar override has been removed; u_terrainTextures
+    // is retained as a binding for compatibility but no longer sampled here.
 
     vec3 V = normalize(u_viewPos - FragPos);
     vec3 F0 = mix(vec3(0.04), Albedo, Metallic);
@@ -219,15 +220,23 @@ void main() {
     vec3 crystalGlow = vec3(0.0);
     // Fix: MaterialID is already decoded from normalData.a above, not matData.a
     
-    if (MaterialID == 6u) { // Luminous Crystal
+    // T-I4-9 emissive calibration: the emission -> lighting -> glow chain is
+    // driven by the materials-LUT emissive_intensity column (row 2, v=0.8333),
+    // rescaled from the normalized LUT value. A material with intensity 0 emits
+    // no glow; the glow scales LINEARLY and MONOTONICALLY with intensity so the
+    // authored value maps predictably to on-screen luminance (calibration table
+    // documents the transfer curve). The crystal's prismatic look is preserved
+    // as the glow's color/shape; intensity only scales magnitude.
+    float emissiveIntensity = texture(u_materialLUT, vec2(float(MaterialID) / 255.0, 0.8333)).r * u_emissiveLutScale;
+    if (emissiveIntensity > 0.0) {
         // Inner magical glow
         float glowPulse = sin(u_time * 2.0) * 0.3 + 0.7;
         vec3 magicColor = vec3(0.6, 0.8, 1.0) * glowPulse * 0.8;
-        
+
         // Fresnel-based edge lighting
         float fresnel = pow(1.0 - max(0.0, dot(V, Normal)), 3.0);
         vec3 edgeGlow = vec3(0.4, 0.7, 1.0) * fresnel * 1.5;
-        
+
         // Prismatic dispersion effect
         float dispersion = sin(u_time * 1.5 + FragPos.x * 0.1 + FragPos.z * 0.15);
         vec3 prismColors = vec3(
@@ -235,12 +244,14 @@ void main() {
             0.6 + 0.4 * sin(dispersion + 2.0),
             1.0 + 0.2 * sin(dispersion + 4.0)
         );
-        
+
         // Energy field around crystals
         float energyField = abs(sin(u_time * 3.0 + length(FragPos) * 0.05)) * 0.3;
-        
+
         crystalGlow = magicColor + edgeGlow + prismColors * energyField * 0.2;
-        crystalGlow *= 1.5; // HDR boost for magical effect
+        // Linear, monotonic scale by authored emissive_intensity (the old fixed
+        // 1.5 HDR boost is now intensity 1.0 -> 1.5x; transfer curve documented).
+        crystalGlow *= 1.5 * emissiveIntensity;
     }
     
     // --- Final Color Composition ---

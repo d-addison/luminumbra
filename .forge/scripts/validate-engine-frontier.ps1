@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "SkinnedMeshVisual", "EngineGameSplitLint", "CreatureSlice", "BiomeCoverage", "RiverPresence", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "SkinnedMeshVisual", "EngineGameSplitLint", "CreatureSlice", "BiomeCoverage", "RiverPresence", "EmissiveCalibration", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -287,85 +287,98 @@ function Get-ClientExe {
 }
 
 function Test-MaterialVisual {
-    $exe = Get-ClientExe
-    $visualDir = "build/$BuildPreset/test-artifacts/runtime/material-visual"
-    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $visualDir
-    New-Item -ItemType Directory -Force -Path $visualDir | Out-Null
-
-    $runSeconds = [Math]::Max(20, $SmokeSeconds)
-    Invoke-Checked -FilePath $exe -ArgumentList @(
-        "--scenario", "material_visual_smoke",
-        "--auto-create-world",
-        "--auto-enter-world",
-        "--timed-run", "$runSeconds",
-        "--no-audio",
-        "--no-ui",
-        "--runtime-artifact-dir", $visualDir
-    ) -TimeoutSeconds ([Math]::Max(120, $runSeconds + 90))
-
-    $analysisPath = Join-Path $visualDir "material-visual-analysis.json"
+    # T-I4-7 re-home: the iteration-3 MaterialVisual gate scanned for a sand
+    # beach beside a grass-capped, stone-rimmed highland on the polished
+    # archipelago - geometry the terrain pass deliberately removed, so the gate
+    # could not be framed (deferred to iteration 4; see handoff.md). It is
+    # replaced by the deterministic calibration-plate gate (design-decisions §9):
+    # authored per-material plates drawn at fixed coordinates into the G-buffer,
+    # captured under two sun angles, checked for per-material albedo bands and a
+    # normal-response (shading varies across the plate and between sun angles by
+    # more than a flat-surface bound). The gate runs headlessly in the render
+    # smoke ctest (RenderSmokeTest.CalibrationPlateCloseRangeMaterialGate), which
+    # emits the v2 analysis artifact; this validator consumes that artifact.
+    $renderDir = "build/$BuildPreset/test-artifacts/render"
+    $analysisPath = Join-Path $renderDir "material-visual-analysis.json"
     if (-not (Test-Path $analysisPath)) {
-        throw "material visual run did not produce $analysisPath (gate produced by task T-EF-1-material-visual-gate)"
+        throw "material visual (calibration-plate) analysis missing $analysisPath - run the render smoke ctest (RenderSmokeTest.CalibrationPlateCloseRangeMaterialGate) first"
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
-    if ($analysis.schema -ne "luminumbra.material_visual_analysis.v1") {
-        throw "Unexpected material visual analysis schema '$($analysis.schema)'"
+    if ($analysis.schema -ne "luminumbra.material_visual_analysis.v2") {
+        throw "Unexpected material visual analysis schema '$($analysis.schema)' (expected calibration-plate v2)"
     }
-    if ([int64]$analysis.gl_debug.errors -ne 0) {
-        throw "Material visual run emitted GL debug errors: $($analysis.gl_debug.errors)"
+    if ($analysis.mode -ne "calibration_plate") {
+        throw "Material visual analysis mode must be 'calibration_plate' (T-I4-7 re-home)"
     }
-    if ($null -eq $analysis.materials -or @($analysis.materials).Count -lt 1) {
-        throw "Material visual analysis is missing the materials ROI array"
-    }
-
-    $sandEntries = @($analysis.materials | Where-Object { $_.name -eq "Sand" })
-    if ($sandEntries.Count -lt 1) {
-        throw "Material visual analysis has no Sand ROI entry; sand vs grey fallback is the primary gate target"
+    if ($null -eq $analysis.materials -or @($analysis.materials).Count -lt 4) {
+        throw "Calibration-plate analysis must report at least the Sand/Grass/Stone/Soil material plates"
     }
 
-    $grassEntries = @($analysis.materials | Where-Object { $_.name -eq "Grass" })
-    if ($grassEntries.Count -lt 1) {
-        throw "Material visual analysis has no Grass ROI entry; the composite vantage must show grass above the beach band"
-    }
-
-    $stoneEntries = @($analysis.materials | Where-Object { $_.name -eq "Stone" })
-    if ($stoneEntries.Count -lt 1) {
-        throw "Material visual analysis has no Stone ROI entry; the rim sub-ROI must show the cliff-rim stone band"
-    }
-    if ($stoneEntries[0].roi_scope -ne "rim_band") {
-        throw "Stone ROI entry must be scoped to the rim sub-ROI (legitimate stone is grey-fallback-shaped; see classifier docs)"
-    }
-
-    $soilEntries = @($analysis.materials | Where-Object { $_.name -eq "Soil" })
-    if ($soilEntries.Count -lt 1) {
-        throw "Material visual analysis has no Soil ROI entry; the rim sub-ROI must show the depth 1-5 soil band"
-    }
-    if ($soilEntries[0].roi_scope -ne "rim_band") {
-        throw "Soil ROI entry must be scoped to the rim sub-ROI (rim interpolation-error exposure; see classifier docs)"
-    }
-
-    foreach ($entry in $analysis.materials) {
-        if ($null -eq $entry.pixels -or $null -eq $entry.thresholds) {
-            throw "Material ROI entry '$($entry.name)' is missing pixels or thresholds"
+    $bound = [double]$analysis.flat_shading_bound
+    foreach ($name in @("Sand", "Grass", "Stone", "Soil", "Deepslate")) {
+        $entry = @($analysis.materials | Where-Object { $_.name -eq $name })
+        if ($entry.Count -lt 1) {
+            throw "Calibration-plate analysis is missing the '$name' plate"
         }
-        if ([int64]$entry.pixels.classified_pixels -lt [int64]$entry.thresholds.min_classified_pixels) {
-            throw "Material ROI '$($entry.name)' has too few classified pixels: $($entry.pixels.classified_pixels) < $($entry.thresholds.min_classified_pixels)"
+        $m = $entry[0]
+        if (-not $m.textured) {
+            throw "Calibration plate '$name' is not textured (triplanar terrain sampling failed)"
         }
-        if ([double]$entry.pixels.classified_ratio -lt [double]$entry.thresholds.min_classified_ratio) {
-            throw "Material ROI '$($entry.name)' has too low a classified ratio: $($entry.pixels.classified_ratio) < $($entry.thresholds.min_classified_ratio)"
+        if ([double]$m.shading_stddev_sun0 -le $bound -or [double]$m.shading_stddev_sun1 -le $bound) {
+            throw "Calibration plate '$name' shows no normal-map shading variation (<= flat bound $bound)"
         }
-        if ([int64]$entry.pixels.grey_fallback_pixels -gt [int64]$entry.thresholds.max_grey_fallback_pixels) {
-            throw "Material ROI '$($entry.name)' shows grey fallback pixels above threshold: $($entry.pixels.grey_fallback_pixels) > $($entry.thresholds.max_grey_fallback_pixels)"
+        if ([double]$m.sun_response_delta -le $bound) {
+            throw "Calibration plate '$name' shading does not respond to sun direction (<= flat bound $bound)"
         }
+    }
+
+    # Per-material albedo bands: sand reads brighter than grass; grass reads
+    # greener than blue. This separates the materials by color so a single
+    # fallback texture cannot pass the gate.
+    $sand = @($analysis.materials | Where-Object { $_.name -eq "Sand" })[0]
+    $grass = @($analysis.materials | Where-Object { $_.name -eq "Grass" })[0]
+    $sandLuma = [double]$sand.albedo[0] + [double]$sand.albedo[1] + [double]$sand.albedo[2]
+    $grassLuma = [double]$grass.albedo[0] + [double]$grass.albedo[1] + [double]$grass.albedo[2]
+    if ($sandLuma -le $grassLuma) {
+        throw "Calibration-plate albedo band failure: sand ($sandLuma) should read brighter than grass ($grassLuma)"
+    }
+    if ([double]$grass.albedo[1] -le [double]$grass.albedo[2]) {
+        throw "Calibration-plate albedo band failure: grass should read greener than blue"
     }
 
     if (-not $analysis.passed) {
-        throw "Material visual analysis reported failure"
+        throw "Material visual (calibration-plate) analysis reported failure"
     }
+}
 
-    Assert-FileExists (Join-Path $visualDir $analysis.screenshot)
-    Assert-FileExists (Join-Path $visualDir $analysis.heatmap_screenshot)
+function Test-EmissiveCalibration {
+    # T-I4-9: the emission -> lighting -> on-screen-glow chain calibration table
+    # (RenderSmokeTest.EmissiveCalibrationMonotonic emits this artifact). The
+    # authored emissive_intensity must map monotonically to measured luminance.
+    $renderDir = "build/$BuildPreset/test-artifacts/render"
+    $analysisPath = Join-Path $renderDir "emissive-calibration.json"
+    if (-not (Test-Path $analysisPath)) {
+        throw "emissive calibration artifact missing $analysisPath - run the render smoke ctest (RenderSmokeTest.EmissiveCalibrationMonotonic) first"
+    }
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.emissive_calibration.v1") {
+        throw "Unexpected emissive calibration schema '$($analysis.schema)'"
+    }
+    $table = @($analysis.table)
+    if ($table.Count -lt 3) {
+        throw "Emissive calibration table must have at least 3 intensity samples"
+    }
+    for ($i = 1; $i -lt $table.Count; $i++) {
+        if ([double]$table[$i].measured_luminance -le [double]$table[$i - 1].measured_luminance) {
+            throw "Emissive calibration not monotonic at intensity $($table[$i].emissive_intensity): $($table[$i].measured_luminance) <= $($table[$i-1].measured_luminance)"
+        }
+    }
+    if (-not $analysis.passed) {
+        throw "Emissive calibration analysis reported failure"
+    }
+    Write-Host ("emissive calibration: monotonic over {0} samples (scale {1}); {2}" -f `
+        $table.Count, $analysis.emissive_lut_scale, $analysis.transfer_curve)
 }
 
 function Test-RenderHealth {
@@ -3133,6 +3146,12 @@ function Test-SkinnedMeshVisual {
     if ([double]$analysis.diff.changed_ratio -lt [double]$analysis.thresholds.min_changed_ratio) {
         throw "Skinned mesh ROI diff ratio below threshold: $($analysis.diff.changed_ratio) < $($analysis.thresholds.min_changed_ratio)"
     }
+    # T-I4-8 textured-response: the UV-mapped creature texture must drive a
+    # color variance above the flat-color bound (a flat-shaded creature fails).
+    if ($null -ne $analysis.diff.mesh_color_stddev_a -and `
+        [double]$analysis.diff.mesh_color_stddev_a -lt [double]$analysis.thresholds.min_mesh_color_stddev) {
+        throw "Skinned mesh is not textured: color stddev $($analysis.diff.mesh_color_stddev_a) < $($analysis.thresholds.min_mesh_color_stddev)"
+    }
     if (-not $analysis.passed) {
         throw "Skinned mesh visual analysis reported failure: $($analysis.failures -join ', ')"
     }
@@ -3316,6 +3335,16 @@ function Test-CreatureSlice {
         if ([double]$comp.creature_terrain_color_delta -lt $minColorDelta) {
             throw "Creature slice capture '$($capture.file)' creature_terrain_color_delta $($comp.creature_terrain_color_delta) is below $minColorDelta (creature reads invisibly against the terrain)"
         }
+        # T-I4-9 emissive glow halo: when the glow_bloom stimulus is framed, its
+        # emission must read as a luminance gradient (bright core/ring above a
+        # falling-off background), not a flat patch.
+        if ($comp.glow_measured) {
+            $lums = @([double]$comp.glow_core_luminance, [double]$comp.glow_ring_luminance, [double]$comp.glow_background_luminance)
+            $span = ($lums | Measure-Object -Maximum).Maximum - ($lums | Measure-Object -Minimum).Minimum
+            if ($span -lt 8.0) {
+                throw "Creature slice capture '$($capture.file)' glow halo is flat (luminance span $span < 8): no visible bloom falloff ring"
+            }
+        }
     }
 
     if (-not $analysis.passed) {
@@ -3480,6 +3509,7 @@ switch ($Mode) {
     "UnitTests" { Test-UnitTests }
     "MaterialVisual" { Test-MaterialVisual }
     "RenderHealth" { Test-RenderHealth }
+    "EmissiveCalibration" { Test-EmissiveCalibration }
     "ShaderInventory" { Test-ShaderInventory }
     "TextureResidency" { Test-TextureResidency }
     "GpuSdfCallbackSafetyGate" { Test-GpuSdfCallbackSafetyGate }

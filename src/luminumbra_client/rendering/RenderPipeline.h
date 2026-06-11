@@ -448,8 +448,64 @@ private:
     u32 m_screen_quad_vbo = 0;
 
     u32 m_terrainTextureArray = 0;
+    // Per-material triplanar normal-map array (T-I4-7). Same layer order as the
+    // albedo array; layer indices come from the material LUT normal_layer
+    // column. RGBA8 tangent-space (OpenGL convention) normal maps.
+    u32 m_terrainNormalArray = 0;
     u32 m_materialLUT = 0;
     size_t m_terrain_texture_fallback_layers = 0;
+    // Resolution the terrain albedo/normal arrays are allocated at (256 this
+    // iteration; the committed .ltex plates are 256x256, design §10 budget).
+    static constexpr int kTerrainTextureResolution = 256;
+
+    // Emissive intensity LUT scale (T-I4-9). The RGBA8 material LUT stores
+    // emissive_intensity normalized by this ceiling; the lighting pass rescales.
+    // Authored intensities run 0..~4 this iteration; 8 leaves headroom.
+    static constexpr float kEmissiveLutScale = 8.0f;
+
+    // --- Skinned/creature UV-mapped textures (T-I4-8) ---
+    // GL_TEXTURE_2D_ARRAY of UV-sampled creature textures; layer 0 = grovestrider
+    // albedo, layer 1 = grovestrider normal. Sampled by the skinned-mesh G-buffer
+    // path (skinned_mesh.vert + g_buffer.frag u_skinnedTextures). Separate from
+    // the terrain triplanar arrays (different sampling model).
+    u32 m_skinnedTextureArray = 0;
+    static constexpr int kSkinnedTextureResolution = 256;
+    // Layer indices within m_skinnedTextureArray (-1 = absent).
+    int m_grovestriderAlbedoLayer = -1;
+    int m_grovestriderNormalLayer = -1;
+    void init_skinned_textures();
+    // Accessor for GBufferPass (friend) skinned-pass binding.
+public:
+    u32 skinned_texture_array() const { return m_skinnedTextureArray; }
+    int grovestrider_albedo_layer() const { return m_grovestriderAlbedoLayer; }
+    int grovestrider_normal_layer() const { return m_grovestriderNormalLayer; }
+private:
+
+    // Per-material LUT columns parsed from data/common/materials.json
+    // (texture_layer / normal_layer / tiling — design §3, owned by T-I4-7).
+    // Indexed by material id; defaults mean "untextured / flat" so unknown ids
+    // and the crystal/water render kinds keep the G-buffer base color.
+    struct MaterialTextureLut {
+        std::array<int, 256> texture_layer;        // -1 = untextured
+        std::array<int, 256> normal_layer;         // -1 = flat
+        std::array<float, 256> tiling;             // world-units per repeat (>0)
+        std::array<float, 256> emissive_intensity; // 0 = non-emissive (T-I4-9)
+        std::array<float, 256> roughness;          // 0..1, default 0.85 (T-I4-10)
+        std::array<bool, 256> roughness_set;       // material declared roughness
+        int terrain_layer_count = 0;               // distinct albedo layers loaded
+        MaterialTextureLut() {
+            texture_layer.fill(-1);
+            normal_layer.fill(-1);
+            tiling.fill(4.0f);
+            emissive_intensity.fill(0.0f);
+            roughness.fill(0.85f);
+            roughness_set.fill(false);
+        }
+    };
+    MaterialTextureLut m_material_texture_lut;
+    // Parses materials.json texture_layer/normal_layer/tiling columns into
+    // m_material_texture_lut. Missing file/columns leave defaults (untextured).
+    void load_material_texture_lut();
 
     void init_terrain_textures();
     void init_material_lut();
