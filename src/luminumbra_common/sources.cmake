@@ -15,6 +15,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/core/EventBus.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/JobSystem.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/Log.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/SimulationClock.cpp
 
     # Net
     ${CMAKE_CURRENT_LIST_DIR}/net/NetworkManager.cpp

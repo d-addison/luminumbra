@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <memory>
 #include <ctime>
@@ -7,6 +8,8 @@
 #include <vector>
 #include "entt/entt.hpp"
 #include "../../../include/luminumbra/core/Types.h"
+#include "../core/SimulationClock.h"
+#include "../simulation/SimulationEventBus.h"
 
 namespace Luminumbra {
     class JobSystem;
@@ -95,6 +98,25 @@ public:
 
     entt::registry& GetRegistry() { return m_registry; }
 
+    // --- Fixed-rate simulation (T-I3-4) ---
+    // Advances the 30 Hz simulation clock by one variable-dt frame and runs
+    // the produced fixed ticks (clamped to the clock's catch-up limit). Per
+    // fixed tick the deterministic system order is executed (placeholder
+    // slots until the owning iteration-3 tasks land), then the ordered event
+    // bus drains every event published for that tick. Returns the number of
+    // fixed ticks executed this frame.
+    std::uint32_t TickSimulation(double frame_dt);
+
+    [[nodiscard]] std::uint64_t GetSimulationTickCount() const noexcept {
+        return m_simulationClock.tick_count();
+    }
+    [[nodiscard]] const luminumbra::core::SimulationClock& GetSimulationClock() const noexcept {
+        return m_simulationClock;
+    }
+    luminumbra::simulation::OrderedEventBus& GetSimulationEventBus() noexcept {
+        return m_simulationEventBus;
+    }
+
     // Set the job system (must be called before CreateWorld/LoadWorld)
     void SetJobSystem(JobSystem* jobSystem) { m_jobSystem = jobSystem; }
     void SetRootPath(const std::string& root_path) { m_rootPath = root_path; }
@@ -102,6 +124,8 @@ public:
 private:
     entt::registry m_registry;
     WorldMetadata m_metadata;
+    luminumbra::core::SimulationClock m_simulationClock;
+    luminumbra::simulation::OrderedEventBus m_simulationEventBus;
     std::unique_ptr<Systems::SHIELD_WorldSystem> m_worldSystem;
     std::unique_ptr<Systems::WaterSystem> m_waterSystem;
     JobSystem* m_jobSystem = nullptr;
