@@ -58,6 +58,15 @@ public:
     // wins where the two coincide (quantization can lift far samples at most
     // 1/32 m above the analytic surface).
     static constexpr float kFarDepthBiasMeters = 0.125f;
+    // T-I4-DR-far-water-sheet: a flat far-water sheet is drawn at the global
+    // waterline over far regions whose tiles carry water-present samples (river
+    // channels + seabeds beyond the live ring). The sheet uses a dedicated
+    // material id so the G-buffer pass tints it with the deep-water albedo
+    // family WITHOUT the live water.frag pipeline (no reflections/caustics far
+    // out). It sits a hair below the waterline so coincident far terrain at the
+    // shoreline keeps winning the depth test, matching the terrain depth bias.
+    static constexpr u32 kFarWaterMaterialId = 200u;
+    static constexpr float kFarWaterDepthBiasMeters = 0.0625f;
     // Per-frame integration caps keep upload hitches bounded.
     static constexpr std::size_t kMaxBuildDispatchesPerFrame = 8;
     static constexpr std::size_t kMaxUploadsPerFrame = 6;
@@ -73,6 +82,10 @@ public:
         std::size_t resident_bytes = 0; // tile payload + GPU mesh bytes
         std::size_t region_draws = 0;
         std::size_t indices_drawn = 0;
+        // T-I4-DR-far-water-sheet: far water sheet draw/index counts (subset of
+        // the far draws; surfaced so the horizon gate can assert continuity).
+        std::size_t water_sheet_draws = 0;
+        std::size_t water_sheet_indices = 0;
         std::size_t builds_completed_total = 0;
         std::size_t evictions_total = 0;
     };
@@ -121,6 +134,12 @@ private:
         GLuint vbo = 0;
         GLuint ebo = 0;
         u32 element_count = 0;
+        // T-I4-DR-far-water-sheet: optional flat water sheet for this region
+        // (present only when the tile carries water-flagged samples).
+        GLuint water_vao = 0;
+        GLuint water_vbo = 0;
+        GLuint water_ebo = 0;
+        u32 water_element_count = 0;
         glm::vec3 aabb_min{0.0f};
         glm::vec3 aabb_max{0.0f};
         std::size_t resident_bytes = 0;
@@ -136,6 +155,11 @@ private:
         float max_height = 0.0f;
         std::size_t tile_bytes = 0;
         World::FarLodRegionMesh mesh;
+        // T-I4-DR-far-water-sheet: flat water sheet geometry (VoxelVertex
+        // layout, material id kFarWaterMaterialId, normals up) covering the
+        // water-flagged samples at the global waterline. Empty when the tile
+        // is fully dry.
+        World::FarLodRegionMesh water_mesh;
     };
 
     struct SharedBuildState {

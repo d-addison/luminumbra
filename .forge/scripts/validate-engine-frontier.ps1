@@ -2896,7 +2896,16 @@ function Test-FarLodHorizon {
     $exe = Get-ClientExe
     $runSeconds = [Math]::Max(50, $SmokeSeconds)
 
-    foreach ($preset in @("mountains", "default")) {
+    # T-I4-DR-far-water-sheet: archipelago (sea to horizon) added so the
+    # water-continuity assertion below runs on an open-water preset alongside
+    # mountains (river channels). default stays dry (height_offset 20).
+    # Water-bearing presets must render a far water sheet; open-water presets
+    # additionally must show far-water pixels in the live/far boundary band
+    # (rivers are too sparse to guarantee the band crosses a channel, so the
+    # boundary-band-coverage assertion is gated to the sea preset).
+    $waterBearingPresets = @("mountains", "archipelago")
+    $openWaterPresets = @("archipelago")
+    foreach ($preset in @("mountains", "default", "archipelago")) {
         $viewDir = "build/$BuildPreset/test-artifacts/runtime/farlod-horizon-$preset"
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $viewDir
         New-Item -ItemType Directory -Force -Path $viewDir | Out-Null
@@ -2992,6 +3001,31 @@ function Test-FarLodHorizon {
             $analysis.farlod.farlod_resident_bytes, $analysis.farlod.far_region_draws, $analysis.farlod.far_indices_drawn, `
             $analysis.gbuffer.baseline_gbuffer_gpu_ms, $analysis.gbuffer.far_gbuffer_gpu_ms, $analysis.gbuffer.gbuffer_delta_ms, `
             $analysis.aggregates.max_below_horizon_sky_ratio, $analysis.aggregates.bands_resolved)
+
+        # T-I4-DR-far-water-sheet: water-continuity gate. On a water-bearing
+        # preset the far path must render a flat water sheet where the live
+        # water ring ends (river channels / seabeds beyond the live ring) - no
+        # dry band. Proven two ways: the far water sheet is actually drawn
+        # (max_water_sheet_draws > 0), and the live/far boundary band shows
+        # far-water pixels (max_boundary_band_water_ratio > 0). The dry "default"
+        # preset (height_offset 20) legitimately renders no far water and is
+        # skipped. The below-horizon sky-ratio gate above already proves the
+        # combined far terrain+water leaves no sky/void band below the horizon.
+        $maxWaterDraws = [int]$analysis.far_water.max_water_sheet_draws
+        $maxBandWaterRatio = [double]$analysis.aggregates.max_boundary_band_water_ratio
+        if ($waterBearingPresets -contains $preset) {
+            if ($maxWaterDraws -le 0) {
+                throw "farlod horizon ($preset) water-continuity: far path rendered no water sheet (max_water_sheet_draws=$maxWaterDraws) past the live water ring"
+            }
+            if (($openWaterPresets -contains $preset) -and $maxBandWaterRatio -le 0.0) {
+                throw "farlod horizon ($preset) water-continuity: live/far boundary band shows no far-water pixels (max_boundary_band_water_ratio=$maxBandWaterRatio) - dry band at the ring boundary over water"
+            }
+            Write-Host ("farlod horizon ({0}): far-water continuity OK - water_sheet_draws_max={1} boundary_band_water_ratio_max={2}" -f `
+                $preset, $maxWaterDraws, $maxBandWaterRatio)
+        } else {
+            Write-Host ("farlod horizon ({0}): dry preset - far water sheet not asserted (water_sheet_draws_max={1})" -f `
+                $preset, $maxWaterDraws)
+        }
 
         # T-I4-DR-river-seam-sliver: above-horizon sky-sliver telemetry. The
         # area-based below-horizon sky-ratio gate cannot see a thin near-vertical

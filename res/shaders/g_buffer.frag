@@ -121,6 +121,12 @@ void main()
         case 3u: albedo = vec3(0.2, 0.6, 0.15); break;         // Grass
         case 4u: albedo = vec3(0.9, 0.8, 0.5); break;          // Sand
         case 6u: albedo = vec3(0.85, 0.95, 1.0); break;        // Luminous Crystal
+        // T-I4-DR-far-water-sheet: flat far-water sheet. Deep-water albedo with
+        // a constant sky-reflection tint so the far field reads as water past
+        // the live water ring, WITHOUT the live water.frag reflection/caustic
+        // pipeline (too costly and unnecessary at kilometer range). Material id
+        // 200 (FarLodSystem::kFarWaterMaterialId).
+        case 200u: albedo = mix(vec3(0.04, 0.10, 0.18), vec3(0.42, 0.55, 0.68), 0.35); break;
     }
 
     // --- Triplanar terrain texturing (T-I4-7) ---
