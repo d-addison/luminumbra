@@ -275,6 +275,40 @@ void FrameWaterVisualCameras(
     target.reflection_camera_position = target.focus - best_dir * kReflectionDistance + Luminumbra::Vec3(0.0f, kReflectionHeight, 0.0f);
     const float reflection_terrain = world_system->GetTerrainHeightAt(target.reflection_camera_position.x, target.reflection_camera_position.z);
     target.reflection_camera_position.y = std::max(target.reflection_camera_position.y, reflection_terrain + 12.0f);
+
+    // T-I2-16c: locate the nearest shallow-tint (0.8-1.6 m), foam-band
+    // (0.25-0.6 m) and deep (>= 3 m) water-surface points around the focus.
+    // All are projected into the top-down capture to gate the depth tint
+    // gradient and the shoreline foam band. The 64 m search radius stays
+    // inside the top-down camera footprint.
+    constexpr int kDepthSearchRadius = 64;
+    constexpr int kDepthSearchStep = 2;
+    float best_shallow_distance_sq = std::numeric_limits<float>::max();
+    float best_foam_distance_sq = std::numeric_limits<float>::max();
+    float best_deep_distance_sq = std::numeric_limits<float>::max();
+    for (int dz = -kDepthSearchRadius; dz <= kDepthSearchRadius; dz += kDepthSearchStep) {
+        for (int dx = -kDepthSearchRadius; dx <= kDepthSearchRadius; dx += kDepthSearchStep) {
+            const float x = target.focus.x + static_cast<float>(dx);
+            const float z = target.focus.z + static_cast<float>(dz);
+            const float water_depth = Luminumbra::SEA_LEVEL - world_system->GetTerrainHeightAt(x, z);
+            const float distance_sq = static_cast<float>(dx * dx + dz * dz);
+            if (water_depth >= 0.8f && water_depth <= 1.6f && distance_sq < best_shallow_distance_sq) {
+                best_shallow_distance_sq = distance_sq;
+                target.shallow_point = Luminumbra::Vec3(x, Luminumbra::SEA_LEVEL, z);
+                target.shallow_point_found = true;
+            }
+            if (water_depth >= 0.25f && water_depth <= 0.6f && distance_sq < best_foam_distance_sq) {
+                best_foam_distance_sq = distance_sq;
+                target.foam_point = Luminumbra::Vec3(x, Luminumbra::SEA_LEVEL, z);
+                target.foam_point_found = true;
+            }
+            if (water_depth >= 3.0f && distance_sq < best_deep_distance_sq) {
+                best_deep_distance_sq = distance_sq;
+                target.deep_point = Luminumbra::Vec3(x, Luminumbra::SEA_LEVEL, z);
+                target.deep_point_found = true;
+            }
+        }
+    }
 }
 
 } // namespace
@@ -668,6 +702,74 @@ WaterReflectionStats AnalyzeWaterReflection(
     return stats;
 }
 
+// Foam pixels are bright and nearly achromatic: white-ish froth over any of
+// the water tints. Calibrated against the procedural shoreline band: full
+// foam captures at min channel >= 140; lit sand measures min ~32 and bright
+// shallow water min ~96 with a wider channel spread, so neither aliases in.
+bool IsFoamLikePixel(unsigned char r, unsigned char g, unsigned char b) {
+    const int max_channel = std::max({static_cast<int>(r), static_cast<int>(g), static_cast<int>(b)});
+    const int min_channel = std::min({static_cast<int>(r), static_cast<int>(g), static_cast<int>(b)});
+    return min_channel >= 140 && (max_channel - min_channel) <= 60;
+}
+
+WaterRegionPatch AnalyzeWaterRegionPatch(
+    const std::vector<unsigned char>& pixels,
+    int width,
+    int height,
+    int center_x,
+    int center_y_from_top,
+    int radius)
+{
+    WaterRegionPatch patch;
+    patch.center_x = center_x;
+    patch.center_y_from_top = center_y_from_top;
+    if (width <= 0 || height <= 0 || radius <= 0 ||
+        pixels.size() < static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u) {
+        return patch;
+    }
+
+    const std::size_t row_stride = static_cast<std::size_t>(width) * 3u;
+    double sum_r = 0.0;
+    double sum_g = 0.0;
+    double sum_b = 0.0;
+    for (int oy = -radius; oy <= radius; ++oy) {
+        const int y_from_top = center_y_from_top + oy;
+        if (y_from_top < 0 || y_from_top >= height) {
+            continue;
+        }
+        const int y = height - 1 - y_from_top; // glReadPixels rows start at the bottom
+        for (int ox = -radius; ox <= radius; ++ox) {
+            const int x = center_x + ox;
+            if (x < 0 || x >= width) {
+                continue;
+            }
+            const std::size_t offset = static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
+            const unsigned char r = pixels[offset + 0u];
+            const unsigned char g = pixels[offset + 1u];
+            const unsigned char b = pixels[offset + 2u];
+            ++patch.pixels;
+            sum_r += static_cast<double>(r);
+            sum_g += static_cast<double>(g);
+            sum_b += static_cast<double>(b);
+            if (IsFoamLikePixel(r, g, b)) {
+                ++patch.foam_pixels;
+            }
+        }
+    }
+    if (patch.pixels == 0) {
+        return patch;
+    }
+
+    patch.sampled = true;
+    patch.mean_r = sum_r / static_cast<double>(patch.pixels);
+    patch.mean_g = sum_g / static_cast<double>(patch.pixels);
+    patch.mean_b = sum_b / static_cast<double>(patch.pixels);
+    const double gb_sum = patch.mean_g + patch.mean_b;
+    patch.gb_balance = gb_sum > 0.0 ? (patch.mean_g - patch.mean_b) / gb_sum : 0.0;
+    patch.foam_ratio = static_cast<double>(patch.foam_pixels) / static_cast<double>(patch.pixels);
+    return patch;
+}
+
 // Mean luminance (Rec.601, 0-255) of the water-like pixels inside the same
 // ROI AnalyzeScreenshotPixels gates on. Read back from the back buffer so the
 // caustics-animation probe samples exactly what the screenshot capture sees.
@@ -947,10 +1049,28 @@ void WriteWaterVisualAnalysis(
     const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass,
     const Luminumbra::Rendering::RenderPipeline::MeshUploadFrameStats& upload_queue,
     const std::vector<WaterCausticsSample>& caustics_samples,
-    const WaterReflectionStats& reflection_stats)
+    const WaterReflectionStats& reflection_stats,
+    const WaterRegionPatch& shallow_patch,
+    const WaterRegionPatch& deep_patch,
+    const WaterRegionPatch& foam_patch)
 {
     constexpr std::uint64_t kMinWaterLikePixels = 2500;
     constexpr double kMinWaterLikeRatio = 0.02;
+    // T-I2-16c depth gradient + shoreline foam gates, calibrated against the
+    // top-down noon capture:
+    // - depth gradient: the shallow (0.8-1.6 m) patch measured gb_balance
+    //   +0.012 (bright teal, green/blue balanced) vs the deep patch -0.264
+    //   (blue-led): separation measured 0.276. This is a property gate (the
+    //   pre-change linear ramp already had distinct endpoint hues at 0.276;
+    //   the new curve reshapes the falloff) protecting the shallow-teal vs
+    //   deep-blue contrast against regressions. Floor 0.12 keeps >2x margin.
+    // - shoreline foam: the foam-band patch measured a foam-like pixel
+    //   ratio of 0.084-0.108 with the procedural band; the pre-change
+    //   shader (foam multiplied by the black fallback texture, i.e. never
+    //   rendered) measured 0.0. Floor 0.04 sits ~2x under the weakest
+    //   measured band.
+    constexpr double kMinDepthGradientSeparation = 0.12;
+    constexpr double kMinShorelineFoamRatio = 0.04;
     // T-I2-16b reflection gate, calibrated against the grazing open-water
     // reflection capture (noon): with the sky-aware SSR miss color the
     // upper-band water hue correlates with the sky reference at 0.9895; the
@@ -1033,6 +1153,18 @@ void WriteWaterVisualAnalysis(
         reflection_stats.upper_roi_water_pixels >= kMinReflectionWaterPixels &&
         reflection_stats.sky_correlation >= kMinSkyCorrelation;
 
+    const double depth_gradient_separation =
+        (shallow_patch.sampled && deep_patch.sampled)
+            ? shallow_patch.gb_balance - deep_patch.gb_balance
+            : 0.0;
+    const bool depth_gradient_present =
+        shallow_patch.sampled &&
+        deep_patch.sampled &&
+        depth_gradient_separation >= kMinDepthGradientSeparation;
+    const bool foam_present =
+        foam_patch.sampled &&
+        foam_patch.foam_ratio >= kMinShorelineFoamRatio;
+
     const GLDebugRuntimeStats gl_debug = CurrentGLDebugRuntimeStats();
     const bool passed =
         target.found &&
@@ -1042,6 +1174,8 @@ void WriteWaterVisualAnalysis(
         pixel_stats.water_like_ratio >= kMinWaterLikeRatio &&
         caustics_animated &&
         reflection_sky_correlated &&
+        depth_gradient_present &&
+        foam_present &&
         gl_debug.errors == 0;
 
     nlohmann::json caustics_sample_json = nlohmann::json::array();
@@ -1077,6 +1211,45 @@ void WriteWaterVisualAnalysis(
             {"water_uploads_deferred", upload_queue.water_uploads_deferred},
             {"terrain_upload_candidates", upload_queue.terrain_upload_candidates},
             {"terrain_uploads_deferred", upload_queue.terrain_uploads_deferred}
+        }},
+        {"depth_gradient", {
+            {"shallow_point_found", target.shallow_point_found},
+            {"deep_point_found", target.deep_point_found},
+            {"shallow", {
+                {"sampled", shallow_patch.sampled},
+                {"center_x", shallow_patch.center_x},
+                {"center_y_from_top", shallow_patch.center_y_from_top},
+                {"pixels", shallow_patch.pixels},
+                {"mean_rgb", {shallow_patch.mean_r, shallow_patch.mean_g, shallow_patch.mean_b}},
+                {"gb_balance", shallow_patch.gb_balance}
+            }},
+            {"deep", {
+                {"sampled", deep_patch.sampled},
+                {"center_x", deep_patch.center_x},
+                {"center_y_from_top", deep_patch.center_y_from_top},
+                {"pixels", deep_patch.pixels},
+                {"mean_rgb", {deep_patch.mean_r, deep_patch.mean_g, deep_patch.mean_b}},
+                {"gb_balance", deep_patch.gb_balance}
+            }},
+            {"hue_separation", depth_gradient_separation},
+            {"present", depth_gradient_present},
+            {"thresholds", {
+                {"min_hue_separation", kMinDepthGradientSeparation}
+            }}
+        }},
+        {"foam_presence", {
+            {"foam_point_found", target.foam_point_found},
+            {"sampled", foam_patch.sampled},
+            {"center_x", foam_patch.center_x},
+            {"center_y_from_top", foam_patch.center_y_from_top},
+            {"patch_pixels", foam_patch.pixels},
+            {"foam_pixels", foam_patch.foam_pixels},
+            {"foam_ratio", foam_patch.foam_ratio},
+            {"mean_rgb", {foam_patch.mean_r, foam_patch.mean_g, foam_patch.mean_b}},
+            {"present", foam_present},
+            {"thresholds", {
+                {"min_foam_ratio", kMinShorelineFoamRatio}
+            }}
         }},
         {"reflection", {
             {"screenshot", reflection_screenshot},

@@ -1495,7 +1495,43 @@ int main(int argc, char* argv[]) {
     std::vector<unsigned char> water_caustics_previous_texels;
     double water_caustics_next_sample_seconds = 0.0;
     ScreenshotPixelStats water_visual_pixel_stats;
+    WaterRegionPatch water_shallow_patch;
+    WaterRegionPatch water_deep_patch;
+    WaterRegionPatch water_foam_patch;
     bool water_reflection_capture_written = false;
+    // Projects a world point into capture pixel coordinates using the same
+    // projection the render pipeline builds. Returns false when the point is
+    // behind the camera or too close to the frame edge for a full patch.
+    const auto project_world_to_capture = [](const Luminumbra::Rendering::Camera& camera,
+                                             const Luminumbra::Vec3& world,
+                                             int width,
+                                             int height,
+                                             int margin,
+                                             int& out_x,
+                                             int& out_y_from_top) -> bool {
+        if (width <= 0 || height <= 0) {
+            return false;
+        }
+        const glm::mat4 projection = glm::perspective(
+            glm::radians(camera.Zoom),
+            static_cast<float>(width) / static_cast<float>(height),
+            camera.GetNearPlane(),
+            camera.GetFarPlane());
+        const glm::vec4 clip = projection * camera.GetViewMatrix() * glm::vec4(world, 1.0f);
+        if (clip.w <= 0.0f) {
+            return false;
+        }
+        const glm::vec3 ndc = glm::vec3(clip) / clip.w;
+        const int x = static_cast<int>((ndc.x * 0.5f + 0.5f) * static_cast<float>(width));
+        const int y_from_bottom = static_cast<int>((ndc.y * 0.5f + 0.5f) * static_cast<float>(height));
+        const int y_from_top = height - 1 - y_from_bottom;
+        if (x < margin || x >= width - margin || y_from_top < margin || y_from_top >= height - margin) {
+            return false;
+        }
+        out_x = x;
+        out_y_from_top = y_from_top;
+        return true;
+    };
     WaterVisualCameraTarget material_visual_target;
     bool material_visual_target_initialized = false;
     bool material_visual_capture_written = false;
@@ -1815,10 +1851,52 @@ int main(int argc, char* argv[]) {
                                 int screenshot_width = 0;
                                 int screenshot_height = 0;
                                 glfwGetFramebufferSize(window, &screenshot_width, &screenshot_height);
-                                ScreenshotPixelStats pixel_stats;
-                                if (WriteBackbufferPpm(scenario_config.artifact_dir / "screenshots/water-visual.ppm", screenshot_width, screenshot_height, &pixel_stats)) {
-                                    water_visual_capture_written = true;
-                                    water_visual_pixel_stats = pixel_stats;
+                                if (screenshot_width > 0 && screenshot_height > 0) {
+                                    std::vector<unsigned char> frame_pixels(
+                                        static_cast<std::size_t>(screenshot_width) * static_cast<std::size_t>(screenshot_height) * 3u);
+                                    glReadBuffer(GL_BACK);
+                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                                    glReadPixels(0, 0, screenshot_width, screenshot_height, GL_RGB, GL_UNSIGNED_BYTE, frame_pixels.data());
+
+                                    if (WritePixelBufferPpm(scenario_config.artifact_dir / "screenshots/water-visual.ppm", screenshot_width, screenshot_height, frame_pixels)) {
+                                        water_visual_capture_written = true;
+                                        water_visual_pixel_stats =
+                                            AnalyzeScreenshotPixels(frame_pixels, screenshot_width, screenshot_height);
+
+                                        // T-I2-16c: depth tint gradient + shoreline foam
+                                        // probes around the projected shallow/deep points.
+                                        constexpr int kWaterPatchRadius = 10;
+                                        int patch_x = 0;
+                                        int patch_y = 0;
+                                        if (water_visual_target.shallow_point_found && g_camera &&
+                                            project_world_to_capture(*g_camera, water_visual_target.shallow_point,
+                                                                     screenshot_width, screenshot_height,
+                                                                     kWaterPatchRadius, patch_x, patch_y)) {
+                                            water_shallow_patch = AnalyzeWaterRegionPatch(
+                                                frame_pixels, screenshot_width, screenshot_height,
+                                                patch_x, patch_y, kWaterPatchRadius);
+                                        }
+                                        if (water_visual_target.deep_point_found && g_camera &&
+                                            project_world_to_capture(*g_camera, water_visual_target.deep_point,
+                                                                     screenshot_width, screenshot_height,
+                                                                     kWaterPatchRadius, patch_x, patch_y)) {
+                                            water_deep_patch = AnalyzeWaterRegionPatch(
+                                                frame_pixels, screenshot_width, screenshot_height,
+                                                patch_x, patch_y, kWaterPatchRadius);
+                                        }
+                                        // Wider patch for the foam band: the projected
+                                        // point sits mid-band, the extra radius tolerates
+                                        // the heightfield-vs-mesh shoreline offset.
+                                        constexpr int kFoamPatchRadius = 16;
+                                        if (water_visual_target.foam_point_found && g_camera &&
+                                            project_world_to_capture(*g_camera, water_visual_target.foam_point,
+                                                                     screenshot_width, screenshot_height,
+                                                                     kFoamPatchRadius, patch_x, patch_y)) {
+                                            water_foam_patch = AnalyzeWaterRegionPatch(
+                                                frame_pixels, screenshot_width, screenshot_height,
+                                                patch_x, patch_y, kFoamPatchRadius);
+                                        }
+                                    }
                                 }
                             }
                             // Reflection capture (grazing open-water framing, T-I2-16b)
@@ -1856,7 +1934,10 @@ int main(int argc, char* argv[]) {
                                             render_pass_stats,
                                             renderPipeline.get_last_mesh_upload_stats(),
                                             water_caustics_samples,
-                                            reflection_stats
+                                            reflection_stats,
+                                            water_shallow_patch,
+                                            water_deep_patch,
+                                            water_foam_patch
                                         );
                                     }
                                 }
