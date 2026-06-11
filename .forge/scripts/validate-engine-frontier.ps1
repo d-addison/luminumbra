@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -2411,6 +2411,191 @@ function Test-PerfRegression {
     }
 }
 
+# --- T-I2-17 beautification track B (atmosphere) modes: append-only ---
+
+function Test-SkyboxVisual {
+    $exe = Get-ClientExe
+    $visualDir = "build/$BuildPreset/test-artifacts/runtime/skybox-visual"
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $visualDir
+    New-Item -ItemType Directory -Force -Path $visualDir | Out-Null
+
+    $runSeconds = [Math]::Max(15, $SmokeSeconds)
+    Invoke-Checked -FilePath $exe -ArgumentList @(
+        "--scenario", "skybox_visual_smoke",
+        "--auto-create-world",
+        "--auto-enter-world",
+        "--timed-run", "$runSeconds",
+        "--no-audio",
+        "--no-ui",
+        "--runtime-artifact-dir", $visualDir
+    ) -TimeoutSeconds ([Math]::Max(120, $runSeconds + 90))
+
+    $analysisPath = Join-Path $visualDir "skybox-visual-analysis.json"
+    if (-not (Test-Path $analysisPath)) {
+        throw "skybox visual run did not produce $analysisPath (gate produced by task T-I2-17a-enhanced-skybox)"
+    }
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.skybox_visual.v1") {
+        throw "Unexpected skybox visual analysis schema '$($analysis.schema)'"
+    }
+    if ([int64]$analysis.gl_debug.errors -ne 0) {
+        throw "Skybox visual run emitted GL debug errors: $($analysis.gl_debug.errors)"
+    }
+    if ([int]$analysis.render_pass.skybox_draws -le 0) {
+        throw "Skybox visual run did not submit skybox draws"
+    }
+    if (-not $analysis.gradient.passed) {
+        throw "Skybox horizon gradient check failed: drop=$($analysis.gradient.horizon_zenith_drop), violations=$($analysis.gradient.monotonic_violations)"
+    }
+    if ([double]$analysis.gradient.horizon_zenith_drop -lt [double]$analysis.thresholds.min_horizon_zenith_drop) {
+        throw "Skybox horizon->zenith luminance drop $($analysis.gradient.horizon_zenith_drop) is below threshold $($analysis.thresholds.min_horizon_zenith_drop)"
+    }
+    if ([int]$analysis.gradient.monotonic_violations -gt [int]$analysis.thresholds.max_monotonic_violations) {
+        throw "Skybox gradient has too many monotonicity violations: $($analysis.gradient.monotonic_violations)"
+    }
+    if (-not $analysis.sun_disc.passed) {
+        throw "Skybox sun-disc check failed: on_screen=$($analysis.sun_disc.on_screen), pixels=$($analysis.sun_disc.pixels), cluster_fraction=$($analysis.sun_disc.sun_cluster_fraction)"
+    }
+    if ([int64]$analysis.sun_disc.pixels -lt [int64]$analysis.thresholds.min_sun_disc_pixels) {
+        throw "Skybox sun-disc has too few high-luminance pixels: $($analysis.sun_disc.pixels)"
+    }
+    if ([double]$analysis.sun_disc.sun_cluster_fraction -lt [double]$analysis.thresholds.min_sun_cluster_fraction) {
+        throw "Skybox sun-disc cluster is not localized at the expected sun position"
+    }
+    if (-not $analysis.passed) {
+        throw "Skybox visual analysis reported failure"
+    }
+
+    Assert-PpmArtifact (Join-Path $visualDir $analysis.screenshot)
+}
+
+function Test-WeatherVisual {
+    $exe = Get-ClientExe
+    $visualDir = "build/$BuildPreset/test-artifacts/runtime/weather-visual"
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $visualDir
+    New-Item -ItemType Directory -Force -Path $visualDir | Out-Null
+
+    $runSeconds = [Math]::Max(20, $SmokeSeconds)
+    Invoke-Checked -FilePath $exe -ArgumentList @(
+        "--scenario", "weather_visual_smoke",
+        "--auto-create-world",
+        "--auto-enter-world",
+        "--timed-run", "$runSeconds",
+        "--no-audio",
+        "--no-ui",
+        "--runtime-artifact-dir", $visualDir
+    ) -TimeoutSeconds ([Math]::Max(120, $runSeconds + 90))
+
+    $analysisPath = Join-Path $visualDir "weather-visual-analysis.json"
+    if (-not (Test-Path $analysisPath)) {
+        throw "weather visual run did not produce $analysisPath (gate produced by task T-I2-17b-weather-overlay)"
+    }
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.weather_visual.v1") {
+        throw "Unexpected weather visual analysis schema '$($analysis.schema)'"
+    }
+    if ([int64]$analysis.gl_debug.errors -ne 0) {
+        throw "Weather visual run emitted GL debug errors: $($analysis.gl_debug.errors)"
+    }
+    if ($analysis.weather.type -ne "rain" -or [double]$analysis.weather.intensity -lt 1.0) {
+        throw "Weather visual run must exercise rain at intensity 1.0"
+    }
+    if (-not $analysis.overcast.passed) {
+        throw "Weather overcast luminance drop check failed: drop=$($analysis.overcast.sky_luminance_drop)"
+    }
+    if ([double]$analysis.overcast.sky_luminance_drop -lt [double]$analysis.thresholds.min_overcast_luminance_drop) {
+        throw "Weather sky luminance drop $($analysis.overcast.sky_luminance_drop) is below threshold $($analysis.thresholds.min_overcast_luminance_drop)"
+    }
+    if (-not $analysis.streaks.passed) {
+        throw "Weather streak structure check failed: gradient_ratio=$($analysis.streaks.sky_horizontal_gradient_ratio)"
+    }
+    if ([double]$analysis.streaks.sky_horizontal_gradient_ratio -lt [double]$analysis.thresholds.min_streak_gradient_ratio) {
+        throw "Weather streak gradient ratio $($analysis.streaks.sky_horizontal_gradient_ratio) is below threshold $($analysis.thresholds.min_streak_gradient_ratio)"
+    }
+    if (-not $analysis.passed) {
+        throw "Weather visual analysis reported failure"
+    }
+
+    Assert-PpmArtifact (Join-Path $visualDir $analysis.baseline_screenshot)
+    Assert-PpmArtifact (Join-Path $visualDir $analysis.weather_screenshot)
+}
+
+function Test-TimeOfDaySweep {
+    $exe = Get-ClientExe
+    $visualDir = "build/$BuildPreset/test-artifacts/runtime/timeofday-sweep"
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $visualDir
+    New-Item -ItemType Directory -Force -Path $visualDir | Out-Null
+
+    $runSeconds = [Math]::Max(24, $SmokeSeconds)
+    Invoke-Checked -FilePath $exe -ArgumentList @(
+        "--scenario", "timeofday_sweep_smoke",
+        "--auto-create-world",
+        "--auto-enter-world",
+        "--timed-run", "$runSeconds",
+        "--no-audio",
+        "--no-ui",
+        "--runtime-artifact-dir", $visualDir
+    ) -TimeoutSeconds ([Math]::Max(150, $runSeconds + 90))
+
+    $analysisPath = Join-Path $visualDir "timeofday-sweep-analysis.json"
+    if (-not (Test-Path $analysisPath)) {
+        throw "time-of-day sweep run did not produce $analysisPath (gate produced by task T-I2-17c-timeofday-sweep)"
+    }
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.timeofday_sweep.v1") {
+        throw "Unexpected time-of-day sweep analysis schema '$($analysis.schema)'"
+    }
+    if ([int64]$analysis.gl_debug.errors -ne 0) {
+        throw "Time-of-day sweep emitted GL debug errors: $($analysis.gl_debug.errors)"
+    }
+
+    $phases = @($analysis.phases)
+    if ($phases.Count -lt 3) {
+        throw "Time-of-day sweep must capture noon, dusk, and night phases (found $($phases.Count))"
+    }
+    foreach ($phaseName in @("noon", "dusk", "night")) {
+        $matches = @($phases | Where-Object { $_.name -eq $phaseName })
+        if ($matches.Count -ne 1) {
+            throw "Time-of-day sweep is missing the '$phaseName' phase capture"
+        }
+        Assert-PpmArtifact (Join-Path $visualDir $matches[0].screenshot)
+    }
+
+    if (-not $analysis.luminance_ordering.passed) {
+        throw "Time-of-day luminance ordering failed: noon=$($analysis.luminance_ordering.noon_mean_luminance) dusk=$($analysis.luminance_ordering.dusk_mean_luminance) night=$($analysis.luminance_ordering.night_mean_luminance)"
+    }
+    if ([double]$analysis.luminance_ordering.noon_over_dusk_gap -lt [double]$analysis.thresholds.min_noon_over_dusk_gap) {
+        throw "Noon-over-dusk luminance gap $($analysis.luminance_ordering.noon_over_dusk_gap) is below threshold"
+    }
+    if ([double]$analysis.luminance_ordering.dusk_over_night_gap -lt [double]$analysis.thresholds.min_dusk_over_night_gap) {
+        throw "Dusk-over-night luminance gap $($analysis.luminance_ordering.dusk_over_night_gap) is below threshold"
+    }
+    if (-not $analysis.dusk_warm_shift.passed) {
+        throw "Dusk warm-shift check failed: r/b increase $($analysis.dusk_warm_shift.r_b_ratio_increase)"
+    }
+    if ([double]$analysis.dusk_warm_shift.r_b_ratio_increase -lt [double]$analysis.thresholds.min_dusk_warm_shift) {
+        throw "Dusk r/b warm shift $($analysis.dusk_warm_shift.r_b_ratio_increase) is below threshold $($analysis.thresholds.min_dusk_warm_shift)"
+    }
+    if (@("checked_surface_emissive", "not_applicable_no_surface_emissives") -notcontains $analysis.emissive_check.status) {
+        throw "Time-of-day emissive check reported unexpected status '$($analysis.emissive_check.status)'"
+    }
+    if (-not $analysis.emissive_check.passed) {
+        throw "Time-of-day emissive night check failed (status=$($analysis.emissive_check.status))"
+    }
+    if ($analysis.emissive_check.status -eq "checked_surface_emissive") {
+        Assert-PpmArtifact (Join-Path $visualDir $analysis.emissive_check.screenshot)
+        if ([int64]$analysis.emissive_check.center_glow_pixels -lt [int64]$analysis.thresholds.min_emissive_glow_pixels) {
+            throw "Emissive night capture has too few glow pixels: $($analysis.emissive_check.center_glow_pixels)"
+        }
+    }
+    if (-not $analysis.passed) {
+        throw "Time-of-day sweep analysis reported failure"
+    }
+}
+
 switch ($Mode) {
     "CodexOnly" { Test-CodexOnly }
     "Panels" { Test-Panels }
@@ -2441,6 +2626,9 @@ switch ($Mode) {
     "NetworkStateHash" { Test-NetworkStateHash }
     "PerfRegression" { Test-PerfRegression }
     "FrontierDisabled" { Test-FrontierDisabled }
+    "SkyboxVisual" { Test-SkyboxVisual }
+    "WeatherVisual" { Test-WeatherVisual }
+    "TimeOfDaySweep" { Test-TimeOfDaySweep }
     "All" {
         Test-CodexOnly
         Test-Files

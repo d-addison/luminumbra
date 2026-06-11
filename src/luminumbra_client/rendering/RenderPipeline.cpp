@@ -517,6 +517,7 @@ std::vector<RenderPipeline::ShaderHealthEntry> RenderPipeline::get_shader_health
     add_shader("ssao_blur", m_ssao_pass->ssao().blurShader);
     add_shader("water", m_water_pass->shader());
     add_shader("instanced_static_mesh", m_gbuffer_pass->instanced_static_mesh_shader());
+    add_shader("weather_overlay", m_skybox_pass->weather_shader());
     health.push_back({"gpu_sdf_compute", m_gpu_sdf.compute_program != 0, m_gpu_sdf.compute_program != 0 ? "" : "not initialized"});
     return health;
 }
@@ -2117,6 +2118,11 @@ u32 RenderPipeline::water_caustics_texture() const {
 
 void RenderPipeline::set_time_of_day(float normalized_time) {
     m_timeOfDay = std::clamp(normalized_time, 0.0f, 1.0f);
+}
+
+void RenderPipeline::set_weather(WeatherType type, float intensity) {
+    m_weather_type = type;
+    m_weather_intensity = std::clamp(intensity, 0.0f, 1.0f);
 }
 
 std::vector<glm::mat4> RenderPipeline::get_light_space_matrices(const Camera& camera) {
