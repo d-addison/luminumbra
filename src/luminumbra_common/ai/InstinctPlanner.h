@@ -50,9 +50,11 @@ struct InstinctPlan {
     bool passed = false;
 };
 
-InstinctPlanRequest MakeGrovestriderHungerFixture();
+// T-I3-17: the planner is pure engine — fixtures and pass expectations are
+// game data (data/common/archetypes/*.json carries an `expected` block the
+// gate consumes). plan.passed is generic: a non-empty deterministic ranking
+// with the top candidate selected.
 InstinctPlan PlanInstincts(const InstinctPlanRequest& request);
 std::string SerializeInstinctPlanJson(const InstinctPlan& plan, const std::string& build_preset);
-bool InstinctPlannerMeetsBaseline();
 
 } // namespace luminumbra::ai

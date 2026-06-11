@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "SkinnedMeshVisual", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "AethericDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "SkinnedMeshVisual", "EngineGameSplitLint", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -2883,6 +2883,95 @@ function Test-SkinnedMeshVisual {
         $analysis.diff.mesh_like_pixels_a, $analysis.diff.mesh_like_pixels_b)
 }
 
+function Test-EngineGameSplitLint {
+    # T-I3-17: engine/game decoupling lint. The engine (src/) must carry no
+    # Project Capture game nouns — content lives under data/ and worlds/.
+    # (a) path lint: no game noun in any path under src/;
+    # (b) content lint: no game noun in any engine source file.
+    # The aetheric compatibility alias (T-I3-17, removal at iteration close)
+    # is the single allowlisted exception.
+    $gameNouns = @(
+        "lumincrystal",
+        "grovestrider",
+        "glimmer",
+        "mossberry",
+        "glowcap",
+        "thunder_hollow",
+        "stream_reeds",
+        "lantern_wisp",
+        "aetheric"
+    )
+
+    # Allowlist: (path regex, noun) pairs that are legitimate during the
+    # alias window. Path separators normalized to '/'.
+    $allowlist = @(
+        @{ path = "^src/luminumbra_common/aetheric/"; noun = "aetheric" },
+        @{ path = "^src/luminumbra_common/sources\.cmake$"; noun = "aetheric" }
+    )
+
+    function Test-Allowlisted {
+        param([string]$RelativePath, [string]$Noun)
+        foreach ($entry in $allowlist) {
+            if ($RelativePath -match $entry.path -and $Noun -eq $entry.noun) {
+                return $true
+            }
+        }
+        return $false
+    }
+
+    $violations = New-Object 'System.Collections.Generic.List[string]'
+    $srcRoot = (Resolve-Path "src").Path
+    $files = Get-ChildItem -Path "src" -Recurse -File |
+        Where-Object { $_.Extension -in @(".h", ".hpp", ".c", ".cpp", ".inl", ".cmake", ".txt") -or $_.Name -eq "sources.cmake" }
+
+    $scannedFiles = 0
+    foreach ($file in $files) {
+        $relative = $file.FullName.Substring($srcRoot.Length - 3).Replace("\", "/")
+        $scannedFiles++
+
+        # (a) path lint.
+        foreach ($noun in $gameNouns) {
+            if ($relative.ToLowerInvariant().Contains($noun)) {
+                if (-not (Test-Allowlisted -RelativePath $relative -Noun $noun)) {
+                    $violations.Add("path: $relative contains game noun '$noun'")
+                }
+            }
+        }
+
+        # (b) content lint.
+        $content = Get-Content $file.FullName -Raw
+        if ($null -eq $content) { continue }
+        $lower = $content.ToLowerInvariant()
+        foreach ($noun in $gameNouns) {
+            if ($lower.Contains($noun)) {
+                if (-not (Test-Allowlisted -RelativePath $relative -Noun $noun)) {
+                    $violations.Add("content: $relative contains game noun '$noun'")
+                }
+            }
+        }
+    }
+
+    if ($scannedFiles -lt 50) {
+        throw "engine-game split lint scanned suspiciously few files ($scannedFiles); src/ scan is broken"
+    }
+
+    # Relocated game content must exist where it belongs.
+    foreach ($dataFile in @("data/common/archetypes/grovestrider.json")) {
+        if (-not (Test-Path $dataFile)) {
+            throw "engine-game split lint: relocated game content missing: $dataFile"
+        }
+    }
+
+    if ($violations.Count -gt 0) {
+        foreach ($violation in $violations) {
+            Write-Host "  $violation"
+        }
+        throw "engine-game split lint found $($violations.Count) violation(s) in src/"
+    }
+
+    Write-Host "engine-game split lint: $scannedFiles engine files scanned, 0 game-noun violations (aetheric alias allowlisted until iteration close)"
+}
+
 switch ($Mode) {
     "CodexOnly" { Test-CodexOnly }
     "Panels" { Test-Panels }
@@ -2919,6 +3008,7 @@ switch ($Mode) {
     "PlayerView" { Test-PlayerView }
     "FarLodHorizon" { Test-FarLodHorizon }
     "SkinnedMeshVisual" { Test-SkinnedMeshVisual }
+    "EngineGameSplitLint" { Test-EngineGameSplitLint }
     "All" {
         Test-CodexOnly
         Test-Files

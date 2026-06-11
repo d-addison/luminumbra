@@ -1,4 +1,5 @@
 #include "GameSession.h"
+#include "../ai/InstinctSystem.h"
 #include "../animation/AnimationRuntime.h"
 #include "../systems/SHIELD_WorldSystem.h" // This includes TerrainGenParams
 #include "../core/JobSystem.h"
@@ -72,7 +73,6 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         // Deterministic per-tick system order (design-decisions.md §1).
         // Remaining placeholder slots until the owning iteration-3/4 tasks
         // land:
-        //   2. Instinct planning (T-I3 planner runtime)
         //   3. Field budget (iteration 4)
         //   4. Queued world edits
         // Finally, the ordered event bus drains everything published for
@@ -80,6 +80,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
 
         // 1. Animation pose sampling (T-I3-15): FIRST in the tick order.
         luminumbra::animation::SamplePosesOnTick(m_registry, m_simulationClock.fixed_dt());
+
+        // 2. Instinct planning (T-I3-17): need growth + deterministic
+        // replanning over the registry.
+        luminumbra::ai::RunInstinctSystemOnTick(m_registry, current_tick);
 
         m_simulationEventBus.drain(current_tick);
     }

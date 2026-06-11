@@ -1,0 +1,33 @@
+{
+  "schema": "luminumbra.game.archetype.v1",
+  "archetype": "grovestrider",
+  "actor_id": "grovestrider-01",
+  "comment": "Project Capture game content (T-I3-17): the grovestrider hunger fixture relocated out of engine source. The `expected` block is the planner gate's baseline; the engine never reads this file.",
+  "needs": [
+    { "name": "hunger", "pressure": 0.92, "growth_per_tick": 0.0 },
+    { "name": "safety", "pressure": 0.28, "growth_per_tick": 0.0 },
+    { "name": "curiosity", "pressure": 0.18, "growth_per_tick": 0.0 },
+    { "name": "fatigue", "pressure": 0.22, "growth_per_tick": 0.0 }
+  ],
+  "opportunities": [
+    { "id": "mossberry-cache", "action": "forage", "target": "mossberry_grove", "need": "hunger", "satisfaction": 0.94, "urgency": 0.85, "distance": 2.0, "risk": 0.08, "stamina_cost": 0.18 },
+    { "id": "stream-reeds", "action": "graze", "target": "stream_reeds", "need": "hunger", "satisfaction": 0.42, "urgency": 0.6, "distance": 1.0, "risk": 0.03, "stamina_cost": 0.08 },
+    { "id": "thunder-hollow", "action": "shelter", "target": "thunder_hollow", "need": "safety", "satisfaction": 0.7, "urgency": 0.4, "distance": 0.8, "risk": 0.02, "stamina_cost": 0.1 },
+    { "id": "glowcap-ring", "action": "inspect", "target": "glowcap_ring", "need": "curiosity", "satisfaction": 0.55, "urgency": 0.35, "distance": 1.2, "risk": 0.15, "stamina_cost": 0.2 }
+  ],
+  "expected": {
+    "decision_contract": "deterministic_priority_then_cost",
+    "dominant_need": "hunger",
+    "selected_action": "forage",
+    "selected_target": "mossberry_grove",
+    "selected_score": 2.1366,
+    "candidate_count": 4,
+    "checksum": "fnv1a32:5bfeaba9",
+    "candidates": [
+      { "rank": 1, "id": "mossberry-cache", "need": "hunger", "action": "forage", "target": "mossberry_grove", "score": 2.1366, "need_pressure": 0.92 },
+      { "rank": 2, "id": "stream-reeds", "need": "hunger", "action": "graze", "target": "stream_reeds", "score": 1.2548, "need_pressure": 0.92 },
+      { "rank": 3, "id": "thunder-hollow", "need": "safety", "action": "shelter", "target": "thunder_hollow", "score": 0.648, "need_pressure": 0.28 },
+      { "rank": 4, "id": "glowcap-ring", "need": "curiosity", "action": "inspect", "target": "glowcap_ring", "score": 0.043, "need_pressure": 0.18 }
+    ]
+  }
+}

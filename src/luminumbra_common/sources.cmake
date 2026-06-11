@@ -2,11 +2,16 @@
 # Paths are anchored to this file so the list is safe to include from any
 # CMakeLists.txt in the tree.
 set(COMMON_SOURCES
-    # Aetheric
+    # Aetheric (T-I3-17 compatibility alias for fields/ScalarFieldDiffusion;
+    # alias removal at iteration close)
     ${CMAKE_CURRENT_LIST_DIR}/aetheric/AethericFieldDiffusion.cpp
 
     # AI
     ${CMAKE_CURRENT_LIST_DIR}/ai/InstinctPlanner.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/ai/InstinctSystem.cpp
+
+    # Fields
+    ${CMAKE_CURRENT_LIST_DIR}/fields/ScalarFieldDiffusion.cpp
 
     # Animation
     ${CMAKE_CURRENT_LIST_DIR}/animation/AnimationRuntime.cpp
