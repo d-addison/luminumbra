@@ -16,9 +16,9 @@
 #include "luminumbra_common/world/Chunk.h"
 
 // Forward declarations
-namespace Luminumbra { class Chunk; }
+namespace Luminumbra { class Chunk; class JobSystem; }
 namespace Luminumbra::Systems { class SHIELD_WorldSystem; struct TerrainGenParams; }
-namespace Luminumbra::Rendering { class Shader; class Camera; class ShadowPass; class GBufferPass; class SsaoPass; class LightingPass; class WaterPass; class SkyboxPass; }
+namespace Luminumbra::Rendering { class Shader; class Camera; class ShadowPass; class GBufferPass; class SsaoPass; class LightingPass; class WaterPass; class SkyboxPass; class FarLodSystem; }
 
 namespace Luminumbra::Rendering {
 
@@ -152,6 +152,10 @@ public:
         size_t terrain_visible_chunks = 0;
         size_t terrain_draws = 0;
         size_t terrain_indices_drawn = 0;
+        // Far-LOD region meshes drawn in the G-buffer pass after the live
+        // chunks (T-I3-9). Recorded inside the gbuffer GPU timer window.
+        size_t far_region_draws = 0;
+        size_t far_indices_drawn = 0;
         std::array<size_t, ShadowMap::CASCADE_COUNT> shadow_cascade_visible_chunks{};
         std::array<size_t, ShadowMap::CASCADE_COUNT> shadow_cascade_draws{};
         size_t shadow_draws = 0;
@@ -286,6 +290,16 @@ public:
     GpuSdfRuntimeToggleState get_gpu_sdf_runtime_toggle_state() const;
     void SetupGPUSDFIntegration(Systems::SHIELD_WorldSystem& world_system);
 
+    // --- Far-LOD region rendering (T-I3-9) ---
+    // Far tile builds run on the attached JobSystem's Normal lane; without an
+    // attached job system the far-LOD path stays inert.
+    void attach_farlod_job_system(JobSystem* job_system);
+    // Drains in-flight far tile builds (they sample the world system). MUST
+    // run before the currently bound world is destroyed/recreated.
+    void prepare_world_swap();
+    FarLodSystem* farlod() { return m_farlod.get(); }
+    const FarLodSystem* farlod() const { return m_farlod.get(); }
+
 private:
     // Extracted render pass classes (T-I2-11). Passes own their GL resources
     // (FBOs/textures/shaders); the pipeline keeps orchestration order, shared
@@ -394,6 +408,7 @@ private:
     glm::vec3 m_skyAmbientColor;
     WeatherType m_weather_type = WeatherType::None;
     float m_weather_intensity = 0.0f;
+    std::unique_ptr<FarLodSystem> m_farlod;
     std::unique_ptr<GBufferPass> m_gbuffer_pass;
     std::unique_ptr<ShadowPass> m_shadow_pass;
     std::unique_ptr<SsaoPass> m_ssao_pass;

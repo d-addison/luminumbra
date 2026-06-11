@@ -66,6 +66,7 @@ struct RuntimeScenarioConfig {
     bool lod_seam_arrival_smoke() const { return scenario == "lod_seam_arrival_smoke"; }
     bool persistence_roundtrip_smoke() const { return scenario == "persistence_roundtrip_smoke"; }
     bool player_view_smoke() const { return scenario == "player_view_smoke"; }
+    bool farlod_horizon_smoke() const { return scenario == "farlod_horizon_smoke"; }
     bool forced_crash() const { return scenario == "forced_crash"; }
 };
 
@@ -645,6 +646,90 @@ void WritePlayerViewAnalysis(
     const std::vector<PlayerViewStationCapture>& captures,
     std::size_t expected_station_count,
     const Luminumbra::Systems::SHIELD_WorldSystem::RuntimeChunkStats& chunk_stats,
+    bool enforce_sky_ratio);
+
+// --- farlod_horizon_smoke (T-I3-9): far-LOD horizon + live/far seam gate ---
+// Two-phase run: phase A holds the eye-level camera with far-LOD DISABLED
+// and samples the gbuffer GPU time (the honest in-run baseline - the
+// committed perf baseline carries frame times, not per-pass GPU times);
+// phase B enables far-LOD and sweeps the stations, capturing each one after
+// a settle window plus the far gbuffer GPU time. The seam gate (the
+// Distant-Horizons failure mode): a boundary-band ROI spanning the live-ring
+// boundary (~192 m at the smoke radii) is analyzed with the below-horizon
+// sky-leak predicate and the strict void-cluster machinery - any sky/void
+// band at the live/far boundary fails the station.
+struct FarLodHorizonStation {
+    std::string name;
+    float yaw_degrees = 0.0f;
+    float pitch_degrees = 0.0f;
+    // Camera height above the spawn-column terrain (eye level or elevated).
+    float eye_height_meters = 1.8f;
+};
+
+std::vector<FarLodHorizonStation> BuildFarLodHorizonStations();
+
+void ApplyFarLodHorizonCamera(
+    Luminumbra::world::GameSession* game_session,
+    Luminumbra::Rendering::Camera* camera,
+    const FarLodHorizonStation& station);
+
+struct FarLodBoundaryBandStats {
+    // False when terrain along the forward azimuth occludes the boundary
+    // ring (projected band collapses above the horizon) - nothing to gate.
+    bool band_resolved = false;
+    int band_top_row_from_top = 0;
+    int band_bottom_row_from_top = 0;
+    std::uint64_t band_pixels = 0;
+    std::uint64_t band_sky_pixels = 0;
+    double band_sky_ratio = 0.0;
+    std::uint64_t void_cluster_count = 0;
+    std::uint64_t largest_void_cluster_px = 0;
+};
+
+// Projects ground points at the inner/outer band distances along the camera
+// forward azimuth (terrain height sampled per point) to screen rows; the
+// rows are clamped below the projected eye-level horizon row.
+bool ComputeFarLodBoundaryBandRows(
+    Luminumbra::world::GameSession* game_session,
+    const Luminumbra::Rendering::Camera& camera,
+    int width,
+    int height,
+    float inner_distance_m,
+    float outer_distance_m,
+    int horizon_row_from_top,
+    int& out_top_row_from_top,
+    int& out_bottom_row_from_top);
+
+FarLodBoundaryBandStats AnalyzeFarLodBoundaryBand(
+    const std::vector<unsigned char>& pixels,
+    int width,
+    int height,
+    int band_top_row_from_top,
+    int band_bottom_row_from_top);
+
+struct FarLodHorizonStationCapture {
+    FarLodHorizonStation station;
+    std::string file;
+    PlayerViewPixelStats sky;          // full below-horizon machinery
+    FarLodBoundaryBandStats boundary;  // live/far boundary band ROI
+    // Far-LOD scheduler state at capture time.
+    std::size_t regions_wanted = 0;
+    std::size_t regions_resident = 0;
+    std::size_t regions_missing = 0;
+    std::size_t resident_bytes = 0;
+    std::size_t region_draws = 0;
+    std::size_t far_indices_drawn = 0;
+};
+
+void WriteFarLodHorizonAnalysis(
+    const std::filesystem::path& artifact_dir,
+    const std::string& world_preset,
+    double duration_seconds,
+    const std::vector<FarLodHorizonStationCapture>& captures,
+    std::size_t expected_station_count,
+    double baseline_gbuffer_gpu_ms,
+    double far_gbuffer_gpu_ms,
+    bool gpu_timers_supported,
     bool enforce_sky_ratio);
 
 } // namespace Luminumbra::Client::ScenarioHarness

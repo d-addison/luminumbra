@@ -21,6 +21,7 @@
 #include <cmath>
 #include "luminumbra_common/components/LightingComponents.h"
 #include "RenderSystem.h"
+#include "FarLodSystem.h"
 #include "passes/GBufferPass.h"
 #include "passes/LightingPass.h"
 #include "passes/ShadowPass.h"
@@ -300,7 +301,8 @@ void RenderPipeline::HierarchicalCuller::Clear() {
 // --- CONSTRUCTOR / DESTRUCTOR ---
 
 RenderPipeline::RenderPipeline()
-    : m_gbuffer_pass(std::make_unique<GBufferPass>()),
+    : m_farlod(std::make_unique<FarLodSystem>()),
+      m_gbuffer_pass(std::make_unique<GBufferPass>()),
       m_shadow_pass(std::make_unique<ShadowPass>()),
       m_ssao_pass(std::make_unique<SsaoPass>()),
       m_lighting_pass(std::make_unique<LightingPass>()),
@@ -352,6 +354,18 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
 
 void RenderPipeline::shutdown() {
     cleanup_gpu_resources();
+}
+
+void RenderPipeline::attach_farlod_job_system(JobSystem* job_system) {
+    if (m_farlod) {
+        m_farlod->attach_job_system(job_system);
+    }
+}
+
+void RenderPipeline::prepare_world_swap() {
+    if (m_farlod) {
+        m_farlod->prepare_world_swap();
+    }
 }
 
 void RenderPipeline::set_gpu_sdf_runtime_enabled(bool enabled) {
@@ -468,6 +482,7 @@ RenderPipeline::RuntimeRenderStats RenderPipeline::get_runtime_render_stats() co
         estimated_vram_bytes += static_cast<size_t>(WaterPass::kCausticsResolution) *
                                 static_cast<size_t>(WaterPass::kCausticsResolution) * 4u; // RGBA8
     }
+    if (m_farlod) estimated_vram_bytes += m_farlod->stats().resident_bytes;
     if (m_gpu_sdf.sdf_buffer) estimated_vram_bytes += 17u * 17u * 17u * sizeof(float);
     if (m_gpu_sdf.terrain_noise_texture) estimated_vram_bytes += 128u * 128u * 128u * sizeof(float);
     if (m_gpu_sdf.cave_noise_texture) estimated_vram_bytes += 128u * 128u * 128u * sizeof(float);
@@ -589,6 +604,12 @@ RenderPipeline::RenderResourceRegistryStats RenderPipeline::get_resource_registr
     }
     for (const auto& data : m_free_water_render_slots) {
         count_water_slot(data);
+    }
+
+    // Far-LOD region meshes (one VAO + VBO/EBO per resident region, T-I3-9).
+    if (m_farlod) {
+        stats.vertex_arrays += m_farlod->resident_vertex_array_count();
+        stats.buffers += m_farlod->resident_vertex_array_count() * 2u;
     }
 
     for (const ShaderHealthEntry& shader : get_shader_health()) {
@@ -725,9 +746,10 @@ void RenderPipeline::refresh_render_pass_metadata() {
 
     add_pass("shadow", {"terrain_depth"}, {"shadow.depth_texture_array"}, m_shadow_pass->shadow_map().resolution, m_shadow_pass->shadow_map().resolution,
              "depth", "store depth cascades", m_last_render_pass_stats.shadow_draws);
-    add_pass("gbuffer", {"terrain_meshes", "static_meshes", "material_lut"},
+    add_pass("gbuffer", {"terrain_meshes", "farlod_region_meshes", "static_meshes", "material_lut"},
              {"gbuffer.position", "gbuffer.normal_material", "gbuffer.albedo_roughness", "gbuffer.metallic_ao", "gbuffer.depth"},
-             m_screen_width, m_screen_height, "color+depth", "store deferred attachments", m_last_render_pass_stats.terrain_draws);
+             m_screen_width, m_screen_height, "color+depth", "store deferred attachments",
+             m_last_render_pass_stats.terrain_draws + m_last_render_pass_stats.far_region_draws);
     add_pass("ssao", {"gbuffer.position", "gbuffer.normal_material", "ssao.noise"}, {"ssao.raw"}, m_screen_width, m_screen_height,
              "color", "store ambient occlusion", m_last_render_pass_stats.ssao_draws);
     add_pass("ssao_blur", {"ssao.raw"}, {"ssao.blur"}, m_screen_width, m_screen_height,
@@ -992,6 +1014,13 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     manage_water_gpu_resources(renderable_chunk_snapshots, camera);
     ensure_terrain_culling_hierarchy(renderable_chunk_snapshots);
 
+    // Far-LOD scheduling (T-I3-9): ring-diff the wanted region set, integrate
+    // finished tile builds (mesh uploads), and evict. Draws happen inside the
+    // G-buffer pass after the live chunks.
+    if (m_farlod) {
+        m_farlod->update(world_system, camera.Position);
+    }
+
     // Ensure no VAO is bound at start to prevent artifacts
     glBindVertexArray(0);
     
@@ -1166,6 +1195,9 @@ void RenderPipeline::init_screen_quad() {
 // --- CLEANUP ---
 
 void RenderPipeline::cleanup_gpu_resources() {
+    if (m_farlod) {
+        m_farlod->shutdown();
+    }
     for (auto& [id, d] : m_chunk_render_data) {
         (void)id;
         delete_chunk_slot(d);

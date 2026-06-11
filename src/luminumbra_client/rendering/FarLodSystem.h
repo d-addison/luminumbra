@@ -1,0 +1,172 @@
+#pragma once
+
+// Far-LOD region scheduler + render residency (T-I3-9).
+//
+// Extends the visible horizon past the live chunk ring by streaming far-LOD
+// region tiles (FarLodStore, T-I3-8) and drawing one merged heightfield mesh
+// per (tier, region) inside the G-buffer pass AFTER the live chunks:
+// - Ring-diff wanted set: every region whose footprint comes within the F2
+//   outer range (1536 m) of the camera is wanted; tier F1 (4 m) inside 768 m,
+//   F2 (8 m) beyond. Regions fully covered by the live chunk ring are skipped
+//   (live wins); partially-covered regions ARE drawn underneath the live
+//   terrain - a small depth bias plus polygon offset keeps the live geometry
+//   in front where the two surfaces coincide, and the far surface fills any
+//   live-side gaps instead of opening a sky/void band at the boundary (the
+//   Distant-Horizons failure mode the FarLodHorizon seam gate watches).
+// - Tiles build on the JobSystem Normal lane (pristine tiles are pure
+//   functions of (seed, params); edited tiles load from the LMR1 store when a
+//   save directory is attached); the main thread uploads finished meshes.
+// - Residency: 64 MB byte budget with least-recently-used eviction; regions
+//   leaving the wanted set free their GL buffers immediately.
+
+#include "luminumbra_common/world/FarLodStore.h"
+#include "luminumbra_common/core/JobSystem.h"
+
+#include <glad/glad.h>
+#include <glm/glm.hpp>
+
+#include <cstddef>
+#include <filesystem>
+#include <memory>
+#include <mutex>
+#include <unordered_map>
+#include <vector>
+
+namespace Luminumbra::Systems { class SHIELD_WorldSystem; }
+
+namespace Luminumbra::Rendering {
+
+class Shader;
+
+class FarLodSystem {
+public:
+    // Pinned numbers (design-decisions.md section 4).
+    static constexpr float kF1OuterRangeMeters = 768.0f;
+    static constexpr float kF2OuterRangeMeters = 1536.0f;
+    static constexpr std::size_t kResidentBudgetBytes = 64ull * 1024ull * 1024ull;
+    // Live chunk ring horizontal reach (RENDER_DISTANCE chunks): regions
+    // fully inside this disc are owned by live chunks and never drawn far.
+    static constexpr float kLiveRingRadiusMeters = 512.0f;
+    // Fragment-level live/far handoff: far-mesh fragments closer than this
+    // (the guaranteed-renderable LOD0 ring minus one chunk of overlap) are
+    // discarded in the G-buffer shader so the under-terrain far fill cannot
+    // show through live LOD seam cracks at close range, while everything
+    // beyond the live ring keeps far coverage (no gap band: the overlap chunk
+    // is drawn by BOTH paths and depth resolves it).
+    static constexpr float kFarClipInnerRadiusMeters = 176.0f;
+    // Far meshes sit slightly below the live surface so live geometry always
+    // wins where the two coincide (quantization can lift far samples at most
+    // 1/32 m above the analytic surface).
+    static constexpr float kFarDepthBiasMeters = 0.125f;
+    // Per-frame integration caps keep upload hitches bounded.
+    static constexpr std::size_t kMaxBuildDispatchesPerFrame = 8;
+    static constexpr std::size_t kMaxUploadsPerFrame = 6;
+
+    struct FrameStats {
+        bool enabled = false;
+        std::size_t regions_wanted = 0;
+        std::size_t regions_resident = 0;
+        // Wanted regions with no resident mesh yet (the FarLodHorizon gate
+        // requires this to settle to 0 out to 1536 m).
+        std::size_t regions_missing = 0;
+        std::size_t regions_building = 0;
+        std::size_t resident_bytes = 0; // tile payload + GPU mesh bytes
+        std::size_t region_draws = 0;
+        std::size_t indices_drawn = 0;
+        std::size_t builds_completed_total = 0;
+        std::size_t evictions_total = 0;
+    };
+
+    FarLodSystem();
+    ~FarLodSystem();
+
+    void attach_job_system(JobSystem* job_system) { m_job_system = job_system; }
+    // Optional persistence root: when set, edited (authoritative) far tiles
+    // load from the LMR1 store before falling back to pristine generation.
+    void set_save_dir(std::filesystem::path save_dir) { m_save_dir = std::move(save_dir); }
+    void set_enabled(bool enabled) { m_enabled = enabled; }
+    bool enabled() const { return m_enabled; }
+
+    // Waits for in-flight tile builds (they sample the world system) and
+    // drops the world binding. MUST run before the bound world is destroyed.
+    void prepare_world_swap();
+    // prepare_world_swap + frees every GL resource.
+    void shutdown();
+
+    // Ring-diff scheduling + finished-build integration + eviction. Called
+    // once per rendered frame from RenderPipeline::render_frame.
+    void update(const Systems::SHIELD_WorldSystem& world_system, const glm::vec3& camera_position);
+
+    // Draws resident far-region meshes with the ALREADY BOUND terrain
+    // geometry shader (VoxelVertex layout is identical). Region-AABB frustum
+    // culling; depth-biased so overlapping live chunks win. Returns draw and
+    // index counts for RenderPassFrameStats.
+    void draw_gbuffer(
+        Shader& geometry_shader,
+        const glm::mat4& view,
+        const glm::vec4 frustum_planes[6],
+        std::size_t& draws_out,
+        std::size_t& indices_out);
+
+    const FrameStats& stats() const { return m_stats; }
+    std::size_t resident_gpu_buffer_count() const { return m_residents.size() * 3u; }
+    std::size_t resident_vertex_array_count() const { return m_residents.size(); }
+
+private:
+    struct ResidentRegion {
+        World::FarLodTier tier = World::FarLodTier::F1;
+        int rx = 0;
+        int rz = 0;
+        GLuint vao = 0;
+        GLuint vbo = 0;
+        GLuint ebo = 0;
+        u32 element_count = 0;
+        glm::vec3 aabb_min{0.0f};
+        glm::vec3 aabb_max{0.0f};
+        std::size_t resident_bytes = 0;
+        u64 last_wanted_frame = 0;
+    };
+
+    struct BuildResult {
+        u64 epoch = 0;
+        World::FarLodTier tier = World::FarLodTier::F1;
+        int rx = 0;
+        int rz = 0;
+        float min_height = 0.0f;
+        float max_height = 0.0f;
+        std::size_t tile_bytes = 0;
+        World::FarLodRegionMesh mesh;
+    };
+
+    struct SharedBuildState {
+        std::mutex mutex;
+        std::vector<BuildResult> completed;
+    };
+
+    static u64 region_key(int rx, int rz);
+    void bind_world(const Systems::SHIELD_WorldSystem& world_system);
+    void wait_for_builds();
+    void release_region(ResidentRegion& region);
+    void integrate_completed_builds();
+    std::size_t total_resident_bytes() const;
+
+    JobSystem* m_job_system = nullptr;
+    bool m_enabled = true;
+    std::filesystem::path m_save_dir;
+
+    const Systems::SHIELD_WorldSystem* m_world = nullptr;
+    u64 m_params_hash = 0;
+    // Build-result generation: results from a previous world binding are
+    // discarded on integration.
+    u64 m_epoch = 0;
+    u64 m_frame = 0;
+
+    std::shared_ptr<SharedBuildState> m_shared = std::make_shared<SharedBuildState>();
+    std::vector<JobHandle> m_inflight_handles;
+    std::unordered_map<u64, World::FarLodTier> m_pending;
+    std::unordered_map<u64, ResidentRegion> m_residents;
+
+    FrameStats m_stats;
+};
+
+} // namespace Luminumbra::Rendering

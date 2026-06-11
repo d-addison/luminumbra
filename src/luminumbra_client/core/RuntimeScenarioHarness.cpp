@@ -99,10 +99,10 @@ RuntimeScenarioConfig ParseRuntimeScenarioConfig(int argc, char* argv[], const s
     config.persistence_session_dir = GetCommandLineOption(argc, argv, "--persistence-session-dir", "");
     config.world_preset = GetCommandLineOption(argc, argv, "--world-preset", "");
 
-    const int default_timed_run = config.auto_world_smoke() ? 300 : ((config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke() || config.skybox_visual_smoke() || config.weather_visual_smoke() || config.timeofday_sweep_smoke() || config.lod_boundary_oscillation_smoke() || config.lod_seam_arrival_smoke() || config.player_view_smoke()) ? 60 : 0);
+    const int default_timed_run = config.auto_world_smoke() ? 300 : ((config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke() || config.skybox_visual_smoke() || config.weather_visual_smoke() || config.timeofday_sweep_smoke() || config.lod_boundary_oscillation_smoke() || config.lod_seam_arrival_smoke() || config.player_view_smoke() || config.farlod_horizon_smoke()) ? 60 : 0);
     config.timed_run_seconds = GetCommandLineIntOption(argc, argv, "--timed-run", default_timed_run);
 
-    if (config.auto_world_smoke() || config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke() || config.skybox_visual_smoke() || config.weather_visual_smoke() || config.timeofday_sweep_smoke() || config.lod_boundary_oscillation_smoke() || config.lod_seam_arrival_smoke() || config.persistence_roundtrip_smoke() || config.player_view_smoke()) {
+    if (config.auto_world_smoke() || config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke() || config.skybox_visual_smoke() || config.weather_visual_smoke() || config.timeofday_sweep_smoke() || config.lod_boundary_oscillation_smoke() || config.lod_seam_arrival_smoke() || config.persistence_roundtrip_smoke() || config.player_view_smoke() || config.farlod_horizon_smoke()) {
         config.auto_create_world = true;
         config.auto_enter_world = true;
     }
@@ -3770,6 +3770,374 @@ void WritePlayerViewAnalysis(
     std::error_code ec;
     std::filesystem::create_directories(artifact_dir, ec);
     std::ofstream output(artifact_dir / "player-view-analysis.json");
+    output << std::setw(2) << artifact << '\n';
+}
+
+// --- farlod_horizon_smoke (T-I3-9) ---
+
+namespace {
+
+// FarLodHorizon thresholds (luminumbra.farlod_horizon.v1, pinned numbers in
+// design-decisions.md section 4).
+constexpr std::size_t kFarLodHorizonMaxMissingRegions = 0;
+constexpr std::size_t kFarLodHorizonResidentBudgetBytes = 64ull * 1024ull * 1024ull;
+constexpr double kFarLodHorizonMaxGbufferDeltaMs = 1.5;
+// Horizon screenshots must show terrain to the horizon: with the far field
+// resident there is no legitimate sky below the eye-level horizon away from
+// open sea, so the full below-horizon sky ratio gates at this bound (looser
+// than the 192 m player-view bound because the far heightfield approximates
+// silhouettes at kilometer range).
+constexpr double kFarLodHorizonMaxSkyRatio = 0.02;
+// Boundary band: ground distances spanning the live-ring boundary at the
+// smoke radii (radius 12 = 192 m).
+constexpr float kFarLodBoundaryBandInnerMeters = 128.0f;
+constexpr float kFarLodBoundaryBandOuterMeters = 384.0f;
+constexpr double kFarLodBoundaryMaxSkyRatio = 0.02;
+constexpr std::uint64_t kFarLodBoundaryMaxVoidClusters = 0;
+
+bool ProjectWorldPointToScreenRow(
+    const Luminumbra::Rendering::Camera& camera,
+    int width,
+    int height,
+    const Luminumbra::Vec3& world,
+    int& out_row_from_top)
+{
+    const glm::mat4 clip_matrix =
+        camera.GetProjectionMatrix(std::max(1, width), std::max(1, height)) * camera.GetViewMatrix();
+    const glm::vec4 clip = clip_matrix * glm::vec4(world, 1.0f);
+    if (clip.w <= 0.0f) {
+        return false;
+    }
+    const float ndc_y = clip.y / clip.w;
+    const int y_from_bottom = static_cast<int>((ndc_y * 0.5f + 0.5f) * static_cast<float>(height));
+    out_row_from_top = std::clamp(height - 1 - y_from_bottom, -height, 2 * height);
+    return true;
+}
+
+} // namespace
+
+std::vector<FarLodHorizonStation> BuildFarLodHorizonStations() {
+    // Four eye-level yaw stations spanning the boundary ring in every
+    // direction, plus an elevated station looking down across the boundary
+    // (the band ROI is widest there).
+    return {
+        {"eye_yaw_000", 0.0f, 0.0f, 1.8f},
+        {"eye_yaw_090", 90.0f, 0.0f, 1.8f},
+        {"eye_yaw_180", 180.0f, 0.0f, 1.8f},
+        {"eye_yaw_270", 270.0f, 0.0f, 1.8f},
+        {"elevated", 45.0f, -20.0f, 80.0f},
+    };
+}
+
+void ApplyFarLodHorizonCamera(
+    Luminumbra::world::GameSession* game_session,
+    Luminumbra::Rendering::Camera* camera,
+    const FarLodHorizonStation& station)
+{
+    if (!camera || !game_session || !game_session->GetWorldSystem()) {
+        return;
+    }
+    const Luminumbra::Vec3 spawn = game_session->GetMetadata().spawnPoint;
+    const float terrain_height = game_session->GetWorldSystem()->GetTerrainHeightAt(spawn.x, spawn.z);
+    camera->Position = Luminumbra::Vec3(spawn.x, terrain_height + station.eye_height_meters, spawn.z);
+    camera->Zoom = 60.0f;
+    camera->Yaw = station.yaw_degrees;
+    camera->Pitch = station.pitch_degrees;
+    camera->updateCameraVectors();
+}
+
+bool ComputeFarLodBoundaryBandRows(
+    Luminumbra::world::GameSession* game_session,
+    const Luminumbra::Rendering::Camera& camera,
+    int width,
+    int height,
+    float inner_distance_m,
+    float outer_distance_m,
+    int horizon_row_from_top,
+    int& out_top_row_from_top,
+    int& out_bottom_row_from_top)
+{
+    if (!game_session || !game_session->GetWorldSystem() || width <= 0 || height <= 0) {
+        return false;
+    }
+    auto* world_system = game_session->GetWorldSystem();
+
+    glm::vec3 forward = camera.Front;
+    forward.y = 0.0f;
+    if (glm::dot(forward, forward) <= 1.0e-6f) {
+        return false;
+    }
+    forward = glm::normalize(forward);
+
+    // Ground points at the band distances along the forward azimuth, at the
+    // sampled terrain height (the band follows the terrain, not a flat
+    // ground-plane assumption).
+    const auto ground_row = [&](float distance, int& out_row) -> bool {
+        const glm::vec3 ground_xz = glm::vec3(camera.Position) + forward * distance;
+        const float ground_height = world_system->GetTerrainHeightAt(ground_xz.x, ground_xz.z);
+        return ProjectWorldPointToScreenRow(
+            camera, width, height,
+            Luminumbra::Vec3(ground_xz.x, ground_height, ground_xz.z),
+            out_row);
+    };
+
+    int outer_row = 0; // farther ground projects higher in the frame
+    int inner_row = 0;
+    if (!ground_row(outer_distance_m, outer_row) || !ground_row(inner_distance_m, inner_row)) {
+        return false;
+    }
+
+    // Clamp below the horizon row (terrain rising above eye level occludes
+    // the boundary there; only the visible below-horizon part is gateable).
+    const int top = std::max(std::min(outer_row, inner_row), horizon_row_from_top);
+    const int bottom = std::min(std::max(outer_row, inner_row), height - 1);
+    if (bottom - top < 2) {
+        return false; // band fully occluded or degenerate
+    }
+    out_top_row_from_top = top;
+    out_bottom_row_from_top = bottom;
+    return true;
+}
+
+FarLodBoundaryBandStats AnalyzeFarLodBoundaryBand(
+    const std::vector<unsigned char>& pixels,
+    int width,
+    int height,
+    int band_top_row_from_top,
+    int band_bottom_row_from_top)
+{
+    FarLodBoundaryBandStats stats;
+    stats.band_top_row_from_top = band_top_row_from_top;
+    stats.band_bottom_row_from_top = band_bottom_row_from_top;
+    if (width <= 0 || height <= 0 ||
+        band_bottom_row_from_top <= band_top_row_from_top ||
+        pixels.size() < static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u) {
+        return stats;
+    }
+    stats.band_resolved = true;
+
+    const int min_x = width / 64;
+    const int max_x = width - min_x;
+    const std::size_t row_stride = static_cast<std::size_t>(width) * 3u;
+
+    // Sky-leak pass over the band (same predicate as the player-view gate).
+    std::vector<std::uint8_t> void_mask(static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0u);
+    for (int y = 0; y < height; ++y) {
+        const int y_from_top = height - 1 - y; // glReadPixels rows are bottom-up
+        if (y_from_top < band_top_row_from_top || y_from_top > band_bottom_row_from_top) {
+            continue;
+        }
+        for (int x = min_x; x < max_x; ++x) {
+            const std::size_t offset = static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
+            ++stats.band_pixels;
+            if (IsBelowHorizonSkyPixel(pixels[offset], pixels[offset + 1u], pixels[offset + 2u])) {
+                ++stats.band_sky_pixels;
+            }
+            if (pixels[offset] <= 2u && pixels[offset + 1u] <= 2u && pixels[offset + 2u] <= 2u) {
+                void_mask[static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)] = 1u;
+            }
+        }
+    }
+    if (stats.band_pixels > 0) {
+        stats.band_sky_ratio = static_cast<double>(stats.band_sky_pixels) / static_cast<double>(stats.band_pixels);
+    }
+
+    // Strict-void cluster pass (max(r,g,b) <= 2, 8-connectivity, >= 12 px)
+    // restricted to the boundary band.
+    constexpr std::uint64_t kMinVoidClusterPx = 12;
+    std::vector<std::size_t> flood_stack;
+    for (std::size_t seed = 0; seed < void_mask.size(); ++seed) {
+        if (void_mask[seed] != 1u) {
+            continue;
+        }
+        std::uint64_t cluster_px = 0;
+        flood_stack.clear();
+        flood_stack.push_back(seed);
+        void_mask[seed] = 2u;
+        while (!flood_stack.empty()) {
+            const std::size_t current = flood_stack.back();
+            flood_stack.pop_back();
+            ++cluster_px;
+            const int cx = static_cast<int>(current % static_cast<std::size_t>(width));
+            const int cy = static_cast<int>(current / static_cast<std::size_t>(width));
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const int nx = cx + dx;
+                    const int ny = cy + dy;
+                    if (nx < 0 || ny < 0 || nx >= width || ny >= height) {
+                        continue;
+                    }
+                    const std::size_t neighbor = static_cast<std::size_t>(ny) * static_cast<std::size_t>(width) + static_cast<std::size_t>(nx);
+                    if (void_mask[neighbor] == 1u) {
+                        void_mask[neighbor] = 2u;
+                        flood_stack.push_back(neighbor);
+                    }
+                }
+            }
+        }
+        stats.largest_void_cluster_px = std::max(stats.largest_void_cluster_px, cluster_px);
+        if (cluster_px >= kMinVoidClusterPx) {
+            ++stats.void_cluster_count;
+        }
+    }
+    return stats;
+}
+
+void WriteFarLodHorizonAnalysis(
+    const std::filesystem::path& artifact_dir,
+    const std::string& world_preset,
+    double duration_seconds,
+    const std::vector<FarLodHorizonStationCapture>& captures,
+    std::size_t expected_station_count,
+    double baseline_gbuffer_gpu_ms,
+    double far_gbuffer_gpu_ms,
+    bool gpu_timers_supported,
+    bool enforce_sky_ratio)
+{
+    const GLDebugRuntimeStats gl_debug = CurrentGLDebugRuntimeStats();
+    const double gbuffer_delta_ms = far_gbuffer_gpu_ms - baseline_gbuffer_gpu_ms;
+
+    std::size_t final_missing = 0;
+    std::size_t final_resident_bytes = 0;
+    std::size_t final_wanted = 0;
+    std::size_t final_resident = 0;
+    std::size_t final_draws = 0;
+    std::size_t final_indices = 0;
+    double max_sky_ratio = 0.0;
+    double max_band_sky_ratio = 0.0;
+    std::uint64_t max_band_void_clusters = 0;
+    std::size_t bands_resolved = 0;
+    bool all_stations_passed = captures.size() == expected_station_count;
+
+    nlohmann::json station_rows = nlohmann::json::array();
+    for (const FarLodHorizonStationCapture& capture : captures) {
+        const bool boundary_passed =
+            !capture.boundary.band_resolved ||
+            ((!enforce_sky_ratio || capture.boundary.band_sky_ratio < kFarLodBoundaryMaxSkyRatio) &&
+             capture.boundary.void_cluster_count <= kFarLodBoundaryMaxVoidClusters);
+        const bool horizon_passed =
+            (!enforce_sky_ratio || capture.sky.below_horizon_sky_ratio < kFarLodHorizonMaxSkyRatio) &&
+            capture.sky.void_cluster_count == 0;
+        const bool station_passed = boundary_passed && horizon_passed;
+        all_stations_passed = all_stations_passed && station_passed;
+
+        if (capture.boundary.band_resolved) {
+            ++bands_resolved;
+            max_band_sky_ratio = std::max(max_band_sky_ratio, capture.boundary.band_sky_ratio);
+            max_band_void_clusters = std::max(max_band_void_clusters, capture.boundary.void_cluster_count);
+        }
+        max_sky_ratio = std::max(max_sky_ratio, capture.sky.below_horizon_sky_ratio);
+        final_missing = capture.regions_missing;
+        final_resident_bytes = capture.resident_bytes;
+        final_wanted = capture.regions_wanted;
+        final_resident = capture.regions_resident;
+        final_draws = capture.region_draws;
+        final_indices = capture.far_indices_drawn;
+
+        station_rows.push_back({
+            {"name", capture.station.name},
+            {"yaw_degrees", capture.station.yaw_degrees},
+            {"pitch_degrees", capture.station.pitch_degrees},
+            {"eye_height_meters", capture.station.eye_height_meters},
+            {"file", capture.file},
+            {"horizon", {
+                {"horizon_row_from_top", capture.sky.horizon_row_from_top},
+                {"below_horizon_pixels", capture.sky.below_horizon_pixels},
+                {"below_horizon_sky_pixels", capture.sky.below_horizon_sky_pixels},
+                {"below_horizon_sky_ratio", capture.sky.below_horizon_sky_ratio},
+                {"void_cluster_count", capture.sky.void_cluster_count},
+                {"largest_void_cluster_px", capture.sky.largest_void_cluster_px},
+            }},
+            {"boundary_band", {
+                {"resolved", capture.boundary.band_resolved},
+                {"inner_distance_m", kFarLodBoundaryBandInnerMeters},
+                {"outer_distance_m", kFarLodBoundaryBandOuterMeters},
+                {"top_row_from_top", capture.boundary.band_top_row_from_top},
+                {"bottom_row_from_top", capture.boundary.band_bottom_row_from_top},
+                {"band_pixels", capture.boundary.band_pixels},
+                {"band_sky_pixels", capture.boundary.band_sky_pixels},
+                {"band_sky_ratio", capture.boundary.band_sky_ratio},
+                {"void_cluster_count", capture.boundary.void_cluster_count},
+                {"largest_void_cluster_px", capture.boundary.largest_void_cluster_px},
+            }},
+            {"farlod", {
+                {"regions_wanted", capture.regions_wanted},
+                {"regions_resident", capture.regions_resident},
+                {"regions_missing", capture.regions_missing},
+                {"resident_bytes", capture.resident_bytes},
+                {"region_draws", capture.region_draws},
+                {"far_indices_drawn", capture.far_indices_drawn},
+            }},
+            {"passed", station_passed},
+        });
+    }
+
+    // After-settle gates evaluate the LAST captured station's scheduler state
+    // (the wanted set stops changing once every station holds the same eye
+    // position; only the view direction sweeps).
+    const bool coverage_passed = !captures.empty() && final_missing <= kFarLodHorizonMaxMissingRegions;
+    const bool budget_passed = !captures.empty() && final_resident_bytes < kFarLodHorizonResidentBudgetBytes;
+    // gpu timer support is hardware-dependent; without timers the delta gate
+    // records zeros and passes (the honest comparison needs the timers).
+    const bool gbuffer_passed = !gpu_timers_supported || gbuffer_delta_ms < kFarLodHorizonMaxGbufferDeltaMs;
+    const bool passed =
+        all_stations_passed && coverage_passed && budget_passed && gbuffer_passed && gl_debug.errors == 0;
+
+    const nlohmann::json artifact = {
+        {"schema", "luminumbra.farlod_horizon.v1"},
+        {"timestamp_utc", TimestampUtc()},
+        {"scenario", "farlod_horizon_smoke"},
+        {"world_preset", world_preset},
+        {"duration_seconds", duration_seconds},
+        {"thresholds", {
+            {"max_missing_wanted_regions", kFarLodHorizonMaxMissingRegions},
+            {"resident_budget_bytes", kFarLodHorizonResidentBudgetBytes},
+            {"max_gbuffer_delta_ms", kFarLodHorizonMaxGbufferDeltaMs},
+            {"max_below_horizon_sky_ratio", kFarLodHorizonMaxSkyRatio},
+            {"max_boundary_band_sky_ratio", kFarLodBoundaryMaxSkyRatio},
+            {"max_boundary_band_void_clusters", kFarLodBoundaryMaxVoidClusters},
+            {"f2_outer_range_m", 1536.0},
+            {"sky_ratio_enforced", enforce_sky_ratio},
+        }},
+        {"stations", station_rows},
+        {"farlod", {
+            {"regions_wanted", final_wanted},
+            {"regions_resident", final_resident},
+            {"regions_missing", final_missing},
+            {"farlod_resident_bytes", final_resident_bytes},
+            {"far_region_draws", final_draws},
+            {"far_indices_drawn", final_indices},
+        }},
+        {"gbuffer", {
+            // Honest in-run A/B: the committed perf baseline records frame
+            // times, not per-pass GPU times, so the reference gbuffer time is
+            // measured in this run's far-LOD-disabled phase A.
+            {"baseline_source", "in_run_far_lod_disabled_phase"},
+            {"gpu_timers_supported", gpu_timers_supported},
+            {"baseline_gbuffer_gpu_ms", baseline_gbuffer_gpu_ms},
+            {"far_gbuffer_gpu_ms", far_gbuffer_gpu_ms},
+            {"gbuffer_delta_ms", gbuffer_delta_ms},
+        }},
+        {"aggregates", {
+            {"expected_stations", expected_station_count},
+            {"captured_stations", captures.size()},
+            {"bands_resolved", bands_resolved},
+            {"max_below_horizon_sky_ratio", max_sky_ratio},
+            {"max_boundary_band_sky_ratio", max_band_sky_ratio},
+            {"max_boundary_band_void_clusters", max_band_void_clusters},
+        }},
+        {"gl_debug", {
+            {"messages", gl_debug.messages},
+            {"errors", gl_debug.errors},
+            {"warnings", gl_debug.warnings},
+            {"notifications", gl_debug.notifications},
+        }},
+        {"passed", passed},
+    };
+
+    std::error_code ec;
+    std::filesystem::create_directories(artifact_dir, ec);
+    std::ofstream output(artifact_dir / "farlod-horizon-analysis.json");
     output << std::setw(2) << artifact << '\n';
 }
 

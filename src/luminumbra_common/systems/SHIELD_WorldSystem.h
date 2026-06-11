@@ -197,6 +197,10 @@ public:
 
     // --- API for WorldGenViewer ---
     const TerrainGenParams& get_params() const { return m_params; }
+    // T-I3-9 (far-LOD): read-only seed accessor so the far-LOD scheduler can
+    // key its pristine tile cache (seed, params_hash) without re-deriving the
+    // seed. Minimal insertion - no height/noise path is touched.
+    int get_seed() const { return m_seed; }
     void set_params(const TerrainGenParams& params);
     void set_seed(int seed);
     void regenerate_all_chunks(PhysicsSystem* physics_system);

@@ -17,6 +17,13 @@ vec2 encode_octahedral(vec3 n) {
 // Material lookup texture
 uniform sampler2D u_materialLUT;
 
+// T-I3-9 far-LOD: view-space radius (meters) inside which far-region mesh
+// fragments are discarded - the live chunk ring owns that space (live wins;
+// the under-terrain far fill must not show through live LOD seam cracks at
+// close range, where shadow/SSAO render it near-black). Default 0.0 disables
+// the clip; live chunk and static mesh draws never set it.
+uniform float u_farClipInnerRadius;
+
 // Input from the vertex shader, with "flat" interpolation for the integer ID
 in VS_OUT {
     vec3 FragPos; // Now in VIEW SPACE
@@ -28,6 +35,10 @@ void main()
 {
     if (fs_in.MaterialID == 7u) { // Water
         discard;
+    }
+    if (u_farClipInnerRadius > 0.0 &&
+        dot(fs_in.FragPos, fs_in.FragPos) < u_farClipInnerRadius * u_farClipInnerRadius) {
+        discard; // far-region fragment inside the live ring: live wins
     }
     
     // --- Compressed G-Buffer Output ---
