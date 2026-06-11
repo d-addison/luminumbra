@@ -1,13 +1,19 @@
 #pragma once
 
+#include "../../../include/luminumbra/core/Types.h"
+
 #include <cstddef>
 #include <cstdint>
 
 // Forward declarations
 namespace Luminumbra { class Chunk; }
-namespace Luminumbra::Systems { 
-    class SHIELD_WorldSystem; 
-    class WaterSystem; 
+namespace Luminumbra::Systems {
+    class SHIELD_WorldSystem;
+    class WaterSystem;
+}
+namespace Luminumbra::World {
+    struct FarLodTile;
+    struct FarLodRegionMesh;
 }
 
 namespace Luminumbra::World::MarchingCubes {
@@ -71,6 +77,43 @@ namespace Luminumbra::World::MarchingCubes {
         Chunk& chunk,
         int step,
         TerrainTransitionFaceMask faces = kAllHorizontalTransitionFaces
+    );
+
+    /**
+     * @brief Terrain material at the surface of a column, exactly as the
+     * coarse heightfield chunk mesher classifies it (sampled just below the
+     * surface so isosurface interpolation can never land on Air). Exposed for
+     * the far-LOD tile builder (T-I3-8) so the far field matches the live
+     * field at the seam.
+     */
+    MaterialType TerrainSurfaceMaterialAt(
+        const Systems::SHIELD_WorldSystem& world_system,
+        float world_x,
+        float world_z,
+        float terrain_height
+    );
+
+    struct FarLodRegionMeshStats {
+        std::size_t vertices = 0;
+        std::size_t indices = 0;
+        std::size_t triangles = 0;
+        std::size_t skirt_quads = 0;
+    };
+
+    /**
+     * @brief Far-LOD region mesher (T-I3-8): the coarse heightfield approach
+     * generalized to a whole far-LOD region tile. One mesh per (tier, region);
+     * the whole-tile heightfield owns its full vertical extent, so the
+     * per-cell chunk-Y ownership test of the chunk mesher (and its hole class)
+     * does not exist here. Vertex positions are region-local in X/Z and
+     * absolute in Y; VoxelVertex layout is untouched (28 bytes). Tile border
+     * samples are shared with adjacent regions, so neighboring region meshes
+     * share edge vertex positions; the tile perimeter additionally drops a
+     * skirt one sample-step deep to mask tier-boundary cracks.
+     */
+    FarLodRegionMeshStats GenerateFarLodRegionMesh(
+        const World::FarLodTile& tile,
+        World::FarLodRegionMesh& out_mesh
     );
 
     /**
