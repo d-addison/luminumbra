@@ -6,6 +6,7 @@
 #include "../systems/WaterSystem.h"
 #include "../core/Log.h"
 #include "../persistence/WorldSaveService.h"
+#include "TerrainPresetLoader.h"
 #include "WorldStreamingState.h"
 
 #include <fstream>
@@ -42,71 +43,6 @@ fs::path RuntimeRoot(const std::string& root_path) {
 
 fs::path PresetPathFor(const std::string& root_path, const std::string& world_type) {
     return RuntimeRoot(root_path) / "worlds" / "atlas" / "presets" / (world_type + ".json");
-}
-
-bool JsonHasObject(const nlohmann::json& data, const char* key) {
-    return data.contains(key) && data[key].is_object();
-}
-
-bool LoadTerrainParamsFromPreset(const fs::path& preset_path, TerrainGenParams& params, std::vector<std::string>& errors) {
-    std::ifstream file(preset_path);
-    if (!file.is_open()) {
-        errors.push_back("failed to open world preset: " + preset_path.string());
-        return false;
-    }
-
-    nlohmann::json data;
-    try {
-        data = nlohmann::json::parse(file);
-    } catch (const nlohmann::json::parse_error& e) {
-        errors.push_back("failed to parse world preset JSON '" + preset_path.string() + "': " + e.what());
-        return false;
-    }
-
-    if (!JsonHasObject(data, "generation_params")) {
-        errors.push_back("world preset is missing object generation_params: " + preset_path.string());
-        return false;
-    }
-
-    const auto& gen_params = data["generation_params"];
-    if (!JsonHasObject(gen_params, "terrain")) {
-        errors.push_back("world preset is missing object generation_params.terrain: " + preset_path.string());
-        return false;
-    }
-    if (!JsonHasObject(gen_params, "features")) {
-        errors.push_back("world preset is missing object generation_params.features: " + preset_path.string());
-        return false;
-    }
-
-    const auto& terrain = gen_params["terrain"];
-    const auto& features = gen_params["features"];
-    for (const char* key : {"base_frequency", "base_amplitude", "octaves", "persistence", "lacunarity", "height_offset"}) {
-        if (!terrain.contains(key) || !terrain[key].is_number()) {
-            errors.push_back(std::string("world preset terrain field must be numeric: ") + key);
-        }
-    }
-    if (!features.contains("caves_enabled") || !features["caves_enabled"].is_boolean()) {
-        errors.push_back("world preset feature caves_enabled must be boolean");
-    }
-    if (!features.contains("cave_frequency") || !features["cave_frequency"].is_number()) {
-        errors.push_back("world preset feature cave_frequency must be numeric");
-    }
-
-    if (!errors.empty()) {
-        return false;
-    }
-
-    params.base_frequency = terrain.value("base_frequency", 0.01f);
-    params.base_amplitude = terrain.value("base_amplitude", 50.0f);
-    params.octaves = terrain.value("octaves", 4);
-    params.persistence = terrain.value("persistence", 0.5f);
-    params.lacunarity = terrain.value("lacunarity", 2.0f);
-    params.height_offset = terrain.value("height_offset", 0.0f);
-    params.island_mask_enabled = terrain.value("island_mask_enabled", false);
-    params.island_mask_frequency = terrain.value("island_mask_frequency", 0.004f);
-    params.caves_enabled = features.value("caves_enabled", true);
-    params.cave_frequency = features.value("cave_frequency", 0.02f);
-    return true;
 }
 }
 
@@ -175,10 +111,9 @@ WorldConfigValidationResult GameSession::ValidateWorldConfig(const std::string& 
     }
 
     if (result.ok) {
-        TerrainGenParams params;
-        std::vector<std::string> parse_errors;
-        if (!LoadTerrainParamsFromPreset(result.preset_path, params, parse_errors)) {
-            for (const std::string& error : parse_errors) {
+        const TerrainPresetLoadResult preset = LoadTerrainPreset(result.preset_path);
+        if (!preset.ok) {
+            for (const std::string& error : preset.errors) {
                 AddValidationError(result, error);
             }
         }
@@ -222,15 +157,15 @@ bool GameSession::CreateWorld(const std::string& name, const std::string& seed, 
     m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
     m_physicsSystem->startup();
 
-    TerrainGenParams params;
-    std::vector<std::string> parse_errors;
-    if (!LoadTerrainParamsFromPreset(validation.preset_path, params, parse_errors)) {
-        for (const std::string& error : parse_errors) {
+    const TerrainPresetLoadResult preset = LoadTerrainPreset(validation.preset_path);
+    if (!preset.ok) {
+        for (const std::string& error : preset.errors) {
             LUMINUMBRA_CORE_ERROR("World preset load failed: {}", error);
         }
         return false;
     }
-    
+    const TerrainGenParams& params = preset.params;
+
     int world_seed = StringToSeed(m_metadata.seed);
     LUMINUMBRA_CORE_INFO("Loaded world preset '{}': height_offset={}, amplitude={}, caves={}", 
         worldType, params.height_offset, params.base_amplitude, params.caves_enabled);
@@ -305,14 +240,14 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     }
     
     // --- Load Generation Preset ---
-    TerrainGenParams params;
-    std::vector<std::string> parse_errors;
-    if (!LoadTerrainParamsFromPreset(validation.preset_path, params, parse_errors)) {
-        for (const std::string& error : parse_errors) {
+    const TerrainPresetLoadResult preset = LoadTerrainPreset(validation.preset_path);
+    if (!preset.ok) {
+        for (const std::string& error : preset.errors) {
             LUMINUMBRA_CORE_ERROR("World preset load failed: {}", error);
         }
         return false;
     }
+    const TerrainGenParams& params = preset.params;
 
     int world_seed = StringToSeed(m_metadata.seed);
 
