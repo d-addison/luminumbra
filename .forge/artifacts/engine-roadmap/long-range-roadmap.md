@@ -131,8 +131,9 @@ sensible seed: IK/gait after iteration 5; parametric bodies as an
 iteration 6/7 stretch or first post-photography feature. Gets its own
 spec/critique round before any scheduling.
 
-## Candidate expansions backlog (recorded 2026-06-11; each needs its own
-## spec/critique round; listed by natural home + why it is cheap here)
+## Committed expansions (owner-mandated 2026-06-11 — "all great and must
+## be added"; each still gets its spec/critique round for sizing/sequence,
+## but inclusion is decided; listed by natural home + why it is cheap here)
 
 Lockstep dividends (iter 4+): **session replay** (seed + input stream =
 perfect replay; re-photograph missed moments, ghosts, trailers, desync
@@ -160,6 +161,31 @@ real photo export to disk from the capture path; hides/camouflage tools
 
 Owner-flagged highest leverage: replay, creature memory, celestial
 events. Also recorded: procedural/evolved creatures (section above).
+
+## Standing optimization discipline + framework-hardening iteration
+## (owner-mandated 2026-06-11)
+
+1. **Per-iteration optimization wave (STANDING, every iteration close)**:
+   profile-driven, gate-ratcheted (the iteration-2 model — every win locks
+   in via PerfRegression baseline re-bless + ratcheted thresholds, never
+   silent). Rotating focus chosen by that iteration's profiling evidence:
+   streaming/meshing hot paths, JobSystem scheduling/lane balance, memory
+   (pooling/arenas, resident watermarks), render submission (batching,
+   state-change reduction, bindless candidates), ECS iteration layout,
+   far-LOD/SDF pipeline costs. Release-lane numbers (T-I3-20) become the
+   canonical optimization currency from iteration 4 on.
+2. **Framework-hardening iteration (between 6 and 7, before the game
+   loop lands)**: deliberate refactor pass over the engine AS A FRAMEWORK —
+   formalize the engine public API surface (engine as a reusable library;
+   game links against it, never reaches inside); module dependency audit
+   (common/client/server layering enforced by build, not convention);
+   subsystem lifecycle unification (init/tick/shutdown contracts);
+   allocator strategy unification; error/logging policy; asset pipeline
+   throughput; build-time reduction; dead-code/dormant-path sweep; gate
+   suite consolidation (validator modes as a versioned contract). Exit
+   criterion: a new game module can be built against the engine using only
+   public headers + data, proven by the iteration-7 photography loop doing
+   exactly that.
 
 ## Explicitly unscheduled (revisit at iteration-7 close)
 
