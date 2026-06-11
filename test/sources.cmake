@@ -15,6 +15,7 @@ set(AETHERIC_TEST_SOURCES
 
 set(AI_TEST_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/ai/instinct_planner_gate_test.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/ai/instinct_system_test.cpp
 )
 
 set(PERSISTENCE_TEST_SOURCES

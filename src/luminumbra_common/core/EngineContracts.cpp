@@ -107,6 +107,10 @@ std::vector<SubsystemContract> KnownRuntimeSubsystemContracts() {
         {"physics_system", "game_session", {}},
         {"world_system", "game_session", {"job_system", "physics_system"}},
         {"water_system", "game_session", {"job_system", "world_system"}},
+        // T-I3-17: instinct planning runs on the fixed simulation tick after
+        // the world systems exist (NeedsComponent migration landed with this
+        // contract entry).
+        {"instinct_system", "game_session", {"world_system"}},
         {"renderer", "client", {"world_system"}},
         {"audio", "client", {}},
         {"ui", "client", {"renderer"}},

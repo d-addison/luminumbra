@@ -26,9 +26,13 @@ public:
 
     void init_geometry_shader(const std::filesystem::path& root_path);
     void init_instanced_static_mesh(const std::filesystem::path& root_path);
+    // T-I3-16: non-instanced skinned draw stage (skinned_mesh.vert +
+    // g_buffer.frag) with a joint-palette SSBO fed by the T-I3-15 runtime.
+    void init_skinned_mesh(const std::filesystem::path& root_path);
     void init_gbuffer(u32 width, u32 height);
     void destroy_gbuffer();
     void destroy_instanced_static_mesh();
+    void destroy_skinned_mesh();
     void reset_shaders();
 
     void execute(RenderPipeline& pipeline,
@@ -41,7 +45,9 @@ public:
     const GBuffer& gbuffer() const { return m_gbuffer; }
     const std::unique_ptr<Shader>& geometry_shader() const { return m_geometry_shader; }
     const std::unique_ptr<Shader>& instanced_static_mesh_shader() const { return m_instanced_static_mesh_shader; }
+    const std::unique_ptr<Shader>& skinned_mesh_shader() const { return m_skinned_mesh_shader; }
     GLuint instance_matrix_vbo() const { return m_instanceMatrixVBO; }
+    GLuint joint_palette_ssbo() const { return m_jointPaletteSSBO; }
 
 private:
     void geometry_pass_chunks(RenderPipeline& pipeline,
@@ -52,12 +58,20 @@ private:
                                      entt::registry& registry,
                                      const Camera& camera,
                                      const glm::vec4 frustum_planes[6]);
+    void geometry_pass_skinned_meshes(RenderPipeline& pipeline,
+                                      entt::registry& registry,
+                                      const Camera& camera,
+                                      const glm::vec4 frustum_planes[6]);
 
     GBuffer m_gbuffer;
     std::unique_ptr<Shader> m_geometry_shader;
     std::unique_ptr<Shader> m_instanced_static_mesh_shader;
+    std::unique_ptr<Shader> m_skinned_mesh_shader;
     std::map<std::string, std::unique_ptr<Mesh>> m_meshCache;
+    std::map<std::string, std::unique_ptr<Mesh>> m_skinnedMeshCache;
     GLuint m_instanceMatrixVBO = 0;
+    GLuint m_jointPaletteSSBO = 0;
+    std::size_t m_jointPaletteSSBOCapacityBytes = 0;
 };
 
 } // namespace Luminumbra::Rendering

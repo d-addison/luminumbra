@@ -8,6 +8,8 @@ add_executable(asset_processor
 target_include_directories(asset_processor PUBLIC
     # Assuming the meshoptimizer src files are in vendor/meshoptimizer/src
     ${CMAKE_SOURCE_DIR}/vendor/meshoptimizer/src
+    # For luminumbra_common/animation/SkinnedMeshFormat.h (LMS2/.lanim formats)
+    ${CMAKE_SOURCE_DIR}/src
 )
 
 # Add the required meshoptimizer .cpp files to be compiled with your tool.
