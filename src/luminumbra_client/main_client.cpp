@@ -988,14 +988,18 @@ public:
     }
 
 private:
-    static double percentile(std::vector<double> values, double pct) {
-        if (values.empty()) {
+    // Takes an ALREADY-SORTED vector by const reference. The previous
+    // by-value-copy-then-sort signature tripped a GCC 15 -O3
+    // -Wfree-nonheap-object false positive when the inlined copy's
+    // deallocation was folded (release lane, T-I3-20); sorting once at the
+    // call site also avoids three copies/sorts of the frame-time vector.
+    static double percentile_sorted(const std::vector<double>& sorted_values, double pct) {
+        if (sorted_values.empty()) {
             return 0.0;
         }
-        std::sort(values.begin(), values.end());
-        const double position = pct * static_cast<double>(values.size() - 1);
+        const double position = pct * static_cast<double>(sorted_values.size() - 1);
         const auto index = static_cast<size_t>(std::round(position));
-        return values[std::min(index, values.size() - 1)];
+        return sorted_values[std::min(index, sorted_values.size() - 1)];
     }
 
     std::vector<double> frame_times_ms() const {
@@ -1014,11 +1018,12 @@ private:
             return false;
         }
 
-        const std::vector<double> deltas = frame_times_ms();
+        std::vector<double> deltas = frame_times_ms();
+        std::sort(deltas.begin(), deltas.end());
         const auto elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - m_started_at).count();
-        const double p50_ms = percentile(deltas, 0.50);
-        const double p95_ms = percentile(deltas, 0.95);
-        const double p99_ms = percentile(deltas, 0.99);
+        const double p50_ms = percentile_sorted(deltas, 0.50);
+        const double p95_ms = percentile_sorted(deltas, 0.95);
+        const double p99_ms = percentile_sorted(deltas, 0.99);
         size_t max_snapshots = 0;
         size_t max_terrain_visible_chunks = 0;
         size_t max_terrain_draws = 0;
@@ -1260,7 +1265,9 @@ int main(int argc, char* argv[]) {
     // g_windowState.isFullscreen = false;
     // ToggleFullscreen(window, g_windowState);
 
-    int status = gladLoadGLLoader((GLADloadproc)glfwGetProcAddress);
+    // [[maybe_unused]]: LUMINUMBRA_ASSERT compiles out in release builds
+    // (T-I3-20 release perf lane builds with -Werror).
+    [[maybe_unused]] const int status = gladLoadGLLoader((GLADloadproc)glfwGetProcAddress);
     LUMINUMBRA_ASSERT(status, "Failed to initialize GLAD!");
     
     if (g_imgui_enabled) {
