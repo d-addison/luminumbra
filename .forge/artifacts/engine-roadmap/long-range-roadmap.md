@@ -89,6 +89,16 @@ wants instanced draws) and creature planner (ecology wants stimuli).
    iteration 2 graduates from beautification to simulation-driven.
    Weather state is part of world_hash (server-authoritative, replicated
    via lockstep inputs/seeded schedule — NOT client-local).
+   **Lightning (owner-mandated 2026-06-11)**: deterministic strike events
+   scheduled by storm-cell state (sim-side, in world_hash — strikes are
+   world events, not client effects); render side: branching bolt flash +
+   a one-to-few-frame full-scene light pulse through the lighting pass;
+   thunder via the audio propagation system with distance-correct delay
+   (sound arrives seconds after the flash — free realism from machinery
+   we already have); strike scorch/impact via emitters. Iteration-6 hook:
+   strikes write ignition into the fire scalar field (storm starts a
+   wildfire). Photography: THE timing shot — gate asserts a captured
+   strike frame shows the luminance pulse + bolt pixels.
 3. **Seasons + celestial model (engine)**: long-period time scale driving
    sun path, day length, biome material/foliage palettes; time-of-day
    sweep gates extend to season sweep gates.
