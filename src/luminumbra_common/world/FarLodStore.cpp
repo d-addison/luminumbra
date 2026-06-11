@@ -102,6 +102,13 @@ u64 ComputeTerrainParamsHash(const Systems::TerrainGenParams& params, int seed) 
         FnvMixValue(hash, params.river_depth);
         FnvMixValue(hash, params.river_max_carve);
     }
+    // T-I4-4: mix the structure template content hash ONLY when structures are
+    // enabled, so structure presets' pristine far tiles invalidate on a template
+    // change while non-structure worlds keep byte-identical far-tile cache keys.
+    if (params.structures_enabled && params.structures_content_hash != 0) {
+        FnvMixValue(hash, static_cast<u8>(3));
+        FnvMixValue(hash, params.structures_content_hash);
+    }
     return hash;
 }
 

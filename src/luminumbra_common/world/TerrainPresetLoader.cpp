@@ -261,12 +261,25 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
         params.temperature_frequency = biomes.temperature_frequency;
         params.humidity_frequency = biomes.humidity_frequency;
     }
-    // Features river/structure flags: rivers are CONSUMED (T-I4-3) when the
-    // preset opts in; an absent flag keeps rivers_enabled=false -> byte-zero
-    // drift. Structures stay parsed-not-consumed (Agent WA2 / T-I4-4).
+    // Features river/structure flags: rivers (T-I4-3) and structures (T-I4-4)
+    // are CONSUMED when the preset opts in; an absent flag keeps the feature off
+    // -> byte-zero drift. The structure template content hash is stamped later by
+    // the world system when it loads the pools (mirrors the biome-table hash).
     result.extras.features.present = true;
     result.extras.features.rivers_enabled = features.value("rivers_enabled", false);
     result.extras.features.structures_enabled = features.value("structures_enabled", false);
+    params.structures_enabled = result.extras.features.structures_enabled;
+    if (params.structures_enabled) {
+        // Resolve <data_root>/common/structures to an absolute path (same data
+        // root the biome table resolves against: four parents up from the preset).
+        std::error_code ec;
+        const std::filesystem::path preset_dir =
+            std::filesystem::absolute(preset_path, ec).parent_path();
+        const std::filesystem::path data_root =
+            preset_dir.parent_path().parent_path().parent_path() / "data";
+        params.structures_data_dir =
+            (data_root / "common" / "structures").lexically_normal().string();
+    }
     if (result.extras.features.rivers_enabled) {
         params.rivers_enabled = true;
         params.river_frequency = features.value("river_frequency", params.river_frequency);

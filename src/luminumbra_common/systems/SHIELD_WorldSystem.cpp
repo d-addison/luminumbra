@@ -5,7 +5,9 @@
 #include <atomic>
 #include <cmath>
 #include <algorithm> // Required for std::max and std::min
+#include <filesystem>
 #include <limits>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include "systems/PhysicsSystem.h"
@@ -274,6 +276,64 @@ void SHIELD_WorldSystem::reinitialize_noise() {
             m_params.biome_table_content_hash = m_biome_table.content_hash();
         }
     }
+
+    // T-I4-4: structure template pools. Loaded only when the preset opts in;
+    // disabled worlds load nothing and contribute a zero content hash (byte-zero
+    // drift). The combined content hash is stamped into params so far-LOD cache
+    // keys track template changes (ComputeTerrainParamsHash mixes it in).
+    m_structure_pools.clear();
+    m_structures_enabled = false;
+    m_params.structures_content_hash = 0;
+    if (m_params.structures_enabled && !m_params.structures_data_dir.empty()) {
+        const std::filesystem::path structures_root(m_params.structures_data_dir);
+        std::error_code ec;
+        std::vector<std::filesystem::path> type_dirs;
+        if (std::filesystem::is_directory(structures_root, ec)) {
+            for (const auto& entry : std::filesystem::directory_iterator(structures_root, ec)) {
+                if (entry.is_directory()) {
+                    type_dirs.push_back(entry.path());
+                }
+            }
+        }
+        // Sort by type name so the combined content hash is order-independent.
+        std::sort(type_dirs.begin(), type_dirs.end());
+        u64 combined = 14695981039346656037ull; // fnv offset basis
+        for (const auto& type_dir : type_dirs) {
+            const std::string type = type_dir.filename().string();
+            World::StructureTemplatePool pool =
+                World::LoadStructureTemplatePool(type_dir, type);
+            for (const std::string& warn : pool.warnings) {
+                LUMINUMBRA_CORE_WARN("structure pool '{}': {}", type, warn);
+            }
+            if (!pool.ok()) {
+                for (const std::string& error : pool.errors) {
+                    LUMINUMBRA_CORE_WARN("structure pool '{}' load error: {}", type, error);
+                }
+                continue;
+            }
+            const u64 ch = pool.content_hash;
+            const auto* bytes = reinterpret_cast<const unsigned char*>(&ch);
+            for (std::size_t i = 0; i < sizeof(ch); ++i) {
+                combined ^= static_cast<u64>(bytes[i]);
+                combined *= 1099511628211ull;
+            }
+            m_structure_pools.push_back(std::move(pool));
+        }
+        if (!m_structure_pools.empty()) {
+            m_structures_enabled = true;
+            m_params.structures_content_hash = combined;
+        }
+    }
+}
+
+std::optional<World::StructureSite> SHIELD_WorldSystem::LocateStructure(
+    const std::string& type, int world_x, int world_z, int search_radius_cells) const {
+    for (const World::StructureTemplatePool& pool : m_structure_pools) {
+        if (pool.type == type) {
+            return World::LocateNearestSite(pool, m_seed, world_x, world_z, search_radius_cells);
+        }
+    }
+    return std::nullopt;
 }
 
 float SHIELD_WorldSystem::EvaluateShapingSpline(

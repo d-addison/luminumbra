@@ -1,0 +1,11 @@
+{
+  "name": "ruin_base",
+  "_comment": "Foundation slab (Deepslate=5) with two socket joints where uprights attach.",
+  "boxes": [
+    { "min": [-2, 0, -2], "size": [5, 1, 5], "material": 5 }
+  ],
+  "sockets": [
+    { "name": "north", "position": [-2, 1, 2] },
+    { "name": "south", "position": [2, 1, -2] }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "name": "ruin_pillar",
+  "_comment": "A broken stone pillar (Stone=1). Its base socket joins a base slab socket.",
+  "boxes": [
+    { "min": [0, 0, 0], "size": [1, 4, 1], "material": 1 }
+  ],
+  "sockets": [
+    { "name": "foot", "position": [0, 0, 0] }
+  ]
+}
