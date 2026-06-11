@@ -128,6 +128,18 @@ wants instanced draws) and creature planner (ecology wants stimuli).
    channel registry.
 6. **Atmosphere audio**: wind/rain ambience layers on the propagation
    system; reverb modulated by weather.
+7. **Waterfalls (owner-mandated 2026-06-11) — rendered phenomena, no new
+   sim**: deterministic site detection where river course/water body
+   crosses a steep drop (waterline + height data exist); dressing:
+   animated falling sheet (flow-map shader), spray/mist via the particle
+   framework, plunge-pool foam, distance-attenuated roar via audio
+   propagation. Same falls for every player/replay. Iteration-6 upgrade:
+   **shallow-water flow dynamics on the Aetheric field stack** (water
+   depth + flow velocity fields, 30 Hz, in world_hash) — dammed rivers
+   pool, dug channels fill, flow drives surface animation/foam, player-
+   made waterfalls detected from the live flow field. Full 3D splash
+   fluids (FLIP/SPH) explicitly REJECTED: non-deterministic,
+   lockstep-hostile; particles fake the visible part.
 Gates: wind-field determinism hash; weather visual + state-hash gates;
 foliage instancing perf budget; season snapshot sweep; stimulus-channel
 planner gate (behavior differs across weather fixtures); Endurance300
