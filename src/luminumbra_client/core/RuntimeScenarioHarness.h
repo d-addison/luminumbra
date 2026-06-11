@@ -53,6 +53,10 @@ struct RuntimeScenarioConfig {
     // world from (--world-preset; empty falls back to "mountains", the
     // worst-case preset for surface-span coverage).
     std::string world_preset;
+    // creature_slice_smoke (T-I3-18): root-relative path of the game
+    // archetype JSON to spawn (--creature-archetype). The engine harness
+    // carries no game nouns; the validator supplies the content path.
+    std::string creature_archetype;
 
     bool active() const { return !scenario.empty(); }
     bool auto_world_smoke() const { return scenario == "auto_world_smoke"; }
@@ -68,6 +72,7 @@ struct RuntimeScenarioConfig {
     bool player_view_smoke() const { return scenario == "player_view_smoke"; }
     bool farlod_horizon_smoke() const { return scenario == "farlod_horizon_smoke"; }
     bool skinned_mesh_visual_smoke() const { return scenario == "skinned_mesh_visual_smoke"; }
+    bool creature_slice_smoke() const { return scenario == "creature_slice_smoke"; }
     bool forced_crash() const { return scenario == "forced_crash"; }
 };
 
@@ -806,5 +811,97 @@ void WriteSkinnedMeshVisualAnalysis(
     const SkinnedMeshVisualCapture& capture_a,
     const SkinnedMeshVisualCapture& capture_b,
     const SkinnedMeshDiffStats& diff);
+
+// --- creature_slice_smoke (T-I3-18): Project Capture game slice ---
+// One MVP creature (pure game data: the archetype JSON named by
+// --creature-archetype plus its rigged assets under data/models/) is
+// spawned near the archipelago spawn: rigged LMS2 mesh + idle/walk clips on
+// the skinned G-Buffer stage (T-I3-16), needs/opportunities planned by the
+// fixed-tick InstinctSystem (T-I3-17). Mid-run a light stimulus appears (a
+// prop rendered with the emissive LUT material from
+// data/common/materials.json plus a high-urgency curiosity opportunity, both
+// declared in the archetype's `slice` block) and the planner switches
+// behavior (graze -> approach); the creature turns and walks toward the
+// glow. The gate records the planner state before/after the stimulus plus
+// two screenshots — the photographable moment.
+struct CreatureSliceScene {
+    bool spawned = false;
+    std::string failure_reason;
+    Luminumbra::EntityID creature{entt::null};
+    Luminumbra::EntityID graze_opportunity{entt::null};
+    Luminumbra::EntityID stimulus{entt::null};
+    bool stimulus_spawned = false;
+    Luminumbra::Vec3 creature_position{0.0f};
+    Luminumbra::Vec3 graze_position{0.0f};
+    Luminumbra::Vec3 stimulus_position{0.0f};
+    Luminumbra::Vec3 camera_position{0.0f};
+    Luminumbra::Vec3 camera_focus{0.0f};
+    std::string archetype_name;
+    std::string expected_before_action;
+    std::string expected_after_action;
+    std::string active_clip;
+    // Loaded archetype JSON (slice/creature blocks consumed at runtime).
+    nlohmann::json archetype;
+};
+
+CreatureSliceScene SpawnCreatureSliceScene(
+    Luminumbra::world::GameSession* game_session,
+    const std::filesystem::path& root_dir,
+    const std::string& archetype_relative_path);
+
+// Spawns the light stimulus: an emissive-material prop plus the curiosity
+// opportunity from the archetype's slice block.
+bool SpawnCreatureSliceStimulus(
+    Luminumbra::world::GameSession* game_session,
+    CreatureSliceScene& scene);
+
+// Per-frame game glue: planner-action -> clip selection (graze=idle,
+// approach=walk, from the archetype's clip_by_action map) and approach
+// locomotion (walk toward the plan target, terrain-following, facing the
+// movement direction).
+void UpdateCreatureSliceScene(
+    Luminumbra::world::GameSession* game_session,
+    CreatureSliceScene& scene,
+    double dt);
+
+// Live photographic framing: follows the creature, keeps the active target
+// (graze spot before the stimulus, the glow after) in frame, and lifts the
+// camera over intervening terrain ridges.
+void ApplyCreatureSliceCamera(
+    Luminumbra::world::GameSession* game_session,
+    Luminumbra::Rendering::Camera* camera,
+    CreatureSliceScene& scene);
+
+struct CreatureSlicePlanProbe {
+    bool valid = false;
+    std::string action;
+    std::string target;
+    std::string need;
+    double score = 0.0;
+    std::string checksum;
+    std::uint64_t plans_executed = 0;
+    std::string active_clip;
+    // Live world state at probe time (the creature moves on approach).
+    Luminumbra::Vec3 creature_position{0.0f};
+    Luminumbra::Vec3 camera_position{0.0f};
+};
+
+CreatureSlicePlanProbe ProbeCreatureSlicePlan(
+    Luminumbra::world::GameSession* game_session,
+    const CreatureSliceScene& scene);
+
+struct CreatureSliceCapture {
+    std::string file;
+    double elapsed_seconds = 0.0;
+    CreatureSlicePlanProbe plan;
+    std::size_t skinned_draws = 0;
+    std::size_t skinned_indices_drawn = 0;
+};
+
+void WriteCreatureSliceAnalysis(
+    const std::filesystem::path& artifact_dir,
+    const CreatureSliceScene& scene,
+    const CreatureSliceCapture& before,
+    const CreatureSliceCapture& after);
 
 } // namespace Luminumbra::Client::ScenarioHarness
