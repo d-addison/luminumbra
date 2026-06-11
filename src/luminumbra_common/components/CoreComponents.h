@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../../../include/luminumbra/core/Types.h"
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -40,6 +41,19 @@ struct HierarchyComponent {
 
 struct StaticMeshComponent {
     std::string meshPath;
+    // Material LUT id used by the G-Buffer instanced draw (T-I3-16: was
+    // hardcoded to 3/grass inside instanced_mesh.vert). Defaults keep the
+    // pre-fix appearance for content that never sets it.
+    std::uint32_t materialId = 3;
+};
+
+// Skinned mesh rendered by the non-instanced skinned G-Buffer stage
+// (T-I3-16). The entity must also carry an animation player component
+// (luminumbra::animation::AnimationPlayerComponent) whose joint palette the
+// renderer uploads to the skinning SSBO each frame.
+struct SkinnedMeshComponent {
+    std::string meshPath; // .lmesh v2 (LMS2)
+    std::uint32_t materialId = 1;
 };
 
 // --- State & Lifecycle ---

@@ -337,6 +337,7 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         init_gpu_pass_timers();
 
         m_gbuffer_pass->init_instanced_static_mesh(m_root_path);
+        m_gbuffer_pass->init_skinned_mesh(m_root_path);
 
         refresh_render_pass_metadata();
         m_started = true;
@@ -532,6 +533,7 @@ std::vector<RenderPipeline::ShaderHealthEntry> RenderPipeline::get_shader_health
     add_shader("ssao_blur", m_ssao_pass->ssao().blurShader);
     add_shader("water", m_water_pass->shader());
     add_shader("instanced_static_mesh", m_gbuffer_pass->instanced_static_mesh_shader());
+    add_shader("skinned_mesh", m_gbuffer_pass->skinned_mesh_shader());
     add_shader("weather_overlay", m_skybox_pass->weather_shader());
     health.push_back({"gpu_sdf_compute", m_gpu_sdf.compute_program != 0, m_gpu_sdf.compute_program != 0 ? "" : "not initialized"});
     return health;
@@ -574,6 +576,7 @@ RenderPipeline::RenderResourceRegistryStats RenderPipeline::get_resource_registr
     stats.buffers += count(m_screen_quad_vbo);
     stats.buffers += count(m_skybox_pass->vbo());
     stats.buffers += count(m_gbuffer_pass->instance_matrix_vbo());
+    stats.buffers += count(m_gbuffer_pass->joint_palette_ssbo());
     stats.buffers += count(m_gpu_sdf.sdf_buffer);
     stats.vertex_arrays += count(m_screen_quad_vao);
     stats.vertex_arrays += count(m_skybox_pass->vao());
@@ -746,10 +749,10 @@ void RenderPipeline::refresh_render_pass_metadata() {
 
     add_pass("shadow", {"terrain_depth"}, {"shadow.depth_texture_array"}, m_shadow_pass->shadow_map().resolution, m_shadow_pass->shadow_map().resolution,
              "depth", "store depth cascades", m_last_render_pass_stats.shadow_draws);
-    add_pass("gbuffer", {"terrain_meshes", "farlod_region_meshes", "static_meshes", "material_lut"},
+    add_pass("gbuffer", {"terrain_meshes", "farlod_region_meshes", "static_meshes", "skinned_meshes", "material_lut"},
              {"gbuffer.position", "gbuffer.normal_material", "gbuffer.albedo_roughness", "gbuffer.metallic_ao", "gbuffer.depth"},
              m_screen_width, m_screen_height, "color+depth", "store deferred attachments",
-             m_last_render_pass_stats.terrain_draws + m_last_render_pass_stats.far_region_draws);
+             m_last_render_pass_stats.terrain_draws + m_last_render_pass_stats.far_region_draws + m_last_render_pass_stats.skinned_draws);
     add_pass("ssao", {"gbuffer.position", "gbuffer.normal_material", "ssao.noise"}, {"ssao.raw"}, m_screen_width, m_screen_height,
              "color", "store ambient occlusion", m_last_render_pass_stats.ssao_draws);
     add_pass("ssao_blur", {"ssao.raw"}, {"ssao.blur"}, m_screen_width, m_screen_height,
@@ -1225,6 +1228,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     if (m_screen_quad_vbo) { glDeleteBuffers(1, &m_screen_quad_vbo); m_screen_quad_vbo = 0; }
     m_skybox_pass->destroy_geometry();
     m_gbuffer_pass->destroy_instanced_static_mesh();
+    m_gbuffer_pass->destroy_skinned_mesh();
     if (m_terrainTextureArray) { glDeleteTextures(1, &m_terrainTextureArray); m_terrainTextureArray = 0; }
     if (m_materialLUT) { glDeleteTextures(1, &m_materialLUT); m_materialLUT = 0; }
     m_water_pass->destroy_water_fallback_textures();

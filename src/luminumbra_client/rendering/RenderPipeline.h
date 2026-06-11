@@ -156,6 +156,9 @@ public:
         // chunks (T-I3-9). Recorded inside the gbuffer GPU timer window.
         size_t far_region_draws = 0;
         size_t far_indices_drawn = 0;
+        // Skinned (animated) meshes drawn in the G-buffer pass (T-I3-16).
+        size_t skinned_draws = 0;
+        size_t skinned_indices_drawn = 0;
         std::array<size_t, ShadowMap::CASCADE_COUNT> shadow_cascade_visible_chunks{};
         std::array<size_t, ShadowMap::CASCADE_COUNT> shadow_cascade_draws{};
         size_t shadow_draws = 0;

@@ -29,6 +29,9 @@ struct Mesh {
     GLuint vbo = 0;
     GLuint ebo = 0;
     uint32_t indexCount = 0;
+    // Non-zero only for skinned (LMS2) meshes: the joint palette uploaded to
+    // the skinning SSBO must carry exactly this many mat4s (T-I3-16).
+    uint32_t jointCount = 0;
     glm::vec4 boundingSphere; // x, y, z, radius
 
     ~Mesh() {
@@ -41,6 +44,9 @@ struct Mesh {
 class MeshLoader {
 public:
     static std::unique_ptr<Mesh> Load(const std::string& path);
+    // Loads an .lmesh v2 (LMS2) skinned mesh: VAO layout 0=pos, 1=norm,
+    // 2=uv, 3=joints (u8x4 integer), 4=weights (u8x4 normalized). T-I3-16.
+    static std::unique_ptr<Mesh> LoadSkinned(const std::string& path);
 };
 
 }
