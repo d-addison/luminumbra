@@ -58,12 +58,15 @@ void UIManager::Init(GLFWwindow* window, IAudioManager* audioManager) {
     // Load default theme
     LoadTheme(m_currentTheme);
     
-    // Initialize state manager properties
-    m_stateManager->currentUIDocument.Subscribe([this](const std::string& oldDoc, const std::string& newDoc) {
-        if (newDoc != m_activeDocument) {
-            RequestLoadDocument(newDoc);
-        }
-    });
+    // Initialize state manager properties (RAII handle unsubscribes when
+    // this manager is destroyed, preventing a dangling [this] callback)
+    const SubscriptionToken documentToken = m_stateManager->currentUIDocument.Subscribe(
+        [this](const std::string& oldDoc, const std::string& newDoc) {
+            if (newDoc != m_activeDocument) {
+                RequestLoadDocument(newDoc);
+            }
+        });
+    m_documentSubscription = ScopedSubscription(m_stateManager->currentUIDocument, documentToken);
 
     // Initialize hot-reload system
     m_hotReload->SetReloadCallback([this](const std::string& filePath) {
