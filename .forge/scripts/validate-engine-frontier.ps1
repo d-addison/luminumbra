@@ -3027,25 +3027,26 @@ function Test-FarLodHorizon {
                 $preset, $maxWaterDraws)
         }
 
-        # T-I4-DR-river-seam-sliver: above-horizon sky-sliver telemetry. The
+        # T-I4-DR-horizon-sliver-render: above-horizon sky-sliver gate. The
         # area-based below-horizon sky-ratio gate cannot see a thin near-vertical
-        # sliver streaking up THROUGH the horizon into the sky; the analysis now
-        # scans the sky band for narrow tall terrain-coloured intrusions. The
-        # detector is wired as telemetry (not a hard throw) because the residual
-        # mountains+rivers sliver was traced to the render path, not the meshers
-        # this task owns (every CPU mesh source - far surface/skirts, full-res,
-        # coarse, water, fallback patches - verified free of a corresponding
-        # tall/degenerate triangle). The threshold below flags a clean-sky
-        # regression of the class so future render-side work can clear it.
+        # sliver streaking up THROUGH the horizon into the sky; this scans the sky
+        # band for narrow tall terrain-coloured intrusions. WA2 proved the far
+        # sky-sliver (a ~360 px thick streak) is in the RENDER path, not any CPU
+        # mesh; the root cause was far-region triangles straddling the camera /
+        # the 1000 m far plane being rasterized as a streak. The fix
+        # (FarLodSystem far-geometry clip + camera-region skip) removes that
+        # far-render streak. The detector is now PROMOTED FROM WARNING TO HARD
+        # FAIL to gate the class: a regression of the thick far streak (back to
+        # ~360 px) fails. The residual ~150-200 px thin streaks are sharp LIVE
+        # mountain-peak silhouettes (reproduce with far-LOD disabled), tracked
+        # separately; the 256 px threshold sits between them and the defect.
         $maxSliver = [int]$analysis.aggregates.max_sky_sliver_px
         $sliverBudget = [int]$analysis.thresholds.max_sky_sliver_px
         if ($maxSliver -gt $sliverBudget) {
-            Write-Host ("farlod horizon ({0}) WARNING: above-horizon sky-sliver max={1}px exceeds {2}px budget (river-carve bank edge-on; render-path follow-up)" -f `
-                $preset, $maxSliver, $sliverBudget)
-        } else {
-            Write-Host ("farlod horizon ({0}): above-horizon sky-sliver max={1}px within {2}px budget" -f `
-                $preset, $maxSliver, $sliverBudget)
+            throw "farlod horizon ($preset) above-horizon sky-sliver max=${maxSliver}px exceeds the ${sliverBudget}px hard-fail budget (far-region render streak regressed)"
         }
+        Write-Host ("farlod horizon ({0}): above-horizon sky-sliver max={1}px within {2}px hard-fail budget" -f `
+            $preset, $maxSliver, $sliverBudget)
     }
 }
 

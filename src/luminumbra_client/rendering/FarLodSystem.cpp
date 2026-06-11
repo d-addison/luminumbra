@@ -303,6 +303,7 @@ void FarLodSystem::integrate_completed_builds() {
 
 void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system, const glm::vec3& camera_position) {
     ++m_frame;
+    m_last_camera_position = camera_position;
     m_stats.enabled = m_enabled;
     m_stats.region_draws = 0;
     m_stats.indices_drawn = 0;
@@ -486,12 +487,27 @@ void FarLodSystem::draw_gbuffer(
     glEnable(GL_POLYGON_OFFSET_FILL);
     glPolygonOffset(2.0f, 4.0f);
     geometry_shader.setFloat("u_farClipInnerRadius", kFarClipInnerRadiusMeters);
+    // T-I4-DR-horizon-sliver-render: clip far geometry at the GEOMETRY level
+    // (gl_ClipDistance[0]) to a radial band. The near radius removes the camera-
+    // straddling triangles; the far radius removes the far-plane/frustum-edge
+    // triangles - both rasterized as the horizon sky-sliver. The clipped band is
+    // invisible (inside the live ring / past the 1000 m far plane), so nothing is
+    // lost. Camera-region skip also drops the one region the camera sits in,
+    // whose near triangles straddle the camera even after the radial clip.
+    glEnable(GL_CLIP_DISTANCE0);
+    geometry_shader.setFloat("u_farClipNearRadius", kFarClipInnerRadiusMeters);
+    geometry_shader.setFloat("u_farClipFarRadius", kFarClipOuterRadiusMeters);
+    const int camera_rx = static_cast<int>(std::floor(m_last_camera_position.x / kRegionSize));
+    const int camera_rz = static_cast<int>(std::floor(m_last_camera_position.z / kRegionSize));
+    const auto is_camera_region = [&](const ResidentRegion& region) {
+        return region.rx == camera_rx && region.rz == camera_rz;
+    };
 
     std::size_t water_draws = 0;
     std::size_t water_indices = 0;
     for (const auto& [key, region] : m_residents) {
         (void)key;
-        if (region.element_count == 0 ||
+        if (region.element_count == 0 || is_camera_region(region) ||
             aabb_outside_frustum(region.aabb_min, region.aabb_max, frustum_planes)) {
             continue;
         }
@@ -517,7 +533,7 @@ void FarLodSystem::draw_gbuffer(
     // deep water in the G-buffer (no live water.frag reflections far out).
     for (const auto& [key, region] : m_residents) {
         (void)key;
-        if (region.water_element_count == 0 ||
+        if (region.water_element_count == 0 || is_camera_region(region) ||
             aabb_outside_frustum(region.aabb_min, region.aabb_max, frustum_planes)) {
             continue;
         }
@@ -540,9 +556,12 @@ void FarLodSystem::draw_gbuffer(
     glBindVertexArray(0);
     glDisable(GL_POLYGON_OFFSET_FILL);
     glPolygonOffset(0.0f, 0.0f);
+    glDisable(GL_CLIP_DISTANCE0);
     // The geometry program is shared with the live chunk draws: the clip
-    // uniform MUST reset to its inert default.
+    // uniforms MUST reset to their inert defaults.
     geometry_shader.setFloat("u_farClipInnerRadius", 0.0f);
+    geometry_shader.setFloat("u_farClipNearRadius", 0.0f);
+    geometry_shader.setFloat("u_farClipFarRadius", 0.0f);
 
     m_stats.region_draws = draws_out;
     m_stats.indices_drawn = indices_out;
