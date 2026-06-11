@@ -764,7 +764,43 @@ TEST(WorldGenLayerSnapshotTest, InitialChunkLoadListCoversSpawnSurfaceNeighborho
     const Vec3 spawn(8.0f, world.GetTerrainHeightAt(8.0f, 8.0f) + 1.95f, 8.0f);
     const std::vector<IVec3> initial_chunks = world.GetInitialChunkLoadList(spawn);
 
-    EXPECT_EQ(initial_chunks.size(), 25u * 25u * 3u);
+    // DELIBERATE expectation update (T-I3-2): the initial load list used to
+    // emit exactly 3 chunks per column (center-point surface sample +-1, the
+    // old 25*25*3 constant). It now emits the column's 5-point surface SPAN
+    // (min..max chunk-Y across the column center + 4 footprint corners) plus
+    // the same +-1 margin, so steep columns whose isosurface crosses a
+    // chunk-Y border contribute extra cliff-wall chunks. The expected count
+    // is derived from the same span math: span_size + 2 per column, with a
+    // floor of the old 3-per-column emission.
+    std::size_t expected_chunks = 0;
+    const IVec3 spawn_chunk_for_count = SHIELD_WorldSystem::world_to_chunk_coords(spawn);
+    for (int dz = -12; dz <= 12; ++dz) {
+        for (int dx = -12; dx <= 12; ++dx) {
+            const int chunk_x = spawn_chunk_for_count.x + dx;
+            const int chunk_z = spawn_chunk_for_count.z + dz;
+            const float base_x = static_cast<float>(chunk_x * CHUNK_SIZE_X);
+            const float base_z = static_cast<float>(chunk_z * CHUNK_SIZE_Z);
+            float min_height = std::numeric_limits<float>::max();
+            float max_height = std::numeric_limits<float>::lowest();
+            const std::array<std::pair<float, float>, 5> sample_points{{
+                {base_x + CHUNK_SIZE_X * 0.5f, base_z + CHUNK_SIZE_Z * 0.5f},
+                {base_x, base_z},
+                {base_x + CHUNK_SIZE_X, base_z},
+                {base_x, base_z + CHUNK_SIZE_Z},
+                {base_x + CHUNK_SIZE_X, base_z + CHUNK_SIZE_Z},
+            }};
+            for (const auto& [px, pz] : sample_points) {
+                const float h = world.GetTerrainHeightAt(px, pz);
+                min_height = std::min(min_height, h);
+                max_height = std::max(max_height, h);
+            }
+            const int span_min = SHIELD_WorldSystem::world_to_chunk_coords(Vec3(0.0f, min_height, 0.0f)).y;
+            const int span_max = SHIELD_WorldSystem::world_to_chunk_coords(Vec3(0.0f, max_height, 0.0f)).y;
+            expected_chunks += static_cast<std::size_t>(span_max - span_min + 3);
+        }
+    }
+    EXPECT_EQ(initial_chunks.size(), expected_chunks);
+    EXPECT_GE(initial_chunks.size(), 25u * 25u * 3u);
 
     std::unordered_set<ChunkID> loaded_ids;
     loaded_ids.reserve(initial_chunks.size());
@@ -899,6 +935,117 @@ TEST(WorldGenLayerSnapshotTest, LodRemeshKeepsPreviousMeshRenderableWhilePending
     EXPECT_GE(target_after_request->mesh_version.load(), previous_mesh_version);
 
     physics.shutdown();
+}
+
+TEST(WorldGenLayerSnapshotTest, VerticalUnloadExemptsColumnSurfaceSpanChunks) {
+    // T-I3-2 (F4): the camera-relative vertical unload test evicted surface
+    // chunks of tall peaks (> 10 chunk-Ys above the camera), which the
+    // surface scan immediately re-candidated - a churn loop that left holes
+    // on mountain summits. Chunks inside their column's surface band must be
+    // exempt from the vertical test; chunks far off the surface still unload.
+    TerrainGenParams params;
+    params.base_frequency = 0.01f;
+    params.base_amplitude = 0.0f;   // flat world ...
+    params.height_offset = 200.0f;  // ... with its surface in chunk-Y 12
+    params.caves_enabled = false;
+
+    SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
+
+    // Camera in the "valley" at y=0: the surface chunk (0, 12, 0) sits
+    // d.y = 12 above the camera chunk, beyond UNLOAD_DISTANCE_UP (10).
+    const Vec3 camera(8.0f, 0.0f, 8.0f);
+    const IVec3 surface_coords(0, 12, 0);
+    const IVec3 sky_coords(0, 20, 0); // far above the surface band: evictable
+
+    ASSERT_TRUE(world.adopt_streamed_chunk(std::make_shared<Chunk>(surface_coords)));
+    ASSERT_TRUE(world.adopt_streamed_chunk(std::make_shared<Chunk>(sky_coords)));
+
+    entt::registry registry;
+    for (int i = 0; i < 8; ++i) {
+        world.update(registry, camera, nullptr);
+    }
+
+    EXPECT_NE(world.find_streamed_chunk(surface_coords), nullptr)
+        << "surface-span chunk above the camera must survive the vertical unload test";
+    EXPECT_EQ(world.find_streamed_chunk(sky_coords), nullptr)
+        << "chunk far above the surface band must still be vertically evicted";
+}
+
+TEST(WorldGenLayerSnapshotTest, MountainsSurfaceSpanWantedSetStaysUnderChunkBudget) {
+    // T-I3-2 budget proof: the steady-state activation wanted set with
+    // 5-point surface spans must fit the 8192 active-chunk budget on the
+    // worst-case shipped preset (mountains: amplitude 120, 6 octaves). The
+    // count mirrors update_chunk_activation's candidate rule: every chunk-Y
+    // in the column span at every ring, plus the +-1 stack inside ring 12.
+    TerrainGenParams params;
+    params.base_frequency = 0.008f;
+    params.base_amplitude = 120.0f;
+    params.octaves = 6;
+    params.persistence = 0.65f;
+    params.lacunarity = 2.2f;
+    params.height_offset = 20.0f;
+    params.caves_enabled = true;
+    params.cave_frequency = 0.03f;
+
+    SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
+
+    auto wanted_chunks_at_radius = [&world](int radius) {
+        std::size_t wanted = 0;
+        for (int dz = -radius; dz <= radius; ++dz) {
+            for (int dx = -radius; dx <= radius; ++dx) {
+                if (dx * dx + dz * dz > radius * radius) {
+                    continue;
+                }
+                float min_height = std::numeric_limits<float>::max();
+                float max_height = std::numeric_limits<float>::lowest();
+                const float base_x = static_cast<float>(dx * CHUNK_SIZE_X);
+                const float base_z = static_cast<float>(dz * CHUNK_SIZE_Z);
+                const std::array<std::pair<float, float>, 5> sample_points{{
+                    {base_x + CHUNK_SIZE_X * 0.5f, base_z + CHUNK_SIZE_Z * 0.5f},
+                    {base_x, base_z},
+                    {base_x + CHUNK_SIZE_X, base_z},
+                    {base_x, base_z + CHUNK_SIZE_Z},
+                    {base_x + CHUNK_SIZE_X, base_z + CHUNK_SIZE_Z},
+                }};
+                for (const auto& [px, pz] : sample_points) {
+                    const float h = world.GetTerrainHeightAt(px, pz);
+                    min_height = std::min(min_height, h);
+                    max_height = std::max(max_height, h);
+                }
+                const int span_min = SHIELD_WorldSystem::world_to_chunk_coords(Vec3(0.0f, min_height, 0.0f)).y;
+                const int span_max = SHIELD_WorldSystem::world_to_chunk_coords(Vec3(0.0f, max_height, 0.0f)).y;
+                const int ring = std::max(std::abs(dx), std::abs(dz));
+                wanted += static_cast<std::size_t>(span_max - span_min + 1);
+                if (ring <= 12) {
+                    wanted += 2; // +-1 vertical stack inside the mid ring
+                }
+            }
+        }
+        return wanted;
+    };
+
+    const std::size_t wanted_full_radius = wanted_chunks_at_radius(RENDER_DISTANCE);
+    const std::size_t wanted_radius_24 = wanted_chunks_at_radius(24);
+    const std::size_t wanted_radius_20 = wanted_chunks_at_radius(20);
+    const std::size_t wanted_player_core = wanted_chunks_at_radius(12);
+    std::cout << "[ SPANBUDGET ] mountains wanted set: radius " << RENDER_DISTANCE
+              << " -> " << wanted_full_radius << ", radius 24 -> " << wanted_radius_24
+              << ", radius 20 -> " << wanted_radius_20
+              << ", radius 12 (player-view core) -> " << wanted_player_core
+              << " chunks (budget 8192)" << std::endl;
+
+    // The activation pass truncates the SORTED candidate list at the budget,
+    // so active chunks can never exceed 8192 and any trim lands on the
+    // farthest rim. These asserts pin the budget headroom where it matters:
+    // the pressure-throttled radius (20, the radius streaming falls back to
+    // under load) must fit entirely, and the player-view core (radius 12,
+    // the LOD0/collision neighborhood the PlayerView gate measures) must
+    // leave generous headroom. The full radius-32 mountains wanted set
+    // (~13.5k) deliberately exceeds the budget - the trim is the documented
+    // trade until the far-LOD region store (T8/T9) replaces live chunks
+    // beyond the near field.
+    EXPECT_LT(wanted_radius_20, 8192u);
+    EXPECT_LT(wanted_player_core, 4096u);
 }
 
 TEST(WorldGenLayerSnapshotTest, AuthoredPresetAtlasHasSaneSpawnAndCleanTopology) {

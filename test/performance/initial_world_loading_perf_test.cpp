@@ -399,7 +399,14 @@ TEST(InitialWorldLoadingPerfTest, MeasuresSurfaceHorizonPrep) {
         {"stats", MeshingStatsToJson(meshing_stats)},
     });
 
-    EXPECT_EQ(initial_chunks.size(), 25u * 25u * 3u);
+    // DELIBERATE expectation update (T-I3-2): the initial load list now emits
+    // each column's 5-point surface SPAN (+-1 margin) instead of a fixed 3
+    // chunks per column, so steep columns add cliff-wall chunks. The exact
+    // span-derived count is asserted by
+    // WorldGenLayerSnapshotTest.InitialChunkLoadListCoversSpawnSurfaceNeighborhood;
+    // here the old 25*25*3 constant becomes the flat-terrain floor.
+    EXPECT_GE(initial_chunks.size(), 25u * 25u * 3u);
+    EXPECT_LE(initial_chunks.size(), 25u * 25u * 6u);
     EXPECT_GE(mesh_stats.mesh_chunks, static_cast<std::size_t>(expected_surface_chunks * 0.90));
     EXPECT_GE(mesh_stats.collision_chunks, expected_collision_chunks);
     EXPECT_GE(mesh_stats.lod_mesh_chunks[0], static_cast<std::size_t>(expected_collision_chunks * 0.90));

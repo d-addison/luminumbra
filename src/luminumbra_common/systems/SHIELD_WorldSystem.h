@@ -256,10 +256,26 @@ private:
         const Vec3& chunk_center,
         const Vec3& camera_position);
 
-    // Chunk-y of the terrain surface for a horizontal column, cached for the
-    // lifetime of the current seed/params (terrain height is deterministic).
-    int column_surface_chunk_y(int chunk_x, int chunk_z);
-    std::unordered_map<u64, int> m_column_surface_chunk_y_cache;
+    // Chunk-Y span of the terrain surface for a horizontal column (T-I3-2).
+    // Sampled at 5 points - the column center plus its 4 footprint corners -
+    // so steep columns (mountains preset: >16 m height variation across one
+    // chunk) report every chunk-Y their isosurface passes through, not just
+    // the center sample. Corner samples are shared with the neighboring
+    // columns, so adjacent spans overlap at shared corners and the cliff
+    // wall between columns of different surface height is always inside one
+    // of the two spans. center_y preserves the old single-point sample for
+    // ordering (drain center-out) and collision selection.
+    struct ColumnSurfaceSpan {
+        int min_y = 0;
+        int max_y = 0;
+        int center_y = 0;
+    };
+    // Pure 5-point sampling (no cache) - usable from const initial-load paths.
+    ColumnSurfaceSpan compute_column_surface_span(int chunk_x, int chunk_z) const;
+    // Cached for the lifetime of the current seed/params (terrain height is
+    // deterministic).
+    ColumnSurfaceSpan column_surface_span(int chunk_x, int chunk_z);
+    std::unordered_map<u64, ColumnSurfaceSpan> m_column_surface_span_cache;
 
     // --- Helper Functions ---
     void update_chunk_activation(const Vec3& player_pos, PhysicsSystem* physics_system);

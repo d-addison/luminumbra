@@ -180,8 +180,8 @@ bool SHIELD_WorldSystem::meshing_jobs_active() const {
 
 void SHIELD_WorldSystem::reinitialize_noise() {
     // Terrain height is a pure function of seed/params; drop the cached
-    // per-column surface heights whenever either changes.
-    m_column_surface_chunk_y_cache.clear();
+    // per-column surface spans whenever either changes.
+    m_column_surface_span_cache.clear();
 
     // FastNoise2 uses a node-based system to build complex generators.
 
@@ -203,19 +203,43 @@ void SHIELD_WorldSystem::reinitialize_noise() {
     m_island_mask_generator = island_noise;
 }
 
-int SHIELD_WorldSystem::column_surface_chunk_y(int chunk_x, int chunk_z) {
+SHIELD_WorldSystem::ColumnSurfaceSpan SHIELD_WorldSystem::compute_column_surface_span(int chunk_x, int chunk_z) const {
+    const float base_x = static_cast<float>(chunk_x * CHUNK_SIZE_X);
+    const float base_z = static_cast<float>(chunk_z * CHUNK_SIZE_Z);
+    const float max_x = base_x + static_cast<float>(CHUNK_SIZE_X);
+    const float max_z = base_z + static_cast<float>(CHUNK_SIZE_Z);
+    const float center_x = base_x + CHUNK_SIZE_X * 0.5f;
+    const float center_z = base_z + CHUNK_SIZE_Z * 0.5f;
+
+    const float center_height = GetTerrainHeightAt(center_x, center_z);
+    float min_height = center_height;
+    float max_height = center_height;
+    const std::array<std::pair<float, float>, 4> corners{{
+        {base_x, base_z}, {max_x, base_z}, {base_x, max_z}, {max_x, max_z}
+    }};
+    for (const auto& [corner_x, corner_z] : corners) {
+        const float corner_height = GetTerrainHeightAt(corner_x, corner_z);
+        min_height = std::min(min_height, corner_height);
+        max_height = std::max(max_height, corner_height);
+    }
+
+    ColumnSurfaceSpan span;
+    span.center_y = world_to_chunk_coords(Vec3(center_x, center_height, center_z)).y;
+    span.min_y = world_to_chunk_coords(Vec3(center_x, min_height, center_z)).y;
+    span.max_y = world_to_chunk_coords(Vec3(center_x, max_height, center_z)).y;
+    return span;
+}
+
+SHIELD_WorldSystem::ColumnSurfaceSpan SHIELD_WorldSystem::column_surface_span(int chunk_x, int chunk_z) {
     const u64 key = horizontal_chunk_key(chunk_x, chunk_z);
-    const auto it = m_column_surface_chunk_y_cache.find(key);
-    if (it != m_column_surface_chunk_y_cache.end()) {
+    const auto it = m_column_surface_span_cache.find(key);
+    if (it != m_column_surface_span_cache.end()) {
         return it->second;
     }
 
-    const float sample_x = static_cast<float>(chunk_x * CHUNK_SIZE_X) + CHUNK_SIZE_X * 0.5f;
-    const float sample_z = static_cast<float>(chunk_z * CHUNK_SIZE_Z) + CHUNK_SIZE_Z * 0.5f;
-    const float terrain_height = GetTerrainHeightAt(sample_x, sample_z);
-    const int surface_y = world_to_chunk_coords(Vec3(sample_x, terrain_height, sample_z)).y;
-    m_column_surface_chunk_y_cache.emplace(key, surface_y);
-    return surface_y;
+    const ColumnSurfaceSpan span = compute_column_surface_span(chunk_x, chunk_z);
+    m_column_surface_span_cache.emplace(key, span);
+    return span;
 }
 
 int SHIELD_WorldSystem::get_lod_level_for_distance(float dist) const {
@@ -243,10 +267,15 @@ int SHIELD_WorldSystem::get_required_lod_for_chunk(
     // no geometry, cannot open surface seams, and keep the cheaper
     // 3D-distance LOD so deep/air columns do not inflate the meshing load.
     // This mirrors the per-ring LOD already used by EnsureSurfaceReadyNear.
+    // The band covers the full column surface SPAN (T-I3-2) plus the same
+    // +-1 margin as before, so an entire cliff face keeps a single LOD per
+    // column (preserving the vertical-seam invariant above). On flat terrain
+    // span.min_y == span.max_y == center and this is exactly the old band.
     constexpr int kSurfaceLodBandChunks = 1;
-    const int surface_y = column_surface_chunk_y(coords.x, coords.z);
+    const ColumnSurfaceSpan span = column_surface_span(coords.x, coords.z);
     float dist;
-    if (std::abs(coords.y - surface_y) <= kSurfaceLodBandChunks) {
+    if (coords.y >= span.min_y - kSurfaceLodBandChunks &&
+        coords.y <= span.max_y + kSurfaceLodBandChunks) {
         dist = glm::distance(
             Vec3(camera_position.x, 0.0f, camera_position.z),
             Vec3(chunk_center.x, 0.0f, chunk_center.z));
@@ -287,17 +316,15 @@ std::vector<IVec3> SHIELD_WorldSystem::GetInitialChunkLoadList(const Vec3& cente
         for (int dx = -INITIAL_LOAD_RADIUS; dx <= INITIAL_LOAD_RADIUS; ++dx) {
             const int chunk_x = spawn_chunk_coords.x + dx;
             const int chunk_z = spawn_chunk_coords.z + dz;
-            const float sample_x = static_cast<float>(chunk_x * CHUNK_SIZE_X) + CHUNK_SIZE_X * 0.5f;
-            const float sample_z = static_cast<float>(chunk_z * CHUNK_SIZE_Z) + CHUNK_SIZE_Z * 0.5f;
-            const float terrain_height = GetTerrainHeightAt(sample_x, sample_z);
-            const int surface_y = world_to_chunk_coords(Vec3(sample_x, terrain_height, sample_z)).y;
+            // Full column surface span (T-I3-2) plus the same +-1 margin the
+            // fixed {0, -1, 1} offsets provided on flat terrain, so steep
+            // spawn neighborhoods preload their cliff-wall chunks too.
+            const ColumnSurfaceSpan span = compute_column_surface_span(chunk_x, chunk_z);
 
-            const std::array<int, 3> vertical_offsets{0, -1, 1};
-            for (const int offset : vertical_offsets) {
-                const int y = surface_y + offset;
+            for (int y = span.min_y - 1; y <= span.max_y + 1; ++y) {
                 candidates.push_back({
                     IVec3(chunk_x, y, chunk_z),
-                    std::abs(offset),
+                    std::abs(y - span.center_y),
                     horizontal_ring_distance(dx, dz),
                     horizontal_distance_sq(dx, dz)
                 });
@@ -496,10 +523,18 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
             if (required_lod == -1) {
                 required_lod = get_required_lod_for_chunk(chunk_ptr->get_coords(), chunk_center, camera_position);
             }
-            // The column-surface cache samples the same chunk-center position,
-            // so this replaces a per-candidate fractal noise evaluation with a
+            // The column-surface cache samples the same chunk positions, so
+            // this replaces per-candidate fractal noise evaluations with a
             // hash lookup (terrain height is a pure function of seed/params).
-            const int surface_y = column_surface_chunk_y(chunk_ptr->get_coords().x, chunk_ptr->get_coords().z);
+            // Vertical rank is the distance OUTSIDE the column surface span
+            // (0 for every chunk the isosurface passes through), so cliff
+            // wall chunks drain with the same hole-fill priority as the
+            // center surface chunk.
+            const ColumnSurfaceSpan span = column_surface_span(chunk_ptr->get_coords().x, chunk_ptr->get_coords().z);
+            const int chunk_y = chunk_ptr->get_coords().y;
+            const int vertical_surface_distance = chunk_y > span.max_y
+                ? chunk_y - span.max_y
+                : (chunk_y < span.min_y ? span.min_y - chunk_y : 0);
             const IVec3 delta = chunk_ptr->get_coords() - world_to_chunk_coords(camera_position);
             const float distance_sq = static_cast<float>(horizontal_distance_sq(delta.x, delta.z) + delta.y * delta.y);
             meshing_candidates.push_back({
@@ -507,7 +542,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
                 required_lod,
                 state == Luminumbra::ChunkState::Ready && !chunk_ptr->mesh_vertices.empty() && !chunk_ptr->mesh_indices.empty(),
                 terrain_mesh_required,
-                std::abs(chunk_ptr->get_coords().y - surface_y),
+                vertical_surface_distance,
                 distance_sq
             });
         }
@@ -679,10 +714,13 @@ void SHIELD_WorldSystem::update_chunk_activation(const Vec3& player_pos, Physics
     seen_candidate_ids.reserve(to_create.capacity() * 2u);
 
     auto add_candidate = [&](const IVec3& coords, bool surface, int ring_distance, int horizontal_dist2, int vertical_rank) {
-        if (m_streaming_state.chunks.size() + to_create.size() >= STREAMING_MAX_ACTIVE_CHUNKS_BUDGET) {
-            return;
-        }
-
+        // NOTE (T-I3-2): the active-chunk budget is no longer applied here.
+        // Enforcing it during enumeration capped candidates in row-major scan
+        // order, so when the wanted set exceeded the budget (mountains preset
+        // with surface spans) the dropped chunks were a directional bite out
+        // of one side of the disc. The budget is applied after the sort below,
+        // so the trimmed candidates are always the lowest-priority (farthest
+        // ring, deepest vertical rank) ones - a thin rim at the horizon edge.
         const ChunkID id = Chunk::calculate_id(coords);
         if (m_streaming_state.chunks.find(id) != m_streaming_state.chunks.end()) {
             return;
@@ -711,20 +749,40 @@ void SHIELD_WorldSystem::update_chunk_activation(const Vec3& player_pos, Physics
 
             const int chunk_x = camera_chunk.x + dx;
             const int chunk_z = camera_chunk.z + dz;
-            // Same chunk-center sample as the direct noise evaluation this
-            // replaces; the cache persists for the lifetime of seed/params.
-            const int surface_y = column_surface_chunk_y(chunk_x, chunk_z);
+            // 5-point span sample (T-I3-2); the cache persists for the
+            // lifetime of seed/params.
+            const ColumnSurfaceSpan span = column_surface_span(chunk_x, chunk_z);
             const int ring_distance = horizontal_ring_distance(dx, dz);
 
             ++m_last_streaming_budget_stats.target_surface_columns;
-            add_candidate(IVec3(chunk_x, surface_y, chunk_z), true, ring_distance, horizontal_dist2, 0);
+            // Activate EVERY chunk-Y the column's isosurface passes through,
+            // at every ring. Beyond ring 12 the old code streamed exactly one
+            // chunk per column; any coarse cell whose surface lay in another
+            // chunk-Y had no owner (the coarse mesher's per-cell ownership
+            // test drops it) - a permanent horizon hole. Cliff walls between
+            // columns (>16 m steps) live in the span interior and were never
+            // streamed at any ring. Flat terrain has span size 1, so this
+            // costs nothing where the old behavior was already correct.
+            // When the full wanted set exceeds the active-chunk budget (the
+            // mountains preset at large radii), the post-sort budget
+            // truncation below trims the farthest-ring candidates - never
+            // the near field.
+            for (int y = span.min_y; y <= span.max_y; ++y) {
+                add_candidate(
+                    IVec3(chunk_x, y, chunk_z),
+                    true,
+                    ring_distance,
+                    horizontal_dist2,
+                    std::abs(y - span.center_y)
+                );
+            }
 
             if (ring_distance <= STREAMING_NEAR_VERTICAL_STACK_RADIUS) {
-                add_candidate(IVec3(chunk_x, surface_y - 1, chunk_z), false, ring_distance, horizontal_dist2, 1);
-                add_candidate(IVec3(chunk_x, surface_y + 1, chunk_z), false, ring_distance, horizontal_dist2, 1);
+                add_candidate(IVec3(chunk_x, span.min_y - 1, chunk_z), false, ring_distance, horizontal_dist2, 1);
+                add_candidate(IVec3(chunk_x, span.max_y + 1, chunk_z), false, ring_distance, horizontal_dist2, 1);
             } else if (ring_distance <= STREAMING_MID_VERTICAL_STACK_RADIUS) {
-                add_candidate(IVec3(chunk_x, surface_y - 1, chunk_z), false, ring_distance, horizontal_dist2, 2);
-                add_candidate(IVec3(chunk_x, surface_y + 1, chunk_z), false, ring_distance, horizontal_dist2, 2);
+                add_candidate(IVec3(chunk_x, span.min_y - 1, chunk_z), false, ring_distance, horizontal_dist2, 2);
+                add_candidate(IVec3(chunk_x, span.max_y + 1, chunk_z), false, ring_distance, horizontal_dist2, 2);
             }
         }
     }
@@ -763,8 +821,15 @@ void SHIELD_WorldSystem::update_chunk_activation(const Vec3& player_pos, Physics
     std::vector<ChunkGenerationRequest> generate_now;
     generate_now.reserve(static_cast<std::size_t>(m_last_streaming_budget_stats.generation_budget));
     if (m_last_streaming_budget_stats.generation_budget > 0) {
+        // Active-chunk budget, applied to the sorted candidate prefix so the
+        // highest-priority (nearest, surface-first) chunks always win the
+        // remaining slots.
+        const std::size_t budget_headroom =
+            m_streaming_state.chunks.size() < STREAMING_MAX_ACTIVE_CHUNKS_BUDGET
+                ? STREAMING_MAX_ACTIVE_CHUNKS_BUDGET - m_streaming_state.chunks.size()
+                : 0u;
         const std::size_t budget = std::min(
-            to_create.size(),
+            std::min(to_create.size(), budget_headroom),
             static_cast<std::size_t>(m_last_streaming_budget_stats.generation_budget)
         );
         for (std::size_t i = 0; i < budget; ++i) {
@@ -793,12 +858,29 @@ void SHIELD_WorldSystem::update_chunk_activation(const Vec3& player_pos, Physics
     const int UNLOAD_DISTANCE_DOWN = RENDER_DISTANCE_DOWN + 2;
 
     for (const auto& [id, chunk_ptr] : m_streaming_state.chunks) {
-        const IVec3 d = chunk_ptr->get_coords() - camera_chunk;
-        if (std::abs(d.x) > UNLOAD_DISTANCE_XZ ||
-            std::abs(d.z) > UNLOAD_DISTANCE_XZ ||
-            d.y > UNLOAD_DISTANCE_UP ||
-            d.y < -UNLOAD_DISTANCE_DOWN)
-        {
+        const IVec3 coords = chunk_ptr->get_coords();
+        const IVec3 d = coords - camera_chunk;
+        if (std::abs(d.x) > UNLOAD_DISTANCE_XZ || std::abs(d.z) > UNLOAD_DISTANCE_XZ) {
+            to_unload.push_back(id);
+            continue;
+        }
+
+        if (d.y <= UNLOAD_DISTANCE_UP && d.y >= -UNLOAD_DISTANCE_DOWN) {
+            continue;
+        }
+
+        // Vertical-unload exemption (T-I3-2): a chunk inside its column's
+        // surface span (+-1 stack margin) holds the terrain isosurface the
+        // player can see, regardless of how far above/below the CAMERA it
+        // sits. The old camera-relative test evicted mountain summits more
+        // than 160 m above a valley camera every activation pass, then the
+        // surface scan immediately re-added them - a load/unload churn loop
+        // that left permanent holes on tall peaks. Only chunks vertically
+        // outside their column's surface band may be evicted by the Y test;
+        // the XZ test above is unchanged.
+        const ColumnSurfaceSpan span = column_surface_span(coords.x, coords.z);
+        const bool inside_surface_band = coords.y >= span.min_y - 1 && coords.y <= span.max_y + 1;
+        if (!inside_surface_band) {
             to_unload.push_back(id);
         }
     }
@@ -838,7 +920,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
     std::vector<SurfaceHorizonChunk> chunks_to_build;
     std::vector<SurfaceHorizonChunk> chunks_to_consider_for_collision;
     std::array<std::size_t, 3> lod_counts{0u, 0u, 0u};
-    const std::size_t surface_capacity = static_cast<std::size_t>((radius * 2 + 1) * (radius * 2 + 1) * 3);
+    const std::size_t surface_capacity = static_cast<std::size_t>((radius * 2 + 1) * (radius * 2 + 1) * 5);
     chunks_to_build.reserve(surface_capacity);
     chunks_to_consider_for_collision.reserve(surface_capacity);
 
@@ -846,17 +928,18 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
         for (int dx = -radius; dx <= radius; ++dx) {
             const int chunk_x = center_chunk.x + dx;
             const int chunk_z = center_chunk.z + dz;
-            const float sample_x = static_cast<float>(chunk_x * CHUNK_SIZE_X) + CHUNK_SIZE_X * 0.5f;
-            const float sample_z = static_cast<float>(chunk_z * CHUNK_SIZE_Z) + CHUNK_SIZE_Z * 0.5f;
-            const float terrain_height = GetTerrainHeightAt(sample_x, sample_z);
-            const int chunk_y = world_to_chunk_coords(Vec3(sample_x, terrain_height, sample_z)).y;
+            // Full column surface span (T-I3-2) with the same +-1 stack
+            // margin the fixed {-1, 0, 1} band provided on flat terrain;
+            // steep columns additionally cover every chunk-Y the isosurface
+            // passes through so cliff walls are meshed before world enter.
+            const ColumnSurfaceSpan span = column_surface_span(chunk_x, chunk_z);
             const int ring_distance = std::max(std::abs(dx), std::abs(dz));
             const int lod = horizon_lod_for_ring(ring_distance, radius, collision_range);
             const int step = get_lod_step_for_level(lod);
             lod_counts[static_cast<std::size_t>(std::clamp(lod, 0, 2))]++;
 
-            for (const int vertical_offset : {-1, 0, 1}) {
-                const IVec3 coords(chunk_x, chunk_y + vertical_offset, chunk_z);
+            for (int chunk_y = span.min_y - 1; chunk_y <= span.max_y + 1; ++chunk_y) {
+                const IVec3 coords(chunk_x, chunk_y, chunk_z);
                 const ChunkID id = Chunk::calculate_id(coords);
 
                 auto it = m_streaming_state.chunks.find(id);
@@ -869,7 +952,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
                 SurfaceHorizonChunk surface_chunk{
                     chunk,
                     IVec2(dx, dz),
-                    std::abs(vertical_offset),
+                    std::abs(chunk_y - span.center_y),
                     lod,
                     step
                 };
