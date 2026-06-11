@@ -66,6 +66,18 @@ The world starts *behaving*. Builds directly on iteration 4's biomes
 (weather wants climate zones) and iteration 3's instancing fixes (foliage
 wants instanced draws) and creature planner (ecology wants stimuli).
 
+0. **GPU particle framework (engine enabler, owner-mandated 2026-06-11 —
+   precedes the weather wave, which consumes it)**: instanced/compute
+   pools; emitters as game data (rate/lifetime/velocity/size/color curves,
+   textures from the .ltex arrays); depth-buffer collision; soft
+   particles; lit by the existing lighting path. magical_particles
+   re-homes onto it. Gates: deterministic emitter fixture on the 30 Hz
+   tick, visual capture, hard release-lane perf budget. Consumers in this
+   iteration: rain/snow (wind-advected — rain slants in storms), water
+   splash/spray, biome leaves/pollen, fire/smoke VISUALS (emissive sprite
+   + smoke column emitters). Fire as a SPREADING SIMULATION is iteration
+   6: an Aetheric scalar field (ignition/fuel/propagation) whose render
+   side is these emitters — the field stack's first dramatic consumer.
 1. **Wind grid (engine)**: coarse vector field on the 30 Hz tick (the
    first production consumer of the generalized field architecture —
    design it so Aetheric scalar fields reuse the same container/budget in
