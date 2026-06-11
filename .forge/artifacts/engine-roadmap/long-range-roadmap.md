@@ -114,6 +114,23 @@ Gates: capture-scoring determinism fixture, photo-mode perf budget,
 slice playtest artifact (scripted session producing a scored Codex entry),
 full-sweep + endurance as always.
 
+## Recorded concept — procedural/evolved creatures (owner interest, 2026-06-11)
+
+Blender-authored rigs are fully served by the LMS2/.lanim pipeline. The
+evolution concept ("evolution type things") needs two ENGINE systems:
+(1) parametric body generation — skeleton + mesh + skin weights from a
+body-plan parameter vector; strong native fit: compose bodies from SDF
+primitives and mesh via the existing marching-cubes stack (capsule limbs,
+blended torsos; weights derive from per-primitive joint ownership);
+(2) procedural locomotion — IK chains + deterministic gait synthesis as a
+pose source beside clip sampling in AnimationRuntime (30 Hz, lockstep-
+safe). GAME side: genomes/mutation/species/selection as data + systems;
+iteration-5 ecology stimulus channels supply selection pressure. Synergy:
+evolved fauna makes every world's Codex photographically unique. Earliest
+sensible seed: IK/gait after iteration 5; parametric bodies as an
+iteration 6/7 stretch or first post-photography feature. Gets its own
+spec/critique round before any scheduling.
+
 ## Explicitly unscheduled (revisit at iteration-7 close)
 
 F3/3 km tier (superseded by SHIELD-RT), matchmaking/WAN networking, mod
