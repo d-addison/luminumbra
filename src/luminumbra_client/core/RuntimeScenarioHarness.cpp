@@ -4897,41 +4897,43 @@ void ApplyCreatureSliceCamera(
     const Luminumbra::Vec3 target =
         scene.stimulus_spawned ? scene.stimulus_position : scene.graze_position;
 
-    // Creature-weighted focus: the creature is the subject, the target stays
-    // in frame.
-    const Luminumbra::Vec3 focus =
-        creature_pos * 0.8f + target * 0.2f + Luminumbra::Vec3(0.0f, 0.9f, 0.0f);
     glm::vec2 flat_dir(target.x - creature_pos.x, target.z - creature_pos.z);
     if (glm::dot(flat_dir, flat_dir) < 1.0e-4f) {
         flat_dir = glm::vec2(0.0f, 1.0f);
     } else {
         flat_dir = glm::normalize(flat_dir);
     }
-    // Over-the-shoulder framing: the camera sits behind the creature on the
-    // creature->target axis, so the subject is always between the lens and
-    // the point of interest, and the sightline crosses ground the creature
-    // itself stands on (open by construction). Lifted over any residual
-    // ridge between camera and focus.
-    const glm::vec2 cam_xz = glm::vec2(creature_pos.x, creature_pos.z) - flat_dir * 4.5f;
-    float cam_y = creature_pos.y + 2.2f;
+    // T-I3-22 re-frame: over-the-shoulder at CREATURE EYE LEVEL with the
+    // horizon visible (sky in the upper third), not a high downward shot that
+    // stares at the ground. The camera sits just behind and a touch above the
+    // creature on the creature->target axis (subject between lens and point of
+    // interest), and aims at a focus raised to roughly camera height so the
+    // gaze is near-level: a small downward pitch keeps the creature a third up
+    // from the bottom while open sky fills the top of the frame.
+    const float kEyeLift = 1.6f;        // camera a touch above the creature's body center
+    const float kBackDistance = 5.0f;   // over-the-shoulder distance
+    const glm::vec2 cam_xz = glm::vec2(creature_pos.x, creature_pos.z) - flat_dir * kBackDistance;
+    float cam_y = creature_pos.y + kEyeLift;
+
+    // Clear only the terrain directly between the camera and the subject so
+    // the lens does not start inside a dune; do NOT lift to clear all the way
+    // to the distant target (that is what pitched the old shot into the dirt).
     if (world_system != nullptr) {
-        // True line-of-sight clearance: the segment camera(t=0) -> focus(t=1)
-        // must pass above the terrain at every sample, so solve
-        // cam_y*(1-t) + focus.y*t >= h(t) + margin for cam_y. The margin is
-        // generous because the rendered marching-cubes surface can sit a
-        // couple of meters above the generator height on cliff folds.
-        constexpr float kClearance = 1.0f;
-        for (float t : {0.0f, 0.15f, 0.3f, 0.45f, 0.6f, 0.75f, 0.9f}) {
-            const glm::vec2 sample = glm::mix(cam_xz, glm::vec2(focus.x, focus.z), t);
+        constexpr float kClearance = 0.6f;
+        for (float t : {0.0f, 0.25f, 0.5f}) {
+            const glm::vec2 sample = glm::mix(cam_xz, glm::vec2(creature_pos.x, creature_pos.z), t);
             const float h = world_system->GetTerrainHeightAt(sample.x, sample.y);
-            if (t < 0.99f) {
-                cam_y = std::max(cam_y, (h + kClearance - focus.y * t) / (1.0f - t));
-            }
+            cam_y = std::max(cam_y, h + kClearance);
         }
     }
-    // Cap the lift: a low, partially occluded side shot beats a distant
-    // aerial where the subject vanishes among the folds.
-    cam_y = std::min(cam_y, creature_pos.y + 6.0f);
+    // Cap the lift so the gaze stays near-level (sky stays in frame).
+    cam_y = std::min(cam_y, creature_pos.y + 2.8f);
+
+    // Focus: the creature's body center, nudged toward the target, raised to
+    // just below camera height. A near-level aim (camera only slightly above
+    // focus) seats the horizon around a third down from the top.
+    Luminumbra::Vec3 focus = creature_pos * 0.78f + target * 0.22f;
+    focus.y = cam_y - 0.6f;
 
     scene.camera_position = {cam_xz.x, cam_y, cam_xz.y};
     scene.camera_focus = focus;
@@ -4974,6 +4976,116 @@ CreatureSlicePlanProbe ProbeCreatureSlicePlan(
     return probe;
 }
 
+CreatureSliceComposition AnalyzeCreatureSliceComposition(
+    const std::vector<unsigned char>& pixels,
+    int width,
+    int height,
+    int creature_screen_x_from_left,
+    int creature_screen_y_from_top)
+{
+    CreatureSliceComposition comp;
+    comp.creature_screen_x = creature_screen_x_from_left;
+    comp.creature_screen_y = creature_screen_y_from_top;
+    if (width <= 0 || height <= 0 ||
+        pixels.size() < static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u) {
+        return comp;
+    }
+    const std::size_t row_stride = static_cast<std::size_t>(width) * 3u;
+    const auto px = [&](int x, int y_from_top, int channel) -> unsigned char {
+        const int y = height - 1 - y_from_top; // glReadPixels rows are bottom-up
+        return pixels[static_cast<std::size_t>(y) * row_stride
+                      + static_cast<std::size_t>(x) * 3u + static_cast<std::size_t>(channel)];
+    };
+
+    // Whole-frame sky ratio (horizon-in-frame proof). Uses the same sky
+    // classifier as the PlayerView gate.
+    std::uint64_t sky_pixels = 0;
+    const std::uint64_t total_pixels =
+        static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            if (IsBelowHorizonSkyPixel(px(x, y, 0), px(x, y, 1), px(x, y, 2))) {
+                ++sky_pixels;
+            }
+        }
+    }
+    comp.sky_ratio = total_pixels > 0
+        ? static_cast<double>(sky_pixels) / static_cast<double>(total_pixels)
+        : 0.0;
+
+    // Creature ROI: a box around the projected creature position. The
+    // half-extent scales with the frame so it covers the subject without
+    // swallowing the whole shot.
+    const bool in_frame = creature_screen_x_from_left >= 0 &&
+        creature_screen_x_from_left < width &&
+        creature_screen_y_from_top >= 0 &&
+        creature_screen_y_from_top < height;
+    if (!in_frame) {
+        return comp; // valid stays false; ROI metrics zero
+    }
+    const int roi_half = std::max(6, std::min(width, height) / 16);
+    const int rx0 = std::max(0, creature_screen_x_from_left - roi_half);
+    const int rx1 = std::min(width - 1, creature_screen_x_from_left + roi_half);
+    const int ry0 = std::max(0, creature_screen_y_from_top - roi_half);
+    const int ry1 = std::min(height - 1, creature_screen_y_from_top + roi_half);
+
+    double roi_sum[3] = {0.0, 0.0, 0.0};
+    std::size_t roi_count = 0;
+    for (int y = ry0; y <= ry1; ++y) {
+        for (int x = rx0; x <= rx1; ++x) {
+            // Skip sky pixels inside the ROI so the creature mean reflects the
+            // subject, not the sky behind it.
+            if (IsBelowHorizonSkyPixel(px(x, y, 0), px(x, y, 1), px(x, y, 2))) {
+                continue;
+            }
+            roi_sum[0] += px(x, y, 0);
+            roi_sum[1] += px(x, y, 1);
+            roi_sum[2] += px(x, y, 2);
+            ++roi_count;
+        }
+    }
+
+    // Terrain reference: a ring around (but outside) the creature ROI, sky
+    // excluded — the ground the creature stands on. Sampled within 3x the ROI
+    // half-extent so it stays local to the subject.
+    const int ref_half = roi_half * 3;
+    const int fx0 = std::max(0, creature_screen_x_from_left - ref_half);
+    const int fx1 = std::min(width - 1, creature_screen_x_from_left + ref_half);
+    const int fy0 = std::max(0, creature_screen_y_from_top - ref_half);
+    const int fy1 = std::min(height - 1, creature_screen_y_from_top + ref_half);
+    double ref_sum[3] = {0.0, 0.0, 0.0};
+    std::size_t ref_count = 0;
+    for (int y = fy0; y <= fy1; ++y) {
+        for (int x = fx0; x <= fx1; ++x) {
+            if (x >= rx0 && x <= rx1 && y >= ry0 && y <= ry1) {
+                continue; // inside the creature ROI
+            }
+            if (IsBelowHorizonSkyPixel(px(x, y, 0), px(x, y, 1), px(x, y, 2))) {
+                continue; // sky is not terrain
+            }
+            ref_sum[0] += px(x, y, 0);
+            ref_sum[1] += px(x, y, 1);
+            ref_sum[2] += px(x, y, 2);
+            ++ref_count;
+        }
+    }
+
+    comp.creature_roi_pixels = roi_count;
+    comp.terrain_ref_pixels = ref_count;
+    if (roi_count > 0 && ref_count > 0) {
+        for (int c = 0; c < 3; ++c) {
+            comp.creature_roi_mean[c] = roi_sum[c] / static_cast<double>(roi_count);
+            comp.terrain_ref_mean[c] = ref_sum[c] / static_cast<double>(ref_count);
+        }
+        comp.creature_terrain_color_delta =
+            std::abs(comp.creature_roi_mean[0] - comp.terrain_ref_mean[0]) +
+            std::abs(comp.creature_roi_mean[1] - comp.terrain_ref_mean[1]) +
+            std::abs(comp.creature_roi_mean[2] - comp.terrain_ref_mean[2]);
+        comp.valid = true;
+    }
+    return comp;
+}
+
 void WriteCreatureSliceAnalysis(
     const std::filesystem::path& artifact_dir,
     const CreatureSliceScene& scene,
@@ -5003,6 +5115,25 @@ void WriteCreatureSliceAnalysis(
     if (gl_debug.errors != 0) {
         failures.push_back("gl_debug_errors");
     }
+    // T-I3-22 composition: a frame that renders the creature but stares at the
+    // ground/sky, or camouflages the creature against its terrain, is visually
+    // broken even when functionally green. Bounds match the validator gate.
+    constexpr double kMinSkyRatio = 0.05;
+    constexpr double kMaxSkyRatio = 0.6;
+    constexpr double kMinColorDelta = 24.0; // L1 over 0-255 RGB means
+    for (const auto* cap : {&before, &after}) {
+        const CreatureSliceComposition& c = cap->composition;
+        if (!c.valid) {
+            failures.push_back("composition_invalid:" + cap->file);
+            continue;
+        }
+        if (c.sky_ratio < kMinSkyRatio || c.sky_ratio > kMaxSkyRatio) {
+            failures.push_back("composition_sky_ratio_out_of_band:" + cap->file);
+        }
+        if (c.creature_terrain_color_delta < kMinColorDelta) {
+            failures.push_back("composition_creature_low_contrast:" + cap->file);
+        }
+    }
     const bool passed = failures.empty();
 
     const auto probe_json = [](const CreatureSlicePlanProbe& probe) {
@@ -5019,13 +5150,27 @@ void WriteCreatureSliceAnalysis(
             {"camera_position", Vec3ToJson(probe.camera_position)},
         };
     };
-    const auto capture_json = [&probe_json](const CreatureSliceCapture& capture) {
+    const auto composition_json = [](const CreatureSliceComposition& c) {
+        return nlohmann::json{
+            {"valid", c.valid},
+            {"sky_ratio", c.sky_ratio},
+            {"creature_terrain_color_delta", c.creature_terrain_color_delta},
+            {"creature_roi_mean", {c.creature_roi_mean[0], c.creature_roi_mean[1], c.creature_roi_mean[2]}},
+            {"terrain_ref_mean", {c.terrain_ref_mean[0], c.terrain_ref_mean[1], c.terrain_ref_mean[2]}},
+            {"creature_roi_pixels", c.creature_roi_pixels},
+            {"terrain_ref_pixels", c.terrain_ref_pixels},
+            {"creature_screen_x", c.creature_screen_x},
+            {"creature_screen_y", c.creature_screen_y},
+        };
+    };
+    const auto capture_json = [&probe_json, &composition_json](const CreatureSliceCapture& capture) {
         return nlohmann::json{
             {"file", capture.file},
             {"elapsed_seconds", capture.elapsed_seconds},
             {"plan", probe_json(capture.plan)},
             {"skinned_draws", capture.skinned_draws},
             {"skinned_indices_drawn", capture.skinned_indices_drawn},
+            {"composition", composition_json(capture.composition)},
         };
     };
 
