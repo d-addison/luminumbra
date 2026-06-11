@@ -1,4 +1,5 @@
 #include "GameSession.h"
+#include "../animation/AnimationRuntime.h"
 #include "../systems/SHIELD_WorldSystem.h" // This includes TerrainGenParams
 #include "../core/JobSystem.h"
 #include "nlohmann/json.hpp" // For parsing JSON
@@ -69,13 +70,17 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         const std::uint64_t current_tick = first_tick + i;
 
         // Deterministic per-tick system order (design-decisions.md §1).
-        // Placeholder slots until the owning iteration-3/4 tasks land:
-        //   1. Animation pose sampling (T-I3 animation core)
+        // Remaining placeholder slots until the owning iteration-3/4 tasks
+        // land:
         //   2. Instinct planning (T-I3 planner runtime)
         //   3. Field budget (iteration 4)
         //   4. Queued world edits
         // Finally, the ordered event bus drains everything published for
         // this tick (tick -> lane -> sequence order).
+
+        // 1. Animation pose sampling (T-I3-15): FIRST in the tick order.
+        luminumbra::animation::SamplePosesOnTick(m_registry, m_simulationClock.fixed_dt());
+
         m_simulationEventBus.drain(current_tick);
     }
     return ticks_executed;
