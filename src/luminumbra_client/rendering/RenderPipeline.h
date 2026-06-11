@@ -279,7 +279,19 @@ public:
     bool startup(u32 screen_width, u32 screen_height, const std::filesystem::path& root_path);
     void shutdown();
     void render_frame(entt::registry& registry, Systems::SHIELD_WorldSystem& world_system, const Camera& camera, float deltaTime, bool wireframe = false);
+    // Reallocates ALL screen-sized render targets (G-buffer, SSAO, lighting/post
+    // chain) to the new framebuffer size, preserving formats; the far-LOD path
+    // and passes consume the new sizes through the shared state. A no-op when the
+    // size is unchanged or degenerate (0). Each real reallocation bumps
+    // resize_generation() so callers (the WindowModeStress gate) can assert
+    // targets were actually rebuilt (T-I4-DR-window-modes).
     void on_resize(u32 new_width, u32 new_height);
+    u32 screen_width() const { return m_screen_width; }
+    u32 screen_height() const { return m_screen_height; }
+    // Count of render-target reallocations since startup (one per real
+    // on_resize). Surfaced as telemetry so the resize-stress gate can verify
+    // targets were rebuilt during the mid-run mode toggles.
+    u64 resize_generation() const { return m_resize_generation; }
     void clear_all_chunk_data(); // Force clear all cached chunk render data
     const MeshUploadFrameStats& get_last_mesh_upload_stats() const { return m_last_mesh_upload_stats; }
     const RenderPassFrameStats& get_last_render_pass_stats() const { return m_last_render_pass_stats; }
@@ -421,6 +433,9 @@ private:
 
     u32 m_screen_width = 0;
     u32 m_screen_height = 0;
+    // Render-target reallocation counter (T-I4-DR-window-modes). Bumped once per
+    // real on_resize so the resize-stress gate can assert targets were rebuilt.
+    u64 m_resize_generation = 0;
     std::filesystem::path m_root_path;
 
     DirectionalLight m_sun;

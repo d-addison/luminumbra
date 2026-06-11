@@ -82,6 +82,55 @@ uint64_t GetCommandLineUInt64Option(int argc, char* argv[], const std::string& f
     }
 }
 
+WindowMode ParseWindowMode(const std::string& value, WindowMode fallback) {
+    if (value == "windowed") return WindowMode::Windowed;
+    if (value == "borderless") return WindowMode::Borderless;
+    if (value == "fullscreen") return WindowMode::Fullscreen;
+    if (value == "headless") return WindowMode::Headless;
+    return fallback;
+}
+
+const char* WindowModeName(WindowMode mode) {
+    switch (mode) {
+        case WindowMode::Windowed: return "windowed";
+        case WindowMode::Borderless: return "borderless";
+        case WindowMode::Fullscreen: return "fullscreen";
+        case WindowMode::Headless: return "headless";
+    }
+    return "unknown";
+}
+
+nlohmann::json CapturePinMetadata(WindowMode active_window_mode, int capture_width, int capture_height) {
+    const bool pinned = capture_width == kCapturePinnedWidth && capture_height == kCapturePinnedHeight;
+    return nlohmann::json{
+        {"window_mode", WindowModeName(active_window_mode)},
+        {"capture_width", capture_width},
+        {"capture_height", capture_height},
+        {"pinned_width", kCapturePinnedWidth},
+        {"pinned_height", kCapturePinnedHeight},
+        {"pinned", pinned}
+    };
+}
+
+// Parses "WxH" (e.g. "1600x900") into width/height. Returns false (leaving the
+// outputs untouched) on any malformed/non-positive value.
+static bool ParseResolution(const std::string& value, int& out_width, int& out_height) {
+    const auto x_pos = value.find_first_of("xX");
+    if (x_pos == std::string::npos || x_pos == 0 || x_pos + 1 >= value.size()) {
+        return false;
+    }
+    try {
+        const int w = std::stoi(value.substr(0, x_pos));
+        const int h = std::stoi(value.substr(x_pos + 1));
+        if (w <= 0 || h <= 0) return false;
+        out_width = w;
+        out_height = h;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 RuntimeScenarioConfig ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& root_dir) {
     RuntimeScenarioConfig config;
     config.scenario = GetCommandLineOption(argc, argv, "--scenario", "");
@@ -90,6 +139,21 @@ RuntimeScenarioConfig ParseRuntimeScenarioConfig(int argc, char* argv[], const s
     config.no_audio = HasCommandLineFlag(argc, argv, "--no-audio");
     config.no_ui = HasCommandLineFlag(argc, argv, "--no-ui");
     config.hidden_window = HasCommandLineFlag(argc, argv, "--hidden-window");
+
+    // --- Window modes (T-I4-DR-window-modes) ---
+    // borderless is the interactive default. --window-mode wins; the legacy
+    // --hidden-window flag is equivalent to --window-mode headless. headless
+    // implies a hidden window (gates/server use it), so the two stay in sync.
+    config.window_mode = ParseWindowMode(
+        GetCommandLineOption(argc, argv, "--window-mode", ""),
+        config.hidden_window ? WindowMode::Headless : WindowMode::Borderless);
+    if (config.window_mode == WindowMode::Headless) {
+        config.hidden_window = true;
+    }
+    ParseResolution(
+        GetCommandLineOption(argc, argv, "--resolution", ""),
+        config.windowed_width, config.windowed_height);
+
     config.enable_gpu_sdf_runtime = HasCommandLineFlag(argc, argv, "--enable-gpu-sdf-runtime");
     config.readiness_timeout_seconds = GetCommandLineIntOption(argc, argv, "--readiness-timeout", config.readiness_timeout_seconds);
     config.horizon_radius = GetCommandLineIntOption(argc, argv, "--horizon-radius", config.horizon_radius);
@@ -130,10 +194,10 @@ RuntimeScenarioConfig ParseRuntimeScenarioConfig(int argc, char* argv[], const s
         config.skinned_normal_texture = "data/textures/test/skinned_test_normal_256.ltex";
     }
 
-    const int default_timed_run = config.auto_world_smoke() ? 300 : ((config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke() || config.skybox_visual_smoke() || config.weather_visual_smoke() || config.timeofday_sweep_smoke() || config.lod_boundary_oscillation_smoke() || config.lod_seam_arrival_smoke() || config.player_view_smoke() || config.farlod_horizon_smoke() || config.skinned_mesh_visual_smoke() || config.creature_slice_smoke()) ? 60 : 0);
+    const int default_timed_run = config.auto_world_smoke() ? 300 : ((config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke() || config.skybox_visual_smoke() || config.weather_visual_smoke() || config.timeofday_sweep_smoke() || config.lod_boundary_oscillation_smoke() || config.lod_seam_arrival_smoke() || config.player_view_smoke() || config.farlod_horizon_smoke() || config.skinned_mesh_visual_smoke() || config.creature_slice_smoke() || config.window_mode_stress_smoke()) ? 60 : 0);
     config.timed_run_seconds = GetCommandLineIntOption(argc, argv, "--timed-run", default_timed_run);
 
-    if (config.auto_world_smoke() || config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke() || config.skybox_visual_smoke() || config.weather_visual_smoke() || config.timeofday_sweep_smoke() || config.lod_boundary_oscillation_smoke() || config.lod_seam_arrival_smoke() || config.persistence_roundtrip_smoke() || config.player_view_smoke() || config.farlod_horizon_smoke() || config.skinned_mesh_visual_smoke() || config.creature_slice_smoke()) {
+    if (config.auto_world_smoke() || config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke() || config.skybox_visual_smoke() || config.weather_visual_smoke() || config.timeofday_sweep_smoke() || config.lod_boundary_oscillation_smoke() || config.lod_seam_arrival_smoke() || config.persistence_roundtrip_smoke() || config.player_view_smoke() || config.farlod_horizon_smoke() || config.skinned_mesh_visual_smoke() || config.creature_slice_smoke() || config.window_mode_stress_smoke()) {
         config.auto_create_world = true;
         config.auto_enter_world = true;
     }
@@ -5548,6 +5612,129 @@ void WriteCreatureSliceAnalysis(
     std::error_code ec;
     std::filesystem::create_directories(artifact_dir, ec);
     std::ofstream output(artifact_dir / "creature-slice-analysis.json");
+    output << std::setw(2) << artifact << '\n';
+}
+
+// --- window_mode_stress_smoke (T-I4-DR-window-modes) ---
+
+std::vector<WindowModeStressStep> BuildWindowModeStressSequence() {
+    // windowed -> borderless (larger) -> a couple of resolutions -> exclusive
+    // (native-like) -> back to the pinned capture size. The intermediate sizes
+    // intentionally differ from the pinned size so every step reallocates the
+    // non-pinned targets. The final step restores the pinned 1280x720 so the
+    // Smoke-equivalent capture is at the gate-pinned size.
+    return {
+        {"windowed_1280x720", kCapturePinnedWidth, kCapturePinnedHeight, false, 0, 0, 0, 0, 0},
+        {"borderless_1920x1080", 1920, 1080, false, 0, 0, 0, 0, 0},
+        {"resolution_1600x900", 1600, 900, false, 0, 0, 0, 0, 0},
+        {"resolution_1024x768", 1024, 768, false, 0, 0, 0, 0, 0},
+        {"fullscreen_2560x1440", 2560, 1440, false, 0, 0, 0, 0, 0},
+        {"windowed_1366x768", 1366, 768, false, 0, 0, 0, 0, 0},
+        {"restore_pinned_1280x720", kCapturePinnedWidth, kCapturePinnedHeight, false, 0, 0, 0, 0, 0},
+    };
+}
+
+void WriteWindowModeStressAnalysis(
+    const std::filesystem::path& artifact_dir,
+    double duration_seconds,
+    WindowMode requested_window_mode,
+    const std::vector<WindowModeStressStep>& steps,
+    const WindowModeStressCapture& final_capture)
+{
+    const GLDebugRuntimeStats gl_debug = CurrentGLDebugRuntimeStats();
+
+    // Every step that changed the framebuffer size must have bumped the resize
+    // generation (targets actually reallocated) and left zero GL errors.
+    bool all_steps_ok = !steps.empty();
+    std::uint64_t size_changing_steps = 0;
+    std::uint64_t reallocating_steps = 0;
+    nlohmann::json steps_json = nlohmann::json::array();
+    for (const WindowModeStressStep& step : steps) {
+        const bool generation_bumped = step.resize_generation_after > step.resize_generation_before;
+        const bool realloc_consistent = step.size_changed ? generation_bumped : true;
+        const bool targets_match = step.targets_width_after == step.width &&
+                                   step.targets_height_after == step.height;
+        const bool step_ok = realloc_consistent && targets_match && step.gl_errors_after == 0;
+        if (step.size_changed) {
+            ++size_changing_steps;
+            if (generation_bumped) ++reallocating_steps;
+        }
+        if (!step_ok) all_steps_ok = false;
+        steps_json.push_back({
+            {"label", step.label},
+            {"width", step.width},
+            {"height", step.height},
+            {"size_changed", step.size_changed},
+            {"resize_generation_before", step.resize_generation_before},
+            {"resize_generation_after", step.resize_generation_after},
+            {"gl_errors_after", step.gl_errors_after},
+            {"targets_width_after", step.targets_width_after},
+            {"targets_height_after", step.targets_height_after},
+            {"passed", step_ok}
+        });
+    }
+
+    // Final state must be restored to the pinned capture size.
+    const bool final_pinned =
+        !steps.empty() &&
+        steps.back().targets_width_after == kCapturePinnedWidth &&
+        steps.back().targets_height_after == kCapturePinnedHeight;
+
+    // The pinned capture must be at the pinned size and contain a real rendered
+    // scene (Smoke-equivalent: ROI present and not an all-dark/empty frame).
+    constexpr double kMaxDarkRatio = 0.97;
+    const double dark_ratio = final_capture.pixels.roi_pixels > 0
+        ? static_cast<double>(final_capture.pixels.dark_pixels) /
+              static_cast<double>(final_capture.pixels.roi_pixels)
+        : 1.0;
+    const bool capture_pinned_size =
+        final_capture.width == kCapturePinnedWidth &&
+        final_capture.height == kCapturePinnedHeight;
+    const bool capture_smoke_ok =
+        capture_pinned_size &&
+        final_capture.pixels.roi_pixels > 0 &&
+        dark_ratio < kMaxDarkRatio;
+
+    const bool passed =
+        all_steps_ok &&
+        size_changing_steps > 0 &&
+        reallocating_steps == size_changing_steps &&
+        final_pinned &&
+        capture_smoke_ok &&
+        gl_debug.errors == 0;
+
+    nlohmann::json artifact = {
+        {"schema", "luminumbra.window_mode_stress.v1"},
+        {"timestamp_utc", TimestampUtc()},
+        {"passed", passed},
+        {"duration_seconds", duration_seconds},
+        {"requested_window_mode", WindowModeName(requested_window_mode)},
+        {"capture_pin", CapturePinMetadata(requested_window_mode, final_capture.width, final_capture.height)},
+        {"steps", steps_json},
+        {"aggregates", {
+            {"size_changing_steps", size_changing_steps},
+            {"reallocating_steps", reallocating_steps},
+            {"final_targets_pinned", final_pinned},
+            {"final_dark_ratio", dark_ratio}
+        }},
+        {"final_capture", {
+            {"file", final_capture.file},
+            {"width", final_capture.width},
+            {"height", final_capture.height},
+            {"pixels", ScreenshotPixelStatsToJson(final_capture.pixels)}
+        }},
+        {"thresholds", {
+            {"max_dark_ratio", kMaxDarkRatio}
+        }},
+        {"gl_debug", {
+            {"errors", gl_debug.errors},
+            {"warnings", gl_debug.warnings}
+        }}
+    };
+
+    std::error_code ec;
+    std::filesystem::create_directories(artifact_dir, ec);
+    std::ofstream output(artifact_dir / "window-mode-stress-analysis.json");
     output << std::setw(2) << artifact << '\n';
 }
 
