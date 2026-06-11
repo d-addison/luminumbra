@@ -1,10 +1,11 @@
 {
   "name": "Flat Lands",
   "description": "Mostly flat terrain with gentle rolling hills",
+  "schema_rev": 2,
   "generation_params": {
     "terrain": {
-      "base_frequency": 0.02,
-      "base_amplitude": 10.0,
+      "base_frequency": 0.005,
+      "base_amplitude": 6.0,
       "octaves": 2,
       "persistence": 0.3,
       "lacunarity": 2.0,
