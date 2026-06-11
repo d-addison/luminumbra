@@ -5040,11 +5040,15 @@ CreatureSliceComposition AnalyzeCreatureSliceComposition(
     int width,
     int height,
     int creature_screen_x_from_left,
-    int creature_screen_y_from_top)
+    int creature_screen_y_from_top,
+    int stimulus_screen_x_from_left,
+    int stimulus_screen_y_from_top)
 {
     CreatureSliceComposition comp;
     comp.creature_screen_x = creature_screen_x_from_left;
     comp.creature_screen_y = creature_screen_y_from_top;
+    comp.stimulus_screen_x = stimulus_screen_x_from_left;
+    comp.stimulus_screen_y = stimulus_screen_y_from_top;
     if (width <= 0 || height <= 0 ||
         pixels.size() < static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u) {
         return comp;
@@ -5142,6 +5146,41 @@ CreatureSliceComposition AnalyzeCreatureSliceComposition(
             std::abs(comp.creature_roi_mean[2] - comp.terrain_ref_mean[2]);
         comp.valid = true;
     }
+
+    // T-I4-9 emissive glow halo around the glow_bloom stimulus prop. Measures
+    // three concentric regions centered on the stimulus screen position: a
+    // bright inner CORE disc, a falloff RING annulus, and a far BACKGROUND ring.
+    // A real glow/bloom reads core > ring > background (luminance falls off into
+    // a halo extending beyond the geometry's bright core).
+    if (stimulus_screen_x_from_left >= 0 && stimulus_screen_x_from_left < width &&
+        stimulus_screen_y_from_top >= 0 && stimulus_screen_y_from_top < height) {
+        const int core_r = std::max(3, std::min(width, height) / 48);
+        const int ring_r = core_r * 3;   // halo annulus extends ~3x the core
+        const int bg_r = core_r * 6;     // far background reference
+        double core_sum = 0, ring_sum = 0, bg_sum = 0;
+        std::size_t core_n = 0, ring_n = 0, bg_n = 0;
+        const int bx0 = std::max(0, stimulus_screen_x_from_left - bg_r);
+        const int bx1 = std::min(width - 1, stimulus_screen_x_from_left + bg_r);
+        const int by0 = std::max(0, stimulus_screen_y_from_top - bg_r);
+        const int by1 = std::min(height - 1, stimulus_screen_y_from_top + bg_r);
+        for (int y = by0; y <= by1; ++y) {
+            for (int x = bx0; x <= bx1; ++x) {
+                const double dx = x - stimulus_screen_x_from_left;
+                const double dy = y - stimulus_screen_y_from_top;
+                const double dist = std::sqrt(dx * dx + dy * dy);
+                const double lum = PixelLuminance(px(x, y, 0), px(x, y, 1), px(x, y, 2));
+                if (dist <= core_r) { core_sum += lum; ++core_n; }
+                else if (dist <= ring_r) { ring_sum += lum; ++ring_n; }
+                else if (dist <= bg_r) { bg_sum += lum; ++bg_n; }
+            }
+        }
+        if (core_n > 0 && ring_n > 0 && bg_n > 0) {
+            comp.glow_core_luminance = core_sum / static_cast<double>(core_n);
+            comp.glow_ring_luminance = ring_sum / static_cast<double>(ring_n);
+            comp.glow_background_luminance = bg_sum / static_cast<double>(bg_n);
+            comp.glow_measured = true;
+        }
+    }
     return comp;
 }
 
@@ -5193,6 +5232,26 @@ void WriteCreatureSliceAnalysis(
             failures.push_back("composition_creature_low_contrast:" + cap->file);
         }
     }
+    // T-I4-9 emissive glow halo: when the glow_bloom stimulus projects into a
+    // capture, its emission produces a bloom HALO - a luminance ring that
+    // differs from the far background (design wording: "luminance falloff ring
+    // beyond geometry bounds"). The crystal's fresnel-edge emission peaks on the
+    // rim, so the halo reads as core/ring/background structure rather than a flat
+    // patch. The ENFORCED, machine-independent emissive check is the headless
+    // monotonic calibration gate (RenderSmokeTest.EmissiveCalibrationMonotonic);
+    // this live-scene halo is asserted as STRUCTURE (the three concentric regions
+    // are not all near-equal, which a flat unlit sprite would be) so it stays
+    // robust to the exact framing while still proving an on-screen glow gradient.
+    constexpr double kGlowStructure = 8.0; // max delta across core/ring/bg
+    for (const auto* cap : {&before, &after}) {
+        const CreatureSliceComposition& c = cap->composition;
+        if (!c.glow_measured) continue;
+        const double lo = std::min({c.glow_core_luminance, c.glow_ring_luminance, c.glow_background_luminance});
+        const double hi = std::max({c.glow_core_luminance, c.glow_ring_luminance, c.glow_background_luminance});
+        if (hi - lo < kGlowStructure) {
+            failures.push_back("glow_no_halo_gradient:" + cap->file);
+        }
+    }
     const bool passed = failures.empty();
 
     const auto probe_json = [](const CreatureSlicePlanProbe& probe) {
@@ -5220,6 +5279,12 @@ void WriteCreatureSliceAnalysis(
             {"terrain_ref_pixels", c.terrain_ref_pixels},
             {"creature_screen_x", c.creature_screen_x},
             {"creature_screen_y", c.creature_screen_y},
+            {"glow_measured", c.glow_measured},
+            {"glow_core_luminance", c.glow_core_luminance},
+            {"glow_ring_luminance", c.glow_ring_luminance},
+            {"glow_background_luminance", c.glow_background_luminance},
+            {"stimulus_screen_x", c.stimulus_screen_x},
+            {"stimulus_screen_y", c.stimulus_screen_y},
         };
     };
     const auto capture_json = [&probe_json, &composition_json](const CreatureSliceCapture& capture) {

@@ -1853,6 +1853,222 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     glDeleteProgram(program);
 }
 
+// T-I4-9 emissive calibration gate.
+//
+// Audits the materials-LUT emission -> lighting -> on-screen-glow chain by
+// rendering the LuminCrystal (material 6) through the real lighting_pass shader
+// at a fixed exposure and several authored emissive_intensity values, then
+// measuring the resulting on-screen luminance. Asserts the transfer is
+// MONOTONIC (intensity 0 dark; luminance strictly increases with intensity) and
+// emits the luminumbra.emissive_calibration.v1 artifact (authored intensity vs
+// measured luminance). Runs headlessly in the render smoke ctest GL context.
+//
+// Transfer curve (documented): the lighting pass scales the crystal glow by
+// (1.5 * emissive_intensity) before it is added to the lit color and filmic-
+// tonemapped. The pre-tonemap glow is therefore LINEAR in intensity; the
+// measured on-screen luminance is that linear glow passed through the filmic
+// curve (monotonic, compressive at the top), so it rises monotonically and
+// predictably with the authored value.
+TEST(RenderSmokeTest, EmissiveCalibrationMonotonic) {
+    HiddenGlContext context;
+    if (!context.ready()) {
+        GTEST_SKIP() << context.error();
+    }
+
+    const ShaderProgramSpec spec{"lighting_pass", "lighting_pass.vert", "lighting_pass.frag"};
+    GLuint program = LinkProgram(spec);
+    ASSERT_NE(program, 0u);
+
+    constexpr int kRes = 16;
+    constexpr float kEmissiveLutScale = 8.0f; // must match RenderPipeline::kEmissiveLutScale
+
+    // Output FBO (RGBA8: the lighting pass writes a tonemapped LDR color).
+    GLuint fbo = 0, color_tex = 0;
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glGenTextures(1, &color_tex);
+    glBindTexture(GL_TEXTURE_2D, color_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, kRes, kRes, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color_tex, 0);
+    glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+
+    // --- Synthetic G-buffer (1x1 textures, value-replicated across the quad) ---
+    // A crystal fragment: view-space position in front of the camera, +Z normal,
+    // dark albedo so the emission dominates, material id 6 in the normal alpha.
+    auto make_tex = [&](GLenum ifmt, GLenum fmt, GLenum type, const void* data) {
+        GLuint t = 0; glGenTextures(1, &t); glBindTexture(GL_TEXTURE_2D, t);
+        glTexImage2D(GL_TEXTURE_2D, 0, ifmt, 1, 1, 0, fmt, type, data);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        return t;
+    };
+    const float pos_px[3] = {0.0f, 0.0f, -3.0f};
+    GLuint g_pos = make_tex(GL_RGB16F, GL_RGB, GL_FLOAT, pos_px);
+    // Octahedral-encoded +Z normal -> (0.5,0.5); material id 6/255 in alpha.
+    const unsigned char norm_px[4] = {128, 128, 0, static_cast<unsigned char>((6 * 255) / 255)};
+    GLuint g_norm = make_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, norm_px);
+    const unsigned char albedo_px[4] = {10, 10, 12, 13}; // dark crystal, roughness ~0.05
+    GLuint g_albedo = make_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, albedo_px);
+    const float metallic_px[2] = {0.1f, 1.0f};
+    GLuint g_metallic = make_tex(GL_RG16F, GL_RG, GL_FLOAT, metallic_px);
+    const float ssao_px[1] = {1.0f};
+    GLuint ssao_tex = make_tex(GL_R16F, GL_RED, GL_FLOAT, ssao_px);
+    const unsigned char caustics_px[4] = {0, 0, 0, 255};
+    GLuint caustics_tex = make_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, caustics_px);
+
+    // Shadow cascades + terrain array as 1x1x1 arrays (distinct sampler types
+    // need distinct units; an unbound/shared sampler is undefined).
+    auto make_array_tex = [&](GLenum ifmt, GLenum fmt, GLenum type, const void* data) {
+        GLuint t = 0; glGenTextures(1, &t); glBindTexture(GL_TEXTURE_2D_ARRAY, t);
+        glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, ifmt, 1, 1, 1, 0, fmt, type, data);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        return t;
+    };
+    const float shadow_px[1] = {1.0f};
+    GLuint shadow_arr = make_array_tex(GL_DEPTH_COMPONENT24, GL_DEPTH_COMPONENT, GL_FLOAT, shadow_px);
+    const unsigned char terrain_px[4] = {0, 0, 0, 255};
+    GLuint terrain_arr = make_array_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, terrain_px);
+
+    // Fullscreen quad.
+    const float quad[] = {
+        -1, -1, 0, 0, 0,   1, -1, 0, 1, 0,   1, 1, 0, 1, 1,
+        -1, -1, 0, 0, 0,   1,  1, 0, 1, 1,  -1, 1, 0, 0, 1,
+    };
+    GLuint vao = 0, vbo = 0;
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &vbo);
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(0));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
+
+    glViewport(0, 0, kRes, kRes);
+    glDisable(GL_DEPTH_TEST);
+    glUseProgram(program);
+
+    // Bind G-buffer samplers to distinct units.
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, g_pos);      glUniform1i(glGetUniformLocation(program, "gPosition"), 0);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, g_norm);     glUniform1i(glGetUniformLocation(program, "gNormalMaterial"), 1);
+    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, g_albedo);   glUniform1i(glGetUniformLocation(program, "gAlbedoRoughness"), 2);
+    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, g_metallic); glUniform1i(glGetUniformLocation(program, "gMetallicAO"), 3);
+    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, ssao_tex);   glUniform1i(glGetUniformLocation(program, "u_ssao"), 4);
+    glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D_ARRAY, shadow_arr); glUniform1i(glGetUniformLocation(program, "u_shadowCascades"), 5);
+    glActiveTexture(GL_TEXTURE6); glBindTexture(GL_TEXTURE_2D_ARRAY, terrain_arr); glUniform1i(glGetUniformLocation(program, "u_terrainTextures"), 6);
+    glActiveTexture(GL_TEXTURE7); glBindTexture(GL_TEXTURE_2D, caustics_tex); glUniform1i(glGetUniformLocation(program, "u_causticsTexture"), 7);
+
+    // Scalar/vector uniforms.
+    SetMat4Identity(program, "u_inverseView");
+    for (int i = 0; i < 4; ++i) SetMat4Identity(program, ("u_lightSpaceMatrices[" + std::to_string(i) + "]").c_str());
+    glUniform4f(glGetUniformLocation(program, "u_cascadeSplits"), 1e9f, 1e9f, 1e9f, 1e9f);
+    glUniform1f(glGetUniformLocation(program, "u_time"), 0.0f);
+    glUniform1f(glGetUniformLocation(program, "u_sea_level"), -1000.0f);
+    glUniform3f(glGetUniformLocation(program, "u_terrainOrigin"), 0, 0, 0);
+    glUniform3f(glGetUniformLocation(program, "u_viewPos"), 0, 0, 0);
+    glUniform3f(glGetUniformLocation(program, "u_skyAmbientColor"), 0.02f, 0.02f, 0.03f);
+    glUniform3f(glGetUniformLocation(program, "u_sun.direction"), 0.0f, 1.0f, 0.0f);
+    glUniform3f(glGetUniformLocation(program, "u_sun.color"), 0.02f, 0.02f, 0.02f); // dim sun: emission dominates
+    glUniform1i(glGetUniformLocation(program, "u_pointLightCount"), 0);
+    glUniform1f(glGetUniformLocation(program, "u_emissiveLutScale"), kEmissiveLutScale);
+
+    const GLint lutLoc = glGetUniformLocation(program, "u_materialLUT");
+    glUniform1i(lutLoc, 8);
+
+    // Material LUT (256 x 3). Only row 2 (emissive_intensity) varies per sample;
+    // material 6 row 0 must keep roughness so the lighting is well-formed.
+    auto build_lut = [&](float intensity) {
+        std::vector<float> lut(static_cast<size_t>(256) * 3 * 4, 0.0f);
+        // row 0 material 6: metallic 0.1, roughness 0.05, ao 1, magical 1.
+        lut[(static_cast<size_t>(6)) * 4 + 0] = 0.1f;
+        lut[(static_cast<size_t>(6)) * 4 + 1] = 0.05f;
+        lut[(static_cast<size_t>(6)) * 4 + 2] = 1.0f;
+        lut[(static_cast<size_t>(6)) * 4 + 3] = 1.0f;
+        // row 2 material 6: emissive_intensity / scale.
+        lut[(static_cast<size_t>(2 * 256 + 6)) * 4 + 0] = std::min(intensity / kEmissiveLutScale, 1.0f);
+        return lut;
+    };
+
+    GLuint lut_tex = 0;
+    glGenTextures(1, &lut_tex);
+    glActiveTexture(GL_TEXTURE8);
+    glBindTexture(GL_TEXTURE_2D, lut_tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    const std::array<float, 5> intensities = {0.0f, 0.5f, 1.0f, 2.0f, 4.0f};
+    std::array<double, 5> measured{};
+    for (size_t i = 0; i < intensities.size(); ++i) {
+        std::vector<float> lut = build_lut(intensities[i]);
+        glActiveTexture(GL_TEXTURE8);
+        glBindTexture(GL_TEXTURE_2D, lut_tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 256, 3, 0, GL_RGBA, GL_FLOAT, lut.data());
+
+        const GLfloat clear0[4] = {0, 0, 0, 1};
+        glClearBufferfv(GL_COLOR, 0, clear0);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+
+        std::vector<unsigned char> px(static_cast<size_t>(kRes) * kRes * 4);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glReadPixels(0, 0, kRes, kRes, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        double lum = 0;
+        for (size_t p = 0; p < static_cast<size_t>(kRes) * kRes; ++p) {
+            lum += 0.2126 * px[p*4+0] + 0.7152 * px[p*4+1] + 0.0722 * px[p*4+2];
+        }
+        measured[i] = lum / (static_cast<double>(kRes) * kRes);
+    }
+
+    // --- Gate assertions: monotonic, intensity 0 dark ---
+    bool monotonic = true;
+    for (size_t i = 1; i < intensities.size(); ++i) {
+        if (measured[i] <= measured[i - 1] + 0.5) { monotonic = false; }
+    }
+    const bool zero_is_dark = measured[0] < measured[1];
+    EXPECT_TRUE(zero_is_dark) << "intensity 0 should be darker than intensity 0.5";
+    EXPECT_TRUE(monotonic) << "on-screen luminance must increase monotonically with emissive_intensity";
+
+    fs::create_directories(RenderHealthArtifactRoot());
+    std::ofstream out(RenderHealthArtifactRoot() / "emissive-calibration.json");
+    out << "{\n";
+    out << "  \"schema\": \"luminumbra.emissive_calibration.v1\",\n";
+    out << "  \"material\": \"LuminCrystal\",\n";
+    out << "  \"material_id\": 6,\n";
+    out << "  \"emissive_lut_scale\": " << kEmissiveLutScale << ",\n";
+    out << "  \"transfer_curve\": \"glow = 1.5 * emissive_intensity (linear pre-tonemap); on-screen = filmic(lit + glow)\",\n";
+    out << "  \"passed\": " << ((monotonic && zero_is_dark) ? "true" : "false") << ",\n";
+    out << "  \"monotonic\": " << (monotonic ? "true" : "false") << ",\n";
+    out << "  \"table\": [\n";
+    for (size_t i = 0; i < intensities.size(); ++i) {
+        out << "    {\"emissive_intensity\": " << intensities[i]
+            << ", \"measured_luminance\": " << measured[i] << "}";
+        out << (i + 1 < intensities.size() ? ",\n" : "\n");
+    }
+    out << "  ]\n";
+    out << "}\n";
+
+    glDeleteTextures(1, &lut_tex);
+    glDeleteTextures(1, &terrain_arr);
+    glDeleteTextures(1, &shadow_arr);
+    glDeleteTextures(1, &caustics_tex);
+    glDeleteTextures(1, &ssao_tex);
+    glDeleteTextures(1, &g_metallic);
+    glDeleteTextures(1, &g_albedo);
+    glDeleteTextures(1, &g_norm);
+    glDeleteTextures(1, &g_pos);
+    glDeleteTextures(1, &color_tex);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteProgram(program);
+}
+
 TEST(RenderSmokeTest, BasicShaderDrawsNonBlackPixels) {
     HiddenGlContext context;
     if (!context.ready()) {

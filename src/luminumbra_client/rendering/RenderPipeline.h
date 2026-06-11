@@ -458,6 +458,11 @@ private:
     // iteration; the committed .ltex plates are 256x256, design §10 budget).
     static constexpr int kTerrainTextureResolution = 256;
 
+    // Emissive intensity LUT scale (T-I4-9). The RGBA8 material LUT stores
+    // emissive_intensity normalized by this ceiling; the lighting pass rescales.
+    // Authored intensities run 0..~4 this iteration; 8 leaves headroom.
+    static constexpr float kEmissiveLutScale = 8.0f;
+
     // --- Skinned/creature UV-mapped textures (T-I4-8) ---
     // GL_TEXTURE_2D_ARRAY of UV-sampled creature textures; layer 0 = grovestrider
     // albedo, layer 1 = grovestrider normal. Sampled by the skinned-mesh G-buffer
@@ -481,14 +486,16 @@ private:
     // Indexed by material id; defaults mean "untextured / flat" so unknown ids
     // and the crystal/water render kinds keep the G-buffer base color.
     struct MaterialTextureLut {
-        std::array<int, 256> texture_layer;   // -1 = untextured
-        std::array<int, 256> normal_layer;    // -1 = flat
-        std::array<float, 256> tiling;        // world-units per repeat (>0)
-        int terrain_layer_count = 0;          // distinct albedo layers loaded
+        std::array<int, 256> texture_layer;        // -1 = untextured
+        std::array<int, 256> normal_layer;         // -1 = flat
+        std::array<float, 256> tiling;             // world-units per repeat (>0)
+        std::array<float, 256> emissive_intensity; // 0 = non-emissive (T-I4-9)
+        int terrain_layer_count = 0;               // distinct albedo layers loaded
         MaterialTextureLut() {
             texture_layer.fill(-1);
             normal_layer.fill(-1);
             tiling.fill(4.0f);
+            emissive_intensity.fill(0.0f);
         }
     };
     MaterialTextureLut m_material_texture_lut;

@@ -1967,6 +1967,14 @@ void RenderPipeline::load_material_texture_lut() {
                 const float t = mat["tiling"].get<float>();
                 if (t > 0.0f) m_material_texture_lut.tiling[static_cast<size_t>(id)] = t;
             }
+            if (mat.contains("emissive_intensity")) {
+                m_material_texture_lut.emissive_intensity[static_cast<size_t>(id)] =
+                    std::max(0.0f, mat["emissive_intensity"].get<float>());
+            } else if (mat.contains("emission")) {
+                // A material with authored emission but no explicit intensity
+                // defaults to unit intensity so legacy emissive materials glow.
+                m_material_texture_lut.emissive_intensity[static_cast<size_t>(id)] = 1.0f;
+            }
         }
         LUMINUMBRA_CORE_INFO("Material texture LUT parsed: {} textured material(s) from materials.json.", textured);
     } catch (const std::exception& e) {
@@ -1976,20 +1984,24 @@ void RenderPipeline::load_material_texture_lut() {
 }
 
 void RenderPipeline::init_material_lut() {
-    // Material properties LUT (T-I4-7 widens to two rows). Sampled in
-    // g_buffer.frag at v=0.25 (row 0) and v=0.75 (row 1):
-    //   row 0: [R metallic, G roughness, B AO, A magical-flag]
-    //   row 1: [R texture_layer/255, G normal_layer/255, B tiling/64,
-    //           A has_texture (1.0 textured, 0.0 untextured)]
-    // The layer/tiling columns come from materials.json (load_material_texture_lut);
-    // the metallic/roughness/AO row stays authored here until T-I4-10 routes
-    // roughness from the LUT columns. -1 layers encode as A=0 (untextured).
+    // Material properties LUT (T-I4-7 two rows; T-I4-9 adds row 2). Sampled by
+    // material id (u = id/255) at the row centers:
+    //   row 0 (v=1/6): [R metallic, G roughness, B AO, A magical-flag]
+    //   row 1 (v=1/2): [R texture_layer/255, G normal_layer/255, B tiling/64,
+    //                   A has_texture]
+    //   row 2 (v=5/6): [R emissive_intensity/kEmissiveLutScale, G/B/A reserved]
+    // The texture/emissive columns come from materials.json
+    // (load_material_texture_lut). The emissive_intensity column drives the
+    // emission->lighting->glow chain (T-I4-9 calibration); it is stored
+    // normalized by kEmissiveLutScale so the 0..1 RGBA8 LUT covers intensities
+    // up to that ceiling, and the lighting pass rescales it back.
     const int MATERIAL_COUNT = 256;
-    const int ROWS = 2;
+    const int ROWS = 3;
 
     std::vector<glm::vec4> materialData(static_cast<size_t>(MATERIAL_COUNT) * ROWS, glm::vec4(0.1f, 0.8f, 1.0f, 0.0f));
     auto row0 = [&](int id) -> glm::vec4& { return materialData[static_cast<size_t>(id)]; };
     auto row1 = [&](int id) -> glm::vec4& { return materialData[static_cast<size_t>(MATERIAL_COUNT + id)]; };
+    auto row2 = [&](int id) -> glm::vec4& { return materialData[static_cast<size_t>(2 * MATERIAL_COUNT + id)]; };
 
     // Row 0 (metallic/roughness/AO/magical) — unchanged authored values.
     row0(0) = glm::vec4(0.1f, 0.8f, 1.0f, 0.0f);   // Air/Default
@@ -2001,7 +2013,7 @@ void RenderPipeline::init_material_lut() {
     row0(6) = glm::vec4(0.1f, 0.05f, 1.0f, 1.0f);  // Luminous Crystal (magical in alpha)
     row0(7) = glm::vec4(0.0f, 0.1f, 1.0f, 0.0f);   // Water
 
-    // Row 1 (texture columns) — baked from the parsed material LUT.
+    // Rows 1 + 2 (texture + emissive columns) — baked from the parsed LUT.
     for (int id = 0; id < MATERIAL_COUNT; ++id) {
         const int tl = m_material_texture_lut.texture_layer[static_cast<size_t>(id)];
         const int nl = m_material_texture_lut.normal_layer[static_cast<size_t>(id)];
@@ -2012,6 +2024,8 @@ void RenderPipeline::init_material_lut() {
             (nl >= 0) ? static_cast<float>(nl) / 255.0f : 0.0f,
             glm::clamp(tiling / 64.0f, 0.0f, 1.0f),
             has_tex ? 1.0f : 0.0f);
+        const float ei = m_material_texture_lut.emissive_intensity[static_cast<size_t>(id)];
+        row2(id) = glm::vec4(glm::clamp(ei / kEmissiveLutScale, 0.0f, 1.0f), 0.0f, 0.0f, 0.0f);
     }
 
     glGenTextures(1, &m_materialLUT);

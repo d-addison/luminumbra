@@ -112,6 +112,7 @@ void LightingPass::execute(RenderPipeline& pipeline, const Camera& camera) {
     m_lighting_shader->setInt("u_ssao", 6);
     m_lighting_shader->setInt("u_terrainTextures", 7);
     m_lighting_shader->setInt("u_materialLUT", 8);
+    m_lighting_shader->setFloat("u_emissiveLutScale", RenderPipeline::kEmissiveLutScale);
     m_lighting_shader->setInt("u_causticsTexture", 9);
     m_lighting_shader->setVec3("u_skyAmbientColor", pipeline.m_skyAmbientColor);
     m_lighting_shader->setVec3("u_viewPos", camera.Position);
