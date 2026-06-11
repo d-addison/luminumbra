@@ -118,6 +118,29 @@ void EnvironmentalAudioSystem::SetSeasonalEffects(float seasonFactor) {
     m_weatherState.seasonalFactor = std::clamp(seasonFactor, 0.0f, 1.0f);
 }
 
+void EnvironmentalAudioSystem::ApplyBiomeReverb(const std::string& preset, float wet, float dry, float decay) {
+    // Idempotent: skip when the active profile already matches (avoids churning
+    // the audio backend every Update tick while the listener stays in a biome).
+    if (m_biomeReverb.applied &&
+        m_biomeReverb.preset == preset &&
+        m_biomeReverb.wet == wet &&
+        m_biomeReverb.dry == dry &&
+        m_biomeReverb.decay == decay) {
+        return;
+    }
+    m_biomeReverb.applied = true;
+    m_biomeReverb.preset = preset;
+    m_biomeReverb.wet = wet;
+    m_biomeReverb.dry = dry;
+    m_biomeReverb.decay = decay;
+    ++m_biomeReverb.apply_count;
+    if (m_audioManager) {
+        m_audioManager->SetGlobalReverb(wet, dry, decay);
+    }
+    LUMINUMBRA_CORE_INFO("Biome reverb applied: preset={} wet={} dry={} decay={}",
+                         preset, wet, dry, decay);
+}
+
 void EnvironmentalAudioSystem::UpdateAmbientZones(const glm::vec3& listenerPosition) {
     for (auto& [id, zone] : m_ambientZones) {
         float distance = glm::distance(listenerPosition, zone->center);

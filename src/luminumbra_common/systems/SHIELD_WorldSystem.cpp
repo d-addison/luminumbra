@@ -560,6 +560,14 @@ u8 SHIELD_WorldSystem::BiomeIdAt(float world_x, float world_z) const {
                                 climate.humidity);
 }
 
+const World::BiomeReverb& SHIELD_WorldSystem::BiomeReverbAt(float world_x, float world_z) const {
+    static const World::BiomeReverb kDefaultReverb{};
+    if (!m_biomes_enabled || m_biome_table.empty()) {
+        return kDefaultReverb;
+    }
+    return m_biome_table.reverb_for(BiomeIdAt(world_x, world_z));
+}
+
 float SHIELD_WorldSystem::RiverInfluenceFromNoise(float world_x, float world_z) const {
     if (!m_params.rivers_enabled || !m_river_generator) {
         return 0.0f;

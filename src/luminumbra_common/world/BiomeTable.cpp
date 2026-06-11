@@ -1,5 +1,6 @@
 #include "BiomeTable.h"
 
+#include <algorithm>
 #include <fstream>
 #include <initializer_list>
 #include <optional>
@@ -182,9 +183,15 @@ BiomeTable BiomeTable::Load(const std::filesystem::path& table_path) {
             WarnUnknownKeys(entry["vegetation"], "biomes[" + std::to_string(raw_id) + "].vegetation",
                             {"density", "scatter"}, table_path, table.m_warnings);
         }
+        // T-I4-5: reverb is now CONSUMED (per-biome environmental audio).
         if (entry.contains("reverb") && entry["reverb"].is_object()) {
-            WarnUnknownKeys(entry["reverb"], "biomes[" + std::to_string(raw_id) + "].reverb",
-                            {"preset", "wet"}, table_path, table.m_warnings);
+            const nlohmann::json& reverb = entry["reverb"];
+            biome.reverb.preset = reverb.value("preset", biome.reverb.preset);
+            biome.reverb.wet = std::clamp(reverb.value("wet", biome.reverb.wet), 0.0f, 1.0f);
+            biome.reverb.dry = std::clamp(reverb.value("dry", biome.reverb.dry), 0.0f, 1.0f);
+            biome.reverb.decay = std::max(0.0f, reverb.value("decay", biome.reverb.decay));
+            WarnUnknownKeys(reverb, "biomes[" + std::to_string(raw_id) + "].reverb",
+                            {"preset", "wet", "dry", "decay"}, table_path, table.m_warnings);
         }
 
         WarnUnknownKeys(entry, "biomes[" + std::to_string(raw_id) + "]",
@@ -241,6 +248,19 @@ const BiomeSurfacePalette& BiomeTable::palette_for(u8 biome_id) const {
     return m_default_palette;
 }
 
+const BiomeReverb& BiomeTable::reverb_for(u8 biome_id) const {
+    if (biome_id < m_id_to_index.size()) {
+        const u8 index = m_id_to_index[biome_id];
+        if (index != kNoBiome && index < m_biomes.size()) {
+            return m_biomes[index].reverb;
+        }
+    }
+    return m_default_reverb;
+}
+
+// NOTE: reverb is deliberately NOT mixed into compute_content_hash(). The
+// content hash gates the terrain far-LOD cache (ComputeTerrainParamsHash), and
+// reverb is audio-only - a reverb retune must not invalidate terrain tiles.
 u64 BiomeTable::compute_content_hash() const {
     u64 hash = kFnvOffsetBasis;
     const auto mix_range = [&hash](const BiomeClimateRange& range) {

@@ -3454,6 +3454,23 @@ function Test-StructurePresence {
     Write-Host "structure presence gate passed: cairn + ruin pools load, placement grid deterministic, assembled voxel hashes stable"
 }
 
+# --- T-I4-5 BiomeReverb mode: append-only ---
+# Runs the BiomeReverb gtest (loads the shipped biomes.json, proves the per-biome
+# reverb params are CONSUMED into BiomeTable and that reverb_for(active biome id)
+# returns the authored profile - the data->engine flow EnvironmentalAudioSystem
+# drives via SHIELD_WorldSystem::BiomeReverbAt). Append-only.
+function Test-BiomeReverb {
+    $exe = "build/$BuildPreset/bin/common_tests.exe"
+    if (-not (Test-Path $exe)) {
+        throw "BiomeReverb gate: missing $exe (cmake --build --preset $BuildPreset)"
+    }
+    & $exe "--gtest_filter=BiomeReverbTest.*"
+    if ($LASTEXITCODE -ne 0) {
+        throw "BiomeReverb gtest (BiomeReverbTest.*) failed with exit code $LASTEXITCODE"
+    }
+    Write-Host "biome reverb gate passed: per-biome reverb params consumed; active-biome reverb flow validated"
+}
+
 switch ($Mode) {
     "CodexOnly" { Test-CodexOnly }
     "Panels" { Test-Panels }
@@ -3497,6 +3514,7 @@ switch ($Mode) {
     "BiomeCoverage" { Test-BiomeCoverage }
     "RiverPresence" { Test-RiverPresence }
     "StructurePresence" { Test-StructurePresence }
+    "BiomeReverb" { Test-BiomeReverb }
     "All" {
         Test-CodexOnly
         Test-Files

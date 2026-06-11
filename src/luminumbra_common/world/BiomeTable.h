@@ -57,6 +57,17 @@ struct BiomeSurfacePalette {
     u8 underwater = static_cast<u8>(MaterialType::Sand);
 };
 
+// T-I4-5: per-biome environmental-audio reverb. Consumed by the client
+// EnvironmentalAudioSystem to set the listener's reverb profile by biome. The
+// preset name is game-authored (the engine treats it as an opaque label); the
+// numeric wet/dry/decay drive the audio environment directly.
+struct BiomeReverb {
+    std::string preset = "open_field";
+    float wet = 0.2f;
+    float dry = 0.8f;
+    float decay = 1.0f;
+};
+
 struct BiomeDefinition {
     u8 id = kNoBiome;
     std::string name;
@@ -66,6 +77,7 @@ struct BiomeDefinition {
     BiomeClimateRange temperature;
     BiomeClimateRange humidity;
     BiomeSurfacePalette palette;
+    BiomeReverb reverb;
 };
 
 class BiomeTable {
@@ -94,6 +106,10 @@ public:
     // unknown id so callers never need a separate guard.
     const BiomeSurfacePalette& palette_for(u8 biome_id) const;
 
+    // T-I4-5: reverb profile for a biome id; returns the default profile for
+    // kNoBiome / any unknown id so callers never need a separate guard.
+    const BiomeReverb& reverb_for(u8 biome_id) const;
+
     // fnv1a64 over the canonicalized table content (see header note).
     u64 content_hash() const { return m_content_hash; }
 
@@ -103,6 +119,7 @@ private:
     // load time so palette_for is O(1).
     std::array<u8, 256> m_id_to_index{};
     BiomeSurfacePalette m_default_palette{};
+    BiomeReverb m_default_reverb{};
     std::vector<std::string> m_errors;
     std::vector<std::string> m_warnings;
     u64 m_content_hash = 0;

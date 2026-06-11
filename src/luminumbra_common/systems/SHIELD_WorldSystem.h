@@ -307,6 +307,11 @@ public:
     // fall back to the legacy single-material classifier.
     u8 BiomeIdAt(float world_x, float world_z) const;
 
+    // T-I4-5: environmental-audio reverb profile for the biome at a column.
+    // Returns the active biome's reverb when biomes are enabled, else the
+    // default profile. Pure function of (seed, params, table).
+    const World::BiomeReverb& BiomeReverbAt(float world_x, float world_z) const;
+
     // T-I4-2 biome-aware surface material. Given a solid surface sample (its
     // world Y, the column's final terrain height, and the column biome id from
     // BiomeIdAt), returns the palette material for the band the sample sits in:
