@@ -46,8 +46,10 @@ std::optional<u8> MaterialIdFromName(const std::string& name) {
     if (name == "Grass") return static_cast<u8>(MaterialType::Grass);
     if (name == "Sand") return static_cast<u8>(MaterialType::Sand);
     if (name == "Deepslate") return static_cast<u8>(MaterialType::Deepslate);
-    if (name == "LuminCrystal") return static_cast<u8>(MaterialType::LuminCrystal);
     if (name == "Water") return static_cast<u8>(MaterialType::Water);
+    // Game-content material names (emissive crystals etc.) are not resolvable
+    // here by design: biome palettes name only the generic terrain materials.
+    // Unknown names warn and fall back, keeping engine source noun-free.
     return std::nullopt;
 }
 
