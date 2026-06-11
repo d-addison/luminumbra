@@ -331,6 +331,42 @@ public:
                                           u8 biome_id,
                                           bool river_bank = false) const;
 
+    // T-I4-DR-shaping-perf: surface-skin material for a column whose final
+    // terrain height is already known (e.g. the coarse heightfield mesher just
+    // read it from the cached heightmap). Returns BYTE-IDENTICAL results to
+    // GetTerrainMaterialAt(Vec3(world_x, terrain_height - 0.1, world_z)) for a
+    // surface vertex, but WITHOUT re-evaluating the shaped height (which the
+    // caller already has) - it reproduces that helper's exact two-stage band
+    // selection (solid-branch classification at depth 0.35 m, then the
+    // Air/Water reclassification at depth 0.1 m) using the supplied height.
+    // Valid for the live coarse mesher's surface samples, where caves never
+    // carve (the 18 m surface cap makes the 0.35 m-deep sample always solid).
+    MaterialType SurfaceVertexMaterial(float world_x, float world_z,
+                                       float terrain_height) const;
+
+    // T-I4-DR-shaping-perf: SIMD-batched material classification for a list of
+    // isosurface vertex world positions (the LOD0 marching-cubes mesher emits
+    // hundreds per chunk). out[i] receives the SAME material id as
+    // MarchingCubes::GetTerrainMaterialAt(positions[i]) would return - the
+    // shaped height and the climate channels are evaluated through FastNoise's
+    // SIMD GenPositionArray2D batch entry points (bit-identical to the per-point
+    // GenSingle2D scalar helper on this build, proven by the parity gate),
+    // collapsing the per-vertex ComputeShapedHeightSample + ComputeClimateSample
+    // cost (~30 us each scalar) into one batched pass. The cave channel and the
+    // final band selection stay per-vertex (cheap). positions are in WORLD
+    // space. With shaping disabled this falls back to per-vertex classification
+    // so legacy worlds are byte-unchanged.
+    void ClassifyVertexMaterials(const Vec3* positions, std::size_t count,
+                                 u32* out_materials) const;
+
+    // T-I4-DR-shaping-perf: SIMD-batched shaped final heights at an arbitrary
+    // list of world (x,z) positions. out[i] == ComputeShapedHeight(xs[i], zs[i])
+    // byte-for-byte (uses GenPositionArray2D, proven bit-identical to GenSingle2D
+    // on this build). Used to batch the per-column surface-span corner samples
+    // and exercised directly by the position-array parity gate.
+    void ComputeShapedHeightsAtPositions(const float* xs, const float* zs,
+                                         std::size_t count, float* out) const;
+
     // T-I4-3: river influence [0, 1] at a column - how strongly the +10 PV-band
     // river carve applies (0 = no river, 1 = channel center). 0 when rivers are
     // disabled. Pure function of (seed, params); used by the RiverPresence gate.
@@ -494,6 +530,22 @@ private:
     };
     ShapedHeightSample ComputeShapedHeightSample(float world_x, float world_z) const;
     float ComputeShapedHeight(float world_x, float world_z) const;
+
+    // T-I4-DR-shaping-perf: SIMD-batched shaped heights for a chunk-aligned
+    // (size_x * size_z) column grid whose origin is the integer world position
+    // (base_x, base_z). Writes size_x*size_z final heights into out (row-major,
+    // x fastest) that are BYTE-IDENTICAL to calling ComputeShapedHeight at each
+    // column - every noise channel is evaluated through FastNoise's SIMD batch
+    // entry points (GenUniformGrid2D for the unwarped continentalness/erosion/
+    // warp channels; GenPositionArray2D for the warp-displaced base detail and
+    // peaks channels), which produce the same float bits as the per-point
+    // GenSingle2D scalar helper on this build (proven by the batch-vs-scalar
+    // parity gtest, which now also exercises the SIMD path). The slow per-column
+    // GenSingle2D loop cost ~26 us/column; the batched path is ~2 us/column.
+    // Only valid when m_params.shaping_enabled; callers gate on that.
+    void ComputeShapedHeightGrid(int base_x, int base_z,
+                                 int size_x, int size_z,
+                                 float* out) const;
 
     // T-I4-1: the five normalized climate dimensions consumed by the biome
     // lookup. continentalness/erosion/peaks_valleys REUSE the +3/+4/+5 shaping
