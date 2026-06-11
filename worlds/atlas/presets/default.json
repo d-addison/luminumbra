@@ -1,14 +1,27 @@
 {
   "name": "Default",
-  "description": "Standard world generation with varied terrain",
+  "description": "Standard world generation with varied, DEM-grounded foothills terrain",
+  "schema_rev": 5,
   "generation_params": {
     "terrain": {
       "base_frequency": 0.01,
-      "base_amplitude": 12.0,
-      "octaves": 4,
+      "base_amplitude": 34.0,
+      "octaves": 6,
       "persistence": 0.5,
       "lacunarity": 2.0,
-      "height_offset": 20.0
+      "height_offset": 20.0,
+      "shaping": {
+        "enabled": true,
+        "continentalness_frequency": 0.0012,
+        "erosion_frequency": 0.0018,
+        "peaks_frequency": 0.004,
+        "peaks_amplitude": 20.0,
+        "domain_warp_amplitude": 14.0,
+        "domain_warp_frequency": 0.004,
+        "continental_spline": [[-1.0, -5.0], [-0.3, 2.0], [0.1, 7.0], [0.5, 12.0], [1.0, 20.0]],
+        "erosion_spline": [[-1.0, 0.7], [-0.4, 0.45], [0.0, 0.3], [0.5, 0.18], [1.0, 0.12]],
+        "peaks_spline": [[-1.0, 0.0], [0.3, 0.05], [0.7, 0.4], [1.0, 1.0]]
+      }
     },
     "biomes": {
       "temperature_frequency": 0.005,

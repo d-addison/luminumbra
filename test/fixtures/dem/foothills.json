@@ -1,0 +1,131 @@
+{
+  "schema": "luminumbra.dem_reference.v1",
+  "class": "foothills",
+  "landform": "foothills",
+  "source": {
+    "dataset": "AWS Terrain Tiles (Terrarium PNG), open data, public domain",
+    "dataset_url": "https://registry.opendata.aws/terrain-tiles/",
+    "tile_url": "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/11/344/797.png",
+    "tile_zxy": [
+      11,
+      344,
+      797
+    ],
+    "center_latlon": [
+      37.0,
+      -119.5
+    ],
+    "region": "Sierra Nevada western foothills, California, USA",
+    "license": "Public domain / CC0 (Terrarium tiles; underlying SRTM/USGS/ASTER public-domain sources)",
+    "decode": "elevation_m = R*256 + G + B/256 - 32768"
+  },
+  "grid": {
+    "samples": [
+      256,
+      256
+    ],
+    "meters_per_pixel": 61.045
+  },
+  "elevation_m": {
+    "min": 170.3,
+    "median": 478.3,
+    "max": 1285.9,
+    "relief": 1115.6
+  },
+  "slope": {
+    "spacing_m": 61.05,
+    "p10": 2.596,
+    "p50": 10.233,
+    "p90": 23.364,
+    "p95": 26.178,
+    "mean": 11.82,
+    "frac_lt5": 0.25307,
+    "frac_lt15": 0.66046,
+    "frac_lt25": 0.9317,
+    "frac_gt35": 0.00185,
+    "frac_gt60": 0.0,
+    "bins_5deg": [
+      0.25307,
+      0.23785,
+      0.16954,
+      0.15367,
+      0.11757,
+      0.05296,
+      0.01349,
+      0.0018,
+      5e-05,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "hypsometry": {
+    "integral": 0.28523,
+    "curve": [
+      [
+        0.0,
+        1.0
+      ],
+      [
+        0.1,
+        0.84309
+      ],
+      [
+        0.2,
+        0.64265
+      ],
+      [
+        0.3,
+        0.45113
+      ],
+      [
+        0.4,
+        0.23813
+      ],
+      [
+        0.5,
+        0.09912
+      ],
+      [
+        0.6,
+        0.04213
+      ],
+      [
+        0.7,
+        0.02139
+      ],
+      [
+        0.8,
+        0.01112
+      ],
+      [
+        0.9,
+        0.00377
+      ],
+      [
+        1.0,
+        2e-05
+      ]
+    ]
+  },
+  "spectral": {
+    "measured_beta": 3.488,
+    "fit_band_k": [
+      2,
+      64
+    ],
+    "samples": 63,
+    "reference_beta_band": [
+      1.8,
+      2.2
+    ],
+    "reference_beta_note": "self-affine topography beta = 2H+1 ~ 1.8-2.2 (published); the measured_beta above is biased high by terrarium-tile upsampling. "
+  },
+  "scale_note": "Slope magnitudes are at ~60 m/px DEM resolution; the engine TerrainRealism gate samples at 4 m. Gate on scale-robust descriptors (hypsometric integral, spectral beta, slope distribution SHAPE) rather than absolute slope degrees."
+}
