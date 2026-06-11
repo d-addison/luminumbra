@@ -53,9 +53,13 @@ TEST(TerrainPresetLoaderTest, LoadsShippedDefaultPreset) {
     const TerrainPresetLoadResult result = LoadTerrainPreset(PresetDir() / "default.json");
     ASSERT_TRUE(result.ok) << (result.errors.empty() ? "" : result.errors.front());
 
+    // DELIBERATE preset bump (T-I4-DR-terrain-realism): default.json was
+    // recalibrated against real-world DEM statistics (foothills class) and
+    // gained a shaping block. Before: base_amplitude 12, octaves 4, no shaping.
+    // After: base_amplitude 34, octaves 6, shaping present.
     EXPECT_FLOAT_EQ(result.params.base_frequency, 0.01f);
-    EXPECT_FLOAT_EQ(result.params.base_amplitude, 12.0f);
-    EXPECT_EQ(result.params.octaves, 4);
+    EXPECT_FLOAT_EQ(result.params.base_amplitude, 34.0f);
+    EXPECT_EQ(result.params.octaves, 6);
     EXPECT_FLOAT_EQ(result.params.persistence, 0.5f);
     EXPECT_FLOAT_EQ(result.params.lacunarity, 2.0f);
     EXPECT_FLOAT_EQ(result.params.height_offset, 20.0f);
@@ -78,7 +82,9 @@ TEST(TerrainPresetLoaderTest, LoadsShippedDefaultPreset) {
     EXPECT_FALSE(result.extras.features.rivers_enabled);
     EXPECT_FALSE(result.params.rivers_enabled);
     EXPECT_TRUE(result.extras.features.structures_enabled);
-    EXPECT_FALSE(result.extras.shaping.present);
+    // Default now ships a shaping block (T-I4-DR DEM realism calibration).
+    EXPECT_TRUE(result.extras.shaping.present);
+    EXPECT_TRUE(result.params.shaping_enabled);
     EXPECT_FALSE(result.extras.materials.present);
     EXPECT_TRUE(result.warnings.empty()) << result.warnings.front();
 }

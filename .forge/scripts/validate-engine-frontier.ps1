@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "SkinnedMeshVisual", "EngineGameSplitLint", "CreatureSlice", "BiomeCoverage", "RiverPresence", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "SkinnedMeshVisual", "EngineGameSplitLint", "CreatureSlice", "BiomeCoverage", "RiverPresence", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -3535,6 +3535,57 @@ function Test-BiomeReverb {
     Write-Host "biome reverb gate passed: per-biome reverb params consumed; active-biome reverb flow validated"
 }
 
+# --- T-I4-DR-terrain-realism TerrainRealism mode: append-only ---
+# Runs the DEM-grounded realism gtest (which generates every shipped preset at
+# the fixed atlas seed and computes slope distribution, Strahler hypsometric
+# integral, and radially-averaged spectral-slope beta over the atlas window),
+# then consumes the emitted worldgen_terrain_realism.json artifact and asserts
+# every preset's hypsometric integral and spectral beta sit inside the
+# real-world DEM reference bands for its declared landscape class
+# (test/fixtures/dem/*.json, derived by tools/derive_dem_stats.py from
+# public-domain AWS Terrain Tiles). Append-only; no existing gate behavior
+# changes.
+function Test-TerrainRealism {
+    $exe = "build/$BuildPreset/bin/worldgen_layer_snapshot_test.exe"
+    if (-not (Test-Path $exe)) {
+        throw "TerrainRealism gate: missing $exe (cmake --build --preset $BuildPreset)"
+    }
+    & $exe "--gtest_filter=WorldGenLayerSnapshotTest.AuthoredPresetsMeetDemReferenceRealismBands"
+    if ($LASTEXITCODE -ne 0) {
+        throw "TerrainRealism gtest (AuthoredPresetsMeetDemReferenceRealismBands) failed with exit code $LASTEXITCODE"
+    }
+
+    $analysisPath = "build/$BuildPreset/test-artifacts/worldgen_layers/atlas/worldgen_terrain_realism.json"
+    if (-not (Test-Path $analysisPath)) {
+        throw "TerrainRealism gate: missing $analysisPath (produced by AuthoredPresetsMeetDemReferenceRealismBands)"
+    }
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.worldgen_terrain_realism.v1") {
+        throw "Unexpected terrain realism schema '$($analysis.schema)'"
+    }
+    $presets = @($analysis.presets)
+    if ($presets.Count -lt 5) {
+        throw "TerrainRealism: expected >= 5 presets, got $($presets.Count)"
+    }
+    foreach ($p in $presets) {
+        $hi = [double]$p.hypsometric_integral
+        $hiLo = [double]$p.hi_band[0]; $hiHi = [double]$p.hi_band[1]
+        if ($hi -lt $hiLo -or $hi -gt $hiHi) {
+            throw ("TerrainRealism: preset '{0}' ({1}) hypsometric integral {2} outside DEM band [{3},{4}]" -f `
+                $p.preset, $p.class, $hi, $hiLo, $hiHi)
+        }
+        $beta = [double]$p.spectral_beta
+        $bLo = [double]$p.beta_band[0]; $bHi = [double]$p.beta_band[1]
+        if ($beta -lt $bLo -or $beta -gt $bHi) {
+            throw ("TerrainRealism: preset '{0}' ({1}) spectral beta {2} outside self-affine band [{3},{4}]" -f `
+                $p.preset, $p.class, $beta, $bLo, $bHi)
+        }
+        Write-Host ("terrain realism: {0,-18} class={1,-10} HI={2:N3} [{3:N2},{4:N2}] beta={5:N3} [{6:N2},{7:N2}] p50/p95={8:N1}/{9:N1}deg" -f `
+            $p.preset, $p.class, $hi, $hiLo, $hiHi, $beta, $bLo, $bHi, [double]$p.slope_p50_deg, [double]$p.slope_p95_deg)
+    }
+    Write-Host "terrain realism gate passed: all presets in DEM reference bands (hypsometry + spectral beta) for their landscape class"
+}
+
 switch ($Mode) {
     "CodexOnly" { Test-CodexOnly }
     "Panels" { Test-Panels }
@@ -3580,6 +3631,7 @@ switch ($Mode) {
     "RiverPresence" { Test-RiverPresence }
     "StructurePresence" { Test-StructurePresence }
     "BiomeReverb" { Test-BiomeReverb }
+    "TerrainRealism" { Test-TerrainRealism }
     "All" {
         Test-CodexOnly
         Test-Files

@@ -1,0 +1,3 @@
+# Raw DEM tile downloads cached by tools/derive_dem_stats.py. Only the compact
+# derived JSON fixtures + PROVENANCE.md are committed; re-fetch tiles on demand.
+_cache/
