@@ -4449,6 +4449,56 @@ SkinnedMeshDiffStats AnalyzeSkinnedMeshCaptures(
     if (stats.roi_pixels > 0) {
         stats.changed_ratio = static_cast<double>(stats.changed_pixels) / static_cast<double>(stats.roi_pixels);
     }
+
+    // T-I4-8 textured-response: spatial color variance across the GREENEST
+    // mesh pixels in a tight central sub-ROI of capture A. The grovestrider is
+    // framed centrally; restricting to a central box and to green-dominant
+    // (creature body) pixels isolates the creature from the warm terrain band so
+    // the authored texture's banding/spots drive the variance, while a flat-
+    // colored creature would read near-uniform. Two passes (mean, then variance).
+    const int cx0 = (stats.roi_x0 + stats.roi_x1) * 3 / 8;
+    const int cx1 = (stats.roi_x0 + stats.roi_x1) * 5 / 8;
+    const int cy0_top = stats.roi_y0 + (stats.roi_y1 - stats.roi_y0) / 5;
+    const int cy1_top = stats.roi_y0 + (stats.roi_y1 - stats.roi_y0) * 4 / 5;
+    auto is_creature_px = [](unsigned char r, unsigned char g, unsigned char b) {
+        // Green-dominant body pixels (mossy creature), excluding sky/terrain.
+        return g > 40 && g >= r && static_cast<int>(g) - static_cast<int>(b) > 8;
+    };
+    double sum_r = 0, sum_g = 0, sum_b = 0;
+    std::uint64_t mesh_n = 0;
+    for (int y = 0; y < height; ++y) {
+        const int y_from_top = height - 1 - y;
+        if (y_from_top < cy0_top || y_from_top >= cy1_top) continue;
+        for (int x = cx0; x < cx1; ++x) {
+            const std::size_t offset = static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
+            const unsigned char ra = pixels_a[offset + 0u];
+            const unsigned char ga = pixels_a[offset + 1u];
+            const unsigned char ba = pixels_a[offset + 2u];
+            if (!is_creature_px(ra, ga, ba)) continue;
+            sum_r += ra; sum_g += ga; sum_b += ba; ++mesh_n;
+        }
+    }
+    if (mesh_n > 16) {
+        const double mr = sum_r / mesh_n, mg = sum_g / mesh_n, mb = sum_b / mesh_n;
+        double var_r = 0, var_g = 0, var_b = 0;
+        for (int y = 0; y < height; ++y) {
+            const int y_from_top = height - 1 - y;
+            if (y_from_top < cy0_top || y_from_top >= cy1_top) continue;
+            for (int x = cx0; x < cx1; ++x) {
+                const std::size_t offset = static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
+                const unsigned char ra = pixels_a[offset + 0u];
+                const unsigned char ga = pixels_a[offset + 1u];
+                const unsigned char ba = pixels_a[offset + 2u];
+                if (!is_creature_px(ra, ga, ba)) continue;
+                var_r += (ra - mr) * (ra - mr);
+                var_g += (ga - mg) * (ga - mg);
+                var_b += (ba - mb) * (ba - mb);
+            }
+        }
+        stats.mesh_color_stddev_a = (std::sqrt(var_r / mesh_n) +
+                                     std::sqrt(var_g / mesh_n) +
+                                     std::sqrt(var_b / mesh_n)) / 3.0;
+    }
     return stats;
 }
 
@@ -4460,6 +4510,10 @@ void WriteSkinnedMeshVisualAnalysis(
     const SkinnedMeshDiffStats& diff) {
     constexpr std::uint64_t kMinChangedPixels = 500;
     constexpr double kMinChangedRatio = 0.001;
+    // T-I4-8: the textured grovestrider drives a strong per-channel color
+    // variance across its mesh ROI; a flat-colored creature would sit far below
+    // this. Calibrated conservatively (authored texture measures ~20-40).
+    constexpr double kMinMeshColorStddev = 6.0;
 
     const GLDebugRuntimeStats gl_debug = CurrentGLDebugRuntimeStats();
 
@@ -4475,6 +4529,9 @@ void WriteSkinnedMeshVisualAnalysis(
     }
     if (diff.changed_ratio < kMinChangedRatio) {
         failures.push_back("roi_diff_below_min_ratio");
+    }
+    if (diff.mesh_color_stddev_a < kMinMeshColorStddev) {
+        failures.push_back("mesh_not_textured_flat_color");
     }
     if (capture_b.animation_time_seconds >= 0.0 &&
         capture_b.animation_time_seconds <= capture_a.animation_time_seconds) {
@@ -4520,10 +4577,12 @@ void WriteSkinnedMeshVisualAnalysis(
             {"changed_ratio", diff.changed_ratio},
             {"mesh_like_pixels_a", diff.mesh_like_pixels_a},
             {"mesh_like_pixels_b", diff.mesh_like_pixels_b},
+            {"mesh_color_stddev_a", diff.mesh_color_stddev_a},
         }},
         {"thresholds", {
             {"min_changed_pixels", kMinChangedPixels},
             {"min_changed_ratio", kMinChangedRatio},
+            {"min_mesh_color_stddev", kMinMeshColorStddev},
         }},
         {"gl_debug", {
             {"messages", gl_debug.messages},

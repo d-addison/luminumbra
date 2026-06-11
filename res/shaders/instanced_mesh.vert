@@ -12,6 +12,7 @@ out VS_OUT {
     vec3 Normal;       // VIEW SPACE
     vec3 WorldPos;     // WORLD SPACE (triplanar projection)
     vec3 WorldNormal;  // WORLD SPACE
+    vec2 UV;           // mesh UV (unused for instanced terrain props; T-I4-8)
     flat uint MaterialID;
 } vs_out;
 
@@ -38,6 +39,7 @@ void main()
     // This is the correct place to use 'viewModel'
     mat3 normalMatrix = mat3(transpose(inverse(viewModel)));
     vs_out.Normal = normalize(normalMatrix * aNormal); // Also includes the fix from last time
+    vs_out.UV = vec2(0.0);
 
     vs_out.MaterialID = uint(u_materialId);
 

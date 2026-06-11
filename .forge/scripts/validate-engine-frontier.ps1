@@ -3097,6 +3097,12 @@ function Test-SkinnedMeshVisual {
     if ([double]$analysis.diff.changed_ratio -lt [double]$analysis.thresholds.min_changed_ratio) {
         throw "Skinned mesh ROI diff ratio below threshold: $($analysis.diff.changed_ratio) < $($analysis.thresholds.min_changed_ratio)"
     }
+    # T-I4-8 textured-response: the UV-mapped creature texture must drive a
+    # color variance above the flat-color bound (a flat-shaded creature fails).
+    if ($null -ne $analysis.diff.mesh_color_stddev_a -and `
+        [double]$analysis.diff.mesh_color_stddev_a -lt [double]$analysis.thresholds.min_mesh_color_stddev) {
+        throw "Skinned mesh is not textured: color stddev $($analysis.diff.mesh_color_stddev_a) < $($analysis.thresholds.min_mesh_color_stddev)"
+    }
     if (-not $analysis.passed) {
         throw "Skinned mesh visual analysis reported failure: $($analysis.failures -join ', ')"
     }

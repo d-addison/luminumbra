@@ -458,6 +458,24 @@ private:
     // iteration; the committed .ltex plates are 256x256, design §10 budget).
     static constexpr int kTerrainTextureResolution = 256;
 
+    // --- Skinned/creature UV-mapped textures (T-I4-8) ---
+    // GL_TEXTURE_2D_ARRAY of UV-sampled creature textures; layer 0 = grovestrider
+    // albedo, layer 1 = grovestrider normal. Sampled by the skinned-mesh G-buffer
+    // path (skinned_mesh.vert + g_buffer.frag u_skinnedTextures). Separate from
+    // the terrain triplanar arrays (different sampling model).
+    u32 m_skinnedTextureArray = 0;
+    static constexpr int kSkinnedTextureResolution = 256;
+    // Layer indices within m_skinnedTextureArray (-1 = absent).
+    int m_grovestriderAlbedoLayer = -1;
+    int m_grovestriderNormalLayer = -1;
+    void init_skinned_textures();
+    // Accessor for GBufferPass (friend) skinned-pass binding.
+public:
+    u32 skinned_texture_array() const { return m_skinnedTextureArray; }
+    int grovestrider_albedo_layer() const { return m_grovestriderAlbedoLayer; }
+    int grovestrider_normal_layer() const { return m_grovestriderNormalLayer; }
+private:
+
     // Per-material LUT columns parsed from data/common/materials.json
     // (texture_layer / normal_layer / tiling — design §3, owned by T-I4-7).
     // Indexed by material id; defaults mean "untextured / flat" so unknown ids

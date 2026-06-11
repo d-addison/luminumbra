@@ -333,6 +333,7 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         m_skybox_pass->init_geometry();
         load_material_texture_lut();
         init_terrain_textures();
+        init_skinned_textures();
         init_material_lut();
         init_texture_residency();
         m_water_pass->init_water_fallback_textures();
@@ -478,6 +479,7 @@ RenderPipeline::RuntimeRenderStats RenderPipeline::get_runtime_render_stats() co
     if (m_gbuffer_pass->instance_matrix_vbo()) estimated_vram_bytes += 10000u * sizeof(glm::mat4);
     if (m_terrainTextureArray) estimated_vram_bytes += static_cast<size_t>(kTerrainTextureResolution) * kTerrainTextureResolution * 5u * 4u;
     if (m_terrainNormalArray) estimated_vram_bytes += static_cast<size_t>(kTerrainTextureResolution) * kTerrainTextureResolution * 5u * 4u;
+    if (m_skinnedTextureArray) estimated_vram_bytes += static_cast<size_t>(kSkinnedTextureResolution) * kSkinnedTextureResolution * 2u * 4u;
     if (m_materialLUT) estimated_vram_bytes += 256u * 2u * 4u;
     if (m_water_pass->flat_normal_texture()) estimated_vram_bytes += 4u;
     if (m_water_pass->neutral_flow_texture()) estimated_vram_bytes += 4u;
@@ -581,6 +583,7 @@ RenderPipeline::RenderResourceRegistryStats RenderPipeline::get_resource_registr
     stats.textures += count(m_ssao_pass->ssao().noiseTexture);
     stats.textures += count(m_terrainTextureArray);
     stats.textures += count(m_terrainNormalArray);
+    stats.textures += count(m_skinnedTextureArray);
     stats.textures += count(m_materialLUT);
     stats.textures += count(m_water_pass->flat_normal_texture());
     stats.textures += count(m_water_pass->neutral_flow_texture());
@@ -1257,6 +1260,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_gbuffer_pass->destroy_skinned_mesh();
     if (m_terrainTextureArray) { glDeleteTextures(1, &m_terrainTextureArray); m_terrainTextureArray = 0; }
     if (m_terrainNormalArray) { glDeleteTextures(1, &m_terrainNormalArray); m_terrainNormalArray = 0; }
+    if (m_skinnedTextureArray) { glDeleteTextures(1, &m_skinnedTextureArray); m_skinnedTextureArray = 0; }
     if (m_materialLUT) { glDeleteTextures(1, &m_materialLUT); m_materialLUT = 0; }
     destroy_texture_residency();
     m_water_pass->destroy_water_fallback_textures();
@@ -1870,6 +1874,64 @@ void RenderPipeline::init_terrain_textures() {
 
     LUMINUMBRA_CORE_INFO("Terrain texture arrays loaded ({} albedo + {} normal layers, {}x{}).",
                          layer_count, layer_count, res, res);
+}
+
+void RenderPipeline::init_skinned_textures() {
+    // T-I4-8: UV-mapped creature texture array. Layer 0 grovestrider albedo,
+    // layer 1 grovestrider normal. Loaded from the committed 256x256 .ltex.
+    const int res = kSkinnedTextureResolution;
+    struct SkinnedAsset { const char* path; bool is_normal; };
+    const std::array<SkinnedAsset, 2> assets = {{
+        {"data/textures/creatures/grovestrider/grovestrider_albedo_256.ltex", false},
+        {"data/textures/creatures/grovestrider/grovestrider_normal_256.ltex", true},
+    }};
+    const int layer_count = static_cast<int>(assets.size());
+
+    glGenTextures(1, &m_skinnedTextureArray);
+    label_gl_object(GL_TEXTURE, m_skinnedTextureArray, "creature.texture_array");
+    glBindTexture(GL_TEXTURE_2D_ARRAY, m_skinnedTextureArray);
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_SRGB8_ALPHA8, res, res, layer_count, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+
+    bool albedo_ok = false;
+    bool normal_ok = false;
+    for (int i = 0; i < layer_count; ++i) {
+        LtexCpuImage img;
+        if (load_ltex_cpu_image(m_root_path / assets[i].path, img) &&
+            img.width == static_cast<uint32_t>(res) &&
+            img.height == static_cast<uint32_t>(res) && img.channels == 4u) {
+            glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, i,
+                            static_cast<GLsizei>(img.width), static_cast<GLsizei>(img.height), 1,
+                            GL_RGBA, GL_UNSIGNED_BYTE, img.bytes.data());
+            if (assets[i].is_normal) normal_ok = true; else albedo_ok = true;
+        } else {
+            // Flat fallback so the layer is still valid (mid-grey albedo /
+            // up-normal); the skinned mesh stays visible, just untextured.
+            std::vector<unsigned char> fill(static_cast<size_t>(res) * res * 4u);
+            for (size_t p = 0; p < static_cast<size_t>(res) * res; ++p) {
+                if (assets[i].is_normal) {
+                    fill[p*4+0] = 128; fill[p*4+1] = 128; fill[p*4+2] = 255; fill[p*4+3] = 255;
+                } else {
+                    fill[p*4+0] = 120; fill[p*4+1] = 150; fill[p*4+2] = 90; fill[p*4+3] = 255;
+                }
+            }
+            glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, i, res, res, 1,
+                            GL_RGBA, GL_UNSIGNED_BYTE, fill.data());
+            LUMINUMBRA_CORE_WARN("Creature texture: failed to load '{}', using flat fallback.", assets[i].path);
+        }
+    }
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 8);
+    glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+
+    m_grovestriderAlbedoLayer = albedo_ok ? 0 : 0; // layer 0 regardless (fallback valid)
+    m_grovestriderNormalLayer = 1;                  // layer 1 (fallback flat-normal valid)
+    (void)normal_ok;
+    LUMINUMBRA_CORE_INFO("Creature texture array loaded ({} layers, {}x{}).", layer_count, res, res);
 }
 
 void RenderPipeline::load_material_texture_lut() {

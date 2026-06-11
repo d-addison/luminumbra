@@ -10,6 +10,7 @@ out VS_OUT {
     vec3 Normal;       // VIEW SPACE (octahedral-encoded into the g-buffer)
     vec3 WorldPos;     // WORLD SPACE (triplanar projection, T-I4-7)
     vec3 WorldNormal;  // WORLD SPACE (triplanar blend weights + normal mapping)
+    vec2 UV;           // mesh UV (terrain has none -> 0; T-I4-8)
     flat uint MaterialID;
 } vs_out;
 
@@ -30,6 +31,7 @@ void main()
     vec4 viewPos = view * worldPos;
     vs_out.FragPos = vec3(viewPos);
     vs_out.Normal = normalize(normalMatrix * aNormal);
+    vs_out.UV = vec2(0.0); // terrain uses triplanar projection, not mesh UVs
     vs_out.MaterialID = aMaterialID;
 
     // Calculate the final clip-space position for rasterization
