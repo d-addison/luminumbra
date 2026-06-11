@@ -81,7 +81,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
     return ticks_executed;
 }
 
-WorldConfigValidationResult GameSession::ValidateWorldConfig(const std::string& root_path, const std::string& worldType) {
+WorldConfigValidationResult GameSession::ValidateWorldConfig(
+    const std::string& root_path,
+    const std::string& worldType,
+    const std::vector<std::filesystem::path>& required_assets) {
     WorldConfigValidationResult result;
     result.ok = true;
 
@@ -96,15 +99,11 @@ WorldConfigValidationResult GameSession::ValidateWorldConfig(const std::string& 
         AddValidationError(result, "missing world preset: " + result.preset_path.string());
     }
 
-    const std::vector<fs::path> required_assets = {
-        root / "res" / "shaders" / "basic.vert",
-        root / "res" / "shaders" / "g_buffer.frag",
-        root / "res" / "shaders" / "sdf_generation.compute",
-        root / "data" / "ui" / "main_menu.rml",
-        root / "data" / "fonts" / "Lora" / "static" / "Lora-Regular.ttf",
-    };
-
-    for (const fs::path& path : required_assets) {
+    // T-I3-6: simulation needs only the preset. Any further runtime assets
+    // are caller-supplied (the client registers shaders/RML/fonts; a headless
+    // host registers none).
+    for (const fs::path& relative : required_assets) {
+        const fs::path path = root / relative;
         if (!fs::exists(path)) {
             AddValidationError(result, "missing required runtime asset: " + path.string());
         }
@@ -128,7 +127,7 @@ bool GameSession::CreateWorld(const std::string& name, const std::string& seed, 
         return false;
     }
 
-    const WorldConfigValidationResult validation = ValidateWorldConfig(m_rootPath, worldType);
+    const WorldConfigValidationResult validation = ValidateWorldConfig(m_rootPath, worldType, m_requiredClientAssets);
     if (!validation.ok) {
         for (const std::string& error : validation.errors) {
             LUMINUMBRA_CORE_ERROR("World config validation failed: {}", error);
@@ -231,7 +230,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
         return false;
     }
 
-    const WorldConfigValidationResult validation = ValidateWorldConfig(m_rootPath, m_metadata.worldType);
+    const WorldConfigValidationResult validation = ValidateWorldConfig(m_rootPath, m_metadata.worldType, m_requiredClientAssets);
     if (!validation.ok) {
         for (const std::string& error : validation.errors) {
             LUMINUMBRA_CORE_ERROR("World config validation failed: {}", error);

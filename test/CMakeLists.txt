@@ -97,6 +97,7 @@ endif()
 
 add_executable(common_tests
     common/EngineContracts_test.cpp
+    common/GameSessionHeadlessWorld_test.cpp
     common/JobSystem_test.cpp
     common/SimulationClock_test.cpp
     common/TerrainPresetLoader_test.cpp

@@ -1263,6 +1263,17 @@ int main(int argc, char* argv[]) {
     auto gameSession = std::make_unique<Luminumbra::world::GameSession>();
     gameSession->SetJobSystem(&jobSystem);
     gameSession->SetRootPath(root_path_str);
+    // T-I3-6 asset-manifest split: the engine validates simulation
+    // requirements only; the CLIENT declares the renderer/UI assets it needs
+    // before any world create/load. This list matches the pre-split
+    // engine-side manifest byte for byte.
+    gameSession->SetRequiredClientAssets({
+        std::filesystem::path("res") / "shaders" / "basic.vert",
+        std::filesystem::path("res") / "shaders" / "g_buffer.frag",
+        std::filesystem::path("res") / "shaders" / "sdf_generation.compute",
+        std::filesystem::path("data") / "ui" / "main_menu.rml",
+        std::filesystem::path("data") / "fonts" / "Lora" / "static" / "Lora-Regular.ttf",
+    });
 
     std::unique_ptr<Luminumbra::Client::IAudioManager> audioManager;
     if (scenario_config.no_audio) {
