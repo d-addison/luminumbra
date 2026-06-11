@@ -1,0 +1,131 @@
+{
+  "schema": "luminumbra.dem_reference.v1",
+  "class": "coastal",
+  "landform": "coastal (sea-meets-mountain)",
+  "source": {
+    "dataset": "AWS Terrain Tiles (Terrarium PNG), open data, public domain",
+    "dataset_url": "https://registry.opendata.aws/terrain-tiles/",
+    "tile_url": "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/11/331/802.png",
+    "tile_zxy": [
+      11,
+      331,
+      802
+    ],
+    "center_latlon": [
+      36.27,
+      -121.8
+    ],
+    "region": "Big Sur coast, California, USA",
+    "license": "Public domain / CC0 (Terrarium tiles; underlying SRTM/USGS/ASTER public-domain sources)",
+    "decode": "elevation_m = R*256 + G + B/256 - 32768"
+  },
+  "grid": {
+    "samples": [
+      256,
+      256
+    ],
+    "meters_per_pixel": 61.626
+  },
+  "elevation_m": {
+    "min": -41.6,
+    "median": 618.4,
+    "max": 1470.4,
+    "relief": 1512.0
+  },
+  "slope": {
+    "spacing_m": 61.63,
+    "p10": 0.002,
+    "p50": 25.545,
+    "p90": 37.003,
+    "p95": 39.337,
+    "mean": 22.234,
+    "frac_lt5": 0.19513,
+    "frac_lt15": 0.26883,
+    "frac_lt25": 0.48195,
+    "frac_gt35": 0.16161,
+    "frac_gt60": 0.0,
+    "bins_5deg": [
+      0.19513,
+      0.02444,
+      0.04926,
+      0.08531,
+      0.12781,
+      0.1736,
+      0.18285,
+      0.12166,
+      0.03357,
+      0.00557,
+      0.00072,
+      9e-05,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "hypsometry": {
+    "integral": 0.39732,
+    "curve": [
+      [
+        0.0,
+        1.0
+      ],
+      [
+        0.1,
+        0.78436
+      ],
+      [
+        0.2,
+        0.7252
+      ],
+      [
+        0.3,
+        0.65041
+      ],
+      [
+        0.4,
+        0.54825
+      ],
+      [
+        0.5,
+        0.40515
+      ],
+      [
+        0.6,
+        0.24251
+      ],
+      [
+        0.7,
+        0.1133
+      ],
+      [
+        0.8,
+        0.03877
+      ],
+      [
+        0.9,
+        0.00749
+      ],
+      [
+        1.0,
+        2e-05
+      ]
+    ]
+  },
+  "spectral": {
+    "measured_beta": 3.469,
+    "fit_band_k": [
+      2,
+      64
+    ],
+    "samples": 63,
+    "reference_beta_band": [
+      1.8,
+      3.0
+    ],
+    "reference_beta_note": "self-affine topography beta = 2H+1 ~ 1.8-2.2 (published); the measured_beta above is biased high by terrarium-tile upsampling. Band WIDENED for this class (mask-dominated scattered-island engine realization)."
+  },
+  "scale_note": "Slope magnitudes are at ~60 m/px DEM resolution; the engine TerrainRealism gate samples at 4 m. Gate on scale-robust descriptors (hypsometric integral, spectral beta, slope distribution SHAPE) rather than absolute slope degrees."
+}
