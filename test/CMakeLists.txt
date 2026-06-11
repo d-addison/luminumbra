@@ -259,6 +259,28 @@ else()
     target_link_libraries(runtime_world_visual_validation_test PRIVATE OpenGL::GL)
 endif()
 
+# T-I4-15 SHIELD-RT spike benchmark (manual/excluded-by-default: Debug runtime
+# can exceed 60s; evidence-only, not a required gate). Registered with add_test
+# under a "manual" label below so it stays out of the default ctest selection
+# (run explicitly: ctest -L manual -R ShieldRtSpike).
+add_executable(shieldrt_spike_bench
+    performance/shieldrt_spike_bench.cpp
+)
+
+target_compile_definitions(shieldrt_spike_bench PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+    LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts"
+)
+
+target_include_directories(shieldrt_spike_bench PRIVATE
+    ../src
+)
+
+target_link_libraries(shieldrt_spike_bench PRIVATE
+    gtest_main
+    luminumbra_common
+)
+
 # Frontier gate fixtures: the lua-api-manifest and scalar-field-diffusion gates
 # assert at static initialization, the instinct and loopback gates are called
 # from the gtest cases in network_state_hash_gate_test.cpp.
@@ -336,6 +358,18 @@ gtest_discover_tests(ui_smoke_test)
 gtest_discover_tests(initial_world_loading_perf_test)
 gtest_discover_tests(runtime_world_visual_validation_test)
 gtest_discover_tests(frontier_gates_test)
+
+# T-I4-15: register the spike benchmark under the "manual" label. It is
+# evidence-only (not a required gate) and its Debug runtime (~25s, and can exceed
+# 60s under build contention) makes it a manual/excluded-by-default bench:
+# exclude it from a default gate run with label-exclusion, run it deliberately by
+# name or label:
+#   default gate (skip it):   ctest -LE manual
+#   run only the spike:       ctest -L manual -R ShieldRtSpike --output-on-failure
+add_test(NAME ShieldRtSpike COMMAND shieldrt_spike_bench)
+set_tests_properties(ShieldRtSpike PROPERTIES
+    LABELS "manual;perf;spike"
+    TIMEOUT 600)
 
 set(LUMINUMBRA_TEST_BASELINE_BUILD_PRESET "${CMAKE_BUILD_TYPE}")
 string(TOLOWER "${LUMINUMBRA_TEST_BASELINE_BUILD_PRESET}" LUMINUMBRA_TEST_BASELINE_BUILD_PRESET)
