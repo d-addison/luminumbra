@@ -92,6 +92,18 @@ struct WaterVisualCameraTarget {
     // the late-run reflection capture (the top-down camera_position view has
     // no usable fresnel reflection signal).
     Luminumbra::Vec3 reflection_camera_position{0.0f};
+    // T-I2-16c: water-surface points (y = sea level) near the focus,
+    // projected into the main capture to gate the depth tint gradient and
+    // the shoreline foam band:
+    // - shallow_point: 0.8-1.6 m of water (bright teal tint, clear of sand)
+    // - foam_point: 0.25-0.6 m of water (middle of the foam band)
+    // - deep_point: >= 3 m of water (dark deep tint)
+    bool shallow_point_found = false;
+    bool deep_point_found = false;
+    bool foam_point_found = false;
+    Luminumbra::Vec3 shallow_point{0.0f};
+    Luminumbra::Vec3 deep_point{0.0f};
+    Luminumbra::Vec3 foam_point{0.0f};
     float terrain_height = 0.0f;
     float camera_terrain_height = 0.0f;
     int supporting_water_samples = 0;
@@ -200,6 +212,31 @@ WaterReflectionStats AnalyzeWaterReflection(
     int height,
     const Luminumbra::Vec3& sky_reference);
 
+// T-I2-16c: mean color of a square pixel patch around a projected water
+// point, plus the fraction of foam-like (bright, low-saturation) pixels in
+// it. gb_balance ((g-b)/(g+b)) separates the bright-teal shallow tint
+// (green-led) from the deep blue tint (blue-led).
+struct WaterRegionPatch {
+    bool sampled = false;
+    int center_x = 0;          // pixels from the left edge
+    int center_y_from_top = 0; // pixels from the top edge
+    std::uint64_t pixels = 0;
+    double mean_r = 0.0;
+    double mean_g = 0.0;
+    double mean_b = 0.0;
+    double gb_balance = 0.0;
+    std::uint64_t foam_pixels = 0;
+    double foam_ratio = 0.0;
+};
+
+WaterRegionPatch AnalyzeWaterRegionPatch(
+    const std::vector<unsigned char>& pixels,
+    int width,
+    int height,
+    int center_x,
+    int center_y_from_top,
+    int radius);
+
 ScreenshotPixelStats AnalyzeScreenshotPixels(const std::vector<unsigned char>& pixels, int width, int height);
 LodHolePixelStats AnalyzeLodHolePixels(const std::vector<unsigned char>& pixels, int width, int height);
 MaterialPixelStats AnalyzeMaterialPixels(const std::vector<unsigned char>& pixels, int width, int height);
@@ -231,7 +268,10 @@ void WriteWaterVisualAnalysis(
     const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass,
     const Luminumbra::Rendering::RenderPipeline::MeshUploadFrameStats& upload_queue,
     const std::vector<WaterCausticsSample>& caustics_samples,
-    const WaterReflectionStats& reflection_stats);
+    const WaterReflectionStats& reflection_stats,
+    const WaterRegionPatch& shallow_patch,
+    const WaterRegionPatch& deep_patch,
+    const WaterRegionPatch& foam_patch);
 
 void WriteMaterialVisualAnalysis(
     const std::filesystem::path& artifact_dir,

@@ -189,10 +189,8 @@ void WaterPass::execute(RenderPipeline& pipeline,
     glActiveTexture(GL_TEXTURE5);
     glBindTexture(GL_TEXTURE_2D, m_water_underwater_texture);
     m_water_shader->setInt("u_underwater_texture", 5);
-
-    glActiveTexture(GL_TEXTURE6);
-    glBindTexture(GL_TEXTURE_2D, m_water_black_texture);
-    m_water_shader->setInt("u_foam_texture", 6);
+    // T-I2-16c: shoreline foam is generated procedurally in the shader; the
+    // old u_foam_texture slot (black fallback) is gone.
 
     // --- 3. Draw Water Meshes ---
     for (const auto& chunk : renderable_chunks) {

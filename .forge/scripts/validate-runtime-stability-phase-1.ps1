@@ -457,6 +457,30 @@ function Test-WaterVisual {
     if (-not $reflection.sky_correlated) {
         throw "Water visual reflection sky-correlation gate failed"
     }
+    # T-I2-16c: shallow-to-deep tint gradient and shoreline foam band.
+    $depthGradient = $analysis.depth_gradient
+    if ($null -eq $depthGradient) {
+        throw "Water visual analysis is missing the depth_gradient block"
+    }
+    if (-not $depthGradient.shallow.sampled -or -not $depthGradient.deep.sampled) {
+        throw "Water visual depth gradient probe did not sample both patches (shallow=$($depthGradient.shallow.sampled), deep=$($depthGradient.deep.sampled))"
+    }
+    if ([double]$depthGradient.hue_separation -lt [double]$depthGradient.thresholds.min_hue_separation) {
+        throw "Water visual depth tint gradient too weak: hue_separation=$($depthGradient.hue_separation) (threshold $($depthGradient.thresholds.min_hue_separation))"
+    }
+    if (-not $depthGradient.present) {
+        throw "Water visual depth gradient gate failed"
+    }
+    $foam = $analysis.foam_presence
+    if ($null -eq $foam) {
+        throw "Water visual analysis is missing the foam_presence block"
+    }
+    if ([double]$foam.foam_ratio -lt [double]$foam.thresholds.min_foam_ratio) {
+        throw "Water visual shoreline foam missing: foam_ratio=$($foam.foam_ratio) (threshold $($foam.thresholds.min_foam_ratio))"
+    }
+    if (-not $foam.present) {
+        throw "Water visual foam presence gate failed"
+    }
     Assert-FileExists (Join-Path $visualDir $reflection.screenshot)
     Assert-FileExists (Join-Path $visualDir $analysis.screenshot)
 }
