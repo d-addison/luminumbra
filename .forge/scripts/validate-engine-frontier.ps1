@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "SkinnedMeshVisual", "EngineGameSplitLint", "CreatureSlice", "BiomeCoverage", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "SkinnedMeshVisual", "EngineGameSplitLint", "CreatureSlice", "BiomeCoverage", "RiverPresence", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -3262,6 +3262,53 @@ function Test-BiomeCoverage {
         $analysis.distinct_biomes_realized, $analysis.biome_table_content_hash)
 }
 
+# --- T-I4-3 RiverPresence mode: append-only ---
+# Runs the MountainsRiverPresenceAtlas gtest (which sweeps the shipped mountains
+# preset - rivers enabled - and emits river-presence.json), then asserts rivers
+# are present, every river column's folded PV sits in the valleys band (zero
+# band violations), the channel carves to a waterline, and the river course is
+# continuous. Append-only; no existing gate behavior changes.
+function Test-RiverPresence {
+    $exe = "build/$BuildPreset/bin/worldgen_layer_snapshot_test.exe"
+    if (-not (Test-Path $exe)) {
+        throw "RiverPresence gate: missing $exe (cmake --build --preset $BuildPreset)"
+    }
+    & $exe "--gtest_filter=WorldGenLayerSnapshotTest.MountainsRiverPresenceAtlas"
+    if ($LASTEXITCODE -ne 0) {
+        throw "RiverPresence gtest (MountainsRiverPresenceAtlas) failed with exit code $LASTEXITCODE"
+    }
+
+    $analysisPath = "build/$BuildPreset/test-artifacts/worldgen_layers/river/river-presence.json"
+    if (-not (Test-Path $analysisPath)) {
+        throw "RiverPresence gate: missing $analysisPath (produced by MountainsRiverPresenceAtlas)"
+    }
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.river_presence.v1") {
+        throw "Unexpected river presence schema '$($analysis.schema)'"
+    }
+    if ($analysis.preset -ne "mountains") {
+        throw "RiverPresence must analyze the mountains preset (got '$($analysis.preset)')"
+    }
+    if ([int64]$analysis.river_columns -le 0) {
+        throw "RiverPresence: no river columns found in the atlas window"
+    }
+    if ([int64]$analysis.band_violations -ne 0) {
+        throw "RiverPresence: $($analysis.band_violations) river columns fall outside the PV valleys band"
+    }
+    if ([int64]$analysis.waterline_columns -le 0) {
+        throw "RiverPresence: river channels never reach the waterline (no carve below SEA_LEVEL)"
+    }
+    if ([int64]$analysis.longest_continuous_run -lt 3) {
+        throw "RiverPresence: river course is not continuous (longest run $($analysis.longest_continuous_run))"
+    }
+    if (-not $analysis.passed) {
+        throw "RiverPresence analysis reported failure"
+    }
+    Write-Host ("river presence gate passed: preset={0} river_cols={1} waterline_cols={2} longest_run={3} ratio={4} band=[{5},{6}]" -f `
+        $analysis.preset, $analysis.river_columns, $analysis.waterline_columns, `
+        $analysis.longest_continuous_run, $analysis.river_ratio, $analysis.river_pv_min, $analysis.river_pv_max)
+}
+
 switch ($Mode) {
     "CodexOnly" { Test-CodexOnly }
     "Panels" { Test-Panels }
@@ -3302,6 +3349,7 @@ switch ($Mode) {
     "EngineGameSplitLint" { Test-EngineGameSplitLint }
     "CreatureSlice" { Test-CreatureSlice }
     "BiomeCoverage" { Test-BiomeCoverage }
+    "RiverPresence" { Test-RiverPresence }
     "All" {
         Test-CodexOnly
         Test-Files

@@ -62,7 +62,8 @@ namespace { // Anonymous namespace for internal implementation details
         // bit-for-bit.
         const float terrain_height = world_system.GetTerrainHeightAt(world_pos.x, world_pos.z);
         const u8 biome_id = world_system.BiomeIdAt(world_pos.x, world_pos.z);
-        return world_system.SurfaceMaterialForColumn(world_pos.y, terrain_height, biome_id);
+        const bool river_bank = world_system.RiverInfluenceAt(world_pos.x, world_pos.z) > 0.25f;
+        return world_system.SurfaceMaterialForColumn(world_pos.y, terrain_height, biome_id, river_bank);
     }
 
     struct AtomicTerrainMeshBuildStats {

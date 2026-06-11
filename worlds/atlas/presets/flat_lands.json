@@ -18,7 +18,7 @@
     "features": {
       "caves_enabled": false,
       "cave_frequency": 0.0,
-      "rivers_enabled": true,
+      "rivers_enabled": false,
       "structures_enabled": true
     }
   }
