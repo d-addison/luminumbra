@@ -1,14 +1,27 @@
 {
   "name": "Mountainous",
-  "description": "Extreme mountain ranges and deep valleys",
+  "description": "Dramatic shaped mountain ranges rising from walkable valleys and plateaus",
+  "schema_rev": 2,
   "generation_params": {
     "terrain": {
       "base_frequency": 0.008,
       "base_amplitude": 120.0,
       "octaves": 6,
-      "persistence": 0.65,
+      "persistence": 0.55,
       "lacunarity": 2.2,
-      "height_offset": 20.0
+      "height_offset": 12.0,
+      "shaping": {
+        "enabled": true,
+        "continentalness_frequency": 0.0008,
+        "erosion_frequency": 0.0015,
+        "peaks_frequency": 0.0025,
+        "peaks_amplitude": 105.0,
+        "domain_warp_amplitude": 20.0,
+        "domain_warp_frequency": 0.003,
+        "continental_spline": [[-1.0, -18.0], [-0.2, 0.0], [0.2, 5.0], [0.6, 18.0], [1.0, 50.0]],
+        "erosion_spline": [[-1.0, 0.38], [-0.6, 0.22], [-0.35, 0.11], [0.0, 0.055], [0.4, 0.035], [1.0, 0.03]],
+        "peaks_spline": [[-1.0, 0.0], [0.4, 0.0], [0.75, 0.5], [1.0, 1.0]]
+      }
     },
     "biomes": {
       "temperature_frequency": 0.003,
