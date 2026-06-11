@@ -17,7 +17,8 @@
   ],
   "creature": {
     "mesh": "data/models/creatures/grovestrider/grovestrider.lmesh",
-    "material_id": 4,
+    "comment_material": "T-I3-22 slice polish: dark moss tone (material 3) for high contrast against the sandy archipelago shore. Material 4 (Sand) made the creature read invisibly against its own ground.",
+    "material_id": 3,
     "replan_interval_ticks": 10,
     "clips": {
       "idle": "data/models/creatures/grovestrider/grovestrider.idle.lanim",

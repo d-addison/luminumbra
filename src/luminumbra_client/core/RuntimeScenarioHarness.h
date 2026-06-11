@@ -890,12 +890,41 @@ CreatureSlicePlanProbe ProbeCreatureSlicePlan(
     Luminumbra::world::GameSession* game_session,
     const CreatureSliceScene& scene);
 
+// T-I3-22 composition check: a "functionally green, visually broken" capture
+// (creature rendered, planner correct, but the camera stares at the ground or
+// the sky, or the creature is camouflaged against its own terrain) must not
+// pass. sky_ratio proves a horizon is in frame; creature_terrain_color_delta
+// proves the creature reads against the surrounding terrain.
+struct CreatureSliceComposition {
+    bool valid = false;            // the creature projected into the frame
+    double sky_ratio = 0.0;        // fraction of frame pixels classified as sky
+    double creature_roi_mean[3] = {0.0, 0.0, 0.0};
+    double terrain_ref_mean[3] = {0.0, 0.0, 0.0};
+    double creature_terrain_color_delta = 0.0; // L1 distance between the means
+    std::size_t creature_roi_pixels = 0;
+    std::size_t terrain_ref_pixels = 0;
+    int creature_screen_x = 0;     // from left
+    int creature_screen_y = 0;     // from top
+};
+
+// Analyzes a captured RGB framebuffer (bottom-up glReadPixels layout) for the
+// creature-slice composition metrics. creature_screen_x/y are in top-left
+// pixel coordinates (the projected creature position); pass valid=false-making
+// out-of-frame coordinates and the ROI metrics stay zero.
+CreatureSliceComposition AnalyzeCreatureSliceComposition(
+    const std::vector<unsigned char>& pixels,
+    int width,
+    int height,
+    int creature_screen_x_from_left,
+    int creature_screen_y_from_top);
+
 struct CreatureSliceCapture {
     std::string file;
     double elapsed_seconds = 0.0;
     CreatureSlicePlanProbe plan;
     std::size_t skinned_draws = 0;
     std::size_t skinned_indices_drawn = 0;
+    CreatureSliceComposition composition;
 };
 
 void WriteCreatureSliceAnalysis(

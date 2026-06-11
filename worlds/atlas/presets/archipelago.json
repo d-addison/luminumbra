@@ -1,16 +1,29 @@
 {
   "name": "Archipelago",
-  "description": "A world of scattered islands across a deep ocean.",
+  "description": "Scattered islands across a deep ocean — rolling shores and walkable interiors, not spiky blades.",
+  "schema_rev": 2,
   "generation_params": {
     "terrain": {
-      "base_frequency": 0.009,
-      "base_amplitude": 110.0,
-      "octaves": 6,
-      "persistence": 0.55,
-      "lacunarity": 2.2,
+      "base_frequency": 0.008,
+      "base_amplitude": 16.0,
+      "octaves": 4,
+      "persistence": 0.42,
+      "lacunarity": 2.1,
       "height_offset": -20.0,
       "island_mask_enabled": true,
-      "island_mask_frequency": 0.004
+      "island_mask_frequency": 0.0032,
+      "shaping": {
+        "enabled": true,
+        "continentalness_frequency": 0.0011,
+        "erosion_frequency": 0.0016,
+        "peaks_frequency": 0.003,
+        "peaks_amplitude": 26.0,
+        "domain_warp_amplitude": 12.0,
+        "domain_warp_frequency": 0.0035,
+        "continental_spline": [[-1.0, 4.0], [-0.3, 10.0], [0.1, 16.0], [0.5, 24.0], [1.0, 34.0]],
+        "erosion_spline": [[-1.0, 0.34], [-0.6, 0.22], [-0.3, 0.13], [0.0, 0.08], [0.4, 0.05], [1.0, 0.035]],
+        "peaks_spline": [[-1.0, 0.0], [0.5, 0.0], [0.8, 0.5], [1.0, 1.0]]
+      }
     },
     "biomes": {
       "temperature_frequency": 0.005,

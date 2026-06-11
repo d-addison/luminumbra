@@ -2621,6 +2621,45 @@ int main(int argc, char* argv[]) {
                                     capture.plan = ProbeCreatureSlicePlan(gameSession.get(), creature_slice_scene);
                                     capture.skinned_draws = render_pass_stats.skinned_draws;
                                     capture.skinned_indices_drawn = render_pass_stats.skinned_indices_drawn;
+                                    // T-I3-22 composition: read the backbuffer,
+                                    // project the (live) creature position to
+                                    // screen, and measure sky_ratio + the
+                                    // creature-vs-terrain color delta so a
+                                    // visually broken-but-functional frame fails.
+                                    {
+                                        std::vector<unsigned char> comp_pixels(
+                                            static_cast<std::size_t>(screenshot_width) *
+                                            static_cast<std::size_t>(screenshot_height) * 3u);
+                                        glReadBuffer(GL_BACK);
+                                        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                                        glReadPixels(0, 0, screenshot_width, screenshot_height,
+                                                     GL_RGB, GL_UNSIGNED_BYTE, comp_pixels.data());
+                                        Luminumbra::Vec3 creature_world = creature_slice_scene.creature_position;
+                                        if (gameSession->GetRegistry().valid(creature_slice_scene.creature)) {
+                                            if (const auto* tf = gameSession->GetRegistry().try_get<
+                                                    const Luminumbra::Components::TransformComponent>(
+                                                        creature_slice_scene.creature)) {
+                                                creature_world = tf->position;
+                                            }
+                                        }
+                                        const glm::mat4 view = g_camera->GetViewMatrix();
+                                        const glm::mat4 proj = g_camera->GetProjectionMatrix(
+                                            screenshot_width, screenshot_height);
+                                        const glm::vec4 clip = proj * view *
+                                            glm::vec4(creature_world.x,
+                                                      creature_world.y + 1.0f, // body center, above feet
+                                                      creature_world.z, 1.0f);
+                                        int sx = -1, sy = -1;
+                                        if (clip.w > 0.0f) {
+                                            const glm::vec3 ndc = glm::vec3(clip) / clip.w;
+                                            sx = static_cast<int>((ndc.x * 0.5f + 0.5f) *
+                                                                  static_cast<float>(screenshot_width));
+                                            sy = static_cast<int>((1.0f - (ndc.y * 0.5f + 0.5f)) *
+                                                                  static_cast<float>(screenshot_height));
+                                        }
+                                        capture.composition = AnalyzeCreatureSliceComposition(
+                                            comp_pixels, screenshot_width, screenshot_height, sx, sy);
+                                    }
                                     const std::string relative_path = want_before
                                         ? "screenshots/creature-slice-before.ppm"
                                         : "screenshots/creature-slice-after.ppm";

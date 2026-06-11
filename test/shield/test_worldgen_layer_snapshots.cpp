@@ -1166,6 +1166,36 @@ TEST(WorldGenLayerSnapshotTest, LegacyPresetHeightsAreBitIdenticalToPreShaping) 
     }
 }
 
+// T-I3-22 slice polish: CURRENT shipped-preset terrain hash. Unlike the
+// legacy fixture above (frozen pre-shaping params, must NEVER change), this
+// gate loads the LIVE preset JSON through the canonical loader and hashes the
+// resulting GetTerrainHeightAt grid. It catches accidental drift in a shipped
+// preset's generated terrain AND forces any deliberate preset edit to bump the
+// expected hash in the same commit (documented in the commit message).
+//
+// The archipelago hash was bumped deliberately in T-I3-22 when the schema_rev
+// 2 `shaping` block was added (spiky-blade shores -> rolling shores / walkable
+// interiors). The pre-shaping archipelago hash (0xc075cf55c182393c) is frozen
+// forever in the LEGACY fixture above as the default-off shaping proof.
+TEST(WorldGenLayerSnapshotTest, CurrentShippedArchipelagoPresetHeightHash) {
+    const fs::path preset = SourceRoot() / "worlds/atlas/presets/archipelago.json";
+    const TerrainGenParams params = LoadPresetParams(preset);
+    ASSERT_TRUE(params.shaping_enabled)
+        << "archipelago.json must carry an enabled shaping block (T-I3-22)";
+    SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
+    const std::uint64_t hash = HashTerrainHeightGrid(world);
+    std::cout << "[ CURRENTHASH ] archipelago seed=" << kSeed
+              << " hash=0x" << std::hex << std::setfill('0') << std::setw(16) << hash
+              << std::dec << std::setfill(' ') << std::endl;
+    // DELIBERATE BUMP (T-I3-22 slice polish). Before (legacy, shaping-off):
+    // 0xc075cf55c182393c. After (schema_rev 2 shaping): 0x940d621a2e3c0436.
+    constexpr std::uint64_t kArchipelagoShapedHash = 0x940d621a2e3c0436ull;
+    EXPECT_EQ(hash, kArchipelagoShapedHash)
+        << "shipped archipelago preset terrain drifted; if intentional, bump "
+        << "kArchipelagoShapedHash deliberately and document before/after in "
+        << "the commit message";
+}
+
 namespace {
 
 // Synthetic shaping params for the T-I3-10 parity/determinism gates (engine
@@ -1307,6 +1337,16 @@ struct SlopeHistogramMetrics {
     double cliff_fraction = 0.0;       // slope > 60 deg
     // Normal land: walkable-ish slope at habitable height (owner complaint).
     double normal_land_fraction = 0.0; // slope < 20 deg AND height in [sea+2, sea+40]
+    // Land-restricted walkability (T-I3-22): for mostly-ocean presets
+    // (archipelago) the whole-grid fractions are dominated by the flat sea
+    // floor, so island quality is invisible in them. These restrict the
+    // slope spectrum to dry land (height > sea+1) — the surface a player
+    // actually walks on. land_fraction reports how much of the grid is land.
+    std::size_t land_samples = 0;
+    double land_fraction = 0.0;          // fraction of grid above sea+1
+    double land_walkable_fraction = 0.0; // among land: slope < 25 deg
+    double land_cliff_fraction = 0.0;    // among land: slope > 60 deg
+    float land_height_p95 = 0.0f;        // 95th pct height of dry land
     // Height distribution (relief spectrum).
     float height_p10 = 0.0f;
     float height_p50 = 0.0f;
@@ -1347,10 +1387,13 @@ SlopeHistogramMetrics ComputeSlopeHistogram(const std::string& preset_name,
 
     std::vector<float> slopes;
     std::vector<float> sample_heights;
+    std::vector<float> land_heights;
     slopes.reserve(static_cast<std::size_t>(kSlopeGridSize) * kSlopeGridSize);
     sample_heights.reserve(slopes.capacity());
+    land_heights.reserve(slopes.capacity());
 
     std::size_t flat = 0, normal_slope = 0, walkable = 0, steep = 0, cliff = 0, normal_land = 0;
+    std::size_t land = 0, land_walkable = 0, land_cliff = 0;
     for (int j = 1; j <= kSlopeGridSize; ++j) {
         for (int i = 1; i <= kSlopeGridSize; ++i) {
             const auto at = [&](int ii, int jj) {
@@ -1376,6 +1419,15 @@ SlopeHistogramMetrics ComputeSlopeHistogram(const std::string& preset_name,
             if (slope_deg < 20.0f && h >= SEA_LEVEL + 2.0f && h <= SEA_LEVEL + 40.0f) {
                 ++normal_land;
             }
+            // Dry land only: the surface a player can stand on. For
+            // mostly-ocean presets this isolates island walkability from the
+            // flat sea floor that dominates the whole-grid fractions.
+            if (h > SEA_LEVEL + 1.0f) {
+                ++land;
+                land_heights.push_back(h);
+                if (slope_deg < 25.0f) ++land_walkable;
+                if (slope_deg > 60.0f) ++land_cliff;
+            }
         }
     }
 
@@ -1387,6 +1439,15 @@ SlopeHistogramMetrics ComputeSlopeHistogram(const std::string& preset_name,
     metrics.steep_fraction = steep / count;
     metrics.cliff_fraction = cliff / count;
     metrics.normal_land_fraction = normal_land / count;
+
+    metrics.land_samples = land;
+    metrics.land_fraction = land / count;
+    if (land > 0) {
+        metrics.land_walkable_fraction = static_cast<double>(land_walkable) / static_cast<double>(land);
+        metrics.land_cliff_fraction = static_cast<double>(land_cliff) / static_cast<double>(land);
+        std::sort(land_heights.begin(), land_heights.end());
+        metrics.land_height_p95 = PercentileOfSorted(land_heights, 0.95);
+    }
 
     std::sort(slopes.begin(), slopes.end());
     std::sort(sample_heights.begin(), sample_heights.end());
@@ -1419,6 +1480,10 @@ void WriteSlopeHistogramJson(const fs::path& path, const std::vector<SlopeHistog
         output << "\"steep_fraction_gt35\": " << JsonNumber(row.steep_fraction) << ", ";
         output << "\"cliff_fraction_gt60\": " << JsonNumber(row.cliff_fraction) << ", ";
         output << "\"normal_land_fraction\": " << JsonNumber(row.normal_land_fraction) << ", ";
+        output << "\"land_fraction\": " << JsonNumber(row.land_fraction) << ", ";
+        output << "\"land_walkable_fraction\": " << JsonNumber(row.land_walkable_fraction) << ", ";
+        output << "\"land_cliff_fraction\": " << JsonNumber(row.land_cliff_fraction) << ", ";
+        output << "\"land_height_p95\": " << JsonNumber(row.land_height_p95) << ", ";
         output << "\"height_p10\": " << JsonNumber(row.height_p10) << ", ";
         output << "\"height_p50\": " << JsonNumber(row.height_p50) << ", ";
         output << "\"height_p95\": " << JsonNumber(row.height_p95) << ", ";
@@ -1440,6 +1505,10 @@ void PrintSlopeHistogram(const SlopeHistogramMetrics& m) {
               << " steep>35=" << m.steep_fraction
               << " cliff>60=" << m.cliff_fraction
               << " normal_land=" << m.normal_land_fraction
+              << " land_frac=" << m.land_fraction
+              << " land_walkable=" << m.land_walkable_fraction
+              << " land_cliff=" << m.land_cliff_fraction
+              << " land_h_p95=" << m.land_height_p95
               << " height_p10/p50/p95=" << m.height_p10 << "/" << m.height_p50
               << "/" << m.height_p95 << std::endl;
 }
@@ -1504,6 +1573,34 @@ TEST(WorldGenLayerSnapshotTest, AuthoredPresetSlopeHistogramsMeetWalkabilityGate
     EXPECT_LT(mountains.height_p50 - mountains.height_p10,
               0.35f * (mountains.height_p95 - mountains.height_p10))
         << "mountains relief spectrum is not bimodal (no plains mode)";
+
+    // Shaped archipelago (T-I3-22 slice polish): islands must keep their
+    // identity (a deep ocean still dominates the grid, so whole-grid
+    // habitable-land fractions stay near zero by construction) BUT lose the
+    // spiky-blade silhouette — rolling shores and walkable interiors. The
+    // owner complaint here was "spiky blades", not "no normal land", so the
+    // gate measures the DRY-LAND slope spectrum (the island surface a player
+    // walks on) rather than the whole-grid fractions used for mountains.
+    //
+    // Thresholds (measured on the shaped preset, seed 424242, with headroom):
+    //   land_fraction    0.065  -> islands cover a real, non-trivial area
+    //   land_walkable    0.818  -> island interiors are mostly walkable (<25deg)
+    //   land_cliff       0.012  -> almost no knife-edge blades on land (>60deg)
+    //   whole-grid cliff 0.018 (was 0.346 pre-shaping) -> shores rolled off
+    //   land_height_p95  8.67   -> islands rise to a real walkable elevation
+    // Thresholds carry generous headroom against the measured values so the
+    // gate proves the silhouette change without overfitting the noise field.
+    const SlopeHistogramMetrics& archipelago = find_preset("archipelago");
+    EXPECT_GT(archipelago.land_fraction, 0.03)
+        << "archipelago has no meaningful island land area (mostly submerged)";
+    EXPECT_GT(archipelago.land_walkable_fraction, 0.65)
+        << "archipelago island interiors are not walkable (slope<25deg fraction on dry land)";
+    EXPECT_LT(archipelago.land_cliff_fraction, 0.05)
+        << "archipelago islands are spiky blades (cliff>60deg fraction on dry land)";
+    EXPECT_LT(archipelago.cliff_fraction, 0.08)
+        << "archipelago whole-grid cliff(>60deg) mass — shores did not roll off";
+    EXPECT_GT(archipelago.land_height_p95, 6.0f)
+        << "archipelago islands barely clear the water (no walkable interior elevation)";
 }
 
 TEST(WorldGenLayerSnapshotTest, AuthoredPresetAtlasHasSaneSpawnAndCleanTopology) {

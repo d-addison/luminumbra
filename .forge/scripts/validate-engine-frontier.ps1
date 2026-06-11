@@ -3150,9 +3150,35 @@ function Test-CreatureSlice {
     if ([int64]$analysis.after_stimulus.plan.plans_executed -le [int64]$analysis.before_stimulus.plan.plans_executed) {
         throw "Creature slice planner did not replan after the stimulus"
     }
+    # T-I3-22 composition check: a "functionally green, visually broken"
+    # capture (creature rendered + planner correct, but the camera stares at
+    # the ground or the sky, or the creature is camouflaged against the sand)
+    # must not pass. sky_ratio in [0.05, 0.6] proves a horizon is visible
+    # (not staring at ground or sky); the creature ROI mean color must differ
+    # from the surrounding terrain mean by an L1 distance >= 24 (over 0-255 RGB
+    # channel means) so the dark-moss creature reads against the bright shore.
+    $minSkyRatio = 0.05
+    $maxSkyRatio = 0.6
+    $minColorDelta = 24.0
+    foreach ($capture in @($analysis.before_stimulus, $analysis.after_stimulus)) {
+        $comp = $capture.composition
+        if ($null -eq $comp -or -not $comp.valid) {
+            throw "Creature slice capture '$($capture.file)' has no valid composition metrics (creature did not project into the frame)"
+        }
+        if ([double]$comp.sky_ratio -lt $minSkyRatio -or [double]$comp.sky_ratio -gt $maxSkyRatio) {
+            throw "Creature slice capture '$($capture.file)' sky_ratio $($comp.sky_ratio) is outside [$minSkyRatio, $maxSkyRatio] (horizon not visible / staring at ground or sky)"
+        }
+        if ([double]$comp.creature_terrain_color_delta -lt $minColorDelta) {
+            throw "Creature slice capture '$($capture.file)' creature_terrain_color_delta $($comp.creature_terrain_color_delta) is below $minColorDelta (creature reads invisibly against the terrain)"
+        }
+    }
+
     if (-not $analysis.passed) {
         throw "Creature slice analysis reported failure: $($analysis.failures -join ', ')"
     }
+    Write-Host ("creature slice composition: sky_ratio {0:N3}/{1:N3}, color_delta {2:N1}/{3:N1}" -f `
+        $analysis.before_stimulus.composition.sky_ratio, $analysis.after_stimulus.composition.sky_ratio, `
+        $analysis.before_stimulus.composition.creature_terrain_color_delta, $analysis.after_stimulus.composition.creature_terrain_color_delta)
     Write-Host ("creature slice: plan {0} ({1}) -> {2} ({3}); clips {4} -> {5}; skinned draws {6}/{7}; plans {8} -> {9}" -f `
         $analysis.before_stimulus.plan.action, $analysis.before_stimulus.plan.target, `
         $analysis.after_stimulus.plan.action, $analysis.after_stimulus.plan.target, `
