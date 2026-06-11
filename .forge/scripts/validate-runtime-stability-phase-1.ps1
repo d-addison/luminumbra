@@ -371,7 +371,12 @@ function Test-WaterVisual {
     $visualDir = Join-Path $artifactRoot "water-visual"
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $visualDir
 
-    $runSeconds = [Math]::Max(20, $SmokeSeconds)
+    # 40 s settle (was 20): the depth-gradient deep-point sample races water
+    # mesh upload drain — at 20 s the Wave-3 merged tree captured with
+    # 335/343 water uploads still deferred and read seabed at the deep ROI
+    # (red at 20 s, green at 40 s, PerfRegression green = timing margin,
+    # not a render regression). Capture must follow upload drain, not race it.
+    $runSeconds = [Math]::Max(40, $SmokeSeconds)
     Invoke-Checked -FilePath $exe -ArgumentList @(
         "--scenario", "water_visual_smoke",
         "--auto-create-world",
