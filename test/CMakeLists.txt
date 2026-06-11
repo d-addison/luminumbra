@@ -180,6 +180,7 @@ endif()
 
 add_executable(ui_smoke_test
     ui/ui_smoke_test.cpp
+    ../src/luminumbra_client/ui/core/UIComponent.cpp
     ../src/luminumbra_client/ui/core/UIStateManager.cpp
 )
 

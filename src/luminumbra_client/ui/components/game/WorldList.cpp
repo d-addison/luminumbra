@@ -185,7 +185,7 @@ void WorldList::BindWorlds(Property<std::vector<WorldInfo>>& worldsProperty) {
     SetWorlds(worldsProperty.Get());
     
     // Subscribe to changes
-    worldsProperty.Subscribe([this](const std::vector<WorldInfo>& oldWorlds, const std::vector<WorldInfo>& newWorlds) {
+    TrackSubscription(worldsProperty, [this](const std::vector<WorldInfo>& oldWorlds, const std::vector<WorldInfo>& newWorlds) {
         SetWorlds(newWorlds);
     });
 }
@@ -197,7 +197,7 @@ void WorldList::BindSelectedWorldId(Property<std::string>& selectedIdProperty) {
     }
     
     // Subscribe to property changes
-    selectedIdProperty.Subscribe([this](const std::string& oldId, const std::string& newId) {
+    TrackSubscription(selectedIdProperty, [this](const std::string& oldId, const std::string& newId) {
         if (!newId.empty()) {
             SelectWorld(newId);
         } else {
@@ -216,7 +216,7 @@ void WorldList::BindSearchFilter(Property<std::string>& searchProperty) {
     SetSearchFilter(searchProperty.Get());
     
     // Subscribe to changes
-    searchProperty.Subscribe([this](const std::string& oldFilter, const std::string& newFilter) {
+    TrackSubscription(searchProperty, [this](const std::string& oldFilter, const std::string& newFilter) {
         SetSearchFilter(newFilter);
     });
 }

@@ -158,7 +158,7 @@ void Input::BindValue(Property<std::string>& property) {
     SetValue(property.Get());
     
     // Subscribe to property changes
-    property.Subscribe([this](const std::string& oldValue, const std::string& newValue) {
+    TrackSubscription(property, [this](const std::string& oldValue, const std::string& newValue) {
         SetValue(newValue);
     });
     
@@ -173,7 +173,7 @@ void Input::BindEnabled(Property<bool>& property) {
     SetEnabled(property.Get());
     
     // Subscribe to changes
-    property.Subscribe([this](const bool& oldValue, const bool& newValue) {
+    TrackSubscription(property, [this](const bool& oldValue, const bool& newValue) {
         SetEnabled(newValue);
     });
 }

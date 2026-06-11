@@ -80,7 +80,7 @@ void Button::BindEnabled(Property<bool>& property) {
     SetEnabled(property.Get());
     
     // Subscribe to changes
-    property.Subscribe([this](const bool& oldValue, const bool& newValue) {
+    TrackSubscription(property, [this](const bool& oldValue, const bool& newValue) {
         SetEnabled(newValue);
     });
 }
@@ -90,7 +90,7 @@ void Button::BindText(Property<std::string>& property) {
     SetText(property.Get());
     
     // Subscribe to changes
-    property.Subscribe([this](const std::string& oldValue, const std::string& newValue) {
+    TrackSubscription(property, [this](const std::string& oldValue, const std::string& newValue) {
         SetText(newValue);
     });
 }

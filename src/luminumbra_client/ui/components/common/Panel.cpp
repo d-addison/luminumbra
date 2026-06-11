@@ -132,7 +132,7 @@ void Panel::BindTitle(Property<std::string>& property) {
     SetTitle(property.Get());
     
     // Subscribe to changes
-    property.Subscribe([this](const std::string& oldValue, const std::string& newValue) {
+    TrackSubscription(property, [this](const std::string& oldValue, const std::string& newValue) {
         SetTitle(newValue);
     });
 }
@@ -142,7 +142,7 @@ void Panel::BindExpanded(Property<bool>& property) {
     SetExpanded(property.Get());
     
     // Subscribe to property changes
-    property.Subscribe([this](const bool& oldValue, const bool& newValue) {
+    TrackSubscription(property, [this](const bool& oldValue, const bool& newValue) {
         SetExpanded(newValue);
     });
     

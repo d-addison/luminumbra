@@ -17,7 +17,9 @@ namespace Luminumbra::Client::UI {
 class UIComponent {
 public:
     explicit UIComponent(const std::string& elementId);
-    virtual ~UIComponent() = default;
+    // Unsubscribes all tracked property subscriptions so a destroyed
+    // component never receives further property notifications (UAF guard).
+    virtual ~UIComponent();
     
     // Component lifecycle
     virtual void Initialize(Rml::ElementDocument* document);
@@ -70,14 +72,26 @@ protected:
     Rml::Element* m_element = nullptr;
     Rml::ElementDocument* m_document = nullptr;
     
-    // Track bindings for cleanup
-    std::vector<std::function<void()>> m_bindings;
-    
+    // RAII property subscriptions; cleared (= unsubscribed) on Destroy()
+    // and in the destructor. The bound Property must outlive this component
+    // (UI properties live in UIStateManager / manager singletons).
+    std::vector<ScopedSubscription> m_bindings;
+
     // Event listeners for cleanup
     std::vector<std::unique_ptr<Rml::EventListener>> m_eventListeners;
-    
+
     virtual void OnElementSet() {} // Called when element is first set
     void CleanupBindings();
+
+    // Subscribe to a property and track the subscription for automatic
+    // unsubscription when this component is destroyed. The callable type is
+    // deduced independently so raw lambdas bind without conversion to
+    // PropertyCallback<T> first.
+    template<typename T, typename Callback>
+    void TrackSubscription(Property<T>& property, Callback&& callback) {
+        const SubscriptionToken token = property.Subscribe(std::forward<Callback>(callback));
+        m_bindings.emplace_back(property, token);
+    }
 };
 
 /**
@@ -121,8 +135,7 @@ void UIComponent::BindProperty(const std::string& attribute, Property<T>& proper
         }
     };
     
-    property.Subscribe(binding);
-    m_bindings.emplace_back([&property, binding](){ /* TODO: Implement unsubscribe */ });
+    TrackSubscription(property, std::move(binding));
 }
 
 template<typename T>
@@ -147,8 +160,7 @@ void UIComponent::BindText(Property<T>& property) {
         }
     };
     
-    property.Subscribe(binding);
-    m_bindings.emplace_back([&property, binding](){ /* TODO: Implement unsubscribe */ });
+    TrackSubscription(property, std::move(binding));
 }
 
 template<typename T>
@@ -173,20 +185,18 @@ void UIComponent::BindValue(Property<T>& property) {
         }
     };
     
-    property.Subscribe(propertyBinding);
-    
+    TrackSubscription(property, std::move(propertyBinding));
+
     // Subscribe to element changes
     OnChange([&property](Rml::Event& event) {
         if constexpr (std::is_same_v<T, std::string>) {
-            property.Set(event.GetTargetElement()->GetAttribute("value", ""));
+            property.Set(event.GetTargetElement()->GetAttribute<Rml::String>("value", ""));
         } else if constexpr (std::is_same_v<T, int>) {
             property.Set(event.GetTargetElement()->GetAttribute("value", 0));
         } else if constexpr (std::is_same_v<T, float>) {
             property.Set(event.GetTargetElement()->GetAttribute("value", 0.0f));
         }
     });
-    
-    m_bindings.emplace_back([&property, propertyBinding](){ /* TODO: Implement unsubscribe */ });
 }
 
 template<typename T>
@@ -205,8 +215,7 @@ void UIComponent::BindVisibility(Property<T>& property, std::function<bool(const
         }
     };
     
-    property.Subscribe(binding);
-    m_bindings.emplace_back([&property, binding](){ /* TODO: Implement unsubscribe */ });
+    TrackSubscription(property, std::move(binding));
 }
 
 } // namespace Luminumbra::Client::UI

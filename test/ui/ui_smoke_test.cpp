@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "ui/Rml_UIManager.h"
+#include "ui/core/UIComponent.h"
 #include "ui/core/UIStateManager.h"
 
 namespace fs = std::filesystem;
@@ -399,6 +400,103 @@ TEST(UiSmokeTest, AuthoredMenuInteractionsNavigateAndInvokeCallbacks) {
         created_world->type,
         *loaded_world_id,
         quit_requested);
+
+    ui.Shutdown();
+}
+
+// T-I3-21: token-based Subscribe/Unsubscribe on Property<T> (no GL needed).
+TEST(UiSmokeTest, PropertyTokenUnsubscribeStopsCallbacks) {
+    using Luminumbra::Client::UI::Property;
+    using Luminumbra::Client::UI::ScopedSubscription;
+    using Luminumbra::Client::UI::SubscriptionToken;
+
+    Property<int> property(0);
+    int first_calls = 0;
+    int second_calls = 0;
+
+    const SubscriptionToken first = property.Subscribe([&](const int&, const int&) { ++first_calls; });
+    const SubscriptionToken second = property.Subscribe([&](const int&, const int&) { ++second_calls; });
+    EXPECT_NE(first, second);
+    EXPECT_EQ(property.SubscriberCount(), 2u);
+
+    property.Set(1);
+    EXPECT_EQ(first_calls, 1);
+    EXPECT_EQ(second_calls, 1);
+
+    EXPECT_TRUE(property.Unsubscribe(first));
+    EXPECT_FALSE(property.Unsubscribe(first)) << "double unsubscribe must be a safe no-op";
+    EXPECT_EQ(property.SubscriberCount(), 1u);
+
+    property.Set(2);
+    EXPECT_EQ(first_calls, 1) << "unsubscribed callback must not fire";
+    EXPECT_EQ(second_calls, 2);
+
+    // RAII handle unsubscribes when it goes out of scope.
+    {
+        ScopedSubscription scoped(property, second);
+        EXPECT_TRUE(scoped.Active());
+    }
+    EXPECT_EQ(property.SubscriberCount(), 0u);
+    property.Set(3);
+    EXPECT_EQ(second_calls, 2);
+}
+
+// T-I3-21: destroy-then-mutate regression — a destroyed UIComponent must not
+// be reachable from later Property::Set() calls (use-after-free guard).
+TEST(UiSmokeTest, DestroyedComponentReceivesNoPropertyMutations) {
+    using Luminumbra::Client::UI::Property;
+    using Luminumbra::Client::UI::UIComponent;
+
+    HiddenGlContext context;
+    if (!context.ready()) {
+        GTEST_SKIP() << context.error();
+    }
+
+    const fs::path source_root = SourceRoot();
+    Luminumbra::Client::Rml_UIManager ui((source_root.string() + "/"));
+    ui.Init(context.window(), nullptr);
+    ASSERT_NE(ui.GetContext(), nullptr);
+
+    Rml::ElementDocument* main_menu = LoadDocumentAndFind(ui, "main_menu.rml", "main_menu");
+    ASSERT_NE(main_menu, nullptr);
+    Rml::Element* notification_text = main_menu->GetElementById("notification_text");
+    ASSERT_NE(notification_text, nullptr);
+
+    Property<std::string> text_property(std::string("bound-initial"));
+    int callback_fires = 0;
+    const auto counter_token =
+        text_property.Subscribe([&](const std::string&, const std::string&) { ++callback_fires; });
+
+    {
+        auto component = std::make_unique<UIComponent>("notification_text");
+        component->Initialize(main_menu);
+        ASSERT_TRUE(component->IsValid());
+
+        component->BindText(text_property);
+        EXPECT_EQ(text_property.SubscriberCount(), 2u) << "counter + component binding";
+        EXPECT_EQ(notification_text->GetInnerRML(), "bound-initial");
+
+        // Callback fires while the component is alive.
+        text_property.Set("before-destroy");
+        EXPECT_EQ(callback_fires, 1);
+        EXPECT_EQ(notification_text->GetInnerRML(), "before-destroy");
+
+        // Destruction alone (no explicit Destroy() call) must unsubscribe.
+        component.reset();
+    }
+    EXPECT_EQ(text_property.SubscriberCount(), 1u) << "component binding must be gone after destruction";
+
+    // Mutating after destroy must not crash and must not touch the element
+    // through the dead component's binding.
+    text_property.Set("after-destroy");
+    EXPECT_EQ(callback_fires, 2);
+    EXPECT_EQ(notification_text->GetInnerRML(), "before-destroy");
+
+    // Callback count returns to zero once the remaining subscriber leaves.
+    EXPECT_TRUE(text_property.Unsubscribe(counter_token));
+    EXPECT_EQ(text_property.SubscriberCount(), 0u);
+    text_property.Set("nobody-listens");
+    EXPECT_EQ(callback_fires, 2);
 
     ui.Shutdown();
 }

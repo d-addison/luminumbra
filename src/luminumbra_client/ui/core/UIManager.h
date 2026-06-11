@@ -120,7 +120,8 @@ private:
     
     // State management
     UIStateManager* m_stateManager = nullptr;
-    
+    ScopedSubscription m_documentSubscription; // RAII: unsubscribes on destruction
+
     // Static instance for callbacks
     static UIManager* s_active_manager;
     
