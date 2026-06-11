@@ -88,7 +88,11 @@ TEST(WorldSaveService, SaveThenLoadRoundTripPreservesWorldHash) {
     std::vector<std::string> save_errors;
     ASSERT_TRUE(service.save_world(original, save_dir.path, &save_errors));
     EXPECT_TRUE(save_errors.empty());
-    EXPECT_TRUE(std::filesystem::exists(WorldSaveService::world_state_path(save_dir.path)));
+    // Persistence v2 (T-I3-7): the writer emits the LMR1 region container,
+    // never the legacy v1 single snapshot.
+    EXPECT_FALSE(std::filesystem::exists(WorldSaveService::world_state_path(save_dir.path)));
+    EXPECT_TRUE(std::filesystem::exists(WorldSaveService::world_manifest_path(save_dir.path)));
+    EXPECT_TRUE(std::filesystem::exists(WorldSaveService::region_file_path(save_dir.path, 0, 0)));
 
     WorldStreamingState restored;
     std::vector<std::string> load_errors;
@@ -162,7 +166,8 @@ TEST(ChunkDirtyTracking, SaveDirtyChunksWritesSnapshotAndClearsFlags) {
     EXPECT_EQ(report.chunks_total, 3u);
     EXPECT_EQ(report.chunks_dirty, 1u);
     EXPECT_TRUE(report.saved);
-    EXPECT_TRUE(std::filesystem::exists(WorldSaveService::world_state_path(save_dir.path)));
+    EXPECT_GE(report.regions_written, 1u);
+    EXPECT_TRUE(std::filesystem::exists(WorldSaveService::region_file_path(save_dir.path, 0, 0)));
     EXPECT_FALSE(edited->is_voxel_data_dirty());
     EXPECT_TRUE(state.dirty_chunk_ids().empty());
 
@@ -188,6 +193,7 @@ TEST(ChunkDirtyTracking, SaveDirtyChunksWithoutDirtyChunksWritesNothing) {
     EXPECT_EQ(report.chunks_dirty, 0u);
     EXPECT_FALSE(report.saved);
     EXPECT_FALSE(std::filesystem::exists(WorldSaveService::world_state_path(save_dir.path)));
+    EXPECT_FALSE(std::filesystem::exists(WorldSaveService::region_directory(save_dir.path)));
 }
 
 TEST(ChunkDirtyTracking, GenerationAndMeshingLeaveChunkClean) {

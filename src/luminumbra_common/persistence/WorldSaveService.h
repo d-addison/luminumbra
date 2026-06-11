@@ -13,20 +13,52 @@ namespace Luminumbra::Persistence {
 struct WorldSaveDirtyReport {
     std::size_t chunks_total = 0;
     std::size_t chunks_dirty = 0;
+    std::size_t regions_written = 0;
     bool saved = false;
 };
 
 // Persists WorldStreamingState snapshots beneath a world save directory.
 //
-// Current on-disk layout is a single versioned snapshot file at
-// <save_dir>/chunks/world-state.json that reuses the schema header emitted by
-// SerializeWorldStreamingStateSnapshotJson. All writes funnel through the
-// private write_snapshot() seam so the layout can later split into per-chunk
-// files without changing the public API.
+// On-disk layout (persistence v2, LMR1 container per the iteration-3 design
+// decisions doc, section 3):
+//   <save_dir>/chunks/region/r.<rx>.<rz>.lmr   region files, 32x32 chunks each
+//   <save_dir>/chunks/region/world-manifest.json
+//                                              container version + durable
+//                                              entity id allocator counter
+// Region file: magic "LMR1" (u32) | u16 version=1 | u16 record_count |
+// manifest of record headers | LZ4-compressed record payloads in manifest
+// order. Record header: u64 chunk_id (or tile_id) | u8 lod_level (0 = full
+// live chunk record; 1/2 = far tiers F1/F2) | u8 flags (bit0
+// edited/authoritative, bit1 water-present) | u32 uncompressed_size |
+// u32 compressed_size. A lod_level 0 payload is the v1 chunk snapshot record
+// (single-chunk world_state_snapshot.v1 JSON), LZ4-compressed.
+//
+// Loading supports BOTH formats: v2 region files are preferred when present,
+// otherwise the legacy v1 single snapshot <save_dir>/chunks/world-state.json
+// is loaded. Writers emit v2 only; the first v2 save over a v1 world renames
+// the v1 snapshot to world-state.json.bak. world_hash stays computed over the
+// canonical IN-MEMORY snapshot, so a v1-file load and a v2-file load of the
+// same world hash equal (the migration gate).
+//
+// All v2 writes funnel through the private write_snapshot() seam.
 class WorldSaveService {
 public:
-    // Canonical location of the world state snapshot inside a save directory.
+    // Canonical location of the LEGACY v1 world state snapshot inside a save
+    // directory (still read for migration; never written).
     static std::filesystem::path world_state_path(const std::filesystem::path& save_dir);
+
+    // v2 container locations.
+    static std::filesystem::path region_directory(const std::filesystem::path& save_dir);
+    static std::filesystem::path region_file_path(const std::filesystem::path& save_dir, int rx, int rz);
+    static std::filesystem::path world_manifest_path(const std::filesystem::path& save_dir);
+
+    // Region addressing: rx = floor(chunk_x / 32), rz = floor(chunk_z / 32).
+    static constexpr int kRegionChunkSpan = 32;
+    static void region_coords_for_chunk(const IVec3& chunk_coords, int& out_rx, int& out_rz);
+
+    // True when the save directory contains a persisted world in either the
+    // v1 or the v2 format.
+    static bool has_world_save(const std::filesystem::path& save_dir);
 
     // Serializes the full streaming state into the save directory, creating
     // intermediate directories as needed. Returns false (with diagnostics in
@@ -45,23 +77,31 @@ public:
         std::vector<std::string>& errors) const;
 
     // Deterministic hash of the streaming state, reusing the persistence hash
-    // machinery (fnv1a_64 over the canonical snapshot bytes).
+    // machinery (fnv1a_64 over the canonical snapshot bytes). Format
+    // independent: computed over the in-memory snapshot, never file bytes.
     std::string world_hash(const WorldStreamingState& state) const;
 
-    // Incremental save pass: when any chunk has unsaved voxel edits the whole
-    // snapshot is written (the per-chunk layout will narrow this later) and
-    // the dirty flags of the saved chunks are cleared after a successful
-    // write. With no dirty chunks nothing is written and saved stays false.
+    // Incremental save pass: O(edited regions). Only region files containing
+    // at least one dirty chunk are rewritten (all in-memory chunks of those
+    // regions are refreshed; records of chunks absent from memory and far-LOD
+    // tile records are preserved verbatim). Dirty flags of the saved chunks
+    // are cleared after a successful write. With no dirty chunks nothing is
+    // written and saved stays false.
     WorldSaveDirtyReport save_dirty_chunks(
         WorldStreamingState& state,
         const std::filesystem::path& save_dir,
         std::vector<std::string>* errors = nullptr) const;
 
 private:
+    // The single v2 write seam: serializes the given chunks into LMR1 region
+    // files, merging with on-disk records, refreshes the world manifest, and
+    // retires a legacy v1 snapshot to .bak. regions_written receives the
+    // number of region files rewritten when provided.
     bool write_snapshot(
-        const std::string& snapshot_json,
+        const std::vector<std::shared_ptr<Chunk>>& chunks,
         const std::filesystem::path& save_dir,
-        std::vector<std::string>* errors) const;
+        std::vector<std::string>* errors,
+        std::size_t* regions_written = nullptr) const;
 };
 
 } // namespace Luminumbra::Persistence
