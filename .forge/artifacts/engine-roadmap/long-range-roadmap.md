@@ -103,9 +103,14 @@ wants instanced draws) and creature planner (ecology wants stimuli).
    fluffy imposter/sky visuals at landscape distance. TIER 2 (iteration 6,
    unchanged): full Nubis-style volumetric raymarch upgrade sharing
    SHIELD-RT infrastructure.
-4. **Instanced foliage with wind response (engine path, game assets)**:
-   grass/canopy instancing budgeted via PerfRegression; vertex-level wind
-   displacement sampling the wind grid; pairs with biome vegetation maps.
+4. **Instanced ground cover & foliage with wind response (engine path,
+   game assets; owner-expanded 2026-06-11)**: grass BLADES/tufts, pebble
+   and gravel scatter, twigs/shells/clutter, canopy — one instanced
+   scatter system, density driven by the biome table's vegetation/cover
+   block (iter-4 hook, parsed-not-consumed today) modulated by slope/
+   moisture; vertex-level wind displacement (grass waves, pebbles don't);
+   distance-faded against the far-LOD horizon; budgeted via the release
+   perf lane. The single biggest "real place" multiplier for photography.
 5. **Ecology coupling (Instinct pillar deepening)**: engine-side stimulus
    channels (weather, temperature, time, light level) feeding the planner;
    creature CONTENT reacts in game data (shelter-seeking in rain, dawn
