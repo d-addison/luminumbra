@@ -6,8 +6,10 @@ layout (location = 2) in uint aMaterialID;
 
 // Define the output interface block to match g_buffer.frag
 out VS_OUT {
-    vec3 FragPos; // Transformed to VIEW SPACE
-    vec3 Normal;  // Transformed to VIEW SPACE
+    vec3 FragPos;      // VIEW SPACE (g-buffer position output)
+    vec3 Normal;       // VIEW SPACE (octahedral-encoded into the g-buffer)
+    vec3 WorldPos;     // WORLD SPACE (triplanar projection, T-I4-7)
+    vec3 WorldNormal;  // WORLD SPACE (triplanar blend weights + normal mapping)
     flat uint MaterialID;
 } vs_out;
 
@@ -19,8 +21,13 @@ uniform mat3 normalMatrix;
 
 void main()
 {
+    // World-space position/normal for triplanar terrain sampling (T-I4-7).
+    vec4 worldPos = model * vec4(aPos, 1.0);
+    vs_out.WorldPos = vec3(worldPos);
+    vs_out.WorldNormal = normalize(mat3(model) * aNormal);
+
     // Calculate view-space position
-    vec4 viewPos = view * model * vec4(aPos, 1.0);
+    vec4 viewPos = view * worldPos;
     vs_out.FragPos = vec3(viewPos);
     vs_out.Normal = normalize(normalMatrix * aNormal);
     vs_out.MaterialID = aMaterialID;

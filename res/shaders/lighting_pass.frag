@@ -164,13 +164,11 @@ void main() {
     vec3 FragPos = vec3(u_inverseView * vec4(viewPos, 1.0));
     vec3 Normal = normalize(mat3(u_inverseView) * viewNormal);
 
-    // Use tri-planar textures only for material IDs backed by terrain texture layers.
-    // Crystal, water, or invalid IDs keep their G-buffer albedo instead of sampling
-    // outside the texture array and producing undefined material patches.
-    int terrainLayerCount = textureSize(u_terrainTextures, 0).z;
-    if (MaterialID > 0u && int(MaterialID) <= terrainLayerCount) {
-        Albedo = TriPlanar(FragPos, Normal, u_terrainTextures, float(MaterialID - 1u), 0.1);
-    }
+    // T-I4-7: triplanar terrain albedo + normal mapping now happen in
+    // g_buffer.frag (the textured albedo and normal-mapped normal are baked into
+    // the G-buffer), so the lighting pass consumes the G-buffer albedo directly.
+    // The legacy lighting-pass TriPlanar override has been removed; u_terrainTextures
+    // is retained as a binding for compatibility but no longer sampled here.
 
     vec3 V = normalize(u_viewPos - FragPos);
     vec3 F0 = mix(vec3(0.04), Albedo, Metallic);

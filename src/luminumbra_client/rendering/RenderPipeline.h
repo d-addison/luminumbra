@@ -448,8 +448,35 @@ private:
     u32 m_screen_quad_vbo = 0;
 
     u32 m_terrainTextureArray = 0;
+    // Per-material triplanar normal-map array (T-I4-7). Same layer order as the
+    // albedo array; layer indices come from the material LUT normal_layer
+    // column. RGBA8 tangent-space (OpenGL convention) normal maps.
+    u32 m_terrainNormalArray = 0;
     u32 m_materialLUT = 0;
     size_t m_terrain_texture_fallback_layers = 0;
+    // Resolution the terrain albedo/normal arrays are allocated at (256 this
+    // iteration; the committed .ltex plates are 256x256, design §10 budget).
+    static constexpr int kTerrainTextureResolution = 256;
+
+    // Per-material LUT columns parsed from data/common/materials.json
+    // (texture_layer / normal_layer / tiling — design §3, owned by T-I4-7).
+    // Indexed by material id; defaults mean "untextured / flat" so unknown ids
+    // and the crystal/water render kinds keep the G-buffer base color.
+    struct MaterialTextureLut {
+        std::array<int, 256> texture_layer;   // -1 = untextured
+        std::array<int, 256> normal_layer;    // -1 = flat
+        std::array<float, 256> tiling;        // world-units per repeat (>0)
+        int terrain_layer_count = 0;          // distinct albedo layers loaded
+        MaterialTextureLut() {
+            texture_layer.fill(-1);
+            normal_layer.fill(-1);
+            tiling.fill(4.0f);
+        }
+    };
+    MaterialTextureLut m_material_texture_lut;
+    // Parses materials.json texture_layer/normal_layer/tiling columns into
+    // m_material_texture_lut. Missing file/columns leave defaults (untextured).
+    void load_material_texture_lut();
 
     void init_terrain_textures();
     void init_material_lut();

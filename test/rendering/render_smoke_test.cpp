@@ -8,9 +8,11 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <map>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -849,6 +851,92 @@ void SetMat3Identity(GLuint program, const char* name) {
     glUniformMatrix3fv(glGetUniformLocation(program, name), 1, GL_FALSE, identity);
 }
 
+// --- T-I4-7 calibration-plate gate helpers ---
+//
+// Minimal .ltex (T-I4-6 format) CPU loader for the gate. Loads the committed
+// 256x256 terrain plates into texture-array layers. Header layout mirrors
+// asset_processor::WriteLtex / RenderPipeline::load_ltex_cpu_image.
+struct GateLtexImage {
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t channels = 0;
+    uint16_t mip_count = 0;
+    std::vector<unsigned char> bytes; // full mip chain, level 0 first
+};
+
+bool LoadGateLtex(const fs::path& path, GateLtexImage& out) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    auto read_pod = [&](auto& v) { in.read(reinterpret_cast<char*>(&v), sizeof(v)); return static_cast<bool>(in); };
+    uint32_t magic = 0; uint16_t version = 0; uint16_t mip_count = 0;
+    uint32_t width = 0; uint32_t height = 0; uint8_t channels = 0;
+    if (!read_pod(magic) || !read_pod(version) || !read_pod(mip_count) ||
+        !read_pod(width) || !read_pod(height) || !read_pod(channels)) return false;
+    if (magic != 0x5845544Cu || version != 1u || width == 0 || height == 0 ||
+        channels == 0 || channels > 4 || mip_count == 0) return false;
+    size_t total = 0;
+    { uint32_t w = width, h = height;
+      for (uint16_t l = 0; l < mip_count; ++l) { total += static_cast<size_t>(w) * h * channels; w = std::max(1u, w/2u); h = std::max(1u, h/2u); } }
+    out.width = width; out.height = height; out.channels = channels; out.mip_count = mip_count;
+    out.bytes.resize(total);
+    in.read(reinterpret_cast<char*>(out.bytes.data()), static_cast<std::streamsize>(total));
+    return static_cast<bool>(in);
+}
+
+// Uploads a set of .ltex plates into a GL_TEXTURE_2D_ARRAY (256x256xN). Returns
+// the GL texture id (0 on failure). internal_srgb selects sRGB vs linear.
+GLuint UploadGateTextureArray(const std::vector<fs::path>& plates, bool internal_srgb) {
+    constexpr int kRes = 256;
+    // 256 -> 1 is 9 mip levels.
+    constexpr int kMipLevels = 9;
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, tex);
+    // Immutable storage allocates EVERY mip level up front (glTexImage3D only
+    // allocates level 0, so uploading the pre-built mip chain to it leaves
+    // levels 1+ undefined -> black under mipmap filtering).
+    glTexStorage3D(GL_TEXTURE_2D_ARRAY, kMipLevels,
+                   internal_srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8,
+                   kRes, kRes, static_cast<GLsizei>(plates.size()));
+    for (size_t i = 0; i < plates.size(); ++i) {
+        GateLtexImage img;
+        if (!LoadGateLtex(plates[i], img) || img.width != kRes || img.height != kRes || img.channels != 4u) {
+            glDeleteTextures(1, &tex);
+            return 0;
+        }
+        size_t offset = 0; uint32_t w = img.width, h = img.height;
+        for (uint16_t l = 0; l < img.mip_count && l < kMipLevels; ++l) {
+            glTexSubImage3D(GL_TEXTURE_2D_ARRAY, l, 0, 0, static_cast<GLint>(i),
+                            static_cast<GLsizei>(w), static_cast<GLsizei>(h), 1,
+                            GL_RGBA, GL_UNSIGNED_BYTE, img.bytes.data() + offset);
+            offset += static_cast<size_t>(w) * h * img.channels;
+            w = std::max(1u, w/2u); h = std::max(1u, h/2u);
+        }
+    }
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 8);
+    return tex;
+}
+
+// Decodes an octahedral-encoded normal (the G-buffer normal storage) back to a
+// unit vector, matching lighting_pass.frag decode_octahedral.
+std::array<float, 3> DecodeOctahedral(float ex, float ey) {
+    float x = ex * 2.0f - 1.0f;
+    float y = ey * 2.0f - 1.0f;
+    float z = 1.0f - std::fabs(x) - std::fabs(y);
+    if (z < 0.0f) {
+        float ox = (1.0f - std::fabs(y)) * (x >= 0.0f ? 1.0f : -1.0f);
+        float oy = (1.0f - std::fabs(x)) * (y >= 0.0f ? 1.0f : -1.0f);
+        x = ox; y = oy;
+    }
+    float len = std::sqrt(x * x + y * y + z * z);
+    if (len < 1e-6f) len = 1.0f;
+    return {x / len, y / len, z / len};
+}
+
 } // namespace
 
 TEST(RenderSmokeTest, AllShaderSourcesCompile) {
@@ -1424,6 +1512,338 @@ TEST(RenderSmokeTest, GBufferStoresFullViewSpacePosition) {
     glDeleteProgram(program);
 }
 
+// T-I4-7 close-range material gate (design §9, calibration-plate pattern).
+//
+// This is the re-home of the iteration-3 MaterialVisual gate (handoff.md
+// "Iteration 3 Closeout"). The old scan-based gate needed a sand beach beside a
+// grass-capped, stone-rimmed highland on the polished archipelago — geometry
+// the owner-priority terrain pass deliberately removed, so the gate could not be
+// framed. The calibration-plate pattern replaces that scenario-geometry
+// dependency: authored per-material plates are drawn at FIXED coordinates into
+// the G-buffer, captured at close range under TWO sun angles, and checked for
+//   (a) per-material albedo bands (each terrain material is textured and its
+//       mean albedo is distinguishable from the others), and
+//   (b) a normal-response check (the normal-mapped surface produces a shading
+//       field whose response to the sun direction varies across the plate, and
+//       differs between the two sun angles, by more than a flat-surface bound).
+// Running in the headless ctest GL context makes the gate deterministic and
+// machine-independent (no windowed client app / world generation required).
+TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
+    HiddenGlContext context;
+    if (!context.ready()) {
+        GTEST_SKIP() << context.error();
+    }
+
+    const ShaderProgramSpec spec{"g_buffer", "g_buffer.vert", "g_buffer.frag"};
+    GLuint program = LinkProgram(spec);
+    ASSERT_NE(program, 0u);
+
+    // --- Terrain texture + normal arrays from the committed 256 plates ---
+    const fs::path tex_root = SourceRoot() / "data/textures/terrain";
+    const std::vector<fs::path> albedo_plates = {
+        tex_root / "rock/stone_albedo_256.ltex",
+        tex_root / "soil/soil_albedo_256.ltex",
+        tex_root / "grass/grass_albedo_256.ltex",
+        tex_root / "sand/sand_albedo_256.ltex",
+        tex_root / "deepslate/deepslate_albedo_256.ltex",
+    };
+    const std::vector<fs::path> normal_plates = {
+        tex_root / "rock/stone_normal_256.ltex",
+        tex_root / "soil/soil_normal_256.ltex",
+        tex_root / "grass/grass_normal_256.ltex",
+        tex_root / "sand/sand_normal_256.ltex",
+        tex_root / "deepslate/deepslate_normal_256.ltex",
+    };
+    GLuint albedo_array = UploadGateTextureArray(albedo_plates, /*srgb=*/true);
+    GLuint normal_array = UploadGateTextureArray(normal_plates, /*srgb=*/false);
+    ASSERT_NE(albedo_array, 0u) << "failed to load terrain albedo .ltex plates";
+    ASSERT_NE(normal_array, 0u) << "failed to load terrain normal .ltex plates";
+
+    // --- Material LUT (256 x 2) matching RenderPipeline::init_material_lut ---
+    // Material id -> {texture_layer, normal_layer, tiling}. Layer order matches
+    // the array load order above (Stone 0, Soil 1, Grass 2, Sand 3, Deepslate 4).
+    struct PlateMat { int id; const char* name; int layer; float tiling; };
+    const std::array<PlateMat, 5> plates = {{
+        {1, "Stone",     0, 4.0f},
+        {2, "Soil",      1, 3.0f},
+        {3, "Grass",     2, 3.0f},
+        {4, "Sand",      3, 2.5f},
+        {5, "Deepslate", 4, 4.0f},
+    }};
+    std::vector<float> lut(static_cast<size_t>(256) * 2 * 4, 0.0f);
+    auto set_row1 = [&](int id, int layer, float tiling) {
+        const size_t base = (static_cast<size_t>(256) + id) * 4u; // row 1
+        lut[base + 0] = static_cast<float>(layer) / 255.0f;
+        lut[base + 1] = static_cast<float>(layer) / 255.0f;
+        lut[base + 2] = std::min(tiling / 64.0f, 1.0f);
+        lut[base + 3] = 1.0f; // has_texture
+    };
+    // Row 0 roughness=0.8 for all so the gAlbedoRoughness alpha is populated.
+    for (int id = 0; id < 256; ++id) lut[(static_cast<size_t>(id)) * 4 + 1] = 0.8f;
+    for (const auto& p : plates) set_row1(p.id, p.layer, p.tiling);
+    GLuint material_lut = 0;
+    glGenTextures(1, &material_lut);
+    glBindTexture(GL_TEXTURE_2D, material_lut);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 256, 2, 0, GL_RGBA, GL_FLOAT, lut.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    // --- G-buffer FBO (256x256, larger ROI for stable statistics) ---
+    constexpr int kRes = 256;
+    GLuint fbo = 0, gpos = 0, gnorm = 0, galbedo = 0, gmat = 0, gdepth = 0;
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    auto make_color = [&](GLuint& t, GLenum ifmt, GLenum fmt, GLenum type, int attach) {
+        glGenTextures(1, &t);
+        glBindTexture(GL_TEXTURE_2D, t);
+        glTexImage2D(GL_TEXTURE_2D, 0, ifmt, kRes, kRes, 0, fmt, type, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + attach, GL_TEXTURE_2D, t, 0);
+    };
+    make_color(gpos, GL_RGB16F, GL_RGB, GL_FLOAT, 0);
+    make_color(gnorm, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, 1);
+    make_color(galbedo, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, 2);
+    make_color(gmat, GL_RG16F, GL_RG, GL_FLOAT, 3);
+    glGenTextures(1, &gdepth);
+    glBindTexture(GL_TEXTURE_2D, gdepth);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, kRes, kRes, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, gdepth, 0);
+    const GLenum draw_buffers[4] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3};
+    glDrawBuffers(4, draw_buffers);
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+
+    glUseProgram(program);
+    SetMat4Identity(program, "view");
+    SetMat4Identity(program, "projection");
+    SetMat3Identity(program, "normalMatrix");
+    SetMat3Identity(program, "u_normalViewMatrix");
+    glUniform1f(glGetUniformLocation(program, "u_farClipInnerRadius"), 0.0f);
+    glUniform1i(glGetUniformLocation(program, "u_materialLUT"), 0);
+    glUniform1i(glGetUniformLocation(program, "u_terrainTextures"), 1);
+    glUniform1i(glGetUniformLocation(program, "u_terrainNormals"), 2);
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, material_lut);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D_ARRAY, albedo_array);
+    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D_ARRAY, normal_array);
+
+    glViewport(0, 0, kRes, kRes);
+    glDisable(GL_DEPTH_TEST);
+
+    struct PlateVertex { GLfloat px, py, pz, nx, ny, nz; GLuint material; };
+
+    // Two sun directions for the normal-response check. The plates face +Z
+    // (toward the camera), so both suns keep a positive Z component (the surface
+    // is lit) but differ strongly in their X/Y tilt — a flat plate would shade
+    // nearly uniformly under each, while the normal-mapped surface produces a
+    // spatially varying shading field whose pattern shifts between the two
+    // angles. (A sun pointing away from the plate face would zero the whole ROI
+    // and defeat the check.) Both are normalized.
+    auto normalize3 = [](std::array<float, 3> v) {
+        float l = std::sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+        if (l < 1e-6f) l = 1.0f;
+        return std::array<float, 3>{v[0]/l, v[1]/l, v[2]/l};
+    };
+    const std::array<std::array<float, 3>, 2> sun_dirs = {{
+        normalize3({-0.55f,  0.30f, 0.78f}),  // sun tilted up-left toward the plate
+        normalize3({ 0.62f, -0.35f, 0.70f}),  // sun tilted down-right toward the plate
+    }};
+
+    // Per-material capture results.
+    struct PlateResult {
+        std::string name;
+        float albedo_r = 0, albedo_g = 0, albedo_b = 0;
+        float shading_spatial_stddev[2] = {0, 0}; // per sun angle
+        float sun_response_delta = 0;             // |shadingA - shadingB| mean
+        bool albedo_textured = false;
+    };
+    std::vector<PlateResult> results;
+
+    for (const auto& pm : plates) {
+        // The plate is a screen-filling quad at FIXED clip/world coordinates
+        // (model = identity, +Z normal toward the camera). Each material samples
+        // its own texture-array layer (via the LUT) so the captures are
+        // reproducible and the materials are separated by layer, not by viewport
+        // position. The quad spans world XY [-0.95, 0.95] so the triplanar XY
+        // projection covers a full tiling period of the plate.
+        SetMat4Identity(program, "model");
+        const std::array<PlateVertex, 6> quad = {{
+            {-0.95f, -0.95f, -0.5f, 0,0,1, static_cast<GLuint>(pm.id)},
+            { 0.95f, -0.95f, -0.5f, 0,0,1, static_cast<GLuint>(pm.id)},
+            { 0.95f,  0.95f, -0.5f, 0,0,1, static_cast<GLuint>(pm.id)},
+            {-0.95f, -0.95f, -0.5f, 0,0,1, static_cast<GLuint>(pm.id)},
+            { 0.95f,  0.95f, -0.5f, 0,0,1, static_cast<GLuint>(pm.id)},
+            {-0.95f,  0.95f, -0.5f, 0,0,1, static_cast<GLuint>(pm.id)},
+        }};
+        GLuint vao = 0, vbo = 0;
+        glGenVertexArrays(1, &vao);
+        glGenBuffers(1, &vbo);
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad.data(), GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(PlateVertex), reinterpret_cast<void*>(offsetof(PlateVertex, px)));
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(PlateVertex), reinterpret_cast<void*>(offsetof(PlateVertex, nx)));
+        glEnableVertexAttribArray(2);
+        glVertexAttribIPointer(2, 1, GL_UNSIGNED_INT, sizeof(PlateVertex), reinterpret_cast<void*>(offsetof(PlateVertex, material)));
+
+        const GLfloat clear0[4] = {0, 0, 0, 0};
+        glClearBufferfv(GL_COLOR, 0, clear0);
+        glClearBufferfv(GL_COLOR, 1, clear0);
+        glClearBufferfv(GL_COLOR, 2, clear0);
+        glClearBufferfv(GL_COLOR, 3, clear0);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+
+        // Dump the full-frame textured albedo as a PPM capture per material
+        // (convertible to PNG via .forge/scripts/convert-ppm-to-png.ps1).
+        {
+            std::vector<unsigned char> frame(static_cast<size_t>(kRes) * kRes * 4);
+            glReadBuffer(GL_COLOR_ATTACHMENT2);
+            glReadPixels(0, 0, kRes, kRes, GL_RGBA, GL_UNSIGNED_BYTE, frame.data());
+            fs::create_directories(RenderHealthArtifactRoot() / "calibration-plates");
+            std::ofstream ppm(RenderHealthArtifactRoot() / "calibration-plates" /
+                              (std::string("plate-") + pm.name + ".ppm"), std::ios::binary);
+            ppm << "P6\n" << kRes << " " << kRes << "\n255\n";
+            for (int y = kRes - 1; y >= 0; --y) { // flip to top-down
+                for (int x = 0; x < kRes; ++x) {
+                    const size_t i = (static_cast<size_t>(y) * kRes + x) * 4;
+                    ppm.put(static_cast<char>(frame[i + 0]));
+                    ppm.put(static_cast<char>(frame[i + 1]));
+                    ppm.put(static_cast<char>(frame[i + 2]));
+                }
+            }
+        }
+
+        // Read the albedo and encoded normal over the inner ROI.
+        constexpr int kRoi = 96; // centered 96x96 sample window
+        const int x0 = (kRes - kRoi) / 2;
+        std::vector<unsigned char> albedo_px(static_cast<size_t>(kRoi) * kRoi * 4);
+        std::vector<unsigned char> normal_px(static_cast<size_t>(kRoi) * kRoi * 4);
+        glReadBuffer(GL_COLOR_ATTACHMENT2);
+        glReadPixels(x0, x0, kRoi, kRoi, GL_RGBA, GL_UNSIGNED_BYTE, albedo_px.data());
+        glReadBuffer(GL_COLOR_ATTACHMENT1);
+        glReadPixels(x0, x0, kRoi, kRoi, GL_RGBA, GL_UNSIGNED_BYTE, normal_px.data());
+
+        PlateResult pr;
+        pr.name = pm.name;
+        // Mean albedo.
+        double ar = 0, ag = 0, ab = 0;
+        const size_t n = static_cast<size_t>(kRoi) * kRoi;
+        for (size_t i = 0; i < n; ++i) {
+            ar += albedo_px[i * 4 + 0];
+            ag += albedo_px[i * 4 + 1];
+            ab += albedo_px[i * 4 + 2];
+        }
+        pr.albedo_r = static_cast<float>(ar / n / 255.0);
+        pr.albedo_g = static_cast<float>(ag / n / 255.0);
+        pr.albedo_b = static_cast<float>(ab / n / 255.0);
+        pr.albedo_textured = (pr.albedo_r + pr.albedo_g + pr.albedo_b) > 0.02f;
+
+        // Decode per-pixel normals, compute shading under each sun, accumulate
+        // the spatial variation and the per-pixel response delta between suns.
+        std::vector<float> shadeA(n), shadeB(n);
+        for (size_t i = 0; i < n; ++i) {
+            std::array<float, 3> N = DecodeOctahedral(normal_px[i * 4 + 0] / 255.0f,
+                                                      normal_px[i * 4 + 1] / 255.0f);
+            auto dot3 = [&](const std::array<float, 3>& s) {
+                return std::max(0.0f, N[0]*s[0] + N[1]*s[1] + N[2]*s[2]);
+            };
+            shadeA[i] = dot3(sun_dirs[0]);
+            shadeB[i] = dot3(sun_dirs[1]);
+        }
+        auto stddev = [&](const std::vector<float>& v) {
+            double mean = 0; for (float x : v) mean += x; mean /= v.size();
+            double var = 0; for (float x : v) { double d = x - mean; var += d * d; }
+            return static_cast<float>(std::sqrt(var / v.size()));
+        };
+        pr.shading_spatial_stddev[0] = stddev(shadeA);
+        pr.shading_spatial_stddev[1] = stddev(shadeB);
+        double delta = 0;
+        for (size_t i = 0; i < n; ++i) delta += std::fabs(shadeA[i] - shadeB[i]);
+        pr.sun_response_delta = static_cast<float>(delta / n);
+        results.push_back(pr);
+
+        glDeleteBuffers(1, &vbo);
+        glDeleteVertexArrays(1, &vao);
+    }
+
+    // --- Gate assertions ---
+    // Flat-surface bound: a perfectly flat plate (constant normal) has zero
+    // spatial shading variation. Normal maps must perturb the normal enough that
+    // the spatial std-dev of shading clears this bound on every textured plate.
+    constexpr float kFlatShadingBound = 0.02f;
+    // Albedo distinguishability: every plate is textured (non-black) and at
+    // least one channel must differ meaningfully between materials.
+    std::map<std::string, PlateResult> by_name;
+    for (const auto& r : results) by_name[r.name] = r;
+
+    bool gate_passed = (results.size() == plates.size());
+    for (const auto& r : results) {
+        EXPECT_TRUE(r.albedo_textured) << r.name << " plate produced a black/empty albedo (texture not sampled)";
+        // Normal response: spatial shading variation under both sun angles, plus
+        // a non-trivial difference between the two sun directions.
+        EXPECT_GT(r.shading_spatial_stddev[0], kFlatShadingBound) << r.name << " has no normal-map shading variation (high sun)";
+        EXPECT_GT(r.shading_spatial_stddev[1], kFlatShadingBound) << r.name << " has no normal-map shading variation (low sun)";
+        EXPECT_GT(r.sun_response_delta, kFlatShadingBound) << r.name << " shading does not respond to sun direction";
+        if (!(r.albedo_textured &&
+              r.shading_spatial_stddev[0] > kFlatShadingBound &&
+              r.shading_spatial_stddev[1] > kFlatShadingBound &&
+              r.sun_response_delta > kFlatShadingBound)) {
+            gate_passed = false;
+        }
+    }
+    // Per-material albedo bands: sand is the brightest plate; grass is the
+    // greenest (g exceeds r and b); stone/deepslate stay neutral-to-dark. These
+    // separate the materials by color so a single fallback texture cannot pass.
+    if (by_name.count("Sand") && by_name.count("Grass") && by_name.count("Stone")) {
+        const auto& sand = by_name["Sand"];
+        const auto& grass = by_name["Grass"];
+        const float sand_luma = sand.albedo_r + sand.albedo_g + sand.albedo_b;
+        const float grass_luma = grass.albedo_r + grass.albedo_g + grass.albedo_b;
+        EXPECT_GT(sand_luma, grass_luma) << "sand should read brighter than grass";
+        EXPECT_GT(grass.albedo_g, grass.albedo_b) << "grass should read greener than blue";
+        if (!(sand_luma > grass_luma && grass.albedo_g > grass.albedo_b)) gate_passed = false;
+    }
+
+    // --- Emit the re-homed analysis artifact ---
+    fs::create_directories(RenderHealthArtifactRoot());
+    std::ofstream out(RenderHealthArtifactRoot() / "material-visual-analysis.json");
+    out << "{\n";
+    out << "  \"schema\": \"luminumbra.material_visual_analysis.v2\",\n";
+    out << "  \"mode\": \"calibration_plate\",\n";
+    out << "  \"passed\": " << (gate_passed ? "true" : "false") << ",\n";
+    out << "  \"flat_shading_bound\": " << kFlatShadingBound << ",\n";
+    out << "  \"sun_angles\": 2,\n";
+    out << "  \"materials\": [\n";
+    for (size_t i = 0; i < results.size(); ++i) {
+        const auto& r = results[i];
+        out << "    {\"name\": \"" << r.name << "\""
+            << ", \"albedo\": [" << r.albedo_r << ", " << r.albedo_g << ", " << r.albedo_b << "]"
+            << ", \"shading_stddev_sun0\": " << r.shading_spatial_stddev[0]
+            << ", \"shading_stddev_sun1\": " << r.shading_spatial_stddev[1]
+            << ", \"sun_response_delta\": " << r.sun_response_delta
+            << ", \"textured\": " << (r.albedo_textured ? "true" : "false") << "}";
+        out << (i + 1 < results.size() ? ",\n" : "\n");
+    }
+    out << "  ]\n";
+    out << "}\n";
+
+    EXPECT_TRUE(gate_passed);
+
+    glDeleteTextures(1, &material_lut);
+    glDeleteTextures(1, &albedo_array);
+    glDeleteTextures(1, &normal_array);
+    glDeleteTextures(1, &gdepth);
+    glDeleteTextures(1, &gmat);
+    glDeleteTextures(1, &galbedo);
+    glDeleteTextures(1, &gnorm);
+    glDeleteTextures(1, &gpos);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteProgram(program);
+}
+
 TEST(RenderSmokeTest, BasicShaderDrawsNonBlackPixels) {
     HiddenGlContext context;
     if (!context.ready()) {
@@ -1576,7 +1996,16 @@ TEST(RenderSmokeTest, RenderFrameworkContractsEmitArtifacts) {
     EXPECT_NE(source.find("u_flow_map"), std::string::npos);
     EXPECT_NE(source.find("u_foam_texture"), std::string::npos);
     EXPECT_NE(source.find("u_underwater_texture"), std::string::npos);
-    EXPECT_NE(ReadTextFile(SourceRoot() / "res/shaders/lighting_pass.frag").find("terrainLayerCount"), std::string::npos);
+    // T-I4-7: triplanar terrain albedo + normal mapping moved from the lighting
+    // pass into the G-buffer pass (the textured albedo and normal-mapped normal
+    // are baked into the G-buffer). The contract now lives in g_buffer.frag.
+    {
+        const std::string gbuffer_frag = ReadTextFile(SourceRoot() / "res/shaders/g_buffer.frag");
+        EXPECT_NE(gbuffer_frag.find("u_terrainTextures"), std::string::npos);
+        EXPECT_NE(gbuffer_frag.find("u_terrainNormals"), std::string::npos);
+        EXPECT_NE(gbuffer_frag.find("triplanar_albedo"), std::string::npos);
+        EXPECT_NE(gbuffer_frag.find("triplanar_normal"), std::string::npos);
+    }
     EXPECT_NE(shader_header.find("Diagnostic"), std::string::npos);
     EXPECT_NE(shader_source.find("m_valid = true"), std::string::npos);
     EXPECT_NE(capture_header.find("RenderDoc"), std::string::npos);
@@ -1592,7 +2021,7 @@ TEST(RenderSmokeTest, RenderFrameworkContractsEmitArtifacts) {
     pass_metadata << "  \"schema\": \"luminumbra.render_framework.pass_metadata.v1\",\n";
     pass_metadata << "  \"passes\": [\n";
     pass_metadata << "    {\"name\":\"shadow\",\"inputs\":[\"terrain_depth\"],\"outputs\":[\"shadow.depth_texture_array\"],\"resolution\":\"shadow_map\",\"clear\":\"depth\",\"load_store\":\"store depth cascades\",\"draw_count_source\":\"shadow_draws\"},\n";
-    pass_metadata << "    {\"name\":\"gbuffer\",\"inputs\":[\"terrain_meshes\",\"static_meshes\",\"material_lut\"],\"outputs\":[\"gbuffer.position\",\"gbuffer.normal_material\",\"gbuffer.albedo_roughness\",\"gbuffer.metallic_ao\",\"gbuffer.depth\"],\"resolution\":\"screen\",\"clear\":\"color+depth\",\"load_store\":\"store deferred attachments\",\"draw_count_source\":\"terrain_draws\"},\n";
+    pass_metadata << "    {\"name\":\"gbuffer\",\"inputs\":[\"terrain_meshes\",\"static_meshes\",\"material_lut\",\"terrain_texture_array\",\"terrain_normal_array\"],\"outputs\":[\"gbuffer.position\",\"gbuffer.normal_material\",\"gbuffer.albedo_roughness\",\"gbuffer.metallic_ao\",\"gbuffer.depth\"],\"resolution\":\"screen\",\"clear\":\"color+depth\",\"load_store\":\"store deferred attachments\",\"draw_count_source\":\"terrain_draws\"},\n";
     pass_metadata << "    {\"name\":\"ssao\",\"inputs\":[\"gbuffer.position\",\"gbuffer.normal_material\",\"ssao.noise\"],\"outputs\":[\"ssao.raw\"],\"resolution\":\"screen\",\"clear\":\"color\",\"load_store\":\"store ambient occlusion\",\"draw_count_source\":\"ssao_draws\"},\n";
     pass_metadata << "    {\"name\":\"ssao_blur\",\"inputs\":[\"ssao.raw\"],\"outputs\":[\"ssao.blur\"],\"resolution\":\"screen\",\"clear\":\"color\",\"load_store\":\"store blurred ambient occlusion\",\"draw_count_source\":\"ssao_blur_draws\"},\n";
     pass_metadata << "    {\"name\":\"lighting\",\"inputs\":[\"gbuffer.*\",\"shadow.depth_texture_array\",\"ssao.blur\",\"terrain_texture_array\",\"material_lut\",\"water.fallback.black\"],\"outputs\":[\"lighting.color\",\"lighting.depth\"],\"resolution\":\"screen\",\"clear\":\"color+depth\",\"load_store\":\"store lit scene\",\"draw_count_source\":\"lighting_draws\"},\n";
