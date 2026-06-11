@@ -256,6 +256,18 @@ public:
     std::vector<::Luminumbra::Chunk*> get_renderable_chunks();
     float get_density_at(const Vec3& world_pos) const;
     float GetTerrainHeightAt(float world_x, float world_z) const;
+    // T-I4-DR-river-seam-sliver: coarse-LOD height. Identical to
+    // GetTerrainHeightAt for step <= 1 (full-res byte-identical). For step > 1
+    // the river carve - and ONLY the carve - is anti-aliased over the
+    // sample_step footprint so a sub-step-width channel produces a shallow dip
+    // proportional to its coverage instead of an isolated full-depth notch. A
+    // point-sampled narrow channel otherwise aliases into a one-sample pit at
+    // 4 m / 8 m far-LOD steps, and the far/coarse heightfield mesher then emits
+    // a tall near-vertical sliver triangle across it (the FarLodHorizon defect).
+    // The base (un-carved) terrain is low-frequency and already band-limited, so
+    // only the high-frequency carve needs this; the perimeter skirts mask the
+    // residual full-res-ring vs coarse-tile seam, as documented in the mesher.
+    float GetTerrainHeightAtCoarse(float world_x, float world_z, int sample_step) const;
     WorldGenLayerSample SampleWorldGenLayers(const Vec3& world_pos) const;
 
     // --- T-I4-1 biome selection ---
@@ -446,7 +458,8 @@ private:
         float pre_island_height = 0.0f; // combined height before the island mask
         float island_noise = 0.0f;
         float island_mask = 1.0f;
-        float final_height = 0.0f;
+        float final_height = 0.0f;  // after the river carve
+        float pre_carve_height = 0.0f; // final surface before the river carve
         bool island_applied = false;
     };
     ShapedHeightSample ComputeShapedHeightSample(float world_x, float world_z) const;
@@ -471,6 +484,10 @@ private:
     // ramped across the valleys band. 0 outside the band / rivers disabled.
     // Shared by ComputeShapedHeightSample (carve) and RiverInfluenceAt (gate).
     float RiverInfluenceFromNoise(float world_x, float world_z) const;
+    // T-I4-DR-river-seam-sliver: carve depth at one column for a given river
+    // influence [0, 1] (pure; 0 outside the band). Factored out so the coarse
+    // anti-aliased sampler can re-evaluate the carve over a footprint stencil.
+    float RiverCarveAmount(float final_height, float influence) const;
     // Monotone piecewise-linear spline over sorted [input, output] control
     // points: endpoint-clamped, plain lerp between neighbors, `fallback` when
     // the point list is empty.

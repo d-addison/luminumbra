@@ -3798,6 +3798,12 @@ constexpr float kFarLodBoundaryBandInnerMeters = 128.0f;
 constexpr float kFarLodBoundaryBandOuterMeters = 384.0f;
 constexpr double kFarLodBoundaryMaxSkyRatio = 0.02;
 constexpr std::uint64_t kFarLodBoundaryMaxVoidClusters = 0;
+// T-I4-DR-river-seam-sliver: max vertical extent (px) of a thin near-vertical
+// non-sky streak permitted in the sky band above the eye-level horizon. A
+// degenerate far-mesh sliver triangle seen edge-on streaks tens-to-hundreds of
+// px up into the sky; a clean horizon has none. Tuned well below the observed
+// defect extent (~200 px) and above incidental 1-row jitter at a real peak tip.
+constexpr int kFarLodHorizonMaxSkySliverPx = 24;
 
 bool ProjectWorldPointToScreenRow(
     const Luminumbra::Rendering::Camera& camera,
@@ -3987,6 +3993,100 @@ FarLodBoundaryBandStats AnalyzeFarLodBoundaryBand(
     return stats;
 }
 
+FarLodHorizonSkySliverStats AnalyzeFarLodHorizonSkySliver(
+    const std::vector<unsigned char>& pixels,
+    int width,
+    int height,
+    int horizon_row_from_top)
+{
+    FarLodHorizonSkySliverStats stats;
+    stats.sky_bottom_row_from_top = std::clamp(horizon_row_from_top, 0, std::max(0, height - 1));
+    if (width <= 0 || height <= 0 || horizon_row_from_top <= 1 ||
+        pixels.size() < static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u) {
+        return stats;
+    }
+
+    const std::size_t row_stride = static_cast<std::size_t>(width) * 3u;
+    // glReadPixels rows are bottom-up; sky rows are those ABOVE (numerically
+    // smaller from-top than) the horizon row. The UPPER sky here is the bright
+    // blue-grey skybox, not the hazy near-horizon band IsBelowHorizonSkyPixel
+    // classifies. A degenerate far-mesh sliver seen edge-on draws as a DARK,
+    // narrow terrain-colored streak against that bright sky. So in the sky band
+    // a "terrain intrusion" pixel is one that is markedly darker than skybox
+    // brightness (a terrain/unlit fragment), detected by a luminance floor.
+    // Edge columns are ignored (the frame border legitimately shows near terrain
+    // rising above the horizon).
+    const int min_x = width / 64;
+    const int max_x = width - min_x;
+    const int sky_band_rows = horizon_row_from_top; // rows [0, horizon)
+    // Skybox at the pinned noon time is bright (luma > ~120); terrain/unlit
+    // sliver fragments are dark (the observed defect measured ~(10,14,8)).
+    const auto is_terrain_intrusion = [](unsigned char r, unsigned char g, unsigned char b) {
+        const int luma = (static_cast<int>(r) * 30 + static_cast<int>(g) * 59 + static_cast<int>(b) * 11) / 100;
+        return luma < 90;
+    };
+
+    // Per-column vertical SPAN of terrain-intrusion pixels within the sky band
+    // (highest-minus-lowest intrusion row). A sliver is diagonal and dotted
+    // after rasterization, so span captures its reach better than the longest
+    // contiguous run. The topmost band of rows near the very top edge is part of
+    // the scan (a sliver streaks to the frame top). Columns with no intrusion
+    // have span 0.
+    std::vector<int> column_span(static_cast<std::size_t>(width), 0);
+    for (int x = min_x; x < max_x; ++x) {
+        int first = -1;
+        int last = -1;
+        for (int y_from_top = 0; y_from_top < sky_band_rows; ++y_from_top) {
+            const int y = height - 1 - y_from_top; // to bottom-up buffer row
+            const std::size_t offset =
+                static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
+            if (is_terrain_intrusion(pixels[offset], pixels[offset + 1u], pixels[offset + 2u])) {
+                if (first < 0) first = y_from_top;
+                last = y_from_top;
+            }
+            ++stats.sky_pixels;
+        }
+        // Exclude intrusion that only touches the bottom rows just above the
+        // horizon: that is the legitimate near-horizon terrain silhouette, not a
+        // sliver streaking up. Require the intrusion to start well above the
+        // horizon (first row from top must be in the upper part of the sky band).
+        if (first >= 0 && first < sky_band_rows * 3 / 4) {
+            column_span[static_cast<std::size_t>(x)] = last - first + 1;
+        }
+    }
+    std::vector<int>& column_run = column_span;
+
+    // A sliver is a narrow cluster of columns (width-bounded) whose tallest
+    // non-sky run reaches well up into the sky. Slide a width window: a true
+    // tall thin sliver lights up only a few adjacent columns; a real mountain
+    // ridge intruding above the horizon spans a wide column range, so requiring
+    // the run on BOTH flanks of the window to fall off keeps ridges out.
+    constexpr int kMaxSliverWidth = 16; // px; slivers are 1-2 px, walls < 16
+    for (int x = min_x; x < max_x; ++x) {
+        const int run = column_run[static_cast<std::size_t>(x)];
+        if (run <= stats.tallest_sliver_px) {
+            continue;
+        }
+        // Measure the contiguous width of columns whose run is at least half of
+        // this column's run, centered on x.
+        int left = x;
+        while (left > min_x && column_run[static_cast<std::size_t>(left - 1)] * 2 >= run) {
+            --left;
+        }
+        int right = x;
+        while (right + 1 < max_x && column_run[static_cast<std::size_t>(right + 1)] * 2 >= run) {
+            ++right;
+        }
+        const int wwidth = right - left + 1;
+        if (wwidth <= kMaxSliverWidth) {
+            stats.tallest_sliver_px = run;
+            stats.tallest_sliver_width_px = wwidth;
+            stats.tallest_sliver_col = x;
+        }
+    }
+    return stats;
+}
+
 void WriteFarLodHorizonAnalysis(
     const std::filesystem::path& artifact_dir,
     const std::string& world_preset,
@@ -4011,6 +4111,7 @@ void WriteFarLodHorizonAnalysis(
     double max_band_sky_ratio = 0.0;
     std::uint64_t max_band_void_clusters = 0;
     std::size_t bands_resolved = 0;
+    int max_sky_sliver_px = 0;
     bool all_stations_passed = captures.size() == expected_station_count;
 
     nlohmann::json station_rows = nlohmann::json::array();
@@ -4024,6 +4125,7 @@ void WriteFarLodHorizonAnalysis(
             capture.sky.void_cluster_count == 0;
         const bool station_passed = boundary_passed && horizon_passed;
         all_stations_passed = all_stations_passed && station_passed;
+        max_sky_sliver_px = std::max(max_sky_sliver_px, capture.sky_sliver.tallest_sliver_px);
 
         if (capture.boundary.band_resolved) {
             ++bands_resolved;
@@ -4064,6 +4166,13 @@ void WriteFarLodHorizonAnalysis(
                 {"void_cluster_count", capture.boundary.void_cluster_count},
                 {"largest_void_cluster_px", capture.boundary.largest_void_cluster_px},
             }},
+            {"sky_sliver", {
+                {"sky_bottom_row_from_top", capture.sky_sliver.sky_bottom_row_from_top},
+                {"sky_pixels", capture.sky_sliver.sky_pixels},
+                {"tallest_sliver_px", capture.sky_sliver.tallest_sliver_px},
+                {"tallest_sliver_width_px", capture.sky_sliver.tallest_sliver_width_px},
+                {"tallest_sliver_col", capture.sky_sliver.tallest_sliver_col},
+            }},
             {"farlod", {
                 {"regions_wanted", capture.regions_wanted},
                 {"regions_resident", capture.regions_resident},
@@ -4100,6 +4209,7 @@ void WriteFarLodHorizonAnalysis(
             {"max_below_horizon_sky_ratio", kFarLodHorizonMaxSkyRatio},
             {"max_boundary_band_sky_ratio", kFarLodBoundaryMaxSkyRatio},
             {"max_boundary_band_void_clusters", kFarLodBoundaryMaxVoidClusters},
+            {"max_sky_sliver_px", kFarLodHorizonMaxSkySliverPx},
             {"f2_outer_range_m", 1536.0},
             {"sky_ratio_enforced", enforce_sky_ratio},
         }},
@@ -4129,6 +4239,7 @@ void WriteFarLodHorizonAnalysis(
             {"max_below_horizon_sky_ratio", max_sky_ratio},
             {"max_boundary_band_sky_ratio", max_band_sky_ratio},
             {"max_boundary_band_void_clusters", max_band_void_clusters},
+            {"max_sky_sliver_px", max_sky_sliver_px},
         }},
         {"gl_debug", {
             {"messages", gl_debug.messages},

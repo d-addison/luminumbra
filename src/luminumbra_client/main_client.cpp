@@ -2524,6 +2524,9 @@ int main(int argc, char* argv[]) {
                                             capture.boundary = AnalyzeFarLodBoundaryBand(
                                                 frame_pixels, screenshot_width, screenshot_height, band_top, band_bottom);
                                         }
+                                        // T-I4-DR-river-seam-sliver: above-horizon thin-sliver scan.
+                                        capture.sky_sliver = AnalyzeFarLodHorizonSkySliver(
+                                            frame_pixels, screenshot_width, screenshot_height, horizon_row_from_top);
                                         if (const auto* farlod = renderPipeline.farlod()) {
                                             const auto& farlod_stats = farlod->stats();
                                             capture.regions_wanted = farlod_stats.regions_wanted;

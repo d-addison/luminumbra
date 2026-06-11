@@ -713,11 +713,36 @@ FarLodBoundaryBandStats AnalyzeFarLodBoundaryBand(
     int band_top_row_from_top,
     int band_bottom_row_from_top);
 
+// T-I4-DR-river-seam-sliver: above-horizon sky-sliver detector. The
+// below-horizon sky-ratio gate is area-based and a 1-2 px near-vertical sliver
+// triangle streaking up into the sky passes it (negligible area, and it sits
+// ABOVE the horizon row the sky gate ignores). This pass scans the sky region
+// (rows above the eye-level horizon) for connected non-sky components that are
+// tall and thin and cross a large vertical fraction of the sky - the signature
+// of a degenerate far-mesh sliver seen edge-on - and gates their height.
+struct FarLodHorizonSkySliverStats {
+    int sky_top_row_from_top = 0;      // top of the scanned sky band (0)
+    int sky_bottom_row_from_top = 0;   // = horizon row
+    std::uint64_t sky_pixels = 0;
+    // Tallest thin (width-bounded) non-sky component found in the sky band, in
+    // pixels of vertical extent. 0 when the sky is clean.
+    int tallest_sliver_px = 0;
+    int tallest_sliver_width_px = 0;
+    int tallest_sliver_col = 0;
+};
+
+FarLodHorizonSkySliverStats AnalyzeFarLodHorizonSkySliver(
+    const std::vector<unsigned char>& pixels,
+    int width,
+    int height,
+    int horizon_row_from_top);
+
 struct FarLodHorizonStationCapture {
     FarLodHorizonStation station;
     std::string file;
     PlayerViewPixelStats sky;          // full below-horizon machinery
     FarLodBoundaryBandStats boundary;  // live/far boundary band ROI
+    FarLodHorizonSkySliverStats sky_sliver; // above-horizon sliver detector
     // Far-LOD scheduler state at capture time.
     std::size_t regions_wanted = 0;
     std::size_t regions_resident = 0;

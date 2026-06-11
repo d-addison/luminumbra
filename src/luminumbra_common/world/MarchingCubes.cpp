@@ -5,7 +5,7 @@
 #include <chrono>
 #include <cstdint>
 #include <vector>
-#include <cmath> 
+#include <cmath>
 #include "world/Chunk.h"
 #include "../../../include/luminumbra/core/Types.h"
 #include <glm/glm.hpp>
@@ -395,7 +395,11 @@ namespace { // Anonymous namespace for internal implementation details
             for (int gx = 0; gx < vertices_x; ++gx) {
                 const int local_x = std::min(CHUNK_SIZE_X, gx * sample_step);
                 const float world_x = static_cast<float>(chunk_base_pos.x + local_x);
-                const float terrain_height = world_system.GetTerrainHeightAt(world_x, world_z);
+                // T-I4-DR-river-seam-sliver: coarse-LOD river-carve anti-alias
+                // (matches the far tile sampler) so the live coarse ring does
+                // not aliased-notch a narrow channel into a sliver triangle.
+                const float terrain_height =
+                    world_system.GetTerrainHeightAtCoarse(world_x, world_z, sample_step);
                 const float local_y = terrain_height - static_cast<float>(chunk_base_pos.y);
                 const MaterialType material = GetTerrainMaterialAt(
                     world_system,
@@ -874,7 +878,7 @@ void PolygoniseTerrain(
         chunk.mesh_indices.size(),
         elapsed_us
     );
-    
+
     // Mesh generation complete
 }
 
