@@ -192,6 +192,40 @@ Mandated streams for the iteration after iteration 2, all gate-first:
    enablement, release perf lane); gameplay systems runtime; vertical
    slice; networking last.
 
+## Iteration 2 Closeout (2026-06-10)
+
+All five phases complete on feat/polyglot-audit-roadmap. Final state: 82/82
+ctest; all 22 engine-frontier validator modes pass; runtime-stability gates
+(Smoke, LodGround, WaterVisual, LodSeamRisk, LodBoundaryHysteresis,
+EnduranceStreamDrain, Endurance300) green; forge verify clean.
+
+Landed: scenario harness extraction; EnduranceStreamDrain/
+LodBoundaryHysteresis/LodSeamRisk gates (closing T-EF-6/8/9); PerfRegression
+with blessed median-of-3 baseline (+50%/+25% noise-honest margins, 20ms
+noise floor); per-pass GPU timers; WorldSaveService + chunk dirty tracking +
+runtime save/load with PersistenceRuntimeRoundtrip gate; marching-cubes
+flat-edge-cache optimization (byte-identical, determinism-hash locked);
+six-pass RenderPipeline extraction under empty RenderHealth diffs; streaming
+drain optimization (streaming_walk p99 66->11ms, chunk_churn 77->7ms, +82%
+frame rate under load); JobSystem High/Normal priority lanes; beautification
+(animated caustics, improved SSR, depth tint + shoreline foam, atmospheric
+skybox, weather overlay behind set_weather, noon/dusk/night sweep gate,
+Grass/Stone/Soil material ROIs); scenario windows no longer steal focus.
+
+Defects found and fixed by gate-first work: vertical-column LOD mismatch
+(black seam slivers + bottom band — surface-band column LOD); corrupted
+skybox cube array (106/108 floats); backface-culled skybox; sign-flipped
+sun/moon directions (no sun disc had ever rendered); water tangent normals
+added raw (permanent 45-degree tilt); SSR far-plane grey blotches; shoreline
+foam multiplied by a black fallback (never rendered); WorldStreamingState.cpp
+missing from the sources manifest; dispatched gate fixtures never compiled.
+
+Open (carried to iteration 3, see Directives above): degenerate-geometry
+chunk seed 424242 near (-120..-160, 180..230); player-view coverage
+(eye-level gate + vertical-band fixes); terrain shaping; 6x+ view distance
+per the Distant Horizons model. NOTE: no git remote is configured — add one
+to push.
+
 ## Iteration 2 Kickoff (2026-06-10)
 
 Execution model: Claude Code agent teams execute all implementation (Agent + Workflow, worktree isolation for parallel phases); Forge provides gates, bookkeeping (.forge/tasks/engine-iteration-2/dispatch.json, 19 tasks / 7 waves), and forge verify. Codex dispatch retired this iteration. Phase order: S1 gates || S2a perf infra -> baseline capture -> GPU timers || persistence core || meshing opt -> pass extraction || runtime persistence -> streaming/jobs optimization -> beautification tracks -> closeout. render-health-baseline.json committed as the extraction diff anchor.
