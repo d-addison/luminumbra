@@ -8,11 +8,13 @@
 #include <unordered_map>
 #include <memory>
 #include <string>
+#include <optional>
 #include <vector>
 #include <functional>
 #include "entt/entt.hpp"
 #include "FastNoise/FastNoise.h"
 #include "../world/BiomeTable.h"
+#include "../world/StructurePlacement.h"
 
 namespace Luminumbra::Systems {
 
@@ -96,6 +98,18 @@ struct TerrainGenParams {
     // far-LOD tiles self-invalidate when the table content changes even though
     // the path is unchanged (design-decisions section 2).
     u64 biome_table_content_hash = 0;
+    // T-I4-4: structures. When enabled, the world system places jigsaw
+    // structures (data/common/structures/<type>/) through the normal edit path
+    // during chunk generation. structures_content_hash is the fnv1a64 of the
+    // loaded template pools' content; ComputeTerrainParamsHash mixes it in (only
+    // when enabled) so pristine far tiles self-invalidate on a template change.
+    // Disabled (the default preset) => byte-zero drift, identical hashes.
+    bool structures_enabled = false;
+    u64 structures_content_hash = 0;
+    // Absolute path to data/common/structures (resolved by the preset loader,
+    // mirrors biome_table_path). The world system loads every <type>/ pool here
+    // when structures_enabled.
+    std::string structures_data_dir;
 };
 
 struct WorldGenLayerSample {
@@ -274,6 +288,17 @@ public:
     // Whether biomes are active (preset opted in AND the table loaded).
     bool biomes_enabled() const { return m_biomes_enabled; }
     const World::BiomeTable& biome_table() const { return m_biome_table; }
+
+    // --- T-I4-4 structures ---
+    bool structures_enabled() const { return m_structures_enabled; }
+    const std::vector<World::StructureTemplatePool>& structure_pools() const {
+        return m_structure_pools;
+    }
+    // Nearest structure site of the given type to (world_x, world_z) within the
+    // search radius (cells), or nullopt. Deterministic; pure function of the
+    // world seed + the type's grid. Used by gates and locate(type, near).
+    std::optional<World::StructureSite> LocateStructure(
+        const std::string& type, int world_x, int world_z, int search_radius_cells = 2) const;
     // Per-column biome id at the surface (u8, 255 = none). Pure function of
     // (seed, params): samples the five climate dimensions (continentalness,
     // erosion, peaks/valleys reuse the +3/+4/+5 shaping noises; temperature
@@ -524,6 +549,14 @@ private:
     // (re)init when biomes are enabled; empty/disabled otherwise.
     World::BiomeTable m_biome_table;
     bool m_biomes_enabled = false;
+
+    // T-I4-4 structure template pools (game data). Loaded from
+    // m_params.structures_data_dir when structures are enabled; the combined
+    // content hash is stamped into m_params.structures_content_hash so the far
+    // cache key tracks template changes. Public accessors expose the deterministic
+    // placement query so callers (and gates) can locate sites.
+    std::vector<World::StructureTemplatePool> m_structure_pools;
+    bool m_structures_enabled = false;
 
     WaterSystem* m_water_system;
 };

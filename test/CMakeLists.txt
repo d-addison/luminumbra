@@ -109,6 +109,7 @@ add_executable(common_tests
     common/JobSystem_test.cpp
     common/ServerHeadlessHygiene_test.cpp
     common/SimulationClock_test.cpp
+    common/StructurePlacement_test.cpp
     common/TerrainPresetLoader_test.cpp
     common/WorldStreamingState_test.cpp
 )

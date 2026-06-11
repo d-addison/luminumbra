@@ -53,6 +53,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/world/FarLodStore.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/GameSession.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/MarchingCubes.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/world/StructurePlacement.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/TerrainPresetLoader.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/WorldStreamingState.cpp
 )

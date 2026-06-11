@@ -3436,6 +3436,24 @@ function Test-RiverPresence {
         $analysis.longest_continuous_run, $analysis.river_ratio, $analysis.river_pv_min, $analysis.river_pv_max)
 }
 
+# --- T-I4-4 StructurePresence mode: append-only ---
+# Runs the StructurePlacement gtest (which loads the shipped cairn + ruin
+# template pools, proves the placement grid is deterministic - same seed =>
+# same sites, locate(type, near) verified against a brute-force scan - and
+# snapshots the assembled fixture voxel hash). Append-only; no existing gate
+# behavior changes.
+function Test-StructurePresence {
+    $exe = "build/$BuildPreset/bin/common_tests.exe"
+    if (-not (Test-Path $exe)) {
+        throw "StructurePresence gate: missing $exe (cmake --build --preset $BuildPreset)"
+    }
+    & $exe "--gtest_filter=StructurePlacementTest.*"
+    if ($LASTEXITCODE -ne 0) {
+        throw "StructurePresence gtest (StructurePlacementTest.*) failed with exit code $LASTEXITCODE"
+    }
+    Write-Host "structure presence gate passed: cairn + ruin pools load, placement grid deterministic, assembled voxel hashes stable"
+}
+
 switch ($Mode) {
     "CodexOnly" { Test-CodexOnly }
     "Panels" { Test-Panels }
@@ -3478,6 +3496,7 @@ switch ($Mode) {
     "CreatureSlice" { Test-CreatureSlice }
     "BiomeCoverage" { Test-BiomeCoverage }
     "RiverPresence" { Test-RiverPresence }
+    "StructurePresence" { Test-StructurePresence }
     "All" {
         Test-CodexOnly
         Test-Files

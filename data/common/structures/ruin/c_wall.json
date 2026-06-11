@@ -1,0 +1,10 @@
+{
+  "name": "ruin_wall",
+  "_comment": "A crumbled wall segment (Stone=1). Its end socket joins a base slab socket.",
+  "boxes": [
+    { "min": [0, 0, 0], "size": [3, 2, 1], "material": 1 }
+  ],
+  "sockets": [
+    { "name": "end", "position": [0, 0, 0] }
+  ]
+}
