@@ -201,6 +201,134 @@ void SHIELD_WorldSystem::reinitialize_noise() {
     // 3. Island Mask Generator (Low-frequency Simplex)
     auto island_noise = FastNoise::New<FastNoise::Simplex>();
     m_island_mask_generator = island_noise;
+
+    // 4. T-I3-10 shaping control noises (seed registry: +3 continentalness,
+    //    +4 erosion, +5 peaks/valleys, +6/+7 domain warp X/Z). Only built when
+    //    the preset opts in; legacy worlds never construct these nodes.
+    m_continentalness_generator = {};
+    m_erosion_generator = {};
+    m_peaks_generator = {};
+    m_warp_generator = {};
+    if (m_params.shaping_enabled) {
+        auto continental_fractal = FastNoise::New<FastNoise::FractalFBm>();
+        continental_fractal->SetSource(FastNoise::New<FastNoise::Simplex>());
+        continental_fractal->SetOctaveCount(3);
+        m_continentalness_generator = continental_fractal;
+
+        auto erosion_fractal = FastNoise::New<FastNoise::FractalFBm>();
+        erosion_fractal->SetSource(FastNoise::New<FastNoise::Simplex>());
+        erosion_fractal->SetOctaveCount(3);
+        m_erosion_generator = erosion_fractal;
+
+        auto peaks_fractal = FastNoise::New<FastNoise::FractalRidged>();
+        peaks_fractal->SetSource(FastNoise::New<FastNoise::Simplex>());
+        peaks_fractal->SetOctaveCount(2);
+        m_peaks_generator = peaks_fractal;
+
+        m_warp_generator = FastNoise::New<FastNoise::Simplex>();
+    }
+}
+
+float SHIELD_WorldSystem::EvaluateShapingSpline(
+    const std::vector<std::array<float, 2>>& points, float input, float fallback) {
+    if (points.empty()) {
+        return fallback;
+    }
+    if (input <= points.front()[0]) {
+        return points.front()[1];
+    }
+    if (input >= points.back()[0]) {
+        return points.back()[1];
+    }
+    for (std::size_t i = 1; i < points.size(); ++i) {
+        if (input <= points[i][0]) {
+            const float span = points[i][0] - points[i - 1][0];
+            const float t = span > 0.0f ? (input - points[i - 1][0]) / span : 0.0f;
+            return points[i - 1][1] + t * (points[i][1] - points[i - 1][1]);
+        }
+    }
+    return points.back()[1];
+}
+
+SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSample(
+    float world_x, float world_z) const {
+    ShapedHeightSample sample;
+
+    float sample_x = world_x;
+    float sample_z = world_z;
+    float base_level = 0.0f;
+    float amplitude_multiplier = 1.0f;
+    float ridge = 0.0f;
+
+    if (m_params.shaping_enabled) {
+        // Domain warp (seed +6 / +7) displaces the BASE detail (and pv)
+        // sample coordinates; the control channels read the unwarped point so
+        // the macro structure stays stable under the warp.
+        const float warp_x = m_params.domain_warp_amplitude * m_warp_generator->GenSingle2D(
+            world_x * m_params.domain_warp_frequency,
+            world_z * m_params.domain_warp_frequency,
+            m_seed + 6);
+        const float warp_z = m_params.domain_warp_amplitude * m_warp_generator->GenSingle2D(
+            world_x * m_params.domain_warp_frequency,
+            world_z * m_params.domain_warp_frequency,
+            m_seed + 7);
+        sample_x = world_x + warp_x;
+        sample_z = world_z + warp_z;
+
+        const float continentalness = m_continentalness_generator->GenSingle2D(
+            world_x * m_params.continentalness_frequency,
+            world_z * m_params.continentalness_frequency,
+            m_seed + 3);
+        const float erosion = m_erosion_generator->GenSingle2D(
+            world_x * m_params.erosion_frequency,
+            world_z * m_params.erosion_frequency,
+            m_seed + 4);
+        const float peaks_valleys = m_peaks_generator->GenSingle2D(
+            sample_x * m_params.peaks_frequency,
+            sample_z * m_params.peaks_frequency,
+            m_seed + 5);
+
+        base_level = EvaluateShapingSpline(m_params.continental_spline, continentalness, 0.0f);
+        amplitude_multiplier = EvaluateShapingSpline(m_params.erosion_spline, erosion, 1.0f);
+        // Ridge term: peaks only where erosion is low (eroded land is flat).
+        const float erosion_01 = std::clamp((erosion + 1.0f) * 0.5f, 0.0f, 1.0f);
+        ridge = EvaluateShapingSpline(m_params.peaks_spline, peaks_valleys, 0.0f)
+            * m_params.peaks_amplitude * std::max(0.0f, 1.0f - erosion_01);
+    }
+
+    sample.base_noise = m_terrain_generator->GenSingle2D(
+        sample_x * m_params.base_frequency,
+        sample_z * m_params.base_frequency,
+        m_seed);
+    // With shaping disabled this is exactly the legacy float-op sequence:
+    // height_offset + noise * amplitude (base_level == 0, multiplier == 1,
+    // ridge == 0 are not applied at all on the legacy branch).
+    float terrain_height;
+    if (m_params.shaping_enabled) {
+        terrain_height = m_params.height_offset + base_level
+            + amplitude_multiplier * (sample.base_noise * m_params.base_amplitude)
+            + ridge;
+    } else {
+        terrain_height = m_params.height_offset + sample.base_noise * m_params.base_amplitude;
+    }
+    sample.pre_island_height = terrain_height;
+    sample.final_height = terrain_height;
+
+    if (m_params.island_mask_enabled) {
+        sample.island_applied = true;
+        sample.island_noise = m_island_mask_generator->GenSingle2D(
+            world_x * m_params.island_mask_frequency,
+            world_z * m_params.island_mask_frequency,
+            m_seed + 2);
+        sample.island_mask = glm::smoothstep(0.1f, 0.25f, sample.island_noise);
+        sample.final_height = glm::mix(m_params.height_offset, terrain_height, sample.island_mask);
+    }
+
+    return sample;
+}
+
+float SHIELD_WorldSystem::ComputeShapedHeight(float world_x, float world_z) const {
+    return ComputeShapedHeightSample(world_x, world_z).final_height;
 }
 
 SHIELD_WorldSystem::ColumnSurfaceSpan SHIELD_WorldSystem::compute_column_surface_span(int chunk_x, int chunk_z) const {
@@ -1080,46 +1208,24 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
 }
 
 float SHIELD_WorldSystem::GetTerrainHeightAt(float world_x, float world_z) const {
-    const float noise_value = m_terrain_generator->GenSingle2D(
-        world_x * m_params.base_frequency,
-        world_z * m_params.base_frequency,
-        m_seed
-    );
-    float terrain_height = m_params.height_offset + noise_value * m_params.base_amplitude;
-    if (m_params.island_mask_enabled) {
-        const float island_value = m_island_mask_generator->GenSingle2D(
-            world_x * m_params.island_mask_frequency,
-            world_z * m_params.island_mask_frequency,
-            m_seed + 2
-        );
-        const float island_mask = glm::smoothstep(0.1f, 0.25f, island_value);
-        terrain_height = glm::mix(m_params.height_offset, terrain_height, island_mask);
-    }
-    return terrain_height;
+    // T-I3-10: delegates to the one shared height implementation.
+    return ComputeShapedHeightSample(world_x, world_z).final_height;
 }
 
 WorldGenLayerSample SHIELD_WorldSystem::SampleWorldGenLayers(const Vec3& world_pos) const {
     WorldGenLayerSample sample;
     sample.world_pos = world_pos;
 
-    sample.base_noise = m_terrain_generator->GenSingle2D(
-        world_pos.x * m_params.base_frequency,
-        world_pos.z * m_params.base_frequency,
-        m_seed
-    );
-    sample.base_height = m_params.height_offset + sample.base_noise * m_params.base_amplitude;
-    sample.final_height = sample.base_height;
-
-    if (m_params.island_mask_enabled) {
-        sample.island_applied = true;
-        sample.island_noise = m_island_mask_generator->GenSingle2D(
-            world_pos.x * m_params.island_mask_frequency,
-            world_pos.z * m_params.island_mask_frequency,
-            m_seed + 2
-        );
-        sample.island_mask = glm::smoothstep(0.1f, 0.25f, sample.island_noise);
-        sample.final_height = glm::mix(m_params.height_offset, sample.base_height, sample.island_mask);
-    }
+    // T-I3-10: heights come from the one shared implementation so this sample
+    // path stays exactly consistent with GetTerrainHeightAt and both
+    // GenerateChunkData batch loops.
+    const ShapedHeightSample height = ComputeShapedHeightSample(world_pos.x, world_pos.z);
+    sample.base_noise = height.base_noise;
+    sample.base_height = height.pre_island_height;
+    sample.final_height = height.final_height;
+    sample.island_applied = height.island_applied;
+    sample.island_noise = height.island_noise;
+    sample.island_mask = height.island_mask;
 
     sample.terrain_density = world_pos.y - sample.final_height;
     sample.final_density = sample.terrain_density;
@@ -1455,6 +1561,22 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_
        const size_t heightmap_size = static_cast<size_t>(size_x) * size_z;
        chunk.heightmap_data.resize(heightmap_size);
 
+       if (m_params.shaping_enabled) {
+           // T-I3-10: shaped heights come from the one shared scalar helper
+           // (GenSingle* only), so the batch heightmap bytes are EXACTLY equal
+           // to GetTerrainHeightAt at the same world coordinate - the batch
+           // and scalar paths cannot diverge (batch-vs-scalar parity gtest).
+           for (int z = 0; z < size_z; ++z) {
+               for (int x = 0; x < size_x; ++x) {
+                   chunk.heightmap_data[static_cast<size_t>(x) + static_cast<size_t>(z) * size_x] =
+                       ComputeShapedHeight(static_cast<float>(base_pos.x + x),
+                                           static_cast<float>(base_pos.z + z));
+               }
+           }
+           chunk.clear_voxel_data_dirty();
+           return;
+       }
+
        std::vector<float> heightmap_noise(heightmap_size);
        std::vector<float> island_mask_noise(heightmap_size);
        m_terrain_generator->GenUniformGrid2D(heightmap_noise.data(), base_pos.x, base_pos.z, size_x, size_z, m_params.base_frequency, m_seed);
@@ -1520,10 +1642,27 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_
        cave_noise.resize(padded_volume);
    }
    
-   // FastNoise GenUniformGrid2D populates its buffer in [x][z] layout where x varies fastest
-   m_terrain_generator->GenUniformGrid2D(heightmap_noise.data(), base_pos.x, base_pos.z, size_x, size_z, m_params.base_frequency, m_seed);
-   m_island_mask_generator->GenUniformGrid2D(island_mask_noise.data(), base_pos.x, base_pos.z, size_x, size_z, m_params.island_mask_frequency, m_seed + 2);
-   
+   // T-I3-10: with shaping enabled the per-column heights are computed by the
+   // one shared scalar helper (GenSingle* only) so they are EXACTLY equal to
+   // GetTerrainHeightAt/SampleWorldGenLayers at the same coordinates. The
+   // legacy path keeps its SIMD GenUniformGrid2D batches (bit-identical
+   // pre-shaping bytes; the 1e-4 snapshot gate covers grid-vs-single drift).
+   std::vector<float> shaped_heights;
+   if (m_params.shaping_enabled) {
+       shaped_heights.resize(heightmap_size);
+       for (int z = 0; z < size_z; ++z) {
+           for (int x = 0; x < size_x; ++x) {
+               shaped_heights[static_cast<size_t>(x) + static_cast<size_t>(z) * size_x] =
+                   ComputeShapedHeight(static_cast<float>(base_pos.x + x),
+                                       static_cast<float>(base_pos.z + z));
+           }
+       }
+   } else {
+       // FastNoise GenUniformGrid2D populates its buffer in [x][z] layout where x varies fastest
+       m_terrain_generator->GenUniformGrid2D(heightmap_noise.data(), base_pos.x, base_pos.z, size_x, size_z, m_params.base_frequency, m_seed);
+       m_island_mask_generator->GenUniformGrid2D(island_mask_noise.data(), base_pos.x, base_pos.z, size_x, size_z, m_params.island_mask_frequency, m_seed + 2);
+   }
+
    // FastNoise GenUniformGrid3D populates its buffer in [x][y][z] layout where x varies fastest
    if (m_params.caves_enabled) {
        m_cave_generator->GenUniformGrid3D(cave_noise.data(), base_pos.x, base_pos.y, base_pos.z, size_x, size_y, size_z, m_params.cave_frequency, m_seed + 1);
@@ -1551,10 +1690,15 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_
                }
                
                // A. Calculate final terrain height for this (x,z) column
-               float terrain_h = m_params.height_offset + heightmap_noise[index_2d_read] * m_params.base_amplitude;
-               if (m_params.island_mask_enabled) {
-                   float island_mask = glm::smoothstep(0.1f, 0.25f, island_mask_noise[index_2d_read]);
-                   terrain_h = glm::mix(m_params.height_offset, terrain_h, island_mask);
+               float terrain_h;
+               if (m_params.shaping_enabled) {
+                   terrain_h = shaped_heights[index_2d_read];
+               } else {
+                   terrain_h = m_params.height_offset + heightmap_noise[index_2d_read] * m_params.base_amplitude;
+                   if (m_params.island_mask_enabled) {
+                       float island_mask = glm::smoothstep(0.1f, 0.25f, island_mask_noise[index_2d_read]);
+                       terrain_h = glm::mix(m_params.height_offset, terrain_h, island_mask);
+                   }
                }
 
                // B. Calculate base terrain density

@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -1033,6 +1034,239 @@ TEST(WorldGenLayerSnapshotTest, MountainsSurfaceSpanWantedSetStaysUnderChunkBudg
     // beyond the near field.
     EXPECT_LT(wanted_radius_20, 8192u);
     EXPECT_LT(wanted_player_core, 4096u);
+}
+
+// ---------------------------------------------------------------------------
+// T-I3-10 terrain shaping gates
+// ---------------------------------------------------------------------------
+
+namespace {
+
+constexpr std::uint64_t kFnvOffsetBasis = 14695981039346656037ull;
+constexpr std::uint64_t kFnvPrime = 1099511628211ull;
+
+std::uint64_t Fnv1a64Bytes(std::uint64_t hash, const void* data, std::size_t size) {
+    const auto* bytes = static_cast<const unsigned char*>(data);
+    for (std::size_t i = 0; i < size; ++i) {
+        hash ^= static_cast<std::uint64_t>(bytes[i]);
+        hash *= kFnvPrime;
+    }
+    return hash;
+}
+
+// FNV-1a-64 over the raw float bytes of GetTerrainHeightAt sampled on a fixed
+// 64x64 grid (step 16.25 m so fractional world coordinates are exercised).
+std::uint64_t HashTerrainHeightGrid(const SHIELD_WorldSystem& world) {
+    std::uint64_t hash = kFnvOffsetBasis;
+    for (int j = 0; j < 64; ++j) {
+        for (int i = 0; i < 64; ++i) {
+            const float x = -512.0f + static_cast<float>(i) * 16.25f;
+            const float z = -512.0f + static_cast<float>(j) * 16.25f;
+            const float height = world.GetTerrainHeightAt(x, z);
+            hash = Fnv1a64Bytes(hash, &height, sizeof(height));
+        }
+    }
+    return hash;
+}
+
+struct LegacyPresetHeightFixture {
+    const char* name;
+    TerrainGenParams params;
+    std::uint64_t expected_hash;
+};
+
+// Frozen copies of the five shipped presets' terrain params as of the commit
+// BEFORE T-I3-10 (shaping defaults off). These fixtures deliberately do NOT
+// load the preset JSON files: shipped presets may later opt into shaping
+// (T-I3-11), but legacy params must keep producing bit-identical heights
+// forever. The expected hashes were captured by running this exact grid hash
+// against the pre-shaping GetTerrainHeightAt implementation.
+std::vector<LegacyPresetHeightFixture> LegacyPresetHeightFixtures() {
+    std::vector<LegacyPresetHeightFixture> fixtures;
+
+    TerrainGenParams default_params;
+    default_params.base_frequency = 0.01f;
+    default_params.base_amplitude = 12.0f;
+    default_params.octaves = 4;
+    default_params.persistence = 0.5f;
+    default_params.lacunarity = 2.0f;
+    default_params.height_offset = 20.0f;
+    default_params.caves_enabled = true;
+    default_params.cave_frequency = 0.02f;
+    fixtures.push_back({"default", default_params, 0xe585505dedeba6c9ull});
+
+    TerrainGenParams flat_params;
+    flat_params.base_frequency = 0.02f;
+    flat_params.base_amplitude = 10.0f;
+    flat_params.octaves = 2;
+    flat_params.persistence = 0.3f;
+    flat_params.lacunarity = 2.0f;
+    flat_params.height_offset = 5.0f;
+    flat_params.caves_enabled = false;
+    flat_params.cave_frequency = 0.0f;
+    fixtures.push_back({"flat_lands", flat_params, 0x5f0afd93c41d6b51ull});
+
+    TerrainGenParams mountains_params;
+    mountains_params.base_frequency = 0.008f;
+    mountains_params.base_amplitude = 120.0f;
+    mountains_params.octaves = 6;
+    mountains_params.persistence = 0.65f;
+    mountains_params.lacunarity = 2.2f;
+    mountains_params.height_offset = 20.0f;
+    mountains_params.caves_enabled = true;
+    mountains_params.cave_frequency = 0.03f;
+    fixtures.push_back({"mountains", mountains_params, 0xc7d4205d48faabb7ull});
+
+    TerrainGenParams archipelago_params;
+    archipelago_params.base_frequency = 0.009f;
+    archipelago_params.base_amplitude = 110.0f;
+    archipelago_params.octaves = 6;
+    archipelago_params.persistence = 0.55f;
+    archipelago_params.lacunarity = 2.2f;
+    archipelago_params.height_offset = -20.0f;
+    archipelago_params.island_mask_enabled = true;
+    archipelago_params.island_mask_frequency = 0.004f;
+    archipelago_params.caves_enabled = true;
+    archipelago_params.cave_frequency = 0.03f;
+    fixtures.push_back({"archipelago", archipelago_params, 0xc075cf55c182393cull});
+
+    TerrainGenParams forest_params;
+    forest_params.base_frequency = 0.008f;
+    forest_params.base_amplitude = 50.0f;
+    forest_params.octaves = 6;
+    forest_params.persistence = 0.5f;
+    forest_params.lacunarity = 2.1f;
+    forest_params.height_offset = 32.0f;
+    forest_params.caves_enabled = true;
+    forest_params.cave_frequency = 0.025f;
+    fixtures.push_back({"temperate_forest", forest_params, 0xb9b8b2f79e44b42dull});
+
+    return fixtures;
+}
+
+} // namespace
+
+// T-I3-10 zero-hash-drift proof: legacy params (shaping_enabled == false, the
+// default) must produce heights bit-identical to the pre-shaping
+// implementation. Hashes captured pre-change; any drift here is a
+// review-blocking defect, never a re-bless.
+TEST(WorldGenLayerSnapshotTest, LegacyPresetHeightsAreBitIdenticalToPreShaping) {
+    for (const LegacyPresetHeightFixture& fixture : LegacyPresetHeightFixtures()) {
+        SHIELD_WorldSystem world(nullptr, nullptr, fixture.params, kSeed);
+        const std::uint64_t hash = HashTerrainHeightGrid(world);
+        std::cout << "[ LEGACYHEIGHT ] " << fixture.name << " seed=" << kSeed
+                  << " hash=0x" << std::hex << std::setfill('0') << std::setw(16) << hash
+                  << std::dec << std::setfill(' ') << std::endl;
+        EXPECT_EQ(hash, fixture.expected_hash)
+            << fixture.name << ": legacy (shaping-off) terrain heights drifted from the "
+            << "pre-shaping implementation - this is a hard determinism break";
+    }
+}
+
+namespace {
+
+// Synthetic shaping params for the T-I3-10 parity/determinism gates (engine
+// tests must not depend on game preset data choices).
+TerrainGenParams ShapingTestParams() {
+    TerrainGenParams params;
+    params.base_frequency = 0.008f;
+    params.base_amplitude = 60.0f;
+    params.octaves = 5;
+    params.persistence = 0.55f;
+    params.lacunarity = 2.1f;
+    params.height_offset = 12.0f;
+    params.caves_enabled = true;
+    params.cave_frequency = 0.03f;
+    params.shaping_enabled = true;
+    params.continentalness_frequency = 0.0008f;
+    params.erosion_frequency = 0.0015f;
+    params.peaks_frequency = 0.004f;
+    params.peaks_amplitude = 90.0f;
+    params.domain_warp_amplitude = 30.0f;
+    params.domain_warp_frequency = 0.006f;
+    params.continental_spline = {{-1.0f, -40.0f}, {-0.3f, -12.0f}, {-0.1f, 2.0f}, {0.3f, 14.0f}, {1.0f, 42.0f}};
+    params.erosion_spline = {{-1.0f, 1.0f}, {0.0f, 0.55f}, {0.6f, 0.18f}, {1.0f, 0.05f}};
+    params.peaks_spline = {{-1.0f, 0.0f}, {0.4f, 0.05f}, {0.8f, 0.45f}, {1.0f, 1.0f}};
+    return params;
+}
+
+} // namespace
+
+// T-I3-10 batch-vs-scalar parity: with shaping enabled, every generation path
+// computes heights through the one shared scalar helper (GenSingle* APIs in
+// both the scalar and batch paths), so the batch heightmap bytes must be
+// EXACTLY equal (==, no epsilon) to GetTerrainHeightAt at the same world
+// coordinates - for the full-SDF path, the step>1 heightmap-only path, and
+// SampleWorldGenLayers. FastNoise SIMD grid batches (GenUniformGrid2D) are
+// deliberately NOT used for shaped heights precisely so no SIMD-lane epsilon
+// is needed here; the legacy (shaping-off) grid batches stay covered by the
+// existing max_sdf_sample_error < 1e-4 snapshot gate.
+TEST(WorldGenLayerSnapshotTest, ShapedHeightBatchPathsExactlyMatchScalarPath) {
+    const TerrainGenParams params = ShapingTestParams();
+    SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
+
+    const std::array<IVec3, 4> chunk_coords{{
+        IVec3(0, 0, 0), IVec3(-3, 1, 2), IVec3(7, -1, -5), IVec3(-11, 0, 9),
+    }};
+    for (const IVec3& coords : chunk_coords) {
+        const IVec3 base_pos = coords * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+
+        Chunk full_chunk(coords);
+        world.GenerateChunkData(full_chunk, 1);
+        Chunk coarse_chunk(coords);
+        world.GenerateChunkData(coarse_chunk, 4);
+        ASSERT_TRUE(coarse_chunk.sdf_data.empty());
+
+        for (int z = 0; z <= CHUNK_SIZE_Z; ++z) {
+            for (int x = 0; x <= CHUNK_SIZE_X; ++x) {
+                const float world_x = static_cast<float>(base_pos.x + x);
+                const float world_z = static_cast<float>(base_pos.z + z);
+                const float scalar_height = world.GetTerrainHeightAt(world_x, world_z);
+                const std::size_t index = static_cast<std::size_t>(x)
+                    + static_cast<std::size_t>(z) * (CHUNK_SIZE_X + 1);
+
+                EXPECT_EQ(full_chunk.heightmap_data[index], scalar_height)
+                    << "full-path heightmap diverged from scalar at (" << world_x << ", " << world_z << ")";
+                EXPECT_EQ(coarse_chunk.heightmap_data[index], scalar_height)
+                    << "step>1 heightmap diverged from scalar at (" << world_x << ", " << world_z << ")";
+
+                const WorldGenLayerSample sample =
+                    world.SampleWorldGenLayers(Vec3(world_x, 0.0f, world_z));
+                EXPECT_EQ(sample.final_height, scalar_height)
+                    << "SampleWorldGenLayers diverged from scalar at (" << world_x << ", " << world_z << ")";
+            }
+        }
+    }
+}
+
+// T-I3-10: generation with shaping ON stays deterministic for a fixed seed
+// (two independent systems produce byte-identical SDF + heightmap), and a
+// different seed produces different terrain (the control channels actually
+// consume the seed offsets).
+TEST(WorldGenLayerSnapshotTest, ShapedGenerationIsDeterministicWithSameSeed) {
+    const TerrainGenParams params = ShapingTestParams();
+    SHIELD_WorldSystem world_a(nullptr, nullptr, params, kSeed);
+    SHIELD_WorldSystem world_b(nullptr, nullptr, params, kSeed);
+    SHIELD_WorldSystem world_c(nullptr, nullptr, params, kSeed + 1);
+
+    Chunk chunk_a(kChunkCoords);
+    Chunk chunk_b(kChunkCoords);
+    Chunk chunk_c(kChunkCoords);
+    world_a.GenerateChunkData(chunk_a);
+    world_b.GenerateChunkData(chunk_b);
+    world_c.GenerateChunkData(chunk_c);
+
+    EXPECT_EQ(chunk_a.sdf_data, chunk_b.sdf_data);
+    EXPECT_EQ(chunk_a.heightmap_data, chunk_b.heightmap_data);
+    EXPECT_NE(chunk_a.heightmap_data, chunk_c.heightmap_data);
+
+    // The shaped-height snapshot keeps the sample-path consistency gate green
+    // with shaping ON (cave noise is still grid-batched, hence the 1e-4
+    // tolerance rather than exact equality for full SDF samples).
+    const LayerSnapshot shaped_snapshot = GenerateSnapshot("06_shaping", params, 1, false);
+    EXPECT_GT(shaped_snapshot.sdf.solid_samples, 0u);
+    EXPECT_GT(shaped_snapshot.sdf.air_samples, 0u);
+    EXPECT_LT(shaped_snapshot.sampled_layers.max_sdf_sample_error, 1.0e-4f);
 }
 
 TEST(WorldGenLayerSnapshotTest, AuthoredPresetAtlasHasSaneSpawnAndCleanTopology) {
