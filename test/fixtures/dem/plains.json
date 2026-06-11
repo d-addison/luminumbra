@@ -1,0 +1,131 @@
+{
+  "schema": "luminumbra.dem_reference.v1",
+  "class": "plains",
+  "landform": "rolling plains",
+  "source": {
+    "dataset": "AWS Terrain Tiles (Terrarium PNG), open data, public domain",
+    "dataset_url": "https://registry.opendata.aws/terrain-tiles/",
+    "tile_url": "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/11/459/786.png",
+    "tile_zxy": [
+      11,
+      459,
+      786
+    ],
+    "center_latlon": [
+      38.5,
+      -99.3
+    ],
+    "region": "Great Plains, west-central Kansas, USA",
+    "license": "Public domain / CC0 (Terrarium tiles; underlying SRTM/USGS/ASTER public-domain sources)",
+    "decode": "elevation_m = R*256 + G + B/256 - 32768"
+  },
+  "grid": {
+    "samples": [
+      256,
+      256
+    ],
+    "meters_per_pixel": 59.82
+  },
+  "elevation_m": {
+    "min": 589.6,
+    "median": 619.1,
+    "max": 656.1,
+    "relief": 66.5
+  },
+  "slope": {
+    "spacing_m": 59.82,
+    "p10": 0.271,
+    "p50": 1.136,
+    "p90": 2.768,
+    "p95": 3.287,
+    "mean": 1.358,
+    "frac_lt5": 0.9968,
+    "frac_lt15": 1.0,
+    "frac_lt25": 1.0,
+    "frac_gt35": 0.0,
+    "frac_gt60": 0.0,
+    "bins_5deg": [
+      0.9968,
+      0.0032,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "hypsometry": {
+    "integral": 0.44235,
+    "curve": [
+      [
+        0.0,
+        1.0
+      ],
+      [
+        0.1,
+        0.9735
+      ],
+      [
+        0.2,
+        0.87921
+      ],
+      [
+        0.3,
+        0.71758
+      ],
+      [
+        0.4,
+        0.56432
+      ],
+      [
+        0.5,
+        0.41165
+      ],
+      [
+        0.6,
+        0.24306
+      ],
+      [
+        0.7,
+        0.09683
+      ],
+      [
+        0.8,
+        0.03246
+      ],
+      [
+        0.9,
+        0.00565
+      ],
+      [
+        1.0,
+        2e-05
+      ]
+    ]
+  },
+  "spectral": {
+    "measured_beta": 3.184,
+    "fit_band_k": [
+      2,
+      64
+    ],
+    "samples": 63,
+    "reference_beta_band": [
+      1.8,
+      2.2
+    ],
+    "reference_beta_note": "self-affine topography beta = 2H+1 ~ 1.8-2.2 (published); the measured_beta above is biased high by terrarium-tile upsampling. "
+  },
+  "scale_note": "Slope magnitudes are at ~60 m/px DEM resolution; the engine TerrainRealism gate samples at 4 m. Gate on scale-robust descriptors (hypsometric integral, spectral beta, slope distribution SHAPE) rather than absolute slope degrees."
+}
