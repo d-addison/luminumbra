@@ -609,8 +609,13 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
     // boundaries (F1 vs F2 sample density, live ring vs F1).
     const float drop = step;
     const auto add_skirt_edge = [&](u32 top_a, u32 top_b, const Vec3& outward) {
-        const VoxelVertex& a = vertices[top_a];
-        const VoxelVertex& b = vertices[top_b];
+        // T-I4-DR-live-needle-streak: copy the two source vertices BY VALUE.
+        // The four push_back calls below can reallocate `vertices`, and the
+        // reads of b.position on the 2nd/3rd push (and a.position on the 4th)
+        // would otherwise dereference dangling references (UB: garbage skirt
+        // vertices, or a crash when the stale storage is reclaimed).
+        const VoxelVertex a = vertices[top_a];
+        const VoxelVertex b = vertices[top_b];
         const u32 base = static_cast<u32>(vertices.size());
         vertices.push_back({a.position, outward, a.material_id});
         vertices.push_back({b.position, outward, b.material_id});
@@ -970,8 +975,15 @@ TerrainTransitionSkirtStats AddBoundaryTransitionSkirts(
         if (a >= chunk.mesh_vertices.size() || b >= chunk.mesh_vertices.size()) {
             return;
         }
-        const VoxelVertex& top_a = chunk.mesh_vertices[a];
-        const VoxelVertex& top_b = chunk.mesh_vertices[b];
+        // T-I4-DR-live-needle-streak: copy the two top vertices BY VALUE before
+        // any push_back below. They previously aliased chunk.mesh_vertices via
+        // reference; the first push_back can reallocate the vector, leaving
+        // later reads dereferencing dangling references (UB: garbage skirt
+        // vertices, or a crash when the stale storage is reclaimed - observed
+        // as an AV in offline skirt scans). Holding values makes the reads
+        // reallocation-proof.
+        const VoxelVertex top_a = chunk.mesh_vertices[a];
+        const VoxelVertex top_b = chunk.mesh_vertices[b];
         if (!EdgeOnTransitionFace(top_a, top_b, face)) {
             return;
         }
