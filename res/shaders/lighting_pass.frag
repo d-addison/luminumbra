@@ -61,6 +61,23 @@ uniform int u_pointLightCount;
 
 const float PI = 3.14159265359;
 
+// --- T-I4-DR-albedo-calibration: exposure / irradiance transfer ---
+// The diffuse BRDF below divides albedo by PI (kD * albedo / PI), the
+// energy-conserving Lambert term. For that to render an albedo faithfully, the
+// incoming SUN radiance must be the surface IRRADIANCE, i.e. ~PI for a unit-
+// color overhead sun: outgoing = albedo/PI * irradiance -> albedo when
+// irradiance = PI. The pipeline authors u_sun.color as a unit-ish sun COLOR
+// (noon ~ (1.0, 0.95, 0.85)); feeding it directly left every lit surface dark
+// by a factor of ~PI (the unmatched 1/PI division ate the luminance). An 18%
+// gray surface landed at on-screen sRGB ~0.32 and sand/grass read as
+// rust-brown / near-black at noon. Multiplying the sun radiance by PI converts
+// the authored sun color into physical irradiance at the root, so a white
+// surface tends to white (filmic-rolled) and an 18% gray lands near perceptual
+// mid (~0.58). Sun ONLY: point lights already carry explicit intensity, and
+// ambient is an irradiance term already. See the exposure audit in the
+// T-I4-DR-albedo-calibration commit for the full before/after transfer table.
+const float SUN_IRRADIANCE_SCALE = PI;
+
 // Optimized PBR functions with precalculated values
 float DistributionGGX(float NdotH, float a2) {
     float NdotH2 = NdotH * NdotH;
@@ -186,7 +203,11 @@ void main() {
     vec3 Lo = vec3(0.0);
     vec3 L_sun = normalize(u_sun.direction);
     float shadow = CalculateShadow(FragPos, Normal, L_sun, abs(viewPos.z));
-    Lo += CalculateLightContribution(L_sun, V, Normal, F0, Albedo, Metallic, a2, k, u_sun.color) * shadow;
+    // Convert the authored sun COLOR into surface IRRADIANCE (x PI) so the
+    // diffuse 1/PI division round-trips albedo faithfully (exposure-audit root
+    // fix; see SUN_IRRADIANCE_SCALE above).
+    vec3 sunRadiance = u_sun.color * SUN_IRRADIANCE_SCALE;
+    Lo += CalculateLightContribution(L_sun, V, Normal, F0, Albedo, Metallic, a2, k, sunRadiance) * shadow;
 
     // Point Lights with early rejection
     for (int i = 0; i < u_pointLightCount; ++i) {

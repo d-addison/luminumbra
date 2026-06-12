@@ -347,6 +347,64 @@ function Test-MaterialVisual {
         throw "Calibration-plate albedo band failure: grass should read greener than blue"
     }
 
+    # --- T-I4-DR-albedo-calibration: ABSOLUTE on-screen sRGB bands ---
+    # The relative checks above pass even when the whole frame is crushed dark
+    # (the owner-reported defect: sand rust-brown, grass near-black). These bands
+    # assert each material lands in its REAL on-screen color window at fixed noon,
+    # derived from published surface-reflectance data carried through the
+    # exposure-corrected chain (data/common/albedo_calibration_reference.json).
+    # The C++ gate (RenderSmokeTest.CalibrationPlateCloseRangeMaterialGate) emits
+    # onscreen_srgb per material + exposure_anchors; this validator re-asserts
+    # them so a regressed exposure chain fails the frontier validation too.
+    $srgbBands = @{
+        "Stone"     = @(0.45, 0.95, 0.45, 0.95, 0.40, 0.92)
+        "Soil"      = @(0.40, 0.85, 0.30, 0.78, 0.24, 0.72)
+        "Grass"     = @(0.20, 0.65, 0.24, 0.70, 0.10, 0.55)
+        "Sand"      = @(0.62, 0.98, 0.52, 0.95, 0.26, 0.78)
+        "Deepslate" = @(0.30, 0.80, 0.30, 0.80, 0.26, 0.74)
+    }
+    foreach ($name in $srgbBands.Keys) {
+        $entry = @($analysis.materials | Where-Object { $_.name -eq $name })
+        if ($entry.Count -lt 1) { continue }
+        $m = $entry[0]
+        if ($null -eq $m.onscreen_srgb) {
+            throw "Calibration plate '$name' is missing onscreen_srgb (rebuild the render smoke ctest for the T-I4-DR-albedo-calibration absolute bands)"
+        }
+        $b = $srgbBands[$name]
+        $os = @($m.onscreen_srgb)
+        for ($ch = 0; $ch -lt 3; $ch++) {
+            $v = [double]$os[$ch]; $lo = [double]$b[$ch * 2]; $hi = [double]$b[$ch * 2 + 1]
+            if ($v -lt $lo -or $v -gt $hi) {
+                $chan = @("R", "G", "B")[$ch]
+                throw "Calibration-plate ABSOLUTE band failure: $name on-screen $chan $v outside [$lo, $hi] (exposure chain regressed?)"
+            }
+        }
+    }
+
+    # --- T-I4-DR-albedo-calibration: white/gray exposure anchors (PERMANENT) ---
+    # A correctly-exposed chain renders white near full (filmic-rolled) and 18%
+    # gray near perceptual mid at noon. The pre-fix chain crushed white to ~0.74
+    # and mid-gray to ~0.32 (sun COLOR fed where IRRADIANCE was needed).
+    if ($null -eq $analysis.exposure_anchors) {
+        throw "Calibration analysis is missing exposure_anchors (rebuild the render smoke ctest for the T-I4-DR-albedo-calibration chain assertion)"
+    }
+    $wp = @($analysis.exposure_anchors.white_plate_srgb)
+    $gp = @($analysis.exposure_anchors.gray18_plate_srgb)
+    $whiteLuma = ([double]$wp[0] + [double]$wp[1] + [double]$wp[2]) / 3.0
+    $grayLuma = ([double]$gp[0] + [double]$gp[1] + [double]$gp[2]) / 3.0
+    if ($whiteLuma -le 0.80) {
+        throw "Exposure anchor failure: white plate too dark at noon ($whiteLuma) - chain crushes luminance"
+    }
+    if ($grayLuma -le 0.45) {
+        throw "Exposure anchor failure: 18% gray plate too dark at noon ($grayLuma) - chain crushes luminance"
+    }
+    if ($grayLuma -ge 0.80) {
+        throw "Exposure anchor failure: 18% gray plate too bright at noon ($grayLuma) - chain over-exposed"
+    }
+    if ($whiteLuma -le $grayLuma) {
+        throw "Exposure anchor failure: white ($whiteLuma) must read brighter than 18% gray ($grayLuma)"
+    }
+
     if (-not $analysis.passed) {
         throw "Material visual (calibration-plate) analysis reported failure"
     }
