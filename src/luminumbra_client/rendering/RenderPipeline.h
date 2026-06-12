@@ -441,6 +441,13 @@ private:
     DirectionalLight m_sun;
     glm::vec3 m_moonDirection;
     glm::vec3 m_skyAmbientColor;
+    // T-I4-DR-tod-sky-balance: continuous day->twilight->night factor derived
+    // from the sun's elevation, smoothly 1 (sun high) -> 0 (sun below horizon).
+    // The sky dome reads this so its brightness/tint tracks time-of-day with
+    // the SAME elevation signal that drives sun.color/ambient, instead of the
+    // clamped m_sun.intensity (which saturates to 1 while the sun is still low,
+    // leaving the dusk dome stuck at full midday and the night dome bright).
+    float m_skyDayFactor = 1.0f;
     WeatherType m_weather_type = WeatherType::None;
     float m_weather_intensity = 0.0f;
     std::unique_ptr<FarLodSystem> m_farlod;

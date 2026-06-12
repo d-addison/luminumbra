@@ -2862,6 +2862,23 @@ function Test-TimeOfDaySweep {
     if ([double]$analysis.dusk_warm_shift.r_b_ratio_increase -lt [double]$analysis.thresholds.min_dusk_warm_shift) {
         throw "Dusk r/b warm shift $($analysis.dusk_warm_shift.r_b_ratio_increase) is below threshold $($analysis.thresholds.min_dusk_warm_shift)"
     }
+    # T-I4-DR-tod-sky-balance: the sky DOME must track time-of-day, not just the
+    # terrain lighting. (1) Night dome must be dark; the pre-fix dome held a
+    # bright twilight-blue night sky (~182) over near-black ground.
+    if (-not $analysis.night_sky_dark.passed) {
+        throw "Night sky-dome is too bright: sky mean luminance $($analysis.night_sky_dark.night_sky_mean_luminance) exceeds ceiling $($analysis.night_sky_dark.max_night_sky_luminance) (T-I4-DR-tod-sky-balance: dome must darken at night)"
+    }
+    if ([double]$analysis.night_sky_dark.night_sky_mean_luminance -gt [double]$analysis.thresholds.max_night_sky_luminance) {
+        throw "Night sky mean luminance $($analysis.night_sky_dark.night_sky_mean_luminance) exceeds threshold $($analysis.thresholds.max_night_sky_luminance)"
+    }
+    # (2) Dusk dome must warm on the sun side; the pre-fix dusk dome was full
+    # midday blue (sun-side sky R<B, no shift vs noon).
+    if (-not $analysis.dusk_sky_warm_shift.passed) {
+        throw "Dusk sky-dome warm-shift failed: warm-half sky r/b increase $($analysis.dusk_sky_warm_shift.sky_warm_half_r_b_ratio_increase) (T-I4-DR-tod-sky-balance: dusk dome must show a warm sun-side tint)"
+    }
+    if ([double]$analysis.dusk_sky_warm_shift.sky_warm_half_r_b_ratio_increase -lt [double]$analysis.thresholds.min_dusk_sky_warm_shift) {
+        throw "Dusk sky warm-half r/b shift $($analysis.dusk_sky_warm_shift.sky_warm_half_r_b_ratio_increase) is below threshold $($analysis.thresholds.min_dusk_sky_warm_shift)"
+    }
     if (@("checked_surface_emissive", "not_applicable_no_surface_emissives") -notcontains $analysis.emissive_check.status) {
         throw "Time-of-day emissive check reported unexpected status '$($analysis.emissive_check.status)'"
     }

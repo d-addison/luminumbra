@@ -435,6 +435,16 @@ struct TimeOfDayPixelStats {
     double frame_mean_b = 0.0;
     double frame_r_b_ratio = 0.0;
     double terrain_r_b_ratio = 0.0;
+    // T-I4-DR-tod-sky-balance: sky-band color balance. sky_r_b_ratio is the
+    // whole sky band; sky_warm_half_r_b_ratio is the warmer of the left/right
+    // sky halves (the sun sits on one side at dusk, so the dusk sunset glow
+    // raises R>B on its side without the analyzer needing the sun azimuth).
+    // These let the gate require a real twilight warm-shift IN THE SKY, not
+    // just in the terrain lighting, so a midday-looking dusk dome fails.
+    double sky_mean_r = 0.0;
+    double sky_mean_b = 0.0;
+    double sky_r_b_ratio = 0.0;
+    double sky_warm_half_r_b_ratio = 0.0;
     double max_luminance = 0.0;
     double max_luminance_y_from_top_norm = 0.0;  // 0 = top of frame
     double sky_max_luminance = 0.0;              // max within the sky band

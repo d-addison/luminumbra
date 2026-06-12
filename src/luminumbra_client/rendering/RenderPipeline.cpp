@@ -2637,6 +2637,17 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     float sun_up_factor = glm::dot(m_sun.direction, glm::vec3(0.0f, -1.0f, 0.0f));
     m_sun.intensity = glm::smoothstep(-0.1f, 0.15f, sun_up_factor);
 
+    // T-I4-DR-tod-sky-balance: the sky dome's day/twilight/night blend is keyed
+    // off the sun's RAW elevation, not the lighting intensity above.
+    // m_sun.intensity saturates to 1 once the sun clears ~0.15 elevation, so a
+    // sun only ~11 degrees up (dusk) still drove a full-midday dome and the
+    // sub-horizon night dome stayed bright twilight-blue. This wider band keeps
+    // the zenith at full day while the sun is high but falls off across the
+    // low-sun arc, so dusk is a genuine partial-day value and night collapses to
+    // ~0. Noon (sun_up ~0.95) stays pinned at 1.0, so the noon dome and the
+    // albedo/ambient calibrations that depend on it are untouched.
+    m_skyDayFactor = glm::smoothstep(-0.05f, 0.55f, sun_up_factor);
+
     glm::vec3 noonColor(1.0f, 0.95f, 0.85f);
     glm::vec3 horizonColor(1.0f, 0.6f, 0.2f);
     m_sun.color = glm::mix(horizonColor, noonColor, glm::smoothstep(0.0f, 0.25f, sun_up_factor)) * m_sun.intensity;

@@ -1321,6 +1321,15 @@ TimeOfDayPixelStats AnalyzeTimeOfDayPixels(const std::vector<unsigned char>& pix
     std::uint64_t frame_pixels = 0;
     double sky_luminance_accum = 0.0;
     std::uint64_t sky_pixels = 0;
+    // T-I4-DR-tod-sky-balance: sky-band color accumulators, split left/right
+    // (mid_x) so the warmer sky half (the sun's side at dusk) is measurable.
+    double sky_r_accum = 0.0;
+    double sky_b_accum = 0.0;
+    double sky_left_r_accum = 0.0;
+    double sky_left_b_accum = 0.0;
+    double sky_right_r_accum = 0.0;
+    double sky_right_b_accum = 0.0;
+    const int mid_x = width / 2;
     double terrain_luminance_accum = 0.0;
     double terrain_r_accum = 0.0;
     double terrain_b_accum = 0.0;
@@ -1348,6 +1357,17 @@ TimeOfDayPixelStats AnalyzeTimeOfDayPixels(const std::vector<unsigned char>& pix
                 sky_luminance_accum += luminance;
                 ++sky_pixels;
                 stats.sky_max_luminance = std::max(stats.sky_max_luminance, luminance);
+                // T-I4-DR-tod-sky-balance: sky-band color balance (whole band
+                // and per-half) for the dusk warm-shift requirement.
+                sky_r_accum += static_cast<double>(r);
+                sky_b_accum += static_cast<double>(b);
+                if (x < mid_x) {
+                    sky_left_r_accum += static_cast<double>(r);
+                    sky_left_b_accum += static_cast<double>(b);
+                } else {
+                    sky_right_r_accum += static_cast<double>(r);
+                    sky_right_b_accum += static_cast<double>(b);
+                }
             }
             if (y_from_top >= terrain_min_y_from_top) {
                 terrain_luminance_accum += luminance;
@@ -1373,6 +1393,15 @@ TimeOfDayPixelStats AnalyzeTimeOfDayPixels(const std::vector<unsigned char>& pix
     }
     if (sky_pixels > 0) {
         stats.sky_mean_luminance = sky_luminance_accum / static_cast<double>(sky_pixels);
+        // T-I4-DR-tod-sky-balance: whole-band and warmer-half sky R/B ratios.
+        stats.sky_mean_r = sky_r_accum / static_cast<double>(sky_pixels);
+        stats.sky_mean_b = sky_b_accum / static_cast<double>(sky_pixels);
+        if (sky_b_accum > 0.0) {
+            stats.sky_r_b_ratio = sky_r_accum / sky_b_accum;
+        }
+        const double left_ratio = (sky_left_b_accum > 0.0) ? sky_left_r_accum / sky_left_b_accum : 0.0;
+        const double right_ratio = (sky_right_b_accum > 0.0) ? sky_right_r_accum / sky_right_b_accum : 0.0;
+        stats.sky_warm_half_r_b_ratio = std::max(left_ratio, right_ratio);
     }
     if (terrain_pixels > 0) {
         stats.terrain_mean_luminance = terrain_luminance_accum / static_cast<double>(terrain_pixels);
@@ -1508,6 +1537,10 @@ nlohmann::json TimeOfDayPixelStatsToJson(const TimeOfDayPixelStats& stats) {
         {"frame_mean_b", stats.frame_mean_b},
         {"frame_r_b_ratio", stats.frame_r_b_ratio},
         {"terrain_r_b_ratio", stats.terrain_r_b_ratio},
+        {"sky_mean_r", stats.sky_mean_r},
+        {"sky_mean_b", stats.sky_mean_b},
+        {"sky_r_b_ratio", stats.sky_r_b_ratio},
+        {"sky_warm_half_r_b_ratio", stats.sky_warm_half_r_b_ratio},
         {"max_luminance", stats.max_luminance},
         {"max_luminance_y_from_top_norm", stats.max_luminance_y_from_top_norm},
         {"sky_max_luminance", stats.sky_max_luminance},
@@ -1533,6 +1566,18 @@ void WriteTimeOfDaySweepAnalysis(
     constexpr double kMinDuskOverNightGap = 10.0;
     constexpr double kMinDuskWarmShift = 0.01;      // terrain r/b ratio increase vs noon (measured +0.081)
     constexpr std::uint64_t kMinEmissiveGlowPixels = 200;
+    // T-I4-DR-tod-sky-balance: the dome must actually track time-of-day.
+    // (1) Night ceiling: the pre-fix dome held a bright twilight-blue night sky
+    //     (sky mean ~182) over near-black ground; a real night dome reads dark.
+    //     The fixed dome measures sky mean ~20-30 at night, so a 60 ceiling has
+    //     wide margin against tonemap/star/moon noise yet fails the old dome.
+    // (2) Dusk sky warm-shift: the pre-fix dusk dome was full-midday blue
+    //     (sun-side sky R/B < 1, no shift vs noon). A real twilight warms the
+    //     sun-side sky (R>B). Require the warmer sky half's R/B to rise vs noon;
+    //     +0.05 sits well above per-frame noise while the warm fix clears it by
+    //     a wide margin.
+    constexpr double kMaxNightSkyLuminance = 60.0;
+    constexpr double kMinDuskSkyWarmShift = 0.05;   // dusk warm-half sky r/b increase vs noon
 
     const TimeOfDayPhaseCapture* noon = nullptr;
     const TimeOfDayPhaseCapture* dusk = nullptr;
@@ -1556,6 +1601,15 @@ void WriteTimeOfDaySweepAnalysis(
         ? dusk->stats.terrain_r_b_ratio - noon->stats.terrain_r_b_ratio
         : 0.0;
     const bool warm_shift_passed = all_phases_captured && warm_shift >= kMinDuskWarmShift;
+
+    // T-I4-DR-tod-sky-balance: the dome (not just the terrain) must track
+    // time-of-day. Night sky band must be dark, and the dusk sky's warmer half
+    // (the sun side) must warm vs noon.
+    const bool night_sky_dark_passed = night && night_luminance <= kMaxNightSkyLuminance;
+    const double dusk_sky_warm_shift = (noon && dusk)
+        ? dusk->stats.sky_warm_half_r_b_ratio - noon->stats.sky_warm_half_r_b_ratio
+        : 0.0;
+    const bool dusk_sky_warm_passed = all_phases_captured && dusk_sky_warm_shift >= kMinDuskSkyWarmShift;
 
     // Emissive night check: when a registry-emissive material is reachable
     // in a surface capture, the dedicated night-emissive capture must show a
@@ -1588,6 +1642,8 @@ void WriteTimeOfDaySweepAnalysis(
         render_pass.skybox_draws > 0 &&
         luminance_ordering_passed &&
         warm_shift_passed &&
+        night_sky_dark_passed &&     // T-I4-DR-tod-sky-balance
+        dusk_sky_warm_passed &&      // T-I4-DR-tod-sky-balance
         emissive_passed &&
         gl_debug.errors == 0;
 
@@ -1626,6 +1682,17 @@ void WriteTimeOfDaySweepAnalysis(
             {"dusk_terrain_r_b_ratio", dusk ? dusk->stats.terrain_r_b_ratio : 0.0},
             {"r_b_ratio_increase", warm_shift}
         }},
+        {"night_sky_dark", {
+            {"passed", night_sky_dark_passed},
+            {"night_sky_mean_luminance", night_luminance},
+            {"max_night_sky_luminance", kMaxNightSkyLuminance}
+        }},
+        {"dusk_sky_warm_shift", {
+            {"passed", dusk_sky_warm_passed},
+            {"noon_sky_warm_half_r_b_ratio", noon ? noon->stats.sky_warm_half_r_b_ratio : 0.0},
+            {"dusk_sky_warm_half_r_b_ratio", dusk ? dusk->stats.sky_warm_half_r_b_ratio : 0.0},
+            {"sky_warm_half_r_b_ratio_increase", dusk_sky_warm_shift}
+        }},
         {"emissive_check", {
             {"status", emissive_status},
             {"passed", emissive_passed},
@@ -1648,6 +1715,8 @@ void WriteTimeOfDaySweepAnalysis(
             {"min_noon_over_dusk_gap", kMinNoonOverDuskGap},
             {"min_dusk_over_night_gap", kMinDuskOverNightGap},
             {"min_dusk_warm_shift", kMinDuskWarmShift},
+            {"max_night_sky_luminance", kMaxNightSkyLuminance},
+            {"min_dusk_sky_warm_shift", kMinDuskSkyWarmShift},
             {"min_emissive_glow_pixels", kMinEmissiveGlowPixels},
             {"emissive_glow_min_luminance", kEmissiveGlowMinLuminance},
             {"sky_band_height_fraction", kSkyRoiHeightFraction}
