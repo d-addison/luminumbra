@@ -937,6 +937,184 @@ std::array<float, 3> DecodeOctahedral(float ex, float ey) {
     return {x / len, y / len, z / len};
 }
 
+// --- T-I4-DR-albedo-calibration: lit-chain on-screen capture helper ---
+//
+// Runs the REAL lighting_pass.frag against a synthetic flat G-buffer fragment
+// (given LINEAR albedo + roughness, +Z normal, non-metallic) at the FIXED NOON
+// lighting used by the calibration scenario, and returns the mean on-screen
+// sRGB the chain produces. This is the absolute-color half of the calibration
+// gate: it audits albedo -> lit -> ACES tonemap -> gamma end to end, so a chain
+// that globally crushes luminance (the pre-fix defect: sun COLOR fed where
+// IRRADIANCE was needed) is caught even though raw-albedo ordering still passes.
+//
+// Noon parameters mirror RenderPipeline::update_time_of_day at sun_up_factor->1:
+//   sun.color = (1.0, 0.95, 0.85), sky ambient = (0.1, 0.15, 0.2), ao = 1.
+// The sun is placed overhead-ish toward the +Z plate (NdotL ~ 0.85) so the
+// representative diffuse term dominates without a specular singularity.
+struct LitNoonResult { float r = 0, g = 0, b = 0; };
+LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
+                                       const std::array<float, 3>& albedo_linear,
+                                       float roughness,
+                                       const fs::path& dump_ppm = {}) {
+    // 64x64 so the optional swatch dump is a reviewable PNG; the mean is the
+    // same regardless of resolution (flat fragment).
+    constexpr int kRes = 64;
+    constexpr float kEmissiveLutScale = 8.0f;
+
+    GLuint fbo = 0, color_tex = 0;
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glGenTextures(1, &color_tex);
+    glBindTexture(GL_TEXTURE_2D, color_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, kRes, kRes, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color_tex, 0);
+    glDrawBuffer(GL_COLOR_ATTACHMENT0);
+
+    auto make_tex = [&](GLenum ifmt, GLenum fmt, GLenum type, const void* data) {
+        GLuint t = 0; glGenTextures(1, &t); glBindTexture(GL_TEXTURE_2D, t);
+        glTexImage2D(GL_TEXTURE_2D, 0, ifmt, 1, 1, 0, fmt, type, data);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        return t;
+    };
+    // Fragment in front of the camera; +Z normal; material id 1 (Stone-like, no
+    // emission so the lit color is pure albedo response).
+    const float pos_px[3] = {0.0f, 0.0f, -3.0f};
+    GLuint g_pos = make_tex(GL_RGB16F, GL_RGB, GL_FLOAT, pos_px);
+    const unsigned char norm_px[4] = {128, 128, 0, 1};
+    GLuint g_norm = make_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, norm_px);
+    // gAlbedoRoughness is a LINEAR RGBA8 buffer (the g-buffer stores already-
+    // linearized albedo). Pack the requested linear albedo + roughness directly.
+    auto to_u8 = [](float v) {
+        int q = static_cast<int>(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f));
+        return static_cast<unsigned char>(std::clamp(q, 0, 255));
+    };
+    const unsigned char albedo_px[4] = {to_u8(albedo_linear[0]), to_u8(albedo_linear[1]),
+                                        to_u8(albedo_linear[2]), to_u8(roughness)};
+    GLuint g_albedo = make_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, albedo_px);
+    const float metallic_px[2] = {0.0f, 1.0f};
+    GLuint g_metallic = make_tex(GL_RG16F, GL_RG, GL_FLOAT, metallic_px);
+    const float ssao_px[1] = {1.0f};
+    GLuint ssao_tex = make_tex(GL_R16F, GL_RED, GL_FLOAT, ssao_px);
+    const unsigned char caustics_px[4] = {0, 0, 0, 255};
+    GLuint caustics_tex = make_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, caustics_px);
+
+    auto make_array_tex = [&](GLenum ifmt, GLenum fmt, GLenum type, const void* data) {
+        GLuint t = 0; glGenTextures(1, &t); glBindTexture(GL_TEXTURE_2D_ARRAY, t);
+        glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, ifmt, 1, 1, 1, 0, fmt, type, data);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        return t;
+    };
+    const float shadow_px[1] = {1.0f};
+    GLuint shadow_arr = make_array_tex(GL_DEPTH_COMPONENT24, GL_DEPTH_COMPONENT, GL_FLOAT, shadow_px);
+    const unsigned char terrain_px[4] = {0, 0, 0, 255};
+    GLuint terrain_arr = make_array_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, terrain_px);
+
+    const float quad[] = {
+        -1, -1, 0, 0, 0,   1, -1, 0, 1, 0,   1, 1, 0, 1, 1,
+        -1, -1, 0, 0, 0,   1,  1, 0, 1, 1,  -1, 1, 0, 0, 1,
+    };
+    GLuint vao = 0, vbo = 0;
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &vbo);
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(0));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
+
+    glViewport(0, 0, kRes, kRes);
+    glDisable(GL_DEPTH_TEST);
+    glUseProgram(lighting_program);
+
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, g_pos);      glUniform1i(glGetUniformLocation(lighting_program, "gPosition"), 0);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, g_norm);     glUniform1i(glGetUniformLocation(lighting_program, "gNormalMaterial"), 1);
+    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, g_albedo);   glUniform1i(glGetUniformLocation(lighting_program, "gAlbedoRoughness"), 2);
+    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, g_metallic); glUniform1i(glGetUniformLocation(lighting_program, "gMetallicAO"), 3);
+    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, ssao_tex);   glUniform1i(glGetUniformLocation(lighting_program, "u_ssao"), 4);
+    glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D_ARRAY, shadow_arr); glUniform1i(glGetUniformLocation(lighting_program, "u_shadowCascades"), 5);
+    glActiveTexture(GL_TEXTURE6); glBindTexture(GL_TEXTURE_2D_ARRAY, terrain_arr); glUniform1i(glGetUniformLocation(lighting_program, "u_terrainTextures"), 6);
+    glActiveTexture(GL_TEXTURE7); glBindTexture(GL_TEXTURE_2D, caustics_tex); glUniform1i(glGetUniformLocation(lighting_program, "u_causticsTexture"), 7);
+
+    SetMat4Identity(lighting_program, "u_inverseView");
+    for (int i = 0; i < 4; ++i) SetMat4Identity(lighting_program, ("u_lightSpaceMatrices[" + std::to_string(i) + "]").c_str());
+    glUniform4f(glGetUniformLocation(lighting_program, "u_cascadeSplits"), 1e9f, 1e9f, 1e9f, 1e9f);
+    glUniform1f(glGetUniformLocation(lighting_program, "u_time"), 0.0f);
+    glUniform1f(glGetUniformLocation(lighting_program, "u_sea_level"), -1000.0f);
+    glUniform3f(glGetUniformLocation(lighting_program, "u_terrainOrigin"), 0, 0, 0);
+    glUniform3f(glGetUniformLocation(lighting_program, "u_viewPos"), 0, 0, 0);
+    // FIXED NOON lighting (mirrors RenderPipeline::update_time_of_day peak).
+    glUniform3f(glGetUniformLocation(lighting_program, "u_skyAmbientColor"), 0.1f, 0.15f, 0.2f);
+    // Sun overhead-ish toward the +Z plate: L=(0.2,0.0,0.98) -> NdotL ~ 0.98.
+    glUniform3f(glGetUniformLocation(lighting_program, "u_sun.direction"), 0.2f, 0.0f, 0.98f);
+    glUniform3f(glGetUniformLocation(lighting_program, "u_sun.color"), 1.0f, 0.95f, 0.85f);
+    glUniform1i(glGetUniformLocation(lighting_program, "u_pointLightCount"), 0);
+    glUniform1f(glGetUniformLocation(lighting_program, "u_emissiveLutScale"), kEmissiveLutScale);
+
+    // Empty material LUT (material 1 has no emission row -> glow path skipped).
+    std::vector<float> lut(static_cast<size_t>(256) * 3 * 4, 0.0f);
+    GLuint lut_tex = 0;
+    glGenTextures(1, &lut_tex);
+    glActiveTexture(GL_TEXTURE8);
+    glBindTexture(GL_TEXTURE_2D, lut_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 256, 3, 0, GL_RGBA, GL_FLOAT, lut.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glUniform1i(glGetUniformLocation(lighting_program, "u_materialLUT"), 8);
+
+    const GLfloat clear0[4] = {0, 0, 0, 1};
+    glClearBufferfv(GL_COLOR, 0, clear0);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+
+    std::vector<unsigned char> px(static_cast<size_t>(kRes) * kRes * 4);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    glReadPixels(0, 0, kRes, kRes, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    double sr = 0, sg = 0, sb = 0;
+    const size_t n = static_cast<size_t>(kRes) * kRes;
+    for (size_t p = 0; p < n; ++p) { sr += px[p*4+0]; sg += px[p*4+1]; sb += px[p*4+2]; }
+    LitNoonResult res;
+    res.r = static_cast<float>(sr / n / 255.0);
+    res.g = static_cast<float>(sg / n / 255.0);
+    res.b = static_cast<float>(sb / n / 255.0);
+
+    // Optional lit-swatch dump (the actual ON-SCREEN color through the chain).
+    if (!dump_ppm.empty()) {
+        fs::create_directories(dump_ppm.parent_path());
+        std::ofstream ppm(dump_ppm, std::ios::binary);
+        ppm << "P6\n" << kRes << " " << kRes << "\n255\n";
+        for (int y = kRes - 1; y >= 0; --y) {
+            for (int x = 0; x < kRes; ++x) {
+                const size_t i = (static_cast<size_t>(y) * kRes + x) * 4;
+                ppm.put(static_cast<char>(px[i + 0]));
+                ppm.put(static_cast<char>(px[i + 1]));
+                ppm.put(static_cast<char>(px[i + 2]));
+            }
+        }
+    }
+
+    glDeleteTextures(1, &lut_tex);
+    glDeleteTextures(1, &terrain_arr);
+    glDeleteTextures(1, &shadow_arr);
+    glDeleteTextures(1, &caustics_tex);
+    glDeleteTextures(1, &ssao_tex);
+    glDeleteTextures(1, &g_metallic);
+    glDeleteTextures(1, &g_albedo);
+    glDeleteTextures(1, &g_norm);
+    glDeleteTextures(1, &g_pos);
+    glDeleteTextures(1, &color_tex);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteFramebuffers(1, &fbo);
+    return res;
+}
+
 } // namespace
 
 TEST(RenderSmokeTest, AllShaderSourcesCompile) {
@@ -1538,6 +1716,13 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     GLuint program = LinkProgram(spec);
     ASSERT_NE(program, 0u);
 
+    // T-I4-DR-albedo-calibration: the lighting pass program is used to capture
+    // the ABSOLUTE on-screen sRGB each material produces through the full chain
+    // (albedo -> lit -> ACES tonemap -> gamma) at the fixed noon lighting.
+    const ShaderProgramSpec lighting_spec{"lighting_pass", "lighting_pass.vert", "lighting_pass.frag"};
+    GLuint lighting_program = LinkProgram(lighting_spec);
+    ASSERT_NE(lighting_program, 0u);
+
     // --- Terrain texture + normal arrays from the committed 256 plates ---
     const fs::path tex_root = SourceRoot() / "data/textures/terrain";
     const std::vector<fs::path> albedo_plates = {
@@ -1673,6 +1858,9 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
         float authored_roughness = 0;             // T-I4-10 ladder value
         float gbuffer_roughness = 0;              // read back from gAlbedoRoughness.a
         float specular_highlight = 0;             // analytical GGX peak (lower roughness -> brighter)
+        // T-I4-DR-albedo-calibration: ABSOLUTE on-screen sRGB through the real
+        // lighting_pass.frag at fixed noon (the calibration scenario's lighting).
+        float onscreen_r = 0, onscreen_g = 0, onscreen_b = 0;
     };
     std::vector<PlateResult> results;
 
@@ -1803,6 +1991,28 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
         glDeleteVertexArrays(1, &vao);
     }
 
+    // --- T-I4-DR-albedo-calibration: ABSOLUTE on-screen sRGB capture ---
+    // Second pass: run the REAL lighting_pass.frag on each plate's measured
+    // (linear) G-buffer albedo + authored roughness at the FIXED NOON lighting,
+    // and record the on-screen sRGB. This audits the full albedo -> lit -> ACES
+    // -> gamma chain. The helper rebinds GL state, so it runs after the G-buffer
+    // loop. Also capture the white and 18%-gray reference plates: those are a
+    // permanent assertion that the chain neither crushes nor blows luminance
+    // (mid-gray must land near perceptual mid; white must roll up high).
+    const fs::path lit_dir = RenderHealthArtifactRoot() / "calibration-plates";
+    for (auto& r : results) {
+        const LitNoonResult lit = LitChainNoonOnscreenSrgb(
+            lighting_program, {r.albedo_r, r.albedo_g, r.albedo_b}, r.gbuffer_roughness,
+            lit_dir / ("lit-noon-" + r.name + ".ppm"));
+        r.onscreen_r = lit.r;
+        r.onscreen_g = lit.g;
+        r.onscreen_b = lit.b;
+    }
+    const LitNoonResult white_plate = LitChainNoonOnscreenSrgb(
+        lighting_program, {1.0f, 1.0f, 1.0f}, 0.5f, lit_dir / "lit-noon-WhiteRef.ppm");
+    const LitNoonResult gray18_plate = LitChainNoonOnscreenSrgb(
+        lighting_program, {0.18f, 0.18f, 0.18f}, 0.5f, lit_dir / "lit-noon-Gray18Ref.ppm");
+
     // --- Gate assertions ---
     // Flat-surface bound: a perfectly flat plate (constant normal) has zero
     // spatial shading variation. Normal maps must perturb the normal enough that
@@ -1839,6 +2049,56 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
         EXPECT_GT(sand_luma, grass_luma) << "sand should read brighter than grass";
         EXPECT_GT(grass.albedo_g, grass.albedo_b) << "grass should read greener than blue";
         if (!(sand_luma > grass_luma && grass.albedo_g > grass.albedo_b)) gate_passed = false;
+    }
+
+    // --- T-I4-DR-albedo-calibration: ABSOLUTE on-screen sRGB bands ---
+    // The crux of this task. The relative checks above pass even when the whole
+    // frame is crushed dark (the owner-reported defect: sand rust-brown, grass
+    // near-black). These bands assert each material lands in its REAL color
+    // window on screen at fixed noon, derived from published surface-reflectance
+    // data carried through the (now exposure-corrected) chain. Bands are from
+    // data/common/albedo_calibration_reference.json and widened for normal/
+    // roughness spread + RGBA8 quantization. If the chain ever crushes or blows
+    // luminance, these fail where the relative checks would not.
+    struct SrgbBand { const char* name; float rlo, rhi, glo, ghi, blo, bhi; };
+    const std::array<SrgbBand, 5> bands = {{
+        // name        r:[lo,hi]      g:[lo,hi]      b:[lo,hi]
+        {"Stone",     0.45f, 0.95f, 0.45f, 0.95f, 0.40f, 0.92f},
+        {"Soil",      0.40f, 0.85f, 0.30f, 0.78f, 0.24f, 0.72f},
+        {"Grass",     0.20f, 0.65f, 0.24f, 0.70f, 0.10f, 0.55f},
+        {"Sand",      0.62f, 0.98f, 0.52f, 0.95f, 0.26f, 0.78f},
+        {"Deepslate", 0.30f, 0.80f, 0.30f, 0.80f, 0.26f, 0.74f},
+    }};
+    for (const auto& band : bands) {
+        if (!by_name.count(band.name)) continue;
+        const auto& m = by_name[band.name];
+        const bool in_r = m.onscreen_r >= band.rlo && m.onscreen_r <= band.rhi;
+        const bool in_g = m.onscreen_g >= band.glo && m.onscreen_g <= band.ghi;
+        const bool in_b = m.onscreen_b >= band.blo && m.onscreen_b <= band.bhi;
+        EXPECT_TRUE(in_r) << band.name << " on-screen R " << m.onscreen_r
+                          << " outside band [" << band.rlo << ", " << band.rhi << "]";
+        EXPECT_TRUE(in_g) << band.name << " on-screen G " << m.onscreen_g
+                          << " outside band [" << band.glo << ", " << band.ghi << "]";
+        EXPECT_TRUE(in_b) << band.name << " on-screen B " << m.onscreen_b
+                          << " outside band [" << band.blo << ", " << band.bhi << "]";
+        if (!(in_r && in_g && in_b)) gate_passed = false;
+    }
+
+    // --- T-I4-DR-albedo-calibration: white/gray chain assertion (PERMANENT) ---
+    // The exposure-audit anchors. A correctly-exposed chain renders a white
+    // surface near (but below, due to filmic rolloff) full white at noon and an
+    // 18% gray near perceptual mid. The pre-fix chain (sun COLOR fed where
+    // IRRADIANCE was needed) crushed white to ~0.74 and mid-gray to ~0.32.
+    const float white_luma = (white_plate.r + white_plate.g + white_plate.b) / 3.0f;
+    const float gray_luma  = (gray18_plate.r + gray18_plate.g + gray18_plate.b) / 3.0f;
+    EXPECT_GT(white_luma, 0.80f) << "white plate too dark at noon (chain crushes luminance): " << white_luma;
+    EXPECT_LT(white_luma, 1.001f) << "white plate impossibly bright: " << white_luma;
+    EXPECT_GT(gray_luma, 0.45f) << "18% gray plate too dark at noon (chain crushes luminance): " << gray_luma;
+    EXPECT_LT(gray_luma, 0.80f) << "18% gray plate too bright at noon (chain over-exposed): " << gray_luma;
+    EXPECT_GT(white_luma, gray_luma) << "white must read brighter than 18% gray";
+    if (!(white_luma > 0.80f && white_luma <= 1.001f &&
+          gray_luma > 0.45f && gray_luma < 0.80f && white_luma > gray_luma)) {
+        gate_passed = false;
     }
 
     // --- T-I4-10 specular-response check: roughness ladder ---
@@ -1885,10 +2145,20 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
             << ", \"authored_roughness\": " << r.authored_roughness
             << ", \"gbuffer_roughness\": " << r.gbuffer_roughness
             << ", \"specular_highlight\": " << r.specular_highlight
+            << ", \"onscreen_srgb\": [" << r.onscreen_r << ", " << r.onscreen_g << ", " << r.onscreen_b << "]"
             << ", \"textured\": " << (r.albedo_textured ? "true" : "false") << "}";
         out << (i + 1 < results.size() ? ",\n" : "\n");
     }
-    out << "  ]\n";
+    out << "  ],\n";
+    // T-I4-DR-albedo-calibration: exposure-chain anchors (white + 18% gray
+    // through the real lighting_pass at fixed noon). A permanent assertion that
+    // the chain neither crushes nor blows luminance.
+    out << "  \"exposure_anchors\": {\n";
+    out << "    \"lighting\": \"fixed_noon\",\n";
+    out << "    \"sun_irradiance_scale\": " << 3.14159265f << ",\n";
+    out << "    \"white_plate_srgb\": [" << white_plate.r << ", " << white_plate.g << ", " << white_plate.b << "],\n";
+    out << "    \"gray18_plate_srgb\": [" << gray18_plate.r << ", " << gray18_plate.g << ", " << gray18_plate.b << "]\n";
+    out << "  }\n";
     out << "}\n";
 
     EXPECT_TRUE(gate_passed);
@@ -1903,6 +2173,7 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     glDeleteTextures(1, &gpos);
     glDeleteFramebuffers(1, &fbo);
     glDeleteProgram(program);
+    glDeleteProgram(lighting_program);
 }
 
 // T-I4-9 emissive calibration gate.
