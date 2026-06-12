@@ -2059,10 +2059,33 @@ void RenderPipeline::init_material_lut() {
     row0(5) = glm::vec4(0.02f, 0.95f, 1.0f, 0.0f); // Deepslate
     row0(6) = glm::vec4(0.1f, 0.05f, 1.0f, 1.0f);  // Luminous Crystal (magical in alpha)
     row0(7) = glm::vec4(0.0f, 0.1f, 1.0f, 0.0f);   // Water
+    // T-I4-DR-far-water-exposure: far-water sheet (id 200,
+    // FarLodSystem::kFarWaterMaterialId). Without an explicit row this id
+    // inherited the unknown-material defaults below (metallic 0.1, roughness
+    // 0.85), so an up-facing sheet at noon picked up a broad white specular lobe
+    // (F0 = mix(0.04, albedo, 0.1)) that, on top of the already-clipping diffuse,
+    // washed the sheet toward warm-white. The deep-water albedo fix in
+    // g_buffer.frag relies on a FULLY matte surface: metallic 0 (no metal F0
+    // toward albedo), roughness 1.0, AO 1.0. Any glossier setting (0.10 and
+    // 0.55 were both tried) turns the sheet into a sun-colored mirror at
+    // grazing incidence - the stations that matter view the sea near-grazing,
+    // Fresnel rises toward 1 there, and the white sun specular swamps the dark
+    // blue diffuse. The sheet is a flat SKY-REFLECTION-TINT approximation by
+    // design (see the g_buffer.frag case-200 comment), so it carries its look
+    // entirely in the albedo. Set BEFORE the data-driven roughness override so
+    // the override's "unknown -> 0.85" branch does not stomp the explicit
+    // roughness (id 200 is render-only and never appears in materials.json).
+    row0(200) = glm::vec4(0.0f, 1.0f, 1.0f, 0.0f); // Far-water sheet (matte sky-tint water)
     // Override the roughness channel from the data-driven column. Materials that
     // do not declare roughness keep the 0.85 default (matching the authored
     // values above for the common terrain ids).
     for (int id = 0; id < MATERIAL_COUNT; ++id) {
+        if (id == 200) {
+            // T-I4-DR-far-water-exposure: explicit far-water row authored above;
+            // it is not a materials.json material, so skip the data-driven /
+            // unknown-default roughness override that would force it to 0.85.
+            continue;
+        }
         if (m_material_texture_lut.roughness_set[static_cast<size_t>(id)]) {
             row0(id).g = m_material_texture_lut.roughness[static_cast<size_t>(id)];
         } else if (id != 0) {

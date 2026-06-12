@@ -91,12 +91,20 @@ void BuildFarLodWaterSheet(const Luminumbra::World::FarLodTile& tile,
             out.vertices.push_back({Vec3(x1, waterline, z0), up, FarLodSystem::kFarWaterMaterialId});
             out.vertices.push_back({Vec3(x1, waterline, z1), up, FarLodSystem::kFarWaterMaterialId});
             out.vertices.push_back({Vec3(x0, waterline, z1), up, FarLodSystem::kFarWaterMaterialId});
+            // T-I4-DR-far-water-exposure: wind the quads COUNTER-clockwise as
+            // seen from ABOVE (+Y front face). The original (0,1,2)/(0,2,3)
+            // order produced -Y face normals, so with GL_CULL_FACE/GL_BACK in
+            // the G-buffer pass EVERY sheet triangle was backface-culled - the
+            // draws were submitted (water_sheet_draws ~17, ~1M indices) but
+            // rasterized ZERO pixels, leaving the far sea as skybox haze
+            // showing through the id-7-discarded far terrain.
+            // (v2-v0)x(v1-v0) = +Y for (0,2,1); same for (0,3,2).
             out.indices.push_back(base + 0u);
+            out.indices.push_back(base + 2u);
             out.indices.push_back(base + 1u);
-            out.indices.push_back(base + 2u);
             out.indices.push_back(base + 0u);
-            out.indices.push_back(base + 2u);
             out.indices.push_back(base + 3u);
+            out.indices.push_back(base + 2u);
         }
     }
 }
@@ -533,6 +541,12 @@ void FarLodSystem::draw_gbuffer(
     // deep water in the G-buffer (no live water.frag reflections far out).
     for (const auto& [key, region] : m_residents) {
         (void)key;
+        // T-I4-DR-far-water-exposure note: drawing the camera region's sheet
+        // here (to cover the live-disc sea where the live water sim does not
+        // reach) was tried and reverted - the pale sheet behind the live
+        // transparent water shifts water.frag's blend result enough to break
+        // the boundary-band blue-dominance classifier. Who renders the
+        // live-disc sea is the live-water-coverage task's design question.
         if (region.water_element_count == 0 || is_camera_region(region) ||
             aabb_outside_frustum(region.aabb_min, region.aabb_max, frustum_planes)) {
             continue;

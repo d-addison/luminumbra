@@ -192,6 +192,15 @@ void main() {
 
     vec3 V = normalize(u_viewPos - FragPos);
     vec3 F0 = mix(vec3(0.04), Albedo, Metallic);
+    // T-I4-DR-far-water-exposure: the far-water sheet (material 200) is a flat
+    // albedo-only sky-reflection-tint approximation. With ANY F0, grazing-angle
+    // Fresnel turns the flat sheet into a sun-colored mirror at the eye-level
+    // horizon views (the 1/NdotV specular term saturates white and swamps the
+    // blue diffuse). Zero F0 makes it pure diffuse: the authored albedo IS the
+    // look, matching the g_buffer case-200 design comment.
+    if (MaterialID == 200u) {
+        F0 = vec3(0.0);
+    }
     
     // Precalculate roughness-dependent values once
     float a = Roughness * Roughness;

@@ -121,12 +121,27 @@ void main()
         case 3u: albedo = vec3(0.2, 0.6, 0.15); break;         // Grass
         case 4u: albedo = vec3(0.9, 0.8, 0.5); break;          // Sand
         case 6u: albedo = vec3(0.85, 0.95, 1.0); break;        // Luminous Crystal
-        // T-I4-DR-far-water-sheet: flat far-water sheet. Deep-water albedo with
-        // a constant sky-reflection tint so the far field reads as water past
-        // the live water ring, WITHOUT the live water.frag reflection/caustic
-        // pipeline (too costly and unnecessary at kilometer range). Material id
-        // 200 (FarLodSystem::kFarWaterMaterialId).
-        case 200u: albedo = mix(vec3(0.04, 0.10, 0.18), vec3(0.42, 0.55, 0.68), 0.35); break;
+        // T-I4-DR-far-water-sheet: flat far-water sheet. Deep-water albedo so the
+        // far field reads as water past the live water ring, WITHOUT the live
+        // water.frag reflection/caustic pipeline (too costly and unnecessary at
+        // kilometer range). Material id 200 (FarLodSystem::kFarWaterMaterialId).
+        //
+        // T-I4-DR-far-water-exposure: the old albedo (~0.17,0.26,0.36 linear) was
+        // a mid-bright sky-tinted blue. The sheet faces straight up, so at the
+        // pinned noon sun it takes near-maximum sun irradiance; run through the
+        // calibrated exposure chain (SUN_IRRADIANCE_SCALE = PI in lighting_pass)
+        // every channel clipped past the ACES knee and the surface rendered flat
+        // near-white (measured on-screen sRGB ~233,231,226 - warm-white, B BELOW
+        // R) instead of blue. That produced a hard white/cyan seam against the
+        // correctly-cyan live water.frag forward pass. The deep-water reflectance
+        // of real open ocean is very low (broadband linear albedo well under
+        // 0.05, blue-weighted); authoring the sheet at a genuinely deep-water
+        // linear albedo keeps the lit surface below the ACES clip so it survives
+        // tonemapping as deep blue (B markedly above R) and the live/far seam
+        // becomes a soft tint step. Paired with the explicit matte water row in
+        // RenderPipeline::init_material_lut (metallic 0, low roughness) so no
+        // broad white specular lobe washes the channels back toward white.
+        case 200u: albedo = vec3(0.018, 0.065, 0.11); break;
     }
 
     // --- Triplanar terrain texturing (T-I4-7) ---
