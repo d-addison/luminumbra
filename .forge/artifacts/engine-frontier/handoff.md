@@ -1,5 +1,104 @@
 # Engine Frontier Handoff
 
+## Iteration 4 Status (updated 2026-06-12, mid-iteration)
+
+Branch `feat/polyglot-audit-roadmap`, tip `0af7ee3`. Landed from the
+iteration-4 dispatch (`.forge/tasks/engine-iteration-4/dispatch.json`):
+T-I4-0 through T-I4-10 (Wave A world identity + texture/material fidelity)
+and T-I4-15 (SHIELD-RT spike, memo at
+`.forge/artifacts/engine-iteration-4/shieldrt-spike-memo.md`). An ad-hoc
+defect-resolution wave also landed: T-I4-DR-{terrain-realism, shaping-perf,
+window-modes, albedo-calibration, lod-swap-atomicity, churn-perf,
+far-water-sheet, horizon-sliver-render, river-seam-sliver, split-lint,
+sliver-baseline-diff}.
+
+T-I4-DR-sliver-baseline-diff (0af7ee3) closed the session that stalled
+2026-06-11 night: the FarLodHorizon sliver gate is now far-attributable
+(paired far-OFF render per station, per-pixel 3x3 cancellation, 64px budget;
+raw 256px metric is telemetry-only). FarLodHorizon and PlayerView green on
+all three presets.
+
+T-I4-DR-live-needle-streak RESOLVED (2026-06-12): the "thin diagonal needle
+blade" in the mountains eye_yaw_180 captures (raw sliver 91px) is NOT a
+defect. A G-buffer probe (gPosition + material id at the blade pixels) pinned
+the fragments to world (-0.3, ~40, 3.7) - the LEGITIMATE grass crest of the
+hillock 8 m NW of spawn, whose surface (40 m) rises above the eye (38.5 m);
+seen tangentially its shadowed north face collapses to a 1-2 px line sweeping
+14 deg up across the sky (atan(2/8)). Every prior hypothesis (degenerate live
+mesh, heightfield spike, structure stamp, water, far-LOD tile/mesh/upload,
+GPU index corruption, skybox) was instrumented and exonerated - all
+generation, upload, and draw paths verified clean along the way. The raw
+sliver telemetry will keep reporting such crest silhouettes; the gated
+far-attributable metric correctly cancels them. Two real items fell out:
+(1) FIXED - dangling-reference UB in both skirt generators
+(MarchingCubes.cpp: vertex refs invalidated by push_back reallocation);
+(2) routed to the visual sweep - shadowed slopes render near-black
+(~luma 31 at noon) and shaped ridge crests are unnaturally straight; both are
+aesthetic, not geometric. Also noted: water chunk (4,1,-2) emits its
+sea-level sheet at local y=-16 (world y=0) - benign but worth a look.
+
+Remaining dispatch tasks: T-I4-11 (determinism contract) -> T-I4-12 (LREC1
+replay) -> T-I4-13 (lockstep transport) -> T-I4-14 (client over transport),
+T-I4-16/17/18 (perf O1-O3), T-I4-19 (closeout). Owner directive 2026-06-12:
+another visual/defect DR sweep runs BEFORE resuming dispatch tasks.
+
+T-I4-DR-far-water-exposure PARTIAL (2026-06-12): two real defects fixed.
+(1) The far-water sheet had NEVER rendered a single pixel: its quads were
+wound -Y and were 100% backface-culled (water_sheet_draws ~17 with ~1M
+indices submitted per frame, zero rasterized). Winding fixed; the sheet now
+renders. (2) Sheet shading: any specular setting turned the flat sheet into
+a sun-colored mirror at grazing eye-level views (Fresnel -> 1); it now
+shades pure-diffuse (explicit matte LUT row metallic 0 / roughness 1.0,
+F0 zeroed for material 200 in lighting_pass, calibrated blue albedo
+0.018/0.065/0.11 - the exposure chain clips albedo >= ~0.25 to white).
+TRIED AND REVERTED: drawing the camera region's sheet (to cover the
+live-disc sea) - the pale sheet behind live transparent water shifts the
+water.frag blend enough to break the boundary-band blue-dominance
+classifier (ratio 0.0071 -> 0).
+REVISED understanding of the sweep's "flat white ocean": it is mostly
+(a) the walkable archipelago's vast near-sea-level DRY sand flats rendering
+sun-bright (albedo-calibration / preset-shaping territory), and (b) the
+BARE SAND SEABED visible inside the live ring where the live water sim
+does not reach and the far sheet correctly does not draw (<176 m discard +
+live-disc ownership). REMAINING DESIGN WORK (next water session):
+live-ring sea coverage (who renders the 0-512 m sea surface beyond the
+water-sim radius); seabed terracing stripes where the gently-sloping
+seabed crosses the waterline (1/32 m height quantization banding);
+band-assertion premise review (the walkable archipelago has little deep
+water at the band distance - same preset-conflict class that deferred
+MaterialVisual); sand-flat brightness at noon. Gates after the landed
+fixes: FarLodHorizon green x3 (band ratio 0.0071 restored), PlayerView
+green x3.
+
+VISUAL SWEEP COMPLETED (2026-06-12): 58 station images reviewed across
+player-view/farlod-horizon/timeofday on all three presets. Defect backlog
+(file as T-I4-DR-* in this order):
+1. far-water-exposure (BLOCKER): the far-LOD water sheet (material 200,
+   deep-blue albedo) renders flat near-white (~234,236,236) - upward-facing
+   sheet takes max noon irradiance and clips through the exposure chain
+   (flat sandy ground also reads ~234); live water.frag water is correctly
+   cyan, leaving a hard live/far seam. Includes shoreline z-fighting of the
+   sheet against waterline-grazing island slopes (depth bias insufficient
+   there). Gate-first: extend far-water assertions with absolute on-screen
+   sRGB bands per the T-I4-DR-albedo-calibration pattern.
+2. tod-sky-balance (quality): night sky luma barely drops (252 noon -> 171
+   night) while ground goes 234 -> 6; dusk has no warm tint. Tighten the
+   TimeOfDaySweep per-phase sky bands so this fails, then fix.
+3. farlod-pinholes (quality, medium confidence): sky-color pinholes through
+   archipelago far slope meshes; re-triage after the water exposure fix.
+No structures were visible in any station capture (could not be judged);
+no chunk seams/cracks/floaters/degenerate slivers observed. Aesthetic
+carry-overs confirmed: near-black shadowed slopes at noon, razor-straight
+shaped ridge crests. Sweep evidence PNGs:
+%TEMP%\lumi-sweep\findings\01..07-*.png (sent to owner).
+
+Housekeeping: the four merged agent worktrees were removed and their
+branches deleted. The working tree carries uncommitted test-artifact churn
+(audio/persistence/gpu-sdf/render-health JSONs under
+build/debug/test-artifacts) left by interrupted-session test runs; per DR
+commit convention it was NOT committed with sliver-baseline-diff - review
+or re-bless at the iteration-4 closeout.
+
 ## Current Status (updated 2026-06-10, post-execution)
 
 The dispatch has been executed. Of the 34-task graph: T-EF-1 (material visual
