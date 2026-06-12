@@ -783,18 +783,33 @@ struct FarLodHorizonSkySliverStats {
     int tallest_sliver_col = 0;
 };
 
+// T-I4-DR-sliver-baseline-diff: cancel_baseline (optional) is the paired far-OFF
+// render of the identical camera/frame; far-ON terrain-intrusion pixels with a
+// far-OFF intrusion pixel in their 3x3 neighborhood are cancelled (pixel-aligned
+// live geometry), so the result is far-attributable only. nullptr = raw far-ON.
 FarLodHorizonSkySliverStats AnalyzeFarLodHorizonSkySliver(
     const std::vector<unsigned char>& pixels,
     int width,
     int height,
-    int horizon_row_from_top);
+    int horizon_row_from_top,
+    const std::vector<unsigned char>* cancel_baseline = nullptr);
 
 struct FarLodHorizonStationCapture {
     FarLodHorizonStation station;
     std::string file;
     PlayerViewPixelStats sky;          // full below-horizon machinery
     FarLodBoundaryBandStats boundary;  // live/far boundary band ROI
-    FarLodHorizonSkySliverStats sky_sliver; // above-horizon sliver detector
+    FarLodHorizonSkySliverStats sky_sliver; // above-horizon sliver detector (far ON)
+    // T-I4-DR-sliver-baseline-diff: far_attributable_sliver_px is the tallest
+    // sliver from the MASKED analysis - the far-ON frame re-analyzed with the
+    // paired far-OFF frame's intrusion pixels cancelled per-pixel within a 3x3
+    // neighborhood, so pixel-aligned LIVE peak/ridge silhouettes and diagonal
+    // live-geometry slivers drop out and only a genuine far-render streak (present
+    // only with far-LOD on) survives. This is the ratcheted gate's metric.
+    // far_off_sliver_px is the raw tallest sliver of the far-OFF measurement,
+    // retained as telemetry only; -1 = no far-OFF sample.
+    int far_off_sliver_px = -1;
+    int far_attributable_sliver_px = 0;
     // Far-LOD scheduler state at capture time.
     std::size_t regions_wanted = 0;
     std::size_t regions_resident = 0;
