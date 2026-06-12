@@ -1248,46 +1248,19 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
         }
     }
 
-    // Camera-discontinuity (teleport) catch-up: the activation pass runs only
-    // once every STREAMING_ACTIVATION_INTERVAL_FRAMES updates and meshing is
-    // dispatched asynchronously, so when the streaming position jumps more than
-    // a chunk or two in a single update (a teleport, or a per-frame jump forced
-    // by a slow renderer driving a wall-clock camera path) the near surface
-    // chunks at the destination are not even created - let alone meshed - before
-    // the next render, opening world-wide near-field holes. This is the
-    // LodGround coverage dip: near-field renderable surface chunks collapsed
-    // 49 -> 7 the frame the camera settled into fresh terrain, because the
-    // just-entered chunks had no live mesh yet. EnsureSurfaceReadyNear creates,
-    // generates, and meshes the near surface band synchronously, so those
-    // chunks present a live mesh on the very next frame instead of an empty one.
-    // It is a pure catch-up: it only (re)builds chunks that are not already
-    // Ready at the required LOD and produces byte-identical meshes to the async
-    // path (same PolygoniseTerrain + boundary skirts), so meshing determinism
-    // and the steady-state streaming policy are unchanged. Guarded on a jump
-    // larger than the async path can bridge (> 2 chunks) so normal frame-to-frame
-    // movement never triggers it - the streaming-walk perf fixture moves
-    // smoothly and stays within budget. The catch-up radius (4) covers the near
-    // render ring the LodGround coverage gate samples (radius 3). Requires a
-    // physics system (collision build path); the smoke/perf scenarios always
-    // supply one.
-    const IVec3 streaming_chunk = world_to_chunk_coords(camera_position);
-    constexpr int kTeleportCatchupJumpThreshold = 2;
-    constexpr int kTeleportCatchupSurfaceRadius = 4;
-    constexpr int kTeleportCatchupCollisionRadius = 1;
-    if (physics_system &&
-        m_last_streaming_chunk.x != std::numeric_limits<int>::min())
-    {
-        const IVec3 jump = streaming_chunk - m_last_streaming_chunk;
-        const int jump_chebyshev = std::max(std::abs(jump.x), std::abs(jump.z));
-        if (jump_chebyshev > kTeleportCatchupJumpThreshold) {
-            EnsureSurfaceReadyNear(
-                camera_position,
-                physics_system,
-                kTeleportCatchupSurfaceRadius,
-                kTeleportCatchupCollisionRadius);
-        }
-    }
-    m_last_streaming_chunk = streaming_chunk;
+    // Engine streaming stays fully asynchronous: on a camera discontinuity
+    // (teleport, or a per-frame jump forced by a slow renderer driving a
+    // wall-clock camera path) the throttled activation pass + async meshing
+    // catch the destination near field up over the next few updates. A previous
+    // engine-side SYNCHRONOUS catch-up here (ee4f378) pulled the near surface
+    // band ready via EnsureSurfaceReadyNear whenever the streaming chunk jumped
+    // > 2 chebyshev, but churn workloads (which jump every frame) turned that
+    // into a per-frame synchronous meshing spike (chunk_churn p99 8 -> 89 ms,
+    // an 11x PerfRegression). It is gone. Capture-driven scenarios that need a
+    // guaranteed-renderable near field in the exact frame they screenshot call
+    // EnsureSurfaceReadyNear explicitly BEFORE the capture (the API is public
+    // and already used by the server boot path and the LodGround/FarLod
+    // harness); gameplay teleports stream in normally.
 
     // Decouple the expensive chunk activation/deactivation logic from the frame rate.
     m_update_tick_counter++;
