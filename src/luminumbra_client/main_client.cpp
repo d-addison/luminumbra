@@ -83,12 +83,34 @@ std::vector<Luminumbra::IVec3> g_initial_chunks_to_load;
 int g_generation_dispatch_index = 0;
 Luminumbra::JobHandle g_world_gen_handle;
 
+// --- Window-mode runtime state (T-I4-DR-window-modes) ---
+// Tracks the active window arrangement plus the saved windowed geometry so the
+// Alt+Enter windowed<->borderless toggle (and F11 exclusive-fullscreen toggle)
+// can restore it. The framebuffer-size callback writes pending sizes here; the
+// main loop debounces them to a single RenderPipeline::on_resize per settle
+// window so dragging the window edge does not reallocate targets every event.
 struct WindowState {
-    bool isFullscreen = false;
+    Luminumbra::Client::ScenarioHarness::WindowMode mode =
+        Luminumbra::Client::ScenarioHarness::WindowMode::Borderless;
+    // Geometry to restore when leaving borderless/fullscreen back to windowed.
     int windowedX = 100, windowedY = 100;
     int windowedWidth = 1280, windowedHeight = 720;
+    // Capture-pin lock: when true the window is held at the pinned capture size
+    // and the runtime mode toggles are suppressed (scenario/capture runs).
+    bool capture_pinned = false;
+
+    // Debounced framebuffer resize (driven by the GLFW framebuffer-size cb).
+    bool resize_pending = false;
+    int pending_width = 0;
+    int pending_height = 0;
+    double pending_since_seconds = 0.0;
 };
 WindowState g_windowState;
+
+// Debounce window for framebuffer resizes (seconds). A drag emits a burst of
+// framebuffer-size events; we coalesce them into one realloc once the size has
+// been stable for this long.
+constexpr double kResizeDebounceSeconds = 0.12;
 
 namespace {
 
@@ -572,6 +594,14 @@ private:
             state["render_runtime"] = render_json;
             state["estimated_vram_bytes"] = runtime_render.estimated_vram_bytes;
             state["shader_health"] = render_json["shader_health"];
+            // Capture-pin protection (T-I4-DR-window-modes): record the active
+            // window mode + the live render-target size so the offline gate can
+            // hard-fail if a capture-mode run ever drifted off the pinned size.
+            state["capture_pin"] = Luminumbra::Client::ScenarioHarness::CapturePinMetadata(
+                m_config.window_mode,
+                static_cast<int>(render_pipeline->screen_width()),
+                static_cast<int>(render_pipeline->screen_height()));
+            state["resize_generation"] = render_pipeline->resize_generation();
             state["upload_queue"] = UploadStatsToJson(render_pipeline->get_last_mesh_upload_stats());
             state["render_pass"] = RenderPassStatsToJson(render_pipeline->get_last_render_pass_stats());
             // Far-LOD scheduler telemetry (T-I3-9, FarLodHorizon gate inputs).
@@ -1202,17 +1232,107 @@ private:
 
 } // namespace
 
-void ToggleFullscreen(GLFWwindow* window, WindowState& state) {
-    if (state.isFullscreen) {
-        glfwSetWindowMonitor(window, nullptr, state.windowedX, state.windowedY, state.windowedWidth, state.windowedHeight, 0);
-    } else {
-        glfwGetWindowPos(window, &state.windowedX, &state.windowedY);
-        glfwGetWindowSize(window, &state.windowedWidth, &state.windowedHeight);
-        GLFWmonitor* monitor = glfwGetPrimaryMonitor();
-        const GLFWvidmode* mode = glfwGetVideoMode(monitor);
-        glfwSetWindowMonitor(window, monitor, 0, 0, mode->width, mode->height, mode->refreshRate);
+namespace {
+
+using Luminumbra::Client::ScenarioHarness::WindowMode;
+
+// Monitor under the window's center (falls back to the primary monitor). Used
+// so borderless/fullscreen target the display the window currently lives on.
+GLFWmonitor* MonitorForWindow(GLFWwindow* window) {
+    int wx = 0, wy = 0, ww = 0, wh = 0;
+    glfwGetWindowPos(window, &wx, &wy);
+    glfwGetWindowSize(window, &ww, &wh);
+    const int cx = wx + ww / 2;
+    const int cy = wy + wh / 2;
+
+    int count = 0;
+    GLFWmonitor** monitors = glfwGetMonitors(&count);
+    for (int i = 0; i < count; ++i) {
+        int mx = 0, my = 0, mw = 0, mh = 0;
+        glfwGetMonitorWorkarea(monitors[i], &mx, &my, &mw, &mh);
+        if (cx >= mx && cx < mx + mw && cy >= my && cy < my + mh) {
+            return monitors[i];
+        }
     }
-    state.isFullscreen = !state.isFullscreen;
+    return glfwGetPrimaryMonitor();
+}
+
+// Saves the current windowed geometry so a later return to windowed restores it.
+void SaveWindowedGeometry(GLFWwindow* window, WindowState& state) {
+    glfwGetWindowPos(window, &state.windowedX, &state.windowedY);
+    glfwGetWindowSize(window, &state.windowedWidth, &state.windowedHeight);
+}
+
+// Applies a window mode to an existing window. capture_pinned runs (scenario
+// captures) are never reconfigured: they stay at the pinned size in a hidden /
+// stable window so every pixel-ROI gate sees exactly 1280x720.
+void ApplyWindowMode(GLFWwindow* window, WindowState& state, WindowMode mode) {
+    if (state.capture_pinned) {
+        state.mode = mode; // record intent, but do not touch the pinned window
+        return;
+    }
+    if (mode == state.mode) return;
+
+    // Leaving windowed: remember where it was so we can come back to it.
+    if (state.mode == WindowMode::Windowed) {
+        SaveWindowedGeometry(window, state);
+    }
+
+    GLFWmonitor* monitor = MonitorForWindow(window);
+    switch (mode) {
+        case WindowMode::Windowed: {
+            glfwSetWindowAttrib(window, GLFW_DECORATED, GLFW_TRUE);
+            glfwSetWindowAttrib(window, GLFW_RESIZABLE, GLFW_TRUE);
+            glfwSetWindowMonitor(window, nullptr, state.windowedX, state.windowedY,
+                                 state.windowedWidth, state.windowedHeight, 0);
+            break;
+        }
+        case WindowMode::Borderless: {
+            // Borderless window covering the monitor work-area (no exclusive
+            // video-mode switch, no decorations).
+            int mx = 0, my = 0, mw = 0, mh = 0;
+            glfwGetMonitorWorkarea(monitor, &mx, &my, &mw, &mh);
+            glfwSetWindowMonitor(window, nullptr, mx, my, mw, mh, 0);
+            glfwSetWindowAttrib(window, GLFW_DECORATED, GLFW_FALSE);
+            glfwSetWindowAttrib(window, GLFW_RESIZABLE, GLFW_FALSE);
+            break;
+        }
+        case WindowMode::Fullscreen: {
+            // Exclusive fullscreen at the monitor's native video mode.
+            const GLFWvidmode* vmode = glfwGetVideoMode(monitor);
+            glfwSetWindowMonitor(window, monitor, 0, 0, vmode->width, vmode->height, vmode->refreshRate);
+            break;
+        }
+        case WindowMode::Headless:
+            glfwHideWindow(window);
+            break;
+    }
+    state.mode = mode;
+    LUMINUMBRA_CORE_INFO("Window mode -> {}", Luminumbra::Client::ScenarioHarness::WindowModeName(mode));
+}
+
+} // namespace
+
+using Luminumbra::Client::ScenarioHarness::WindowMode;
+
+// Alt+Enter runtime toggle: windowed <-> borderless. Suppressed on
+// capture-pinned (scenario) runs.
+void ToggleWindowedBorderless(GLFWwindow* window, WindowState& state) {
+    if (state.capture_pinned) return;
+    const WindowMode next = (state.mode == WindowMode::Windowed)
+        ? WindowMode::Borderless
+        : WindowMode::Windowed;
+    ApplyWindowMode(window, state, next);
+}
+
+// F11 toggle: exclusive fullscreen <-> windowed (kept for back-compat with the
+// previous F11 binding).
+void ToggleFullscreen(GLFWwindow* window, WindowState& state) {
+    if (state.capture_pinned) return;
+    const WindowMode next = (state.mode == WindowMode::Fullscreen)
+        ? WindowMode::Windowed
+        : WindowMode::Fullscreen;
+    ApplyWindowMode(window, state, next);
 }
 
 int main(int argc, char* argv[]) {
@@ -1255,7 +1375,33 @@ int main(int argc, char* argv[]) {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-    if (runtime_boot_recorder.enabled() || scenario_config.hidden_window) {
+
+    // --- Window-mode resolution (T-I4-DR-window-modes) ---
+    // GATE PROTECTION: any scenario/capture run PINS the window to 1280x720 so
+    // every pixel-ROI gate sees the same framebuffer regardless of CLI flags.
+    // Outside scenarios, --window-mode / --resolution select the arrangement.
+    using Luminumbra::Client::ScenarioHarness::kCapturePinnedWidth;
+    using Luminumbra::Client::ScenarioHarness::kCapturePinnedHeight;
+    const bool capture_pinned = scenario_config.requires_pinned_capture();
+    g_windowState.capture_pinned = capture_pinned;
+    g_windowState.mode = scenario_config.window_mode;
+
+    int create_width = kCapturePinnedWidth;
+    int create_height = kCapturePinnedHeight;
+    if (!capture_pinned && scenario_config.window_mode == WindowMode::Windowed) {
+        create_width = scenario_config.windowed_width;
+        create_height = scenario_config.windowed_height;
+    }
+    g_windowState.windowedWidth = create_width;
+    g_windowState.windowedHeight = create_height;
+
+    // Headless (and runtime-boot metrics) keep a hidden window. Capture-pinned
+    // runs also create the window hidden/decorated at the pinned size; the mode
+    // application below is suppressed for them.
+    const bool hidden_window =
+        runtime_boot_recorder.enabled() || scenario_config.hidden_window ||
+        scenario_config.window_mode == WindowMode::Headless;
+    if (hidden_window) {
         glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
     }
     if (scenario_config.active()) {
@@ -1269,11 +1415,9 @@ int main(int argc, char* argv[]) {
         glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GL_TRUE);
     #endif
 
-    GLFWwindow* window = glfwCreateWindow(1280, 720, "Luminumbra", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(create_width, create_height, "Luminumbra", nullptr, nullptr);
     LUMINUMBRA_ASSERT(window, "Failed to create GLFW window!");
     glfwMakeContextCurrent(window);
-    // g_windowState.isFullscreen = false;
-    // ToggleFullscreen(window, g_windowState);
 
     // [[maybe_unused]]: LUMINUMBRA_ASSERT compiles out in release builds
     // (T-I3-20 release perf lane builds with -Werror).
@@ -1368,6 +1512,25 @@ int main(int argc, char* argv[]) {
     }
     glfwSetWindowUserPointer(window, &renderPipeline);
     glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
+
+    // Apply the requested interactive window mode now that the GL context and
+    // render pipeline exist: the framebuffer-size callback this triggers drives
+    // RenderPipeline::on_resize so all targets are reallocated to the real
+    // framebuffer size. Capture-pinned (scenario) runs are intentionally left at
+    // the pinned 1280x720 window (ApplyWindowMode is a no-op for them).
+    if (!capture_pinned && scenario_config.window_mode != WindowMode::Headless) {
+        ApplyWindowMode(window, g_windowState, scenario_config.window_mode);
+        // The framebuffer-size callback only fires on a real change; for the
+        // borderless/fullscreen path it does, but resync the pipeline directly
+        // in case GLFW coalesced the event so targets always match the window.
+        int fbw = 0, fbh = 0;
+        glfwGetFramebufferSize(window, &fbw, &fbh);
+        if (fbw > 0 && fbh > 0) {
+            renderPipeline.on_resize(static_cast<unsigned int>(fbw), static_cast<unsigned int>(fbh));
+            framebufferWidth = fbw;
+            framebufferHeight = fbh;
+        }
+    }
 
     g_loading_visualizer = std::make_unique<Luminumbra::Client::WorldLoadingVisualizer>();
     g_loading_visualizer->Startup(root_dir, framebufferWidth, framebufferHeight);
@@ -1657,6 +1820,16 @@ int main(int argc, char* argv[]) {
     bool creature_slice_before_written = false;
     bool creature_slice_analysis_written = false;
     CreatureSliceCapture creature_slice_before;
+    // window_mode_stress_smoke (T-I4-DR-window-modes): scripted resize cycle
+    // exercised once after readiness. Each step drives RenderPipeline::on_resize
+    // (windowed->borderless->resolutions->fullscreen->restore-pinned) and
+    // records the resize-generation delta + GL error count; the final pinned
+    // step is captured as a Smoke-equivalent screenshot.
+    std::vector<WindowModeStressStep> window_mode_stress_steps;
+    std::size_t window_mode_stress_step_index = 0;
+    bool window_mode_stress_complete = false;
+    bool window_mode_stress_analysis_written = false;
+    WindowModeStressCapture window_mode_stress_capture;
     const auto median_of = [](std::vector<double> samples) -> double {
         if (samples.empty()) {
             return 0.0;
@@ -1700,6 +1873,24 @@ int main(int argc, char* argv[]) {
         }
 
         glfwPollEvents();
+
+        // Debounced framebuffer resize (T-I4-DR-window-modes): coalesce a burst
+        // of drag events into one RenderPipeline::on_resize once the size has
+        // settled. RmlUi (Update/Render) and ImGui (GLFW backend NewFrame)
+        // re-query the framebuffer size every frame, so their viewports track
+        // the new size automatically once the GL targets are reallocated here.
+        if (g_windowState.resize_pending && !g_windowState.capture_pinned) {
+            const double now = glfwGetTime();
+            if (now - g_windowState.pending_since_seconds >= kResizeDebounceSeconds) {
+                renderPipeline.on_resize(
+                    static_cast<unsigned int>(g_windowState.pending_width),
+                    static_cast<unsigned int>(g_windowState.pending_height));
+                framebufferWidth = g_windowState.pending_width;
+                framebufferHeight = g_windowState.pending_height;
+                g_windowState.resize_pending = false;
+            }
+        }
+
         audioManager->Update();
 
         if (g_uiManager) {
@@ -2018,6 +2209,60 @@ int main(int argc, char* argv[]) {
                     if (scenario_config.active() && currentState == GameState::IN_GAME) {
                         ++scenario_frame_count;
                         const auto now = std::chrono::steady_clock::now();
+                        // window_mode_stress_smoke (T-I4-DR-window-modes): drive
+                        // one resize-chain step per frame after readiness. The
+                        // window itself stays pinned/hidden (capture protection),
+                        // but on_resize reallocates the non-pinned targets through
+                        // exactly the runtime resize path. We measure the resize
+                        // generation + GL errors AFTER this frame's render so the
+                        // PREVIOUS step's new targets have been drawn into once.
+                        if (scenario_config.window_mode_stress_smoke() && scenario_ready &&
+                            !window_mode_stress_complete) {
+                            if (window_mode_stress_steps.empty()) {
+                                window_mode_stress_steps = BuildWindowModeStressSequence();
+                            }
+                            // Finalize the step applied on the previous frame
+                            // (its targets were just rendered into this frame).
+                            if (window_mode_stress_step_index > 0) {
+                                WindowModeStressStep& done =
+                                    window_mode_stress_steps[window_mode_stress_step_index - 1];
+                                done.resize_generation_after = renderPipeline.resize_generation();
+                                done.gl_errors_after = CurrentGLDebugRuntimeStats().errors;
+                                done.targets_width_after = static_cast<int>(renderPipeline.screen_width());
+                                done.targets_height_after = static_cast<int>(renderPipeline.screen_height());
+                            }
+                            if (window_mode_stress_step_index < window_mode_stress_steps.size()) {
+                                WindowModeStressStep& step =
+                                    window_mode_stress_steps[window_mode_stress_step_index];
+                                step.resize_generation_before = renderPipeline.resize_generation();
+                                step.size_changed =
+                                    static_cast<int>(renderPipeline.screen_width()) != step.width ||
+                                    static_cast<int>(renderPipeline.screen_height()) != step.height;
+                                renderPipeline.on_resize(
+                                    static_cast<unsigned int>(step.width),
+                                    static_cast<unsigned int>(step.height));
+                                ++window_mode_stress_step_index;
+                            } else {
+                                // All steps applied + finalized: capture the
+                                // restored pinned-size frame (Smoke-equivalent).
+                                // Targets are 1280x720; render one clean frame
+                                // into the default framebuffer for the readback.
+                                window_mode_stress_capture.width =
+                                    static_cast<int>(renderPipeline.screen_width());
+                                window_mode_stress_capture.height =
+                                    static_cast<int>(renderPipeline.screen_height());
+                                window_mode_stress_capture.file = "window-mode-stress-final.ppm";
+                                ScreenshotPixelStats final_stats;
+                                if (WriteBackbufferPpm(
+                                        scenario_config.artifact_dir / window_mode_stress_capture.file,
+                                        window_mode_stress_capture.width,
+                                        window_mode_stress_capture.height,
+                                        &final_stats)) {
+                                    window_mode_stress_capture.pixels = final_stats;
+                                }
+                                window_mode_stress_complete = true;
+                            }
+                        }
                         if (lod_ground_frame_recorder.enabled()) {
                             lod_ground_frame_recorder.record_frame(deltaTime, gameSession.get(), renderPipeline, scenario_frame_count);
                         }
@@ -2876,6 +3121,18 @@ int main(int argc, char* argv[]) {
                     lod_seam_arrival_recorder);
             }
         }
+        if (scenario_config.window_mode_stress_smoke() && !window_mode_stress_analysis_written) {
+            const double scenario_play_seconds = scenario_ready
+                ? std::chrono::duration<double>(std::chrono::steady_clock::now() - scenario_play_started_at).count()
+                : 0.0;
+            WriteWindowModeStressAnalysis(
+                scenario_config.artifact_dir,
+                scenario_play_seconds,
+                scenario_config.window_mode,
+                window_mode_stress_steps,
+                window_mode_stress_capture);
+            window_mode_stress_analysis_written = true;
+        }
     }
 
     std::vector<std::string> shutdown_milestones;
@@ -2939,6 +3196,11 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
         if (show_worldgen_viewer) {
              glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
         }
+        return;
+    }
+    // Alt+Enter: runtime windowed <-> borderless toggle (T-I4-DR-window-modes).
+    if (key == GLFW_KEY_ENTER && action == GLFW_PRESS && (mods & GLFW_MOD_ALT)) {
+        ToggleWindowedBorderless(window, g_windowState);
         return;
     }
     if (key == GLFW_KEY_F11 && action == GLFW_PRESS) {
@@ -3024,8 +3286,17 @@ void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
 }
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height) {
-    auto* pipeline = static_cast<Luminumbra::Rendering::RenderPipeline*>(glfwGetWindowUserPointer(window));
-    if (pipeline) pipeline->on_resize(width, height);
+    (void)window;
+    if (width <= 0 || height <= 0) return; // minimized window: ignore
+    // Capture-pinned (scenario) runs must never resize their targets; the gate
+    // depends on a fixed 1280x720 framebuffer.
+    if (g_windowState.capture_pinned) return;
+    // Debounce: record the pending size and let the main loop coalesce a burst
+    // of drag events into one RenderPipeline::on_resize after the size settles.
+    g_windowState.pending_width = width;
+    g_windowState.pending_height = height;
+    g_windowState.pending_since_seconds = glfwGetTime();
+    g_windowState.resize_pending = true;
 }
 
 void GLFWErrorCallback(int error, const char* description) {

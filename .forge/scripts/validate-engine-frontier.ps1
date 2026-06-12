@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "SkinnedMeshVisual", "EngineGameSplitLint", "CreatureSlice", "BiomeCoverage", "RiverPresence", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "SkinnedMeshVisual", "EngineGameSplitLint", "CreatureSlice", "BiomeCoverage", "RiverPresence", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -113,6 +113,33 @@ function Assert-ArrayContains {
     )
     if (@($Values) -notcontains $Needle) {
         throw "$Description is missing '$Needle'"
+    }
+}
+
+# Capture-pin gate protection (T-I4-DR-window-modes). Every pixel-ROI gate
+# depends on captures running at exactly 1280x720. The runtime writes a
+# capture_pin block into last-known-runtime.json (window mode + live target
+# size); this asserts the run stayed pinned. Hard-fails if a capture ever ran at
+# a non-pinned framebuffer size, which would silently corrupt every ROI gate.
+function Assert-CapturePinned {
+    param(
+        [string]$ArtifactDir,
+        [string]$Name
+    )
+    $statePath = Join-Path $ArtifactDir "last-known-runtime.json"
+    if (-not (Test-Path $statePath)) {
+        throw "$Name capture-pin check: missing runtime state artifact $statePath"
+    }
+    $state = Get-Content $statePath -Raw | ConvertFrom-Json
+    if ($null -eq $state.capture_pin) {
+        throw "$Name capture-pin check: runtime state has no capture_pin block (window-mode telemetry missing)"
+    }
+    $pin = $state.capture_pin
+    if (-not [bool]$pin.pinned) {
+        throw "$Name ran at a NON-PINNED capture size: $($pin.capture_width)x$($pin.capture_height) (window_mode=$($pin.window_mode), required $($pin.pinned_width)x$($pin.pinned_height))"
+    }
+    if ([int64]$pin.capture_width -ne [int64]$pin.pinned_width -or [int64]$pin.capture_height -ne [int64]$pin.pinned_height) {
+        throw "$Name capture size $($pin.capture_width)x$($pin.capture_height) does not match the pinned $($pin.pinned_width)x$($pin.pinned_height)"
     }
 }
 
@@ -2723,6 +2750,7 @@ function Test-SkyboxVisual {
     }
 
     Assert-PpmArtifact (Join-Path $visualDir $analysis.screenshot)
+    Assert-CapturePinned -ArtifactDir $visualDir -Name "SkyboxVisual"
 }
 
 function Test-WeatherVisual {
@@ -2934,6 +2962,7 @@ function Test-PlayerView {
         if (-not $analysis.passed) {
             throw "player view ($preset) analysis reported failure"
         }
+        Assert-CapturePinned -ArtifactDir $viewDir -Name "PlayerView ($preset)"
         Write-Host "player view ($preset): stations=$($analysis.aggregates.captured_stations), max_missing=$($analysis.aggregates.max_missing_frustum_surface_chunks), min_renderable_ratio=$($analysis.aggregates.min_renderable_frustum_ratio), max_sky_ratio=$($analysis.aggregates.max_below_horizon_sky_ratio) (enforced=$skyEnforced), max_void_clusters=$($analysis.aggregates.max_near_black_cluster_count)"
     }
 }
@@ -3105,6 +3134,7 @@ function Test-FarLodHorizon {
         }
         Write-Host ("farlod horizon ({0}): above-horizon sky-sliver max={1}px within {2}px hard-fail budget" -f `
             $preset, $maxSliver, $sliverBudget)
+        Assert-CapturePinned -ArtifactDir $viewDir -Name "FarLodHorizon ($preset)"
     }
 }
 
@@ -3253,6 +3283,7 @@ function Test-SkinnedMeshVisual {
         $analysis.capture_a.animation_time_seconds, $analysis.capture_b.animation_time_seconds, `
         $analysis.diff.changed_pixels, $analysis.diff.changed_ratio, `
         $analysis.diff.mesh_like_pixels_a, $analysis.diff.mesh_like_pixels_b)
+    Assert-CapturePinned -ArtifactDir $visualDir -Name "SkinnedMeshVisual"
 }
 
 function Test-EngineGameSplitLint {
@@ -3452,6 +3483,7 @@ function Test-CreatureSlice {
         $analysis.before_stimulus.plan.active_clip, $analysis.after_stimulus.plan.active_clip, `
         $analysis.before_stimulus.skinned_draws, $analysis.after_stimulus.skinned_draws, `
         $analysis.before_stimulus.plan.plans_executed, $analysis.after_stimulus.plan.plans_executed)
+    Assert-CapturePinned -ArtifactDir $sliceDir -Name "CreatureSlice"
 }
 
 # --- T-I4-2 BiomeCoverage mode: append-only ---
@@ -3644,6 +3676,68 @@ function Test-TerrainRealism {
     Write-Host "terrain realism gate passed: all presets in DEM reference bands (hypsometry + spectral beta) for their landscape class"
 }
 
+# T-I4-DR-window-modes: resize-stress gate. A scripted run drives the render
+# pipeline through a windowed->borderless->resolutions->fullscreen->restore-pinned
+# resize cycle (RenderPipeline::on_resize), asserting 0 GL errors, that every
+# size-changing step reallocated targets (resize generation bumped), the final
+# state is restored to the pinned 1280x720 targets, and the pinned-size capture
+# still meets the visual-Smoke expectations.
+function Test-WindowModeStress {
+    $exe = Get-ClientExe
+    $visualDir = "build/$BuildPreset/test-artifacts/runtime/window-mode-stress"
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $visualDir
+    New-Item -ItemType Directory -Force -Path $visualDir | Out-Null
+
+    $runSeconds = [Math]::Max(20, $SmokeSeconds)
+    Invoke-Checked -FilePath $exe -ArgumentList @(
+        "--scenario", "window_mode_stress_smoke",
+        "--auto-create-world",
+        "--auto-enter-world",
+        "--timed-run", "$runSeconds",
+        "--no-audio",
+        "--no-ui",
+        "--runtime-artifact-dir", $visualDir
+    ) -TimeoutSeconds ([Math]::Max(150, $runSeconds + 120))
+
+    $analysisPath = Join-Path $visualDir "window-mode-stress-analysis.json"
+    $analysis = Read-JsonArtifact -Path $analysisPath -Schema "luminumbra.window_mode_stress.v1"
+
+    if ([int64]$analysis.gl_debug.errors -ne 0) {
+        throw "window-mode stress run emitted GL debug errors: $($analysis.gl_debug.errors)"
+    }
+    $steps = @($analysis.steps)
+    if ($steps.Count -lt 2) {
+        throw "window-mode stress run recorded only $($steps.Count) resize steps (expected the full scripted cycle)"
+    }
+    foreach ($step in $steps) {
+        if (-not [bool]$step.passed) {
+            throw "window-mode stress step '$($step.label)' failed: size_changed=$($step.size_changed), gen $($step.resize_generation_before)->$($step.resize_generation_after), gl_errors=$($step.gl_errors_after), targets=$($step.targets_width_after)x$($step.targets_height_after)"
+        }
+    }
+    if ([int64]$analysis.aggregates.size_changing_steps -le 0) {
+        throw "window-mode stress run changed the framebuffer size on no steps (the resize chain was never exercised)"
+    }
+    if ([int64]$analysis.aggregates.reallocating_steps -ne [int64]$analysis.aggregates.size_changing_steps) {
+        throw "window-mode stress: only $($analysis.aggregates.reallocating_steps) of $($analysis.aggregates.size_changing_steps) size-changing steps reallocated targets"
+    }
+    if (-not [bool]$analysis.aggregates.final_targets_pinned) {
+        throw "window-mode stress run did not restore the pinned 1280x720 targets after the resize cycle"
+    }
+
+    # The final pinned-size capture must record pinned == true and meet the
+    # Smoke-equivalent content floor.
+    $pin = $analysis.capture_pin
+    if (-not [bool]$pin.pinned) {
+        throw "window-mode stress final capture is NOT pinned: $($pin.capture_width)x$($pin.capture_height)"
+    }
+    Assert-PpmArtifact (Join-Path $visualDir $analysis.final_capture.file)
+    if (-not [bool]$analysis.passed) {
+        throw "window-mode stress analysis reported failure (dark_ratio=$($analysis.aggregates.final_dark_ratio))"
+    }
+
+    Write-Host "window-mode stress gate passed: $($analysis.aggregates.size_changing_steps) resize steps, all reallocated targets, 0 GL errors, final pinned $($pin.capture_width)x$($pin.capture_height)"
+}
+
 switch ($Mode) {
     "CodexOnly" { Test-CodexOnly }
     "Panels" { Test-Panels }
@@ -3690,6 +3784,7 @@ switch ($Mode) {
     "StructurePresence" { Test-StructurePresence }
     "BiomeReverb" { Test-BiomeReverb }
     "TerrainRealism" { Test-TerrainRealism }
+    "WindowModeStress" { Test-WindowModeStress }
     "All" {
         Test-CodexOnly
         Test-Files
