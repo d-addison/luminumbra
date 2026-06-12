@@ -5,6 +5,7 @@
 #include "../core/JobSystem.h"
 #include <array>
 #include <cstddef>
+#include <limits>
 #include <unordered_map>
 #include <memory>
 #include <string>
@@ -578,6 +579,15 @@ private:
                                        float fallback);
 
     int m_update_tick_counter = 0;
+
+    // Streaming-position chunk observed on the previous update(), used to
+    // detect a camera discontinuity (teleport / per-frame jump larger than the
+    // near render ring) that the throttled, async activation+meshing path
+    // cannot bridge before the next render. On such a jump the near-field
+    // surface is pulled ready synchronously (see update()) so chunks that just
+    // entered the near ring never present an empty mesh. INT_MIN marks "no
+    // previous sample yet" (first update after construction/world enter).
+    IVec3 m_last_streaming_chunk{std::numeric_limits<int>::min()};
 
     // --- Dependencies ---
     JobSystem* m_job_system;
