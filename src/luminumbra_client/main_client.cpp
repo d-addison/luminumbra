@@ -1805,6 +1805,21 @@ int main(int argc, char* argv[]) {
     bool farlod_horizon_sky_enforced = true;
     std::vector<double> farlod_baseline_gbuffer_samples;
     std::vector<double> farlod_far_gbuffer_samples;
+    // T-I4-DR-sliver-baseline-diff: each station's far-OFF above-horizon sliver
+    // baseline, captured PAIRED with its far-ON capture in phase B (an extra
+    // far-disabled render at the same camera, same frame). Thin LIVE
+    // mountain/island peak/ridge silhouettes (and diagonal live-geometry slivers)
+    // are legitimate geometry that classify as slivers in BOTH renders; the gated
+    // far-ATTRIBUTABLE sliver re-analyzes the far-ON frame with the far-OFF frame's
+    // intrusion pixels cancelled per-pixel in a 3x3 neighborhood, so they cancel
+    // pixel-for-pixel and only a genuine far-render streak (present only when far
+    // is on) survives. This vector retains the raw far-OFF measurement as
+    // telemetry only. Indexed by station; -1 = not yet captured.
+    std::vector<int> farlod_horizon_far_off_sliver_px;
+    // T-I4-DR-sliver-baseline-diff: station the camera was applied to this frame;
+    // the post-render capture targets exactly this station so the analyzed back
+    // buffer always matches the camera that rendered it.
+    std::size_t farlod_horizon_applied_station = 0;
     // skinned_mesh_visual_smoke (T-I3-16): rig spawned once after readiness;
     // captures at two clip times prove the skinned stage renders and animates.
     SkinnedMeshVisualTarget skinned_mesh_visual_target;
@@ -2127,12 +2142,18 @@ int main(int argc, char* argv[]) {
                             : std::min(wall_clock_index, first_unwritten);
                     ApplyPlayerViewCamera(gameSession.get(), g_camera.get(), player_view_stations[station_index]);
                 } else if (scenario_config.farlod_horizon_smoke() && scenario_ready && g_camera) {
-                    // T-I3-9: phase A holds station 0 with far-LOD disabled
-                    // (gbuffer GPU baseline); phase B enables far-LOD and
-                    // divides the remaining time among the stations.
+                    // T-I3-9 / T-I4-DR-sliver-baseline-diff: phase A holds station 0
+                    // with far-LOD DISABLED (the in-run gbuffer GPU baseline); phase
+                    // B enables far-LOD and sweeps the stations. The per-station
+                    // far-OFF sliver baseline is captured PAIRED with the far-ON
+                    // capture in phase B (an extra far-disabled render at the exact
+                    // same camera the same frame), so the diagonal live-geometry
+                    // streaks are pixel-aligned and the far-attributable analysis
+                    // cancels them per-pixel (3x3 neighborhood mask) cleanly.
                     if (farlod_horizon_stations.empty()) {
                         farlod_horizon_stations = BuildFarLodHorizonStations();
                         farlod_horizon_captures_written.assign(farlod_horizon_stations.size(), false);
+                        farlod_horizon_far_off_sliver_px.assign(farlod_horizon_stations.size(), -1);
                         farlod_horizon_sky_enforced = !PlayerViewSeaWaterInNearField(gameSession.get());
                     }
                     const double elapsed_play_seconds = std::chrono::duration<double>(
@@ -2142,14 +2163,31 @@ int main(int argc, char* argv[]) {
                     if (auto* farlod = renderPipeline.farlod()) {
                         farlod->set_enabled(progress >= kFarLodHorizonPhaseSplit);
                     }
+                    const std::size_t station_count = farlod_horizon_stations.size();
                     std::size_t station_index = 0;
                     if (progress >= kFarLodHorizonPhaseSplit) {
                         const double sweep =
                             (progress - kFarLodHorizonPhaseSplit) / (1.0 - kFarLodHorizonPhaseSplit);
-                        station_index = std::min(
-                            farlod_horizon_stations.size() - 1u,
-                            static_cast<std::size_t>(sweep * static_cast<double>(farlod_horizon_stations.size())));
+                        const std::size_t time_based_index = std::min(
+                            station_count - 1u,
+                            static_cast<std::size_t>(sweep * static_cast<double>(station_count)));
+                        // T-I4-DR-sliver-baseline-diff: on slow debug runs the
+                        // time-based sweep outruns the expensive captures (each
+                        // capture renders a paired far-OFF frame and analyzes two
+                        // back buffers, ~1 fps), so wall-clock stations get skipped.
+                        // Hold the camera on the first un-captured station so the
+                        // sweep cannot advance past it - mirrors the player_view
+                        // catch-up clamp above.
+                        std::size_t first_unwritten = 0;
+                        while (first_unwritten < farlod_horizon_captures_written.size() &&
+                               farlod_horizon_captures_written[first_unwritten]) {
+                            ++first_unwritten;
+                        }
+                        station_index = first_unwritten >= station_count
+                                            ? time_based_index
+                                            : std::min(time_based_index, first_unwritten);
                     }
+                    farlod_horizon_applied_station = station_index;
                     ApplyFarLodHorizonCamera(gameSession.get(), g_camera.get(), farlod_horizon_stations[station_index]);
                 } else if (scenario_config.skinned_mesh_visual_smoke() && scenario_ready && g_camera) {
                     // T-I3-16: spawn the rigged test mesh once, then hold the
@@ -2786,12 +2824,26 @@ int main(int argc, char* argv[]) {
                                 const double sweep =
                                     (progress - kFarLodHorizonPhaseSplit) / (1.0 - kFarLodHorizonPhaseSplit);
                                 const std::size_t station_count = farlod_horizon_stations.size();
-                                const std::size_t station_index = std::min(
+                                const std::size_t time_station_index = std::min(
                                     station_count - 1u,
                                     static_cast<std::size_t>(sweep * static_cast<double>(station_count)));
+                                // T-I4-DR-sliver-baseline-diff: capture the station the
+                                // rendered back buffer actually shows (the camera-apply
+                                // clamp), not the bare time index. station_progress is
+                                // only meaningful when station_index == time_station_index.
+                                const std::size_t station_index = farlod_horizon_applied_station;
                                 const double station_progress =
                                     sweep * static_cast<double>(station_count) - static_cast<double>(station_index);
-                                if (!farlod_horizon_captures_written[station_index] && station_progress >= 0.7) {
+                                // T-I4-DR-sliver-baseline-diff: when behind schedule the
+                                // settle wait is skipped - the stations are yaw rotations
+                                // of an already-settled world (and at ~1 fps a full second
+                                // of simulation precedes each frame), so capture
+                                // immediately to catch up; when on schedule, keep the 0.7
+                                // settle gate.
+                                const bool behind_schedule = station_index < time_station_index;
+                                if (station_index < farlod_horizon_captures_written.size() &&
+                                    !farlod_horizon_captures_written[station_index] &&
+                                    (behind_schedule || station_progress >= 0.7)) {
                                     int screenshot_width = 0;
                                     int screenshot_height = 0;
                                     glfwGetFramebufferSize(window, &screenshot_width, &screenshot_height);
@@ -2842,9 +2894,15 @@ int main(int argc, char* argv[]) {
                                                                         static_cast<double>(band_total_px)
                                                                   : 0.0;
                                         }
-                                        // T-I4-DR-river-seam-sliver: above-horizon thin-sliver scan.
+                                        // T-I4-DR-river-seam-sliver: above-horizon thin-sliver scan (far ON).
                                         capture.sky_sliver = AnalyzeFarLodHorizonSkySliver(
                                             frame_pixels, screenshot_width, screenshot_height, horizon_row_from_top);
+                                        // T-I4-DR-sliver-baseline-diff: snapshot the far-LOD
+                                        // scheduler stats for the ON frame BEFORE the paired
+                                        // far-OFF render below - that render updates
+                                        // farlod->stats() to the disabled frame (no wanted/
+                                        // resident regions, zero draws), which is not the
+                                        // state this capture asserts on.
                                         if (const auto* farlod = renderPipeline.farlod()) {
                                             const auto& farlod_stats = farlod->stats();
                                             capture.regions_wanted = farlod_stats.regions_wanted;
@@ -2857,6 +2915,60 @@ int main(int argc, char* argv[]) {
                                             capture.water_sheet_draws = farlod_stats.water_sheet_draws;
                                             capture.water_sheet_indices = farlod_stats.water_sheet_indices;
                                         }
+                                        // T-I4-DR-sliver-baseline-diff: PAIRED far-OFF
+                                        // baseline at the EXACT same camera/frame. The
+                                        // current back buffer was rendered far-ON; render
+                                        // one more frame with far-LOD disabled, read its
+                                        // pixels, then restore far-ON. Both buffers are
+                                        // pixel-aligned (identical view, identical live
+                                        // geometry), so the far-attributable sliver is the
+                                        // far-ON frame re-analyzed with the far-OFF frame's
+                                        // intrusion pixels cancelled PER PIXEL within a 3x3
+                                        // neighborhood: pixel-aligned LIVE peak/ridge
+                                        // silhouettes and diagonal live-geometry slivers
+                                        // drop out and only a genuine far-render streak
+                                        // (present only with far on) survives. (A scalar
+                                        // on-minus-off max diff cannot do this: a detached
+                                        // live streak and the legitimate far-LOD horizon
+                                        // silhouette fuse into one far-ON-only span.)
+                                        int far_off_sliver_px = -1;
+                                        if (auto* farlod = renderPipeline.farlod()) {
+                                            const bool was_enabled = farlod->enabled();
+                                            farlod->set_enabled(false);
+                                            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+                                            renderPipeline.render_frame(
+                                                gameSession->GetRegistry(),
+                                                *gameSession->GetWorldSystem(), *g_camera, deltaTime, wireframe_mode);
+                                            std::vector<unsigned char> off_pixels(
+                                                static_cast<std::size_t>(screenshot_width) *
+                                                static_cast<std::size_t>(screenshot_height) * 3u);
+                                            glReadBuffer(GL_BACK);
+                                            glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                                            glReadPixels(0, 0, screenshot_width, screenshot_height,
+                                                         GL_RGB, GL_UNSIGNED_BYTE, off_pixels.data());
+                                            const auto off_sliver = AnalyzeFarLodHorizonSkySliver(
+                                                off_pixels, screenshot_width, screenshot_height, horizon_row_from_top);
+                                            far_off_sliver_px = off_sliver.tallest_sliver_px;
+                                            farlod->set_enabled(was_enabled);
+                                            // Masked far-attributable analysis of the ON
+                                            // frame, cancelling the paired far-OFF intrusion
+                                            // pixels in a 3x3 neighborhood.
+                                            const auto attributable_sliver = AnalyzeFarLodHorizonSkySliver(
+                                                frame_pixels, screenshot_width, screenshot_height,
+                                                horizon_row_from_top, &off_pixels);
+                                            capture.far_attributable_sliver_px =
+                                                attributable_sliver.tallest_sliver_px;
+                                        } else {
+                                            // No far-OFF sample available: fall back to the
+                                            // raw far-ON sliver (conservative - never under-
+                                            // reports an attributable streak).
+                                            capture.far_attributable_sliver_px =
+                                                capture.sky_sliver.tallest_sliver_px;
+                                        }
+                                        if (station_index < farlod_horizon_far_off_sliver_px.size()) {
+                                            farlod_horizon_far_off_sliver_px[station_index] = far_off_sliver_px;
+                                        }
+                                        capture.far_off_sliver_px = far_off_sliver_px;
 
                                         const std::string relative_path =
                                             "screenshots/farlod-horizon-" + farlod_horizon_stations[station_index].name + ".ppm";

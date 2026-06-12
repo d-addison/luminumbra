@@ -3901,7 +3901,33 @@ constexpr std::uint64_t kFarLodBoundaryMaxVoidClusters = 0;
 // far-OFF classification), and well below the 360 px far-render defect so a
 // regression of it fails. Lowering toward 24 px requires a separate live-terrain
 // peak-silhouette fix (deferred; outside the far-LOD render path).
+//
+// T-I4-DR-sliver-baseline-diff: the raw above-horizon sliver mixes the genuine
+// far-render streak with legitimate thin LIVE mountain/island peak silhouettes
+// (which classify TALLER after the 6a16048 ambient brightening: archipelago
+// 201 -> 345 px, mountains ~107 px). The gated FAR-ATTRIBUTABLE metric is the
+// sliver analysis of the far-ON frame run with each far-OFF-intrusion pixel
+// cancelled PER PIXEL: an ON pixel counts as a terrain intrusion only when the
+// paired far-OFF render (identical camera/frame) has no intrusion pixel within
+// its 3x3 neighborhood (the dilation absorbs sub-pixel rasterization jitter).
+// A per-image scalar max-difference cannot do this: in one column a detached
+// live-geometry streak and the legitimate far-LOD horizon silhouette grazing
+// just above the estimated horizon row fuse into a single tall span that exists
+// only in the far-ON frame, so the scalar diff fails to cancel. The pixel-level
+// mask cancels the pixel-aligned live geometry exactly; the surviving far-LOD
+// horizon silhouette is then excluded by the existing bottom-anchor check
+// (first < sky_band_rows*3/4). With the far streak eliminated the metric is ~0,
+// so the hard-fail budget ratchets from 256 px (raw) down to 64 px
+// (far-attributable). The raw kFarLodHorizonMaxSkySliverPx is retained as
+// informational telemetry only (it is no longer the gated metric).
 constexpr int kFarLodHorizonMaxSkySliverPx = 256;
+constexpr int kFarLodHorizonMaxFarAttributableSliverPx = 64;
+// Rows immediately above the estimated horizon row excluded from the sliver
+// span scan: the horizon row is a projection estimate, and legitimate far-LOD
+// terrain silhouettes graze within a few px of it (far-ON only), which would
+// otherwise fuse with a detached streak into one span and defeat the far-OFF
+// cancellation. ~2% of the observed 360-row sky band.
+constexpr int kFarLodHorizonSliverHorizonGuardPx = 8;
 
 bool ProjectWorldPointToScreenRow(
     const Luminumbra::Rendering::Camera& camera,
@@ -4091,11 +4117,21 @@ FarLodBoundaryBandStats AnalyzeFarLodBoundaryBand(
     return stats;
 }
 
+// T-I4-DR-sliver-baseline-diff: cancel_baseline, when non-null, is the PAIRED
+// far-OFF render of the IDENTICAL camera/frame as `pixels` (the far-ON frame).
+// Both buffers are pixel-aligned, so the legitimate LIVE mountain/island peak
+// silhouettes and diagonal live-geometry slivers rasterize to the same pixels
+// in both; an ON-frame terrain-intrusion pixel is therefore counted only when
+// the baseline has NO intrusion pixel in its 3x3 neighborhood (the dilation
+// absorbs sub-pixel rasterization jitter between the two renders). What
+// survives is far-ATTRIBUTABLE only - a streak present solely with far-LOD on.
+// Passing nullptr disables cancellation (raw far-ON measurement).
 FarLodHorizonSkySliverStats AnalyzeFarLodHorizonSkySliver(
     const std::vector<unsigned char>& pixels,
     int width,
     int height,
-    int horizon_row_from_top)
+    int horizon_row_from_top,
+    const std::vector<unsigned char>* cancel_baseline)
 {
     FarLodHorizonSkySliverStats stats;
     stats.sky_bottom_row_from_top = std::clamp(horizon_row_from_top, 0, std::max(0, height - 1));
@@ -4124,21 +4160,64 @@ FarLodHorizonSkySliverStats AnalyzeFarLodHorizonSkySliver(
         return luma < 90;
     };
 
+    // T-I4-DR-sliver-baseline-diff: only honor the cancellation baseline when it
+    // is the paired full-resolution far-OFF buffer; a wrong-sized or absent
+    // buffer leaves the raw far-ON measurement untouched.
+    const bool use_cancel_baseline =
+        cancel_baseline != nullptr &&
+        cancel_baseline->size() == static_cast<std::size_t>(width) *
+                                       static_cast<std::size_t>(height) * 3u;
+    // True when the far-OFF baseline has an intrusion pixel anywhere in the 3x3
+    // neighborhood (in the same bottom-up buffer coordinates, clamped to bounds)
+    // of (x, y) - i.e. the same live geometry is present in the far-OFF frame, so
+    // the matching far-ON pixel is not far-attributable and must be treated as
+    // sky. The 3x3 dilation absorbs sub-pixel rasterization jitter.
+    const auto baseline_cancels = [&](int x, int y) {
+        if (!use_cancel_baseline) {
+            return false;
+        }
+        const std::vector<unsigned char>& base = *cancel_baseline;
+        for (int dy = -1; dy <= 1; ++dy) {
+            const int ny = std::clamp(y + dy, 0, height - 1);
+            for (int dx = -1; dx <= 1; ++dx) {
+                const int nx = std::clamp(x + dx, 0, width - 1);
+                const std::size_t boffset =
+                    static_cast<std::size_t>(ny) * row_stride + static_cast<std::size_t>(nx) * 3u;
+                if (is_terrain_intrusion(base[boffset], base[boffset + 1u], base[boffset + 2u])) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+
     // Per-column vertical SPAN of terrain-intrusion pixels within the sky band
     // (highest-minus-lowest intrusion row). A sliver is diagonal and dotted
     // after rasterization, so span captures its reach better than the longest
     // contiguous run. The topmost band of rows near the very top edge is part of
     // the scan (a sliver streaks to the frame top). Columns with no intrusion
     // have span 0.
+    //
+    // T-I4-DR-sliver-baseline-diff: the horizon row is a projection ESTIMATE;
+    // legitimate far-LOD terrain silhouettes sit within a few px above it. A
+    // single such grazing pixel must not fuse with a detached streak higher in
+    // the column into one giant span (observed: an 8 px live streak + one far
+    // silhouette pixel 1 px above the horizon row read as a 107 px span in the
+    // far-ON phase only, defeating the far-OFF cancellation). The scan therefore
+    // stops a guard band above the horizon row; a genuine far-render streak (the
+    // ~360 px defect class) towers far above the guard, so sensitivity holds.
+    const int sliver_scan_rows =
+        std::max(0, sky_band_rows - kFarLodHorizonSliverHorizonGuardPx);
     std::vector<int> column_span(static_cast<std::size_t>(width), 0);
     for (int x = min_x; x < max_x; ++x) {
         int first = -1;
         int last = -1;
-        for (int y_from_top = 0; y_from_top < sky_band_rows; ++y_from_top) {
+        for (int y_from_top = 0; y_from_top < sliver_scan_rows; ++y_from_top) {
             const int y = height - 1 - y_from_top; // to bottom-up buffer row
             const std::size_t offset =
                 static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
-            if (is_terrain_intrusion(pixels[offset], pixels[offset + 1u], pixels[offset + 2u])) {
+            if (is_terrain_intrusion(pixels[offset], pixels[offset + 1u], pixels[offset + 2u]) &&
+                !baseline_cancels(x, y)) {
                 if (first < 0) first = y_from_top;
                 last = y_from_top;
             }
@@ -4256,6 +4335,8 @@ void WriteFarLodHorizonAnalysis(
     std::uint64_t max_band_void_clusters = 0;
     std::size_t bands_resolved = 0;
     int max_sky_sliver_px = 0;
+    // T-I4-DR-sliver-baseline-diff: gated far-attributable aggregate.
+    int max_far_attributable_sliver_px = 0;
     // T-I4-DR-far-water-sheet aggregates.
     std::size_t total_water_sheet_draws = 0;
     std::size_t max_water_sheet_draws = 0;
@@ -4275,6 +4356,8 @@ void WriteFarLodHorizonAnalysis(
         const bool station_passed = boundary_passed && horizon_passed;
         all_stations_passed = all_stations_passed && station_passed;
         max_sky_sliver_px = std::max(max_sky_sliver_px, capture.sky_sliver.tallest_sliver_px);
+        max_far_attributable_sliver_px =
+            std::max(max_far_attributable_sliver_px, capture.far_attributable_sliver_px);
 
         if (capture.boundary.band_resolved) {
             ++bands_resolved;
@@ -4326,6 +4409,10 @@ void WriteFarLodHorizonAnalysis(
                 {"tallest_sliver_px", capture.sky_sliver.tallest_sliver_px},
                 {"tallest_sliver_width_px", capture.sky_sliver.tallest_sliver_width_px},
                 {"tallest_sliver_col", capture.sky_sliver.tallest_sliver_col},
+                // T-I4-DR-sliver-baseline-diff: far-OFF (phase A) baseline at the
+                // same station and the far-attributable diff (the gated metric).
+                {"far_off_sliver_px", capture.far_off_sliver_px},
+                {"far_attributable_sliver_px", capture.far_attributable_sliver_px},
             }},
             {"farlod", {
                 {"regions_wanted", capture.regions_wanted},
@@ -4353,8 +4440,13 @@ void WriteFarLodHorizonAnalysis(
     // gpu timer support is hardware-dependent; without timers the delta gate
     // records zeros and passes (the honest comparison needs the timers).
     const bool gbuffer_passed = !gpu_timers_supported || gbuffer_delta_ms < kFarLodHorizonMaxGbufferDeltaMs;
+    // T-I4-DR-sliver-baseline-diff: the gated sliver metric is the far-attributable
+    // diff against the per-station far-OFF baseline (<= 64 px), not the raw sliver.
+    const bool sliver_passed =
+        max_far_attributable_sliver_px <= kFarLodHorizonMaxFarAttributableSliverPx;
     const bool passed =
-        all_stations_passed && coverage_passed && budget_passed && gbuffer_passed && gl_debug.errors == 0;
+        all_stations_passed && coverage_passed && budget_passed && gbuffer_passed &&
+        sliver_passed && gl_debug.errors == 0;
 
     const nlohmann::json artifact = {
         {"schema", "luminumbra.farlod_horizon.v1"},
@@ -4370,6 +4462,10 @@ void WriteFarLodHorizonAnalysis(
             {"max_boundary_band_sky_ratio", kFarLodBoundaryMaxSkyRatio},
             {"max_boundary_band_void_clusters", kFarLodBoundaryMaxVoidClusters},
             {"max_sky_sliver_px", kFarLodHorizonMaxSkySliverPx},
+            // T-I4-DR-sliver-baseline-diff: the GATED sliver budget is now the
+            // far-attributable diff (max(0, on - off)); the raw max_sky_sliver_px
+            // above is informational telemetry only.
+            {"max_far_attributable_sliver_px", kFarLodHorizonMaxFarAttributableSliverPx},
             {"f2_outer_range_m", 1536.0},
             {"sky_ratio_enforced", enforce_sky_ratio},
         }},
@@ -4409,6 +4505,7 @@ void WriteFarLodHorizonAnalysis(
             {"max_boundary_band_sky_ratio", max_band_sky_ratio},
             {"max_boundary_band_void_clusters", max_band_void_clusters},
             {"max_sky_sliver_px", max_sky_sliver_px},
+            {"max_far_attributable_sliver_px", max_far_attributable_sliver_px},
             {"max_water_sheet_draws", max_water_sheet_draws},
             {"max_boundary_band_water_ratio", max_boundary_band_water_ratio},
         }},

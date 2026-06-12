@@ -3114,26 +3114,32 @@ function Test-FarLodHorizon {
                 $preset, $maxWaterDraws)
         }
 
-        # T-I4-DR-horizon-sliver-render: above-horizon sky-sliver gate. The
-        # area-based below-horizon sky-ratio gate cannot see a thin near-vertical
-        # sliver streaking up THROUGH the horizon into the sky; this scans the sky
-        # band for narrow tall terrain-coloured intrusions. WA2 proved the far
-        # sky-sliver (a ~360 px thick streak) is in the RENDER path, not any CPU
-        # mesh; the root cause was far-region triangles straddling the camera /
-        # the 1000 m far plane being rasterized as a streak. The fix
-        # (FarLodSystem far-geometry clip + camera-region skip) removes that
-        # far-render streak. The detector is now PROMOTED FROM WARNING TO HARD
-        # FAIL to gate the class: a regression of the thick far streak (back to
-        # ~360 px) fails. The residual ~150-200 px thin streaks are sharp LIVE
-        # mountain-peak silhouettes (reproduce with far-LOD disabled), tracked
-        # separately; the 256 px threshold sits between them and the defect.
+        # T-I4-DR-sliver-baseline-diff: above-horizon sky-sliver gate, ratcheted.
+        # The area-based below-horizon sky-ratio gate cannot see a thin
+        # near-vertical sliver streaking up THROUGH the horizon into the sky; the
+        # detector scans the sky band for narrow tall terrain-coloured intrusions.
+        # WA2 proved the far sky-sliver (a ~360 px thick streak) was in the RENDER
+        # path; the FarLodSystem far-geometry clip + camera-region skip removed it.
+        # But the raw sliver also catches legitimate thin LIVE mountain/island peak
+        # silhouettes (reproduce with far-LOD disabled), and the 6a16048 ambient
+        # brightening made those classify taller (archipelago 201 -> 345 px),
+        # which broke the old raw 256 px gate. The scenario now measures each
+        # station's sliver PAIRED with a far-LOD-disabled render at the identical
+        # camera/frame and gates the FAR-ATTRIBUTABLE sliver: the far-ON frame is
+        # re-analyzed with the far-OFF frame's intrusion pixels cancelled per-pixel
+        # within a 3x3 neighborhood. The pixel-aligned live-peak silhouette cancels
+        # exactly, leaving only a genuine far-render streak (present only with far
+        # on). The far path is clean, so the attributable metric is ~0 and the
+        # hard-fail budget ratchets from 256 px (raw) down to 64 px (attributable).
+        # The raw max is still reported for telemetry.
         $maxSliver = [int]$analysis.aggregates.max_sky_sliver_px
-        $sliverBudget = [int]$analysis.thresholds.max_sky_sliver_px
-        if ($maxSliver -gt $sliverBudget) {
-            throw "farlod horizon ($preset) above-horizon sky-sliver max=${maxSliver}px exceeds the ${sliverBudget}px hard-fail budget (far-region render streak regressed)"
+        $maxFarAttributable = [int]$analysis.aggregates.max_far_attributable_sliver_px
+        $sliverBudget = [int]$analysis.thresholds.max_far_attributable_sliver_px
+        if ($maxFarAttributable -gt $sliverBudget) {
+            throw "farlod horizon ($preset) far-attributable above-horizon sky-sliver max=${maxFarAttributable}px (masked by the paired far-OFF baseline; raw far-ON max=${maxSliver}px) exceeds the ${sliverBudget}px hard-fail budget (far-region render streak regressed)"
         }
-        Write-Host ("farlod horizon ({0}): above-horizon sky-sliver max={1}px within {2}px hard-fail budget" -f `
-            $preset, $maxSliver, $sliverBudget)
+        Write-Host ("farlod horizon ({0}): far-attributable sky-sliver max={1}px within {2}px hard-fail budget (raw far-ON max={3}px)" -f `
+            $preset, $maxFarAttributable, $sliverBudget, $maxSliver)
         Assert-CapturePinned -ArtifactDir $viewDir -Name "FarLodHorizon ($preset)"
     }
 }
