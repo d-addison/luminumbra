@@ -926,6 +926,72 @@ TEST(WorldGenLayerSnapshotTest, LodRemeshKeepsPreviousMeshRenderableWhilePending
     physics.shutdown();
 }
 
+TEST(WorldGenLayerSnapshotTest, CameraTeleportKeepsNearFieldRenderableInOneUpdate) {
+    // T-I4-DR-lod-swap-atomicity: when the streaming position jumps farther than
+    // the async, throttled activation/meshing path can bridge before the next
+    // render (a teleport, or a per-frame jump forced by a slow renderer driving
+    // a wall-clock camera path), the near surface field at the destination must
+    // present a live mesh on the very next frame instead of an empty one. The
+    // LodGround coverage gate observed near-field renderable surface chunks
+    // collapsing (49 -> 7) for exactly this reason: chunks that had just entered
+    // the near ring were not even created, let alone meshed, when the frame was
+    // sampled. SHIELD_WorldSystem::update() detects the discontinuity and pulls
+    // the near surface band ready synchronously; this pins that invariant.
+    TerrainGenParams params;
+    params.base_frequency = 0.01f;
+    params.base_amplitude = 12.0f;
+    params.octaves = 4;
+    params.persistence = 0.5f;
+    params.lacunarity = 2.0f;
+    params.height_offset = 20.0f;
+    params.caves_enabled = true;
+    params.cave_frequency = 0.02f;
+
+    Luminumbra::JobSystem jobs;
+    jobs.startup();
+    SHIELD_WorldSystem world(&jobs, nullptr, params, kSeed);
+
+    PhysicsSystem physics;
+    physics.startup();
+
+    // Warm the spawn neighbourhood so the system has an established near field
+    // before the teleport (mirrors a real session: the player is already in a
+    // streamed world when they jump).
+    const Vec3 spawn(8.0f, world.GetTerrainHeightAt(8.0f, 8.0f) + 1.95f, 8.0f);
+    ASSERT_TRUE(world.EnsureSurfaceReadyNear(spawn, &physics, 6, 2));
+
+    // Establish the previous streaming position so the next update() can detect
+    // the jump (the first update after construction has no prior sample to
+    // compare against - the discontinuity test deliberately needs a baseline,
+    // exactly as a live session accumulates one before the player teleports).
+    entt::registry registry;
+    world.update(registry, spawn, &physics);
+
+    // Teleport far enough that NONE of the spawn near field overlaps the
+    // destination near field (well beyond the catch-up jump threshold). Use a
+    // round number of chunks so the destination columns are fresh.
+    constexpr int kTeleportChunks = 24;
+    const float dest_x = static_cast<float>(kTeleportChunks * CHUNK_SIZE_X) + CHUNK_SIZE_X * 0.5f;
+    const float dest_z = static_cast<float>(kTeleportChunks * CHUNK_SIZE_Z) + CHUNK_SIZE_Z * 0.5f;
+    const Vec3 dest(dest_x, world.GetTerrainHeightAt(dest_x, dest_z) + 180.0f, dest_z);
+
+    // A single update at the teleported position must leave the near surface
+    // band fully renderable - this is the frame the LodGround gate samples.
+    world.update(registry, dest, &physics);
+
+    constexpr int kCoverageRadius = 3;
+    const auto coverage = world.get_camera_local_coverage_stats(dest, kCoverageRadius);
+    EXPECT_GT(coverage.expected_surface_chunks, 0u);
+    EXPECT_EQ(coverage.missing_surface_chunks, 0u)
+        << "teleport destination near field has uncreated surface chunks";
+    EXPECT_EQ(coverage.renderable_surface_chunks, coverage.expected_surface_chunks)
+        << "teleport destination near field is not fully renderable in the sampled frame "
+        << "(" << coverage.renderable_surface_chunks << "/" << coverage.expected_surface_chunks << ")";
+    EXPECT_TRUE(coverage.near_field_renderable);
+
+    physics.shutdown();
+}
+
 TEST(WorldGenLayerSnapshotTest, VerticalUnloadExemptsColumnSurfaceSpanChunks) {
     // T-I3-2 (F4): the camera-relative vertical unload test evicted surface
     // chunks of tall peaks (> 10 chunk-Ys above the camera), which the
