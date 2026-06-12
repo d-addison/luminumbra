@@ -2612,8 +2612,14 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     
     m_moonDirection = -m_sun.direction;
 
-    glm::vec3 dayAmbient(0.1f, 0.15f, 0.2f);
-    glm::vec3 nightAmbient(0.01f, 0.02f, 0.04f);
+    // Ambient scales by the same PI as SUN_IRRADIANCE_SCALE (lighting_pass
+    // exposure audit): these values were tuned against the pre-audit sun, so
+    // without the matching scale the sun:ambient balance collapses from ~30%
+    // shadow luminance to ~4% (shadowed slopes read near-black, LodGround/
+    // LodSeamRisk near_black_ratio regressions on DEM-realistic terrain).
+    constexpr float kAmbientIrradianceScale = 3.14159265f;
+    glm::vec3 dayAmbient = glm::vec3(0.1f, 0.15f, 0.2f) * kAmbientIrradianceScale;
+    glm::vec3 nightAmbient = glm::vec3(0.01f, 0.02f, 0.04f) * kAmbientIrradianceScale;
     m_skyAmbientColor = glm::mix(nightAmbient, dayAmbient, m_sun.intensity);
 }
 
