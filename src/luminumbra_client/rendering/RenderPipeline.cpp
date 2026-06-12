@@ -1164,6 +1164,12 @@ void RenderPipeline::on_resize(u32 new_width, u32 new_height) {
     if (new_width == 0 || new_height == 0 || (new_width == m_screen_width && new_height == m_screen_height)) return;
     m_screen_width = new_width;
     m_screen_height = new_height;
+    // Reallocate the screen-sized targets, preserving formats (each init_*
+    // rebuilds with the same internal formats it used at startup). The shadow
+    // map is a fixed-resolution cascade array and the water caustics texture is
+    // a fixed-resolution offscreen target, so neither resizes here; the water /
+    // skybox / far-LOD passes read the resized G-buffer and lighting targets
+    // through the shared pipeline state and pick up the new size automatically.
     m_lighting_pass->destroy_lighting_fbo();
     m_lighting_pass->init_lighting_fbo(new_width, new_height);
     m_gbuffer_pass->destroy_gbuffer();
@@ -1171,6 +1177,8 @@ void RenderPipeline::on_resize(u32 new_width, u32 new_height) {
     m_ssao_pass->destroy_ssao();
     m_ssao_pass->init_ssao(new_width, new_height);
     m_frustumCache.valid = false;
+    ++m_resize_generation;
+    LUMINUMBRA_CORE_INFO("RenderPipeline resized targets to {}x{} (resize generation {})", new_width, new_height, m_resize_generation);
 }
 
 void RenderPipeline::clear_all_chunk_data() {
