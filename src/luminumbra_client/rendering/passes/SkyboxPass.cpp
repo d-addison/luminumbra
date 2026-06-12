@@ -101,6 +101,12 @@ void SkyboxPass::execute(RenderPipeline& pipeline, const Camera& camera) {
     m_skybox_shader->setVec3("u_sunDirection", -pipeline.m_sun.direction);
     m_skybox_shader->setVec3("u_moonDirection", -pipeline.m_moonDirection);
     m_skybox_shader->setFloat("u_sunIntensity", pipeline.m_sun.intensity);
+    // T-I4-DR-tod-sky-balance: continuous day->twilight->night factor from the
+    // sun elevation (1 sun high, ~0 sun below horizon). The dome derives its
+    // brightness/tint from this instead of the clamped u_sunIntensity, so the
+    // dusk dome warms/darkens and the night dome goes genuinely dark in lockstep
+    // with the terrain lighting that shares the same elevation signal.
+    m_skybox_shader->setFloat("u_skyDayFactor", pipeline.m_skyDayFactor);
     m_skybox_shader->setFloat("u_time", (float)glfwGetTime());
     glBindVertexArray(m_skybox_vao);
     glDrawArrays(GL_TRIANGLES, 0, 36);
