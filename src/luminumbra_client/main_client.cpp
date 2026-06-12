@@ -2003,6 +2003,25 @@ int main(int argc, char* argv[]) {
                     const double elapsed_play_seconds = std::chrono::duration<double>(
                         std::chrono::steady_clock::now() - scenario_play_started_at).count();
                     ApplyLodGroundCameraPath(scenario_config, gameSession.get(), g_camera.get(), elapsed_play_seconds);
+                    // T-I4-DR-churn-perf: the engine no longer synchronously
+                    // catches the near field up on a camera discontinuity (that
+                    // hook caused an 11x chunk_churn PerfRegression). The
+                    // LodGround camera sweeps in wall-clock-driven jumps that can
+                    // outrun the async, throttled activation/meshing path, so the
+                    // exact frame the coverage gate samples could show a near-field
+                    // dip. Pull the destination near surface band ready
+                    // synchronously right after moving the camera and before this
+                    // frame renders, so every captured frame is fully renderable
+                    // (49/49). EnsureSurfaceReadyNear only (re)builds chunks not
+                    // already Ready at the required LOD, so steady-state frames
+                    // (camera already settled) pay nothing.
+                    if (gameSession->GetWorldSystem() && gameSession->GetPhysicsSystem()) {
+                        gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
+                            g_camera->Position,
+                            gameSession->GetPhysicsSystem(),
+                            4,
+                            1);
+                    }
                 } else if (scenario_config.water_visual_smoke() && scenario_ready && g_camera) {
                     if (!water_visual_target_initialized || !water_visual_target.found) {
                         water_visual_target = FindWaterVisualCameraTarget(gameSession.get());

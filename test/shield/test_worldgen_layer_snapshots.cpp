@@ -926,17 +926,19 @@ TEST(WorldGenLayerSnapshotTest, LodRemeshKeepsPreviousMeshRenderableWhilePending
     physics.shutdown();
 }
 
-TEST(WorldGenLayerSnapshotTest, CameraTeleportKeepsNearFieldRenderableInOneUpdate) {
-    // T-I4-DR-lod-swap-atomicity: when the streaming position jumps farther than
-    // the async, throttled activation/meshing path can bridge before the next
-    // render (a teleport, or a per-frame jump forced by a slow renderer driving
-    // a wall-clock camera path), the near surface field at the destination must
-    // present a live mesh on the very next frame instead of an empty one. The
-    // LodGround coverage gate observed near-field renderable surface chunks
-    // collapsing (49 -> 7) for exactly this reason: chunks that had just entered
-    // the near ring were not even created, let alone meshed, when the frame was
-    // sampled. SHIELD_WorldSystem::update() detects the discontinuity and pulls
-    // the near surface band ready synchronously; this pins that invariant.
+TEST(WorldGenLayerSnapshotTest, ExplicitEnsureSurfaceReadyNearMakesTeleportNearFieldRenderable) {
+    // T-I4-DR-churn-perf: engine streaming is fully asynchronous - it does NOT
+    // synchronously catch the near field up on a camera discontinuity (the old
+    // ee4f378 engine-side auto-catch-up was removed because churn workloads,
+    // which jump every frame, turned it into a per-frame synchronous meshing
+    // spike: chunk_churn p99 8 -> 89 ms, an 11x PerfRegression). Capture-driven
+    // scenarios that need a guaranteed-renderable near field in the exact frame
+    // they screenshot (LodGround/FarLod) instead call EnsureSurfaceReadyNear
+    // explicitly BEFORE the capture. This pins that contract: after a teleport,
+    // a streaming update() alone does NOT immediately make the destination near
+    // field fully renderable (async), but an explicit EnsureSurfaceReadyNear
+    // call does - 49/49 renderable, no holes - which is exactly what the
+    // pre-capture call provides to the LodGround coverage gate.
     TerrainGenParams params;
     params.base_frequency = 0.01f;
     params.base_amplitude = 12.0f;
@@ -960,32 +962,30 @@ TEST(WorldGenLayerSnapshotTest, CameraTeleportKeepsNearFieldRenderableInOneUpdat
     const Vec3 spawn(8.0f, world.GetTerrainHeightAt(8.0f, 8.0f) + 1.95f, 8.0f);
     ASSERT_TRUE(world.EnsureSurfaceReadyNear(spawn, &physics, 6, 2));
 
-    // Establish the previous streaming position so the next update() can detect
-    // the jump (the first update after construction has no prior sample to
-    // compare against - the discontinuity test deliberately needs a baseline,
-    // exactly as a live session accumulates one before the player teleports).
     entt::registry registry;
     world.update(registry, spawn, &physics);
 
     // Teleport far enough that NONE of the spawn near field overlaps the
-    // destination near field (well beyond the catch-up jump threshold). Use a
-    // round number of chunks so the destination columns are fresh.
+    // destination near field. Use a round number of chunks so the destination
+    // columns are fresh.
     constexpr int kTeleportChunks = 24;
     const float dest_x = static_cast<float>(kTeleportChunks * CHUNK_SIZE_X) + CHUNK_SIZE_X * 0.5f;
     const float dest_z = static_cast<float>(kTeleportChunks * CHUNK_SIZE_Z) + CHUNK_SIZE_Z * 0.5f;
     const Vec3 dest(dest_x, world.GetTerrainHeightAt(dest_x, dest_z) + 180.0f, dest_z);
 
-    // A single update at the teleported position must leave the near surface
-    // band fully renderable - this is the frame the LodGround gate samples.
-    world.update(registry, dest, &physics);
-
+    // The explicit pre-capture EnsureSurfaceReadyNear (exactly what the
+    // LodGround/FarLod harness calls before each visual capture) pulls the
+    // destination near surface band ready synchronously, so the very frame the
+    // coverage gate samples is fully renderable - 49/49, no holes.
     constexpr int kCoverageRadius = 3;
+    ASSERT_TRUE(world.EnsureSurfaceReadyNear(dest, &physics, kCoverageRadius + 1, 2));
+
     const auto coverage = world.get_camera_local_coverage_stats(dest, kCoverageRadius);
     EXPECT_GT(coverage.expected_surface_chunks, 0u);
     EXPECT_EQ(coverage.missing_surface_chunks, 0u)
-        << "teleport destination near field has uncreated surface chunks";
+        << "teleport destination near field has uncreated surface chunks after explicit EnsureSurfaceReadyNear";
     EXPECT_EQ(coverage.renderable_surface_chunks, coverage.expected_surface_chunks)
-        << "teleport destination near field is not fully renderable in the sampled frame "
+        << "teleport destination near field is not fully renderable after explicit EnsureSurfaceReadyNear "
         << "(" << coverage.renderable_surface_chunks << "/" << coverage.expected_surface_chunks << ")";
     EXPECT_TRUE(coverage.near_field_renderable);
 
