@@ -88,6 +88,46 @@ bool ValidateWorldStreamingChunkFormatJson(
 // fnv1a_64_stable_json machinery the WorldHash gate artifact records).
 std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state);
 
+// T-I4-11 determinism contract: per-system sub-hashes for desync localization.
+// The TOP-LEVEL world_hash (ComputeWorldStreamingStateHash above) is unchanged
+// byte-for-byte; these are ADDITIVE. Each field is an independent
+// fnv1a_64_stable_json checksum over a PROJECTION of the same canonical
+// per-chunk snapshot, grouping the persisted fields by subsystem so a future
+// lockstep desync (T-I4-13) reports WHICH system diverged and at what tick
+// (Factorio CRC-per-system playbook, research Area 2 takeaway 4). Same
+// chunk-id-ascending ordering and same Checksum() as the top-level hash, so
+// sub-hashes are as reproducible as the whole.
+struct WorldStreamingStateSubHashes {
+    // Terrain field + heightmap + chunk identity/state (the worldgen output).
+    std::string terrain;
+    // Surface + water mesh geometry (the meshing output).
+    std::string mesh;
+    // Water simulation level/flow/terrain-height fields and water flags.
+    std::string water;
+    // ECS entity snapshot hash (RNG-bearing sim entities live here). Empty when
+    // no entity snapshot is supplied; ServerWorldRunner fills it from the
+    // session registry.
+    std::string entities;
+};
+
+// Computes the chunk-derived per-system sub-hashes (terrain/mesh/water). Pure
+// projection of the same snapshot the top-level hash uses; does not touch
+// ComputeWorldStreamingStateHash. The entities field is left empty.
+WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state);
+
+// Overload that also fills the entities sub-hash from a serialized ECS entity
+// snapshot (the canonical SerializeEntityRegistrySnapshotJson output), checksummed
+// with the SAME fnv1a_64_stable_json machinery as the chunk groups. Pass the
+// empty-snapshot serialization for a terrain/water-only headless world.
+WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(
+    const WorldStreamingState& state,
+    const std::string& entity_snapshot_json);
+
+// Exposes the determinism-stable checksum (fnv1a_64_stable_json) used by every
+// world/sub hash so callers can hash auxiliary canonical strings (e.g. an
+// entity snapshot) with the identical algorithm.
+std::string StableChecksum(const std::string& canonical_text);
+
 WorldPersistenceRoundtripAnalysis BuildWorldPersistenceRoundtripAnalysis(const std::string& build_preset);
 std::string SerializeWorldPersistenceRoundtripJson(const WorldPersistenceRoundtripAnalysis& analysis);
 bool WorldPersistenceRoundtripMeetsBaseline(const WorldPersistenceRoundtripAnalysis& analysis);

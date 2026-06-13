@@ -46,6 +46,40 @@ function(luminumbra_configure_first_party_target TARGET_NAME)
   endif()
 endfunction()
 
+# T-I4-11 determinism contract (FP flag pinning). The simulation-authority
+# targets (luminumbra_common, luminumbra_server_app) must produce bit-identical
+# floating point across optimization levels and machines so the lockstep
+# world_hash oracle (T-I4-13) can rely on it. The hazard here is FMA
+# CONTRACTION: Jolt exports -mavx2 -mfma -mfpmath=sse as PUBLIC compile options
+# (vendor/Jolt/Jolt.cmake:677/681), so those flags flow transitively onto every
+# sim translation unit; with -mfma available, GCC's default -ffp-contract=fast
+# can fuse a*b+c into a single rounding (FMA) at higher optimization, diverging
+# from the unfused debug result. Pinning -ffp-contract=off forbids that fusion
+# everywhere. No -ffast-math reaches these targets (it is confined to vendor
+# FastNoise); this function asserts that invariant rather than assuming it.
+# Generalizes the per-file AnimationRuntime.cpp pin (T-I3-15) to whole targets.
+# MSVC's analogue is /fp:precise (default) + /fp:contract- but the build is
+# GCC/MinGW today; the MSVC arm is added defensively for a future client lane.
+function(luminumbra_pin_fp_determinism TARGET_NAME)
+  if(NOT TARGET ${TARGET_NAME})
+    return()
+  endif()
+  get_target_property(_lpfd_type ${TARGET_NAME} TYPE)
+  if(_lpfd_type STREQUAL "INTERFACE_LIBRARY")
+    return()
+  endif()
+  if(MSVC)
+    target_compile_options(${TARGET_NAME} PRIVATE /fp:precise)
+    # /fp:contract- requires MSVC >= 19.30 (VS2022 17.0); the cmake generator
+    # expression keeps older toolchains compiling (they default to no
+    # contraction anyway).
+    target_compile_options(${TARGET_NAME} PRIVATE
+      $<$<CXX_COMPILER_VERSION:GREATER_EQUAL:19.30>:/fp:contract->)
+  else()
+    target_compile_options(${TARGET_NAME} PRIVATE -ffp-contract=off)
+  endif()
+endfunction()
+
 include(cmake/engine_version.cmake)
 
 # Fetch all third-party dependencies from a central file
@@ -130,6 +164,13 @@ target_compile_definitions(luminumbra_client_app PRIVATE
 target_include_directories(luminumbra_common PUBLIC
     "${LUMINUMBRA_ENGINE_VERSION_INCLUDE_DIR}"
 )
+
+# T-I4-11: pin FP determinism on the simulation-authority targets (see the
+# luminumbra_pin_fp_determinism rationale above). Proven hash-neutral in the
+# landing commit (HeadlessServerTick world_hash unchanged) because debug -O0
+# never contracted; this guards the release lane and cross-machine builds.
+luminumbra_pin_fp_determinism(luminumbra_common)
+luminumbra_pin_fp_determinism(luminumbra_server_app)
 
 # --- FINAL DEPENDENCY LINK ---
 # Make the main game executable depend on the asset processing target.
