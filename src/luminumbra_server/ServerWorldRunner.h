@@ -81,6 +81,16 @@ public:
     // entity-bearing server desync is attributable.
     Persistence::WorldStreamingStateSubHashes ComputeWorldSubHashes();
 
+    // T-I4-12 replay checkpoint capture: computes the top-level world_hash AND
+    // the per-system sub-hashes from a SINGLE quiesce + chunk snapshot (instead
+    // of two independent snapshots via ComputeWorldHash + ComputeWorldSubHashes).
+    // One settled-state read per checkpoint keeps the recorder's mid-run capture
+    // minimal. out_world_hash and out_sub are filled together and are exactly the
+    // values the separate calls would produce.
+    void ComputeWorldHashAndSubHashes(
+        std::string& out_world_hash,
+        Persistence::WorldStreamingStateSubHashes& out_sub);
+
     // T-I4-11 heavy oracle support: persists the COMPLETE in-memory streamed-
     // chunk snapshot via WorldSaveService::save_world (NOT the dirty-gated
     // GameSession::SaveWorldState, which writes nothing for a never-edited
