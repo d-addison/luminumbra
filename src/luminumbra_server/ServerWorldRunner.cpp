@@ -1,6 +1,7 @@
 #include "ServerWorldRunner.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <utility>
 
 #include "luminumbra_common/core/Log.h"
@@ -25,7 +26,17 @@ bool ServerWorldRunner::Boot() {
         return true;
     }
 
-    m_jobSystem.startup();
+    // T-I4-12: optional worker-count override (LUMINUMBRA_JOB_WORKERS). The
+    // streamed-chunk world_hash is INVARIANT to worker count (hashes are computed
+    // after a full streaming quiesce), so this is a pure scheduling knob: the
+    // replay gates set it to 1 to minimize the headless server's known
+    // intermittent shutdown/streaming race (documented in T-I4-11) without
+    // touching the hash. Unset => one worker per hardware thread (production).
+    if (const char* wc = std::getenv("LUMINUMBRA_JOB_WORKERS")) {
+        m_jobSystem.startup(static_cast<std::size_t>(std::strtoul(wc, nullptr, 10)));
+    } else {
+        m_jobSystem.startup();
+    }
 
     m_session = std::make_unique<world::GameSession>();
     m_session->SetJobSystem(&m_jobSystem);
@@ -174,6 +185,36 @@ Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHash
     const std::string empty_entities =
         Ecs::SerializeEntityRegistrySnapshotJson(Ecs::EntityRegistrySnapshot{});
     return Persistence::ComputeWorldStreamingStateSubHashes(state, empty_entities);
+}
+
+void ServerWorldRunner::ComputeWorldHashAndSubHashes(
+    std::string& out_world_hash,
+    Persistence::WorldStreamingStateSubHashes& out_sub) {
+    // T-I4-12: single quiesce + single chunk snapshot feeding BOTH hashes. This
+    // is the recorder/replayer's mid-run checkpoint capture; minimizing the
+    // settled-state reads keeps the capture window tight. The produced values are
+    // byte-identical to ComputeWorldHash() and ComputeWorldSubHashes() called
+    // separately (same WorldSaveService::world_hash + same projection).
+    out_world_hash.clear();
+    out_sub = Persistence::WorldStreamingStateSubHashes{};
+    if (!m_booted || !m_session || !m_session->GetWorldSystem()) {
+        return;
+    }
+
+    auto* world_system = m_session->GetWorldSystem();
+    world_system->wait_for_streaming_jobs();
+
+    WorldStreamingState state;
+    for (const auto& chunk : world_system->snapshot_streamed_chunks()) {
+        state.insert_chunk(chunk);
+    }
+
+    Persistence::WorldSaveService service;
+    out_world_hash = service.world_hash(state);
+
+    const std::string empty_entities =
+        Ecs::SerializeEntityRegistrySnapshotJson(Ecs::EntityRegistrySnapshot{});
+    out_sub = Persistence::ComputeWorldStreamingStateSubHashes(state, empty_entities);
 }
 
 std::size_t ServerWorldRunner::SaveFullSnapshot() {

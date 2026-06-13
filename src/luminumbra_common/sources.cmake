@@ -32,6 +32,9 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/persistence/WorldPersistenceRoundtrip.cpp
     ${CMAKE_CURRENT_LIST_DIR}/persistence/WorldSaveService.cpp
 
+    # Replay (T-I4-12: LREC1 session replay stream; engine-generic)
+    ${CMAKE_CURRENT_LIST_DIR}/replay/ReplayStream.cpp
+
     # Scripting
     ${CMAKE_CURRENT_LIST_DIR}/scripting/LuaApiManifest.cpp
     ${CMAKE_CURRENT_LIST_DIR}/scripting/LuaState.cpp
