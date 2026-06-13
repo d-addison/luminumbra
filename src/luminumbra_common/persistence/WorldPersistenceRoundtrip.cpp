@@ -726,6 +726,101 @@ std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state) {
     return Checksum(SerializeWorldStreamingStateSnapshotJson(state));
 }
 
+WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state) {
+    // T-I4-11: project the SAME canonical snapshot the top-level hash uses into
+    // per-subsystem field groups, then checksum each group with the SAME
+    // Checksum() and the SAME chunk-id-ascending ordering. This never calls or
+    // alters ComputeWorldStreamingStateHash, so the top-level world_hash is
+    // byte-identical; these sub-hashes are purely additive localization data.
+    auto chunks = state.snapshot_chunks();
+    std::sort(chunks.begin(), chunks.end(), [](const auto& lhs, const auto& rhs) {
+        if (!lhs || !rhs) {
+            return static_cast<bool>(rhs);
+        }
+        return lhs->get_id() < rhs->get_id();
+    });
+
+    nlohmann::json terrain_array = nlohmann::json::array();
+    nlohmann::json mesh_array = nlohmann::json::array();
+    nlohmann::json water_array = nlohmann::json::array();
+
+    for (const auto& chunk : chunks) {
+        if (!chunk) {
+            continue;
+        }
+        // Full per-chunk JSON (identical to the bytes the top-level hash sees),
+        // then slice the fields into subsystem groups. Each group carries the
+        // chunk identity so a per-chunk divergence is attributable.
+        const nlohmann::json full = ChunkToJson(*chunk);
+
+        // Terrain: worldgen field + heightmap + chunk identity/state.
+        terrain_array.push_back(nlohmann::json{
+            {"coords", full.at("coords")},
+            {"chunk_id", full.at("chunk_id")},
+            {"state", full.at("state")},
+            {"state_value", full.at("state_value")},
+            {"sdf_data", full.at("sdf_data")},
+            {"heightmap_data", full.at("heightmap_data")},
+        });
+
+        // Mesh: surface + water mesh geometry and meshing bookkeeping.
+        mesh_array.push_back(nlohmann::json{
+            {"chunk_id", full.at("chunk_id")},
+            {"mesh_vertices", full.at("mesh_vertices")},
+            {"mesh_indices", full.at("mesh_indices")},
+            {"water_mesh_vertices", full.at("water_mesh_vertices")},
+            {"water_mesh_indices", full.at("water_mesh_indices")},
+            {"pending_mesh_vertices", full.at("pending_mesh_vertices")},
+            {"pending_mesh_indices", full.at("pending_mesh_indices")},
+            {"pending_water_mesh_vertices", full.at("pending_water_mesh_vertices")},
+            {"pending_water_mesh_indices", full.at("pending_water_mesh_indices")},
+            {"mesh_version", full.at("mesh_version")},
+            {"water_mesh_version", full.at("water_mesh_version")},
+        });
+
+        // Water: simulation level/flow fields + water state flags.
+        water_array.push_back(nlohmann::json{
+            {"chunk_id", full.at("chunk_id")},
+            {"water_level_data", full.at("water_level_data")},
+            {"water_flow_data", full.at("water_flow_data")},
+            {"water_sim_terrain_height", full.at("water_sim_terrain_height")},
+            {"has_water_sim", full.at("has_water_sim")},
+            {"water_mesh_generated", full.at("water_mesh_generated")},
+            {"current_water_resolution", full.at("current_water_resolution")},
+            {"is_water_sleeping", full.at("is_water_sleeping")},
+            {"max_water_delta_last_tick", full.at("max_water_delta_last_tick")},
+            {"ticks_below_threshold", full.at("ticks_below_threshold")},
+            {"water_mesh_dirty_ticks", full.at("water_mesh_dirty_ticks")},
+        });
+    }
+
+    WorldStreamingStateSubHashes sub;
+    sub.terrain = Checksum(StableDump(nlohmann::json{
+        {"section", "terrain"}, {"order_contract", kOrderContract},
+        {"chunk_count", terrain_array.size()}, {"chunks", std::move(terrain_array)}}));
+    sub.mesh = Checksum(StableDump(nlohmann::json{
+        {"section", "mesh"}, {"order_contract", kOrderContract},
+        {"chunk_count", mesh_array.size()}, {"chunks", std::move(mesh_array)}}));
+    sub.water = Checksum(StableDump(nlohmann::json{
+        {"section", "water"}, {"order_contract", kOrderContract},
+        {"chunk_count", water_array.size()}, {"chunks", std::move(water_array)}}));
+    // entities filled by the overload below from the ECS snapshot (no chunk source).
+    sub.entities = std::string();
+    return sub;
+}
+
+WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(
+    const WorldStreamingState& state,
+    const std::string& entity_snapshot_json) {
+    WorldStreamingStateSubHashes sub = ComputeWorldStreamingStateSubHashes(state);
+    sub.entities = Checksum(entity_snapshot_json);
+    return sub;
+}
+
+std::string StableChecksum(const std::string& canonical_text) {
+    return Checksum(canonical_text);
+}
+
 WorldPersistenceRoundtripAnalysis BuildWorldPersistenceRoundtripAnalysis(const std::string& build_preset) {
     WorldPersistenceRoundtripAnalysis analysis;
     analysis.build_preset = build_preset;

@@ -84,8 +84,12 @@ player-view/farlod-horizon/timeofday on all three presets. Defect backlog
 2. tod-sky-balance (quality): night sky luma barely drops (252 noon -> 171
    night) while ground goes 234 -> 6; dusk has no warm tint. Tighten the
    TimeOfDaySweep per-phase sky bands so this fails, then fix.
-3. farlod-pinholes (quality, medium confidence): sky-color pinholes through
-   archipelago far slope meshes; re-triage after the water exposure fix.
+3. farlod-pinholes: RE-TRIAGED CLOSED (2026-06-12), no geometry defect.
+   The white speckles on archipelago shoreline slopes are legitimate
+   sand-material patches (a post-triplanar material dye turned them green
+   with the rest of the sand; true holes would have kept the background
+   color). They read glaring white from the noon sand brightness - same
+   aesthetic root as the sand-flat item above (albedo-calibration domain).
 No structures were visible in any station capture (could not be judged);
 no chunk seams/cracks/floaters/degenerate slivers observed. Aesthetic
 carry-overs confirmed: near-black shadowed slopes at noon, razor-straight

@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "SkinnedMeshVisual", "EngineGameSplitLint", "CreatureSlice", "BiomeCoverage", "RiverPresence", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "BiomeCoverage", "RiverPresence", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -3215,6 +3215,27 @@ function Test-HeadlessServerTick {
     if ($analysis.world_hash -ne $analysis.world_hash_replay) {
         throw "headless server world_hash mismatch: $($analysis.world_hash) != $($analysis.world_hash_replay)"
     }
+
+    # T-I4-11: per-system sub-hashes must exist and match run vs replay. A
+    # mismatch in any one localizes a future desync to that subsystem; their
+    # presence is additive (the top-level world_hash above is unchanged).
+    if ($null -eq $analysis.sub_hashes -or $null -eq $analysis.sub_hashes_replay) {
+        throw "headless server artifact is missing the T-I4-11 sub_hashes fields"
+    }
+    foreach ($section in @("terrain", "mesh", "water", "entities")) {
+        $a = $analysis.sub_hashes.$section
+        $b = $analysis.sub_hashes_replay.$section
+        if ([string]::IsNullOrWhiteSpace($a)) {
+            throw "headless server sub_hashes.$section is empty"
+        }
+        if ($a -ne $b) {
+            throw "headless server sub-hash divergence in '$section': $a != $b (desync localized to $section)"
+        }
+    }
+    if (-not $analysis.sub_hashes_match) {
+        throw "headless server reported sub_hashes_match=false"
+    }
+
     if ($analysis.tick_rate_hz -ne 30.0) {
         throw "headless server must tick at the canonical 30 Hz (got $($analysis.tick_rate_hz))"
     }
@@ -3238,8 +3259,55 @@ function Test-HeadlessServerTick {
             throw "headless server streamed no chunks around the spawn anchor"
         }
     }
-    Write-Host ("headless server tick gate passed: world_hash={0} == world_hash_replay, {1} ticks x 2 runs, {2} chunks streamed per run" -f `
-        $analysis.world_hash, $analysis.ticks_requested, $analysis.runs[0].chunks_streamed)
+    Write-Host ("headless server tick gate passed: world_hash={0} == world_hash_replay, {1} ticks x 2 runs, {2} chunks streamed per run; sub-hashes [terrain={3} mesh={4} water={5} entities={6}] match" -f `
+        $analysis.world_hash, $analysis.ticks_requested, $analysis.runs[0].chunks_streamed, `
+        $analysis.sub_hashes.terrain, $analysis.sub_hashes.mesh, $analysis.sub_hashes.water, $analysis.sub_hashes.entities)
+}
+
+function Test-HeadlessServerTickHeavy {
+    # T-I4-11 heavy-mode oracle (Factorio "heavy mode"): tick N, SAVE the full
+    # streamed-chunk set, LOAD it into a FRESH session, resimulate M further
+    # ticks on BOTH and compare AUTHORITATIVE sim state (terrain/water/entities)
+    # + per-system sub-hashes. Catches sim state excluded from the hash and
+    # save/load round-trip divergence. Kept off the default lane (slower:
+    # two sessions, a save and a load) -- run via -Mode HeadlessServerTickHeavy.
+    $serverExe = "build/$BuildPreset/bin/luminumbra_server_app.exe"
+    if (-not (Test-Path $serverExe)) {
+        throw "headless heavy gate not yet built - missing $serverExe (cmake --build build/$BuildPreset)"
+    }
+
+    $artifactPath = "build/$BuildPreset/test-artifacts/server/server-tick-heavy.json"
+    if (Test-Path $artifactPath) {
+        Remove-Item $artifactPath
+    }
+
+    & $serverExe --heavy --ticks 60 --heavy-resim 30 --artifact $artifactPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "headless server heavy oracle exited with code $LASTEXITCODE"
+    }
+
+    $h = Read-JsonArtifact $artifactPath "luminumbra.server_tick_heavy.v1"
+    Assert-ArtifactPassed $h "HeadlessServerTickHeavy"
+
+    if (-not $h.roundtrip_match) {
+        throw "heavy oracle: authoritative state diverged across save/load round-trip (terrain/water/entities)"
+    }
+    if (-not $h.resim_match) {
+        throw "heavy oracle: authoritative state diverged after resimulating both sessions"
+    }
+    # Authoritative sub-hashes must be byte-equal at both comparison points.
+    foreach ($section in @("terrain", "water", "entities")) {
+        if ($h.original_at_save.sub_hashes.$section -ne $h.loaded_at_load.sub_hashes.$section) {
+            throw "heavy oracle: round-trip $section sub-hash mismatch: $($h.original_at_save.sub_hashes.$section) != $($h.loaded_at_load.sub_hashes.$section)"
+        }
+        if ($h.original_final.sub_hashes.$section -ne $h.loaded_final.sub_hashes.$section) {
+            throw "heavy oracle: resim $section sub-hash mismatch: $($h.original_final.sub_hashes.$section) != $($h.loaded_final.sub_hashes.$section)"
+        }
+    }
+
+    $meshNote = if ($h.resim_mesh_match) { "mesh also matched" } else { "mesh differs (derived render artifact; excluded by design)" }
+    Write-Host ("headless heavy oracle passed: {0} ticks -> save -> load -> +{1} ticks; authoritative state (terrain/water/entities) round-trips AND resims identically. {2}." -f `
+        $h.ticks_before_save, $h.resim_ticks, $meshNote)
 }
 
 function Test-SkinnedMeshVisual {
@@ -3384,6 +3452,154 @@ function Test-EngineGameSplitLint {
     }
 
     Write-Host "engine-game split lint: $scannedFiles engine files scanned, 0 game-noun violations"
+}
+
+function Test-SimDeterminismLint {
+    # T-I4-11 determinism contract (prevention, not detection). Bans, in the
+    # SIM-CRITICAL paths (luminumbra_common simulation systems + the headless
+    # server), the constructs that silently diverge a lockstep tick -- the
+    # Factorio std::sort-comparator lesson (research Area 2, takeaway 6/9):
+    #   (a) libm transcendentals (sin/cos/tan/exp/log/pow/atan2) -- different
+    #       per libm; sim code must call core/DeterministicMath.h instead.
+    #       sqrt is NOT banned (IEEE-754 correctly-rounded => already stable);
+    #       floor/ceil/round are exact and not scanned.
+    #   (b) wall-clock time (std::chrono::system_clock/steady_clock/
+    #       high_resolution_clock, std::time, glfwGetTime) -- non-deterministic.
+    #   (c) non-seeded RNG (rand/srand/std::random_device/std::mt19937/
+    #       std::default_random_engine) -- a sim RNG must be one seeded stream.
+    #   (d) range-for iteration over std::unordered_map/set where order feeds
+    #       sim state. Heuristic: flag `for (... : <ident>)` where the same TU
+    #       declares that identifier an unordered_map/set. Hash-order iteration
+    #       is the single most common real desync.
+    # This gate is APPEND-ONLY safe: it PASSES on the current tree (every
+    # existing legitimate site is allowlisted below WITH a reason) and exists to
+    # fail NEW violations. Migration of existing sqrt/etc. is explicitly out of
+    # scope for T-I4-11.
+
+    # Sim-critical roots. world/systems/fields/ai/simulation/animation/physics
+    # under common are authoritative tick state; net/network carry hashed state;
+    # the headless server drives the canonical loop. Render/scripting/persistence
+    # IO and core utilities are excluded (not per-tick authoritative math).
+    $simRoots = @(
+        "src/luminumbra_common/systems",
+        "src/luminumbra_common/world",
+        "src/luminumbra_common/fields",
+        "src/luminumbra_common/ai",
+        "src/luminumbra_common/simulation",
+        "src/luminumbra_common/animation",
+        "src/luminumbra_common/physics",
+        "src/luminumbra_server"
+    )
+
+    # Allowlist: "<relative-path>|<category>" entries that are legitimate and
+    # MUST NOT be flagged. Each carries an inline reason. Keep this list small
+    # and justified; adding an entry is a determinism decision.
+    $allowlist = @{
+        # World-creation BOOTSTRAP: seed default, unique world-id (directory
+        # name) and creation-timestamp metadata. None of these feed the per-tick
+        # sim or world_hash -- they SELECT the seed, after which generation is
+        # fully deterministic. A fresh world with no seed is intentionally
+        # non-reproducible (like a UUID); a seeded world is bit-stable.
+        "src/luminumbra_common/world/GameSession.cpp|time"  = "world-id/creation metadata + seed default; not per-tick sim state"
+        "src/luminumbra_common/world/GameSession.cpp|rng"   = "seed default + world-id RNG; bootstrap only, never per-tick"
+        # TELEMETRY ONLY: meshing build-time stats (elapsed_us) and the server
+        # wall_seconds report. Measured, recorded in artifacts, never hashed.
+        "src/luminumbra_common/world/MarchingCubes.cpp|time" = "TerrainMeshBuildStats elapsed_us telemetry; not hashed"
+        "src/luminumbra_server/ServerWorldRunner.cpp|time"   = "RunFixedTicks wall_seconds report telemetry; not hashed"
+    }
+
+    $bannedTrig = 'sin|cos|tan|asin|acos|atan|atan2|sinh|cosh|tanh|exp|exp2|log|log2|log10|pow|cbrt|hypot'
+    $violations = New-Object 'System.Collections.Generic.List[string]'
+    $scanned = 0
+    $repoRoot = (Resolve-Path ".").Path
+
+    foreach ($root in $simRoots) {
+        if (-not (Test-Path $root)) { continue }
+        $files = Get-ChildItem -Path $root -Recurse -File |
+            Where-Object { $_.Extension -in @(".h", ".hpp", ".cpp", ".inl", ".c") }
+        foreach ($file in $files) {
+            $scanned++
+            $relative = $file.FullName.Substring($repoRoot.Length + 1).Replace("\", "/")
+            $rawLines = Get-Content $file.FullName
+            $content = $rawLines -join "`n"
+
+            # Collect identifiers declared as unordered_map/set in this TU so the
+            # range-for check can tell hashed iteration from ordered iteration.
+            $unorderedIdents = @{}
+            foreach ($line in $rawLines) {
+                $m = [regex]::Matches($line, 'std::unordered_(?:map|set|multimap|multiset)\s*<[^;{]*?>\s+([A-Za-z_]\w*)')
+                foreach ($mm in $m) { $unorderedIdents[$mm.Groups[1].Value] = $true }
+                # member/typedef-style: `... m_foo;` where the type was unordered_*
+                $m2 = [regex]::Matches($line, 'std::unordered_(?:map|set|multimap|multiset)\s*<')
+            }
+
+            $lineNo = 0
+            foreach ($line in $rawLines) {
+                $lineNo++
+                # Strip line comments so commented examples never trip the lint.
+                $code = $line -replace '//.*$', ''
+                if ($code -match '^\s*\*' -or $code -match '^\s*/\*') { continue }
+
+                # (a) libm transcendentals: std::<fn>( or bare <fn>( / <fn>f(.
+                if ($code -match ("(?:std::)?(?:$bannedTrig)f?\s*\(")) {
+                    # Allow DeterministicMath:: dispatch and glm:: (glm trig is
+                    # template math the migration task addresses separately; the
+                    # present sim paths use none -- if one appears it is flagged
+                    # via the std::/bare forms, not glm).
+                    if ($code -notmatch 'DeterministicMath::' -and $code -match ("(?:std::|[^.\w])(?:$bannedTrig)f?\s*\(")) {
+                        $key = "$relative|trig"
+                        if (-not $allowlist.ContainsKey($key)) {
+                            $violations.Add("trig: ${relative}:${lineNo}: libm transcendental in sim path -> use DeterministicMath:: ; `"$($code.Trim())`"")
+                        }
+                    }
+                }
+
+                # (b) wall-clock.
+                if ($code -match 'std::chrono::(system_clock|steady_clock|high_resolution_clock)' -or
+                    $code -match 'std::time\s*\(' -or
+                    $code -match 'glfwGetTime\s*\(') {
+                    $key = "$relative|time"
+                    if (-not $allowlist.ContainsKey($key)) {
+                        $violations.Add("time: ${relative}:${lineNo}: wall-clock in sim path ; `"$($code.Trim())`"")
+                    }
+                }
+
+                # (c) non-seeded RNG.
+                if ($code -match 'std::random_device' -or
+                    $code -match 'std::mt19937' -or
+                    $code -match 'std::default_random_engine' -or
+                    $code -match '(^|[^.\w])s?rand\s*\(') {
+                    $key = "$relative|rng"
+                    if (-not $allowlist.ContainsKey($key)) {
+                        $violations.Add("rng: ${relative}:${lineNo}: non-seeded RNG in sim path ; `"$($code.Trim())`"")
+                    }
+                }
+
+                # (d) range-for over a hashed container declared in this TU.
+                $rf = [regex]::Match($code, 'for\s*\(\s*[^:;]*:\s*([A-Za-z_]\w*)')
+                if ($rf.Success) {
+                    $iterName = $rf.Groups[1].Value
+                    if ($unorderedIdents.ContainsKey($iterName)) {
+                        $key = "$relative|hashiter"
+                        if (-not $allowlist.ContainsKey($key)) {
+                            $violations.Add("hashiter: ${relative}:${lineNo}: range-for over unordered '$iterName' in sim path (iteration order is non-deterministic) ; `"$($code.Trim())`"")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if ($scanned -lt 10) {
+        throw "sim determinism lint scanned suspiciously few files ($scanned); sim-path scan is broken"
+    }
+
+    if ($violations.Count -gt 0) {
+        foreach ($v in $violations) { Write-Host "  $v" }
+        throw "sim determinism lint found $($violations.Count) violation(s) in sim-critical paths (T-I4-11). Use core/DeterministicMath.h, the seeded sim RNG, the SimulationClock, and ordered iteration; or allowlist with a documented reason."
+    }
+
+    Write-Host ("sim determinism lint: {0} sim-critical files scanned, 0 new violations ({1} documented allowlist exception site(s))" -f $scanned, $allowlist.Count)
 }
 
 function Test-CreatureSlice {
@@ -3799,8 +4015,10 @@ switch ($Mode) {
     "PlayerView" { Test-PlayerView }
     "FarLodHorizon" { Test-FarLodHorizon }
     "HeadlessServerTick" { Test-HeadlessServerTick }
+    "HeadlessServerTickHeavy" { Test-HeadlessServerTickHeavy }
     "SkinnedMeshVisual" { Test-SkinnedMeshVisual }
     "EngineGameSplitLint" { Test-EngineGameSplitLint }
+    "SimDeterminismLint" { Test-SimDeterminismLint }
     "CreatureSlice" { Test-CreatureSlice }
     "BiomeCoverage" { Test-BiomeCoverage }
     "RiverPresence" { Test-RiverPresence }

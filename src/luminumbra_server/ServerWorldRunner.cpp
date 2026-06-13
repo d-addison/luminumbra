@@ -4,6 +4,8 @@
 #include <utility>
 
 #include "luminumbra_common/core/Log.h"
+#include "luminumbra_common/ecs/EntitySnapshot.h"
+#include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
@@ -146,6 +148,61 @@ std::string ServerWorldRunner::ComputeWorldHash() {
 
     Persistence::WorldSaveService service;
     return service.world_hash(state);
+}
+
+Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHashes() {
+    // T-I4-11: per-system sub-hashes over the SAME streamed-chunk snapshot the
+    // top-level world_hash is built from. Additive desync localization; the
+    // top-level hash (ComputeWorldHash) is unchanged.
+    Persistence::WorldStreamingStateSubHashes empty;
+    if (!m_booted || !m_session || !m_session->GetWorldSystem()) {
+        return empty;
+    }
+
+    auto* world_system = m_session->GetWorldSystem();
+    world_system->wait_for_streaming_jobs();
+
+    WorldStreamingState state;
+    for (const auto& chunk : world_system->snapshot_streamed_chunks()) {
+        state.insert_chunk(chunk);
+    }
+
+    // The headless server is terrain/water authority only: no game entities are
+    // streamed, so the entities sub-hash is the stable checksum of the EMPTY
+    // canonical ECS snapshot. Present (not blank) so a future entity-bearing
+    // server reports an entity-section divergence rather than a silent gap.
+    const std::string empty_entities =
+        Ecs::SerializeEntityRegistrySnapshotJson(Ecs::EntityRegistrySnapshot{});
+    return Persistence::ComputeWorldStreamingStateSubHashes(state, empty_entities);
+}
+
+std::size_t ServerWorldRunner::SaveFullSnapshot() {
+    // T-I4-11: write the FULL in-memory streamed-chunk set (not dirty-gated) so
+    // a loaded session can adopt exactly this set. Reuses WorldSaveService.
+    if (!m_booted || !m_session || !m_session->GetWorldSystem()) {
+        return 0;
+    }
+    auto* world_system = m_session->GetWorldSystem();
+    world_system->wait_for_streaming_jobs();
+
+    WorldStreamingState state;
+    for (const auto& chunk : world_system->snapshot_streamed_chunks()) {
+        state.insert_chunk(chunk);
+    }
+
+    const std::filesystem::path save_dir = m_session->GetWorldSaveDir();
+    if (save_dir.empty()) {
+        return 0;
+    }
+    Persistence::WorldSaveService service;
+    std::vector<std::string> errors;
+    if (!service.save_world(state, save_dir, &errors)) {
+        for (const std::string& error : errors) {
+            LUMINUMBRA_CORE_ERROR("SaveFullSnapshot failed: {}", error);
+        }
+        return 0;
+    }
+    return state.size();
 }
 
 std::size_t ServerWorldRunner::StreamedChunkCount() {

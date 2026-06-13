@@ -104,6 +104,7 @@ endif()
 add_executable(common_tests
     common/AnimationRuntime_test.cpp
     common/BiomeReverb_test.cpp
+    common/DeterministicMath_test.cpp
     common/EngineContracts_test.cpp
     common/FarLodStore_test.cpp
     common/GameSessionHeadlessWorld_test.cpp

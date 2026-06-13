@@ -17,6 +17,7 @@
 #include <string>
 
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/world/GameSession.h"
 
 namespace Luminumbra::Server {
@@ -72,6 +73,20 @@ public:
     // Deterministic hash over the in-memory streamed-chunk snapshot
     // (WorldSaveService::world_hash; format-independent persistence hash).
     std::string ComputeWorldHash();
+
+    // T-I4-11: per-system sub-hashes over the SAME streamed-chunk snapshot, for
+    // desync localization. The top-level ComputeWorldHash() above is unchanged;
+    // these are additive. entities is the stable hash of the (currently empty,
+    // terrain/water-only headless) ECS snapshot -- present so a future
+    // entity-bearing server desync is attributable.
+    Persistence::WorldStreamingStateSubHashes ComputeWorldSubHashes();
+
+    // T-I4-11 heavy oracle support: persists the COMPLETE in-memory streamed-
+    // chunk snapshot via WorldSaveService::save_world (NOT the dirty-gated
+    // GameSession::SaveWorldState, which writes nothing for a never-edited
+    // world). Used so a freshly loaded session adopts exactly this chunk set and
+    // the save/load round-trip is comparable. Returns the chunk count written.
+    std::size_t SaveFullSnapshot();
 
     std::size_t StreamedChunkCount();
     std::size_t LoadedChunkCount() const;
