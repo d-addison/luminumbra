@@ -6,6 +6,7 @@
 #include "nlohmann/json.hpp" // For parsing JSON
 #include "../systems/PhysicsSystem.h"
 #include "../systems/WaterSystem.h"
+#include "../systems/WindFieldSystem.h"
 #include "../core/Log.h"
 #include "../persistence/WorldSaveService.h"
 #include "TerrainPresetLoader.h"
@@ -84,6 +85,15 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         // 2. Instinct planning (T-I3-17): need growth + deterministic
         // replanning over the registry.
         luminumbra::ai::RunInstinctSystemOnTick(m_registry, current_tick);
+
+        // 3. T-I5a-2 (A2): wind field update. Deterministic (DeterministicMath +
+        // FastNoise batch path; no wall-clock/RNG). Anchored on the spawn/stream
+        // anchor so the streamed-region grid follows it. The wind cell values
+        // feed the world_hash `wind` sub-hash; the update must run every tick so
+        // run==replay and resim agree on the field at every checkpoint.
+        if (m_windFieldSystem) {
+            m_windFieldSystem->Update(current_tick, m_metadata.spawnPoint);
+        }
 
         m_simulationEventBus.drain(current_tick);
     }
@@ -190,6 +200,11 @@ bool GameSession::CreateWorld(const std::string& name, const std::string& seed, 
     m_worldSystem->SetWaterSystem(m_waterSystem.get());
     LUMINUMBRA_CORE_INFO("World and water systems linked.");
 
+    // 4. T-I5a-2 (A2): the deterministic wind field. Pure function of the world
+    //    seed (uses seed+11 for its base-direction noise); updated per tick.
+    m_windFieldSystem = std::make_unique<Systems::WindFieldSystem>(world_seed);
+    LUMINUMBRA_CORE_INFO("Wind field system initialized.");
+
     // Calculate appropriate spawn point based on actual terrain height
     float spawn_x = 8.0f;
     float spawn_z = 8.0f;
@@ -278,6 +293,11 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     m_worldSystem = std::make_unique<Systems::SHIELD_WorldSystem>(m_jobSystem, nullptr, params, world_seed);
     m_waterSystem = std::make_unique<Systems::WaterSystem>(m_jobSystem, m_worldSystem.get());
     m_worldSystem->SetWaterSystem(m_waterSystem.get());
+
+    // T-I5a-2 (A2): the wind field is a pure function of the world seed, so a
+    // loaded world reconstructs the identical field (the heavy-oracle/replay
+    // resim reaches the same wind sub-hash at the same tick).
+    m_windFieldSystem = std::make_unique<Systems::WindFieldSystem>(world_seed);
 
     // Legacy saves without a persisted spawnPoint: derive it from terrain
     // height exactly like CreateWorld does (pure function of seed/params).
