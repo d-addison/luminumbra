@@ -108,6 +108,12 @@ struct WorldStreamingStateSubHashes {
     // no entity snapshot is supplied; ServerWorldRunner fills it from the
     // session registry.
     std::string entities;
+    // T-I5a-2 (A2): the deterministic wind field cell values (its own
+    // world_hash sub-hash slot, design-decisions.md S2). NOT chunk-derived: the
+    // wind field lives on GameSession, so the runner supplies this string from
+    // WindFieldSystem::ComputeWindSubHash(). Empty when no wind field exists
+    // (e.g. the persistence fixtures, which never construct one).
+    std::string wind;
 };
 
 // Computes the chunk-derived per-system sub-hashes (terrain/mesh/water). Pure

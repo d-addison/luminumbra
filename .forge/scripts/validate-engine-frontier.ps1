@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "ParticleEmitterDeterminism", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "BiomeCoverage", "RiverPresence", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "ParticleEmitterDeterminism", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "WindFieldDeterminism", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "BiomeCoverage", "RiverPresence", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -3294,12 +3294,14 @@ function Test-HeadlessServerTick {
     }
 
     # T-I4-11: per-system sub-hashes must exist and match run vs replay. A
-    # mismatch in any one localizes a future desync to that subsystem; their
-    # presence is additive (the top-level world_hash above is unchanged).
+    # mismatch in any one localizes a future desync to that subsystem.
+    # T-I5a-2 (A2): the `wind` sub-hash is now part of this set AND folded into
+    # the top-level world_hash (the deliberate mega-bump 2fa007951a21e140 ->
+    # 0eac465289e7c88b), so a wind divergence flips both world_hash and wind.
     if ($null -eq $analysis.sub_hashes -or $null -eq $analysis.sub_hashes_replay) {
         throw "headless server artifact is missing the T-I4-11 sub_hashes fields"
     }
-    foreach ($section in @("terrain", "mesh", "water", "entities")) {
+    foreach ($section in @("terrain", "mesh", "water", "entities", "wind")) {
         $a = $analysis.sub_hashes.$section
         $b = $analysis.sub_hashes_replay.$section
         if ([string]::IsNullOrWhiteSpace($a)) {
@@ -3336,9 +3338,94 @@ function Test-HeadlessServerTick {
             throw "headless server streamed no chunks around the spawn anchor"
         }
     }
-    Write-Host ("headless server tick gate passed: world_hash={0} == world_hash_replay, {1} ticks x 2 runs, {2} chunks streamed per run; sub-hashes [terrain={3} mesh={4} water={5} entities={6}] match" -f `
+    Write-Host ("headless server tick gate passed: world_hash={0} == world_hash_replay, {1} ticks x 2 runs, {2} chunks streamed per run; sub-hashes [terrain={3} mesh={4} water={5} entities={6} wind={7}] match" -f `
         $analysis.world_hash, $analysis.ticks_requested, $analysis.runs[0].chunks_streamed, `
-        $analysis.sub_hashes.terrain, $analysis.sub_hashes.mesh, $analysis.sub_hashes.water, $analysis.sub_hashes.entities)
+        $analysis.sub_hashes.terrain, $analysis.sub_hashes.mesh, $analysis.sub_hashes.water, $analysis.sub_hashes.entities, $analysis.sub_hashes.wind)
+}
+
+function Test-WindFieldDeterminism {
+    # T-I5a-2 (A2): the wind grid is a deterministic, hashed sim system. This
+    # gate drives the server's --wind-bench mode: seed -> N WindFieldSystem
+    # updates twice -> the wind sub-hash is EQUAL across runs and STABLE; the
+    # field EVOLVES over time (the gate is not vacuous); and the per-tick wind
+    # update stays within the PINNED <= 0.15 ms budget at the streamed extent.
+    # The `wind` sub-hash is also folded into the world_hash (the deliberate
+    # mega-bump 2fa007951a21e140 -> 0eac465289e7c88b, asserted by the headless
+    # tick / replay / lockstep gates).
+    $serverExe = "build/$BuildPreset/bin/luminumbra_server_app.exe"
+    if (-not (Test-Path $serverExe)) {
+        throw "wind-field determinism gate not yet built - missing $serverExe (cmake --build build/$BuildPreset)"
+    }
+
+    $artifactPath = "build/$BuildPreset/test-artifacts/server/wind-field-determinism.json"
+    if (Test-Path $artifactPath) {
+        Remove-Item $artifactPath
+    }
+
+    & $serverExe --wind-bench --ticks 90 --seed 424242 --artifact $artifactPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "wind-bench exited with code $LASTEXITCODE"
+    }
+
+    $a = Read-JsonArtifact $artifactPath "luminumbra.wind_field_determinism.v1"
+    Assert-ArtifactPassed $a "WindFieldDeterminism"
+
+    if ([string]::IsNullOrWhiteSpace($a.wind_sub_hash)) {
+        throw "wind-field determinism: empty wind sub-hash"
+    }
+    if ($a.wind_sub_hash -ne $a.wind_sub_hash_replay) {
+        throw "wind-field determinism: wind sub-hash diverged across runs ($($a.wind_sub_hash) != $($a.wind_sub_hash_replay))"
+    }
+    if (-not $a.deterministic) {
+        throw "wind-field determinism: reported non-deterministic"
+    }
+    if (-not $a.evolves -or $a.wind_sub_hash_tick0 -eq $a.wind_sub_hash_evolved) {
+        throw "wind-field determinism: field did not evolve over ticks (gate is vacuous)"
+    }
+    # Geometry must match the PINNED shape (24 m cells, 3 layers).
+    if ([double]$a.cell_size_m -ne 24.0) {
+        throw "wind-field determinism: cell_size_m=$($a.cell_size_m), expected 24"
+    }
+    if ([int]$a.layer_count -ne 3) {
+        throw "wind-field determinism: layer_count=$($a.layer_count), expected 3"
+    }
+    # Per-tick budget: <= 0.15 ms at the streamed extent. The PINNED budget is a
+    # RELEASE-build number (design-decisions.md S7: the 5a perf budgets are
+    # release/optimized measurements; an un-optimized debug build runs the same
+    # bit-deterministic field ~10x slower). So the budget is asserted against the
+    # release build when one exists; the determinism/geometry checks above hold
+    # on whatever preset the gate runs. If no release build is present, the gate
+    # preset's measurement is reported but only enforced when it is the release
+    # build (so a debug-only run does not falsely fail the release budget).
+    $budgetMs = [double]$a.budget_ms
+    $budgetSource = $BuildPreset
+    $perTickMs = [double]$a.per_tick_update_ms
+    $releaseExe = "build/release/bin/luminumbra_server_app.exe"
+    if ($BuildPreset -ne "release" -and (Test-Path $releaseExe)) {
+        $relArtifact = "build/release/test-artifacts/server/wind-field-determinism.json"
+        Remove-Item -Force -ErrorAction SilentlyContinue $relArtifact
+        & $releaseExe --wind-bench --ticks 90 --seed 424242 --artifact $relArtifact | Out-Null
+        if ($LASTEXITCODE -eq 0 -and (Test-Path $relArtifact)) {
+            $rel = Read-JsonArtifact $relArtifact "luminumbra.wind_field_determinism.v1"
+            $perTickMs = [double]$rel.per_tick_update_ms
+            $budgetSource = "release"
+            # The release field must also be internally deterministic + evolve.
+            if (-not $rel.deterministic -or -not $rel.evolves) {
+                throw "wind-field determinism: release build run was non-deterministic or did not evolve"
+            }
+        }
+    }
+    if ($budgetSource -eq "release") {
+        if ($perTickMs -gt $budgetMs) {
+            throw ("wind-field determinism: per-tick wind update {0:N4} ms (release) exceeds the {1:N4} ms budget" -f $perTickMs, $budgetMs)
+        }
+    } else {
+        Write-Host ("wind-field determinism: NOTE budget enforced on the release build only; {0} measured {1:N4} ms (informational, budget {2:N4} ms)" -f `
+            $BuildPreset, $perTickMs, $budgetMs)
+    }
+    Write-Host ("wind-field determinism gate passed: wind_sub_hash={0} stable across 2 runs (evolves over {1} ticks); per-tick update {2:N4} ms <= {3:N4} ms budget [{4}] ({5} m cells x {6} layers x {7} extent)" -f `
+        $a.wind_sub_hash, $a.ticks, $perTickMs, $budgetMs, $budgetSource, `
+        $a.cell_size_m, $a.layer_count, $a.extent_cells)
 }
 
 function Test-HeadlessServerTickHeavy {
@@ -3415,7 +3502,8 @@ function Test-ReplayRoundtrip {
     # T-I4-12 session replay (LREC1): record a 90-tick run, replay it, and assert
     # the replay reproduces the SAME end-hash, verifies all checkpoints, and (the
     # determinism proof) that recording is hash-neutral -- the recorded run must
-    # reach the canonical HeadlessServerTick hash 2fa007951a21e140 unchanged.
+    # reach the canonical HeadlessServerTick hash 0eac465289e7c88b unchanged
+    # (T-I5a-2 mega-bump: was 2fa007951a21e140 before the `wind` sub-hash slot).
     $serverExe = "build/$BuildPreset/bin/luminumbra_server_app.exe"
     if (-not (Test-Path $serverExe)) {
         throw "replay roundtrip gate not yet built - missing $serverExe (cmake --build build/$BuildPreset)"
@@ -3462,7 +3550,7 @@ function Test-ReplayRoundtrip {
     }
     # Determinism proof: recording must NOT perturb the sim. The recorded run's
     # end hash must equal the canonical HeadlessServerTick hash, unchanged.
-    $expectedHash = "2fa007951a21e140"
+    $expectedHash = "0eac465289e7c88b"
     if ($r.end_world_hash -ne $expectedHash) {
         throw "replay roundtrip end hash $($r.end_world_hash) != canonical $expectedHash (recording perturbed the simulation)"
     }
@@ -3544,7 +3632,7 @@ function Test-ReplayDivergence {
 # + the one remote=client1), M ticks (>=90), each peer stepping its own ServerWorldRunner
 # of the SAME seed/preset. Asserts the session stayed in sync (no desync), both peers
 # reached the budget tick, the exchanged-every-cadence hashes agreed, and the two worlds
-# end at the IDENTICAL canonical hash 2fa007951a21e140 -- proving lockstep does NOT perturb
+# end at the IDENTICAL canonical hash 0eac465289e7c88b -- proving lockstep does NOT perturb
 # the simulation. Kept OFF the default All lane (slow: two full worlds), like the other
 # headless-server modes -- run via -Mode LockstepLoopback.
 function Test-LockstepLoopback {
@@ -3580,7 +3668,7 @@ function Test-LockstepLoopback {
     }
     # Determinism proof: lockstep must NOT perturb the sim. The in-sync end hash must equal
     # the canonical HeadlessServerTick hash, unchanged.
-    $expectedHash = "2fa007951a21e140"
+    $expectedHash = "0eac465289e7c88b"
     if ($a.host.world_hash -ne $expectedHash) {
         throw "lockstep loopback end hash $($a.host.world_hash) != canonical $expectedHash (lockstep perturbed the simulation)"
     }
@@ -3597,7 +3685,7 @@ function Test-LockstepLoopback {
 # look is render-side (never round-tripped). The gate asserts: both peers reach
 # the budget tick, hashes matched at every cadence, host==client end_hash, the
 # input set round-tripped, a clean disconnect, and the artifact schema. The
-# canonical 2fa007951a21e140 hash (radius-4 streaming) is asserted to prove the
+# canonical 0eac465289e7c88b hash (radius-4 streaming) is asserted to prove the
 # client world == the canonical server world. This is a HEAVY two-world lockstep
 # gate (like LockstepLoopback / HeadlessServerTick), so it stays off All.
 function Test-NetworkedSession {
@@ -3659,7 +3747,7 @@ function Test-NetworkedSession {
     }
     # Determinism proof: the client-rendered, server-owned world equals the
     # canonical headless server world. Render-side camera look did NOT perturb it.
-    $expectedHash = "2fa007951a21e140"
+    $expectedHash = "0eac465289e7c88b"
     if ($a.end_hash -ne $expectedHash) {
         throw "networked session end hash $($a.end_hash) != canonical $expectedHash (client world diverged from the server world)"
     }
@@ -3709,7 +3797,7 @@ function Test-LockstepFaultInjection {
     if ([int64]$absorb.host.late_input_events -le 0) {
         throw "lockstep fault-injection: no late-input events recorded (the delay was not exercised)"
     }
-    if (-not $absorb.end_hashes_equal -or $absorb.host.world_hash -ne "2fa007951a21e140") {
+    if (-not $absorb.end_hashes_equal -or $absorb.host.world_hash -ne "0eac465289e7c88b") {
         throw "lockstep fault-injection: absorbed-jitter run did not reach the canonical in-sync end hash (host=$($absorb.host.world_hash))"
     }
 
@@ -3959,6 +4047,11 @@ function Test-SimDeterminismLint {
         # wall_seconds report. Measured, recorded in artifacts, never hashed.
         "src/luminumbra_common/world/MarchingCubes.cpp|time" = "TerrainMeshBuildStats elapsed_us telemetry; not hashed"
         "src/luminumbra_server/ServerWorldRunner.cpp|time"   = "RunFixedTicks wall_seconds report telemetry; not hashed"
+        # T-I5a-2: the --wind-bench mode times the per-tick wind update for the
+        # WindFieldDeterminism budget assertion. The clock is TELEMETRY only
+        # (measured, recorded in the artifact, never hashed); the wind field
+        # itself is bit-deterministic (DeterministicMath + FastNoise batch path).
+        "src/luminumbra_server/main_server.cpp|time"         = "--wind-bench per-tick update timing telemetry; not hashed"
     }
 
     $bannedTrig = 'sin|cos|tan|asin|acos|atan|atan2|sinh|cosh|tanh|exp|exp2|log|log2|log10|pow|cbrt|hypot'
@@ -4470,6 +4563,7 @@ switch ($Mode) {
     "FarLodHorizon" { Test-FarLodHorizon }
     "HeadlessServerTick" { Test-HeadlessServerTick }
     "HeadlessServerTickHeavy" { Test-HeadlessServerTickHeavy }
+    "WindFieldDeterminism" { Test-WindFieldDeterminism }
     "ReplayRoundtrip" { Test-ReplayRoundtrip }
     "ReplayDivergence" { Test-ReplayDivergence }
     "LockstepLoopback" { Test-LockstepLoopback }

@@ -10,9 +10,35 @@
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
 
 namespace Luminumbra::Server {
+
+namespace {
+
+// T-I5a-2 (A2) world_hash MEGA-BUMP: the wind sub-hash from the session's wind
+// field, or empty when no wind field exists (defensive; the headless runner
+// always constructs one on world create/load).
+std::string WindSubHash(world::GameSession* session) {
+    if (!session) {
+        return {};
+    }
+    const Systems::WindFieldSystem* wind = session->GetWindFieldSystem();
+    return wind ? wind->ComputeWindSubHash() : std::string();
+}
+
+// Folds the chunk-derived top-level hash and the wind sub-hash into the new
+// composite world_hash. This is the DELIBERATE bump: the chunk hash
+// (WorldSaveService::world_hash / ComputeWorldStreamingStateHash) is unchanged
+// byte-for-byte (persistence fixtures stay green); the runner-level world_hash
+// now ALSO commits the wind field, so its value changes from 2fa007951a21e140.
+// Order is fixed (chunk then wind) so the composite is reproducible.
+std::string ComposeWorldHash(const std::string& chunk_hash, const std::string& wind_hash) {
+    return Persistence::StableChecksum(chunk_hash + "|wind:" + wind_hash);
+}
+
+} // namespace
 
 ServerWorldRunner::ServerWorldRunner(ServerWorldRunnerConfig config)
     : m_config(std::move(config)) {}
@@ -158,7 +184,9 @@ std::string ServerWorldRunner::ComputeWorldHash() {
     }
 
     Persistence::WorldSaveService service;
-    return service.world_hash(state);
+    // T-I5a-2 (A2) MEGA-BUMP: fold the wind sub-hash into the top-level hash.
+    // The chunk hash itself is unchanged; the composite deliberately is not.
+    return ComposeWorldHash(service.world_hash(state), WindSubHash(m_session.get()));
 }
 
 Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHashes() {
@@ -184,7 +212,13 @@ Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHash
     // server reports an entity-section divergence rather than a silent gap.
     const std::string empty_entities =
         Ecs::SerializeEntityRegistrySnapshotJson(Ecs::EntityRegistrySnapshot{});
-    return Persistence::ComputeWorldStreamingStateSubHashes(state, empty_entities);
+    Persistence::WorldStreamingStateSubHashes sub =
+        Persistence::ComputeWorldStreamingStateSubHashes(state, empty_entities);
+    // T-I5a-2 (A2): the wind sub-hash slot, supplied from the session's wind
+    // field (not chunk-derived). Present + stable for the WindFieldDeterminism
+    // gate and the desync-localization oracle.
+    sub.wind = WindSubHash(m_session.get());
+    return sub;
 }
 
 void ServerWorldRunner::ComputeWorldHashAndSubHashes(
@@ -209,12 +243,16 @@ void ServerWorldRunner::ComputeWorldHashAndSubHashes(
         state.insert_chunk(chunk);
     }
 
+    const std::string wind_hash = WindSubHash(m_session.get());
+
     Persistence::WorldSaveService service;
-    out_world_hash = service.world_hash(state);
+    // T-I5a-2 (A2) MEGA-BUMP: the composite world_hash (chunk + wind).
+    out_world_hash = ComposeWorldHash(service.world_hash(state), wind_hash);
 
     const std::string empty_entities =
         Ecs::SerializeEntityRegistrySnapshotJson(Ecs::EntityRegistrySnapshot{});
     out_sub = Persistence::ComputeWorldStreamingStateSubHashes(state, empty_entities);
+    out_sub.wind = wind_hash;
 }
 
 std::size_t ServerWorldRunner::SaveFullSnapshot() {
