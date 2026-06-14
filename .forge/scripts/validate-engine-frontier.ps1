@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "ReplayRoundtrip", "ReplayDivergence", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "BiomeCoverage", "RiverPresence", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "BiomeCoverage", "RiverPresence", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -3462,6 +3462,148 @@ function Test-ReplayDivergence {
     $global:LASTEXITCODE = 0
 }
 
+# --- T-I4-13 LockstepLoopback mode: append-only ---
+# Delay-based lockstep over LoopbackTransport (no sockets/ports): 2 peers (host=client0
+# + the one remote=client1), M ticks (>=90), each peer stepping its own ServerWorldRunner
+# of the SAME seed/preset. Asserts the session stayed in sync (no desync), both peers
+# reached the budget tick, the exchanged-every-cadence hashes agreed, and the two worlds
+# end at the IDENTICAL canonical hash 2fa007951a21e140 -- proving lockstep does NOT perturb
+# the simulation. Kept OFF the default All lane (slow: two full worlds), like the other
+# headless-server modes -- run via -Mode LockstepLoopback.
+function Test-LockstepLoopback {
+    $serverExe = "build/$BuildPreset/bin/luminumbra_server_app.exe"
+    if (-not (Test-Path $serverExe)) {
+        throw "lockstep loopback gate not yet built - missing $serverExe (cmake --build build/$BuildPreset)"
+    }
+
+    $lockstepDir = "build/$BuildPreset/test-artifacts/lockstep"
+    New-Item -ItemType Directory -Force -Path $lockstepDir | Out-Null
+    $artifactPath = Join-Path $lockstepDir "lockstep-loopback.json"
+    Remove-Item -Force -ErrorAction SilentlyContinue $artifactPath
+
+    & $serverExe --lockstep-loopback --ticks 90 --artifact $artifactPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "lockstep loopback exited with code $LASTEXITCODE"
+    }
+
+    $a = Read-JsonArtifact $artifactPath "luminumbra.lockstep_loopback.v1"
+    Assert-ArtifactPassed $a "LockstepLoopback"
+    if ($a.desynced) {
+        throw "lockstep loopback reported a desync on an in-sync session"
+    }
+    if ([int64]$a.ticks_requested -lt 90) {
+        throw "lockstep loopback must run at least 90 ticks (got $($a.ticks_requested))"
+    }
+    if ([int64]$a.host.agreed_tick -ne [int64]$a.ticks_requested -or
+        [int64]$a.peer.agreed_tick -ne [int64]$a.ticks_requested) {
+        throw "lockstep loopback peers did not both reach the budget tick: host=$($a.host.agreed_tick) peer=$($a.peer.agreed_tick) / $($a.ticks_requested)"
+    }
+    if (-not $a.end_hashes_equal) {
+        throw "lockstep loopback host/peer end hashes differ: $($a.host.world_hash) != $($a.peer.world_hash)"
+    }
+    # Determinism proof: lockstep must NOT perturb the sim. The in-sync end hash must equal
+    # the canonical HeadlessServerTick hash, unchanged.
+    $expectedHash = "2fa007951a21e140"
+    if ($a.host.world_hash -ne $expectedHash) {
+        throw "lockstep loopback end hash $($a.host.world_hash) != canonical $expectedHash (lockstep perturbed the simulation)"
+    }
+    Write-Host ("lockstep loopback gate passed: {0} ticks, 2 peers in sync, end_hash={1} (canonical, host==peer), max_horizon={2}, late_inputs={3}" -f `
+        $a.ticks_requested, $a.host.world_hash, $a.host.max_horizon_reached, $a.host.late_input_events)
+}
+
+# --- T-I4-13 LockstepFaultInjection mode: append-only ---
+# Two scenarios, both over LoopbackTransport (no sockets):
+#  (1) DELAYED+DROPPED input within horizon tolerance: peer 1 withholds its inputs for a
+#      burst of ticks, then releases them. The adaptive horizon must ABSORB it -- the
+#      session stays in sync (no desync), the hashes still match, and the horizon GREW
+#      (proving the absorption was real, not a no-op). The end hash stays canonical.
+#  (2) An actual STATE divergence: peer 1's captured hashes are corrupted from a chosen
+#      tick (like the ReplayDivergence fixture). The oracle must HALT the session and emit
+#      the LREC1 dump with the CORRECT divergent tick -- proving the oracle is not vacuous.
+function Test-LockstepFaultInjection {
+    $serverExe = "build/$BuildPreset/bin/luminumbra_server_app.exe"
+    if (-not (Test-Path $serverExe)) {
+        throw "lockstep fault-injection gate not yet built - missing $serverExe (cmake --build build/$BuildPreset)"
+    }
+
+    $lockstepDir = "build/$BuildPreset/test-artifacts/lockstep"
+    New-Item -ItemType Directory -Force -Path $lockstepDir | Out-Null
+
+    # --- Scenario 1: horizon absorbs a delayed/dropped input (stays in sync). ---
+    $absorbArtifact = Join-Path $lockstepDir "lockstep-absorb.json"
+    Remove-Item -Force -ErrorAction SilentlyContinue $absorbArtifact
+    & $serverExe --lockstep-loopback --ticks 90 --lockstep-delay-input 8 --artifact $absorbArtifact
+    if ($LASTEXITCODE -ne 0) {
+        throw "lockstep fault-injection (absorb) exited with code $LASTEXITCODE"
+    }
+    $absorb = Read-JsonArtifact $absorbArtifact "luminumbra.lockstep_loopback.v1"
+    Assert-ArtifactPassed $absorb "LockstepFaultInjection-absorb"
+    if ($absorb.desynced) {
+        throw "lockstep fault-injection: the horizon FAILED to absorb a delayed input (false desync)"
+    }
+    if (-not $absorb.horizon_absorbed_jitter) {
+        throw "lockstep fault-injection: artifact does not confirm horizon absorption (horizon never grew?)"
+    }
+    if ([int64]$absorb.host.max_horizon_reached -le 3) {
+        throw "lockstep fault-injection: horizon did not grow on a delayed input (max_horizon=$($absorb.host.max_horizon_reached))"
+    }
+    if ([int64]$absorb.host.late_input_events -le 0) {
+        throw "lockstep fault-injection: no late-input events recorded (the delay was not exercised)"
+    }
+    if (-not $absorb.end_hashes_equal -or $absorb.host.world_hash -ne "2fa007951a21e140") {
+        throw "lockstep fault-injection: absorbed-jitter run did not reach the canonical in-sync end hash (host=$($absorb.host.world_hash))"
+    }
+
+    # --- Scenario 2: a real state divergence HALTS the session + dumps LREC1. ---
+    $corruptArtifact = Join-Path $lockstepDir "lockstep-corrupt.json"
+    $dumpPath = Join-Path $lockstepDir "lockstep-desync.lrec1"
+    Remove-Item -Force -ErrorAction SilentlyContinue $corruptArtifact, $dumpPath, ($dumpPath + ".peer")
+    & $serverExe --lockstep-loopback --ticks 90 --lockstep-corrupt-tick 30 --lockstep-dump $dumpPath --artifact $corruptArtifact
+    if ($LASTEXITCODE -ne 0) {
+        throw "lockstep fault-injection (corrupt) exited with code $LASTEXITCODE"
+    }
+    $corrupt = Read-JsonArtifact $corruptArtifact "luminumbra.lockstep_loopback.v1"
+    Assert-ArtifactPassed $corrupt "LockstepFaultInjection-corrupt"
+    if (-not $corrupt.desynced) {
+        throw "lockstep fault-injection: a deliberate STATE divergence was NOT caught (oracle is vacuous!)"
+    }
+    if ([int64]$corrupt.desync_tick -ne 30) {
+        throw "lockstep fault-injection: divergence caught at tick $($corrupt.desync_tick), expected the corrupt tick 30"
+    }
+    if ($corrupt.desync_section -ne "terrain") {
+        throw "lockstep fault-injection: divergence localized to '$($corrupt.desync_section)', expected 'terrain'"
+    }
+    if (-not $corrupt.dump_present) {
+        throw "lockstep fault-injection: oracle halted but emitted NO LREC1 dump (no desync-repro artifact)"
+    }
+    # The dump must be a valid LREC1 stream the existing --replay path consumes (it is the
+    # desync-repro artifact). Replaying it MUST report a divergence (exit 1), not a crash.
+    $emittedDump = $corrupt.dump_path
+    if (-not (Test-Path $emittedDump)) {
+        throw "lockstep fault-injection: dump_path '$emittedDump' does not exist on disk"
+    }
+    $dumpReplayArtifact = Join-Path $lockstepDir "lockstep-dump-replay.json"
+    Remove-Item -Force -ErrorAction SilentlyContinue $dumpReplayArtifact
+    & $serverExe --replay $emittedDump --artifact $dumpReplayArtifact
+    $dumpReplayExit = $LASTEXITCODE
+    if ($dumpReplayExit -eq 0) {
+        throw "lockstep fault-injection: the desync dump replayed WITHOUT a divergence (the dump is not a real repro)"
+    }
+    if (-not (Test-Path $dumpReplayArtifact)) {
+        throw "lockstep fault-injection: replaying the dump produced no divergence artifact (a crash, not a detected divergence)"
+    }
+    $dumpReplay = Read-JsonArtifact $dumpReplayArtifact "luminumbra.replay_divergence.v1"
+    if (-not $dumpReplay.diverged) {
+        throw "lockstep fault-injection: dump replay artifact did not report diverged=true"
+    }
+    # The deliberate non-zero exit from the dump replay is the divergence we asserted; clear
+    # it so the gate reports success to its caller.
+    $global:LASTEXITCODE = 0
+
+    Write-Host ("lockstep fault-injection gate passed: (1) horizon ABSORBED a delayed input (max_horizon={0}, late_inputs={1}, end_hash canonical, no desync); (2) a real STATE divergence HALTED the session at tick {2} (section={3}) + emitted an LREC1 dump that replays to a divergence (oracle is not vacuous)" -f `
+        $absorb.host.max_horizon_reached, $absorb.host.late_input_events, $corrupt.desync_tick, $corrupt.desync_section)
+}
+
 function Test-SkinnedMeshVisual {
     # T-I3-16: skinned G-Buffer stage gate. A procedurally generated rigged
     # test mesh is spawned near spawn; two captures at different clip times
@@ -4170,6 +4312,8 @@ switch ($Mode) {
     "HeadlessServerTickHeavy" { Test-HeadlessServerTickHeavy }
     "ReplayRoundtrip" { Test-ReplayRoundtrip }
     "ReplayDivergence" { Test-ReplayDivergence }
+    "LockstepLoopback" { Test-LockstepLoopback }
+    "LockstepFaultInjection" { Test-LockstepFaultInjection }
     "SkinnedMeshVisual" { Test-SkinnedMeshVisual }
     "EngineGameSplitLint" { Test-EngineGameSplitLint }
     "SimDeterminismLint" { Test-SimDeterminismLint }
