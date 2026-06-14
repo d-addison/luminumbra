@@ -483,8 +483,9 @@ struct GpuTimerProbeResult {
 // small real GPU workload per render pass name with glQueryCounter pairs so
 // the render-health artifact carries observed gpu_ms values.
 GpuTimerProbeResult MeasureGpuTimerProbe(bool context_ready) {
-    static constexpr std::array<const char*, 8> kPassNames = {
-        "shadow", "gbuffer", "ssao", "ssao_blur", "lighting", "water", "skybox", "final_blit"};
+    // T-I5a-1: "particles" slots after "skybox" (the live ParticlePass order).
+    static constexpr std::array<const char*, 9> kPassNames = {
+        "shadow", "gbuffer", "ssao", "ssao_blur", "lighting", "water", "skybox", "particles", "final_blit"};
 
     GpuTimerProbeResult probe;
     const bool loader_ok = context_ready &&
@@ -575,7 +576,7 @@ void WriteRenderHealthAnalysis(
     output << "  },\n";
     output << "  \"render_pass_metadata\": {\n";
     output << "    \"present\": " << (pass_metadata_present ? "true" : "false") << ",\n";
-    output << "    \"required_passes\": [\"shadow\", \"gbuffer\", \"ssao\", \"ssao_blur\", \"lighting\", \"water\", \"skybox\", \"final_blit\"]\n";
+    output << "    \"required_passes\": [\"shadow\", \"gbuffer\", \"ssao\", \"ssao_blur\", \"lighting\", \"water\", \"skybox\", \"particles\", \"final_blit\"]\n";
     output << "  },\n";
     output << "  \"resource_registry\": {\n";
     output << "    \"present\": " << (resource_registry_present ? "true" : "false") << ",\n";
@@ -1283,7 +1284,7 @@ TEST(RenderSmokeTest, RenderHealthGateEmitsAnalysisArtifact) {
     EXPECT_TRUE(resource_registry_present);
     EXPECT_TRUE(terrain_materials_present);
     EXPECT_TRUE(gpu_timer_api_present);
-    EXPECT_EQ(gpu_timer_probe.passes.size(), 8u);
+    EXPECT_EQ(gpu_timer_probe.passes.size(), 9u);
     for (const auto& [pass_name, gpu_ms] : gpu_timer_probe.passes) {
         EXPECT_GE(gpu_ms, 0.0) << pass_name;
         if (!gpu_timer_probe.supported) {
@@ -2575,6 +2576,7 @@ TEST(RenderSmokeTest, RenderFrameworkContractsEmitArtifacts) {
     pass_metadata << "    {\"name\":\"lighting\",\"inputs\":[\"gbuffer.*\",\"shadow.depth_texture_array\",\"ssao.blur\",\"terrain_texture_array\",\"material_lut\",\"water.fallback.black\"],\"outputs\":[\"lighting.color\",\"lighting.depth\"],\"resolution\":\"screen\",\"clear\":\"color+depth\",\"load_store\":\"store lit scene\",\"draw_count_source\":\"lighting_draws\"},\n";
     pass_metadata << "    {\"name\":\"water\",\"inputs\":[\"lighting.opaque_color_copy\",\"gbuffer.depth\",\"water_meshes\",\"water.fallback.*\"],\"outputs\":[\"lighting.color\"],\"resolution\":\"screen\",\"clear\":\"load lighting\",\"load_store\":\"blend water into lighting\",\"draw_count_source\":\"water_draws\"},\n";
     pass_metadata << "    {\"name\":\"skybox\",\"inputs\":[\"skybox_vertices\"],\"outputs\":[\"lighting.color\"],\"resolution\":\"screen\",\"clear\":\"load lighting\",\"load_store\":\"store sky contribution\",\"draw_count_source\":\"skybox_draws\"},\n";
+    pass_metadata << "    {\"name\":\"particles\",\"inputs\":[\"particle_instances\",\"gbuffer.depth\"],\"outputs\":[\"lighting.color\"],\"resolution\":\"screen\",\"clear\":\"load lighting\",\"load_store\":\"blend forward-lit particles\",\"draw_count_source\":\"particle_draws\"},\n";
     pass_metadata << "    {\"name\":\"final_blit\",\"inputs\":[\"lighting.color\"],\"outputs\":[\"swapchain.color\"],\"resolution\":\"screen\",\"clear\":\"default color+depth\",\"load_store\":\"present-ready color\",\"draw_count_source\":\"final_blits\"}\n";
     pass_metadata << "  ]\n";
     pass_metadata << "}\n";

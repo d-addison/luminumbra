@@ -202,10 +202,10 @@ RuntimeScenarioConfig ParseRuntimeScenarioConfig(int argc, char* argv[], const s
         config.skinned_normal_texture = "data/textures/test/skinned_test_normal_256.ltex";
     }
 
-    const int default_timed_run = config.auto_world_smoke() ? 300 : ((config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke() || config.skybox_visual_smoke() || config.weather_visual_smoke() || config.timeofday_sweep_smoke() || config.lod_boundary_oscillation_smoke() || config.lod_seam_arrival_smoke() || config.player_view_smoke() || config.farlod_horizon_smoke() || config.skinned_mesh_visual_smoke() || config.creature_slice_smoke() || config.window_mode_stress_smoke()) ? 60 : 0);
+    const int default_timed_run = config.auto_world_smoke() ? 300 : ((config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke() || config.skybox_visual_smoke() || config.weather_visual_smoke() || config.particle_emitter_determinism_smoke() || config.timeofday_sweep_smoke() || config.lod_boundary_oscillation_smoke() || config.lod_seam_arrival_smoke() || config.player_view_smoke() || config.farlod_horizon_smoke() || config.skinned_mesh_visual_smoke() || config.creature_slice_smoke() || config.window_mode_stress_smoke()) ? 60 : 0);
     config.timed_run_seconds = GetCommandLineIntOption(argc, argv, "--timed-run", default_timed_run);
 
-    if (config.auto_world_smoke() || config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke() || config.skybox_visual_smoke() || config.weather_visual_smoke() || config.timeofday_sweep_smoke() || config.lod_boundary_oscillation_smoke() || config.lod_seam_arrival_smoke() || config.persistence_roundtrip_smoke() || config.player_view_smoke() || config.farlod_horizon_smoke() || config.skinned_mesh_visual_smoke() || config.creature_slice_smoke() || config.window_mode_stress_smoke()) {
+    if (config.auto_world_smoke() || config.lod_ground_smoke() || config.water_visual_smoke() || config.material_visual_smoke() || config.skybox_visual_smoke() || config.weather_visual_smoke() || config.particle_emitter_determinism_smoke() || config.timeofday_sweep_smoke() || config.lod_boundary_oscillation_smoke() || config.lod_seam_arrival_smoke() || config.persistence_roundtrip_smoke() || config.player_view_smoke() || config.farlod_horizon_smoke() || config.skinned_mesh_visual_smoke() || config.creature_slice_smoke() || config.window_mode_stress_smoke()) {
         config.auto_create_world = true;
         config.auto_enter_world = true;
     }
@@ -1279,6 +1279,68 @@ void WriteWeatherVisualAnalysis(
     };
 
     std::ofstream output(artifact_dir / "weather-visual-analysis.json");
+    output << std::setw(2) << artifact << '\n';
+}
+
+// --- Particle emitter determinism smoke (T-I5a-1) ---
+
+void WriteParticleEmitterDeterminismAnalysis(
+    const std::filesystem::path& artifact_dir,
+    const std::string& particle_screenshot,
+    const ParticleDeterminismResult& result,
+    const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass)
+{
+    const GLDebugRuntimeStats gl_debug = CurrentGLDebugRuntimeStats();
+    // GPU timer budget only asserted when the timer ring resolved a sample; an
+    // unsupported/unresolved timer reports 0.0 ms and is treated as within budget
+    // (the byte-equal determinism assertion is the load-bearing check).
+    const bool gpu_within_budget =
+        result.particle_pass_gpu_ms <= result.particle_pass_budget_ms;
+    const bool passed =
+        result.byte_equal &&
+        result.descriptor_count > 0 &&
+        result.descriptor_hash_run_a == result.descriptor_hash_run_b &&
+        render_pass.particle_draws > 0 &&
+        gpu_within_budget &&
+        gl_debug.errors == 0;
+
+    nlohmann::json artifact = {
+        {"schema", "luminumbra.particle_emitter_determinism.v1"},
+        {"timestamp_utc", TimestampUtc()},
+        {"passed", passed},
+        {"particle_screenshot", particle_screenshot},
+        {"determinism", {
+            {"byte_equal", result.byte_equal},
+            {"descriptor_count", result.descriptor_count},
+            {"world_seed", result.world_seed},
+            {"world_tick", result.world_tick},
+            {"descriptor_hash_run_a", result.descriptor_hash_run_a},
+            {"descriptor_hash_run_b", result.descriptor_hash_run_b},
+            // Documents the snapshot surface: ONLY the emitter descriptor set is
+            // snapshotted; per-particle motion is render-only and excluded.
+            {"snapshot_surface", "emitter_descriptor_set"},
+            {"motion_snapshotted", false}
+        }},
+        {"gpu_timer", {
+            {"particle_pass_gpu_ms", result.particle_pass_gpu_ms},
+            {"budget_ms", result.particle_pass_budget_ms},
+            {"within_budget", gpu_within_budget},
+            {"supported", render_pass.gpu_timers_supported}
+        }},
+        {"render_pass", {
+            {"particle_draws", render_pass.particle_draws},
+            {"particles_drawn", render_pass.particles_drawn},
+            {"skybox_draws", render_pass.skybox_draws}
+        }},
+        {"gl_debug", {
+            {"messages", gl_debug.messages},
+            {"errors", gl_debug.errors},
+            {"warnings", gl_debug.warnings},
+            {"notifications", gl_debug.notifications}
+        }}
+    };
+
+    std::ofstream output(artifact_dir / "particle-emitter-determinism-analysis.json");
     output << std::setw(2) << artifact << '\n';
 }
 

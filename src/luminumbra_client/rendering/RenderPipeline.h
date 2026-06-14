@@ -19,7 +19,7 @@
 // Forward declarations
 namespace Luminumbra { class Chunk; class JobSystem; }
 namespace Luminumbra::Systems { class SHIELD_WorldSystem; struct TerrainGenParams; }
-namespace Luminumbra::Rendering { class Shader; class Camera; class ShadowPass; class GBufferPass; class SsaoPass; class LightingPass; class WaterPass; class SkyboxPass; class FarLodSystem; }
+namespace Luminumbra::Rendering { class Shader; class Camera; class ShadowPass; class GBufferPass; class SsaoPass; class LightingPass; class WaterPass; class SkyboxPass; class ParticlePass; class FarLodSystem; }
 
 namespace Luminumbra::Rendering {
 
@@ -276,6 +276,12 @@ public:
         size_t water_draws = 0;
         size_t water_indices_drawn = 0;
         size_t skybox_draws = 0;
+        // T-I5a-1: instanced particle draws (one per ParticlePass submit) and
+        // the total particle instances drawn this frame. Both stay 0 when no
+        // emitters are active (the pass is a no-op), keeping existing visual
+        // gates byte-stable.
+        size_t particle_draws = 0;
+        size_t particles_drawn = 0;
         size_t final_blits = 0;
         // Per-pass GPU timings sampled from a GL_TIMESTAMP query ring
         // (frame N publishes the timings recorded at frame N-2). Values stay
@@ -288,6 +294,7 @@ public:
         double lighting_gpu_ms = 0.0;
         double water_gpu_ms = 0.0;
         double skybox_gpu_ms = 0.0;
+        double particle_gpu_ms = 0.0; // T-I5a-1: ParticlePass GPU timer (≤ 0.8 ms budget)
         double final_blit_gpu_ms = 0.0;
     };
 
@@ -439,6 +446,14 @@ public:
     FarLodSystem* farlod() { return m_farlod.get(); }
     const FarLodSystem* farlod() const { return m_farlod.get(); }
 
+    // --- Particle framework (T-I5a-1). ---
+    // The particle pass owns the fixed-capacity persistent-mapped instance pool,
+    // the emitter set, and the sim-deterministic emitter-descriptor snapshot
+    // surface. Exposed so the scenario harness can load fixture emitters and
+    // snapshot/assert the descriptor set for the ParticleEmitterDeterminism gate.
+    ParticlePass* particles() { return m_particle_pass.get(); }
+    const ParticlePass* particles() const { return m_particle_pass.get(); }
+
 private:
     // Extracted render pass classes (T-I2-11). Passes own their GL resources
     // (FBOs/textures/shaders); the pipeline keeps orchestration order, shared
@@ -449,6 +464,7 @@ private:
     friend class LightingPass;
     friend class WaterPass;
     friend class SkyboxPass;
+    friend class ParticlePass;
 
     struct ChunkMeshSnapshot {
         ChunkID id = 0;
@@ -499,6 +515,7 @@ private:
         Lighting,
         Water,
         Skybox,
+        Particle, // T-I5a-1
         FinalBlit,
         Count,
     };
@@ -564,6 +581,7 @@ private:
     std::unique_ptr<LightingPass> m_lighting_pass;
     std::unique_ptr<WaterPass> m_water_pass;
     std::unique_ptr<SkyboxPass> m_skybox_pass;
+    std::unique_ptr<ParticlePass> m_particle_pass; // T-I5a-1
 
     std::unordered_map<ChunkID, ChunkRenderData> m_chunk_render_data;
     std::unordered_map<ChunkID, WaterRenderData> m_water_render_data;

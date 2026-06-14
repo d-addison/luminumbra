@@ -1,134 +1,77 @@
 #version 450 core
 
-// Per-vertex attributes
-layout (location = 0) in vec3 aPosition;    // World position
-layout (location = 1) in vec3 aVelocity;    // Velocity vector
-layout (location = 2) in float aLifetime;   // Current lifetime
-layout (location = 3) in float aMaxLifetime; // Maximum lifetime
-layout (location = 4) in float aSize;       // Particle size
-layout (location = 5) in vec4 aColor;       // Particle color
-layout (location = 6) in float aType;       // Particle type (0=sparkle, 1=ember, 2=magic, 3=crystal)
+// ===========================================================================
+// T-I5a-1: GPU particle framework vertex stage.
+//
+// Re-home of the magical_particles billboard onto the instanced, fixed-capacity
+// persistent-mapped pool (ParticlePass). Each particle is drawn as an instanced
+// quad: glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, instanceCount). The four
+// corners are generated from gl_VertexID, so NO geometry shader is used by the
+// live path (the Shader class is vert+frag only).
+//
+// The legacy magical_particles.geom is RETAINED so the render shader inventory
+// (test/rendering/render_smoke_test.cpp) can still compile + link a
+// vert+geom+frag program for the magical_particles entry. The output interface
+// block below (VS_OUT) is shared by both the 2-stage (vert->frag) live link and
+// the 3-stage (vert->geom->frag) inventory link, so both link cleanly.
+//
+// Per-instance attributes come from the 24-byte InstanceRecord:
+//   0: pos (vec3), 1: size (float), 2: color (rgba8 -> vec4),
+//   3: atlasLayer (uint16 -> uint), 4: rotation (f16 -> float).
+// ===========================================================================
 
-// Uniforms
-uniform mat4 u_view;
-uniform mat4 u_projection;
-uniform vec3 u_cameraPos;
+layout (location = 0) in vec3  aPos;
+layout (location = 1) in float aSize;
+layout (location = 2) in vec4  aColor;
+layout (location = 3) in uint  aAtlasLayer;
+layout (location = 4) in float aRotation;
+
+uniform mat4  u_view;
+uniform mat4  u_projection;
+uniform vec3  u_cameraRight;
+uniform vec3  u_cameraUp;
+uniform vec3  u_cameraPos;
 uniform float u_time;
-uniform vec3 u_windDirection = vec3(1.0, 0.0, 0.0);
-uniform float u_windStrength = 0.5;
+uniform vec2  u_screenSize;
+uniform float u_nearPlane;
+uniform float u_farPlane;
 
-// Output to geometry shader
+// Shared interface block. Consumed directly by the fragment stage in the live
+// (vert+frag) path, and re-emitted by the geometry stage in the inventory link.
 out VS_OUT {
-    vec3 worldPos;
-    vec4 color;
-    float size;
-    float lifetime;
-    float maxLifetime;
-    float type;
+    vec2  texCoord;
+    vec4  color;
+    flat float atlasLayer;
     float distanceToCamera;
+    float viewDepth;   // positive linear view-space depth of the billboard centre
+    vec3  worldPos;    // billboard corner world position (soft-particle depth)
 } vs_out;
 
-// Noise function for organic movement
-float hash(float p) {
-    return fract(sin(p * 127.1) * 43758.5453123);
-}
-
-float noise(float p) {
-    float i = floor(p);
-    float f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    return mix(hash(i), hash(i + 1.0), f);
-}
-
 void main() {
-    // Calculate age factor (0 = just born, 1 = about to die)
-    float ageFactor = aLifetime / aMaxLifetime;
-    
-    // Apply wind and turbulence to position
-    vec3 worldPos = aPosition;
-    
-    // Wind effect
-    worldPos += u_windDirection * u_windStrength * aLifetime * 0.1;
-    
-    // Add organic turbulence based on particle type and position
-    float turbulenceScale = 0.01;
-    float turbulenceStrength = 0.5;
-    
-    if (aType == 0.0) { // Sparkle particles - gentle floating
-        float noiseTime = u_time * 0.5 + aPosition.x * 0.1;
-        worldPos.x += sin(noiseTime) * 0.3;
-        worldPos.y += cos(noiseTime * 0.7) * 0.2;
-        worldPos.z += sin(noiseTime * 0.3) * 0.25;
-    }
-    else if (aType == 1.0) { // Ember particles - rising with heat distortion
-        float heat = 1.0 - ageFactor;
-        worldPos.y += heat * aLifetime * 0.5; // Rise with heat
-        
-        float flicker = noise(u_time * 3.0 + aPosition.x * 10.0) * 0.2;
-        worldPos.x += flicker * heat;
-        worldPos.z += flicker * heat * 0.5;
-    }
-    else if (aType == 2.0) { // Magic particles - spiral movement
-        float spiral = u_time * 2.0 + aPosition.y * 0.1;
-        float radius = 0.5 * (1.0 - ageFactor);
-        worldPos.x += cos(spiral) * radius;
-        worldPos.z += sin(spiral) * radius;
-        worldPos.y += sin(spiral * 0.3) * 0.3;
-    }
-    else if (aType == 3.0) { // Crystal particles - geometric patterns
-        float geometric = u_time + aPosition.x * 0.2 + aPosition.z * 0.15;
-        worldPos.y += sin(geometric * 4.0) * 0.1;
-        worldPos.x += cos(geometric * 6.0) * 0.15;
-        worldPos.z += sin(geometric * 5.0) * 0.12;
-    }
-    
-    // Calculate distance to camera for LOD
-    float distanceToCamera = length(worldPos - u_cameraPos);
-    
-    // Size attenuation based on distance and age
-    float sizeScale = aSize;
-    
-    // Particles grow slightly when young, shrink when old
-    if (ageFactor < 0.3) {
-        sizeScale *= (0.5 + ageFactor * 1.5); // Grow from 50% to 95%
-    } else {
-        sizeScale *= (1.2 - ageFactor * 0.7); // Shrink from 95% to 50%
-    }
-    
-    // Distance-based size scaling for performance
-    sizeScale *= clamp(50.0 / distanceToCamera, 0.3, 2.0);
-    
-    // Color evolution over lifetime
-    vec4 evolvedColor = aColor;
-    
-    if (aType == 0.0) { // Sparkle - fade to white
-        evolvedColor.rgb = mix(aColor.rgb, vec3(1.0, 1.0, 1.0), ageFactor * 0.5);
-        evolvedColor.a *= (1.0 - pow(ageFactor, 2.0)); // Quadratic fade
-    }
-    else if (aType == 1.0) { // Ember - cool down
-        evolvedColor.rgb = mix(vec3(1.0, 0.3, 0.1), vec3(0.8, 0.1, 0.05), ageFactor);
-        evolvedColor.a *= (1.0 - ageFactor);
-    }
-    else if (aType == 2.0) { // Magic - cycle through colors
-        float colorCycle = sin(u_time * 2.0 + aPosition.y * 0.1) * 0.5 + 0.5;
-        evolvedColor.rgb = mix(aColor.rgb, vec3(0.8, 0.2, 1.0), colorCycle * 0.3);
-        evolvedColor.a *= pow(1.0 - ageFactor, 1.5);
-    }
-    else if (aType == 3.0) { // Crystal - prismatic effects
-        float prism = sin(u_time + ageFactor * 6.28) * 0.5 + 0.5;
-        evolvedColor.rgb = aColor.rgb + vec3(0.2, 0.1, 0.3) * prism;
-        evolvedColor.a *= (1.0 - pow(ageFactor, 0.8));
-    }
-    
-    // Pass data to geometry shader
-    vs_out.worldPos = worldPos;
-    vs_out.color = evolvedColor;
-    vs_out.size = sizeScale;
-    vs_out.lifetime = aLifetime;
-    vs_out.maxLifetime = aMaxLifetime;
-    vs_out.type = aType;
-    vs_out.distanceToCamera = distanceToCamera;
-    
-    // Transform to clip space
-    gl_Position = u_projection * u_view * vec4(worldPos, 1.0);
+    // Quad corner from gl_VertexID for a triangle strip:
+    //   0 -> (-1,-1), 1 -> (+1,-1), 2 -> (-1,+1), 3 -> (+1,+1)
+    vec2 corner = vec2(
+        (gl_VertexID == 1 || gl_VertexID == 3) ? 1.0 : -1.0,
+        (gl_VertexID == 2 || gl_VertexID == 3) ? 1.0 : -1.0);
+
+    // Rotate the billboard in its own plane.
+    float c = cos(aRotation);
+    float s = sin(aRotation);
+    vec2 rotated = vec2(corner.x * c - corner.y * s,
+                        corner.x * s + corner.y * c);
+
+    vec3 right = normalize(u_cameraRight);
+    vec3 up    = normalize(u_cameraUp);
+    vec3 worldCorner = aPos + (right * rotated.x + up * rotated.y) * aSize;
+
+    vec4 viewPos = u_view * vec4(worldCorner, 1.0);
+
+    vs_out.texCoord = corner * 0.5 + 0.5;
+    vs_out.color = aColor;
+    vs_out.atlasLayer = float(aAtlasLayer);
+    vs_out.distanceToCamera = length(aPos - u_cameraPos);
+    vs_out.viewDepth = -viewPos.z;
+    vs_out.worldPos = worldCorner;
+
+    gl_Position = u_projection * viewPos;
 }
