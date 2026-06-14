@@ -26,6 +26,7 @@
 #include "passes/LightingPass.h"
 #include "passes/ShadowPass.h"
 #include "passes/SkyboxPass.h"
+#include "passes/ParticlePass.h"
 #include "passes/SsaoPass.h"
 #include "passes/WaterPass.h"
 #include <stb_image.h>
@@ -169,6 +170,7 @@ constexpr const char* kGpuTimerPassNames[] = {
     "lighting",
     "water",
     "skybox",
+    "particles",
     "final_blit",
 };
 
@@ -568,7 +570,8 @@ RenderPipeline::RenderPipeline()
       m_ssao_pass(std::make_unique<SsaoPass>()),
       m_lighting_pass(std::make_unique<LightingPass>()),
       m_water_pass(std::make_unique<WaterPass>()),
-      m_skybox_pass(std::make_unique<SkyboxPass>()) {}
+      m_skybox_pass(std::make_unique<SkyboxPass>()),
+      m_particle_pass(std::make_unique<ParticlePass>()) {}
 RenderPipeline::~RenderPipeline() {
     cleanup_gpu_resources();
 }
@@ -591,6 +594,7 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         m_ssao_pass->init_ssao(screen_width, screen_height);
         init_screen_quad();
         m_skybox_pass->init_geometry();
+        m_particle_pass->init_buffers(); // T-I5a-1: persistent-mapped instance pool
         load_material_texture_lut();
         init_terrain_textures();
         init_skinned_texture_array();
@@ -816,6 +820,7 @@ std::vector<RenderPipeline::ShaderHealthEntry> RenderPipeline::get_shader_health
     add_shader("instanced_static_mesh", m_gbuffer_pass->instanced_static_mesh_shader());
     add_shader("skinned_mesh", m_gbuffer_pass->skinned_mesh_shader());
     add_shader("weather_overlay", m_skybox_pass->weather_shader());
+    if (m_particle_pass) { add_shader("particles", m_particle_pass->shader()); } // T-I5a-1
     health.push_back({"gpu_sdf_compute", m_gpu_sdf.compute_program != 0, m_gpu_sdf.compute_program != 0 ? "" : "not initialized"});
     return health;
 }
@@ -870,6 +875,15 @@ RenderPipeline::RenderResourceRegistryStats RenderPipeline::get_resource_registr
     stats.buffers += count(m_gpu_sdf.sdf_buffer);
     stats.vertex_arrays += count(m_screen_quad_vao);
     stats.vertex_arrays += count(m_skybox_pass->vao());
+    // T-I5a-1: particle pass VAO + persistent-mapped instance ring buffers.
+    // Released in cleanup_gpu_resources() -> ParticlePass::destroy_buffers(), so
+    // they count 0 after shutdown (empty-after-shutdown invariant holds).
+    if (m_particle_pass) {
+        stats.vertex_arrays += count(m_particle_pass->vao());
+        for (std::size_t ring = 0; ring < ParticlePass::kRingFrames; ++ring) {
+            stats.buffers += count(m_particle_pass->instance_buffer(ring));
+        }
+    }
 
     auto count_chunk_slot = [&stats](const ChunkRenderData& data) {
         stats.vertex_arrays += data.vao_id != 0 ? 1u : 0u;
@@ -1070,6 +1084,8 @@ void RenderPipeline::refresh_render_pass_metadata() {
              "load lighting", "blend water into lighting", m_last_render_pass_stats.water_draws);
     add_pass("skybox", {"skybox_vertices"}, {"lighting.color"}, m_screen_width, m_screen_height,
              "load lighting", "store sky contribution", m_last_render_pass_stats.skybox_draws);
+    add_pass("particles", {"particle_instances", "gbuffer.depth"}, {"lighting.color"}, m_screen_width, m_screen_height,
+             "load lighting", "blend forward-lit particles", m_last_render_pass_stats.particle_draws);
     add_pass("final_blit", {"lighting.color"}, {"swapchain.color"}, m_screen_width, m_screen_height,
              "default color+depth", "present-ready color", m_last_render_pass_stats.final_blits);
 }
@@ -1346,13 +1362,14 @@ void RenderPipeline::collect_gpu_pass_timers() {
     m_last_render_pass_stats.lighting_gpu_ms = m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::Lighting)];
     m_last_render_pass_stats.water_gpu_ms = m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::Water)];
     m_last_render_pass_stats.skybox_gpu_ms = m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::Skybox)];
+    m_last_render_pass_stats.particle_gpu_ms = m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::Particle)];
     m_last_render_pass_stats.final_blit_gpu_ms = m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::FinalBlit)];
 
     // One-time diagnostic so smoke runs prove the ring resolves real samples.
     if (resolved_sample_this_frame && !m_gpu_timers.first_sample_logged) {
         m_gpu_timers.first_sample_logged = true;
         LUMINUMBRA_CORE_INFO(
-            "Per-pass GPU timers active (ms): shadow={:.4f} gbuffer={:.4f} ssao={:.4f} ssao_blur={:.4f} lighting={:.4f} water={:.4f} skybox={:.4f} final_blit={:.4f}",
+            "Per-pass GPU timers active (ms): shadow={:.4f} gbuffer={:.4f} ssao={:.4f} ssao_blur={:.4f} lighting={:.4f} water={:.4f} skybox={:.4f} particles={:.4f} final_blit={:.4f}",
             m_last_render_pass_stats.shadow_gpu_ms,
             m_last_render_pass_stats.gbuffer_gpu_ms,
             m_last_render_pass_stats.ssao_gpu_ms,
@@ -1360,6 +1377,7 @@ void RenderPipeline::collect_gpu_pass_timers() {
             m_last_render_pass_stats.lighting_gpu_ms,
             m_last_render_pass_stats.water_gpu_ms,
             m_last_render_pass_stats.skybox_gpu_ms,
+            m_last_render_pass_stats.particle_gpu_ms,
             m_last_render_pass_stats.final_blit_gpu_ms);
     }
 }
@@ -1591,7 +1609,20 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     end_gpu_pass_timer(GpuTimerPass::Skybox);
     glBindVertexArray(0);  // Unbind after skybox pass
 
-    // 8. FINAL BLIT TO SCREEN
+    // 8. PARTICLE PASS (T-I5a-1): forward-lit, soft-faded transparent particles
+    // blended into the lit HDR target after the skybox. Render-only motion is
+    // advanced first; the descriptor schedule (the sim-deterministic surface) is
+    // rebuilt by the scenario driver, NOT here. A no-op (zero GL draws) when no
+    // emitters exist, so all existing visual gates stay byte-stable.
+    if (m_particle_pass) {
+        m_particle_pass->update(deltaTime);
+        begin_gpu_pass_timer(GpuTimerPass::Particle);
+        m_particle_pass->execute(*this, camera);
+        end_gpu_pass_timer(GpuTimerPass::Particle);
+        glBindVertexArray(0);
+    }
+
+    // 9. FINAL BLIT TO SCREEN
     begin_gpu_pass_timer(GpuTimerPass::FinalBlit);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0); // Default framebuffer
@@ -1664,6 +1695,7 @@ void RenderPipeline::init_shaders() {
     m_gbuffer_pass->init_geometry_shader(m_root_path);
     m_lighting_pass->init_shader(m_root_path);
     m_skybox_pass->init_shader(m_root_path);
+    m_particle_pass->init_shader(m_root_path); // T-I5a-1
     m_shadow_pass->init_shader(m_root_path);
     m_ssao_pass->init_shaders(m_root_path);
     m_water_pass->init_shader(m_root_path);
@@ -1722,6 +1754,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     if (m_screen_quad_vao) { glDeleteVertexArrays(1, &m_screen_quad_vao); m_screen_quad_vao = 0; }
     if (m_screen_quad_vbo) { glDeleteBuffers(1, &m_screen_quad_vbo); m_screen_quad_vbo = 0; }
     m_skybox_pass->destroy_geometry();
+    if (m_particle_pass) { m_particle_pass->destroy_buffers(); } // T-I5a-1
     m_gbuffer_pass->destroy_instanced_static_mesh();
     m_gbuffer_pass->destroy_skinned_mesh();
     if (m_terrainTextureArray) { glDeleteTextures(1, &m_terrainTextureArray); m_terrainTextureArray = 0; }
@@ -1735,6 +1768,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_gbuffer_pass->reset_shaders();
     m_lighting_pass->reset_shader();
     m_skybox_pass->reset_shader();
+    if (m_particle_pass) { m_particle_pass->reset_shader(); } // T-I5a-1
     m_shadow_pass->reset_shader();
     m_ssao_pass->reset_shaders();
     m_water_pass->reset_shader();

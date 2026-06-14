@@ -106,6 +106,9 @@ struct RuntimeScenarioConfig {
     bool material_visual_smoke() const { return scenario == "material_visual_smoke"; }
     bool skybox_visual_smoke() const { return scenario == "skybox_visual_smoke"; }
     bool weather_visual_smoke() const { return scenario == "weather_visual_smoke"; }
+    // T-I5a-1: spawns the fixture particle emitter, snapshots the
+    // sim-deterministic emitter descriptor set, and captures a particle render.
+    bool particle_emitter_determinism_smoke() const { return scenario == "particle_emitter_determinism_smoke"; }
     bool timeofday_sweep_smoke() const { return scenario == "timeofday_sweep_smoke"; }
     bool lod_boundary_oscillation_smoke() const { return scenario == "lod_boundary_oscillation_smoke"; }
     bool lod_seam_arrival_smoke() const { return scenario == "lod_seam_arrival_smoke"; }
@@ -418,6 +421,32 @@ void WriteWeatherVisualAnalysis(
     const WeatherPixelStats& weather_stats,
     const std::string& weather_type,
     float weather_intensity,
+    const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass);
+
+// --- Particle emitter determinism smoke (T-I5a-1) ---
+// Spawns the fixture particle emitter, rebuilds the sim-deterministic emitter
+// DESCRIPTOR SET at a fixed tick twice (from identical world state), and asserts
+// the descriptor bytes are byte-equal across the two rebuilds. The emitter
+// schedule is a pure function of world state; per-particle MOTION is render-only
+// and is NEVER snapshotted (critique F2). Also records the ParticlePass GPU-timer
+// (budget ≤ 0.8 ms) and a particle render capture. The two descriptor-set hashes
+// + the per-descriptor fields are written to the analysis JSON.
+struct ParticleDeterminismResult {
+    std::uint64_t world_seed = 0;
+    std::uint64_t world_tick = 0;
+    std::uint64_t descriptor_hash_run_a = 0;
+    std::uint64_t descriptor_hash_run_b = 0;
+    std::size_t descriptor_count = 0;
+    bool byte_equal = false;
+    double particle_pass_gpu_ms = 0.0;
+    double particle_pass_budget_ms = 0.8;
+    std::size_t particles_drawn = 0;
+};
+
+void WriteParticleEmitterDeterminismAnalysis(
+    const std::filesystem::path& artifact_dir,
+    const std::string& particle_screenshot,
+    const ParticleDeterminismResult& result,
     const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass);
 
 // --- Time-of-day sweep smoke (T-I2-17c) ---

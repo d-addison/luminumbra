@@ -14,6 +14,7 @@
 #include "rendering/FarLodSystem.h"
 #include "rendering/RenderPipeline.h"
 #include "rendering/passes/WaterPass.h"
+#include "rendering/passes/ParticlePass.h" // T-I5a-1: EmitterDescriptor + accessor type
 #include "rendering/WorldLoadingVisualizer.h"
 #include "ui/Rml_UIManager.h"
 #include "audio/AudioManagerFactory.h"
@@ -34,6 +35,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <cstdlib>
 #include <csignal>
 #include <ctime>
@@ -1779,6 +1781,9 @@ int main(int argc, char* argv[]) {
     bool weather_baseline_capture_written = false;
     bool weather_visual_capture_written = false;
     WeatherPixelStats weather_baseline_stats;
+    // T-I5a-1 particle determinism scenario state.
+    bool particle_emitter_spawned = false;
+    bool particle_determinism_capture_written = false;
     std::array<bool, 3> timeofday_captures_written{false, false, false};
     std::vector<TimeOfDayPhaseCapture> timeofday_phase_captures;
     EmissiveMaterialTarget timeofday_emissive_target;
@@ -2081,6 +2086,20 @@ int main(int argc, char* argv[]) {
                     const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
                     if (elapsed_play_seconds / duration >= 0.5) {
                         renderPipeline.set_weather(Luminumbra::Rendering::WeatherType::Rain, 1.0f);
+                    }
+                } else if (scenario_config.particle_emitter_determinism_smoke() && scenario_ready && g_camera) {
+                    // T-I5a-1: fixed skybox-style camera; spawn the fixture
+                    // emitter ONCE in front of the camera so particles render.
+                    ApplySkyboxVisualCamera(gameSession.get(), g_camera.get(), 0.30f);
+                    if (!particle_emitter_spawned) {
+                        if (auto* particles = renderPipeline.particles()) {
+                            const glm::vec3 spawn_origin =
+                                g_camera->Position + g_camera->Front * 8.0f;
+                            particles->add_emitter(
+                                root_dir / "data/common/particles/fixture_sparkle.json",
+                                spawn_origin);
+                            particle_emitter_spawned = true;
+                        }
                     }
                 } else if (scenario_config.timeofday_sweep_smoke() && scenario_ready && g_camera) {
                     const double elapsed_play_seconds = std::chrono::duration<double>(
@@ -2715,6 +2734,78 @@ int main(int argc, char* argv[]) {
                                                 stats,
                                                 "rain",
                                                 1.0f,
+                                                render_pass_stats);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (scenario_config.particle_emitter_determinism_smoke() && scenario_ready && !particle_determinism_capture_written) {
+                            const double elapsed_play_seconds = std::chrono::duration<double>(now - scenario_play_started_at).count();
+                            const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
+                            const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
+                            const auto& render_pass_stats = renderPipeline.get_last_render_pass_stats();
+                            // Capture once particles are visibly rendering (the
+                            // pass reports draws) and late enough that the GPU
+                            // timer ring has resolved a real sample.
+                            if (progress >= 0.5 && render_pass_stats.particle_draws > 0) {
+                                auto* particles = renderPipeline.particles();
+                                if (particles != nullptr) {
+                                    // --- DETERMINISM ASSERTION (critique F2) ---
+                                    // Rebuild the sim-deterministic emitter
+                                    // DESCRIPTOR SET from identical world state
+                                    // twice; the descriptor bytes must be
+                                    // byte-equal across runs. Per-particle motion
+                                    // is render-only and is NOT snapshotted here.
+                                    std::uint64_t world_seed = 0;
+                                    if (auto* ws = gameSession->GetWorldSystem()) {
+                                        world_seed = static_cast<std::uint64_t>(
+                                            static_cast<std::uint32_t>(ws->get_seed()));
+                                    }
+                                    const std::uint64_t world_tick =
+                                        gameSession->GetSimulationTickCount();
+
+                                    particles->rebuild_emitter_descriptors(world_seed, world_tick);
+                                    const auto descriptors_a = particles->emitter_descriptors();
+                                    const std::uint64_t hash_a = particles->emitter_descriptor_hash();
+
+                                    particles->rebuild_emitter_descriptors(world_seed, world_tick);
+                                    const auto descriptors_b = particles->emitter_descriptors();
+                                    const std::uint64_t hash_b = particles->emitter_descriptor_hash();
+
+                                    const bool byte_equal =
+                                        descriptors_a.size() == descriptors_b.size() &&
+                                        std::memcmp(descriptors_a.data(), descriptors_b.data(),
+                                                    descriptors_a.size() * sizeof(Luminumbra::Rendering::ParticlePass::EmitterDescriptor)) == 0;
+
+                                    Luminumbra::Client::ScenarioHarness::ParticleDeterminismResult result;
+                                    result.world_seed = world_seed;
+                                    result.world_tick = world_tick;
+                                    result.descriptor_hash_run_a = hash_a;
+                                    result.descriptor_hash_run_b = hash_b;
+                                    result.descriptor_count = descriptors_a.size();
+                                    result.byte_equal = byte_equal && hash_a == hash_b;
+                                    result.particle_pass_gpu_ms = render_pass_stats.particle_gpu_ms;
+                                    result.particles_drawn = render_pass_stats.particles_drawn;
+
+                                    int screenshot_width = 0;
+                                    int screenshot_height = 0;
+                                    glfwGetFramebufferSize(window, &screenshot_width, &screenshot_height);
+                                    if (screenshot_width > 0 && screenshot_height > 0) {
+                                        std::vector<unsigned char> frame_pixels(
+                                            static_cast<std::size_t>(screenshot_width) * static_cast<std::size_t>(screenshot_height) * 3u);
+                                        glReadBuffer(GL_BACK);
+                                        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                                        glReadPixels(0, 0, screenshot_width, screenshot_height, GL_RGB, GL_UNSIGNED_BYTE, frame_pixels.data());
+                                        const std::string screenshot_path = "screenshots/particle-determinism.ppm";
+                                        if (WritePixelBufferPpm(
+                                                scenario_config.artifact_dir / screenshot_path,
+                                                screenshot_width, screenshot_height, frame_pixels)) {
+                                            particle_determinism_capture_written = true;
+                                            WriteParticleEmitterDeterminismAnalysis(
+                                                scenario_config.artifact_dir,
+                                                screenshot_path,
+                                                result,
                                                 render_pass_stats);
                                         }
                                     }

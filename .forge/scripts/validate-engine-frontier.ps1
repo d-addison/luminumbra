@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "BiomeCoverage", "RiverPresence", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "ParticleEmitterDeterminism", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "BiomeCoverage", "RiverPresence", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -2805,6 +2805,83 @@ function Test-WeatherVisual {
     Assert-PpmArtifact (Join-Path $visualDir $analysis.weather_screenshot)
 }
 
+function Test-ParticleEmitterDeterminism {
+    # T-I5a-1: GPU particle framework determinism gate. Spawns the fixture
+    # emitter, snapshots the sim-deterministic emitter DESCRIPTOR SET twice from
+    # identical world state, and asserts the descriptor bytes are byte-equal
+    # across runs. Per-particle MOTION is render-only and is NOT snapshotted
+    # (critique F2). Also asserts particles rendered and the ParticlePass GPU
+    # timer is within the 0.8 ms budget (critique F3).
+    $exe = Get-ClientExe
+    $visualDir = "build/$BuildPreset/test-artifacts/runtime/particle-determinism"
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $visualDir
+    New-Item -ItemType Directory -Force -Path $visualDir | Out-Null
+
+    $runSeconds = [Math]::Max(20, $SmokeSeconds)
+    Invoke-Checked -FilePath $exe -ArgumentList @(
+        "--scenario", "particle_emitter_determinism_smoke",
+        "--auto-create-world",
+        "--auto-enter-world",
+        "--timed-run", "$runSeconds",
+        "--no-audio",
+        "--no-ui",
+        "--runtime-artifact-dir", $visualDir
+    ) -TimeoutSeconds ([Math]::Max(120, $runSeconds + 90))
+
+    $analysisPath = Join-Path $visualDir "particle-emitter-determinism-analysis.json"
+    if (-not (Test-Path $analysisPath)) {
+        throw "particle determinism run did not produce $analysisPath (gate produced by task T-I5a-1-gpu-particle-framework)"
+    }
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.particle_emitter_determinism.v1") {
+        throw "Unexpected particle determinism analysis schema '$($analysis.schema)'"
+    }
+    if ([int64]$analysis.gl_debug.errors -ne 0) {
+        throw "Particle determinism run emitted GL debug errors: $($analysis.gl_debug.errors)"
+    }
+
+    # Emitter descriptor set must be byte-equal across the two rebuilds.
+    if (-not $analysis.determinism.byte_equal) {
+        throw "Particle emitter descriptor set is NOT byte-equal across runs (hash_a=$($analysis.determinism.descriptor_hash_run_a) hash_b=$($analysis.determinism.descriptor_hash_run_b))"
+    }
+    if ([string]$analysis.determinism.descriptor_hash_run_a -ne [string]$analysis.determinism.descriptor_hash_run_b) {
+        throw "Particle emitter descriptor hashes differ across runs"
+    }
+    if ([int64]$analysis.determinism.descriptor_count -lt 1) {
+        throw "Particle determinism gate captured no emitter descriptors"
+    }
+    # The snapshot surface must be the emitter descriptor set ONLY; particle
+    # motion must never be snapshotted.
+    if ($analysis.determinism.snapshot_surface -ne "emitter_descriptor_set") {
+        throw "Particle determinism snapshot surface must be 'emitter_descriptor_set', got '$($analysis.determinism.snapshot_surface)'"
+    }
+    if ([bool]$analysis.determinism.motion_snapshotted) {
+        throw "Particle MOTION must never be snapshotted (render-only); motion_snapshotted=true"
+    }
+
+    # Particles must actually have rendered.
+    if ([int64]$analysis.render_pass.particle_draws -lt 1) {
+        throw "Particle determinism gate recorded no ParticlePass draws"
+    }
+
+    # ParticlePass GPU timer must be within the 0.8 ms budget.
+    if (-not $analysis.gpu_timer.within_budget) {
+        throw "ParticlePass GPU timer $($analysis.gpu_timer.particle_pass_gpu_ms) ms exceeds budget $($analysis.gpu_timer.budget_ms) ms"
+    }
+    if ([double]$analysis.gpu_timer.particle_pass_gpu_ms -gt [double]$analysis.gpu_timer.budget_ms) {
+        throw "ParticlePass GPU timer $($analysis.gpu_timer.particle_pass_gpu_ms) ms exceeds budget $($analysis.gpu_timer.budget_ms) ms"
+    }
+
+    if (-not $analysis.passed) {
+        throw "Particle determinism analysis reported failure"
+    }
+
+    Assert-PpmArtifact (Join-Path $visualDir $analysis.particle_screenshot)
+    Write-Host ("particle determinism: descriptor set byte-equal over {0} emitter(s); ParticlePass {1} ms (budget {2} ms)" -f `
+        $analysis.determinism.descriptor_count, $analysis.gpu_timer.particle_pass_gpu_ms, $analysis.gpu_timer.budget_ms)
+}
+
 function Test-TimeOfDaySweep {
     $exe = Get-ClientExe
     $visualDir = "build/$BuildPreset/test-artifacts/runtime/timeofday-sweep"
@@ -4387,6 +4464,7 @@ switch ($Mode) {
     "FrontierDisabled" { Test-FrontierDisabled }
     "SkyboxVisual" { Test-SkyboxVisual }
     "WeatherVisual" { Test-WeatherVisual }
+    "ParticleEmitterDeterminism" { Test-ParticleEmitterDeterminism }
     "TimeOfDaySweep" { Test-TimeOfDaySweep }
     "PlayerView" { Test-PlayerView }
     "FarLodHorizon" { Test-FarLodHorizon }
