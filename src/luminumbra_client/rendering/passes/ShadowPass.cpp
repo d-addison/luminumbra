@@ -71,6 +71,12 @@ void ShadowPass::execute(RenderPipeline& pipeline,
     glClear(GL_DEPTH_BUFFER_BIT);
     glCullFace(GL_FRONT);
     m_shadow_shader->use();
+    // T-I4-16: the shadow cascades draw the SAME live terrain chunks as the
+    // G-buffer pass, now via glMultiDrawElementsIndirect from the shared pool.
+    // The chunk world origin reaches shadow_map.vert through the instanced
+    // aOrigin attribute (u_useInstanceOrigin == 1); the legacy per-chunk u_model
+    // uniform path is left compiled but unused for live chunks.
+    m_shadow_shader->setInt("u_useInstanceOrigin", 1);
     for (int i = 0; i < ShadowMap::CASCADE_COUNT; ++i) {
         glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, m_shadow_map.depth_texture_array, 0, i);
         m_shadow_shader->setMat4("u_lightSpaceMatrix", light_space_matrices[i]);
@@ -82,21 +88,12 @@ void ShadowPass::execute(RenderPipeline& pipeline,
         pipeline.m_hierarchicalCuller.CullHierarchical(cascade_planes, visible_chunks);
         pipeline.m_last_render_pass_stats.shadow_cascade_visible_chunks[i] = visible_chunks.size();
 
-        for (const auto* chunk : visible_chunks) {
-            if (pipeline.m_chunk_render_data.count(chunk->id) == 0) continue;
-            const auto& render_data = pipeline.m_chunk_render_data.at(chunk->id);
-            if (render_data.element_count == 0) continue;
-
-            glm::ivec3 cc = chunk->coords;
-            glm::vec3 base(cc.x * CHUNK_SIZE_X, cc.y * CHUNK_SIZE_Y, cc.z * CHUNK_SIZE_Z);
-            glm::mat4 model = glm::translate(glm::mat4(1.0f), base);
-            m_shadow_shader->setMat4("u_model", model);
-            glBindVertexArray(render_data.vao_id);
-            glDrawElements(GL_TRIANGLES, render_data.element_count, GL_UNSIGNED_INT, 0);
-            pipeline.m_last_render_pass_stats.shadow_cascade_draws[i]++;
-            pipeline.m_last_render_pass_stats.shadow_draws++;
-            pipeline.m_last_render_pass_stats.shadow_indices_drawn += render_data.element_count;
-        }
+        std::size_t cascade_draws = 0;
+        std::size_t cascade_indices = 0;
+        pipeline.draw_chunks_mdi(visible_chunks, cascade_draws, cascade_indices);
+        pipeline.m_last_render_pass_stats.shadow_cascade_draws[i] += cascade_draws;
+        pipeline.m_last_render_pass_stats.shadow_draws += cascade_draws;
+        pipeline.m_last_render_pass_stats.shadow_indices_drawn += cascade_indices;
     }
     glCullFace(GL_BACK);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);

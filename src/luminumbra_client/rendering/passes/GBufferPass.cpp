@@ -170,6 +170,15 @@ void GBufferPass::geometry_pass_chunks(RenderPipeline& pipeline,
     // View rotation: triplanar normal mapping (T-I4-7) perturbs the normal in
     // world space then rotates it into view space for the octahedral G-buffer.
     m_geometry_shader->setMat3("u_normalViewMatrix", glm::mat3(view));
+    // T-I4-16: live terrain is now submitted via glMultiDrawElementsIndirect
+    // from the shared geometry pool; the per-draw chunk origin arrives through
+    // the instanced aOrigin attribute, so the per-chunk model uniform path is
+    // disabled (u_useInstanceOrigin == 1). Far-LOD draws below re-enable the
+    // model-uniform path (u_useInstanceOrigin == 0).
+    m_geometry_shader->setInt("u_useInstanceOrigin", 1);
+    // Clip band is inert for live chunks (matches the legacy per-chunk path).
+    m_geometry_shader->setFloat("u_farClipNearRadius", 0.0f);
+    m_geometry_shader->setFloat("u_farClipFarRadius", 0.0f);
 
     // Bind material LUT + triplanar terrain arrays for the G-Buffer pass.
     glActiveTexture(GL_TEXTURE0);
@@ -196,26 +205,19 @@ void GBufferPass::geometry_pass_chunks(RenderPipeline& pipeline,
     pipeline.m_hierarchicalCuller.CullHierarchical(frustum_planes, visible_chunks);
     pipeline.m_last_render_pass_stats.terrain_visible_chunks = visible_chunks.size();
 
-    // Render visible chunks
-    for (const auto* chunk : visible_chunks) {
-        if (pipeline.m_chunk_render_data.find(chunk->id) == pipeline.m_chunk_render_data.end()) continue;
+    // T-I4-16: ONE (per-bucket) glMultiDrawElementsIndirect over the shared
+    // geometry pool replaces the per-chunk glDrawElements loop. The chunk world
+    // origin reaches g_buffer.vert via the instanced aOrigin attribute; the
+    // pool VAOs carry the VoxelVertex layout, so no per-draw VAO/uniform binds.
+    std::size_t terrain_draws = 0;
+    std::size_t terrain_indices = 0;
+    pipeline.draw_chunks_mdi(visible_chunks, terrain_draws, terrain_indices);
+    pipeline.m_last_render_pass_stats.terrain_draws += terrain_draws;
+    pipeline.m_last_render_pass_stats.terrain_indices_drawn += terrain_indices;
 
-        const auto& render_data = pipeline.m_chunk_render_data.at(chunk->id);
-        if (render_data.element_count == 0) continue;
-
-        glm::ivec3 cc = chunk->coords;
-        glm::vec3 min_aabb(cc.x * CHUNK_SIZE_X, cc.y * CHUNK_SIZE_Y, cc.z * CHUNK_SIZE_Z);
-
-        glm::mat4 model = glm::translate(glm::mat4(1.0f), min_aabb);
-        glm::mat3 normalMatrix = glm::transpose(glm::inverse(glm::mat3(view * model)));
-        m_geometry_shader->setMat4("model", model);
-        m_geometry_shader->setMat3("normalMatrix", normalMatrix);
-
-        glBindVertexArray(render_data.vao_id);
-        glDrawElements(GL_TRIANGLES, render_data.element_count, GL_UNSIGNED_INT, 0);
-        pipeline.m_last_render_pass_stats.terrain_draws++;
-        pipeline.m_last_render_pass_stats.terrain_indices_drawn += render_data.element_count;
-    }
+    // Far-LOD path uses the per-region model uniform: switch the shader back to
+    // the model-uniform origin path before it runs (it never sets this flag).
+    m_geometry_shader->setInt("u_useInstanceOrigin", 0);
 
     // Far-LOD region meshes AFTER the live chunks (T-I3-9): same geometry
     // shader/material LUT (VoxelVertex layout is identical), region-AABB

@@ -3,6 +3,11 @@ layout (location = 0) in vec3 aPos;
 layout (location = 1) in vec3 aNormal;
 // The per-vertex material ID from the VoxelVertex struct
 layout (location = 2) in uint aMaterialID;
+// T-I4-16: per-DRAW chunk world origin (instanced attribute, divisor 1). Live
+// terrain is submitted with glMultiDrawElementsIndirect from the shared
+// geometry pool; each draw's baseInstance selects this origin, replacing the
+// per-draw 'model' uniform. Only consumed when u_useInstanceOrigin == 1.
+layout (location = 3) in vec3 aOrigin;
 
 // T-I4-DR-horizon-sliver-render: redeclare the built-in output block sized for
 // one clip distance (some GL drivers ignore gl_ClipDistance writes otherwise).
@@ -26,6 +31,16 @@ uniform mat4 model;
 uniform mat4 view;
 uniform mat4 projection;
 uniform mat3 normalMatrix;
+// T-I4-16: world->view normal rotation for the instanced live-terrain path
+// (== mat3(view); the pass already sets this). The camera view is rigid, so this
+// equals the legacy transpose(inverse(mat3(view*model))) for translation-only
+// chunk models.
+uniform mat3 u_normalViewMatrix;
+// T-I4-16: when 1, the model transform is a pure translation by aOrigin (live
+// terrain pool draw) and the world->view normal uses u_normalViewMatrix
+// (== mat3(view)); when 0 the legacy per-draw 'model' / 'normalMatrix' uniforms
+// drive it (far-LOD region draws, which set those uniforms per region).
+uniform int u_useInstanceOrigin;
 
 // T-I4-DR-horizon-sliver-render: far-region geometry clip band (meters). Set > 0
 // only for far draws (live/static/skinned keep them 0 -> clip inert).
@@ -42,14 +57,32 @@ uniform float u_farClipFarRadius;
 void main()
 {
     // World-space position/normal for triplanar terrain sampling (T-I4-7).
-    vec4 worldPos = model * vec4(aPos, 1.0);
-    vs_out.WorldPos = vec3(worldPos);
-    vs_out.WorldNormal = normalize(mat3(model) * aNormal);
+    // T-I4-16: the live-terrain pool path applies a pure translation by the
+    // per-draw chunk origin (mat3(model) is identity, so the world normal is
+    // the mesh normal); the world->view normal uses u_normalViewMatrix, which
+    // equals mat3(view) and -- because the camera view is a rigid (orthonormal)
+    // transform -- is identical to the legacy transpose(inverse(mat3(view*model)))
+    // when model is translation-only. Far-LOD draws keep the uniform path.
+    vec3 worldPos3;
+    vec3 worldNormal;
+    vec3 viewNormal;
+    if (u_useInstanceOrigin == 1) {
+        worldPos3 = aPos + aOrigin;
+        worldNormal = normalize(aNormal);
+        viewNormal = normalize(u_normalViewMatrix * aNormal);
+    } else {
+        worldPos3 = vec3(model * vec4(aPos, 1.0));
+        worldNormal = normalize(mat3(model) * aNormal);
+        viewNormal = normalize(normalMatrix * aNormal);
+    }
+    vec4 worldPos = vec4(worldPos3, 1.0);
+    vs_out.WorldPos = worldPos3;
+    vs_out.WorldNormal = worldNormal;
 
     // Calculate view-space position
     vec4 viewPos = view * worldPos;
     vs_out.FragPos = vec3(viewPos);
-    vs_out.Normal = normalize(normalMatrix * aNormal);
+    vs_out.Normal = viewNormal;
     vs_out.UV = vec2(0.0); // terrain uses triplanar projection, not mesh UVs
     vs_out.MaterialID = aMaterialID;
 
