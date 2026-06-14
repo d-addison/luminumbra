@@ -19,6 +19,7 @@ namespace Luminumbra {
         class PhysicsSystem;
         class WaterSystem;
         class WindFieldSystem;
+        class WeatherSystem;
     }
 }
 
@@ -123,6 +124,14 @@ public:
     Systems::WindFieldSystem* GetWindFieldSystem() { return m_windFieldSystem.get(); }
     const Systems::WindFieldSystem* GetWindFieldSystem() const { return m_windFieldSystem.get(); }
 
+    // T-I5a-3 (B1): the deterministic weather core. Sim-authoritative; its state
+    // (region category + storm cells + precip field) feeds the world_hash
+    // `weather` sub-hash. Constructed on world create/load (pure function of the
+    // world seed); updated per fixed tick in TickSimulation AFTER the wind field
+    // (it advects storm cells by the just-updated wind), around the stream anchor.
+    Systems::WeatherSystem* GetWeatherSystem() { return m_weatherSystem.get(); }
+    const Systems::WeatherSystem* GetWeatherSystem() const { return m_weatherSystem.get(); }
+
     entt::registry& GetRegistry() { return m_registry; }
 
     // --- Fixed-rate simulation (T-I3-4) ---
@@ -156,6 +165,7 @@ private:
     std::unique_ptr<Systems::SHIELD_WorldSystem> m_worldSystem;
     std::unique_ptr<Systems::WaterSystem> m_waterSystem;
     std::unique_ptr<Systems::WindFieldSystem> m_windFieldSystem;
+    std::unique_ptr<Systems::WeatherSystem> m_weatherSystem;
     JobSystem* m_jobSystem = nullptr;
 
     // Generate a unique world ID

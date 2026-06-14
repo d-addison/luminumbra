@@ -7,6 +7,7 @@
 #include "../systems/PhysicsSystem.h"
 #include "../systems/WaterSystem.h"
 #include "../systems/WindFieldSystem.h"
+#include "../systems/WeatherSystem.h"
 #include "../core/Log.h"
 #include "../persistence/WorldSaveService.h"
 #include "TerrainPresetLoader.h"
@@ -93,6 +94,16 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         // run==replay and resim agree on the field at every checkpoint.
         if (m_windFieldSystem) {
             m_windFieldSystem->Update(current_tick, m_metadata.spawnPoint);
+        }
+
+        // 4. T-I5a-3 (B1): weather core update. Runs AFTER wind so storm cells
+        // advect by the freshly-updated wind grid. Deterministic (DeterministicMath
+        // + FastNoise batch path; no wall-clock/RNG, no std::random). The weather
+        // state (category map + storm cells + precip field) feeds the world_hash
+        // `weather` sub-hash; the update runs every tick so run==replay and resim
+        // agree on the state at every checkpoint.
+        if (m_weatherSystem) {
+            m_weatherSystem->Update(current_tick, m_metadata.spawnPoint, m_windFieldSystem.get());
         }
 
         m_simulationEventBus.drain(current_tick);
@@ -205,6 +216,12 @@ bool GameSession::CreateWorld(const std::string& name, const std::string& seed, 
     m_windFieldSystem = std::make_unique<Systems::WindFieldSystem>(world_seed);
     LUMINUMBRA_CORE_INFO("Wind field system initialized.");
 
+    // 5. T-I5a-3 (B1): the deterministic weather core. Pure function of the world
+    //    seed (uses seed+12 for its pressure/climate noise + storm schedule);
+    //    updated per tick AFTER wind (advects storm cells by the wind grid).
+    m_weatherSystem = std::make_unique<Systems::WeatherSystem>(world_seed);
+    LUMINUMBRA_CORE_INFO("Weather system initialized.");
+
     // Calculate appropriate spawn point based on actual terrain height
     float spawn_x = 8.0f;
     float spawn_z = 8.0f;
@@ -298,6 +315,14 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     // loaded world reconstructs the identical field (the heavy-oracle/replay
     // resim reaches the same wind sub-hash at the same tick).
     m_windFieldSystem = std::make_unique<Systems::WindFieldSystem>(world_seed);
+
+    // T-I5a-3 (B1): weather is likewise a pure function of (world seed, tick,
+    // anchor). A loaded world reconstructs the identical weather core. NOTE: like
+    // wind, the loaded session's tick counter starts at 0, so the loaded session
+    // reproduces the SAME-TICK state, not the original's absolute-tick state --
+    // the heavy-oracle cross-phase compare excludes weather for this reason
+    // (documented in main_server.cpp AuthoritativeStateEqual), exactly as wind is.
+    m_weatherSystem = std::make_unique<Systems::WeatherSystem>(world_seed);
 
     // Legacy saves without a persisted spawnPoint: derive it from terrain
     // height exactly like CreateWorld does (pure function of seed/params).

@@ -2803,6 +2803,78 @@ function Test-WeatherVisual {
 
     Assert-PpmArtifact (Join-Path $visualDir $analysis.baseline_screenshot)
     Assert-PpmArtifact (Join-Path $visualDir $analysis.weather_screenshot)
+
+    # T-I5a-3 (B1): the WeatherVisual gate ALSO asserts the SIM-side weather state
+    # determinism via the server's --weather-bench mode (the visual overlay above
+    # is now fed from this replicated state, one-way). Two independent runs of N
+    # WeatherSystem updates (advected by a parallel wind field) reach the IDENTICAL
+    # `weather` STATE-HASH (stable across resim/replay -- the property the
+    # world_hash `weather` slot depends on); the state EVOLVES over time (gate not
+    # vacuous); storm cells stay BOUNDED (<= 16, F9) with at least one spawned; and
+    # the per-tick weather update stays within the PINNED <= 0.20 ms budget at the
+    # streamed extent (enforced on the release build; informational on debug).
+    $serverExe = "build/$BuildPreset/bin/luminumbra_server_app.exe"
+    if (-not (Test-Path $serverExe)) {
+        throw "weather determinism gate not yet built - missing $serverExe (cmake --build build/$BuildPreset)"
+    }
+    $weatherArtifact = "build/$BuildPreset/test-artifacts/server/weather-determinism.json"
+    Remove-Item -Force -ErrorAction SilentlyContinue $weatherArtifact
+    & $serverExe --weather-bench --ticks 300 --seed 424242 --artifact $weatherArtifact
+    if ($LASTEXITCODE -ne 0) {
+        throw "weather-bench exited with code $LASTEXITCODE"
+    }
+    $w = Read-JsonArtifact $weatherArtifact "luminumbra.weather_determinism.v1"
+    Assert-ArtifactPassed $w "WeatherVisual(weather-bench)"
+    if ([string]::IsNullOrWhiteSpace($w.weather_sub_hash)) {
+        throw "weather determinism: empty weather sub-hash"
+    }
+    if ($w.weather_sub_hash -ne $w.weather_sub_hash_replay) {
+        throw "weather determinism: weather state-hash diverged across runs ($($w.weather_sub_hash) != $($w.weather_sub_hash_replay))"
+    }
+    if (-not $w.deterministic) {
+        throw "weather determinism: reported non-deterministic"
+    }
+    if (-not $w.evolves -or $w.weather_sub_hash_tick0 -eq $w.weather_sub_hash_evolved) {
+        throw "weather determinism: state did not evolve over ticks (gate is vacuous)"
+    }
+    if (-not $w.bounded_storm_cells -or [int]$w.max_storm_cells -gt [int]$w.max_storm_cell_cap) {
+        throw "weather determinism: storm cells exceeded the bounded cap (max=$($w.max_storm_cells) cap=$($w.max_storm_cell_cap))"
+    }
+    if (-not $w.storms_spawned -or [int]$w.max_storm_cells -le 0) {
+        throw "weather determinism: no storm cell ever spawned (storm path is vacuous)"
+    }
+    if ([double]$w.cell_size_m -ne 24.0) {
+        throw "weather determinism: cell_size_m=$($w.cell_size_m), expected 24"
+    }
+    # Per-tick weather budget: <= 0.20 ms at the streamed extent, enforced on the
+    # release build only (design-decisions.md S7), informational on debug.
+    $wBudgetMs = [double]$w.budget_ms
+    $wPerTickMs = [double]$w.per_tick_update_ms
+    $wBudgetSource = $BuildPreset
+    $releaseExe = "build/release/bin/luminumbra_server_app.exe"
+    if ($BuildPreset -ne "release" -and (Test-Path $releaseExe)) {
+        $relWeather = "build/release/test-artifacts/server/weather-determinism.json"
+        Remove-Item -Force -ErrorAction SilentlyContinue $relWeather
+        & $releaseExe --weather-bench --ticks 300 --seed 424242 --artifact $relWeather | Out-Null
+        if ($LASTEXITCODE -eq 0 -and (Test-Path $relWeather)) {
+            $relW = Read-JsonArtifact $relWeather "luminumbra.weather_determinism.v1"
+            $wPerTickMs = [double]$relW.per_tick_update_ms
+            $wBudgetSource = "release"
+            if (-not $relW.deterministic -or -not $relW.evolves) {
+                throw "weather determinism: release build run was non-deterministic or did not evolve"
+            }
+        }
+    }
+    if ($wBudgetSource -eq "release") {
+        if ($wPerTickMs -gt $wBudgetMs) {
+            throw ("weather determinism: per-tick weather update {0:N4} ms (release) exceeds the {1:N4} ms budget" -f $wPerTickMs, $wBudgetMs)
+        }
+    } else {
+        Write-Host ("weather determinism: NOTE budget enforced on the release build only; {0} measured {1:N4} ms (informational, budget {2:N4} ms)" -f `
+            $BuildPreset, $wPerTickMs, $wBudgetMs)
+    }
+    Write-Host ("weather determinism gate passed: weather_sub_hash={0} stable across 2 runs (evolves over {1} ticks); max_storm_cells={2} (cap {3}); per-tick update {4:N4} ms <= {5:N4} ms budget [{6}]" -f `
+        $w.weather_sub_hash, $w.ticks, $w.max_storm_cells, $w.max_storm_cell_cap, $wPerTickMs, $wBudgetMs, $wBudgetSource)
 }
 
 function Test-ParticleEmitterDeterminism {
@@ -4051,7 +4123,7 @@ function Test-SimDeterminismLint {
         # WindFieldDeterminism budget assertion. The clock is TELEMETRY only
         # (measured, recorded in the artifact, never hashed); the wind field
         # itself is bit-deterministic (DeterministicMath + FastNoise batch path).
-        "src/luminumbra_server/main_server.cpp|time"         = "--wind-bench per-tick update timing telemetry; not hashed"
+        "src/luminumbra_server/main_server.cpp|time"         = "--wind-bench / --weather-bench per-tick update timing telemetry; not hashed"
     }
 
     $bannedTrig = 'sin|cos|tan|asin|acos|atan|atan2|sinh|cosh|tanh|exp|exp2|log|log2|log10|pow|cbrt|hypot'

@@ -11,6 +11,7 @@
 //                  seed/preset, runs N ticks each, and emits the
 //                  luminumbra.server_tick.v1 artifact asserting
 //                  world_hash == world_hash_replay.
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -27,6 +28,7 @@
 #include "luminumbra_common/net/LockstepSession.h"
 #include "luminumbra_common/replay/ReplayStream.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
+#include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/world/GameSession.h"
 
 namespace fs = std::filesystem;
@@ -49,6 +51,11 @@ struct ServerCliOptions {
     // twice, asserts the wind sub-hash is equal across runs + stable, and times
     // the per-tick wind update (budget <= 0.15 ms at the streamed extent).
     bool wind_bench = false;
+    // T-I5a-3 (B1): WeatherVisual determinism. Boots the weather core (advected by
+    // the wind field), runs N ticks twice, asserts the weather sub-hash is equal
+    // across runs + stable + evolves + bounded storm cells, and times the per-tick
+    // weather update (budget <= 0.20 ms at the streamed extent).
+    bool weather_bench = false;
     // T-I4-11 heavy-mode oracle: tick N, save, load into a fresh session,
     // resimulate heavy_resim ticks on BOTH, compare full + sub hashes.
     bool heavy = false;
@@ -138,6 +145,8 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
         const char* arg = argv[i];
         if (std::strcmp(arg, "--wind-bench") == 0) {
             options.wind_bench = true;
+        } else if (std::strcmp(arg, "--weather-bench") == 0) {
+            options.weather_bench = true;
         } else if (std::strcmp(arg, "--smoke") == 0) {
             options.smoke = true;
         } else if (std::strcmp(arg, "--heavy") == 0) {
@@ -481,6 +490,155 @@ int RunWindBench(const ServerCliOptions& options) {
 }
 
 // ---------------------------------------------------------------------------
+// T-I5a-3 (B1) WeatherVisual determinism driver. Two independent runs of N
+// WeatherSystem updates (advected by a parallel wind field) with the same
+// seed/anchor must reach the IDENTICAL weather sub-hash (the bit-determinism the
+// world_hash `weather` slot + the WeatherVisual state-hash assertion depend on),
+// the state must EVOLVE (tick 0 != tick N -- gate is not vacuous), storm cells
+// must stay BOUNDED (<= kMaxStormCells, F9), and the per-tick weather update
+// cost is measured against the PINNED <= 0.20 ms budget at the streamed extent.
+// The weather core is exercised in isolation (no chunk streaming) so the timing
+// is the weather update ALONE (plus the wind advection sample it requires).
+// ---------------------------------------------------------------------------
+struct WeatherBenchResult {
+    std::string sub_hash;
+    int max_storm_cells = 0;
+};
+
+WeatherBenchResult RunWeatherUpdatesAndHash(int seed, std::uint64_t ticks, const Luminumbra::Vec3& anchor) {
+    Luminumbra::Systems::WindFieldSystem wind(seed);
+    Luminumbra::Systems::WeatherSystem weather(seed);
+    WeatherBenchResult result;
+    for (std::uint64_t t = 1; t <= ticks; ++t) {
+        wind.Update(t, anchor);
+        weather.Update(t, anchor, &wind);
+        result.max_storm_cells = std::max(result.max_storm_cells, weather.active_storm_count());
+    }
+    result.sub_hash = weather.ComputeWeatherSubHash();
+    return result;
+}
+
+int RunWeatherBench(const ServerCliOptions& options) {
+    const int seed = static_cast<int>(std::strtoul(options.seed.c_str(), nullptr, 10));
+    // A storm-bearing run: enough ticks for the seeded schedule to spawn + advect
+    // several storm cells (the dedicated weather scenario, premise guard F4). 300
+    // ticks (10 s at 30 Hz) is the Endurance300Storm horizon.
+    const std::uint64_t ticks = options.ticks > 0 ? options.ticks : 300;
+    const Luminumbra::Vec3 anchor(8.0f, 100.0f, 8.0f);
+
+    LUMINUMBRA_CORE_INFO(
+        "Headless server WEATHER-BENCH: seed={} ticks={} (24 m cells x {} extent, "
+        "storm-cell cap {})",
+        seed, ticks, Luminumbra::Systems::kWeatherExtentCells,
+        Luminumbra::Systems::kMaxStormCells);
+
+    // Determinism: two independent runs to the same tick must match.
+    const WeatherBenchResult run1 = RunWeatherUpdatesAndHash(seed, ticks, anchor);
+    const WeatherBenchResult run2 = RunWeatherUpdatesAndHash(seed, ticks, anchor);
+    const bool deterministic = !run1.sub_hash.empty() && run1.sub_hash == run2.sub_hash;
+
+    // Non-vacuity: the state at tick 0 differs from the state after N ticks.
+    Luminumbra::Systems::WindFieldSystem wind_evolve(seed);
+    Luminumbra::Systems::WeatherSystem weather_evolve(seed);
+    const std::string hash_tick0 = weather_evolve.ComputeWeatherSubHash();
+    for (std::uint64_t t = 1; t <= ticks; ++t) {
+        wind_evolve.Update(t, anchor);
+        weather_evolve.Update(t, anchor, &wind_evolve);
+    }
+    const std::string hash_evolved = weather_evolve.ComputeWeatherSubHash();
+    const bool evolves = hash_tick0 != hash_evolved;
+
+    // Bounded state (F9): the storm-cell count never exceeds the cap.
+    const bool bounded = run1.max_storm_cells <= Luminumbra::Systems::kMaxStormCells &&
+                         run2.max_storm_cells <= Luminumbra::Systems::kMaxStormCells;
+    // Non-vacuity of the storm path: at least one storm cell spawned over the run
+    // (so the gate actually exercised advection + the precip field).
+    const bool storms_spawned = run1.max_storm_cells > 0;
+
+    // Budget: time the per-tick weather update (with wind advection) in isolation.
+    // TELEMETRY (never hashed), same justification as the wind-bench timing.
+    Luminumbra::Systems::WindFieldSystem wind_timed(seed);
+    Luminumbra::Systems::WeatherSystem weather_timed(seed);
+    constexpr std::uint64_t kWarmup = 30;
+    constexpr std::uint64_t kMeasured = 600;
+    for (std::uint64_t t = 1; t <= kWarmup; ++t) {
+        wind_timed.Update(t, anchor);
+        weather_timed.Update(t, anchor, &wind_timed);
+    }
+    const auto t_start = std::chrono::steady_clock::now();
+    for (std::uint64_t t = 1; t <= kMeasured; ++t) {
+        wind_timed.Update(kWarmup + t, anchor);
+        weather_timed.Update(kWarmup + t, anchor, &wind_timed);
+    }
+    const auto t_end = std::chrono::steady_clock::now();
+    const double total_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+    const double per_tick_ms = total_ms / static_cast<double>(kMeasured);
+    constexpr double kBudgetMs = 0.20;
+    const bool within_budget = per_tick_ms <= kBudgetMs;
+
+    // Pass/fail is the BIT-DETERMINISM + bounded-state contract; the per-tick
+    // budget is REPORTED for the gate to enforce on the release build.
+    const bool passed = deterministic && evolves && bounded && storms_spawned;
+
+    nlohmann::json artifact{
+        {"schema", "luminumbra.weather_determinism.v1"},
+        {"generated_by", "luminumbra_server_app --weather-bench (T-I5a-3)"},
+        {"seed", seed},
+        {"ticks", ticks},
+        {"cell_size_m", Luminumbra::Systems::kWeatherCellSizeM},
+        {"extent_cells", Luminumbra::Systems::kWeatherExtentCells},
+        {"max_storm_cell_cap", Luminumbra::Systems::kMaxStormCells},
+        {"weather_sub_hash", run1.sub_hash},
+        {"weather_sub_hash_replay", run2.sub_hash},
+        {"deterministic", deterministic},
+        {"weather_sub_hash_tick0", hash_tick0},
+        {"weather_sub_hash_evolved", hash_evolved},
+        {"evolves", evolves},
+        {"max_storm_cells", run1.max_storm_cells},
+        {"bounded_storm_cells", bounded},
+        {"storms_spawned", storms_spawned},
+        {"per_tick_update_ms", per_tick_ms},
+        {"budget_ms", kBudgetMs},
+        {"within_budget", within_budget},
+        {"measured_ticks", kMeasured},
+        {"passed", passed},
+    };
+
+    if (!options.artifact_path.empty()) {
+        const fs::path artifact_path(options.artifact_path);
+        std::error_code ec;
+        if (artifact_path.has_parent_path()) {
+            fs::create_directories(artifact_path.parent_path(), ec);
+        }
+        std::ofstream out(artifact_path);
+        if (out.is_open()) {
+            out << artifact.dump(2) << "\n";
+            LUMINUMBRA_CORE_INFO("Weather-bench artifact written: {}", options.artifact_path);
+        } else {
+            LUMINUMBRA_CORE_ERROR("Failed to write weather-bench artifact: {}", options.artifact_path);
+            return 1;
+        }
+    }
+
+    if (!passed) {
+        LUMINUMBRA_CORE_ERROR(
+            "Weather-bench FAILED: deterministic={} evolves={} bounded={} storms_spawned={} "
+            "(weather_hash={} replay={} max_storm_cells={})",
+            deterministic, evolves, bounded, storms_spawned,
+            run1.sub_hash, run2.sub_hash, run1.max_storm_cells);
+        return 1;
+    }
+
+    LUMINUMBRA_CORE_INFO(
+        "Weather-bench passed: weather_sub_hash={} stable across runs, state evolves; "
+        "max_storm_cells={} (cap {}); per_tick_update={:.4f} ms (budget {:.4f} ms, "
+        "within_budget={}; budget enforced by the gate on the release build)",
+        run1.sub_hash, run1.max_storm_cells, Luminumbra::Systems::kMaxStormCells,
+        per_tick_ms, kBudgetMs, within_budget);
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
 // T-I4-11 heavy-mode oracle (Factorio "heavy mode", research Area 2 takeaway 5):
 // tick N, SAVE, LOAD into a FRESH session, then resimulate M further ticks in
 // BOTH the original and the loaded session and compare full + per-system
@@ -524,6 +682,19 @@ bool AuthoritativeStateEqual(const HeavyHashes& a, const HeavyHashes& b) {
     // comparison IS same-tick: the smoke (run==replay), WindFieldDeterminism,
     // and the replay roundtrip (same-tick checkpoint hashes, which include wind
     // via the composite world_hash).
+    //
+    // T-I5a-3 (B1): WEATHER is excluded for the IDENTICAL reason as wind. The
+    // weather core (region category map + storm cells + precipitation field) is a
+    // pure function of (seed+12, ABSOLUTE tick, anchor) -- it evolves every tick
+    // and the storm-cell schedule keys on the absolute tick-epoch. Across the
+    // save/load boundary the loaded session's tick counter resets to 0, so it has
+    // no concept of the original's absolute tick; persisting the accumulated
+    // weather state could NOT make a cross-phase compare match (original@N+M vs
+    // loaded@M differ in absolute tick), so it is recompute-and-excluded here. Its
+    // determinism is proven where the comparison IS same-tick: the smoke
+    // (run==replay), the WeatherVisual state-hash (resim/replay at the same tick),
+    // and the replay roundtrip / lockstep checkpoints (which include weather via
+    // the composite world_hash).
     return a.sub.terrain == b.sub.terrain &&
         a.sub.water == b.sub.water &&
         a.sub.entities == b.sub.entities;
@@ -542,6 +713,7 @@ nlohmann::json HeavyHashJson(const HeavyHashes& h) {
             {"water", h.sub.water},
             {"entities", h.sub.entities},
             {"wind", h.sub.wind},
+            {"weather", h.sub.weather},
         }},
     };
 }
@@ -1377,6 +1549,9 @@ int main(int argc, char* argv[]) {
     }
     if (options.heavy) {
         return RunHeavy(options);
+    }
+    if (options.weather_bench) {
+        return RunWeatherBench(options);
     }
     if (options.wind_bench) {
         return RunWindBench(options);
