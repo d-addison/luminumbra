@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "BiomeCoverage", "RiverPresence", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "BiomeCoverage", "RiverPresence", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -3511,6 +3511,88 @@ function Test-LockstepLoopback {
         $a.ticks_requested, $a.host.world_hash, $a.host.max_horizon_reached, $a.host.late_input_events)
 }
 
+# --- T-I4-14 NetworkedSession mode: append-only (OFF the default All lane) ---
+# The CLIENT renders a SERVER-OWNED world over the lockstep transport. A
+# LockstepSession pair runs over an in-process LoopbackTransport (no sockets):
+# one peer is a headless HOST world authority, the other is the client's render
+# GameSession. Per agreed tick both worlds step one fixed sim tick from the SAME
+# spawn anchor and exchange world_hash + sub-hashes (the desync oracle). Camera
+# look is render-side (never round-tripped). The gate asserts: both peers reach
+# the budget tick, hashes matched at every cadence, host==client end_hash, the
+# input set round-tripped, a clean disconnect, and the artifact schema. The
+# canonical 2fa007951a21e140 hash (radius-4 streaming) is asserted to prove the
+# client world == the canonical server world. This is a HEAVY two-world lockstep
+# gate (like LockstepLoopback / HeadlessServerTick), so it stays off All.
+function Test-NetworkedSession {
+    $exe = Get-ClientExe
+    $viewDir = "build/$BuildPreset/test-artifacts/runtime/networked-session"
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $viewDir
+    New-Item -ItemType Directory -Force -Path $viewDir | Out-Null
+
+    # radius 4/2 keeps the two-world 90-tick lockstep inside a practical wall time
+    # AND matches the headless server's streaming profile, so the in-sync end hash
+    # is the canonical world hash. The run drives the lockstep to completion and
+    # exits; --timed-run is a generous outer ceiling only.
+    Invoke-Checked -FilePath $exe -ArgumentList @(
+        "--scenario", "networked_session_smoke",
+        "--auto-create-world",
+        "--auto-enter-world",
+        "--timed-run", "600",
+        "--horizon-radius", "4",
+        "--collision-radius", "2",
+        "--no-audio",
+        "--no-ui",
+        "--runtime-artifact-dir", $viewDir
+    ) -TimeoutSeconds 600
+
+    $analysisPath = Join-Path $viewDir "networked-session-analysis.json"
+    $a = Read-JsonArtifact -Path $analysisPath -Schema "luminumbra.networked_session.v1"
+
+    if ([int64]$a.gl_debug.errors -ne 0) {
+        throw "networked session emitted GL debug errors: $($a.gl_debug.errors)"
+    }
+    if ($a.desynced) {
+        throw "networked session reported a desync on an in-sync session"
+    }
+    if ([int64]$a.ticks_requested -lt 90) {
+        throw "networked session must run at least 90 ticks (got $($a.ticks_requested))"
+    }
+    if ([int64]$a.host.agreed_tick -ne [int64]$a.ticks_requested -or
+        [int64]$a.client.agreed_tick -ne [int64]$a.ticks_requested) {
+        throw "networked session peers did not both reach the budget tick: host=$($a.host.agreed_tick) client=$($a.client.agreed_tick) / $($a.ticks_requested)"
+    }
+    if (-not $a.end_hashes_equal) {
+        throw "networked session host/client end hashes differ: $($a.host.world_hash) != $($a.client.world_hash)"
+    }
+    if (-not $a.in_sync_every_cadence) {
+        throw "networked session was not in sync at every cadence (hash_exchanges=$($a.hash_exchanges))"
+    }
+    $expectedExchanges = [int][Math]::Floor([int64]$a.ticks_requested / [int64]$a.hash_cadence_ticks)
+    if ([int64]$a.hash_exchanges -lt $expectedExchanges) {
+        throw "networked session ran $($a.hash_exchanges) cadence hash exchanges, expected at least $expectedExchanges"
+    }
+    if (-not $a.input_round_tripped) {
+        throw "networked session did not round-trip the input set through the session"
+    }
+    if (-not $a.camera_look_render_side) {
+        throw "networked session did not keep camera look render-side"
+    }
+    if (-not $a.clean_disconnect) {
+        throw "networked session did not record a clean disconnect"
+    }
+    # Determinism proof: the client-rendered, server-owned world equals the
+    # canonical headless server world. Render-side camera look did NOT perturb it.
+    $expectedHash = "2fa007951a21e140"
+    if ($a.end_hash -ne $expectedHash) {
+        throw "networked session end hash $($a.end_hash) != canonical $expectedHash (client world diverged from the server world)"
+    }
+    if (-not $a.passed) {
+        throw "networked session analysis reported failure: $($a.failure_reason)"
+    }
+    Write-Host ("networked session gate passed: client renders server-owned world, {0} ticks in sync (host==client), end_hash={1} (canonical), {2} cadence hash exchanges, clean disconnect" -f `
+        $a.ticks_requested, $a.end_hash, $a.hash_exchanges)
+}
+
 # --- T-I4-13 LockstepFaultInjection mode: append-only ---
 # Two scenarios, both over LoopbackTransport (no sockets):
 #  (1) DELAYED+DROPPED input within horizon tolerance: peer 1 withholds its inputs for a
@@ -4314,6 +4396,7 @@ switch ($Mode) {
     "ReplayDivergence" { Test-ReplayDivergence }
     "LockstepLoopback" { Test-LockstepLoopback }
     "LockstepFaultInjection" { Test-LockstepFaultInjection }
+    "NetworkedSession" { Test-NetworkedSession }
     "SkinnedMeshVisual" { Test-SkinnedMeshVisual }
     "EngineGameSplitLint" { Test-EngineGameSplitLint }
     "SimDeterminismLint" { Test-SimDeterminismLint }

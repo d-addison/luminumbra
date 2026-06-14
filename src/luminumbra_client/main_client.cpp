@@ -1845,6 +1845,16 @@ int main(int argc, char* argv[]) {
     bool window_mode_stress_complete = false;
     bool window_mode_stress_analysis_written = false;
     WindowModeStressCapture window_mode_stress_capture;
+    // networked_session_smoke (T-I4-14): the client renders a SERVER-OWNED world
+    // streamed over the lockstep transport. The driver owns the host authority +
+    // both LockstepSession ends (LoopbackTransport, no sockets); per agreed tick
+    // both worlds step one fixed sim tick from the SAME spawn anchor and exchange
+    // hashes (the desync oracle). Camera LOOK is applied render-side each frame
+    // and is NEVER sent through the session, so look latency is zero (research
+    // worldgen-lockstep-sdfrt.md Area 2 takeaway 2).
+    NetworkedSessionDriver networked_session_driver;
+    bool networked_session_begun = false;
+    bool networked_session_done = false;
     const auto median_of = [](std::vector<double> samples) -> double {
         if (samples.empty()) {
             return 0.0;
@@ -2216,6 +2226,74 @@ int main(int argc, char* argv[]) {
                     }
                     UpdateCreatureSliceScene(gameSession.get(), creature_slice_scene, static_cast<double>(deltaTime));
                     ApplyCreatureSliceCamera(gameSession.get(), g_camera.get(), creature_slice_scene);
+                } else if (scenario_config.networked_session_smoke() && scenario_ready && g_camera) {
+                    // T-I4-14: the client renders a SERVER-OWNED world over the
+                    // lockstep transport. The driver owns the host authority world
+                    // + both LockstepSession ends; per agreed tick it steps BOTH
+                    // worlds (the client world is THIS gameSession, stepped via the
+                    // driver's apply_and_step hook from the spawn anchor) and
+                    // exchanges hashes. The client's WORLD-AFFECTING input set
+                    // (empty today) round-trips through LockstepSession::*Input.
+                    if (!networked_session_begun) {
+                        networked_session_begun = true;
+                        NetworkedSessionDriver::Config net_cfg;
+                        net_cfg.seed = 424242;
+                        net_cfg.preset = scenario_world_type;
+                        net_cfg.budget_ticks = 90;
+                        net_cfg.hash_cadence_ticks = 30;
+                        net_cfg.root_path = root_path_str;
+                        net_cfg.surface_radius = scenario_config.horizon_radius;
+                        net_cfg.collision_radius = scenario_config.collision_radius;
+                        if (!networked_session_driver.Begin(gameSession.get(), net_cfg)) {
+                            scenario_failed = true;
+                            scenario_failure_reason =
+                                "networked_session_begin_failed_" + networked_session_driver.failure_reason();
+                        }
+                    }
+                    if (networked_session_begun && !networked_session_done && !scenario_failed) {
+                        // Drive the lockstep session to COMPLETION here (bounded by
+                        // the budget): each agreed tick quiesces both worlds' streaming
+                        // jobs, which is expensive in a debug build, so spreading it
+                        // across rendered frames would blow the run window. The world
+                        // is server-owned and stepped through the driver's
+                        // apply_and_step hook; the render frame BELOW then draws the
+                        // settled server-owned world (proving the client is
+                        // render-capable, unlike the headless server). One agreed tick
+                        // is stepped before the first render so the loop is observable.
+                        bool live = networked_session_driver.StepAgreedTick();
+                        while (live) {
+                            live = networked_session_driver.StepAgreedTick();
+                        }
+                        if (!live) {
+                            networked_session_done = true;
+                            networked_session_driver.Disconnect();
+                            const double net_seconds = std::chrono::duration<double>(
+                                std::chrono::steady_clock::now() - scenario_play_started_at).count();
+                            const bool net_passed = networked_session_driver.WriteArtifact(
+                                scenario_config.artifact_dir, net_seconds);
+                            if (!net_passed) {
+                                scenario_failed = true;
+                                scenario_failure_reason =
+                                    networked_session_driver.failure_reason().empty()
+                                        ? std::string("networked_session_not_in_sync")
+                                        : ("networked_session_" + networked_session_driver.failure_reason());
+                            }
+                            scenario_timed_run_complete = true;
+                            glfwSetWindowShouldClose(window, true);
+                        }
+                    }
+                    // Camera LOOK is RENDER-SIDE: a fixed eye-level framing applied
+                    // locally each frame, NEVER round-tripped through the session, so
+                    // look latency is zero (research worldgen-lockstep-sdfrt.md Area 2
+                    // takeaway 2). It reads the spawn anchor the driver streams the
+                    // world around, but does NOT influence the hashed world step.
+                    {
+                        const Luminumbra::Vec3 anchor = networked_session_driver.ClientStreamingAnchor();
+                        g_camera->Position = glm::vec3(anchor.x, anchor.y + 1.8f, anchor.z);
+                        g_camera->Yaw = 0.0f;
+                        g_camera->Pitch = 0.0f;
+                        g_camera->updateCameraVectors();
+                    }
                 } else if (g_playerController) {
                     g_playerController->Update(deltaTime);
                 }
@@ -2223,6 +2301,12 @@ int main(int argc, char* argv[]) {
                 // T-I3-4: fixed 30 Hz simulation tick (SimulationClock +
                 // OrderedEventBus drain) hosted by GameSession. Render,
                 // physics, and scenario paths above remain variable-dt.
+                // T-I4-14: the networked-session scenario steps its client world
+                // through the lockstep driver's apply_and_step hook (in lockstep
+                // with the host), so the default per-frame tick + camera-anchored
+                // streaming are SKIPPED here -- ticking twice would desync from the
+                // host, and camera-anchored streaming would diverge the hashed world.
+                if (!scenario_config.networked_session_smoke()) {
                 gameSession->TickSimulation(static_cast<double>(deltaTime));
                 if (gameSession->GetWorldSystem() && (g_playerController || g_camera)) {
                     const Luminumbra::Vec3 streaming_position =
@@ -2235,6 +2319,7 @@ int main(int argc, char* argv[]) {
                         gameSession->GetPhysicsSystem()
                     );
                 }
+                } // T-I4-14: end !networked_session_smoke default-tick guard
                 break;
             case GameState::MAIN_MENU:
                 break;
