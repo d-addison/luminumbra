@@ -163,42 +163,66 @@ void SkyboxPass::execute_weather_overlay(RenderPipeline& pipeline, const Camera&
     m_weather_shader->setVec3("u_sunColor", pipeline.m_sun.color);
     m_weather_shader->setFloat("u_sunIntensity", pipeline.m_sun.intensity);
 
-    // Map the engine-generic weather type onto the shader's intensity
-    // uniforms. Rain carries a sub-lightning storm component (overcast
-    // darkening without random flashes) and light fog; Storm enables the
-    // full storm path including lightning.
-    const float intensity = pipeline.m_weather_intensity;
+    // T-I5a-3 (B1): the weather uniforms are SIM-DRIVEN when a replicated weather
+    // state has been pushed (one-way, F2): the WeatherSystem region category +
+    // precip + nearest-storm + advected wind feed u_rainIntensity/u_snowIntensity/
+    // u_fogDensity/u_stormIntensity/u_windDirection/u_windStrength directly. The
+    // legacy set_weather DEBUG mapping (deriving the uniforms from a single
+    // WeatherType+intensity) is the FALLBACK for non-driven callers. The wetness
+    // material response (u_wetness) is RENDER-ONLY: it shifts roughness/albedo by
+    // local precip and never feeds back into the sim or world_hash.
     float rain = 0.0f;
     float snow = 0.0f;
     float fog = 0.0f;
     float storm = 0.0f;
-    switch (pipeline.m_weather_type) {
-        case WeatherType::Rain:
-            rain = intensity;
-            storm = 0.25f * intensity;
-            fog = 0.1f * intensity;
-            break;
-        case WeatherType::Snow:
-            snow = intensity;
-            fog = 0.05f * intensity;
-            break;
-        case WeatherType::Fog:
-            fog = intensity;
-            break;
-        case WeatherType::Storm:
-            rain = intensity;
-            storm = intensity;
-            break;
-        case WeatherType::None:
-        default:
-            break;
+    float wetness = 0.0f;
+    glm::vec3 wind_dir(1.0f, 0.0f, 0.0f);
+    float wind_strength = 0.0f;
+    if (pipeline.m_weather_state.driven) {
+        const WeatherRenderState& w = pipeline.m_weather_state;
+        rain = w.rain_intensity;
+        snow = w.snow_intensity;
+        fog = w.fog_density;
+        storm = w.storm_intensity;
+        wetness = w.wetness;
+        wind_dir = w.wind_direction;
+        wind_strength = w.wind_strength;
+    } else {
+        // Legacy DEBUG mapping. Rain carries a sub-lightning storm component
+        // (overcast darkening without flashes) and light fog; Storm enables the
+        // full storm path.
+        const float intensity = pipeline.m_weather_intensity;
+        switch (pipeline.m_weather_type) {
+            case WeatherType::Rain:
+                rain = intensity;
+                storm = 0.25f * intensity;
+                fog = 0.1f * intensity;
+                break;
+            case WeatherType::Snow:
+                snow = intensity;
+                fog = 0.05f * intensity;
+                break;
+            case WeatherType::Fog:
+                fog = intensity;
+                break;
+            case WeatherType::Storm:
+                rain = intensity;
+                storm = intensity;
+                break;
+            case WeatherType::None:
+            default:
+                break;
+        }
+        wetness = rain;
+        wind_strength = 0.3f * intensity;
     }
     m_weather_shader->setFloat("u_rainIntensity", rain);
     m_weather_shader->setFloat("u_snowIntensity", snow);
     m_weather_shader->setFloat("u_fogDensity", fog);
     m_weather_shader->setFloat("u_stormIntensity", storm);
-    m_weather_shader->setVec3("u_windDirection", glm::vec3(1.0f, 0.0f, 0.0f));
-    m_weather_shader->setFloat("u_windStrength", 0.3f * intensity);
+    m_weather_shader->setFloat("u_wetness", wetness);
+    m_weather_shader->setVec3("u_windDirection", wind_dir);
+    m_weather_shader->setFloat("u_windStrength", wind_strength);
 
     glBindVertexArray(pipeline.m_screen_quad_vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);

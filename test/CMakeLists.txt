@@ -116,6 +116,7 @@ add_executable(common_tests
     common/StructurePlacement_test.cpp
     common/TerrainPresetLoader_test.cpp
     common/WindFieldSystem_test.cpp
+    common/WeatherSystem_test.cpp
     common/WorldStreamingState_test.cpp
 )
 

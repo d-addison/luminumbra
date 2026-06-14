@@ -3183,6 +3183,44 @@ void RenderPipeline::set_time_of_day(float normalized_time) {
 void RenderPipeline::set_weather(WeatherType type, float intensity) {
     m_weather_type = type;
     m_weather_intensity = std::clamp(intensity, 0.0f, 1.0f);
+    // A direct debug set_weather call overrides any prior sim-driven state.
+    m_weather_state.driven = false;
+}
+
+void RenderPipeline::set_weather_state(const WeatherRenderState& state) {
+    // T-I5a-3 (B1): SIM-DRIVEN path. Store the replicated state for the overlay +
+    // wetness response. The overlay's zero-work gate keys on m_weather_type /
+    // m_weather_intensity, so derive a representative type + intensity from the
+    // sim state: precipitation drives Rain/Snow, an active storm escalates to
+    // Storm, fog/overcast without precip is Fog; no precip + no fog == None (the
+    // overlay short-circuits, exactly like a clear sky). One-way: nothing here
+    // writes back into the sim.
+    m_weather_state = state;
+    m_weather_state.driven = true;
+    m_weather_state.rain_intensity = std::clamp(state.rain_intensity, 0.0f, 1.0f);
+    m_weather_state.snow_intensity = std::clamp(state.snow_intensity, 0.0f, 1.0f);
+    m_weather_state.fog_density = std::clamp(state.fog_density, 0.0f, 1.0f);
+    m_weather_state.storm_intensity = std::clamp(state.storm_intensity, 0.0f, 1.0f);
+    m_weather_state.wetness = std::clamp(state.wetness, 0.0f, 1.0f);
+    m_weather_state.wind_strength = std::clamp(state.wind_strength, 0.0f, 1.0f);
+
+    const float precip = std::max(m_weather_state.rain_intensity, m_weather_state.snow_intensity);
+    if (m_weather_state.storm_intensity > 0.05f && m_weather_state.rain_intensity > 0.05f) {
+        m_weather_type = WeatherType::Storm;
+        m_weather_intensity = std::max(precip, m_weather_state.storm_intensity);
+    } else if (m_weather_state.snow_intensity > 0.02f) {
+        m_weather_type = WeatherType::Snow;
+        m_weather_intensity = m_weather_state.snow_intensity;
+    } else if (m_weather_state.rain_intensity > 0.02f) {
+        m_weather_type = WeatherType::Rain;
+        m_weather_intensity = m_weather_state.rain_intensity;
+    } else if (m_weather_state.fog_density > 0.02f) {
+        m_weather_type = WeatherType::Fog;
+        m_weather_intensity = m_weather_state.fog_density;
+    } else {
+        m_weather_type = WeatherType::None;
+        m_weather_intensity = 0.0f;
+    }
 }
 
 std::vector<glm::mat4> RenderPipeline::get_light_space_matrices(const Camera& camera) {

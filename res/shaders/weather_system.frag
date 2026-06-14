@@ -23,6 +23,10 @@ uniform float u_fogDensity = 0.0;         // 0.0 = clear, 1.0 = thick fog
 uniform float u_stormIntensity = 0.0;     // 0.0 = calm, 1.0 = storm
 uniform vec3 u_windDirection = vec3(1.0, 0.0, 0.0);
 uniform float u_windStrength = 0.5;
+// T-I5a-3 (B1): local precipitation -> material WETNESS response. RENDER-ONLY:
+// darkens albedo and adds a sun-glossy sheen on wet (upward-facing) surfaces.
+// Fed from the replicated WeatherSystem precipitation; never written to the sim.
+uniform float u_wetness = 0.0;
 
 // Lighting
 uniform vec3 u_sunDirection;
@@ -242,17 +246,47 @@ vec3 renderWind(vec3 sceneColor, vec2 screenUV, vec3 worldPos) {
     return texture(u_sceneColor, distortedUV).rgb;
 }
 
+// T-I5a-3 (B1): wetness material response (RENDER-ONLY). On upward-facing solid
+// surfaces, local precipitation darkens the albedo (wet ground reads darker) and
+// adds a view-dependent specular sheen toward the sun (wet surfaces glisten). The
+// sim provides u_wetness (local precip intensity); this writes only the rendered
+// color and never feeds back into sim/world_hash.
+vec3 renderWetness(vec3 sceneColor, vec2 screenUV, vec3 worldPos) {
+    if (u_wetness < 0.01) return sceneColor;
+    vec3 worldNormal = texture(gNormal, screenUV).rgb;
+    if (length(worldNormal) < 0.1) return sceneColor; // sky / no surface
+    worldNormal = normalize(worldNormal);
+    float upFacing = max(0.0, dot(worldNormal, vec3(0.0, 1.0, 0.0)));
+    float wet = u_wetness * upFacing;
+    if (wet < 0.01) return sceneColor;
+
+    // Darken albedo on wet surfaces (water film absorbs).
+    vec3 wetColor = sceneColor * (1.0 - 0.35 * wet);
+
+    // Specular sheen: reflect the view direction about the surface normal and
+    // measure alignment with the sun for a glossy highlight.
+    vec3 viewDir = normalize(worldPos - u_cameraPos);
+    vec3 reflectDir = reflect(viewDir, worldNormal);
+    float spec = pow(max(0.0, dot(reflectDir, -u_sunDirection)), 32.0);
+    wetColor += u_sunColor * spec * u_sunIntensity * wet * 0.5;
+    return mix(sceneColor, wetColor, wet);
+}
+
 void main() {
     vec2 screenUV = TexCoords;
-    
+
     // Get scene data
     vec3 sceneColor = texture(u_sceneColor, screenUV).rgb;
     float sceneDepth = texture(u_sceneDepth, screenUV).r;
     vec3 worldPos = worldPosFromDepth(screenUV, sceneDepth);
-    
+
     // Start with wind distortion as base
     vec3 finalColor = renderWind(sceneColor, screenUV, worldPos);
-    
+
+    // T-I5a-3: wetness material response BEFORE the volumetric weather so the wet
+    // surface tint is then occluded by fog/rain like the rest of the scene.
+    finalColor = renderWetness(finalColor, screenUV, worldPos);
+
     // Apply weather effects in order
     finalColor = renderFog(finalColor, screenUV, worldPos);
     finalColor = renderRain(finalColor, screenUV, worldPos);
