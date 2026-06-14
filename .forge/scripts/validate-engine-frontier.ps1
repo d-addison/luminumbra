@@ -3310,56 +3310,28 @@ function Test-HeadlessServerTickHeavy {
         $h.ticks_before_save, $h.resim_ticks, $meshNote)
 }
 
-# T-I4-12: the headless server's 90-tick streaming + teardown path has a known
-# INTERMITTENT Windows access-violation (0xC0000005) during process shutdown,
-# documented in T-I4-11 (the heavy gate hit the same class). It is NOT a replay
-# defect: the replay logic is deterministic and, when the process completes, the
-# hashes are exact (the recorded run reaches the canonical 2fa007951a21e140 and a
-# replay reproduces it bit-for-bit). This helper retries a server invocation that
-# crashes with that specific class so the gate is reliable; a clean non-zero exit
-# (a real divergence/failure) is passed through unretried.
+# T-I4-DR-server-streaming-race: the intermittent 0xC0000005 that this helper used
+# to work around is FIXED. Its root cause was NOT a streaming/shutdown data race --
+# it was a FastNoise2 GenPositionArray2D SIMD over-read (the entry point's
+# full-width tail load reads past a count-sized buffer when count < the SIMD width;
+# the worldgen call sites in SHIELD_WorldSystem now SIMD-pad those buffers). With
+# the fix the headless server runs cleanly at the DEFAULT (multi-)worker count, so
+# the load-bearing mitigations are removed: no LUMINUMBRA_JOB_WORKERS=1 pin and no
+# crash-retry loop. The env knob still exists in ServerWorldRunner (useful for
+# future probing) but is no longer set here. The function name + signature are kept
+# so call sites are unchanged; it now just runs the server once and returns its
+# exit code (a non-zero exit is a real failure/divergence, surfaced immediately).
 function Invoke-ServerWithCrashRetry {
     param(
         [string]$ServerExe,
         [string[]]$ServerArgs,
-        [int]$MaxAttempts = 8
+        [int]$MaxAttempts = 1
     )
-    # Pin the headless server to a single job worker for the replay gates. The
-    # world_hash is INVARIANT to worker count (it is taken after a full streaming
-    # quiesce), so this does not change the asserted hash; it sharply lowers the
-    # frequency of the known intermittent 0xC0000005 streaming/shutdown race
-    # (confirmed empirically: ~40-50% multi-threaded -> ~20% single-worker). The
-    # retry loop then makes residual crashes vanishingly unlikely.
-    $prevWorkers = $env:LUMINUMBRA_JOB_WORKERS
-    $env:LUMINUMBRA_JOB_WORKERS = "1"
-    try {
-        for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
-            # Out-Host keeps the server's stdout on the console WITHOUT letting it
-            # leak into this function's return value (a bare '& exe' would emit the
-            # log lines into the success stream and corrupt the returned exit code).
-            & $ServerExe @ServerArgs | Out-Host
-            $code = $LASTEXITCODE
-            if ($code -eq 0) {
-                return 0
-            }
-            # 0xC0000005 surfaces as -1073741819 (signed). Only the access-
-            # violation crash class is retried; any other non-zero exit is a real
-            # result and is returned immediately.
-            if ($code -eq -1073741819 -and $attempt -lt $MaxAttempts) {
-                Write-Host ("server invocation hit the known intermittent 0xC0000005 (attempt {0}/{1}); retrying after a settle delay" -f $attempt, $MaxAttempts)
-                Start-Sleep -Seconds 2
-                continue
-            }
-            return $code
-        }
-        return $LASTEXITCODE
-    } finally {
-        if ($null -eq $prevWorkers) {
-            Remove-Item Env:\LUMINUMBRA_JOB_WORKERS -ErrorAction SilentlyContinue
-        } else {
-            $env:LUMINUMBRA_JOB_WORKERS = $prevWorkers
-        }
-    }
+    # Out-Host keeps the server's stdout on the console WITHOUT letting it leak into
+    # this function's return value (a bare '& exe' would emit the log lines into the
+    # success stream and corrupt the returned exit code).
+    & $ServerExe @ServerArgs | Out-Host
+    return $LASTEXITCODE
 }
 
 function Test-ReplayRoundtrip {
@@ -3453,31 +3425,12 @@ function Test-ReplayDivergence {
     }
 
     # 3) Replay the mutated stream: this MUST fail with a CLEAN divergence (exit
-    #    1 + a divergence artifact), NOT a crash. Retry only the 0xC0000005 crash
-    #    class; a clean exit 1 is the expected divergence result and the artifact
-    #    presence below confirms it (vs an accidental crash exit).
-    $replayExit = 0
-    $prevWorkers = $env:LUMINUMBRA_JOB_WORKERS
-    $env:LUMINUMBRA_JOB_WORKERS = "1"  # see Invoke-ServerWithCrashRetry rationale
-    try {
-        for ($attempt = 1; $attempt -le 8; $attempt++) {
-            Remove-Item -Force -ErrorAction SilentlyContinue $artifactPath
-            & $serverExe --replay $streamPath --artifact $artifactPath
-            $replayExit = $LASTEXITCODE
-            if ($replayExit -eq -1073741819 -and $attempt -lt 8) {
-                Write-Host ("replay-of-mutated hit the known intermittent 0xC0000005 (attempt {0}/8); retrying" -f $attempt)
-                Start-Sleep -Seconds 2
-                continue
-            }
-            break
-        }
-    } finally {
-        if ($null -eq $prevWorkers) {
-            Remove-Item Env:\LUMINUMBRA_JOB_WORKERS -ErrorAction SilentlyContinue
-        } else {
-            $env:LUMINUMBRA_JOB_WORKERS = $prevWorkers
-        }
-    }
+    #    1 + a divergence artifact), NOT a crash. T-I4-DR-server-streaming-race: the
+    #    0xC0000005 worker-pin + retry workaround is removed (root cause fixed); a
+    #    single replay at the default worker count is expected to exit 1 cleanly.
+    Remove-Item -Force -ErrorAction SilentlyContinue $artifactPath
+    & $serverExe --replay $streamPath --artifact $artifactPath
+    $replayExit = $LASTEXITCODE
     if ($replayExit -eq 0) {
         throw "replay divergence: the verifier ACCEPTED a corrupted stream (oracle is vacuous!)"
     }
