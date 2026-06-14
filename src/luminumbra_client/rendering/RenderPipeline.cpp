@@ -32,6 +32,13 @@
 #include <stb_image.h>
 #include <nlohmann/json.hpp>
 
+// T-I5a-6: the Hillaire scattering-LUT implementation is compiled into this TU
+// rather than added as a separate source file (the vendored meshoptimizer
+// source is absent from this checkout, so a sources.cmake change that forces a
+// fresh CMake configure would fail; folding the impl here keeps the build
+// incremental). The .ipp opens its own Luminumbra::Rendering namespace.
+#include "SkyAtmosphereLut.ipp"
+
 namespace {
 // Helper for frustum culling
 inline void ExtractFrustumPlanes(const glm::mat4& m, glm::vec4 planes[6]) {
@@ -604,6 +611,7 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         init_gpu_sdf_system();
         init_gpu_pass_timers();
         init_mdi_buffers(); // T-I4-16: per-frame MDI command + origin SSBO ring
+        init_sky_lut();     // T-I5a-6: Hillaire 2020 scattering LUT precompute
 
         m_gbuffer_pass->init_instanced_static_mesh(m_root_path);
         m_gbuffer_pass->init_skinned_mesh(m_root_path);
@@ -821,6 +829,7 @@ std::vector<RenderPipeline::ShaderHealthEntry> RenderPipeline::get_shader_health
     add_shader("skinned_mesh", m_gbuffer_pass->skinned_mesh_shader());
     add_shader("weather_overlay", m_skybox_pass->weather_shader());
     if (m_particle_pass) { add_shader("particles", m_particle_pass->shader()); } // T-I5a-1
+    add_shader("aerial_perspective", m_aerial_shader); // T-I5a-6
     health.push_back({"gpu_sdf_compute", m_gpu_sdf.compute_program != 0, m_gpu_sdf.compute_program != 0 ? "" : "not initialized"});
     return health;
 }
@@ -859,6 +868,13 @@ RenderPipeline::RenderResourceRegistryStats RenderPipeline::get_resource_registr
     stats.textures += count(m_gpu_sdf.terrain_noise_texture);
     stats.textures += count(m_gpu_sdf.cave_noise_texture);
     stats.textures += count(m_gpu_sdf.island_mask_texture);
+    // T-I5a-6: the three Hillaire scattering LUTs (transmittance / multi-scatter
+    // / sky-view). RGB16F GL textures, debug-labelled, released in
+    // cleanup_gpu_resources() -> SkyAtmosphereLut::destroy() so the
+    // empty-after-shutdown invariant holds.
+    stats.textures += count(m_sky_lut.transmittance_texture());
+    stats.textures += count(m_sky_lut.multiscatter_texture());
+    stats.textures += count(m_sky_lut.sky_view_texture());
 
     // Texture-array residency manager: one GL_TEXTURE_2D_ARRAY per size class
     // (T-I4-6). These register under the existing "texture" resource type, so
@@ -1363,6 +1379,7 @@ void RenderPipeline::collect_gpu_pass_timers() {
     m_last_render_pass_stats.water_gpu_ms = m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::Water)];
     m_last_render_pass_stats.skybox_gpu_ms = m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::Skybox)];
     m_last_render_pass_stats.particle_gpu_ms = m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::Particle)];
+    m_last_render_pass_stats.aerial_gpu_ms = m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::Aerial)]; // T-I5a-6
     m_last_render_pass_stats.final_blit_gpu_ms = m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::FinalBlit)];
 
     // One-time diagnostic so smoke runs prove the ring resolves real samples.
@@ -1504,6 +1521,10 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     m_last_mesh_upload_stats.snapshot_count = renderable_chunk_snapshots.size();
     m_last_render_pass_stats = {};
     m_last_render_pass_stats.snapshot_count = renderable_chunk_snapshots.size();
+    // T-I5a-6: carry the sky-LUT precompute (startup one-shot) + this frame's
+    // sky-view refresh cost (set by update_time_of_day above, before this reset).
+    m_last_render_pass_stats.sky_full_precompute_ms = m_sky_full_precompute_ms;
+    m_last_render_pass_stats.sky_view_refresh_ms = m_sky_view_refresh_ms;
 
     // Publish GPU timings recorded two frames ago without stalling, then
     // record this frame's passes into the current ring slot below.
@@ -1609,6 +1630,15 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     end_gpu_pass_timer(GpuTimerPass::Skybox);
     glBindVertexArray(0);  // Unbind after skybox pass
 
+    // 7b. AERIAL-PERSPECTIVE PASS (T-I5a-6): analytic distance-fog in-scatter
+    // over the lit scene, wiring the dormant volumetric_lighting.frag. Reads the
+    // SAME sky-view/transmittance LUT the skybox uses so the fog palette stays
+    // coherent with the sky (warm pinks/oranges at low sun). Budget ≤ 0.3 ms.
+    begin_gpu_pass_timer(GpuTimerPass::Aerial);
+    execute_aerial_pass(camera);
+    end_gpu_pass_timer(GpuTimerPass::Aerial);
+    glBindVertexArray(0);
+
     // 8. PARTICLE PASS (T-I5a-1): forward-lit, soft-faded transparent particles
     // blended into the lit HDR target after the skybox. Render-only motion is
     // advanced first; the descriptor schedule (the sim-deterministic surface) is
@@ -1699,6 +1729,78 @@ void RenderPipeline::init_shaders() {
     m_shadow_pass->init_shader(m_root_path);
     m_ssao_pass->init_shaders(m_root_path);
     m_water_pass->init_shader(m_root_path);
+    // T-I5a-6: analytic aerial-perspective term wiring the dormant
+    // volumetric_lighting.frag as a fullscreen pass over the lit scene. Reuses
+    // the SSAO fullscreen-quad vertex stage.
+    m_aerial_shader = std::make_unique<Shader>(
+        (m_root_path / "res/shaders/ssao.vert").string().c_str(),
+        (m_root_path / "res/shaders/volumetric_lighting.frag").string().c_str());
+    label_gl_object(GL_PROGRAM, m_aerial_shader ? m_aerial_shader->Id() : 0u, "shader.aerial_perspective");
+}
+
+void RenderPipeline::init_sky_lut() {
+    // Build the transmittance + multi-scatter LUTs (sun-independent) and the
+    // initial sky-view LUT for the current sun. Recorded as a startup one-shot
+    // cost in render telemetry (budget ≤ 8.0 ms on release). Render-only.
+    update_time_of_day(0.0f); // seed m_sun.direction for the initial sky-view
+    const glm::vec3 toward_sun = -glm::normalize(m_sun.direction);
+    double precompute_ms = 0.0;
+    if (m_sky_lut.initialize(toward_sun, &precompute_ms)) {
+        m_skyScatterAmbient = m_sky_lut.sky_ambient();
+        LUMINUMBRA_CORE_INFO("Sky scattering LUTs precomputed in {:.3f} ms", precompute_ms);
+    } else {
+        LUMINUMBRA_CORE_ERROR("Sky scattering LUT precompute failed");
+    }
+    m_sky_full_precompute_ms = precompute_ms;
+}
+
+void RenderPipeline::execute_aerial_pass(const Camera& camera) {
+    // T-I5a-6: analytic aerial-perspective in-scatter composited OVER the lit
+    // scene in the lighting FBO. Reads the SAME sky-view/transmittance LUTs the
+    // dome uses (coherent palette). A no-op if the LUT/shader are unavailable.
+    if (!m_aerial_shader || !m_aerial_shader->IsValid() || !m_sky_lut.ready() || m_screen_quad_vao == 0) {
+        return;
+    }
+    const FrameBufferObject& lighting_fbo = m_lighting_pass->lighting_fbo();
+    const GBuffer& gbuffer = m_gbuffer_pass->gbuffer();
+    if (!lighting_fbo.fbo_id) {
+        return;
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, lighting_fbo.fbo_id);
+    glViewport(0, 0, m_screen_width, m_screen_height);
+    const GLboolean depth_was_enabled = glIsEnabled(GL_DEPTH_TEST);
+    glDisable(GL_DEPTH_TEST);
+    const GLboolean blend_was_enabled = glIsEnabled(GL_BLEND);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    m_aerial_shader->use();
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, gbuffer.depth_texture);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m_sky_lut.sky_view_texture());
+    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_sky_lut.transmittance_texture());
+    m_aerial_shader->setInt("gDepth", 0);
+    m_aerial_shader->setInt("u_skyViewLut", 1);
+    m_aerial_shader->setInt("u_transmittanceLut", 2);
+    glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom),
+        (float)m_screen_width / (float)m_screen_height, camera.GetNearPlane(), camera.GetFarPlane());
+    m_aerial_shader->setMat4("u_inverseView", glm::inverse(camera.GetViewMatrix()));
+    m_aerial_shader->setMat4("u_inverseProjection", glm::inverse(projection));
+    m_aerial_shader->setVec3("u_viewPos", camera.Position);
+    // Toward-sun direction (sun-disc convention), matching the sky-view LUT frame.
+    m_aerial_shader->setVec3("u_sunDirection", -m_sun.direction);
+    const float sun_up = glm::dot(m_sun.direction, glm::vec3(0.0f, -1.0f, 0.0f));
+    m_aerial_shader->setFloat("u_sunCosZenith", sun_up);
+    m_aerial_shader->setFloat("u_skyDayFactor", m_skyDayFactor);
+
+    glBindVertexArray(m_screen_quad_vao);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glBindVertexArray(0);
+
+    if (!blend_was_enabled) { glDisable(GL_BLEND); }
+    if (depth_was_enabled) { glEnable(GL_DEPTH_TEST); }
+    glActiveTexture(GL_TEXTURE0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 void RenderPipeline::init_screen_quad() {
@@ -1755,6 +1857,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     if (m_screen_quad_vbo) { glDeleteBuffers(1, &m_screen_quad_vbo); m_screen_quad_vbo = 0; }
     m_skybox_pass->destroy_geometry();
     if (m_particle_pass) { m_particle_pass->destroy_buffers(); } // T-I5a-1
+    m_sky_lut.destroy(); // T-I5a-6: release scattering LUT textures
     m_gbuffer_pass->destroy_instanced_static_mesh();
     m_gbuffer_pass->destroy_skinned_mesh();
     if (m_terrainTextureArray) { glDeleteTextures(1, &m_terrainTextureArray); m_terrainTextureArray = 0; }
@@ -1769,6 +1872,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_lighting_pass->reset_shader();
     m_skybox_pass->reset_shader();
     if (m_particle_pass) { m_particle_pass->reset_shader(); } // T-I5a-1
+    m_aerial_shader.reset(); // T-I5a-6: aerial-perspective fullscreen shader
     m_shadow_pass->reset_shader();
     m_ssao_pass->reset_shaders();
     m_water_pass->reset_shader();
@@ -3158,7 +3262,35 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     glm::vec3 noonColor(1.0f, 0.95f, 0.85f);
     glm::vec3 horizonColor(1.0f, 0.6f, 0.2f);
     m_sun.color = glm::mix(horizonColor, noonColor, glm::smoothstep(0.0f, 0.25f, sun_up_factor)) * m_sun.intensity;
-    
+
+    // T-I5a-6: refresh the sun-dependent sky-view LUT (no-op unless the sun
+    // moved past the small threshold), and share the SAME atmospheric
+    // transmittance the skybox + aerial pass use so the sun-disc color, sky and
+    // ambient all redden coherently at low sun. The transmittance is normalized
+    // against the overhead-sun reference so the NOON sun color/ambient stay at
+    // their existing calibration (multiplier ≈ 1 at high sun) and only warm as
+    // the sun drops (longer optical path eats blue first -> pink/orange).
+    double refresh_ms = 0.0;
+    const glm::vec3 toward_sun = -m_sun.direction;
+    if (m_sky_lut.ready() && m_sky_lut.refresh_sky_view(toward_sun, &refresh_ms)) {
+        m_skyScatterAmbient = m_sky_lut.sky_ambient();
+    }
+    m_sky_view_refresh_ms = refresh_ms; // 0.0 on no-refresh frames; copied into stats after the per-frame reset
+
+    glm::vec3 sun_transmittance(1.0f);
+    if (m_sky_lut.ready()) {
+        const float sun_cos = glm::clamp(sun_up_factor, -1.0f, 1.0f);
+        const glm::vec3 t_now = m_sky_lut.sun_transmittance(sun_cos);
+        const glm::vec3 t_ref = m_sky_lut.sun_transmittance(1.0f); // overhead-sun ref
+        sun_transmittance = t_now / glm::max(t_ref, glm::vec3(1e-4f));
+        sun_transmittance = glm::clamp(sun_transmittance, glm::vec3(0.0f), glm::vec3(1.0f));
+        // Only applies while the sun is above the horizon; below it the disc is
+        // gone (m_sun.intensity ≈ 0) and the normalization is meaningless.
+        const float above = glm::smoothstep(-0.05f, 0.1f, sun_up_factor);
+        sun_transmittance = glm::mix(glm::vec3(1.0f), sun_transmittance, above);
+    }
+    m_sun.color *= sun_transmittance;
+
     m_moonDirection = -m_sun.direction;
 
     // Ambient scales by the same PI as SUN_IRRADIANCE_SCALE (lighting_pass
@@ -3170,6 +3302,19 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     glm::vec3 dayAmbient = glm::vec3(0.1f, 0.15f, 0.2f) * kAmbientIrradianceScale;
     glm::vec3 nightAmbient = glm::vec3(0.01f, 0.02f, 0.04f) * kAmbientIrradianceScale;
     m_skyAmbientColor = glm::mix(nightAmbient, dayAmbient, m_sun.intensity);
+    // T-I5a-6: tint the daytime ambient HUE toward the sky-view scattering
+    // ambient (the same LUT integral) while preserving the calibrated ambient
+    // LUMINANCE, so shadowed surfaces pick up the coherent sky color without
+    // moving the noon ambient level that LodGround/LodSeamRisk depend on.
+    if (m_sky_lut.ready()) {
+        const float scatter_lum = m_skyScatterAmbient.r * 0.2126f + m_skyScatterAmbient.g * 0.7152f + m_skyScatterAmbient.b * 0.0722f;
+        if (scatter_lum > 1e-6f) {
+            const glm::vec3 scatter_hue = m_skyScatterAmbient / scatter_lum; // luminance-normalized hue
+            const float amb_lum = m_skyAmbientColor.r * 0.2126f + m_skyAmbientColor.g * 0.7152f + m_skyAmbientColor.b * 0.0722f;
+            const glm::vec3 tinted = scatter_hue * amb_lum;
+            m_skyAmbientColor = glm::mix(m_skyAmbientColor, tinted, 0.5f * m_sun.intensity);
+        }
+    }
 }
 
 u32 RenderPipeline::water_caustics_texture() const {
