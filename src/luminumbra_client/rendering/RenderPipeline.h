@@ -115,6 +115,26 @@ enum class WeatherType {
     Storm,
 };
 
+// T-I5a-3 (B1): SIM-DRIVEN weather render state. This is the one-way (critique
+// F2) bridge from the replicated WeatherSystem state to the render overlay +
+// wetness response: the client samples WeatherSystem at the camera each frame and
+// pushes this POD via RenderPipeline::set_weather_state. The render side READS it
+// and writes NOTHING back into the sim. All fields are derived weather quantities;
+// the overlay's u_rainIntensity/u_snowIntensity/u_fogDensity/u_stormIntensity/
+// u_windDirection/u_windStrength uniforms are fed from here instead of the legacy
+// set_weather debug mapping. driven=false falls back to the legacy debug path so
+// existing set_weather callers (and the None default) are unchanged.
+struct WeatherRenderState {
+    bool driven = false;          // true once a sim weather state has been pushed
+    float rain_intensity = 0.0f;  // [0, 1]
+    float snow_intensity = 0.0f;  // [0, 1]
+    float fog_density = 0.0f;     // [0, 1]
+    float storm_intensity = 0.0f; // [0, 1]
+    float wetness = 0.0f;         // [0, 1] local precipitation -> material wetness
+    glm::vec3 wind_direction = glm::vec3(1.0f, 0.0f, 0.0f); // normalized XZ wind
+    float wind_strength = 0.0f;   // [0, 1] wind magnitude (scaled)
+};
+
 // T-I4-16: bucketed persistent-mapped geometry pool for live terrain chunks.
 //
 // Replaces the one-VBO/EBO/VAO-per-chunk model with a small set of large,
@@ -430,6 +450,13 @@ public:
     void set_weather(WeatherType type, float intensity);
     WeatherType get_weather_type() const { return m_weather_type; }
     float get_weather_intensity() const { return m_weather_intensity; }
+    // T-I5a-3 (B1): push the SIM-DRIVEN weather render state (one-way, F2). The
+    // client samples the replicated WeatherSystem at the camera each frame and
+    // calls this; the overlay + wetness response read m_weather_state. Also sets
+    // m_weather_type/intensity so the overlay's zero-work gate still fires when
+    // there is no precipitation (driven clear == overlay off).
+    void set_weather_state(const WeatherRenderState& state);
+    const WeatherRenderState& get_weather_state() const { return m_weather_state; }
     
     // GPU SDF integration
     void set_gpu_sdf_runtime_enabled(bool enabled);
@@ -574,6 +601,8 @@ private:
     float m_skyDayFactor = 1.0f;
     WeatherType m_weather_type = WeatherType::None;
     float m_weather_intensity = 0.0f;
+    // T-I5a-3 (B1): SIM-DRIVEN weather render state (one-way from WeatherSystem).
+    WeatherRenderState m_weather_state;
     std::unique_ptr<FarLodSystem> m_farlod;
     std::unique_ptr<GBufferPass> m_gbuffer_pass;
     std::unique_ptr<ShadowPass> m_shadow_pass;

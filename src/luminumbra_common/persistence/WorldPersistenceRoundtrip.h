@@ -114,6 +114,13 @@ struct WorldStreamingStateSubHashes {
     // WindFieldSystem::ComputeWindSubHash(). Empty when no wind field exists
     // (e.g. the persistence fixtures, which never construct one).
     std::string wind;
+    // T-I5a-3 (B1): the deterministic weather state (region category map + storm
+    // cells + precipitation field, with a reserved lightning strike-schedule
+    // slot for T-I5a-5) -- its own world_hash sub-hash slot (design-decisions.md
+    // S2). NOT chunk-derived: the weather core lives on GameSession, so the runner
+    // supplies this string from WeatherSystem::ComputeWeatherSubHash(). Empty when
+    // no weather core exists (e.g. the persistence fixtures, which never make one).
+    std::string weather;
 };
 
 // Computes the chunk-derived per-system sub-hashes (terrain/mesh/water). Pure
