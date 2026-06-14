@@ -52,6 +52,8 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/systems/PhysicsSystem.cpp
     ${CMAKE_CURRENT_LIST_DIR}/systems/SHIELD_WorldSystem.cpp
     ${CMAKE_CURRENT_LIST_DIR}/systems/WaterSystem.cpp
+    # T-I5a-2 (A2): deterministic wind grid (sim-authoritative; world_hash wind slot).
+    ${CMAKE_CURRENT_LIST_DIR}/systems/WindFieldSystem.cpp
 
     # World
     ${CMAKE_CURRENT_LIST_DIR}/world/BiomeTable.cpp

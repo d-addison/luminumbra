@@ -11,11 +11,13 @@
 //                  seed/preset, runs N ticks each, and emits the
 //                  luminumbra.server_tick.v1 artifact asserting
 //                  world_hash == world_hash_replay.
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
 
 #include "nlohmann/json.hpp"
 
@@ -24,6 +26,8 @@
 #include "luminumbra_common/core/Log.h"
 #include "luminumbra_common/net/LockstepSession.h"
 #include "luminumbra_common/replay/ReplayStream.h"
+#include "luminumbra_common/systems/WindFieldSystem.h"
+#include "luminumbra_common/world/GameSession.h"
 
 namespace fs = std::filesystem;
 
@@ -41,6 +45,10 @@ struct ServerCliOptions {
     int collision_radius = 2;
     std::uint64_t autosave_ticks = 0;
     bool smoke = false;
+    // T-I5a-2 (A2): WindFieldDeterminism gate. Boots a world, runs N ticks
+    // twice, asserts the wind sub-hash is equal across runs + stable, and times
+    // the per-tick wind update (budget <= 0.15 ms at the streamed extent).
+    bool wind_bench = false;
     // T-I4-11 heavy-mode oracle: tick N, save, load into a fresh session,
     // resimulate heavy_resim ticks on BOTH, compare full + sub hashes.
     bool heavy = false;
@@ -128,7 +136,9 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
 
     for (int i = 1; i < argc; ++i) {
         const char* arg = argv[i];
-        if (std::strcmp(arg, "--smoke") == 0) {
+        if (std::strcmp(arg, "--wind-bench") == 0) {
+            options.wind_bench = true;
+        } else if (std::strcmp(arg, "--smoke") == 0) {
             options.smoke = true;
         } else if (std::strcmp(arg, "--heavy") == 0) {
             options.heavy = true;
@@ -246,6 +256,7 @@ nlohmann::json SmokeRunJson(const SmokeRunResult& run) {
             {"mesh", run.sub_hashes.mesh},
             {"water", run.sub_hashes.water},
             {"entities", run.sub_hashes.entities},
+            {"wind", run.sub_hashes.wind},
         }},
         {"world_id", run.world_id},
         {"ticks_executed", run.ticks.ticks_executed},
@@ -279,7 +290,8 @@ int RunSmoke(const ServerCliOptions& options) {
         first.sub_hashes.terrain == replay.sub_hashes.terrain &&
         first.sub_hashes.mesh == replay.sub_hashes.mesh &&
         first.sub_hashes.water == replay.sub_hashes.water &&
-        first.sub_hashes.entities == replay.sub_hashes.entities;
+        first.sub_hashes.entities == replay.sub_hashes.entities &&
+        first.sub_hashes.wind == replay.sub_hashes.wind;
 
     const bool deterministic = first.ok && replay.ok &&
         first.world_hash == replay.world_hash && sub_hashes_match;
@@ -305,12 +317,14 @@ int RunSmoke(const ServerCliOptions& options) {
             {"mesh", first.sub_hashes.mesh},
             {"water", first.sub_hashes.water},
             {"entities", first.sub_hashes.entities},
+            {"wind", first.sub_hashes.wind},
         }},
         {"sub_hashes_replay", {
             {"terrain", replay.sub_hashes.terrain},
             {"mesh", replay.sub_hashes.mesh},
             {"water", replay.sub_hashes.water},
             {"entities", replay.sub_hashes.entities},
+            {"wind", replay.sub_hashes.wind},
         }},
         {"sub_hashes_match", sub_hashes_match},
         {"deterministic", deterministic},
@@ -347,6 +361,126 @@ int RunSmoke(const ServerCliOptions& options) {
 }
 
 // ---------------------------------------------------------------------------
+// T-I5a-2 (A2) WindFieldDeterminism gate driver. Two independent runs of N
+// WindFieldSystem updates with the same seed/anchor must reach the IDENTICAL
+// wind sub-hash (the bit-determinism the world_hash `wind` slot depends on),
+// the field must EVOLVE (sub-hash differs from the tick-0 field, so the gate is
+// not vacuous), and the per-tick wind update cost is measured against the PINNED
+// <= 0.15 ms budget at the streamed extent. The wind field is exercised in
+// isolation (no chunk streaming) so the timing is the wind update ALONE.
+// ---------------------------------------------------------------------------
+std::string RunWindUpdatesAndHash(int seed, std::uint64_t ticks, const Luminumbra::Vec3& anchor) {
+    Luminumbra::Systems::WindFieldSystem wind(seed);
+    for (std::uint64_t t = 1; t <= ticks; ++t) {
+        wind.Update(t, anchor);
+    }
+    return wind.ComputeWindSubHash();
+}
+
+int RunWindBench(const ServerCliOptions& options) {
+    const int seed = static_cast<int>(std::strtoul(options.seed.c_str(), nullptr, 10));
+    const std::uint64_t ticks = options.ticks;
+    const Luminumbra::Vec3 anchor(8.0f, 100.0f, 8.0f);
+
+    LUMINUMBRA_CORE_INFO(
+        "Headless server WIND-BENCH: seed={} ticks={} (24 m cells x 3 layers x {} extent)",
+        seed, ticks, Luminumbra::Systems::kWindExtentCells);
+
+    // Determinism: two independent runs to the same tick must match.
+    const std::string hash_run1 = RunWindUpdatesAndHash(seed, ticks, anchor);
+    const std::string hash_run2 = RunWindUpdatesAndHash(seed, ticks, anchor);
+    const bool deterministic = !hash_run1.empty() && hash_run1 == hash_run2;
+
+    // Non-vacuity: the field at tick 0 differs from the field after N ticks.
+    Luminumbra::Systems::WindFieldSystem wind_evolve(seed);
+    const std::string hash_tick0 = wind_evolve.ComputeWindSubHash(); // constructed at tick 0
+    for (std::uint64_t t = 1; t <= ticks; ++t) {
+        wind_evolve.Update(t, anchor);
+    }
+    const std::string hash_evolved = wind_evolve.ComputeWindSubHash();
+    const bool evolves = hash_tick0 != hash_evolved;
+
+    // Budget: time the per-tick wind update in isolation. Warm up, then average a
+    // large iteration count so the per-tick number is stable. This is TELEMETRY
+    // (never hashed), the same justification as the runner's wall_seconds report.
+    Luminumbra::Systems::WindFieldSystem wind_timed(seed);
+    constexpr std::uint64_t kWarmup = 30;
+    constexpr std::uint64_t kMeasured = 600;
+    for (std::uint64_t t = 1; t <= kWarmup; ++t) {
+        wind_timed.Update(t, anchor);
+    }
+    const auto t_start = std::chrono::steady_clock::now();
+    for (std::uint64_t t = 1; t <= kMeasured; ++t) {
+        wind_timed.Update(kWarmup + t, anchor);
+    }
+    const auto t_end = std::chrono::steady_clock::now();
+    const double total_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+    const double per_tick_ms = total_ms / static_cast<double>(kMeasured);
+    constexpr double kBudgetMs = 0.15;
+    const bool within_budget = per_tick_ms <= kBudgetMs;
+
+    // The bench's pass/fail is the BIT-DETERMINISM contract (deterministic +
+    // evolves); the per-tick budget is REPORTED as data (within_budget /
+    // per_tick_update_ms) for the gate to enforce against the appropriate
+    // (release) preset -- an un-optimized debug build runs the same field ~10x
+    // slower, so binding the budget into the bench's exit code would make the
+    // debug-preset gate falsely fail a RELEASE-build budget (design S7).
+    const bool passed = deterministic && evolves;
+
+    nlohmann::json artifact{
+        {"schema", "luminumbra.wind_field_determinism.v1"},
+        {"generated_by", "luminumbra_server_app --wind-bench (T-I5a-2)"},
+        {"seed", seed},
+        {"ticks", ticks},
+        {"cell_size_m", Luminumbra::Systems::kWindCellSizeM},
+        {"extent_cells", Luminumbra::Systems::kWindExtentCells},
+        {"layer_count", Luminumbra::Systems::kWindLayerCount},
+        {"wind_sub_hash", hash_run1},
+        {"wind_sub_hash_replay", hash_run2},
+        {"deterministic", deterministic},
+        {"wind_sub_hash_tick0", hash_tick0},
+        {"wind_sub_hash_evolved", hash_evolved},
+        {"evolves", evolves},
+        {"per_tick_update_ms", per_tick_ms},
+        {"budget_ms", kBudgetMs},
+        {"within_budget", within_budget},
+        {"measured_ticks", kMeasured},
+        {"passed", passed},
+    };
+
+    if (!options.artifact_path.empty()) {
+        const fs::path artifact_path(options.artifact_path);
+        std::error_code ec;
+        if (artifact_path.has_parent_path()) {
+            fs::create_directories(artifact_path.parent_path(), ec);
+        }
+        std::ofstream out(artifact_path);
+        if (out.is_open()) {
+            out << artifact.dump(2) << "\n";
+            LUMINUMBRA_CORE_INFO("Wind-bench artifact written: {}", options.artifact_path);
+        } else {
+            LUMINUMBRA_CORE_ERROR("Failed to write wind-bench artifact: {}", options.artifact_path);
+            return 1;
+        }
+    }
+
+    if (!passed) {
+        LUMINUMBRA_CORE_ERROR(
+            "Wind-bench FAILED (determinism): deterministic={} evolves={} "
+            "(wind_hash={} replay={})",
+            deterministic, evolves, hash_run1, hash_run2);
+        return 1;
+    }
+
+    LUMINUMBRA_CORE_INFO(
+        "Wind-bench passed: wind_sub_hash={} stable across runs, field evolves; "
+        "per_tick_update={:.4f} ms (budget {:.4f} ms, within_budget={}; budget "
+        "enforced by the gate on the release build)",
+        hash_run1, per_tick_ms, kBudgetMs, within_budget);
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
 // T-I4-11 heavy-mode oracle (Factorio "heavy mode", research Area 2 takeaway 5):
 // tick N, SAVE, LOAD into a FRESH session, then resimulate M further ticks in
 // BOTH the original and the loaded session and compare full + per-system
@@ -379,6 +513,17 @@ HeavyHashes CaptureHashes(Luminumbra::Server::ServerWorldRunner& runner) {
 // world_hash (which DOES include mesh) is reported but not asserted on across
 // the round-trip for this reason; it is still asserted run==replay in --smoke.
 bool AuthoritativeStateEqual(const HeavyHashes& a, const HeavyHashes& b) {
+    // T-I5a-2 (A2): the heavy oracle compares two sessions at DIFFERENT tick
+    // phases across the save/load boundary (original at tick N vs the freshly
+    // loaded session at tick 0; later original at N+M vs loaded at M). Terrain/
+    // water/entities are spatial state that is invariant once streaming settles,
+    // so they compare exactly. The WIND field is TICK-DEPENDENT by design (it
+    // evolves every tick), so it legitimately differs between two sessions at
+    // different tick counts and is NOT compared here -- exactly like mesh is
+    // excluded for a different reason. Wind's determinism is proven where the
+    // comparison IS same-tick: the smoke (run==replay), WindFieldDeterminism,
+    // and the replay roundtrip (same-tick checkpoint hashes, which include wind
+    // via the composite world_hash).
     return a.sub.terrain == b.sub.terrain &&
         a.sub.water == b.sub.water &&
         a.sub.entities == b.sub.entities;
@@ -396,6 +541,7 @@ nlohmann::json HeavyHashJson(const HeavyHashes& h) {
             {"mesh", h.sub.mesh},
             {"water", h.sub.water},
             {"entities", h.sub.entities},
+            {"wind", h.sub.wind},
         }},
     };
 }
@@ -540,7 +686,8 @@ int RunHeavy(const ServerCliOptions& options) {
 // IO sits on the tick path. Checkpoint hashing reuses ComputeWorldHash /
 // ComputeWorldSubHashes (the same quiesce-then-snapshot the smoke does), which
 // reads state without mutating it. Proof: the ReplayRoundtrip gate asserts the
-// recorded run reaches the SAME 2fa007951a21e140 as the smoke.
+// recorded run reaches the SAME 0eac465289e7c88b as the smoke (T-I5a-2
+// mega-bump: was 2fa007951a21e140 before the `wind` sub-hash slot landed).
 // ---------------------------------------------------------------------------
 
 constexpr std::uint64_t kCheckpointIntervalTicks = 30; // one second at 30 Hz
@@ -908,7 +1055,8 @@ int RunMutateReplayFixture(const ServerCliOptions& options) {
 // world (same seed/preset => identical hashes); the host is the sim authority and
 // both exchange world_hash + sub-hashes at the 30-tick cadence (the LREC1 checkpoint
 // cadence). The adaptive horizon is HASH-NEUTRAL: it only decides WHEN a tick runs,
-// never WHAT it computes, so the canonical 90-tick hash 2fa007951a21e140 is unchanged.
+// never WHAT it computes, so the canonical 90-tick hash 0eac465289e7c88b is unchanged
+// by lockstep (T-I5a-2 mega-bump: was 2fa007951a21e140 pre-wind-slot).
 //
 // Fault injection (LockstepFaultInjection gate):
 //  - delay_input N: peer 1 withholds its (empty) input for the first N agreed ticks,
@@ -1229,6 +1377,9 @@ int main(int argc, char* argv[]) {
     }
     if (options.heavy) {
         return RunHeavy(options);
+    }
+    if (options.wind_bench) {
+        return RunWindBench(options);
     }
     return options.smoke ? RunSmoke(options) : RunServer(options);
 }

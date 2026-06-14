@@ -18,6 +18,7 @@ namespace Luminumbra {
         class SHIELD_WorldSystem;
         class PhysicsSystem;
         class WaterSystem;
+        class WindFieldSystem;
     }
 }
 
@@ -113,7 +114,14 @@ public:
     // Get the world system for chunk generation
     Systems::SHIELD_WorldSystem* GetWorldSystem() { return m_worldSystem.get(); }
     Systems::WaterSystem* GetWaterSystem() { return m_waterSystem.get(); }
-    Systems::PhysicsSystem* GetPhysicsSystem() { return m_physicsSystem.get(); } 
+    Systems::PhysicsSystem* GetPhysicsSystem() { return m_physicsSystem.get(); }
+
+    // T-I5a-2 (A2): the deterministic wind field. Sim-authoritative; its cell
+    // values feed the world_hash `wind` sub-hash. Constructed on world
+    // create/load (pure function of the world seed); updated per fixed tick in
+    // TickSimulation around the spawn/stream anchor.
+    Systems::WindFieldSystem* GetWindFieldSystem() { return m_windFieldSystem.get(); }
+    const Systems::WindFieldSystem* GetWindFieldSystem() const { return m_windFieldSystem.get(); }
 
     entt::registry& GetRegistry() { return m_registry; }
 
@@ -147,6 +155,7 @@ private:
     luminumbra::simulation::OrderedEventBus m_simulationEventBus;
     std::unique_ptr<Systems::SHIELD_WorldSystem> m_worldSystem;
     std::unique_ptr<Systems::WaterSystem> m_waterSystem;
+    std::unique_ptr<Systems::WindFieldSystem> m_windFieldSystem;
     JobSystem* m_jobSystem = nullptr;
 
     // Generate a unique world ID
