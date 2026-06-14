@@ -11,7 +11,7 @@ target_include_directories(luminumbra_common PUBLIC
     "${CMAKE_SOURCE_DIR}/vendor"
 )
 
-target_link_libraries(luminumbra_common PUBLIC 
+target_link_libraries(luminumbra_common PUBLIC
     entt
     Jolt
     nlohmann_json
@@ -22,3 +22,10 @@ target_link_libraries(luminumbra_common PUBLIC
     glm
     FastNoise
 )
+
+# T-I4-13: the TcpTransport (net/LockstepSession.cpp) uses winsock2 under _WIN32; link
+# ws2_32 where (and only where) the platform needs it. The gates/tests drive
+# LoopbackTransport (no sockets), so this link is for the real loopback/LAN session path.
+if(WIN32)
+    target_link_libraries(luminumbra_common PUBLIC ws2_32)
+endif()

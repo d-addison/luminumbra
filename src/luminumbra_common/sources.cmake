@@ -23,6 +23,9 @@ set(COMMON_SOURCES
 
     # Net
     ${CMAKE_CURRENT_LIST_DIR}/net/NetworkManager.cpp
+    # T-I4-13: delay-based lockstep transport (engine-generic; LoopbackTransport
+    # for gates/tests, _WIN32-guarded TcpTransport for loopback+LAN).
+    ${CMAKE_CURRENT_LIST_DIR}/net/LockstepSession.cpp
 
     # Network
     ${CMAKE_CURRENT_LIST_DIR}/network/NetworkLoopbackAuthority.cpp
