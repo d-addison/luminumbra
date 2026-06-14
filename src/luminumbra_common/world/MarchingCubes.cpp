@@ -13,12 +13,163 @@
 #include "systems/WaterSystem.h"
 #include <unordered_set>
 #include "../core/Log.h"
+#include <memory>
+#include <new>
+#include <cstring>
+#include <type_traits>
 
 namespace Luminumbra {
 namespace World::MarchingCubes {
 
 // ===================== CORE MARCHING CUBES HELPERS (REFACTORED) =====================
 namespace { // Anonymous namespace for internal implementation details
+
+    // ===================== T-I4-18 RESET-PER-JOB MESHING ARENA =====================
+    // Reset-per-job linear (bump) allocator for the meshing hot path. This is a
+    // pure ALLOCATION-STRATEGY change: it replaces the repeated malloc/free of
+    // the per-job PURE-SCRATCH buffers (the index-addressed temporaries that are
+    // NEVER moved into the chunk - edge_vertex_cache, world_positions, materials,
+    // remap) with bump allocations from a thread_local arena that is RESET (not
+    // freed) at the start of each meshing job and reused across jobs, growing
+    // only to a per-worker high-water mark.
+    //
+    // Thread-safety: the arena is thread_local, so each JobSystem worker owns its
+    // own arena. Meshing runs inside Job lambdas on worker threads (see
+    // SHIELD_WorldSystem chunk-build / remesh job loops), so an arena is never
+    // shared across concurrently running jobs - no locks, no atomics, no sharing.
+    //
+    // Byte-identical guarantee: the arena only backs index-addressed, FIXED-SIZE
+    // scratch buffers. None of them GROW (no push_back / reallocation) and none
+    // ESCAPE the meshing function (the buffers that ARE moved into the chunk -
+    // mesh_vertices / mesh_indices / compact_vertices / water meshes - stay real
+    // owning std::vectors, because the Chunk takes ownership and outlives the
+    // job). Each arena buffer is value-initialized to the SAME init value the old
+    // std::vector ctor used (kNoCachedVertex, 0xFFFFFFFF remap sentinel, or
+    // default), so every byte the mesher reads/writes is identical. The arena
+    // therefore changes WHERE scratch memory comes from, never the geometry.
+    //
+    // Skirt by-value invariant (T-I4-DR-live-needle-streak): UNAFFECTED. The
+    // dangling-reference hazard lives in the skirt generators, which read/grow
+    // `vertices` / `out_mesh.vertices` - those remain real std::vectors that can
+    // still reallocate on push_back, so the existing by-value source-vertex
+    // copies are still required and are left exactly in place. The arena never
+    // backs any vertex buffer that a skirt generator pushes into.
+    class MeshArena {
+    public:
+        // Reset to empty without releasing the backing storage (reused next job).
+        void Reset() noexcept { m_offset = 0; }
+
+        unsigned char* base() const noexcept { return m_storage.get(); }
+
+        // Bump-allocate `count` objects of trivially-copyable T, value-set to
+        // `init`. Returns the BYTE OFFSET of the allocation within the arena
+        // block (NOT a raw pointer). Callers resolve the pointer lazily against
+        // base() on every access (see ArenaSpan), which keeps outstanding
+        // allocations valid across a mid-job grow: a grow that needs more space
+        // while earlier allocations are still live copies the existing
+        // [0, m_offset) bytes into the larger block, so resolving the offset
+        // against the NEW base yields the same logical data. This is the
+        // determinism-critical property - an earlier raw-pointer design dangled
+        // world_positions when the subsequent materials allocation reallocated
+        // the block, leaking job-order-dependent garbage and breaking the
+        // canonical world_hash (T-I4-18).
+        template <typename T>
+        std::size_t Allocate(std::size_t count, const T& init) {
+            static_assert(std::is_trivially_copyable<T>::value,
+                          "T-I4-18 arena only backs trivially-copyable scratch");
+            static_assert(std::is_trivially_destructible<T>::value,
+                          "T-I4-18 arena never runs destructors");
+            if (count == 0) {
+                return 0;
+            }
+            constexpr std::size_t align = alignof(T);
+            const std::size_t aligned_offset = (m_offset + (align - 1)) & ~(align - 1);
+            const std::size_t bytes = count * sizeof(T);
+            EnsureCapacity(aligned_offset + bytes);
+            T* const ptr = reinterpret_cast<T*>(m_storage.get() + aligned_offset);
+            m_offset = aligned_offset + bytes;
+            for (std::size_t i = 0; i < count; ++i) {
+                // Placement-construct each element with the requested init value;
+                // matches the std::vector(count, init) the arena replaces.
+                ::new (static_cast<void*>(ptr + i)) T(init);
+            }
+            return aligned_offset;
+        }
+
+    private:
+        void EnsureCapacity(std::size_t required_bytes) {
+            if (required_bytes <= m_capacity) {
+                return;
+            }
+            // Grow geometrically to amortize. A grow may fire mid-job while
+            // earlier allocations are still live, so preserve their bytes by
+            // copying [0, m_offset) into the new block. Offset-based ArenaSpans
+            // (which resolve against base() lazily) then keep pointing at the
+            // same logical scratch after the block moves.
+            std::size_t new_capacity = m_capacity == 0 ? 4096 : m_capacity;
+            while (new_capacity < required_bytes) {
+                new_capacity *= 2;
+            }
+            // Over-aligned to the strictest scratch type we hand out so every
+            // typed sub-allocation's alignment math stays in-bounds.
+            constexpr std::size_t kBlockAlign = alignof(std::max_align_t);
+            auto* raw = static_cast<unsigned char*>(
+                ::operator new(new_capacity, std::align_val_t{kBlockAlign}));
+            if (m_storage && m_offset > 0) {
+                std::memcpy(raw, m_storage.get(), m_offset);
+            }
+            m_storage = std::unique_ptr<unsigned char[], BlockDeleter>(raw);
+            m_capacity = new_capacity;
+        }
+
+        struct BlockDeleter {
+            void operator()(unsigned char* p) const noexcept {
+                ::operator delete(p, std::align_val_t{alignof(std::max_align_t)});
+            }
+        };
+
+        std::unique_ptr<unsigned char[], BlockDeleter> m_storage;
+        std::size_t m_capacity = 0;  // high-water mark in bytes (never shrinks)
+        std::size_t m_offset = 0;    // bump cursor; Reset() rewinds to 0
+    };
+
+    // Per-worker meshing arena. thread_local => one arena per JobSystem worker,
+    // never shared across concurrently running meshing jobs.
+    thread_local MeshArena t_mesh_arena;
+
+    // RAII guard: reset the worker arena at job entry so each meshing job starts
+    // from a clean bump cursor while reusing the high-water-mark storage.
+    struct MeshArenaScope {
+        MeshArenaScope() noexcept { t_mesh_arena.Reset(); }
+        ~MeshArenaScope() noexcept { t_mesh_arena.Reset(); }
+        MeshArenaScope(const MeshArenaScope&) = delete;
+        MeshArenaScope& operator=(const MeshArenaScope&) = delete;
+    };
+
+    // Lightweight typed view over an arena allocation. Index-addressed only (the
+    // arena never backs a growing buffer), so it deliberately exposes no
+    // push_back: that keeps the no-reallocation / stable-address guarantee that
+    // makes the scratch byte-identical to the std::vectors it replaces. The view
+    // holds a BYTE OFFSET, not a pointer, and resolves data() against the current
+    // arena base on every access, so it survives a mid-job arena grow (the grow
+    // copies existing bytes forward; see MeshArena::EnsureCapacity).
+    template <typename T>
+    struct ArenaSpan {
+        std::size_t offset = 0;
+        std::size_t count = 0;
+        T* data() const noexcept {
+            return count == 0 ? nullptr
+                              : reinterpret_cast<T*>(t_mesh_arena.base() + offset);
+        }
+        std::size_t size() const noexcept { return count; }
+        T& operator[](std::size_t i) const noexcept { return data()[i]; }
+    };
+
+    template <typename T>
+    ArenaSpan<T> ArenaAlloc(std::size_t count, const T& init) {
+        return ArenaSpan<T>{t_mesh_arena.Allocate<T>(count, init), count};
+    }
+    // ===================== END T-I4-18 MESHING ARENA =====================
 
     // These tables are the core of the Marching Cubes algorithm
     #include "MarchingCubesTables.inl"
@@ -491,7 +642,10 @@ namespace { // Anonymous namespace for internal implementation details
             }
         }
 
-        std::vector<u32> remap(vertices.size(), static_cast<u32>(-1));
+        // T-I4-18: remap is pure index-addressed scratch (never escapes), so it
+        // comes from the reset-per-job arena. Value-set to 0xFFFFFFFF, the exact
+        // sentinel the prior std::vector(count, -1) used - byte-identical compaction.
+        ArenaSpan<u32> remap = ArenaAlloc<u32>(vertices.size(), static_cast<u32>(-1));
         std::vector<VoxelVertex> compact_vertices;
         compact_vertices.reserve(vertices.size());
         for (u32& index : indices) {
@@ -684,6 +838,11 @@ void PolygoniseTerrain(
     int step
 ) {
     const auto build_start = std::chrono::steady_clock::now();
+    // T-I4-18: reset the per-worker meshing arena at job entry. Covers BOTH the
+    // coarse heightfield path (remap) and the unit-step path below (edge cache,
+    // world positions, materials, remap). Reset is an offset rewind - negligible
+    // vs. the elapsed_us this build is timed against.
+    MeshArenaScope mesh_arena_scope;
     const int sample_step = std::max(1, step);
 
     if (sample_step > 1) {
@@ -778,7 +937,14 @@ void PolygoniseTerrain(
         (1u + kZStride) * 3u + 1u,             // edge 10: +Y edge at corner 2
         kZStride * 3u + 1u,                    // edge 11: +Y edge at corner 3
     };
-    std::vector<u32> edge_vertex_cache(static_cast<std::size_t>(kLatticeCount) * 3u, kNoCachedVertex);
+    // T-I4-18: the per-edge vertex cache is the dominant per-job scratch alloc
+    // (kLatticeCount*3 u32 ~= 59 KB at 17^3). It is pure scratch (index-addressed,
+    // never escapes), so it comes from the reset-per-job arena, value-set to
+    // kNoCachedVertex exactly as the prior std::vector(count, kNoCachedVertex) did.
+    // The cache stores vertex INDICES into `vertices` (a real std::vector), never
+    // pointers, so the arena gives it stable storage with no aliasing hazard.
+    ArenaSpan<u32> edge_vertex_cache =
+        ArenaAlloc<u32>(static_cast<std::size_t>(kLatticeCount) * 3u, kNoCachedVertex);
 
     const float* const sdf = chunk.sdf_data.data();
 
@@ -877,8 +1043,13 @@ void PolygoniseTerrain(
     // returns the exact GetTerrainMaterialAt material per vertex but evaluates
     // the shaped-height/climate noise through FastNoise's batch entry points.
     if (!vertices.empty()) {
-        std::vector<Vec3> world_positions(vertices.size());
-        std::vector<u32> materials(vertices.size());
+        // T-I4-18: both scratch arrays are index-filled then consumed in-place
+        // (ClassifyVertexMaterials reads positions, writes materials) and never
+        // escape, so they are arena-backed. world_positions is overwritten for
+        // every element below before use; materials is fully written by the batch
+        // classifier. Init values match the prior std::vector default-init.
+        ArenaSpan<Vec3> world_positions = ArenaAlloc<Vec3>(vertices.size(), Vec3(0.0f));
+        ArenaSpan<u32> materials = ArenaAlloc<u32>(vertices.size(), 0u);
         const Vec3 base = Vec3(chunk_base_pos);
         for (size_t i = 0; i < vertices.size(); ++i) {
             world_positions[i] = base + vertices[i].position;
@@ -910,7 +1081,9 @@ void PolygoniseTerrain(
         }
     }
 
-    std::vector<u32> remap(vertices.size(), static_cast<u32>(-1));
+    // T-I4-18: remap is pure index-addressed scratch (never escapes) -> arena.
+    // Value-set to 0xFFFFFFFF, identical to the prior std::vector(count, -1).
+    ArenaSpan<u32> remap = ArenaAlloc<u32>(vertices.size(), static_cast<u32>(-1));
     std::vector<VoxelVertex> compact_vertices;
     compact_vertices.reserve(vertices.size());
     for (u32& index : indices) {
@@ -920,7 +1093,7 @@ void PolygoniseTerrain(
         }
         index = remap[index];
     }
-    
+
     chunk.mesh_vertices = std::move(compact_vertices);
     chunk.mesh_indices = std::move(indices);
     const auto elapsed_us = static_cast<std::uint64_t>(
