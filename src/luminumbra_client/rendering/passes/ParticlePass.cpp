@@ -1,0 +1,492 @@
+#include "ParticlePass.h"
+
+#include "GBufferPass.h"
+#include "LightingPass.h"
+#include "PassGlHelpers.h"
+#include "core/Log.h"
+#include "rendering/Camera.h"
+#include "rendering/Shader.h"
+
+#include <GLFW/glfw3.h>
+#include <glm/gtc/matrix_transform.hpp>
+#include <nlohmann/json.hpp>
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <fstream>
+
+namespace Luminumbra::Rendering {
+
+namespace {
+
+// IEEE-754 half-precision encode (round-to-nearest-even is overkill here; a
+// truncating encode is deterministic and adequate for a rotation angle).
+uint16_t encode_f16(float value) {
+    uint32_t bits;
+    std::memcpy(&bits, &value, sizeof(bits));
+    const uint32_t sign = (bits >> 16) & 0x8000u;
+    int32_t exponent = static_cast<int32_t>((bits >> 23) & 0xFFu) - 127 + 15;
+    uint32_t mantissa = bits & 0x7FFFFFu;
+    if (exponent <= 0) {
+        return static_cast<uint16_t>(sign); // flush sub-normals to zero
+    }
+    if (exponent >= 0x1F) {
+        return static_cast<uint16_t>(sign | 0x7C00u); // inf/overflow
+    }
+    return static_cast<uint16_t>(sign | (static_cast<uint32_t>(exponent) << 10) | (mantissa >> 13));
+}
+
+uint8_t to_unorm8(float v) {
+    return static_cast<uint8_t>(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f));
+}
+
+// splitmix64 -- a strong, fast, deterministic mixer for seed derivation.
+uint64_t splitmix64(uint64_t x) {
+    x += 0x9E3779B97F4A7C15ull;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+    return x ^ (x >> 31);
+}
+
+// FNV-1a over a byte range.
+uint64_t fnv1a(const void* data, std::size_t len, uint64_t seed = 1469598103934665603ull) {
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    uint64_t hash = seed;
+    for (std::size_t i = 0; i < len; ++i) {
+        hash ^= bytes[i];
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+// Render-only xorshift64 (particle spawn jitter). Reproducible per emitter seed
+// but NEVER feeds world_hash.
+uint64_t xorshift64(uint64_t& state) {
+    state ^= state << 13;
+    state ^= state >> 7;
+    state ^= state << 17;
+    return state;
+}
+
+float rng_unit(uint64_t& state) {
+    // 24 high bits -> [0,1).
+    return static_cast<float>(xorshift64(state) >> 40) / 16777216.0f;
+}
+
+float rng_signed(uint64_t& state) {
+    return rng_unit(state) * 2.0f - 1.0f;
+}
+
+void parse_curve(const nlohmann::json& node, ParticlePass::Curve& out) {
+    if (!node.is_array()) {
+        return;
+    }
+    const std::size_t n = std::min<std::size_t>(node.size(), ParticlePass::kCurvePoints);
+    for (std::size_t i = 0; i < n; ++i) {
+        out.points[i] = node[i].get<float>();
+    }
+    // If fewer than kCurvePoints were given, hold the last value.
+    for (std::size_t i = n; i < ParticlePass::kCurvePoints && n > 0; ++i) {
+        out.points[i] = out.points[n - 1];
+    }
+}
+
+} // namespace
+
+float ParticlePass::Curve::sample(float t) const {
+    t = std::clamp(t, 0.0f, 1.0f);
+    const float scaled = t * static_cast<float>(kCurvePoints - 1);
+    const std::size_t i0 = static_cast<std::size_t>(scaled);
+    const std::size_t i1 = std::min(i0 + 1, kCurvePoints - 1);
+    const float frac = scaled - static_cast<float>(i0);
+    return glm::mix(points[i0], points[i1], frac);
+}
+
+ParticlePass::ParticlePass() = default;
+ParticlePass::~ParticlePass() = default;
+
+void ParticlePass::init_shader(const std::filesystem::path& root_path) {
+    // Re-home of magical_particles. Billboard expansion now happens in the
+    // vertex stage (4 verts/instance via gl_VertexID); the geometry shader is
+    // retired because the Shader class is vert+frag only.
+    m_shader = std::make_unique<Shader>(
+        (root_path / "res/shaders/magical_particles.vert").string().c_str(),
+        (root_path / "res/shaders/magical_particles.frag").string().c_str());
+    PassGl::label_gl_object(GL_PROGRAM, m_shader ? m_shader->Id() : 0u, "shader.particles");
+}
+
+void ParticlePass::init_buffers() {
+    m_particles.assign(kMaxInstances, Particle{});
+    m_ring_head = 0;
+    m_live_count = 0;
+
+    glGenVertexArrays(1, &m_vao);
+    PassGl::label_gl_object(GL_VERTEX_ARRAY, m_vao, "particles.vao");
+    glBindVertexArray(m_vao);
+
+    const GLbitfield storage_flags = GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
+    const GLsizeiptr bytes = static_cast<GLsizeiptr>(kMaxInstances * sizeof(InstanceRecord));
+
+    for (std::size_t ring = 0; ring < kRingFrames; ++ring) {
+        glGenBuffers(1, &m_instance_vbo[ring]);
+        glBindBuffer(GL_ARRAY_BUFFER, m_instance_vbo[ring]);
+        glBufferStorage(GL_ARRAY_BUFFER, bytes, nullptr, storage_flags);
+        m_instance_ptr[ring] = static_cast<InstanceRecord*>(
+            glMapBufferRange(GL_ARRAY_BUFFER, 0, bytes, storage_flags));
+        PassGl::label_gl_object(GL_BUFFER, m_instance_vbo[ring],
+                                "particles.instances." + std::to_string(ring));
+    }
+
+    // Bind ring slot 0's layout into the VAO; execute() rebinds the live ring
+    // slot's buffer to binding point 0 before drawing (same VAO, swapped VBO).
+    glBindBuffer(GL_ARRAY_BUFFER, m_instance_vbo[0]);
+    glVertexBindingDivisor(0, 1); // one record per instance
+
+    // location 0: pos (vec3)
+    glEnableVertexAttribArray(0);
+    glVertexAttribFormat(0, 3, GL_FLOAT, GL_FALSE, offsetof(InstanceRecord, pos));
+    glVertexAttribBinding(0, 0);
+    // location 1: size (float)
+    glEnableVertexAttribArray(1);
+    glVertexAttribFormat(1, 1, GL_FLOAT, GL_FALSE, offsetof(InstanceRecord, size));
+    glVertexAttribBinding(1, 0);
+    // location 2: color (rgba8 normalized)
+    glEnableVertexAttribArray(2);
+    glVertexAttribFormat(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, offsetof(InstanceRecord, color));
+    glVertexAttribBinding(2, 0);
+    // location 3: atlas layer (uint16 -> int attrib)
+    glEnableVertexAttribArray(3);
+    glVertexAttribIFormat(3, 1, GL_UNSIGNED_SHORT, offsetof(InstanceRecord, atlas_layer));
+    glVertexAttribBinding(3, 0);
+    // location 4: rotation (half float)
+    glEnableVertexAttribArray(4);
+    glVertexAttribFormat(4, 1, GL_HALF_FLOAT, GL_FALSE, offsetof(InstanceRecord, rotation));
+    glVertexAttribBinding(4, 0);
+
+    glBindVertexBuffer(0, m_instance_vbo[0], 0, sizeof(InstanceRecord));
+
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+void ParticlePass::destroy_buffers() {
+    for (std::size_t ring = 0; ring < kRingFrames; ++ring) {
+        if (m_instance_vbo[ring]) {
+            glBindBuffer(GL_ARRAY_BUFFER, m_instance_vbo[ring]);
+            glUnmapBuffer(GL_ARRAY_BUFFER);
+            glDeleteBuffers(1, &m_instance_vbo[ring]);
+            m_instance_vbo[ring] = 0;
+            m_instance_ptr[ring] = nullptr;
+        }
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    if (m_vao) { glDeleteVertexArrays(1, &m_vao); m_vao = 0; }
+    m_particles.clear();
+    m_particles.shrink_to_fit();
+    m_ring_head = 0;
+    m_live_count = 0;
+    m_ring_cursor = 0;
+    m_frame_instance_count = 0;
+}
+
+void ParticlePass::reset_shader() {
+    m_shader.reset();
+}
+
+uint32_t ParticlePass::add_emitter(const std::filesystem::path& json_path, const glm::vec3& world_origin) {
+    if (m_active_emitters.size() >= kMaxEmitters) {
+        LUMINUMBRA_CORE_WARN("ParticlePass: emitter cap ({}) reached, ignoring '{}'.",
+                             kMaxEmitters, json_path.string());
+        return kInvalidEmitter;
+    }
+    std::ifstream in(json_path);
+    if (!in) {
+        LUMINUMBRA_CORE_WARN("ParticlePass: emitter file not found '{}'.", json_path.string());
+        return kInvalidEmitter;
+    }
+
+    EmitterData data;
+    try {
+        nlohmann::json doc = nlohmann::json::parse(in);
+        data.name = doc.value("name", json_path.stem().string());
+        data.type = doc.value("type", 0u);
+        data.spawn_rate = doc.value("spawn_rate", 0.0f);
+        data.lifetime = std::max(0.01f, doc.value("lifetime", 1.0f));
+        if (doc.contains("origin") && doc["origin"].is_array() && doc["origin"].size() == 3) {
+            data.origin = glm::vec3(doc["origin"][0].get<float>(), doc["origin"][1].get<float>(),
+                                    doc["origin"][2].get<float>());
+        }
+        if (doc.contains("origin_extent") && doc["origin_extent"].is_array() && doc["origin_extent"].size() == 3) {
+            data.origin_extent = glm::vec3(doc["origin_extent"][0].get<float>(),
+                                           doc["origin_extent"][1].get<float>(),
+                                           doc["origin_extent"][2].get<float>());
+        }
+        if (doc.contains("base_velocity") && doc["base_velocity"].is_array() && doc["base_velocity"].size() == 3) {
+            data.base_velocity = glm::vec3(doc["base_velocity"][0].get<float>(),
+                                           doc["base_velocity"][1].get<float>(),
+                                           doc["base_velocity"][2].get<float>());
+        }
+        data.velocity_jitter = doc.value("velocity_jitter", 0.0f);
+        if (doc.contains("size_curve")) parse_curve(doc["size_curve"], data.size_curve);
+        if (doc.contains("color_r_curve")) parse_curve(doc["color_r_curve"], data.r_curve);
+        if (doc.contains("color_g_curve")) parse_curve(doc["color_g_curve"], data.g_curve);
+        if (doc.contains("color_b_curve")) parse_curve(doc["color_b_curve"], data.b_curve);
+        if (doc.contains("color_a_curve")) parse_curve(doc["color_a_curve"], data.a_curve);
+        data.atlas_layer = static_cast<uint16_t>(doc.value("atlas_layer", 0u));
+        const std::string blend = doc.value("blend", std::string("additive"));
+        data.blend = (blend == "alpha") ? BlendMode::AlphaBlend : BlendMode::Additive;
+        data.loaded = true;
+    } catch (const std::exception& e) {
+        LUMINUMBRA_CORE_WARN("ParticlePass: failed to parse emitter '{}': {}", json_path.string(), e.what());
+        return kInvalidEmitter;
+    }
+
+    ActiveEmitter emitter;
+    emitter.data = std::move(data);
+    emitter.id = m_next_emitter_id++;
+    emitter.world_origin = world_origin + emitter.data.origin;
+    emitter.rng_seed = 0; // filled by rebuild_emitter_descriptors
+    emitter.rng_state = 1;
+    m_active_emitters.push_back(std::move(emitter));
+    LUMINUMBRA_CORE_INFO("ParticlePass: emitter '{}' id={} added (rate={}/s).",
+                         m_active_emitters.back().data.name, m_active_emitters.back().id,
+                         m_active_emitters.back().data.spawn_rate);
+    return m_active_emitters.back().id;
+}
+
+void ParticlePass::clear_emitters() {
+    m_active_emitters.clear();
+    m_descriptors.clear();
+    m_next_emitter_id = 0;
+    // Kill any live particles so existing byte-stable visual gates render an
+    // empty (no-op) particle pass.
+    for (auto& p : m_particles) p.alive = false;
+    m_ring_head = 0;
+    m_live_count = 0;
+}
+
+uint64_t ParticlePass::derive_emitter_seed(uint64_t world_seed, uint64_t world_tick, uint32_t emitter_id) {
+    // Pure function of world state + emitter identity. Mixing three splitmix64
+    // rounds de-correlates seeds across ticks and emitters.
+    uint64_t s = splitmix64(world_seed ^ 0xA24BAED4963EE407ull);
+    s = splitmix64(s ^ (world_tick + 0x9E3779B97F4A7C15ull));
+    s = splitmix64(s ^ (static_cast<uint64_t>(emitter_id) * 0xD1B54A32D192ED03ull));
+    return s;
+}
+
+void ParticlePass::rebuild_emitter_descriptors(uint64_t world_seed, uint64_t world_tick) {
+    m_descriptors.clear();
+    m_descriptors.reserve(m_active_emitters.size());
+    for (auto& emitter : m_active_emitters) {
+        EmitterDescriptor d;
+        d.id = emitter.id;
+        d.type = emitter.data.type;
+        // Quantize the world origin to integer millimetres so the descriptor is
+        // a stable POD (no float bit-noise across runs).
+        d.origin_region[0] = static_cast<int32_t>(std::lround(emitter.world_origin.x * 1000.0f));
+        d.origin_region[1] = static_cast<int32_t>(std::lround(emitter.world_origin.y * 1000.0f));
+        d.origin_region[2] = static_cast<int32_t>(std::lround(emitter.world_origin.z * 1000.0f));
+        d.spawn_rate_milli = static_cast<uint32_t>(std::lround(emitter.data.spawn_rate * 1000.0f));
+        d.rng_seed = derive_emitter_seed(world_seed, world_tick, emitter.id);
+        d.enable = (emitter.data.loaded && emitter.data.spawn_rate > 0.0f) ? 1u : 0u;
+        emitter.rng_seed = d.rng_seed;
+        // Seed the render-only spawn RNG from the deterministic seed so the
+        // render spawn pattern is reproducible (still never enters world_hash).
+        if (emitter.rng_state == 0 || emitter.rng_state == 1) {
+            emitter.rng_state = d.rng_seed != 0 ? d.rng_seed : 0x1234567890ABCDEFull;
+        }
+        m_descriptors.push_back(d);
+    }
+}
+
+uint64_t ParticlePass::emitter_descriptor_hash() const {
+    if (m_descriptors.empty()) {
+        return fnv1a(nullptr, 0);
+    }
+    return fnv1a(m_descriptors.data(), m_descriptors.size() * sizeof(EmitterDescriptor));
+}
+
+void ParticlePass::spawn_from_emitter(ActiveEmitter& emitter, float dt) {
+    if (!emitter.data.loaded || emitter.data.spawn_rate <= 0.0f) {
+        return;
+    }
+    emitter.spawn_accumulator += static_cast<double>(emitter.data.spawn_rate) * static_cast<double>(dt);
+    int to_spawn = static_cast<int>(emitter.spawn_accumulator);
+    if (to_spawn <= 0) {
+        return;
+    }
+    emitter.spawn_accumulator -= static_cast<double>(to_spawn);
+    to_spawn = std::min(to_spawn, static_cast<int>(kMaxInstances));
+
+    const uint32_t emitter_index = static_cast<uint32_t>(&emitter - m_active_emitters.data());
+    for (int i = 0; i < to_spawn; ++i) {
+        Particle& p = m_particles[m_ring_head];
+        if (!p.alive) {
+            ++m_live_count;
+        }
+        // else: oldest slot reused -> ring eviction (live count unchanged).
+        p.alive = true;
+        p.age = 0.0f;
+        p.lifetime = emitter.data.lifetime;
+        p.emitter_index = emitter_index;
+        p.pos = emitter.world_origin
+              + glm::vec3(rng_signed(emitter.rng_state) * emitter.data.origin_extent.x,
+                          rng_signed(emitter.rng_state) * emitter.data.origin_extent.y,
+                          rng_signed(emitter.rng_state) * emitter.data.origin_extent.z);
+        p.vel = emitter.data.base_velocity
+              + glm::vec3(rng_signed(emitter.rng_state),
+                          rng_signed(emitter.rng_state),
+                          rng_signed(emitter.rng_state)) * emitter.data.velocity_jitter;
+        m_ring_head = (m_ring_head + 1) % kMaxInstances;
+    }
+}
+
+void ParticlePass::update(float dt) {
+    m_frame_instance_count = 0;
+    if (m_active_emitters.empty() || m_particles.empty()) {
+        m_live_count = 0;
+        return;
+    }
+
+    // 1. Spawn (render-only).
+    for (auto& emitter : m_active_emitters) {
+        spawn_from_emitter(emitter, dt);
+    }
+
+    // 2. Integrate motion + age, build this frame's instance records.
+    m_ring_cursor = (m_ring_cursor + 1) % kRingFrames;
+    InstanceRecord* dst = m_instance_ptr[m_ring_cursor];
+    if (dst == nullptr) {
+        return;
+    }
+
+    std::size_t live = 0;
+    std::size_t written = 0;
+    for (auto& p : m_particles) {
+        if (!p.alive) {
+            continue;
+        }
+        p.age += dt;
+        if (p.age >= p.lifetime) {
+            p.alive = false;
+            continue;
+        }
+        p.pos += p.vel * dt;
+        ++live;
+
+        const ActiveEmitter& emitter = m_active_emitters[p.emitter_index];
+        const float life_t = p.age / p.lifetime;
+
+        InstanceRecord& rec = dst[written];
+        rec.pos[0] = p.pos.x;
+        rec.pos[1] = p.pos.y;
+        rec.pos[2] = p.pos.z;
+        rec.size = emitter.data.size_curve.sample(life_t);
+        rec.color[0] = to_unorm8(emitter.data.r_curve.sample(life_t));
+        rec.color[1] = to_unorm8(emitter.data.g_curve.sample(life_t));
+        rec.color[2] = to_unorm8(emitter.data.b_curve.sample(life_t));
+        rec.color[3] = to_unorm8(emitter.data.a_curve.sample(life_t));
+        rec.atlas_layer = emitter.data.atlas_layer;
+        rec.rotation = encode_f16(life_t * 6.2831853f);
+        ++written;
+        if (written >= kMaxInstances) {
+            break;
+        }
+    }
+
+    m_live_count = live;
+    m_frame_instance_count = written;
+}
+
+void ParticlePass::execute(RenderPipeline& pipeline, const Camera& camera) {
+    // No-op (zero draw work) when nothing to render: keeps existing visual gates
+    // byte-stable.
+    if (!m_shader || !m_shader->IsValid() || m_frame_instance_count == 0 || m_vao == 0) {
+        return;
+    }
+
+    const FrameBufferObject& lighting_fbo = pipeline.m_lighting_pass->lighting_fbo();
+    const GBuffer& gbuffer = pipeline.m_gbuffer_pass->gbuffer();
+    if (!lighting_fbo.fbo_id) {
+        return;
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, lighting_fbo.fbo_id);
+    glViewport(0, 0, pipeline.m_screen_width, pipeline.m_screen_height);
+
+    // Transparent particles: test against scene depth but do not write depth,
+    // and blend additively into the HDR lighting target.
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+    glDepthFunc(GL_LEQUAL);
+    glEnable(GL_BLEND);
+    // Default emitter blend is additive (emissive glow); alpha emitters use
+    // standard transparency. The fixture emitter is additive.
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    const GLboolean cull_was_enabled = glIsEnabled(GL_CULL_FACE);
+    if (cull_was_enabled) {
+        glDisable(GL_CULL_FACE);
+    }
+
+    m_shader->use();
+    const glm::mat4 projection = glm::perspective(
+        glm::radians(camera.Zoom),
+        static_cast<float>(pipeline.m_screen_width) / static_cast<float>(pipeline.m_screen_height),
+        camera.GetNearPlane(), camera.GetFarPlane());
+    const glm::mat4 view = camera.GetViewMatrix();
+    m_shader->setMat4("u_view", view);
+    m_shader->setMat4("u_projection", projection);
+    m_shader->setVec3("u_cameraRight", camera.Right);
+    m_shader->setVec3("u_cameraUp", camera.Up);
+    m_shader->setVec3("u_cameraPos", camera.Position);
+    m_shader->setFloat("u_time", static_cast<float>(glfwGetTime()));
+    m_shader->setVec2("u_screenSize",
+                      glm::vec2(static_cast<float>(pipeline.m_screen_width),
+                                static_cast<float>(pipeline.m_screen_height)));
+    m_shader->setFloat("u_nearPlane", camera.GetNearPlane());
+    m_shader->setFloat("u_farPlane", camera.GetFarPlane());
+
+    // Forward lighting: sun + ambient + the nearest few point lights.
+    m_shader->setVec3("u_sunDirection", pipeline.m_sun.direction);
+    m_shader->setVec3("u_sunColor", pipeline.m_sun.color);
+    m_shader->setFloat("u_sunIntensity", pipeline.m_sun.intensity);
+    m_shader->setVec3("u_ambientColor", pipeline.m_skyAmbientColor);
+
+    const int max_lights = 4;
+    int light_count = std::min(static_cast<int>(pipeline.m_point_lights_this_frame.size()), max_lights);
+    m_shader->setInt("u_pointLightCount", light_count);
+    for (int i = 0; i < light_count; ++i) {
+        const PointLight& l = pipeline.m_point_lights_this_frame[static_cast<std::size_t>(i)];
+        const std::string base = "u_pointLights[" + std::to_string(i) + "].";
+        m_shader->setVec3(base + "position", l.position);
+        m_shader->setVec3(base + "color", l.color);
+        m_shader->setFloat(base + "radius", l.radius);
+        m_shader->setFloat(base + "intensity", l.intensity);
+    }
+
+    // Soft-particle depth read from the G-buffer depth attachment.
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, gbuffer.depth_texture);
+    m_shader->setInt("u_sceneDepth", 0);
+
+    // Point the VAO's binding 0 at this frame's ring slot, then instanced-draw
+    // 4 verts (a quad) per particle.
+    glBindVertexArray(m_vao);
+    glBindVertexBuffer(0, m_instance_vbo[m_ring_cursor], 0, sizeof(InstanceRecord));
+    glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, static_cast<GLsizei>(m_frame_instance_count));
+    pipeline.m_last_render_pass_stats.particle_draws++;
+    pipeline.m_last_render_pass_stats.particles_drawn += m_frame_instance_count;
+    glBindVertexArray(0);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    if (cull_was_enabled) {
+        glEnable(GL_CULL_FACE);
+    }
+    glDisable(GL_BLEND);
+    glDepthMask(GL_TRUE);
+    glDepthFunc(GL_LESS);
+}
+
+} // namespace Luminumbra::Rendering

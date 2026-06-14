@@ -190,6 +190,38 @@ else()
     target_link_libraries(render_capture_test PRIVATE OpenGL::GL)
 endif()
 
+# T-I5a-1: GL-free particle determinism unit tests (emitter descriptor surface).
+add_executable(particle_determinism_test
+    rendering/particle_determinism_test.cpp
+)
+
+target_compile_definitions(particle_determinism_test PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+    LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts"
+)
+
+target_include_directories(particle_determinism_test PRIVATE
+    ../src
+    ../src/luminumbra_client
+)
+
+target_link_libraries(particle_determinism_test PRIVATE
+    gtest_main
+    luminumbra_client
+    glfw
+    glad
+)
+
+if(WIN32)
+    target_link_libraries(particle_determinism_test PRIVATE opengl32)
+elseif(APPLE)
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(particle_determinism_test PRIVATE ${OPENGL_LIBRARIES})
+else()
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(particle_determinism_test PRIVATE OpenGL::GL)
+endif()
+
 add_executable(ui_smoke_test
     ui/ui_smoke_test.cpp
     ../src/luminumbra_client/ui/core/UIComponent.cpp
@@ -364,6 +396,7 @@ gtest_discover_tests(asset_processor_round_trip_test)
 gtest_discover_tests(common_tests)
 gtest_discover_tests(render_smoke_test)
 gtest_discover_tests(render_capture_test)
+gtest_discover_tests(particle_determinism_test)
 gtest_discover_tests(ui_smoke_test)
 gtest_discover_tests(initial_world_loading_perf_test)
 gtest_discover_tests(runtime_world_visual_validation_test)
