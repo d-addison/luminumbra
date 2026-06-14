@@ -31,6 +31,25 @@ constexpr size_t STREAMING_MAX_ACTIVE_CHUNKS_BUDGET = 8192;
 constexpr int STREAMING_ACTIVATION_INTERVAL_FRAMES = 4;
 constexpr int STREAMING_NEAR_VERTICAL_STACK_RADIUS = 4;
 constexpr int STREAMING_MID_VERTICAL_STACK_RADIUS = 12;
+
+// T-I4-DR-server-streaming-race: SIMD over-read guard for FastNoise2's
+// GenPositionArray2D. That entry point's tail does an UNCONDITIONAL full-width
+// SIMD load of the input position arrays (FS_Load_f32(&xPosArray[index]) in
+// vendor/fastnoise/.../Generator.inl:260) and a masked store of only the valid
+// lanes. When the element count is smaller than the SIMD width (AVX512 = 16
+// floats) -- e.g. the 5-point column-span footprint -- that load reads up to 15
+// floats PAST a count-sized std::vector; if the allocation abuts an unmapped
+// page the load faults with 0xC0000005 (the intermittent headless streaming
+// crash). Padding every input/output array handed to GenPositionArray2D up to a
+// multiple of this width keeps the tail load/store inside mapped memory. 16
+// covers AVX512 (and every narrower level); the padding lanes are never read
+// back into results, so heights/materials for indices [0,count) are byte-
+// identical and the world_hash is unchanged.
+constexpr std::size_t kNoiseSimdWidth = 16;
+constexpr std::size_t PadToNoiseSimd(std::size_t count) {
+    return count + (kNoiseSimdWidth - 1);
+}
+
 namespace Luminumbra::Systems {
 
 constexpr float FLOW_CONSTANT = 0.1f;
@@ -559,10 +578,16 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
     // helper's `sample_x * m_params.<freq>`. GenPositionArray2D samples at
     // (xPos[i] + xOffset, yPos[i] + yOffset); we fold freq into the arrays and
     // pass zero offsets.
-    std::vector<float> base_px(count);
-    std::vector<float> base_py(count);
-    std::vector<float> peaks_px(count);
-    std::vector<float> peaks_py(count);
+    // T-I4-DR-server-streaming-race: SIMD-pad the GenPositionArray2D input AND
+    // output arrays so the full-width tail load/store (which runs even when count
+    // is not a multiple of the SIMD width -- count = size_x*size_z is rarely a
+    // multiple of 16) cannot over-read/over-write past the count-sized vectors.
+    // Padding is never consumed (only [0,count) is read back) -> hash-neutral.
+    const std::size_t noise_pad = PadToNoiseSimd(count);
+    std::vector<float> base_px(noise_pad);
+    std::vector<float> base_py(noise_pad);
+    std::vector<float> peaks_px(noise_pad);
+    std::vector<float> peaks_py(noise_pad);
     for (int z = 0; z < size_z; ++z) {
         for (int x = 0; x < size_x; ++x) {
             const std::size_t i = static_cast<std::size_t>(x) +
@@ -580,8 +605,8 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
         }
     }
 
-    std::vector<float> base_noise(count);
-    std::vector<float> peaks_noise(count);
+    std::vector<float> base_noise(noise_pad);
+    std::vector<float> peaks_noise(noise_pad);
     m_terrain_generator->GenPositionArray2D(
         base_noise.data(), static_cast<int>(count), base_px.data(), base_py.data(),
         0.0f, 0.0f, m_seed);
@@ -804,19 +829,24 @@ void SHIELD_WorldSystem::ComputeShapedHeightsAtPositions(
     }
     // Warp channels (unwarped lattice), then base/peaks at warped coords, then
     // continentalness/erosion at unwarped coords - all via GenPositionArray2D.
-    std::vector<float> wx_in(count), wz_in(count);
+    // T-I4-DR-server-streaming-race: every array handed to GenPositionArray2D is
+    // SIMD-padded (PadToNoiseSimd) so the entry point's full-width tail load/store
+    // stays in mapped memory even when count < SIMD width. Loops still touch only
+    // [0,count); padding lanes are never read into results (hash-neutral).
+    const std::size_t pad = PadToNoiseSimd(count);
+    std::vector<float> wx_in(pad), wz_in(pad);
     for (std::size_t i = 0; i < count; ++i) {
         wx_in[i] = xs[i] * m_params.domain_warp_frequency;
         wz_in[i] = zs[i] * m_params.domain_warp_frequency;
     }
-    std::vector<float> warp_x(count), warp_z(count);
+    std::vector<float> warp_x(pad), warp_z(pad);
     m_warp_generator->GenPositionArray2D(warp_x.data(), static_cast<int>(count),
         wx_in.data(), wz_in.data(), 0.0f, 0.0f, m_seed + 6);
     m_warp_generator->GenPositionArray2D(warp_z.data(), static_cast<int>(count),
         wx_in.data(), wz_in.data(), 0.0f, 0.0f, m_seed + 7);
 
-    std::vector<float> cont_x(count), cont_y(count), eros_x(count), eros_y(count);
-    std::vector<float> base_x(count), base_y(count), peaks_x(count), peaks_y(count);
+    std::vector<float> cont_x(pad), cont_y(pad), eros_x(pad), eros_y(pad);
+    std::vector<float> base_x(pad), base_y(pad), peaks_x(pad), peaks_y(pad);
     for (std::size_t i = 0; i < count; ++i) {
         cont_x[i] = xs[i] * m_params.continentalness_frequency;
         cont_y[i] = zs[i] * m_params.continentalness_frequency;
@@ -829,7 +859,7 @@ void SHIELD_WorldSystem::ComputeShapedHeightsAtPositions(
         peaks_x[i] = sx * m_params.peaks_frequency;
         peaks_y[i] = sz * m_params.peaks_frequency;
     }
-    std::vector<float> continentalness(count), erosion(count), base_noise(count), peaks_noise(count);
+    std::vector<float> continentalness(pad), erosion(pad), base_noise(pad), peaks_noise(pad);
     m_continentalness_generator->GenPositionArray2D(continentalness.data(), static_cast<int>(count),
         cont_x.data(), cont_y.data(), 0.0f, 0.0f, m_seed + 3);
     m_erosion_generator->GenPositionArray2D(erosion.data(), static_cast<int>(count),
@@ -893,12 +923,16 @@ void SHIELD_WorldSystem::ClassifyVertexMaterials(
     // GenPositionArray2D samples at (xPos[i] + xOffset, yPos[i] + yOffset); we
     // fold the per-channel frequency into the coordinate arrays (zero offsets),
     // mirroring the scalar helpers' `coord * frequency`.
-    std::vector<float> warp_xf(count), warp_zf(count);   // warp coords (unwarped * warp_freq)
+    // T-I4-DR-server-streaming-race: SIMD-pad every GenPositionArray2D buffer (see
+    // PadToNoiseSimd) so the full-width tail load/store cannot over-read past the
+    // count-sized vectors. Hash-neutral: only indices [0,count) are consumed.
+    const std::size_t pad = PadToNoiseSimd(count);
+    std::vector<float> warp_xf(pad), warp_zf(pad);   // warp coords (unwarped * warp_freq)
     for (std::size_t i = 0; i < count; ++i) {
         warp_xf[i] = positions[i].x * m_params.domain_warp_frequency;
         warp_zf[i] = positions[i].z * m_params.domain_warp_frequency;
     }
-    std::vector<float> warp_x(count), warp_z(count);
+    std::vector<float> warp_x(pad), warp_z(pad);
     m_warp_generator->GenPositionArray2D(warp_x.data(), static_cast<int>(count),
         warp_xf.data(), warp_zf.data(), 0.0f, 0.0f, m_seed + 6);
     m_warp_generator->GenPositionArray2D(warp_z.data(), static_cast<int>(count),
@@ -906,8 +940,8 @@ void SHIELD_WorldSystem::ClassifyVertexMaterials(
 
     // continentalness/erosion read the UNWARPED column; base/peaks read the
     // warp-displaced column (matching ComputeShapedHeightSample).
-    std::vector<float> cont_x(count), cont_y(count), eros_x(count), eros_y(count);
-    std::vector<float> base_x(count), base_y(count), peaks_x(count), peaks_y(count);
+    std::vector<float> cont_x(pad), cont_y(pad), eros_x(pad), eros_y(pad);
+    std::vector<float> base_x(pad), base_y(pad), peaks_x(pad), peaks_y(pad);
     for (std::size_t i = 0; i < count; ++i) {
         const float wx = positions[i].x;
         const float wz = positions[i].z;
@@ -922,7 +956,7 @@ void SHIELD_WorldSystem::ClassifyVertexMaterials(
         peaks_x[i] = sx * m_params.peaks_frequency;
         peaks_y[i] = sz * m_params.peaks_frequency;
     }
-    std::vector<float> continentalness(count), erosion(count), base_noise(count), peaks_noise(count);
+    std::vector<float> continentalness(pad), erosion(pad), base_noise(pad), peaks_noise(pad);
     m_continentalness_generator->GenPositionArray2D(continentalness.data(), static_cast<int>(count),
         cont_x.data(), cont_y.data(), 0.0f, 0.0f, m_seed + 3);
     m_erosion_generator->GenPositionArray2D(erosion.data(), static_cast<int>(count),
@@ -936,9 +970,9 @@ void SHIELD_WorldSystem::ClassifyVertexMaterials(
     // are enabled. Sampled at the unwarped column.
     std::vector<float> temperature, humidity;
     if (m_biomes_enabled && !m_biome_table.empty()) {
-        temperature.resize(count);
-        humidity.resize(count);
-        std::vector<float> temp_x(count), temp_y(count), hum_x(count), hum_y(count);
+        temperature.resize(pad);
+        humidity.resize(pad);
+        std::vector<float> temp_x(pad), temp_y(pad), hum_x(pad), hum_y(pad);
         for (std::size_t i = 0; i < count; ++i) {
             temp_x[i] = positions[i].x * m_params.temperature_frequency;
             temp_y[i] = positions[i].z * m_params.temperature_frequency;
@@ -1491,7 +1525,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
     if (!chunks_to_mesh_jobs.empty() && !meshing_job_active) {
         dispatch_meshing_jobs(chunks_to_mesh_jobs);
     }
-    
+
     // Step 4. Time-slice the creation of expensive physics colliders on the main thread
     if (physics_system) {
         int collision_meshes_created_this_frame = 0;

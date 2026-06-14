@@ -23,9 +23,17 @@ void complete_job(const std::shared_ptr<JobCompletionState>& completion) {
     }
 
     if (completion->counter.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-        {
-            std::lock_guard<std::mutex> lock(completion->mutex);
-        }
+        // T-I4-DR-server-streaming-race: notify with completion->mutex HELD (the
+        // canonical condition_variable idiom) rather than after a momentary empty
+        // lock. The waiter (JobSystem::wait) evaluates `counter <= 0` under this
+        // mutex before blocking; the counter is an atomic decremented OUTSIDE the
+        // mutex, so holding the lock across the notify guarantees the waiter is
+        // either pre-predicate (observes 0, never blocks) or already enqueued on
+        // the CV (receives the notify) -- the wakeup cannot slip into the gap
+        // between the waiter releasing the mutex inside wait() and finishing its
+        // CV enqueue. Hardening (not the root cause of this task's crash, which
+        // was a FastNoise SIMD over-read), kept because it is the correct idiom.
+        std::lock_guard<std::mutex> lock(completion->mutex);
         completion->condition.notify_all();
     }
 }
@@ -148,8 +156,15 @@ JobHandle JobSystem::dispatch_batch(const std::vector<Job>& jobs, JobPriority pr
     }
 
     if (!accepted) {
-        completion->counter.store(0, std::memory_order_release);
-        completion->condition.notify_all();
+        // T-I4-DR-server-streaming-race: same lost-wakeup discipline as
+        // complete_job -- drop the counter to 0 and notify with completion->mutex
+        // HELD so a waiter that called wait() concurrently with this rejection
+        // cannot miss the wakeup.
+        {
+            std::lock_guard<std::mutex> lock(completion->mutex);
+            completion->counter.store(0, std::memory_order_release);
+            completion->condition.notify_all();
+        }
         LUMINUMBRA_CORE_WARN("JobSystem rejected batch dispatch while shutting down.");
         return handle;
     }
