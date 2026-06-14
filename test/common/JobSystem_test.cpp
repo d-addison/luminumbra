@@ -7,7 +7,9 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdio>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -316,6 +318,212 @@ TEST(JobSystemStressTest, BatchCountersCanBeReusedAcrossSequentialBatches) {
 
         ASSERT_EQ(completed.load(std::memory_order_acquire), kJobsPerBatch) << "batch " << batch;
     }
+}
+
+// T-I4-17-jobsystem-pod-pool: exercise the pooled-slot ring hard -- many
+// dispatch/complete cycles that force the lane ring well past its initial
+// capacity (256/lane) and back to empty repeatedly, asserting every job runs
+// exactly once and the completion barrier drains each time. A leak or
+// use-after-free in the slot recycling would surface as a wrong count or a
+// hang.
+TEST(JobSystemPoolTest, RingGrowsAndRecyclesAcrossManyCycles) {
+    if (std::thread::hardware_concurrency() == 0) {
+        GTEST_SKIP() << "JobSystem cannot start workers when hardware_concurrency is zero.";
+    }
+
+    constexpr int kCycles = 200;
+    constexpr int kJobsPerCycle = 1000;  // > initial 256/lane capacity -> growth
+
+    RunningJobSystem system;
+    std::atomic<long long> grand_total{0};
+
+    for (int cycle = 0; cycle < kCycles; ++cycle) {
+        std::atomic<int> ran{0};
+        std::vector<Luminumbra::Job> jobs;
+        jobs.reserve(kJobsPerCycle);
+        for (int i = 0; i < kJobsPerCycle; ++i) {
+            jobs.emplace_back([&ran, &grand_total]() {
+                ran.fetch_add(1, std::memory_order_relaxed);
+                grand_total.fetch_add(1, std::memory_order_relaxed);
+            });
+        }
+        const Luminumbra::JobHandle handle = system.job_system.dispatch_batch(jobs);
+        system.job_system.wait(handle);
+        ASSERT_EQ(ran.load(std::memory_order_acquire), kJobsPerCycle)
+            << "cycle " << cycle;
+    }
+
+    EXPECT_EQ(grand_total.load(std::memory_order_acquire),
+              static_cast<long long>(kCycles) * kJobsPerCycle);
+}
+
+// T-I4-17-jobsystem-pod-pool: nested dispatch -- outer jobs each dispatch an
+// inner batch (collecting handles) WITHOUT blocking inside the worker. The main
+// thread then drains the outer barrier and every inner handle. This stresses
+// the ring with interleaved outer+inner slots and recycling, but avoids the
+// fixed-pool deadlock that blocking on inner work from inside a worker would
+// cause (a worker parked in wait() cannot service the inner jobs it waits on --
+// a pre-existing thread-pool hazard, unrelated to the pooling change). The
+// engine itself never blocks inside a job; nested *dispatch* is the realistic
+// pattern.
+TEST(JobSystemPoolTest, NestedDispatchCompletesFully) {
+    if (std::thread::hardware_concurrency() == 0) {
+        GTEST_SKIP() << "JobSystem cannot start workers when hardware_concurrency is zero.";
+    }
+
+    constexpr int kOuter = 16;
+    constexpr int kInner = 32;
+
+    RunningJobSystem system;
+    std::atomic<int> inner_ran{0};
+    std::mutex handles_mutex;
+    std::vector<Luminumbra::JobHandle> inner_handles;
+    inner_handles.reserve(kOuter);
+
+    std::vector<Luminumbra::Job> outer_jobs;
+    outer_jobs.reserve(kOuter);
+    for (int o = 0; o < kOuter; ++o) {
+        outer_jobs.emplace_back([&system, &inner_ran, &handles_mutex, &inner_handles]() {
+            std::vector<Luminumbra::Job> inner_jobs;
+            inner_jobs.reserve(kInner);
+            for (int i = 0; i < kInner; ++i) {
+                inner_jobs.emplace_back([&inner_ran]() {
+                    inner_ran.fetch_add(1, std::memory_order_relaxed);
+                });
+            }
+            Luminumbra::JobHandle inner_handle =
+                system.job_system.dispatch_batch(inner_jobs);
+            std::lock_guard<std::mutex> lock(handles_mutex);
+            inner_handles.push_back(std::move(inner_handle));
+        });
+    }
+
+    const Luminumbra::JobHandle outer_handle =
+        system.job_system.dispatch_batch(outer_jobs);
+    system.job_system.wait(outer_handle);  // all inner batches now dispatched
+
+    std::vector<Luminumbra::JobHandle> to_wait;
+    {
+        std::lock_guard<std::mutex> lock(handles_mutex);
+        to_wait = inner_handles;
+    }
+    for (const Luminumbra::JobHandle& handle : to_wait) {
+        system.job_system.wait(handle);
+    }
+
+    EXPECT_EQ(inner_ran.load(std::memory_order_acquire), kOuter * kInner);
+}
+
+// T-I4-17-jobsystem-pod-pool: an empty batch returns a default (null) handle
+// and waiting on it is a no-op -- no allocation, no hang.
+TEST(JobSystemPoolTest, EmptyBatchReturnsNullHandleAndWaitIsNoop) {
+    RunningJobSystem system;
+    const std::vector<Luminumbra::Job> none;
+    const Luminumbra::JobHandle handle = system.job_system.dispatch_batch(none);
+    EXPECT_FALSE(static_cast<bool>(handle.completion));
+    EXPECT_FALSE(static_cast<bool>(handle.counter));
+    // Must return immediately.
+    system.job_system.wait(handle);
+}
+
+// T-I4-17-jobsystem-pod-pool: jobs that throw must still complete their batch
+// slot (run_slot's Finisher runs during unwind) so the barrier drains and the
+// worker survives to serve later work.
+TEST(JobSystemPoolTest, ThrowingJobsStillDrainTheBarrier) {
+    if (std::thread::hardware_concurrency() == 0) {
+        GTEST_SKIP() << "JobSystem cannot start workers when hardware_concurrency is zero.";
+    }
+
+    constexpr int kJobs = 128;
+    RunningJobSystem system;
+    std::atomic<int> survived{0};
+
+    std::vector<Luminumbra::Job> jobs;
+    jobs.reserve(kJobs);
+    for (int i = 0; i < kJobs; ++i) {
+        jobs.emplace_back([i, &survived]() {
+            survived.fetch_add(1, std::memory_order_relaxed);
+            if (i % 3 == 0) {
+                throw std::runtime_error("intentional job failure");
+            }
+        });
+    }
+
+    const Luminumbra::JobHandle handle = system.job_system.dispatch_batch(jobs);
+    // If a throwing job leaked its completion decrement, this would hang.
+    system.job_system.wait(handle);
+    EXPECT_EQ(survived.load(std::memory_order_acquire), kJobs);
+
+    // The pool/workers are still healthy: a follow-up batch completes.
+    std::atomic<int> after{0};
+    std::vector<Luminumbra::Job> more;
+    more.reserve(8);
+    for (int i = 0; i < 8; ++i) {
+        more.emplace_back([&after]() { after.fetch_add(1, std::memory_order_relaxed); });
+    }
+    system.job_system.wait(system.job_system.dispatch_batch(more));
+    EXPECT_EQ(after.load(std::memory_order_acquire), 8);
+}
+
+// T-I4-17-jobsystem-pod-pool: after shutdown, dispatch_batch must reject the
+// batch, drive the counter to 0, and return a handle whose wait() does not
+// hang (the lost-wakeup-safe reject path). dispatch() of a single job after
+// shutdown must be a no-op.
+TEST(JobSystemPoolTest, DispatchAfterShutdownRejectsWithoutHang) {
+    Luminumbra::JobSystem job_system;
+    job_system.startup();
+    job_system.shutdown();
+
+    std::atomic<int> ran{0};
+    std::vector<Luminumbra::Job> jobs;
+    jobs.reserve(4);
+    for (int i = 0; i < 4; ++i) {
+        jobs.emplace_back([&ran]() { ran.fetch_add(1, std::memory_order_relaxed); });
+    }
+
+    const Luminumbra::JobHandle handle = job_system.dispatch_batch(jobs);
+    // Reject path must leave a waitable handle that does not block.
+    job_system.wait(handle);
+    EXPECT_EQ(ran.load(std::memory_order_acquire), 0);
+
+    // Single dispatch after shutdown is a silent no-op.
+    job_system.dispatch([&ran]() { ran.fetch_add(1, std::memory_order_relaxed); });
+    EXPECT_EQ(ran.load(std::memory_order_acquire), 0);
+}
+
+// T-I4-17-jobsystem-pod-pool: PERF micro-benchmark, DISABLED by default (run
+// with --gtest_also_run_disabled_tests). Measures empty-job dispatch_batch +
+// wait throughput so the pooled-slot win can be reported without re-blessing
+// any baseline. Reports to stdout; asserts nothing timing-dependent.
+TEST(JobSystemPoolTest, DISABLED_DispatchThroughputBenchmark) {
+    if (std::thread::hardware_concurrency() == 0) {
+        GTEST_SKIP() << "JobSystem cannot start workers when hardware_concurrency is zero.";
+    }
+
+    constexpr int kTotal = 100000;
+    constexpr int kBatch = 1000;
+    constexpr int kBatches = kTotal / kBatch;
+
+    RunningJobSystem system;
+    std::atomic<long long> ran{0};
+
+    const auto start = std::chrono::steady_clock::now();
+    for (int b = 0; b < kBatches; ++b) {
+        std::vector<Luminumbra::Job> jobs;
+        jobs.reserve(kBatch);
+        for (int i = 0; i < kBatch; ++i) {
+            jobs.emplace_back([&ran]() { ran.fetch_add(1, std::memory_order_relaxed); });
+        }
+        system.job_system.wait(system.job_system.dispatch_batch(jobs));
+    }
+    const auto end = std::chrono::steady_clock::now();
+
+    const double seconds =
+        std::chrono::duration<double>(end - start).count();
+    const double per_job_ns = (seconds * 1e9) / static_cast<double>(kTotal);
+    std::printf("[PERF] dispatch_batch+wait: %d jobs in %.4f s = %.1f ns/job (%.0f jobs/s)\n",
+                kTotal, seconds, per_job_ns, static_cast<double>(kTotal) / seconds);
+    EXPECT_EQ(ran.load(std::memory_order_acquire), static_cast<long long>(kTotal));
 }
 
 } // namespace

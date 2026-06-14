@@ -4,7 +4,6 @@
 #include <functional>
 #include <thread>
 #include <vector>
-#include <queue>
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
@@ -59,13 +58,57 @@ public:
     RuntimeStats get_runtime_stats() const;
 
 private:
+    // T-I4-17-jobsystem-pod-pool: a pooled, allocation-free job slot. The
+    // previous design wrapped every queued job in a SECOND std::function (to
+    // attach the completion guard) and stored it in a std::deque-backed
+    // std::queue, so each dispatch paid for (a) the wrapper std::function's
+    // heap block when the {job, completion} capture exceeded the SBO -- it
+    // always did, ~32 bytes > libstdc++'s 16-byte buffer -- and (b) std::deque
+    // node growth. PooledJob instead stores the caller's Job and the
+    // completion handle directly in a pre-sized ring (PooledQueue below), so a
+    // dispatch into already-grown lanes performs ZERO heap allocations beyond
+    // the caller-side std::function the public API still accepts. The
+    // completion guard moved into the worker loop (see worker_loop / run_slot).
+    struct PooledJob {
+        Job job;
+        std::shared_ptr<JobCompletionState> completion;
+    };
+
+    // T-I4-17-jobsystem-pod-pool: a contiguous ring buffer of PooledJob slots.
+    // It grows by doubling (never shrinks) so steady-state dispatch reuses
+    // slots without allocating. All access is serialized by JobSystem's
+    // m_queue_mutex; the ring itself carries no internal synchronization.
+    class PooledQueue {
+    public:
+        PooledQueue();
+        bool empty() const { return m_size == 0; }
+        std::size_t size() const { return m_size; }
+        // Moves `slot` into the ring, growing capacity if full.
+        void push(PooledJob&& slot);
+        // Moves the front slot out and advances the head. The vacated slot's
+        // Job/shared_ptr are reset so referenced state is released promptly.
+        PooledJob pop();
+
+    private:
+        void grow();
+
+        std::vector<PooledJob> m_slots;
+        std::size_t m_head = 0;
+        std::size_t m_tail = 0;
+        std::size_t m_size = 0;
+    };
+
     void worker_loop();
     // Requires m_queue_mutex to be held.
-    std::queue<Job>& queue_for(JobPriority priority);
+    PooledQueue& queue_for(JobPriority priority);
+    // T-I4-17-jobsystem-pod-pool: run a popped slot and complete its batch on
+    // every exit path. Static (no JobSystem state) but a member so it can touch
+    // the private PooledJob type.
+    static void run_slot(PooledJob& slot);
 
     std::vector<std::thread> m_workers;
-    std::queue<Job> m_high_queue;
-    std::queue<Job> m_normal_queue;
+    PooledQueue m_high_queue;
+    PooledQueue m_normal_queue;
     // Consecutive High jobs served while Normal work waited; guarded by
     // m_queue_mutex.
     std::size_t m_consecutive_high_served = 0;
