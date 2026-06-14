@@ -7,6 +7,7 @@
 #include <memory>
 #include <unordered_map>
 #include <string>
+#include <utility>
 #include <glm/glm.hpp>
 #include "Mesh.h"
 #include <map>
@@ -53,6 +54,16 @@ struct ShadowMap {
     std::vector<float> cascade_splits;
 };
 
+// T-I4-16: a live chunk's terrain geometry now lives inside the shared
+// bucketed persistent-mapped geometry pool (ChunkGeometryPool) instead of a
+// dedicated VAO/VBO/EBO per chunk. ChunkRenderData keeps the per-chunk
+// LIFECYCLE bookkeeping (mark-and-sweep TTL, mesh_version, capacity for the
+// distance-budgeted upload selection in manage_chunk_gpu_resources) and now
+// records the pool slice the chunk occupies. The legacy vao/vbo/ebo fields are
+// retained ONLY for the still-per-chunk water path (WaterRenderData mirrors
+// this layout); terrain leaves them 0 and the resource-registry stats count
+// pool blocks instead (see get_resource_registry_stats). pool_handle == kInvalid
+// means "not pool-resident".
 struct ChunkRenderData {
     u32 vao_id = 0;
     u32 vbo_id = 0;
@@ -62,6 +73,9 @@ struct ChunkRenderData {
     u32 vertex_capacity = 0;
     u32 index_capacity = 0;
     u32 frames_since_inactive = 0;
+    // T-I4-16 pool slice. Packs {block_index, vertex/index slot offsets}.
+    static constexpr u32 kInvalidPoolHandle = 0xFFFFFFFFu;
+    u32 pool_handle = kInvalidPoolHandle;
 };
 
 struct WaterRenderData {
@@ -99,6 +113,99 @@ enum class WeatherType {
     Snow,
     Fog,
     Storm,
+};
+
+// T-I4-16: bucketed persistent-mapped geometry pool for live terrain chunks.
+//
+// Replaces the one-VBO/EBO/VAO-per-chunk model with a small set of large,
+// immutable, persistently+coherently mapped GL buffers ("blocks"). Each block
+// owns a vertex buffer, an index buffer, and a VAO with the VoxelVertex
+// attribute layout pre-bound, and acts as ONE glMultiDrawElementsIndirect
+// bucket. A chunk's geometry is sub-allocated as a contiguous vertex slice and
+// a contiguous index slice inside a single block (a free-list suballocator per
+// block, best-fit). Uploads memcpy straight into the persistent mapping (no
+// glBufferSubData / driver staging copy). Draw submission builds one indirect
+// command per visible chunk (firstIndex/baseVertex into the block) plus a
+// per-draw chunk origin, and issues one MDI per block that has visible chunks.
+//
+// GL floor: glBufferStorage + GL_MAP_PERSISTENT_BIT (GL 4.4) and
+// glMultiDrawElementsIndirect (GL 4.3). The engine requests a 4.5 core context
+// (main_client.cpp), so both are guaranteed; no runtime capability fallback.
+class ChunkGeometryPool {
+public:
+    static constexpr u32 kInvalid = 0xFFFFFFFFu;
+
+    // One per-chunk allocation record. block_index selects the GL block; the
+    // vertex/index slices are expressed in ELEMENTS (vertices / indices), so the
+    // draw command derives baseVertex = vertex_offset and firstIndex =
+    // index_offset directly.
+    struct Allocation {
+        u32 block_index = 0;
+        u32 vertex_offset = 0;   // first vertex (baseVertex)
+        u32 vertex_count = 0;    // vertices written
+        u32 vertex_slot = 0;     // capacity of the reserved vertex slot
+        u32 index_offset = 0;    // first index (firstIndex)
+        u32 index_count = 0;     // indices written (drawn element_count)
+        u32 index_slot = 0;      // capacity of the reserved index slot
+        bool live = false;
+    };
+
+    // GL handles + persistent pointers + free lists for one pool block.
+    struct Block {
+        u32 vao = 0;
+        u32 vbo = 0;
+        u32 ebo = 0;
+        VoxelVertex* vertex_ptr = nullptr; // persistent+coherent mapping
+        u32* index_ptr = nullptr;
+        u32 vertex_capacity = 0;           // vertices
+        u32 index_capacity = 0;            // indices
+        u32 vertex_high_water = 0;         // bump allocator frontier
+        u32 index_high_water = 0;
+        // Free slices returned by freed chunks, reused best-fit before bumping.
+        std::vector<std::pair<u32, u32>> free_vertex_slices; // {offset, size}
+        std::vector<std::pair<u32, u32>> free_index_slices;
+    };
+
+    ChunkGeometryPool() = default;
+
+    // Allocates a slice for {vertex_count, index_count}, growing the pool with a
+    // fresh block if no existing block can host it. Writes the geometry into the
+    // persistent mapping. Returns a handle, or kInvalid on failure (e.g. a mesh
+    // larger than a whole block). label_seed feeds GL debug labels.
+    u32 allocate(const VoxelVertex* vertices, u32 vertex_count,
+                 const u32* indices, u32 index_count, const char* label_seed);
+    // Overwrites an existing allocation in place when the new geometry fits the
+    // reserved slots; otherwise frees and reallocates. Returns the (possibly
+    // new) handle.
+    u32 update(u32 handle, const VoxelVertex* vertices, u32 vertex_count,
+               const u32* indices, u32 index_count, const char* label_seed);
+    void free(u32 handle);
+
+    const Allocation& allocation(u32 handle) const { return m_allocations[handle]; }
+    const std::vector<Block>& blocks() const { return m_blocks; }
+    std::size_t block_count() const { return m_blocks.size(); }
+    std::size_t live_allocation_count() const { return m_live_count; }
+
+    // Sum of reserved vertex/index slot capacities across live allocations
+    // (feeds the runtime VRAM estimate, matching the old per-chunk accounting).
+    void resident_capacity(std::size_t& vertices, std::size_t& indices) const;
+
+    // Releases all GL objects + mappings. Safe to call with no current chunks.
+    void destroy();
+    bool empty() const { return m_blocks.empty(); }
+
+private:
+    u32 acquire_handle();
+    void release_handle(u32 handle);
+    bool reserve_in_block(Block& block, u32 vertex_count, u32 index_count,
+                          u32& vertex_offset, u32& vertex_slot,
+                          u32& index_offset, u32& index_slot);
+    u32 add_block(u32 min_vertices, u32 min_indices, const char* label_seed);
+
+    std::vector<Block> m_blocks;
+    std::vector<Allocation> m_allocations;
+    std::vector<u32> m_free_handles;
+    std::size_t m_live_count = 0;
 };
 
 class RenderPipeline {
@@ -462,6 +569,44 @@ private:
     std::unordered_map<ChunkID, WaterRenderData> m_water_render_data;
     std::vector<ChunkRenderData> m_free_chunk_render_slots;
     std::vector<WaterRenderData> m_free_water_render_slots;
+
+    // T-I4-16: shared bucketed persistent-mapped pool backing all live terrain
+    // chunk geometry, plus the per-frame MDI scratch buffers (an indirect
+    // command buffer and a chunk-origin SSBO, double/triple-buffered to avoid
+    // stalling on the GPU still reading last frame's commands). The G-buffer and
+    // shadow passes both submit live terrain through draw_chunks_mdi().
+    ChunkGeometryPool m_chunk_geometry_pool;
+
+    struct DrawElementsIndirectCommand {
+        GLuint count;          // index count
+        GLuint instanceCount;  // 1
+        GLuint firstIndex;     // index_offset
+        GLuint baseVertex;     // vertex_offset
+        GLuint baseInstance;   // gl_DrawID fallback / origin index
+    };
+
+    static constexpr std::size_t kMdiRingFrames = 3;
+    struct MdiFrameBuffers {
+        GLuint indirect_buffer = 0; // GL_DRAW_INDIRECT_BUFFER
+        // Per-draw chunk origin (vec4), consumed as an instanced vertex
+        // attribute (binding 1, divisor 1) indexed by each command's
+        // baseInstance. A plain array buffer, not an SSBO -- this makes
+        // per-draw origin selection work without GLSL 4.6 gl_BaseInstance.
+        GLuint origin_buffer = 0;
+        std::size_t command_capacity = 0; // commands the buffers can hold
+    };
+    std::array<MdiFrameBuffers, kMdiRingFrames> m_mdi_frames;
+    std::size_t m_mdi_frame_cursor = 0;
+    // Reusable CPU scratch so the per-frame submit allocates nothing steady-state.
+    std::vector<DrawElementsIndirectCommand> m_mdi_command_scratch;
+    std::vector<glm::vec4> m_mdi_origin_scratch;
+
+    void init_mdi_buffers();
+    void destroy_mdi_buffers();
+    void ensure_mdi_capacity(MdiFrameBuffers& frame, std::size_t commands);
+    // draw_chunks_mdi is declared after ChunkCullEntry (it takes a vector of
+    // those), further down in this class.
+
     MeshUploadFrameStats m_last_mesh_upload_stats;
     RenderPassFrameStats m_last_render_pass_stats;
     std::vector<RenderPassMetadata> m_last_render_pass_metadata;
@@ -672,6 +817,17 @@ private:
     };
     
     HierarchicalCuller m_hierarchicalCuller;
+
+    // T-I4-16: builds and issues glMultiDrawElementsIndirect for the supplied
+    // visible live chunks (one command per pool-resident chunk, grouped by pool
+    // block -> one MDI call per block). The chunk world origin reaches the
+    // vertex shader through the instanced aOrigin attribute (binding 1) indexed
+    // by each command's baseInstance; the caller's shader must declare that
+    // attribute and set u_useInstanceOrigin = 1. Returns draw + index totals.
+    // Declared here (not with the other MDI helpers above) because it takes a
+    // vector of ChunkCullEntry, which is defined just above.
+    void draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& visible_chunks,
+                         std::size_t& out_draws, std::size_t& out_indices);
 
     struct TerrainCullingCache {
         u64 chunk_set_signature = 0;

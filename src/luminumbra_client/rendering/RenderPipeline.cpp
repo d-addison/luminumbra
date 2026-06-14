@@ -174,6 +174,266 @@ constexpr const char* kGpuTimerPassNames[] = {
 
 } // namespace
 
+// ===========================================================================
+// T-I4-16: ChunkGeometryPool - bucketed persistent-mapped geometry pool.
+// ===========================================================================
+namespace {
+// Per-block capacities. A 16^3 marching-cubes chunk produces at most a few
+// thousand vertices, so a 1M-vertex / 2M-index block (~36 MB) hosts hundreds of
+// live chunks; the pool grows by adding blocks only when the working set
+// outgrows the current blocks. Powers of two keep the bump frontier aligned.
+constexpr u32 kPoolBlockVertexCapacity = 1u << 20; // 1,048,576 vertices (~28 MB)
+constexpr u32 kPoolBlockIndexCapacity  = 1u << 21; // 2,097,152 indices  (~8 MB)
+// Round a slot size up to keep slices loosely aligned and reduce free-list
+// fragmentation when a chunk re-meshes to a slightly different size.
+constexpr u32 kPoolSlotAlign = 64u;
+inline u32 round_up_pool(u32 v) { return (v + (kPoolSlotAlign - 1u)) & ~(kPoolSlotAlign - 1u); }
+
+// Pack {block_index, allocation_index} is unnecessary: the handle IS the index
+// into m_allocations, and the Allocation stores block_index. Keep handles small.
+} // namespace
+
+u32 ChunkGeometryPool::acquire_handle() {
+    if (!m_free_handles.empty()) {
+        const u32 h = m_free_handles.back();
+        m_free_handles.pop_back();
+        return h;
+    }
+    m_allocations.emplace_back();
+    return static_cast<u32>(m_allocations.size() - 1u);
+}
+
+void ChunkGeometryPool::release_handle(u32 handle) {
+    m_allocations[handle] = Allocation{};
+    m_free_handles.push_back(handle);
+}
+
+u32 ChunkGeometryPool::add_block(u32 min_vertices, u32 min_indices, const char* label_seed) {
+    Block block;
+    block.vertex_capacity = std::max(kPoolBlockVertexCapacity, round_up_pool(min_vertices));
+    block.index_capacity = std::max(kPoolBlockIndexCapacity, round_up_pool(min_indices));
+
+    const GLbitfield storage_flags = GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
+    const GLbitfield map_flags = GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
+
+    glGenVertexArrays(1, &block.vao);
+    glGenBuffers(1, &block.vbo);
+    glGenBuffers(1, &block.ebo);
+
+    const std::size_t vbytes = static_cast<std::size_t>(block.vertex_capacity) * sizeof(VoxelVertex);
+    const std::size_t ibytes = static_cast<std::size_t>(block.index_capacity) * sizeof(u32);
+
+    glBindVertexArray(block.vao);
+
+    glBindBuffer(GL_ARRAY_BUFFER, block.vbo);
+    glBufferStorage(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(vbytes), nullptr, storage_flags);
+    block.vertex_ptr = static_cast<VoxelVertex*>(
+        glMapBufferRange(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(vbytes), map_flags));
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, block.ebo);
+    glBufferStorage(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(ibytes), nullptr, storage_flags);
+    block.index_ptr = static_cast<u32*>(
+        glMapBufferRange(GL_ELEMENT_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(ibytes), map_flags));
+
+    // Per-vertex VoxelVertex attributes via separate-format buffer binding 0
+    // (binding 0 = the geometry VBO). 0 = position vec3, 1 = normal vec3,
+    // 2 = material_id uint -- identical layout to the legacy per-chunk VAO.
+    glBindVertexBuffer(0, block.vbo, 0, sizeof(VoxelVertex));
+    glEnableVertexAttribArray(0);
+    glVertexAttribFormat(0, 3, GL_FLOAT, GL_FALSE, offsetof(VoxelVertex, position));
+    glVertexAttribBinding(0, 0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribFormat(1, 3, GL_FLOAT, GL_FALSE, offsetof(VoxelVertex, normal));
+    glVertexAttribBinding(1, 0);
+    glEnableVertexAttribArray(2);
+    glVertexAttribIFormat(2, 1, GL_UNSIGNED_INT, offsetof(VoxelVertex, material_id));
+    glVertexAttribBinding(2, 0);
+
+    // T-I4-16: per-DRAW chunk world origin as an instanced attribute (location 3,
+    // vec3) on buffer binding 1 with divisor 1. With instanceCount==1 and a
+    // per-draw baseInstance, the GL fetches origins[baseInstance] for every
+    // vertex of that draw -- this is how each MDI draw gets its chunk origin
+    // without a per-draw uniform, and it is portable to GL 4.3 (unlike
+    // gl_BaseInstance in GLSL, which is core only in 4.6). The actual origin
+    // buffer is the per-frame ring buffer, bound to binding 1 at draw time.
+    glEnableVertexAttribArray(3);
+    glVertexAttribFormat(3, 3, GL_FLOAT, GL_FALSE, 0);
+    glVertexAttribBinding(3, 1);
+    glVertexBindingDivisor(1, 1);
+
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    const u32 block_index = static_cast<u32>(m_blocks.size());
+    if (label_seed != nullptr) {
+        const std::string base = std::string("terrain.pool.") + label_seed + "." + std::to_string(block_index);
+        label_gl_object(GL_VERTEX_ARRAY, block.vao, base + ".vao");
+        label_gl_object(GL_BUFFER, block.vbo, base + ".vbo");
+        label_gl_object(GL_BUFFER, block.ebo, base + ".ebo");
+    }
+
+    m_blocks.push_back(block);
+    return block_index;
+}
+
+bool ChunkGeometryPool::reserve_in_block(Block& block, u32 vertex_count, u32 index_count,
+                                         u32& vertex_offset, u32& vertex_slot,
+                                         u32& index_offset, u32& index_slot) {
+    const u32 want_v = round_up_pool(vertex_count);
+    const u32 want_i = round_up_pool(index_count);
+
+    auto take_slice = [](std::vector<std::pair<u32, u32>>& free_slices, u32 high_water,
+                         u32 capacity, u32 want, u32& out_offset, u32& out_slot) -> bool {
+        // Best-fit over the free list first.
+        std::size_t best = free_slices.size();
+        for (std::size_t i = 0; i < free_slices.size(); ++i) {
+            if (free_slices[i].second >= want &&
+                (best == free_slices.size() || free_slices[i].second < free_slices[best].second)) {
+                best = i;
+            }
+        }
+        if (best != free_slices.size()) {
+            out_offset = free_slices[best].first;
+            out_slot = free_slices[best].second; // reuse the whole freed slot
+            free_slices.erase(free_slices.begin() + static_cast<std::ptrdiff_t>(best));
+            return true;
+        }
+        // Otherwise bump-allocate from the frontier.
+        if (high_water + want <= capacity) {
+            out_offset = high_water;
+            out_slot = want;
+            return true;
+        }
+        return false;
+    };
+
+    u32 v_off = 0, v_slot = 0, i_off = 0, i_slot = 0;
+    if (!take_slice(block.free_vertex_slices, block.vertex_high_water, block.vertex_capacity, want_v, v_off, v_slot)) {
+        return false;
+    }
+    if (!take_slice(block.free_index_slices, block.index_high_water, block.index_capacity, want_i, i_off, i_slot)) {
+        // Roll back the vertex reservation: return it to the free list rather
+        // than leaking it (do not touch the bump frontier here).
+        block.free_vertex_slices.emplace_back(v_off, v_slot);
+        return false;
+    }
+    // Commit any bump-frontier advances now that both slices succeeded.
+    if (v_off == block.vertex_high_water) block.vertex_high_water += v_slot;
+    if (i_off == block.index_high_water) block.index_high_water += i_slot;
+
+    vertex_offset = v_off; vertex_slot = v_slot;
+    index_offset = i_off; index_slot = i_slot;
+    return true;
+}
+
+u32 ChunkGeometryPool::allocate(const VoxelVertex* vertices, u32 vertex_count,
+                                const u32* indices, u32 index_count, const char* label_seed) {
+    if (vertex_count == 0 || index_count == 0) return kInvalid;
+    // A fresh block always grows to host any single mesh (add_block uses
+    // std::max(block_cap, rounded_request)), so allocation cannot fail on size.
+
+    u32 vertex_offset = 0, vertex_slot = 0, index_offset = 0, index_slot = 0;
+    u32 block_index = kInvalid;
+    for (u32 b = 0; b < static_cast<u32>(m_blocks.size()); ++b) {
+        if (reserve_in_block(m_blocks[b], vertex_count, index_count,
+                             vertex_offset, vertex_slot, index_offset, index_slot)) {
+            block_index = b;
+            break;
+        }
+    }
+    if (block_index == kInvalid) {
+        block_index = add_block(vertex_count, index_count, label_seed);
+        if (!reserve_in_block(m_blocks[block_index], vertex_count, index_count,
+                              vertex_offset, vertex_slot, index_offset, index_slot)) {
+            return kInvalid; // a fresh block could not host it -> hard failure
+        }
+    }
+
+    Block& block = m_blocks[block_index];
+    std::memcpy(block.vertex_ptr + vertex_offset, vertices, static_cast<std::size_t>(vertex_count) * sizeof(VoxelVertex));
+    std::memcpy(block.index_ptr + index_offset, indices, static_cast<std::size_t>(index_count) * sizeof(u32));
+
+    const u32 handle = acquire_handle();
+    Allocation& alloc = m_allocations[handle];
+    alloc.block_index = block_index;
+    alloc.vertex_offset = vertex_offset;
+    alloc.vertex_count = vertex_count;
+    alloc.vertex_slot = vertex_slot;
+    alloc.index_offset = index_offset;
+    alloc.index_count = index_count;
+    alloc.index_slot = index_slot;
+    alloc.live = true;
+    ++m_live_count;
+    return handle;
+}
+
+u32 ChunkGeometryPool::update(u32 handle, const VoxelVertex* vertices, u32 vertex_count,
+                              const u32* indices, u32 index_count, const char* label_seed) {
+    if (handle == kInvalid || handle >= m_allocations.size() || !m_allocations[handle].live) {
+        return allocate(vertices, vertex_count, indices, index_count, label_seed);
+    }
+    Allocation& alloc = m_allocations[handle];
+    // In-place overwrite when the new geometry fits the reserved slots.
+    if (vertex_count <= alloc.vertex_slot && index_count <= alloc.index_slot &&
+        vertex_count != 0 && index_count != 0) {
+        Block& block = m_blocks[alloc.block_index];
+        std::memcpy(block.vertex_ptr + alloc.vertex_offset, vertices,
+                    static_cast<std::size_t>(vertex_count) * sizeof(VoxelVertex));
+        std::memcpy(block.index_ptr + alloc.index_offset, indices,
+                    static_cast<std::size_t>(index_count) * sizeof(u32));
+        alloc.vertex_count = vertex_count;
+        alloc.index_count = index_count;
+        return handle;
+    }
+    // Outgrew the slot: free and reallocate (handle changes).
+    free(handle);
+    return allocate(vertices, vertex_count, indices, index_count, label_seed);
+}
+
+void ChunkGeometryPool::free(u32 handle) {
+    if (handle == kInvalid || handle >= m_allocations.size() || !m_allocations[handle].live) {
+        return;
+    }
+    Allocation& alloc = m_allocations[handle];
+    Block& block = m_blocks[alloc.block_index];
+    // Return the reserved slots to the block free lists for best-fit reuse.
+    block.free_vertex_slices.emplace_back(alloc.vertex_offset, alloc.vertex_slot);
+    block.free_index_slices.emplace_back(alloc.index_offset, alloc.index_slot);
+    release_handle(handle);
+    --m_live_count;
+}
+
+void ChunkGeometryPool::resident_capacity(std::size_t& vertices, std::size_t& indices) const {
+    for (const Allocation& alloc : m_allocations) {
+        if (alloc.live) {
+            vertices += alloc.vertex_slot;
+            indices += alloc.index_slot;
+        }
+    }
+}
+
+void ChunkGeometryPool::destroy() {
+    for (Block& block : m_blocks) {
+        if (block.vbo) {
+            glBindBuffer(GL_ARRAY_BUFFER, block.vbo);
+            glUnmapBuffer(GL_ARRAY_BUFFER);
+        }
+        if (block.ebo) {
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, block.ebo);
+            glUnmapBuffer(GL_ELEMENT_ARRAY_BUFFER);
+        }
+        if (block.vao) glDeleteVertexArrays(1, &block.vao);
+        if (block.vbo) glDeleteBuffers(1, &block.vbo);
+        if (block.ebo) glDeleteBuffers(1, &block.ebo);
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+    m_blocks.clear();
+    m_allocations.clear();
+    m_free_handles.clear();
+    m_live_count = 0;
+}
+
 // --- HIERARCHICAL CULLING IMPLEMENTATION ---
 
 void RenderPipeline::HierarchicalCuller::BuildHierarchy(const std::vector<ChunkMeshSnapshot>& chunks) {
@@ -339,6 +599,7 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         m_water_pass->init_water_fallback_textures();
         init_gpu_sdf_system();
         init_gpu_pass_timers();
+        init_mdi_buffers(); // T-I4-16: per-frame MDI command + origin SSBO ring
 
         m_gbuffer_pass->init_instanced_static_mesh(m_root_path);
         m_gbuffer_pass->init_skinned_mesh(m_root_path);
@@ -630,6 +891,22 @@ RenderPipeline::RenderResourceRegistryStats RenderPipeline::get_resource_registr
     for (const auto& data : m_free_chunk_render_slots) {
         count_chunk_slot(data);
     }
+
+    // T-I4-16: live terrain geometry is now backed by the shared pool's blocks
+    // (each block: 1 VAO + vertex VBO + index EBO) plus the per-frame MDI ring
+    // (indirect command buffer + origin buffer per ring slot), rather than a
+    // VAO/VBO/EBO per chunk. Count those here so the resource registry remains
+    // accurate (debug-labelled, and empty after shutdown -- the pool/MDI buffers
+    // are released in cleanup_gpu_resources()).
+    for (const ChunkGeometryPool::Block& block : m_chunk_geometry_pool.blocks()) {
+        stats.vertex_arrays += block.vao != 0 ? 1u : 0u;
+        stats.buffers += block.vbo != 0 ? 1u : 0u;
+        stats.buffers += block.ebo != 0 ? 1u : 0u;
+    }
+    for (const MdiFrameBuffers& frame : m_mdi_frames) {
+        stats.buffers += frame.indirect_buffer != 0 ? 1u : 0u;
+        stats.buffers += frame.origin_buffer != 0 ? 1u : 0u;
+    }
     for (const auto& [id, data] : m_water_render_data) {
         (void)id;
         count_water_slot(data);
@@ -798,6 +1075,178 @@ void RenderPipeline::refresh_render_pass_metadata() {
 }
 
 // --- PER-PASS GPU TIMERS ---
+
+// ===========================================================================
+// T-I4-16: glMultiDrawElementsIndirect submission for live terrain chunks.
+//
+// The G-buffer and shadow passes share this path. Each visible pool-resident
+// chunk becomes one DrawElementsIndirectCommand (firstIndex/baseVertex into the
+// chunk's pool block) plus a chunk world origin written to the origin SSBO at
+// the same draw index. Commands are grouped by pool block so each block's VAO
+// is bound once and submitted with a single glMultiDrawElementsIndirect (the
+// "per-bucket MDI" form from the dispatch). The vertex shaders read the origin
+// by gl_DrawID from the SSBO instead of a per-draw model uniform.
+//
+// A small ring of {indirect buffer, origin SSBO} pairs avoids the GPU stalling
+// on buffers it may still be reading from a prior frame (the passes run twice
+// per frame -> shadow then gbuffer; the ring advances per submit).
+// ===========================================================================
+void RenderPipeline::init_mdi_buffers() {
+    for (MdiFrameBuffers& frame : m_mdi_frames) {
+        frame.indirect_buffer = 0;
+        frame.origin_buffer = 0;
+        frame.command_capacity = 0;
+    }
+    m_mdi_frame_cursor = 0;
+}
+
+void RenderPipeline::destroy_mdi_buffers() {
+    for (MdiFrameBuffers& frame : m_mdi_frames) {
+        if (frame.indirect_buffer) { glDeleteBuffers(1, &frame.indirect_buffer); frame.indirect_buffer = 0; }
+        if (frame.origin_buffer) { glDeleteBuffers(1, &frame.origin_buffer); frame.origin_buffer = 0; }
+        frame.command_capacity = 0;
+    }
+    m_mdi_frame_cursor = 0;
+    m_mdi_command_scratch.clear();
+    m_mdi_command_scratch.shrink_to_fit();
+    m_mdi_origin_scratch.clear();
+    m_mdi_origin_scratch.shrink_to_fit();
+}
+
+void RenderPipeline::ensure_mdi_capacity(MdiFrameBuffers& frame, std::size_t commands) {
+    if (commands <= frame.command_capacity && frame.indirect_buffer != 0) {
+        return;
+    }
+    // Grow with headroom so steady-state frames never reallocate.
+    std::size_t new_capacity = std::max<std::size_t>(commands, 256u);
+    new_capacity += new_capacity / 2u;
+
+    if (frame.indirect_buffer) { glDeleteBuffers(1, &frame.indirect_buffer); frame.indirect_buffer = 0; }
+    if (frame.origin_buffer) { glDeleteBuffers(1, &frame.origin_buffer); frame.origin_buffer = 0; }
+
+    glGenBuffers(1, &frame.indirect_buffer);
+    glBindBuffer(GL_DRAW_INDIRECT_BUFFER, frame.indirect_buffer);
+    glBufferData(GL_DRAW_INDIRECT_BUFFER,
+                 static_cast<GLsizeiptr>(new_capacity * sizeof(DrawElementsIndirectCommand)),
+                 nullptr, GL_STREAM_DRAW);
+
+    glGenBuffers(1, &frame.origin_buffer);
+    glBindBuffer(GL_ARRAY_BUFFER, frame.origin_buffer);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(new_capacity * sizeof(glm::vec4)),
+                 nullptr, GL_STREAM_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
+
+    const std::size_t slot = static_cast<std::size_t>(&frame - m_mdi_frames.data());
+    const std::string base = "terrain.mdi." + std::to_string(slot);
+    label_gl_object(GL_BUFFER, frame.indirect_buffer, base + ".indirect");
+    label_gl_object(GL_BUFFER, frame.origin_buffer, base + ".origins");
+
+    frame.command_capacity = new_capacity;
+}
+
+void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& visible_chunks,
+                                     std::size_t& out_draws, std::size_t& out_indices) {
+    out_draws = 0;
+    out_indices = 0;
+    const std::size_t block_count = m_chunk_geometry_pool.block_count();
+    if (visible_chunks.empty() || block_count == 0) {
+        return;
+    }
+
+    // Bucket visible draws by pool block, laying out per-block contiguous runs
+    // of commands in a single flat array. The chunk origin shares the same flat
+    // index, and each command's baseInstance = its flat index, so the instanced
+    // origin attribute (binding 1, divisor 1) fetches origins[baseInstance] for
+    // that draw. This is portable to GL 4.3 (no gl_BaseInstance/gl_DrawID in the
+    // shader required). One glMultiDrawElementsIndirect per block (per bucket).
+    std::vector<std::size_t> per_block_count(block_count, 0u);
+    for (const ChunkCullEntry* chunk : visible_chunks) {
+        auto it = m_chunk_render_data.find(chunk->id);
+        if (it == m_chunk_render_data.end()) continue;
+        const ChunkRenderData& rd = it->second;
+        if (rd.pool_handle == ChunkRenderData::kInvalidPoolHandle || rd.element_count == 0) continue;
+        ++per_block_count[m_chunk_geometry_pool.allocation(rd.pool_handle).block_index];
+    }
+    std::vector<std::size_t> block_offset(block_count, 0u);
+    std::size_t running = 0;
+    for (std::size_t b = 0; b < block_count; ++b) {
+        block_offset[b] = running;
+        running += per_block_count[b];
+    }
+    if (running == 0) {
+        return;
+    }
+
+    m_mdi_command_scratch.resize(running);
+    m_mdi_origin_scratch.resize(running);
+
+    std::vector<std::size_t> write_cursor = block_offset;
+    for (const ChunkCullEntry* chunk : visible_chunks) {
+        auto it = m_chunk_render_data.find(chunk->id);
+        if (it == m_chunk_render_data.end()) continue;
+        const ChunkRenderData& rd = it->second;
+        if (rd.pool_handle == ChunkRenderData::kInvalidPoolHandle || rd.element_count == 0) continue;
+        const ChunkGeometryPool::Allocation& a = m_chunk_geometry_pool.allocation(rd.pool_handle);
+
+        const std::size_t dst = write_cursor[a.block_index]++;
+        DrawElementsIndirectCommand& cmd = m_mdi_command_scratch[dst];
+        cmd.count = a.index_count;
+        cmd.instanceCount = 1u;
+        cmd.firstIndex = a.index_offset;
+        cmd.baseVertex = a.vertex_offset;
+        cmd.baseInstance = static_cast<GLuint>(dst); // origins[baseInstance]
+
+        const glm::ivec3 cc = chunk->coords;
+        m_mdi_origin_scratch[dst] = glm::vec4(
+            static_cast<float>(cc.x * CHUNK_SIZE_X),
+            static_cast<float>(cc.y * CHUNK_SIZE_Y),
+            static_cast<float>(cc.z * CHUNK_SIZE_Z),
+            0.0f);
+
+        out_indices += a.index_count;
+    }
+    out_draws = running;
+
+    MdiFrameBuffers& frame = m_mdi_frames[m_mdi_frame_cursor];
+    ensure_mdi_capacity(frame, running);
+
+    glBindBuffer(GL_DRAW_INDIRECT_BUFFER, frame.indirect_buffer);
+    glBufferSubData(GL_DRAW_INDIRECT_BUFFER, 0,
+                    static_cast<GLsizeiptr>(running * sizeof(DrawElementsIndirectCommand)),
+                    m_mdi_command_scratch.data());
+    // The origin buffer is consumed as an instanced vertex attribute (binding 1,
+    // vec4 stride), not an SSBO -- baseInstance indexing works without GLSL 4.6.
+    glBindBuffer(GL_ARRAY_BUFFER, frame.origin_buffer);
+    glBufferSubData(GL_ARRAY_BUFFER, 0,
+                    static_cast<GLsizeiptr>(running * sizeof(glm::vec4)),
+                    m_mdi_origin_scratch.data());
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    const auto& blocks = m_chunk_geometry_pool.blocks();
+    for (std::size_t b = 0; b < block_count; ++b) {
+        const std::size_t count = per_block_count[b];
+        if (count == 0) continue;
+        const std::size_t first = block_offset[b];
+
+        glBindVertexArray(blocks[b].vao);
+        // Bind this frame's origin buffer to the VAO's instanced binding (1).
+        // baseInstance is absolute into this buffer, so offset 0 is correct.
+        glBindVertexBuffer(1, frame.origin_buffer, 0, sizeof(glm::vec4));
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, frame.indirect_buffer);
+        glMultiDrawElementsIndirect(
+            GL_TRIANGLES, GL_UNSIGNED_INT,
+            reinterpret_cast<const void*>(first * sizeof(DrawElementsIndirectCommand)),
+            static_cast<GLsizei>(count),
+            static_cast<GLsizei>(sizeof(DrawElementsIndirectCommand)));
+    }
+
+    glBindVertexArray(0);
+    glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
+
+    m_mdi_frame_cursor = (m_mdi_frame_cursor + 1u) % kMdiRingFrames;
+}
 
 void RenderPipeline::init_gpu_pass_timers() {
     static_assert(sizeof(kGpuTimerPassNames) / sizeof(kGpuTimerPassNames[0]) == kGpuTimerPassCount,
@@ -1182,7 +1631,10 @@ void RenderPipeline::on_resize(u32 new_width, u32 new_height) {
 }
 
 void RenderPipeline::clear_all_chunk_data() {
-    // Force clear all cached chunk render data to ensure fresh uploads
+    // Force clear all cached chunk render data to ensure fresh uploads.
+    // T-I4-16: terrain geometry lives in the shared pool; dropping the whole
+    // pool releases every live slice at once. delete_chunk_slot still runs on
+    // each record (a no-op for terrain since vao/vbo/ebo are 0, kept for safety).
     for (auto& [id, data] : m_chunk_render_data) {
         (void)id;
         delete_chunk_slot(data);
@@ -1192,6 +1644,7 @@ void RenderPipeline::clear_all_chunk_data() {
         delete_chunk_slot(data);
     }
     m_free_chunk_render_slots.clear();
+    m_chunk_geometry_pool.destroy();
 
     for (auto& [id, data] : m_water_render_data) {
         (void)id;
@@ -1247,6 +1700,11 @@ void RenderPipeline::cleanup_gpu_resources() {
         delete_chunk_slot(d);
     }
     m_free_chunk_render_slots.clear();
+    // T-I4-16: release the shared terrain geometry pool (unmaps + deletes all
+    // blocks) and the per-frame MDI scratch buffers so the resource registry is
+    // empty after shutdown (RenderHealth empty_after_shutdown invariant).
+    m_chunk_geometry_pool.destroy();
+    destroy_mdi_buffers();
 
     for (auto& [id, d] : m_water_render_data) {
         (void)id;
@@ -1684,68 +2142,75 @@ void RenderPipeline::upload_chunk_mesh(const ChunkMeshSnapshot& chunk, const Chu
         return;
     }
 
+    // T-I4-16: terrain geometry now lives in the shared bucketed
+    // persistent-mapped pool instead of a dedicated VBO/EBO/VAO per chunk.
+    // ChunkRenderData stays the per-chunk LIFECYCLE record (TTL, mesh_version,
+    // capacity for the distance-budgeted upload selection); it now carries a
+    // pool handle (vao/vbo/ebo stay 0 for terrain). The free-slot list is no
+    // longer GL-backed for terrain but is retained so the existing telemetry
+    // (terrain_slots_reused) keeps meaning "record reused without a pool grow".
     auto it = m_chunk_render_data.find(chunk.id);
-    bool slot_created = false;
-    bool slot_from_pool = false;
+    bool record_created = false;
+    bool record_from_pool = false;
     if (it == m_chunk_render_data.end()) {
         ChunkRenderData render_data;
         if (!m_free_chunk_render_slots.empty()) {
             render_data = m_free_chunk_render_slots.back();
             m_free_chunk_render_slots.pop_back();
-            slot_from_pool = true;
+            record_from_pool = true;
         } else {
-            glGenVertexArrays(1, &render_data.vao_id);
-            glGenBuffers(1, &render_data.vbo_id);
-            glGenBuffers(1, &render_data.ebo_id);
-            const std::string label_prefix = "terrain.chunk." + std::to_string(chunk.id);
-            label_gl_object(GL_VERTEX_ARRAY, render_data.vao_id, label_prefix + ".vao");
-            label_gl_object(GL_BUFFER, render_data.vbo_id, label_prefix + ".vbo");
-            label_gl_object(GL_BUFFER, render_data.ebo_id, label_prefix + ".ebo");
-            slot_created = true;
+            record_created = true;
         }
+        // A recycled record never carries a stale pool handle: unload_chunk_resources
+        // frees the pool slice and clears the handle before pushing to the free list.
+        render_data.pool_handle = ChunkRenderData::kInvalidPoolHandle;
         it = m_chunk_render_data.emplace(chunk.id, render_data).first;
     }
 
     ChunkRenderData& render_data = it->second;
     const u32 vertex_count = static_cast<u32>(payload.vertices.size());
     const u32 index_count = static_cast<u32>(payload.indices.size());
-    const bool needs_growth = render_data.vertex_capacity < vertex_count || render_data.index_capacity < index_count;
-    const bool version_reused = render_data.mesh_version != 0 && render_data.mesh_version != payload.mesh_version;
+    const bool had_allocation = render_data.pool_handle != ChunkRenderData::kInvalidPoolHandle;
+    const u32 prior_vertex_capacity = render_data.vertex_capacity;
+    const u32 prior_index_capacity = render_data.index_capacity;
 
-    glBindVertexArray(render_data.vao_id);
-    glBindBuffer(GL_ARRAY_BUFFER, render_data.vbo_id);
-    if (needs_growth) {
-        glBufferData(GL_ARRAY_BUFFER, payload.vertices.size() * sizeof(VoxelVertex), payload.vertices.data(), GL_STATIC_DRAW);
-        render_data.vertex_capacity = vertex_count;
-    } else {
-        glBufferSubData(GL_ARRAY_BUFFER, 0, payload.vertices.size() * sizeof(VoxelVertex), payload.vertices.data());
+    const std::string label_seed = std::to_string(chunk.id);
+    const u32 new_handle = m_chunk_geometry_pool.update(
+        render_data.pool_handle,
+        payload.vertices.data(), vertex_count,
+        payload.indices.data(), index_count,
+        label_seed.c_str());
+    if (new_handle == ChunkRenderData::kInvalidPoolHandle) {
+        // Pool allocation failed (e.g. OOM): leave the record empty so the draw
+        // loop skips it, and record the failure.
+        render_data.element_count = 0;
+        m_last_mesh_upload_stats.terrain_upload_failures++;
+        if (record_created) m_last_mesh_upload_stats.terrain_slots_created++;
+        return;
     }
 
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, render_data.ebo_id);
-    if (needs_growth) {
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, payload.indices.size() * sizeof(u32), payload.indices.data(), GL_STATIC_DRAW);
-        render_data.index_capacity = index_count;
-    } else {
-        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, payload.indices.size() * sizeof(u32), payload.indices.data());
-    }
-
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, position));
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, normal));
-    glEnableVertexAttribArray(2);
-    glVertexAttribIPointer(2, 1, GL_UNSIGNED_INT, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, material_id));
-    glBindVertexArray(0);
-
+    render_data.pool_handle = new_handle;
+    const ChunkGeometryPool::Allocation& alloc = m_chunk_geometry_pool.allocation(new_handle);
+    // Track the reserved slot capacity (not just the written count) so the
+    // distance-budget "needs growth" intuition and the VRAM estimate match the
+    // pool's actual reservation.
+    render_data.vertex_capacity = alloc.vertex_slot;
+    render_data.index_capacity = alloc.index_slot;
     render_data.element_count = index_count;
     render_data.mesh_version = payload.mesh_version;
     render_data.frames_since_inactive = 0;
 
-    if (slot_created) {
+    // Telemetry parity with the legacy slot accounting: a brand-new record is a
+    // "slot created"; an existing chunk whose mesh outgrew its reserved slot
+    // (so the pool reallocated, raising capacity) is a "slot grown"; an in-place
+    // pool overwrite of a recycled/existing record is a "slot reused".
+    const bool grew = had_allocation &&
+        (render_data.vertex_capacity > prior_vertex_capacity || render_data.index_capacity > prior_index_capacity);
+    if (record_created && !had_allocation) {
         m_last_mesh_upload_stats.terrain_slots_created++;
-    } else if (needs_growth) {
+    } else if (grew) {
         m_last_mesh_upload_stats.terrain_slots_grown++;
-    } else if (slot_from_pool || version_reused) {
+    } else if (record_from_pool || had_allocation) {
         m_last_mesh_upload_stats.terrain_slots_reused++;
     }
 }
@@ -1770,8 +2235,16 @@ void RenderPipeline::unload_chunk_resources(ChunkID chunk_id) {
     auto it = m_chunk_render_data.find(chunk_id);
     if (it != m_chunk_render_data.end()) {
         ChunkRenderData data = it->second;
+        // T-I4-16: return the pool slice before recycling the record. The
+        // recycled record must NOT carry a stale handle into the free list.
+        if (data.pool_handle != ChunkRenderData::kInvalidPoolHandle) {
+            m_chunk_geometry_pool.free(data.pool_handle);
+            data.pool_handle = ChunkRenderData::kInvalidPoolHandle;
+        }
         data.element_count = 0;
         data.mesh_version = 0;
+        data.vertex_capacity = 0;
+        data.index_capacity = 0;
         data.frames_since_inactive = 0;
         if (m_free_chunk_render_slots.size() < kMaxFreeChunkRenderSlots) {
             m_free_chunk_render_slots.push_back(data);
