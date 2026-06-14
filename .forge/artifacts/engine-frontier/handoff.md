@@ -65,8 +65,12 @@ wall-clock regression within the gate's margins. The trio's wins are
 architectural (draw-call count, allocation count), verified analytically + by
 byte/pixel-stable gates. ACTION FOR NEXT QUIET-MACHINE WINDOW: re-run
 `.forge/scripts/run-release-perf-lane.ps1 -Bless` to capture the real post-trio
-baseline; the lane's PS-5.1 stderr-as-error trap (cmake deprecation warnings)
-needs `$ErrorActionPreference` relaxed or the steps run manually as done here.
+baseline - now a clean single command. **FIXED (2026-06-14):** the lane's
+PS-5.1 stderr-as-error trap is resolved - an `Invoke-Native` helper relaxes
+`$ErrorActionPreference` only around the native cmake calls and throws solely on
+a non-zero `$LASTEXITCODE`, so benign cmake deprecation warnings no longer abort
+configure/build. Verified: configure runs to exit 0 under `Stop` through the
+helper. No manual workaround needed anymore.
 
 ### Iteration 5 planning inputs (Atmospheric pillar LEAD - owner-flagged IMPORTANT)
 See [[iteration-4-priorities]] / long-range-roadmap.md. Carry-ins for the iter-5
@@ -89,6 +93,20 @@ spec/research round:
   razor-straight shaped ridge crests - candidate Atmospheric/material polish.
 - Lock-free JobSystem queue / work-stealing was REJECTED in T-I4-17 scope;
   recorded as a future candidate only if profiling demands it.
+
+### NOTED — worktree base hazard (carry into any agent fan-out)
+The repo's `main` / `origin/HEAD` points at the stale **project-capture**
+predecessor commit `972c133`, while all real work lives on
+`feat/polyglot-audit-roadmap`. On 2026-06-14 Agent `isolation: worktree`
+provisioned all three perf worktrees from that stale default (not session HEAD);
+the base-verification guards in the dispatch prompts caught it (two agents
+refused, one self-recovered via `git reset --hard`), and the tasks were
+re-dispatched in the main tree with no bad code landing. Mitigation going
+forward: ALWAYS inject a `git rev-parse HEAD` + scope-file existence check
+before agent worktree work, and prefer the main tree until `main` is repointed.
+Recorded in auto-memory `stale-main-worktree-hazard.md`. Repointing/pruning
+`main` + the ~20 orphan project-capture `feat/*` branches is an owner decision
+(destructive; deferred).
 
 ## Iteration 4 Status (updated 2026-06-12, mid-iteration)
 

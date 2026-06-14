@@ -20,26 +20,47 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# T-I4-19 closeout: run a native command with stderr NOT treated as a
+# terminating error, then throw only on a non-zero exit code. Windows
+# PowerShell 5.1 wraps every native stderr line as a NativeCommandError, and
+# under $ErrorActionPreference='Stop' that aborts the lane on a BENIGN cmake
+# warning (e.g. the vendor `cmake_minimum_required` deprecation) before the
+# explicit $LASTEXITCODE check can run. Exit code remains the source of truth.
+function Invoke-Native {
+    param(
+        [Parameter(Mandatory)][string]$What,
+        [Parameter(Mandatory)][scriptblock]$Call
+    )
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $Call } finally { $ErrorActionPreference = $prev }
+    if ($LASTEXITCODE -ne 0) {
+        throw "$What failed with exit code $LASTEXITCODE"
+    }
+}
+
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 Push-Location $RepoRoot
 try {
     Write-Host "release-perf-lane: configuring release preset"
-    cmake --preset release
-    if ($LASTEXITCODE -ne 0) {
-        throw "cmake --preset release failed with exit code $LASTEXITCODE"
-    }
+    Invoke-Native "cmake --preset release" { cmake --preset release }
 
     Write-Host "release-perf-lane: building release preset"
+    # Known flake: gtest test discovery has a 5s timeout that occasionally
+    # trips on a loaded machine. Retry the build once (ninja resumes
+    # incrementally). stderr is non-terminating here for the same reason as
+    # Invoke-Native; the retry decision and the final throw both key off
+    # $LASTEXITCODE, never off a stderr line.
+    $ErrorActionPreference = 'Continue'
     cmake --build --preset release
     if ($LASTEXITCODE -ne 0) {
-        # Known flake: gtest test discovery has a 5s timeout that
-        # occasionally trips on a loaded machine. Retry the build once;
-        # ninja resumes incrementally.
         Write-Host "release-perf-lane: build failed once (gtest discovery flake?); retrying"
         cmake --build --preset release
-        if ($LASTEXITCODE -ne 0) {
-            throw "cmake --build --preset release failed twice with exit code $LASTEXITCODE"
-        }
+    }
+    $buildExit = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    if ($buildExit -ne 0) {
+        throw "cmake --build --preset release failed twice with exit code $buildExit"
     }
 
     $captureScript = Join-Path $PSScriptRoot "capture-perf-baseline.ps1"
