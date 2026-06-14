@@ -1,5 +1,95 @@
 # Engine Frontier Handoff
 
+## Iteration 4 CLOSEOUT (2026-06-14, T-I4-19)
+
+Branch `feat/polyglot-audit-roadmap`, tip **726ab8f**. All iteration-4 dispatch
+tasks complete (T-I4-0..18) plus the T-I4-DR defect-resolution wave. The
+networking and performance frontier landed this session arc (12 commits since
+e811adb):
+
+- Wave C networking: **T-I4-11** determinism contract (FP pin proven
+  hash-neutral AND load-bearing - Jolt leaks `-mfma` onto sim TUs;
+  DeterministicMath wrappers; SimDeterminismLint; per-system sub-hashes; heavy
+  save/load/resim oracle) -> **T-I4-12** LREC1 tick-indexed replay (record/replay
+  + checkpoint divergence dump) -> **T-I4-13** delay-based lockstep (adaptive
+  horizon, hash-exchange desync oracle, LREC1 dump on divergence) -> **T-I4-14**
+  client renders a server-owned world over loopback. Camera look stays
+  render-side; world_hash 2fa007951a21e140 unchanged throughout.
+- Perf trio (byte/pixel-neutral): **T-I4-18** reset-per-job meshing arena
+  (~2941 malloc/free pairs/prep eliminated), **T-I4-17** pooled POD jobs +
+  cache-aligned completion counter (~0 alloc/job steady state), **T-I4-16**
+  persistent-mapped pool + glMultiDrawElementsIndirect (live chunks:
+  **1361 glDrawElements -> 2 MDI calls, ~680x fewer draw calls**; shadow
+  cascades 1191 -> 2). Far-LOD path untouched.
+- Mid-iteration DR fixes that also landed: sliver-baseline-diff,
+  live-needle-streak (+ skirt dangling-ref UB fix; the "needle" was legit
+  terrain), far-water-exposure (sheet had never rendered - backface-wound),
+  tod-sky-balance (night dome was daylit), and the FastNoise2 SIMD over-read
+  (**T-I4-DR-server-streaming-race**, commit 09ac3bf) that had been crashing the
+  headless server ~50% of 90-tick runs - a vendor buffer over-read, not a race.
+
+### Final sweep (all GREEN at 726ab8f)
+- **ctest: 200/200** (was 148 at i3 close; +replay/lockstep/networked/jobsystem
+  /determinism tests).
+- engine-frontier modes: HeadlessServerTick (hash 2fa007951a21e140 + sub-hashes),
+  HeadlessServerTickHeavy, ReplayRoundtrip, ReplayDivergence, LockstepLoopback,
+  LockstepFaultInjection, NetworkedSession, SimDeterminismLint, EngineGameSplitLint,
+  RenderHealth, PlayerView (x3), FarLodHorizon (x3), **MaterialVisual (re-homed,
+  now GREEN** - the i3 deferral is closed; it re-homed during T-I4-7),
+  TimeOfDaySweep, SkyboxVisual, WeatherVisual, CreatureSlice, SkinnedMeshVisual,
+  PerfRegression - all pass.
+- runtime-stability: Smoke, LodGround, WaterVisual, LodSeamRisk,
+  LodBoundaryHysteresis, EnduranceStreamDrain, **Endurance300** - all GREEN
+  (terminal endurance run at the final tip).
+- **forge verify**: the only blocking-shaped findings are 3 `pre_review`
+  brace-balance false positives (test/common/ServerHeadlessHygiene_test.cpp,
+  tools/asset_processor.cpp, tools/derive_dem_stats.py) - all untouched by
+  iteration 4, all compile clean under -Werror, and ServerHeadlessHygiene is a
+  passing ctest, so the braces ARE balanced (the C-brace heuristic miscounts
+  string-literal / Python-dict braces). Plus soft PATH-002/004/005/006 infos.
+  Same "findings outside iteration source" pattern as the i3 close (then vendor/).
+
+### Perf re-bless log (deliberate decision)
+**Release baseline NOT re-blessed; the previous T-I3-20 baseline
+(perf-baseline-release.json, captured 2026-06-11) is RETAINED.** Rationale: the
+perf harness (initial_world_loading_perf_test) measures worldgen/streaming, NOT
+the render-submission MDI path, so T-I4-16's 680x win cannot appear in it, and
+the arena/jobpool allocation wins are swamped by FastNoise-dominated generation
+time. A -Bless capture was run but came back NOISE-CONTAMINATED on this
+session-loaded machine (idle_horizon p99 1.81->3.42 ms - the IDLE scenario with
+unchanged code, i.e. pure system contention; boot 0.89->1.19, enter_spawn
+2.61->3.06). Blessing regressed noise as the enforced baseline would be
+dishonest, so it was reverted. **PerfRegression -Preset release PASSES against
+the retained T-I3-20 baseline** - confirming the trio introduced no real
+wall-clock regression within the gate's margins. The trio's wins are
+architectural (draw-call count, allocation count), verified analytically + by
+byte/pixel-stable gates. ACTION FOR NEXT QUIET-MACHINE WINDOW: re-run
+`.forge/scripts/run-release-perf-lane.ps1 -Bless` to capture the real post-trio
+baseline; the lane's PS-5.1 stderr-as-error trap (cmake deprecation warnings)
+needs `$ErrorActionPreference` relaxed or the steps run manually as done here.
+
+### Iteration 5 planning inputs (Atmospheric pillar LEAD - owner-flagged IMPORTANT)
+See [[iteration-4-priorities]] / long-range-roadmap.md. Carry-ins for the iter-5
+spec/research round:
+- **Atmospheric pillar is the iteration-5 lead.** The tod-sky-balance fix
+  (84cf431: u_skyDayFactor driving the dome from sun elevation, warm dusk band,
+  dark night) is the seam to build on - volumetric lighting/god-rays, aerial
+  perspective/fog by distance, cloud layers, and the LuminCrystal night-glow tie
+  (CreatureSlice already asserts night glow) are the natural next beats, each
+  gate-first against TimeOfDaySweep's per-phase luma/color bands.
+- **Water-domain backlog (deferred from far-water-exposure):** live-ring sea
+  coverage (who renders the 0-512 m sea surface beyond the water-sim radius;
+  bare sand seabed currently shows), seabed terracing stripes at the waterline
+  (1/32 m height quantization banding), band-assertion premise on the walkable
+  archipelago, sand-flat noon brightness. Atmospheric aerial-perspective work
+  will interact with the far-water look - sequence accordingly.
+- **Quiet-machine perf re-bless** (above) so iteration-5 perf work has an honest
+  post-trio baseline.
+- **Aesthetic carry-overs** (visual sweep): near-black shadowed slopes at noon,
+  razor-straight shaped ridge crests - candidate Atmospheric/material polish.
+- Lock-free JobSystem queue / work-stealing was REJECTED in T-I4-17 scope;
+  recorded as a future candidate only if profiling demands it.
+
 ## Iteration 4 Status (updated 2026-06-12, mid-iteration)
 
 Branch `feat/polyglot-audit-roadmap`, tip `0af7ee3`. Landed from the
