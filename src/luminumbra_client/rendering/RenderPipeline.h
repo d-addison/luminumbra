@@ -10,6 +10,7 @@
 #include <utility>
 #include <glm/glm.hpp>
 #include "Mesh.h"
+#include "SkyAtmosphereLut.h" // T-I5a-6: Hillaire 2020 scattering LUTs
 #include <map>
 #include "core/AssetManager.h"
 #include <filesystem>
@@ -295,7 +296,17 @@ public:
         double water_gpu_ms = 0.0;
         double skybox_gpu_ms = 0.0;
         double particle_gpu_ms = 0.0; // T-I5a-1: ParticlePass GPU timer (≤ 0.8 ms budget)
+        // T-I5a-6: analytic aerial-perspective term (a fullscreen pass wiring
+        // volumetric_lighting.frag). Budget ≤ 0.3 ms (design §7).
+        double aerial_gpu_ms = 0.0;
         double final_blit_gpu_ms = 0.0;
+        // T-I5a-6: sky scattering LUT precompute timings (CPU build + GL upload).
+        // sky_full_precompute_ms is the startup one-shot (budget ≤ 8.0 ms on
+        // release); sky_view_refresh_ms is the last per-frame sky-view recompute
+        // when the sun moved past the refresh threshold (budget ≤ 0.2 ms),
+        // staying 0.0 on frames with no refresh.
+        double sky_full_precompute_ms = 0.0;
+        double sky_view_refresh_ms = 0.0;
     };
 
     struct RenderPassMetadata {
@@ -516,6 +527,7 @@ private:
         Water,
         Skybox,
         Particle, // T-I5a-1
+        Aerial,    // T-I5a-6: analytic aerial-perspective fullscreen pass
         FinalBlit,
         Count,
     };
@@ -582,6 +594,25 @@ private:
     std::unique_ptr<WaterPass> m_water_pass;
     std::unique_ptr<SkyboxPass> m_skybox_pass;
     std::unique_ptr<ParticlePass> m_particle_pass; // T-I5a-1
+
+    // T-I5a-6: Hillaire 2020 atmospheric scattering. The LUTs are built once at
+    // startup and the sky-view LUT refreshed when the sun moves; the skybox pass
+    // samples the sky-view LUT, the lighting pass + aerial pass read the SAME
+    // transmittance/multi-scatter pair (coherent sun/sky/ambient/fog palette).
+    // m_aerial_shader is the analytic aerial-perspective fullscreen term wiring
+    // the previously dormant volumetric_lighting.frag. Render-only (design §2).
+    SkyAtmosphereLut m_sky_lut;
+    std::unique_ptr<Shader> m_aerial_shader;
+    double m_sky_full_precompute_ms = 0.0;
+    double m_sky_view_refresh_ms = 0.0; // last sky-view refresh cost (0 = none this frame)
+    // Sky-derived scattering ambient (the sky-view hemisphere integral); folded
+    // into m_skyAmbientColor so lighting/ambient share the LUT transmittance.
+    glm::vec3 m_skyScatterAmbient{0.0f};
+    void init_sky_lut();
+    void execute_aerial_pass(const Camera& camera);
+public:
+    const SkyAtmosphereLut& sky_lut() const { return m_sky_lut; }
+private:
 
     std::unordered_map<ChunkID, ChunkRenderData> m_chunk_render_data;
     std::unordered_map<ChunkID, WaterRenderData> m_water_render_data;

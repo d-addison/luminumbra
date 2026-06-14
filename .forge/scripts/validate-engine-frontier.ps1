@@ -2745,12 +2745,53 @@ function Test-SkyboxVisual {
     if ([double]$analysis.sun_disc.sun_cluster_fraction -lt [double]$analysis.thresholds.min_sun_cluster_fraction) {
         throw "Skybox sun-disc cluster is not localized at the expected sun position"
     }
+    # T-I5a-6: low-sun scattering palette emergence (warm horizon band, clear
+    # sky). Added on top of the existing monotonic-brighten + sun-disc-localize
+    # premises. The pinned t=0.04 low sun must produce a genuinely warm horizon
+    # band (R>B) measurably warmer than the cool zenith band.
+    if ($null -eq $analysis.palette_emergence) {
+        throw "Skybox visual analysis is missing the palette_emergence section (T-I5a-6)"
+    }
+    if (-not $analysis.palette_emergence.passed) {
+        throw "Skybox low-sun palette emergence failed: horizon r/b=$($analysis.palette_emergence.horizon_band_r_b_ratio) zenith r/b=$($analysis.palette_emergence.zenith_band_r_b_ratio) gap=$($analysis.palette_emergence.horizon_over_zenith_warm_gap)"
+    }
+    if ([double]$analysis.palette_emergence.horizon_band_r_b_ratio -lt [double]$analysis.thresholds.min_horizon_warm_ratio) {
+        throw "Skybox horizon band r/b $($analysis.palette_emergence.horizon_band_r_b_ratio) is below warm threshold $($analysis.thresholds.min_horizon_warm_ratio)"
+    }
+    if ([double]$analysis.palette_emergence.horizon_over_zenith_warm_gap -lt [double]$analysis.thresholds.min_horizon_over_zenith_warm_gap) {
+        throw "Skybox horizon-over-zenith warm gap $($analysis.palette_emergence.horizon_over_zenith_warm_gap) is below threshold $($analysis.thresholds.min_horizon_over_zenith_warm_gap)"
+    }
+    # T-I5a-6: per-pass GPU-timer budgets for the aerial term + sky precompute.
+    # Enforced on the RELEASE build only (debug is ~10x slower -- A2 wind
+    # precedent); on debug the timers must still be present + non-negative.
+    if ($null -eq $analysis.gpu_timer) {
+        throw "Skybox visual analysis is missing the gpu_timer section (T-I5a-6)"
+    }
+    foreach ($field in @("aerial_gpu_ms", "sky_view_refresh_ms", "sky_full_precompute_ms")) {
+        if ([double]$analysis.gpu_timer.$field -lt 0) {
+            throw "Skybox gpu_timer.$field reports a negative value"
+        }
+    }
+    if ($BuildPreset -eq "release" -and [bool]$analysis.gpu_timer.supported) {
+        if (-not $analysis.gpu_timer.aerial_within_budget) {
+            throw "Aerial-perspective GPU timer $($analysis.gpu_timer.aerial_gpu_ms) ms exceeds budget $($analysis.gpu_timer.aerial_budget_ms) ms (release)"
+        }
+        if (-not $analysis.gpu_timer.sky_view_refresh_within_budget) {
+            throw "Sky-view refresh GPU timer $($analysis.gpu_timer.sky_view_refresh_ms) ms exceeds budget $($analysis.gpu_timer.sky_view_refresh_budget_ms) ms (release)"
+        }
+        if (-not $analysis.gpu_timer.sky_precompute_within_budget) {
+            throw "Sky LUT full precompute $($analysis.gpu_timer.sky_full_precompute_ms) ms exceeds budget $($analysis.gpu_timer.sky_precompute_budget_ms) ms (release)"
+        }
+    }
     if (-not $analysis.passed) {
         throw "Skybox visual analysis reported failure"
     }
 
     Assert-PpmArtifact (Join-Path $visualDir $analysis.screenshot)
     Assert-CapturePinned -ArtifactDir $visualDir -Name "SkyboxVisual"
+    Write-Host ("SkyboxVisual: palette horizon r/b {0:N3} vs zenith {1:N3}; aerial {2:N3} ms, sky precompute {3:N3} ms" -f `
+        $analysis.palette_emergence.horizon_band_r_b_ratio, $analysis.palette_emergence.zenith_band_r_b_ratio, `
+        $analysis.gpu_timer.aerial_gpu_ms, $analysis.gpu_timer.sky_full_precompute_ms)
 }
 
 function Test-WeatherVisual {
@@ -2955,6 +2996,29 @@ function Test-TimeOfDaySweep {
     }
     if ([double]$analysis.dusk_sky_warm_shift.sky_warm_half_r_b_ratio_increase -lt [double]$analysis.thresholds.min_dusk_sky_warm_shift) {
         throw "Dusk sky warm-half r/b shift $($analysis.dusk_sky_warm_shift.sky_warm_half_r_b_ratio_increase) is below threshold $($analysis.thresholds.min_dusk_sky_warm_shift)"
+    }
+    # T-I5a-6: absolute dawn/dusk HUE-BAND assertion (scattering palette rises
+    # warm at low sun, clear sky) on top of the existing noon>dusk>night ordering
+    # + relative warm-shift.
+    if ($null -eq $analysis.dusk_sky_hue_band) {
+        throw "Time-of-day sweep analysis is missing the dusk_sky_hue_band section (T-I5a-6)"
+    }
+    if (-not $analysis.dusk_sky_hue_band.passed) {
+        throw "Dusk sky hue-band failed: warm-half r/b $($analysis.dusk_sky_hue_band.dusk_sky_warm_half_r_b_ratio) (T-I5a-6: scattering palette must rise warm at low sun)"
+    }
+    if ([double]$analysis.dusk_sky_hue_band.dusk_sky_warm_half_r_b_ratio -lt [double]$analysis.thresholds.min_dusk_sky_warm_band_ratio) {
+        throw "Dusk sky warm-half r/b $($analysis.dusk_sky_hue_band.dusk_sky_warm_half_r_b_ratio) is below absolute hue-band threshold $($analysis.thresholds.min_dusk_sky_warm_band_ratio)"
+    }
+    # T-I5a-6: sky LUT full precompute startup one-shot recorded in render
+    # telemetry; budget enforced on the RELEASE build only.
+    if ($null -ne $analysis.gpu_timer) {
+        if ([double]$analysis.gpu_timer.sky_full_precompute_ms -lt 0) {
+            throw "Time-of-day gpu_timer.sky_full_precompute_ms reports a negative value"
+        }
+        if ($BuildPreset -eq "release" -and [bool]$analysis.gpu_timer.supported -and `
+            [double]$analysis.gpu_timer.sky_full_precompute_ms -gt 8.0) {
+            throw "Sky LUT full precompute $($analysis.gpu_timer.sky_full_precompute_ms) ms exceeds 8.0 ms budget (release)"
+        }
     }
     if (@("checked_surface_emissive", "not_applicable_no_surface_emissives") -notcontains $analysis.emissive_check.status) {
         throw "Time-of-day emissive check reported unexpected status '$($analysis.emissive_check.status)'"

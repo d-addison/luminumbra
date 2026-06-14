@@ -108,10 +108,30 @@ void SkyboxPass::execute(RenderPipeline& pipeline, const Camera& camera) {
     // with the terrain lighting that shares the same elevation signal.
     m_skybox_shader->setFloat("u_skyDayFactor", pipeline.m_skyDayFactor);
     m_skybox_shader->setFloat("u_time", (float)glfwGetTime());
+    // T-I5a-6: bind the Hillaire scattering LUTs. The sky-view LUT supplies the
+    // dome COLOR and the transmittance LUT colors the sun disc; both are shared
+    // with the lighting pass + aerial-perspective term for a coherent palette.
+    const bool sky_lut_ready = pipeline.m_sky_lut.ready();
+    if (sky_lut_ready) {
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, pipeline.m_sky_lut.sky_view_texture());
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, pipeline.m_sky_lut.transmittance_texture());
+        m_skybox_shader->setInt("u_skyViewLut", 0);
+        m_skybox_shader->setInt("u_transmittanceLut", 1);
+    }
+    m_skybox_shader->setInt("u_useSkyLut", sky_lut_ready ? 1 : 0);
+    // dot(toward-sun, up): the transmittance LUT's mu axis. up is +Y; the
+    // pipeline stores the light-travel direction, so toward-sun is -direction.
+    m_skybox_shader->setFloat("u_sunCosZenith", glm::dot(-pipeline.m_sun.direction, glm::vec3(0.0f, 1.0f, 0.0f)));
     glBindVertexArray(m_skybox_vao);
     glDrawArrays(GL_TRIANGLES, 0, 36);
     pipeline.m_last_render_pass_stats.skybox_draws++;
     glBindVertexArray(0);
+    if (sky_lut_ready) {
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, 0);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, 0);
+    }
     if (cull_was_enabled) {
         glEnable(GL_CULL_FACE);
     }
