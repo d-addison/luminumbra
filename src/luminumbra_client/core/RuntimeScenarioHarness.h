@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -114,6 +115,8 @@ struct RuntimeScenarioConfig {
     bool skinned_mesh_visual_smoke() const { return scenario == "skinned_mesh_visual_smoke"; }
     bool creature_slice_smoke() const { return scenario == "creature_slice_smoke"; }
     bool window_mode_stress_smoke() const { return scenario == "window_mode_stress_smoke"; }
+    // T-I4-14: client renders a server-owned world over the lockstep transport.
+    bool networked_session_smoke() const { return scenario == "networked_session_smoke"; }
     bool forced_crash() const { return scenario == "forced_crash"; }
 
     // True for any scenario that captures pixel-ROI screenshots and therefore
@@ -1112,5 +1115,84 @@ void WriteWindowModeStressAnalysis(
     WindowMode requested_window_mode,
     const std::vector<WindowModeStressStep>& steps,
     const WindowModeStressCapture& final_capture);
+
+// --- networked_session_smoke (T-I4-14): client renders a server-owned world ---
+// over the lockstep transport. A LockstepSession pair runs over an in-process
+// LoopbackTransport (no sockets/ports -- gate stability). One peer is a HOST
+// world authority (a headless GameSession stepped in the same process); the
+// other peer is the CLIENT's rendering GameSession. Per agreed tick:
+//   * the client's WORLD-AFFECTING input set (empty today -- no gameplay inputs
+//     yet) round-trips through LockstepSession::*Input and is APPLIED, so the
+//     input blob travels the real path even while it is empty;
+//   * both worlds advance EXACTLY one fixed sim tick from the SAME spawn anchor
+//     (the server-owned streaming position), so they stay byte-identical;
+//   * camera LOOK (yaw/pitch) is NOT carried here -- it stays render-side and is
+//     applied locally each frame, so look latency is zero (research
+//     worldgen-lockstep-sdfrt.md Area 2 takeaway 2: "Camera look must remain
+//     client-local ... only quantized movement/interaction intents enter the
+//     lockstep input stream");
+//   * the peers exchange world_hash + sub-hashes at the cadence (the desync
+//     oracle), proving the client world == the host world.
+// The driver OWNS the host authority + both session ends; the client's render
+// GameSession is supplied by the caller. The hashed world step uses the spawn
+// anchor (NOT the camera) so render-side look can never perturb the hash.
+class NetworkedSessionDriver {
+public:
+    struct Config {
+        std::uint64_t seed = 424242;
+        std::string preset = "default";
+        std::uint64_t budget_ticks = 90;
+        std::uint64_t hash_cadence_ticks = 30;
+        std::string root_path;
+        int surface_radius = 12;
+        int collision_radius = 4;
+    };
+
+    NetworkedSessionDriver();
+    ~NetworkedSessionDriver();
+
+    NetworkedSessionDriver(const NetworkedSessionDriver&) = delete;
+    NetworkedSessionDriver& operator=(const NetworkedSessionDriver&) = delete;
+
+    // Boots the host authority world, builds the loopback pair + both session
+    // ends, and completes the handshake. The client GameSession must already be
+    // world-ready (its world streamed to the spawn anchor). Returns false on any
+    // boot/handshake failure (failure_reason() carries the cause).
+    bool Begin(Luminumbra::world::GameSession* client_session, const Config& config);
+
+    // Advances the lockstep session by AT MOST one agreed tick on BOTH peers.
+    // Each agreed tick steps both worlds one fixed sim tick from the spawn
+    // anchor and, at the cadence, exchanges + compares hashes. Returns true while
+    // the session is still live (more ticks to run); false once it has finished,
+    // disconnected, or desynced (terminal). Idempotent after termination.
+    bool StepAgreedTick();
+
+    // The server-owned streaming anchor the CLIENT world must stream around
+    // (the spawn point). Render-side camera look is independent of this.
+    Luminumbra::Vec3 ClientStreamingAnchor() const { return m_spawn_anchor; }
+
+    [[nodiscard]] bool finished() const { return m_finished; }
+    [[nodiscard]] bool desynced() const { return m_desynced; }
+    [[nodiscard]] std::uint64_t agreed_ticks() const { return m_agreed_ticks; }
+    [[nodiscard]] const std::string& failure_reason() const { return m_failure_reason; }
+
+    // Sends a clean Bye on both ends and tears down the host world. Idempotent.
+    void Disconnect();
+
+    // Writes the runtime artifact (schema luminumbra.networked_session.v1) and
+    // returns whether the session met its in-sync + clean-disconnect contract.
+    bool WriteArtifact(const std::filesystem::path& artifact_dir, double duration_seconds);
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> m_impl;
+
+    Luminumbra::Vec3 m_spawn_anchor{0.0f};
+    std::uint64_t m_agreed_ticks = 0;
+    bool m_finished = false;
+    bool m_desynced = false;
+    bool m_disconnected = false;
+    std::string m_failure_reason;
+};
 
 } // namespace Luminumbra::Client::ScenarioHarness
