@@ -28,6 +28,7 @@ in VS_OUT {
     float distanceToCamera;
     float viewDepth;
     vec3  worldPos;
+    flat float streakAspect;
 } gs_in[];
 
 out VS_OUT {
@@ -37,6 +38,7 @@ out VS_OUT {
     float distanceToCamera;
     float viewDepth;
     vec3  worldPos;
+    flat float streakAspect;
 } gs_out;
 
 void emit_corner(vec4 centre, vec2 corner) {
@@ -50,6 +52,7 @@ void emit_corner(vec4 centre, vec2 corner) {
     gs_out.distanceToCamera = gs_in[0].distanceToCamera;
     gs_out.viewDepth = gs_in[0].viewDepth;
     gs_out.worldPos = gs_in[0].worldPos;
+    gs_out.streakAspect = gs_in[0].streakAspect;
     EmitVertex();
 }
 

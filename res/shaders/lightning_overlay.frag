@@ -53,12 +53,26 @@ void main() {
         // Full-scene flash: additive lift, mildly stronger toward the strike.
         float radial = 1.0 - 0.35 * clamp(length((ndc - u_strikeNdc) * vec2(u_aspect, 1.0)) / 2.0, 0.0, 1.0);
         color += u_color * (u_pulse * radial);
-        // Bolt: bright near-white core + soft glow halo along the polyline.
+        // Bolt: a THIN hot near-white core with a soft, falling-off bluish glow
+        // halo along the polyline (T-I5a-DR-atmospheric-visuals). The old single
+        // wide smoothstep + core*3.0 painted a fat opaque white worm; this splits
+        // the response into (1) a hard, narrow hot core only a couple px wide that
+        // reads as the bright channel, and (2) an additive glow that decays
+        // smoothly with distance so the bolt has a luminous halo rather than a
+        // hard-edged blob. The core half-width is clamped well below the glow
+        // radius so the structure stays thin regardless of the uniform tuning.
         float bd = boltDistance(ndc);
-        float core = 1.0 - smoothstep(0.0, u_boltWidth, bd);
-        float glow = 1.0 - smoothstep(u_boltWidth, u_boltGlow, bd);
-        vec3 boltCol = mix(u_color, vec3(1.0), 0.85);
-        color += boltCol * (core * 3.0 + glow * 1.0) * max(u_pulse, 1.0);
+        float coreHalf = min(u_boltWidth * 0.35, u_boltGlow * 0.18);
+        // Hot core: tight, near-binary inner ribbon (thin bright filament).
+        float core = 1.0 - smoothstep(coreHalf * 0.5, coreHalf, bd);
+        // Glow: smooth quadratic falloff from the core edge out to the glow radius.
+        float glowLin = 1.0 - smoothstep(coreHalf, u_boltGlow, bd);
+        float glow = glowLin * glowLin;
+        vec3 hotCore = mix(u_color, vec3(1.0), 0.92);   // hot white-blue filament
+        vec3 glowCol = u_color;                          // bluish additive halo
+        // Core dominates where present; glow adds a translucent surrounding halo.
+        color += hotCore * (core * 2.6) * max(u_pulse, 1.0);
+        color += glowCol * (glow * 0.85) * max(u_pulse, 1.0);
     }
     FragColor = vec4(color, 1.0);
 }

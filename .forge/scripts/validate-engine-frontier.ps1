@@ -2875,6 +2875,31 @@ function Test-WeatherVisual {
     if ([int64]$strike.bolt.bright_thin_pixels -lt [int64]$strike.thresholds.min_bolt_pixels) {
         throw "Lightning bolt pixel count $($strike.bolt.bright_thin_pixels) below threshold $($strike.thresholds.min_bolt_pixels)"
     }
+    # T-I5a-DR-atmospheric-visuals: bolt SHAPE -- the bright core must be a THIN,
+    # mostly-VERTICAL structure (aspect >= min, fill fraction <= max), not a fat
+    # lumpy white blob. Also assert the strike fires against a dark enough storm
+    # sky that the flash reads (neighbour pre-strike frame luminance ceiling).
+    if ($null -eq $strike.bolt_shape) {
+        throw "Lightning strike analysis is missing the bolt_shape section (T-I5a-DR)"
+    }
+    if (-not $strike.bolt_shape.passed) {
+        throw "Lightning bolt SHAPE check failed (fat-blob guard): aspect=$($strike.bolt_shape.aspect_ratio) (>= $($strike.thresholds.min_bolt_aspect)), fill_fraction=$($strike.bolt_shape.fill_fraction) (<= $($strike.thresholds.max_bolt_fill_fraction)), bbox=$($strike.bolt_shape.bbox_width)x$($strike.bolt_shape.bbox_height)"
+    }
+    if ([double]$strike.bolt_shape.aspect_ratio -lt [double]$strike.thresholds.min_bolt_aspect) {
+        throw "Lightning bolt aspect ratio $($strike.bolt_shape.aspect_ratio) below threshold $($strike.thresholds.min_bolt_aspect) (bolt is not tall/narrow enough -- reads as a blob)"
+    }
+    if ([double]$strike.bolt_shape.fill_fraction -gt [double]$strike.thresholds.max_bolt_fill_fraction) {
+        throw "Lightning bolt fill fraction $($strike.bolt_shape.fill_fraction) exceeds threshold $($strike.thresholds.max_bolt_fill_fraction) (bolt is too dense -- a filled blob, not a thin filament)"
+    }
+    if ($null -eq $strike.strike_contrast) {
+        throw "Lightning strike analysis is missing the strike_contrast section (T-I5a-DR)"
+    }
+    if (-not $strike.strike_contrast.passed) {
+        throw "Lightning strike CONTRAST check failed: pre-strike storm sky luminance $($strike.strike_contrast.neighbor_frame_mean_luminance) exceeds ceiling $($strike.thresholds.max_neighbor_luma) (the flash must read against a dark storm sky)"
+    }
+    if ([double]$strike.strike_contrast.neighbor_frame_mean_luminance -gt [double]$strike.thresholds.max_neighbor_luma) {
+        throw "Pre-strike storm sky luminance $($strike.strike_contrast.neighbor_frame_mean_luminance) exceeds the $($strike.thresholds.max_neighbor_luma) ceiling"
+    }
     if (-not $strike.passed) {
         throw "Lightning strike visual analysis reported failure"
     }
@@ -3191,6 +3216,34 @@ function Test-Precipitation {
         throw "Precipitation slant gain $($analysis.wind_slant.slant_ratio_gain) is below threshold $($analysis.thresholds.min_slant_ratio_gain)"
     }
 
+    # T-I5a-DR-atmospheric-visuals: STREAKS-NOT-DOTS shape gate. The bright precip
+    # structure must be ELONGATED (anisotropic gradient), not round dots. This
+    # catches the "scattered dots" failure that the presence/slant thresholds
+    # passed when rain rendered as round billboards.
+    if ($null -eq $analysis.streak_shape) {
+        throw "Precipitation analysis is missing the streak_shape section (T-I5a-DR)"
+    }
+    if (-not $analysis.streak_shape.passed) {
+        throw "Precipitation STREAK-SHAPE check failed (dots-not-streaks guard): calm_anisotropy=$($analysis.streak_shape.calm_anisotropy) (>= $($analysis.thresholds.min_streak_anisotropy))"
+    }
+    if ([double]$analysis.streak_shape.calm_anisotropy -lt [double]$analysis.thresholds.min_streak_anisotropy) {
+        throw "Precipitation calm streak anisotropy $($analysis.streak_shape.calm_anisotropy) is below threshold $($analysis.thresholds.min_streak_anisotropy) -- precip reads as round dots, not vertical streaks"
+    }
+
+    # T-I5a-DR-atmospheric-visuals: LIGHT-STREAKS gate. Rain must read as LIGHT
+    # streaks (clearly brighter than the sky backdrop), NOT dark specks ("dirt on
+    # the sky"). The bright precip pixels must sit above the band mean by a margin.
+    if ($null -eq $analysis.light_streaks) {
+        throw "Precipitation analysis is missing the light_streaks section (T-I5a-DR)"
+    }
+    if (-not $analysis.light_streaks.passed) {
+        throw "Precipitation LIGHT-STREAKS check failed (dark-speck guard): calm bright/band luma $($analysis.light_streaks.calm_bright_mean_luminance)/$($analysis.light_streaks.calm_band_mean_luminance), windy $($analysis.light_streaks.windy_bright_mean_luminance)/$($analysis.light_streaks.windy_band_mean_luminance) (bright must exceed band by $($analysis.thresholds.min_bright_over_band_margin))"
+    }
+    if ([double]$analysis.light_streaks.calm_bright_mean_luminance -lt [double]$analysis.light_streaks.calm_band_mean_luminance + [double]$analysis.thresholds.min_bright_over_band_margin -or `
+        [double]$analysis.light_streaks.windy_bright_mean_luminance -lt [double]$analysis.light_streaks.windy_band_mean_luminance + [double]$analysis.thresholds.min_bright_over_band_margin) {
+        throw "Precipitation bright precip is not clearly lighter than the sky backdrop (calm $($analysis.light_streaks.calm_bright_mean_luminance) vs $($analysis.light_streaks.calm_band_mean_luminance), windy $($analysis.light_streaks.windy_bright_mean_luminance) vs $($analysis.light_streaks.windy_band_mean_luminance)) -- rain reads as dark specks"
+    }
+
     # Active-storm + precipitation ParticlePass GPU timer must be within the storm
     # budget (informational on debug where the timer may report 0.0).
     if (-not $analysis.gpu_timer.within_budget) {
@@ -3302,6 +3355,23 @@ function Test-TimeOfDaySweep {
     }
     if ([double]$analysis.dusk_sky_hue_band.dusk_sky_warm_half_r_b_ratio -lt [double]$analysis.thresholds.min_dusk_sky_warm_band_ratio) {
         throw "Dusk sky warm-half r/b $($analysis.dusk_sky_hue_band.dusk_sky_warm_half_r_b_ratio) is below absolute hue-band threshold $($analysis.thresholds.min_dusk_sky_warm_band_ratio)"
+    }
+    # T-I5a-DR-atmospheric-visuals: AURORA NIGHT-GATING. The aurora is a night-only
+    # phenomenon; it must be ABSENT (no green chroma smear) in the dusk and noon sky
+    # bands. This catches the "aurora bleeds into the dusk sky" failure that the
+    # luminance/warm-shift thresholds passed.
+    if ($null -eq $analysis.aurora_gating) {
+        throw "Time-of-day sweep analysis is missing the aurora_gating section (T-I5a-DR)"
+    }
+    if (-not $analysis.aurora_gating.passed) {
+        throw "Aurora night-gating failed: night aurora curtain fraction $($analysis.aurora_gating.night_sky_strong_green_fraction) (need >= $($analysis.aurora_gating.min_night_strong_green_fraction)); day-side aurora fractions noon=$($analysis.aurora_gating.noon_sky_strong_green_fraction) dusk=$($analysis.aurora_gating.dusk_sky_strong_green_fraction) (must be <= $($analysis.aurora_gating.max_day_strong_green_fraction)) -- aurora must be night-only"
+    }
+    if ([double]$analysis.aurora_gating.noon_sky_strong_green_fraction -gt [double]$analysis.aurora_gating.max_day_strong_green_fraction -or `
+        [double]$analysis.aurora_gating.dusk_sky_strong_green_fraction -gt [double]$analysis.aurora_gating.max_day_strong_green_fraction) {
+        throw "Aurora green chroma present at dusk/noon (noon $($analysis.aurora_gating.noon_sky_strong_green_fraction), dusk $($analysis.aurora_gating.dusk_sky_strong_green_fraction)) -- aurora must be night-only"
+    }
+    if ([double]$analysis.aurora_gating.night_sky_strong_green_fraction -lt [double]$analysis.aurora_gating.min_night_strong_green_fraction) {
+        throw "Aurora absent at night (night curtain fraction $($analysis.aurora_gating.night_sky_strong_green_fraction)) -- the aurora must still render at night"
     }
     # T-I5a-7 (C2): SEASON-SWEEP assertions. The same noon/dusk/night phases are
     # captured under two TICK-DERIVED seasons; assert a real per-season sun-path

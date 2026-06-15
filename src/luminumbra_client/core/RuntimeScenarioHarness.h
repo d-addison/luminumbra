@@ -458,6 +458,15 @@ struct StrikePixelStats {
     double frame_mean_luminance = 0.0; // whole-frame mean (the pulse signal)
     std::uint64_t bright_thin_pixels = 0; // bright + high local gradient (bolt body)
     double max_luminance = 0.0;
+    // T-I5a-DR-atmospheric-visuals: bolt SHAPE so the gate catches the "fat lumpy
+    // white blob" failure that the raw bright-pixel count alone passed. The bolt's
+    // bright-core pixels are collected into a bounding box; a real bolt is a THIN,
+    // mostly-VERTICAL, sparse structure.
+    std::uint64_t bolt_core_pixels = 0;     // strictly-bright bolt-core pixels
+    int bolt_bbox_width = 0;                 // bbox width in px (narrow for a bolt)
+    int bolt_bbox_height = 0;                // bbox height in px (tall for a bolt)
+    double bolt_aspect_ratio = 0.0;          // height / width (>1 = vertical bolt)
+    double bolt_fill_fraction = 0.0;         // core pixels / bbox area (low = thin)
 };
 
 StrikePixelStats AnalyzeStrikePixels(const std::vector<unsigned char>& pixels, int width, int height);
@@ -582,6 +591,20 @@ struct PrecipPixelStats {
     double vertical_gradient_mean = 0.0;
     // horizontal_gradient_mean / vertical_gradient_mean. Rises as rain slants.
     double slant_ratio = 0.0;
+    // T-I5a-DR-atmospheric-visuals: SHAPE/QUALITY metrics so the gate catches the
+    // "dark speckled dots" failure that thresholds alone passed.
+    //  - streak_anisotropy: max(h,v)/min(h,v) gradient energy around bright precip.
+    //    A round DOT is gradient-isotropic (~1); an elongated STREAK has one axis
+    //    of sharp cross-gradient and one of smooth along-gradient (>> 1).
+    double streak_anisotropy = 0.0;
+    // Mean luminance of the precip BAND (the backdrop the particles sit over).
+    double band_mean_luminance = 0.0;
+    // Mean luminance of the BRIGHT precip pixels (must sit ABOVE the band: rain is
+    // a LIGHT streak over the sky, not a DARK speck).
+    double bright_particle_mean_luminance = 0.0;
+    // Pixels notably DARKER than the band (dark specks: the failure signature).
+    std::uint64_t dark_speck_pixels = 0;
+    double dark_speck_fraction = 0.0;
 };
 
 PrecipPixelStats AnalyzePrecipPixels(const std::vector<unsigned char>& pixels, int width, int height);
@@ -629,6 +652,17 @@ struct TimeOfDayPixelStats {
     double max_luminance = 0.0;
     double max_luminance_y_from_top_norm = 0.0;  // 0 = top of frame
     double sky_max_luminance = 0.0;              // max within the sky band
+    // T-I5a-DR-atmospheric-visuals: AURORA chroma detector. The aurora paints
+    // SATURATED green (g strongly exceeds BOTH r and b) curtains across the sky
+    // band -- a warm low-sun sky (r>=g, yellow) does NOT produce this. We measure
+    // the per-pixel GREEN EXCESS (g - max(r,b), >=0) and, crucially, COUNT pixels
+    // with a STRONG green excess (the aurora curtain core). At night the strong-
+    // green count is high; at day/dusk it is ~0. This catches the "aurora bleeds
+    // into dusk" failure that the luminance/warm-shift thresholds passed, while
+    // staying robust to the warm sky's own faint green/yellow gradient.
+    double sky_green_excess_mean = 0.0;   // mean green-excess over the sky band
+    double sky_green_excess_max = 0.0;    // peak green-excess (the smear core)
+    double sky_strong_green_fraction = 0.0; // fraction of sky pixels with g-max(r,b) strong
     // Pixels above the emissive glow floor inside the central third of the
     // frame; only consumed by the optional night-emissive capture.
     std::uint64_t center_glow_pixels = 0;
