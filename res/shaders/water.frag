@@ -48,6 +48,32 @@ void main()
     vec2 screen_uv = gl_FragCoord.xy / u_screen_size;
     vec3 view_dir = normalize(fs_in.world_pos - u_camera_pos);
 
+    // --- 1b. Time-of-day light factor (kills the night "emissive cyan" glow) ---
+    // The water body colour, caustics and the minimum tint floor below used to
+    // be constants, so at night the lake stayed fully bright teal while the sky
+    // and terrain went dark -- it read as a self-lit emissive material and was
+    // the brightest thing in a night frame. u_sky_color is the time-of-day
+    // driven sky tint (night ~(0.02,0.04,0.10) luminance ~0.05, day
+    // ~(0.45,0.68,0.95) luminance ~0.68); u_sun_direction.y is the sun height.
+    // We fold both into a 0..1 daylight term and use it to dim the water body
+    // toward a dark night tint so the surface only carries sky/moon reflection
+    // at night, while daytime water keeps its natural blue.
+    float sky_luma = dot(u_sky_color, vec3(0.2126, 0.7152, 0.0722));
+    // Map the sky luminance (~0.05 night .. ~0.68 day) onto 0..1.
+    float sky_light = smoothstep(0.06, 0.45, sky_luma);
+    // Sun-above-horizon contribution. u_sun_direction is the light TRAVEL
+    // direction (from the sun toward the surface), so the sun is overhead when
+    // the light is travelling downward (direction.y < 0). The sun height above
+    // the horizon is therefore -u_sun_direction.y: +1 at noon (light straight
+    // down), -1 at night (light from below). The earlier version used
+    // +u_sun_direction.y, which is +1 at night -- that inverted sign is what
+    // kept the water fully lit (glowing) in night frames.
+    float sun_height = smoothstep(-0.15, 0.25, -u_sun_direction.y);
+    float daylight = clamp(max(sky_light, sun_height), 0.0, 1.0);
+    // Never fully zero so the lake does not become a pure-black hole; a faint
+    // floor keeps a hint of ambient/moon sheen on the surface.
+    float light_scale = mix(0.06, 1.0, daylight);
+
     // --- 2. Surface Normals & Flow ---
     vec4 flow_data = texture(u_flow_map, fs_in.world_pos.xz * 0.05);
     vec2 flow_vector = (flow_data.rg * 2.0 - 1.0) * flow_data.a;
@@ -77,9 +103,13 @@ void main()
     // the surface (unstreamed chunks / sky at the far plane); sampling the
     // unrendered opaque buffer there produces grey-white blotches.
     float refraction_depth = texture(u_opaque_depth, refraction_uv).r;
+    // Light-scaled deep tint used wherever the surface falls back to a constant
+    // water colour (refraction/reflection misses). Like the body colour, this
+    // must dim at night or the constant blue becomes self-lit in dark frames.
+    vec3 deep_fill = u_deep_color * light_scale;
     vec3 refracted_color = refraction_depth < 1.0
         ? texture(u_opaque_scene_color, refraction_uv).rgb
-        : u_deep_color;
+        : deep_fill;
     
     // --- 5. Reflection (inline SSR: 8-step raymarch + binary refinement + edge fade) ---
     // T-I2-16b decision: the whole water pass (caustics + SSR + shading)
@@ -88,7 +118,7 @@ void main()
     vec3 reflection_vector = reflect(view_dir, surface_normal);
     // Rays that leave the screen without hitting geometry reflect the sky for
     // upward directions and the deep water tint for grazing/downward ones.
-    vec3 miss_color = mix(u_deep_color, u_sky_color, clamp(reflection_vector.y * 2.0 + 0.2, 0.0, 1.0));
+    vec3 miss_color = mix(deep_fill, u_sky_color, clamp(reflection_vector.y * 2.0 + 0.2, 0.0, 1.0));
     vec3 reflected_color = miss_color;
 
     // Reduced steps and adaptive quality based on fresnel
@@ -100,7 +130,7 @@ void main()
 
     // Early exit if reflection vector points down
     if (reflection_vector.y < -0.1) {
-        reflected_color = u_deep_color;
+        reflected_color = deep_fill;
     } else {
         vec3 ray_pos = fs_in.world_pos;
         vec3 prev_pos = ray_pos;
@@ -170,6 +200,12 @@ void main()
     float tint_curve = smoothstep(0.0, 1.0, absorption_factor);
     vec3 shallow_tint = u_shallow_color * 1.08; // slight lift so the shallows read bright
     vec3 water_color = mix(shallow_tint, u_deep_color, tint_curve);
+    // Dim the water body by the time-of-day light factor. This is the term that
+    // made the lake glow electric cyan at night: it is a constant material
+    // colour, so without this scale it stays fully bright regardless of how
+    // dark the scene is. At noon light_scale ~= 1.0 (natural blue preserved);
+    // at night it drops to a faint sheen so only sky/moon reflection remains.
+    water_color *= light_scale;
     
     // --- 8. Specular Highlight ---
     vec3 half_vector = normalize(u_sun_direction - view_dir);
@@ -191,6 +227,10 @@ void main()
         
         caustics_color = vec3(0.6, 0.8, 1.0) * caustics_strength * caustics_falloff;
         caustics_color *= max(0.3, dot(u_sun_direction, vec3(0, -1, 0))); // Sun angle modulation
+        // Caustics are sunlight focused through the surface; at night there is
+        // no sun to focus, so dim them with the daylight factor instead of
+        // letting them add a constant cyan shimmer in dark frames.
+        caustics_color *= light_scale;
     }
     
     // --- 10. Shoreline Foam (procedural, T-I2-16c) ---
@@ -226,10 +266,16 @@ void main()
     final_color += specular_highlight;
     final_color = mix(final_color, foam_color, foam_factor); // Blend foam on top
 
+    // Minimum tint floor. Previously this clamped the surface up to a constant
+    // teal (vec3(0.025,0.14,0.24)) no matter the lighting, which is what kept
+    // the lake glowing cyan at night even after everything else darkened. Scale
+    // the whole floor by the daylight factor so at night the floor collapses
+    // toward black (only sky/moon reflection survives) while daytime water keeps
+    // its lifted body colour and reads as natural water.
     vec3 minimum_water_tint = max(
         mix(u_shallow_color, u_deep_color, clamp(absorption_factor, 0.0, 1.0)) * 0.72,
         vec3(0.025, 0.14, 0.24)
-    );
+    ) * light_scale;
     final_color = max(final_color, minimum_water_tint);
 
     float alpha = clamp(0.58 + absorption_factor * 0.22 + fresnel * 0.12, 0.58, 0.86);
