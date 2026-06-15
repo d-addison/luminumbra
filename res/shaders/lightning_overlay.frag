@@ -21,6 +21,11 @@ uniform float u_boltGlow = 0.040;        // bolt glow falloff radius (NDC)
 uniform int   u_boltCount = 0;
 uniform vec2  u_bolt[MAX_BOLT_POINTS];   // flattened NDC polyline (x<=-2 == pen-up)
 uniform float u_aspect = 1.777;          // framebuffer width/height
+// T-I5a-DR-storm-motion-v2: GROUND-IMPACT flash. The bolt must visibly TOUCH DOWN:
+// a bright radial bloom at the touchdown point sells the strike connecting to the
+// terrain. u_groundNdc is the projected ground terminus; u_groundFlash scales it.
+uniform vec2  u_groundNdc = vec2(0.0, -1.0);
+uniform float u_groundFlash = 0.0;       // 0 = no impact bloom
 
 // Shortest distance (aspect-corrected NDC) from a screen point to the bolt
 // polyline. A pen-up separator (x <= -2.0) breaks disjoint strokes.
@@ -61,18 +66,39 @@ void main() {
         // smoothly with distance so the bolt has a luminous halo rather than a
         // hard-edged blob. The core half-width is clamped well below the glow
         // radius so the structure stays thin regardless of the uniform tuning.
+        // T-I5a-DR-storm-motion-v2: a THIN, SHARP, near-white filament. The owner
+        // saw a "fat worm" -- so the core is pinned to a hard ~1-2px ribbon (a
+        // near-binary edge a hair wide in NDC) regardless of the glow tuning, and
+        // the glow halo is kept tight + faint so it frames the bolt rather than
+        // bloating it. The result reads as a hot jagged crack of light, not a tube.
         float bd = boltDistance(ndc);
-        float coreHalf = min(u_boltWidth * 0.35, u_boltGlow * 0.18);
-        // Hot core: tight, near-binary inner ribbon (thin bright filament).
-        float core = 1.0 - smoothstep(coreHalf * 0.5, coreHalf, bd);
-        // Glow: smooth quadratic falloff from the core edge out to the glow radius.
-        float glowLin = 1.0 - smoothstep(coreHalf, u_boltGlow, bd);
+        // Core half-width in NDC clamped to a ~1-2px equivalent ribbon so the bolt
+        // is sharp at any resolution. (0.0016 NDC ~= 1.5px on a 1080-tall frame.)
+        float coreHalf = clamp(min(u_boltWidth * 0.18, u_boltGlow * 0.10), 0.0010, 0.0024);
+        // Hot core: hard near-binary inner ribbon (thin bright filament). A tiny
+        // smoothstep band gives 1px antialiasing without widening the core.
+        float core = 1.0 - smoothstep(coreHalf * 0.6, coreHalf, bd);
+        // Glow: tight quadratic falloff, kept faint so it does not read as girth.
+        float glowRadius = min(u_boltGlow, 0.030);
+        float glowLin = 1.0 - smoothstep(coreHalf, glowRadius, bd);
         float glow = glowLin * glowLin;
-        vec3 hotCore = mix(u_color, vec3(1.0), 0.92);   // hot white-blue filament
+        vec3 hotCore = mix(u_color, vec3(1.0), 0.97);   // near-white hot filament
         vec3 glowCol = u_color;                          // bluish additive halo
-        // Core dominates where present; glow adds a translucent surrounding halo.
-        color += hotCore * (core * 2.6) * max(u_pulse, 1.0);
-        color += glowCol * (glow * 0.85) * max(u_pulse, 1.0);
+        // Core is the dominant bright channel; glow is a thin translucent halo.
+        color += hotCore * (core * 3.2) * max(u_pulse, 1.0);
+        color += glowCol * (glow * 0.40) * max(u_pulse, 1.0);
+
+        // T-I5a-DR-storm-motion-v2: GROUND-IMPACT bloom -- a bright radial flash at
+        // the touchdown point so the bolt visibly CONNECTS to the terrain and lights
+        // the ground it strikes. Aspect-corrected radial falloff; brightest at the
+        // strike point, fading over a short radius.
+        if (u_groundFlash > 0.0) {
+            float gd = length((ndc - u_groundNdc) * vec2(u_aspect, 1.0));
+            float impact = 1.0 - smoothstep(0.0, 0.42, gd);
+            impact = impact * impact;            // concentrate near the strike
+            vec3 impactCol = mix(u_color, vec3(1.0), 0.6);
+            color += impactCol * impact * u_groundFlash;
+        }
     }
     FragColor = vec4(color, 1.0);
 }

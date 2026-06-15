@@ -2337,8 +2337,14 @@ int main(int argc, char* argv[]) {
                         // falling column fills the frame, plus the splash template.
                         const glm::vec3 field_origin(
                             g_camera->Position.x, g_camera->Position.y, g_camera->Position.z);
-                        particles->add_emitter(
-                            root_dir / "data/common/particles/precip_rain.json", field_origin);
+                        // T-I5a-DR-storm-motion-v2: the motion clip uses a dedicated
+                        // rain emitter tuned for SMOOTH TRACKABLE FALL at the capture
+                        // interval (longer streaks, moderate fall speed). The gate
+                        // path keeps the byte-blessed precip_rain.json untouched.
+                        const char* rain_emitter = atmos_motion_capture
+                            ? "data/common/particles/precip_rain_motion.json"
+                            : "data/common/particles/precip_rain.json";
+                        particles->add_emitter(root_dir / rain_emitter, field_origin);
                         particles->add_splash_emitter(
                             root_dir / "data/common/particles/precip_splash.json");
                         precip_emitter_spawned = true;
@@ -2450,11 +2456,19 @@ int main(int argc, char* argv[]) {
                             // strike in motion), with a thin bright forked core +
                             // soft glow halo so the bolt is a filament, not a worm.
                             lstate.pulse_intensity = 0.38f;  // brighter scene flash
-                            lstate.bolt_width_ndc = 0.007f;  // thinner bright core
-                            lstate.bolt_glow_ndc = 0.045f;   // soft additive glow halo
+                            lstate.bolt_width_ndc = 0.006f;  // thin bright core
+                            lstate.bolt_glow_ndc = 0.024f;   // tight glow halo
                             const glm::vec3 fwd = glm::normalize(
                                 glm::vec3(g_camera->Front.x, 0.0f, g_camera->Front.z));
-                            const glm::vec3 strike_ground = g_camera->Position + fwd * 220.0f;
+                            // T-I5a-DR-storm-motion-v2: TOUCHDOWN. Strike a real ground
+                            // point ahead of the camera: terrain height at (x,z) is the
+                            // bolt's true bottom, so the channel spans cloud->terrain and
+                            // ends ON the ground (no floating mid-air bolt).
+                            const glm::vec3 strike_xz = g_camera->Position + fwd * 160.0f;
+                            const float ground_y =
+                                gameSession->GetWorldSystem()->GetTerrainHeightAt(
+                                    strike_xz.x, strike_xz.z);
+                            const glm::vec3 strike_ground(strike_xz.x, ground_y, strike_xz.z);
                             // Vary the strike seed per cycle so successive bolts differ.
                             const uint64_t cycle_index = static_cast<uint64_t>(
                                 elapsed_play_seconds / 1.6);
@@ -2463,21 +2477,52 @@ int main(int argc, char* argv[]) {
                                     strike_ground.x, strike_ground.y, strike_ground.z,
                                     /*magnitude=*/0.9f,
                                     /*strike_seed=*/0x5A5A1357ull + cycle_index * 0x9E3779B1ull);
+                            // PROJECT the real bolt through the actual render camera so
+                            // the bolt spans the frame from the cloud base down to the
+                            // projected terrain terminus -- it visibly TOUCHES DOWN.
+                            int mvw = 0, mvh = 0;
+                            glfwGetFramebufferSize(window, &mvw, &mvh);
+                            const glm::mat4 proj = glm::perspective(
+                                glm::radians(g_camera->Zoom),
+                                static_cast<float>(std::max(1, mvw)) /
+                                    static_cast<float>(std::max(1, mvh)),
+                                g_camera->GetNearPlane(), g_camera->GetFarPlane());
+                            const glm::mat4 viewproj = proj * g_camera->GetViewMatrix();
                             const glm::vec3 top = bolt.main_channel.front();
                             const glm::vec3 bottom = bolt.main_channel.back();
                             const float span_y = std::max(1e-3f, top.y - bottom.y);
-                            const float kBoltColumnNdcX = 0.06f;
-                            const float kBoltTopNdcY = 0.92f;
-                            const float kBoltBotNdcY = -0.12f;
-                            const float kLateralToNdc = 1.0f / 150.0f;
+                            // Project the straight cloud->ground baseline endpoints; the
+                            // bolt's jagged points are laid along the screen line between
+                            // these, with the seeded lateral wobble added as a MODEST
+                            // sideways jag (kept small so the bolt stays a tall, thin,
+                            // mostly-vertical filament -- not a horizontal scribble).
+                            const auto project = [&](const glm::vec3& wp, bool& ok) -> glm::vec2 {
+                                const glm::vec4 clip = viewproj * glm::vec4(wp, 1.0f);
+                                ok = clip.w > 1e-4f;
+                                if (!ok) return glm::vec2(0.0f);
+                                return glm::vec2(clip.x / clip.w, clip.y / clip.w);
+                            };
+                            bool top_ok = false, bot_ok = false;
+                            glm::vec2 top_ndc = project(top, top_ok);
+                            glm::vec2 bot_ndc = project(bottom, bot_ok);
+                            // Anchor the bolt TOP high in the sky and the BOTTOM onto the
+                            // projected ground point, clamped to stay just inside the
+                            // bottom edge so the touchdown is visible even when the
+                            // upward-tilted camera projects the ground low.
+                            top_ndc.y = top_ok ? std::min(top_ndc.y, 0.94f) : 0.94f;
+                            const float kGroundNdcY = bot_ok
+                                ? std::clamp(bot_ndc.y, -0.96f, -0.55f) : -0.92f;
+                            const float kColumnNdcX = bot_ok
+                                ? std::clamp(bot_ndc.x, -0.6f, 0.6f) : 0.0f;
+                            const float kLateralToNdc = 1.0f / 260.0f; // modest jag
                             const auto map_point = [&](const glm::vec3& wp) -> glm::vec2 {
                                 const float hf = std::clamp((wp.y - bottom.y) / span_y, 0.0f, 1.0f);
-                                const float ndc_y = kBoltBotNdcY + (kBoltTopNdcY - kBoltBotNdcY) * hf;
+                                const float ndc_y = kGroundNdcY + (top_ndc.y - kGroundNdcY) * hf;
                                 const float base_x = bottom.x + (top.x - bottom.x) * hf;
                                 const float base_z = bottom.z + (top.z - bottom.z) * hf;
                                 const float lateral = (wp.x - base_x) + (wp.z - base_z);
-                                const float ndc_x = kBoltColumnNdcX +
-                                    std::clamp(lateral * kLateralToNdc, -0.22f, 0.22f);
+                                const float ndc_x = kColumnNdcX +
+                                    std::clamp(lateral * kLateralToNdc, -0.14f, 0.14f);
                                 return glm::vec2(ndc_x, ndc_y);
                             };
                             const auto push_stroke = [&](const std::vector<glm::vec3>& stroke) {
@@ -2490,7 +2535,10 @@ int main(int argc, char* argv[]) {
                             };
                             push_stroke(bolt.main_channel);
                             for (const auto& br : bolt.branches) { push_stroke(br); }
-                            lstate.strike_ndc = glm::vec2(kBoltColumnNdcX, kBoltBotNdcY);
+                            lstate.strike_ndc = glm::vec2(kColumnNdcX, kGroundNdcY);
+                            // Ground-impact bloom at the touchdown point.
+                            lstate.ground_ndc = glm::vec2(kColumnNdcX, kGroundNdcY);
+                            lstate.ground_flash = 0.55f;
                         }
                         renderPipeline.set_lightning_state(lstate);
                     }

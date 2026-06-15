@@ -178,6 +178,11 @@ struct LightningRenderState {
     glm::vec2 strike_ndc = glm::vec2(0.0f); // strike point in NDC (radial centre)
     float bolt_width_ndc = 0.004f;          // bolt core half-width in NDC units
     float bolt_glow_ndc = 0.018f;           // bolt glow falloff radius in NDC units
+    // T-I5a-DR-storm-motion-v2: GROUND-IMPACT bloom at the bolt touchdown point so
+    // the strike visibly CONNECTS to terrain. ground_ndc is the projected terminus;
+    // ground_flash scales the radial impact glow (0 = off, keeps gates byte-stable).
+    glm::vec2 ground_ndc = glm::vec2(0.0f, -1.0f);
+    float ground_flash = 0.0f;
     // Flattened NDC polyline points. A point with x <= -2.0 is a PEN-UP separator
     // between disjoint polylines (main channel / each branch). Drawn as connected
     // segments between consecutive non-separator points.
