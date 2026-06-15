@@ -20,7 +20,7 @@
 // Forward declarations
 namespace Luminumbra { class Chunk; class JobSystem; }
 namespace Luminumbra::Systems { class SHIELD_WorldSystem; struct TerrainGenParams; }
-namespace Luminumbra::Rendering { class Shader; class Camera; class ShadowPass; class GBufferPass; class SsaoPass; class LightingPass; class WaterPass; class SkyboxPass; class ParticlePass; class FarLodSystem; }
+namespace Luminumbra::Rendering { class Shader; class Camera; class ShadowPass; class GBufferPass; class SsaoPass; class LightingPass; class WaterPass; class SkyboxPass; class ParticlePass; class FoliagePass; class FarLodSystem; }
 
 namespace Luminumbra::Rendering {
 
@@ -364,6 +364,12 @@ public:
         // gates byte-stable.
         size_t particle_draws = 0;
         size_t particles_drawn = 0;
+        // T-I5b-1 (F1): instanced foliage scatter draws (one per FoliagePass
+        // submit) and the total scatter instances drawn this frame. Both stay 0
+        // when foliage is disabled (the pass is a no-op), keeping existing
+        // visual gates byte-stable.
+        size_t foliage_draws = 0;
+        size_t foliage_instances_drawn = 0;
         size_t final_blits = 0;
         // Per-pass GPU timings sampled from a GL_TIMESTAMP query ring
         // (frame N publishes the timings recorded at frame N-2). Values stay
@@ -377,6 +383,10 @@ public:
         double water_gpu_ms = 0.0;
         double skybox_gpu_ms = 0.0;
         double particle_gpu_ms = 0.0; // T-I5a-1: ParticlePass GPU timer (≤ 0.8 ms budget)
+        // T-I5b-1 (F1): FoliagePass GPU timer. The FoliageInstancing gate bounds
+        // this against the pinned release budget (design §7). 0.0 when foliage is
+        // disabled / no instances.
+        double foliage_gpu_ms = 0.0;
         // T-I5a-6: analytic aerial-perspective term (a fullscreen pass wiring
         // volumetric_lighting.frag). Budget ≤ 0.3 ms (design §7).
         double aerial_gpu_ms = 0.0;
@@ -616,6 +626,14 @@ public:
     ParticlePass* particles() { return m_particle_pass.get(); }
     const ParticlePass* particles() const { return m_particle_pass.get(); }
 
+    // --- Foliage scatter (T-I5b-1, F1). ---
+    // The foliage pass owns the fixed-capacity persistent-mapped scatter
+    // instance pool + the deterministic placement hash. Exposed so the scenario
+    // harness can load the scatter set, push per-chunk placement inputs + the A2
+    // wind bridge, and snapshot the instance set for the FoliageInstancing gate.
+    FoliagePass* foliage() { return m_foliage_pass.get(); }
+    const FoliagePass* foliage() const { return m_foliage_pass.get(); }
+
 private:
     // Extracted render pass classes (T-I2-11). Passes own their GL resources
     // (FBOs/textures/shaders); the pipeline keeps orchestration order, shared
@@ -627,6 +645,7 @@ private:
     friend class WaterPass;
     friend class SkyboxPass;
     friend class ParticlePass;
+    friend class FoliagePass;
 
     struct ChunkMeshSnapshot {
         ChunkID id = 0;
@@ -678,6 +697,7 @@ private:
         Water,
         Skybox,
         Particle, // T-I5a-1
+        Foliage,  // T-I5b-1: instanced foliage scatter pass
         Aerial,    // T-I5a-6: analytic aerial-perspective fullscreen pass
         FinalBlit,
         Count,
@@ -766,6 +786,7 @@ private:
     std::unique_ptr<WaterPass> m_water_pass;
     std::unique_ptr<SkyboxPass> m_skybox_pass;
     std::unique_ptr<ParticlePass> m_particle_pass; // T-I5a-1
+    std::unique_ptr<FoliagePass> m_foliage_pass;   // T-I5b-1
 
     // T-I5a-6: Hillaire 2020 atmospheric scattering. The LUTs are built once at
     // startup and the sky-view LUT refreshed when the sun moves; the skybox pass

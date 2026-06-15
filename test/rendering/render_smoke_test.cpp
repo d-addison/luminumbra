@@ -328,6 +328,7 @@ std::vector<ShaderProgramSpec> PipelineProgramSpecs() {
         {"loading_visual", "loading_visual.vert", "loading_visual.frag"},
         {"volumetric_lighting", "volumetric_lighting.vert", "volumetric_lighting.frag"},
         {"magical_particles", "magical_particles.vert", "magical_particles.frag", "magical_particles.geom"},
+        {"foliage", "foliage.vert", "foliage.frag"},
     };
 }
 
