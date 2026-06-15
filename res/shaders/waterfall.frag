@@ -1,0 +1,97 @@
+#version 450 core
+
+// ===========================================================================
+// T-I5b-4 (W1): waterfall falling-sheet shader. RENDER-ONLY DRESSING.
+//
+// An animated vertical sheet of falling water drawn over a detected waterfall
+// site (WaterfallDetect). The sheet uses a procedural FLOW-MAP: vertical streaks
+// scroll DOWNWARD over time (the flow direction), with layered high-frequency
+// turbulence so the cascade reads as broken, frothy water rather than a flat
+// scrolling band. The crest and the plunge foot are foamed white; the mid-fall
+// is a bright blue-white cascade. No external textures are required (the flow is
+// generated), so the gate can compile + render this standalone.
+//
+// Inputs are the basic.vert outputs (FragPos = world position, Normal). The
+// sheet quad is oriented so its local "down" is world -Y; the shader keys the
+// flow on world Y (height down the fall) and the horizontal channel coordinate.
+// ===========================================================================
+
+in vec3 FragPos;
+in vec3 Normal;
+
+out vec4 o_frag_color;
+
+uniform float u_time;
+uniform vec3  u_camera_pos;
+// The fall extent in world space so the shader can normalize height-down-the-
+// fall to [0,1] (0 = crest, 1 = plunge foot) for the foam bands.
+uniform float u_crest_y;   // world Y of the lip
+uniform float u_foot_y;    // world Y of the plunge pool
+uniform vec3  u_sun_color; // tint for the lit froth (defaults handled by caller)
+
+// Cheap hash + value noise for the procedural flow turbulence.
+float hash21(vec2 p) {
+    p = fract(p * vec2(123.34, 345.45));
+    p += dot(p, p + 34.345);
+    return fract(p.x * p.y);
+}
+
+float value_noise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = hash21(i);
+    float b = hash21(i + vec2(1.0, 0.0));
+    float c = hash21(i + vec2(0.0, 1.0));
+    float d = hash21(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+void main() {
+    // Height down the fall, normalized [0,1] (0 = crest, 1 = foot).
+    float span = max(0.001, u_crest_y - u_foot_y);
+    float fall_t = clamp((u_crest_y - FragPos.y) / span, 0.0, 1.0);
+
+    // Horizontal channel coordinate (world XZ projected): gives each vertical
+    // streak a stable lane so streaks don't smear sideways.
+    float lane = FragPos.x * 0.7 + FragPos.z * 0.7;
+
+    // --- FLOW MAP: vertical streaks scrolling DOWN over time. ---
+    // The dominant scroll term is u_time on the height axis (water falls), with
+    // two octaves of turbulence at different speeds so the sheet churns.
+    float scroll = u_time * 1.8;
+    float streak1 = value_noise(vec2(lane * 1.3, fall_t * 9.0 + scroll));
+    float streak2 = value_noise(vec2(lane * 3.1 + 5.0, fall_t * 18.0 + scroll * 1.7));
+    float streak3 = value_noise(vec2(lane * 6.2 - 3.0, fall_t * 30.0 + scroll * 2.4));
+    float turbulence = streak1 * 0.55 + streak2 * 0.30 + streak3 * 0.15;
+
+    // Vertical streak structure: sharpen the noise into bright filaments so the
+    // cascade reads as falling threads of water.
+    float streaks = pow(turbulence, 1.6);
+
+    // --- Colour: blue-white cascade, brightening toward froth. ---
+    vec3 deep_water  = vec3(0.20, 0.42, 0.62);
+    vec3 bright_foam = vec3(0.92, 0.97, 1.0);
+    vec3 cascade = mix(deep_water, bright_foam, clamp(streaks * 1.3, 0.0, 1.0));
+
+    // --- Foam bands at the crest and the plunge foot. ---
+    // Crest froth (top ~12%) and plunge-pool foam (bottom ~22%) churn white.
+    float crest_foam = smoothstep(0.12, 0.0, fall_t);
+    float plunge_foam = smoothstep(0.78, 1.0, fall_t);
+    // Animate the plunge foam so the pool roils.
+    float roil = 0.5 + 0.5 * value_noise(vec2(lane * 4.0, u_time * 2.2));
+    plunge_foam *= (0.6 + 0.4 * roil);
+
+    float foam = clamp(crest_foam + plunge_foam, 0.0, 1.0);
+    cascade = mix(cascade, bright_foam, foam);
+
+    // Sun-tinted lift so the froth catches light (caller passes the sun colour;
+    // a sensible white default if unset reads as plain bright froth).
+    vec3 lit = cascade * mix(vec3(1.0), u_sun_color, 0.25);
+
+    // Sheet opacity: brighter where the streaks/foam are, with a soft floor so
+    // the falling water always reads as a translucent veil.
+    float alpha = clamp(0.45 + streaks * 0.45 + foam * 0.35, 0.45, 0.98);
+
+    o_frag_color = vec4(lit, alpha);
+}

@@ -26,6 +26,7 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/LightningBolt.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/Mesh.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/RenderPipeline.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/WaterfallDetect.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/RenderSystem.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/Shader.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/WorldLoadingVisualizer.cpp

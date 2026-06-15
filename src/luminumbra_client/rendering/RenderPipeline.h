@@ -11,6 +11,7 @@
 #include <glm/glm.hpp>
 #include "Mesh.h"
 #include "SkyAtmosphereLut.h" // T-I5a-6: Hillaire 2020 scattering LUTs
+#include "WaterfallDetect.h"  // T-I5b-4: world-deterministic waterfall sites
 #include <map>
 #include "core/AssetManager.h"
 #include <filesystem>
@@ -634,6 +635,20 @@ public:
     FoliagePass* foliage() { return m_foliage_pass.get(); }
     const FoliagePass* foliage() const { return m_foliage_pass.get(); }
 
+    // --- Waterfalls (T-I5b-4, W1). ---
+    // World-deterministic site detection (river course x steep height drop),
+    // computed once per world and CACHED here (camera/frame independent —
+    // critique F5). The dressing (sheet shader, A1 spray, plunge foam, roar) is
+    // render-only and never hashed; the SITES are a pure function of the
+    // generated world (same seed -> same sites for every replay). Returns the
+    // cached site set for `world`, detecting on first use.
+    const std::vector<WaterfallSite>& waterfall_sites(
+        const Systems::SHIELD_WorldSystem& world,
+        const WaterfallDetectParams& params = {}) {
+        return m_waterfall_sites.sites_for(world, params);
+    }
+    WaterfallSiteCache& waterfall_cache() { return m_waterfall_sites; }
+
 private:
     // Extracted render pass classes (T-I2-11). Passes own their GL resources
     // (FBOs/textures/shaders); the pipeline keeps orchestration order, shared
@@ -787,6 +802,7 @@ private:
     std::unique_ptr<SkyboxPass> m_skybox_pass;
     std::unique_ptr<ParticlePass> m_particle_pass; // T-I5a-1
     std::unique_ptr<FoliagePass> m_foliage_pass;   // T-I5b-1
+    WaterfallSiteCache m_waterfall_sites;          // T-I5b-4 (render-only, cached)
 
     // T-I5a-6: Hillaire 2020 atmospheric scattering. The LUTs are built once at
     // startup and the sky-view LUT refreshed when the sun moves; the skybox pass
@@ -796,6 +812,9 @@ private:
     // the previously dormant volumetric_lighting.frag. Render-only (design §2).
     SkyAtmosphereLut m_sky_lut;
     std::unique_ptr<Shader> m_aerial_shader;
+    // T-I5b-4 (W1): the animated falling-sheet shader (waterfall.frag) the live
+    // pipeline draws over detected waterfall sites. Render-only dressing.
+    std::unique_ptr<Shader> m_waterfall_shader;
     double m_sky_full_precompute_ms = 0.0;
     double m_sky_view_refresh_ms = 0.0; // last sky-view refresh cost (0 = none this frame)
     // Sky-derived scattering ambient (the sky-view hemisphere integral); folded
