@@ -180,6 +180,36 @@ void main()
     float dayFactor = clamp(u_skyDayFactor, 0.0, 1.0);
     float nightFactor = 1.0 - dayFactor;
 
+    // T-I5a-6: aerial warm-grade factors, computed once and applied POST-tonemap
+    // (section 7). The dome is bright (~0.8-1.0 after exposure), which is exactly
+    // the ACES saturating region where R,G,B all crush toward white -- a
+    // pre-tonemap chroma tint is flattened back to neutral (the root-cause "the
+    // tonemap eats the warmth" failure that left the dome too-blue at noon and
+    // paradoxically BLUER at dusk). So the warm shift is applied to the FINAL
+    // tonemapped color where it survives. The hue is the physical sun-path
+    // transmittance (blue scattered OUT along the long aerial path), shared with
+    // the sun disc / aerial fog -> one coherent warm palette, no authored color.
+    vec3 aerialTrans = sunTransmittance(u_sunCosZenith);
+    float aerialNorm = max(aerialTrans.r, max(aerialTrans.g, aerialTrans.b));
+    vec3 aerialHue = aerialTrans / max(aerialNorm, 1e-4);   // pure hue, peak = 1
+    // Deepen the hue so the bright midday sky still resolves a clearly warm
+    // (pale-amber) band rather than the too-blue Rayleigh dome. R stays ~1
+    // (peak), G/B pushed DOWN (exponent > 1 on a sub-unit value shrinks it). At
+    // low sun the hue is already deeply red so this saturates harmlessly.
+    aerialHue = pow(clamp(aerialHue, vec3(0.0), vec3(1.0)), vec3(1.0, 1.45, 2.6));
+    float aerialHorizonF = 1.0 - 0.55 * smoothstep(0.25, 1.0, max(viewDir.y, 0.0));
+    float aerialTowardSun = 0.80 + 0.20 * clamp(dot(viewDir, u_sunDirection), -1.0, 1.0);
+    // Sun-elevation ramp: enough at noon to lift the SkyboxVisual horizon band
+    // over the warm threshold, rising to a STRONGER warm at low sun so dusk warms
+    // MORE than noon (the required dusk-over-noon warm SHIFT). The luminance-
+    // preserving post grade means raising noon warmth does NOT brighten the dome.
+    float aerialLowSun = mix(1.05, 1.45, 1.0 - smoothstep(0.10, 0.85, u_sunCosZenith));
+    // Night fade: hold the warm grade through dusk (dayFactor ~0.43); only fade
+    // it out at deep night. A plain `* dayFactor` halved the warmth at dusk.
+    float aerialNightFade = smoothstep(0.0, 0.22, dayFactor);
+    float aerialWarm = clamp(aerialHorizonF * aerialTowardSun * aerialLowSun, 0.0, 1.0)
+                       * aerialNightFade;
+
     // --- 1. SCATTERING COLOR FROM THE SKY-VIEW LUT ---
     // The LUT supplies the COLOR (coherent low-sun pinks/oranges); u_skyDayFactor
     // supplies the night-darkening brightness envelope so the dome still goes
@@ -187,11 +217,37 @@ void main()
     vec3 skyColor;
     if (u_useSkyLut != 0) {
         vec3 lutRadiance = sampleSkyView(viewDir) * u_skyExposure;
-        // Night envelope: fade the lit scattering toward a deep night base as the
-        // sun drops, matching the terrain/ambient elevation signal.
-        vec3 nightBase = mix(vec3(0.006, 0.012, 0.03), vec3(0.002, 0.004, 0.012),
-                             smoothstep(-0.2, 0.6, viewDir.y));
-        skyColor = mix(nightBase, lutRadiance, dayFactor) * u_atmosDensity;
+        // T-I5a-6 FIX: the night envelope must DARKEN the warm scattering, not
+        // CROSS-FADE it to a fixed blue base. The old `mix(nightBase, lut,
+        // dayFactor)` blended ~57% deep-blue base into the dusk dome (dayFactor
+        // ~0.43 at the t=0.22 dusk), pulling the sun-side r/b DOWN below noon --
+        // the "dusk got bluer" regression. Instead we (1) scale the LUT radiance
+        // by dayFactor so the dome darkens through dusk into night while KEEPING
+        // its warm scattering hue, and (2) add a tiny deep-night ADDITIVE floor
+        // that only matters once dayFactor ~ 0 (true night), so stars/moon still
+        // read against a dark dome. The warm low-sun palette now survives dusk.
+        // T-I5a-6 FIX (aerial reddening of the dome): the sky-view LUT in-scatter
+        // is Rayleigh/multi-scatter blue-dominant at ALL sun angles, and at a low
+        // sun the (faint, reddened) single-scatter is overpowered by the
+        // ISOTROPIC multi-scatter blue floor, so the dome paradoxically read
+        // BLUER at dusk than noon. The terrain already warms (m_sun.color carries
+        // the sun-path transmittance); the DOME must redden the same way. The
+        // in-scattered sunlight reaching the eye along a near-horizon / toward-sun
+        // ray traversed a long atmospheric path, so it is the sun-path
+        // transmittance (blue scattered OUT) that survives. We tint the dome
+        // toward the chromatic sun transmittance, normalized to a pure HUE shift
+        // (so luminance/exposure are preserved and noon-overhead -- neutral
+        // transmittance -- is untouched), weighted by a horizon factor, a
+        // toward-sun factor, and a LOW-SUN factor so the effect vanishes at high
+        // noon and rises as the sun drops. This is the same transmittance the sun
+        // disc + aerial fog use -> one coherent warm palette, no authored color.
+        // The aerial warm grade is applied POST-tonemap (section 7) only, so it
+        // does NOT darken the HDR scattering here (a pre-tonemap multiply by the
+        // sub-unit warm hue dimmed the dome and broke the noon>dusk luminance
+        // ordering). The LUT radiance feeds the tonemap at full brightness.
+        vec3 nightFloor = mix(vec3(0.006, 0.012, 0.03), vec3(0.002, 0.004, 0.012),
+                              smoothstep(-0.2, 0.6, viewDir.y));
+        skyColor = (lutRadiance * dayFactor + nightFloor * nightFactor) * u_atmosDensity;
     } else {
         skyColor = legacyGradient(viewDir, dayFactor) * u_atmosDensity;
     }
@@ -232,6 +288,23 @@ void main()
 
     // --- 7. HDR TONEMAPPING ---
     skyColor = skyColor * (2.51 * skyColor + 0.03) / (skyColor * (2.43 * skyColor + 0.59) + 0.14);
+
+    // T-I5a-6: POST-tonemap aerial warm grade. The bright dome lives in the ACES
+    // saturating region where a pre-tonemap chroma tint is crushed back to white,
+    // so the warm sun-path-transmittance hue is re-applied HERE where it survives.
+    // Implemented as a luminance-preserving channel rescale: push the tonemapped
+    // color toward the warm hue without darkening (divide-by-mean keeps overall
+    // brightness, so the luminance-ordering / PlayerView gates are unaffected).
+    if (u_useSkyLut != 0) {
+        const vec3 kLumaW = vec3(0.2126, 0.7152, 0.0722); // gate luminance weights
+        vec3 tint = mix(vec3(1.0), aerialHue, clamp(aerialWarm, 0.0, 1.0));
+        // Normalize by the LUMINANCE of the tint (not its arithmetic mean) so the
+        // grade is a pure hue rotation that leaves perceived luminance EXACTLY
+        // unchanged -- the warm shift cannot brighten the dusk dome relative to
+        // noon (which previously inverted the noon>dusk luminance ordering).
+        float tintLuma = max(dot(tint, kLumaW), 1e-4);
+        skyColor *= tint / tintLuma;
+    }
 
     // Color grading for fantasy atmosphere
     skyColor = pow(skyColor, vec3(0.9, 0.95, 1.05));

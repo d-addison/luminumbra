@@ -57,6 +57,13 @@ vec3 sampleSkyInscatter(vec3 viewDir) {
     return texture(u_skyViewLut, vec2(u, v)).rgb;
 }
 
+// Transmittance toward the sun (ground viewer), the warm aerial hue shared with
+// the skybox dome grade.
+vec3 sunTransmittance(float cosZenith) {
+    float u = clamp((cosZenith + 1.0) * 0.5, 0.0, 1.0);
+    return texture(u_transmittanceLut, vec2(u, 0.0)).rgb;
+}
+
 void main() {
     float sceneDepth = texture(gDepth, TexCoords).r;
     // Far-depth (sky) pixels: the dome + its own scattering already supply the
@@ -81,6 +88,23 @@ void main() {
     // night exactly as the dome darkens.
     vec3 inscatter = sampleSkyInscatter(viewDir) * 60.0;
     inscatter *= clamp(u_skyDayFactor, 0.0, 1.0);
+
+    // T-I5a-6 FIX (FarLodHorizon): the raw sky-view in-scatter is BLUE-dominant
+    // (b > r). Composited over the far-LOD terrain at the live/far seam it tinted
+    // the distant ground blue enough to trip the FarLodHorizon boundary-band sky
+    // detector (b >= r+35, g >= r+18 reads as "sky") -- the aerial term was
+    // breaking the very horizon sky-ratio it promised not to touch. We warm the
+    // aerial in-scatter toward the sun-path transmittance hue (the SAME warm grade
+    // the dome uses, so the palette stays coherent) and pull its blue down toward
+    // green, so the far-terrain haze is a pale/warm aerial veil rather than blue
+    // sky -- it no longer classifies as a sky band over the terrain.
+    vec3 aerialTrans = sunTransmittance(u_sunCosZenith);
+    float aNorm = max(aerialTrans.r, max(aerialTrans.g, aerialTrans.b));
+    vec3 aHue = pow(clamp(aerialTrans / max(aNorm, 1e-4), vec3(0.0), vec3(1.0)),
+                    vec3(1.0, 1.4, 2.4));
+    float aLuma = max(dot(aHue, vec3(0.2126, 0.7152, 0.0722)), 1e-4);
+    inscatter *= aHue / aLuma;               // warm hue, luminance preserved
+    inscatter.b = min(inscatter.b, inscatter.g);   // never blue-dominant over land
 
     // alpha = fog composites the aerial haze OVER the lit terrain.
     FragColor = vec4(inscatter, fog);
