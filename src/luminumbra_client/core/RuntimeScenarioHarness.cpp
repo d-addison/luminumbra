@@ -5228,6 +5228,24 @@ constexpr float kFarLodBoundaryBandInnerMeters = 128.0f;
 constexpr float kFarLodBoundaryBandOuterMeters = 384.0f;
 constexpr double kFarLodBoundaryMaxSkyRatio = 0.02;
 constexpr std::uint64_t kFarLodBoundaryMaxVoidClusters = 0;
+// T-I5b-5-water-backlog: re-derived far-water band floor. With the post-aerial-
+// perspective far-water classifier the open-water preset's boundary band must
+// register at least this water fraction at its best station (the live/far sea
+// reads as water past the live ring). Measured ~0.36 (eye) / ~0.71 (elevated)
+// on archipelago with the re-derived bands; 0.05 leaves generous margin while
+// still hard-failing a dry/degenerate band (the pre-re-derivation 0.013 reading
+// that silently passed the old > 0 check).
+constexpr double kFarLodBoundaryMinWaterRatioOpenSea = 0.05;
+// T-I5b-5-water-backlog: sand-flat-brightness band ceiling. The sand-flat metric
+// counts WHITE-CLIPPED warm sand (every channel driven to the ACES hard ceiling
+// - the blown-out sun-bright dry sand the spec calls out). With the albedo_scale
+// LUT calibration the real near-sea-level dry sand stays off that hard clip:
+// measured boundary-band clipped-sand fraction <= ~0.03 across presets. The gate
+// holds the fraction under 0.20 - generous headroom over the calibrated reading
+// (the band ROI also grazes the bright hazy near-horizon, which is legitimately
+// bright but NOT hard-clipped), while still hard-failing a regression that blows
+// the band fully white (the uncalibrated sand was the original defect).
+constexpr double kFarLodBoundaryMaxSandFlatRatio = 0.20;
 // T-I4-DR-horizon-sliver-render: max vertical extent (px) of a thin near-
 // vertical non-sky streak permitted in the sky band above the eye-level horizon.
 // The FAR-render sky-sliver (a far-region triangle straddling the camera /
@@ -5603,12 +5621,27 @@ FarLodHorizonSkySliverStats AnalyzeFarLodHorizonSkySliver(
     return stats;
 }
 
-// T-I4-DR-far-water-sheet: count deep-water-tinted pixels in the live/far
-// boundary band ROI. The far water sheet renders with a deep-water albedo
-// (blue-dominant, mid brightness): B markedly above R, not the near-white of
-// dry far terrain nor the high-value pale skybox. Returns the count and the
-// fraction of band pixels reading as water; non-zero on a water-bearing preset
-// proves the far water continues where the live water ring ends (no dry band).
+// T-I4-DR-far-water-sheet / T-I5b-5-water-backlog: classify deep-water-tinted
+// and sun-bright sand-flat pixels in the live/far boundary band ROI.
+//
+// T-I5b-5 RE-DERIVATION: the original blue-dominance classifier
+//   (b > r + 25 && g >= r && b > 150 && r < 205)
+// was tuned PRE-aerial-perspective. 5a scattering/aerial fog re-tinted the far
+// field: the far-water sheet now renders at a deep, MID-LOW brightness blue
+// (the matte deep-water albedo run through the calibrated irradiance chain;
+// measured boundary-band median ~rgb(52,75,66): B above R, mid-low value), and
+// the near-horizon band is dominated by bright warm aerial haze
+// (median ~rgb(239,234,211): R above B, value > 200). The old "b > 150" floor
+// excluded the now-darker far water entirely (measured 0.013 water-pixel ratio
+// at the open-water elevated station, where the sheet visibly fills the frame),
+// so the gate was passing on a degenerate reading. The bands are re-derived
+// here against the post-5a look:
+//   far water:  B clearly above R, NOT warm-bright; mid brightness band.
+//   sand-flat:  warm (R >= B), all channels bright (the sun-bright dry sand /
+//               hazy near-horizon the spec calls out at ~234).
+// The two predicates are mutually exclusive (the R-vs-B sign and the brightness
+// band separate them), so a single band ROI yields independent water + sand
+// fractions. Render-only analysis; no world_hash / tile-byte input.
 void AnalyzeFarLodBoundaryBandWater(
     const std::vector<unsigned char>& pixels,
     int width,
@@ -5616,10 +5649,14 @@ void AnalyzeFarLodBoundaryBandWater(
     int band_top_row_from_top,
     int band_bottom_row_from_top,
     std::uint64_t& out_water_pixels,
-    std::uint64_t& out_band_pixels)
+    std::uint64_t& out_band_pixels,
+    std::uint64_t* out_sand_flat_pixels)
 {
     out_water_pixels = 0;
     out_band_pixels = 0;
+    if (out_sand_flat_pixels) {
+        *out_sand_flat_pixels = 0;
+    }
     if (width <= 0 || height <= 0 ||
         band_bottom_row_from_top <= band_top_row_from_top ||
         pixels.size() < static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u) {
@@ -5628,10 +5665,22 @@ void AnalyzeFarLodBoundaryBandWater(
     const int min_x = width / 64;
     const int max_x = width - min_x;
     const std::size_t row_stride = static_cast<std::size_t>(width) * 3u;
-    const auto is_far_water = [](unsigned char r, unsigned char g, unsigned char b) {
-        // Blue-dominant, mid brightness: excludes near-white terrain (b<=r) and
-        // the pale skybox (r high). Tuned against the rendered far-water albedo.
-        return b > static_cast<int>(r) + 25 && g >= r && b > 150 && r < 205;
+    // T-I5b-5: re-derived far-water classifier. Blue clearly above red, blue not
+    // far below green (so the deep-blue sheet qualifies but warm terrain does
+    // not), MID brightness (above the dark shadowed-cliff floor, below the bright
+    // hazy sky), and red bounded so the warm bright haze is excluded.
+    const auto is_far_water = [](int r, int g, int b) {
+        return b > r + 4 && b >= g - 12 && b > 35 && b < 165 && r < 175;
+    };
+    // T-I5b-5: WHITE-CLIPPED warm sand-flat. Warm (red at least as strong as
+    // blue) AND every channel driven near the ACES hard ceiling - the blown-out
+    // sun-bright dry sand the spec calls out (~234 and brighter, washing toward
+    // white). The albedo_scale LUT calibration keeps real near-sea-level dry sand
+    // OFF this hard clip; the assertion guards against a regression that blows the
+    // boundary band fully white. The legitimately-bright-but-unclipped hazy
+    // near-horizon (the band ROI grazes it post-5a) does NOT trip this floor.
+    const auto is_sand_flat_bright = [](int r, int g, int b) {
+        return r >= 234 && g >= 226 && b >= 210 && r >= b - 12;
     };
     for (int y_from_top = band_top_row_from_top; y_from_top <= band_bottom_row_from_top; ++y_from_top) {
         if (y_from_top < 0 || y_from_top >= height) {
@@ -5641,9 +5690,15 @@ void AnalyzeFarLodBoundaryBandWater(
         for (int x = min_x; x < max_x; ++x) {
             const std::size_t offset =
                 static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
+            const int r = pixels[offset];
+            const int g = pixels[offset + 1u];
+            const int b = pixels[offset + 2u];
             ++out_band_pixels;
-            if (is_far_water(pixels[offset], pixels[offset + 1u], pixels[offset + 2u])) {
+            if (is_far_water(r, g, b)) {
                 ++out_water_pixels;
+            }
+            if (out_sand_flat_pixels && is_sand_flat_bright(r, g, b)) {
+                ++*out_sand_flat_pixels;
             }
         }
     }
@@ -5681,6 +5736,14 @@ void WriteFarLodHorizonAnalysis(
     std::size_t max_water_sheet_draws = 0;
     double max_boundary_band_water_ratio = 0.0;
     std::uint64_t total_boundary_band_water_pixels = 0;
+    // T-I5b-5-water-backlog: sand-flat-brightness band aggregates. max over ALL
+    // stations is telemetry (the eye-level bands legitimately graze the bright
+    // post-5a hazy near-horizon); the GATED metric is the elevated (downward)
+    // station's band, which frames real near-shore ground - white-clipped sand
+    // there is the calibration regression the gate watches.
+    double max_boundary_band_sand_flat_ratio = 0.0;
+    double elevated_boundary_band_sand_flat_ratio = 0.0;
+    bool elevated_band_resolved = false;
     bool all_stations_passed = captures.size() == expected_station_count;
 
     nlohmann::json station_rows = nlohmann::json::array();
@@ -5709,6 +5772,14 @@ void WriteFarLodHorizonAnalysis(
         max_boundary_band_water_ratio =
             std::max(max_boundary_band_water_ratio, capture.boundary_band_water_ratio);
         total_boundary_band_water_pixels += capture.boundary_band_water_pixels;
+        // T-I5b-5-water-backlog: sand-flat band telemetry + the gated elevated
+        // (downward) station reading.
+        max_boundary_band_sand_flat_ratio =
+            std::max(max_boundary_band_sand_flat_ratio, capture.boundary_band_sand_flat_ratio);
+        if (capture.station.name == std::string("elevated") && capture.boundary.band_resolved) {
+            elevated_band_resolved = true;
+            elevated_boundary_band_sand_flat_ratio = capture.boundary_band_sand_flat_ratio;
+        }
         final_missing = capture.regions_missing;
         final_resident_bytes = capture.resident_bytes;
         final_wanted = capture.regions_wanted;
@@ -5766,6 +5837,9 @@ void WriteFarLodHorizonAnalysis(
             {"far_water", {
                 {"boundary_band_water_pixels", capture.boundary_band_water_pixels},
                 {"boundary_band_water_ratio", capture.boundary_band_water_ratio},
+                // T-I5b-5-water-backlog: per-station sand-flat-brightness band.
+                {"boundary_band_sand_flat_pixels", capture.boundary_band_sand_flat_pixels},
+                {"boundary_band_sand_flat_ratio", capture.boundary_band_sand_flat_ratio},
             }},
             {"passed", station_passed},
         });
@@ -5783,9 +5857,19 @@ void WriteFarLodHorizonAnalysis(
     // diff against the per-station far-OFF baseline (<= 64 px), not the raw sliver.
     const bool sliver_passed =
         max_far_attributable_sliver_px <= kFarLodHorizonMaxFarAttributableSliverPx;
+    // T-I5b-5-water-backlog: sand-flat-brightness gate. The elevated (downward)
+    // station frames real near-shore ground; with the albedo_scale calibration
+    // its band must not be a white-clipped sun-bright sand sheet. When the
+    // elevated band is unresolved (fully occluded) the assertion is vacuously
+    // satisfied (no ground to over-brighten). Eye-level bands are NOT gated here
+    // (they graze the bright post-5a hazy near-horizon); their reading is
+    // recorded as telemetry only.
+    const bool sand_flat_passed =
+        !elevated_band_resolved ||
+        elevated_boundary_band_sand_flat_ratio < kFarLodBoundaryMaxSandFlatRatio;
     const bool passed =
         all_stations_passed && coverage_passed && budget_passed && gbuffer_passed &&
-        sliver_passed && gl_debug.errors == 0;
+        sliver_passed && sand_flat_passed && gl_debug.errors == 0;
 
     const nlohmann::json artifact = {
         {"schema", "luminumbra.farlod_horizon.v1"},
@@ -5805,6 +5889,12 @@ void WriteFarLodHorizonAnalysis(
             // far-attributable diff (max(0, on - off)); the raw max_sky_sliver_px
             // above is informational telemetry only.
             {"max_far_attributable_sliver_px", kFarLodHorizonMaxFarAttributableSliverPx},
+            // T-I5b-5-water-backlog: re-derived far-water band floor (open-sea)
+            // + sand-flat-brightness band ceiling (elevated station).
+            {"min_boundary_band_water_ratio_open_sea", kFarLodBoundaryMinWaterRatioOpenSea},
+            {"max_boundary_band_sand_flat_ratio", kFarLodBoundaryMaxSandFlatRatio},
+            {"boundary_band_inner_m", kFarLodBoundaryBandInnerMeters},
+            {"boundary_band_outer_m", kFarLodBoundaryBandOuterMeters},
             {"f2_outer_range_m", 1536.0},
             {"sky_ratio_enforced", enforce_sky_ratio},
         }},
@@ -5825,6 +5915,12 @@ void WriteFarLodHorizonAnalysis(
             {"max_water_sheet_draws", max_water_sheet_draws},
             {"total_boundary_band_water_pixels", total_boundary_band_water_pixels},
             {"max_boundary_band_water_ratio", max_boundary_band_water_ratio},
+            // T-I5b-5-water-backlog: sand-flat-brightness band. max over all
+            // stations is telemetry; the elevated reading is the gated metric.
+            {"max_boundary_band_sand_flat_ratio", max_boundary_band_sand_flat_ratio},
+            {"elevated_boundary_band_sand_flat_ratio", elevated_boundary_band_sand_flat_ratio},
+            {"elevated_band_resolved", elevated_band_resolved},
+            {"sand_flat_passed", sand_flat_passed},
         }},
         {"gbuffer", {
             // Honest in-run A/B: the committed perf baseline records frame
@@ -5847,6 +5943,8 @@ void WriteFarLodHorizonAnalysis(
             {"max_far_attributable_sliver_px", max_far_attributable_sliver_px},
             {"max_water_sheet_draws", max_water_sheet_draws},
             {"max_boundary_band_water_ratio", max_boundary_band_water_ratio},
+            {"max_boundary_band_sand_flat_ratio", max_boundary_band_sand_flat_ratio},
+            {"elevated_boundary_band_sand_flat_ratio", elevated_boundary_band_sand_flat_ratio},
         }},
         {"gl_debug", {
             {"messages", gl_debug.messages},

@@ -4017,15 +4017,22 @@ int main(int argc, char* argv[]) {
                                                 128.0f, 384.0f, horizon_row_from_top, band_top, band_bottom)) {
                                             capture.boundary = AnalyzeFarLodBoundaryBand(
                                                 frame_pixels, screenshot_width, screenshot_height, band_top, band_bottom);
-                                            // T-I4-DR-far-water-sheet: far water coverage in the band.
+                                            // T-I4-DR-far-water-sheet / T-I5b-5: re-derived far-water
+                                            // coverage + sun-bright sand-flat coverage in the band.
                                             std::uint64_t band_water_px = 0;
                                             std::uint64_t band_total_px = 0;
+                                            std::uint64_t band_sand_flat_px = 0;
                                             AnalyzeFarLodBoundaryBandWater(
                                                 frame_pixels, screenshot_width, screenshot_height, band_top, band_bottom,
-                                                band_water_px, band_total_px);
+                                                band_water_px, band_total_px, &band_sand_flat_px);
                                             capture.boundary_band_water_pixels = band_water_px;
                                             capture.boundary_band_water_ratio =
                                                 band_total_px > 0 ? static_cast<double>(band_water_px) /
+                                                                        static_cast<double>(band_total_px)
+                                                                  : 0.0;
+                                            capture.boundary_band_sand_flat_pixels = band_sand_flat_px;
+                                            capture.boundary_band_sand_flat_ratio =
+                                                band_total_px > 0 ? static_cast<double>(band_sand_flat_px) /
                                                                         static_cast<double>(band_total_px)
                                                                   : 0.0;
                                         }

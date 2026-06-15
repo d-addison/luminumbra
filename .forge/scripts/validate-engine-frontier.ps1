@@ -3920,19 +3920,41 @@ function Test-FarLodHorizon {
         # combined far terrain+water leaves no sky/void band below the horizon.
         $maxWaterDraws = [int]$analysis.far_water.max_water_sheet_draws
         $maxBandWaterRatio = [double]$analysis.aggregates.max_boundary_band_water_ratio
+        # T-I5b-5-water-backlog: re-derived far-water band FLOOR (open sea). The
+        # pre-aerial-perspective classifier passed on a degenerate ~0.013 reading
+        # (just > 0); the re-derived post-5a classifier registers far water as a
+        # real fraction, so the open-water preset must clear a non-trivial floor.
+        $minWaterRatioOpenSea = [double]$analysis.thresholds.min_boundary_band_water_ratio_open_sea
         if ($waterBearingPresets -contains $preset) {
             if ($maxWaterDraws -le 0) {
                 throw "farlod horizon ($preset) water-continuity: far path rendered no water sheet (max_water_sheet_draws=$maxWaterDraws) past the live water ring"
             }
-            if (($openWaterPresets -contains $preset) -and $maxBandWaterRatio -le 0.0) {
-                throw "farlod horizon ($preset) water-continuity: live/far boundary band shows no far-water pixels (max_boundary_band_water_ratio=$maxBandWaterRatio) - dry band at the ring boundary over water"
+            if (($openWaterPresets -contains $preset) -and $maxBandWaterRatio -lt $minWaterRatioOpenSea) {
+                throw "farlod horizon ($preset) water-continuity: re-derived far-water band ratio $maxBandWaterRatio below floor $minWaterRatioOpenSea - far sea not classified past the live ring (post-aerial-perspective re-derivation regressed)"
             }
-            Write-Host ("farlod horizon ({0}): far-water continuity OK - water_sheet_draws_max={1} boundary_band_water_ratio_max={2}" -f `
-                $preset, $maxWaterDraws, $maxBandWaterRatio)
+            Write-Host ("farlod horizon ({0}): far-water continuity OK (re-derived) - water_sheet_draws_max={1} boundary_band_water_ratio_max={2} floor={3}" -f `
+                $preset, $maxWaterDraws, $maxBandWaterRatio, $minWaterRatioOpenSea)
         } else {
             Write-Host ("farlod horizon ({0}): dry preset - far water sheet not asserted (water_sheet_draws_max={1})" -f `
                 $preset, $maxWaterDraws)
         }
+
+        # T-I5b-5-water-backlog: sand-flat-brightness band. The elevated (downward)
+        # station frames real near-shore ground; with the albedo_scale LUT
+        # calibration its band must not be a white-clipped sun-bright sand sheet.
+        # Eye-level bands are excluded (they graze the bright post-5a hazy near-
+        # horizon and are telemetry only). Vacuously satisfied when the elevated
+        # band is unresolved. The harness already folds sand_flat_passed into
+        # analysis.passed; this surfaces an explicit, readable failure + log line.
+        $maxSandFlatCeil = [double]$analysis.thresholds.max_boundary_band_sand_flat_ratio
+        $elevatedBandResolved = [bool]$analysis.far_water.elevated_band_resolved
+        $elevatedSandFlat = [double]$analysis.far_water.elevated_boundary_band_sand_flat_ratio
+        $maxSandFlat = [double]$analysis.aggregates.max_boundary_band_sand_flat_ratio
+        if ($elevatedBandResolved -and ($elevatedSandFlat -ge $maxSandFlatCeil)) {
+            throw "farlod horizon ($preset) sand-flat-brightness: elevated boundary band white-clipped sand ratio $elevatedSandFlat >= ceiling $maxSandFlatCeil (near-sea-level dry sand blown sun-bright; albedo calibration regressed)"
+        }
+        Write-Host ("farlod horizon ({0}): sand-flat band OK - elevated_clipped_sand={1} (ceiling={2}, all-station_max={3} telemetry)" -f `
+            $preset, $elevatedSandFlat, $maxSandFlatCeil, $maxSandFlat)
 
         # T-I4-DR-sliver-baseline-diff: above-horizon sky-sliver gate, ratcheted.
         # The area-based below-horizon sky-ratio gate cannot see a thin
