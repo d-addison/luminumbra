@@ -1,12 +1,13 @@
-# Engine Iteration 5b Spec — Life & Water (SKELETON)
+# Engine Iteration 5b Spec — Life & Water (FINAL)
 
-Status: SKELETON (authored 2026-06-14 alongside the 5a spec round). 5b is the
-second half of iteration 5 (split 5a/5b, owner 2026-06-14). It is **dispatched
-after 5a closes** so it inherits the post-5a `world_hash` (the 5a `wind` +
-`weather` sub-hashes) and the re-blessed gate baselines. The full
-`dispatch.json` + `design-decisions.md` for 5b are authored at 5a closeout / 5b
-kickoff; this skeleton fixes the system list, the folded water backlog, and the
-hard dependencies on 5a outputs so 5a's read-side APIs are designed for them.
+Status: FINAL (promoted 2026-06-15 at 5a closeout). 5b is the second half of
+iteration 5 (split 5a/5b, owner 2026-06-14). It inherits the post-5a `world_hash`
+**`d950a6afc12a5cdc`** (wind + weather + strike sub-hashes) and the re-blessed 5a
+gate baselines. Execution artifacts (binding): `engine-iteration-5b/
+design-decisions.md`, `engine-iteration-5b/critique.md` (F1–F6),
+`.forge/tasks/engine-iteration-5b/dispatch.json` (7 tasks, all Opus). DESIGN
+GOAL: **no world_hash bump #4** — render/client-only systems plus a
+canonical-neutral ecology registry (see design-decisions §0).
 
 Inherits (binding): `.forge/artifacts/engine-roadmap/long-range-roadmap.md`
 §"Iteration 5" items 4–7; the iteration-4 determinism contract; the 5a
