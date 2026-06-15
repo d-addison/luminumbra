@@ -517,7 +517,15 @@ void ParticlePass::update(float dt) {
                 // a fake vertical bar. Smoothstep so side-on rain stays full-length.
                 if (world_speed > 1e-4f) {
                     const float frac = std::clamp(screen_speed / world_speed, 0.0f, 1.0f);
-                    screen_vel_scale = std::clamp(frac / 0.45f, 0.0f, 1.0f);
+                    // T-I5b-DR-storm2 (M7): keep a VISIBLE streak floor when looking
+                    // down. The previous frac/0.45 collapsed end-on rain all the way to
+                    // a ~round dot; combined with the down-view grey veil, the down-look
+                    // read as fog with no rain at all. We now (a) widen the side-on band
+                    // (frac/0.30 reaches full streak sooner) and (b) lift the minimum so
+                    // even fully end-on rain (looking straight down) still draws a short
+                    // foreshortened streak instead of a near-invisible droplet. So down-
+                    // pitched rain reads as real falling streaks, not haze.
+                    screen_vel_scale = std::clamp(frac / 0.30f, 0.35f, 1.0f);
                 }
             } else {
                 const float horiz = advected_vel.x;
