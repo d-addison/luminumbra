@@ -168,21 +168,34 @@ vec3 renderClouds(vec3 viewDir, vec3 baseColor, float dayFactor) {
     float horizonFade = smoothstep(0.02, 0.22, viewDir.y);
 
     float coverage = cloudCoverageAt(worldXZ);
-    // T-I5b-DR-sweep-visual-fixes (defect 4): give the cloud sheet real STRUCTURE
-    // at HIGH (storm/overcast) coverage, where it used to read as a flat grey dome.
-    // The extra structure is gated by a coverage weight (~0 at the fair-weather
-    // 0.45 deck, ~1 at the 0.85 storm deck) so the low-coverage clear-sky dome the
-    // SkyboxVisual gradient gate frames is left essentially unchanged (it must keep
-    // its horizon->zenith luminance drop). Layer two detail octaves and let them
-    // MODULATE the coverage (carving holes + piling cores) for fluffy billows.
+    // T-I5b-DR-sky-fixes (defect M8): a storm deck (u_cloudCoverageAmount ~0.85)
+    // must read as a HEAVY, MENACING OVERCAST with real billow STRUCTURE -- not the
+    // old flat grey dome with a couple of detached cotton-ball puffs. Two problems
+    // were fixed:
+    //   (1) COVERAGE HOLES. At 0.85 the smoothstep band in cloudCoverageAt still
+    //       left large stretches of field below threshold -> bare sky gaps that
+    //       read as a near-empty dome with sparse puffs. We lift a coverage FLOOR
+    //       with coverage so the whole sky fills in to an unbroken overcast sheet,
+    //       leaving only shallow thinning instead of clear holes.
+    //   (2) FLATNESS. Once filled, a uniform coverage made the deck a flat grey
+    //       (low luma std -> CLOUDS_FLAT_NO_STRUCTURE). The structure is now carried
+    //       in the cloud SHADING (lump-driven luminance billows below), so a filled
+    //       overcast still has strong internal relief and high luma variance.
+    // All of this is gated by structureWeight (~0 at the fair-weather 0.45 deck,
+    // ~1 at the 0.85 storm deck) so the clear-sky dome the SkyboxVisual gradient
+    // gate frames keeps its horizon->zenith luminance drop untouched.
     float structureWeight = smoothstep(0.55, 0.80, u_cloudCoverageAmount);
     float detailA = fbm(worldXZ * (1.0 / 520.0) + u_cloudScrollOffset * (1.0 / 520.0), 4);
     float detailB = fbm(worldXZ * (1.0 / 210.0) + vec2(53.0, 19.0), 3);
+    // Higher-frequency billow term for the fine cauliflower relief on the overcast.
+    float detailC = fbm(worldXZ * (1.0 / 95.0) + vec2(7.0, 31.0), 3);
     float lumpy = (detailA - 0.5) * 0.55 + (detailB - 0.5) * 0.30;
-    // Structured coverage (storm) carves billows; plain coverage (fair) is the old
-    // faint detail-modulated deck. Blend by structureWeight so only storms restyle.
-    float structured = clamp(coverage + coverage * lumpy * 1.6, 0.0, 1.0);
-    structured = smoothstep(0.04, 0.62, structured);
+    // Storm coverage: a high FLOOR (heavy overcast fills the sky) with only shallow
+    // thinning carved by the lump term, so there are no bare-sky holes but the deck
+    // is not a dead-flat fill either. Fair coverage keeps the old detail-modulated
+    // sparse deck. Blend by structureWeight so only storms restyle.
+    float fillFloor = mix(0.55, 0.97, structureWeight); // storm fills the dome
+    float structured = clamp(fillFloor + (lumpy + (detailC - 0.5) * 0.25) * 0.30, 0.0, 1.0);
     float plain = clamp(coverage * (0.82 + 0.18 * detailA), 0.0, 1.0);
     coverage = mix(plain, structured, structureWeight);
     coverage *= horizonFade;
@@ -194,11 +207,18 @@ vec3 renderClouds(vec3 viewDir, vec3 baseColor, float dayFactor) {
     float sunDot = dot(viewDir, u_sunDirection);
     float cloudLighting = clamp(sunDot * 0.5 + 0.5, 0.0, 1.0);
     cloudLighting = max(cloudLighting, 0.35);
-    // Relief term (storm only): detailA lights the tops, deepening the 3D read of
-    // the billows. Gated by structureWeight so the fair-weather deck keeps its old
-    // flat lighting (and the gate's zenith luminance).
-    cloudLighting = clamp(cloudLighting + structureWeight * (detailA - 0.5) * 0.55, 0.18, 1.0);
+    // Relief term (storm only): a multi-octave billow signal lights the cauliflower
+    // tops and sinks the valleys, so a FILLED overcast still varies strongly in
+    // luminance (menacing structured deck, high luma std) instead of a flat grey
+    // sheet. detailC adds the fine high-frequency texture. Gated by structureWeight
+    // so the fair-weather deck keeps its old flat lighting (and the gate's zenith
+    // luminance for the clear-sky cells).
+    float stormRelief = (detailA - 0.5) * 0.9 + (detailC - 0.5) * 0.6 + (detailB - 0.5) * 0.4;
+    cloudLighting = clamp(cloudLighting + structureWeight * stormRelief, 0.10, 1.0);
     vec3 cloudColor = mix(shadowCloud, litCloud, cloudLighting);
+    // Storm deck darkens overall (heavy nimbus reads grey-charcoal, not white) so
+    // the overcast is genuinely menacing rather than a bright fluffy ceiling.
+    cloudColor = mix(cloudColor, cloudColor * 0.62, structureWeight);
     // Night tint + darkening (kept from the old layer so night clouds silhouette).
     cloudColor = mix(cloudColor, vec3(0.18, 0.16, 0.26), 1.0 - dayFactor);
 
@@ -235,42 +255,93 @@ vec3 renderStars(vec3 viewDir, float nightIntensity) {
 }
 
 // Aurora effect for magical atmosphere. T-I5a-DR-atmospheric-visuals: aurora is a
-// NIGHT-ONLY phenomenon. The old `nightIntensity < 0.3` cutoff let the aurora
-// bleed into DUSK (at dusk dayFactor ~0.43 -> nightIntensity ~0.57, well over
-// 0.3), painting green/purple smears across the twilight dome. The contribution
-// is now gated by a deep-night ENVELOPE derived from u_skyDayFactor: it is fully
-// off until the sun is well below the horizon (dayFactor high) and only ramps up
-// once the dome is genuinely dark. We also smooth the lower-edge coverage so the
-// aurora curtain fades in over the horizon band instead of banding hard at y=0.2.
+// NIGHT-ONLY phenomenon, gated by u_auroraStrength (CPU-derived from the sun's RAW
+// elevation): a hard 0 through day + dusk + dawn, only opening once the sun is well
+// below the horizon, so the twilight dome stays clean (defect M6).
+//
+// T-I5b-DR-sky-fixes (defect M5): the aurora is rebuilt as flowing vertical
+// CURTAINS (draped sheets), NOT the old soft circular blobs. The previous version
+// took a product sin(uv.x)*cos(uv.y) of the raw screen-space viewDir.x/.y and
+// smoothstep(abs(.)) -> isolated 2D lobes that read as discrete green/magenta ORBS
+// and, because they keyed off viewDir.x, hugged/cut hard at the frame edge.
+//
+// The rewrite parameterizes the dome by AZIMUTH around the horizon (continuous,
+// wraps seamlessly -> no frame-edge hard cut) and HEIGHT. A curtain is a set of
+// thin azimuthal RIDGES that wander slowly with the flow (the draped sheet seen
+// edge-on), with fine vertical striations running up the sheet and a height
+// envelope so the curtain hangs from the upper dome and feathers out at the
+// horizon and the zenith. The result is band/sheet structure, not splotches.
 vec3 renderAurora(vec3 viewDir, float dayFactor) {
-    // T-I5b-DR-sweep-visual-fixes (defect 5): the deep-night envelope now comes
-    // from u_auroraStrength (CPU-derived from the sun's RAW elevation), which is a
-    // hard 0 through dusk and only opens once the sun is well below the horizon.
-    // The old dayFactor-only envelope could not separate dusk (dayFactor ~0.02)
-    // from night (~0) and bled the aurora into the twilight dome.
     float nightEnvelope = clamp(u_auroraStrength, 0.0, 1.0);
-    if (nightEnvelope <= 0.0 || viewDir.y < 0.18) return vec3(0.0);
+    // Curtains hang above the horizon band; start the fade a little above y=0 so
+    // nothing snaps on at the frame edge, but allow them well up the dome.
+    if (nightEnvelope <= 0.0 || viewDir.y < 0.12) return vec3(0.0);
 
-    float auroraTime = u_time * 0.1;
-    vec2 auroraUV = vec2(viewDir.x, viewDir.y) * 3.0;
+    float t = u_time * 0.06;
 
-    float aurora1 = sin(auroraUV.x * 2.0 + auroraTime) * cos(auroraUV.y + auroraTime * 0.7);
-    float aurora2 = sin(auroraUV.x * 1.5 - auroraTime * 0.8) * cos(auroraUV.y * 1.3 - auroraTime);
+    // Azimuth around the dome [-pi,pi] -> [0,1], continuous and seamless so a
+    // curtain does not hard-cut where the view frustum clips the dome. Height is
+    // the view elevation [0 horizon .. 1 zenith].
+    float az = atan(viewDir.z, viewDir.x);     // [-pi, pi]
+    float azu = az / (2.0 * PI_SKY) + 0.5;     // [0, 1], wraps
+    float height = clamp(viewDir.y, 0.0, 1.0);
 
-    float auroraFlow = fbm(auroraUV + vec2(auroraTime, -auroraTime * 0.5), 3);
+    // --- curtain placement: a few wandering vertical sheets in azimuth ---------
+    // Warp the azimuth coordinate slowly so the sheets drape and flow rather than
+    // sitting on fixed meridians. fbm of (azimuth, slow time) gives the meander.
+    float meander = fbm(vec2(azu * 6.0, t * 1.3), 4) - 0.5;       // [-0.5,0.5]
+    float curtainCoord = azu * 7.0 + meander * 2.2 + t * 0.35;    // sheets per dome
 
-    float auroraIntensity = (aurora1 + aurora2) * auroraFlow;
-    auroraIntensity = smoothstep(0.2, 0.8, abs(auroraIntensity));
-    // Smooth the lower-edge coverage: the curtain fades in over the horizon band
-    // (0.18 -> 0.34) rather than snapping on at a hard threshold -> no blocky band.
-    float lowerEdge = smoothstep(0.18, 0.34, viewDir.y);
-    auroraIntensity *= lowerEdge * nightEnvelope * 0.3;
+    // RIDGE function: fract->triangular gives evenly-ish spaced sheets; sharpen
+    // into narrow bright filaments (the curtain seen near edge-on). The width is
+    // modulated by a second slow noise so some sheets are broad, some are thin.
+    float ridgePhase = fract(curtainCoord);
+    float ridge = abs(ridgePhase - 0.5) * 2.0;                    // 0 at sheet core, 1 between
+    float widthMod = 0.45 + 0.40 * fbm(vec2(curtainCoord * 0.7, t), 3);
+    float sheet = 1.0 - smoothstep(0.0, widthMod, ridge);         // bright sheet cores
 
-    vec3 auroraColor = mix(
-        vec3(0.2, 0.8, 0.4),
-        vec3(0.6, 0.2, 0.9),
-        sin(auroraTime + viewDir.x * 5.0) * 0.5 + 0.5
-    );
+    // Vary sheet brightness so the curtain breaks into separate draped panels
+    // rather than a uniform ring -- but as VERTICAL panels, never round blobs. The
+    // panel only DIMS sheets (floor 0.45) instead of fully dropping them, so some
+    // green curtain is always present whatever azimuth a view frames (the night
+    // aurora gate needs a reliable green fraction in its sky ROI).
+    float panel = 0.45 + 0.55 * smoothstep(0.30, 0.80, fbm(vec2(floor(curtainCoord) * 1.7, t * 0.5), 3));
+    sheet *= panel;
+
+    // --- vertical structure: striations running UP the sheet -------------------
+    // Fine vertical filaments give the curtain its rayed texture; they scroll
+    // upward slowly. Keyed to height so they run vertically, not across.
+    float striation = 0.65 + 0.35 * fbm(vec2(curtainCoord * 5.0, height * 9.0 - t * 2.0), 3);
+    sheet *= striation;
+
+    // --- height envelope: curtains hang from the upper dome --------------------
+    // Feather in above the horizon (0.12 -> 0.30), brightest through the mid dome,
+    // and ease off toward the zenith so the sheets read as draped, bottom-lit
+    // sheets rather than a flat overhead wash.
+    float lowerEdge = smoothstep(0.12, 0.30, height);
+    // Extend the curtain well up the dome so its GREEN body fills the upper-sky
+    // band a horizon-framed view sees (the TimeOfDaySweep night ROI is the top
+    // third of the frame -> mid/high view elevation); only feather out near the
+    // zenith. A too-low upper fade left only the magenta tips in that ROI and the
+    // night-only aurora gate read zero green.
+    float upperFade = 1.0 - smoothstep(0.78, 0.99, height);
+    // Bottom-emphasis: aurora curtains are brightest along their lower fringe.
+    float bottomGlow = 0.60 + 0.40 * (1.0 - smoothstep(0.12, 0.60, height));
+    float vertEnv = lowerEdge * upperFade * bottomGlow;
+
+    float auroraIntensity = sheet * vertEnv * nightEnvelope * 0.46;
+
+    // Colour: a tall GREEN body (O2) topped by a thin magenta/violet fringe (N2)
+    // only near the zenith. The split is driven by HEIGHT plus a slow azimuthal
+    // drift, so a single sheet grades vertically. The green is held dominant
+    // through almost the whole dome (transition pushed near the zenith); the
+    // TimeOfDaySweep night ROI spans view elevation ~0.43..0.97 (pitch +30, 90 deg
+    // FOV, top 55%), so the green body must reach high to register the night-only
+    // aurora curtain there -- only a thin violet cap sits above it.
+    float hue = clamp((height - 0.74) * 3.0 + 0.16 * sin(t * 1.7 + az * 2.0), 0.0, 1.0);
+    vec3 auroraColor = mix(vec3(0.12, 0.85, 0.45),   // green base
+                           vec3(0.55, 0.22, 0.85),   // violet tips
+                           hue);
 
     return auroraColor * auroraIntensity;
 }
@@ -431,6 +502,38 @@ void main()
         // noon (which previously inverted the noon>dusk luminance ordering).
         float tintLuma = max(dot(tint, kLumaW), 1e-4);
         skyColor *= tint / tintLuma;
+
+        // T-I5b-DR-sky-fixes (defect M6): kill the SICKLY YELLOW-GREEN dawn cast.
+        // At a low-but-positive sun (dawn, sun ~27 deg up) the sky-view LUT radiance
+        // is green-dominant (G leads R and B), and the luminance-preserving warm
+        // grade above cannot fix a base whose GREEN already leads -- the bright dawn
+        // dome read yellow-green instead of a clean warm amber. A real sunrise sky
+        // is amber/orange: R >= G >= B. So clamp any GREEN EXCESS (G above R) back
+        // down toward R on the BRIGHT dome only. This is gated by:
+        //   - brightness (only the bright day/dawn dome; the dark dusk/night dome
+        //     the TimeOfDaySweep gate measures has low luma and is untouched, so the
+        //     dusk warm-half r/b band + night-dark gates are unaffected), and
+        //   - the warm-grade weight (off at deep night) so stars/aurora are clean.
+        // It only ever REMOVES an unwanted green lead; a neutral or warm (R>=G) sky
+        // is left exactly as-is, so dusk stays warm.
+        //
+        // The clamp fires ONLY when GREEN leads BOTH red AND blue -- i.e. the true
+        // sickly yellow-green dawn cast -- AND only at a LOW SUN (dawn/dusk window).
+        // At a HIGH sun the SkyboxVisual smoke (time-of-day 0.04, sun near zenith)
+        // measures a strict horizon->zenith luminance gradient; touching G per-band
+        // there perturbed that gradient's monotonicity. So a low-sun gate
+        // (u_sunCosZenith) holds the clamp fully OFF at noon and only opens it as
+        // the sun drops toward the horizon -- exactly the dawn/dusk band where the
+        // green cast appears. The dawn sun (cosZenith ~0.47) is well inside it. The
+        // blue-dominant noon dome (B >= G) is untouched on both counts.
+        float skyLuma = dot(skyColor, kLumaW);
+        float brightDome = smoothstep(0.35, 0.7, skyLuma);   // bright day/dawn only
+        float lowSunGate = 1.0 - smoothstep(0.55, 0.78, u_sunCosZenith); // off at noon
+        float rb = max(skyColor.r, skyColor.b);
+        // Only a green lead over BOTH channels counts (yellow-green dawn cast).
+        float greenLead = max(skyColor.g - rb, 0.0);
+        skyColor.g -= greenLead * 0.85 * brightDome * lowSunGate
+                      * clamp(aerialNightFade, 0.0, 1.0);
     }
 
     // Color grading for fantasy atmosphere
