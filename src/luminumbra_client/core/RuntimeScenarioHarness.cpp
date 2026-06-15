@@ -2367,6 +2367,28 @@ std::uint64_t SeasonSweepTick(int season_index) {
     return (RP::kTicksPerSeasonCycle * 3) / 4;      // winter solstice
 }
 
+const TimeOfDaySweepCapturePlan& TimeOfDaySweepCapturePlanAt(int index) {
+    // T-I5a-DR-green-precip-tod: single source of truth for the six capture
+    // windows. The summer (season 0) noon/dusk/night own the canonical
+    // timeofday-{noon,dusk,night}.ppm files + the ordering/hue-band/emissive
+    // assertions; winter (season 1) adds the per-season comparison set. The
+    // phase_time values are pinned sun positions: noon 0.04 (near zenith), dusk
+    // 0.22 (sun ~10.8 deg up -> a genuine partial-day sky, brighter than night),
+    // night 0.45 (sun below the horizon). The per-frame pin drives the sun from
+    // THESE values for the pending capture, so the captured frame is always lit
+    // by the labelled phase.
+    static const std::array<TimeOfDaySweepCapturePlan, kTimeOfDaySweepCaptureCount> kPlans{{
+        {0.13, "noon",  0, 0.04f, "summer", 0, "screenshots/timeofday-noon.ppm"},
+        {0.28, "dusk",  1, 0.22f, "summer", 0, "screenshots/timeofday-dusk.ppm"},
+        {0.42, "night", 2, 0.45f, "summer", 0, "screenshots/timeofday-night.ppm"},
+        {0.63, "noon",  0, 0.04f, "winter", 1, "screenshots/timeofday-winter-noon.ppm"},
+        {0.78, "dusk",  1, 0.22f, "winter", 1, "screenshots/timeofday-winter-dusk.ppm"},
+        {0.92, "night", 2, 0.45f, "winter", 1, "screenshots/timeofday-winter-night.ppm"},
+    }};
+    const int clamped = std::clamp(index, 0, kTimeOfDaySweepCaptureCount - 1);
+    return kPlans[static_cast<std::size_t>(clamped)];
+}
+
 SeasonSweepPoint SeasonSweepAt(double progress) {
     SeasonSweepPoint p;
     const double clamped = std::clamp(progress, 0.0, 1.0);
