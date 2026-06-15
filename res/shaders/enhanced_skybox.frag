@@ -18,6 +18,24 @@ uniform float u_atmosDensity = 1.0;
 uniform float u_cloudCoverage = 0.5;
 uniform vec3 u_skyTint = vec3(1.0, 0.95, 0.8);
 
+// T-I5a-8 (C3): wind-advected 2.5D cloud coverage field. The coverage is a pure
+// function of world XZ position, a wind-driven scroll offset, the weather-derived
+// coverage amount, and a biome variation factor. The IDENTICAL coverage function
+// (cloudCoverageAt below) is evaluated here for the sky-dome cloud layer AND in
+// lighting_pass.frag for the projected cast shadow, so the drifting dome clouds
+// and the crawling terrain shadows stay registered. Render-only: nothing here
+// writes back into any sim/world_hash input (critique F2, one-way render->sim).
+//   u_cloudScrollOffset  - wind * tick-phase, in world metres (drift vector)
+//   u_cloudCoverageAmount - [0,1] sky fraction the weather state wants covered
+//   u_cloudBiomeVariation - biome-driven coverage bias (e.g. wetter biomes cloudier)
+//   u_cloudPlaneHeight    - world Y of the cloud sheet (for dome projection + shadow)
+//   u_cloudShadowStrength - how much the projected coverage darkens the sun
+uniform vec2  u_cloudScrollOffset = vec2(0.0);
+uniform float u_cloudCoverageAmount = 0.45;
+uniform float u_cloudBiomeVariation = 0.0;
+uniform float u_cloudPlaneHeight = 900.0;
+uniform float u_cloudShadowStrength = 0.0;
+
 // T-I5a-6: PBR atmospheric scattering. The authored vertical gradient + ad-hoc
 // rayleigh/mie haze is replaced by the precomputed Hillaire 2020 sky-view LUT
 // (192x108 sky dome radiance for the current sun) plus the transmittance LUT
@@ -65,6 +83,31 @@ float fbm(vec2 p, int octaves) {
     return value;
 }
 
+// T-I5a-8 (C3): the SHARED wind-advected cloud coverage field. Returns the cloud
+// optical density [0,1] at a world XZ position. This EXACT function is duplicated
+// verbatim in lighting_pass.frag (GLSL has no shared includes here); the dome
+// clouds below and the projected cast shadow there evaluate the same field at the
+// same world XZ, so a dome cloud and its ground shadow stay registered as both
+// drift with the wind. f(noise, wind offset, weather coverage, biome):
+//   - the world XZ is scrolled by u_cloudScrollOffset (wind * tick-phase) so the
+//     whole field translates with the large-scale wind direction;
+//   - two fbm octave-stacks at different scales give billowy structure;
+//   - u_cloudCoverageAmount (+ biome bias) sets the smoothstep threshold so a
+//     low coverage yields sparse fair-weather puffs and a high coverage an
+//     overcast sheet. PARTLY-CLOUDY is the mid range the CloudShadow gate uses.
+float cloudCoverageAt(vec2 worldXZ) {
+    // Metres -> noise units. ~1200 m feature scale for the main cloud cells.
+    vec2 p = (worldXZ + u_cloudScrollOffset) * (1.0 / 1200.0);
+    float base = fbm(p, 5);
+    float detail = fbm(p * 2.7 + vec2(11.3, 4.7), 3);
+    float field = base * 0.72 + detail * 0.28;
+    // Coverage threshold: higher coverage -> lower threshold -> more sky covered.
+    float cov = clamp(u_cloudCoverageAmount + u_cloudBiomeVariation, 0.0, 1.0);
+    float lo = mix(0.62, 0.30, cov);
+    float hi = mix(0.82, 0.55, cov);
+    return smoothstep(lo, hi, field);
+}
+
 // T-I5a-6: sample the sky-view LUT for a view direction. u = azimuth around the
 // sun [0,2pi]->[0,1]; v = view zenith [0 (up), pi (down)]->[0,1].
 vec3 sampleSkyView(vec3 viewDir) {
@@ -85,36 +128,45 @@ vec3 sunTransmittance(float cosZenith) {
     return texture(u_transmittanceLut, vec2(u, 0.0)).rgb;
 }
 
-// Enhanced cloud rendering
-// T-I4-DR-tod-sky-balance: dayFactor lights the clouds. At night they fall to a
+// T-I5a-8 (C3): wind-advected sky-dome cloud layer + landscape-distance imposters.
+// The view ray is intersected with the cloud plane (u_cloudPlaneHeight); the hit's
+// world XZ feeds the SHARED cloudCoverageAt field, so the dome clouds are the same
+// field that casts the ground shadow and they DRIFT with the wind as the scroll
+// offset advances. Rays toward the horizon hit the plane far away -> the cloud
+// cells foreshorten into fluffy landscape-distance imposters near the horizon
+// band; rays toward the zenith sample the overhead sheet. Render-only.
+// T-I4-DR-tod-sky-balance: dayFactor lights the clouds; at night they fall to a
 // faint dark silhouette instead of holding a lit sunset tint over the dome.
 vec3 renderClouds(vec3 viewDir, vec3 baseColor, float dayFactor) {
-    if(viewDir.y < 0.0) return baseColor; // No clouds below horizon
+    if (viewDir.y < 0.02) return baseColor; // No clouds at/below the horizon
 
-    float cloudTime = u_time * 0.02;
-    vec2 cloudUV = viewDir.xz / (viewDir.y + 0.5) * 0.5;
+    // Eye assumed near the origin of the (translation-stripped) sky cube. Project
+    // the ray up to the cloud plane: t = planeHeight / viewDir.y. The resulting
+    // XZ is in metres, so it lines up with the lighting pass world XZ.
+    float t = u_cloudPlaneHeight / max(viewDir.y, 1e-3);
+    vec2 worldXZ = viewDir.xz * t;
 
-    float highClouds = fbm(cloudUV * 2.0 + vec2(cloudTime, cloudTime * 0.7), 4);
-    highClouds = smoothstep(0.4, 0.8, highClouds) * 0.45;
+    // Distance fade so the far (near-horizon) cloud band thins into haze rather
+    // than tiling hard -- this is the "imposter" foreshortening band.
+    float horizonFade = smoothstep(0.02, 0.22, viewDir.y);
 
-    float midClouds = fbm(cloudUV * 1.0 + vec2(cloudTime * 0.5, -cloudTime * 0.3), 5);
-    midClouds = smoothstep(0.5, 0.9, midClouds) * u_cloudCoverage;
+    float coverage = cloudCoverageAt(worldXZ);
+    // A faint higher detail octave breaks up the silhouette near the zenith.
+    float detail = fbm(worldXZ * (1.0 / 520.0) + u_cloudScrollOffset * (1.0 / 520.0), 3);
+    coverage = clamp(coverage * (0.82 + 0.18 * detail), 0.0, 1.0);
+    coverage *= horizonFade;
 
-    float haze = fbm(cloudUV * 0.5 + vec2(-cloudTime * 0.2, cloudTime * 0.1), 3);
-    haze = smoothstep(0.3, 0.7, haze) * 0.3;
-
-    vec3 cloudColor = mix(
-        vec3(0.9, 0.9, 1.0),
-        vec3(0.6, 0.4, 0.8),
-        1.0 - dayFactor
-    );
-
+    // Self-shadow: denser cloud cores read darker on their sun-away side.
+    vec3 litCloud = vec3(0.95, 0.96, 1.0);
+    vec3 shadowCloud = vec3(0.55, 0.57, 0.66);
     float sunDot = dot(viewDir, u_sunDirection);
-    float cloudLighting = max(0.3, sunDot * 0.5 + 0.5);
-    cloudColor *= cloudLighting * dayFactor + 0.04 * dayFactor;
+    float cloudLighting = max(0.35, sunDot * 0.5 + 0.5);
+    vec3 cloudColor = mix(shadowCloud, litCloud, cloudLighting);
+    // Night tint + darkening (kept from the old layer so night clouds silhouette).
+    cloudColor = mix(cloudColor, vec3(0.18, 0.16, 0.26), 1.0 - dayFactor);
+    cloudColor *= dayFactor + 0.04 * dayFactor;
 
-    float totalCloudDensity = clamp(highClouds + midClouds + haze, 0.0, 1.0);
-    return mix(baseColor, cloudColor, totalCloudDensity);
+    return mix(baseColor, cloudColor, coverage);
 }
 
 // Enhanced star field

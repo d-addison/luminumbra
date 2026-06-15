@@ -109,6 +109,10 @@ struct RuntimeScenarioConfig {
     // T-I5a-1: spawns the fixture particle emitter, snapshots the
     // sim-deterministic emitter descriptor set, and captures a particle render.
     bool particle_emitter_determinism_smoke() const { return scenario == "particle_emitter_determinism_smoke"; }
+    // T-I5a-8 (C3): partly-cloudy fixture; asserts the moving cast-shadow signature
+    // on terrain (ROI luminance delta as a cloud-shadow edge drifts) + cloud layer
+    // present in the sky.
+    bool cloud_shadow_smoke() const { return scenario == "cloud_shadow_smoke"; }
     bool timeofday_sweep_smoke() const { return scenario == "timeofday_sweep_smoke"; }
     bool lod_boundary_oscillation_smoke() const { return scenario == "lod_boundary_oscillation_smoke"; }
     bool lod_seam_arrival_smoke() const { return scenario == "lod_seam_arrival_smoke"; }
@@ -433,6 +437,64 @@ void WriteWeatherVisualAnalysis(
     const WeatherPixelStats& weather_stats,
     const std::string& weather_type,
     float weather_intensity,
+    const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass);
+
+// --- Cloud-shadow smoke (T-I5a-8, C3) ---
+// PARTLY-CLOUDY fixture (NOT overcast — critique F4). The skybox dome renders the
+// wind-advected cloud layer and the lighting pass projects the SAME coverage field
+// to cast crawling terrain shadows. The camera holds a fixed downward-tilted view
+// of terrain; the cloud field scrolls with the wind across the run. Two captures
+// (t0, t1) are taken as a cloud-shadow edge drifts across a FIXED terrain ROI: the
+// gate asserts a luminance delta in that ROI between the two times (the moving
+// cast-shadow signature) AND that the cloud layer is present in the sky band. A
+// clouds-OFF lighting GPU timing is captured alongside the clouds-ON timing so the
+// added per-fragment cloud-shadow sample cost is bounded against the ≤ 0.4 ms
+// budget (design §7, F3). Render-only: the cloud field never feeds the sim (F2).
+struct CloudShadowPixelStats {
+    int width = 0;
+    int height = 0;
+    // Fixed terrain ROI (a centred rectangle in the lower frame, on lit ground)
+    // mean luminance — the cast shadow darkens this band as a cloud core crosses.
+    std::uint64_t terrain_roi_pixels = 0;
+    double terrain_roi_mean_luminance = 0.0;
+    // Sky band cloud presence: clouds raise the mean luminance + the horizontal
+    // gradient of the upper sky band over a clear dome (bright cloud edges).
+    std::uint64_t sky_roi_pixels = 0;
+    double sky_mean_luminance = 0.0;
+    double sky_horizontal_gradient_mean = 0.0;
+};
+
+CloudShadowPixelStats AnalyzeCloudShadowPixels(const std::vector<unsigned char>& pixels, int width, int height);
+
+struct CloudShadowResult {
+    // Two terrain-ROI captures as the shadow edge crosses.
+    double terrain_roi_luminance_t0 = 0.0;
+    double terrain_roi_luminance_t1 = 0.0;
+    double terrain_roi_luminance_delta = 0.0; // |t1 - t0|
+    // Cloud presence in the sky (from the t1, fully-clouded capture).
+    double sky_mean_luminance = 0.0;
+    double sky_horizontal_gradient_mean = 0.0;
+    bool cloud_layer_present = false;
+    // GPU timing: lighting pass with the cloud-shadow sample OFF vs ON; the added
+    // cost is on - off, bounded against the budget on release.
+    double lighting_gpu_ms_clouds_off = 0.0;
+    double lighting_gpu_ms_clouds_on = 0.0;
+    double cloud_shadow_added_ms = 0.0;
+    double cloud_shadow_budget_ms = 0.4;
+    bool gpu_timers_supported = false;
+    // Cloud fixture parameters echoed for the artifact.
+    double coverage_amount = 0.0;
+    double shadow_strength = 0.0;
+    double scroll_offset_t0 = 0.0;
+    double scroll_offset_t1 = 0.0;
+};
+
+void WriteCloudShadowAnalysis(
+    const std::filesystem::path& artifact_dir,
+    const std::string& terrain_t0_screenshot,
+    const std::string& terrain_t1_screenshot,
+    const std::string& sky_screenshot,
+    const CloudShadowResult& result,
     const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass);
 
 // --- Particle emitter determinism smoke (T-I5a-1) ---
