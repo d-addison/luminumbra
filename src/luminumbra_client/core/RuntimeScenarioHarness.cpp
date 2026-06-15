@@ -8014,7 +8014,14 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
     if (foliage != nullptr) {
         foliage->set_enabled(true);
         foliage_ready = foliage->load_scatter_set(deps.root_dir / "data/common/foliage/scatter_set.json");
-        foliage->set_fade_distances(60.0f, 120.0f);
+        // T-I5b-DR-sweep-visual-fixes (defect 1): tighten the fade so foliage is a
+        // NEAR-FIELD ground cover only. The old (60,120) ring let distant cards sit
+        // out near the horizon, where a card's tip can poke ABOVE the terrain
+        // silhouette and render as a green firefly against the sky/storm dome. A
+        // (28,58) ring keeps the scatter dense underfoot (defect 2) while removing
+        // the far floaters entirely -- combined with the denser candidate budget,
+        // the near ground reads as real grass cover.
+        foliage->set_fade_distances(28.0f, 58.0f);
         foliage->set_wind(glm::vec2(3.0f, 1.5f));
     }
     FoliageScatterContext foliage_ctx{world_system};
@@ -8071,9 +8078,18 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
         for (int i = 0; i < settle_frames; ++i) {
             // Rebuild foliage instances around the live camera each settle frame
             // so the scatter is fresh for the framing.
-            if (foliage != nullptr && foliage_ready && !chunk_scatter.empty()) {
+            // T-I5b-DR-sweep-visual-fixes (defect 1): foliage is GROUND cover -- it
+            // must never appear in an UP-pitched (sky) shot. When the camera looks
+            // up, rebuild from an EMPTY scatter set so the live instance set is
+            // cleared (no stale cards from the previous down/horizon cell linger to
+            // render as green specks against the sky/storm dome). The down + horizon
+            // cells still get the full dense scatter.
+            if (foliage != nullptr && foliage_ready) {
+                static const std::vector<Luminumbra::Rendering::FoliagePass::ChunkScatter> kEmptyScatter;
+                const bool looking_up = camera->Pitch > 5.0f;
+                const auto& scatter_for_cell = looking_up ? kEmptyScatter : chunk_scatter;
                 foliage->rebuild_instances(
-                    chunk_scatter, &FoliageSurfaceQuery, &foliage_ctx, camera->Position);
+                    scatter_for_cell, &FoliageSurfaceQuery, &foliage_ctx, camera->Position);
             }
             ok = deps.render_and_read(pixels, fb_w, fb_h);
             if (!ok) { break; }
@@ -8136,12 +8152,16 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
                 particles->set_wind(glm::vec3(4.0f, 0.0f, 1.0f));
             }
             // Periodic lightning: fire a deterministic bolt on the storm cells.
+            // T-I5b-DR-sweep-visual-fixes (defect 3): a stronger pulse + ground
+            // flash so the strike clearly READS over the dark night-storm dome
+            // (the old 0.18 pulse was nearly invisible once the storm dimmed the
+            // already-dark night frame). Daytime storm cells keep ample contrast.
             lstate.active = true;
-            lstate.pulse_intensity = 0.18f;
+            lstate.pulse_intensity = 0.42f;
             lstate.bolt_width_ndc = 0.010f;
             lstate.bolt_glow_ndc = 0.034f;
             lstate.cloud_darkness = 0.5f;
-            lstate.ground_flash = 0.4f;
+            lstate.ground_flash = 0.7f;
             const glm::vec3 fwd = glm::normalize(glm::vec3(camera->Front.x, 0.0f, camera->Front.z));
             const glm::vec3 strike_ground = glm::vec3(camera->Position) + fwd * 200.0f;
             const LightningBoltGeometry bolt = BuildLightningBolt(
