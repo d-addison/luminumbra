@@ -1018,6 +1018,8 @@ SkyboxPixelStats AnalyzeSkyboxPixels(
 
             SkyboxVisualBandStats& band = stats.bands[static_cast<std::size_t>(band_from_horizon)];
             band.mean_luminance += luminance;
+            band.mean_r += static_cast<double>(r); // T-I5a-6 palette-emergence
+            band.mean_b += static_cast<double>(b);
             ++band.pixels;
         }
     }
@@ -1025,10 +1027,17 @@ SkyboxPixelStats AnalyzeSkyboxPixels(
     for (SkyboxVisualBandStats& band : stats.bands) {
         if (band.pixels > 0) {
             band.mean_luminance /= static_cast<double>(band.pixels);
+            band.mean_r /= static_cast<double>(band.pixels);
+            band.mean_b /= static_cast<double>(band.pixels);
         }
     }
     stats.horizon_band_mean = stats.bands.front().mean_luminance;
     stats.zenith_band_mean = stats.bands.back().mean_luminance;
+    // T-I5a-6: warm/cool band R/B ratios for the low-sun scattering palette.
+    stats.horizon_band_r_b_ratio = stats.bands.front().mean_b > 1.0
+        ? stats.bands.front().mean_r / stats.bands.front().mean_b : 0.0;
+    stats.zenith_band_r_b_ratio = stats.bands.back().mean_b > 1.0
+        ? stats.bands.back().mean_r / stats.bands.back().mean_b : 0.0;
 
     // "Monotonic-ish": count adjacent horizon->zenith transitions where the
     // luminance rises by more than a small tolerance (clouds add noise).
@@ -1060,6 +1069,19 @@ void WriteSkyboxVisualAnalysis(
     constexpr int kMaxMonotonicViolations = 1;
     constexpr std::uint64_t kMinSunDiscPixels = 50;
     constexpr double kMinSunClusterFraction = 0.6;
+    // T-I5a-6: low-sun scattering palette emergence (pinned t=0.04, low sun).
+    // The warm horizon band must read genuinely warm (R>B) AND warmer than the
+    // cool zenith band by a clear margin -- the pinks/oranges that emerge from
+    // Rayleigh/Mie at long optical paths. Clear sky (F4: SkyboxVisual keeps the
+    // clear-sky atmosphere; no storms).
+    constexpr double kMinHorizonWarmRatio = 1.02;       // horizon R/B > 1 (warm)
+    constexpr double kMinHorizonOverZenithWarmGap = 0.03; // horizon r/b - zenith r/b
+    // GPU-timer budgets (PINNED design §7). Enforced on RELEASE by the PS1 gate
+    // (debug is ~10x slower -- A2 wind precedent); the harness emits the raw
+    // measurements + within-budget flags either way.
+    constexpr double kAerialBudgetMs = 0.3;
+    constexpr double kSkyViewRefreshBudgetMs = 0.2;
+    constexpr double kSkyPrecomputeBudgetMs = 8.0;
 
     const double sun_cluster_fraction = pixel_stats.sun_disc_pixels > 0
         ? static_cast<double>(pixel_stats.sun_disc_pixels_near_expected) / static_cast<double>(pixel_stats.sun_disc_pixels)
@@ -1072,10 +1094,22 @@ void WriteSkyboxVisualAnalysis(
         sun_on_screen &&
         pixel_stats.sun_disc_pixels >= kMinSunDiscPixels &&
         sun_cluster_fraction >= kMinSunClusterFraction;
+    // T-I5a-6 palette emergence.
+    const double horizon_over_zenith_warm_gap =
+        pixel_stats.horizon_band_r_b_ratio - pixel_stats.zenith_band_r_b_ratio;
+    const bool palette_emergence_passed =
+        pixel_stats.horizon_band_r_b_ratio >= kMinHorizonWarmRatio &&
+        horizon_over_zenith_warm_gap >= kMinHorizonOverZenithWarmGap;
+    // GPU-timer correctness (non-negative, supported). Budget enforcement is the
+    // PS1 gate's job on release.
+    const bool aerial_within_budget = render_pass.aerial_gpu_ms <= kAerialBudgetMs;
+    const bool sky_view_refresh_within_budget = render_pass.sky_view_refresh_ms <= kSkyViewRefreshBudgetMs;
+    const bool sky_precompute_within_budget = render_pass.sky_full_precompute_ms <= kSkyPrecomputeBudgetMs;
     const bool passed =
         render_pass.skybox_draws > 0 &&
         gradient_passed &&
         sun_disc_passed &&
+        palette_emergence_passed &&  // T-I5a-6
         gl_debug.errors == 0;
 
     nlohmann::json bands = nlohmann::json::array();
@@ -1083,6 +1117,8 @@ void WriteSkyboxVisualAnalysis(
         bands.push_back({
             {"band_from_horizon", i},
             {"mean_luminance", pixel_stats.bands[i].mean_luminance},
+            {"mean_r", pixel_stats.bands[i].mean_r},
+            {"mean_b", pixel_stats.bands[i].mean_b},
             {"pixels", pixel_stats.bands[i].pixels}
         });
     }
@@ -1113,6 +1149,27 @@ void WriteSkyboxVisualAnalysis(
             {"centroid_y_from_top", pixel_stats.sun_disc_centroid_y},
             {"max_luminance", pixel_stats.max_luminance}
         }},
+        {"palette_emergence", {
+            // T-I5a-6: low-sun scattering palette (warm horizon band, clear sky).
+            {"passed", palette_emergence_passed},
+            {"horizon_band_r_b_ratio", pixel_stats.horizon_band_r_b_ratio},
+            {"zenith_band_r_b_ratio", pixel_stats.zenith_band_r_b_ratio},
+            {"horizon_over_zenith_warm_gap", horizon_over_zenith_warm_gap}
+        }},
+        {"gpu_timer", {
+            // T-I5a-6: per-pass GPU timers for the aerial term + sky precompute.
+            // Budgets enforced on RELEASE by the PS1 gate (debug ~10x slower).
+            {"supported", render_pass.gpu_timers_supported},
+            {"aerial_gpu_ms", render_pass.aerial_gpu_ms},
+            {"aerial_budget_ms", kAerialBudgetMs},
+            {"aerial_within_budget", aerial_within_budget},
+            {"sky_view_refresh_ms", render_pass.sky_view_refresh_ms},
+            {"sky_view_refresh_budget_ms", kSkyViewRefreshBudgetMs},
+            {"sky_view_refresh_within_budget", sky_view_refresh_within_budget},
+            {"sky_full_precompute_ms", render_pass.sky_full_precompute_ms},
+            {"sky_precompute_budget_ms", kSkyPrecomputeBudgetMs},
+            {"sky_precompute_within_budget", sky_precompute_within_budget}
+        }},
         {"roi", {
             {"width", pixel_stats.width},
             {"height", pixel_stats.height},
@@ -1126,7 +1183,9 @@ void WriteSkyboxVisualAnalysis(
             {"min_sun_cluster_fraction", kMinSunClusterFraction},
             {"sun_cluster_radius_fraction", kSunClusterRadiusFraction},
             {"sun_gradient_exclusion_radius_fraction", kSunGradientExclusionRadiusFraction},
-            {"sun_disc_min_luminance", kSunDiscMinLuminance}
+            {"sun_disc_min_luminance", kSunDiscMinLuminance},
+            {"min_horizon_warm_ratio", kMinHorizonWarmRatio},
+            {"min_horizon_over_zenith_warm_gap", kMinHorizonOverZenithWarmGap}
         }},
         {"render_pass", {
             {"skybox_draws", render_pass.skybox_draws},
@@ -1648,6 +1707,14 @@ void WriteTimeOfDaySweepAnalysis(
     //     a wide margin.
     constexpr double kMaxNightSkyLuminance = 60.0;
     constexpr double kMinDuskSkyWarmShift = 0.05;   // dusk warm-half sky r/b increase vs noon
+    // T-I5a-6: dawn/dusk HUE-BAND assertion on top of the existing ordering +
+    // relative warm-shift. The Hillaire scattering must make the low-sun sky
+    // warm-half band read GENUINELY warm in ABSOLUTE terms (R/B approaching or
+    // exceeding parity), not merely warmer than noon's blue. Clear sky (F4).
+    // The dusk warm-half r/b must clear this floor AND exceed the noon warm-half
+    // r/b (the rising-warm direction). 0.95 sits below the scattering-warmed
+    // dusk band but well above the cool midday sky (~0.7-0.8 R/B).
+    constexpr double kMinDuskSkyWarmBandRatio = 0.95;
 
     const TimeOfDayPhaseCapture* noon = nullptr;
     const TimeOfDayPhaseCapture* dusk = nullptr;
@@ -1680,6 +1747,14 @@ void WriteTimeOfDaySweepAnalysis(
         ? dusk->stats.sky_warm_half_r_b_ratio - noon->stats.sky_warm_half_r_b_ratio
         : 0.0;
     const bool dusk_sky_warm_passed = all_phases_captured && dusk_sky_warm_shift >= kMinDuskSkyWarmShift;
+
+    // T-I5a-6: absolute dawn/dusk hue-band. The dusk warm-half sky band must be
+    // genuinely warm (R/B near/above parity) AND warmer than noon's warm half --
+    // the scattering palette rising warm at low sun (clear sky).
+    const double dusk_sky_warm_band_ratio = dusk ? dusk->stats.sky_warm_half_r_b_ratio : 0.0;
+    const bool dusk_sky_warm_band_passed = all_phases_captured &&
+        dusk_sky_warm_band_ratio >= kMinDuskSkyWarmBandRatio &&
+        dusk_sky_warm_band_ratio > (noon ? noon->stats.sky_warm_half_r_b_ratio : 0.0);
 
     // Emissive night check: when a registry-emissive material is reachable
     // in a surface capture, the dedicated night-emissive capture must show a
@@ -1714,6 +1789,7 @@ void WriteTimeOfDaySweepAnalysis(
         warm_shift_passed &&
         night_sky_dark_passed &&     // T-I4-DR-tod-sky-balance
         dusk_sky_warm_passed &&      // T-I4-DR-tod-sky-balance
+        dusk_sky_warm_band_passed && // T-I5a-6: absolute dawn/dusk hue band
         emissive_passed &&
         gl_debug.errors == 0;
 
@@ -1763,6 +1839,21 @@ void WriteTimeOfDaySweepAnalysis(
             {"dusk_sky_warm_half_r_b_ratio", dusk ? dusk->stats.sky_warm_half_r_b_ratio : 0.0},
             {"sky_warm_half_r_b_ratio_increase", dusk_sky_warm_shift}
         }},
+        {"dusk_sky_hue_band", {
+            // T-I5a-6: absolute dawn/dusk hue band (scattering palette rises warm
+            // at low sun, clear sky).
+            {"passed", dusk_sky_warm_band_passed},
+            {"dusk_sky_warm_half_r_b_ratio", dusk_sky_warm_band_ratio},
+            {"min_dusk_sky_warm_band_ratio", kMinDuskSkyWarmBandRatio}
+        }},
+        {"gpu_timer", {
+            // T-I5a-6: sky precompute startup one-shot recorded in render
+            // telemetry (budget enforced on release by the PS1 gate).
+            {"supported", render_pass.gpu_timers_supported},
+            {"aerial_gpu_ms", render_pass.aerial_gpu_ms},
+            {"sky_view_refresh_ms", render_pass.sky_view_refresh_ms},
+            {"sky_full_precompute_ms", render_pass.sky_full_precompute_ms}
+        }},
         {"emissive_check", {
             {"status", emissive_status},
             {"passed", emissive_passed},
@@ -1787,6 +1878,7 @@ void WriteTimeOfDaySweepAnalysis(
             {"min_dusk_warm_shift", kMinDuskWarmShift},
             {"max_night_sky_luminance", kMaxNightSkyLuminance},
             {"min_dusk_sky_warm_shift", kMinDuskSkyWarmShift},
+            {"min_dusk_sky_warm_band_ratio", kMinDuskSkyWarmBandRatio},
             {"min_emissive_glow_pixels", kMinEmissiveGlowPixels},
             {"emissive_glow_min_luminance", kEmissiveGlowMinLuminance},
             {"sky_band_height_fraction", kSkyRoiHeightFraction}
