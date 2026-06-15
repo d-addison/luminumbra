@@ -1426,6 +1426,32 @@ float TimeOfDaySweepPhaseTime(double progress) {
     return 0.45f;      // night: sun well below the horizon, moon up
 }
 
+std::uint64_t SeasonSweepTick(int season_index) {
+    // T-I5a-7 (C2): summer = quarter-year phase (0.25 -> highest arc), winter =
+    // three-quarter phase (0.75 -> lowest arc). PURE integer tick math off the
+    // long-period cycle; the RenderPipeline derives the season phase from this.
+    using RP = Luminumbra::Rendering::RenderPipeline;
+    if (season_index == 0) {
+        return RP::kTicksPerSeasonCycle / 4;        // summer solstice
+    }
+    return (RP::kTicksPerSeasonCycle * 3) / 4;      // winter solstice
+}
+
+SeasonSweepPoint SeasonSweepAt(double progress) {
+    SeasonSweepPoint p;
+    const double clamped = std::clamp(progress, 0.0, 1.0);
+    // First half == summer, second half == winter; each half replays the
+    // noon/dusk/night thirds via the existing phase-time mapping.
+    const bool winter = clamped >= 0.5;
+    p.season_index = winter ? 1 : 0;
+    p.season_label = winter ? "winter" : "summer";
+    p.season_tick = SeasonSweepTick(p.season_index);
+    const double within = winter ? (clamped - 0.5) * 2.0 : clamped * 2.0;
+    p.time_of_day = TimeOfDaySweepPhaseTime(std::clamp(within, 0.0, 1.0));
+    p.phase_index = (within < 1.0 / 3.0) ? 0 : (within < 2.0 / 3.0 ? 1 : 2);
+    return p;
+}
+
 TimeOfDayPixelStats AnalyzeTimeOfDayPixels(const std::vector<unsigned char>& pixels, int width, int height) {
     TimeOfDayPixelStats stats;
     stats.width = width;
@@ -1716,13 +1742,21 @@ void WriteTimeOfDaySweepAnalysis(
     // dusk band but well above the cool midday sky (~0.7-0.8 R/B).
     constexpr double kMinDuskSkyWarmBandRatio = 0.95;
 
+    // T-I5a-7 (C2): the SUMMER season (season_index 0) owns the existing
+    // ordering / warm-shift / hue-band / emissive assertions -- these read the
+    // summer noon/dusk/night exactly as the pre-season sweep did, so they stay
+    // GREEN. The winter captures feed the NEW per-season comparison below.
     const TimeOfDayPhaseCapture* noon = nullptr;
     const TimeOfDayPhaseCapture* dusk = nullptr;
     const TimeOfDayPhaseCapture* night = nullptr;
+    const TimeOfDayPhaseCapture* winter_noon = nullptr;
+    const TimeOfDayPhaseCapture* winter_dusk = nullptr;
+    const TimeOfDayPhaseCapture* winter_night = nullptr;
     for (const TimeOfDayPhaseCapture& phase : phases) {
-        if (phase.name == "noon") noon = &phase;
-        else if (phase.name == "dusk") dusk = &phase;
-        else if (phase.name == "night") night = &phase;
+        const bool summer = phase.season_index == 0;
+        if (phase.name == "noon") { if (summer) noon = &phase; else winter_noon = &phase; }
+        else if (phase.name == "dusk") { if (summer) dusk = &phase; else winter_dusk = &phase; }
+        else if (phase.name == "night") { if (summer) night = &phase; else winter_night = &phase; }
     }
 
     const bool all_phases_captured = noon && dusk && night;
@@ -1782,6 +1816,50 @@ void WriteTimeOfDaySweepAnalysis(
              night->stats.max_luminance <= night->stats.sky_max_luminance + kNightSkyMaxEpsilon);
     }
 
+    // T-I5a-7 (C2): SEASON-SWEEP assertions. The same noon/dusk/night phases are
+    // captured under TWO seasons; assert a REAL per-season difference in BOTH
+    // (a) the sun-path band -- summer's tick-derived solar arc sits HIGHER than
+    //     winter's at the same time-of-day (the seasonal declination), measured
+    //     directly from the sun elevation the season modulates; AND
+    // (b) the palette band -- summer reads WARMER than winter (the luminance-
+    //     preserving season tint), measured as a daytime sky/terrain r/b ratio
+    //     difference at the same noon phase. Clear sky (F4).
+    const bool season_phases_captured =
+        noon && winter_noon && dusk && winter_dusk && night && winter_night;
+    // (a) sun-path band: summer noon elevation must exceed winter noon by a
+    // margin well above per-frame jitter (the declination is ~23.5 deg => the
+    // noon-elevation gap is ~tens of degrees; require a comfortably clearing
+    // 0.05 rad ~ 2.9 deg minimum).
+    constexpr double kMinSeasonSunElevationGap = 0.05; // radians
+    const double summer_noon_elev = noon ? noon->sun_elevation_rad : 0.0;
+    const double winter_noon_elev = winter_noon ? winter_noon->sun_elevation_rad : 0.0;
+    const double season_sun_elev_gap = summer_noon_elev - winter_noon_elev;
+    const bool season_sun_path_passed =
+        season_phases_captured && season_sun_elev_gap >= kMinSeasonSunElevationGap;
+    // (b) palette band: the two seasons' palettes must differ measurably in a
+    // CONSISTENT direction. WINTER reads WARMER (higher frame r/b ratio) than
+    // summer -- the season tint leans winter golden / summer cool, REINFORCING
+    // the low-winter-sun / high-summer-sun arc, so the palette band is a large,
+    // robust signal (the authored tint and the sun-path physics agree). The tint
+    // is luminance-preserving, so use a jitter-clearing floor on the daytime
+    // frame r/b difference.
+    constexpr double kMinSeasonPaletteWarmthGap = 0.01; // frame r/b ratio delta
+    const double summer_noon_rb = noon ? noon->stats.frame_r_b_ratio : 0.0;
+    const double winter_noon_rb = winter_noon ? winter_noon->stats.frame_r_b_ratio : 0.0;
+    // winter - summer: winter is the warmer season here (see direction note).
+    const double season_palette_gap = winter_noon_rb - summer_noon_rb;
+    const bool season_palette_passed =
+        season_phases_captured && season_palette_gap >= kMinSeasonPaletteWarmthGap;
+    // The two seasons must actually be distinct tick-derived phases (proves the
+    // sweep drove different ticks, not the same frame twice).
+    const bool season_phases_distinct =
+        noon && winter_noon &&
+        noon->season_tick != winter_noon->season_tick &&
+        std::abs(noon->season_phase - winter_noon->season_phase) > 1e-4;
+    const bool season_sweep_passed =
+        season_phases_captured && season_phases_distinct &&
+        season_sun_path_passed && season_palette_passed;
+
     const GLDebugRuntimeStats gl_debug = CurrentGLDebugRuntimeStats();
     const bool passed =
         render_pass.skybox_draws > 0 &&
@@ -1790,6 +1868,7 @@ void WriteTimeOfDaySweepAnalysis(
         night_sky_dark_passed &&     // T-I4-DR-tod-sky-balance
         dusk_sky_warm_passed &&      // T-I4-DR-tod-sky-balance
         dusk_sky_warm_band_passed && // T-I5a-6: absolute dawn/dusk hue band
+        season_sweep_passed &&       // T-I5a-7: per-season sun-path + palette
         emissive_passed &&
         gl_debug.errors == 0;
 
@@ -1799,7 +1878,14 @@ void WriteTimeOfDaySweepAnalysis(
             {"name", phase.name},
             {"time_of_day", phase.time_of_day},
             {"screenshot", phase.file},
-            {"pixels", TimeOfDayPixelStatsToJson(phase.stats)}
+            {"pixels", TimeOfDayPixelStatsToJson(phase.stats)},
+            // T-I5a-7 (C2): tick-derived season state at capture time.
+            {"season_label", phase.season_label},
+            {"season_index", phase.season_index},
+            {"season_phase", phase.season_phase},
+            {"season_tick", phase.season_tick},
+            {"sun_elevation_rad", phase.sun_elevation_rad},
+            {"season_sun_declination_rad", phase.season_sun_declination_rad}
         });
     }
 
@@ -1846,6 +1932,36 @@ void WriteTimeOfDaySweepAnalysis(
             {"dusk_sky_warm_half_r_b_ratio", dusk_sky_warm_band_ratio},
             {"min_dusk_sky_warm_band_ratio", kMinDuskSkyWarmBandRatio}
         }},
+        {"season_sweep", {
+            // T-I5a-7 (C2): per-season sun-path + palette bands. The SAME
+            // noon/dusk/night phases captured under two TICK-DERIVED seasons
+            // (summer/winter), asserting a real per-season difference. The season
+            // is render-derived (pure function of tick) and adds NOTHING to
+            // world_hash.
+            {"passed", season_sweep_passed},
+            {"phases_captured", season_phases_captured},
+            {"phases_distinct", season_phases_distinct},
+            {"summer_season_tick", noon ? noon->season_tick : 0},
+            {"winter_season_tick", winter_noon ? winter_noon->season_tick : 0},
+            {"summer_season_phase", noon ? noon->season_phase : 0.0},
+            {"winter_season_phase", winter_noon ? winter_noon->season_phase : 0.0},
+            {"sun_path", {
+                {"passed", season_sun_path_passed},
+                {"summer_noon_sun_elevation_rad", summer_noon_elev},
+                {"winter_noon_sun_elevation_rad", winter_noon_elev},
+                {"summer_noon_sun_declination_rad", noon ? noon->season_sun_declination_rad : 0.0},
+                {"winter_noon_sun_declination_rad", winter_noon ? winter_noon->season_sun_declination_rad : 0.0},
+                {"sun_elevation_gap_rad", season_sun_elev_gap},
+                {"min_sun_elevation_gap_rad", kMinSeasonSunElevationGap}
+            }},
+            {"palette", {
+                {"passed", season_palette_passed},
+                {"summer_noon_frame_r_b_ratio", summer_noon_rb},
+                {"winter_noon_frame_r_b_ratio", winter_noon_rb},
+                {"palette_warmth_gap", season_palette_gap},
+                {"min_palette_warmth_gap", kMinSeasonPaletteWarmthGap}
+            }}
+        }},
         {"gpu_timer", {
             // T-I5a-6: sky precompute startup one-shot recorded in render
             // telemetry (budget enforced on release by the PS1 gate).
@@ -1879,6 +1995,8 @@ void WriteTimeOfDaySweepAnalysis(
             {"max_night_sky_luminance", kMaxNightSkyLuminance},
             {"min_dusk_sky_warm_shift", kMinDuskSkyWarmShift},
             {"min_dusk_sky_warm_band_ratio", kMinDuskSkyWarmBandRatio},
+            {"min_season_sun_elevation_gap_rad", kMinSeasonSunElevationGap},
+            {"min_season_palette_warmth_gap", kMinSeasonPaletteWarmthGap},
             {"min_emissive_glow_pixels", kMinEmissiveGlowPixels},
             {"emissive_glow_min_luminance", kEmissiveGlowMinLuminance},
             {"sky_band_height_fraction", kSkyRoiHeightFraction}

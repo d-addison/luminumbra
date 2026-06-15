@@ -1,5 +1,6 @@
 #include "RenderPipeline.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/core/DeterministicMath.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "core/Log.h"
 #include "rendering/Shader.h"
@@ -3243,10 +3244,48 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     m_timeOfDay += deltaTime / m_dayDurationSeconds;
     m_timeOfDay = fmod(m_timeOfDay, 1.0f);
 
+    // T-I5a-7 (C2): SEASON phase as a PURE FUNCTION of the tick count. Integer
+    // epoch math (modulo the long-period year), then a single DeterministicMath
+    // trig evaluation -- NO wall-clock, NO float accumulator (critique F7). The
+    // phase wraps deterministically on kTicksPerSeasonCycle, so the same tick
+    // always yields the same season; the quantity is reproducible from the tick
+    // alone and is never folded into world_hash (render-derived, one-way).
+    namespace DM = Luminumbra::DeterministicMath;
+    const std::uint64_t tick_in_year = m_seasonTick % kTicksPerSeasonCycle;
+    // Integer ratio first (exact), then to float: keeps the mapping a pure
+    // function of the integer tick rather than an accumulated remainder.
+    m_seasonPhase = static_cast<float>(
+        static_cast<double>(tick_in_year) / static_cast<double>(kTicksPerSeasonCycle));
+    // Seasonal sine wave over the year, ZEROED at phase 0 so the DEFAULT season
+    // (tick 0, the state every non-season scenario sees because it never calls
+    // set_season_tick) is season-NEUTRAL and reproduces the pre-T-I5a-7 sun arc /
+    // palette EXACTLY -- the season is a delta layered on top, not a baseline
+    // shift. Phase 0 == spring equinox (neutral); +1 at phase 0.25 (summer
+    // solstice, highest arc / longest day); -1 at phase 0.75 (winter solstice,
+    // lowest arc / shortest day). DeterministicMath::Sin keeps the trig clean.
+    const float season_wave = DM::Sin(m_seasonPhase * DM::kTwoPi);
+    // Axial-tilt amplitude (radians) -> a real per-season change in the sun's
+    // peak elevation. ~23.5 deg Earth obliquity; the existing fixed -0.2f tilt
+    // is replaced by this season-varying declination so summer reads a visibly
+    // higher noon arc than winter.
+    constexpr float kSeasonalTiltAmplitude = 0.41015237f; // ~23.5 degrees
+    m_seasonSunDeclination = kSeasonalTiltAmplitude * season_wave;
+
     float sun_angle_rad = m_timeOfDay * 2.0f * glm::pi<float>();
-    m_sun.direction = glm::normalize(glm::vec3(sin(sun_angle_rad), -cos(sun_angle_rad), -0.2f));
+    // The z component carries the seasonal declination (was a constant -0.2f).
+    // The light direction's y-down component sets the sun elevation; pushing z
+    // toward 0 RAISES the post-normalization elevation, pushing it more negative
+    // LOWERS it. A positive declination (summer) therefore nudges z toward 0
+    // (higher noon sun / longer day) and a negative one (winter) more negative
+    // (lower noon sun / shorter day). sin() of the declination gives the offset;
+    // the -0.2f baseline keeps the season-neutral (tick 0) arc EXACTLY as before.
+    const float season_tilt_z = DM::Sin(m_seasonSunDeclination) - 0.2f;
+    m_sun.direction = glm::normalize(glm::vec3(sin(sun_angle_rad), -cos(sun_angle_rad), season_tilt_z));
 
     float sun_up_factor = glm::dot(m_sun.direction, glm::vec3(0.0f, -1.0f, 0.0f));
+    // Sun elevation above the horizon (radians). Exposed for the season sweep so
+    // it can assert per-season sun-path bands. asin domain-clamped.
+    m_sunElevationRad = std::asin(glm::clamp(sun_up_factor, -1.0f, 1.0f));
     m_sun.intensity = glm::smoothstep(-0.1f, 0.15f, sun_up_factor);
 
     // T-I4-DR-tod-sky-balance: the sky dome's day/twilight/night blend is keyed
@@ -3292,6 +3331,34 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     }
     m_sun.color *= sun_transmittance;
 
+    // T-I5a-7 (C2): SEASON PALETTE tint. A small luminance-preserving hue shift
+    // selects the biome material/foliage palette feel per season. The direction
+    // REINFORCES the seasonal sun path rather than fighting it: WINTER (low arc,
+    // season_wave < 0) leans WARM/golden -- matching the long-optical-path low
+    // sun -- while SUMMER (high arc, season_wave > 0) leans COOL/blue, matching
+    // the high overhead sun. Applied to the SUN color (and, below, the ambient)
+    // so the whole lit scene + foliage picks up the seasonal cast. Amplitude is
+    // small and luminance-normalized so it modulates HUE without moving the
+    // calibrated noon luminance the LodGround/RenderHealth baselines depend on.
+    // Render-only. (season_wave: +1 summer -> R down/B up; -1 winter -> R up/B
+    // down.)
+    constexpr float kSeasonTintStrength = 0.06f; // +/- per-channel hue swing
+    m_seasonPaletteTint = glm::vec3(
+        1.0f - kSeasonTintStrength * season_wave,
+        1.0f,
+        1.0f + kSeasonTintStrength * season_wave);
+    {
+        // Preserve luminance: renormalize the tint so it only rotates hue.
+        const float tint_lum =
+            m_seasonPaletteTint.r * 0.2126f +
+            m_seasonPaletteTint.g * 0.7152f +
+            m_seasonPaletteTint.b * 0.0722f;
+        if (tint_lum > 1e-6f) {
+            m_seasonPaletteTint /= tint_lum;
+        }
+    }
+    m_sun.color *= m_seasonPaletteTint;
+
     m_moonDirection = -m_sun.direction;
 
     // Ambient scales by the same PI as SUN_IRRADIANCE_SCALE (lighting_pass
@@ -3316,6 +3383,34 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
             m_skyAmbientColor = glm::mix(m_skyAmbientColor, tinted, 0.5f * m_sun.intensity);
         }
     }
+    // T-I5a-7 (C2): carry the seasonal palette tint into the DAYTIME ambient too
+    // (luminance-preserving, scaled by sun intensity) so shadowed foliage/terrain
+    // picks up the season cast, not just sunlit surfaces. Night ambient is left
+    // untouched (tint folds out as m_sun.intensity -> 0).
+    {
+        const float amb_lum =
+            m_skyAmbientColor.r * 0.2126f +
+            m_skyAmbientColor.g * 0.7152f +
+            m_skyAmbientColor.b * 0.0722f;
+        const glm::vec3 season_tinted = m_skyAmbientColor * m_seasonPaletteTint;
+        m_skyAmbientColor = glm::mix(m_skyAmbientColor, season_tinted, m_sun.intensity);
+        // Restore the calibrated ambient luminance after the hue rotation.
+        const float new_lum =
+            m_skyAmbientColor.r * 0.2126f +
+            m_skyAmbientColor.g * 0.7152f +
+            m_skyAmbientColor.b * 0.0722f;
+        if (new_lum > 1e-6f) {
+            m_skyAmbientColor *= (amb_lum / new_lum);
+        }
+    }
+}
+
+void RenderPipeline::set_season_tick(std::uint64_t tick) {
+    // RENDER-DERIVED season: store the authoritative sim tick; update_time_of_day
+    // recomputes the season phase/declination/tint from it as a pure function.
+    // One-way (F2): this never feeds back into the sim and never touches
+    // world_hash.
+    m_seasonTick = tick;
 }
 
 u32 RenderPipeline::water_caustics_texture() const {
