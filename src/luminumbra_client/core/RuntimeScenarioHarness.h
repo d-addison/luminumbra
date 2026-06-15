@@ -771,6 +771,30 @@ SeasonSweepPoint SeasonSweepAt(double progress);
 // The two season ticks the sweep pins (summer / winter solstice), pure tick math.
 std::uint64_t SeasonSweepTick(int season_index);
 
+// T-I5a-DR-green-precip-tod: the SIX season-sweep CAPTURE windows, the single
+// source of truth shared by the per-frame sun PIN and the capture WRITER. Each
+// entry is one screenshot the gate consumes (summer/winter x noon/dusk/night).
+// The per-frame pin selects the FIRST not-yet-written plan whose progress
+// threshold has been reached and pins the sun to THAT plan's phase_time/season,
+// so the rendered sun the capture grabs is ALWAYS the labelled phase -- even if
+// the sim hitches and several thresholds pass between frames (the old code pinned
+// from SeasonSweepAt(progress), whose phase window could already have advanced to
+// night by the time the throttled one-per-frame dusk capture actually wrote,
+// recording a night-lit frame as "dusk" and collapsing the dusk>night ordering).
+struct TimeOfDaySweepCapturePlan {
+    double threshold;       // sweep progress at which to grab this capture
+    const char* phase_name; // "noon" / "dusk" / "night"
+    int phase_index;        // 0 noon, 1 dusk, 2 night
+    float phase_time;       // pinned time-of-day (sun position)
+    const char* season_label;
+    int season_index;       // 0 summer, 1 winter
+    const char* file;       // relative screenshot path
+};
+// Count of capture windows (two seasons x three phases).
+constexpr int kTimeOfDaySweepCaptureCount = 6;
+// Accessor for capture plan [0,kTimeOfDaySweepCaptureCount): single definition.
+const TimeOfDaySweepCapturePlan& TimeOfDaySweepCapturePlanAt(int index);
+
 // Generic emissive-material discovery: emissive material ids come from the
 // engine material registry (data/common/materials.json entries with a
 // non-zero "emission"); the streamed terrain meshes are scanned for a
