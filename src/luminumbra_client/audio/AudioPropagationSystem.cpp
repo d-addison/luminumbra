@@ -156,6 +156,35 @@ AudioPropagationSystem::AmbienceBed AudioPropagationSystem::ComputeAmbienceBed(
     return bed;
 }
 
+AudioPropagationSystem::WaterfallRoar AudioPropagationSystem::ComputeWaterfallRoar(
+        const glm::vec3& crest_position, float drop_height,
+        const glm::vec3& listener, float max_distance) const {
+    // T-I5b-4 (W1): positional waterfall roar. Distance attenuation reuses the
+    // same inverse-falloff shape as ComputeThunderCue (additive hook, not new
+    // propagation). The loop volume also scales with the fall's drop height: a
+    // tall fall roars louder than a trickle. The low-pass term rises with
+    // distance because the bright spray hiss attenuates faster than the low
+    // rumble. Pure read; no sim writes.
+    WaterfallRoar roar;
+    roar.distance = glm::distance(crest_position, listener);
+    const float md = max_distance > 1.0f ? max_distance : 400.0f;
+    if (roar.distance >= md) {
+        roar.volume = 0.0f;
+        roar.low_pass = 1.0f;
+        roar.audible = false;
+        return roar;
+    }
+    // Drop-height loudness: ramps a 3 m fall up to a full roar by ~24 m of drop.
+    const float drop_gain = std::clamp(drop_height / 24.0f, 0.15f, 1.0f);
+    // ~120 m halves the volume (a fall carries less far than thunder).
+    const float dist_atten = 1.0f / (1.0f + roar.distance / 120.0f);
+    roar.volume = std::clamp(drop_gain * dist_atten, 0.0f, 1.0f);
+    // Muffle (low-pass) rises smoothly with normalized distance.
+    roar.low_pass = std::clamp(roar.distance / md, 0.0f, 1.0f);
+    roar.audible = roar.volume > 0.02f;
+    return roar;
+}
+
 AudioPropagationPath AudioPropagationSystem::CalculateDirectPath(const glm::vec3& source, const glm::vec3& listener) {
     AudioPropagationPath path;
     path.is_direct_path = true;

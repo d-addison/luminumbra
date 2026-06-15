@@ -185,6 +185,19 @@ public:
     // Render-only; the splash template carries NO descriptor enable (spawn_rate 0).
     uint32_t add_splash_emitter(const std::filesystem::path& json_path);
 
+    // T-I5b-4 (W1): registers a waterfall SPRAY/MIST emitter at a detected fall.
+    // Loads the spray emitter data and orients its spawn box at the plunge foot
+    // (`plunge_pos`), scaling the spawn extent + spawn rate with the fall's
+    // `drop_height` and `channel_width` so a taller/wider fall throws more mist.
+    // The mist drifts upward and outward from the impact (the authored
+    // base_velocity is biased away from gravity). Returns the emitter id (or
+    // kInvalidEmitter). RENDER-ONLY dressing on a world-deterministic site: the
+    // spray MOTION is render-time, never hashed (one-way, critique F2).
+    uint32_t add_waterfall_spray(const std::filesystem::path& json_path,
+                                 const glm::vec3& plunge_pos,
+                                 float drop_height,
+                                 float channel_width);
+
     // T-I5a-4 (B2): per-frame WIND velocity (world-space; horizontal XZ carried in
     // x/z, y usually 0) sampled by the client from the A2 wind field / replicated
     // weather at the camera. Applied to particle motion scaled by each emitter's

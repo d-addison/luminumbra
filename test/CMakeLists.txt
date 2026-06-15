@@ -224,6 +224,43 @@ else()
     target_link_libraries(particle_determinism_test PRIVATE OpenGL::GL)
 endif()
 
+# T-I5b-4 (W1): WaterfallVisual gate. Determinism (DetectWaterfalls same-seed ->
+# same-sites) + a sheet/spray/foam render capture at a detected site. Compiles
+# the render-side WaterfallDetect.cpp directly (it depends only on
+# luminumbra_common's world queries + glm), plus a GL context for the capture.
+add_executable(waterfall_visual_test
+    rendering/waterfall_visual_test.cpp
+    ../src/luminumbra_client/rendering/WaterfallDetect.cpp
+)
+
+target_compile_definitions(waterfall_visual_test PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+    LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts"
+)
+
+target_include_directories(waterfall_visual_test PRIVATE
+    ../src
+    ../src/luminumbra_client
+)
+
+target_link_libraries(waterfall_visual_test PRIVATE
+    gtest_main
+    luminumbra_common
+    glfw
+    glad
+    glm
+)
+
+if(WIN32)
+    target_link_libraries(waterfall_visual_test PRIVATE opengl32)
+elseif(APPLE)
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(waterfall_visual_test PRIVATE ${OPENGL_LIBRARIES})
+else()
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(waterfall_visual_test PRIVATE OpenGL::GL)
+endif()
+
 add_executable(ui_smoke_test
     ui/ui_smoke_test.cpp
     ../src/luminumbra_client/ui/core/UIComponent.cpp
@@ -399,6 +436,7 @@ gtest_discover_tests(asset_processor_round_trip_test)
 gtest_discover_tests(common_tests)
 gtest_discover_tests(render_smoke_test)
 gtest_discover_tests(render_capture_test)
+gtest_discover_tests(waterfall_visual_test)
 gtest_discover_tests(particle_determinism_test)
 gtest_discover_tests(ui_smoke_test)
 gtest_discover_tests(initial_world_loading_perf_test)
