@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "ParticleEmitterDeterminism", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "WindFieldDeterminism", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "BiomeCoverage", "RiverPresence", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "ParticleEmitterDeterminism", "Precipitation", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "WindFieldDeterminism", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "BiomeCoverage", "RiverPresence", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -2995,6 +2995,92 @@ function Test-ParticleEmitterDeterminism {
         $analysis.determinism.descriptor_count, $analysis.gpu_timer.particle_pass_gpu_ms, $analysis.gpu_timer.budget_ms)
 }
 
+function Test-Precipitation {
+    # T-I5a-4 (B2): rain precipitation through the A1 particle framework, driven by
+    # the replicated weather state and WIND-ADVECTED (slant) by the A2 wind field.
+    # The scenario captures a CALM rain frame (zero wind -> vertical fall) and a
+    # WINDY rain frame (strong horizontal wind -> diagonal slant). The gate asserts
+    # precip particles are PRESENT in both frames AND that the windy streaks slant
+    # with wind (the windy slant ratio exceeds the calm one by a margin). Emitter
+    # descriptors stay deterministic (ParticleEmitterDeterminism owns that surface);
+    # particle MOTION is render-only and never hashed (critique F2, one-way). Also
+    # asserts the active-storm + precipitation ParticlePass GPU timer is within the
+    # 1.2 ms storm budget (design-decisions.md S7).
+    $exe = Get-ClientExe
+    $visualDir = "build/$BuildPreset/test-artifacts/runtime/precipitation"
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $visualDir
+    New-Item -ItemType Directory -Force -Path $visualDir | Out-Null
+
+    $runSeconds = [Math]::Max(20, $SmokeSeconds)
+    Invoke-Checked -FilePath $exe -ArgumentList @(
+        "--scenario", "precipitation_smoke",
+        "--auto-create-world",
+        "--auto-enter-world",
+        "--timed-run", "$runSeconds",
+        "--no-audio",
+        "--no-ui",
+        "--runtime-artifact-dir", $visualDir
+    ) -TimeoutSeconds ([Math]::Max(120, $runSeconds + 90))
+
+    $analysisPath = Join-Path $visualDir "precipitation-analysis.json"
+    if (-not (Test-Path $analysisPath)) {
+        throw "precipitation run did not produce $analysisPath (gate produced by task T-I5a-4-precipitation-particles)"
+    }
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.precipitation.v1") {
+        throw "Unexpected precipitation analysis schema '$($analysis.schema)'"
+    }
+    if ([int64]$analysis.gl_debug.errors -ne 0) {
+        throw "Precipitation run emitted GL debug errors: $($analysis.gl_debug.errors)"
+    }
+    if ($analysis.precip.type -ne "rain") {
+        throw "Precipitation run must exercise rain"
+    }
+
+    # Precip particles must actually have rendered in BOTH the calm and windy frame.
+    if ([int64]$analysis.render_pass.calm_particle_draws -lt 1) {
+        throw "Precipitation gate recorded no ParticlePass draws in the calm frame"
+    }
+    if ([int64]$analysis.render_pass.windy_particle_draws -lt 1) {
+        throw "Precipitation gate recorded no ParticlePass draws in the windy frame"
+    }
+    if (-not $analysis.presence.calm_passed) {
+        throw "Precipitation presence check failed (calm): bright_fraction=$($analysis.presence.calm_bright_fraction)"
+    }
+    if (-not $analysis.presence.windy_passed) {
+        throw "Precipitation presence check failed (windy): bright_fraction=$($analysis.presence.windy_bright_fraction)"
+    }
+
+    # Wind-slant: the windy streaks must lean measurably more than the calm streaks.
+    if (-not $analysis.wind_slant.passed) {
+        throw "Precipitation wind-slant check failed: calm_slant=$($analysis.wind_slant.calm_slant_ratio) windy_slant=$($analysis.wind_slant.windy_slant_ratio) gain=$($analysis.wind_slant.slant_ratio_gain)"
+    }
+    if ([double]$analysis.wind_slant.slant_ratio_gain -lt [double]$analysis.thresholds.min_slant_ratio_gain) {
+        throw "Precipitation slant gain $($analysis.wind_slant.slant_ratio_gain) is below threshold $($analysis.thresholds.min_slant_ratio_gain)"
+    }
+
+    # Active-storm + precipitation ParticlePass GPU timer must be within the storm
+    # budget (informational on debug where the timer may report 0.0).
+    if (-not $analysis.gpu_timer.within_budget) {
+        throw "ParticlePass storm GPU timer $($analysis.gpu_timer.particle_pass_gpu_ms) ms exceeds storm budget $($analysis.gpu_timer.storm_budget_ms) ms"
+    }
+    if ([double]$analysis.gpu_timer.particle_pass_gpu_ms -gt [double]$analysis.gpu_timer.storm_budget_ms) {
+        throw "ParticlePass storm GPU timer $($analysis.gpu_timer.particle_pass_gpu_ms) ms exceeds storm budget $($analysis.gpu_timer.storm_budget_ms) ms"
+    }
+
+    if (-not $analysis.passed) {
+        throw "Precipitation analysis reported failure"
+    }
+
+    Assert-PpmArtifact (Join-Path $visualDir $analysis.calm_screenshot)
+    Assert-PpmArtifact (Join-Path $visualDir $analysis.windy_screenshot)
+    Write-Host ("precipitation gate passed: rain particles present (calm bright {0:P3}, windy bright {1:P3}); streaks slant with wind (calm slant {2:N3} -> windy slant {3:N3}, gain {4:N2}x); ParticlePass storm {5} ms <= {6} ms budget" -f `
+        $analysis.presence.calm_bright_fraction, $analysis.presence.windy_bright_fraction, `
+        $analysis.wind_slant.calm_slant_ratio, $analysis.wind_slant.windy_slant_ratio, `
+        $analysis.wind_slant.slant_ratio_gain, $analysis.gpu_timer.particle_pass_gpu_ms, $analysis.gpu_timer.storm_budget_ms)
+}
+
 function Test-TimeOfDaySweep {
     $exe = Get-ClientExe
     $visualDir = "build/$BuildPreset/test-artifacts/runtime/timeofday-sweep"
@@ -4725,6 +4811,7 @@ switch ($Mode) {
     "SkyboxVisual" { Test-SkyboxVisual }
     "WeatherVisual" { Test-WeatherVisual }
     "ParticleEmitterDeterminism" { Test-ParticleEmitterDeterminism }
+    "Precipitation" { Test-Precipitation }
     "TimeOfDaySweep" { Test-TimeOfDaySweep }
     "PlayerView" { Test-PlayerView }
     "FarLodHorizon" { Test-FarLodHorizon }

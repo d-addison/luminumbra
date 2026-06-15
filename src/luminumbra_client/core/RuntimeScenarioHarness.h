@@ -109,6 +109,11 @@ struct RuntimeScenarioConfig {
     // T-I5a-1: spawns the fixture particle emitter, snapshots the
     // sim-deterministic emitter descriptor set, and captures a particle render.
     bool particle_emitter_determinism_smoke() const { return scenario == "particle_emitter_determinism_smoke"; }
+    // T-I5a-4 (B2): rain precipitation through the A1 particle framework, driven
+    // by the replicated weather state and wind-advected (slant) from the A2 wind
+    // field. Captures a calm vs a windy rain frame so the gate can assert precip
+    // particles present AND that they slant with wind.
+    bool precipitation_smoke() const { return scenario == "precipitation_smoke"; }
     bool timeofday_sweep_smoke() const { return scenario == "timeofday_sweep_smoke"; }
     bool lod_boundary_oscillation_smoke() const { return scenario == "lod_boundary_oscillation_smoke"; }
     bool lod_seam_arrival_smoke() const { return scenario == "lod_seam_arrival_smoke"; }
@@ -460,6 +465,48 @@ void WriteParticleEmitterDeterminismAnalysis(
     const std::string& particle_screenshot,
     const ParticleDeterminismResult& result,
     const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass);
+
+// --- Precipitation visual + wind-slant smoke (T-I5a-4 / B2) ---
+// Rain is rendered through the A1 particle framework, spawned by the REPLICATED
+// weather state at the camera and WIND-ADVECTED by the A2 wind field (rain slants
+// in storms). The scenario captures two frames at the SAME camera: a CALM phase
+// (zero wind -> particles fall vertically) and a WINDY phase (strong horizontal
+// wind -> the falling field slants diagonally). The analysis measures, over the
+// near-field precipitation band, the orientation of the bright-particle mass: a
+// "slant ratio" = mean |dL/dx| / mean |dL/dy|. Calm rain is dominated by vertical
+// streak columns (low horizontal gradient relative to vertical); wind-advected
+// rain leans, raising the horizontal gradient component. The gate asserts
+// precip particles are PRESENT in both frames (ParticlePass draws + a bright
+// pixel count floor) AND that the windy slant ratio exceeds the calm one by a
+// margin (the streaks demonstrably slant with wind). Particle MOTION is
+// render-only and is never snapshotted/hashed (critique F2, one-way).
+struct PrecipPixelStats {
+    int width = 0;
+    int height = 0;
+    std::uint64_t precip_band_pixels = 0;
+    // Pixels in the precip band brighter than the bright floor (precip presence).
+    std::uint64_t bright_particle_pixels = 0;
+    double bright_particle_fraction = 0.0;
+    // Mean |L(x+1,y)-L(x,y)| and |L(x,y+1)-L(x,y)| over bright neighborhoods.
+    double horizontal_gradient_mean = 0.0;
+    double vertical_gradient_mean = 0.0;
+    // horizontal_gradient_mean / vertical_gradient_mean. Rises as rain slants.
+    double slant_ratio = 0.0;
+};
+
+PrecipPixelStats AnalyzePrecipPixels(const std::vector<unsigned char>& pixels, int width, int height);
+
+void WritePrecipitationAnalysis(
+    const std::filesystem::path& artifact_dir,
+    const std::string& calm_screenshot,
+    const std::string& windy_screenshot,
+    const PrecipPixelStats& calm_stats,
+    const PrecipPixelStats& windy_stats,
+    const std::string& precip_type,
+    double calm_wind_speed,
+    double windy_wind_speed,
+    const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& calm_render_pass,
+    const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& windy_render_pass);
 
 // --- Time-of-day sweep smoke (T-I2-17c) ---
 // Fixed skybox camera; the run is split into three equal phases pinned at
