@@ -1810,6 +1810,10 @@ int main(int argc, char* argv[]) {
     // phase (no wind) and a WINDY phase (wind-advected slant) -- so the gate can
     // assert precip particles are present AND that they slant with wind.
     bool precip_emitter_spawned = false;
+    // T-I5a-DR-storm-motion-v4: id of the camera-tracked rain emitter (so it can
+    // be re-centered on the live camera every frame -> rain falls past the viewer).
+    uint32_t precip_rain_emitter_id =
+        Luminumbra::Rendering::ParticlePass::kInvalidEmitter;
     bool precip_calm_capture_written = false;
     bool precip_windy_capture_written = false;
     // T-I5a-DR-particle-motion-quality: atmospheric MOTION capture. Env-gated
@@ -2348,11 +2352,30 @@ int main(int argc, char* argv[]) {
                         // Honest fall is achieved by sampling the capture every render
                         // frame (see kAtmosMotionFrameIntervalS below) instead of a
                         // long interval that misrepresented 60 fps motion.
-                        particles->add_emitter(
+                        precip_rain_emitter_id = particles->add_emitter(
                             root_dir / "data/common/particles/precip_rain.json", field_origin);
                         particles->add_splash_emitter(
                             root_dir / "data/common/particles/precip_splash.json");
                         precip_emitter_spawned = true;
+                    }
+
+                    // T-I5a-DR-storm-motion-v4: CAMERA-RELATIVE rain. The scenario
+                    // calls ApplySkyboxVisualCamera every frame, so the camera MOVES
+                    // through the world. Previously the rain column was spawned ONCE
+                    // at a FIXED world point, so as the camera advanced the fixed
+                    // column drifted across the view -- reading as rain "floating
+                    // toward" the viewer instead of falling. RE-CENTER the emitter's
+                    // spawn box on the LIVE camera position every frame (the authored
+                    // [0,22,0] height offset is re-applied inside set_emitter_origin),
+                    // so new drops always spawn AROUND/ABOVE the viewer and fall
+                    // straight DOWN past it regardless of camera motion. In-flight
+                    // drops keep their own trajectories. Render-only -> world_hash
+                    // is untouched (the emitter origin is render state, not sim).
+                    if (particles != nullptr &&
+                        precip_rain_emitter_id != Luminumbra::Rendering::ParticlePass::kInvalidEmitter) {
+                        const glm::vec3 cam_anchor(
+                            g_camera->Position.x, g_camera->Position.y, g_camera->Position.z);
+                        particles->set_emitter_origin(precip_rain_emitter_id, cam_anchor);
                     }
 
                     // Overcast/wet backdrop from the replicated weather state (the
@@ -2430,9 +2453,23 @@ int main(int argc, char* argv[]) {
                         // Steady cross-wind: a constant breeze on the camera-right
                         // axis gives every frame the same gentle shear so the falling
                         // rain reads as rain (not floating dots) and slants slightly.
+                        // T-I5a-DR-storm-motion-v4: the wind must NOT push rain along
+                        // the camera FORWARD axis -- any toward/away-camera drift makes
+                        // the streaks read as "floating toward us" instead of falling
+                        // straight past the viewer. Keep the shear PURELY in the screen
+                        // plane (camera-right only) and STRIP any forward (depth)
+                        // component, so every streak stays in the view plane and falls
+                        // vertically past the camera. (The old `+ vec3(0,0,1.5)` was a
+                        // WORLD-Z push whose camera-forward projection caused exactly
+                        // the toward-camera float the owner flagged.)
                         if (particles != nullptr) {
                             const glm::vec3 right = glm::normalize(g_camera->Right);
-                            particles->set_wind(right * 6.0f + glm::vec3(0.0f, 0.0f, 1.5f));
+                            const glm::vec3 fwd = glm::normalize(g_camera->Front);
+                            glm::vec3 wind = right * 6.0f;
+                            // Project out any forward (depth) component defensively so
+                            // there is zero toward/away-camera motion in the streaks.
+                            wind -= fwd * glm::dot(wind, fwd);
+                            particles->set_wind(wind);
                         }
                         // Drifting overcast cloud sheet (dims the storm dome too).
                         Luminumbra::Rendering::CloudRenderState cstate;
