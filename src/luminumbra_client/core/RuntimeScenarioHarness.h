@@ -334,6 +334,11 @@ WaterRegionPatch AnalyzeWaterRegionPatch(
 struct SkyboxVisualBandStats {
     double mean_luminance = 0.0;
     std::uint64_t pixels = 0;
+    // T-I5a-6: per-band color accumulators for the low-sun palette-emergence
+    // assertion (a warm horizon band reads R>B from Rayleigh/Mie scattering at
+    // long optical paths). mean_r/mean_b are finalized as band means.
+    double mean_r = 0.0;
+    double mean_b = 0.0;
 };
 
 struct SkyboxPixelStats {
@@ -355,6 +360,13 @@ struct SkyboxPixelStats {
     // localization metric (a half/quadrant split breaks when the sun sits on
     // the frame centerline).
     std::uint64_t sun_disc_pixels_near_expected = 0;
+    // T-I5a-6: low-sun scattering palette emergence. horizon_band_r_b_ratio is
+    // the R/B ratio of the warm horizon band; zenith_band_r_b_ratio the cool
+    // zenith band. At a low sun the horizon band warms (R>B) measurably above
+    // the zenith band, which the SkyboxVisual gate asserts on top of the
+    // existing monotonic-brighten + sun-disc-localize premises (clear sky).
+    double horizon_band_r_b_ratio = 0.0;
+    double zenith_band_r_b_ratio = 0.0;
 };
 
 // Toward-sun unit vector for a normalized time of day, mirroring
