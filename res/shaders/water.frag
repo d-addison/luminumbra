@@ -247,7 +247,14 @@ void main()
     float flow_foam = flow_data.b;
 
     float foam_factor = clamp(shoreline_band * (0.70 + 0.45 * foam_wave + 0.45 * foam_sparkle) + flow_foam * 0.5, 0.0, 1.0);
-    vec3 foam_color = vec3(0.92, 0.96, 0.94);
+    // Foam is bright wind-whipped froth lit by the sky/sun; it is NOT emissive.
+    // The base colour is near-white (luminance ~0.95), so without dimming it was
+    // the brightest thing in a night frame -- the self-lit cyan-white shore band
+    // the critique flagged. Scale the foam colour by the same daylight factor the
+    // body/caustics use so the shoreline goes dark at night and reads as natural
+    // foam by day. (Dim the colour, not the coverage, so the foam *shape* -- the
+    // animated wave fronts and band width -- stays identical between day/night.)
+    vec3 foam_color = vec3(0.92, 0.96, 0.94) * light_scale;
     
     // --- 11. Underwater Environment ---
     vec3 underwater_color = vec3(0.0);
