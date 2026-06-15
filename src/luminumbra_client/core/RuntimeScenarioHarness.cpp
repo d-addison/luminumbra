@@ -8152,30 +8152,102 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
                 particles->set_wind(glm::vec3(4.0f, 0.0f, 1.0f));
             }
             // Periodic lightning: fire a deterministic bolt on the storm cells.
-            // T-I5b-DR-sweep-visual-fixes (defect 3): a stronger pulse + ground
-            // flash so the strike clearly READS over the dark night-storm dome
-            // (the old 0.18 pulse was nearly invisible once the storm dimmed the
-            // already-dark night frame). Daytime storm cells keep ample contrast.
+            // T-I5b-DR-sweep-visual-fixes (defect 3): a stronger pulse so the strike
+            // clearly READS over the dark night-storm dome (the old 0.18 pulse was
+            // nearly invisible once the storm dimmed the already-dark night frame).
             lstate.active = true;
             lstate.pulse_intensity = 0.42f;
             lstate.bolt_width_ndc = 0.010f;
             lstate.bolt_glow_ndc = 0.034f;
             lstate.cloud_darkness = 0.5f;
-            lstate.ground_flash = 0.7f;
             const glm::vec3 fwd = glm::normalize(glm::vec3(camera->Front.x, 0.0f, camera->Front.z));
-            const glm::vec3 strike_ground = glm::vec3(camera->Position) + fwd * 200.0f;
+            // T-I5b-DR-storm-blockers (B1): TOUCHDOWN. The strike terminus is a REAL
+            // ground point ahead of the camera -- the terrain height at (x,z), not the
+            // camera's eye level. The bolt's bottom is that ground point so the channel
+            // spans cloud -> terrain and ends ON the surface rather than dangling in
+            // mid-air at the horizon. The strike is placed near enough that the
+            // touchdown projects inside the frame for the horizon/down framings.
+            const glm::vec3 strike_xz = glm::vec3(camera->Position) + fwd * 150.0f;
+            const float ground_y = world_system->GetTerrainHeightAt(strike_xz.x, strike_xz.z);
+            const glm::vec3 strike_ground(strike_xz.x, ground_y, strike_xz.z);
             const LightningBoltGeometry bolt = BuildLightningBolt(
                 strike_ground.x, strike_ground.y, strike_ground.z,
                 /*magnitude=*/0.9f, /*strike_seed=*/0x5A5A1357ull);
-            for (const auto& pt : bolt.main_channel) {
-                double x_norm = 0.0, y_norm = 0.0;
-                const Luminumbra::Vec3 dir = Luminumbra::Vec3(pt.x, pt.y, pt.z) - Luminumbra::Vec3(camera->Position);
-                if (ProjectDirectionToScreen(*camera, fb_w > 0 ? fb_w : 1280, fb_h > 0 ? fb_h : 720, dir, x_norm, y_norm)) {
-                    lstate.bolt_points_ndc.emplace_back(
-                        static_cast<float>(x_norm * 2.0 - 1.0),
-                        static_cast<float>((1.0 - y_norm) * 2.0 - 1.0));
+            // PROJECT the bolt through the ACTUAL render camera (perspective-correct,
+            // distance-aware) so the cloud-base top and the terrain terminus land at
+            // their true screen positions. The old code projected each world point as
+            // a DIRECTION to infinity (ProjectDirectionToScreen), which ignored range
+            // and collapsed the descending channel onto the horizon line -- the bolt
+            // appeared to stop in mid-air well above the ground. We project real world
+            // positions and lay the seeded jagged channel along the screen line from
+            // the cloud base down to the projected touchdown.
+            const int proj_w = fb_w > 0 ? fb_w : 1280;
+            const int proj_h = fb_h > 0 ? fb_h : 720;
+            const glm::mat4 viewproj =
+                camera->GetProjectionMatrix(proj_w, proj_h) * camera->GetViewMatrix();
+            const glm::vec3 bolt_top = bolt.main_channel.front();
+            const glm::vec3 bolt_bottom = bolt.main_channel.back();
+            const float span_y = std::max(1e-3f, bolt_top.y - bolt_bottom.y);
+            const auto project = [&](const glm::vec3& wp, bool& ok) -> glm::vec2 {
+                const glm::vec4 clip = viewproj * glm::vec4(wp, 1.0f);
+                ok = clip.w > 1e-4f;
+                if (!ok) return glm::vec2(0.0f);
+                return glm::vec2(clip.x / clip.w, clip.y / clip.w);
+            };
+            bool top_ok = false, bot_ok = false;
+            glm::vec2 top_ndc = project(bolt_top, top_ok);
+            glm::vec2 bot_ndc = project(bolt_bottom, bot_ok);
+            // Anchor the bolt TOP just below the top edge so the dark storm-cloud deck
+            // is visible above the origin. The BOTTOM goes onto the projected ground
+            // terminus, clamped just inside the frame so the touchdown stays visible
+            // even when the camera pitch projects the ground point low or (looking up)
+            // off the bottom edge.
+            const float top_ndc_y = top_ok ? std::min(top_ndc.y, 0.74f) : 0.74f;
+            // Whether the real ground terminus is genuinely on-screen (in front of the
+            // camera and within the frame). This gates the ground-impact flash so it is
+            // anchored at the actual touchdown -- never a hovering disc at frame centre.
+            const bool ground_on_screen = bot_ok &&
+                bot_ndc.x >= -1.0f && bot_ndc.x <= 1.0f &&
+                bot_ndc.y >= -1.0f && bot_ndc.y <= 1.0f;
+            const float ground_ndc_y = bot_ok
+                ? std::clamp(bot_ndc.y, -0.96f, 0.55f) : -0.92f;
+            const float column_ndc_x = bot_ok
+                ? std::clamp(bot_ndc.x, -0.85f, 0.85f) : 0.0f;
+            const float kLateralToNdc = 1.0f / 260.0f; // modest sideways jag
+            const auto map_point = [&](const glm::vec3& wp) -> glm::vec2 {
+                const float hf = std::clamp((wp.y - bolt_bottom.y) / span_y, 0.0f, 1.0f);
+                const float ndc_y = ground_ndc_y + (top_ndc_y - ground_ndc_y) * hf;
+                const float base_x = bolt_bottom.x + (bolt_top.x - bolt_bottom.x) * hf;
+                const float base_z = bolt_bottom.z + (bolt_top.z - bolt_bottom.z) * hf;
+                const float lateral = (wp.x - base_x) + (wp.z - base_z);
+                const float ndc_x = column_ndc_x +
+                    std::clamp(lateral * kLateralToNdc, -0.14f, 0.14f);
+                return glm::vec2(ndc_x, ndc_y);
+            };
+            const auto push_stroke = [&](const std::vector<glm::vec3>& stroke) {
+                if (!lstate.bolt_points_ndc.empty()) {
+                    lstate.bolt_points_ndc.emplace_back(-3.0f, -3.0f); // pen-up
                 }
-            }
+                for (const glm::vec3& wp : stroke) {
+                    lstate.bolt_points_ndc.push_back(map_point(wp));
+                }
+            };
+            push_stroke(bolt.main_channel);
+            for (const auto& br : bolt.branches) { push_stroke(br); }
+            // Flash centre + dark-cloud anchor at the strike column.
+            lstate.strike_ndc = glm::vec2(column_ndc_x, ground_ndc_y);
+            lstate.cloud_anchor_ndc = glm::vec2(column_ndc_x, top_ndc_y);
+            // T-I5b-DR-storm-blockers (B2): GROUND-IMPACT bloom ONLY when the real
+            // touchdown is on-screen, anchored AT the projected terminus (the bolt's
+            // bottom). The previous code left u_groundNdc at its default (0, -1) while
+            // forcing u_groundFlash > 0, which painted a hard bright disc at the bottom
+            // centre of every storm frame -- the "floating UFO/saucer" artifact. By
+            // anchoring the bloom to the actual touchdown and disabling it whenever the
+            // strike point is off-screen (camera pitched up so the ground is below the
+            // frame), the impact reads as ground illumination at the strike and the
+            // floating disc is gone.
+            lstate.ground_ndc = glm::vec2(column_ndc_x, ground_ndc_y);
+            lstate.ground_flash = ground_on_screen ? 0.55f : 0.0f;
             out_lightning = true;
         } else {
             // Clear: overlay off, clouds off, rain off. Fully remove the rain
