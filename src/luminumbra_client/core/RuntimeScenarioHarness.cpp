@@ -8247,7 +8247,10 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
             // frame), the impact reads as ground illumination at the strike and the
             // floating disc is gone.
             lstate.ground_ndc = glm::vec2(column_ndc_x, ground_ndc_y);
-            lstate.ground_flash = ground_on_screen ? 0.55f : 0.0f;
+            // T-I5b-DR-storm2 (N2): tamer impact bloom. 0.55 over the bright storm
+            // water clipped to a blown-out floating white smear. Drop it to a dim
+            // contact glow; the shader bloom is also tightened + dimmed above.
+            lstate.ground_flash = ground_on_screen ? 0.30f : 0.0f;
             out_lightning = true;
         } else {
             // Clear: overlay off, clouds off, rain off. Fully remove the rain

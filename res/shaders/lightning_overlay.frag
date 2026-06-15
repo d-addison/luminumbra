@@ -164,23 +164,32 @@ void main() {
         // spreading along the surface at the strike, not a hovering circular saucer.
         // A small hot core sits at the contact point; a wider, low, horizontally-biased
         // wash lifts the ground around it.
+        // T-I5b-DR-storm2 (N2): TAME THE IMPACT BLOOM. The old bloom was a blown-out
+        // white smear that floated/bled across the water -- because (a) its radii were
+        // large (core to 0.10, wash to 0.26 NDC) so it spread a big disc, (b) the wash
+        // strength (0.30) was high enough to wash a wide area to white over the bright
+        // water, and (c) the near-white core (mix 0.7) clipped hot. Now it is a small,
+        // dim, tightly-localized contact glow: a tiny hot core hugging the strike point
+        // and a much smaller, fainter, vertically-squashed wash so it lights the surface
+        // immediately at the touchdown WITHOUT smearing across the water.
         if (u_groundFlash > 0.0) {
             vec2 d = (ndc - u_groundNdc) * vec2(u_aspect, 1.0);
             // Vertical squash: the glow hugs the ground line (wider than it is tall),
             // so it does not read as a free-floating round disc.
-            vec2 dFlat = vec2(d.x, d.y * 2.2);
+            vec2 dFlat = vec2(d.x, d.y * 2.6);
             float gd = length(dFlat);
-            // Tight hot contact core right at the touchdown.
-            float core = 1.0 - smoothstep(0.0, 0.10, gd);
+            // Tight hot contact core right at the touchdown (smaller than before).
+            float core = 1.0 - smoothstep(0.0, 0.055, gd);
             core = core * core;
-            // Low, broad ground wash -- only spreads BELOW/around the contact, kept
-            // faint so it lifts the surface rather than painting a bright ellipse.
-            float wash = 1.0 - smoothstep(0.0, 0.26, gd);
+            // Low, narrow ground wash -- spreads only a short way around the contact,
+            // kept faint so it lifts the surface rather than painting a bright ellipse.
+            float wash = 1.0 - smoothstep(0.0, 0.14, gd);
             wash = wash * wash;
-            vec3 coreCol = mix(u_color, vec3(1.0), 0.7);
+            // Cooler, less-white core so it does not clip to a white smear on water.
+            vec3 coreCol = mix(u_color, vec3(1.0), 0.45);
             vec3 washCol = u_color;
-            color += coreCol * core * u_groundFlash;
-            color += washCol * wash * u_groundFlash * 0.30;
+            color += coreCol * core * u_groundFlash * 0.65;
+            color += washCol * wash * u_groundFlash * 0.16;
         }
     }
     FragColor = vec4(color, 1.0);
