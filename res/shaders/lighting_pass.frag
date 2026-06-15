@@ -59,7 +59,83 @@ struct PointLight {
 uniform PointLight u_pointLights[MAX_POINT_LIGHTS];
 uniform int u_pointLightCount;
 
+// T-I5a-8 (C3): wind-advected cloud cast-shadow uniforms. The coverage field is a
+// pure function of replicated weather state + tick + wind, evaluated render-side;
+// nothing here writes back into the sim (critique F2, one-way). directSun is
+// scaled by (1 - cloudShadow(worldPos)) so cloud cores throw crawling terrain
+// shadows that drift with the SAME wind scroll as the sky-dome clouds. The fbm/
+// hash/cloudCoverageAt trio below is byte-identical to enhanced_skybox.frag so the
+// dome cloud and its ground shadow stay registered (GLSL has no shared includes).
+//   u_cloudShadowEnabled  - 0 disables the sample entirely (zero added cost)
+//   u_cloudScrollOffset   - wind * tick-phase, world metres (matches the dome)
+//   u_cloudCoverageAmount - [0,1] weather sky-cover fraction
+//   u_cloudBiomeVariation - biome coverage bias
+//   u_cloudPlaneHeight    - world Y of the cloud sheet
+//   u_cloudShadowStrength - [0,1] max darkening the cloud sheet applies to the sun
+//   u_cloudSunDir         - sun TRAVEL direction (same as u_sun.direction)
+uniform int   u_cloudShadowEnabled = 0;
+uniform vec2  u_cloudScrollOffset = vec2(0.0);
+uniform float u_cloudCoverageAmount = 0.45;
+uniform float u_cloudBiomeVariation = 0.0;
+uniform float u_cloudPlaneHeight = 900.0;
+uniform float u_cloudShadowStrength = 0.0;
+uniform vec3  u_cloudSunDir = vec3(0.0, -1.0, 0.0);
+
 const float PI = 3.14159265359;
+
+// --- T-I5a-8 cloud coverage field (MUST match enhanced_skybox.frag verbatim) ---
+float cloud_hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+float cloud_noise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f*f*(3.0-2.0*f);
+    float a = cloud_hash(i + vec2(0.,0.));
+    float b = cloud_hash(i + vec2(1.,0.));
+    float c = cloud_hash(i + vec2(0.,1.));
+    float d = cloud_hash(i + vec2(1.,1.));
+    return mix(mix(a,b,f.x), mix(c,d,f.x), f.y);
+}
+float cloud_fbm(vec2 p, int octaves) {
+    float value = 0.0;
+    float amplitude = 0.5;
+    float frequency = 1.0;
+    for(int i = 0; i < octaves; i++) {
+        value += amplitude * cloud_noise(p * frequency);
+        amplitude *= 0.5;
+        frequency *= 2.0;
+    }
+    return value;
+}
+float cloudCoverageAt(vec2 worldXZ) {
+    vec2 p = (worldXZ + u_cloudScrollOffset) * (1.0 / 1200.0);
+    float base = cloud_fbm(p, 5);
+    float detail = cloud_fbm(p * 2.7 + vec2(11.3, 4.7), 3);
+    float field = base * 0.72 + detail * 0.28;
+    float cov = clamp(u_cloudCoverageAmount + u_cloudBiomeVariation, 0.0, 1.0);
+    float lo = mix(0.62, 0.30, cov);
+    float hi = mix(0.82, 0.55, cov);
+    return smoothstep(lo, hi, field);
+}
+
+// Projected cloud cast shadow at a world position: walk from the fragment up the
+// sun ray to the cloud plane, sample the coverage at that XZ, return the [0,1]
+// shadow amount. The projection along the sun direction is what makes the shadow
+// CRAWL across terrain as the sun moves / the clouds drift -- a real cast shadow,
+// not a screen-space overlay.
+float cloudShadow(vec3 worldPos) {
+    if (u_cloudShadowEnabled == 0 || u_cloudShadowStrength <= 0.0) return 0.0;
+    // toward-sun = -travel direction. Skip when the sun is at/below the horizon.
+    vec3 toSun = -u_cloudSunDir;
+    if (toSun.y < 0.05) return 0.0;
+    float dh = u_cloudPlaneHeight - worldPos.y;
+    if (dh <= 0.0) return 0.0;
+    float t = dh / toSun.y;                 // distance along the sun ray to the plane
+    vec2 hitXZ = worldPos.xz + toSun.xz * t;
+    float coverage = cloudCoverageAt(hitXZ);
+    return clamp(coverage * u_cloudShadowStrength, 0.0, 1.0);
+}
 
 // --- T-I4-DR-albedo-calibration: exposure / irradiance transfer ---
 // The diffuse BRDF below divides albedo by PI (kD * albedo / PI), the
@@ -216,7 +292,14 @@ void main() {
     // diffuse 1/PI division round-trips albedo faithfully (exposure-audit root
     // fix; see SUN_IRRADIANCE_SCALE above).
     vec3 sunRadiance = u_sun.color * SUN_IRRADIANCE_SCALE;
-    Lo += CalculateLightContribution(L_sun, V, Normal, F0, Albedo, Metallic, a2, k, sunRadiance) * shadow;
+    // T-I5a-8 (C3): real cloud cast shadow. Project the fragment up the sun ray to
+    // the cloud sheet, sample the wind-advected coverage, and attenuate the DIRECT
+    // sun: directSun *= (1 - cloudShadow(worldPos)). Cloud cores throw crawling
+    // terrain shadows that drift with the wind (the CloudShadow gate asserts the
+    // moving-shadow luminance delta in a fixed terrain ROI). Render-only.
+    float cloud_shadow = cloudShadow(FragPos);
+    Lo += CalculateLightContribution(L_sun, V, Normal, F0, Albedo, Metallic, a2, k, sunRadiance)
+          * shadow * (1.0 - cloud_shadow);
 
     // Point Lights with early rejection
     for (int i = 0; i < u_pointLightCount; ++i) {

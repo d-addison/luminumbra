@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "ParticleEmitterDeterminism", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "WindFieldDeterminism", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "BiomeCoverage", "RiverPresence", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "ParticleEmitterDeterminism", "CloudShadow", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "WindFieldDeterminism", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "BiomeCoverage", "RiverPresence", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -2918,6 +2918,83 @@ function Test-WeatherVisual {
         $w.weather_sub_hash, $w.ticks, $w.max_storm_cells, $w.max_storm_cell_cap, $wPerTickMs, $wBudgetMs, $wBudgetSource)
 }
 
+function Test-CloudShadow {
+    # T-I5a-8 (C3): cloud-layer cast-shadow gate. PARTLY-CLOUDY fixture (NOT
+    # overcast -- premise guard F4). The skybox dome renders the wind-advected
+    # cloud layer and the lighting pass projects the SAME coverage field to cast
+    # crawling terrain shadows. Two captures (t0, t1) are taken as a cloud-shadow
+    # edge drifts across a FIXED terrain ROI; the gate asserts a luminance delta in
+    # that ROI (the moving cast-shadow signature) AND that the cloud layer is
+    # present in the sky. The added per-fragment cloud-shadow sample cost (lighting
+    # pass clouds-on minus clouds-off) is bounded against the <= 0.4 ms budget on
+    # release (design-decisions.md S7, critique F3).
+    $exe = Get-ClientExe
+    $visualDir = "build/$BuildPreset/test-artifacts/runtime/cloud-shadow"
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $visualDir
+    New-Item -ItemType Directory -Force -Path $visualDir | Out-Null
+
+    # A longer window than the other visual smokes so the wind drifts a shadow
+    # edge across the fixed terrain ROI between the two captures.
+    $runSeconds = [Math]::Max(24, $SmokeSeconds)
+    Invoke-Checked -FilePath $exe -ArgumentList @(
+        "--scenario", "cloud_shadow_smoke",
+        "--auto-create-world",
+        "--auto-enter-world",
+        "--timed-run", "$runSeconds",
+        "--no-audio",
+        "--no-ui",
+        "--runtime-artifact-dir", $visualDir
+    ) -TimeoutSeconds ([Math]::Max(150, $runSeconds + 90))
+
+    $analysisPath = Join-Path $visualDir "cloud-shadow-analysis.json"
+    if (-not (Test-Path $analysisPath)) {
+        throw "cloud shadow run did not produce $analysisPath (gate produced by task T-I5a-8-cloud-layer-tier1)"
+    }
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.cloud_shadow.v1") {
+        throw "Unexpected cloud shadow analysis schema '$($analysis.schema)'"
+    }
+    if ([int64]$analysis.gl_debug.errors -ne 0) {
+        throw "Cloud shadow run emitted GL debug errors: $($analysis.gl_debug.errors)"
+    }
+    if ([int]$analysis.render_pass.skybox_draws -le 0) {
+        throw "Cloud shadow run did not submit skybox draws"
+    }
+    # Moving cast-shadow signature: luminance delta in the fixed terrain ROI as a
+    # shadow edge crosses between the two times.
+    if (-not $analysis.moving_shadow.passed) {
+        throw "Cloud cast-shadow did not move the terrain ROI: t0=$($analysis.moving_shadow.terrain_roi_luminance_t0) t1=$($analysis.moving_shadow.terrain_roi_luminance_t1) delta=$($analysis.moving_shadow.terrain_roi_luminance_delta) (min $($analysis.moving_shadow.min_terrain_roi_delta))"
+    }
+    if ([double]$analysis.moving_shadow.terrain_roi_luminance_delta -lt [double]$analysis.moving_shadow.min_terrain_roi_delta) {
+        throw "Cloud cast-shadow terrain ROI delta $($analysis.moving_shadow.terrain_roi_luminance_delta) is below threshold $($analysis.moving_shadow.min_terrain_roi_delta)"
+    }
+    # Cloud layer present in the sky capture.
+    if (-not $analysis.cloud_layer.passed -or -not $analysis.cloud_layer.present) {
+        throw "Cloud layer not present in the sky: gradient=$($analysis.cloud_layer.sky_horizontal_gradient_mean) (min $($analysis.cloud_layer.min_sky_cloud_gradient))"
+    }
+    # GPU-timer budget for the added cloud-shadow sample (release-enforced; on
+    # debug the timing is informational, A2/T-I5a-6 precedent).
+    if ($null -eq $analysis.gpu_timer) {
+        throw "Cloud shadow analysis is missing the gpu_timer section (T-I5a-8)"
+    }
+    if ($BuildPreset -eq "release" -and [bool]$analysis.gpu_timer.supported) {
+        if (-not $analysis.gpu_timer.within_budget) {
+            throw "Cloud-shadow added GPU cost $($analysis.gpu_timer.cloud_shadow_added_ms) ms exceeds budget $($analysis.gpu_timer.cloud_shadow_budget_ms) ms (release)"
+        }
+    }
+    if (-not $analysis.passed) {
+        throw "Cloud shadow analysis reported failure"
+    }
+
+    Assert-PpmArtifact (Join-Path $visualDir $analysis.terrain_t1_screenshot)
+    Assert-CapturePinned -ArtifactDir $visualDir -Name "CloudShadow"
+    Write-Host ("CloudShadow: terrain ROI luminance t0 {0:N4} -> t1 {1:N4} (delta {2:N4}); cloud sky gradient {3:N4}; cloud-shadow added {4:N4} ms" -f `
+        $analysis.moving_shadow.terrain_roi_luminance_t0, $analysis.moving_shadow.terrain_roi_luminance_t1, `
+        $analysis.moving_shadow.terrain_roi_luminance_delta, $analysis.cloud_layer.sky_horizontal_gradient_mean, `
+        $analysis.gpu_timer.cloud_shadow_added_ms)
+}
+
 function Test-ParticleEmitterDeterminism {
     # T-I5a-1: GPU particle framework determinism gate. Spawns the fixture
     # emitter, snapshots the sim-deterministic emitter DESCRIPTOR SET twice from
@@ -4725,6 +4802,7 @@ switch ($Mode) {
     "SkyboxVisual" { Test-SkyboxVisual }
     "WeatherVisual" { Test-WeatherVisual }
     "ParticleEmitterDeterminism" { Test-ParticleEmitterDeterminism }
+    "CloudShadow" { Test-CloudShadow }
     "TimeOfDaySweep" { Test-TimeOfDaySweep }
     "PlayerView" { Test-PlayerView }
     "FarLodHorizon" { Test-FarLodHorizon }
