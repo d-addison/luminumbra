@@ -134,7 +134,21 @@ vec3 renderRain(vec3 sceneColor, vec2 screenUV, vec3 worldPos) {
     float veil = (near * 0.7 + far * 0.45) * u_rainIntensity;
     // Light water-white, low intensity -> a translucent veil, not bright dirt.
     vec3 veilColor = vec3(0.82, 0.9, 1.0) * (0.35 + u_stormIntensity * 0.25);
-    rainColor += veilColor * veil * 0.22;
+
+    // T-I5b-DR-storm2 (M7): KILL THE DOWN-VIEW GREY VEIL. This screen-space veil
+    // paints fixed VERTICAL screen-space dashes over EVERY pixel. When the camera
+    // pitches DOWN, the frame fills with NEAR terrain, and those vertical dashes
+    // smear into a flat desaturated grey haze across the ground -- the "grey fog,
+    // not streaks" defect. Vertical screen streaks only read as falling rain when
+    // they overlay DISTANT scene / sky (a roughly horizontal look). So we fade the
+    // veil out as the viewed surface gets close to the camera (i.e. looking down at
+    // the ground). The 3D ParticlePass streaks carry the actual rain in the down
+    // view; this veil is reserved for the far/horizon read where it belongs.
+    float viewDist = length(worldPos - u_cameraPos);
+    // Full veil only past ~40m (horizon/sky); fully suppressed within ~12m (the
+    // near terrain that floods a down-pitched frame).
+    float farVeilMask = smoothstep(12.0, 40.0, viewDist);
+    rainColor += veilColor * veil * 0.20 * farVeilMask;
 
     // Ground sheen ONLY on valid upward-facing surfaces (sky has no normal, so it
     // is untouched). A slow fbm gives a gentle living wet-ground shimmer.
