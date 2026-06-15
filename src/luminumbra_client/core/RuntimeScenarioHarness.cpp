@@ -6388,6 +6388,43 @@ CreatureSliceScene SpawnCreatureSliceScene(
                 need.at("pressure").get<float>(),
                 need.at("growth_per_tick").get<float>()});
         }
+        // T-I5b-2 (E1): OPTIONAL ecology stimulus subscriptions (game-data opt-in).
+        // Only archetypes whose slice declares a `stimulus_subscriptions` block
+        // react to the environment; the default grovestrider carries none, so its
+        // planner path (and the CreatureSlice gate) is unchanged. Each entry maps a
+        // named channel onto a need with a gain; the engine names no channel-to-need
+        // semantics -- the archetype does. Unknown channel names are skipped.
+        if (slice.contains("stimulus_subscriptions")) {
+            auto& subscription =
+                registry.emplace<Luminumbra::Components::StimulusSubscriptionComponent>(creature);
+            for (const nlohmann::json& entry : slice.at("stimulus_subscriptions")) {
+                const std::string channel_name = entry.at("channel").get<std::string>();
+                luminumbra::ai::StimulusChannel channel{};
+                bool known = true;
+                if (channel_name == "weather") {
+                    channel = luminumbra::ai::StimulusChannel::Weather;
+                } else if (channel_name == "temperature") {
+                    channel = luminumbra::ai::StimulusChannel::Temperature;
+                } else if (channel_name == "time_of_day") {
+                    channel = luminumbra::ai::StimulusChannel::TimeOfDay;
+                } else if (channel_name == "season") {
+                    channel = luminumbra::ai::StimulusChannel::Season;
+                } else if (channel_name == "light_level") {
+                    channel = luminumbra::ai::StimulusChannel::LightLevel;
+                } else {
+                    known = false;
+                }
+                if (known) {
+                    subscription.subscriptions.push_back({
+                        channel,
+                        entry.at("need").get<std::string>(),
+                        entry.value("gain", 1.0f)});
+                }
+            }
+            if (subscription.subscriptions.empty()) {
+                registry.remove<Luminumbra::Components::StimulusSubscriptionComponent>(creature);
+            }
+        }
     }
     scene.creature = creature;
 

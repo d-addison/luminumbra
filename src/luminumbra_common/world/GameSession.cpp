@@ -1,5 +1,7 @@
 #include "GameSession.h"
 #include "../ai/InstinctSystem.h"
+#include "../ai/StimulusChannels.h"
+#include "../components/InstinctComponents.h"
 #include "../animation/AnimationRuntime.h"
 #include "../systems/SHIELD_WorldSystem.h" // This includes TerrainGenParams
 #include "../core/JobSystem.h"
@@ -85,7 +87,26 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
 
         // 2. Instinct planning (T-I3-17): need growth + deterministic
         // replanning over the registry.
-        luminumbra::ai::RunInstinctSystemOnTick(m_registry, current_tick);
+        //
+        // T-I5b-2 (E1): the ecology stimulus-channel registry is supplied ONLY
+        // when at least one creature has OPTED IN via a game-data
+        // StimulusSubscriptionComponent. The canonical roster carries none, so
+        // the `view.empty()` guard keeps the call BYTE-IDENTICAL to the pre-5b
+        // path (nullptr context) -- world_hash stays d950a6afc12a5cdc (critique
+        // F1 / §0). When subscribers exist, the context reads the replicated
+        // weather state (one-way; weather updated on the PREVIOUS tick, slot 4)
+        // and the per-tick time-of-day/season/light channels derived from the
+        // tick. The engine still names no creature behavior.
+        if (m_registry.view<const Luminumbra::Components::StimulusSubscriptionComponent>().empty()) {
+            luminumbra::ai::RunInstinctSystemOnTick(m_registry, current_tick);
+        } else {
+            luminumbra::ai::StimulusContext stimulus_context;
+            stimulus_context.tick = current_tick;
+            stimulus_context.sample_position = m_metadata.spawnPoint;
+            stimulus_context.weather = m_weatherSystem.get();
+            const luminumbra::ai::StimulusChannelRegistry stimulus_registry(stimulus_context);
+            luminumbra::ai::RunInstinctSystemOnTick(m_registry, current_tick, &stimulus_registry);
+        }
 
         // 3. T-I5a-2 (A2): wind field update. Deterministic (DeterministicMath +
         // FastNoise batch path; no wall-clock/RNG). Anchored on the spawn/stream
