@@ -2177,9 +2177,14 @@ int main(int argc, char* argv[]) {
                         // The overlay adds to the already-tonemapped [0,1] scene, so
                         // a modest pulse is a clear full-scene flash without a total
                         // white-out (the gate needs a frame-mean spike >= 0.04).
+                        // T-I5a-DR-atmospheric-visuals: a STORM/overcast strike.
+                        // The pulse is the readable scene flash; the bolt is a
+                        // THIN jagged forked filament (width/glow below, the
+                        // overlay shader splits these into a hot core + glow halo
+                        // so the bolt no longer reads as a fat opaque white worm).
                         lstate.pulse_intensity = 0.16f; // 1-to-few-frame flash lift
-                        lstate.bolt_width_ndc = 0.012f; // bright core ribbon
-                        lstate.bolt_glow_ndc = 0.040f;  // surrounding glow halo
+                        lstate.bolt_width_ndc = 0.010f; // thin bright core ribbon
+                        lstate.bolt_glow_ndc = 0.034f;  // surrounding glow halo
                         // Deterministic strike terminus on the horizon ahead of the
                         // camera. The bolt descends from a cloud-base height down to
                         // this point; placing the terminus ~220 m ahead at the camera's
@@ -2209,7 +2214,14 @@ int main(int argc, char* argv[]) {
                         const float kBoltColumnNdcX = 0.06f;  // centred column
                         const float kBoltTopNdcY = 0.92f;
                         const float kBoltBotNdcY = -0.12f;
-                        const float kLateralToNdc = 1.0f / 240.0f; // gentle lateral jag -> a vertical-ish bolt
+                        // T-I5a-DR-atmospheric-visuals: amplify the seeded lateral
+                        // displacement into NDC so the descending channel reads as
+                        // a JAGGED zig-zag instead of a near-straight thick bar --
+                        // but keep it predominantly VERTICAL (the descent spans the
+                        // full frame height while the jag stays a modest sideways
+                        // wobble), so the bolt reads as a tall jagged filament, not
+                        // a horizontal scribble. The shader keeps the stroke thin.
+                        const float kLateralToNdc = 1.0f / 150.0f; // modest jagged wobble
                         const auto map_point = [&](const glm::vec3& wp) -> glm::vec2 {
                             const float hf = std::clamp((wp.y - bottom.y) / span_y, 0.0f, 1.0f);
                             const float ndc_y = kBoltBotNdcY + (kBoltTopNdcY - kBoltBotNdcY) * hf;
@@ -2218,7 +2230,12 @@ int main(int argc, char* argv[]) {
                             const float base_x = bottom.x + (top.x - bottom.x) * hf;
                             const float base_z = bottom.z + (top.z - bottom.z) * hf;
                             const float lateral = (wp.x - base_x) + (wp.z - base_z);
-                            const float ndc_x = kBoltColumnNdcX + lateral * kLateralToNdc;
+                            // Clamp the lateral excursion so the jag stays a modest
+                            // sideways wobble around the fixed column -- the descent
+                            // (full frame height) dominates, so the bolt reads as a
+                            // TALL jagged filament rather than a horizontal scribble.
+                            const float ndc_x = kBoltColumnNdcX +
+                                std::clamp(lateral * kLateralToNdc, -0.22f, 0.22f);
                             return glm::vec2(ndc_x, ndc_y);
                         };
                         const auto push_stroke = [&](const std::vector<glm::vec3>& stroke) {

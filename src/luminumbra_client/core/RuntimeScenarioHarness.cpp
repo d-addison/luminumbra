@@ -1381,6 +1381,16 @@ StrikePixelStats AnalyzeStrikePixels(const std::vector<unsigned char>& pixels, i
     // The bolt pixel is bright in absolute terms AND well above the frame mean AND
     // a sharp local step on at least one axis.
     const double rel_bright = stats.frame_mean_luminance + 0.12;
+    // Bolt-core bounding box accumulation (T-I5a-DR-atmospheric-visuals): a real
+    // bolt's bright core is THIN + mostly VERTICAL, so its bright-core pixels span
+    // a tall, narrow box and fill only a small fraction of it. A fat white blob
+    // fills a near-square box densely. We collect the bbox over the SAME bright-
+    // thin pixels the count above tracks (the bolt body, excluding the broad pulse).
+    int bbox_min_x = width;
+    int bbox_min_y = height;
+    int bbox_max_x = -1;
+    int bbox_max_y = -1;
+    std::uint64_t core_pixels = 0;
     for (int y = 1; y < height - 1; ++y) {
         for (int x = 1; x < width - 1; ++x) {
             const std::size_t off = static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
@@ -1399,7 +1409,26 @@ StrikePixelStats AnalyzeStrikePixels(const std::vector<unsigned char>& pixels, i
             if ((l - lL) >= kGradientLuma || (l - lR) >= kGradientLuma ||
                 (l - lU) >= kGradientLuma || (l - lD) >= kGradientLuma) {
                 ++stats.bright_thin_pixels;
+                ++core_pixels;
+                bbox_min_x = std::min(bbox_min_x, x);
+                bbox_min_y = std::min(bbox_min_y, y);
+                bbox_max_x = std::max(bbox_max_x, x);
+                bbox_max_y = std::max(bbox_max_y, y);
             }
+        }
+    }
+    stats.bolt_core_pixels = core_pixels;
+    if (bbox_max_x >= bbox_min_x && bbox_max_y >= bbox_min_y) {
+        stats.bolt_bbox_width = bbox_max_x - bbox_min_x + 1;
+        stats.bolt_bbox_height = bbox_max_y - bbox_min_y + 1;
+        if (stats.bolt_bbox_width > 0) {
+            stats.bolt_aspect_ratio =
+                static_cast<double>(stats.bolt_bbox_height) / static_cast<double>(stats.bolt_bbox_width);
+        }
+        const double bbox_area =
+            static_cast<double>(stats.bolt_bbox_width) * static_cast<double>(stats.bolt_bbox_height);
+        if (bbox_area > 0.0) {
+            stats.bolt_fill_fraction = static_cast<double>(core_pixels) / bbox_area;
         }
     }
     return stats;
@@ -1421,12 +1450,29 @@ void WriteStrikeVisualAnalysis(
     // calibrated to the first strike capture; measured values recorded alongside.
     constexpr double kMinPulseDelta = 0.04;         // >= 4% absolute frame-mean luma rise
     constexpr std::uint64_t kMinBoltPixels = 40;    // a visible thin bolt structure
+    // T-I5a-DR-atmospheric-visuals BOLT-SHAPE gate (catch the "fat lumpy blob"):
+    //  - the bolt's bright core must form a TALL, NARROW structure (aspect >= 2:1),
+    //  - and it must be THIN -- its bright-core pixels fill only a small fraction
+    //    of its bounding box (a solid white worm fills a near-square box densely),
+    //  - and the pre-strike STORM scene must be dark enough that the flash reads.
+    constexpr double kMinBoltAspect = 2.0;          // height/width: a vertical bolt
+    constexpr double kMaxBoltFillFraction = 0.34;   // sparse/thin, not a filled blob
+    constexpr double kMaxNeighborLuma = 0.62;       // storm sky dark enough for contrast
 
     const double pulse_delta = strike_stats.frame_mean_luminance - neighbor_stats.frame_mean_luminance;
     const GLDebugRuntimeStats gl_debug = CurrentGLDebugRuntimeStats();
 
     const bool pulse_passed = pulse_delta >= kMinPulseDelta;
     const bool bolt_passed = strike_stats.bright_thin_pixels >= kMinBoltPixels;
+    // Shape: a thin, mostly-vertical, connected-looking structure -- NOT a blob.
+    const bool bolt_shape_passed =
+        strike_stats.bolt_aspect_ratio >= kMinBoltAspect &&
+        strike_stats.bolt_fill_fraction > 0.0 &&
+        strike_stats.bolt_fill_fraction <= kMaxBoltFillFraction;
+    // Contrast: the strike fires against a dark enough storm/overcast sky that the
+    // pulse + bolt read (the neighbour pre-strike frame is the storm backdrop).
+    const bool strike_contrast_passed =
+        neighbor_stats.frame_mean_luminance <= kMaxNeighborLuma;
     // The strike's SIM determinism (the schedule is a replayable WORLD EVENT folded
     // into the `weather` world_hash sub-hash) is proven by the weather-bench arm of
     // the WeatherVisual gate (strikes_scheduled there is asserted > 0). Here in the
@@ -1437,6 +1483,8 @@ void WriteStrikeVisualAnalysis(
         render_pass.lighting_draws > 0 &&
         pulse_passed &&
         bolt_passed &&
+        bolt_shape_passed &&
+        strike_contrast_passed &&
         gl_debug.errors == 0;
 
     nlohmann::json artifact = {
@@ -1463,13 +1511,28 @@ void WriteStrikeVisualAnalysis(
             {"passed", bolt_passed},
             {"bright_thin_pixels", strike_stats.bright_thin_pixels}
         }},
+        {"bolt_shape", {
+            {"passed", bolt_shape_passed},
+            {"bolt_core_pixels", strike_stats.bolt_core_pixels},
+            {"bbox_width", strike_stats.bolt_bbox_width},
+            {"bbox_height", strike_stats.bolt_bbox_height},
+            {"aspect_ratio", strike_stats.bolt_aspect_ratio},
+            {"fill_fraction", strike_stats.bolt_fill_fraction}
+        }},
+        {"strike_contrast", {
+            {"passed", strike_contrast_passed},
+            {"neighbor_frame_mean_luminance", neighbor_stats.frame_mean_luminance}
+        }},
         {"sim", {
             {"strikes_scheduled", sim_strikes_scheduled},
             {"sim_scheduled", sim_scheduled}
         }},
         {"thresholds", {
             {"min_pulse_delta", kMinPulseDelta},
-            {"min_bolt_pixels", kMinBoltPixels}
+            {"min_bolt_pixels", kMinBoltPixels},
+            {"min_bolt_aspect", kMinBoltAspect},
+            {"max_bolt_fill_fraction", kMaxBoltFillFraction},
+            {"max_neighbor_luma", kMaxNeighborLuma}
         }},
         {"render_pass", {
             {"lighting_draws", render_pass.lighting_draws},
@@ -1738,21 +1801,35 @@ PrecipPixelStats AnalyzePrecipPixels(const std::vector<unsigned char>& pixels, i
     }
     stats.precip_band_pixels = band_pixels;
     const double band_mean = band_pixels > 0 ? band_luminance_accum / static_cast<double>(band_pixels) : 0.0;
+    stats.band_mean_luminance = band_mean;
     // Bright = clearly above the local backdrop (particles read as light streaks).
+    // NOTE: PixelLuminance is on the 0-255 scale, so the floor uses 0-255 units.
     const double bright_floor = band_mean + 0.06;
+    // Dark speck = MEANINGFULLY below the backdrop (the "dirt on the sky" failure).
+    // A real margin (0-255 units) so ordinary cloud/terrain noise near the band
+    // mean is NOT counted; only pixels clearly darker than the sky are "specks".
+    constexpr double kDarkSpeckMargin = 14.0; // ~0.055 on the [0,1] scale
+    const double dark_floor = band_mean - kDarkSpeckMargin;
 
     double h_grad_accum = 0.0;
     double v_grad_accum = 0.0;
     std::uint64_t grad_samples = 0;
     std::uint64_t bright_pixels = 0;
+    std::uint64_t dark_pixels = 0;
+    double bright_luminance_accum = 0.0;
 
     for (int y = band_top; y < band_bottom - 1; ++y) {
         for (int x = min_x; x < max_x - 1; ++x) {
             const std::size_t off = static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
             const double l = PixelLuminance(pixels[off], pixels[off + 1u], pixels[off + 2u]);
             const bool bright = l >= bright_floor;
+            const bool dark = l <= dark_floor;
             if (bright) {
                 ++bright_pixels;
+                bright_luminance_accum += l;
+            }
+            if (dark) {
+                ++dark_pixels;
             }
             // Only accumulate gradient orientation around bright structure so the
             // measure tracks the particle streaks, not the smooth backdrop.
@@ -1769,13 +1846,27 @@ PrecipPixelStats AnalyzePrecipPixels(const std::vector<unsigned char>& pixels, i
     }
 
     stats.bright_particle_pixels = bright_pixels;
+    stats.dark_speck_pixels = dark_pixels;
     if (band_pixels > 0) {
         stats.bright_particle_fraction =
             static_cast<double>(bright_pixels) / static_cast<double>(band_pixels);
+        stats.dark_speck_fraction =
+            static_cast<double>(dark_pixels) / static_cast<double>(band_pixels);
+    }
+    if (bright_pixels > 0) {
+        stats.bright_particle_mean_luminance =
+            bright_luminance_accum / static_cast<double>(bright_pixels);
     }
     if (grad_samples > 0) {
         stats.horizontal_gradient_mean = h_grad_accum / static_cast<double>(grad_samples);
         stats.vertical_gradient_mean = v_grad_accum / static_cast<double>(grad_samples);
+    }
+    // Streak ANISOTROPY: the ratio of the dominant gradient axis to the weaker.
+    // A round dot is ~isotropic (~1); an elongated streak is strongly anisotropic.
+    {
+        const double hi = std::max(stats.horizontal_gradient_mean, stats.vertical_gradient_mean);
+        const double lo = std::min(stats.horizontal_gradient_mean, stats.vertical_gradient_mean);
+        stats.streak_anisotropy = (lo > 1e-6) ? (hi / lo) : 0.0;
     }
     // Slant ratio: horizontal vs vertical gradient energy around bright streaks.
     // Vertical (calm) rain produces near-vertical streaks -> strong vertical
@@ -1797,7 +1888,12 @@ nlohmann::json PrecipPixelStatsToJson(const PrecipPixelStats& s) {
         {"bright_particle_fraction", s.bright_particle_fraction},
         {"horizontal_gradient_mean", s.horizontal_gradient_mean},
         {"vertical_gradient_mean", s.vertical_gradient_mean},
-        {"slant_ratio", s.slant_ratio}
+        {"slant_ratio", s.slant_ratio},
+        {"streak_anisotropy", s.streak_anisotropy},
+        {"band_mean_luminance", s.band_mean_luminance},
+        {"bright_particle_mean_luminance", s.bright_particle_mean_luminance},
+        {"dark_speck_pixels", s.dark_speck_pixels},
+        {"dark_speck_fraction", s.dark_speck_fraction}
     };
 }
 } // namespace
@@ -1819,6 +1915,19 @@ void WritePrecipitationAnalysis(
     constexpr double kMinSlantRatioGain = 1.20;     // windy slant >= 20% over calm
     // Active-storm + precipitation ParticlePass budget (design-decisions §7).
     constexpr double kParticleStormBudgetMs = 1.2;
+    // T-I5a-DR-atmospheric-visuals SHAPE/QUALITY gates (catch "dark speckled dots"):
+    //  - the precip must read as ELONGATED streaks (anisotropic gradient), not
+    //    round dots (isotropic). A round dot is ~1.0; a vertical streak is well
+    //    above 1. We assert this on the CALM frame (vertical fall -> the cleanest
+    //    anisotropy signal); the WINDY frame's streaks run diagonally so their h/v
+    //    gradient energy is balanced (anisotropy ~1 even though they ARE streaks),
+    //    so the windy STREAK proof is the slant-gain check above, not anisotropy.
+    constexpr double kMinStreakAnisotropy = 1.50; // calm vertical streaks
+    //  - rain must be LIGHT over the sky: the bright precip pixels' mean luminance
+    //    must sit ABOVE the band backdrop by a real margin (0-255 units) -- not
+    //    dark specks. (dark_speck_fraction is reported as telemetry; the band
+    //    includes dark horizon terrain so it is not a clean pass gate.)
+    constexpr double kMinBrightOverBandMargin = 6.0; // bright precip clearly lighter than sky
 
     const bool precip_present_calm =
         calm_render_pass.particle_draws > 0 &&
@@ -1832,6 +1941,19 @@ void WritePrecipitationAnalysis(
         : 0.0;
     const bool slants_with_wind = slant_gain >= kMinSlantRatioGain;
 
+    // Streaks-not-dots: the bright precip structure must be ELONGATED (anisotropic
+    // gradient) in the CALM frame (vertical streaks). The windy frame is covered by
+    // the slant-gain check (diagonal streaks are gradient-isotropic).
+    const bool streaks_not_dots =
+        calm_stats.streak_anisotropy >= kMinStreakAnisotropy;
+    // Light-not-dark: bright precip pixels sit clearly ABOVE the band backdrop in
+    // BOTH frames (rain is a light streak over the sky, not a dark speck).
+    const bool light_not_dark =
+        calm_stats.bright_particle_mean_luminance >=
+            calm_stats.band_mean_luminance + kMinBrightOverBandMargin &&
+        windy_stats.bright_particle_mean_luminance >=
+            windy_stats.band_mean_luminance + kMinBrightOverBandMargin;
+
     // Active-storm precip GPU-timer budget: assert the higher of the two captures'
     // ParticlePass timer against the storm budget (informational on debug where
     // the timer may report 0.0; enforced on the gate where supported).
@@ -1844,6 +1966,8 @@ void WritePrecipitationAnalysis(
         precip_present_calm &&
         precip_present_windy &&
         slants_with_wind &&
+        streaks_not_dots &&
+        light_not_dark &&
         within_storm_budget &&
         gl_debug.errors == 0;
 
@@ -1872,6 +1996,20 @@ void WritePrecipitationAnalysis(
             {"windy_slant_ratio", windy_stats.slant_ratio},
             {"slant_ratio_gain", slant_gain}
         }},
+        {"streak_shape", {
+            {"passed", streaks_not_dots},
+            {"calm_anisotropy", calm_stats.streak_anisotropy},
+            {"windy_anisotropy", windy_stats.streak_anisotropy}
+        }},
+        {"light_streaks", {
+            {"passed", light_not_dark},
+            {"calm_band_mean_luminance", calm_stats.band_mean_luminance},
+            {"calm_bright_mean_luminance", calm_stats.bright_particle_mean_luminance},
+            {"windy_band_mean_luminance", windy_stats.band_mean_luminance},
+            {"windy_bright_mean_luminance", windy_stats.bright_particle_mean_luminance},
+            {"calm_dark_speck_fraction", calm_stats.dark_speck_fraction},
+            {"windy_dark_speck_fraction", windy_stats.dark_speck_fraction}
+        }},
         {"gpu_timer", {
             {"particle_pass_gpu_ms", particle_storm_gpu_ms},
             {"storm_budget_ms", kParticleStormBudgetMs},
@@ -1881,7 +2019,9 @@ void WritePrecipitationAnalysis(
         {"thresholds", {
             {"min_bright_fraction", kMinBrightFraction},
             {"min_slant_ratio_gain", kMinSlantRatioGain},
-            {"particle_storm_budget_ms", kParticleStormBudgetMs}
+            {"particle_storm_budget_ms", kParticleStormBudgetMs},
+            {"min_streak_anisotropy", kMinStreakAnisotropy},
+            {"min_bright_over_band_margin", kMinBrightOverBandMargin}
         }},
         {"render_pass", {
             {"calm_particle_draws", calm_render_pass.particle_draws},
@@ -1982,6 +2122,10 @@ TimeOfDayPixelStats AnalyzeTimeOfDayPixels(const std::vector<unsigned char>& pix
     double sky_left_b_accum = 0.0;
     double sky_right_r_accum = 0.0;
     double sky_right_b_accum = 0.0;
+    // T-I5a-DR-atmospheric-visuals: sky green-excess (aurora chroma) accumulators.
+    double sky_green_excess_accum = 0.0;
+    double sky_green_excess_max = 0.0;
+    std::uint64_t sky_strong_green_pixels = 0;
     const int mid_x = width / 2;
     double terrain_luminance_accum = 0.0;
     double terrain_r_accum = 0.0;
@@ -2021,6 +2165,19 @@ TimeOfDayPixelStats AnalyzeTimeOfDayPixels(const std::vector<unsigned char>& pix
                     sky_right_r_accum += static_cast<double>(r);
                     sky_right_b_accum += static_cast<double>(b);
                 }
+                // Aurora green-excess: how much green leads the max of r,b. A
+                // neutral/blue dusk dome has g <= max(r,b) -> ~0; a green aurora
+                // smear spikes this. Normalized to [0,1] (divide by 255).
+                const double green_excess =
+                    std::max(0.0, static_cast<double>(g) -
+                                  static_cast<double>(std::max(r, b))) / 255.0;
+                sky_green_excess_accum += green_excess;
+                sky_green_excess_max = std::max(sky_green_excess_max, green_excess);
+                // STRONG green excess => an aurora curtain core (a warm yellow sky
+                // has r>=g so it never clears this). ~0.12 == 30/255.
+                if (green_excess >= 0.12) {
+                    ++sky_strong_green_pixels;
+                }
             }
             if (y_from_top >= terrain_min_y_from_top) {
                 terrain_luminance_accum += luminance;
@@ -2055,6 +2212,10 @@ TimeOfDayPixelStats AnalyzeTimeOfDayPixels(const std::vector<unsigned char>& pix
         const double left_ratio = (sky_left_b_accum > 0.0) ? sky_left_r_accum / sky_left_b_accum : 0.0;
         const double right_ratio = (sky_right_b_accum > 0.0) ? sky_right_r_accum / sky_right_b_accum : 0.0;
         stats.sky_warm_half_r_b_ratio = std::max(left_ratio, right_ratio);
+        stats.sky_green_excess_mean = sky_green_excess_accum / static_cast<double>(sky_pixels);
+        stats.sky_green_excess_max = sky_green_excess_max;
+        stats.sky_strong_green_fraction =
+            static_cast<double>(sky_strong_green_pixels) / static_cast<double>(sky_pixels);
     }
     if (terrain_pixels > 0) {
         stats.terrain_mean_luminance = terrain_luminance_accum / static_cast<double>(terrain_pixels);
@@ -2197,6 +2358,9 @@ nlohmann::json TimeOfDayPixelStatsToJson(const TimeOfDayPixelStats& stats) {
         {"max_luminance", stats.max_luminance},
         {"max_luminance_y_from_top_norm", stats.max_luminance_y_from_top_norm},
         {"sky_max_luminance", stats.sky_max_luminance},
+        {"sky_green_excess_mean", stats.sky_green_excess_mean},
+        {"sky_green_excess_max", stats.sky_green_excess_max},
+        {"sky_strong_green_fraction", stats.sky_strong_green_fraction},
         {"center_glow_pixels", stats.center_glow_pixels}
     };
 }
@@ -2358,6 +2522,33 @@ void WriteTimeOfDaySweepAnalysis(
         season_phases_captured && season_phases_distinct &&
         season_sun_path_passed && season_palette_passed;
 
+    // T-I5a-DR-atmospheric-visuals: AURORA NIGHT-GATING. The aurora is a NIGHT-ONLY
+    // phenomenon. The old shader let it bleed into the twilight/day dome. The fixed
+    // shader gates the aurora by the deep-night brightness envelope, so its green
+    // chroma only appears at night. We assert this as a RELATIVE presence check
+    // (robust to the warm low-sun sky's own green/yellow gradient, which an
+    // ABSOLUTE green ceiling would false-trip): the NIGHT sky band must carry a
+    // measurably STRONGER green-excess curtain than the brighter (day/dusk) phases.
+    // If the aurora bled into dusk/noon (the failure), the night-vs-day gap would
+    // collapse; the night-only gating keeps a clear gap. We compare night against
+    // the brightest (most day-like) phase, whichever of noon/dusk that is, so the
+    // check holds even when the scenario's phase timing shifts which capture is the
+    // sunniest. A non-trivial absolute night floor keeps the gate non-vacuous.
+    // The discriminator is the SATURATED-green curtain fraction: the night aurora
+    // covers a non-trivial fraction of the sky band with strong green; a warm low-
+    // sun day/dusk sky (r>=g) produces ~none. Require the night to carry a visible
+    // aurora AND the day-side phases to be essentially aurora-FREE.
+    constexpr double kMinNightStrongGreen = 0.010;  // night aurora curtain present
+    constexpr double kMaxDayStrongGreen = 0.003;    // day/dusk must be aurora-free
+    const double noon_strong_green = noon ? noon->stats.sky_strong_green_fraction : 0.0;
+    const double dusk_strong_green = dusk ? dusk->stats.sky_strong_green_fraction : 0.0;
+    const double night_strong_green = night ? night->stats.sky_strong_green_fraction : 0.0;
+    const bool aurora_absent_dusk_noon =
+        all_phases_captured &&
+        noon_strong_green <= kMaxDayStrongGreen &&
+        dusk_strong_green <= kMaxDayStrongGreen &&
+        night_strong_green >= kMinNightStrongGreen;
+
     const GLDebugRuntimeStats gl_debug = CurrentGLDebugRuntimeStats();
     const bool passed =
         render_pass.skybox_draws > 0 &&
@@ -2367,6 +2558,7 @@ void WriteTimeOfDaySweepAnalysis(
         dusk_sky_warm_passed &&      // T-I4-DR-tod-sky-balance
         dusk_sky_warm_band_passed && // T-I5a-6: absolute dawn/dusk hue band
         season_sweep_passed &&       // T-I5a-7: per-season sun-path + palette
+        aurora_absent_dusk_noon &&   // T-I5a-DR: aurora night-only (absent at dusk/noon)
         emissive_passed &&
         gl_debug.errors == 0;
 
@@ -2422,6 +2614,14 @@ void WriteTimeOfDaySweepAnalysis(
             {"noon_sky_warm_half_r_b_ratio", noon ? noon->stats.sky_warm_half_r_b_ratio : 0.0},
             {"dusk_sky_warm_half_r_b_ratio", dusk ? dusk->stats.sky_warm_half_r_b_ratio : 0.0},
             {"sky_warm_half_r_b_ratio_increase", dusk_sky_warm_shift}
+        }},
+        {"aurora_gating", {
+            {"passed", aurora_absent_dusk_noon},
+            {"noon_sky_strong_green_fraction", noon_strong_green},
+            {"dusk_sky_strong_green_fraction", dusk_strong_green},
+            {"night_sky_strong_green_fraction", night_strong_green},
+            {"max_day_strong_green_fraction", kMaxDayStrongGreen},
+            {"min_night_strong_green_fraction", kMinNightStrongGreen}
         }},
         {"dusk_sky_hue_band", {
             // T-I5a-6: absolute dawn/dusk hue band (scattering palette rises warm
