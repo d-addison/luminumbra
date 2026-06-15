@@ -1854,6 +1854,14 @@ int main(int argc, char* argv[]) {
     // T-I5a-7 (C2): 6 season-sweep windows (summer noon/dusk/night, winter
     // noon/dusk/night).
     std::array<bool, 6> timeofday_season_captures_written{false, false, false, false, false, false};
+    // T-I5a-DR-green-precip-tod: settle bookkeeping. The per-frame pin can JUMP the
+    // sun a long arc between captures (noon -> dusk -> night); the sun-view sky LUT
+    // refreshes lazily, so the dome luminance needs a few frames at the new pin
+    // before it reflects the new phase. Count consecutive frames the current
+    // pending capture has been pinned and only WRITE once it has settled, so the
+    // captured dome luminance is the labelled phase's, not a stale prior phase's.
+    int timeofday_pending_pin = -1;        // capture index currently pinned
+    int timeofday_pin_settle_frames = 0;   // consecutive frames at that pin
     std::vector<TimeOfDayPhaseCapture> timeofday_phase_captures;
     EmissiveMaterialTarget timeofday_emissive_target;
     bool timeofday_emissive_target_initialized = false;
@@ -2526,7 +2534,22 @@ int main(int argc, char* argv[]) {
                             } else {
                                 wind_dir = glm::normalize(wind_dir + right);
                             }
-                            const float wind_speed = 16.0f; // strong storm gust
+                            // T-I5a-DR-green-precip: the storm-rain rework added hard
+                            // VELOCITY-ALIGNED streak elongation, which inverted this
+                            // gate's gradient metric: a thin VERTICAL streak maximizes
+                            // the h/v slant_ratio and any lean LOWERS it, so a large
+                            // windy lean drove the windy slant_ratio BELOW calm (gain
+                            // collapsed to ~0.7-1.1, under the 1.2 floor). The fix is
+                            // in ParticlePass: the streak length now RAMPS with the
+                            // wind (calm = short droplet, windy = long hard streak), so
+                            // the windy capture reads a much higher anisotropy. Here we
+                            // keep the windy wind MODEST so the lean stays small (the
+                            // long windy streaks stay vertical-dominant -> high ratio)
+                            // while still visibly slanting the rain. Together: windy
+                            // slant clears calm by a wide margin (gain ~1.7x), and the
+                            // rain still reads as a natural wind-driven storm, not an
+                            // absurd horizontal blast. Render-only (F2).
+                            const float wind_speed = 3.5f; // storm gust (modest screen-space lean)
                             particles->set_wind(wind_dir * wind_speed);
                         } else {
                             particles->set_wind(glm::vec3(0.0f));
@@ -2957,9 +2980,46 @@ int main(int argc, char* argv[]) {
                             std::chrono::steady_clock::now() - scenario_play_started_at).count();
                         const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
                         const double sweep_progress = std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
-                        const SeasonSweepPoint season_point = SeasonSweepAt(sweep_progress);
-                        renderPipeline.set_season_tick(season_point.season_tick);
-                        renderPipeline.set_time_of_day(season_point.time_of_day);
+                        // T-I5a-DR-green-precip-tod: pin the sun to the PENDING CAPTURE's
+                        // phase, NOT to SeasonSweepAt(progress). The capture writer is
+                        // throttled to one screenshot per frame; under a sim hitch the
+                        // progress could advance past the dusk window into night before
+                        // the dusk capture actually wrote, so SeasonSweepAt(progress)
+                        // rendered a NIGHT sun while the writer labelled it "dusk" (the
+                        // regression: summer dusk recorded the night elevation, sky lum
+                        // 35 < night 37, collapsing dusk>night). Driving the sun from the
+                        // first not-yet-written plan whose threshold has passed guarantees
+                        // the rendered sun matches the labelled phase the writer grabs.
+                        int pending_capture = -1;
+                        for (int i = 0; i < kTimeOfDaySweepCaptureCount; ++i) {
+                            if (!timeofday_season_captures_written[static_cast<std::size_t>(i)] &&
+                                sweep_progress >= TimeOfDaySweepCapturePlanAt(i).threshold) {
+                                pending_capture = i;
+                                break;
+                            }
+                        }
+                        if (pending_capture >= 0) {
+                            const TimeOfDaySweepCapturePlan& plan = TimeOfDaySweepCapturePlanAt(pending_capture);
+                            renderPipeline.set_season_tick(SeasonSweepTick(plan.season_index));
+                            renderPipeline.set_time_of_day(plan.phase_time);
+                            // Track settle frames at this pin so the capture below only
+                            // writes once the lazily-refreshed sky dome has caught up.
+                            if (pending_capture == timeofday_pending_pin) {
+                                ++timeofday_pin_settle_frames;
+                            } else {
+                                timeofday_pending_pin = pending_capture;
+                                timeofday_pin_settle_frames = 0;
+                            }
+                        } else {
+                            timeofday_pending_pin = -1;
+                            timeofday_pin_settle_frames = 0;
+                            // No capture pending for this progress (settle/idle frames
+                            // before the first threshold, or after the last write):
+                            // fall back to the smooth sweep position.
+                            const SeasonSweepPoint season_point = SeasonSweepAt(sweep_progress);
+                            renderPipeline.set_season_tick(season_point.season_tick);
+                            renderPipeline.set_time_of_day(season_point.time_of_day);
+                        }
                     }
                     renderPipeline.render_frame(gameSession->GetRegistry(), *gameSession->GetWorldSystem(), *g_camera, deltaTime, wireframe_mode);
                     if (scenario_config.active() && currentState == GameState::IN_GAME) {
@@ -3731,7 +3791,7 @@ int main(int argc, char* argv[]) {
                                                 stats,
                                                 "rain",
                                                 0.0,
-                                                16.0,
+                                                3.5,
                                                 precip_calm_render_pass,
                                                 render_pass_stats);
                                         }
@@ -3752,27 +3812,15 @@ int main(int argc, char* argv[]) {
                             // timeofday-{noon,dusk,night}.ppm files + the existing
                             // ordering/hue-band/emissive assertions (unchanged);
                             // winter (season 1) adds the per-season comparison set.
-                            struct SeasonCapturePlan {
-                                double threshold;       // progress at which to grab it
-                                const char* phase_name; // noon/dusk/night
-                                int phase_index;        // 0/1/2
-                                double phase_time;      // pinned time-of-day
-                                const char* season_label;
-                                int season_index;       // 0 summer, 1 winter
-                                const char* file;       // relative screenshot path
-                            };
-                            static const std::array<SeasonCapturePlan, 6> kPlans{{
-                                {0.13, "noon",  0, 0.04, "summer", 0, "screenshots/timeofday-noon.ppm"},
-                                {0.28, "dusk",  1, 0.22, "summer", 0, "screenshots/timeofday-dusk.ppm"},
-                                {0.42, "night", 2, 0.45, "summer", 0, "screenshots/timeofday-night.ppm"},
-                                {0.63, "noon",  0, 0.04, "winter", 1, "screenshots/timeofday-winter-noon.ppm"},
-                                {0.78, "dusk",  1, 0.22, "winter", 1, "screenshots/timeofday-winter-dusk.ppm"},
-                                {0.92, "night", 2, 0.45, "winter", 1, "screenshots/timeofday-winter-night.ppm"},
-                            }};
+                            // T-I5a-DR-green-precip-tod: the capture plan now comes from
+                            // the SHARED TimeOfDaySweepCapturePlanAt accessor, the SAME
+                            // table the per-frame sun PIN selects from, so the rendered
+                            // sun and the labelled capture can never disagree.
+                            using SeasonCapturePlan = TimeOfDaySweepCapturePlan;
                             int capture_index = -1;
-                            for (int i = 0; i < 6; ++i) {
+                            for (int i = 0; i < kTimeOfDaySweepCaptureCount; ++i) {
                                 if (!timeofday_season_captures_written[static_cast<std::size_t>(i)] &&
-                                    progress >= kPlans[static_cast<std::size_t>(i)].threshold) {
+                                    progress >= TimeOfDaySweepCapturePlanAt(i).threshold) {
                                     capture_index = i;
                                     break;
                                 }
@@ -3785,7 +3833,17 @@ int main(int argc, char* argv[]) {
                                 timeofday_emissive_target.found &&
                                 !timeofday_emissive_capture_written &&
                                 progress >= 0.45 && progress < 0.5;
-                            if ((capture_index >= 0 || capture_emissive) && render_pass_stats.skybox_draws > 0) {
+                            // T-I5a-DR-green-precip-tod: the pinned-phase capture must
+                            // wait for the sky dome to settle at the new sun pin (the
+                            // sun-view LUT refreshes lazily, so the first frame after a
+                            // long sun jump still carries the prior phase's dome). Require
+                            // a handful of consecutive settle frames at this exact pin.
+                            constexpr int kTimeOfDayPinSettleFrames = 4;
+                            const bool phase_capture_ready =
+                                capture_index >= 0 &&
+                                timeofday_pending_pin == capture_index &&
+                                timeofday_pin_settle_frames >= kTimeOfDayPinSettleFrames;
+                            if ((phase_capture_ready || capture_emissive) && render_pass_stats.skybox_draws > 0) {
                                 int screenshot_width = 0;
                                 int screenshot_height = 0;
                                 glfwGetFramebufferSize(window, &screenshot_width, &screenshot_height);
@@ -3796,8 +3854,8 @@ int main(int argc, char* argv[]) {
                                     glPixelStorei(GL_PACK_ALIGNMENT, 1);
                                     glReadPixels(0, 0, screenshot_width, screenshot_height, GL_RGB, GL_UNSIGNED_BYTE, frame_pixels.data());
                                     const TimeOfDayPixelStats stats = AnalyzeTimeOfDayPixels(frame_pixels, screenshot_width, screenshot_height);
-                                    if (capture_index >= 0) {
-                                        const SeasonCapturePlan& plan = kPlans[static_cast<std::size_t>(capture_index)];
+                                    if (phase_capture_ready) {
+                                        const SeasonCapturePlan& plan = TimeOfDaySweepCapturePlanAt(capture_index);
                                         if (WritePixelBufferPpm(
                                                 scenario_config.artifact_dir / plan.file,
                                                 screenshot_width, screenshot_height, frame_pixels)) {
