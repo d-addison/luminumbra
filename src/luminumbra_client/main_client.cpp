@@ -1782,6 +1782,15 @@ int main(int argc, char* argv[]) {
     bool weather_baseline_capture_written = false;
     bool weather_visual_capture_written = false;
     WeatherPixelStats weather_baseline_stats;
+    // T-I5a-8 cloud-shadow scenario state. Two terrain ROI captures (t0/t1) as the
+    // cloud-shadow edge drifts, a sky capture for cloud presence, and a clouds-off
+    // lighting-pass GPU timing captured before enabling the shadow (budget check).
+    bool cloud_shadow_t0_written = false;
+    bool cloud_shadow_done = false;
+    double cloud_shadow_terrain_luma_t0 = 0.0;
+    double cloud_shadow_scroll_t0 = 0.0;
+    double cloud_shadow_lighting_ms_off = 0.0;
+    bool cloud_shadow_lighting_off_sampled = false;
     // T-I5a-1 particle determinism scenario state.
     bool particle_emitter_spawned = false;
     bool particle_determinism_capture_written = false;
@@ -2126,6 +2135,38 @@ int main(int argc, char* argv[]) {
                         // Clear-sky control: a driven CLEAR state (overlay off).
                         renderPipeline.set_weather_state(wstate);
                     }
+                } else if (scenario_config.cloud_shadow_smoke() && scenario_ready && g_camera) {
+                    // T-I5a-8 (C3): partly-cloudy cast-shadow scenario. Fixed noon
+                    // camera framing lit terrain in the lower frame (strong sun ->
+                    // strong cast shadow). Enable the wind-advected cloud layer +
+                    // its projected cast shadow at a PARTLY-CLOUDY coverage (NOT
+                    // overcast -- premise guard F4). A strong, fixed wind drifts the
+                    // coverage field across the run so a shadow edge crawls over the
+                    // fixed terrain ROI between the two captures. Render-only (F2):
+                    // the cloud state never feeds back into the sim.
+                    ApplySkyboxVisualCamera(gameSession.get(), g_camera.get(), 0.04f);
+                    const double elapsed_play_seconds = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - scenario_play_started_at).count();
+                    const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
+                    const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
+                    Luminumbra::Rendering::WeatherRenderState wstate;
+                    // Strong, deterministic wind so the cloud sheet drifts visibly
+                    // across the ROI in the run window (one-way: this is the render
+                    // wind the cloud scroll consumes; it is not written to the sim).
+                    wstate.wind_direction = glm::vec3(1.0f, 0.0f, 0.0f);
+                    wstate.wind_strength = 1.0f;
+                    renderPipeline.set_weather_state(wstate);
+                    Luminumbra::Rendering::CloudRenderState cstate;
+                    cstate.enabled = true;
+                    // Cast shadow is OFF for the first ~15% so a clouds-off lighting
+                    // GPU baseline can be sampled, then ON for the rest (the added
+                    // per-fragment sample cost = on - off, bounded by the budget).
+                    cstate.shadow_enabled = progress >= 0.15;
+                    cstate.coverage_amount = 0.5f;   // partly cloudy (not overcast)
+                    cstate.biome_variation = 0.0f;
+                    cstate.plane_height = 900.0f;
+                    cstate.shadow_strength = 0.8f;
+                    renderPipeline.set_cloud_state(cstate);
                 } else if (scenario_config.particle_emitter_determinism_smoke() && scenario_ready && g_camera) {
                     // T-I5a-1: fixed skybox-style camera; spawn the fixture
                     // emitter ONCE in front of the camera so particles render.
@@ -2372,7 +2413,7 @@ int main(int argc, char* argv[]) {
                 gameSession->TickSimulation(static_cast<double>(deltaTime));
                 if (gameSession->GetWorldSystem() && (g_playerController || g_camera)) {
                     const Luminumbra::Vec3 streaming_position =
-                        ((scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.timeofday_sweep_smoke() || scenario_config.lod_boundary_oscillation_smoke() || scenario_config.lod_seam_arrival_smoke() || scenario_config.player_view_smoke() || scenario_config.farlod_horizon_smoke() || scenario_config.skinned_mesh_visual_smoke() || scenario_config.creature_slice_smoke()) && scenario_ready && g_camera)
+                        ((scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.cloud_shadow_smoke() || scenario_config.timeofday_sweep_smoke() || scenario_config.lod_boundary_oscillation_smoke() || scenario_config.lod_seam_arrival_smoke() || scenario_config.player_view_smoke() || scenario_config.farlod_horizon_smoke() || scenario_config.skinned_mesh_visual_smoke() || scenario_config.creature_slice_smoke()) && scenario_ready && g_camera)
                             ? Luminumbra::Vec3(g_camera->Position)
                             : (g_playerController ? Luminumbra::Vec3(g_playerController->GetPosition()) : Luminumbra::Vec3(g_camera->Position));
                     gameSession->GetWorldSystem()->update(
@@ -2396,7 +2437,7 @@ int main(int argc, char* argv[]) {
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             if (currentState == GameState::IN_GAME) {
                 if (gameSession->GetWorldSystem() && g_camera) {
-                    if (scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.lod_seam_arrival_smoke() || scenario_config.player_view_smoke() || scenario_config.farlod_horizon_smoke() || scenario_config.skinned_mesh_visual_smoke() || scenario_config.creature_slice_smoke()) {
+                    if (scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.cloud_shadow_smoke() || scenario_config.lod_seam_arrival_smoke() || scenario_config.player_view_smoke() || scenario_config.farlod_horizon_smoke() || scenario_config.skinned_mesh_visual_smoke() || scenario_config.creature_slice_smoke()) {
                         // time_of_day 0 is noon (sun elevation = cos(2*pi*t));
                         // 0.04 keeps the sun near its zenith for stable captures.
                         renderPipeline.set_time_of_day(0.04f);
@@ -2786,6 +2827,87 @@ int main(int argc, char* argv[]) {
                                                 "rain",
                                                 1.0f,
                                                 render_pass_stats);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (scenario_config.cloud_shadow_smoke() && scenario_ready && !cloud_shadow_done) {
+                            const double elapsed_play_seconds = std::chrono::duration<double>(now - scenario_play_started_at).count();
+                            const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
+                            const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
+                            const auto& render_pass_stats = renderPipeline.get_last_render_pass_stats();
+                            const auto& cloud_state = renderPipeline.get_cloud_state();
+                            // Sample the clouds-OFF lighting GPU baseline during the
+                            // shadow-off warmup window (the camera branch keeps the
+                            // cast shadow off until progress >= 0.15).
+                            if (!cloud_shadow_lighting_off_sampled &&
+                                progress >= 0.10 && progress < 0.15 &&
+                                render_pass_stats.lighting_draws > 0 &&
+                                render_pass_stats.lighting_gpu_ms > 0.0) {
+                                cloud_shadow_lighting_ms_off = render_pass_stats.lighting_gpu_ms;
+                                cloud_shadow_lighting_off_sampled = true;
+                            }
+                            // Two terrain-ROI captures with the cast shadow ON, far
+                            // enough apart that the wind has drifted a shadow edge
+                            // across the fixed ROI (t0 ~45%, t1 ~92%).
+                            const bool capture_t0 = !cloud_shadow_t0_written && progress >= 0.45 && progress < 0.55;
+                            const bool capture_t1 = cloud_shadow_t0_written && progress >= 0.90;
+                            if ((capture_t0 || capture_t1) && render_pass_stats.skybox_draws > 0) {
+                                int screenshot_width = 0;
+                                int screenshot_height = 0;
+                                glfwGetFramebufferSize(window, &screenshot_width, &screenshot_height);
+                                if (screenshot_width > 0 && screenshot_height > 0) {
+                                    std::vector<unsigned char> frame_pixels(
+                                        static_cast<std::size_t>(screenshot_width) * static_cast<std::size_t>(screenshot_height) * 3u);
+                                    glReadBuffer(GL_BACK);
+                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                                    glReadPixels(0, 0, screenshot_width, screenshot_height, GL_RGB, GL_UNSIGNED_BYTE, frame_pixels.data());
+                                    const Luminumbra::Client::ScenarioHarness::CloudShadowPixelStats stats =
+                                        Luminumbra::Client::ScenarioHarness::AnalyzeCloudShadowPixels(
+                                            frame_pixels, screenshot_width, screenshot_height);
+                                    if (capture_t0) {
+                                        const std::string t0_path = "screenshots/cloud-shadow-t0.ppm";
+                                        if (WritePixelBufferPpm(
+                                                scenario_config.artifact_dir / t0_path,
+                                                screenshot_width, screenshot_height, frame_pixels)) {
+                                            cloud_shadow_t0_written = true;
+                                            cloud_shadow_terrain_luma_t0 = stats.terrain_roi_mean_luminance;
+                                            cloud_shadow_scroll_t0 = static_cast<double>(cloud_state.scroll_offset.x);
+                                        }
+                                    } else {
+                                        const std::string t1_path = "screenshots/cloud-shadow-t1.ppm";
+                                        if (WritePixelBufferPpm(
+                                                scenario_config.artifact_dir / t1_path,
+                                                screenshot_width, screenshot_height, frame_pixels)) {
+                                            Luminumbra::Client::ScenarioHarness::CloudShadowResult result;
+                                            result.terrain_roi_luminance_t0 = cloud_shadow_terrain_luma_t0;
+                                            result.terrain_roi_luminance_t1 = stats.terrain_roi_mean_luminance;
+                                            result.terrain_roi_luminance_delta =
+                                                std::abs(result.terrain_roi_luminance_t1 - result.terrain_roi_luminance_t0);
+                                            result.sky_mean_luminance = stats.sky_mean_luminance;
+                                            result.sky_horizontal_gradient_mean = stats.sky_horizontal_gradient_mean;
+                                            result.cloud_layer_present = stats.sky_horizontal_gradient_mean > 0.0;
+                                            result.lighting_gpu_ms_clouds_off = cloud_shadow_lighting_ms_off;
+                                            result.lighting_gpu_ms_clouds_on = render_pass_stats.cloud_shadow_gpu_ms;
+                                            result.cloud_shadow_added_ms = std::max(
+                                                0.0, result.lighting_gpu_ms_clouds_on - result.lighting_gpu_ms_clouds_off);
+                                            result.gpu_timers_supported =
+                                                render_pass_stats.gpu_timers_supported &&
+                                                cloud_shadow_lighting_off_sampled &&
+                                                render_pass_stats.cloud_shadow_gpu_ms > 0.0;
+                                            result.coverage_amount = cloud_state.coverage_amount;
+                                            result.shadow_strength = cloud_state.shadow_strength;
+                                            result.scroll_offset_t0 = cloud_shadow_scroll_t0;
+                                            result.scroll_offset_t1 = static_cast<double>(cloud_state.scroll_offset.x);
+                                            Luminumbra::Client::ScenarioHarness::WriteCloudShadowAnalysis(
+                                                scenario_config.artifact_dir,
+                                                "screenshots/cloud-shadow-t0.ppm",
+                                                t1_path,
+                                                t1_path,
+                                                result,
+                                                render_pass_stats);
+                                            cloud_shadow_done = true;
                                         }
                                     }
                                 }

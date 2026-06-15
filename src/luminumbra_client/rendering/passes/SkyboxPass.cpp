@@ -124,6 +124,23 @@ void SkyboxPass::execute(RenderPipeline& pipeline, const Camera& camera) {
     // dot(toward-sun, up): the transmittance LUT's mu axis. up is +Y; the
     // pipeline stores the light-travel direction, so toward-sun is -direction.
     m_skybox_shader->setFloat("u_sunCosZenith", glm::dot(-pipeline.m_sun.direction, glm::vec3(0.0f, 1.0f, 0.0f)));
+    // T-I5a-8 (C3): push the wind-advected cloud-coverage state to the sky-dome.
+    // The shader holds GLSL defaults, but the live scroll offset/coverage must be
+    // pushed each frame or the dome clouds never drift (and never register with the
+    // lighting-pass cast shadow that shares cloudCoverageAt). RENDER-ONLY (F2).
+    // The dome cloud LAYER is always present at the state's fair-weather coverage
+    // (default 0.45) -- matching the legacy always-on sky clouds the SkyboxVisual
+    // palette gate frames; the cloud.enabled flag gates the PROJECTED CAST SHADOW
+    // + wind scroll in the lighting pass, not the visual dome layer.
+    {
+        const CloudRenderState& cloud = pipeline.get_cloud_state();
+        const float coverage = cloud.coverage_amount;
+        m_skybox_shader->setVec2("u_cloudScrollOffset", cloud.scroll_offset);
+        m_skybox_shader->setFloat("u_cloudCoverageAmount", coverage);
+        m_skybox_shader->setFloat("u_cloudBiomeVariation", cloud.biome_variation);
+        m_skybox_shader->setFloat("u_cloudPlaneHeight", cloud.plane_height);
+        m_skybox_shader->setFloat("u_cloudShadowStrength", cloud.shadow_strength);
+    }
     glBindVertexArray(m_skybox_vao);
     glDrawArrays(GL_TRIANGLES, 0, 36);
     pipeline.m_last_render_pass_stats.skybox_draws++;
