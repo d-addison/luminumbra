@@ -203,6 +203,21 @@ void SkyAtmosphereLut::build_sky_view_cpu(const glm::vec3& sun_dir_world) {
     const glm::vec3 origin(0.0f, kPlanetRadiusM + kEpsilonM, 0.0f);
     const float sun_cos_zenith = glm::clamp(glm::dot(sun_dir_world, up), -1.0f, 1.0f);
 
+    // T-I5a-6 FIX: build the dome in a SUN-RELATIVE horizontal frame so the LUT's
+    // azimuth column u directly matches what the skybox/aerial shaders sample
+    // (az = acos(dot(view_horiz, sun_horiz)) -> u). Previously this loop built
+    // view_dir on the WORLD x/z axes (the comment claimed a sun frame, the code
+    // used world axes), so the warm toward-sun column landed at the sun's WORLD
+    // azimuth while the shader read u from the sun-RELATIVE angle. With the sun at
+    // an arbitrary world azimuth (e.g. ~141 deg at the pinned t=0.04) the warm
+    // band was rotated away from the toward-sun ray and the horizon read blue.
+    // Sun-aligned horizontal basis: forward points at the sun's horizontal
+    // bearing, right is the orthogonal horizontal axis.
+    glm::vec3 sun_horiz(sun_dir_world.x, 0.0f, sun_dir_world.z);
+    const float sun_horiz_len = glm::length(sun_horiz);
+    glm::vec3 forward = sun_horiz_len > 1e-4f ? sun_horiz / sun_horiz_len : glm::vec3(0.0f, 0.0f, 1.0f);
+    const glm::vec3 right(-forward.z, 0.0f, forward.x); // 90 deg CCW about +Y
+
     constexpr int kMarchSamples = 30;
     glm::vec3 ambient_accum(0.0f);
     float ambient_weight = 0.0f;
@@ -215,9 +230,11 @@ void SkyAtmosphereLut::build_sky_view_cpu(const glm::vec3& sun_dir_world) {
         const float sin_view = std::sin(view_zenith);
         for (int x = 0; x < kSkyViewWidth; ++x) {
             const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(kSkyViewWidth);
-            const float azimuth = u * 2.0f * glm::pi<float>();
-            // Build the view direction in a frame where the sun azimuth is 0.
-            const glm::vec3 view_dir(sin_view * std::cos(azimuth), cos_view, sin_view * std::sin(azimuth));
+            const float azimuth = u * 2.0f * glm::pi<float>(); // 0 = toward sun
+            // View ray in the sun-relative horizontal frame: azimuth 0 points at
+            // the sun's bearing, so column u mirrors the shader's sun-relative az.
+            const glm::vec3 view_dir =
+                up * cos_view + (forward * std::cos(azimuth) + right * std::sin(azimuth)) * sin_view;
 
             float t_max = ray_sphere_nearest(origin, view_dir, kAtmosphereTopM);
             const float t_planet = ray_sphere_nearest(origin, view_dir, kPlanetRadiusM);

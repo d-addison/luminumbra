@@ -178,6 +178,7 @@ constexpr const char* kGpuTimerPassNames[] = {
     "water",
     "skybox",
     "particles",
+    "aerial",
     "final_blit",
 };
 
