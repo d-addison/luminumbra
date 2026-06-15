@@ -24,7 +24,12 @@ layout (location = 0) in vec3  aPos;
 layout (location = 1) in float aSize;
 layout (location = 2) in vec4  aColor;
 layout (location = 3) in uint  aAtlasLayer;
-layout (location = 4) in float aRotation;
+// T-I5a-DR-atmospheric-visuals: location 4 is now an snorm8 rotation (angle/pi in
+// [-1,1]) and location 5 a unorm8 streak aspect (aspect/16 in [0,1]). The streak
+// aspect ELONGATES the velocity-aligned billboard so rain renders as a vertical
+// (wind-sheared) streak instead of a round dot.
+layout (location = 4) in float aRotation;   // normalized: angle = aRotation * PI
+layout (location = 5) in float aStreak;      // normalized: aspect = aStreak * 16
 
 uniform mat4  u_view;
 uniform mat4  u_projection;
@@ -45,7 +50,11 @@ out VS_OUT {
     float distanceToCamera;
     float viewDepth;   // positive linear view-space depth of the billboard centre
     vec3  worldPos;    // billboard corner world position (soft-particle depth)
+    flat float streakAspect;  // >1 = elongated rain streak; 1 = round sprite
 } vs_out;
+
+const float PI_PARTICLE = 3.14159265358979323846;
+const float MAX_STREAK_ASPECT = 16.0;
 
 void main() {
     // Quad corner from gl_VertexID for a triangle strip:
@@ -54,11 +63,23 @@ void main() {
         (gl_VertexID == 1 || gl_VertexID == 3) ? 1.0 : -1.0,
         (gl_VertexID == 2 || gl_VertexID == 3) ? 1.0 : -1.0);
 
-    // Rotate the billboard in its own plane.
-    float c = cos(aRotation);
-    float s = sin(aRotation);
-    vec2 rotated = vec2(corner.x * c - corner.y * s,
-                        corner.x * s + corner.y * c);
+    // Decode the packed rotation (snorm8 angle/pi) + streak aspect (unorm8).
+    float angle = aRotation * PI_PARTICLE;
+    float aspect = max(1.0, aStreak * MAX_STREAK_ASPECT);
+
+    // T-I5a-DR-atmospheric-visuals: ELONGATE the local quad along its streak axis
+    // (local Y) by the aspect, and SLIM it across (local X) so the on-screen area
+    // stays modest -- a thin tall streak rather than a fat dot. The subsequent
+    // rotation aligns the streak to the screen-projected velocity (set on the CPU
+    // as atan2(horiz, vert)), so a wind-slanted velocity renders a slanted streak.
+    float widthScale = (aspect > 1.0) ? (1.0 / sqrt(aspect)) : 1.0;
+    vec2 shaped = vec2(corner.x * widthScale, corner.y * aspect);
+
+    // Rotate the (elongated) billboard in its own plane.
+    float c = cos(angle);
+    float s = sin(angle);
+    vec2 rotated = vec2(shaped.x * c - shaped.y * s,
+                        shaped.x * s + shaped.y * c);
 
     vec3 right = normalize(u_cameraRight);
     vec3 up    = normalize(u_cameraUp);
@@ -72,6 +93,7 @@ void main() {
     vs_out.distanceToCamera = length(aPos - u_cameraPos);
     vs_out.viewDepth = -viewPos.z;
     vs_out.worldPos = worldCorner;
+    vs_out.streakAspect = aspect;
 
     gl_Position = u_projection * viewPos;
 }

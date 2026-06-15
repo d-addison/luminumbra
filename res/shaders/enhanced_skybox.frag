@@ -189,9 +189,20 @@ vec3 renderStars(vec3 viewDir, float nightIntensity) {
     return starColor * totalStars;
 }
 
-// Aurora effect for magical atmosphere
-vec3 renderAurora(vec3 viewDir, float nightIntensity) {
-    if(nightIntensity < 0.3 || viewDir.y < 0.2) return vec3(0.0);
+// Aurora effect for magical atmosphere. T-I5a-DR-atmospheric-visuals: aurora is a
+// NIGHT-ONLY phenomenon. The old `nightIntensity < 0.3` cutoff let the aurora
+// bleed into DUSK (at dusk dayFactor ~0.43 -> nightIntensity ~0.57, well over
+// 0.3), painting green/purple smears across the twilight dome. The contribution
+// is now gated by a deep-night ENVELOPE derived from u_skyDayFactor: it is fully
+// off until the sun is well below the horizon (dayFactor high) and only ramps up
+// once the dome is genuinely dark. We also smooth the lower-edge coverage so the
+// aurora curtain fades in over the horizon band instead of banding hard at y=0.2.
+vec3 renderAurora(vec3 viewDir, float dayFactor) {
+    // Deep-night envelope: zero through day + dusk, rising only once the dome has
+    // darkened toward night. dayFactor ~0.43 at dusk -> envelope 0; it does not
+    // start opening until dayFactor falls below ~0.12 and is full by ~0.02.
+    float nightEnvelope = 1.0 - smoothstep(0.02, 0.12, dayFactor);
+    if (nightEnvelope <= 0.0 || viewDir.y < 0.18) return vec3(0.0);
 
     float auroraTime = u_time * 0.1;
     vec2 auroraUV = vec2(viewDir.x, viewDir.y) * 3.0;
@@ -202,7 +213,11 @@ vec3 renderAurora(vec3 viewDir, float nightIntensity) {
     float auroraFlow = fbm(auroraUV + vec2(auroraTime, -auroraTime * 0.5), 3);
 
     float auroraIntensity = (aurora1 + aurora2) * auroraFlow;
-    auroraIntensity = smoothstep(0.2, 0.8, abs(auroraIntensity)) * nightIntensity * 0.3;
+    auroraIntensity = smoothstep(0.2, 0.8, abs(auroraIntensity));
+    // Smooth the lower-edge coverage: the curtain fades in over the horizon band
+    // (0.18 -> 0.34) rather than snapping on at a hard threshold -> no blocky band.
+    float lowerEdge = smoothstep(0.18, 0.34, viewDir.y);
+    auroraIntensity *= lowerEdge * nightEnvelope * 0.3;
 
     vec3 auroraColor = mix(
         vec3(0.2, 0.8, 0.4),
@@ -335,8 +350,8 @@ void main()
     // --- 5. STARS ---
     skyColor += renderStars(viewDir, nightFactor);
 
-    // --- 6. MAGICAL AURORA ---
-    skyColor += renderAurora(viewDir, nightFactor);
+    // --- 6. MAGICAL AURORA (NIGHT-ONLY; gated by the deep-night envelope) ---
+    skyColor += renderAurora(viewDir, dayFactor);
 
     // --- 7. HDR TONEMAPPING ---
     skyColor = skyColor * (2.51 * skyColor + 0.03) / (skyColor * (2.43 * skyColor + 0.59) + 0.14);
