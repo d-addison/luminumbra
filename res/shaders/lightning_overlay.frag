@@ -26,6 +26,39 @@ uniform float u_aspect = 1.777;          // framebuffer width/height
 // terrain. u_groundNdc is the projected ground terminus; u_groundFlash scales it.
 uniform vec2  u_groundNdc = vec2(0.0, -1.0);
 uniform float u_groundFlash = 0.0;       // 0 = no impact bloom
+// T-I5a-DR-storm-motion-v3: DARK STORM CLOUD the bolt emerges from. u_cloudNdc is
+// the bolt-top anchor (cloud base) in NDC; u_cloudDark scales a dark, billowing
+// cloud mass painted across the upper frame around that anchor. The flash then
+// lights this cloud from within so the strike clearly STEMS FROM the cloud.
+uniform vec2  u_cloudNdc = vec2(0.0, 0.85);
+uniform float u_cloudDark = 0.0;         // 0 = no cloud overlay
+
+// --- cheap value-noise FBM for the cloud silhouette (hash-based, no textures) ---
+float hash21(vec2 p) {
+    p = fract(p * vec2(123.34, 345.45));
+    p += dot(p, p + 34.345);
+    return fract(p.x * p.y);
+}
+float vnoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = hash21(i + vec2(0.0, 0.0));
+    float b = hash21(i + vec2(1.0, 0.0));
+    float c = hash21(i + vec2(0.0, 1.0));
+    float d = hash21(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+float fbm(vec2 p) {
+    float v = 0.0;
+    float amp = 0.5;
+    for (int i = 0; i < 5; ++i) {
+        v += amp * vnoise(p);
+        p *= 2.02;
+        amp *= 0.5;
+    }
+    return v;
+}
 
 // Shortest distance (aspect-corrected NDC) from a screen point to the bolt
 // polyline. A pen-up separator (x <= -2.0) breaks disjoint strokes.
@@ -55,9 +88,44 @@ void main() {
     vec3 color = texture(u_scene, TexCoords).rgb;
     if (u_active == 1 && u_pulse > 0.0) {
         vec2 ndc = TexCoords * 2.0 - 1.0;
+
+        // --- DARK STORM CLOUD (T-I5a-DR-storm-motion-v3) ------------------------
+        // Paint a dark, billowing cloud mass across the upper frame, densest around
+        // the bolt-top anchor (u_cloudNdc) and thinning downward, so the bolt
+        // emerges from a visible cloud rather than thin air. The cloud is composited
+        // FIRST (darkening the sky) and then lit by the flash below.
+        float cloudLight = 0.0; // remembered cloud density at this pixel for the flash
+        if (u_cloudDark > 0.0) {
+            // Cloud field: low-frequency FBM in aspect-corrected NDC, biased so the
+            // billows pool near the top of the frame and around the strike column.
+            vec2 cp = vec2(ndc.x * u_aspect, ndc.y);
+            float billow = fbm(cp * 2.4 + vec2(7.0, 3.0));
+            billow = billow * 0.65 + 0.5 * fbm(cp * 5.0 + vec2(19.0, 2.0));
+            // Vertical envelope: full strength at/above the cloud base anchor,
+            // tapering off below it (the underside of the storm deck).
+            float vert = smoothstep(u_cloudNdc.y - 0.85, u_cloudNdc.y + 0.15, ndc.y);
+            // Horizontal pooling toward the strike column (denser overhead the bolt).
+            float horiz = 1.0 - 0.45 * clamp(abs(ndc.x - u_cloudNdc.x) * u_aspect / 1.8, 0.0, 1.0);
+            float density = clamp(billow * vert * horiz, 0.0, 1.0);
+            // Soft cloud coverage mask (rolling billow edges, not a flat band).
+            float cover = smoothstep(0.42, 0.78, density);
+            cloudLight = cover;
+            // Darken the scene under the cloud toward a deep storm-grey.
+            vec3 cloudCol = vec3(0.06, 0.07, 0.10);
+            color = mix(color, cloudCol, cover * u_cloudDark);
+        }
+
         // Full-scene flash: additive lift, mildly stronger toward the strike.
         float radial = 1.0 - 0.35 * clamp(length((ndc - u_strikeNdc) * vec2(u_aspect, 1.0)) / 2.0, 0.0, 1.0);
         color += u_color * (u_pulse * radial);
+        // Flash lights the storm cloud FROM WITHIN: the strike briefly back-lights
+        // the dark deck near the bolt top, the readable "thunderhead lit by lightning"
+        // signature. Brightest in the cloud directly around the strike column.
+        if (u_cloudDark > 0.0 && cloudLight > 0.0) {
+            float toStrike = 1.0 - clamp(length((ndc - u_cloudNdc) * vec2(u_aspect, 1.0)) / 1.6, 0.0, 1.0);
+            vec3 litCloud = mix(u_color, vec3(1.0), 0.4);
+            color += litCloud * cloudLight * toStrike * u_pulse * 1.6;
+        }
         // Bolt: a THIN hot near-white core with a soft, falling-off bluish glow
         // halo along the polyline (T-I5a-DR-atmospheric-visuals). The old single
         // wide smoothstep + core*3.0 painted a fat opaque white worm; this splits

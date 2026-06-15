@@ -1823,13 +1823,18 @@ int main(int argc, char* argv[]) {
         return v != nullptr && v[0] != '\0' && v[0] != '0';
     }();
     int atmos_motion_frame_index = 0;
-    constexpr int kAtmosMotionFrameCount = 90;
-    // Space captured frames ~45 ms apart (in wall/play time) so each frame shows
-    // a meaningful step of rain fall -- otherwise consecutive render iterations
-    // advance the rain sub-pixel and the assembled clip looks frozen. ~45 ms *
-    // 90 frames ~= 4 s of fall motion, replayed at 24 fps = a smooth storm clip.
+    // T-I5a-DR-storm-motion-v3: capture 240 frames. At the honest 1/60 s stride
+    // (every render frame) that is ~4 s of real-time storm replayed at 60 fps --
+    // long enough to show several lightning strikes and continuous falling rain.
+    constexpr int kAtmosMotionFrameCount = 240;
+    // T-I5a-DR-storm-motion-v3: HONEST motion. The clip captures the REAL
+    // precip_rain.json (no demo emitter), so the capture cadence must match how the
+    // rain actually looks at runtime: sample every render frame (~60 fps -> ~16.7 ms
+    // step) rather than the old 45 ms stride that exaggerated the per-frame fall and
+    // misrepresented the true on-screen motion. Replayed at 60 fps the assembled
+    // clip is a faithful 1:1 recording of the shipping rain. 90 frames ~= 1.5 s.
     double atmos_motion_last_capture_s = -1.0;
-    constexpr double kAtmosMotionFrameIntervalS = 0.045;
+    constexpr double kAtmosMotionFrameIntervalS = 1.0 / 60.0;
     PrecipPixelStats precip_calm_stats;
     Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats precip_calm_render_pass;
     // T-I5a-7 (C2): 6 season-sweep windows (summer noon/dusk/night, winter
@@ -2337,14 +2342,14 @@ int main(int argc, char* argv[]) {
                         // falling column fills the frame, plus the splash template.
                         const glm::vec3 field_origin(
                             g_camera->Position.x, g_camera->Position.y, g_camera->Position.z);
-                        // T-I5a-DR-storm-motion-v2: the motion clip uses a dedicated
-                        // rain emitter tuned for SMOOTH TRACKABLE FALL at the capture
-                        // interval (longer streaks, moderate fall speed). The gate
-                        // path keeps the byte-blessed precip_rain.json untouched.
-                        const char* rain_emitter = atmos_motion_capture
-                            ? "data/common/particles/precip_rain_motion.json"
-                            : "data/common/particles/precip_rain.json";
-                        particles->add_emitter(root_dir / rain_emitter, field_origin);
+                        // T-I5a-DR-storm-motion-v3: UNIFIED. The motion clip now shows
+                        // the EXACT same precip_rain.json that ships in real gameplay
+                        // (no demo-only emitter). What the owner watches == what ships.
+                        // Honest fall is achieved by sampling the capture every render
+                        // frame (see kAtmosMotionFrameIntervalS below) instead of a
+                        // long interval that misrepresented 60 fps motion.
+                        particles->add_emitter(
+                            root_dir / "data/common/particles/precip_rain.json", field_origin);
                         particles->add_splash_emitter(
                             root_dir / "data/common/particles/precip_splash.json");
                         precip_emitter_spawned = true;
@@ -2505,11 +2510,14 @@ int main(int argc, char* argv[]) {
                             bool top_ok = false, bot_ok = false;
                             glm::vec2 top_ndc = project(top, top_ok);
                             glm::vec2 bot_ndc = project(bottom, bot_ok);
-                            // Anchor the bolt TOP high in the sky and the BOTTOM onto the
-                            // projected ground point, clamped to stay just inside the
-                            // bottom edge so the touchdown is visible even when the
-                            // upward-tilted camera projects the ground low.
-                            top_ndc.y = top_ok ? std::min(top_ndc.y, 0.94f) : 0.94f;
+                            // Anchor the bolt TOP just BELOW the top edge so the dark
+                            // storm cloud deck (painted from this anchor upward) is
+                            // visible ABOVE the bolt origin and the bolt clearly emerges
+                            // from the cloud base. BOTTOM goes onto the projected ground
+                            // point, clamped just inside the bottom edge so the touchdown
+                            // is visible even when the upward-tilted camera projects the
+                            // ground low.
+                            top_ndc.y = top_ok ? std::min(top_ndc.y, 0.74f) : 0.74f;
                             const float kGroundNdcY = bot_ok
                                 ? std::clamp(bot_ndc.y, -0.96f, -0.55f) : -0.92f;
                             const float kColumnNdcX = bot_ok
@@ -2539,6 +2547,13 @@ int main(int argc, char* argv[]) {
                             // Ground-impact bloom at the touchdown point.
                             lstate.ground_ndc = glm::vec2(kColumnNdcX, kGroundNdcY);
                             lstate.ground_flash = 0.55f;
+                            // T-I5a-DR-storm-motion-v3: anchor a DARK STORM CLOUD at the
+                            // bolt TOP so the bolt visibly EMERGES from a cloud (not thin
+                            // air). The cloud base sits at the bolt-top NDC and the
+                            // overlay paints a billowing dark deck across the upper frame
+                            // around this column; the flash lights it from within.
+                            lstate.cloud_anchor_ndc = glm::vec2(kColumnNdcX, top_ndc.y);
+                            lstate.cloud_darkness = 0.85f;
                         }
                         renderPipeline.set_lightning_state(lstate);
                     }
