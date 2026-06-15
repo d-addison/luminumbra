@@ -142,6 +142,22 @@ void LightingPass::execute(RenderPipeline& pipeline, const Camera& camera) {
     }
     glm::vec3 terrainOrigin(floor(camera.Position.x / CHUNK_SIZE_X) * CHUNK_SIZE_X, 0.0f, floor(camera.Position.z / CHUNK_SIZE_Z) * CHUNK_SIZE_Z);
     m_lighting_shader->setVec3("u_terrainOrigin", terrainOrigin);
+    // T-I5a-8 (C3): project the wind-advected cloud coverage onto the terrain as a
+    // crawling cast shadow (directSun *= 1 - cloudShadow). The uniforms must match
+    // the sky-dome's cloudCoverageAt field exactly so a dome cloud and its ground
+    // shadow stay registered. u_cloudShadowEnabled==0 is the zero-cost OFF path
+    // (the gate captures clouds-on vs clouds-off lighting ms). RENDER-ONLY (F2).
+    {
+        const CloudRenderState& cloud = pipeline.get_cloud_state();
+        const bool shadow_on = cloud.enabled && cloud.shadow_enabled && cloud.shadow_strength > 0.0f;
+        m_lighting_shader->setInt("u_cloudShadowEnabled", shadow_on ? 1 : 0);
+        m_lighting_shader->setVec2("u_cloudScrollOffset", cloud.scroll_offset);
+        m_lighting_shader->setFloat("u_cloudCoverageAmount", cloud.enabled ? cloud.coverage_amount : 0.0f);
+        m_lighting_shader->setFloat("u_cloudBiomeVariation", cloud.biome_variation);
+        m_lighting_shader->setFloat("u_cloudPlaneHeight", cloud.plane_height);
+        m_lighting_shader->setFloat("u_cloudShadowStrength", cloud.shadow_strength);
+        m_lighting_shader->setVec3("u_cloudSunDir", cloud.sun_travel_dir);
+    }
     glBindVertexArray(pipeline.m_screen_quad_vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     pipeline.m_last_render_pass_stats.lighting_draws++;
