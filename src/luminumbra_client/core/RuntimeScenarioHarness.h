@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rendering/RenderPipeline.h"
+#include "rendering/passes/FoliagePass.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "nlohmann/json.hpp"
 #include <atomic>
@@ -113,6 +114,14 @@ struct RuntimeScenarioConfig {
     // on terrain (ROI luminance delta as a cloud-shadow edge drifts) + cloud layer
     // present in the sky.
     bool cloud_shadow_smoke() const { return scenario == "cloud_shadow_smoke"; }
+    // T-I5b-1 (F1): instanced foliage scatter. Loads the scatter set, builds the
+    // deterministic per-chunk scatter over the visible live ring, samples the A2
+    // wind field at the camera (calm vs windy phases), captures a frame and
+    // snapshots the instance set so the FoliageInstancing gate can assert coverage
+    // density vs the biome table, distance-fade (no foliage beyond the live ring),
+    // wind-sway response (calm vs windy displacement differs), and the FoliagePass
+    // GPU-timer budget. RENDER-ONLY (one-way, never writes world_hash).
+    bool foliage_visual_smoke() const { return scenario == "foliage_visual_smoke"; }
     // T-I5a-4 (B2): rain precipitation through the A1 particle framework, driven
     // by the replicated weather state and wind-advected (slant) from the A2 wind
     // field. Captures a calm vs a windy rain frame so the gate can assert precip
@@ -576,6 +585,65 @@ void WriteParticleEmitterDeterminismAnalysis(
     const std::string& particle_screenshot,
     const ParticleDeterminismResult& result,
     const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass);
+
+// --- Foliage instancing smoke (T-I5b-1 / F1) ---
+// Drives the instanced foliage scatter over the visible live ring and snapshots
+// the scatter instance set so the FoliageInstancing gate can assert, from the
+// DATA (not pixels), that: (a) coverage density tracks the biome table within a
+// band at fixed seeds; (b) the distance-fade is present (no instances beyond the
+// live ring / fade end); (c) the wind-sway responds (calm vs windy max-tip
+// displacement differs, and only swaying archetypes move); (d) the FoliagePass
+// GPU-timer is within the pinned release budget. The placement hash is asserted
+// reproducible (run==run) — the determinism surface. RENDER-ONLY: nothing here
+// writes world_hash (one-way, critique F2).
+struct FoliageInstancingResult {
+    // Determinism: the instance-set hash from two identical rebuilds.
+    std::uint64_t instance_hash_run_a = 0;
+    std::uint64_t instance_hash_run_b = 0;
+    bool hash_byte_equal = false;
+    std::uint64_t world_seed = 0;
+    // Coverage density: live instances within the live-ring radius and the
+    // measured biome density they were generated against (band-checked).
+    std::size_t instances_within_ring = 0;
+    std::size_t instances_total = 0;
+    double measured_density = 0.0; // instances / candidate budget, normalized
+    double biome_density = 0.0;    // the biome table density the scatter used
+    double biome_density_band = 0.5; // |measured - biome| tolerance band
+    // Distance fade: instances beyond the fade end (must be 0) + the fade band.
+    std::size_t instances_beyond_fade = 0;
+    double fade_start_m = 0.0;
+    double fade_end_m = 0.0;
+    double live_ring_radius_m = 0.0;
+    // Wind sway: calm vs windy max tip displacement (must differ) + that pebbles
+    // / clutter (non-swaying archetypes) carry zero displacement.
+    double calm_max_sway = 0.0;
+    double windy_max_sway = 0.0;
+    bool sway_responds = false;
+    // GPU timing.
+    double foliage_gpu_ms = 0.0;
+    double foliage_budget_ms = 0.6;
+    bool gpu_timers_supported = false;
+    std::size_t foliage_draws = 0;
+    std::size_t foliage_instances_drawn = 0;
+};
+
+void WriteFoliageInstancingAnalysis(
+    const std::filesystem::path& artifact_dir,
+    const std::string& foliage_screenshot,
+    const FoliageInstancingResult& result,
+    const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass);
+
+// Surface-query context + callback the FoliagePass uses to resolve, at a world
+// (x,z), the terrain surface height + a slope estimate + a moisture estimate.
+// All values are PURE functions of the world generator (seed, params) — no RNG,
+// no sim writes. The slope is derived from finite-difference height samples; the
+// moisture from the biome humidity proxy (the biome density already encodes it,
+// so a mild render-side modulation suffices). The query skips underwater columns.
+struct FoliageScatterContext {
+    Luminumbra::Systems::SHIELD_WorldSystem* world_system = nullptr;
+};
+Luminumbra::Rendering::FoliagePass::SurfaceSample FoliageSurfaceQuery(
+    void* ctx, float world_x, float world_z);
 
 // --- Precipitation visual + wind-slant smoke (T-I5a-4 / B2) ---
 // Rain is rendered through the A1 particle framework, spawned by the REPLICATED

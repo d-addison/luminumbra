@@ -1,0 +1,46 @@
+{
+  "schema": "luminumbra.foliage_scatter.v1",
+  "description": "T-I5b-1 (F1) instanced foliage scatter set. Game content: the engine knows only the schema (archetype card size, tint, sway flag, density weight). Per-instance PLACEMENT is a deterministic pure hash of (chunk coords, biome id, slope, moisture, instance index); the per-column DENSITY comes from the biome table's vegetation block (data/common/biomes.json), modulated render-side by slope/moisture. RENDER-ONLY: nothing here feeds the sim or world_hash. The sway flag is per-archetype: grass/canopy wave with the A2 wind field; pebbles/clutter do not.",
+  "archetypes": [
+    {
+      "name": "grass_tuft",
+      "color": [0.34, 0.52, 0.18],
+      "half_width": 0.14,
+      "height": 0.55,
+      "sways": true,
+      "density_weight": 4.0
+    },
+    {
+      "name": "fern",
+      "color": [0.22, 0.45, 0.20],
+      "half_width": 0.22,
+      "height": 0.7,
+      "sways": true,
+      "density_weight": 2.0
+    },
+    {
+      "name": "canopy_sprig",
+      "color": [0.18, 0.38, 0.14],
+      "half_width": 0.5,
+      "height": 1.6,
+      "sways": true,
+      "density_weight": 1.0
+    },
+    {
+      "name": "pebble",
+      "color": [0.42, 0.40, 0.36],
+      "half_width": 0.16,
+      "height": 0.14,
+      "sways": false,
+      "density_weight": 1.5
+    },
+    {
+      "name": "clutter_twig",
+      "color": [0.36, 0.30, 0.20],
+      "half_width": 0.18,
+      "height": 0.2,
+      "sways": false,
+      "density_weight": 1.0
+    }
+  ]
+}

@@ -1,5 +1,5 @@
 ﻿param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "AtmosphereAudio", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "ParticleEmitterDeterminism", "CloudShadow", "Precipitation", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "WindFieldDeterminism", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "StimulusChannelGate", "BiomeCoverage", "RiverPresence", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "AtmosphereAudio", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "ParticleEmitterDeterminism", "CloudShadow", "FoliageInstancing", "Precipitation", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "WindFieldDeterminism", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "StimulusChannelGate", "BiomeCoverage", "RiverPresence", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -624,7 +624,8 @@ function Test-ShaderInventory {
         "loading_hologram",
         "loading_visual",
         "volumetric_lighting",
-        "magical_particles"
+        "magical_particles",
+        "foliage"
     )
 
     $inventoryPrograms = @($inventory.pipeline_programs)
@@ -3246,6 +3247,105 @@ function Test-CloudShadow {
         $analysis.gpu_timer.cloud_shadow_added_ms)
 }
 
+function Test-FoliageInstancing {
+    # T-I5b-1 (F1): instanced foliage scatter + wind response gate. The scatter
+    # is a DETERMINISTIC pure hash of (chunk coords, biome id, slope, moisture,
+    # instance index) -- NO global RNG, NO world_hash growth. The gate asserts,
+    # from the instance-set DATA: (a) coverage density tracks the biome table
+    # within a band at fixed seeds; (b) the distance-fade is present (no foliage
+    # beyond the live ring / fade end); (c) the wind-sway responds (calm vs windy
+    # max tip displacement differs, only swaying archetypes move); (d) the
+    # FoliagePass GPU-timer is within the pinned release budget. The instance-set
+    # hash is asserted reproducible (run==run). RENDER-ONLY: world_hash stays
+    # d950a6afc12a5cdc (one-way, critique F2). Foliage adds ground pixels, so the
+    # RenderHealth re-bless is DELIBERATE and logged (design-decisions.md S2/S7).
+    $exe = Get-ClientExe
+    $visualDir = "build/$BuildPreset/test-artifacts/runtime/foliage-instancing"
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $visualDir
+    New-Item -ItemType Directory -Force -Path $visualDir | Out-Null
+
+    # A window long enough to run the CALM phase then the WINDY phase (the sway
+    # delta is measured across the two).
+    $runSeconds = [Math]::Max(20, $SmokeSeconds)
+    Invoke-Checked -FilePath $exe -ArgumentList @(
+        "--scenario", "foliage_visual_smoke",
+        "--auto-create-world",
+        "--auto-enter-world",
+        "--world-preset", "flat_lands",
+        "--timed-run", "$runSeconds",
+        "--no-audio",
+        "--no-ui",
+        "--runtime-artifact-dir", $visualDir
+    ) -TimeoutSeconds ([Math]::Max(150, $runSeconds + 90))
+
+    $analysisPath = Join-Path $visualDir "foliage-instancing-analysis.json"
+    if (-not (Test-Path $analysisPath)) {
+        throw "foliage instancing run did not produce $analysisPath (gate produced by task T-I5b-1-foliage-instancing)"
+    }
+
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.foliage_instancing.v1") {
+        throw "Unexpected foliage instancing analysis schema '$($analysis.schema)'"
+    }
+    if ([int64]$analysis.gl_debug.errors -ne 0) {
+        throw "Foliage instancing run emitted GL debug errors: $($analysis.gl_debug.errors)"
+    }
+    if ([int]$analysis.render_pass.foliage_draws -le 0) {
+        throw "Foliage instancing run did not submit foliage draws"
+    }
+    if ([int64]$analysis.render_pass.foliage_instances_drawn -le 0) {
+        throw "Foliage instancing run drew zero scatter instances"
+    }
+    # Determinism: the instance-set hash is byte-equal across two rebuilds.
+    if (-not $analysis.determinism.passed -or -not $analysis.determinism.hash_byte_equal) {
+        throw "Foliage placement is not deterministic: hash_a=$($analysis.determinism.instance_hash_run_a) hash_b=$($analysis.determinism.instance_hash_run_b)"
+    }
+    if ([bool]$analysis.determinism.global_rng) {
+        throw "Foliage placement reports a global RNG (must be a pure per-chunk hash)"
+    }
+    if ([bool]$analysis.determinism.world_hash_written) {
+        throw "Foliage reported writing world_hash (must be render-only / one-way)"
+    }
+    # Coverage density tracks the biome table within a band.
+    if (-not $analysis.coverage_density.passed) {
+        throw "Foliage coverage density off-band: measured=$($analysis.coverage_density.measured_density) biome=$($analysis.coverage_density.biome_density) delta=$($analysis.coverage_density.density_delta) band=$($analysis.coverage_density.density_band)"
+    }
+    if ([int64]$analysis.coverage_density.instances_within_ring -le 0) {
+        throw "Foliage produced no instances within the live ring"
+    }
+    # Distance-fade: NO foliage beyond the live ring / fade end.
+    if (-not $analysis.distance_fade.passed -or [int64]$analysis.distance_fade.instances_beyond_fade -ne 0) {
+        throw "Foliage present beyond the live ring: $($analysis.distance_fade.instances_beyond_fade) instances past fade_end $($analysis.distance_fade.fade_end_m) m"
+    }
+    # Wind sway responds: windy max tip displacement exceeds calm by a margin.
+    if (-not $analysis.wind_sway.passed) {
+        throw "Foliage sway did not respond to wind: calm=$($analysis.wind_sway.calm_max_sway) windy=$($analysis.wind_sway.windy_max_sway) delta=$($analysis.wind_sway.sway_delta) (min $($analysis.wind_sway.min_sway_delta))"
+    }
+    # GPU-timer budget (release-enforced; informational on debug, A2/T-I5a-1 precedent).
+    if ($null -eq $analysis.gpu_timer) {
+        throw "Foliage instancing analysis is missing the gpu_timer section (T-I5b-1)"
+    }
+    if ([double]$analysis.gpu_timer.foliage_gpu_ms -lt 0) {
+        throw "Foliage gpu_timer.foliage_gpu_ms reports a negative value"
+    }
+    if ($BuildPreset -eq "release" -and [bool]$analysis.gpu_timer.supported) {
+        if (-not $analysis.gpu_timer.within_budget) {
+            throw "FoliagePass GPU timer $($analysis.gpu_timer.foliage_gpu_ms) ms exceeds budget $($analysis.gpu_timer.budget_ms) ms (release)"
+        }
+    }
+    if (-not $analysis.passed) {
+        throw "Foliage instancing analysis reported failure"
+    }
+
+    Assert-PpmArtifact (Join-Path $visualDir $analysis.foliage_screenshot)
+    Assert-CapturePinned -ArtifactDir $visualDir -Name "FoliageInstancing"
+    Write-Host ("FoliageInstancing: {0} instances ({1} in-ring); density measured {2:N3} vs biome {3:N3}; sway calm {4:N4} -> windy {5:N4} m; {6:N4} ms" -f `
+        $analysis.render_pass.foliage_instances_drawn, $analysis.coverage_density.instances_within_ring, `
+        $analysis.coverage_density.measured_density, $analysis.coverage_density.biome_density, `
+        $analysis.wind_sway.calm_max_sway, $analysis.wind_sway.windy_max_sway, `
+        $analysis.gpu_timer.foliage_gpu_ms)
+}
+
 function Test-ParticleEmitterDeterminism {
     # T-I5a-1: GPU particle framework determinism gate. Spawns the fixture
     # emitter, snapshots the sim-deterministic emitter DESCRIPTOR SET twice from
@@ -5212,6 +5312,7 @@ switch ($Mode) {
     "WeatherVisual" { Test-WeatherVisual }
     "ParticleEmitterDeterminism" { Test-ParticleEmitterDeterminism }
     "CloudShadow" { Test-CloudShadow }
+    "FoliageInstancing" { Test-FoliageInstancing }
     "Precipitation" { Test-Precipitation }
     "TimeOfDaySweep" { Test-TimeOfDaySweep }
     "PlayerView" { Test-PlayerView }
