@@ -1,5 +1,6 @@
 #include "WeatherSystem.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <iomanip>
@@ -39,6 +40,16 @@ constexpr std::uint32_t kStormLifetimeTicks = 240;  // 8 s at 30 Hz
 constexpr std::uint32_t kStormRampTicks = 45;       // ramp-in / decay-out window
 constexpr float kStormRadiusM = 220.0f;             // influence radius (world metres)
 constexpr float kStormPeakIntensity = 1.0f;
+
+// Lightning strike schedule (T-I5a-5 B3). A storm cell whose envelope intensity is
+// at/above kStrikeIntensityThreshold has a STRIKE OPPORTUNITY on a fixed tick epoch.
+// Whether it actually strikes, and where/how strongly, is a deterministic seeded
+// draw keyed on (seed+13, the cell's seed_salt, the strike-epoch index) -- NO
+// wall-clock, NO std::random. The schedule is bounded (kMaxLiveStrikes) and folded
+// into the `weather` world_hash sub-hash so strikes are replayable WORLD EVENTS.
+constexpr std::uint64_t kStrikeEpochTicks = 18;     // a strike opportunity every 18 ticks (~0.6 s)
+constexpr float kStrikeProbabilityAtPeak = 0.40f;   // per-opportunity strike chance at full intensity
+constexpr float kStrikeScatterM = 180.0f;           // strike scatter radius around the cell centre
 
 // Category classification thresholds over the normalized pressure/climate. The
 // weather pressure dominates (clear at high pressure, precip at low); the
@@ -110,7 +121,8 @@ const char* WeatherCategoryName(WeatherCategory category) noexcept {
 
 WeatherSystem::WeatherSystem(int world_seed)
     : m_world_seed(world_seed),
-      m_weather_seed(world_seed + 12), // seed-offset registry: +12 weather (FIRST)
+      m_weather_seed(world_seed + 12),   // seed-offset registry: +12 weather (FIRST)
+      m_lightning_seed(world_seed + 13), // seed-offset registry: +13 lightning strikes (FIRST)
       m_precip(kWeatherExtentCells, kWeatherCellSizeM),
       m_category(kWeatherExtentCells, kWeatherCellSizeM),
       m_grid_extent(kWeatherExtentCells),
@@ -334,6 +346,93 @@ void WeatherSystem::StepStormCells(std::uint64_t tick, const Vec3& region_anchor
     }
 }
 
+void WeatherSystem::StepStrikes(std::uint64_t tick) {
+    // 1) Evict strikes that have already landed (strike_tick < current tick). The
+    // schedule keeps only the current + near-future window so memory stays flat.
+    // Canonical spawn order is preserved; expired entries are removed in place.
+    if (!m_strikes.empty()) {
+        std::vector<StrikeEvent> live;
+        live.reserve(m_strikes.size());
+        for (const StrikeEvent& s : m_strikes) {
+            if (s.strike_tick >= tick) {
+                live.push_back(s);
+            }
+        }
+        m_strikes.swap(live);
+    }
+
+    // 2) Strike opportunity on the fixed epoch. Each qualifying storm cell draws
+    // from its OWN seeded stream: splitmix64 seeded from (seed+13, cell seed_salt,
+    // strike-epoch index). NO wall-clock, NO std::random. A cell strikes when its
+    // draw clears a probability that scales with its current intensity envelope, so
+    // only storms at/above the threshold strike and the strongest strike most.
+    if (tick == 0 || (tick % kStrikeEpochTicks) != 0) {
+        return;
+    }
+    const std::uint64_t epoch = tick / kStrikeEpochTicks;
+    for (const StormCell& cell : m_storm_cells) {
+        if (cell.intensity < kStrikeIntensityThreshold) {
+            continue;
+        }
+        // splitmix64 stream seed: fold the +13 lightning seed, the cell salt, and
+        // the strike-epoch into one key, then advance the splitmix state. Pure
+        // integer arithmetic -> bit-stable on every machine, identical across runs.
+        std::uint64_t state =
+            static_cast<std::uint64_t>(static_cast<std::uint32_t>(m_lightning_seed));
+        state = Mix64(state ^ (static_cast<std::uint64_t>(cell.seed_salt) * 0x9e3779b97f4a7c15ull));
+        state = Mix64(state ^ (epoch * 0xff51afd7ed558ccdull));
+
+        // Draw 1: strike coin. Probability scales with intensity over the
+        // threshold-to-peak range (kStrikeProbabilityAtPeak at full intensity).
+        const std::uint64_t k_coin = Mix64(state);
+        const float coin = UnitFloat(k_coin);
+        const float prob = kStrikeProbabilityAtPeak * cell.intensity;
+        if (coin >= prob) {
+            continue;
+        }
+        if (static_cast<int>(m_strikes.size()) >= kMaxLiveStrikes) {
+            break; // bounded (F9): drop further strikes this epoch
+        }
+
+        // Draws 2-4: scatter offset + magnitude (independent splitmix outputs).
+        const float ox = (UnitFloat(Mix64(state ^ 0x1111222233334444ull)) * 2.0f - 1.0f) * kStrikeScatterM;
+        const float oz = (UnitFloat(Mix64(state ^ 0x5555666677778888ull)) * 2.0f - 1.0f) * kStrikeScatterM;
+        const float mag_draw = UnitFloat(Mix64(state ^ 0x99990000AAAABBBBull));
+
+        StrikeEvent s;
+        s.strike_tick = tick; // lands on this opportunity tick (replayable)
+        s.world_x = cell.center_world.x + ox;
+        s.world_z = cell.center_world.y + oz;
+        // Magnitude: storm intensity blended with the per-strike draw so strong
+        // storms strike harder but every strike has some variety. Clamped [0, 1].
+        s.magnitude = std::min(1.0f, 0.55f * cell.intensity + 0.45f * mag_draw);
+        s.storm_salt = cell.seed_salt;
+        m_strikes.push_back(s);
+    }
+
+    // 3) Canonical order: strike_tick asc, then storm_salt, then x, then z. Sorting
+    // is over a bounded set; keeps the sub-hash byte layout independent of storm-
+    // cell iteration order (defensive determinism). Bit-exact float compares.
+    std::sort(m_strikes.begin(), m_strikes.end(), [](const StrikeEvent& a, const StrikeEvent& b) {
+        if (a.strike_tick != b.strike_tick) return a.strike_tick < b.strike_tick;
+        if (a.storm_salt != b.storm_salt) return a.storm_salt < b.storm_salt;
+        if (DeterministicMath::BitsOf(a.world_x) != DeterministicMath::BitsOf(b.world_x)) {
+            return DeterministicMath::BitsOf(a.world_x) < DeterministicMath::BitsOf(b.world_x);
+        }
+        return DeterministicMath::BitsOf(a.world_z) < DeterministicMath::BitsOf(b.world_z);
+    });
+}
+
+std::vector<StrikeEvent> WeatherSystem::StrikesThisTick() const {
+    std::vector<StrikeEvent> out;
+    for (const StrikeEvent& s : m_strikes) {
+        if (s.strike_tick == m_last_tick) {
+            out.push_back(s);
+        }
+    }
+    return out;
+}
+
 float WeatherSystem::StormPrecipAt(const Vec3& world_pos) const {
     float precip = 0.0f;
     for (const StormCell& cell : m_storm_cells) {
@@ -375,7 +474,11 @@ void WeatherSystem::Update(std::uint64_t tick, const Vec3& region_anchor, const 
     RebuildFields(tick, region_anchor);
     // 2) Storm cells: age/advect existing, spawn on the deterministic schedule.
     StepStormCells(tick, region_anchor, wind);
-    // 3) Anchor wind diagnostic (for the overlay's wind-direction uniform).
+    // 3) Lightning strikes: storm cells at/above the intensity threshold schedule
+    // strike events from the seed+13 stream (T-I5a-5 B3). MUST run after the storm
+    // step so cell intensities + salts are current; folded into the weather sub-hash.
+    StepStrikes(tick);
+    // 4) Anchor wind diagnostic (for the overlay's wind-direction uniform).
     if (wind) {
         m_anchor_wind = wind->SampleWind(Vec3(region_anchor.x, 5.0f, region_anchor.z),
                                          WindLayer::Ground);
@@ -420,9 +523,10 @@ WeatherSample WeatherSystem::SampleAt(const Vec3& world_pos) const {
 std::string WeatherSystem::ComputeWeatherSubHash() const {
     // fnv1a-64 over: seed, tick, grid geometry, origin, the per-cell category +
     // precip in the FieldGrid canonical order, then the bounded storm-cell set
-    // (count + each cell's pos/velocity/intensity/spawn/lifetime/salt), then a
-    // RESERVED strike-schedule epoch (0 in 5a; T-I5a-5 folds the real schedule
-    // here WITHOUT reordering the preceding bytes). Bit-exact float hashing so a
+    // (count + each cell's pos/velocity/intensity/spawn/lifetime/salt), then the
+    // lightning STRIKE schedule (T-I5a-5 B3: lightning seed + count + each strike's
+    // tick/x/z/magnitude/salt). The strike block REPLACES the reserved single-0
+    // slot B1 left -- this is world_hash MEGA-BUMP #3. Bit-exact float hashing so a
     // one-ULP drift fails the gate loudly.
     std::uint64_t hash = 14695981039346656037ull; // fnv offset basis
     MixU64(hash, static_cast<std::uint64_t>(static_cast<std::uint32_t>(m_weather_seed)));
@@ -453,9 +557,21 @@ std::string WeatherSystem::ComputeWeatherSubHash() const {
         MixU64(hash, static_cast<std::uint64_t>(cell.seed_salt));
     }
 
-    // Reserved lightning strike-schedule slot (T-I5a-5). Hashed as a single 0 so
-    // the byte layout is fixed now; B3 replaces this with the real schedule.
-    MixU64(hash, 0ull);
+    // Lightning strike schedule (T-I5a-5 B3, world_hash MEGA-BUMP #3). This REPLACES
+    // the reserved single-0 slot B1 left here. The strikes are sim-authoritative
+    // WORLD EVENTS scheduled from the seed+13 stream; folding them in deliberately
+    // changes the `weather` sub-hash (and thus the composite world_hash). Canonical
+    // order (strike_tick asc, storm_salt, x, z) is enforced in StepStrikes. Bit-exact
+    // float hashing so a one-ULP drift fails the gate loudly.
+    MixU64(hash, static_cast<std::uint64_t>(static_cast<std::uint32_t>(m_lightning_seed)));
+    MixU64(hash, static_cast<std::uint64_t>(m_strikes.size()));
+    for (const StrikeEvent& s : m_strikes) {
+        MixU64(hash, s.strike_tick);
+        MixFloat(hash, s.world_x);
+        MixFloat(hash, s.world_z);
+        MixFloat(hash, s.magnitude);
+        MixU64(hash, static_cast<std::uint64_t>(s.storm_salt));
+    }
 
     std::ostringstream stream;
     stream << std::hex << std::setw(16) << std::setfill('0') << hash;

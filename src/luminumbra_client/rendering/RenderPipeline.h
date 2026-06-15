@@ -155,6 +155,35 @@ struct CloudRenderState {
     glm::vec3 sun_travel_dir = glm::vec3(0.0f, -1.0f, 0.0f); // for shadow projection
 };
 
+// T-I5a-5 (B3): RENDER-ONLY lightning state for a single captured frame. A strike
+// is a deterministic SIM world event (Systems::StrikeEvent, in the `weather`
+// world_hash sub-hash); this is the ONE-WAY (critique F2) render response the
+// client pushes for the frame(s) the bolt is visible: a full-scene LIGHT PULSE
+// injected through the lighting pass + a screen-space BOLT polyline rasterized in
+// the same pass (no new GL objects). Nothing here is hashed or written back to sim.
+//
+//  - pulse_intensity  scales a full-scene additive luminance spike (the 1-to-few-
+//    frame flash); 0 == the zero-cost OFF path (no added lighting work).
+//  - pulse_color      the flash tint (cool white-blue by default).
+//  - strike_ndc       the strike ground point projected to NDC [-1,1] (for a mild
+//    radial brightening centred on the strike).
+//  - bolt_points_ndc  the bolt polyline (main channel + branches, flattened with
+//    NaN-x separators) in NDC; the lighting frag adds bright pixels near any
+//    segment so the capture shows a thin high-gradient structure.
+inline constexpr int kMaxBoltSegmentPoints = 96; // GLSL uniform array cap
+struct LightningRenderState {
+    bool active = false;                    // master toggle (false == zero added cost)
+    float pulse_intensity = 0.0f;           // [0,~3] full-scene additive flash strength
+    glm::vec3 pulse_color = glm::vec3(0.72f, 0.82f, 1.0f); // cool flash tint
+    glm::vec2 strike_ndc = glm::vec2(0.0f); // strike point in NDC (radial centre)
+    float bolt_width_ndc = 0.004f;          // bolt core half-width in NDC units
+    float bolt_glow_ndc = 0.018f;           // bolt glow falloff radius in NDC units
+    // Flattened NDC polyline points. A point with x <= -2.0 is a PEN-UP separator
+    // between disjoint polylines (main channel / each branch). Drawn as connected
+    // segments between consecutive non-separator points.
+    std::vector<glm::vec2> bolt_points_ndc;
+};
+
 // T-I4-16: bucketed persistent-mapped geometry pool for live terrain chunks.
 //
 // Replaces the one-VBO/EBO/VAO-per-chunk model with a small set of large,
@@ -344,6 +373,11 @@ public:
         // the incremental cost vs the clouds-off lighting baseline, the number the
         // CloudShadow gate bounds against the ≤ 0.4 ms budget (design §7, F3).
         double cloud_shadow_gpu_ms = 0.0;       // lighting pass ms with clouds on
+        // T-I5a-5 (B3): the lighting-pass GPU time on the last frame the lightning
+        // light-pulse was ACTIVE (the full-scene flash + bolt rasterization are both
+        // per-fragment inside the lighting pass). The PerfRegression gate bounds this
+        // against the transient ≤ 0.5 ms budget (design §7).
+        double lightning_pulse_gpu_ms = 0.0;
         double final_blit_gpu_ms = 0.0;
         // T-I5a-6: sky scattering LUT precompute timings (CPU build + GL upload).
         // sky_full_precompute_ms is the startup one-shot (budget ≤ 8.0 ms on
@@ -529,6 +563,17 @@ public:
     // coverage parameters here. One-way: the cloud field never feeds the sim.
     void set_cloud_state(const CloudRenderState& state);
     const CloudRenderState& get_cloud_state() const { return m_cloud_state; }
+
+    // T-I5a-5 (B3): render-only lightning control. set_lightning_state pushes the
+    // full-scene light pulse + bolt polyline for the current frame; the LightingPass
+    // injects the pulse and rasterizes the bolt. Pass an inactive state (default) to
+    // turn it off (zero added lighting cost). One-way (F2): never fed to the sim.
+    void set_lightning_state(const LightningRenderState& state);
+    const LightningRenderState& get_lightning_state() const { return m_lightning_state; }
+    // Lightning light-pulse GPU cost (ms) from the lighting-pass timer on the LAST
+    // frame the pulse was active; 0.0 otherwise. The PerfRegression gate bounds this
+    // against the transient ≤ 0.5 ms budget (design §7).
+    double lightning_pulse_gpu_ms() const { return m_last_render_pass_stats.lightning_pulse_gpu_ms; }
     // Cloud-shadow GPU cost (ms) from the per-pass timer pair bracketing the
     // lighting pass on the LAST frame the cloud shadow was active; 0.0 otherwise.
     // The CloudShadow gate compares the clouds-on vs clouds-off lighting timing to
@@ -698,6 +743,8 @@ private:
     CloudRenderState m_cloud_state;
     float m_cloud_phase = 0.0f;
     void advance_cloud_phase(float deltaTime);
+    // T-I5a-5 (B3): render-only lightning pulse + bolt state for the current frame.
+    LightningRenderState m_lightning_state;
     std::unique_ptr<FarLodSystem> m_farlod;
     std::unique_ptr<GBufferPass> m_gbuffer_pass;
     std::unique_ptr<ShadowPass> m_shadow_pass;

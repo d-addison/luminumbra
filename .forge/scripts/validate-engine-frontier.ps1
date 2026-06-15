@@ -1,4 +1,4 @@
-param(
+﻿param(
     [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "ParticleEmitterDeterminism", "CloudShadow", "Precipitation", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "WindFieldDeterminism", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "BiomeCoverage", "RiverPresence", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "All")]
     [string]$Mode = "All",
 
@@ -318,7 +318,7 @@ function Test-MaterialVisual {
     # beach beside a grass-capped, stone-rimmed highland on the polished
     # archipelago - geometry the terrain pass deliberately removed, so the gate
     # could not be framed (deferred to iteration 4; see handoff.md). It is
-    # replaced by the deterministic calibration-plate gate (design-decisions §9):
+    # replaced by the deterministic calibration-plate gate (design-decisions Â§9):
     # authored per-material plates drawn at fixed coordinates into the G-buffer,
     # captured under two sun angles, checked for per-material albedo bands and a
     # normal-response (shading varies across the plate and between sun angles by
@@ -679,7 +679,7 @@ function Test-TextureResidency {
     # T-I4-6 texture-array residency gate. Self-contained (no GL context): it
     # (1) asserts the RenderPipeline residency contract via source inspection
     # and (2) parses the committed .ltex assets, summing their resident bytes
-    # and asserting they fit the 96 MB iteration budget (design-decisions §10).
+    # and asserting they fit the 96 MB iteration budget (design-decisions Â§10).
     $budgetBytes = 96 * 1024 * 1024
 
     $headerPath = "src/luminumbra_client/rendering/RenderPipeline.h"
@@ -2583,7 +2583,7 @@ function Test-PerfRegression {
 
     # T-I3-22: GPU provenance check. Perf timings are GPU/driver-sensitive, so a
     # baseline recorded on a different adapter/driver may explain (or mask) a
-    # regression. WARN — never fail — and stay silent when the baseline predates
+    # regression. WARN â€” never fail â€” and stay silent when the baseline predates
     # the provenance block (old baselines have no $baseline.gpu).
     if ($null -ne $baseline.gpu) {
         $currentGpu = $null
@@ -2845,6 +2845,45 @@ function Test-WeatherVisual {
     Assert-PpmArtifact (Join-Path $visualDir $analysis.baseline_screenshot)
     Assert-PpmArtifact (Join-Path $visualDir $analysis.weather_screenshot)
 
+    # T-I5a-5 (B3): the WeatherVisual gate ALSO asserts the LIGHTNING strike FRAME --
+    # the photography timing shot. The same weather_visual_smoke run fires a
+    # deterministically scheduled strike during the weather phase and captures a
+    # NEIGHBOUR (pre-strike) frame + the STRIKE frame. The gate asserts (a) a
+    # full-scene luminance PULSE (frame-mean luminance spike vs the neighbour) and
+    # (b) BOLT pixels (a bright thin high-gradient structure). The visual gate does
+    # NOT depend on audio (critique F8): thunder is a separate thin cue.
+    $strikePath = Join-Path $visualDir "lightning-strike-visual-analysis.json"
+    if (-not (Test-Path $strikePath)) {
+        throw "weather visual run did not produce $strikePath (T-I5a-5 lightning strike frame)"
+    }
+    $strike = Get-Content $strikePath -Raw | ConvertFrom-Json
+    if ($strike.schema -ne "luminumbra.lightning_strike_visual.v1") {
+        throw "Unexpected lightning strike analysis schema '$($strike.schema)'"
+    }
+    if ([int64]$strike.gl_debug.errors -ne 0) {
+        throw "Lightning strike frame emitted GL debug errors: $($strike.gl_debug.errors)"
+    }
+    if (-not $strike.pulse.passed) {
+        throw "Lightning pulse check failed: frame-mean luminance delta=$($strike.pulse.frame_mean_luminance_delta) (threshold $($strike.thresholds.min_pulse_delta))"
+    }
+    if ([double]$strike.pulse.frame_mean_luminance_delta -lt [double]$strike.thresholds.min_pulse_delta) {
+        throw "Lightning pulse delta $($strike.pulse.frame_mean_luminance_delta) below threshold $($strike.thresholds.min_pulse_delta)"
+    }
+    if (-not $strike.bolt.passed) {
+        throw "Lightning bolt structure check failed: bright_thin_pixels=$($strike.bolt.bright_thin_pixels) (threshold $($strike.thresholds.min_bolt_pixels))"
+    }
+    if ([int64]$strike.bolt.bright_thin_pixels -lt [int64]$strike.thresholds.min_bolt_pixels) {
+        throw "Lightning bolt pixel count $($strike.bolt.bright_thin_pixels) below threshold $($strike.thresholds.min_bolt_pixels)"
+    }
+    if (-not $strike.passed) {
+        throw "Lightning strike visual analysis reported failure"
+    }
+    Assert-PpmArtifact (Join-Path $visualDir $strike.neighbor_screenshot)
+    Assert-PpmArtifact (Join-Path $visualDir $strike.strike_screenshot)
+    Write-Host ("lightning strike frame gate passed: frame-mean luminance pulse +{0:N4} (neighbour {1:N4} -> strike {2:N4}); {3} bolt pixels; pulse GPU {4:N4} ms" -f `
+        $strike.pulse.frame_mean_luminance_delta, $strike.neighbor.frame_mean_luminance, $strike.strike.frame_mean_luminance, `
+        $strike.bolt.bright_thin_pixels, $strike.render_pass.lightning_pulse_gpu_ms)
+
     # T-I5a-3 (B1): the WeatherVisual gate ALSO asserts the SIM-side weather state
     # determinism via the server's --weather-bench mode (the visual overlay above
     # is now fed from this replicated state, one-way). Two independent runs of N
@@ -2886,6 +2925,21 @@ function Test-WeatherVisual {
     }
     if ([double]$w.cell_size_m -ne 24.0) {
         throw "weather determinism: cell_size_m=$($w.cell_size_m), expected 24"
+    }
+    # T-I5a-5 (B3): LIGHTNING strike schedule determinism (the schedule is folded
+    # into the `weather` world_hash sub-hash -- world_hash mega-bump #3). The seed+13
+    # schedule must FIRE (at least one strike over the run, non-vacuous), match
+    # bit-for-bit across the two runs (deterministic), and stay BOUNDED (<= the live
+    # strike cap, F9). The strike SUB-HASH determinism is already covered by the
+    # weather_sub_hash equality above; these assert the strike path is exercised.
+    if (-not $w.strikes_scheduled -or [int64]$w.total_strikes -le 0) {
+        throw "weather determinism: no lightning strike scheduled (strike path is vacuous; total_strikes=$($w.total_strikes))"
+    }
+    if (-not $w.strikes_deterministic -or [int64]$w.total_strikes -ne [int64]$w.total_strikes_replay) {
+        throw "weather determinism: strike schedule diverged across runs (total_strikes $($w.total_strikes) != $($w.total_strikes_replay))"
+    }
+    if (-not $w.strikes_bounded -or [int]$w.max_live_strikes -gt [int]$w.max_live_strike_cap) {
+        throw "weather determinism: live strike window exceeded the bounded cap (max=$($w.max_live_strikes) cap=$($w.max_live_strike_cap))"
     }
     # Per-tick weather budget: <= 0.20 ms at the streamed extent, enforced on the
     # release build only (design-decisions.md S7), informational on debug.
@@ -3832,8 +3886,10 @@ function Test-ReplayRoundtrip {
     # T-I4-12 session replay (LREC1): record a 90-tick run, replay it, and assert
     # the replay reproduces the SAME end-hash, verifies all checkpoints, and (the
     # determinism proof) that recording is hash-neutral -- the recorded run must
-    # reach the canonical HeadlessServerTick hash 0857e683b4b8c47e unchanged
-    # (T-I5a-2 mega-bump: was 2fa007951a21e140 before the `wind` sub-hash slot).
+    # reach the canonical HeadlessServerTick hash d950a6afc12a5cdc unchanged
+    # (world_hash lineage: 2fa007951a21e140 -> 0eac465289e7c88b [T-I5a-2 wind slot]
+    #  -> 0857e683b4b8c47e [T-I5a-3 weather slot] -> d950a6afc12a5cdc [T-I5a-5
+    #  lightning strike schedule folded into the weather sub-hash, mega-bump #3]).
     $serverExe = "build/$BuildPreset/bin/luminumbra_server_app.exe"
     if (-not (Test-Path $serverExe)) {
         throw "replay roundtrip gate not yet built - missing $serverExe (cmake --build build/$BuildPreset)"
@@ -3880,7 +3936,7 @@ function Test-ReplayRoundtrip {
     }
     # Determinism proof: recording must NOT perturb the sim. The recorded run's
     # end hash must equal the canonical HeadlessServerTick hash, unchanged.
-    $expectedHash = "0857e683b4b8c47e"
+    $expectedHash = "d950a6afc12a5cdc"
     if ($r.end_world_hash -ne $expectedHash) {
         throw "replay roundtrip end hash $($r.end_world_hash) != canonical $expectedHash (recording perturbed the simulation)"
     }
@@ -3962,7 +4018,7 @@ function Test-ReplayDivergence {
 # + the one remote=client1), M ticks (>=90), each peer stepping its own ServerWorldRunner
 # of the SAME seed/preset. Asserts the session stayed in sync (no desync), both peers
 # reached the budget tick, the exchanged-every-cadence hashes agreed, and the two worlds
-# end at the IDENTICAL canonical hash 0857e683b4b8c47e -- proving lockstep does NOT perturb
+# end at the IDENTICAL canonical hash d950a6afc12a5cdc -- proving lockstep does NOT perturb
 # the simulation. Kept OFF the default All lane (slow: two full worlds), like the other
 # headless-server modes -- run via -Mode LockstepLoopback.
 function Test-LockstepLoopback {
@@ -3998,7 +4054,7 @@ function Test-LockstepLoopback {
     }
     # Determinism proof: lockstep must NOT perturb the sim. The in-sync end hash must equal
     # the canonical HeadlessServerTick hash, unchanged.
-    $expectedHash = "0857e683b4b8c47e"
+    $expectedHash = "d950a6afc12a5cdc"
     if ($a.host.world_hash -ne $expectedHash) {
         throw "lockstep loopback end hash $($a.host.world_hash) != canonical $expectedHash (lockstep perturbed the simulation)"
     }
@@ -4015,7 +4071,7 @@ function Test-LockstepLoopback {
 # look is render-side (never round-tripped). The gate asserts: both peers reach
 # the budget tick, hashes matched at every cadence, host==client end_hash, the
 # input set round-tripped, a clean disconnect, and the artifact schema. The
-# canonical 0857e683b4b8c47e hash (radius-4 streaming) is asserted to prove the
+# canonical d950a6afc12a5cdc hash (radius-4 streaming) is asserted to prove the
 # client world == the canonical server world. This is a HEAVY two-world lockstep
 # gate (like LockstepLoopback / HeadlessServerTick), so it stays off All.
 function Test-NetworkedSession {
@@ -4077,7 +4133,7 @@ function Test-NetworkedSession {
     }
     # Determinism proof: the client-rendered, server-owned world equals the
     # canonical headless server world. Render-side camera look did NOT perturb it.
-    $expectedHash = "0857e683b4b8c47e"
+    $expectedHash = "d950a6afc12a5cdc"
     if ($a.end_hash -ne $expectedHash) {
         throw "networked session end hash $($a.end_hash) != canonical $expectedHash (client world diverged from the server world)"
     }
@@ -4127,7 +4183,7 @@ function Test-LockstepFaultInjection {
     if ([int64]$absorb.host.late_input_events -le 0) {
         throw "lockstep fault-injection: no late-input events recorded (the delay was not exercised)"
     }
-    if (-not $absorb.end_hashes_equal -or $absorb.host.world_hash -ne "0857e683b4b8c47e") {
+    if (-not $absorb.end_hashes_equal -or $absorb.host.world_hash -ne "d950a6afc12a5cdc") {
         throw "lockstep fault-injection: absorbed-jitter run did not reach the canonical in-sync end hash (host=$($absorb.host.world_hash))"
     }
 
@@ -4250,7 +4306,7 @@ function Test-SkinnedMeshVisual {
 
 function Test-EngineGameSplitLint {
     # T-I3-17: engine/game decoupling lint. The engine (src/) must carry no
-    # Project Capture game nouns — content lives under data/ and worlds/.
+    # Project Capture game nouns â€” content lives under data/ and worlds/.
     # (a) path lint: no game noun in any path under src/;
     # (b) content lint: no game noun in any engine source file.
     # T-I3-22: the aetheric compatibility alias was removed at iteration close;
