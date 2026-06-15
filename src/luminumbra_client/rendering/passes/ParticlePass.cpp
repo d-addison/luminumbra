@@ -236,6 +236,12 @@ uint32_t ParticlePass::add_emitter(const std::filesystem::path& json_path, const
         data.atlas_layer = static_cast<uint16_t>(doc.value("atlas_layer", 0u));
         const std::string blend = doc.value("blend", std::string("additive"));
         data.blend = (blend == "alpha") ? BlendMode::AlphaBlend : BlendMode::Additive;
+        // T-I5a-4 (B2 precipitation): optional wind/streak/splash fields. Absent
+        // for legacy magical emitters (defaults keep them unaffected).
+        data.wind_response = doc.value("wind_response", 0.0f);
+        data.streak_aspect = std::max(1.0f, doc.value("streak_aspect", 1.0f));
+        data.impact_splash = doc.value("impact_splash", false);
+        data.impact_plane_y = doc.value("impact_plane_y", 0.0f);
         data.loaded = true;
     } catch (const std::exception& e) {
         LUMINUMBRA_CORE_WARN("ParticlePass: failed to parse emitter '{}': {}", json_path.string(), e.what());
@@ -259,11 +265,28 @@ void ParticlePass::clear_emitters() {
     m_active_emitters.clear();
     m_descriptors.clear();
     m_next_emitter_id = 0;
+    m_splash_emitter_index = kNoSplashEmitter;
     // Kill any live particles so existing byte-stable visual gates render an
     // empty (no-op) particle pass.
     for (auto& p : m_particles) p.alive = false;
     m_ring_head = 0;
     m_live_count = 0;
+}
+
+uint32_t ParticlePass::add_splash_emitter(const std::filesystem::path& json_path) {
+    // T-I5a-4 (B2): a splash burst is a normal emitter loaded with spawn_rate
+    // forced to 0 -- it never self-emits; only rain-impact events spawn from it.
+    // It carries no descriptor "enable" (spawn_rate 0), so it does not perturb
+    // the deterministic emitter-descriptor snapshot.
+    const uint32_t id = add_emitter(json_path, glm::vec3(0.0f));
+    if (id == kInvalidEmitter) {
+        return kInvalidEmitter;
+    }
+    m_splash_emitter_index = m_active_emitters.size() - 1;
+    ActiveEmitter& splash = m_active_emitters[m_splash_emitter_index];
+    splash.data.spawn_rate = 0.0f; // never self-emit
+    splash.data.impact_splash = false;
+    return id;
 }
 
 uint64_t ParticlePass::derive_emitter_seed(uint64_t world_seed, uint64_t world_tick, uint32_t emitter_id) {
@@ -342,6 +365,31 @@ void ParticlePass::spawn_from_emitter(ActiveEmitter& emitter, float dt) {
     }
 }
 
+void ParticlePass::spawn_splash_burst(const glm::vec3& world_pos, int count, ActiveEmitter& splash_template) {
+    // Render-only: emit `count` short-lived splash particles at the impact point.
+    const uint32_t splash_index = static_cast<uint32_t>(&splash_template - m_active_emitters.data());
+    for (int i = 0; i < count; ++i) {
+        Particle& p = m_particles[m_ring_head];
+        if (!p.alive) {
+            ++m_live_count;
+        }
+        p.alive = true;
+        p.age = 0.0f;
+        p.lifetime = splash_template.data.lifetime;
+        p.emitter_index = splash_index;
+        p.pos = world_pos
+              + glm::vec3(rng_signed(splash_template.rng_state) * 0.15f, 0.02f,
+                          rng_signed(splash_template.rng_state) * 0.15f);
+        // Outward + upward spray (a tiny crown), no wind response.
+        p.vel = splash_template.data.base_velocity
+              + glm::vec3(rng_signed(splash_template.rng_state),
+                          rng_unit(splash_template.rng_state),
+                          rng_signed(splash_template.rng_state))
+                    * splash_template.data.velocity_jitter;
+        m_ring_head = (m_ring_head + 1) % kMaxInstances;
+    }
+}
+
 void ParticlePass::update(float dt) {
     m_frame_instance_count = 0;
     if (m_active_emitters.empty() || m_particles.empty()) {
@@ -361,6 +409,11 @@ void ParticlePass::update(float dt) {
         return;
     }
 
+    // T-I5a-4 (B2): collect impact-splash spawn points this frame, then emit them
+    // after the integration loop (so we never mutate the ring while iterating it).
+    struct ImpactEvent { glm::vec3 pos; };
+    std::vector<ImpactEvent> impacts;
+
     std::size_t live = 0;
     std::size_t written = 0;
     for (auto& p : m_particles) {
@@ -372,11 +425,45 @@ void ParticlePass::update(float dt) {
             p.alive = false;
             continue;
         }
-        p.pos += p.vel * dt;
-        ++live;
 
         const ActiveEmitter& emitter = m_active_emitters[p.emitter_index];
+
+        // T-I5a-4: WIND-ADVECTION (render-only). Apply the per-frame wind velocity
+        // scaled by the emitter's wind_response, so rain/snow SLANT in storms.
+        // wind_response == 0 leaves magical/splash particles unaffected.
+        const glm::vec3 advected_vel =
+            p.vel + m_wind_velocity * emitter.data.wind_response;
+        p.pos += advected_vel * dt;
+
+        // T-I5a-4: IMPACT SPLASH. A descending precip particle that crosses the
+        // emitter's impact plane spawns a splash burst and dies (depth/ground
+        // impact -- the soft-particle depth fade in the frag shader handles the
+        // G-buffer surface intersection visually; this is the spray response).
+        if (emitter.data.impact_splash && advected_vel.y < 0.0f &&
+            p.pos.y <= emitter.data.impact_plane_y &&
+            m_splash_emitter_index != kNoSplashEmitter) {
+            impacts.push_back(ImpactEvent{
+                glm::vec3(p.pos.x, emitter.data.impact_plane_y, p.pos.z)});
+            p.alive = false;
+            continue;
+        }
+        ++live;
+
         const float life_t = p.age / p.lifetime;
+
+        // Streak orientation: for elongated emitters (rain, streak_aspect > 1) the
+        // billboard is rotated to align with the SCREEN-projected velocity, so a
+        // wind-slanted velocity renders a diagonal streak and a calm velocity a
+        // vertical one. The frag-shader quad stays square; the visible slant comes
+        // from this rotation + the wind-advected spatial envelope of the field.
+        float rotation = life_t * 6.2831853f;
+        if (emitter.data.streak_aspect > 1.0f) {
+            // atan2(horizontal-advected, vertical-fall): 0 when straight down,
+            // tilts toward horizontal as wind grows. Deterministic per frame.
+            const float horiz = advected_vel.x; // dominant slant axis (camera right-ish)
+            const float vert = advected_vel.y;
+            rotation = std::atan2(horiz, vert);
+        }
 
         InstanceRecord& rec = dst[written];
         rec.pos[0] = p.pos.x;
@@ -388,10 +475,20 @@ void ParticlePass::update(float dt) {
         rec.color[2] = to_unorm8(emitter.data.b_curve.sample(life_t));
         rec.color[3] = to_unorm8(emitter.data.a_curve.sample(life_t));
         rec.atlas_layer = emitter.data.atlas_layer;
-        rec.rotation = encode_f16(life_t * 6.2831853f);
+        rec.rotation = encode_f16(rotation);
         ++written;
         if (written >= kMaxInstances) {
             break;
+        }
+    }
+
+    // Emit splash bursts for this frame's impacts (bounded; a few particles each).
+    if (!impacts.empty() && m_splash_emitter_index != kNoSplashEmitter) {
+        ActiveEmitter& splash = m_active_emitters[m_splash_emitter_index];
+        // Sub-sample impacts so a dense storm does not flood the ring with splash
+        // particles (every 4th impact yields a small crown).
+        for (std::size_t i = 0; i < impacts.size(); i += 4) {
+            spawn_splash_burst(impacts[i].pos, 3, splash);
         }
     }
 

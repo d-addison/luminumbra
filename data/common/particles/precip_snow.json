@@ -1,0 +1,22 @@
+{
+  "schema": "luminumbra.particle_emitter.v1",
+  "name": "precip_snow",
+  "type": 2,
+  "spawn_rate": 1200.0,
+  "lifetime": 4.5,
+  "origin": [0.0, 22.0, 0.0],
+  "origin_extent": [26.0, 4.0, 26.0],
+  "base_velocity": [0.0, -2.2, 0.0],
+  "velocity_jitter": 0.5,
+  "size_curve": [0.10, 0.12, 0.13, 0.12, 0.10],
+  "color_r_curve": [0.85, 0.92, 0.97, 0.95, 0.88],
+  "color_g_curve": [0.88, 0.94, 0.98, 0.96, 0.9],
+  "color_b_curve": [0.92, 0.97, 1.0, 0.98, 0.93],
+  "color_a_curve": [0.0, 0.7, 0.85, 0.7, 0.0],
+  "atlas_layer": 0,
+  "blend": "alpha",
+  "wind_response": 1.4,
+  "streak_aspect": 1.0,
+  "impact_splash": false,
+  "impact_plane_y": 0.0
+}

@@ -1785,6 +1785,15 @@ int main(int argc, char* argv[]) {
     // T-I5a-1 particle determinism scenario state.
     bool particle_emitter_spawned = false;
     bool particle_determinism_capture_written = false;
+    // T-I5a-4 (B2): precipitation scenario state. The run spawns the rain emitter
+    // (driven by the replicated weather state) and captures TWO frames -- a CALM
+    // phase (no wind) and a WINDY phase (wind-advected slant) -- so the gate can
+    // assert precip particles are present AND that they slant with wind.
+    bool precip_emitter_spawned = false;
+    bool precip_calm_capture_written = false;
+    bool precip_windy_capture_written = false;
+    PrecipPixelStats precip_calm_stats;
+    Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats precip_calm_render_pass;
     // T-I5a-7 (C2): 6 season-sweep windows (summer noon/dusk/night, winter
     // noon/dusk/night).
     std::array<bool, 6> timeofday_season_captures_written{false, false, false, false, false, false};
@@ -2140,6 +2149,86 @@ int main(int argc, char* argv[]) {
                             particle_emitter_spawned = true;
                         }
                     }
+                } else if (scenario_config.precipitation_smoke() && scenario_ready && g_camera) {
+                    // T-I5a-4 (B2): RAIN through the A1 particle framework, driven
+                    // by the REPLICATED weather state at the camera and WIND-ADVECTED
+                    // by the A2 wind field. Two phases at the SAME framing: a CALM
+                    // phase (zero wind -> vertical fall) then a WINDY phase (strong
+                    // horizontal wind -> diagonal slant). ONE-WAY (F2): we READ
+                    // weather/wind and write nothing back to sim/world_hash.
+                    ApplySkyboxVisualCamera(gameSession.get(), g_camera.get(), 0.30f);
+                    const double elapsed_play_seconds = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - scenario_play_started_at).count();
+                    const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
+                    const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
+                    const bool windy_phase = progress >= 0.5;
+
+                    auto* particles = renderPipeline.particles();
+                    if (particles != nullptr && !precip_emitter_spawned) {
+                        // Spawn the rain field above + around the camera so the
+                        // falling column fills the frame, plus the splash template.
+                        const glm::vec3 field_origin(
+                            g_camera->Position.x, g_camera->Position.y, g_camera->Position.z);
+                        particles->add_emitter(
+                            root_dir / "data/common/particles/precip_rain.json", field_origin);
+                        particles->add_splash_emitter(
+                            root_dir / "data/common/particles/precip_splash.json");
+                        precip_emitter_spawned = true;
+                    }
+
+                    // Overcast/wet backdrop from the replicated weather state (the
+                    // same one-way overlay the WeatherVisual gate exercises) so the
+                    // rain reads against a darkened sky.
+                    const auto* weather = gameSession->GetWeatherSystem();
+                    Luminumbra::Rendering::WeatherRenderState wstate;
+                    const Luminumbra::Vec3 cam(
+                        g_camera->Position.x, g_camera->Position.y, g_camera->Position.z);
+                    float sampled_wind_len = 0.0f;
+                    glm::vec3 sampled_wind_dir(1.0f, 0.0f, 0.0f);
+                    if (weather != nullptr) {
+                        const auto sample = weather->SampleAt(cam);
+                        wstate.rain_intensity = std::max(sample.precip_intensity, 1.0f);
+                        wstate.storm_intensity = std::max(sample.storm_intensity, 0.4f);
+                        wstate.wetness = wstate.rain_intensity;
+                        wstate.fog_density = 0.1f;
+                        sampled_wind_len = std::sqrt(
+                            sample.wind.x * sample.wind.x + sample.wind.y * sample.wind.y);
+                        if (sampled_wind_len > 1e-4f) {
+                            sampled_wind_dir = glm::vec3(
+                                sample.wind.x / sampled_wind_len, 0.0f, sample.wind.y / sampled_wind_len);
+                            wstate.wind_direction = sampled_wind_dir;
+                            wstate.wind_strength = std::clamp(sampled_wind_len / 13.0f, 0.0f, 1.0f);
+                        }
+                    } else {
+                        wstate.rain_intensity = 1.0f;
+                        wstate.wetness = 1.0f;
+                    }
+                    renderPipeline.set_weather_state(wstate);
+
+                    // WIND-ADVECTION push (render-only). Calm phase: zero wind so
+                    // rain falls straight down. Windy phase: a strong horizontal
+                    // wind aligned with the camera-right axis so the slant is
+                    // unambiguous in screen space and clearly diagonal. The wind
+                    // DIRECTION comes from the replicated A2 field when available;
+                    // its MAGNITUDE is floored to a strong, deterministic value in
+                    // this dedicated scenario (premise guard: storms run only here).
+                    if (particles != nullptr) {
+                        if (windy_phase) {
+                            glm::vec3 wind_dir = sampled_wind_dir;
+                            // Bias the slant onto the camera-right axis so the
+                            // 2D analyzer measures a clean horizontal lean.
+                            const glm::vec3 right = glm::normalize(g_camera->Right);
+                            if (glm::length(wind_dir) < 1e-3f) {
+                                wind_dir = right;
+                            } else {
+                                wind_dir = glm::normalize(wind_dir + right);
+                            }
+                            const float wind_speed = 16.0f; // strong storm gust
+                            particles->set_wind(wind_dir * wind_speed);
+                        } else {
+                            particles->set_wind(glm::vec3(0.0f));
+                        }
+                    }
                 } else if (scenario_config.timeofday_sweep_smoke() && scenario_ready && g_camera) {
                     const double elapsed_play_seconds = std::chrono::duration<double>(
                         std::chrono::steady_clock::now() - scenario_play_started_at).count();
@@ -2372,7 +2461,7 @@ int main(int argc, char* argv[]) {
                 gameSession->TickSimulation(static_cast<double>(deltaTime));
                 if (gameSession->GetWorldSystem() && (g_playerController || g_camera)) {
                     const Luminumbra::Vec3 streaming_position =
-                        ((scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.timeofday_sweep_smoke() || scenario_config.lod_boundary_oscillation_smoke() || scenario_config.lod_seam_arrival_smoke() || scenario_config.player_view_smoke() || scenario_config.farlod_horizon_smoke() || scenario_config.skinned_mesh_visual_smoke() || scenario_config.creature_slice_smoke()) && scenario_ready && g_camera)
+                        ((scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.precipitation_smoke() || scenario_config.timeofday_sweep_smoke() || scenario_config.lod_boundary_oscillation_smoke() || scenario_config.lod_seam_arrival_smoke() || scenario_config.player_view_smoke() || scenario_config.farlod_horizon_smoke() || scenario_config.skinned_mesh_visual_smoke() || scenario_config.creature_slice_smoke()) && scenario_ready && g_camera)
                             ? Luminumbra::Vec3(g_camera->Position)
                             : (g_playerController ? Luminumbra::Vec3(g_playerController->GetPosition()) : Luminumbra::Vec3(g_camera->Position));
                     gameSession->GetWorldSystem()->update(
@@ -2396,7 +2485,7 @@ int main(int argc, char* argv[]) {
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             if (currentState == GameState::IN_GAME) {
                 if (gameSession->GetWorldSystem() && g_camera) {
-                    if (scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.lod_seam_arrival_smoke() || scenario_config.player_view_smoke() || scenario_config.farlod_horizon_smoke() || scenario_config.skinned_mesh_visual_smoke() || scenario_config.creature_slice_smoke()) {
+                    if (scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.precipitation_smoke() || scenario_config.lod_seam_arrival_smoke() || scenario_config.player_view_smoke() || scenario_config.farlod_horizon_smoke() || scenario_config.skinned_mesh_visual_smoke() || scenario_config.creature_slice_smoke()) {
                         // time_of_day 0 is noon (sun elevation = cos(2*pi*t));
                         // 0.04 keeps the sun near its zenith for stable captures.
                         renderPipeline.set_time_of_day(0.04f);
@@ -2857,6 +2946,67 @@ int main(int argc, char* argv[]) {
                                                 scenario_config.artifact_dir,
                                                 screenshot_path,
                                                 result,
+                                                render_pass_stats);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (scenario_config.precipitation_smoke() && scenario_ready && !precip_windy_capture_written) {
+                            // T-I5a-4 (B2): capture a CALM rain frame (first half,
+                            // zero wind -> vertical fall) and a WINDY rain frame
+                            // (second half, wind-advected slant). The analysis on
+                            // the windy capture asserts precip particles are present
+                            // in both AND that the streaks slant with wind.
+                            const double elapsed_play_seconds = std::chrono::duration<double>(now - scenario_play_started_at).count();
+                            const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
+                            const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
+                            const auto& render_pass_stats = renderPipeline.get_last_render_pass_stats();
+                            // Capture once rain is visibly rendering (the pass
+                            // reports draws). Calm: late in the first half so the
+                            // field has filled and settled to a steady vertical
+                            // fall. Windy: late in the second half so the slant has
+                            // fully developed after the wind switch at progress 0.5.
+                            const bool capture_calm = !precip_calm_capture_written &&
+                                progress >= 0.35 && progress < 0.5 && render_pass_stats.particle_draws > 0;
+                            const bool capture_windy = precip_calm_capture_written &&
+                                progress >= 0.9 && render_pass_stats.particle_draws > 0;
+                            if (capture_calm || capture_windy) {
+                                int screenshot_width = 0;
+                                int screenshot_height = 0;
+                                glfwGetFramebufferSize(window, &screenshot_width, &screenshot_height);
+                                if (screenshot_width > 0 && screenshot_height > 0) {
+                                    std::vector<unsigned char> frame_pixels(
+                                        static_cast<std::size_t>(screenshot_width) * static_cast<std::size_t>(screenshot_height) * 3u);
+                                    glReadBuffer(GL_BACK);
+                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                                    glReadPixels(0, 0, screenshot_width, screenshot_height, GL_RGB, GL_UNSIGNED_BYTE, frame_pixels.data());
+                                    const PrecipPixelStats stats = AnalyzePrecipPixels(frame_pixels, screenshot_width, screenshot_height);
+                                    if (capture_calm) {
+                                        const std::string calm_path = "screenshots/precip-calm.ppm";
+                                        if (WritePixelBufferPpm(
+                                                scenario_config.artifact_dir / calm_path,
+                                                screenshot_width, screenshot_height, frame_pixels)) {
+                                            precip_calm_capture_written = true;
+                                            precip_calm_stats = stats;
+                                            precip_calm_render_pass = render_pass_stats;
+                                        }
+                                    } else {
+                                        const std::string windy_path = "screenshots/precip-windy.ppm";
+                                        if (WritePixelBufferPpm(
+                                                scenario_config.artifact_dir / windy_path,
+                                                screenshot_width, screenshot_height, frame_pixels)) {
+                                            precip_windy_capture_written = true;
+                                            WritePrecipitationAnalysis(
+                                                scenario_config.artifact_dir,
+                                                "screenshots/precip-calm.ppm",
+                                                windy_path,
+                                                precip_calm_stats,
+                                                stats,
+                                                "rain",
+                                                0.0,
+                                                16.0,
+                                                precip_calm_render_pass,
                                                 render_pass_stats);
                                         }
                                     }

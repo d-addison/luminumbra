@@ -107,6 +107,18 @@ public:
         Curve a_curve;
         uint16_t atlas_layer = 0;
         BlendMode blend = BlendMode::Additive;
+        // T-I5a-4 (B2 precipitation): wind-advection + streak + splash extensions.
+        // wind_response scales how much the per-frame wind velocity (set via
+        // set_wind) is applied to this emitter's particles -- rain/snow slant with
+        // wind; magical emitters default to 0 (unaffected). streak_aspect drives
+        // the billboard elongation along the velocity direction (>1 = a rain
+        // streak; 1 = a round flake). impact_splash converts a particle that
+        // descends past impact_plane_y into a short splash burst (depth/ground
+        // impact). All render-only -- NONE of these touch world_hash.
+        float wind_response = 0.0f;
+        float streak_aspect = 1.0f;
+        bool impact_splash = false;
+        float impact_plane_y = 0.0f;
         bool loaded = false;
     };
 
@@ -146,6 +158,21 @@ public:
     static constexpr uint32_t kInvalidEmitter = 0xFFFFFFFFu;
     uint32_t add_emitter(const std::filesystem::path& json_path, const glm::vec3& world_origin);
     void clear_emitters();
+
+    // T-I5a-4 (B2): registers a SPLASH emitter (a zero-spawn-rate burst template)
+    // that impact_splash particles trigger when they reach the impact plane. The
+    // emitter's spawn_rate is forced to 0 so it produces nothing on its own --
+    // only impact events spawn from it. Returns its emitter id (or kInvalidEmitter).
+    // Render-only; the splash template carries NO descriptor enable (spawn_rate 0).
+    uint32_t add_splash_emitter(const std::filesystem::path& json_path);
+
+    // T-I5a-4 (B2): per-frame WIND velocity (world-space; horizontal XZ carried in
+    // x/z, y usually 0) sampled by the client from the A2 wind field / replicated
+    // weather at the camera. Applied to particle motion scaled by each emitter's
+    // wind_response so rain/snow SLANT in storms. RENDER-ONLY -- never hashed, and
+    // this subsystem writes nothing back into sim/world_hash (one-way, critique F2).
+    void set_wind(const glm::vec3& wind_velocity) { m_wind_velocity = wind_velocity; }
+    const glm::vec3& wind_velocity() const { return m_wind_velocity; }
 
     // Rebuilds the sim-deterministic emitter descriptor set for the supplied
     // world tick. rng_seed is derived from {world_seed, tick, emitter id}. This
@@ -191,6 +218,9 @@ private:
 
     void spawn_from_emitter(ActiveEmitter& emitter, float dt);
     void map_instances_for_frame();
+    // T-I5a-4: spawn a small splash burst at world_pos using the registered
+    // splash template emitter (no-op when none registered). Render-only.
+    void spawn_splash_burst(const glm::vec3& world_pos, int count, ActiveEmitter& splash_template);
 
     std::unique_ptr<Shader> m_shader;
     u32 m_vao = 0;
@@ -209,6 +239,11 @@ private:
     // Per-frame instance count actually written to the mapping.
     std::size_t m_frame_instance_count = 0;
     uint32_t m_next_emitter_id = 0;
+
+    // T-I5a-4 (B2): per-frame wind velocity (render-only) + splash template index.
+    glm::vec3 m_wind_velocity{0.0f};
+    static constexpr std::size_t kNoSplashEmitter = static_cast<std::size_t>(-1);
+    std::size_t m_splash_emitter_index = kNoSplashEmitter;
 };
 
 } // namespace Luminumbra::Rendering
