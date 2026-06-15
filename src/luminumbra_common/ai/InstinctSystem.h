@@ -17,6 +17,13 @@
 //      the winning action into ActionPlanComponent.
 //
 // The system is pure engine: need names, actions, and targets are game data.
+//
+// T-I5b-2 (E1): an OPTIONAL ecology stimulus-channel context may be supplied. It
+// is consumed ONLY for entities that carry a StimulusSubscriptionComponent (game-
+// data opt-in); for those creatures each subscribed channel scalar modulates the
+// mapped need's pressure before planning. The default roster carries no
+// subscription, so passing nullptr (the default) leaves the tick path BYTE-
+// UNCHANGED and world_hash stays `d950a6afc12a5cdc` (critique F1 / §0).
 
 #include <cstdint>
 
@@ -24,12 +31,23 @@
 
 namespace luminumbra::ai {
 
+class StimulusChannelRegistry;
+
 struct InstinctSystemTickStats {
     std::uint64_t agents_seen = 0;
     std::uint64_t agents_replanned = 0;
     std::uint64_t opportunities_considered = 0;
+    // T-I5b-2: how many subscribing creatures had a channel modulate a need this
+    // tick (0 for the canonical roster -- the registry stays inert).
+    std::uint64_t stimulus_subscribers_applied = 0;
 };
 
-InstinctSystemTickStats RunInstinctSystemOnTick(entt::registry& registry, std::uint64_t tick);
+// `stimulus` is OPTIONAL: when null (default), no stimulus-channel work runs and
+// the planner tick path is byte-identical to the pre-T-I5b-2 behavior. When non-
+// null, ONLY entities carrying a StimulusSubscriptionComponent sample channels.
+InstinctSystemTickStats RunInstinctSystemOnTick(
+    entt::registry& registry,
+    std::uint64_t tick,
+    const StimulusChannelRegistry* stimulus = nullptr);
 
 } // namespace luminumbra::ai

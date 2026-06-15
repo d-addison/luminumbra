@@ -2,6 +2,7 @@
 
 #include "../../../include/luminumbra/core/Types.h"
 #include "../ai/InstinctPlanner.h"
+#include "../ai/StimulusChannels.h"
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -74,6 +75,27 @@ struct ActionPlanComponent {
 
 // A tag component to identify an entity as being controlled by the Instinct Engine.
 struct InstinctAgent {};
+
+// T-I5b-2 (E1): GAME-DATA opt-in for the ecology stimulus channels. A creature
+// that carries this component REACTS to the environment: each subscription maps
+// a stimulus channel onto a named need, scaling the need's pressure by the
+// channel's [0, 1] scalar times `gain` every replan tick (clamped to [0, 1]).
+//
+// This is the INERT switch (critique F1 / design-decisions §0). The InstinctSystem
+// touches the stimulus registry ONLY for entities that carry this component. The
+// canonical world (the HeadlessServerTick default roster) spawns NO entity with a
+// StimulusSubscriptionComponent, so the default planner tick path is byte-
+// unchanged and world_hash stays `d950a6afc12a5cdc`. The engine names no channel-
+// to-need mapping; the archetype JSON does.
+struct StimulusSubscription {
+    luminumbra::ai::StimulusChannel channel = luminumbra::ai::StimulusChannel::Weather;
+    std::string need;     // the named need this channel drives (game data)
+    f32 gain = 1.0f;      // scale applied to the channel scalar before adding to pressure
+};
+
+struct StimulusSubscriptionComponent {
+    std::vector<StimulusSubscription> subscriptions;
+};
 
 // Identity + planner state for an instinct agent (T-I3-17). The
 // InstinctSystem replans every replan_interval_ticks fixed ticks and stores
