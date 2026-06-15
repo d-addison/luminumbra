@@ -136,6 +136,25 @@ struct WeatherRenderState {
     float wind_strength = 0.0f;   // [0, 1] wind magnitude (scaled)
 };
 
+// T-I5a-8 (C3): RENDER-ONLY cloud layer state. The cloud coverage field + its
+// projected cast shadow are a pure function of (replicated weather state + sim
+// tick + wind) — one-way, never read back into the sim or world_hash (critique
+// F2). The client pushes this each frame via set_cloud_state; the SkyboxPass
+// renders the wind-advected sky-dome cloud layer and the LightingPass projects
+// the SAME coverage field to cast crawling terrain shadows. The scroll offset is
+// the wind direction * a tick-derived phase, so the clouds drift deterministically
+// with the large-scale wind and the dome/shadow stay registered.
+struct CloudRenderState {
+    bool enabled = false;             // master toggle (false == zero added cost)
+    bool shadow_enabled = false;      // project the coverage into the lighting pass
+    glm::vec2 scroll_offset = glm::vec2(0.0f); // wind * tick-phase, world metres
+    float coverage_amount = 0.45f;    // [0,1] weather sky-cover fraction
+    float biome_variation = 0.0f;     // biome coverage bias (e.g. wetter == cloudier)
+    float plane_height = 900.0f;      // world Y of the cloud sheet
+    float shadow_strength = 0.0f;     // [0,1] max sun darkening under a cloud core
+    glm::vec3 sun_travel_dir = glm::vec3(0.0f, -1.0f, 0.0f); // for shadow projection
+};
+
 // T-I4-16: bucketed persistent-mapped geometry pool for live terrain chunks.
 //
 // Replaces the one-VBO/EBO/VAO-per-chunk model with a small set of large,
@@ -319,6 +338,12 @@ public:
         // T-I5a-6: analytic aerial-perspective term (a fullscreen pass wiring
         // volumetric_lighting.frag). Budget ≤ 0.3 ms (design §7).
         double aerial_gpu_ms = 0.0;
+        // T-I5a-8: the lighting-pass GPU time on the last frame the cloud cast
+        // shadow was ACTIVE (the projected coverage sample is per-fragment inside
+        // the lighting pass — no separate pass to time). cloud_shadow_added_ms is
+        // the incremental cost vs the clouds-off lighting baseline, the number the
+        // CloudShadow gate bounds against the ≤ 0.4 ms budget (design §7, F3).
+        double cloud_shadow_gpu_ms = 0.0;       // lighting pass ms with clouds on
         double final_blit_gpu_ms = 0.0;
         // T-I5a-6: sky scattering LUT precompute timings (CPU build + GL upload).
         // sky_full_precompute_ms is the startup one-shot (budget ≤ 8.0 ms on
@@ -468,6 +493,21 @@ public:
     // there is no precipitation (driven clear == overlay off).
     void set_weather_state(const WeatherRenderState& state);
     const WeatherRenderState& get_weather_state() const { return m_weather_state; }
+
+    // T-I5a-8 (C3): render-only cloud layer control. set_cloud_state enables the
+    // wind-advected cloud dome + (optionally) the projected cast shadow and sets
+    // the weather-derived coverage/biome/plane parameters. The wind scroll offset
+    // is advanced internally each frame from the pushed wind direction * a tick-
+    // derived phase (advance_cloud_phase, called inside update_time_of_day) so the
+    // clouds drift deterministically with the wind; callers supply the static
+    // coverage parameters here. One-way: the cloud field never feeds the sim.
+    void set_cloud_state(const CloudRenderState& state);
+    const CloudRenderState& get_cloud_state() const { return m_cloud_state; }
+    // Cloud-shadow GPU cost (ms) from the per-pass timer pair bracketing the
+    // lighting pass on the LAST frame the cloud shadow was active; 0.0 otherwise.
+    // The CloudShadow gate compares the clouds-on vs clouds-off lighting timing to
+    // bound the ADDED per-fragment sample cost against the ≤ 0.4 ms budget (F3).
+    double cloud_shadow_gpu_ms() const { return m_last_render_pass_stats.cloud_shadow_gpu_ms; }
     
     // GPU SDF integration
     void set_gpu_sdf_runtime_enabled(bool enabled);
@@ -615,6 +655,14 @@ private:
     float m_weather_intensity = 0.0f;
     // T-I5a-3 (B1): SIM-DRIVEN weather render state (one-way from WeatherSystem).
     WeatherRenderState m_weather_state;
+    // T-I5a-8 (C3): render-only cloud layer state + the wind-advection scroll
+    // phase. m_cloud_phase accumulates the tick-derived deltaTime so the scroll
+    // offset (= wind_dir * wind_strength * phase) advances with the wind; it is a
+    // pure render accumulator (never hashed, one-way). advance_cloud_phase runs
+    // inside update_time_of_day on the same deltaTime that drives the sun.
+    CloudRenderState m_cloud_state;
+    float m_cloud_phase = 0.0f;
+    void advance_cloud_phase(float deltaTime);
     std::unique_ptr<FarLodSystem> m_farlod;
     std::unique_ptr<GBufferPass> m_gbuffer_pass;
     std::unique_ptr<ShadowPass> m_shadow_pass;

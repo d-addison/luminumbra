@@ -1381,6 +1381,15 @@ void RenderPipeline::collect_gpu_pass_timers() {
     m_last_render_pass_stats.skybox_gpu_ms = m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::Skybox)];
     m_last_render_pass_stats.particle_gpu_ms = m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::Particle)];
     m_last_render_pass_stats.aerial_gpu_ms = m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::Aerial)]; // T-I5a-6
+    // T-I5a-8: the cloud cast-shadow sample lives INSIDE the lighting pass (a
+    // per-fragment projected-coverage lookup, no separate pass), so its cost is
+    // the lighting-pass GPU time on frames where the shadow is active. The
+    // CloudShadow gate captures this with clouds ON vs OFF to bound the added
+    // sample cost against the ≤ 0.4 ms budget (design §7, F3).
+    m_last_render_pass_stats.cloud_shadow_gpu_ms =
+        (m_cloud_state.enabled && m_cloud_state.shadow_enabled)
+            ? m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::Lighting)]
+            : 0.0;
     m_last_render_pass_stats.final_blit_gpu_ms = m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::FinalBlit)];
 
     // One-time diagnostic so smoke runs prove the ring resolves real samples.
@@ -3316,6 +3325,10 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
             m_skyAmbientColor = glm::mix(m_skyAmbientColor, tinted, 0.5f * m_sun.intensity);
         }
     }
+
+    // T-I5a-8 (C3): advance the wind-advected cloud scroll on the same tick-
+    // derived deltaTime so the dome clouds + their cast shadow drift with the wind.
+    advance_cloud_phase(deltaTime);
 }
 
 u32 RenderPipeline::water_caustics_texture() const {
@@ -3367,6 +3380,56 @@ void RenderPipeline::set_weather_state(const WeatherRenderState& state) {
         m_weather_type = WeatherType::None;
         m_weather_intensity = 0.0f;
     }
+}
+
+void RenderPipeline::set_cloud_state(const CloudRenderState& state) {
+    // T-I5a-8 (C3): render-only. Store the coverage parameters; the wind scroll
+    // offset is advanced internally (advance_cloud_phase) from the pushed wind
+    // direction/strength so the field DRIFTS deterministically with the wind. The
+    // caller's scroll_offset/sun_travel_dir are ignored — we own those — so a
+    // caller need only set enabled/shadow_enabled/coverage/biome/plane/strength.
+    // One-way: nothing here is read back into the sim or world_hash.
+    const glm::vec2 preserved_offset = m_cloud_state.scroll_offset;
+    m_cloud_state = state;
+    m_cloud_state.scroll_offset = preserved_offset; // keep the accumulated drift
+    m_cloud_state.coverage_amount = std::clamp(m_cloud_state.coverage_amount, 0.0f, 1.0f);
+    m_cloud_state.biome_variation = std::clamp(m_cloud_state.biome_variation, -1.0f, 1.0f);
+    m_cloud_state.shadow_strength = std::clamp(m_cloud_state.shadow_strength, 0.0f, 1.0f);
+    if (m_cloud_state.plane_height < 1.0f) {
+        m_cloud_state.plane_height = 900.0f;
+    }
+    // The sun travel direction the cast-shadow projection uses always mirrors the
+    // current sun so the shadow stays consistent with the lit scene.
+    m_cloud_state.sun_travel_dir = m_sun.direction;
+}
+
+void RenderPipeline::advance_cloud_phase(float deltaTime) {
+    // T-I5a-8 (C3): advance the wind-advection scroll. The phase accumulates the
+    // SAME tick-derived deltaTime that drives the sun (deterministic per tick in
+    // the headless/scenario stepping — no wall-clock), and the scroll offset is
+    // wind_direction * wind_strength * phase, so the entire coverage field (dome
+    // clouds AND the projected cast shadow) translates with the large-scale wind.
+    // Pure render accumulator: never hashed, never read back into the sim.
+    if (!m_cloud_state.enabled) {
+        return;
+    }
+    m_cloud_phase += deltaTime;
+    // Wind comes from the replicated weather render state (one-way bridge). A
+    // gentle base drift so clouds still move when no wind has been pushed yet.
+    glm::vec2 wind_xz(m_weather_state.wind_direction.x, m_weather_state.wind_direction.z);
+    const float wind_len = glm::length(wind_xz);
+    if (wind_len > 1e-4f) {
+        wind_xz /= wind_len;
+    } else {
+        wind_xz = glm::vec2(1.0f, 0.0f);
+    }
+    // Metres-per-second the cloud sheet drifts at full wind strength. The cells
+    // are ~1200 m, so ~60 m/s visibly shifts a cloud edge across a terrain ROI in
+    // the few-second gate window while staying a believable high-altitude drift.
+    constexpr float kCloudDriftMetersPerSec = 60.0f;
+    const float speed = kCloudDriftMetersPerSec * std::max(0.12f, m_weather_state.wind_strength);
+    m_cloud_state.scroll_offset = wind_xz * (m_cloud_phase * speed);
+    m_cloud_state.sun_travel_dir = m_sun.direction;
 }
 
 std::vector<glm::mat4> RenderPipeline::get_light_space_matrices(const Camera& camera) {
