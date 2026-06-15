@@ -165,7 +165,20 @@ vec3 renderClouds(vec3 viewDir, vec3 baseColor, float dayFactor) {
 
     // Distance fade so the far (near-horizon) cloud band thins into haze rather
     // than tiling hard -- this is the "imposter" foreshortening band.
-    float horizonFade = smoothstep(0.02, 0.22, viewDir.y);
+    // T-I5b-DR-sky2 (defect M8/N6): under a STORM deck the overcast must WRAP
+    // DOWN to the horizon as a structured murk band -- a horizon-level storm view
+    // (the water_shore c1/c5 cells, pitch 0) was reading the fade all the way to
+    // zero -> bare battleship-grey dome with structure only higher up (near the
+    // bolt). So lift a horizon-fade FLOOR with the storm structureWeight: the fair-
+    // weather deck still thins to clear haze at the horizon (clear-sky gate intact),
+    // but a storm keeps near-full cloud cover right down to the horizon band so the
+    // billow structure carried in the shading reads across the WHOLE storm sky.
+    float storm = smoothstep(0.55, 0.80, u_cloudCoverageAmount);
+    float horizonFade = mix(smoothstep(0.02, 0.22, viewDir.y),
+                            // Storm: only a shallow thin at the very horizon line,
+                            // then full overcast immediately above it.
+                            0.55 + 0.45 * smoothstep(0.02, 0.10, viewDir.y),
+                            storm);
 
     float coverage = cloudCoverageAt(worldXZ);
     // T-I5b-DR-sky-fixes (defect M8): a storm deck (u_cloudCoverageAmount ~0.85)
@@ -184,7 +197,7 @@ vec3 renderClouds(vec3 viewDir, vec3 baseColor, float dayFactor) {
     // All of this is gated by structureWeight (~0 at the fair-weather 0.45 deck,
     // ~1 at the 0.85 storm deck) so the clear-sky dome the SkyboxVisual gradient
     // gate frames keeps its horizon->zenith luminance drop untouched.
-    float structureWeight = smoothstep(0.55, 0.80, u_cloudCoverageAmount);
+    float structureWeight = storm; // == smoothstep(0.55, 0.80, u_cloudCoverageAmount)
     float detailA = fbm(worldXZ * (1.0 / 520.0) + u_cloudScrollOffset * (1.0 / 520.0), 4);
     float detailB = fbm(worldXZ * (1.0 / 210.0) + vec2(53.0, 19.0), 3);
     // Higher-frequency billow term for the fine cauliflower relief on the overcast.
@@ -272,7 +285,16 @@ vec3 renderStars(vec3 viewDir, float nightIntensity) {
 // envelope so the curtain hangs from the upper dome and feathers out at the
 // horizon and the zenith. The result is band/sheet structure, not splotches.
 vec3 renderAurora(vec3 viewDir, float dayFactor) {
-    float nightEnvelope = clamp(u_auroraStrength, 0.0, 1.0);
+    // T-I5b-DR-sky2 (defect M6/N5): aurora must NOT show through a STORM/overcast
+    // sky. The night gate (u_auroraStrength) alone let the green curtains bleed up
+    // THROUGH a heavy night-storm deck (the aurora is added AFTER the cloud layer,
+    // so a high-coverage overcast did not occlude it). Gate the aurora OFF as the
+    // sky-wide cloud coverage rises into the overcast band: clear/fair-weather night
+    // keeps its full green curtains (the night-aurora gate), a storm night shows
+    // NONE. Keyed on the same u_cloudCoverageAmount the cloud deck uses, so the gate
+    // tracks the actual overcast level (clear ~0.45 -> 1.0, storm ~0.85 -> 0.0).
+    float overcastGate = 1.0 - smoothstep(0.55, 0.72, u_cloudCoverageAmount);
+    float nightEnvelope = clamp(u_auroraStrength, 0.0, 1.0) * overcastGate;
     // Curtains hang above the horizon band; start the fade a little above y=0 so
     // nothing snaps on at the frame edge, but allow them well up the dome.
     if (nightEnvelope <= 0.0 || viewDir.y < 0.12) return vec3(0.0);
