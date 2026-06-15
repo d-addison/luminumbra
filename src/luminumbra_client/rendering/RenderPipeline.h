@@ -183,6 +183,14 @@ struct LightningRenderState {
     // ground_flash scales the radial impact glow (0 = off, keeps gates byte-stable).
     glm::vec2 ground_ndc = glm::vec2(0.0f, -1.0f);
     float ground_flash = 0.0f;
+    // T-I5a-DR-storm-motion-v3: DARK STORM CLOUD anchor. The owner saw the bolt
+    // "appear from thin air". cloud_anchor_ndc is the screen point at the TOP of the
+    // bolt (where it should emerge from the cloud base); cloud_darkness scales a
+    // dark, billowing cloud mass the overlay paints around that anchor so the bolt
+    // visibly STEMS FROM a cloud and the flash lights that cloud from within.
+    // 0 == no cloud overlay (keeps the WeatherVisual strike gate byte-stable).
+    glm::vec2 cloud_anchor_ndc = glm::vec2(0.0f, 0.85f);
+    float cloud_darkness = 0.0f;
     // Flattened NDC polyline points. A point with x <= -2.0 is a PEN-UP separator
     // between disjoint polylines (main channel / each branch). Drawn as connected
     // segments between consecutive non-separator points.

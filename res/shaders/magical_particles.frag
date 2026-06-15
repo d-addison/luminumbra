@@ -79,6 +79,11 @@ float streak_mask(vec2 uv) {
 void main() {
     vec2 uv = fs_in.texCoord;
     bool isStreak = fs_in.streakAspect > 1.5;
+    // T-I5a-DR-storm-motion-v3: rain-impact FOAM is tagged with a dedicated atlas
+    // layer sentinel (precip_splash.json atlas_layer = 4) so it renders as a clean
+    // whitish foam burst rather than a scene-tinted emissive sprite. All other
+    // round (non-streak) particles (e.g. magical sparkles) keep the emissive path.
+    bool isFoam = (!isStreak) && (fs_in.atlasLayer > 3.5);
     float shape = isStreak ? streak_mask(uv) : sprite_mask(uv);
     if (shape <= 0.0) {
         discard;
@@ -107,25 +112,36 @@ void main() {
 
     vec4 finalColor = fs_in.color;
     if (isStreak) {
-        // T-I5a-DR-particle-motion-quality: rain is now ALPHA-blended (src-alpha,
-        // one-minus-src-alpha) so each streak is a soft translucent water filament
-        // composited over the dark overcast sky. The colour is a bright water-white
-        // (slightly tinted by the scene light) and the cross-section mask drives a
-        // gentle alpha so the spine is brightest and the edges fade out -- a soft
-        // streak, not a hard bright bar. softFade keeps it from punching through
-        // near geometry. The brightness sits clearly ABOVE the darkened storm
-        // backdrop (so rain reads as light streaks) without additive over-glow.
-        vec3 streakTint = mix(vec3(0.86, 0.92, 1.0), vec3(1.0), 0.35);
-        finalColor.rgb = streakTint * (0.7 + 0.45 * lit);
-        // Brighten the thin spine a touch so the centre of each streak catches
-        // the light (a wet highlight running down the filament).
-        finalColor.rgb += vec3(0.12) * shape;
+        // T-I5a-DR-storm-motion-v3: CLEAN RAIN. The owner saw "coloured TV static"
+        // -- cyan/teal/pink speckle. Root cause: the streak colour was modulated by
+        // the scene forward-lighting term (`lit` = ambient + sun + up to 4 coloured
+        // point lights), so every streak picked up a per-position hue and the field
+        // read as chromatic noise. The fix: rain is a CONSTANT light blue-white
+        // translucent filament with NO per-particle hue variation and NO scene-light
+        // tint. A single fixed water colour; the only spatial variation is the
+        // soft cross-section mask (spine brighter than edges) and the depth fade --
+        // i.e. shape, not colour. This reads as clean rain, not static.
+        const vec3 kRainColor = vec3(0.82, 0.90, 1.0);   // fixed light blue-white
+        finalColor.rgb = kRainColor;
+        // Brighten the thin spine a touch so the centre of each streak catches a
+        // wet highlight running down the filament (still hue-neutral: white add).
+        finalColor.rgb += vec3(0.10) * shape;
         // Translucent veil: moderate peak alpha, shaped by the streak mask so it
         // is soft-edged. Kept well below 1 so the rain stays see-through in motion.
         finalColor.a = clamp(fs_in.color.a, 0.0, 1.0) * shape * 0.85 * softFade;
+    } else if (isFoam) {
+        // T-I5a-DR-storm-motion-v3: SPLASH = subtle whitish foam burst, not coloured
+        // dots. The impact spray previously ran through the emissive path
+        // (scene-light tint + additive HDR glow core), which painted small COLOURED
+        // speckle scattered around the ground line. Now the splash is a fixed pale
+        // near-white foam with a soft round mask and a low alpha, with NO scene-light
+        // tint and NO additive glow -- a faint white burst on impact, nothing more.
+        const vec3 kFoamColor = vec3(0.92, 0.95, 1.0);   // pale near-white foam
+        finalColor.rgb = kFoamColor;
+        finalColor.a = clamp(fs_in.color.a, 0.0, 1.0) * shape * 0.5 * softFade;
     } else {
         // Emissive core: the particle is its own light source, modulated by the
-        // forward-lit term so it still reads the scene's mood.
+        // forward-lit term so it still reads the scene's mood. (Magical sparkles.)
         finalColor.rgb *= (0.6 + 0.4 * lit);
         finalColor.rgb += fs_in.color.rgb * shape * 0.5; // HDR glow core
         finalColor.a *= shape * softFade;
