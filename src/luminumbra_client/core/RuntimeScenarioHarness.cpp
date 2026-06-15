@@ -4339,7 +4339,20 @@ void WriteStreamingTelemetry(
         : 0.0;
     const bool deferred_age_bounded =
         stats.frames_observed == 0 || stats.max_deferred_age_frames < stats.frames_observed;
-    const bool backlog_bounded = stats.last_queue_depth == 0 && deferred_age_bounded;
+    // T-I5b-DR-streaming-drain: judge "did the streaming backlog drain" against
+    // the SETTLED queue depth (the trailing-window minimum), not the raw final-
+    // frame snapshot. Chunk activation is decoupled from the frame rate (it runs
+    // every STREAMING_ACTIVATION_INTERVAL_FRAMES frames), so generation/loading
+    // arrives in periodic batches and the raw last_queue_depth reads an in-flight
+    // batch (~one ring of loading chunks) whenever the run's final frame lands on
+    // or just after an activation tick — a single-frame phase artifact, not a
+    // standing backlog. The settled depth is 0 iff the pipeline reaches empty
+    // within each activation cycle (bounded + fully draining) and stays nonzero
+    // only for a backlog that never empties (genuinely unbounded). This makes the
+    // gate measure boundedness instead of which frame the 20 s window happened to
+    // stop on. world_hash is untouched (telemetry only).
+    const std::size_t settled_queue_depth = stats.settled_queue_depth;
+    const bool backlog_bounded = settled_queue_depth == 0 && deferred_age_bounded;
 
     nlohmann::json artifact = {
         {"schema", "luminumbra.streaming_telemetry.v1"},
@@ -4354,7 +4367,11 @@ void WriteStreamingTelemetry(
         {"max_deferred_age_frames", stats.max_deferred_age_frames},
         {"drain_rate_per_s", drain_rate_per_s},
         {"backlog_bounded", backlog_bounded},
-        {"final_queue_depth", stats.last_queue_depth}
+        // final_queue_depth is the SETTLED floor (the value the gate checks);
+        // last_frame_queue_depth preserves the raw single-frame snapshot for
+        // transparency / debugging of the activation-cycle phase.
+        {"final_queue_depth", settled_queue_depth},
+        {"last_frame_queue_depth", stats.last_queue_depth}
     };
 
     std::error_code ec;

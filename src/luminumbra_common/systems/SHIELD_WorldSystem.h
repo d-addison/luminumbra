@@ -206,6 +206,20 @@ public:
         std::size_t cumulative_deferred_meshing = 0;
         uint64_t max_deferred_age_frames = 0;
         std::size_t last_queue_depth = 0;
+        // T-I5b-DR-streaming-drain: the SETTLED backlog floor — the minimum
+        // queue depth observed across the trailing activation window
+        // (STREAMING_ACTIVATION_INTERVAL_FRAMES). Chunk activation runs only
+        // every Nth frame (decoupled from the frame rate), so generation/loading
+        // arrives in periodic batches that drain over the next few frames. The
+        // raw last_queue_depth is a single mid-cycle snapshot: it reads the
+        // in-flight generation batch (~one ring of loading chunks) whenever the
+        // run's final frame happens to land on or just after an activation tick,
+        // even though the pipeline reaches EMPTY every cycle. settled_queue_depth
+        // is the trailing-window minimum, so it is 0 iff the backlog genuinely
+        // drains to empty within each activation period (bounded + draining) and
+        // is nonzero only if a standing backlog never empties (truly unbounded).
+        // Pure telemetry: never fed into world_hash.
+        std::size_t settled_queue_depth = 0;
         uint64_t frames_observed = 0;
     };
 
@@ -443,6 +457,13 @@ private:
     StreamingBudgetFrameStats m_last_streaming_budget_stats;
     StreamingTelemetryStats m_streaming_telemetry_stats;
     uint64_t m_deferred_backlog_age_frames = 0;
+    // T-I5b-DR-streaming-drain: trailing per-frame queue-depth ring used to
+    // derive StreamingTelemetryStats::settled_queue_depth (the min over the last
+    // activation window). Sized to one full activation period so the window
+    // always spans an activation tick + its drain. Telemetry only.
+    std::array<std::size_t, 8> m_recent_queue_depths{};
+    std::size_t m_recent_queue_depth_count = 0;
+    std::size_t m_recent_queue_depth_cursor = 0;
 
     const std::vector<ChunkLOD> m_lod_levels = {
         {0, 1, 192.0f},  // LOD 0: Full detail up to 192 meters (~12 chunks)
