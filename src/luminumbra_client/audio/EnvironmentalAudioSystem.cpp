@@ -141,6 +141,91 @@ void EnvironmentalAudioSystem::ApplyBiomeReverb(const std::string& preset, float
                          preset, wet, dry, decay);
 }
 
+AtmosphereAudioState EnvironmentalAudioSystem::ComputeAtmosphere(
+        const glm::vec3& wind, float precipIntensity, float stormIntensity,
+        float biomeWet, float biomeDry, float biomeDecay) {
+    // T-I5b-3 (AU1) PINNED model (design-decisions.md §4). Pure function of the
+    // replicated weather sample -> two ambience layers + a weather reverb shift.
+    AtmosphereAudioState state;
+    state.applied = true;
+
+    const float windSpeed = glm::length(glm::vec3(wind.x, 0.0f, wind.z));
+    const float windSpeed01 = std::clamp(windSpeed / kAtmosphereWindRefSpeed, 0.0f, 1.0f);
+    const float precip01 = std::clamp(precipIntensity, 0.0f, 1.0f);
+    const float storm01 = std::clamp(stormIntensity, 0.0f, 1.0f);
+
+    // Wind ambience: scales with wind speed, never fully silent in open air (a
+    // faint air bed remains so a calm scene still moves).
+    state.wind.intensity = windSpeed01;
+    state.wind.volume = std::max(kAtmosphereWindFloor, windSpeed01);
+    state.wind.present = state.wind.volume > kAtmosphereLayerFloor;
+
+    // Rain ambience: silent when clear; rises with rain/storm precipitation. The
+    // heavier of the category precip and the nearest-storm contribution drives it.
+    const float rain01 = std::max(precip01, storm01);
+    state.rain.intensity = rain01;
+    state.rain.volume = rain01;
+    state.rain.present = state.rain.volume > kAtmosphereLayerFloor;
+
+    // Weather reverb shift: wet, overcast, precipitation-laden air carries early
+    // reflections longer + wetter. The shift is precipitation-driven (so it tracks
+    // weather, not just wind) and bounded so it cannot invert the dry/wet mix.
+    const float shift = rain01;
+    state.reverb_weather_shift = shift;
+    state.reverb_wet = std::clamp(biomeWet + shift * kAtmosphereReverbWetBoost, 0.0f, 1.0f);
+    state.reverb_dry = std::clamp(biomeDry - shift * kAtmosphereReverbWetBoost, 0.0f, 1.0f);
+    state.reverb_decay = std::max(0.0f, biomeDecay + shift * kAtmosphereReverbDecayBoost);
+    return state;
+}
+
+void EnvironmentalAudioSystem::UpdateAtmosphere(const glm::vec3& wind,
+                                                float precipIntensity,
+                                                float stormIntensity) {
+    AtmosphereAudioState next = ComputeAtmosphere(
+        wind, precipIntensity, stormIntensity,
+        m_biomeReverb.wet, m_biomeReverb.dry, m_biomeReverb.decay);
+    next.apply_count = m_atmosphere.apply_count;
+
+    // Idempotent at the backend: only push when the audible state changed (keeps
+    // the per-tick Update path from churning the audio engine while weather holds).
+    const bool changed =
+        !m_atmosphere.applied ||
+        next.wind.volume != m_atmosphere.wind.volume ||
+        next.rain.volume != m_atmosphere.rain.volume ||
+        next.reverb_wet != m_atmosphere.reverb_wet ||
+        next.reverb_dry != m_atmosphere.reverb_dry ||
+        next.reverb_decay != m_atmosphere.reverb_decay;
+
+    if (!changed) {
+        return;
+    }
+    ++next.apply_count;
+    m_atmosphere = next;
+
+    // Keep the WeatherState mirror used by the legacy wind/rain ambience path in
+    // sync (UpdateWeatherAudio reads it), then push the weather-shifted reverb +
+    // wind parameters through the manager. All backend calls are suppressed in
+    // null-audio mode (the manager is null/Null), so the null-audio gates are
+    // unaffected -- this is optional dressing layered on the existing systems.
+    m_weatherState.windStrength = m_atmosphere.wind.intensity;
+    m_weatherState.windDirection = glm::length(wind) > 1e-4f ? glm::normalize(wind) : m_weatherState.windDirection;
+    m_weatherState.isRaining = m_atmosphere.rain.present;
+    m_weatherState.rainIntensity = m_atmosphere.rain.intensity;
+
+    if (m_audioManager) {
+        m_audioManager->SetWindParameters(m_weatherState.windDirection, m_atmosphere.wind.volume);
+        m_audioManager->SetGlobalReverb(m_atmosphere.reverb_wet,
+                                        m_atmosphere.reverb_dry,
+                                        m_atmosphere.reverb_decay);
+    }
+
+    LUMINUMBRA_CORE_INFO(
+        "Atmosphere audio: wind={:.2f} rain={:.2f} reverb wet={:.2f} dry={:.2f} decay={:.2f} (shift={:.2f})",
+        m_atmosphere.wind.volume, m_atmosphere.rain.volume,
+        m_atmosphere.reverb_wet, m_atmosphere.reverb_dry, m_atmosphere.reverb_decay,
+        m_atmosphere.reverb_weather_shift);
+}
+
 void EnvironmentalAudioSystem::UpdateAmbientZones(const glm::vec3& listenerPosition) {
     for (auto& [id, zone] : m_ambientZones) {
         float distance = glm::distance(listenerPosition, zone->center);

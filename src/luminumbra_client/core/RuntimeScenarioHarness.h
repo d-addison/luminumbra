@@ -444,6 +444,18 @@ void WriteWeatherVisualAnalysis(
     float weather_intensity,
     const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass);
 
+// --- Atmosphere audio telemetry (T-I5b-3, AU1) ---
+// Client-side dressing: the replicated weather/wind state drives wind/rain
+// AMBIENCE layers on the AudioPropagationSystem ambience bed + a weather-modulated
+// reverb shift through the EnvironmentalAudioSystem. This sweeps a fixed set of
+// weather conditions (clear / rain / storm) through the REAL audio systems (no
+// audio backend needed -- the model is a pure function) and writes the
+// AtmosphereAudio artifact (schema luminumbra.audio.atmosphere.v1) asserting an
+// ambience layer is present and SCALES with weather intensity and the reverb param
+// SHIFTS with weather. No world_hash, no visual-gate dependency; the null-audio
+// path is unaffected. Returns true when the telemetry asserts pass.
+bool WriteAtmosphereAudioTelemetry(const std::filesystem::path& artifact_dir);
+
 // --- Lightning strike-frame smoke (T-I5a-5, B3) ---
 // The strike capture is the photography TIMING shot: a deterministically scheduled
 // strike fires during the weather phase, and the gate asserts the captured STRIKE
