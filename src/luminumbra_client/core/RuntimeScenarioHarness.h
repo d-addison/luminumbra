@@ -502,6 +502,24 @@ TimeOfDayPixelStats AnalyzeTimeOfDayPixels(const std::vector<unsigned char>& pix
 // Phase time for a normalized sweep progress: noon / dusk / night thirds.
 float TimeOfDaySweepPhaseTime(double progress);
 
+// --- T-I5a-7 (C2): season sweep -------------------------------------------
+// The sweep is split into TWO season halves; each half replays the
+// noon/dusk/night thirds. progress<0.5 == season 0 (summer), >=0.5 == season 1
+// (winter). These helpers map a normalized sweep progress to the season index,
+// the within-season phase time, the season tick to push to set_season_tick, and
+// the season label -- all PURE FUNCTIONS of the (tick-derived) progress, so the
+// sweep stays reproducible and never consults wall-clock for the SEASON itself.
+struct SeasonSweepPoint {
+    int season_index = 0;          // 0 summer, 1 winter
+    const char* season_label = ""; // "summer" / "winter"
+    std::uint64_t season_tick = 0; // tick to feed RenderPipeline::set_season_tick
+    float time_of_day = 0.0f;      // within-season noon/dusk/night phase time
+    int phase_index = 0;           // 0 noon, 1 dusk, 2 night
+};
+SeasonSweepPoint SeasonSweepAt(double progress);
+// The two season ticks the sweep pins (summer / winter solstice), pure tick math.
+std::uint64_t SeasonSweepTick(int season_index);
+
 // Generic emissive-material discovery: emissive material ids come from the
 // engine material registry (data/common/materials.json entries with a
 // non-zero "emission"); the streamed terrain meshes are scanned for a
@@ -528,6 +546,18 @@ struct TimeOfDayPhaseCapture {
     double time_of_day = 0.0;
     std::string file;
     TimeOfDayPixelStats stats;
+    // T-I5a-7 (C2): season dimension. The sweep captures the noon/dusk/night
+    // phases under >=2 SEASONS; these record the tick-derived season state read
+    // from the RenderPipeline at capture time so the analysis can assert a real
+    // per-season sun-path band + palette band difference. season_label is e.g.
+    // "summer"/"winter"; season_phase is the [0,1) tick-derived phase; the sun
+    // elevation/declination are the sun-path metrics the season modulates.
+    std::string season_label = "neutral";
+    int season_index = 0; // 0 summer, 1 winter
+    double season_phase = 0.0;
+    double sun_elevation_rad = 0.0;
+    double season_sun_declination_rad = 0.0;
+    std::uint64_t season_tick = 0;
 };
 
 void WriteTimeOfDaySweepAnalysis(

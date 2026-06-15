@@ -1785,7 +1785,9 @@ int main(int argc, char* argv[]) {
     // T-I5a-1 particle determinism scenario state.
     bool particle_emitter_spawned = false;
     bool particle_determinism_capture_written = false;
-    std::array<bool, 3> timeofday_captures_written{false, false, false};
+    // T-I5a-7 (C2): 6 season-sweep windows (summer noon/dusk/night, winter
+    // noon/dusk/night).
+    std::array<bool, 6> timeofday_season_captures_written{false, false, false, false, false, false};
     std::vector<TimeOfDayPhaseCapture> timeofday_phase_captures;
     EmissiveMaterialTarget timeofday_emissive_target;
     bool timeofday_emissive_target_initialized = false;
@@ -2145,22 +2147,26 @@ int main(int argc, char* argv[]) {
                     const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
                     // Discovery reruns while meshes stream in (the first
                     // frames only carry a fraction of the surface meshes);
-                    // it freezes once found or once the night phase nears so
-                    // the emissive camera target stays stable.
-                    if (!timeofday_emissive_target.found && progress < 0.8 &&
+                    // it freezes once found or once the SUMMER night phase nears
+                    // so the emissive camera target stays stable. T-I5a-7: the
+                    // summer half ends at progress 0.5, so freeze discovery before
+                    // its night/emissive window (~0.45-0.5).
+                    if (!timeofday_emissive_target.found && progress < 0.43 &&
                         (!timeofday_emissive_target_initialized || (scenario_frame_count % 120) == 0)) {
                         timeofday_emissive_target_initialized = true;
                         timeofday_emissive_target = FindEmissiveMaterialTarget(gameSession.get(), root_dir);
                     }
-                    if (timeofday_emissive_target.found && progress >= 0.92) {
-                        // Final stretch: aim at the discovered surface emissive
-                        // material for the dedicated night-emissive capture.
+                    if (timeofday_emissive_target.found && progress >= 0.44 && progress < 0.5) {
+                        // End of the SUMMER half: aim at the discovered surface
+                        // emissive material for the dedicated night-emissive
+                        // capture (the existing emissive night check, unchanged).
                         g_camera->Position = timeofday_emissive_target.position + Luminumbra::Vec3(8.0f, 6.0f, 8.0f);
                         g_camera->Zoom = 60.0f;
                         AimCameraAt(g_camera.get(), timeofday_emissive_target.position);
                     } else {
-                        // Fixed framing across all three phases so the
-                        // luminance comparison measures lighting, not framing.
+                        // Fixed framing across all phases (both seasons) so the
+                        // luminance/palette comparison measures lighting, not
+                        // framing.
                         ApplySkyboxVisualCamera(gameSession.get(), g_camera.get(), 0.04f);
                     }
                 } else if (scenario_config.lod_boundary_oscillation_smoke() && scenario_ready && g_camera) {
@@ -2395,13 +2401,21 @@ int main(int argc, char* argv[]) {
                         // 0.04 keeps the sun near its zenith for stable captures.
                         renderPipeline.set_time_of_day(0.04f);
                     } else if (scenario_config.timeofday_sweep_smoke() && scenario_ready) {
-                        // Three equal phase windows pinned at noon/dusk/night;
-                        // re-pinned every frame so update_time_of_day cannot
-                        // drift the phase between settle frames.
+                        // T-I5a-7 (C2): SEASON SWEEP. The run is split into two
+                        // season halves (summer then winter); each half replays
+                        // the noon/dusk/night phase windows. Both the time-of-day
+                        // AND the tick-derived season are re-pinned every frame so
+                        // update_time_of_day cannot drift either between settle
+                        // frames. set_season_tick feeds the authoritative-tick-
+                        // style integer the season is a PURE FUNCTION of (no
+                        // wall-clock for the season itself).
                         const double elapsed_play_seconds = std::chrono::duration<double>(
                             std::chrono::steady_clock::now() - scenario_play_started_at).count();
                         const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-                        renderPipeline.set_time_of_day(TimeOfDaySweepPhaseTime(std::clamp(elapsed_play_seconds / duration, 0.0, 1.0)));
+                        const double sweep_progress = std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
+                        const SeasonSweepPoint season_point = SeasonSweepAt(sweep_progress);
+                        renderPipeline.set_season_tick(season_point.season_tick);
+                        renderPipeline.set_time_of_day(season_point.time_of_day);
                     }
                     renderPipeline.render_frame(gameSession->GetRegistry(), *gameSession->GetWorldSystem(), *g_camera, deltaTime, wireframe_mode);
                     if (scenario_config.active() && currentState == GameState::IN_GAME) {
@@ -2854,24 +2868,47 @@ int main(int argc, char* argv[]) {
                             const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
                             const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
                             const auto& render_pass_stats = renderPipeline.get_last_render_pass_stats();
-                            // Captures land late in each phase window so the
-                            // pinned time of day has settle frames after each
-                            // transition (phase boundaries at 1/3 and 2/3).
-                            const std::array<double, 3> capture_thresholds{0.28, 0.61, 0.88};
-                            const std::array<const char*, 3> phase_names{"noon", "dusk", "night"};
-                            const std::array<double, 3> phase_times{0.04, 0.22, 0.45};
+                            // T-I5a-7 (C2): SEASON SWEEP capture. SIX windows = two
+                            // season halves (summer then winter), each replaying
+                            // noon/dusk/night. Captures land late in each window so
+                            // the pinned time-of-day + tick-derived season have
+                            // settle frames. Summer (season 0) OWNS the canonical
+                            // timeofday-{noon,dusk,night}.ppm files + the existing
+                            // ordering/hue-band/emissive assertions (unchanged);
+                            // winter (season 1) adds the per-season comparison set.
+                            struct SeasonCapturePlan {
+                                double threshold;       // progress at which to grab it
+                                const char* phase_name; // noon/dusk/night
+                                int phase_index;        // 0/1/2
+                                double phase_time;      // pinned time-of-day
+                                const char* season_label;
+                                int season_index;       // 0 summer, 1 winter
+                                const char* file;       // relative screenshot path
+                            };
+                            static const std::array<SeasonCapturePlan, 6> kPlans{{
+                                {0.13, "noon",  0, 0.04, "summer", 0, "screenshots/timeofday-noon.ppm"},
+                                {0.28, "dusk",  1, 0.22, "summer", 0, "screenshots/timeofday-dusk.ppm"},
+                                {0.42, "night", 2, 0.45, "summer", 0, "screenshots/timeofday-night.ppm"},
+                                {0.63, "noon",  0, 0.04, "winter", 1, "screenshots/timeofday-winter-noon.ppm"},
+                                {0.78, "dusk",  1, 0.22, "winter", 1, "screenshots/timeofday-winter-dusk.ppm"},
+                                {0.92, "night", 2, 0.45, "winter", 1, "screenshots/timeofday-winter-night.ppm"},
+                            }};
                             int capture_index = -1;
-                            for (int i = 0; i < 3; ++i) {
-                                if (!timeofday_captures_written[static_cast<std::size_t>(i)] && progress >= capture_thresholds[static_cast<std::size_t>(i)]) {
+                            for (int i = 0; i < 6; ++i) {
+                                if (!timeofday_season_captures_written[static_cast<std::size_t>(i)] &&
+                                    progress >= kPlans[static_cast<std::size_t>(i)].threshold) {
                                     capture_index = i;
                                     break;
                                 }
                             }
+                            // The emissive capture follows the SUMMER night (season 0,
+                            // index 2) so the existing emissive night check is unchanged;
+                            // it fires once that night is in and the camera has settled.
                             const bool capture_emissive =
-                                timeofday_captures_written[2] &&
+                                timeofday_season_captures_written[2] &&
                                 timeofday_emissive_target.found &&
                                 !timeofday_emissive_capture_written &&
-                                progress >= 0.97;
+                                progress >= 0.45 && progress < 0.5;
                             if ((capture_index >= 0 || capture_emissive) && render_pass_stats.skybox_draws > 0) {
                                 int screenshot_width = 0;
                                 int screenshot_height = 0;
@@ -2884,18 +2921,23 @@ int main(int argc, char* argv[]) {
                                     glReadPixels(0, 0, screenshot_width, screenshot_height, GL_RGB, GL_UNSIGNED_BYTE, frame_pixels.data());
                                     const TimeOfDayPixelStats stats = AnalyzeTimeOfDayPixels(frame_pixels, screenshot_width, screenshot_height);
                                     if (capture_index >= 0) {
-                                        const std::string relative_path =
-                                            std::string("screenshots/timeofday-") + phase_names[static_cast<std::size_t>(capture_index)] + ".ppm";
+                                        const SeasonCapturePlan& plan = kPlans[static_cast<std::size_t>(capture_index)];
                                         if (WritePixelBufferPpm(
-                                                scenario_config.artifact_dir / relative_path,
+                                                scenario_config.artifact_dir / plan.file,
                                                 screenshot_width, screenshot_height, frame_pixels)) {
-                                            timeofday_captures_written[static_cast<std::size_t>(capture_index)] = true;
-                                            timeofday_phase_captures.push_back({
-                                                phase_names[static_cast<std::size_t>(capture_index)],
-                                                phase_times[static_cast<std::size_t>(capture_index)],
-                                                relative_path,
-                                                stats
-                                            });
+                                            timeofday_season_captures_written[static_cast<std::size_t>(capture_index)] = true;
+                                            TimeOfDayPhaseCapture cap;
+                                            cap.name = plan.phase_name;
+                                            cap.time_of_day = plan.phase_time;
+                                            cap.file = plan.file;
+                                            cap.stats = stats;
+                                            cap.season_label = plan.season_label;
+                                            cap.season_index = plan.season_index;
+                                            cap.season_phase = renderPipeline.get_season_phase();
+                                            cap.sun_elevation_rad = renderPipeline.get_sun_elevation_rad();
+                                            cap.season_sun_declination_rad = renderPipeline.get_season_sun_declination();
+                                            cap.season_tick = renderPipeline.get_season_tick();
+                                            timeofday_phase_captures.push_back(cap);
                                         }
                                     } else {
                                         const std::string emissive_path = "screenshots/timeofday-night-emissive.ppm";
@@ -2906,7 +2948,11 @@ int main(int argc, char* argv[]) {
                                             timeofday_emissive_stats = stats;
                                         }
                                     }
-                                    if (timeofday_captures_written[0] && timeofday_captures_written[1] && timeofday_captures_written[2]) {
+                                    const bool all_six =
+                                        timeofday_season_captures_written[0] && timeofday_season_captures_written[1] &&
+                                        timeofday_season_captures_written[2] && timeofday_season_captures_written[3] &&
+                                        timeofday_season_captures_written[4] && timeofday_season_captures_written[5];
+                                    if (all_six) {
                                         // Final once the optional emissive capture is in
                                         // (or no surface emissive target exists).
                                         timeofday_analysis_final =
