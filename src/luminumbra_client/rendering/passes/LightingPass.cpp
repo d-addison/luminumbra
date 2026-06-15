@@ -235,6 +235,8 @@ void LightingPass::execute_lightning_overlay(RenderPipeline& pipeline, const Cam
     m_lightning_overlay_shader->setVec2("u_strikeNdc", lit.strike_ndc);
     m_lightning_overlay_shader->setFloat("u_boltWidth", lit.bolt_width_ndc);
     m_lightning_overlay_shader->setFloat("u_boltGlow", lit.bolt_glow_ndc);
+    m_lightning_overlay_shader->setVec2("u_groundNdc", lit.ground_ndc);
+    m_lightning_overlay_shader->setFloat("u_groundFlash", lit.ground_flash);
     m_lightning_overlay_shader->setFloat("u_aspect",
         static_cast<float>(w) / std::max(1.0f, static_cast<float>(h)));
     const int point_count =
