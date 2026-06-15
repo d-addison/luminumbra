@@ -1571,6 +1571,25 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
     ++m_streaming_telemetry_stats.frames_observed;
     m_streaming_telemetry_stats.last_queue_depth = queue_depth;
     m_streaming_telemetry_stats.peak_queue_depth = std::max(m_streaming_telemetry_stats.peak_queue_depth, queue_depth);
+    // T-I5b-DR-streaming-drain: record this frame's depth into the trailing ring
+    // and derive the SETTLED floor (min over the last activation window). Chunk
+    // activation runs only every STREAMING_ACTIVATION_INTERVAL_FRAMES frames, so
+    // generation/loading arrives in periodic batches; the raw last_queue_depth
+    // catches whichever phase of that cycle the snapshot frame falls in. The
+    // window minimum is 0 iff the pipeline reaches empty within each cycle
+    // (bounded + fully draining) and stays nonzero only for a standing backlog
+    // that never empties (genuinely unbounded). Telemetry only; not hashed.
+    m_recent_queue_depths[m_recent_queue_depth_cursor] = queue_depth;
+    m_recent_queue_depth_cursor =
+        (m_recent_queue_depth_cursor + 1u) % m_recent_queue_depths.size();
+    if (m_recent_queue_depth_count < m_recent_queue_depths.size()) {
+        ++m_recent_queue_depth_count;
+    }
+    std::size_t settled_queue_depth = queue_depth;
+    for (std::size_t i = 0; i < m_recent_queue_depth_count; ++i) {
+        settled_queue_depth = std::min(settled_queue_depth, m_recent_queue_depths[i]);
+    }
+    m_streaming_telemetry_stats.settled_queue_depth = settled_queue_depth;
     m_streaming_telemetry_stats.peak_meshing_candidates = std::max(
         m_streaming_telemetry_stats.peak_meshing_candidates,
         m_last_streaming_budget_stats.meshing_candidates
