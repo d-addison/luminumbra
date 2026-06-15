@@ -55,8 +55,15 @@ public:
     // --- Pinned capacities (design-decisions §3). ---
     static constexpr std::size_t kMaxInstances = 65536;  // global ring pool
     static constexpr std::size_t kMaxEmitters = 256;     // concurrent emitters
-    // Instance stride: pos(12) + size(4) + color(4) + atlasLayer(2) + rot(2).
+    // Instance stride: pos(12) + size(4) + color(4) + atlasLayer(2) + rot(1) +
+    // aspect(1). T-I5a-DR-atmospheric-visuals: the final 2-byte slot, formerly a
+    // single f16 rotation, now packs an snorm8 rotation (angle/pi in [-1,1]) plus
+    // a unorm8 streak ELONGATION (so rain renders as a stretched velocity-aligned
+    // streak, not a round dot). The 24-byte stride + 24-byte static_assert are
+    // unchanged, so the ParticleDeterminism InstanceRecordIs24Bytes contract holds.
     static constexpr std::size_t kInstanceStride = 24;
+    // Streak aspect quantization: aspect in [1, ~16] -> unorm8 (aspect/16*255).
+    static constexpr float kMaxStreakAspect = 16.0f;
     // Double-buffer the persistent mapping so the CPU writes frame N+1 while the
     // GPU may still be reading frame N (avoids a coherent-write hazard).
     static constexpr std::size_t kRingFrames = 2;
@@ -69,7 +76,8 @@ public:
         float    size;        // billboard half-extent (world units)
         uint8_t  color[4];    // rgba8 (a = emissive opacity scale)
         uint16_t atlas_layer; // array-texture layer
-        uint16_t rotation;    // f16 rotation (radians)
+        int8_t   rotation;    // snorm8 rotation (angle/pi in [-1,1])
+        uint8_t  streak;      // unorm8 streak aspect (aspect/kMaxStreakAspect)
     };
 #pragma pack(pop)
     static_assert(sizeof(InstanceRecord) == kInstanceStride,

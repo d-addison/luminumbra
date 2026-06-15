@@ -20,23 +20,6 @@ namespace Luminumbra::Rendering {
 
 namespace {
 
-// IEEE-754 half-precision encode (round-to-nearest-even is overkill here; a
-// truncating encode is deterministic and adequate for a rotation angle).
-uint16_t encode_f16(float value) {
-    uint32_t bits;
-    std::memcpy(&bits, &value, sizeof(bits));
-    const uint32_t sign = (bits >> 16) & 0x8000u;
-    int32_t exponent = static_cast<int32_t>((bits >> 23) & 0xFFu) - 127 + 15;
-    uint32_t mantissa = bits & 0x7FFFFFu;
-    if (exponent <= 0) {
-        return static_cast<uint16_t>(sign); // flush sub-normals to zero
-    }
-    if (exponent >= 0x1F) {
-        return static_cast<uint16_t>(sign | 0x7C00u); // inf/overflow
-    }
-    return static_cast<uint16_t>(sign | (static_cast<uint32_t>(exponent) << 10) | (mantissa >> 13));
-}
-
 uint8_t to_unorm8(float v) {
     return static_cast<uint8_t>(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f));
 }
@@ -159,10 +142,14 @@ void ParticlePass::init_buffers() {
     glEnableVertexAttribArray(3);
     glVertexAttribIFormat(3, 1, GL_UNSIGNED_SHORT, offsetof(InstanceRecord, atlas_layer));
     glVertexAttribBinding(3, 0);
-    // location 4: rotation (half float)
+    // location 4: rotation (snorm8 -> [-1,1], decoded to radians as angle*pi)
     glEnableVertexAttribArray(4);
-    glVertexAttribFormat(4, 1, GL_HALF_FLOAT, GL_FALSE, offsetof(InstanceRecord, rotation));
+    glVertexAttribFormat(4, 1, GL_BYTE, GL_TRUE, offsetof(InstanceRecord, rotation));
     glVertexAttribBinding(4, 0);
+    // location 5: streak aspect (unorm8 -> [0,1], decoded as v*kMaxStreakAspect)
+    glEnableVertexAttribArray(5);
+    glVertexAttribFormat(5, 1, GL_UNSIGNED_BYTE, GL_TRUE, offsetof(InstanceRecord, streak));
+    glVertexAttribBinding(5, 0);
 
     glBindVertexBuffer(0, m_instance_vbo[0], 0, sizeof(InstanceRecord));
 
@@ -475,7 +462,15 @@ void ParticlePass::update(float dt) {
         rec.color[2] = to_unorm8(emitter.data.b_curve.sample(life_t));
         rec.color[3] = to_unorm8(emitter.data.a_curve.sample(life_t));
         rec.atlas_layer = emitter.data.atlas_layer;
-        rec.rotation = encode_f16(rotation);
+        // Pack rotation as snorm8 (angle/pi in [-1,1]) and the per-emitter streak
+        // aspect as unorm8 (aspect/kMaxStreakAspect). Round particles carry aspect
+        // 1 -> a square billboard; rain carries streak_aspect > 1 -> the vertex
+        // stage elongates the velocity-aligned quad into a streak.
+        const float angle_norm = std::clamp(rotation * (1.0f / 3.14159265358979323846f), -1.0f, 1.0f);
+        rec.rotation = static_cast<int8_t>(std::lround(angle_norm * 127.0f));
+        const float aspect_norm =
+            std::clamp(emitter.data.streak_aspect / kMaxStreakAspect, 0.0f, 1.0f);
+        rec.streak = static_cast<uint8_t>(std::lround(aspect_norm * 255.0f));
         ++written;
         if (written >= kMaxInstances) {
             break;

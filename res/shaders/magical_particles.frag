@@ -21,6 +21,7 @@ in VS_OUT {
     float distanceToCamera;
     float viewDepth;
     vec3  worldPos;
+    flat float streakAspect;
 } fs_in;
 
 uniform float u_time;
@@ -54,15 +55,31 @@ float linearize_depth(float d) {
            (u_farPlane + u_nearPlane - z * (u_farPlane - u_nearPlane));
 }
 
-// Radial soft sprite mask.
+// Radial soft sprite mask (round flakes / magical sparkles).
 float sprite_mask(vec2 uv) {
     float dist = length(uv - vec2(0.5));
     return 1.0 - smoothstep(0.25, 0.5, dist);
 }
 
+// T-I5a-DR-atmospheric-visuals: streak (rain) mask. The quad was elongated along
+// its local Y in the vertex stage; uv.x is the ACROSS axis (thin) and uv.y the
+// ALONG axis (the streak length). A near-vertical bright filament with a soft
+// cross-falloff + rounded ends so rain reads as a light translucent STREAK, not a
+// dot. A faint bright head (leading end) gives the streak a directional read.
+float streak_mask(vec2 uv) {
+    float across = abs(uv.x - 0.5) * 2.0;            // 0 at the spine, 1 at edges
+    float along  = uv.y;                              // 0..1 down the streak
+    // Thin bright core across the width; soft edge so it is translucent, not hard.
+    float width = 1.0 - smoothstep(0.18, 0.62, across);
+    // Fade the two ends so the streak has rounded, tapered tips (no hard caps).
+    float ends = smoothstep(0.0, 0.12, along) * (1.0 - smoothstep(0.86, 1.0, along));
+    return width * ends;
+}
+
 void main() {
     vec2 uv = fs_in.texCoord;
-    float shape = sprite_mask(uv);
+    bool isStreak = fs_in.streakAspect > 1.5;
+    float shape = isStreak ? streak_mask(uv) : sprite_mask(uv);
     if (shape <= 0.0) {
         discard;
     }
@@ -89,11 +106,25 @@ void main() {
     }
 
     vec4 finalColor = fs_in.color;
-    // Emissive core: the particle is its own light source, modulated by the
-    // forward-lit term so it still reads the scene's mood.
-    finalColor.rgb *= (0.6 + 0.4 * lit);
-    finalColor.rgb += fs_in.color.rgb * shape * 0.5; // HDR glow core
-    finalColor.a *= shape * softFade;
+    if (isStreak) {
+        // T-I5a-DR-atmospheric-visuals: rain must read as LIGHT translucent
+        // streaks over the overcast sky, NOT dark specks. Lift the streak toward
+        // a bright water-white and add a luminous core so the streak sits ABOVE
+        // the bright backdrop instead of darkening it. Soft-particle fade keeps it
+        // from over-brightening where it meets near geometry.
+        vec3 streakTint = mix(fs_in.color.rgb, vec3(0.92, 0.96, 1.0), 0.6);
+        finalColor.rgb = streakTint * (0.85 + 0.35 * lit);
+        finalColor.rgb += vec3(0.95, 0.97, 1.0) * shape * 0.9; // bright streak core
+        // Keep it clearly translucent (a veil of rain), boosted slightly so it
+        // is visible as a light streak against the bright sky.
+        finalColor.a = clamp(fs_in.color.a * 1.25, 0.0, 1.0) * shape * softFade;
+    } else {
+        // Emissive core: the particle is its own light source, modulated by the
+        // forward-lit term so it still reads the scene's mood.
+        finalColor.rgb *= (0.6 + 0.4 * lit);
+        finalColor.rgb += fs_in.color.rgb * shape * 0.5; // HDR glow core
+        finalColor.a *= shape * softFade;
+    }
 
     if (finalColor.a < 0.01) {
         discard;
