@@ -503,6 +503,11 @@ int RunWindBench(const ServerCliOptions& options) {
 struct WeatherBenchResult {
     std::string sub_hash;
     int max_storm_cells = 0;
+    // T-I5a-5 (B3): lightning strike telemetry. total_strikes counts every strike
+    // event scheduled over the run (the seed+13 schedule is non-vacuous when > 0);
+    // max_live_strikes is the peak schedule-window size (bounded <= kMaxLiveStrikes).
+    std::uint64_t total_strikes = 0;
+    int max_live_strikes = 0;
 };
 
 WeatherBenchResult RunWeatherUpdatesAndHash(int seed, std::uint64_t ticks, const Luminumbra::Vec3& anchor) {
@@ -513,6 +518,9 @@ WeatherBenchResult RunWeatherUpdatesAndHash(int seed, std::uint64_t ticks, const
         wind.Update(t, anchor);
         weather.Update(t, anchor, &wind);
         result.max_storm_cells = std::max(result.max_storm_cells, weather.active_storm_count());
+        // Count strikes that LAND on this tick (each is a unique scheduled event).
+        result.total_strikes += static_cast<std::uint64_t>(weather.StrikesThisTick().size());
+        result.max_live_strikes = std::max(result.max_live_strikes, weather.live_strike_count());
     }
     result.sub_hash = weather.ComputeWeatherSubHash();
     return result;
@@ -554,6 +562,15 @@ int RunWeatherBench(const ServerCliOptions& options) {
     // Non-vacuity of the storm path: at least one storm cell spawned over the run
     // (so the gate actually exercised advection + the precip field).
     const bool storms_spawned = run1.max_storm_cells > 0;
+    // T-I5a-5 (B3): non-vacuity of the LIGHTNING path -- at least one strike was
+    // scheduled (proves the seed+13 schedule fired, exercising the strike sub-hash),
+    // and the live strike window stayed BOUNDED (<= kMaxLiveStrikes, F9). Strike
+    // counts must MATCH across the two runs (the schedule is deterministic).
+    const bool strikes_scheduled = run1.total_strikes > 0;
+    const bool strikes_deterministic = run1.total_strikes == run2.total_strikes;
+    const bool strikes_bounded =
+        run1.max_live_strikes <= Luminumbra::Systems::kMaxLiveStrikes &&
+        run2.max_live_strikes <= Luminumbra::Systems::kMaxLiveStrikes;
 
     // Budget: time the per-tick weather update (with wind advection) in isolation.
     // TELEMETRY (never hashed), same justification as the wind-bench timing.
@@ -578,7 +595,8 @@ int RunWeatherBench(const ServerCliOptions& options) {
 
     // Pass/fail is the BIT-DETERMINISM + bounded-state contract; the per-tick
     // budget is REPORTED for the gate to enforce on the release build.
-    const bool passed = deterministic && evolves && bounded && storms_spawned;
+    const bool passed = deterministic && evolves && bounded && storms_spawned &&
+                        strikes_scheduled && strikes_deterministic && strikes_bounded;
 
     nlohmann::json artifact{
         {"schema", "luminumbra.weather_determinism.v1"},
@@ -597,6 +615,13 @@ int RunWeatherBench(const ServerCliOptions& options) {
         {"max_storm_cells", run1.max_storm_cells},
         {"bounded_storm_cells", bounded},
         {"storms_spawned", storms_spawned},
+        {"total_strikes", run1.total_strikes},
+        {"total_strikes_replay", run2.total_strikes},
+        {"max_live_strikes", run1.max_live_strikes},
+        {"max_live_strike_cap", Luminumbra::Systems::kMaxLiveStrikes},
+        {"strikes_scheduled", strikes_scheduled},
+        {"strikes_deterministic", strikes_deterministic},
+        {"strikes_bounded", strikes_bounded},
         {"per_tick_update_ms", per_tick_ms},
         {"budget_ms", kBudgetMs},
         {"within_budget", within_budget},

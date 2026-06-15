@@ -118,6 +118,23 @@ void AudioPropagationSystem::CalculatePropagationAsync(const glm::vec3& source,
     m_task_cv.notify_one();
 }
 
+AudioPropagationSystem::ThunderCue AudioPropagationSystem::ComputeThunderCue(
+        const glm::vec3& strike_position, const glm::vec3& listener) const {
+    // T-I5a-5 (B3): thin thunder cue (F8). Geometric flash-to-bang delay only --
+    // distance / speed_of_sound -- plus a smooth distance attenuation. No reflection
+    // tracing, no environment analysis, no physics dependency: this is the minimal
+    // additive hook, not new propagation machinery. speed_of_sound is the existing
+    // setting (343 m/s default).
+    ThunderCue cue;
+    cue.distance = glm::distance(strike_position, listener);
+    const float c = m_settings.speed_of_sound > 1.0f ? m_settings.speed_of_sound : 343.0f;
+    cue.delay_seconds = cue.distance / c;
+    // Inverse-ish falloff: distant strikes are quieter (and the low rumble carries),
+    // bounded to [0, 1]. ~600 m halves the volume.
+    cue.volume_multiplier = 1.0f / (1.0f + cue.distance / 600.0f);
+    return cue;
+}
+
 AudioPropagationPath AudioPropagationSystem::CalculateDirectPath(const glm::vec3& source, const glm::vec3& listener) {
     AudioPropagationPath path;
     path.is_direct_path = true;

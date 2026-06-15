@@ -371,6 +371,12 @@ void main() {
     vec3 ambient = u_skyAmbientColor * Albedo * ao;
     vec3 color = ambient + Lo + caustics + crystalGlow; // Add magical crystal glow
 
+    // T-I5a-5 (B3): the lightning light-pulse + bolt are injected by a dedicated
+    // FULL-SCREEN overlay (lightning_overlay.frag) drawn AFTER the skybox, so the
+    // flash composites over BOTH the lit terrain and the sky. (The lighting pass
+    // shades only G-buffer geometry; the skybox later overwrites sky pixels, so a
+    // sky-spanning bolt injected here would be painted over.) See LightingPass.
+
     // Enhanced HDR tone mapping for magical effects
     // Use filmic tone mapping to preserve magical highlights
     color = color * (2.51 * color + 0.03) / (color * (2.43 * color + 0.59) + 0.14);

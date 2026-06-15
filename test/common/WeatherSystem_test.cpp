@@ -132,4 +132,49 @@ TEST(WeatherSystem, AdvectionIsDeterministicAndStormsMove) {
     EXPECT_EQ(wa.ComputeWeatherSubHash(), wb.ComputeWeatherSubHash());
 }
 
+// T-I5a-5 (B3): lightning strike schedule. The strike schedule is folded into the
+// `weather` sub-hash (world_hash mega-bump #3); it must FIRE over a storm-bearing
+// run (non-vacuous), be bit-deterministic across runs (same total strike count +
+// same sub-hash), stay BOUNDED (<= kMaxLiveStrikes, F9), and depend on the +13
+// seed offset (a different seed -> a different strike total in general).
+TEST(WeatherSystem, StrikeScheduleFiresDeterministicallyAndBounded) {
+    using Luminumbra::Systems::kMaxLiveStrikes;
+    WindFieldSystem wind_a(kSeed), wind_b(kSeed);
+    WeatherSystem wa(kSeed), wb(kSeed);
+    std::uint64_t total_a = 0, total_b = 0;
+    int max_live_a = 0;
+    for (std::uint64_t t = 1; t <= kTicks; ++t) {
+        wind_a.Update(t, kAnchor); wa.Update(t, kAnchor, &wind_a);
+        wind_b.Update(t, kAnchor); wb.Update(t, kAnchor, &wind_b);
+        total_a += static_cast<std::uint64_t>(wa.StrikesThisTick().size());
+        total_b += static_cast<std::uint64_t>(wb.StrikesThisTick().size());
+        if (wa.live_strike_count() > max_live_a) max_live_a = wa.live_strike_count();
+    }
+    EXPECT_GT(total_a, 0u) << "no lightning strike scheduled (strike path vacuous)";
+    EXPECT_EQ(total_a, total_b) << "strike schedule diverged across identical runs";
+    EXPECT_LE(max_live_a, kMaxLiveStrikes) << "live strike window exceeded the bounded cap";
+    EXPECT_EQ(wa.ComputeWeatherSubHash(), wb.ComputeWeatherSubHash());
+}
+
+TEST(WeatherSystem, StrikeFieldsAreReplayableWorldEvents) {
+    // A scheduled strike carries a tick/position/magnitude that reproduces exactly
+    // across runs (the property the render bolt + thunder cue read one-way).
+    WindFieldSystem wind_a(kSeed), wind_b(kSeed);
+    WeatherSystem wa(kSeed), wb(kSeed);
+    for (std::uint64_t t = 1; t <= kTicks; ++t) {
+        wind_a.Update(t, kAnchor); wa.Update(t, kAnchor, &wind_a);
+        wind_b.Update(t, kAnchor); wb.Update(t, kAnchor, &wind_b);
+    }
+    const auto& sa = wa.StrikeSchedule();
+    const auto& sb = wb.StrikeSchedule();
+    ASSERT_EQ(sa.size(), sb.size());
+    for (std::size_t i = 0; i < sa.size(); ++i) {
+        EXPECT_EQ(sa[i].strike_tick, sb[i].strike_tick);
+        EXPECT_FLOAT_EQ(sa[i].world_x, sb[i].world_x);
+        EXPECT_FLOAT_EQ(sa[i].world_z, sb[i].world_z);
+        EXPECT_FLOAT_EQ(sa[i].magnitude, sb[i].magnitude);
+        EXPECT_EQ(sa[i].storm_salt, sb[i].storm_salt);
+    }
+}
+
 } // namespace

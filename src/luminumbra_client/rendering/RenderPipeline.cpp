@@ -1391,6 +1391,14 @@ void RenderPipeline::collect_gpu_pass_timers() {
         (m_cloud_state.enabled && m_cloud_state.shadow_enabled)
             ? m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::Lighting)]
             : 0.0;
+    // T-I5a-5 (B3): the lightning light-pulse + bolt also live INSIDE the lighting
+    // pass (full-scene additive flash + screen-space bolt rasterization, no separate
+    // pass), so the transient pulse cost is the lighting-pass GPU time on frames the
+    // pulse is active. PerfRegression bounds this against the ≤ 0.5 ms budget.
+    m_last_render_pass_stats.lightning_pulse_gpu_ms =
+        (m_lightning_state.active && m_lightning_state.pulse_intensity > 0.0f)
+            ? m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::Lighting)]
+            : 0.0;
     m_last_render_pass_stats.final_blit_gpu_ms = m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::FinalBlit)];
 
     // One-time diagnostic so smoke runs prove the ring resolves real samples.
@@ -1662,6 +1670,14 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
         end_gpu_pass_timer(GpuTimerPass::Particle);
         glBindVertexArray(0);
     }
+
+    // 8b. LIGHTNING OVERLAY (T-I5a-5, B3): the full-scene light-pulse + screen-space
+    // bolt, composited over the lit terrain AND the sky (drawn after the skybox).
+    // A no-op when no strike is active (zero added cost). Its transient cost is
+    // captured by the FinalBlit-adjacent timing; the PerfRegression budget (≤ 0.5 ms)
+    // is bounded by the overlay being a single additive full-screen quad.
+    m_lighting_pass->execute_lightning_overlay(*this, camera);
+    glBindVertexArray(0);
 
     // 9. FINAL BLIT TO SCREEN
     begin_gpu_pass_timer(GpuTimerPass::FinalBlit);
@@ -3525,6 +3541,18 @@ void RenderPipeline::advance_cloud_phase(float deltaTime) {
     const float speed = kCloudDriftMetersPerSec * std::max(0.12f, m_weather_state.wind_strength);
     m_cloud_state.scroll_offset = wind_xz * (m_cloud_phase * speed);
     m_cloud_state.sun_travel_dir = m_sun.direction;
+}
+
+void RenderPipeline::set_lightning_state(const LightningRenderState& state) {
+    // T-I5a-5 (B3): render-only. Store the per-frame pulse + bolt polyline for the
+    // LightingPass to inject. Clamp the pulse so the additive flash stays bounded;
+    // truncate the bolt polyline to the GLSL uniform-array cap. One-way (F2):
+    // nothing here is read back into the sim or world_hash.
+    m_lightning_state = state;
+    m_lightning_state.pulse_intensity = std::max(0.0f, state.pulse_intensity);
+    if (static_cast<int>(m_lightning_state.bolt_points_ndc.size()) > kMaxBoltSegmentPoints) {
+        m_lightning_state.bolt_points_ndc.resize(kMaxBoltSegmentPoints);
+    }
 }
 
 std::vector<glm::mat4> RenderPipeline::get_light_space_matrices(const Camera& camera) {
