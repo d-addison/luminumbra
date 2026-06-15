@@ -56,7 +56,11 @@ public:
     static constexpr std::size_t kRingFrames = 2;
     // Per-chunk scatter cap (placement evaluates this many candidate slots per
     // chunk; density + slope/moisture decide which actually emit).
-    static constexpr std::size_t kMaxCandidatesPerChunk = 256;
+    // T-I5b-DR-sweep-visual-fixes (defect 2): raised 256 -> 2048 so daytime ground
+    // reads as real grass COVER rather than a few sparse tufts. The placement is
+    // still a pure per-chunk hash (idx in [0,candidates)), so determinism + the
+    // RENDER-ONLY contract are preserved; only the candidate count per chunk grows.
+    static constexpr std::size_t kMaxCandidatesPerChunk = 2048;
 
     // Packed 36-byte instance record (matches the GL vertex-attribute layout).
 #pragma pack(push, 1)
