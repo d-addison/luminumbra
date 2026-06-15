@@ -1545,6 +1545,9 @@ int main(int argc, char* argv[]) {
     std::string scenario_failure_reason;
     bool scenario_ready = false;
     bool scenario_timed_run_complete = false;
+    // T-I5b-visual-sweep: the world_visual_sweep runs its whole capture matrix
+    // synchronously in one pass once the world is ready, so it self-completes.
+    bool world_visual_sweep_done = false;
     uint64_t scenario_frame_count = 0;
     std::chrono::steady_clock::time_point scenario_play_started_at{};
     RuntimeReadinessReport last_readiness_report;
@@ -1663,7 +1666,13 @@ int main(int argc, char* argv[]) {
             ? (scenario_config.world_preset.empty() ? std::string("mountains") : scenario_config.world_preset)
             : ((scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() ||
                 scenario_config.auto_world_smoke() || scenario_config.persistence_roundtrip_smoke() ||
-                scenario_config.creature_slice_smoke()) ? "archipelago" : "default");
+                scenario_config.creature_slice_smoke() ||
+                // T-I5b-visual-sweep: archipelago shows water + shore + foliage +
+                // open sky from one anchor (an explicit --world-preset still wins).
+                scenario_config.world_visual_sweep())
+                   ? (scenario_config.world_preset.empty() ? std::string("archipelago")
+                                                            : scenario_config.world_preset)
+                   : "default");
     if (scenario_config.auto_create_world || HasCommandLineFlag(argc, argv, "--auto-create-world") || runtime_boot_recorder.enabled()) {
         start_world_creation("Automated Test World", "424242", scenario_world_type);
     }
@@ -2962,6 +2971,69 @@ int main(int argc, char* argv[]) {
         if (currentState != GameState::WORLD_LOADING) {
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             if (currentState == GameState::IN_GAME) {
+                // T-I5b-visual-sweep: run the entire deterministic capture matrix
+                // (times-of-day x angles x weather x season) in ONE synchronous pass
+                // once the world is ready, then self-complete. The render_and_read
+                // hook owns render_frame + present + glReadPixels so the harness stays
+                // GL-context-free. RENDER-ONLY: drives the existing one-way bridges,
+                // never writes world_hash.
+                if (scenario_config.world_visual_sweep() && scenario_ready &&
+                    !world_visual_sweep_done && gameSession->GetWorldSystem() && g_camera) {
+                    int sweep_fb_w = 0, sweep_fb_h = 0;
+                    glfwGetFramebufferSize(window, &sweep_fb_w, &sweep_fb_h);
+                    Luminumbra::Client::ScenarioHarness::WorldVisualSweepDeps deps;
+                    deps.game_session = gameSession.get();
+                    deps.pipeline = &renderPipeline;
+                    deps.camera = g_camera.get();
+                    deps.root_dir = root_dir;
+                    deps.artifact_dir = scenario_config.artifact_dir;
+                    // Winter is the second season pass; gate it behind the env flag
+                    // so the standing gate (summer-only, 48 cells) stays fast while a
+                    // manual LUMINUMBRA_VISUAL_SWEEP_WINTER=1 run captures both seasons.
+                    {
+                        const char* w = std::getenv("LUMINUMBRA_VISUAL_SWEEP_WINTER");
+                        deps.include_winter = (w != nullptr && w[0] != '\0' && w[0] != '0');
+                    }
+                    // The anchor position is FIXED across the whole matrix (only the
+                    // camera orientation changes per cell), so the world only needs to
+                    // stream ONCE. We stream for a bounded warmup, then skip the
+                    // expensive per-frame world update and just re-render — the same
+                    // settled geometry is reused for every subsequent cell.
+                    int sweep_stream_frames = 0;
+                    deps.render_and_read =
+                        [&, sweep_stream_frames](std::vector<unsigned char>& out_pixels, int& w, int& h) mutable -> bool {
+                        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+                        if (sweep_stream_frames < 24) {
+                            gameSession->GetWorldSystem()->update(
+                                gameSession->GetRegistry(),
+                                Luminumbra::Vec3(g_camera->Position),
+                                gameSession->GetPhysicsSystem());
+                            ++sweep_stream_frames;
+                        }
+                        renderPipeline.render_frame(
+                            gameSession->GetRegistry(), *gameSession->GetWorldSystem(),
+                            *g_camera, 1.0f / 60.0f, wireframe_mode);
+                        glfwGetFramebufferSize(window, &w, &h);
+                        if (w <= 0 || h <= 0) { return false; }
+                        out_pixels.assign(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 3u, 0u);
+                        glReadBuffer(GL_BACK);
+                        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                        // glReadPixels itself synchronizes; no explicit glFinish needed.
+                        glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, out_pixels.data());
+                        glfwSwapBuffers(window);
+                        glfwPollEvents();
+                        return true;
+                    };
+                    const bool sweep_passed =
+                        Luminumbra::Client::ScenarioHarness::RunWorldVisualSweep(deps);
+                    world_visual_sweep_done = true;
+                    if (!sweep_passed) {
+                        scenario_failed = true;
+                        scenario_failure_reason = "world_visual_sweep_presence_failed";
+                    }
+                    scenario_timed_run_complete = true;
+                    glfwSetWindowShouldClose(window, true);
+                }
                 if (gameSession->GetWorldSystem() && g_camera) {
                     if (scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.cloud_shadow_smoke() || scenario_config.precipitation_smoke() || scenario_config.lod_seam_arrival_smoke() || scenario_config.player_view_smoke() || scenario_config.farlod_horizon_smoke() || scenario_config.skinned_mesh_visual_smoke() || scenario_config.creature_slice_smoke()) {
                         // time_of_day 0 is noon (sun elevation = cos(2*pi*t));
