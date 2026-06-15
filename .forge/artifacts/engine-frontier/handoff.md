@@ -1,5 +1,103 @@
 # Engine Frontier Handoff
 
+## Iteration 5a CLOSEOUT (2026-06-15) — Atmospheric pillar (LEAD)
+
+Branch `feat/polyglot-audit-roadmap`, tip **a971154**. **All 8 atmospheric-core
+features of iteration 5a are implemented, integrated, and verified.** The full
+iteration-5 spec round was authored first (split 5a/5b, owner 2026-06-14; Fable
+unavailable so ALL tasks ran on Opus): spec, research, critique, design-decisions
+(all values pinned), `engine-iteration-5a/dispatch.json` (10 tasks), and the 5b
+skeleton — committed at `793e382`.
+
+### Features landed (sim/render line held throughout)
+- **A1 GPU particle framework** (`9c66385`): instanced 65,536-pool ParticlePass
+  after skybox, deterministic emitter-descriptor snapshot, motion render-only.
+- **A2 wind grid** (`8d87c6c`): 24 m × 3-layer deterministic field, new
+  `FieldGrid` container, seed +11. **world_hash MEGA-BUMP #1: `2fa007951a21e140`
+  → `0eac465289e7c88b`** (wind sub-hash `61e22348…`).
+- **B1 weather core** (`f36fa3a`): storm-cell model over biome base, advected by
+  wind, `weather_system.frag` sim-driven, seed +12. **MEGA-BUMP #2: `0eac…` →
+  `0857e683b4b8c47e`** (weather sub-hash `a7d8f3d2…`).
+- **C1 PBR scattering sky** (`413694a`): Hillaire-2020 LUTs replace the authored
+  gradient; warm sunrise/sunset palettes EMERGE (SkyboxVisual horizon r/b 1.033,
+  TimeOfDaySweep dusk warm-shift +0.846). Three real scattering bugs fixed
+  (sun-relative azimuth frame, tonemap crushing chroma, aerial term tinting far
+  terrain blue). Analytic aerial perspective; NO froxel. Render-only.
+- **C2 seasons/celestial** (`a19443d`): tick-derived (NOT wall-clock) season time
+  → sun path, day length, palettes; TimeOfDaySweep season sweep (summer sun-path
+  1.249 vs winter 0.980). Render-derived, no world_hash.
+- **C3 cloud layer tier-1** (`fa1e08b`): wind-advected 2.5D coverage + real
+  lighting-pass cast shadows (CloudShadow moving-ROI delta 0.87, GPU 0.045 ms).
+  Tier-2 volumetric deferred to iter 6.
+- **B2 precipitation** (`92bbd4d`): rain/snow via the A1 framework, wind-advected
+  (slant gain 1.68–1.83×), splash emitters. Render-only.
+- **B3 lightning** (`d992190`): deterministic strike schedule from storm state
+  (seed +13) folded into the weather sub-hash; seeded branching bolt + full-scene
+  light pulse via a dedicated lighting-overlay pass (after skybox so the bolt
+  composites over sky+terrain); thunder reuses `AudioPropagationSystem`
+  (distance/343). Strike-frame gate: luminance pulse +0.110, 2701 bolt pixels.
+  **MEGA-BUMP #3: `0857…` → `d950a6afc12a5cdc`** (weather sub-hash → `e3c7e0aa…`;
+  the strike schedule replaced B1's reserved 0-slot, so the byte layout before it
+  is unchanged). Iteration-6 fire-ignition hook noted, not built.
+
+### Final sweep — ALL GREEN at a971154 (world_hash d950a6afc12a5cdc)
+- **ctest 224/224** (+ wind/weather/particle/lightning/season tests).
+- engine-frontier: HeadlessServerTick (d950a6afc12a5cdc + sub-hashes), Heavy,
+  ReplayRoundtrip, ReplayDivergence, LockstepLoopback, LockstepFaultInjection,
+  SimDeterminismLint, WindFieldDeterminism, WeatherVisual (+ strike frame),
+  ParticleEmitterDeterminism, CloudShadow, Precipitation, SkyboxVisual,
+  TimeOfDaySweep (+ hue + season), FarLodHorizon, PlayerView, RenderHealth — all
+  pass. (FarLodHorizon flaked once under the 17-gate batch load; passes clean
+  in isolation — sky-sliver 0px, far-water continuity OK.)
+- runtime-stability: Smoke, WaterVisual, EnduranceStreamDrain, **Endurance300**
+  green — the world survives 300 ticks with all atmospheric systems active.
+- **forge verify**: only the SAME 3 documented `pre_review` brace false positives
+  as the i4 close (ServerHeadlessHygiene_test / asset_processor / derive_dem_stats
+  — C-brace heuristic miscounts string/dict braces; all compile clean under
+  -Werror) + 1 trailing-whitespace + benign spec-drift. No iteration-5 findings.
+
+### Determinism mega-bump chain (deliberate, each re-validated in-commit)
+`2fa007951a21e140` (i4) → `0eac465289e7c88b` (A2 wind) → `0857e683b4b8c47e`
+(B1 weather) → `d950a6afc12a5cdc` (B3 strike schedule). Each bump re-ran the
+heavy oracle + LREC1 replay + lockstep with the new canonical asserted. Wind +
+weather + strikes are recompute-and-excluded from the heavy oracle's
+cross-phase compare (tick-phase-dependent), proven instead via same-tick paths.
+
+### ENVIRONMENT RECOVERY (mid-iteration, important)
+The on-disk `vendor/` third-party SOURCES were destroyed mid-session: agent
+worktrees created Windows junctions into the main checkout's `vendor/`, and a
+`git worktree remove --force` deleted THROUGH the junctions (the cached `.a`
+libs survived, masking it until a reconfigure was needed). The sources were
+never tracked in git (only `googletest` is a submodule). **Recovered + upgraded
+to a reproducible standard (`2f5809e`): the 11 missing libs are now pinned
+FetchContent declarations** (EnTT v3.15.0, glm 1.0.1, glfw 3.4, glad v0.1.36,
+nlohmann_json v3.12.0, JoltPhysics v5.3.0, RmlUi 6.1, SOIL2 1.3.0, miniaudio
+0.11.22, meshoptimizer v0.22, lua v5.4.8 + hand-built target, sol2 v3.3.0,
+spdlog v1.15.1, imgui v1.92.1 backends, stb pinned-commit). Hardcoded vendor/
+paths (imgui backends, meshoptimizer/src, soil2, stb) restore via file(COPY) at
+configure; `entt`/`rmlui` link-name shims; `CMAKE_POLICY_VERSION_MINIMUM=3.5`
+for CMake 4.0. Determinism PROVEN intact: clean rebuild reproduced world_hash
+(then 0eac, later 0857/d950 with the features). **HAZARD CARRIED: NEVER
+`git worktree remove --force` when a worktree may hold junctions into the main
+tree — it deletes through them. Fresh worktrees still lack the STILL-on-disk
+vendored libs (fastnoise, imgui core, googletest); agents restore them by
+copying from the main checkout + `git submodule update --init vendor/googletest`
+(NOT junctions).** fastnoise/imgui were kept on-disk (NOT FetchContent) because
+fastnoise drives worldgen → determinism-critical.
+
+### Iteration-5a carry-ins (for 5b spec round + closeout follow-ups)
+- **Endurance300Storm** (storm-FORCED 300-tick variant) NOT built; bounded storm
+  state IS proven (weather-bench: max_storm_cells ≤ cap over 300 ticks). Add the
+  storm-forced endurance run in 5b/closeout polish.
+- **Quiet-machine release perf re-bless** STILL deferred — the lane is verified
+  healthy but a provisional capture on this session-loaded machine was
+  noise-contaminated (idle p99 1.81→3.67). Blessed T-I3-20 baseline retained.
+  Re-run `.forge/scripts/run-release-perf-lane.ps1 -Bless` on a quiet machine.
+- **5b** (foliage + wind response, ecology stimulus channels, atmosphere audio
+  ambience, waterfalls, folded water backlog) — spec skeleton at
+  `.forge/specs/ENGINE-ITERATION-5B-2026-06-14.md`; consumes the 5a wind/
+  particle/weather APIs. Author its full dispatch now that 5a's hash is final.
+
 ## Iteration 4 CLOSEOUT (2026-06-14, T-I4-19)
 
 Branch `feat/polyglot-audit-roadmap`, tip **726ab8f**. All iteration-4 dispatch
