@@ -456,6 +456,32 @@ public:
     // runtime scenario harness caustics-animation probe (T-I2-16).
     u32 water_caustics_texture() const;
     void set_time_of_day(float normalized_time);
+    // T-I5a-7 (C2): SEASON / celestial model. The season phase is a PURE FUNCTION
+    // of the authoritative TICK COUNT (integer epoch math; DeterministicMath for
+    // the sun-path trig) -- never wall-clock, never a free-running float
+    // accumulator (critique F7). It is RENDER-DERIVED: the client pushes the
+    // replicated sim tick here each frame; the season modulates the sun ARC
+    // (declination / day length) and a biome material/foliage PALETTE tint ON TOP
+    // of the existing time-of-day, and adds NOTHING to world_hash. One-way (F2):
+    // nothing here writes back into the sim.
+    void set_season_tick(std::uint64_t tick);
+    std::uint64_t get_season_tick() const { return m_seasonTick; }
+    // Season phase in [0,1): 0 == summer solstice, 0.5 == winter solstice. Pure
+    // function of the tick count (see kTicksPerSeasonCycle).
+    float get_season_phase() const { return m_seasonPhase; }
+    // Seasonal solar declination offset applied to the sun arc this frame
+    // (positive raises the arc / lengthens the day in summer; negative lowers it
+    // in winter). Tick-derived, deterministic.
+    float get_season_sun_declination() const { return m_seasonSunDeclination; }
+    // Sun elevation above the horizon this frame, radians (>0 == above horizon).
+    // The season modulates its peak, so the season sweep reads distinct bands.
+    float get_sun_elevation_rad() const { return m_sunElevationRad; }
+    // Per-frame season palette tint (multiplied into the sun/ambient warmth):
+    // warmer (R>B) toward summer, cooler (B>R) toward winter. Render-only.
+    glm::vec3 get_season_palette_tint() const { return m_seasonPaletteTint; }
+    // Long-period season cycle length in ticks (a full "year"). The phase wraps
+    // on this; integer epoch math keeps it a pure tick function.
+    static constexpr std::uint64_t kTicksPerSeasonCycle = 432000ull; // 4 h at 30 Hz
     // Runtime weather control (engine-generic). Intensity is clamped to
     // [0, 1]; WeatherType::None or intensity 0 disables the overlay entirely.
     void set_weather(WeatherType type, float intensity);
@@ -611,6 +637,15 @@ private:
     // clamped m_sun.intensity (which saturates to 1 while the sun is still low,
     // leaving the dusk dome stuck at full midday and the night dome bright).
     float m_skyDayFactor = 1.0f;
+    // T-I5a-7 (C2): SEASON state, all DERIVED from m_seasonTick (a pure function
+    // of the authoritative sim tick -- no wall-clock, no float accumulator). The
+    // phase/declination/tint are recomputed inside update_time_of_day from the
+    // integer tick, so they are reproducible from tick alone and never hashed.
+    std::uint64_t m_seasonTick = 0;
+    float m_seasonPhase = 0.0f;          // [0,1): 0 summer, 0.5 winter
+    float m_seasonSunDeclination = 0.0f; // radians, seasonal arc tilt
+    float m_sunElevationRad = 0.0f;      // sun elevation this frame (radians)
+    glm::vec3 m_seasonPaletteTint{1.0f}; // warm(summer)/cool(winter) palette tint
     WeatherType m_weather_type = WeatherType::None;
     float m_weather_intensity = 0.0f;
     // T-I5a-3 (B1): SIM-DRIVEN weather render state (one-way from WeatherSystem).
