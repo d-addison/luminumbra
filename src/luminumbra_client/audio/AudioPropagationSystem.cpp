@@ -135,6 +135,27 @@ AudioPropagationSystem::ThunderCue AudioPropagationSystem::ComputeThunderCue(
     return cue;
 }
 
+AudioPropagationSystem::AmbienceBed AudioPropagationSystem::ComputeAmbienceBed(
+        const glm::vec3& listener, float requested_volume, float analysis_radius) {
+    // T-I5b-3 (AU1): occlude the weather ambience bed by the listener's enclosure.
+    // Outdoor weather (wind/rain) is a non-positional bed; an enclosed space muffles
+    // it. We reuse the existing environmental analysis (RT60 + enclosure estimate)
+    // rather than tracing new paths -- this is the additive ambience hook, not new
+    // propagation machinery. Pure read of the environment; no sim writes.
+    AmbienceBed bed;
+    bed.requested_volume = std::clamp(requested_volume, 0.0f, 1.0f);
+
+    EnvironmentalAnalysis env = AnalyzeEnvironment(listener, analysis_radius);
+    // Openness: an enclosed space (cave/room) muffles the outdoor bed to a floor;
+    // open sky passes it through. avg_absorption is high in soft enclosed spaces.
+    float openness = env.is_enclosed
+        ? std::clamp(0.35f - env.avg_absorption * 0.25f, 0.05f, 0.35f)
+        : 1.0f;
+    bed.openness = openness;
+    bed.volume = bed.requested_volume * openness;
+    return bed;
+}
+
 AudioPropagationPath AudioPropagationSystem::CalculateDirectPath(const glm::vec3& source, const glm::vec3& listener) {
     AudioPropagationPath path;
     path.is_direct_path = true;
