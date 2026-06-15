@@ -371,6 +371,31 @@ void main() {
     vec3 ambient = u_skyAmbientColor * Albedo * ao;
     vec3 color = ambient + Lo + caustics + crystalGlow; // Add magical crystal glow
 
+    // T-I5b-5-water-backlog (seabed waterline terracing de-band): the far seabed
+    // is a height-quantized heightfield (kFarLodHeightQuantScale = 1/16 m). Where
+    // the gently-sloping seabed crosses the waterline the 1/16 m steps read as
+    // horizontal terraces, and bare sun-bright sand shows above them. Tint any
+    // below-sea-level upward-facing terrain toward the deep-water color with
+    // depth: the terrace steps dissolve into a smooth depth gradient (the banding
+    // is HIDDEN, per design §6 "or hide (depth-fade)") and the submerged seabed
+    // reads as water rather than bright sand. Pure post-shade blend in linear
+    // space; no tile-byte change (world_hash + far-tile bytes untouched). The
+    // far-water sheet (id 200) and live water (id 7, discarded in g_buffer) are
+    // excluded - they carry their own surface look.
+    if (MaterialID != 200u && Normal.y > 0.3) {
+        float depth = u_sea_level - FragPos.y; // >0 below the waterline
+        if (depth > 0.0) {
+            // Deep-water linear color matched to the far-water sheet albedo run
+            // through the lit chain (g_buffer.frag case-200 ~vec3(0.018,0.065,
+            // 0.11)). 0..1 fade reaches near-full tint by ~2.5 m of depth, so the
+            // shoreline keeps a thin readable wet-sand lip and deeper seabed goes
+            // fully water-toned (no terrace steps).
+            vec3 deepWater = vec3(0.015, 0.05, 0.085);
+            float t = clamp(depth / 2.5, 0.0, 0.92);
+            color = mix(color, deepWater, t);
+        }
+    }
+
     // T-I5a-5 (B3): the lightning light-pulse + bolt are injected by a dedicated
     // FULL-SCREEN overlay (lightning_overlay.frag) drawn AFTER the skybox, so the
     // flash composites over BOTH the lit terrain and the sky. (The lighting pass

@@ -2697,6 +2697,12 @@ void RenderPipeline::load_material_texture_lut() {
                     glm::clamp(mat["roughness"].get<float>(), 0.0f, 1.0f);
                 m_material_texture_lut.roughness_set[static_cast<size_t>(id)] = true;
             }
+            // T-I5b-5-water-backlog: optional albedo multiplier (render-only LUT
+            // calibration). Clamped to a sane (0, 1] range; absent -> 1.0.
+            if (mat.contains("albedo_scale")) {
+                m_material_texture_lut.albedo_scale[static_cast<size_t>(id)] =
+                    glm::clamp(mat["albedo_scale"].get<float>(), 0.0f, 1.0f);
+            }
         }
         LUMINUMBRA_CORE_INFO("Material texture LUT parsed: {} textured material(s) from materials.json.", textured);
     } catch (const std::exception& e) {
@@ -2711,7 +2717,8 @@ void RenderPipeline::init_material_lut() {
     //   row 0 (v=1/6): [R metallic, G roughness, B AO, A magical-flag]
     //   row 1 (v=1/2): [R texture_layer/255, G normal_layer/255, B tiling/64,
     //                   A has_texture]
-    //   row 2 (v=5/6): [R emissive_intensity/kEmissiveLutScale, G/B/A reserved]
+    //   row 2 (v=5/6): [R emissive_intensity/kEmissiveLutScale,
+    //                   G albedo_scale (0..1, default 1; T-I5b-5), B/A reserved]
     // The texture/emissive columns come from materials.json
     // (load_material_texture_lut). The emissive_intensity column drives the
     // emission->lighting->glow chain (T-I4-9 calibration); it is stored
@@ -2784,7 +2791,12 @@ void RenderPipeline::init_material_lut() {
             glm::clamp(tiling / 64.0f, 0.0f, 1.0f),
             has_tex ? 1.0f : 0.0f);
         const float ei = m_material_texture_lut.emissive_intensity[static_cast<size_t>(id)];
-        row2(id) = glm::vec4(glm::clamp(ei / kEmissiveLutScale, 0.0f, 1.0f), 0.0f, 0.0f, 0.0f);
+        // T-I5b-5-water-backlog: row2.G carries the per-material albedo multiplier
+        // (default 1.0). The G-buffer samples it and scales the baked textured
+        // albedo (sand-flat noon-brightness calibration). Stored directly (0..1).
+        const float albedo_scale = m_material_texture_lut.albedo_scale[static_cast<size_t>(id)];
+        row2(id) = glm::vec4(glm::clamp(ei / kEmissiveLutScale, 0.0f, 1.0f),
+                             glm::clamp(albedo_scale, 0.0f, 1.0f), 0.0f, 0.0f);
     }
 
     glGenTextures(1, &m_materialLUT);
