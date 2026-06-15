@@ -78,6 +78,28 @@ public:
                                    float requested_volume,
                                    float analysis_radius = 20.0f);
 
+    // T-I5b-4 (W1): distance-attenuated waterfall ROAR. A waterfall is a fixed
+    // world site (WaterfallDetect); the roar is the positional ambient loop the
+    // listener hears from it. Like ComputeThunderCue this is a LIGHTWEIGHT
+    // additive hook (NOT new propagation machinery): given the fall's crest
+    // position, its drop height (louder, deeper falls roar more) and the
+    // listener, it returns a distance-attenuated loop volume + a low-pass /
+    // muffle factor that rises with distance (the high-frequency hiss falls off
+    // faster than the low rumble). Reuses the existing direct-path distance
+    // attenuation; no reflection tracing, no physics raycast required. The
+    // visual WaterfallVisual gate does NOT depend on this (audio is optional
+    // dressing). Render-only: nothing here writes back to sim/world_hash.
+    struct WaterfallRoar {
+        float distance = 0.0f;          // metres crest->listener
+        float volume = 0.0f;            // [0,1] distance + drop-scaled loop volume
+        float low_pass = 0.0f;          // [0,1] 0 = bright/near, 1 = muffled/far
+        bool audible = false;           // volume above the silence floor
+    };
+    WaterfallRoar ComputeWaterfallRoar(const glm::vec3& crest_position,
+                                       float drop_height,
+                                       const glm::vec3& listener,
+                                       float max_distance = 400.0f) const;
+
     // Async propagation for performance
     void CalculatePropagationAsync(const glm::vec3& source, 
                                   const glm::vec3& listener,

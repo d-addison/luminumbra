@@ -1792,6 +1792,14 @@ void RenderPipeline::init_shaders() {
         (m_root_path / "res/shaders/ssao.vert").string().c_str(),
         (m_root_path / "res/shaders/volumetric_lighting.frag").string().c_str());
     label_gl_object(GL_PROGRAM, m_aerial_shader ? m_aerial_shader->Id() : 0u, "shader.aerial_perspective");
+    // T-I5b-4 (W1): the waterfall falling-sheet shader. Drawn over detected
+    // waterfall sites (waterfall_sites()) on a world-deterministic site; the
+    // dressing is render-only and never hashed. Reuses the basic vertex stage
+    // (world-position + normal varyings) the sheet quad is built with.
+    m_waterfall_shader = std::make_unique<Shader>(
+        (m_root_path / "res/shaders/basic.vert").string().c_str(),
+        (m_root_path / "res/shaders/waterfall.frag").string().c_str());
+    label_gl_object(GL_PROGRAM, m_waterfall_shader ? m_waterfall_shader->Id() : 0u, "shader.waterfall");
 }
 
 void RenderPipeline::init_sky_lut() {
@@ -1931,6 +1939,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     if (m_particle_pass) { m_particle_pass->reset_shader(); } // T-I5a-1
     if (m_foliage_pass) { m_foliage_pass->reset_shader(); }   // T-I5b-1
     m_aerial_shader.reset(); // T-I5a-6: aerial-perspective fullscreen shader
+    m_waterfall_shader.reset(); // T-I5b-4: waterfall falling-sheet shader
     m_shadow_pass->reset_shader();
     m_ssao_pass->reset_shaders();
     m_water_pass->reset_shader();

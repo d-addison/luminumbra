@@ -1,5 +1,5 @@
 ﻿param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "AtmosphereAudio", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "ParticleEmitterDeterminism", "CloudShadow", "FoliageInstancing", "Precipitation", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "WindFieldDeterminism", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "StimulusChannelGate", "BiomeCoverage", "RiverPresence", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "AtmosphereAudio", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "ParticleEmitterDeterminism", "CloudShadow", "FoliageInstancing", "Precipitation", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "WindFieldDeterminism", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "StimulusChannelGate", "BiomeCoverage", "RiverPresence", "WaterfallVisual", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -5127,6 +5127,71 @@ function Test-RiverPresence {
         $analysis.longest_continuous_run, $analysis.river_ratio, $analysis.river_pv_min, $analysis.river_pv_max)
 }
 
+# --- T-I5b-4 (W1) WaterfallVisual mode: append-only ---
+# Runs the WaterfallVisualTest gtest (which builds the shipped mountains world -
+# rivers enabled - at the atlas seed, runs the render-side WaterfallDetect TWICE,
+# asserts the sites are byte-identical + same-seed-same-sites - the F5
+# determinism contract - and renders a sheet/spray/foam capture at a detected
+# site), then asserts from waterfall-visual.json that determinism held, falls
+# were detected, and the dressing capture shows the sheet + spray + foam.
+# Render-only: detection is a pure function of the world, never hashed (world_hash
+# stays d950a6afc12a5cdc). Append-only; no existing gate behavior changes.
+function Test-WaterfallVisual {
+    $exe = "build/$BuildPreset/bin/waterfall_visual_test.exe"
+    if (-not (Test-Path $exe)) {
+        throw "WaterfallVisual gate: missing $exe (cmake --build --preset $BuildPreset)"
+    }
+    & $exe "--gtest_filter=WaterfallVisualTest.SiteDetectionDeterministicAndDressed"
+    if ($LASTEXITCODE -ne 0) {
+        throw "WaterfallVisual gtest (SiteDetectionDeterministicAndDressed) failed with exit code $LASTEXITCODE"
+    }
+
+    $analysisPath = "build/$BuildPreset/test-artifacts/render/waterfall/waterfall-visual.json"
+    if (-not (Test-Path $analysisPath)) {
+        throw "WaterfallVisual gate: missing $analysisPath (produced by WaterfallVisualTest)"
+    }
+    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+    if ($analysis.schema -ne "luminumbra.waterfall_visual.v1") {
+        throw "Unexpected waterfall visual schema '$($analysis.schema)'"
+    }
+    if ($analysis.preset -ne "mountains") {
+        throw "WaterfallVisual must analyze the mountains preset (got '$($analysis.preset)')"
+    }
+    if ([int64]$analysis.site_count -le 0) {
+        throw "WaterfallVisual: no waterfall sites detected on the mountains preset"
+    }
+    # Determinism (critique F5): repeated detection byte-equal + same seed -> same sites.
+    if (-not $analysis.determinism_byte_equal) {
+        throw "WaterfallVisual: site detection not byte-identical across runs (non-deterministic)"
+    }
+    if (-not $analysis.determinism_same_seed_same_sites) {
+        throw "WaterfallVisual: same seed produced different sites (F5 contract broken)"
+    }
+    if ($analysis.site_hash_run_a -ne $analysis.site_hash_world_b) {
+        throw "WaterfallVisual: site hash differs across worlds with the same seed"
+    }
+    # Dressing capture (when GL was available): sheet + spray + foam must render.
+    if ($analysis.capture_written) {
+        if (-not $analysis.sheet_present) {
+            throw "WaterfallVisual: capture shows no falling-sheet cascade body"
+        }
+        if (-not $analysis.spray_present) {
+            throw "WaterfallVisual: capture shows no spray/mist plume"
+        }
+        if (-not $analysis.foam_present) {
+            throw "WaterfallVisual: capture shows no plunge-pool/crest foam"
+        }
+    } else {
+        Write-Host "WaterfallVisual: dressing capture skipped (no GL context: $($analysis.gl_skip_reason)); determinism contract still gated"
+    }
+    if (-not $analysis.passed) {
+        throw "WaterfallVisual analysis reported failure"
+    }
+    Write-Host ("waterfall visual gate passed: preset={0} sites={1} best_drop={2:N2} m steepness={3:N2} sheet={4} spray={5} foam={6} (capture={7})" -f `
+        $analysis.preset, $analysis.site_count, $analysis.best_drop_height, $analysis.best_steepness, `
+        $analysis.cascade_pixels, $analysis.spray_pixels, $analysis.foam_pixels, $analysis.capture_written)
+}
+
 # --- T-I4-4 StructurePresence mode: append-only ---
 # Runs the StructurePlacement gtest (which loads the shipped cairn + ruin
 # template pools, proves the placement grid is deterministic - same seed =>
@@ -5332,6 +5397,7 @@ switch ($Mode) {
     "StimulusChannelGate" { Test-StimulusChannelGate }
     "BiomeCoverage" { Test-BiomeCoverage }
     "RiverPresence" { Test-RiverPresence }
+    "WaterfallVisual" { Test-WaterfallVisual }
     "StructurePresence" { Test-StructurePresence }
     "BiomeReverb" { Test-BiomeReverb }
     "TerrainRealism" { Test-TerrainRealism }
