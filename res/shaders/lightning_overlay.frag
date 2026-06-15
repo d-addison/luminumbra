@@ -156,16 +156,31 @@ void main() {
         color += hotCore * (core * 3.2) * max(u_pulse, 1.0);
         color += glowCol * (glow * 0.40) * max(u_pulse, 1.0);
 
-        // T-I5a-DR-storm-motion-v2: GROUND-IMPACT bloom -- a bright radial flash at
-        // the touchdown point so the bolt visibly CONNECTS to the terrain and lights
-        // the ground it strikes. Aspect-corrected radial falloff; brightest at the
-        // strike point, fading over a short radius.
+        // GROUND-IMPACT bloom -- a bright flash at the touchdown point so the bolt
+        // visibly CONNECTS to the terrain and lights the ground it strikes.
+        // T-I5b-DR-storm-blockers (B2): the bloom is now anchored at the REAL
+        // projected touchdown (the host only enables it when that point is on-screen),
+        // and it is FLATTENED vertically + tightened so it reads as ground illumination
+        // spreading along the surface at the strike, not a hovering circular saucer.
+        // A small hot core sits at the contact point; a wider, low, horizontally-biased
+        // wash lifts the ground around it.
         if (u_groundFlash > 0.0) {
-            float gd = length((ndc - u_groundNdc) * vec2(u_aspect, 1.0));
-            float impact = 1.0 - smoothstep(0.0, 0.42, gd);
-            impact = impact * impact;            // concentrate near the strike
-            vec3 impactCol = mix(u_color, vec3(1.0), 0.6);
-            color += impactCol * impact * u_groundFlash;
+            vec2 d = (ndc - u_groundNdc) * vec2(u_aspect, 1.0);
+            // Vertical squash: the glow hugs the ground line (wider than it is tall),
+            // so it does not read as a free-floating round disc.
+            vec2 dFlat = vec2(d.x, d.y * 2.2);
+            float gd = length(dFlat);
+            // Tight hot contact core right at the touchdown.
+            float core = 1.0 - smoothstep(0.0, 0.10, gd);
+            core = core * core;
+            // Low, broad ground wash -- only spreads BELOW/around the contact, kept
+            // faint so it lifts the surface rather than painting a bright ellipse.
+            float wash = 1.0 - smoothstep(0.0, 0.26, gd);
+            wash = wash * wash;
+            vec3 coreCol = mix(u_color, vec3(1.0), 0.7);
+            vec3 washCol = u_color;
+            color += coreCol * core * u_groundFlash;
+            color += washCol * wash * u_groundFlash * 0.30;
         }
     }
     FragColor = vec4(color, 1.0);
