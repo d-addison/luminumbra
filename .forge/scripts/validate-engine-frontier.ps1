@@ -3026,15 +3026,20 @@ function Test-TimeOfDaySweep {
     }
 
     $phases = @($analysis.phases)
-    if ($phases.Count -lt 3) {
-        throw "Time-of-day sweep must capture noon, dusk, and night phases (found $($phases.Count))"
+    # T-I5a-7 (C2): the sweep now captures noon/dusk/night under TWO seasons
+    # (summer + winter) == 6 phase captures. The summer (season_index 0) set owns
+    # the existing ordering/warm-shift/hue-band/emissive assertions below.
+    if ($phases.Count -lt 6) {
+        throw "Time-of-day season sweep must capture noon/dusk/night under 2 seasons (6 phases; found $($phases.Count))"
     }
-    foreach ($phaseName in @("noon", "dusk", "night")) {
-        $matches = @($phases | Where-Object { $_.name -eq $phaseName })
-        if ($matches.Count -ne 1) {
-            throw "Time-of-day sweep is missing the '$phaseName' phase capture"
+    foreach ($seasonIndex in @(0, 1)) {
+        foreach ($phaseName in @("noon", "dusk", "night")) {
+            $matches = @($phases | Where-Object { $_.name -eq $phaseName -and [int]$_.season_index -eq $seasonIndex })
+            if ($matches.Count -ne 1) {
+                throw "Time-of-day season sweep is missing the season $seasonIndex '$phaseName' phase capture"
+            }
+            Assert-PpmArtifact (Join-Path $visualDir $matches[0].screenshot)
         }
-        Assert-PpmArtifact (Join-Path $visualDir $matches[0].screenshot)
     }
 
     if (-not $analysis.luminance_ordering.passed) {
@@ -3080,6 +3085,32 @@ function Test-TimeOfDaySweep {
     }
     if ([double]$analysis.dusk_sky_hue_band.dusk_sky_warm_half_r_b_ratio -lt [double]$analysis.thresholds.min_dusk_sky_warm_band_ratio) {
         throw "Dusk sky warm-half r/b $($analysis.dusk_sky_hue_band.dusk_sky_warm_half_r_b_ratio) is below absolute hue-band threshold $($analysis.thresholds.min_dusk_sky_warm_band_ratio)"
+    }
+    # T-I5a-7 (C2): SEASON-SWEEP assertions. The same noon/dusk/night phases are
+    # captured under two TICK-DERIVED seasons; assert a real per-season sun-path
+    # band (summer noon sun higher than winter) AND palette band (summer noon
+    # warmer than winter) difference. The season is render-derived (pure function
+    # of tick) -- it adds nothing to world_hash (verified by HeadlessServerTick).
+    if ($null -eq $analysis.season_sweep) {
+        throw "Time-of-day sweep analysis is missing the season_sweep section (T-I5a-7)"
+    }
+    if (-not $analysis.season_sweep.phases_captured) {
+        throw "Season sweep did not capture both seasons' noon/dusk/night phases (T-I5a-7)"
+    }
+    if (-not $analysis.season_sweep.phases_distinct) {
+        throw "Season sweep seasons are not distinct tick-derived phases: summer_tick=$($analysis.season_sweep.summer_season_tick) winter_tick=$($analysis.season_sweep.winter_season_tick) (T-I5a-7)"
+    }
+    if (-not $analysis.season_sweep.sun_path.passed) {
+        throw "Season sun-path band failed: summer noon elevation $($analysis.season_sweep.sun_path.summer_noon_sun_elevation_rad) rad vs winter $($analysis.season_sweep.sun_path.winter_noon_sun_elevation_rad) rad (gap $($analysis.season_sweep.sun_path.sun_elevation_gap_rad), need >= $($analysis.season_sweep.sun_path.min_sun_elevation_gap_rad)) (T-I5a-7)"
+    }
+    if ([double]$analysis.season_sweep.sun_path.sun_elevation_gap_rad -lt [double]$analysis.season_sweep.sun_path.min_sun_elevation_gap_rad) {
+        throw "Season sun-elevation gap $($analysis.season_sweep.sun_path.sun_elevation_gap_rad) rad is below threshold $($analysis.season_sweep.sun_path.min_sun_elevation_gap_rad)"
+    }
+    if (-not $analysis.season_sweep.palette.passed) {
+        throw "Season palette band failed: summer noon r/b $($analysis.season_sweep.palette.summer_noon_frame_r_b_ratio) vs winter $($analysis.season_sweep.palette.winter_noon_frame_r_b_ratio) (gap $($analysis.season_sweep.palette.palette_warmth_gap), need >= $($analysis.season_sweep.palette.min_palette_warmth_gap)) (T-I5a-7)"
+    }
+    if ([double]$analysis.season_sweep.palette.palette_warmth_gap -lt [double]$analysis.season_sweep.palette.min_palette_warmth_gap) {
+        throw "Season palette warmth gap $($analysis.season_sweep.palette.palette_warmth_gap) is below threshold $($analysis.season_sweep.palette.min_palette_warmth_gap)"
     }
     # T-I5a-6: sky LUT full precompute startup one-shot recorded in render
     # telemetry; budget enforced on the RELEASE build only.
