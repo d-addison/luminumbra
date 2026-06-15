@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -138,6 +139,13 @@ struct RuntimeScenarioConfig {
     bool window_mode_stress_smoke() const { return scenario == "window_mode_stress_smoke"; }
     // T-I4-14: client renders a server-owned world over the lockstep transport.
     bool networked_session_smoke() const { return scenario == "networked_session_smoke"; }
+    // T-I5b-visual-sweep: deterministic multi-angle/time/weather/season world
+    // capture matrix for orchestrator visual review. RENDER-ONLY (drives the
+    // existing one-way atmospheric/foliage bridges; never writes world_hash). The
+    // scenario is selected by --scenario=world_visual_sweep OR the
+    // LUMINUMBRA_VISUAL_SWEEP=1 env flag (the latter mapped in
+    // ParseRuntimeScenarioConfig so existing auto/server launches can opt in).
+    bool world_visual_sweep() const { return scenario == "world_visual_sweep"; }
     bool forced_crash() const { return scenario == "forced_crash"; }
 
     // True for any scenario that captures pixel-ROI screenshots and therefore
@@ -1580,5 +1588,40 @@ private:
     bool m_disconnected = false;
     std::string m_failure_reason;
 };
+
+// --- world_visual_sweep (T-I5b-visual-sweep) ---------------------------------
+// A self-contained, DETERMINISTIC capture matrix for orchestrator visual review.
+// Once the world is ready the driver renders a fixed matrix of
+//   times-of-day x camera angles x weather (x optional season)
+// from a single feature-rich anchor (open sky + foliage ground + water/shore),
+// driving the EXISTING render systems through their one-way bridges
+// (set_time_of_day, set_weather_state/set_cloud_state/set_lightning_state, the
+// FoliagePass scatter, ParticlePass rain). Each cell is written as
+//   <artifact_dir>/sweep/<tod>__<angle>__<weather>[__<season>].ppm
+// plus a sweep-manifest.json carrying, per cell, the active feature signals
+// (foliage_draws / particle_draws / lightning active / cloud coverage / water
+// pixels) and a non-black check, so the WorldVisualSweep gate can assert
+// PRODUCTION + PRESENCE offline. RENDER-ONLY: nothing here writes world_hash.
+//
+// `render_one_frame` is supplied by the caller (main_client owns the GL context,
+// the RenderPipeline, the camera, and the swap); the harness calls it to advance
+// + present a settled frame and hands back the captured backbuffer. Returns true
+// when every expected cell PPM was produced and non-black.
+struct WorldVisualSweepDeps {
+    Luminumbra::world::GameSession* game_session = nullptr;
+    Luminumbra::Rendering::RenderPipeline* pipeline = nullptr;
+    Luminumbra::Rendering::Camera* camera = nullptr;
+    std::filesystem::path root_dir;
+    std::filesystem::path artifact_dir;
+    // Renders ONE frame with the current camera/pipeline state and presents it,
+    // then reads the backbuffer into `out_pixels` (RGB, bottom-up glReadPixels
+    // layout) and reports the framebuffer size. Returns false on a GL/size error.
+    std::function<bool(std::vector<unsigned char>& out_pixels, int& width, int& height)>
+        render_and_read;
+    // Whether to also capture the winter season pass (summer is always captured).
+    bool include_winter = true;
+};
+
+bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps);
 
 } // namespace Luminumbra::Client::ScenarioHarness
