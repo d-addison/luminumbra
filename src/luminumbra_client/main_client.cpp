@@ -3770,7 +3770,14 @@ int main(int argc, char* argv[]) {
                                 // a nominal full-cover count (so it tracks biome_density
                                 // on the same [0,1] scale; banded loosely since scatter
                                 // also depends on slope/moisture + the visible footprint).
-                                const double nominal_full = 4096.0;
+                                // T-I5b-DR-sweep-visual-fixes (defect 2): the candidate
+                                // budget per chunk was raised 256 -> 2048 to make the
+                                // ground read as real grass cover, so the in-ring instance
+                                // COUNT scales up proportionally. Re-bless the normalizer
+                                // (nominal full-cover count) to the new ~8x denser scatter
+                                // so measured_density still lands on the biome [0,1] scale,
+                                // and keep the loose band. DELIBERATE re-bless (logged).
+                                const double nominal_full = 32768.0;
                                 result.measured_density = std::clamp(
                                     static_cast<double>(result.instances_within_ring) / nominal_full, 0.0, 1.0);
                                 result.biome_density = biome_density;

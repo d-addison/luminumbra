@@ -330,6 +330,21 @@ void main() {
         float luma = dot(finalColor, vec3(0.299, 0.587, 0.114));
         vec3 overcast = mix(vec3(luma), finalColor, 0.55) * vec3(0.86, 0.92, 1.04);
         finalColor = mix(finalColor, overcast, clamp(u_stormIntensity, 0.0, 1.0) * 0.8);
+
+        // T-I5b-DR-sweep-visual-fixes (defect 3): NIGHT-STORM legibility floor on
+        // SURFACES. At night the lit scene is near-black and the storm dim above
+        // crushes it the rest of the way, so a night storm read as an empty black
+        // frame. Lift a faint cool storm-ambient floor on solid surfaces (the sky
+        // has no normal, so it is untouched and stays a dark dome). Only meaningful
+        // where the surface is already very dark (night), so the daytime storm is
+        // unaffected. The max() never darkens -- it only sets a minimum.
+        vec3 stormNormal = texture(gNormal, screenUV).rgb;
+        if (length(stormNormal) > 0.1) {
+            float surfLuma = dot(finalColor, vec3(0.299, 0.587, 0.114));
+            float floorLift = clamp(u_stormIntensity, 0.0, 1.0)
+                              * (1.0 - smoothstep(0.0, 0.10, surfLuma)) * 0.045;
+            finalColor += vec3(0.7, 0.8, 1.0) * floorLift;
+        }
     }
     
     if (u_fogDensity > 0.1) {
