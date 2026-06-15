@@ -51,6 +51,23 @@ uniform float u_sunCosZenith = 1.0;   // dot(toward-sun, up)
 uniform float u_skyExposure = 38.0;   // LUT radiance -> HDR display scale
 uniform int u_useSkyLut = 1;          // 0 falls back to the legacy gradient
 
+// T-I5b-DR-sweep-visual-fixes (defect 5): aurora is a DEEP-NIGHT-ONLY phenomenon.
+// u_skyDayFactor alone cannot cleanly separate DUSK (sun on the horizon ->
+// dayFactor ~0.02) from NIGHT (sun well below -> dayFactor ~0): both round to a
+// hair above zero and the old envelope let the aurora bleed into the twilight
+// dome. So the CPU computes a dedicated aurora strength from the sun's RAW
+// elevation (1 only once the sun is clearly below the horizon, 0 through dusk)
+// and pushes it here. 0 == no aurora; the dusk dome stays clean.
+uniform float u_auroraStrength = 0.0;
+
+// T-I5b-DR-sweep-visual-fixes (defect 3): NIGHT-STORM visibility floor. A night
+// storm was rendering as a near-black dome (dayFactor ~0 -> the dome scattering
+// and the cloud layer both collapse to black). This is a small additive sky-grey
+// floor under the storm clouds so a NIGHT storm is dark-but-legible (rain +
+// lightning read against it) WITHOUT lifting the clear-night dome. The CPU passes
+// the storm intensity; it is 0 for clear sky so clear night stays genuinely dark.
+uniform float u_stormSkyFloor = 0.0;   // [0,1] storm intensity for the night floor
+
 const float PI_SKY = 3.14159265359;
 
 // Enhanced noise functions for atmospheric effects
@@ -151,20 +168,48 @@ vec3 renderClouds(vec3 viewDir, vec3 baseColor, float dayFactor) {
     float horizonFade = smoothstep(0.02, 0.22, viewDir.y);
 
     float coverage = cloudCoverageAt(worldXZ);
-    // A faint higher detail octave breaks up the silhouette near the zenith.
-    float detail = fbm(worldXZ * (1.0 / 520.0) + u_cloudScrollOffset * (1.0 / 520.0), 3);
-    coverage = clamp(coverage * (0.82 + 0.18 * detail), 0.0, 1.0);
+    // T-I5b-DR-sweep-visual-fixes (defect 4): give the cloud sheet real STRUCTURE
+    // at HIGH (storm/overcast) coverage, where it used to read as a flat grey dome.
+    // The extra structure is gated by a coverage weight (~0 at the fair-weather
+    // 0.45 deck, ~1 at the 0.85 storm deck) so the low-coverage clear-sky dome the
+    // SkyboxVisual gradient gate frames is left essentially unchanged (it must keep
+    // its horizon->zenith luminance drop). Layer two detail octaves and let them
+    // MODULATE the coverage (carving holes + piling cores) for fluffy billows.
+    float structureWeight = smoothstep(0.55, 0.80, u_cloudCoverageAmount);
+    float detailA = fbm(worldXZ * (1.0 / 520.0) + u_cloudScrollOffset * (1.0 / 520.0), 4);
+    float detailB = fbm(worldXZ * (1.0 / 210.0) + vec2(53.0, 19.0), 3);
+    float lumpy = (detailA - 0.5) * 0.55 + (detailB - 0.5) * 0.30;
+    // Structured coverage (storm) carves billows; plain coverage (fair) is the old
+    // faint detail-modulated deck. Blend by structureWeight so only storms restyle.
+    float structured = clamp(coverage + coverage * lumpy * 1.6, 0.0, 1.0);
+    structured = smoothstep(0.04, 0.62, structured);
+    float plain = clamp(coverage * (0.82 + 0.18 * detailA), 0.0, 1.0);
+    coverage = mix(plain, structured, structureWeight);
     coverage *= horizonFade;
 
-    // Self-shadow: denser cloud cores read darker on their sun-away side.
+    // Self-shadow: denser cloud cores read darker on their sun-away side, while a
+    // higher-frequency lump term brightens the cauliflower tops -> visible relief.
     vec3 litCloud = vec3(0.95, 0.96, 1.0);
-    vec3 shadowCloud = vec3(0.55, 0.57, 0.66);
+    vec3 shadowCloud = vec3(0.52, 0.55, 0.66);
     float sunDot = dot(viewDir, u_sunDirection);
-    float cloudLighting = max(0.35, sunDot * 0.5 + 0.5);
+    float cloudLighting = clamp(sunDot * 0.5 + 0.5, 0.0, 1.0);
+    cloudLighting = max(cloudLighting, 0.35);
+    // Relief term (storm only): detailA lights the tops, deepening the 3D read of
+    // the billows. Gated by structureWeight so the fair-weather deck keeps its old
+    // flat lighting (and the gate's zenith luminance).
+    cloudLighting = clamp(cloudLighting + structureWeight * (detailA - 0.5) * 0.55, 0.18, 1.0);
     vec3 cloudColor = mix(shadowCloud, litCloud, cloudLighting);
     // Night tint + darkening (kept from the old layer so night clouds silhouette).
     cloudColor = mix(cloudColor, vec3(0.18, 0.16, 0.26), 1.0 - dayFactor);
-    cloudColor *= dayFactor + 0.04 * dayFactor;
+
+    // T-I5b-DR-sweep-visual-fixes (defect 3): NIGHT-STORM floor. Plain *dayFactor
+    // crushed night clouds (and the whole storm dome) to black -- a night storm
+    // was unreadable. Hold a small storm-only brightness floor so the overcast
+    // deck stays a legible dark grey at night WITHOUT lifting the clear-night
+    // dome (u_stormSkyFloor is 0 for clear sky). Clear night clouds still go dark.
+    float nightStormFloor = u_stormSkyFloor * (1.0 - dayFactor) * 0.16;
+    float cloudBright = max(dayFactor * 1.04, nightStormFloor);
+    cloudColor *= cloudBright;
 
     return mix(baseColor, cloudColor, coverage);
 }
@@ -198,10 +243,12 @@ vec3 renderStars(vec3 viewDir, float nightIntensity) {
 // once the dome is genuinely dark. We also smooth the lower-edge coverage so the
 // aurora curtain fades in over the horizon band instead of banding hard at y=0.2.
 vec3 renderAurora(vec3 viewDir, float dayFactor) {
-    // Deep-night envelope: zero through day + dusk, rising only once the dome has
-    // darkened toward night. dayFactor ~0.43 at dusk -> envelope 0; it does not
-    // start opening until dayFactor falls below ~0.12 and is full by ~0.02.
-    float nightEnvelope = 1.0 - smoothstep(0.02, 0.12, dayFactor);
+    // T-I5b-DR-sweep-visual-fixes (defect 5): the deep-night envelope now comes
+    // from u_auroraStrength (CPU-derived from the sun's RAW elevation), which is a
+    // hard 0 through dusk and only opens once the sun is well below the horizon.
+    // The old dayFactor-only envelope could not separate dusk (dayFactor ~0.02)
+    // from night (~0) and bled the aurora into the twilight dome.
+    float nightEnvelope = clamp(u_auroraStrength, 0.0, 1.0);
     if (nightEnvelope <= 0.0 || viewDir.y < 0.18) return vec3(0.0);
 
     float auroraTime = u_time * 0.1;
@@ -346,6 +393,19 @@ void main()
 
     // --- 4. CLOUDS WITH ATMOSPHERIC LIGHTING ---
     skyColor = renderClouds(viewDir, skyColor, dayFactor);
+
+    // T-I5b-DR-sweep-visual-fixes (defect 3): NIGHT-STORM dome floor. Independent
+    // of the cloud layer, lift the whole night-storm dome to a faint cool storm-grey
+    // so the sky behind the rain/lightning is dark-but-legible rather than pure
+    // black. Gated by storm intensity AND nightFactor, and faded toward the horizon
+    // so it reads as overcast murk above the scene. Zero for clear sky / daytime, so
+    // the clear-night dome and all daytime cells are untouched.
+    {
+        float stormNight = u_stormSkyFloor * nightFactor;
+        float aboveHorizon = smoothstep(-0.05, 0.35, viewDir.y);
+        vec3 stormMurk = vec3(0.020, 0.024, 0.034);
+        skyColor += stormMurk * stormNight * aboveHorizon;
+    }
 
     // --- 5. STARS ---
     skyColor += renderStars(viewDir, nightFactor);

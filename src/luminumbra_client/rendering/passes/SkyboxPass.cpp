@@ -141,6 +141,31 @@ void SkyboxPass::execute(RenderPipeline& pipeline, const Camera& camera) {
         m_skybox_shader->setFloat("u_cloudPlaneHeight", cloud.plane_height);
         m_skybox_shader->setFloat("u_cloudShadowStrength", cloud.shadow_strength);
     }
+
+    // T-I5b-DR-sweep-visual-fixes:
+    //  (defect 5) AURORA gate -- a deep-night-only strength from the sun's RAW
+    //  elevation. u_skyDayFactor cannot separate dusk (sun on the horizon) from
+    //  night (sun below), so derive the gate here: the sun must be clearly below
+    //  the horizon (sun_up_factor well negative) before the aurora opens. 0 through
+    //  day + dusk, ramping to 1 only in deep night -> no aurora smear at dusk.
+    //  (defect 3) NIGHT-STORM floor -- push the storm intensity so the shader can
+    //  hold a small dark-grey sky floor at night (legible storm) without lifting
+    //  the clear-night dome. 0 for clear sky.
+    {
+        // sun_up_factor = dot(light-travel-dir, down) = sun elevation sign; >0 day,
+        // ~0 at the horizon (dusk/dawn), negative once the sun has set.
+        const float sun_up_factor =
+            glm::dot(pipeline.m_sun.direction, glm::vec3(0.0f, -1.0f, 0.0f));
+        // Open only once the sun is a clear margin below the horizon: 0 at
+        // sun_up_factor >= -0.12 (still twilight/dusk), full by -0.30 (deep night).
+        const float aurora_strength =
+            glm::smoothstep(-0.12f, -0.30f, sun_up_factor);
+        m_skybox_shader->setFloat("u_auroraStrength", aurora_strength);
+
+        const float storm_floor =
+            glm::clamp(pipeline.get_weather_state().storm_intensity, 0.0f, 1.0f);
+        m_skybox_shader->setFloat("u_stormSkyFloor", storm_floor);
+    }
     glBindVertexArray(m_skybox_vao);
     glDrawArrays(GL_TRIANGLES, 0, 36);
     pipeline.m_last_render_pass_stats.skybox_draws++;
