@@ -38,10 +38,26 @@ public:
     ~AudioPropagationSystem();
 
     // Core propagation calculation
-    AudioPropagationResult CalculatePropagation(const glm::vec3& source, 
+    AudioPropagationResult CalculatePropagation(const glm::vec3& source,
                                                const glm::vec3& listener,
                                                float max_distance = 100.0f,
                                                int max_reflections = 5);
+
+    // T-I5a-5 (B3): THIN thunder cue for a lightning strike (critique F8). A strike
+    // is a deterministic SIM world event; thunder is the delayed positional one-shot
+    // it cues. This is a LIGHTWEIGHT additive hook (NOT new propagation machinery):
+    // it returns the speed-of-sound delay (distance / speed_of_sound, the physically
+    // correct flash-to-bang gap) and a distance attenuation for the strike, reusing
+    // the existing direct-path geometry + the m_settings.speed_of_sound. The caller
+    // schedules an IAudioManager::PlayOneShot at delay_seconds. The visual lightning
+    // gate does NOT depend on this (F8): it is a pure audio convenience.
+    struct ThunderCue {
+        float delay_seconds = 0.0f;     // distance / speed_of_sound (flash-to-bang)
+        float distance = 0.0f;          // metres source->listener
+        float volume_multiplier = 1.0f; // [0,1] distance/absorption attenuation
+    };
+    ThunderCue ComputeThunderCue(const glm::vec3& strike_position,
+                                 const glm::vec3& listener) const;
     
     // Async propagation for performance
     void CalculatePropagationAsync(const glm::vec3& source, 

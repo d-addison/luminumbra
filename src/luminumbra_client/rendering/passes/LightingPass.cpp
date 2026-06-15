@@ -11,6 +11,7 @@
 #include "luminumbra_common/world/Chunk.h"
 
 #include <glm/gtc/matrix_transform.hpp>
+#include <algorithm>
 #include <cmath>
 #include <string>
 
@@ -20,6 +21,7 @@ LightingPass::LightingPass() = default;
 LightingPass::~LightingPass() = default;
 
 void LightingPass::init_shader(const std::filesystem::path& root_path) {
+    m_root_path = root_path; // retained for the lazy lightning overlay (T-I5a-5)
     m_lighting_shader = std::make_unique<Shader>((root_path / "res/shaders/lighting_pass.vert").string().c_str(), (root_path / "res/shaders/lighting_pass.frag").string().c_str());
     PassGl::label_gl_object(GL_PROGRAM, m_lighting_shader ? m_lighting_shader->Id() : 0u, "shader.lighting");
 }
@@ -67,6 +69,7 @@ void LightingPass::destroy_lighting_fbo() {
     if (m_lighting_fbo.color_texture) { glDeleteTextures(1, &m_lighting_fbo.color_texture); m_lighting_fbo.color_texture = 0; }
     if (m_lighting_fbo.opaque_color_texture) { glDeleteTextures(1, &m_lighting_fbo.opaque_color_texture); m_lighting_fbo.opaque_color_texture = 0; }
     if (m_lighting_fbo.depth_texture) { glDeleteRenderbuffers(1, &m_lighting_fbo.depth_texture); m_lighting_fbo.depth_texture = 0; }
+    if (m_lightning_scene_copy) { glDeleteTextures(1, &m_lightning_scene_copy); m_lightning_scene_copy = 0; m_lightning_copy_w = 0; m_lightning_copy_h = 0; }
 }
 
 void LightingPass::reset_shader() {
@@ -163,6 +166,92 @@ void LightingPass::execute(RenderPipeline& pipeline, const Camera& camera) {
     pipeline.m_last_render_pass_stats.lighting_draws++;
     glBindVertexArray(0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+void LightingPass::execute_lightning_overlay(RenderPipeline& pipeline, const Camera& camera) {
+    (void)camera;
+    const LightningRenderState& lit = pipeline.get_lightning_state();
+    if (!lit.active || lit.pulse_intensity <= 0.0f) {
+        return; // zero-cost OFF path (no strike this frame)
+    }
+    const int w = static_cast<int>(pipeline.m_screen_width);
+    const int h = static_cast<int>(pipeline.m_screen_height);
+    if (w <= 0 || h <= 0 || !m_lighting_fbo.fbo_id || !m_lighting_fbo.color_texture) {
+        return;
+    }
+
+    // Lazily build the overlay program on first strike.
+    if (!m_lightning_overlay_shader) {
+        m_lightning_overlay_shader = std::make_unique<Shader>(
+            (m_root_path / "res/shaders/lightning_overlay.vert").string().c_str(),
+            (m_root_path / "res/shaders/lightning_overlay.frag").string().c_str());
+        PassGl::label_gl_object(GL_PROGRAM,
+            m_lightning_overlay_shader ? m_lightning_overlay_shader->Id() : 0u, "shader.lightning_overlay");
+    }
+    if (!m_lightning_overlay_shader || !m_lightning_overlay_shader->IsValid()) {
+        return;
+    }
+
+    // (Re)allocate the scene-copy texture if the framebuffer size changed.
+    if (m_lightning_scene_copy == 0 || m_lightning_copy_w != w || m_lightning_copy_h != h) {
+        if (m_lightning_scene_copy != 0) {
+            glDeleteTextures(1, &m_lightning_scene_copy);
+            m_lightning_scene_copy = 0;
+        }
+        glGenTextures(1, &m_lightning_scene_copy);
+        PassGl::label_gl_object(GL_TEXTURE, m_lightning_scene_copy, "lighting.lightning_scene_copy");
+        glBindTexture(GL_TEXTURE_2D, m_lightning_scene_copy);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        m_lightning_copy_w = w;
+        m_lightning_copy_h = h;
+    }
+
+    // Snapshot the composited (lit + sky + water + particles) FBO color into the
+    // scratch texture; the overlay reads it and writes the additive result back.
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, m_lighting_fbo.fbo_id);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    glBindTexture(GL_TEXTURE_2D, m_lightning_scene_copy);
+    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, w, h);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_fbo.fbo_id);
+    glViewport(0, 0, w, h);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND); // shader reads the scene copy and writes pulse+bolt added
+
+    m_lightning_overlay_shader->use();
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_lightning_scene_copy);
+    m_lightning_overlay_shader->setInt("u_scene", 0);
+    m_lightning_overlay_shader->setInt("u_active", 1);
+    m_lightning_overlay_shader->setFloat("u_pulse", lit.pulse_intensity);
+    m_lightning_overlay_shader->setVec3("u_color", lit.pulse_color);
+    m_lightning_overlay_shader->setVec2("u_strikeNdc", lit.strike_ndc);
+    m_lightning_overlay_shader->setFloat("u_boltWidth", lit.bolt_width_ndc);
+    m_lightning_overlay_shader->setFloat("u_boltGlow", lit.bolt_glow_ndc);
+    m_lightning_overlay_shader->setFloat("u_aspect",
+        static_cast<float>(w) / std::max(1.0f, static_cast<float>(h)));
+    const int point_count =
+        std::min<int>(static_cast<int>(lit.bolt_points_ndc.size()), kMaxBoltSegmentPoints);
+    m_lightning_overlay_shader->setInt("u_boltCount", point_count);
+    for (int i = 0; i < point_count; ++i) {
+        m_lightning_overlay_shader->setVec2(
+            "u_bolt[" + std::to_string(i) + "]", lit.bolt_points_ndc[static_cast<std::size_t>(i)]);
+    }
+
+    glBindVertexArray(pipeline.m_screen_quad_vao);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glBindVertexArray(0);
+    glEnable(GL_DEPTH_TEST);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    pipeline.m_last_render_pass_stats.lighting_draws++;
 }
 
 } // namespace Luminumbra::Rendering
