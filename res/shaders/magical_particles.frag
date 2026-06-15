@@ -79,6 +79,11 @@ float streak_mask(vec2 uv) {
 void main() {
     vec2 uv = fs_in.texCoord;
     bool isStreak = fs_in.streakAspect > 1.5;
+    // T-I5a-DR-storm-motion-v3: rain-impact FOAM is tagged with a dedicated atlas
+    // layer sentinel (precip_splash.json atlas_layer = 4) so it renders as a clean
+    // whitish foam burst rather than a scene-tinted emissive sprite. All other
+    // round (non-streak) particles (e.g. magical sparkles) keep the emissive path.
+    bool isFoam = (!isStreak) && (fs_in.atlasLayer > 3.5);
     float shape = isStreak ? streak_mask(uv) : sprite_mask(uv);
     if (shape <= 0.0) {
         discard;
@@ -107,20 +112,36 @@ void main() {
 
     vec4 finalColor = fs_in.color;
     if (isStreak) {
-        // T-I5a-DR-atmospheric-visuals: rain must read as LIGHT translucent
-        // streaks over the overcast sky, NOT dark specks. Lift the streak toward
-        // a bright water-white and add a luminous core so the streak sits ABOVE
-        // the bright backdrop instead of darkening it. Soft-particle fade keeps it
-        // from over-brightening where it meets near geometry.
-        vec3 streakTint = mix(fs_in.color.rgb, vec3(0.92, 0.96, 1.0), 0.6);
-        finalColor.rgb = streakTint * (0.85 + 0.35 * lit);
-        finalColor.rgb += vec3(0.95, 0.97, 1.0) * shape * 0.9; // bright streak core
-        // Keep it clearly translucent (a veil of rain), boosted slightly so it
-        // is visible as a light streak against the bright sky.
-        finalColor.a = clamp(fs_in.color.a * 1.25, 0.0, 1.0) * shape * softFade;
+        // T-I5a-DR-storm-motion-v3: CLEAN RAIN. The owner saw "coloured TV static"
+        // -- cyan/teal/pink speckle. Root cause: the streak colour was modulated by
+        // the scene forward-lighting term (`lit` = ambient + sun + up to 4 coloured
+        // point lights), so every streak picked up a per-position hue and the field
+        // read as chromatic noise. The fix: rain is a CONSTANT light blue-white
+        // translucent filament with NO per-particle hue variation and NO scene-light
+        // tint. A single fixed water colour; the only spatial variation is the
+        // soft cross-section mask (spine brighter than edges) and the depth fade --
+        // i.e. shape, not colour. This reads as clean rain, not static.
+        const vec3 kRainColor = vec3(0.82, 0.90, 1.0);   // fixed light blue-white
+        finalColor.rgb = kRainColor;
+        // Brighten the thin spine a touch so the centre of each streak catches a
+        // wet highlight running down the filament (still hue-neutral: white add).
+        finalColor.rgb += vec3(0.10) * shape;
+        // Translucent veil: moderate peak alpha, shaped by the streak mask so it
+        // is soft-edged. Kept well below 1 so the rain stays see-through in motion.
+        finalColor.a = clamp(fs_in.color.a, 0.0, 1.0) * shape * 0.85 * softFade;
+    } else if (isFoam) {
+        // T-I5a-DR-storm-motion-v3: SPLASH = subtle whitish foam burst, not coloured
+        // dots. The impact spray previously ran through the emissive path
+        // (scene-light tint + additive HDR glow core), which painted small COLOURED
+        // speckle scattered around the ground line. Now the splash is a fixed pale
+        // near-white foam with a soft round mask and a low alpha, with NO scene-light
+        // tint and NO additive glow -- a faint white burst on impact, nothing more.
+        const vec3 kFoamColor = vec3(0.92, 0.95, 1.0);   // pale near-white foam
+        finalColor.rgb = kFoamColor;
+        finalColor.a = clamp(fs_in.color.a, 0.0, 1.0) * shape * 0.5 * softFade;
     } else {
         // Emissive core: the particle is its own light source, modulated by the
-        // forward-lit term so it still reads the scene's mood.
+        // forward-lit term so it still reads the scene's mood. (Magical sparkles.)
         finalColor.rgb *= (0.6 + 0.4 * lit);
         finalColor.rgb += fs_in.color.rgb * shape * 0.5; // HDR glow core
         finalColor.a *= shape * softFade;
