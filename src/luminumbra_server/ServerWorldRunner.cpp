@@ -46,7 +46,8 @@ std::string WeatherSubHash(world::GameSession* session) {
 // unchanged byte-for-byte (persistence fixtures stay green); the runner-level
 // world_hash ALSO commits the wind field (A2 bump, 2fa007951a21e140 ->
 // 0eac465289e7c88b) and now the weather state (B1 bump #2, 0eac465289e7c88b ->
-// new). Order is fixed (chunk, then wind, then weather) so the composite is
+// 0857e683b4b8c47e; weather_sub_hash a7d8f3d28401386f). Order is fixed (chunk,
+// then wind, then weather) so the composite is
 // reproducible; appending weather is append-only so the wind term is unchanged.
 std::string ComposeWorldHash(const std::string& chunk_hash,
                              const std::string& wind_hash,
