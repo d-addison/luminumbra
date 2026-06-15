@@ -1,5 +1,5 @@
 ﻿param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "ParticleEmitterDeterminism", "CloudShadow", "Precipitation", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "WindFieldDeterminism", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "BiomeCoverage", "RiverPresence", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "ParticleEmitterDeterminism", "CloudShadow", "Precipitation", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "WindFieldDeterminism", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "StimulusChannelGate", "BiomeCoverage", "RiverPresence", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -4657,6 +4657,30 @@ function Test-CreatureSlice {
     Assert-CapturePinned -ArtifactDir $sliceDir -Name "CreatureSlice"
 }
 
+# --- T-I5b-2 (E1) StimulusChannelGate mode: append-only ---
+# Ecology stimulus-channel registry feeding the InstinctSystem planner. Runs the
+# StimulusChannelGate gtest suite (frontier_gates_test), which asserts:
+#   * INERT: a non-subscribing creature plans IDENTICALLY with or without a
+#     stimulus context (the canonical-neutral property keeping world_hash at
+#     d950a6afc12a5cdc -- critique F1 / design-decisions §0).
+#   * BEHAVIOR DIFFERS: a reactive (game-data opt-in) creature plans differently
+#     across weather fixtures (clear vs rain) and time-of-day fixtures (midnight
+#     vs noon) -- the channels reach the plan.
+#   * DETERMINISTIC: run==replay within a fixture.
+# Append-only; no existing gate behavior changes. The default-roster world_hash
+# stays unchanged (proven separately by HeadlessServerTick).
+function Test-StimulusChannelGate {
+    $exe = "build/$BuildPreset/bin/frontier_gates_test.exe"
+    if (-not (Test-Path $exe)) {
+        throw "StimulusChannelGate gate: missing $exe (cmake --build --preset $BuildPreset)"
+    }
+    & $exe "--gtest_filter=StimulusChannelGate.*"
+    if ($LASTEXITCODE -ne 0) {
+        throw "StimulusChannelGate gtest (StimulusChannelGate.*) failed with exit code $LASTEXITCODE"
+    }
+    Write-Host "StimulusChannelGate: inert non-subscriber + behavior-differs (weather/time) + run==replay green"
+}
+
 # --- T-I4-2 BiomeCoverage mode: append-only ---
 # Atlas coverage gate for biomes. Runs the MountainsBiomeCoverageAtlas gtest
 # (which sweeps the shipped mountains preset - biomes enabled - at the fixed
@@ -4961,6 +4985,7 @@ switch ($Mode) {
     "EngineGameSplitLint" { Test-EngineGameSplitLint }
     "SimDeterminismLint" { Test-SimDeterminismLint }
     "CreatureSlice" { Test-CreatureSlice }
+    "StimulusChannelGate" { Test-StimulusChannelGate }
     "BiomeCoverage" { Test-BiomeCoverage }
     "RiverPresence" { Test-RiverPresence }
     "StructurePresence" { Test-StructurePresence }

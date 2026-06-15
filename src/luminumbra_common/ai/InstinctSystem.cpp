@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "InstinctPlanner.h"
+#include "StimulusChannels.h"
 #include "../components/CoreComponents.h"
 #include "../components/InstinctComponents.h"
 
@@ -34,11 +35,15 @@ struct OpportunitySource {
 
 } // namespace
 
-InstinctSystemTickStats RunInstinctSystemOnTick(entt::registry& registry, std::uint64_t tick) {
+InstinctSystemTickStats RunInstinctSystemOnTick(
+    entt::registry& registry,
+    std::uint64_t tick,
+    const StimulusChannelRegistry* stimulus) {
     using Luminumbra::Components::ActionPlanComponent;
     using Luminumbra::Components::InstinctAgentComponent;
     using Luminumbra::Components::NeedsComponent;
     using Luminumbra::Components::OpportunityComponent;
+    using Luminumbra::Components::StimulusSubscriptionComponent;
     using Luminumbra::Components::TransformComponent;
 
     InstinctSystemTickStats stats;
@@ -75,6 +80,35 @@ InstinctSystemTickStats RunInstinctSystemOnTick(entt::registry& registry, std::u
         // 1. Need growth on every fixed tick.
         for (auto& need : needs.needs) {
             need.pressure = ClampUnit(need.pressure + need.growth_per_tick);
+        }
+
+        // 1b. T-I5b-2 (E1): ecology stimulus channels. INERT for the canonical
+        // roster -- this block only runs when a stimulus context is supplied AND
+        // the creature carries a StimulusSubscriptionComponent (game-data opt-in).
+        // For a subscriber, each subscription samples its channel scalar [0, 1]
+        // (lazily, only the subscribed channels) and adds gain*scalar to the
+        // mapped need's pressure (clamped). Deterministic: the channel is a pure
+        // function of the tick/replicated state; need iteration is the entity's
+        // own ordered vector. The default roster has no subscription component, so
+        // the loop below NEVER runs for it and the tick path is byte-unchanged.
+        if (stimulus != nullptr) {
+            if (const auto* subscription =
+                    registry.try_get<const StimulusSubscriptionComponent>(entity)) {
+                bool applied_any = false;
+                for (const auto& sub : subscription->subscriptions) {
+                    const float scalar = stimulus->Sample(sub.channel);
+                    for (auto& need : needs.needs) {
+                        if (need.name == sub.need) {
+                            need.pressure = ClampUnit(need.pressure + sub.gain * scalar);
+                            applied_any = true;
+                            break;
+                        }
+                    }
+                }
+                if (applied_any) {
+                    ++stats.stimulus_subscribers_applied;
+                }
+            }
         }
 
         // 2. Replan when due.
