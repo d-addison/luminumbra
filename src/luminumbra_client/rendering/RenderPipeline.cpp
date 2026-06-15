@@ -28,6 +28,7 @@
 #include "passes/ShadowPass.h"
 #include "passes/SkyboxPass.h"
 #include "passes/ParticlePass.h"
+#include "passes/FoliagePass.h"
 #include "passes/SsaoPass.h"
 #include "passes/WaterPass.h"
 #include <stb_image.h>
@@ -179,6 +180,7 @@ constexpr const char* kGpuTimerPassNames[] = {
     "water",
     "skybox",
     "particles",
+    "foliage",
     "aerial",
     "final_blit",
 };
@@ -580,7 +582,8 @@ RenderPipeline::RenderPipeline()
       m_lighting_pass(std::make_unique<LightingPass>()),
       m_water_pass(std::make_unique<WaterPass>()),
       m_skybox_pass(std::make_unique<SkyboxPass>()),
-      m_particle_pass(std::make_unique<ParticlePass>()) {}
+      m_particle_pass(std::make_unique<ParticlePass>()),
+      m_foliage_pass(std::make_unique<FoliagePass>()) {}
 RenderPipeline::~RenderPipeline() {
     cleanup_gpu_resources();
 }
@@ -604,6 +607,7 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         init_screen_quad();
         m_skybox_pass->init_geometry();
         m_particle_pass->init_buffers(); // T-I5a-1: persistent-mapped instance pool
+        m_foliage_pass->init_buffers();  // T-I5b-1: persistent-mapped scatter pool
         load_material_texture_lut();
         init_terrain_textures();
         init_skinned_texture_array();
@@ -831,6 +835,7 @@ std::vector<RenderPipeline::ShaderHealthEntry> RenderPipeline::get_shader_health
     add_shader("skinned_mesh", m_gbuffer_pass->skinned_mesh_shader());
     add_shader("weather_overlay", m_skybox_pass->weather_shader());
     if (m_particle_pass) { add_shader("particles", m_particle_pass->shader()); } // T-I5a-1
+    if (m_foliage_pass) { add_shader("foliage", m_foliage_pass->shader()); } // T-I5b-1
     add_shader("aerial_perspective", m_aerial_shader); // T-I5a-6
     health.push_back({"gpu_sdf_compute", m_gpu_sdf.compute_program != 0, m_gpu_sdf.compute_program != 0 ? "" : "not initialized"});
     return health;
@@ -900,6 +905,14 @@ RenderPipeline::RenderResourceRegistryStats RenderPipeline::get_resource_registr
         stats.vertex_arrays += count(m_particle_pass->vao());
         for (std::size_t ring = 0; ring < ParticlePass::kRingFrames; ++ring) {
             stats.buffers += count(m_particle_pass->instance_buffer(ring));
+        }
+    }
+    // T-I5b-1: foliage pass VAO + persistent-mapped scatter ring buffers (same
+    // shutdown-release invariant as the particle pool above).
+    if (m_foliage_pass) {
+        stats.vertex_arrays += count(m_foliage_pass->vao());
+        for (std::size_t ring = 0; ring < FoliagePass::kRingFrames; ++ring) {
+            stats.buffers += count(m_foliage_pass->instance_buffer(ring));
         }
     }
 
@@ -1381,6 +1394,7 @@ void RenderPipeline::collect_gpu_pass_timers() {
     m_last_render_pass_stats.water_gpu_ms = m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::Water)];
     m_last_render_pass_stats.skybox_gpu_ms = m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::Skybox)];
     m_last_render_pass_stats.particle_gpu_ms = m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::Particle)];
+    m_last_render_pass_stats.foliage_gpu_ms = m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::Foliage)]; // T-I5b-1
     m_last_render_pass_stats.aerial_gpu_ms = m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::Aerial)]; // T-I5a-6
     // T-I5a-8: the cloud cast-shadow sample lives INSIDE the lighting pass (a
     // per-fragment projected-coverage lookup, no separate pass), so its cost is
@@ -1658,6 +1672,20 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     end_gpu_pass_timer(GpuTimerPass::Aerial);
     glBindVertexArray(0);
 
+    // 7c. FOLIAGE PASS (T-I5b-1, F1): instanced ground-cover scatter blended
+    // into the lit HDR target. Depth-tested against the scene depth (blitted into
+    // the lighting FBO at step 5), so the cards occlude correctly. The scatter
+    // instances are rebuilt by the scenario/client driver (the deterministic
+    // placement hash + the A2 wind bridge) BEFORE this; here we only draw. A
+    // no-op (zero GL draws) when foliage is disabled / empty, so all existing
+    // visual gates stay byte-stable. RENDER-ONLY (one-way, never feeds the sim).
+    if (m_foliage_pass) {
+        begin_gpu_pass_timer(GpuTimerPass::Foliage);
+        m_foliage_pass->execute(*this, camera);
+        end_gpu_pass_timer(GpuTimerPass::Foliage);
+        glBindVertexArray(0);
+    }
+
     // 8. PARTICLE PASS (T-I5a-1): forward-lit, soft-faded transparent particles
     // blended into the lit HDR target after the skybox. Render-only motion is
     // advanced first; the descriptor schedule (the sim-deterministic surface) is
@@ -1753,6 +1781,7 @@ void RenderPipeline::init_shaders() {
     m_lighting_pass->init_shader(m_root_path);
     m_skybox_pass->init_shader(m_root_path);
     m_particle_pass->init_shader(m_root_path); // T-I5a-1
+    m_foliage_pass->init_shader(m_root_path);  // T-I5b-1
     m_shadow_pass->init_shader(m_root_path);
     m_ssao_pass->init_shaders(m_root_path);
     m_water_pass->init_shader(m_root_path);
@@ -1884,6 +1913,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     if (m_screen_quad_vbo) { glDeleteBuffers(1, &m_screen_quad_vbo); m_screen_quad_vbo = 0; }
     m_skybox_pass->destroy_geometry();
     if (m_particle_pass) { m_particle_pass->destroy_buffers(); } // T-I5a-1
+    if (m_foliage_pass) { m_foliage_pass->destroy_buffers(); }   // T-I5b-1
     m_sky_lut.destroy(); // T-I5a-6: release scattering LUT textures
     m_gbuffer_pass->destroy_instanced_static_mesh();
     m_gbuffer_pass->destroy_skinned_mesh();
@@ -1899,6 +1929,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_lighting_pass->reset_shader();
     m_skybox_pass->reset_shader();
     if (m_particle_pass) { m_particle_pass->reset_shader(); } // T-I5a-1
+    if (m_foliage_pass) { m_foliage_pass->reset_shader(); }   // T-I5b-1
     m_aerial_shader.reset(); // T-I5a-6: aerial-perspective fullscreen shader
     m_shadow_pass->reset_shader();
     m_ssao_pass->reset_shaders();

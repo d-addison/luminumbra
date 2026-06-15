@@ -68,6 +68,18 @@ struct BiomeReverb {
     float decay = 1.0f;
 };
 
+// T-I5b-1 (F1): per-biome vegetation/cover. Parsed in iteration 4
+// (parsed-not-consumed); now CONSUMED render-side by the FoliagePass scatter
+// density. The scatter names are game-authored opaque labels (the engine only
+// reads `density`); like reverb, vegetation is RENDER/CLIENT-only and is
+// DELIBERATELY NOT mixed into compute_content_hash() (the content hash gates the
+// terrain far-LOD cache; foliage is render-only and must not invalidate tiles or
+// perturb world_hash).
+struct BiomeVegetation {
+    float density = 0.0f; // [0,1] cover fraction driving the foliage scatter
+    std::vector<std::string> scatter; // opaque archetype labels (game content)
+};
+
 struct BiomeDefinition {
     u8 id = kNoBiome;
     std::string name;
@@ -78,6 +90,7 @@ struct BiomeDefinition {
     BiomeClimateRange humidity;
     BiomeSurfacePalette palette;
     BiomeReverb reverb;
+    BiomeVegetation vegetation;
 };
 
 class BiomeTable {
@@ -110,6 +123,10 @@ public:
     // kNoBiome / any unknown id so callers never need a separate guard.
     const BiomeReverb& reverb_for(u8 biome_id) const;
 
+    // T-I5b-1: vegetation/cover for a biome id; returns the default (zero
+    // density) for kNoBiome / any unknown id. Render-only (foliage scatter).
+    const BiomeVegetation& vegetation_for(u8 biome_id) const;
+
     // fnv1a64 over the canonicalized table content (see header note).
     u64 content_hash() const { return m_content_hash; }
 
@@ -120,6 +137,7 @@ private:
     std::array<u8, 256> m_id_to_index{};
     BiomeSurfacePalette m_default_palette{};
     BiomeReverb m_default_reverb{};
+    BiomeVegetation m_default_vegetation{};
     std::vector<std::string> m_errors;
     std::vector<std::string> m_warnings;
     u64 m_content_hash = 0;

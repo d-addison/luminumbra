@@ -1703,6 +1703,146 @@ void WriteParticleEmitterDeterminismAnalysis(
     output << std::setw(2) << artifact << '\n';
 }
 
+// --- Foliage instancing smoke (T-I5b-1 / F1) ---
+
+Luminumbra::Rendering::FoliagePass::SurfaceSample FoliageSurfaceQuery(
+    void* ctx, float world_x, float world_z) {
+    Luminumbra::Rendering::FoliagePass::SurfaceSample s;
+    auto* fctx = static_cast<FoliageScatterContext*>(ctx);
+    if (fctx == nullptr || fctx->world_system == nullptr) {
+        s.valid = false;
+        return s;
+    }
+    Luminumbra::Systems::SHIELD_WorldSystem* ws = fctx->world_system;
+    const float h = ws->GetTerrainHeightAt(world_x, world_z);
+    s.height = h;
+    // Underwater columns carry no ground-cover foliage.
+    if (h <= Luminumbra::SEA_LEVEL) {
+        s.valid = false;
+        return s;
+    }
+    // Slope from a 1 m central finite difference of the shaped height (pure).
+    const float hx = ws->GetTerrainHeightAt(world_x + 1.0f, world_z);
+    const float hz = ws->GetTerrainHeightAt(world_x, world_z + 1.0f);
+    const float grad = std::sqrt((hx - h) * (hx - h) + (hz - h) * (hz - h));
+    s.slope = std::clamp(grad, 0.0f, 1.0f); // 1 m rise over 1 m == slope 1
+    // Moisture proxy: the biome density already encodes it; modulate mildly by a
+    // height-band proxy (lower/flatter ground reads wetter). Render-only.
+    s.moisture = std::clamp(1.0f - s.slope, 0.0f, 1.0f);
+    s.valid = true;
+    return s;
+}
+
+void WriteFoliageInstancingAnalysis(
+    const std::filesystem::path& artifact_dir,
+    const std::string& foliage_screenshot,
+    const FoliageInstancingResult& result,
+    const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass)
+{
+    const GLDebugRuntimeStats gl_debug = CurrentGLDebugRuntimeStats();
+
+    // Coverage density tracks the biome table within a band (fixed seeds). The
+    // measured density is the fraction of the per-chunk candidate budget that
+    // actually emitted; it should land near the biome density it scaled from.
+    const double density_delta = std::abs(result.measured_density - result.biome_density);
+    const bool density_passed =
+        result.instances_within_ring > 0 &&
+        density_delta <= result.biome_density_band;
+
+    // Distance-fade: NO foliage beyond the live ring / fade end.
+    const bool fade_passed = result.instances_beyond_fade == 0;
+
+    // Wind sway responds: the windy max tip displacement must exceed calm by a
+    // clear margin (calm is ~0). The placement hash is identical across the two
+    // phases, so the ONLY change is the wind bridge -> the sway delta isolates it.
+    constexpr double kMinSwayDelta = 0.02; // metres of extra tip displacement
+    const bool sway_passed =
+        result.sway_responds &&
+        (result.windy_max_sway - result.calm_max_sway) >= kMinSwayDelta &&
+        result.windy_max_sway > result.calm_max_sway;
+
+    // GPU budget enforced where the timer resolved a sample; informational on
+    // debug (debug ~10x slower — A2 / T-I5a-1 precedent).
+    const bool gpu_within_budget =
+        !result.gpu_timers_supported ||
+        result.foliage_gpu_ms <= result.foliage_budget_ms;
+
+    // Determinism: the instance-set hash is byte-equal across two rebuilds.
+    const bool determinism_passed =
+        result.hash_byte_equal &&
+        result.instance_hash_run_a == result.instance_hash_run_b;
+
+    const bool passed =
+        render_pass.foliage_draws > 0 &&
+        determinism_passed &&
+        density_passed &&
+        fade_passed &&
+        sway_passed &&
+        gpu_within_budget &&
+        gl_debug.errors == 0;
+
+    nlohmann::json artifact = {
+        {"schema", "luminumbra.foliage_instancing.v1"},
+        {"timestamp_utc", TimestampUtc()},
+        {"passed", passed},
+        {"foliage_screenshot", foliage_screenshot},
+        {"determinism", {
+            {"passed", determinism_passed},
+            {"world_seed", result.world_seed},
+            {"instance_hash_run_a", result.instance_hash_run_a},
+            {"instance_hash_run_b", result.instance_hash_run_b},
+            {"hash_byte_equal", result.hash_byte_equal},
+            {"placement", "pure_hash(chunk_coords, biome_id, slope, moisture, instance_index)"},
+            {"global_rng", false},
+            {"seed_offset_consumed", false},
+            {"world_hash_written", false}
+        }},
+        {"coverage_density", {
+            {"passed", density_passed},
+            {"instances_within_ring", result.instances_within_ring},
+            {"instances_total", result.instances_total},
+            {"measured_density", result.measured_density},
+            {"biome_density", result.biome_density},
+            {"density_delta", density_delta},
+            {"density_band", result.biome_density_band}
+        }},
+        {"distance_fade", {
+            {"passed", fade_passed},
+            {"instances_beyond_fade", result.instances_beyond_fade},
+            {"fade_start_m", result.fade_start_m},
+            {"fade_end_m", result.fade_end_m},
+            {"live_ring_radius_m", result.live_ring_radius_m}
+        }},
+        {"wind_sway", {
+            {"passed", sway_passed},
+            {"calm_max_sway", result.calm_max_sway},
+            {"windy_max_sway", result.windy_max_sway},
+            {"sway_delta", result.windy_max_sway - result.calm_max_sway},
+            {"min_sway_delta", kMinSwayDelta}
+        }},
+        {"gpu_timer", {
+            {"foliage_gpu_ms", result.foliage_gpu_ms},
+            {"budget_ms", result.foliage_budget_ms},
+            {"within_budget", gpu_within_budget},
+            {"supported", result.gpu_timers_supported}
+        }},
+        {"render_pass", {
+            {"foliage_draws", result.foliage_draws},
+            {"foliage_instances_drawn", result.foliage_instances_drawn},
+            {"skybox_draws", render_pass.skybox_draws}
+        }},
+        {"gl_debug", {
+            {"messages", gl_debug.messages},
+            {"errors", gl_debug.errors},
+            {"warnings", gl_debug.warnings},
+            {"notifications", gl_debug.notifications}
+        }}
+    };
+
+    std::ofstream output(artifact_dir / "foliage-instancing-analysis.json");
+    output << std::setw(2) << artifact << '\n';
+}
+
 // --- Precipitation visual + wind-slant smoke (T-I5a-4 / B2) ---
 
 PrecipPixelStats AnalyzePrecipPixels(const std::vector<unsigned char>& pixels, int width, int height) {
