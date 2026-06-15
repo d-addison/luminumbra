@@ -45,10 +45,14 @@ std::string WeatherSubHash(world::GameSession* session) {
 // chunk hash (WorldSaveService::world_hash / ComputeWorldStreamingStateHash) is
 // unchanged byte-for-byte (persistence fixtures stay green); the runner-level
 // world_hash ALSO commits the wind field (A2 bump, 2fa007951a21e140 ->
-// 0eac465289e7c88b) and now the weather state (B1 bump #2, 0eac465289e7c88b ->
-// 0857e683b4b8c47e; weather_sub_hash a7d8f3d28401386f). Order is fixed (chunk,
-// then wind, then weather) so the composite is
-// reproducible; appending weather is append-only so the wind term is unchanged.
+// 0eac465289e7c88b), the weather state (B1 bump #2, 0eac465289e7c88b ->
+// 0857e683b4b8c47e; weather_sub_hash a7d8f3d28401386f), and now the lightning
+// STRIKE SCHEDULE folded into the SAME weather sub-hash (T-I5a-5 B3, MEGA-BUMP #3,
+// 0857e683b4b8c47e -> d950a6afc12a5cdc; weather_sub_hash a7d8f3d28401386f ->
+// e3c7e0aa219ebbe5). The strike schedule replaces the reserved single-0 slot B1
+// left in ComputeWeatherSubHash, so the wind term + the byte layout before the
+// strike block are unchanged. Order is fixed (chunk, then wind, then weather) so
+// the composite is reproducible.
 std::string ComposeWorldHash(const std::string& chunk_hash,
                              const std::string& wind_hash,
                              const std::string& weather_hash) {

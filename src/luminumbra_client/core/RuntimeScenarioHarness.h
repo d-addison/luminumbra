@@ -444,6 +444,34 @@ void WriteWeatherVisualAnalysis(
     float weather_intensity,
     const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass);
 
+// --- Lightning strike-frame smoke (T-I5a-5, B3) ---
+// The strike capture is the photography TIMING shot: a deterministically scheduled
+// strike fires during the weather phase, and the gate asserts the captured STRIKE
+// FRAME shows (a) a full-scene luminance PULSE (frame-mean luminance spike vs the
+// neighbour pre-strike frame) and (b) BOLT pixels (a bright thin high-gradient
+// structure). The bolt-pixel detector counts pixels that are both bright AND a
+// local high-gradient (the thin channel against the darkened storm sky). Render-
+// only: the bolt/pulse are a one-way response to the SIM strike event (F2).
+struct StrikePixelStats {
+    int width = 0;
+    int height = 0;
+    double frame_mean_luminance = 0.0; // whole-frame mean (the pulse signal)
+    std::uint64_t bright_thin_pixels = 0; // bright + high local gradient (bolt body)
+    double max_luminance = 0.0;
+};
+
+StrikePixelStats AnalyzeStrikePixels(const std::vector<unsigned char>& pixels, int width, int height);
+
+void WriteStrikeVisualAnalysis(
+    const std::filesystem::path& artifact_dir,
+    const std::string& neighbor_screenshot,
+    const std::string& strike_screenshot,
+    const StrikePixelStats& neighbor_stats,
+    const StrikePixelStats& strike_stats,
+    int sim_strikes_scheduled,
+    double lightning_pulse_gpu_ms,
+    const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass);
+
 // --- Cloud-shadow smoke (T-I5a-8, C3) ---
 // PARTLY-CLOUDY fixture (NOT overcast — critique F4). The skybox dome renders the
 // wind-advected cloud layer and the lighting pass projects the SAME coverage field

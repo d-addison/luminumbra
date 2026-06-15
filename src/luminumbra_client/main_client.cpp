@@ -15,6 +15,7 @@
 #include "rendering/RenderPipeline.h"
 #include "rendering/passes/WaterPass.h"
 #include "rendering/passes/ParticlePass.h" // T-I5a-1: EmitterDescriptor + accessor type
+#include "rendering/LightningBolt.h" // T-I5a-5 (B3): deterministic bolt geometry
 #include "rendering/WorldLoadingVisualizer.h"
 #include "ui/Rml_UIManager.h"
 #include "audio/AudioManagerFactory.h"
@@ -1782,6 +1783,15 @@ int main(int argc, char* argv[]) {
     bool weather_baseline_capture_written = false;
     bool weather_visual_capture_written = false;
     WeatherPixelStats weather_baseline_stats;
+    // T-I5a-5 (B3): lightning strike-frame state. During the weather phase a
+    // deterministically scheduled strike fires; the harness captures a NEIGHBOUR
+    // (pre-strike) frame and the STRIKE frame so the gate can assert the full-scene
+    // luminance PULSE (frame-mean spike) + BOLT pixels. Render-only response to the
+    // SIM strike event (one-way, F2); the visual gate does NOT depend on audio (F8).
+    bool lightning_neighbor_captured = false;
+    bool lightning_strike_capture_written = false;
+    Luminumbra::Client::ScenarioHarness::StrikePixelStats lightning_neighbor_stats;
+    int lightning_sim_strikes_scheduled = 0;
     // T-I5a-8 cloud-shadow scenario state. Two terrain ROI captures (t0/t1) as the
     // cloud-shadow edge drifts, a sky capture for cloud presence, and a clouds-off
     // lighting-pass GPU timing captured before enabling the shadow (budget check).
@@ -2144,6 +2154,87 @@ int main(int argc, char* argv[]) {
                         // Clear-sky control: a driven CLEAR state (overlay off).
                         renderPipeline.set_weather_state(wstate);
                     }
+
+                    // T-I5a-5 (B3): LIGHTNING. The SIM strike schedule is a pure
+                    // function of (seed+13, storm state, tick); we read its count for
+                    // the gate's sim-scheduled assertion. For a REPRODUCIBLE capture
+                    // (the render loop is wall-clock paced, so we cannot rely on a sim
+                    // strike landing exactly on the capture frame), the strike FRAME
+                    // is driven deterministically here in this dedicated scenario: a
+                    // fixed-position strike in front of the camera fires in a narrow
+                    // progress window, building the SAME deterministic bolt the sim
+                    // event would. One-way (F2): we READ sim strike state + drive the
+                    // render pulse/bolt; we write NOTHING back into the sim.
+                    if (weather && weather->live_strike_count() > lightning_sim_strikes_scheduled) {
+                        lightning_sim_strikes_scheduled = weather->live_strike_count();
+                    }
+                    Luminumbra::Rendering::LightningRenderState lstate;
+                    const bool strike_window = weather_phase &&
+                        (elapsed_play_seconds / duration) >= 0.80 &&
+                        (elapsed_play_seconds / duration) < 0.84;
+                    if (strike_window && g_camera) {
+                        lstate.active = true;
+                        // The overlay adds to the already-tonemapped [0,1] scene, so
+                        // a modest pulse is a clear full-scene flash without a total
+                        // white-out (the gate needs a frame-mean spike >= 0.04).
+                        lstate.pulse_intensity = 0.16f; // 1-to-few-frame flash lift
+                        lstate.bolt_width_ndc = 0.012f; // bright core ribbon
+                        lstate.bolt_glow_ndc = 0.040f;  // surrounding glow halo
+                        // Deterministic strike terminus on the horizon ahead of the
+                        // camera. The bolt descends from a cloud-base height down to
+                        // this point; placing the terminus ~220 m ahead at the camera's
+                        // EYE level (not far below) keeps the whole descending channel
+                        // inside the upper-frame sky where the skybox-visual camera
+                        // looks, so the bolt is on-screen. Seeded from a fixed salt so
+                        // the captured bolt is byte-reproducible.
+                        const glm::vec3 fwd = glm::normalize(glm::vec3(g_camera->Front.x, 0.0f, g_camera->Front.z));
+                        const glm::vec3 strike_ground = g_camera->Position + fwd * 220.0f;
+                        const Luminumbra::Rendering::LightningBoltGeometry bolt =
+                            Luminumbra::Rendering::BuildLightningBolt(
+                                strike_ground.x, strike_ground.y, strike_ground.z,
+                                /*magnitude=*/0.9f, /*strike_seed=*/0x5A5A1357ull);
+                        // SCREEN-ANCHORED bolt projection. The bolt's WORLD shape (the
+                        // seeded midpoint-displacement channel + branches) is mapped
+                        // into a guaranteed-on-screen NDC path: the channel's normalized
+                        // HEIGHT drives NDC.y from the upper sky (+0.92) down to just
+                        // above the horizon (-0.12), and its lateral displacement from
+                        // the straight cloud->ground line drives NDC.x around a fixed
+                        // screen column. This keeps the bolt a reproducible, clearly
+                        // visible vertical streak regardless of the camera pitch (the
+                        // skybox-visual framing) while preserving the seeded jaggedness.
+                        // Render-only capture aid (F2): pure function of the strike.
+                        const glm::vec3 top = bolt.main_channel.front();
+                        const glm::vec3 bottom = bolt.main_channel.back();
+                        const float span_y = std::max(1e-3f, top.y - bottom.y);
+                        const float kBoltColumnNdcX = 0.06f;  // centred column
+                        const float kBoltTopNdcY = 0.92f;
+                        const float kBoltBotNdcY = -0.12f;
+                        const float kLateralToNdc = 1.0f / 240.0f; // gentle lateral jag -> a vertical-ish bolt
+                        const auto map_point = [&](const glm::vec3& wp) -> glm::vec2 {
+                            const float hf = std::clamp((wp.y - bottom.y) / span_y, 0.0f, 1.0f);
+                            const float ndc_y = kBoltBotNdcY + (kBoltTopNdcY - kBoltBotNdcY) * hf;
+                            // Lateral offset from the straight descent line (interpolated
+                            // X/Z between top and bottom at this height fraction).
+                            const float base_x = bottom.x + (top.x - bottom.x) * hf;
+                            const float base_z = bottom.z + (top.z - bottom.z) * hf;
+                            const float lateral = (wp.x - base_x) + (wp.z - base_z);
+                            const float ndc_x = kBoltColumnNdcX + lateral * kLateralToNdc;
+                            return glm::vec2(ndc_x, ndc_y);
+                        };
+                        const auto push_stroke = [&](const std::vector<glm::vec3>& stroke) {
+                            if (!lstate.bolt_points_ndc.empty()) {
+                                lstate.bolt_points_ndc.emplace_back(-3.0f, -3.0f); // pen-up
+                            }
+                            for (const glm::vec3& wp : stroke) {
+                                lstate.bolt_points_ndc.push_back(map_point(wp));
+                            }
+                        };
+                        push_stroke(bolt.main_channel);
+                        for (const auto& br : bolt.branches) { push_stroke(br); }
+                        // Strike point NDC for the radial flash centre (the terminus).
+                        lstate.strike_ndc = glm::vec2(kBoltColumnNdcX, kBoltBotNdcY);
+                    }
+                    renderPipeline.set_lightning_state(lstate);
                 } else if (scenario_config.cloud_shadow_smoke() && scenario_ready && g_camera) {
                     // T-I5a-8 (C3): partly-cloudy cast-shadow scenario. Fixed noon
                     // camera framing lit terrain in the lower frame (strong sun ->
@@ -2915,6 +3006,60 @@ int main(int argc, char* argv[]) {
                                                 stats,
                                                 "rain",
                                                 1.0f,
+                                                render_pass_stats);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // T-I5a-5 (B3): lightning strike-frame capture. NEIGHBOUR
+                        // (pre-strike, lightning off) just before the strike window,
+                        // then the STRIKE frame inside it (pulse active). The gate
+                        // asserts the frame-mean luminance PULSE delta + BOLT pixels.
+                        if (scenario_config.weather_visual_smoke() && scenario_ready && !lightning_strike_capture_written) {
+                            const double elapsed_play_seconds = std::chrono::duration<double>(now - scenario_play_started_at).count();
+                            const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
+                            const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
+                            const auto& render_pass_stats = renderPipeline.get_last_render_pass_stats();
+                            const auto& lit_state = renderPipeline.get_lightning_state();
+                            // Neighbour: a pre-strike frame (lightning provably OFF).
+                            const bool capture_neighbor = !lightning_neighbor_captured &&
+                                progress >= 0.76 && progress < 0.80 && !lit_state.active;
+                            // Strike: a frame inside the window where the pulse is ON.
+                            const bool capture_strike = lightning_neighbor_captured &&
+                                lit_state.active && lit_state.pulse_intensity > 0.0f &&
+                                progress >= 0.80 && progress < 0.84;
+                            if ((capture_neighbor || capture_strike) && render_pass_stats.lighting_draws > 0) {
+                                int sw = 0, sh = 0;
+                                glfwGetFramebufferSize(window, &sw, &sh);
+                                if (sw > 0 && sh > 0) {
+                                    std::vector<unsigned char> frame_pixels(
+                                        static_cast<std::size_t>(sw) * static_cast<std::size_t>(sh) * 3u);
+                                    glReadBuffer(GL_BACK);
+                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                                    glReadPixels(0, 0, sw, sh, GL_RGB, GL_UNSIGNED_BYTE, frame_pixels.data());
+                                    const auto stats =
+                                        Luminumbra::Client::ScenarioHarness::AnalyzeStrikePixels(frame_pixels, sw, sh);
+                                    if (capture_neighbor) {
+                                        const std::string neighbor_path = "screenshots/lightning-neighbor.ppm";
+                                        if (WritePixelBufferPpm(
+                                                scenario_config.artifact_dir / neighbor_path, sw, sh, frame_pixels)) {
+                                            lightning_neighbor_captured = true;
+                                            lightning_neighbor_stats = stats;
+                                        }
+                                    } else {
+                                        const std::string strike_path = "screenshots/lightning-strike.ppm";
+                                        if (WritePixelBufferPpm(
+                                                scenario_config.artifact_dir / strike_path, sw, sh, frame_pixels)) {
+                                            lightning_strike_capture_written = true;
+                                            Luminumbra::Client::ScenarioHarness::WriteStrikeVisualAnalysis(
+                                                scenario_config.artifact_dir,
+                                                "screenshots/lightning-neighbor.ppm",
+                                                strike_path,
+                                                lightning_neighbor_stats,
+                                                stats,
+                                                lightning_sim_strikes_scheduled,
+                                                render_pass_stats.lightning_pulse_gpu_ms,
                                                 render_pass_stats);
                                         }
                                     }

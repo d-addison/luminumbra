@@ -1341,6 +1341,152 @@ void WriteWeatherVisualAnalysis(
     output << std::setw(2) << artifact << '\n';
 }
 
+// --- Lightning strike-frame smoke (T-I5a-5, B3) ---
+
+StrikePixelStats AnalyzeStrikePixels(const std::vector<unsigned char>& pixels, int width, int height) {
+    StrikePixelStats stats;
+    stats.width = width;
+    stats.height = height;
+    if (width <= 0 || height <= 0 ||
+        pixels.size() < static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u) {
+        return stats;
+    }
+    const std::size_t row_stride = static_cast<std::size_t>(width) * 3u;
+
+    // Frame-mean luminance is the PULSE signal (the whole frame brightens on the
+    // strike frame). The bolt detector counts BRIGHT pixels that are also a local
+    // high-gradient -- the thin bright channel of the bolt standing out from its
+    // surroundings. The gradient is checked in BOTH axes (the bolt descends, so a
+    // near-vertical segment has bright horizontal neighbours but a sharp VERTICAL
+    // step at its ends/kinks; a near-horizontal branch is the reverse) so the thin
+    // structure is caught regardless of its local orientation. "Bright" is relative
+    // to the frame mean (the bolt sits well above the scene average) so it works
+    // against either a dark or a bright storm sky after tonemapping.
+    constexpr double kAbsBright = 0.74;        // near the post-tonemap bolt core ribbon
+    constexpr double kGradientLuma = 0.06;     // sharp local luminance step (either axis)
+    double frame_accum = 0.0;
+    std::uint64_t frame_pixels = 0;
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const std::size_t off = static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
+            const double l = PixelLuminance(pixels[off], pixels[off + 1u], pixels[off + 2u]) / 255.0;
+            frame_accum += l;
+            ++frame_pixels;
+            stats.max_luminance = std::max(stats.max_luminance, l);
+        }
+    }
+    if (frame_pixels > 0) {
+        stats.frame_mean_luminance = frame_accum / static_cast<double>(frame_pixels);
+    }
+    // The bolt pixel is bright in absolute terms AND well above the frame mean AND
+    // a sharp local step on at least one axis.
+    const double rel_bright = stats.frame_mean_luminance + 0.12;
+    for (int y = 1; y < height - 1; ++y) {
+        for (int x = 1; x < width - 1; ++x) {
+            const std::size_t off = static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
+            const double l = PixelLuminance(pixels[off], pixels[off + 1u], pixels[off + 2u]) / 255.0;
+            if (l < kAbsBright || l < rel_bright) {
+                continue;
+            }
+            const std::size_t offL = off - 3u;
+            const std::size_t offR = off + 3u;
+            const std::size_t offU = off - row_stride;
+            const std::size_t offD = off + row_stride;
+            const double lL = PixelLuminance(pixels[offL], pixels[offL + 1u], pixels[offL + 2u]) / 255.0;
+            const double lR = PixelLuminance(pixels[offR], pixels[offR + 1u], pixels[offR + 2u]) / 255.0;
+            const double lU = PixelLuminance(pixels[offU], pixels[offU + 1u], pixels[offU + 2u]) / 255.0;
+            const double lD = PixelLuminance(pixels[offD], pixels[offD + 1u], pixels[offD + 2u]) / 255.0;
+            if ((l - lL) >= kGradientLuma || (l - lR) >= kGradientLuma ||
+                (l - lU) >= kGradientLuma || (l - lD) >= kGradientLuma) {
+                ++stats.bright_thin_pixels;
+            }
+        }
+    }
+    return stats;
+}
+
+void WriteStrikeVisualAnalysis(
+    const std::filesystem::path& artifact_dir,
+    const std::string& neighbor_screenshot,
+    const std::string& strike_screenshot,
+    const StrikePixelStats& neighbor_stats,
+    const StrikePixelStats& strike_stats,
+    int sim_strikes_scheduled,
+    double lightning_pulse_gpu_ms,
+    const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass)
+{
+    // The strike frame must (a) show a full-scene luminance PULSE -- frame-mean
+    // luminance markedly higher than the neighbour pre-strike frame -- and (b)
+    // contain BOLT pixels (a bright thin high-gradient structure). Thresholds
+    // calibrated to the first strike capture; measured values recorded alongside.
+    constexpr double kMinPulseDelta = 0.04;         // >= 4% absolute frame-mean luma rise
+    constexpr std::uint64_t kMinBoltPixels = 40;    // a visible thin bolt structure
+
+    const double pulse_delta = strike_stats.frame_mean_luminance - neighbor_stats.frame_mean_luminance;
+    const GLDebugRuntimeStats gl_debug = CurrentGLDebugRuntimeStats();
+
+    const bool pulse_passed = pulse_delta >= kMinPulseDelta;
+    const bool bolt_passed = strike_stats.bright_thin_pixels >= kMinBoltPixels;
+    // The strike's SIM determinism (the schedule is a replayable WORLD EVENT folded
+    // into the `weather` world_hash sub-hash) is proven by the weather-bench arm of
+    // the WeatherVisual gate (strikes_scheduled there is asserted > 0). Here in the
+    // VISUAL arm the strike count is reported as telemetry; the visual PASS is the
+    // pulse + bolt, and it does NOT depend on audio (critique F8).
+    const bool sim_scheduled = sim_strikes_scheduled > 0; // telemetry (not a pass gate here)
+    const bool passed =
+        render_pass.lighting_draws > 0 &&
+        pulse_passed &&
+        bolt_passed &&
+        gl_debug.errors == 0;
+
+    nlohmann::json artifact = {
+        {"schema", "luminumbra.lightning_strike_visual.v1"},
+        {"timestamp_utc", TimestampUtc()},
+        {"passed", passed},
+        {"neighbor_screenshot", neighbor_screenshot},
+        {"strike_screenshot", strike_screenshot},
+        {"neighbor", {
+            {"frame_mean_luminance", neighbor_stats.frame_mean_luminance},
+            {"bright_thin_pixels", neighbor_stats.bright_thin_pixels},
+            {"max_luminance", neighbor_stats.max_luminance}
+        }},
+        {"strike", {
+            {"frame_mean_luminance", strike_stats.frame_mean_luminance},
+            {"bright_thin_pixels", strike_stats.bright_thin_pixels},
+            {"max_luminance", strike_stats.max_luminance}
+        }},
+        {"pulse", {
+            {"passed", pulse_passed},
+            {"frame_mean_luminance_delta", pulse_delta}
+        }},
+        {"bolt", {
+            {"passed", bolt_passed},
+            {"bright_thin_pixels", strike_stats.bright_thin_pixels}
+        }},
+        {"sim", {
+            {"strikes_scheduled", sim_strikes_scheduled},
+            {"sim_scheduled", sim_scheduled}
+        }},
+        {"thresholds", {
+            {"min_pulse_delta", kMinPulseDelta},
+            {"min_bolt_pixels", kMinBoltPixels}
+        }},
+        {"render_pass", {
+            {"lighting_draws", render_pass.lighting_draws},
+            {"lighting_pulse_gpu_ms", lightning_pulse_gpu_ms}
+        }},
+        {"gl_debug", {
+            {"messages", gl_debug.messages},
+            {"errors", gl_debug.errors},
+            {"warnings", gl_debug.warnings},
+            {"notifications", gl_debug.notifications}
+        }}
+    };
+
+    std::ofstream output(artifact_dir / "lightning-strike-visual-analysis.json");
+    output << std::setw(2) << artifact << '\n';
+}
+
 // --- Cloud-shadow smoke (T-I5a-8, C3) ---
 
 CloudShadowPixelStats AnalyzeCloudShadowPixels(const std::vector<unsigned char>& pixels, int width, int height) {
