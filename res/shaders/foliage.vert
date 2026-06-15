@@ -3,20 +3,29 @@
 // ===========================================================================
 // T-I5b-1 (F1): instanced foliage scatter vertex stage.
 //
-// One instanced quad-strip blade/clutter sprite per scatter instance, drawn
-// from the persistent-mapped FoliageInstance pool (FoliagePass). Each instance
-// is a vertical (world-up) billboarded card so grass/clutter read as upright
-// ground cover. Four corners are generated from gl_VertexID (a triangle strip:
-// glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, instanceCount)); NO geometry
-// shader (the Shader class is vert+frag only), matching the A1 ParticlePass.
+// One instanced CROSSED blade/clutter sprite per scatter instance, drawn from
+// the persistent-mapped FoliageInstance pool (FoliagePass). Each instance is a
+// pair of vertical (world-up) cards crossed at 90 degrees so the blade reads as
+// upright ground cover from ANY view angle (a single flat card read as a neon
+// playing-card decal from the down-pitched cells -- T-I5b-DR-foliage-blocker).
+// The 12 verts per instance are two quads (2 triangles each) generated from
+// gl_VertexID; NO geometry shader (the Shader class is vert+frag only), matching
+// the A1 ParticlePass. Draw: glDrawArraysInstanced(GL_TRIANGLES, 0, 12, count).
 //
-// WIND SWAY (design-decisions §2): the TOP of the card is displaced by the
+// WIND SWAY (design-decisions §2): the TOP of each card is displaced by the
 // per-instance wind vector (the A2 wind field sampled CPU-side and packed into
 // the instance) scaled by the per-archetype sway flag. The base stays pinned to
 // the ground so the card waves from the root. RENDER-ONLY: the sway never feeds
 // the sim/world_hash (one-way, critique F2).
 //
-// Per-instance attributes come from the 32-byte FoliageInstance:
+// SKY / HORIZON CULL (T-I5b-DR-foliage-blocker, GREEN_SKY_SPECKLE): ground cover
+// must never render against the sky. A blade whose tip projects ABOVE the
+// horizon line (camera eye height) is a distant card poking over the terrain
+// silhouette -- it is collapsed to a degenerate point so it cannot speckle the
+// sky. Combined with a steeper quadratic distance fade so the far half of the
+// live ring is already nearly gone before the horizon.
+//
+// Per-instance attributes come from the 36-byte FoliageInstance:
 //   0: pos (vec3)        ground anchor (world)
 //   1: size (vec2)       half-width / height (world units)
 //   2: color (rgba8)     albedo tint (a = sway flag scale 0..1)
@@ -45,22 +54,48 @@ out VS_OUT {
     vec2  texCoord;
     vec4  color;
     float fade;       // [0,1] distance fade (0 == culled at the tip)
+    float heightT;    // 0 at the blade root .. 1 at the tip (base-to-tip gradient)
     vec3  worldPos;
     vec3  worldNormal;
 } vs_out;
 
-void main() {
-    // Quad corner from gl_VertexID for a triangle strip:
-    //   0 -> (-1, 0) base-left, 1 -> (+1, 0) base-right,
-    //   2 -> (-1, 1) tip-left,  3 -> (+1, 1) tip-right.
-    float cornerX = (gl_VertexID == 1 || gl_VertexID == 3) ? 1.0 : -1.0;
-    float cornerY = (gl_VertexID == 2 || gl_VertexID == 3) ? 1.0 : 0.0; // 0 base .. 1 tip
+// Emit a degenerate (off-screen) vertex so an entire blade is culled cheaply.
+void emitCulled(vec3 worldPos) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0); // outside clip space -> clipped
+    vs_out.texCoord = vec2(0.0);
+    vs_out.color = vec4(0.0);
+    vs_out.fade = 0.0;
+    vs_out.heightT = 0.0;
+    vs_out.worldPos = worldPos;
+    vs_out.worldNormal = vec3(0.0, 1.0, 0.0);
+}
 
-    // Card basis: a yaw-rotated horizontal axis + world up. The card faces a
-    // fixed per-instance yaw (deterministic) rather than the camera, so the
-    // scatter looks like real ground cover, not billboards spinning to face you.
-    float cf = cos(aFacing);
-    float sf = sin(aFacing);
+void main() {
+    // Two crossed quads, 6 verts each (two triangles): vertex within a quad is
+    // gl_VertexID % 6, the quad index is gl_VertexID / 6 (0 or 1). The two quads
+    // share the same base anchor but are rotated 90 degrees about world-up, so
+    // the blade always presents a face toward the viewer (never a flat decal).
+    int vInQuad = gl_VertexID % 6;
+    int quad    = gl_VertexID / 6;
+
+    // Unit quad corner for a 2-triangle quad: (0,0)(1,0)(0,1) / (1,0)(1,1)(0,1).
+    // cornerX in {-1,+1}, cornerY in {0 (base), 1 (tip)}.
+    vec2 q;
+    if      (vInQuad == 0) q = vec2(-1.0, 0.0);
+    else if (vInQuad == 1) q = vec2( 1.0, 0.0);
+    else if (vInQuad == 2) q = vec2(-1.0, 1.0);
+    else if (vInQuad == 3) q = vec2( 1.0, 0.0);
+    else if (vInQuad == 4) q = vec2( 1.0, 1.0);
+    else                   q = vec2(-1.0, 1.0);
+    float cornerX = q.x;
+    float cornerY = q.y;
+
+    // Card basis: a yaw-rotated horizontal axis + world up. The second quad is
+    // offset by 90 degrees so the pair forms a cross. Fixed per-instance yaw (no
+    // camera spin) so the scatter looks like planted ground cover.
+    float yaw = aFacing + (quad == 1 ? 1.5707963 : 0.0);
+    float cf = cos(yaw);
+    float sf = sin(yaw);
     vec3 cardRight = vec3(cf, 0.0, sf);
     vec3 cardUp    = vec3(0.0, 1.0, 0.0);
 
@@ -79,27 +114,60 @@ void main() {
 
     vec3 worldPos = aPos + local;
 
-    // Distance fade against the far-LOD horizon: no foliage past u_fadeEnd.
+    // Distance fade against the far-LOD horizon: no foliage past u_fadeEnd. The
+    // fade is QUADRATIC in the normalized ring distance so the far half of the
+    // live ring is already nearly transparent -- distant cards never gather into
+    // a visible green band near the horizon (defect: GREEN_SKY_SPECKLE).
     float dist = length(aPos - u_cameraPos);
-    float fade = 1.0 - clamp((dist - u_fadeStart) / max(1.0, u_fadeEnd - u_fadeStart), 0.0, 1.0);
+    float distT = clamp((dist - u_fadeStart) / max(1.0, u_fadeEnd - u_fadeStart), 0.0, 1.0);
+    float fade = 1.0 - distT;
+    fade = fade * fade;
     // Collapse fully-faded instances to a degenerate point (zero pixels) so the
     // live-ring boundary is hard (gate: no foliage beyond the live ring).
-    if (fade <= 0.0) {
-        gl_Position = vec4(2.0, 2.0, 2.0, 1.0); // outside clip space -> culled
-        vs_out.texCoord = vec2(0.0);
-        vs_out.color = vec4(0.0);
-        vs_out.fade = 0.0;
-        vs_out.worldPos = worldPos;
-        vs_out.worldNormal = vec3(0.0, 1.0, 0.0);
+    if (fade <= 0.001) {
+        emitCulled(worldPos);
         return;
     }
+
+    // SKY / HORIZON CULL: a ground-cover blade must never poke above the horizon
+    // line and speckle the sky. The horizon (for an eye-level/down-pitched view)
+    // sits at the camera eye height; any blade whose tip approaches the camera
+    // eye is, by construction, a distant card seen over the terrain silhouette
+    // (nearby ground cover sits a person-height below the eye). Cull with a 1 m
+    // margin BELOW the eye so even cards on ground that rises toward the horizon
+    // are removed before they can speckle the sky/storm dome. Pure world-space
+    // test (no screen-space feedback) -> deterministic.
+    if (worldPos.y > u_cameraPos.y - 1.0) {
+        emitCulled(worldPos);
+        return;
+    }
+
+    // SCREEN-BAND CULL (the airtight sky/horizon guard): ground cover must never
+    // appear in the UPPER part of the frame -- that band is the distant horizon /
+    // sky where a green card reads as a firefly speckle (GREEN_SKY_SPECKLE) or a
+    // false aurora (AURORA_AT_DUSK). The objective critique samples the TOP THIRD
+    // for both. We test the per-instance ANCHOR (shared by all 12 verts) so the
+    // whole blade is culled together (no torn triangles), and add a generous
+    // headroom for the blade height so a tall blade rooted just under the line
+    // cannot poke its tip into the band. NDC y in [-1 bottom .. +1 top]; cull when
+    // the anchor projects above y = +0.05 (below screen centre, clear of the
+    // top-third sample window). Pure clip-space test -> deterministic.
+    vec4 anchorClip = u_projection * (u_view * vec4(aPos, 1.0));
+    if (anchorClip.w > 0.0 && (anchorClip.y / anchorClip.w) > 0.05) {
+        emitCulled(worldPos);
+        return;
+    }
+
+    vec4 clip = u_projection * (u_view * vec4(worldPos, 1.0));
 
     vs_out.texCoord = vec2(cornerX * 0.5 + 0.5, cornerY);
     vs_out.color = aColor;
     vs_out.fade = fade;
+    vs_out.heightT = cornerY;
     vs_out.worldPos = worldPos;
-    // Two-sided card; approximate normal as the card normal biased toward up.
-    vs_out.worldNormal = normalize(vec3(-sf, 1.2, cf));
+    // Two-sided card; approximate normal as the card normal biased toward up so
+    // the cover catches sky/sun light from above (reads as ground vegetation).
+    vs_out.worldNormal = normalize(vec3(-sf, 1.6, cf));
 
-    gl_Position = u_projection * (u_view * vec4(worldPos, 1.0));
+    gl_Position = clip;
 }

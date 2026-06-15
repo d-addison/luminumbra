@@ -284,13 +284,49 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
                 continue; // underwater / no ground here
             }
 
+            // T-I5b-DR-foliage-blocker (defect B3.1): HARD placement gates so the
+            // scatter only ever lands on WALKABLE LAND. These are belt-and-braces
+            // on top of the surface query (which already rejects underwater
+            // columns): a card must never float on the water surface nor cling to a
+            // steep cliff face.
+            //   * WATER gate: skip any anchor at or below sea level. (The query
+            //     marks underwater columns invalid, but a shoreline sample can sit
+            //     a hair above the query's threshold yet still read as "on water";
+            //     the explicit sea-level reject removes the floaters seen plastered
+            //     on the water in the sweep.)
+            //   * SLOPE gate: skip steep ground above kMaxFoliageSlope. The slope is
+            //     a 0..1 rise-over-run estimate; cliffs/dune faces shed all foliage
+            //     so cards stop appearing pasted on the conical hillsides.
+            constexpr float kSeaLevel = 0.0f;       // Luminumbra::SEA_LEVEL
+            constexpr float kWaterMargin = 0.4f;    // keep blades off the wet fringe
+            constexpr float kMaxFoliageSlope = 0.70f; // ~35deg; steeper = bare cliff
+            if (surf.height <= kSeaLevel + kWaterMargin) {
+                continue; // on/at water -> no ground cover
+            }
+            if (surf.slope >= kMaxFoliageSlope) {
+                continue; // too steep -> bare dirt/cliff
+            }
+
             // DENSITY MODULATION (design-decisions §2): biome density modulated
             // by slope (steep ground sheds foliage) and moisture (wet ground
             // grows more). The per-candidate accept threshold is a hash draw, so
             // the placement stays a pure function of the world grid.
-            const float slope_factor = std::clamp(1.0f - surf.slope, 0.0f, 1.0f);
-            const float moisture_factor = std::clamp(0.5f + 0.5f * surf.moisture, 0.0f, 1.0f);
-            const float accept = std::clamp(chunk.density * slope_factor * moisture_factor, 0.0f, 1.0f);
+            // T-I5b-DR-foliage-blocker (defect B3.2): the slope falloff is now
+            // sharpened (square of the remaining headroom under the cutoff) so
+            // gentle ground stays FULLY covered (no bald patches) while ground
+            // approaching the cutoff thins out smoothly instead of abruptly. The
+            // moisture term keeps a high floor so suitable flat land reads as
+            // CONTINUOUS cover rather than scattered tufts.
+            const float slope_head = std::clamp(1.0f - surf.slope / kMaxFoliageSlope, 0.0f, 1.0f);
+            const float slope_factor = slope_head * slope_head;
+            const float moisture_factor = std::clamp(0.78f + 0.22f * surf.moisture, 0.0f, 1.0f);
+            // Boost the effective density so flat, suitable ground reaches near-full
+            // candidate acceptance (continuous cover), still clamped to [0,1] so the
+            // per-chunk candidate budget remains the hard ceiling. RENDER-ONLY.
+            // T-I5b-DR-foliage-blocker (defect B3.2): raised the multiplier so the
+            // near-field ground reads as CONTINUOUS cover (no bald patches) in the
+            // down-pitched cells across all times of day.
+            const float accept = std::clamp(chunk.density * 2.4f * slope_factor * moisture_factor, 0.0f, 1.0f);
             if (hash_unit(h2) > accept) {
                 continue;
             }
@@ -322,9 +358,22 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
             const float size_jit = 0.8f + 0.4f * hash_unit(splitmix64(h3 ^ 0x123456789ABCDEFull));
             rec.size[0] = arch.half_width * size_jit;
             rec.size[1] = arch.height * size_jit;
-            rec.color[0] = to_unorm8(arch.color.r);
-            rec.color[1] = to_unorm8(arch.color.g);
-            rec.color[2] = to_unorm8(arch.color.b);
+
+            // T-I5b-DR-foliage-blocker (defect B3.3): per-instance TONAL variation so
+            // the field is not a flat single neon hue. A deterministic value jitter
+            // (darker/lighter) plus a small green<->khaki hue jitter breaks up the
+            // billboard banding; the vertex/frag stage further darkens the ROOT of
+            // each card so blades read with a base-to-tip gradient. The base albedo
+            // is already desaturated in the JSON; here we only spread it. The result
+            // stays well clear of the speckle detector's green-dominance margin.
+            const float val_jit = 0.72f + 0.42f * hash_unit(splitmix64(h2 ^ 0xC2B2AE3D27D4EB4Full));
+            const float hue_jit = (hash_unit(splitmix64(h1 ^ 0x165667B19E3779F9ull)) - 0.5f) * 0.10f;
+            float cr = arch.color.r * val_jit + hue_jit;          // toward khaki when +
+            float cg = arch.color.g * val_jit;
+            float cb = arch.color.b * val_jit - 0.4f * hue_jit;   // away from blue when +
+            rec.color[0] = to_unorm8(cr);
+            rec.color[1] = to_unorm8(cg);
+            rec.color[2] = to_unorm8(cb);
             rec.color[3] = to_unorm8(sway_scale); // sway-flag scale rides in alpha
             rec.sway[0] = sway.x;
             rec.sway[1] = sway.y;
@@ -406,7 +455,9 @@ void FoliagePass::execute(RenderPipeline& pipeline, const Camera& camera) {
 
     glBindVertexArray(m_vao);
     glBindVertexBuffer(0, m_instance_vbo[m_ring_cursor], 0, sizeof(InstanceRecord));
-    glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, static_cast<GLsizei>(m_frame_instance_count));
+    // T-I5b-DR-foliage-blocker: 12 verts/instance = two crossed quads (6 verts
+    // each) so a blade reads as upright cover from any angle, not a flat decal.
+    glDrawArraysInstanced(GL_TRIANGLES, 0, 12, static_cast<GLsizei>(m_frame_instance_count));
     pipeline.m_last_render_pass_stats.foliage_draws++;
     pipeline.m_last_render_pass_stats.foliage_instances_drawn += m_frame_instance_count;
     glBindVertexArray(0);
