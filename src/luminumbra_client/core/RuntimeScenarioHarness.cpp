@@ -2058,6 +2058,74 @@ void WriteFoliageInstancingAnalysis(
     output << std::setw(2) << artifact << '\n';
 }
 
+// --- Waterfall visual (T-I5b-4, W1) ---
+
+void WriteWaterfallVisualAnalysis(
+    const std::filesystem::path& artifact_dir,
+    const std::string& waterfall_screenshot,
+    const WaterfallVisualResult& result)
+{
+    const GLDebugRuntimeStats gl_debug = CurrentGLDebugRuntimeStats();
+
+    // Determinism (critique F5): same world -> byte-equal sites, same seed (a
+    // separate world) -> the same site set/hash. This is the load-bearing gate.
+    const bool determinism_passed =
+        result.determinism_byte_equal &&
+        result.same_seed_same_sites &&
+        result.site_hash_run_a == result.site_hash_run_b &&
+        result.site_count > 0;
+
+    // Dressing: when a capture was taken it must show the falling sheet body,
+    // the plunge/crest foam, and the spray plume. When GL is unavailable the
+    // dressing assertion is vacuously satisfied (audio/visual is optional
+    // dressing; the determinism contract still gates).
+    const bool dressing_passed =
+        !result.capture_written ||
+        (result.cascade_pixels > 0 && result.foam_pixels > 0 && result.spray_pixels > 0);
+
+    const bool passed = determinism_passed && dressing_passed && gl_debug.errors == 0;
+
+    nlohmann::json artifact = {
+        {"schema", "luminumbra.waterfall_visual.v1"},
+        {"timestamp_utc", TimestampUtc()},
+        {"passed", passed},
+        {"waterfall_screenshot", waterfall_screenshot},
+        {"world_seed", result.world_seed},
+        {"site_count", result.site_count},
+        {"determinism", {
+            {"passed", determinism_passed},
+            {"site_hash_run_a", result.site_hash_run_a},
+            {"site_hash_run_b", result.site_hash_run_b},
+            {"byte_equal", result.determinism_byte_equal},
+            {"same_seed_same_sites", result.same_seed_same_sites},
+            {"contract", "pure_function(world river course x heightfield); cached per region; never hashed"}
+        }},
+        {"best_site", {
+            {"drop_height", result.best_drop_height},
+            {"steepness", result.best_steepness}
+        }},
+        {"dressing", {
+            {"passed", dressing_passed},
+            {"capture_written", result.capture_written},
+            {"cascade_pixels", result.cascade_pixels},
+            {"foam_pixels", result.foam_pixels},
+            {"spray_pixels", result.spray_pixels},
+            {"sheet_present", result.cascade_pixels > 0},
+            {"foam_present", result.foam_pixels > 0},
+            {"spray_present", result.spray_pixels > 0}
+        }},
+        {"gl_debug", {
+            {"messages", gl_debug.messages},
+            {"errors", gl_debug.errors},
+            {"warnings", gl_debug.warnings},
+            {"notifications", gl_debug.notifications}
+        }}
+    };
+
+    std::ofstream output(artifact_dir / "waterfall-visual-analysis.json");
+    output << std::setw(2) << artifact << '\n';
+}
+
 // --- Precipitation visual + wind-slant smoke (T-I5a-4 / B2) ---
 
 PrecipPixelStats AnalyzePrecipPixels(const std::vector<unsigned char>& pixels, int width, int height) {

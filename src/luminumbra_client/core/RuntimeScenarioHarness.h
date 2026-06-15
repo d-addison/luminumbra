@@ -633,6 +633,36 @@ void WriteFoliageInstancingAnalysis(
     const FoliageInstancingResult& result,
     const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass);
 
+// --- Waterfall visual (T-I5b-4, W1) ---
+// Render-only dressing on a WORLD-DETERMINISTIC site (WaterfallDetect). The
+// detection is a pure function of the generated world (same seed -> same sites,
+// critique F5) computed render-side and CACHED, never hashed; the sheet/spray/
+// foam are render-time. This result carries the determinism proof (the site
+// hash from two detections + whether they match) and the dressing-capture pixel
+// signatures (sheet body + spray plume + plunge foam present). The WaterfallVisual
+// gate asserts both. The gtest waterfall_visual_test is the primary gate; this
+// writer lets the live-engine scenario emit the same artifact schema.
+struct WaterfallVisualResult {
+    std::uint64_t world_seed = 0;
+    std::size_t site_count = 0;
+    std::uint64_t site_hash_run_a = 0;
+    std::uint64_t site_hash_run_b = 0;
+    bool determinism_byte_equal = false;     // same world, two detections byte-equal
+    bool same_seed_same_sites = false;       // separate world same seed -> same sites
+    double best_drop_height = 0.0;
+    double best_steepness = 0.0;
+    // Dressing capture signatures (0 when no capture taken / GL unavailable).
+    std::uint64_t cascade_pixels = 0;
+    std::uint64_t foam_pixels = 0;
+    std::uint64_t spray_pixels = 0;
+    bool capture_written = false;
+};
+
+void WriteWaterfallVisualAnalysis(
+    const std::filesystem::path& artifact_dir,
+    const std::string& waterfall_screenshot,
+    const WaterfallVisualResult& result);
+
 // Surface-query context + callback the FoliagePass uses to resolve, at a world
 // (x,z), the terrain surface height + a slope estimate + a moisture estimate.
 // All values are PURE functions of the world generator (seed, params) — no RNG,

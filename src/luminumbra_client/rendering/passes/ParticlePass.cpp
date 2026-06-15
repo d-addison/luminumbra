@@ -292,6 +292,34 @@ uint32_t ParticlePass::add_splash_emitter(const std::filesystem::path& json_path
     return id;
 }
 
+uint32_t ParticlePass::add_waterfall_spray(const std::filesystem::path& json_path,
+                                           const glm::vec3& plunge_pos,
+                                           float drop_height,
+                                           float channel_width) {
+    // T-I5b-4 (W1): a waterfall spray emitter is a normal emitter anchored at the
+    // plunge foot. After loading we re-shape its spawn box + emission rate to the
+    // detected fall's geometry so a tall/wide fall throws a proportionally larger
+    // mist plume. add_emitter applies world_origin = base + data.origin, so we
+    // pass plunge_pos as the base and then widen the loaded spawn extent.
+    const uint32_t id = add_emitter(json_path, plunge_pos);
+    if (id == kInvalidEmitter) {
+        return kInvalidEmitter;
+    }
+    ActiveEmitter& spray = m_active_emitters.back();
+    // Spawn box spans the channel width horizontally and a shallow band at the
+    // plunge pool surface; clamp so the mist stays a plume, not a fog bank.
+    const float half_w = std::clamp(channel_width * 0.6f, 1.5f, 8.0f);
+    spray.data.origin_extent = glm::vec3(half_w, 0.5f, half_w);
+    // Mist intensity scales with drop height (a taller fall aerates more water).
+    const float intensity = std::clamp(drop_height / 8.0f, 0.5f, 4.0f);
+    spray.data.spawn_rate *= intensity;
+    // Bias the mist UPWARD/outward from the impact (against gravity) so it reads
+    // as rising spray; keep the authored horizontal jitter for the fan-out.
+    spray.data.base_velocity.y = std::max(spray.data.base_velocity.y, 1.5f * intensity);
+    spray.data.wind_response = std::max(spray.data.wind_response, 0.4f); // mist drifts on wind
+    return id;
+}
+
 uint64_t ParticlePass::derive_emitter_seed(uint64_t world_seed, uint64_t world_tick, uint32_t emitter_id) {
     // Pure function of world state + emitter identity. Mixing three splitmix64
     // rounds de-correlates seeds across ticks and emitters.
