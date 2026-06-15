@@ -1760,7 +1760,13 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
         {4, "Sand",      3, 2.5f, 0.80f},
         {5, "Deepslate", 4, 4.0f, 0.95f},
     }};
-    std::vector<float> lut(static_cast<size_t>(256) * 2 * 4, 0.0f);
+    // T-I5b-5-water-backlog: the LUT is now 3 rows to mirror
+    // RenderPipeline::init_material_lut - row 2 G carries the per-material
+    // albedo_scale (default 1.0). The g_buffer shader samples row 2 (v=0.8333)
+    // and multiplies the baked albedo by it; with a 2-row LUT that sample read
+    // garbage (row 1's normal_layer/255) and crushed every plate dark, so the
+    // gate must author the third row at scale 1.0 (no calibration change).
+    std::vector<float> lut(static_cast<size_t>(256) * 3 * 4, 0.0f);
     auto set_row1 = [&](int id, int layer, float tiling) {
         const size_t base = (static_cast<size_t>(256) + id) * 4u; // row 1
         lut[base + 0] = static_cast<float>(layer) / 255.0f;
@@ -1768,14 +1774,23 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
         lut[base + 2] = std::min(tiling / 64.0f, 1.0f);
         lut[base + 3] = 1.0f; // has_texture
     };
+    auto set_row2 = [&](int id, float albedo_scale) {
+        const size_t base = (static_cast<size_t>(2) * 256u + id) * 4u; // row 2
+        lut[base + 0] = 0.0f;          // emissive_intensity/scale (non-emissive)
+        lut[base + 1] = albedo_scale;  // T-I5b-5 albedo_scale (G channel)
+    };
     // Row 0 G channel = per-plate authored roughness (T-I4-10); the G-buffer
     // stores it in gAlbedoRoughness.a, which the gate reads back per plate.
     for (const auto& p : plates) lut[(static_cast<size_t>(p.id)) * 4 + 1] = p.roughness;
     for (const auto& p : plates) set_row1(p.id, p.layer, p.tiling);
+    // Plates calibrate at scale 1.0 (this gate asserts the photographic albedo;
+    // the albedo_scale calibration is exercised separately by the FarLodHorizon
+    // sand-flat band). Every id defaults to 1.0 so the row-2 sample is a no-op.
+    for (int id = 0; id < 256; ++id) set_row2(id, 1.0f);
     GLuint material_lut = 0;
     glGenTextures(1, &material_lut);
     glBindTexture(GL_TEXTURE_2D, material_lut);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 256, 2, 0, GL_RGBA, GL_FLOAT, lut.data());
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 256, 3, 0, GL_RGBA, GL_FLOAT, lut.data());
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);

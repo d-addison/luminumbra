@@ -108,6 +108,11 @@ void main()
     float matIndex = float(fs_in.MaterialID) / 255.0;
     vec4 matProps = texture(u_materialLUT, vec2(matIndex, 0.16667)); // row 0
     vec4 texInfo  = texture(u_materialLUT, vec2(matIndex, 0.5));     // row 1
+    // T-I5b-5-water-backlog: row 2 G channel is the per-material albedo multiplier
+    // (default 1.0). Applied to the baked textured albedo below so a physically-
+    // bright photographic texture (the noon sun-bright sand flat) calibrates to a
+    // natural lit tone that survives tonemapping below the ACES clip. Render-only.
+    float albedoScale = texture(u_materialLUT, vec2(matIndex, 0.83333)).g; // row 2
 
     float metallic = matProps.r;
     float roughness = matProps.g;
@@ -175,6 +180,14 @@ void main()
         vec3 weights = triplanar_weights(worldN);
         albedo = triplanar_albedo(fs_in.WorldPos, weights, texLayer, scale);
         worldN = triplanar_normal(fs_in.WorldPos, worldN, weights, normLayer, scale);
+        // T-I5b-5-water-backlog: per-material albedo calibration on the textured
+        // terrain path (live AND far-LOD sand both sample this triplanar branch -
+        // sand carries has_texture). Default scale 1.0 is a no-op (byte-identical)
+        // for every unscaled id. Confined to the triplanar branch so flat-material
+        // and skinned paths are untouched (no spurious scaling of the case-switch
+        // base colors). Brings the noon sun-bright sand flat down to a natural lit
+        // tone below the ACES clip.
+        albedo *= albedoScale;
         textured = true;
     }
 
