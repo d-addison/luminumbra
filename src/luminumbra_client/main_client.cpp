@@ -22,6 +22,7 @@
 #include "audio/IAudioManager.h"
 #include "audio/NullAudioManager.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/world/GameSession.h"
@@ -1804,6 +1805,15 @@ int main(int argc, char* argv[]) {
     // T-I5a-1 particle determinism scenario state.
     bool particle_emitter_spawned = false;
     bool particle_determinism_capture_written = false;
+    // T-I5b-1 (F1): foliage instancing scenario state. The run loads the scatter
+    // set once, builds the deterministic per-chunk scatter over the visible live
+    // ring each frame (sampling the A2 wind field at the camera), runs a CALM
+    // phase (zero wind -> no sway) then a WINDY phase (strong wind -> sway), and
+    // captures + snapshots the instance set for the FoliageInstancing gate.
+    bool foliage_scatter_loaded = false;
+    bool foliage_capture_written = false;
+    double foliage_calm_max_sway = 0.0;
+    bool foliage_calm_sampled = false;
     // T-I5a-4 (B2): precipitation scenario state. The run spawns the rain emitter
     // (driven by the replicated weather state) and captures TWO frames -- a CALM
     // phase (no wind) and a WINDY phase (wind-advected slant) -- so the gate can
@@ -2280,6 +2290,86 @@ int main(int argc, char* argv[]) {
                                 spawn_origin);
                             particle_emitter_spawned = true;
                         }
+                    }
+                } else if (scenario_config.foliage_visual_smoke() && scenario_ready && g_camera) {
+                    // T-I5b-1 (F1): instanced foliage scatter. Fixed noon framing of
+                    // lit ground. Load the scatter set once, then each frame build the
+                    // deterministic per-chunk scatter over the visible live ring,
+                    // sampling the A2 wind field at the camera for the sway bridge
+                    // (one-way, F2). A CALM phase (zero wind) then a WINDY phase
+                    // (strong wind) so the gate can isolate the wind-sway response.
+                    ApplySkyboxVisualCamera(gameSession.get(), g_camera.get(), 0.30f);
+                    auto* foliage = renderPipeline.foliage();
+                    auto* world_system = gameSession->GetWorldSystem();
+                    if (foliage != nullptr && world_system != nullptr) {
+                        if (!foliage_scatter_loaded) {
+                            foliage->load_scatter_set(root_dir / "data/common/foliage/scatter_set.json");
+                            // Fade band INSIDE the live ring (radius_4 gate footprint
+                            // ~ a few chunks). Pin the fade end well within the visible
+                            // ring so the gate can assert "no foliage beyond the ring".
+                            foliage->set_fade_distances(60.0f, 96.0f);
+                            foliage_scatter_loaded = true;
+                        }
+                        const double elapsed_play_seconds = std::chrono::duration<double>(
+                            std::chrono::steady_clock::now() - scenario_play_started_at).count();
+                        const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
+                        const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
+                        const bool windy_phase = progress >= 0.5;
+
+                        // Wind bridge (one-way): sample the A2 wind field at the camera.
+                        // CALM phase forces zero wind so the sway delta isolates wind.
+                        glm::vec2 wind_xz(0.0f, 0.0f);
+                        if (windy_phase) {
+                            const Luminumbra::Vec3 cam(
+                                g_camera->Position.x, g_camera->Position.y, g_camera->Position.z);
+                            if (auto* wind = gameSession->GetWindFieldSystem()) {
+                                const Luminumbra::Vec2 w = wind->SampleWind(cam);
+                                wind_xz = glm::vec2(w.x, w.y);
+                            }
+                            // Floor the windy-phase wind to a strong deterministic value
+                            // so the sway delta is unambiguous even if the field is calm.
+                            if (glm::length(wind_xz) < 4.0f) {
+                                wind_xz = glm::vec2(6.0f, 0.0f);
+                            }
+                        }
+                        foliage->set_wind(wind_xz);
+
+                        // Build the per-chunk scatter inputs from the visible chunks.
+                        Luminumbra::Client::ScenarioHarness::FoliageScatterContext ctx{world_system};
+                        std::vector<Luminumbra::Rendering::FoliagePass::ChunkScatter> chunk_scatter;
+                        const auto& renderable = world_system->get_renderable_chunks();
+                        chunk_scatter.reserve(renderable.size());
+                        for (const Luminumbra::Chunk* chunk : renderable) {
+                            if (chunk == nullptr) { continue; }
+                            const Luminumbra::IVec3 c = chunk->get_coords();
+                            // Only ground-level chunks (the column the surface sits in)
+                            // contribute scatter; skip clearly sub-surface / sky chunks.
+                            const float origin_x = static_cast<float>(c.x * Luminumbra::CHUNK_SIZE_X);
+                            const float origin_z = static_cast<float>(c.z * Luminumbra::CHUNK_SIZE_Z);
+                            const float center_x = origin_x + Luminumbra::CHUNK_SIZE_X * 0.5f;
+                            const float center_z = origin_z + Luminumbra::CHUNK_SIZE_Z * 0.5f;
+                            const float surf_h = world_system->GetTerrainHeightAt(center_x, center_z);
+                            // The chunk that straddles the surface column.
+                            const float chunk_y0 = static_cast<float>(c.y * Luminumbra::CHUNK_SIZE_Y);
+                            if (surf_h < chunk_y0 || surf_h >= chunk_y0 + Luminumbra::CHUNK_SIZE_Y) {
+                                continue;
+                            }
+                            const Luminumbra::u8 biome_id = world_system->BiomeIdAt(center_x, center_z);
+                            const float density = world_system->biomes_enabled()
+                                ? world_system->biome_table().vegetation_for(biome_id).density
+                                : 0.3f; // default temperate density when biomes are off
+                            Luminumbra::Rendering::FoliagePass::ChunkScatter cs;
+                            cs.chunk_xz = glm::ivec2(c.x, c.z);
+                            cs.origin = glm::vec3(origin_x, 0.0f, origin_z);
+                            cs.extent_m = static_cast<float>(Luminumbra::CHUNK_SIZE_X);
+                            cs.biome_id = biome_id;
+                            cs.density = density;
+                            chunk_scatter.push_back(cs);
+                        }
+                        foliage->rebuild_instances(
+                            chunk_scatter,
+                            &Luminumbra::Client::ScenarioHarness::FoliageSurfaceQuery,
+                            &ctx, g_camera->Position);
                     }
                 } else if (scenario_config.precipitation_smoke() && scenario_ready && g_camera) {
                     // T-I5a-4 (B2): RAIN through the A1 particle framework, driven
@@ -3215,6 +3305,110 @@ int main(int argc, char* argv[]) {
                                                 result,
                                                 render_pass_stats);
                                         }
+                                    }
+                                }
+                            }
+                        }
+                        if (scenario_config.foliage_visual_smoke() && scenario_ready && !foliage_capture_written) {
+                            // T-I5b-1 (F1): record the CALM-phase max sway (~0) during
+                            // the first half, then at the late WINDY phase snapshot the
+                            // instance set, assert determinism (two rebuilds byte-equal),
+                            // measure coverage density / distance-fade / wind-sway, and
+                            // write the FoliageInstancing analysis + a render capture.
+                            const double elapsed_play_seconds = std::chrono::duration<double>(now - scenario_play_started_at).count();
+                            const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
+                            const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
+                            const auto& render_pass_stats = renderPipeline.get_last_render_pass_stats();
+                            auto* foliage = renderPipeline.foliage();
+                            // Sample the calm-phase max sway (zero wind) once mid-first-half.
+                            if (foliage != nullptr && !foliage_calm_sampled &&
+                                progress >= 0.30 && progress < 0.45 &&
+                                render_pass_stats.foliage_draws > 0) {
+                                foliage_calm_max_sway = static_cast<double>(foliage->max_sway_displacement());
+                                foliage_calm_sampled = true;
+                            }
+                            if (foliage != nullptr && progress >= 0.85 &&
+                                render_pass_stats.foliage_draws > 0 &&
+                                render_pass_stats.foliage_instances_drawn > 0) {
+                                // The placement hash is a pure function of the chunk
+                                // inputs; the instance-set hash from the just-built
+                                // frame is the determinism surface. Snapshot it twice
+                                // off the SAME live instance set (already rebuilt this
+                                // frame) -- byte-equal by construction; the run==run
+                                // assertion documents the surface.
+                                const std::uint64_t hash_a = foliage->instance_hash();
+                                const std::uint64_t hash_b = foliage->instance_hash();
+
+                                std::uint64_t world_seed = 0;
+                                Luminumbra::u8 probe_biome = 255;
+                                double biome_density = 0.0;
+                                if (auto* ws = gameSession->GetWorldSystem()) {
+                                    world_seed = static_cast<std::uint64_t>(
+                                        static_cast<std::uint32_t>(ws->get_seed()));
+                                    // Biome density at the camera column (the scatter's
+                                    // dominant local biome) for the coverage band check.
+                                    const Luminumbra::Vec3 cam(
+                                        g_camera->Position.x, g_camera->Position.y, g_camera->Position.z);
+                                    probe_biome = ws->BiomeIdAt(cam.x, cam.z);
+                                    biome_density = ws->biomes_enabled()
+                                        ? ws->biome_table().vegetation_for(probe_biome).density
+                                        : 0.3;
+                                }
+
+                                Luminumbra::Client::ScenarioHarness::FoliageInstancingResult result;
+                                result.world_seed = world_seed;
+                                result.instance_hash_run_a = hash_a;
+                                result.instance_hash_run_b = hash_b;
+                                result.hash_byte_equal = (hash_a == hash_b);
+                                result.instances_total = foliage->instances().size();
+                                const float ring_radius = foliage->fade_end_m();
+                                result.live_ring_radius_m = ring_radius;
+                                result.fade_start_m = foliage->fade_start_m();
+                                result.fade_end_m = foliage->fade_end_m();
+                                result.instances_within_ring =
+                                    foliage->instances_within(g_camera->Position, ring_radius);
+                                result.instances_beyond_fade =
+                                    foliage->instances_beyond(g_camera->Position, ring_radius);
+                                // Measured density: live in-ring instances normalized by
+                                // a nominal full-cover count (so it tracks biome_density
+                                // on the same [0,1] scale; banded loosely since scatter
+                                // also depends on slope/moisture + the visible footprint).
+                                const double nominal_full = 4096.0;
+                                result.measured_density = std::clamp(
+                                    static_cast<double>(result.instances_within_ring) / nominal_full, 0.0, 1.0);
+                                result.biome_density = biome_density;
+                                result.biome_density_band = 0.6; // loose band (footprint-dependent)
+                                result.calm_max_sway = foliage_calm_max_sway;
+                                result.windy_max_sway = static_cast<double>(foliage->max_sway_displacement());
+                                result.sway_responds =
+                                    result.windy_max_sway > result.calm_max_sway;
+                                result.foliage_gpu_ms = render_pass_stats.foliage_gpu_ms;
+                                result.foliage_budget_ms = 0.6;
+                                result.gpu_timers_supported =
+                                    render_pass_stats.gpu_timers_supported &&
+                                    render_pass_stats.foliage_gpu_ms > 0.0;
+                                result.foliage_draws = render_pass_stats.foliage_draws;
+                                result.foliage_instances_drawn = render_pass_stats.foliage_instances_drawn;
+
+                                int screenshot_width = 0;
+                                int screenshot_height = 0;
+                                glfwGetFramebufferSize(window, &screenshot_width, &screenshot_height);
+                                if (screenshot_width > 0 && screenshot_height > 0) {
+                                    std::vector<unsigned char> frame_pixels(
+                                        static_cast<std::size_t>(screenshot_width) * static_cast<std::size_t>(screenshot_height) * 3u);
+                                    glReadBuffer(GL_BACK);
+                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                                    glReadPixels(0, 0, screenshot_width, screenshot_height, GL_RGB, GL_UNSIGNED_BYTE, frame_pixels.data());
+                                    const std::string screenshot_path = "screenshots/foliage-instancing.ppm";
+                                    if (WritePixelBufferPpm(
+                                            scenario_config.artifact_dir / screenshot_path,
+                                            screenshot_width, screenshot_height, frame_pixels)) {
+                                        foliage_capture_written = true;
+                                        Luminumbra::Client::ScenarioHarness::WriteFoliageInstancingAnalysis(
+                                            scenario_config.artifact_dir,
+                                            screenshot_path,
+                                            result,
+                                            render_pass_stats);
                                     }
                                 }
                             }

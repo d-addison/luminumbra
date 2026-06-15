@@ -1,0 +1,464 @@
+#include "FoliagePass.h"
+
+#include "GBufferPass.h"
+#include "LightingPass.h"
+#include "PassGlHelpers.h"
+#include "core/Log.h"
+#include "rendering/Camera.h"
+#include "rendering/Shader.h"
+
+#include <GLFW/glfw3.h>
+#include <glm/gtc/matrix_transform.hpp>
+#include <nlohmann/json.hpp>
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <fstream>
+
+namespace Luminumbra::Rendering {
+
+namespace {
+
+// splitmix64 -- the same deterministic mixer the A1 particle pass uses for seed
+// derivation. PURE: no global RNG, no world-seed offset consumed.
+uint64_t splitmix64(uint64_t x) {
+    x += 0x9E3779B97F4A7C15ull;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+    return x ^ (x >> 31);
+}
+
+// FNV-1a over a byte range (instance-hash determinism surface).
+uint64_t fnv1a(const void* data, std::size_t len, uint64_t seed = 1469598103934665603ull) {
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    uint64_t hash = seed;
+    for (std::size_t i = 0; i < len; ++i) {
+        hash ^= bytes[i];
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+// 64 high bits of a splitmix64 word -> [0,1).
+float hash_unit(uint64_t h) {
+    return static_cast<float>(h >> 40) / 16777216.0f;
+}
+
+uint8_t to_unorm8(float v) {
+    return static_cast<uint8_t>(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f));
+}
+
+// IEEE-754 half-precision encode (truncating; deterministic, adequate for an
+// angle), matching ParticlePass::encode_f16.
+uint16_t encode_f16(float value) {
+    uint32_t bits;
+    std::memcpy(&bits, &value, sizeof(bits));
+    const uint32_t sign = (bits >> 16) & 0x8000u;
+    int32_t exponent = static_cast<int32_t>((bits >> 23) & 0xFFu) - 127 + 15;
+    uint32_t mantissa = bits & 0x7FFFFFu;
+    if (exponent <= 0) {
+        return static_cast<uint16_t>(sign);
+    }
+    if (exponent >= 0x1F) {
+        return static_cast<uint16_t>(sign | 0x7C00u);
+    }
+    return static_cast<uint16_t>(sign | (static_cast<uint32_t>(exponent) << 10) | (mantissa >> 13));
+}
+
+} // namespace
+
+FoliagePass::FoliagePass() = default;
+FoliagePass::~FoliagePass() = default;
+
+uint64_t FoliagePass::placement_hash(int chunk_x, int chunk_z, u8 biome_id,
+                                     uint32_t instance_index) {
+    // PINNED placement function (design-decisions §2): a pure hash of
+    // (chunk coords, biome id, instance index). Slope/moisture modulate the
+    // EMIT decision downstream (not the hash) so the hash stays a stable
+    // function of the world grid. NO global RNG, NO seed offset.
+    uint64_t h = splitmix64(static_cast<uint64_t>(static_cast<uint32_t>(chunk_x))
+                            ^ 0x51AF7C3D9E0B12A7ull);
+    h = splitmix64(h ^ (static_cast<uint64_t>(static_cast<uint32_t>(chunk_z)) * 0xD1B54A32D192ED03ull));
+    h = splitmix64(h ^ (static_cast<uint64_t>(biome_id) * 0x9E3779B97F4A7C15ull));
+    h = splitmix64(h ^ (static_cast<uint64_t>(instance_index) * 0xA24BAED4963EE407ull));
+    return h;
+}
+
+void FoliagePass::init_shader(const std::filesystem::path& root_path) {
+    m_shader = std::make_unique<Shader>(
+        (root_path / "res/shaders/foliage.vert").string().c_str(),
+        (root_path / "res/shaders/foliage.frag").string().c_str());
+    PassGl::label_gl_object(GL_PROGRAM, m_shader ? m_shader->Id() : 0u, "shader.foliage");
+}
+
+void FoliagePass::init_buffers() {
+    m_instances.clear();
+    m_instances.reserve(4096);
+    m_frame_instance_count = 0;
+
+    glGenVertexArrays(1, &m_vao);
+    PassGl::label_gl_object(GL_VERTEX_ARRAY, m_vao, "foliage.vao");
+    glBindVertexArray(m_vao);
+
+    const GLbitfield storage_flags = GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
+    const GLsizeiptr bytes = static_cast<GLsizeiptr>(kMaxInstances * sizeof(InstanceRecord));
+
+    for (std::size_t ring = 0; ring < kRingFrames; ++ring) {
+        glGenBuffers(1, &m_instance_vbo[ring]);
+        glBindBuffer(GL_ARRAY_BUFFER, m_instance_vbo[ring]);
+        glBufferStorage(GL_ARRAY_BUFFER, bytes, nullptr, storage_flags);
+        m_instance_ptr[ring] = static_cast<InstanceRecord*>(
+            glMapBufferRange(GL_ARRAY_BUFFER, 0, bytes, storage_flags));
+        PassGl::label_gl_object(GL_BUFFER, m_instance_vbo[ring],
+                                "foliage.instances." + std::to_string(ring));
+    }
+
+    glBindBuffer(GL_ARRAY_BUFFER, m_instance_vbo[0]);
+    glVertexBindingDivisor(0, 1); // one record per instance
+
+    // location 0: pos (vec3)
+    glEnableVertexAttribArray(0);
+    glVertexAttribFormat(0, 3, GL_FLOAT, GL_FALSE, offsetof(InstanceRecord, pos));
+    glVertexAttribBinding(0, 0);
+    // location 1: size (vec2)
+    glEnableVertexAttribArray(1);
+    glVertexAttribFormat(1, 2, GL_FLOAT, GL_FALSE, offsetof(InstanceRecord, size));
+    glVertexAttribBinding(1, 0);
+    // location 2: color (rgba8 normalized)
+    glEnableVertexAttribArray(2);
+    glVertexAttribFormat(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, offsetof(InstanceRecord, color));
+    glVertexAttribBinding(2, 0);
+    // location 3: sway (vec2)
+    glEnableVertexAttribArray(3);
+    glVertexAttribFormat(3, 2, GL_FLOAT, GL_FALSE, offsetof(InstanceRecord, sway));
+    glVertexAttribBinding(3, 0);
+    // location 4: phase (half float)
+    glEnableVertexAttribArray(4);
+    glVertexAttribFormat(4, 1, GL_HALF_FLOAT, GL_FALSE, offsetof(InstanceRecord, phase));
+    glVertexAttribBinding(4, 0);
+    // location 5: facing (half float)
+    glEnableVertexAttribArray(5);
+    glVertexAttribFormat(5, 1, GL_HALF_FLOAT, GL_FALSE, offsetof(InstanceRecord, facing));
+    glVertexAttribBinding(5, 0);
+
+    glBindVertexBuffer(0, m_instance_vbo[0], 0, sizeof(InstanceRecord));
+
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+void FoliagePass::destroy_buffers() {
+    for (std::size_t ring = 0; ring < kRingFrames; ++ring) {
+        if (m_instance_vbo[ring]) {
+            glBindBuffer(GL_ARRAY_BUFFER, m_instance_vbo[ring]);
+            glUnmapBuffer(GL_ARRAY_BUFFER);
+            glDeleteBuffers(1, &m_instance_vbo[ring]);
+            m_instance_vbo[ring] = 0;
+            m_instance_ptr[ring] = nullptr;
+        }
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    if (m_vao) { glDeleteVertexArrays(1, &m_vao); m_vao = 0; }
+    m_instances.clear();
+    m_instances.shrink_to_fit();
+    m_ring_cursor = 0;
+    m_frame_instance_count = 0;
+}
+
+void FoliagePass::reset_shader() {
+    m_shader.reset();
+}
+
+bool FoliagePass::load_scatter_set(const std::filesystem::path& json_path) {
+    std::ifstream in(json_path);
+    if (!in) {
+        LUMINUMBRA_CORE_WARN("FoliagePass: scatter set not found '{}'.", json_path.string());
+        return false;
+    }
+    m_archetypes.clear();
+    try {
+        nlohmann::json doc = nlohmann::json::parse(in);
+        if (!doc.contains("archetypes") || !doc["archetypes"].is_array()) {
+            LUMINUMBRA_CORE_WARN("FoliagePass: scatter set '{}' missing 'archetypes' array.",
+                                 json_path.string());
+            return false;
+        }
+        for (const auto& node : doc["archetypes"]) {
+            ArchetypeData a;
+            a.name = node.value("name", std::string("archetype"));
+            if (node.contains("color") && node["color"].is_array() && node["color"].size() == 3) {
+                a.color = glm::vec3(node["color"][0].get<float>(),
+                                    node["color"][1].get<float>(),
+                                    node["color"][2].get<float>());
+            }
+            a.half_width = node.value("half_width", a.half_width);
+            a.height = node.value("height", a.height);
+            a.sways = node.value("sways", a.sways);
+            a.density_weight = std::max(0.0f, node.value("density_weight", 1.0f));
+            a.loaded = true;
+            m_archetypes.push_back(std::move(a));
+        }
+    } catch (const std::exception& e) {
+        LUMINUMBRA_CORE_WARN("FoliagePass: failed to parse scatter set '{}': {}",
+                             json_path.string(), e.what());
+        m_archetypes.clear();
+        return false;
+    }
+    if (m_archetypes.empty()) {
+        return false;
+    }
+    m_enabled = true;
+    LUMINUMBRA_CORE_INFO("FoliagePass: loaded {} scatter archetypes from '{}'.",
+                         m_archetypes.size(), json_path.string());
+    return true;
+}
+
+void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
+                                    SurfaceQuery query, void* query_ctx,
+                                    const glm::vec3& camera_pos) {
+    m_instances.clear();
+    m_frame_instance_count = 0;
+    if (!m_enabled || m_archetypes.empty() || query == nullptr) {
+        return;
+    }
+
+    // Total archetype weight for the deterministic per-instance archetype pick.
+    float total_weight = 0.0f;
+    for (const auto& a : m_archetypes) {
+        total_weight += a.density_weight;
+    }
+    if (total_weight <= 0.0f) {
+        total_weight = 1.0f;
+    }
+
+    for (const ChunkScatter& chunk : chunks) {
+        if (chunk.density <= 0.0f) {
+            continue;
+        }
+        // Distance cull whole chunks past the fade horizon (no per-instance work
+        // for far tiles -- gate: no foliage beyond the live ring).
+        const glm::vec3 chunk_center = chunk.origin + glm::vec3(chunk.extent_m * 0.5f, 0.0f, chunk.extent_m * 0.5f);
+        const float chunk_dist =
+            std::sqrt((chunk_center.x - camera_pos.x) * (chunk_center.x - camera_pos.x) +
+                      (chunk_center.z - camera_pos.z) * (chunk_center.z - camera_pos.z));
+        if (chunk_dist - chunk.extent_m > m_fade_end_m) {
+            continue;
+        }
+
+        // Number of candidate slots scales with density (capped). Each candidate
+        // is a deterministic hash draw; slope/moisture decide the emit.
+        const std::size_t candidates = std::min<std::size_t>(
+            kMaxCandidatesPerChunk,
+            static_cast<std::size_t>(std::lround(chunk.density * static_cast<float>(kMaxCandidatesPerChunk))));
+
+        for (uint32_t idx = 0; idx < candidates; ++idx) {
+            if (m_instances.size() >= kMaxInstances) {
+                break;
+            }
+            const uint64_t h0 = placement_hash(chunk.chunk_xz.x, chunk.chunk_xz.y,
+                                               chunk.biome_id, idx);
+            const uint64_t h1 = splitmix64(h0 ^ 0x2545F4914F6CDD1Dull);
+            const uint64_t h2 = splitmix64(h1 ^ 0x9E3779B97F4A7C15ull);
+            const uint64_t h3 = splitmix64(h2 ^ 0xBF58476D1CE4E5B9ull);
+
+            // Jittered position inside the chunk footprint.
+            const float fx = hash_unit(h0);
+            const float fz = hash_unit(h1);
+            const float wx = chunk.origin.x + fx * chunk.extent_m;
+            const float wz = chunk.origin.z + fz * chunk.extent_m;
+
+            // Distance-fade hard cull: instances whose ANCHOR is past the fade
+            // end are never emitted (gate: no foliage beyond the live ring). The
+            // shader fade handles the soft band in [fade_start, fade_end]; this
+            // keeps the CPU set itself ring-bounded.
+            const float inst_dist =
+                std::sqrt((wx - camera_pos.x) * (wx - camera_pos.x) +
+                          (wz - camera_pos.z) * (wz - camera_pos.z));
+            if (inst_dist > m_fade_end_m) {
+                continue;
+            }
+
+            const SurfaceSample surf = query(query_ctx, wx, wz);
+            if (!surf.valid) {
+                continue; // underwater / no ground here
+            }
+
+            // DENSITY MODULATION (design-decisions §2): biome density modulated
+            // by slope (steep ground sheds foliage) and moisture (wet ground
+            // grows more). The per-candidate accept threshold is a hash draw, so
+            // the placement stays a pure function of the world grid.
+            const float slope_factor = std::clamp(1.0f - surf.slope, 0.0f, 1.0f);
+            const float moisture_factor = std::clamp(0.5f + 0.5f * surf.moisture, 0.0f, 1.0f);
+            const float accept = std::clamp(chunk.density * slope_factor * moisture_factor, 0.0f, 1.0f);
+            if (hash_unit(h2) > accept) {
+                continue;
+            }
+
+            // Deterministic per-instance archetype pick (weighted).
+            float pick = hash_unit(h3) * total_weight;
+            std::size_t arch_index = 0;
+            for (std::size_t a = 0; a < m_archetypes.size(); ++a) {
+                if (pick < m_archetypes[a].density_weight) {
+                    arch_index = a;
+                    break;
+                }
+                pick -= m_archetypes[a].density_weight;
+                arch_index = a;
+            }
+            const ArchetypeData& arch = m_archetypes[arch_index];
+
+            // Per-instance wind sway: the camera-region wind vector, attenuated
+            // by the per-archetype sway flag. Pebbles/clutter (sways=false) get
+            // zero displacement and a zero sway-flag scale so they never wave.
+            const float sway_scale = arch.sways ? 1.0f : 0.0f;
+            const glm::vec2 sway = m_wind_xz * sway_scale;
+
+            InstanceRecord rec;
+            rec.pos[0] = wx;
+            rec.pos[1] = surf.height;
+            rec.pos[2] = wz;
+            // Slight per-instance size jitter (deterministic).
+            const float size_jit = 0.8f + 0.4f * hash_unit(splitmix64(h3 ^ 0x123456789ABCDEFull));
+            rec.size[0] = arch.half_width * size_jit;
+            rec.size[1] = arch.height * size_jit;
+            rec.color[0] = to_unorm8(arch.color.r);
+            rec.color[1] = to_unorm8(arch.color.g);
+            rec.color[2] = to_unorm8(arch.color.b);
+            rec.color[3] = to_unorm8(sway_scale); // sway-flag scale rides in alpha
+            rec.sway[0] = sway.x;
+            rec.sway[1] = sway.y;
+            rec.phase = encode_f16(hash_unit(h1) * 6.2831853f);
+            rec.facing = encode_f16(hash_unit(h0) * 6.2831853f);
+            m_instances.push_back(rec);
+        }
+        if (m_instances.size() >= kMaxInstances) {
+            break;
+        }
+    }
+
+    map_instances_for_frame();
+}
+
+void FoliagePass::map_instances_for_frame() {
+    m_ring_cursor = (m_ring_cursor + 1) % kRingFrames;
+    InstanceRecord* dst = m_instance_ptr[m_ring_cursor];
+    if (dst == nullptr) {
+        m_frame_instance_count = 0;
+        return;
+    }
+    const std::size_t count = std::min(m_instances.size(), kMaxInstances);
+    if (count > 0) {
+        std::memcpy(dst, m_instances.data(), count * sizeof(InstanceRecord));
+    }
+    m_frame_instance_count = count;
+}
+
+void FoliagePass::execute(RenderPipeline& pipeline, const Camera& camera) {
+    if (!m_enabled || !m_shader || !m_shader->IsValid() ||
+        m_frame_instance_count == 0 || m_vao == 0) {
+        return;
+    }
+
+    const FrameBufferObject& lighting_fbo = pipeline.m_lighting_pass->lighting_fbo();
+    const GBuffer& gbuffer = pipeline.m_gbuffer_pass->gbuffer();
+    if (!lighting_fbo.fbo_id) {
+        return;
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, lighting_fbo.fbo_id);
+    glViewport(0, 0, pipeline.m_screen_width, pipeline.m_screen_height);
+
+    // Opaque-ish ground cover: depth test AND write against the scene depth so
+    // the cards occlude correctly, alpha-tested in the frag shader. Blend on for
+    // soft edges.
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    glDepthFunc(GL_LEQUAL);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    const GLboolean cull_was_enabled = glIsEnabled(GL_CULL_FACE);
+    if (cull_was_enabled) {
+        glDisable(GL_CULL_FACE); // two-sided cards
+    }
+
+    m_shader->use();
+    const glm::mat4 projection = glm::perspective(
+        glm::radians(camera.Zoom),
+        static_cast<float>(pipeline.m_screen_width) / static_cast<float>(pipeline.m_screen_height),
+        camera.GetNearPlane(), camera.GetFarPlane());
+    const glm::mat4 view = camera.GetViewMatrix();
+    m_shader->setMat4("u_view", view);
+    m_shader->setMat4("u_projection", projection);
+    m_shader->setVec3("u_cameraPos", camera.Position);
+    m_shader->setFloat("u_time", static_cast<float>(glfwGetTime()));
+    m_shader->setFloat("u_swayAmplitude", m_sway_amplitude);
+    m_shader->setFloat("u_swaySpeed", m_sway_speed);
+    m_shader->setFloat("u_fadeStart", m_fade_start_m);
+    m_shader->setFloat("u_fadeEnd", m_fade_end_m);
+
+    m_shader->setVec3("u_sunDirection", pipeline.m_sun.direction);
+    m_shader->setVec3("u_sunColor", pipeline.m_sun.color);
+    m_shader->setFloat("u_sunIntensity", pipeline.m_sun.intensity);
+    m_shader->setVec3("u_ambientColor", pipeline.m_skyAmbientColor);
+
+    (void)gbuffer; // depth already copied into the lighting FBO by the pipeline
+
+    glBindVertexArray(m_vao);
+    glBindVertexBuffer(0, m_instance_vbo[m_ring_cursor], 0, sizeof(InstanceRecord));
+    glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, static_cast<GLsizei>(m_frame_instance_count));
+    pipeline.m_last_render_pass_stats.foliage_draws++;
+    pipeline.m_last_render_pass_stats.foliage_instances_drawn += m_frame_instance_count;
+    glBindVertexArray(0);
+
+    if (cull_was_enabled) {
+        glEnable(GL_CULL_FACE);
+    }
+    glDisable(GL_BLEND);
+    glDepthMask(GL_TRUE);
+    glDepthFunc(GL_LESS);
+}
+
+uint64_t FoliagePass::instance_hash() const {
+    if (m_instances.empty()) {
+        return fnv1a(nullptr, 0);
+    }
+    return fnv1a(m_instances.data(), m_instances.size() * sizeof(InstanceRecord));
+}
+
+std::size_t FoliagePass::instances_within(const glm::vec3& center, float radius_m) const {
+    const float r2 = radius_m * radius_m;
+    std::size_t count = 0;
+    for (const auto& rec : m_instances) {
+        const float dx = rec.pos[0] - center.x;
+        const float dz = rec.pos[2] - center.z;
+        if (dx * dx + dz * dz <= r2) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+std::size_t FoliagePass::instances_beyond(const glm::vec3& center, float radius_m) const {
+    const float r2 = radius_m * radius_m;
+    std::size_t count = 0;
+    for (const auto& rec : m_instances) {
+        const float dx = rec.pos[0] - center.x;
+        const float dz = rec.pos[2] - center.z;
+        if (dx * dx + dz * dz > r2) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+float FoliagePass::max_sway_displacement() const {
+    float max_mag = 0.0f;
+    for (const auto& rec : m_instances) {
+        const float mag = std::sqrt(rec.sway[0] * rec.sway[0] + rec.sway[1] * rec.sway[1]);
+        max_mag = std::max(max_mag, mag);
+    }
+    return max_mag;
+}
+
+} // namespace Luminumbra::Rendering

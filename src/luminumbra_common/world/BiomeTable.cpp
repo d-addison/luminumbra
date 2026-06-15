@@ -179,10 +179,21 @@ BiomeTable BiomeTable::Load(const std::filesystem::path& table_path) {
             table.m_errors.push_back("biome '" + biome.name + "' is missing a surface palette object");
         }
 
-        // vegetation + reverb are parsed-not-consumed this iteration. Touch
-        // them only to surface unknown-key warnings inside (forward-compat).
+        // T-I5b-1: vegetation is now CONSUMED render-side (foliage scatter
+        // density). Render-only: NOT mixed into compute_content_hash() (see the
+        // note there) so it never invalidates far-LOD tiles or perturbs
+        // world_hash. The scatter labels stay opaque game content.
         if (entry.contains("vegetation") && entry["vegetation"].is_object()) {
-            WarnUnknownKeys(entry["vegetation"], "biomes[" + std::to_string(raw_id) + "].vegetation",
+            const nlohmann::json& veg = entry["vegetation"];
+            biome.vegetation.density = std::clamp(veg.value("density", biome.vegetation.density), 0.0f, 1.0f);
+            if (veg.contains("scatter") && veg["scatter"].is_array()) {
+                for (const auto& s : veg["scatter"]) {
+                    if (s.is_string()) {
+                        biome.vegetation.scatter.push_back(s.get<std::string>());
+                    }
+                }
+            }
+            WarnUnknownKeys(veg, "biomes[" + std::to_string(raw_id) + "].vegetation",
                             {"density", "scatter"}, table_path, table.m_warnings);
         }
         // T-I4-5: reverb is now CONSUMED (per-biome environmental audio).
@@ -260,7 +271,18 @@ const BiomeReverb& BiomeTable::reverb_for(u8 biome_id) const {
     return m_default_reverb;
 }
 
-// NOTE: reverb is deliberately NOT mixed into compute_content_hash(). The
+const BiomeVegetation& BiomeTable::vegetation_for(u8 biome_id) const {
+    if (biome_id < m_id_to_index.size()) {
+        const u8 index = m_id_to_index[biome_id];
+        if (index != kNoBiome && index < m_biomes.size()) {
+            return m_biomes[index].vegetation;
+        }
+    }
+    return m_default_vegetation;
+}
+
+// NOTE: reverb AND vegetation are deliberately NOT mixed into
+// compute_content_hash(). The
 // content hash gates the terrain far-LOD cache (ComputeTerrainParamsHash), and
 // reverb is audio-only - a reverb retune must not invalidate terrain tiles.
 u64 BiomeTable::compute_content_hash() const {
