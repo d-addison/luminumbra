@@ -37,6 +37,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <csignal>
@@ -1809,8 +1810,35 @@ int main(int argc, char* argv[]) {
     // phase (no wind) and a WINDY phase (wind-advected slant) -- so the gate can
     // assert precip particles are present AND that they slant with wind.
     bool precip_emitter_spawned = false;
+    // T-I5a-DR-storm-motion-v4: id of the camera-tracked rain emitter (so it can
+    // be re-centered on the live camera every frame -> rain falls past the viewer).
+    uint32_t precip_rain_emitter_id =
+        Luminumbra::Rendering::ParticlePass::kInvalidEmitter;
     bool precip_calm_capture_written = false;
     bool precip_windy_capture_written = false;
+    // T-I5a-DR-particle-motion-quality: atmospheric MOTION capture. Env-gated
+    // (LUMINUMBRA_ATMOS_MOTION_CAPTURE=1) on top of the precipitation_smoke
+    // scenario. Runs a continuous STORM (heavy rain + drifting clouds + periodic
+    // lightning) and dumps ~90 consecutive frames as motion/frame_%03d.ppm so the
+    // moving clip (GIF/MP4) can be judged IN MOTION (a single still is not enough).
+    // Render-only: never touches sim/world_hash.
+    const bool atmos_motion_capture = [] {
+        const char* v = std::getenv("LUMINUMBRA_ATMOS_MOTION_CAPTURE");
+        return v != nullptr && v[0] != '\0' && v[0] != '0';
+    }();
+    int atmos_motion_frame_index = 0;
+    // T-I5a-DR-storm-motion-v3: capture 240 frames. At the honest 1/60 s stride
+    // (every render frame) that is ~4 s of real-time storm replayed at 60 fps --
+    // long enough to show several lightning strikes and continuous falling rain.
+    constexpr int kAtmosMotionFrameCount = 240;
+    // T-I5a-DR-storm-motion-v3: HONEST motion. The clip captures the REAL
+    // precip_rain.json (no demo emitter), so the capture cadence must match how the
+    // rain actually looks at runtime: sample every render frame (~60 fps -> ~16.7 ms
+    // step) rather than the old 45 ms stride that exaggerated the per-frame fall and
+    // misrepresented the true on-screen motion. Replayed at 60 fps the assembled
+    // clip is a faithful 1:1 recording of the shipping rain. 90 frames ~= 1.5 s.
+    double atmos_motion_last_capture_s = -1.0;
+    constexpr double kAtmosMotionFrameIntervalS = 1.0 / 60.0;
     PrecipPixelStats precip_calm_stats;
     Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats precip_calm_render_pass;
     // T-I5a-7 (C2): 6 season-sweep windows (summer noon/dusk/night, winter
@@ -2318,11 +2346,36 @@ int main(int argc, char* argv[]) {
                         // falling column fills the frame, plus the splash template.
                         const glm::vec3 field_origin(
                             g_camera->Position.x, g_camera->Position.y, g_camera->Position.z);
-                        particles->add_emitter(
+                        // T-I5a-DR-storm-motion-v3: UNIFIED. The motion clip now shows
+                        // the EXACT same precip_rain.json that ships in real gameplay
+                        // (no demo-only emitter). What the owner watches == what ships.
+                        // Honest fall is achieved by sampling the capture every render
+                        // frame (see kAtmosMotionFrameIntervalS below) instead of a
+                        // long interval that misrepresented 60 fps motion.
+                        precip_rain_emitter_id = particles->add_emitter(
                             root_dir / "data/common/particles/precip_rain.json", field_origin);
                         particles->add_splash_emitter(
                             root_dir / "data/common/particles/precip_splash.json");
                         precip_emitter_spawned = true;
+                    }
+
+                    // T-I5a-DR-storm-motion-v4: CAMERA-RELATIVE rain. The scenario
+                    // calls ApplySkyboxVisualCamera every frame, so the camera MOVES
+                    // through the world. Previously the rain column was spawned ONCE
+                    // at a FIXED world point, so as the camera advanced the fixed
+                    // column drifted across the view -- reading as rain "floating
+                    // toward" the viewer instead of falling. RE-CENTER the emitter's
+                    // spawn box on the LIVE camera position every frame (the authored
+                    // [0,22,0] height offset is re-applied inside set_emitter_origin),
+                    // so new drops always spawn AROUND/ABOVE the viewer and fall
+                    // straight DOWN past it regardless of camera motion. In-flight
+                    // drops keep their own trajectories. Render-only -> world_hash
+                    // is untouched (the emitter origin is render state, not sim).
+                    if (particles != nullptr &&
+                        precip_rain_emitter_id != Luminumbra::Rendering::ParticlePass::kInvalidEmitter) {
+                        const glm::vec3 cam_anchor(
+                            g_camera->Position.x, g_camera->Position.y, g_camera->Position.z);
+                        particles->set_emitter_origin(precip_rain_emitter_id, cam_anchor);
                     }
 
                     // Overcast/wet backdrop from the replicated weather state (the
@@ -2352,6 +2405,17 @@ int main(int argc, char* argv[]) {
                         wstate.rain_intensity = 1.0f;
                         wstate.wetness = 1.0f;
                     }
+                    // T-I5a-DR-particle-motion-quality: in the motion clip push a
+                    // FULL storm (high storm intensity -> the overlay darkens the
+                    // dome to overcast) so the rain reads as bright streaks over a
+                    // dark sky and the lightning has contrast. This override is
+                    // gated on the env flag so the dedicated Precipitation gate's
+                    // calm/windy captures (which assert a specific overcast luma
+                    // drop) keep their tuned storm_intensity unchanged.
+                    if (atmos_motion_capture) {
+                        wstate.storm_intensity = 0.92f;
+                        wstate.fog_density = 0.18f;
+                    }
                     renderPipeline.set_weather_state(wstate);
 
                     // WIND-ADVECTION push (render-only). Calm phase: zero wind so
@@ -2377,6 +2441,158 @@ int main(int argc, char* argv[]) {
                         } else {
                             particles->set_wind(glm::vec3(0.0f));
                         }
+                    }
+
+                    // T-I5a-DR-particle-motion-quality: continuous STORM driving for
+                    // the motion clip. Overrides the calm/windy split with a steady
+                    // moderate cross-wind (so rain reads as wind-sheared streaks
+                    // falling past the camera), a drifting overcast cloud sheet, and
+                    // a PERIODIC lightning strike so the moving clip shows a storm
+                    // flash. All render-only (F2): nothing is written back to sim.
+                    if (atmos_motion_capture) {
+                        // Steady cross-wind: a constant breeze on the camera-right
+                        // axis gives every frame the same gentle shear so the falling
+                        // rain reads as rain (not floating dots) and slants slightly.
+                        // T-I5a-DR-storm-motion-v4: the wind must NOT push rain along
+                        // the camera FORWARD axis -- any toward/away-camera drift makes
+                        // the streaks read as "floating toward us" instead of falling
+                        // straight past the viewer. Keep the shear PURELY in the screen
+                        // plane (camera-right only) and STRIP any forward (depth)
+                        // component, so every streak stays in the view plane and falls
+                        // vertically past the camera. (The old `+ vec3(0,0,1.5)` was a
+                        // WORLD-Z push whose camera-forward projection caused exactly
+                        // the toward-camera float the owner flagged.)
+                        if (particles != nullptr) {
+                            const glm::vec3 right = glm::normalize(g_camera->Right);
+                            const glm::vec3 fwd = glm::normalize(g_camera->Front);
+                            glm::vec3 wind = right * 6.0f;
+                            // Project out any forward (depth) component defensively so
+                            // there is zero toward/away-camera motion in the streaks.
+                            wind -= fwd * glm::dot(wind, fwd);
+                            particles->set_wind(wind);
+                        }
+                        // Drifting overcast cloud sheet (dims the storm dome too).
+                        Luminumbra::Rendering::CloudRenderState cstate;
+                        cstate.enabled = true;
+                        cstate.shadow_enabled = true;
+                        cstate.coverage_amount = 0.85f;     // heavy overcast
+                        cstate.biome_variation = 0.0f;
+                        cstate.plane_height = 900.0f;
+                        cstate.shadow_strength = 0.6f;
+                        cstate.scroll_offset = glm::vec2(
+                            static_cast<float>(elapsed_play_seconds) * 22.0f,
+                            static_cast<float>(elapsed_play_seconds) * 6.0f);
+                        renderPipeline.set_cloud_state(cstate);
+
+                        // Periodic lightning: fire a deterministic forked bolt in a
+                        // short window roughly every ~1.6 s of wall-clock so the clip
+                        // contains a few strikes. The bolt + full-scene flash use the
+                        // same screen-anchored projection as the WeatherVisual gate.
+                        const double strike_cycle = std::fmod(elapsed_play_seconds, 1.6);
+                        const bool strike_now = strike_cycle < 0.16; // ~10% duty -> a few-frame flash
+                        Luminumbra::Rendering::LightningRenderState lstate;
+                        if (strike_now) {
+                            lstate.active = true;
+                            // Strong full-scene flash so the strike briefly LIGHTS
+                            // the dark storm scene (the readable signature of a
+                            // strike in motion), with a thin bright forked core +
+                            // soft glow halo so the bolt is a filament, not a worm.
+                            lstate.pulse_intensity = 0.38f;  // brighter scene flash
+                            lstate.bolt_width_ndc = 0.006f;  // thin bright core
+                            lstate.bolt_glow_ndc = 0.024f;   // tight glow halo
+                            const glm::vec3 fwd = glm::normalize(
+                                glm::vec3(g_camera->Front.x, 0.0f, g_camera->Front.z));
+                            // T-I5a-DR-storm-motion-v2: TOUCHDOWN. Strike a real ground
+                            // point ahead of the camera: terrain height at (x,z) is the
+                            // bolt's true bottom, so the channel spans cloud->terrain and
+                            // ends ON the ground (no floating mid-air bolt).
+                            const glm::vec3 strike_xz = g_camera->Position + fwd * 160.0f;
+                            const float ground_y =
+                                gameSession->GetWorldSystem()->GetTerrainHeightAt(
+                                    strike_xz.x, strike_xz.z);
+                            const glm::vec3 strike_ground(strike_xz.x, ground_y, strike_xz.z);
+                            // Vary the strike seed per cycle so successive bolts differ.
+                            const uint64_t cycle_index = static_cast<uint64_t>(
+                                elapsed_play_seconds / 1.6);
+                            const Luminumbra::Rendering::LightningBoltGeometry bolt =
+                                Luminumbra::Rendering::BuildLightningBolt(
+                                    strike_ground.x, strike_ground.y, strike_ground.z,
+                                    /*magnitude=*/0.9f,
+                                    /*strike_seed=*/0x5A5A1357ull + cycle_index * 0x9E3779B1ull);
+                            // PROJECT the real bolt through the actual render camera so
+                            // the bolt spans the frame from the cloud base down to the
+                            // projected terrain terminus -- it visibly TOUCHES DOWN.
+                            int mvw = 0, mvh = 0;
+                            glfwGetFramebufferSize(window, &mvw, &mvh);
+                            const glm::mat4 proj = glm::perspective(
+                                glm::radians(g_camera->Zoom),
+                                static_cast<float>(std::max(1, mvw)) /
+                                    static_cast<float>(std::max(1, mvh)),
+                                g_camera->GetNearPlane(), g_camera->GetFarPlane());
+                            const glm::mat4 viewproj = proj * g_camera->GetViewMatrix();
+                            const glm::vec3 top = bolt.main_channel.front();
+                            const glm::vec3 bottom = bolt.main_channel.back();
+                            const float span_y = std::max(1e-3f, top.y - bottom.y);
+                            // Project the straight cloud->ground baseline endpoints; the
+                            // bolt's jagged points are laid along the screen line between
+                            // these, with the seeded lateral wobble added as a MODEST
+                            // sideways jag (kept small so the bolt stays a tall, thin,
+                            // mostly-vertical filament -- not a horizontal scribble).
+                            const auto project = [&](const glm::vec3& wp, bool& ok) -> glm::vec2 {
+                                const glm::vec4 clip = viewproj * glm::vec4(wp, 1.0f);
+                                ok = clip.w > 1e-4f;
+                                if (!ok) return glm::vec2(0.0f);
+                                return glm::vec2(clip.x / clip.w, clip.y / clip.w);
+                            };
+                            bool top_ok = false, bot_ok = false;
+                            glm::vec2 top_ndc = project(top, top_ok);
+                            glm::vec2 bot_ndc = project(bottom, bot_ok);
+                            // Anchor the bolt TOP just BELOW the top edge so the dark
+                            // storm cloud deck (painted from this anchor upward) is
+                            // visible ABOVE the bolt origin and the bolt clearly emerges
+                            // from the cloud base. BOTTOM goes onto the projected ground
+                            // point, clamped just inside the bottom edge so the touchdown
+                            // is visible even when the upward-tilted camera projects the
+                            // ground low.
+                            top_ndc.y = top_ok ? std::min(top_ndc.y, 0.74f) : 0.74f;
+                            const float kGroundNdcY = bot_ok
+                                ? std::clamp(bot_ndc.y, -0.96f, -0.55f) : -0.92f;
+                            const float kColumnNdcX = bot_ok
+                                ? std::clamp(bot_ndc.x, -0.6f, 0.6f) : 0.0f;
+                            const float kLateralToNdc = 1.0f / 260.0f; // modest jag
+                            const auto map_point = [&](const glm::vec3& wp) -> glm::vec2 {
+                                const float hf = std::clamp((wp.y - bottom.y) / span_y, 0.0f, 1.0f);
+                                const float ndc_y = kGroundNdcY + (top_ndc.y - kGroundNdcY) * hf;
+                                const float base_x = bottom.x + (top.x - bottom.x) * hf;
+                                const float base_z = bottom.z + (top.z - bottom.z) * hf;
+                                const float lateral = (wp.x - base_x) + (wp.z - base_z);
+                                const float ndc_x = kColumnNdcX +
+                                    std::clamp(lateral * kLateralToNdc, -0.14f, 0.14f);
+                                return glm::vec2(ndc_x, ndc_y);
+                            };
+                            const auto push_stroke = [&](const std::vector<glm::vec3>& stroke) {
+                                if (!lstate.bolt_points_ndc.empty()) {
+                                    lstate.bolt_points_ndc.emplace_back(-3.0f, -3.0f);
+                                }
+                                for (const glm::vec3& wp : stroke) {
+                                    lstate.bolt_points_ndc.push_back(map_point(wp));
+                                }
+                            };
+                            push_stroke(bolt.main_channel);
+                            for (const auto& br : bolt.branches) { push_stroke(br); }
+                            lstate.strike_ndc = glm::vec2(kColumnNdcX, kGroundNdcY);
+                            // Ground-impact bloom at the touchdown point.
+                            lstate.ground_ndc = glm::vec2(kColumnNdcX, kGroundNdcY);
+                            lstate.ground_flash = 0.55f;
+                            // T-I5a-DR-storm-motion-v3: anchor a DARK STORM CLOUD at the
+                            // bolt TOP so the bolt visibly EMERGES from a cloud (not thin
+                            // air). The cloud base sits at the bolt-top NDC and the
+                            // overlay paints a billowing dark deck across the upper frame
+                            // around this column; the flash lights it from within.
+                            lstate.cloud_anchor_ndc = glm::vec2(kColumnNdcX, top_ndc.y);
+                            lstate.cloud_darkness = 0.85f;
+                        }
+                        renderPipeline.set_lightning_state(lstate);
                     }
                 } else if (scenario_config.timeofday_sweep_smoke() && scenario_ready && g_camera) {
                     const double elapsed_play_seconds = std::chrono::duration<double>(
@@ -3232,6 +3448,38 @@ int main(int argc, char* argv[]) {
                                                 result,
                                                 render_pass_stats);
                                         }
+                                    }
+                                }
+                            }
+                        }
+                        // T-I5a-DR-particle-motion-quality: dump consecutive STORM
+                        // frames for the motion clip. Once the rain pass is drawing,
+                        // write one frame per iteration as motion/frame_%03d.ppm until
+                        // kAtmosMotionFrameCount frames are captured.
+                        if (atmos_motion_capture && scenario_config.precipitation_smoke() &&
+                            scenario_ready && atmos_motion_frame_index < kAtmosMotionFrameCount) {
+                            const auto& render_pass_stats = renderPipeline.get_last_render_pass_stats();
+                            const double motion_now_s = std::chrono::duration<double>(
+                                now - scenario_play_started_at).count();
+                            const bool motion_interval_elapsed =
+                                atmos_motion_last_capture_s < 0.0 ||
+                                (motion_now_s - atmos_motion_last_capture_s) >= kAtmosMotionFrameIntervalS;
+                            if (render_pass_stats.particle_draws > 0 && motion_interval_elapsed) {
+                                int mw = 0;
+                                int mh = 0;
+                                glfwGetFramebufferSize(window, &mw, &mh);
+                                if (mw > 0 && mh > 0) {
+                                    std::vector<unsigned char> mpx(
+                                        static_cast<std::size_t>(mw) * static_cast<std::size_t>(mh) * 3u);
+                                    glReadBuffer(GL_BACK);
+                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                                    glReadPixels(0, 0, mw, mh, GL_RGB, GL_UNSIGNED_BYTE, mpx.data());
+                                    char name[32];
+                                    std::snprintf(name, sizeof(name), "motion/frame_%03d.ppm",
+                                                  atmos_motion_frame_index);
+                                    if (WritePixelBufferPpm(scenario_config.artifact_dir / name, mw, mh, mpx)) {
+                                        ++atmos_motion_frame_index;
+                                        atmos_motion_last_capture_s = motion_now_s;
                                     }
                                 }
                             }

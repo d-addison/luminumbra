@@ -260,6 +260,22 @@ void ParticlePass::clear_emitters() {
     m_live_count = 0;
 }
 
+void ParticlePass::set_emitter_origin(uint32_t emitter_id, const glm::vec3& base_origin) {
+    // T-I5a-DR-storm-motion-v4: re-anchor a live emitter's spawn region. We apply
+    // the SAME convention as add_emitter (world_origin = base + data.origin) so the
+    // authored height offset (rain: [0,22,0]) is preserved as the camera moves.
+    // Render-only: this never feeds rebuild_emitter_descriptors at a fixed tick, and
+    // the descriptor snapshot (world_hash surface) is rebuilt independently from the
+    // sim-deterministic schedule -- so moving the render anchor leaves world_hash
+    // untouched (one-way rule, critique F2).
+    for (ActiveEmitter& emitter : m_active_emitters) {
+        if (emitter.id == emitter_id) {
+            emitter.world_origin = base_origin + emitter.data.origin;
+            return;
+        }
+    }
+}
+
 uint32_t ParticlePass::add_splash_emitter(const std::filesystem::path& json_path) {
     // T-I5a-4 (B2): a splash burst is a normal emitter loaded with spawn_rate
     // forced to 0 -- it never self-emits; only rain-impact events spawn from it.
@@ -513,9 +529,27 @@ void ParticlePass::execute(RenderPipeline& pipeline, const Camera& camera) {
     glDepthMask(GL_FALSE);
     glDepthFunc(GL_LEQUAL);
     glEnable(GL_BLEND);
-    // Default emitter blend is additive (emissive glow); alpha emitters use
-    // standard transparency. The fixture emitter is additive.
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    // T-I5a-DR-particle-motion-quality: honour the emitter blend mode. The old
+    // path hardcoded additive (GL_SRC_ALPHA, GL_ONE) for EVERY emitter -- but RAIN
+    // is alpha-blended translucent water, and drawing it additively over the dark
+    // storm sky made the streaks glow/clip oddly instead of reading as a soft
+    // translucent curtain. If ANY active emitter requests alpha blending (rain /
+    // splash), use standard src-alpha transparency so the streaks composite as a
+    // translucent veil; otherwise keep additive (emissive magical sparkles). The
+    // two never coexist in a scene, so a single per-draw choice is sufficient and
+    // keeps the additive fixture path byte-identical.
+    bool any_alpha = false;
+    for (const auto& e : m_active_emitters) {
+        if (e.data.loaded && e.data.blend == BlendMode::AlphaBlend) {
+            any_alpha = true;
+            break;
+        }
+    }
+    if (any_alpha) {
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    } else {
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    }
     const GLboolean cull_was_enabled = glIsEnabled(GL_CULL_FACE);
     if (cull_was_enabled) {
         glDisable(GL_CULL_FACE);

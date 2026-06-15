@@ -21,6 +21,44 @@ uniform float u_boltGlow = 0.040;        // bolt glow falloff radius (NDC)
 uniform int   u_boltCount = 0;
 uniform vec2  u_bolt[MAX_BOLT_POINTS];   // flattened NDC polyline (x<=-2 == pen-up)
 uniform float u_aspect = 1.777;          // framebuffer width/height
+// T-I5a-DR-storm-motion-v2: GROUND-IMPACT flash. The bolt must visibly TOUCH DOWN:
+// a bright radial bloom at the touchdown point sells the strike connecting to the
+// terrain. u_groundNdc is the projected ground terminus; u_groundFlash scales it.
+uniform vec2  u_groundNdc = vec2(0.0, -1.0);
+uniform float u_groundFlash = 0.0;       // 0 = no impact bloom
+// T-I5a-DR-storm-motion-v3: DARK STORM CLOUD the bolt emerges from. u_cloudNdc is
+// the bolt-top anchor (cloud base) in NDC; u_cloudDark scales a dark, billowing
+// cloud mass painted across the upper frame around that anchor. The flash then
+// lights this cloud from within so the strike clearly STEMS FROM the cloud.
+uniform vec2  u_cloudNdc = vec2(0.0, 0.85);
+uniform float u_cloudDark = 0.0;         // 0 = no cloud overlay
+
+// --- cheap value-noise FBM for the cloud silhouette (hash-based, no textures) ---
+float hash21(vec2 p) {
+    p = fract(p * vec2(123.34, 345.45));
+    p += dot(p, p + 34.345);
+    return fract(p.x * p.y);
+}
+float vnoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = hash21(i + vec2(0.0, 0.0));
+    float b = hash21(i + vec2(1.0, 0.0));
+    float c = hash21(i + vec2(0.0, 1.0));
+    float d = hash21(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+float fbm(vec2 p) {
+    float v = 0.0;
+    float amp = 0.5;
+    for (int i = 0; i < 5; ++i) {
+        v += amp * vnoise(p);
+        p *= 2.02;
+        amp *= 0.5;
+    }
+    return v;
+}
 
 // Shortest distance (aspect-corrected NDC) from a screen point to the bolt
 // polyline. A pen-up separator (x <= -2.0) breaks disjoint strokes.
@@ -50,9 +88,44 @@ void main() {
     vec3 color = texture(u_scene, TexCoords).rgb;
     if (u_active == 1 && u_pulse > 0.0) {
         vec2 ndc = TexCoords * 2.0 - 1.0;
+
+        // --- DARK STORM CLOUD (T-I5a-DR-storm-motion-v3) ------------------------
+        // Paint a dark, billowing cloud mass across the upper frame, densest around
+        // the bolt-top anchor (u_cloudNdc) and thinning downward, so the bolt
+        // emerges from a visible cloud rather than thin air. The cloud is composited
+        // FIRST (darkening the sky) and then lit by the flash below.
+        float cloudLight = 0.0; // remembered cloud density at this pixel for the flash
+        if (u_cloudDark > 0.0) {
+            // Cloud field: low-frequency FBM in aspect-corrected NDC, biased so the
+            // billows pool near the top of the frame and around the strike column.
+            vec2 cp = vec2(ndc.x * u_aspect, ndc.y);
+            float billow = fbm(cp * 2.4 + vec2(7.0, 3.0));
+            billow = billow * 0.65 + 0.5 * fbm(cp * 5.0 + vec2(19.0, 2.0));
+            // Vertical envelope: full strength at/above the cloud base anchor,
+            // tapering off below it (the underside of the storm deck).
+            float vert = smoothstep(u_cloudNdc.y - 0.85, u_cloudNdc.y + 0.15, ndc.y);
+            // Horizontal pooling toward the strike column (denser overhead the bolt).
+            float horiz = 1.0 - 0.45 * clamp(abs(ndc.x - u_cloudNdc.x) * u_aspect / 1.8, 0.0, 1.0);
+            float density = clamp(billow * vert * horiz, 0.0, 1.0);
+            // Soft cloud coverage mask (rolling billow edges, not a flat band).
+            float cover = smoothstep(0.42, 0.78, density);
+            cloudLight = cover;
+            // Darken the scene under the cloud toward a deep storm-grey.
+            vec3 cloudCol = vec3(0.06, 0.07, 0.10);
+            color = mix(color, cloudCol, cover * u_cloudDark);
+        }
+
         // Full-scene flash: additive lift, mildly stronger toward the strike.
         float radial = 1.0 - 0.35 * clamp(length((ndc - u_strikeNdc) * vec2(u_aspect, 1.0)) / 2.0, 0.0, 1.0);
         color += u_color * (u_pulse * radial);
+        // Flash lights the storm cloud FROM WITHIN: the strike briefly back-lights
+        // the dark deck near the bolt top, the readable "thunderhead lit by lightning"
+        // signature. Brightest in the cloud directly around the strike column.
+        if (u_cloudDark > 0.0 && cloudLight > 0.0) {
+            float toStrike = 1.0 - clamp(length((ndc - u_cloudNdc) * vec2(u_aspect, 1.0)) / 1.6, 0.0, 1.0);
+            vec3 litCloud = mix(u_color, vec3(1.0), 0.4);
+            color += litCloud * cloudLight * toStrike * u_pulse * 1.6;
+        }
         // Bolt: a THIN hot near-white core with a soft, falling-off bluish glow
         // halo along the polyline (T-I5a-DR-atmospheric-visuals). The old single
         // wide smoothstep + core*3.0 painted a fat opaque white worm; this splits
@@ -61,18 +134,39 @@ void main() {
         // smoothly with distance so the bolt has a luminous halo rather than a
         // hard-edged blob. The core half-width is clamped well below the glow
         // radius so the structure stays thin regardless of the uniform tuning.
+        // T-I5a-DR-storm-motion-v2: a THIN, SHARP, near-white filament. The owner
+        // saw a "fat worm" -- so the core is pinned to a hard ~1-2px ribbon (a
+        // near-binary edge a hair wide in NDC) regardless of the glow tuning, and
+        // the glow halo is kept tight + faint so it frames the bolt rather than
+        // bloating it. The result reads as a hot jagged crack of light, not a tube.
         float bd = boltDistance(ndc);
-        float coreHalf = min(u_boltWidth * 0.35, u_boltGlow * 0.18);
-        // Hot core: tight, near-binary inner ribbon (thin bright filament).
-        float core = 1.0 - smoothstep(coreHalf * 0.5, coreHalf, bd);
-        // Glow: smooth quadratic falloff from the core edge out to the glow radius.
-        float glowLin = 1.0 - smoothstep(coreHalf, u_boltGlow, bd);
+        // Core half-width in NDC clamped to a ~1-2px equivalent ribbon so the bolt
+        // is sharp at any resolution. (0.0016 NDC ~= 1.5px on a 1080-tall frame.)
+        float coreHalf = clamp(min(u_boltWidth * 0.18, u_boltGlow * 0.10), 0.0010, 0.0024);
+        // Hot core: hard near-binary inner ribbon (thin bright filament). A tiny
+        // smoothstep band gives 1px antialiasing without widening the core.
+        float core = 1.0 - smoothstep(coreHalf * 0.6, coreHalf, bd);
+        // Glow: tight quadratic falloff, kept faint so it does not read as girth.
+        float glowRadius = min(u_boltGlow, 0.030);
+        float glowLin = 1.0 - smoothstep(coreHalf, glowRadius, bd);
         float glow = glowLin * glowLin;
-        vec3 hotCore = mix(u_color, vec3(1.0), 0.92);   // hot white-blue filament
+        vec3 hotCore = mix(u_color, vec3(1.0), 0.97);   // near-white hot filament
         vec3 glowCol = u_color;                          // bluish additive halo
-        // Core dominates where present; glow adds a translucent surrounding halo.
-        color += hotCore * (core * 2.6) * max(u_pulse, 1.0);
-        color += glowCol * (glow * 0.85) * max(u_pulse, 1.0);
+        // Core is the dominant bright channel; glow is a thin translucent halo.
+        color += hotCore * (core * 3.2) * max(u_pulse, 1.0);
+        color += glowCol * (glow * 0.40) * max(u_pulse, 1.0);
+
+        // T-I5a-DR-storm-motion-v2: GROUND-IMPACT bloom -- a bright radial flash at
+        // the touchdown point so the bolt visibly CONNECTS to the terrain and lights
+        // the ground it strikes. Aspect-corrected radial falloff; brightest at the
+        // strike point, fading over a short radius.
+        if (u_groundFlash > 0.0) {
+            float gd = length((ndc - u_groundNdc) * vec2(u_aspect, 1.0));
+            float impact = 1.0 - smoothstep(0.0, 0.42, gd);
+            impact = impact * impact;            // concentrate near the strike
+            vec3 impactCol = mix(u_color, vec3(1.0), 0.6);
+            color += impactCol * impact * u_groundFlash;
+        }
     }
     FragColor = vec4(color, 1.0);
 }

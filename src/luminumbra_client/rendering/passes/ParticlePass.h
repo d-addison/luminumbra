@@ -167,6 +167,17 @@ public:
     uint32_t add_emitter(const std::filesystem::path& json_path, const glm::vec3& world_origin);
     void clear_emitters();
 
+    // T-I5a-DR-storm-motion-v4: RE-CENTER an existing emitter's spawn region on a
+    // new base origin (render-only). `base_origin` is the same un-offset world
+    // anchor that add_emitter takes -- the emitter's data.origin (e.g. the rain
+    // column's [0,22,0] height offset) is re-applied internally so the spawn box
+    // keeps its authored height above the anchor. The precipitation scenario calls
+    // this every frame with the LIVE camera position so the rain volume FOLLOWS
+    // the moving camera: new drops always spawn AROUND/ABOVE the viewer and fall
+    // straight past it, while in-flight drops keep their existing trajectories.
+    // No-op for an unknown id. Touches only render state -- never world_hash.
+    void set_emitter_origin(uint32_t emitter_id, const glm::vec3& base_origin);
+
     // T-I5a-4 (B2): registers a SPLASH emitter (a zero-spawn-rate burst template)
     // that impact_splash particles trigger when they reach the impact plane. The
     // emitter's spawn_rate is forced to 0 so it produces nothing on its own --

@@ -91,42 +91,61 @@ vec3 worldPosFromDepth(vec2 uv, float depth) {
     return worldPos.xyz;
 }
 
-// Rain effect
+// Thin per-column vertical streak field. hash01(column) selects which columns
+// carry a streak; a fract() phase scrolls them downward over time. This is a
+// 1D-along-X structure (NOT a 2D value-noise blob field), so it reads as faint
+// vertical RAIN STREAKS rather than the old "lens-dirt" speckle.
+float rainStreaks(vec2 uv, float density, float speed, float colScale) {
+    float col = floor(uv.x * colScale);
+    float pick = hash(vec2(col, 3.17));          // which columns carry a streak
+    if (pick > density) return 0.0;
+    // Per-column random length + phase so streaks are staggered, not a grid.
+    float seed = hash(vec2(col, 9.71));
+    float yphase = fract(uv.y * (5.0 + seed * 5.0) + u_time * speed + seed);
+    // A short bright dash within the column with soft ends (tapered streak).
+    float dash = smoothstep(0.0, 0.06, yphase) * (1.0 - smoothstep(0.18, 0.5, yphase));
+    // Thin across the column width (centred), soft-edged.
+    float across = abs(fract(uv.x * colScale) - 0.5) * 2.0;
+    float width = 1.0 - smoothstep(0.25, 0.8, across);
+    return dash * width;
+}
+
+// Rain effect.
+//
+// T-I5a-DR-particle-motion-quality: the old screen-space rain painted a 2D value
+// noise (noise(screenUV*vec2(80,200))) over EVERY pixel -- blobby grain across
+// the whole sky dome, the "lens-dirt" speckle the owner saw. The bulk rain is now
+// the 3D ParticlePass streak volume around the camera; this screen-space term is
+// reduced to a FAINT, properly VERTICAL streak veil (thin per-column dashes, not
+// 2D blobs) that adds gentle depth/atmosphere to the rain without the speckle. It
+// is kept low-contrast so it never reads as dirt, and a second sparser/slower
+// layer adds parallax. We also keep the ground wet-sheen response.
 vec3 renderRain(vec3 sceneColor, vec2 screenUV, vec3 worldPos) {
     if (u_rainIntensity < 0.01) return sceneColor;
-    
+
     vec3 rainColor = sceneColor;
-    
-    // Rain streaks in screen space
-    vec2 rainUV = screenUV * vec2(80.0, 200.0); // Stretch vertically for streaks
-    rainUV.y += u_time * 15.0; // Falling motion
-    rainUV.x += sin(u_time * 2.0 + rainUV.y * 0.1) * 0.5; // Wind sway
-    
-    float rainPattern = noise(rainUV);
-    rainPattern = smoothstep(0.7, 0.95, rainPattern);
-    
-    // Distance-based rain density. Clamped: rain falls between the camera
-    // and the background, so sky pixels (reconstructed at the far plane)
-    // must still show near-field streaks instead of exp(-1000*0.01) ~= 0.
-    float distance = length(worldPos - u_cameraPos);
-    float rainFalloff = exp(-min(distance, 80.0) * 0.01);
-    
-    // Rain lighting (brighter during storms)
-    vec3 rainLight = vec3(0.8, 0.9, 1.0) * (0.3 + u_stormIntensity * 0.4);
-    
-    // Apply rain effect
-    float rainStrength = rainPattern * u_rainIntensity * rainFalloff;
-    rainColor = mix(rainColor, rainLight, rainStrength * 0.3);
-    
-    // Rain splash effect on surfaces (simplified)
+
+    // Two faint vertical streak layers (near + far) for a subtle rain veil. Wind
+    // sway shifts the column sample so the veil leans with the wind.
+    vec2 swayUV = screenUV;
+    swayUV.x += u_windDirection.x * u_windStrength * (screenUV.y) * 0.08;
+    float near = rainStreaks(swayUV, 0.42, 1.9, 150.0);
+    float far  = rainStreaks(swayUV * vec2(1.0, 1.3), 0.30, 1.2, 96.0);
+    float veil = (near * 0.7 + far * 0.45) * u_rainIntensity;
+    // Light water-white, low intensity -> a translucent veil, not bright dirt.
+    vec3 veilColor = vec3(0.82, 0.9, 1.0) * (0.35 + u_stormIntensity * 0.25);
+    rainColor += veilColor * veil * 0.22;
+
+    // Ground sheen ONLY on valid upward-facing surfaces (sky has no normal, so it
+    // is untouched). A slow fbm gives a gentle living wet-ground shimmer.
     vec3 worldNormal = texture(gNormal, screenUV).rgb;
-    if (length(worldNormal) > 0.1) { // Valid surface
-        float splashFactor = max(0.0, dot(worldNormal, vec3(0, 1, 0))); // Upward facing
+    if (length(worldNormal) > 0.1) {
+        float splashFactor = max(0.0, dot(normalize(worldNormal), vec3(0, 1, 0)));
         float splash = fbm(worldPos * 2.0 + vec3(u_time * 0.5), 2) * splashFactor;
-        splash = smoothstep(0.3, 0.8, splash) * u_rainIntensity;
-        rainColor += vec3(0.4, 0.5, 0.6) * splash * 0.2;
+        splash = smoothstep(0.45, 0.85, splash) * u_rainIntensity;
+        rainColor += vec3(0.35, 0.42, 0.52) * splash * 0.12;
     }
-    
+
     return rainColor;
 }
 
@@ -291,13 +310,26 @@ void main() {
     finalColor = renderFog(finalColor, screenUV, worldPos);
     finalColor = renderRain(finalColor, screenUV, worldPos);
     finalColor = renderSnow(finalColor, screenUV, worldPos);
-    finalColor = renderLightning(finalColor, screenUV);
-    
-    // Global weather tinting
-    if (u_stormIntensity > 0.1) {
-        // Storm darkening and color shift
-        finalColor *= (0.7 + u_stormIntensity * 0.2);
-        finalColor = mix(finalColor, finalColor * vec3(0.8, 0.9, 1.1), u_stormIntensity * 0.3);
+    // T-I5a-DR-particle-motion-quality: the legacy random fbm "lightning" here
+    // (renderLightning) fired on its OWN screen-space hash schedule and painted a
+    // smeared fbm splotch -- it competes with the deterministic lightning_overlay
+    // bolt/flash and added more sky noise. The dedicated lightning_overlay pass
+    // owns the strike now, so this redundant flash is removed.
+
+    // Global weather tinting.
+    // T-I5a-DR-particle-motion-quality: the storm must DIM the whole scene
+    // (overcast dome + darkened terrain) so the rain streaks read as bright water
+    // over a dark backdrop and the lightning bolt + flash have contrast. The old
+    // factor (0.7 + storm*0.2) barely darkened (>=0.9) and left a bright clear-blue
+    // sky behind the strike. Darken substantially with storm intensity and pull a
+    // cool, desaturated overcast cast across the frame.
+    if (u_stormIntensity > 0.05) {
+        float dim = mix(1.0, 0.36, clamp(u_stormIntensity, 0.0, 1.0));
+        finalColor *= dim;
+        // Desaturate + cool the overcast (grey-blue storm light).
+        float luma = dot(finalColor, vec3(0.299, 0.587, 0.114));
+        vec3 overcast = mix(vec3(luma), finalColor, 0.55) * vec3(0.86, 0.92, 1.04);
+        finalColor = mix(finalColor, overcast, clamp(u_stormIntensity, 0.0, 1.0) * 0.8);
     }
     
     if (u_fogDensity > 0.1) {
