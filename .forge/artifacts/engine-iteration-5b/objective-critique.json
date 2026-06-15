@@ -1,0 +1,1580 @@
+{
+ "sweep_dir": ".claude/worktrees/agent-a2598b60a958eee36/build/debug/test-artifacts/runtime/world-visual-sweep",
+ "n_cells": 48,
+ "cells": [
+  {
+   "file": "summer__dawn__yaw000__clear.png",
+   "label": {
+    "season": "summer",
+    "tod": "dawn",
+    "angle": "yaw000",
+    "weather": "clear",
+    "feature": "horizon_vista"
+   },
+   "metrics": {
+    "mean_luma": 157.629638671875,
+    "std_luma": 72.00459289550781,
+    "p1_luma": 36.07060241699219,
+    "p99_luma": 245.79920959472656,
+    "black_frac": 0.0,
+    "blown_frac": 0.00021375868055555555,
+    "mean_sat": 45.96571350097656,
+    "sky_luma": 213.2621307373047,
+    "ground_luma": 95.63363647460938,
+    "sky_green_speck_frac": 0.0
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 0,
+    "lightning_active": false,
+    "cloud_coverage": 0.0,
+    "water_like_ratio": 0.18324435763888888,
+    "mean_luminance": 157.62963371284016
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__dawn__yaw120__clear.png",
+   "label": {
+    "season": "summer",
+    "tod": "dawn",
+    "angle": "yaw120",
+    "weather": "clear",
+    "feature": "horizon_vista"
+   },
+   "metrics": {
+    "mean_luma": 153.0139617919922,
+    "std_luma": 73.82940673828125,
+    "p1_luma": 43.47200012207031,
+    "p99_luma": 244.63720703125,
+    "black_frac": 0.0,
+    "blown_frac": 3.2552083333333335e-06,
+    "mean_sat": 51.09280776977539,
+    "sky_luma": 216.8405303955078,
+    "ground_luma": 81.6500015258789,
+    "sky_green_speck_frac": 0.0
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 0,
+    "lightning_active": false,
+    "cloud_coverage": 0.0,
+    "water_like_ratio": 0.04506293402777778,
+    "mean_luminance": 153.01395256393826
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__dawn__yaw240__clear.png",
+   "label": {
+    "season": "summer",
+    "tod": "dawn",
+    "angle": "yaw240",
+    "weather": "clear",
+    "feature": "horizon_vista"
+   },
+   "metrics": {
+    "mean_luma": 156.27947998046875,
+    "std_luma": 83.44901275634766,
+    "p1_luma": 7.570799827575684,
+    "p99_luma": 246.13980102539062,
+    "black_frac": 0.08009548611111111,
+    "blown_frac": 5.642361111111111e-05,
+    "mean_sat": 62.672119140625,
+    "sky_luma": 224.45523071289062,
+    "ground_luma": 83.92874908447266,
+    "sky_green_speck_frac": 0.0
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 0,
+    "lightning_active": false,
+    "cloud_coverage": 0.0,
+    "water_like_ratio": 0.308681640625,
+    "mean_luminance": 156.27948898274704
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__dawn__down35__clear.png",
+   "label": {
+    "season": "summer",
+    "tod": "dawn",
+    "angle": "down35",
+    "weather": "clear",
+    "feature": "ground_foliage"
+   },
+   "metrics": {
+    "mean_luma": 92.75794982910156,
+    "std_luma": 41.82181167602539,
+    "p1_luma": 22.21780014038086,
+    "p99_luma": 246.44219970703125,
+    "black_frac": 0.0,
+    "blown_frac": 0.0005859375,
+    "mean_sat": 31.70781707763672,
+    "sky_luma": 98.93379211425781,
+    "ground_luma": 90.34536743164062,
+    "sky_green_speck_frac": 0.000322265625,
+    "ground_green_cover_frac": 0.29453450520833335
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 0,
+    "lightning_active": false,
+    "cloud_coverage": 0.0,
+    "water_like_ratio": 0.07013888888888889,
+    "mean_luminance": 92.75794779735644
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__dawn__up25__clear.png",
+   "label": {
+    "season": "summer",
+    "tod": "dawn",
+    "angle": "up25",
+    "weather": "clear",
+    "feature": "sky_clouds"
+   },
+   "metrics": {
+    "mean_luma": 193.0146942138672,
+    "std_luma": 62.30397033691406,
+    "p1_luma": 35.558197021484375,
+    "p99_luma": 245.42459106445312,
+    "black_frac": 5.4253472222222224e-06,
+    "blown_frac": 1.953125e-05,
+    "mean_sat": 62.5433235168457,
+    "sky_luma": 209.96337890625,
+    "ground_luma": 139.0263214111328,
+    "sky_green_speck_frac": 0.0
+   },
+   "engine": {
+    "foliage_draws": 0,
+    "particle_draws": 0,
+    "lightning_active": false,
+    "cloud_coverage": 0.0,
+    "water_like_ratio": 0.13565538194444443,
+    "mean_luminance": 193.01469016734214
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__dawn__water__clear.png",
+   "label": {
+    "season": "summer",
+    "tod": "dawn",
+    "angle": "water",
+    "weather": "clear",
+    "feature": "water_shore"
+   },
+   "metrics": {
+    "mean_luma": 143.74765014648438,
+    "std_luma": 73.78062438964844,
+    "p1_luma": 33.69860076904297,
+    "p99_luma": 245.42459106445312,
+    "black_frac": 0.0,
+    "blown_frac": 6.510416666666667e-06,
+    "mean_sat": 52.778167724609375,
+    "sky_luma": 227.7777099609375,
+    "ground_luma": 91.58775329589844,
+    "sky_green_speck_frac": 0.0
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 0,
+    "lightning_active": false,
+    "cloud_coverage": 0.0,
+    "water_like_ratio": 0.11070095486111112,
+    "mean_luminance": 143.74765400084766
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__dawn__yaw000__storm.png",
+   "label": {
+    "season": "summer",
+    "tod": "dawn",
+    "angle": "yaw000",
+    "weather": "storm",
+    "feature": "horizon_vista"
+   },
+   "metrics": {
+    "mean_luma": 135.647216796875,
+    "std_luma": 33.550106048583984,
+    "p1_luma": 82.80860137939453,
+    "p99_luma": 224.63438415527344,
+    "black_frac": 0.0,
+    "blown_frac": 0.0027897135416666665,
+    "mean_sat": 27.204492568969727,
+    "sky_luma": 158.53050231933594,
+    "ground_luma": 110.0784912109375,
+    "sky_green_speck_frac": 0.0,
+    "rain_vh_anisotropy": 0.9570642113685608
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 1,
+    "lightning_active": true,
+    "cloud_coverage": 0.8500000238418579,
+    "water_like_ratio": 0.9640874565972222,
+    "mean_luminance": 135.64722091267595
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__dawn__yaw120__storm.png",
+   "label": {
+    "season": "summer",
+    "tod": "dawn",
+    "angle": "yaw120",
+    "weather": "storm",
+    "feature": "horizon_vista"
+   },
+   "metrics": {
+    "mean_luma": 134.4823455810547,
+    "std_luma": 35.59514236450195,
+    "p1_luma": 82.5238037109375,
+    "p99_luma": 227.40341186523438,
+    "black_frac": 0.0,
+    "blown_frac": 0.002275390625,
+    "mean_sat": 21.96234130859375,
+    "sky_luma": 161.67529296875,
+    "ground_luma": 105.93123626708984,
+    "sky_green_speck_frac": 0.0,
+    "rain_vh_anisotropy": 1.1146405935287476
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 1,
+    "lightning_active": true,
+    "cloud_coverage": 0.8500000238418579,
+    "water_like_ratio": 0.8797677951388889,
+    "mean_luminance": 134.48235914180432
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__dawn__yaw240__storm.png",
+   "label": {
+    "season": "summer",
+    "tod": "dawn",
+    "angle": "yaw240",
+    "weather": "storm",
+    "feature": "horizon_vista"
+   },
+   "metrics": {
+    "mean_luma": 141.0321807861328,
+    "std_luma": 32.630775451660156,
+    "p1_luma": 83.59600067138672,
+    "p99_luma": 228.69338989257812,
+    "black_frac": 0.0,
+    "blown_frac": 0.0028309461805555557,
+    "mean_sat": 26.732322692871094,
+    "sky_luma": 162.5172576904297,
+    "ground_luma": 119.34416961669922,
+    "sky_green_speck_frac": 0.0,
+    "rain_vh_anisotropy": 1.0402902364730835
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 1,
+    "lightning_active": true,
+    "cloud_coverage": 0.8500000238418579,
+    "water_like_ratio": 0.7632725694444444,
+    "mean_luminance": 141.0321826447836
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__dawn__down35__storm.png",
+   "label": {
+    "season": "summer",
+    "tod": "dawn",
+    "angle": "down35",
+    "weather": "storm",
+    "feature": "ground_foliage"
+   },
+   "metrics": {
+    "mean_luma": 109.16246795654297,
+    "std_luma": 27.506439208984375,
+    "p1_luma": 81.66819763183594,
+    "p99_luma": 219.18280029296875,
+    "black_frac": 0.0,
+    "blown_frac": 0.0032562934027777777,
+    "mean_sat": 27.967588424682617,
+    "sky_luma": 115.5195083618164,
+    "ground_luma": 102.16695404052734,
+    "sky_green_speck_frac": 0.009368489583333334,
+    "rain_vh_anisotropy": 0.9284615516662598
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 1,
+    "lightning_active": true,
+    "cloud_coverage": 0.8500000238418579,
+    "water_like_ratio": 0.9878776041666667,
+    "mean_luminance": 109.16246702039628
+   },
+   "flags": [
+    "GREEN_SKY_SPECKLE"
+   ]
+  },
+  {
+   "file": "summer__dawn__up25__storm.png",
+   "label": {
+    "season": "summer",
+    "tod": "dawn",
+    "angle": "up25",
+    "weather": "storm",
+    "feature": "sky_clouds"
+   },
+   "metrics": {
+    "mean_luma": 151.40829467773438,
+    "std_luma": 31.311723709106445,
+    "p1_luma": 82.59600067138672,
+    "p99_luma": 230.7615966796875,
+    "black_frac": 0.0,
+    "blown_frac": 0.002568359375,
+    "mean_sat": 17.533735275268555,
+    "sky_luma": 163.4528350830078,
+    "ground_luma": 125.8628921508789,
+    "sky_green_speck_frac": 0.0
+   },
+   "engine": {
+    "foliage_draws": 0,
+    "particle_draws": 1,
+    "lightning_active": true,
+    "cloud_coverage": 0.8500000238418579,
+    "water_like_ratio": 0.7230631510416666,
+    "mean_luminance": 151.40830861411231
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__dawn__water__storm.png",
+   "label": {
+    "season": "summer",
+    "tod": "dawn",
+    "angle": "water",
+    "weather": "storm",
+    "feature": "water_shore"
+   },
+   "metrics": {
+    "mean_luma": 128.1512451171875,
+    "std_luma": 34.94414138793945,
+    "p1_luma": 82.61199951171875,
+    "p99_luma": 224.04640197753906,
+    "black_frac": 0.0,
+    "blown_frac": 0.0015657552083333333,
+    "mean_sat": 22.53847312927246,
+    "sky_luma": 164.00570678710938,
+    "ground_luma": 101.47440338134766,
+    "sky_green_speck_frac": 0.0,
+    "rain_vh_anisotropy": 0.7468706965446472
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 1,
+    "lightning_active": true,
+    "cloud_coverage": 0.8500000238418579,
+    "water_like_ratio": 0.8288465711805556,
+    "mean_luminance": 128.15124232703153
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__noon__yaw000__clear.png",
+   "label": {
+    "season": "summer",
+    "tod": "noon",
+    "angle": "yaw000",
+    "weather": "clear",
+    "feature": "horizon_vista"
+   },
+   "metrics": {
+    "mean_luma": 162.55653381347656,
+    "std_luma": 70.24773406982422,
+    "p1_luma": 32.91120147705078,
+    "p99_luma": 245.60939025878906,
+    "black_frac": 1.736111111111111e-05,
+    "blown_frac": 0.0011404079861111111,
+    "mean_sat": 36.07883834838867,
+    "sky_luma": 217.8496551513672,
+    "ground_luma": 103.62519836425781,
+    "sky_green_speck_frac": 0.0
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 0,
+    "lightning_active": false,
+    "cloud_coverage": 0.0,
+    "water_like_ratio": 0.34985134548611113,
+    "mean_luminance": 162.5565264417932
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__noon__yaw120__clear.png",
+   "label": {
+    "season": "summer",
+    "tod": "noon",
+    "angle": "yaw120",
+    "weather": "clear",
+    "feature": "horizon_vista"
+   },
+   "metrics": {
+    "mean_luma": 154.91102600097656,
+    "std_luma": 71.39116668701172,
+    "p1_luma": 50.854000091552734,
+    "p99_luma": 244.8260040283203,
+    "black_frac": 0.0,
+    "blown_frac": 5.3168402777777775e-05,
+    "mean_sat": 30.280534744262695,
+    "sky_luma": 215.80026245117188,
+    "ground_luma": 86.90131378173828,
+    "sky_green_speck_frac": 0.0
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 0,
+    "lightning_active": false,
+    "cloud_coverage": 0.0,
+    "water_like_ratio": 0.28477973090277775,
+    "mean_luminance": 154.91102182311647
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__noon__yaw240__clear.png",
+   "label": {
+    "season": "summer",
+    "tod": "noon",
+    "angle": "yaw240",
+    "weather": "clear",
+    "feature": "horizon_vista"
+   },
+   "metrics": {
+    "mean_luma": 160.32586669921875,
+    "std_luma": 81.65272521972656,
+    "p1_luma": 5.787400245666504,
+    "p99_luma": 245.6815948486328,
+    "black_frac": 0.08009982638888889,
+    "blown_frac": 0.0006282552083333333,
+    "mean_sat": 39.44779586791992,
+    "sky_luma": 223.39979553222656,
+    "ground_luma": 93.7031021118164,
+    "sky_green_speck_frac": 0.0
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 0,
+    "lightning_active": false,
+    "cloud_coverage": 0.0,
+    "water_like_ratio": 0.40533311631944446,
+    "mean_luminance": 160.32586234385772
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__noon__down35__clear.png",
+   "label": {
+    "season": "summer",
+    "tod": "noon",
+    "angle": "down35",
+    "weather": "clear",
+    "feature": "ground_foliage"
+   },
+   "metrics": {
+    "mean_luma": 95.4556884765625,
+    "std_luma": 41.19538879394531,
+    "p1_luma": 21.187999725341797,
+    "p99_luma": 245.61338806152344,
+    "black_frac": 5.099826388888889e-05,
+    "blown_frac": 0.00068359375,
+    "mean_sat": 29.989656448364258,
+    "sky_luma": 101.326904296875,
+    "ground_luma": 89.30040740966797,
+    "sky_green_speck_frac": 0.0010774739583333333,
+    "ground_green_cover_frac": 0.5941015625
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 0,
+    "lightning_active": false,
+    "cloud_coverage": 0.0,
+    "water_like_ratio": 0.08616102430555556,
+    "mean_luminance": 95.45568882954436
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__noon__up25__clear.png",
+   "label": {
+    "season": "summer",
+    "tod": "noon",
+    "angle": "up25",
+    "weather": "clear",
+    "feature": "sky_clouds"
+   },
+   "metrics": {
+    "mean_luma": 191.117919921875,
+    "std_luma": 60.75418472290039,
+    "p1_luma": 35.435001373291016,
+    "p99_luma": 244.8260040283203,
+    "black_frac": 0.00018120659722222222,
+    "blown_frac": 2.8211805555555554e-05,
+    "mean_sat": 30.045597076416016,
+    "sky_luma": 212.04400634765625,
+    "ground_luma": 138.15097045898438,
+    "sky_green_speck_frac": 0.0
+   },
+   "engine": {
+    "foliage_draws": 0,
+    "particle_draws": 0,
+    "lightning_active": false,
+    "cloud_coverage": 0.0,
+    "water_like_ratio": 0.3809364149305556,
+    "mean_luminance": 191.11790424908514
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__noon__water__clear.png",
+   "label": {
+    "season": "summer",
+    "tod": "noon",
+    "angle": "water",
+    "weather": "clear",
+    "feature": "water_shore"
+   },
+   "metrics": {
+    "mean_luma": 143.90359497070312,
+    "std_luma": 74.03333282470703,
+    "p1_luma": 32.8390007019043,
+    "p99_luma": 245.60939025878906,
+    "black_frac": 0.0,
+    "blown_frac": 0.00040798611111111114,
+    "mean_sat": 31.811424255371094,
+    "sky_luma": 227.8140106201172,
+    "ground_luma": 89.90229034423828,
+    "sky_green_speck_frac": 0.0
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 0,
+    "lightning_active": false,
+    "cloud_coverage": 0.0,
+    "water_like_ratio": 0.15821614583333332,
+    "mean_luminance": 143.90359989630886
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__noon__yaw000__storm.png",
+   "label": {
+    "season": "summer",
+    "tod": "noon",
+    "angle": "yaw000",
+    "weather": "storm",
+    "feature": "horizon_vista"
+   },
+   "metrics": {
+    "mean_luma": 139.23155212402344,
+    "std_luma": 34.25059509277344,
+    "p1_luma": 82.80860137939453,
+    "p99_luma": 227.4951934814453,
+    "black_frac": 0.0,
+    "blown_frac": 0.0030577256944444445,
+    "mean_sat": 33.05268096923828,
+    "sky_luma": 161.6768341064453,
+    "ground_luma": 116.99869537353516,
+    "sky_green_speck_frac": 0.0,
+    "rain_vh_anisotropy": 0.8556917905807495
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 1,
+    "lightning_active": true,
+    "cloud_coverage": 0.8500000238418579,
+    "water_like_ratio": 0.9983940972222223,
+    "mean_luminance": 139.23154940972077
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__noon__yaw120__storm.png",
+   "label": {
+    "season": "summer",
+    "tod": "noon",
+    "angle": "yaw120",
+    "weather": "storm",
+    "feature": "horizon_vista"
+   },
+   "metrics": {
+    "mean_luma": 136.92391967773438,
+    "std_luma": 35.91836929321289,
+    "p1_luma": 82.66820526123047,
+    "p99_luma": 227.6389617919922,
+    "black_frac": 0.0,
+    "blown_frac": 0.002238498263888889,
+    "mean_sat": 30.80802345275879,
+    "sky_luma": 162.1265106201172,
+    "ground_luma": 111.7306137084961,
+    "sky_green_speck_frac": 0.0,
+    "rain_vh_anisotropy": 1.158474087715149
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 1,
+    "lightning_active": true,
+    "cloud_coverage": 0.8500000238418579,
+    "water_like_ratio": 0.9987478298611111,
+    "mean_luminance": 136.9239184951762
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__noon__yaw240__storm.png",
+   "label": {
+    "season": "summer",
+    "tod": "noon",
+    "angle": "yaw240",
+    "weather": "storm",
+    "feature": "horizon_vista"
+   },
+   "metrics": {
+    "mean_luma": 144.48678588867188,
+    "std_luma": 31.56281280517578,
+    "p1_luma": 84.47159576416016,
+    "p99_luma": 228.90599060058594,
+    "black_frac": 0.0,
+    "blown_frac": 0.0027842881944444443,
+    "mean_sat": 35.67042922973633,
+    "sky_luma": 163.88739013671875,
+    "ground_luma": 124.82432556152344,
+    "sky_green_speck_frac": 0.0,
+    "rain_vh_anisotropy": 1.1879065036773682
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 1,
+    "lightning_active": true,
+    "cloud_coverage": 0.8500000238418579,
+    "water_like_ratio": 0.9983582899305555,
+    "mean_luminance": 144.48678332555724
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__noon__down35__storm.png",
+   "label": {
+    "season": "summer",
+    "tod": "noon",
+    "angle": "down35",
+    "weather": "storm",
+    "feature": "ground_foliage"
+   },
+   "metrics": {
+    "mean_luma": 112.48866271972656,
+    "std_luma": 31.639301300048828,
+    "p1_luma": 81.59600067138672,
+    "p99_luma": 216.9781951904297,
+    "black_frac": 0.0,
+    "blown_frac": 0.0025640190972222223,
+    "mean_sat": 30.560087203979492,
+    "sky_luma": 117.4857406616211,
+    "ground_luma": 104.3558120727539,
+    "sky_green_speck_frac": 0.015901692708333335,
+    "rain_vh_anisotropy": 0.81278395652771
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 1,
+    "lightning_active": true,
+    "cloud_coverage": 0.8500000238418579,
+    "water_like_ratio": 0.9981184895833334,
+    "mean_luminance": 112.48865401985717
+   },
+   "flags": [
+    "GREEN_SKY_SPECKLE"
+   ]
+  },
+  {
+   "file": "summer__noon__up25__storm.png",
+   "label": {
+    "season": "summer",
+    "tod": "noon",
+    "angle": "up25",
+    "weather": "storm",
+    "feature": "sky_clouds"
+   },
+   "metrics": {
+    "mean_luma": 151.64785766601562,
+    "std_luma": 31.087656021118164,
+    "p1_luma": 81.88079071044922,
+    "p99_luma": 230.20118713378906,
+    "black_frac": 0.0,
+    "blown_frac": 0.0020279947916666667,
+    "mean_sat": 29.015928268432617,
+    "sky_luma": 164.76666259765625,
+    "ground_luma": 125.62239837646484,
+    "sky_green_speck_frac": 0.0
+   },
+   "engine": {
+    "foliage_draws": 0,
+    "particle_draws": 1,
+    "lightning_active": true,
+    "cloud_coverage": 0.8500000238418579,
+    "water_like_ratio": 0.999169921875,
+    "mean_luminance": 151.64786845205845
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__noon__water__storm.png",
+   "label": {
+    "season": "summer",
+    "tod": "noon",
+    "angle": "water",
+    "weather": "storm",
+    "feature": "water_shore"
+   },
+   "metrics": {
+    "mean_luma": 130.29000854492188,
+    "std_luma": 35.124061584472656,
+    "p1_luma": 84.18680572509766,
+    "p99_luma": 225.19479370117188,
+    "black_frac": 0.0,
+    "blown_frac": 0.0015668402777777777,
+    "mean_sat": 29.6649227142334,
+    "sky_luma": 164.72593688964844,
+    "ground_luma": 104.02334594726562,
+    "sky_green_speck_frac": 0.0,
+    "rain_vh_anisotropy": 0.820050835609436
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 1,
+    "lightning_active": true,
+    "cloud_coverage": 0.8500000238418579,
+    "water_like_ratio": 0.9992122395833334,
+    "mean_luminance": 130.2900075779293
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__dusk__yaw000__clear.png",
+   "label": {
+    "season": "summer",
+    "tod": "dusk",
+    "angle": "yaw000",
+    "weather": "clear",
+    "feature": "horizon_vista"
+   },
+   "metrics": {
+    "mean_luma": 48.916873931884766,
+    "std_luma": 33.79419708251953,
+    "p1_luma": 15.284799575805664,
+    "p99_luma": 186.01039123535156,
+    "black_frac": 0.006446397569444444,
+    "blown_frac": 0.0,
+    "mean_sat": 20.795183181762695,
+    "sky_luma": 31.94679069519043,
+    "ground_luma": 58.65578842163086,
+    "sky_green_speck_frac": 0.0,
+    "dusk_sky_chroma_frac": 0.0
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 0,
+    "lightning_active": false,
+    "cloud_coverage": 0.0,
+    "water_like_ratio": 0.11163628472222223,
+    "mean_luminance": 48.916871506631196
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__dusk__yaw120__clear.png",
+   "label": {
+    "season": "summer",
+    "tod": "dusk",
+    "angle": "yaw120",
+    "weather": "clear",
+    "feature": "horizon_vista"
+   },
+   "metrics": {
+    "mean_luma": 33.13340759277344,
+    "std_luma": 15.671643257141113,
+    "p1_luma": 15.284799575805664,
+    "p99_luma": 88.86539459228516,
+    "black_frac": 0.006535373263888889,
+    "blown_frac": 0.0,
+    "mean_sat": 15.287613868713379,
+    "sky_luma": 20.705726623535156,
+    "ground_luma": 42.49495315551758,
+    "sky_green_speck_frac": 0.0,
+    "dusk_sky_chroma_frac": 0.0
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 0,
+    "lightning_active": false,
+    "cloud_coverage": 0.0,
+    "water_like_ratio": 0.015010850694444444,
+    "mean_luminance": 33.13340900918604
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__dusk__yaw240__clear.png",
+   "label": {
+    "season": "summer",
+    "tod": "dusk",
+    "angle": "yaw240",
+    "weather": "clear",
+    "feature": "horizon_vista"
+   },
+   "metrics": {
+    "mean_luma": 39.754127502441406,
+    "std_luma": 31.602745056152344,
+    "p1_luma": 13.425199508666992,
+    "p99_luma": 158.3463897705078,
+    "black_frac": 0.017879774305555554,
+    "blown_frac": 0.0,
+    "mean_sat": 27.325538635253906,
+    "sky_luma": 20.28586196899414,
+    "ground_luma": 61.63255310058594,
+    "sky_green_speck_frac": 0.0,
+    "dusk_sky_chroma_frac": 0.0
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 0,
+    "lightning_active": false,
+    "cloud_coverage": 0.0,
+    "water_like_ratio": 0.2833387586805556,
+    "mean_luminance": 39.754126629515056
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__dusk__down35__clear.png",
+   "label": {
+    "season": "summer",
+    "tod": "dusk",
+    "angle": "down35",
+    "weather": "clear",
+    "feature": "ground_foliage"
+   },
+   "metrics": {
+    "mean_luma": 55.434234619140625,
+    "std_luma": 30.164249420166016,
+    "p1_luma": 15.919800758361816,
+    "p99_luma": 207.49754333496094,
+    "black_frac": 0.007296006944444444,
+    "blown_frac": 0.0,
+    "mean_sat": 32.46440505981445,
+    "sky_luma": 47.0777473449707,
+    "ground_luma": 61.725547790527344,
+    "sky_green_speck_frac": 0.0,
+    "dusk_sky_chroma_frac": 7.161458333333333e-05,
+    "ground_green_cover_frac": 0.0
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 0,
+    "lightning_active": false,
+    "cloud_coverage": 0.0,
+    "water_like_ratio": 0.023038194444444444,
+    "mean_luminance": 55.43423418434048
+   },
+   "flags": [
+    "FOLIAGE_SPARSE"
+   ]
+  },
+  {
+   "file": "summer__dusk__up25__clear.png",
+   "label": {
+    "season": "summer",
+    "tod": "dusk",
+    "angle": "up25",
+    "weather": "clear",
+    "feature": "sky_clouds"
+   },
+   "metrics": {
+    "mean_luma": 27.597122192382812,
+    "std_luma": 17.009492874145508,
+    "p1_luma": 13.497400283813477,
+    "p99_luma": 94.86140441894531,
+    "black_frac": 0.013780381944444444,
+    "blown_frac": 0.0,
+    "mean_sat": 12.882067680358887,
+    "sky_luma": 16.350950241088867,
+    "ground_luma": 44.42438888549805,
+    "sky_green_speck_frac": 0.0,
+    "dusk_sky_chroma_frac": 0.0
+   },
+   "engine": {
+    "foliage_draws": 0,
+    "particle_draws": 0,
+    "lightning_active": false,
+    "cloud_coverage": 0.0,
+    "water_like_ratio": 0.06488932291666667,
+    "mean_luminance": 27.597121941692194
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__dusk__water__clear.png",
+   "label": {
+    "season": "summer",
+    "tod": "dusk",
+    "angle": "water",
+    "weather": "clear",
+    "feature": "water_shore"
+   },
+   "metrics": {
+    "mean_luma": 43.54566955566406,
+    "std_luma": 22.057933807373047,
+    "p1_luma": 15.586400985717773,
+    "p99_luma": 127.54521942138672,
+    "black_frac": 0.0038107638888888887,
+    "blown_frac": 0.0,
+    "mean_sat": 27.98414421081543,
+    "sky_luma": 24.975221633911133,
+    "ground_luma": 59.3795166015625,
+    "sky_green_speck_frac": 0.0,
+    "dusk_sky_chroma_frac": 0.0
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 0,
+    "lightning_active": false,
+    "cloud_coverage": 0.0,
+    "water_like_ratio": 0.08978515625,
+    "mean_luminance": 43.54566942038296
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__dusk__yaw000__storm.png",
+   "label": {
+    "season": "summer",
+    "tod": "dusk",
+    "angle": "yaw000",
+    "weather": "storm",
+    "feature": "horizon_vista"
+   },
+   "metrics": {
+    "mean_luma": 95.977783203125,
+    "std_luma": 19.859718322753906,
+    "p1_luma": 74.31400299072266,
+    "p99_luma": 185.69580078125,
+    "black_frac": 0.0,
+    "blown_frac": 0.00064453125,
+    "mean_sat": 29.69822883605957,
+    "sky_luma": 98.33782196044922,
+    "ground_luma": 92.67570495605469,
+    "sky_green_speck_frac": 0.0,
+    "dusk_sky_chroma_frac": 0.0,
+    "rain_vh_anisotropy": 1.0188294649124146
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 1,
+    "lightning_active": true,
+    "cloud_coverage": 0.8500000238418579,
+    "water_like_ratio": 0.9964637586805556,
+    "mean_luminance": 95.97779011233162
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__dusk__yaw120__storm.png",
+   "label": {
+    "season": "summer",
+    "tod": "dusk",
+    "angle": "yaw120",
+    "weather": "storm",
+    "feature": "horizon_vista"
+   },
+   "metrics": {
+    "mean_luma": 92.74494934082031,
+    "std_luma": 17.820114135742188,
+    "p1_luma": 74.52259826660156,
+    "p99_luma": 184.61199951171875,
+    "black_frac": 0.0,
+    "blown_frac": 0.000673828125,
+    "mean_sat": 27.604549407958984,
+    "sky_luma": 97.495361328125,
+    "ground_luma": 89.61993408203125,
+    "sky_green_speck_frac": 0.0,
+    "dusk_sky_chroma_frac": 0.0,
+    "rain_vh_anisotropy": 0.8712701201438904
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 1,
+    "lightning_active": true,
+    "cloud_coverage": 0.8500000238418579,
+    "water_like_ratio": 0.9994911024305555,
+    "mean_luminance": 92.74495163028344
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__dusk__yaw240__storm.png",
+   "label": {
+    "season": "summer",
+    "tod": "dusk",
+    "angle": "yaw240",
+    "weather": "storm",
+    "feature": "horizon_vista"
+   },
+   "metrics": {
+    "mean_luma": 98.16205596923828,
+    "std_luma": 19.650829315185547,
+    "p1_luma": 75.1090087890625,
+    "p99_luma": 186.98098754882812,
+    "black_frac": 0.0,
+    "blown_frac": 0.0008116319444444445,
+    "mean_sat": 33.81319046020508,
+    "sky_luma": 99.0912094116211,
+    "ground_luma": 103.20550537109375,
+    "sky_green_speck_frac": 0.0,
+    "dusk_sky_chroma_frac": 0.0,
+    "rain_vh_anisotropy": 0.8461189866065979
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 1,
+    "lightning_active": true,
+    "cloud_coverage": 0.8500000238418579,
+    "water_like_ratio": 0.9916178385416666,
+    "mean_luminance": 98.16206017110414
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__dusk__down35__storm.png",
+   "label": {
+    "season": "summer",
+    "tod": "dusk",
+    "angle": "down35",
+    "weather": "storm",
+    "feature": "ground_foliage"
+   },
+   "metrics": {
+    "mean_luma": 93.55097961425781,
+    "std_luma": 17.491870880126953,
+    "p1_luma": 72.02519989013672,
+    "p99_luma": 176.9810028076172,
+    "black_frac": 0.0,
+    "blown_frac": 0.0003385416666666667,
+    "mean_sat": 23.07526397705078,
+    "sky_luma": 93.99309539794922,
+    "ground_luma": 92.77261352539062,
+    "sky_green_speck_frac": 0.0,
+    "dusk_sky_chroma_frac": 0.0,
+    "rain_vh_anisotropy": 1.1052287817001343
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 1,
+    "lightning_active": true,
+    "cloud_coverage": 0.8500000238418579,
+    "water_like_ratio": 0.9461631944444444,
+    "mean_luminance": 93.55097978402729
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__dusk__up25__storm.png",
+   "label": {
+    "season": "summer",
+    "tod": "dusk",
+    "angle": "up25",
+    "weather": "storm",
+    "feature": "sky_clouds"
+   },
+   "metrics": {
+    "mean_luma": 96.90094757080078,
+    "std_luma": 19.083744049072266,
+    "p1_luma": 74.66699981689453,
+    "p99_luma": 190.34320068359375,
+    "black_frac": 0.0,
+    "blown_frac": 0.0007280815972222222,
+    "mean_sat": 29.639631271362305,
+    "sky_luma": 100.80811309814453,
+    "ground_luma": 91.7343978881836,
+    "sky_green_speck_frac": 0.0,
+    "dusk_sky_chroma_frac": 0.0
+   },
+   "engine": {
+    "foliage_draws": 0,
+    "particle_draws": 1,
+    "lightning_active": true,
+    "cloud_coverage": 0.8500000238418579,
+    "water_like_ratio": 0.9973567708333333,
+    "mean_luminance": 96.90094957164915
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__dusk__water__storm.png",
+   "label": {
+    "season": "summer",
+    "tod": "dusk",
+    "angle": "water",
+    "weather": "storm",
+    "feature": "water_shore"
+   },
+   "metrics": {
+    "mean_luma": 93.8982925415039,
+    "std_luma": 17.849916458129883,
+    "p1_luma": 75.0934066772461,
+    "p99_luma": 187.1053924560547,
+    "black_frac": 0.0,
+    "blown_frac": 0.000693359375,
+    "mean_sat": 25.8927001953125,
+    "sky_luma": 96.99549102783203,
+    "ground_luma": 92.70856475830078,
+    "sky_green_speck_frac": 0.0,
+    "dusk_sky_chroma_frac": 0.0,
+    "rain_vh_anisotropy": 0.5929798483848572
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 1,
+    "lightning_active": true,
+    "cloud_coverage": 0.8500000238418579,
+    "water_like_ratio": 0.9530609809027778,
+    "mean_luminance": 93.89828948675986
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__night__yaw000__clear.png",
+   "label": {
+    "season": "summer",
+    "tod": "night",
+    "angle": "yaw000",
+    "weather": "clear",
+    "feature": "horizon_vista"
+   },
+   "metrics": {
+    "mean_luma": 25.396169662475586,
+    "std_luma": 27.394750595092773,
+    "p1_luma": 5.072199821472168,
+    "p99_luma": 143.1293182373047,
+    "black_frac": 0.16536024305555555,
+    "blown_frac": 0.0,
+    "mean_sat": 15.629767417907715,
+    "sky_luma": 15.60173511505127,
+    "ground_luma": 31.940481185913086,
+    "sky_green_speck_frac": 0.0
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 0,
+    "lightning_active": false,
+    "cloud_coverage": 0.0,
+    "water_like_ratio": 0.11147135416666666,
+    "mean_luminance": 25.39617037987411
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__night__yaw120__clear.png",
+   "label": {
+    "season": "summer",
+    "tod": "night",
+    "angle": "yaw120",
+    "weather": "clear",
+    "feature": "horizon_vista"
+   },
+   "metrics": {
+    "mean_luma": 20.544357299804688,
+    "std_luma": 13.081073760986328,
+    "p1_luma": 4.650999546051025,
+    "p99_luma": 73.32060241699219,
+    "black_frac": 0.13644856770833333,
+    "blown_frac": 0.0,
+    "mean_sat": 10.174177169799805,
+    "sky_luma": 22.94584846496582,
+    "ground_luma": 17.899093627929688,
+    "sky_green_speck_frac": 0.0
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 0,
+    "lightning_active": false,
+    "cloud_coverage": 0.0,
+    "water_like_ratio": 0.01754340277777778,
+    "mean_luminance": 20.544356907215732
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__night__yaw240__clear.png",
+   "label": {
+    "season": "summer",
+    "tod": "night",
+    "angle": "yaw240",
+    "weather": "clear",
+    "feature": "horizon_vista"
+   },
+   "metrics": {
+    "mean_luma": 31.41795539855957,
+    "std_luma": 31.91587257385254,
+    "p1_luma": 4.149600028991699,
+    "p99_luma": 149.35040283203125,
+    "black_frac": 0.19783094618055555,
+    "blown_frac": 0.0,
+    "mean_sat": 27.04793930053711,
+    "sky_luma": 14.621047973632812,
+    "ground_luma": 56.363162994384766,
+    "sky_green_speck_frac": 0.0
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 0,
+    "lightning_active": false,
+    "cloud_coverage": 0.0,
+    "water_like_ratio": 0.2805891927083333,
+    "mean_luminance": 31.41795396254361
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__night__down35__clear.png",
+   "label": {
+    "season": "summer",
+    "tod": "night",
+    "angle": "down35",
+    "weather": "clear",
+    "feature": "ground_foliage"
+   },
+   "metrics": {
+    "mean_luma": 22.14637565612793,
+    "std_luma": 23.130447387695312,
+    "p1_luma": 4.927800178527832,
+    "p99_luma": 190.39100646972656,
+    "black_frac": 0.12764214409722222,
+    "blown_frac": 0.0,
+    "mean_sat": 7.032593250274658,
+    "sky_luma": 20.763654708862305,
+    "ground_luma": 20.6783504486084,
+    "sky_green_speck_frac": 0.0
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 0,
+    "lightning_active": false,
+    "cloud_coverage": 0.0,
+    "water_like_ratio": 0.023466796875,
+    "mean_luminance": 22.146374024560526
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__night__up25__clear.png",
+   "label": {
+    "season": "summer",
+    "tod": "night",
+    "angle": "up25",
+    "weather": "clear",
+    "feature": "sky_clouds"
+   },
+   "metrics": {
+    "mean_luma": 20.208480834960938,
+    "std_luma": 14.26417064666748,
+    "p1_luma": 3.935800075531006,
+    "p99_luma": 84.38999938964844,
+    "black_frac": 0.30058919270833334,
+    "blown_frac": 0.0,
+    "mean_sat": 13.15865707397461,
+    "sky_luma": 15.32994270324707,
+    "ground_luma": 24.457792282104492,
+    "sky_green_speck_frac": 0.0
+   },
+   "engine": {
+    "foliage_draws": 0,
+    "particle_draws": 0,
+    "lightning_active": false,
+    "cloud_coverage": 0.0,
+    "water_like_ratio": 0.08510091145833333,
+    "mean_luminance": 20.208480864407864
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__night__water__clear.png",
+   "label": {
+    "season": "summer",
+    "tod": "night",
+    "angle": "water",
+    "weather": "clear",
+    "feature": "water_shore"
+   },
+   "metrics": {
+    "mean_luma": 26.659164428710938,
+    "std_luma": 19.907245635986328,
+    "p1_luma": 4.792600631713867,
+    "p99_luma": 108.63199615478516,
+    "black_frac": 0.08927408854166667,
+    "blown_frac": 0.0,
+    "mean_sat": 15.693167686462402,
+    "sky_luma": 33.607112884521484,
+    "ground_luma": 23.45756721496582,
+    "sky_green_speck_frac": 0.0
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 0,
+    "lightning_active": false,
+    "cloud_coverage": 0.0,
+    "water_like_ratio": 0.13301323784722222,
+    "mean_luminance": 26.659163964650073
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__night__yaw000__storm.png",
+   "label": {
+    "season": "summer",
+    "tod": "night",
+    "angle": "yaw000",
+    "weather": "storm",
+    "feature": "horizon_vista"
+   },
+   "metrics": {
+    "mean_luma": 91.86276245117188,
+    "std_luma": 19.165388107299805,
+    "p1_luma": 67.67220306396484,
+    "p99_luma": 181.7615966796875,
+    "black_frac": 0.0,
+    "blown_frac": 0.0005360243055555555,
+    "mean_sat": 31.09885025024414,
+    "sky_luma": 98.095947265625,
+    "ground_luma": 87.60174560546875,
+    "sky_green_speck_frac": 0.0,
+    "rain_vh_anisotropy": 0.9149761199951172
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 1,
+    "lightning_active": true,
+    "cloud_coverage": 0.8500000238418579,
+    "water_like_ratio": 0.9994986979166667,
+    "mean_luminance": 91.86275718445987
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__night__yaw120__storm.png",
+   "label": {
+    "season": "summer",
+    "tod": "night",
+    "angle": "yaw120",
+    "weather": "storm",
+    "feature": "horizon_vista"
+   },
+   "metrics": {
+    "mean_luma": 90.98712158203125,
+    "std_luma": 19.352672576904297,
+    "p1_luma": 68.31520080566406,
+    "p99_luma": 188.61599731445312,
+    "black_frac": 0.0,
+    "blown_frac": 0.0005718315972222223,
+    "mean_sat": 29.842931747436523,
+    "sky_luma": 100.83277130126953,
+    "ground_luma": 84.37191772460938,
+    "sky_green_speck_frac": 0.0,
+    "rain_vh_anisotropy": 0.8608250021934509
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 1,
+    "lightning_active": true,
+    "cloud_coverage": 0.8500000238418579,
+    "water_like_ratio": 0.9994769965277778,
+    "mean_luminance": 90.98711745412665
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__night__yaw240__storm.png",
+   "label": {
+    "season": "summer",
+    "tod": "night",
+    "angle": "yaw240",
+    "weather": "storm",
+    "feature": "horizon_vista"
+   },
+   "metrics": {
+    "mean_luma": 95.52384185791016,
+    "std_luma": 19.438085556030273,
+    "p1_luma": 68.17479705810547,
+    "p99_luma": 185.92138671875,
+    "black_frac": 0.0,
+    "blown_frac": 0.0006456163194444444,
+    "mean_sat": 34.97237014770508,
+    "sky_luma": 100.21419525146484,
+    "ground_luma": 98.75415802001953,
+    "sky_green_speck_frac": 0.0,
+    "rain_vh_anisotropy": 0.8181553483009338
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 1,
+    "lightning_active": true,
+    "cloud_coverage": 0.8500000238418579,
+    "water_like_ratio": 0.9994965277777778,
+    "mean_luminance": 95.52384144575068
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__night__down35__storm.png",
+   "label": {
+    "season": "summer",
+    "tod": "night",
+    "angle": "down35",
+    "weather": "storm",
+    "feature": "ground_foliage"
+   },
+   "metrics": {
+    "mean_luma": 86.52880096435547,
+    "std_luma": 16.908199310302734,
+    "p1_luma": 66.2417984008789,
+    "p99_luma": 173.54379272460938,
+    "black_frac": 0.0,
+    "blown_frac": 0.00011176215277777778,
+    "mean_sat": 28.54296875,
+    "sky_luma": 87.33477020263672,
+    "ground_luma": 85.58493041992188,
+    "sky_green_speck_frac": 0.0,
+    "rain_vh_anisotropy": 0.9037127494812012
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 1,
+    "lightning_active": true,
+    "cloud_coverage": 0.8500000238418579,
+    "water_like_ratio": 0.9999641927083334,
+    "mean_luminance": 86.52879693674029
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__night__up25__storm.png",
+   "label": {
+    "season": "summer",
+    "tod": "night",
+    "angle": "up25",
+    "weather": "storm",
+    "feature": "sky_clouds"
+   },
+   "metrics": {
+    "mean_luma": 95.43502807617188,
+    "std_luma": 19.674692153930664,
+    "p1_luma": 71.09739685058594,
+    "p99_luma": 190.26699829101562,
+    "black_frac": 0.0,
+    "blown_frac": 0.0006781684027777778,
+    "mean_sat": 30.921796798706055,
+    "sky_luma": 100.65424346923828,
+    "ground_luma": 87.27979278564453,
+    "sky_green_speck_frac": 0.0
+   },
+   "engine": {
+    "foliage_draws": 0,
+    "particle_draws": 1,
+    "lightning_active": true,
+    "cloud_coverage": 0.8500000238418579,
+    "water_like_ratio": 0.9993880208333333,
+    "mean_luminance": 95.4350235048594
+   },
+   "flags": []
+  },
+  {
+   "file": "summer__night__water__storm.png",
+   "label": {
+    "season": "summer",
+    "tod": "night",
+    "angle": "water",
+    "weather": "storm",
+    "feature": "water_shore"
+   },
+   "metrics": {
+    "mean_luma": 91.76504516601562,
+    "std_luma": 20.080177307128906,
+    "p1_luma": 70.16960144042969,
+    "p99_luma": 191.193603515625,
+    "black_frac": 0.0,
+    "blown_frac": 0.0005197482638888889,
+    "mean_sat": 30.538623809814453,
+    "sky_luma": 102.42609405517578,
+    "ground_luma": 86.58971405029297,
+    "sky_green_speck_frac": 0.0,
+    "rain_vh_anisotropy": 0.5724090337753296
+   },
+   "engine": {
+    "foliage_draws": 1,
+    "particle_draws": 1,
+    "lightning_active": true,
+    "cloud_coverage": 0.8500000238418579,
+    "water_like_ratio": 0.9995941840277778,
+    "mean_luminance": 91.76503902684377
+   },
+   "flags": []
+  }
+ ],
+ "defects": [
+  {
+   "file": "summer__dawn__down35__storm.png",
+   "label": {
+    "season": "summer",
+    "tod": "dawn",
+    "angle": "down35",
+    "weather": "storm",
+    "feature": "ground_foliage"
+   },
+   "flags": [
+    "GREEN_SKY_SPECKLE"
+   ]
+  },
+  {
+   "file": "summer__noon__down35__storm.png",
+   "label": {
+    "season": "summer",
+    "tod": "noon",
+    "angle": "down35",
+    "weather": "storm",
+    "feature": "ground_foliage"
+   },
+   "flags": [
+    "GREEN_SKY_SPECKLE"
+   ]
+  },
+  {
+   "file": "summer__dusk__down35__clear.png",
+   "label": {
+    "season": "summer",
+    "tod": "dusk",
+    "angle": "down35",
+    "weather": "clear",
+    "feature": "ground_foliage"
+   },
+   "flags": [
+    "FOLIAGE_SPARSE"
+   ]
+  }
+ ],
+ "flag_counts": {
+  "GREEN_SKY_SPECKLE": 2,
+  "FOLIAGE_SPARSE": 1
+ }
+}
