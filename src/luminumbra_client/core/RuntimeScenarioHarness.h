@@ -1160,10 +1160,19 @@ struct FarLodHorizonStationCapture {
     std::size_t water_sheet_indices = 0;
     std::uint64_t boundary_band_water_pixels = 0;
     double boundary_band_water_ratio = 0.0;
+    // T-I5b-5-water-backlog: sun-bright warm sand-flat coverage in the same
+    // boundary band ROI (the sand-flat-brightness band). The albedo_scale LUT
+    // calibration keeps real dry sand below the ACES hard clip; this fraction is
+    // the regression guard that the band is not a fully white-washed sand sheet.
+    std::uint64_t boundary_band_sand_flat_pixels = 0;
+    double boundary_band_sand_flat_ratio = 0.0;
 };
 
-// T-I4-DR-far-water-sheet: counts deep-water-tinted pixels in the live/far
-// boundary band ROI (proves far water continues where the live ring ends).
+// T-I4-DR-far-water-sheet / T-I5b-5-water-backlog: classifies the live/far
+// boundary band ROI. out_water_pixels uses the RE-DERIVED post-aerial-
+// perspective far-water classifier (proves far water continues where the live
+// ring ends); out_sand_flat_pixels (optional) counts sun-bright warm sand-flat
+// pixels (the sand-flat-brightness band). Pass nullptr to skip the sand count.
 void AnalyzeFarLodBoundaryBandWater(
     const std::vector<unsigned char>& pixels,
     int width,
@@ -1171,7 +1180,8 @@ void AnalyzeFarLodBoundaryBandWater(
     int band_top_row_from_top,
     int band_bottom_row_from_top,
     std::uint64_t& out_water_pixels,
-    std::uint64_t& out_band_pixels);
+    std::uint64_t& out_band_pixels,
+    std::uint64_t* out_sand_flat_pixels = nullptr);
 
 void WriteFarLodHorizonAnalysis(
     const std::filesystem::path& artifact_dir,

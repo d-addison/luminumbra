@@ -915,6 +915,12 @@ private:
         std::array<float, 256> emissive_intensity; // 0 = non-emissive (T-I4-9)
         std::array<float, 256> roughness;          // 0..1, default 0.85 (T-I4-10)
         std::array<bool, 256> roughness_set;       // material declared roughness
+        // T-I5b-5-water-backlog: per-material albedo multiplier applied to the
+        // baked (textured) G-buffer albedo. Default 1.0 (unscaled). Calibrates a
+        // physically-bright photographic texture down to a natural lit tone when
+        // the irradiance chain would otherwise clip it past the ACES knee (the
+        // sun-bright near-sea-level sand-flat). Render-only.
+        std::array<float, 256> albedo_scale;       // >0, default 1.0
         int terrain_layer_count = 0;               // distinct albedo layers loaded
         MaterialTextureLut() {
             texture_layer.fill(-1);
@@ -923,6 +929,7 @@ private:
             emissive_intensity.fill(0.0f);
             roughness.fill(0.85f);
             roughness_set.fill(false);
+            albedo_scale.fill(1.0f);
         }
     };
     MaterialTextureLut m_material_texture_lut;
