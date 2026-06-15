@@ -8,6 +8,61 @@
 
 namespace Luminumbra::Client {
 
+// T-I5b-3 (AU1): atmosphere-audio layer descriptors. The replicated weather/wind
+// state drives two AMBIENCE layers (wind + rain) plus a weather-modulated reverb
+// shift. This is render/client-only dressing (no world_hash, no visual-gate
+// dependency): the NULL-audio path is unaffected because the model is a pure
+// function the harness samples for telemetry and the live client applies through
+// IAudioManager (suppressed centrally in null mode).
+//
+// PINNED model (design-decisions.md §4). Inputs are the WeatherSystem replicated
+// sample fields, all in [0, 1] except wind which is a world-space vector:
+//   wind_speed01 = clamp(|wind| / kAtmosphereWindRefSpeed, 0, 1)
+//   precip01     = clamp(precip_intensity, 0, 1)
+//   storm01      = clamp(storm_intensity, 0, 1)
+// Layer volumes (each [0, 1]):
+//   wind layer  = wind_speed01 (gusts louder in stronger wind; always present
+//                 above a faint floor so a calm scene still has air movement)
+//   rain layer  = max(precip01, storm01) (silent when clear, rises with rain and
+//                 storm precipitation; storms add the heavier downpour)
+// Weather reverb shift (added on top of the active biome reverb): wet/decay rise
+// with precipitation (a wet, dense, overcast air carries early reflections longer
+// and wetter), dry falls. The shift is bounded so it can never invert the mix.
+struct AtmosphereAudioLayer {
+    bool present = false;       // layer audible this frame (volume above the floor)
+    float intensity = 0.0f;     // [0, 1] driver (wind speed / precip) before volume
+    float volume = 0.0f;        // [0, 1] applied ambience volume
+};
+
+struct AtmosphereAudioState {
+    bool applied = false;
+    AtmosphereAudioLayer wind;  // wind ambience (scales with wind speed)
+    AtmosphereAudioLayer rain;  // rain ambience (scales with precip/storm)
+    // Weather-modulated reverb the listener hears (base biome reverb + weather
+    // shift). These are the values pushed to the audio backend's global reverb.
+    float reverb_wet = 0.0f;
+    float reverb_dry = 1.0f;
+    float reverb_decay = 0.0f;
+    // The precipitation-driven reverb shift applied on top of the biome base
+    // (telemetry: proves the reverb param SHIFTS with weather).
+    float reverb_weather_shift = 0.0f;
+    std::uint64_t apply_count = 0; // distinct atmosphere transitions pushed
+};
+
+// Reference wind speed (m/s) at which the wind ambience layer saturates. Stronger
+// gusts than this are clamped to full volume. PINNED so the telemetry sweep and
+// the live client agree.
+inline constexpr float kAtmosphereWindRefSpeed = 12.0f;
+// Faint floor the wind ambience never drops below in the open air (so a calm
+// outdoor scene still carries a barely-audible air bed). Below kAtmosphereLayerFloor
+// the rain layer is treated as silent/absent.
+inline constexpr float kAtmosphereWindFloor = 0.04f;
+inline constexpr float kAtmosphereLayerFloor = 0.02f;
+// Maximum weather reverb wet/decay boost added on top of the biome base at full
+// precipitation. Bounded so the weather shift can never invert the dry/wet mix.
+inline constexpr float kAtmosphereReverbWetBoost = 0.25f;
+inline constexpr float kAtmosphereReverbDecayBoost = 0.6f;
+
 class EnvironmentalAudioSystem {
 public:
     EnvironmentalAudioSystem(MiniaudioManager* audioManager);
@@ -46,6 +101,30 @@ public:
         std::uint64_t apply_count = 0; // distinct profile transitions
     };
     const BiomeReverbState& CurrentBiomeReverb() const { return m_biomeReverb; }
+
+    // T-I5b-3 (AU1): drive the atmosphere ambience + weather reverb shift from a
+    // replicated weather sample. `wind` is the world-space local wind vector (the
+    // WeatherSample.wind / WindFieldSystem sample, magnitude in m/s); precip and
+    // storm are the [0, 1] WeatherSample fields. Pure data->audio: it computes the
+    // ambience layer volumes (ComputeAtmosphere) and pushes them + the weather-
+    // shifted global reverb through the audio manager. Idempotent at the backend:
+    // re-applying an unchanged state is a no-op (does not churn per Update tick).
+    // Render/client-only: writes nothing to the sim. Null-audio safe (the manager
+    // suppresses the backend calls centrally).
+    void UpdateAtmosphere(const glm::vec3& wind, float precipIntensity, float stormIntensity);
+
+    // Pure function: the PINNED atmosphere model (design-decisions.md §4). Exposed
+    // so the telemetry harness can sweep weather conditions without an audio
+    // backend. `biomeWet/biomeDry/biomeDecay` are the active biome reverb base the
+    // weather shift is layered on top of.
+    static AtmosphereAudioState ComputeAtmosphere(const glm::vec3& wind,
+                                                  float precipIntensity,
+                                                  float stormIntensity,
+                                                  float biomeWet,
+                                                  float biomeDry,
+                                                  float biomeDecay);
+
+    const AtmosphereAudioState& CurrentAtmosphere() const { return m_atmosphere; }
 
 private:
     struct AmbientZone {
@@ -86,6 +165,8 @@ private:
     const float UPDATE_INTERVAL = 0.1f; // Update every 100ms
 
     BiomeReverbState m_biomeReverb; // T-I4-5: last applied per-biome reverb
+
+    AtmosphereAudioState m_atmosphere; // T-I5b-3: last applied atmosphere state
 };
 
 } // namespace Luminumbra::Client

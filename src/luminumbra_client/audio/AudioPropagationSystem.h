@@ -58,7 +58,26 @@ public:
     };
     ThunderCue ComputeThunderCue(const glm::vec3& strike_position,
                                  const glm::vec3& listener) const;
-    
+
+    // T-I5b-3 (AU1): atmosphere AMBIENCE bed on the propagation system. Wind/rain
+    // ambience are non-positional weather beds (they envelop the listener), so this
+    // is a LIGHTWEIGHT additive hook, NOT new ray-traced propagation: given a
+    // requested ambience volume [0, 1] it returns the volume the listener actually
+    // hears once the environment occludes/encloses it (open sky -> full weather
+    // bed; an enclosed cave muffles the outdoor wind/rain). It reuses the existing
+    // AnalyzeEnvironment enclosure estimate; no reflections, no physics raycast on
+    // the call path unless a physics system is present. The EnvironmentalAudioSystem
+    // drives the ambience layers through this so the weather bed responds to the
+    // listener's space the same way other audio does. Null-audio safe (pure math).
+    struct AmbienceBed {
+        float requested_volume = 0.0f;  // [0, 1] weather-driven ambience volume in
+        float volume = 0.0f;            // [0, 1] occlusion/enclosure-adjusted output
+        float openness = 1.0f;          // [0, 1] 1 = open sky, 0 = fully enclosed
+    };
+    AmbienceBed ComputeAmbienceBed(const glm::vec3& listener,
+                                   float requested_volume,
+                                   float analysis_radius = 20.0f);
+
     // Async propagation for performance
     void CalculatePropagationAsync(const glm::vec3& source, 
                                   const glm::vec3& listener,
