@@ -276,6 +276,17 @@ private:
     glm::vec3 m_wind_velocity{0.0f};
     static constexpr std::size_t kNoSplashEmitter = static_cast<std::size_t>(-1);
     std::size_t m_splash_emitter_index = kNoSplashEmitter;
+
+    // T-I5b-DR-storm-blockers (M7): cached camera SCREEN basis from the previous
+    // execute(), used by update() to orient rain streaks by the velocity PROJECTED
+    // INTO SCREEN SPACE (right/up) rather than by raw world XY. Looking down a
+    // falling drop projects to a near-zero screen vector, so the streak shrinks
+    // toward a round droplet instead of painting a fake vertical veil/grey haze.
+    // Render-only; never hashed (per-particle motion is not snapshotted, F2).
+    glm::vec3 m_view_right{1.0f, 0.0f, 0.0f};
+    glm::vec3 m_view_up{0.0f, 1.0f, 0.0f};
+    glm::vec3 m_view_forward{0.0f, 0.0f, -1.0f};
+    bool m_have_view_basis = false;
 };
 
 } // namespace Luminumbra::Rendering

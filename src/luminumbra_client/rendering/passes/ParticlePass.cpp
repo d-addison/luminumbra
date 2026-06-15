@@ -488,12 +488,42 @@ void ParticlePass::update(float dt) {
         // vertical one. The frag-shader quad stays square; the visible slant comes
         // from this rotation + the wind-advected spatial envelope of the field.
         float rotation = life_t * 6.2831853f;
+        // T-I5b-DR-storm-blockers (M7): SCREEN-projected streak orientation. The old
+        // code fed RAW WORLD velocity (advected_vel.x/.y) into atan2 and elongated the
+        // billboard along that fixed screen axis regardless of where the camera looked.
+        // Looking DOWN, a falling drop (world -Y) still painted a full-length vertical
+        // screen streak -> a uniform grey vertical veil/haze that read as static, not
+        // rain. The fix projects the world velocity onto the camera screen plane
+        // (right/up) so the streak follows its true on-screen motion: end-on rain
+        // (looking down) projects to a near-zero screen vector and collapses to a
+        // short droplet, while side-on rain stays a vertical streak. Render-only (F2).
+        float screen_vel_scale = 1.0f; // 1 = full streak; <1 shrinks toward a droplet
         if (emitter.data.streak_aspect > 1.0f) {
-            // atan2(horizontal-advected, vertical-fall): 0 when straight down,
-            // tilts toward horizontal as wind grows. Deterministic per frame.
-            const float horiz = advected_vel.x; // dominant slant axis (camera right-ish)
-            const float vert = advected_vel.y;
-            rotation = std::atan2(horiz, vert);
+            if (m_have_view_basis) {
+                const float sx = glm::dot(advected_vel, m_view_right);
+                const float sy = glm::dot(advected_vel, m_view_up);
+                const float screen_speed = std::sqrt(sx * sx + sy * sy);
+                const float world_speed =
+                    std::sqrt(advected_vel.x * advected_vel.x +
+                              advected_vel.y * advected_vel.y +
+                              advected_vel.z * advected_vel.z);
+                // atan2(screen-right, screen-up): a vertical on-screen fall -> 0; wind
+                // shear or an oblique view tilts it. NDC y grows UP and the vertex
+                // stage elongates along +up, so this lines the streak up with motion.
+                rotation = std::atan2(sx, sy);
+                // How much of the motion is actually visible on screen. When the drop
+                // travels almost straight at/away from the camera (looking down/up),
+                // this drops toward 0 and the streak shortens to a droplet instead of
+                // a fake vertical bar. Smoothstep so side-on rain stays full-length.
+                if (world_speed > 1e-4f) {
+                    const float frac = std::clamp(screen_speed / world_speed, 0.0f, 1.0f);
+                    screen_vel_scale = std::clamp(frac / 0.45f, 0.0f, 1.0f);
+                }
+            } else {
+                const float horiz = advected_vel.x;
+                const float vert = advected_vel.y;
+                rotation = std::atan2(horiz, vert);
+            }
         }
 
         InstanceRecord& rec = dst[written];
@@ -543,6 +573,14 @@ void ParticlePass::update(float dt) {
             const float t = std::clamp(wind_horiz / kWindFullStretch, 0.0f, 1.0f);
             effective_aspect = kCalmStreakAspect +
                 (kWindyStreakAspect - kCalmStreakAspect) * t;
+        }
+        // T-I5b-DR-storm-blockers (M7): shrink the streak toward a round droplet as
+        // its on-screen motion vanishes (camera looking along the fall direction), so
+        // down-pitched rain reads as droplets, not a fake vertical grey veil. Lerp
+        // the elongation back toward 1 (square) by the screen-velocity scale; side-on
+        // framings keep screen_vel_scale ~1 so the wind-slant streaks are untouched.
+        if (emitter.data.streak_aspect > 1.0f) {
+            effective_aspect = 1.0f + (effective_aspect - 1.0f) * screen_vel_scale;
         }
         const float aspect_norm =
             std::clamp(effective_aspect / kMaxStreakAspect, 0.0f, 1.0f);
@@ -621,6 +659,14 @@ void ParticlePass::execute(RenderPipeline& pipeline, const Camera& camera) {
         static_cast<float>(pipeline.m_screen_width) / static_cast<float>(pipeline.m_screen_height),
         camera.GetNearPlane(), camera.GetFarPlane());
     const glm::mat4 view = camera.GetViewMatrix();
+    // T-I5b-DR-storm-blockers (M7): cache the camera screen basis so next frame's
+    // update() can orient rain streaks by SCREEN-projected velocity (kills the
+    // grey vertical-veil haze when looking down). update()->execute() run back to
+    // back on the same camera, so a one-frame-stale basis is imperceptible.
+    m_view_right = camera.Right;
+    m_view_up = camera.Up;
+    m_view_forward = camera.Front;
+    m_have_view_basis = true;
     m_shader->setMat4("u_view", view);
     m_shader->setMat4("u_projection", projection);
     m_shader->setVec3("u_cameraRight", camera.Right);
