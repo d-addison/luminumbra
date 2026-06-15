@@ -1,5 +1,5 @@
 ﻿param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "AtmosphereAudio", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "ParticleEmitterDeterminism", "CloudShadow", "FoliageInstancing", "Precipitation", "TimeOfDaySweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "WindFieldDeterminism", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "StimulusChannelGate", "BiomeCoverage", "RiverPresence", "WaterfallVisual", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "AtmosphereAudio", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "ParticleEmitterDeterminism", "CloudShadow", "FoliageInstancing", "Precipitation", "TimeOfDaySweep", "WorldVisualSweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "WindFieldDeterminism", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "StimulusChannelGate", "BiomeCoverage", "RiverPresence", "WaterfallVisual", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -3699,6 +3699,140 @@ function Test-TimeOfDaySweep {
     }
 }
 
+# --- T-I5b-visual-sweep WorldVisualSweep mode ---
+# Drives the world_visual_sweep capture matrix (times-of-day x camera angles x
+# weather x season) from a feature-rich archipelago anchor and guards PRODUCTION
+# + PRESENCE so the matrix can become a standing validation gate. Real visual
+# QUALITY is judged by the orchestrator from the assembled montages; this gate
+# only proves every expected cell PPM was produced + non-black AND that the
+# intended feature signal is ACTIVE in its cells:
+#   * foliage_draws > 0 in the down-pitched DAYTIME clear cells,
+#   * particle_draws > 0 AND lightning active in every STORM cell,
+#   * cloud coverage > 0 in the up-pitched STORM cells,
+#   * water-like pixels present in the water-aimed DAYTIME cells,
+#   * NO rain leaking into clear cells (particle_draws == 0).
+# RENDER-ONLY: the scenario drives the existing one-way bridges and never writes
+# world_hash. The gate also assembles the labelled montages for review.
+function Test-WorldVisualSweep {
+    $exe = Get-ClientExe
+    $visualDir = "build/$BuildPreset/test-artifacts/runtime/world-visual-sweep"
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $visualDir
+    New-Item -ItemType Directory -Force -Path $visualDir | Out-Null
+
+    $runSeconds = [Math]::Max(20, $SmokeSeconds)
+    Invoke-Checked -FilePath $exe -ArgumentList @(
+        "--scenario", "world_visual_sweep",
+        "--auto-create-world",
+        "--auto-enter-world",
+        "--timed-run", "$runSeconds",
+        "--no-audio",
+        "--no-ui",
+        "--runtime-artifact-dir", $visualDir
+    ) -TimeoutSeconds ([Math]::Max(480, $runSeconds + 360))
+
+    $manifestPath = Join-Path $visualDir "world-visual-sweep-manifest.json"
+    if (-not (Test-Path $manifestPath)) {
+        throw "world_visual_sweep run did not produce $manifestPath (gate produced by task T-I5b-visual-sweep)"
+    }
+
+    $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+    if ($manifest.schema -ne "luminumbra.world_visual_sweep.v1") {
+        throw "Unexpected world_visual_sweep manifest schema '$($manifest.schema)'"
+    }
+
+    $cells = @($manifest.cells)
+    if ($cells.Count -lt 1) {
+        throw "world_visual_sweep manifest carries no cells"
+    }
+
+    # PRODUCTION: every expected cell PPM produced + present on disk + non-black.
+    if ([int]$manifest.produced_cell_count -ne [int]$manifest.expected_cell_count) {
+        throw "world_visual_sweep produced $($manifest.produced_cell_count) of $($manifest.expected_cell_count) expected cells"
+    }
+    foreach ($cell in $cells) {
+        if (-not $cell.produced) {
+            throw "world_visual_sweep cell not produced: $($cell.file)"
+        }
+        Assert-PpmArtifact (Join-Path $visualDir $cell.file)
+        if (-not $cell.non_black) {
+            throw "world_visual_sweep cell is black/empty: $($cell.file) (mean_luminance=$($cell.mean_luminance))"
+        }
+    }
+
+    # PRESENCE: each feature must be ACTIVE in its intended cells.
+    $foliageCells = @($cells | Where-Object { $_.pitched_down -and $_.daytime -and -not $_.storm })
+    if ($foliageCells.Count -lt 1) { throw "world_visual_sweep has no down-pitched daytime clear cells to assert foliage" }
+    foreach ($cell in $foliageCells) {
+        if ([int64]$cell.foliage_draws -lt 1) {
+            throw "world_visual_sweep down-daytime cell shows no foliage (foliage_draws=$($cell.foliage_draws)): $($cell.file)"
+        }
+    }
+
+    $stormCells = @($cells | Where-Object { $_.storm })
+    if ($stormCells.Count -lt 1) { throw "world_visual_sweep has no storm cells" }
+    foreach ($cell in $stormCells) {
+        if ([int64]$cell.particle_draws -lt 1) {
+            throw "world_visual_sweep storm cell shows no rain (particle_draws=$($cell.particle_draws)): $($cell.file)"
+        }
+        if (-not $cell.lightning_active) {
+            throw "world_visual_sweep storm cell has no active lightning: $($cell.file)"
+        }
+    }
+
+    $cloudCells = @($cells | Where-Object { $_.pitched_up -and $_.storm })
+    if ($cloudCells.Count -lt 1) { throw "world_visual_sweep has no up-pitched storm cells to assert clouds" }
+    foreach ($cell in $cloudCells) {
+        if ([double]$cell.cloud_coverage -le 0.0) {
+            throw "world_visual_sweep up-storm cell has no cloud coverage: $($cell.file)"
+        }
+    }
+
+    $waterCells = @($cells | Where-Object { $_.water_aimed -and $_.daytime })
+    if ($waterCells.Count -lt 1) { throw "world_visual_sweep has no water-aimed daytime cells" }
+    foreach ($cell in $waterCells) {
+        if ([int64]$cell.water_like_pixels -lt 1) {
+            throw "world_visual_sweep water-aimed cell shows no water: $($cell.file)"
+        }
+    }
+
+    # No rain may leak into clear cells (clean clear-vs-storm separation).
+    $clearLeak = @($cells | Where-Object { -not $_.storm -and [int64]$_.particle_draws -gt 0 })
+    if ($clearLeak.Count -gt 0) {
+        throw "world_visual_sweep rain leaked into $($clearLeak.Count) clear cell(s), e.g. $($clearLeak[0].file)"
+    }
+
+    if (-not $manifest.passed) {
+        throw "world_visual_sweep manifest reported failure: $($manifest.failures -join ', ')"
+    }
+
+    # Assemble the labelled contact-sheet montages for orchestrator review. This
+    # is a BEST-EFFORT review convenience (it needs python+Pillow); the gate's
+    # PASS/FAIL is the production + presence assertions above, NOT the montage.
+    # We try a few python interpreters and warn (never fail) if none has Pillow.
+    $montageScript = ".forge/scripts/build-visual-sweep-montages.py"
+    if (Test-Path $montageScript) {
+        $montageBuilt = $false
+        foreach ($py in @($env:VISUAL_SWEEP_PYTHON, "python", "python3", "py")) {
+            if ([string]::IsNullOrWhiteSpace($py)) { continue }
+            if (-not (Get-Command $py -ErrorAction SilentlyContinue)) { continue }
+            try {
+                & $py -c "import PIL" 2>$null
+                if ($LASTEXITCODE -ne 0) { continue }
+                & $py $montageScript $visualDir
+                if ($LASTEXITCODE -eq 0) { $montageBuilt = $true; break }
+            } catch { continue }
+        }
+        if (-not $montageBuilt) {
+            Write-Warning "world_visual_sweep montages not assembled (no python with Pillow found). Captures + manifest are still produced under $visualDir; set VISUAL_SWEEP_PYTHON to a python with Pillow to enable montages."
+        } else {
+            Write-Host "world_visual_sweep montages assembled under $visualDir/sweep/montages"
+        }
+    }
+
+    Write-Host ("world_visual_sweep gate passed: {0} cells all produced + non-black; foliage in {1} down-daytime cells, rain+lightning in {2} storm cells, clouds in {3} up-storm cells, water in {4} water-aimed cells; no clear-cell rain leak" -f `
+        $manifest.expected_cell_count, $foliageCells.Count, $stormCells.Count, $cloudCells.Count, $waterCells.Count)
+}
+
 # --- T-I3-3 PlayerView mode: append-only ---
 # Eye-level 360-degree player-view coverage gate (player_view_smoke): 12 yaw
 # stations + a peak-aimed station per preset, plus the seed-424242
@@ -5402,6 +5536,7 @@ switch ($Mode) {
     "FoliageInstancing" { Test-FoliageInstancing }
     "Precipitation" { Test-Precipitation }
     "TimeOfDaySweep" { Test-TimeOfDaySweep }
+    "WorldVisualSweep" { Test-WorldVisualSweep }
     "PlayerView" { Test-PlayerView }
     "FarLodHorizon" { Test-FarLodHorizon }
     "HeadlessServerTick" { Test-HeadlessServerTick }
