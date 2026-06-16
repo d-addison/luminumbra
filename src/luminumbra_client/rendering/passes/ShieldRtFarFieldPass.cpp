@@ -51,6 +51,15 @@ uniform int   u_maxSteps;
 uniform float u_seaLevel;
 uniform int   u_mipOffset[24];
 uniform int   u_mipDim[24];
+// inc2c-SCALE step 1: far-pixel-only dispatch. A copy of the scene depth (blitted
+// before the pass to avoid a feedback loop on the depth attachment this pass writes
+// via gl_FragDepth). < 1.0 means opaque geometry (live/far-LOD mesh) already covered
+// this pixel; the GL_LESS depth test would reject the raymarch write there anyway, so
+// we discard BEFORE marching and skip the wasted rays. Typical down/eye views are
+// ~2/3 near-terrain -> most rays skipped. Quality-neutral (augment-not-replace,
+// Decision A: the raymarch fills only the sky/gap pixels the mesh did not).
+uniform sampler2D u_sceneDepth;
+uniform int   u_farPixelEarlyOut;  // 1 = enabled (0 keeps the validated full-frame march)
 
 float hfSample(float wx, float wz) {
     float fx = clamp((wx - u_origin.x) / u_step, 0.0, float(u_n - 1));
@@ -93,6 +102,13 @@ vec2 encode_octahedral(vec3 n) {
 }
 
 void main() {
+    // Far-pixel early-out: skip the march where opaque geometry already won this
+    // pixel (sampled scene-depth copy < far plane). Pure perf — the depth test
+    // would reject the write here regardless.
+    if (u_farPixelEarlyOut == 1 &&
+        texelFetch(u_sceneDepth, ivec2(gl_FragCoord.xy), 0).r < 1.0) {
+        discard;
+    }
     vec2 uv = gl_FragCoord.xy / u_viewport;
     vec4 farp = u_invViewProj * vec4(uv * 2.0 - 1.0, 1.0, 1.0);
     farp /= farp.w;
@@ -283,9 +299,44 @@ void ShieldRtFarFieldPass::shutdown() {
     if (m_vao) { glDeleteVertexArrays(1, &m_vao); m_vao = 0; }
     if (m_base_ssbo) { glDeleteBuffers(1, &m_base_ssbo); m_base_ssbo = 0; }
     if (m_maxmip_ssbo) { glDeleteBuffers(1, &m_maxmip_ssbo); m_maxmip_ssbo = 0; }
+    if (m_scene_depth_fbo) { glDeleteFramebuffers(1, &m_scene_depth_fbo); m_scene_depth_fbo = 0; }
+    if (m_scene_depth_tex) { glDeleteTextures(1, &m_scene_depth_tex); m_scene_depth_tex = 0; }
+    m_depth_w = 0;
+    m_depth_h = 0;
+    m_have_depth_copy = false;
     m_ready = false;
     m_has_field = false;
     m_have_cache_key = false;
+}
+
+void ShieldRtFarFieldPass::capture_scene_depth(GLuint src_fbo, int width, int height) {
+    if (!m_ready || width <= 0 || height <= 0) { m_have_depth_copy = false; return; }
+    // Lazily (re)allocate the copy texture + FBO to the current viewport. Matches the
+    // G-buffer depth format (DEPTH_COMPONENT24) so glBlitFramebuffer is a straight copy.
+    if (m_scene_depth_tex == 0 || width != m_depth_w || height != m_depth_h) {
+        if (m_scene_depth_tex == 0) glGenTextures(1, &m_scene_depth_tex);
+        glBindTexture(GL_TEXTURE_2D, m_scene_depth_tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0,
+                     GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        if (m_scene_depth_fbo == 0) glGenFramebuffers(1, &m_scene_depth_fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, m_scene_depth_fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_scene_depth_tex, 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        m_depth_w = width;
+        m_depth_h = height;
+    }
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, src_fbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_scene_depth_fbo);
+    glBlitFramebuffer(0, 0, width, height, 0, 0, width, height,
+                      GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+    m_have_depth_copy = true;
 }
 
 void ShieldRtFarFieldPass::update(const Systems::SHIELD_WorldSystem& world,
@@ -409,11 +460,26 @@ void ShieldRtFarFieldPass::render(const glm::mat4& view, const glm::mat4& view_p
     glUniform1f(glGetUniformLocation(m_raymarch_prog, "u_seaLevel"), 0.0f);
     glUniform1iv(glGetUniformLocation(m_raymarch_prog, "u_mipOffset"), m_levels, m_mip_offset.data());
     glUniform1iv(glGetUniformLocation(m_raymarch_prog, "u_mipDim"), m_levels, m_mip_dim.data());
+    // inc2c-SCALE step 1: bind the scene-depth copy + enable the far-pixel early-out
+    // only when a fresh copy was captured this frame (else fall back to the validated
+    // full-frame march so the pass is never wrong, just slower).
+    const int early_out = m_have_depth_copy ? 1 : 0;
+    glUniform1i(glGetUniformLocation(m_raymarch_prog, "u_farPixelEarlyOut"), early_out);
+    if (early_out) {
+        glActiveTexture(GL_TEXTURE8);
+        glBindTexture(GL_TEXTURE_2D, m_scene_depth_tex);
+        glUniform1i(glGetUniformLocation(m_raymarch_prog, "u_sceneDepth"), 8);
+    }
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_base_ssbo);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, m_maxmip_ssbo);
     glBindVertexArray(m_vao);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     glBindVertexArray(0);
+    if (early_out) {
+        glActiveTexture(GL_TEXTURE8);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glActiveTexture(GL_TEXTURE0);
+    }
     glUseProgram(0);
 }
 
