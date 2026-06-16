@@ -105,6 +105,23 @@ void LightingPass::execute(RenderPipeline& pipeline, const Camera& camera) {
     glActiveTexture(GL_TEXTURE7); glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_terrainTextureArray);
     glActiveTexture(GL_TEXTURE8); glBindTexture(GL_TEXTURE_2D, pipeline.m_materialLUT);
     glActiveTexture(GL_TEXTURE9); glBindTexture(GL_TEXTURE_2D, pipeline.m_water_pass->black_texture());
+    // T-I6-A1d: Aetheric emissive field at unit 10 (gated by u_aetherActive). When
+    // no field is uploaded the texture is 0 and u_aetherActive=0, so the glow term
+    // is skipped -> pixel-identical to the pre-A1d path.
+    glActiveTexture(GL_TEXTURE10);
+    glBindTexture(GL_TEXTURE_2D, pipeline.m_aetherFieldTexture);
+    m_lighting_shader->setInt("u_aetherField", 10);
+    if (pipeline.m_aetherFieldActive && pipeline.m_aetherFieldExtent > 0) {
+        const float world_span = static_cast<float>(pipeline.m_aetherFieldExtent) *
+                                 pipeline.m_aetherFieldCellSize;
+        m_lighting_shader->setFloat("u_aetherActive", 1.0f);
+        m_lighting_shader->setVec2("u_aetherFieldWorldOrigin", pipeline.m_aetherFieldWorldOrigin);
+        m_lighting_shader->setFloat("u_aetherFieldInvWorldSpan",
+                                    world_span > 0.0f ? (1.0f / world_span) : 0.0f);
+    } else {
+        m_lighting_shader->setFloat("u_aetherActive", 0.0f);
+    }
+    glActiveTexture(GL_TEXTURE0);
     m_lighting_shader->setMat4("u_inverseView", glm::inverse(camera.GetViewMatrix()));
     m_lighting_shader->setInt("gPosition", 0);
     m_lighting_shader->setInt("gNormalMaterial", 1);    // Octahedral normal + material
