@@ -75,6 +75,26 @@ vec3 triplanar_weights(vec3 n) {
     return w / max(w.x + w.y + w.z, 1e-4);
 }
 
+// T-I6 macro material variation: cheap spatially-coherent value noise to jitter the
+// slope/height material boundaries so they read as natural transitions, not clean
+// contour lines. Deterministic in WORLD space (no temporal shimmer under motion).
+float hash13(vec3 p) {
+    p = fract(p * 0.1031);
+    p += dot(p, p.zyx + 31.32);
+    return fract((p.x + p.y) * p.z);
+}
+float vnoise(vec3 p) {
+    vec3 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float n000 = hash13(i + vec3(0,0,0)), n100 = hash13(i + vec3(1,0,0));
+    float n010 = hash13(i + vec3(0,1,0)), n110 = hash13(i + vec3(1,1,0));
+    float n001 = hash13(i + vec3(0,0,1)), n101 = hash13(i + vec3(1,0,1));
+    float n011 = hash13(i + vec3(0,1,1)), n111 = hash13(i + vec3(1,1,1));
+    float nx00 = mix(n000, n100, f.x), nx10 = mix(n010, n110, f.x);
+    float nx01 = mix(n001, n101, f.x), nx11 = mix(n011, n111, f.x);
+    return mix(mix(nx00, nx10, f.y), mix(nx01, nx11, f.y), f.z);
+}
+
 // Triplanar albedo sample from the terrain array, with unsharp detail amplification.
 vec3 triplanar_albedo(vec3 worldPos, vec3 weights, float layer, float scale) {
     vec2 uv_x = worldPos.zy * scale;
@@ -198,8 +218,34 @@ void main()
         float tiling = max(texInfo.b * 64.0, 0.0625);
         float scale = 1.0 / tiling; // repeats per world unit
         vec3 weights = triplanar_weights(worldN);
-        albedo = triplanar_albedo(fs_in.WorldPos, weights, texLayer, scale);
-        worldN = triplanar_normal(fs_in.WorldPos, worldN, weights, normLayer, scale);
+        float geomSlope = worldN.y; // up-facing-ness (1 flat, 0 vertical), pre normal-map
+        vec3 baseAlbedo = triplanar_albedo(fs_in.WorldPos, weights, texLayer, scale);
+        vec3 baseN      = triplanar_normal(fs_in.WorldPos, worldN, weights, normLayer, scale);
+
+        // T-I6 macro material variation (RENDER-ONLY, no world_hash): overlay ROCK on
+        // steep faces so natural terrain stops reading as one uniform olive material
+        // (the BF4/BF1 macro-variation lift). Only natural ground ids (Stone/Soil/Grass
+        // = 1..3); calibrated Sand (4) and the flat far-water sheet (200) are untouched,
+        // so the sand exposure calibration + the live/far water seam are unchanged. The
+        // rock layers are read from the Stone (id 1) material row so this tracks
+        // materials.json (no hardcoded layer index). Steep faces blend toward rock with
+        // a world-space-noise-jittered boundary so cliffs read as natural scree, not a
+        // clean contour line.
+        if (fs_in.MaterialID >= 1u && fs_in.MaterialID <= 3u) {
+            float jitter = (vnoise(fs_in.WorldPos * 0.05) - 0.5) * 0.18; // ~20 m break-up
+            float rockW = smoothstep(0.80 + jitter, 0.50 + jitter, geomSlope); // steep -> rock
+            if (rockW > 0.002) {
+                vec4 rockInfo = texture(u_materialLUT, vec2(1.0/255.0, 0.5)); // Stone row 1
+                float rockTex   = floor(rockInfo.r * 255.0 + 0.5);
+                float rockNrm   = floor(rockInfo.g * 255.0 + 0.5);
+                float rockScale = 1.0 / max(rockInfo.b * 64.0, 0.0625);
+                vec3 rockAlbedo = triplanar_albedo(fs_in.WorldPos, weights, rockTex, rockScale);
+                vec3 rockN      = triplanar_normal(fs_in.WorldPos, worldN, weights, rockNrm, rockScale);
+                baseAlbedo = mix(baseAlbedo, rockAlbedo, rockW);
+                baseN      = normalize(mix(baseN, rockN, rockW));
+            }
+        }
+        worldN = baseN;
         // T-I5b-5-water-backlog: per-material albedo calibration on the textured
         // terrain path (live AND far-LOD sand both sample this triplanar branch -
         // sand carries has_texture). Default scale 1.0 is a no-op (byte-identical)
@@ -207,7 +253,7 @@ void main()
         // and skinned paths are untouched (no spurious scaling of the case-switch
         // base colors). Brings the noon sun-bright sand flat down to a natural lit
         // tone below the ACES clip.
-        albedo *= albedoScale;
+        albedo = baseAlbedo * albedoScale;
         textured = true;
     }
 
