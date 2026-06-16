@@ -1088,7 +1088,8 @@ void WriteSkyboxVisualAnalysis(
 {
     constexpr double kMinHorizonZenithDrop = 8.0;
     constexpr int kMaxMonotonicViolations = 1;
-    constexpr std::uint64_t kMinSunDiscPixels = 50;
+    const std::uint64_t kMinSunDiscPixels =
+        static_cast<std::uint64_t>(ScalePinnedArea(50, kCapturePinnedWidth, kCapturePinnedHeight));
     constexpr double kMinSunClusterFraction = 0.6;
     // T-I5a-6: low-sun scattering palette emergence (pinned t=0.04, low sun).
     // The warm horizon band must read genuinely warm (R>B) AND warmer than the
@@ -1616,7 +1617,8 @@ void WriteStrikeVisualAnalysis(
     // contain BOLT pixels (a bright thin high-gradient structure). Thresholds
     // calibrated to the first strike capture; measured values recorded alongside.
     constexpr double kMinPulseDelta = 0.04;         // >= 4% absolute frame-mean luma rise
-    constexpr std::uint64_t kMinBoltPixels = 40;    // a visible thin bolt structure
+    const std::uint64_t kMinBoltPixels =  // a visible thin bolt structure (area-scaled)
+        static_cast<std::uint64_t>(ScalePinnedArea(40, kCapturePinnedWidth, kCapturePinnedHeight));
     // T-I5a-DR-atmospheric-visuals BOLT-SHAPE gate (catch the "fat lumpy blob"):
     //  - the bolt's bright core must form a TALL, NARROW structure (aspect >= 2:1),
     //  - and it must be THIN -- its bright-core pixels fill only a small fraction
@@ -2779,7 +2781,8 @@ void WriteTimeOfDaySweepAnalysis(
     constexpr double kMinNoonOverDuskGap = 3.0;     // sky mean luminance units (0-255)
     constexpr double kMinDuskOverNightGap = 10.0;
     constexpr double kMinDuskWarmShift = 0.01;      // terrain r/b ratio increase vs noon (measured +0.081)
-    constexpr std::uint64_t kMinEmissiveGlowPixels = 200;
+    const std::uint64_t kMinEmissiveGlowPixels =
+        static_cast<std::uint64_t>(ScalePinnedArea(200, kCapturePinnedWidth, kCapturePinnedHeight));
     // T-I4-DR-tod-sky-balance: the dome must actually track time-of-day.
     // (1) Night ceiling: the pre-fix dome held a bright twilight-blue night sky
     //     (sky mean ~182) over near-black ground; a real night dome reads dark.
@@ -3146,7 +3149,8 @@ bool IsSeamSliverPixel(unsigned char r, unsigned char g, unsigned char b) {
 
 // Minimum connected-component size (in pixels) for a near-black run to count
 // as a seam crack sliver instead of legitimate point shadow/noise.
-constexpr std::uint64_t kMinNearBlackClusterPx = 12;
+const std::uint64_t kMinNearBlackClusterPx =
+    static_cast<std::uint64_t>(ScalePinnedArea(12, kCapturePinnedWidth, kCapturePinnedHeight));
 
 bool IsBackgroundBluePixel(unsigned char r, unsigned char g, unsigned char b) {
     return r >= 38 &&
@@ -3619,7 +3623,8 @@ void WriteWaterVisualAnalysis(
     const WaterRegionPatch& deep_patch,
     const WaterRegionPatch& foam_patch)
 {
-    constexpr std::uint64_t kMinWaterLikePixels = 2500;
+    const std::uint64_t kMinWaterLikePixels =
+        static_cast<std::uint64_t>(ScalePinnedArea(2500, kCapturePinnedWidth, kCapturePinnedHeight));
     constexpr double kMinWaterLikeRatio = 0.02;
     // T-I2-16c depth gradient + shoreline foam gates, calibrated against the
     // top-down noon capture:
@@ -3641,7 +3646,8 @@ void WriteWaterVisualAnalysis(
     // upper-band water hue correlates with the sky reference at 0.9895; the
     // pre-change deep-tint miss color measured 0.9806. The 0.985 floor sits
     // between the two with comparable margin on both sides.
-    constexpr std::uint64_t kMinReflectionWaterPixels = 500;
+    const std::uint64_t kMinReflectionWaterPixels =
+        static_cast<std::uint64_t>(ScalePinnedArea(500, kCapturePinnedWidth, kCapturePinnedHeight));
     constexpr double kMinSkyCorrelation = 0.985;
     // T-I2-16a caustics animation gate (recalibrated in T-I2-16b after the
     // water normal fix): the enforced signal is the mean absolute texel delta
@@ -4121,22 +4127,29 @@ void WriteMaterialVisualAnalysis(
     const MaterialPixelStats& pixel_stats,
     const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass)
 {
-    constexpr std::uint64_t kMinSandPixels = 2000;
+    // Pixel-count floors scale with the capture area (T-I6 capture-native re-bless;
+    // identity at the 1280x720 tuning base). The companion ratios are already
+    // resolution-independent.
+    const std::uint64_t kMinSandPixels =
+        static_cast<std::uint64_t>(ScalePinnedArea(2000, kCapturePinnedWidth, kCapturePinnedHeight));
     constexpr double kMinSandRatio = 0.02;
     // Grass calibration (composite beach+highland vantage, seed 424242, noon):
     // measured grass_ratio 0.50 across repeated runs; the gate takes half the
     // observed ratio as the floor.
-    constexpr std::uint64_t kMinGrassPixels = 2000;
+    const std::uint64_t kMinGrassPixels =
+        static_cast<std::uint64_t>(ScalePinnedArea(2000, kCapturePinnedWidth, kCapturePinnedHeight));
     constexpr double kMinGrassRatio = 0.25;
     // Stone calibration (rim sub-ROI, seed 424242, noon): measured
     // stone_ratio 0.132-0.134 across repeated runs; the gate takes half the
     // observed ratio as the floor.
-    constexpr std::uint64_t kMinStonePixels = 5000;
+    const std::uint64_t kMinStonePixels =
+        static_cast<std::uint64_t>(ScalePinnedArea(5000, kCapturePinnedWidth, kCapturePinnedHeight));
     constexpr double kMinStoneRatio = 0.066;
     // Soil calibration (rim sub-ROI, seed 424242, noon): measured soil_ratio
     // 0.0107-0.0109 across repeated runs; the gate takes half the observed
     // ratio as the floor.
-    constexpr std::uint64_t kMinSoilPixels = 800;
+    const std::uint64_t kMinSoilPixels =
+        static_cast<std::uint64_t>(ScalePinnedArea(800, kCapturePinnedWidth, kCapturePinnedHeight));
     constexpr double kMinSoilRatio = 0.0054;
     constexpr double kMaxGreyFallbackRatio = 0.125;
     const std::uint64_t max_grey_fallback_pixels = static_cast<std::uint64_t>(
@@ -4293,9 +4306,16 @@ void WriteLodGroundVisualAnalysis(
     const std::filesystem::path& artifact_dir,
     const std::vector<LodGroundVisualCapture>& captures)
 {
-    constexpr std::uint64_t kMaxDarkVoidPixels = 18000;
-    constexpr std::uint64_t kMaxNearBlackPixels = 4000;
-    constexpr std::uint64_t kMaxBackgroundBluePixels = 22000;
+    // Pixel-count ceilings scale with the capture area (T-I6 capture-native
+    // re-bless; identity at the 1280x720 tuning base). Critical: without scaling
+    // these would false-fail at native res, where a benign frame has ~6.67x more
+    // pixels. The companion ratios are resolution-independent.
+    const std::uint64_t kMaxDarkVoidPixels =
+        static_cast<std::uint64_t>(ScalePinnedArea(18000, kCapturePinnedWidth, kCapturePinnedHeight));
+    const std::uint64_t kMaxNearBlackPixels =
+        static_cast<std::uint64_t>(ScalePinnedArea(4000, kCapturePinnedWidth, kCapturePinnedHeight));
+    const std::uint64_t kMaxBackgroundBluePixels =
+        static_cast<std::uint64_t>(ScalePinnedArea(22000, kCapturePinnedWidth, kCapturePinnedHeight));
     constexpr double kMaxDarkVoidRatio = 0.020;
     constexpr double kMaxNearBlackRatio = 0.0065;
     constexpr double kMaxBackgroundBlueRatio = 0.025;
@@ -4574,9 +4594,16 @@ void WriteLodSeamArrivalAnalysis(
     const std::vector<LodGroundVisualCapture>& captures,
     const LodSeamArrivalRecorder& recorder)
 {
-    constexpr std::uint64_t kMaxDarkVoidPixels = 18000;
-    constexpr std::uint64_t kMaxNearBlackPixels = 4000;
-    constexpr std::uint64_t kMaxBackgroundBluePixels = 22000;
+    // Pixel-count ceilings scale with the capture area (T-I6 capture-native
+    // re-bless; identity at the 1280x720 tuning base). Critical: without scaling
+    // these would false-fail at native res, where a benign frame has ~6.67x more
+    // pixels. The companion ratios are resolution-independent.
+    const std::uint64_t kMaxDarkVoidPixels =
+        static_cast<std::uint64_t>(ScalePinnedArea(18000, kCapturePinnedWidth, kCapturePinnedHeight));
+    const std::uint64_t kMaxNearBlackPixels =
+        static_cast<std::uint64_t>(ScalePinnedArea(4000, kCapturePinnedWidth, kCapturePinnedHeight));
+    const std::uint64_t kMaxBackgroundBluePixels =
+        static_cast<std::uint64_t>(ScalePinnedArea(22000, kCapturePinnedWidth, kCapturePinnedHeight));
     constexpr double kMaxDarkVoidRatio = 0.020;
     constexpr double kMaxNearBlackRatio = 0.0065;
     constexpr double kMaxBackgroundBlueRatio = 0.025;
@@ -5162,7 +5189,8 @@ PlayerViewPixelStats AnalyzePlayerViewPixels(
         }
     }
 
-    constexpr std::uint64_t kMinVoidClusterPx = 12;
+    const std::uint64_t kMinVoidClusterPx =
+        static_cast<std::uint64_t>(ScalePinnedArea(12, kCapturePinnedWidth, kCapturePinnedHeight));
     std::vector<std::size_t> flood_stack;
     for (std::size_t seed = 0; seed < void_mask.size(); ++seed) {
         if (void_mask[seed] != 1u) {
@@ -5561,7 +5589,8 @@ FarLodBoundaryBandStats AnalyzeFarLodBoundaryBand(
 
     // Strict-void cluster pass (max(r,g,b) <= 2, 8-connectivity, >= 12 px)
     // restricted to the boundary band.
-    constexpr std::uint64_t kMinVoidClusterPx = 12;
+    const std::uint64_t kMinVoidClusterPx =
+        static_cast<std::uint64_t>(ScalePinnedArea(12, kCapturePinnedWidth, kCapturePinnedHeight));
     std::vector<std::size_t> flood_stack;
     for (std::size_t seed = 0; seed < void_mask.size(); ++seed) {
         if (void_mask[seed] != 1u) {
@@ -6458,7 +6487,8 @@ void WriteSkinnedMeshVisualAnalysis(
     const SkinnedMeshVisualCapture& capture_a,
     const SkinnedMeshVisualCapture& capture_b,
     const SkinnedMeshDiffStats& diff) {
-    constexpr std::uint64_t kMinChangedPixels = 500;
+    const std::uint64_t kMinChangedPixels =
+        static_cast<std::uint64_t>(ScalePinnedArea(500, kCapturePinnedWidth, kCapturePinnedHeight));
     constexpr double kMinChangedRatio = 0.001;
     // T-I4-8: the textured creature drives a strong per-channel color
     // variance across its mesh ROI; a flat-colored creature would sit far below
