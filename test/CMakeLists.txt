@@ -496,6 +496,18 @@ target_link_libraries(frontier_gates_test PRIVATE
     luminumbra_common
 )
 
+# T-I6 capture-native re-bless: resolution-relative gate-threshold scaling unit
+# tests (core/CaptureScale.h is dependency-free, so this needs no GL/common libs).
+add_executable(capture_scale_test
+    rendering/capture_scale_test.cpp
+)
+target_include_directories(capture_scale_test PRIVATE
+    ../src/luminumbra_client
+)
+target_link_libraries(capture_scale_test PRIVATE
+    gtest_main
+)
+
 # Standalone main() gate programs registered directly with CTest.
 add_executable(eventbus_order_gate_test
     simulation/eventbus_order_gate_test.cpp
@@ -547,6 +559,7 @@ gtest_discover_tests(ui_smoke_test)
 gtest_discover_tests(initial_world_loading_perf_test)
 gtest_discover_tests(runtime_world_visual_validation_test)
 gtest_discover_tests(frontier_gates_test)
+gtest_discover_tests(capture_scale_test)
 
 # T-I4-15: register the spike benchmark under the "manual" label. It is
 # evidence-only (not a required gate) and its Debug runtime (~25s, and can exceed

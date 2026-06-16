@@ -5690,7 +5690,8 @@ FarLodHorizonSkySliverStats AnalyzeFarLodHorizonSkySliver(
     // stops a guard band above the horizon row; a genuine far-render streak (the
     // ~360 px defect class) towers far above the guard, so sensitivity holds.
     const int sliver_scan_rows =
-        std::max(0, sky_band_rows - kFarLodHorizonSliverHorizonGuardPx);
+        std::max(0, sky_band_rows -
+                        static_cast<int>(ScalePinnedHeight(kFarLodHorizonSliverHorizonGuardPx, height)));
     std::vector<int> column_span(static_cast<std::size_t>(width), 0);
     for (int x = min_x; x < max_x; ++x) {
         int first = -1;
@@ -5721,7 +5722,9 @@ FarLodHorizonSkySliverStats AnalyzeFarLodHorizonSkySliver(
     // tall thin sliver lights up only a few adjacent columns; a real mountain
     // ridge intruding above the horizon spans a wide column range, so requiring
     // the run on BOTH flanks of the window to fall off keeps ridges out.
-    constexpr int kMaxSliverWidth = 16; // px; slivers are 1-2 px, walls < 16
+    // px; slivers are 1-2 px, walls < 16 (tuning base, scaled to capture width).
+    constexpr int kMaxSliverWidthBase = 16;
+    const int kMaxSliverWidth = static_cast<int>(ScalePinnedWidth(kMaxSliverWidthBase, width));
     for (int x = min_x; x < max_x; ++x) {
         const int run = column_run[static_cast<std::size_t>(x)];
         if (run <= stats.tallest_sliver_px) {
@@ -5981,8 +5984,11 @@ void WriteFarLodHorizonAnalysis(
     const bool gbuffer_passed = !gpu_timers_supported || gbuffer_delta_ms < kFarLodHorizonMaxGbufferDeltaMs;
     // T-I4-DR-sliver-baseline-diff: the gated sliver metric is the far-attributable
     // diff against the per-station far-OFF baseline (<= 64 px), not the raw sliver.
+    // Sliver spans are vertical pixel extents; scale the budget to the actual
+    // capture height (captures are pinned to kCapturePinnedHeight by contract).
     const bool sliver_passed =
-        max_far_attributable_sliver_px <= kFarLodHorizonMaxFarAttributableSliverPx;
+        max_far_attributable_sliver_px <=
+        ScalePinnedHeight(kFarLodHorizonMaxFarAttributableSliverPx, kCapturePinnedHeight);
     // T-I5b-5-water-backlog: sand-flat-brightness gate. The elevated (downward)
     // station frames real near-shore ground; with the albedo_scale calibration
     // its band must not be a white-clipped sun-bright sand sheet. When the
@@ -6010,11 +6016,13 @@ void WriteFarLodHorizonAnalysis(
             {"max_below_horizon_sky_ratio", kFarLodHorizonMaxSkyRatio},
             {"max_boundary_band_sky_ratio", kFarLodBoundaryMaxSkyRatio},
             {"max_boundary_band_void_clusters", kFarLodBoundaryMaxVoidClusters},
-            {"max_sky_sliver_px", kFarLodHorizonMaxSkySliverPx},
+            {"max_sky_sliver_px", ScalePinnedHeight(kFarLodHorizonMaxSkySliverPx, kCapturePinnedHeight)},
             // T-I4-DR-sliver-baseline-diff: the GATED sliver budget is now the
             // far-attributable diff (max(0, on - off)); the raw max_sky_sliver_px
-            // above is informational telemetry only.
-            {"max_far_attributable_sliver_px", kFarLodHorizonMaxFarAttributableSliverPx},
+            // above is informational telemetry only. Both are vertical pixel spans
+            // scaled to the pinned capture height (T-I6 capture-native re-bless).
+            {"max_far_attributable_sliver_px",
+             ScalePinnedHeight(kFarLodHorizonMaxFarAttributableSliverPx, kCapturePinnedHeight)},
             // T-I5b-5-water-backlog: re-derived far-water band floor (open-sea)
             // + sand-flat-brightness band ceiling (elevated station).
             {"min_boundary_band_water_ratio_open_sea", kFarLodBoundaryMinWaterRatioOpenSea},
