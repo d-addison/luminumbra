@@ -1,6 +1,8 @@
 #include "SHIELD_WorldSystem.h"
 #include "entt/entt.hpp"
 #include "../world/MarchingCubes.h"
+#include "../world/HydraulicErosion.h" // T-I6-A2
+#include <mutex>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -378,6 +380,11 @@ float SHIELD_WorldSystem::EvaluateShapingSpline(
 
 SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSample(
     float world_x, float world_z) const {
+    return ComputeShapedHeightSampleImpl(world_x, world_z, /*apply_hydro=*/true);
+}
+
+SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSampleImpl(
+    float world_x, float world_z, bool apply_hydro) const {
     ShapedHeightSample sample;
 
     float sample_x = world_x;
@@ -465,7 +472,102 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
         sample.final_height -= RiverCarveAmount(sample.final_height, influence);
     }
 
+    // T-I6-A2: hydraulic/thermal relief (decision a). Added LAST so the baked
+    // drainage/talus sits in the final surface EVERY height consumer reads
+    // (collision/spawn/water/far-LOD/mesh). The per-region bake samples the
+    // NO-hydro height (apply_hydro=false) so this never recurses. Skipped (byte-
+    // identical legacy path) when hydro is disabled -> world_hash unchanged.
+    if (apply_hydro && m_params.hydro_enabled) {
+        sample.final_height += SampleHydroOffsetMeters(world_x, world_z);
+    }
+
     return sample;
+}
+
+namespace {
+// T-I6-A2: hydraulic-relief region geometry. A region is kHydroRegionCells erosion
+// cells per side; offsets are indexed by GLOBAL erosion cell so bilinear sampling
+// crosses region boundaries seamlessly (each region's interior is, by the A2a
+// halo-independence proof, byte-identical to a single global bake). The halo
+// margin keeps the interior strictly independent of terrain beyond the halo.
+constexpr int kHydroRegionCells = 64;
+constexpr int kHydroHaloMargin = 8;
+
+std::int64_t HydroFloorDiv(std::int64_t a, std::int64_t b) {
+    const std::int64_t q = a / b;
+    const std::int64_t r = a % b;
+    return (r != 0 && ((r < 0) != (b < 0))) ? q - 1 : q;
+}
+} // namespace
+
+float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x, float world_z) const {
+    const float cs = m_params.hydro_cell_size_m;
+    if (cs <= 0.0f) {
+        return 0.0f;
+    }
+    // World -> fractional GLOBAL erosion-cell coordinates.
+    const float gxf = world_x / cs;
+    const float gzf = world_z / cs;
+    const std::int64_t gx0 = static_cast<std::int64_t>(std::floor(gxf));
+    const std::int64_t gz0 = static_cast<std::int64_t>(std::floor(gzf));
+    const float fx = gxf - static_cast<float>(gx0);
+    const float fz = gzf - static_cast<float>(gz0);
+
+    // Fetch one global cell's baked offset, baking (and caching) its owning
+    // region on first touch. Deterministic + recompute-on-load; the mutex only
+    // guards the cache map (the bake itself is a pure function of region+seed+
+    // params, so a duplicate concurrent bake would be identical).
+    auto offset_at = [this, cs](std::int64_t gx, std::int64_t gz) -> float {
+        const std::int64_t rx = HydroFloorDiv(gx, kHydroRegionCells);
+        const std::int64_t rz = HydroFloorDiv(gz, kHydroRegionCells);
+        const int lx = static_cast<int>(gx - rx * kHydroRegionCells);
+        const int lz = static_cast<int>(gz - rz * kHydroRegionCells);
+        const std::pair<std::int64_t, std::int64_t> key(rx, rz);
+
+        std::lock_guard<std::mutex> lock(m_hydro_mutex);
+        auto it = m_hydro_cache.find(key);
+        if (it == m_hydro_cache.end()) {
+            const int halo = m_params.hydro_iterations + kHydroHaloMargin;
+            const int m = kHydroRegionCells + 2 * halo;
+            std::vector<float> heights(static_cast<std::size_t>(m) * static_cast<std::size_t>(m), 0.0f);
+            for (int pz = 0; pz < m; ++pz) {
+                for (int px = 0; px < m; ++px) {
+                    const std::int64_t cell_gx = rx * kHydroRegionCells + (px - halo);
+                    const std::int64_t cell_gz = rz * kHydroRegionCells + (pz - halo);
+                    const float wx = static_cast<float>(cell_gx) * cs;
+                    const float wz = static_cast<float>(cell_gz) * cs;
+                    // NO-hydro base height (apply_hydro=false) -> never recurses.
+                    heights[static_cast<std::size_t>(pz) * static_cast<std::size_t>(m) +
+                            static_cast<std::size_t>(px)] =
+                        ComputeShapedHeightSampleImpl(wx, wz, /*apply_hydro=*/false).final_height;
+                }
+            }
+            World::HydroErosionParams p;
+            p.iterations = m_params.hydro_iterations;
+            p.talus_height = m_params.hydro_talus_height;
+            p.thermal_rate = m_params.hydro_thermal_rate;
+            p.rain_per_sweep = m_params.hydro_rain_per_sweep;
+            p.solubility = m_params.hydro_solubility;
+            p.deposition = m_params.hydro_deposition;
+            p.evaporation = m_params.hydro_evaporation;
+            p.sediment_capacity = m_params.hydro_sediment_capacity;
+            p.max_offset = m_params.hydro_max_offset;
+            std::vector<float> offset;
+            World::BakeHydraulicErosion(heights, kHydroRegionCells, halo, p, offset);
+            it = m_hydro_cache.emplace(key, std::move(offset)).first;
+        }
+        const std::vector<float>& grid = it->second;
+        return grid[static_cast<std::size_t>(lz) * static_cast<std::size_t>(kHydroRegionCells) +
+                    static_cast<std::size_t>(lx)];
+    };
+
+    const float o00 = offset_at(gx0, gz0);
+    const float o10 = offset_at(gx0 + 1, gz0);
+    const float o01 = offset_at(gx0, gz0 + 1);
+    const float o11 = offset_at(gx0 + 1, gz0 + 1);
+    const float a = o00 + (o10 - o00) * fx;
+    const float b = o01 + (o11 - o01) * fx;
+    return a + (b - a) * fz;
 }
 
 float SHIELD_WorldSystem::RiverCarveAmount(float final_height, float influence) const {
@@ -657,6 +759,21 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
             }
 
             out[i] = terrain_height;
+        }
+    }
+
+    // T-I6-A2: hydraulic relief post-pass (decision a). Adds the same baked
+    // offset the scalar path adds in ComputeShapedHeightSampleImpl, so batch and
+    // scalar stay byte-identical (parity gate). Skipped when hydro is disabled
+    // -> batch output byte-identical to the legacy path (world_hash unchanged).
+    if (m_params.hydro_enabled) {
+        for (int z = 0; z < size_z; ++z) {
+            for (int x = 0; x < size_x; ++x) {
+                const std::size_t i = static_cast<std::size_t>(x) +
+                                      static_cast<std::size_t>(z) * static_cast<std::size_t>(size_x);
+                out[i] += SampleHydroOffsetMeters(static_cast<float>(base_x + x),
+                                                  static_cast<float>(base_z + z));
+            }
         }
     }
 }
