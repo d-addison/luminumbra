@@ -399,6 +399,40 @@ else()
     target_link_libraries(shieldrt_tracer_profile_gpu PRIVATE OpenGL::GL)
 endif()
 
+# T-I6-A3b (increment 1): SHIELD-RT far-field ground-truth parity gate. Manual/GPU
+# (same gating shape as the profile). Proves the heightfield max-mip march hits the
+# real analytic surface before it is wired into the live G-buffer; emits
+# shieldrt-far-field-parity.json. Shares the harness + builders with the profile.
+add_executable(shieldrt_far_field_parity_gpu
+    performance/shieldrt_far_field_parity_gpu.cpp
+)
+
+target_compile_definitions(shieldrt_far_field_parity_gpu PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+    LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts"
+)
+
+target_include_directories(shieldrt_far_field_parity_gpu PRIVATE
+    ../src
+)
+
+target_link_libraries(shieldrt_far_field_parity_gpu PRIVATE
+    gtest_main
+    luminumbra_common
+    glfw
+    glad
+)
+
+if(WIN32)
+    target_link_libraries(shieldrt_far_field_parity_gpu PRIVATE opengl32)
+elseif(APPLE)
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(shieldrt_far_field_parity_gpu PRIVATE ${OPENGL_LIBRARIES})
+else()
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(shieldrt_far_field_parity_gpu PRIVATE OpenGL::GL)
+endif()
+
 # Frontier gate fixtures: the lua-api-manifest and scalar-field-diffusion gates
 # assert at static initialization, the instinct and loopback gates are called
 # from the gtest cases in network_state_hash_gate_test.cpp.
@@ -498,6 +532,13 @@ set_tests_properties(ShieldRtSpike PROPERTIES
 #   ctest -L manual -R ShieldRtTracerProfileGpu --output-on-failure
 add_test(NAME ShieldRtTracerProfileGpu COMMAND shieldrt_tracer_profile_gpu)
 set_tests_properties(ShieldRtTracerProfileGpu PROPERTIES
+    LABELS "manual;perf;gpu"
+    TIMEOUT 600)
+
+# T-I6-A3b (increment 1): far-field ground-truth parity gate (manual;perf;gpu):
+#   ctest -L manual -R ShieldRtFarFieldParityGpu --output-on-failure
+add_test(NAME ShieldRtFarFieldParityGpu COMMAND shieldrt_far_field_parity_gpu)
+set_tests_properties(ShieldRtFarFieldParityGpu PROPERTIES
     LABELS "manual;perf;gpu"
     TIMEOUT 600)
 
