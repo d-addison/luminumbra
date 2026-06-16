@@ -1,5 +1,5 @@
 ﻿param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "AtmosphereAudio", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "ParticleEmitterDeterminism", "CloudShadow", "FoliageInstancing", "Precipitation", "TimeOfDaySweep", "WorldVisualSweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "WindFieldDeterminism", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "StimulusChannelGate", "BiomeCoverage", "RiverPresence", "WaterfallVisual", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "AtmosphereAudio", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "ParticleEmitterDeterminism", "CloudShadow", "FoliageInstancing", "Precipitation", "TimeOfDaySweep", "WorldVisualSweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "WindFieldDeterminism", "AetherFieldDeterminism", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "StimulusChannelGate", "BiomeCoverage", "RiverPresence", "WaterfallVisual", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -4248,6 +4248,58 @@ function Test-HeadlessServerTick {
         $analysis.sub_hashes.terrain, $analysis.sub_hashes.mesh, $analysis.sub_hashes.water, $analysis.sub_hashes.entities, $analysis.sub_hashes.wind)
 }
 
+function Test-AetherFieldDeterminism {
+    # T-I6-A1: the Aetheric scalar field is a deterministic, hashed sim system.
+    # Drives the server's --aether-bench mode: seed -> N AetherFieldSystem updates
+    # (advected by a parallel wind field) twice -> the aether sub-hash is EQUAL
+    # across runs and STABLE; the field EVOLVES over time (not vacuous); geometry
+    # matches the PINNED 24 m / 64-extent / 8-sweep shape. The `aether` sub-hash is
+    # folded into the world_hash (deliberate bump #4 d950a6afc12a5cdc ->
+    # f17726d44054d133, asserted by the headless tick / replay / lockstep gates).
+    $serverExe = "build/$BuildPreset/bin/luminumbra_server_app.exe"
+    if (-not (Test-Path $serverExe)) {
+        throw "aether-field determinism gate not yet built - missing $serverExe (cmake --build build/$BuildPreset)"
+    }
+
+    $artifactPath = "build/$BuildPreset/test-artifacts/server/aether-field-determinism.json"
+    if (Test-Path $artifactPath) {
+        Remove-Item $artifactPath
+    }
+
+    & $serverExe --aether-bench --ticks 90 --seed 424242 --artifact $artifactPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "aether-bench exited with code $LASTEXITCODE"
+    }
+
+    $a = Read-JsonArtifact $artifactPath "luminumbra.aether_field_determinism.v1"
+    Assert-ArtifactPassed $a "AetherFieldDeterminism"
+
+    if ([string]::IsNullOrWhiteSpace($a.aether_sub_hash)) {
+        throw "aether-field determinism: empty aether sub-hash"
+    }
+    if ($a.aether_sub_hash -ne $a.aether_sub_hash_replay) {
+        throw "aether-field determinism: aether sub-hash diverged across runs ($($a.aether_sub_hash) != $($a.aether_sub_hash_replay))"
+    }
+    if (-not $a.deterministic) {
+        throw "aether-field determinism: reported non-deterministic"
+    }
+    if (-not $a.evolves -or $a.aether_sub_hash_tick0 -eq $a.aether_sub_hash_evolved) {
+        throw "aether-field determinism: field did not evolve over ticks (gate is vacuous)"
+    }
+    if ([double]$a.cell_size_m -ne 24.0) {
+        throw "aether-field determinism: cell_size_m=$($a.cell_size_m), expected 24"
+    }
+    if ([int]$a.extent_cells -ne 64) {
+        throw "aether-field determinism: extent_cells=$($a.extent_cells), expected 64"
+    }
+    if ([int]$a.diffuse_iterations -ne 8) {
+        throw "aether-field determinism: diffuse_iterations=$($a.diffuse_iterations), expected 8 (PINNED)"
+    }
+    Write-Host ("aether-field determinism gate passed: aether_sub_hash={0} stable across 2 runs (evolves over {1} ticks); per-tick update {2:N4} ms (budget {3:N4} ms, informational on {4}) ({5} m cells x {6} extent x {7} diffuse sweeps)" -f `
+        $a.aether_sub_hash, $a.ticks, [double]$a.per_tick_update_ms, [double]$a.budget_ms, $BuildPreset, `
+        $a.cell_size_m, $a.extent_cells, $a.diffuse_iterations)
+}
+
 function Test-WindFieldDeterminism {
     # T-I5a-2 (A2): the wind grid is a deterministic, hashed sim system. This
     # gate drives the server's --wind-bench mode: seed -> N WindFieldSystem
@@ -5566,6 +5618,7 @@ switch ($Mode) {
     "HeadlessServerTick" { Test-HeadlessServerTick }
     "HeadlessServerTickHeavy" { Test-HeadlessServerTickHeavy }
     "WindFieldDeterminism" { Test-WindFieldDeterminism }
+    "AetherFieldDeterminism" { Test-AetherFieldDeterminism }
     "ReplayRoundtrip" { Test-ReplayRoundtrip }
     "ReplayDivergence" { Test-ReplayDivergence }
     "LockstepLoopback" { Test-LockstepLoopback }
