@@ -84,6 +84,39 @@ parity leg) + a visual sweep for the seam. Temporal-stability gate is inc3.
 This is a single coherent integration; all its components are proven (inc1/2a/2b)
 and the flag-gating makes every intermediate commit byte-stable.
 
+## inc2c-SCALE — make the far-field scalable under load (owner principle 2026-06-16)
+Owner standing directive: build the most powerful, COMPOSABLE, SCALABLE-under-load
+engine ([[engine-power-scalability-principle]]). The v1 pass RUNS but is NOT yet
+scalable, so it stays dormant until this lands. Perf math: A3a measured the
+heightfield march at ~0.07 ms for 320x180 (57,600 rays, ~2-4 steps/ray). Fullscreen
+at the 3840x1600 target = 6.14 M rays ≈ **107x → ~7.5 ms** — far over the 300 fps /
+~3.3 ms frame budget. The cost is RAY COUNT (fullscreen), not steps (the max-mip is
+already efficient). Scale it down, in priority order:
+
+1. **Far-pixel-only dispatch (biggest, cleanest win).** Only march pixels the mesh
+   didn't cover (sky/far). Copy the G-buffer depth to a sampler texture BEFORE the
+   pass (a blit — avoids the read-while-write feedback on the depth attachment the
+   pass writes via gl_FragDepth), bind it, and `discard` immediately in the frag when
+   sampled depth < ~1.0 (mesh closer). Typical views are ~2/3 near-terrain → skips
+   most rays. Correctness-safe: only skips pixels the GL_LESS depth test would reject
+   anyway. Est. fullscreen → ~2-3 ms.
+2. **Half-resolution raymarch + depth-aware upsample.** March a half-res target
+   (4x fewer rays → another ~4x), then NEAREST-DEPTH upsample into the G-buffer
+   (naive bilinear bleeds across silhouettes — use the classic nearest-of-4 by depth
+   delta). Est. → sub-ms. This is the spec's substrate (half-res/temporal/upsample).
+3. **Async region-crossing rebuild.** The 49-tile BuildPristineFarLodTile rebuild is
+   synchronous on the GL thread today → a stream hitch. Dispatch on JobSystem (mirror
+   FarLodSystem's async build + main-thread integrate), render the prior field until
+   ready. Removes the under-load hitch.
+4. **Composability:** the half-res raymarch + upsample is the shared substrate Wave B
+   clouds/aurora/ocean consume — freeze its API (output-target + field-sampler params)
+   so those pass a froxel/volume sampler instead of the heightfield. (Substrate API
+   freeze + Wave-B-consumer dry-run = MAJOR #10.)
+
+**Gate:** add the FarFieldRaymarch GPU-timer budget to a perf gate (must be within
+the far-field slice of the frame budget at 3840x1600 on the 5070 Ti) BEFORE flipping
+the compile flag on. Then the parity/seam validation, then enable-by-default.
+
 ## New files
 - `src/luminumbra_client/rendering/passes/ShieldRtFarFieldPass.{h,cpp}` — owns the
   clipmap texture + maxmip, update_clipmap(camera), dispatch mip reduction.
