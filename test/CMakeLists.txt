@@ -541,6 +541,18 @@ target_link_libraries(capture_scale_test PRIVATE
     gtest_main
 )
 
+# T-I6 isolation/layer mode: pure config-parse unit test (core/IsolationConfig.h is
+# dependency-free, so this needs no GL/common libs). Runs in the default ctest gate.
+add_executable(isolation_config_test
+    rendering/isolation_config_test.cpp
+)
+target_include_directories(isolation_config_test PRIVATE
+    ../src/luminumbra_client
+)
+target_link_libraries(isolation_config_test PRIVATE
+    gtest_main
+)
+
 # Standalone main() gate programs registered directly with CTest.
 add_executable(eventbus_order_gate_test
     simulation/eventbus_order_gate_test.cpp
@@ -593,6 +605,7 @@ gtest_discover_tests(initial_world_loading_perf_test)
 gtest_discover_tests(runtime_world_visual_validation_test)
 gtest_discover_tests(frontier_gates_test)
 gtest_discover_tests(capture_scale_test)
+gtest_discover_tests(isolation_config_test)
 
 # T-I4-15: register the spike benchmark under the "manual" label. It is
 # evidence-only (not a required gate) and its Debug runtime (~25s, and can exceed
