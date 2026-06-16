@@ -4407,10 +4407,11 @@ function Test-ReplayRoundtrip {
     # T-I4-12 session replay (LREC1): record a 90-tick run, replay it, and assert
     # the replay reproduces the SAME end-hash, verifies all checkpoints, and (the
     # determinism proof) that recording is hash-neutral -- the recorded run must
-    # reach the canonical HeadlessServerTick hash d950a6afc12a5cdc unchanged
+    # reach the canonical HeadlessServerTick hash f17726d44054d133 unchanged
     # (world_hash lineage: 2fa007951a21e140 -> 0eac465289e7c88b [T-I5a-2 wind slot]
     #  -> 0857e683b4b8c47e [T-I5a-3 weather slot] -> d950a6afc12a5cdc [T-I5a-5
-    #  lightning strike schedule folded into the weather sub-hash, mega-bump #3]).
+    #  lightning strike schedule folded into the weather sub-hash, mega-bump #3]
+    #  -> f17726d44054d133 [T-I6-A1 aether slot appended, bump #4]).
     $serverExe = "build/$BuildPreset/bin/luminumbra_server_app.exe"
     if (-not (Test-Path $serverExe)) {
         throw "replay roundtrip gate not yet built - missing $serverExe (cmake --build build/$BuildPreset)"
@@ -4457,7 +4458,7 @@ function Test-ReplayRoundtrip {
     }
     # Determinism proof: recording must NOT perturb the sim. The recorded run's
     # end hash must equal the canonical HeadlessServerTick hash, unchanged.
-    $expectedHash = "d950a6afc12a5cdc"
+    $expectedHash = "f17726d44054d133"
     if ($r.end_world_hash -ne $expectedHash) {
         throw "replay roundtrip end hash $($r.end_world_hash) != canonical $expectedHash (recording perturbed the simulation)"
     }
@@ -4575,7 +4576,7 @@ function Test-LockstepLoopback {
     }
     # Determinism proof: lockstep must NOT perturb the sim. The in-sync end hash must equal
     # the canonical HeadlessServerTick hash, unchanged.
-    $expectedHash = "d950a6afc12a5cdc"
+    $expectedHash = "f17726d44054d133"
     if ($a.host.world_hash -ne $expectedHash) {
         throw "lockstep loopback end hash $($a.host.world_hash) != canonical $expectedHash (lockstep perturbed the simulation)"
     }
@@ -4654,7 +4655,7 @@ function Test-NetworkedSession {
     }
     # Determinism proof: the client-rendered, server-owned world equals the
     # canonical headless server world. Render-side camera look did NOT perturb it.
-    $expectedHash = "d950a6afc12a5cdc"
+    $expectedHash = "f17726d44054d133"
     if ($a.end_hash -ne $expectedHash) {
         throw "networked session end hash $($a.end_hash) != canonical $expectedHash (client world diverged from the server world)"
     }
@@ -4704,7 +4705,7 @@ function Test-LockstepFaultInjection {
     if ([int64]$absorb.host.late_input_events -le 0) {
         throw "lockstep fault-injection: no late-input events recorded (the delay was not exercised)"
     }
-    if (-not $absorb.end_hashes_equal -or $absorb.host.world_hash -ne "d950a6afc12a5cdc") {
+    if (-not $absorb.end_hashes_equal -or $absorb.host.world_hash -ne "f17726d44054d133") {
         throw "lockstep fault-injection: absorbed-jitter run did not reach the canonical in-sync end hash (host=$($absorb.host.world_hash))"
     }
 

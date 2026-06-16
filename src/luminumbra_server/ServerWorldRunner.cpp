@@ -12,6 +12,7 @@
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
+#include "luminumbra_common/systems/AetherFieldSystem.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
 
 namespace Luminumbra::Server {
@@ -40,6 +41,17 @@ std::string WeatherSubHash(world::GameSession* session) {
     return weather ? weather->ComputeWeatherSubHash() : std::string();
 }
 
+// T-I6-A1 world_hash bump #4: the aether sub-hash from the session's Aetheric
+// scalar field, or empty when none exists (defensive; the headless runner always
+// constructs one on world create/load).
+std::string AetherSubHash(world::GameSession* session) {
+    if (!session) {
+        return {};
+    }
+    const Systems::AetherFieldSystem* aether = session->GetAetherFieldSystem();
+    return aether ? aether->ComputeAetherSubHash() : std::string();
+}
+
 // Folds the chunk-derived top-level hash, the wind sub-hash, and the weather
 // sub-hash into the composite world_hash. This is the DELIBERATE bump chain: the
 // chunk hash (WorldSaveService::world_hash / ComputeWorldStreamingStateHash) is
@@ -51,13 +63,17 @@ std::string WeatherSubHash(world::GameSession* session) {
 // 0857e683b4b8c47e -> d950a6afc12a5cdc; weather_sub_hash a7d8f3d28401386f ->
 // e3c7e0aa219ebbe5). The strike schedule replaces the reserved single-0 slot B1
 // left in ComputeWeatherSubHash, so the wind term + the byte layout before the
-// strike block are unchanged. Order is fixed (chunk, then wind, then weather) so
-// the composite is reproducible.
+// strike block are unchanged. Order is fixed (chunk, then wind, then weather,
+// then aether) so the composite is reproducible. T-I6-A1 appends the `aether`
+// term (bump #4, d950a6afc12a5cdc -> f17726d44054d133) -- append-only, so the
+// bytes before "|aether:" are unchanged (wind/weather sub-hashes are intact).
 std::string ComposeWorldHash(const std::string& chunk_hash,
                              const std::string& wind_hash,
-                             const std::string& weather_hash) {
+                             const std::string& weather_hash,
+                             const std::string& aether_hash) {
     return Persistence::StableChecksum(
-        chunk_hash + "|wind:" + wind_hash + "|weather:" + weather_hash);
+        chunk_hash + "|wind:" + wind_hash + "|weather:" + weather_hash +
+        "|aether:" + aether_hash);
 }
 
 } // namespace
@@ -211,7 +227,8 @@ std::string ServerWorldRunner::ComputeWorldHash() {
     // deliberately is not.
     return ComposeWorldHash(service.world_hash(state),
                             WindSubHash(m_session.get()),
-                            WeatherSubHash(m_session.get()));
+                            WeatherSubHash(m_session.get()),
+                            AetherSubHash(m_session.get()));
 }
 
 Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHashes() {
@@ -247,6 +264,10 @@ Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHash
     // core (not chunk-derived). Present + stable for the WeatherVisual state-hash
     // assertion and the desync-localization oracle.
     sub.weather = WeatherSubHash(m_session.get());
+    // T-I6-A1: the aether sub-hash slot, supplied from the session's Aetheric
+    // scalar field (not chunk-derived). Present + stable for the
+    // AetherFieldDeterminism gate and the desync-localization oracle.
+    sub.aether = AetherSubHash(m_session.get());
     return sub;
 }
 
@@ -274,17 +295,19 @@ void ServerWorldRunner::ComputeWorldHashAndSubHashes(
 
     const std::string wind_hash = WindSubHash(m_session.get());
     const std::string weather_hash = WeatherSubHash(m_session.get());
+    const std::string aether_hash = AetherSubHash(m_session.get());
 
     Persistence::WorldSaveService service;
-    // T-I5a-2 (A2) + T-I5a-3 (B1) MEGA-BUMPS: composite world_hash (chunk + wind +
-    // weather).
-    out_world_hash = ComposeWorldHash(service.world_hash(state), wind_hash, weather_hash);
+    // T-I5a-2 (A2) + T-I5a-3 (B1) + T-I6-A1 MEGA-BUMPS: composite world_hash
+    // (chunk + wind + weather + aether).
+    out_world_hash = ComposeWorldHash(service.world_hash(state), wind_hash, weather_hash, aether_hash);
 
     const std::string empty_entities =
         Ecs::SerializeEntityRegistrySnapshotJson(Ecs::EntityRegistrySnapshot{});
     out_sub = Persistence::ComputeWorldStreamingStateSubHashes(state, empty_entities);
     out_sub.wind = wind_hash;
     out_sub.weather = weather_hash;
+    out_sub.aether = aether_hash;
 }
 
 std::size_t ServerWorldRunner::SaveFullSnapshot() {

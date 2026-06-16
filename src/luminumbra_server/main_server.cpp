@@ -266,6 +266,7 @@ nlohmann::json SmokeRunJson(const SmokeRunResult& run) {
             {"water", run.sub_hashes.water},
             {"entities", run.sub_hashes.entities},
             {"wind", run.sub_hashes.wind},
+            {"aether", run.sub_hashes.aether},
         }},
         {"world_id", run.world_id},
         {"ticks_executed", run.ticks.ticks_executed},
@@ -300,7 +301,8 @@ int RunSmoke(const ServerCliOptions& options) {
         first.sub_hashes.mesh == replay.sub_hashes.mesh &&
         first.sub_hashes.water == replay.sub_hashes.water &&
         first.sub_hashes.entities == replay.sub_hashes.entities &&
-        first.sub_hashes.wind == replay.sub_hashes.wind;
+        first.sub_hashes.wind == replay.sub_hashes.wind &&
+        first.sub_hashes.aether == replay.sub_hashes.aether;
 
     const bool deterministic = first.ok && replay.ok &&
         first.world_hash == replay.world_hash && sub_hashes_match;
@@ -327,6 +329,7 @@ int RunSmoke(const ServerCliOptions& options) {
             {"water", first.sub_hashes.water},
             {"entities", first.sub_hashes.entities},
             {"wind", first.sub_hashes.wind},
+            {"aether", first.sub_hashes.aether},
         }},
         {"sub_hashes_replay", {
             {"terrain", replay.sub_hashes.terrain},
@@ -334,6 +337,7 @@ int RunSmoke(const ServerCliOptions& options) {
             {"water", replay.sub_hashes.water},
             {"entities", replay.sub_hashes.entities},
             {"wind", replay.sub_hashes.wind},
+            {"aether", replay.sub_hashes.aether},
         }},
         {"sub_hashes_match", sub_hashes_match},
         {"deterministic", deterministic},
@@ -739,6 +743,7 @@ nlohmann::json HeavyHashJson(const HeavyHashes& h) {
             {"entities", h.sub.entities},
             {"wind", h.sub.wind},
             {"weather", h.sub.weather},
+            {"aether", h.sub.aether},
         }},
     };
 }
