@@ -78,8 +78,14 @@ all green.**
   Offscreen MRT validation: gPosition→world on the analytic surface (median ≤0.19 m,
   p99 ≤1.29 m), normals unit (err ~1e-7) + 100% terrain-up. Artifact
   `shieldrt-far-field-gbuffer.json`.
-- **A3b REMAINING:** **inc2b** GPU-resident heightfield/clipmap streaming (net-new,
-  from CPU tiles); **inc2c** wire `ShieldRtFarFieldPass` into the G-buffer slot
+- **A3b inc2b (max-mip) DONE** (`758dda3`): GPU max-reduction compute (level0 = max
+  over 2x2 base samples, then halve+max per level) proven **byte-identical** to the
+  CPU `BuildHeightMaxMip` (0 mismatches / 21,845 cells x 8 levels x 2 presets) —
+  glGenerateMipmap is box-filter, unusable; this is the net-new acceleration
+  structure. `ShieldRtFarFieldMaxMipGpu`. Design in `shieldrt-inc2b-plan.md`.
+- **A3b REMAINING:** **inc2b-rest** clipmap texture streaming from FarLodSystem
+  (centered R16, glTexSubImage2D on the touched quadrants, `heightfield_generation`
+  dirty counter); **inc2c** wire `ShieldRtFarFieldPass` into the G-buffer slot
   after live chunks (`GBufferPass.cpp:227`), behind `--enable-shieldrt-far-field`
   (mirror the GPUSDF gating shape), `GpuTimerPass::ShieldRtFar`, near↔far dither
   blend, mesh-vs-raymarch parity leg in `FarLodHorizon`. **inc3** temporal-stability
