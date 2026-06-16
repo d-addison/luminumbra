@@ -507,6 +507,15 @@ public:
     bool startup(u32 screen_width, u32 screen_height, const std::filesystem::path& root_path);
     void shutdown();
     void render_frame(entt::registry& registry, Systems::SHIELD_WorldSystem& world_system, const Camera& camera, float deltaTime, bool wireframe = false);
+
+    // T-I6-A1d: push the deterministic Aetheric scalar field to the lighting-pass
+    // emissive tap (one-way sim->render bridge, called per frame from the client).
+    // `cells` is the row-major extent*extent field; (world_origin_x/z) is the
+    // grid's world-space origin; cell_size_m maps world XZ -> texel. Lazily
+    // creates the R32F texture. Pass an empty `cells` (or never call it) to leave
+    // the field inactive -> the lighting pass adds no glow (pixel-identical).
+    void update_aether_field(const std::vector<float>& cells, float world_origin_x,
+                             float world_origin_z, int extent, float cell_size_m);
     // Reallocates ALL screen-sized render targets (G-buffer, SSAO, lighting/post
     // chain) to the new framebuffer size, preserving formats; the far-LOD path
     // and passes consume the new sizes through the shared state. A no-op when the
@@ -881,6 +890,15 @@ private:
     // column. RGBA8 tangent-space (OpenGL convention) normal maps.
     u32 m_terrainNormalArray = 0;
     u32 m_materialLUT = 0;
+    // T-I6-A1d: Aetheric scalar field as an R32F texture for the lighting-pass
+    // emissive tap. Updated per frame from the sim field (one-way bridge).
+    // m_aetherFieldActive gates the glow so a no-aether world stays pixel-identical
+    // (RenderHealth-neutral until a world enables the field).
+    u32 m_aetherFieldTexture = 0;
+    glm::vec2 m_aetherFieldWorldOrigin{0.0f};
+    float m_aetherFieldCellSize = 24.0f;
+    int m_aetherFieldExtent = 0;
+    bool m_aetherFieldActive = false;
     size_t m_terrain_texture_fallback_layers = 0;
     // Resolution the terrain albedo/normal arrays are allocated at (256 this
     // iteration; the committed .ltex plates are 256x256, design §10 budget).

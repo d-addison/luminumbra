@@ -85,6 +85,11 @@ public:
     [[nodiscard]] std::uint64_t last_tick() const noexcept { return m_last_tick; }
     [[nodiscard]] int diffuse_iterations() const noexcept { return kAetherDiffuseIterations; }
 
+    // T-I6-A1d: read-only access to the grid for the render emissive tap (the
+    // client uploads cells() as a texture, mapped by origin + cell size). One-way
+    // bridge: render is a pure CONSUMER, never writes back.
+    [[nodiscard]] const luminumbra::fields::FieldGrid<float>& grid() const noexcept { return m_grid; }
+
 private:
     // World-pos -> local cell indices for the current origin (clamped result
     // reported via in_region). Mirrors WindFieldSystem::LocalCell.
