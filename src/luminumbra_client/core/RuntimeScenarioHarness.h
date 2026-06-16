@@ -3,6 +3,7 @@
 #include "rendering/RenderPipeline.h"
 #include "rendering/passes/FoliagePass.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "core/CaptureScale.h"
 #include "nlohmann/json.hpp"
 #include <atomic>
 #include <cstdint>
@@ -51,6 +52,9 @@ const char* WindowModeName(WindowMode mode);
 // analysis can hard-fail if a capture ever ran at a non-pinned size.
 inline constexpr int kCapturePinnedWidth = 1280;
 inline constexpr int kCapturePinnedHeight = 720;
+// Resolution-relative gate-threshold scaling (kThresholdTuning* + ScalePinned*).
+// Dependency-free header so the scaling math is unit-testable without GL.
+// (Included here so every gate in RuntimeScenarioHarness.cpp sees the helpers.)
 
 struct RuntimeScenarioConfig {
     std::string scenario;
