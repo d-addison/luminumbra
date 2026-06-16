@@ -113,8 +113,10 @@ all green.**
     sampling at a resolution-scaled offset; (3) **bolt aspect** — the pixel bbox aspect
     is distorted by 24:10 vs 16:9, fixed by correcting the min-aspect threshold by the
     pixel-aspect ratio. All 17 visual gates green at 3840×1600; default ctest 247/247.
-    A full background re-confirmation sweep is running. Memory `display-and-capture-resolution`.
+    Full re-confirmation sweep **GREEN: all 17 visual gates pass at 3840×1600, 0
+    failures** (clean run against the final binary). Memory `display-and-capture-resolution`.
   - **Net:** review/critique screenshots now capture at native 3840×1600 ultrawide.
+    **Capture re-bless COMPLETE** (commits c6d634f, 6fda4d5, b2d63c0).
 - **Wave B** clouds/grass/aurora/ocean (consume the A.2 substrate); **Wave C**
   worldgen multi-anchor; **Wave D** closeout. See `WAVE-A-SPEC.md` + `_synthesis.md`.
 - **Iteration 7** (deferred content): sparse aether sources (LuminCrystal) -> the
