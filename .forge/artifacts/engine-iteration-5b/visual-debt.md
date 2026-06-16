@@ -27,3 +27,18 @@ research-driven reimplementation in the iteration-6 research agenda.
 The pipeline (`-Mode WorldVisualSweep` + `tools/visual_critique.py`) is the
 standing gate: re-run it after any render change to re-assess objectively + with
 the dual-bias AI critique.
+
+## OPEN BLOCKs — gate-enforced (iteration-6 critique #4/#5, 2026-06-15)
+As of the iteration-6 hygiene pass, `tools/visual_critique.py analyze --strict`
+is a REQUIRED step inside the WorldVisualSweep gate (no longer best-effort), and
+its per-flag thresholds are pinned by the `VisualCritiqueFlags` ctest
+(`tools/test_visual_critique.py`). The gate therefore HARD-FAILS today on the
+`GREEN_SKY_SPECKLE` cell above (the foliage tip-cull residual). Per the process
+rule, these BLOCKs are discharged **only by a flag-free re-run of the same gate**
+— never by reclassifying a flagged cell as "tracked debt":
+- **Foliage BLOCK** (billboard tufts / `GREEN_SKY_SPECKLE`) — OPEN until Wave B
+  GPU-grass lands and WorldVisualSweep re-runs flag-free.
+- **Aurora BLOCK** (orb-like / blob reflections) — OPEN until Wave B aurora
+  curtains land and WorldVisualSweep re-runs flag-free.
+The MINOR items remain research-tracked for Waves B/C; they are not currently
+raising blocking objective flags but are re-assessed on every gate re-run.

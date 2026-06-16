@@ -3805,29 +3805,52 @@ function Test-WorldVisualSweep {
         throw "world_visual_sweep manifest reported failure: $($manifest.failures -join ', ')"
     }
 
-    # Assemble the labelled contact-sheet montages for orchestrator review. This
-    # is a BEST-EFFORT review convenience (it needs python+Pillow); the gate's
-    # PASS/FAIL is the production + presence assertions above, NOT the montage.
-    # We try a few python interpreters and warn (never fail) if none has Pillow.
+    # Iteration-6 critique #5: the OBJECTIVE visual critique is now a REQUIRED
+    # gate step, not a best-effort convenience. We (1) build the labelled
+    # contact-sheet montages (which also converts every PPM -> sweep/png/*.png),
+    # then (2) run tools/visual_critique.py analyze --strict, which fails the
+    # gate on ANY objective defect flag (dead/black, washed-out, green-sky
+    # speckle, flat storm clouds, aurora-at-dusk, sparse foliage, ...). Per the
+    # process rule, such a BLOCK is discharged ONLY by a flag-free re-run of this
+    # gate -- never by reclassifying a flagged cell as "tracked debt". numpy +
+    # Pillow are REQUIRED; the gate fails loudly if no suitable python is found
+    # (a gate CI cannot run is not a gate). Override the interpreter with
+    # $env:VISUAL_SWEEP_PYTHON. The per-flag thresholds are pinned by the
+    # VisualCritiqueFlags ctest (tools/test_visual_critique.py).
     $montageScript = ".forge/scripts/build-visual-sweep-montages.py"
-    if (Test-Path $montageScript) {
-        $montageBuilt = $false
-        foreach ($py in @($env:VISUAL_SWEEP_PYTHON, "python", "python3", "py")) {
-            if ([string]::IsNullOrWhiteSpace($py)) { continue }
-            if (-not (Get-Command $py -ErrorAction SilentlyContinue)) { continue }
-            try {
-                & $py -c "import PIL" 2>$null
-                if ($LASTEXITCODE -ne 0) { continue }
-                & $py $montageScript $visualDir
-                if ($LASTEXITCODE -eq 0) { $montageBuilt = $true; break }
-            } catch { continue }
-        }
-        if (-not $montageBuilt) {
-            Write-Warning "world_visual_sweep montages not assembled (no python with Pillow found). Captures + manifest are still produced under $visualDir; set VISUAL_SWEEP_PYTHON to a python with Pillow to enable montages."
-        } else {
-            Write-Host "world_visual_sweep montages assembled under $visualDir/sweep/montages"
-        }
+    $critiqueScript = "tools/visual_critique.py"
+    $vsPython = $null
+    foreach ($py in @($env:VISUAL_SWEEP_PYTHON, "python", "python3", "py")) {
+        if ([string]::IsNullOrWhiteSpace($py)) { continue }
+        if (-not (Get-Command $py -ErrorAction SilentlyContinue)) { continue }
+        & $py -c "import numpy, PIL" 2>$null
+        if ($LASTEXITCODE -eq 0) { $vsPython = $py; break }
     }
+    if (-not $vsPython) {
+        throw "world_visual_sweep objective critique cannot run: no python with numpy+Pillow found. Install them or set VISUAL_SWEEP_PYTHON to a suitable interpreter (a visual gate that cannot run is not a gate)."
+    }
+
+    if (Test-Path $montageScript) {
+        & $vsPython $montageScript $visualDir
+        if ($LASTEXITCODE -ne 0) { throw "world_visual_sweep montage/PNG build failed (exit $LASTEXITCODE) using $vsPython" }
+        Write-Host "world_visual_sweep montages assembled under $visualDir/sweep/montages"
+    }
+
+    # Guard against a vacuous pass: the objective critique reads sweep/png/*.png,
+    # so there must be one PNG per expected cell before --strict can mean anything.
+    $pngDir = Join-Path $visualDir "sweep/png"
+    $pngCount = @(Get-ChildItem -Path $pngDir -Filter *.png -ErrorAction SilentlyContinue).Count
+    if ($pngCount -ne [int]$manifest.expected_cell_count) {
+        throw "world_visual_sweep objective critique: found $pngCount PNG(s) under $pngDir but expected $($manifest.expected_cell_count) (PPM->PNG conversion incomplete)"
+    }
+
+    & $vsPython $critiqueScript analyze $visualDir --strict
+    if ($LASTEXITCODE -ne 0) {
+        $critiqueMd = Join-Path $visualDir "objective-critique.md"
+        $detail = if (Test-Path $critiqueMd) { (Get-Content $critiqueMd -Raw) } else { "(no objective-critique.md produced)" }
+        throw "world_visual_sweep OBJECTIVE CRITIQUE FAILED (blocking defect flag raised). Discharge only by a flag-free re-run -- do NOT reclassify as tracked debt.`n$detail"
+    }
+    Write-Host "world_visual_sweep objective critique passed: no blocking defect flags across $($manifest.expected_cell_count) cells."
 
     Write-Host ("world_visual_sweep gate passed: {0} cells all produced + non-black; foliage in {1} down-daytime cells, rain+lightning in {2} storm cells, clouds in {3} up-storm cells, water in {4} water-aimed cells; no clear-cell rain leak" -f `
         $manifest.expected_cell_count, $foliageCells.Count, $stormCells.Count, $cloudCells.Count, $waterCells.Count)

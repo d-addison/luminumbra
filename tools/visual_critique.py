@@ -8,30 +8,57 @@ no model judgement. The AI half (neutral describe + adversarial flaw-hunt) is
 produced separately by vision passes and merged by `combine` below.
 
 Usage:
-  python tools/visual_critique.py analyze <sweep_dir>            # objective only
-  python tools/visual_critique.py combine <sweep_dir> <ai.json>  # merge AI critique
+  python tools/visual_critique.py analyze <sweep_dir> [--strict]   # objective only
+  python tools/visual_critique.py combine <sweep_dir> <ai.json>    # merge AI critique
+
+  --strict : exit non-zero if ANY objective defect flag is raised. This is the
+             mode the WorldVisualSweep validator gate runs. Per the iteration-6
+             process rule, a visual-critique BLOCK is discharged ONLY by a
+             passing (flag-free) re-run of this gate -- never by reclassifying a
+             flagged cell as "tracked debt". So there is intentionally NO
+             allowlist: every flag below blocks until the render is fixed.
 
 A "cell" is one (season,tod,angle,weather) frame. The manifest carries the
 ground-truth labels + engine-side counters (foliage_draws, particle_draws,
 lightning_active, ...). The objective metrics below are computed from pixels so
 they are an INDEPENDENT check on the engine counters and on the rendered look.
 """
-import sys, os, json, glob
+import sys, os, json
 import numpy as np
 from PIL import Image
 
-# --- objective thresholds (tuned to the defects this matrix must catch) -------
+# --- objective thresholds -----------------------------------------------------
+# PROVENANCE: every threshold below was tuned against a specific iteration-5
+# storm-visual defect the dual-bias pipeline caught (see the iteration-5b
+# closeout + engine-iteration-5b/visual-debt.md). The number is the boundary
+# that separated the broken captures from the fixed ones in that DR round; do
+# not retune without a fixture in tools/test_visual_critique.py pinning it.
 T = {
-    "black_frac_dead": 0.92,        # >92% near-black pixels => dead/black frame
-    "near_black": 14,               # luma <= this is "near black"
-    "blown_frac_washed": 0.35,      # >35% blown highlights => washed out
-    "blown": 250,
-    "low_contrast_std": 6.0,        # whole-frame luma std below this => flat/featureless
-    "sky_green_speck_frac": 0.0015, # fraction of sky pixels that are isolated green => firefly speckle
+    "black_frac_dead": 0.92,        # >92% near-black => dead/black frame (night dome was once fully unlit)
+    "near_black": 14,               # luma <= this counts as "near black"
+    "blown_frac_washed": 0.35,      # >35% blown => washed out (noon sand/far-water sheet clipped to white)
+    "blown": 250,                   # luma >= this counts as "blown" highlight
+    "low_contrast_std": 6.0,        # whole-frame luma std below this => flat/featureless (grey-fog storm)
+    "sky_green_speck_frac": 0.0015, # isolated-green sky fraction => firefly speckle (cyan-billboard foliage era)
     "cloud_struct_std_min": 8.0,    # up-storm sky luma std below this => flat overcast (no cloud structure)
-    "aurora_dusk_chroma_frac": 0.010, # green/magenta chroma fraction in a dusk sky => aurora leak
-    "foliage_ground_green_min": 0.010, # daytime down-view: ground green-cover fraction floor
-    "rain_anis_min": 1.15,          # storm: vertical/horizontal gradient ratio floor (streaks)
+    "aurora_dusk_chroma_frac": 0.010, # green/magenta chroma in a dusk sky => aurora leaking out of night
+    "foliage_ground_green_min": 0.010, # daytime down-view: ground green-cover floor (foliage must be present)
+    "rain_anis_min": 1.15,          # storm: vertical/horizontal gradient ratio floor (rain reads as streaks)
+}
+
+# Flags that BLOCK the gate in --strict mode. All objective defect flags are
+# blocking by design (no reclassification escape hatch). Listed explicitly so a
+# new flag must be consciously added here to gain blocking power, and so the
+# fixture test can assert the set is complete.
+HARD_FLAGS = {
+    "DEAD_BLACK_FRAME",
+    "FLAT_DARK_NO_DETAIL",
+    "WASHED_OUT",
+    "GREEN_SKY_SPECKLE",
+    "NIGHT_STORM_TOO_BLACK",
+    "CLOUDS_FLAT_NO_STRUCTURE",
+    "AURORA_AT_DUSK",
+    "FOLIAGE_SPARSE",
 }
 
 def luma(a):  # a: HxWx3 uint8
@@ -60,7 +87,18 @@ def isolated_green_mask(a):
     return green & outlier
 
 def analyze_cell(path, m):
-    a = load(path)
+    """Thin wrapper: load the PNG and run the pure-numpy core. Kept so callers
+    that have a file path do not need to touch Pillow themselves; the fixture
+    tests call analyze_array directly with synthetic arrays (numpy only)."""
+    res = analyze_array(load(path), m)
+    res["file"] = os.path.basename(path)
+    return res
+
+def analyze_array(a, m):
+    """Pure-numpy objective critique of one cell. `a` is an HxWx3 float32 RGB
+    array (0..255); `m` is the manifest cell dict (labels + engine counters).
+    Returns {file,label,metrics,engine,flags}. No file I/O -> directly testable."""
+    a = np.asarray(a, dtype=np.float32)
     L = luma(a)
     h, w = L.shape
     n = h*w
@@ -131,7 +169,8 @@ def analyze_cell(path, m):
         anis = float(gy / (gx + 1e-6))
         metrics["rain_vh_anisotropy"] = anis
 
-    return {"file": os.path.basename(path), "label": {k: m.get(k) for k in
+    return {"file": (os.path.basename(m["file"]) if m.get("file") else None),
+            "label": {k: m.get(k) for k in
             ("season","tod","angle","weather","feature")}, "metrics": metrics,
             "engine": {k: m.get(k) for k in ("foliage_draws","particle_draws",
             "lightning_active","cloud_coverage","water_like_ratio","mean_luminance")},
@@ -172,15 +211,49 @@ def md(rep):
     return "\n".join(lines)
 
 def combine(sweep_dir, ai_json):
+    """Merge the objective track with an AI-critique JSON keyed by cell file.
+    The AI json is {"<file.png>": {"notes": [...], "critical": bool}, ...} as
+    emitted by the vision describe + adversarial flaw-hunt passes. A cell is
+    HIGH CONFIDENCE when an objective flag AND an AI note land on the same cell."""
     obj = analyze(sweep_dir)
-    ai = json.load(open(ai_json)) if os.path.exists(ai_json) else {}
-    # high-confidence = objective flag AND any AI (neutral/critical) note on same cell
-    return {"objective": obj, "ai": ai}
+    ai = json.load(open(ai_json)) if (ai_json and os.path.exists(ai_json)) else {}
+    high = []
+    for c in obj["cells"]:
+        ac = ai.get(c["file"]) or {}
+        ai_notes = ac.get("notes") or []
+        if c["flags"] and ai_notes:
+            high.append({"file": c["file"], "label": c["label"],
+                         "objective_flags": c["flags"], "ai_notes": ai_notes})
+    return {"objective": obj, "ai": ai, "high_confidence": high}
+
+def _strict_exit(rep):
+    """Exit 1 if any blocking objective flag was raised (gate mode)."""
+    hard = {fl: n for fl, n in rep["flag_counts"].items() if fl in HARD_FLAGS}
+    if hard:
+        tally = ", ".join(f"{k}x{v}" for k, v in sorted(hard.items(), key=lambda x: -x[1]))
+        print(f"\nGATE FAIL (--strict): {sum(hard.values())} blocking flag(s) across "
+              f"{len(rep['defects'])} cell(s): {tally}", file=sys.stderr)
+        sys.exit(1)
+    print("\nGATE PASS (--strict): no blocking objective flags.")
+    sys.exit(0)
 
 if __name__ == "__main__":
-    cmd = sys.argv[1] if len(sys.argv)>1 else "analyze"
-    sd = sys.argv[2]
-    rep = analyze(sd)
-    json.dump(rep, open(os.path.join(sd, "objective-critique.json"), "w"), indent=1)
-    open(os.path.join(sd, "objective-critique.md"), "w").write(md(rep))
-    print(md(rep))
+    args = sys.argv[1:]
+    strict = "--strict" in args
+    args = [a for a in args if a != "--strict"]
+    cmd = args[0] if args else "analyze"
+    if cmd == "combine":
+        sd = args[1]
+        ai_json = args[2] if len(args) > 2 else None
+        rep = combine(sd, ai_json)
+        json.dump(rep, open(os.path.join(sd, "combined-critique.json"), "w"), indent=1)
+        print(f"combined critique: {len(rep['high_confidence'])} high-confidence cell(s) "
+              f"(objective flag AND AI note); wrote {os.path.join(sd, 'combined-critique.json')}")
+    else:  # analyze
+        sd = args[1] if len(args) > 1 else "."
+        rep = analyze(sd)
+        json.dump(rep, open(os.path.join(sd, "objective-critique.json"), "w"), indent=1)
+        open(os.path.join(sd, "objective-critique.md"), "w").write(md(rep))
+        print(md(rep))
+        if strict:
+            _strict_exit(rep)
