@@ -190,13 +190,19 @@ So `ErodedHeightOffset` is a **baked offset grid**, and the spec must define the
   `C=Kc·sin(tilt)·|v|` term uses `DeterministicMath::Sin`.
 - **Storage:** persist the baked hydro offset alongside the far-LOD/region data
   (quantized), keyed by the params hash so it invalidates correctly.
-- **Single-point consistency (the hole v1 ignored):** `GetTerrainHeightAt()` /
-  `ComputeShapedHeightSample()` callers (collision, spawn, telemetry, water) must get a
-  **consistent** hydro offset. Specify ONE of: (a) sample the baked offset grid at the
-  query point (bilinear, deterministic), or (b) **restrict hydro relief to far-LOD /
-  render-visible height only** and make collision/spawn use the un-eroded analytic
-  height, with that divergence as an **explicit acceptance test**. **Decision required
-  before dispatch** — (b) is the lower-risk default for Wave A.
+- **Single-point consistency — DECISION (a), owner-confirmed 2026-06-15:** the baked
+  hydro offset grid is the **authoritative** terrain source; ALL single-point callers
+  (collision, spawn, telemetry, water, render) sample it so the player **walks the
+  eroded surface**. The lookup is a **deterministic bilinear sample** of the baked grid
+  at the query XZ, in a fixed op order using IEEE basic ops + the sanctioned
+  `std::floor` exception (NO libm transcendentals) — it runs on the sim/lockstep path,
+  so it is part of the determinism contract (SimDeterminismLint-clean) and is exercised
+  by the heavy oracle + replay + lockstep re-bless. The grid is streamed/loaded with
+  the region data, quantized, params-hashed (marker `0x04`) so it invalidates with the
+  bump. Wave A includes the runtime grid-lookup path + its **perf budget** (a per-query
+  bilinear fetch on the streamed grid — cache the resident region; bound the cost) and a
+  **collision-walks-eroded-surface acceptance test** (an entity placed on a hydro-eroded
+  slope rests on the eroded height, not the analytic one).
 - Add `hydro_enabled` (+ params) to `TerrainGenParams`, default **OFF**; shipped
   presets opt in. Slot the offset application after shaping+island, before the river
   carve, mirrored in `ComputeShapedHeightGrid`. Mix into `ComputeTerrainParamsHash`
@@ -288,8 +294,9 @@ be re-ratified against the measured A.2 split — not silently pre-cut here.
 Each go/no-go emits a committed decision artifact + a trivial validator that fails if
 absent/unset: `aether-2.5d-decision.json` (aether 2.5D justification; fire deferred),
 `shieldrt-tracer-profile.json` (measured GPU ms, both tracers, both view cases),
-`hydro-single-point-contract.json` ((a) grid-lookup vs (b) render-only + collision
-acceptance). No honor-system preconditions.
+`hydro-single-point-contract.json` (**decision (a) confirmed**: authoritative baked-grid
+bilinear lookup for all callers; records the resident-grid caching + per-query cost
+bound). No honor-system preconditions.
 
 ## §6. Execution model
 Agent teams (worktree-isolated Opus 4.8) author A1/A1.5/A2 in parallel but **land
@@ -309,7 +316,8 @@ verify clean (modulo documented brace false-positives). Wave A.2 is a separate s
 
 ## Objection → disposition (critique `.forge/critique-wave-a-spec-20260615.md`)
 - **BLOCK #1 erosion non-local / single-point** → §A2 Architecture: baked grid +
-  single-point lookup contract; default (b) render-only + collision acceptance test;
+  single-point lookup contract; **owner chose (a)** — authoritative baked-grid bilinear
+  lookup for ALL callers (player walks eroded surface), on the deterministic sim path;
   decision artifact `hydro-single-point-contract.json`.
 - **BLOCK #2 re-bless surface** → §A2 Re-bless surface enumerated (WaterSystem,
   WaterfallDetect+test, RuntimeScenarioHarness selectors, MarchingCubes, spawn,
