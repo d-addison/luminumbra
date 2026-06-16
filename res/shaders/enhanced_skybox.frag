@@ -68,6 +68,15 @@ uniform float u_auroraStrength = 0.0;
 // the storm intensity; it is 0 for clear sky so clear night stays genuinely dark.
 uniform float u_stormSkyFloor = 0.0;   // [0,1] storm intensity for the night floor
 
+// T-I6 isolation/layer mode: when > 0 the skybox renders a flat neutral BACKDROP
+// (the no-geometry background) instead of the sky dome, so an isolated subsystem
+// can be reviewed against a void/greenscreen/checker. 0 = normal sky (default).
+//   1 = void (flat u_backdropColor), 2 = greenscreen, 3 = checker.
+// No GLSL initializer for the int (non-core); SkyboxPass sets these every frame
+// and GL defaults unset ints to 0, so every non-isolation render is byte-stable.
+uniform int  u_backdropMode;
+uniform vec3 u_backdropColor;
+
 const float PI_SKY = 3.14159265359;
 
 // Enhanced noise functions for atmospheric effects
@@ -383,6 +392,17 @@ vec3 legacyGradient(vec3 viewDir, float dayFactor) {
 
 void main()
 {
+    // T-I6: isolation backdrop — flat-fill the background, skip the sky dome.
+    if (u_backdropMode > 0) {
+        if (u_backdropMode == 3) {  // checker (scale/alignment reference)
+            vec2 c = floor(gl_FragCoord.xy / 64.0);
+            float k = mod(c.x + c.y, 2.0);
+            FragColor = vec4(mix(vec3(0.18), vec3(0.6, 0.1, 0.6), k), 1.0);
+        } else {                    // 1 = void colour, 2 = greenscreen (via u_backdropColor)
+            FragColor = vec4(u_backdropColor, 1.0);
+        }
+        return;
+    }
     vec3 viewDir = normalize(WorldPos);
     float dayFactor = clamp(u_skyDayFactor, 0.0, 1.0);
     float nightFactor = 1.0 - dayFactor;

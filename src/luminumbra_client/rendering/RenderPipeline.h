@@ -14,6 +14,7 @@
 #include "WaterfallDetect.h"  // T-I5b-4: world-deterministic waterfall sites
 #include <map>
 #include "core/AssetManager.h"
+#include "core/IsolationConfig.h"  // T-I6: isolation/layer render mode (backdrop + spawn-suppression)
 #include <filesystem>
 #include "luminumbra_common/components/LightingComponents.h"
 #include "luminumbra_common/world/Chunk.h"
@@ -619,6 +620,12 @@ public:
     // T-I6-A3b SHIELD-RT far-field raymarch runtime opt-in (gated additionally by
     // the compile-time kEnableExperimentalFarFieldGpuRaymarching).
     void set_far_field_raymarch_enabled(bool enabled) { m_far_field_runtime_requested = enabled; }
+    // T-I6 isolation/layer mode: set from the scenario config (CLI). Default
+    // {All, Scene} is a no-op (render byte-stable). The SkyboxPass reads the
+    // backdrop to flat-fill the background; the scenario harness reads the layer
+    // mask to spawn-suppress non-selected content.
+    void set_isolation_config(const Client::ScenarioHarness::IsolationConfig& cfg) { m_isolation_config = cfg; }
+    const Client::ScenarioHarness::IsolationConfig& isolation_config() const { return m_isolation_config; }
     void SetupGPUSDFIntegration(Systems::SHIELD_WorldSystem& world_system);
 
     // --- Far-LOD region rendering (T-I3-9) ---
@@ -817,6 +824,7 @@ private:
     std::unique_ptr<FoliagePass> m_foliage_pass;   // T-I5b-1
     std::unique_ptr<ShieldRtFarFieldPass> m_shieldrt_far_pass; // T-I6-A3b (flag-gated)
     bool m_far_field_runtime_requested = false;    // --enable-far-field-gpu-raymarch
+    Client::ScenarioHarness::IsolationConfig m_isolation_config; // T-I6 (default {All,Scene} = no-op)
     WaterfallSiteCache m_waterfall_sites;          // T-I5b-4 (render-only, cached)
 
     // T-I5a-6: Hillaire 2020 atmospheric scattering. The LUTs are built once at

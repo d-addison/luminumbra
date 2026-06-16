@@ -90,6 +90,25 @@ void SkyboxPass::execute(RenderPipeline& pipeline, const Camera& camera) {
         glDisable(GL_CULL_FACE);
     }
     m_skybox_shader->use();
+    // T-I6 isolation backdrop override: flat-fill the background instead of the sky
+    // dome so an isolated subsystem reads against a void/greenscreen/checker. Default
+    // Scene -> mode 0 (byte-stable). (Transparent is a v1 void fallback; the RGBA
+    // capture chain is a v2 deferral.)
+    {
+        namespace SH = Luminumbra::Client::ScenarioHarness;
+        const SH::IsolationConfig& iso = pipeline.isolation_config();
+        int backdrop_mode = 0;
+        glm::vec3 backdrop_color(0.02f);
+        switch (iso.backdrop) {
+            case SH::BackdropMode::Void:        backdrop_mode = 1; backdrop_color = glm::vec3(0.02f); break;
+            case SH::BackdropMode::Greenscreen: backdrop_mode = 2; backdrop_color = glm::vec3(0.0f, 1.0f, 0.0f); break;
+            case SH::BackdropMode::Checker:     backdrop_mode = 3; break;
+            case SH::BackdropMode::Transparent: backdrop_mode = 1; backdrop_color = glm::vec3(0.02f); break;
+            case SH::BackdropMode::Scene: default: backdrop_mode = 0; break;
+        }
+        m_skybox_shader->setInt("u_backdropMode", backdrop_mode);
+        m_skybox_shader->setVec3("u_backdropColor", backdrop_color);
+    }
     glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)pipeline.m_screen_width / (float)pipeline.m_screen_height, camera.GetNearPlane(), camera.GetFarPlane());
     glm::mat4 view = glm::mat4(glm::mat3(camera.GetViewMatrix())); // remove translation
     m_skybox_shader->setMat4("view", view);
