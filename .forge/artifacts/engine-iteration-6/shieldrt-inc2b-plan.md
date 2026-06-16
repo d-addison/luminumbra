@@ -117,6 +117,26 @@ already efficient). Scale it down, in priority order:
 the far-field slice of the frame budget at 3840x1600 on the 5070 Ti) BEFORE flipping
 the compile flag on. Then the parity/seam validation, then enable-by-default.
 
+## VISUAL-FIDELITY constraint on the scalability work (owner principle 2026-06-16)
+Don't sacrifice beauty for perf — hold a **Battlefield 4/BF1 (Frostbite) realistic
+fidelity floor** ([[visual-fidelity-target]]). Every step above must pass the visual
+bar, not just the perf bar:
+- **Far-pixel-only dispatch:** quality-neutral (skips redundant pixels) — preferred.
+- **Half-res + upsample:** MUST stay crisp — depth-aware nearest upsample (no
+  silhouette bleed/aliasing) + temporal accumulation if needed; a blurry low-res far
+  field FAILS the floor. If half-res can't hold the bar on silhouettes, keep edges
+  full-res (edge-detect) or drop to 3/4-res rather than blur.
+- **Shading parity (fidelity gap to close):** the far-field currently writes FLAT
+  material ids + flat albedo. For the BF4/BF1 floor it must be TEXTURED + lit like the
+  near terrain (it already shares the deferred lighting) — sample the same triplanar
+  terrain material/albedo path (or a distance-faded approximation) so the far field
+  reads as continuous realistic terrain, not flat slabs. Seamless near<->far LOD/fade
+  (no popping/banding/void seam).
+- **Guard:** the WorldVisualSweep / visual-critique objective gates (washed-out, flat,
+  aliased, sparse, seam flags) are the floor's automated enforcement — the far-field,
+  once enabled, must keep them GREEN at 3840x1600. Perf-gate AND visual-gate together
+  before enable-by-default.
+
 ## New files
 - `src/luminumbra_client/rendering/passes/ShieldRtFarFieldPass.{h,cpp}` — owns the
   clipmap texture + maxmip, update_clipmap(camera), dispatch mip reduction.
