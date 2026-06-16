@@ -2,8 +2,9 @@
 
 ## Iteration 6 IN PROGRESS (2026-06-16) — Wave A sim/worldgen foundation
 
-Branch `feat/polyglot-audit-roadmap`, tip **`0ca8d77`**. Autonomous run
-(owner-authorized: memory `autonomous-iteration-6-mandate`). **WAVE A COMPLETE**
+Branch `feat/polyglot-audit-roadmap`, tip **`ca72f5e`** (Wave A.2 A3a + A3b-inc1
+landed). Autonomous run (owner-authorized: memory `autonomous-iteration-6-mandate`).
+**WAVE A COMPLETE**
 (A0 + A1 + A1.5 + A2 + A1d): sim/worldgen foundation + erosion enabled & validated
 on both gameplay presets + the aether render tap & coupling gate. **Full ctest
 244/244.** Verified, hash-clean. Commits:
@@ -51,14 +52,33 @@ all green.**
 
 **WAVE A COMPLETE** (A0 + A1 + A1.5 + A2 + A1d). Full ctest green.
 
-### Remaining (render phase)
-- **Wave A.2** SHIELD-RT far-field — the big render-architecture leg. PREREQUISITES
-  before the substrate: (1) **Phase 0.3 quiet-machine perf re-bless** (A.2
-  entry-gate, still owed); (2) the **A0 GPU tracer micro-profile** (heightfield
-  max-mip vs SDF sphere-trace on the 5070 Ti via the A0 Nsight markers) — pins the
-  primary tracer (currently PROVISIONAL). Then: shared volumetric/raymarch
-  substrate (build once, froxel scoped OUT) + heightfield far-field tracer + parity
-  gate (mesh-equivalence AND ground-truth-vs-raymarch) + near↔far seam gate.
+### Wave A.2 IN PROGRESS — SHIELD-RT far-field (tip `ca72f5e`)
+- **A3a DONE** (`0952a90`): GPU tracer micro-profile on the RTX 5070 Ti
+  (`ShieldRtTracerProfileGpu`, GL_TIME_ELAPSED) → **decision: heightfield_primary**
+  (no longer provisional). Artifacts `shieldrt-tracer-profile.json` +
+  `-memo.md`. Key finding: naive ms naively favours SDF sphere-trace, but measured
+  against ground truth the conservative-mip SDF tracer agrees on only **21%** of
+  rays (false-hits ~79% sky — coarse mips collapse to ~0); heightfield is correct
+  + within budget (~0.07 ms/view) and reuses existing tiles. SDF bricks reserved
+  for true 3D content. Shared builders factored into `test/performance/shieldrt_far_field.h`.
+- **A3b inc1 DONE** (`ca72f5e`): ground-truth parity gate
+  (`ShieldRtFarFieldParityGpu`) proving the tracer hits the real surface before
+  live wiring — self-consistency + analytic-vs-`GetTerrainHeightAtCoarse` legs.
+  **Caught + fixed a real tracer bug**: the spike/A3a march overshot terrain rises
+  for near-horizontal rays (fixed-cell-size advance from mid-cell, ~1315 m error);
+  production kernel rewritten as **overshoot-free hierarchical DDA** (step to cell
+  boundary; skip only when above cell-max at both entry+exit; descend/bisect).
+  Now self ≤ 0.09 m, ground-truth median ≤ 0.19 m / p99 ≤ 1.32 m. GL harness
+  factored into `shieldrt_gl_harness.h`. Artifact `shieldrt-far-field-parity.json`.
+- **A3b REMAINING:** **inc2** wire `ShieldRtFarFieldPass` into the G-buffer slot
+  after live chunks (`GBufferPass.cpp:227`), behind `--enable-shieldrt-far-field`
+  (mirror the GPUSDF gating shape), `GpuTimerPass::ShieldRtFar`, near↔far dither
+  blend, mesh-vs-raymarch parity leg in `FarLodHorizon`. **inc3** temporal-stability
+  gate (build a minimal render-interpolated prev-view history — no TAA infra exists).
+  Substrate API freeze (output-target + field-sampler params) + Wave-B-consumer
+  dry-run review. See `shieldrt-tracer-profile-memo.md` "Remaining A3b increments".
+- **Still owed:** **Phase 0.3 quiet-machine perf re-bless** (A.2 budget-ratification
+  entry-gate) — run `.forge/scripts/run-release-perf-lane.ps1 -Bless` on a quiet box.
 - **Wave B** clouds/grass/aurora/ocean (consume the A.2 substrate); **Wave C**
   worldgen multi-anchor; **Wave D** closeout. See `WAVE-A-SPEC.md` + `_synthesis.md`.
 - **Iteration 7** (deferred content): sparse aether sources (LuminCrystal) -> the
