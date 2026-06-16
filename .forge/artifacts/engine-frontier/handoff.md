@@ -1,5 +1,54 @@
 # Engine Frontier Handoff
 
+## Iteration 6 IN PROGRESS (2026-06-16) — Wave A sim/worldgen foundation
+
+Branch `feat/polyglot-audit-roadmap`, tip **`014c81b`**. Autonomous overnight run
+(owner-authorized: memory `autonomous-iteration-6-mandate`). **Full ctest 243/243.**
+The complete determinism-critical sim+worldgen foundation of Wave A is built,
+verified, and hash-clean. Commits:
+- **Phase 0 hygiene** (`8ae7b8f`): 33 orphaned worktrees removed (audited safe, no
+  vendor junctions), `main` reset to `c3806dc` (local), visual-critique hardened
+  into a ctest-pinned strict gate (`VisualCritiqueFlags` + `analyze --strict`).
+- **Wave 0** (`546ce6e`): 5 cited research briefs + synthesis
+  (`.forge/artifacts/engine-iteration-6/`).
+- **Wave A spec** (`bb3a5fc`/`5f2acdb`/`9eea0ac`): spec → 5-lens critique (4 BLOCKs)
+  → revision → owner-decision finalize. `WAVE-A-SPEC.md` is the live spec.
+- **A0** (`5ad9f47`): Nsight per-pass `KHR_debug` markers (RenderHealth byte-stable).
+- **A1** Aetheric scalar field: `fc8f476` core (recompute model, 7 tests) →
+  `3b1ce63` **world_hash bump #4 `d950a6afc12a5cdc → f17726d44054d133`** (append-only
+  aether term; replay+lockstep+lint re-blessed) → `1260c04` AetherFieldDeterminism
+  gate + `--aether-bench`. Fire channel deferred (2.5D risk).
+- **A1.5** (`a854389`): shaping-spline fold into the far-LOD cache key (marker 0x05,
+  world_hash-neutral — heights unchanged).
+- **A2** hydraulic/thermal relief: `6450226` A2a deterministic **halo-independent**
+  erosion kernel (`HydraulicErosion`, 3 tests) → `0f78a5f` A2b-1 full hash-neutral
+  integration into the shared height path (every consumer walks the eroded surface
+  when enabled; per-region seamless bake via global-cell indexing) → `014c81b`
+  A2b-2 perf (shared-lock the bake cache, bake outside the lock).
+
+**Determinism chain:** `d950a6afc12a5cdc` (iter-5) → **`f17726d44054d133`** (A1 aether
+bump #4). A1.5 + A2b-1 are world_hash-neutral (gated off). Wind/weather sub-hashes
+intact (`wind=61e223488b8ed5db`).
+
+### Remaining (visual/aesthetic/render — needs owner direction)
+- **A2b-2** (task #14): enable hydro on shipped presets = **world_hash bump #5**.
+  Needs erosion-strength TUNING (aesthetic), the broad re-bless (worldgen snapshots,
+  CurrentShippedArchipelagoPresetHeightHash, FarLodHorizon, PlayerView, WaterfallVisual
+  — confirm quality thresholds, don't blind-bless), + WorldVisualSweep/screenshots.
+  Open owner decision: enable+tune autonomously (keep only if gates pass) vs owner
+  steers the look first.
+- **A1d** (task #11): aether render emissive tap + coupling gate (render phase;
+  RenderHealth re-bless + visual QA). Closes critique MAJOR #17 (dead-system).
+- **Wave A.2** SHIELD-RT far-field (GPU-profile both tracers first, per A0 markers);
+  **Wave B** clouds/grass/aurora/ocean; **Wave C** worldgen multi-anchor; **Wave D**
+  closeout. See `WAVE-A-SPEC.md` + `_synthesis.md`.
+
+### Carried environment notes
+ucrt64 PATH must be prepended on every build/ctest/validator call (memory
+`toolchain-path-contamination`); an external scanner intermittently locks relinked
+exes during gtest discovery — retry once. Phase 0.3 quiet-machine perf re-bless
+still owed (A.2 entry-gate).
+
 ## Iteration 5b CLOSEOUT (2026-06-15) — Life & Water + Visual-QA pipeline
 
 Branch `feat/polyglot-audit-roadmap`, tip **97d81bc**. Iteration 5b complete:
@@ -67,6 +116,56 @@ skill on the wave's topics → cited brief → spec → implement → verify (ga
 the `WorldVisualSweep` visual-critique pipeline). Ordering below is by
 dependency + leverage, not the nominal roadmap order; rationale inline.
 
+> **EXECUTION MODEL — READ FIRST (owner directive, 2026-06-15).** The next dev
+> taking this handoff must drive iteration 6 with **agent teams AND the new
+> Workflow feature** — not hand-serial single-agent edits. Two complementary
+> tools:
+>
+> 1. **Agent teams** — the established model: fan out parallel Opus 4.8
+>    subagents, each owning a disjoint file set, each in its own git worktree.
+>    This is how 5a's A1∥A2 and all of 5b ran. Use it for the genuinely
+>    independent legs (Wave A render ∥ sim; Wave B's four debt systems). Every
+>    agent prompt must be self-contained (execution-model tiering: specs carry
+>    their own context — Fable is unavailable, **all tasks run on Opus 4.8**,
+>    executor `opus-agent`).
+> 2. **Workflow feature (NEW)** — use the `Workflow` tool for *deterministic
+>    multi-agent orchestration*: encode each wave as a script with explicit
+>    `phase()` / `parallel()` / `pipeline()` stages instead of ad-hoc dispatch.
+>    This is the right tool for the research-gate→spec→implement→verify pipeline
+>    (a natural `pipeline()` per topic) and for the find→adversarially-verify
+>    shape the visual-critique pipeline already wants (a `pipeline()` whose
+>    stage 2 fans out skeptics per finding). It gives reproducible fan-out,
+>    budget control, and resume — strictly better than manually spawning agents
+>    for the structured waves.
+>
+> Rule of thumb: **Workflow for the structured wave pipelines** (research,
+> review/critique, migration-shaped debt sweeps); **agent teams for the
+> long-running disjoint implementation legs** that each need a worktree. They
+> compose — a Workflow stage can itself dispatch worktree agents. See
+> `execution-model-tiering` + `stale-main-worktree-hazard` memories: inject the
+> `git rev-parse HEAD` + scope-file base-check before ANY worktree work
+> (`main`/`origin/HEAD` is still the stale project-capture `972c133`), copy
+> vendored libs as REAL copies NOT junctions, and **never** `git worktree
+> remove --force` (it deletes through junctions into the main vendor/ — the
+> catastrophe that already cost a full vendor restoration).
+
+> **OWNER DECISIONS REQUIRED BEFORE ITERATION 6 (from /forge-critique,
+> 2026-06-15 — see `.forge/critique-iteration-6-plan-20260615.md`).** Three
+> decision points gate a clean iter-6 start:
+>
+> 1. **Worktree cleanup** — ~33 orphaned agent worktrees with `vendor/`
+>    junctions are still on disk (the loaded gun behind the vendor catastrophe).
+>    Recommend clearing now, **junction-first, no `--force`**, verifying the main
+>    vendor/ hash is unchanged after each. Prerequisite for any iter-6 fan-out.
+> 2. **`main` trunk decision** — `main`/`origin/HEAD` is still the stale
+>    project-capture `972c133`; all iter 3–5 work lives on
+>    `feat/polyglot-audit-roadmap`. Reset `main` to the real tip, or formally
+>    adopt the feature branch as trunk. Until resolved, the worktree base-check
+>    stays mandatory.
+> 3. **Quiet-machine perf re-bless** — carried debt i4→i5→i6. Bless the post-5
+>    `run-release-perf-lane.ps1 -Bless` baseline before iter-6 atmospheric/SDF
+>    perf work so budgets have an honest floor.
+
 **Wave 0 — Deep-research sweep (cheap, de-risks everything; do FIRST).**
 Run `deep-research` on: SHIELD-RT SDF raymarch + GPU-resident SDF storage
 (Claybook GDC 2018, UE Lumen surface cache, Aaltonen brick clipmaps); Aetheric
@@ -77,7 +176,13 @@ briefs that pin the approach + perf budget + determinism implications before any
 spec. (This subsumes the "run deep-research first" option.)
 
 **Wave A — SHIELD-RT far-field + GPU-SDF residency (RENDER) ∥ Aetheric stack (SIM).**
-These are disjoint (render vs sim) → run in PARALLEL like 5a's A1∥A2.
+These run concurrently for authoring but are **NOT cleanly disjoint** (critique
+#2): both contend for the GPU budget, both touch the `FieldGrid` container, and
+Aetheric is the `world_hash`-bumping partner. Before fanning out: (a) split the
+GPU budget explicitly, (b) **freeze the `FieldGrid` container API** so render and
+sim consume a fixed contract, (c) land Aetheric's `world_hash` bump in its **own**
+commit (replay/lockstep re-bless in that commit; render churn excluded). Only the
+authoring legs parallelize like 5a's A1∥A2 — the integration points serialize.
 - A-render: **GPU-resident SDF (clipmap bricks) → SHIELD-RT SDF raymarch** as the
   productionized far-field renderer (the iter-4 spike's destination). Highest
   architecture leverage: it IS the 6×-view-distance endgame, it fixes the
@@ -109,12 +214,24 @@ research-driven systems, each verified by re-running `WorldVisualSweep`:
 - **Hydraulic/thermal erosion** + far-LOD meshing (Transvoxel/Dual-Contouring) —
   closes the "smooth cones / blob-rocks / shoreline seams / LOD slabs" debt.
   WORLDGEN → `world_hash`-affecting → deliberate bump, atlas/snapshot-gated,
-  determinism-sensitive (sequence after Aetheric's bump settles).
+  determinism-sensitive. **Sequencing (critique #3/#7):** erosion **changes the
+  terrain shape SHIELD-RT renders** — building Wave-A far-field parity baselines
+  against pre-erosion terrain forces a double re-bless. Pull erosion's
+  shape-affecting portion **earlier** (settle terrain shape before SHIELD-RT
+  parity baselines bless) OR explicitly budget the second parity re-bless. Two
+  ordered `world_hash` bumps total in iter-6 — Aetheric first, **then** erosion,
+  never in the same commit, so a determinism regression is attributable.
 - **Multi-anchor streaming + server scale** — multiple lockstep players,
   per-anchor streaming budgets, HeadlessServerTick multi-anchor mode.
 
 **Wave D — Closeout** — full gate sweep + `WorldVisualSweep` dual-bias critique
 (the standing QA gate) + Endurance + forge verify + handoff; iteration-7 inputs.
+**Process rule (critique #4):** a visual-critique **BLOCK is discharged only by a
+passing re-run of the same gate — never by reclassification to "tracked debt."**
+The iter-5 foliage + aurora BLOCKs stay open in
+`engine-iteration-5b/visual-debt.md` until Wave B's `WorldVisualSweep` passes.
+Also wire `tools/visual_critique.py analyze()` into the validator as a real gate
+step with per-flag fixture tests (critique #5) — a gate CI doesn't run isn't a gate.
 
 **Recorded for iter 6/7 (own spec/critique round before scheduling):** GPU-driven
 rendering / Nanite-style cluster cull; DDGI/SDFGI dynamic GI; virtual shadow maps;
