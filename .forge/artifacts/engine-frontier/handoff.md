@@ -83,9 +83,22 @@ all green.**
   CPU `BuildHeightMaxMip` (0 mismatches / 21,845 cells x 8 levels x 2 presets) —
   glGenerateMipmap is box-filter, unusable; this is the net-new acceleration
   structure. `ShieldRtFarFieldMaxMipGpu`. Design in `shieldrt-inc2b-plan.md`.
-- **A3b REMAINING:** **inc2b-rest** clipmap texture streaming from FarLodSystem
-  (centered R16, glTexSubImage2D on the touched quadrants, `heightfield_generation`
-  dirty counter); **inc2c** wire `ShieldRtFarFieldPass` into the G-buffer slot
+- **A3b inc2c (live pass) DONE** (`e12137f`): `ShieldRtFarFieldPass` wired into the
+  deferred pipeline after the G-buffer pass, depth-tested (GL_LESS) into the same
+  G-buffer (augment-v1: fills far/sky pixels the mesh didn't). Owns a camera-centered
+  heightfield SSBO (from `BuildPristineFarLodTile`, rebuilt on region-crossing) + the
+  GPU max-mip (validated reduction). Flag-gated (`kEnableExperimentalFarFieldGpuRaymarching`
+  false + `--enable-far-field-gpu-raymarch`) → byte-stable when off (ctest 247/247,
+  render_smoke 14/14). `GpuTimerPass::FarFieldRaymarch` added (RenderHealth presence-
+  based → safe). **Proven live:** with the flag on, the mountains farlod_horizon
+  scenario ran clean (pass inits + fires every frame, scene composites with no
+  corruption/voids, exit 0) — the integration is sound.
+- **A3b REMAINING (enable-by-default gate):** the MAJOR #9 mesh-vs-raymarch PARITY
+  leg (render raymarch-only vs mesh-only, diff the G-buffer within the inc1 quant
+  tolerance) + a seam/visual check + perf + addressing the synchronous 49-tile
+  region-crossing rebuild hitch (async it). Then flip the compile flag on. Also the
+  inc3 temporal-stability gate. Flag stays OFF (experimental) until parity passes,
+  mirroring the GPU SDF discipline.
   after live chunks (`GBufferPass.cpp:227`), behind `--enable-shieldrt-far-field`
   (mirror the GPUSDF gating shape), `GpuTimerPass::ShieldRtFar`, near↔far dither
   blend, mesh-vs-raymarch parity leg in `FarLodHorizon`. **inc3** temporal-stability
