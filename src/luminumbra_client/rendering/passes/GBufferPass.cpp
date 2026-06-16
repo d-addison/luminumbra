@@ -144,15 +144,30 @@ void GBufferPass::execute(RenderPipeline& pipeline,
     glBindFramebuffer(GL_FRAMEBUFFER, m_gbuffer.fbo_id);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    // Pass 1: Render all the terrain chunks
-    geometry_pass_chunks(pipeline, renderable_chunks, camera, frustum_planes);
+    // T-I6 isolation/layer mode: skip the draws whose layer bit is cleared so an
+    // isolated subsystem reads ALONE against the SkyboxPass backdrop. The gbuffer
+    // is ALWAYS cleared first, so suppressing a sub-pass just leaves cleared pixels
+    // (depth = far plane); the late additive passes still depth-test correctly and
+    // the skybox fills the empty pixels with the backdrop. NOT the deferred
+    // clear-before-lighting masking the critique rejected — this only OMITS draws.
+    // Default config renders() == true for every bit, so this is byte-stable off.
+    namespace SH = Luminumbra::Client::ScenarioHarness;
+    const SH::IsolationConfig& iso = pipeline.isolation_config();
 
-    // Pass 2: Render all instanced static meshes
-    geometry_pass_static_meshes(pipeline, registry, camera, frustum_planes);
+    // Pass 1: Render all the terrain chunks (+ far-LOD region meshes). Static
+    // props/structures are part of the solid world, so they follow the Terrain bit.
+    if (iso.renders(SH::IsolationLayer::Terrain)) {
+        geometry_pass_chunks(pipeline, renderable_chunks, camera, frustum_planes);
+
+        // Pass 2: Render all instanced static meshes
+        geometry_pass_static_meshes(pipeline, registry, camera, frustum_planes);
+    }
 
     // Pass 3 (T-I3-16): non-instanced skinned meshes (CPU-sampled joint
     // palettes from the fixed-tick animation runtime, GPU skinning).
-    geometry_pass_skinned_meshes(pipeline, registry, camera, frustum_planes);
+    if (iso.renders(SH::IsolationLayer::Skinned)) {
+        geometry_pass_skinned_meshes(pipeline, registry, camera, frustum_planes);
+    }
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
