@@ -520,19 +520,25 @@ float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x, float world_z) 
     auto bake_region = [this, cs](std::int64_t rx, std::int64_t rz) -> std::vector<float> {
         const int halo = m_params.hydro_iterations + kHydroHaloMargin;
         const int m = kHydroRegionCells + 2 * halo;
-        std::vector<float> heights(static_cast<std::size_t>(m) * static_cast<std::size_t>(m), 0.0f);
+        const std::size_t cells = static_cast<std::size_t>(m) * static_cast<std::size_t>(m);
+        // Build the padded grid's world coords, then sample the NO-hydro base
+        // heights in ONE SIMD batch (apply_hydro=false: no recursion, and the
+        // GenPositionArray2D path is ~10x faster than per-cell GenSingle2D --
+        // keeps the bake off the far-LOD settle critical path). Byte-identical to
+        // the scalar path (position-array parity gate), so the offset is unchanged.
+        std::vector<float> xs(cells, 0.0f);
+        std::vector<float> zs(cells, 0.0f);
         for (int pz = 0; pz < m; ++pz) {
             for (int px = 0; px < m; ++px) {
-                const std::int64_t cell_gx = rx * kHydroRegionCells + (px - halo);
-                const std::int64_t cell_gz = rz * kHydroRegionCells + (pz - halo);
-                const float wx = static_cast<float>(cell_gx) * cs;
-                const float wz = static_cast<float>(cell_gz) * cs;
-                // NO-hydro base height (apply_hydro=false) -> never recurses.
-                heights[static_cast<std::size_t>(pz) * static_cast<std::size_t>(m) +
-                        static_cast<std::size_t>(px)] =
-                    ComputeShapedHeightSampleImpl(wx, wz, /*apply_hydro=*/false).final_height;
+                const std::size_t idx = static_cast<std::size_t>(pz) * static_cast<std::size_t>(m) +
+                                        static_cast<std::size_t>(px);
+                xs[idx] = static_cast<float>(rx * kHydroRegionCells + (px - halo)) * cs;
+                zs[idx] = static_cast<float>(rz * kHydroRegionCells + (pz - halo)) * cs;
             }
         }
+        std::vector<float> heights(cells, 0.0f);
+        ComputeShapedHeightsAtPositions(xs.data(), zs.data(), cells, heights.data(),
+                                        /*apply_hydro=*/false);
         World::HydroErosionParams p;
         p.iterations = m_params.hydro_iterations;
         p.talus_height = m_params.hydro_talus_height;
@@ -946,13 +952,13 @@ MaterialType SHIELD_WorldSystem::SurfaceVertexMaterial(
 }
 
 void SHIELD_WorldSystem::ComputeShapedHeightsAtPositions(
-    const float* xs, const float* zs, std::size_t count, float* out) const {
+    const float* xs, const float* zs, std::size_t count, float* out, bool apply_hydro) const {
     if (count == 0) {
         return;
     }
     if (!m_params.shaping_enabled) {
         for (std::size_t i = 0; i < count; ++i) {
-            out[i] = ComputeShapedHeight(xs[i], zs[i]);
+            out[i] = ComputeShapedHeightSampleImpl(xs[i], zs[i], apply_hydro).final_height;
         }
         return;
     }
@@ -1018,6 +1024,11 @@ void SHIELD_WorldSystem::ComputeShapedHeightsAtPositions(
         if (m_params.rivers_enabled) {
             const float influence = RiverInfluenceFromNoise(xs[i], zs[i]);
             h -= RiverCarveAmount(h, influence);
+        }
+        // T-I6-A2: add the baked hydro offset so this matches GetTerrainHeightAt
+        // (apply_hydro=false on the erosion bake's own base samples -> no recursion).
+        if (apply_hydro && m_params.hydro_enabled) {
+            h += SampleHydroOffsetMeters(xs[i], zs[i]);
         }
         out[i] = h;
     }

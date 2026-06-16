@@ -79,6 +79,33 @@ void ParseShapingBlock(const nlohmann::json& terrain,
                     preset_path, warnings);
 }
 
+void ParseHydroBlock(const nlohmann::json& terrain,
+                     TerrainHydroPreset& hydro,
+                     const std::filesystem::path& preset_path,
+                     std::vector<std::string>& warnings) {
+    if (!JsonHasObject(terrain, "hydro")) {
+        return;
+    }
+    const nlohmann::json& block = terrain["hydro"];
+    hydro.present = true;
+    hydro.enabled = block.value("enabled", hydro.enabled);
+    hydro.iterations = block.value("iterations", hydro.iterations);
+    hydro.cell_size_m = block.value("cell_size_m", hydro.cell_size_m);
+    hydro.talus_height = block.value("talus_height", hydro.talus_height);
+    hydro.thermal_rate = block.value("thermal_rate", hydro.thermal_rate);
+    hydro.rain_per_sweep = block.value("rain_per_sweep", hydro.rain_per_sweep);
+    hydro.solubility = block.value("solubility", hydro.solubility);
+    hydro.deposition = block.value("deposition", hydro.deposition);
+    hydro.evaporation = block.value("evaporation", hydro.evaporation);
+    hydro.sediment_capacity = block.value("sediment_capacity", hydro.sediment_capacity);
+    hydro.max_offset = block.value("max_offset", hydro.max_offset);
+    WarnUnknownKeys(block, "generation_params.terrain.hydro",
+                    {"enabled", "iterations", "cell_size_m", "talus_height",
+                     "thermal_rate", "rain_per_sweep", "solubility", "deposition",
+                     "evaporation", "sediment_capacity", "max_offset"},
+                    preset_path, warnings);
+}
+
 void ParseBiomesBlock(const nlohmann::json& gen_params,
                       TerrainBiomesPreset& biomes,
                       const std::filesystem::path& preset_path,
@@ -250,6 +277,25 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
         params.peaks_spline = shaping.peaks_spline;
     }
 
+    // Hydro block (T-I6-A2): hydraulic/thermal relief. Default-off; a preset opts
+    // in via "hydro": {"enabled": true, ...}. Mapped into TerrainGenParams.hydro_*
+    // (deliberate world_hash-affecting feature when enabled).
+    ParseHydroBlock(terrain, result.extras.hydro, preset_path, result.warnings);
+    if (result.extras.hydro.present) {
+        const TerrainHydroPreset& hydro = result.extras.hydro;
+        params.hydro_enabled = hydro.enabled;
+        params.hydro_iterations = hydro.iterations;
+        params.hydro_cell_size_m = hydro.cell_size_m;
+        params.hydro_talus_height = hydro.talus_height;
+        params.hydro_thermal_rate = hydro.thermal_rate;
+        params.hydro_rain_per_sweep = hydro.rain_per_sweep;
+        params.hydro_solubility = hydro.solubility;
+        params.hydro_deposition = hydro.deposition;
+        params.hydro_evaporation = hydro.evaporation;
+        params.hydro_sediment_capacity = hydro.sediment_capacity;
+        params.hydro_max_offset = hydro.max_offset;
+    }
+
     // Biomes block: parsed into extras AND consumed when it opts in via a
     // table. With no table the consumed params keep biomes_enabled=false ->
     // byte-zero drift from the pre-biome implementation.
@@ -298,7 +344,7 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
     WarnUnknownKeys(terrain, "generation_params.terrain",
                     {"base_frequency", "base_amplitude", "octaves", "persistence",
                      "lacunarity", "height_offset", "island_mask_enabled",
-                     "island_mask_frequency", "shaping"},
+                     "island_mask_frequency", "shaping", "hydro"},
                     preset_path, result.warnings);
     WarnUnknownKeys(features, "generation_params.features",
                     {"caves_enabled", "cave_frequency", "cave_threshold",

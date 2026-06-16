@@ -16,8 +16,10 @@
 // - Tiles build on the JobSystem Normal lane (pristine tiles are pure
 //   functions of (seed, params); edited tiles load from the LMR1 store when a
 //   save directory is attached); the main thread uploads finished meshes.
-// - Residency: 64 MB byte budget with least-recently-used eviction; regions
-//   leaving the wanted set free their GL buffers immediately.
+// - Residency: 128 MB byte budget with least-recently-used eviction; regions
+//   leaving the wanted set free their GL buffers immediately. (Raised from 64 MB
+//   for T-I6-A2: hydraulic relief adds far-LOD geometry to the gameplay presets;
+//   128 MB is trivial for the 16 GB RTX 5070 Ti target — owner "up the caps".)
 
 #include "luminumbra_common/world/FarLodStore.h"
 #include "luminumbra_common/core/JobSystem.h"
@@ -43,7 +45,7 @@ public:
     // Pinned numbers (design-decisions.md section 4).
     static constexpr float kF1OuterRangeMeters = 768.0f;
     static constexpr float kF2OuterRangeMeters = 1536.0f;
-    static constexpr std::size_t kResidentBudgetBytes = 64ull * 1024ull * 1024ull;
+    static constexpr std::size_t kResidentBudgetBytes = 128ull * 1024ull * 1024ull;
     // Live chunk ring horizontal reach (RENDER_DISTANCE chunks): regions
     // fully inside this disc are owned by live chunks and never drawn far.
     static constexpr float kLiveRingRadiusMeters = 512.0f;

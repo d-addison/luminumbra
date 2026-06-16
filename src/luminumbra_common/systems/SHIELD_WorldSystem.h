@@ -403,8 +403,14 @@ public:
     // byte-for-byte (uses GenPositionArray2D, proven bit-identical to GenSingle2D
     // on this build). Used to batch the per-column surface-span corner samples
     // and exercised directly by the position-array parity gate.
+    // apply_hydro (T-I6-A2): when true (default) and hydro is enabled, the baked
+    // erosion offset is added so this matches GetTerrainHeightAt at every position
+    // (keeps the surface-span corners consistent with collision/SDF). The erosion
+    // bake passes false to sample the NO-hydro base height (and to avoid recursion)
+    // -- this is also the fast SIMD path the bake uses to build its base grid.
     void ComputeShapedHeightsAtPositions(const float* xs, const float* zs,
-                                         std::size_t count, float* out) const;
+                                         std::size_t count, float* out,
+                                         bool apply_hydro = true) const;
 
     // T-I4-3: river influence [0, 1] at a column - how strongly the +10 PV-band
     // river carve applies (0 = no river, 1 = channel center). 0 when rivers are
