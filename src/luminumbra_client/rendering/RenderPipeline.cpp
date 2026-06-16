@@ -72,6 +72,13 @@ namespace Luminumbra::Rendering {
 namespace {
 
 constexpr bool kEnableExperimentalGpuSdfIntegration = false;
+// T-I6-A3b SHIELD-RT far-field GPU raymarch. Compile-time gate, mirrors the GPU
+// SDF gating shape: stays OFF until the live ShieldRtFarFieldPass (clipmap +
+// validated GPU max-mip + heightfield DDA raymarch into the G-buffer) lands and
+// passes the FarLodHorizon mesh-vs-raymarch parity leg. The tracer, G-buffer
+// write, and max-mip build are each validated in isolation (ShieldRtFarField*
+// manual GPU benches). Runtime opt-in via --enable-far-field-gpu-raymarch.
+constexpr bool kEnableExperimentalFarFieldGpuRaymarching = false;
 constexpr size_t kMaxFreeChunkRenderSlots = 2048;
 constexpr size_t kMaxFreeWaterRenderSlots = 1024;
 constexpr int kTerrainFallbackTileSize = 32;
