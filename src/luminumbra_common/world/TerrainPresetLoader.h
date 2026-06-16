@@ -85,11 +85,30 @@ struct TerrainMaterialsPreset {
     std::vector<TerrainVeinPreset> veins;
 };
 
+// generation_params.terrain.hydro (T-I6-A2): hydraulic/thermal relief. A preset
+// opts in with "hydro": {"enabled": true, ...}. Defaults mirror
+// TerrainGenParams' hydro_* defaults so a bare {"enabled": true} works.
+struct TerrainHydroPreset {
+    bool present = false;
+    bool enabled = false;
+    int iterations = 24;
+    float cell_size_m = 8.0f;
+    float talus_height = 1.2f;
+    float thermal_rate = 0.5f;
+    float rain_per_sweep = 0.02f;
+    float solubility = 0.10f;
+    float deposition = 0.10f;
+    float evaporation = 0.20f;
+    float sediment_capacity = 0.40f;
+    float max_offset = 24.0f;
+};
+
 struct TerrainPresetExtras {
     TerrainShapingPreset shaping;
     TerrainBiomesPreset biomes;
     TerrainFeaturesPreset features;
     TerrainMaterialsPreset materials;
+    TerrainHydroPreset hydro;
 };
 
 struct TerrainPresetLoadResult {

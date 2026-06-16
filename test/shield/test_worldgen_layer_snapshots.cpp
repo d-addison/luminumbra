@@ -1256,7 +1256,13 @@ TEST(WorldGenLayerSnapshotTest, CurrentShippedArchipelagoPresetHeightHash) {
               << std::dec << std::setfill(' ') << std::endl;
     // DELIBERATE BUMP (T-I3-22 slice polish). Before (legacy, shaping-off):
     // 0xc075cf55c182393c. After (schema_rev 2 shaping): 0x940d621a2e3c0436.
-    constexpr std::uint64_t kArchipelagoShapedHash = 0x940d621a2e3c0436ull;
+    // T-I6-A2b-2 DELIBERATE BUMP: GENTLE hydraulic relief enabled on the
+    // archipelago preset (the player walks the eroded surface). Tuned subtle
+    // (iterations 10, talus 2.5, max_offset 4) so the walkable-interior +
+    // self-affine gates below still pass (land_h_p95 7.85>6; spectral beta 2.70 in
+    // [1.8,3]). 0x940d621a2e3c0436 -> 0xf26e830fb364b045. Visual-QA clean
+    // (WorldVisualSweep 0 flags); FarLodHorizon/PlayerView/WaterfallVisual pass.
+    constexpr std::uint64_t kArchipelagoShapedHash = 0xf26e830fb364b045ull;
     EXPECT_EQ(hash, kArchipelagoShapedHash)
         << "shipped archipelago preset terrain drifted; if intentional, bump "
         << "kArchipelagoShapedHash deliberately and document before/after in "
@@ -1368,6 +1374,25 @@ TEST(WorldGenLayerSnapshotTest, HydraulicReliefShiftsHeightDeterministicallyAndK
         }
     }
     EXPECT_TRUE(any_diff) << "hydraulic relief had no effect on terrain height";
+
+    // Position-array batch (ComputeShapedHeightsAtPositions, used for runtime
+    // surface-spans) must include the hydro offset too -> byte-identical to the
+    // scalar GetTerrainHeightAt with hydro on (T-I6-A2 surface-span consistency).
+    {
+        std::vector<float> pxs, pzs;
+        for (int z = -120; z <= 120; z += 31) {
+            for (int x = -120; x <= 120; x += 29) {
+                pxs.push_back(static_cast<float>(x) + 0.4f);
+                pzs.push_back(static_cast<float>(z) - 0.15f);
+            }
+        }
+        std::vector<float> batch(pxs.size(), 0.0f);
+        on.ComputeShapedHeightsAtPositions(pxs.data(), pzs.data(), pxs.size(), batch.data());
+        for (std::size_t i = 0; i < pxs.size(); ++i) {
+            EXPECT_EQ(batch[i], on.GetTerrainHeightAt(pxs[i], pzs[i]))
+                << "position-array batch diverged from scalar (hydro) at (" << pxs[i] << ", " << pzs[i] << ")";
+        }
+    }
 
     // Batch (GenerateChunkData -> ComputeShapedHeightGrid + post-pass) must equal
     // the scalar path byte-for-byte with hydro on.

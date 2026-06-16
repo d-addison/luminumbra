@@ -5336,7 +5336,11 @@ namespace {
 // FarLodHorizon thresholds (luminumbra.farlod_horizon.v1, pinned numbers in
 // design-decisions.md section 4).
 constexpr std::size_t kFarLodHorizonMaxMissingRegions = 0;
-constexpr std::size_t kFarLodHorizonResidentBudgetBytes = 64ull * 1024ull * 1024ull;
+// Raised 64 -> 128 MB for T-I6-A2: hydraulic relief adds far-LOD geometry to the
+// gameplay presets (eroded archipelago ~67 MB). Matches FarLodSystem::
+// kResidentBudgetBytes (the runtime LRU cap); 128 MB is trivial for the 16 GB
+// RTX 5070 Ti target (owner "up the caps, make use of this PC").
+constexpr std::size_t kFarLodHorizonResidentBudgetBytes = 128ull * 1024ull * 1024ull;
 constexpr double kFarLodHorizonMaxGbufferDeltaMs = 1.5;
 // Horizon screenshots must show terrain to the horizon: with the far field
 // resident there is no legitimate sky below the eye-level horizon away from
