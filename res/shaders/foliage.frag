@@ -6,27 +6,38 @@
 // Forward-lit ground cover blended into the lit HDR target after the opaque
 // terrain. RENDER-ONLY (no sim writes).
 //
-// T-I5b-DR-foliage-emissive: foliage is now SCENE-LIT exactly like the terrain
-// ground, with NO self-emissive term whatsoever. The previous fix added an
-// additive "green self-glow floor" plus a multiplicative green-dominance clamp
-// that forced the blades to stay bright green regardless of the sun -- so the
-// grass GLOWED IN THE DARK (montage_summer_night). Both are removed.
+// T-I5b-DR-foliage-green: kill the CYAN/TEAL cast, scene-light so the blades go
+// DARK under storm/night, and keep them clearly GREEN in daylight.
 //
-// The lighting here mirrors lighting_pass.frag's diffuse model so foliage sits
-// in the SAME colour space as the terrain it overlays:
-//   * ambient  = u_ambientColor * albedo            (u_ambientColor already
-//                carries the PI irradiance scale, matching u_skyAmbientColor)
-//   * direct   = albedo/PI * (u_sunColor * PI) * NdotL   (Lambert, same
-//                SUN_IRRADIANCE_SCALE = PI as the terrain pass; u_sunColor is
-//                already pre-scaled by sun intensity / transmittance on the CPU,
-//                so it collapses to ~0 at night)
-//   * filmic tonemap + 1/2.2 gamma                  (identical to the terrain
-//                pass) so the lit blade matches the surrounding ground exactly.
-// Result: bright in daylight, DARK at night, never self-emissive.
+// ROOT CAUSE of the old cyan: the daytime sky ambient (u_ambientColor ==
+// m_skyAmbientColor) is strongly BLUE-DOMINANT -- vec3(0.1,0.15,0.2)*PI, i.e.
+// B > G > R. A near-vertical blade card with an up-biased normal is ambient-
+// DOMINATED (it barely catches the low/raking sun), so its colour collapses to
+// `u_ambientColor * albedo`. With the desaturated blade albedo that product
+// keeps a heavy blue component, and after filmic+gamma a low-saturation green
+// with a blue lift reads to the eye as pale CYAN/TEAL. Under storm the sky
+// ambient does NOT drop (only the DIRECT sun is cloud-shadowed), so the ambient-
+// dominated blades stayed bright and GLOWED teal while the terrain went dark.
 //
-// A base-to-tip ambient-occlusion gradient (darker root, lighter tip) and the
-// per-instance tonal/hue jitter baked into the vertex colour keep the field
-// from reading as a flat single hue, WITHOUT adding any light of its own.
+// THE FIX (lighting only -- placement / world_hash untouched):
+//   1) HUED ambient: drive the ambient by the sky-ambient LUMINANCE but through
+//      the blade's OWN green albedo hue, not the raw blue sky colour. The blue
+//      channel can no longer wash the blade to cyan, yet the ambient still
+//      tracks sun-up (bright day, ~10x dimmer night) so the grass darkens with
+//      the scene. A faint sky tint is folded back in for cohesion, capped so it
+//      can never re-introduce a blue-dominant result.
+//   2) STORM darkening: replicate the lighting pass' projected cloud cast shadow
+//      and attenuate BOTH the ambient and the direct sun by the cloud coverage
+//      overhead, so an overcast cell drives the blades DARK exactly like the
+//      ground beside them (the old shader left ambient un-attenuated -> glow).
+//   3) Sun-weighted: the GREEN-hued direct sun term (albedo/PI * sunRadiance) is
+//      what lifts the daytime grass; u_sunColor is pre-scaled by sun intensity/
+//      transmittance on the CPU so it collapses to ~0 at night.
+//   * filmic tonemap + 1/2.2 gamma, identical to lighting_pass.frag, so the lit
+//     blade lands in the same sRGB space as the surrounding tonemapped terrain.
+//
+// A base-to-tip ambient-occlusion gradient (darker root, lighter tip) keeps the
+// field from reading as a flat single hue, WITHOUT adding any light of its own.
 // ===========================================================================
 
 in VS_OUT {
@@ -43,10 +54,70 @@ uniform vec3  u_sunColor;      // CPU-side: already scaled by sun intensity/tran
 uniform float u_sunIntensity;  // [0,1] sun-up factor (0 at night)
 uniform vec3  u_ambientColor;  // == u_skyAmbientColor (already PI-scaled)
 
+// T-I5b-DR-foliage-green: projected cloud cast-shadow uniforms, mirroring the
+// lighting pass so a storm-overcast cell darkens the blades like the terrain.
+// All default to "no clouds" so a missing-uniform path is a no-op.
+uniform int   u_cloudShadowEnabled;   // 0 == skip (clear sky)
+uniform vec2  u_cloudScrollOffset;    // wind * tick-phase, world metres
+uniform float u_cloudCoverageAmount;  // [0,1] sky-cover fraction
+uniform float u_cloudBiomeVariation;  // biome coverage bias
+uniform float u_cloudPlaneHeight;     // world Y of the cloud sheet
+uniform float u_cloudShadowStrength;  // [0,1] max darkening under a cloud core
+uniform vec3  u_cloudSunDir;          // sun TRAVEL direction (== u_sunDirection)
+
 out vec4 FragColor;
 
 const float PI = 3.14159265359;
 const float SUN_IRRADIANCE_SCALE = PI; // matches lighting_pass.frag
+const vec3  LUMA = vec3(0.2126, 0.7152, 0.0722);
+
+// --- cloud coverage field (matches lighting_pass.frag / enhanced_skybox.frag) ---
+float fol_cloud_hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+float fol_cloud_noise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = fol_cloud_hash(i + vec2(0.0, 0.0));
+    float b = fol_cloud_hash(i + vec2(1.0, 0.0));
+    float c = fol_cloud_hash(i + vec2(0.0, 1.0));
+    float d = fol_cloud_hash(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+float fol_cloud_fbm(vec2 p, int octaves) {
+    float value = 0.0;
+    float amplitude = 0.5;
+    float frequency = 1.0;
+    for (int i = 0; i < octaves; i++) {
+        value += amplitude * fol_cloud_noise(p * frequency);
+        amplitude *= 0.5;
+        frequency *= 2.0;
+    }
+    return value;
+}
+float fol_cloudCoverageAt(vec2 worldXZ) {
+    vec2 p = (worldXZ + u_cloudScrollOffset) * (1.0 / 1200.0);
+    float base = fol_cloud_fbm(p, 5);
+    float detail = fol_cloud_fbm(p * 2.7 + vec2(11.3, 4.7), 3);
+    float field = base * 0.72 + detail * 0.28;
+    float cov = clamp(u_cloudCoverageAmount + u_cloudBiomeVariation, 0.0, 1.0);
+    float lo = mix(0.62, 0.30, cov);
+    float hi = mix(0.82, 0.55, cov);
+    return smoothstep(lo, hi, field);
+}
+// [0,1] cloud shadow amount above this blade (projected up the sun ray).
+float fol_cloudShadow(vec3 worldPos) {
+    if (u_cloudShadowEnabled == 0 || u_cloudShadowStrength <= 0.0) return 0.0;
+    vec3 toSun = -u_cloudSunDir;
+    if (toSun.y < 0.05) return 0.0;
+    float dh = u_cloudPlaneHeight - worldPos.y;
+    if (dh <= 0.0) return 0.0;
+    float t = dh / toSun.y;
+    vec2 hitXZ = worldPos.xz + toSun.xz * t;
+    float coverage = fol_cloudCoverageAt(hitXZ);
+    return clamp(coverage * u_cloudShadowStrength, 0.0, 1.0);
+}
 
 void main() {
     // Blade alpha mask: taper toward the tip and soften the vertical edges so
@@ -68,14 +139,48 @@ void main() {
     vec3 N = normalize(fs_in.worldNormal);
     float ndl = max(dot(N, -normalize(u_sunDirection)), 0.0);
 
-    // SCENE LIGHTING, identical model to the terrain ground:
-    //   ambient term (sky irradiance) + Lambert sun diffuse.
-    // u_ambientColor and u_sunColor both already carry their irradiance scale on
-    // the CPU; u_sunColor additionally folds in the sun-up intensity so it is ~0
-    // at night. NO constant/self-emissive floor.
-    vec3 ambient = u_ambientColor * albedo;
+    // STORM / OVERCAST darkening. Two combined terms so the blades go genuinely
+    // DARK under an overcast sky (the old shader left ambient un-attenuated, so
+    // the blades GLOWED while the terrain went dark):
+    //   * overcast: a UNIFORM dim across the whole field from the sky-cover
+    //     fraction (overcast = less sky light everywhere, even between cloud
+    //     cores) -- this is the dominant darkener and removes the field-wide glow.
+    //   * coreShadow: the projected cloud cast shadow (same field as the terrain
+    //     pass) adds extra darkening directly under a cloud core.
+    float overcast = 0.0;
+    float coreShadow = 0.0;
+    if (u_cloudShadowEnabled != 0) {
+        // Uniform overcast dim from the sky-cover fraction itself (not just the
+        // cloud-core shadow): an overcast cell loses sky light EVERYWHERE, so the
+        // whole field darkens, not only the patches under a cloud core. Scaled by
+        // shadow_strength so a thin/decorative cloud layer barely dims.
+        overcast = clamp(u_cloudCoverageAmount * (0.4 + 0.6 * u_cloudShadowStrength), 0.0, 1.0);
+        coreShadow = fol_cloudShadow(fs_in.worldPos);
+    }
+    // Combined [0,1] light loss; overcast sets the floor, the core shadow deepens it.
+    float lightLoss = clamp(overcast + (1.0 - overcast) * coreShadow, 0.0, 1.0);
+
+    // (1) HUED AMBIENT -- the cyan fix. Take the sky-ambient BRIGHTNESS but apply
+    // it through the blade's OWN green albedo hue so the blue sky channel can
+    // never wash the blade to cyan. ambientLum tracks sun-up (bright day, ~10x
+    // dimmer night), so the grass still darkens with the scene. A small, capped
+    // sky tint is folded back for cohesion with the surrounding ground.
+    // u_ambientColor already carries the PI irradiance scale, so its luminance is
+    // the correct ambient brightness -- do NOT re-multiply by PI (that would over-
+    // brighten the blade by ~3x and blow it toward white). greenAmbient reuses the
+    // ORIGINAL ambient luminance, just re-hued through the blade's green albedo.
+    float ambientLum = max(dot(u_ambientColor, LUMA), 0.0);
+    vec3  greenAmbient = albedo * ambientLum;
+    vec3  skyTint = u_ambientColor * albedo;       // raw (blue-leaning) sky*albedo
+    vec3  ambient = mix(greenAmbient, skyTint, 0.20);
+    // Overcast strongly cuts the diffuse sky light reaching the ground cover.
+    ambient *= (1.0 - 0.9 * lightLoss);
+
+    // (3) DIRECT SUN -- the green-hued Lambert term that lifts daytime grass and
+    // collapses to ~0 at night (u_sunColor is pre-scaled CPU-side). Cloud-shadow
+    // attenuated like the terrain's direct sun.
     vec3 sunRadiance = u_sunColor * SUN_IRRADIANCE_SCALE;
-    vec3 direct = (albedo / PI) * sunRadiance * ndl;
+    vec3 direct = (albedo / PI) * sunRadiance * ndl * (1.0 - lightLoss);
 
     vec3 color = (ambient + direct) * ao;
 
