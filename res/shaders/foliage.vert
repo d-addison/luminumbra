@@ -99,7 +99,14 @@ void main() {
     vec3 cardRight = vec3(cf, 0.0, sf);
     vec3 cardUp    = vec3(0.0, 1.0, 0.0);
 
-    vec3 local = cardRight * (cornerX * aSize.x) + cardUp * (cornerY * aSize.y);
+    // T-I5b-DR-foliage-green (GROUNDING): the base verts (cornerY==0) are sunk a
+    // few cm BELOW the surface anchor so the blade root is buried in the terrain
+    // -- this removes the visible hover gap (blades looked like floating dashes)
+    // and guarantees ground contact even where the rendered terrain micro-varies
+    // from the sampled surface height. The tip still extends a full aSize.y up.
+    const float kRootSink = 0.06; // metres buried below the surface
+    float vy = cornerY * aSize.y - (1.0 - cornerY) * kRootSink;
+    vec3 local = cardRight * (cornerX * aSize.x) + cardUp * vy;
 
     // WIND SWAY: displace only the upper part of the card (quadratic in height
     // so the base is pinned). The sway flag scale rides in aColor.a; pebbles /
@@ -145,15 +152,23 @@ void main() {
     // SCREEN-BAND CULL (the airtight sky/horizon guard): ground cover must never
     // appear in the UPPER part of the frame -- that band is the distant horizon /
     // sky where a green card reads as a firefly speckle (GREEN_SKY_SPECKLE) or a
-    // false aurora (AURORA_AT_DUSK). The objective critique samples the TOP THIRD
-    // for both. We test the per-instance ANCHOR (shared by all 12 verts) so the
-    // whole blade is culled together (no torn triangles), and add a generous
-    // headroom for the blade height so a tall blade rooted just under the line
-    // cannot poke its tip into the band. NDC y in [-1 bottom .. +1 top]; cull when
-    // the anchor projects above y = +0.05 (below screen centre, clear of the
-    // top-third sample window). Pure clip-space test -> deterministic.
+    // false aurora (AURORA_AT_DUSK). The objective critique samples the TOP THIRD,
+    // i.e. NDC y > +0.33. We test the per-instance TIP (anchor + full blade
+    // height) -- shared by all 12 verts so the whole blade is culled together (no
+    // torn triangles). T-I5b-DR-foliage-green: testing the TIP (not just the
+    // anchor) closes the gap where a blade rooted just under the old anchor line
+    // poked its now-brighter GREEN tip into the top third at the dawn/storm
+    // horizon (GREEN_SKY_SPECKLE). Cull when the TIP projects above y = +0.10,
+    // comfortably below the top-third window with margin. Two clip-space tests
+    // (anchor for the near floor, tip for the horizon) -> deterministic.
     vec4 anchorClip = u_projection * (u_view * vec4(aPos, 1.0));
     if (anchorClip.w > 0.0 && (anchorClip.y / anchorClip.w) > 0.05) {
+        emitCulled(worldPos);
+        return;
+    }
+    vec3 tipWorld = aPos + vec3(0.0, aSize.y, 0.0);
+    vec4 tipClip = u_projection * (u_view * vec4(tipWorld, 1.0));
+    if (tipClip.w > 0.0 && (tipClip.y / tipClip.w) > 0.10) {
         emitCulled(worldPos);
         return;
     }

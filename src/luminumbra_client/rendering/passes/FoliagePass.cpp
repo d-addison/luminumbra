@@ -451,6 +451,20 @@ void FoliagePass::execute(RenderPipeline& pipeline, const Camera& camera) {
     m_shader->setFloat("u_sunIntensity", pipeline.m_sun.intensity);
     m_shader->setVec3("u_ambientColor", pipeline.m_skyAmbientColor);
 
+    // T-I5b-DR-foliage-green: feed the SAME projected cloud cast-shadow state the
+    // lighting pass uses, so storm-overcast cells drive the blades DARK like the
+    // terrain (no more teal glow under storm). Cleanly disabled when clouds are
+    // off (enabled==0 -> the shader's cloud term is a no-op).
+    const Luminumbra::Rendering::CloudRenderState& cloud = pipeline.m_cloud_state;
+    const bool cloud_on = cloud.enabled && cloud.shadow_enabled;
+    m_shader->setInt("u_cloudShadowEnabled", cloud_on ? 1 : 0);
+    m_shader->setVec2("u_cloudScrollOffset", cloud.scroll_offset);
+    m_shader->setFloat("u_cloudCoverageAmount", cloud.coverage_amount);
+    m_shader->setFloat("u_cloudBiomeVariation", cloud.biome_variation);
+    m_shader->setFloat("u_cloudPlaneHeight", cloud.plane_height);
+    m_shader->setFloat("u_cloudShadowStrength", cloud.shadow_strength);
+    m_shader->setVec3("u_cloudSunDir", cloud.sun_travel_dir);
+
     (void)gbuffer; // depth already copied into the lighting FBO by the pipeline
 
     glBindVertexArray(m_vao);

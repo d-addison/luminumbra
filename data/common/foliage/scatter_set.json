@@ -4,33 +4,33 @@
   "archetypes": [
     {
       "name": "grass_tuft",
-      "color": [0.24, 0.31, 0.13],
-      "half_width": 0.18,
-      "height": 0.50,
+      "color": [0.19, 0.34, 0.11],
+      "half_width": 0.19,
+      "height": 0.44,
       "sways": true,
       "density_weight": 11.0
     },
     {
       "name": "grass_short",
-      "color": [0.27, 0.33, 0.15],
-      "half_width": 0.16,
-      "height": 0.38,
+      "color": [0.22, 0.37, 0.13],
+      "half_width": 0.17,
+      "height": 0.33,
       "sways": true,
       "density_weight": 8.0
     },
     {
       "name": "fern",
-      "color": [0.19, 0.29, 0.14],
-      "half_width": 0.20,
-      "height": 0.58,
+      "color": [0.15, 0.31, 0.12],
+      "half_width": 0.21,
+      "height": 0.52,
       "sways": true,
       "density_weight": 2.5
     },
     {
       "name": "canopy_sprig",
-      "color": [0.17, 0.26, 0.12],
-      "half_width": 0.26,
-      "height": 0.80,
+      "color": [0.14, 0.28, 0.10],
+      "half_width": 0.27,
+      "height": 0.72,
       "sways": true,
       "density_weight": 0.5
     },
