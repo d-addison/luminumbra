@@ -161,14 +161,22 @@ void main() {
     // horizon (GREEN_SKY_SPECKLE). Cull when the TIP projects above y = +0.10,
     // comfortably below the top-third window with margin. Two clip-space tests
     // (anchor for the near floor, tip for the horizon) -> deterministic.
+    // T-I6 coverage: the objective sky-speckle sample is the TOP THIRD (NDC y > 0.33).
+    // The previous thresholds (anchor 0.05 / tip 0.10) were far below that window, so a
+    // DOWN-PITCHED view (horizon high in frame) culled most below-horizon ground cover
+    // and the foreground read as sparse tufts. Raise the cull to just BELOW the sky
+    // window (anchor 0.26 / tip 0.30) so ground cover fills the lower ~two-thirds while
+    // the top-third sky sample stays foliage-free (the geometric above-horizon cull at
+    // worldPos.y > eye-1 above is the primary sky guard; this is the screen-band backstop
+    // with margin to y=0.33). Re-validated against GREEN_SKY_SPECKLE/AURORA_AT_DUSK.
     vec4 anchorClip = u_projection * (u_view * vec4(aPos, 1.0));
-    if (anchorClip.w > 0.0 && (anchorClip.y / anchorClip.w) > 0.05) {
+    if (anchorClip.w > 0.0 && (anchorClip.y / anchorClip.w) > 0.26) {
         emitCulled(worldPos);
         return;
     }
     vec3 tipWorld = aPos + vec3(0.0, aSize.y, 0.0);
     vec4 tipClip = u_projection * (u_view * vec4(tipWorld, 1.0));
-    if (tipClip.w > 0.0 && (tipClip.y / tipClip.w) > 0.10) {
+    if (tipClip.w > 0.0 && (tipClip.y / tipClip.w) > 0.30) {
         emitCulled(worldPos);
         return;
     }
