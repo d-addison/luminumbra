@@ -5,10 +5,14 @@
 #include "../core/JobSystem.h"
 #include <array>
 #include <cstddef>
+#include <cstdint>
+#include <map>
+#include <mutex>
 #include <unordered_map>
 #include <memory>
 #include <string>
 #include <optional>
+#include <utility>
 #include <vector>
 #include <functional>
 #include "entt/entt.hpp"
@@ -110,6 +114,27 @@ struct TerrainGenParams {
     // mirrors biome_table_path). The world system loads every <type>/ pool here
     // when structures_enabled.
     std::string structures_data_dir;
+
+    // T-I6-A2: hydraulic/thermal RELIEF. When enabled, a deterministic per-region
+    // erosion bake (HydraulicErosion) carves drainage/talus into the analytic
+    // surface; ComputeShapedHeightSample adds the baked offset so EVERY height
+    // consumer (collision/spawn/water/far-LOD/mesh) sees the eroded surface
+    // (decision a). Distinct from the analytic `erosion` CONTROL noise (seed +4,
+    // erosion_spline) which only modulates amplitude -- this is an absolute
+    // height offset in metres. Disabled (the default preset) => byte-zero drift,
+    // identical hashes (ComputeShapedHeightSample/Grid skip the lookup, marker
+    // 0x06 is not mixed). World_hash-affecting when enabled -> deliberate bump.
+    bool hydro_enabled = false;
+    int hydro_iterations = 24;       // erosion sweeps (also the halo cell radius)
+    float hydro_cell_size_m = 8.0f;  // erosion grid resolution (coarse macro relief)
+    float hydro_talus_height = 1.2f; // thermal stable per-cell delta (m, at cell size)
+    float hydro_thermal_rate = 0.5f;
+    float hydro_rain_per_sweep = 0.02f;
+    float hydro_solubility = 0.10f;
+    float hydro_deposition = 0.10f;
+    float hydro_evaporation = 0.20f;
+    float hydro_sediment_capacity = 0.40f;
+    float hydro_max_offset = 24.0f;  // clamp |offset| (m)
 };
 
 struct WorldGenLayerSample {
@@ -568,6 +593,17 @@ private:
                                  int size_x, int size_z,
                                  float* out) const;
 
+    // T-I6-A2: hydraulic/thermal relief (decision a). The analytic height is
+    // computed by ...Impl(apply_hydro=false); ComputeShapedHeightSample adds the
+    // baked offset when hydro_enabled, so every consumer walks the eroded
+    // surface. SampleHydroOffsetMeters baked per kHydroRegionMeters region
+    // (deterministic, cached, recompute-on-load); the bake samples the NO-hydro
+    // height (apply_hydro=false) to avoid recursion. World_hash-affecting when
+    // enabled. Halo == hydro_iterations (halo-independent interior, A2a).
+    ShapedHeightSample ComputeShapedHeightSampleImpl(float world_x, float world_z,
+                                                     bool apply_hydro) const;
+    float SampleHydroOffsetMeters(float world_x, float world_z) const;
+
     // T-I4-1: the five normalized climate dimensions consumed by the biome
     // lookup. continentalness/erosion/peaks_valleys REUSE the +3/+4/+5 shaping
     // control noises (sampled at the unwarped column, exactly as
@@ -637,6 +673,17 @@ private:
     bool m_structures_enabled = false;
 
     WaterSystem* m_water_system;
+
+    // T-I6-A2: per-region baked hydraulic-relief offset cache. Keyed by integer
+    // region (rx,rz) on a kHydroRegionMeters grid; each entry is the cropped
+    // interior offset (row-major, kHydroRegionCells^2). Lazily baked on first
+    // lookup (pure function of region+seed+params -> recompute-on-load, NOT
+    // persisted, like wind/aether). `mutable` + a mutex because the height path
+    // is queried from multithreaded chunk-gen jobs; the bake is deterministic so
+    // a duplicate concurrent bake would be identical, the mutex only guards the
+    // map. Empty/unused when hydro is disabled.
+    mutable std::map<std::pair<std::int64_t, std::int64_t>, std::vector<float>> m_hydro_cache;
+    mutable std::mutex m_hydro_mutex;
 };
 
 } // namespace Luminumbra::Systems

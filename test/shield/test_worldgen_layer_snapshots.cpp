@@ -1339,6 +1339,56 @@ TEST(WorldGenLayerSnapshotTest, ShapedHeightBatchPathsExactlyMatchScalarPath) {
     }
 }
 
+// T-I6-A2b: hydraulic relief (decision a). With hydro enabled the baked erosion
+// offset must (1) actually shift terrain height vs the hydro-off world, (2) be
+// deterministic across two worlds, and (3) keep the chunk-batch heightmap path
+// BYTE-IDENTICAL to the scalar GetTerrainHeightAt (both add the same offset).
+// This is the integration gate; the kernel itself is covered by the A2a unit
+// tests (determinism + halo-independence).
+TEST(WorldGenLayerSnapshotTest, HydraulicReliefShiftsHeightDeterministicallyAndKeepsBatchParity) {
+    TerrainGenParams off_params = ShapingTestParams();
+    TerrainGenParams on_params = ShapingTestParams();
+    on_params.hydro_enabled = true;
+
+    SHIELD_WorldSystem off(nullptr, nullptr, off_params, kSeed);
+    SHIELD_WorldSystem on(nullptr, nullptr, on_params, kSeed);
+    SHIELD_WorldSystem on2(nullptr, nullptr, on_params, kSeed);
+
+    bool any_diff = false;
+    for (int z = -150; z <= 150; z += 13) {
+        for (int x = -150; x <= 150; x += 17) {
+            const float wx = static_cast<float>(x) + 0.3f;
+            const float wz = static_cast<float>(z) - 0.2f;
+            const float h_off = off.GetTerrainHeightAt(wx, wz);
+            const float h_on = on.GetTerrainHeightAt(wx, wz);
+            const float h_on2 = on2.GetTerrainHeightAt(wx, wz);
+            EXPECT_EQ(h_on, h_on2) << "hydro height non-deterministic at (" << wx << ", " << wz << ")";
+            const float d = (h_on > h_off) ? (h_on - h_off) : (h_off - h_on);
+            if (d > 1.0e-3f) any_diff = true;
+        }
+    }
+    EXPECT_TRUE(any_diff) << "hydraulic relief had no effect on terrain height";
+
+    // Batch (GenerateChunkData -> ComputeShapedHeightGrid + post-pass) must equal
+    // the scalar path byte-for-byte with hydro on.
+    const std::array<IVec3, 3> coords{{IVec3(0, 0, 0), IVec3(-3, 1, 2), IVec3(7, -1, -5)}};
+    for (const IVec3& c : coords) {
+        const IVec3 base_pos = c * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+        Chunk chunk(c);
+        on.GenerateChunkData(chunk, 1);
+        for (int z = 0; z <= CHUNK_SIZE_Z; ++z) {
+            for (int x = 0; x <= CHUNK_SIZE_X; ++x) {
+                const float wx = static_cast<float>(base_pos.x + x);
+                const float wz = static_cast<float>(base_pos.z + z);
+                const std::size_t i = static_cast<std::size_t>(x) +
+                    static_cast<std::size_t>(z) * (CHUNK_SIZE_X + 1);
+                EXPECT_EQ(chunk.heightmap_data[i], on.GetTerrainHeightAt(wx, wz))
+                    << "hydro batch/scalar parity broke at (" << wx << ", " << wz << ")";
+            }
+        }
+    }
+}
+
 // T-I4-DR-shaping-perf: the SIMD-batched position-array shaped-height helper
 // (ComputeShapedHeightsAtPositions, used to batch the per-column surface-span
 // corner samples) must return heights BYTE-IDENTICAL to the scalar
