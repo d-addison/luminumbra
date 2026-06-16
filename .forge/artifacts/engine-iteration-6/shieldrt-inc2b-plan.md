@@ -163,3 +163,33 @@ temporal-stability gate (needs a minimal render-interpolated prev-view history).
 
 Source: background scoping agent (read-only), 2026-06-16. Adding the `GpuTimerPass`
 entry will require re-blessing the RenderHealth pass-name contract in render_smoke_test.
+
+## inc2c-SCALE step 1 LANDED + validation finding (2026-06-16, autonomous)
+**Step 1 (far-pixel-only dispatch) implemented** in `ShieldRtFarFieldPass`: a
+feedback-safe scene-depth COPY (own texture+FBO, blitted from the G-buffer via
+`capture_scene_depth()` BEFORE the march binds the G-buffer as draw target) is sampled
+in the frag; `u_farPixelEarlyOut` discards pixels where opaque geometry already won
+(sampled depth < 1.0) — the `GL_LESS` test would reject the write there anyway, so it
+is quality-neutral (aligned with Decision A, augment-not-replace). Falls back to the
+full-frame march when no depth copy was captured (never wrong, just slower). Committed
+DORMANT (`kEnableExperimentalFarFieldGpuRaymarching = false`) → zero blast radius.
+
+**First end-to-end live-pass validation (compile flag flipped on LOCALLY, reverted
+before commit):** the pass runs **GL-clean (0 errors)** through `farlod_horizon_smoke`
+— the depth-copy/blit/sample path is sound, no feedback-loop error. The early-out
+shader compiles and runs.
+
+**BLOCKER for in-scenario PARITY validation — it's step 3, not step 1.** With the flag
+on, `farlod_horizon_smoke` captures only **1/5 stations** and reports
+`regions_wanted=0 / far_region_draws=0` at BOTH 8 s and 52 s (the 8 s baseline showed
+it too, so it PRE-DATES the early-out). The unscaled pass — dominated by the
+**synchronous 49-tile `rebuild_field` on the GL thread** on each region-crossing —
+starves the streaming job system, so far-LOD regions never become resident and the
+scenario never reaches a settled multi-station far-field. Confirms the plan's "runs but
+NOT scalable → stays dormant". **Consequence: the early-out's far-field output parity
+cannot be validated in-scenario until step 3 (async region-crossing rebuild on
+JobSystem, render prior field until ready) lands so streaming can progress.** Sequence
+correction: do **step 3 (async rebuild) BEFORE** a settled FarLodHorizon-style flag-on
+parity/seam gate; step 1's perf benefit + step 2 (half-res) are measured after the
+scenario can settle. The isolated ctest benches (ShieldRtFarField*Gpu) remain the only
+green correctness signal until then.

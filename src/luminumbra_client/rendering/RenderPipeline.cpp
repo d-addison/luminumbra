@@ -1667,6 +1667,12 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
         const glm::mat4 ff_view_proj = ff_proj * ff_view;
         const glm::mat4 ff_inv_vp = glm::inverse(ff_view_proj);
         const glm::mat3 ff_normal_view(ff_view);
+        // inc2c-SCALE step 1: copy the just-written G-buffer depth into the pass's own
+        // texture BEFORE binding the G-buffer as the march's draw target, so the frag
+        // can sample scene depth for the far-pixel early-out without a feedback loop on
+        // the depth attachment it writes via gl_FragDepth.
+        m_shieldrt_far_pass->capture_scene_depth(
+            m_gbuffer_pass->gbuffer().fbo_id, m_screen_width, m_screen_height);
         glBindFramebuffer(GL_FRAMEBUFFER, m_gbuffer_pass->gbuffer().fbo_id);
         const GLenum ff_bufs[4] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1,
                                    GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3};

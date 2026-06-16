@@ -55,6 +55,13 @@ public:
     // no-op otherwise. Must run on the GL thread (it uploads + dispatches).
     void update(const Systems::SHIELD_WorldSystem& world, const glm::vec3& camera_pos);
 
+    // inc2c-SCALE step 1: blit the source FBO's depth into a pass-owned copy
+    // texture so the raymarch frag can sample it WITHOUT a feedback loop on the
+    // depth attachment it writes (gl_FragDepth). Call BEFORE render() each frame;
+    // it lazily (re)allocates the copy texture/FBO to the viewport. Enables the
+    // far-pixel early-out (skip rays where opaque geometry already won the pixel).
+    void capture_scene_depth(GLuint src_fbo, int width, int height);
+
     // Fullscreen raymarch into the CURRENTLY BOUND G-buffer FBO (the caller binds
     // it, sets the 4 draw buffers, and enables depth-test GL_LESS with writes on).
     // No-op until the first successful update() populated the heightfield.
@@ -77,6 +84,13 @@ private:
 
     GLuint m_base_ssbo = 0;         // heightfield base (n*n floats)
     GLuint m_maxmip_ssbo = 0;       // flattened max-mip pyramid
+
+    // inc2c-SCALE step 1: scene-depth copy for the far-pixel early-out.
+    GLuint m_scene_depth_tex = 0;
+    GLuint m_scene_depth_fbo = 0;
+    int m_depth_w = 0;
+    int m_depth_h = 0;
+    bool m_have_depth_copy = false;
 
     // Cached field descriptor (set by rebuild_field).
     int m_center_rx = 0;
