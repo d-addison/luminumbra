@@ -1739,6 +1739,37 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     assert(PassGl::debug_group_depth() == 0 && "unbalanced GL debug-group push/pop in render_frame");
 }
 
+void RenderPipeline::update_aether_field(const std::vector<float>& cells, float world_origin_x,
+                                         float world_origin_z, int extent, float cell_size_m) {
+    // One-way sim->render bridge for the Aetheric emissive tap (T-I6-A1d). Empty/
+    // mismatched input -> inactive (lighting pass adds no glow, pixel-identical).
+    if (extent <= 0 ||
+        cells.size() != static_cast<std::size_t>(extent) * static_cast<std::size_t>(extent)) {
+        m_aetherFieldActive = false;
+        return;
+    }
+    if (m_aetherFieldTexture == 0 || m_aetherFieldExtent != extent) {
+        if (m_aetherFieldTexture != 0) {
+            glDeleteTextures(1, &m_aetherFieldTexture);
+            m_aetherFieldTexture = 0;
+        }
+        glGenTextures(1, &m_aetherFieldTexture);
+        glBindTexture(GL_TEXTURE_2D, m_aetherFieldTexture);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, extent, extent, 0, GL_RED, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        m_aetherFieldExtent = extent;
+    }
+    glBindTexture(GL_TEXTURE_2D, m_aetherFieldTexture);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, extent, extent, GL_RED, GL_FLOAT, cells.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+    m_aetherFieldWorldOrigin = glm::vec2(world_origin_x, world_origin_z);
+    m_aetherFieldCellSize = cell_size_m;
+    m_aetherFieldActive = true;
+}
+
 void RenderPipeline::on_resize(u32 new_width, u32 new_height) {
     if (new_width == 0 || new_height == 0 || (new_width == m_screen_width && new_height == m_screen_height)) return;
     m_screen_width = new_width;
