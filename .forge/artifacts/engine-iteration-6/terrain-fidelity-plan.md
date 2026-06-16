@@ -46,3 +46,37 @@ Each lever: implement -> rebuild -> re-run `world_visual_sweep` -> `visual_criti
 analyze --strict` -> read `ground_detail_energy` (must climb toward/over 8.0 and the
 LOW_TEXTURE_DETAIL cells clear) + eyeball the native crops at the BF4/BF1 bar. Iterate.
 Lever 1+2 are the efficient first pass (no new assets); 3-5 are the deeper lift.
+
+## Pass #1 findings (2026-06-16) — REVERTED, lesson learned
+Tried lever 1 (detail-normal overlay at 6x tiling) + a render-only low/mid-freq
+albedo break-up. **Ineffective** (detail energy unchanged 1.98 vs 1.99; near crop
+visually unchanged) -> reverted (no measured gain + shader cost violates the
+measured/scalable principles). WHY:
+- The terrain DOES take the textured triplanar path (5 albedo+normal layers load;
+  near terrain shows muddy soil) — it is NOT the flat base-color path. The look is
+  low-CONTRAST, low-detail texturing, not "no texture".
+- A high-freq detail-normal MINIFIES AWAY at the down-view distance; low/mid-freq
+  albedo break-up does not raise the HIGH-freq Laplacian metric (and is too
+  large-scale to see in the near field). Distant terrain is minification-bound.
+
+### Corrected lever order
+1. **Contrast amplification of the existing texture** (in `triplanar_albedo` /
+   normal): amplify the AC (high-freq) component — `albedo = mix(meanAlbedo, albedo,
+   k)` with k>1, and boost normal strength. This MULTIPLIES existing high-freq -> it
+   actually moves the Laplacian metric AND de-muddies the look. The metric-moving
+   lever (where there is detail to amplify, i.e. near/mid).
+2. **Higher-CONTRAST / higher-res detail textures** — the 256px terrain albedos are
+   muddy/low-contrast; this is the base-fidelity lift (asset work). Kill the
+   blue-speckle artifact in the soil normal/decode.
+3. **Lighting/AO contrast** on terrain (richer sun/ambient + readable AO).
+4. **Metric recalibration:** the 8.0 floor may be too aggressive for distance-
+   dominated down-views (distant terrain legitimately minifies). Consider a
+   near-weighted ROI (e.g. bottom 1/6 = nearest terrain) or a floor calibrated to
+   achievable detail once contrast/textures are improved. The floor is provisional.
+5. Macro material variation by slope/height is a WORLDGEN change (world_hash bump),
+   not render-only — defer to a deliberate hash-bump increment.
+
+### Process note
+`world_visual_sweep` writes PPMs; the PPM->PNG conversion is a SEPARATE validator
+step. Running the scenario directly requires a manual PPM->PNG before
+`visual_critique.py` (which reads sweep/png/), or stale PNGs are critiqued.
