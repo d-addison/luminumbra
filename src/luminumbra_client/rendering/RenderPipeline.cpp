@@ -1658,7 +1658,8 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // (GL_LESS) against the mesh depth so it only wins where nothing is closer.
     // OFF by default (compile flag + runtime opt-in); render is unchanged then.
     if (kEnableExperimentalFarFieldGpuRaymarching && m_far_field_runtime_requested &&
-        m_shieldrt_far_pass && m_shieldrt_far_pass->ready()) {
+        m_shieldrt_far_pass && m_shieldrt_far_pass->ready() &&
+        m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::FarField)) {
         begin_gpu_pass_timer(GpuTimerPass::FarFieldRaymarch);
         m_shieldrt_far_pass->update(world_system, camera.Position);
         const glm::mat4 ff_view = camera.GetViewMatrix();
@@ -1708,10 +1709,12 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     
     // 6. WATER PASS (Renders to m_lighting_fbo, reads from it for refraction)
     glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
-    begin_gpu_pass_timer(GpuTimerPass::Water);
-    m_water_pass->execute(*this, renderable_chunk_snapshots, camera);
-    end_gpu_pass_timer(GpuTimerPass::Water);
-    glBindVertexArray(0);  // Unbind after water pass
+    if (m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Water)) {
+        begin_gpu_pass_timer(GpuTimerPass::Water);
+        m_water_pass->execute(*this, renderable_chunk_snapshots, camera);
+        end_gpu_pass_timer(GpuTimerPass::Water);
+        glBindVertexArray(0);  // Unbind after water pass
+    }
 
     // 7. SKYBOX PASS (Renders to m_lighting_fbo)
     begin_gpu_pass_timer(GpuTimerPass::Skybox);
@@ -1723,10 +1726,12 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // over the lit scene, wiring the dormant volumetric_lighting.frag. Reads the
     // SAME sky-view/transmittance LUT the skybox uses so the fog palette stays
     // coherent with the sky (warm pinks/oranges at low sun). Budget ≤ 0.3 ms.
-    begin_gpu_pass_timer(GpuTimerPass::Aerial);
-    execute_aerial_pass(camera);
-    end_gpu_pass_timer(GpuTimerPass::Aerial);
-    glBindVertexArray(0);
+    if (m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Aerial)) {
+        begin_gpu_pass_timer(GpuTimerPass::Aerial);
+        execute_aerial_pass(camera);
+        end_gpu_pass_timer(GpuTimerPass::Aerial);
+        glBindVertexArray(0);
+    }
 
     // 7c. FOLIAGE PASS (T-I5b-1, F1): instanced ground-cover scatter blended
     // into the lit HDR target. Depth-tested against the scene depth (blitted into
@@ -1735,7 +1740,8 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // placement hash + the A2 wind bridge) BEFORE this; here we only draw. A
     // no-op (zero GL draws) when foliage is disabled / empty, so all existing
     // visual gates stay byte-stable. RENDER-ONLY (one-way, never feeds the sim).
-    if (m_foliage_pass) {
+    if (m_foliage_pass &&
+        m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Foliage)) {
         begin_gpu_pass_timer(GpuTimerPass::Foliage);
         m_foliage_pass->execute(*this, camera);
         end_gpu_pass_timer(GpuTimerPass::Foliage);
@@ -1747,7 +1753,8 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // advanced first; the descriptor schedule (the sim-deterministic surface) is
     // rebuilt by the scenario driver, NOT here. A no-op (zero GL draws) when no
     // emitters exist, so all existing visual gates stay byte-stable.
-    if (m_particle_pass) {
+    if (m_particle_pass &&
+        m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Particles)) {
         m_particle_pass->update(deltaTime);
         begin_gpu_pass_timer(GpuTimerPass::Particle);
         m_particle_pass->execute(*this, camera);
@@ -1760,8 +1767,10 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // A no-op when no strike is active (zero added cost). Its transient cost is
     // captured by the FinalBlit-adjacent timing; the PerfRegression budget (≤ 0.5 ms)
     // is bounded by the overlay being a single additive full-screen quad.
-    m_lighting_pass->execute_lightning_overlay(*this, camera);
-    glBindVertexArray(0);
+    if (m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Lightning)) {
+        m_lighting_pass->execute_lightning_overlay(*this, camera);
+        glBindVertexArray(0);
+    }
 
     // 9. FINAL BLIT TO SCREEN
     begin_gpu_pass_timer(GpuTimerPass::FinalBlit);

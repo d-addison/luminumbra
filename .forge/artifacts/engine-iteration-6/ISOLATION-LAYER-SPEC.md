@@ -1,5 +1,26 @@
 # Isolation / Layer render mode — SPEC (T-I6, owner-requested 2026-06-16)
 
+> **v1 SHIPPED (2026-06-16):** all three slices landed and green.
+> - **Slice 1 — backdrop override** (`475e70b`): SkyboxPass flat-fills the
+>   no-geometry background (void/greenscreen/checker) via `enhanced_skybox.frag`
+>   `u_backdropMode`/`u_backdropColor`. (Root cause of the initial 0%-green: the
+>   override was first authored in the dormant `skybox.frag`; the pipeline loads
+>   `enhanced_skybox.frag`.)
+> - **Slice 2 — layer suppression**: each subsystem draw is gated by its layer
+>   bit. The critique's C1–C5 (deferred clear-before-lighting masking) are SIDE-
+>   STEPPED — the backdrop is the post-lighting skybox, and isolation only OMITS
+>   draws (gbuffer terrain/skinned sub-passes + the late Water/Aerial/Foliage/
+>   Particle/Lightning/FarField passes). Suppressed pixels stay cleared → the
+>   skybox backdrop fills them; kept geometry depth-tests normally. ("Floating lit
+>   geometry needs a ground-plane studio rig" = the S3 v2 deferral, documented.)
+> - **Slice 3 — CI gate**: `validate-engine-frontier.ps1 -Mode IsolationLayer`
+>   drives ONE seeded capture (terrain/greenscreen), then
+>   `.forge/scripts/check-isolation-backdrop.py` asserts (tolerantly, T2) the sky
+>   region == backdrop AND the isolated terrain still rendered. `IsolationConfig.*`
+>   (7 gtests) is in the default lane; default render byte-stable (ctest 254/254).
+> Deferred to v2: render-side clear-masking, transparent RGBA, studio rig, sim
+> debug-viz layers, interactive in-client toggle.
+>
 > **POST-CRITIQUE REVISION (2026-06-16):** the 4-lens forge-critique
 > (`.forge/critique-isolation-layer-spec-20260616.md`) found the render-side
 > per-pass masking + transparent-alpha v1 below is BOTH over-engineered (risky

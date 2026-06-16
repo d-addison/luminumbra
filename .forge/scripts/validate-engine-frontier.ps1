@@ -1,5 +1,5 @@
 ﻿param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "AtmosphereAudio", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "ParticleEmitterDeterminism", "CloudShadow", "FoliageInstancing", "Precipitation", "TimeOfDaySweep", "WorldVisualSweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "WindFieldDeterminism", "AetherFieldDeterminism", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "StimulusChannelGate", "BiomeCoverage", "RiverPresence", "WaterfallVisual", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "AtmosphereAudio", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "ParticleEmitterDeterminism", "CloudShadow", "FoliageInstancing", "Precipitation", "TimeOfDaySweep", "WorldVisualSweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "WindFieldDeterminism", "AetherFieldDeterminism", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "StimulusChannelGate", "BiomeCoverage", "RiverPresence", "WaterfallVisual", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "IsolationLayer", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -4143,6 +4143,78 @@ function Test-FarLodHorizon {
     }
 }
 
+# --- T-I6 isolation/layer review mode gate ---
+# Drives ONE seeded capture (critique T4: minimise CI cost) with the Terrain
+# layer isolated on a GREENSCREEN backdrop, then objectively asserts BOTH the
+# SkyboxPass backdrop override AND layer suppression:
+#   - the no-geometry sky region fills with the flat backdrop colour (the sky
+#     dome is replaced -> proves --isolation-backdrop reached the shader), and
+#   - the lower region still carries lit terrain (proves the isolated layer
+#     rendered and the gate is not vacuously all-backdrop, while water/foliage/
+#     particles/aerial/lightning were suppressed by their cleared layer bits).
+# The objective check is tolerant (per-channel LSB tolerance) per critique T2.
+# Reuses the farlod_horizon_smoke capture harness (native-pinned). Default
+# (no isolation flags) is byte-stable and is covered by the rest of the suite.
+function Test-IsolationLayer {
+    $exe = Get-ClientExe
+    $runSeconds = [Math]::Max(8, [Math]::Min([int]$SmokeSeconds, 14))
+    $isoDir = "build/$BuildPreset/test-artifacts/runtime/isolation-layer"
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $isoDir
+    New-Item -ItemType Directory -Force -Path $isoDir | Out-Null
+
+    Invoke-Checked -FilePath $exe -ArgumentList @(
+        "--scenario", "farlod_horizon_smoke",
+        "--auto-create-world",
+        "--auto-enter-world",
+        "--timed-run", "$runSeconds",
+        "--world-preset", "mountains",
+        "--no-audio",
+        "--no-ui",
+        "--isolation-layers", "terrain",
+        "--isolation-backdrop", "greenscreen",
+        "--runtime-artifact-dir", $isoDir
+    ) -TimeoutSeconds ([Math]::Max(180, $runSeconds + 120))
+
+    # GL must be clean (the analysis artifact is emitted by the farlod scenario).
+    $analysisPath = Join-Path $isoDir "farlod-horizon-analysis.json"
+    if (Test-Path $analysisPath) {
+        $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
+        if ([int64]$analysis.gl_debug.errors -ne 0) {
+            throw "isolation-layer run emitted GL debug errors: $($analysis.gl_debug.errors)"
+        }
+    }
+
+    $shots = @(Get-ChildItem -Path (Join-Path $isoDir "screenshots") -Filter *.ppm -ErrorAction SilentlyContinue)
+    if ($shots.Count -lt 1) {
+        throw "isolation-layer run produced no screenshots under $isoDir/screenshots"
+    }
+    foreach ($s in $shots) { Assert-PpmArtifact $s.FullName }
+    Assert-CapturePinned -ArtifactDir $isoDir -Name "IsolationLayer (terrain/greenscreen)"
+
+    # Objective backdrop-fill + geometry-present check. numpy REQUIRED (a gate
+    # CI cannot run is not a gate); override with $env:VISUAL_SWEEP_PYTHON.
+    $py = $null
+    foreach ($cand in @($env:VISUAL_SWEEP_PYTHON, "python", "python3", "py")) {
+        if ([string]::IsNullOrWhiteSpace($cand)) { continue }
+        if (-not (Get-Command $cand -ErrorAction SilentlyContinue)) { continue }
+        & $cand -c "import numpy" 2>$null
+        if ($LASTEXITCODE -eq 0) { $py = $cand; break }
+    }
+    if (-not $py) {
+        throw "isolation-layer gate cannot run: no python with numpy found. Install it or set VISUAL_SWEEP_PYTHON (a visual gate that cannot run is not a gate)."
+    }
+
+    $checkScript = ".forge/scripts/check-isolation-backdrop.py"
+    $outJson = Join-Path $isoDir "isolation-terrain-greenscreen.json"
+    $ppmArgs = @($shots | ForEach-Object { $_.FullName })
+    & $py $checkScript "greenscreen" $outJson "true" @ppmArgs
+    if ($LASTEXITCODE -ne 0) {
+        $detail = if (Test-Path $outJson) { (Get-Content $outJson -Raw) } else { "(no decision JSON produced)" }
+        throw "isolation-layer OBJECTIVE CHECK FAILED (backdrop override or layer suppression broke).`n$detail"
+    }
+    Write-Host "isolation-layer gate passed: terrain isolated on greenscreen; backdrop fill + isolated-geometry presence verified across $($shots.Count) frame(s) -> $outJson"
+}
+
 function Test-HeadlessServerTick {
     # T-I3-13: headless server boot + fixed 30 Hz tick determinism gate.
     # Hygiene first (script-side mirror of the ServerHeadlessHygiene ctest so
@@ -5615,6 +5687,7 @@ switch ($Mode) {
     "WorldVisualSweep" { Test-WorldVisualSweep }
     "PlayerView" { Test-PlayerView }
     "FarLodHorizon" { Test-FarLodHorizon }
+    "IsolationLayer" { Test-IsolationLayer }
     "HeadlessServerTick" { Test-HeadlessServerTick }
     "HeadlessServerTickHeavy" { Test-HeadlessServerTickHeavy }
     "WindFieldDeterminism" { Test-WindFieldDeterminism }
