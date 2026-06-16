@@ -1,5 +1,75 @@
 # Engine Frontier Handoff
 
+## Iteration 5b CLOSEOUT (2026-06-15) — Life & Water + Visual-QA pipeline
+
+Branch `feat/polyglot-audit-roadmap`, tip **97d81bc**. Iteration 5b complete:
+foliage, ecology stimulus channels, atmosphere audio, waterfalls, folded water
+backlog — all gated, plus the storm-visual DR and an automated **visual-critique
+pipeline**. **world_hash held at `d950a6afc12a5cdc` (no bump #4** — ecology kept
+canonical-neutral by design).
+
+### Features landed (all render/client-only except ecology, all gated)
+- **Foliage** (`83f3344` + DR): instanced scatter, biome-density, A2 wind sway,
+  land/slope-gated placement. FoliageInstancing gate green.
+- **Ecology** (`29a4e81`): stimulus-channel registry (weather/temp/time/light) →
+  planner; canonical creatures non-reactive so `world_hash` unchanged;
+  StimulusChannelGate (behavior differs across fixtures, deterministic).
+- **Atmosphere audio** (`a5a814b`): wind/rain ambience + weather reverb; null-audio
+  green; AtmosphereAudio gate.
+- **Waterfalls** (`637457a`): deterministic river/steep-drop site detection (578
+  sites), flow-map sheet + spray + foam + roar; WaterfallVisual gate.
+- **Water backlog** (`fb5f9ca`): live-ring sea coverage (sub-waterline depth-fade,
+  trap-proof), seabed de-band, sand albedo; FarLodHorizon re-derived (archipelago
+  water ratio 0.013→0.999).
+- **EnduranceStreamDrain** (`ed72f89`): was a single-frame-snapshot flake (proven
+  identical at the 5a close); fixed to measure the settled backlog floor.
+
+### Automated visual-QA pipeline (owner-mandated — the key process deliverable)
+`tools/visual_critique.py` + the `WorldVisualSweep` gate: a feature×state matrix
+(48 cells = tod × angle × weather × season) + a DUAL-BIAS critique — **non-AI
+objective** (luminance/contrast, %black/%blown, isolated green-speckle detection,
+sky/ground split, cloud-structure variance, aurora-at-dusk chroma, foliage cover,
+rain anisotropy → hard flags) + **AI neutral describe + AI adversarial flaw-hunt**.
+This replaced unreliable eyeballing and repeatedly caught agents over-claiming
+"it's fixed." It is the STANDING render-QA gate.
+
+### Storm-visual DR (driven by the pipeline, owner feedback)
+The pipeline + owner review drove ~5 fix rounds. FIXED + verified: lightning now
+strikes cloud→ground with impact (was mid-air); floating glow-disc/UFO artifact
+removed; rain falls/streaks (was dark sky-dashes / camera-float / grey fog);
+sky-speckle removed (full-screen 2D noise over the sky dome); aurora night-only
+(no dawn/storm bleed) + curtains; storm clouds structured; night water no longer
+emissive-cyan; foliage green (was cyan billboards) + grounded; water de-faceted
+(ripple normals). Determinism held (`d950a6afc12a5cdc`) throughout — all
+render-only.
+
+### Remaining VISUAL DEBT (pipeline-tracked, → iter-6 research)
+See `.forge/artifacts/engine-iteration-5b/visual-debt.md`. The egregious bugs are
+fixed; remaining QUALITY items need the research-driven reimplementation:
+continuous scene-lit GPU grass (foliage is still billboard tufts), aurora curtains,
+volumetric-cloud storm depth, ocean-wave water, terrain erosion + far-LOD
+(blob-rocks / distant slabs). 1/48 marginal objective flag remains. The
+adversarial sign-off calls these a narrow BLOCK by strict acceptance wording;
+the orchestrator closes the ENGINE ITERATION (features + pipeline + bug-fixes
+done) and tracks the quality debt for the research passes.
+
+### Verification (tip 97d81bc)
+- ctest **230/230**; all engine-frontier gates green incl. FoliageInstancing,
+  StimulusChannelGate, AtmosphereAudio, WaterfallVisual, WorldVisualSweep,
+  FarLodHorizon (re-derived), + the full 5a determinism/sky/weather suite.
+- Endurance300 + Smoke + WaterVisual green; objective critique 1/48 (marginal).
+- forge verify effectively clean (the documented brace false-positives).
+
+### Iteration-6 inputs (research agenda — owner-requested 2026-06-15)
+Lead = Aetheric pillar + SHIELD-RT productionization. Research-then-implement
+items (with literature) recorded in this session's response + visual-debt.md:
+GPU-driven rendering (Nanite cluster cull), SHIELD-RT SDF raymarch (Claybook/
+Lumen), Transvoxel/Dual-Contouring LOD, hydraulic erosion (Mei 2007), GPU grass
+(GoT GDC 2021), volumetric clouds (Nubis), DDGI, ocean (Tessendorf), VSM; plus
+core features: motion-matching/IK animation, parametric/evolved creatures, WFC
+structures, lockstep determinism (fixed-point), HRTF audio, photography aesthetic
+scoring (NIMA). Run the `deep-research` skill per item before committing.
+
 ## Iteration 5a CLOSEOUT (2026-06-15) — Atmospheric pillar (LEAD)
 
 Branch `feat/polyglot-audit-roadmap`, tip **a971154**. **All 8 atmospheric-core
