@@ -44,6 +44,16 @@ T = {
     "aurora_dusk_chroma_frac": 0.010, # green/magenta chroma in a dusk sky => aurora leaking out of night
     "foliage_ground_green_min": 0.010, # daytime down-view: ground green-cover floor (foliage must be present)
     "rain_anis_min": 1.15,          # storm: vertical/horizontal gradient ratio floor (rain reads as streaks)
+    # --- VISUAL-FIDELITY FLOOR (owner principle 2026-06-16: BF4/BF1 realism) ---
+    # Ground high-frequency surface detail (mean |Laplacian| of the ground-third
+    # luma). Flat/untextured terrain reads low-fi; a textured, BF4/BF1-floor surface
+    # carries visible detail. PROVENANCE: measured on the current world-visual-sweep
+    # at native 3840x1600 noon clear ground views, every cell scored 2.0-6.3
+    # (flat-shaded low-detail terrain — "visuals are pretty shit"); the floor sits
+    # above that so the gate flags the shortfall until the terrain is textured to the
+    # fidelity floor. PROVISIONAL — recalibrate against a fidelity reference; pinned
+    # by tools/test_visual_critique.py.
+    "fidelity_detail_min": 8.0,
 }
 
 # Flags that BLOCK the gate in --strict mode. All objective defect flags are
@@ -61,8 +71,31 @@ HARD_FLAGS = {
     "FOLIAGE_SPARSE",
 }
 
+# Visual-FIDELITY-FLOOR flags (owner principle: minimum realistic fidelity at the
+# Battlefield 4/BF1 / Frostbite level — don't ship flat/low-fi visuals). Distinct
+# from the DEFECT flags above: those catch BROKEN renders, these catch renders that
+# work but fall below the beauty floor. They BLOCK in --strict exactly like the
+# defect flags, so the critique enforces the floor; a fidelity BLOCK is discharged
+# only by raising the visuals (e.g. texturing the far/near terrain), never by
+# reclassification. (These are expected to fire on the current sub-floor visuals —
+# that is the point: the gate now objectively reflects "the visuals are not there
+# yet" and drives the work.)
+FIDELITY_FLAGS = {
+    "LOW_TEXTURE_DETAIL",
+}
+
 def luma(a):  # a: HxWx3 uint8
     return (0.2126*a[...,0] + 0.7152*a[...,1] + 0.0722*a[...,2])
+
+def detail_energy(L):
+    """High-frequency surface detail of a luma plane: mean abs discrete Laplacian
+    (4-neighbour). Flat/untextured surfaces -> near 0; textured surfaces (real
+    terrain micro-detail, normal-mapped relief) -> markedly higher. This is the
+    objective proxy for the BF4/BF1 texture-fidelity floor."""
+    if L.shape[0] < 3 or L.shape[1] < 3:
+        return 0.0
+    lap = np.abs(4.0*L[1:-1, 1:-1] - L[:-2, 1:-1] - L[2:, 1:-1] - L[1:-1, :-2] - L[1:-1, 2:])
+    return float(lap.mean())
 
 def load(p):
     return np.asarray(Image.open(p).convert("RGB"), dtype=np.float32)
@@ -114,6 +147,7 @@ def analyze_array(a, m):
         "mean_sat": float(sat.mean()),
         "sky_luma": float(luma(region(a,"sky")).mean()),
         "ground_luma": float(luma(region(a,"ground")).mean()),
+        "ground_detail_energy": detail_energy(luma(region(a,"ground"))),
     }
     # --- universal flags ---
     if metrics["black_frac"] > T["black_frac_dead"]:
@@ -134,6 +168,14 @@ def analyze_array(a, m):
     storm = bool(m.get("storm"))
     daytime = bool(m.get("daytime"))
     tod = m.get("tod"); angle = m.get("angle")
+
+    # --- VISUAL-FIDELITY FLOOR: terrain texture detail (BF4/BF1 realism) ---
+    # Judge on daytime, clear, terrain-facing cells: pitched-up sky views and water
+    # cells don't put lit terrain in the ground third, so they aren't a fair texture
+    # test. Flat/untextured terrain falls below the detail floor and reads low-fi.
+    if daytime and not storm and not bool(m.get("pitched_up")) and angle != "water":
+        if metrics["ground_detail_energy"] < T["fidelity_detail_min"]:
+            flags.append("LOW_TEXTURE_DETAIL")
 
     # --- night-storm legibility: dark but must have SOME structure/contrast ---
     if storm and tod == "night":
@@ -227,14 +269,21 @@ def combine(sweep_dir, ai_json):
     return {"objective": obj, "ai": ai, "high_confidence": high}
 
 def _strict_exit(rep):
-    """Exit 1 if any blocking objective flag was raised (gate mode)."""
-    hard = {fl: n for fl, n in rep["flag_counts"].items() if fl in HARD_FLAGS}
+    """Exit 1 if any blocking objective flag was raised (gate mode). Blocking =
+    DEFECT flags (broken renders) + FIDELITY flags (sub-BF4/BF1-floor visuals)."""
+    blocking = HARD_FLAGS | FIDELITY_FLAGS
+    hard = {fl: n for fl, n in rep["flag_counts"].items() if fl in blocking}
     if hard:
         tally = ", ".join(f"{k}x{v}" for k, v in sorted(hard.items(), key=lambda x: -x[1]))
+        fid = ", ".join(f"{k}x{v}" for k, v in sorted(hard.items(), key=lambda x: -x[1])
+                        if k in FIDELITY_FLAGS)
         print(f"\nGATE FAIL (--strict): {sum(hard.values())} blocking flag(s) across "
               f"{len(rep['defects'])} cell(s): {tally}", file=sys.stderr)
+        if fid:
+            print(f"  (visual-fidelity-floor flags: {fid} — raise the visuals to the "
+                  f"BF4/BF1 floor to clear)", file=sys.stderr)
         sys.exit(1)
-    print("\nGATE PASS (--strict): no blocking objective flags.")
+    print("\nGATE PASS (--strict): no blocking objective/fidelity flags.")
     sys.exit(0)
 
 if __name__ == "__main__":
