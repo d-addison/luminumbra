@@ -60,7 +60,11 @@ public:
     // reads as real grass COVER rather than a few sparse tufts. The placement is
     // still a pure per-chunk hash (idx in [0,candidates)), so determinism + the
     // RENDER-ONLY contract are preserved; only the candidate count per chunk grows.
-    static constexpr std::size_t kMaxCandidatesPerChunk = 2048;
+    // T-I6: raised 2048 -> 4096 (≈2 -> ≈4 blades/m²) so the near foreground reads as
+    // continuous turf rather than discrete tufts. Pool headroom is ample (a focused
+    // scene drew ~11.9k of the 262k pool = 4.5%), so doubling stays well within the
+    // instance pool + a single instanced draw. Perf re-validated (frame throughput).
+    static constexpr std::size_t kMaxCandidatesPerChunk = 4096;
 
     // Packed 36-byte instance record (matches the GL vertex-attribute layout).
 #pragma pack(push, 1)
