@@ -32,6 +32,55 @@ uniform float u_water_depth_scaler;
 uniform float u_reflection_power;
 uniform vec3 u_sky_color; // approximate sky reflection color (time-of-day driven)
 
+// --- Procedural ripple normal -------------------------------------------
+// The bound u_normal_map is the engine's FLAT fallback (tangent +Z), so the
+// texture bump below contributes no XY tilt and the surface normal collapses
+// to the interpolated per-vertex world normal. Across the low-poly water mesh
+// that interpolation reads as hard-shaded triangle facets with visible seams
+// (the de-facet defect). To give the surface genuine per-pixel detail we add
+// an analytic ripple field: a sum of gently animated directional waves whose
+// horizontal gradient tilts the world normal. Because it is evaluated per
+// fragment from world position + time, the lighting/reflection now varies
+// smoothly and continuously across each triangle, breaking up the facets.
+//
+// Returns the XZ-plane gradient (slope.x, slope.z) of the height field; the
+// caller folds it into the world normal. Kept subtle (small amplitudes,
+// low frequencies) so the water reads as gentle ripples, not chop.
+vec2 ripple_gradient(vec2 p, float t, vec2 flow)
+{
+    // Drift the sample point along the flow so ripples travel with the water.
+    p += flow * t * 0.35;
+
+    // A handful of overlapping directional waves at increasing frequency and
+    // decreasing amplitude (a small "ocean" spectrum). For wave
+    //   h = A * sin(dot(dir, p) * freq + speed * t)
+    // the horizontal gradient is
+    //   dh = A * freq * cos(...) * dir
+    // which is exactly the surface slope we add to the normal.
+    vec2 grad = vec2(0.0);
+
+    // dir, freq, amp, speed per octave. Directions are spread around the
+    // compass so the interference pattern is non-repeating and natural.
+    // 1
+    vec2  d1 = normalize(vec2( 0.80,  0.60));
+    float f1 = 0.55, a1 = 0.085, s1 = 0.9;
+    grad += a1 * f1 * cos(dot(d1, p) * f1 + t * s1) * d1;
+    // 2
+    vec2  d2 = normalize(vec2(-0.60,  0.80));
+    float f2 = 0.95, a2 = 0.060, s2 = 1.25;
+    grad += a2 * f2 * cos(dot(d2, p) * f2 + t * s2) * d2;
+    // 3
+    vec2  d3 = normalize(vec2( 0.20, -0.98));
+    float f3 = 1.70, a3 = 0.038, s3 = 1.7;
+    grad += a3 * f3 * cos(dot(d3, p) * f3 + t * s3) * d3;
+    // 4 (fine detail)
+    vec2  d4 = normalize(vec2(-0.95, -0.30));
+    float f4 = 3.10, a4 = 0.022, s4 = 2.3;
+    grad += a4 * f4 * cos(dot(d4, p) * f4 + t * s4) * d4;
+
+    return grad;
+}
+
 vec3 world_pos_from_depth(float depth, vec2 screen_uv) {
     float z = depth * 2.0 - 1.0;
     vec4 clip_space_pos = vec4(screen_uv * 2.0 - 1.0, z, 1.0);
@@ -89,6 +138,19 @@ void main()
     // perfectly flat surface 45 degrees toward +Z and broke the fresnel and
     // reflection directions (T-I2-16b).
     vec3 bump = vec3(normal1.x * 0.6 + normal2.x * 0.4, 0.0, normal1.y * 0.6 + normal2.y * 0.4);
+
+    // Procedural per-pixel ripple detail. The bound normal map is the flat
+    // fallback, so the texture bump above is ~zero and the surface would shade
+    // as interpolated per-vertex normals -> hard triangle facets. The analytic
+    // ripple gradient tilts the world normal continuously per fragment, so the
+    // lighting, fresnel and reflection vectors vary smoothly across each
+    // triangle and the faceting/seams break up into a rippled surface. The
+    // gradient is the XZ slope of the wave height field; a negative slope in
+    // X/Z tilts the +Y normal toward -X/-Z, matching the tangent-space bump
+    // convention used above (only XZ wobble, world up stays +Y).
+    vec2 ripple = ripple_gradient(fs_in.world_pos.xz, u_time, flow_vector);
+    bump += vec3(-ripple.x, 0.0, -ripple.y);
+
     vec3 surface_normal = normalize(fs_in.world_normal + bump);
 
     // --- 3. Depth & Scene Reconstruction ---
