@@ -433,6 +433,40 @@ else()
     target_link_libraries(shieldrt_far_field_parity_gpu PRIVATE OpenGL::GL)
 endif()
 
+# T-I6-A3b (increment 2a): far-field G-buffer raymarch validated offscreen.
+# Manual/GPU. Proves the fullscreen far-field raymarch writes correct deferred
+# G-buffer values (view-space position, octahedral normal, gl_FragDepth) before
+# live RenderPipeline wiring; emits shieldrt-far-field-gbuffer.json.
+add_executable(shieldrt_far_field_gbuffer_gpu
+    performance/shieldrt_far_field_gbuffer_gpu.cpp
+)
+
+target_compile_definitions(shieldrt_far_field_gbuffer_gpu PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+    LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts"
+)
+
+target_include_directories(shieldrt_far_field_gbuffer_gpu PRIVATE
+    ../src
+)
+
+target_link_libraries(shieldrt_far_field_gbuffer_gpu PRIVATE
+    gtest_main
+    luminumbra_common
+    glfw
+    glad
+)
+
+if(WIN32)
+    target_link_libraries(shieldrt_far_field_gbuffer_gpu PRIVATE opengl32)
+elseif(APPLE)
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(shieldrt_far_field_gbuffer_gpu PRIVATE ${OPENGL_LIBRARIES})
+else()
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(shieldrt_far_field_gbuffer_gpu PRIVATE OpenGL::GL)
+endif()
+
 # Frontier gate fixtures: the lua-api-manifest and scalar-field-diffusion gates
 # assert at static initialization, the instinct and loopback gates are called
 # from the gtest cases in network_state_hash_gate_test.cpp.
@@ -539,6 +573,13 @@ set_tests_properties(ShieldRtTracerProfileGpu PROPERTIES
 #   ctest -L manual -R ShieldRtFarFieldParityGpu --output-on-failure
 add_test(NAME ShieldRtFarFieldParityGpu COMMAND shieldrt_far_field_parity_gpu)
 set_tests_properties(ShieldRtFarFieldParityGpu PROPERTIES
+    LABELS "manual;perf;gpu"
+    TIMEOUT 600)
+
+# T-I6-A3b (increment 2a): far-field G-buffer raymarch (manual;perf;gpu):
+#   ctest -L manual -R ShieldRtFarFieldGbufferGpu --output-on-failure
+add_test(NAME ShieldRtFarFieldGbufferGpu COMMAND shieldrt_far_field_gbuffer_gpu)
+set_tests_properties(ShieldRtFarFieldGbufferGpu PROPERTIES
     LABELS "manual;perf;gpu"
     TIMEOUT 600)
 
