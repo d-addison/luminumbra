@@ -52,6 +52,45 @@ inline void label_gl_object(GLenum identifier, GLuint name, const std::string& l
 #endif
 }
 
+// --- Nsight / RenderDoc debug-group markers (iteration-6 A0) -----------------
+// KHR_debug command-stream groups so GPU-capture tools show named per-pass spans.
+// Guarded on GL 4.3 + a non-null entry point (same discipline as label_gl_object);
+// no-ops on contexts that lack KHR_debug, so they never affect rendered pixels.
+// A shared depth counter lets a frame-end assert catch mismatched push/pop nesting
+// (which would garble a capture even though it is invisible to a pixel diff).
+inline int& debug_group_depth() {
+    static int depth = 0;  // one shared instance across TUs (inline fn local static)
+    return depth;
+}
+
+inline void push_debug_group(const std::string& label) {
+#ifdef GL_VERSION_4_3
+    if (glPushDebugGroup) {
+        glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0u, -1, label.c_str());
+        ++debug_group_depth();
+    }
+#else
+    (void)label;
+#endif
+}
+
+inline void pop_debug_group() {
+#ifdef GL_VERSION_4_3
+    if (glPopDebugGroup && debug_group_depth() > 0) {
+        glPopDebugGroup();
+        --debug_group_depth();
+    }
+#endif
+}
+
+// RAII scoped group: balance is guaranteed even if a pass early-returns.
+struct ScopedDebugGroup {
+    explicit ScopedDebugGroup(const std::string& label) { push_debug_group(label); }
+    ~ScopedDebugGroup() { pop_debug_group(); }
+    ScopedDebugGroup(const ScopedDebugGroup&) = delete;
+    ScopedDebugGroup& operator=(const ScopedDebugGroup&) = delete;
+};
+
 inline void ExtractFrustumPlanes(const glm::mat4& m, glm::vec4 planes[6]) {
     planes[0] = glm::vec4(m[0][3] + m[0][0], m[1][3] + m[1][0], m[2][3] + m[2][0], m[3][3] + m[3][0]);
     planes[1] = glm::vec4(m[0][3] - m[0][0], m[1][3] - m[1][0], m[2][3] - m[2][0], m[3][3] - m[3][0]);
