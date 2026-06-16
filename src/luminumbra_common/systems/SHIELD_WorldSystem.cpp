@@ -2,7 +2,7 @@
 #include "entt/entt.hpp"
 #include "../world/MarchingCubes.h"
 #include "../world/HydraulicErosion.h" // T-I6-A2
-#include <mutex>
+#include <shared_mutex>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -513,52 +513,64 @@ float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x, float world_z) 
     const float fx = gxf - static_cast<float>(gx0);
     const float fz = gzf - static_cast<float>(gz0);
 
-    // Fetch one global cell's baked offset, baking (and caching) its owning
-    // region on first touch. Deterministic + recompute-on-load; the mutex only
-    // guards the cache map (the bake itself is a pure function of region+seed+
-    // params, so a duplicate concurrent bake would be identical).
-    auto offset_at = [this, cs](std::int64_t gx, std::int64_t gz) -> float {
+    // Bake one region's interior offset grid. PURE function of (region, seed,
+    // params); runs OUTSIDE any lock so concurrent chunk-gen threads never
+    // serialize on the (expensive) bake -- a duplicate concurrent bake is
+    // byte-identical, so try_emplace keeps whichever lands first.
+    auto bake_region = [this, cs](std::int64_t rx, std::int64_t rz) -> std::vector<float> {
+        const int halo = m_params.hydro_iterations + kHydroHaloMargin;
+        const int m = kHydroRegionCells + 2 * halo;
+        std::vector<float> heights(static_cast<std::size_t>(m) * static_cast<std::size_t>(m), 0.0f);
+        for (int pz = 0; pz < m; ++pz) {
+            for (int px = 0; px < m; ++px) {
+                const std::int64_t cell_gx = rx * kHydroRegionCells + (px - halo);
+                const std::int64_t cell_gz = rz * kHydroRegionCells + (pz - halo);
+                const float wx = static_cast<float>(cell_gx) * cs;
+                const float wz = static_cast<float>(cell_gz) * cs;
+                // NO-hydro base height (apply_hydro=false) -> never recurses.
+                heights[static_cast<std::size_t>(pz) * static_cast<std::size_t>(m) +
+                        static_cast<std::size_t>(px)] =
+                    ComputeShapedHeightSampleImpl(wx, wz, /*apply_hydro=*/false).final_height;
+            }
+        }
+        World::HydroErosionParams p;
+        p.iterations = m_params.hydro_iterations;
+        p.talus_height = m_params.hydro_talus_height;
+        p.thermal_rate = m_params.hydro_thermal_rate;
+        p.rain_per_sweep = m_params.hydro_rain_per_sweep;
+        p.solubility = m_params.hydro_solubility;
+        p.deposition = m_params.hydro_deposition;
+        p.evaporation = m_params.hydro_evaporation;
+        p.sediment_capacity = m_params.hydro_sediment_capacity;
+        p.max_offset = m_params.hydro_max_offset;
+        std::vector<float> offset;
+        World::BakeHydraulicErosion(heights, kHydroRegionCells, halo, p, offset);
+        return offset;
+    };
+
+    // Fetch one global cell's baked offset. Warm-cache reads take a SHARED lock
+    // (concurrent across chunk-gen jobs); a cold region is baked OUTSIDE the lock
+    // then inserted under the exclusive lock. std::map node storage keeps cached
+    // values stable; recompute-on-load (not persisted), deterministic.
+    auto offset_at = [this, &bake_region](std::int64_t gx, std::int64_t gz) -> float {
         const std::int64_t rx = HydroFloorDiv(gx, kHydroRegionCells);
         const std::int64_t rz = HydroFloorDiv(gz, kHydroRegionCells);
         const int lx = static_cast<int>(gx - rx * kHydroRegionCells);
         const int lz = static_cast<int>(gz - rz * kHydroRegionCells);
         const std::pair<std::int64_t, std::int64_t> key(rx, rz);
-
-        std::lock_guard<std::mutex> lock(m_hydro_mutex);
-        auto it = m_hydro_cache.find(key);
-        if (it == m_hydro_cache.end()) {
-            const int halo = m_params.hydro_iterations + kHydroHaloMargin;
-            const int m = kHydroRegionCells + 2 * halo;
-            std::vector<float> heights(static_cast<std::size_t>(m) * static_cast<std::size_t>(m), 0.0f);
-            for (int pz = 0; pz < m; ++pz) {
-                for (int px = 0; px < m; ++px) {
-                    const std::int64_t cell_gx = rx * kHydroRegionCells + (px - halo);
-                    const std::int64_t cell_gz = rz * kHydroRegionCells + (pz - halo);
-                    const float wx = static_cast<float>(cell_gx) * cs;
-                    const float wz = static_cast<float>(cell_gz) * cs;
-                    // NO-hydro base height (apply_hydro=false) -> never recurses.
-                    heights[static_cast<std::size_t>(pz) * static_cast<std::size_t>(m) +
-                            static_cast<std::size_t>(px)] =
-                        ComputeShapedHeightSampleImpl(wx, wz, /*apply_hydro=*/false).final_height;
-                }
+        const std::size_t local = static_cast<std::size_t>(lz) *
+            static_cast<std::size_t>(kHydroRegionCells) + static_cast<std::size_t>(lx);
+        {
+            std::shared_lock<std::shared_mutex> rlock(m_hydro_mutex);
+            auto it = m_hydro_cache.find(key);
+            if (it != m_hydro_cache.end()) {
+                return it->second[local];
             }
-            World::HydroErosionParams p;
-            p.iterations = m_params.hydro_iterations;
-            p.talus_height = m_params.hydro_talus_height;
-            p.thermal_rate = m_params.hydro_thermal_rate;
-            p.rain_per_sweep = m_params.hydro_rain_per_sweep;
-            p.solubility = m_params.hydro_solubility;
-            p.deposition = m_params.hydro_deposition;
-            p.evaporation = m_params.hydro_evaporation;
-            p.sediment_capacity = m_params.hydro_sediment_capacity;
-            p.max_offset = m_params.hydro_max_offset;
-            std::vector<float> offset;
-            World::BakeHydraulicErosion(heights, kHydroRegionCells, halo, p, offset);
-            it = m_hydro_cache.emplace(key, std::move(offset)).first;
         }
-        const std::vector<float>& grid = it->second;
-        return grid[static_cast<std::size_t>(lz) * static_cast<std::size_t>(kHydroRegionCells) +
-                    static_cast<std::size_t>(lx)];
+        std::vector<float> baked = bake_region(rx, rz); // outside any lock
+        std::unique_lock<std::shared_mutex> wlock(m_hydro_mutex);
+        auto it = m_hydro_cache.try_emplace(key, std::move(baked)).first;
+        return it->second[local];
     };
 
     const float o00 = offset_at(gx0, gz0);
