@@ -2,10 +2,11 @@
 
 ## Iteration 6 IN PROGRESS (2026-06-16) — Wave A sim/worldgen foundation
 
-Branch `feat/polyglot-audit-roadmap`, tip **`1d63435`**. Autonomous run
-(owner-authorized: memory `autonomous-iteration-6-mandate`). **Full ctest 243/243.**
-Wave A's entire sim/worldgen scope is COMPLETE (incl. erosion enabled + visually
-validated on both gameplay presets), verified, and hash-clean. Commits:
+Branch `feat/polyglot-audit-roadmap`, tip **`0ca8d77`**. Autonomous run
+(owner-authorized: memory `autonomous-iteration-6-mandate`). **WAVE A COMPLETE**
+(A0 + A1 + A1.5 + A2 + A1d): sim/worldgen foundation + erosion enabled & validated
+on both gameplay presets + the aether render tap & coupling gate. **Full ctest
+244/244.** Verified, hash-clean. Commits:
 - **Phase 0 hygiene** (`8ae7b8f`): 33 orphaned worktrees removed (audited safe, no
   vendor junctions), `main` reset to `c3806dc` (local), visual-critique hardened
   into a ctest-pinned strict gate (`VisualCritiqueFlags` + `analyze --strict`).
@@ -40,12 +41,28 @@ the hydro infra are world_hash-neutral. Wind/weather sub-hashes intact
 flags, FarLodHorizon 40/40, PlayerView, WaterfallVisual, slope-walkability + DEM-realism
 all green.**
 
+- **A1d DONE** (`bce99a5` plumbing + `0ca8d77` tap+gate): aether emissive tap in
+  the lighting pass, GATED by `u_aetherActive` (RenderHealth byte-stable);
+  coupling gate `RenderSmokeTest.AetherEmissiveTapBrightensLitOutput` proves
+  CONSUMPTION (closes critique MAJOR #17). The LIVE in-game glow stays
+  gated/inactive in shipped paths until game content drives sparse aether sources
+  (LuminCrystal, iteration 7) — the A1 field is uniform noise-emission, so a live
+  glow now would wash the world; the engine consumption path is proven + tested.
+
+**WAVE A COMPLETE** (A0 + A1 + A1.5 + A2 + A1d). Full ctest green.
+
 ### Remaining (render phase)
-- **A1d** (task #11): aether render emissive tap + coupling gate (render phase;
-  RenderHealth re-bless + visual QA). Closes critique MAJOR #17 (dead-system).
-- **Wave A.2** SHIELD-RT far-field (GPU-profile both tracers first, per A0 markers);
-  **Wave B** clouds/grass/aurora/ocean; **Wave C** worldgen multi-anchor; **Wave D**
-  closeout. See `WAVE-A-SPEC.md` + `_synthesis.md`.
+- **Wave A.2** SHIELD-RT far-field — the big render-architecture leg. PREREQUISITES
+  before the substrate: (1) **Phase 0.3 quiet-machine perf re-bless** (A.2
+  entry-gate, still owed); (2) the **A0 GPU tracer micro-profile** (heightfield
+  max-mip vs SDF sphere-trace on the 5070 Ti via the A0 Nsight markers) — pins the
+  primary tracer (currently PROVISIONAL). Then: shared volumetric/raymarch
+  substrate (build once, froxel scoped OUT) + heightfield far-field tracer + parity
+  gate (mesh-equivalence AND ground-truth-vs-raymarch) + near↔far seam gate.
+- **Wave B** clouds/grass/aurora/ocean (consume the A.2 substrate); **Wave C**
+  worldgen multi-anchor; **Wave D** closeout. See `WAVE-A-SPEC.md` + `_synthesis.md`.
+- **Iteration 7** (deferred content): sparse aether sources (LuminCrystal) -> the
+  A1d live glow; the fire channel (A1's deferred 2.5D-risk channel).
 
 ### Carried environment notes
 ucrt64 PATH must be prepended on every build/ctest/validator call (memory
