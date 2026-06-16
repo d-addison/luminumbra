@@ -10,6 +10,7 @@
 #include "../systems/WaterSystem.h"
 #include "../systems/WindFieldSystem.h"
 #include "../systems/WeatherSystem.h"
+#include "../systems/AetherFieldSystem.h"
 #include "../core/Log.h"
 #include "../persistence/WorldSaveService.h"
 #include "TerrainPresetLoader.h"
@@ -125,6 +126,17 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         // agree on the state at every checkpoint.
         if (m_weatherSystem) {
             m_weatherSystem->Update(current_tick, m_metadata.spawnPoint, m_windFieldSystem.get());
+        }
+
+        // 5. T-I6-A1: Aetheric scalar field update. Runs AFTER weather so it
+        // advects its emission source by the freshly-updated wind grid (and so
+        // any future weather coupling reads the current weather). Deterministic
+        // (pure function of seed+14, tick, origin[, wind]; DeterministicMath +
+        // FastNoise batch path; no wall-clock/RNG). The cell values feed the
+        // world_hash `aether` sub-hash; the update runs every tick so run==replay
+        // and resim agree on the field at every checkpoint.
+        if (m_aetherFieldSystem) {
+            m_aetherFieldSystem->Update(current_tick, m_metadata.spawnPoint, m_windFieldSystem.get());
         }
 
         m_simulationEventBus.drain(current_tick);
@@ -243,6 +255,12 @@ bool GameSession::CreateWorld(const std::string& name, const std::string& seed, 
     m_weatherSystem = std::make_unique<Systems::WeatherSystem>(world_seed);
     LUMINUMBRA_CORE_INFO("Weather system initialized.");
 
+    // 6. T-I6-A1: the deterministic Aetheric scalar field. Pure function of the
+    //    world seed (uses seed+14 for its emission noise); updated per tick AFTER
+    //    weather, advected by the wind grid. Feeds the world_hash `aether` slot.
+    m_aetherFieldSystem = std::make_unique<Systems::AetherFieldSystem>(world_seed);
+    LUMINUMBRA_CORE_INFO("Aether field system initialized.");
+
     // Calculate appropriate spawn point based on actual terrain height
     float spawn_x = 8.0f;
     float spawn_z = 8.0f;
@@ -344,6 +362,12 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     // the heavy-oracle cross-phase compare excludes weather for this reason
     // (documented in main_server.cpp AuthoritativeStateEqual), exactly as wind is.
     m_weatherSystem = std::make_unique<Systems::WeatherSystem>(world_seed);
+
+    // T-I6-A1: aether is likewise a pure function of (world seed, tick, anchor);
+    // a loaded world reconstructs the identical field at the same tick (heavy-
+    // oracle cross-phase compare excludes it for the same loaded-tick-zero reason
+    // as wind/weather).
+    m_aetherFieldSystem = std::make_unique<Systems::AetherFieldSystem>(world_seed);
 
     // Legacy saves without a persisted spawnPoint: derive it from terrain
     // height exactly like CreateWorld does (pure function of seed/params).

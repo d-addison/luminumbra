@@ -121,6 +121,12 @@ struct WorldStreamingStateSubHashes {
     // supplies this string from WeatherSystem::ComputeWeatherSubHash(). Empty when
     // no weather core exists (e.g. the persistence fixtures, which never make one).
     std::string weather;
+    // T-I6-A1: the deterministic Aetheric scalar-field cell values -- its own
+    // world_hash sub-hash slot. NOT chunk-derived: the field lives on
+    // GameSession, so the runner supplies this from
+    // AetherFieldSystem::ComputeAetherSubHash(). Empty when no field exists
+    // (e.g. the persistence fixtures, which never construct one).
+    std::string aether;
 };
 
 // Computes the chunk-derived per-system sub-hashes (terrain/mesh/water). Pure
