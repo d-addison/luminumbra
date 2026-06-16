@@ -21,6 +21,17 @@
         "continental_spline": [[-1.0, -6.0], [-0.2, 4.0], [0.3, 8.0], [0.65, 27.5], [1.0, 50.0]],
         "erosion_spline": [[-1.0, 0.5], [-0.6, 0.36], [-0.35, 0.25], [0.0, 0.18], [0.4, 0.13], [1.0, 0.1]],
         "peaks_spline": [[-1.0, 0.0], [0.35, 0.08], [0.72, 0.5], [1.0, 1.0]]
+      },
+      "hydro": {
+        "enabled": true,
+        "iterations": 9,
+        "cell_size_m": 8.0,
+        "talus_height": 2.8,
+        "thermal_rate": 0.3,
+        "solubility": 0.06,
+        "deposition": 0.15,
+        "sediment_capacity": 0.35,
+        "max_offset": 14.0
       }
     },
     "biomes": {
