@@ -1501,6 +1501,7 @@ int main(int argc, char* argv[]) {
 
     Luminumbra::Rendering::RenderPipeline renderPipeline;
     renderPipeline.set_gpu_sdf_runtime_enabled(scenario_config.enable_gpu_sdf_runtime);
+    renderPipeline.set_far_field_raymarch_enabled(scenario_config.enable_far_field_gpu_raymarch);
     // T-I3-9: far-LOD tile builds ride the JobSystem Normal lane.
     renderPipeline.attach_farlod_job_system(&jobSystem);
     if (!renderPipeline.startup(framebufferWidth, framebufferHeight, root_dir)) {

@@ -5,6 +5,7 @@
 #include "core/Log.h"
 #include "rendering/Shader.h"
 #include "rendering/Camera.h"
+#include "rendering/passes/ShieldRtFarFieldPass.h"
 #include <algorithm>
 #include <unordered_set>
 #include <glm/gtc/matrix_transform.hpp>
@@ -191,6 +192,7 @@ constexpr const char* kGpuTimerPassNames[] = {
     "particles",
     "foliage",
     "aerial",
+    "shieldrt_far",
     "final_blit",
 };
 
@@ -617,6 +619,13 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         m_skybox_pass->init_geometry();
         m_particle_pass->init_buffers(); // T-I5a-1: persistent-mapped instance pool
         m_foliage_pass->init_buffers();  // T-I5b-1: persistent-mapped scatter pool
+        // T-I6-A3b: experimental SHIELD-RT far-field raymarch pass. Compiled +
+        // resident only when the compile-time gate is on (runtime opt-in still
+        // required to render); render output is unchanged when the gate is off.
+        if (kEnableExperimentalFarFieldGpuRaymarching) {
+            m_shieldrt_far_pass = std::make_unique<ShieldRtFarFieldPass>();
+            m_shieldrt_far_pass->init();
+        }
         load_material_texture_lut();
         init_terrain_textures();
         init_skinned_texture_array();
@@ -1642,6 +1651,37 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     end_gpu_pass_timer(GpuTimerPass::GBuffer);
     glBindVertexArray(0);  // Unbind after gbuffer pass
     glDisable(GL_CULL_FACE);
+
+    // 2b. EXPERIMENTAL SHIELD-RT FAR-FIELD RAYMARCH (T-I6-A3b, flag-gated).
+    // Fills the far/sky pixels the live + far-mesh geometry left unwritten: a
+    // fullscreen heightfield max-mip raymarch into the SAME G-buffer, depth-tested
+    // (GL_LESS) against the mesh depth so it only wins where nothing is closer.
+    // OFF by default (compile flag + runtime opt-in); render is unchanged then.
+    if (kEnableExperimentalFarFieldGpuRaymarching && m_far_field_runtime_requested &&
+        m_shieldrt_far_pass && m_shieldrt_far_pass->ready()) {
+        begin_gpu_pass_timer(GpuTimerPass::FarFieldRaymarch);
+        m_shieldrt_far_pass->update(world_system, camera.Position);
+        const glm::mat4 ff_view = camera.GetViewMatrix();
+        const glm::mat4 ff_proj = camera.GetProjectionMatrix(m_screen_width, m_screen_height);
+        const glm::mat4 ff_view_proj = ff_proj * ff_view;
+        const glm::mat4 ff_inv_vp = glm::inverse(ff_view_proj);
+        const glm::mat3 ff_normal_view(ff_view);
+        glBindFramebuffer(GL_FRAMEBUFFER, m_gbuffer_pass->gbuffer().fbo_id);
+        const GLenum ff_bufs[4] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1,
+                                   GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3};
+        glDrawBuffers(4, ff_bufs);
+        glViewport(0, 0, m_screen_width, m_screen_height);
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LESS);
+        glDepthMask(GL_TRUE);
+        glDisable(GL_CULL_FACE);
+        m_shieldrt_far_pass->render(
+            ff_view, ff_view_proj, ff_inv_vp, ff_normal_view, camera.Position,
+            glm::vec2(static_cast<float>(m_screen_width), static_cast<float>(m_screen_height)),
+            camera.GetFarPlane());
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        end_gpu_pass_timer(GpuTimerPass::FarFieldRaymarch);
+    }
 
     // 3. SSAO PASS
     begin_gpu_pass_timer(GpuTimerPass::Ssao);
