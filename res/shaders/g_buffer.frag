@@ -55,13 +55,27 @@ in VS_OUT {
     flat uint MaterialID;
 } fs_in;
 
+// T-I6 terrain visual-fidelity (BF4/BF1 floor), RENDER-ONLY: the 256px terrain
+// textures read muddy/low-contrast. Amplify the EXISTING high-frequency detail
+// (unsharp mask vs a mip-blurred base) so the surface de-muds + carries visible
+// detail, and boost normal-map strength so relief catches light. Mean-preserving
+// (no exposure shift); auto-fades at distance where the texture is minified
+// (sharp ~= blur), so it lifts the visible near/mid terrain. Cheap (3 extra
+// textureLod + a few mults).
+const float kDetailBlurLod = 3.0;   // mip level used as the unsharp low-freq base
+const float kDetailGain    = 2.2;   // high-freq amplification (>1 sharpens)
+// NOTE: a normal-map strength boost was tried here and dropped — it amplifies a
+// pre-existing sky-ambient blue-speckle LIGHTING artifact on terrain facets without
+// adding meaningful detail (the albedo unsharp carries the gain). The speckle is a
+// separate lighting follow-up (terrain-fidelity-plan.md).
+
 // Triplanar blend weights from a world-space normal (sharpened, normalized).
 vec3 triplanar_weights(vec3 n) {
     vec3 w = pow(abs(n), vec3(4.0));
     return w / max(w.x + w.y + w.z, 1e-4);
 }
 
-// Triplanar albedo sample from the terrain array.
+// Triplanar albedo sample from the terrain array, with unsharp detail amplification.
 vec3 triplanar_albedo(vec3 worldPos, vec3 weights, float layer, float scale) {
     vec2 uv_x = worldPos.zy * scale;
     vec2 uv_y = worldPos.xz * scale;
@@ -69,7 +83,13 @@ vec3 triplanar_albedo(vec3 worldPos, vec3 weights, float layer, float scale) {
     vec3 cx = texture(u_terrainTextures, vec3(uv_x, layer)).rgb;
     vec3 cy = texture(u_terrainTextures, vec3(uv_y, layer)).rgb;
     vec3 cz = texture(u_terrainTextures, vec3(uv_z, layer)).rgb;
-    return cx * weights.x + cy * weights.y + cz * weights.z;
+    vec3 sharp = cx * weights.x + cy * weights.y + cz * weights.z;
+    // Mip-blurred base for the unsharp mask (mean-preserving high-freq boost).
+    vec3 bx = textureLod(u_terrainTextures, vec3(uv_x, layer), kDetailBlurLod).rgb;
+    vec3 by = textureLod(u_terrainTextures, vec3(uv_y, layer), kDetailBlurLod).rgb;
+    vec3 bz = textureLod(u_terrainTextures, vec3(uv_z, layer), kDetailBlurLod).rgb;
+    vec3 blur = bx * weights.x + by * weights.y + bz * weights.z;
+    return clamp(blur + (sharp - blur) * kDetailGain, 0.0, 1.0);
 }
 
 // Triplanar tangent-space normal sample, reoriented to world space via the
