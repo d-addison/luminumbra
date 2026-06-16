@@ -52,6 +52,9 @@ public:
     // on shader failure. Safe to call once after a GL context exists.
     bool init();
     void shutdown();
+    // Wait out any in-flight async heightfield build. MUST be called before the bound
+    // world is cleared/destroyed (the build job reads the world by pointer).
+    void drain();
     bool ready() const { return m_ready; }
 
     // inc2c-SCALE step 3: attach the JobSystem so the heightfield assembly (49

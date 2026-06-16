@@ -635,6 +635,9 @@ public:
     // Drains in-flight far tile builds (they sample the world system). MUST
     // run before the currently bound world is destroyed/recreated.
     void prepare_world_swap();
+    // Drains only the SHIELD-RT far-field heightfield build (its worker reads the
+    // world by pointer). MUST run before clear_world at teardown.
+    void drain_far_field_builds();
     FarLodSystem* farlod() { return m_farlod.get(); }
     const FarLodSystem* farlod() const { return m_farlod.get(); }
 
@@ -823,6 +826,7 @@ private:
     std::unique_ptr<ParticlePass> m_particle_pass; // T-I5a-1
     std::unique_ptr<FoliagePass> m_foliage_pass;   // T-I5b-1
     std::unique_ptr<ShieldRtFarFieldPass> m_shieldrt_far_pass; // T-I6-A3b (flag-gated)
+    JobSystem* m_job_system = nullptr;             // attached pre-startup; forwarded to passes built in startup()
     bool m_far_field_runtime_requested = false;    // --enable-far-field-gpu-raymarch
     Client::ScenarioHarness::IsolationConfig m_isolation_config; // T-I6 (default {All,Scene} = no-op)
     WaterfallSiteCache m_waterfall_sites;          // T-I5b-4 (render-only, cached)

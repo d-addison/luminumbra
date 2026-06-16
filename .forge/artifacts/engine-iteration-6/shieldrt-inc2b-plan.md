@@ -226,3 +226,40 @@ correction: do **step 3 (async rebuild) BEFORE** a settled FarLodHorizon-style f
 parity/seam gate; step 1's perf benefit + step 2 (half-res) are measured after the
 scenario can settle. The isolated ctest benches (ShieldRtFarField*Gpu) remain the only
 green correctness signal until then.
+
+## ROOT-CAUSE CORRECTED (2026-06-16, autonomous) — the march was a RED HERRING
+Empirical: `u_maxSteps` 512 -> 48 was IDENTICAL (still ~3 frames in 30 s) -> NOT
+step-bound. The KHR_debug log showed the **first `shieldrt_far` pass took 115 SECONDS**
+(17:02:54 -> 17:04:49); every later frame was instant. So the cost is the **heightfield
+ASSEMBLY**, not the march: `assemble_field` runs 49 `BuildPristineFarLodTile` calls
+(7x7 regions x 128^2 ~= 800K worldgen samples), and with **A2 erosion now enabled each
+sample walks the eroded surface** -> ~115 s for the block.
+
+**Bug 1 (async never engaged):** `attach_farlod_job_system` runs in main_client BEFORE
+`RenderPipeline::startup()`, but the far-field pass is CONSTRUCTED in startup() -> the
+pass was null at attach time and the guard skipped it, so the pass had no JobSystem and
+`update()` took the synchronous fallback (115 s GL-thread freeze, 1/5 stations,
+regions_wanted=0). FIX: the pipeline stores the JobSystem pointer and re-forwards it to
+the pass at its construct site in startup().
+
+**Bug 2 (teardown use-after-free):** with async working, a 115 s build is ALWAYS in
+flight at exit; `clear_world` (main_client teardown) freed the world while the worker
+still read it via the captured pointer -> SEGFAULT (exit 139). FIX: `drain()` on the
+pass, exposed as `RenderPipeline::drain_far_field_builds()` + folded into
+`prepare_world_swap()`, called before `clear_world`. (FarLodSystem dodges this only
+because it dispatches many SMALL tile jobs that finish fast.)
+
+With both fixed: flag-on run is **5/5 stations, regions 40/40, GL-clean, exits 0** — the
+GL thread is no longer frozen and streaming settles. BUT the far-field raymarch still
+does not render in-scenario: the ~115 s assembly is far too slow for the field to be
+ready within a run, and draining it stalls shutdown up to ~115 s.
+
+## THE REAL NEXT BLOCKER: incremental/cached heightfield assembly
+The single 49-tile job (115 s, erosion-bound) is the wall. Options, in order:
+1. **Reuse FarLodSystem's already-built tiles / its LMR1 cache** — it builds these exact
+   F1 tiles incrementally + caches them; the pass re-runs that worldgen from scratch.
+2. **Incremental build (mirror FarLodSystem):** a few tiles/frame, fill the clipmap
+   progressively, fade the far-field in (small jobs -> fast drain, no 115 s hitch/stall).
+3. **Cache to the LMR1 store** keyed by region+params_hash so a revisit is instant.
+Only after the assembly is real-time does the march-cost question even arise. The two
+wiring bugs above are fixed + committed dormant regardless.

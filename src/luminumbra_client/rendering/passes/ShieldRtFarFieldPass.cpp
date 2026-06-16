@@ -292,16 +292,21 @@ bool ShieldRtFarFieldPass::init() {
     return true;
 }
 
-void ShieldRtFarFieldPass::shutdown() {
-    // Drain any in-flight async heightfield build so its worker does not read the
-    // world / write m_shared after teardown (m_shared is a shared_ptr so the buffer
-    // itself outlives the job, but the world pointer must stay valid until it ends).
+void ShieldRtFarFieldPass::drain() {
+    // Wait out an in-flight async heightfield build so its worker cannot read the
+    // world after the caller tears it down (the job captures the world by pointer;
+    // BuildPristineFarLodTile reads it). MUST be called before the world is cleared
+    // / destroyed. m_shared is a shared_ptr so the hand-off buffer itself is safe.
     if (m_job_system && m_inflight_handle.counter) {
         m_job_system->wait(m_inflight_handle);
     }
     m_inflight_handle = JobHandle{};
     m_shared.reset();
     m_building = false;
+}
+
+void ShieldRtFarFieldPass::shutdown() {
+    drain();
     if (m_raymarch_prog) { glDeleteProgram(m_raymarch_prog); m_raymarch_prog = 0; }
     if (m_maxmip_l0_prog) { glDeleteProgram(m_maxmip_l0_prog); m_maxmip_l0_prog = 0; }
     if (m_maxmip_reduce_prog) { glDeleteProgram(m_maxmip_reduce_prog); m_maxmip_reduce_prog = 0; }
