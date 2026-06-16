@@ -20,10 +20,12 @@
 #include "../../include/luminumbra/core/Types.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include <cmath>
+#include <cassert>
 #include "luminumbra_common/components/LightingComponents.h"
 #include "RenderSystem.h"
 #include "FarLodSystem.h"
 #include "passes/GBufferPass.h"
+#include "passes/PassGlHelpers.h"  // iter-6 A0: push/pop debug-group markers
 #include "passes/LightingPass.h"
 #include "passes/ShadowPass.h"
 #include "passes/SkyboxPass.h"
@@ -1339,6 +1341,12 @@ void RenderPipeline::destroy_gpu_pass_timers() {
 }
 
 void RenderPipeline::begin_gpu_pass_timer(GpuTimerPass pass) {
+    // iter-6 A0: open a KHR_debug group named for the pass so Nsight/RenderDoc
+    // captures show a labelled span. Pushed BEFORE the support-guard so markers
+    // bracket the pass even on contexts without GL timestamp queries. Pure
+    // command-stream annotation: zero effect on rendered pixels (RenderHealth
+    // stays byte-stable). Paired with the pop in end_gpu_pass_timer.
+    PassGl::push_debug_group(kGpuTimerPassNames[static_cast<size_t>(pass)]);
     if (!m_gpu_timers.supported) {
         return;
     }
@@ -1347,6 +1355,7 @@ void RenderPipeline::begin_gpu_pass_timer(GpuTimerPass pass) {
 }
 
 void RenderPipeline::end_gpu_pass_timer(GpuTimerPass pass) {
+    PassGl::pop_debug_group();
     if (!m_gpu_timers.supported) {
         return;
     }
@@ -1723,6 +1732,11 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     finish_gpu_pass_timer_frame();
     refresh_render_pass_metadata();
+
+    // iter-6 A0: every pass marker must be balanced by frame end, else the
+    // Nsight/RenderDoc capture (which the SHIELD-RT tracer decision depends on)
+    // is garbled even though pixels are unaffected. Cheap debug-only guard.
+    assert(PassGl::debug_group_depth() == 0 && "unbalanced GL debug-group push/pop in render_frame");
 }
 
 void RenderPipeline::on_resize(u32 new_width, u32 new_height) {
