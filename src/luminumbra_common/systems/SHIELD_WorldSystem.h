@@ -7,7 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
-#include <mutex>
+#include <shared_mutex>
 #include <unordered_map>
 #include <memory>
 #include <string>
@@ -683,7 +683,10 @@ private:
     // a duplicate concurrent bake would be identical, the mutex only guards the
     // map. Empty/unused when hydro is disabled.
     mutable std::map<std::pair<std::int64_t, std::int64_t>, std::vector<float>> m_hydro_cache;
-    mutable std::mutex m_hydro_mutex;
+    // shared_mutex: warm-cache lookups take a SHARED lock (concurrent across the
+    // multithreaded chunk-gen jobs); only the one-time per-region bake takes the
+    // exclusive lock, and the bake itself runs OUTSIDE any lock (pure function).
+    mutable std::shared_mutex m_hydro_mutex;
 };
 
 } // namespace Luminumbra::Systems
