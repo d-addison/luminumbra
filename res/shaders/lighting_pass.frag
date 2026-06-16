@@ -16,6 +16,19 @@ uniform sampler2D u_materialLUT;
 // Must match RenderPipeline::kEmissiveLutScale.
 uniform float u_emissiveLutScale = 8.0;
 
+// T-I6-A1d: Aetheric scalar field emissive tap. The field (R32F, extent x extent
+// cells) is sampled at the fragment's world XZ and adds an additive emissive
+// glow. GATED by u_aetherActive (0 when no field is uploaded -> zero contribution
+// -> pixel-identical, so shipped render paths stay RenderHealth-neutral until
+// game content drives sparse aether sources). Engine knows only "emissive scalar
+// field"; the glow color/intensity is an engine default game content can refine.
+uniform sampler2D u_aetherField;
+uniform vec2 u_aetherFieldWorldOrigin;   // world XZ of the grid's (0,0) corner
+uniform float u_aetherFieldInvWorldSpan; // 1 / (extent * cell_size_m)
+uniform float u_aetherActive = 0.0;      // 0 = no field uploaded (no glow)
+uniform vec3 u_aetherGlowColor = vec3(0.30, 0.55, 0.95);
+uniform float u_aetherGlowIntensity = 2.0;
+
 // G-Buffer decoding functions
 vec2 octWrap(vec2 v) {
     return (1.0 - abs(v.yx)) * (step(0.0, v.xy) * 2.0 - 1.0);
@@ -367,9 +380,22 @@ void main() {
         crystalGlow *= 1.5 * emissiveIntensity;
     }
     
+    // T-I6-A1d: Aetheric emissive tap. Sample the field at the fragment's world
+    // XZ (FragPos is world-space here, as the crystal glow above uses it) and add
+    // an additive glow. uv outside [0,1] (beyond the streamed grid) contributes
+    // nothing. Fully gated by u_aetherActive so the default path is unchanged.
+    vec3 aetherGlow = vec3(0.0);
+    if (u_aetherActive > 0.5) {
+        vec2 auv = (FragPos.xz - u_aetherFieldWorldOrigin) * u_aetherFieldInvWorldSpan;
+        if (auv.x >= 0.0 && auv.x <= 1.0 && auv.y >= 0.0 && auv.y <= 1.0) {
+            float aether = max(0.0, texture(u_aetherField, auv).r);
+            aetherGlow = aether * u_aetherGlowColor * u_aetherGlowIntensity;
+        }
+    }
+
     // --- Final Color Composition ---
     vec3 ambient = u_skyAmbientColor * Albedo * ao;
-    vec3 color = ambient + Lo + caustics + crystalGlow; // Add magical crystal glow
+    vec3 color = ambient + Lo + caustics + crystalGlow + aetherGlow; // + A1d aether glow
 
     // T-I5b-5-water-backlog (seabed waterline terracing de-band): the far seabed
     // is a height-quantized heightfield (kFarLodHeightQuantScale = 1/16 m). Where

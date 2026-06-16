@@ -957,7 +957,8 @@ struct LitNoonResult { float r = 0, g = 0, b = 0; };
 LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
                                        const std::array<float, 3>& albedo_linear,
                                        float roughness,
-                                       const fs::path& dump_ppm = {}) {
+                                       const fs::path& dump_ppm = {},
+                                       float aether_field_value = -1.0f) {
     // 64x64 so the optional swatch dump is a reviewable PNG; the mean is the
     // same regardless of resolution (flat fragment).
     constexpr int kRes = 64;
@@ -1071,9 +1072,32 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glUniform1i(glGetUniformLocation(lighting_program, "u_materialLUT"), 8);
 
+    // T-I6-A1d coupling: when aether_field_value >= 0, bind a uniform aether
+    // field at unit 10 and activate the tap. u_aetherFieldInvWorldSpan=0 makes
+    // every fragment sample texel (0,0) (uv=(0,0), in [0,1]) regardless of its
+    // world XZ, so the glow is FragPos-independent for the assertion. Negative ->
+    // tap stays inactive (u_aetherActive default 0.0), baseline render.
+    GLuint aether_tex = 0;
+    if (aether_field_value >= 0.0f) {
+        const std::vector<float> field(4, aether_field_value); // 2x2 uniform
+        glGenTextures(1, &aether_tex);
+        glActiveTexture(GL_TEXTURE10);
+        glBindTexture(GL_TEXTURE_2D, aether_tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, 2, 2, 0, GL_RED, GL_FLOAT, field.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glUniform1i(glGetUniformLocation(lighting_program, "u_aetherField"), 10);
+        glUniform1f(glGetUniformLocation(lighting_program, "u_aetherActive"), 1.0f);
+        glUniform2f(glGetUniformLocation(lighting_program, "u_aetherFieldWorldOrigin"), 0.0f, 0.0f);
+        glUniform1f(glGetUniformLocation(lighting_program, "u_aetherFieldInvWorldSpan"), 0.0f);
+    }
+
     const GLfloat clear0[4] = {0, 0, 0, 1};
     glClearBufferfv(GL_COLOR, 0, clear0);
     glDrawArrays(GL_TRIANGLES, 0, 6);
+    if (aether_tex != 0) { glDeleteTextures(1, &aether_tex); }
 
     std::vector<unsigned char> px(static_cast<size_t>(kRes) * kRes * 4);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
@@ -2191,6 +2215,39 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     glDeleteFramebuffers(1, &fbo);
     glDeleteProgram(program);
     glDeleteProgram(lighting_program);
+}
+
+// T-I6-A1d aether coupling gate. Closes critique MAJOR #17 (the determinism gate
+// proves the field HASHES, not that anything CONSUMES it). Renders a flat plate
+// through the REAL lighting_pass shader with the aether tap inactive (baseline)
+// vs an active uniform aether field, and asserts the field measurably brightens
+// the lit output (blue-dominant glow) -- i.e. the lighting pass demonstrably
+// CONSUMES the field's values. Also asserts a zero field == baseline (the
+// u_aetherActive gating is correct, so shipped paths stay pixel-identical).
+TEST(RenderSmokeTest, AetherEmissiveTapBrightensLitOutput) {
+    HiddenGlContext context;
+    if (!context.ready()) {
+        GTEST_SKIP() << context.error();
+    }
+    const ShaderProgramSpec spec{"lighting_pass", "lighting_pass.vert", "lighting_pass.frag"};
+    GLuint program = LinkProgram(spec);
+    ASSERT_NE(program, 0u);
+
+    const std::array<float, 3> albedo{0.2f, 0.2f, 0.2f};
+    const LitNoonResult base = LitChainNoonOnscreenSrgb(program, albedo, 1.0f);          // tap inactive
+    const LitNoonResult glow = LitChainNoonOnscreenSrgb(program, albedo, 1.0f, {}, 0.6f); // field=0.6
+    const LitNoonResult zero = LitChainNoonOnscreenSrgb(program, albedo, 1.0f, {}, 0.0f); // active, field=0
+
+    const float base_lum = base.r + base.g + base.b;
+    const float glow_lum = glow.r + glow.g + glow.b;
+    EXPECT_GT(glow_lum, base_lum + 0.05f) << "aether tap did not brighten the lit output (field not consumed)";
+    EXPECT_GT(glow.b, base.b + 0.02f) << "aether blue glow not present in the lit output";
+    // Active-but-zero field contributes nothing -> identical to baseline.
+    EXPECT_NEAR(zero.r, base.r, 1.0e-4f);
+    EXPECT_NEAR(zero.g, base.g, 1.0e-4f);
+    EXPECT_NEAR(zero.b, base.b, 1.0e-4f);
+
+    glDeleteProgram(program);
 }
 
 // T-I4-9 emissive calibration gate.
