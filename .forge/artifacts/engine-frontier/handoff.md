@@ -60,15 +60,70 @@ done) and tracks the quality debt for the research passes.
 - Endurance300 + Smoke + WaterVisual green; objective critique 1/48 (marginal).
 - forge verify effectively clean (the documented brace false-positives).
 
-### Iteration-6 inputs (research agenda — owner-requested 2026-06-15)
-Lead = Aetheric pillar + SHIELD-RT productionization. Research-then-implement
-items (with literature) recorded in this session's response + visual-debt.md:
-GPU-driven rendering (Nanite cluster cull), SHIELD-RT SDF raymarch (Claybook/
-Lumen), Transvoxel/Dual-Contouring LOD, hydraulic erosion (Mei 2007), GPU grass
-(GoT GDC 2021), volumetric clouds (Nubis), DDGI, ocean (Tessendorf), VSM; plus
-core features: motion-matching/IK animation, parametric/evolved creatures, WFC
-structures, lockstep determinism (fixed-point), HRTF audio, photography aesthetic
-scoring (NIMA). Run the `deep-research` skill per item before committing.
+### ITERATION 6 — ordered program (owner-requested 2026-06-15, "order it best")
+
+Cross-cutting principle: **research-gate every wave** — run the `deep-research`
+skill on the wave's topics → cited brief → spec → implement → verify (gates +
+the `WorldVisualSweep` visual-critique pipeline). Ordering below is by
+dependency + leverage, not the nominal roadmap order; rationale inline.
+
+**Wave 0 — Deep-research sweep (cheap, de-risks everything; do FIRST).**
+Run `deep-research` on: SHIELD-RT SDF raymarch + GPU-resident SDF storage
+(Claybook GDC 2018, UE Lumen surface cache, Aaltonen brick clipmaps); Aetheric
+field solver (reaction-diffusion/advection-diffusion, stable semi-Lagrangian);
+GPU grass (Ghost of Tsushima GDC 2021); volumetric clouds (Nubis, SIGGRAPH
+2015/17); hydraulic/thermal erosion (Mei 2007, Musgrave 1989). Output: per-topic
+briefs that pin the approach + perf budget + determinism implications before any
+spec. (This subsumes the "run deep-research first" option.)
+
+**Wave A — SHIELD-RT far-field + GPU-SDF residency (RENDER) ∥ Aetheric stack (SIM).**
+These are disjoint (render vs sim) → run in PARALLEL like 5a's A1∥A2.
+- A-render: **GPU-resident SDF (clipmap bricks) → SHIELD-RT SDF raymarch** as the
+  productionized far-field renderer (the iter-4 spike's destination). Highest
+  architecture leverage: it IS the 6×-view-distance endgame, it fixes the
+  visual-debt "distant landmass slabs," and it lays the froxel/raymarch infra
+  that Wave-C volumetric clouds reuse. Gate-first: parity vs the F1/F2 tile path
+  at 1536 m, perf budget beyond F2, near↔far seam/transition gate; GPU-SDF full
+  live parity enablement folds in here.
+- A-sim: **Aetheric scalar-field stack** (the roadmap's nominal iter-6 LEAD).
+  Generalized scalar field on the 30 Hz tick REUSING the 5a wind `FieldGrid`
+  container/budget; emission/absorption tied to the materials LUT emission path;
+  field-sampling API for planner stimuli + rendering. Sim-side → deliberate
+  `world_hash` bump under the iter-4 determinism contract (DeterministicMath,
+  SimDeterminismLint, sub-hash, replay/lockstep re-bless). Game content
+  (LuminCrystal/Glimmer) consumes it; engine knows only "emissive scalar fields."
+  Includes the iter-5 lightning→ignition hook (fire scalar field).
+
+**Wave B — Visual-debt reimplementation (RENDER; consumes Wave-A froxel infra + the critique pipeline).**
+The pipeline-tracked debt (`engine-iteration-5b/visual-debt.md`), now done as real
+research-driven systems, each verified by re-running `WorldVisualSweep`:
+- **GPU grass** — continuous, scene-lit, cloud-shadowed turf (compute density +
+  indirect draw) replacing the billboard-tuft foliage (closes the B3 residual).
+- **Volumetric clouds TIER 2** (Nubis raymarch) — shares the SHIELD-RT froxel/
+  raymarch infra from Wave A; closes the storm-cloud-depth debt.
+- **Aurora curtains** (volumetric/curtain geometry, reflection-correct).
+- **Ocean/water waves** (Gerstner or FFT, Tessendorf 2001) + time-of-day tint —
+  closes the flat-water + cool-night-tint debt.
+
+**Wave C — Worldgen realism + multi-anchor scale.**
+- **Hydraulic/thermal erosion** + far-LOD meshing (Transvoxel/Dual-Contouring) —
+  closes the "smooth cones / blob-rocks / shoreline seams / LOD slabs" debt.
+  WORLDGEN → `world_hash`-affecting → deliberate bump, atlas/snapshot-gated,
+  determinism-sensitive (sequence after Aetheric's bump settles).
+- **Multi-anchor streaming + server scale** — multiple lockstep players,
+  per-anchor streaming budgets, HeadlessServerTick multi-anchor mode.
+
+**Wave D — Closeout** — full gate sweep + `WorldVisualSweep` dual-bias critique
+(the standing QA gate) + Endurance + forge verify + handoff; iteration-7 inputs.
+
+**Recorded for iter 6/7 (own spec/critique round before scheduling):** GPU-driven
+rendering / Nanite-style cluster cull; DDGI/SDFGI dynamic GI; virtual shadow maps;
+skeletal-animation depth (motion matching — Clavet GDC 2016; IK FABRIK; gait
+synthesis); parametric/evolved creatures (SDF-primitive bodies → marching cubes);
+WFC structures (Gumin; Karth & Smith 2017); cross-platform lockstep determinism
+(fixed-point/soft-float); HRTF + wave-based audio. **Iteration 7 (photography
+loop) stays LAST by design** — camera/lenses/DoF, capture scoring + Codex
+(aesthetic models, NIMA 2017), light/shadow tools, roster.
 
 ## Iteration 5a CLOSEOUT (2026-06-15) — Atmospheric pillar (LEAD)
 
