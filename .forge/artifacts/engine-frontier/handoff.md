@@ -93,12 +93,23 @@ all green.**
 - Owner display: **3840×1600 @ 143 Hz** ultrawide (24:10) on the 5070 Ti.
 - **DONE** (`227383c`): interactive `Borderless` default now covers the FULL
   monitor (native video mode, was work-area only) — true borderless fullscreen.
-- **TASKED (task #16):** owner chose "raise everything to native" — bump the pinned
-  visual-capture size `kCapturePinnedWidth/Height` 1280×720 → **3840×1600** and
-  re-bless the whole visual-gate suite (resolution + aspect change). ROI gates are
-  mostly framebuffer-relative already; the absolute-px FarLodHorizon thresholds +
-  any objective-critique thresholds that shift need re-deriving. Heavy/iterative;
-  commit only when the whole suite is green. See memory `display-and-capture-resolution`.
+- **IN PROGRESS (task #16):** owner chose "raise everything to native" — bump the
+  pinned visual-capture size 1280×720 → **3840×1600** and re-bless the visual gates.
+  - **Groundwork DONE** (`c6d634f` + `6fda4d5`): `core/CaptureScale.h` adds
+    `ScalePinnedArea/Width/Height` (rescale a base threshold from the fixed 1280×720
+    tuning base to the actual capture size; identity at the base — unit-tested in
+    `capture_scale_test`, 4 cases). ALL absolute-pixel gate thresholds converted to
+    scale by capture area/dimension: FarLodHorizon sliver spans/widths/guard, the
+    terrain-material floors, the LodGround dark-void/near-black/bg-blue CEILINGS
+    (critical — false-fail at native without scaling), sun-disc/bolt/emissive/water
+    floors, cluster sizes, changed-pixels. Behavior-preserving at the current pin
+    (pin still 1280×720); default ctest 247/247.
+  - **REMAINING:** flip `kCapturePinnedWidth/Height` → 3840×1600, then run the full
+    visual-gate suite at the new size and fix any **aspect-framing** shifts (16:9→
+    24:10 widens the horizontal FOV; vertical-fraction ROIs survive, ratio gates are
+    resolution-independent, but composition shifts need empirical revalidation).
+    Watch perf/VRAM watermark gates at 6.67× pixels. Commit the flip ONLY when the
+    whole suite is green. See memory `display-and-capture-resolution`.
 - **Wave B** clouds/grass/aurora/ocean (consume the A.2 substrate); **Wave C**
   worldgen multi-anchor; **Wave D** closeout. See `WAVE-A-SPEC.md` + `_synthesis.md`.
 - **Iteration 7** (deferred content): sparse aether sources (LuminCrystal) -> the
