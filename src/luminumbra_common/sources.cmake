@@ -59,6 +59,8 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/systems/WeatherSystem.cpp
     # T-I6-A1: deterministic Aetheric scalar field (sim-authoritative; world_hash aether slot).
     ${CMAKE_CURRENT_LIST_DIR}/systems/AetherFieldSystem.cpp
+    # T-I6-A2a: deterministic thermal+hydraulic erosion kernel (worldgen primitive).
+    ${CMAKE_CURRENT_LIST_DIR}/world/HydraulicErosion.cpp
 
     # World
     ${CMAKE_CURRENT_LIST_DIR}/world/BiomeTable.cpp
