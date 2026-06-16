@@ -4581,6 +4581,9 @@ int main(int argc, char* argv[]) {
         mark_shutdown("world_state_saved");
     }
 
+    // Drain the SHIELD-RT far-field heightfield build before the world is cleared —
+    // its worker job reads the world by pointer (else a teardown-time use-after-free).
+    renderPipeline.drain_far_field_builds();
     if (auto* world_system = gameSession->GetWorldSystem()) {
         world_system->clear_world(gameSession->GetPhysicsSystem());
         mark_shutdown("world_cleared");

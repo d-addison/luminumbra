@@ -625,6 +625,10 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         if (kEnableExperimentalFarFieldGpuRaymarching) {
             m_shieldrt_far_pass = std::make_unique<ShieldRtFarFieldPass>();
             m_shieldrt_far_pass->init();
+            // attach_farlod_job_system ran BEFORE startup() (the pass did not exist
+            // yet), so forward the stored JobSystem now — else update() falls back to
+            // the synchronous 49-tile heightfield build and freezes the GL thread.
+            m_shieldrt_far_pass->attach_job_system(m_job_system);
         }
         load_material_texture_lut();
         init_terrain_textures();
@@ -659,12 +663,17 @@ void RenderPipeline::shutdown() {
 }
 
 void RenderPipeline::attach_farlod_job_system(JobSystem* job_system) {
+    // Stored so passes CONSTRUCTED IN startup() (which runs after this call) can be
+    // wired too — the far-field pass is one such, and without this it silently fell
+    // back to the synchronous heightfield build, freezing the GL thread.
+    m_job_system = job_system;
     if (m_farlod) {
         m_farlod->attach_job_system(job_system);
     }
     // inc2c-SCALE step 3: the SHIELD-RT far-field pass assembles its heightfield on
     // the same JobSystem so the 49-tile rebuild no longer hitches the GL thread on a
-    // region-crossing (it exists only when the experimental flag is compiled in).
+    // region-crossing (it exists only when the experimental flag is compiled in, and
+    // only after startup() — see the construct site, which re-forwards m_job_system).
     if (m_shieldrt_far_pass) {
         m_shieldrt_far_pass->attach_job_system(job_system);
     }
@@ -673,6 +682,17 @@ void RenderPipeline::attach_farlod_job_system(JobSystem* job_system) {
 void RenderPipeline::prepare_world_swap() {
     if (m_farlod) {
         m_farlod->prepare_world_swap();
+    }
+    // Drain the far-field heightfield build before the world changes (its worker
+    // reads the world by pointer).
+    if (m_shieldrt_far_pass) {
+        m_shieldrt_far_pass->drain();
+    }
+}
+
+void RenderPipeline::drain_far_field_builds() {
+    if (m_shieldrt_far_pass) {
+        m_shieldrt_far_pass->drain();
     }
 }
 
