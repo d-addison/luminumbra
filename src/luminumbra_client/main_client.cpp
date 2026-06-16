@@ -1294,13 +1294,20 @@ void ApplyWindowMode(GLFWwindow* window, WindowState& state, WindowMode mode) {
             break;
         }
         case WindowMode::Borderless: {
-            // Borderless window covering the monitor work-area (no exclusive
-            // video-mode switch, no decorations).
-            int mx = 0, my = 0, mw = 0, mh = 0;
-            glfwGetMonitorWorkarea(monitor, &mx, &my, &mw, &mh);
-            glfwSetWindowMonitor(window, nullptr, mx, my, mw, mh, 0);
+            // Borderless window covering the WHOLE monitor (owner default 2026-06-16:
+            // make full use of the ultrawide display for reviews/critiques). Unlike
+            // the work-area variant, this spans the full native resolution including
+            // under the taskbar (a borderless fullscreen), without an exclusive
+            // video-mode switch so alt-tab stays instant. Position = monitor origin,
+            // size = native video mode.
+            int mx = 0, my = 0;
+            glfwGetMonitorPos(monitor, &mx, &my);
+            const GLFWvidmode* vmode = glfwGetVideoMode(monitor);
+            const int mw = vmode ? vmode->width : 1920;
+            const int mh = vmode ? vmode->height : 1080;
             glfwSetWindowAttrib(window, GLFW_DECORATED, GLFW_FALSE);
             glfwSetWindowAttrib(window, GLFW_RESIZABLE, GLFW_FALSE);
+            glfwSetWindowMonitor(window, nullptr, mx, my, mw, mh, 0);
             break;
         }
         case WindowMode::Fullscreen: {
