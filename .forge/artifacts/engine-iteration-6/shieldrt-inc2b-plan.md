@@ -35,14 +35,54 @@ mesh-residency signal.
   GPU SDF flag) + `--enable-far-field-gpu-raymarch` CLI → `config.enable_far_field_gpu_raymarch`
   (inert/byte-stable until the pass reads them).
 
-## Next validatable increment (texture-backed path)
-Before live wiring, prove the TEXTURE-backed render path (the live pass uses
-textures, the benches used SSBOs): R32F clipmap texture + GPU max-mip as a texture
-(adapt the validated reduction to imageLoad/imageStore) + the DDA raymarch sampling
-the textures, validated offscreen vs analytic ground truth (mirrors inc2a). Then
-inc2c wires `ShieldRtFarFieldPass` into the live G-buffer slot gated by the flag,
-adds `GpuTimerPass::FarFieldRaymarching` (re-bless render_smoke_test pass list), and
-the `FarLodHorizon` mesh-vs-raymarch parity leg.
+## Decision: SSBO-backed, no texture-path bench needed
+inc2a already proved a fragment pass reading an SSBO heightfield + flattened SSBO
+max-mip writes a correct deferred G-buffer; inc2b proved the GPU max-reduction.
+So the live pass reuses the **SSBO** approach directly — no texture clipmap / no
+extra texture-path bench. The heightfield is a camera-centered SSBO rebuilt on
+region-crossing; the max-mip is the validated GPU reduction into a flattened SSBO.
+
+## inc2c — TURNKEY live-wiring plan (decisions resolved)
+Execute as ONE focused unit (gated by `kEnableExperimentalFarFieldGpuRaymarching`,
+default false → render byte-stable except two re-blessable artifacts):
+
+**Decision A — augment, not replace (v1):** keep the FarLodSystem mesh; the
+raymarch fills only pixels the mesh/live geometry didn't (depth-tested). Writes
+`gl_FragDepth` + the G-buffer MRT (inc2a encoding), `glDepthFunc(GL_LESS)` against
+the existing G-buffer depth so it only fills sky/gaps beyond the mesh. (Replacing
+the mesh slabs is a later refinement once parity holds.)
+
+**Decision B — heightfield source:** the pass owns an SSBO heightfield assembled by
+porting `BuildHeightFieldFromTiles` into production (it calls the production
+`BuildPristineFarLodTile`); rebuild + re-run the GPU max-mip only when the camera
+crosses into a new region (cache key = camera region + `ComputeTerrainParamsHash`).
+
+**Files:**
+- NEW `src/luminumbra_client/rendering/passes/ShieldRtFarFieldPass.{h,cpp}` — port
+  the validated raymarch (inc2a frag), max-mip build (inc2b computes), and
+  heightfield assembly; API `set_camera_region(world,camera)` (rebuild on miss) +
+  `render(view,viewProj,invViewProj,normalView,eye,viewport,tmax)` into the bound
+  G-buffer FBO. Embed the GLSL as string literals (matches the benches; avoids the
+  ShaderInventory dir-scan ripple) OR add to res/shaders + PipelineProgramSpecs +
+  re-bless `shader-inventory.json` — pick embedded for v1 to minimize ripple.
+- `sources.cmake`: add ShieldRtFarFieldPass.cpp.
+- `RenderPipeline.h/.cpp`: `m_shieldrt_far_pass` member (constructed only when the
+  flag is on), `GpuTimerPass::FarFieldRaymarching` enum + `"shieldrt_far"` name
+  (RenderHealth is PRESENCE-based — confirmed validate-engine-frontier.ps1:504/548
+  — so an extra pass reporting 0 ms when flag-off is SAFE, no re-bless needed), and
+  the execute call in `render_frame` after the G-buffer pass (gated), bracketed by
+  begin/end_gpu_pass_timer.
+- `main_client.cpp`: when `scenario_config.enable_far_field_gpu_raymarch`, the pass
+  is active (the flag plumbing is already landed at 6b2c7df).
+
+**Gates:** flag-off → default ctest 247/247 unchanged + RenderHealth green (extra
+0 ms pass tolerated). Flag-on → a new `FarLodHorizon`-style scenario captures with
+`--enable-far-field-gpu-raymarch` and asserts the raymarch G-buffer matches the
+mesh path within the inc1 quantization tolerance (the MAJOR #9 mesh-vs-raymarch
+parity leg) + a visual sweep for the seam. Temporal-stability gate is inc3.
+
+This is a single coherent integration; all its components are proven (inc1/2a/2b)
+and the flag-gating makes every intermediate commit byte-stable.
 
 ## New files
 - `src/luminumbra_client/rendering/passes/ShieldRtFarFieldPass.{h,cpp}` — owns the
