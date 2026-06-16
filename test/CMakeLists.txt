@@ -118,6 +118,7 @@ add_executable(common_tests
     common/WindFieldSystem_test.cpp
     common/WeatherSystem_test.cpp
     common/AetherFieldSystem_test.cpp
+    common/HydraulicErosion_test.cpp
     common/WorldStreamingState_test.cpp
 )
 
