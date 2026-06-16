@@ -108,6 +108,22 @@ all green.**
 - **Still owed:** **Phase 0.3 quiet-machine perf re-bless** (A.2 budget-ratification
   entry-gate) — run `.forge/scripts/run-release-perf-lane.ps1 -Bless` on a quiet box.
 
+### Owner principles + visual-fidelity floor (2026-06-16)
+- **Standing principles** (memories): build the most **powerful/composable/scalable-
+  under-load** engine (`engine-power-scalability-principle`); **don't sacrifice beauty
+  for perf** — minimum realistic fidelity floor at **Battlefield 4/BF1 (Frostbite)**
+  level (`visual-fidelity-target`). These govern all engine work: productionized over
+  stopgap, design for scale/load from the start, perf opts must hold the visual floor.
+- **Fidelity floor now ENFORCED in the visual critique** (`8ca0468`):
+  `tools/visual_critique.py` gained `LOW_TEXTURE_DETAIL` (ground high-freq detail
+  below 8.0 on daytime-clear terrain views) in a new blocking `FIDELITY_FLAGS` set.
+  **INTENTIONAL: the WorldVisualSweep `analyze --strict` gate now FAILS — 12/48 cells
+  flag LOW_TEXTURE_DETAIL** (the current flat-shaded terrain scores 2-6 vs the 8.0
+  floor). This is NOT a regression: it is the owner-requested objective BLOCK that
+  drives terrain texturing to the BF4/BF1 floor (near terrain triplanar fidelity +
+  the far-field shading-parity gap). Discharged only by raising the visuals + a
+  flag-free re-run. `VisualCritiqueFlags` fixture ctest stays GREEN (pins the logic).
+
 ### Owner display/fullscreen directive (2026-06-16)
 - Owner display: **3840×1600 @ 143 Hz** ultrawide (24:10) on the 5070 Ti.
 - **DONE** (`227383c`): interactive `Borderless` default now covers the FULL
