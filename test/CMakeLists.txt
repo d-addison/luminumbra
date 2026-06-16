@@ -455,6 +455,45 @@ set_tests_properties(ShieldRtSpike PROPERTIES
     LABELS "manual;perf;spike"
     TIMEOUT 600)
 
+# Iteration-6 critique #5: per-flag fixtures for the WorldVisualSweep objective
+# critique (tools/visual_critique.py). Pins every objective defect flag so a
+# threshold edit that stops catching a defect fails CI. Needs numpy (the fixtures
+# build synthetic arrays). Multiple python installs may exist on a machine and
+# only some carry numpy, so probe candidates for `import numpy` and register the
+# test with the first that has it (the same strategy the validator gate uses to
+# pick $VISUAL_SWEEP_PYTHON). If none has numpy, warn and skip registration.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+set(_vc_candidates "")
+if(DEFINED ENV{VISUAL_SWEEP_PYTHON})
+    list(APPEND _vc_candidates "$ENV{VISUAL_SWEEP_PYTHON}")
+endif()
+if(Python3_FOUND)
+    list(APPEND _vc_candidates "${Python3_EXECUTABLE}")
+endif()
+foreach(_pyname python python3 py)
+    find_program(_vc_${_pyname} ${_pyname})
+    if(_vc_${_pyname})
+        list(APPEND _vc_candidates "${_vc_${_pyname}}")
+    endif()
+endforeach()
+set(_vc_python "")
+foreach(_cand ${_vc_candidates})
+    execute_process(COMMAND "${_cand}" -c "import numpy"
+        RESULT_VARIABLE _vc_rc OUTPUT_QUIET ERROR_QUIET)
+    if(_vc_rc EQUAL 0)
+        set(_vc_python "${_cand}")
+        break()
+    endif()
+endforeach()
+if(_vc_python)
+    add_test(NAME VisualCritiqueFlags
+        COMMAND "${_vc_python}" ${CMAKE_SOURCE_DIR}/tools/test_visual_critique.py)
+    set_tests_properties(VisualCritiqueFlags PROPERTIES LABELS "visual;critique" TIMEOUT 120)
+    message(STATUS "VisualCritiqueFlags gate registered using python: ${_vc_python}")
+else()
+    message(WARNING "No python with numpy found: VisualCritiqueFlags gate (visual_critique fixtures) will NOT be registered. Set VISUAL_SWEEP_PYTHON to a python with numpy+Pillow.")
+endif()
+
 set(LUMINUMBRA_TEST_BASELINE_BUILD_PRESET "${CMAKE_BUILD_TYPE}")
 string(TOLOWER "${LUMINUMBRA_TEST_BASELINE_BUILD_PRESET}" LUMINUMBRA_TEST_BASELINE_BUILD_PRESET)
 if(LUMINUMBRA_TEST_BASELINE_BUILD_PRESET STREQUAL "")
