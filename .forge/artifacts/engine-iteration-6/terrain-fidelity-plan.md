@@ -80,3 +80,42 @@ measured/scalable principles). WHY:
 `world_visual_sweep` writes PPMs; the PPM->PNG conversion is a SEPARATE validator
 step. Running the scenario directly requires a manual PPM->PNG before
 `visual_critique.py` (which reads sweep/png/), or stale PNGs are critiqued.
+
+## Pass #2 measured state (2026-06-16, after the g_buffer unsharp lever 69c7433)
+Fresh native 3840x1600 sweep. Still **12/48** cells flag `LOW_TEXTURE_DETAIL`
+(all summer-clear terrain views). Per-flagged-cell `ground_detail_energy` (floor 8.0):
+
+| tod  | yaw000 | yaw120 | yaw240 | down35 | ground_luma band |
+|------|-------:|-------:|-------:|-------:|------------------|
+| dawn | 4.17   | 6.04   | 2.57   | 4.39   | 76–105 |
+| noon | 4.66   | 7.18   | 2.84   | 3.28   | 85–114 |
+| dusk | 2.42   | 2.94   | 1.44   | 2.80   | 42–61  |
+
+**Key finding — the metric conflates texture with light level.** The SAME terrain
+scores ~2.5–3x lower at dusk (gl 42–61) than at noon (gl 85–114): mean-abs-Laplacian
+of luma scales with absolute luma, so a dim-but-textured surface reads as "low
+detail." The dusk row is a brightness artifact, not a texture deficit. A
+brightness-normalized companion metric (`detail_energy / max(ground_luma, eps)` =
+relative micro-contrast) would measure texture independent of light — confirming the
+plan's lever-4 suspicion that the flat 8.0 absolute floor is mis-calibrated for
+dim/distance-dominated views. yaw000/120/240 are also distance-dominated (eye-level
+horizon vistas → the ground ROI is mid/far terrain that legitimately minifies);
+down35 frames the NEAREST ground and is the honest near-micro-detail signal
+(noon 3.28, dawn 4.39, dusk 2.80).
+
+The pass-#2 unsharp lever DID help (the worst near cells were ~2 pre-pass) but the
+near floor is still ~3–4. The blue-speckle is effectively gone (0.39% of the ground
+ROI on noon/down35, mostly horizon/sky bleed at the ROI top — not a soil defect).
+
+**Decision needed (owner's eye — over-sharpening can game the Laplacian while
+looking WORSE, so this is not an autonomous-commit call):** pick the next lever —
+  (a) push albedo/normal contrast harder (risk: haloing; needs visual bless), or
+  (b) brightness-aware metric + near-weighted ROI (honest recalibration of a
+      provisional floor; additive companion metric is safe, gate-threshold change
+      is the owner's call), or
+  (c) higher-res / higher-contrast detail textures (asset work — the real floor
+      lift), or
+  (d) accept distance-dominated minification and re-scope the floor to the down35
+      near-ROI only.
+Recommend (b)+(c): instrument the honest metric now, then asset-side contrast for
+the genuine near-field lift. (a) alone risks a worse-looking, higher-scoring image.
