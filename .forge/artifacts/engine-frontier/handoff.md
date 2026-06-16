@@ -2,10 +2,10 @@
 
 ## Iteration 6 IN PROGRESS (2026-06-16) — Wave A sim/worldgen foundation
 
-Branch `feat/polyglot-audit-roadmap`, tip **`014c81b`**. Autonomous overnight run
+Branch `feat/polyglot-audit-roadmap`, tip **`1d63435`**. Autonomous run
 (owner-authorized: memory `autonomous-iteration-6-mandate`). **Full ctest 243/243.**
-The complete determinism-critical sim+worldgen foundation of Wave A is built,
-verified, and hash-clean. Commits:
+Wave A's entire sim/worldgen scope is COMPLETE (incl. erosion enabled + visually
+validated on both gameplay presets), verified, and hash-clean. Commits:
 - **Phase 0 hygiene** (`8ae7b8f`): 33 orphaned worktrees removed (audited safe, no
   vendor junctions), `main` reset to `c3806dc` (local), visual-critique hardened
   into a ctest-pinned strict gate (`VisualCritiqueFlags` + `analyze --strict`).
@@ -24,19 +24,23 @@ verified, and hash-clean. Commits:
   erosion kernel (`HydraulicErosion`, 3 tests) → `0f78a5f` A2b-1 full hash-neutral
   integration into the shared height path (every consumer walks the eroded surface
   when enabled; per-region seamless bake via global-cell indexing) → `014c81b`
-  A2b-2 perf (shared-lock the bake cache, bake outside the lock).
+  A2b-2 perf (shared-lock the bake cache, bake outside the lock) → `7a2104c`
+  A2b-2 ARCHIPELAGO erosion ENABLED (gentle: iter 10/talus 2.5/max 4; preset hash
+  `0x940d…` → `0xf26e830fb364b045`; loader hydro block; ComputeShapedHeightsAtPositions
+  apply_hydro surface-span fix + batched bake; far-LOD cap 64→128 MB) → `1d63435`
+  A2b-2 MOUNTAINS erosion ENABLED (moderate: iter 9/talus 2.8/max 14; beta 2.07 in-band;
+  walkable 0.62→0.66; 579 waterfall sites).
 
 **Determinism chain:** `d950a6afc12a5cdc` (iter-5) → **`f17726d44054d133`** (A1 aether
-bump #4). A1.5 + A2b-1 are world_hash-neutral (gated off). Wind/weather sub-hashes
-intact (`wind=61e223488b8ed5db`).
+bump #4) — UNCHANGED by A2 (the default preset that HeadlessServerTick/replay/lockstep
+use is left un-eroded; erosion is per-gameplay-preset, captured by the archipelago
+preset-height-hash + the slope/DEM realism gates, not the determinism chain). A1.5 +
+the hydro infra are world_hash-neutral. Wind/weather sub-hashes intact
+(`wind=61e223488b8ed5db`). **Erosion validated on eroded terrain: WorldVisualSweep 0
+flags, FarLodHorizon 40/40, PlayerView, WaterfallVisual, slope-walkability + DEM-realism
+all green.**
 
-### Remaining (visual/aesthetic/render — needs owner direction)
-- **A2b-2** (task #14): enable hydro on shipped presets = **world_hash bump #5**.
-  Needs erosion-strength TUNING (aesthetic), the broad re-bless (worldgen snapshots,
-  CurrentShippedArchipelagoPresetHeightHash, FarLodHorizon, PlayerView, WaterfallVisual
-  — confirm quality thresholds, don't blind-bless), + WorldVisualSweep/screenshots.
-  Open owner decision: enable+tune autonomously (keep only if gates pass) vs owner
-  steers the look first.
+### Remaining (render phase)
 - **A1d** (task #11): aether render emissive tap + coupling gate (render phase;
   RenderHealth re-bless + visual QA). Closes critique MAJOR #17 (dead-system).
 - **Wave A.2** SHIELD-RT far-field (GPU-profile both tracers first, per A0 markers);
