@@ -108,6 +108,29 @@ check("up_view_no_fidelity", a,
       {"daytime": True, "pitched_up": True, "storm": False, "angle": "up25"},
       expect_absent=["LOW_TEXTURE_DETAIL"])
 
+# --- brightness INDEPENDENCE (the 2026-06-16 fix): dim-but-textured terrain PASSES the
+#     normalized floor even though its RAW |Laplacian| is below the old absolute floor.
+#     The old light-coupled metric would have spuriously flagged this dusk-dim terrain. ---
+a = frame(45.0)
+g = np.full((H - 2 * H // 3, W, 3), (38.0, 52.0, 33.0), dtype=np.float32)  # dim (~dusk) base
+g[::2] += 3.0                         # faint but real surface texture
+a[2 * H // 3:] = g
+res = check("dim_textured_ok", a,
+            {"daytime": True, "pitched_down": True, "storm": False, "angle": "down35"},
+            expect_absent=["LOW_TEXTURE_DETAIL"])
+if res["metrics"]["ground_detail_energy"] >= vc.T["fidelity_detail_min"]:
+    _failures.append("[dim_textured] fixture must have RAW detail below the old absolute "
+                     "floor (else it doesn't prove the brightness-coupling fix)")
+
+# --- the fidelity floor judges ONLY down-pitched cells: an eye-level horizon vista with
+#     flat ground is NOT flagged (distant terrain legitimately minifies — low detail is
+#     correct there, not a defect). ---
+a = frame(110.0)
+a[2 * H // 3:] = (95.0, 135.0, 80.0)  # flat ground, eye-level vista (no pitch flags)
+check("eye_level_vista_no_fidelity", a,
+      {"daytime": True, "storm": False, "angle": "yaw000"},
+      expect_absent=["LOW_TEXTURE_DETAIL"])
+
 # --- CLEAN frame: a normal lit daytime scene raises NO blocking flags ---
 a = frame(90.0)
 a[: H // 3] = (120.0, 150.0, 210.0)   # blue sky

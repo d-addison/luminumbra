@@ -45,15 +45,20 @@ T = {
     "foliage_ground_green_min": 0.010, # daytime down-view: ground green-cover floor (foliage must be present)
     "rain_anis_min": 1.15,          # storm: vertical/horizontal gradient ratio floor (rain reads as streaks)
     # --- VISUAL-FIDELITY FLOOR (owner principle 2026-06-16: BF4/BF1 realism) ---
-    # Ground high-frequency surface detail (mean |Laplacian| of the ground-third
-    # luma). Flat/untextured terrain reads low-fi; a textured, BF4/BF1-floor surface
-    # carries visible detail. PROVENANCE: measured on the current world-visual-sweep
-    # at native 3840x1600 noon clear ground views, every cell scored 2.0-6.3
-    # (flat-shaded low-detail terrain — "visuals are pretty shit"); the floor sits
-    # above that so the gate flags the shortfall until the terrain is textured to the
-    # fidelity floor. PROVISIONAL — recalibrate against a fidelity reference; pinned
+    # Terrain micro-contrast = BRIGHTNESS-NORMALIZED ground detail: mean |Laplacian| of
+    # the ground luma DIVIDED BY mean ground luma. The raw |Laplacian| (fidelity_detail_min
+    # below, kept for telemetry) scales with absolute luma, so the SAME terrain scored
+    # 2.5-3x lower at dusk than noon — a light-level artifact, not a texture deficit
+    # (forge-critique 2026-06-16, terrain-fidelity-plan pass-#2). The normalized metric is
+    # light-independent: flat/untextured terrain -> ~0 at any time of day; a textured
+    # BF4/BF1 surface carries visible relative contrast. PROVENANCE: the current sweep's
+    # daytime ground views score ~0.03-0.05 relative (flat-shaded, "pretty shit"); the
+    # floor sits above that. The flag is judged ONLY on DOWN-PITCHED daytime-clear cells
+    # (eye-level horizon vistas legitimately minify distant terrain). PROVISIONAL — pinned
     # by tools/test_visual_critique.py.
-    "fidelity_detail_min": 8.0,
+    "fidelity_relative_detail_min": 0.08,  # |Laplacian|/luma floor (light-independent)
+    "fidelity_luma_floor": 8.0,            # eps for the division; below this a cell is too dark to judge
+    "fidelity_detail_min": 8.0,            # RAW |Laplacian| floor — telemetry only now (light-coupled; superseded)
 }
 
 # Flags that BLOCK the gate in --strict mode. All objective defect flags are
@@ -149,6 +154,12 @@ def analyze_array(a, m):
         "ground_luma": float(luma(region(a,"ground")).mean()),
         "ground_detail_energy": detail_energy(luma(region(a,"ground"))),
     }
+    # Brightness-normalized micro-contrast: |Laplacian| / mean-luma is light-independent,
+    # so the SAME texture scores identically at noon and dusk (the raw |Laplacian| above
+    # scales with luma and spuriously fails dim-but-textured terrain). This is the metric
+    # the BF4/BF1 fidelity floor judges on.
+    metrics["ground_relative_detail"] = (
+        metrics["ground_detail_energy"] / max(metrics["ground_luma"], T["fidelity_luma_floor"]))
     # --- universal flags ---
     if metrics["black_frac"] > T["black_frac_dead"]:
         flags.append("DEAD_BLACK_FRAME")
@@ -169,12 +180,15 @@ def analyze_array(a, m):
     daytime = bool(m.get("daytime"))
     tod = m.get("tod"); angle = m.get("angle")
 
-    # --- VISUAL-FIDELITY FLOOR: terrain texture detail (BF4/BF1 realism) ---
-    # Judge on daytime, clear, terrain-facing cells: pitched-up sky views and water
-    # cells don't put lit terrain in the ground third, so they aren't a fair texture
-    # test. Flat/untextured terrain falls below the detail floor and reads low-fi.
-    if daytime and not storm and not bool(m.get("pitched_up")) and angle != "water":
-        if metrics["ground_detail_energy"] < T["fidelity_detail_min"]:
+    # --- VISUAL-FIDELITY FLOOR: terrain micro-contrast (BF4/BF1 realism) ---
+    # Judge ONLY on DOWN-PITCHED daytime-clear cells: those frame NEAR terrain (where
+    # micro-detail is the honest signal). Eye-level horizon vistas legitimately minify
+    # distant terrain (low detail is correct there, not a defect); pitched-up sky views
+    # and water cells put no near terrain in the ground third. The metric is the
+    # BRIGHTNESS-NORMALIZED micro-contrast so dim dusk terrain is not penalized for being
+    # dark (the raw |Laplacian| floor conflated texture with light level).
+    if daytime and not storm and bool(m.get("pitched_down")) and angle != "water":
+        if metrics["ground_relative_detail"] < T["fidelity_relative_detail_min"]:
             flags.append("LOW_TEXTURE_DETAIL")
 
     # --- night-storm legibility: dark but must have SOME structure/contrast ---
