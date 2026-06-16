@@ -64,6 +64,10 @@ struct RuntimeScenarioConfig {
     bool no_ui = false;
     bool hidden_window = false;
     bool enable_gpu_sdf_runtime = false;
+    // T-I6-A3b SHIELD-RT far-field GPU raymarch runtime opt-in
+    // (--enable-far-field-gpu-raymarch). Gated additionally by the compile-time
+    // kEnableExperimentalFarFieldGpuRaymarching until the pass lands.
+    bool enable_far_field_gpu_raymarch = false;
     int timed_run_seconds = 0;
     int readiness_timeout_seconds = 120;
     int horizon_radius = 12;
