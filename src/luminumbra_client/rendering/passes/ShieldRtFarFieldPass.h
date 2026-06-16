@@ -23,8 +23,12 @@
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 
+#include "luminumbra_common/core/JobSystem.h"
+
 #include <array>
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <vector>
 
 namespace Luminumbra::Systems { class SHIELD_WorldSystem; }
@@ -50,9 +54,17 @@ public:
     void shutdown();
     bool ready() const { return m_ready; }
 
-    // Rebuild the camera-centered heightfield + GPU max-mip when the camera
-    // crosses into a new F1 region (or the bound world/params change). Cheap
-    // no-op otherwise. Must run on the GL thread (it uploads + dispatches).
+    // inc2c-SCALE step 3: attach the JobSystem so the heightfield assembly (49
+    // BuildPristineFarLodTile calls) runs on a worker instead of hitching the GL
+    // thread on every region-crossing. When null, update() falls back to the
+    // synchronous in-line build (the validated inc2c behaviour).
+    void attach_job_system(JobSystem* job_system) { m_job_system = job_system; }
+
+    // Keep the camera-centered heightfield + GPU max-mip current. On a region/params
+    // change it dispatches an ASYNC CPU assembly (the prior field keeps rendering
+    // until the new one is ready), and integrates a finished build (GL upload + mip
+    // reduction) on the GL thread. Cheap no-op when the field already matches. Must
+    // run on the GL thread.
     void update(const Systems::SHIELD_WorldSystem& world, const glm::vec3& camera_pos);
 
     // inc2c-SCALE step 1: blit the source FBO's depth into a pass-owned copy
@@ -72,7 +84,32 @@ public:
     bool has_field() const { return m_has_field; }
 
 private:
-    void rebuild_field(const Systems::SHIELD_WorldSystem& world, int center_rx, int center_rz);
+    // Pure-CPU heightfield assembly result (no GL, no `this`) — safe to produce on
+    // a worker thread and hand back to the GL thread to integrate.
+    struct FieldData {
+        std::vector<float> heights;
+        int n = 0;
+        float step = 0.0f, ox = 0.0f, oz = 0.0f;
+        int center_rx = 0, center_rz = 0;
+        std::uint64_t params_hash = 0;
+    };
+    // Cross-thread hand-off: the worker fills `data` + sets `ready` under `mutex`;
+    // the GL thread polls and moves it out. shared_ptr so an in-flight job outlives
+    // the pass if it is destroyed mid-build.
+    struct FieldBuild {
+        std::mutex mutex;
+        bool ready = false;
+        FieldData data;
+    };
+
+    // Assemble the 7x7-region heightfield (CPU only). Static so the worker lambda
+    // cannot touch GL state or `this`.
+    static FieldData assemble_field(const Systems::SHIELD_WorldSystem& world,
+                                    int center_rx, int center_rz,
+                                    std::uint64_t params_hash);
+    // Upload the assembled field + build the GPU max-mip (GL thread only). Sets the
+    // resident field descriptor + cache key to the integrated region.
+    void integrate_field(FieldData& fd);
 
     bool m_ready = false;
     bool m_has_field = false;
@@ -92,11 +129,21 @@ private:
     int m_depth_h = 0;
     bool m_have_depth_copy = false;
 
-    // Cached field descriptor (set by rebuild_field).
+    // Cached field descriptor (set by integrate_field — the resident field's region).
     int m_center_rx = 0;
     int m_center_rz = 0;
     std::uint64_t m_params_hash = 0;
     bool m_have_cache_key = false;
+
+    // inc2c-SCALE step 3: async-rebuild state (all GL-thread-only except m_shared,
+    // which is guarded by its own mutex).
+    JobSystem* m_job_system = nullptr;
+    std::shared_ptr<FieldBuild> m_shared;  // in-flight build hand-off (null when idle)
+    JobHandle m_inflight_handle;
+    bool m_building = false;
+    int m_inflight_rx = 0;
+    int m_inflight_rz = 0;
+    std::uint64_t m_inflight_params = 0;
 
     int m_n = 0;                    // base samples per side
     float m_step = 0.0f;           // metres between samples
