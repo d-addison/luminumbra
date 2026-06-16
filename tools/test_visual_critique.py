@@ -84,12 +84,38 @@ res = vc.analyze_array(a, {"storm": True})
 if "rain_vh_anisotropy" not in res["metrics"]:
     _failures.append("[rain_anis] storm horizon cell missing rain_vh_anisotropy metric")
 
+# --- LOW_TEXTURE_DETAIL: daytime clear terrain view with flat/untextured ground ---
+# (BF4/BF1 visual-fidelity floor). Solid green ground -> ~zero high-freq detail.
+a = frame(110.0)
+a[2 * H // 3:] = (95.0, 135.0, 80.0)  # SOLID green ground (low-fi, no surface detail)
+check("low_texture_detail", a,
+      {"daytime": True, "pitched_down": True, "storm": False, "angle": "down35"},
+      expect_present=["LOW_TEXTURE_DETAIL"])
+
+# --- a TEXTURED ground clears the fidelity floor (no flag) ---
+a = frame(110.0)
+g = np.full((H - 2 * H // 3, W, 3), (95.0, 135.0, 80.0), dtype=np.float32)
+g[::2] += 45.0                        # high-frequency surface detail -> above the floor
+a[2 * H // 3:] = g
+check("textured_ground_ok", a,
+      {"daytime": True, "pitched_down": True, "storm": False, "angle": "down35"},
+      expect_absent=["LOW_TEXTURE_DETAIL"])
+
+# --- fidelity floor does NOT judge pitched-up sky views or water cells ---
+a = frame(110.0)
+a[2 * H // 3:] = (95.0, 135.0, 80.0)  # flat, but it's a sky/up view -> not a terrain test
+check("up_view_no_fidelity", a,
+      {"daytime": True, "pitched_up": True, "storm": False, "angle": "up25"},
+      expect_absent=["LOW_TEXTURE_DETAIL"])
+
 # --- CLEAN frame: a normal lit daytime scene raises NO blocking flags ---
 a = frame(90.0)
 a[: H // 3] = (120.0, 150.0, 210.0)   # blue sky
-a[2 * H // 3:] = (80.0, 140.0, 70.0)  # green ground
-res = check("clean", a, {"daytime": True, "pitched_down": True},
-            expect_absent=list(vc.HARD_FLAGS))
+g = np.full((H - 2 * H // 3, W, 3), (80.0, 140.0, 70.0), dtype=np.float32)
+g[::2] += 40.0                        # textured green ground -> clears the fidelity floor
+a[2 * H // 3:] = g
+res = check("clean", a, {"daytime": True, "pitched_down": True, "angle": "down35"},
+            expect_absent=list(vc.HARD_FLAGS) + list(vc.FIDELITY_FLAGS))
 
 # --- the blocking-flag registry must cover every flag these fixtures raise ---
 raised = {"DEAD_BLACK_FRAME", "FLAT_DARK_NO_DETAIL", "WASHED_OUT", "GREEN_SKY_SPECKLE",
@@ -98,6 +124,10 @@ raised = {"DEAD_BLACK_FRAME", "FLAT_DARK_NO_DETAIL", "WASHED_OUT", "GREEN_SKY_SP
 missing = raised - vc.HARD_FLAGS
 if missing:
     _failures.append(f"HARD_FLAGS is missing blocking flags: {sorted(missing)}")
+
+# --- the fidelity-floor flag must be registered in FIDELITY_FLAGS (blocking) ---
+if "LOW_TEXTURE_DETAIL" not in vc.FIDELITY_FLAGS:
+    _failures.append("FIDELITY_FLAGS is missing LOW_TEXTURE_DETAIL")
 
 if _failures:
     print("VISUAL CRITIQUE FIXTURE FAILURES:")
