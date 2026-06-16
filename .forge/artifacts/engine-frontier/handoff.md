@@ -104,12 +104,17 @@ all green.**
     (critical — false-fail at native without scaling), sun-disc/bolt/emissive/water
     floors, cluster sizes, changed-pixels. Behavior-preserving at the current pin
     (pin still 1280×720); default ctest 247/247.
-  - **REMAINING:** flip `kCapturePinnedWidth/Height` → 3840×1600, then run the full
-    visual-gate suite at the new size and fix any **aspect-framing** shifts (16:9→
-    24:10 widens the horizontal FOV; vertical-fraction ROIs survive, ratio gates are
-    resolution-independent, but composition shifts need empirical revalidation).
-    Watch perf/VRAM watermark gates at 6.67× pixels. Commit the flip ONLY when the
-    whole suite is green. See memory `display-and-capture-resolution`.
+  - **FLIP DONE** (`b2d63c0`): `kCapturePinnedWidth/Height` → **3840×1600**. The full
+    visual sweep at the new size surfaced 3 real resolution-dependent issues (16/17
+    gates passed immediately on the scaled thresholds): (1) **capture clipping** —
+    a decorated 3840×1600 window clips its client area to 3840×1581 (19px title bar),
+    fixed by creating the capture window undecorated; (2) **lightning bolt undetected**
+    — the bright-thin ±1px gradient softens on a 3×-wider bloomed bolt edge, fixed by
+    sampling at a resolution-scaled offset; (3) **bolt aspect** — the pixel bbox aspect
+    is distorted by 24:10 vs 16:9, fixed by correcting the min-aspect threshold by the
+    pixel-aspect ratio. All 17 visual gates green at 3840×1600; default ctest 247/247.
+    A full background re-confirmation sweep is running. Memory `display-and-capture-resolution`.
+  - **Net:** review/critique screenshots now capture at native 3840×1600 ultrawide.
 - **Wave B** clouds/grass/aurora/ocean (consume the A.2 substrate); **Wave C**
   worldgen multi-anchor; **Wave D** closeout. See `WAVE-A-SPEC.md` + `_synthesis.md`.
 - **Iteration 7** (deferred content): sparse aether sources (LuminCrystal) -> the
