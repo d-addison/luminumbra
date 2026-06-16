@@ -1417,6 +1417,17 @@ int main(int argc, char* argv[]) {
     if (hidden_window) {
         glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
     }
+    if (capture_pinned) {
+        // Pinned captures must hit EXACTLY kCapturePinnedWidth x Height. A DECORATED
+        // window clips its client area by the title bar, so on a monitor whose
+        // resolution equals the pinned size a 3840x1600 decorated window yields a
+        // 3840x1581 framebuffer (the 19 px title bar). Create the capture window
+        // undecorated so the client area — hence glfwGetFramebufferSize and the
+        // glReadPixels(GL_BACK) capture — equals the requested pinned size exactly.
+        // (At 1280x720 the decorated window fit with room to spare, so this never
+        // mattered until the native-resolution capture re-bless.)
+        glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
+    }
     if (scenario_config.active()) {
         // Automated gate runs need a visible window (Endurance300 asserts it)
         // but must not steal focus from whatever the developer is doing.

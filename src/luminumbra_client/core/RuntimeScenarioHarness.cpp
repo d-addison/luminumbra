@@ -1559,6 +1559,14 @@ StrikePixelStats AnalyzeStrikePixels(const std::vector<unsigned char>& pixels, i
     int bbox_max_x = -1;
     int bbox_max_y = -1;
     std::uint64_t core_pixels = 0;
+    // The sharp-step test compares a bolt pixel to a neighbour a fixed VISUAL
+    // distance away. Sample that neighbour at a RESOLUTION-SCALED pixel offset so
+    // an anti-aliased/bloomed bolt edge — which ramps over more pixels at higher
+    // resolution — reads the same per-step gradient at any capture size. At the
+    // 1280x720 tuning base both offsets are 1 px (byte-identical to the original
+    // off +/- 3 bytes / +/- one row); T-I6 capture-native re-bless.
+    const int grad_dx = std::max(1, static_cast<int>(ScalePinnedWidth(1, width)));
+    const int grad_dy = std::max(1, static_cast<int>(ScalePinnedHeight(1, height)));
     for (int y = 1; y < height - 1; ++y) {
         for (int x = 1; x < width - 1; ++x) {
             const std::size_t off = static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
@@ -1566,10 +1574,14 @@ StrikePixelStats AnalyzeStrikePixels(const std::vector<unsigned char>& pixels, i
             if (l < kAbsBright || l < rel_bright) {
                 continue;
             }
-            const std::size_t offL = off - 3u;
-            const std::size_t offR = off + 3u;
-            const std::size_t offU = off - row_stride;
-            const std::size_t offD = off + row_stride;
+            const std::size_t offL = static_cast<std::size_t>(y) * row_stride +
+                                     static_cast<std::size_t>(std::max(0, x - grad_dx)) * 3u;
+            const std::size_t offR = static_cast<std::size_t>(y) * row_stride +
+                                     static_cast<std::size_t>(std::min(width - 1, x + grad_dx)) * 3u;
+            const std::size_t offU = static_cast<std::size_t>(std::max(0, y - grad_dy)) * row_stride +
+                                     static_cast<std::size_t>(x) * 3u;
+            const std::size_t offD = static_cast<std::size_t>(std::min(height - 1, y + grad_dy)) * row_stride +
+                                     static_cast<std::size_t>(x) * 3u;
             const double lL = PixelLuminance(pixels[offL], pixels[offL + 1u], pixels[offL + 2u]) / 255.0;
             const double lR = PixelLuminance(pixels[offR], pixels[offR + 1u], pixels[offR + 2u]) / 255.0;
             const double lU = PixelLuminance(pixels[offU], pixels[offU + 1u], pixels[offU + 2u]) / 255.0;
@@ -1624,7 +1636,15 @@ void WriteStrikeVisualAnalysis(
     //  - and it must be THIN -- its bright-core pixels fill only a small fraction
     //    of its bounding box (a solid white worm fills a near-square box densely),
     //  - and the pre-strike STORM scene must be dark enough that the flash reads.
-    constexpr double kMinBoltAspect = 2.0;          // height/width: a vertical bolt
+    // height/width: a vertical bolt. The bbox aspect is measured in PIXELS, so it
+    // scales with the capture's pixel aspect ratio; correct the threshold by
+    // (H/W) / (tuningH/tuningW) so it tests the same TRUE bolt shape at any capture
+    // aspect. Identity at the 1280x720 tuning base; at 3840x1600 (24:10) it relaxes
+    // to ~1.48 because horizontal pixels stretch 3x vs vertical 2.22x (T-I6
+    // capture-native re-bless). fill_fraction below is a ratio — aspect-invariant.
+    const double kMinBoltAspect =
+        2.0 * (static_cast<double>(kCapturePinnedHeight) * kThresholdTuningWidth) /
+              (static_cast<double>(kCapturePinnedWidth) * kThresholdTuningHeight);
     constexpr double kMaxBoltFillFraction = 0.34;   // sparse/thin, not a filled blob
     constexpr double kMaxNeighborLuma = 0.62;       // storm sky dark enough for contrast
 

@@ -50,8 +50,8 @@ const char* WindowModeName(WindowMode mode);
 // regardless of --window-mode / --resolution, and records the active window
 // mode + framebuffer size into each capture analysis artifact so the offline
 // analysis can hard-fail if a capture ever ran at a non-pinned size.
-inline constexpr int kCapturePinnedWidth = 1280;
-inline constexpr int kCapturePinnedHeight = 720;
+inline constexpr int kCapturePinnedWidth = 3840;
+inline constexpr int kCapturePinnedHeight = 1600;
 // Resolution-relative gate-threshold scaling (kThresholdTuning* + ScalePinned*).
 // Dependency-free header so the scaling math is unit-testable without GL.
 // (Included here so every gate in RuntimeScenarioHarness.cpp sees the helpers.)
