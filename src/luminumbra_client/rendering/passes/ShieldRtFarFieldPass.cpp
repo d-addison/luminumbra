@@ -293,6 +293,15 @@ bool ShieldRtFarFieldPass::init() {
 }
 
 void ShieldRtFarFieldPass::shutdown() {
+    // Drain any in-flight async heightfield build so its worker does not read the
+    // world / write m_shared after teardown (m_shared is a shared_ptr so the buffer
+    // itself outlives the job, but the world pointer must stay valid until it ends).
+    if (m_job_system && m_inflight_handle.counter) {
+        m_job_system->wait(m_inflight_handle);
+    }
+    m_inflight_handle = JobHandle{};
+    m_shared.reset();
+    m_building = false;
     if (m_raymarch_prog) { glDeleteProgram(m_raymarch_prog); m_raymarch_prog = 0; }
     if (m_maxmip_l0_prog) { glDeleteProgram(m_maxmip_l0_prog); m_maxmip_l0_prog = 0; }
     if (m_maxmip_reduce_prog) { glDeleteProgram(m_maxmip_reduce_prog); m_maxmip_reduce_prog = 0; }
@@ -346,34 +355,91 @@ void ShieldRtFarFieldPass::update(const Systems::SHIELD_WorldSystem& world,
     const int center_rz = static_cast<int>(std::floor(camera_pos.z / 512.0f));
     const std::uint64_t params_hash =
         World::ComputeTerrainParamsHash(world.get_params(), world.get_seed());
+
+    // 1. Integrate a finished async build (GL upload + mip reduction on this thread).
+    if (m_building && m_shared) {
+        FieldData done;
+        bool got = false;
+        {
+            std::lock_guard<std::mutex> lock(m_shared->mutex);
+            if (m_shared->ready) {
+                done = std::move(m_shared->data);
+                m_shared->ready = false;
+                got = true;
+            }
+        }
+        if (got) {
+            integrate_field(done);  // sets m_has_field + the cache key to done's region
+            m_building = false;
+            m_shared.reset();
+            m_inflight_handle = JobHandle{};
+        }
+    }
+
+    // 2. Resident field already matches the camera region + params: nothing to do.
     if (m_have_cache_key && center_rx == m_center_rx && center_rz == m_center_rz &&
         params_hash == m_params_hash) {
-        return;  // same region + params: clipmap is current
+        return;
     }
-    rebuild_field(world, center_rx, center_rz);
-    m_center_rx = center_rx;
-    m_center_rz = center_rz;
-    m_params_hash = params_hash;
-    m_have_cache_key = true;
+
+    // 3. A build for THIS exact target is already in flight: keep rendering the prior
+    //    field until it lands (no re-dispatch).
+    if (m_building && center_rx == m_inflight_rx && center_rz == m_inflight_rz &&
+        params_hash == m_inflight_params) {
+        return;
+    }
+
+    // 4a. No JobSystem (tests / headless without a pool): synchronous in-line build,
+    //     preserving the validated inc2c behaviour.
+    if (!m_job_system) {
+        FieldData fd = assemble_field(world, center_rx, center_rz, params_hash);
+        integrate_field(fd);
+        return;
+    }
+
+    // 4b. A build for a now-stale target is still running: let it finish and integrate
+    //     first (eventual consistency — the next update() dispatches the newest target).
+    if (m_building) return;
+
+    // 4c. Dispatch the async heightfield assembly on a worker; the prior field keeps
+    //     rendering until update() integrates this one.
+    m_shared = std::make_shared<FieldBuild>();
+    m_inflight_rx = center_rx;
+    m_inflight_rz = center_rz;
+    m_inflight_params = params_hash;
+    m_building = true;
+    auto shared = m_shared;
+    const Systems::SHIELD_WorldSystem* world_ptr = &world;
+    m_inflight_handle = m_job_system->dispatch_batch(
+        {[shared, world_ptr, center_rx, center_rz, params_hash]() {
+            FieldData fd = assemble_field(*world_ptr, center_rx, center_rz, params_hash);
+            std::lock_guard<std::mutex> lock(shared->mutex);
+            shared->data = std::move(fd);
+            shared->ready = true;
+        }},
+        JobPriority::Normal);
 }
 
-void ShieldRtFarFieldPass::rebuild_field(const Systems::SHIELD_WorldSystem& world,
-                                         int center_rx, int center_rz) {
+ShieldRtFarFieldPass::FieldData ShieldRtFarFieldPass::assemble_field(
+        const Systems::SHIELD_WorldSystem& world, int center_rx, int center_rz,
+        std::uint64_t params_hash) {
     using World::FarLodTier;
     const int step = World::FarLodSampleStepMeters(FarLodTier::F1);  // 4 m
     const int per_region = 512 / step;                              // 128
     const int regions = 2 * kRegionRadius + 1;                      // 7
     const int rx0 = center_rx - kRegionRadius;
     const int rz0 = center_rz - kRegionRadius;
-    const std::uint64_t params_hash =
-        World::ComputeTerrainParamsHash(world.get_params(), world.get_seed());
 
-    m_n = per_region * regions + 1;
-    m_step = static_cast<float>(step);
-    m_ox = static_cast<float>(rx0) * 512.0f;
-    m_oz = static_cast<float>(rz0) * 512.0f;
+    FieldData fd;
+    fd.center_rx = center_rx;
+    fd.center_rz = center_rz;
+    fd.params_hash = params_hash;
+    fd.n = per_region * regions + 1;
+    fd.step = static_cast<float>(step);
+    fd.ox = static_cast<float>(rx0) * 512.0f;
+    fd.oz = static_cast<float>(rz0) * 512.0f;
 
-    std::vector<float> heights(static_cast<std::size_t>(m_n) * m_n, 0.0f);
+    fd.heights.assign(static_cast<std::size_t>(fd.n) * fd.n, 0.0f);
     for (int rz = 0; rz < regions; ++rz) {
         for (int rx = 0; rx < regions; ++rx) {
             const World::FarLodTile tile = World::BuildPristineFarLodTile(
@@ -383,13 +449,22 @@ void ShieldRtFarFieldPass::rebuild_field(const Systems::SHIELD_WorldSystem& worl
                 for (int x = 0; x < sps; ++x) {
                     const int gx = rx * per_region + x;
                     const int gz = rz * per_region + z;
-                    if (gx >= m_n || gz >= m_n) continue;
-                    heights[static_cast<std::size_t>(gz) * m_n + gx] =
+                    if (gx >= fd.n || gz >= fd.n) continue;
+                    fd.heights[static_cast<std::size_t>(gz) * fd.n + gx] =
                         World::DequantizeFarLodHeight(tile.height_q[z * sps + x]);
                 }
             }
         }
     }
+    return fd;
+}
+
+void ShieldRtFarFieldPass::integrate_field(FieldData& fd) {
+    m_n = fd.n;
+    m_step = fd.step;
+    m_ox = fd.ox;
+    m_oz = fd.oz;
+    std::vector<float>& heights = fd.heights;
 
     // Flattened max-mip layout (dims match the CPU reference: level0 = n-1 cells,
     // then (dim+1)/2 each level to 1).
@@ -438,6 +513,12 @@ void ShieldRtFarFieldPass::rebuild_field(const Systems::SHIELD_WorldSystem& worl
     }
     glUseProgram(0);
     m_has_field = true;
+    // The resident field now matches this region/params (the async target may since
+    // have moved on — update() re-dispatches if so).
+    m_center_rx = fd.center_rx;
+    m_center_rz = fd.center_rz;
+    m_params_hash = fd.params_hash;
+    m_have_cache_key = true;
 }
 
 void ShieldRtFarFieldPass::render(const glm::mat4& view, const glm::mat4& view_proj,

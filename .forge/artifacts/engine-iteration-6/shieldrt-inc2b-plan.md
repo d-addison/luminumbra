@@ -164,6 +164,39 @@ temporal-stability gate (needs a minimal render-interpolated prev-view history).
 Source: background scoping agent (read-only), 2026-06-16. Adding the `GpuTimerPass`
 entry will require re-blessing the RenderHealth pass-name contract in render_smoke_test.
 
+## inc2c-SCALE step 3 LANDED + the REAL blocker found: march cost (2026-06-16, autonomous)
+**Step 3 (async region-crossing rebuild) implemented & GL-clean.** `rebuild_field` split
+into a pure-CPU `assemble_field` (the 49-tile build, dispatched on the JobSystem Normal
+lane, mirroring FarLodSystem) + a GL-thread `integrate_field` (SSBO upload + GPU max-mip).
+`update()` is a non-blocking state machine: poll/integrate a finished build, render the
+prior field while a new one is in flight, eventual-consistency re-dispatch on camera move,
+synchronous fallback when no JobSystem (tests). Thread-safe `shared_ptr<FieldBuild>`
+hand-off; `shutdown()` drains the in-flight job. Wired via
+`RenderPipeline::attach_farlod_job_system`. Committed DORMANT (flag false).
+
+**ROOT-CAUSE of the in-scenario stall — it is NOT the rebuild, it is the MARCH itself.**
+Decisive A/B at 52 s, same flag-ON build, mountains:
+- far-field runtime flag OFF (control, == the FarLodHorizon gate invocation): **5/5
+  stations, regions 40/40, far_region_draws 32, PASSED.**
+- far-field runtime flag ON: **1/5 stations, regions_wanted=0, far_region_draws=0,
+  failed.** Log line count: 79 vs the control's 18,146 — i.e. **~3 frames rendered in
+  52 s ≈ ~15-17 s PER FRAME.** The client is effectively frozen, so the scenario never
+  advances the camera and far-LOD never becomes wanted/resident.
+This is ~1000x over the plan's ~7.5 ms fullscreen estimate. Async rebuild (step 3) + the
+early-out (step 1) are necessary but NOT sufficient. Likely compounding causes:
+  1. DEBUG build (no -O2) — the A3a 0.07 ms/320x180 bench basis may have been release.
+  2. Fullscreen 3840x1600 = 6.14 M rays.
+  3. Rays spinning to `u_maxSteps=512` (the hierarchical DDA degenerating to max-steps for
+     grazing/sky rays at the initial pose) — 6.14 M x 512 = 3.1 B step-iters/frame.
+  4. The early-out's effectiveness in-scenario is UNVERIFIED (the pass never settles).
+
+**NEXT (focused perf/correctness investigation, gating in-scenario validation):**
+instrument per-ray step counts (are rays hitting `u_maxSteps`?); profile a release build;
+add step 2 (half-res march + depth-aware upsample, 4x); cap/justify `u_maxSteps`; consider
+marching only below the horizon line. Until the march is in budget the pass cannot run
+live, so the FarLodHorizon flag-on parity/seam gate remains blocked. The isolated
+ShieldRtFarField*Gpu benches remain the only green correctness signal.
+
 ## inc2c-SCALE step 1 LANDED + validation finding (2026-06-16, autonomous)
 **Step 1 (far-pixel-only dispatch) implemented** in `ShieldRtFarFieldPass`: a
 feedback-safe scene-depth COPY (own texture+FBO, blitted from the G-buffer via

@@ -662,6 +662,12 @@ void RenderPipeline::attach_farlod_job_system(JobSystem* job_system) {
     if (m_farlod) {
         m_farlod->attach_job_system(job_system);
     }
+    // inc2c-SCALE step 3: the SHIELD-RT far-field pass assembles its heightfield on
+    // the same JobSystem so the 49-tile rebuild no longer hitches the GL thread on a
+    // region-crossing (it exists only when the experimental flag is compiled in).
+    if (m_shieldrt_far_pass) {
+        m_shieldrt_far_pass->attach_job_system(job_system);
+    }
 }
 
 void RenderPipeline::prepare_world_swap() {
