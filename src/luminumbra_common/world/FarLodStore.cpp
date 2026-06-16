@@ -109,6 +109,33 @@ u64 ComputeTerrainParamsHash(const Systems::TerrainGenParams& params, int seed) 
         FnvMixValue(hash, static_cast<u8>(3));
         FnvMixValue(hash, params.structures_content_hash);
     }
+    // T-I6-A1.5: mix the SHAPING params ONLY when shaping is enabled, so shaped
+    // presets' pristine far-LOD tiles self-invalidate on a shaping-spline / freq
+    // change (closing the latent gap where continentalness/erosion/peaks were
+    // NOT in the cache key). Non-shaped worlds skip this block entirely, so their
+    // far-tile cache key is byte-identical to before (FarLodStore fixtures + the
+    // shaping-off legacy preset hash stay green). Canonical spline encoding:
+    // count (size_t) then each [input,output] control point in stored order via
+    // raw IEEE bits -- pinned by FarLodStore_test::TerrainParamsHashShapingFold.
+    if (params.shaping_enabled) {
+        FnvMixValue(hash, static_cast<u8>(4)); // marker 0x05 (4th conditional block)
+        FnvMixValue(hash, params.continentalness_frequency);
+        FnvMixValue(hash, params.erosion_frequency);
+        FnvMixValue(hash, params.peaks_frequency);
+        FnvMixValue(hash, params.peaks_amplitude);
+        FnvMixValue(hash, params.domain_warp_amplitude);
+        FnvMixValue(hash, params.domain_warp_frequency);
+        const auto mix_spline = [&hash](const std::vector<std::array<float, 2>>& spline) {
+            FnvMixValue(hash, static_cast<std::uint64_t>(spline.size()));
+            for (const std::array<float, 2>& cp : spline) {
+                FnvMixValue(hash, cp[0]);
+                FnvMixValue(hash, cp[1]);
+            }
+        };
+        mix_spline(params.continental_spline);
+        mix_spline(params.erosion_spline);
+        mix_spline(params.peaks_spline);
+    }
     return hash;
 }
 

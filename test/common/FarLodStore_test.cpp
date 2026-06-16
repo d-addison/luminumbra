@@ -362,3 +362,63 @@ TEST(FarLodRegionMesher, AdjacentRegionsShareBorderVertexPositions) {
         EXPECT_EQ(left.material[left_index], right.material[right_index]) << "row " << z;
     }
 }
+
+// T-I6-A1.5: the shaping params (continentalness/erosion/peaks freqs + splines)
+// are folded into ComputeTerrainParamsHash, gated on shaping_enabled, so shaped
+// presets' pristine far-LOD tiles self-invalidate on a shaping change. Pins the
+// contract: shaping-OFF ignores the shaping fields (byte-stable cache key for
+// non-shaped worlds), shaping-ON re-keys on any spline/freq/count change, and
+// the hash is deterministic.
+TEST(FarLodStore, TerrainParamsHashShapingFold) {
+    auto make = [](bool shaping) {
+        TerrainGenParams p;
+        p.base_frequency = 0.008f; p.base_amplitude = 60.0f; p.octaves = 5;
+        p.persistence = 0.55f; p.lacunarity = 2.1f; p.height_offset = 12.0f;
+        p.shaping_enabled = shaping;
+        p.continentalness_frequency = 0.0008f; p.erosion_frequency = 0.0015f;
+        p.peaks_frequency = 0.004f; p.peaks_amplitude = 90.0f;
+        p.domain_warp_amplitude = 30.0f; p.domain_warp_frequency = 0.006f;
+        p.continental_spline = {{-1.0f, -40.0f}, {0.0f, 0.0f}, {1.0f, 40.0f}};
+        p.erosion_spline = {{-1.0f, 1.0f}, {1.0f, 0.1f}};
+        p.peaks_spline = {{-1.0f, 0.0f}, {1.0f, 1.0f}};
+        return p;
+    };
+    const int seed = 424242;
+    const TerrainGenParams off = make(false);
+    const TerrainGenParams on = make(true);
+
+    // Determinism: identical params -> identical hash.
+    EXPECT_EQ(ComputeTerrainParamsHash(on, seed), ComputeTerrainParamsHash(on, seed));
+
+    // Enabling shaping engages the fold -> hash differs from the shaping-off path.
+    EXPECT_NE(ComputeTerrainParamsHash(off, seed), ComputeTerrainParamsHash(on, seed))
+        << "shaping fold did not engage";
+
+    // Shaping-OFF ignores the shaping fields: mutating them on a shaping-off
+    // params must NOT change the hash (the gated block is skipped -> the far-tile
+    // cache key is byte-stable for every non-shaped world, fixtures stay green).
+    TerrainGenParams off2 = off;
+    off2.continental_spline = {{-1.0f, 99.0f}};
+    off2.peaks_amplitude = 1234.0f;
+    off2.erosion_frequency = 0.5f;
+    EXPECT_EQ(ComputeTerrainParamsHash(off, seed), ComputeTerrainParamsHash(off2, seed))
+        << "shaping-off path must ignore shaping fields (byte-stable cache key)";
+
+    // Shaping-ON: a spline control-point change re-keys the hash.
+    TerrainGenParams on_spline = on;
+    on_spline.peaks_spline = {{-1.0f, 0.0f}, {1.0f, 0.9f}};
+    EXPECT_NE(ComputeTerrainParamsHash(on, seed), ComputeTerrainParamsHash(on_spline, seed))
+        << "shaping spline content not hashed";
+
+    // Shaping-ON: a frequency change re-keys the hash.
+    TerrainGenParams on_freq = on;
+    on_freq.erosion_frequency = on.erosion_frequency * 2.0f;
+    EXPECT_NE(ComputeTerrainParamsHash(on, seed), ComputeTerrainParamsHash(on_freq, seed))
+        << "shaping frequency not hashed";
+
+    // Shaping-ON: spline COUNT matters (the count prefix prevents merge collisions).
+    TerrainGenParams on_count = on;
+    on_count.continental_spline = {{-1.0f, -40.0f}, {0.0f, 0.0f}, {1.0f, 40.0f}, {0.5f, 20.0f}};
+    EXPECT_NE(ComputeTerrainParamsHash(on, seed), ComputeTerrainParamsHash(on_count, seed))
+        << "spline count not hashed";
+}
