@@ -186,6 +186,8 @@ RuntimeScenarioConfig ParseRuntimeScenarioConfig(int argc, char* argv[], const s
     config.enable_gpu_sdf_runtime = HasCommandLineFlag(argc, argv, "--enable-gpu-sdf-runtime");
     config.enable_far_field_gpu_raymarch =
         HasCommandLineFlag(argc, argv, "--enable-far-field-gpu-raymarch");
+    config.isolation_layers = GetCommandLineOption(argc, argv, "--isolation-layers", "");
+    config.isolation_backdrop = GetCommandLineOption(argc, argv, "--isolation-backdrop", "");
     config.readiness_timeout_seconds = GetCommandLineIntOption(argc, argv, "--readiness-timeout", config.readiness_timeout_seconds);
     config.horizon_radius = GetCommandLineIntOption(argc, argv, "--horizon-radius", config.horizon_radius);
     config.collision_radius = GetCommandLineIntOption(argc, argv, "--collision-radius", config.collision_radius);

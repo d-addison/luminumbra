@@ -68,6 +68,11 @@ struct RuntimeScenarioConfig {
     // (--enable-far-field-gpu-raymarch). Gated additionally by the compile-time
     // kEnableExperimentalFarFieldGpuRaymarching until the pass lands.
     bool enable_far_field_gpu_raymarch = false;
+    // T-I6 isolation/layer render mode (--isolation-layers <csv>, --isolation-backdrop
+    // <void|greenscreen|checker>). Empty/"scene" = no isolation (byte-stable). Parsed
+    // to an IsolationConfig (core/IsolationConfig.h) where consumed.
+    std::string isolation_layers;
+    std::string isolation_backdrop;
     int timed_run_seconds = 0;
     int readiness_timeout_seconds = 120;
     int horizon_radius = 12;
