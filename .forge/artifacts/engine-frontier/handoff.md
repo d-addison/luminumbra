@@ -2,9 +2,9 @@
 
 ## Iteration 6 IN PROGRESS (2026-06-16) — Wave A sim/worldgen foundation
 
-Branch `feat/polyglot-audit-roadmap`, tip **`ca72f5e`** (Wave A.2 A3a + A3b-inc1
-landed). Autonomous run (owner-authorized: memory `autonomous-iteration-6-mandate`).
-**WAVE A COMPLETE**
+Branch `feat/polyglot-audit-roadmap`, tip **`227383c`** (Wave A.2 A3a + A3b inc1/
+inc2a landed; borderless full-monitor fullscreen). Autonomous run (owner-authorized:
+memory `autonomous-iteration-6-mandate`). **WAVE A COMPLETE**
 (A0 + A1 + A1.5 + A2 + A1d): sim/worldgen foundation + erosion enabled & validated
 on both gameplay presets + the aether render tap & coupling gate. **Full ctest
 244/244.** Verified, hash-clean. Commits:
@@ -70,7 +70,16 @@ all green.**
   boundary; skip only when above cell-max at both entry+exit; descend/bisect).
   Now self ≤ 0.09 m, ground-truth median ≤ 0.19 m / p99 ≤ 1.32 m. GL harness
   factored into `shieldrt_gl_harness.h`. Artifact `shieldrt-far-field-parity.json`.
-- **A3b REMAINING:** **inc2** wire `ShieldRtFarFieldPass` into the G-buffer slot
+- **A3b inc2a DONE** (`146803c`): far-field G-buffer raymarch validated offscreen
+  (`ShieldRtFarFieldGbufferGpu`). The production *render* form — a fullscreen
+  fragment pass reconstructing per-pixel world rays from the inverse view-proj,
+  marching the heightfield, writing the deferred G-buffer (view-space position,
+  oct view-space normal + material, albedo/rough, metallic/AO) + `gl_FragDepth`.
+  Offscreen MRT validation: gPosition→world on the analytic surface (median ≤0.19 m,
+  p99 ≤1.29 m), normals unit (err ~1e-7) + 100% terrain-up. Artifact
+  `shieldrt-far-field-gbuffer.json`.
+- **A3b REMAINING:** **inc2b** GPU-resident heightfield/clipmap streaming (net-new,
+  from CPU tiles); **inc2c** wire `ShieldRtFarFieldPass` into the G-buffer slot
   after live chunks (`GBufferPass.cpp:227`), behind `--enable-shieldrt-far-field`
   (mirror the GPUSDF gating shape), `GpuTimerPass::ShieldRtFar`, near↔far dither
   blend, mesh-vs-raymarch parity leg in `FarLodHorizon`. **inc3** temporal-stability
@@ -79,6 +88,17 @@ all green.**
   dry-run review. See `shieldrt-tracer-profile-memo.md` "Remaining A3b increments".
 - **Still owed:** **Phase 0.3 quiet-machine perf re-bless** (A.2 budget-ratification
   entry-gate) — run `.forge/scripts/run-release-perf-lane.ps1 -Bless` on a quiet box.
+
+### Owner display/fullscreen directive (2026-06-16)
+- Owner display: **3840×1600 @ 143 Hz** ultrawide (24:10) on the 5070 Ti.
+- **DONE** (`227383c`): interactive `Borderless` default now covers the FULL
+  monitor (native video mode, was work-area only) — true borderless fullscreen.
+- **TASKED (task #16):** owner chose "raise everything to native" — bump the pinned
+  visual-capture size `kCapturePinnedWidth/Height` 1280×720 → **3840×1600** and
+  re-bless the whole visual-gate suite (resolution + aspect change). ROI gates are
+  mostly framebuffer-relative already; the absolute-px FarLodHorizon thresholds +
+  any objective-critique thresholds that shift need re-deriving. Heavy/iterative;
+  commit only when the whole suite is green. See memory `display-and-capture-resolution`.
 - **Wave B** clouds/grass/aurora/ocean (consume the A.2 substrate); **Wave C**
   worldgen multi-anchor; **Wave D** closeout. See `WAVE-A-SPEC.md` + `_synthesis.md`.
 - **Iteration 7** (deferred content): sparse aether sources (LuminCrystal) -> the
