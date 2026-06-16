@@ -21,7 +21,7 @@
 // Forward declarations
 namespace Luminumbra { class Chunk; class JobSystem; }
 namespace Luminumbra::Systems { class SHIELD_WorldSystem; struct TerrainGenParams; }
-namespace Luminumbra::Rendering { class Shader; class Camera; class ShadowPass; class GBufferPass; class SsaoPass; class LightingPass; class WaterPass; class SkyboxPass; class ParticlePass; class FoliagePass; class FarLodSystem; }
+namespace Luminumbra::Rendering { class Shader; class Camera; class ShadowPass; class GBufferPass; class SsaoPass; class LightingPass; class WaterPass; class SkyboxPass; class ParticlePass; class FoliagePass; class FarLodSystem; class ShieldRtFarFieldPass; }
 
 namespace Luminumbra::Rendering {
 
@@ -616,6 +616,9 @@ public:
     // GPU SDF integration
     void set_gpu_sdf_runtime_enabled(bool enabled);
     GpuSdfRuntimeToggleState get_gpu_sdf_runtime_toggle_state() const;
+    // T-I6-A3b SHIELD-RT far-field raymarch runtime opt-in (gated additionally by
+    // the compile-time kEnableExperimentalFarFieldGpuRaymarching).
+    void set_far_field_raymarch_enabled(bool enabled) { m_far_field_runtime_requested = enabled; }
     void SetupGPUSDFIntegration(Systems::SHIELD_WorldSystem& world_system);
 
     // --- Far-LOD region rendering (T-I3-9) ---
@@ -723,6 +726,7 @@ private:
         Particle, // T-I5a-1
         Foliage,  // T-I5b-1: instanced foliage scatter pass
         Aerial,    // T-I5a-6: analytic aerial-perspective fullscreen pass
+        FarFieldRaymarch, // T-I6-A3b: experimental SHIELD-RT far-field raymarch
         FinalBlit,
         Count,
     };
@@ -811,6 +815,8 @@ private:
     std::unique_ptr<SkyboxPass> m_skybox_pass;
     std::unique_ptr<ParticlePass> m_particle_pass; // T-I5a-1
     std::unique_ptr<FoliagePass> m_foliage_pass;   // T-I5b-1
+    std::unique_ptr<ShieldRtFarFieldPass> m_shieldrt_far_pass; // T-I6-A3b (flag-gated)
+    bool m_far_field_runtime_requested = false;    // --enable-far-field-gpu-raymarch
     WaterfallSiteCache m_waterfall_sites;          // T-I5b-4 (render-only, cached)
 
     // T-I5a-6: Hillaire 2020 atmospheric scattering. The LUTs are built once at
