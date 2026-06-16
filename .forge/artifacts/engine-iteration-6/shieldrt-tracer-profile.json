@@ -1,0 +1,186 @@
+{
+  "agreement_bar": 0.9,
+  "budget_ceiling_ms": 2.0,
+  "build_mode": "debug",
+  "decision": "heightfield_primary",
+  "decision_note": "Heightfield max-mip march of FarLodStore tiles is PINNED as the SHIELD-RT far-field tracer for A3b. Rationale (GPU-confirmed): it is correct-by-construction and within the far-field raymarch budget on the RTX 5070 Ti (~0.07 ms for a 1536 m / 320x180 probe), and it adds only a cheap max-mip over tiles that already exist. The naive conservative-mip SDF sphere trace is NOT a viable terrain far-field tracer: its coarse mips collapse toward zero (min-magnitude minus coarse half-diagonal), so it false-hits sky rays beyond the near band, scoring low agreement with ground truth despite a deceptively low ms. Sparse SDF bricks stay reserved for genuine 3D far content (Wave C+), not the terrain field.",
+  "generated_by": "shieldrt_tracer_profile_gpu (GPU micro-profile, GL_TIME_ELAPSED)",
+  "gpu": {
+    "gl_version": "4.5.0 NVIDIA 595.97",
+    "renderer": "NVIDIA GeForce RTX 5070 Ti/PCIe/SSE2",
+    "software_renderer": false,
+    "vendor": "NVIDIA Corporation"
+  },
+  "median_policy": "median of timed GL_TIME_ELAPSED runs per tracer per view",
+  "ray_grid": {
+    "h": 180,
+    "w": 320
+  },
+  "schema": "luminumbra.shieldrt_tracer_profile.v1",
+  "seed": 424242,
+  "task": "T-I6-A3a",
+  "timed_runs": 5,
+  "totals": {
+    "heightfield_march_ms": 0.111232,
+    "mean_sdf_agreement_vs_ground_truth": 0.20906249999999998,
+    "sdf_naive_mip_viable": false,
+    "sdf_sphere_trace_ms": 0.058976,
+    "views_heightfield_faster_ms": 2,
+    "views_total": 4
+  },
+  "views": [
+    {
+      "grazing": true,
+      "heightfield_march": {
+        "accel_bytes": 1379340,
+        "hit_fraction": 0.0690625,
+        "hits": 3978,
+        "mean_steps_per_ray": 2.001145833333333,
+        "ms_median": 0.022016,
+        "ms_runs": [
+          0.022016,
+          0.021952,
+          0.022048,
+          0.022016,
+          0.021792
+        ]
+      },
+      "hf_faster": false,
+      "preset": "default.json",
+      "rays": 57600,
+      "sdf_sphere_trace": {
+        "agreement_vs_ground_truth": 0.09520833333333334,
+        "false_hits": 52116,
+        "false_misses": 0,
+        "hits": 56094,
+        "mean_steps_per_ray": 17.262274305555554,
+        "ms_median": 0.015104,
+        "ms_runs": [
+          0.015104,
+          0.015232,
+          0.01504,
+          0.01584,
+          0.015008
+        ],
+        "total_bytes": 1899540,
+        "voxel_step_m": 8.0
+      },
+      "view": "default_grazing"
+    },
+    {
+      "grazing": false,
+      "heightfield_march": {
+        "accel_bytes": 1379340,
+        "hit_fraction": 0.11413194444444444,
+        "hits": 6574,
+        "mean_steps_per_ray": 2.0,
+        "ms_median": 0.00688,
+        "ms_runs": [
+          0.007104,
+          0.006048,
+          0.009248,
+          0.00688,
+          0.006368
+        ]
+      },
+      "hf_faster": true,
+      "preset": "default.json",
+      "rays": 57600,
+      "sdf_sphere_trace": {
+        "agreement_vs_ground_truth": 0.11413194444444441,
+        "false_hits": 51026,
+        "false_misses": 0,
+        "hits": 57600,
+        "mean_steps_per_ray": 23.12121527777778,
+        "ms_median": 0.015488,
+        "ms_runs": [
+          0.015552,
+          0.015488,
+          0.015488,
+          0.0152,
+          0.01168
+        ],
+        "total_bytes": 1899540,
+        "voxel_step_m": 8.0
+      },
+      "view": "default_elevated"
+    },
+    {
+      "grazing": true,
+      "heightfield_march": {
+        "accel_bytes": 1379340,
+        "hit_fraction": 0.5196527777777777,
+        "hits": 29932,
+        "mean_steps_per_ray": 4.162638888888889,
+        "ms_median": 0.071712,
+        "ms_runs": [
+          0.068384,
+          0.071712,
+          0.068224,
+          0.072128,
+          0.07184
+        ]
+      },
+      "hf_faster": false,
+      "preset": "mountains.json",
+      "rays": 57600,
+      "sdf_sphere_trace": {
+        "agreement_vs_ground_truth": 0.5127777777777778,
+        "false_hits": 27113,
+        "false_misses": 951,
+        "hits": 56094,
+        "mean_steps_per_ray": 14.024409722222222,
+        "ms_median": 0.017696,
+        "ms_runs": [
+          0.01456,
+          0.018752,
+          0.018528,
+          0.014944,
+          0.017696
+        ],
+        "total_bytes": 2580400,
+        "voxel_step_m": 8.0
+      },
+      "view": "mountains_grazing"
+    },
+    {
+      "grazing": false,
+      "heightfield_march": {
+        "accel_bytes": 1379340,
+        "hit_fraction": 0.11413194444444444,
+        "hits": 6574,
+        "mean_steps_per_ray": 2.0,
+        "ms_median": 0.010624,
+        "ms_runs": [
+          0.011136,
+          0.010624,
+          0.012096,
+          0.009472,
+          0.006176
+        ]
+      },
+      "hf_faster": true,
+      "preset": "mountains.json",
+      "rays": 57600,
+      "sdf_sphere_trace": {
+        "agreement_vs_ground_truth": 0.11413194444444441,
+        "false_hits": 51026,
+        "false_misses": 0,
+        "hits": 57600,
+        "mean_steps_per_ray": 16.432690972222222,
+        "ms_median": 0.010688,
+        "ms_runs": [
+          0.01168,
+          0.010656,
+          0.010688,
+          0.010688,
+          0.010688
+        ],
+        "total_bytes": 2580400,
+        "voxel_step_m": 8.0
+      },
+      "view": "mountains_elevated"
+    }
+  ],
+  "warmup_runs": 2
+}

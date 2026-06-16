@@ -364,6 +364,41 @@ target_link_libraries(shieldrt_spike_bench PRIVATE
     luminumbra_common
 )
 
+# T-I6-A3a SHIELD-RT GPU tracer micro-profile (manual/GPU: needs a real GL
+# context + GPU. Debug SDF-volume build can exceed 60s.) Re-runs the same two
+# far-field tracers as compute kernels and times them with GL_TIME_ELAPSED to
+# confirm the iteration-4 spike's heightfield-primary conclusion on hardware;
+# emits shieldrt-tracer-profile.json. Shares shieldrt_far_field.h with the spike.
+add_executable(shieldrt_tracer_profile_gpu
+    performance/shieldrt_tracer_profile_gpu.cpp
+)
+
+target_compile_definitions(shieldrt_tracer_profile_gpu PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+    LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts"
+)
+
+target_include_directories(shieldrt_tracer_profile_gpu PRIVATE
+    ../src
+)
+
+target_link_libraries(shieldrt_tracer_profile_gpu PRIVATE
+    gtest_main
+    luminumbra_common
+    glfw
+    glad
+)
+
+if(WIN32)
+    target_link_libraries(shieldrt_tracer_profile_gpu PRIVATE opengl32)
+elseif(APPLE)
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(shieldrt_tracer_profile_gpu PRIVATE ${OPENGL_LIBRARIES})
+else()
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(shieldrt_tracer_profile_gpu PRIVATE OpenGL::GL)
+endif()
+
 # Frontier gate fixtures: the lua-api-manifest and scalar-field-diffusion gates
 # assert at static initialization, the instinct and loopback gates are called
 # from the gtest cases in network_state_hash_gate_test.cpp.
@@ -455,6 +490,15 @@ gtest_discover_tests(frontier_gates_test)
 add_test(NAME ShieldRtSpike COMMAND shieldrt_spike_bench)
 set_tests_properties(ShieldRtSpike PROPERTIES
     LABELS "manual;perf;spike"
+    TIMEOUT 600)
+
+# T-I6-A3a: GPU tracer micro-profile. Manual/GPU — needs a real GL context and a
+# hardware GPU (skips gracefully headless; writes the artifact but skips the perf
+# assertion on a software renderer). Run it deliberately:
+#   ctest -L manual -R ShieldRtTracerProfileGpu --output-on-failure
+add_test(NAME ShieldRtTracerProfileGpu COMMAND shieldrt_tracer_profile_gpu)
+set_tests_properties(ShieldRtTracerProfileGpu PROPERTIES
+    LABELS "manual;perf;gpu"
     TIMEOUT 600)
 
 # Iteration-6 critique #5: per-flag fixtures for the WorldVisualSweep objective
