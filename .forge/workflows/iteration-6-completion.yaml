@@ -152,47 +152,58 @@ pipelines:
     aggregate_within_phase: all_must_pass
     on_phase_fail: stop
     steps:
-      - name: critique-specs
-        type: deterministic
-        run: 'forge critique .forge/specs/iter6'
-        capabilities: { sandbox: workspace-write, egress: [openai-api] }
-      - name: red-team-specs
-        type: deterministic
-        run: 'forge red-team .forge/specs/iter6'
-        capabilities: { sandbox: workspace-write, egress: [openai-api] }
-      - name: pre-mortem-specs
-        type: deterministic
-        run: 'forge pre-mortem .forge/specs/iter6'
+      # NOTE: `forge critique/red-team/pre-mortem` take a SINGLE file/spec/"current"
+      # target, not a directory, so the adversarial pass is done as a Codex dispatch
+      # that sweeps every spec under .forge/specs/iter6/ from all three angles.
+      - name: adversarial-critique
+        type: ai_dispatch
+        model: deep
+        prompt: |
+          Adversarially review EVERY spec under .forge/specs/iter6/ from three
+          distinct angles and write findings to {{ inputs.reports_dir }}/critique.md
+          (group by spec, tag each finding [devil's-advocate]|[red-team]|[pre-mortem]):
+            * Devil's advocate: overfitting, vague tasks, unsupported assumptions,
+              hidden coupling, missing tests, sequencing mistakes.
+            * Red team: how each change could break determinism (world_hash), perf
+              budget (300fps / RTX 5070 Ti), the visual-debt gates, or the
+              replication/AOI invariants -- find the failure that ships.
+            * Pre-mortem: assume each item shipped and caused a regression; name the
+              most likely cause and the guard that would have caught it.
         capabilities: { sandbox: workspace-write, egress: [openai-api] }
       - name: spec-revision
         type: ai_dispatch
         model: deep
         prompt: |
-          Revise the specs under .forge/specs/iter6/ using the critique, red-team,
-          and pre-mortem findings. Resolve every objection as either a spec change,
-          an explicit non-goal, or a follow-up. Keep acceptance criteria as BDD
-          scenarios. Write a one-line disposition per objection to
+          Revise the specs under .forge/specs/iter6/ using
+          {{ inputs.reports_dir }}/critique.md. Resolve every finding as either a
+          spec change, an explicit non-goal, or a follow-up. Keep acceptance
+          criteria as BDD scenarios. Write a one-line disposition per finding to
           {{ inputs.reports_dir }}/critique-dispositions.md.
         capabilities: { sandbox: workspace-write, egress: [openai-api] }
 
   # ----------------------------------------------------------------------------
   - name: bdd-sdd-phase
     phase: plan
-    description: "Generate BDD .feature scenarios + link acceptance criteria to tests (SDD)."
+    description: "Author BDD .feature scenarios + an SDD acceptance->test trace from the specs."
     aggregate_within_phase: all_must_pass
     on_phase_fail: stop
     steps:
-      - name: bdd-generate
-        type: deterministic
-        run: 'forge bdd generate'
-        capabilities: { sandbox: workspace-write, egress: [openai-api] }
-      - name: bdd-validate
-        type: deterministic
-        run: 'forge bdd validate'
-        capabilities: { sandbox: read-only, egress: none }
-      - name: sdd-link
-        type: deterministic
-        run: 'forge sdd link'
+      # NOTE: `forge bdd generate` (--profile/--request/--out) and `forge sdd link`
+      # (<AC_ID> <TEST_PATH>) are PER-ITEM CLIs; bulk authoring is a Codex dispatch.
+      # The execute tasks also re-lock BDD/acceptance per task (T-I6-000), so this
+      # phase seeds the .feature scenarios + the traceability map the tasks consume.
+      - name: bdd-sdd-author
+        type: ai_dispatch
+        model: deep
+        prompt: |
+          For each spec under .forge/specs/iter6/, turn its BDD acceptance criteria
+          into Gherkin .feature files under .forge/specs/iter6/features/ (one per
+          spec; Feature/Scenario/Given-When-Then). Then write an SDD traceability
+          map to {{ inputs.reports_dir }}/sdd-trace.md linking every acceptance
+          criterion (AC id) to the concrete test/gate that proves it (ctest name,
+          engine-frontier gate mode, or .feature scenario) -- flag any AC with no
+          test as a coverage gap for the execute phase to close test-first.
+          Ensure every authored .feature file parses as valid Gherkin.
         capabilities: { sandbox: workspace-write, egress: [openai-api] }
 
   # ----------------------------------------------------------------------------
@@ -254,9 +265,19 @@ pipelines:
         run: 'forge contracts execute --tasks .forge/tasks/iter6-completion/dispatch.json'
         capabilities: { sandbox: workspace-write, egress: [openai-api] }
       - name: sdd-verify-coverage
-        type: deterministic
-        run: 'forge sdd verify'
-        capabilities: { sandbox: read-only, egress: none }
+        # SDD coverage audit: forge's `sdd verify` is a per-item CLI keyed on a
+        # ./sdd-traceability.json store, so the cross-spec coverage check runs as a
+        # Codex audit against the trace map + the tests the execute phase produced.
+        type: ai_dispatch
+        model: deep
+        prompt: |
+          Audit SDD coverage after execution. For every acceptance criterion in
+          {{ inputs.reports_dir }}/sdd-trace.md and the specs under
+          .forge/specs/iter6/, confirm a real test/gate now exists AND passes
+          (ctest target, engine-frontier gate, or .feature scenario). Write
+          {{ inputs.reports_dir }}/sdd-coverage.md: per-AC PASS/MISSING with the
+          proving test. List any AC still without a passing test as a hard gap.
+        capabilities: { sandbox: workspace-write, egress: [openai-api] }
       - name: closeout-verify
         # --new-only: only NEW findings vs baseline block (see context-baseline-verify).
         type: deterministic
