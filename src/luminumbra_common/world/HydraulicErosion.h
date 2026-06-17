@@ -32,6 +32,12 @@
 
 namespace Luminumbra::World {
 
+// Worldgen hash salt for the enabled hydraulic/thermal erosion path. Bump this
+// whenever BakeHydraulicErosion's shape-affecting behavior changes without a
+// TerrainGenParams field/value change, then re-bless the affected replay/corpus
+// baselines as an explicit world_hash change.
+constexpr u32 kHydraulicErosionWorldgenVersion = 2u;
+
 // PINNED erosion parameters. Changing ANY value changes the baked offset bits
 // and is therefore a deliberate world_hash bump -- frozen for iteration 6.
 struct HydroErosionParams {

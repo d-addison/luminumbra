@@ -189,6 +189,11 @@ Engine, so it is safe to vendor the tables.
   must be deterministic: integer iteration order, `DeterministicMath` wrappers, pinned FP
   flags (precise, contraction off), no libm transcendentals (`sin` for the tilt term must
   go through the project's deterministic approximation), no unordered-container iteration.
+- **Kernel behavior changes need an explicit generation salt.** The enabled hydro path
+  mixes `kHydraulicErosionWorldgenVersion` into `ComputeTerrainParamsHash` before the
+  pinned hydro params. Bump that version whenever `BakeHydraulicErosion` changes shape
+  output without a `TerrainGenParams` value change. Disabled hydro worlds skip the block
+  and remain byte-stable.
 - **The bake output (the offset field) is the world_hash input, so its byte layout must
   be canonicalized** like `FieldGrid` (z-major, integer-indexed) and `FarLodTile`
   (row-major) snapshot order. Quantize the offset (u16, fixed scale) before it enters the
@@ -227,6 +232,8 @@ Engine, so it is safe to vendor the tables.
   per-sample erosion-offset stream (or carry the post-erosion height directly), included
   in `ComputeFarLodTileHash` and the LMR1 record. Pristine tile rebuild
   (`BuildPristineFarLodTile`) must apply erosion so far tiles match near chunks at the seam.
+  `ComputeTerrainParamsHash` must also carry the enabled hydro worldgen-version salt so
+  pristine far-LOD tiles self-invalidate after shape-affecting erosion kernel changes.
 - `src/luminumbra_common/fields/FieldGrid.h` — the erosion working/offset field is a
   natural `FieldGrid<float>` consumer (the same plumbing iter-6 Aetheric reuses), giving
   canonical z-major snapshot order for free. Respect the iter-6 API freeze.

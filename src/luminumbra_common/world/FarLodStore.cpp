@@ -1,5 +1,6 @@
 #include "FarLodStore.h"
 
+#include "HydraulicErosion.h"
 #include "MarchingCubes.h"
 #include "persistence/WorldSaveService.h"
 #include "systems/SHIELD_WorldSystem.h"
@@ -136,11 +137,13 @@ u64 ComputeTerrainParamsHash(const Systems::TerrainGenParams& params, int seed) 
         mix_spline(params.erosion_spline);
         mix_spline(params.peaks_spline);
     }
-    // T-I6-A2: mix the hydraulic-relief params ONLY when hydro is enabled, so a
-    // relief-tuning change invalidates shaped presets' pristine far-LOD tiles.
-    // Disabled worlds skip the block (byte-stable cache key). marker 0x06.
+    // T-I6-A2/T-I6-030: mix the hydraulic-relief params ONLY when hydro is
+    // enabled, so a relief-tuning OR kernel-version change invalidates shaped
+    // presets' pristine far-LOD tiles. Disabled worlds skip the block
+    // (byte-stable cache key). marker 0x06.
     if (params.hydro_enabled) {
         FnvMixValue(hash, static_cast<u8>(5)); // marker 0x06 (5th conditional block)
+        FnvMixValue(hash, kHydraulicErosionWorldgenVersion);
         FnvMixValue(hash, params.hydro_iterations);
         FnvMixValue(hash, params.hydro_cell_size_m);
         FnvMixValue(hash, params.hydro_talus_height);
