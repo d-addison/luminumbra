@@ -108,10 +108,15 @@ for real cross-machine play.
   `anim_state`/`anim_phase`; `SnapshotMsg` += `removed_ids` (reliable despawn). Round-trip gtest
   (player/deer/arrow) + 60 net tests + ReplicationSmoke green. Interpolator passes class/anim through.
 
-**Next:** P6.1 server-spawn AI creatures (InstinctSystem ticks on the server) + general
-`BuildEntityReplStates` (walk registry by type) → P6.2 projectile (server Jolt ballistic, typed,
-interpolated). Plus the owner-gated `SteamNetworkingTransport` (real cross-machine play), Prune-into-
-tick despawn, chunk-index AOI. In-process stack P0–P5 complete; P6 adds heterogeneous entities.
+- **P6.1 foundation** (`c0152e7`): `Components::ReplicatedComponent` + general
+  `World::BuildEntityReplStates(registry)` (walks Transform+Replicated → ReplEntityState by type,
+  yaw from rotation, sorted by network_id). The ECS→wire bridge server NPCs/animals/projectiles use.
+  gtest (player/deer/arrow) + full ctest 294/294.
+
+**Next:** P6.1b server-spawn AI creatures (InstinctSystem ticks on the server) tagged
+`ReplicatedComponent` → fed through `BuildEntityReplStates` into the snapshot → P6.2 projectile
+(server Jolt ballistic, typed, reliable despawn). Owner-gated: `SteamNetworkingTransport` (real
+cross-machine play). Also: Prune-into-tick despawn, chunk-index AOI.
 
 ## Iteration 6 (cont., 2026-06-17) — Render-debt wave #1–#4 + #5 spec (tip `3df4347`)
 
