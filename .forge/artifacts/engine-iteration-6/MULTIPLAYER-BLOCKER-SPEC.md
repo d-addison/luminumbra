@@ -1,14 +1,119 @@
 # Multiplayer blocker spec — gating the Wave C multi-anchor driver (#5)
 
 **Slug:** `multiplayer-blocker` · **Side:** SIM + NET (engine-generic) · **Iteration:** 6, Wave C
-**Status:** SPEC (owner-gated: "5 needs the multi-player blocker properly specd out first")
-**Determinism posture:** the streaming change itself is residency-only (world_hash-neutral),
-but the player-avatar + input pieces are SIM state → **deliberate `world_hash` bump territory**;
-this spec pins which parts bump and which do not.
+**Status:** SPEC v2 (owner answered the §5 sizing questions 2026-06-17 → ARCHITECTURE PIVOT)
+
+> ⚠️ **v2 supersedes the v1 lockstep design below (§1–§7).** The v1 phasing (M1–M6, built on
+> the delay-based `LockstepSession`) was correct for ≤2-player co-op. The owner's answers make
+> that model the WRONG foundation; v0 (§0, this section) is the live plan. §1–§7 are retained as
+> the blocker analysis (B1–B5 are still real) + the determinism reasoning, which v0 reuses.
 
 ---
 
-## 1. What "#5" is, and why it is blocked
+## 0. v2 — owner answers + the architecture pivot (LIVE PLAN)
+
+### Owner answers (2026-06-17)
+1. **Player count:** "ideally a system that can handle a lot (20+)."
+2. **Roster:** fixed-roster fine for the very first cut, **but it must become a PERSISTENT
+   server players can JOIN and LEAVE** at will (not a fixed co-op lobby).
+3. **Physics:** **full server-authoritative physics** — Garry's Mod model (players + props
+   collide, server owns the physics world).
+4. **Per-anchor streaming budget:** **build now, in prep.**
+5. **Determinism bump sequencing:** "whatever is recommended."
+
+### The pivot: delay-based lockstep is the WRONG model for these requirements
+The v1 spec built on `LockstepSession` (delay-based, ≤2 peer, "no rejoin"). **20+ players +
+persistent join/leave + server-authoritative physics is fundamentally incompatible with peer
+lockstep:**
+
+- **Lockstep stalls on the slowest peer.** A tick cannot advance until EVERY peer's input for
+  it has arrived. At 2 co-op players this is fine; at 20 it is fragile — one player's hiccup
+  freezes all 20. The adaptive horizon hides 2-player jitter, not 20-player tail latency.
+- **Lockstep cannot do mid-session join/leave.** Every peer must run the identical sim from
+  tick 0; a joiner has no way to adopt tick-T state, and a leaver's missing input stalls the
+  tick. The v1 spec explicitly deferred join (§3 M5) precisely because lockstep can't.
+- **Lockstep needs bit-exact cross-MACHINE determinism** (the desync oracle). That is a heavy,
+  perpetual tax (every transcendental, every map order) and it does not even buy what a
+  Garry's-Mod server needs.
+
+These three are exactly what an **authoritative dedicated server with state replication**
+(Source/Quake/Garry's Mod lineage) solves, and it is the model the requirements describe:
+
+> **RECOMMENDED ARCHITECTURE (Q5 "whatever is recommended"): authoritative server + snapshot
+> replication + client prediction.** The server runs the one true 30 Hz simulation (physics,
+> entities, world). Each client sends its quantized input (`usercmd`); the server simulates and
+> sends back per-client entity-state SNAPSHOTS (baseline + delta), scoped by interest management
+> (PVS/area-of-interest) so a 20-player world does not broadcast everything to everyone. Clients
+> PREDICT their own avatar locally and RECONCILE against the authoritative snapshot; remote
+> entities are INTERPOLATED. Join = stream a baseline + start sending snapshots (trivial).
+> Leave = drop the client, despawn/freeze its avatar (trivial). No cross-peer hash convergence.
+
+**What this KEEPS from the existing engine:**
+- The deterministic 30 Hz `SimulationClock` + `GameSession::TickSimulation` → the SERVER's sim
+  core (unchanged; it is already the authority `ServerWorldRunner` runs).
+- The `world_hash` / sub-hash machinery → repurposed as the server's REPLAY + save-integrity +
+  desync-DEBUG tool (still very useful), NOT a multiplayer transport requirement.
+- The multi-anchor streaming foundation (`0113a60`) → the server streams around all connected
+  players' avatar positions (exactly the anchor vector).
+- The `ILockstepTransport` framing discipline (length-prefixed, no struct padding, hashes as
+  hex) → the wire-encoding style the replication protocol reuses.
+
+**What this RETIRES / re-scopes:**
+- `LockstepSession` as the *multiplayer* path. Keep it ONLY if a deterministic 2-player
+  lockstep co-op mode is still wanted as a separate feature; it is NOT the 20+ persistent path.
+  Recommendation: park it (like SHIELD-RT) — do not delete; it is a working deterministic
+  transport useful for replay/loopback testing.
+- The cross-peer desync oracle as a *runtime* requirement (server is authoritative; clients
+  cannot desync the world, they can only mispredict and reconcile).
+
+### Determinism recommendation (Q5)
+- Server-authoritative ⇒ clients need NO bit-exact cross-machine determinism. This REMOVES the
+  largest determinism tax. **Keep `world_hash` as the server's internal replay/save/debug
+  invariant only.**
+- **Player avatars are still SIM state on the server** ⇒ when avatars + server physics enter the
+  default lane, that is ONE deliberate `world_hash` bump (the entities/physics sub-hash stops
+  being empty). Land it in its OWN commit with the heavy-oracle + replay re-bless, AFTER any
+  remaining Wave C worldgen bump, so the chain stays one-bump-per-commit attributable. Inter-
+  player physics collision is part of that same avatar/physics bump (one commit, not two).
+
+### v0 phase plan (replaces v1 M1–M6)
+Ordered so each step is independently validatable; the architecture-neutral pieces (P0–P1) land
+first and are useful under ANY model, the bump is isolated (P2), and the netcode (P3+) is gated
+on owner confirmation of the pivot.
+
+- **P0 — per-anchor streaming budget (Q4 "build now"; residency-only, world_hash-NEUTRAL).**
+  Generalize the shared 8192-active-chunk budget so N far-apart anchors each get a guaranteed
+  near-field floor instead of a near anchor starving a far one under union pressure. Foundation-
+  neutral; needed under both models. **← BUILDING THIS NOW.** Gate: `HeadlessServerTick` /
+  `MultiAnchorStreaming` — each of N anchors keeps its near-surface resident under a tight
+  global budget; single-anchor path byte-identical (world_hash unchanged).
+- **P1 — player avatar as a deterministic server entity (prep; the eventual bump #5).** Add a
+  `PlayerAvatar` ECS entity (stable id, position, facing, velocity); deterministic spawn from
+  `(seed, preset, player_id)`. Avatar positions become the streaming anchor vector (closes B2).
+  Lands the world_hash bump in its own commit + re-bless.
+- **P2 — server-authoritative physics for avatars + props (Q3 Garry's-Mod model).** Players and
+  dynamic props in the server Jolt world; inter-entity collision; part of the P1 avatar/physics
+  bump or an immediately-following one. Kinematic-first is NOT chosen — owner wants full physics.
+- **P3 — replication protocol (authoritative snapshots + delta + client prediction).** The new
+  net layer: `usercmd` upstream, per-client snapshot downstream, baseline+delta compression,
+  PVS/area-of-interest culling for 20+, client prediction + reconciliation, interpolation of
+  remote entities. **GATED on owner confirming the pivot** (this is the large, weeks-scale leg).
+- **P4 — persistent server lifecycle (join/leave; Q2).** Connect = baseline + snapshot stream +
+  avatar spawn; disconnect = avatar despawn + anchor removed; the server runs continuously
+  independent of any single client. Loopback + LAN first.
+- **P5 — scale hardening to 20+ (Q1).** AOI tuning, snapshot bandwidth budgets, per-anchor
+  streaming floors validated at 20 anchors, server tick-budget under N-player physics.
+
+### Open confirmation for owner
+The pivot itself (retire peer-lockstep as the multiplayer transport; adopt authoritative
+server + replication) is the one call worth confirming before the large P3 build. P0 (and the
+P1/P2 prep) are safe to build now under your standing authority + "build now in prep"; P3+ is
+where the weeks-scale netcode investment lands, so a one-word "yes, authoritative server" before
+that is the cheap checkpoint. Everything below (§1–§7) is the retained v1 analysis.
+
+---
+
+## 1. What "#5" is, and why it is blocked  *(v1 — retained as blocker analysis)*
 
 **#5 = the multi-anchor streaming DRIVER:** multiple lockstep players, each driving their own
 streaming anchor, over a shared world, with per-anchor streaming budgets and a
