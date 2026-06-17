@@ -44,7 +44,18 @@ layout(std430, binding = 0) readonly buffer ChunkParams { GpuChunk chunks[]; };
 // underwater/no-ground (the candidate is skipped).
 layout(std430, binding = 1) readonly buffer SurfaceGrid { vec4 surf[]; };
 layout(std430, binding = 2) writeonly buffer GrassBlades { uint blades[]; };
-layout(std430, binding = 3) buffer BladeCount { uint blade_count; };
+// One append counter followed by DrawArraysIndirectCommand:
+//   [0] append_count, [1] vertex_count, [2] instance_count, [3] first_vertex,
+//   [4] base_instance. The CPU initializes this to {0,12,0,0,0}; each accepted
+// blade reserves a storage slot with append_count and increments instance_count
+// only if the slot fits inside the fixed pool.
+layout(std430, binding = 3) buffer BladeCount {
+    uint append_count;
+    uint draw_vertex_count;
+    uint draw_instance_count;
+    uint draw_first_vertex;
+    uint draw_base_instance;
+};
 // Archetype palette (parallel arrays packed as vec4 for std430 cleanliness):
 //   pal0 = (color.r, color.g, color.b, density_weight)
 //   pal1 = (half_width, height, sways?1:0, 0)
@@ -188,9 +199,12 @@ void main() {
 
     vec2 sway = u_wind_xz * sway_scale;
 
-    // Reserve a slot. Atomic append; respect the global pool cap.
-    uint slot = atomicAdd(blade_count, 1u);
+    // Reserve a slot. Atomic append; respect the global pool cap. The draw
+    // command counts only valid in-pool blades, so overflow candidates never
+    // overdraw stale SSBO records.
+    uint slot = atomicAdd(append_count, 1u);
     if (slot >= u_max_instances) return;
+    atomicAdd(draw_instance_count, 1u);
     uint o = slot * kWordsPerBlade;
 
     blades[o + 0u] = floatBitsToUint(wx);
