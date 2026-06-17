@@ -22,6 +22,7 @@
 #include "audio/IAudioManager.h"
 #include "audio/NullAudioManager.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
@@ -1691,6 +1692,9 @@ int main(int argc, char* argv[]) {
             : ((scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() ||
                 scenario_config.auto_world_smoke() || scenario_config.persistence_roundtrip_smoke() ||
                 scenario_config.creature_slice_smoke() ||
+                // T-I6 cinematic: the wildlife scene needs a real waterline for the
+                // animal to wander to, so it joins the archipelago water group.
+                (scenario_config.skinned_mesh_visual_smoke() && scenario_config.wildlife) ||
                 // T-I5b-visual-sweep: archipelago shows water + shore + foliage +
                 // open sky from one anchor (an explicit --world-preset still wins).
                 scenario_config.world_visual_sweep())
@@ -1944,10 +1948,26 @@ int main(int argc, char* argv[]) {
     // T-I6 P3.1d video proof: showcase frame-sequence dump (avatars>=2 only).
     int showcase_video_frame = 0;
     double showcase_video_last_s = -1.0;
+    // T-I6 cinematic: the wildlife camera is FIXED, so the heavy per-frame
+    // horizon-radius EnsureSurfaceReadyNear (which keeps render at ~0.6 fps and
+    // starves the 120-frame capture) is amortized -- the scene region is streamed
+    // once in setup, then refreshed only every Nth frame.
+    int wildlife_stream_tick = 0;
     // T-I6 P3.3 integration: drives the showcase render avatars from the replication
     // pipeline when --replicated is set (network-driven view).
     Luminumbra::Client::ScenarioHarness::ReplicatedAvatarDemo replicated_demo;
     bool replicated_demo_setup = false;
+    // T-I6 cinematic wildlife scene state. Entity[0]=animal, [1]=human (grovestriders);
+    // a separate arrow render entity. FSM: 0 seek-water, 1 arrow-in-flight, 2 flee.
+    bool wildlife_setup = false;
+    int wildlife_phase = 0;
+    glm::vec3 wildlife_water{0.0f};      // water-edge target the animal walks to
+    glm::vec3 wildlife_animal{0.0f};     // animal world position (kinematic)
+    glm::vec3 wildlife_human{0.0f};      // human (shooter) position
+    glm::vec3 wildlife_flee_dir{0.0f};
+    glm::vec3 wildlife_arrow_pos{0.0f};
+    glm::vec3 wildlife_arrow_vel{0.0f};
+    Luminumbra::EntityID wildlife_arrow_entity{entt::null};
     SkinnedMeshVisualCapture skinned_mesh_capture_a;
     std::vector<unsigned char> skinned_mesh_pixels_a;
     // creature_slice_smoke (T-I3-18): data-driven creature game slice. The
@@ -2882,6 +2902,101 @@ int main(int argc, char* argv[]) {
                             gameSession.get(), scenario_config.artifact_dir,
                             root_dir, std::max(1, scenario_config.avatars));
                     }
+                    // T-I6 cinematic: position the animal + human near a water edge and
+                    // frame a wide side shot. Reuses the 2-grovestrider spawn (entity[0]
+                    // = animal, [1] = human) + a separate arrow prop. Overrides the
+                    // target camera/focus so the existing aim code frames the scene.
+                    if (scenario_config.wildlife && !wildlife_setup &&
+                        skinned_mesh_visual_target.spawned &&
+                        skinned_mesh_visual_target.all_entities.size() >= 2) {
+                        auto& reg = gameSession->GetRegistry();
+                        auto* ws = gameSession->GetWorldSystem();
+                        const Luminumbra::Vec3 spawn = gameSession->GetMetadata().spawnPoint;
+                        // GetTerrainHeightAt is a PURE function (valid anywhere, no streaming
+                        // needed), so scan a wide grid around spawn for the nearest real
+                        // SHORELINE: a beach cell (terrain just above sea level) with a water
+                        // neighbour (terrain below sea level). The archipelago basin around
+                        // spawn is often open ocean with no beach for hundreds of metres, so a
+                        // local gradient march fails -- a wide scan reliably finds an island edge.
+                        auto terr = [&](float x, float z) { return ws ? ws->GetTerrainHeightAt(x, z) : 0.0f; };
+                        glm::vec3 shore(spawn.x, 0.0f, spawn.z);
+                        glm::vec3 toLand(1.0f, 0.0f, 0.0f); // from water toward land (unit)
+                        bool found = false;
+                        {
+                            constexpr float kBeachLo = 0.4f;   // m above sea level
+                            constexpr float kBeachHi = 5.0f;
+                            constexpr float kWaterDepth = 0.5f; // neighbour must be this far below sea
+                            const float step = 16.0f;
+                            const float reach = 1600.0f;
+                            const float probe = 16.0f;
+                            float best_d2 = 1e18f;
+                            const glm::vec2 dirs[4] = {{probe,0},{-probe,0},{0,probe},{0,-probe}};
+                            for (float dz = -reach; dz <= reach; dz += step) {
+                                for (float dx = -reach; dx <= reach; dx += step) {
+                                    const float x = spawn.x + dx, z = spawn.z + dz;
+                                    const float h = terr(x, z);
+                                    if (h < Luminumbra::SEA_LEVEL + kBeachLo || h > Luminumbra::SEA_LEVEL + kBeachHi)
+                                        continue;
+                                    glm::vec3 wdir(0.0f);
+                                    bool has_water = false;
+                                    for (const auto& d : dirs) {
+                                        if (terr(x + d.x, z + d.y) < Luminumbra::SEA_LEVEL - kWaterDepth) {
+                                            wdir = glm::vec3(d.x, 0.0f, d.y);
+                                            has_water = true;
+                                            break;
+                                        }
+                                    }
+                                    if (!has_water) continue;
+                                    const float d2 = dx * dx + dz * dz;
+                                    if (d2 < best_d2) {
+                                        best_d2 = d2;
+                                        shore = glm::vec3(x, h, z);
+                                        toLand = -glm::normalize(wdir); // water->land = away from water neighbour
+                                        found = true;
+                                    }
+                                }
+                            }
+                        }
+                        const float shore_dist = std::sqrt((shore.x - spawn.x) * (shore.x - spawn.x) +
+                                                           (shore.z - spawn.z) * (shore.z - spawn.z));
+                        LUMINUMBRA_CORE_INFO("wildlife: shoreline found={} at ({:.0f},{:.0f}) terr {:.1f} (dist {:.0f}m from spawn)",
+                            found, shore.x, shore.z, shore.y, shore_dist);
+                        const glm::vec3 side(-toLand.z, 0.0f, toLand.x);
+                        // The water's edge the animal walks to is just seaward of the shore;
+                        // it starts a few metres up the dry shore and approaches the waterline.
+                        wildlife_water = glm::vec3(shore.x, Luminumbra::SEA_LEVEL, shore.z) - toLand * 2.0f;
+                        wildlife_water.y = Luminumbra::SEA_LEVEL;
+                        wildlife_animal = shore + toLand * 8.0f; // up the dry shore
+                        wildlife_animal.y = terr(wildlife_animal.x, wildlife_animal.z);
+                        wildlife_human = wildlife_animal + toLand * 7.0f + side * 6.0f; // further inland + aside
+                        wildlife_human.y = terr(wildlife_human.x, wildlife_human.z);
+                        reg.get<Luminumbra::Components::TransformComponent>(skinned_mesh_visual_target.all_entities[0]).position = wildlife_animal;
+                        reg.get<Luminumbra::Components::TransformComponent>(skinned_mesh_visual_target.all_entities[1]).position = wildlife_human;
+                        // Arrow prop (a small glowing bloom mesh), parked out of view until fired.
+                        wildlife_arrow_entity = reg.create();
+                        reg.emplace<Luminumbra::Components::TransformComponent>(wildlife_arrow_entity).position = glm::vec3(0.0f, -1000.0f, 0.0f);
+                        auto& am = reg.emplace<Luminumbra::Components::StaticMeshComponent>(wildlife_arrow_entity);
+                        am.meshPath = "data/models/props/glow_bloom/glow_bloom.lmesh";
+                        am.materialId = 4;
+                        // Wide side shot: camera off to the side of the animal->water line,
+                        // elevated, looking at the midpoint where the action unfolds.
+                        const glm::vec3 mid = (wildlife_animal + wildlife_water) * 0.5f;
+                        skinned_mesh_visual_target.camera_position = mid + side * 22.0f + glm::vec3(0.0f, 9.0f, 0.0f);
+                        skinned_mesh_visual_target.focus = mid + glm::vec3(0.0f, 1.0f, 0.0f);
+                        // The shoreline can be hundreds of metres from spawn; stream the scene
+                        // region in now so terrain + water are meshed before the first capture.
+                        if (ws && gameSession->GetPhysicsSystem()) {
+                            ws->EnsureSurfaceReadyNear(
+                                Luminumbra::Vec3(mid.x, mid.y, mid.z),
+                                gameSession->GetPhysicsSystem(),
+                                scenario_config.horizon_radius, scenario_config.collision_radius);
+                        }
+                        wildlife_setup = true;
+                        LUMINUMBRA_CORE_INFO("wildlife: water-edge ({:.1f},{:.1f}), animal ({:.1f},{:.1f}) terr {:.1f}, human ({:.1f},{:.1f}){}",
+                            wildlife_water.x, wildlife_water.z, wildlife_animal.x, wildlife_animal.z, wildlife_animal.y,
+                            wildlife_human.x, wildlife_human.z,
+                            found ? "" : " [no shoreline found - dry fallback]");
+                    }
                     ApplySkinnedMeshVisualCamera(g_camera.get(), skinned_mesh_visual_target);
                     // T-I6 P3.1d video: for the SHOWCASE row (avatars>=2), synchronously
                     // pull the surface around the camera fully ready each frame (same
@@ -2889,9 +3004,15 @@ int main(int argc, char* argv[]) {
                     // frame is captured -- no streaming/meshing pop-in in the clip.
                     if (scenario_config.avatars >= 2 &&
                         gameSession->GetWorldSystem() && gameSession->GetPhysicsSystem()) {
-                        gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
-                            g_camera->Position, gameSession->GetPhysicsSystem(),
-                            scenario_config.horizon_radius, scenario_config.collision_radius);
+                        // Fixed-camera wildlife scene: stream once (setup) then refresh
+                        // every 30th frame so the 120-frame clip captures at full rate.
+                        // The walking-row showcase moves the camera, so it streams each frame.
+                        const bool skip = scenario_config.wildlife && (wildlife_stream_tick++ % 30 != 0);
+                        if (!skip) {
+                            gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
+                                g_camera->Position, gameSession->GetPhysicsSystem(),
+                                scenario_config.horizon_radius, scenario_config.collision_radius);
+                        }
                     }
                 } else if (scenario_config.creature_slice_smoke() && scenario_ready && g_camera) {
                     // T-I3-18: spawn the creature scene once, hold the fixed
@@ -4391,7 +4512,60 @@ int main(int argc, char* argv[]) {
                             if (warmed_up && interval_ok) {
                                 auto& reg = gameSession->GetRegistry();
                                 auto* world_sys = gameSession->GetWorldSystem();
-                                if (scenario_config.replicated) {
+                                if (scenario_config.wildlife && wildlife_setup) {
+                                    // Cinematic FSM on CAPTURE-relative time T (frames dumped * 0.05 s):
+                                    // 0..~2.3 s animal walks to water; ~2.5 s human shoots; arrow arcs
+                                    // ~1 s; on landing the splash SCARES the animal -> it flees.
+                                    const float T = static_cast<float>(showcase_video_frame) * 0.05f;
+                                    const float dt = 0.05f;
+                                    const auto e_animal = skinned_mesh_visual_target.all_entities[0];
+                                    const auto e_human = skinned_mesh_visual_target.all_entities[1];
+                                    auto ground = [&](glm::vec3 p) {
+                                        if (world_sys) p.y = world_sys->GetTerrainHeightAt(p.x, p.z);
+                                        return p;
+                                    };
+                                    auto set_tf = [&](Luminumbra::EntityID e, const glm::vec3& p, const glm::vec3& dir) {
+                                        if (!reg.valid(e) || !reg.all_of<Luminumbra::Components::TransformComponent>(e)) return;
+                                        auto& tf = reg.get<Luminumbra::Components::TransformComponent>(e);
+                                        tf.position = p;
+                                        const glm::vec3 d(dir.x, 0.0f, dir.z);
+                                        if (glm::length(d) > 0.01f) tf.rotation = glm::angleAxis(std::atan2(d.x, d.z), glm::vec3(0, 1, 0));
+                                    };
+                                    glm::vec3 to_water = wildlife_water - wildlife_animal; to_water.y = 0.0f;
+                                    const glm::vec3 seek_dir = glm::length(to_water) > 0.01f ? glm::normalize(to_water) : glm::vec3(1, 0, 0);
+                                    if (wildlife_phase == 0) { // SEEK water
+                                        if (glm::length(to_water) > 2.5f) wildlife_animal += seek_dir * 3.0f * dt;
+                                        wildlife_animal = ground(wildlife_animal);
+                                        set_tf(e_animal, wildlife_animal, seek_dir);
+                                        if (T >= 2.5f) { // human looses the arrow toward a spot beside the animal
+                                            const glm::vec3 perp(-seek_dir.z, 0.0f, seek_dir.x);
+                                            const glm::vec3 target = wildlife_animal + perp * 2.0f; // BESIDE, not at
+                                            wildlife_arrow_pos = wildlife_human + glm::vec3(0.0f, 1.3f, 0.0f);
+                                            glm::vec3 ah = target - wildlife_arrow_pos; ah.y = 0.0f;
+                                            const glm::vec3 adir = glm::length(ah) > 0.01f ? glm::normalize(ah) : seek_dir;
+                                            wildlife_arrow_vel = adir * 13.0f + glm::vec3(0.0f, 4.5f, 0.0f);
+                                            set_tf(e_human, wildlife_human, adir); // human faces the shot
+                                            wildlife_phase = 1;
+                                        }
+                                    } else if (wildlife_phase == 1) { // ARROW in flight
+                                        wildlife_arrow_vel.y -= 9.81f * dt;
+                                        wildlife_arrow_pos += wildlife_arrow_vel * dt;
+                                        const float terr = world_sys ? world_sys->GetTerrainHeightAt(wildlife_arrow_pos.x, wildlife_arrow_pos.z) : wildlife_arrow_pos.y;
+                                        set_tf(wildlife_arrow_entity, wildlife_arrow_pos, wildlife_arrow_vel);
+                                        if (wildlife_arrow_pos.y <= terr) { // THWACK beside the animal -> scare
+                                            wildlife_arrow_pos.y = terr;
+                                            set_tf(wildlife_arrow_entity, wildlife_arrow_pos, glm::vec3(0, 0, 1));
+                                            glm::vec3 away = wildlife_animal - wildlife_arrow_pos; away.y = 0.0f;
+                                            wildlife_flee_dir = glm::length(away) > 0.01f ? glm::normalize(away) : -seek_dir;
+                                            wildlife_phase = 2;
+                                        }
+                                        set_tf(e_animal, wildlife_animal, seek_dir); // animal still drinking
+                                    } else { // FLEE
+                                        wildlife_animal += wildlife_flee_dir * 6.0f * dt; // bolts away, faster
+                                        wildlife_animal = ground(wildlife_animal);
+                                        set_tf(e_animal, wildlife_animal, wildlife_flee_dir);
+                                    }
+                                } else if (scenario_config.replicated) {
                                     // T-I6 P3.3: NETWORK-DRIVEN. Drive each render avatar's
                                     // transform from the replication pipeline (server walk ->
                                     // snapshot -> client -> interpolate), not a direct walk.
