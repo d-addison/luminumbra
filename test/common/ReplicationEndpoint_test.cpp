@@ -192,6 +192,63 @@ TEST(ReplicationEndpoint, AoiDisabledByDefaultSendsAll) {
     EXPECT_EQ(client.snapshot().entities.size(), 3u);
 }
 
+// P3.3: client-side remote-entity interpolation (render-behind lerp).
+TEST(SnapshotInterpolation, LerpsBetweenSnapshots) {
+    SnapshotInterpolator interp;
+    SnapshotMsg s0; s0.server_tick = 0;  s0.entities = {MakeEntity(1, 0, 1000, 0)};
+    SnapshotMsg s1; s1.server_tick = 10; s1.entities = {MakeEntity(1, 1000, 1000, 2000)};
+    interp.Push(s1); // out-of-order push tolerated
+    interp.Push(s0);
+    EXPECT_EQ(interp.buffered(), 2u);
+    EXPECT_EQ(interp.newest_tick(), 10u);
+
+    // Halfway (tick 5) -> position halfway.
+    auto mid = interp.Sample(5.0);
+    ASSERT_EQ(mid.size(), 1u);
+    EXPECT_EQ(mid[0].entity_id, 1u);
+    EXPECT_NEAR(mid[0].px_mm, 500, 1);
+    EXPECT_NEAR(mid[0].pz_mm, 1000, 1);
+
+    // Quarter (tick 2.5) -> 25%.
+    EXPECT_NEAR(interp.Sample(2.5)[0].px_mm, 250, 1);
+}
+
+TEST(SnapshotInterpolation, ClampsOutsideRangeNoExtrapolation) {
+    SnapshotInterpolator interp;
+    SnapshotMsg s0; s0.server_tick = 10; s0.entities = {MakeEntity(1, 100, 0, 0)};
+    SnapshotMsg s1; s1.server_tick = 20; s1.entities = {MakeEntity(1, 200, 0, 0)};
+    interp.Push(s0);
+    interp.Push(s1);
+    // Before the buffer -> oldest; after -> newest (no extrapolation past 200).
+    EXPECT_EQ(interp.Sample(5.0)[0].px_mm, 100);
+    EXPECT_EQ(interp.Sample(99.0)[0].px_mm, 200);
+}
+
+TEST(SnapshotInterpolation, NewEntityPassesThroughUntilInBoth) {
+    SnapshotInterpolator interp;
+    SnapshotMsg s0; s0.server_tick = 0;  s0.entities = {MakeEntity(1, 0, 0, 0)};
+    SnapshotMsg s1; s1.server_tick = 10; s1.entities = {MakeEntity(1, 1000, 0, 0), MakeEntity(2, 5000, 0, 0)};
+    interp.Push(s0);
+    interp.Push(s1);
+    auto mid = interp.Sample(5.0);
+    // Entity 1 (in both) is lerped; entity 2 (only in the newer) passes through.
+    ASSERT_EQ(mid.size(), 2u);
+    const ReplEntityState* e2 = nullptr;
+    for (const auto& e : mid) if (e.entity_id == 2u) e2 = &e;
+    ASSERT_NE(e2, nullptr);
+    EXPECT_EQ(e2->px_mm, 5000);
+}
+
+TEST(SnapshotInterpolation, EmptyAndEviction) {
+    SnapshotInterpolator interp(/*max_buffer=*/3);
+    EXPECT_TRUE(interp.empty());
+    for (std::uint32_t t = 0; t < 6; ++t) {
+        SnapshotMsg s; s.server_tick = t; interp.Push(s);
+    }
+    EXPECT_EQ(interp.buffered(), 3u);   // capped
+    EXPECT_EQ(interp.newest_tick(), 5u); // newest kept
+}
+
 TEST(ReplicationEndpoint, StaleSnapshotDoesNotRegress) {
     auto pair = MakeLoopbackPair();
     ReplicationServer server;
