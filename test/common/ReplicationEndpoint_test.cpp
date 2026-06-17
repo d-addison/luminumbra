@@ -249,6 +249,47 @@ TEST(SnapshotInterpolation, EmptyAndEviction) {
     EXPECT_EQ(interp.newest_tick(), 5u); // newest kept
 }
 
+// P3.3: local-player prediction + reconciliation.
+TEST(LocalPlayerPrediction, PredictsImmediatelyAndReconciles) {
+    LocalPlayerPredictor pred(/*speed*/4.0f, /*dt*/0.1f); // 0.4 m per full-axis tick
+    pred.SetPosition(0.0f, 0.0f, 0.0f);
+    pred.RecordInput(1, 1.0f, 0.0f);
+    pred.RecordInput(2, 1.0f, 0.0f);
+    pred.RecordInput(3, 1.0f, 0.0f);
+    // Predicted immediately: 3 * 0.4 = 1.2 m in X.
+    EXPECT_NEAR(pred.predicted().x, 1.2f, 1e-4f);
+    EXPECT_EQ(pred.pending_inputs(), 3u);
+
+    // Server acks tick 1 with the matching authoritative position (0.4). Reconcile
+    // drops cmd1, snaps to 0.4, replays cmds 2+3 -> back to 1.2 (server agreed).
+    pred.Reconcile(0.4f, 0.0f, 0.0f, /*acked*/1);
+    EXPECT_NEAR(pred.predicted().x, 1.2f, 1e-4f);
+    EXPECT_EQ(pred.pending_inputs(), 2u);
+}
+
+TEST(LocalPlayerPrediction, SnapsToAuthoritativeOnDivergence) {
+    LocalPlayerPredictor pred(4.0f, 0.1f);
+    pred.SetPosition(0.0f, 0.0f, 0.0f);
+    pred.RecordInput(1, 1.0f, 0.0f); // predicts 0.4
+    pred.RecordInput(2, 1.0f, 0.0f); // predicts 0.8
+    // Server says after tick 1 the avatar was actually at x=0.2 (blocked/slope),
+    // acks tick 1. Reconcile snaps to 0.2 + replays cmd2 (0.4) -> 0.6.
+    pred.Reconcile(0.2f, 0.0f, 0.0f, 1);
+    EXPECT_NEAR(pred.predicted().x, 0.6f, 1e-4f);
+    EXPECT_EQ(pred.pending_inputs(), 1u);
+}
+
+TEST(LocalPlayerPrediction, FullAckClearsBufferAndMatchesAuthoritative) {
+    LocalPlayerPredictor pred(4.0f, 0.1f);
+    pred.RecordInput(1, 1.0f, 0.0f);
+    pred.RecordInput(2, 0.0f, 1.0f);
+    // Server acks through tick 2 -> all inputs folded in; predicted == authoritative.
+    pred.Reconcile(0.4f, 0.0f, 0.4f, 2);
+    EXPECT_EQ(pred.pending_inputs(), 0u);
+    EXPECT_NEAR(pred.predicted().x, 0.4f, 1e-4f);
+    EXPECT_NEAR(pred.predicted().z, 0.4f, 1e-4f);
+}
+
 TEST(ReplicationEndpoint, StaleSnapshotDoesNotRegress) {
     auto pair = MakeLoopbackPair();
     ReplicationServer server;
