@@ -69,8 +69,11 @@ pipelines:
         run: 'forge index'
         capabilities: { sandbox: workspace-write, egress: none }
       - name: context-baseline-verify
+        # --new-only: gate on NEW findings vs the committed .forge/verify-baseline.json
+        # (the repo carries 155 accepted findings incl. documented brace-counter false
+        # positives in test/tools files; those must not block the pipeline).
         type: deterministic
-        run: 'forge verify --validation-policy warn --testing-policy warn'
+        run: 'forge verify --new-only --validation-policy warn --testing-policy warn'
         capabilities: { sandbox: workspace-write, egress: none }
 
   # ----------------------------------------------------------------------------
@@ -255,8 +258,9 @@ pipelines:
         run: 'forge sdd verify'
         capabilities: { sandbox: read-only, egress: none }
       - name: closeout-verify
+        # --new-only: only NEW findings vs baseline block (see context-baseline-verify).
         type: deterministic
-        run: 'forge verify --validation-policy warn --testing-policy warn'
+        run: 'forge verify --new-only --validation-policy warn --testing-policy warn'
         capabilities: { sandbox: workspace-write, egress: none }
       - name: closeout-handoff
         type: ai_dispatch

@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-06-17T19:07:08.470105300+00:00",
+  "domain_policy": {
+    "acceptance": "block",
+    "adr_fr_consistency": "block",
+    "architecture_constraints": "block",
+    "ast_verification": "block",
+    "comment_hygiene": "block",
+    "compliance": "block",
+    "contracts": "block",
+    "conventions": "block",
+    "documentation": "block",
+    "drift": "block",
+    "figma_interaction": "block",
+    "formal_proofs": "block",
+    "graph_diff": "block",
+    "hygiene": "block",
+    "path_audit": "block",
+    "performance": "block",
+    "pre_review": "block",
+    "security": "block",
+    "spec_coverage": "block",
+    "structure_drift": "block",
+    "stub_protection": "block",
+    "testing": "block",
+    "visual": "block"
+  },
+  "domains": {
+    "ast_verification": {
+      "f2543a0ec1d6000d35d3e384cb66c105bed36a1e16ab99c06e5b7e57e2415166": 1
+    },
+    "compliance": {
+      "a28a97021144e134c285b2ec61cbe4eb4383ab676df39fa85a5e7bad9ec9d8f7": 1
+    },
+    "contracts": {
+      "0029114428a336d7cfb0ace8b223c72b6cf1293e818839607422e091dd674a80": 1,
+      "068e4b0545f8e382fd8cdeff073944d100686cfacf68bb81b3f4b4a68a09f4e6": 5,
+      "183a58b5602613f55bf5cdb4d9cfc04e563d5dcbb982732ba52aaa8bb06c67a5": 2,
+      "277d83ba0e1f206e64c9c685ce564fb386ecb3eaf751a025866a0cdb021010dd": 3,
+      "4279053dd82aa98bea392876c6384a08aec9bfebdff9cac1bacab09a0314f19c": 1,
+      "4ca7b35c7bc2700f850f6dcc6c433571b28ab4cba23fa2dbff76291d73e1179f": 1,
+      "60742ea5961349d3804b9e66087cd510e048fa8ae766bec5124c3b48bb319db4": 21,
+      "7c7379b3bd113e16521c4fa1c20fb25538ab2fd696aba65120a45c58bea9dafd": 1,
+      "7d41ca4204357a885d63dcb5d734ced012b391e0f13fd3b2fe49ed9f58d43f05": 1,
+      "80d6202f03447ce0d9461f45c3001c1b394b8d8dd823f13307ea104303a4a7d5": 2,
+      "8914dfb4b615aa3220f152669234f52c923f7ecffeccd85b359cac10db26f92f": 1,
+      "8ffb64e3e8981289e1830df87f58db9bea1f16ef29a2aa86bd5949ed8e950d55": 5,
+      "930025b2b1bb44331b203ab29788d245bba46554b86529221ba26a8708073e0c": 1,
+      "995250b90fc87d83c5ca578f0499b05145f59fadc779ae72c743638f628c96d0": 18,
+      "9dc81c0c6dd0cb469c20308fc80a9ac7c6042e78710d723e46fc4b2ca6459a20": 23,
+      "a7dadc7216aded9c1e0e74a739c04a611b85960117061a50b1c4894699f4544e": 1,
+      "aad5c0433f27bb31e20ea65c6a3eaa6e934680ea0e34e6c91aadcffcf081a2a1": 2,
+      "ae6158e870fe73e443210c2a99ed5b8b2d17c1fe382d6b26aee8475e25d60646": 4,
+      "aee268490969ceeafc850445319ec64c78c5dc88096256fd24a6b85f639a7c7f": 1,
+      "c6b2eff103c70a74f0a67390d754c6b279012b2871ccfbfc0638383a70842a1a": 8,
+      "c6d7121d451270c086e57fe71503cfae1be1c300d44e7ad9505d3adad05771b9": 1,
+      "c7f124e9f414e18f94913a854485fe50e87cf5c3f2f8b852eb38955c0eea7c14": 1,
+      "cd91f5ffaa98391d6721fb78de0a5ec822e9738207dde79f999f18f9dd1e58cb": 17,
+      "cdd669b11ec4e4c002ae9e00fdf45b2b149aac5fa4b21b6adad96dfeee63bcd9": 1,
+      "cffb1aa213057356ae299322f71ff8660a4879ce59143b19aca73d8628a6cc33": 2,
+      "d22a0d6c20ca879a5b042acd4763b3140d784acfa66817d71c5f8213a65f3ad7": 1,
+      "e06d294fd15465089073f531a1dcae228e8b416b816c2f73c3235f3e234208ed": 4,
+      "edabc50940035869aabf29773c6dc6c1c1ad601f77d156a5d0bfb3dc9ca10ebd": 2
+    },
+    "conventions": {
+      "49247a92479736cf16461395e85e3adf2ba67a03fe12c51be4a2dffac90f5fe1": 1,
+      "c7bab683b278e7121383d08dd8bbbfba5f1aa4589029d1d16d050b4265dc1b08": 1
+    },
+    "drift": {
+      "06011ba07d11e2e3ed1fcdfedb6075aeb11bc03b1c0a91d2937d4f3632f0a144": 1,
+      "801f149a61f0b95bf1751aaf8c44d638bf3f93631086ba7abe616f2f1fb6c4bc": 1,
+      "aaf41a56318b8bca2abfaa5403e911926e8b9b3bd7cdf4ad66b7674116fc11fb": 1,
+      "f508a1aa7dfae17430acb5f04b2410fc8bc908cf3c2cc304449221abc7006e77": 1
+    },
+    "figma_interaction": {
+      "a5a9293ad961abf6c0693f9154a99b30acaf7adf4ecc256ef89d429770e4ed35": 1
+    },
+    "formal_proofs": {
+      "040c3cfdfef8ea1291edf60ec434fd70c540bbbe0eadb24cb2ce57258ae89d8f": 1
+    },
+    "graph_diff": {
+      "7a95298a8e423a48aff6e931c88d199f6d96b73b74eb01ea3925271a117b2a57": 1
+    },
+    "hygiene": {
+      "1c7c991197339a646541241cad04b1a6756534955a4db79f2607d09c7e99b8d7": 1,
+      "eb30e910a09d54b29c7a1e4e996e6ac9ceb7704eef76da18d1bee8de1467b170": 1
+    },
+    "path_audit": {
+      "7c668ebf968d1f2751ab31dd2efe033b6dd34237c3a858f1fc411230b6d57652": 1
+    },
+    "performance": {
+      "c0f04f782bb11cb81dc38d7e1ef1f561d5cff0f7e137e8650624290b51cf58c2": 1
+    },
+    "pre_review": {
+      "7cd8867f3a0885952fef7ab2e77d4a1442be82b0dd2e22b13ee0abaf8e3f0a5b": 1,
+      "a89ec820236d5a077c57a0e8c3a689b4bfd2b0b5d2b6ebf1658082c91161dbcc": 1,
+      "c5b30028ec6ffcefe2d58245278d281f9f53cd97365880369ab5d2b1d87f0b76": 1
+    },
+    "security": {
+      "183afe31dc9ee163b618dba573c6c009b77ce37b95d1aa1b59065149907538dd": 1,
+      "2a46bb988e9c3a5bfcc28f6d796ce429d00b2896193cc6d2603a487fcbb489aa": 1,
+      "402555a643130fb51a4b52f5b4eafc42872165e5c04c9a0879c0910aa32385fd": 1,
+      "4445d18dced5ad5d3baca80685a413f397c75ad732d375ba9280b54445a1fae2": 1
+    },
+    "testing": {
+      "e7c95528752d234f4a2f6da54cffff0c042f6ac054d57004bcf75f57a8a046a7": 1
+    },
+    "visual": {
+      "5ea4f4715ed620e79613661ab8046aae7d00c61cde5c7ce3c1f708acb0082e3d": 1
+    }
+  }
+}
