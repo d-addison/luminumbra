@@ -25,6 +25,8 @@
 #include "../ecs/EntitySnapshot.h"
 #include "../net/ReplicationProtocol.h"
 
+#include <entt/entt.hpp>
+
 #include <cstdint>
 #include <vector>
 
@@ -58,5 +60,14 @@ Ecs::EntityRegistrySnapshot BuildAvatarEntitySnapshot(const std::vector<PlayerAv
 // from the SIM avatar list to the WIRE form -- the same positions that feed the
 // streaming anchors + the entities sub-hash, now sent to clients.
 std::vector<Net::ReplEntityState> BuildAvatarReplStates(const std::vector<PlayerAvatar>& avatars);
+
+// T-I6 P6.1: the general ECS->wire bridge. Projects EVERY entity carrying a
+// TransformComponent + Components::ReplicatedComponent into a ReplEntityState
+// (entity_id = network_id; position quantized; yaw derived from the transform
+// rotation; type_id/anim_state/anim_phase/flags from the ReplicatedComponent).
+// This is what server-spawned NPCs / animals / projectiles use to replicate --
+// the same machinery as avatars, now driven off the registry by type. Ordered by
+// network_id for a stable snapshot.
+std::vector<Net::ReplEntityState> BuildEntityReplStates(const entt::registry& registry);
 
 } // namespace Luminumbra::World

@@ -56,6 +56,19 @@ struct SkinnedMeshComponent {
     std::uint32_t materialId = 1;
 };
 
+// T-I6 P6.1: marks an entity for network REPLICATION to clients. The authoritative
+// server tags NPCs/animals/projectiles (and, later, avatars) with this; the ECS->wire
+// bridge (BuildEntityReplStates) projects every entity that has a TransformComponent +
+// ReplicatedComponent into a ReplEntityState. Engine-generic: the engine carries the
+// ids/enums, the game assigns their meaning.
+struct ReplicatedComponent {
+    std::uint32_t network_id = 0;  // stable per-session id the client keys on
+    std::uint16_t type_id = 0;     // archetype/class -> client picks the mesh/behaviour
+    std::uint8_t  anim_state = 0;  // current clip enum (game-defined)
+    std::uint8_t  anim_phase = 0;  // normalized clip time, 0..255
+    std::uint8_t  flags = 0;       // bit0 grounded, bit1 owned/predicted, ... (game-defined)
+};
+
 // --- State & Lifecycle ---
 
 // A simple marker component to signal that an entity is scheduled for destruction

@@ -1,5 +1,10 @@
 #include "PlayerAvatar.h"
 
+#include "../components/CoreComponents.h"
+
+#include <glm/gtc/quaternion.hpp>
+
+#include <algorithm>
 #include <cmath>
 
 namespace Luminumbra::World {
@@ -54,6 +59,34 @@ Ecs::EntityRegistrySnapshot BuildAvatarEntitySnapshot(const std::vector<PlayerAv
     // so any direct consumer sees the canonical order.
     Ecs::SortEntityRegistrySnapshot(snapshot);
     return snapshot;
+}
+
+std::vector<Net::ReplEntityState> BuildEntityReplStates(const entt::registry& registry) {
+    std::vector<Net::ReplEntityState> states;
+    auto view = registry.view<const Components::TransformComponent, const Components::ReplicatedComponent>();
+    for (auto entity : view) {
+        const auto& tf = view.get<const Components::TransformComponent>(entity);
+        const auto& rep = view.get<const Components::ReplicatedComponent>(entity);
+        Net::ReplEntityState s;
+        s.entity_id = rep.network_id;
+        s.px_mm = Net::ReplQuantPos(tf.position.x);
+        s.py_mm = Net::ReplQuantPos(tf.position.y);
+        s.pz_mm = Net::ReplQuantPos(tf.position.z);
+        // Yaw from the transform's facing (rotate +Z forward, atan2 in the XZ plane).
+        const Vec3 fwd = tf.rotation * Vec3(0.0f, 0.0f, 1.0f);
+        s.yaw_mrad = Net::ReplQuantAngle(std::atan2(fwd.x, fwd.z));
+        s.flags = rep.flags;
+        s.type_id = rep.type_id;
+        s.anim_state = rep.anim_state;
+        s.anim_phase = rep.anim_phase;
+        states.push_back(s);
+    }
+    // Stable order by network_id (snapshot determinism / readable diffs).
+    std::sort(states.begin(), states.end(),
+              [](const Net::ReplEntityState& a, const Net::ReplEntityState& b) {
+                  return a.entity_id < b.entity_id;
+              });
+    return states;
 }
 
 std::vector<Net::ReplEntityState> BuildAvatarReplStates(const std::vector<PlayerAvatar>& avatars) {

@@ -13,6 +13,9 @@
 
 #include "luminumbra_common/world/PlayerAvatar.h"
 #include "luminumbra_common/ecs/EntitySnapshot.h"
+#include "luminumbra_common/components/CoreComponents.h"
+
+#include <entt/entt.hpp>
 
 namespace {
 
@@ -56,6 +59,38 @@ TEST(PlayerAvatar, SpawnOffsetsAreDistinctAndFanOut) {
     }
     // Monotone-ish fan-out: the outermost is clearly beyond the innermost ring.
     EXPECT_GT(horiz_len(offs[19]), horiz_len(offs[1]));
+}
+
+TEST(PlayerAvatar, BuildEntityReplStatesProjectsTypedRegistryEntities) {
+    using Luminumbra::World::BuildEntityReplStates;
+    namespace C = Luminumbra::Components;
+    entt::registry reg;
+
+    // A player (type 0), a deer (type 7), an arrow (type 42) at distinct positions.
+    auto mk = [&](std::uint32_t nid, std::uint16_t type, Luminumbra::Vec3 pos, std::uint8_t anim) {
+        auto e = reg.create();
+        auto& tf = reg.emplace<C::TransformComponent>(e);
+        tf.position = pos;
+        auto& rep = reg.emplace<C::ReplicatedComponent>(e);
+        rep.network_id = nid; rep.type_id = type; rep.anim_state = anim;
+    };
+    mk(2, 7, Luminumbra::Vec3(10.0f, 34.0f, -3.0f), 1);  // deer
+    mk(1, 0, Luminumbra::Vec3(0.0f, 35.0f, 0.0f), 0);    // player
+    mk(3, 42, Luminumbra::Vec3(-5.0f, 36.0f, 8.0f), 0);  // arrow
+    // An entity WITHOUT ReplicatedComponent must be ignored.
+    { auto e = reg.create(); reg.emplace<C::TransformComponent>(e); }
+
+    const auto states = BuildEntityReplStates(reg);
+    ASSERT_EQ(states.size(), 3u);
+    // Sorted by network_id.
+    EXPECT_EQ(states[0].entity_id, 1u);
+    EXPECT_EQ(states[0].type_id, 0u);
+    EXPECT_EQ(states[1].entity_id, 2u);
+    EXPECT_EQ(states[1].type_id, 7u);
+    EXPECT_EQ(states[1].anim_state, 1u);
+    EXPECT_NEAR(Luminumbra::Net::ReplDequantPos(states[1].px_mm), 10.0f, 0.001f);
+    EXPECT_EQ(states[2].entity_id, 3u);
+    EXPECT_EQ(states[2].type_id, 42u);
 }
 
 TEST(PlayerAvatar, EmptyAvatarsYieldEmptySnapshot) {
