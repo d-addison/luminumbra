@@ -41,9 +41,9 @@ std::string WeatherSubHash(world::GameSession* session) {
     return weather ? weather->ComputeWeatherSubHash() : std::string();
 }
 
-// T-I6-A1 world_hash bump #4: the aether sub-hash from the session's Aetheric
-// scalar field, or empty when none exists (defensive; the headless runner always
-// constructs one on world create/load).
+// T-I6-020 / T-I6-A1 world_hash bump #4: the aether sub-hash from the session's
+// Aetheric scalar field, or empty when none exists (defensive; the headless
+// runner always constructs one on world create/load).
 std::string AetherSubHash(world::GameSession* session) {
     if (!session) {
         return {};

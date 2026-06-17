@@ -4,7 +4,9 @@
 from `.forge/critique-wave-a-spec-20260615.md`. **Branch:**
 `feat/polyglot-audit-roadmap` (tip after spec v1 = `bb3a5fc`). **Inputs:** the 5
 Wave-0 briefs + `_synthesis.md`; owner decisions 2026-06-15; the critique report.
-**Determinism baseline:** `world_hash d950a6afc12a5cdc`.
+**Determinism baseline:** pre-A1 `world_hash d950a6afc12a5cdc`; T-I6-020 A1
+aether bump appends the runner-level `aether` term and records post-A1
+`world_hash f17726d44054d133`.
 
 > **What changed from v1 (critique dispositions):** the wave is **split** (heavy
 > SHIELD-RT substrate moved to **Wave A.2**; froxel volume + SDF brick clipmap are
@@ -42,7 +44,8 @@ serialization.
 **Wave A (this spec, dispatchable after the BLOCKs are closed):**
 - **A0** — Nsight markers + **standalone GPU tracer micro-profile spike** (the BLOCK
   #3 gate, pulled to the front).
-- **A1** — Aetheric **aether** scalar field (fire deferred). **Hash change #1 (sim).**
+- **A1** — Aetheric **aether** scalar field (fire deferred). **Hash change #1
+  (sim), landed by T-I6-020 as the append-only `|aether:` composite term.**
 - **A1.5** — shaping-spline params-hash fix. **Hash change #2 (worldgen params).**
 - **A2** — hydraulic/thermal relief (baked grid). **Hash change #3 (worldgen params).**
 
@@ -60,7 +63,9 @@ portability layer.
 bumps" in v1). Each is its **own commit** with in-commit replay (LREC1) + lockstep
 re-bless, and a **CI guard** asserts each commit changes **exactly one** sub-hash term
 (squash-proof, MINOR fold):
-1. **#1 A1 aether** — sim composite term (see A1).
+1. **#1 A1 aether** — sim composite term (see A1). T-I6-020 threads
+   `AetherFieldSystem::ComputeAetherSubHash()` through `ServerWorldRunner` and
+   updates the composite from `d950a6afc12a5cdc` to `f17726d44054d133`.
 2. **#2 A1.5 shaping-spline fold** — `ComputeTerrainParamsHash`, gated on
    `shaping_enabled`; re-keys shaped presets only. **Lands before #3.**
 3. **#3 A2 hydraulic relief** — `ComputeTerrainParamsHash`, gated on the new

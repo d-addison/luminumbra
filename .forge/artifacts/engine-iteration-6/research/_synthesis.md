@@ -58,49 +58,61 @@ Notes that make the split honest:
 
 ---
 
-## 2. world_hash bump sequencing — Aetheric FIRST, then erosion, never same commit
+## 2. world_hash bump sequencing — Aetheric FIRST, then shaping, then hydro, never same commit
 
-Exactly two deliberate world_hash bumps in iter-6. Required order:
+Revised by the Wave-A spec and T-I6-020: Wave A has three deliberate
+world_hash-affecting changes, each attributable to its own commit and verifier
+surface. Required order:
 
 **Bump #1 (commit A): Aetheric scalar field.** Sim-authoritative new sub-hash
 slot `aether` (fnv1a-64 over IEEE bits, modeled on `ComputeWindSubHash`), ticked
-after weather, folded into world_hash. Re-bless: LREC1 replay + delay-based
+after weather, folded into the runner-level world_hash as an append-only
+`|aether:` term. T-I6-020 records the composite bump
+`d950a6afc12a5cdc -> f17726d44054d133`. Re-bless: LREC1 replay + delay-based
 lockstep. Cost: one re-bless pass; the Aetheric field does NOT change terrain
 geometry, so it does not invalidate any far-field render parity corpus.
 
-**Bump #2 (commit B): hydraulic/thermal erosion offset.** Sim-authoritative;
-adds `ErodedHeightOffset` as an additive term in the single shared analytic
-height path (`ComputeShapedHeight`), baked offline CPU, quantized u16,
-canonicalized before hashing; included in `ComputeFarLodTileHash` /
+**Bump #2 (commit B): shaping-spline params-hash fold.** Worldgen-params
+change only: `ComputeTerrainParamsHash` folds `shaping_enabled`, the shaping
+frequencies, peaks controls, and the three spline control-point arrays. It is
+gated on `shaping_enabled`, uses marker `0x05`, and lands before hydro so the
+hydro commit has a single attributable params-hash delta.
+
+**Bump #3 (commit C): hydraulic relief baked-grid lookup.** Sim-authoritative;
+adds the baked hydro offset grid as the single terrain source for all
+single-point callers, with deterministic bilinear lookup and marker `0x04` in
 `ComputeTerrainParamsHash`. Re-bless: LREC1 replay + lockstep AND it changes the
 terrain SHIELD-RT renders.
 
 **Why this order minimizes re-bless cost:**
 
-The expensive coupling is *erosion changes the terrain geometry that SHIELD-RT's
+The expensive coupling is *hydro changes the terrain geometry that SHIELD-RT's
 far-field parity baselines capture*. SHIELD-RT parity (the A/B silhouette/depth
 diff at 1536 m vs the FarLodSystem marching-cubes mesh) must be blessed against
-the FINAL terrain. If erosion lands AFTER SHIELD-RT parity is blessed, you
-re-bless twice: once for the erosion sim bump (LREC1 + lockstep) AND a full
-regeneration of the SHIELD-RT far-field parity corpus against eroded terrain.
+the FINAL terrain. If hydro lands AFTER SHIELD-RT parity is blessed, you
+re-bless twice: once for the hydro sim bump (LREC1 + lockstep) AND a full
+regeneration of the SHIELD-RT far-field parity corpus against hydro terrain.
 
-Putting **erosion before the SHIELD-RT parity bless** collapses that into one
-re-bless — the parity corpus is *born* eroded.
+Putting **hydro before the SHIELD-RT parity bless** collapses that into one
+re-bless — the parity corpus is *born* hydro-shaped.
 
 Aetheric goes first because it is geometry-neutral and cheap to bless, so it
-clears out of the way and never entangles with the terrain corpus. Erosion goes
-second, immediately before Wave A locks SHIELD-RT parity, so the heavy corpus is
-captured exactly once against eroded terrain. The two are never in the same
+clears out of the way and never entangles with the terrain corpus. The shaping
+params fold goes second because shipped shaped presets already depend on those
+fields and the correction must not be hidden inside the hydro bump. Hydro goes
+third, immediately before Wave A.2 locks SHIELD-RT parity, so the heavy corpus is
+captured exactly once against final terrain. The three are never in the same
 commit because each is an independent deliberate bump with its own replay
 re-bless protocol; merging them would make a replay failure ambiguous as to
-which sub-hash diverged and would force re-blessing both on any single-system
-regression.
+which sub-hash diverged and would force re-blessing multiple systems on any
+single-system regression.
 
 **Ordering invariant for the scheduler:** `Aetheric bump` (commit A) ->
-`erosion bump` (commit B) -> `SHIELD-RT parity baseline bless`. The erosion
-commit must precede the SHIELD-RT parity bless even though SHIELD-RT is
-render-only and world_hash-neutral, because its *parity capture* (a separate
-baseline, not world_hash) reads the eroded geometry.
+`shaping-spline params fold` (commit B) -> `hydro baked-grid bump` (commit C) ->
+`SHIELD-RT parity baseline bless`. The hydro commit must precede the SHIELD-RT
+parity bless even though SHIELD-RT is render-only and world_hash-neutral,
+because its *parity capture* (a separate baseline, not world_hash) reads the
+hydro-shaped geometry.
 
 ---
 
