@@ -91,10 +91,14 @@ gated on owner confirmation of the pivot.
   ✅ DONE (`9f6d605`).** Closest-anchor priority on the union wanted-set so N anchors share the
   8192 budget fairly (no near anchor starves a far one). MultiAnchorStreaming gtests + Headless-
   ServerTick green; single-anchor byte-identical (world_hash `f17726d44054d133` unchanged).
-- **P1 — player avatar as a deterministic server entity (prep; the eventual bump #5).** Add a
-  `PlayerAvatar` ECS entity (stable id, position, facing, velocity); deterministic spawn from
-  `(seed, preset, player_id)`. Avatar positions become the streaming anchor vector (closes B2).
-  world_hash bump in its own commit + re-bless.
+- **P1 — player avatar as a deterministic server entity. ✅ DONE (`ee598da`).** `World::PlayerAvatar`
+  + pure phyllotaxis `DeterministicAvatarSpawnOffset` + `BuildAvatarEntitySnapshot` (quantized,
+  ordered). `ServerWorldRunner.avatar_count` spawns N avatars whose positions feed the
+  multi-anchor streaming vector and fold into the `entities` sub-hash; `--avatars N` CLI.
+  **world_hash-NEUTRAL on the default lane** (avatars are in the separate `entities` sub-hash,
+  not the chunk+wind+weather+aether composite; 0 avatars → byte-identical `f17726d44054d133` /
+  `entities 5735a5094c1e92a8`). Avatar lane validated via `--smoke --avatars 3` (entities
+  `54d55979ebbffb34`, run==replay) + 5 gtests. Full ctest 266/266. Closes B2.
 - **P2 — server-authoritative physics for avatars + props (Q3 Garry's-Mod model).** Players +
   dynamic props in the server Jolt world; inter-entity collision. STATE-SYNC replication model
   (server is final arbiter; client ownership is a prediction hint, not hand-off) per

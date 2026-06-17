@@ -1,5 +1,32 @@
 # Engine Frontier Handoff
 
+## Iteration 6 (cont., 2026-06-17) — #5 multiplayer: pivot + research + P0/P1 (tip `ee598da`)
+
+Owner confirmed the authoritative-server pivot ("sounds good") + answered the sizing
+questions (20+ players, persistent join/leave, full server physics). Research-gated per
+owner ("research then spec then plan, don't go in blind" — see memory `research-before-spec`).
+
+- **Spec v2 — architecture pivot** (`dacb6dc`): delay-based lockstep is wrong for 20+ /
+  persistent join-leave / server physics → **authoritative dedicated server + state
+  replication** (Garry's Mod / Source model). v0 phase plan P0–P5. LockstepSession parked
+  (kept as deterministic loopback/replay tool).
+- **Multiplayer research** (`7d594df`): 5 cited briefs + synthesis in `research/mp-*.md`
+  (replication, interest-management, prediction-reconciliation, networked-physics, server-
+  architecture) — all validate the pivot. AOI reuses the existing chunk index; UDP transport
+  is a P3 prerequisite; state-sync Jolt physics; single-process server holds 20–32/core.
+- **P0 — per-anchor streaming budget** (`9f6d605`): closest-anchor priority on the union
+  wanted-set so N anchors share the 8192 budget fairly. Residency-only / world_hash-neutral;
+  MultiAnchorStreaming + HeadlessServerTick green.
+- **P1 — PlayerAvatar deterministic server entity** (`ee598da`): `World::PlayerAvatar` +
+  phyllotaxis spawn + entity-snapshot fold; `ServerWorldRunner.avatar_count` feeds avatar
+  positions as streaming anchors + the `entities` sub-hash; `--avatars N`. **world_hash-neutral
+  on the default lane** (0 avatars → byte-identical `f17726d44054d133`); avatar lane
+  deterministic (`--smoke --avatars 3` entities `54d55979ebbffb34`, run==replay). Full ctest
+  **266/266** (+5 gtests).
+
+**Next:** P2 (avatars get Jolt physics bodies — server-authoritative collision), then P3 (UDP
+replication + AOI + prediction — the weeks-scale netcode leg), P4 join/leave, P5 scale to 20+.
+
 ## Iteration 6 (cont., 2026-06-17) — Render-debt wave #1–#4 + #5 spec (tip `3df4347`)
 
 Autonomous run (memory `autonomous-iteration-6-mandate`). Owner directive
