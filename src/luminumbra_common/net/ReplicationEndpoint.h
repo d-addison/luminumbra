@@ -20,6 +20,7 @@
 // authoritative sim state is supplied to BroadcastSnapshot and consumed from
 // LatestUsercmd by the caller (the server tick / the client input+render).
 
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <vector>
@@ -125,6 +126,57 @@ public:
 private:
     std::vector<SnapshotMsg> m_buf; // ascending by server_tick
     std::size_t m_max;
+};
+
+// T-I6 P3.3: LOCAL-PLAYER prediction + reconciliation (research mp-prediction-
+// reconciliation.md). The client applies its OWN input immediately (predict, no
+// wait for the server) and buffers each unacked usercmd. When an authoritative
+// snapshot arrives (carrying acked_usercmd_tick), the client drops acked inputs,
+// SNAPS its predicted position to the authoritative one, and REPLAYS the still-
+// unacked inputs on top -- so the local avatar stays responsive yet converges to
+// the server. Horizontal-only kinematic model (move axes in [-1,1] * speed);
+// vertical is server-authoritative (gravity/terrain), not predicted. NOTE: the
+// server steps Jolt CharacterVirtual, so a perfect match isn't guaranteed; the
+// per-snapshot snap-then-replay bounds the error (render-side smoothing of the
+// residual is a renderer concern). Engine-generic, world_hash-neutral.
+class LocalPlayerPredictor {
+public:
+    struct Pos { float x = 0.0f; float y = 0.0f; float z = 0.0f; };
+
+    LocalPlayerPredictor(float speed_ms = 4.0f, float dt_s = 1.0f / 30.0f)
+        : m_speed(speed_ms), m_dt(dt_s) {}
+
+    void SetPosition(float x, float y, float z) { m_pos = {x, y, z}; }
+
+    // Apply this tick's input immediately (predict) and buffer it for reconcile.
+    void RecordInput(std::uint64_t tick, float move_x, float move_z) {
+        Step(m_pos, move_x, move_z);
+        m_buffer.push_back({tick, move_x, move_z});
+    }
+
+    // Authoritative correction: drop inputs the server has folded in (tick <=
+    // acked_tick), snap to the authoritative position, replay the rest on top.
+    void Reconcile(float ax, float ay, float az, std::uint64_t acked_tick) {
+        m_buffer.erase(std::remove_if(m_buffer.begin(), m_buffer.end(),
+                                      [acked_tick](const Cmd& c) { return c.tick <= acked_tick; }),
+                       m_buffer.end());
+        m_pos = {ax, ay, az};
+        for (const Cmd& c : m_buffer) Step(m_pos, c.move_x, c.move_z);
+    }
+
+    [[nodiscard]] Pos predicted() const { return m_pos; }
+    [[nodiscard]] std::size_t pending_inputs() const { return m_buffer.size(); }
+
+private:
+    struct Cmd { std::uint64_t tick; float move_x; float move_z; };
+    void Step(Pos& p, float move_x, float move_z) const {
+        p.x += move_x * m_speed * m_dt;
+        p.z += move_z * m_speed * m_dt;
+    }
+    std::vector<Cmd> m_buffer; // unacked inputs, ascending tick
+    Pos m_pos;
+    float m_speed;
+    float m_dt;
 };
 
 } // namespace Luminumbra::Net
