@@ -28,6 +28,7 @@
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/network/NetworkLoopbackAuthority.h"
 #include "debug/WorldGenViewer.h"
 #include "nlohmann/json.hpp"
 #include <imgui.h>
@@ -1957,6 +1958,8 @@ int main(int argc, char* argv[]) {
     // pipeline when --replicated is set (network-driven view).
     Luminumbra::Client::ScenarioHarness::ReplicatedAvatarDemo replicated_demo;
     bool replicated_demo_setup = false;
+    double replicated_avatar_render_seconds = 0.0;
+    bool remote_avatar_render_artifact_written = false;
     // T-I6 cinematic wildlife scene state. Entity[0]=animal, [1]=human (grovestriders);
     // a separate arrow render entity. FSM: 0 seek-water, 1 arrow-in-flight, 2 flee.
     bool wildlife_setup = false;
@@ -2998,6 +3001,31 @@ int main(int argc, char* argv[]) {
                             found ? "" : " [no shoreline found - dry fallback]");
                     }
                     ApplySkinnedMeshVisualCamera(g_camera.get(), skinned_mesh_visual_target);
+                    if (scenario_config.replicated && scenario_config.avatars >= 2 &&
+                        skinned_mesh_visual_target.spawned) {
+                        if (!replicated_demo_setup) {
+                            replicated_demo.Setup(skinned_mesh_visual_target.spawn_positions);
+                            replicated_demo_setup = true;
+                        }
+                        auto* world_sys = gameSession->GetWorldSystem();
+                        const double replicated_dt = deltaTime > 0.0f
+                            ? static_cast<double>(std::min(deltaTime, 1.0f / 20.0f))
+                            : (1.0 / 60.0);
+                        const auto positions = replicated_demo.Update(replicated_dt, world_sys);
+                        auto& reg = gameSession->GetRegistry();
+                        bool applied_remote_pose = false;
+                        for (std::size_t i = 0;
+                             i < skinned_mesh_visual_target.all_entities.size() && i < positions.size(); ++i) {
+                            const auto ent = skinned_mesh_visual_target.all_entities[i];
+                            if (reg.valid(ent) && reg.all_of<Luminumbra::Components::TransformComponent>(ent)) {
+                                reg.get<Luminumbra::Components::TransformComponent>(ent).position = positions[i];
+                                applied_remote_pose = true;
+                            }
+                        }
+                        if (applied_remote_pose) {
+                            replicated_avatar_render_seconds += replicated_dt;
+                        }
+                    }
                     // T-I6 P3.1d video: for the SHOWCASE row (avatars>=2), synchronously
                     // pull the surface around the camera fully ready each frame (same
                     // pattern as LodGround) so the world is PROPERLY LOADED before any
@@ -4493,6 +4521,69 @@ int main(int argc, char* argv[]) {
                                 }
                             }
                         }
+                        if (scenario_config.skinned_mesh_visual_smoke() && scenario_config.replicated &&
+                            scenario_config.avatars >= 2 && scenario_ready &&
+                            skinned_mesh_visual_target.spawned &&
+                            replicated_demo.ready() &&
+                            replicated_avatar_render_seconds >= (2.0 / 15.0) &&
+                            !remote_avatar_render_artifact_written) {
+                            const auto& render_pass_stats = renderPipeline.get_last_render_pass_stats();
+                            if (render_pass_stats.skinned_draws >= skinned_mesh_visual_target.all_entities.size()) {
+                                const auto clamp_to_u32 = [](std::size_t value) -> std::uint32_t {
+                                    return static_cast<std::uint32_t>(
+                                        std::min<std::size_t>(
+                                            value,
+                                            static_cast<std::size_t>(
+                                                std::numeric_limits<std::uint32_t>::max())));
+                                };
+                                const std::uint32_t local_client_id = 1u;
+                                const std::uint32_t snapshot_count = clamp_to_u32(
+                                    static_cast<std::size_t>(
+                                        std::max(1.0, std::floor(replicated_avatar_render_seconds * 15.0))));
+                                std::vector<luminumbra::network::NetworkRemoteAvatarRenderPose> poses;
+                                poses.reserve(skinned_mesh_visual_target.all_entities.size());
+                                auto& reg = gameSession->GetRegistry();
+                                for (std::size_t i = 0; i < skinned_mesh_visual_target.all_entities.size(); ++i) {
+                                    const std::uint32_t client_id = clamp_to_u32(i + 1u);
+                                    luminumbra::network::NetworkRemoteAvatarRenderPose pose;
+                                    pose.clientId = client_id;
+                                    pose.serverTick = snapshot_count;
+                                    pose.snapshotSequence = pose.serverTick;
+                                    pose.remote = client_id != local_client_id;
+                                    pose.interpolated = pose.remote;
+                                    const auto ent = skinned_mesh_visual_target.all_entities[i];
+                                    if (reg.valid(ent) && reg.all_of<Luminumbra::Components::TransformComponent>(ent)) {
+                                        pose.rendered = true;
+                                        const auto& tf = reg.get<Luminumbra::Components::TransformComponent>(ent);
+                                        pose.positionXMm = static_cast<int>(
+                                            std::lround(static_cast<double>(tf.position.x) * 1000.0));
+                                        pose.positionYMm = static_cast<int>(
+                                            std::lround(static_cast<double>(tf.position.y) * 1000.0));
+                                        pose.positionZMm = static_cast<int>(
+                                            std::lround(static_cast<double>(tf.position.z) * 1000.0));
+                                    }
+                                    poses.push_back(pose);
+                                }
+                                const auto report = luminumbra::network::BuildNetworkRemoteAvatarRenderReport(
+                                    local_client_id,
+                                    poses,
+                                    clamp_to_u32(static_cast<std::size_t>(std::max(2, scenario_config.avatars))),
+                                    snapshot_count,
+                                    clamp_to_u32(std::min<std::size_t>(
+                                        skinned_mesh_visual_target.all_entities.size(),
+                                        render_pass_stats.skinned_draws)),
+                                    clamp_to_u32(render_pass_stats.skinned_draws),
+                                    clamp_to_u32(render_pass_stats.skinned_indices_drawn));
+                                remote_avatar_render_artifact_written =
+                                    luminumbra::network::WriteNetworkRemoteAvatarRenderArtifact(
+                                        (scenario_config.artifact_dir / "remote-avatar-render.json").string(),
+                                        report);
+                                if (!remote_avatar_render_artifact_written) {
+                                    scenario_failed = true;
+                                    scenario_failure_reason = "remote_avatar_render_artifact_failed";
+                                }
+                            }
+                        }
                         // T-I6 P3.1d video proof: when the avatar SHOWCASE row is up
                         // (avatars>=2), walk the avatars laterally and dump a frame
                         // sequence (motion/frame_%03d.ppm) for an ffmpeg clip. Gated on
@@ -4566,21 +4657,9 @@ int main(int argc, char* argv[]) {
                                         set_tf(e_animal, wildlife_animal, wildlife_flee_dir);
                                     }
                                 } else if (scenario_config.replicated) {
-                                    // T-I6 P3.3: NETWORK-DRIVEN. Drive each render avatar's
-                                    // transform from the replication pipeline (server walk ->
-                                    // snapshot -> client -> interpolate), not a direct walk.
-                                    if (!replicated_demo_setup) {
-                                        replicated_demo.Setup(skinned_mesh_visual_target.spawn_positions);
-                                        replicated_demo_setup = true;
-                                    }
-                                    const auto positions = replicated_demo.Update(0.05, world_sys);
-                                    for (std::size_t i = 0;
-                                         i < skinned_mesh_visual_target.all_entities.size() && i < positions.size(); ++i) {
-                                        const auto ent = skinned_mesh_visual_target.all_entities[i];
-                                        if (reg.valid(ent) && reg.all_of<Luminumbra::Components::TransformComponent>(ent)) {
-                                            reg.get<Luminumbra::Components::TransformComponent>(ent).position = positions[i];
-                                        }
-                                    }
+                                    // Network-driven poses are applied before render so
+                                    // this readback observes the frame drawn from the
+                                    // replicated snapshot/interpolation path.
                                 } else {
                                 // Walk every avatar gently TOWARD the camera (+Z) so the row
                                 // strolls forward and stays framed (idle clip still plays).
@@ -4721,8 +4800,21 @@ int main(int argc, char* argv[]) {
                                 std::chrono::duration_cast<std::chrono::seconds>(now - scenario_play_started_at).count();
                             if (elapsed_play_seconds >= scenario_config.timed_run_seconds && scenario_frame_count > 0) {
                                 last_readiness_report = EvaluateReadiness(scenario_config, gameSession.get());
-                                runtime_state_recorder.capture("timed_run_complete", &jobSystem, gameSession.get(), &renderPipeline, scenario_frame_count, last_readiness_report);
-                                scenario_timed_run_complete = true;
+                                if (scenario_config.skinned_mesh_visual_smoke() && scenario_config.replicated &&
+                                    scenario_config.avatars >= 2 && !remote_avatar_render_artifact_written) {
+                                    scenario_failed = true;
+                                    scenario_failure_reason = "remote_avatar_render_artifact_missing";
+                                    runtime_state_recorder.capture(
+                                        scenario_failure_reason,
+                                        &jobSystem,
+                                        gameSession.get(),
+                                        &renderPipeline,
+                                        scenario_frame_count,
+                                        last_readiness_report);
+                                } else {
+                                    runtime_state_recorder.capture("timed_run_complete", &jobSystem, gameSession.get(), &renderPipeline, scenario_frame_count, last_readiness_report);
+                                    scenario_timed_run_complete = true;
+                                }
                                 glfwSetWindowShouldClose(window, true);
                             }
                         }
