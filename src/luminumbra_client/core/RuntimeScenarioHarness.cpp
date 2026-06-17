@@ -195,6 +195,9 @@ RuntimeScenarioConfig ParseRuntimeScenarioConfig(int argc, char* argv[], const s
         try { v = std::stof(s); } catch (...) { v = 1.0f; }
         config.foliage_density_scale = (v > 0.0f && v <= 8.0f) ? v : 1.0f;
     }
+    // T-I6 P2b: avatar showcase row count (skinned_mesh_visual_smoke). Clamp to a
+    // sane max so a typo can't spawn thousands of rigs.
+    config.avatars = std::clamp(GetCommandLineIntOption(argc, argv, "--avatars", 0), 0, 32);
     config.readiness_timeout_seconds = GetCommandLineIntOption(argc, argv, "--readiness-timeout", config.readiness_timeout_seconds);
     config.horizon_radius = GetCommandLineIntOption(argc, argv, "--horizon-radius", config.horizon_radius);
     config.collision_radius = GetCommandLineIntOption(argc, argv, "--collision-radius", config.collision_radius);
@@ -6312,7 +6315,8 @@ bool IsSkinnedMeshLikePixel(unsigned char r, unsigned char g, unsigned char b) {
 
 SkinnedMeshVisualTarget SpawnSkinnedMeshVisualEntity(
     Luminumbra::world::GameSession* game_session,
-    const std::filesystem::path& artifact_dir) {
+    const std::filesystem::path& artifact_dir,
+    int avatar_count) {
     SkinnedMeshVisualTarget target;
     if (!game_session || !game_session->GetWorldSystem()) {
         target.failure_reason = "no_world_system";
@@ -6321,18 +6325,24 @@ SkinnedMeshVisualTarget SpawnSkinnedMeshVisualEntity(
     auto* world_system = game_session->GetWorldSystem();
     const Luminumbra::Vec3 spawn = game_session->GetMetadata().spawnPoint;
 
+    // T-I6 P2b: avatar SHOWCASE row. count==1 -> the unchanged single-rig gate
+    // framing (every term below reduces to the original at n==1). count>=2 ->
+    // a centered row of rigs ("multiple players beside each other") with the
+    // camera pulled back + raised to frame the whole spread.
+    const int n = std::max(1, avatar_count);
+    const float kRowSpacingM = 2.2f;
     const float mesh_x = spawn.x + 5.0f;
     const float mesh_z = spawn.z + 3.0f;
     const float mesh_y = world_system->GetTerrainHeightAt(mesh_x, mesh_z);
     target.mesh_position = {mesh_x, mesh_y, mesh_z};
     target.focus = target.mesh_position + Luminumbra::Vec3(0.4f, 1.9f, 0.0f);
 
-    // Camera: fixed framing ~9 m south of the rig, slightly above the arm
-    // hinge, lifted clear of the local terrain.
+    // Camera: fixed framing ~9 m south of the row centre, slightly above the arm
+    // hinge, lifted clear of the local terrain; widened for a multi-rig row.
     const float cam_x = mesh_x;
-    const float cam_z = mesh_z + 9.0f;
+    const float cam_z = mesh_z + 9.0f + static_cast<float>(n - 1) * 2.0f;
     const float cam_terrain = world_system->GetTerrainHeightAt(cam_x, cam_z);
-    const float cam_y = std::max(mesh_y + 2.6f, cam_terrain + 1.7f);
+    const float cam_y = std::max(mesh_y + 2.6f + static_cast<float>(n - 1) * 0.5f, cam_terrain + 1.7f);
     target.camera_position = {cam_x, cam_y, cam_z};
 
     std::error_code ec;
@@ -6359,23 +6369,34 @@ SkinnedMeshVisualTarget SpawnSkinnedMeshVisualEntity(
     g_skinned_test_clip = anim::BuildClip(clip_asset);
 
     entt::registry& registry = game_session->GetRegistry();
-    const auto entity = registry.create();
-    auto& transform = registry.emplace<Luminumbra::Components::TransformComponent>(entity);
-    transform.position = target.mesh_position;
-    auto& mesh_component = registry.emplace<Luminumbra::Components::SkinnedMeshComponent>(entity);
-    mesh_component.meshPath = target.mesh_path;
-    mesh_component.materialId = 4; // Sand: warm and bright against grass/sky
-    auto& player = registry.emplace<anim::AnimationPlayerComponent>(entity);
-    player.skeleton = &g_skinned_test_skeleton;
-    player.clip = &g_skinned_test_clip;
-    player.time = 0.0;
-    player.looping = true;
+    // Spawn the row centred on mesh_x along X. Material ids cycle for visible
+    // per-player distinction; the animation phase is staggered so the rigs are
+    // not in lock-step (reads as separate players). At n==1 this is byte-identical
+    // to the original single rig (offset 0, material 4, phase 0).
+    const std::uint32_t kRowMaterials[5] = {4u, 2u, 1u, 3u, 0u};
+    for (int i = 0; i < n; ++i) {
+        const float rx = mesh_x + (static_cast<float>(i) - static_cast<float>(n - 1) * 0.5f) * kRowSpacingM;
+        const float ry = world_system->GetTerrainHeightAt(rx, mesh_z);
+        const auto entity = registry.create();
+        auto& transform = registry.emplace<Luminumbra::Components::TransformComponent>(entity);
+        transform.position = Luminumbra::Vec3(rx, ry, mesh_z);
+        auto& mesh_component = registry.emplace<Luminumbra::Components::SkinnedMeshComponent>(entity);
+        mesh_component.meshPath = target.mesh_path;
+        mesh_component.materialId = kRowMaterials[i % 5];
+        auto& player = registry.emplace<anim::AnimationPlayerComponent>(entity);
+        player.skeleton = &g_skinned_test_skeleton;
+        player.clip = &g_skinned_test_clip;
+        player.time = static_cast<double>(i) * 0.3; // staggered phase
+        player.looping = true;
+        if (i == 0) {
+            target.entity = entity; // primary rig (the gate ROI tracks this one)
+        }
+    }
 
-    target.entity = entity;
     target.spawned = true;
     LUMINUMBRA_CORE_INFO(
-        "skinned_mesh_visual_smoke: spawned test rig at ({:.1f}, {:.1f}, {:.1f})",
-        target.mesh_position.x, target.mesh_position.y, target.mesh_position.z);
+        "skinned_mesh_visual_smoke: spawned {} test rig(s) centred at ({:.1f}, {:.1f}, {:.1f})",
+        n, target.mesh_position.x, target.mesh_position.y, target.mesh_position.z);
     return target;
 }
 

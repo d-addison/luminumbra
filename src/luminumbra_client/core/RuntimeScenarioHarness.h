@@ -76,6 +76,10 @@ struct RuntimeScenarioConfig {
     // T-I6 #1b-lush: render-only foliage density multiplier for showcase/photo scenes
     // (--foliage-density-scale, default 1.0 = the biome-tracked default, gates untouched).
     float foliage_density_scale = 1.0f;
+    // T-I6 P2b: number of avatars to spawn in skinned_mesh_visual_smoke as a row of
+    // player placeholders (--avatars; 0/1 = the unchanged single-rig gate behavior,
+    // >=2 = a multiplayer SHOWCASE row with a widened camera). Visualization only.
+    int avatars = 0;
     int timed_run_seconds = 0;
     int readiness_timeout_seconds = 120;
     int horizon_radius = 12;
@@ -1294,7 +1298,8 @@ struct SkinnedMeshVisualTarget {
 
 SkinnedMeshVisualTarget SpawnSkinnedMeshVisualEntity(
     Luminumbra::world::GameSession* game_session,
-    const std::filesystem::path& artifact_dir);
+    const std::filesystem::path& artifact_dir,
+    int avatar_count = 1);
 
 void ApplySkinnedMeshVisualCamera(
     Luminumbra::Rendering::Camera* camera,
