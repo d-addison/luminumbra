@@ -96,6 +96,49 @@ struct NetworkMultiClientAcceptReport {
     std::vector<NetworkMultiClientAcceptCheck> checks;
 };
 
+struct NetworkRuntimeJoinLeaveEvent {
+    std::uint32_t tick = 0;
+    std::uint32_t clientId = 0;
+    std::string event;
+    bool hostContinued = false;
+};
+
+struct NetworkRuntimeJoinLeaveClient {
+    std::uint32_t clientId = 0;
+    std::uint16_t acceptPort = 0;
+    std::uint32_t joinedAtTick = 0;
+    std::uint32_t leftAtTick = 0;
+    std::uint32_t finalAckedSnapshotSeq = 0;
+};
+
+struct NetworkRuntimeJoinLeaveCheck {
+    std::string name;
+    bool passed = false;
+};
+
+struct NetworkRuntimeJoinLeaveReport {
+    std::string schema;
+    bool passed = false;
+    std::string source;
+    std::string header;
+    std::string portMappingApi;
+    std::string validationApi;
+    std::string artifactWriter;
+    std::string serverModeContract;
+    std::uint32_t expectedClientCount = 0;
+    std::uint32_t ticksExecuted = 0;
+    std::uint16_t basePort = 0;
+    bool emptyServerTicksBeforeJoin = false;
+    bool lateJoinAccepted = false;
+    bool leaveDoesNotStopHost = false;
+    bool hostRunsAfterLastLeave = false;
+    bool stablePlayerIds = false;
+    bool deterministicPortMapping = false;
+    std::vector<NetworkRuntimeJoinLeaveClient> clients;
+    std::vector<NetworkRuntimeJoinLeaveEvent> events;
+    std::vector<NetworkRuntimeJoinLeaveCheck> checks;
+};
+
 NetworkLoopbackConvergenceReport BuildNetworkLoopbackConvergenceFixture(
     const std::string& buildPreset = "debug");
 
@@ -128,5 +171,22 @@ bool WriteNetworkMultiClientAcceptArtifact(
     const std::string& path,
     std::uint32_t expectedClientCount = 2,
     std::uint16_t basePort = 27015);
+
+NetworkRuntimeJoinLeaveReport BuildNetworkRuntimeJoinLeaveFixture(
+    std::uint32_t expectedClientCount = 2,
+    std::uint16_t basePort = 27015,
+    std::uint32_t ticksExecuted = 12);
+
+std::string SerializeNetworkRuntimeJoinLeaveJson(
+    const NetworkRuntimeJoinLeaveReport& report);
+
+bool NetworkRuntimeJoinLeaveMeetsBaseline(
+    const NetworkRuntimeJoinLeaveReport& report);
+
+bool WriteNetworkRuntimeJoinLeaveArtifact(
+    const std::string& path,
+    std::uint32_t expectedClientCount = 2,
+    std::uint16_t basePort = 27015,
+    std::uint32_t ticksExecuted = 12);
 
 } // namespace luminumbra::network
