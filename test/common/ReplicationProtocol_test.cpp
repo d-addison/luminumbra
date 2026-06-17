@@ -107,4 +107,65 @@ TEST(ReplicationProtocol, QuantizationRoundTripsWithinTolerance) {
     }
 }
 
+// --- P3.0b: unreliable-delivery reliability layer ---
+
+SnapshotMsg MakeSnap(std::uint32_t seq, std::uint64_t tick) {
+    SnapshotMsg s;
+    s.snapshot_seq = seq;
+    s.server_tick = tick;
+    return s;
+}
+
+TEST(ReplicationReliability, SnapshotReceiverKeepsMostRecent) {
+    SnapshotReceiver rx;
+    EXPECT_FALSE(rx.has_snapshot());
+    EXPECT_TRUE(rx.Receive(MakeSnap(1, 100)));
+    EXPECT_TRUE(rx.Receive(MakeSnap(2, 130)));
+    EXPECT_EQ(rx.current().snapshot_seq, 2u);
+
+    // Out-of-order / late datagram (older seq) is discarded; current unchanged.
+    EXPECT_FALSE(rx.Receive(MakeSnap(1, 100)));
+    EXPECT_EQ(rx.current().snapshot_seq, 2u);
+    EXPECT_EQ(rx.current().server_tick, 130u);
+
+    // Duplicate of the current seq is also discarded.
+    EXPECT_FALSE(rx.Receive(MakeSnap(2, 130)));
+
+    // A genuinely newer datagram wins.
+    EXPECT_TRUE(rx.Receive(MakeSnap(5, 220)));
+    EXPECT_EQ(rx.current().snapshot_seq, 5u);
+}
+
+TEST(ReplicationReliability, AckReflectsNewestSnapshotAndUsercmd) {
+    SnapshotReceiver rx;
+    AckMsg none = rx.make_ack(0);
+    EXPECT_EQ(none.snapshot_seq, 0u); // nothing applied yet
+    rx.Receive(MakeSnap(7, 300));
+    AckMsg ack = rx.make_ack(295);
+    EXPECT_EQ(ack.snapshot_seq, 7u);
+    EXPECT_EQ(ack.usercmd_tick, 295u);
+}
+
+TEST(ReplicationReliability, UsercmdReceiverKeepsNewestTick) {
+    UsercmdReceiver rx;
+    UsercmdMsg a; a.tick = 10; a.move_x = 100;
+    UsercmdMsg b; b.tick = 12; b.move_x = 200;
+    EXPECT_TRUE(rx.Receive(a));
+    EXPECT_TRUE(rx.Receive(b));
+    EXPECT_EQ(rx.latest().tick, 12u);
+    // Reordered older command discarded.
+    EXPECT_FALSE(rx.Receive(a));
+    EXPECT_EQ(rx.latest().move_x, 200);
+}
+
+TEST(ReplicationReliability, AckTrackingIsMonotonic) {
+    UsercmdReceiver rx;
+    rx.ApplyAck(AckMsg{5, 0});
+    EXPECT_EQ(rx.acked_snapshot_seq(), 5u);
+    rx.ApplyAck(AckMsg{3, 0}); // stale ack must not lower it
+    EXPECT_EQ(rx.acked_snapshot_seq(), 5u);
+    rx.ApplyAck(AckMsg{9, 0});
+    EXPECT_EQ(rx.acked_snapshot_seq(), 9u);
+}
+
 } // namespace
