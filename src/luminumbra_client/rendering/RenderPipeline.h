@@ -918,9 +918,14 @@ private:
     int m_aetherFieldExtent = 0;
     bool m_aetherFieldActive = false;
     size_t m_terrain_texture_fallback_layers = 0;
-    // Resolution the terrain albedo/normal arrays are allocated at (256 this
-    // iteration; the committed .ltex plates are 256x256, design §10 budget).
-    static constexpr int kTerrainTextureResolution = 256;
+    // Resolution the terrain albedo/normal arrays are allocated at. T-I6: raised
+    // 256 -> 1024. The repo already ships full AmbientCG 2K CC0 PBR sets per material
+    // (Rock028/Ground048/Grass003/Ground087/Gravel040) but the runtime had been
+    // loading 256px .ltex plates that threw away the near-ground micro-detail the
+    // BF4/BF1 fidelity floor wants. The 1024 .ltex are regenerated from the 2K Color/
+    // NormalGL PNGs (16x the texels). VRAM: 1024^2 x 5 layers x 4 B x 2 arrays = 42 MB
+    // (trivial on the 16 GB RTX 5070 Ti target).
+    static constexpr int kTerrainTextureResolution = 1024;
 
     // Emissive intensity LUT scale (T-I4-9). The RGBA8 material LUT stores
     // emissive_intensity normalized by this ceiling; the lighting pass rescales.

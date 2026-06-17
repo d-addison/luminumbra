@@ -2609,11 +2609,11 @@ void RenderPipeline::init_terrain_textures() {
         const char* normal;
     };
     const std::array<TerrainLayerAssets, 5> assets = {{
-        {"data/textures/terrain/rock/stone_albedo_256.ltex",        "data/textures/terrain/rock/stone_normal_256.ltex"},
-        {"data/textures/terrain/soil/soil_albedo_256.ltex",         "data/textures/terrain/soil/soil_normal_256.ltex"},
-        {"data/textures/terrain/grass/grass_albedo_256.ltex",       "data/textures/terrain/grass/grass_normal_256.ltex"},
-        {"data/textures/terrain/sand/sand_albedo_256.ltex",         "data/textures/terrain/sand/sand_normal_256.ltex"},
-        {"data/textures/terrain/deepslate/deepslate_albedo_256.ltex","data/textures/terrain/deepslate/deepslate_normal_256.ltex"},
+        {"data/textures/terrain/rock/rock_albedo_1024.ltex",            "data/textures/terrain/rock/rock_normal_1024.ltex"},
+        {"data/textures/terrain/soil/soil_albedo_1024.ltex",            "data/textures/terrain/soil/soil_normal_1024.ltex"},
+        {"data/textures/terrain/grass/grass_albedo_1024.ltex",          "data/textures/terrain/grass/grass_normal_1024.ltex"},
+        {"data/textures/terrain/sand/sand_albedo_1024.ltex",            "data/textures/terrain/sand/sand_normal_1024.ltex"},
+        {"data/textures/terrain/deepslate/deepslate_albedo_1024.ltex",  "data/textures/terrain/deepslate/deepslate_normal_1024.ltex"},
     }};
 
     const int res = kTerrainTextureResolution;
@@ -2671,7 +2671,7 @@ void RenderPipeline::init_terrain_textures() {
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 8); // 256 -> 1 is 9 levels
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 10); // 1024 -> 1 is 11 levels
     glGenerateMipmap(GL_TEXTURE_2D_ARRAY); // build full mip chain from level 0
 
     // --- Normal-map array (linear RGBA8, tangent space) ---
@@ -2687,7 +2687,7 @@ void RenderPipeline::init_terrain_textures() {
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 8);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 10);
     glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
     glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
 
@@ -2730,7 +2730,7 @@ void RenderPipeline::init_skinned_texture_array() {
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 8);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 10);
     glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
     glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
 
