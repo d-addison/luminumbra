@@ -207,6 +207,15 @@ private:
     float m_sway_speed = 1.6f;
     float m_fade_start_m = 96.0f;
     float m_fade_end_m = 160.0f;
+
+    // T-I6 scatter cache: rebuild_instances is called EVERY frame, but the instance set
+    // only changes when the visible chunk-set, the camera chunk (the coarse per-chunk
+    // fade cull), or the wind changes. Skip the per-frame CPU rebuild + GPU upload when
+    // the signature is unchanged — the ring buffer + frame_instance_count from the last
+    // build are reused (execute() redraws the same VBO). This removes the per-frame CPU
+    // cost that capped scatter density. Determinism-neutral (render-only).
+    std::uint64_t m_last_scatter_sig = 0;
+    bool m_scatter_built = false;
 };
 
 } // namespace Luminumbra::Rendering

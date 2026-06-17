@@ -217,6 +217,41 @@ bool FoliagePass::load_scatter_set(const std::filesystem::path& json_path) {
 void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
                                     SurfaceQuery query, void* query_ctx,
                                     const glm::vec3& camera_pos) {
+    // Scatter cache (T-I6): the instance set is a pure function of the visible chunk-set,
+    // the camera chunk (the per-chunk fade cull), and the wind. It is independent of the
+    // frame otherwise (the sway WAVING is animated shader-side by u_time; aSway is just
+    // the wind vector). So fold those inputs into a signature and skip the rebuild when
+    // unchanged — most frames the camera has not crossed a ~16 m cell and no chunk
+    // streamed, so this elides the per-frame CPU rebuild that capped density. On a skip
+    // the ring buffer + m_frame_instance_count from the last build are reused as-is.
+    {
+        auto cell = [](float v) { return static_cast<long long>(std::floor(v / 16.0f)); };
+        std::uint64_t sig = 1469598103934665603ull;
+        auto mix = [&sig](std::uint64_t v) { sig ^= v; sig *= 1099511628211ull; };
+        mix(m_enabled ? 0x9E3779B97F4A7C15ull : 0x1ull);
+        mix(static_cast<std::uint64_t>(cell(camera_pos.x)) * 73856093ull ^
+            (static_cast<std::uint64_t>(cell(camera_pos.z)) * 19349663ull));
+        mix(static_cast<std::uint64_t>(std::llround(m_wind_xz.x * 2.0f)) ^
+            (static_cast<std::uint64_t>(std::llround(m_wind_xz.y * 2.0f)) << 16));
+        mix(static_cast<std::uint64_t>(std::llround(m_fade_start_m)) ^
+            (static_cast<std::uint64_t>(std::llround(m_fade_end_m)) << 20));
+        std::uint64_t chunk_acc = chunks.size();
+        for (const ChunkScatter& c : chunks) {
+            const std::uint64_t ch =
+                (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.chunk_xz.x)) * 73856093ull) ^
+                (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.chunk_xz.y)) * 19349663ull) ^
+                (static_cast<std::uint64_t>(c.biome_id) << 40) ^
+                (static_cast<std::uint64_t>(std::llround(c.density * 16.0f)) << 48);
+            chunk_acc ^= splitmix64(ch);  // XOR fold -> order-independent over the chunk list
+        }
+        mix(chunk_acc);
+        if (m_scatter_built && sig == m_last_scatter_sig) {
+            return;  // unchanged -> reuse the last build (ring VBO + frame_instance_count)
+        }
+        m_last_scatter_sig = sig;
+        m_scatter_built = true;
+    }
+
     m_instances.clear();
     m_frame_instance_count = 0;
     if (!m_enabled || m_archetypes.empty() || query == nullptr) {
