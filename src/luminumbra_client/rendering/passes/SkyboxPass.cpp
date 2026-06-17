@@ -80,7 +80,7 @@ void SkyboxPass::reset_shader() {
     m_weather_shader.reset();
 }
 
-void SkyboxPass::execute(RenderPipeline& pipeline, const Camera& camera) {
+void SkyboxPass::execute(RenderPipeline& pipeline, const Camera& camera, bool draw_weather_overlay) {
     glDepthFunc(GL_LEQUAL);
     // The camera sits inside the skybox cube, so its upward faces wind
     // clockwise from the inside view and were backface-culled (black wedges
@@ -198,9 +198,21 @@ void SkyboxPass::execute(RenderPipeline& pipeline, const Camera& camera) {
     }
     glDepthFunc(GL_LESS);
 
-    if (pipeline.m_weather_type != WeatherType::None && pipeline.m_weather_intensity > 0.0f) {
+    if (draw_weather_overlay && pipeline.m_weather_type != WeatherType::None && pipeline.m_weather_intensity > 0.0f) {
         execute_weather_overlay(pipeline, camera, projection);
     }
+}
+
+void SkyboxPass::execute_weather_overlay(RenderPipeline& pipeline, const Camera& camera) {
+    if (pipeline.m_weather_type == WeatherType::None || pipeline.m_weather_intensity <= 0.0f) {
+        return;
+    }
+    const glm::mat4 projection = glm::perspective(
+        glm::radians(camera.Zoom),
+        static_cast<float>(pipeline.m_screen_width) / static_cast<float>(pipeline.m_screen_height),
+        camera.GetNearPlane(),
+        camera.GetFarPlane());
+    execute_weather_overlay(pipeline, camera, projection);
 }
 
 void SkyboxPass::execute_weather_overlay(RenderPipeline& pipeline, const Camera& camera, const glm::mat4& projection) {
