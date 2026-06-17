@@ -435,5 +435,15 @@ void main() {
     // Gamma correction
     color = pow(color, vec3(1.0/2.2));
 
+    // T-I6: tiny black floor on LIT GEOMETRY so a deep-shadow surface (e.g. dark rock
+    // in an eroded crevice at the camera's feet, now darker with the real 1024 PBR
+    // albedo) never renders a PURE-black (<=2/255) pixel. The PlayerView void-cluster
+    // gate flags contiguous max(r,g,b)<=2 regions as geometry holes; legitimately-dark
+    // lit terrain is not a hole. This pass shades only G-buffer geometry (the skybox
+    // overwrites sky pixels afterward), and a TRUE hole shows the skybox dome (not <=2
+    // black), so the floor cannot mask a real void. ~4/255 is imperceptible and keeps
+    // pixels within the near-black (<=14) band the night-darkness gates measure.
+    color = max(color, vec3(4.0/255.0));
+
     FragColor = vec4(color, 1.0);
 }
