@@ -1,5 +1,149 @@
 # Engine Frontier Handoff
 
+## Iteration 6 closeout update (2026-06-17) - this run, tip `36a36a7`
+
+Scope: latest local run after the previous handoff entry (`ed598eb`/`53d53d4`)
+plus verification commands run from the repo root with `C:\msys64\ucrt64\bin`
+prepended to `PATH`. This section supersedes the older "Next" lines below.
+
+### What Landed
+
+- **Wildlife cinematic fixture** (`816cc60`): archipelago shoreline placement for
+  the animal-to-water, arrow-scare, flee scene. Render/scenario only; no
+  determinism or `world_hash` impact.
+- **GOAP locomotion executor** (`1ac085d`) + **server NPC GOAP wiring**
+  (`94294b1`): `ActionPlanComponent` now drives deterministic seek/arrival
+  locomotion, and `--replicate --npcs 3 --arrow` verifies server NPCs approach a
+  water opportunity through Jolt CharacterVirtual physics. Commit evidence:
+  6 locomotion gtests, `frontier_gates 36/36`, full ctest **300/300** at
+  `94294b1`.
+- **Chunk-index AOI + prune-into-tick despawn** (`9acf4cf`): entity buckets are
+  built once by streaming chunk and snapshots are scoped by each client's avatar
+  chunk; disconnect despawns are folded into snapshots and repeated for 3
+  unreliable sends. Evidence at commit: 8 ReplicationEndpoint + 4
+  ReplicationLifecycle gtests, `common_tests 158/158`, `frontier_gates 36/36`,
+  `ReplicationSmoke` green, run==replay.
+- **ReplicationScale stress** (`21d7c19`): 64-player AOI gtest proves
+  per-connection bandwidth is bounded by local density, not total population.
+  Manual clustered scale evidence: 20p=585 B, 32p=861 B, 48p=1229 B per
+  snapshot per client (~94/138/197 kbps at 20 Hz); `common_tests 159/159`.
+- **Real over-the-wire TCP** (`cf36b71`) + **repeatable NetworkedReplication
+  gate** (`1587c41`): `--net-host` and `--net-join` run as separate processes
+  over Winsock TCP; the validator auto-launches both sides.
+- **UDP/Steam transport stack** (`6354eab`, `58a7908`, `b19b7aa`): old GNS
+  v1.4.1 protobuf path was rejected; Steamworks SDK 164 transport now compiles,
+  links, initializes Steam API, and exposes `--steam` behind
+  `LUMINUMBRA_ENABLE_STEAM`; standalone GNS master transport works locally over
+  real UDP behind `LUMINUMBRA_ENABLE_GNS`.
+- **Iteration-6 completion workflow and verify baseline** (`7ccf489`,
+  `36a36a7`): `.forge/workflows/iteration-6-completion.yaml` now encodes
+  spec->critique->plan->task->TDD/SDD/BDD->execute->closeout. `forge verify`
+  now runs with `--new-only` against `.forge/verify-baseline.json`.
+
+### Gate Evidence From This Update
+
+- `RenderHealth`: PASS (`validate-engine-frontier.ps1 -Mode RenderHealth`);
+  artifact `build/debug/test-artifacts/render/render-health-analysis.json`
+  reports `passed=true`, GL debug errors 0, shader health OK, and resource
+  registry empty after shutdown.
+- `WorldVisualSweep`: PASS on the current build at 3840x1600
+  (`timestamp_utc=2026-06-17T20:02:26Z`). Validator output: **48/48 cells
+  produced + non-black**, foliage present in 3 down-daytime cells, rain+lightning
+  in 24 storm cells, clouds in 4 up-storm cells, water in 6 water-aimed cells,
+  no clear-cell rain leak. Objective critique:
+  `build/debug/test-artifacts/runtime/world-visual-sweep/objective-critique.md`
+  reports **0 / 48 defect cells** and no objective or fidelity flags.
+- **Visual-debt BLOCK disposition:** every iter-6 visual-debt BLOCK is discharged
+  by the passing `WorldVisualSweep` above. Nothing is closed by relabeling,
+  reclassifying, or threshold weakening. The remaining Bezier blade / grass LOD /
+  far texture-grass items are follow-up quality work, not reclassified
+  `WorldVisualSweep` failures.
+- `HeadlessServerTick`: PASS (`validate-engine-frontier.ps1 -Mode
+  HeadlessServerTick`), 90 ticks x 2 runs, 4498 chunks/run, current canonical
+  `world_hash=f17726d44054d133 == world_hash_replay`.
+- `ReplicationSmoke`: PASS (`validate-engine-frontier.ps1 -Mode
+  ReplicationSmoke`), 4 avatars mirrored, seq=120, acked=120, max position error
+  0.0004355907440185547 m, controlled avatar +15.62 m, 3 GOAP NPCs approached
+  water by at least 7.385 m, arrow OK, 194 B/snapshot/client (~31.0 kbps at
+  20 Hz).
+- `NetworkedReplication`: PASS (`validate-engine-frontier.ps1 -Mode
+  NetworkedReplication`), separate host/client processes over TCP on port 27061,
+  60 ticks. Logs: `build/debug/test-artifacts/server/net-host.log` and
+  `build/debug/test-artifacts/server/net-join.log` show the joiner mirrored seq
+  60 / 4 entities and avatar id 1 at x=12.57 m.
+- `NetworkStateHash` + `NetworkLoopbackAuthorityGate`: PASS; artifacts
+  `build/debug/test-artifacts/network/network-state-hash.json` and
+  `build/debug/test-artifacts/network/network-loopback-convergence.json`.
+- `FarLodHorizon`: STILL RED on `mountains` in the current run. Artifact
+  `build/debug/test-artifacts/runtime/farlod-horizon-mountains/farlod-horizon-analysis.json`
+  reports `passed=false`, `regions_wanted=40`, `regions_resident=40`,
+  `regions_missing=0`, but `max_far_attributable_sliver_px=758` vs threshold
+  142 and `max_sky_sliver_px=762` vs threshold 569.
+- `forge verify --new-only --validation-policy warn --testing-policy warn`:
+  exit 0 / WARN. Baseline suppresses 155 known findings; 9 warning findings
+  remain for `type: code` values in `.forge/tasks/iter6-completion/dispatch.json`.
+
+### world_hash Transitions
+
+- Current canonical lane is still **`f17726d44054d133`**. Fresh
+  `HeadlessServerTick` confirms replay equality and matching sub-hashes:
+  `aether=2d459164188392ca`, `entities=5735a5094c1e92a8`,
+  `mesh=812c3bb1c19b127a`, `terrain=9e1b9316d5eeca32`,
+  `water=ed4265f8b090adf7`, `wind=61e223488b8ed5db`.
+- Iteration chain remains: `2fa007951a21e140` (i4) -> `0eac465289e7c88b`
+  (wind) -> `0857e683b4b8c47e` (weather) -> `d950a6afc12a5cdc` (strike
+  schedule) -> **`f17726d44054d133`** (`3b1ce63`, Aether append-only bump).
+- This run did **not** introduce a new default-lane `world_hash` transition.
+  GOAP/NPC, AOI/despawn, TCP, GNS, Steam, workflow, and verification-baseline
+  commits are transport, render, AI-fixture, or tooling side effects only.
+- Preset-local terrain evidence remains as previously recorded: archipelago
+  height hash `0x940d621a2e3c0436 -> 0xf26e830fb364b045` when gentle hydro was
+  enabled (`7a2104c`); default canonical `world_hash` stayed `f17726d44054d133`.
+
+### Remaining / Deferred
+
+- **Steam over-the-wire validation:** deferred by hardware/account constraint.
+  Steamworks direct-IP transport builds/links/inits and local TCP + standalone GNS
+  UDP prove the replication seam. Same-PC/same-account Steam connection is not a
+  valid validation lane. Required next proof: two machines or two Steam accounts,
+  Steam-enabled build, AppID 480 or real app id, host/join over Steam P2P/SDR or
+  direct-IP Steam socket, and artifact showing replicated snapshots/usercmds/acks
+  over Steam.
+- **Steam lobby/P2P/SDR layer:** spec exists in
+  `.forge/specs/iter6/multiplayer-steam-p2p-lobby-and-sdr.md`; lobby
+  create/list/join/invite/leave, identity binding, admission red-team, and
+  dedicated SDR auth ticket flow remain unimplemented.
+- **Runtime N-client server:** common-layer scale/AOI is tested, but live
+  `--net-host`/`--net-join`, GNS, and Steam host paths still run as one-peer
+  sessions. Remaining gate: one persistent server with N live clients, stable
+  client ids, per-client snapshots, bounded inbound pump, disconnect handling,
+  and per-anchor streaming telemetry.
+- **Runtime join/leave + remote render integration:** lifecycle unit coverage
+  exists, but persistent server late-join/leave and a real client app rendering
+  remote avatars from live snapshots still need integration gates. The older
+  `NetworkedSession` gate is stale/lockstep-era and must be repaired, replaced,
+  or retired through project process.
+- **Closeout blockers:** full non-placeholder `ctest` still needs a completed
+  green run; `FarLodHorizon` mountains remains red as above; `forge verify`
+  warning cleanup should change the iter6 dispatch task type values away from
+  `code` or document that Forge's schema intentionally permits them.
+- **Parked SHIELD-RT far field:** remains dormant. Resume only with the recorded
+  shared `FarLodHeightProvider`, clipmap/band-update, parallel all-or-nothing
+  build, and live visual/perf validation plan.
+
+### Iteration 7 Inputs
+
+- **Project Capture / photography loop** remains the long-range i7 gameplay input
+  by owner priority: camera/lenses/DoF/shutter, capture scoring, Codex, and
+  usable game loop, after engine closeout blockers are resolved.
+- **Networking carry-in:** two-machine Steam validation, Steam lobby/P2P/SDR,
+  live N-client TCP/GNS server, runtime join/leave, and remote-avatar client
+  render gate.
+- **Engine carry-in:** fix `FarLodHorizon` mountains, complete full ctest and
+  stale-gate cleanup, decide whether SHIELD-RT far field is worth resuming under
+  the parked plan, and keep all visual changes locked behind `WorldVisualSweep`
+  plus targeted render gates.
+
 ## Iteration 6 (cont., 2026-06-17) — #5 multiplayer: pivot + research + P0/P1 (tip `ee598da`)
 
 Owner confirmed the authoritative-server pivot ("sounds good") + answered the sizing
