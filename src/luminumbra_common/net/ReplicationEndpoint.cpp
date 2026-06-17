@@ -1,5 +1,7 @@
 #include "ReplicationEndpoint.h"
 
+#include <cstdlib> // std::llabs
+
 namespace Luminumbra::Net {
 
 void ReplicationServer::AddClient(std::uint32_t client_id, ILockstepTransport* transport) {
@@ -15,13 +17,39 @@ void ReplicationServer::RemoveClient(std::uint32_t client_id) {
 void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
                                           const std::vector<ReplEntityState>& entities) {
     for (auto& [client_id, link] : m_clients) {
-        (void)client_id;
         if (!link.transport) continue;
         SnapshotMsg snap;
         snap.server_tick = server_tick;
         snap.snapshot_seq = link.next_snapshot_seq++;
         snap.acked_usercmd_tick = link.inbound.has_command() ? link.inbound.latest().tick : 0u;
-        snap.entities = entities;
+
+        // T-I6 P3.2: AOI scoping. With a radius set, scope this client's entity set
+        // to entities within `radius` of its OWN avatar (entity_id == client_id);
+        // the own avatar is always included. Box-cull before the squared compare to
+        // keep the int64 distance math overflow-safe at large world coordinates.
+        const ReplEntityState* center = nullptr;
+        if (m_aoi_radius_mm > 0) {
+            for (const ReplEntityState& e : entities) {
+                if (e.entity_id == client_id) { center = &e; break; }
+            }
+        }
+        if (center == nullptr) {
+            snap.entities = entities; // AOI disabled, or this client has no avatar yet
+        } else {
+            const std::int64_t r = m_aoi_radius_mm;
+            const std::int64_t r2 = r * r;
+            for (const ReplEntityState& e : entities) {
+                const bool is_self = e.entity_id == client_id;
+                const std::int64_t dx = static_cast<std::int64_t>(e.px_mm) - center->px_mm;
+                const std::int64_t dy = static_cast<std::int64_t>(e.py_mm) - center->py_mm;
+                const std::int64_t dz = static_cast<std::int64_t>(e.pz_mm) - center->pz_mm;
+                if (is_self ||
+                    (std::llabs(dx) <= r && std::llabs(dy) <= r && std::llabs(dz) <= r &&
+                     dx * dx + dy * dy + dz * dz <= r2)) {
+                    snap.entities.push_back(e);
+                }
+            }
+        }
         // State snapshots are UNRELIABLE: a dropped one is superseded by the next
         // (most-recent-wins). Over Steam this maps to k_nSteamNetworkingSend_Unreliable.
         link.transport->SendFrame(EncodeSnapshot(snap), FrameDelivery::Unreliable);

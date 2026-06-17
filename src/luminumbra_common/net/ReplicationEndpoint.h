@@ -36,11 +36,18 @@ public:
     void RemoveClient(std::uint32_t client_id);
     [[nodiscard]] std::size_t client_count() const { return m_clients.size(); }
 
-    // Builds ONE SnapshotMsg from the authoritative entity set and sends it to
-    // every connected client (each gets its own monotonically increasing seq).
-    // P3.1 sends the full set; P3.2 will scope `entities` per client (AOI) and
-    // P3.1b will delta against each client's acked seq. acked_usercmd_tick per
-    // client is taken from that client's newest received usercmd.
+    // T-I6 P3.2: area-of-interest radius (mm). When > 0, each client's snapshot is
+    // SCOPED to entities within this radius of THAT client's own avatar (the entity
+    // whose id == client_id), so a 20-player world does not send everyone to
+    // everyone (research mp-interest-management.md). 0 (default) = disabled = full
+    // set. The client's own avatar is ALWAYS included.
+    void SetAoiRadiusMm(std::int64_t radius_mm) { m_aoi_radius_mm = radius_mm; }
+    [[nodiscard]] std::int64_t aoi_radius_mm() const { return m_aoi_radius_mm; }
+
+    // Builds a SnapshotMsg from the authoritative entity set and sends it to every
+    // connected client (each its own monotonically increasing seq + acked_usercmd_
+    // tick). When AOI is enabled the per-client `entities` is filtered to that
+    // client's area of interest. (Delta-vs-acked compression is a later step.)
     void BroadcastSnapshot(std::uint64_t server_tick, const std::vector<ReplEntityState>& entities);
 
     // Drains all currently-available inbound frames from every client: Usercmd
@@ -58,6 +65,7 @@ private:
         std::uint32_t next_snapshot_seq = 1;
     };
     std::map<std::uint32_t, ClientLink> m_clients; // ordered -> deterministic broadcast order
+    std::int64_t m_aoi_radius_mm = 0;              // 0 = AOI disabled (full set)
 };
 
 class ReplicationClient {
