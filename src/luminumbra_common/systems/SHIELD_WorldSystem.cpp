@@ -1811,8 +1811,11 @@ void SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
 
     std::vector<GenerationCandidate> to_create;
     to_create.reserve(static_cast<std::size_t>((target_radius * 2 + 1) * (target_radius * 2 + 1)));
-    std::unordered_set<ChunkID> seen_candidate_ids;
-    seen_candidate_ids.reserve(to_create.capacity() * 2u);
+    // T-I6 P0: map ChunkID -> its index in to_create (was a plain seen-set). A chunk
+    // reached from multiple anchors is deduped AND its priority metrics are upgraded
+    // to the CLOSEST anchor's (see add_candidate) so per-anchor near-fields are fair.
+    std::unordered_map<ChunkID, std::size_t> candidate_index;
+    candidate_index.reserve(to_create.capacity() * 2u);
 
     auto add_candidate = [&](const IVec3& coords, bool surface, int ring_distance, int horizontal_dist2, int vertical_rank, const Vec3& anchor_pos) {
         // NOTE (T-I3-2): the active-chunk budget is no longer applied here.
@@ -1826,9 +1829,6 @@ void SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
         if (m_streaming_state.chunks.find(id) != m_streaming_state.chunks.end()) {
             return;
         }
-        if (!seen_candidate_ids.insert(id).second) {
-            return;
-        }
 
         // Generation intent (T-I3-1): chunks whose required meshing step is
         // coarse (> 1) generate surface-band data only - no interior SDF, no
@@ -1838,13 +1838,34 @@ void SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
         const int required_lod = get_required_lod_for_chunk(coords, chunk_center, anchor_pos);
         const int target_step = get_lod_step_for_level(required_lod);
 
+        // T-I6 P0 (per-anchor budget fairness): when a chunk is wanted by more than
+        // one anchor, keep the CLOSEST anchor's priority metrics (smallest ring /
+        // horizontal distance, finest LOD step) instead of the v1 first-anchor-wins.
+        // ring_distance/horizontal_distance_sq/target_step are all monotone in the
+        // distance to the SAME enumerating anchor, so the per-field min picks the
+        // closest anchor consistently. This makes each anchor's near-field sort to the
+        // front of to_create, so the post-sort active-chunk budget truncates only the
+        // shared far rim -- no near anchor can starve a far one under union pressure.
+        // RESIDENCY-ONLY: streaming sets which chunks are resident, never their content,
+        // so world_hash is unaffected; a single anchor never hits the merge path -> the
+        // single-anchor stream/hash stays byte-identical.
+        auto it = candidate_index.find(id);
+        if (it != candidate_index.end()) {
+            GenerationCandidate& existing = to_create[it->second];
+            existing.ring_distance = std::min(existing.ring_distance, ring_distance);
+            existing.horizontal_distance_sq = std::min(existing.horizontal_distance_sq, horizontal_dist2);
+            existing.vertical_rank = std::min(existing.vertical_rank, vertical_rank);
+            existing.target_step = std::min(existing.target_step, target_step);
+            return;
+        }
+        candidate_index.emplace(id, to_create.size());
         to_create.push_back({coords, surface, ring_distance, horizontal_dist2, vertical_rank, target_step});
     };
 
-    // UNION the wanted-set across every anchor. seen_candidate_ids (in add_candidate)
-    // dedupes a chunk reached from multiple anchors, so the first anchor to reach it
-    // wins its priority metrics; a chunk wanted by ANY anchor is enumerated. One anchor
-    // -> the historical single-disc scan, unchanged.
+    // UNION the wanted-set across every anchor. candidate_index (in add_candidate)
+    // dedupes a chunk reached from multiple anchors and upgrades it to the CLOSEST
+    // anchor's priority metrics (T-I6 P0); a chunk wanted by ANY anchor is enumerated.
+    // One anchor -> the historical single-disc scan, unchanged.
     for (std::size_t ai = 0; ai < anchors.size(); ++ai) {
       const IVec3 camera_chunk = camera_chunks[ai];
       const Vec3& anchor_pos = anchors[ai];
