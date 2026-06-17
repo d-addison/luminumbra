@@ -5,6 +5,7 @@
 #include <Jolt/Physics/Body/Body.h>
 #include <Jolt/Physics/Collision/BroadPhase/BroadPhaseLayer.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
+#include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
 #include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
@@ -304,6 +305,41 @@ glm::vec3 PhysicsSystem::get_player_position() const {
 bool PhysicsSystem::is_player_grounded() const {
     if (!m_player_character) return false;
     return m_player_character->GetGroundState() == JPH::CharacterBase::EGroundState::OnGround;
+}
+
+// --- T-I6 P6.3: dynamic rigid-body projectiles ---
+JPH::BodyID PhysicsSystem::create_dynamic_sphere(const glm::vec3& position, const glm::vec3& velocity, float radius) {
+    if (!m_body_interface) return JPH::BodyID();
+    JPH::BodyCreationSettings settings(
+        new JPH::SphereShape(radius),
+        JPH::RVec3(position.x, position.y, position.z),
+        JPH::Quat::sIdentity(),
+        JPH::EMotionType::Dynamic,
+        Layers::MOVING);
+    settings.mLinearVelocity = JPH::Vec3(velocity.x, velocity.y, velocity.z);
+    // A light, lively projectile: low gravity factor would float it; keep 1.0 so it
+    // arcs naturally and rests on the terrain. Continuous collision avoids tunnelling
+    // through thin geometry at speed.
+    settings.mMotionQuality = JPH::EMotionQuality::LinearCast;
+    const JPH::BodyID id = m_body_interface->CreateAndAddBody(settings, JPH::EActivation::Activate);
+    return id;
+}
+
+glm::vec3 PhysicsSystem::get_body_position(JPH::BodyID body) const {
+    if (!m_body_interface || body.IsInvalid()) return glm::vec3(0.0f);
+    const JPH::RVec3 p = m_body_interface->GetPosition(body);
+    return glm::vec3((float)p.GetX(), (float)p.GetY(), (float)p.GetZ());
+}
+
+bool PhysicsSystem::body_is_active(JPH::BodyID body) const {
+    if (!m_body_interface || body.IsInvalid()) return false;
+    return m_body_interface->IsActive(body);
+}
+
+void PhysicsSystem::destroy_body(JPH::BodyID body) {
+    if (!m_body_interface || body.IsInvalid()) return;
+    m_body_interface->RemoveBody(body);
+    m_body_interface->DestroyBody(body);
 }
 
 // --- T-I6 P2: server-authoritative avatar characters ---

@@ -39,6 +39,18 @@ public:
     void add_chunk_collision(Chunk& chunk);
     void remove_chunk_collision(ChunkID chunk_id);
 
+    // --- T-I6 P6.3: dynamic rigid bodies (projectiles e.g. an arrow) ---
+    // Spawns a small dynamic sphere with an initial velocity: it falls under the
+    // world gravity and COLLIDES with the chunk terrain (real ballistic physics,
+    // not a hand-integrated arc). Returns the Jolt BodyID handle. Read its position
+    // each tick (get_body_position), detect rest via body_is_active()==false, and
+    // destroy_body() to despawn. Server-authoritative (the headless server owns the
+    // Jolt world); the resulting transform replicates like any other entity.
+    JPH::BodyID create_dynamic_sphere(const glm::vec3& position, const glm::vec3& velocity, float radius);
+    glm::vec3 get_body_position(JPH::BodyID body) const;
+    bool body_is_active(JPH::BodyID body) const;
+    void destroy_body(JPH::BodyID body);
+
     // --- Player Controller ---
     void create_player_controller(const glm::vec3& initial_position);
     void update_player(const glm::vec3& wish_velocity, bool wants_to_jump, float jump_force, float delta_time);
