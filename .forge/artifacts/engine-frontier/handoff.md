@@ -96,10 +96,16 @@ for real cross-machine play.
   cleanly-disconnected clients (returns ids to despawn); join = AddClient mid-session → fresh-seq
   baseline; 2 gtests (survivors undisturbed, live client never pruned).
 
+- **P5 first cut — 20-player scale + measured bandwidth** (`d963455`): `ReplicationServer` records
+  last-broadcast bytes; `--replicate --avatars 20` → all 20 mirrored, input-driven, passed; MEASURED
+  409 B/snapshot/client (~65 kbps @20Hz, full-set worst case — AOI+delta drop it toward the
+  research's ~11-14 kbps). Owner's 20-player target validated in-process.
+
 **Next (real-networking + lifecycle phase):** `SteamNetworkingTransport` (ISteamNetworkingSockets /
 GameNetworkingSockets, owner/LAN-validated — memory `steam-multiplayer-target`); wire Prune into the
-server tick (despawn left players); state-baseline handoff on join; P5 scale to 20+; wire
-`LocalPlayerPredictor` to a controlled client avatar; chunk-index AOI.
+server tick (despawn left players); chunk-index AOI in the live loop; `LocalPlayerPredictor` to a
+controlled client avatar. The in-process stack (P0–P5 first cut) is complete + tested; real
+cross-machine play = the Steam transport drop-in.
 
 ## Iteration 6 (cont., 2026-06-17) — Render-debt wave #1–#4 + #5 spec (tip `3df4347`)
 
