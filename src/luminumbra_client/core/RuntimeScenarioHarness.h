@@ -73,6 +73,9 @@ struct RuntimeScenarioConfig {
     // to an IsolationConfig (core/IsolationConfig.h) where consumed.
     std::string isolation_layers;
     std::string isolation_backdrop;
+    // T-I6 #1b-lush: render-only foliage density multiplier for showcase/photo scenes
+    // (--foliage-density-scale, default 1.0 = the biome-tracked default, gates untouched).
+    float foliage_density_scale = 1.0f;
     int timed_run_seconds = 0;
     int readiness_timeout_seconds = 120;
     int horizon_radius = 12;

@@ -2394,6 +2394,11 @@ int main(int argc, char* argv[]) {
                             // ~ a few chunks). Pin the fade end well within the visible
                             // ring so the gate can assert "no foliage beyond the ring".
                             foliage->set_fade_distances(60.0f, 96.0f);
+                            // #1b-lush (render-only): per-preset showcase density.
+                            // Default 1.0 == biome-tracked density (byte-identical to
+                            // the FoliageInstancing-gated path); a preset can raise it
+                            // for near-continuous turf WITHOUT touching biome data.
+                            foliage->set_density_scale(scenario_config.foliage_density_scale);
                             foliage_scatter_loaded = true;
                         }
                         const double elapsed_play_seconds = std::chrono::duration<double>(
