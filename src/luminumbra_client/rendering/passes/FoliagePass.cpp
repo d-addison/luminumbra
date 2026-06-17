@@ -235,6 +235,7 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
             (static_cast<std::uint64_t>(std::llround(m_wind_xz.y * 2.0f)) << 16));
         mix(static_cast<std::uint64_t>(std::llround(m_fade_start_m)) ^
             (static_cast<std::uint64_t>(std::llround(m_fade_end_m)) << 20));
+        mix(static_cast<std::uint64_t>(std::llround(m_density_scale * 100.0f)));
         std::uint64_t chunk_acc = chunks.size();
         for (const ChunkScatter& c : chunks) {
             const std::uint64_t ch =
@@ -285,7 +286,8 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
         // is a deterministic hash draw; slope/moisture decide the emit.
         const std::size_t candidates = std::min<std::size_t>(
             kMaxCandidatesPerChunk,
-            static_cast<std::size_t>(std::lround(chunk.density * static_cast<float>(kMaxCandidatesPerChunk))));
+            static_cast<std::size_t>(std::lround(
+                chunk.density * static_cast<float>(kMaxCandidatesPerChunk) * m_density_scale)));
 
         for (uint32_t idx = 0; idx < candidates; ++idx) {
             if (m_instances.size() >= kMaxInstances) {
@@ -361,7 +363,7 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
             // T-I5b-DR-foliage-blocker (defect B3.2): raised the multiplier so the
             // near-field ground reads as CONTINUOUS cover (no bald patches) in the
             // down-pitched cells across all times of day.
-            const float accept = std::clamp(chunk.density * 2.4f * slope_factor * moisture_factor, 0.0f, 1.0f);
+            const float accept = std::clamp(chunk.density * 2.4f * m_density_scale * slope_factor * moisture_factor, 0.0f, 1.0f);
             if (hash_unit(h2) > accept) {
                 continue;
             }

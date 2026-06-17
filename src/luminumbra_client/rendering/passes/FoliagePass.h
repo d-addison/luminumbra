@@ -127,6 +127,15 @@ public:
     float fade_start_m() const { return m_fade_start_m; }
     float fade_end_m() const { return m_fade_end_m; }
 
+    // T-I6 #1b-lush: render-only density multiplier for SHOWCASE/photo scenes (owner:
+    // lush-per-preset, default untouched). Scales both the candidate count and the
+    // accept fraction, so a scene can reach near-continuous turf WITHOUT raising the
+    // biome's vegetation density (which folds into the biome content-hash / params
+    // marker — determinism-adjacent). Default 1.0 == byte-identical to the biome-tracked
+    // density; the FoliageInstancing gate (which runs the default) is unaffected.
+    void set_density_scale(float scale) { m_density_scale = scale > 0.0f ? scale : 1.0f; }
+    float density_scale() const { return m_density_scale; }
+
     // --- Per-frame wind bridge (one-way). The caller pushes the camera-region
     // wind vector sampled from the A2 wind field; per-instance sway is the wind
     // projected at the instance (cheap distance-attenuated copy). RENDER-ONLY. ---
@@ -219,6 +228,7 @@ private:
     // cost that capped scatter density. Determinism-neutral (render-only).
     std::uint64_t m_last_scatter_sig = 0;
     bool m_scatter_built = false;
+    float m_density_scale = 1.0f;  // #1b-lush: showcase density multiplier (1.0 = default)
 };
 
 } // namespace Luminumbra::Rendering
