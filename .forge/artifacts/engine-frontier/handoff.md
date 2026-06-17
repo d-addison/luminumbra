@@ -37,10 +37,17 @@ owner ("research then spec then plan, don't go in blind" — see memory `researc
   (Usercmd / Snapshot / Ack), quantized fixed-point, framed over the existing
   ILockstepTransport seam; 7 round-trip gtests. Engine-generic, world_hash-neutral.
 
-**Next:** P3.0b UDP `ILockstepTransport` (state over unreliable UDP + reliable event channel)
-reusing the P3.0 protocol → P3.1 server snapshot build + client apply over loopback → P3.2 AOI
-(chunk index) → P3.3 client prediction. Then P4 join/leave, P5 scale to 20+. (Dynamic-prop
-collision rides P3's replication channel.)
+- **P3.0b reliability layer** (`3ff8d38`): SnapshotReceiver (most-recent-wins) + UsercmdReceiver
+  (newest-wins + monotonic ack) — the unreliable-UDP semantics, header-inline + 11 gtests. Raw
+  winsock UDP socket deferred to owner-LAN validation (drop-in on the transport seam).
+- **P3.1 replication endpoints** (`89a88ed`): ReplicationServer/ReplicationClient — server builds
+  + broadcasts per-client SnapshotMsg from a supplied entity set, client applies most-recent-wins
+  + auto-acks; full bidirectional loop over LoopbackTransport, 3 gtests. Full ctest 280/280.
+
+**Next:** P3.1b wire ReplicationServer into ServerWorldRunner's tick (broadcast avatar
+ReplEntityState each tick) + a headless client-sim applying snapshots → P3.2 AOI (chunk index)
+→ P3.3 client prediction/interpolation. Then P4 join/leave, P5 scale to 20+. Deferred: raw UDP
+socket transport (owner-LAN). Dynamic-prop collision rides P3's replication channel.
 
 ## Iteration 6 (cont., 2026-06-17) — Render-debt wave #1–#4 + #5 spec (tip `3df4347`)
 
