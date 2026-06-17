@@ -29,6 +29,8 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/net/LockstepSession.cpp
     # T-I6 P3.0: authoritative-server state-replication wire protocol.
     ${CMAKE_CURRENT_LIST_DIR}/net/ReplicationProtocol.cpp
+    # T-I6 P3.1: server/client replication endpoints over ILockstepTransport.
+    ${CMAKE_CURRENT_LIST_DIR}/net/ReplicationEndpoint.cpp
 
     # Network
     ${CMAKE_CURRENT_LIST_DIR}/network/NetworkLoopbackAuthority.cpp

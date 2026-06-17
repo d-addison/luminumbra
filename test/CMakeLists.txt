@@ -112,6 +112,7 @@ add_executable(common_tests
     common/MultiAnchorStreaming_test.cpp
     common/PlayerAvatar_test.cpp
     common/ReplicationProtocol_test.cpp
+    common/ReplicationEndpoint_test.cpp
     common/LockstepSession_test.cpp
     common/ReplayStream_test.cpp
     common/ServerHeadlessHygiene_test.cpp
