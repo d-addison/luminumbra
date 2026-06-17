@@ -29,9 +29,18 @@ owner ("research then spec then plan, don't go in blind" — see memory `researc
   stepping (deterministic). `--smoke --avatars 3` → 3/3 grounded (y=35.41 settled), run==replay;
   default 0-avatar lane byte-identical (`f17726d44054d133`). Full ctest 266/266.
 
-**Next:** P3 (UDP transport + snapshot replication + AOI on the chunk index + client prediction —
-the weeks-scale netcode leg; dynamic-prop collision rides P3's replication channel), P4
-join/leave, P5 scale to 20+.
+- **P2b avatar showcase** (`63e2ed2` + `08af6da`): `skinned_mesh_visual_smoke --avatars N`
+  renders a centered ROW of N avatars for a "multiple players beside each other" screenshot —
+  the grovestrider character mesh + idle clip at N>=2, the test rig at N==1 (gate byte-identical,
+  verified passed). Two screenshots delivered (6 test-rigs, then 6 grovestriders).
+- **P3.0 replication protocol** (`f885fd6`): the authoritative-server wire messages
+  (Usercmd / Snapshot / Ack), quantized fixed-point, framed over the existing
+  ILockstepTransport seam; 7 round-trip gtests. Engine-generic, world_hash-neutral.
+
+**Next:** P3.0b UDP `ILockstepTransport` (state over unreliable UDP + reliable event channel)
+reusing the P3.0 protocol → P3.1 server snapshot build + client apply over loopback → P3.2 AOI
+(chunk index) → P3.3 client prediction. Then P4 join/leave, P5 scale to 20+. (Dynamic-prop
+collision rides P3's replication channel.)
 
 ## Iteration 6 (cont., 2026-06-17) — Render-debt wave #1–#4 + #5 spec (tip `3df4347`)
 
