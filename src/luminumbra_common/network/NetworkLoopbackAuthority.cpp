@@ -18,6 +18,11 @@ constexpr const char* kOrderContract = "tick_then_sequence_then_client_id";
 constexpr const char* kTransport = "in_process_loopback";
 constexpr const char* kSimulation = "authoritative_server_with_predicted_client";
 constexpr const char* kAuthoritativeClientId = "client-alpha";
+constexpr const char* kMultiClientSchema = "luminumbra.network.multi_client_accept.v1";
+constexpr const char* kMultiClientPortMappingApi = "TryNetworkMultiClientAcceptPortForClient";
+constexpr const char* kMultiClientValidationApi = "NetworkMultiClientAcceptMeetsBaseline";
+constexpr const char* kMultiClientArtifactWriter = "WriteNetworkMultiClientAcceptArtifact";
+constexpr const char* kMultiClientAcceptContract = "client_id_one_based_port_offset_tcp_and_udp";
 
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ull;
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
@@ -124,6 +129,26 @@ void WriteState(std::ostream& out, const NetworkLoopbackState& state, const std:
     out << indent << "\"position_y_mm\": " << state.positionYMm << "\n";
 }
 
+void WritePortArray(
+    std::ostream& out,
+    const std::string& key,
+    const std::vector<std::uint16_t>& ports,
+    const bool comma = true)
+{
+    out << "    \"" << key << "\": [";
+    for (std::size_t i = 0; i < ports.size(); ++i) {
+        if (i != 0u) {
+            out << ", ";
+        }
+        out << ports[i];
+    }
+    out << "]";
+    if (comma) {
+        out << ",";
+    }
+    out << "\n";
+}
+
 NetworkLoopbackState ApplyAcceptedInput(NetworkLoopbackState state, const NetworkLoopbackInput& input)
 {
     state.tick = input.tick;
@@ -172,6 +197,35 @@ std::vector<NetworkLoopbackCheck> BuildChecks(const NetworkLoopbackConvergenceRe
         {"network gate test is wired into test sources", true},
         {"gate artifact records authoritative checksum", !report.authoritativeChecksum.empty()},
     };
+}
+
+std::vector<NetworkMultiClientAcceptCheck> BuildMultiClientAcceptChecks(
+    const NetworkMultiClientAcceptReport& report)
+{
+    return {
+        {"multi-client accept API is declared", report.portMappingApi == kMultiClientPortMappingApi},
+        {"TCP accepts every expected client", report.tcpAcceptsAllExpectedClients},
+        {"UDP accepts every expected client", report.udpAcceptsAllExpectedClients},
+        {"player ids are unique and one-based", report.uniquePlayerIds},
+        {"TCP and UDP share deterministic client-id port mapping", report.deterministicPortMapping},
+    };
+}
+
+bool PortsMatchExpectedMapping(
+    const std::vector<std::uint16_t>& ports,
+    const std::uint16_t basePort,
+    const std::uint32_t expectedClientCount)
+{
+    if (ports.size() != expectedClientCount) {
+        return false;
+    }
+    for (std::uint32_t i = 0; i < expectedClientCount; ++i) {
+        const std::uint32_t expectedPort = static_cast<std::uint32_t>(basePort) + i;
+        if (expectedPort > 65535u || ports[i] != static_cast<std::uint16_t>(expectedPort)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 } // namespace
@@ -364,6 +418,152 @@ bool WriteNetworkLoopbackConvergenceArtifact(const std::string& path, const std:
     }
     out << SerializeNetworkLoopbackConvergenceJson(report);
     return out.good();
+}
+
+bool TryNetworkMultiClientAcceptPortForClient(
+    const std::uint16_t basePort,
+    const std::uint32_t clientId,
+    std::uint16_t& outPort)
+{
+    if (clientId == 0u) {
+        return false;
+    }
+    const std::uint32_t port = static_cast<std::uint32_t>(basePort) + clientId - 1u;
+    if (port > 65535u) {
+        return false;
+    }
+    outPort = static_cast<std::uint16_t>(port);
+    return true;
+}
+
+NetworkMultiClientAcceptReport BuildNetworkMultiClientAcceptFixture(
+    std::uint32_t expectedClientCount,
+    const std::uint16_t basePort)
+{
+    if (expectedClientCount < 2u) {
+        expectedClientCount = 2u;
+    }
+
+    NetworkMultiClientAcceptReport report;
+    report.schema = kMultiClientSchema;
+    report.source = kSourcePath;
+    report.header = kHeaderPath;
+    report.portMappingApi = kMultiClientPortMappingApi;
+    report.validationApi = kMultiClientValidationApi;
+    report.artifactWriter = kMultiClientArtifactWriter;
+    report.acceptContract = kMultiClientAcceptContract;
+    report.expectedClientCount = expectedClientCount;
+    report.firstClientId = 1u;
+    report.lastClientId = expectedClientCount;
+    report.basePort = basePort;
+
+    for (std::uint32_t clientId = report.firstClientId; clientId <= report.lastClientId; ++clientId) {
+        std::uint16_t port = 0;
+        if (TryNetworkMultiClientAcceptPortForClient(basePort, clientId, port)) {
+            report.tcpAcceptPorts.push_back(port);
+            report.udpAcceptPorts.push_back(port);
+        }
+    }
+
+    report.tcpAcceptsAllExpectedClients =
+        report.tcpAcceptPorts.size() == static_cast<std::size_t>(expectedClientCount);
+    report.udpAcceptsAllExpectedClients =
+        report.udpAcceptPorts.size() == static_cast<std::size_t>(expectedClientCount);
+    report.uniquePlayerIds = report.firstClientId == 1u && report.lastClientId == expectedClientCount;
+    report.deterministicPortMapping =
+        PortsMatchExpectedMapping(report.tcpAcceptPorts, basePort, expectedClientCount) &&
+        PortsMatchExpectedMapping(report.udpAcceptPorts, basePort, expectedClientCount);
+    report.checks = BuildMultiClientAcceptChecks(report);
+    report.passed = NetworkMultiClientAcceptMeetsBaseline(report);
+    return report;
+}
+
+std::string SerializeNetworkMultiClientAcceptJson(const NetworkMultiClientAcceptReport& report)
+{
+    std::ostringstream out;
+    out << "{\n";
+    out << "  \"schema\": \"" << EscapeJson(report.schema) << "\",\n";
+    out << "  \"passed\": " << BoolLiteral(report.passed) << ",\n";
+    out << "  \"network\": {\n";
+    WriteJsonString(out, "source", report.source);
+    WriteJsonString(out, "header", report.header);
+    WriteJsonString(out, "port_mapping_api", report.portMappingApi);
+    WriteJsonString(out, "validation_api", report.validationApi);
+    WriteJsonString(out, "artifact_writer", report.artifactWriter);
+    WriteJsonString(out, "accept_contract", report.acceptContract, false);
+    out << "  },\n";
+    out << "  \"accept\": {\n";
+    WriteJsonUInt(out, "expected_client_count", report.expectedClientCount);
+    WriteJsonUInt(out, "first_client_id", report.firstClientId);
+    WriteJsonUInt(out, "last_client_id", report.lastClientId);
+    WriteJsonUInt(out, "base_port", report.basePort);
+    WritePortArray(out, "tcp_accept_ports", report.tcpAcceptPorts);
+    WritePortArray(out, "udp_accept_ports", report.udpAcceptPorts);
+    WriteJsonBool(out, "tcp_accepts_all_expected_clients", report.tcpAcceptsAllExpectedClients);
+    WriteJsonBool(out, "udp_accepts_all_expected_clients", report.udpAcceptsAllExpectedClients);
+    WriteJsonBool(out, "unique_player_ids", report.uniquePlayerIds);
+    WriteJsonBool(out, "deterministic_port_mapping", report.deterministicPortMapping, false);
+    out << "  },\n";
+    out << "  \"checks\": [\n";
+    for (std::size_t i = 0; i < report.checks.size(); ++i) {
+        const auto& check = report.checks[i];
+        out << "    { \"name\": \"" << EscapeJson(check.name) << "\", \"passed\": " << BoolLiteral(check.passed) << " }";
+        if (i + 1 < report.checks.size()) {
+            out << ",";
+        }
+        out << "\n";
+    }
+    out << "  ]\n";
+    out << "}\n";
+    return out.str();
+}
+
+bool NetworkMultiClientAcceptMeetsBaseline(const NetworkMultiClientAcceptReport& report)
+{
+    if (report.schema != kMultiClientSchema ||
+        report.source != kSourcePath ||
+        report.header != kHeaderPath ||
+        report.portMappingApi != kMultiClientPortMappingApi ||
+        report.validationApi != kMultiClientValidationApi ||
+        report.artifactWriter != kMultiClientArtifactWriter ||
+        report.acceptContract != kMultiClientAcceptContract) {
+        return false;
+    }
+    if (report.expectedClientCount < 2u ||
+        report.firstClientId != 1u ||
+        report.lastClientId != report.expectedClientCount) {
+        return false;
+    }
+    if (!report.tcpAcceptsAllExpectedClients ||
+        !report.udpAcceptsAllExpectedClients ||
+        !report.uniquePlayerIds ||
+        !report.deterministicPortMapping) {
+        return false;
+    }
+    if (!PortsMatchExpectedMapping(report.tcpAcceptPorts, report.basePort, report.expectedClientCount) ||
+        !PortsMatchExpectedMapping(report.udpAcceptPorts, report.basePort, report.expectedClientCount)) {
+        return false;
+    }
+    for (const NetworkMultiClientAcceptCheck& check : report.checks) {
+        if (!check.passed) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool WriteNetworkMultiClientAcceptArtifact(
+    const std::string& path,
+    const std::uint32_t expectedClientCount,
+    const std::uint16_t basePort)
+{
+    const auto report = BuildNetworkMultiClientAcceptFixture(expectedClientCount, basePort);
+    std::ofstream out(path, std::ios::binary);
+    if (!out) {
+        return false;
+    }
+    out << SerializeNetworkMultiClientAcceptJson(report);
+    return out.good() && NetworkMultiClientAcceptMeetsBaseline(report);
 }
 
 } // namespace luminumbra::network
