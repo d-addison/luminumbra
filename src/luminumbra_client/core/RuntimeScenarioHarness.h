@@ -1299,6 +1299,7 @@ struct SkinnedMeshVisualTarget {
 SkinnedMeshVisualTarget SpawnSkinnedMeshVisualEntity(
     Luminumbra::world::GameSession* game_session,
     const std::filesystem::path& artifact_dir,
+    const std::filesystem::path& root_dir = {},
     int avatar_count = 1);
 
 void ApplySkinnedMeshVisualCamera(
