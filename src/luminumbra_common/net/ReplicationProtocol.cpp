@@ -113,6 +113,13 @@ std::vector<std::uint8_t> EncodeSnapshot(const SnapshotMsg& m) {
         PutI32(p, e.pz_mm);
         PutI16(p, e.yaw_mrad);
         PutU8(p, e.flags);
+        PutU16(p, e.type_id);
+        PutU8(p, e.anim_state);
+        PutU8(p, e.anim_phase);
+    }
+    PutU32(p, static_cast<std::uint32_t>(m.removed_ids.size()));
+    for (std::uint32_t id : m.removed_ids) {
+        PutU32(p, id);
     }
     return Frame(ReplMessageType::Snapshot, p);
 }
@@ -150,10 +157,20 @@ bool DecodeSnapshot(const std::vector<std::uint8_t>& frame, SnapshotMsg& out) {
     for (std::uint32_t i = 0; i < count; ++i) {
         ReplEntityState e;
         if (!c.GetU32(e.entity_id) || !c.GetI32(e.px_mm) || !c.GetI32(e.py_mm) ||
-            !c.GetI32(e.pz_mm) || !c.GetI16(e.yaw_mrad) || !c.GetU8(e.flags)) {
+            !c.GetI32(e.pz_mm) || !c.GetI16(e.yaw_mrad) || !c.GetU8(e.flags) ||
+            !c.GetU16(e.type_id) || !c.GetU8(e.anim_state) || !c.GetU8(e.anim_phase)) {
             return false;
         }
         out.entities.push_back(e);
+    }
+    std::uint32_t removed_count = 0;
+    if (!c.GetU32(removed_count)) return false;
+    out.removed_ids.clear();
+    out.removed_ids.reserve(removed_count);
+    for (std::uint32_t i = 0; i < removed_count; ++i) {
+        std::uint32_t id = 0;
+        if (!c.GetU32(id)) return false;
+        out.removed_ids.push_back(id);
     }
     return true;
 }

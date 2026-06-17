@@ -70,6 +70,31 @@ TEST(ReplicationProtocol, SnapshotMultiEntityRoundTrip) {
     }
 }
 
+TEST(ReplicationProtocol, EntityTypeAnimAndRemovedIdsRoundTrip) {
+    SnapshotMsg in;
+    in.server_tick = 77;
+    in.snapshot_seq = 5;
+    ReplEntityState player; player.entity_id = 1; player.type_id = 0; player.anim_state = 2; player.anim_phase = 128;
+    ReplEntityState deer;   deer.entity_id = 50; deer.type_id = 7; deer.px_mm = 4000; deer.anim_state = 1; deer.anim_phase = 200; deer.flags = 1;
+    ReplEntityState arrow;  arrow.entity_id = 900; arrow.type_id = 42; arrow.px_mm = -1234; arrow.yaw_mrad = 1570; arrow.flags = 2;
+    in.entities = {player, deer, arrow};
+    in.removed_ids = {901, 902, 17};
+
+    SnapshotMsg out;
+    ASSERT_TRUE(DecodeSnapshot(EncodeSnapshot(in), out));
+    ASSERT_EQ(out.entities.size(), 3u);
+    EXPECT_EQ(out.entities[1].type_id, 7u);
+    EXPECT_EQ(out.entities[1].anim_state, 1u);
+    EXPECT_EQ(out.entities[1].anim_phase, 200u);
+    EXPECT_EQ(out.entities[2].type_id, 42u);
+    EXPECT_EQ(out.entities[2].flags, 2u);
+    // Every field round-trips (operator== covers type/anim too).
+    for (std::size_t i = 0; i < in.entities.size(); ++i) {
+        EXPECT_EQ(out.entities[i], in.entities[i]) << "entity " << i;
+    }
+    EXPECT_EQ(out.removed_ids, (std::vector<std::uint32_t>{901, 902, 17}));
+}
+
 TEST(ReplicationProtocol, EmptySnapshotRoundTrips) {
     SnapshotMsg in;
     in.server_tick = 1;
