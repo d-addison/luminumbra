@@ -234,11 +234,11 @@ void FoliagePass::init_compute(const std::filesystem::path& root_path) {
                  static_cast<GLsizeiptr>(kMaxInstances * sizeof(InstanceRecord)),
                  nullptr, GL_DYNAMIC_DRAW);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_count_ssbo);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(GLuint), nullptr, GL_DYNAMIC_DRAW);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(GLuint) * 5, nullptr, GL_DYNAMIC_DRAW);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
     PassGl::label_gl_object(GL_BUFFER, m_blade_ssbo, "grass.blades.ssbo");
-    PassGl::label_gl_object(GL_BUFFER, m_count_ssbo, "grass.count.ssbo");
+    PassGl::label_gl_object(GL_BUFFER, m_count_ssbo, "grass.count_and_draw.ssbo");
 
     m_gpu_scatter = true;
     LUMINUMBRA_CORE_INFO("FoliagePass: GPU grass scatter active (compute + SSBO).");
@@ -572,6 +572,10 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
     const int chunk_count = static_cast<int>(chunk_params.size());
     if (chunk_count == 0) {
         // Nothing to scatter (all chunks culled). Empty build; gate sees 0.
+        const GLuint empty_draw[5] = {0u, 12u, 0u, 0u, 0u};
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_count_ssbo);
+        glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(empty_draw), empty_draw);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
         m_instances.clear();
         m_frame_instance_count = 0;
         m_gpu_active = true;
@@ -602,9 +606,9 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
     glBufferData(GL_SHADER_STORAGE_BUFFER,
                  static_cast<GLsizeiptr>(pal.size() * sizeof(float)),
                  pal.data(), GL_DYNAMIC_DRAW);
-    const GLuint zero = 0;
+    const GLuint draw_command[5] = {0u, 12u, 0u, 0u, 0u};
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_count_ssbo);
-    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(GLuint), &zero);
+    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(draw_command), draw_command);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
     // --- Dispatch. ---
@@ -628,14 +632,14 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
     const GLuint groups_x = static_cast<GLuint>((kMaxCandidatesPerChunk + 63) / 64);
     glDispatchCompute(groups_x, static_cast<GLuint>(chunk_count), 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT |
-                    GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT);
+                    GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | GL_COMMAND_BARRIER_BIT);
     glUseProgram(0);
 
     // --- Read the count + the generated blades back into m_instances (gate +
     // scatter-cache surface). Rebuild-only, so the sync stall is infrequent. ---
     GLuint count = 0;
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_count_ssbo);
-    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(GLuint), &count);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, sizeof(GLuint) * 2, sizeof(GLuint), &count);
     count = std::min<GLuint>(count, static_cast<GLuint>(kMaxInstances));
 
     m_instances.resize(count);
@@ -731,14 +735,21 @@ void FoliagePass::execute(RenderPipeline& pipeline, const Camera& camera) {
     (void)gbuffer; // depth already copied into the lighting FBO by the pipeline
 
     glBindVertexArray(m_vao);
-    // T-I6 #4: when the GPU scatter path built this frame, draw straight from the
-    // blade SSBO (no ring-VBO reupload -- the genuine CPU-ceiling break). The CPU
+    // T-I6 #4/T-I6-010: when the GPU scatter path built this frame, draw straight
+    // from the blade SSBO using the compute-written indirect command. The CPU
     // fallback path still uses the persistent-mapped ring buffer.
-    const u32 inst_buf = m_gpu_active ? m_blade_ssbo : m_instance_vbo[m_ring_cursor];
-    glBindVertexBuffer(0, inst_buf, 0, sizeof(InstanceRecord));
-    // T-I5b-DR-foliage-blocker: 12 verts/instance = two crossed quads (6 verts
-    // each) so a blade reads as upright cover from any angle, not a flat decal.
-    glDrawArraysInstanced(GL_TRIANGLES, 0, 12, static_cast<GLsizei>(m_frame_instance_count));
+    if (m_gpu_active && m_count_ssbo != 0) {
+        glBindVertexBuffer(0, m_blade_ssbo, 0, sizeof(InstanceRecord));
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, m_count_ssbo);
+        glDrawArraysIndirect(GL_TRIANGLES,
+                             reinterpret_cast<const void*>(kGrassDrawCommandOffsetBytes));
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
+    } else {
+        glBindVertexBuffer(0, m_instance_vbo[m_ring_cursor], 0, sizeof(InstanceRecord));
+        // T-I5b-DR-foliage-blocker: 12 verts/instance = two crossed quads (6 verts
+        // each) so a blade reads as upright cover from any angle, not a flat decal.
+        glDrawArraysInstanced(GL_TRIANGLES, 0, 12, static_cast<GLsizei>(m_frame_instance_count));
+    }
     pipeline.m_last_render_pass_stats.foliage_draws++;
     pipeline.m_last_render_pass_stats.foliage_instances_drawn += m_frame_instance_count;
     glBindVertexArray(0);
