@@ -44,10 +44,23 @@ owner ("research then spec then plan, don't go in blind" — see memory `researc
   + broadcasts per-client SnapshotMsg from a supplied entity set, client applies most-recent-wins
   + auto-acks; full bidirectional loop over LoopbackTransport, 3 gtests. Full ctest 280/280.
 
-**Next:** P3.1b wire ReplicationServer into ServerWorldRunner's tick (broadcast avatar
-ReplEntityState each tick) + a headless client-sim applying snapshots → P3.2 AOI (chunk index)
-→ P3.3 client prediction/interpolation. Then P4 join/leave, P5 scale to 20+. Deferred: raw UDP
-socket transport (owner-LAN). Dynamic-prop collision rides P3's replication channel.
+- **P3 Steam-readiness** (`7e32091`): `ILockstepTransport::SendFrame` gained a
+  `FrameDelivery {Unreliable, Reliable}` selector (default Reliable → lockstep unchanged);
+  replication tags Snapshot/Usercmd/Ack Unreliable. Research `mp-steam-networking.md`: production
+  transport = Steam `ISteamNetworkingSockets` (SDR relay at ship), dev/CI = GameNetworkingSockets
+  (same API, no Steam client); one `SteamNetworkingTransport : ILockstepTransport`, CMake-guarded.
+  Raw-winsock-UDP dropped (folded into GNS/Steam). See memory `steam-multiplayer-target`.
+- **P3.1b avatar→replication bridge** (`808e045`): `World::BuildAvatarReplStates` projects the
+  avatar list to the wire entity set; gtest proves server avatars → client over loopback (mm).
+- **P3.1c live replication smoke** (`84df966`): `--replicate` steps the REAL ServerWorldRunner,
+  broadcasts avatar states each tick to a loopback client + pumps acks; asserts the client mirrors
+  the server avatars (`--replicate --avatars 4 --ticks 60`: seq=60, acked=60, max_pos_err 0.0005m,
+  passed). End-to-end live replication with physics-stepped positions. Full ctest **281/281**.
+
+**Next:** register `--replicate` as a `ReplicationSmoke` gate in validate-engine-frontier.ps1
+(mirrors `--smoke`→HeadlessServerTick); P3.2 AOI (chunk-index scoping); P3.3 client
+prediction/interpolation + real per-player input driving avatars (the first VISIBLE multiplayer
+motion). Then the `SteamNetworkingTransport` impl (owner/LAN-validated), P4 join/leave, P5 20+.
 
 ## Iteration 6 (cont., 2026-06-17) — Render-debt wave #1–#4 + #5 spec (tip `3df4347`)
 
