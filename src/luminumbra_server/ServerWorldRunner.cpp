@@ -1,6 +1,8 @@
 #include "ServerWorldRunner.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <utility>
 
@@ -74,6 +76,19 @@ std::string ComposeWorldHash(const std::string& chunk_hash,
     return Persistence::StableChecksum(
         chunk_hash + "|wind:" + wind_hash + "|weather:" + weather_hash +
         "|aether:" + aether_hash);
+}
+
+std::pair<int, int> HorizontalChunkCoords(const Vec3& position) {
+    return {
+        static_cast<int>(std::floor(position.x / CHUNK_SIZE_X)),
+        static_cast<int>(std::floor(position.z / CHUNK_SIZE_Z))
+    };
+}
+
+bool HorizontalChunkHorizonCovers(const Vec3& center, const Vec3& candidate, int radius) {
+    const auto [cx, cz] = HorizontalChunkCoords(center);
+    const auto [tx, tz] = HorizontalChunkCoords(candidate);
+    return std::max(std::abs(tx - cx), std::abs(tz - cz)) <= std::max(0, radius);
 }
 
 } // namespace
@@ -186,6 +201,49 @@ bool ServerWorldRunner::Boot() {
         }
         LUMINUMBRA_CORE_INFO("ServerWorldRunner: spawned {} deterministic player avatar(s) (+physics characters).",
                              m_avatars.size());
+
+        // The spawn horizon is already fully ready. For avatars outside that
+        // collision neighbourhood, synchronously warm only a compact local
+        // collision horizon; the regular multi-anchor streamer expands the
+        // visual AOI over subsequent fixed ticks.
+        const int avatar_collision_radius = std::max(0, m_config.collision_radius);
+        const int avatar_surface_radius = std::max(
+            avatar_collision_radius,
+            std::min(m_config.surface_radius, std::max(avatar_collision_radius, 1)));
+        std::vector<Vec3> warmed_collision_anchors;
+        warmed_collision_anchors.reserve(m_avatars.size() + 1u);
+        warmed_collision_anchors.push_back(spawn_anchor);
+        std::size_t warmed_avatar_horizons = 0;
+        for (const World::PlayerAvatar& avatar : m_avatars) {
+            bool covered = false;
+            for (const Vec3& warmed_anchor : warmed_collision_anchors) {
+                if (HorizontalChunkHorizonCovers(warmed_anchor, avatar.position, avatar_collision_radius)) {
+                    covered = true;
+                    break;
+                }
+            }
+            if (covered) {
+                continue;
+            }
+
+            const bool avatar_ready = world_system->EnsureSurfaceReadyNear(
+                avatar.position, physics_system, avatar_surface_radius, avatar_collision_radius);
+            if (!avatar_ready) {
+                LUMINUMBRA_CORE_ERROR(
+                    "ServerWorldRunner: avatar collision horizon failed to become ready for player {}",
+                    avatar.player_id);
+                m_session.reset();
+                m_jobSystem.shutdown();
+                return false;
+            }
+            warmed_collision_anchors.push_back(avatar.position);
+            ++warmed_avatar_horizons;
+        }
+        if (warmed_avatar_horizons > 0u) {
+            LUMINUMBRA_CORE_INFO(
+                "ServerWorldRunner: warmed {} additional avatar collision horizon(s) (surface_radius={}, collision_radius={}).",
+                warmed_avatar_horizons, avatar_surface_radius, avatar_collision_radius);
+        }
     }
 
     m_booted = true;

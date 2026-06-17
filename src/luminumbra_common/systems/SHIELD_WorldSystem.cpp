@@ -33,6 +33,8 @@ constexpr size_t STREAMING_MAX_ACTIVE_CHUNKS_BUDGET = 8192;
 constexpr int STREAMING_ACTIVATION_INTERVAL_FRAMES = 4;
 constexpr int STREAMING_NEAR_VERTICAL_STACK_RADIUS = 4;
 constexpr int STREAMING_MID_VERTICAL_STACK_RADIUS = 12;
+constexpr int STREAMING_MULTI_ANCHOR_MIN_RADIUS = 6;
+constexpr std::size_t STREAMING_APPROX_CHUNKS_PER_SURFACE_COLUMN = 3;
 
 // T-I4-DR-server-streaming-race: SIMD over-read guard for FastNoise2's
 // GenPositionArray2D. That entry point's tail does an UNCONDITIONAL full-width
@@ -133,18 +135,31 @@ u64 horizontal_chunk_key(int x, int z) {
     return (static_cast<u64>(static_cast<u32>(x)) << 32u) | static_cast<u32>(z);
 }
 
-int streaming_radius_for_pressure(std::size_t active_chunks, std::size_t loading_chunks, std::size_t idle_chunks, bool generation_active, bool meshing_active) {
+int streaming_radius_for_pressure(std::size_t active_chunks, std::size_t loading_chunks, std::size_t idle_chunks, bool generation_active, bool meshing_active, std::size_t anchor_count) {
     const std::size_t pending_chunks = loading_chunks + idle_chunks;
+    int radius = RENDER_DISTANCE;
     if (active_chunks < 800u && !generation_active) {
-        return std::min(RENDER_DISTANCE, 24);
+        radius = std::min(radius, 24);
+    } else if (generation_active || meshing_active || pending_chunks > static_cast<std::size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME * 8)) {
+        radius = std::min(radius, 20);
+    } else if (active_chunks > STREAMING_MAX_ACTIVE_CHUNKS_BUDGET * 3u / 4u) {
+        radius = std::min(radius, 24);
     }
-    if (generation_active || meshing_active || pending_chunks > static_cast<std::size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME * 8)) {
-        return std::min(RENDER_DISTANCE, 20);
+
+    if (anchor_count > 1u) {
+        // Server-scale multi-anchor sessions cannot keep a full client render
+        // disc around every avatar. Bound each anchor's wanted radius by the
+        // global chunk budget so 20+ spread-out players get fair local AOIs
+        // instead of an unbounded union backlog.
+        constexpr double kPi = 3.14159265358979323846;
+        const double columns_per_anchor =
+            static_cast<double>(STREAMING_MAX_ACTIVE_CHUNKS_BUDGET) /
+            static_cast<double>(anchor_count * STREAMING_APPROX_CHUNKS_PER_SURFACE_COLUMN);
+        const int budget_radius = static_cast<int>(std::floor(std::sqrt(std::max(1.0, columns_per_anchor / kPi))));
+        radius = std::min(radius, std::clamp(budget_radius, STREAMING_MULTI_ANCHOR_MIN_RADIUS, RENDER_DISTANCE));
     }
-    if (active_chunks > STREAMING_MAX_ACTIVE_CHUNKS_BUDGET * 3u / 4u) {
-        return std::min(RENDER_DISTANCE, 24);
-    }
-    return RENDER_DISTANCE;
+
+    return radius;
 }
 
 void clear_streaming_state_counts(SHIELD_WorldSystem::StreamingBudgetFrameStats& stats) {
@@ -1800,14 +1815,23 @@ void SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
         m_last_streaming_budget_stats.loading_chunks,
         m_last_streaming_budget_stats.idle_chunks,
         has_active_job(m_streaming_state.generation_job_handle),
-        meshing_jobs_active()
+        meshing_jobs_active(),
+        anchors.size()
     );
 
     m_last_streaming_budget_stats.target_render_radius = target_radius;
     m_last_streaming_budget_stats.generation_job_active = has_active_job(m_streaming_state.generation_job_handle);
+    int generation_budget = MAX_CHUNKS_TO_PROCESS_PER_FRAME;
+    if (anchors.size() > 1u) {
+        generation_budget = static_cast<int>(std::min<std::size_t>(
+            static_cast<std::size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME) * 2u,
+            static_cast<std::size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME) +
+                static_cast<std::size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME) * (anchors.size() - 1u) / 8u
+        ));
+    }
     m_last_streaming_budget_stats.generation_budget = m_last_streaming_budget_stats.generation_job_active
         ? 0
-        : MAX_CHUNKS_TO_PROCESS_PER_FRAME;
+        : generation_budget;
 
     std::vector<GenerationCandidate> to_create;
     to_create.reserve(static_cast<std::size_t>((target_radius * 2 + 1) * (target_radius * 2 + 1)));
@@ -1984,7 +2008,7 @@ void SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
 
     // Add a small buffer (hysteresis) to the render distance to prevent rapid
     // loading/unloading of chunks at the very edge of the view distance.
-    const int UNLOAD_DISTANCE_XZ = RENDER_DISTANCE + 2;
+    const int UNLOAD_DISTANCE_XZ = target_radius + 2;
     const int UNLOAD_DISTANCE_UP = RENDER_DISTANCE_UP + 2;
     const int UNLOAD_DISTANCE_DOWN = RENDER_DISTANCE_DOWN + 2;
 
