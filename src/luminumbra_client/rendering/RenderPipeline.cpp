@@ -1155,10 +1155,10 @@ void RenderPipeline::refresh_render_pass_metadata() {
     add_pass("lighting", {"gbuffer.*", "shadow.depth_texture_array", "ssao.blur", "terrain_texture_array", "material_lut", "water.fallback.black"},
              {"lighting.color", "lighting.depth"}, m_screen_width, m_screen_height,
              "color+depth", "store lit scene", m_last_render_pass_stats.lighting_draws);
-    add_pass("water", {"lighting.opaque_color_copy", "gbuffer.depth", "water_meshes", "water.fallback.*"}, {"lighting.color"}, m_screen_width, m_screen_height,
-             "load lighting", "blend water into lighting", m_last_render_pass_stats.water_draws);
     add_pass("skybox", {"skybox_vertices"}, {"lighting.color"}, m_screen_width, m_screen_height,
              "load lighting", "store sky contribution", m_last_render_pass_stats.skybox_draws);
+    add_pass("water", {"lighting.opaque_color_copy", "gbuffer.depth", "water_meshes", "water.fallback.*"}, {"lighting.color"}, m_screen_width, m_screen_height,
+             "load sky+lighting", "blend water over sky+lighting", m_last_render_pass_stats.water_draws);
     add_pass("particles", {"particle_instances", "gbuffer.depth"}, {"lighting.color"}, m_screen_width, m_screen_height,
              "load lighting", "blend forward-lit particles", m_last_render_pass_stats.particle_draws);
     add_pass("final_blit", {"lighting.color"}, {"swapchain.color"}, m_screen_width, m_screen_height,
@@ -1733,13 +1733,23 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     end_gpu_pass_timer(GpuTimerPass::Lighting);
     glBindVertexArray(0);  // Unbind after lighting pass
 
-    // 5. SNAPSHOT THE OPAQUE SCENE, THEN COPY DEPTH TO LIGHTING FBO FOR WATER DEPTH TEST
-    m_lighting_pass->copy_lighting_color_to_opaque_texture(*this);
+    // 5. COPY DEPTH TO LIGHTING FBO SO SKYBOX AND WATER SHARE THE G-BUFFER OCCLUSION
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_gbuffer_pass->gbuffer().fbo_id);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
     glBlitFramebuffer(0, 0, m_screen_width, m_screen_height, 0, 0, m_screen_width, m_screen_height, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
-    
-    // 6. WATER PASS (Renders to m_lighting_fbo, reads from it for refraction)
+
+    // 6. SKYBOX PASS (Renders to m_lighting_fbo before transparent water blends)
+    glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
+    begin_gpu_pass_timer(GpuTimerPass::Skybox);
+    m_skybox_pass->execute(*this, camera, false);
+    end_gpu_pass_timer(GpuTimerPass::Skybox);
+    glBindVertexArray(0);  // Unbind after skybox pass
+
+    // 7. SNAPSHOT THE LIT OPAQUE+SKY SCENE, THEN WATER PASS BLENDS OVER IT.
+    // Water keeps depth writes off for transparency. Drawing the sky first prevents
+    // cloud/aurora sky pixels from overwriting water over far-depth/background
+    // samples while still giving refraction a stable pre-water color source.
+    m_lighting_pass->copy_lighting_color_to_opaque_texture(*this);
     glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
     if (m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Water)) {
         begin_gpu_pass_timer(GpuTimerPass::Water);
@@ -1748,11 +1758,11 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
         glBindVertexArray(0);  // Unbind after water pass
     }
 
-    // 7. SKYBOX PASS (Renders to m_lighting_fbo)
-    begin_gpu_pass_timer(GpuTimerPass::Skybox);
-    m_skybox_pass->execute(*this, camera);
-    end_gpu_pass_timer(GpuTimerPass::Skybox);
-    glBindVertexArray(0);  // Unbind after skybox pass
+    // 7a. WEATHER OVERLAY (owned by SkyboxPass): defer until after water so
+    // screen-space rain/fog remains a full-scene composite while sky/cloud/aurora
+    // still render before water.
+    m_skybox_pass->execute_weather_overlay(*this, camera);
+    glBindVertexArray(0);
 
     // 7b. AERIAL-PERSPECTIVE PASS (T-I5a-6): analytic distance-fog in-scatter
     // over the lit scene, wiring the dormant volumetric_lighting.frag. Reads the

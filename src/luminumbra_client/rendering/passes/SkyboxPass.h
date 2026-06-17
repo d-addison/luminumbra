@@ -14,8 +14,8 @@ class Shader;
 // skybox shader and cube geometry; the pipeline keeps orchestration order,
 // sun/moon state, stats collection, and the GPU timer issue/collect calls.
 // T-I2-17b: also owns the optional screen-space weather overlay
-// (weather_system.frag), drawn right after the skybox into the lighting FBO
-// when RenderPipeline weather state is active (default off: zero GL work).
+// (weather_system.frag). The pipeline can defer the overlay so transparent
+// water still blends over the sky before rain/fog composite over the full scene.
 class SkyboxPass {
 public:
     SkyboxPass();
@@ -26,7 +26,8 @@ public:
     void destroy_geometry();
     void reset_shader();
 
-    void execute(RenderPipeline& pipeline, const Camera& camera);
+    void execute(RenderPipeline& pipeline, const Camera& camera, bool draw_weather_overlay = true);
+    void execute_weather_overlay(RenderPipeline& pipeline, const Camera& camera);
 
     const std::unique_ptr<Shader>& shader() const { return m_skybox_shader; }
     const std::unique_ptr<Shader>& weather_shader() const { return m_weather_shader; }
