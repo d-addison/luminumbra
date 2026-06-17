@@ -23,6 +23,7 @@
 
 #include "../../../include/luminumbra/core/Types.h"
 #include "../ecs/EntitySnapshot.h"
+#include "../net/ReplicationProtocol.h"
 
 #include <cstdint>
 #include <vector>
@@ -49,5 +50,13 @@ Vec3 DeterministicAvatarSpawnOffset(std::uint32_t player_id);
 // the pre-P1 headless lane, so the default world_hash/entities sub-hash is
 // unchanged when no players are connected.
 Ecs::EntityRegistrySnapshot BuildAvatarEntitySnapshot(const std::vector<PlayerAvatar>& avatars);
+
+// T-I6 P3.1b: project avatars into the network replication entity set the
+// authoritative server broadcasts (ReplicationServer::BroadcastSnapshot). Each
+// avatar becomes one ReplEntityState (entity_id = player_id; position quantized
+// to mm, facing to milli-radians; flags bit0 = grounded). This is the bridge
+// from the SIM avatar list to the WIRE form -- the same positions that feed the
+// streaming anchors + the entities sub-hash, now sent to clients.
+std::vector<Net::ReplEntityState> BuildAvatarReplStates(const std::vector<PlayerAvatar>& avatars);
 
 } // namespace Luminumbra::World
