@@ -56,4 +56,20 @@ Ecs::EntityRegistrySnapshot BuildAvatarEntitySnapshot(const std::vector<PlayerAv
     return snapshot;
 }
 
+std::vector<Net::ReplEntityState> BuildAvatarReplStates(const std::vector<PlayerAvatar>& avatars) {
+    std::vector<Net::ReplEntityState> states;
+    states.reserve(avatars.size());
+    for (const PlayerAvatar& a : avatars) {
+        Net::ReplEntityState s;
+        s.entity_id = a.player_id;
+        s.px_mm = Net::ReplQuantPos(a.position.x);
+        s.py_mm = Net::ReplQuantPos(a.position.y);
+        s.pz_mm = Net::ReplQuantPos(a.position.z);
+        s.yaw_mrad = Net::ReplQuantAngle(a.facing);
+        s.flags = 0; // bit0 grounded reserved (PlayerAvatar has no grounded field yet)
+        states.push_back(s);
+    }
+    return states;
+}
+
 } // namespace Luminumbra::World

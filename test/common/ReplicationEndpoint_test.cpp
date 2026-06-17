@@ -11,6 +11,7 @@
 #include "luminumbra_common/net/ReplicationEndpoint.h"
 #include "luminumbra_common/net/LockstepSession.h"
 #include "luminumbra_common/net/ReplicationProtocol.h"
+#include "luminumbra_common/world/PlayerAvatar.h"
 
 namespace {
 
@@ -100,6 +101,41 @@ TEST(ReplicationEndpoint, MultiClientEachGetsOwnSeq) {
 
     server.RemoveClient(2);
     EXPECT_EQ(server.client_count(), 1u);
+}
+
+// P3.1b: the avatar -> replication-state bridge, end-to-end over the transport.
+// Server projects its authoritative PlayerAvatars to ReplEntityState, broadcasts;
+// the client receives + the dequantized positions match the server avatars.
+TEST(ReplicationEndpoint, ServerAvatarsReplicateToClient) {
+    using Luminumbra::World::PlayerAvatar;
+    using Luminumbra::World::BuildAvatarReplStates;
+
+    std::vector<PlayerAvatar> avatars(3);
+    avatars[0].player_id = 0; avatars[0].position = Luminumbra::Vec3(8.0f, 35.4f, 8.0f);  avatars[0].facing = 0.0f;
+    avatars[1].player_id = 1; avatars[1].position = Luminumbra::Vec3(11.1f, 35.6f, 7.2f); avatars[1].facing = 1.57f;
+    avatars[2].player_id = 2; avatars[2].position = Luminumbra::Vec3(6.4f, 35.2f, 10.8f); avatars[2].facing = -2.3f;
+
+    const std::vector<ReplEntityState> states = BuildAvatarReplStates(avatars);
+    ASSERT_EQ(states.size(), 3u);
+
+    auto pair = MakeLoopbackPair();
+    ReplicationServer server;
+    server.AddClient(1, pair.first.get());
+    ReplicationClient client(1, pair.second.get());
+
+    server.BroadcastSnapshot(/*server_tick=*/50, states);
+    client.PumpInbound();
+    ASSERT_TRUE(client.has_snapshot());
+    const SnapshotMsg& snap = client.snapshot();
+    ASSERT_EQ(snap.entities.size(), 3u);
+    for (std::size_t i = 0; i < avatars.size(); ++i) {
+        EXPECT_EQ(snap.entities[i].entity_id, avatars[i].player_id);
+        // Dequantized client position matches the server avatar within mm tolerance.
+        EXPECT_NEAR(ReplDequantPos(snap.entities[i].px_mm), avatars[i].position.x, 0.001f) << "avatar " << i;
+        EXPECT_NEAR(ReplDequantPos(snap.entities[i].py_mm), avatars[i].position.y, 0.001f) << "avatar " << i;
+        EXPECT_NEAR(ReplDequantPos(snap.entities[i].pz_mm), avatars[i].position.z, 0.001f) << "avatar " << i;
+        EXPECT_NEAR(ReplDequantAngle(snap.entities[i].yaw_mrad), avatars[i].facing, 0.001f) << "avatar " << i;
+    }
 }
 
 TEST(ReplicationEndpoint, StaleSnapshotDoesNotRegress) {
