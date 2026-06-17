@@ -1944,6 +1944,10 @@ int main(int argc, char* argv[]) {
     // T-I6 P3.1d video proof: showcase frame-sequence dump (avatars>=2 only).
     int showcase_video_frame = 0;
     double showcase_video_last_s = -1.0;
+    // T-I6 P3.3 integration: drives the showcase render avatars from the replication
+    // pipeline when --replicated is set (network-driven view).
+    Luminumbra::Client::ScenarioHarness::ReplicatedAvatarDemo replicated_demo;
+    bool replicated_demo_setup = false;
     SkinnedMeshVisualCapture skinned_mesh_capture_a;
     std::vector<unsigned char> skinned_mesh_pixels_a;
     // creature_slice_smoke (T-I3-18): data-driven creature game slice. The
@@ -4385,14 +4389,31 @@ int main(int argc, char* argv[]) {
                             const bool warmed_up = vnow >= kShowcaseWarmupS;
                             const bool interval_ok = showcase_video_last_s < 0.0 || (vnow - showcase_video_last_s) >= 0.05;
                             if (warmed_up && interval_ok) {
+                                auto& reg = gameSession->GetRegistry();
+                                auto* world_sys = gameSession->GetWorldSystem();
+                                if (scenario_config.replicated) {
+                                    // T-I6 P3.3: NETWORK-DRIVEN. Drive each render avatar's
+                                    // transform from the replication pipeline (server walk ->
+                                    // snapshot -> client -> interpolate), not a direct walk.
+                                    if (!replicated_demo_setup) {
+                                        replicated_demo.Setup(skinned_mesh_visual_target.spawn_positions);
+                                        replicated_demo_setup = true;
+                                    }
+                                    const auto positions = replicated_demo.Update(0.05, world_sys);
+                                    for (std::size_t i = 0;
+                                         i < skinned_mesh_visual_target.all_entities.size() && i < positions.size(); ++i) {
+                                        const auto ent = skinned_mesh_visual_target.all_entities[i];
+                                        if (reg.valid(ent) && reg.all_of<Luminumbra::Components::TransformComponent>(ent)) {
+                                            reg.get<Luminumbra::Components::TransformComponent>(ent).position = positions[i];
+                                        }
+                                    }
+                                } else {
                                 // Walk every avatar gently TOWARD the camera (+Z) so the row
                                 // strolls forward and stays framed (idle clip still plays).
                                 // These are render-only entities (no physics body), so RE-GROUND
                                 // Y to the terrain at each new XZ every step -- otherwise they
                                 // sink into / float over rising/falling ground (owner: avatars
                                 // sinking into the ground on the mountains preset).
-                                auto& reg = gameSession->GetRegistry();
-                                auto* world_sys = gameSession->GetWorldSystem();
                                 auto view = reg.view<Luminumbra::Components::TransformComponent,
                                                      Luminumbra::Components::SkinnedMeshComponent>();
                                 const float step_m = 0.05f; // ~1 m/s at 20 dumps/s
@@ -4400,6 +4421,7 @@ int main(int argc, char* argv[]) {
                                     auto& pos = view.get<Luminumbra::Components::TransformComponent>(e).position;
                                     pos.z += step_m;
                                     if (world_sys) pos.y = world_sys->GetTerrainHeightAt(pos.x, pos.z);
+                                }
                                 }
                                 int vw = 0, vh = 0;
                                 glfwGetFramebufferSize(window, &vw, &vh);
