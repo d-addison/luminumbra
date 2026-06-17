@@ -66,9 +66,15 @@ owner ("research then spec then plan, don't go in blind" — see memory `researc
 - **P3.2 AOI** (`4854234`): `ReplicationServer::SetAoiRadiusMm` scopes each client's snapshot to
   entities near its own avatar (own always included); 2 gtests. r==0 default = full set.
 
-**Next:** P3.3 client renders replicated snapshot positions (joins render + netcode = literally
-network-driven view); chunk-index AOI integration; register `--replicate` as a `ReplicationSmoke`
-gate. Then `SteamNetworkingTransport` (owner/LAN-validated), P4 join/leave, P5 scale to 20+.
+- **P3.3 (core) snapshot interpolation** (`7957423`): `SnapshotInterpolator` buffers snapshots +
+  Sample(tick_time) lerps remote entities render-behind (clamp, no extrapolation); 4 gtests.
+- **ReplicationSmoke gate** (`687d17a`): `--replicate` registered as a standalone engine-frontier
+  gate (asserts mirror + ack + input-moved-avatar); the P3 replication loop is now CI-locked.
+  Sinking-avatar video bug fixed (`7fa7a1c`, render-showcase re-grounding). Full ctest 287/287.
+
+**Next:** wire `SnapshotInterpolator` into a connected CLIENT's render (the literally-network-
+driven view) + local-player prediction/reconciliation; chunk-index AOI integration. Then
+`SteamNetworkingTransport` (owner/LAN-validated), P4 join/leave, P5 scale to 20+.
 
 ## Iteration 6 (cont., 2026-06-17) — Render-debt wave #1–#4 + #5 spec (tip `3df4347`)
 
