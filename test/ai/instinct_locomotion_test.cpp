@@ -1,0 +1,165 @@
+// T-I6 multiplayer polish: InstinctLocomotionSystem coverage — the GOAP executor
+// converting ActionPlanComponent into a seek/arrival wish-velocity intent. Pure,
+// deterministic, engine-generic (no action-name vocabulary). Synthetic test data.
+
+#include "gtest/gtest.h"
+
+#include "luminumbra_common/ai/InstinctLocomotionSystem.h"
+#include "luminumbra_common/components/CoreComponents.h"
+#include "luminumbra_common/components/InstinctComponents.h"
+
+#include <cmath>
+#include <cstring>
+
+namespace {
+
+using Luminumbra::Components::Action;
+using Luminumbra::Components::ActionPlanComponent;
+using Luminumbra::Components::LocomotionIntentComponent;
+using Luminumbra::Components::LocomotionProfile;
+using Luminumbra::Components::TransformComponent;
+using luminumbra::ai::RunInstinctLocomotionOnTick;
+
+// Make an agent at (x,0,z) with a single-action plan targeting `target`.
+entt::entity MakeAgent(entt::registry& reg, float x, float z, entt::entity target,
+                       LocomotionProfile profile = {}) {
+    const auto e = reg.create();
+    auto& tf = reg.emplace<TransformComponent>(e);
+    tf.position = Luminumbra::Vec3(x, 0.0f, z);
+    reg.emplace<LocomotionProfile>(e) = profile;
+    auto& plan = reg.emplace<ActionPlanComponent>(e);
+    Action a;
+    a.name = "approach"; // game-data string; engine must not key on it
+    a.target = target;
+    plan.plan.push_back(a);
+    return e;
+}
+
+entt::entity MakeTarget(entt::registry& reg, float x, float z) {
+    const auto e = reg.create();
+    auto& tf = reg.emplace<TransformComponent>(e);
+    tf.position = Luminumbra::Vec3(x, 0.0f, z);
+    return e;
+}
+
+float Len(const Luminumbra::Vec2& v) { return std::sqrt(v.x * v.x + v.y * v.y); }
+
+} // namespace
+
+// Far from target: wish points at the target at full cruise speed.
+TEST(InstinctLocomotion, SeeksTargetAtCruiseSpeedWhenFar) {
+    entt::registry reg;
+    const auto target = MakeTarget(reg, 100.0f, 0.0f);
+    LocomotionProfile p;
+    p.move_speed = 3.0f;
+    p.arrival_radius = 1.5f;
+    p.slow_radius = 4.0f;
+    const auto agent = MakeAgent(reg, 0.0f, 0.0f, target, p);
+
+    const auto stats = RunInstinctLocomotionOnTick(reg);
+
+    EXPECT_EQ(stats.agents_steered, 1u);
+    EXPECT_EQ(stats.agents_arrived, 0u);
+    const auto& intent = reg.get<LocomotionIntentComponent>(agent);
+    EXPECT_FALSE(intent.arrived);
+    EXPECT_NEAR(intent.wish_xz.x, 3.0f, 1e-4f); // +X toward target
+    EXPECT_NEAR(intent.wish_xz.y, 0.0f, 1e-4f);
+    EXPECT_NEAR(Len(intent.wish_xz), 3.0f, 1e-4f);
+}
+
+// Inside slow_radius but outside arrival_radius: speed ramps linearly with dist.
+TEST(InstinctLocomotion, ArrivalRampReducesSpeedNearTarget) {
+    entt::registry reg;
+    const auto target = MakeTarget(reg, 2.0f, 0.0f); // dist 2, slow_radius 4 -> half speed
+    LocomotionProfile p;
+    p.move_speed = 4.0f;
+    p.arrival_radius = 1.0f;
+    p.slow_radius = 4.0f;
+    const auto agent = MakeAgent(reg, 0.0f, 0.0f, target, p);
+
+    RunInstinctLocomotionOnTick(reg);
+
+    const auto& intent = reg.get<LocomotionIntentComponent>(agent);
+    EXPECT_FALSE(intent.arrived);
+    EXPECT_NEAR(Len(intent.wish_xz), 4.0f * (2.0f / 4.0f), 1e-4f); // 2.0 m/s
+    EXPECT_GT(Len(intent.wish_xz), 0.0f);
+    EXPECT_LT(Len(intent.wish_xz), p.move_speed);
+}
+
+// Within arrival_radius: wish is zero, arrived flagged, and the plan advances.
+TEST(InstinctLocomotion, ArrivesHoldsAndAdvancesPlan) {
+    entt::registry reg;
+    const auto target = MakeTarget(reg, 0.5f, 0.0f); // dist 0.5 < arrival_radius
+    const auto agent = MakeAgent(reg, 0.0f, 0.0f, target);
+
+    const auto stats = RunInstinctLocomotionOnTick(reg);
+
+    EXPECT_EQ(stats.agents_arrived, 1u);
+    const auto& intent = reg.get<LocomotionIntentComponent>(agent);
+    EXPECT_TRUE(intent.arrived);
+    EXPECT_NEAR(Len(intent.wish_xz), 0.0f, 1e-6f);
+    // Plan advanced past the consumed move action -> next tick is idle (holds).
+    EXPECT_EQ(reg.get<ActionPlanComponent>(agent).current_action_index, 1u);
+
+    const auto stats2 = RunInstinctLocomotionOnTick(reg);
+    EXPECT_EQ(stats2.agents_idle, 1u);
+    EXPECT_NEAR(Len(reg.get<LocomotionIntentComponent>(agent).wish_xz), 0.0f, 1e-6f);
+}
+
+// No positioned target / no plan -> idle, zero wish, no crash.
+TEST(InstinctLocomotion, NoTargetIsIdle) {
+    entt::registry reg;
+    const auto agent = MakeAgent(reg, 0.0f, 0.0f, entt::null);
+
+    const auto stats = RunInstinctLocomotionOnTick(reg);
+
+    EXPECT_EQ(stats.agents_idle, 1u);
+    EXPECT_EQ(stats.agents_steered, 0u);
+    EXPECT_NEAR(Len(reg.get<LocomotionIntentComponent>(agent).wish_xz), 0.0f, 1e-6f);
+}
+
+// Determinism: identical state in two registries -> byte-identical wish bits.
+TEST(InstinctLocomotion, IsDeterministicAcrossRuns) {
+    auto build_and_run = []() {
+        entt::registry reg;
+        const auto t = MakeTarget(reg, 13.7f, -8.2f);
+        LocomotionProfile p;
+        p.move_speed = 2.5f;
+        const auto a = MakeAgent(reg, -3.1f, 4.4f, t, p);
+        RunInstinctLocomotionOnTick(reg);
+        return reg.get<LocomotionIntentComponent>(a).wish_xz;
+    };
+    const auto wish_a = build_and_run();
+    const auto wish_b = build_and_run();
+    std::uint32_t ax, ay, bx, by;
+    std::memcpy(&ax, &wish_a.x, 4);
+    std::memcpy(&ay, &wish_a.y, 4);
+    std::memcpy(&bx, &wish_b.x, 4);
+    std::memcpy(&by, &wish_b.y, 4);
+    EXPECT_EQ(ax, bx);
+    EXPECT_EQ(ay, by);
+}
+
+// Visiting order is independent of entity insertion order (deterministic sort).
+TEST(InstinctLocomotion, OrderIndependentPerEntityResult) {
+    // Registry A: target first, then agent. Registry B: agent first, then target.
+    Luminumbra::Vec2 wish_a, wish_b;
+    {
+        entt::registry reg;
+        const auto t = MakeTarget(reg, 10.0f, 10.0f);
+        const auto a = MakeAgent(reg, 0.0f, 0.0f, t);
+        RunInstinctLocomotionOnTick(reg);
+        wish_a = reg.get<LocomotionIntentComponent>(a).wish_xz;
+    }
+    {
+        entt::registry reg;
+        // create a throwaway to shift entity ids, then agent, then target
+        (void)reg.create();
+        const auto t = MakeTarget(reg, 10.0f, 10.0f);
+        const auto a = MakeAgent(reg, 0.0f, 0.0f, t);
+        RunInstinctLocomotionOnTick(reg);
+        wish_b = reg.get<LocomotionIntentComponent>(a).wish_xz;
+    }
+    EXPECT_NEAR(wish_a.x, wish_b.x, 1e-5f);
+    EXPECT_NEAR(wish_a.y, wish_b.y, 1e-5f);
+}
