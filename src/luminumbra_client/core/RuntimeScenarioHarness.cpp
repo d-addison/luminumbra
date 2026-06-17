@@ -6316,6 +6316,7 @@ bool IsSkinnedMeshLikePixel(unsigned char r, unsigned char g, unsigned char b) {
 SkinnedMeshVisualTarget SpawnSkinnedMeshVisualEntity(
     Luminumbra::world::GameSession* game_session,
     const std::filesystem::path& artifact_dir,
+    const std::filesystem::path& root_dir,
     int avatar_count) {
     SkinnedMeshVisualTarget target;
     if (!game_session || !game_session->GetWorldSystem()) {
@@ -6345,34 +6346,69 @@ SkinnedMeshVisualTarget SpawnSkinnedMeshVisualEntity(
     const float cam_y = std::max(mesh_y + 2.6f + static_cast<float>(n - 1) * 0.5f, cam_terrain + 1.7f);
     target.camera_position = {cam_x, cam_y, cam_z};
 
-    std::error_code ec;
-    std::filesystem::create_directories(artifact_dir / "assets", ec);
-    const std::filesystem::path mesh_path = artifact_dir / "assets" / "skinned-test-rig.lmesh";
-    const std::filesystem::path clip_path = artifact_dir / "assets" / "skinned-test-rig-wave.lanim";
-    if (!WriteSkinnedTestAssets(mesh_path, clip_path)) {
-        target.failure_reason = "asset_write_failed";
-        return target;
-    }
-    target.mesh_path = mesh_path.string();
-    target.clip_path = clip_path.string();
+    // Choose the avatar mesh/skeleton/clip. count==1 (the GATE) uses the engine's
+    // 2-joint wave TEST RIG, byte-identical to the original. count>=2 (the manual
+    // SHOWCASE) uses the rigged GROVESTRIDER CHARACTER + its idle clip, so the row
+    // reads as real figures, not abstract test rigs.
+    anim::Skeleton* use_skeleton = nullptr;
+    anim::AnimationClip* use_clip = nullptr;
+    std::string use_mesh_path;
 
-    // Round-trip through the on-disk formats: the same loaders the renderer
-    // and the animation runtime consume.
-    anim::SkinnedMeshAsset mesh_asset;
-    anim::AnimClipAsset clip_asset;
-    if (!anim::LoadSkinnedMeshAsset(target.mesh_path, mesh_asset) ||
-        !anim::LoadAnimClipAsset(target.clip_path, clip_asset)) {
-        target.failure_reason = "asset_reload_failed";
-        return target;
+    if (n <= 1) {
+        std::error_code ec;
+        std::filesystem::create_directories(artifact_dir / "assets", ec);
+        const std::filesystem::path mesh_path = artifact_dir / "assets" / "skinned-test-rig.lmesh";
+        const std::filesystem::path clip_path = artifact_dir / "assets" / "skinned-test-rig-wave.lanim";
+        if (!WriteSkinnedTestAssets(mesh_path, clip_path)) {
+            target.failure_reason = "asset_write_failed";
+            return target;
+        }
+        target.mesh_path = mesh_path.string();
+        target.clip_path = clip_path.string();
+        // Round-trip through the on-disk formats: the same loaders the renderer
+        // and the animation runtime consume.
+        anim::SkinnedMeshAsset mesh_asset;
+        anim::AnimClipAsset clip_asset;
+        if (!anim::LoadSkinnedMeshAsset(target.mesh_path, mesh_asset) ||
+            !anim::LoadAnimClipAsset(target.clip_path, clip_asset)) {
+            target.failure_reason = "asset_reload_failed";
+            return target;
+        }
+        g_skinned_test_skeleton = anim::BuildSkeleton(mesh_asset);
+        g_skinned_test_clip = anim::BuildClip(clip_asset);
+        use_skeleton = &g_skinned_test_skeleton;
+        use_clip = &g_skinned_test_clip;
+        use_mesh_path = target.mesh_path;
+    } else {
+        // SHOWCASE: the grovestrider character mesh + idle clip from game data.
+        // Function-local statics persist for the program lifetime (the player
+        // components hold pointers into them), same lifetime guarantee as the
+        // g_skinned_test_* globals.
+        static anim::Skeleton s_showcase_skeleton;
+        static anim::AnimationClip s_showcase_clip;
+        const std::filesystem::path gmesh = root_dir / "data/models/creatures/grovestrider/grovestrider.lmesh";
+        const std::filesystem::path gclip = root_dir / "data/models/creatures/grovestrider/grovestrider.idle.lanim";
+        anim::SkinnedMeshAsset mesh_asset;
+        anim::AnimClipAsset clip_asset;
+        if (!anim::LoadSkinnedMeshAsset(gmesh.string(), mesh_asset) ||
+            !anim::LoadAnimClipAsset(gclip.string(), clip_asset)) {
+            target.failure_reason = "showcase_asset_load_failed";
+            return target;
+        }
+        s_showcase_skeleton = anim::BuildSkeleton(mesh_asset);
+        s_showcase_clip = anim::BuildClip(clip_asset);
+        use_skeleton = &s_showcase_skeleton;
+        use_clip = &s_showcase_clip;
+        use_mesh_path = gmesh.string();
+        target.mesh_path = use_mesh_path;
+        target.clip_path = gclip.string();
     }
-    g_skinned_test_skeleton = anim::BuildSkeleton(mesh_asset);
-    g_skinned_test_clip = anim::BuildClip(clip_asset);
 
     entt::registry& registry = game_session->GetRegistry();
     // Spawn the row centred on mesh_x along X. Material ids cycle for visible
-    // per-player distinction; the animation phase is staggered so the rigs are
+    // per-player distinction; the animation phase is staggered so the avatars are
     // not in lock-step (reads as separate players). At n==1 this is byte-identical
-    // to the original single rig (offset 0, material 4, phase 0).
+    // to the original single test rig (offset 0, material 4, phase 0).
     const std::uint32_t kRowMaterials[5] = {4u, 2u, 1u, 3u, 0u};
     for (int i = 0; i < n; ++i) {
         const float rx = mesh_x + (static_cast<float>(i) - static_cast<float>(n - 1) * 0.5f) * kRowSpacingM;
@@ -6381,22 +6417,23 @@ SkinnedMeshVisualTarget SpawnSkinnedMeshVisualEntity(
         auto& transform = registry.emplace<Luminumbra::Components::TransformComponent>(entity);
         transform.position = Luminumbra::Vec3(rx, ry, mesh_z);
         auto& mesh_component = registry.emplace<Luminumbra::Components::SkinnedMeshComponent>(entity);
-        mesh_component.meshPath = target.mesh_path;
+        mesh_component.meshPath = use_mesh_path;
         mesh_component.materialId = kRowMaterials[i % 5];
         auto& player = registry.emplace<anim::AnimationPlayerComponent>(entity);
-        player.skeleton = &g_skinned_test_skeleton;
-        player.clip = &g_skinned_test_clip;
+        player.skeleton = use_skeleton;
+        player.clip = use_clip;
         player.time = static_cast<double>(i) * 0.3; // staggered phase
         player.looping = true;
         if (i == 0) {
-            target.entity = entity; // primary rig (the gate ROI tracks this one)
+            target.entity = entity; // primary avatar (the gate ROI tracks this one)
         }
     }
 
     target.spawned = true;
     LUMINUMBRA_CORE_INFO(
-        "skinned_mesh_visual_smoke: spawned {} test rig(s) centred at ({:.1f}, {:.1f}, {:.1f})",
-        n, target.mesh_position.x, target.mesh_position.y, target.mesh_position.z);
+        "skinned_mesh_visual_smoke: spawned {} avatar(s) [{}] centred at ({:.1f}, {:.1f}, {:.1f})",
+        n, (n <= 1 ? "test-rig" : "grovestrider"),
+        target.mesh_position.x, target.mesh_position.y, target.mesh_position.z);
     return target;
 }
 
