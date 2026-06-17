@@ -1,5 +1,50 @@
 # Engine Frontier Handoff
 
+## Iteration 6 (cont., 2026-06-16) — Visual-fidelity wave + far-field park (tip `dbab527`)
+
+Autonomous run (memory `autonomous-iteration-6-mandate`). After Wave A, a 5-lens
+forge-critique (`.forge/critique-remaining-blockers-20260616.md`) redirected effort
+from the SHIELD-RT far-field (sunk-cost, low ROI for a photography game) to the
+NEAR-field the camera actually frames. **11 commits, all gates green** except one
+marginal cell (below). RENDER-ONLY throughout — `world_hash` untouched.
+
+- **SHIELD-RT far-field PARKED dormant** (`shieldrt-PARKED-resume-spec.md`). It runs
+  GL-clean but its 49-tile heightfield assembly (~115 s, erosion-bound) is too slow to
+  render in-scenario; the fullscreen march cost is also unvalidated. Resume in iter-7 via
+  a shared cache-backed `FarLodHeightProvider` + clipmap band-update + parallel
+  all-or-nothing build. Two real bugs were fixed before parking (async-attach wiring;
+  teardown use-after-free). Stays committed/green/dormant (flag off).
+- **Terrain fidelity, properly unblocked — the assets were already in-repo.** Every
+  material ships a full AmbientCG 2K CC0 PBR set; the runtime had been loading 256px
+  `.ltex` and discarding the detail. Now loaded at **1024** (`c9853ef`, 16x texels,
+  42 MB VRAM) — near-ground micro-contrast ~doubled honestly (`LOW_TEXTURE_DETAIL`
+  12→1). Plus: brightness-aware detail metric (`8aeffa3` — the old Laplacian floor
+  conflated texture with light level), render-side slope→rock macro variation
+  (`b6d051d`), foliage sky-cull relaxation (`df193f0`) + **2× scatter density**
+  (`5e5c68c`, FoliageInstancing green at 23.9k instances).
+- **Regression sweep caught + fixed a void** (`dbab527`): the darker real 1024 textures
+  tipped deep-shadow terrain under the strict ≤2 void-cluster threshold (PlayerView
+  mountains/yaw_060). Root-caused to LIT dark terrain (not a geometry hole — a hole shows
+  the skybox dome); fixed with an imperceptible ~4/255 black-floor on the lit-geometry
+  output (+ a companion foliage floor). Cannot mask real voids.
+
+**Gate state (debug):** WorldVisualSweep 47/48 (only `summer/noon/down35`
+`LOW_TEXTURE_DETAIL` at 0.070 vs 0.08 — noon flat overhead light shows less micro-relief,
+~physical), FoliageInstancing / FarLodHorizon (all presets) / PlayerView (all presets) /
+default ctest all GREEN.
+
+**Open owner-calls (quality/resource, not blockers):**
+1. **2048 terrain textures** — native asset res, would green the last noon cell;
+   ~168 MB VRAM + ~220 MB repo. Deferred (heavy) pending owner go.
+2. **Phase 0.3 perf re-bless** — needs a quiet machine; gates honest perf for pushing
+   foliage density further toward continuous turf.
+
+Free-asset sources for future needs (all CC0, repo-safe): ambientCG (ground/rock — our
+terrain source), Poly Haven (PBR + HDRIs + models), Quaternius (low-poly veg/props),
+Kenney (stylized kits).
+
+---
+
 ## Iteration 6 IN PROGRESS (2026-06-16) — Wave A sim/worldgen foundation
 
 Branch `feat/polyglot-audit-roadmap`, tip **`227383c`** (Wave A.2 A3a + A3b inc1/
