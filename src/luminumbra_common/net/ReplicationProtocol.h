@@ -109,4 +109,64 @@ inline std::int16_t ReplQuantAngle(float radians) {
 }
 inline float ReplDequantAngle(std::int16_t mrad) { return static_cast<float>(mrad) / kReplAngleScale; }
 
+// ---------------------------------------------------------------------------
+// T-I6 P3.0b: unreliable-delivery reliability layer (what makes UDP usable).
+// State replication runs over UNRELIABLE UDP (research/mp-replication.md): a
+// datagram can arrive late, out of order, or duplicated, and an OLD snapshot is
+// superseded by a newer one (most-recent-wins -- TCP head-of-line blocking is
+// exactly the wrong behaviour here). These tiny endpoints encode that semantics
+// independent of the socket, so they are unit-testable without real ports (the
+// raw winsock UDP ILockstepTransport is a separate owner-LAN-validated step).
+// ---------------------------------------------------------------------------
+
+// CLIENT side: keeps only the NEWEST snapshot seen (by snapshot_seq); discards
+// any stale/duplicate datagram. Generates the Ack the client sends upstream.
+class SnapshotReceiver {
+public:
+    // Returns true if accepted (strictly newer seq), false if stale/duplicate.
+    bool Receive(const SnapshotMsg& snap) {
+        if (m_has && snap.snapshot_seq <= m_current.snapshot_seq) return false;
+        m_current = snap;
+        m_has = true;
+        return true;
+    }
+    [[nodiscard]] bool has_snapshot() const { return m_has; }
+    [[nodiscard]] const SnapshotMsg& current() const { return m_current; }
+    // The Ack to send upstream: newest snapshot applied + newest usercmd produced.
+    [[nodiscard]] AckMsg make_ack(std::uint64_t latest_usercmd_tick) const {
+        return AckMsg{m_has ? m_current.snapshot_seq : 0u, latest_usercmd_tick};
+    }
+
+private:
+    SnapshotMsg m_current;
+    bool m_has = false;
+};
+
+// SERVER side, per connected client: keeps the NEWEST usercmd seen (by tick;
+// UDP may reorder) and tracks the latest snapshot_seq that client has acked (so
+// the server can delta against it in P3.1).
+class UsercmdReceiver {
+public:
+    // Returns true if accepted (strictly newer tick), false if stale/duplicate.
+    bool Receive(const UsercmdMsg& cmd) {
+        if (m_has && cmd.tick <= m_latest.tick) return false;
+        m_latest = cmd;
+        m_has = true;
+        return true;
+    }
+    [[nodiscard]] bool has_command() const { return m_has; }
+    [[nodiscard]] const UsercmdMsg& latest() const { return m_latest; }
+
+    // Record an Ack from this client (monotonic: a stale ack never lowers state).
+    void ApplyAck(const AckMsg& ack) {
+        if (ack.snapshot_seq > m_acked_snapshot_seq) m_acked_snapshot_seq = ack.snapshot_seq;
+    }
+    [[nodiscard]] std::uint32_t acked_snapshot_seq() const { return m_acked_snapshot_seq; }
+
+private:
+    UsercmdMsg m_latest;
+    bool m_has = false;
+    std::uint32_t m_acked_snapshot_seq = 0;
+};
+
 } // namespace Luminumbra::Net
