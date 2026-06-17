@@ -76,6 +76,26 @@ struct ActionPlanComponent {
 // A tag component to identify an entity as being controlled by the Instinct Engine.
 struct InstinctAgent {};
 
+// --- Locomotion (GOAP action execution) ---
+
+// GAME DATA: steering parameters for an agent that physically moves toward the
+// target of its current ActionPlanComponent action. The engine reads these; the
+// archetype/spawn decides the values. (T-I6 multiplayer polish: action->steering.)
+struct LocomotionProfile {
+    f32 move_speed = 2.0f;      // m/s horizontal cruise speed
+    f32 arrival_radius = 1.5f;  // m; within this the agent is "arrived" and holds
+    f32 slow_radius = 4.0f;     // m; linear arrival speed-ramp begins at this range
+};
+
+// ENGINE OUTPUT: the horizontal wish velocity produced by InstinctLocomotionSystem
+// from the agent's current action. The physics owner (server NPC tick) maps wish_xz
+// onto set_avatar_wish_velocity(char_index, wish_xz) before stepping the character.
+// Pure data; no physics dependency lives in the common AI layer.
+struct LocomotionIntentComponent {
+    Vec2 wish_xz{0.0f};
+    bool arrived = false;
+};
+
 // T-I5b-2 (E1): GAME-DATA opt-in for the ecology stimulus channels. A creature
 // that carries this component REACTS to the environment: each subscription maps
 // a stimulus channel onto a named need, scaling the need's pressure by the

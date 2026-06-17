@@ -5,6 +5,7 @@ set(COMMON_SOURCES
     # AI
     ${CMAKE_CURRENT_LIST_DIR}/ai/InstinctPlanner.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ai/InstinctSystem.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/ai/InstinctLocomotionSystem.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ai/StimulusChannels.cpp
 
     # Fields
