@@ -85,6 +85,10 @@ struct RuntimeScenarioConfig {
     // in-process replication pipeline (server->snapshot->client->interpolate) instead
     // of a scripted transform walk, so the on-screen view is literally network-driven.
     bool replicated = false;
+    // T-I6 cinematic: a scripted wildlife scene -- an animal wanders to water, a human
+    // shoots an arrow beside it (Jolt projectile), the splash scares the animal and it
+    // flees. Reuses the skinned_mesh_visual_smoke 2-grovestrider spawn (animal + human).
+    bool wildlife = false;
     int timed_run_seconds = 0;
     int readiness_timeout_seconds = 120;
     int horizon_radius = 12;
