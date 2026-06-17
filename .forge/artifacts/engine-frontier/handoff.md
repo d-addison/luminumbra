@@ -72,9 +72,19 @@ owner ("research then spec then plan, don't go in blind" — see memory `researc
   gate (asserts mirror + ack + input-moved-avatar); the P3 replication loop is now CI-locked.
   Sinking-avatar video bug fixed (`7fa7a1c`, render-showcase re-grounding). Full ctest 287/287.
 
-**Next:** wire `SnapshotInterpolator` into a connected CLIENT's render (the literally-network-
-driven view) + local-player prediction/reconciliation; chunk-index AOI integration. Then
-`SteamNetworkingTransport` (owner/LAN-validated), P4 join/leave, P5 scale to 20+.
+- **P3.3 (core) prediction** (`43e3134`): `LocalPlayerPredictor` — apply local input immediately,
+  buffer unacked, snap-to-authoritative + replay-unacked on snapshot; 3 gtests. **P3.3 client-
+  logic layer COMPLETE** (interpolation + prediction), full ctest **290/290**.
+
+**P3 status:** protocol (P3.0) · reliability (P3.0b) · endpoints (P3.1) · live loop + input→movement
+(P3.1c/d) · AOI (P3.2) · interpolation + prediction (P3.3 core) — ALL tested; the live loop is
+CI-gated (ReplicationSmoke). The net + client-logic layers are done.
+
+**Next (the remaining join — larger, deliberate):** CLIENT-RENDER INTEGRATION — a connected client
+that feeds `SnapshotInterpolator.Sample()` / `LocalPlayerPredictor` into the avatar renderer so the
+on-screen view is literally network-driven (vs. today's scripted showcase walk). Then chunk-index
+AOI integration, `SteamNetworkingTransport` (owner/LAN-validated), P4 persistent join/leave, P5
+scale to 20+.
 
 ## Iteration 6 (cont., 2026-06-17) — Render-debt wave #1–#4 + #5 spec (tip `3df4347`)
 
