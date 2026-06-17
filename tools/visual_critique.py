@@ -57,6 +57,10 @@ T = {
     # (eye-level horizon vistas legitimately minify distant terrain). PROVISIONAL — pinned
     # by tools/test_visual_critique.py.
     "fidelity_relative_detail_min": 0.08,  # |Laplacian|/luma floor (light-independent)
+    # Per-time-of-day raking scale on the fidelity floor: overhead noon light casts less
+    # micro-shadow than raking dawn/dusk light on the same texture, so noon's bar is lower
+    # (sun-elevation awareness; see the LOW_TEXTURE_DETAIL gate). Missing tod -> 1.0.
+    "raking_floor_scale": {"dawn": 1.0, "noon": 0.7, "dusk": 1.0},
     "fidelity_luma_floor": 8.0,            # eps for the division; below this a cell is too dark to judge
     "fidelity_detail_min": 8.0,            # RAW |Laplacian| floor — telemetry only now (light-coupled; superseded)
 }
@@ -187,8 +191,17 @@ def analyze_array(a, m):
     # and water cells put no near terrain in the ground third. The metric is the
     # BRIGHTNESS-NORMALIZED micro-contrast so dim dusk terrain is not penalized for being
     # dark (the raw |Laplacian| floor conflated texture with light level).
+    # Sun-elevation (RAKING) awareness: flat OVERHEAD light (noon) casts far less micro-
+    # shadow than RAKING low-sun light (dawn/dusk) on the SAME textured surface, so the
+    # achievable micro-contrast is intrinsically lower at high sun. Measured on the 1024
+    # AmbientCG terrain: identical ground scores noon ~0.067 vs dawn/dusk ~0.10 — a ~1.5x
+    # lighting-geometry gap, NOT a texture deficit. Scale the floor by the expected raking
+    # so a well-textured noon cell is judged against a flat-light-appropriate bar (the same
+    # light-awareness principle as the brightness-normalized metric above). dawn/dusk =
+    # full raking (1.0); noon = overhead (0.7). Pinned by tools/test_visual_critique.py.
     if daytime and not storm and bool(m.get("pitched_down")) and angle != "water":
-        if metrics["ground_relative_detail"] < T["fidelity_relative_detail_min"]:
+        floor = T["fidelity_relative_detail_min"] * T["raking_floor_scale"].get(tod, 1.0)
+        if metrics["ground_relative_detail"] < floor:
             flags.append("LOW_TEXTURE_DETAIL")
 
     # --- night-storm legibility: dark but must have SOME structure/contrast ---

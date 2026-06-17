@@ -131,6 +131,26 @@ check("eye_level_vista_no_fidelity", a,
       {"daytime": True, "storm": False, "angle": "yaw000"},
       expect_absent=["LOW_TEXTURE_DETAIL"])
 
+# --- sun-elevation (raking) awareness: a modestly-textured ground that PASSES at noon
+#     (overhead light -> lower achievable micro-shadow -> scaled floor) would FAIL at
+#     dawn (raking light -> full floor). Same texture, different bar by sun elevation. ---
+def _modest_ground():
+    a = frame(110.0)
+    g = np.full((H - 2 * H // 3, W, 3), (95.0, 135.0, 80.0), dtype=np.float32)
+    g[::2] += 4.0   # faint texture -> ground_relative_detail ~0.064 (between 0.056 and 0.08)
+    a[2 * H // 3:] = g
+    return a
+res = check("noon_raking_ok", _modest_ground(),
+            {"daytime": True, "pitched_down": True, "storm": False, "angle": "down35", "tod": "noon"},
+            expect_absent=["LOW_TEXTURE_DETAIL"])
+rd = res["metrics"]["ground_relative_detail"]
+if not (0.056 < rd < vc.T["fidelity_relative_detail_min"]):
+    _failures.append(f"[noon_raking] fixture rel_detail {rd:.4f} must sit between noon floor "
+                     f"(0.056) and the full floor (0.08) to prove the raking scale")
+check("dawn_raking_flag", _modest_ground(),
+      {"daytime": True, "pitched_down": True, "storm": False, "angle": "down35", "tod": "dawn"},
+      expect_present=["LOW_TEXTURE_DETAIL"])
+
 # --- CLEAN frame: a normal lit daytime scene raises NO blocking flags ---
 a = frame(90.0)
 a[: H // 3] = (120.0, 150.0, 210.0)   # blue sky
