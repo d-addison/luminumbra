@@ -237,7 +237,7 @@ bool DecodeBye(const std::vector<std::uint8_t>& frame, ByeMsg& out) {
 LoopbackTransport::LoopbackTransport(std::shared_ptr<Channel> tx, std::shared_ptr<Channel> rx)
     : m_tx(std::move(tx)), m_rx(std::move(rx)) {}
 
-bool LoopbackTransport::SendFrame(const std::vector<std::uint8_t>& frame) {
+bool LoopbackTransport::SendFrame(const std::vector<std::uint8_t>& frame, FrameDelivery /*delivery*/) {
     if (!m_tx || !m_tx->open) return false;
     m_tx->queue.push_back(frame);
     return true;
@@ -363,7 +363,7 @@ bool TcpTransport::Connect(const std::string& host, std::uint16_t port, int time
     return true;
 }
 
-bool TcpTransport::SendFrame(const std::vector<std::uint8_t>& frame) {
+bool TcpTransport::SendFrame(const std::vector<std::uint8_t>& frame, FrameDelivery /*delivery*/) {
     if (m_socket < 0 || m_peer_closed) return false;
     std::vector<std::uint8_t> out;
     PutU32(out, static_cast<std::uint32_t>(frame.size()));
@@ -411,7 +411,7 @@ TcpTransport::TcpTransport() = default;
 TcpTransport::~TcpTransport() { Close(); }
 bool TcpTransport::Listen(std::uint16_t, int) { return false; }
 bool TcpTransport::Connect(const std::string&, std::uint16_t, int) { return false; }
-bool TcpTransport::SendFrame(const std::vector<std::uint8_t>&) { return false; }
+bool TcpTransport::SendFrame(const std::vector<std::uint8_t>&, FrameDelivery) { return false; }
 bool TcpTransport::TryReceiveFrame(std::vector<std::uint8_t>&) { return false; }
 bool TcpTransport::IsPeerConnected() const { return false; }
 void TcpTransport::Close() {}

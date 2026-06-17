@@ -108,9 +108,18 @@ gated on owner confirmation of the pivot.
   Full ctest 266/266.
 - **P3 — replication protocol (authoritative snapshots + delta + prediction + AOI).** Per
   `mp-replication.md` + `mp-interest-management.md` + `mp-prediction-reconciliation.md`:
-  - **P3.0 (prerequisite): UDP transport** behind the transport seam — state over unreliable
-    UDP (seq/ack, most-recent-wins); keep the existing TCP for the reliable event channel
-    (join/leave, world edits, chat) + loopback tests. (We only have TCP today.)
+  - **P3.0 (prerequisite): transport — STEAM-READY** (research `mp-steam-networking.md`). State
+    runs UNRELIABLE (most-recent-wins), events RELIABLE, both on ONE connection. The
+    `ILockstepTransport` seam now carries a `FrameDelivery {Unreliable, Reliable}` selector
+    (added P3 Steam-readiness; Loopback/Tcp ignore it as always-reliable supersets). **Production
+    transport = Steam `ISteamNetworkingSockets`** (message-oriented — fits framed messages, no
+    stream reassembly; reliable+unreliable send flags; **SDR** relay = NAT punch-through + anti-
+    DDoS + IP-hiding at ship). **Dev/CI transport = Valve's open-source GameNetworkingSockets**
+    (same API, BSD-3, no Steam client needed; direct-UDP). Write `SteamNetworkingTransport :
+    ILockstepTransport` ONCE; CMake-guard the SDK/GNS link with no-op stubs for headless/non-
+    Steam (like the `_WIN32 TcpTransport` stub). **The bespoke raw-winsock-UDP transport is
+    DROPPED** — folded into the GNS/Steam transport (the seam + reliability layer are done; this
+    is the remaining socket impl, owner-LAN/Steam-validated).
   - baseline + delta snapshots vs the client's last ACKED snapshot, bit-packed/quantized
     (pos ~26-bit delta, smallest-three quaternion ~29 bits), snapshot @ 15–20 Hz decoupled from
     the 30 Hz tick, priority accumulator under a fixed per-client byte budget;

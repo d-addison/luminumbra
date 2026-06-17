@@ -22,7 +22,9 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
         snap.snapshot_seq = link.next_snapshot_seq++;
         snap.acked_usercmd_tick = link.inbound.has_command() ? link.inbound.latest().tick : 0u;
         snap.entities = entities;
-        link.transport->SendFrame(EncodeSnapshot(snap));
+        // State snapshots are UNRELIABLE: a dropped one is superseded by the next
+        // (most-recent-wins). Over Steam this maps to k_nSteamNetworkingSend_Unreliable.
+        link.transport->SendFrame(EncodeSnapshot(snap), FrameDelivery::Unreliable);
     }
 }
 
@@ -59,7 +61,9 @@ std::uint32_t ReplicationServer::AckedSnapshotSeq(std::uint32_t client_id) const
 
 void ReplicationClient::SendUsercmd(const UsercmdMsg& cmd) {
     if (!m_transport) return;
-    m_transport->SendFrame(EncodeUsercmd(cmd));
+    // Usercmds are UNRELIABLE: newest tick wins on the server (UsercmdReceiver),
+    // a dropped one is superseded by the next tick's input.
+    m_transport->SendFrame(EncodeUsercmd(cmd), FrameDelivery::Unreliable);
     m_latest_usercmd_tick = cmd.tick;
     m_sent_any_usercmd = true;
 }
@@ -82,7 +86,9 @@ void ReplicationClient::PumpInbound() {
     // Ack the newest snapshot applied (carries the newest usercmd we produced so
     // the server can reconcile). Only bother once we have something to report.
     if (got_new_snapshot || m_sent_any_usercmd) {
-        m_transport->SendFrame(EncodeAck(m_receiver.make_ack(m_latest_usercmd_tick)));
+        // Acks are UNRELIABLE: the newest ack supersedes (monotonic on the server).
+        m_transport->SendFrame(EncodeAck(m_receiver.make_ack(m_latest_usercmd_tick)),
+                               FrameDelivery::Unreliable);
     }
 }
 

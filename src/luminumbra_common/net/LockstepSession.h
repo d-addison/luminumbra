@@ -122,6 +122,15 @@ bool DecodeBye(const std::vector<std::uint8_t>& frame, ByeMsg& out);
 // SendMessage frames a complete message; TryReceiveMessage returns ONE complete framed
 // message or false if none is currently available (non-blocking -- the session pumps it
 // every tick rather than blocking the loop).
+// T-I6 P3 (Steam-readiness, research mp-steam-networking.md): a per-frame delivery
+// selector. State replication (Usercmd/Snapshot/Ack) sends UNRELIABLE (most-recent-
+// wins; a dropped datagram is superseded); events/handshake/world-edits/chat send
+// RELIABLE. Steam's ISteamNetworkingSockets carries BOTH on one connection
+// (k_nSteamNetworkingSend_Unreliable / _Reliable). The Loopback/Tcp transports are
+// always-reliable (a safe superset), so they ignore the flag; only a future
+// SteamNetworkingTransport / GameNetworkingSockets impl honours it.
+enum class FrameDelivery { Unreliable, Reliable };
+
 class ILockstepTransport {
 public:
     virtual ~ILockstepTransport() = default;
@@ -129,7 +138,9 @@ public:
     // Sends one complete message frame. Returns false if the peer is gone.
     // NOTE: named SendFrame (not SendMessage) deliberately -- <windows.h> #defines
     // SendMessage to SendMessageA/W, which would rename this virtual under the macro.
-    virtual bool SendFrame(const std::vector<std::uint8_t>& frame) = 0;
+    // `delivery` defaults to Reliable so existing callers (lockstep) are unchanged.
+    virtual bool SendFrame(const std::vector<std::uint8_t>& frame,
+                           FrameDelivery delivery = FrameDelivery::Reliable) = 0;
 
     // Non-blocking: pops ONE complete framed message into `out` and returns true, or
     // returns false if none is available right now. A clean peer close is reported via
@@ -156,7 +167,8 @@ public:
     // mirror image). Channels are shared_ptr so both ends see the same queues/open flag.
     LoopbackTransport(std::shared_ptr<Channel> tx, std::shared_ptr<Channel> rx);
 
-    bool SendFrame(const std::vector<std::uint8_t>& frame) override;
+    bool SendFrame(const std::vector<std::uint8_t>& frame,
+                   FrameDelivery delivery = FrameDelivery::Reliable) override;
     bool TryReceiveFrame(std::vector<std::uint8_t>& out) override;
     [[nodiscard]] bool IsPeerConnected() const override;
     void Close() override;
@@ -191,7 +203,8 @@ public:
     // Client: connect to host:port (blocking up to timeout_ms).
     bool Connect(const std::string& host, std::uint16_t port, int timeout_ms = 10000);
 
-    bool SendFrame(const std::vector<std::uint8_t>& frame) override;
+    bool SendFrame(const std::vector<std::uint8_t>& frame,
+                   FrameDelivery delivery = FrameDelivery::Reliable) override;
     bool TryReceiveFrame(std::vector<std::uint8_t>& out) override;
     [[nodiscard]] bool IsPeerConnected() const override;
     void Close() override;
