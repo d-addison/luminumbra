@@ -1,5 +1,5 @@
 ﻿param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "AtmosphereAudio", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "ParticleEmitterDeterminism", "CloudShadow", "FoliageInstancing", "Precipitation", "TimeOfDaySweep", "WorldVisualSweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "ReplicationSmoke", "WindFieldDeterminism", "AetherFieldDeterminism", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "StimulusChannelGate", "BiomeCoverage", "RiverPresence", "WaterfallVisual", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "IsolationLayer", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "AtmosphereAudio", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "ParticleEmitterDeterminism", "CloudShadow", "FoliageInstancing", "Precipitation", "TimeOfDaySweep", "WorldVisualSweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "ReplicationSmoke", "NetworkedReplication", "WindFieldDeterminism", "AetherFieldDeterminism", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "StimulusChannelGate", "BiomeCoverage", "RiverPresence", "WaterfallVisual", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "IsolationLayer", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -4379,6 +4379,58 @@ function Test-ReplicationSmoke {
         $analysis.npc_count, $analysis.min_npc_approach_m, $analysis.arrow_ok)
 }
 
+function Test-NetworkedReplication {
+    # T-I6: REAL over-the-wire replication between TWO PROCESSES over TCP sockets
+    # (not the in-process loopback ReplicationSmoke uses). Auto-launches the host
+    # (--net-host, binds + runs the authoritative world) and the client
+    # (--net-join, connects + mirrors), then asserts BOTH exited cleanly and the
+    # client confirmed it mirrored the host over the wire. This turns the manual
+    # two-terminal check into a repeatable gate. Localhost; transport-side ->
+    # world_hash untouched.
+    $serverExe = "build/$BuildPreset/bin/luminumbra_server_app.exe"
+    if (-not (Test-Path $serverExe)) {
+        throw "networked gate not yet built - missing $serverExe (cmake --build build/$BuildPreset)"
+    }
+    $port = 27061
+    $ticks = 60
+    $logDir = "build/$BuildPreset/test-artifacts/server"
+    if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Force $logDir | Out-Null }
+    $hostOut = Join-Path $logDir "net-host.log"
+    $hostErr = Join-Path $logDir "net-host.err.log"
+    $joinOut = Join-Path $logDir "net-join.log"
+    $joinErr = Join-Path $logDir "net-join.err.log"
+
+    # Host listens in the background; give it a moment to bind before the client dials.
+    $hostProc = Start-Process -FilePath $serverExe `
+        -ArgumentList @("--net-host", "--port", "$port", "--avatars", "4", "--ticks", "$ticks") `
+        -PassThru -NoNewWindow -RedirectStandardOutput $hostOut -RedirectStandardError $hostErr
+    Start-Sleep -Milliseconds 1500
+    try {
+        $joinProc = Start-Process -FilePath $serverExe `
+            -ArgumentList @("--net-join", "--host", "127.0.0.1", "--port", "$port", "--ticks", "$ticks") `
+            -PassThru -NoNewWindow -RedirectStandardOutput $joinOut -RedirectStandardError $joinErr -Wait
+        $joinExit = $joinProc.ExitCode
+    } finally {
+        if (-not $hostProc.HasExited) { $hostProc.WaitForExit(15000) | Out-Null }
+        if (-not $hostProc.HasExited) { $hostProc.Kill(); throw "networked gate: host did not exit (hung)" }
+    }
+
+    # The client ran with -Wait, so its ExitCode is reliable; assert on it. The
+    # background host's ExitCode is not reliably populated by Start-Process
+    # -PassThru, so assert on its success log line instead (it prints the line only
+    # after completing all ticks with a connected peer).
+    if ($joinExit -ne 0) { throw "networked gate: client (--net-join) exited $joinExit - see $joinOut / $joinErr" }
+    $joinText = (Get-Content $joinOut -Raw -ErrorAction SilentlyContinue) + (Get-Content $joinErr -Raw -ErrorAction SilentlyContinue)
+    if ($joinText -notmatch "Real over-the-wire replication confirmed") {
+        throw "networked gate: client did not confirm mirroring over the wire - see $joinOut / $joinErr"
+    }
+    $hostText = (Get-Content $hostOut -Raw -ErrorAction SilentlyContinue) + (Get-Content $hostErr -Raw -ErrorAction SilentlyContinue)
+    if ($hostText -notmatch "net-host: ran $ticks ticks") {
+        throw "networked gate: host did not complete all $ticks ticks with a connected peer - see $hostOut / $hostErr"
+    }
+    Write-Host "NetworkedReplication gate passed: host + client ran as separate processes over TCP; client mirrored the authoritative world over the wire (port $port, $ticks ticks)."
+}
+
 function Test-AetherFieldDeterminism {
     # T-I6-A1: the Aetheric scalar field is a deterministic, hashed sim system.
     # Drives the server's --aether-bench mode: seed -> N AetherFieldSystem updates
@@ -5749,6 +5801,7 @@ switch ($Mode) {
     "IsolationLayer" { Test-IsolationLayer }
     "HeadlessServerTick" { Test-HeadlessServerTick }
     "ReplicationSmoke" { Test-ReplicationSmoke }
+    "NetworkedReplication" { Test-NetworkedReplication }
     "HeadlessServerTickHeavy" { Test-HeadlessServerTickHeavy }
     "WindFieldDeterminism" { Test-WindFieldDeterminism }
     "AetherFieldDeterminism" { Test-AetherFieldDeterminism }
