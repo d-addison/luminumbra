@@ -1744,6 +1744,12 @@ int RunReplicate(const ServerCliOptions& options) {
     Luminumbra::Net::ReplicationServer server;
     server.AddClient(/*client_id=*/1, pair.first.get());
     Luminumbra::Net::ReplicationClient client(/*player_id=*/1, pair.second.get());
+    // T-I6 polish: CHUNK-INDEX area of interest. Scope each client's snapshot to the
+    // chunk neighbourhood around its own avatar (the grid the world streams on), the
+    // scalable interest-management path for a 20+ player persistent server. Radius 3
+    // chunks (48 m) comfortably covers the spawn-clustered avatars + NPCs here, so
+    // the mirror stays complete while the bucketed-AOI path is exercised in the gate.
+    server.SetAoiChunkRadius(/*chunk_radius=*/3, /*chunk_size_mm=*/Luminumbra::CHUNK_SIZE_X * 1000);
 
     // P3.1d: the loopback client CONTROLS one avatar -- it sends a constant +X
     // move usercmd each tick; the server applies it so that avatar walks. We then

@@ -53,6 +53,20 @@ public:
     void SetAoiRadiusMm(std::int64_t radius_mm) { m_aoi_radius_mm = radius_mm; }
     [[nodiscard]] std::int64_t aoi_radius_mm() const { return m_aoi_radius_mm; }
 
+    // T-I6 polish: CHUNK-INDEX area of interest (research mp-interest-management.md
+    // "AOI reuses the existing chunk index"). Buckets entities by their horizontal
+    // (X/Z) streaming chunk ONCE per broadcast, then sends each client only the
+    // entities within `chunk_radius` chunks (Chebyshev) of its OWN avatar's chunk --
+    // aligned with the grid the world actually streams on. Scales as
+    // O(E + clients * (2r+1)^2) instead of the mm-radius path's O(clients * E), so a
+    // 20+ player world with many entities stays cheap. Takes PRECEDENCE over the mm
+    // radius when enabled. chunk_radius < 0 (default) = chunk AOI off.
+    void SetAoiChunkRadius(int chunk_radius, std::int64_t chunk_size_mm) {
+        m_aoi_chunk_radius = chunk_radius;
+        m_aoi_chunk_size_mm = chunk_size_mm;
+    }
+    [[nodiscard]] int aoi_chunk_radius() const { return m_aoi_chunk_radius; }
+
     // Builds a SnapshotMsg from the authoritative entity set and sends it to every
     // connected client (each its own monotonically increasing seq + acked_usercmd_
     // tick). When AOI is enabled the per-client `entities` is filtered to that
@@ -82,9 +96,18 @@ private:
         std::uint32_t next_snapshot_seq = 1;
     };
     std::map<std::uint32_t, ClientLink> m_clients; // ordered -> deterministic broadcast order
-    std::int64_t m_aoi_radius_mm = 0;              // 0 = AOI disabled (full set)
+    std::int64_t m_aoi_radius_mm = 0;              // 0 = mm-radius AOI disabled (full set)
+    int m_aoi_chunk_radius = -1;                   // < 0 = chunk AOI disabled
+    std::int64_t m_aoi_chunk_size_mm = 0;          // chunk edge length (mm) for chunk AOI
     std::size_t m_last_broadcast_total_bytes = 0;
     std::size_t m_last_broadcast_max_client_bytes = 0;
+    // T-I6 polish: PENDING despawns. PruneDisconnectedClients() enqueues the
+    // leaver's avatar id here; each BroadcastSnapshot folds the pending ids into
+    // removed_ids and REPEATS them across a few snapshots (the snapshot is
+    // unreliable, so a single despawn could be dropped -> a ghost entity). The
+    // value is the remaining repeat count; entries decay to 0 and are erased.
+    std::map<std::uint32_t, int> m_pending_removed_ids;
+    static constexpr int kRemovalRepeatBroadcasts = 3;
 };
 
 class ReplicationClient {
