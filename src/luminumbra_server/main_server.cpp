@@ -1775,12 +1775,12 @@ int RunReplicate(const ServerCliOptions& options) {
     // integrated under gravity, despawned (reliable removed_id) on ground-hit/timeout.
     constexpr std::uint32_t kArrowNetId = 2000u;
     constexpr std::uint64_t kArrowFireTick = 10;
+    auto* physics = runner.Session()->GetPhysicsSystem();
     entt::entity arrow_entity = entt::null;
-    Luminumbra::Vec3 arrow_vel(0.0f);
+    JPH::BodyID arrow_body;        // T-I6 P6.3: real Jolt dynamic body
     bool arrow_active = false;
     bool arrow_seen_by_client = false;
     bool arrow_despawn_signalled = false;
-    const float arrow_dt = 1.0f / 30.0f;
 
     std::uint64_t executed = 0;
     while (executed < options.ticks) {
@@ -1815,30 +1815,37 @@ int RunReplicate(const ServerCliOptions& options) {
             if (world_sys) tf.position.y = world_sys->GetTerrainHeightAt(tf.position.x, tf.position.z);
         }
 
-        // P6.2: arrow lifecycle. Fire once; integrate ballistically; despawn on
-        // ground-hit or timeout, emitting a RELIABLE removed_id that tick.
+        // P6.2/P6.3: arrow lifecycle with REAL JOLT PHYSICS. Fire once -> a dynamic
+        // sphere body that arcs under gravity and COLLIDES with the terrain; its
+        // body position drives the replicated transform; despawn (reliable removed_id)
+        // when the body comes to rest (sleeps) or times out.
         std::vector<std::uint32_t> tick_removed;
-        if (options.arrow && !arrow_active && arrow_entity == entt::null && executed == kArrowFireTick) {
+        if (options.arrow && !arrow_active && arrow_entity == entt::null && executed == kArrowFireTick && physics) {
             const Luminumbra::Vec3 from = runner.Avatars().empty()
                 ? npc_origin : runner.Avatars()[controlled].position;
+            const Luminumbra::Vec3 spawn_pos(from.x, from.y + 1.2f, from.z);
+            arrow_body = physics->create_dynamic_sphere(spawn_pos, Luminumbra::Vec3(10.0f, 6.0f, 0.0f), 0.12f);
             arrow_entity = registry.create();
             auto& tf = registry.emplace<Luminumbra::Components::TransformComponent>(arrow_entity);
-            tf.position = Luminumbra::Vec3(from.x, from.y + 1.2f, from.z);
+            tf.position = spawn_pos;
             auto& rep = registry.emplace<Luminumbra::Components::ReplicatedComponent>(arrow_entity);
             rep.network_id = kArrowNetId;
             rep.type_id = 2u; // "arrow"
-            arrow_vel = Luminumbra::Vec3(10.0f, 6.0f, 0.0f); // forward + up
             arrow_active = true;
         }
-        if (arrow_active && registry.valid(arrow_entity)) {
-            auto& tf = registry.get<Luminumbra::Components::TransformComponent>(arrow_entity);
-            arrow_vel.y -= 9.81f * arrow_dt;
-            tf.position += arrow_vel * arrow_dt;
-            const float ground = world_sys ? world_sys->GetTerrainHeightAt(tf.position.x, tf.position.z)
-                                           : npc_origin.y;
-            const bool hit = tf.position.y <= ground;
-            const bool expired = executed > kArrowFireTick + 90; // 3 s @30 Hz
-            if (hit || expired) {
+        if (arrow_active && physics && registry.valid(arrow_entity)) {
+            // Jolt stepped the body in RunFixedTicks above; mirror its position.
+            const Luminumbra::Vec3 apos = physics->get_body_position(arrow_body);
+            registry.get<Luminumbra::Components::TransformComponent>(arrow_entity).position = apos;
+            // Despawn when the body comes to REST on the terrain (Jolt slept it), or it
+            // fell below the world (no collision under it), or it times out -- whichever
+            // first. Reliable removed_id that snapshot either way.
+            const bool rested = executed > kArrowFireTick + 5 && !physics->body_is_active(arrow_body);
+            const bool fell_through = apos.y < npc_origin.y - 30.0f;
+            const bool expired = executed > kArrowFireTick + 60; // 2 s @30 Hz
+            if (rested || fell_through || expired) {
+                physics->destroy_body(arrow_body);
+                arrow_body = JPH::BodyID();
                 registry.destroy(arrow_entity);
                 arrow_entity = entt::null;
                 arrow_active = false;
