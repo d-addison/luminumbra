@@ -13,6 +13,7 @@
 //                  world_hash == world_hash_replay.
 #include <algorithm>
 #include <chrono>
+#include <thread>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -75,6 +76,12 @@ struct ServerCliOptions {
     // --replicate -> replicates typed while in flight, reliable despawn on hit/expire.
     bool arrow = false;
     bool smoke = false;
+    // T-I6: REAL networked multiplayer over TCP sockets (two processes). --net-host
+    // listens; --net-join connects. Same replication stack as --replicate, off-loopback.
+    bool net_host = false;
+    bool net_join = false;
+    std::string host = "127.0.0.1";
+    std::uint16_t port = 27015;
     // T-I5a-2 (A2): WindFieldDeterminism gate. Boots a world, runs N ticks
     // twice, asserts the wind sub-hash is equal across runs + stable, and times
     // the per-tick wind update (budget <= 0.15 ms at the streamed extent).
@@ -225,6 +232,14 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
             if (const char* v = next_value(i)) options.npcs = std::atoi(v);
         } else if (std::strcmp(arg, "--arrow") == 0) {
             options.arrow = true;
+        } else if (std::strcmp(arg, "--net-host") == 0) {
+            options.net_host = true;
+        } else if (std::strcmp(arg, "--net-join") == 0) {
+            options.net_join = true;
+        } else if (std::strcmp(arg, "--host") == 0) {
+            if (const char* v = next_value(i)) options.host = v;
+        } else if (std::strcmp(arg, "--port") == 0) {
+            if (const char* v = next_value(i)) options.port = static_cast<std::uint16_t>(std::atoi(v));
         } else if (std::strcmp(arg, "--artifact") == 0) {
             if (const char* v = next_value(i)) options.artifact_path = v;
         } else {
@@ -2074,6 +2089,130 @@ int RunReplicate(const ServerCliOptions& options) {
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// T-I6: REAL networked multiplayer over actual TCP sockets (TcpTransport). Same
+// authoritative-server replication stack as --replicate, but server and client
+// run as SEPARATE PROCESSES over the wire instead of an in-process loopback.
+// Proves the ILockstepTransport seam end-to-end off-loopback; the Steam/GNS
+// transport drops into this exact seam later. Run: one process --net-host --port
+// P, another --net-join --host H --port P.
+// ---------------------------------------------------------------------------
+int RunNetHost(const ServerCliOptions& options) {
+    Luminumbra::Server::ServerWorldRunnerConfig config = RunnerConfigFrom(options);
+    config.world_id.clear();
+    config.world_name = "Net Host";
+    config.autosave_interval_ticks = 0;
+    if (config.avatar_count <= 1) {
+        config.avatar_count = 2; // need a controlled (id 1) avatar for AOI centring
+    }
+    LUMINUMBRA_CORE_INFO("Net HOST: preset={} seed={} avatars={} ticks={} -- listening on port {}",
+        options.preset, options.seed, config.avatar_count, options.ticks, options.port);
+
+    Luminumbra::Server::ServerWorldRunner runner(std::move(config));
+    if (!runner.Boot()) {
+        LUMINUMBRA_CORE_ERROR("net-host: session failed to boot");
+        return 1;
+    }
+
+    Luminumbra::Net::TcpTransport transport;
+    if (!transport.Listen(options.port, /*timeout_ms=*/30000)) {
+        LUMINUMBRA_CORE_ERROR("net-host: listen/accept failed on port {} (timed out waiting for a client?)",
+            options.port);
+        return 1;
+    }
+    LUMINUMBRA_CORE_INFO("net-host: client connected over TCP.");
+
+    Luminumbra::Net::ReplicationServer server;
+    server.AddClient(/*client_id=*/1, &transport);
+    server.SetAoiChunkRadius(/*chunk_radius=*/3, /*chunk_size_mm=*/Luminumbra::CHUNK_SIZE_X * 1000);
+
+    const std::uint32_t controlled = runner.Avatars().size() > 1 ? 1u : 0u;
+    const float initial_x = runner.Avatars().empty() ? 0.0f : runner.Avatars()[controlled].position.x;
+
+    std::uint64_t executed = 0;
+    while (executed < options.ticks) {
+        server.PumpInbound(); // receive the client's usercmd (newest-wins)
+        if (const Luminumbra::Net::UsercmdMsg* got = server.LatestUsercmd(1)) {
+            runner.SetAvatarMove(got->player_id,
+                                 static_cast<float>(got->move_x) / 32767.0f,
+                                 static_cast<float>(got->move_z) / 32767.0f);
+        }
+        const auto step = runner.RunFixedTicks(1);
+        executed += step.ticks_executed;
+        if (step.ticks_executed == 0) {
+            LUMINUMBRA_CORE_ERROR("net-host: tick {} did not advance", executed + 1);
+            return 1;
+        }
+        const auto states = Luminumbra::World::BuildAvatarReplStates(runner.Avatars());
+        server.BroadcastSnapshot(executed, states); // reliable over TCP
+        if (!transport.IsPeerConnected()) {
+            LUMINUMBRA_CORE_WARN("net-host: peer disconnected at tick {}", executed);
+            break;
+        }
+    }
+    server.PumpInbound(); // drain final ack
+    const float final_x = runner.Avatars().empty() ? 0.0f : runner.Avatars()[controlled].position.x;
+    LUMINUMBRA_CORE_INFO(
+        "net-host: ran {} ticks, {} avatars; client acked seq {}; controlled avatar moved {:.2f} m in X. "
+        "Holding briefly so the last frames flush, then closing.",
+        executed, runner.Avatars().size(), server.AckedSnapshotSeq(1), final_x - initial_x);
+    // Give TCP a moment to flush the final snapshot(s) before the socket closes.
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    transport.Close();
+    return (executed == options.ticks) ? 0 : 1;
+}
+
+int RunNetJoin(const ServerCliOptions& options) {
+    LUMINUMBRA_CORE_INFO("Net JOIN: connecting to {}:{} ...", options.host, options.port);
+    Luminumbra::Net::TcpTransport transport;
+    if (!transport.Connect(options.host, options.port, /*timeout_ms=*/30000)) {
+        LUMINUMBRA_CORE_ERROR("net-join: could not connect to {}:{}", options.host, options.port);
+        return 1;
+    }
+    LUMINUMBRA_CORE_INFO("net-join: connected over TCP.");
+
+    Luminumbra::Net::ReplicationClient client(/*player_id=*/1, &transport);
+
+    std::uint32_t last_seq = 0;
+    std::size_t max_entities = 0;
+    // Pump until we have mirrored the host's full run (seq >= ticks) or it leaves.
+    // Send a +X usercmd each iteration so the host's avatar 1 walks under our input.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    while (std::chrono::steady_clock::now() < deadline) {
+        Luminumbra::Net::UsercmdMsg cmd;
+        cmd.tick = last_seq + 1;
+        cmd.player_id = 1;
+        cmd.move_x = 32767; // +1.0
+        client.SendUsercmd(cmd);
+        client.PumpInbound();
+        if (client.has_snapshot()) {
+            last_seq = client.snapshot().snapshot_seq;
+            max_entities = std::max(max_entities, client.snapshot().entities.size());
+        }
+        if (last_seq >= options.ticks) break;
+        if (!transport.IsPeerConnected() && last_seq > 0) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+
+    const bool ok = client.has_snapshot() && max_entities >= 2 && last_seq > 0;
+    if (!ok) {
+        LUMINUMBRA_CORE_ERROR("net-join: did not mirror the host (has_snapshot={} max_entities={} last_seq={})",
+            client.has_snapshot(), max_entities, last_seq);
+        transport.Close();
+        return 1;
+    }
+    float mirror_x = 0.0f;
+    for (const auto& e : client.snapshot().entities) {
+        if (e.entity_id == 1u) mirror_x = Luminumbra::Net::ReplDequantPos(e.px_mm);
+    }
+    LUMINUMBRA_CORE_INFO(
+        "net-join: mirrored host over TCP -- last seq {}, up to {} entities; controlled avatar (id 1) "
+        "mirrored at x={:.2f} m. Real over-the-wire replication confirmed.",
+        last_seq, max_entities, mirror_x);
+    transport.Close();
+    return 0;
+}
+
 int main(int argc, char* argv[]) {
     Log::Init();
     LUMINUMBRA_CORE_INFO("Luminumbra headless server");
@@ -2121,6 +2260,12 @@ int main(int argc, char* argv[]) {
     }
     if (options.wind_bench) {
         return RunWindBench(options);
+    }
+    if (options.net_host) {
+        return RunNetHost(options);
+    }
+    if (options.net_join) {
+        return RunNetJoin(options);
     }
     if (options.replicate) {
         return RunReplicate(options);
