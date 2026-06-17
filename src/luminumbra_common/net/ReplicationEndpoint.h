@@ -57,7 +57,8 @@ public:
     // connected client (each its own monotonically increasing seq + acked_usercmd_
     // tick). When AOI is enabled the per-client `entities` is filtered to that
     // client's area of interest. (Delta-vs-acked compression is a later step.)
-    void BroadcastSnapshot(std::uint64_t server_tick, const std::vector<ReplEntityState>& entities);
+    void BroadcastSnapshot(std::uint64_t server_tick, const std::vector<ReplEntityState>& entities,
+                           const std::vector<std::uint32_t>& removed_ids = {});
 
     // Drains all currently-available inbound frames from every client: Usercmd
     // (newest-wins) and Ack (monotonic). Non-blocking.
