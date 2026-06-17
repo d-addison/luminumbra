@@ -1,0 +1,270 @@
+# Iteration-6 completion workflow — full SDD/TDD/BDD pipeline over ALL remaining
+# wave work + Steam/multiplayer work.
+#
+#   forge run .forge/workflows/iteration-6-completion.yaml --dry-run   # validate
+#   forge run .forge/workflows/iteration-6-completion.yaml             # execute
+#
+# Drives the canonical Forge cycle for every remaining work item:
+#   assess -> spec -> critique (devil's-advocate + red-team + pre-mortem)
+#   -> BDD scenarios + SDD acceptance->test links -> plan -> decompose to tasks
+#   -> human approval -> TDD-gated execution -> SDD coverage verify -> closeout.
+#
+# PROJECT HARD CONSTRAINTS (echoed into every authoring/execution prompt; these
+# OVERRIDE any default agent behaviour):
+#   * Commit LOCALLY ONLY. NEVER push (the origin remote is a stale predecessor
+#     repo). One commit per landed task.
+#   * Builds/ctest/validators MUST prepend C:\msys64\ucrt64\bin to PATH (KiCad /
+#     mingw64 on PATH otherwise breaks the compiler -- cc1plus exit 127).
+#   * Research BEFORE spec: cite journals/papers/industry talks; never go in blind.
+#   * Determinism contract: sim changes that move world_hash are DELIBERATE, one
+#     bump per commit, re-blessed (heavy oracle + LREC1 replay + lockstep).
+#   * Visual-debt BLOCKs are discharged ONLY by a passing WorldVisualSweep re-run,
+#     never by reclassification.
+#   * Steam transport CANNOT be validated locally (one PC; Steam is one-instance-
+#     per-app). Spec/build it, but defer over-the-wire validation to a 2nd machine;
+#     use the standalone GNS UDP transport (--udp) for local two-process testing.
+
+name: iteration-6-completion
+description: |
+  Spec, critique, plan, task, and execute (SDD/TDD/BDD) all remaining iteration-6
+  wave work (Wave B visual debt, Wave C worldgen realism + multi-anchor scale,
+  Wave D closeout) and the remaining Steam/multiplayer work (Steam P2P + lobby +
+  SDR, multi-client over the wire, runtime join/leave, client render integration).
+
+config:
+  timeout_secs: 28800        # 8h ceiling for the full pipeline
+  model_ceiling: deep
+  headless: false            # human approval gate before execution
+
+tags:
+  - "#workflow:iteration-6-completion"
+  - "#scope:repository"
+  - "#project:luminumbra"
+
+inputs:
+  include_waves:
+    description: "Include the remaining engine/visual wave work (B/C/D)."
+    default: "true"
+  include_multiplayer:
+    description: "Include the remaining Steam/multiplayer work."
+    default: "true"
+  reports_dir:
+    description: "Where assessment + critique reports are written."
+    default: ".forge/reports/iter6-completion"
+
+pipelines:
+  # ----------------------------------------------------------------------------
+  - name: context-phase
+    phase: spec
+    description: "Deterministic, fresh repository context before any AI reasoning."
+    aggregate_within_phase: all_must_pass
+    on_phase_fail: stop
+    steps:
+      - name: context-structure
+        type: deterministic
+        run: 'forge structure'
+        capabilities: { sandbox: workspace-write, egress: none }
+      - name: context-index
+        type: deterministic
+        run: 'forge index'
+        capabilities: { sandbox: workspace-write, egress: none }
+      - name: context-baseline-verify
+        type: deterministic
+        run: 'forge verify --validation-policy warn --testing-policy warn'
+        capabilities: { sandbox: workspace-write, egress: none }
+
+  # ----------------------------------------------------------------------------
+  - name: assess-phase
+    phase: spec
+    description: "Enumerate the concrete remaining work from the live repo state."
+    aggregate_within_phase: all_must_pass
+    on_phase_fail: stop
+    steps:
+      - name: assess-remaining
+        type: ai_dispatch
+        model: deep
+        prompt: |
+          Read .forge/artifacts/engine-frontier/handoff.md, everything under
+          .forge/artifacts/engine-iteration-6/ (WAVE-A-SPEC.md, the shieldrt-*,
+          terrain-fidelity-plan.md, GOAP-LOCOMOTION-SPEC.md, UDP-TRANSPORT-FINDINGS.md,
+          GNS-UDP-STATUS.md, STEAM-TRANSPORT-STATUS.md, STEAMWORKS-SETUP.md), the
+          plan file, and the engine-frontier gate list. Cross-check against the
+          actual code + ctest/gate state.
+
+          Produce {{ inputs.reports_dir }}/remaining.md: the AUTHORITATIVE list of
+          work that is NOT yet done, split into:
+            WAVES (only if include_waves={{ inputs.include_waves }}): Wave B visual
+              debt (GPU grass residual, volumetric clouds tier-2, aurora curtains,
+              ocean/water waves), Wave C (erosion gaps + far-LOD meshing, multi-
+              anchor streaming + server scale), Wave D closeout.
+            MULTIPLAYER (only if include_multiplayer={{ inputs.include_multiplayer }}):
+              Steam P2P + lobby + SDR, multi-client accept over TCP/UDP, runtime
+              join/leave wired into a server mode, client-side render integration
+              of remote players.
+          For each item: current state (done/partial/not-started with evidence),
+          the gap, and the acceptance signal (which gate/test proves it done).
+          Mark anything blocked by the single-PC constraint as "spec+build, defer
+          validation". Honour ALL project hard constraints in this file's header.
+        capabilities: { sandbox: workspace-write, egress: [openai-api] }
+
+  # ----------------------------------------------------------------------------
+  - name: spec-phase
+    phase: spec
+    description: "Author research-cited specs (acceptance criteria as BDD scenarios)."
+    aggregate_within_phase: all_must_pass
+    on_phase_fail: stop
+    steps:
+      - name: spec-waves
+        type: ai_dispatch
+        model: deep
+        prompt: |
+          For each WAVE item in {{ inputs.reports_dir }}/remaining.md, RESEARCH
+          first (cite papers/GDC/SIGGRAPH talks) then write a spec under
+          .forge/specs/iter6/ (one file per item). Each spec: problem, research
+          grounding (citations), design, determinism/world_hash impact, perf
+          budget (300fps / RTX 5070 Ti target), and ACCEPTANCE CRITERIA written as
+          concrete BDD scenarios (Given/When/Then) tied to a named gate
+          (WorldVisualSweep, perf lane, ctest). Skip if include_waves != true.
+        capabilities: { sandbox: workspace-write, egress: [openai-api] }
+      - name: spec-multiplayer
+        type: ai_dispatch
+        model: deep
+        prompt: |
+          For each MULTIPLAYER item in {{ inputs.reports_dir }}/remaining.md,
+          RESEARCH first (cited briefs) then write a spec under .forge/specs/iter6/.
+          Cover: Steam ISteamNetworkingSockets P2P + lobby create/join/invite + SDR
+          relay (builds on SteamNetworkingTransport); multi-client accept (N peers)
+          over the ILockstepTransport seam; runtime join/leave (PruneDisconnected +
+          prune-into-tick already exist); client render integration of remote
+          avatars. Acceptance criteria as BDD scenarios tied to gates
+          (ReplicationSmoke, NetworkedReplication, ReplicationScale). Respect the
+          single-PC constraint: design for validation on a 2nd machine; local
+          proof uses the GNS --udp path. Skip if include_multiplayer != true.
+        capabilities: { sandbox: workspace-write, egress: [openai-api] }
+
+  # ----------------------------------------------------------------------------
+  - name: critique-phase
+    phase: plan
+    description: "Adversarial critique of the specs (devil's advocate + red-team + pre-mortem)."
+    aggregate_within_phase: all_must_pass
+    on_phase_fail: stop
+    steps:
+      - name: critique-specs
+        type: deterministic
+        run: 'forge critique .forge/specs/iter6'
+        capabilities: { sandbox: workspace-write, egress: [openai-api] }
+      - name: red-team-specs
+        type: deterministic
+        run: 'forge red-team .forge/specs/iter6'
+        capabilities: { sandbox: workspace-write, egress: [openai-api] }
+      - name: pre-mortem-specs
+        type: deterministic
+        run: 'forge pre-mortem .forge/specs/iter6'
+        capabilities: { sandbox: workspace-write, egress: [openai-api] }
+      - name: spec-revision
+        type: ai_dispatch
+        model: deep
+        prompt: |
+          Revise the specs under .forge/specs/iter6/ using the critique, red-team,
+          and pre-mortem findings. Resolve every objection as either a spec change,
+          an explicit non-goal, or a follow-up. Keep acceptance criteria as BDD
+          scenarios. Write a one-line disposition per objection to
+          {{ inputs.reports_dir }}/critique-dispositions.md.
+        capabilities: { sandbox: workspace-write, egress: [openai-api] }
+
+  # ----------------------------------------------------------------------------
+  - name: bdd-sdd-phase
+    phase: plan
+    description: "Generate BDD .feature scenarios + link acceptance criteria to tests (SDD)."
+    aggregate_within_phase: all_must_pass
+    on_phase_fail: stop
+    steps:
+      - name: bdd-generate
+        type: deterministic
+        run: 'forge bdd generate'
+        capabilities: { sandbox: workspace-write, egress: [openai-api] }
+      - name: bdd-validate
+        type: deterministic
+        run: 'forge bdd validate'
+        capabilities: { sandbox: read-only, egress: none }
+      - name: sdd-link
+        type: deterministic
+        run: 'forge sdd link'
+        capabilities: { sandbox: workspace-write, egress: [openai-api] }
+
+  # ----------------------------------------------------------------------------
+  - name: plan-phase
+    phase: tasks
+    description: "Plan + decompose the approved specs into a dependency-ordered task graph."
+    aggregate_within_phase: all_must_pass
+    on_phase_fail: stop
+    steps:
+      - name: plan-sequencing
+        type: ai_dispatch
+        model: deep
+        prompt: |
+          Produce a staged execution plan for the specs under .forge/specs/iter6/,
+          written to {{ inputs.reports_dir }}/plan.md. Sequence with the determinism
+          discipline: render-only work first; sim/world_hash-affecting work each in
+          its OWN commit with one deliberate bump, re-blessed; the two ordered bumps
+          (Aetheric-then-erosion) never in one commit. Then emit a Forge task graph
+          to .forge/tasks/iter6-completion/dispatch.json: scoped, dependency-ordered,
+          test-FIRST tasks. Every task's prompt MUST instruct: (1) write/lock the
+          failing BDD/acceptance tests first (forge tdd lock), (2) implement to
+          green, (3) run the relevant engine-frontier gate + ctest with
+          C:\msys64\ucrt64\bin prepended to PATH, (4) commit LOCALLY ONLY, never push.
+        capabilities: { sandbox: workspace-write, egress: [openai-api] }
+      - name: validate-dispatch
+        type: deterministic
+        run: 'forge tasks validate .forge/tasks/iter6-completion/dispatch.json'
+        capabilities: { sandbox: read-only, egress: none }
+
+  # ----------------------------------------------------------------------------
+  - name: approve-phase
+    phase: tasks
+    description: "Human approval gate before any execution."
+    aggregate_within_phase: all_must_pass
+    on_phase_fail: stop
+    steps:
+      - name: approve-execution
+        type: user_interaction
+        prompt: |
+          Review {{ inputs.reports_dir }}/remaining.md, plan.md, the specs under
+          .forge/specs/iter6/, and the task graph
+          .forge/tasks/iter6-completion/dispatch.json before execution.
+        options:
+          - { value: approve, label: "Approve execution" }
+          - { value: reject,  label: "Revise specs/plan" }
+          - { value: diff,    label: "Show task diff" }
+          - { value: quit,    label: "Abort workflow" }
+        capabilities: { sandbox: read-only, egress: none }
+
+  # ----------------------------------------------------------------------------
+  - name: execute-phase
+    phase: execute
+    description: "TDD-gated execution of the approved task graph, then SDD coverage + closeout."
+    aggregate_within_phase: all_must_pass
+    on_phase_fail: stop
+    steps:
+      - name: execute-tasks
+        type: deterministic
+        run: 'forge contracts execute --tasks .forge/tasks/iter6-completion/dispatch.json'
+        capabilities: { sandbox: workspace-write, egress: [openai-api] }
+      - name: sdd-verify-coverage
+        type: deterministic
+        run: 'forge sdd verify'
+        capabilities: { sandbox: read-only, egress: none }
+      - name: closeout-verify
+        type: deterministic
+        run: 'forge verify --validation-policy warn --testing-policy warn'
+        capabilities: { sandbox: workspace-write, egress: none }
+      - name: closeout-handoff
+        type: ai_dispatch
+        model: deep
+        prompt: |
+          Update .forge/artifacts/engine-frontier/handoff.md with what landed this
+          run (per spec: commit, gate evidence, world_hash transitions), the
+          remaining/deferred items (esp. Steam over-the-wire validation pending a
+          2nd machine), and iteration-7 inputs. Confirm every iter-6 visual-debt
+          BLOCK is discharged by a passing WorldVisualSweep, not reclassified.
+        capabilities: { sandbox: workspace-write, egress: [openai-api] }
