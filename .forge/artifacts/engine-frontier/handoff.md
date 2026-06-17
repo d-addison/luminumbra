@@ -101,11 +101,17 @@ for real cross-machine play.
   409 B/snapshot/client (~65 kbps @20Hz, full-set worst case — AOI+delta drop it toward the
   research's ~11-14 kbps). Owner's 20-player target validated in-process.
 
-**Next (real-networking + lifecycle phase):** `SteamNetworkingTransport` (ISteamNetworkingSockets /
-GameNetworkingSockets, owner/LAN-validated — memory `steam-multiplayer-target`); wire Prune into the
-server tick (despawn left players); chunk-index AOI in the live loop; `LocalPlayerPredictor` to a
-controlled client avatar. The in-process stack (P0–P5 first cut) is complete + tested; real
-cross-machine play = the Steam transport drop-in.
+- **P6 research+spec** (`a4c4f0f`): networked heterogeneous entities (NPCs/animals/projectiles).
+  Honest state: server already ticks AI (InstinctSystem) + the pipeline is entity-agnostic; gaps =
+  no server-spawned/replicated AI, no projectiles, no entity type. `research/mp-entities.md`.
+- **P6.0 typed-entity wire model** (`dca9c91`): `ReplEntityState` += `type_id` (archetype→mesh) +
+  `anim_state`/`anim_phase`; `SnapshotMsg` += `removed_ids` (reliable despawn). Round-trip gtest
+  (player/deer/arrow) + 60 net tests + ReplicationSmoke green. Interpolator passes class/anim through.
+
+**Next:** P6.1 server-spawn AI creatures (InstinctSystem ticks on the server) + general
+`BuildEntityReplStates` (walk registry by type) → P6.2 projectile (server Jolt ballistic, typed,
+interpolated). Plus the owner-gated `SteamNetworkingTransport` (real cross-machine play), Prune-into-
+tick despawn, chunk-index AOI. In-process stack P0–P5 complete; P6 adds heterogeneous entities.
 
 ## Iteration 6 (cont., 2026-06-17) — Render-debt wave #1–#4 + #5 spec (tip `3df4347`)
 
