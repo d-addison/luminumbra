@@ -69,6 +69,33 @@ struct NetworkLoopbackConvergenceReport {
     std::vector<NetworkLoopbackCheck> checks;
 };
 
+struct NetworkMultiClientAcceptCheck {
+    std::string name;
+    bool passed = false;
+};
+
+struct NetworkMultiClientAcceptReport {
+    std::string schema;
+    bool passed = false;
+    std::string source;
+    std::string header;
+    std::string portMappingApi;
+    std::string validationApi;
+    std::string artifactWriter;
+    std::string acceptContract;
+    std::uint32_t expectedClientCount = 0;
+    std::uint32_t firstClientId = 0;
+    std::uint32_t lastClientId = 0;
+    std::uint16_t basePort = 0;
+    std::vector<std::uint16_t> tcpAcceptPorts;
+    std::vector<std::uint16_t> udpAcceptPorts;
+    bool tcpAcceptsAllExpectedClients = false;
+    bool udpAcceptsAllExpectedClients = false;
+    bool uniquePlayerIds = false;
+    bool deterministicPortMapping = false;
+    std::vector<NetworkMultiClientAcceptCheck> checks;
+};
+
 NetworkLoopbackConvergenceReport BuildNetworkLoopbackConvergenceFixture(
     const std::string& buildPreset = "debug");
 
@@ -81,5 +108,25 @@ bool NetworkLoopbackAuthorityMeetsBaseline(
 bool WriteNetworkLoopbackConvergenceArtifact(
     const std::string& path,
     const std::string& buildPreset = "debug");
+
+bool TryNetworkMultiClientAcceptPortForClient(
+    std::uint16_t basePort,
+    std::uint32_t clientId,
+    std::uint16_t& outPort);
+
+NetworkMultiClientAcceptReport BuildNetworkMultiClientAcceptFixture(
+    std::uint32_t expectedClientCount = 2,
+    std::uint16_t basePort = 27015);
+
+std::string SerializeNetworkMultiClientAcceptJson(
+    const NetworkMultiClientAcceptReport& report);
+
+bool NetworkMultiClientAcceptMeetsBaseline(
+    const NetworkMultiClientAcceptReport& report);
+
+bool WriteNetworkMultiClientAcceptArtifact(
+    const std::string& path,
+    std::uint32_t expectedClientCount = 2,
+    std::uint16_t basePort = 27015);
 
 } // namespace luminumbra::network
