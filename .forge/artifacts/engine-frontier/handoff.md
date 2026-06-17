@@ -24,8 +24,14 @@ owner ("research then spec then plan, don't go in blind" — see memory `researc
   deterministic (`--smoke --avatars 3` entities `54d55979ebbffb34`, run==replay). Full ctest
   **266/266** (+5 gtests).
 
-**Next:** P2 (avatars get Jolt physics bodies — server-authoritative collision), then P3 (UDP
-replication + AOI + prediction — the weeks-scale netcode leg), P4 join/leave, P5 scale to 20+.
+- **P2 — server-authoritative avatar physics** (`b97f155`): per-avatar Jolt `CharacterVirtual`
+  capsule (additive; client singleton untouched), gravity + world collision, player_id-order
+  stepping (deterministic). `--smoke --avatars 3` → 3/3 grounded (y=35.41 settled), run==replay;
+  default 0-avatar lane byte-identical (`f17726d44054d133`). Full ctest 266/266.
+
+**Next:** P3 (UDP transport + snapshot replication + AOI on the chunk index + client prediction —
+the weeks-scale netcode leg; dynamic-prop collision rides P3's replication channel), P4
+join/leave, P5 scale to 20+.
 
 ## Iteration 6 (cont., 2026-06-17) — Render-debt wave #1–#4 + #5 spec (tip `3df4347`)
 

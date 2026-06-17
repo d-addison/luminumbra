@@ -99,11 +99,13 @@ gated on owner confirmation of the pivot.
   not the chunk+wind+weather+aether composite; 0 avatars → byte-identical `f17726d44054d133` /
   `entities 5735a5094c1e92a8`). Avatar lane validated via `--smoke --avatars 3` (entities
   `54d55979ebbffb34`, run==replay) + 5 gtests. Full ctest 266/266. Closes B2.
-- **P2 — server-authoritative physics for avatars + props (Q3 Garry's-Mod model).** Players +
-  dynamic props in the server Jolt world; inter-entity collision. STATE-SYNC replication model
-  (server is final arbiter; client ownership is a prediction hint, not hand-off) per
-  `mp-networked-physics.md` — deterministic-lockstep physics rejected. Part of the P1
-  avatar/physics bump or an immediately-following one. Full physics (not kinematic).
+- **P2 — server-authoritative avatar physics. ✅ DONE (`b97f155`).** Per-avatar Jolt
+  `CharacterVirtual` capsule (additive — separate from the singleton client player); gravity +
+  world collision, stepped in player_id order (deterministic same-binary). Avatars settle on
+  terrain (`--smoke --avatars 3`: 3/3 grounded, y=35.41, run==replay); default 0-avatar lane
+  byte-identical (`f17726d44054d133`). Dynamic-PROP collision + the STATE-SYNC replication of
+  prop bodies (`mp-networked-physics.md`) lands with P3 (props need the replication channel).
+  Full ctest 266/266.
 - **P3 — replication protocol (authoritative snapshots + delta + prediction + AOI).** Per
   `mp-replication.md` + `mp-interest-management.md` + `mp-prediction-reconciliation.md`:
   - **P3.0 (prerequisite): UDP transport** behind the transport seam — state over unreliable
