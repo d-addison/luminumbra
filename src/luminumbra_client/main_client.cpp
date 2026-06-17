@@ -2872,7 +2872,8 @@ int main(int argc, char* argv[]) {
                     if (!skinned_mesh_spawn_attempted) {
                         skinned_mesh_spawn_attempted = true;
                         skinned_mesh_visual_target = SpawnSkinnedMeshVisualEntity(
-                            gameSession.get(), scenario_config.artifact_dir);
+                            gameSession.get(), scenario_config.artifact_dir,
+                            std::max(1, scenario_config.avatars));
                     }
                     ApplySkinnedMeshVisualCamera(g_camera.get(), skinned_mesh_visual_target);
                 } else if (scenario_config.creature_slice_smoke() && scenario_ready && g_camera) {
