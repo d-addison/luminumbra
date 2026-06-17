@@ -113,10 +113,19 @@ for real cross-machine play.
   yaw from rotation, sorted by network_id). The ECS→wire bridge server NPCs/animals/projectiles use.
   gtest (player/deer/arrow) + full ctest 294/294.
 
-**Next:** P6.1b server-spawn AI creatures (InstinctSystem ticks on the server) tagged
-`ReplicatedComponent` → fed through `BuildEntityReplStates` into the snapshot → P6.2 projectile
-(server Jolt ballistic, typed, reliable despawn). Owner-gated: `SteamNetworkingTransport` (real
-cross-machine play). Also: Prune-into-tick despawn, chunk-index AOI.
+- **P6.1b/P6.2/P6.3 server entities WITH REAL PHYSICS** (`1099d7c`/`ac31692`/`810da73`/`53d53d4`):
+  `--replicate --npcs N --arrow` spawns server-side replicated NPCs + a projectile, merged into the
+  snapshot via `BuildEntityReplStates`, client mirrors them typed. Owner asked "do AI + arrows have
+  physics?" → now YES for all three classes: avatars = Jolt CharacterVirtual (P2), NPCs/animals =
+  Jolt CharacterVirtual + wander wish (P6.3b), arrow = Jolt dynamic rigid body (gravity + terrain
+  collision, CCD) with reliable despawn (P6.3a). `PhysicsSystem::create_dynamic_sphere/get_body_
+  position/body_is_active/destroy_body` added. Verified --avatars 4 --npcs 3 --arrow → npcs_ok +
+  arrow_ok + passed; gate + 294/294 ctest unaffected. world_hash-neutral.
+
+**Next:** GOAP-driven NPC behaviour (the InstinctSystem brain on the server) vs the placeholder
+wander; the owner-gated `SteamNetworkingTransport` (real cross-machine play); Prune-into-tick
+despawn for left players; chunk-index AOI. The in-process multiplayer stack (P0–P6) is complete +
+tested with real physics across players, NPCs, and projectiles.
 
 ## Iteration 6 (cont., 2026-06-17) — Render-debt wave #1–#4 + #5 spec (tip `3df4347`)
 
