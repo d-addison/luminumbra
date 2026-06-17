@@ -1,5 +1,7 @@
 #include "ReplicationEndpoint.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdlib> // std::llabs
 
 namespace Luminumbra::Net {
@@ -94,6 +96,69 @@ void ReplicationClient::SendUsercmd(const UsercmdMsg& cmd) {
     m_transport->SendFrame(EncodeUsercmd(cmd), FrameDelivery::Unreliable);
     m_latest_usercmd_tick = cmd.tick;
     m_sent_any_usercmd = true;
+}
+
+void SnapshotInterpolator::Push(const SnapshotMsg& snap) {
+    // Insert keeping the buffer sorted ascending by server_tick; replace on an
+    // equal tick (newest wins for that tick).
+    auto it = std::lower_bound(m_buf.begin(), m_buf.end(), snap.server_tick,
+                               [](const SnapshotMsg& s, std::uint64_t t) { return s.server_tick < t; });
+    if (it != m_buf.end() && it->server_tick == snap.server_tick) {
+        *it = snap;
+    } else {
+        m_buf.insert(it, snap);
+    }
+    // Evict the oldest beyond the cap.
+    while (m_buf.size() > m_max) {
+        m_buf.erase(m_buf.begin());
+    }
+}
+
+std::vector<ReplEntityState> SnapshotInterpolator::Sample(double tick_time) const {
+    if (m_buf.empty()) return {};
+    // Clamp outside the buffered range (no extrapolation).
+    if (tick_time <= static_cast<double>(m_buf.front().server_tick)) return m_buf.front().entities;
+    if (tick_time >= static_cast<double>(m_buf.back().server_tick)) return m_buf.back().entities;
+
+    // Find the bracketing pair a.tick <= tick_time < b.tick.
+    std::size_t bi = 0;
+    while (bi < m_buf.size() && static_cast<double>(m_buf[bi].server_tick) <= tick_time) ++bi;
+    const SnapshotMsg& a = m_buf[bi - 1];
+    const SnapshotMsg& b = m_buf[bi];
+    const double span = static_cast<double>(b.server_tick) - static_cast<double>(a.server_tick);
+    const double frac = span > 0.0 ? (tick_time - static_cast<double>(a.server_tick)) / span : 0.0;
+
+    auto lerp_i32 = [frac](std::int32_t lo, std::int32_t hi) {
+        return static_cast<std::int32_t>(std::llround(static_cast<double>(lo) +
+                                                      frac * (static_cast<double>(hi) - static_cast<double>(lo))));
+    };
+    auto lerp_i16 = [frac](std::int16_t lo, std::int16_t hi) {
+        return static_cast<std::int16_t>(std::llround(static_cast<double>(lo) +
+                                                      frac * (static_cast<double>(hi) - static_cast<double>(lo))));
+    };
+
+    // Lerp entities present in BOTH; pass through entities only in `b` (newer).
+    std::vector<ReplEntityState> out;
+    out.reserve(b.entities.size());
+    for (const ReplEntityState& be : b.entities) {
+        const ReplEntityState* ae = nullptr;
+        for (const ReplEntityState& cand : a.entities) {
+            if (cand.entity_id == be.entity_id) { ae = &cand; break; }
+        }
+        if (ae == nullptr) {
+            out.push_back(be);
+            continue;
+        }
+        ReplEntityState e = be;
+        e.px_mm = lerp_i32(ae->px_mm, be.px_mm);
+        e.py_mm = lerp_i32(ae->py_mm, be.py_mm);
+        e.pz_mm = lerp_i32(ae->pz_mm, be.pz_mm);
+        // NOTE: linear yaw lerp (no shortest-arc wrap); fine for the small per-
+        // snapshot deltas at 15-20 Hz, revisit if a wrap glitch ever shows.
+        e.yaw_mrad = lerp_i16(ae->yaw_mrad, be.yaw_mrad);
+        out.push_back(e);
+    }
+    return out;
 }
 
 void ReplicationClient::PumpInbound() {

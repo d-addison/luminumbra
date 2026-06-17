@@ -91,4 +91,40 @@ private:
     bool m_sent_any_usercmd = false;
 };
 
+// T-I6 P3.3: client-side REMOTE-ENTITY INTERPOLATION (research mp-prediction-
+// reconciliation.md). Snapshots arrive at ~15-20 Hz; the client RENDERS remote
+// entities at a time slightly in the past (render-behind) and LERPs between the
+// two bracketing snapshots, so motion is smooth between updates. The time axis is
+// the server_tick the snapshot carries (no wall-clock here -- the caller supplies
+// the render tick-time, typically newest_tick - interp_delay_ticks). No
+// EXTRAPOLATION past the newest snapshot (clamp) -- walking avatars change
+// direction abruptly, so extrapolation overshoots (research default).
+class SnapshotInterpolator {
+public:
+    explicit SnapshotInterpolator(std::size_t max_buffer = 32) : m_max(max_buffer) {}
+
+    // Buffer a snapshot (kept sorted ascending by server_tick; duplicates by tick
+    // replace; oldest evicted past max_buffer). Snapshots should already be most-
+    // recent-wins de-duped upstream (SnapshotReceiver) but out-of-order pushes are
+    // tolerated.
+    void Push(const SnapshotMsg& snap);
+
+    // Interpolated entity states at fractional server tick `tick_time`. Entities in
+    // BOTH bracketing snapshots are position/yaw-lerped; entities in only one are
+    // passed through. Clamps to the nearest snapshot outside the buffered range.
+    [[nodiscard]] std::vector<ReplEntityState> Sample(double tick_time) const;
+
+    [[nodiscard]] bool empty() const { return m_buf.empty(); }
+    [[nodiscard]] std::size_t buffered() const { return m_buf.size(); }
+    // Newest buffered server_tick (0 if empty) -- the caller subtracts the interp
+    // delay from this to get the render tick-time.
+    [[nodiscard]] std::uint64_t newest_tick() const {
+        return m_buf.empty() ? 0u : m_buf.back().server_tick;
+    }
+
+private:
+    std::vector<SnapshotMsg> m_buf; // ascending by server_tick
+    std::size_t m_max;
+};
+
 } // namespace Luminumbra::Net
