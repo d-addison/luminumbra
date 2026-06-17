@@ -30,6 +30,8 @@
 #include "luminumbra_common/net/ReplicationProtocol.h"
 #include "luminumbra_common/world/PlayerAvatar.h"
 #include "luminumbra_common/components/CoreComponents.h"
+#include "luminumbra_common/components/InstinctComponents.h"
+#include "luminumbra_common/ai/InstinctLocomotionSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/replay/ReplayStream.h"
 
@@ -1758,8 +1760,33 @@ int RunReplicate(const ServerCliOptions& options) {
     auto* npc_physics = runner.Session()->GetPhysicsSystem();
     const Luminumbra::Vec3 npc_origin = runner.Session()->GetMetadata().spawnPoint;
     // P6.3b: each NPC is a real Jolt CharacterVirtual (the same physics body the
-    // avatars use -- gravity + terrain collision), driven by a wander wish velocity.
-    struct NpcRec { entt::entity e; std::size_t char_index; };
+    // avatars use -- gravity + terrain collision). T-I6 polish: instead of a
+    // meaningless circle-wander, each NPC is a GOAP agent that PLANS toward a water
+    // opportunity and the InstinctLocomotionSystem steers it there (seek + arrival).
+    //
+    // The water "opportunity" is a positioned entity the planner ranks and the
+    // locomotion executor steers toward. Placed a short walk from the NPC line so
+    // the animals visibly converge on it. Engine-generic: the action string is
+    // game data; the executor only follows the planned target's transform.
+    entt::entity water_opportunity = entt::null;
+    if (options.npcs > 0) {
+        const float wx = npc_origin.x + 2.0f;
+        const float wz = npc_origin.z + 14.0f; // ahead of the NPC line
+        const float wy = world_sys ? world_sys->GetTerrainHeightAt(wx, wz) : npc_origin.y;
+        water_opportunity = registry.create();
+        auto& otf = registry.emplace<Luminumbra::Components::TransformComponent>(water_opportunity);
+        otf.position = Luminumbra::Vec3(wx, wy, wz);
+        auto& opp = registry.emplace<Luminumbra::Components::OpportunityComponent>(water_opportunity);
+        opp.id = "water-hole";
+        opp.action = "drink";
+        opp.target = "water-hole";
+        opp.need = "thirst";
+        opp.satisfaction = 1.0f;
+        opp.urgency = 1.0f;
+        opp.radius = 0.0f; // unbounded: always a candidate
+    }
+
+    struct NpcRec { entt::entity e; std::size_t char_index; Luminumbra::Vec3 start; };
     std::vector<NpcRec> npc_recs;
     for (int i = 0; i < options.npcs; ++i) {
         const float bx = npc_origin.x + 6.0f + static_cast<float>(i) * 2.0f;
@@ -1773,7 +1800,19 @@ int RunReplicate(const ServerCliOptions& options) {
         auto& rep = registry.emplace<Luminumbra::Components::ReplicatedComponent>(e);
         rep.network_id = 1000u + static_cast<std::uint32_t>(i); // distinct from avatar ids
         rep.type_id = 1u;  // "animal" archetype (client picks the mesh)
-        npc_recs.push_back({e, ci});
+        // GOAP agent: needs drive planning; the planner (GameSession tick slot 2)
+        // writes the winning action into ActionPlanComponent each replan.
+        auto& agent = registry.emplace<Luminumbra::Components::InstinctAgentComponent>(e);
+        agent.actor_id = "npc-" + std::to_string(i);
+        agent.archetype = "animal";
+        agent.replan_interval_ticks = 10;
+        auto& needs = registry.emplace<Luminumbra::Components::NeedsComponent>(e);
+        needs.needs = {Luminumbra::Components::Need{"thirst", 0.8f, 0.005f}};
+        auto& loco = registry.emplace<Luminumbra::Components::LocomotionProfile>(e);
+        loco.move_speed = 2.0f;
+        loco.arrival_radius = 1.5f;
+        loco.slow_radius = 4.0f;
+        npc_recs.push_back({e, ci, Luminumbra::Vec3(bx, by, bz)});
     }
 
     // P6.2: one server-authoritative ballistic ARROW (type_id 2). Fired at tick 10,
@@ -1802,15 +1841,23 @@ int RunReplicate(const ServerCliOptions& options) {
                                  static_cast<float>(got->move_x) / 32767.0f,
                                  static_cast<float>(got->move_z) / 32767.0f);
         }
-        // P6.3b: set each NPC's wander WISH velocity (a slow per-NPC circle) before the
-        // physics step, so update_avatars (in RunFixedTicks) walks the CharacterVirtual
-        // with real gravity + terrain collision.
+        // T-I6 polish: GOAP-driven NPC locomotion. The planner ran inside the
+        // PREVIOUS RunFixedTicks (GameSession tick slot 2) and wrote each NPC's
+        // ActionPlanComponent; the locomotion executor turns that plan into a wish
+        // velocity toward the planned target (seek + arrival). One-tick coupling
+        // (plan from N-1 steers N) -- the same pattern the avatar usercmd uses --
+        // and fully deterministic (pure function of registry state). Set the wish
+        // BEFORE the step so update_avatars (in RunFixedTicks) walks the
+        // CharacterVirtual with real gravity + terrain collision.
         if (npc_physics) {
-            const float tw = static_cast<float>(executed) * 0.08f;
+            luminumbra::ai::RunInstinctLocomotionOnTick(registry);
             for (std::size_t i = 0; i < npc_recs.size(); ++i) {
-                const float ph = tw + static_cast<float>(i);
-                npc_physics->set_avatar_wish_velocity(npc_recs[i].char_index,
-                                                      glm::vec2(1.5f * std::cos(ph), 1.5f * std::sin(ph)));
+                glm::vec2 wish(0.0f);
+                if (const auto* intent = registry.try_get<
+                        Luminumbra::Components::LocomotionIntentComponent>(npc_recs[i].e)) {
+                    wish = intent->wish_xz;
+                }
+                npc_physics->set_avatar_wish_velocity(npc_recs[i].char_index, wish);
             }
         }
 
@@ -1904,6 +1951,29 @@ int RunReplicate(const ServerCliOptions& options) {
         }
     }
     const bool npcs_ok = npc_seen == static_cast<std::size_t>(options.npcs);
+    // T-I6 polish: verify the GOAP locomotion actually STEERED the NPCs -- every
+    // NPC must have ended meaningfully CLOSER to the water hole it planned toward
+    // (not just replicated). This is the behavioural assert for action->locomotion.
+    bool npcs_approached_water = true;
+    double min_npc_approach_m = 1e9;
+    if (options.npcs > 0 && water_opportunity != entt::null && registry.valid(water_opportunity)) {
+        const Luminumbra::Vec3 w =
+            registry.get<Luminumbra::Components::TransformComponent>(water_opportunity).position;
+        auto dist_xz = [&](const Luminumbra::Vec3& p) {
+            const float dx = p.x - w.x, dz = p.z - w.z;
+            return std::sqrt(dx * dx + dz * dz);
+        };
+        for (const NpcRec& n : npc_recs) {
+            if (!registry.valid(n.e)) { npcs_approached_water = false; continue; }
+            const Luminumbra::Vec3 end =
+                registry.get<Luminumbra::Components::TransformComponent>(n.e).position;
+            const double approached = static_cast<double>(dist_xz(n.start) - dist_xz(end));
+            min_npc_approach_m = std::min(min_npc_approach_m, approached);
+            if (approached < 2.0) npcs_approached_water = false; // >= 2 m closer
+        }
+    } else {
+        min_npc_approach_m = 0.0;
+    }
     // P6.2: if an arrow was fired, the client must have SEEN it (typed) in flight AND
     // received its reliable despawn.
     const bool arrow_ok = !options.arrow || (arrow_seen_by_client && arrow_despawn_signalled);
@@ -1926,7 +1996,8 @@ int RunReplicate(const ServerCliOptions& options) {
     // est kbps per client = bytes * a realistic 20 Hz snapshot rate * 8 / 1000.
     const std::size_t snapshot_bytes = server.last_broadcast_max_client_bytes();
     const double est_kbps_per_client = static_cast<double>(snapshot_bytes) * 20.0 * 8.0 / 1000.0;
-    const bool passed = size_ok && ids_ok && npcs_ok && arrow_ok && max_pos_err < 0.01 && acked && moved &&
+    const bool passed = size_ok && ids_ok && npcs_ok && npcs_approached_water && arrow_ok &&
+                        max_pos_err < 0.01 && acked && moved &&
                         executed == options.ticks;
 
     nlohmann::json artifact{
@@ -1948,6 +2019,8 @@ int RunReplicate(const ServerCliOptions& options) {
         {"npc_count", options.npcs},
         {"npcs_replicated", npc_seen},
         {"npcs_ok", npcs_ok},
+        {"npcs_approached_water", npcs_approached_water},
+        {"min_npc_approach_m", min_npc_approach_m},
         {"arrow_fired", options.arrow},
         {"arrow_seen_by_client", arrow_seen_by_client},
         {"arrow_despawn_signalled", arrow_despawn_signalled},
@@ -1979,15 +2052,19 @@ int RunReplicate(const ServerCliOptions& options) {
 
     if (!passed) {
         LUMINUMBRA_CORE_ERROR(
-            "Replicate smoke FAILED: size_ok={} ids_ok={} max_pos_err={:.4f} acked={} moved={} (dx={:.2f}) ticks={}/{}",
-            size_ok, ids_ok, max_pos_err, acked, moved, final_x - initial_x, executed, options.ticks);
+            "Replicate smoke FAILED: size_ok={} ids_ok={} npcs_ok={} npcs_approached_water={} (min {:.2f} m) "
+            "arrow_ok={} max_pos_err={:.4f} acked={} moved={} (dx={:.2f}) ticks={}/{}",
+            size_ok, ids_ok, npcs_ok, npcs_approached_water, min_npc_approach_m, arrow_ok,
+            max_pos_err, acked, moved, final_x - initial_x, executed, options.ticks);
         return 1;
     }
     LUMINUMBRA_CORE_INFO(
         "Replicate smoke passed: {} avatars mirrored to client (seq={}, acked_seq={}, max_pos_err={:.4f} m); "
-        "network input walked avatar {} +{:.2f} m in X; bandwidth {} B/snapshot/client (~{:.1f} kbps @20Hz)",
+        "network input walked avatar {} +{:.2f} m in X; {} GOAP NPCs approached water (min {:.2f} m closer); "
+        "bandwidth {} B/snapshot/client (~{:.1f} kbps @20Hz)",
         avatars.size(), client.snapshot().snapshot_seq, server.AckedSnapshotSeq(1), max_pos_err,
-        controlled, final_x - initial_x, snapshot_bytes, est_kbps_per_client);
+        controlled, final_x - initial_x, options.npcs, min_npc_approach_m,
+        snapshot_bytes, est_kbps_per_client);
     return 0;
 }
 

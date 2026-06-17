@@ -4337,7 +4337,12 @@ function Test-ReplicationSmoke {
         Remove-Item $artifactPath
     }
 
-    & $serverExe --replicate --avatars 4 --ticks 60 --artifact $artifactPath
+    # T-I6 polish: exercise the full heterogeneous-entity path -- GOAP-driven NPCs
+    # (animals that PLAN toward a water hole and are steered there by the
+    # InstinctLocomotionSystem) + a server-authoritative ballistic arrow with a
+    # reliable despawn -- so the gate locks the action->locomotion behaviour, not
+    # just avatar mirroring. 120 ticks gives the NPCs time to converge on water.
+    & $serverExe --replicate --avatars 4 --npcs 3 --arrow --ticks 120 --artifact $artifactPath
     if ($LASTEXITCODE -ne 0) {
         throw "replication smoke exited with code $LASTEXITCODE"
     }
@@ -4345,7 +4350,7 @@ function Test-ReplicationSmoke {
     $analysis = Read-JsonArtifact $artifactPath "luminumbra.replication_smoke.v1"
     Assert-ArtifactPassed $analysis "ReplicationSmoke"
     if (-not $analysis.size_ok) {
-        throw "replication smoke: client entity count did not match the server avatars"
+        throw "replication smoke: client entity count did not match the server avatars + NPCs"
     }
     if (-not $analysis.ids_ok) {
         throw "replication smoke: replicated entity ids did not match the server avatars"
@@ -4356,12 +4361,22 @@ function Test-ReplicationSmoke {
     if (-not $analysis.input_moved_avatar) {
         throw "replication smoke: network input did not move the controlled avatar (dx=$($analysis.controlled_dx_m) m)"
     }
+    if (-not $analysis.npcs_ok) {
+        throw "replication smoke: NPCs did not all replicate as typed entities ($($analysis.npcs_replicated)/$($analysis.npc_count))"
+    }
+    if (-not $analysis.npcs_approached_water) {
+        throw "replication smoke: GOAP NPCs did not steer to the water hole (min approach $($analysis.min_npc_approach_m) m, need >= 2 m)"
+    }
+    if (-not $analysis.arrow_ok) {
+        throw "replication smoke: arrow was not seen in flight + reliably despawned (seen=$($analysis.arrow_seen_by_client) despawn=$($analysis.arrow_despawn_signalled))"
+    }
     if ([double]$analysis.max_position_error_m -ge 0.01) {
         throw "replication smoke: replicated position error too large ($($analysis.max_position_error_m) m)"
     }
-    Write-Host ("ReplicationSmoke gate passed: {0} avatars mirrored to client (seq={1}, acked={2}, max_pos_err={3} m); network input walked avatar {4} +{5} m" -f `
+    Write-Host ("ReplicationSmoke gate passed: {0} avatars mirrored (seq={1}, acked={2}, max_pos_err={3} m); input walked avatar {4} +{5} m; {6} GOAP NPCs approached water (min {7} m); arrow_ok={8}" -f `
         $analysis.avatar_count, $analysis.final_snapshot_seq, $analysis.acked_snapshot_seq, `
-        $analysis.max_position_error_m, $analysis.controlled_avatar, $analysis.controlled_dx_m)
+        $analysis.max_position_error_m, $analysis.controlled_avatar, $analysis.controlled_dx_m, `
+        $analysis.npc_count, $analysis.min_npc_approach_m, $analysis.arrow_ok)
 }
 
 function Test-AetherFieldDeterminism {
