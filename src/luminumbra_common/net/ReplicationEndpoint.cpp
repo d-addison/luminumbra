@@ -3,6 +3,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib> // std::llabs
+#include <map>
+#include <set>
+#include <utility>
+#include <vector>
 
 namespace Luminumbra::Net {
 
@@ -21,6 +25,11 @@ std::vector<std::uint32_t> ReplicationServer::PruneDisconnectedClients() {
     for (auto it = m_clients.begin(); it != m_clients.end();) {
         if (it->second.transport && !it->second.transport->IsPeerConnected()) {
             removed.push_back(it->first);
+            // T-I6 polish: PRUNE-INTO-TICK. Enqueue the leaver's avatar id (id ==
+            // client_id) so the very next BroadcastSnapshot folds it into removed_ids
+            // and tells surviving clients to despawn the ghost -- in the same tick the
+            // disconnect was detected, repeated for unreliable-delivery robustness.
+            m_pending_removed_ids[it->first] = kRemovalRepeatBroadcasts;
             it = m_clients.erase(it);
         } else {
             ++it;
@@ -34,6 +43,37 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
                                           const std::vector<std::uint32_t>& removed_ids) {
     m_last_broadcast_total_bytes = 0;
     m_last_broadcast_max_client_bytes = 0;
+
+    // T-I6 polish: PRUNE-INTO-TICK. Merge the caller's explicit despawns (e.g. a
+    // spent arrow) with the pending leaver despawns enqueued by
+    // PruneDisconnectedClients, deduped + sorted for a deterministic wire order.
+    std::vector<std::uint32_t> merged_removed;
+    {
+        std::set<std::uint32_t> ids(removed_ids.begin(), removed_ids.end());
+        for (const auto& [id, count] : m_pending_removed_ids) {
+            if (count > 0) ids.insert(id);
+        }
+        merged_removed.assign(ids.begin(), ids.end()); // std::set -> sorted ascending
+    }
+
+    // T-I6 polish: CHUNK-INDEX AOI. Bucket every entity by its horizontal (X/Z)
+    // streaming chunk ONCE, so each client's scope is a cheap neighbourhood gather
+    // instead of an all-entities distance scan. floor-divide handles negative
+    // coordinates so chunk boundaries are stable across the origin.
+    const bool chunk_aoi = m_aoi_chunk_radius >= 0 && m_aoi_chunk_size_mm > 0;
+    auto chunk_idx = [](std::int64_t v, std::int64_t cs) -> std::int64_t {
+        return (v >= 0) ? (v / cs) : -((-v + cs - 1) / cs);
+    };
+    std::map<std::pair<std::int64_t, std::int64_t>, std::vector<const ReplEntityState*>> buckets;
+    if (chunk_aoi) {
+        for (const ReplEntityState& e : entities) {
+            const std::pair<std::int64_t, std::int64_t> key{
+                chunk_idx(e.px_mm, m_aoi_chunk_size_mm),
+                chunk_idx(e.pz_mm, m_aoi_chunk_size_mm)};
+            buckets[key].push_back(&e);
+        }
+    }
+
     for (auto& [client_id, link] : m_clients) {
         if (!link.transport) continue;
         SnapshotMsg snap;
@@ -41,36 +81,53 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
         snap.snapshot_seq = link.next_snapshot_seq++;
         snap.acked_usercmd_tick = link.inbound.has_command() ? link.inbound.latest().tick : 0u;
 
-        // T-I6 P3.2: AOI scoping. With a radius set, scope this client's entity set
-        // to entities within `radius` of its OWN avatar (entity_id == client_id);
-        // the own avatar is always included. Box-cull before the squared compare to
-        // keep the int64 distance math overflow-safe at large world coordinates.
+        // Locate this client's own avatar (entity_id == client_id) -- the AOI centre;
+        // it is ALWAYS included even if scoping would exclude it.
         const ReplEntityState* center = nullptr;
-        if (m_aoi_radius_mm > 0) {
-            for (const ReplEntityState& e : entities) {
-                if (e.entity_id == client_id) { center = &e; break; }
-            }
+        for (const ReplEntityState& e : entities) {
+            if (e.entity_id == client_id) { center = &e; break; }
         }
-        if (center == nullptr) {
-            snap.entities = entities; // AOI disabled, or this client has no avatar yet
-        } else {
-            const std::int64_t r = m_aoi_radius_mm;
-            const std::int64_t r2 = r * r;
+
+        if (center != nullptr && chunk_aoi) {
+            // Gather the (2r+1)^2 chunk neighbourhood of the centre, then sort by
+            // entity_id to reproduce the canonical (network-id) wire order.
+            const std::int64_t ccx = chunk_idx(center->px_mm, m_aoi_chunk_size_mm);
+            const std::int64_t ccz = chunk_idx(center->pz_mm, m_aoi_chunk_size_mm);
+            const int r = m_aoi_chunk_radius;
+            std::vector<const ReplEntityState*> gathered;
+            for (int dx = -r; dx <= r; ++dx) {
+                for (int dz = -r; dz <= r; ++dz) {
+                    const auto it = buckets.find({ccx + dx, ccz + dz});
+                    if (it == buckets.end()) continue;
+                    for (const ReplEntityState* p : it->second) gathered.push_back(p);
+                }
+            }
+            std::sort(gathered.begin(), gathered.end(),
+                      [](const ReplEntityState* a, const ReplEntityState* b) {
+                          return a->entity_id < b->entity_id;
+                      });
+            snap.entities.reserve(gathered.size());
+            for (const ReplEntityState* p : gathered) snap.entities.push_back(*p);
+        } else if (center != nullptr && m_aoi_radius_mm > 0) {
+            // T-I6 P3.2: mm-radius AOI. Box-cull before the squared compare to keep
+            // the int64 distance math overflow-safe at large world coordinates.
+            const std::int64_t rr = m_aoi_radius_mm;
+            const std::int64_t r2 = rr * rr;
             for (const ReplEntityState& e : entities) {
                 const bool is_self = e.entity_id == client_id;
                 const std::int64_t dx = static_cast<std::int64_t>(e.px_mm) - center->px_mm;
                 const std::int64_t dy = static_cast<std::int64_t>(e.py_mm) - center->py_mm;
                 const std::int64_t dz = static_cast<std::int64_t>(e.pz_mm) - center->pz_mm;
                 if (is_self ||
-                    (std::llabs(dx) <= r && std::llabs(dy) <= r && std::llabs(dz) <= r &&
+                    (std::llabs(dx) <= rr && std::llabs(dy) <= rr && std::llabs(dz) <= rr &&
                      dx * dx + dy * dy + dz * dz <= r2)) {
                     snap.entities.push_back(e);
                 }
             }
+        } else {
+            snap.entities = entities; // AOI disabled, or this client has no avatar yet
         }
-        // P6: explicit despawns (e.g. a spent arrow). Passed through to every client
-        // (AOI-scoped despawn filtering is a later refinement; the set is tiny).
-        snap.removed_ids = removed_ids;
+        snap.removed_ids = merged_removed;
         // State snapshots are UNRELIABLE: a dropped one is superseded by the next
         // (most-recent-wins). Over Steam this maps to k_nSteamNetworkingSend_Unreliable.
         const std::vector<std::uint8_t> frame = EncodeSnapshot(snap);
@@ -79,6 +136,17 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
             m_last_broadcast_max_client_bytes = frame.size();
         }
         link.transport->SendFrame(frame, FrameDelivery::Unreliable);
+    }
+
+    // Decay the pending despawns: each was just sent to every surviving client this
+    // broadcast; drop the repeat count and erase exhausted ids. Repeating across a
+    // few unreliable snapshots makes a dropped despawn vanishingly unlikely.
+    for (auto it = m_pending_removed_ids.begin(); it != m_pending_removed_ids.end();) {
+        if (--it->second <= 0) {
+            it = m_pending_removed_ids.erase(it);
+        } else {
+            ++it;
+        }
     }
 }
 

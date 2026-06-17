@@ -192,6 +192,112 @@ TEST(ReplicationEndpoint, AoiDisabledByDefaultSendsAll) {
     EXPECT_EQ(client.snapshot().entities.size(), 3u);
 }
 
+// T-I6 polish: CHUNK-INDEX AOI. With a 16 m chunk and radius 1 chunk, each client
+// sees only entities in the 3x3 chunk neighbourhood of its own avatar's chunk.
+TEST(ReplicationEndpoint, ChunkAoiScopesToNeighbourhood) {
+    auto pair_a = MakeLoopbackPair();
+    auto pair_b = MakeLoopbackPair();
+    ReplicationServer server;
+    server.AddClient(1, pair_a.first.get());
+    server.AddClient(2, pair_b.first.get());
+    ReplicationClient client_a(1, pair_a.second.get());
+    ReplicationClient client_b(2, pair_b.second.get());
+
+    // 16 m chunk edge (16000 mm), radius 1 chunk -> +/-1 chunk in X/Z about centre.
+    server.SetAoiChunkRadius(/*chunk_radius=*/1, /*chunk_size_mm=*/16000);
+    std::vector<ReplEntityState> entities = {
+        MakeEntity(1, 0, 0, 0),         // client 1 avatar -> chunk (0,0)
+        MakeEntity(2, 320000, 0, 0),    // client 2 avatar -> chunk (20,0), 320 m away
+        MakeEntity(10, 20000, 0, 8000), // chunk (1,0): adjacent to avatar 1 -> in
+        MakeEntity(11, 40000, 0, 0),    // chunk (2,0): two chunks from avatar 1 -> out
+        MakeEntity(20, 312000, 0, 0),   // chunk (19,0): adjacent to avatar 2 -> in
+    };
+    server.BroadcastSnapshot(10, entities);
+    client_a.PumpInbound();
+    client_b.PumpInbound();
+
+    auto ids = [](const SnapshotMsg& s) {
+        std::vector<std::uint32_t> v;
+        for (const auto& e : s.entities) v.push_back(e.entity_id);
+        return v; // chunk-AOI emits sorted by entity_id already
+    };
+    ASSERT_TRUE(client_a.has_snapshot());
+    ASSERT_TRUE(client_b.has_snapshot());
+    EXPECT_EQ(ids(client_a.snapshot()), (std::vector<std::uint32_t>{1, 10})); // not 11/2/20
+    EXPECT_EQ(ids(client_b.snapshot()), (std::vector<std::uint32_t>{2, 20}));
+}
+
+// Chunk-AOI radius 0 -> only the avatar's own chunk (self + co-located entities).
+TEST(ReplicationEndpoint, ChunkAoiRadiusZeroIsOwnChunkOnly) {
+    auto pair = MakeLoopbackPair();
+    ReplicationServer server;
+    server.AddClient(1, pair.first.get());
+    ReplicationClient client(1, pair.second.get());
+    server.SetAoiChunkRadius(0, 16000);
+    std::vector<ReplEntityState> entities = {
+        MakeEntity(1, 1000, 0, 1000),   // chunk (0,0)
+        MakeEntity(10, 2000, 0, 2000),  // chunk (0,0): same chunk -> in
+        MakeEntity(11, 20000, 0, 0),    // chunk (1,0): adjacent -> out at radius 0
+    };
+    server.BroadcastSnapshot(1, entities);
+    client.PumpInbound();
+    ASSERT_TRUE(client.has_snapshot());
+    EXPECT_EQ(client.snapshot().entities.size(), 2u);
+    EXPECT_EQ(client.snapshot().entities[0].entity_id, 1u);
+    EXPECT_EQ(client.snapshot().entities[1].entity_id, 10u);
+}
+
+// T-I6 polish: PRUNE-INTO-TICK despawn. A disconnect is folded into the very next
+// broadcast's removed_ids for surviving clients, and repeated for robustness.
+TEST(ReplicationLifecycle, PruneFoldsDespawnIntoNextSnapshot) {
+    auto pa = MakeLoopbackPair();
+    auto pb = MakeLoopbackPair();
+    ReplicationServer server;
+    server.AddClient(1, pa.first.get());
+    server.AddClient(2, pb.first.get());
+    ReplicationClient client_a(1, pa.second.get());
+    std::vector<ReplEntityState> entities = {MakeEntity(1, 0, 0, 0), MakeEntity(2, 1000, 0, 0)};
+
+    // Client 2 leaves; prune detects it and enqueues its despawn.
+    pb.second->Close();
+    server.PumpInbound();
+    auto removed = server.PruneDisconnectedClients();
+    ASSERT_EQ(removed.size(), 1u);
+
+    // The NEXT broadcast tells the survivor to despawn entity 2 -- same tick.
+    server.BroadcastSnapshot(20, entities);
+    client_a.PumpInbound();
+    ASSERT_TRUE(client_a.has_snapshot());
+    const auto& rem = client_a.snapshot().removed_ids;
+    EXPECT_NE(std::find(rem.begin(), rem.end(), 2u), rem.end());
+
+    // Repeated across the next couple of unreliable snapshots (drop-robust), then stops.
+    server.BroadcastSnapshot(21, entities);
+    client_a.PumpInbound();
+    const auto& rem2 = client_a.snapshot().removed_ids;
+    EXPECT_NE(std::find(rem2.begin(), rem2.end(), 2u), rem2.end());
+
+    server.BroadcastSnapshot(22, entities);
+    client_a.PumpInbound();
+    server.BroadcastSnapshot(23, entities); // 4th broadcast: repeat count (3) exhausted
+    client_a.PumpInbound();
+    const auto& rem4 = client_a.snapshot().removed_ids;
+    EXPECT_EQ(std::find(rem4.begin(), rem4.end(), 2u), rem4.end());
+}
+
+// Caller-supplied removed_ids still flow (and merge with pending) deterministically.
+TEST(ReplicationLifecycle, CallerRemovedIdsStillDelivered) {
+    auto pair = MakeLoopbackPair();
+    ReplicationServer server;
+    server.AddClient(1, pair.first.get());
+    ReplicationClient client(1, pair.second.get());
+    server.BroadcastSnapshot(1, {MakeEntity(1, 0, 0, 0)}, {2000u});
+    client.PumpInbound();
+    ASSERT_TRUE(client.has_snapshot());
+    const auto& rem = client.snapshot().removed_ids;
+    EXPECT_NE(std::find(rem.begin(), rem.end(), 2000u), rem.end());
+}
+
 // P3.3: client-side remote-entity interpolation (render-behind lerp).
 TEST(SnapshotInterpolation, LerpsBetweenSnapshots) {
     SnapshotInterpolator interp;
