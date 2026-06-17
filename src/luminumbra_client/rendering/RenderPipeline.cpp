@@ -1915,6 +1915,7 @@ void RenderPipeline::init_shaders() {
     m_skybox_pass->init_shader(m_root_path);
     m_particle_pass->init_shader(m_root_path); // T-I5a-1
     m_foliage_pass->init_shader(m_root_path);  // T-I5b-1
+    m_foliage_pass->init_compute(m_root_path); // T-I6 #4: GPU grass scatter (graceful CPU fallback)
     m_shadow_pass->init_shader(m_root_path);
     m_ssao_pass->init_shaders(m_root_path);
     m_water_pass->init_shader(m_root_path);
@@ -2054,7 +2055,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     if (m_screen_quad_vbo) { glDeleteBuffers(1, &m_screen_quad_vbo); m_screen_quad_vbo = 0; }
     m_skybox_pass->destroy_geometry();
     if (m_particle_pass) { m_particle_pass->destroy_buffers(); } // T-I5a-1
-    if (m_foliage_pass) { m_foliage_pass->destroy_buffers(); }   // T-I5b-1
+    if (m_foliage_pass) { m_foliage_pass->destroy_buffers(); m_foliage_pass->destroy_compute(); }   // T-I5b-1 / T-I6 #4
     m_sky_lut.destroy(); // T-I5a-6: release scattering LUT textures
     m_gbuffer_pass->destroy_instanced_static_mesh();
     m_gbuffer_pass->destroy_skinned_mesh();
