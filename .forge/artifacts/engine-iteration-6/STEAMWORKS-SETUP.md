@@ -1,42 +1,33 @@
-# How to grab me the Steamworks SDK (owner action)
+# Steamworks Setup
 
-You only need this for **Layer 3** (the actual Steam transport: SDR relay, lobbies,
-friend invites, auth). Real networking (TCP, done) and the GNS UDP transport
-(in progress) need none of this.
+## Status
 
-## What I need from you
-1. **A Steamworks partner account** (free to create; the $100 Steam Direct fee is
-   only for *publishing* an app, not for downloading the SDK or dev testing).
-   - Go to https://partner.steamgames.com/ and sign in / sign up.
-2. **Download the Steamworks SDK**
-   - https://partner.steamgames.com/downloads/list → "Steamworks SDK" (latest,
-     e.g. `steamworks_sdk_161.zip`).
-   - Unzip it. You'll get an `sdk/` folder containing:
-     - `sdk/public/steam/` — the headers (`steam_api.h`, `isteamnetworkingsockets.h`, ...)
-     - `sdk/redistributable_bin/win64/` — `steam_api64.lib` + `steam_api64.dll`
-3. **Drop it in the repo at** `vendor/steamworks/` so the layout is:
+Deferred for Iteration 6. The scoped source tree for this task does not include Steamworks transport files, lobby code, or Steam SDK vendor files. This document records the expected owner setup and keeps the non-redistributable SDK out of the repository.
+
+## Owner Setup
+
+1. Sign in to a Steamworks partner account at `https://partner.steamgames.com/`.
+2. Download the Steamworks SDK from the Steamworks downloads page.
+3. Unzip the SDK outside source control.
+4. If a future Steam-enabled branch expects local SDK files, place only the local working copy under `vendor/steamworks/` with this layout:
    - `vendor/steamworks/public/steam/*.h`
-   - `vendor/steamworks/redistributable_bin/win64/steam_api64.{lib,dll}`
-   - (I'll add `vendor/steamworks/` to `.gitignore` — the SDK is **not
-     redistributable**, so it must never be committed.)
-4. **An App ID** — you do NOT need a paid app to test:
-   - For development/testing, use **App ID 480** ("Spacewar", Valve's public test
-     app). It works with the SDK for networking + SDR. I'll wire `steam_appid.txt`
-     = `480` for dev runs.
-   - A real shipping App ID needs the Steam Direct fee + a created app later; tell
-     me the number when you have it and I'll switch dev→prod.
-5. **Steam client installed + running** on this machine (the SDK talks to the
-   running Steam client for auth/SDR). You're logged into Steam already, so that's
-   covered.
+   - `vendor/steamworks/redistributable_bin/win64/steam_api64.lib`
+   - `vendor/steamworks/redistributable_bin/win64/steam_api64.dll`
+5. Keep `vendor/steamworks/` ignored. Steamworks SDK headers, libraries, and redistributables must not be committed.
+6. Use App ID `480` only for local Spacewar-based development tests. A shipping App ID must come from the product's Steamworks app configuration.
+7. Run the Steam client and sign in before starting a Steam-enabled build. Steam Networking Sockets and SDR depend on the client session for development authentication and relay access.
 
-## Tell me when done
-Just say "steamworks sdk is in vendor/steamworks" (or wherever you put it) and I'll
-wire `SteamNetworkingTransport : ILockstepTransport` + lobby create/join into the
-existing seam. Until then I'm building the GNS UDP transport, which shares almost
-all the same connection-handling code.
+## Expected Build Contract
 
-## Why this part is gated and the rest isn't
-- TCP transport: open-source winsock — done, runs two processes over the wire now.
-- GameNetworkingSockets (UDP): Valve open-source on GitHub — I can build it myself.
-- Steamworks SDK: behind a partner **login**, **not redistributable** for me to
-  fetch, and needs an **App ID** tied to your account. Only this layer needs you.
+- Default builds must not require the Steamworks SDK.
+- Steam code must be behind an explicit build option such as `LUMINUMBRA_ENABLE_STEAM`.
+- `--steam` runtime options must report a clear disabled-feature error when the build option is off.
+- Development builds may generate `steam_appid.txt` with `480`; production builds must not silently force that App ID.
+
+## Validation Environment
+
+Steam P2P lobby and SDR validation requires two Steam sessions. Use either two machines or two Steam accounts so the host and joiner are distinct Steam identities. A same-machine two-process run with one account is not acceptance evidence for Steam P2P/SDR.
+
+## Handoff
+
+When the SDK, App ID choice, and two-session validation environment are available, the implementation task can wire the Steam lobby lifecycle and SDR transport described in `.forge/specs/iter6/multiplayer-steam-p2p-lobby-and-sdr.md`.

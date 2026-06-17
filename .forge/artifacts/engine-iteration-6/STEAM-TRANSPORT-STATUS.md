@@ -1,46 +1,36 @@
-# Steamworks transport — status
+# Steam Transport Status
 
-## What's done (committed, gated OFF by default)
-- **SDK wired**: `vendor/steamworks/` (SDK 164, gitignored — non-redistributable).
-  CMake option `LUMINUMBRA_ENABLE_STEAM` (OFF by default) adds the headers, links
-  `steam_api64.lib`, defines `LUMINUMBRA_ENABLE_STEAM`, and copies `steam_api64.dll`
-  next to the server exe.
-- **`SteamNetworkingTransport : ILockstepTransport`** (`net/SteamNetworkingTransport.{h,cpp}`)
-  over `ISteamNetworkingSockets`: `Listen`/`Connect` (direct IP), reliable +
-  unreliable `SendFrame` (maps to `k_nSteamNetworkingSend_Reliable/Unreliable`),
-  message-framed `TryReceiveFrame`, async accept/connect via the global
-  connection-status callback. `SteamLink::Init/RunCallbacks/Shutdown` wraps
-  `SteamAPI_Init` (+ writes `steam_appid.txt`=480 for dev) + `InitRelayNetworkAccess`.
-- **`--net-host --steam` / `--net-join --steam`** run the SAME authoritative-server
-  replication over the Steam transport.
+## Current Status
 
-## Verified
-- ✅ **Compiles against the Steam headers** on msys2/ucrt64.
-- ✅ **Links `steam_api64.lib` with GCC/MinGW** — the main risk (MSVC import lib +
-  GCC) is cleared.
-- ✅ **`SteamAPI_Init` succeeds** against the running Steam client (app id 480):
-  `"SteamLink: initialized (Steamworks SDK, app id 480)."`
-- ✅ Host creates the listen socket; client attempts `ConnectByIPAddress`.
+Deferred. In the scoped Iteration 6 worktree for this task, Steam transport source files are not present under the allowed network source context. No Steam P2P/lobby/SDR implementation or two-machine validation is claimed by this status artifact.
 
-## Known limitation: localhost two-process test does NOT connect
-Running `--net-host --steam` and `--net-join --steam` as two processes on ONE
-machine with the same app id (480) does not establish the connection (both time
-out). This is **Steam's single-instance-per-app / local-loopback model**, not a
-code defect — Steam treats both processes as the same app+user, and its
-IP/relay networking is not meant for two same-app instances on one box.
+## Intended Transport Shape
 
-### How to actually validate the Steam path
-- **Two machines** (or two Steam accounts), host on one, join on the other by IP —
-  the direct-IP path should connect.
-- **P2P + lobby + SDR** (the real shipping shape): create/join a Steam lobby,
-  connect via `ConnectP2P` to the host's `SteamNetworkingIdentity` over the SDR
-  relay. This is the next layer (needs lobby create/join + identity exchange) and
-  is the recommended production path. Tracked as a follow-up.
-- Meanwhile, the **TCP transport + NetworkedReplication gate** already prove the
-  replication logic over the wire locally (two processes), so the Steam work is
-  isolated to the transport handshake, not the replication stack.
+- Steam support stays optional behind an explicit build flag such as `LUMINUMBRA_ENABLE_STEAM`.
+- The transport should implement the existing replication/lockstep transport contract without changing gameplay ownership semantics.
+- Lobby create/join should be the shipping entry point.
+- Lobby metadata should carry protocol/build compatibility and the host `SteamNetworkingIdentity`.
+- Runtime connection should use Steam P2P over SDR through `ISteamNetworkingSockets`, not a direct-IP-only path.
+- Reliable and unreliable payloads should map to Steam Networking Sockets send modes.
 
-## Default build unaffected
-`LUMINUMBRA_ENABLE_STEAM` defaults OFF; the transport body is `#ifdef`-guarded and
-`--steam` without the build flag prints a clear error. No SDK dependency in the
-normal build; world_hash untouched (transport-side only).
+## Deferred Work
+
+- Add Steamworks build integration with SDK paths excluded from source control.
+- Add Steam API lifetime management and callback pumping.
+- Add host lobby creation, metadata publication, lobby search/join, and invite-compatible join handling.
+- Add P2P/SDR connect and accept handling using Steam identities.
+- Add route diagnostics so logs report direct versus relayed state when Steam exposes it.
+- Add bounded host/join smoke validation using two Steam identities.
+
+## Validation Required Before Completion
+
+- Steam-enabled build compiles and links locally with SDK files supplied out of tree.
+- Host can create a Steam lobby and publish metadata.
+- Joiner can resolve lobby metadata and connect to the host identity.
+- Host and joiner exchange at least one reliable frame and one unreliable frame.
+- Existing replication payloads run over the Steam transport for a bounded tick count.
+- Logs capture connection lifecycle, route state, timeout/failure reasons, and clean shutdown.
+
+## Localhost Limitation
+
+A same-machine, same-account two-process test is not sufficient evidence for Steam P2P/SDR because it does not represent two distinct Steam identities. The acceptance run remains deferred to a two-machine or two-account setup; see `.forge/reports/iter6-completion/steam-two-machine-deferred.md`.

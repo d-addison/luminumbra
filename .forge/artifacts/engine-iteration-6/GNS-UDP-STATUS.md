@@ -1,40 +1,32 @@
-# Standalone GameNetworkingSockets (UDP) transport — WORKING
+# GameNetworkingSockets UDP Status
 
-## Result: real UDP replication, two processes, one PC ✅
-The earlier protobuf wall was an artifact of probing the old GNS **v1.4.1** tag.
-GNS **master** + the Windows-native **BCrypt** crypto backend + the ucrt64
-**protobuf 31.1 / abseil** packages configures, builds (`libGameNetworkingSockets_s.a`),
-links into the server, and runs:
+## Current Status
 
-```
-gns-host: listening over UDP; peer connected over UDP; ran 60 ticks
-gns-join: connected over UDP; mirrored host over UDP -- seq 60, 4 entities,
-          controlled avatar (id 1) at x=12.57 m. Real UDP replication confirmed.
-```
+Deferred in this worktree. The scoped source context for this task contains common network fixtures only and does not include a standalone GameNetworkingSockets transport implementation to verify or update.
 
-This is the path the Steam SDK could NOT provide on a single machine (Steam's
-one-instance-per-app rule). GNS standalone is exactly what Valve ships it for:
-local dev + Steam-independent dedicated servers.
+## Relationship To Steam
 
-## How to build + run it
-```
-# configure once with GNS on (FetchContent builds GNS master, ~2-3 min the first time)
-cmake -S . -B build/debug -DLUMINUMBRA_ENABLE_GNS=ON
-cmake --build build/debug --target luminumbra_server_app
-# two terminals (ucrt64/bin must be on PATH for the protobuf/abseil runtime DLLs):
-luminumbra_server_app --net-host --udp --port 27070 --avatars 4 --ticks 60
-luminumbra_server_app --net-join --udp --host 127.0.0.1 --port 27070 --ticks 60
-```
-Default builds keep `LUMINUMBRA_ENABLE_GNS=OFF`; `--udp` without the flag errors
-cleanly. GnsTransport shares the ISteamNetworkingSockets API with
-SteamNetworkingTransport, so the same code ports to Steam (P2P/SDR) later.
+Standalone GameNetworkingSockets can still be useful as a Steam-independent UDP development transport because its socket API is close to Steam Networking Sockets. It does not replace the production Steam P2P/lobby/SDR path:
 
-## Notes
-- Crypto: `USE_CRYPTO=BCrypt` (no OpenSSL/libsodium dependency).
-- Runtime: the GNS-enabled exe needs libprotobuf + abseil DLLs (ucrt64/bin on
-  PATH -- already standard for this toolchain). A redistributable build would
-  bundle them; not needed for local dev.
-- The replication logic over the wire is the SAME as the TCP `NetworkedReplication`
-  gate; only the transport differs, and it's manually validated above. A ctest
-  gate is intentionally NOT added (would force the multi-minute GNS FetchContent
-  into every CI build).
+- GNS UDP can support local two-process transport testing without Steam identity constraints.
+- Steam P2P/SDR still needs Steamworks SDK setup, lobby metadata, Steam identities, and two-session validation.
+- Passing GNS UDP validation must not be used as proof that Steam lobby/SDR works.
+
+## Expected Future GNS Contract
+
+- Keep GNS behind an explicit build flag such as `LUMINUMBRA_ENABLE_GNS`.
+- Keep default builds independent of GNS, protobuf, abseil, or other GNS runtime dependencies.
+- Map reliable/unreliable frame sends to the same replication/lockstep transport contract used by other network paths.
+- Record bounded host/join logs separately from Steam validation artifacts.
+
+## Validation Required Before Completion
+
+- GNS-enabled build configures and links in the selected toolchain.
+- Host listens on UDP and accepts a joiner from a separate process.
+- Host/joiner exchange reliable and unreliable frames.
+- Existing replication payloads run for a bounded tick count.
+- Runtime dependency requirements are documented for local and redistributable builds.
+
+## Iteration 6 Note
+
+This artifact intentionally avoids claiming a working GNS UDP transport from the current scoped source tree. It remains a future or external validation path adjacent to the Steam P2P/lobby/SDR work.
