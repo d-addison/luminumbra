@@ -48,6 +48,26 @@ public:
     void set_player_crouched(bool is_crouched);
     bool player_has_space_to_stand() const;
 
+    // --- T-I6 P2: server-authoritative avatar characters (multiplayer) ---
+    // The authoritative server gives every connected player's avatar a Jolt
+    // CharacterVirtual (capsule) so players collide with the world (and, once
+    // props exist, with dynamic props -- the Garry's-Mod model). ADDITIVE: this
+    // is a SEPARATE set from the singleton m_player_character the local client
+    // uses, so the client path is untouched. Avatars are stepped in INDEX order
+    // (player_id order) on the calling thread -> deterministic same-binary, so
+    // the avatar positions that fold into the `entities` sub-hash are run==replay
+    // reproducible. P2 has no per-avatar input yet (gravity + world collision
+    // only -> avatars settle on the terrain); P3 feeds the per-tick usercmd.
+    void clear_avatar_characters();
+    std::size_t create_avatar_character(const glm::vec3& initial_position);
+    // Steps every avatar character by dt (gravity when airborne, ground-stick when
+    // grounded; horizontal wish-velocity is 0 until P3) against the world geometry.
+    void update_avatars(float delta_time);
+    std::size_t avatar_character_count() const { return m_avatar_characters.size(); }
+    glm::vec3 get_avatar_position(std::size_t index) const;
+    glm::vec3 get_avatar_velocity(std::size_t index) const;
+    bool is_avatar_grounded(std::size_t index) const;
+
     // --- Audio-Physics Integration ---
     struct AudioRaycastResult {
         bool hit = false;
@@ -125,6 +145,11 @@ private:
     // <<< NEW: Cached player shapes to prevent memory leaks and improve performance
     JPH::Ref<JPH::Shape> m_player_stand_shape;
     JPH::Ref<JPH::Shape> m_player_crouch_shape;
+
+    // T-I6 P2: server-authoritative avatar characters (one per connected player)
+    // + the shared avatar capsule shape. Stepped in index order for determinism.
+    std::vector<std::unique_ptr<JPH::CharacterVirtual>> m_avatar_characters;
+    JPH::Ref<JPH::Shape> m_avatar_shape;
 
     // Track collision bodies for loaded chunks
     std::unordered_map<ChunkID, ChunkCollisionData> m_chunk_bodies;

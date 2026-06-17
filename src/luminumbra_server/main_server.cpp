@@ -30,6 +30,7 @@
 #include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/systems/AetherFieldSystem.h"
+#include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/world/GameSession.h"
 
 namespace fs = std::filesystem;
@@ -252,6 +253,18 @@ SmokeRunResult RunSmokeOnce(const ServerCliOptions& options, const char* run_lab
     }
 
     result.ticks = runner.RunFixedTicks(options.ticks);
+    // T-I6 P2: avatar physics telemetry — confirm the server-authoritative avatar
+    // characters SETTLED on the terrain (grounded; not fallen through the world).
+    if (!runner.Avatars().empty()) {
+        auto* phys = runner.Session() ? runner.Session()->GetPhysicsSystem() : nullptr;
+        int grounded = 0;
+        for (std::size_t i = 0; i < runner.Avatars().size(); ++i) {
+            if (phys && phys->is_avatar_grounded(i)) ++grounded;
+        }
+        const auto& a0 = runner.Avatars().front();
+        LUMINUMBRA_CORE_INFO("Smoke {}: avatars={} grounded={} (avatar0 y={:.2f})",
+            run_label, runner.Avatars().size(), grounded, a0.position.y);
+    }
     result.world_hash = runner.ComputeWorldHash();
     result.sub_hashes = runner.ComputeWorldSubHashes();
     result.chunks_streamed = runner.StreamedChunkCount();

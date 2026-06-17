@@ -128,9 +128,11 @@ void PhysicsSystem::shutdown() {
     }
     m_chunk_bodies.clear();
     m_player_character.reset();
+    m_avatar_characters.clear(); // T-I6 P2: release server avatars before the Jolt system
     // Properly release the reference-counted shapes
-    m_player_stand_shape = nullptr; 
+    m_player_stand_shape = nullptr;
     m_player_crouch_shape = nullptr;
+    m_avatar_shape = nullptr;
     m_body_interface = nullptr;
     m_jolt_system.reset();
     m_jolt_job_system.reset();
@@ -302,6 +304,67 @@ glm::vec3 PhysicsSystem::get_player_position() const {
 bool PhysicsSystem::is_player_grounded() const {
     if (!m_player_character) return false;
     return m_player_character->GetGroundState() == JPH::CharacterBase::EGroundState::OnGround;
+}
+
+// --- T-I6 P2: server-authoritative avatar characters ---
+void PhysicsSystem::clear_avatar_characters() {
+    m_avatar_characters.clear();
+}
+
+std::size_t PhysicsSystem::create_avatar_character(const glm::vec3& start_pos) {
+    if (!m_jolt_system) return 0;
+    // Shared capsule (same dimensions as the standing player) created once.
+    if (m_avatar_shape == nullptr) {
+        m_avatar_shape = JPH::CapsuleShapeSettings(0.9f, 0.4f).Create().Get();
+    }
+    JPH::CharacterVirtualSettings settings;
+    settings.mShape = m_avatar_shape;
+    settings.mMass = 80.0f;
+    settings.mMaxSlopeAngle = glm::radians(50.0f);
+    settings.mSupportingVolume = JPH::Plane(JPH::Vec3::sAxisY(), -0.1f);
+    m_avatar_characters.push_back(std::make_unique<JPH::CharacterVirtual>(
+        &settings, JPH::RVec3(start_pos.x, start_pos.y, start_pos.z), JPH::Quat::sIdentity(), m_jolt_system.get()));
+    return m_avatar_characters.size() - 1;
+}
+
+void PhysicsSystem::update_avatars(float dt) {
+    if (!m_jolt_system) return;
+    // Step every avatar IN INDEX (player_id) ORDER so the per-character collide-
+    // and-slide sequence is deterministic same-binary. P2: no horizontal input
+    // yet -- gravity when airborne, ground-stick when grounded (the avatars fall
+    // and settle on the terrain). Mirrors update_player's vertical handling.
+    const JPH::Vec3 gravity = m_jolt_system->GetGravity();
+    for (auto& character : m_avatar_characters) {
+        if (!character) continue;
+        const JPH::Vec3 current_velocity = character->GetLinearVelocity();
+        const bool grounded = character->GetGroundState() == JPH::CharacterBase::EGroundState::OnGround;
+        JPH::Vec3 desired_velocity(0.0f, current_velocity.GetY(), 0.0f);
+        if (grounded) {
+            desired_velocity.SetY(-1.0f); // stick to slopes / ground
+        } else {
+            desired_velocity.SetY(current_velocity.GetY() + gravity.GetY() * dt);
+        }
+        character->SetLinearVelocity(desired_velocity);
+        character->Update(dt, gravity, BroadPhaseLayerFilterAll(), ObjectLayerFilterAll(),
+                          JPH::BodyFilter(), JPH::ShapeFilter(), *m_temp_allocator);
+    }
+}
+
+glm::vec3 PhysicsSystem::get_avatar_position(std::size_t index) const {
+    if (index >= m_avatar_characters.size() || !m_avatar_characters[index]) return glm::vec3(0.0f);
+    const JPH::RVec3 p = m_avatar_characters[index]->GetPosition();
+    return glm::vec3((float)p.GetX(), (float)p.GetY(), (float)p.GetZ());
+}
+
+glm::vec3 PhysicsSystem::get_avatar_velocity(std::size_t index) const {
+    if (index >= m_avatar_characters.size() || !m_avatar_characters[index]) return glm::vec3(0.0f);
+    const JPH::Vec3 v = m_avatar_characters[index]->GetLinearVelocity();
+    return glm::vec3((float)v.GetX(), (float)v.GetY(), (float)v.GetZ());
+}
+
+bool PhysicsSystem::is_avatar_grounded(std::size_t index) const {
+    if (index >= m_avatar_characters.size() || !m_avatar_characters[index]) return false;
+    return m_avatar_characters[index]->GetGroundState() == JPH::CharacterBase::EGroundState::OnGround;
 }
 
 bool PhysicsSystem::player_has_space_to_stand() const {

@@ -165,21 +165,26 @@ bool ServerWorldRunner::Boot() {
     // vector in RunFixedTicks and fold into the `entities` sub-hash. avatar_count
     // == 0 leaves m_avatars empty -> the pre-P1 single-anchor / empty-entity lane.
     m_avatars.clear();
+    physics_system->clear_avatar_characters();
     if (m_config.avatar_count > 0) {
         m_avatars.reserve(static_cast<std::size_t>(m_config.avatar_count));
         for (int i = 0; i < m_config.avatar_count; ++i) {
             const Vec3 offset = World::DeterministicAvatarSpawnOffset(static_cast<std::uint32_t>(i));
             const float ax = spawn_anchor.x + offset.x;
             const float az = spawn_anchor.z + offset.z;
-            const float ay = world_system->GetTerrainHeightAt(ax, az) + 1.0f;
+            // Spawn a touch above the terrain so the T-I6 P2 physics character
+            // settles down onto the ground deterministically on the first ticks.
+            const float ay = world_system->GetTerrainHeightAt(ax, az) + 1.5f;
             World::PlayerAvatar avatar;
             avatar.player_id = static_cast<std::uint32_t>(i);
             avatar.position = Vec3(ax, ay, az);
             // Deterministic initial facing fanned around the circle (pure id fn).
             avatar.facing = static_cast<float>(i) * 2.39996323f;
             m_avatars.push_back(avatar);
+            // T-I6 P2: server-authoritative physics character (capsule) per avatar.
+            physics_system->create_avatar_character(avatar.position);
         }
-        LUMINUMBRA_CORE_INFO("ServerWorldRunner: spawned {} deterministic player avatar(s).",
+        LUMINUMBRA_CORE_INFO("ServerWorldRunner: spawned {} deterministic player avatar(s) (+physics characters).",
                              m_avatars.size());
     }
 
@@ -204,6 +209,17 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         // keeps the frame/tick mapping 1:1 and removes wall-clock timing from
         // the simulation entirely (determinism discipline).
         physics_system->update(static_cast<float>(fixed_dt));
+        // T-I6 P2: step the server-authoritative avatar characters (gravity +
+        // world collision; deterministic index order) and read their settled
+        // transforms back into m_avatars, so the streaming anchors + the
+        // `entities` sub-hash reflect the physics-authoritative positions.
+        if (!m_avatars.empty()) {
+            physics_system->update_avatars(static_cast<float>(fixed_dt));
+            for (std::size_t i = 0; i < m_avatars.size(); ++i) {
+                m_avatars[i].position = physics_system->get_avatar_position(i);
+                m_avatars[i].velocity = physics_system->get_avatar_velocity(i);
+            }
+        }
         report.ticks_executed += m_session->TickSimulation(fixed_dt);
         report.frames_executed += 1;
 
