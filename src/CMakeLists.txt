@@ -65,6 +65,16 @@ target_link_libraries(luminumbra_server_app PRIVATE
 # First-party hygiene (warnings-as-errors per the build preset).
 luminumbra_configure_first_party_target(luminumbra_server_app)
 
+# T-I6: when the Steamworks transport is built in, the redistributable steam_api64.dll
+# must sit next to the server exe at runtime. Copy it post-build.
+if(LUMINUMBRA_ENABLE_STEAM AND WIN32)
+    add_custom_command(TARGET luminumbra_server_app POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${LUMINUMBRA_STEAM_SDK_DIR}/redistributable_bin/win64/steam_api64.dll"
+            "$<TARGET_FILE_DIR:luminumbra_server_app>/steam_api64.dll"
+        COMMENT "Copying steam_api64.dll next to luminumbra_server_app")
+endif()
+
 # --- Client Executable ---
 add_executable(luminumbra_client_app
     ${CLIENT_APP_SOURCES}

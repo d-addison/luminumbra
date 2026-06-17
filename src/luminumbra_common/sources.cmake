@@ -32,6 +32,9 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/net/ReplicationProtocol.cpp
     # T-I6 P3.1: server/client replication endpoints over ILockstepTransport.
     ${CMAKE_CURRENT_LIST_DIR}/net/ReplicationEndpoint.cpp
+    # T-I6: Steamworks ISteamNetworkingSockets transport (body guarded by
+    # LUMINUMBRA_ENABLE_STEAM; compiles to nothing when the SDK is not wired in).
+    ${CMAKE_CURRENT_LIST_DIR}/net/SteamNetworkingTransport.cpp
 
     # Network
     ${CMAKE_CURRENT_LIST_DIR}/network/NetworkLoopbackAuthority.cpp

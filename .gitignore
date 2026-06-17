@@ -44,3 +44,6 @@ imgui.ini
 # OS files
 .DS_Store
 Thumbs.db
+
+# Steamworks SDK (NOT redistributable -- owner-provided, never commit)
+vendor/steamworks/
