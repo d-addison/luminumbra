@@ -1,5 +1,41 @@
 # Engine Frontier Handoff
 
+## Iteration 6 (cont., 2026-06-17) — Render-debt wave #1–#4 + #5 spec (tip `3df4347`)
+
+Autonomous run (memory `autonomous-iteration-6-mandate`). Owner directive
+(2026-06-15): "1-4 should all be completed, 5 needs the multi-player blocker
+properly specd out first." All landed, **ctest 261/261**, every engine-frontier
+gate green, `world_hash f17726d44054d133` UNCHANGED (all render-only):
+
+- **#1b-lush** (`24963de`): render-only per-preset foliage density scale
+  (`--foliage-density-scale`, default 1.0 byte-identical → FoliageInstancing
+  unchanged at 0.730; lush 1.7 → 68.5k saturated turf, deterministic).
+- **#3 ocean Gerstner swells** (`2a27bc2`): vertex-displaced trochoids + analytic
+  normals in water.vert (zen-calm, render-only). Water sub-hash `ed4265f8…`
+  unchanged; WorldVisualSweep + FarLodHorizon green.
+- **#2 volumetric clouds tier-2** (`a7debb4`): Nubis-style raymarch through a
+  cloud slab (shared coverage field → ground-shadow registration kept, 3D
+  erosion, sun light-march + HG silver-lining + Beer-Powder). Cheap clear-sky
+  reject keeps the SkyboxVisual gradient pristine. enhanced_skybox.frag only.
+- **#4 GPU grass scatter compute** (`515cef2`): foliage generation moved to a
+  compute pass (`grass_scatter.comp`, splitmix64 ported bit-exact via
+  GL_ARB_gpu_shader_int64, coarse 9×9 surface grid instead of per-candidate CPU
+  queries, atomic-append SSBO, draw straight from the SSBO — no ring-VBO
+  reupload). Rebuild-only readback into m_instances keeps every FoliageInstancing
+  hook validating the REAL GPU path (no gate re-point); graceful CPU fallback.
+  FoliageInstancing GPU path: 0.643 in-band, deterministic, 0.097 ms. Bézier
+  blades + LOD + far-field texture-grass (brief stages 4-5) remain follow-ups.
+- **#5 multiplayer blocker SPEC** (`3df4347`): `MULTIPLAYER-BLOCKER-SPEC.md` —
+  multi-anchor streaming foundation is unblocked; the real blocker is the
+  session/sim layer (B1 ≤2-peer session, B2 no player avatar, B3 no movement
+  input schema, B4 no join/leave model, B5 one-remote transport). Phased design
+  M1–M6, one deliberate world_hash bump (#5: non-empty entities sub-hash), gate
+  plan, and 5 owner sizing questions. **#5 build is gated on owner answers.**
+
+**Perf note (carried):** #2 clouds + #4 grass GPU budgets are to be confirmed
+against the deferred quiet-machine release perf re-bless (Phase 0.3); both are
+bounded + early-out, and grass is gate-clean at 0.097 ms in debug.
+
 ## Iteration 6 (cont., 2026-06-16) — Visual-fidelity wave + far-field park (tip `dbab527`)
 
 Autonomous run (memory `autonomous-iteration-6-mandate`). After Wave A, a 5-lens
