@@ -26,6 +26,9 @@
 #include "core/EngineVersion.h"
 #include "luminumbra_common/core/Log.h"
 #include "luminumbra_common/net/LockstepSession.h"
+#include "luminumbra_common/net/ReplicationEndpoint.h"
+#include "luminumbra_common/net/ReplicationProtocol.h"
+#include "luminumbra_common/world/PlayerAvatar.h"
 #include "luminumbra_common/replay/ReplayStream.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
@@ -53,6 +56,10 @@ struct ServerCliOptions {
     // double-run already asserts the entities sub-hash matches, so --smoke --avatars N
     // validates avatar determinism through the existing gate path.
     int avatars = 0;
+    // T-I6 P3.1c: --replicate runs the authoritative server + an in-process loopback
+    // ReplicationClient, broadcasts the avatar states each tick, and asserts the client
+    // mirrors the server avatars (end-to-end live replication in the harness).
+    bool replicate = false;
     bool smoke = false;
     // T-I5a-2 (A2): WindFieldDeterminism gate. Boots a world, runs N ticks
     // twice, asserts the wind sub-hash is equal across runs + stable, and times
@@ -198,6 +205,8 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
             if (const char* v = next_value(i)) options.autosave_ticks = std::strtoull(v, nullptr, 10);
         } else if (std::strcmp(arg, "--avatars") == 0) {
             if (const char* v = next_value(i)) options.avatars = std::atoi(v);
+        } else if (std::strcmp(arg, "--replicate") == 0) {
+            options.replicate = true;
         } else if (std::strcmp(arg, "--artifact") == 0) {
             if (const char* v = next_value(i)) options.artifact_path = v;
         } else {
@@ -1686,6 +1695,120 @@ int RunServer(const ServerCliOptions& options) {
 
 } // namespace
 
+// ---------------------------------------------------------------------------
+// T-I6 P3.1c: live replication smoke. Boots the authoritative server with N
+// avatars, wires an in-process ReplicationServer + a loopback ReplicationClient,
+// and each tick broadcasts the avatar states + pumps the client/acks. Asserts the
+// client mirrors the server's avatars (within mm) and that an ack flowed back --
+// the end-to-end server->client replication loop with the REAL runner (physics-
+// settled avatar positions), in the gate harness. RENDER/transport-side only:
+// world_hash is untouched (this reads the avatar list, never writes the sim).
+// ---------------------------------------------------------------------------
+int RunReplicate(const ServerCliOptions& options) {
+    Luminumbra::Server::ServerWorldRunnerConfig config = RunnerConfigFrom(options);
+    config.world_id.clear();
+    config.world_name = "Replication Smoke";
+    config.autosave_interval_ticks = 0;
+    if (config.avatar_count <= 0) {
+        config.avatar_count = 3; // replication needs avatars to replicate
+    }
+
+    LUMINUMBRA_CORE_INFO("Headless server REPLICATE smoke: preset={} seed={} ticks={} avatars={}",
+        options.preset, options.seed, options.ticks, config.avatar_count);
+
+    Luminumbra::Server::ServerWorldRunner runner(std::move(config));
+    if (!runner.Boot()) {
+        LUMINUMBRA_CORE_ERROR("replicate: session failed to boot");
+        return 1;
+    }
+
+    auto pair = Luminumbra::Net::MakeLoopbackPair();
+    Luminumbra::Net::ReplicationServer server;
+    server.AddClient(/*client_id=*/1, pair.first.get());
+    Luminumbra::Net::ReplicationClient client(/*player_id=*/1, pair.second.get());
+
+    std::uint64_t executed = 0;
+    while (executed < options.ticks) {
+        const auto step = runner.RunFixedTicks(1);
+        executed += step.ticks_executed;
+        if (step.ticks_executed == 0) {
+            LUMINUMBRA_CORE_ERROR("replicate: tick {} did not advance", executed + 1);
+            return 1;
+        }
+        server.BroadcastSnapshot(executed, Luminumbra::World::BuildAvatarReplStates(runner.Avatars()));
+        client.PumpInbound(); // apply snapshot (most-recent-wins) + ack
+        server.PumpInbound(); // drain the ack
+    }
+
+    // Verify the client mirrors the server's authoritative avatars.
+    const auto& avatars = runner.Avatars();
+    bool size_ok = client.has_snapshot() && client.snapshot().entities.size() == avatars.size();
+    double max_pos_err = 0.0;
+    bool ids_ok = size_ok;
+    if (size_ok) {
+        for (std::size_t i = 0; i < avatars.size(); ++i) {
+            const auto& e = client.snapshot().entities[i];
+            if (e.entity_id != avatars[i].player_id) ids_ok = false;
+            max_pos_err = std::max(max_pos_err, static_cast<double>(std::abs(
+                Luminumbra::Net::ReplDequantPos(e.px_mm) - avatars[i].position.x)));
+            max_pos_err = std::max(max_pos_err, static_cast<double>(std::abs(
+                Luminumbra::Net::ReplDequantPos(e.py_mm) - avatars[i].position.y)));
+            max_pos_err = std::max(max_pos_err, static_cast<double>(std::abs(
+                Luminumbra::Net::ReplDequantPos(e.pz_mm) - avatars[i].position.z)));
+        }
+    }
+    const bool acked = server.AckedSnapshotSeq(1) > 0;
+    const bool passed = size_ok && ids_ok && max_pos_err < 0.01 && acked &&
+                        executed == options.ticks;
+
+    nlohmann::json artifact{
+        {"schema", "luminumbra.replication_smoke.v1"},
+        {"generated_by", "luminumbra_server_app --replicate (T-I6 P3.1c)"},
+        {"preset", options.preset},
+        {"seed", options.seed},
+        {"ticks", options.ticks},
+        {"avatar_count", avatars.size()},
+        {"client_has_snapshot", client.has_snapshot()},
+        {"client_entity_count", client.has_snapshot() ? client.snapshot().entities.size() : 0u},
+        {"final_snapshot_seq", client.has_snapshot() ? client.snapshot().snapshot_seq : 0u},
+        {"acked_snapshot_seq", server.AckedSnapshotSeq(1)},
+        {"max_position_error_m", max_pos_err},
+        {"size_ok", size_ok},
+        {"ids_ok", ids_ok},
+        {"ack_flowed", acked},
+        {"passed", passed},
+    };
+
+    const fs::path save_dir = runner.Session() ? runner.Session()->GetWorldSaveDir() : fs::path();
+    runner.Shutdown();
+    if (!save_dir.empty()) {
+        std::error_code ec;
+        fs::remove_all(save_dir, ec);
+    }
+
+    if (!options.artifact_path.empty()) {
+        const fs::path artifact_path(options.artifact_path);
+        std::error_code ec;
+        if (artifact_path.has_parent_path()) fs::create_directories(artifact_path.parent_path(), ec);
+        std::ofstream out(artifact_path);
+        if (out.is_open()) {
+            out << artifact.dump(2) << "\n";
+            LUMINUMBRA_CORE_INFO("Replicate artifact written: {}", options.artifact_path);
+        }
+    }
+
+    if (!passed) {
+        LUMINUMBRA_CORE_ERROR(
+            "Replicate smoke FAILED: size_ok={} ids_ok={} max_pos_err={:.4f} acked={} ticks={}/{}",
+            size_ok, ids_ok, max_pos_err, acked, executed, options.ticks);
+        return 1;
+    }
+    LUMINUMBRA_CORE_INFO(
+        "Replicate smoke passed: {} avatars mirrored to client (seq={}, acked_seq={}, max_pos_err={:.4f} m)",
+        avatars.size(), client.snapshot().snapshot_seq, server.AckedSnapshotSeq(1), max_pos_err);
+    return 0;
+}
+
 int main(int argc, char* argv[]) {
     Log::Init();
     LUMINUMBRA_CORE_INFO("Luminumbra headless server");
@@ -1733,6 +1856,9 @@ int main(int argc, char* argv[]) {
     }
     if (options.wind_bench) {
         return RunWindBench(options);
+    }
+    if (options.replicate) {
+        return RunReplicate(options);
     }
     return options.smoke ? RunSmoke(options) : RunServer(options);
 }
