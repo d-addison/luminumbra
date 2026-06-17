@@ -1941,6 +1941,9 @@ int main(int argc, char* argv[]) {
     bool skinned_mesh_spawn_attempted = false;
     bool skinned_mesh_capture_a_written = false;
     bool skinned_mesh_analysis_written = false;
+    // T-I6 P3.1d video proof: showcase frame-sequence dump (avatars>=2 only).
+    int showcase_video_frame = 0;
+    double showcase_video_last_s = -1.0;
     SkinnedMeshVisualCapture skinned_mesh_capture_a;
     std::vector<unsigned char> skinned_mesh_pixels_a;
     // creature_slice_smoke (T-I3-18): data-driven creature game slice. The
@@ -4351,6 +4354,42 @@ int main(int argc, char* argv[]) {
                                                 diff);
                                             skinned_mesh_analysis_written = true;
                                         }
+                                    }
+                                }
+                            }
+                        }
+                        // T-I6 P3.1d video proof: when the avatar SHOWCASE row is up
+                        // (avatars>=2), walk the avatars laterally and dump a frame
+                        // sequence (motion/frame_%03d.ppm) for an ffmpeg clip. Gated on
+                        // avatars>=2 so the single-rig gate run never dumps frames.
+                        if (scenario_config.skinned_mesh_visual_smoke() && scenario_config.avatars >= 2 &&
+                            scenario_ready && skinned_mesh_visual_target.spawned &&
+                            showcase_video_frame < 120) {
+                            const double vnow = std::chrono::duration<double>(now - scenario_play_started_at).count();
+                            const bool interval_ok = showcase_video_last_s < 0.0 || (vnow - showcase_video_last_s) >= 0.05;
+                            if (interval_ok) {
+                                // Walk every avatar gently TOWARD the camera (+Z) so the row
+                                // strolls forward and stays framed (idle clip still plays).
+                                auto& reg = gameSession->GetRegistry();
+                                auto view = reg.view<Luminumbra::Components::TransformComponent,
+                                                     Luminumbra::Components::SkinnedMeshComponent>();
+                                const float step_m = 0.05f; // ~1 m/s at 20 dumps/s
+                                for (auto e : view) {
+                                    view.get<Luminumbra::Components::TransformComponent>(e).position.z += step_m;
+                                }
+                                int vw = 0, vh = 0;
+                                glfwGetFramebufferSize(window, &vw, &vh);
+                                if (vw > 0 && vh > 0) {
+                                    std::vector<unsigned char> vpx(
+                                        static_cast<std::size_t>(vw) * static_cast<std::size_t>(vh) * 3u);
+                                    glReadBuffer(GL_BACK);
+                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                                    glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, vpx.data());
+                                    char vname[40];
+                                    std::snprintf(vname, sizeof(vname), "motion/frame_%03d.ppm", showcase_video_frame);
+                                    if (WritePixelBufferPpm(scenario_config.artifact_dir / vname, vw, vh, vpx)) {
+                                        ++showcase_video_frame;
+                                        showcase_video_last_s = vnow;
                                     }
                                 }
                             }
