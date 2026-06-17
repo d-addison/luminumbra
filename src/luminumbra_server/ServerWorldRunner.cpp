@@ -159,6 +159,30 @@ bool ServerWorldRunner::Boot() {
         spawn_anchor.x, spawn_anchor.y, spawn_anchor.z,
         m_session->GetLastLoadedChunkCount());
 
+    // T-I6 P1 (multiplayer): spawn the deterministic player avatars. Each avatar's
+    // XZ is the world spawn plus a pure phyllotaxis offset (player_id-indexed);
+    // Y is terrain-clamped. Avatar positions become the multi-anchor streaming
+    // vector in RunFixedTicks and fold into the `entities` sub-hash. avatar_count
+    // == 0 leaves m_avatars empty -> the pre-P1 single-anchor / empty-entity lane.
+    m_avatars.clear();
+    if (m_config.avatar_count > 0) {
+        m_avatars.reserve(static_cast<std::size_t>(m_config.avatar_count));
+        for (int i = 0; i < m_config.avatar_count; ++i) {
+            const Vec3 offset = World::DeterministicAvatarSpawnOffset(static_cast<std::uint32_t>(i));
+            const float ax = spawn_anchor.x + offset.x;
+            const float az = spawn_anchor.z + offset.z;
+            const float ay = world_system->GetTerrainHeightAt(ax, az) + 1.0f;
+            World::PlayerAvatar avatar;
+            avatar.player_id = static_cast<std::uint32_t>(i);
+            avatar.position = Vec3(ax, ay, az);
+            // Deterministic initial facing fanned around the circle (pure id fn).
+            avatar.facing = static_cast<float>(i) * 2.39996323f;
+            m_avatars.push_back(avatar);
+        }
+        LUMINUMBRA_CORE_INFO("ServerWorldRunner: spawned {} deterministic player avatar(s).",
+                             m_avatars.size());
+    }
+
     m_booted = true;
     return true;
 }
@@ -185,8 +209,19 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
 
         // Spawn-anchor streaming, then quiesce in-flight generation/meshing
         // so every scheduler decision next frame observes the identical
-        // settled state in both determinism runs.
-        world_system->update(m_session->GetRegistry(), spawn_anchor, physics_system);
+        // settled state in both determinism runs. T-I6 P1: with avatars, stream
+        // around the UNION of avatar positions (multi-anchor); with none, the
+        // single spawn anchor via the Vec3 overload (byte-identical to pre-P1).
+        if (m_avatars.empty()) {
+            world_system->update(m_session->GetRegistry(), spawn_anchor, physics_system);
+        } else {
+            std::vector<Vec3> anchors;
+            anchors.reserve(m_avatars.size());
+            for (const World::PlayerAvatar& a : m_avatars) {
+                anchors.push_back(a.position);
+            }
+            world_system->update(m_session->GetRegistry(), anchors, physics_system);
+        }
         world_system->wait_for_streaming_jobs();
 
         if (m_config.autosave_interval_ticks > 0 &&
@@ -248,14 +283,14 @@ Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHash
         state.insert_chunk(chunk);
     }
 
-    // The headless server is terrain/water authority only: no game entities are
-    // streamed, so the entities sub-hash is the stable checksum of the EMPTY
-    // canonical ECS snapshot. Present (not blank) so a future entity-bearing
-    // server reports an entity-section divergence rather than a silent gap.
-    const std::string empty_entities =
-        Ecs::SerializeEntityRegistrySnapshotJson(Ecs::EntityRegistrySnapshot{});
+    // The entities sub-hash is the stable checksum of the canonical ECS snapshot.
+    // T-I6 P1: that snapshot now carries the deterministic player avatars (empty
+    // when avatar_count == 0 -> byte-identical to the pre-P1 terrain/water-only
+    // lane, so the default world_hash/entities sub-hash is unchanged).
+    const std::string entities_snapshot =
+        Ecs::SerializeEntityRegistrySnapshotJson(World::BuildAvatarEntitySnapshot(m_avatars));
     Persistence::WorldStreamingStateSubHashes sub =
-        Persistence::ComputeWorldStreamingStateSubHashes(state, empty_entities);
+        Persistence::ComputeWorldStreamingStateSubHashes(state, entities_snapshot);
     // T-I5a-2 (A2): the wind sub-hash slot, supplied from the session's wind
     // field (not chunk-derived). Present + stable for the WindFieldDeterminism
     // gate and the desync-localization oracle.
@@ -302,9 +337,9 @@ void ServerWorldRunner::ComputeWorldHashAndSubHashes(
     // (chunk + wind + weather + aether).
     out_world_hash = ComposeWorldHash(service.world_hash(state), wind_hash, weather_hash, aether_hash);
 
-    const std::string empty_entities =
-        Ecs::SerializeEntityRegistrySnapshotJson(Ecs::EntityRegistrySnapshot{});
-    out_sub = Persistence::ComputeWorldStreamingStateSubHashes(state, empty_entities);
+    const std::string entities_snapshot =
+        Ecs::SerializeEntityRegistrySnapshotJson(World::BuildAvatarEntitySnapshot(m_avatars));
+    out_sub = Persistence::ComputeWorldStreamingStateSubHashes(state, entities_snapshot);
     out_sub.wind = wind_hash;
     out_sub.weather = weather_hash;
     out_sub.aether = aether_hash;

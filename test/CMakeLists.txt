@@ -110,6 +110,7 @@ add_executable(common_tests
     common/GameSessionHeadlessWorld_test.cpp
     common/JobSystem_test.cpp
     common/MultiAnchorStreaming_test.cpp
+    common/PlayerAvatar_test.cpp
     common/LockstepSession_test.cpp
     common/ReplayStream_test.cpp
     common/ServerHeadlessHygiene_test.cpp

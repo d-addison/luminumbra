@@ -47,6 +47,11 @@ struct ServerCliOptions {
     int surface_radius = 4;
     int collision_radius = 2;
     std::uint64_t autosave_ticks = 0;
+    // T-I6 P1 (multiplayer): spawn N deterministic player avatars (phyllotaxis ring
+    // around spawn). 0 = none (byte-identical to the pre-P1 lane). With --smoke the
+    // double-run already asserts the entities sub-hash matches, so --smoke --avatars N
+    // validates avatar determinism through the existing gate path.
+    int avatars = 0;
     bool smoke = false;
     // T-I5a-2 (A2): WindFieldDeterminism gate. Boots a world, runs N ticks
     // twice, asserts the wind sub-hash is equal across runs + stable, and times
@@ -190,6 +195,8 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
             if (const char* v = next_value(i)) options.collision_radius = std::atoi(v);
         } else if (std::strcmp(arg, "--autosave-ticks") == 0) {
             if (const char* v = next_value(i)) options.autosave_ticks = std::strtoull(v, nullptr, 10);
+        } else if (std::strcmp(arg, "--avatars") == 0) {
+            if (const char* v = next_value(i)) options.avatars = std::atoi(v);
         } else if (std::strcmp(arg, "--artifact") == 0) {
             if (const char* v = next_value(i)) options.artifact_path = v;
         } else {
@@ -209,6 +216,7 @@ Luminumbra::Server::ServerWorldRunnerConfig RunnerConfigFrom(const ServerCliOpti
     config.surface_radius = options.surface_radius;
     config.collision_radius = options.collision_radius;
     config.autosave_interval_ticks = options.autosave_ticks;
+    config.avatar_count = options.avatars;
     return config;
 }
 
