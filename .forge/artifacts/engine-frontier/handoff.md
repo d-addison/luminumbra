@@ -80,11 +80,22 @@ owner ("research then spec then plan, don't go in blind" — see memory `researc
 (P3.1c/d) · AOI (P3.2) · interpolation + prediction (P3.3 core) — ALL tested; the live loop is
 CI-gated (ReplicationSmoke). The net + client-logic layers are done.
 
-**Next (the remaining join — larger, deliberate):** CLIENT-RENDER INTEGRATION — a connected client
-that feeds `SnapshotInterpolator.Sample()` / `LocalPlayerPredictor` into the avatar renderer so the
-on-screen view is literally network-driven (vs. today's scripted showcase walk). Then chunk-index
-AOI integration, `SteamNetworkingTransport` (owner/LAN-validated), P4 persistent join/leave, P5
-scale to 20+.
+- **P3.3 integration — NETWORK-DRIVEN RENDER** (`942b4a7`): `ReplicatedAvatarDemo` hosts a
+  ReplicationServer + ReplicationClient + SnapshotInterpolator over a loopback pair IN the client;
+  `--replicated` (showcase, avatars>=2) drives each render avatar's transform from the pipeline
+  (server walk → 15 Hz snapshot → transport → client → most-recent-wins → render-behind interpolate)
+  instead of direct transforms. Network-driven video delivered. Single-rig gate untouched. Full
+  ctest 290/290.
+
+**P3 COMPLETE (in-process):** the whole loop — protocol, reliability, endpoints, input→movement,
+AOI, interpolation+prediction, CI gate, AND the network-driven render — works end-to-end over the
+loopback transport. Swapping `LoopbackTransport` → `SteamNetworkingTransport` is the only change
+for real cross-machine play.
+
+**Next (real-networking + lifecycle phase):** `SteamNetworkingTransport` (ISteamNetworkingSockets /
+GameNetworkingSockets, owner/LAN-validated — memory `steam-multiplayer-target`); P4 persistent
+join/leave (ReplicationServer Add/RemoveClient lifecycle + state-baseline handoff); P5 scale to
+20+; wire `LocalPlayerPredictor` to a controlled client avatar; chunk-index AOI.
 
 ## Iteration 6 (cont., 2026-06-17) — Render-debt wave #1–#4 + #5 spec (tip `3df4347`)
 
