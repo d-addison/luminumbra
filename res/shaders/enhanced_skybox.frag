@@ -154,106 +154,164 @@ vec3 sunTransmittance(float cosZenith) {
     return texture(u_transmittanceLut, vec2(u, 0.0)).rgb;
 }
 
-// T-I5a-8 (C3): wind-advected sky-dome cloud layer + landscape-distance imposters.
-// The view ray is intersected with the cloud plane (u_cloudPlaneHeight); the hit's
-// world XZ feeds the SHARED cloudCoverageAt field, so the dome clouds are the same
-// field that casts the ground shadow and they DRIFT with the wind as the scroll
-// offset advances. Rays toward the horizon hit the plane far away -> the cloud
-// cells foreshorten into fluffy landscape-distance imposters near the horizon
-// band; rays toward the zenith sample the overhead sheet. Render-only.
-// T-I4-DR-tod-sky-balance: dayFactor lights the clouds; at night they fall to a
-// faint dark silhouette instead of holding a lit sunset tint over the dome.
+// ===========================================================================
+// T-I6 #2: VOLUMETRIC clouds (tier-2, Nubis-style raymarch). RENDER-ONLY.
+//
+// The tier-1 layer projected the view ray onto a single cloud PLANE and shaded
+// a 2.5D coverage sheet -- it had no depth, no parallax, no real silhouette
+// (the CLOUDS_FLAT_NO_STRUCTURE risk). This replaces that with a bounded
+// view-ray raymarch through a cloud SLAB [kCloudBottom, kCloudTop]:
+//   * horizontal density still comes from the SHARED cloudCoverageAt() field,
+//     so the dome clouds stay registered with the ground shadow the lighting
+//     pass projects from the SAME field (CloudShadow gate intact, render-only);
+//   * a vertical PROFILE (rounded base, anvil-tapered top) shapes the slab;
+//   * 3D EROSION fbm carves billows/cauliflower into the body;
+//   * a short LIGHT-MARCH toward the sun gives Beer-Lambert self-shadowing and
+//     a Henyey-Greenstein forward-scatter silver lining;
+//   * scattering is integrated front-to-back with transmittance (energy-
+//     conserving), composited over the LUT sky by the accumulated alpha.
+//
+// GATE SAFETY: clear-sky pixels (coverage ~0 at the slab) take a CHEAP reject
+// and return the base gradient BYTE-FOR-BYTE, so the SkyboxVisual horizon->
+// zenith luminance-drop / monotonicity gate sees an untouched fair-weather
+// dome -- only genuinely cloudy pixels pay the march. Storm decks (high
+// coverage) fill the dome with a structured overcast (high luma variance ->
+// not CLOUDS_FLAT). Render-only: nothing writes back to sim/world_hash.
+// ===========================================================================
+
+// Cloud slab in metres (world Y). Anchored on the shared u_cloudPlaneHeight so
+// the horizontal registration with the ground-shadow field is preserved.
+float cloudSlabBottom() { return u_cloudPlaneHeight; }
+float cloudSlabTop()    { return u_cloudPlaneHeight + 420.0; }
+
+// Henyey-Greenstein phase: g>0 forward scatter (bright silver lining toward sun).
+float hgPhase(float cosTheta, float g) {
+    float g2 = g * g;
+    float denom = 1.0 + g2 - 2.0 * g * cosTheta;
+    return (1.0 - g2) / (4.0 * PI_SKY * pow(max(denom, 1e-4), 1.5));
+}
+
+// Volumetric cloud density at a world-space sample p. Combines the shared 2D
+// coverage field (registration), a vertical profile, and 3D erosion. Returns
+// [0,1]; also outputs the raw horizontal coverage for the caller's cheap reject.
+// structureWeight (0 fair .. 1 storm) fills the slab into an overcast deck.
+float cloudDensity(vec3 p, float structureWeight, out float coverageOut) {
+    float coverage = cloudCoverageAt(p.xz);
+    // Storm fills holes: lift a coverage floor so a heavy deck is unbroken.
+    coverage = mix(coverage, max(coverage, mix(0.55, 0.95, structureWeight)), structureWeight);
+    coverageOut = coverage;
+    if (coverage <= 0.002) return 0.0;
+
+    float hf = clamp((p.y - cloudSlabBottom()) / (cloudSlabTop() - cloudSlabBottom()), 0.0, 1.0);
+    // Vertical profile: feather in off the rounded base, taper the anvil top.
+    float profile = smoothstep(0.0, 0.16, hf) * (1.0 - smoothstep(0.50, 1.0, hf));
+
+    // 3D erosion: low-frequency billow shape + high-frequency cauliflower edge.
+    // p.y folded into the 2D fbm lookups gives vertical (3D) variation cheaply.
+    vec2 wind = u_cloudScrollOffset;
+    float shape   = fbm((p.xz + wind) * (1.0 / 430.0) + vec2(p.y * 0.0045), 4);
+    float erosion = fbm((p.xz - wind * 0.6) * (1.0 / 120.0) + vec2(p.y * 0.011, 0.0), 3);
+
+    float d = coverage * profile;
+    // Modulate the body by the billow shape, then erode the edges (less erosion
+    // where coverage is high so a storm deck stays solid).
+    d *= (0.45 + 0.85 * shape);
+    d -= erosion * 0.32 * (1.0 - coverage * 0.6);
+    return clamp(d, 0.0, 1.0);
+}
+
+// T-I6 #2: bounded volumetric raymarch through the cloud slab. Replaces the
+// tier-1 single-plane projection. dayFactor lights the clouds; at night they
+// fall to a faint dark silhouette (storm night held legible by u_stormSkyFloor).
 vec3 renderClouds(vec3 viewDir, vec3 baseColor, float dayFactor) {
-    if (viewDir.y < 0.02) return baseColor; // No clouds at/below the horizon
+    if (viewDir.y < 0.02) return baseColor; // No clouds at/below the horizon.
 
-    // Eye assumed near the origin of the (translation-stripped) sky cube. Project
-    // the ray up to the cloud plane: t = planeHeight / viewDir.y. The resulting
-    // XZ is in metres, so it lines up with the lighting pass world XZ.
-    float t = u_cloudPlaneHeight / max(viewDir.y, 1e-3);
-    vec2 worldXZ = viewDir.xz * t;
+    float structureWeight = smoothstep(0.55, 0.80, u_cloudCoverageAmount);
 
-    // Distance fade so the far (near-horizon) cloud band thins into haze rather
-    // than tiling hard -- this is the "imposter" foreshortening band.
-    // T-I5b-DR-sky2 (defect M8/N6): under a STORM deck the overcast must WRAP
-    // DOWN to the horizon as a structured murk band -- a horizon-level storm view
-    // (the water_shore c1/c5 cells, pitch 0) was reading the fade all the way to
-    // zero -> bare battleship-grey dome with structure only higher up (near the
-    // bolt). So lift a horizon-fade FLOOR with the storm structureWeight: the fair-
-    // weather deck still thins to clear haze at the horizon (clear-sky gate intact),
-    // but a storm keeps near-full cloud cover right down to the horizon band so the
-    // billow structure carried in the shading reads across the WHOLE storm sky.
-    float storm = smoothstep(0.55, 0.80, u_cloudCoverageAmount);
+    // Eye at the origin of the (translation-stripped) sky cube. The slab spans
+    // [tEnter, tExit] along the ray; p.xz = viewDir.xz * t matches the lighting
+    // pass world XZ (same as the tier-1 plane projection -> registration kept).
+    float tEnter = cloudSlabBottom() / max(viewDir.y, 1e-3);
+    float tExit  = cloudSlabTop()    / max(viewDir.y, 1e-3);
+
+    // CHEAP CLEAR-SKY REJECT (gate safety + perf): probe coverage at the slab
+    // mid-point; if the column is essentially clear, return the base gradient
+    // untouched so SkyboxVisual sees a pristine fair-weather dome.
+    float midCov = cloudCoverageAt(viewDir.xz * (0.5 * (tEnter + tExit)));
+    midCov = mix(midCov, max(midCov, mix(0.55, 0.95, structureWeight)), structureWeight);
+    if (midCov <= 0.01) return baseColor;
+
+    // Horizon fade: fair weather thins to clear haze at the horizon (clear-sky
+    // gate intact); a storm keeps near-full cover right down to the horizon band.
     float horizonFade = mix(smoothstep(0.02, 0.22, viewDir.y),
-                            // Storm: only a shallow thin at the very horizon line,
-                            // then full overcast immediately above it.
                             0.55 + 0.45 * smoothstep(0.02, 0.10, viewDir.y),
-                            storm);
+                            structureWeight);
 
-    float coverage = cloudCoverageAt(worldXZ);
-    // T-I5b-DR-sky-fixes (defect M8): a storm deck (u_cloudCoverageAmount ~0.85)
-    // must read as a HEAVY, MENACING OVERCAST with real billow STRUCTURE -- not the
-    // old flat grey dome with a couple of detached cotton-ball puffs. Two problems
-    // were fixed:
-    //   (1) COVERAGE HOLES. At 0.85 the smoothstep band in cloudCoverageAt still
-    //       left large stretches of field below threshold -> bare sky gaps that
-    //       read as a near-empty dome with sparse puffs. We lift a coverage FLOOR
-    //       with coverage so the whole sky fills in to an unbroken overcast sheet,
-    //       leaving only shallow thinning instead of clear holes.
-    //   (2) FLATNESS. Once filled, a uniform coverage made the deck a flat grey
-    //       (low luma std -> CLOUDS_FLAT_NO_STRUCTURE). The structure is now carried
-    //       in the cloud SHADING (lump-driven luminance billows below), so a filled
-    //       overcast still has strong internal relief and high luma variance.
-    // All of this is gated by structureWeight (~0 at the fair-weather 0.45 deck,
-    // ~1 at the 0.85 storm deck) so the clear-sky dome the SkyboxVisual gradient
-    // gate frames keeps its horizon->zenith luminance drop untouched.
-    float structureWeight = storm; // == smoothstep(0.55, 0.80, u_cloudCoverageAmount)
-    float detailA = fbm(worldXZ * (1.0 / 520.0) + u_cloudScrollOffset * (1.0 / 520.0), 4);
-    float detailB = fbm(worldXZ * (1.0 / 210.0) + vec2(53.0, 19.0), 3);
-    // Higher-frequency billow term for the fine cauliflower relief on the overcast.
-    float detailC = fbm(worldXZ * (1.0 / 95.0) + vec2(7.0, 31.0), 3);
-    float lumpy = (detailA - 0.5) * 0.55 + (detailB - 0.5) * 0.30;
-    // Storm coverage: a high FLOOR (heavy overcast fills the sky) with only shallow
-    // thinning carved by the lump term, so there are no bare-sky holes but the deck
-    // is not a dead-flat fill either. Fair coverage keeps the old detail-modulated
-    // sparse deck. Blend by structureWeight so only storms restyle.
-    float fillFloor = mix(0.55, 0.97, structureWeight); // storm fills the dome
-    float structured = clamp(fillFloor + (lumpy + (detailC - 0.5) * 0.25) * 0.30, 0.0, 1.0);
-    float plain = clamp(coverage * (0.82 + 0.18 * detailA), 0.0, 1.0);
-    coverage = mix(plain, structured, structureWeight);
-    coverage *= horizonFade;
+    // --- Raymarch the slab front-to-back. ---
+    const int   kSteps      = 28;
+    const int   kLightSteps = 5;
+    float dt = (tExit - tEnter) / float(kSteps);
+    // Per-pixel jitter breaks the slab-entry banding without a blue-noise tex.
+    float jitter = hash(viewDir.xz * 512.0 + u_time);
 
-    // Self-shadow: denser cloud cores read darker on their sun-away side, while a
-    // higher-frequency lump term brightens the cauliflower tops -> visible relief.
-    vec3 litCloud = vec3(0.95, 0.96, 1.0);
-    vec3 shadowCloud = vec3(0.52, 0.55, 0.66);
-    float sunDot = dot(viewDir, u_sunDirection);
-    float cloudLighting = clamp(sunDot * 0.5 + 0.5, 0.0, 1.0);
-    cloudLighting = max(cloudLighting, 0.35);
-    // Relief term (storm only): a multi-octave billow signal lights the cauliflower
-    // tops and sinks the valleys, so a FILLED overcast still varies strongly in
-    // luminance (menacing structured deck, high luma std) instead of a flat grey
-    // sheet. detailC adds the fine high-frequency texture. Gated by structureWeight
-    // so the fair-weather deck keeps its old flat lighting (and the gate's zenith
-    // luminance for the clear-sky cells).
-    float stormRelief = (detailA - 0.5) * 0.9 + (detailC - 0.5) * 0.6 + (detailB - 0.5) * 0.4;
-    cloudLighting = clamp(cloudLighting + structureWeight * stormRelief, 0.10, 1.0);
-    vec3 cloudColor = mix(shadowCloud, litCloud, cloudLighting);
-    // Storm deck darkens overall (heavy nimbus reads grey-charcoal, not white) so
-    // the overcast is genuinely menacing rather than a bright fluffy ceiling.
-    cloudColor = mix(cloudColor, cloudColor * 0.62, structureWeight);
-    // Night tint + darkening (kept from the old layer so night clouds silhouette).
-    cloudColor = mix(cloudColor, vec3(0.18, 0.16, 0.26), 1.0 - dayFactor);
+    // Lighting palette. Sun colour reddens at low sun via the transmittance LUT
+    // (coherent with the disc/aerial); ambient is a cool sky fill.
+    vec3 sunLight = sunTransmittance(u_sunCosZenith) * 2.4;
+    vec3 ambient  = vec3(0.42, 0.47, 0.58);
+    float cosToSun = dot(viewDir, u_sunDirection);
+    // Blend a forward (silver lining) and a near-isotropic lobe.
+    float phase = mix(hgPhase(cosToSun, 0.20), hgPhase(cosToSun, 0.76), 0.5);
 
-    // T-I5b-DR-sweep-visual-fixes (defect 3): NIGHT-STORM floor. Plain *dayFactor
-    // crushed night clouds (and the whole storm dome) to black -- a night storm
-    // was unreadable. Hold a small storm-only brightness floor so the overcast
-    // deck stays a legible dark grey at night WITHOUT lifting the clear-night
-    // dome (u_stormSkyFloor is 0 for clear sky). Clear night clouds still go dark.
+    const float kSigma      = 0.085; // extinction per metre-density
+    const float kLightSigma = 0.090;
+
+    float transmittance = 1.0;
+    vec3  scatter = vec3(0.0);
+
+    for (int i = 0; i < kSteps; ++i) {
+        float t = tEnter + (float(i) + jitter) * dt;
+        vec3 p = viewDir * t;
+        float cov;
+        float density = cloudDensity(p, structureWeight, cov);
+        if (density > 0.001) {
+            // Light march toward the sun for self-shadowing (Beer-Lambert).
+            float lightDt = (tExit - tEnter) / float(kSteps) * 1.4;
+            float lightDensity = 0.0;
+            for (int j = 0; j < kLightSteps; ++j) {
+                vec3 lp = p + u_sunDirection * (lightDt * (float(j) + 0.5));
+                float lc;
+                lightDensity += cloudDensity(lp, structureWeight, lc);
+            }
+            float lightTrans = exp(-lightDensity * lightDt * kLightSigma);
+            // Beer-Powder: the powder term restores the dark-edge / bright-core
+            // look multiple scattering would give (Nubis, SIGGRAPH 2015).
+            float powder = 1.0 - exp(-density * dt * kSigma * 2.0);
+            vec3 sunTerm = sunLight * lightTrans * phase * powder;
+            vec3 stepColor = (sunTerm + ambient) * density;
+
+            float stepExt = exp(-density * dt * kSigma);
+            // Energy-conserving front-to-back integration.
+            scatter += transmittance * stepColor * (1.0 - stepExt);
+            transmittance *= stepExt;
+            if (transmittance < 0.02) break;
+        }
+    }
+
+    float alpha = clamp((1.0 - transmittance) * horizonFade, 0.0, 1.0);
+    vec3 cloudColor = scatter;
+
+    // Storm deck reads charcoal-grey (menacing), not bright white.
+    cloudColor = mix(cloudColor, cloudColor * 0.66, structureWeight);
+    // Night tint so clouds silhouette against the dark dome.
+    cloudColor = mix(cloudColor, cloudColor * 0.12 + vec3(0.02, 0.02, 0.03), 1.0 - dayFactor);
+
+    // NIGHT-STORM floor: keep a night overcast legible without lifting the
+    // clear-night dome (u_stormSkyFloor is 0 for clear sky).
     float nightStormFloor = u_stormSkyFloor * (1.0 - dayFactor) * 0.16;
     float cloudBright = max(dayFactor * 1.04, nightStormFloor);
     cloudColor *= cloudBright;
 
-    return mix(baseColor, cloudColor, coverage);
+    return mix(baseColor, cloudColor, alpha);
 }
 
 // Enhanced star field
