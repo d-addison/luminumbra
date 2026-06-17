@@ -18,6 +18,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -29,6 +30,7 @@
 #include "luminumbra_common/net/LockstepSession.h"
 #include "luminumbra_common/net/ReplicationEndpoint.h"
 #include "luminumbra_common/net/ReplicationProtocol.h"
+#include "luminumbra_common/network/NetworkLoopbackAuthority.h"
 #include "luminumbra_common/world/PlayerAvatar.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/InstinctComponents.h"
@@ -84,6 +86,10 @@ struct ServerCliOptions {
     bool net_join = false;
     std::string host = "127.0.0.1";
     std::uint16_t port = 27015;
+    // Multi-client accept: host accepts client ids 1..clients. Each joiner passes
+    // --player-id K and connects to base_port + K - 1 for both TCP and GNS UDP.
+    int clients = 1;
+    std::uint32_t player_id = 1;
     // T-I6: use the Steamworks ISteamNetworkingSockets transport (real UDP via the
     // Steam SDK) for --net-host/--net-join instead of raw TCP. Requires the build to
     // be configured with -DLUMINUMBRA_ENABLE_STEAM=ON and the Steam client running.
@@ -253,6 +259,12 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
             if (const char* v = next_value(i)) options.host = v;
         } else if (std::strcmp(arg, "--port") == 0) {
             if (const char* v = next_value(i)) options.port = static_cast<std::uint16_t>(std::atoi(v));
+        } else if (std::strcmp(arg, "--clients") == 0) {
+            if (const char* v = next_value(i)) options.clients = std::max(1, std::atoi(v));
+        } else if (std::strcmp(arg, "--player-id") == 0) {
+            if (const char* v = next_value(i)) {
+                options.player_id = static_cast<std::uint32_t>(std::max(1, std::atoi(v)));
+            }
         } else if (std::strcmp(arg, "--artifact") == 0) {
             if (const char* v = next_value(i)) options.artifact_path = v;
         } else {
@@ -274,6 +286,21 @@ Luminumbra::Server::ServerWorldRunnerConfig RunnerConfigFrom(const ServerCliOpti
     config.autosave_interval_ticks = options.autosave_ticks;
     config.avatar_count = options.avatars;
     return config;
+}
+
+std::uint32_t ExpectedNetworkClients(const ServerCliOptions& options) {
+    return options.clients > 0 ? static_cast<std::uint32_t>(options.clients) : 1u;
+}
+
+std::uint32_t LocalNetworkPlayerId(const ServerCliOptions& options) {
+    return options.player_id == 0u ? 1u : options.player_id;
+}
+
+bool ResolveNetworkClientPort(
+    const std::uint16_t base_port,
+    const std::uint32_t client_id,
+    std::uint16_t& out_port) {
+    return luminumbra::network::TryNetworkMultiClientAcceptPortForClient(base_port, client_id, out_port);
 }
 
 struct SmokeRunResult {
@@ -2111,15 +2138,24 @@ int RunReplicate(const ServerCliOptions& options) {
 // P, another --net-join --host H --port P.
 // ---------------------------------------------------------------------------
 int RunNetHost(const ServerCliOptions& options) {
+    const std::uint32_t expected_clients = ExpectedNetworkClients(options);
+    std::uint16_t last_accept_port = 0;
+    if (!ResolveNetworkClientPort(options.port, expected_clients, last_accept_port)) {
+        LUMINUMBRA_CORE_ERROR("net-host: cannot map {} client(s) from base port {}", expected_clients, options.port);
+        return 2;
+    }
+
     Luminumbra::Server::ServerWorldRunnerConfig config = RunnerConfigFrom(options);
     config.world_id.clear();
     config.world_name = "Net Host";
     config.autosave_interval_ticks = 0;
-    if (config.avatar_count <= 1) {
-        config.avatar_count = 2; // need a controlled (id 1) avatar for AOI centring
+    const int required_avatars = static_cast<int>(expected_clients) + 1;
+    if (config.avatar_count < required_avatars) {
+        config.avatar_count = required_avatars; // avatar ids 1..N are controlled by remote clients
     }
-    LUMINUMBRA_CORE_INFO("Net HOST: preset={} seed={} avatars={} ticks={} -- listening on port {}",
-        options.preset, options.seed, config.avatar_count, options.ticks, options.port);
+    LUMINUMBRA_CORE_INFO(
+        "Net HOST: preset={} seed={} avatars={} ticks={} clients={} -- accepting TCP ports {}..{}",
+        options.preset, options.seed, config.avatar_count, options.ticks, expected_clients, options.port, last_accept_port);
 
     Luminumbra::Server::ServerWorldRunner runner(std::move(config));
     if (!runner.Boot()) {
@@ -2127,74 +2163,131 @@ int RunNetHost(const ServerCliOptions& options) {
         return 1;
     }
 
-    Luminumbra::Net::TcpTransport transport;
-    if (!transport.Listen(options.port, /*timeout_ms=*/30000)) {
-        LUMINUMBRA_CORE_ERROR("net-host: listen/accept failed on port {} (timed out waiting for a client?)",
-            options.port);
-        return 1;
-    }
-    LUMINUMBRA_CORE_INFO("net-host: client connected over TCP.");
-
     Luminumbra::Net::ReplicationServer server;
-    server.AddClient(/*client_id=*/1, &transport);
+    std::vector<std::unique_ptr<Luminumbra::Net::TcpTransport>> transports;
+    std::vector<std::uint32_t> client_ids;
+    transports.reserve(expected_clients);
+    client_ids.reserve(expected_clients);
+    for (std::uint32_t client_id = 1; client_id <= expected_clients; ++client_id) {
+        std::uint16_t client_port = 0;
+        if (!ResolveNetworkClientPort(options.port, client_id, client_port)) {
+            LUMINUMBRA_CORE_ERROR("net-host: cannot map client {} from base port {}", client_id, options.port);
+            for (auto& accepted : transports) {
+                accepted->Close();
+            }
+            return 2;
+        }
+        auto transport = std::make_unique<Luminumbra::Net::TcpTransport>();
+        LUMINUMBRA_CORE_INFO("net-host: waiting for client {} over TCP on port {}...", client_id, client_port);
+        if (!transport->Listen(client_port, /*timeout_ms=*/30000)) {
+            LUMINUMBRA_CORE_ERROR(
+                "net-host: listen/accept failed for client {} on port {} (timed out waiting for a client?)",
+                client_id, client_port);
+            for (auto& accepted : transports) {
+                accepted->Close();
+            }
+            return 1;
+        }
+        server.AddClient(client_id, transport.get());
+        client_ids.push_back(client_id);
+        transports.push_back(std::move(transport));
+    }
+    LUMINUMBRA_CORE_INFO("net-host: {} client(s) connected over TCP.", transports.size());
+
     server.SetAoiChunkRadius(/*chunk_radius=*/3, /*chunk_size_mm=*/Luminumbra::CHUNK_SIZE_X * 1000);
 
-    const std::uint32_t controlled = runner.Avatars().size() > 1 ? 1u : 0u;
-    const float initial_x = runner.Avatars().empty() ? 0.0f : runner.Avatars()[controlled].position.x;
+    std::vector<float> initial_x_by_client(expected_clients + 1u, 0.0f);
+    for (const std::uint32_t client_id : client_ids) {
+        if (client_id < runner.Avatars().size()) {
+            initial_x_by_client[client_id] = runner.Avatars()[client_id].position.x;
+        }
+    }
 
     std::uint64_t executed = 0;
+    bool all_clients_connected = true;
     while (executed < options.ticks) {
-        server.PumpInbound(); // receive the client's usercmd (newest-wins)
-        if (const Luminumbra::Net::UsercmdMsg* got = server.LatestUsercmd(1)) {
-            runner.SetAvatarMove(got->player_id,
-                                 static_cast<float>(got->move_x) / 32767.0f,
-                                 static_cast<float>(got->move_z) / 32767.0f);
+        server.PumpInbound(); // receive each client's usercmd (newest-wins)
+        for (const std::uint32_t client_id : client_ids) {
+            if (const Luminumbra::Net::UsercmdMsg* got = server.LatestUsercmd(client_id)) {
+                runner.SetAvatarMove(got->player_id,
+                                     static_cast<float>(got->move_x) / 32767.0f,
+                                     static_cast<float>(got->move_z) / 32767.0f);
+            }
         }
         const auto step = runner.RunFixedTicks(1);
         executed += step.ticks_executed;
         if (step.ticks_executed == 0) {
             LUMINUMBRA_CORE_ERROR("net-host: tick {} did not advance", executed + 1);
+            for (auto& transport : transports) {
+                transport->Close();
+            }
             return 1;
         }
         const auto states = Luminumbra::World::BuildAvatarReplStates(runner.Avatars());
         server.BroadcastSnapshot(executed, states); // reliable over TCP
-        if (!transport.IsPeerConnected()) {
-            LUMINUMBRA_CORE_WARN("net-host: peer disconnected at tick {}", executed);
+        std::size_t connected_count = 0;
+        for (const auto& transport : transports) {
+            if (transport->IsPeerConnected()) {
+                ++connected_count;
+            }
+        }
+        if (connected_count != transports.size()) {
+            LUMINUMBRA_CORE_WARN(
+                "net-host: {}/{} client(s) still connected at tick {}",
+                connected_count, transports.size(), executed);
+            all_clients_connected = false;
             break;
         }
     }
     server.PumpInbound(); // drain final ack
-    const float final_x = runner.Avatars().empty() ? 0.0f : runner.Avatars()[controlled].position.x;
+    for (const std::uint32_t client_id : client_ids) {
+        const float final_x =
+            client_id < runner.Avatars().size() ? runner.Avatars()[client_id].position.x : 0.0f;
+        LUMINUMBRA_CORE_INFO(
+            "net-host: client {} acked seq {}; avatar {} moved {:.2f} m in X.",
+            client_id, server.AckedSnapshotSeq(client_id), client_id, final_x - initial_x_by_client[client_id]);
+    }
     LUMINUMBRA_CORE_INFO(
-        "net-host: ran {} ticks, {} avatars; client acked seq {}; controlled avatar moved {:.2f} m in X. "
+        "net-host: ran {} ticks, {} avatars, {} TCP client(s). "
         "Holding briefly so the last frames flush, then closing.",
-        executed, runner.Avatars().size(), server.AckedSnapshotSeq(1), final_x - initial_x);
+        executed, runner.Avatars().size(), transports.size());
     // Give TCP a moment to flush the final snapshot(s) before the socket closes.
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    transport.Close();
-    return (executed == options.ticks) ? 0 : 1;
+    for (auto& transport : transports) {
+        transport->Close();
+    }
+    return (executed == options.ticks && all_clients_connected) ? 0 : 1;
 }
 
 int RunNetJoin(const ServerCliOptions& options) {
-    LUMINUMBRA_CORE_INFO("Net JOIN: connecting to {}:{} ...", options.host, options.port);
+    const std::uint32_t player_id = LocalNetworkPlayerId(options);
+    std::uint16_t connect_port = 0;
+    if (!ResolveNetworkClientPort(options.port, player_id, connect_port)) {
+        LUMINUMBRA_CORE_ERROR("net-join: cannot map player id {} from base port {}", player_id, options.port);
+        return 2;
+    }
+
+    LUMINUMBRA_CORE_INFO(
+        "Net JOIN: player {} connecting to {}:{} ...",
+        player_id, options.host, connect_port);
     Luminumbra::Net::TcpTransport transport;
-    if (!transport.Connect(options.host, options.port, /*timeout_ms=*/30000)) {
-        LUMINUMBRA_CORE_ERROR("net-join: could not connect to {}:{}", options.host, options.port);
+    if (!transport.Connect(options.host, connect_port, /*timeout_ms=*/30000)) {
+        LUMINUMBRA_CORE_ERROR("net-join: could not connect to {}:{}", options.host, connect_port);
         return 1;
     }
-    LUMINUMBRA_CORE_INFO("net-join: connected over TCP.");
+    LUMINUMBRA_CORE_INFO("net-join: player {} connected over TCP.", player_id);
 
-    Luminumbra::Net::ReplicationClient client(/*player_id=*/1, &transport);
+    Luminumbra::Net::ReplicationClient client(player_id, &transport);
 
     std::uint32_t last_seq = 0;
     std::size_t max_entities = 0;
     // Pump until we have mirrored the host's full run (seq >= ticks) or it leaves.
-    // Send a +X usercmd each iteration so the host's avatar 1 walks under our input.
+    // Send a +X usercmd each iteration so the selected host avatar walks under our input.
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
     while (std::chrono::steady_clock::now() < deadline) {
         Luminumbra::Net::UsercmdMsg cmd;
         cmd.tick = last_seq + 1;
-        cmd.player_id = 1;
+        cmd.player_id = player_id;
         cmd.move_x = 32767; // +1.0
         client.SendUsercmd(cmd);
         client.PumpInbound();
@@ -2207,21 +2300,23 @@ int RunNetJoin(const ServerCliOptions& options) {
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 
-    const bool ok = client.has_snapshot() && max_entities >= 2 && last_seq > 0;
+    const bool ok =
+        client.has_snapshot() && max_entities > static_cast<std::size_t>(player_id) && last_seq > 0;
     if (!ok) {
-        LUMINUMBRA_CORE_ERROR("net-join: did not mirror the host (has_snapshot={} max_entities={} last_seq={})",
-            client.has_snapshot(), max_entities, last_seq);
+        LUMINUMBRA_CORE_ERROR(
+            "net-join: player {} did not mirror the host (has_snapshot={} max_entities={} last_seq={})",
+            player_id, client.has_snapshot(), max_entities, last_seq);
         transport.Close();
         return 1;
     }
     float mirror_x = 0.0f;
     for (const auto& e : client.snapshot().entities) {
-        if (e.entity_id == 1u) mirror_x = Luminumbra::Net::ReplDequantPos(e.px_mm);
+        if (e.entity_id == player_id) mirror_x = Luminumbra::Net::ReplDequantPos(e.px_mm);
     }
     LUMINUMBRA_CORE_INFO(
-        "net-join: mirrored host over TCP -- last seq {}, up to {} entities; controlled avatar (id 1) "
+        "net-join: player {} mirrored host over TCP -- last seq {}, up to {} entities; controlled avatar "
         "mirrored at x={:.2f} m. Real over-the-wire replication confirmed.",
-        last_seq, max_entities, mirror_x);
+        player_id, last_seq, max_entities, mirror_x);
     transport.Close();
     return 0;
 }
@@ -2365,62 +2460,136 @@ int RunGnsHost(const ServerCliOptions& options) {
         LUMINUMBRA_CORE_ERROR("gns-host: GameNetworkingSockets init failed");
         return 1;
     }
+    const std::uint32_t expected_clients = ExpectedNetworkClients(options);
+    std::uint16_t last_accept_port = 0;
+    if (!ResolveNetworkClientPort(options.port, expected_clients, last_accept_port)) {
+        LUMINUMBRA_CORE_ERROR("gns-host: cannot map {} client(s) from base port {}", expected_clients, options.port);
+        Luminumbra::Net::GnsLink::Shutdown();
+        return 2;
+    }
     Luminumbra::Server::ServerWorldRunnerConfig config = RunnerConfigFrom(options);
     config.world_id.clear();
     config.world_name = "GNS Host";
     config.autosave_interval_ticks = 0;
-    if (config.avatar_count <= 1) config.avatar_count = 2;
-    LUMINUMBRA_CORE_INFO("GNS HOST: preset={} seed={} avatars={} ticks={} -- UDP listening on port {}",
-        options.preset, options.seed, config.avatar_count, options.ticks, options.port);
+    const int required_avatars = static_cast<int>(expected_clients) + 1;
+    if (config.avatar_count < required_avatars) config.avatar_count = required_avatars;
+    LUMINUMBRA_CORE_INFO(
+        "GNS HOST: preset={} seed={} avatars={} ticks={} clients={} -- accepting UDP ports {}..{}",
+        options.preset, options.seed, config.avatar_count, options.ticks, expected_clients, options.port, last_accept_port);
 
     Luminumbra::Server::ServerWorldRunner runner(std::move(config));
-    if (!runner.Boot()) { LUMINUMBRA_CORE_ERROR("gns-host: boot failed"); return 1; }
-
-    Luminumbra::Net::GnsTransport transport;
-    if (!transport.Listen(options.port)) {
-        LUMINUMBRA_CORE_ERROR("gns-host: CreateListenSocketIP failed on port {}", options.port);
+    if (!runner.Boot()) {
+        LUMINUMBRA_CORE_ERROR("gns-host: boot failed");
+        Luminumbra::Net::GnsLink::Shutdown();
         return 1;
     }
-    LUMINUMBRA_CORE_INFO("gns-host: listening over UDP; waiting for a peer (30s)...");
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
-    while (!transport.IsPeerConnected() && std::chrono::steady_clock::now() < deadline) {
-        Luminumbra::Net::GnsLink::RunCallbacks();
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    if (!transport.IsPeerConnected()) {
-        LUMINUMBRA_CORE_ERROR("gns-host: no peer connected within timeout");
-        return 1;
-    }
-    LUMINUMBRA_CORE_INFO("gns-host: peer connected over UDP.");
 
     Luminumbra::Net::ReplicationServer server;
-    server.AddClient(1, &transport);
+    std::vector<std::unique_ptr<Luminumbra::Net::GnsTransport>> transports;
+    std::vector<std::uint32_t> client_ids;
+    transports.reserve(expected_clients);
+    client_ids.reserve(expected_clients);
+    for (std::uint32_t client_id = 1; client_id <= expected_clients; ++client_id) {
+        std::uint16_t client_port = 0;
+        if (!ResolveNetworkClientPort(options.port, client_id, client_port)) {
+            LUMINUMBRA_CORE_ERROR("gns-host: cannot map client {} from base port {}", client_id, options.port);
+            for (auto& accepted : transports) {
+                accepted->Close();
+            }
+            Luminumbra::Net::GnsLink::Shutdown();
+            return 2;
+        }
+        auto transport = std::make_unique<Luminumbra::Net::GnsTransport>();
+        if (!transport->Listen(client_port)) {
+            LUMINUMBRA_CORE_ERROR("gns-host: CreateListenSocketIP failed for client {} on port {}", client_id, client_port);
+            for (auto& accepted : transports) {
+                accepted->Close();
+            }
+            Luminumbra::Net::GnsLink::Shutdown();
+            return 1;
+        }
+        LUMINUMBRA_CORE_INFO("gns-host: listening for client {} over UDP on port {} (30s)...", client_id, client_port);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        while (!transport->IsPeerConnected() && std::chrono::steady_clock::now() < deadline) {
+            Luminumbra::Net::GnsLink::RunCallbacks();
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (!transport->IsPeerConnected()) {
+            LUMINUMBRA_CORE_ERROR("gns-host: client {} did not connect within timeout", client_id);
+            transport->Close();
+            for (auto& accepted : transports) {
+                accepted->Close();
+            }
+            Luminumbra::Net::GnsLink::Shutdown();
+            return 1;
+        }
+        server.AddClient(client_id, transport.get());
+        client_ids.push_back(client_id);
+        transports.push_back(std::move(transport));
+    }
+    LUMINUMBRA_CORE_INFO("gns-host: {} client(s) connected over UDP.", transports.size());
+
     server.SetAoiChunkRadius(3, Luminumbra::CHUNK_SIZE_X * 1000);
-    const std::uint32_t controlled = runner.Avatars().size() > 1 ? 1u : 0u;
-    const float initial_x = runner.Avatars().empty() ? 0.0f : runner.Avatars()[controlled].position.x;
+    std::vector<float> initial_x_by_client(expected_clients + 1u, 0.0f);
+    for (const std::uint32_t client_id : client_ids) {
+        if (client_id < runner.Avatars().size()) {
+            initial_x_by_client[client_id] = runner.Avatars()[client_id].position.x;
+        }
+    }
 
     std::uint64_t executed = 0;
+    bool all_clients_connected = true;
     while (executed < options.ticks) {
         Luminumbra::Net::GnsLink::RunCallbacks();
         server.PumpInbound();
-        if (const Luminumbra::Net::UsercmdMsg* got = server.LatestUsercmd(1)) {
-            runner.SetAvatarMove(got->player_id, static_cast<float>(got->move_x) / 32767.0f,
-                                 static_cast<float>(got->move_z) / 32767.0f);
+        for (const std::uint32_t client_id : client_ids) {
+            if (const Luminumbra::Net::UsercmdMsg* got = server.LatestUsercmd(client_id)) {
+                runner.SetAvatarMove(got->player_id, static_cast<float>(got->move_x) / 32767.0f,
+                                     static_cast<float>(got->move_z) / 32767.0f);
+            }
         }
         const auto step = runner.RunFixedTicks(1);
         executed += step.ticks_executed;
-        if (step.ticks_executed == 0) { LUMINUMBRA_CORE_ERROR("gns-host: tick stalled"); return 1; }
+        if (step.ticks_executed == 0) {
+            LUMINUMBRA_CORE_ERROR("gns-host: tick stalled");
+            for (auto& transport : transports) {
+                transport->Close();
+            }
+            Luminumbra::Net::GnsLink::Shutdown();
+            return 1;
+        }
         const auto states = Luminumbra::World::BuildAvatarReplStates(runner.Avatars());
         server.BroadcastSnapshot(executed, states);
-        if (!transport.IsPeerConnected()) { LUMINUMBRA_CORE_WARN("gns-host: peer left at tick {}", executed); break; }
+        std::size_t connected_count = 0;
+        for (const auto& transport : transports) {
+            if (transport->IsPeerConnected()) {
+                ++connected_count;
+            }
+        }
+        if (connected_count != transports.size()) {
+            LUMINUMBRA_CORE_WARN(
+                "gns-host: {}/{} client(s) still connected at tick {}",
+                connected_count, transports.size(), executed);
+            all_clients_connected = false;
+            break;
+        }
     }
-    const float final_x = runner.Avatars().empty() ? 0.0f : runner.Avatars()[controlled].position.x;
-    LUMINUMBRA_CORE_INFO("gns-host: ran {} ticks over UDP, {} avatars; controlled avatar moved {:.2f} m in X.",
-        executed, runner.Avatars().size(), final_x - initial_x);
+    for (const std::uint32_t client_id : client_ids) {
+        const float final_x =
+            client_id < runner.Avatars().size() ? runner.Avatars()[client_id].position.x : 0.0f;
+        LUMINUMBRA_CORE_INFO(
+            "gns-host: client {} acked seq {}; avatar {} moved {:.2f} m in X.",
+            client_id, server.AckedSnapshotSeq(client_id), client_id, final_x - initial_x_by_client[client_id]);
+    }
+    LUMINUMBRA_CORE_INFO(
+        "gns-host: ran {} ticks over UDP, {} avatars, {} client(s).",
+        executed, runner.Avatars().size(), transports.size());
     for (int i = 0; i < 50; ++i) { Luminumbra::Net::GnsLink::RunCallbacks(); std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
-    transport.Close();
+    for (auto& transport : transports) {
+        transport->Close();
+    }
     Luminumbra::Net::GnsLink::Shutdown();
-    return (executed == options.ticks) ? 0 : 1;
+    return (executed == options.ticks && all_clients_connected) ? 0 : 1;
 }
 
 int RunGnsJoin(const ServerCliOptions& options) {
@@ -2428,10 +2597,20 @@ int RunGnsJoin(const ServerCliOptions& options) {
         LUMINUMBRA_CORE_ERROR("gns-join: GameNetworkingSockets init failed");
         return 1;
     }
-    LUMINUMBRA_CORE_INFO("GNS JOIN: connecting to {}:{} over UDP ...", options.host, options.port);
+    const std::uint32_t player_id = LocalNetworkPlayerId(options);
+    std::uint16_t connect_port = 0;
+    if (!ResolveNetworkClientPort(options.port, player_id, connect_port)) {
+        LUMINUMBRA_CORE_ERROR("gns-join: cannot map player id {} from base port {}", player_id, options.port);
+        Luminumbra::Net::GnsLink::Shutdown();
+        return 2;
+    }
+    LUMINUMBRA_CORE_INFO(
+        "GNS JOIN: player {} connecting to {}:{} over UDP ...",
+        player_id, options.host, connect_port);
     Luminumbra::Net::GnsTransport transport;
-    if (!transport.Connect(options.host, options.port)) {
+    if (!transport.Connect(options.host, connect_port)) {
         LUMINUMBRA_CORE_ERROR("gns-join: ConnectByIPAddress failed");
+        Luminumbra::Net::GnsLink::Shutdown();
         return 1;
     }
     const auto connect_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
@@ -2439,17 +2618,22 @@ int RunGnsJoin(const ServerCliOptions& options) {
         Luminumbra::Net::GnsLink::RunCallbacks();
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    if (!transport.IsPeerConnected()) { LUMINUMBRA_CORE_ERROR("gns-join: connect timed out"); return 1; }
-    LUMINUMBRA_CORE_INFO("gns-join: connected over UDP.");
+    if (!transport.IsPeerConnected()) {
+        LUMINUMBRA_CORE_ERROR("gns-join: connect timed out");
+        transport.Close();
+        Luminumbra::Net::GnsLink::Shutdown();
+        return 1;
+    }
+    LUMINUMBRA_CORE_INFO("gns-join: player {} connected over UDP.", player_id);
 
-    Luminumbra::Net::ReplicationClient client(1, &transport);
+    Luminumbra::Net::ReplicationClient client(player_id, &transport);
     std::uint32_t last_seq = 0;
     std::size_t max_entities = 0;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
     while (std::chrono::steady_clock::now() < deadline) {
         Luminumbra::Net::GnsLink::RunCallbacks();
         Luminumbra::Net::UsercmdMsg cmd;
-        cmd.tick = last_seq + 1; cmd.player_id = 1; cmd.move_x = 32767;
+        cmd.tick = last_seq + 1; cmd.player_id = player_id; cmd.move_x = 32767;
         client.SendUsercmd(cmd);
         client.PumpInbound();
         if (client.has_snapshot()) {
@@ -2460,18 +2644,20 @@ int RunGnsJoin(const ServerCliOptions& options) {
         if (!transport.IsPeerConnected() && last_seq > 0) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
-    const bool ok = client.has_snapshot() && max_entities >= 2 && last_seq > 0;
+    const bool ok =
+        client.has_snapshot() && max_entities > static_cast<std::size_t>(player_id) && last_seq > 0;
     if (!ok) {
-        LUMINUMBRA_CORE_ERROR("gns-join: did not mirror the host (has_snapshot={} max_entities={} last_seq={})",
-            client.has_snapshot(), max_entities, last_seq);
+        LUMINUMBRA_CORE_ERROR(
+            "gns-join: player {} did not mirror the host (has_snapshot={} max_entities={} last_seq={})",
+            player_id, client.has_snapshot(), max_entities, last_seq);
         transport.Close(); Luminumbra::Net::GnsLink::Shutdown(); return 1;
     }
     float mirror_x = 0.0f;
     for (const auto& e : client.snapshot().entities) {
-        if (e.entity_id == 1u) mirror_x = Luminumbra::Net::ReplDequantPos(e.px_mm);
+        if (e.entity_id == player_id) mirror_x = Luminumbra::Net::ReplDequantPos(e.px_mm);
     }
-    LUMINUMBRA_CORE_INFO("gns-join: mirrored host over UDP -- last seq {}, up to {} entities; controlled avatar "
-        "(id 1) at x={:.2f} m. Real UDP replication confirmed.", last_seq, max_entities, mirror_x);
+    LUMINUMBRA_CORE_INFO("gns-join: player {} mirrored host over UDP -- last seq {}, up to {} entities; controlled "
+        "avatar at x={:.2f} m. Real UDP replication confirmed.", player_id, last_seq, max_entities, mirror_x);
     transport.Close();
     Luminumbra::Net::GnsLink::Shutdown();
     return 0;
@@ -2491,7 +2677,8 @@ int main(int argc, char* argv[]) {
             "[--lockstep-dump <path>]] "
             "[--root <path>] [--preset <name>] "
             "[--seed <seed>] [--world-id <id>] [--ticks <n>] [--radius <chunks>] "
-            "[--collision-radius <chunks>] [--autosave-ticks <n>] [--artifact <path>]");
+            "[--collision-radius <chunks>] [--autosave-ticks <n>] [--clients <n>] "
+            "[--player-id <id>] [--artifact <path>]");
         return 2;
     }
 
