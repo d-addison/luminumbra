@@ -57,10 +57,18 @@ owner ("research then spec then plan, don't go in blind" — see memory `researc
   the server avatars (`--replicate --avatars 4 --ticks 60`: seq=60, acked=60, max_pos_err 0.0005m,
   passed). End-to-end live replication with physics-stepped positions. Full ctest **281/281**.
 
-**Next:** register `--replicate` as a `ReplicationSmoke` gate in validate-engine-frontier.ps1
-(mirrors `--smoke`→HeadlessServerTick); P3.2 AOI (chunk-index scoping); P3.3 client
-prediction/interpolation + real per-player input driving avatars (the first VISIBLE multiplayer
-motion). Then the `SteamNetworkingTransport` impl (owner/LAN-validated), P4 join/leave, P5 20+.
+- **P3.1d input→movement** (`f5be340`): network usercmd drives avatar physics
+  (`set_avatar_wish_velocity` / `SetAvatarMove`); `--replicate` client walks the server avatar
+  +7.69 m, mirrored back (0.0005 m). No-input lanes byte-identical (`c42f4f1…` @90t). + a showcase
+  frame-dump video capability (`9b41f4a`, avatars>=2 only) and proper-world-loading-before-capture
+  (`fd82562`: per-frame EnsureSurfaceReadyNear around the showcase camera + 3 s warm-up; rendered
+  on the mountains preset). Video proofs delivered.
+- **P3.2 AOI** (`4854234`): `ReplicationServer::SetAoiRadiusMm` scopes each client's snapshot to
+  entities near its own avatar (own always included); 2 gtests. r==0 default = full set.
+
+**Next:** P3.3 client renders replicated snapshot positions (joins render + netcode = literally
+network-driven view); chunk-index AOI integration; register `--replicate` as a `ReplicationSmoke`
+gate. Then `SteamNetworkingTransport` (owner/LAN-validated), P4 join/leave, P5 scale to 20+.
 
 ## Iteration 6 (cont., 2026-06-17) — Render-debt wave #1–#4 + #5 spec (tip `3df4347`)
 
