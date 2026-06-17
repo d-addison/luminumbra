@@ -140,6 +140,33 @@ gated on owner confirmation of the pivot.
   clock's `dropped_time_seconds`. Confirms the estimated budgets (~11–14 kbps/client at 20,
   20–32 players/core) on the quiet-machine baseline.
 
+- **P6 — networked HETEROGENEOUS entities (NPCs / animals / projectiles).** (Research:
+  `research/mp-entities.md`.) Owner question 2026-06-17: "do we handle AI properly (npcs, animals,
+  an arrow that was shot)?" Honest state: the server already TICKS AI (`GameSession::TickSimulation`
+  → `RunInstinctSystemOnTick` GOAP), and the replication pipeline is entity-agnostic (interpolation
+  lerps any transform, full snapshots drop absent entities) — but AI creatures only spawn in a
+  CLIENT scenario today (not server-spawned/replicated), projectiles don't exist, and the wire
+  record has NO entity type. P6 closes that:
+  - **Wire additions (small):** `ReplEntityState` gains `u16 type_id` (archetype → client picks the
+    mesh; Quake3 eType / Source server-class index / Unreal actor class), `u8 anim_state`
+    (+ optional `u8 anim_phase`; NEVER joint data), and `SnapshotMsg` gains a `removed_ids` list for
+    RELIABLE despawn (a lost "arrow gone" event otherwise strands a ghost — Halo's lesson). Generalize
+    `BuildAvatarReplStates` → `BuildEntityReplStates` walking the registry.
+  - **AI/NPCs/animals: server-authoritative, interpolate on client.** Spawn them on the SERVER tick
+    (the InstinctSystem already runs there); GOAP decisions stay server-only, only transform +
+    anim-state replicate; clients run ZERO AI and interpolate exactly like a remote avatar. Per-entity
+    update-rate tiering (distant/idle NPCs replicate rarely/dormant — Unreal `NetUpdateFrequency`).
+  - **Projectiles (arrow): server-authoritative + interpolated, NOT predicted, NO lag-comp for v1.**
+    Fire usercmd → server spawns a Jolt ballistic body → replicate typed → client interpolates.
+    Predicted projectiles + server-rewind lag-comp are for COMPETITIVE shooters; a zen co-op
+    photographer has no adversary, so the ~100 ms render-behind is imperceptible — explicitly out of
+    v1 (door left open via a `flags` owned/predicted bit).
+  - **Determinism:** clients run none of these sims (no cross-machine bit-exactness). Server-side AI
+    creatures make the `entities` sub-hash non-empty → ONE deliberate bump (like the avatar bump);
+    transient projectiles recommended EXCLUDED from the hash (document it).
+  - **Per-class netcode:** player = predict-self; NPC/animal = server-AI + interpolate (rate-tiered);
+    projectile = server-authoritative + interpolate (transient, reliable despawn).
+
 ### Open confirmation for owner
 The pivot itself (retire peer-lockstep as the multiplayer transport; adopt authoritative
 server + replication) is the one call worth confirming before the large P3 build. P0 (and the
