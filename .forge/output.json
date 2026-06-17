@@ -1,15 +1,17 @@
 {
-  "task_id": "T-EF-28-gpu-sdf-compute-parity-gate",
-  "attempt_id": "T-EF-28-gpu-sdf-compute-parity-gate",
+  "task_id": "T-I6-012-far-lod-horizon-render-repair",
+  "attempt_id": "T-I6-012-far-lod-horizon-render-repair",
   "status": "completed",
   "artifacts": [
-    "build/debug/test-artifacts/render/gpu-sdf-compute-parity.json"
+    ".forge/specs/iter6/wave-c-erosion-gaps-and-far-lod-meshing.md",
+    ".forge/reports/iter6-completion/far-lod-horizon-render-repair.md"
   ],
   "verification": [
-    ".forge/scripts/validate-engine-frontier.ps1 -Mode GpuSdfComputeParityGate -BuildPreset debug"
+    "git diff --check -- .forge/specs/iter6/wave-c-erosion-gaps-and-far-lod-meshing.md .forge/scripts/validate-engine-frontier.ps1 src/luminumbra_client/rendering .forge/reports/iter6-completion/far-lod-horizon-render-repair.md",
+    "powershell -ExecutionPolicy Bypass -File .forge/scripts/validate-engine-frontier.ps1 -Mode FarLodHorizon -BuildPreset debug"
   ],
   "notes": [
-    "ctest --preset debug -R RenderSmokeTest found zero registered tests in this worktree.",
-    "cmake --build --preset debug could not run because the debug build cache is missing."
+    "FarLodHorizon validator reached the client executable check after the source guard, then failed because build/debug/bin/luminumbra_client_app.exe is absent.",
+    "cmake --preset debug failed during configure because vendor/fastnoise and vendor/googletest do not contain CMakeLists.txt in this worktree."
   ]
 }

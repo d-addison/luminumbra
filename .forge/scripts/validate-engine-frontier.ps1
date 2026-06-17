@@ -3957,6 +3957,10 @@ function Test-PlayerView {
 # Distant-Horizons failure mode).
 
 function Test-FarLodHorizon {
+    $farLodHeader = Get-Content "src/luminumbra_client/rendering/FarLodSystem.h" -Raw
+    if ($farLodHeader -notmatch "kFarClipOuterRadiusMeters\s*=\s*kF2OuterRangeMeters") {
+        throw "FarLodHorizon source guard: far outer geometry clip must cover the full F2 horizon range"
+    }
     $exe = Get-ClientExe
     $runSeconds = [Math]::Max(50, $SmokeSeconds)
 

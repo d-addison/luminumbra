@@ -56,13 +56,11 @@ public:
     // beyond the live ring keeps far coverage (no gap band: the overlap chunk
     // is drawn by BOTH paths and depth resolves it).
     static constexpr float kFarClipInnerRadiusMeters = 176.0f;
-    // T-I4-DR-horizon-sliver-render: far geometry is clipped at the geometry
-    // level outside this radius. The camera far plane (Camera.h FAR_PLANE) is
-    // 1000 m but far regions stream to 1536 m; far triangles near the far-plane/
-    // frustum-edge corner rasterized as the horizon sky-sliver (a tall thin
-    // terrain streak crossing into the sky). Clipping just inside removes them
-    // with no visible loss - nothing past the 1000 m far plane was drawable.
-    static constexpr float kFarClipOuterRadiusMeters = 950.0f;
+    // Far geometry is clipped at the geometry level outside the authored F2
+    // horizon. The projection far plane now sits beyond F2, so the obsolete
+    // 950 m sliver-era clip would leave the 950-1536 m horizon ring undrawn.
+    // Keep the draw band aligned with the scheduler's outer wanted radius.
+    static constexpr float kFarClipOuterRadiusMeters = kF2OuterRangeMeters;
     // Far meshes sit slightly below the live surface so live geometry always
     // wins where the two coincide (quantization can lift far samples at most
     // 1/32 m above the analytic surface).
