@@ -192,6 +192,16 @@ bool ServerWorldRunner::Boot() {
     return true;
 }
 
+void ServerWorldRunner::SetAvatarMove(std::uint32_t player_id, float move_x, float move_z) {
+    if (!m_session) return;
+    auto* physics = m_session->GetPhysicsSystem();
+    if (!physics) return;
+    // Normalized input -> wish velocity. A gentle walk speed (zen game, not a sprinter).
+    constexpr float kWalkSpeedMs = 4.0f;
+    physics->set_avatar_wish_velocity(static_cast<std::size_t>(player_id),
+                                      glm::vec2(move_x, move_z) * kWalkSpeedMs);
+}
+
 ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
     ServerTickReport report;
     if (!m_booted || !m_session) {

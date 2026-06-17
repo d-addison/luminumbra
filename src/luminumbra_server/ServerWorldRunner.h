@@ -118,6 +118,11 @@ public:
     // avatar_count == 0). Read-only view for tests/telemetry.
     const std::vector<World::PlayerAvatar>& Avatars() const { return m_avatars; }
 
+    // T-I6 P3.1d: apply a player's network movement input (normalized world XZ in
+    // [-1,1]) to its avatar's physics for the next tick. player_id == avatar index.
+    // The caller decodes this from the replicated usercmd; persists until changed.
+    void SetAvatarMove(std::uint32_t player_id, float move_x, float move_z);
+
     // Saves world state through WorldSaveService (incremental contract: a
     // never-edited world writes nothing) and tears the session down.
     // Called by the destructor when not invoked explicitly.

@@ -309,6 +309,11 @@ bool PhysicsSystem::is_player_grounded() const {
 // --- T-I6 P2: server-authoritative avatar characters ---
 void PhysicsSystem::clear_avatar_characters() {
     m_avatar_characters.clear();
+    m_avatar_wish.clear();
+}
+
+void PhysicsSystem::set_avatar_wish_velocity(std::size_t index, const glm::vec2& wish_xz) {
+    if (index < m_avatar_wish.size()) m_avatar_wish[index] = wish_xz;
 }
 
 std::size_t PhysicsSystem::create_avatar_character(const glm::vec3& start_pos) {
@@ -324,6 +329,7 @@ std::size_t PhysicsSystem::create_avatar_character(const glm::vec3& start_pos) {
     settings.mSupportingVolume = JPH::Plane(JPH::Vec3::sAxisY(), -0.1f);
     m_avatar_characters.push_back(std::make_unique<JPH::CharacterVirtual>(
         &settings, JPH::RVec3(start_pos.x, start_pos.y, start_pos.z), JPH::Quat::sIdentity(), m_jolt_system.get()));
+    m_avatar_wish.emplace_back(0.0f, 0.0f);
     return m_avatar_characters.size() - 1;
 }
 
@@ -334,11 +340,13 @@ void PhysicsSystem::update_avatars(float dt) {
     // yet -- gravity when airborne, ground-stick when grounded (the avatars fall
     // and settle on the terrain). Mirrors update_player's vertical handling.
     const JPH::Vec3 gravity = m_jolt_system->GetGravity();
-    for (auto& character : m_avatar_characters) {
+    for (std::size_t i = 0; i < m_avatar_characters.size(); ++i) {
+        auto& character = m_avatar_characters[i];
         if (!character) continue;
+        const glm::vec2 wish = i < m_avatar_wish.size() ? m_avatar_wish[i] : glm::vec2(0.0f);
         const JPH::Vec3 current_velocity = character->GetLinearVelocity();
         const bool grounded = character->GetGroundState() == JPH::CharacterBase::EGroundState::OnGround;
-        JPH::Vec3 desired_velocity(0.0f, current_velocity.GetY(), 0.0f);
+        JPH::Vec3 desired_velocity(wish.x, current_velocity.GetY(), wish.y);
         if (grounded) {
             desired_velocity.SetY(-1.0f); // stick to slopes / ground
         } else {

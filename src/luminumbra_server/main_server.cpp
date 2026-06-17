@@ -1727,8 +1727,28 @@ int RunReplicate(const ServerCliOptions& options) {
     server.AddClient(/*client_id=*/1, pair.first.get());
     Luminumbra::Net::ReplicationClient client(/*player_id=*/1, pair.second.get());
 
+    // P3.1d: the loopback client CONTROLS one avatar -- it sends a constant +X
+    // move usercmd each tick; the server applies it so that avatar walks. We then
+    // assert the avatar actually moved (network input -> server movement loop).
+    const std::uint32_t controlled = runner.Avatars().size() > 1 ? 1u : 0u;
+    const float initial_x = runner.Avatars().empty() ? 0.0f : runner.Avatars()[controlled].position.x;
+
     std::uint64_t executed = 0;
     while (executed < options.ticks) {
+        // Client -> server: full +X movement input for its avatar this tick.
+        Luminumbra::Net::UsercmdMsg cmd;
+        cmd.tick = executed + 1;
+        cmd.player_id = controlled;
+        cmd.move_x = 32767; // normalized +1.0
+        cmd.move_z = 0;
+        client.SendUsercmd(cmd);
+        server.PumpInbound(); // receive the usercmd (newest-wins)
+        if (const Luminumbra::Net::UsercmdMsg* got = server.LatestUsercmd(1)) {
+            runner.SetAvatarMove(got->player_id,
+                                 static_cast<float>(got->move_x) / 32767.0f,
+                                 static_cast<float>(got->move_z) / 32767.0f);
+        }
+
         const auto step = runner.RunFixedTicks(1);
         executed += step.ticks_executed;
         if (step.ticks_executed == 0) {
@@ -1742,6 +1762,9 @@ int RunReplicate(const ServerCliOptions& options) {
 
     // Verify the client mirrors the server's authoritative avatars.
     const auto& avatars = runner.Avatars();
+    const float final_x = avatars.empty() ? 0.0f : avatars[controlled].position.x;
+    // The controlled avatar walked +X under network input (>= ~0.5 m over the run).
+    const bool moved = (final_x - initial_x) > 0.5f;
     bool size_ok = client.has_snapshot() && client.snapshot().entities.size() == avatars.size();
     double max_pos_err = 0.0;
     bool ids_ok = size_ok;
@@ -1758,7 +1781,7 @@ int RunReplicate(const ServerCliOptions& options) {
         }
     }
     const bool acked = server.AckedSnapshotSeq(1) > 0;
-    const bool passed = size_ok && ids_ok && max_pos_err < 0.01 && acked &&
+    const bool passed = size_ok && ids_ok && max_pos_err < 0.01 && acked && moved &&
                         executed == options.ticks;
 
     nlohmann::json artifact{
@@ -1773,9 +1796,12 @@ int RunReplicate(const ServerCliOptions& options) {
         {"final_snapshot_seq", client.has_snapshot() ? client.snapshot().snapshot_seq : 0u},
         {"acked_snapshot_seq", server.AckedSnapshotSeq(1)},
         {"max_position_error_m", max_pos_err},
+        {"controlled_avatar", controlled},
+        {"controlled_dx_m", final_x - initial_x},
         {"size_ok", size_ok},
         {"ids_ok", ids_ok},
         {"ack_flowed", acked},
+        {"input_moved_avatar", moved},
         {"passed", passed},
     };
 
@@ -1799,13 +1825,15 @@ int RunReplicate(const ServerCliOptions& options) {
 
     if (!passed) {
         LUMINUMBRA_CORE_ERROR(
-            "Replicate smoke FAILED: size_ok={} ids_ok={} max_pos_err={:.4f} acked={} ticks={}/{}",
-            size_ok, ids_ok, max_pos_err, acked, executed, options.ticks);
+            "Replicate smoke FAILED: size_ok={} ids_ok={} max_pos_err={:.4f} acked={} moved={} (dx={:.2f}) ticks={}/{}",
+            size_ok, ids_ok, max_pos_err, acked, moved, final_x - initial_x, executed, options.ticks);
         return 1;
     }
     LUMINUMBRA_CORE_INFO(
-        "Replicate smoke passed: {} avatars mirrored to client (seq={}, acked_seq={}, max_pos_err={:.4f} m)",
-        avatars.size(), client.snapshot().snapshot_seq, server.AckedSnapshotSeq(1), max_pos_err);
+        "Replicate smoke passed: {} avatars mirrored to client (seq={}, acked_seq={}, max_pos_err={:.4f} m); "
+        "network input walked avatar {} +{:.2f} m in X",
+        avatars.size(), client.snapshot().snapshot_seq, server.AckedSnapshotSeq(1), max_pos_err,
+        controlled, final_x - initial_x);
     return 0;
 }
 

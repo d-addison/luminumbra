@@ -60,8 +60,12 @@ public:
     // only -> avatars settle on the terrain); P3 feeds the per-tick usercmd.
     void clear_avatar_characters();
     std::size_t create_avatar_character(const glm::vec3& initial_position);
-    // Steps every avatar character by dt (gravity when airborne, ground-stick when
-    // grounded; horizontal wish-velocity is 0 until P3) against the world geometry.
+    // T-I6 P3.1d: set an avatar's horizontal WISH velocity (world XZ m/s) for the
+    // next step -- the server applies the network usercmd's movement here. Persists
+    // until changed (0 by default -> the avatar stands, the pre-P3.1d behaviour).
+    void set_avatar_wish_velocity(std::size_t index, const glm::vec2& wish_xz);
+    // Steps every avatar character by dt: the per-avatar horizontal wish velocity
+    // (gravity when airborne, ground-stick when grounded) against the world geometry.
     void update_avatars(float delta_time);
     std::size_t avatar_character_count() const { return m_avatar_characters.size(); }
     glm::vec3 get_avatar_position(std::size_t index) const;
@@ -149,6 +153,7 @@ private:
     // T-I6 P2: server-authoritative avatar characters (one per connected player)
     // + the shared avatar capsule shape. Stepped in index order for determinism.
     std::vector<std::unique_ptr<JPH::CharacterVirtual>> m_avatar_characters;
+    std::vector<glm::vec2> m_avatar_wish; // T-I6 P3.1d: per-avatar horizontal wish velocity (m/s)
     JPH::Ref<JPH::Shape> m_avatar_shape;
 
     // Track collision bodies for loaded chunks
