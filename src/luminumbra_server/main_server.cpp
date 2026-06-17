@@ -29,7 +29,12 @@
 #include "luminumbra_common/net/ReplicationEndpoint.h"
 #include "luminumbra_common/net/ReplicationProtocol.h"
 #include "luminumbra_common/world/PlayerAvatar.h"
+#include "luminumbra_common/components/CoreComponents.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/replay/ReplayStream.h"
+
+#include <cmath>
+#include <entt/entt.hpp>
 #include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/systems/AetherFieldSystem.h"
@@ -60,6 +65,10 @@ struct ServerCliOptions {
     // ReplicationClient, broadcasts the avatar states each tick, and asserts the client
     // mirrors the server avatars (end-to-end live replication in the harness).
     bool replicate = false;
+    // T-I6 P6.1b: spawn N server-side replicated NPC entities in --replicate (tagged
+    // ReplicatedComponent, deterministic wander) to prove heterogeneous entities
+    // (animals/NPCs) replicate alongside player avatars.
+    int npcs = 0;
     bool smoke = false;
     // T-I5a-2 (A2): WindFieldDeterminism gate. Boots a world, runs N ticks
     // twice, asserts the wind sub-hash is equal across runs + stable, and times
@@ -207,6 +216,8 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
             if (const char* v = next_value(i)) options.avatars = std::atoi(v);
         } else if (std::strcmp(arg, "--replicate") == 0) {
             options.replicate = true;
+        } else if (std::strcmp(arg, "--npcs") == 0) {
+            if (const char* v = next_value(i)) options.npcs = std::atoi(v);
         } else if (std::strcmp(arg, "--artifact") == 0) {
             if (const char* v = next_value(i)) options.artifact_path = v;
         } else {
@@ -1733,6 +1744,28 @@ int RunReplicate(const ServerCliOptions& options) {
     const std::uint32_t controlled = runner.Avatars().size() > 1 ? 1u : 0u;
     const float initial_x = runner.Avatars().empty() ? 0.0f : runner.Avatars()[controlled].position.x;
 
+    // P6.1b: spawn server-side replicated NPC entities (type_id 1 = "animal") in the
+    // GameSession registry, tagged ReplicatedComponent. They wander deterministically
+    // each tick and replicate through BuildEntityReplStates alongside the avatars --
+    // proving heterogeneous entities (NPCs/animals) flow through the same pipeline.
+    auto& registry = runner.Session()->GetRegistry();
+    auto* world_sys = runner.Session()->GetWorldSystem();
+    const Luminumbra::Vec3 npc_origin = runner.Session()->GetMetadata().spawnPoint;
+    struct NpcRec { entt::entity e; Luminumbra::Vec3 base; };
+    std::vector<NpcRec> npc_recs;
+    for (int i = 0; i < options.npcs; ++i) {
+        const float bx = npc_origin.x + 6.0f + static_cast<float>(i) * 2.0f;
+        const float bz = npc_origin.z - 4.0f;
+        const float by = world_sys ? world_sys->GetTerrainHeightAt(bx, bz) : npc_origin.y;
+        auto e = registry.create();
+        auto& tf = registry.emplace<Luminumbra::Components::TransformComponent>(e);
+        tf.position = Luminumbra::Vec3(bx, by, bz);
+        auto& rep = registry.emplace<Luminumbra::Components::ReplicatedComponent>(e);
+        rep.network_id = 1000u + static_cast<std::uint32_t>(i); // distinct from avatar ids
+        rep.type_id = 1u;  // "animal" archetype (client picks the mesh)
+        npc_recs.push_back({e, Luminumbra::Vec3(bx, by, bz)});
+    }
+
     std::uint64_t executed = 0;
     while (executed < options.ticks) {
         // Client -> server: full +X movement input for its avatar this tick.
@@ -1755,7 +1788,23 @@ int RunReplicate(const ServerCliOptions& options) {
             LUMINUMBRA_CORE_ERROR("replicate: tick {} did not advance", executed + 1);
             return 1;
         }
-        server.BroadcastSnapshot(executed, Luminumbra::World::BuildAvatarReplStates(runner.Avatars()));
+        // P6.1b: wander the NPCs deterministically (a slow circle around their base,
+        // terrain-grounded) -- server-authoritative motion the snapshot carries.
+        const float t = static_cast<float>(executed) * 0.1f;
+        for (const NpcRec& n : npc_recs) {
+            if (!registry.valid(n.e)) continue;
+            auto& tf = registry.get<Luminumbra::Components::TransformComponent>(n.e);
+            tf.position.x = n.base.x + 2.0f * std::cos(t);
+            tf.position.z = n.base.z + 2.0f * std::sin(t);
+            if (world_sys) tf.position.y = world_sys->GetTerrainHeightAt(tf.position.x, tf.position.z);
+        }
+
+        // Snapshot = player avatars + registry-driven entities (NPCs), one set.
+        std::vector<Luminumbra::Net::ReplEntityState> states =
+            Luminumbra::World::BuildAvatarReplStates(runner.Avatars());
+        const auto npc_states = Luminumbra::World::BuildEntityReplStates(registry);
+        states.insert(states.end(), npc_states.begin(), npc_states.end());
+        server.BroadcastSnapshot(executed, states);
         client.PumpInbound(); // apply snapshot (most-recent-wins) + ack
         server.PumpInbound(); // drain the ack
     }
@@ -1765,7 +1814,17 @@ int RunReplicate(const ServerCliOptions& options) {
     const float final_x = avatars.empty() ? 0.0f : avatars[controlled].position.x;
     // The controlled avatar walked +X under network input (>= ~0.5 m over the run).
     const bool moved = (final_x - initial_x) > 0.5f;
-    bool size_ok = client.has_snapshot() && client.snapshot().entities.size() == avatars.size();
+    // Client mirrors avatars + the N replicated NPCs.
+    const std::size_t expected_entities = avatars.size() + static_cast<std::size_t>(options.npcs);
+    bool size_ok = client.has_snapshot() && client.snapshot().entities.size() == expected_entities;
+    // P6.1b: the NPCs replicated as typed entities (type_id 1).
+    std::size_t npc_seen = 0;
+    if (client.has_snapshot()) {
+        for (const auto& e : client.snapshot().entities) {
+            if (e.type_id == 1u) ++npc_seen;
+        }
+    }
+    const bool npcs_ok = npc_seen == static_cast<std::size_t>(options.npcs);
     double max_pos_err = 0.0;
     bool ids_ok = size_ok;
     if (size_ok) {
@@ -1785,7 +1844,7 @@ int RunReplicate(const ServerCliOptions& options) {
     // est kbps per client = bytes * a realistic 20 Hz snapshot rate * 8 / 1000.
     const std::size_t snapshot_bytes = server.last_broadcast_max_client_bytes();
     const double est_kbps_per_client = static_cast<double>(snapshot_bytes) * 20.0 * 8.0 / 1000.0;
-    const bool passed = size_ok && ids_ok && max_pos_err < 0.01 && acked && moved &&
+    const bool passed = size_ok && ids_ok && npcs_ok && max_pos_err < 0.01 && acked && moved &&
                         executed == options.ticks;
 
     nlohmann::json artifact{
@@ -1804,6 +1863,9 @@ int RunReplicate(const ServerCliOptions& options) {
         {"controlled_dx_m", final_x - initial_x},
         {"snapshot_bytes_per_client", snapshot_bytes},
         {"est_kbps_per_client_at_20hz", est_kbps_per_client},
+        {"npc_count", options.npcs},
+        {"npcs_replicated", npc_seen},
+        {"npcs_ok", npcs_ok},
         {"size_ok", size_ok},
         {"ids_ok", ids_ok},
         {"ack_flowed", acked},
