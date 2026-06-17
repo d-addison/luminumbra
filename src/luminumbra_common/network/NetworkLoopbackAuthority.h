@@ -139,6 +139,50 @@ struct NetworkRuntimeJoinLeaveReport {
     std::vector<NetworkRuntimeJoinLeaveCheck> checks;
 };
 
+struct NetworkRemoteAvatarRenderPose {
+    std::uint32_t clientId = 0;
+    std::uint32_t serverTick = 0;
+    std::uint32_t snapshotSequence = 0;
+    int positionXMm = 0;
+    int positionYMm = 0;
+    int positionZMm = 0;
+    bool remote = false;
+    bool interpolated = false;
+    bool rendered = false;
+};
+
+struct NetworkRemoteAvatarRenderCheck {
+    std::string name;
+    bool passed = false;
+};
+
+struct NetworkRemoteAvatarRenderReport {
+    std::string schema;
+    bool passed = false;
+    std::string source;
+    std::string header;
+    std::string builderApi;
+    std::string validationApi;
+    std::string artifactWriter;
+    std::string replicationContract;
+    std::string interpolationContract;
+    std::string renderContract;
+    std::uint32_t localClientId = 0;
+    std::uint32_t expectedAvatarCount = 0;
+    std::uint32_t remoteAvatarCount = 0;
+    std::uint32_t snapshotFrameCount = 0;
+    std::uint32_t renderedAvatarCount = 0;
+    std::uint32_t skinnedDraws = 0;
+    std::uint32_t skinnedIndicesDrawn = 0;
+    bool serverSnapshotsReceived = false;
+    bool remoteAvatarsInterpolated = false;
+    bool remoteAvatarsRendered = false;
+    bool localAvatarExcludedFromRemoteSet = false;
+    bool deterministicClientOrdering = false;
+    std::vector<NetworkRemoteAvatarRenderPose> poses;
+    std::vector<NetworkRemoteAvatarRenderCheck> checks;
+};
+
 NetworkLoopbackConvergenceReport BuildNetworkLoopbackConvergenceFixture(
     const std::string& buildPreset = "debug");
 
@@ -188,5 +232,37 @@ bool WriteNetworkRuntimeJoinLeaveArtifact(
     std::uint32_t expectedClientCount = 2,
     std::uint16_t basePort = 27015,
     std::uint32_t ticksExecuted = 12);
+
+NetworkRemoteAvatarRenderReport BuildNetworkRemoteAvatarRenderReport(
+    std::uint32_t localClientId,
+    const std::vector<NetworkRemoteAvatarRenderPose>& poses,
+    std::uint32_t expectedAvatarCount,
+    std::uint32_t snapshotFrameCount,
+    std::uint32_t renderedAvatarCount,
+    std::uint32_t skinnedDraws,
+    std::uint32_t skinnedIndicesDrawn);
+
+NetworkRemoteAvatarRenderReport BuildNetworkRemoteAvatarRenderFixture(
+    std::uint32_t expectedAvatarCount = 3,
+    std::uint32_t renderedAvatarCount = 3,
+    std::uint32_t skinnedDraws = 3,
+    std::uint32_t skinnedIndicesDrawn = 900);
+
+std::string SerializeNetworkRemoteAvatarRenderJson(
+    const NetworkRemoteAvatarRenderReport& report);
+
+bool NetworkRemoteAvatarRenderMeetsBaseline(
+    const NetworkRemoteAvatarRenderReport& report);
+
+bool WriteNetworkRemoteAvatarRenderArtifact(
+    const std::string& path,
+    const NetworkRemoteAvatarRenderReport& report);
+
+bool WriteNetworkRemoteAvatarRenderFixtureArtifact(
+    const std::string& path,
+    std::uint32_t expectedAvatarCount = 3,
+    std::uint32_t renderedAvatarCount = 3,
+    std::uint32_t skinnedDraws = 3,
+    std::uint32_t skinnedIndicesDrawn = 900);
 
 } // namespace luminumbra::network

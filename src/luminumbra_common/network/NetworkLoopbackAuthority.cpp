@@ -1,5 +1,7 @@
 #include "NetworkLoopbackAuthority.h"
 
+#include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -27,6 +29,13 @@ constexpr const char* kRuntimeJoinLeaveSchema = "luminumbra.network.runtime_join
 constexpr const char* kRuntimeJoinLeaveValidationApi = "NetworkRuntimeJoinLeaveMeetsBaseline";
 constexpr const char* kRuntimeJoinLeaveArtifactWriter = "WriteNetworkRuntimeJoinLeaveArtifact";
 constexpr const char* kRuntimeJoinLeaveServerModeContract = "server_ticks_continue_while_clients_join_and_leave";
+constexpr const char* kRemoteAvatarRenderSchema = "luminumbra.network.remote_avatar_render.v1";
+constexpr const char* kRemoteAvatarRenderBuilderApi = "BuildNetworkRemoteAvatarRenderReport";
+constexpr const char* kRemoteAvatarRenderValidationApi = "NetworkRemoteAvatarRenderMeetsBaseline";
+constexpr const char* kRemoteAvatarRenderArtifactWriter = "WriteNetworkRemoteAvatarRenderArtifact";
+constexpr const char* kRemoteAvatarReplicationContract = "server_snapshot_drives_client_remote_avatar_transforms";
+constexpr const char* kRemoteAvatarInterpolationContract = "client_render_behind_interpolated_remote_poses";
+constexpr const char* kRemoteAvatarRenderContract = "remote_client_ids_render_as_skinned_avatars";
 
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ull;
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
@@ -226,6 +235,44 @@ std::vector<NetworkRuntimeJoinLeaveCheck> BuildRuntimeJoinLeaveChecks(
         {"player ids remain stable across runtime lifecycle events", report.stablePlayerIds},
         {"runtime accept ports reuse the deterministic multi-client mapping", report.deterministicPortMapping},
     };
+}
+
+std::vector<NetworkRemoteAvatarRenderCheck> BuildRemoteAvatarRenderChecks(
+    const NetworkRemoteAvatarRenderReport& report)
+{
+    return {
+        {"remote-avatar render API is declared", report.builderApi == kRemoteAvatarRenderBuilderApi},
+        {"server snapshots are received before render", report.serverSnapshotsReceived},
+        {"remote avatar poses come from client interpolation", report.remoteAvatarsInterpolated},
+        {"remote avatars are submitted through the skinned render pass", report.remoteAvatarsRendered},
+        {"local player id is excluded from the remote set", report.localAvatarExcludedFromRemoteSet},
+        {"client avatar ordering is deterministic", report.deterministicClientOrdering},
+    };
+}
+
+bool AvatarPosesAreOrderedByClientId(const std::vector<NetworkRemoteAvatarRenderPose>& poses)
+{
+    return std::is_sorted(
+        poses.begin(), poses.end(),
+        [](const NetworkRemoteAvatarRenderPose& left, const NetworkRemoteAvatarRenderPose& right) {
+            return left.clientId < right.clientId;
+        });
+}
+
+bool AvatarPosePositionsAreFiniteMillimeters(const std::vector<NetworkRemoteAvatarRenderPose>& poses)
+{
+    constexpr int kMaxWorldMm = 100000000;
+    for (const NetworkRemoteAvatarRenderPose& pose : poses) {
+        if (pose.clientId == 0u || pose.snapshotSequence == 0u || pose.serverTick == 0u) {
+            return false;
+        }
+        if (pose.positionXMm < -kMaxWorldMm || pose.positionXMm > kMaxWorldMm ||
+            pose.positionYMm < -kMaxWorldMm || pose.positionYMm > kMaxWorldMm ||
+            pose.positionZMm < -kMaxWorldMm || pose.positionZMm > kMaxWorldMm) {
+            return false;
+        }
+    }
+    return !poses.empty();
 }
 
 bool PortsMatchExpectedMapping(
@@ -776,6 +823,256 @@ bool WriteNetworkRuntimeJoinLeaveArtifact(
     }
     out << SerializeNetworkRuntimeJoinLeaveJson(report);
     return out.good() && NetworkRuntimeJoinLeaveMeetsBaseline(report);
+}
+
+NetworkRemoteAvatarRenderReport BuildNetworkRemoteAvatarRenderReport(
+    const std::uint32_t localClientId,
+    const std::vector<NetworkRemoteAvatarRenderPose>& poses,
+    std::uint32_t expectedAvatarCount,
+    const std::uint32_t snapshotFrameCount,
+    const std::uint32_t renderedAvatarCount,
+    const std::uint32_t skinnedDraws,
+    const std::uint32_t skinnedIndicesDrawn)
+{
+    if (expectedAvatarCount < 2u) {
+        expectedAvatarCount = 2u;
+    }
+
+    NetworkRemoteAvatarRenderReport report;
+    report.schema = kRemoteAvatarRenderSchema;
+    report.source = kSourcePath;
+    report.header = kHeaderPath;
+    report.builderApi = kRemoteAvatarRenderBuilderApi;
+    report.validationApi = kRemoteAvatarRenderValidationApi;
+    report.artifactWriter = kRemoteAvatarRenderArtifactWriter;
+    report.replicationContract = kRemoteAvatarReplicationContract;
+    report.interpolationContract = kRemoteAvatarInterpolationContract;
+    report.renderContract = kRemoteAvatarRenderContract;
+    report.localClientId = localClientId == 0u ? 1u : localClientId;
+    report.expectedAvatarCount = expectedAvatarCount;
+    report.snapshotFrameCount = snapshotFrameCount;
+    report.renderedAvatarCount = renderedAvatarCount;
+    report.skinnedDraws = skinnedDraws;
+    report.skinnedIndicesDrawn = skinnedIndicesDrawn;
+    report.poses = poses;
+
+    bool all_remote_interpolated = true;
+    bool all_remote_rendered = true;
+    bool local_marked_remote = false;
+    bool local_present = false;
+    std::uint32_t previous_client_id = 0u;
+    bool unique_client_ids = true;
+    for (std::size_t i = 0; i < report.poses.size(); ++i) {
+        const NetworkRemoteAvatarRenderPose& pose = report.poses[i];
+        if (i != 0u && pose.clientId == previous_client_id) {
+            unique_client_ids = false;
+        }
+        previous_client_id = pose.clientId;
+        if (pose.clientId == report.localClientId) {
+            local_present = true;
+            if (pose.remote) {
+                local_marked_remote = true;
+            }
+        }
+        if (pose.remote) {
+            report.remoteAvatarCount += 1u;
+            all_remote_interpolated = all_remote_interpolated && pose.interpolated;
+            all_remote_rendered = all_remote_rendered && pose.rendered;
+        }
+    }
+
+    report.serverSnapshotsReceived =
+        snapshotFrameCount > 0u &&
+        report.poses.size() >= static_cast<std::size_t>(expectedAvatarCount) &&
+        AvatarPosePositionsAreFiniteMillimeters(report.poses);
+    report.remoteAvatarsInterpolated =
+        report.remoteAvatarCount >= expectedAvatarCount - 1u &&
+        all_remote_interpolated;
+    report.remoteAvatarsRendered =
+        renderedAvatarCount >= expectedAvatarCount &&
+        skinnedDraws >= expectedAvatarCount &&
+        skinnedIndicesDrawn > 0u &&
+        all_remote_rendered;
+    report.localAvatarExcludedFromRemoteSet =
+        local_present &&
+        !local_marked_remote &&
+        report.remoteAvatarCount == expectedAvatarCount - 1u;
+    report.deterministicClientOrdering =
+        unique_client_ids &&
+        AvatarPosesAreOrderedByClientId(report.poses);
+    report.checks = BuildRemoteAvatarRenderChecks(report);
+    report.passed = NetworkRemoteAvatarRenderMeetsBaseline(report);
+    report.checks = BuildRemoteAvatarRenderChecks(report);
+    return report;
+}
+
+NetworkRemoteAvatarRenderReport BuildNetworkRemoteAvatarRenderFixture(
+    std::uint32_t expectedAvatarCount,
+    const std::uint32_t renderedAvatarCount,
+    const std::uint32_t skinnedDraws,
+    const std::uint32_t skinnedIndicesDrawn)
+{
+    if (expectedAvatarCount < 2u) {
+        expectedAvatarCount = 2u;
+    }
+
+    std::vector<NetworkRemoteAvatarRenderPose> poses;
+    poses.reserve(expectedAvatarCount);
+    for (std::uint32_t clientId = 1u; clientId <= expectedAvatarCount; ++clientId) {
+        NetworkRemoteAvatarRenderPose pose;
+        pose.clientId = clientId;
+        pose.serverTick = 60u + clientId;
+        pose.snapshotSequence = 100u + clientId;
+        pose.positionXMm = static_cast<int>((clientId - 1u) * 2500u);
+        pose.positionYMm = 12000;
+        pose.positionZMm = static_cast<int>(clientId * 1000u);
+        pose.remote = clientId != 1u;
+        pose.interpolated = true;
+        pose.rendered = clientId <= renderedAvatarCount;
+        poses.push_back(pose);
+    }
+
+    return BuildNetworkRemoteAvatarRenderReport(
+        1u,
+        poses,
+        expectedAvatarCount,
+        3u,
+        renderedAvatarCount,
+        skinnedDraws,
+        skinnedIndicesDrawn);
+}
+
+std::string SerializeNetworkRemoteAvatarRenderJson(const NetworkRemoteAvatarRenderReport& report)
+{
+    std::ostringstream out;
+    out << "{\n";
+    out << "  \"schema\": \"" << EscapeJson(report.schema) << "\",\n";
+    out << "  \"passed\": " << BoolLiteral(report.passed) << ",\n";
+    out << "  \"network\": {\n";
+    WriteJsonString(out, "source", report.source);
+    WriteJsonString(out, "header", report.header);
+    WriteJsonString(out, "builder_api", report.builderApi);
+    WriteJsonString(out, "validation_api", report.validationApi);
+    WriteJsonString(out, "artifact_writer", report.artifactWriter);
+    WriteJsonString(out, "replication_contract", report.replicationContract);
+    WriteJsonString(out, "interpolation_contract", report.interpolationContract);
+    WriteJsonString(out, "render_contract", report.renderContract, false);
+    out << "  },\n";
+    out << "  \"remote_avatar_render\": {\n";
+    WriteJsonUInt(out, "local_client_id", report.localClientId);
+    WriteJsonUInt(out, "expected_avatar_count", report.expectedAvatarCount);
+    WriteJsonUInt(out, "remote_avatar_count", report.remoteAvatarCount);
+    WriteJsonUInt(out, "snapshot_frame_count", report.snapshotFrameCount);
+    WriteJsonUInt(out, "rendered_avatar_count", report.renderedAvatarCount);
+    WriteJsonUInt(out, "skinned_draws", report.skinnedDraws);
+    WriteJsonUInt(out, "skinned_indices_drawn", report.skinnedIndicesDrawn);
+    WriteJsonBool(out, "server_snapshots_received", report.serverSnapshotsReceived);
+    WriteJsonBool(out, "remote_avatars_interpolated", report.remoteAvatarsInterpolated);
+    WriteJsonBool(out, "remote_avatars_rendered", report.remoteAvatarsRendered);
+    WriteJsonBool(out, "local_avatar_excluded_from_remote_set", report.localAvatarExcludedFromRemoteSet);
+    WriteJsonBool(out, "deterministic_client_ordering", report.deterministicClientOrdering, false);
+    out << "  },\n";
+    out << "  \"poses\": [\n";
+    for (std::size_t i = 0; i < report.poses.size(); ++i) {
+        const NetworkRemoteAvatarRenderPose& pose = report.poses[i];
+        out << "    {\"client_id\": " << pose.clientId
+            << ", \"server_tick\": " << pose.serverTick
+            << ", \"snapshot_sequence\": " << pose.snapshotSequence
+            << ", \"position_x_mm\": " << pose.positionXMm
+            << ", \"position_y_mm\": " << pose.positionYMm
+            << ", \"position_z_mm\": " << pose.positionZMm
+            << ", \"remote\": " << BoolLiteral(pose.remote)
+            << ", \"interpolated\": " << BoolLiteral(pose.interpolated)
+            << ", \"rendered\": " << BoolLiteral(pose.rendered)
+            << "}";
+        if (i + 1u < report.poses.size()) {
+            out << ",";
+        }
+        out << "\n";
+    }
+    out << "  ],\n";
+    out << "  \"checks\": [\n";
+    for (std::size_t i = 0; i < report.checks.size(); ++i) {
+        const NetworkRemoteAvatarRenderCheck& check = report.checks[i];
+        out << "    { \"name\": \"" << EscapeJson(check.name) << "\", \"passed\": " << BoolLiteral(check.passed) << " }";
+        if (i + 1u < report.checks.size()) {
+            out << ",";
+        }
+        out << "\n";
+    }
+    out << "  ]\n";
+    out << "}\n";
+    return out.str();
+}
+
+bool NetworkRemoteAvatarRenderMeetsBaseline(const NetworkRemoteAvatarRenderReport& report)
+{
+    if (report.schema != kRemoteAvatarRenderSchema ||
+        report.source != kSourcePath ||
+        report.header != kHeaderPath ||
+        report.builderApi != kRemoteAvatarRenderBuilderApi ||
+        report.validationApi != kRemoteAvatarRenderValidationApi ||
+        report.artifactWriter != kRemoteAvatarRenderArtifactWriter ||
+        report.replicationContract != kRemoteAvatarReplicationContract ||
+        report.interpolationContract != kRemoteAvatarInterpolationContract ||
+        report.renderContract != kRemoteAvatarRenderContract) {
+        return false;
+    }
+    if (report.expectedAvatarCount < 2u ||
+        report.remoteAvatarCount < 1u ||
+        report.poses.size() < static_cast<std::size_t>(report.expectedAvatarCount)) {
+        return false;
+    }
+    if (!report.serverSnapshotsReceived ||
+        !report.remoteAvatarsInterpolated ||
+        !report.remoteAvatarsRendered ||
+        !report.localAvatarExcludedFromRemoteSet ||
+        !report.deterministicClientOrdering) {
+        return false;
+    }
+    if (!AvatarPosePositionsAreFiniteMillimeters(report.poses) ||
+        !AvatarPosesAreOrderedByClientId(report.poses)) {
+        return false;
+    }
+    for (const NetworkRemoteAvatarRenderCheck& check : report.checks) {
+        if (!check.passed) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool WriteNetworkRemoteAvatarRenderArtifact(
+    const std::string& path,
+    const NetworkRemoteAvatarRenderReport& report)
+{
+    const std::filesystem::path output_path(path);
+    std::error_code ec;
+    const std::filesystem::path parent = output_path.parent_path();
+    if (!parent.empty()) {
+        std::filesystem::create_directories(parent, ec);
+    }
+    std::ofstream out(output_path, std::ios::binary);
+    if (!out) {
+        return false;
+    }
+    out << SerializeNetworkRemoteAvatarRenderJson(report);
+    return out.good() && NetworkRemoteAvatarRenderMeetsBaseline(report);
+}
+
+bool WriteNetworkRemoteAvatarRenderFixtureArtifact(
+    const std::string& path,
+    const std::uint32_t expectedAvatarCount,
+    const std::uint32_t renderedAvatarCount,
+    const std::uint32_t skinnedDraws,
+    const std::uint32_t skinnedIndicesDrawn)
+{
+    const auto report = BuildNetworkRemoteAvatarRenderFixture(
+        expectedAvatarCount,
+        renderedAvatarCount,
+        skinnedDraws,
+        skinnedIndicesDrawn);
+    return WriteNetworkRemoteAvatarRenderArtifact(path, report);
 }
 
 } // namespace luminumbra::network
