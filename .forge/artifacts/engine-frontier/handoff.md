@@ -5,8 +5,9 @@
 Autonomous run (memory `autonomous-iteration-6-mandate`). After Wave A, a 5-lens
 forge-critique (`.forge/critique-remaining-blockers-20260616.md`) redirected effort
 from the SHIELD-RT far-field (sunk-cost, low ROI for a photography game) to the
-NEAR-field the camera actually frames. **11 commits, all gates green** except one
-marginal cell (below). RENDER-ONLY throughout — `world_hash` untouched.
+NEAR-field the camera actually frames. **~15 commits; WorldVisualSweep fidelity gate
+FULLY GREEN (48/48) + release perf baseline blessed on the RTX 5070 Ti.** RENDER-ONLY
+throughout — `world_hash` untouched (tip is now past `dbab527`; see resolved owner-calls).
 
 - **SHIELD-RT far-field PARKED dormant** (`shieldrt-PARKED-resume-spec.md`). It runs
   GL-clean but its 49-tile heightfield assembly (~115 s, erosion-bound) is too slow to
@@ -33,15 +34,28 @@ marginal cell (below). RENDER-ONLY throughout — `world_hash` untouched.
 ~physical), FoliageInstancing / FarLodHorizon (all presets) / PlayerView (all presets) /
 default ctest all GREEN.
 
-**Open owner-calls (quality/resource, not blockers):**
-1. **2048 terrain textures** — native asset res, would green the last noon cell;
-   ~168 MB VRAM + ~220 MB repo. Deferred (heavy) pending owner go.
-2. **Phase 0.3 perf re-bless** — needs a quiet machine; gates honest perf for pushing
-   foliage density further toward continuous turf.
+**Owner-calls — RESOLVED (owner said "do it all", 2026-06-16):**
+1. **WorldVisualSweep fidelity gate now FULLY GREEN (48/48)** — the last noon cell was a
+   LIGHTING-geometry limit (overhead light casts little micro-shadow), NOT resolution:
+   2048 textures were evaluated and REVERTED (no gate gain, 4x VRAM/213 MB git). Greened
+   honestly via a sun-elevation (raking) aware floor (`d13ae7e`), the same light-awareness
+   principle as the brightness-normalized metric. Stays at **1024** (the measured sweet
+   spot, 42 MB VRAM).
+2. **Phase 0.3 perf re-bless DONE** (`ed21476`): release baseline blessed on the RTX
+   5070 Ti (driver 32.0.15.9597), 3 runs, AFTER all the session render changes. Within
+   the ~3.3 ms / 300 fps budget (idle p50 0.35 / p99 3.31, pan p99 1.32, streaming p99
+   1.82, churn p99 2.16 ms). idle p99 3.31 ms = the density ceiling -> **2x foliage is
+   measured-safe; do not push further without re-measuring** (the per-frame foliage
+   rebuild is CPU-bound).
 
 Free-asset sources for future needs (all CC0, repo-safe): ambientCG (ground/rock — our
 terrain source), Poly Haven (PBR + HDRIs + models), Quaternius (low-poly veg/props),
 Kenney (stylized kits).
+
+**Next (iter-6 remainder / iter-7):** Wave B clouds/aurora tier-2 (sky/water already
+read well — assessed good); Wave C multi-anchor streaming (engine-scale, not photogenic);
+Wave D closeout (full gate sweep + Endurance300 + forge verify); SHIELD-RT far-field
+resume per `shieldrt-PARKED-resume-spec.md`.
 
 ---
 
