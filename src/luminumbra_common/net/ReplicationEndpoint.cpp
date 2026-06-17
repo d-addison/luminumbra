@@ -16,6 +16,19 @@ void ReplicationServer::RemoveClient(std::uint32_t client_id) {
     m_clients.erase(client_id);
 }
 
+std::vector<std::uint32_t> ReplicationServer::PruneDisconnectedClients() {
+    std::vector<std::uint32_t> removed;
+    for (auto it = m_clients.begin(); it != m_clients.end();) {
+        if (it->second.transport && !it->second.transport->IsPeerConnected()) {
+            removed.push_back(it->first);
+            it = m_clients.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    return removed;
+}
+
 void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
                                           const std::vector<ReplEntityState>& entities) {
     for (auto& [client_id, link] : m_clients) {
