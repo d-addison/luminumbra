@@ -69,6 +69,9 @@ struct ServerCliOptions {
     // ReplicatedComponent, deterministic wander) to prove heterogeneous entities
     // (animals/NPCs) replicate alongside player avatars.
     int npcs = 0;
+    // T-I6 P6.2: fire one server-authoritative ballistic ARROW (type_id 2) in
+    // --replicate -> replicates typed while in flight, reliable despawn on hit/expire.
+    bool arrow = false;
     bool smoke = false;
     // T-I5a-2 (A2): WindFieldDeterminism gate. Boots a world, runs N ticks
     // twice, asserts the wind sub-hash is equal across runs + stable, and times
@@ -218,6 +221,8 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
             options.replicate = true;
         } else if (std::strcmp(arg, "--npcs") == 0) {
             if (const char* v = next_value(i)) options.npcs = std::atoi(v);
+        } else if (std::strcmp(arg, "--arrow") == 0) {
+            options.arrow = true;
         } else if (std::strcmp(arg, "--artifact") == 0) {
             if (const char* v = next_value(i)) options.artifact_path = v;
         } else {
@@ -1766,6 +1771,17 @@ int RunReplicate(const ServerCliOptions& options) {
         npc_recs.push_back({e, Luminumbra::Vec3(bx, by, bz)});
     }
 
+    // P6.2: one server-authoritative ballistic ARROW (type_id 2). Fired at tick 10,
+    // integrated under gravity, despawned (reliable removed_id) on ground-hit/timeout.
+    constexpr std::uint32_t kArrowNetId = 2000u;
+    constexpr std::uint64_t kArrowFireTick = 10;
+    entt::entity arrow_entity = entt::null;
+    Luminumbra::Vec3 arrow_vel(0.0f);
+    bool arrow_active = false;
+    bool arrow_seen_by_client = false;
+    bool arrow_despawn_signalled = false;
+    const float arrow_dt = 1.0f / 30.0f;
+
     std::uint64_t executed = 0;
     while (executed < options.ticks) {
         // Client -> server: full +X movement input for its avatar this tick.
@@ -1799,14 +1815,55 @@ int RunReplicate(const ServerCliOptions& options) {
             if (world_sys) tf.position.y = world_sys->GetTerrainHeightAt(tf.position.x, tf.position.z);
         }
 
-        // Snapshot = player avatars + registry-driven entities (NPCs), one set.
+        // P6.2: arrow lifecycle. Fire once; integrate ballistically; despawn on
+        // ground-hit or timeout, emitting a RELIABLE removed_id that tick.
+        std::vector<std::uint32_t> tick_removed;
+        if (options.arrow && !arrow_active && arrow_entity == entt::null && executed == kArrowFireTick) {
+            const Luminumbra::Vec3 from = runner.Avatars().empty()
+                ? npc_origin : runner.Avatars()[controlled].position;
+            arrow_entity = registry.create();
+            auto& tf = registry.emplace<Luminumbra::Components::TransformComponent>(arrow_entity);
+            tf.position = Luminumbra::Vec3(from.x, from.y + 1.2f, from.z);
+            auto& rep = registry.emplace<Luminumbra::Components::ReplicatedComponent>(arrow_entity);
+            rep.network_id = kArrowNetId;
+            rep.type_id = 2u; // "arrow"
+            arrow_vel = Luminumbra::Vec3(10.0f, 6.0f, 0.0f); // forward + up
+            arrow_active = true;
+        }
+        if (arrow_active && registry.valid(arrow_entity)) {
+            auto& tf = registry.get<Luminumbra::Components::TransformComponent>(arrow_entity);
+            arrow_vel.y -= 9.81f * arrow_dt;
+            tf.position += arrow_vel * arrow_dt;
+            const float ground = world_sys ? world_sys->GetTerrainHeightAt(tf.position.x, tf.position.z)
+                                           : npc_origin.y;
+            const bool hit = tf.position.y <= ground;
+            const bool expired = executed > kArrowFireTick + 90; // 3 s @30 Hz
+            if (hit || expired) {
+                registry.destroy(arrow_entity);
+                arrow_entity = entt::null;
+                arrow_active = false;
+                tick_removed.push_back(kArrowNetId); // reliable despawn this snapshot
+            }
+        }
+
+        // Snapshot = player avatars + registry-driven entities (NPCs + live arrow).
         std::vector<Luminumbra::Net::ReplEntityState> states =
             Luminumbra::World::BuildAvatarReplStates(runner.Avatars());
-        const auto npc_states = Luminumbra::World::BuildEntityReplStates(registry);
-        states.insert(states.end(), npc_states.begin(), npc_states.end());
-        server.BroadcastSnapshot(executed, states);
+        const auto entity_states = Luminumbra::World::BuildEntityReplStates(registry);
+        states.insert(states.end(), entity_states.begin(), entity_states.end());
+        server.BroadcastSnapshot(executed, states, tick_removed);
         client.PumpInbound(); // apply snapshot (most-recent-wins) + ack
         server.PumpInbound(); // drain the ack
+
+        // P6.2 observe: did the client see the typed arrow + its reliable despawn?
+        if (client.has_snapshot()) {
+            for (const auto& e : client.snapshot().entities) {
+                if (e.type_id == 2u) arrow_seen_by_client = true;
+            }
+            for (std::uint32_t rid : client.snapshot().removed_ids) {
+                if (rid == kArrowNetId) arrow_despawn_signalled = true;
+            }
+        }
     }
 
     // Verify the client mirrors the server's authoritative avatars.
@@ -1825,6 +1882,9 @@ int RunReplicate(const ServerCliOptions& options) {
         }
     }
     const bool npcs_ok = npc_seen == static_cast<std::size_t>(options.npcs);
+    // P6.2: if an arrow was fired, the client must have SEEN it (typed) in flight AND
+    // received its reliable despawn.
+    const bool arrow_ok = !options.arrow || (arrow_seen_by_client && arrow_despawn_signalled);
     double max_pos_err = 0.0;
     bool ids_ok = size_ok;
     if (size_ok) {
@@ -1844,7 +1904,7 @@ int RunReplicate(const ServerCliOptions& options) {
     // est kbps per client = bytes * a realistic 20 Hz snapshot rate * 8 / 1000.
     const std::size_t snapshot_bytes = server.last_broadcast_max_client_bytes();
     const double est_kbps_per_client = static_cast<double>(snapshot_bytes) * 20.0 * 8.0 / 1000.0;
-    const bool passed = size_ok && ids_ok && npcs_ok && max_pos_err < 0.01 && acked && moved &&
+    const bool passed = size_ok && ids_ok && npcs_ok && arrow_ok && max_pos_err < 0.01 && acked && moved &&
                         executed == options.ticks;
 
     nlohmann::json artifact{
@@ -1866,6 +1926,10 @@ int RunReplicate(const ServerCliOptions& options) {
         {"npc_count", options.npcs},
         {"npcs_replicated", npc_seen},
         {"npcs_ok", npcs_ok},
+        {"arrow_fired", options.arrow},
+        {"arrow_seen_by_client", arrow_seen_by_client},
+        {"arrow_despawn_signalled", arrow_despawn_signalled},
+        {"arrow_ok", arrow_ok},
         {"size_ok", size_ok},
         {"ids_ok", ids_ok},
         {"ack_flowed", acked},

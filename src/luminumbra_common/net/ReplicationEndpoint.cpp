@@ -30,7 +30,8 @@ std::vector<std::uint32_t> ReplicationServer::PruneDisconnectedClients() {
 }
 
 void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
-                                          const std::vector<ReplEntityState>& entities) {
+                                          const std::vector<ReplEntityState>& entities,
+                                          const std::vector<std::uint32_t>& removed_ids) {
     m_last_broadcast_total_bytes = 0;
     m_last_broadcast_max_client_bytes = 0;
     for (auto& [client_id, link] : m_clients) {
@@ -67,6 +68,9 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
                 }
             }
         }
+        // P6: explicit despawns (e.g. a spent arrow). Passed through to every client
+        // (AOI-scoped despawn filtering is a later refinement; the set is tiny).
+        snap.removed_ids = removed_ids;
         // State snapshots are UNRELIABLE: a dropped one is superseded by the next
         // (most-recent-wins). Over Steam this maps to k_nSteamNetworkingSend_Unreliable.
         const std::vector<std::uint8_t> frame = EncodeSnapshot(snap);
