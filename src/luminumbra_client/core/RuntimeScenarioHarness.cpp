@@ -198,6 +198,7 @@ RuntimeScenarioConfig ParseRuntimeScenarioConfig(int argc, char* argv[], const s
     // T-I6 P2b: avatar showcase row count (skinned_mesh_visual_smoke). Clamp to a
     // sane max so a typo can't spawn thousands of rigs.
     config.avatars = std::clamp(GetCommandLineIntOption(argc, argv, "--avatars", 0), 0, 32);
+    config.replicated = HasCommandLineFlag(argc, argv, "--replicated");
     config.readiness_timeout_seconds = GetCommandLineIntOption(argc, argv, "--readiness-timeout", config.readiness_timeout_seconds);
     config.horizon_radius = GetCommandLineIntOption(argc, argv, "--horizon-radius", config.horizon_radius);
     config.collision_radius = GetCommandLineIntOption(argc, argv, "--collision-radius", config.collision_radius);
@@ -6313,6 +6314,73 @@ bool IsSkinnedMeshLikePixel(unsigned char r, unsigned char g, unsigned char b) {
 
 } // namespace
 
+// T-I6 P3.3 integration: in-process replication-driven avatar demo.
+void ReplicatedAvatarDemo::Setup(const std::vector<Luminumbra::Vec3>& spawn_positions, double snapshot_hz) {
+    auto pair = Luminumbra::Net::MakeLoopbackPair();
+    m_server_tp = std::move(pair.first);
+    m_client_tp = std::move(pair.second);
+    m_server = std::make_unique<Luminumbra::Net::ReplicationServer>();
+    m_server->AddClient(/*client_id=*/0, m_server_tp.get());
+    m_client = std::make_unique<Luminumbra::Net::ReplicationClient>(/*player_id=*/0, m_client_tp.get());
+    m_interp = std::make_unique<Luminumbra::Net::SnapshotInterpolator>();
+    m_server_pos = spawn_positions;
+    m_period = snapshot_hz > 0.0 ? 1.0 / snapshot_hz : 1.0 / 15.0;
+    m_accum = 0.0;
+    m_tick = 0;
+    m_ready = !m_server_pos.empty();
+}
+
+std::vector<Luminumbra::Vec3> ReplicatedAvatarDemo::Update(
+    double dt_seconds, Luminumbra::Systems::SHIELD_WorldSystem* world) {
+    if (!m_ready) return {};
+
+    // Walk the SERVER-side avatars forward (+Z toward the camera), terrain-grounded,
+    // every frame -- this is the authoritative motion the snapshots carry.
+    const float walk = static_cast<float>(dt_seconds) * 1.0f; // ~1 m/s
+    for (std::size_t i = 0; i < m_server_pos.size(); ++i) {
+        m_server_pos[i].z += walk;
+        if (world) m_server_pos[i].y = world->GetTerrainHeightAt(m_server_pos[i].x, m_server_pos[i].z);
+    }
+
+    // Broadcast a snapshot on the snapshot cadence (NOT every frame), so the client
+    // must INTERPOLATE between sparse updates -- the real network behaviour.
+    m_accum += dt_seconds;
+    if (m_accum >= m_period) {
+        m_accum = 0.0;
+        ++m_tick;
+        std::vector<Luminumbra::Net::ReplEntityState> states;
+        states.reserve(m_server_pos.size());
+        for (std::size_t i = 0; i < m_server_pos.size(); ++i) {
+            Luminumbra::Net::ReplEntityState s;
+            s.entity_id = static_cast<std::uint32_t>(i);
+            s.px_mm = Luminumbra::Net::ReplQuantPos(m_server_pos[i].x);
+            s.py_mm = Luminumbra::Net::ReplQuantPos(m_server_pos[i].y);
+            s.pz_mm = Luminumbra::Net::ReplQuantPos(m_server_pos[i].z);
+            states.push_back(s);
+        }
+        m_server->BroadcastSnapshot(m_tick, states);
+        m_client->PumpInbound();
+        m_server->PumpInbound();
+        if (m_client->has_snapshot()) m_interp->Push(m_client->snapshot());
+    }
+
+    // Sample the interpolator render-behind (~1.5 snapshots) so motion is smooth
+    // between the sparse updates.
+    std::vector<Luminumbra::Vec3> out(m_server_pos.size(), Luminumbra::Vec3(0.0f));
+    const double render_tick = static_cast<double>(m_interp->newest_tick()) - 1.5;
+    const auto sampled = m_interp->Sample(render_tick);
+    for (const auto& e : sampled) {
+        if (e.entity_id < out.size()) {
+            out[e.entity_id] = Luminumbra::Vec3(Luminumbra::Net::ReplDequantPos(e.px_mm),
+                                                Luminumbra::Net::ReplDequantPos(e.py_mm),
+                                                Luminumbra::Net::ReplDequantPos(e.pz_mm));
+        }
+    }
+    // Before the first snapshot lands, hold the spawn positions.
+    if (sampled.empty()) return m_server_pos;
+    return out;
+}
+
 SkinnedMeshVisualTarget SpawnSkinnedMeshVisualEntity(
     Luminumbra::world::GameSession* game_session,
     const std::filesystem::path& artifact_dir,
@@ -6424,6 +6492,8 @@ SkinnedMeshVisualTarget SpawnSkinnedMeshVisualEntity(
         player.clip = use_clip;
         player.time = static_cast<double>(i) * 0.3; // staggered phase
         player.looping = true;
+        target.all_entities.push_back(entity);
+        target.spawn_positions.push_back(Luminumbra::Vec3(rx, ry, mesh_z));
         if (i == 0) {
             target.entity = entity; // primary avatar (the gate ROI tracks this one)
         }

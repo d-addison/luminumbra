@@ -3,6 +3,7 @@
 #include "rendering/RenderPipeline.h"
 #include "rendering/passes/FoliagePass.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/net/ReplicationEndpoint.h"
 #include "core/CaptureScale.h"
 #include "nlohmann/json.hpp"
 #include <atomic>
@@ -80,6 +81,10 @@ struct RuntimeScenarioConfig {
     // player placeholders (--avatars; 0/1 = the unchanged single-rig gate behavior,
     // >=2 = a multiplayer SHOWCASE row with a widened camera). Visualization only.
     int avatars = 0;
+    // T-I6 P3.3 integration: drive the showcase row's render avatars through the
+    // in-process replication pipeline (server->snapshot->client->interpolate) instead
+    // of a scripted transform walk, so the on-screen view is literally network-driven.
+    bool replicated = false;
     int timed_run_seconds = 0;
     int readiness_timeout_seconds = 120;
     int horizon_radius = 12;
@@ -1288,12 +1293,50 @@ void WriteFarLodHorizonAnalysis(
 struct SkinnedMeshVisualTarget {
     bool spawned = false;
     Luminumbra::EntityID entity{entt::null};
+    // T-I6 P3.3 integration: ALL spawned avatar entities (ascending player_id) so a
+    // network-driven driver can update each row member's transform from snapshots.
+    std::vector<Luminumbra::EntityID> all_entities;
+    std::vector<Luminumbra::Vec3> spawn_positions; // initial world positions (by id)
     Luminumbra::Vec3 mesh_position{0.0f};   // base of the post
     Luminumbra::Vec3 focus{0.0f};           // arm hinge (camera aim point)
     Luminumbra::Vec3 camera_position{0.0f};
     std::string mesh_path;                  // absolute LMS2 path
     std::string clip_path;                  // absolute .lanim path
     std::string failure_reason;
+};
+
+// T-I6 P3.3 integration: an in-process REPLICATION-DRIVEN avatar demo. Hosts a
+// ReplicationServer + ReplicationClient over a LoopbackTransport pair inside the
+// client process: the "server" walks a set of avatars (kinematic + terrain-grounded)
+// and broadcasts SnapshotMsgs at a fixed snapshot rate; the client applies them
+// most-recent-wins, buffers them in a SnapshotInterpolator, and Update() returns the
+// RENDER-BEHIND INTERPOLATED positions for the renderer. So the on-screen avatars are
+// driven through the real wire pipeline (server -> snapshot -> transport -> client ->
+// interpolate), not by direct transforms. The Jolt-physics avatar path is proven
+// headless (--replicate); this demo proves the pipeline DRIVES THE RENDER. Owns its
+// transports/endpoints; engine-generic, world_hash-neutral.
+class ReplicatedAvatarDemo {
+public:
+    // Seed the server-side avatars at these world positions (id = index). Builds the
+    // loopback server/client + registers one client. snapshot_hz = broadcast rate.
+    void Setup(const std::vector<Luminumbra::Vec3>& spawn_positions, double snapshot_hz = 15.0);
+    // Advance dt: walk the server avatars (+Z, terrain-grounded via `world`), broadcast
+    // on the snapshot cadence, pump the client, and return the render-behind interpolated
+    // positions (by id). Returns the last good positions between snapshots.
+    std::vector<Luminumbra::Vec3> Update(double dt_seconds, Luminumbra::Systems::SHIELD_WorldSystem* world);
+    [[nodiscard]] bool ready() const { return m_ready; }
+
+private:
+    std::unique_ptr<Luminumbra::Net::LoopbackTransport> m_server_tp;
+    std::unique_ptr<Luminumbra::Net::LoopbackTransport> m_client_tp;
+    std::unique_ptr<Luminumbra::Net::ReplicationServer> m_server;
+    std::unique_ptr<Luminumbra::Net::ReplicationClient> m_client;
+    std::unique_ptr<Luminumbra::Net::SnapshotInterpolator> m_interp;
+    std::vector<Luminumbra::Vec3> m_server_pos; // server-side authoritative positions
+    double m_accum = 0.0;
+    double m_period = 1.0 / 15.0;
+    std::uint64_t m_tick = 0;
+    bool m_ready = false;
 };
 
 SkinnedMeshVisualTarget SpawnSkinnedMeshVisualEntity(
