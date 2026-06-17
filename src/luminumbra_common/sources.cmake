@@ -35,6 +35,9 @@ set(COMMON_SOURCES
     # T-I6: Steamworks ISteamNetworkingSockets transport (body guarded by
     # LUMINUMBRA_ENABLE_STEAM; compiles to nothing when the SDK is not wired in).
     ${CMAKE_CURRENT_LIST_DIR}/net/SteamNetworkingTransport.cpp
+    # T-I6: standalone GameNetworkingSockets transport (body guarded by
+    # LUMINUMBRA_ENABLE_GNS; compiles to nothing when GNS is not wired in).
+    ${CMAKE_CURRENT_LIST_DIR}/net/GnsTransport.cpp
 
     # Network
     ${CMAKE_CURRENT_LIST_DIR}/network/NetworkLoopbackAuthority.cpp

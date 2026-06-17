@@ -48,3 +48,28 @@ if(LUMINUMBRA_ENABLE_STEAM)
     endif()
     message(STATUS "Steamworks transport ENABLED (SDK: ${LUMINUMBRA_STEAM_SDK_DIR})")
 endif()
+
+# T-I6: standalone GameNetworkingSockets transport (GnsTransport). Valve's
+# open-source UDP networking, Steam-INDEPENDENT -- so two processes can connect on
+# ONE machine (the Steam SDK can't, one-instance-per-app), which is exactly what
+# local dev/testing needs. OFF by default (FetchContent + a multi-minute GNS build);
+# when ON, fetch GNS master (BCrypt crypto -> no OpenSSL/libsodium dep), link the
+# static lib, and define LUMINUMBRA_ENABLE_GNS so the transport body compiles.
+# Requires protobuf + abseil + protoc on PATH (ucrt64 packages).
+option(LUMINUMBRA_ENABLE_GNS "Build the standalone GameNetworkingSockets UDP transport" OFF)
+if(LUMINUMBRA_ENABLE_GNS)
+    include(FetchContent)
+    set(GAMENETWORKINGSOCKETS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(GAMENETWORKINGSOCKETS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(USE_CRYPTO "BCrypt" CACHE STRING "" FORCE)
+    FetchContent_Declare(
+        GameNetworkingSockets
+        GIT_REPOSITORY https://github.com/ValveSoftware/GameNetworkingSockets.git
+        GIT_TAG master
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(GameNetworkingSockets)
+    target_link_libraries(luminumbra_common PUBLIC GameNetworkingSockets_s)
+    target_compile_definitions(luminumbra_common PUBLIC LUMINUMBRA_ENABLE_GNS)
+    message(STATUS "Standalone GameNetworkingSockets transport ENABLED (master, BCrypt)")
+endif()
