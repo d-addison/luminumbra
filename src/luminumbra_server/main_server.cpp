@@ -1755,20 +1755,25 @@ int RunReplicate(const ServerCliOptions& options) {
     // proving heterogeneous entities (NPCs/animals) flow through the same pipeline.
     auto& registry = runner.Session()->GetRegistry();
     auto* world_sys = runner.Session()->GetWorldSystem();
+    auto* npc_physics = runner.Session()->GetPhysicsSystem();
     const Luminumbra::Vec3 npc_origin = runner.Session()->GetMetadata().spawnPoint;
-    struct NpcRec { entt::entity e; Luminumbra::Vec3 base; };
+    // P6.3b: each NPC is a real Jolt CharacterVirtual (the same physics body the
+    // avatars use -- gravity + terrain collision), driven by a wander wish velocity.
+    struct NpcRec { entt::entity e; std::size_t char_index; };
     std::vector<NpcRec> npc_recs;
     for (int i = 0; i < options.npcs; ++i) {
         const float bx = npc_origin.x + 6.0f + static_cast<float>(i) * 2.0f;
         const float bz = npc_origin.z - 4.0f;
-        const float by = world_sys ? world_sys->GetTerrainHeightAt(bx, bz) : npc_origin.y;
+        const float by = (world_sys ? world_sys->GetTerrainHeightAt(bx, bz) : npc_origin.y) + 1.5f;
+        const std::size_t ci = npc_physics
+            ? npc_physics->create_avatar_character(Luminumbra::Vec3(bx, by, bz)) : 0u;
         auto e = registry.create();
         auto& tf = registry.emplace<Luminumbra::Components::TransformComponent>(e);
         tf.position = Luminumbra::Vec3(bx, by, bz);
         auto& rep = registry.emplace<Luminumbra::Components::ReplicatedComponent>(e);
         rep.network_id = 1000u + static_cast<std::uint32_t>(i); // distinct from avatar ids
         rep.type_id = 1u;  // "animal" archetype (client picks the mesh)
-        npc_recs.push_back({e, Luminumbra::Vec3(bx, by, bz)});
+        npc_recs.push_back({e, ci});
     }
 
     // P6.2: one server-authoritative ballistic ARROW (type_id 2). Fired at tick 10,
@@ -1797,6 +1802,17 @@ int RunReplicate(const ServerCliOptions& options) {
                                  static_cast<float>(got->move_x) / 32767.0f,
                                  static_cast<float>(got->move_z) / 32767.0f);
         }
+        // P6.3b: set each NPC's wander WISH velocity (a slow per-NPC circle) before the
+        // physics step, so update_avatars (in RunFixedTicks) walks the CharacterVirtual
+        // with real gravity + terrain collision.
+        if (npc_physics) {
+            const float tw = static_cast<float>(executed) * 0.08f;
+            for (std::size_t i = 0; i < npc_recs.size(); ++i) {
+                const float ph = tw + static_cast<float>(i);
+                npc_physics->set_avatar_wish_velocity(npc_recs[i].char_index,
+                                                      glm::vec2(1.5f * std::cos(ph), 1.5f * std::sin(ph)));
+            }
+        }
 
         const auto step = runner.RunFixedTicks(1);
         executed += step.ticks_executed;
@@ -1804,15 +1820,14 @@ int RunReplicate(const ServerCliOptions& options) {
             LUMINUMBRA_CORE_ERROR("replicate: tick {} did not advance", executed + 1);
             return 1;
         }
-        // P6.1b: wander the NPCs deterministically (a slow circle around their base,
-        // terrain-grounded) -- server-authoritative motion the snapshot carries.
-        const float t = static_cast<float>(executed) * 0.1f;
-        for (const NpcRec& n : npc_recs) {
-            if (!registry.valid(n.e)) continue;
-            auto& tf = registry.get<Luminumbra::Components::TransformComponent>(n.e);
-            tf.position.x = n.base.x + 2.0f * std::cos(t);
-            tf.position.z = n.base.z + 2.0f * std::sin(t);
-            if (world_sys) tf.position.y = world_sys->GetTerrainHeightAt(tf.position.x, tf.position.z);
+        // P6.3b: mirror each NPC's Jolt CharacterVirtual position (stepped above with
+        // gravity + terrain collision) into its replicated transform.
+        if (npc_physics) {
+            for (const NpcRec& n : npc_recs) {
+                if (!registry.valid(n.e)) continue;
+                registry.get<Luminumbra::Components::TransformComponent>(n.e).position =
+                    npc_physics->get_avatar_position(n.char_index);
+            }
         }
 
         // P6.2/P6.3: arrow lifecycle with REAL JOLT PHYSICS. Fire once -> a dynamic
