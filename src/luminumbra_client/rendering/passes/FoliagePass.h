@@ -60,10 +60,13 @@ public:
     // reads as real grass COVER rather than a few sparse tufts. The placement is
     // still a pure per-chunk hash (idx in [0,candidates)), so determinism + the
     // RENDER-ONLY contract are preserved; only the candidate count per chunk grows.
-    // T-I6: raised 2048 -> 4096 (≈2 -> ≈4 blades/m²) so the near foreground reads as
-    // continuous turf rather than discrete tufts. Pool headroom is ample (a focused
-    // scene drew ~11.9k of the 262k pool = 4.5%), so doubling stays well within the
-    // instance pool + a single instanced draw. Perf re-validated (frame throughput).
+    // T-I6: 2048 -> 4096 candidate slots. The per-frame CPU rebuild that once capped this
+    // is removed by the scatter cache (#1, rebuild only on change). Density is then capped
+    // by the BIOME contract, not perf: the FoliageInstancing gate requires coverage to
+    // track the biome's vegetation density (within a band), so 8192 (coverage saturates to
+    // 1.0, ignoring biome) FAILS — desert would carpet too. 4096 -> ~0.73 coverage tracks
+    // the plains 0.3 density (in-band). "Continuous turf" in a scene is therefore the
+    // biome's vegetation density (data/common/biomes.json), not this raw cap.
     static constexpr std::size_t kMaxCandidatesPerChunk = 4096;
 
     // Packed 36-byte instance record (matches the GL vertex-attribute layout).
