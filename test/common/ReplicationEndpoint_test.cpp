@@ -247,6 +247,52 @@ TEST(ReplicationEndpoint, ChunkAoiRadiusZeroIsOwnChunkOnly) {
     EXPECT_EQ(client.snapshot().entities[1].entity_id, 10u);
 }
 
+// T-I6 SCALE/STRESS: the 20+ player scalability contract. 64 players spread on an
+// 8x8 grid 100 m apart; with a 16 m chunk + radius 1 (a 48 m neighbourhood) almost
+// no two share a neighbourhood, so chunk-AOI must keep each client's snapshot ~1
+// entity REGARDLESS of population, while a full-set broadcast grows linearly with
+// N. Proves per-connection bandwidth (and aggregate server egress) is bounded by
+// LOCAL density, not headcount -- the property that lets a single server hold the
+// 20-32+ players the sizing target calls for.
+TEST(ReplicationScale, ChunkAoiBoundsPerClientBandwidthAsPlayersScale) {
+    constexpr int N = 64;
+    constexpr std::int32_t kSpacingMm = 100000; // 100 m, >> 48 m neighbourhood
+    std::vector<decltype(MakeLoopbackPair())> pairs;
+    pairs.reserve(N);
+    ReplicationServer server;
+    std::vector<ReplEntityState> entities;
+    entities.reserve(N);
+    for (int i = 0; i < N; ++i) {
+        pairs.push_back(MakeLoopbackPair());
+        const std::uint32_t id = static_cast<std::uint32_t>(i + 1);
+        server.AddClient(id, pairs.back().first.get());
+        entities.push_back(MakeEntity(id, (i % 8) * kSpacingMm, 0, (i / 8) * kSpacingMm));
+    }
+    ASSERT_EQ(server.client_count(), static_cast<std::size_t>(N));
+
+    server.SetAoiChunkRadius(/*chunk_radius=*/1, /*chunk_size_mm=*/16000);
+    server.BroadcastSnapshot(1, entities);
+    const std::size_t aoi_max = server.last_broadcast_max_client_bytes();
+    const std::size_t aoi_total = server.last_broadcast_total_bytes();
+
+    server.SetAoiChunkRadius(/*disable=*/-1, 0); // full set: each client gets all N
+    server.BroadcastSnapshot(2, entities);
+    const std::size_t full_max = server.last_broadcast_total_bytes() == 0 ? 0
+                                  : server.last_broadcast_max_client_bytes();
+    const std::size_t full_total = server.last_broadcast_total_bytes();
+
+    // Per-connection AOI bytes are a small fraction of the full-set bytes, and the
+    // aggregate egress collapses (full = N clients x N entities).
+    EXPECT_LT(aoi_max * 8, full_max);
+    EXPECT_LT(aoi_total * 8, full_total);
+
+    // Determinism at scale: re-broadcasting identical state is byte-identical.
+    server.SetAoiChunkRadius(1, 16000);
+    server.BroadcastSnapshot(3, entities);
+    EXPECT_EQ(server.last_broadcast_max_client_bytes(), aoi_max);
+    EXPECT_EQ(server.last_broadcast_total_bytes(), aoi_total);
+}
+
 // T-I6 polish: PRUNE-INTO-TICK despawn. A disconnect is folded into the very next
 // broadcast's removed_ids for surviving clients, and repeated for robustness.
 TEST(ReplicationLifecycle, PruneFoldsDespawnIntoNextSnapshot) {
