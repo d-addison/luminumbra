@@ -1781,6 +1781,10 @@ int RunReplicate(const ServerCliOptions& options) {
         }
     }
     const bool acked = server.AckedSnapshotSeq(1) > 0;
+    // P5 bandwidth: MEASURED per-client snapshot bytes (vs the research estimate).
+    // est kbps per client = bytes * a realistic 20 Hz snapshot rate * 8 / 1000.
+    const std::size_t snapshot_bytes = server.last_broadcast_max_client_bytes();
+    const double est_kbps_per_client = static_cast<double>(snapshot_bytes) * 20.0 * 8.0 / 1000.0;
     const bool passed = size_ok && ids_ok && max_pos_err < 0.01 && acked && moved &&
                         executed == options.ticks;
 
@@ -1798,6 +1802,8 @@ int RunReplicate(const ServerCliOptions& options) {
         {"max_position_error_m", max_pos_err},
         {"controlled_avatar", controlled},
         {"controlled_dx_m", final_x - initial_x},
+        {"snapshot_bytes_per_client", snapshot_bytes},
+        {"est_kbps_per_client_at_20hz", est_kbps_per_client},
         {"size_ok", size_ok},
         {"ids_ok", ids_ok},
         {"ack_flowed", acked},
@@ -1831,9 +1837,9 @@ int RunReplicate(const ServerCliOptions& options) {
     }
     LUMINUMBRA_CORE_INFO(
         "Replicate smoke passed: {} avatars mirrored to client (seq={}, acked_seq={}, max_pos_err={:.4f} m); "
-        "network input walked avatar {} +{:.2f} m in X",
+        "network input walked avatar {} +{:.2f} m in X; bandwidth {} B/snapshot/client (~{:.1f} kbps @20Hz)",
         avatars.size(), client.snapshot().snapshot_seq, server.AckedSnapshotSeq(1), max_pos_err,
-        controlled, final_x - initial_x);
+        controlled, final_x - initial_x, snapshot_bytes, est_kbps_per_client);
     return 0;
 }
 

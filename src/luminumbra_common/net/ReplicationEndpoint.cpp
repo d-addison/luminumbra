@@ -31,6 +31,8 @@ std::vector<std::uint32_t> ReplicationServer::PruneDisconnectedClients() {
 
 void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
                                           const std::vector<ReplEntityState>& entities) {
+    m_last_broadcast_total_bytes = 0;
+    m_last_broadcast_max_client_bytes = 0;
     for (auto& [client_id, link] : m_clients) {
         if (!link.transport) continue;
         SnapshotMsg snap;
@@ -67,7 +69,12 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
         }
         // State snapshots are UNRELIABLE: a dropped one is superseded by the next
         // (most-recent-wins). Over Steam this maps to k_nSteamNetworkingSend_Unreliable.
-        link.transport->SendFrame(EncodeSnapshot(snap), FrameDelivery::Unreliable);
+        const std::vector<std::uint8_t> frame = EncodeSnapshot(snap);
+        m_last_broadcast_total_bytes += frame.size();
+        if (frame.size() > m_last_broadcast_max_client_bytes) {
+            m_last_broadcast_max_client_bytes = frame.size();
+        }
+        link.transport->SendFrame(frame, FrameDelivery::Unreliable);
     }
 }
 

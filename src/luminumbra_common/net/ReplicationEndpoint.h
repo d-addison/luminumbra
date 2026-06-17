@@ -67,6 +67,13 @@ public:
     [[nodiscard]] const UsercmdMsg* LatestUsercmd(std::uint32_t client_id) const;
     [[nodiscard]] std::uint32_t AckedSnapshotSeq(std::uint32_t client_id) const;
 
+    // T-I6 P5: bandwidth telemetry from the LAST BroadcastSnapshot -- total bytes
+    // sent across all clients + the largest single per-client snapshot (the
+    // bound that matters per connection). Lets the gate report MEASURED bytes
+    // (vs the research's estimate) and show AOI's effect.
+    [[nodiscard]] std::size_t last_broadcast_total_bytes() const { return m_last_broadcast_total_bytes; }
+    [[nodiscard]] std::size_t last_broadcast_max_client_bytes() const { return m_last_broadcast_max_client_bytes; }
+
 private:
     struct ClientLink {
         ILockstepTransport* transport = nullptr;
@@ -75,6 +82,8 @@ private:
     };
     std::map<std::uint32_t, ClientLink> m_clients; // ordered -> deterministic broadcast order
     std::int64_t m_aoi_radius_mm = 0;              // 0 = AOI disabled (full set)
+    std::size_t m_last_broadcast_total_bytes = 0;
+    std::size_t m_last_broadcast_max_client_bytes = 0;
 };
 
 class ReplicationClient {
