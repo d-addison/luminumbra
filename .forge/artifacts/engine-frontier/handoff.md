@@ -92,10 +92,14 @@ AOI, interpolation+prediction, CI gate, AND the network-driven render — works 
 loopback transport. Swapping `LoopbackTransport` → `SteamNetworkingTransport` is the only change
 for real cross-machine play.
 
+- **P4.0 join/leave lifecycle** (`9ddd0d3`): `ReplicationServer::PruneDisconnectedClients()` removes
+  cleanly-disconnected clients (returns ids to despawn); join = AddClient mid-session → fresh-seq
+  baseline; 2 gtests (survivors undisturbed, live client never pruned).
+
 **Next (real-networking + lifecycle phase):** `SteamNetworkingTransport` (ISteamNetworkingSockets /
-GameNetworkingSockets, owner/LAN-validated — memory `steam-multiplayer-target`); P4 persistent
-join/leave (ReplicationServer Add/RemoveClient lifecycle + state-baseline handoff); P5 scale to
-20+; wire `LocalPlayerPredictor` to a controlled client avatar; chunk-index AOI.
+GameNetworkingSockets, owner/LAN-validated — memory `steam-multiplayer-target`); wire Prune into the
+server tick (despawn left players); state-baseline handoff on join; P5 scale to 20+; wire
+`LocalPlayerPredictor` to a controlled client avatar; chunk-index AOI.
 
 ## Iteration 6 (cont., 2026-06-17) — Render-debt wave #1–#4 + #5 spec (tip `3df4347`)
 
