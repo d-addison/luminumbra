@@ -16,9 +16,12 @@
 #include <memory>
 #include <string>
 
+#include <vector>
+
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/world/GameSession.h"
+#include "luminumbra_common/world/PlayerAvatar.h"
 
 namespace Luminumbra::Server {
 
@@ -39,6 +42,13 @@ struct ServerWorldRunnerConfig {
     // Autosave every N simulation ticks through WorldSaveService
     // (GameSession::SaveWorldState incremental contract). 0 disables.
     std::uint64_t autosave_interval_ticks = 0;
+    // T-I6 P1 (multiplayer): number of deterministic player avatars to spawn at
+    // boot (phyllotaxis ring around spawn; see World::DeterministicAvatarSpawnOffset).
+    // Avatar positions feed the multi-anchor streaming vector and fold into the
+    // `entities` sub-hash. DEFAULT 0 -> no avatars -> byte-identical to the pre-P1
+    // headless lane (single spawn anchor, empty entity snapshot). Network
+    // connections drive this list in P3; this config is the test/prep entry point.
+    int avatar_count = 0;
 };
 
 struct ServerTickReport {
@@ -104,6 +114,10 @@ public:
 
     world::GameSession* Session() { return m_session.get(); }
 
+    // T-I6 P1: the deterministic player avatars spawned at boot (empty when
+    // avatar_count == 0). Read-only view for tests/telemetry.
+    const std::vector<World::PlayerAvatar>& Avatars() const { return m_avatars; }
+
     // Saves world state through WorldSaveService (incremental contract: a
     // never-edited world writes nothing) and tears the session down.
     // Called by the destructor when not invoked explicitly.
@@ -113,6 +127,7 @@ private:
     ServerWorldRunnerConfig m_config;
     Luminumbra::JobSystem m_jobSystem;
     std::unique_ptr<world::GameSession> m_session;
+    std::vector<World::PlayerAvatar> m_avatars; // T-I6 P1: deterministic player avatars
     bool m_booted = false;
     bool m_shutdown = false;
 };
