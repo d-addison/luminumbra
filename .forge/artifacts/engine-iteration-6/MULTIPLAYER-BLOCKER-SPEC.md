@@ -76,33 +76,54 @@ These three are exactly what an **authoritative dedicated server with state repl
   remaining Wave C worldgen bump, so the chain stays one-bump-per-commit attributable. Inter-
   player physics collision is part of that same avatar/physics bump (one commit, not two).
 
-### v0 phase plan (replaces v1 M1–M6)
+### v0 phase plan (replaces v1 M1–M6) — RESEARCH-BACKED
 Ordered so each step is independently validatable; the architecture-neutral pieces (P0–P1) land
-first and are useful under ANY model, the bump is isolated (P2), and the netcode (P3+) is gated
-on owner confirmation of the pivot.
+first and are useful under ANY model, the bump is isolated (P1/P2), and the netcode (P3+) is
+gated on owner confirmation of the pivot.
 
-- **P0 — per-anchor streaming budget (Q4 "build now"; residency-only, world_hash-NEUTRAL).**
-  Generalize the shared 8192-active-chunk budget so N far-apart anchors each get a guaranteed
-  near-field floor instead of a near anchor starving a far one under union pressure. Foundation-
-  neutral; needed under both models. **← BUILDING THIS NOW.** Gate: `HeadlessServerTick` /
-  `MultiAnchorStreaming` — each of N anchors keeps its near-surface resident under a tight
-  global budget; single-anchor path byte-identical (world_hash unchanged).
+> **Research-gated (owner: "research then spec then plan, don't go in blind").** The five cited
+> briefs + synthesis in `research/mp-*.md` (replication, interest-management, prediction-
+> reconciliation, networked-physics, server-architecture) back every P3+ decision below; all
+> five independently validate this pivot. See `research/mp-_synthesis.md` for the unified
+> architecture, the consolidated bandwidth/scale budget, and the cross-cutting decisions.
+
+- **P0 — per-anchor streaming budget (Q4 "build now"; residency-only, world_hash-NEUTRAL).
+  ✅ DONE (`9f6d605`).** Closest-anchor priority on the union wanted-set so N anchors share the
+  8192 budget fairly (no near anchor starves a far one). MultiAnchorStreaming gtests + Headless-
+  ServerTick green; single-anchor byte-identical (world_hash `f17726d44054d133` unchanged).
 - **P1 — player avatar as a deterministic server entity (prep; the eventual bump #5).** Add a
   `PlayerAvatar` ECS entity (stable id, position, facing, velocity); deterministic spawn from
   `(seed, preset, player_id)`. Avatar positions become the streaming anchor vector (closes B2).
-  Lands the world_hash bump in its own commit + re-bless.
-- **P2 — server-authoritative physics for avatars + props (Q3 Garry's-Mod model).** Players and
-  dynamic props in the server Jolt world; inter-entity collision; part of the P1 avatar/physics
-  bump or an immediately-following one. Kinematic-first is NOT chosen — owner wants full physics.
-- **P3 — replication protocol (authoritative snapshots + delta + client prediction).** The new
-  net layer: `usercmd` upstream, per-client snapshot downstream, baseline+delta compression,
-  PVS/area-of-interest culling for 20+, client prediction + reconciliation, interpolation of
-  remote entities. **GATED on owner confirming the pivot** (this is the large, weeks-scale leg).
-- **P4 — persistent server lifecycle (join/leave; Q2).** Connect = baseline + snapshot stream +
-  avatar spawn; disconnect = avatar despawn + anchor removed; the server runs continuously
-  independent of any single client. Loopback + LAN first.
-- **P5 — scale hardening to 20+ (Q1).** AOI tuning, snapshot bandwidth budgets, per-anchor
-  streaming floors validated at 20 anchors, server tick-budget under N-player physics.
+  world_hash bump in its own commit + re-bless.
+- **P2 — server-authoritative physics for avatars + props (Q3 Garry's-Mod model).** Players +
+  dynamic props in the server Jolt world; inter-entity collision. STATE-SYNC replication model
+  (server is final arbiter; client ownership is a prediction hint, not hand-off) per
+  `mp-networked-physics.md` — deterministic-lockstep physics rejected. Part of the P1
+  avatar/physics bump or an immediately-following one. Full physics (not kinematic).
+- **P3 — replication protocol (authoritative snapshots + delta + prediction + AOI).** Per
+  `mp-replication.md` + `mp-interest-management.md` + `mp-prediction-reconciliation.md`:
+  - **P3.0 (prerequisite): UDP transport** behind the transport seam — state over unreliable
+    UDP (seq/ack, most-recent-wins); keep the existing TCP for the reliable event channel
+    (join/leave, world edits, chat) + loopback tests. (We only have TCP today.)
+  - baseline + delta snapshots vs the client's last ACKED snapshot, bit-packed/quantized
+    (pos ~26-bit delta, smallest-three quaternion ~29 bits), snapshot @ 15–20 Hz decoupled from
+    the 30 Hz tick, priority accumulator under a fixed per-client byte budget;
+  - **AOI = a thin publish/subscribe layer over the EXISTING chunk index** (the multi-anchor
+    wanted-set IS each player's area of interest — do NOT build a second spatial structure),
+    distance-tiered update rates, hysteresis reused from LOD demotion;
+  - client predicts the LOCAL avatar only (replay unacked usercmds on correction, render-side
+    error smoothing), interpolates remote entities at ~100 ms behind. NO lag-compensation
+    rewrite / time-dilation-for-fairness in v1 (non-competitive — pure cost).
+  **GATED on owner confirming the pivot** (the large, weeks-scale leg).
+- **P4 — persistent server lifecycle (join/leave; Q2).** Connect = state baseline + snapshot
+  stream + avatar spawn; disconnect = avatar despawn + anchor removed; server runs continuously
+  independent of any single client (star-through-dedicated-server topology). Loopback + LAN first.
+- **P5 — scale hardening to 20+ (Q1).** Single authoritative process (partitioning seams
+  identified, not built — `mp-server-architecture.md`); AOI tuning; the **20-in-one-chunk
+  "group photo" hotspot load test** (top cross-brief risk) with a per-snapshot entity cap +
+  rate-tiering; adaptive-tick ("time dilation") as the graceful-degradation safety valve via the
+  clock's `dropped_time_seconds`. Confirms the estimated budgets (~11–14 kbps/client at 20,
+  20–32 players/core) on the quiet-machine baseline.
 
 ### Open confirmation for owner
 The pivot itself (retire peer-lockstep as the multiplayer transport; adopt authoritative
