@@ -1,5 +1,5 @@
 ﻿param(
-    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "AtmosphereAudio", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "ParticleEmitterDeterminism", "CloudShadow", "FoliageInstancing", "Precipitation", "TimeOfDaySweep", "WorldVisualSweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "WindFieldDeterminism", "AetherFieldDeterminism", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "StimulusChannelGate", "BiomeCoverage", "RiverPresence", "WaterfallVisual", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "IsolationLayer", "All")]
+    [ValidateSet("CodexOnly", "Panels", "Files", "Sections", "Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "AtmosphereAudio", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "ParticleEmitterDeterminism", "CloudShadow", "FoliageInstancing", "Precipitation", "TimeOfDaySweep", "WorldVisualSweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "ReplicationSmoke", "WindFieldDeterminism", "AetherFieldDeterminism", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "CreatureSlice", "StimulusChannelGate", "BiomeCoverage", "RiverPresence", "WaterfallVisual", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "IsolationLayer", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -4320,6 +4320,50 @@ function Test-HeadlessServerTick {
         $analysis.sub_hashes.terrain, $analysis.sub_hashes.mesh, $analysis.sub_hashes.water, $analysis.sub_hashes.entities, $analysis.sub_hashes.wind)
 }
 
+function Test-ReplicationSmoke {
+    # T-I6 P3.1c/d: live authoritative-server state replication. Drives the server's
+    # --replicate mode: boots N avatars + an in-process loopback ReplicationClient,
+    # broadcasts the avatar states each tick, and (P3.1d) the client CONTROLS one
+    # avatar via a +X usercmd. Asserts the client mirrors the server avatars (mm
+    # tolerance), an ack flowed back, and network input actually walked the avatar.
+    # Engine/transport-side -> world_hash untouched (reads the avatar list).
+    $serverExe = "build/$BuildPreset/bin/luminumbra_server_app.exe"
+    if (-not (Test-Path $serverExe)) {
+        throw "replication gate not yet built - missing $serverExe (cmake --build build/$BuildPreset)"
+    }
+
+    $artifactPath = "build/$BuildPreset/test-artifacts/server/replication-smoke.json"
+    if (Test-Path $artifactPath) {
+        Remove-Item $artifactPath
+    }
+
+    & $serverExe --replicate --avatars 4 --ticks 60 --artifact $artifactPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "replication smoke exited with code $LASTEXITCODE"
+    }
+
+    $analysis = Read-JsonArtifact $artifactPath "luminumbra.replication_smoke.v1"
+    Assert-ArtifactPassed $analysis "ReplicationSmoke"
+    if (-not $analysis.size_ok) {
+        throw "replication smoke: client entity count did not match the server avatars"
+    }
+    if (-not $analysis.ids_ok) {
+        throw "replication smoke: replicated entity ids did not match the server avatars"
+    }
+    if (-not $analysis.ack_flowed) {
+        throw "replication smoke: no ack flowed back to the server (acked_snapshot_seq=$($analysis.acked_snapshot_seq))"
+    }
+    if (-not $analysis.input_moved_avatar) {
+        throw "replication smoke: network input did not move the controlled avatar (dx=$($analysis.controlled_dx_m) m)"
+    }
+    if ([double]$analysis.max_position_error_m -ge 0.01) {
+        throw "replication smoke: replicated position error too large ($($analysis.max_position_error_m) m)"
+    }
+    Write-Host ("ReplicationSmoke gate passed: {0} avatars mirrored to client (seq={1}, acked={2}, max_pos_err={3} m); network input walked avatar {4} +{5} m" -f `
+        $analysis.avatar_count, $analysis.final_snapshot_seq, $analysis.acked_snapshot_seq, `
+        $analysis.max_position_error_m, $analysis.controlled_avatar, $analysis.controlled_dx_m)
+}
+
 function Test-AetherFieldDeterminism {
     # T-I6-A1: the Aetheric scalar field is a deterministic, hashed sim system.
     # Drives the server's --aether-bench mode: seed -> N AetherFieldSystem updates
@@ -5689,6 +5733,7 @@ switch ($Mode) {
     "FarLodHorizon" { Test-FarLodHorizon }
     "IsolationLayer" { Test-IsolationLayer }
     "HeadlessServerTick" { Test-HeadlessServerTick }
+    "ReplicationSmoke" { Test-ReplicationSmoke }
     "HeadlessServerTickHeavy" { Test-HeadlessServerTickHeavy }
     "WindFieldDeterminism" { Test-WindFieldDeterminism }
     "AetherFieldDeterminism" { Test-AetherFieldDeterminism }
