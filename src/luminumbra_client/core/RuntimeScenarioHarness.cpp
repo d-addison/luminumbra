@@ -199,6 +199,8 @@ RuntimeScenarioConfig ParseRuntimeScenarioConfig(int argc, char* argv[], const s
     // sane max so a typo can't spawn thousands of rigs.
     config.avatars = std::clamp(GetCommandLineIntOption(argc, argv, "--avatars", 0), 0, 32);
     config.replicated = HasCommandLineFlag(argc, argv, "--replicated");
+    config.wildlife = HasCommandLineFlag(argc, argv, "--wildlife");
+    if (config.wildlife && config.avatars < 2) config.avatars = 2; // animal + human
     config.readiness_timeout_seconds = GetCommandLineIntOption(argc, argv, "--readiness-timeout", config.readiness_timeout_seconds);
     config.horizon_radius = GetCommandLineIntOption(argc, argv, "--horizon-radius", config.horizon_radius);
     config.collision_radius = GetCommandLineIntOption(argc, argv, "--collision-radius", config.collision_radius);
