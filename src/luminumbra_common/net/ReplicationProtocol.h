@@ -55,18 +55,26 @@ struct UsercmdMsg {
     }
 };
 
-// One entity's replicated transform inside a snapshot (quantized).
+// One entity's replicated transform + class inside a snapshot (quantized).
+// T-I6 P6: type_id lets the client instantiate the right mesh/behaviour (player /
+// animal / NPC / projectile -- like a Quake3 eType / Source server-class index);
+// anim_state is the current clip enum and anim_phase its normalized time
+// (0..255 -> 0..1) -- NEVER joint data. All game-defined; the engine only carries them.
 struct ReplEntityState {
     std::uint32_t entity_id = 0;
     std::int32_t  px_mm = 0;
     std::int32_t  py_mm = 0;
     std::int32_t  pz_mm = 0;
     std::int16_t  yaw_mrad = 0;
-    std::uint8_t  flags = 0; // bit0 grounded, ... (game-defined)
+    std::uint8_t  flags = 0;       // bit0 grounded, bit1 owned/predicted, ... (game-defined)
+    std::uint16_t type_id = 0;     // archetype/class (0 = default/player avatar)
+    std::uint8_t  anim_state = 0;  // current clip enum (game-defined)
+    std::uint8_t  anim_phase = 0;  // normalized clip time, 0..255
 
     bool operator==(const ReplEntityState& o) const {
         return entity_id == o.entity_id && px_mm == o.px_mm && py_mm == o.py_mm &&
-               pz_mm == o.pz_mm && yaw_mrad == o.yaw_mrad && flags == o.flags;
+               pz_mm == o.pz_mm && yaw_mrad == o.yaw_mrad && flags == o.flags &&
+               type_id == o.type_id && anim_state == o.anim_state && anim_phase == o.anim_phase;
     }
 };
 
@@ -78,6 +86,11 @@ struct SnapshotMsg {
     std::uint32_t snapshot_seq = 0;        // monotonically increasing per receiver
     std::uint64_t acked_usercmd_tick = 0;  // newest usercmd the server has folded in (reconciliation)
     std::vector<ReplEntityState> entities;
+    // T-I6 P6: explicit RELIABLE despawn -- ids that LEFT this client's set (died /
+    // expired / left AOI). Full snapshots drop absent entities implicitly, but a
+    // transient (a spent arrow) needs an explicit removal so a lost update can't
+    // strand a ghost (Halo's "cosmetic one-shot events get lost" lesson).
+    std::vector<std::uint32_t> removed_ids;
 };
 
 // Client -> server acknowledgement: the newest snapshot the client has applied
