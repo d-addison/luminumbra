@@ -106,6 +106,19 @@ public:
     void destroy_buffers();
     void reset_shader();
 
+    // T-I6 #4: GPU grass scatter (compute). Compiles res/shaders/grass_scatter.comp
+    // and allocates the SSBOs. On any failure m_gpu_scatter stays false and the
+    // pass transparently uses the CPU rebuild loop (graceful degradation -- the
+    // working path is never lost). RENDER-ONLY.
+    void init_compute(const std::filesystem::path& root_path);
+    void destroy_compute();
+    bool gpu_scatter_active() const { return m_gpu_scatter; }
+
+    // --- GPU scatter tuning (mirrors the CPU placement constants). ---
+    static constexpr int kSurfaceGrid = 8;                 // cells/side
+    static constexpr int kSurfaceGridVerts = kSurfaceGrid + 1; // 9 -> 81 samples/chunk
+    static constexpr std::size_t kWordsPerBlade = 9;       // 36-byte record = 9 u32
+
     const std::unique_ptr<Shader>& shader() const { return m_shader; }
     u32 vao() const { return m_vao; }
     u32 instance_buffer(std::size_t ring) const { return m_instance_vbo[ring % kRingFrames]; }
@@ -201,9 +214,27 @@ public:
 
 private:
     void map_instances_for_frame();
+    // T-I6 #4: GPU scatter rebuild (dispatch compute -> SSBO, read back into
+    // m_instances for the gate/cache surface). Returns false if it could not run
+    // (caller then falls back to the CPU loop).
+    bool rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
+                               SurfaceQuery query, void* query_ctx,
+                               const glm::vec3& camera_pos);
 
     std::unique_ptr<Shader> m_shader;
     u32 m_vao = 0;
+
+    // GPU scatter resources (T-I6 #4). m_gpu_scatter gates the whole path; when
+    // false the CPU loop runs. m_gpu_active is true once a GPU build populated
+    // m_blade_ssbo this session (execute() then draws from it directly).
+    u32 m_compute_prog = 0;
+    u32 m_chunk_ssbo = 0;
+    u32 m_surf_ssbo = 0;
+    u32 m_blade_ssbo = 0;
+    u32 m_count_ssbo = 0;
+    u32 m_arch_ssbo = 0;
+    bool m_gpu_scatter = false;
+    bool m_gpu_active = false;
     std::array<u32, kRingFrames> m_instance_vbo{};
     std::array<InstanceRecord*, kRingFrames> m_instance_ptr{};
     std::size_t m_ring_cursor = 0;
