@@ -36,6 +36,14 @@ public:
     void AddClient(std::uint32_t client_id, ILockstepTransport* transport);
     void RemoveClient(std::uint32_t client_id);
     [[nodiscard]] std::size_t client_count() const { return m_clients.size(); }
+    [[nodiscard]] bool has_client(std::uint32_t client_id) const { return m_clients.count(client_id) != 0; }
+
+    // T-I6 P4: persistent-server lifecycle. Removes any client whose transport peer
+    // has cleanly disconnected (IsPeerConnected()==false) and returns the removed
+    // client ids, so the caller can despawn those players' avatars. Call after
+    // PumpInbound (so a peer's queued frames are drained before it's pruned).
+    // Surviving clients are untouched. Drain-then-prune = a clean leave, not a desync.
+    std::vector<std::uint32_t> PruneDisconnectedClients();
 
     // T-I6 P3.2: area-of-interest radius (mm). When > 0, each client's snapshot is
     // SCOPED to entities within this radius of THAT client's own avatar (the entity

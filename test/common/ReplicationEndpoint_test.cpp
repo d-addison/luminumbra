@@ -290,6 +290,59 @@ TEST(LocalPlayerPrediction, FullAckClearsBufferAndMatchesAuthoritative) {
     EXPECT_NEAR(pred.predicted().z, 0.4f, 1e-4f);
 }
 
+// P4: persistent-server join/leave lifecycle.
+TEST(ReplicationLifecycle, JoinLeaveDoesNotDisturbSurvivors) {
+    auto pa = MakeLoopbackPair();
+    auto pb = MakeLoopbackPair();
+    ReplicationServer server;
+    server.AddClient(1, pa.first.get());
+    server.AddClient(2, pb.first.get());
+    ReplicationClient client_a(1, pa.second.get());
+    std::vector<ReplEntityState> entities = {MakeEntity(1, 0, 0, 0)};
+
+    server.BroadcastSnapshot(10, entities);
+    client_a.PumpInbound();
+    EXPECT_EQ(client_a.snapshot().snapshot_seq, 1u);
+    EXPECT_EQ(server.client_count(), 2u);
+
+    // Client 2 LEAVES (its transport end closes).
+    pb.second->Close();
+    server.PumpInbound();                       // drain anything pending
+    auto removed = server.PruneDisconnectedClients();
+    ASSERT_EQ(removed.size(), 1u);
+    EXPECT_EQ(removed[0], 2u);
+    EXPECT_EQ(server.client_count(), 1u);
+    EXPECT_FALSE(server.has_client(2));
+
+    // Survivor (client 1) is unaffected -- keeps receiving, seq advances.
+    server.BroadcastSnapshot(20, entities);
+    client_a.PumpInbound();
+    EXPECT_EQ(client_a.snapshot().snapshot_seq, 2u);
+
+    // A NEW client JOINS mid-session and gets its own fresh seq (baseline).
+    auto pc = MakeLoopbackPair();
+    server.AddClient(3, pc.first.get());
+    ReplicationClient client_c(3, pc.second.get());
+    server.BroadcastSnapshot(30, entities);
+    client_a.PumpInbound();
+    client_c.PumpInbound();
+    EXPECT_EQ(client_a.snapshot().snapshot_seq, 3u); // survivor continues
+    ASSERT_TRUE(client_c.has_snapshot());
+    EXPECT_EQ(client_c.snapshot().snapshot_seq, 1u); // joiner starts fresh
+}
+
+TEST(ReplicationLifecycle, ConnectedClientNotPruned) {
+    auto pa = MakeLoopbackPair();
+    ReplicationServer server;
+    server.AddClient(1, pa.first.get());
+    ReplicationClient client_a(1, pa.second.get());
+    server.BroadcastSnapshot(1, {MakeEntity(1, 0, 0, 0)});
+    client_a.PumpInbound(); // acks back -> still connected
+    server.PumpInbound();
+    EXPECT_TRUE(server.PruneDisconnectedClients().empty());
+    EXPECT_EQ(server.client_count(), 1u);
+}
+
 TEST(ReplicationEndpoint, StaleSnapshotDoesNotRegress) {
     auto pair = MakeLoopbackPair();
     ReplicationServer server;
