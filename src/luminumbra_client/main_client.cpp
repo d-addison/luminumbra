@@ -2879,6 +2879,16 @@ int main(int argc, char* argv[]) {
                             root_dir, std::max(1, scenario_config.avatars));
                     }
                     ApplySkinnedMeshVisualCamera(g_camera.get(), skinned_mesh_visual_target);
+                    // T-I6 P3.1d video: for the SHOWCASE row (avatars>=2), synchronously
+                    // pull the surface around the camera fully ready each frame (same
+                    // pattern as LodGround) so the world is PROPERLY LOADED before any
+                    // frame is captured -- no streaming/meshing pop-in in the clip.
+                    if (scenario_config.avatars >= 2 &&
+                        gameSession->GetWorldSystem() && gameSession->GetPhysicsSystem()) {
+                        gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
+                            g_camera->Position, gameSession->GetPhysicsSystem(),
+                            scenario_config.horizon_radius, scenario_config.collision_radius);
+                    }
                 } else if (scenario_config.creature_slice_smoke() && scenario_ready && g_camera) {
                     // T-I3-18: spawn the creature scene once, hold the fixed
                     // photographic framing, run the game glue every frame and
@@ -4366,8 +4376,15 @@ int main(int argc, char* argv[]) {
                             scenario_ready && skinned_mesh_visual_target.spawned &&
                             showcase_video_frame < 120) {
                             const double vnow = std::chrono::duration<double>(now - scenario_play_started_at).count();
+                            // WARM-UP: don't capture the first ~3 s -- let async far-LOD,
+                            // meshing and aerial-perspective settle so the world is fully
+                            // loaded in every captured frame (owner: proper loading before
+                            // capture). The per-frame EnsureSurfaceReadyNear above pulls the
+                            // near/mid surface ready; this covers the async far field.
+                            constexpr double kShowcaseWarmupS = 3.0;
+                            const bool warmed_up = vnow >= kShowcaseWarmupS;
                             const bool interval_ok = showcase_video_last_s < 0.0 || (vnow - showcase_video_last_s) >= 0.05;
-                            if (interval_ok) {
+                            if (warmed_up && interval_ok) {
                                 // Walk every avatar gently TOWARD the camera (+Z) so the row
                                 // strolls forward and stays framed (idle clip still plays).
                                 auto& reg = gameSession->GetRegistry();
