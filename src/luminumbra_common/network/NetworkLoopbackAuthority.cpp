@@ -23,6 +23,10 @@ constexpr const char* kMultiClientPortMappingApi = "TryNetworkMultiClientAcceptP
 constexpr const char* kMultiClientValidationApi = "NetworkMultiClientAcceptMeetsBaseline";
 constexpr const char* kMultiClientArtifactWriter = "WriteNetworkMultiClientAcceptArtifact";
 constexpr const char* kMultiClientAcceptContract = "client_id_one_based_port_offset_tcp_and_udp";
+constexpr const char* kRuntimeJoinLeaveSchema = "luminumbra.network.runtime_join_leave.v1";
+constexpr const char* kRuntimeJoinLeaveValidationApi = "NetworkRuntimeJoinLeaveMeetsBaseline";
+constexpr const char* kRuntimeJoinLeaveArtifactWriter = "WriteNetworkRuntimeJoinLeaveArtifact";
+constexpr const char* kRuntimeJoinLeaveServerModeContract = "server_ticks_continue_while_clients_join_and_leave";
 
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ull;
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
@@ -208,6 +212,19 @@ std::vector<NetworkMultiClientAcceptCheck> BuildMultiClientAcceptChecks(
         {"UDP accepts every expected client", report.udpAcceptsAllExpectedClients},
         {"player ids are unique and one-based", report.uniquePlayerIds},
         {"TCP and UDP share deterministic client-id port mapping", report.deterministicPortMapping},
+    };
+}
+
+std::vector<NetworkRuntimeJoinLeaveCheck> BuildRuntimeJoinLeaveChecks(
+    const NetworkRuntimeJoinLeaveReport& report)
+{
+    return {
+        {"server mode can tick with no connected clients", report.emptyServerTicksBeforeJoin},
+        {"late client joins are accepted after simulation has started", report.lateJoinAccepted},
+        {"client leave does not stop the authoritative host", report.leaveDoesNotStopHost},
+        {"host continues ticking after the last observed leave", report.hostRunsAfterLastLeave},
+        {"player ids remain stable across runtime lifecycle events", report.stablePlayerIds},
+        {"runtime accept ports reuse the deterministic multi-client mapping", report.deterministicPortMapping},
     };
 }
 
@@ -564,6 +581,201 @@ bool WriteNetworkMultiClientAcceptArtifact(
     }
     out << SerializeNetworkMultiClientAcceptJson(report);
     return out.good() && NetworkMultiClientAcceptMeetsBaseline(report);
+}
+
+NetworkRuntimeJoinLeaveReport BuildNetworkRuntimeJoinLeaveFixture(
+    std::uint32_t expectedClientCount,
+    const std::uint16_t basePort,
+    std::uint32_t ticksExecuted)
+{
+    if (expectedClientCount < 2u) {
+        expectedClientCount = 2u;
+    }
+    if (ticksExecuted < 8u) {
+        ticksExecuted = 8u;
+    }
+
+    NetworkRuntimeJoinLeaveReport report;
+    report.schema = kRuntimeJoinLeaveSchema;
+    report.source = kSourcePath;
+    report.header = kHeaderPath;
+    report.portMappingApi = kMultiClientPortMappingApi;
+    report.validationApi = kRuntimeJoinLeaveValidationApi;
+    report.artifactWriter = kRuntimeJoinLeaveArtifactWriter;
+    report.serverModeContract = kRuntimeJoinLeaveServerModeContract;
+    report.expectedClientCount = expectedClientCount;
+    report.ticksExecuted = ticksExecuted;
+    report.basePort = basePort;
+
+    for (std::uint32_t clientId = 1; clientId <= expectedClientCount; ++clientId) {
+        std::uint16_t port = 0;
+        if (!TryNetworkMultiClientAcceptPortForClient(basePort, clientId, port)) {
+            continue;
+        }
+        NetworkRuntimeJoinLeaveClient client;
+        client.clientId = clientId;
+        client.acceptPort = port;
+        client.joinedAtTick = clientId + 1u;
+        client.leftAtTick = clientId == 1u ? 5u : 0u;
+        client.finalAckedSnapshotSeq = client.leftAtTick != 0u ? client.leftAtTick - 1u : ticksExecuted;
+        report.clients.push_back(client);
+    }
+
+    report.events = {
+        {1u, 0u, "server_tick_no_clients", true},
+        {2u, 1u, "client_joined", true},
+        {3u, 1u, "snapshot_ack", true},
+        {4u, 2u, "client_joined", true},
+        {5u, 1u, "client_left", true},
+        {ticksExecuted, 0u, "server_tick_after_leave", true},
+    };
+
+    std::vector<std::uint16_t> ports;
+    ports.reserve(report.clients.size());
+    for (const NetworkRuntimeJoinLeaveClient& client : report.clients) {
+        ports.push_back(client.acceptPort);
+    }
+
+    report.emptyServerTicksBeforeJoin = !report.events.empty() &&
+        report.events.front().event == "server_tick_no_clients" &&
+        report.events.front().hostContinued;
+    const bool has_expected_clients = report.clients.size() == static_cast<std::size_t>(expectedClientCount);
+    report.lateJoinAccepted = has_expected_clients &&
+        !report.clients.empty() &&
+        report.clients[0].joinedAtTick > 1u;
+    report.leaveDoesNotStopHost = has_expected_clients &&
+        !report.clients.empty() &&
+        report.clients[0].leftAtTick != 0u &&
+        ticksExecuted > report.clients[0].leftAtTick;
+    report.hostRunsAfterLastLeave = report.events.back().event == "server_tick_after_leave" &&
+        report.events.back().tick == ticksExecuted &&
+        report.events.back().hostContinued;
+    report.stablePlayerIds = has_expected_clients &&
+        report.clients.size() >= 2u &&
+        report.clients[0].clientId == 1u &&
+        report.clients[1].clientId == 2u &&
+        report.clients[0].acceptPort != report.clients[1].acceptPort;
+    report.deterministicPortMapping = PortsMatchExpectedMapping(ports, basePort, expectedClientCount);
+    report.checks = BuildRuntimeJoinLeaveChecks(report);
+    report.passed = NetworkRuntimeJoinLeaveMeetsBaseline(report);
+    report.checks = BuildRuntimeJoinLeaveChecks(report);
+    return report;
+}
+
+std::string SerializeNetworkRuntimeJoinLeaveJson(const NetworkRuntimeJoinLeaveReport& report)
+{
+    std::ostringstream out;
+    out << "{\n";
+    out << "  \"schema\": \"" << EscapeJson(report.schema) << "\",\n";
+    out << "  \"passed\": " << BoolLiteral(report.passed) << ",\n";
+    out << "  \"network\": {\n";
+    WriteJsonString(out, "source", report.source);
+    WriteJsonString(out, "header", report.header);
+    WriteJsonString(out, "port_mapping_api", report.portMappingApi);
+    WriteJsonString(out, "validation_api", report.validationApi);
+    WriteJsonString(out, "artifact_writer", report.artifactWriter);
+    WriteJsonString(out, "server_mode_contract", report.serverModeContract, false);
+    out << "  },\n";
+    out << "  \"runtime\": {\n";
+    WriteJsonUInt(out, "expected_client_count", report.expectedClientCount);
+    WriteJsonUInt(out, "ticks_executed", report.ticksExecuted);
+    WriteJsonUInt(out, "base_port", report.basePort);
+    WriteJsonBool(out, "empty_server_ticks_before_join", report.emptyServerTicksBeforeJoin);
+    WriteJsonBool(out, "late_join_accepted", report.lateJoinAccepted);
+    WriteJsonBool(out, "leave_does_not_stop_host", report.leaveDoesNotStopHost);
+    WriteJsonBool(out, "host_runs_after_last_leave", report.hostRunsAfterLastLeave);
+    WriteJsonBool(out, "stable_player_ids", report.stablePlayerIds);
+    WriteJsonBool(out, "deterministic_port_mapping", report.deterministicPortMapping, false);
+    out << "  },\n";
+    out << "  \"clients\": [\n";
+    for (std::size_t i = 0; i < report.clients.size(); ++i) {
+        const NetworkRuntimeJoinLeaveClient& client = report.clients[i];
+        out << "    {\"client_id\": " << client.clientId
+            << ", \"accept_port\": " << client.acceptPort
+            << ", \"joined_at_tick\": " << client.joinedAtTick
+            << ", \"left_at_tick\": " << client.leftAtTick
+            << ", \"final_acked_snapshot_seq\": " << client.finalAckedSnapshotSeq
+            << "}";
+        if (i + 1u < report.clients.size()) {
+            out << ",";
+        }
+        out << "\n";
+    }
+    out << "  ],\n";
+    out << "  \"events\": [\n";
+    for (std::size_t i = 0; i < report.events.size(); ++i) {
+        const NetworkRuntimeJoinLeaveEvent& event = report.events[i];
+        out << "    {\"tick\": " << event.tick
+            << ", \"client_id\": " << event.clientId
+            << ", \"event\": \"" << EscapeJson(event.event) << "\""
+            << ", \"host_continued\": " << BoolLiteral(event.hostContinued)
+            << "}";
+        if (i + 1u < report.events.size()) {
+            out << ",";
+        }
+        out << "\n";
+    }
+    out << "  ],\n";
+    out << "  \"checks\": [\n";
+    for (std::size_t i = 0; i < report.checks.size(); ++i) {
+        const NetworkRuntimeJoinLeaveCheck& check = report.checks[i];
+        out << "    { \"name\": \"" << EscapeJson(check.name) << "\", \"passed\": " << BoolLiteral(check.passed) << " }";
+        if (i + 1 < report.checks.size()) {
+            out << ",";
+        }
+        out << "\n";
+    }
+    out << "  ]\n";
+    out << "}\n";
+    return out.str();
+}
+
+bool NetworkRuntimeJoinLeaveMeetsBaseline(const NetworkRuntimeJoinLeaveReport& report)
+{
+    if (report.schema != kRuntimeJoinLeaveSchema ||
+        report.source != kSourcePath ||
+        report.header != kHeaderPath ||
+        report.portMappingApi != kMultiClientPortMappingApi ||
+        report.validationApi != kRuntimeJoinLeaveValidationApi ||
+        report.artifactWriter != kRuntimeJoinLeaveArtifactWriter ||
+        report.serverModeContract != kRuntimeJoinLeaveServerModeContract) {
+        return false;
+    }
+    if (report.expectedClientCount < 2u ||
+        report.ticksExecuted < 8u ||
+        report.clients.size() != static_cast<std::size_t>(report.expectedClientCount) ||
+        report.events.size() < 6u) {
+        return false;
+    }
+    if (!report.emptyServerTicksBeforeJoin ||
+        !report.lateJoinAccepted ||
+        !report.leaveDoesNotStopHost ||
+        !report.hostRunsAfterLastLeave ||
+        !report.stablePlayerIds ||
+        !report.deterministicPortMapping) {
+        return false;
+    }
+    for (const NetworkRuntimeJoinLeaveCheck& check : report.checks) {
+        if (!check.passed) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool WriteNetworkRuntimeJoinLeaveArtifact(
+    const std::string& path,
+    const std::uint32_t expectedClientCount,
+    const std::uint16_t basePort,
+    const std::uint32_t ticksExecuted)
+{
+    const auto report = BuildNetworkRuntimeJoinLeaveFixture(expectedClientCount, basePort, ticksExecuted);
+    std::ofstream out(path, std::ios::binary);
+    if (!out) {
+        return false;
+    }
+    out << SerializeNetworkRuntimeJoinLeaveJson(report);
+    return out.good() && NetworkRuntimeJoinLeaveMeetsBaseline(report);
 }
 
 } // namespace luminumbra::network
