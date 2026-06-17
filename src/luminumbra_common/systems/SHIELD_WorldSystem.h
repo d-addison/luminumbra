@@ -305,6 +305,13 @@ public:
     // sdf_data empty and skipping the 3D cave-noise grid entirely. All
     // existing callers default to full generation.
     void GenerateChunkData(::Luminumbra::Chunk& chunk, int target_step = 1) const;
+    // T-I6 Wave C: stream around MULTIPLE anchors (multi-player / multi-camera). The
+    // wanted-set is the UNION of each anchor's disc; the shared active-chunk budget and
+    // eviction use distance-to-CLOSEST-anchor. The single-anchor overload below forwards
+    // to this, so existing callers + single-anchor behaviour are byte-identical (one
+    // anchor -> one disc, identical eviction). Streaming sets RESIDENCY only, not chunk
+    // content, so world_hash is unaffected for a given anchor set.
+    void update(entt::registry& registry, const std::vector<Vec3>& anchor_positions, PhysicsSystem* physics_system);
     void update(entt::registry& registry, const Vec3& camera_position, PhysicsSystem* physics_system);
     std::vector<::Luminumbra::Chunk*> get_renderable_chunks();
     float get_density_at(const Vec3& world_pos) const;
@@ -543,7 +550,7 @@ private:
     std::unordered_map<u64, ColumnSurfaceSpan> m_column_surface_span_cache;
 
     // --- Helper Functions ---
-    void update_chunk_activation(const Vec3& player_pos, PhysicsSystem* physics_system);
+    void update_chunk_activation(const std::vector<Vec3>& anchors, PhysicsSystem* physics_system);
     // Signature updated to use shared_ptr
     struct MeshingWorkItem {
         std::shared_ptr<::Luminumbra::Chunk> chunk;
