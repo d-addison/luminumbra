@@ -4387,12 +4387,19 @@ int main(int argc, char* argv[]) {
                             if (warmed_up && interval_ok) {
                                 // Walk every avatar gently TOWARD the camera (+Z) so the row
                                 // strolls forward and stays framed (idle clip still plays).
+                                // These are render-only entities (no physics body), so RE-GROUND
+                                // Y to the terrain at each new XZ every step -- otherwise they
+                                // sink into / float over rising/falling ground (owner: avatars
+                                // sinking into the ground on the mountains preset).
                                 auto& reg = gameSession->GetRegistry();
+                                auto* world_sys = gameSession->GetWorldSystem();
                                 auto view = reg.view<Luminumbra::Components::TransformComponent,
                                                      Luminumbra::Components::SkinnedMeshComponent>();
                                 const float step_m = 0.05f; // ~1 m/s at 20 dumps/s
                                 for (auto e : view) {
-                                    view.get<Luminumbra::Components::TransformComponent>(e).position.z += step_m;
+                                    auto& pos = view.get<Luminumbra::Components::TransformComponent>(e).position;
+                                    pos.z += step_m;
+                                    if (world_sys) pos.y = world_sys->GetTerrainHeightAt(pos.x, pos.z);
                                 }
                                 int vw = 0, vh = 0;
                                 glfwGetFramebufferSize(window, &vw, &vh);
