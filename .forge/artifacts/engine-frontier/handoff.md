@@ -52,10 +52,20 @@ Free-asset sources for future needs (all CC0, repo-safe): ambientCG (ground/rock
 terrain source), Poly Haven (PBR + HDRIs + models), Quaternius (low-poly veg/props),
 Kenney (stylized kits).
 
-**Next (iter-6 remainder / iter-7):** Wave B clouds/aurora tier-2 (sky/water already
-read well — assessed good); Wave C multi-anchor streaming (engine-scale, not photogenic);
-Wave D closeout (full gate sweep + Endurance300 + forge verify); SHIELD-RT far-field
-resume per `shieldrt-PARKED-resume-spec.md`.
+**Wave C — multi-anchor chunk streaming FOUNDATION landed** (`0113a60` + test `208eb7c`):
+`SHIELD_WorldSystem::update`/`update_chunk_activation` now take a vector of anchors
+(union wanted-set, evict-if-near-ANY-anchor, closest-anchor LOD/meshing, shared 8192
+budget); a `Vec3` forwarding overload keeps every caller + single-anchor behaviour
+byte-identical (verified: HeadlessServerTick world_hash unchanged + replay-matched,
+PlayerView all presets 0-void, ctest). New `MultiAnchorStreaming` gtests exercise the
+2-anchor union + a non-vacuous single-anchor contrast (default lane). Streaming sets
+residency only -> world_hash unaffected. **Follow-up:** a multi-anchor DRIVER
+(ServerWorldRunner feeding N per-player anchors — needs the multiplayer/lockstep session
+to carry N players) + per-anchor budgets if union pressure warrants.
+
+**Next (iter-6 remainder / iter-7):** Wave C driver (above); Wave B clouds/aurora tier-2
+(sky/water already read well — assessed good); Wave D closeout (full gate sweep +
+Endurance300 + forge verify); SHIELD-RT far-field resume per `shieldrt-PARKED-resume-spec.md`.
 
 ---
 
