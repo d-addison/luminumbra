@@ -1390,6 +1390,12 @@ std::vector<IVec3> SHIELD_WorldSystem::GetInitialChunkLoadList(const Vec3& cente
 }
 
 void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_position, PhysicsSystem* physics_system) {
+    // Single-anchor convenience overload — forwards to the multi-anchor path with one
+    // anchor (byte-identical streaming/world_hash to the historical single-anchor code).
+    update(registry, std::vector<Vec3>{camera_position}, physics_system);
+}
+
+void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3>& anchor_positions, PhysicsSystem* physics_system) {
     clear_completed_job_handle(m_streaming_state.generation_job_handle);
     process_completed_meshing_jobs();
 
@@ -1439,7 +1445,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
     // Decouple the expensive chunk activation/deactivation logic from the frame rate.
     m_update_tick_counter++;
     if (m_update_tick_counter >= STREAMING_ACTIVATION_INTERVAL_FRAMES) {
-        update_chunk_activation(camera_position, physics_system);
+        update_chunk_activation(anchor_positions, physics_system);
         m_update_tick_counter = 0;
     }
 
@@ -1526,7 +1532,21 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
         if (pending_lod >= 0) {
             continue;
         }
-        
+
+        // Closest anchor to this chunk (multi-anchor LOD: the finest detail any anchor
+        // demands wins). One anchor -> that anchor, identical to the historical
+        // camera_position.
+        Vec3 closest_anchor = anchor_positions.empty() ? Vec3(0.0f) : anchor_positions[0];
+        if (anchor_positions.size() > 1) {
+            const IVec3 lod_chunk = chunk_ptr->get_coords();
+            float best = 1e30f;
+            for (const Vec3& a : anchor_positions) {
+                const IVec3 d = lod_chunk - world_to_chunk_coords(a);
+                const float ds = static_cast<float>(horizontal_distance_sq(d.x, d.z) + d.y * d.y);
+                if (ds < best) { best = ds; closest_anchor = a; }
+            }
+        }
+
         if (state == Luminumbra::ChunkState::Idle) {
             needs_meshing = true;
         } else if (state == Luminumbra::ChunkState::Ready) {
@@ -1534,7 +1554,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
             // T-I3-19: pass the meshed LOD so demotions go through the
             // asymmetric hysteresis band (promote at D, demote at D + margin).
             required_lod = get_required_lod_for_chunk(
-                chunk_ptr->get_coords(), chunk_center, camera_position,
+                chunk_ptr->get_coords(), chunk_center, closest_anchor,
                 chunk_ptr->current_lod.load());
 
             if (required_lod != chunk_ptr->current_lod.load()) {
@@ -1565,7 +1585,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
                 // the raw band assignment; a previously meshed chunk that
                 // re-enters here keeps the same hysteresis as the Ready path.
                 required_lod = get_required_lod_for_chunk(
-                    chunk_ptr->get_coords(), chunk_center, camera_position,
+                    chunk_ptr->get_coords(), chunk_center, closest_anchor,
                     chunk_ptr->current_lod.load());
             }
             // The column-surface cache samples the same chunk positions, so
@@ -1580,8 +1600,15 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
             const int vertical_surface_distance = chunk_y > span.max_y
                 ? chunk_y - span.max_y
                 : (chunk_y < span.min_y ? span.min_y - chunk_y : 0);
-            const IVec3 delta = chunk_ptr->get_coords() - world_to_chunk_coords(camera_position);
-            const float distance_sq = static_cast<float>(horizontal_distance_sq(delta.x, delta.z) + delta.y * delta.y);
+            // Meshing priority by distance to the CLOSEST anchor (multi-anchor). One
+            // anchor -> identical to the historical camera-relative distance.
+            const IVec3 mc_coords = chunk_ptr->get_coords();
+            float distance_sq = 1e30f;
+            for (const Vec3& a : anchor_positions) {
+                const IVec3 delta = mc_coords - world_to_chunk_coords(a);
+                distance_sq = std::min(distance_sq,
+                    static_cast<float>(horizontal_distance_sq(delta.x, delta.z) + delta.y * delta.y));
+            }
             meshing_candidates.push_back({
                 chunk_ptr,
                 required_lod,
@@ -1747,8 +1774,18 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
     );
 }
 
-void SHIELD_WorldSystem::update_chunk_activation(const Vec3& player_pos, PhysicsSystem* physics_system) {
-    const IVec3 camera_chunk = world_to_chunk_coords(player_pos);
+void SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchors, PhysicsSystem* physics_system) {
+    if (anchors.empty()) {
+        return;  // no anchors -> nothing to stream around (caller guarantees >= 1 in practice)
+    }
+    // Per-anchor chunk coordinates (the wanted-set is the UNION of each anchor's disc;
+    // eviction below keeps a chunk if it is in range of ANY anchor). One anchor ->
+    // identical to the historical single-anchor path.
+    std::vector<IVec3> camera_chunks;
+    camera_chunks.reserve(anchors.size());
+    for (const Vec3& a : anchors) {
+        camera_chunks.push_back(world_to_chunk_coords(a));
+    }
     struct GenerationCandidate {
         IVec3 coords;
         bool surface = false;
@@ -1777,7 +1814,7 @@ void SHIELD_WorldSystem::update_chunk_activation(const Vec3& player_pos, Physics
     std::unordered_set<ChunkID> seen_candidate_ids;
     seen_candidate_ids.reserve(to_create.capacity() * 2u);
 
-    auto add_candidate = [&](const IVec3& coords, bool surface, int ring_distance, int horizontal_dist2, int vertical_rank) {
+    auto add_candidate = [&](const IVec3& coords, bool surface, int ring_distance, int horizontal_dist2, int vertical_rank, const Vec3& anchor_pos) {
         // NOTE (T-I3-2): the active-chunk budget is no longer applied here.
         // Enforcing it during enumeration capped candidates in row-major scan
         // order, so when the wanted set exceeded the budget (mountains preset
@@ -1798,13 +1835,20 @@ void SHIELD_WorldSystem::update_chunk_activation(const Vec3& player_pos, Physics
         // 3D cave grid. Promotion to LOD0 backfills the full SDF via the
         // meshing dispatch, so a conservative step here is only a perf cost.
         const Vec3 chunk_center = (Vec3(coords) + 0.5f) * Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
-        const int required_lod = get_required_lod_for_chunk(coords, chunk_center, player_pos);
+        const int required_lod = get_required_lod_for_chunk(coords, chunk_center, anchor_pos);
         const int target_step = get_lod_step_for_level(required_lod);
 
         to_create.push_back({coords, surface, ring_distance, horizontal_dist2, vertical_rank, target_step});
     };
 
-    for (int dz = -target_radius; dz <= target_radius; ++dz) {
+    // UNION the wanted-set across every anchor. seen_candidate_ids (in add_candidate)
+    // dedupes a chunk reached from multiple anchors, so the first anchor to reach it
+    // wins its priority metrics; a chunk wanted by ANY anchor is enumerated. One anchor
+    // -> the historical single-disc scan, unchanged.
+    for (std::size_t ai = 0; ai < anchors.size(); ++ai) {
+      const IVec3 camera_chunk = camera_chunks[ai];
+      const Vec3& anchor_pos = anchors[ai];
+      for (int dz = -target_radius; dz <= target_radius; ++dz) {
         for (int dx = -target_radius; dx <= target_radius; ++dx) {
             const int horizontal_dist2 = horizontal_distance_sq(dx, dz);
             if (horizontal_dist2 > target_radius * target_radius) {
@@ -1837,18 +1881,20 @@ void SHIELD_WorldSystem::update_chunk_activation(const Vec3& player_pos, Physics
                     true,
                     ring_distance,
                     horizontal_dist2,
-                    std::abs(y - span.center_y)
+                    std::abs(y - span.center_y),
+                    anchor_pos
                 );
             }
 
             if (ring_distance <= STREAMING_NEAR_VERTICAL_STACK_RADIUS) {
-                add_candidate(IVec3(chunk_x, span.min_y - 1, chunk_z), false, ring_distance, horizontal_dist2, 1);
-                add_candidate(IVec3(chunk_x, span.max_y + 1, chunk_z), false, ring_distance, horizontal_dist2, 1);
+                add_candidate(IVec3(chunk_x, span.min_y - 1, chunk_z), false, ring_distance, horizontal_dist2, 1, anchor_pos);
+                add_candidate(IVec3(chunk_x, span.max_y + 1, chunk_z), false, ring_distance, horizontal_dist2, 1, anchor_pos);
             } else if (ring_distance <= STREAMING_MID_VERTICAL_STACK_RADIUS) {
-                add_candidate(IVec3(chunk_x, span.min_y - 1, chunk_z), false, ring_distance, horizontal_dist2, 2);
-                add_candidate(IVec3(chunk_x, span.max_y + 1, chunk_z), false, ring_distance, horizontal_dist2, 2);
+                add_candidate(IVec3(chunk_x, span.min_y - 1, chunk_z), false, ring_distance, horizontal_dist2, 2, anchor_pos);
+                add_candidate(IVec3(chunk_x, span.max_y + 1, chunk_z), false, ring_distance, horizontal_dist2, 2, anchor_pos);
             }
         }
+      }
     }
 
     std::sort(to_create.begin(), to_create.end(), [](const GenerationCandidate& a, const GenerationCandidate& b) {
@@ -1923,15 +1969,30 @@ void SHIELD_WorldSystem::update_chunk_activation(const Vec3& player_pos, Physics
 
     for (const auto& [id, chunk_ptr] : m_streaming_state.chunks) {
         const IVec3 coords = chunk_ptr->get_coords();
-        const IVec3 d = coords - camera_chunk;
-        if (std::abs(d.x) > UNLOAD_DISTANCE_XZ || std::abs(d.z) > UNLOAD_DISTANCE_XZ) {
-            to_unload.push_back(id);
+        // Multi-anchor range test: keep the chunk if it is in full range of ANY anchor
+        // (XZ within the hysteresis disc AND vertically within that anchor's band). One
+        // anchor -> identical to the historical camera-relative test.
+        bool xz_in_range_any = false;
+        bool vert_in_band_any = false;
+        for (const IVec3& cc : camera_chunks) {
+            const IVec3 d = coords - cc;
+            if (std::abs(d.x) > UNLOAD_DISTANCE_XZ || std::abs(d.z) > UNLOAD_DISTANCE_XZ) {
+                continue;  // outside this anchor's XZ disc
+            }
+            xz_in_range_any = true;
+            if (d.y <= UNLOAD_DISTANCE_UP && d.y >= -UNLOAD_DISTANCE_DOWN) {
+                vert_in_band_any = true;
+                break;
+            }
+        }
+        if (vert_in_band_any) {
+            continue;  // in full range of some anchor
+        }
+        if (!xz_in_range_any) {
+            to_unload.push_back(id);  // XZ-far from every anchor
             continue;
         }
-
-        if (d.y <= UNLOAD_DISTANCE_UP && d.y >= -UNLOAD_DISTANCE_DOWN) {
-            continue;
-        }
+        // XZ in range of some anchor but vertically outside all bands -> surface-band test.
 
         // Vertical-unload exemption (T-I3-2): a chunk inside its column's
         // surface span (+-1 stack margin) holds the terrain isosurface the
