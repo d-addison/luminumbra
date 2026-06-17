@@ -5,6 +5,7 @@
 // a drop-in for LoopbackTransport later).
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <memory>
 #include <vector>
 
@@ -136,6 +137,59 @@ TEST(ReplicationEndpoint, ServerAvatarsReplicateToClient) {
         EXPECT_NEAR(ReplDequantPos(snap.entities[i].pz_mm), avatars[i].position.z, 0.001f) << "avatar " << i;
         EXPECT_NEAR(ReplDequantAngle(snap.entities[i].yaw_mrad), avatars[i].facing, 0.001f) << "avatar " << i;
     }
+}
+
+// P3.2: area-of-interest scoping. With a radius set, each client receives only
+// entities near its OWN avatar (+ always its own), so a crowded world does not
+// broadcast everyone to everyone.
+TEST(ReplicationEndpoint, AoiScopesSnapshotPerClient) {
+    auto pair_a = MakeLoopbackPair();
+    auto pair_b = MakeLoopbackPair();
+    ReplicationServer server;
+    server.AddClient(1, pair_a.first.get());
+    server.AddClient(2, pair_b.first.get());
+    ReplicationClient client_a(1, pair_a.second.get());
+    ReplicationClient client_b(2, pair_b.second.get());
+
+    // Radius 5 m. Client 1's avatar (id 1) at the origin; client 2's avatar (id 2)
+    // 100 m away. A "near-1" entity (id 10) sits 2 m from avatar 1; a "near-2"
+    // entity (id 20) sits 2 m from avatar 2.
+    server.SetAoiRadiusMm(5000);
+    std::vector<ReplEntityState> entities = {
+        MakeEntity(1, 0, 0, 0),            // client 1's avatar
+        MakeEntity(2, 100000, 0, 0),       // client 2's avatar (100 m away)
+        MakeEntity(10, 2000, 0, 0),        // near avatar 1
+        MakeEntity(20, 102000, 0, 0),      // near avatar 2
+    };
+    server.BroadcastSnapshot(10, entities);
+    client_a.PumpInbound();
+    client_b.PumpInbound();
+
+    auto ids = [](const SnapshotMsg& s) {
+        std::vector<std::uint32_t> v;
+        for (const auto& e : s.entities) v.push_back(e.entity_id);
+        std::sort(v.begin(), v.end());
+        return v;
+    };
+    ASSERT_TRUE(client_a.has_snapshot());
+    ASSERT_TRUE(client_b.has_snapshot());
+    // Client 1 sees its own avatar (1) + the near entity (10); NOT the far ones.
+    EXPECT_EQ(ids(client_a.snapshot()), (std::vector<std::uint32_t>{1, 10}));
+    // Client 2 sees its own avatar (2) + the near entity (20).
+    EXPECT_EQ(ids(client_b.snapshot()), (std::vector<std::uint32_t>{2, 20}));
+}
+
+TEST(ReplicationEndpoint, AoiDisabledByDefaultSendsAll) {
+    auto pair = MakeLoopbackPair();
+    ReplicationServer server;
+    server.AddClient(1, pair.first.get());
+    ReplicationClient client(1, pair.second.get());
+    std::vector<ReplEntityState> entities = {
+        MakeEntity(1, 0, 0, 0), MakeEntity(2, 999000, 0, 0), MakeEntity(3, -999000, 0, 0),
+    };
+    server.BroadcastSnapshot(1, entities); // radius 0 -> disabled
+    client.PumpInbound();
+    EXPECT_EQ(client.snapshot().entities.size(), 3u);
 }
 
 TEST(ReplicationEndpoint, StaleSnapshotDoesNotRegress) {
