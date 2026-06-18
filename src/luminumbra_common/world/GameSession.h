@@ -11,6 +11,10 @@
 #include "../core/SimulationClock.h"
 #include "../simulation/SimulationEventBus.h"
 
+namespace luminumbra::ai {
+    class ScentField;
+}
+
 namespace Luminumbra {
     class JobSystem;
 
@@ -141,6 +145,14 @@ public:
     Systems::AetherFieldSystem* GetAetherFieldSystem() { return m_aetherFieldSystem.get(); }
     const Systems::AetherFieldSystem* GetAetherFieldSystem() const { return m_aetherFieldSystem.get(); }
 
+    // T-I7-ECO-RENDER: live deterministic ecology substrate. Owned by the
+    // authoritative simulation session and ticked only when game data opts an
+    // entity into scent emission/sensing. The server hash folds the returned
+    // scent sub-hash append-only after aether.
+    luminumbra::ai::ScentField* GetScentField() { return m_scentField.get(); }
+    const luminumbra::ai::ScentField* GetScentField() const { return m_scentField.get(); }
+    [[nodiscard]] std::string ComputeScentSubHash() const;
+
     entt::registry& GetRegistry() { return m_registry; }
 
     // --- Fixed-rate simulation (T-I3-4) ---
@@ -176,6 +188,7 @@ private:
     std::unique_ptr<Systems::WindFieldSystem> m_windFieldSystem;
     std::unique_ptr<Systems::WeatherSystem> m_weatherSystem;
     std::unique_ptr<Systems::AetherFieldSystem> m_aetherFieldSystem;
+    std::unique_ptr<luminumbra::ai::ScentField> m_scentField;
     JobSystem* m_jobSystem = nullptr;
 
     // Generate a unique world ID
@@ -186,6 +199,8 @@ private:
 
     // Convert string seed to numeric seed
     uint32_t StringToSeed(const std::string& seedStr);
+    void InitializeScentField(const Vec3& anchor);
+    bool HasScentParticipants() const;
     std::string m_rootPath; 
 };
 

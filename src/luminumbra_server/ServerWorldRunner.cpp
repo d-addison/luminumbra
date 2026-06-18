@@ -54,6 +54,12 @@ std::string AetherSubHash(world::GameSession* session) {
     return aether ? aether->ComputeAetherSubHash() : std::string();
 }
 
+// T-I7-ECO-RENDER: scent/stigmergy sub-hash from the session-owned ecology
+// field. Empty when no entity has opted into scent emission/sensing.
+std::string ScentSubHash(world::GameSession* session) {
+    return session ? session->ComputeScentSubHash() : std::string();
+}
+
 // Folds the chunk-derived top-level hash, the wind sub-hash, and the weather
 // sub-hash into the composite world_hash. This is the DELIBERATE bump chain: the
 // chunk hash (WorldSaveService::world_hash / ComputeWorldStreamingStateHash) is
@@ -69,13 +75,16 @@ std::string AetherSubHash(world::GameSession* session) {
 // then aether) so the composite is reproducible. T-I6-A1 appends the `aether`
 // term (bump #4, d950a6afc12a5cdc -> f17726d44054d133) -- append-only, so the
 // bytes before "|aether:" are unchanged (wind/weather sub-hashes are intact).
+// T-I7-ECO-RENDER appends the `scents` term after aether, preserving the whole
+// pre-ecology byte prefix while making live scent fields authoritative.
 std::string ComposeWorldHash(const std::string& chunk_hash,
                              const std::string& wind_hash,
                              const std::string& weather_hash,
-                             const std::string& aether_hash) {
+                             const std::string& aether_hash,
+                             const std::string& scent_hash) {
     return Persistence::StableChecksum(
         chunk_hash + "|wind:" + wind_hash + "|weather:" + weather_hash +
-        "|aether:" + aether_hash);
+        "|aether:" + aether_hash + "|scents:" + scent_hash);
 }
 
 std::pair<int, int> HorizontalChunkCoords(const Vec3& position) {
@@ -347,7 +356,8 @@ std::string ServerWorldRunner::ComputeWorldHash() {
     return ComposeWorldHash(service.world_hash(state),
                             WindSubHash(m_session.get()),
                             WeatherSubHash(m_session.get()),
-                            AetherSubHash(m_session.get()));
+                            AetherSubHash(m_session.get()),
+                            ScentSubHash(m_session.get()));
 }
 
 Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHashes() {
@@ -415,11 +425,13 @@ void ServerWorldRunner::ComputeWorldHashAndSubHashes(
     const std::string wind_hash = WindSubHash(m_session.get());
     const std::string weather_hash = WeatherSubHash(m_session.get());
     const std::string aether_hash = AetherSubHash(m_session.get());
+    const std::string scent_hash = ScentSubHash(m_session.get());
 
     Persistence::WorldSaveService service;
     // T-I5a-2 (A2) + T-I5a-3 (B1) + T-I6-A1 MEGA-BUMPS: composite world_hash
-    // (chunk + wind + weather + aether).
-    out_world_hash = ComposeWorldHash(service.world_hash(state), wind_hash, weather_hash, aether_hash);
+    // (chunk + wind + weather + aether + scents).
+    out_world_hash = ComposeWorldHash(
+        service.world_hash(state), wind_hash, weather_hash, aether_hash, scent_hash);
 
     const std::string entities_snapshot =
         Ecs::SerializeEntityRegistrySnapshotJson(World::BuildAvatarEntitySnapshot(m_avatars));

@@ -314,6 +314,7 @@ struct SmokeRunResult {
     std::string world_hash;
     // T-I4-11: per-system sub-hashes (additive; top-level world_hash unchanged).
     Luminumbra::Persistence::WorldStreamingStateSubHashes sub_hashes;
+    std::string scent_hash;
     std::string world_id;
     Luminumbra::Server::ServerTickReport ticks;
     std::size_t chunks_streamed = 0;
@@ -355,6 +356,7 @@ SmokeRunResult RunSmokeOnce(const ServerCliOptions& options, const char* run_lab
     }
     result.world_hash = runner.ComputeWorldHash();
     result.sub_hashes = runner.ComputeWorldSubHashes();
+    result.scent_hash = runner.Session() ? runner.Session()->ComputeScentSubHash() : std::string();
     result.chunks_streamed = runner.StreamedChunkCount();
     result.world_id = runner.Session()->GetMetadata().worldId;
     const fs::path save_dir = runner.Session()->GetWorldSaveDir();
@@ -382,7 +384,9 @@ nlohmann::json SmokeRunJson(const SmokeRunResult& run) {
             {"water", run.sub_hashes.water},
             {"entities", run.sub_hashes.entities},
             {"wind", run.sub_hashes.wind},
+            {"weather", run.sub_hashes.weather},
             {"aether", run.sub_hashes.aether},
+            {"scents", run.scent_hash},
         }},
         {"world_id", run.world_id},
         {"ticks_executed", run.ticks.ticks_executed},
@@ -418,7 +422,9 @@ int RunSmoke(const ServerCliOptions& options) {
         first.sub_hashes.water == replay.sub_hashes.water &&
         first.sub_hashes.entities == replay.sub_hashes.entities &&
         first.sub_hashes.wind == replay.sub_hashes.wind &&
-        first.sub_hashes.aether == replay.sub_hashes.aether;
+        first.sub_hashes.weather == replay.sub_hashes.weather &&
+        first.sub_hashes.aether == replay.sub_hashes.aether &&
+        first.scent_hash == replay.scent_hash;
 
     const bool deterministic = first.ok && replay.ok &&
         first.world_hash == replay.world_hash && sub_hashes_match;
@@ -445,7 +451,9 @@ int RunSmoke(const ServerCliOptions& options) {
             {"water", first.sub_hashes.water},
             {"entities", first.sub_hashes.entities},
             {"wind", first.sub_hashes.wind},
+            {"weather", first.sub_hashes.weather},
             {"aether", first.sub_hashes.aether},
+            {"scents", first.scent_hash},
         }},
         {"sub_hashes_replay", {
             {"terrain", replay.sub_hashes.terrain},
@@ -453,7 +461,9 @@ int RunSmoke(const ServerCliOptions& options) {
             {"water", replay.sub_hashes.water},
             {"entities", replay.sub_hashes.entities},
             {"wind", replay.sub_hashes.wind},
+            {"weather", replay.sub_hashes.weather},
             {"aether", replay.sub_hashes.aether},
+            {"scents", replay.scent_hash},
         }},
         {"sub_hashes_match", sub_hashes_match},
         {"deterministic", deterministic},
@@ -913,12 +923,14 @@ int RunWeatherBench(const ServerCliOptions& options) {
 struct HeavyHashes {
     std::string world_hash;
     Luminumbra::Persistence::WorldStreamingStateSubHashes sub;
+    std::string scent_hash;
 };
 
 HeavyHashes CaptureHashes(Luminumbra::Server::ServerWorldRunner& runner) {
     HeavyHashes h;
     h.world_hash = runner.ComputeWorldHash();
     h.sub = runner.ComputeWorldSubHashes();
+    h.scent_hash = runner.Session() ? runner.Session()->ComputeScentSubHash() : std::string();
     return h;
 }
 
@@ -977,6 +989,7 @@ nlohmann::json HeavyHashJson(const HeavyHashes& h) {
             {"wind", h.sub.wind},
             {"weather", h.sub.weather},
             {"aether", h.sub.aether},
+            {"scents", h.scent_hash},
         }},
     };
 }

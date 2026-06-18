@@ -1,7 +1,12 @@
 #include "GameSession.h"
 #include "../ai/InstinctSystem.h"
+#include "../ai/InstinctLocomotionSystem.h"
 #include "../ai/PerceptionSystem.h"
+#include "../ai/ScentDepositSystem.h"
+#include "../ai/ScentField.h"
+#include "../ai/ScentSteeringSystem.h"
 #include "../ai/StimulusChannels.h"
+#include "../components/CoreComponents.h"
 #include "../components/InstinctComponents.h"
 #include "../animation/AnimationRuntime.h"
 #include "../systems/SHIELD_WorldSystem.h" // This includes TerrainGenParams
@@ -32,6 +37,14 @@ using Luminumbra::Systems::TerrainGenParams;
 
 namespace {
 constexpr float kSpawnEyeHeight = 1.95f;
+constexpr int kScentFieldCells = 128;
+constexpr int kScentFieldChannels = 4;
+constexpr float kScentCellSize = 1.0f;
+constexpr double kScentDiffusionRate = 0.25;
+constexpr std::size_t kScentDiffusionIterations = 4;
+constexpr double kScentEvaporation = 0.05;
+constexpr double kScentTauMin = 1.0e-9;
+constexpr double kScentTauMax = 1.0e6;
 
 void AddValidationError(Luminumbra::world::WorldConfigValidationResult& result, std::string error) {
     result.errors.push_back(std::move(error));
@@ -51,6 +64,10 @@ fs::path RuntimeRoot(const std::string& root_path) {
 
 fs::path PresetPathFor(const std::string& root_path, const std::string& world_type) {
     return RuntimeRoot(root_path) / "worlds" / "atlas" / "presets" / (world_type + ".json");
+}
+
+float ScentOriginFor(float anchor) {
+    return anchor - (static_cast<float>(kScentFieldCells) * kScentCellSize * 0.5f);
 }
 }
 
@@ -119,6 +136,28 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         // world_hash is UNCHANGED (byte-identical) -- same discipline as the
         // stimulus-channel opt-in above. No RNG/wall-clock; id-ordered.
         luminumbra::ai::RunPerceptionSystemOnTick(m_registry, m_simulationClock.fixed_dt());
+
+        // 2c. T-I7-ECO-RENDER: scent stigmergy write/update. Game-data opt-in:
+        // no scent emitter/sensor components means no field mutation, while active
+        // ecology worlds get deterministic deposit -> diffuse/evaporate -> clamp.
+        const bool scent_active = HasScentParticipants();
+        if (scent_active && m_scentField) {
+            luminumbra::ai::RunScentDepositOnTick(
+                m_registry, *m_scentField, ScentOriginFor(m_metadata.spawnPoint.x),
+                ScentOriginFor(m_metadata.spawnPoint.z), kScentCellSize);
+            m_scentField->Step(kScentDiffusionRate, kScentDiffusionIterations, kScentEvaporation);
+            m_scentField->Clamp(kScentTauMin, kScentTauMax);
+        }
+
+        // 2d. T-I7-ECO-RENDER: action-plan locomotion, then scent gradient bias.
+        // The executor writes only LocomotionIntentComponent; physics/render owners
+        // consume that intent in their existing lanes.
+        luminumbra::ai::RunInstinctLocomotionOnTick(m_registry);
+        if (scent_active && m_scentField) {
+            luminumbra::ai::RunScentSteeringOnTick(
+                m_registry, *m_scentField, ScentOriginFor(m_metadata.spawnPoint.x),
+                ScentOriginFor(m_metadata.spawnPoint.z), kScentCellSize);
+        }
 
         // 3. T-I5a-2 (A2): wind field update. Deterministic (DeterministicMath +
         // FastNoise batch path; no wall-clock/RNG). Anchored on the spawn/stream
@@ -279,6 +318,7 @@ bool GameSession::CreateWorld(const std::string& name, const std::string& seed, 
     LUMINUMBRA_CORE_INFO("Initial terrain height sampled at spawn: {}.", terrain_height);
     
     m_metadata.spawnPoint = Vec3(spawn_x, terrain_height + kSpawnEyeHeight, spawn_z);
+    InitializeScentField(m_metadata.spawnPoint);
     
     LUMINUMBRA_CORE_INFO("World created successfully: {} (ID: {})", m_metadata.name, m_metadata.worldId);
     LUMINUMBRA_CORE_INFO("Spawn point set to ({}, {}, {}) - terrain height: {}", 
@@ -388,6 +428,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
         const float terrain_height = m_worldSystem->GetTerrainHeightAt(spawn_x, spawn_z);
         m_metadata.spawnPoint = Vec3(spawn_x, terrain_height + kSpawnEyeHeight, spawn_z);
     }
+    InitializeScentField(m_metadata.spawnPoint);
 
     LUMINUMBRA_CORE_INFO("World loaded successfully: {}", m_metadata.name);
     return true;
@@ -595,6 +636,66 @@ uint32_t GameSession::StringToSeed(const std::string& seedStr) {
         std::hash<std::string> hasher;
         return static_cast<uint32_t>(hasher(seedStr));
     }
+}
+
+void GameSession::InitializeScentField(const Vec3& /*anchor*/) {
+    m_scentField = std::make_unique<luminumbra::ai::ScentField>(
+        kScentFieldCells, kScentFieldCells, kScentFieldChannels);
+    LUMINUMBRA_CORE_INFO(
+        "Scent field initialized: {}x{} cells, {} channel(s), cell_size={}",
+        kScentFieldCells, kScentFieldCells, kScentFieldChannels, kScentCellSize);
+}
+
+bool GameSession::HasScentParticipants() const {
+    {
+        auto emitters =
+            m_registry.view<const Luminumbra::Components::TransformComponent,
+                            const Luminumbra::Components::SensableComponent>();
+        for (auto e : emitters) {
+            const auto& s = emitters.get<
+                const Luminumbra::Components::SensableComponent>(e);
+            if (s.scent_channel >= 0 && s.scent_deposit > 0.0f) {
+                return true;
+            }
+        }
+    }
+    {
+        auto sensors =
+            m_registry.view<const Luminumbra::Components::TransformComponent,
+                            const Luminumbra::Components::ScentSenseComponent>();
+        for (auto e : sensors) {
+            const auto& s = sensors.get<
+                const Luminumbra::Components::ScentSenseComponent>(e);
+            if (s.channel >= 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+std::string GameSession::ComputeScentSubHash() const {
+    if (!m_scentField || !HasScentParticipants()) {
+        return {};
+    }
+
+    std::ostringstream bytes;
+    bytes << "scent:v1:"
+          << m_scentField->width() << ':'
+          << m_scentField->height() << ':'
+          << m_scentField->channels() << ':'
+          << std::setprecision(17);
+    for (int ch = 0; ch < m_scentField->channels(); ++ch) {
+        for (int z = 0; z < m_scentField->height(); ++z) {
+            for (int x = 0; x < m_scentField->width(); ++x) {
+                const double v = m_scentField->Sample(ch, x, z);
+                if (v != 0.0) {
+                    bytes << ch << ',' << x << ',' << z << '=' << v << ';';
+                }
+            }
+        }
+    }
+    return Persistence::StableChecksum(bytes.str());
 }
 
 } // namespace Luminumbra::world
