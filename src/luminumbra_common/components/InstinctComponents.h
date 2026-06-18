@@ -63,6 +63,12 @@ struct Action {
     std::string name; // e.g., "MoveTo", "Eat", "Flee"
     EntityID target = entt::null;
     f32 duration = 1.0f; // Time in seconds to complete the action
+    // T-I9-AI flee/avoidance flag (engine-generic: a movement-DIRECTION modifier,
+    // not keyed on `name`). false (default) = seek toward target (unchanged). true
+    // = move AWAY from target until beyond slow_radius (the "safe" distance), then
+    // the action completes. Default false keeps every existing plan byte-identical,
+    // so world_hash is unchanged.
+    bool flee = false;
 };
 
 // Holds the sequence of actions an agent will perform to satisfy a goal.

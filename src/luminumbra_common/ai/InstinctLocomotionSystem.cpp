@@ -80,27 +80,49 @@ InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry
         const float dz = target_tf.position.z - tf.position.z;
         const float dist = Luminumbra::DeterministicMath::Sqrt(dx * dx + dz * dz);
 
-        if (dist <= profile.arrival_radius) {
-            // Arrived: hold and advance the plan so the next action (if any) runs.
-            intent.arrived = true;
-            ++stats.agents_arrived;
-            ++plan.current_action_index;
-            plan.time_in_current_action = 0.0f;
-            continue;
-        }
-
-        // Seek + arrival ramp (Reynolds): full cruise outside slow_radius, linear
-        // ramp toward zero between slow_radius and arrival_radius.
         const float slow = profile.slow_radius > profile.arrival_radius
                                ? profile.slow_radius
                                : profile.arrival_radius;
-        float speed = profile.move_speed;
-        if (dist < slow && slow > 0.0f) {
-            speed = profile.move_speed * (dist / slow);
-        }
+        const bool flee = plan.plan[plan.current_action_index].flee;
 
-        const float inv = 1.0f / dist; // dist > arrival_radius >= 0 -> safe
-        intent.wish_xz = Luminumbra::Vec2(dx * inv * speed, dz * inv * speed);
+        if (flee) {
+            // T-I9-AI flee/avoidance: move AWAY from the (threat) target until
+            // beyond slow_radius (the "safe" distance), then the action completes.
+            const float safe = slow > 0.0f ? slow : profile.arrival_radius;
+            if (dist >= safe) {
+                intent.arrived = true; // safe: stop fleeing, advance the plan
+                ++stats.agents_arrived;
+                ++plan.current_action_index;
+                plan.time_in_current_action = 0.0f;
+                continue;
+            }
+            // Full-speed flight directly away. Degenerate dist~0 (agent on top of
+            // the threat) picks a deterministic +X so the wish is never NaN.
+            float adx = dx, adz = dz;
+            if (dist < 1e-4f) { adx = -1.0f; adz = 0.0f; } // away = -dir; -(-1)=+X
+            const float ainv = 1.0f /
+                Luminumbra::DeterministicMath::Sqrt(adx * adx + adz * adz);
+            intent.wish_xz =
+                Luminumbra::Vec2(-adx * ainv * profile.move_speed,
+                                 -adz * ainv * profile.move_speed);
+        } else {
+            if (dist <= profile.arrival_radius) {
+                // Arrived: hold and advance so the next action (if any) runs.
+                intent.arrived = true;
+                ++stats.agents_arrived;
+                ++plan.current_action_index;
+                plan.time_in_current_action = 0.0f;
+                continue;
+            }
+            // Seek + arrival ramp (Reynolds): full cruise outside slow_radius,
+            // linear ramp toward zero between slow_radius and arrival_radius.
+            float speed = profile.move_speed;
+            if (dist < slow && slow > 0.0f) {
+                speed = profile.move_speed * (dist / slow);
+            }
+            const float inv = 1.0f / dist; // dist > arrival_radius >= 0 -> safe
+            intent.wish_xz = Luminumbra::Vec2(dx * inv * speed, dz * inv * speed);
+        }
 
         // T-I9-AI obstacle/crowd avoidance (Reynolds separation), DATA-FLAGGED.
         // When separation is enabled, push away from nearby agents so they do not
