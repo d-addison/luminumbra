@@ -368,7 +368,12 @@ void GBufferPass::geometry_pass_skinned_meshes(RenderPipeline& pipeline,
     // T-I4-8: UV-mapped skinned-mesh texture array on unit 3. Skinned creatures
     // take the UV-sampled path (precedence over the terrain LUT triplanar path).
     glActiveTexture(GL_TEXTURE3);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_skinnedTextureArray);
+    // Match the terrain/static paths: when no skinned texture array is loaded,
+    // bind the terrain array as a valid fallback so unit 3's sampler2DArray is
+    // never left referencing an empty unit (GL_INVALID_OPERATION "program
+    // texture usage" otherwise — fires once per skinned draw). The albedo/normal
+    // layers below resolve to -1 in that case, so the fallback is never sampled.
+    glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_skinnedTextureArray ? pipeline.m_skinnedTextureArray : pipeline.m_terrainTextureArray);
     m_skinned_mesh_shader->setInt("u_skinnedTextures", 3);
     m_skinned_mesh_shader->setInt("u_skinnedAlbedoLayer", pipeline.m_skinnedTextureArray ? pipeline.m_skinnedAlbedoLayer : -1);
     m_skinned_mesh_shader->setInt("u_skinnedNormalLayer", pipeline.m_skinnedTextureArray ? pipeline.m_skinnedNormalLayer : -1);
