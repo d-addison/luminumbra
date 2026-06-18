@@ -34,6 +34,19 @@ InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry
                   return entt::to_integral(lhs) < entt::to_integral(rhs);
               });
 
+    // T-I9-AI: positions of all locomotion agents, in deterministic id order, for
+    // the optional Reynolds separation (crowd/obstacle avoidance) term below. Built
+    // once per tick. When no agent enables separation this is unused; the canonical
+    // roster leaves separation_strength == 0 so world_hash is unchanged.
+    struct AgentPos { entt::entity id; float x; float z; };
+    std::vector<AgentPos> neighbors;
+    neighbors.reserve(agents.size());
+    for (auto entity : agents) {
+        const auto& tf = registry.get<const TransformComponent>(entity);
+        neighbors.push_back({entity, tf.position.x, tf.position.z});
+    }
+    // `agents` is already id-sorted, so `neighbors` is too (deterministic scan).
+
     for (auto entity : agents) {
         ++stats.agents_seen;
 
@@ -88,6 +101,44 @@ InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry
 
         const float inv = 1.0f / dist; // dist > arrival_radius >= 0 -> safe
         intent.wish_xz = Luminumbra::Vec2(dx * inv * speed, dz * inv * speed);
+
+        // T-I9-AI obstacle/crowd avoidance (Reynolds separation), DATA-FLAGGED.
+        // When separation is enabled, push away from nearby agents so they do not
+        // pile onto a shared target at scale. Deterministic: neighbors are scanned
+        // in id order; float-only; Sqrt is IEEE-deterministic. A zero strength (the
+        // default) skips this entirely, keeping the canonical world_hash intact.
+        if (profile.separation_strength > 0.0f && profile.separation_radius > 0.0f) {
+            const float sep_r = profile.separation_radius;
+            float push_x = 0.0f;
+            float push_z = 0.0f;
+            for (const auto& nb : neighbors) {
+                if (nb.id == entity) {
+                    continue;
+                }
+                const float nx = tf.position.x - nb.x;
+                const float nz = tf.position.z - nb.z;
+                const float nd = Luminumbra::DeterministicMath::Sqrt(nx * nx + nz * nz);
+                if (nd > 0.0f && nd < sep_r) {
+                    // Linear falloff: closer neighbors push harder. Normalize the
+                    // away direction (1/nd) then weight by (1 - nd/sep_r).
+                    const float w = (sep_r - nd) / (sep_r * nd);
+                    push_x += nx * w;
+                    push_z += nz * w;
+                }
+            }
+            // Blend the avoidance into the seek wish, scaled to the cruise speed so
+            // it is commensurate with the seek term, then clamp the combined wish to
+            // move_speed so avoidance never exceeds the agent's locomotion budget.
+            intent.wish_xz.x += push_x * profile.separation_strength * profile.move_speed;
+            intent.wish_xz.y += push_z * profile.separation_strength * profile.move_speed;
+            const float wmag = Luminumbra::DeterministicMath::Sqrt(
+                intent.wish_xz.x * intent.wish_xz.x + intent.wish_xz.y * intent.wish_xz.y);
+            if (wmag > profile.move_speed && wmag > 0.0f) {
+                const float s = profile.move_speed / wmag;
+                intent.wish_xz.x *= s;
+                intent.wish_xz.y *= s;
+            }
+        }
         ++stats.agents_steered;
     }
 
