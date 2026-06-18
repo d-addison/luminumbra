@@ -3167,6 +3167,65 @@ int main(int argc, char* argv[]) {
         if (currentState != GameState::WORLD_LOADING) {
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             if (currentState == GameState::IN_GAME) {
+                // T-I8 trees: one-time deterministic vegetation scatter once the
+                // world is ready. RENDER-ONLY decoration on the client registry
+                // (never hashed). Places tree static-mesh instances on grassy,
+                // above-water, gentle-slope terrain around the spawn anchor with
+                // seeded jitter so the world reads forested. GetTerrainHeightAt is
+                // a pure function (valid before streaming), so trees appear on the
+                // first ready frame (incl. the visual-sweep capture). First pass
+                // uses the Grass material id; per-mesh bark/leaf texturing is a
+                // follow-up via the model-texture (skinned-UV) path.
+                {
+                    static bool s_trees_scattered = false;
+                    if (!s_trees_scattered && gameSession->GetWorldSystem()) {
+                        s_trees_scattered = true;
+                        auto* ws = gameSession->GetWorldSystem();
+                        auto& reg = gameSession->GetRegistry();
+                        const Luminumbra::Vec3 anchor = gameSession->GetMetadata().spawnPoint;
+                        auto terr = [&](float x, float z) { return ws->GetTerrainHeightAt(x, z); };
+                        std::uint64_t rng = 0x9E3779B97F4A7C15ull ^
+                            (static_cast<std::uint64_t>(static_cast<std::int64_t>(anchor.x)) * 0xBF58476D1CE4E5B9ull) ^
+                            (static_cast<std::uint64_t>(static_cast<std::int64_t>(anchor.z)) * 0x94D049BB133111EBull);
+                        auto frand = [&]() {
+                            rng += 0x9E3779B97F4A7C15ull;
+                            std::uint64_t z = rng;
+                            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+                            z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+                            z = z ^ (z >> 31);
+                            return static_cast<float>((z >> 11) * (1.0 / 9007199254740992.0));
+                        };
+                        const float reach = 760.0f, cell = 17.0f, hs = 4.0f;
+                        int placed = 0;
+                        for (float dz = -reach; dz <= reach && placed < 8000; dz += cell) {
+                            for (float dx = -reach; dx <= reach && placed < 8000; dx += cell) {
+                                // Clustered density: a low-frequency mask makes groves
+                                // (denser stands) instead of a uniform sprinkle.
+                                const float grove = frand();
+                                if (frand() > (0.30f + 0.45f * grove)) continue;
+                                const float x = anchor.x + dx + (frand() * 2.0f - 1.0f) * cell * 0.5f;
+                                const float zc = anchor.z + dz + (frand() * 2.0f - 1.0f) * cell * 0.5f;
+                                const float h = terr(x, zc);
+                                if (h < Luminumbra::SEA_LEVEL + 1.0f) continue; // above water
+                                const float slope = glm::max(
+                                    glm::max(std::abs(terr(x + hs, zc) - h), std::abs(terr(x - hs, zc) - h)),
+                                    glm::max(std::abs(terr(x, zc + hs) - h), std::abs(terr(x, zc - hs) - h)));
+                                if (slope > 5.5f) continue; // skip steep/cliff
+                                const auto e = reg.create();
+                                auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
+                                tf.position = Luminumbra::Vec3(x, h, zc);
+                                const float s = 0.7f + frand() * 1.1f;
+                                tf.scale = Luminumbra::Vec3(s, s, s);
+                                tf.rotation = glm::angleAxis(frand() * 6.2831853f, glm::vec3(0.0f, 1.0f, 0.0f));
+                                auto& sm = reg.emplace<Luminumbra::Components::StaticMeshComponent>(e);
+                                sm.meshPath = "data/models/trees/tree_small_02_2k.lmesh";
+                                sm.materialId = 3u; // Grass (foliage green); textures follow-up
+                                ++placed;
+                            }
+                        }
+                        LUMINUMBRA_CORE_INFO("T-I8 trees: scattered {} tree instances", placed);
+                    }
+                }
                 // T-I5b-visual-sweep: run the entire deterministic capture matrix
                 // (times-of-day x angles x weather x season) in ONE synchronous pass
                 // once the world is ready, then self-complete. The render_and_read
