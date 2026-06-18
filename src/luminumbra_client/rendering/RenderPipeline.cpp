@@ -2071,6 +2071,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_gbuffer_pass->destroy_skinned_mesh();
     if (m_terrainTextureArray) { glDeleteTextures(1, &m_terrainTextureArray); m_terrainTextureArray = 0; }
     if (m_terrainNormalArray) { glDeleteTextures(1, &m_terrainNormalArray); m_terrainNormalArray = 0; }
+    if (m_terrainRoughnessArray) { glDeleteTextures(1, &m_terrainRoughnessArray); m_terrainRoughnessArray = 0; }
     if (m_skinnedTextureArray) { glDeleteTextures(1, &m_skinnedTextureArray); m_skinnedTextureArray = 0; }
     if (m_materialLUT) { glDeleteTextures(1, &m_materialLUT); m_materialLUT = 0; }
     destroy_texture_residency();
@@ -2700,10 +2701,55 @@ void RenderPipeline::init_terrain_textures() {
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 10);
     glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
+
+    // --- Roughness-map array (linear RGBA8; roughness in .r) — I7.1-PBR B1d ---
+    // Per-material AmbientCG roughness plates give per-texel roughness instead of
+    // the flat materials.json scalar (the BF4-floor micro-variation lever). Layer
+    // order matches albedo/normal. A missing layer falls back to flat 0.85
+    // (the design roughness default) and clears m_terrainRoughnessValid so the
+    // shader keeps the per-material scalar rather than a wrong constant.
+    const std::array<const char*, 5> roughness_assets = {{
+        "data/textures/terrain/rock/rock_roughness_1024.ltex",
+        "data/textures/terrain/soil/soil_roughness_1024.ltex",
+        "data/textures/terrain/grass/grass_roughness_1024.ltex",
+        "data/textures/terrain/sand/sand_roughness_1024.ltex",
+        "data/textures/terrain/deepslate/deepslate_roughness_1024.ltex",
+    }};
+    glGenTextures(1, &m_terrainRoughnessArray);
+    label_gl_object(GL_TEXTURE, m_terrainRoughnessArray, "terrain.roughness_array");
+    glBindTexture(GL_TEXTURE_2D_ARRAY, m_terrainRoughnessArray);
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8, res, res, layer_count, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    int roughness_fallbacks = 0;
+    for (int i = 0; i < layer_count; ++i) {
+        LtexCpuImage img;
+        if (load_ltex_cpu_image(m_root_path / roughness_assets[static_cast<size_t>(i)], img) &&
+            img.width == static_cast<uint32_t>(res) &&
+            img.height == static_cast<uint32_t>(res) && img.channels == 4u) {
+            glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, i,
+                            static_cast<GLsizei>(img.width), static_cast<GLsizei>(img.height), 1,
+                            GL_RGBA, GL_UNSIGNED_BYTE, img.bytes.data());
+        } else {
+            std::vector<unsigned char> flat(static_cast<size_t>(res) * res * 4u, 217u); // ~0.85
+            glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, i, res, res, 1,
+                            GL_RGBA, GL_UNSIGNED_BYTE, flat.data());
+            ++roughness_fallbacks;
+            LUMINUMBRA_CORE_ERROR("Terrain roughness: failed to load .ltex layer '{}'",
+                                  roughness_assets[static_cast<size_t>(i)]);
+        }
+    }
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 10);
+    glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
+    m_terrainRoughnessValid = (roughness_fallbacks == 0) ? 1 : 0;
+
     glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
 
-    LUMINUMBRA_CORE_INFO("Terrain texture arrays loaded ({} albedo + {} normal layers, {}x{}).",
-                         layer_count, layer_count, res, res);
+    LUMINUMBRA_CORE_INFO("Terrain texture arrays loaded ({} albedo + {} normal + {} roughness layers, {}x{}; roughness_valid={}).",
+                         layer_count, layer_count, layer_count, res, res, m_terrainRoughnessValid);
 }
 
 void RenderPipeline::init_skinned_texture_array() {

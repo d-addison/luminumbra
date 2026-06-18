@@ -25,6 +25,11 @@ uniform sampler2D u_materialLUT;
 // Layer indices come from the material LUT texture_layer / normal_layer columns.
 uniform sampler2DArray u_terrainTextures;   // sRGB albedo
 uniform sampler2DArray u_terrainNormals;    // tangent-space (OpenGL) normal maps
+// I7.1-PBR B1d: per-material roughness-map array (linear; roughness in .r). When
+// u_terrainRoughnessValid == 0 (a layer failed to load) the shader keeps the flat
+// per-material scalar instead of a wrong constant.
+uniform sampler2DArray u_terrainRoughness;
+uniform int u_terrainRoughnessValid;
 
 // View rotation (mat3 of the camera view matrix). The normal-mapped normal is
 // perturbed in world space then rotated into view space here, so the G-buffer
@@ -134,6 +139,17 @@ vec3 triplanar_normal(vec3 worldPos, vec3 geomN, vec3 weights, float layer, floa
     return normalize(worldN);
 }
 
+// I7.1-PBR B1d: triplanar per-texel roughness (.r), same projection as albedo.
+float triplanar_roughness(vec3 worldPos, vec3 weights, float layer, float scale) {
+    vec2 uv_x = worldPos.zy * scale;
+    vec2 uv_y = worldPos.xz * scale;
+    vec2 uv_z = worldPos.xy * scale;
+    float rx = texture(u_terrainRoughness, vec3(uv_x, layer)).r;
+    float ry = texture(u_terrainRoughness, vec3(uv_y, layer)).r;
+    float rz = texture(u_terrainRoughness, vec3(uv_z, layer)).r;
+    return clamp(rx * weights.x + ry * weights.y + rz * weights.z, 0.04, 1.0);
+}
+
 void main()
 {
     if (fs_in.MaterialID == 7u) { // Water
@@ -221,6 +237,11 @@ void main()
         float geomSlope = worldN.y; // up-facing-ness (1 flat, 0 vertical), pre normal-map
         vec3 baseAlbedo = triplanar_albedo(fs_in.WorldPos, weights, texLayer, scale);
         vec3 baseN      = triplanar_normal(fs_in.WorldPos, worldN, weights, normLayer, scale);
+        // I7.1-PBR B1d: per-texel roughness from the AmbientCG roughness map
+        // (replaces the flat per-material scalar). Falls back to the scalar when
+        // the map array is unavailable.
+        float baseRoughness = (u_terrainRoughnessValid == 1)
+            ? triplanar_roughness(fs_in.WorldPos, weights, texLayer, scale) : roughness;
 
         // T-I6 macro material variation (RENDER-ONLY, no world_hash): overlay ROCK on
         // steep faces so natural terrain stops reading as one uniform olive material
@@ -243,6 +264,10 @@ void main()
                 vec3 rockN      = triplanar_normal(fs_in.WorldPos, worldN, weights, rockNrm, rockScale);
                 baseAlbedo = mix(baseAlbedo, rockAlbedo, rockW);
                 baseN      = normalize(mix(baseN, rockN, rockW));
+                if (u_terrainRoughnessValid == 1) {
+                    float rockRough = triplanar_roughness(fs_in.WorldPos, weights, rockTex, rockScale);
+                    baseRoughness = mix(baseRoughness, rockRough, rockW);
+                }
             }
         }
         worldN = baseN;
@@ -254,6 +279,7 @@ void main()
         // base colors). Brings the noon sun-bright sand flat down to a natural lit
         // tone below the ACES clip.
         albedo = baseAlbedo * albedoScale;
+        roughness = baseRoughness; // I7.1-PBR B1d: per-texel terrain roughness
         textured = true;
     }
 
