@@ -59,6 +59,36 @@ TEST(ScentField, GradientPointsTowardTheSource) {
     EXPECT_GT(gz, 0.0f); // south of source -> up-gradient points +Z (toward z=5)
 }
 
+TEST(ScentField, GradientSteerTracksTowardAndFleesFromSource) {
+    ScentField f(10, 10, 1);
+    f.Deposit(0, 5, 5, 100.0);
+    f.Step(0.25, 2, 0.0);
+    float dx = 0.0f, dz = 0.0f;
+    // West of the source: steering TOWARD (sign +1) points +X (a hunter tracking up).
+    const float conf = f.GradientSteer(0, 3, 5, /*sign=*/1.0f, /*floor=*/1e-4f, /*k=*/5.0f, dx, dz);
+    EXPECT_GT(conf, 0.0f);
+    EXPECT_GT(dx, 0.0f);
+    EXPECT_NEAR(dz, 0.0f, 1e-3f);
+    // Unit direction.
+    EXPECT_NEAR(std::sqrt(dx * dx + dz * dz), 1.0f, 1e-3f);
+    // Fleeing (sign -1) inverts the heading (prey running from the scent).
+    float fx = 0.0f, fz = 0.0f;
+    f.GradientSteer(0, 3, 5, -1.0f, 1e-4f, 5.0f, fx, fz);
+    EXPECT_LT(fx, 0.0f);
+}
+
+TEST(ScentField, GradientSteerFloorCutsOffColdTrail) {
+    ScentField f(10, 10, 1);
+    f.Deposit(0, 5, 5, 100.0);
+    f.Step(0.25, 2, 0.0);
+    float dx = 1.0f, dz = 1.0f;
+    // A high floor rejects the weak gradient far from the source (cold-trail cutoff).
+    const float conf = f.GradientSteer(0, 0, 0, 1.0f, /*floor=*/1e6f, 5.0f, dx, dz);
+    EXPECT_FLOAT_EQ(conf, 0.0f);
+    EXPECT_FLOAT_EQ(dx, 0.0f); // direction zeroed when below floor
+    EXPECT_FLOAT_EQ(dz, 0.0f);
+}
+
 TEST(ScentField, ChannelsAreIndependent) {
     ScentField f(6, 6, /*channels=*/3);
     f.Deposit(0, 2, 2, 10.0); // prey scent only
