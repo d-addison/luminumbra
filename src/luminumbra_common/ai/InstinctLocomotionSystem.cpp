@@ -35,16 +35,22 @@ InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry
                   return entt::to_integral(lhs) < entt::to_integral(rhs);
               });
 
-    // T-I9-AI: positions of all locomotion agents, in deterministic id order, for
-    // the optional Reynolds separation (crowd/obstacle avoidance) term below. Built
-    // once per tick. When no agent enables separation this is unused; the canonical
-    // roster leaves separation_strength == 0 so world_hash is unchanged.
-    struct AgentPos { entt::entity id; float x; float z; };
+    // T-I9-AI: snapshot of all locomotion agents (position + PRIOR-tick heading),
+    // in deterministic id order, for the optional Reynolds flocking terms below
+    // (separation / cohesion / alignment). Built ONCE per tick BEFORE the per-agent
+    // wish is recomputed, so alignment reads last tick's velocities — there is no
+    // intra-tick read-after-write coupling and the result is order-independent.
+    // When no agent enables flocking this is unused; the canonical roster leaves
+    // every strength at 0 so world_hash is unchanged.
+    struct AgentPos { entt::entity id; float x; float z; float wx; float wz; };
     std::vector<AgentPos> neighbors;
     neighbors.reserve(agents.size());
     for (auto entity : agents) {
         const auto& tf = registry.get<const TransformComponent>(entity);
-        neighbors.push_back({entity, tf.position.x, tf.position.z});
+        const auto* prev = registry.try_get<LocomotionIntentComponent>(entity);
+        const float pwx = prev ? prev->wish_xz.x : 0.0f;
+        const float pwz = prev ? prev->wish_xz.y : 0.0f;
+        neighbors.push_back({entity, tf.position.x, tf.position.z, pwx, pwz});
     }
     // `agents` is already id-sorted, so `neighbors` is too (deterministic scan).
 
@@ -181,6 +187,67 @@ InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry
                 const float s = profile.move_speed / wmag;
                 intent.wish_xz.x *= s;
                 intent.wish_xz.y *= s;
+            }
+        }
+
+        // T-I9-AI flocking/herding: cohesion (steer toward the local group's center
+        // of mass) + alignment (match the group's mean heading). Both use
+        // flock_radius and last tick's neighbor headings (snapshotted above), so the
+        // result is deterministic and order-independent. DATA-FLAGGED: zero strength
+        // skips, keeping world_hash intact. Composed on top of seek + separation;
+        // the combined wish is then clamped to the move_speed budget.
+        if ((profile.cohesion_strength > 0.0f || profile.alignment_strength > 0.0f) &&
+            profile.flock_radius > 0.0f) {
+            const float fr = profile.flock_radius;
+            float cx = 0.0f, cz = 0.0f; // sum of neighbor positions (cohesion)
+            float hx = 0.0f, hz = 0.0f; // sum of neighbor headings (alignment)
+            int count = 0;
+            for (const auto& nb : neighbors) {
+                if (nb.id == entity) continue;
+                const float nx = nb.x - tf.position.x;
+                const float nz = nb.z - tf.position.z;
+                const float nd = Luminumbra::DeterministicMath::Sqrt(nx * nx + nz * nz);
+                if (nd > 0.0f && nd < fr) {
+                    cx += nb.x;
+                    cz += nb.z;
+                    hx += nb.wx;
+                    hz += nb.wz;
+                    ++count;
+                }
+            }
+            if (count > 0) {
+                const float invn = 1.0f / static_cast<float>(count);
+                if (profile.cohesion_strength > 0.0f) {
+                    // Toward the neighbor centroid (unit) * strength * cruise speed.
+                    const float ccx = cx * invn - tf.position.x;
+                    const float ccz = cz * invn - tf.position.z;
+                    const float cl =
+                        Luminumbra::DeterministicMath::Sqrt(ccx * ccx + ccz * ccz);
+                    if (cl > 0.0f) {
+                        const float cs = profile.cohesion_strength * profile.move_speed / cl;
+                        intent.wish_xz.x += ccx * cs;
+                        intent.wish_xz.y += ccz * cs;
+                    }
+                }
+                if (profile.alignment_strength > 0.0f) {
+                    // Toward the mean neighbor heading (unit) * strength * cruise speed.
+                    const float mhx = hx * invn;
+                    const float mhz = hz * invn;
+                    const float al =
+                        Luminumbra::DeterministicMath::Sqrt(mhx * mhx + mhz * mhz);
+                    if (al > 0.0f) {
+                        const float as = profile.alignment_strength * profile.move_speed / al;
+                        intent.wish_xz.x += mhx * as;
+                        intent.wish_xz.y += mhz * as;
+                    }
+                }
+                const float wmag = Luminumbra::DeterministicMath::Sqrt(
+                    intent.wish_xz.x * intent.wish_xz.x + intent.wish_xz.y * intent.wish_xz.y);
+                if (wmag > profile.move_speed && wmag > 0.0f) {
+                    const float s = profile.move_speed / wmag;
+                    intent.wish_xz.x *= s;
+                    intent.wish_xz.y *= s;
+                }
             }
         }
         ++stats.agents_steered;
