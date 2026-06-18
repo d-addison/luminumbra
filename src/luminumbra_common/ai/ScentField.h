@@ -102,6 +102,24 @@ public:
         }
     }
 
+    // MAX-MIN Ant System anti-stagnation: clamp every cell of every channel to
+    // [tau_min, tau_max] (spec R-P2.2). A positive tau_min keeps every cell's
+    // follow-probability strictly above zero so agents never lock permanently onto
+    // one trail (prevents premature convergence); tau_max caps unbounded deposit
+    // buildup. Apply AFTER Step. Deterministic. Default args = no-op.
+    void Clamp(double tau_min = 0.0, double tau_max = 1.0e300) {
+        for (auto& field : m_ch) {
+            for (std::size_t y = 0; y < static_cast<std::size_t>(m_h); ++y) {
+                for (std::size_t x = 0; x < static_cast<std::size_t>(m_w); ++x) {
+                    double v = field.at(x, y);
+                    if (v < tau_min) v = tau_min;
+                    if (v > tau_max) v = tau_max;
+                    field.set(x, y, v);
+                }
+            }
+        }
+    }
+
     // Scent concentration of species `ch` at a cell (0 outside the grid).
     [[nodiscard]] double Sample(int ch, int x, int z) const {
         if (!valid(ch, x, z)) return 0.0;

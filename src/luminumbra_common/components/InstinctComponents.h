@@ -115,6 +115,7 @@ struct LocomotionProfile {
 // game data — what it emits to each sense modality. Default emits nothing.
 struct SensableComponent {
     int scent_channel = -1;      // ScentField channel this entity deposits into (-1 none)
+    f32 scent_deposit = 0.0f;    // amount laid into scent_channel per tick (0 = none)
     f32 noise_loudness = 0.0f;   // current emitted sound loudness (0 = silent)
     f32 noise_pitch = 0.5f;      // emitted sound pitch [0,1] (footstep low .. alarm high)
     std::uint32_t faction = 0;   // perceivers sense entities of OTHER factions

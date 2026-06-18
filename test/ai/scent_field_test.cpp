@@ -89,6 +89,14 @@ TEST(ScentField, GradientSteerFloorCutsOffColdTrail) {
     EXPECT_FLOAT_EQ(dz, 0.0f);
 }
 
+TEST(ScentField, ClampBoundsEveryCellToMinMax) {
+    ScentField f(5, 5, 1);
+    f.Deposit(0, 2, 2, 100.0);
+    f.Clamp(/*tau_min=*/1.0, /*tau_max=*/50.0);
+    EXPECT_DOUBLE_EQ(f.Sample(0, 2, 2), 50.0); // capped at tau_max (buildup bound)
+    EXPECT_DOUBLE_EQ(f.Sample(0, 0, 0), 1.0);  // floored at tau_min (>0 -> no dead cells)
+}
+
 TEST(ScentField, ChannelsAreIndependent) {
     ScentField f(6, 6, /*channels=*/3);
     f.Deposit(0, 2, 2, 10.0); // prey scent only
