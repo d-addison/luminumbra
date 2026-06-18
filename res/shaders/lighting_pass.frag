@@ -167,6 +167,17 @@ float cloudShadow(vec3 worldPos) {
 // T-I4-DR-albedo-calibration commit for the full before/after transfer table.
 const float SUN_IRRADIANCE_SCALE = PI;
 
+// T-I7 realistic-lighting grade (controllable). The flat sky-ambient fill plus
+// the desaturating filmic tonemap leave noon terrain washed and low-contrast.
+// These grade controls restore punch: exposure lifts midtones before the curve;
+// saturation/contrast/warmth are applied after it. All default to identity so an
+// unset pipeline reproduces the prior look exactly. Driven from the pipeline
+// (LightingPass) and tunable via the LUMIN_GRADE env override.
+uniform float u_exposure = 1.0;
+uniform float u_saturation = 1.0;
+uniform float u_contrast = 1.0;
+uniform vec3 u_lightWarmth = vec3(1.0, 1.0, 1.0);
+
 // Optimized PBR functions with precalculated values
 float DistributionGGX(float NdotH, float a2) {
     float NdotH2 = NdotH * NdotH;
@@ -451,10 +462,21 @@ void main() {
     // shades only G-buffer geometry; the skybox later overwrites sky pixels, so a
     // sky-spanning bolt injected here would be painted over.) See LightingPass.
 
+    // T-I7 realistic-lighting grade: exposure lifts midtones BEFORE the filmic
+    // curve so the noon scene is no longer dim/washed.
+    color *= u_exposure;
+
     // Enhanced HDR tone mapping for magical effects
     // Use filmic tone mapping to preserve magical highlights
     color = color * (2.51 * color + 0.03) / (color * (2.43 * color + 0.59) + 0.14);
-    
+
+    // T-I7 grade: restore saturation + contrast the flat ambient/filmic wash out,
+    // and apply a subtle sun warmth tint. Applied in tonemapped [0,1] space.
+    float gradeLuma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    color = mix(vec3(gradeLuma), color, u_saturation);
+    color = clamp((color - 0.5) * u_contrast + 0.5, 0.0, 1.0);
+    color *= u_lightWarmth;
+
     // Gamma correction
     color = pow(color, vec3(1.0/2.2));
 
