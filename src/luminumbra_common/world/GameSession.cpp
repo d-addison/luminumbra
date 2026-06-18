@@ -19,6 +19,7 @@
 #include "../systems/AetherFieldSystem.h"
 #include "../core/Log.h"
 #include "../persistence/WorldSaveService.h"
+#include "../persistence/WorldPersistenceRoundtrip.h" // Persistence::StableChecksum (ComputeScentSubHash)
 #include "TerrainPresetLoader.h"
 #include "WorldStreamingState.h"
 
