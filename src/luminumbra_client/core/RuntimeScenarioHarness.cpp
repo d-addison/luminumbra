@@ -8598,9 +8598,9 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
             // only storms). Lighter coverage + softer strength than the storm deck.
             cstate.enabled = true;
             cstate.shadow_enabled = true;
-            cstate.coverage_amount = 0.40f;
+            cstate.coverage_amount = 0.50f;
             cstate.plane_height = 1100.0f;
-            cstate.shadow_strength = 0.45f;
+            cstate.shadow_strength = 0.75f; // pronounced cast shadows (bolder look)
             cstate.scroll_offset = glm::vec2(static_cast<float>(elapsed_phase) * 14.0f, 0.0f);
             out_cloud_cov = cstate.coverage_amount;
             // Fully remove the rain emitter so no streaks bleed into the clear

@@ -122,7 +122,11 @@ float cloud_fbm(vec2 p, int octaves) {
     return value;
 }
 float cloudCoverageAt(vec2 worldXZ) {
-    vec2 p = (worldXZ + u_cloudScrollOffset) * (1.0 / 1200.0);
+    // T-I7: larger cloud clusters (~2400 m feature scale, was 1200) for bolder,
+    // more pronounced cloud masses + their cast shadows. MUST stay identical to
+    // enhanced_skybox.frag::cloudCoverageAt so the dome cloud and its ground
+    // shadow remain registered.
+    vec2 p = (worldXZ + u_cloudScrollOffset) * (1.0 / 2400.0);
     float base = cloud_fbm(p, 5);
     float detail = cloud_fbm(p * 2.7 + vec2(11.3, 4.7), 3);
     float field = base * 0.72 + detail * 0.28;
@@ -177,6 +181,12 @@ uniform float u_exposure = 1.0;
 uniform float u_saturation = 1.0;
 uniform float u_contrast = 1.0;
 uniform vec3 u_lightWarmth = vec3(1.0, 1.0, 1.0);
+// T-I7 cinematic split-tone (BF1-style key/fill): tint shadows toward
+// u_shadowTint (cool) and highlights toward u_highlightTint (warm), blended by
+// luma, scaled by u_splitToneStrength. Defaults identity (no tint).
+uniform vec3 u_shadowTint = vec3(1.0, 1.0, 1.0);
+uniform vec3 u_highlightTint = vec3(1.0, 1.0, 1.0);
+uniform float u_splitToneStrength = 0.0;
 
 // Optimized PBR functions with precalculated values
 float DistributionGGX(float NdotH, float a2) {
@@ -483,7 +493,12 @@ void main() {
     float gradeLuma = dot(color, vec3(0.2126, 0.7152, 0.0722));
     color = mix(vec3(gradeLuma), color, u_saturation);
     color = clamp((color - 0.5) * u_contrast + 0.5, 0.0, 1.0);
+    // Cinematic split-tone: cool shadows -> warm highlights, blended by luma.
+    float toneT = smoothstep(0.12, 0.88, gradeLuma);
+    vec3 splitTint = mix(u_shadowTint, u_highlightTint, toneT);
+    color = mix(color, color * splitTint, clamp(u_splitToneStrength, 0.0, 1.0));
     color *= u_lightWarmth;
+    color = clamp(color, 0.0, 1.0);
 
     // Gamma correction
     color = pow(color, vec3(1.0/2.2));

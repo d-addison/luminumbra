@@ -122,8 +122,11 @@ float fbm(vec2 p, int octaves) {
 //     low coverage yields sparse fair-weather puffs and a high coverage an
 //     overcast sheet. PARTLY-CLOUDY is the mid range the CloudShadow gate uses.
 float cloudCoverageAt(vec2 worldXZ) {
-    // Metres -> noise units. ~1200 m feature scale for the main cloud cells.
-    vec2 p = (worldXZ + u_cloudScrollOffset) * (1.0 / 1200.0);
+    // T-I7: larger cloud clusters (~2400 m feature scale, was 1200) for bolder,
+    // more pronounced cloud masses. MUST stay identical to
+    // lighting_pass.frag::cloudCoverageAt so the dome cloud and its cast shadow
+    // remain registered.
+    vec2 p = (worldXZ + u_cloudScrollOffset) * (1.0 / 2400.0);
     float base = fbm(p, 5);
     float detail = fbm(p * 2.7 + vec2(11.3, 4.7), 3);
     float field = base * 0.72 + detail * 0.28;
