@@ -520,6 +520,7 @@ add_executable(frontier_gates_test
     ai/evolution_test.cpp
     ai/awareness_test.cpp
     ai/perception_system_test.cpp
+    ai/scent_steering_system_test.cpp
     ai/stimulus_channel_gate_test.cpp
     scripting/lua_api_manifest_gate_test.cpp
     fields/scalar_field_diffusion_gate_test.cpp
