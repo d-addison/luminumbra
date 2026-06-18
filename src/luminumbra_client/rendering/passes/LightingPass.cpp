@@ -147,7 +147,7 @@ void LightingPass::execute(RenderPipeline& pipeline, const Camera& camera) {
         float exposure, saturation, contrast, wr, wg, wb;
     };
     static const Grade s_grade = [] {
-        Grade g{1.16f, 1.32f, 1.30f, 1.0f, 1.0f, 1.0f}; // cinematic default
+        Grade g{1.14f, 1.04f, 1.22f, 1.05f, 1.0f, 0.93f}; // cinematic, natural saturation + warm
         if (const char* env = std::getenv("LUMIN_GRADE")) {
             std::sscanf(env, "%f,%f,%f,%f,%f,%f", &g.exposure, &g.saturation,
                         &g.contrast, &g.wr, &g.wg, &g.wb);
