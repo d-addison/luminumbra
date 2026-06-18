@@ -139,21 +139,18 @@ void LightingPass::execute(RenderPipeline& pipeline, const Camera& camera) {
     m_lighting_shader->setVec3("u_sun.direction", pipeline.m_sun.direction);
     m_lighting_shader->setVec3("u_sun.color", pipeline.m_sun.color);
     m_lighting_shader->setFloat("u_sea_level", SEA_LEVEL);
-    // T-I7 realistic-lighting grade. Defaults to identity (no look change) so the
-    // visual gates are unaffected until a realistic preset is baked in. Tunable
-    // via LUMIN_GRADE="exposure,saturation,contrast,warmR,warmG,warmB" (parsed
-    // once) so a capture/tuning run can sweep the look without rebuilding.
-    static const struct GradeOverride {
-        bool set = false;
-        float exposure = 1.0f, saturation = 1.0f, contrast = 1.0f;
-        float wr = 1.0f, wg = 1.0f, wb = 1.0f;
-    } s_grade = [] {
-        GradeOverride g;
+    // T-I7 cinematic grade (BF1-style): BOLD default — lifted exposure, rich
+    // saturation, strong contrast, and a cool-shadow / warm-highlight split-tone
+    // (the key/fill cue). Tunable via LUMIN_GRADE="exposure,saturation,contrast,
+    // warmR,warmG,warmB" (parsed once); the split-tone is fixed cinematic.
+    struct Grade {
+        float exposure, saturation, contrast, wr, wg, wb;
+    };
+    static const Grade s_grade = [] {
+        Grade g{1.16f, 1.32f, 1.30f, 1.0f, 1.0f, 1.0f}; // cinematic default
         if (const char* env = std::getenv("LUMIN_GRADE")) {
-            if (std::sscanf(env, "%f,%f,%f,%f,%f,%f", &g.exposure, &g.saturation,
-                            &g.contrast, &g.wr, &g.wg, &g.wb) >= 1) {
-                g.set = true;
-            }
+            std::sscanf(env, "%f,%f,%f,%f,%f,%f", &g.exposure, &g.saturation,
+                        &g.contrast, &g.wr, &g.wg, &g.wb);
         }
         return g;
     }();
@@ -161,6 +158,9 @@ void LightingPass::execute(RenderPipeline& pipeline, const Camera& camera) {
     m_lighting_shader->setFloat("u_saturation", s_grade.saturation);
     m_lighting_shader->setFloat("u_contrast", s_grade.contrast);
     m_lighting_shader->setVec3("u_lightWarmth", glm::vec3(s_grade.wr, s_grade.wg, s_grade.wb));
+    m_lighting_shader->setVec3("u_shadowTint", glm::vec3(0.88f, 0.96f, 1.14f));   // cool
+    m_lighting_shader->setVec3("u_highlightTint", glm::vec3(1.14f, 1.04f, 0.84f)); // warm
+    m_lighting_shader->setFloat("u_splitToneStrength", 0.55f);
     m_lighting_shader->setInt("u_pointLightCount", static_cast<int>(pipeline.m_point_lights_this_frame.size()));
     for(size_t i = 0; i < pipeline.m_point_lights_this_frame.size(); ++i) {
         std::string prefix = "u_pointLights[" + std::to_string(i) + "].";
