@@ -16,7 +16,7 @@ out VS_OUT {
 } vs_out;
 
 // ===========================================================================
-// T-I6 #3: gentle Gerstner SWELLS (RENDER-ONLY).
+// T-I7 Wave B: gentle ocean Gerstner SWELLS (RENDER-ONLY).
 //
 // The water surface was a perfectly flat per-chunk mesh; all surface motion
 // lived in the fragment shader's per-pixel ripple NORMALS, so the silhouette
