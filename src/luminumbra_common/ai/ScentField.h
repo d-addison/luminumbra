@@ -131,6 +131,30 @@ public:
         return std::sqrt(static_cast<double>(gx) * gx + static_cast<double>(gz) * gz);
     }
 
+    // T-I9-AI E2: chemotaxis STEERING off the scent gradient — the hunting/tracking
+    // read side (research: Weber-law normalized gradient following). Writes a UNIT
+    // direction (out_dx,out_dz) to steer TOWARD (sign=+1, a predator tracking prey)
+    // or AWAY FROM (sign=-1, prey fleeing) the scent source at (x,z), and returns a
+    // Weber-normalized CONFIDENCE m/(m+k) in [0,1) (k = the half-confidence
+    // gradient magnitude — robust to absolute concentration). Returns 0 with a zero
+    // direction when the gradient magnitude is below `floor` — the tracking-window
+    // cutoff (a cold/evaporated trail yields no commitment). Deterministic.
+    float GradientSteer(int ch, int x, int z, float sign, float floor, float k, float& out_dx,
+                        float& out_dz) const {
+        out_dx = 0.0f;
+        out_dz = 0.0f;
+        float gx = 0.0f;
+        float gz = 0.0f;
+        const double mag = Gradient(ch, x, z, gx, gz);
+        if (mag <= 0.0 || static_cast<float>(mag) < floor) return 0.0f;
+        const float inv = 1.0f / static_cast<float>(mag); // |(gx,gz)| == mag
+        out_dx = sign * gx * inv;
+        out_dz = sign * gz * inv;
+        const float m = static_cast<float>(mag);
+        const float kk = k > 0.0f ? k : 1.0f;
+        return m / (m + kk); // Weber-normalized confidence in [0,1)
+    }
+
 private:
     [[nodiscard]] bool valid(int ch, int x, int z) const {
         return ch >= 0 && ch < static_cast<int>(m_ch.size()) && in_bounds(x, z);
