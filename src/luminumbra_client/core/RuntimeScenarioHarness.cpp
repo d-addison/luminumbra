@@ -6768,6 +6768,97 @@ Luminumbra::Components::OpportunityComponent OpportunityFromJson(const nlohmann:
     return opportunity;
 }
 
+void ApplyLocomotionFromJson(
+    entt::registry& registry,
+    entt::entity entity,
+    const nlohmann::json& data,
+    CreatureSliceScene& scene) {
+    auto& profile = registry.get_or_emplace<Luminumbra::Components::LocomotionProfile>(entity);
+    profile.move_speed = data.value("move_speed", profile.move_speed);
+    profile.arrival_radius = data.value("arrival_radius", profile.arrival_radius);
+    profile.slow_radius = data.value("slow_radius", profile.slow_radius);
+    profile.separation_radius = data.value("separation_radius", profile.separation_radius);
+    profile.separation_strength = data.value("separation_strength", profile.separation_strength);
+    profile.flock_radius = data.value("flock_radius", profile.flock_radius);
+    profile.cohesion_strength = data.value("cohesion_strength", profile.cohesion_strength);
+    profile.alignment_strength = data.value("alignment_strength", profile.alignment_strength);
+    registry.get_or_emplace<Luminumbra::Components::LocomotionIntentComponent>(entity);
+    scene.ecology_locomotion = true;
+}
+
+void ApplySensableFromJson(
+    entt::registry& registry,
+    entt::entity entity,
+    const nlohmann::json& data,
+    CreatureSliceScene& scene) {
+    auto& sensable = registry.get_or_emplace<Luminumbra::Components::SensableComponent>(entity);
+    sensable.scent_channel = data.value("scent_channel", data.value("channel", sensable.scent_channel));
+    sensable.scent_deposit = data.value("scent_deposit", data.value("deposit", sensable.scent_deposit));
+    sensable.noise_loudness = data.value("noise_loudness", sensable.noise_loudness);
+    sensable.noise_pitch = data.value("noise_pitch", sensable.noise_pitch);
+    sensable.faction = static_cast<std::uint32_t>(
+        data.value("faction", static_cast<int>(sensable.faction)));
+    if (sensable.scent_channel >= 0 && sensable.scent_deposit > 0.0f) {
+        scene.ecology_scent_emitter = true;
+    }
+}
+
+void ApplyScentSenseFromJson(
+    entt::registry& registry,
+    entt::entity entity,
+    const nlohmann::json& data,
+    CreatureSliceScene& scene) {
+    auto& sense = registry.get_or_emplace<Luminumbra::Components::ScentSenseComponent>(entity);
+    sense.channel = data.value("channel", sense.channel);
+    sense.sign = data.value("sign", sense.sign);
+    sense.strength = data.value("strength", sense.strength);
+    sense.floor = data.value("floor", sense.floor);
+    sense.weber_k = data.value("weber_k", sense.weber_k);
+    registry.get_or_emplace<Luminumbra::Components::LocomotionProfile>(entity);
+    registry.get_or_emplace<Luminumbra::Components::LocomotionIntentComponent>(entity);
+    scene.ecology_scent_sense = sense.channel >= 0;
+    scene.ecology_locomotion = true;
+}
+
+void ApplyPerceptionFromJson(
+    entt::registry& registry,
+    entt::entity entity,
+    const nlohmann::json& data,
+    CreatureSliceScene& scene) {
+    auto& perception = registry.get_or_emplace<Luminumbra::Components::PerceptionComponent>(entity);
+    perception.vision_cos_half_fov =
+        data.value("vision_cos_half_fov", perception.vision_cos_half_fov);
+    perception.vision_range = data.value("vision_range", perception.vision_range);
+    perception.facing_x = data.value("facing_x", perception.facing_x);
+    perception.facing_z = data.value("facing_z", perception.facing_z);
+    perception.faction = static_cast<std::uint32_t>(
+        data.value("faction", static_cast<int>(perception.faction)));
+    registry.get_or_emplace<Luminumbra::Components::AwarenessComponent>(entity);
+    scene.ecology_perception = true;
+}
+
+void ApplyOptionalEcologyBlocks(
+    entt::registry& registry,
+    entt::entity entity,
+    const nlohmann::json& data,
+    CreatureSliceScene& scene) {
+    if (data.contains("locomotion")) {
+        ApplyLocomotionFromJson(registry, entity, data.at("locomotion"), scene);
+    }
+    if (data.contains("sensable")) {
+        ApplySensableFromJson(registry, entity, data.at("sensable"), scene);
+    }
+    if (data.contains("scent_emitter")) {
+        ApplySensableFromJson(registry, entity, data.at("scent_emitter"), scene);
+    }
+    if (data.contains("scent_sense")) {
+        ApplyScentSenseFromJson(registry, entity, data.at("scent_sense"), scene);
+    }
+    if (data.contains("perception")) {
+        ApplyPerceptionFromJson(registry, entity, data.at("perception"), scene);
+    }
+}
+
 } // namespace
 
 CreatureSliceScene SpawnCreatureSliceScene(
@@ -6988,6 +7079,7 @@ CreatureSliceScene SpawnCreatureSliceScene(
                 registry.remove<Luminumbra::Components::StimulusSubscriptionComponent>(creature);
             }
         }
+        ApplyOptionalEcologyBlocks(registry, creature, creature_data, scene);
     }
     scene.creature = creature;
 
@@ -7045,6 +7137,7 @@ bool SpawnCreatureSliceStimulus(
     }
     registry.emplace<Luminumbra::Components::OpportunityComponent>(stimulus) =
         OpportunityFromJson(stimulus_data);
+    ApplyOptionalEcologyBlocks(registry, stimulus, stimulus_data, scene);
 
     scene.stimulus = stimulus;
     scene.stimulus_spawned = true;
@@ -7112,6 +7205,7 @@ void UpdateCreatureSliceScene(
             transform->rotation = glm::angleAxis(yaw, glm::vec3(0.0f, 1.0f, 0.0f));
         }
     }
+    scene.ecology_scent_hash = game_session->ComputeScentSubHash();
 }
 
 void ApplyCreatureSliceCamera(
@@ -7488,6 +7582,13 @@ void WriteCreatureSliceAnalysis(
             {"stimulus_position", Vec3ToJson(scene.stimulus_position)},
             {"camera_position", Vec3ToJson(scene.camera_position)},
             {"stimulus_spawned", scene.stimulus_spawned},
+        }},
+        {"ecology", {
+            {"locomotion", scene.ecology_locomotion},
+            {"scent_emitter", scene.ecology_scent_emitter},
+            {"scent_sense", scene.ecology_scent_sense},
+            {"perception", scene.ecology_perception},
+            {"scent_hash", scene.ecology_scent_hash},
         }},
         {"expected", {
             {"before_action", scene.expected_before_action},

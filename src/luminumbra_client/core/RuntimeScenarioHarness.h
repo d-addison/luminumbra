@@ -1432,6 +1432,11 @@ struct CreatureSliceScene {
     std::string expected_before_action;
     std::string expected_after_action;
     std::string active_clip;
+    bool ecology_locomotion = false;
+    bool ecology_scent_emitter = false;
+    bool ecology_scent_sense = false;
+    bool ecology_perception = false;
+    std::string ecology_scent_hash;
     // Loaded archetype JSON (slice/creature blocks consumed at runtime).
     nlohmann::json archetype;
 };
