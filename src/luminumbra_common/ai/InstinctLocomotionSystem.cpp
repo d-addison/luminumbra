@@ -13,6 +13,7 @@ namespace luminumbra::ai {
 InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry) {
     using Luminumbra::Components::ActionPlanComponent;
     using Luminumbra::Components::LocomotionIntentComponent;
+    using Luminumbra::Components::LocomotionPathComponent;
     using Luminumbra::Components::LocomotionProfile;
     using Luminumbra::Components::TransformComponent;
 
@@ -73,17 +74,30 @@ InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry
         }
 
         const auto& target_tf = registry.get<const TransformComponent>(target);
+        const bool flee = plan.plan[plan.current_action_index].flee;
 
-        // Horizontal vector to the target (XZ plane; Y handled by the character's
+        // T-I9-AI path-following: when the agent carries a LocomotionPathComponent
+        // with a remaining waypoint (and is not fleeing), seek the WAYPOINT instead
+        // of the action target directly. On waypoint arrival the index advances;
+        // once the route is exhausted the agent resumes the plain action-target
+        // seek so it still finishes onto its goal. No component -> byte-identical.
+        auto* path = registry.try_get<LocomotionPathComponent>(entity);
+        const bool following =
+            !flee && path != nullptr && path->index < path->waypoints.size();
+        const float goal_x =
+            following ? path->waypoints[path->index].x : target_tf.position.x;
+        const float goal_z =
+            following ? path->waypoints[path->index].y : target_tf.position.z;
+
+        // Horizontal vector to the goal (XZ plane; Y handled by the character's
         // ground-stick in physics). Float-only; Sqrt is IEEE-deterministic.
-        const float dx = target_tf.position.x - tf.position.x;
-        const float dz = target_tf.position.z - tf.position.z;
+        const float dx = goal_x - tf.position.x;
+        const float dz = goal_z - tf.position.z;
         const float dist = Luminumbra::DeterministicMath::Sqrt(dx * dx + dz * dz);
 
         const float slow = profile.slow_radius > profile.arrival_radius
                                ? profile.slow_radius
                                : profile.arrival_radius;
-        const bool flee = plan.plan[plan.current_action_index].flee;
 
         if (flee) {
             // T-I9-AI flee/avoidance: move AWAY from the (threat) target until
@@ -107,7 +121,15 @@ InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry
                                  -adz * ainv * profile.move_speed);
         } else {
             if (dist <= profile.arrival_radius) {
-                // Arrived: hold and advance so the next action (if any) runs.
+                if (following) {
+                    // Reached this waypoint: advance the route (next tick seeks the
+                    // next waypoint, or the action target once the path runs out).
+                    // The PLAN is not advanced here — the action completes only on
+                    // arrival at its real target, after the path is exhausted.
+                    ++path->index;
+                    continue;
+                }
+                // Arrived at the action target: hold and advance the plan.
                 intent.arrived = true;
                 ++stats.agents_arrived;
                 ++plan.current_action_index;

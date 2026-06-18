@@ -16,6 +16,7 @@ namespace {
 using Luminumbra::Components::Action;
 using Luminumbra::Components::ActionPlanComponent;
 using Luminumbra::Components::LocomotionIntentComponent;
+using Luminumbra::Components::LocomotionPathComponent;
 using Luminumbra::Components::LocomotionProfile;
 using Luminumbra::Components::TransformComponent;
 using luminumbra::ai::RunInstinctLocomotionOnTick;
@@ -138,6 +139,50 @@ TEST(InstinctLocomotion, IsDeterministicAcrossRuns) {
     std::memcpy(&by, &wish_b.y, 4);
     EXPECT_EQ(ax, bx);
     EXPECT_EQ(ay, by);
+}
+
+// T-I9-AI: with a path component the agent seeks the WAYPOINT, not the target.
+TEST(InstinctLocomotion, FollowsWaypointBeforeSeekingTarget) {
+    entt::registry reg;
+    const auto target = MakeTarget(reg, 10.0f, 0.0f); // target on +X
+    LocomotionProfile p;
+    p.move_speed = 3.0f;
+    p.arrival_radius = 1.0f;
+    p.slow_radius = 2.0f;
+    const auto agent = MakeAgent(reg, 0.0f, 0.0f, target, p);
+    auto& path = reg.emplace<LocomotionPathComponent>(agent);
+    path.waypoints = {Luminumbra::Vec2(0.0f, 5.0f)}; // waypoint on +Z (perpendicular)
+
+    RunInstinctLocomotionOnTick(reg);
+
+    const auto& w = reg.get<LocomotionIntentComponent>(agent).wish_xz;
+    EXPECT_GT(w.y, 1.0f);          // heads toward the +Z waypoint...
+    EXPECT_NEAR(w.x, 0.0f, 1e-4f); // ...NOT directly toward the +X target
+}
+
+// T-I9-AI: reaching a waypoint advances the route; once exhausted the agent
+// resumes seeking the action target.
+TEST(InstinctLocomotion, WaypointArrivalAdvancesThenPathExhaustsToTarget) {
+    entt::registry reg;
+    const auto target = MakeTarget(reg, 10.0f, 0.0f); // +X
+    LocomotionProfile p;
+    p.move_speed = 3.0f;
+    p.arrival_radius = 1.0f;
+    p.slow_radius = 2.0f;
+    const auto agent = MakeAgent(reg, 0.0f, 0.0f, target, p);
+    auto& path = reg.emplace<LocomotionPathComponent>(agent);
+    path.waypoints = {Luminumbra::Vec2(0.5f, 0.0f)}; // already within arrival_radius
+
+    // Tick 1: within arrival_radius of the lone waypoint -> advance index, hold.
+    RunInstinctLocomotionOnTick(reg);
+    EXPECT_EQ(reg.get<LocomotionPathComponent>(agent).index, 1u);
+    EXPECT_NEAR(Len(reg.get<LocomotionIntentComponent>(agent).wish_xz), 0.0f, 1e-6f);
+
+    // Tick 2: path exhausted -> seeks the +X action target.
+    RunInstinctLocomotionOnTick(reg);
+    const auto& w = reg.get<LocomotionIntentComponent>(agent).wish_xz;
+    EXPECT_GT(w.x, 1.0f);
+    EXPECT_NEAR(w.y, 0.0f, 1e-4f);
 }
 
 // T-I9-AI: a flee action moves the agent directly AWAY from the (threat) target.

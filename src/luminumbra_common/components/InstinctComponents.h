@@ -109,6 +109,18 @@ struct LocomotionIntentComponent {
     bool arrived = false;
 };
 
+// T-I9-AI path-following: an optional precomputed route (e.g. from grid A*, see
+// AStarGrid.h) the locomotion executor walks before falling back to the direct
+// action-target seek. Waypoints are WORLD-space XZ. DATA-FLAGGED by presence: an
+// agent WITHOUT this component (the canonical roster) is byte-identical and
+// world_hash is unchanged. The executor seeks waypoint[index], advances index on
+// arrival, and once the path is exhausted resumes the plain action-target seek so
+// the agent still finishes onto its goal.
+struct LocomotionPathComponent {
+    std::vector<Vec2> waypoints;          // world-space XZ route, start..goal
+    std::uint32_t index = 0;              // current waypoint being sought
+};
+
 // T-I5b-2 (E1): GAME-DATA opt-in for the ecology stimulus channels. A creature
 // that carries this component REACTS to the environment: each subscription maps
 // a stimulus channel onto a named need, scaling the need's pressure by the
