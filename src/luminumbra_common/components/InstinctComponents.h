@@ -85,6 +85,13 @@ struct LocomotionProfile {
     f32 move_speed = 2.0f;      // m/s horizontal cruise speed
     f32 arrival_radius = 1.5f;  // m; within this the agent is "arrived" and holds
     f32 slow_radius = 4.0f;     // m; linear arrival speed-ramp begins at this range
+    // T-I9-AI obstacle/crowd avoidance (Reynolds separation). DATA-FLAGGED OFF by
+    // default: separation_strength == 0 makes the avoidance term a no-op, so the
+    // canonical headless roster (which leaves these at 0) is byte-identical and
+    // world_hash is unchanged. Set > 0 per-archetype to keep agents from piling
+    // up on a shared target at scale (the 20-48-agent multiplayer scenes).
+    f32 separation_radius = 0.0f;    // m; neighbors within this push the agent away
+    f32 separation_strength = 0.0f;  // 0 = off; >0 scales the avoidance vs the seek
 };
 
 // ENGINE OUTPUT: the horizontal wish velocity produced by InstinctLocomotionSystem

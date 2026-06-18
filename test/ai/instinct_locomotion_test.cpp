@@ -140,6 +140,61 @@ TEST(InstinctLocomotion, IsDeterministicAcrossRuns) {
     EXPECT_EQ(ay, by);
 }
 
+// T-I9-AI: separation (crowd/obstacle avoidance) pushes two crowded agents that
+// seek the SAME target apart laterally, while both still advance toward it.
+TEST(InstinctLocomotion, SeparationPushesCrowdedAgentsApart) {
+    entt::registry reg;
+    const auto target = MakeTarget(reg, 100.0f, 0.0f); // far, on +X
+    LocomotionProfile p;
+    p.move_speed = 3.0f;
+    p.separation_radius = 3.0f;
+    p.separation_strength = 1.0f;
+    // Two agents 1 m apart on the Z axis, both seeking the same far target.
+    const auto a = MakeAgent(reg, 0.0f, 0.0f, target, p);
+    const auto b = MakeAgent(reg, 0.0f, 1.0f, target, p);
+
+    RunInstinctLocomotionOnTick(reg);
+
+    const auto& wa = reg.get<LocomotionIntentComponent>(a).wish_xz;
+    const auto& wb = reg.get<LocomotionIntentComponent>(b).wish_xz;
+    // Both still head toward the target (+X)...
+    EXPECT_GT(wa.x, 0.0f);
+    EXPECT_GT(wb.x, 0.0f);
+    // ...but A (at lower Z) is pushed -Z and B (at higher Z) +Z, away from each other.
+    EXPECT_LT(wa.y, -0.1f);
+    EXPECT_GT(wb.y, 0.1f);
+    // Avoidance never exceeds the locomotion budget.
+    EXPECT_LE(Len(wa), p.move_speed + 1e-4f);
+    EXPECT_LE(Len(wb), p.move_speed + 1e-4f);
+}
+
+// T-I9-AI: separation defaults OFF (strength 0) — a crowded neighbor must NOT
+// perturb the wish, so the canonical roster (which never sets separation) is
+// byte-identical and world_hash is unchanged. This is the determinism guarantee.
+TEST(InstinctLocomotion, SeparationDefaultOffIsByteIdentical) {
+    auto wish_with_neighbor = [](bool add_neighbor) {
+        entt::registry reg;
+        const auto target = MakeTarget(reg, 50.0f, 0.0f);
+        LocomotionProfile p; // defaults: separation_strength == 0
+        p.move_speed = 2.5f;
+        const auto a = MakeAgent(reg, 0.0f, 0.0f, target, p);
+        if (add_neighbor) {
+            (void)MakeAgent(reg, 0.0f, 0.5f, target, p); // very close crowding agent
+        }
+        RunInstinctLocomotionOnTick(reg);
+        return reg.get<LocomotionIntentComponent>(a).wish_xz;
+    };
+    const auto solo = wish_with_neighbor(false);
+    const auto crowded = wish_with_neighbor(true);
+    std::uint32_t sx, sy, cx, cy;
+    std::memcpy(&sx, &solo.x, 4);
+    std::memcpy(&sy, &solo.y, 4);
+    std::memcpy(&cx, &crowded.x, 4);
+    std::memcpy(&cy, &crowded.y, 4);
+    EXPECT_EQ(sx, cx); // identical bits with separation off, neighbor or not
+    EXPECT_EQ(sy, cy);
+}
+
 // Visiting order is independent of entity insertion order (deterministic sort).
 TEST(InstinctLocomotion, OrderIndependentPerEntityResult) {
     // Registry A: target first, then agent. Registry B: agent first, then target.
