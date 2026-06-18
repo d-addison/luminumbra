@@ -223,6 +223,50 @@ TEST(InstinctLocomotion, FleeStopsWhenSafe) {
     EXPECT_EQ(reg.get<ActionPlanComponent>(agent).current_action_index, 1u); // advanced
 }
 
+// T-I9-AI flocking: cohesion adds a pull toward the neighbor group's center.
+TEST(InstinctLocomotion, CohesionPullsTowardGroupCenter) {
+    auto wish_with_cohesion = [](float strength) {
+        entt::registry reg;
+        const auto target = MakeTarget(reg, 0.0f, 100.0f); // far on +Z -> seek is +Z
+        LocomotionProfile p;
+        p.move_speed = 3.0f;
+        p.flock_radius = 20.0f;
+        p.cohesion_strength = strength;
+        const auto a = MakeAgent(reg, 0.0f, 0.0f, target, p);
+        // Two neighbors clustered on +X so the group centroid is on +X of agent A.
+        (void)MakeAgent(reg, 10.0f, 0.0f, target, p);
+        (void)MakeAgent(reg, 10.0f, 2.0f, target, p);
+        RunInstinctLocomotionOnTick(reg);
+        return reg.get<LocomotionIntentComponent>(a).wish_xz;
+    };
+    const auto off = wish_with_cohesion(0.0f);
+    const auto on = wish_with_cohesion(1.0f);
+    EXPECT_NEAR(off.x, 0.0f, 1e-4f);  // pure +Z seek, no lateral pull
+    EXPECT_GT(on.x, off.x + 0.1f);    // cohesion pulls toward the +X group center
+}
+
+// T-I9-AI flocking: alignment steers toward the neighbors' mean heading.
+TEST(InstinctLocomotion, AlignmentMatchesNeighborHeading) {
+    auto wish_with_alignment = [](float strength) {
+        entt::registry reg;
+        const auto target = MakeTarget(reg, 0.0f, 100.0f); // agent A seeks +Z
+        LocomotionProfile p;
+        p.move_speed = 3.0f;
+        p.flock_radius = 20.0f;
+        p.alignment_strength = strength;
+        const auto a = MakeAgent(reg, 0.0f, 0.0f, target, p);
+        // A neighbor already moving on +X (prior-tick heading), nearby.
+        const auto nb = MakeAgent(reg, 3.0f, 0.0f, target, p);
+        reg.emplace<LocomotionIntentComponent>(nb).wish_xz = Luminumbra::Vec2(3.0f, 0.0f);
+        RunInstinctLocomotionOnTick(reg);
+        return reg.get<LocomotionIntentComponent>(a).wish_xz;
+    };
+    const auto off = wish_with_alignment(0.0f);
+    const auto on = wish_with_alignment(1.0f);
+    EXPECT_NEAR(off.x, 0.0f, 1e-4f); // pure +Z seek
+    EXPECT_GT(on.x, off.x + 0.1f);   // alignment turns A toward the +X mean heading
+}
+
 // T-I9-AI: separation (crowd/obstacle avoidance) pushes two crowded agents that
 // seek the SAME target apart laterally, while both still advance toward it.
 TEST(InstinctLocomotion, SeparationPushesCrowdedAgentsApart) {

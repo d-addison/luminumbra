@@ -98,6 +98,15 @@ struct LocomotionProfile {
     // up on a shared target at scale (the 20-48-agent multiplayer scenes).
     f32 separation_radius = 0.0f;    // m; neighbors within this push the agent away
     f32 separation_strength = 0.0f;  // 0 = off; >0 scales the avoidance vs the seek
+    // T-I9-AI flocking/herding: the other two Reynolds rules. Cohesion steers
+    // toward the local group's center of mass; alignment matches the group's mean
+    // heading. Both use flock_radius as the perception neighborhood and are
+    // DATA-FLAGGED OFF (strength 0) so the canonical roster stays byte-identical
+    // and world_hash is unchanged. Set all three (separation+cohesion+alignment)
+    // for true flocking; cohesion alone reads as loose herding.
+    f32 flock_radius = 0.0f;         // m; perception radius for cohesion + alignment
+    f32 cohesion_strength = 0.0f;    // 0 = off; pull toward neighbor center of mass
+    f32 alignment_strength = 0.0f;   // 0 = off; match neighbor mean heading
 };
 
 // ENGINE OUTPUT: the horizontal wish velocity produced by InstinctLocomotionSystem
