@@ -140,6 +140,44 @@ TEST(InstinctLocomotion, IsDeterministicAcrossRuns) {
     EXPECT_EQ(ay, by);
 }
 
+// T-I9-AI: a flee action moves the agent directly AWAY from the (threat) target.
+TEST(InstinctLocomotion, FleeMovesAwayFromThreat) {
+    entt::registry reg;
+    const auto threat = MakeTarget(reg, 2.0f, 0.0f); // threat on +X, close
+    LocomotionProfile p;
+    p.move_speed = 3.0f;
+    p.slow_radius = 5.0f; // safe distance
+    const auto agent = MakeAgent(reg, 0.0f, 0.0f, threat, p);
+    reg.get<ActionPlanComponent>(agent).plan[0].flee = true;
+
+    const auto stats = RunInstinctLocomotionOnTick(reg);
+
+    EXPECT_EQ(stats.agents_steered, 1u);
+    EXPECT_EQ(stats.agents_arrived, 0u);
+    const auto& w = reg.get<LocomotionIntentComponent>(agent).wish_xz;
+    EXPECT_NEAR(w.x, -3.0f, 1e-4f); // flees in -X, away from the +X threat
+    EXPECT_NEAR(w.y, 0.0f, 1e-4f);
+    EXPECT_NEAR(Len(w), 3.0f, 1e-4f); // full cruise while unsafe
+}
+
+// T-I9-AI: once beyond slow_radius (the safe distance) the flee action completes.
+TEST(InstinctLocomotion, FleeStopsWhenSafe) {
+    entt::registry reg;
+    const auto threat = MakeTarget(reg, 10.0f, 0.0f); // far -> already safe
+    LocomotionProfile p;
+    p.move_speed = 3.0f;
+    p.slow_radius = 5.0f;
+    const auto agent = MakeAgent(reg, 0.0f, 0.0f, threat, p);
+    reg.get<ActionPlanComponent>(agent).plan[0].flee = true;
+
+    const auto stats = RunInstinctLocomotionOnTick(reg);
+
+    EXPECT_EQ(stats.agents_arrived, 1u);
+    const auto& w = reg.get<LocomotionIntentComponent>(agent).wish_xz;
+    EXPECT_NEAR(Len(w), 0.0f, 1e-6f);              // safe: holds
+    EXPECT_EQ(reg.get<ActionPlanComponent>(agent).current_action_index, 1u); // advanced
+}
+
 // T-I9-AI: separation (crowd/obstacle avoidance) pushes two crowded agents that
 // seek the SAME target apart laterally, while both still advance toward it.
 TEST(InstinctLocomotion, SeparationPushesCrowdedAgentsApart) {
