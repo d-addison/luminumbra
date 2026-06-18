@@ -907,6 +907,13 @@ private:
     // albedo array; layer indices come from the material LUT normal_layer
     // column. RGBA8 tangent-space (OpenGL convention) normal maps.
     u32 m_terrainNormalArray = 0;
+    // I7.1-PBR (B1d): per-material triplanar ROUGHNESS-map array. Same layer
+    // order as albedo/normal; linear RGBA8 (roughness in .r). Sampled in
+    // g_buffer.frag to drive per-texel roughness (was a flat per-material scalar
+    // from materials.json). m_terrainRoughnessValid is 0 when any layer fell back
+    // (then the shader keeps the scalar). Render-only — no world_hash impact.
+    u32 m_terrainRoughnessArray = 0;
+    int m_terrainRoughnessValid = 0;
     u32 m_materialLUT = 0;
     // T-I6-A1d: Aetheric scalar field as an R32F texture for the lighting-pass
     // emissive tap. Updated per frame from the sim field (one-way bridge).

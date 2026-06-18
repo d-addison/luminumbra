@@ -213,6 +213,11 @@ void GBufferPass::geometry_pass_chunks(RenderPipeline& pipeline,
     m_geometry_shader->setInt("u_skinnedTextures", 3);
     m_geometry_shader->setInt("u_skinnedAlbedoLayer", -1); // terrain uses triplanar, not UV
     m_geometry_shader->setInt("u_skinnedNormalLayer", -1);
+    // I7.1-PBR B1d: per-texel terrain roughness map (unit 4).
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_terrainRoughnessArray ? pipeline.m_terrainRoughnessArray : pipeline.m_terrainTextureArray);
+    m_geometry_shader->setInt("u_terrainRoughness", 4);
+    m_geometry_shader->setInt("u_terrainRoughnessValid", pipeline.m_terrainRoughnessValid);
 
     // Perform hierarchical frustum culling
     std::vector<const RenderPipeline::ChunkCullEntry*> visible_chunks;
@@ -275,6 +280,12 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
     m_instanced_static_mesh_shader->setInt("u_skinnedTextures", 3);
     m_instanced_static_mesh_shader->setInt("u_skinnedAlbedoLayer", -1);
     m_instanced_static_mesh_shader->setInt("u_skinnedNormalLayer", -1);
+    // I7.1-PBR B1d: per-texel terrain roughness map (unit 4) — g_buffer.frag is
+    // shared, so every program using it must bind a valid array to unit 4.
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_terrainRoughnessArray ? pipeline.m_terrainRoughnessArray : pipeline.m_terrainTextureArray);
+    m_instanced_static_mesh_shader->setInt("u_terrainRoughness", 4);
+    m_instanced_static_mesh_shader->setInt("u_terrainRoughnessValid", pipeline.m_terrainRoughnessValid);
     auto view = registry.view<const Components::TransformComponent, const Components::StaticMeshComponent>();
     // T-I3-16: groups carry the material id (per-group uniform) so each
     // static mesh renders with its component material instead of the old
@@ -361,6 +372,11 @@ void GBufferPass::geometry_pass_skinned_meshes(RenderPipeline& pipeline,
     m_skinned_mesh_shader->setInt("u_skinnedTextures", 3);
     m_skinned_mesh_shader->setInt("u_skinnedAlbedoLayer", pipeline.m_skinnedTextureArray ? pipeline.m_skinnedAlbedoLayer : -1);
     m_skinned_mesh_shader->setInt("u_skinnedNormalLayer", pipeline.m_skinnedTextureArray ? pipeline.m_skinnedNormalLayer : -1);
+    // I7.1-PBR B1d: per-texel terrain roughness map (unit 4) — shared g_buffer.frag.
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_terrainRoughnessArray ? pipeline.m_terrainRoughnessArray : pipeline.m_terrainTextureArray);
+    m_skinned_mesh_shader->setInt("u_terrainRoughness", 4);
+    m_skinned_mesh_shader->setInt("u_terrainRoughnessValid", pipeline.m_terrainRoughnessValid);
 
     for (auto entity : view) {
         auto const& transform = view.get<const Components::TransformComponent>(entity);

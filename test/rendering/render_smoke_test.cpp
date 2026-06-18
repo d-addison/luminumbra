@@ -1862,8 +1862,15 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     glUniform1i(glGetUniformLocation(program, "u_skinnedTextures"), 3);
     glUniform1i(glGetUniformLocation(program, "u_skinnedAlbedoLayer"), -1);
     glUniform1i(glGetUniformLocation(program, "u_skinnedNormalLayer"), -1);
+    // I7.1-PBR B1d: u_terrainRoughness (sampler2DArray) must also point at a
+    // DISTINCT unit (4) for the same reason as u_skinnedTextures above — left at
+    // the default unit 0 it collides with the sampler2D LUT and blacks the draw.
+    // valid=0 keeps the scalar roughness on this synthetic plate (no map bound).
+    glUniform1i(glGetUniformLocation(program, "u_terrainRoughness"), 4);
+    glUniform1i(glGetUniformLocation(program, "u_terrainRoughnessValid"), 0);
     glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, material_lut);
     glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D_ARRAY, albedo_array);
+    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D_ARRAY, albedo_array);
     glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D_ARRAY, normal_array);
     glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D_ARRAY, albedo_array); // dummy, unsampled
 

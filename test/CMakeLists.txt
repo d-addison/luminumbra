@@ -594,23 +594,33 @@ add_test(
         "${LUMINUMBRA_GATE_BUILD_PRESET}"
 )
 
-# Discover and add the tests to CTest for running
+# Discover and add the tests to CTest for running.
+# DISCOVERY_TIMEOUT: the default (5s) is too short for the COLD first launch of
+# these large statically-linked exes on Windows (AV scan + page-in of 100 MB+
+# binaries), which spuriously failed the build with "Process terminated due to
+# timeout" during the post-build gtest_discover_tests step (no test actually ran).
+# 120 s is generous headroom; it only affects the one-time list-tests probe.
 include(GoogleTest)
-gtest_discover_tests(world_generation_test)
-gtest_discover_tests(sdf_gpu_cpu_parity_test)
-gtest_discover_tests(worldgen_layer_snapshot_test)
-gtest_discover_tests(asset_processor_round_trip_test)
-gtest_discover_tests(common_tests)
-gtest_discover_tests(render_smoke_test)
-gtest_discover_tests(render_capture_test)
-gtest_discover_tests(waterfall_visual_test)
-gtest_discover_tests(particle_determinism_test)
-gtest_discover_tests(ui_smoke_test)
-gtest_discover_tests(initial_world_loading_perf_test)
-gtest_discover_tests(runtime_world_visual_validation_test)
-gtest_discover_tests(frontier_gates_test)
-gtest_discover_tests(capture_scale_test)
-gtest_discover_tests(isolation_config_test)
+set(LUMINUMBRA_GTEST_TARGETS
+    world_generation_test
+    sdf_gpu_cpu_parity_test
+    worldgen_layer_snapshot_test
+    asset_processor_round_trip_test
+    common_tests
+    render_smoke_test
+    render_capture_test
+    waterfall_visual_test
+    particle_determinism_test
+    ui_smoke_test
+    initial_world_loading_perf_test
+    runtime_world_visual_validation_test
+    frontier_gates_test
+    capture_scale_test
+    isolation_config_test
+)
+foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
+    gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120)
+endforeach()
 
 # T-I4-15: register the spike benchmark under the "manual" label. It is
 # evidence-only (not a required gate) and its Debug runtime (~25s, and can exceed
