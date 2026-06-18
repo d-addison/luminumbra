@@ -514,6 +514,7 @@ add_executable(frontier_gates_test
     ai/instinct_system_test.cpp
     ai/instinct_locomotion_test.cpp
     ai/astar_grid_test.cpp
+    ai/scent_field_test.cpp
     ai/stimulus_channel_gate_test.cpp
     scripting/lua_api_manifest_gate_test.cpp
     fields/scalar_field_diffusion_gate_test.cpp

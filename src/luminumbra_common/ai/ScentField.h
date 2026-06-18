@@ -1,0 +1,143 @@
+#pragma once
+
+// T-I9-AI: scent / pheromone STIGMERGY field — the substrate for emergent
+// tracking, hunting, and trail behaviors (ants laying food/home trails; a
+// predator following prey scent up-gradient; prey fleeing down a predator-scent
+// gradient). Indirect coordination through a shared, decaying environment field
+// is "stigmergy" (Grasse 1959; Dorigo's Ant Colony Optimization; Deneubourg's
+// double-bridge ant-trail experiments).
+//
+// Built ON TOP of the engine's existing conservative diffusion solver
+// (fields::ScalarFieldDiffusion) — one channel per scent species — and adds the
+// two things a *scent* field needs that pure diffusion does not:
+//   * EVAPORATION: scent is non-conservative; each step every cell decays toward
+//     zero so stale trails fade (this is what makes ant trails self-optimize and
+//     what bounds a predator's tracking window).
+//   * GRADIENT SENSING: agents follow the up-gradient (toward the source) or the
+//     down-gradient (away), the read side that turns a deposited trail into a
+//     steering signal (compose with InstinctLocomotion's wish_xz).
+//
+// DETERMINISM (sim contract): the diffusion solver is deterministic (double,
+// fixed traversal order); evaporation is a uniform multiply; the gradient is a
+// central difference. No RNG / wall-clock / libm transcendentals. The field is a
+// standalone subsystem — until a deposit/sense system wires it into the canonical
+// tick it does not feed world_hash (and that wiring is data-flagged, like the
+// flocking/flee/path behaviors).
+
+#include <cmath>
+#include <cstddef>
+#include <vector>
+
+#include "../fields/ScalarFieldDiffusion.h"
+
+namespace luminumbra::ai {
+
+class ScentField {
+public:
+    // `channels` independent scent species (e.g. 0 = prey, 1 = predator, 2 =
+    // food-trail, 3 = home-trail). All share the grid dimensions.
+    ScentField(int width, int height, int channels = 1)
+        : m_w(width > 0 ? width : 0), m_h(height > 0 ? height : 0) {
+        const int n = channels > 0 ? channels : 1;
+        m_ch.reserve(static_cast<std::size_t>(n));
+        for (int c = 0; c < n; ++c) {
+            m_ch.emplace_back(static_cast<std::size_t>(m_w), static_cast<std::size_t>(m_h), 0.0);
+        }
+    }
+
+    [[nodiscard]] int width() const { return m_w; }
+    [[nodiscard]] int height() const { return m_h; }
+    [[nodiscard]] int channels() const { return static_cast<int>(m_ch.size()); }
+
+    [[nodiscard]] bool in_bounds(int x, int z) const {
+        return x >= 0 && z >= 0 && x < m_w && z < m_h;
+    }
+
+    // Lay scent: an agent deposits `amount` of species `ch` at its cell (trail-
+    // laying / scent-marking). Out-of-bounds or unknown channel is a no-op.
+    void Deposit(int ch, int x, int z, double amount) {
+        if (!valid(ch, x, z) || amount == 0.0) return;
+        m_ch[static_cast<std::size_t>(ch)].add_impulse(
+            static_cast<std::size_t>(x), static_cast<std::size_t>(z), amount);
+    }
+
+    // Advance every channel one step: diffuse (spread), then evaporate (decay
+    // toward zero by `evaporation` in [0,1]). `diffusion_iters`/`diffusion_rate`
+    // pass through to the conservative solver. Evaporation is applied AFTER
+    // diffusion so a fresh deposit both spreads and begins to fade.
+    void Step(double diffusion_rate, std::size_t diffusion_iters, double evaporation) {
+        const double keep = 1.0 - (evaporation < 0.0 ? 0.0 : (evaporation > 1.0 ? 1.0 : evaporation));
+        const bool did_diffuse = diffusion_iters > 0 && diffusion_rate > 0.0;
+        const std::size_t W = static_cast<std::size_t>(m_w);
+        const std::size_t H = static_cast<std::size_t>(m_h);
+        for (auto& field : m_ch) {
+            if (did_diffuse) {
+                (void)field.diffuse(diffusion_iters, diffusion_rate);
+                // The conservative 4-neighbour solver leaves a parity (checkerboard)
+                // artifact — after even iterations, odd-Manhattan-distance cells are
+                // exactly 0 — which makes a central-difference gradient read 0 at
+                // those cells. One deterministic 5-point smoothing pass (center 0.5,
+                // each in-bounds neighbour 0.125, edge-normalized) fills the parity
+                // gaps so the scent gradient is usable from any cell. Evaporation is
+                // folded into the same write. Only runs when diffusing, so a pure
+                // evaporation step (iters 0) stays an exact per-cell decay.
+                std::vector<double> tmp(W * H);
+                for (std::size_t y = 0; y < H; ++y)
+                    for (std::size_t x = 0; x < W; ++x) tmp[y * W + x] = field.at(x, y);
+                for (std::size_t y = 0; y < H; ++y) {
+                    for (std::size_t x = 0; x < W; ++x) {
+                        double acc = 0.5 * tmp[y * W + x];
+                        double wsum = 0.5;
+                        if (x > 0)      { acc += 0.125 * tmp[y * W + (x - 1)]; wsum += 0.125; }
+                        if (x + 1 < W)  { acc += 0.125 * tmp[y * W + (x + 1)]; wsum += 0.125; }
+                        if (y > 0)      { acc += 0.125 * tmp[(y - 1) * W + x]; wsum += 0.125; }
+                        if (y + 1 < H)  { acc += 0.125 * tmp[(y + 1) * W + x]; wsum += 0.125; }
+                        field.set(x, y, (acc / wsum) * keep);
+                    }
+                }
+            } else if (keep < 1.0) {
+                for (std::size_t y = 0; y < H; ++y)
+                    for (std::size_t x = 0; x < W; ++x) field.set(x, y, field.at(x, y) * keep);
+            }
+        }
+    }
+
+    // Scent concentration of species `ch` at a cell (0 outside the grid).
+    [[nodiscard]] double Sample(int ch, int x, int z) const {
+        if (!valid(ch, x, z)) return 0.0;
+        return m_ch[static_cast<std::size_t>(ch)].at(static_cast<std::size_t>(x),
+                                                      static_cast<std::size_t>(z));
+    }
+
+    // Central-difference gradient of species `ch` at (x,z). Writes (gx,gz) that
+    // point UP-gradient — toward stronger scent (the source). A hunter steers
+    // along +(gx,gz) to track prey; a prey flees along -(gx,gz). Returns the
+    // gradient magnitude (0 when flat / out of bounds), so callers can gate on a
+    // minimum scent strength before committing to a heading.
+    double Gradient(int ch, int x, int z, float& gx, float& gz) const {
+        gx = 0.0f;
+        gz = 0.0f;
+        if (!valid(ch, x, z)) return 0.0;
+        const auto& f = m_ch[static_cast<std::size_t>(ch)];
+        auto sample = [&](int sx, int sz) -> double {
+            const int cx = sx < 0 ? 0 : (sx >= m_w ? m_w - 1 : sx); // clamp at edges
+            const int cz = sz < 0 ? 0 : (sz >= m_h ? m_h - 1 : sz);
+            return f.at(static_cast<std::size_t>(cx), static_cast<std::size_t>(cz));
+        };
+        const double dgx = sample(x + 1, z) - sample(x - 1, z);
+        const double dgz = sample(x, z + 1) - sample(x, z - 1);
+        gx = static_cast<float>(dgx);
+        gz = static_cast<float>(dgz);
+        return std::sqrt(static_cast<double>(gx) * gx + static_cast<double>(gz) * gz);
+    }
+
+private:
+    [[nodiscard]] bool valid(int ch, int x, int z) const {
+        return ch >= 0 && ch < static_cast<int>(m_ch.size()) && in_bounds(x, z);
+    }
+    int m_w;
+    int m_h;
+    std::vector<luminumbra::fields::ScalarFieldDiffusion> m_ch;
+};
+
+} // namespace luminumbra::ai
