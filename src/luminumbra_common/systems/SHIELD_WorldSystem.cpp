@@ -16,7 +16,7 @@
 #include "../core/Log.h"
 #include "WaterSystem.h"
 
-constexpr int BASE_WORK_BUDGET_EQUIVALENT = 192;
+constexpr int BASE_WORK_BUDGET_EQUIVALENT = 320;
 const int MAX_CHUNKS_TO_PROCESS_PER_FRAME = std::max(1, 
     static_cast<int>(BASE_WORK_BUDGET_EQUIVALENT / (static_cast<float>(Luminumbra::CHUNK_VOLUME) / 4096.0f))
 );
@@ -1652,13 +1652,18 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
     // hole-fill-first ordering and per-chunk LOD selection are unchanged -
     // only how quickly the same work drains. Measured on the 20s
     // EnduranceStreamDrain scenario: max_deferred_age_frames 28 -> 12 and
-    // cumulative_deferred_meshing ~15k -> ~5k versus a fixed budget; a 3x cap
-    // adds little over 2x while tripling worst-case batch latency, so cap
-    // at 2x.
+    // cumulative_deferred_meshing ~15k -> ~5k versus a fixed budget. T-I7
+    // residency push (owner: "parts not loaded" must resolve fast + "up the caps"
+    // for the RTX 5070 Ti target): the deep-backlog cap is raised from 2x to 4x
+    // and the base budget bumped, so initial-load / fast-travel backlogs drain in
+    // far fewer frames (meshing runs on JobSystem workers; the main thread is
+    // still bounded by the per-frame upload cap, so worst-case main-thread cost is
+    // governed by uploads, not this dispatch batch size). Steady-state shallow
+    // backlogs keep the base budget for LOD/hole-fill responsiveness.
     int meshing_budget = MAX_CHUNKS_TO_PROCESS_PER_FRAME;
     if (terrain_meshing_backlog > static_cast<std::size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME)) {
         meshing_budget = static_cast<int>(std::min<std::size_t>(
-            static_cast<std::size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME) * 2u,
+            static_cast<std::size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME) * 4u,
             terrain_meshing_backlog / 2u
         ));
         meshing_budget = std::max(meshing_budget, MAX_CHUNKS_TO_PROCESS_PER_FRAME);
