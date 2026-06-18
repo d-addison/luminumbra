@@ -1,7 +1,9 @@
 #pragma once
 
 #include "../../../include/luminumbra/core/Types.h"
+#include "../ai/Awareness.h"
 #include "../ai/InstinctPlanner.h"
+#include "../ai/Perception.h"
 #include "../ai/StimulusChannels.h"
 #include <cstdint>
 #include <string>
@@ -107,6 +109,35 @@ struct LocomotionProfile {
     f32 flock_radius = 0.0f;         // m; perception radius for cohesion + alignment
     f32 cohesion_strength = 0.0f;    // 0 = off; pull toward neighbor center of mass
     f32 alignment_strength = 0.0f;   // 0 = off; match neighbor mean heading
+};
+
+// T-I9-AI E1: marks an entity OTHERS can sense (prey, predator, herd-mate). Pure
+// game data — what it emits to each sense modality. Default emits nothing.
+struct SensableComponent {
+    int scent_channel = -1;      // ScentField channel this entity deposits into (-1 none)
+    f32 noise_loudness = 0.0f;   // current emitted sound loudness (0 = silent)
+    f32 noise_pitch = 0.5f;      // emitted sound pitch [0,1] (footstep low .. alarm high)
+    std::uint32_t faction = 0;   // perceivers sense entities of OTHER factions
+};
+
+// T-I9-AI E1: a perceiver's senses. Vision FOV is stored as cos(half-angle) so the
+// per-tick cone test is libm-free (set from a degrees gene once at spawn). facing
+// is the unit heading the cone points down (updated from locomotion). All fields
+// are evolvable genes. DATA-FLAGGED by presence: an entity without this component
+// (the canonical headless roster has none) is unaffected -> world_hash unchanged.
+struct PerceptionComponent {
+    f32 vision_cos_half_fov = 0.5f; // cos(half FOV); 0.5 ~= 120 deg total
+    f32 vision_range = 20.0f;       // m
+    f32 facing_x = 1.0f;            // unit heading the vision cone faces
+    f32 facing_z = 0.0f;
+    luminumbra::ai::HearingProfile ear; // hearing audiogram (range/peak/bandwidth/gain/threshold)
+    std::uint32_t faction = 0;      // this perceiver's faction (senses OTHER factions)
+};
+
+// T-I9-AI E1: per-agent fused awareness (the detection meter + state + last-known).
+struct AwarenessComponent {
+    luminumbra::ai::Awareness awareness;
+    luminumbra::ai::AwarenessParams params;
 };
 
 // ENGINE OUTPUT: the horizontal wish velocity produced by InstinctLocomotionSystem

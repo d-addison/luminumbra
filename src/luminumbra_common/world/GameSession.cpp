@@ -1,5 +1,6 @@
 #include "GameSession.h"
 #include "../ai/InstinctSystem.h"
+#include "../ai/PerceptionSystem.h"
 #include "../ai/StimulusChannels.h"
 #include "../components/InstinctComponents.h"
 #include "../animation/AnimationRuntime.h"
@@ -108,6 +109,16 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             const luminumbra::ai::StimulusChannelRegistry stimulus_registry(stimulus_context);
             luminumbra::ai::RunInstinctSystemOnTick(m_registry, current_tick, &stimulus_registry);
         }
+
+        // 2b. T-I9-AI E1: perception fusion. Updates each perceiving creature's
+        // awareness (vision cone + hearing audiogram over Sensable entities of
+        // other factions -> detection meter/state + last-known memory). Runs after
+        // planning so awareness is fresh for the NEXT plan/locomotion. Operates
+        // ONLY on entities carrying PerceptionComponent+AwarenessComponent; the
+        // canonical headless roster carries none, so this is a no-op there and
+        // world_hash is UNCHANGED (byte-identical) -- same discipline as the
+        // stimulus-channel opt-in above. No RNG/wall-clock; id-ordered.
+        luminumbra::ai::RunPerceptionSystemOnTick(m_registry, m_simulationClock.fixed_dt());
 
         // 3. T-I5a-2 (A2): wind field update. Deterministic (DeterministicMath +
         // FastNoise batch path; no wall-clock/RNG). Anchored on the spawn/stream
