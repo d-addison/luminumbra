@@ -149,6 +149,20 @@ struct LocomotionIntentComponent {
     bool arrived = false;
 };
 
+// T-I9-AI E2: smell-driven steering. A creature with this senses ScentField channel
+// `channel` and biases its locomotion wish along the gradient: sign +1 = TRACK
+// toward the source (predator hunting prey scent / ant following a food trail),
+// sign -1 = FLEE down it (prey avoiding predator scent). `strength` scales the bias
+// vs the seek wish; `floor` is the cold-trail cutoff; `k` the Weber half-confidence.
+// DATA-FLAGGED by presence — no component (canonical roster) => unchanged.
+struct ScentSenseComponent {
+    int channel = -1;       // ScentField channel to follow (-1 = inactive)
+    f32 sign = 1.0f;        // +1 track toward source, -1 flee
+    f32 strength = 1.0f;    // bias magnitude vs cruise speed
+    f32 floor = 0.0f;       // min gradient magnitude to act (tracking-window cutoff)
+    f32 weber_k = 1.0f;     // Weber half-confidence gradient magnitude
+};
+
 // T-I9-AI path-following: an optional precomputed route (e.g. from grid A*, see
 // AStarGrid.h) the locomotion executor walks before falling back to the direct
 // action-target seek. Waypoints are WORLD-space XZ. DATA-FLAGGED by presence: an
