@@ -492,6 +492,9 @@ void FarLodSystem::draw_gbuffer(
     // Push far geometry behind coincident live geometry (live wins), and
     // discard far fragments inside the guaranteed-live ring so the
     // under-terrain fill cannot peek through live seam cracks at close range.
+    // The live terrain pool leaves the shared shader in its instanced-origin
+    // path; far-LOD VAOs intentionally bind only the VoxelVertex attributes.
+    geometry_shader.setInt("u_useInstanceOrigin", 0);
     glEnable(GL_POLYGON_OFFSET_FILL);
     glPolygonOffset(2.0f, 4.0f);
     geometry_shader.setFloat("u_farClipInnerRadius", kFarClipInnerRadiusMeters);
