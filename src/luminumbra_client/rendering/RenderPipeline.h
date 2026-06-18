@@ -975,6 +975,11 @@ private:
         std::array<float, 256> emissive_intensity; // 0 = non-emissive (T-I4-9)
         std::array<float, 256> roughness;          // 0..1, default 0.85 (T-I4-10)
         std::array<bool, 256> roughness_set;       // material declared roughness
+        // I7.1-PBR: per-material metallic, data-driven from materials.json (was
+        // hardcoded per-id in init_material_lut, leaving the JSON `metallic`
+        // column dead). 0..1; absent -> the authored row0.r fallback is kept.
+        std::array<float, 256> metallic;           // 0..1, default 0.0
+        std::array<bool, 256> metallic_set;        // material declared metallic
         // T-I5b-5-water-backlog: per-material albedo multiplier applied to the
         // baked (textured) G-buffer albedo. Default 1.0 (unscaled). Calibrates a
         // physically-bright photographic texture down to a natural lit tone when
@@ -989,6 +994,8 @@ private:
             emissive_intensity.fill(0.0f);
             roughness.fill(0.85f);
             roughness_set.fill(false);
+            metallic.fill(0.0f);
+            metallic_set.fill(false);
             albedo_scale.fill(1.0f);
         }
     };

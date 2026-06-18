@@ -185,6 +185,15 @@ float GeometrySmith(float NdotV, float NdotL, float k) {
 vec3 fresnelSchlick(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
+// I7.1-PBR: roughness-aware Fresnel for the ambient/environment term. Rougher
+// surfaces reflect less of the environment at grazing angles (the reflection
+// blurs out), so the grazing limit is clamped toward (1 - roughness) instead of
+// 1. Used ONLY for the analytic ambient specular below — the direct-light path
+// keeps the sharp fresnelSchlick. (Karis 2013, "Real Shading in UE4".)
+vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
+    vec3 Fr = max(vec3(1.0 - roughness), F0);
+    return F0 + (Fr - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
 float CalculateShadow(vec3 fragPos, vec3 normal, vec3 lightDir, float viewDepth) {
     // 1. Determine which cascade to use in a branchless way
     int cascadeIndex = 0;
@@ -394,7 +403,21 @@ void main() {
     }
 
     // --- Final Color Composition ---
-    vec3 ambient = u_skyAmbientColor * Albedo * ao;
+    // I7.1-PBR: split the flat sky ambient into energy-conserving diffuse +
+    // specular. u_skyAmbientColor is ALREADY an irradiance (kAmbientIrradianceScale
+    // = PI matches SUN_IRRADIANCE_SCALE) — do NOT re-multiply by PI here or the
+    // ambient double-counts and blows past the ACES knee. The specular lobe gives
+    // metals/low-roughness surfaces a believable environment sheen at grazing
+    // angles (previously flat). Non-metals at normal incidence keep ~96% of the
+    // old diffuse (kD ~ 1 - 0.04) plus a faint rim, so the visual floor holds.
+    // Far-water (MaterialID 200) has F0=0 + roughness 1.0 => F_amb=0 => specular 0
+    // and diffuse unchanged, preserving the matte sky-tint sheet.
+    float NdotV_amb = max(dot(Normal, V), 0.0);
+    vec3 F_amb = fresnelSchlickRoughness(NdotV_amb, F0, Roughness);
+    vec3 kD_amb = (vec3(1.0) - F_amb) * (1.0 - Metallic);
+    vec3 ambientDiffuse  = kD_amb * Albedo * u_skyAmbientColor;
+    vec3 ambientSpecular = F_amb * u_skyAmbientColor;
+    vec3 ambient = (ambientDiffuse + ambientSpecular) * ao;
     vec3 color = ambient + Lo + caustics + crystalGlow + aetherGlow; // + A1d aether glow
 
     // T-I5b-5-water-backlog (seabed waterline terracing de-band): the far seabed

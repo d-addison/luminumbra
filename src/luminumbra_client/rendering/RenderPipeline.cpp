@@ -2841,6 +2841,12 @@ void RenderPipeline::load_material_texture_lut() {
                     glm::clamp(mat["roughness"].get<float>(), 0.0f, 1.0f);
                 m_material_texture_lut.roughness_set[static_cast<size_t>(id)] = true;
             }
+            // I7.1-PBR: metallic column (was hardcoded in init_material_lut). 0..1.
+            if (mat.contains("metallic")) {
+                m_material_texture_lut.metallic[static_cast<size_t>(id)] =
+                    glm::clamp(mat["metallic"].get<float>(), 0.0f, 1.0f);
+                m_material_texture_lut.metallic_set[static_cast<size_t>(id)] = true;
+            }
             // T-I5b-5-water-backlog: optional albedo multiplier (render-only LUT
             // calibration). Clamped to a sane (0, 1] range; absent -> 1.0.
             if (mat.contains("albedo_scale")) {
@@ -2920,6 +2926,16 @@ void RenderPipeline::init_material_lut() {
         } else if (id != 0) {
             // Unknown materials default to 0.85 (design §3 roughness default).
             row0(id).g = 0.85f;
+        }
+        // I7.1-PBR: metallic (row0.r) is now data-driven too. Materials that
+        // declare metallic in materials.json override the authored fallback
+        // above; the JSON values match the prior hardcoded ones, so this is a
+        // zero-visible-change activation of the authoring path. The id==200
+        // far-water matte row is skipped above (continue), so its metallic 0
+        // stays intact (a glossier far sheet becomes a sun mirror at grazing
+        // incidence — see the far-water comment above).
+        if (m_material_texture_lut.metallic_set[static_cast<size_t>(id)]) {
+            row0(id).r = m_material_texture_lut.metallic[static_cast<size_t>(id)];
         }
     }
 
