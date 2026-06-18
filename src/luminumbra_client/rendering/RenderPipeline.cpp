@@ -2000,6 +2000,32 @@ void RenderPipeline::execute_aerial_pass(const Camera& camera) {
     const float sun_up = glm::dot(m_sun.direction, glm::vec3(0.0f, -1.0f, 0.0f));
     m_aerial_shader->setFloat("u_sunCosZenith", sun_up);
     m_aerial_shader->setFloat("u_skyDayFactor", m_skyDayFactor);
+    // T-I7 controllable atmosphere: feed the data-driven aerial-perspective
+    // parameters (previously hardcoded shader defaults) so the far-field depth
+    // can be dialed crisp <-> realistic <-> dramatic. Optional tuning override:
+    // LUMIN_ATMOS="density,maxDistance,inscatterStrength,warmth" lets a capture
+    // or tuning run dial the look without rebuilding (render-only knob).
+    AtmosphereParams atmo = m_atmosphere;
+    // Tuning override parsed ONCE (not per frame): when set, it supersedes the
+    // configured params so a capture/tuning run can sweep the look.
+    static const auto s_atmos_override = [] {
+        std::optional<AtmosphereParams> ov;
+        if (const char* env = std::getenv("LUMIN_ATMOS")) {
+            AtmosphereParams p{};
+            if (std::sscanf(env, "%f,%f,%f,%f", &p.aerial_density, &p.aerial_max_distance,
+                            &p.inscatter_strength, &p.warmth) == 4) {
+                ov = p;
+            }
+        }
+        return ov;
+    }();
+    if (s_atmos_override) {
+        atmo = *s_atmos_override;
+    }
+    m_aerial_shader->setFloat("u_aerialDensity", atmo.aerial_density);
+    m_aerial_shader->setFloat("u_aerialMaxDistance", atmo.aerial_max_distance);
+    m_aerial_shader->setFloat("u_inscatterStrength", atmo.inscatter_strength);
+    m_aerial_shader->setFloat("u_atmosphereWarmth", atmo.warmth);
 
     glBindVertexArray(m_screen_quad_vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);

@@ -32,6 +32,11 @@ uniform float u_skyDayFactor;  // night-darkening envelope (matches the dome)
 // far field hazes (the FarLodHorizon sky-ratio premise is unaffected).
 uniform float u_aerialDensity = 0.0016;
 uniform float u_aerialMaxDistance = 1600.0;
+// T-I7 controllable atmosphere: HDR scale of the sky in-scatter veil, and a
+// warmth blend (0 = raw sky-view hue -> bluer/crisp aerial; 1 = warmed land
+// veil with b clamped <= g -> warm hazy depth without blue-tinting ground).
+uniform float u_inscatterStrength = 60.0;
+uniform float u_atmosphereWarmth = 1.0;
 
 const float PI = 3.14159265359;
 
@@ -86,8 +91,9 @@ void main() {
     // In-scatter color from the shared sky scattering, scaled into the HDR
     // display range and gated by the night envelope so distance fog vanishes at
     // night exactly as the dome darkens.
-    vec3 inscatter = sampleSkyInscatter(viewDir) * 60.0;
+    vec3 inscatter = sampleSkyInscatter(viewDir) * u_inscatterStrength;
     inscatter *= clamp(u_skyDayFactor, 0.0, 1.0);
+    vec3 rawInscatter = inscatter; // un-warmed sky-view hue (crisp/aerial blue)
 
     // T-I5a-6 FIX (FarLodHorizon): the raw sky-view in-scatter is BLUE-dominant
     // (b > r). Composited over the far-LOD terrain at the live/far seam it tinted
@@ -104,7 +110,13 @@ void main() {
                     vec3(1.0, 1.4, 2.4));
     float aLuma = max(dot(aHue, vec3(0.2126, 0.7152, 0.0722)), 1e-4);
     inscatter *= aHue / aLuma;               // warm hue, luminance preserved
-    inscatter.b = min(inscatter.b, inscatter.g);   // never blue-dominant over land
+    inscatter.b = min(inscatter.b, inscatter.g);   // warmed: never blue-dominant
+
+    // T-I7 controllable atmosphere: blend between the raw sky-view in-scatter
+    // (bluer, crisp aerial perspective) and the warmed land veil. warmth=1
+    // reproduces the prior FarLodHorizon-safe warm haze; warmth<1 lets distance
+    // read with cooler atmospheric blue when the look calls for it.
+    inscatter = mix(rawInscatter, inscatter, clamp(u_atmosphereWarmth, 0.0, 1.0));
 
     // alpha = fog composites the aerial haze OVER the lit terrain.
     FragColor = vec4(inscatter, fog);

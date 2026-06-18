@@ -613,7 +613,28 @@ public:
     // The CloudShadow gate compares the clouds-on vs clouds-off lighting timing to
     // bound the ADDED per-fragment sample cost against the ≤ 0.4 ms budget (F3).
     double cloud_shadow_gpu_ms() const { return m_last_render_pass_stats.cloud_shadow_gpu_ms; }
-    
+
+    // T-I7 atmosphere control: data-driven aerial-perspective / atmospheric
+    // depth so the far field can be dialed crisp <-> realistic <-> dramatic from
+    // one set of parameters. Render-only (never hashed); wired into
+    // execute_aerial_pass and shared with the far-field path.
+    struct AtmosphereParams {
+        // Exponential extinction per metre — distance at which haze reaches ~63%
+        // opacity is 1/density. Higher = thicker/closer haze (dramatic); lower =
+        // crisp far view (Distant-Horizons-like).
+        float aerial_density = 0.0016f;
+        // Distance clamp for the fog term (m); the far-field extends this.
+        float aerial_max_distance = 1600.0f;
+        // HDR scale of the shared sky in-scatter colour composited as haze.
+        float inscatter_strength = 60.0f;
+        // 0 = raw sky-view hue (bluer, crisp/aerial), 1 = fully warmed land veil
+        // (b clamped <= g, avoids blue-tinting distant ground). Tunable so the
+        // look ranges from clear-blue distance to warm hazy depth.
+        float warmth = 1.0f;
+    };
+    void set_atmosphere_params(const AtmosphereParams& p) { m_atmosphere = p; }
+    const AtmosphereParams& atmosphere_params() const { return m_atmosphere; }
+
     // GPU SDF integration
     void set_gpu_sdf_runtime_enabled(bool enabled);
     GpuSdfRuntimeToggleState get_gpu_sdf_runtime_toggle_state() const;
@@ -786,6 +807,8 @@ private:
     DirectionalLight m_sun;
     glm::vec3 m_moonDirection;
     glm::vec3 m_skyAmbientColor;
+    // T-I7 controllable atmosphere (aerial perspective) parameters.
+    AtmosphereParams m_atmosphere{};
     // T-I4-DR-tod-sky-balance: continuous day->twilight->night factor derived
     // from the sun's elevation, smoothly 1 (sun high) -> 0 (sun below horizon).
     // The sky dome reads this so its brightness/tint tracks time-of-day with
