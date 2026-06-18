@@ -40,6 +40,7 @@ uniform mat3 u_normalViewMatrix;
 // terrain pool draw) and the world->view normal uses u_normalViewMatrix
 // (== mat3(view)); when 0 the legacy per-draw 'model' / 'normalMatrix' uniforms
 // drive it (far-LOD region draws, which set those uniforms per region).
+// Far-LOD draw code forces this back to 0 because its VAOs do not bind aOrigin.
 uniform int u_useInstanceOrigin;
 
 // T-I4-DR-horizon-sliver-render: far-region geometry clip band (meters). Set > 0
