@@ -118,6 +118,21 @@ void main() {
     // read with cooler atmospheric blue when the look calls for it.
     inscatter = mix(rawInscatter, inscatter, clamp(u_atmosphereWarmth, 0.0, 1.0));
 
+    // T-I7 horizon blowout fix: this pass composites OVER the lighting FBO, which
+    // is already tonemapped + gamma display-space (sRGB 0..1), but `inscatter` is
+    // HDR-linear radiance (sky-view * strength). Compositing it raw drove distant
+    // terrain past pure white ("overpaying in the distance"). Map the in-scatter
+    // through the SAME filmic tonemap + gamma so it lands in display range and
+    // matches the sky dome's horizon brightness — distant terrain now fades INTO
+    // the sky instead of over-brightening past it.
+    inscatter = inscatter * (2.51 * inscatter + 0.03) /
+                (inscatter * (2.43 * inscatter + 0.59) + 0.14);
+    inscatter = pow(max(inscatter, vec3(0.0)), vec3(1.0 / 2.2));
+
+    // Keep a hint of far terrain rather than a pure sky veil so the long view
+    // still reads (Distant-Horizons style) instead of dissolving to flat sky.
+    fog = min(fog, 0.92);
+
     // alpha = fog composites the aerial haze OVER the lit terrain.
     FragColor = vec4(inscatter, fog);
 }

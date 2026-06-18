@@ -8592,10 +8592,21 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
             lstate.ground_flash = ground_on_screen ? 0.30f : 0.0f;
             out_lightning = true;
         } else {
-            // Clear: overlay off, clouds off, rain off. Fully remove the rain
-            // emitter so no streaks bleed into the clear cells (relocating it is
-            // not enough — it keeps emitting). It is re-added on the next storm
-            // cell. set_wind(0) so any in-flight drops stop being advected.
+            // Clear: overlay off, rain off, but a FAIR-WEATHER cloud deck that
+            // still casts soft drifting shadows on the terrain (user: "make sure
+            // clouds cast shadows" — clouds cast shadows in clear weather too, not
+            // only storms). Lighter coverage + softer strength than the storm deck.
+            cstate.enabled = true;
+            cstate.shadow_enabled = true;
+            cstate.coverage_amount = 0.40f;
+            cstate.plane_height = 1100.0f;
+            cstate.shadow_strength = 0.45f;
+            cstate.scroll_offset = glm::vec2(static_cast<float>(elapsed_phase) * 14.0f, 0.0f);
+            out_cloud_cov = cstate.coverage_amount;
+            // Fully remove the rain emitter so no streaks bleed into the clear
+            // cells (relocating it is not enough — it keeps emitting). It is
+            // re-added on the next storm cell. set_wind(0) so any in-flight drops
+            // stop being advected.
             if (particles != nullptr) {
                 particles->clear_emitters();
                 particles->set_wind(glm::vec3(0.0f));
