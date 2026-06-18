@@ -5476,6 +5476,18 @@ constexpr int kFarLodHorizonMaxFarAttributableSliverPx = 64;
 // otherwise fuse with a detached streak into one span and defeat the far-OFF
 // cancellation. ~2% of the observed 360-row sky band.
 constexpr int kFarLodHorizonSliverHorizonGuardPx = 8;
+// T-I7-#45: a far-ON dark pixel counts as a far-ATTRIBUTABLE terrain streak only
+// when the paired far-OFF pixel was substantially BRIGHTER — i.e. far-LOD drew
+// solid terrain where the baseline showed sky. Far-LOD's aerial perspective
+// nudges distant CLOUD pixels a few luma darker (measured 1-19, median ~4, off
+// luma ~92), which crosses the hard luma<90 terrain threshold and — fused with a
+// legitimate near-horizon far peak in the same column — manufactures a phantom
+// ~700px span. A genuine far-render streak is dark terrain (luma ~70) over bright
+// sky/cloud (>=130), a delta of 60-180; requiring a minimum sky-to-terrain delta
+// kills the benign atmospheric shifts while keeping full sensitivity to a real
+// streak. (Render is unchanged — this is an analysis-only robustness guard, like
+// the 3x3 jitter dilation and the horizon guard band above.)
+constexpr int kFarLodHorizonFarAttribMinSkyDeltaLuma = 32;
 
 bool ProjectWorldPointToScreenRow(
     const Luminumbra::Rendering::Camera& camera,
@@ -5740,6 +5752,26 @@ FarLodHorizonSkySliverStats AnalyzeFarLodHorizonSkySliver(
         return false;
     };
 
+    // T-I7-#45: a far-ON dark pixel is far-ATTRIBUTABLE only when the paired
+    // far-OFF pixel at (x, y) was substantially BRIGHTER — far-LOD drew solid
+    // terrain where the baseline showed sky/cloud. A small ON/OFF delta is the
+    // aerial-perspective shift on a distant cloud crossing the luma<90 threshold,
+    // not a terrain streak. Without a baseline (raw measurement) every dark pixel
+    // qualifies (conservative). See kFarLodHorizonFarAttribMinSkyDeltaLuma.
+    const auto far_attributable_terrain = [&](int x, int y, int on_luma) {
+        if (!use_cancel_baseline) {
+            return true;
+        }
+        const std::vector<unsigned char>& base = *cancel_baseline;
+        const std::size_t boffset =
+            static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
+        const int off_luma =
+            (static_cast<int>(base[boffset]) * 30 + static_cast<int>(base[boffset + 1u]) * 59 +
+             static_cast<int>(base[boffset + 2u]) * 11) /
+            100;
+        return (off_luma - on_luma) >= kFarLodHorizonFarAttribMinSkyDeltaLuma;
+    };
+
     // Per-column vertical SPAN of terrain-intrusion pixels within the sky band
     // (highest-minus-lowest intrusion row). A sliver is diagonal and dotted
     // after rasterization, so span captures its reach better than the longest
@@ -5766,8 +5798,11 @@ FarLodHorizonSkySliverStats AnalyzeFarLodHorizonSkySliver(
             const int y = height - 1 - y_from_top; // to bottom-up buffer row
             const std::size_t offset =
                 static_cast<std::size_t>(y) * row_stride + static_cast<std::size_t>(x) * 3u;
-            if (is_terrain_intrusion(pixels[offset], pixels[offset + 1u], pixels[offset + 2u]) &&
-                !baseline_cancels(x, y)) {
+            const int on_luma =
+                (static_cast<int>(pixels[offset]) * 30 + static_cast<int>(pixels[offset + 1u]) * 59 +
+                 static_cast<int>(pixels[offset + 2u]) * 11) /
+                100;
+            if (on_luma < 90 && !baseline_cancels(x, y) && far_attributable_terrain(x, y, on_luma)) {
                 if (first < 0) first = y_from_top;
                 last = y_from_top;
             }
