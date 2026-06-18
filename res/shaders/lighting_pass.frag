@@ -426,8 +426,16 @@ void main() {
     float NdotV_amb = max(dot(Normal, V), 0.0);
     vec3 F_amb = fresnelSchlickRoughness(NdotV_amb, F0, Roughness);
     vec3 kD_amb = (vec3(1.0) - F_amb) * (1.0 - Metallic);
-    vec3 ambientDiffuse  = kD_amb * Albedo * u_skyAmbientColor;
-    vec3 ambientSpecular = F_amb * u_skyAmbientColor;
+    // T-I7 realistic lighting: HEMISPHERIC ambient instead of a flat fill that
+    // washed every face equally (the "flat / underwater" look). Up-facing surfaces
+    // receive the full sky irradiance; down/side faces fade to a dimmer, warmer
+    // ground-bounce term. This gives slopes, creases and undersides real form and
+    // lets non-sun-facing geometry read darker, restoring directional contrast.
+    float hemi = clamp(0.5 + 0.5 * Normal.y, 0.0, 1.0); // 1 = up (sky), 0 = down
+    vec3 groundBounce = u_skyAmbientColor * vec3(0.32, 0.29, 0.25); // dim, warm
+    vec3 hemiAmbient = mix(groundBounce, u_skyAmbientColor, hemi);
+    vec3 ambientDiffuse  = kD_amb * Albedo * hemiAmbient;
+    vec3 ambientSpecular = F_amb * hemiAmbient;
     vec3 ambient = (ambientDiffuse + ambientSpecular) * ao;
     vec3 color = ambient + Lo + caustics + crystalGlow + aetherGlow; // + A1d aether glow
 
