@@ -16,6 +16,13 @@ routing:
 # 30 covers the first ~2 waves of heterogeneous tasks before enforcement.
 quality_gate:
   min_calibration_samples: 30
+  # The MEDIAN calibrator over-fit a 7.19x multiplier from 26 engine-gate samples
+  # (tasks legitimately read huge TUs: RenderPipeline.cpp, main_server.cpp,
+  # RuntimeScenarioHarness.cpp), inflating raw ~1.2M-token estimates to ~9M and
+  # rejecting 2/2 i7-ecology-visuals tasks at the 200K default ceiling. Local-dev
+  # override: raise the estimated-token ceiling so legitimate large-file engine
+  # tasks dispatch (results are gate-verified + reviewed regardless).
+  max_estimated_tokens: 12000000
 dispatch:
   spawner_priority: [codex, gemini, antigravity, local]
   spawner_override: codex
@@ -24,6 +31,14 @@ dispatch:
   sandbox_required: true
   max_parallel_default: 4
   agent_timeout_secs: 1800
+  # The quality gate is read from dispatch.quality (runner.rs:
+  # `quality_gate_config = dispatch_config.quality`). The top-level `quality_gate:`
+  # block above is at the WRONG path and was silently ignored — which is why the
+  # MEDIAN calibrator's 7.19x over-fit kept rejecting legitimate large-engine-file
+  # tasks at the 200K default ceiling. Effective overrides (local dev):
+  quality:
+    max_estimated_tokens: 12000000   # large engine TUs legitimately estimate high
+    min_calibration_samples: 500     # keep the over-fit multiplier advisory, not a hard skip
 # The spawner's built-in default (gpt-5.3-codex) is no longer supported by
 # ChatGPT-account Codex CLI; the codex-shim rewrites the model id instead
 # (default_agent_config.model does not merge from the project layer).

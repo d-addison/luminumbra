@@ -1,0 +1,83 @@
+{
+  "schema_kind": "forge.task_graph",
+  "schema_version": "2",
+  "feature": "i7-ecology-visuals",
+  "description": "Delegated execution: render the emergent-ecology (creatures move/hunt/herd via the AI substrate) and fix the FarLodHorizon #45 sliver. Spawner: codex. Local-only repo — NEVER push.",
+  "metadata": {
+    "executor": "codex-agent-worktrees",
+    "binding_artifacts": ".forge/specs/emergent-ecology/spec.md",
+    "build": "prepend C:\\msys64\\ucrt64\\bin to PATH; cmake --build build -j 3 (do NOT use default -j: links OOM); gtest discovery timeout is already 120s",
+    "determinism": "fixed 30Hz, run==replay; world_hash bumps are OK locally (no shipped game) but keep run==replay, <=2 ordered bumps, and re-pin the baseline hash literals in the gate tests; no libm transcendentals / no wall-clock on the sim tick path; id-ordered iteration",
+    "never_push": true
+  },
+  "tasks": [
+    {
+      "id": "T-I7-ECO-RENDER",
+      "title": "Render the emergent ecology: wire scent field + scent-steering + a predator/prey scenario so creatures visibly hunt/herd",
+      "type": "code",
+      "tier": "standard",
+      "depends_on": [],
+      "files": [
+        "src/luminumbra_common/world/GameSession.h",
+        "src/luminumbra_common/world/GameSession.cpp",
+        "src/luminumbra_server/main_server.cpp",
+        "src/luminumbra_server/ServerWorldRunner.cpp",
+        "src/luminumbra_client/core/RuntimeScenarioHarness.cpp",
+        "src/luminumbra_client/core/RuntimeScenarioHarness.h"
+      ],
+      "agent_contract": {
+        "reads": [
+          ".forge/specs/emergent-ecology/spec.md",
+          "src/luminumbra_common/ai/ScentField.h",
+          "src/luminumbra_common/ai/ScentDepositSystem.h",
+          "src/luminumbra_common/ai/ScentSteeringSystem.h",
+          "src/luminumbra_common/ai/PerceptionSystem.h",
+          "src/luminumbra_common/ai/InstinctLocomotionSystem.h",
+          "src/luminumbra_common/components/InstinctComponents.h",
+          "src/luminumbra_common/systems/PhysicsSystem.h",
+          "test/ai/ecology_demo_test.cpp"
+        ],
+        "modifies": [
+          "src/luminumbra_common/world/GameSession.h",
+          "src/luminumbra_common/world/GameSession.cpp",
+          "src/luminumbra_server/main_server.cpp",
+          "src/luminumbra_server/ServerWorldRunner.cpp",
+          "src/luminumbra_client/core/RuntimeScenarioHarness.cpp",
+          "src/luminumbra_client/core/RuntimeScenarioHarness.h"
+        ],
+        "creates": []
+      },
+      "prompt": "Make the already-built emergent-ecology AI substrate drive VISIBLE creature movement in a runnable scenario. The deterministic substrate exists and is unit-tested (see test/ai/ecology_demo_test.cpp for the exact composition that works): ScentField (deposit/diffuse/evaporate/clamp/GradientSteer), RunScentDepositOnTick, RunScentSteeringOnTick, RunInstinctLocomotionOnTick (boids+flee+seek), PerceptionSystem, and the components SensableComponent/PerceptionComponent/AwarenessComponent/ScentSenseComponent/LocomotionProfile/LocomotionIntentComponent in components/InstinctComponents.h. The movement->render path (already exists): main_server.cpp ~L1920 calls RunInstinctLocomotionOnTick -> set_avatar_wish_velocity -> PhysicsSystem::update_avatars (Jolt CharacterVirtual) -> ServerWorldRunner mirrors position into TransformComponent -> GBufferPass renders.\n\nDO:\n1) GameSession OWNS a ScentField (std::unique_ptr, GATED: created only when ecology is enabled via a setter/config so the canonical headless roster is byte-identical -> world_hash unchanged when disabled). Add a getter. In GameSession::TickSimulation, when the field exists, run a new slot AFTER the perception slot (2b): RunScentDepositOnTick -> field.Step(0.25, 4, 0.004) [rate is CAPPED at 0.25 — do not exceed] -> field.Clamp(tau_min, tau_max). Pick a world->grid origin (spawn anchor) + cell_size; expose them.\n2) In main_server.cpp, right AFTER RunInstinctLocomotionOnTick and BEFORE set_avatar_wish_velocity, call RunScentSteeringOnTick(registry, gameSession.GetScentField(), origin_x, origin_z, cell_size) when the field is enabled, so the scent gradient biases the wish that physics consumes.\n3) Add a predator/prey demo scenario to RuntimeScenarioHarness (a new scenario name, e.g. 'ecology_hunt') that enables the ecology scent field and spawns: a few PREY creatures (grovestrider mesh; SensableComponent{scent_channel=0, scent_deposit>0, faction=2}; LocomotionProfile; a wander/flee setup) and a PREDATOR (grovestrider mesh; ScentSenseComponent{channel=0, sign=+1, weber_k~2}; PerceptionComponent{faction=1}; LocomotionProfile move_speed faster). Spawn them with Transform+SkinnedMesh+AnimationPlayer like the existing creature spawn (~RuntimeScenarioHarness.cpp:6487) so they RENDER, plus the AI components so they MOVE under the server tick.\n\nCONSTRAINTS: deterministic (id-ordered, float-only, DeterministicMath::Sqrt, no libm transcendentals/no wall-clock on the tick); the scent field gating MUST keep the canonical headless world_hash byte-identical when ecology is OFF (verify the NetworkStateHash / world-hash gate tests still pass unchanged). NEVER push.\n\nVERIFY (required before claiming done): prepend C:\\msys64\\ucrt64\\bin to PATH; `cmake --build build -j 3` clean; `ctest --test-dir build -j3 -E ShieldRtFarField` must be 100% (the world-hash/determinism gates included — prove ecology-OFF is byte-identical). Report the build + ctest output."
+    },
+    {
+      "id": "T-I7-FARLOD-45",
+      "title": "Fix the FarLodHorizon #45 sliver: discard/clamp the grazing far-LOD frustum-edge streak without introducing horizon gaps",
+      "type": "code",
+      "tier": "standard",
+      "depends_on": [],
+      "files": [
+        "src/luminumbra_client/rendering/FarLodSystem.h",
+        "src/luminumbra_client/rendering/FarLodSystem.cpp",
+        "res/shaders/g_buffer.vert",
+        "res/shaders/g_buffer.frag"
+      ],
+      "agent_contract": {
+        "reads": [
+          "src/luminumbra_client/rendering/FarLodSystem.h",
+          "src/luminumbra_client/rendering/FarLodSystem.cpp",
+          "res/shaders/g_buffer.vert",
+          "res/shaders/g_buffer.frag",
+          "src/luminumbra_client/core/RuntimeScenarioHarness.cpp",
+          ".forge/scripts/validate-engine-frontier.ps1"
+        ],
+        "modifies": [
+          "src/luminumbra_client/rendering/FarLodSystem.h",
+          "src/luminumbra_client/rendering/FarLodSystem.cpp",
+          "res/shaders/g_buffer.frag"
+        ],
+        "creates": []
+      },
+      "prompt": "Fix issue #45 (FarLodHorizon sliver). The frontier gate currently FAILS: a thin (~1px wide, ~151px tall) FAR-ATTRIBUTABLE terrain streak rasterizes above the eye-level horizon at the frustum edge (a far-LOD triangle viewed near-grazing). The existing radial clip (FarLodSystem kFarClipOuterRadiusMeters=950) does NOT remove it. The far-LOD meshes render via the g_buffer geometry shader; the far path is identified in g_buffer.frag by `u_farClipInnerRadius > 0.0`.\n\nThe gate metric is kFarLodHorizonMaxFarAttributableSliverPx=64 (scales to ~142px at native via CaptureScale); current ~151px FAILS. Root cause: far triangles near the camera far-plane / frustum-edge corner rasterize as a tall thin sliver crossing into the sky.\n\nDO: implement a far-LOD-fragment discard for the sliver class WITHOUT introducing visible horizon GAPS (do not blanket-discard legitimate far mountains above the horizon). Candidate approaches (pick what passes the gate): (a) a tighter fragment-level far-distance cap in the u_farClipInnerRadius>0 path; (b) discard far fragments whose geometric normal is near-perpendicular to the view ray (grazing edge-on slivers) AND that project above the estimated horizon; (c) clamp far-vert projection. Tune against the gate. A wrong fix that creates horizon gaps is WORSE than the sliver — verify no new WorldVisualSweep defects.\n\nCONSTRAINTS: render-only (do NOT change world_hash); deterministic. NEVER push.\n\nVERIFY (required before claiming done — do NOT claim fixed otherwise): prepend C:\\msys64\\ucrt64\\bin to PATH; build `cmake --build build -j 3`; then run the actual gate `pwsh? no -> powershell` — run `.forge/scripts/validate-engine-frontier.ps1 -Mode FarLodHorizon` and it MUST exit 0 (currently it throws 'farlod horizon (mountains) analysis reported failure'). Also run `-Mode WorldVisualSweep` to confirm no new visual defects, and `-Mode PlayerView` for no horizon gaps. Paste the FarLodHorizon analysis JSON (max_sky_sliver_px) before/after."
+    }
+  ]
+}
