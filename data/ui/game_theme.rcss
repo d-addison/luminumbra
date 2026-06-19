@@ -68,3 +68,168 @@ button:active {
     color: #999999;
     font-size: 12px;
 }
+
+/* ============================================================
+   Settings screen (settings.rml)
+   Reuses the dusty/quantum palette of the main menu. These
+   classes are additive — existing screens don't use them.
+   ============================================================ */
+
+.form-container {
+    width: 640px;
+    margin-left: auto;
+    margin-right: auto;
+    text-align: left;
+}
+
+.settings-container {
+    max-height: 70%;
+    overflow-y: auto;
+}
+
+.settings-section {
+    margin-bottom: 28px;
+    padding: 18px;
+    background-color: #232a31;
+    border-width: 1px;
+    border-color: #3a444f;
+}
+
+h2.settings-heading {
+    font-size: 26px;
+    color: #ff4d6d;
+    font-weight: bold;
+    margin-bottom: 14px;
+    border-bottom-width: 1px;
+    border-bottom-color: #4f5b66;
+    padding-bottom: 6px;
+}
+
+.settings-row {
+    display: block;
+    margin-bottom: 16px;
+}
+
+.settings-row label {
+    display: block;
+    color: #e6e6e6;
+    font-size: 18px;
+    margin-bottom: 6px;
+}
+
+.settings-value {
+    color: #8d99ae;
+    font-size: 16px;
+    font-weight: bold;
+}
+
+.form-control {
+    display: block;
+    width: 100%;
+    height: 36px;
+    background-color: #1a1f24;
+    border-width: 2px;
+    border-color: #4f5b66;
+    color: #ffffff;
+    font-size: 17px;
+    font-family: Lora;
+    padding-left: 8px;
+    padding-right: 8px;
+}
+
+.form-control:focus {
+    border-color: #ff4d6d;
+}
+
+select.form-control {
+    height: 36px;
+}
+
+select.form-control option {
+    background-color: #1a1f24;
+    color: #ffffff;
+}
+
+.settings-slider {
+    height: 24px;
+    padding-left: 0px;
+    padding-right: 0px;
+}
+
+input.settings-slider slidertrack {
+    background-color: #1a1f24;
+    border-width: 1px;
+    border-color: #4f5b66;
+    height: 8px;
+    margin-top: 8px;
+}
+
+input.settings-slider sliderbar {
+    width: 18px;
+    height: 22px;
+    background-color: #8d99ae;
+    border-width: 1px;
+    border-color: #ff4d6d;
+}
+
+input.settings-slider sliderbar:hover {
+    background-color: #ff4d6d;
+}
+
+.field-help {
+    color: #999999;
+    font-size: 14px;
+    font-style: italic;
+    margin-top: 4px;
+}
+
+.settings-keybinds {
+    color: #cccccc;
+    font-size: 15px;
+}
+
+.button-container {
+    text-align: center;
+    margin-top: 12px;
+}
+
+/* Lay the Back / Apply buttons out side by side rather than stacked. */
+.button-container button {
+    display: inline-block;
+    width: 200px;
+    margin-left: 10px;
+    margin-right: 10px;
+}
+
+.btn-success {
+    background-color: #2f6f3e;
+    border-color: #4caf6a;
+}
+
+.btn-success:hover {
+    background-color: #3a8a4c;
+    border-color: #6fdc8c;
+}
+
+.notification {
+    position: absolute;
+    top: 24px;
+    left: 50%;
+    margin-left: -160px;
+    width: 320px;
+    padding: 12px;
+    background-color: #2f6f3e;
+    border-width: 1px;
+    border-color: #6fdc8c;
+    color: #ffffff;
+    text-align: center;
+    font-size: 16px;
+}
+
+.notification.hidden {
+    display: none;
+}
+
+.hidden {
+    display: none;
+}

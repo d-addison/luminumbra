@@ -1799,6 +1799,37 @@ int main(int argc, char* argv[]) {
 
     if (g_uiManager) {
         g_uiManager->SetWorldCreationCallback(start_world_creation);
+        // Wire the RML Settings screen (settings.rml) to the SystemConfig user settings.
+        // Live-apply mirrors the F8 ImGui panel; Save persists the per-user overlay.
+        // Reference g_systemConfig directly (a global) so no captured local dangles.
+        Luminumbra::Client::SettingsBridge sb;
+        sb.GetResolution = [] { return g_systemConfig.user().resolution; };
+        sb.SetResolution = [](const std::string& v) { g_systemConfig.user().resolution = v; };
+        sb.GetWindowMode = [] { return g_systemConfig.user().window_mode; };
+        sb.SetWindowMode = [](const std::string& v) { g_systemConfig.user().window_mode = v; };
+        sb.GetVSync = [] { return g_systemConfig.user().vsync; };
+        sb.SetVSync = [](bool v) { g_systemConfig.user().vsync = v; glfwSwapInterval(v ? 1 : 0); };
+        sb.GetFov = [] { return g_systemConfig.user().fov; };
+        sb.SetFov = [](float v) { g_systemConfig.user().fov = v; if (g_camera) g_camera->Zoom = v; };
+        sb.GetMouseSensitivity = [] { return g_systemConfig.user().mouse_sensitivity; };
+        sb.SetMouseSensitivity = [](float v) {
+            g_systemConfig.user().mouse_sensitivity = v;
+            if (g_camera) g_camera->MouseSensitivity = v;
+        };
+        sb.GetAudioMaster = [] { return g_systemConfig.user().audio_master; };
+        sb.SetAudioMaster = [&audioManager](float v) {
+            g_systemConfig.user().audio_master = v;
+            if (audioManager) audioManager->SetMasterVolume(v);
+        };
+        sb.GetAudioSfx = [] { return g_systemConfig.user().audio_sfx; };
+        sb.SetAudioSfx = [](float v) { g_systemConfig.user().audio_sfx = v; };
+        sb.GetAudioMusic = [] { return g_systemConfig.user().audio_music; };
+        sb.SetAudioMusic = [](float v) { g_systemConfig.user().audio_music = v; };
+        sb.Save = [] {
+            return g_systemConfig.SaveUserOverlay(
+                luminumbra::core::SystemConfig::DefaultUserOverlayPath());
+        };
+        g_uiManager->SetSettingsBridge(std::move(sb));
     }
 
     glfwSetKeyCallback(window, key_callback);

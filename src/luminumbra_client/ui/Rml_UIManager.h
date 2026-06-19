@@ -17,6 +17,35 @@ class IAudioManager;
 using WorldCreationCallback = std::function<void(const std::string&, const std::string&, const std::string&)>;
 using LoadWorldCallback = std::function<void(const std::string&)>;
 
+// --- Settings bridge ---
+// The UI layer must not depend on luminumbra_common's SystemConfig directly (it lives in
+// main_client, which owns the global g_systemConfig). Instead the host wires this small POD
+// of callbacks: the Settings screen (settings.rml) reads initial values via the getters,
+// pushes live changes via the setters, and persists via Save(). Every field is optional —
+// any null callback is simply skipped, so the screen degrades gracefully if unwired.
+struct SettingsBridge {
+    // Video
+    std::function<std::string()> GetResolution;        // "" = native/default, else "WxH"
+    std::function<void(const std::string&)> SetResolution;
+    std::function<std::string()> GetWindowMode;        // "windowed" | "borderless" | "fullscreen"
+    std::function<void(const std::string&)> SetWindowMode;
+    std::function<bool()> GetVSync;
+    std::function<void(bool)> SetVSync;
+    std::function<float()> GetFov;
+    std::function<void(float)> SetFov;
+    std::function<float()> GetMouseSensitivity;
+    std::function<void(float)> SetMouseSensitivity;
+    // Audio (0..1)
+    std::function<float()> GetAudioMaster;
+    std::function<void(float)> SetAudioMaster;
+    std::function<float()> GetAudioSfx;
+    std::function<void(float)> SetAudioSfx;
+    std::function<float()> GetAudioMusic;
+    std::function<void(float)> SetAudioMusic;
+    // Persist the user overlay (returns true on success).
+    std::function<bool()> Save;
+};
+
 class Rml_UIManager {
 public:
     Rml_UIManager(const std::string& asset_root_path);
@@ -39,6 +68,7 @@ public:
     
     void SetWorldCreationCallback(WorldCreationCallback callback) { m_worldCreationCallback = std::move(callback); }
     void SetLoadWorldCallback(LoadWorldCallback callback) { m_loadWorldCallback = std::move(callback); }
+    void SetSettingsBridge(SettingsBridge bridge) { m_settingsBridge = std::move(bridge); }
 
     // Static GLFW callbacks that forward to the active manager instance
     static void KeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);
@@ -53,6 +83,12 @@ private:
     void BindEventListeners(Rml::ElementDocument* document);
     void LoadDocument(const std::string& rml_path);
 
+    // settings.rml support: populate widgets from the bridge on load, and push a single
+    // changed widget's value back through the bridge live.
+    void PopulateSettingsForm(Rml::ElementDocument* document);
+    void ApplySettingFromElement(Rml::Element* element);
+    void BindSettingsListeners(Rml::ElementDocument* document);
+
     // Interfaces are now members, their lifetime is tied to the manager.
     RmlSystem m_systemInterface;
     RmlFileInterface m_fileInterface;
@@ -64,6 +100,7 @@ private:
     
     WorldCreationCallback m_worldCreationCallback;
     LoadWorldCallback m_loadWorldCallback;
+    SettingsBridge m_settingsBridge;
     
     std::string m_documentToLoad;
     std::string m_activeDocument;
