@@ -5,6 +5,9 @@ layout (location = 2) in vec2 aUV; // I8: mesh UV for the static-model texture l
 
 // Instanced model matrix (each mat4 is 4 vec4s)
 layout (location = 3) in mat4 aInstanceMatrix;
+// Per-instance albedo TINT (vast-forest: genetic green/brown variation per tree). White for
+// instances that don't carry one, so the multiply is a no-op for non-tinted static meshes.
+layout (location = 7) in vec3 aTint;
 
 // Output interface block (must match g_buffer.frag VS_OUT, T-I4-7).
 out VS_OUT {
@@ -14,6 +17,7 @@ out VS_OUT {
     vec3 WorldNormal;  // WORLD SPACE
     vec2 UV;           // mesh UV (unused for instanced terrain props; T-I4-8)
     flat uint MaterialID;
+    vec3 Tint;         // per-instance albedo tint (1,1,1 = no-op)
 } vs_out;
 
 uniform mat4 projection;
@@ -55,6 +59,7 @@ void main()
     vs_out.UV = aUV; // I8: pass the mesh UV so the static-model texture lane can sample it
 
     vs_out.MaterialID = uint(u_materialId);
+    vs_out.Tint = aTint;
 
     gl_Position = projection * viewPos;
 }

@@ -26,6 +26,7 @@ out VS_OUT {
     vec3 WorldNormal;  // WORLD SPACE
     vec2 UV;           // mesh UV (skinned/creature texturing, T-I4-8)
     flat uint MaterialID;
+    vec3 Tint;         // per-instance tint (skinned: white = no-op, matches g_buffer.frag VS_OUT)
 } vs_out;
 
 uniform mat4 model;
@@ -59,6 +60,7 @@ void main()
     vs_out.UV = aUV;
 
     vs_out.MaterialID = uint(u_materialId);
+    vs_out.Tint = vec3(1.0);  // skinned meshes are never per-instance tinted
 
     gl_Position = projection * viewPos;
 }

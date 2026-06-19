@@ -75,6 +75,7 @@ private:
     std::map<std::string, std::unique_ptr<Mesh>> m_meshCache;
     std::map<std::string, std::unique_ptr<Mesh>> m_skinnedMeshCache;
     GLuint m_instanceMatrixVBO = 0;
+    GLuint m_instanceTintVBO = 0;  // per-instance albedo tint (vast-forest colour variation)
     GLuint m_jointPaletteSSBO = 0;
     std::size_t m_jointPaletteSSBOCapacityBytes = 0;
 };
