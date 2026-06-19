@@ -121,6 +121,8 @@ public:
     void PlayMusic(const AudioEventID& musicEventID) override;
     void StopMusic();
 
+    void SetMasterVolume(float volume) override;
+
     bool StopEvent(AudioEventHandle handle, bool immediate = true) override;
     bool SetEventPosition(AudioEventHandle handle, const glm::vec3& position) override;
     bool SetEventVolume(AudioEventHandle handle, float volume) override;
