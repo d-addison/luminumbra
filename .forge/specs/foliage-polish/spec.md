@@ -61,6 +61,21 @@ OFF by default) are follow-on slices.
   differs from the default-env form, shifts the canopy toward the sun, and is itself deterministic.
   Proving signal: same.
 
+## Addendum B — rich plant structure (landed)
+
+Beyond the skeleton line list, `GeneratePlant(genome, stage, env) -> PlantStructure` produces what
+a renderer tessellates into a real plant: **tapered branches with pipe-model radii** + **sun-facing
+leaves** + a **sun-leaning trunk**. Still a pure, libm-free, deterministic function.
+- **R-A7 (pipe-model thickness)** Branch radius follows the da Vinci / Borchert-Honda pipe model
+  (`r_parent = sqrt(Σ r_child²)`), so the trunk is the thickest segment and twigs are thin.
+- **R-A8 (leaves)** Terminal twigs carry leaves; leaf count grows with maturity and with a leafier
+  genome; leaves face the sun under phototropism.
+- **R-A9 (whole-plant phototropism)** The trunk itself leans toward the sun (half the per-branch
+  strength), so the whole plant — not just the canopy — seeks light.
+- ACs (all green): **A-007** trunk is the thickest branch; **A-008** leaf count monotonic in stage +
+  leafier genome grows more; **A-009** trunk leans toward a non-vertical sun (deterministically);
+  **A-010** pinned structure golden (`776720397350691645`).
+
 ## Verify With
 `cmake --build --preset debug --target common_tests` (msys64 PATH first) then
-`ctest --test-dir build/debug -R "PlantProcgen" --output-on-failure`.
+`ctest --test-dir build/debug -R "PlantProcgen" --output-on-failure` (10 tests).
