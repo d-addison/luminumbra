@@ -151,3 +151,44 @@ Proving signal: WorldVisualSweep rerun (per `AC-I6-TDD-LOCK-003`).
 `ctest --test-dir build/debug -R "SystemConfig" --output-on-failure` and
 `.\.forge\scripts\validate-engine-frontier.ps1 -Mode UnitTests` +
 `-Mode WorldVisualSweep` for AC-SC-006.
+
+---
+
+## Addendum A (2026-06-18) — `user.*` settings extension + per-user overlay persistence
+
+Owner decision: SystemConfig is the SINGLE config registry — it also carries player-facing
+**settings** (no second config system). See `docs/STANDARDS.md` §5. This addendum extends the
+registry; it is the spec for task #9. Status: DRAFT (build pending, TDD).
+
+### Pillars
+- **P5 — `user.*` section (client-only, NEVER hashed).** A third top-level section alongside
+  `sim`/`render`, holding player settings in sub-groups:
+  - `user.video.*`: `resolution` (e.g. "3840x1600"/[w,h]), `window_mode` (windowed|borderless|
+    fullscreen), `vsync` (bool), `fov` (deg), `render_scale` (float), `mouse_sensitivity` (float).
+  - `user.audio.*`: `master`, `sfx`, `music` (0..1).
+  - `user.controls.*`: a keybind map `action -> key code` (int), keyed by `InputAction` name.
+- **P6 — Value types.** Extend params to support **int** (key codes, enum-as-int like window_mode)
+  and **string** (resolution) in addition to float/vec3. Keybinds are an action→int map.
+- **P7 — Per-user overlay + Save.** Load layering: compiled defaults → `data/common/systems.json`
+  (dev/game) → **per-user overlay** `%APPDATA%/Luminumbra/settings.json` (or `$XDG_CONFIG_HOME`/
+  `~/.config/luminumbra/` on POSIX) → env/CLI (dev override). `SystemConfig::SaveUserOverlay()`
+  writes **only** the `user.*` section back to that path (atomic write; create dirs). Missing
+  overlay → defaults (no crash).
+- **P8 — Ownership.** A single loaded `SystemConfig` instance is owned at the client/session entry
+  (resolves task #5's ownership question) and threaded to consumers; the `config` sub-hash is
+  supplied to `WorldStreamingStateSubHashes` from it (task #5).
+
+### Acceptance Criteria (RED-first)
+- **AC-SC-101** `user.*` round-trips (video/audio/controls incl. int keycodes + string resolution);
+  unnamed → fallback; malformed overlay → defaults, no crash.
+- **AC-SC-102** Setting ANY `user.*` value leaves `ComputeConfigSubHash()` empty AND `world_hash`
+  unchanged (`d950a6afc12a5cdc`) — user settings are never hashed.
+- **AC-SC-103** `SaveUserOverlay()` then reload reproduces the same `user.*` values byte-for-byte,
+  and the written file contains ONLY `user.*` (no sim/render leakage).
+- **AC-SC-104** Overlay merge precedence: a `user.*` value in the overlay wins over `systems.json`;
+  `sim.*`/`render.*` come only from `systems.json` (overlay ignored for them).
+- **AC-SC-105** Keybind map resolves `InputAction -> key`, with a compiled default binding when the
+  overlay omits an action.
+
+### Verify With (addendum)
+`ctest --test-dir build/debug -R "SystemConfig" --output-on-failure` (extends the existing suite).
