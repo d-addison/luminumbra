@@ -4,6 +4,9 @@
 // the test is expected to FAIL TO COMPILE until SystemConfig.{h,cpp} land (RED).
 #include <gtest/gtest.h>
 
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <string>
 
 #include <glm/glm.hpp>
@@ -132,6 +135,113 @@ TEST(SystemConfig, EnabledHotPathStable) {
     // 1e6 XORs of `true` -> false; the point is no crash/alloc and a stable answer.
     EXPECT_FALSE(acc);
     EXPECT_TRUE(cfg.enabled(SysKey::SimErosion));
+}
+
+// ---- Addendum A: user.* settings extension (AC-SC-101..105) ----
+
+// AC-SC-101 — user.video/audio round-trip; unnamed fields keep defaults.
+TEST(SystemConfig, UserVideoAudioRoundTrip) {
+    const std::string json = R"({
+      "user": {
+        "video": { "resolution": "3840x1600", "window_mode": "fullscreen", "vsync": false,
+                   "fov": 70.0, "render_scale": 0.85, "mouse_sensitivity": 0.22 },
+        "audio": { "master": 0.8, "music": 0.5 }
+      }
+    })";
+    const SystemConfig cfg = SystemConfig::FromJsonString(json);
+    const auto& u = cfg.user();
+    EXPECT_EQ(u.resolution, "3840x1600");
+    EXPECT_EQ(u.window_mode, "fullscreen");
+    EXPECT_FALSE(u.vsync);
+    EXPECT_FLOAT_EQ(u.fov, 70.0f);
+    EXPECT_FLOAT_EQ(u.render_scale, 0.85f);
+    EXPECT_FLOAT_EQ(u.mouse_sensitivity, 0.22f);
+    EXPECT_FLOAT_EQ(u.audio_master, 0.8f);
+    EXPECT_FLOAT_EQ(u.audio_music, 0.5f);
+    EXPECT_FLOAT_EQ(u.audio_sfx, 1.0f);  // unnamed -> default
+}
+
+// AC-SC-105 — keybind map resolves action->key; missing action -> fallback.
+TEST(SystemConfig, UserControlsKeybindRoundTrip) {
+    const std::string json = R"({
+      "user": { "controls": { "Move_Forward": 87, "Jump": 32 } }
+    })";
+    const SystemConfig cfg = SystemConfig::FromJsonString(json);
+    EXPECT_EQ(cfg.keybind("Move_Forward", -1), 87);
+    EXPECT_EQ(cfg.keybind("Jump", -1), 32);
+    EXPECT_EQ(cfg.keybind("Crouch", 67), 67);  // unbound -> fallback (compiled default)
+}
+
+// AC-SC-102 — user.* never moves the config sub-hash.
+TEST(SystemConfig, UserSettingsDoNotHash) {
+    const std::string json = R"({
+      "user": { "video": { "fov": 120.0, "vsync": false },
+                "controls": { "Jump": 32 } }
+    })";
+    const SystemConfig cfg = SystemConfig::FromJsonString(json);
+    EXPECT_EQ(cfg.ComputeConfigSubHash(), std::string{});
+}
+
+// AC-SC-103 — SaveUserOverlay round-trips and writes ONLY user.* (no sim/render leakage).
+TEST(SystemConfig, UserOverlaySaveReload) {
+    const std::filesystem::path dir =
+        std::filesystem::temp_directory_path() / "lumin_systemconfig_test";
+    std::error_code rm_ec;
+    std::filesystem::remove_all(dir, rm_ec);  // non-throwing pre-clean
+    const std::filesystem::path path = dir / "settings.json";
+
+    SystemConfig cfg = SystemConfig::FromJsonString(R"({
+      "sim": { "erosion": { "enabled": true } },
+      "user": { "video": { "fov": 95.0, "window_mode": "windowed" },
+                "controls": { "Sprint": 340 } }
+    })");
+    ASSERT_TRUE(cfg.SaveUserOverlay(path.string()));
+
+    // The written file must contain only user.* — no sim/render keys. Scope the stream so
+    // its handle is closed before cleanup (Windows can't delete an open file).
+    std::string text;
+    {
+        std::ifstream in(path);
+        std::ostringstream ss;
+        ss << in.rdbuf();
+        text = ss.str();
+    }
+    EXPECT_NE(text.find("\"user\""), std::string::npos);
+    EXPECT_EQ(text.find("\"sim\""), std::string::npos);
+    EXPECT_EQ(text.find("\"render\""), std::string::npos);
+
+    const SystemConfig reloaded = SystemConfig::LoadFromFile(path.string());
+    EXPECT_FLOAT_EQ(reloaded.user().fov, 95.0f);
+    EXPECT_EQ(reloaded.user().window_mode, "windowed");
+    EXPECT_EQ(reloaded.keybind("Sprint", -1), 340);
+    EXPECT_FALSE(reloaded.enabled(SysKey::SimErosion));  // overlay carries no sim flags
+
+    std::filesystem::remove_all(dir, rm_ec);  // non-throwing teardown
+}
+
+// AC-SC-104 — overlay merge precedence: user.* from overlay, sim/render from defaults;
+// a sim.* in the overlay is ignored.
+TEST(SystemConfig, OverlayMergePrecedence) {
+    SystemConfig cfg = SystemConfig::FromJsonString(R"({
+      "sim": { "plant_growth": { "enabled": true } },
+      "user": { "video": { "fov": 45.0 } }
+    })");
+    EXPECT_TRUE(cfg.enabled(SysKey::SimPlantGrowth));
+    EXPECT_FLOAT_EQ(cfg.user().fov, 45.0f);
+
+    // Overlay only changes user.*; its sim flag must be ignored.
+    cfg.OverlayUserFromJsonString(R"({
+      "sim": { "plant_growth": { "enabled": false } },
+      "user": { "video": { "fov": 100.0 } }
+    })");
+    EXPECT_TRUE(cfg.enabled(SysKey::SimPlantGrowth));  // unchanged by overlay
+    EXPECT_FLOAT_EQ(cfg.user().fov, 100.0f);           // overlay wins for user.*
+}
+
+TEST(SystemConfig, MalformedOverlayKeepsSettings) {
+    SystemConfig cfg = SystemConfig::FromJsonString(R"({ "user": { "video": { "fov": 60.0 } } })");
+    cfg.OverlayUserFromJsonString("}{ not json");
+    EXPECT_FLOAT_EQ(cfg.user().fov, 60.0f);  // unchanged
 }
 
 }  // namespace

@@ -16,11 +16,30 @@
 
 #include <array>
 #include <cstdint>
+#include <map>
 #include <string>
 
 #include <glm/glm.hpp>
 
 namespace luminumbra::core {
+
+// Player-facing settings (client-only; NEVER hashed). Persisted to a writable per-user
+// overlay (%APPDATA%/Luminumbra/settings.json). Spec Addendum A; docs/STANDARDS.md §5/§6.
+struct UserSettings {
+    // video
+    std::string resolution;                 // "" = native/default; else "WxH"
+    std::string window_mode = "borderless"; // windowed | borderless | fullscreen
+    bool vsync = true;
+    float fov = 45.0f;
+    float render_scale = 1.0f;
+    float mouse_sensitivity = 0.1f;
+    // audio (0..1)
+    float audio_master = 1.0f;
+    float audio_sfx = 1.0f;
+    float audio_music = 1.0f;
+    // controls: logical InputAction name -> GLFW key code. Ordered for deterministic save.
+    std::map<std::string, int> keybinds;
+};
 
 // Compile-time registry of every system flag. sim.* entries first, then render.*.
 // New systems append a key here (single compile-checked source of truth for keys).
@@ -61,8 +80,31 @@ public:
     [[nodiscard]] glm::vec3 param3(SysParam id, glm::vec3 fallback) const;
 
     // Additive sim-only sub-hash. Empty "" at all sim defaults; deterministic and
-    // order-independent (canonical SysKey/SysParam enum order) otherwise. render.* excluded.
+    // order-independent (canonical SysKey/SysParam enum order) otherwise. render.*/user.* excluded.
     [[nodiscard]] std::string ComputeConfigSubHash() const;
+
+    // ---- user.* player settings (client-only, never hashed) ----
+    [[nodiscard]] const UserSettings& user() const { return m_user; }
+    [[nodiscard]] UserSettings& user() { return m_user; }
+    // Resolved keybind: the overlay's binding for `action`, else `fallback` (e.g. a client
+    // compiled default). Keeps core engine-generic (no InputAction enum dependency here).
+    [[nodiscard]] int keybind(const std::string& action, int fallback) const;
+
+    // Parse ONLY the `user.*` section from `json_text` and overlay it onto this config
+    // (sim.*/render.* ignored). Malformed -> no change. This is the per-user overlay load.
+    void OverlayUserFromJsonString(const std::string& json_text);
+
+    // Load layering: FromJsonString(defaults file) then OverlayUserFromJsonString(overlay file).
+    [[nodiscard]] static SystemConfig LoadLayered(const std::string& defaults_path,
+                                                  const std::string& overlay_path);
+
+    // Write ONLY the user.* section to `path` (atomic; creates parent dirs). Returns false on
+    // I/O failure. Deterministic key order (keybinds are an ordered map).
+    bool SaveUserOverlay(const std::string& path) const;
+
+    // Per-user overlay location: %APPDATA%/Luminumbra/settings.json (Windows) or
+    // $XDG_CONFIG_HOME/luminumbra/settings.json (POSIX), with HOME fallbacks.
+    [[nodiscard]] static std::string DefaultUserOverlayPath();
 
 private:
     static constexpr std::size_t kParamCount = static_cast<std::size_t>(SysParam::Count);
@@ -70,6 +112,7 @@ private:
     std::uint32_t m_enabled = 0;                       // packed flag bitset (<=32 keys)
     std::uint32_t m_param_set = 0;                     // which params were explicitly set
     std::array<glm::vec3, kParamCount> m_params{};     // scalar params live in .x
+    UserSettings m_user{};                             // client-only; never hashed
 };
 
 }  // namespace luminumbra::core
