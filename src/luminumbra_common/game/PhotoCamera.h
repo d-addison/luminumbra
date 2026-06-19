@@ -141,9 +141,9 @@ inline float Log2Approx(float x) {
     const float e = static_cast<float>(exp_field - 127);
     const float m = static_cast<float>(mant_bits) * (1.0f / 8388608.0f); // /2^23
 
-    // log2(1+m) on m in [0,1): minimax-ish cubic (Horner). Coeffs tuned so the
-    // endpoints log2(1)=0 and log2(2)=1 are respected closely; max abs err ~3.5e-3.
-    const float p = m * (1.441740f + m * (-0.708263f + m * 0.266523f));
+    // log2(1+m) on m in [0,1): least-squares QUARTIC (Horner). Max abs err ~1.9e-4
+    // (the earlier cubic was ~8e-3 at mid-octave, failing its own 4e-3 accuracy band).
+    const float p = m * (1.43854537f + m * (-0.67807154f + m * (0.32361048f + m * -0.08427316f)));
     return e + p;
 }
 

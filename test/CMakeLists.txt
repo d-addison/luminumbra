@@ -141,6 +141,10 @@ add_executable(common_tests
     sim/herd_alarm_test.cpp
     sim/difficulty_test.cpp
     sim/photo_codex_test.cpp
+    sim/decomposition_test.cpp
+    sim/circadian_test.cpp
+    sim/territory_test.cpp
+    sim/photo_camera_test.cpp
 )
 
 target_compile_definitions(common_tests PRIVATE
