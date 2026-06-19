@@ -3310,8 +3310,14 @@ int main(int argc, char* argv[]) {
                     // NOT tied to the (settling) player physics, so it can never fall through the
                     // world -- and it frames the plants instead of whatever the avatar sees.
                     const auto sp = gameSession->GetMetadata().spawnPoint;
-                    const glm::vec3 camPos(sp.x, sp.y + 7.0f, sp.z + 20.0f);
-                    const glm::vec3 target(sp.x, sp.y + 2.0f, sp.z);
+                    // Growth captures frame a tighter view of the hero cluster in front; otherwise
+                    // an elevated look over the grove.
+                    const glm::vec3 camPos = g_timelapse_grow
+                        ? glm::vec3(sp.x, sp.y + 4.0f, sp.z + 22.0f)
+                        : glm::vec3(sp.x, sp.y + 7.0f, sp.z + 20.0f);
+                    const glm::vec3 target = g_timelapse_grow
+                        ? glm::vec3(sp.x, sp.y + 3.0f, sp.z + 10.0f)
+                        : glm::vec3(sp.x, sp.y + 2.0f, sp.z);
                     const glm::vec3 d = glm::normalize(target - camPos);
                     g_camera->Position = camPos;
                     g_camera->Yaw = glm::degrees(std::atan2(d.z, d.x));
@@ -3519,6 +3525,26 @@ int main(int argc, char* argv[]) {
                             }
                         }
                         LUMINUMBRA_CORE_INFO("T-I8 trees: scattered {} tree instances", placed);
+                        // Growth showcase: a cluster of bigger HERO plants right in front of the
+                        // fixed grow-mode camera, so the foreground is dominated by plants visibly
+                        // growing (the scattered grove alone reads as distant background).
+                        if (g_timelapse_grow && procgenPlants) {
+                            const glm::vec3 heroOffsets[] = {
+                                {-5.0f, 0.0f, 9.0f}, {0.0f, 0.0f, 12.0f}, {5.0f, 0.0f, 8.0f},
+                                {-2.5f, 0.0f, 6.0f}, {2.5f, 0.0f, 6.5f}};
+                            auto hgen = luminumbra::core::DeterministicRng::seeded(
+                                luminumbra::foliage::kPlantSeedOffset, 7777u, 1u);
+                            for (const glm::vec3& off : heroOffsets) {
+                                const float hx = anchor.x + off.x, hz = anchor.z + off.z;
+                                ProcgenPlantInstance inst;
+                                inst.worldPos = glm::vec3(hx, terr(hx, hz), hz);
+                                inst.rot = glm::angleAxis(hgen.next_unit() * 6.2831853f,
+                                                          glm::vec3(0.0f, 1.0f, 0.0f));
+                                inst.effScale = 2.4f + hgen.next_unit() * 1.0f;  // big hero trees
+                                inst.genome = luminumbra::foliage::RandomGenome(hgen);
+                                g_procgenPlants.push_back(inst);
+                            }
+                        }
                         // I9-FOLIAGE: bake the stored procedural plants at the current growth
                         // stage + enable the pass (flag-gated). OFF/empty -> pass disabled,
                         // render byte-identical. Growth re-bakes happen per-frame in the loop.
