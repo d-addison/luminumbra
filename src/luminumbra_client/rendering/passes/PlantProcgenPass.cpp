@@ -4,6 +4,7 @@
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
 
+#include <GLFW/glfw3.h>  // glfwGetTime() for render-only leaf wind animation
 #include <glm/gtc/matrix_transform.hpp>
 
 namespace Luminumbra::Rendering {
@@ -118,6 +119,8 @@ void PlantProcgenPass::execute(RenderPipeline& pipeline, const Camera& camera) {
     m_shader->setMat4("projection", projection);
     m_shader->setMat4("view", view);
     m_shader->setMat3("u_normalViewMatrix", glm::mat3(view));
+    m_shader->setFloat("u_time", static_cast<float>(glfwGetTime()));  // render-only leaf sway
+    m_shader->setFloat("u_windStrength", 1.0f);
 
     glBindVertexArray(m_vao);
     glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(m_index_count), GL_UNSIGNED_INT, nullptr);
