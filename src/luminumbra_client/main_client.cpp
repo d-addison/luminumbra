@@ -5011,6 +5011,30 @@ int main(int argc, char* argv[]) {
                             ApplyWindowMode(window, g_windowState, m);
                         }
                     }
+                    {
+                        // Resolution — applied live in windowed mode (borderless/fullscreen use
+                        // the monitor's resolution); suppressed on capture-pinned gate runs.
+                        const char* resos[] = {"1280x720", "1920x1080", "2560x1440",
+                                               "3440x1440", "3840x1600", "3840x2160"};
+                        int rcur = -1;
+                        for (int i = 0; i < 6; ++i)
+                            if (us.resolution == resos[i]) rcur = i;
+                        if (ImGui::Combo("Resolution", &rcur, resos, 6) && rcur >= 0) {
+                            us.resolution = resos[rcur];
+                            const std::string& r = us.resolution;
+                            const auto xp = r.find('x');
+                            if (xp != std::string::npos) {
+                                const int rw = std::atoi(r.substr(0, xp).c_str());
+                                const int rh = std::atoi(r.substr(xp + 1).c_str());
+                                if (rw > 0 && rh > 0) {
+                                    g_windowState.windowedWidth = rw;
+                                    g_windowState.windowedHeight = rh;
+                                    if (us.window_mode == "windowed" && !g_windowState.capture_pinned)
+                                        glfwSetWindowSize(window, rw, rh);
+                                }
+                            }
+                        }
+                    }
                     if (ImGui::SliderFloat("Master volume", &us.audio_master, 0.0f, 1.0f, "%.2f")) {
                         if (audioManager) audioManager->SetMasterVolume(us.audio_master);  // applied live
                     }
