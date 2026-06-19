@@ -107,6 +107,7 @@ add_executable(common_tests
     common/DeterministicMath_test.cpp
     common/SystemConfig_test.cpp
     common/PlantProcgen_test.cpp
+    common/NetworkSim_test.cpp
     common/EngineContracts_test.cpp
     common/FarLodStore_test.cpp
     common/GameSessionHeadlessWorld_test.cpp
