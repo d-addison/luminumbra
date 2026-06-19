@@ -262,7 +262,11 @@ private:
     // cost that capped scatter density. Determinism-neutral (render-only).
     std::uint64_t m_last_scatter_sig = 0;
     bool m_scatter_built = false;
-    float m_density_scale = 1.0f;  // #1b-lush: showcase density multiplier (1.0 = default)
+    // I8: denser default foliage (owner: fuller ground cover). GPU-scattered
+    // blades are cheap, so a modest lift fills the dusk/low-sun fields without a
+    // meaningful perf cost. Deeper grass work (moonlit grass, dusk brightness,
+    // BF1-grove shading) is the Phase 1 foliage substrate.
+    float m_density_scale = 1.35f; // #1b-lush: showcase density multiplier (1.0 = baseline)
 };
 
 } // namespace Luminumbra::Rendering

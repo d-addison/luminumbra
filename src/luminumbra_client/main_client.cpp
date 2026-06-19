@@ -3195,14 +3195,32 @@ int main(int argc, char* argv[]) {
                             z = z ^ (z >> 31);
                             return static_cast<float>((z >> 11) * (1.0 / 9007199254740992.0));
                         };
-                        const float reach = 760.0f, cell = 17.0f, hs = 4.0f;
+                        // I8 BF1-grove tree-scatter knobs (render-only client
+                        // decoration, never hashed). The source mesh is now decimated
+                        // to ~15k tris (LOD0, was ~2.06M) by the asset processor's
+                        // --max-tris pass, so densifying is affordable. Lower base +
+                        // higher grove gain reads as clustered copses (sparse open
+                        // ground, dense stands) instead of a uniform sprinkle. The
+                        // instance VBO (GBufferPass kStaticInstanceCapacity=16384)
+                        // covers the 12000 cap. Per-cell frand() call order is
+                        // unchanged so the seeded layout stays reproducible.
+                        const float kReach = 760.0f;      // meters from spawn anchor
+                        const float kCell = 14.0f;        // grid pitch (denser lattice)
+                        const float kHeightSample = 4.0f; // slope probe radius
+                        const int   kMaxInstances = 12000; // instance cap
+                        const float kGroveBase = 0.22f;   // baseline grove density (sparser open)
+                        const float kGroveGain = 0.62f;   // grove clustering gain (denser stands)
+                        const float kScaleMin = 0.8f;     // min trunk scale
+                        const float kScaleSpan = 1.4f;    // scale jitter span -> 0.8..2.2
+                        const float kSlopeMax = 5.5f;     // skip steeper than this
+                        const float reach = kReach, cell = kCell, hs = kHeightSample;
                         int placed = 0;
-                        for (float dz = -reach; dz <= reach && placed < 8000; dz += cell) {
-                            for (float dx = -reach; dx <= reach && placed < 8000; dx += cell) {
+                        for (float dz = -reach; dz <= reach && placed < kMaxInstances; dz += cell) {
+                            for (float dx = -reach; dx <= reach && placed < kMaxInstances; dx += cell) {
                                 // Clustered density: a low-frequency mask makes groves
                                 // (denser stands) instead of a uniform sprinkle.
                                 const float grove = frand();
-                                if (frand() > (0.30f + 0.45f * grove)) continue;
+                                if (frand() > (kGroveBase + kGroveGain * grove)) continue;
                                 const float x = anchor.x + dx + (frand() * 2.0f - 1.0f) * cell * 0.5f;
                                 const float zc = anchor.z + dz + (frand() * 2.0f - 1.0f) * cell * 0.5f;
                                 const float h = terr(x, zc);
@@ -3210,16 +3228,34 @@ int main(int argc, char* argv[]) {
                                 const float slope = glm::max(
                                     glm::max(std::abs(terr(x + hs, zc) - h), std::abs(terr(x - hs, zc) - h)),
                                     glm::max(std::abs(terr(x, zc + hs) - h), std::abs(terr(x, zc - hs) - h)));
-                                if (slope > 5.5f) continue; // skip steep/cliff
-                                const auto e = reg.create();
-                                auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
-                                tf.position = Luminumbra::Vec3(x, h, zc);
-                                const float s = 0.7f + frand() * 1.1f;
-                                tf.scale = Luminumbra::Vec3(s, s, s);
-                                tf.rotation = glm::angleAxis(frand() * 6.2831853f, glm::vec3(0.0f, 1.0f, 0.0f));
-                                auto& sm = reg.emplace<Luminumbra::Components::StaticMeshComponent>(e);
-                                sm.meshPath = "data/models/trees/tree_small_02_2k.lmesh";
-                                sm.materialId = 3u; // Grass (foliage green); textures follow-up
+                                if (slope > kSlopeMax) continue; // skip steep/cliff
+                                // I8 full UV-texture lane: the tree is now 3 decimated
+                                // PARTS (trunk/branches/leaves), each with its own atlas
+                                // + UV set (the merged single-UV mesh couldn't texture
+                                // all three). Emit one static-mesh entity per part at the
+                                // SAME transform; each part's bark/leaf texture is bound
+                                // by GBufferPass via data/models/trees/tree_textures.json.
+                                // frand() order (scale then rotation) is unchanged so the
+                                // seeded layout stays reproducible.
+                                const float s = kScaleMin + frand() * kScaleSpan;
+                                const Luminumbra::Vec3 treePos(x, h, zc);
+                                const Luminumbra::Vec3 treeScale(s, s, s);
+                                const auto treeRot = glm::angleAxis(frand() * 6.2831853f, glm::vec3(0.0f, 1.0f, 0.0f));
+                                static const char* const kTreeParts[3] = {
+                                    "data/models/trees/tree_small_02_trunk.lmesh",
+                                    "data/models/trees/tree_small_02_branches.lmesh",
+                                    "data/models/trees/tree_small_02_leaves.lmesh",
+                                };
+                                for (const char* part : kTreeParts) {
+                                    const auto e = reg.create();
+                                    auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
+                                    tf.position = treePos;
+                                    tf.scale = treeScale;
+                                    tf.rotation = treeRot;
+                                    auto& sm = reg.emplace<Luminumbra::Components::StaticMeshComponent>(e);
+                                    sm.meshPath = part;
+                                    sm.materialId = 3u; // row0 roughness; UV branch overrides albedo/normal
+                                }
                                 ++placed;
                             }
                         }

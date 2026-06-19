@@ -633,6 +633,7 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         load_material_texture_lut();
         init_terrain_textures();
         init_skinned_texture_array();
+        register_static_model_textures(); // I8: tree-part bark/leaf textures
         init_material_lut();
         init_texture_residency();
         m_water_pass->init_water_fallback_textures();
@@ -803,7 +804,7 @@ RenderPipeline::RuntimeRenderStats RenderPipeline::get_runtime_render_stats() co
     if (m_terrainTextureArray) estimated_vram_bytes += static_cast<size_t>(kTerrainTextureResolution) * kTerrainTextureResolution * 5u * 4u;
     if (m_terrainNormalArray) estimated_vram_bytes += static_cast<size_t>(kTerrainTextureResolution) * kTerrainTextureResolution * 5u * 4u;
     if (m_skinnedTextureArray) estimated_vram_bytes += static_cast<size_t>(kSkinnedTextureResolution) * kSkinnedTextureResolution * 2u * 4u;
-    if (m_materialLUT) estimated_vram_bytes += 256u * 2u * 4u;
+    if (m_materialLUT) estimated_vram_bytes += 256u * 4u * 4u; // 256 ids x 4 rows x RGBA8 (I8: was stale 2-row estimate)
     if (m_water_pass->flat_normal_texture()) estimated_vram_bytes += 4u;
     if (m_water_pass->neutral_flow_texture()) estimated_vram_bytes += 4u;
     if (m_water_pass->black_fallback_texture()) estimated_vram_bytes += 4u;
@@ -2867,6 +2868,103 @@ bool RenderPipeline::load_skinned_texture_set(const std::filesystem::path& albed
     return albedo_ok;
 }
 
+void RenderPipeline::init_static_model_texture_array() {
+    const int res = kStaticModelTextureResolution;
+    const int layers = kStaticModelTextureLayers;
+    glGenTextures(1, &m_staticModelTextureArray);
+    label_gl_object(GL_TEXTURE, m_staticModelTextureArray, "static_model.texture_array");
+    glBindTexture(GL_TEXTURE_2D_ARRAY, m_staticModelTextureArray);
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_SRGB8_ALPHA8, res, res, layers, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    // Flat fallback every layer: even = mid-grey albedo, odd = up-normal.
+    for (int i = 0; i < layers; ++i) {
+        const bool is_normal = (i % 2) == 1;
+        std::vector<unsigned char> fill(static_cast<size_t>(res) * res * 4u);
+        for (size_t p = 0; p < static_cast<size_t>(res) * res; ++p) {
+            if (is_normal) { fill[p*4+0]=128; fill[p*4+1]=128; fill[p*4+2]=255; fill[p*4+3]=255; }
+            else           { fill[p*4+0]=120; fill[p*4+1]=120; fill[p*4+2]=120; fill[p*4+3]=255; }
+        }
+        glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, i, res, res, 1,
+                        GL_RGBA, GL_UNSIGNED_BYTE, fill.data());
+    }
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 10);
+    glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+    m_staticModelNextLayer = 0;
+    LUMINUMBRA_CORE_INFO("Static-model texture array allocated ({} layers, {}x{}).", layers, res, res);
+}
+
+bool RenderPipeline::load_static_model_texture_set(const std::filesystem::path& albedo_path,
+                                                   const std::filesystem::path& normal_path,
+                                                   int& albedo_layer_out, int& normal_layer_out) {
+    if (m_staticModelTextureArray == 0) init_static_model_texture_array();
+    if (m_staticModelNextLayer + 1 >= kStaticModelTextureLayers) {
+        LUMINUMBRA_CORE_WARN("Static-model texture array full; cannot load '{}'.", albedo_path.string());
+        return false;
+    }
+    const int res = kStaticModelTextureResolution;
+    const int albedo_layer = m_staticModelNextLayer;
+    const int normal_layer = m_staticModelNextLayer + 1;
+    glBindTexture(GL_TEXTURE_2D_ARRAY, m_staticModelTextureArray);
+    struct SetLayer { const std::filesystem::path& path; int layer; };
+    const std::array<SetLayer, 2> set = {{ {albedo_path, albedo_layer}, {normal_path, normal_layer} }};
+    bool albedo_ok = false;
+    for (const auto& s : set) {
+        if (s.path.empty()) continue;
+        LtexCpuImage img;
+        if (load_ltex_cpu_image(s.path, img) &&
+            img.width == static_cast<uint32_t>(res) &&
+            img.height == static_cast<uint32_t>(res) && img.channels == 4u) {
+            glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, s.layer, res, res, 1,
+                            GL_RGBA, GL_UNSIGNED_BYTE, img.bytes.data());
+            if (s.layer == albedo_layer) albedo_ok = true;
+        } else {
+            LUMINUMBRA_CORE_WARN("Static-model texture: failed to load '{}', keeping fallback.", s.path.string());
+        }
+    }
+    glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+    m_staticModelNextLayer += 2;
+    albedo_layer_out = albedo_layer;
+    normal_layer_out = normal_layer;
+    return albedo_ok;
+}
+
+void RenderPipeline::register_static_model_textures() {
+    // Data-driven: data/models/trees/tree_textures.json maps each part mesh to its
+    // albedo/normal .ltex + an alpha-test flag (leaves). Render-only; absent file
+    // is a graceful no-op (parts keep the flat fallback / terrain look).
+    const std::filesystem::path manifest = m_root_path / "data/models/trees/tree_textures.json";
+    std::ifstream in(manifest);
+    if (!in) return;
+    try {
+        nlohmann::json j; in >> j;
+        for (const auto& m : j.value("models", nlohmann::json::array())) {
+            const std::string mesh = m.value("mesh", std::string{});
+            if (mesh.empty()) continue;
+            const std::filesystem::path albedo = m.contains("albedo")
+                ? (m_root_path / m["albedo"].get<std::string>()) : std::filesystem::path{};
+            const std::filesystem::path normal = m.contains("normal")
+                ? (m_root_path / m["normal"].get<std::string>()) : std::filesystem::path{};
+            int al = -1, nl = -1;
+            const bool ok = load_static_model_texture_set(albedo, normal, al, nl);
+            if (!ok) continue;
+            StaticModelTex tex;
+            tex.albedoLayer = al;
+            tex.normalLayer = nl;
+            tex.alphaTest = m.value("alpha_test", false);
+            m_staticModelTextures[mesh] = tex;
+        }
+        LUMINUMBRA_CORE_INFO("Static-model textures registered ({} models).", m_staticModelTextures.size());
+    } catch (const std::exception& e) {
+        LUMINUMBRA_CORE_WARN("tree_textures.json parse failed: {}", e.what());
+    }
+}
+
 void RenderPipeline::load_material_texture_lut() {
     // Parse the texture_layer/normal_layer/tiling columns from materials.json
     // (design §3). Defaults (untextured/flat, tiling 4) are kept for any
@@ -2925,6 +3023,20 @@ void RenderPipeline::load_material_texture_lut() {
                 m_material_texture_lut.albedo_scale[static_cast<size_t>(id)] =
                     glm::clamp(mat["albedo_scale"].get<float>(), 0.0f, 1.0f);
             }
+            // I8 dusty-BF1 palette: optional per-material warm albedo tint
+            // [r,g,b] (render-only). Absent -> [1,1,1] (no-op). The tint is a
+            // MULTIPLIER baked into the 0..1 RGBA8 LUT, so it is clamped to
+            // [0,1]: a channel can only be left at 1 or suppressed. "Warmth" is
+            // therefore achieved by lowering G/B relative to R (not by boosting
+            // R > 1, which the RGBA8 LUT cannot represent).
+            if (mat.contains("albedo_tint") && mat["albedo_tint"].is_array() &&
+                mat["albedo_tint"].size() == 3) {
+                const auto& t = mat["albedo_tint"];
+                m_material_texture_lut.albedo_tint[static_cast<size_t>(id)] = glm::vec3(
+                    glm::clamp(t[0].get<float>(), 0.0f, 1.0f),
+                    glm::clamp(t[1].get<float>(), 0.0f, 1.0f),
+                    glm::clamp(t[2].get<float>(), 0.0f, 1.0f));
+            }
         }
         LUMINUMBRA_CORE_INFO("Material texture LUT parsed: {} textured material(s) from materials.json.", textured);
     } catch (const std::exception& e) {
@@ -2939,20 +3051,24 @@ void RenderPipeline::init_material_lut() {
     //   row 0 (v=1/6): [R metallic, G roughness, B AO, A magical-flag]
     //   row 1 (v=1/2): [R texture_layer/255, G normal_layer/255, B tiling/64,
     //                   A has_texture]
-    //   row 2 (v=5/6): [R emissive_intensity/kEmissiveLutScale,
+    //   row 2 (v=5/8): [R emissive_intensity/kEmissiveLutScale,
     //                   G albedo_scale (0..1, default 1; T-I5b-5), B/A reserved]
+    //   row 3 (v=7/8): [RGB albedo_tint (default 1,1,1; I8 dusty-BF1), A reserved]
     // The texture/emissive columns come from materials.json
     // (load_material_texture_lut). The emissive_intensity column drives the
     // emission->lighting->glow chain (T-I4-9 calibration); it is stored
     // normalized by kEmissiveLutScale so the 0..1 RGBA8 LUT covers intensities
     // up to that ceiling, and the lighting pass rescales it back.
+    // I8: ROWS widened 3->4 to carry the per-material albedo_tint. The shader
+    // row v-coords are now the centers (row+0.5)/4 = 0.125/0.375/0.625/0.875.
     const int MATERIAL_COUNT = 256;
-    const int ROWS = 3;
+    const int ROWS = 4;
 
     std::vector<glm::vec4> materialData(static_cast<size_t>(MATERIAL_COUNT) * ROWS, glm::vec4(0.1f, 0.8f, 1.0f, 0.0f));
     auto row0 = [&](int id) -> glm::vec4& { return materialData[static_cast<size_t>(id)]; };
     auto row1 = [&](int id) -> glm::vec4& { return materialData[static_cast<size_t>(MATERIAL_COUNT + id)]; };
     auto row2 = [&](int id) -> glm::vec4& { return materialData[static_cast<size_t>(2 * MATERIAL_COUNT + id)]; };
+    auto row3 = [&](int id) -> glm::vec4& { return materialData[static_cast<size_t>(3 * MATERIAL_COUNT + id)]; };
 
     // Row 0 (metallic / roughness / AO / magical). T-I4-10: the G (roughness)
     // channel is now DRIVEN by the materials.json roughness column (default 0.85)
@@ -3029,6 +3145,11 @@ void RenderPipeline::init_material_lut() {
         const float albedo_scale = m_material_texture_lut.albedo_scale[static_cast<size_t>(id)];
         row2(id) = glm::vec4(glm::clamp(ei / kEmissiveLutScale, 0.0f, 1.0f),
                              glm::clamp(albedo_scale, 0.0f, 1.0f), 0.0f, 0.0f);
+        // I8 dusty-BF1 palette: row3.rgb = per-material warm albedo tint
+        // (default 1,1,1 = byte-identical no-op). Clamped to the LUT's 0..1 RGBA8
+        // range; tints are warm-desaturating multipliers <= 1 so no clamp loss.
+        const glm::vec3 tint = m_material_texture_lut.albedo_tint[static_cast<size_t>(id)];
+        row3(id) = glm::vec4(glm::clamp(tint, glm::vec3(0.0f), glm::vec3(1.0f)), 0.0f);
     }
 
     glGenTextures(1, &m_materialLUT);
@@ -3669,6 +3790,11 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     m_sun.color *= m_seasonPaletteTint;
 
     m_moonDirection = -m_sun.direction;
+    // I8 (owner: "there should be some brightness from the moon"): the moonlight
+    // fill is derived ENTIRELY in lighting_pass.frag from the (already-uploaded)
+    // u_sun uniforms — the moon is the anti-sun, so its light direction is
+    // -u_sun.direction and it ramps in as u_sun.color fades to ~0 at night. No
+    // extra per-frame uniform upload needed. Render-only.
 
     // Ambient scales by the same PI as SUN_IRRADIANCE_SCALE (lighting_pass
     // exposure audit): these values were tuned against the pre-audit sun, so

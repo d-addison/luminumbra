@@ -992,6 +992,36 @@ public:
     bool load_skinned_texture_set(const std::filesystem::path& albedo_path,
                                   const std::filesystem::path& normal_path,
                                   int& albedo_layer_out, int& normal_layer_out);
+
+    // --- I8 static-model UV texture lane ---
+    // A dedicated GL_TEXTURE_2D_ARRAY (separate from the 256x256 skinned/creature
+    // array) holding per-static-model albedo+normal layers sampled by the mesh's
+    // own UVs. Used to give the tree parts (trunk/branch/leaves) real bark/leaf
+    // textures instead of the world-projected terrain triplanar. Per-meshPath
+    // layer + alpha-test lookup is consumed by GBufferPass::geometry_pass_static_meshes.
+    struct StaticModelTex { int albedoLayer = -1; int normalLayer = -1; bool alphaTest = false; };
+private:
+    u32 m_staticModelTextureArray = 0;
+    static constexpr int kStaticModelTextureResolution = 512;
+    static constexpr int kStaticModelTextureLayers = 8;
+    int m_staticModelNextLayer = 0; // next free layer pair to fill
+    std::unordered_map<std::string, StaticModelTex> m_staticModelTextures; // meshPath -> layers
+    void init_static_model_texture_array();
+    // Loads albedo+normal .ltex into the next free layer pair; returns false +
+    // keeps the flat fallback on failure. Layer indices come back via the outs.
+    bool load_static_model_texture_set(const std::filesystem::path& albedo_path,
+                                       const std::filesystem::path& normal_path,
+                                       int& albedo_layer_out, int& normal_layer_out);
+    // Loads the tree-part textures and populates m_staticModelTextures (data-driven
+    // from data/models/trees/tree_textures.json; silently no-ops if absent).
+    void register_static_model_textures();
+public:
+    u32 static_model_texture_array() const { return m_staticModelTextureArray; }
+    const StaticModelTex* static_model_tex(const std::string& mesh_path) const {
+        auto it = m_staticModelTextures.find(mesh_path);
+        return it == m_staticModelTextures.end() ? nullptr : &it->second;
+    }
+private:
 private:
 
     // Per-material LUT columns parsed from data/common/materials.json
@@ -1016,6 +1046,13 @@ private:
         // the irradiance chain would otherwise clip it past the ACES knee (the
         // sun-bright near-sea-level sand-flat). Render-only.
         std::array<float, 256> albedo_scale;       // >0, default 1.0
+        // I8 dusty-BF1 palette: per-material warm albedo TINT (render-only
+        // content). Multiplied onto the baked textured albedo alongside
+        // albedo_scale in the g_buffer triplanar branch. Default [1,1,1] is a
+        // byte-identical no-op. Distinct from the post-process LUMIN_GRADE /
+        // LUMIN_ATMOS stages: this nudges the base surface color (khaki/ochre)
+        // so the warmth survives relighting. Keep small + luminance-preserving.
+        std::array<glm::vec3, 256> albedo_tint;    // default [1,1,1] (no-op)
         int terrain_layer_count = 0;               // distinct albedo layers loaded
         MaterialTextureLut() {
             texture_layer.fill(-1);
@@ -1027,6 +1064,7 @@ private:
             metallic.fill(0.0f);
             metallic_set.fill(false);
             albedo_scale.fill(1.0f);
+            albedo_tint.fill(glm::vec3(1.0f));
         }
     };
     MaterialTextureLut m_material_texture_lut;

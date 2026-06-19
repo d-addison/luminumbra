@@ -25,4 +25,5 @@ target_sources(asset_processor PRIVATE
     ${CMAKE_SOURCE_DIR}/vendor/meshoptimizer/src/vcacheoptimizer.cpp    # For meshopt_optimizeVertexCache
     ${CMAKE_SOURCE_DIR}/vendor/meshoptimizer/src/vfetchoptimizer.cpp    # For meshopt_optimizeVertexFetch
     ${CMAKE_SOURCE_DIR}/vendor/meshoptimizer/src/vertexfilter.cpp
+    ${CMAKE_SOURCE_DIR}/vendor/meshoptimizer/src/simplifier.cpp         # For meshopt_simplify (I8 LOD decimation)
 )
