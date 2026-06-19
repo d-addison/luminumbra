@@ -79,6 +79,11 @@ luminumbra::core::SystemConfig g_systemConfig;
 // g_rebindCaptureAction >= 0 the next key press is captured as that action's binding.
 bool g_show_settings = false;
 int g_rebindCaptureAction = -1;
+// host_timescale-style engine time control (Source/GMod-like). 1.0 = real time, 0 = paused,
+// <1 slow-mo, >1 fast-forward. Render/client playback rate: scales how many FIXED 30 Hz sim
+// ticks run per real frame, NOT the tick dt — so determinism + run==replay hold (tick sequence
+// unchanged; per-tick world_hash unchanged). Leveraged by the timelapse capture.
+float g_timeScale = 1.0f;
 std::unique_ptr<Luminumbra::Client::Rml_UIManager> g_uiManager;
 std::unique_ptr<Luminumbra::Client::WorldLoadingVisualizer> g_loading_visualizer;
 
@@ -3161,7 +3166,7 @@ int main(int argc, char* argv[]) {
                 } else if (g_playerController && !g_show_settings) {
                     g_playerController->Update(deltaTime);  // movement paused while the menu is open
                 }
-                if (auto* physics = gameSession->GetPhysicsSystem()) physics->update(deltaTime);
+                if (auto* physics = gameSession->GetPhysicsSystem()) physics->update(deltaTime * g_timeScale);
                 // T-I3-4: fixed 30 Hz simulation tick (SimulationClock +
                 // OrderedEventBus drain) hosted by GameSession. Render,
                 // physics, and scenario paths above remain variable-dt.
@@ -3171,7 +3176,24 @@ int main(int argc, char* argv[]) {
                 // streaming are SKIPPED here -- ticking twice would desync from the
                 // host, and camera-anchored streaming would diverge the hashed world.
                 if (!scenario_config.networked_session_smoke()) {
-                gameSession->TickSimulation(static_cast<double>(deltaTime));
+                if (g_timeScale == 1.0f) {
+                    gameSession->TickSimulation(static_cast<double>(deltaTime));  // byte-identical default (gates run here)
+                } else if (g_timeScale > 0.0f) {
+                    // host_timescale: run the sim faster/slower. Chunk into <=4-tick steps so a
+                    // high scale isn't dropped by the catch-up clamp, capped per frame to keep
+                    // spiral protection. Determinism holds (fixed dt per tick).
+                    double simDt = static_cast<double>(deltaTime) * static_cast<double>(g_timeScale);
+                    const double kFourTicks = (1.0 / 30.0) * 4.0;
+                    const int budget = static_cast<int>(std::ceil(4.0 * static_cast<double>(g_timeScale)));
+                    int ran = 0;
+                    while (simDt > 1e-9 && ran < budget) {
+                        const double step = std::min(simDt, kFourTicks);
+                        const std::uint32_t t = gameSession->TickSimulation(step);
+                        simDt -= step;
+                        if (t == 0u) break;  // accumulator < 1 tick this frame
+                        ran += static_cast<int>(t);
+                    }
+                }  // g_timeScale == 0 -> paused (no sim ticks; render/streaming continue)
                 if (gameSession->GetWorldSystem() && (g_playerController || g_camera)) {
                     const Luminumbra::Vec3 streaming_position =
                         ((scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.cloud_shadow_smoke() || scenario_config.precipitation_smoke() || scenario_config.timeofday_sweep_smoke() || scenario_config.lod_boundary_oscillation_smoke() || scenario_config.lod_seam_arrival_smoke() || scenario_config.player_view_smoke() || scenario_config.farlod_horizon_smoke() || scenario_config.skinned_mesh_visual_smoke() || scenario_config.creature_slice_smoke()) && scenario_ready && g_camera)
@@ -5067,6 +5089,20 @@ int main(int argc, char* argv[]) {
             if (g_imgui_enabled && g_playerController) {
                 g_playerController->RenderDebugUI();
             }
+            // Always-on time-scale indicator (when not real-time) so slow-mo / fast-forward
+            // / pause is obvious at a glance.
+            if (g_imgui_enabled && g_timeScale != 1.0f) {
+                ImGui::SetNextWindowPos(ImVec2(10.0f, 60.0f), ImGuiCond_Always);
+                ImGui::SetNextWindowBgAlpha(0.5f);
+                if (ImGui::Begin("##timescale", nullptr,
+                                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                                 ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs |
+                                 ImGuiWindowFlags_NoMove)) {
+                    if (g_timeScale == 0.0f) ImGui::Text("|| PAUSED  (\\ to resume)");
+                    else ImGui::Text("TIME  x%.2f", g_timeScale);
+                }
+                ImGui::End();
+            }
             // Settings menu (F8 to toggle; frees the cursor). Render-only; user.* is never
             // hashed. Changes apply live and "Save" persists them to the per-user overlay.
             // The polished RML settings screen (settings.rml) is the follow-on (task #12).
@@ -5083,6 +5119,15 @@ int main(int argc, char* argv[]) {
                     if (ImGui::Checkbox("VSync", &us.vsync)) {
                         glfwSwapInterval(us.vsync ? 1 : 0);
                     }
+                    ImGui::Separator();
+                    ImGui::SliderFloat("Time scale", &g_timeScale, 0.0f, 8.0f, "%.2fx");
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("1x")) g_timeScale = 1.0f;
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton(g_timeScale == 0.0f ? "Resume" : "Pause"))
+                        g_timeScale = (g_timeScale == 0.0f) ? 1.0f : 0.0f;
+                    ImGui::TextDisabled("engine time: [ slower   ] faster   \\ reset");
+                    ImGui::Separator();
                     {
                         // Window mode — applied live via ApplyWindowMode (no-op on capture-pinned runs).
                         const char* modes[] = {"windowed", "borderless", "fullscreen"};
@@ -5314,6 +5359,18 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
             firstMouse = true;  // avoid a camera jump when mouse-look resumes
         }
+        return;
+    }
+    // Engine time scale (host_timescale-style): [ slower, ] faster, \ reset to 1x.
+    if (action == GLFW_PRESS &&
+        (key == GLFW_KEY_LEFT_BRACKET || key == GLFW_KEY_RIGHT_BRACKET || key == GLFW_KEY_BACKSLASH)) {
+        if (key == GLFW_KEY_LEFT_BRACKET)
+            g_timeScale = (g_timeScale <= 0.125f) ? 0.0f : g_timeScale * 0.5f;   // ...down to pause
+        else if (key == GLFW_KEY_RIGHT_BRACKET)
+            g_timeScale = (g_timeScale < 0.125f) ? 0.125f : std::min(g_timeScale * 2.0f, 16.0f);
+        else
+            g_timeScale = 1.0f;  // reset
+        LUMINUMBRA_CORE_INFO("Engine time scale: {:.3f}x", g_timeScale);
         return;
     }
     if (key == GLFW_KEY_F7 && action == GLFW_PRESS) {
