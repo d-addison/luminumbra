@@ -1,5 +1,6 @@
 #include "GameSession.h"
 #include "../ai/InstinctSystem.h"
+#include "../ai/CreatureBrainSystem.h"
 #include "../ai/InstinctLocomotionSystem.h"
 #include "../ai/PerceptionSystem.h"
 #include "../ai/ScentDepositSystem.h"
@@ -160,6 +161,17 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             luminumbra::ai::RunScentSteeringOnTick(
                 m_registry, *m_scentField, ScentOriginFor(m_metadata.spawnPoint.x),
                 ScentOriginFor(m_metadata.spawnPoint.z), kScentCellSize);
+        }
+
+        // 2e. I9-ECO: Utility-AI creature brain (predator/prey movement). Per-entity opt-in
+        // via CreatureComponent -> a world with none is a no-op (canonical roster byte-identical,
+        // same discipline as plants/scent). Deterministic (id-ordered, libm-free).
+        {
+            auto creatures = m_registry.view<const Luminumbra::Components::CreatureComponent>();
+            if (creatures.begin() != creatures.end()) {
+                luminumbra::ai::RunCreatureBrainSystemOnTick(
+                    m_registry, static_cast<float>(m_simulationClock.fixed_dt()));
+            }
         }
 
         // 3. T-I5a-2 (A2): wind field update. Deterministic (DeterministicMath +
