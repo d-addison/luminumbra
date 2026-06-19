@@ -325,6 +325,11 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             constexpr float kFieldCell = 1.0f;      // metres / cell
             const float originX = m_metadata.spawnPoint.x - kFieldCells * kFieldCell * 0.5f;
             const float originZ = m_metadata.spawnPoint.z - kFieldCells * kFieldCell * 0.5f;
+            // Wind coupling: fire spreads + pollen drifts DOWNWIND, sampled from the
+            // (already deterministic, already-hashed) wind field at the anchor.
+            const ::Luminumbra::Vec2 windXZ =
+                m_windFieldSystem ? m_windFieldSystem->SampleWind(m_metadata.spawnPoint)
+                                  : ::Luminumbra::Vec2(0.0f);
 
             if (!m_registry.view<Comp::WaterSourceComponent>().empty()) {
                 if (!m_irrigationGrid)
@@ -337,11 +342,11 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 fol::RunSoilNutrientOnTick(m_registry, *m_soilGrid, originX, originZ, kFieldCell);
             }
             if (!m_registry.view<Comp::PlantGenomeComponent>().empty())
-                fol::RunPollinationOnTick(m_registry, current_tick);
+                fol::RunPollinationOnTick(m_registry, current_tick, windXZ);
             if (!m_registry.view<Comp::PlantHealthComponent>().empty())
                 fol::RunPlantDiseaseOnTick(m_registry, current_tick);
             if (!m_registry.view<Comp::CombustibleComponent>().empty())
-                luminumbra::sim::RunFireSpreadOnTick(m_registry, current_tick);
+                luminumbra::sim::RunFireSpreadOnTick(m_registry, current_tick, windXZ);
             if (!m_registry.view<Comp::GrazeableComponent>().empty())
                 luminumbra::ai::RunWildlifeFoliageOnTick(m_registry, current_tick);
             if (!m_registry.view<Comp::MortalComponent>().empty())
