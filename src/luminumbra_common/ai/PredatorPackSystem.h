@@ -157,6 +157,18 @@ inline PredatorPackStats RunPredatorPackOnTick(entt::registry& reg, std::uint64_
             }
         }
 
+        // Order-INDEPENDENT flank rank: rank pack-mates by POSITION (x then z), not by entity
+        // id, so a predator's flank angle depends on WHERE it is — invariant to spawn order.
+        // (ps is id-sorted, so the index `j` is the id; use it as a stable positional tiebreak.)
+        std::sort(pack.begin(), pack.end(), [&](std::size_t a, std::size_t b) {
+            if (ps[a].x != ps[b].x) return ps[a].x < ps[b].x;
+            if (ps[a].z != ps[b].z) return ps[a].z < ps[b].z;
+            return a < b;
+        });
+        for (std::size_t k = 0; k < pack.size(); ++k) {
+            if (pack[k] == i) { selfRank = k; break; }
+        }
+
         const std::size_t packSize = pack.size();           // >= 1 (self always included)
         const bool inPack = packSize >= 2;                  // a true pack needs a mate in range
         pk.in_pack = inPack ? 1u : 0u;
