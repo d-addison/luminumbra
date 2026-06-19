@@ -1,12 +1,17 @@
 #include "PlayerController.h"
 #include "rendering/Camera.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
+#include "luminumbra_common/core/SystemConfig.h"
 #include "core/Log.h"
 
 namespace Luminumbra::Client {
 
 PlayerController::PlayerController(GLFWwindow* window, Rendering::Camera* camera, Systems::PhysicsSystem* physicsSystem)
     : m_window(window), m_camera(camera), m_physicsSystem(physicsSystem) {
+    // Seed key bindings from the compiled defaults; ApplyKeyBindings() later overlays config.
+    for (const auto& def : kInputActionDefs) {
+        m_keys[static_cast<std::size_t>(def.action)] = def.default_key;
+    }
     if (m_mode == MovementMode::Noclip) {
         m_position = m_camera->Position;
     } else {
@@ -16,6 +21,12 @@ PlayerController::PlayerController(GLFWwindow* window, Rendering::Camera* camera
             m_physicsSystem->create_player_controller(m_position);
             m_hasInitializedPhysicsPlayer = true;
         }
+    }
+}
+
+void PlayerController::ApplyKeyBindings(const luminumbra::core::SystemConfig& cfg) {
+    for (const auto& def : kInputActionDefs) {
+        m_keys[static_cast<std::size_t>(def.action)] = cfg.keybind(def.name, def.default_key);
     }
 }
 
@@ -80,16 +91,16 @@ PlayerReplayInputFrame PlayerController::ReadLiveInputFrame() const {
 
     glm::vec3 right = m_camera->Right;
 
-    if (glfwGetKey(m_window, GLFW_KEY_W) == GLFW_PRESS) wishDir += forward;
-    if (glfwGetKey(m_window, GLFW_KEY_S) == GLFW_PRESS) wishDir -= forward;
-    if (glfwGetKey(m_window, GLFW_KEY_A) == GLFW_PRESS) wishDir -= right;
-    if (glfwGetKey(m_window, GLFW_KEY_D) == GLFW_PRESS) wishDir += right;
+    if (glfwGetKey(m_window, key(InputAction::MoveForward)) == GLFW_PRESS) wishDir += forward;
+    if (glfwGetKey(m_window, key(InputAction::MoveBack)) == GLFW_PRESS) wishDir -= forward;
+    if (glfwGetKey(m_window, key(InputAction::MoveLeft)) == GLFW_PRESS) wishDir -= right;
+    if (glfwGetKey(m_window, key(InputAction::MoveRight)) == GLFW_PRESS) wishDir += right;
 
     if (m_mode == MovementMode::Noclip) {
-        if (glfwGetKey(m_window, GLFW_KEY_SPACE) == GLFW_PRESS) {
+        if (glfwGetKey(m_window, key(InputAction::NoclipUp)) == GLFW_PRESS) {
             wishDir += m_camera->WorldUp;
         }
-        if (glfwGetKey(m_window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS || glfwGetKey(m_window, GLFW_KEY_C) == GLFW_PRESS) {
+        if (glfwGetKey(m_window, key(InputAction::NoclipDown)) == GLFW_PRESS) {
             wishDir -= m_camera->WorldUp;
         }
     }
@@ -97,7 +108,7 @@ PlayerReplayInputFrame PlayerController::ReadLiveInputFrame() const {
     input.wishDirection = wishDir;
     input.jumpPressed = m_wantsToJump;
     input.crouchPressed = m_wantsToCrouch;
-    input.sprintHeld = glfwGetKey(m_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
+    input.sprintHeld = glfwGetKey(m_window, key(InputAction::Sprint)) == GLFW_PRESS;
     return input;
 }
 
@@ -148,7 +159,7 @@ void PlayerController::UpdateCameraFromControllerPosition() {
 
 void PlayerController::ProcessKeyInput(int key, int action) {
     // --- Global Controls (work in any mode) ---
-    if (key == GLFW_KEY_V && action == GLFW_PRESS) {
+    if (key == this->key(InputAction::ToggleNoclip) && action == GLFW_PRESS) {
         if (m_mode == MovementMode::Walking) {
             m_mode = MovementMode::Noclip;
             // When entering noclip, the camera now leads.
@@ -178,11 +189,10 @@ void PlayerController::ProcessKeyInput(int key, int action) {
     // --- Mode-Specific Controls ---
     if (m_mode == MovementMode::Walking) {
         // These actions are events; they set a flag that is consumed in the Update loop.
-        if (key == GLFW_KEY_SPACE && action == GLFW_PRESS) {
+        if (key == this->key(InputAction::Jump) && action == GLFW_PRESS) {
             m_wantsToJump = true;
         }
-        if ((key == GLFW_KEY_LEFT_CONTROL || key == GLFW_KEY_C) && action == GLFW_PRESS) {
-            LUMINUMBRA_CORE_INFO("Crouch key detected (L-CTRL or C). Setting wantsToCrouch flag.");
+        if (key == this->key(InputAction::Crouch) && action == GLFW_PRESS) {
             m_wantsToCrouch = true;
         }
     }

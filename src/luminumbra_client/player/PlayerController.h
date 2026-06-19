@@ -2,9 +2,12 @@
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <glm/glm.hpp>
 #include "imgui.h"
+#include "InputActions.h"
 
 namespace Luminumbra::Rendering {
     class Camera;
@@ -12,6 +15,10 @@ namespace Luminumbra::Rendering {
 
 namespace Luminumbra::Systems {
     class PhysicsSystem;
+}
+
+namespace luminumbra::core {
+    class SystemConfig;
 }
 
 namespace Luminumbra::Client {
@@ -55,6 +62,12 @@ public:
     void ProcessMouseScroll(double yoffset);
     void RenderDebugUI();
 
+    // Resolve all key bindings from SystemConfig user.controls.* (action name -> key),
+    // falling back to the compiled defaults (kInputActionDefs). Call after construction
+    // and whenever bindings change.
+    void ApplyKeyBindings(const luminumbra::core::SystemConfig& cfg);
+    [[nodiscard]] int key(InputAction action) const { return m_keys[static_cast<std::size_t>(action)]; }
+
 private:
     PlayerReplayInputFrame ReadLiveInputFrame() const;
     void UpdateWalking(float deltaTime, const glm::vec3& wishDir, bool jumpPressed, bool crouchPressed, bool sprintHeld);
@@ -64,6 +77,9 @@ private:
     GLFWwindow* m_window;
     Rendering::Camera* m_camera;
     Systems::PhysicsSystem* m_physicsSystem;
+
+    // Resolved key code per InputAction (defaults from kInputActionDefs; overridden by config).
+    std::array<int, kInputActionCount> m_keys{};
 
     MovementMode m_mode = MovementMode::Walking;
     glm::vec3 m_position{16.0f, 100.0f, 16.0f};

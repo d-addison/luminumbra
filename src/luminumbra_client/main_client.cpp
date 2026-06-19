@@ -73,6 +73,10 @@ std::unique_ptr<Luminumbra::Client::PlayerController> g_playerController;
 // per-user settings file (%APPDATA%/Luminumbra/settings.json). user.* is client-only,
 // never hashed (docs/STANDARDS.md §5). Loaded once at startup (before window creation).
 luminumbra::core::SystemConfig g_systemConfig;
+// Settings menu (F8) — frees the cursor so the ImGui panel is clickable. While
+// g_rebindCaptureAction >= 0 the next key press is captured as that action's binding.
+bool g_show_settings = false;
+int g_rebindCaptureAction = -1;
 std::unique_ptr<Luminumbra::Client::Rml_UIManager> g_uiManager;
 std::unique_ptr<Luminumbra::Client::WorldLoadingVisualizer> g_loading_visualizer;
 
@@ -1634,6 +1638,7 @@ int main(int argc, char* argv[]) {
                 g_camera->MouseSensitivity = g_systemConfig.user().mouse_sensitivity;  // user.video.mouse_sensitivity
                 g_camera->Zoom = g_systemConfig.user().fov;                             // user.video.fov
                 g_playerController = std::make_unique<Luminumbra::Client::PlayerController>(window, g_camera.get(), gameSession->GetPhysicsSystem());
+                g_playerController->ApplyKeyBindings(g_systemConfig);  // user.controls.* (rebindable)
                 if (g_world_render_data_initialized) {
                     renderPipeline.clear_all_chunk_data();
                 }
@@ -2147,6 +2152,7 @@ int main(int argc, char* argv[]) {
                     g_camera->MouseSensitivity = g_systemConfig.user().mouse_sensitivity;  // user.video.mouse_sensitivity
                     g_camera->Zoom = g_systemConfig.user().fov;                             // user.video.fov
                     g_playerController = std::make_unique<Luminumbra::Client::PlayerController>(window, g_camera.get(), gameSession->GetPhysicsSystem());
+                    g_playerController->ApplyKeyBindings(g_systemConfig);  // user.controls.* (rebindable)
                     if (g_world_render_data_initialized) {
                         renderPipeline.clear_all_chunk_data();
                     }
@@ -4976,12 +4982,12 @@ int main(int argc, char* argv[]) {
             if (g_imgui_enabled && g_playerController) {
                 g_playerController->RenderDebugUI();
             }
-            // Live player settings (render-only; user.* is never hashed). Lets the player
-            // change look sensitivity / FOV / VSync now and persist them to the per-user
-            // overlay. The polished RML settings screen (settings.rml) is the follow-on.
-            if (g_imgui_enabled && g_camera) {
-                ImGui::SetNextWindowSize(ImVec2(330, 0), ImGuiCond_FirstUseEver);
-                if (ImGui::Begin("Settings")) {
+            // Settings menu (F8 to toggle; frees the cursor). Render-only; user.* is never
+            // hashed. Changes apply live and "Save" persists them to the per-user overlay.
+            // The polished RML settings screen (settings.rml) is the follow-on (task #12).
+            if (g_imgui_enabled && g_show_settings && g_camera) {
+                ImGui::SetNextWindowSize(ImVec2(340, 0), ImGuiCond_FirstUseEver);
+                if (ImGui::Begin("Settings (F8)")) {
                     luminumbra::core::UserSettings& us = g_systemConfig.user();
                     if (ImGui::SliderFloat("Look sensitivity", &us.mouse_sensitivity, 0.01f, 1.0f, "%.3f")) {
                         g_camera->MouseSensitivity = us.mouse_sensitivity;  // applied live
@@ -4991,6 +4997,24 @@ int main(int argc, char* argv[]) {
                     }
                     if (ImGui::Checkbox("VSync", &us.vsync)) {
                         glfwSwapInterval(us.vsync ? 1 : 0);
+                    }
+                    if (ImGui::CollapsingHeader("Controls (keyboard)")) {
+                        for (const auto& def : Luminumbra::Client::kInputActionDefs) {
+                            const int idx = static_cast<int>(def.action);
+                            const int kc = g_systemConfig.keybind(def.name, def.default_key);
+                            const char* kn = glfwGetKeyName(kc, 0);
+                            char btn[48];
+                            if (g_rebindCaptureAction == idx)
+                                std::snprintf(btn, sizeof(btn), "press a key...##%s", def.name);
+                            else if (kn)
+                                std::snprintf(btn, sizeof(btn), "%s##%s", kn, def.name);
+                            else
+                                std::snprintf(btn, sizeof(btn), "key %d##%s", kc, def.name);
+                            ImGui::Text("%-12s", def.name);
+                            ImGui::SameLine(150);
+                            if (ImGui::Button(btn)) g_rebindCaptureAction = idx;
+                        }
+                        ImGui::TextDisabled("click a binding, then press a key (Esc cancels)");
                     }
                     if (ImGui::Button("Save settings")) {
                         const std::string path =
@@ -5144,6 +5168,29 @@ int main(int argc, char* argv[]) {
 }
 
 void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) {
+    // Rebind capture: while waiting for a key for some action, the next key press becomes
+    // its binding (Escape cancels). Intercept first so any key — even F-keys — can be bound.
+    if (g_rebindCaptureAction >= 0 && action == GLFW_PRESS) {
+        if (key != GLFW_KEY_ESCAPE && g_rebindCaptureAction < static_cast<int>(Luminumbra::Client::kInputActionCount)) {
+            const char* name = Luminumbra::Client::kInputActionDefs[g_rebindCaptureAction].name;
+            g_systemConfig.user().keybinds[name] = key;
+            if (g_playerController) g_playerController->ApplyKeyBindings(g_systemConfig);
+        }
+        g_rebindCaptureAction = -1;
+        return;
+    }
+    // F8: toggle the settings menu and free/restore the cursor so the panel is usable.
+    if (key == GLFW_KEY_F8 && action == GLFW_PRESS) {
+        g_show_settings = !g_show_settings;
+        g_rebindCaptureAction = -1;
+        if (g_show_settings) {
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        } else if (g_playerController) {  // in a world -> resume mouse-look
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+            firstMouse = true;  // avoid a camera jump when mouse-look resumes
+        }
+        return;
+    }
     if (key == GLFW_KEY_F7 && action == GLFW_PRESS) {
         show_worldgen_viewer = !show_worldgen_viewer;
         if (show_worldgen_viewer) {
