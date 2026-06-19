@@ -716,6 +716,26 @@ else()
     message(WARNING "No python with numpy found: VisualCritiqueFlags gate (visual_critique fixtures) will NOT be registered. Set VISUAL_SWEEP_PYTHON to a python with numpy+Pillow.")
 endif()
 
+# Timelapse assembler self-check (tools/timelapse.py): needs Pillow. Probe the same
+# candidates for `import PIL` and register with the first that has it.
+set(_tl_python "")
+foreach(_cand ${_vc_candidates})
+    execute_process(COMMAND "${_cand}" -c "import PIL"
+        RESULT_VARIABLE _tl_rc OUTPUT_QUIET ERROR_QUIET)
+    if(_tl_rc EQUAL 0)
+        set(_tl_python "${_cand}")
+        break()
+    endif()
+endforeach()
+if(_tl_python)
+    add_test(NAME TimelapseSelftest
+        COMMAND "${_tl_python}" ${CMAKE_SOURCE_DIR}/tools/timelapse.py --selftest)
+    set_tests_properties(TimelapseSelftest PROPERTIES LABELS "visual;tools" TIMEOUT 120)
+    message(STATUS "TimelapseSelftest registered using python: ${_tl_python}")
+else()
+    message(WARNING "No python with Pillow found: TimelapseSelftest will NOT be registered.")
+endif()
+
 set(LUMINUMBRA_TEST_BASELINE_BUILD_PRESET "${CMAKE_BUILD_TYPE}")
 string(TOLOWER "${LUMINUMBRA_TEST_BASELINE_BUILD_PRESET}" LUMINUMBRA_TEST_BASELINE_BUILD_PRESET)
 if(LUMINUMBRA_TEST_BASELINE_BUILD_PRESET STREQUAL "")
