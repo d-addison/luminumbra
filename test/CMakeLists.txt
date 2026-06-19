@@ -153,6 +153,8 @@ add_executable(common_tests
     sim/scavenging_test.cpp
     sim/species_codex_test.cpp
     sim/photo_filters_test.cpp
+    sim/steering_consumer_test.cpp
+    sim/ecology_pipeline_test.cpp
 )
 
 target_compile_definitions(common_tests PRIVATE
