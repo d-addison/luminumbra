@@ -5,7 +5,13 @@
 #include "../ai/LifespanSystem.h"               // §4: age/starvation death (+22)
 #include "../ai/WildlifeFoliageSystem.h"        // §4: grazing/trampling (+23)
 #include "../ai/HerdAlarmSystem.h"              // §4: collective-vigilance alarm (+26)
+#include "../ai/DecompositionSystem.h"          // §4: death -> nutrient release (+27)
+#include "../ai/CircadianSystem.h"              // §4: diurnal/nocturnal activity (+29)
+#include "../ai/TerritorySystem.h"              // §4: home territory + homing bias (+30)
 #include "../components/AlarmComponents.h"
+#include "../components/DecayComponents.h"
+#include "../components/CircadianComponents.h"
+#include "../components/TerritoryComponents.h"
 #include "../systems/FireSpreadSystem.h"        // §4: fire spread (+17)
 #include "../systems/SoilNutrientSystem.h"      // §4: soil nutrients (+18)
 #include "../systems/PollinationSystem.h"       // §4: cross-pollination (+19)
@@ -358,6 +364,19 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             // propagated level to flee with the herd; this maintains the field.
             if (!m_registry.view<Comp::AlarmComponent>().empty())
                 luminumbra::ai::RunHerdAlarmOnTick(m_registry, static_cast<float>(m_simulationClock.fixed_dt()));
+            // Decomposition: dead creatures decay + release nutrient (consumed by the soil loop).
+            if (!m_registry.view<Comp::DecayComponent>().empty())
+                luminumbra::ai::RunDecompositionOnTick(m_registry, current_tick);
+            // Circadian: diurnal/nocturnal activity from a tick-derived day fraction.
+            if (!m_registry.view<Comp::CircadianComponent>().empty()) {
+                constexpr std::uint64_t kTicksPerDay = 30ull * 60ull * 20ull;  // 20-min day @30Hz
+                const float tod01 = static_cast<float>(current_tick % kTicksPerDay) /
+                                    static_cast<float>(kTicksPerDay);
+                luminumbra::ai::RunCircadianOnTick(m_registry, tod01);
+            }
+            // Territory: claim home + emit a homing bias (movement blends it like mate-seeking).
+            if (!m_registry.view<Comp::TerritoryComponent>().empty())
+                luminumbra::ai::RunTerritoryOnTick(m_registry, current_tick);
         }
 
         m_simulationEventBus.drain(current_tick);
