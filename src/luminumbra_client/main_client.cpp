@@ -110,6 +110,7 @@ std::vector<ProcgenPlantInstance> g_procgenPlants;
 float g_procgenStageF = 5.0f;          // growth: 0 = Seed .. 5 = Fruiting (drives structure + size)
 float g_procgenLastBakedStage = -2.0f;
 glm::vec3 g_procgenSunDir = glm::vec3(0.0f, 1.0f, 0.0f);
+float g_season = 0.0f;                  // 0 = summer green .. 1 = autumn ochre (seasonal leaf color)
 
 // Re-bake the combined procgen plant mesh at growth `stageF` and push it to the pass. Young
 // stages -> shallower branch recursion + smaller size; deterministic pure functions.
@@ -133,13 +134,24 @@ void BakeProcgenPlants(Luminumbra::Rendering::PlantProcgenPass* pp, float stageF
         const float sc = inst.effScale * growF;
         const std::size_t leafVertStart = pm.vertices.size() >= ps.leaves.size() * 4u
             ? pm.vertices.size() - ps.leaves.size() * 4u : pm.vertices.size();
+        // GENETIC + SEASONAL albedo: leaf greens vary by genome, shifting toward autumn
+        // ochre with the season; bark brown varies subtly per genome.
+        using G = Luminumbra::Components::PlantGene;
+        const float hueVar = inst.genome.gene(G::LeafDensity);
+        const float valVar = inst.genome.gene(G::Hardiness);
+        const glm::vec3 summerLeaf(0.09f + 0.10f * hueVar, 0.32f + 0.22f * valVar, 0.07f + 0.05f * hueVar);
+        const glm::vec3 autumnLeaf(0.42f + 0.10f * hueVar, 0.20f + 0.10f * valVar, 0.05f);
+        const glm::vec3 leafColor = glm::mix(summerLeaf, autumnLeaf, std::clamp(g_season, 0.0f, 1.0f));
+        const glm::vec3 barkColor(0.16f + 0.06f * valVar, 0.10f, 0.06f);
         const std::uint32_t baseVert = static_cast<std::uint32_t>(verts.size());
         for (std::size_t vi = 0; vi < pm.vertices.size(); ++vi) {
             const luminumbra::foliage::ProcVertex& src = pm.vertices[vi];
             Luminumbra::Rendering::PlantProcgenPass::Vertex v;
             v.pos = rot * (src.pos * sc) + inst.worldPos;
             v.normal = glm::normalize(rot * src.normal);
-            v.uv = glm::vec2(vi >= leafVertStart ? 1.0f : 0.0f, src.uv.y);
+            const bool isLeaf = vi >= leafVertStart;
+            v.uv = glm::vec2(isLeaf ? 1.0f : 0.0f, src.uv.y);
+            v.color = isLeaf ? leafColor : barkColor;
             verts.push_back(v);
         }
         for (std::uint32_t idx : pm.indices) indices.push_back(baseVert + idx);
@@ -3292,6 +3304,19 @@ int main(int argc, char* argv[]) {
                     }
                 } else if (g_playerController && !g_show_settings) {
                     g_playerController->Update(deltaTime);  // movement paused while the menu is open
+                }
+                if (g_timelapse_frames > 0 && g_camera && gameSession) {
+                    // FIXED timelapse camera: elevated, looking down at the grove around spawn.
+                    // NOT tied to the (settling) player physics, so it can never fall through the
+                    // world -- and it frames the plants instead of whatever the avatar sees.
+                    const auto sp = gameSession->GetMetadata().spawnPoint;
+                    const glm::vec3 camPos(sp.x, sp.y + 7.0f, sp.z + 20.0f);
+                    const glm::vec3 target(sp.x, sp.y + 2.0f, sp.z);
+                    const glm::vec3 d = glm::normalize(target - camPos);
+                    g_camera->Position = camPos;
+                    g_camera->Yaw = glm::degrees(std::atan2(d.z, d.x));
+                    g_camera->Pitch = glm::degrees(std::asin(std::clamp(d.y, -1.0f, 1.0f)));
+                    g_camera->updateCameraVectors();
                 }
                 if (auto* physics = gameSession->GetPhysicsSystem()) physics->update(deltaTime * g_timeScale);
                 // T-I3-4: fixed 30 Hz simulation tick (SimulationClock +
