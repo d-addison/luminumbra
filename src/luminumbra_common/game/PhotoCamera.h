@@ -95,7 +95,7 @@ inline constexpr float kIsoDepthRef    = 4.0f; // DoF this many * distance = poo
 // ---------------------------------------------------------------------------
 // Small pure helpers (float +-*/ only — no libm).
 // ---------------------------------------------------------------------------
-inline float Clamp01(float v) {
+inline float CameraClamp01(float v) {
     if (v < 0.0f) return 0.0f;
     if (v > 1.0f) return 1.0f;
     return v;
@@ -239,12 +239,12 @@ inline float ExposureValue(const LensSettings& lens) {
 // uses Log2Approx).
 // ---------------------------------------------------------------------------
 inline float ExposureQuality(const LensSettings& lens, float scene_luminance) {
-    const float lum = Clamp01(scene_luminance);
+    const float lum = CameraClamp01(scene_luminance);
     const float target_ev = kSceneEvMin + lum * kSceneEvSpan;
     const float lens_ev   = ExposureValue(lens);
 
     const float stops_off = AbsF(lens_ev - target_ev);
-    return Clamp01(1.0f - kEvFalloff * stops_off);
+    return CameraClamp01(1.0f - kEvFalloff * stops_off);
 }
 
 // ---------------------------------------------------------------------------
@@ -267,7 +267,7 @@ inline float SubjectIsolation(const LensSettings& lens, const CameraSubject& sub
     // Aperture term: wide (small N) is good. Linear ramp from f/1.0 (best) to the
     // ref f-number (worst).
     const float N = lens.aperture_f > 0.0f ? lens.aperture_f : kIsoApertureRef;
-    const float aperture_term = Clamp01((kIsoApertureRef - N) / (kIsoApertureRef - 1.0f));
+    const float aperture_term = CameraClamp01((kIsoApertureRef - N) / (kIsoApertureRef - 1.0f));
 
     // Depth term: shallow band relative to subject distance is good. Band width in
     // metres; an infinite far -> treated as maximally deep (term 0).
@@ -278,7 +278,7 @@ inline float SubjectIsolation(const LensSettings& lens, const CameraSubject& sub
     } else {
         const float band = dof.far_limit_m - dof.near_limit_m;        // >= 0
         const float band_ratio = band / (kIsoDepthRef * dist);        // 0 = tiny
-        depth_term = Clamp01(1.0f - band_ratio);
+        depth_term = CameraClamp01(1.0f - band_ratio);
     }
 
     // Combine the optical terms (aperture + depth weighted), then gate on focus.
@@ -291,7 +291,7 @@ inline float SubjectIsolation(const LensSettings& lens, const CameraSubject& sub
         iso = iso * 0.15f;
     }
 
-    return Clamp01(iso);
+    return CameraClamp01(iso);
 }
 
 } // namespace luminumbra::game

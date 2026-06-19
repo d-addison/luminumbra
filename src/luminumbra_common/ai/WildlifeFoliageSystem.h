@@ -126,6 +126,9 @@ inline WildlifeFoliageStats RunWildlifeFoliageOnTick(entt::registry& reg, std::u
 
         // Count how many grazers are within range (trampling pressure) and remember which
         // (to feed them). Summing the count first keeps the bite order-independent.
+        // A depleted plant (no biomass) still gets trampled but feeds NO ONE -- gate the
+        // feed accrual on having biomass to give, so creatures can't eat from bare ground.
+        const bool has_biomass = clampBiomass(gz.biomass) > 0.0f;
         int n_in_range = 0;
         for (std::size_t gi = 0; gi < grazers.size(); ++gi) {
             const float dx = grazers[gi].x - ptf.position.x;
@@ -133,7 +136,7 @@ inline WildlifeFoliageStats RunWildlifeFoliageOnTick(entt::registry& reg, std::u
             const float d2 = dx * dx + dz * dz;
             if (d2 <= kGrazeRadiusSq) {
                 ++n_in_range;
-                feed[gi] += kFeedPerGraze;  // this plant feeds the creature a little
+                if (has_biomass) feed[gi] += kFeedPerGraze;  // only a living plant feeds
             }
         }
 

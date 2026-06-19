@@ -49,6 +49,7 @@ namespace {
 
 namespace Comp = ::Luminumbra::Components;
 namespace dm = ::Luminumbra::DeterministicMath;
+using luminumbra::ai::RunPredatorPackOnTick;
 
 // ---------------------------------------------------------------------------
 // shared spawn helpers
