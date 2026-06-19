@@ -36,6 +36,7 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/SkyboxPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/ParticlePass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/FoliagePass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/PlantProcgenPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/SsaoPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/WaterPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/ShieldRtFarFieldPass.cpp
