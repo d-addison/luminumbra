@@ -8,6 +8,8 @@
 #include "../ai/StimulusChannels.h"
 #include "../components/CoreComponents.h"
 #include "../components/InstinctComponents.h"
+#include "../components/PlantComponents.h"          // I9-FOLIAGE plant pillar
+#include "../systems/PlantGrowthSystem.h"           // I9-FOLIAGE growth tick
 #include "../animation/AnimationRuntime.h"
 #include "../systems/SHIELD_WorldSystem.h" // This includes TerrainGenParams
 #include "../core/JobSystem.h"
@@ -188,6 +190,27 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         // and resim agree on the field at every checkpoint.
         if (m_aetherFieldSystem) {
             m_aetherFieldSystem->Update(current_tick, m_metadata.spawnPoint, m_windFieldSystem.get());
+        }
+
+        // 6. I9-FOLIAGE: deterministic plant GROWTH. Game-data opt-in (PlantTag):
+        // no plants -> the system never runs and world_hash stays byte-identical
+        // (same discipline as scent). The environment is ATMOSPHERIC — moisture is
+        // driven by the freshly-updated weather precip field (rain -> growth), so
+        // growth runs AFTER weather. Integer/fixed-point + id-ordered = run==replay.
+        // (temperature/light/soil coupling are follow-ups; neutral for now.)
+        if (HasPlantParticipants()) {
+            luminumbra::foliage::EnvSampler plant_env =
+                [this](const Luminumbra::Components::TransformComponent& tf) {
+                    luminumbra::foliage::PlantEnvSample s;
+                    const float precip = m_weatherSystem
+                        ? m_weatherSystem->PrecipitationAt(tf.position) : 0.0f;
+                    s.moisture = luminumbra::foliage::clamp01(0.35f + precip * 0.65f);
+                    s.temperature = 0.5f;  // neutral until a sim temperature field is exposed
+                    s.light = 0.75f;
+                    s.soil_quality = 0.6f;
+                    return s;
+                };
+            luminumbra::foliage::RunPlantGrowthSystemOnTick(m_registry, current_tick, plant_env);
         }
 
         m_simulationEventBus.drain(current_tick);
@@ -695,6 +718,32 @@ std::string GameSession::ComputeScentSubHash() const {
                 }
             }
         }
+    }
+    return Persistence::StableChecksum(bytes.str());
+}
+
+bool GameSession::HasPlantParticipants() const {
+    auto plants = m_registry.view<const Luminumbra::Components::PlantTag>();
+    return plants.begin() != plants.end();
+}
+
+std::string GameSession::ComputePlantSubHash() const {
+    if (!HasPlantParticipants()) {
+        return {};
+    }
+    // Hash the id-ordered sequence of integer growth state (geometry is visual-only;
+    // THIS is the sim truth). id-robust: we hash the ordered STATE, not raw ids.
+    auto view = m_registry.view<const Luminumbra::Components::PlantTag,
+                                const Luminumbra::Components::PlantGrowthComponent>();
+    std::vector<entt::entity> ents;
+    for (auto e : view) ents.push_back(e);
+    std::sort(ents.begin(), ents.end());
+    std::ostringstream bytes;
+    bytes << "plant:v1:" << ents.size() << ':';
+    for (auto e : ents) {
+        const auto& g = view.get<const Luminumbra::Components::PlantGrowthComponent>(e);
+        bytes << g.species_id << ',' << int(g.stage) << ',' << int(g.quality) << ','
+              << g.growth_points << ',' << g.stress_points << ';';
     }
     return Persistence::StableChecksum(bytes.str());
 }
