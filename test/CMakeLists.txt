@@ -145,6 +145,10 @@ add_executable(common_tests
     sim/circadian_test.cpp
     sim/territory_test.cpp
     sim/photo_camera_test.cpp
+    sim/light_tools_test.cpp
+    sim/photo_session_test.cpp
+    sim/predator_pack_test.cpp
+    sim/migration_test.cpp
 )
 
 target_compile_definitions(common_tests PRIVATE
