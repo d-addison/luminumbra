@@ -61,8 +61,15 @@ struct CreatureGenomeComponent {
     // Ticks remaining before this creature may reproduce again (set after each birth so
     // populations grow at a bounded rate rather than exploding).
     std::uint32_t reproduce_cooldown = 0;
-    // Generation index (0 = founder); offspring = parent generation + 1. Telemetry only.
+    // Generation index (0 = founder); offspring = max(parents)+1. Telemetry / marker tint.
     std::uint32_t generation = 0;
+    // --- SEXUAL reproduction: a creature has a sex and must COURT an opposite-sex mate ---
+    // Sex (sexual reproduction needs a male + a female). Assigned at birth by a seeded coin
+    // flip; founders are seeded by the spawner.
+    bool female = false;
+    // Ticks the creature has spent adjacent to a ready opposite-sex mate. When it reaches the
+    // courtship duration a single offspring is born. Resets to 0 when no mate is in reach.
+    std::uint32_t courting_ticks = 0;
 };
 
 }  // namespace Luminumbra::Components

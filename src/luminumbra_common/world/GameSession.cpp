@@ -173,6 +173,13 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 luminumbra::ai::RunCreatureBrainSystemOnTick(
                     m_registry, static_cast<float>(m_simulationClock.fixed_dt()));
 
+                // 2e-mate: SEXUAL reproduction, phase A. Ready creatures (mature, well-fed,
+                // off cooldown) carrying a CreatureGenomeComponent steer toward the nearest
+                // ready OPPOSITE-SEX mate by overriding the brain's wish velocity (unless
+                // fleeing) — so the physics bridge below actually walks them together. Opt-in
+                // (genome component); no genome -> untouched.
+                luminumbra::ai::RunMateSeekingOnTick(m_registry);
+
                 // 2e-phys: TRUE-PHYSICS locomotion bridge. Creatures carrying a
                 // CreaturePhysicsComponent are driven by the deterministic Jolt avatar
                 // controller (the same one player/networked avatars use): push the brain's
@@ -205,18 +212,16 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                     }
                 }
 
-                // 2e-evo: Track (a) — generational creature EVOLUTION. After the brain
-                // moves/feeds/catches, well-fed healthy mature prey carrying a
-                // CreatureGenomeComponent reproduce, passing a SEEDED-mutated genome to one
-                // offspring (selection: caught prey leave none). Deterministic — id-ordered,
-                // libm-free, RNG seeded purely from (offset 16 + parent id + tick) (the +16
-                // reproduction seed offset; wind+11/weather+12-13/aether+14/plant+15 above).
-                // Per-entity opt-in (genome component): a roster whose creatures carry no
-                // genome — and any world with no creatures — creates nothing, so the
-                // canonical NetworkStateHash baseline stays byte-identical.
-                const auto repro = luminumbra::ai::RunCreatureReproductionOnTick(m_registry, current_tick);
+                // 2e-mate: SEXUAL reproduction, phase B (after the pair has moved together via
+                // the bridge). Ready adjacent opposite-sex pairs accumulate courtship; once a
+                // pair has courted long enough, ONE offspring is born from a SEEDED blend of
+                // BOTH parents' genomes (caught prey leave none -> selection). Deterministic
+                // (id-ordered, libm-free, RNG seeded from offset 16 + parent ids + tick).
+                // Per-entity opt-in (genome component): no genome / no creatures -> nothing
+                // created, so the canonical NetworkStateHash baseline stays byte-identical.
+                const auto repro = luminumbra::ai::RunMatingResolveOnTick(m_registry, current_tick);
                 if (repro.born > 0) {
-                    LUMINUMBRA_CORE_INFO("I9-EVO: {} offspring born at tick {}", repro.born, current_tick);
+                    LUMINUMBRA_CORE_INFO("I9-EVO: {} offspring born (sexual) at tick {}", repro.born, current_tick);
                 }
             }
         }

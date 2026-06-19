@@ -226,6 +226,27 @@ void BakeCreatureMarkers(Luminumbra::Rendering::PlantProcgenPass* pp, entt::regi
     pp->set_plants(verts, indices, s_sig);
     pp->set_enabled(true);
 }
+
+// I9-ECO: give any creature that still lacks a Jolt body (e.g. an offspring just born in the
+// sim) a deterministic avatar character so the GameSession physics bridge drives it and it
+// COLLIDES with the terrain instead of walking through mountains. Amortized (a few per frame)
+// so a birth wave never spikes the frame. Render/demo-only.
+void AttachMissingCreatureBodies(Luminumbra::Systems::PhysicsSystem* phys, entt::registry& reg,
+                                 int maxPerFrame = 4) {
+    if (!phys) return;
+    int made = 0;
+    auto view = reg.view<const Luminumbra::Components::CreatureComponent,
+                         const Luminumbra::Components::TransformComponent>();
+    for (auto e : view) {
+        if (made >= maxPerFrame) break;
+        if (reg.all_of<Luminumbra::Components::CreaturePhysicsComponent>(e)) continue;
+        const auto& tf = view.get<const Luminumbra::Components::TransformComponent>(e);
+        const std::size_t idx =
+            phys->create_avatar_character(glm::vec3(tf.position.x, tf.position.y + 1.0f, tf.position.z));
+        reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
+        ++made;
+    }
+}
 std::unique_ptr<Luminumbra::Client::Rml_UIManager> g_uiManager;
 std::unique_ptr<Luminumbra::Client::WorldLoadingVisualizer> g_loading_visualizer;
 
@@ -3648,6 +3669,7 @@ int main(int argc, char* argv[]) {
                             // drops and settles on the surface; the brain's wish velocity then
                             // drives it across the heightfield (gravity / collision / slopes).
                             auto* phys = gameSession->GetPhysicsSystem();
+                            int preyIdx = 0;  // alternate founder sexes so a herd can pair up
                             auto mkCreature = [&](float ox, float oz, bool predator, float hunger) {
                                 const float cx = anchor.x + ox, cz = anchor.z + oz;
                                 const float cy = terr(cx, cz) + 1.5f;  // capsule centre above ground
@@ -3672,9 +3694,10 @@ int main(int argc, char* argv[]) {
                                     auto& gn = reg.emplace<
                                         Luminumbra::Components::CreatureGenomeComponent>(e);
                                     gn.move_speed = cr.move_speed;
+                                    gn.female = (preyIdx++ % 2 == 0);  // alternate M/F so pairs form
                                     // Calm (evolution) demo: start the founders WELL-FED + near
-                                    // maturity so they breed early and 2-3 generations appear
-                                    // within the clip (markers are tinted by generation).
+                                    // maturity so they court early and generations appear within
+                                    // the clip (markers are tinted by generation).
                                     if (g_timelapse_calm) {
                                         cr.hunger = 0.05f;
                                         cr.stamina = 1.0f;
@@ -3830,6 +3853,11 @@ int main(int argc, char* argv[]) {
                     // I9-ECO: re-bake the creature markers from the live (just-ticked) positions
                     // so the ecology timelapse shows them actually moving each frame.
                     if (g_timelapse_creatures) {
+                        // Newborn offspring start bodyless; give them avatar bodies so they
+                        // collide with the terrain (no more walking through mountains), then
+                        // bake markers from the physics-resolved positions.
+                        AttachMissingCreatureBodies(gameSession->GetPhysicsSystem(),
+                                                    gameSession->GetRegistry());
                         BakeCreatureMarkers(renderPipeline.plant_procgen(), gameSession->GetRegistry());
                     }
                     renderPipeline.render_frame(gameSession->GetRegistry(), *gameSession->GetWorldSystem(), *g_camera, deltaTime, wireframe_mode);
@@ -5383,6 +5411,50 @@ int main(int argc, char* argv[]) {
         }
         
         if (currentState == GameState::IN_GAME) {
+            // I9-ECO: Minecraft-style floating ID nameplates above each creature's head. Projects
+            // the world position to screen via the camera and draws a label (id + sex + generation)
+            // into the ImGui foreground list, so it shows in the live view AND in the demo capture
+            // (this runs even during the timelapse, unlike the gated debug windows below).
+            if (g_imgui_enabled && g_timelapse_creatures && g_camera && gameSession) {
+                int fbw = 0, fbh = 0;
+                glfwGetFramebufferSize(window, &fbw, &fbh);
+                if (fbw > 0 && fbh > 0) {
+                    const float aspect = static_cast<float>(fbw) / static_cast<float>(fbh);
+                    const glm::mat4 vp =
+                        glm::perspective(glm::radians(g_camera->Zoom), aspect, 0.1f, 10000.0f) *
+                        g_camera->GetViewMatrix();
+                    auto* dl = ImGui::GetForegroundDrawList();
+                    auto& reg = gameSession->GetRegistry();
+                    auto view = reg.view<const Luminumbra::Components::CreatureComponent,
+                                         const Luminumbra::Components::TransformComponent>();
+                    for (auto e : view) {
+                        const auto& cr = view.get<const Luminumbra::Components::CreatureComponent>(e);
+                        const auto& tf = view.get<const Luminumbra::Components::TransformComponent>(e);
+                        const glm::vec4 clip =
+                            vp * glm::vec4(tf.position.x, tf.position.y + 2.4f, tf.position.z, 1.0f);
+                        if (clip.w <= 0.05f) continue;  // behind the camera
+                        const float sx = (clip.x / clip.w * 0.5f + 0.5f) * static_cast<float>(fbw);
+                        const float sy = (1.0f - (clip.y / clip.w * 0.5f + 0.5f)) * static_cast<float>(fbh);
+                        char label[48];
+                        const unsigned idx = static_cast<unsigned>(entt::to_entity(e));
+                        if (cr.eaten) {
+                            std::snprintf(label, sizeof(label), "#%u dead", idx);
+                        } else if (cr.is_predator) {
+                            std::snprintf(label, sizeof(label), "#%u PRED", idx);
+                        } else if (const auto* gn =
+                                       reg.try_get<Luminumbra::Components::CreatureGenomeComponent>(e)) {
+                            std::snprintf(label, sizeof(label), "#%u %c g%u", idx,
+                                          gn->female ? 'F' : 'M', gn->generation);
+                        } else {
+                            std::snprintf(label, sizeof(label), "#%u", idx);
+                        }
+                        const ImVec2 sz = ImGui::CalcTextSize(label);
+                        const ImVec2 at(sx - sz.x * 0.5f, sy - sz.y);
+                        dl->AddText(ImVec2(at.x + 1.0f, at.y + 1.0f), IM_COL32(0, 0, 0, 200), label);  // shadow
+                        dl->AddText(at, IM_COL32(255, 255, 255, 235), label);
+                    }
+                }
+            }
             if (g_imgui_enabled && g_playerController && g_timelapse_frames == 0) {
                 g_playerController->RenderDebugUI();
             }
