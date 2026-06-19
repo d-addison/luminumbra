@@ -75,10 +75,21 @@ inline ProcgenParams DeriveParams(const Comp::PlantGenomeComponent& g, std::uint
     using G = Comp::PlantGene;
     const PlantPhenotype ph = ExpressGenome(g);
     ProcgenParams p;
-    p.trunk_len = ph.max_scale;                                  // 0.6..2.4
-    p.child_count = 2 + (g.gene(G::LeafDensity) > 0.5f ? 1 : 0); // 2 or 3
-    p.branch_tilt = 0.45f + g.gene(G::GrowthRate) * 0.50f;       // ~0.45..0.95 rad
-    p.length_ratio = 0.62f + g.gene(G::MaxScale) * 0.18f;        // 0.62..0.80
+    // 2nd SPECIES from the genome: a hardy genome grows a CONIFER (tall, narrow, near-vertical
+    // branches); otherwise a BROADLEAF (shorter, wide, spreading). Distinct silhouettes from
+    // the same deterministic generator.
+    const bool conifer = g.gene(G::Hardiness) > 0.5f;
+    if (conifer) {
+        p.trunk_len = ph.max_scale * 1.35f;                         // tall central leader
+        p.child_count = 3;
+        p.branch_tilt = 0.16f + g.gene(G::GrowthRate) * 0.14f;      // 0.16..0.30 (near-vertical)
+        p.length_ratio = 0.55f + g.gene(G::MaxScale) * 0.10f;       // 0.55..0.65 (SHORT side branches)
+    } else {
+        p.trunk_len = ph.max_scale;                                 // 0.6..2.4
+        p.child_count = 2 + (g.gene(G::LeafDensity) > 0.5f ? 1 : 0);// 2 or 3
+        p.branch_tilt = 0.60f + g.gene(G::GrowthRate) * 0.45f;      // 0.60..1.05 (spreading)
+        p.length_ratio = 0.62f + g.gene(G::MaxScale) * 0.18f;       // 0.62..0.80
+    }
     // Stage -> recursion depth: Seed(0) = trunk only; deeper as it matures, capped.
     p.max_depth = stage > 5 ? 5 : static_cast<int>(stage);
     // ATMOSPHERIC x GENETIC: leafier genomes seek light harder. clamp01 keeps it [0,1].
@@ -134,7 +145,7 @@ struct PlantStructure {
     std::vector<PlantLeaf> leaves;
 };
 
-inline constexpr float kTwigRadius = 0.01f;  // terminal-twig base radius (pipe-model leaf unit)
+inline constexpr float kTwigRadius = 0.018f;  // terminal-twig base radius (pipe-model leaf unit) -> thicker trunks
 
 // Post-order recursion: returns this branch's pipe-model radius. Da Vinci / Borchert-Honda
 // pipe model — a parent's cross-section area equals the sum of its children's

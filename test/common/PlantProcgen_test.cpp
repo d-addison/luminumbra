@@ -111,7 +111,7 @@ TEST(PlantProcgen, PhototropismBendsTowardSun) {
 // to the libm-free math or the algorithm is a DELIBERATE move of this literal.
 TEST(PlantProcgen, CrossPlatformGolden) {
     const auto m = GeneratePlantMesh(UniformGenome(0.3f), kFruiting);
-    EXPECT_EQ(HashMesh(m), 4793091320348283183ull);  // libm-free determinism golden
+    EXPECT_EQ(HashMesh(m), 10683496572422438044ull);  // libm-free determinism golden
 }
 
 // --- Rich structure (pipe-model branches + sun-facing leaves) ---
@@ -178,9 +178,27 @@ TEST(PlantProcgen, TrunkLeansTowardSun) {
     EXPECT_GT(trunk_tip_x(GeneratePlant(g, kFruiting, leaning)), 0.05f);  // leans toward +x sun
 }
 
+// Item 3: a hardy genome grows a narrow CONIFER; otherwise a wide BROADLEAF.
+TEST(PlantProcgen, ConiferNarrowerThanBroadleaf) {
+    Comp::PlantGenomeComponent conifer = UniformGenome(0.5f);
+    conifer.genes[static_cast<std::size_t>(Comp::PlantGene::Hardiness)] = 0.8f;  // hardy -> conifer
+    Comp::PlantGenomeComponent broad = UniformGenome(0.5f);
+    broad.genes[static_cast<std::size_t>(Comp::PlantGene::Hardiness)] = 0.2f;     // -> broadleaf
+    auto horizExtent = [](const PlantStructure& s) {
+        float mx = 0.0f;
+        for (const auto& b : s.branches) {
+            mx = std::max(mx, std::abs(b.b.x));
+            mx = std::max(mx, std::abs(b.b.z));
+        }
+        return mx;
+    };
+    EXPECT_LT(horizExtent(GeneratePlant(conifer, kFruiting)),
+              horizExtent(GeneratePlant(broad, kFruiting)));
+}
+
 TEST(PlantProcgen, StructureGolden) {
     const std::uint64_t h = HashStructure(GeneratePlant(UniformGenome(0.6f), kFruiting));
-    EXPECT_EQ(h, 17074272212509382706ull);  // libm-free determinism golden (branches + leaf clusters)
+    EXPECT_EQ(h, 6743362585011370933ull);  // libm-free determinism golden (branches + leaf clusters)
 }
 
 // --- Tessellation: structure -> renderable triangle mesh ---
@@ -222,7 +240,7 @@ TEST(PlantProcgen, TessellateDeterministic) {
 
 TEST(PlantProcgen, TessellateGolden) {
     const auto s = GeneratePlant(UniformGenome(0.6f), kFruiting);
-    EXPECT_EQ(HashProcMesh(TessellatePlant(s, 6)), 18381234001532927837ull);  // tessellation golden
+    EXPECT_EQ(HashProcMesh(TessellatePlant(s, 6)), 4738719477643067794ull);  // tessellation golden
 }
 
 }  // namespace
