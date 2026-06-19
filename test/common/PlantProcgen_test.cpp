@@ -183,4 +183,46 @@ TEST(PlantProcgen, StructureGolden) {
     EXPECT_EQ(h, 776720397350691645ull);  // libm-free determinism golden (branches + leaves)
 }
 
+// --- Tessellation: structure -> renderable triangle mesh ---
+
+using luminumbra::foliage::ProcMesh;
+using luminumbra::foliage::TessellatePlant;
+
+std::uint64_t HashProcMesh(const ProcMesh& m) {
+    std::vector<glm::vec3> flat;
+    for (const auto& vtx : m.vertices) {
+        flat.push_back(vtx.pos);
+        flat.push_back(vtx.normal);
+        flat.push_back(glm::vec3(vtx.uv.x, vtx.uv.y, 0.0f));
+    }
+    for (std::uint32_t idx : m.indices) flat.push_back(glm::vec3(static_cast<float>(idx), 0.0f, 0.0f));
+    return HashMesh(flat);
+}
+
+TEST(PlantProcgen, TessellateValidAndCounts) {
+    const int radial = 6;
+    const auto s = GeneratePlant(UniformGenome(0.6f), kFruiting);
+    const ProcMesh m = TessellatePlant(s, radial);
+
+    // Every index references a real vertex; index buffer is whole triangles.
+    EXPECT_FALSE(m.vertices.empty());
+    EXPECT_EQ(m.indices.size() % 3u, 0u);
+    for (std::uint32_t idx : m.indices) EXPECT_LT(idx, m.vertices.size());
+
+    // Counts: each branch -> radial*2 verts + radial*6 indices; each leaf -> 4 verts + 6 indices.
+    const std::size_t nb = s.branches.size(), nl = s.leaves.size();
+    EXPECT_EQ(m.vertices.size(), nb * radial * 2u + nl * 4u);
+    EXPECT_EQ(m.indices.size(), nb * radial * 6u + nl * 6u);
+}
+
+TEST(PlantProcgen, TessellateDeterministic) {
+    const auto s = GeneratePlant(UniformGenome(0.6f), kFruiting);
+    EXPECT_EQ(HashProcMesh(TessellatePlant(s)), HashProcMesh(TessellatePlant(s)));
+}
+
+TEST(PlantProcgen, TessellateGolden) {
+    const auto s = GeneratePlant(UniformGenome(0.6f), kFruiting);
+    EXPECT_EQ(HashProcMesh(TessellatePlant(s, 6)), 8655260894640015716ull);  // tessellation golden
+}
+
 }  // namespace

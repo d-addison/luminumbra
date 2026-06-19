@@ -175,4 +175,64 @@ inline PlantStructure GeneratePlant(const Comp::PlantGenomeComponent& genome, st
     return s;
 }
 
+// --- Tessellation: PlantStructure -> renderable triangle mesh (the bake core) ---
+// What a renderer uploads: branch segments become radial cylinders, leaves become
+// camera/sun-facing quads. PURE + deterministic (libm-free trig); the GL upload + scatter
+// integration (behind render.plant_procgen) is the render-side follow-on.
+
+struct ProcVertex {
+    glm::vec3 pos;
+    glm::vec3 normal;
+    glm::vec2 uv;
+};
+struct ProcMesh {
+    std::vector<ProcVertex> vertices;
+    std::vector<std::uint32_t> indices;
+};
+
+inline ProcMesh TessellatePlant(const PlantStructure& s, int radial = 6, float leaf_size = 0.12f) {
+    ProcMesh m;
+    if (radial < 3) radial = 3;
+
+    for (const PlantBranch& br : s.branches) {
+        const glm::vec3 axis = br.b - br.a;
+        if (axis.x * axis.x + axis.y * axis.y + axis.z * axis.z <= 0.0f) continue;
+        const glm::vec3 dir = NormDet(axis);
+        const glm::vec3 ref = (dir.y > 0.99f || dir.y < -0.99f) ? glm::vec3(1.0f, 0.0f, 0.0f)
+                                                               : glm::vec3(0.0f, 1.0f, 0.0f);
+        const glm::vec3 u = NormDet(CrossDet(dir, ref));
+        const glm::vec3 v = CrossDet(dir, u);
+        const std::uint32_t base = static_cast<std::uint32_t>(m.vertices.size());
+        for (int k = 0; k < radial; ++k) {
+            const float ang = dm::kTwoPi * static_cast<float>(k) / static_cast<float>(radial);
+            const glm::vec3 off = dm::Cos(ang) * u + dm::Sin(ang) * v;  // unit ring offset = normal
+            const float uvx = static_cast<float>(k) / static_cast<float>(radial);
+            m.vertices.push_back({br.a + off * br.radius, off, glm::vec2(uvx, 0.0f)});
+            m.vertices.push_back({br.b + off * br.radius, off, glm::vec2(uvx, 1.0f)});
+        }
+        for (int k = 0; k < radial; ++k) {
+            const int k1 = (k + 1) % radial;
+            const std::uint32_t a0 = base + 2u * k, a1 = base + 2u * k + 1u;
+            const std::uint32_t b0 = base + 2u * k1, b1 = base + 2u * k1 + 1u;
+            m.indices.insert(m.indices.end(), {a0, a1, b1, a0, b1, b0});  // two tris per side
+        }
+    }
+
+    const float h = leaf_size * 0.5f;
+    for (const PlantLeaf& lf : s.leaves) {
+        const glm::vec3 n = NormDet(lf.normal);
+        const glm::vec3 ref = (n.y > 0.99f || n.y < -0.99f) ? glm::vec3(1.0f, 0.0f, 0.0f)
+                                                           : glm::vec3(0.0f, 1.0f, 0.0f);
+        const glm::vec3 t = NormDet(CrossDet(n, ref));
+        const glm::vec3 b = CrossDet(n, t);
+        const std::uint32_t base = static_cast<std::uint32_t>(m.vertices.size());
+        m.vertices.push_back({lf.pos + (-t - b) * h, n, glm::vec2(0.0f, 0.0f)});
+        m.vertices.push_back({lf.pos + (t - b) * h, n, glm::vec2(1.0f, 0.0f)});
+        m.vertices.push_back({lf.pos + (t + b) * h, n, glm::vec2(1.0f, 1.0f)});
+        m.vertices.push_back({lf.pos + (-t + b) * h, n, glm::vec2(0.0f, 1.0f)});
+        m.indices.insert(m.indices.end(), {base, base + 1u, base + 2u, base, base + 2u, base + 3u});
+    }
+    return m;
+}
+
 }  // namespace luminumbra::foliage
