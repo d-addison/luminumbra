@@ -527,6 +527,7 @@ add_executable(frontier_gates_test
     ai/utility_ai_test.cpp
     ai/creature_brain_test.cpp
     ai/creature_brain_system_test.cpp
+    ai/flocking_test.cpp
     ai/awareness_test.cpp
     ai/perception_system_test.cpp
     ai/scent_steering_system_test.cpp
