@@ -117,7 +117,11 @@ inline PlantGrowthStats RunPlantGrowthSystemOnTick(
 
         const PlantPhenotype ph  = ExpressGenome(genome);
         const PlantEnvSample env = sample_env(tf);
-        const float suit = Suitability(ph, env);
+        // FARMING husbandry: tending (water/fertilize) lifts the cell's suitability
+        // and is consumed slowly, so the player must keep tending (DST-style).
+        const float tendBonus = static_cast<float>(growth.tended) * (1.0f / 255.0f) * 0.45f;
+        const float suit = clamp01(Suitability(ph, env) + tendBonus);
+        if (growth.tended > 0) --growth.tended; // wears off (deterministic decay)
 
         // Fixed-point growth increment (truncated; deterministic). Poor cells grow
         // slower AND accrue stress (the DST husbandry model: stress -> low quality).

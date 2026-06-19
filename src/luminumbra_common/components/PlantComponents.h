@@ -57,6 +57,9 @@ struct PlantGrowthComponent {
     std::uint8_t  quality = 100;     // 0..100 harvest quality (100 = unstressed)
     std::uint32_t growth_points = 0; // fixed-point accumulated growth (milli-units)
     std::uint32_t stress_points = 0; // fixed-point accumulated stress (milli-units)
+    std::uint8_t  tended = 0;        // farming husbandry: water/fertilize bonus that
+                                     // boosts suitability + eases stress, decays each
+                                     // tick (so the player must keep tending).
     std::uint64_t planted_tick = 0;  // tick planted (catch-up reference)
     std::uint64_t last_tick = 0;     // last update tick (catch-up via now - last)
 };
