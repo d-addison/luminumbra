@@ -2,6 +2,19 @@
 #include "../ai/InstinctSystem.h"
 #include "../ai/CreatureBrainSystem.h"
 #include "../ai/CreatureReproductionSystem.h"  // Track (a): generational evolution (+16)
+#include "../ai/LifespanSystem.h"               // §4: age/starvation death (+22)
+#include "../ai/WildlifeFoliageSystem.h"        // §4: grazing/trampling (+23)
+#include "../systems/FireSpreadSystem.h"        // §4: fire spread (+17)
+#include "../systems/SoilNutrientSystem.h"      // §4: soil nutrients (+18)
+#include "../systems/PollinationSystem.h"       // §4: cross-pollination (+19)
+#include "../systems/PlantDiseaseSystem.h"      // §4: plant disease (+20)
+#include "../systems/IrrigationSystem.h"        // §4: soil moisture (+21)
+#include "../components/CombustionComponents.h"
+#include "../components/SoilComponents.h"
+#include "../components/IrrigationComponents.h"
+#include "../components/DiseaseComponents.h"
+#include "../components/MortalComponents.h"
+#include "../components/GrazeableComponent.h"
 #include "../ai/InstinctLocomotionSystem.h"
 #include "../ai/PerceptionSystem.h"
 #include "../ai/ScentDepositSystem.h"
@@ -295,6 +308,44 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                     return s;
                 };
             luminumbra::foliage::RunPlantGrowthSystemOnTick(m_registry, current_tick, plant_env);
+        }
+
+        // 7. LIVING-WORLD SYSTEMS (§4): irrigation / soil / pollination / disease / fire /
+        // wildlife-grazing / lifespan. Each is per-entity OPT-IN via its own participant
+        // component, so a world carrying none runs ZERO of them and world_hash stays
+        // byte-identical (canonical NetworkStateHash baseline holds) — same discipline as
+        // plants/creatures/scent. Deterministic (id-ordered, libm-free, seeded-from-ints).
+        // Fixed run order for run==replay. The soil/moisture fields are lazily created on first
+        // participant + anchored at the spawn point. Wind coupling (fire/pollination) is a
+        // follow-up; passing still air for now.
+        {
+            namespace Comp = Luminumbra::Components;
+            namespace fol = luminumbra::foliage;
+            constexpr int kFieldCells = 256;        // grid extent (cells)
+            constexpr float kFieldCell = 1.0f;      // metres / cell
+            const float originX = m_metadata.spawnPoint.x - kFieldCells * kFieldCell * 0.5f;
+            const float originZ = m_metadata.spawnPoint.z - kFieldCells * kFieldCell * 0.5f;
+
+            if (!m_registry.view<Comp::WaterSourceComponent>().empty()) {
+                if (!m_irrigationGrid)
+                    m_irrigationGrid = std::make_unique<fol::IrrigationGrid>(kFieldCells, kFieldCells);
+                fol::RunIrrigationOnTick(m_registry, *m_irrigationGrid, originX, originZ, kFieldCell);
+            }
+            if (!m_registry.view<Comp::SoilFeederComponent>().empty()) {
+                if (!m_soilGrid)
+                    m_soilGrid = std::make_unique<fol::SoilGrid>(kFieldCells, kFieldCells);
+                fol::RunSoilNutrientOnTick(m_registry, *m_soilGrid, originX, originZ, kFieldCell);
+            }
+            if (!m_registry.view<Comp::PlantGenomeComponent>().empty())
+                fol::RunPollinationOnTick(m_registry, current_tick);
+            if (!m_registry.view<Comp::PlantHealthComponent>().empty())
+                fol::RunPlantDiseaseOnTick(m_registry, current_tick);
+            if (!m_registry.view<Comp::CombustibleComponent>().empty())
+                luminumbra::sim::RunFireSpreadOnTick(m_registry, current_tick);
+            if (!m_registry.view<Comp::GrazeableComponent>().empty())
+                luminumbra::ai::RunWildlifeFoliageOnTick(m_registry, current_tick);
+            if (!m_registry.view<Comp::MortalComponent>().empty())
+                luminumbra::ai::RunLifespanOnTick(m_registry, current_tick);
         }
 
         m_simulationEventBus.drain(current_tick);
