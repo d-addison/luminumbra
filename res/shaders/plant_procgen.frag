@@ -14,6 +14,7 @@ in VS_OUT {
     vec3 FragPos;   // VIEW space
     vec3 Normal;    // VIEW space
     vec2 UV;
+    vec3 Color;     // per-vertex albedo (genetic + seasonal)
 } fs_in;
 
 // Octahedral normal encoding (identical to g_buffer.frag).
@@ -36,7 +37,10 @@ void main()
     // class flag: 0.0 for woody branch-ring verts, 1.0 for leaf-card verts. So a
     // simple threshold cleanly separates the brown trunk from the green canopy.
     bool isLeaf = fs_in.UV.x >= 0.5;
-    vec3 albedo = isLeaf ? kLeafAlbedo : kBarkAlbedo;
+    // Per-vertex genetic + seasonal albedo from the bake; fall back to the flat constants
+    // if a vertex carries no color (length ~0).
+    vec3 albedo = dot(fs_in.Color, fs_in.Color) > 1e-6 ? fs_in.Color
+                                                       : (isLeaf ? kLeafAlbedo : kBarkAlbedo);
     float roughness = isLeaf ? 0.85 : 0.70;
 
     gPosition = fs_in.FragPos;

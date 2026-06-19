@@ -42,6 +42,7 @@ public:
         glm::vec3 pos;
         glm::vec3 normal;
         glm::vec2 uv;
+        glm::vec3 color;  // per-vertex albedo (genetic + seasonal leaf color / bark brown)
     };
 
     PlantProcgenPass();
