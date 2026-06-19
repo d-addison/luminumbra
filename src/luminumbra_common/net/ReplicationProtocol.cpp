@@ -104,6 +104,7 @@ std::vector<std::uint8_t> EncodeSnapshot(const SnapshotMsg& m) {
     std::vector<std::uint8_t> p;
     PutU64(p, m.server_tick);
     PutU32(p, m.snapshot_seq);
+    PutU32(p, m.delta_from_seq);
     PutU64(p, m.acked_usercmd_tick);
     PutU32(p, static_cast<std::uint32_t>(m.entities.size()));
     for (const ReplEntityState& e : m.entities) {
@@ -149,7 +150,7 @@ bool DecodeSnapshot(const std::vector<std::uint8_t>& frame, SnapshotMsg& out) {
     if (!OpenFrame(frame, ReplMessageType::Snapshot, c)) return false;
     std::uint32_t count = 0;
     if (!c.GetU64(out.server_tick) || !c.GetU32(out.snapshot_seq) ||
-        !c.GetU64(out.acked_usercmd_tick) || !c.GetU32(count)) {
+        !c.GetU32(out.delta_from_seq) || !c.GetU64(out.acked_usercmd_tick) || !c.GetU32(count)) {
         return false;
     }
     out.entities.clear();
