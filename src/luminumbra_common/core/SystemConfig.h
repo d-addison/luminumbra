@@ -29,10 +29,10 @@ struct UserSettings {
     // video
     std::string resolution;                 // "" = native/default; else "WxH"
     std::string window_mode = "borderless"; // windowed | borderless | fullscreen
-    bool vsync = true;
+    bool vsync = false;                      // default OFF: preserve today's uncapped 300fps target
     float fov = 45.0f;
     float render_scale = 1.0f;
-    float mouse_sensitivity = 0.1f;
+    float mouse_sensitivity = 0.025f;  // 25% of the prior 0.1 default (owner request 2026-06-18)
     // audio (0..1)
     float audio_master = 1.0f;
     float audio_sfx = 1.0f;

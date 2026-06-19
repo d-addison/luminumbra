@@ -161,6 +161,14 @@ TEST(SystemConfig, UserVideoAudioRoundTrip) {
     EXPECT_FLOAT_EQ(u.audio_sfx, 1.0f);  // unnamed -> default
 }
 
+// Owner request 2026-06-18: default look sensitivity is 25% of the prior 0.1, and VSync
+// defaults OFF (preserve uncapped 300fps until the player opts in).
+TEST(SystemConfig, UserVideoDefaults) {
+    const auto& u = SystemConfig::Defaults().user();
+    EXPECT_FLOAT_EQ(u.mouse_sensitivity, 0.025f);
+    EXPECT_FALSE(u.vsync);
+}
+
 // AC-SC-105 — keybind map resolves action->key; missing action -> fallback.
 TEST(SystemConfig, UserControlsKeybindRoundTrip) {
     const std::string json = R"({
