@@ -10,6 +10,7 @@
 
 #include "../core/DeterministicMath.h"
 
+#include <algorithm>
 #include <utility>
 #include <vector>
 
@@ -37,11 +38,20 @@ inline FlockSteer ComputeFlockSteer(float sx, float sz,
     FlockSteer steer;
     if (neighbors.empty()) return steer;
 
+    // ORDER-INDEPENDENCE (the contract above). IEEE-754 float addition is NOT associative, so
+    // accumulating the cohesion/separation sums in the caller's neighbour order would make the
+    // last ULPs depend on that order — breaking run==replay if the gather order ever varies.
+    // Sort into a canonical (lexicographic position) order FIRST so the accumulation is a pure
+    // function of the neighbour SET, not its order. Neighbour lists are small + local, so the
+    // O(n log n) is negligible against the per-tick brain cost.
+    std::vector<std::pair<float, float>> ordered(neighbors);
+    std::sort(ordered.begin(), ordered.end());
+
     // Cohesion: centroid of neighbours within the cohesion radius.
     float cx = 0.0f, cz = 0.0f;
     int cohesion_count = 0;
     float sepx = 0.0f, sepz = 0.0f;
-    for (const auto& [nx, nz] : neighbors) {
+    for (const auto& [nx, nz] : ordered) {
         const float dx = nx - sx, dz = nz - sz;
         const float dist = dm::Sqrt(dx * dx + dz * dz);
         if (dist <= p.neighbor_radius) {
