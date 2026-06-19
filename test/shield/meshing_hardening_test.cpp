@@ -148,7 +148,7 @@ std::size_t SdfIndex(int x, int y, int z) {
          + static_cast<std::size_t>(z) * static_cast<std::size_t>(kLat) * static_cast<std::size_t>(kLat);
 }
 
-bool VertexBytesEqual(const VoxelVertex& a, const VoxelVertex& b) {
+[[maybe_unused]] bool VertexBytesEqual(const VoxelVertex& a, const VoxelVertex& b) {
     return std::memcmp(&a, &b, sizeof(VoxelVertex)) == 0;
 }
 
