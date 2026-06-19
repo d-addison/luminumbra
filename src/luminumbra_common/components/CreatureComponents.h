@@ -21,6 +21,9 @@ struct CreatureComponent {
     // integrates position directly (the pure, unit-tested path).
     float wish_x = 0.0f;
     float wish_z = 0.0f;
+    // Set true when a predator catches this (prey) creature: it becomes an inert carcass
+    // (stops deciding/moving) and predators ignore it when seeking live prey.
+    bool eaten = false;
 };
 
 // I9-ECO + physics: opt-in TRUE-PHYSICS locomotion. When present, the creature is driven by

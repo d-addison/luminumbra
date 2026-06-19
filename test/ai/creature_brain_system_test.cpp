@@ -58,6 +58,27 @@ TEST(CreatureBrainSystem, PredatorHuntsPrey) {
     EXPECT_GT(xOf(r, pred), 0.5f) << "predator did not move toward the prey";
 }
 
+// A hungry predator adjacent to prey CATCHES it: the prey becomes an inert carcass and the
+// predator's hunger drops.
+TEST(CreatureBrainSystem, PredatorCatchesAdjacentPrey) {
+    entt::registry r;
+    const entt::entity pred = spawn(r, /*x*/ 0.0f, 0.0f, /*predator*/ true, /*hunger*/ 0.95f);
+    const entt::entity prey = spawn(r, /*x*/ 1.0f, 0.0f, /*predator*/ false);  // within catch reach
+    RunCreatureBrainSystemOnTick(r, 1.0f / 30.0f);
+    EXPECT_TRUE(r.get<Comp::CreatureComponent>(prey).eaten) << "adjacent prey should be caught";
+    EXPECT_LT(r.get<Comp::CreatureComponent>(pred).hunger, 0.95f) << "predator should be sated";
+}
+
+// A caught carcass does not move (it is inert).
+TEST(CreatureBrainSystem, EatenPreyIsInert) {
+    entt::registry r;
+    const entt::entity prey = spawn(r, /*x*/ 0.0f, 0.0f, /*predator*/ false);
+    spawn(r, /*x*/ 5.0f, 0.0f, /*predator*/ true, /*hunger*/ 0.8f);  // a threat it would flee
+    r.get<Comp::CreatureComponent>(prey).eaten = true;
+    tick(r, 30);
+    EXPECT_NEAR(xOf(r, prey), 0.0f, 1.0e-4f) << "a carcass must not move";
+}
+
 // run == replay: identical setup + ticks -> identical final positions.
 TEST(CreatureBrainSystem, Deterministic) {
     auto run = [] {
