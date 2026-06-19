@@ -133,6 +133,10 @@ add_executable(common_tests
     sim/soil_nutrient_test.cpp
     sim/pollination_test.cpp
     sim/plant_disease_test.cpp
+    sim/irrigation_test.cpp
+    sim/lifespan_test.cpp
+    sim/wildlife_foliage_test.cpp
+    sim/photo_scoring_test.cpp
 )
 
 target_compile_definitions(common_tests PRIVATE
