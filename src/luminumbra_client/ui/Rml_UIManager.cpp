@@ -5,6 +5,8 @@
 #include <RmlUi/Debugger.h>
 #include <utility>
 #include <functional>
+#include <cstdio>
+#include <string>
 #include <GLFW/glfw3.h>
 
 namespace Luminumbra::Client {
@@ -290,8 +292,12 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
     // The rest of your BindEventListeners implementation is fine...
     if (auto* e = document->GetElementById("new_world_btn")) AddClickSoundListener(e, [this](Rml::Event&){ this->RequestLoadDocument("world_creation.rml"); });
     if (auto* e = document->GetElementById("load_world_btn")) AddClickSoundListener(e, [this](Rml::Event&){ this->RequestLoadDocument("world_selection.rml"); });
+    if (auto* e = document->GetElementById("settings_btn")) AddClickSoundListener(e, [this](Rml::Event&){ this->RequestLoadDocument("settings.rml"); });
     if (auto* e = document->GetElementById("quit_btn")) AddClickSoundListener(e, [this](Rml::Event&){ glfwSetWindowShouldClose(this->m_window, true); });
     if (auto* e = document->GetElementById("back_btn")) AddClickSoundListener(e, [this](Rml::Event&){ this->RequestLoadDocument("main_menu.rml"); });
+
+    // settings.rml: populate widgets from current settings, then wire live change + Apply.
+    BindSettingsListeners(document);
 
     if (auto* load_button = document->GetElementById("load_selected_btn")) {
         AddClickSoundListener(load_button, [this](Rml::Event&){
@@ -347,6 +353,169 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
                 m_worldCreationCallback(name, seed, type);
             }
         });
+    }
+}
+
+// --- settings.rml support ---
+namespace {
+
+// Set a form control's value (works for <select>, <input type=range>, etc.).
+void SetControlValue(Rml::Element* element, const std::string& value) {
+    if (auto* control = dynamic_cast<Rml::ElementFormControl*>(element)) {
+        control->SetValue(value);
+    } else if (element) {
+        element->SetAttribute("value", value);
+    }
+}
+
+// Update the little "value" label next to a slider, if present.
+void SetValueLabel(Rml::ElementDocument* doc, const std::string& label_id, const std::string& text) {
+    if (auto* label = doc->GetElementById(label_id)) {
+        label->SetInnerRML(text);
+    }
+}
+
+std::string FormatFloat(float v, int decimals) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.*f", decimals, static_cast<double>(v));
+    return buf;
+}
+
+std::string FormatPercent(float v01) {
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%d%%", static_cast<int>(v01 * 100.0f + 0.5f));
+    return buf;
+}
+
+}  // namespace
+
+void Rml_UIManager::PopulateSettingsForm(Rml::ElementDocument* document) {
+    if (!document) return;
+    const SettingsBridge& b = m_settingsBridge;
+
+    // Video
+    if (b.GetResolution) {
+        SetControlValue(document->GetElementById("setting_resolution"), b.GetResolution());
+    }
+    if (b.GetWindowMode) {
+        SetControlValue(document->GetElementById("setting_window_mode"), b.GetWindowMode());
+    }
+    if (b.GetVSync) {
+        SetControlValue(document->GetElementById("setting_vsync"), b.GetVSync() ? "on" : "off");
+    }
+    if (b.GetFov) {
+        const float fov = b.GetFov();
+        SetControlValue(document->GetElementById("setting_fov"), FormatFloat(fov, 0));
+        SetValueLabel(document, "setting_fov_value", FormatFloat(fov, 0));
+    }
+    if (b.GetMouseSensitivity) {
+        const float s = b.GetMouseSensitivity();
+        SetControlValue(document->GetElementById("setting_mouse_sensitivity"), FormatFloat(s, 3));
+        SetValueLabel(document, "setting_mouse_sensitivity_value", FormatFloat(s, 3));
+    }
+
+    // Audio
+    if (b.GetAudioMaster) {
+        const float v = b.GetAudioMaster();
+        SetControlValue(document->GetElementById("setting_audio_master"), FormatFloat(v, 2));
+        SetValueLabel(document, "setting_audio_master_value", FormatPercent(v));
+    }
+    if (b.GetAudioSfx) {
+        const float v = b.GetAudioSfx();
+        SetControlValue(document->GetElementById("setting_audio_sfx"), FormatFloat(v, 2));
+        SetValueLabel(document, "setting_audio_sfx_value", FormatPercent(v));
+    }
+    if (b.GetAudioMusic) {
+        const float v = b.GetAudioMusic();
+        SetControlValue(document->GetElementById("setting_audio_music"), FormatFloat(v, 2));
+        SetValueLabel(document, "setting_audio_music_value", FormatPercent(v));
+    }
+}
+
+void Rml_UIManager::ApplySettingFromElement(Rml::Element* element) {
+    if (!element) return;
+    const std::string id = element->GetId();
+    const std::string value = ReadFormControlValue(element, "");
+    SettingsBridge& b = m_settingsBridge;
+    Rml::ElementDocument* doc = element->GetOwnerDocument();
+
+    auto as_float = [&value](float fallback) {
+        try { return std::stof(value); } catch (...) { return fallback; }
+    };
+
+    if (id == "setting_resolution") {
+        if (b.SetResolution) b.SetResolution(value);
+    } else if (id == "setting_window_mode") {
+        if (b.SetWindowMode) b.SetWindowMode(value);
+    } else if (id == "setting_vsync") {
+        if (b.SetVSync) b.SetVSync(value == "on" || value == "1" || value == "true");
+    } else if (id == "setting_fov") {
+        const float f = as_float(45.0f);
+        if (b.SetFov) b.SetFov(f);
+        if (doc) SetValueLabel(doc, "setting_fov_value", FormatFloat(f, 0));
+    } else if (id == "setting_mouse_sensitivity") {
+        const float f = as_float(0.025f);
+        if (b.SetMouseSensitivity) b.SetMouseSensitivity(f);
+        if (doc) SetValueLabel(doc, "setting_mouse_sensitivity_value", FormatFloat(f, 3));
+    } else if (id == "setting_audio_master") {
+        const float f = as_float(1.0f);
+        if (b.SetAudioMaster) b.SetAudioMaster(f);
+        if (doc) SetValueLabel(doc, "setting_audio_master_value", FormatPercent(f));
+    } else if (id == "setting_audio_sfx") {
+        const float f = as_float(1.0f);
+        if (b.SetAudioSfx) b.SetAudioSfx(f);
+        if (doc) SetValueLabel(doc, "setting_audio_sfx_value", FormatPercent(f));
+    } else if (id == "setting_audio_music") {
+        const float f = as_float(1.0f);
+        if (b.SetAudioMusic) b.SetAudioMusic(f);
+        if (doc) SetValueLabel(doc, "setting_audio_music_value", FormatPercent(f));
+    }
+}
+
+void Rml_UIManager::BindSettingsListeners(Rml::ElementDocument* document) {
+    if (!document) return;
+    // Only wire the settings screen.
+    if (!document->GetElementById("setting_resolution") &&
+        !document->GetElementById("apply_settings_btn")) {
+        return;
+    }
+
+    // Seed widgets from the current settings.
+    PopulateSettingsForm(document);
+
+    // Live-apply every control on "change" (sliders, selects).
+    static const char* kControlIds[] = {
+        "setting_resolution", "setting_window_mode", "setting_vsync",
+        "setting_fov", "setting_mouse_sensitivity",
+        "setting_audio_master", "setting_audio_sfx", "setting_audio_music",
+    };
+    for (const char* control_id : kControlIds) {
+        if (auto* el = document->GetElementById(control_id)) {
+            el->AddEventListener("change", new LambdaEventListener([this](Rml::Event& event) {
+                this->ApplySettingFromElement(event.GetTargetElement());
+            }));
+        }
+    }
+
+    // Apply & Save button: flush every control then persist the overlay.
+    if (auto* apply = document->GetElementById("apply_settings_btn")) {
+        apply->AddEventListener("click", new LambdaEventListener([this, document](Rml::Event&) {
+            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click");
+            for (const char* control_id : kControlIds) {
+                this->ApplySettingFromElement(document->GetElementById(control_id));
+            }
+            bool ok = true;
+            if (m_settingsBridge.Save) ok = m_settingsBridge.Save();
+            if (auto* note = document->GetElementById("notification")) {
+                note->SetClass("hidden", false);
+                if (auto* txt = document->GetElementById("notification_text")) {
+                    txt->SetInnerRML(ok ? "Settings saved" : "Save failed");
+                }
+            }
+        }));
+        apply->AddEventListener("mouseover", new LambdaEventListener([this](Rml::Event&) {
+            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_hover");
+        }));
     }
 }
 

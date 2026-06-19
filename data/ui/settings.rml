@@ -1,0 +1,106 @@
+<rml>
+    <head>
+        <title>Settings - Luminumbra</title>
+        <link type="text/css" href="game_theme.rcss" />
+    </head>
+    <body id="settings" class="fade-in">
+        <div class="container">
+            <h1>Settings</h1>
+
+            <div class="form-container settings-container">
+                <!-- ===================== VIDEO ===================== -->
+                <div class="settings-section">
+                    <h2 class="settings-heading">Video</h2>
+
+                    <div class="form-group settings-row">
+                        <label for="setting_resolution">Resolution</label>
+                        <select id="setting_resolution" name="resolution" class="form-control">
+                            <option value="">Native / Default</option>
+                            <option value="1280x720">1280 x 720</option>
+                            <option value="1920x1080">1920 x 1080</option>
+                            <option value="2560x1440">2560 x 1440</option>
+                            <option value="3440x1440">3440 x 1440</option>
+                            <option value="3840x1600">3840 x 1600</option>
+                            <option value="3840x2160">3840 x 2160</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group settings-row">
+                        <label for="setting_window_mode">Window Mode</label>
+                        <select id="setting_window_mode" name="window_mode" class="form-control">
+                            <option value="windowed">Windowed</option>
+                            <option value="borderless">Borderless</option>
+                            <option value="fullscreen">Fullscreen</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group settings-row">
+                        <label for="setting_vsync">VSync</label>
+                        <select id="setting_vsync" name="vsync" class="form-control">
+                            <option value="off">Off</option>
+                            <option value="on">On</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group settings-row">
+                        <label for="setting_fov">Field of View <span id="setting_fov_value" class="settings-value">45</span></label>
+                        <input type="range" id="setting_fov" name="fov"
+                               min="30" max="110" step="1" value="45" class="form-control settings-slider" />
+                    </div>
+
+                    <div class="form-group settings-row">
+                        <label for="setting_mouse_sensitivity">Mouse Sensitivity <span id="setting_mouse_sensitivity_value" class="settings-value">0.025</span></label>
+                        <input type="range" id="setting_mouse_sensitivity" name="mouse_sensitivity"
+                               min="0.01" max="1.0" step="0.005" value="0.025" class="form-control settings-slider" />
+                    </div>
+                </div>
+
+                <!-- ===================== AUDIO ===================== -->
+                <div class="settings-section">
+                    <h2 class="settings-heading">Audio</h2>
+
+                    <div class="form-group settings-row">
+                        <label for="setting_audio_master">Master Volume <span id="setting_audio_master_value" class="settings-value">100%</span></label>
+                        <input type="range" id="setting_audio_master" name="audio_master"
+                               min="0" max="1" step="0.01" value="1" class="form-control settings-slider" />
+                    </div>
+
+                    <div class="form-group settings-row">
+                        <label for="setting_audio_sfx">SFX Volume <span id="setting_audio_sfx_value" class="settings-value">100%</span></label>
+                        <input type="range" id="setting_audio_sfx" name="audio_sfx"
+                               min="0" max="1" step="0.01" value="1" class="form-control settings-slider" />
+                    </div>
+
+                    <div class="form-group settings-row">
+                        <label for="setting_audio_music">Music Volume <span id="setting_audio_music_value" class="settings-value">100%</span></label>
+                        <input type="range" id="setting_audio_music" name="audio_music"
+                               min="0" max="1" step="0.01" value="1" class="form-control settings-slider" />
+                    </div>
+                </div>
+
+                <!-- ===================== CONTROLS (stub) ===================== -->
+                <div class="settings-section">
+                    <h2 class="settings-heading">Controls</h2>
+                    <div id="setting_keybinds" class="settings-keybinds">
+                        <p class="field-help">Key bindings are configured from the in-game settings panel (F8). Rebinding from this screen is coming soon.</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Action buttons -->
+            <div class="button-container">
+                <button id="back_btn" class="btn btn-secondary">
+                    Back
+                </button>
+                <button id="apply_settings_btn" class="btn btn-success">
+                    Apply &amp; Save
+                </button>
+            </div>
+        </div>
+
+        <!-- Notification area -->
+        <div id="notification" class="notification hidden">
+            <span id="notification_text"></span>
+        </div>
+    </body>
+</rml>
