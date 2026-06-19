@@ -144,14 +144,16 @@ inline float GrowPlant(const glm::vec3& base, const glm::vec3& dir, float len, i
     const glm::vec3 tip = base + dir * len;
     if (depth >= p.max_depth) {
         s.branches.push_back({base, tip, kTwigRadius, depth});
-        // A small deterministic CLUSTER of leaves per twig -> a fuller canopy (vs one card).
-        // Leaves face the light (phototropism) and spread by the golden angle around it.
-        const glm::vec3 base_n = (p.photo > 0.0f) ? NormDet(env.sun_dir) : dir;
-        constexpr int kLeavesPerTwig = 4;
+        // A deterministic CLUSTER of leaves per twig -> a fuller canopy. The cards fan
+        // WIDELY around the twig (outward) with only a mild sun bias, so the canopy is
+        // visible + leafy from ANY camera angle (cards all facing the sun read edge-on /
+        // invisible when the sun is overhead). Spread by the golden angle, staggered up the twig.
+        const glm::vec3 base_n = NormDet(dir + env.sun_dir * (p.photo * 0.5f));  // outward + mild sun bias
+        constexpr int kLeavesPerTwig = 5;
         constexpr float kGoldenAngle = 2.39996323f;
         for (int li = 0; li < kLeavesPerTwig; ++li) {
-            const glm::vec3 n = RotateBranch(base_n, 0.55f, kGoldenAngle * static_cast<float>(li + 1));
-            const glm::vec3 along = NormDet(dir) * (len * 0.18f * static_cast<float>(li));  // spread up the twig
+            const glm::vec3 n = RotateBranch(base_n, 1.0f, kGoldenAngle * static_cast<float>(li + 1));  // wide fan
+            const glm::vec3 along = NormDet(dir) * (len * 0.16f * static_cast<float>(li));  // staggered up the twig
             s.leaves.push_back({tip + along, n});
         }
         return kTwigRadius;
