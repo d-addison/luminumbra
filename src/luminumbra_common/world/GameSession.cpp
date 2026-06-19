@@ -8,7 +8,11 @@
 #include "../ai/DecompositionSystem.h"          // §4: death -> nutrient release (+27)
 #include "../ai/CircadianSystem.h"              // §4: diurnal/nocturnal activity (+29)
 #include "../ai/TerritorySystem.h"              // §4: home territory + homing bias (+30)
+#include "../ai/PredatorPackSystem.h"           // §4: pack flanking coordination (+31)
+#include "../ai/MigrationSystem.h"              // §4: seasonal migration drive (+32)
 #include "../components/AlarmComponents.h"
+#include "../components/PackHunterComponents.h"
+#include "../components/MigratoryComponents.h"
 #include "../components/DecayComponents.h"
 #include "../components/CircadianComponents.h"
 #include "../components/TerritoryComponents.h"
@@ -48,6 +52,10 @@
 #include "TerrainPresetLoader.h"
 #include "WorldStreamingState.h"
 
+#include <algorithm>   // explicit: stabilise std template instantiation for entt storage helpers
+#include <iterator>    // (GCC-15 vague-linkage: must be visible at the GrazeableComponent storage
+#include <memory>      //  instantiation point, else std::__advance/iter_move get externalized)
+#include <vector>
 #include <fstream>
 #include <sstream>
 #include <iomanip>
@@ -200,6 +208,45 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 // fleeing) — so the physics bridge below actually walks them together. Opt-in
                 // (genome component); no genome -> untouched.
                 luminumbra::ai::RunMateSeekingOnTick(m_registry);
+
+                // 2e-steer: blend the §4 bias systems' outputs (computed last tick, slot 7) into
+                // the wish velocity before the physics bridge applies it: a PACK predator steers
+                // to its FLANK approach point (so the pack surrounds the prey, not all charging
+                // one spot); a migratory creature drifts toward its seasonal target; a territorial
+                // creature is pulled home. Each is opt-in (its component); no component -> untouched.
+                {
+                    namespace Comp = Luminumbra::Components;
+                    namespace dm = ::Luminumbra::DeterministicMath;
+                    auto sv = m_registry.view<Comp::CreatureComponent, Comp::TransformComponent>();
+                    for (auto e : sv) {
+                        auto& cr = sv.get<Comp::CreatureComponent>(e);
+                        if (cr.eaten) continue;
+                        const auto& tf = sv.get<Comp::TransformComponent>(e);
+                        // Pack flanking overrides the predator's wish toward its flank point.
+                        if (cr.is_predator) {
+                            if (auto* pk = m_registry.try_get<Comp::PackHunterComponent>(e);
+                                pk && pk->in_pack) {
+                                const float dx = pk->coord_x - tf.position.x;
+                                const float dz = pk->coord_z - tf.position.z;
+                                const float d = dm::Sqrt(dx * dx + dz * dz);
+                                if (d > 1.0e-3f) {
+                                    const float sp = cr.move_speed * 1.5f / d;
+                                    cr.wish_x = dx * sp;
+                                    cr.wish_z = dz * sp;
+                                }
+                            }
+                        }
+                        // Migration + territory add a gentle homing/seasonal drift on top.
+                        if (auto* mig = m_registry.try_get<Comp::MigratoryComponent>(e)) {
+                            cr.wish_x += mig->wish_x;
+                            cr.wish_z += mig->wish_z;
+                        }
+                        if (auto* tb = m_registry.try_get<Comp::TerritoryBiasComponent>(e)) {
+                            cr.wish_x += tb->wish_x;
+                            cr.wish_z += tb->wish_z;
+                        }
+                    }
+                }
 
                 // 2e-phys: TRUE-PHYSICS locomotion bridge. Creatures carrying a
                 // CreaturePhysicsComponent are driven by the deterministic Jolt avatar
@@ -377,6 +424,16 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             // Territory: claim home + emit a homing bias (movement blends it like mate-seeking).
             if (!m_registry.view<Comp::TerritoryComponent>().empty())
                 luminumbra::ai::RunTerritoryOnTick(m_registry, current_tick);
+            // Predator pack: flanking coordination (a pack surrounds the prey).
+            if (!m_registry.view<Comp::PackHunterComponent>().empty())
+                luminumbra::ai::RunPredatorPackOnTick(m_registry, current_tick);
+            // Migration: seasonal drive toward a moving target (tick-derived year fraction).
+            if (!m_registry.view<Comp::MigratoryComponent>().empty()) {
+                constexpr std::uint64_t kTicksPerYear = 30ull * 60ull * 60ull;  // ~1h year @30Hz
+                const float season01 = static_cast<float>(current_tick % kTicksPerYear) /
+                                       static_cast<float>(kTicksPerYear);
+                luminumbra::ai::RunMigrationOnTick(m_registry, season01);
+            }
         }
 
         m_simulationEventBus.drain(current_tick);

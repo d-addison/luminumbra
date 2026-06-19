@@ -28,6 +28,7 @@
 #include "luminumbra_common/components/CombustionComponents.h" // sim.fire demo markers
 #include "luminumbra_common/components/AlarmComponents.h"      // herd-alarm collective flee
 #include "luminumbra_common/components/MortalComponents.h"     // lifespan / natural death
+#include "luminumbra_common/components/PackHunterComponents.h" // coordinated pack hunting
 #include "luminumbra_common/components/DecayComponents.h"      // decomposition (carcass fades)
 #include "luminumbra_common/systems/PlantGrowthSystem.h"    // I9-FOLIAGE phenotype/genome
 #include "luminumbra_common/systems/PlantProcgen.h"         // I9-FOLIAGE procedural plant geometry (render-only)
@@ -3834,6 +3835,8 @@ int main(int argc, char* argv[]) {
                                 // The predator is a bit faster than the herd so it can run down a
                                 // straggler (otherwise equal flee/hunt speeds never close the gap).
                                 cr.move_speed = predator ? 4.2f : 3.0f;
+                                if (predator)
+                                    reg.emplace<Luminumbra::Components::PackHunterComponent>(e);  // flank coordination
                                 // Track (a): give PREY a heritable genome so well-fed,
                                 // healthy, mature prey reproduce (CreatureReproductionSystem,
                                 // GameSession slot 2e-evo) and selection becomes visible over
@@ -3884,11 +3887,15 @@ int main(int argc, char* argv[]) {
                                                /*predator*/ false, /*hunger*/ 0.05f);
                                 LUMINUMBRA_CORE_INFO("I9-EVO: spawned 6 grazing founders (no predator) for the evolution timelapse");
                             } else {
-                                mkCreature(0.0f, 8.0f, /*predator*/ true, /*hunger*/ 0.95f);
+                                // A PACK of 3 predators flanks the herd (PredatorPackSystem +
+                                // the 2e-steer consumer surround the prey from different angles).
+                                mkCreature(-6.0f, 9.0f, /*predator*/ true, /*hunger*/ 0.95f);
+                                mkCreature(0.0f, 10.0f, /*predator*/ true, /*hunger*/ 0.95f);
+                                mkCreature(6.0f, 9.0f, /*predator*/ true, /*hunger*/ 0.95f);
                                 for (int i = 0; i < 7; ++i)
                                     mkCreature(-7.0f + static_cast<float>(i) * 2.4f, -2.0f,
                                                /*predator*/ false, /*hunger*/ 0.3f);
-                                LUMINUMBRA_CORE_INFO("I9-ECO: spawned 1 predator + 7 prey (Jolt avatar bodies) for the ecology timelapse");
+                                LUMINUMBRA_CORE_INFO("I9-ECO: spawned a 3-predator PACK + 7 prey for the ecology timelapse");
                             }
                         }
                         // sim.fire DEMO: a dry patch of combustible bushes with the centre alight.
