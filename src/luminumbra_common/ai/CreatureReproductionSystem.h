@@ -1,24 +1,27 @@
 #pragma once
 
-// Track (a) — CREATURE EVOLUTION: the deterministic creature REPRODUCTION tick. Makes the
-// ecology GENERATIONAL — well-fed, healthy, mature prey breed and pass a MUTATED copy of
-// their genome to ONE offspring; caught prey (CreatureComponent.eaten) die without breeding.
-// Over many ticks this is natural selection: traits that survive predation propagate.
+// Track (a) — CREATURE EVOLUTION via SEXUAL reproduction. Makes the ecology generational AND
+// requires a MALE + a FEMALE to find each other and COURT before a baby is born:
+//   * a "ready" creature (mature, well-fed, healthy, off cooldown) SEEKS the nearest ready
+//     opposite-sex mate (RunMateSeekingOnTick — runs BEFORE the physics bridge so the steer
+//     becomes real movement),
+//   * once a ready pair is adjacent for the courtship duration, ONE offspring is born from a
+//     deterministic blend-crossover of BOTH parents' genomes (RunMatingResolveOnTick — runs
+//     AFTER the bridge, on the settled positions),
+//   * caught prey (CreatureComponent.eaten) die and never breed -> natural selection.
 //
-// DETERMINISM (this changes sim state -> world_hash): id-ordered traversal; the per-birth
-// mutation RNG is seeded ONLY from integers — DeterministicRng::seeded(kReproSeedOffset,
-// parent_id, tick) — so there is NO wall-clock / std::random and run==replay holds. The
-// mutation noise is the libm-free Irwin-Hall Gaussian (DeterministicRng). New entities are
-// created AFTER the read pass (we snapshot eligible parents first) so the view is never
-// invalidated mid-iteration and creation order is id-deterministic.
+// DETERMINISM (sim path -> world_hash once wired): id-ordered traversal; the per-birth RNG is
+// seeded ONLY from integers (offset + parent ids + tick) -> no wall-clock/std::random, the
+// Gaussian mutation is the libm-free Irwin-Hall one. Mate search uses a PRE snapshot so the
+// result is order-independent; births are collected then created after the read pass so the
+// view is never invalidated. run==replay holds.
 //
-// GATING: a creature only reproduces if it carries a CreatureGenomeComponent (the opt-in,
-// like PlantTag / CreatureComponent). A world whose creatures carry NO genome — and in
-// particular a world with NO creatures — performs ZERO mutation and creates ZERO entities,
-// so the canonical NetworkStateHash baseline (frontier_gates_test) stays byte-identical.
+// GATING: a creature only mates if it carries a CreatureGenomeComponent (the opt-in). A world
+// whose creatures carry NO genome — and any world with NO creatures — does nothing, so the
+// canonical NetworkStateHash baseline stays byte-identical.
 //
-// SEED OFFSET REGISTRY (GameSession): wind+11, weather+12/13, aether+14, plant+15 are taken;
-// CREATURE REPRODUCTION CLAIMS +16. Recorded here and at the GameSession wire site.
+// SEED OFFSET REGISTRY: wind+11, weather+12/13, aether+14, plant+15 taken; CREATURE
+// REPRODUCTION CLAIMS +16. Recorded here and at the GameSession wire site.
 
 #include <algorithm>
 #include <cstdint>
@@ -26,159 +29,207 @@
 
 #include <entt/entt.hpp>
 
+#include "CreatureBrain.h"   // CreatureAction (skip mate-seeking while fleeing)
 #include "CreatureGenome.h"
-#include "UtilityAI.h"  // utility_clamp01
+#include "UtilityAI.h"       // utility_clamp01
 
 #include "../components/CoreComponents.h"
 #include "../components/CreatureComponents.h"
-#include "../core/DeterministicMath.h"  // Cos/Sin (libm-free)
+#include "../core/DeterministicMath.h"
 #include "../core/DeterministicRng.h"
 
 namespace luminumbra::ai {
 
 namespace Comp = ::Luminumbra::Components;
+namespace dm = ::Luminumbra::DeterministicMath;
 
-// Distinct world-seed offset for the reproduction stream (see registry note above).
 inline constexpr std::uint64_t kReproSeedOffset = 16ull;
 
-// Eligibility tuning (deterministic integer/float constants; no data dependency yet).
-//   * a creature must reach maturity (age) before it can breed,
-//   * it must be WELL-FED (hunger at/below its genome's threshold),
-//   * it must be HEALTHY (stamina at/above this floor),
-//   * after a birth it waits this cooldown before breeding again (bounds population growth).
-inline constexpr std::uint32_t kReproMaturityTicks = 90;   // ~3s @ 30Hz
-inline constexpr std::uint32_t kReproCooldownTicks = 300;  // ~10s @ 30Hz
+// Eligibility: mature, healthy, well-fed, off cooldown, alive (and prey — predators don't
+// breed in this slice; the heritable population being selected on is the prey).
+inline constexpr std::uint32_t kReproMaturityTicks = 90;    // ~3s @ 30Hz
+inline constexpr std::uint32_t kReproCooldownTicks = 300;   // ~10s @ 30Hz after a birth
 inline constexpr float kReproHealthyStamina = 0.5f;
-// Offspring spawn offset radius (m) from the parent — small so the newborn appears beside it.
-inline constexpr float kReproSpawnRadius = 1.5f;
+// Mate search + courtship geometry.
+inline constexpr float kMateSeekRadius = 45.0f;             // can sense a mate this far
+inline constexpr float kCourtshipRadius = 2.6f;             // must be this close to court
+inline constexpr std::uint32_t kCourtshipTicks = 90;        // time together before a baby (~3s)
+inline constexpr float kReproSpawnRadius = 1.2f;            // newborn appears beside the pair
 
 struct CreatureReproductionStats {
-    int born = 0;       // offspring created this tick
-    int considered = 0; // creatures with a genome examined this tick
+    int born = 0;        // offspring created this tick
+    int courting = 0;    // ready females currently adjacent to a ready male
 };
 
-// Copy the heritable traits from a genome component onto a CreatureComponent so the genome
-// actually drives behaviour (e.g. move_speed feeds the brain). Pure helper.
-inline void ApplyGenomeToCreature(const Comp::CreatureGenomeComponent& g, Comp::CreatureComponent& c) {
-    c.move_speed = g.move_speed;
+// Ready to mate? (prey, alive, mature, off cooldown, well-fed, healthy)
+[[nodiscard]] inline bool IsReadyToMate(const Comp::CreatureComponent& cr,
+                                        const Comp::CreatureGenomeComponent& gn) {
+    return !cr.eaten && !cr.is_predator && gn.age_ticks >= kReproMaturityTicks &&
+           gn.reproduce_cooldown == 0 && cr.hunger <= gn.hunger_threshold &&
+           cr.stamina >= kReproHealthyStamina;
 }
 
-// Advance reproduction by one fixed tick. Pure function of registry state + the tick id (the
-// RNG seed). Returns birth/consider counts (telemetry / sub-hash). `world_seed` lets distinct
-// worlds diverge; default 0 keeps unit tests simple and reproducible.
-inline CreatureReproductionStats RunCreatureReproductionOnTick(entt::registry& reg,
-                                                               std::uint64_t tick,
-                                                               std::uint64_t world_seed = 0) {
-    CreatureReproductionStats stats;
-
+// PHASE A (run BEFORE the physics bridge): ready creatures steer toward the nearest ready
+// opposite-sex mate by OVERRIDING the brain's wish velocity — unless they are fleeing a
+// threat (survival beats courtship). When already within courtship range they hold still
+// (wish 0) so they stay together and court. id-ordered; reads a pre snapshot (order-stable).
+inline void RunMateSeekingOnTick(entt::registry& reg) {
     auto view = reg.view<Comp::CreatureComponent, Comp::CreatureGenomeComponent,
                          Comp::TransformComponent>();
+    struct M { entt::entity e; float x, z; bool female; bool ready; };
+    std::vector<entt::entity> ents(view.begin(), view.end());
+    std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
+        return entt::to_integral(a) < entt::to_integral(b);
+    });
+    std::vector<M> snap;
+    snap.reserve(ents.size());
+    for (auto e : ents) {
+        const auto& tf = view.get<Comp::TransformComponent>(e);
+        const auto& cr = view.get<Comp::CreatureComponent>(e);
+        const auto& gn = view.get<Comp::CreatureGenomeComponent>(e);
+        snap.push_back({e, tf.position.x, tf.position.z, gn.female, IsReadyToMate(cr, gn)});
+    }
+    for (std::size_t i = 0; i < ents.size(); ++i) {
+        const M& self = snap[i];
+        if (!self.ready) continue;
+        auto& cr = view.get<Comp::CreatureComponent>(self.e);
+        if (cr.last_action == static_cast<int>(CreatureAction::Flee)) continue;  // survival first
+        float best = kMateSeekRadius, mx = 0.0f, mz = 0.0f;
+        bool found = false;
+        for (const M& o : snap) {
+            if (o.e == self.e || !o.ready || o.female == self.female) continue;
+            const float dx = o.x - self.x, dz = o.z - self.z;
+            const float d = dm::Sqrt(dx * dx + dz * dz);
+            if (d < best) { best = d; mx = o.x; mz = o.z; found = true; }
+        }
+        if (!found) continue;
+        const float dx = mx - self.x, dz = mz - self.z;
+        const float d = dm::Sqrt(dx * dx + dz * dz);
+        if (d > kCourtshipRadius && d > 1.0e-5f) {
+            const float inv = cr.move_speed / d;
+            cr.wish_x = dx * inv;   // steer toward the mate (overrides the brain's wander)
+            cr.wish_z = dz * inv;
+        } else {
+            cr.wish_x = 0.0f;       // close enough — hold still and court
+            cr.wish_z = 0.0f;
+        }
+    }
+}
 
-    // id-ordered parent ids so age/cooldown advance and birth order are deterministic.
-    std::vector<entt::entity> ents;
-    for (auto e : view) ents.push_back(e);
+// PHASE B (run AFTER the physics bridge): advance age/cooldown, accumulate courtship for ready
+// adjacent opposite-sex pairs, and birth one offspring per completed courtship (female-driven
+// so each completion makes exactly one baby; the chosen male is consumed for the tick).
+inline CreatureReproductionStats RunMatingResolveOnTick(entt::registry& reg, std::uint64_t tick,
+                                                        std::uint64_t world_seed = 0) {
+    CreatureReproductionStats stats;
+    auto view = reg.view<Comp::CreatureComponent, Comp::CreatureGenomeComponent,
+                         Comp::TransformComponent>();
+    std::vector<entt::entity> ents(view.begin(), view.end());
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
 
-    // Phase 1 (read/update): advance bookkeeping and collect the parents that breed THIS
-    // tick. We don't create entities here — that would invalidate the view.
-    struct Birth {
-        entt::entity parent;
-        CreatureGenome offspring;
-        float px, py, pz;       // parent position (offspring spawns near it)
-        bool predator;
-        std::uint32_t generation;  // offspring generation
-    };
-    std::vector<Birth> births;
-
+    // Bookkeeping: age everyone, tick down cooldowns (id-ordered, deterministic).
     for (auto e : ents) {
-        ++stats.considered;
-        auto& cr = view.get<Comp::CreatureComponent>(e);
         auto& gn = view.get<Comp::CreatureGenomeComponent>(e);
-        const auto& tf = view.get<Comp::TransformComponent>(e);
-
-        // Age every (living or dead) creature; tick down the cooldown.
         if (gn.age_ticks < 0xFFFFFFFFu) ++gn.age_ticks;
         if (gn.reproduce_cooldown > 0) --gn.reproduce_cooldown;
-
-        // A carcass never breeds (selection: caught prey leave no offspring). Predators do
-        // not breed in this slice (prey are the heritable population being selected on).
-        if (cr.eaten || cr.is_predator) continue;
-
-        const bool mature = gn.age_ticks >= kReproMaturityTicks;
-        const bool ready = gn.reproduce_cooldown == 0;
-        const bool well_fed = cr.hunger <= gn.hunger_threshold;
-        const bool healthy = cr.stamina >= kReproHealthyStamina;
-        if (!(mature && ready && well_fed && healthy)) continue;
-
-        // Seed ONLY from integers: offset, parent id, tick (+ optional world seed). Pure.
-        luminumbra::core::DeterministicRng rng = luminumbra::core::DeterministicRng::seeded(
-            kReproSeedOffset ^ world_seed, static_cast<std::uint64_t>(entt::to_integral(e)), tick);
-
-        CreatureGenome parent_genome;
-        parent_genome.move_speed = gn.move_speed;
-        parent_genome.vigilance = gn.vigilance;
-        parent_genome.hunger_threshold = gn.hunger_threshold;
-        parent_genome.size_scale = gn.size_scale;
-
-        Birth b;
-        b.parent = e;
-        b.offspring = MutateOffspring(parent_genome, rng);
-        b.px = tf.position.x;
-        b.py = tf.position.y;
-        b.pz = tf.position.z;
-        b.predator = cr.is_predator;
-        b.generation = gn.generation + 1u;
-        // Deterministic spawn offset around the parent (golden-angle by id, scaled by rng).
-        births.push_back(b);
-
-        // Parent pays the cost: cooldown + a hunger/stamina hit (raising young is taxing).
-        gn.reproduce_cooldown = kReproCooldownTicks;
-        cr.hunger = utility_clamp01(cr.hunger + 0.25f);
-        cr.stamina = utility_clamp01(cr.stamina - 0.25f);
     }
 
-    // Phase 2 (create): spawn offspring in id-deterministic parent order.
-    for (const Birth& b : births) {
-        // Re-derive the SAME rng stream for the spawn offset (seeded purely from integers),
-        // so the offspring position is deterministic and independent of creation order.
+    // Snapshot ready males (by position) for the courtship search.
+    struct Male { entt::entity e; float x, z; };
+    std::vector<Male> males;
+    for (auto e : ents) {
+        const auto& cr = view.get<Comp::CreatureComponent>(e);
+        const auto& gn = view.get<Comp::CreatureGenomeComponent>(e);
+        if (!gn.female && IsReadyToMate(cr, gn)) {
+            const auto& tf = view.get<Comp::TransformComponent>(e);
+            males.push_back({e, tf.position.x, tf.position.z});
+        }
+    }
+
+    struct Birth { CreatureGenome genome; float x, y, z; std::uint32_t generation; bool female; };
+    std::vector<Birth> births;
+    std::vector<bool> male_used(males.size(), false);
+
+    // Female-driven courtship: each ready female courts her nearest unused ready male in range.
+    for (auto e : ents) {
+        auto& cr = view.get<Comp::CreatureComponent>(e);
+        auto& gn = view.get<Comp::CreatureGenomeComponent>(e);
+        if (!gn.female || !IsReadyToMate(cr, gn)) { continue; }
+        const auto& tf = view.get<Comp::TransformComponent>(e);
+        int best = -1;
+        float bestDist = kCourtshipRadius;
+        for (std::size_t m = 0; m < males.size(); ++m) {
+            if (male_used[m]) continue;
+            const float dx = males[m].x - tf.position.x, dz = males[m].z - tf.position.z;
+            const float d = dm::Sqrt(dx * dx + dz * dz);
+            if (d < bestDist) { bestDist = d; best = static_cast<int>(m); }
+        }
+        if (best < 0) { gn.courting_ticks = 0; continue; }  // no mate adjacent -> reset
+        ++stats.courting;
+        ++gn.courting_ticks;
+        if (gn.courting_ticks < kCourtshipTicks) continue;  // still courting
+
+        // Courtship complete -> a baby. Consume this male for the tick.
+        const entt::entity maleE = males[static_cast<std::size_t>(best)].e;
+        male_used[static_cast<std::size_t>(best)] = true;
+        auto& mgn = view.get<Comp::CreatureGenomeComponent>(maleE);
+
+        CreatureGenome fG; fG.move_speed = gn.move_speed; fG.vigilance = gn.vigilance;
+        fG.hunger_threshold = gn.hunger_threshold; fG.size_scale = gn.size_scale;
+        CreatureGenome mG; mG.move_speed = mgn.move_speed; mG.vigilance = mgn.vigilance;
+        mG.hunger_threshold = mgn.hunger_threshold; mG.size_scale = mgn.size_scale;
+
         luminumbra::core::DeterministicRng rng = luminumbra::core::DeterministicRng::seeded(
             kReproSeedOffset ^ world_seed,
-            static_cast<std::uint64_t>(entt::to_integral(b.parent)), tick);
-        // Advance past the mutation draws (4 genes * 12 gaussians each) so the offset draws
-        // are a distinct, stable sub-stream. (next_gaussian consumes 12 next_unit -> next_u64.)
-        for (int i = 0; i < static_cast<int>(kCreatureGeneCount) * 12; ++i) rng.next_u64();
-        const float ang = rng.next_range(0.0f, 6.2831853f);
-        const float rad = rng.next_range(0.5f, 1.0f) * kReproSpawnRadius;
-        const float ox = ::Luminumbra::DeterministicMath::Cos(ang) * rad;
-        const float oz = ::Luminumbra::DeterministicMath::Sin(ang) * rad;
+            (static_cast<std::uint64_t>(entt::to_integral(e)) * 0x9E3779B97F4A7C15ull) ^
+                static_cast<std::uint64_t>(entt::to_integral(maleE)),
+            tick);
+        const CreatureGenome childG = BreedOffspring(fG, mG, rng);
+        const bool childFemale = (rng.next_u64() & 1ull) == 0ull;
 
+        const auto& mtf = view.get<Comp::TransformComponent>(maleE);
+        Birth b;
+        b.genome = childG;
+        b.x = (tf.position.x + mtf.position.x) * 0.5f;
+        b.y = (tf.position.y + mtf.position.y) * 0.5f;
+        b.z = (tf.position.z + mtf.position.z) * 0.5f + kReproSpawnRadius;
+        b.generation = (gn.generation > mgn.generation ? gn.generation : mgn.generation) + 1u;
+        b.female = childFemale;
+        births.push_back(b);
+
+        gn.courting_ticks = 0;
+        gn.reproduce_cooldown = kReproCooldownTicks;
+        mgn.reproduce_cooldown = kReproCooldownTicks;
+    }
+
+    // Create offspring AFTER the read pass (no view invalidation mid-iteration).
+    for (const Birth& b : births) {
         const auto child = reg.create();
         auto& tf = reg.emplace<Comp::TransformComponent>(child);
-        tf.position.x = b.px + ox;
-        tf.position.y = b.py;
-        tf.position.z = b.pz + oz;
-        tf.scale = ::Luminumbra::Vec3(b.offspring.size_scale);
+        tf.position.x = b.x; tf.position.y = b.y; tf.position.z = b.z;
+        tf.scale = ::Luminumbra::Vec3(b.genome.size_scale);
 
         auto& cr = reg.emplace<Comp::CreatureComponent>(child);
-        cr.is_predator = b.predator;
-        cr.hunger = 0.5f;     // newborn starts moderately hungry
-        cr.stamina = 1.0f;    // fresh
-        cr.move_speed = b.offspring.move_speed;  // genome drives the brain
+        cr.is_predator = false;
+        cr.hunger = 0.5f;
+        cr.stamina = 1.0f;
+        cr.move_speed = b.genome.move_speed;
 
         auto& gn = reg.emplace<Comp::CreatureGenomeComponent>(child);
-        gn.move_speed = b.offspring.move_speed;
-        gn.vigilance = b.offspring.vigilance;
-        gn.hunger_threshold = b.offspring.hunger_threshold;
-        gn.size_scale = b.offspring.size_scale;
+        gn.move_speed = b.genome.move_speed;
+        gn.vigilance = b.genome.vigilance;
+        gn.hunger_threshold = b.genome.hunger_threshold;
+        gn.size_scale = b.genome.size_scale;
         gn.age_ticks = 0;
         gn.reproduce_cooldown = kReproCooldownTicks;  // newborn can't immediately breed
         gn.generation = b.generation;
+        gn.female = b.female;
+        gn.courting_ticks = 0;
 
         ++stats.born;
     }
-
     return stats;
 }
 
