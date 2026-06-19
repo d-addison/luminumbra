@@ -128,6 +128,9 @@ add_executable(common_tests
     common/WeatherSystem_test.cpp
     common/AetherFieldSystem_test.cpp
     common/fields_hardening_test.cpp
+    common/replication_hardening_test.cpp
+    common/lockstep_replay_hardening_test.cpp
+    common/world_streaming_hardening_test.cpp
     common/HydraulicErosion_test.cpp
     common/WorldStreamingState_test.cpp
     sim/fire_spread_test.cpp
@@ -589,6 +592,7 @@ add_executable(frontier_gates_test
     fields/scalar_field_diffusion_gate_test.cpp
     persistence/world_save_service_test.cpp
     persistence/world_save_region_format_test.cpp
+    persistence/persistence_hardening_test.cpp
 )
 
 target_compile_definitions(frontier_gates_test PRIVATE
