@@ -144,8 +144,16 @@ inline float GrowPlant(const glm::vec3& base, const glm::vec3& dir, float len, i
     const glm::vec3 tip = base + dir * len;
     if (depth >= p.max_depth) {
         s.branches.push_back({base, tip, kTwigRadius, depth});
-        const glm::vec3 leaf_n = (p.photo > 0.0f) ? NormDet(env.sun_dir) : dir;  // leaves face the light
-        s.leaves.push_back({tip, leaf_n});
+        // A small deterministic CLUSTER of leaves per twig -> a fuller canopy (vs one card).
+        // Leaves face the light (phototropism) and spread by the golden angle around it.
+        const glm::vec3 base_n = (p.photo > 0.0f) ? NormDet(env.sun_dir) : dir;
+        constexpr int kLeavesPerTwig = 4;
+        constexpr float kGoldenAngle = 2.39996323f;
+        for (int li = 0; li < kLeavesPerTwig; ++li) {
+            const glm::vec3 n = RotateBranch(base_n, 0.55f, kGoldenAngle * static_cast<float>(li + 1));
+            const glm::vec3 along = NormDet(dir) * (len * 0.18f * static_cast<float>(li));  // spread up the twig
+            s.leaves.push_back({tip + along, n});
+        }
         return kTwigRadius;
     }
     constexpr float kGoldenAngle = 2.39996323f;
@@ -190,7 +198,7 @@ struct ProcMesh {
     std::vector<std::uint32_t> indices;
 };
 
-inline ProcMesh TessellatePlant(const PlantStructure& s, int radial = 6, float leaf_size = 0.12f) {
+inline ProcMesh TessellatePlant(const PlantStructure& s, int radial = 6, float leaf_size = 0.20f) {
     ProcMesh m;
     if (radial < 3) radial = 3;
 

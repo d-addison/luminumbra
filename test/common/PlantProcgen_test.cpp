@@ -180,7 +180,7 @@ TEST(PlantProcgen, TrunkLeansTowardSun) {
 
 TEST(PlantProcgen, StructureGolden) {
     const std::uint64_t h = HashStructure(GeneratePlant(UniformGenome(0.6f), kFruiting));
-    EXPECT_EQ(h, 776720397350691645ull);  // libm-free determinism golden (branches + leaves)
+    EXPECT_EQ(h, 17689145497192653897ull);  // libm-free determinism golden (branches + leaf clusters)
 }
 
 // --- Tessellation: structure -> renderable triangle mesh ---
@@ -222,7 +222,7 @@ TEST(PlantProcgen, TessellateDeterministic) {
 
 TEST(PlantProcgen, TessellateGolden) {
     const auto s = GeneratePlant(UniformGenome(0.6f), kFruiting);
-    EXPECT_EQ(HashProcMesh(TessellatePlant(s, 6)), 8655260894640015716ull);  // tessellation golden
+    EXPECT_EQ(HashProcMesh(TessellatePlant(s, 6)), 7486039554530736126ull);  // tessellation golden
 }
 
 }  // namespace
