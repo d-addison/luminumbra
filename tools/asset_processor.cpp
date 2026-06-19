@@ -740,6 +740,9 @@ int main(int argc, char* argv[]) {
                      "[target_size] [--preview-png] [--max-tris N]" << std::endl;
         std::cerr << "  --max-tris N : for .lmesh output, decimate the mesh to <= N triangles (LOD0)"
                   << std::endl;
+        std::cerr << "  --emit-lods : for .lmesh output, also write coarser <stem>.lod1.lmesh /"
+                     " <stem>.lod2.lmesh distance LODs (render-only; renderer falls back to LOD0"
+                     " if absent)" << std::endl;
         std::cerr << "  --primitive N : for .lmesh output, export ONLY global primitive N (per-part split"
                      " of a multi-material asset) using that part's own UV set" << std::endl;
         std::cerr << "  target_size : for .ltex output, resize the source to N x N before mipping "
@@ -780,6 +783,13 @@ int main(int argc, char* argv[]) {
     // decimates the combined mesh to <= N triangles (LOD0). Used to bring
     // photogrammetry/SpeedTree exports down to an instanceable poly count.
     size_t max_tris = 0;
+    // Track-B (roadmap pillar B): --emit-lods also writes coarser LOD variants
+    // ("<stem>.lod1.lmesh", "<stem>.lod2.lmesh") next to the LOD0 output by
+    // re-running the SAME meshopt decimation path at successively smaller triangle
+    // budgets. The renderer (Luminumbra::Rendering::LodMeshPath / SelectTreeLod)
+    // picks these by camera distance; missing variants fall back to LOD0. This is
+    // a render-only optimization and does not change the LOD0 output.
+    bool emit_lods = false;
     for (int a = 3; a < argc; ++a) {
         const std::string arg = argv[a];
         if (arg == "--max-tris" && a + 1 < argc) {
@@ -788,6 +798,8 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--primitive" && a + 1 < argc) {
             try { g_only_primitive = std::stoi(argv[++a]); }
             catch (...) { std::cerr << "Error: --primitive needs an integer" << std::endl; return 1; }
+        } else if (arg == "--emit-lods") {
+            emit_lods = true;
         } else {
             std::cerr << "Error: unrecognized argument '" << arg << "'" << std::endl;
             return 1;
@@ -795,5 +807,29 @@ int main(int argc, char* argv[]) {
     }
     g_max_tris = max_tris;
     process_gltf(argv[1], output_path);
+
+    if (emit_lods) {
+        // Derive "<stem>.lodN.lmesh" from the LOD0 output path (matches the
+        // renderer's LodMeshPath naming). LOD0 = the just-written output. LOD1/LOD2
+        // are coarser triangle budgets relative to LOD0's effective budget; if no
+        // --max-tris was given we fall back to fixed, modest budgets so distant
+        // foliage still drops a large share of its triangles.
+        const std::string kExt = ".lmesh";
+        std::string stem = output_path;
+        if (stem.size() >= kExt.size() &&
+            stem.compare(stem.size() - kExt.size(), kExt.size(), kExt) == 0) {
+            stem = stem.substr(0, stem.size() - kExt.size());
+        }
+        const size_t base_budget = (max_tris > 0) ? max_tris : 20000;
+        const size_t lod_budgets[2] = { base_budget / 2, base_budget / 6 };
+        for (int lod = 1; lod <= 2; ++lod) {
+            const size_t budget = lod_budgets[lod - 1];
+            g_max_tris = (budget > 0) ? budget : 1;
+            const std::string lod_path = stem + ".lod" + std::to_string(lod) + kExt;
+            std::cout << "Emitting LOD" << lod << " (<= " << g_max_tris
+                      << " tris) -> '" << lod_path << "'" << std::endl;
+            process_gltf(argv[1], lod_path);
+        }
+    }
     return 0;
 }
