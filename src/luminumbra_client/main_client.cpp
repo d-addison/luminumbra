@@ -100,6 +100,7 @@ static constexpr int kTimelapseSettleFrames = 45;  // let the world stream/settl
 bool g_timelapse_grow = false;     // grow the procgen plants sapling->tree over the capture
 bool g_timelapse_season = false;   // drift summer->autumn leaf color over the capture
 bool g_timelapse_creatures = false; // spawn predators/prey + render markers (ecology demo)
+bool g_timelapse_calm = false;      // calm (no-predator) grazing herd -> reproduction/evolution demo
 
 // I9-FOLIAGE: stored procgen plant instances so the geometry can be RE-BAKED at a changing
 // growth stage (the live-growth render bridge) -- a plant grows sapling->tree over time.
@@ -186,12 +187,24 @@ void BakeCreatureMarkers(Luminumbra::Rendering::PlantProcgenPass* pp, entt::regi
         // The Jolt avatar body owns the position now (gravity/terrain collision), so the
         // transform's Y is the resolved capsule centre -- draw the marker right there.
         const glm::vec3 c(tf.position.x, tf.position.y, tf.position.z);
+        // Prey are tinted by GENERATION (founders blue -> teal -> green -> lime) so new
+        // generations born during the evolution demo are visually distinct; size follows the
+        // heritable genome size_scale so trait drift shows too. Predator red, carcass bone.
+        glm::vec3 preyCol(0.18f, 0.5f, 0.85f);
+        float sizeMul = 1.0f;
+        if (const auto* gn = reg.try_get<Luminumbra::Components::CreatureGenomeComponent>(e)) {
+            static const glm::vec3 kGenPalette[4] = {
+                {0.18f, 0.5f, 0.85f}, {0.18f, 0.82f, 0.72f}, {0.32f, 0.85f, 0.32f}, {0.75f, 0.85f, 0.2f}};
+            preyCol = kGenPalette[gn->generation < 4u ? gn->generation : 3u];
+            sizeMul = gn->size_scale;
+        }
         const glm::vec3 col = cr.eaten      ? glm::vec3(0.92f, 0.88f, 0.75f)   // caught -> pale bone carcass
                               : cr.is_predator ? glm::vec3(0.75f, 0.12f, 0.12f)  // predator -> red
-                                               : glm::vec3(0.18f, 0.5f, 0.85f);  // prey -> blue
-        const glm::vec3 P[6] = {c + glm::vec3(0, halfH, 0), c - glm::vec3(0, halfH, 0),
-                                c + glm::vec3(r, 0, 0),      c + glm::vec3(0, 0, r),
-                                c - glm::vec3(r, 0, 0),      c - glm::vec3(0, 0, r)};
+                                               : preyCol;                         // prey -> by generation
+        const float rr = r * sizeMul, hh = halfH * sizeMul;
+        const glm::vec3 P[6] = {c + glm::vec3(0, hh, 0), c - glm::vec3(0, hh, 0),
+                                c + glm::vec3(rr, 0, 0),     c + glm::vec3(0, 0, rr),
+                                c - glm::vec3(rr, 0, 0),     c - glm::vec3(0, 0, rr)};
         const std::uint32_t base = static_cast<std::uint32_t>(verts.size());
         for (const glm::vec3& p : P) {
             Luminumbra::Rendering::PlantProcgenPass::Vertex v;
@@ -1536,6 +1549,8 @@ int main(int argc, char* argv[]) {
     g_timelapse_season = HasCommandLineFlag(argc, argv, "--timelapse-season");
     if (g_timelapse_season) g_season = 0.0f;  // start summer-green; drift to autumn over the capture
     g_timelapse_creatures = HasCommandLineFlag(argc, argv, "--timelapse-creatures");
+    g_timelapse_calm = HasCommandLineFlag(argc, argv, "--timelapse-calm");
+    if (g_timelapse_calm) g_timelapse_creatures = true;  // calm mode is a creature scenario
     {
         const std::string ds = GetCommandLineOption(argc, argv, "--timelapse-daystep", "");
         if (!ds.empty()) { try { g_timelapse_daystep = std::stof(ds); } catch (...) {} }
@@ -3657,6 +3672,14 @@ int main(int argc, char* argv[]) {
                                     auto& gn = reg.emplace<
                                         Luminumbra::Components::CreatureGenomeComponent>(e);
                                     gn.move_speed = cr.move_speed;
+                                    // Calm (evolution) demo: start the founders WELL-FED + near
+                                    // maturity so they breed early and 2-3 generations appear
+                                    // within the clip (markers are tinted by generation).
+                                    if (g_timelapse_calm) {
+                                        cr.hunger = 0.05f;
+                                        cr.stamina = 1.0f;
+                                        gn.age_ticks = 80u;  // just under kReproMaturityTicks (90)
+                                    }
                                 }
                                 if (phys) {
                                     const std::size_t idx =
@@ -3664,11 +3687,21 @@ int main(int argc, char* argv[]) {
                                     reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
                                 }
                             };
-                            mkCreature(0.0f, 8.0f, /*predator*/ true, /*hunger*/ 0.95f);
-                            for (int i = 0; i < 7; ++i)
-                                mkCreature(-7.0f + static_cast<float>(i) * 2.4f, -2.0f,
-                                           /*predator*/ false, /*hunger*/ 0.3f);
-                            LUMINUMBRA_CORE_INFO("I9-ECO: spawned 1 predator + 7 prey (Jolt avatar bodies) for the ecology timelapse");
+                            if (g_timelapse_calm) {
+                                // Calm grazing herd, NO predator: prey graze (hunger falls),
+                                // stay healthy, and reproduce over generations -> a visible
+                                // population-growth / trait-drift evolution demo.
+                                for (int i = 0; i < 6; ++i)
+                                    mkCreature(-9.0f + static_cast<float>(i) * 3.6f, 0.0f,
+                                               /*predator*/ false, /*hunger*/ 0.05f);
+                                LUMINUMBRA_CORE_INFO("I9-EVO: spawned 6 grazing founders (no predator) for the evolution timelapse");
+                            } else {
+                                mkCreature(0.0f, 8.0f, /*predator*/ true, /*hunger*/ 0.95f);
+                                for (int i = 0; i < 7; ++i)
+                                    mkCreature(-7.0f + static_cast<float>(i) * 2.4f, -2.0f,
+                                               /*predator*/ false, /*hunger*/ 0.3f);
+                                LUMINUMBRA_CORE_INFO("I9-ECO: spawned 1 predator + 7 prey (Jolt avatar bodies) for the ecology timelapse");
+                            }
                         }
                     }
                 }
