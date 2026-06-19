@@ -35,6 +35,13 @@ static constexpr GLsizei kStaticInstanceCapacity = 16384;
 GBufferPass::GBufferPass() = default;
 GBufferPass::~GBufferPass() = default;
 
+void GBufferPass::register_cached_mesh(const std::string& key, std::unique_ptr<Mesh> mesh) {
+    if (mesh) m_meshCache[key] = std::move(mesh);
+}
+bool GBufferPass::has_cached_mesh(const std::string& key) const {
+    return m_meshCache.find(key) != m_meshCache.end();
+}
+
 void GBufferPass::init_geometry_shader(const std::filesystem::path& root_path) {
     m_geometry_shader = std::make_unique<Shader>((root_path / "res/shaders/g_buffer.vert").string().c_str(), (root_path / "res/shaders/g_buffer.frag").string().c_str());
     PassGl::label_gl_object(GL_PROGRAM, m_geometry_shader ? m_geometry_shader->Id() : 0u, "shader.geometry");
