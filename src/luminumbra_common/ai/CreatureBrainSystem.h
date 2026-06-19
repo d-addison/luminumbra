@@ -13,6 +13,7 @@
 #include "CreatureBrain.h"
 #include "Flocking.h"
 
+#include "../components/AlarmComponents.h"
 #include "../components/CoreComponents.h"
 #include "../components/CreatureComponents.h"
 #include "../core/DeterministicMath.h"
@@ -114,6 +115,14 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
         } else {
             s.threat_proximity = nearNorm;
             s.food_proximity = 0.6f;  // prey graze ambient plants
+            // Herd alarm (opt-in via AlarmComponent): a prey that directly senses a predator
+            // RAISES its alarm; and it flees on either the direct threat OR the propagated herd
+            // alarm level (HerdAlarmSystem, slot 7) -- so the whole herd bolts together even if
+            // only one saw the predator. Collective vigilance.
+            if (auto* al = reg.try_get<Comp::AlarmComponent>(e)) {
+                al->alarmed = (nearNorm > 0.4f) ? 1u : 0u;
+                if (al->level > s.threat_proximity) s.threat_proximity = al->level;
+            }
         }
 
         const CreatureAction act = DecideCreatureAction(s);

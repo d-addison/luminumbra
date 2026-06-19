@@ -26,6 +26,7 @@
 #include "luminumbra_common/components/PlantComponents.h"   // I9-FOLIAGE
 #include "luminumbra_common/components/CreatureComponents.h" // I9-ECO creature markers
 #include "luminumbra_common/components/CombustionComponents.h" // sim.fire demo markers
+#include "luminumbra_common/components/AlarmComponents.h"      // herd-alarm collective flee
 #include "luminumbra_common/systems/PlantGrowthSystem.h"    // I9-FOLIAGE phenotype/genome
 #include "luminumbra_common/systems/PlantProcgen.h"         // I9-FOLIAGE procedural plant geometry (render-only)
 #include "luminumbra_common/systems/WaterSystem.h"
@@ -3800,6 +3801,7 @@ int main(int argc, char* argv[]) {
                                         Luminumbra::Components::CreatureGenomeComponent>(e);
                                     gn.move_speed = cr.move_speed;
                                     gn.female = (preyIdx++ % 2 == 0);  // alternate M/F so pairs form
+                                    reg.emplace<Luminumbra::Components::AlarmComponent>(e);  // herd vigilance
                                     // Calm (evolution) demo: start the founders WELL-FED + near
                                     // maturity so they court early and generations appear within
                                     // the clip (markers are tinted by generation).

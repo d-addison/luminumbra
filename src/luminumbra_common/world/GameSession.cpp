@@ -4,6 +4,8 @@
 #include "../ai/CreatureReproductionSystem.h"  // Track (a): generational evolution (+16)
 #include "../ai/LifespanSystem.h"               // §4: age/starvation death (+22)
 #include "../ai/WildlifeFoliageSystem.h"        // §4: grazing/trampling (+23)
+#include "../ai/HerdAlarmSystem.h"              // §4: collective-vigilance alarm (+26)
+#include "../components/AlarmComponents.h"
 #include "../systems/FireSpreadSystem.h"        // §4: fire spread (+17)
 #include "../systems/SoilNutrientSystem.h"      // §4: soil nutrients (+18)
 #include "../systems/PollinationSystem.h"       // §4: cross-pollination (+19)
@@ -351,6 +353,11 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 luminumbra::ai::RunWildlifeFoliageOnTick(m_registry, current_tick);
             if (!m_registry.view<Comp::MortalComponent>().empty())
                 luminumbra::ai::RunLifespanOnTick(m_registry, current_tick);
+            // Herd alarm: propagate collective vigilance among same-role creatures. The brain
+            // (slot 2e) sets AlarmComponent.alarmed when a prey senses a threat and reads the
+            // propagated level to flee with the herd; this maintains the field.
+            if (!m_registry.view<Comp::AlarmComponent>().empty())
+                luminumbra::ai::RunHerdAlarmOnTick(m_registry, static_cast<float>(m_simulationClock.fixed_dt()));
         }
 
         m_simulationEventBus.drain(current_tick);
