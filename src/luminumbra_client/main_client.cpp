@@ -332,22 +332,29 @@ void BuildProcgenTreePalette(Luminumbra::Rendering::RenderPipeline& rp, const gl
     const int radialForLod[3] = {8, 5, 3};  // branch detail per LOD (far = coarser)
     auto pal = luminumbra::core::DeterministicRng::seeded(fol::kPlantSeedOffset, 0xA11CE5ull, 99u);
     int built = 0;
+    using V = Luminumbra::Rendering::Vertex;
     for (int p = 0; p < kTreePaletteSize; ++p) {
         const auto genome = fol::RandomGenome(pal);
         const fol::PlantStructure ps = fol::GeneratePlant(genome, stage, env);
         const std::size_t leafQuads = ps.leaves.size();
+        glm::vec3 lo(1.0e9f), hi(-1.0e9f);       // tree AABB (from LOD0)
+        float leafLoY = 1.0e9f, leafHiY = -1.0e9f; // canopy vertical band (leaf verts)
         for (int lod = 0; lod < 3; ++lod) {
             const fol::ProcMesh pm = fol::TessellatePlant(ps, radialForLod[lod]);
             const std::size_t leafStart =
                 pm.vertices.size() >= leafQuads * 4u ? pm.vertices.size() - leafQuads * 4u
                                                      : pm.vertices.size();
-            std::vector<Luminumbra::Rendering::Vertex> barkV, leafV;
+            std::vector<V> barkV, leafV;
             std::vector<std::uint32_t> barkI, leafI;
             barkV.reserve(leafStart);
             leafV.reserve(pm.vertices.size() - leafStart);
             for (std::size_t i = 0; i < pm.vertices.size(); ++i) {
                 const fol::ProcVertex& s = pm.vertices[i];
-                Luminumbra::Rendering::Vertex v{s.pos, s.normal, s.uv};
+                if (lod == 0) {
+                    lo = glm::min(lo, s.pos); hi = glm::max(hi, s.pos);
+                    if (i >= leafStart) { leafLoY = std::min(leafLoY, s.pos.y); leafHiY = std::max(leafHiY, s.pos.y); }
+                }
+                V v{s.pos, s.normal, s.uv};
                 if (i < leafStart) barkV.push_back(v); else leafV.push_back(v);
             }
             for (std::uint32_t idx : pm.indices) {
@@ -361,10 +368,37 @@ void BuildProcgenTreePalette(Luminumbra::Rendering::RenderPipeline& rp, const gl
             rp.register_procgen_mesh(base + kLeafMatKey + suf,
                                      Luminumbra::Rendering::MeshLoader::CreateFromArrays(leafV, leafI));
         }
+        // LOD3 FAR-FIELD cross-billboard: a few quads spanning the tree's silhouette (~6 tris vs
+        // hundreds), so a vast forest stays in budget out to the horizon. Leaf = two crossed
+        // vertical quads over the canopy band; bark = one slim trunk quad. Sized from the LOD0 AABB.
+        const float H = std::max(hi.y, 0.5f);
+        const float W = std::max({hi.x, -lo.x, hi.z, -lo.z, 0.5f});  // canopy half-width
+        const float cLo = (leafLoY < leafHiY) ? leafLoY : H * 0.35f;
+        const float cHi = (leafHiY > leafLoY) ? leafHiY : H;
+        auto addQuad = [](std::vector<V>& vv, std::vector<std::uint32_t>& ii,
+                          glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 d, glm::vec3 n) {
+            const std::uint32_t k = static_cast<std::uint32_t>(vv.size());
+            vv.push_back({a, n, {0, 0}}); vv.push_back({b, n, {1, 0}});
+            vv.push_back({c, n, {1, 1}}); vv.push_back({d, n, {0, 1}});
+            ii.push_back(k); ii.push_back(k + 1); ii.push_back(k + 2);
+            ii.push_back(k); ii.push_back(k + 2); ii.push_back(k + 3);
+        };
+        std::vector<V> bbLeafV; std::vector<std::uint32_t> bbLeafI;
+        const glm::vec3 up(0, 1, 0);
+        addQuad(bbLeafV, bbLeafI, {-W, cLo, 0}, {W, cLo, 0}, {W, cHi, 0}, {-W, cHi, 0}, up);     // X-facing
+        addQuad(bbLeafV, bbLeafI, {0, cLo, -W}, {0, cLo, W}, {0, cHi, W}, {0, cHi, -W}, up);     // Z-facing
+        std::vector<V> bbBarkV; std::vector<std::uint32_t> bbBarkI;
+        const float tw = W * 0.12f;
+        addQuad(bbBarkV, bbBarkI, {-tw, 0, 0}, {tw, 0, 0}, {tw, cLo, 0}, {-tw, cLo, 0}, glm::vec3(0, 0, 1));
+        const std::string base = "procgen://tree_" + std::to_string(p);
+        rp.register_procgen_mesh(base + kLeafMatKey + ".lod3",
+                                 Luminumbra::Rendering::MeshLoader::CreateFromArrays(bbLeafV, bbLeafI));
+        rp.register_procgen_mesh(base + kBarkMatKey + ".lod3",
+                                 Luminumbra::Rendering::MeshLoader::CreateFromArrays(bbBarkV, bbBarkI));
         ++built;
     }
     g_treePaletteCount = built;
-    LUMINUMBRA_CORE_INFO("VAST-FOREST: built procedural tree palette of {} entries (x3 LODs, bark+leaf)", built);
+    LUMINUMBRA_CORE_INFO("VAST-FOREST: built procedural tree palette of {} entries (x4 LODs incl far-field billboard)", built);
 }
 
 std::unique_ptr<Luminumbra::Client::Rml_UIManager> g_uiManager;
@@ -3640,10 +3674,10 @@ int main(int argc, char* argv[]) {
                         // INSTANCED thousands of times across the whole horizon (cheap GPU
                         // instancing + Track-B LOD + frustum cull), so we can fill the full 760m
                         // reach densely without per-tree cost.
-                        const float kReach = 760.0f;      // meters from spawn anchor (full horizon)
-                        const float kCell = 14.0f;        // grid pitch
+                        const float kReach = 1150.0f;     // meters from spawn anchor (deep horizon)
+                        const float kCell = 13.0f;        // grid pitch
                         const float kHeightSample = 4.0f; // slope probe radius
-                        const int   kMaxInstances = 14000; // instance cap (cheap palette instances)
+                        const int   kMaxInstances = 28000; // instance cap (cheap palette instances; far = billboards)
                         const float kGroveBase = 0.22f;   // baseline grove density (sparser open)
                         const float kGroveGain = 0.62f;   // grove clustering gain (denser stands)
                         const float kScaleMin = 0.8f;     // min trunk scale
