@@ -156,8 +156,8 @@ inline HerdAlarmStats RunHerdAlarmOnTick(entt::registry& reg, float dt) {
         // Self term: own pre-tick level decayed toward 0. An alarmed source pins itself to
         // full so the originator stays lit while it senses the threat.
         float next = self.level * keep;
-        if (self.src_strength >= 1.0f) {
-            next = 1.0f;  // alarmed==1 originator holds at max while alarmed.
+        if (al.alarmed != 0) {
+            next = 1.0f;  // pin ONLY a genuinely-alarmed originator (not a relay that hit 1.0).
         }
 
         // Propagation term: take the STRONGEST same-role source contribution in range
