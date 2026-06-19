@@ -20,15 +20,26 @@ Source/GMod-like global time control in `main_client.cpp`:
 
 ## 2. Frame capture (the loaded world → a `.ppm` sequence)
 
-The engine already dumps `glReadPixels(GL_BACK)` frames as `motion/frame_%03d.ppm` via
-`WritePixelBufferPpm` (the showcase-video / storm-motion scenarios). A timelapse capture runs this
-on the **settled, loaded** world while time advances (set a high `g_timeScale`, or bulk-advance the
-sim between captures). Capturing during world load gives a dark/streaming clip — wait for the world
-to be ready first.
+The **`--timelapse` capture mode** (LANDED) dumps a frame sequence of the live, settled world while
+sim-time and the day clock fast-forward:
 
-> Status: the dedicated `--timelapse` capture mode (wait-for-loaded → advance sim-time per frame →
-> dump) is the remaining slice; until it lands, use the existing showcase-video frame dumps + a high
-> `g_timeScale`.
+```
+luminumbra_client_app.exe --auto-create-world --auto-enter-world --no-audio \
+    --window-mode windowed --resolution 1280x720 \
+    --timelapse-frames 24 --timelapse-ticks 90 --timelapse-tod 0 --timelapse-daystep 0.018 \
+    --timelapse-dir build/tl
+```
+
+- `--timelapse-frames N` — how many frames to capture (then the client auto-exits).
+- `--timelapse-ticks K` — EXTRA fixed sim ticks fast-forwarded between frames (weather/creatures/plants).
+- `--timelapse-tod T` — starting time-of-day (**0 = noon/brightest**; applied during settle so frame 0 is lit).
+- `--timelapse-daystep D` — advance time-of-day by D per frame for shade/sky drift (0 = hold).
+- `--timelapse-dir P` — output directory (default `<artifact-dir>/timelapse`).
+
+Notes: it waits ~45 frames for the world to stream/settle before frame 0; **physics keeps running**
+each frame so the player settles on the ground (do NOT pause it). Run WITH ImGui (omit `--no-ui`) —
+the non-scenario load path asserts without an ImGui context; in-game overlays are auto-suppressed
+during capture so frames are clean.
 
 ## 3. Assembler — `tools/timelapse.py`
 
