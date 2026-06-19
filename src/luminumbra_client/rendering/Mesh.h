@@ -3,6 +3,7 @@
 #include <glm/glm.hpp>
 #include <string>
 #include <memory>
+#include <vector>
 
 namespace Luminumbra::Rendering {
 
@@ -44,6 +45,11 @@ struct Mesh {
 class MeshLoader {
 public:
     static std::unique_ptr<Mesh> Load(const std::string& path);
+    // Build a Mesh from IN-MEMORY arrays (no disk I/O) — used to register runtime-generated
+    // PROCEDURAL tree meshes into the instanced static-mesh cache (vast-forest palette). Same
+    // VAO layout as Load (attrib 0=pos,1=norm,2=uv); the instanced path adds the matrix at 3-6.
+    static std::unique_ptr<Mesh> CreateFromArrays(const std::vector<Vertex>& vertices,
+                                                  const std::vector<uint32_t>& indices);
     // Loads an .lmesh v2 (LMS2) skinned mesh: VAO layout 0=pos, 1=norm,
     // 2=uv, 3=joints (u8x4 integer), 4=weights (u8x4 normalized). T-I3-16.
     static std::unique_ptr<Mesh> LoadSkinned(const std::string& path);

@@ -666,6 +666,13 @@ void RenderPipeline::shutdown() {
     cleanup_gpu_resources();
 }
 
+void RenderPipeline::register_procgen_mesh(const std::string& key, std::unique_ptr<Mesh> mesh) {
+    if (m_gbuffer_pass) m_gbuffer_pass->register_cached_mesh(key, std::move(mesh));
+}
+bool RenderPipeline::has_procgen_mesh(const std::string& key) const {
+    return m_gbuffer_pass && m_gbuffer_pass->has_cached_mesh(key);
+}
+
 void RenderPipeline::attach_farlod_job_system(JobSystem* job_system) {
     // Stored so passes CONSTRUCTED IN startup() (which runs after this call) can be
     // wired too — the far-field pass is one such, and without this it silently fell

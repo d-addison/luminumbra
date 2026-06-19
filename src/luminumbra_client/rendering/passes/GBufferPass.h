@@ -49,6 +49,11 @@ public:
     GLuint instance_matrix_vbo() const { return m_instanceMatrixVBO; }
     GLuint joint_palette_ssbo() const { return m_jointPaletteSSBO; }
 
+    // Register a runtime-built mesh under a synthetic key (e.g. "procgen://tree_3_leaf") so the
+    // instanced static-mesh path + Track-B LOD can draw it -- the vast procedural-tree palette.
+    void register_cached_mesh(const std::string& key, std::unique_ptr<Mesh> mesh);
+    [[nodiscard]] bool has_cached_mesh(const std::string& key) const;
+
 private:
     void geometry_pass_chunks(RenderPipeline& pipeline,
                               const std::vector<RenderPipeline::ChunkMeshSnapshot>& renderable_chunks,

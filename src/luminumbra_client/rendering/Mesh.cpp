@@ -150,6 +150,39 @@ std::unique_ptr<Mesh> MeshLoader::Load(const std::string& path) {
     return mesh;
 }
 
+std::unique_ptr<Mesh> MeshLoader::CreateFromArrays(const std::vector<Vertex>& vertices,
+                                                  const std::vector<uint32_t>& indices) {
+    auto mesh = std::make_unique<Mesh>();
+    if (vertices.empty() || indices.empty()) return mesh;  // empty mesh (caller checks indexCount)
+    mesh->indexCount = static_cast<uint32_t>(indices.size());
+
+    // Bounding sphere from the AABB centre + farthest vertex (the instanced renderer frustum-
+    // culls per instance against this).
+    glm::vec3 lo = vertices[0].pos, hi = vertices[0].pos;
+    for (const Vertex& v : vertices) { lo = glm::min(lo, v.pos); hi = glm::max(hi, v.pos); }
+    const glm::vec3 c = (lo + hi) * 0.5f;
+    float r2 = 0.0f;
+    for (const Vertex& v : vertices) r2 = glm::max(r2, glm::dot(v.pos - c, v.pos - c));
+    mesh->boundingSphere = glm::vec4(c, std::sqrt(r2));
+
+    glGenVertexArrays(1, &mesh->vao);
+    glGenBuffers(1, &mesh->vbo);
+    glGenBuffers(1, &mesh->ebo);
+    glBindVertexArray(mesh->vao);
+    glBindBuffer(GL_ARRAY_BUFFER, mesh->vbo);
+    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex), vertices.data(), GL_STATIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh->ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(uint32_t), indices.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, pos));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, norm));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, uv));
+    glBindVertexArray(0);
+    return mesh;
+}
+
 std::unique_ptr<Mesh> MeshLoader::LoadSkinned(const std::string& path) {
     namespace anim = luminumbra::animation;
 

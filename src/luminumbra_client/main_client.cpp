@@ -111,6 +111,11 @@ struct ProcgenPlantInstance {
     Luminumbra::Components::PlantGenomeComponent genome;
 };
 std::vector<ProcgenPlantInstance> g_procgenPlants;
+// Cache of the last-baked procedural TREE mesh, so the creature timelapse can draw the
+// programmatic trees AND the moving creature markers through the single PlantProcgenPass
+// (creatures are appended to this each frame).
+std::vector<Luminumbra::Rendering::PlantProcgenPass::Vertex> g_procgenTreeVerts;
+std::vector<std::uint32_t> g_procgenTreeIndices;
 float g_procgenStageF = 5.0f;          // growth: 0 = Seed .. 5 = Fruiting (drives structure + size)
 float g_procgenLastBakedStage = -2.0f;
 glm::vec3 g_procgenSunDir = glm::vec3(0.0f, 1.0f, 0.0f);
@@ -161,6 +166,9 @@ void BakeProcgenPlants(Luminumbra::Rendering::PlantProcgenPass* pp, float stageF
         for (std::uint32_t idx : pm.indices) indices.push_back(baseVert + idx);
     }
     g_procgenLastBakedStage = stageF;
+    // Cache the tree mesh so the creature demo can composite creatures on top of it.
+    g_procgenTreeVerts = verts;
+    g_procgenTreeIndices = indices;
     if (verts.empty()) { pp->set_enabled(false); return; }
     const std::uint64_t sig =
         ((static_cast<std::uint64_t>(g_procgenPlants.size()) << 24) ^
@@ -174,6 +182,8 @@ void BakeProcgenPlants(Luminumbra::Rendering::PlantProcgenPass* pp, float stageF
 // track the brain-driven movement. Render-only.
 void BakeCreatureMarkers(Luminumbra::Rendering::PlantProcgenPass* pp, entt::registry& reg) {
     if (!pp) return;
+    // Markers only: the procedural FOREST now renders through the instanced static-mesh path
+    // (vast, LOD'd), so this pass draws just the moving creature octahedra.
     std::vector<Luminumbra::Rendering::PlantProcgenPass::Vertex> verts;
     std::vector<std::uint32_t> indices;
     auto view = reg.view<const Luminumbra::Components::CreatureComponent,
@@ -247,6 +257,62 @@ void AttachMissingCreatureBodies(Luminumbra::Systems::PhysicsSystem* phys, entt:
         ++made;
     }
 }
+// VAST FOREST: a small PALETTE of procedurally-generated tree meshes (no baked model). Each
+// palette entry is built once at world load into the instanced static-mesh cache (with 3 LODs,
+// split into bark + leaf submeshes so the existing material LUT colours them), then the world
+// scatters THOUSANDS of cheap instances of the palette through the engine's instanced + Track-B
+// LOD + frustum-cull path. Variety comes from the palette + per-instance transform; scale comes
+// from instancing. (Per-instance genetic tint + far-field impostors are the follow-ups.)
+int g_treePaletteCount = 0;
+constexpr int kTreePaletteSize = 12;   // distinct procedural trees (mix of species)
+const char* const kBarkMatKey = "_bark";
+const char* const kLeafMatKey = "_leaf";
+
+void BuildProcgenTreePalette(Luminumbra::Rendering::RenderPipeline& rp, const glm::vec3& sunDir) {
+    if (g_treePaletteCount > 0) return;  // build once
+    namespace fol = luminumbra::foliage;
+    fol::PlantEnvDir env;
+    env.sun_dir = sunDir;
+    env.phototropism = 0.5f;
+    const std::uint8_t stage = static_cast<std::uint8_t>(Luminumbra::Components::PlantStage::Fruiting);
+    const int radialForLod[3] = {8, 5, 3};  // branch detail per LOD (far = coarser)
+    auto pal = luminumbra::core::DeterministicRng::seeded(fol::kPlantSeedOffset, 0xA11CE5ull, 99u);
+    int built = 0;
+    for (int p = 0; p < kTreePaletteSize; ++p) {
+        const auto genome = fol::RandomGenome(pal);
+        const fol::PlantStructure ps = fol::GeneratePlant(genome, stage, env);
+        const std::size_t leafQuads = ps.leaves.size();
+        for (int lod = 0; lod < 3; ++lod) {
+            const fol::ProcMesh pm = fol::TessellatePlant(ps, radialForLod[lod]);
+            const std::size_t leafStart =
+                pm.vertices.size() >= leafQuads * 4u ? pm.vertices.size() - leafQuads * 4u
+                                                     : pm.vertices.size();
+            std::vector<Luminumbra::Rendering::Vertex> barkV, leafV;
+            std::vector<std::uint32_t> barkI, leafI;
+            barkV.reserve(leafStart);
+            leafV.reserve(pm.vertices.size() - leafStart);
+            for (std::size_t i = 0; i < pm.vertices.size(); ++i) {
+                const fol::ProcVertex& s = pm.vertices[i];
+                Luminumbra::Rendering::Vertex v{s.pos, s.normal, s.uv};
+                if (i < leafStart) barkV.push_back(v); else leafV.push_back(v);
+            }
+            for (std::uint32_t idx : pm.indices) {
+                if (idx < leafStart) barkI.push_back(idx);
+                else leafI.push_back(idx - static_cast<std::uint32_t>(leafStart));
+            }
+            const std::string base = "procgen://tree_" + std::to_string(p);
+            const std::string suf = lod == 0 ? "" : (lod == 1 ? ".lod1" : ".lod2");
+            rp.register_procgen_mesh(base + kBarkMatKey + suf,
+                                     Luminumbra::Rendering::MeshLoader::CreateFromArrays(barkV, barkI));
+            rp.register_procgen_mesh(base + kLeafMatKey + suf,
+                                     Luminumbra::Rendering::MeshLoader::CreateFromArrays(leafV, leafI));
+        }
+        ++built;
+    }
+    g_treePaletteCount = built;
+    LUMINUMBRA_CORE_INFO("VAST-FOREST: built procedural tree palette of {} entries (x3 LODs, bark+leaf)", built);
+}
+
 std::unique_ptr<Luminumbra::Client::Rml_UIManager> g_uiManager;
 std::unique_ptr<Luminumbra::Client::WorldLoadingVisualizer> g_loading_visualizer;
 
@@ -3511,10 +3577,14 @@ int main(int argc, char* argv[]) {
                         // instance VBO (GBufferPass kStaticInstanceCapacity=16384)
                         // covers the 12000 cap. Per-cell frand() call order is
                         // unchanged so the seeded layout stays reproducible.
-                        const float kReach = 760.0f;      // meters from spawn anchor
-                        const float kCell = 14.0f;        // grid pitch (denser lattice)
+                        // VAST FOREST: the trees are a small PALETTE of procedural meshes
+                        // INSTANCED thousands of times across the whole horizon (cheap GPU
+                        // instancing + Track-B LOD + frustum cull), so we can fill the full 760m
+                        // reach densely without per-tree cost.
+                        const float kReach = 760.0f;      // meters from spawn anchor (full horizon)
+                        const float kCell = 14.0f;        // grid pitch
                         const float kHeightSample = 4.0f; // slope probe radius
-                        const int   kMaxInstances = 12000; // instance cap
+                        const int   kMaxInstances = 14000; // instance cap (cheap palette instances)
                         const float kGroveBase = 0.22f;   // baseline grove density (sparser open)
                         const float kGroveGain = 0.62f;   // grove clustering gain (denser stands)
                         const float kScaleMin = 0.8f;     // min trunk scale
@@ -3530,19 +3600,14 @@ int main(int argc, char* argv[]) {
                         // baked tree models. RENDER-ONLY, never hashed; bounded to keep it
                         // cheap. The genome/maturity reuse the per-position seeded streams
                         // below, so the layout stays deterministic + reproducible.
-                        // The ecology timelapse co-opts the single PlantProcgenPass to draw the
-                        // moving creature markers, so keep procedural plants off in that mode and
-                        // let the baked tree scatter fill the background instead.
-                        const bool procgenPlants =
-                            g_systemConfig.enabled(luminumbra::core::SysKey::RenderPlantProcgen) &&
-                            !g_timelapse_creatures;
-                        constexpr int kProcgenPlantCap = 200; // cheap, bounded
-                        // Phototropism uses the scene's REAL sun: m_sun.direction is the
-                        // light TRAVEL direction (away from the sun), so the unit direction
-                        // TO the sun is its negation. Sampled once at bake time (the bake is
-                        // rebuilt only when the flag toggles / positions change).
+                        // PROGRAMMATIC TREES, NO MODEL (owner): build the procedural palette once
+                        // (into the instanced static-mesh cache), then scatter instances of it.
+                        const glm::vec3 sunToward = -glm::normalize(renderPipeline.sun_direction());
+                        BuildProcgenTreePalette(renderPipeline, sunToward);
+                        const bool procgenPlants = true;
+                        // Phototropism uses the scene's REAL sun (kept for the hero/grow demo path).
                         luminumbra::foliage::PlantEnvDir plantEnv;
-                        plantEnv.sun_dir = -glm::normalize(renderPipeline.sun_direction());
+                        plantEnv.sun_dir = sunToward;
                         plantEnv.phototropism = 0.5f;
                         int procgenCount = 0;
                         g_procgenPlants.clear();
@@ -3584,42 +3649,36 @@ int main(int argc, char* argv[]) {
                                     static_cast<std::uint64_t>(static_cast<std::int64_t>(treePos.z)) * 0x85EBCA77ull);
                                 const auto pgenome = luminumbra::foliage::RandomGenome(pgen);
                                 const float maturity = pgen.next_unit();          // 0 sapling .. 1 mature
-                                const float maturityScale = 0.18f + 0.82f * maturity;
+                                // Bias toward mature trees so the procedural wood reads full
+                                // (fewer tiny saplings than the old baked-grove distribution).
+                                const float maturityScale = 0.5f + 0.5f * maturity;
                                 const float geneticSize =
                                     0.7f + luminumbra::foliage::ExpressGenome(pgenome).max_scale * 0.21f; // ~0.83..1.2
                                 const float effScale = s * maturityScale * geneticSize;
-                                const Luminumbra::Vec3 treeScale(effScale, effScale, effScale);
-                                static const char* const kTreeParts[3] = {
-                                    "data/models/trees/tree_small_02_trunk.lmesh",
-                                    "data/models/trees/tree_small_02_branches.lmesh",
-                                    "data/models/trees/tree_small_02_leaves.lmesh",
-                                };
-                                // When the procgen GROWS this plant (render.plant_procgen, within
-                                // the cap), it REPLACES the baked static-tree model rather than
-                                // overlapping it -- the owner's "stop using baked models" goal.
-                                const bool useProcgenHere = (procgenPlants && procgenCount < kProcgenPlantCap);
-                                if (!useProcgenHere) {
-                                    for (const char* part : kTreeParts) {
+                                // PROGRAMMATIC TREES, NO MODEL: pick a palette entry (by position
+                                // hash) and spawn TWO instanced static-mesh entities at this
+                                // transform — bark (soil/brown material) + leaf (grass/green) — so
+                                // the existing instanced + Track-B LOD + frustum-cull path renders
+                                // the vast forest cheaply. No baked .lmesh anywhere.
+                                if (procgenPlants && g_treePaletteCount > 0) {
+                                    const int pidx = static_cast<int>(
+                                        (static_cast<std::uint64_t>(static_cast<std::int64_t>(treePos.x) * 73856093) ^
+                                         static_cast<std::uint64_t>(static_cast<std::int64_t>(treePos.z) * 19349663)) %
+                                        static_cast<std::uint64_t>(g_treePaletteCount));
+                                    const std::string base = "procgen://tree_" + std::to_string(pidx);
+                                    const Luminumbra::Vec3 treeScale(effScale, effScale, effScale);
+                                    auto emit = [&](const std::string& meshKey, std::uint32_t mat) {
                                         const auto e = reg.create();
                                         auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
                                         tf.position = treePos;
                                         tf.scale = treeScale;
                                         tf.rotation = treeRot;
                                         auto& sm = reg.emplace<Luminumbra::Components::StaticMeshComponent>(e);
-                                        sm.meshPath = part;
-                                        sm.materialId = 3u; // row0 roughness; UV branch overrides albedo/normal
-                                    }
-                                }
-                                // I9-FOLIAGE: store this position's procedural plant; the mesh
-                                // is (re-)baked at the current growth stage by BakeProcgenPlants
-                                // (so a plant can grow sapling->tree over time).
-                                if (useProcgenHere) {
-                                    ProcgenPlantInstance inst;
-                                    inst.worldPos = glm::vec3(treePos.x, treePos.y, treePos.z);
-                                    inst.rot = treeRot;
-                                    inst.effScale = effScale;
-                                    inst.genome = pgenome;
-                                    g_procgenPlants.push_back(inst);
+                                        sm.meshPath = meshKey;
+                                        sm.materialId = mat;
+                                    };
+                                    emit(base + kBarkMatKey, 2u);  // bark -> soil/brown material
+                                    emit(base + kLeafMatKey, 3u);  // leaf -> grass/green material
                                     ++procgenCount;
                                 }
                                 ++placed;

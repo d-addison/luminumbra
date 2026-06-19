@@ -685,6 +685,12 @@ public:
     // the geometry pass. OFF by default (zero GL work) so render is byte-stable.
     PlantProcgenPass* plant_procgen() { return m_plant_procgen_pass.get(); }
     const PlantProcgenPass* plant_procgen() const { return m_plant_procgen_pass.get(); }
+
+    // Vast procedural-tree palette: register a runtime-built mesh under a synthetic key into the
+    // instanced static-mesh cache (forwards to GBufferPass). Lets the world scatter thousands of
+    // instances of a small palette of procedural trees through the existing instanced + LOD path.
+    void register_procgen_mesh(const std::string& key, std::unique_ptr<Mesh> mesh);
+    [[nodiscard]] bool has_procgen_mesh(const std::string& key) const;
     // Render-only accessor for the current sun TRAVEL direction (the lighting
     // pass's m_sun.direction — points away from the sun, i.e. the direction the
     // light travels). The unit direction TO the sun is the negation. Exposed so
