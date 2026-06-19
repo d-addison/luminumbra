@@ -3374,19 +3374,25 @@ int main(int argc, char* argv[]) {
                                     "data/models/trees/tree_small_02_branches.lmesh",
                                     "data/models/trees/tree_small_02_leaves.lmesh",
                                 };
-                                for (const char* part : kTreeParts) {
-                                    const auto e = reg.create();
-                                    auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
-                                    tf.position = treePos;
-                                    tf.scale = treeScale;
-                                    tf.rotation = treeRot;
-                                    auto& sm = reg.emplace<Luminumbra::Components::StaticMeshComponent>(e);
-                                    sm.meshPath = part;
-                                    sm.materialId = 3u; // row0 roughness; UV branch overrides albedo/normal
+                                // When the procgen GROWS this plant (render.plant_procgen, within
+                                // the cap), it REPLACES the baked static-tree model rather than
+                                // overlapping it -- the owner's "stop using baked models" goal.
+                                const bool useProcgenHere = (procgenPlants && procgenCount < kProcgenPlantCap);
+                                if (!useProcgenHere) {
+                                    for (const char* part : kTreeParts) {
+                                        const auto e = reg.create();
+                                        auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
+                                        tf.position = treePos;
+                                        tf.scale = treeScale;
+                                        tf.rotation = treeRot;
+                                        auto& sm = reg.emplace<Luminumbra::Components::StaticMeshComponent>(e);
+                                        sm.meshPath = part;
+                                        sm.materialId = 3u; // row0 roughness; UV branch overrides albedo/normal
+                                    }
                                 }
                                 // I9-FOLIAGE: bake the PROCEDURAL plant for this position
                                 // into the combined render-only mesh (flag-gated, bounded).
-                                if (procgenPlants && procgenCount < kProcgenPlantCap) {
+                                if (useProcgenHere) {
                                     // Mature/Fruiting stage so the plant reads as a grown
                                     // tree (deeper recursion -> fuller canopy). PURE function
                                     // of (genome, stage, atmosphere) -> deterministic geometry.
