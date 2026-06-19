@@ -25,6 +25,7 @@
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/components/PlantComponents.h"   // I9-FOLIAGE
 #include "luminumbra_common/components/CreatureComponents.h" // I9-ECO creature markers
+#include "luminumbra_common/components/CombustionComponents.h" // sim.fire demo markers
 #include "luminumbra_common/systems/PlantGrowthSystem.h"    // I9-FOLIAGE phenotype/genome
 #include "luminumbra_common/systems/PlantProcgen.h"         // I9-FOLIAGE procedural plant geometry (render-only)
 #include "luminumbra_common/systems/WaterSystem.h"
@@ -101,6 +102,7 @@ bool g_timelapse_grow = false;     // grow the procgen plants sapling->tree over
 bool g_timelapse_season = false;   // drift summer->autumn leaf color over the capture
 bool g_timelapse_creatures = false; // spawn predators/prey + render markers (ecology demo)
 bool g_timelapse_calm = false;      // calm (no-predator) grazing herd -> reproduction/evolution demo
+bool g_timelapse_fire = false;      // ignite a patch of combustible foliage -> sim.fire spread demo
 
 // I9-FOLIAGE: stored procgen plant instances so the geometry can be RE-BAKED at a changing
 // growth stage (the live-growth render bridge) -- a plant grows sapling->tree over time.
@@ -234,6 +236,45 @@ void BakeCreatureMarkers(Luminumbra::Rendering::PlantProcgenPass* pp, entt::regi
     ++s_sig;  // creatures move every frame -> always re-upload
     if (verts.empty()) { pp->set_enabled(false); return; }
     pp->set_plants(verts, indices, s_sig);
+    pp->set_enabled(true);
+}
+
+// §4 sim.fire demo: draw each combustible bush as an octahedron coloured by its DETERMINISTIC
+// burn_state (green = unburnt, orange = burning, charcoal = burnt), grounded on the terrain.
+// The FireSpreadSystem (now wired into the tick) drives the colours; this just visualizes them.
+void BakeCombustibleMarkers(Luminumbra::Rendering::PlantProcgenPass* pp, entt::registry& reg,
+                            Luminumbra::Systems::SHIELD_WorldSystem* ws) {
+    if (!pp) return;
+    std::vector<Luminumbra::Rendering::PlantProcgenPass::Vertex> verts;
+    std::vector<std::uint32_t> indices;
+    auto view = reg.view<const Luminumbra::Components::CombustibleComponent,
+                         const Luminumbra::Components::TransformComponent>();
+    constexpr float r = 0.7f, halfH = 0.9f;
+    static const int tri[8][3] = {{0, 2, 3}, {0, 3, 4}, {0, 4, 5}, {0, 5, 2},
+                                  {1, 3, 2}, {1, 4, 3}, {1, 5, 4}, {1, 2, 5}};
+    for (auto e : view) {
+        const auto& tf = view.get<const Luminumbra::Components::TransformComponent>(e);
+        const auto& cb = view.get<const Luminumbra::Components::CombustibleComponent>(e);
+        const float gy = ws ? ws->GetTerrainHeightAt(tf.position.x, tf.position.z) : tf.position.y;
+        const glm::vec3 c(tf.position.x, gy + halfH, tf.position.z);
+        glm::vec3 col(0.15f, 0.55f, 0.12f);  // Unburnt -> green
+        if (cb.state() == Luminumbra::Components::BurnState::Burning) col = glm::vec3(1.0f, 0.42f, 0.05f);
+        else if (cb.state() == Luminumbra::Components::BurnState::Burnt) col = glm::vec3(0.09f, 0.08f, 0.07f);
+        const glm::vec3 P[6] = {c + glm::vec3(0, halfH, 0), c - glm::vec3(0, halfH, 0),
+                                c + glm::vec3(r, 0, 0),      c + glm::vec3(0, 0, r),
+                                c - glm::vec3(r, 0, 0),      c - glm::vec3(0, 0, r)};
+        const std::uint32_t base = static_cast<std::uint32_t>(verts.size());
+        for (const glm::vec3& p : P) {
+            Luminumbra::Rendering::PlantProcgenPass::Vertex v;
+            v.pos = p; v.normal = glm::normalize(p - c); v.uv = glm::vec2(0.0f, 0.0f); v.color = col;
+            verts.push_back(v);
+        }
+        for (const auto& t : tri) { indices.push_back(base + t[0]); indices.push_back(base + t[1]); indices.push_back(base + t[2]); }
+    }
+    static std::uint64_t s_fsig = 5000;
+    ++s_fsig;
+    if (verts.empty()) { pp->set_enabled(false); return; }
+    pp->set_plants(verts, indices, s_fsig);
     pp->set_enabled(true);
 }
 
@@ -1638,6 +1679,7 @@ int main(int argc, char* argv[]) {
     g_timelapse_creatures = HasCommandLineFlag(argc, argv, "--timelapse-creatures");
     g_timelapse_calm = HasCommandLineFlag(argc, argv, "--timelapse-calm");
     if (g_timelapse_calm) g_timelapse_creatures = true;  // calm mode is a creature scenario
+    g_timelapse_fire = HasCommandLineFlag(argc, argv, "--timelapse-fire");
     {
         const std::string ds = GetCommandLineOption(argc, argv, "--timelapse-daystep", "");
         if (!ds.empty()) { try { g_timelapse_daystep = std::stof(ds); } catch (...) {} }
@@ -3471,12 +3513,16 @@ int main(int argc, char* argv[]) {
                     // the herd scattering away from the predator (and the predator weaving
                     // toward the nearest prey) reads as clear motion across the ground, and
                     // nobody runs out of frame as they spread.
-                    const glm::vec3 camPos = g_timelapse_creatures
+                    const glm::vec3 camPos = g_timelapse_fire
+                        ? glm::vec3(sp.x, sp.y + 34.0f, sp.z + 36.0f)  // high look over the burn patch
+                        : g_timelapse_creatures
                         ? glm::vec3(sp.x, sp.y + 30.0f, sp.z + 30.0f)
                         : showcase
                         ? glm::vec3(sp.x, sp.y + 4.0f, sp.z + 22.0f)
                         : glm::vec3(sp.x, sp.y + 7.0f, sp.z + 20.0f);
-                    const glm::vec3 target = g_timelapse_creatures
+                    const glm::vec3 target = g_timelapse_fire
+                        ? glm::vec3(sp.x, sp.y, sp.z)
+                        : g_timelapse_creatures
                         ? glm::vec3(sp.x, sp.y, sp.z - 8.0f)
                         : showcase
                         ? glm::vec3(sp.x, sp.y + 3.0f, sp.z + 10.0f)
@@ -3785,6 +3831,30 @@ int main(int argc, char* argv[]) {
                                 LUMINUMBRA_CORE_INFO("I9-ECO: spawned 1 predator + 7 prey (Jolt avatar bodies) for the ecology timelapse");
                             }
                         }
+                        // sim.fire DEMO: a dry patch of combustible bushes with the centre alight.
+                        // The wired FireSpreadSystem advances the burn each tick (green -> orange
+                        // -> charcoal); BakeCombustibleMarkers visualizes the deterministic state.
+                        if (g_timelapse_fire) {
+                            const int N = 24;
+                            const float sp = 2.0f;
+                            const float x0 = anchor.x - N * sp * 0.5f, z0 = anchor.z - N * sp * 0.5f;
+                            for (int iz = 0; iz < N; ++iz)
+                                for (int ix = 0; ix < N; ++ix) {
+                                    const float cx = x0 + ix * sp, cz = z0 + iz * sp;
+                                    const auto e = reg.create();
+                                    auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
+                                    tf.position = Luminumbra::Vec3(cx, terr(cx, cz), cz);
+                                    auto& cb = reg.emplace<Luminumbra::Components::CombustibleComponent>(e);
+                                    cb.fuel_milli = 1000;
+                                    cb.moisture_milli = 0;       // bone dry -> spreads readily
+                                    cb.ignition_radius = 3.0f;   // reaches orthogonal + diagonal neighbours
+                                    if (ix >= N / 2 - 1 && ix <= N / 2 && iz >= N / 2 - 1 && iz <= N / 2) {
+                                        cb.set_state(Luminumbra::Components::BurnState::Burning);
+                                        cb.burn_ticks_remaining = 160u;  // burns long enough to ignite outward
+                                    }
+                                }
+                            LUMINUMBRA_CORE_INFO("sim.fire: spawned {}x{} combustible patch, centre alight", N, N);
+                        }
                     }
                 }
                 // T-I5b-visual-sweep: run the entire deterministic capture matrix
@@ -3918,6 +3988,10 @@ int main(int argc, char* argv[]) {
                         AttachMissingCreatureBodies(gameSession->GetPhysicsSystem(),
                                                     gameSession->GetRegistry());
                         BakeCreatureMarkers(renderPipeline.plant_procgen(), gameSession->GetRegistry());
+                    }
+                    if (g_timelapse_fire) {
+                        BakeCombustibleMarkers(renderPipeline.plant_procgen(), gameSession->GetRegistry(),
+                                               gameSession->GetWorldSystem());
                     }
                     renderPipeline.render_frame(gameSession->GetRegistry(), *gameSession->GetWorldSystem(), *g_camera, deltaTime, wireframe_mode);
                     if (scenario_config.active() && currentState == GameState::IN_GAME) {
