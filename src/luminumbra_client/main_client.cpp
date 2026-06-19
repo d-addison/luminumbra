@@ -93,7 +93,7 @@ int g_timelapse_ticks = 60;        // sim ticks advanced between captured frames
 float g_timelapse_daystep = 0.0f;  // time-of-day advance per frame [0,1] (shade/sky drift); 0 = leave
 int g_timelapse_captured = 0;
 int g_timelapse_settle = 0;
-float g_timelapse_tod = 0.25f;     // current time-of-day when daystep > 0 (0.25 = morning)
+float g_timelapse_tod = 0.0f;      // starting time-of-day (0 = noon/brightest; drifts by daystep)
 std::filesystem::path g_timelapse_dir;
 static constexpr int kTimelapseSettleFrames = 45;  // let the world stream/settle before frame 0
 std::unique_ptr<Luminumbra::Client::Rml_UIManager> g_uiManager;
@@ -1417,6 +1417,8 @@ int main(int argc, char* argv[]) {
     {
         const std::string ds = GetCommandLineOption(argc, argv, "--timelapse-daystep", "");
         if (!ds.empty()) { try { g_timelapse_daystep = std::stof(ds); } catch (...) {} }
+        const std::string t0 = GetCommandLineOption(argc, argv, "--timelapse-tod", "");
+        if (!t0.empty()) { try { g_timelapse_tod = std::stof(t0); } catch (...) {} }
         const std::string td = GetCommandLineOption(argc, argv, "--timelapse-dir", "");
         g_timelapse_dir = !td.empty()
             ? std::filesystem::path(td)
@@ -1426,7 +1428,9 @@ int main(int argc, char* argv[]) {
     if (g_timelapse_frames > 0) {
         std::error_code _tl_ec;
         std::filesystem::create_directories(g_timelapse_dir, _tl_ec);
-        g_timeScale = 0.0f;  // pause normal ticking; the capture loop advances the sim
+        // NOTE: keep g_timeScale = 1 so the player physics + collision settle each frame (a
+        // frozen physics step makes the avatar fall through the streaming-in ground). The
+        // capture loop adds EXTRA sim ticks for the fast-forward; the player stays grounded.
         LUMINUMBRA_CORE_INFO("Timelapse: {} frames, {} ticks/frame, daystep {:.4f} -> {}",
                              g_timelapse_frames, g_timelapse_ticks, g_timelapse_daystep,
                              g_timelapse_dir.string());
@@ -5244,6 +5248,7 @@ int main(int argc, char* argv[]) {
         // for the next one. Pair with --no-ui so no overlay is baked into the frame.
         if (g_timelapse_frames > 0 && currentState == GameState::IN_GAME && gameSession) {
             if (g_timelapse_settle < kTimelapseSettleFrames) {
+                renderPipeline.set_time_of_day(g_timelapse_tod);  // settle at the start time-of-day
                 ++g_timelapse_settle;  // let the world stream/settle before frame 0
             } else {
                 int vw = 0, vh = 0;
@@ -5263,8 +5268,9 @@ int main(int argc, char* argv[]) {
                                          g_timelapse_captured, g_timelapse_dir.string());
                     glfwSetWindowShouldClose(window, GLFW_TRUE);
                 } else {
-                    // Advance the SIM (weather/wind/creatures/plants) by K fixed ticks for the
-                    // next frame; normal per-frame ticking is paused (g_timeScale = 0).
+                    // Fast-forward the SIM (weather/wind/creatures/plants) by K EXTRA fixed
+                    // ticks for the next frame (on top of the normal per-frame tick). Physics
+                    // runs normally each frame so the player stays grounded.
                     for (int i = 0; i < g_timelapse_ticks; ++i) gameSession->TickSimulation(1.0 / 30.0);
                     if (g_timelapse_daystep > 0.0f) {  // drift the sun/sky for shade-over-time
                         g_timelapse_tod += g_timelapse_daystep;
