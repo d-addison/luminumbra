@@ -153,6 +153,11 @@ public:
     const luminumbra::ai::ScentField* GetScentField() const { return m_scentField.get(); }
     [[nodiscard]] std::string ComputeScentSubHash() const;
 
+    // I9-FOLIAGE: opt-in plant pillar. True if any entity carries a PlantTag (then
+    // the growth system runs each tick). The plant sub-hash folds the id-ordered
+    // integer growth state for run==replay verification; empty when no plants.
+    [[nodiscard]] std::string ComputePlantSubHash() const;
+
     entt::registry& GetRegistry() { return m_registry; }
 
     // --- Fixed-rate simulation (T-I3-4) ---
@@ -201,7 +206,8 @@ private:
     uint32_t StringToSeed(const std::string& seedStr);
     void InitializeScentField(const Vec3& anchor);
     bool HasScentParticipants() const;
-    std::string m_rootPath; 
+    bool HasPlantParticipants() const; // I9-FOLIAGE opt-in gate
+    std::string m_rootPath;
 };
 
 } // namespace Luminumbra::world
