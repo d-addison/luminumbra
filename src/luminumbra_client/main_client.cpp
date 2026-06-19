@@ -24,6 +24,7 @@
 #include "audio/NullAudioManager.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/components/PlantComponents.h"   // I9-FOLIAGE
+#include "luminumbra_common/components/CreatureComponents.h" // I9-ECO creature markers
 #include "luminumbra_common/systems/PlantGrowthSystem.h"    // I9-FOLIAGE phenotype/genome
 #include "luminumbra_common/systems/PlantProcgen.h"         // I9-FOLIAGE procedural plant geometry (render-only)
 #include "luminumbra_common/systems/WaterSystem.h"
@@ -98,6 +99,7 @@ std::filesystem::path g_timelapse_dir;
 static constexpr int kTimelapseSettleFrames = 45;  // let the world stream/settle before frame 0
 bool g_timelapse_grow = false;     // grow the procgen plants sapling->tree over the capture
 bool g_timelapse_season = false;   // drift summer->autumn leaf color over the capture
+bool g_timelapse_creatures = false; // spawn predators/prey + render markers (ecology demo)
 
 // I9-FOLIAGE: stored procgen plant instances so the geometry can be RE-BAKED at a changing
 // growth stage (the live-growth render bridge) -- a plant grows sapling->tree over time.
@@ -163,6 +165,49 @@ void BakeProcgenPlants(Luminumbra::Rendering::PlantProcgenPass* pp, float stageF
         ((static_cast<std::uint64_t>(g_procgenPlants.size()) << 24) ^
          static_cast<std::uint64_t>(stageF * 1000.0f)) | 1ull;
     pp->set_plants(verts, indices, sig);
+    pp->set_enabled(true);
+}
+
+// I9-ECO: rebuild creature markers (small octahedra, red = predator, blue = prey) at the
+// creatures' CURRENT positions and push to the procgen pass. Called per frame so the markers
+// track the brain-driven movement. Render-only.
+void BakeCreatureMarkers(Luminumbra::Rendering::PlantProcgenPass* pp, entt::registry& reg) {
+    if (!pp) return;
+    std::vector<Luminumbra::Rendering::PlantProcgenPass::Vertex> verts;
+    std::vector<std::uint32_t> indices;
+    auto view = reg.view<const Luminumbra::Components::CreatureComponent,
+                         const Luminumbra::Components::TransformComponent>();
+    constexpr float r = 0.7f, halfH = 1.1f;
+    static const int tri[8][3] = {{0, 2, 3}, {0, 3, 4}, {0, 4, 5}, {0, 5, 2},
+                                  {1, 3, 2}, {1, 4, 3}, {1, 5, 4}, {1, 2, 5}};
+    for (auto e : view) {
+        const auto& tf = view.get<const Luminumbra::Components::TransformComponent>(e);
+        const auto& cr = view.get<const Luminumbra::Components::CreatureComponent>(e);
+        const glm::vec3 c(tf.position.x, tf.position.y + halfH, tf.position.z);
+        const glm::vec3 col = cr.is_predator ? glm::vec3(0.75f, 0.12f, 0.12f)
+                                             : glm::vec3(0.18f, 0.5f, 0.85f);
+        const glm::vec3 P[6] = {c + glm::vec3(0, halfH, 0), c - glm::vec3(0, halfH, 0),
+                                c + glm::vec3(r, 0, 0),      c + glm::vec3(0, 0, r),
+                                c - glm::vec3(r, 0, 0),      c - glm::vec3(0, 0, r)};
+        const std::uint32_t base = static_cast<std::uint32_t>(verts.size());
+        for (const glm::vec3& p : P) {
+            Luminumbra::Rendering::PlantProcgenPass::Vertex v;
+            v.pos = p;
+            v.normal = glm::normalize(p - c);
+            v.uv = glm::vec2(0.0f, 0.0f);  // bark flag -> no wind sway, vertex color albedo
+            v.color = col;
+            verts.push_back(v);
+        }
+        for (const auto& t : tri) {
+            indices.push_back(base + t[0]);
+            indices.push_back(base + t[1]);
+            indices.push_back(base + t[2]);
+        }
+    }
+    static std::uint64_t s_sig = 1000;
+    ++s_sig;  // creatures move every frame -> always re-upload
+    if (verts.empty()) { pp->set_enabled(false); return; }
+    pp->set_plants(verts, indices, s_sig);
     pp->set_enabled(true);
 }
 std::unique_ptr<Luminumbra::Client::Rml_UIManager> g_uiManager;
@@ -1487,6 +1532,7 @@ int main(int argc, char* argv[]) {
     if (g_timelapse_grow) g_procgenStageF = 0.0f;  // start as seeds; grow sapling->tree over the capture
     g_timelapse_season = HasCommandLineFlag(argc, argv, "--timelapse-season");
     if (g_timelapse_season) g_season = 0.0f;  // start summer-green; drift to autumn over the capture
+    g_timelapse_creatures = HasCommandLineFlag(argc, argv, "--timelapse-creatures");
     {
         const std::string ds = GetCommandLineOption(argc, argv, "--timelapse-daystep", "");
         if (!ds.empty()) { try { g_timelapse_daystep = std::stof(ds); } catch (...) {} }
@@ -3316,10 +3362,16 @@ int main(int argc, char* argv[]) {
                     // Growth captures frame a tighter view of the hero cluster in front; otherwise
                     // an elevated look over the grove.
                     const bool showcase = g_timelapse_grow || g_timelapse_season;
-                    const glm::vec3 camPos = showcase
+                    // Ecology demo: an elevated, pulled-back look over the field so the
+                    // predator (red) chasing / prey (blue) fleeing reads as motion across it.
+                    const glm::vec3 camPos = g_timelapse_creatures
+                        ? glm::vec3(sp.x, sp.y + 11.0f, sp.z + 26.0f)
+                        : showcase
                         ? glm::vec3(sp.x, sp.y + 4.0f, sp.z + 22.0f)
                         : glm::vec3(sp.x, sp.y + 7.0f, sp.z + 20.0f);
-                    const glm::vec3 target = showcase
+                    const glm::vec3 target = g_timelapse_creatures
+                        ? glm::vec3(sp.x, sp.y + 1.0f, sp.z + 2.0f)
+                        : showcase
                         ? glm::vec3(sp.x, sp.y + 3.0f, sp.z + 10.0f)
                         : glm::vec3(sp.x, sp.y + 2.0f, sp.z);
                     const glm::vec3 d = glm::normalize(target - camPos);
@@ -3437,8 +3489,12 @@ int main(int argc, char* argv[]) {
                         // baked tree models. RENDER-ONLY, never hashed; bounded to keep it
                         // cheap. The genome/maturity reuse the per-position seeded streams
                         // below, so the layout stays deterministic + reproducible.
+                        // The ecology timelapse co-opts the single PlantProcgenPass to draw the
+                        // moving creature markers, so keep procedural plants off in that mode and
+                        // let the baked tree scatter fill the background instead.
                         const bool procgenPlants =
-                            g_systemConfig.enabled(luminumbra::core::SysKey::RenderPlantProcgen);
+                            g_systemConfig.enabled(luminumbra::core::SysKey::RenderPlantProcgen) &&
+                            !g_timelapse_creatures;
                         constexpr int kProcgenPlantCap = 200; // cheap, bounded
                         // Phototropism uses the scene's REAL sun: m_sun.direction is the
                         // light TRAVEL direction (away from the sun), so the unit direction
@@ -3561,6 +3617,26 @@ int main(int argc, char* argv[]) {
                             } else {
                                 pp->set_enabled(false);
                             }
+                        }
+                        // I9-ECO ecology demo: spawn a hungry predator above a row of prey, then
+                        // let the live CreatureBrain tick (GameSession) move them — predator hunts
+                        // toward, prey flee away — and render them as moving octahedron markers via
+                        // the procgen pass (baked per-frame in the loop). Render/demo-only spawn.
+                        if (g_timelapse_creatures) {
+                            auto mkCreature = [&](float ox, float oz, bool predator, float hunger) {
+                                const float cx = anchor.x + ox, cz = anchor.z + oz;
+                                const auto e = reg.create();
+                                auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
+                                tf.position = Luminumbra::Vec3(cx, terr(cx, cz), cz);
+                                auto& cr = reg.emplace<Luminumbra::Components::CreatureComponent>(e);
+                                cr.is_predator = predator;
+                                cr.hunger = hunger;
+                            };
+                            mkCreature(0.0f, 8.0f, /*predator*/ true, /*hunger*/ 0.95f);
+                            for (int i = 0; i < 7; ++i)
+                                mkCreature(-7.0f + static_cast<float>(i) * 2.4f, -2.0f,
+                                           /*predator*/ false, /*hunger*/ 0.3f);
+                            LUMINUMBRA_CORE_INFO("I9-ECO: spawned 1 predator + 7 prey for the ecology timelapse");
                         }
                     }
                 }
@@ -3685,6 +3761,11 @@ int main(int argc, char* argv[]) {
                             renderPipeline.set_season_tick(season_point.season_tick);
                             renderPipeline.set_time_of_day(season_point.time_of_day);
                         }
+                    }
+                    // I9-ECO: re-bake the creature markers from the live (just-ticked) positions
+                    // so the ecology timelapse shows them actually moving each frame.
+                    if (g_timelapse_creatures) {
+                        BakeCreatureMarkers(renderPipeline.plant_procgen(), gameSession->GetRegistry());
                     }
                     renderPipeline.render_frame(gameSession->GetRegistry(), *gameSession->GetWorldSystem(), *g_camera, deltaTime, wireframe_mode);
                     if (scenario_config.active() && currentState == GameState::IN_GAME) {
