@@ -149,6 +149,10 @@ add_executable(common_tests
     sim/photo_session_test.cpp
     sim/predator_pack_test.cpp
     sim/migration_test.cpp
+    sim/thirst_test.cpp
+    sim/scavenging_test.cpp
+    sim/species_codex_test.cpp
+    sim/photo_filters_test.cpp
 )
 
 target_compile_definitions(common_tests PRIVATE
