@@ -171,24 +171,21 @@ void BakeProcgenPlants(Luminumbra::Rendering::PlantProcgenPass* pp, float stageF
 // I9-ECO: rebuild creature markers (small octahedra, red = predator, blue = prey) at the
 // creatures' CURRENT positions and push to the procgen pass. Called per frame so the markers
 // track the brain-driven movement. Render-only.
-void BakeCreatureMarkers(Luminumbra::Rendering::PlantProcgenPass* pp, entt::registry& reg,
-                         Luminumbra::Systems::SHIELD_WorldSystem* ws) {
+void BakeCreatureMarkers(Luminumbra::Rendering::PlantProcgenPass* pp, entt::registry& reg) {
     if (!pp) return;
     std::vector<Luminumbra::Rendering::PlantProcgenPass::Vertex> verts;
     std::vector<std::uint32_t> indices;
     auto view = reg.view<const Luminumbra::Components::CreatureComponent,
                          const Luminumbra::Components::TransformComponent>();
-    constexpr float r = 1.5f, halfH = 2.2f;  // sized to read clearly from the high demo camera
+    constexpr float r = 1.0f, halfH = 1.3f;  // ~matches the Jolt capsule; reads from the demo camera
     static const int tri[8][3] = {{0, 2, 3}, {0, 3, 4}, {0, 4, 5}, {0, 5, 2},
                                   {1, 3, 2}, {1, 4, 3}, {1, 5, 4}, {1, 2, 5}};
     for (auto e : view) {
         const auto& tf = view.get<const Luminumbra::Components::TransformComponent>(e);
         const auto& cr = view.get<const Luminumbra::Components::CreatureComponent>(e);
-        // The deterministic brain moves creatures in X/Z only (terrain-independent, libm-free).
-        // GROUND the marker here at bake time (pure render): sit it on the terrain at its current
-        // X/Z so it walks the surface instead of floating/clipping as the ground rolls.
-        const float groundY = ws ? ws->GetTerrainHeightAt(tf.position.x, tf.position.z) : tf.position.y;
-        const glm::vec3 c(tf.position.x, groundY + halfH, tf.position.z);
+        // The Jolt avatar body owns the position now (gravity/terrain collision), so the
+        // transform's Y is the resolved capsule centre -- draw the marker right there.
+        const glm::vec3 c(tf.position.x, tf.position.y, tf.position.z);
         const glm::vec3 col = cr.is_predator ? glm::vec3(0.75f, 0.12f, 0.12f)
                                              : glm::vec3(0.18f, 0.5f, 0.85f);
         const glm::vec3 P[6] = {c + glm::vec3(0, halfH, 0), c - glm::vec3(0, halfH, 0),
@@ -3630,20 +3627,31 @@ int main(int argc, char* argv[]) {
                         // toward, prey flee away — and render them as moving octahedron markers via
                         // the procgen pass (baked per-frame in the loop). Render/demo-only spawn.
                         if (g_timelapse_creatures) {
+                            // TRUE PHYSICS: each creature gets a deterministic Jolt avatar body
+                            // (CreaturePhysicsComponent). Spawn a little ABOVE the terrain so it
+                            // drops and settles on the surface; the brain's wish velocity then
+                            // drives it across the heightfield (gravity / collision / slopes).
+                            auto* phys = gameSession->GetPhysicsSystem();
                             auto mkCreature = [&](float ox, float oz, bool predator, float hunger) {
                                 const float cx = anchor.x + ox, cz = anchor.z + oz;
+                                const float cy = terr(cx, cz) + 1.5f;  // capsule centre above ground
                                 const auto e = reg.create();
                                 auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
-                                tf.position = Luminumbra::Vec3(cx, terr(cx, cz), cz);
+                                tf.position = Luminumbra::Vec3(cx, cy, cz);
                                 auto& cr = reg.emplace<Luminumbra::Components::CreatureComponent>(e);
                                 cr.is_predator = predator;
                                 cr.hunger = hunger;
+                                if (phys) {
+                                    const std::size_t idx =
+                                        phys->create_avatar_character(glm::vec3(cx, cy, cz));
+                                    reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
+                                }
                             };
                             mkCreature(0.0f, 8.0f, /*predator*/ true, /*hunger*/ 0.95f);
                             for (int i = 0; i < 7; ++i)
                                 mkCreature(-7.0f + static_cast<float>(i) * 2.4f, -2.0f,
                                            /*predator*/ false, /*hunger*/ 0.3f);
-                            LUMINUMBRA_CORE_INFO("I9-ECO: spawned 1 predator + 7 prey for the ecology timelapse");
+                            LUMINUMBRA_CORE_INFO("I9-ECO: spawned 1 predator + 7 prey (Jolt avatar bodies) for the ecology timelapse");
                         }
                     }
                 }
@@ -3772,8 +3780,7 @@ int main(int argc, char* argv[]) {
                     // I9-ECO: re-bake the creature markers from the live (just-ticked) positions
                     // so the ecology timelapse shows them actually moving each frame.
                     if (g_timelapse_creatures) {
-                        BakeCreatureMarkers(renderPipeline.plant_procgen(), gameSession->GetRegistry(),
-                                            gameSession->GetWorldSystem());
+                        BakeCreatureMarkers(renderPipeline.plant_procgen(), gameSession->GetRegistry());
                     }
                     renderPipeline.render_frame(gameSession->GetRegistry(), *gameSession->GetWorldSystem(), *g_camera, deltaTime, wireframe_mode);
                     if (scenario_config.active() && currentState == GameState::IN_GAME) {
