@@ -96,6 +96,62 @@ int g_timelapse_settle = 0;
 float g_timelapse_tod = 0.0f;      // starting time-of-day (0 = noon/brightest; drifts by daystep)
 std::filesystem::path g_timelapse_dir;
 static constexpr int kTimelapseSettleFrames = 45;  // let the world stream/settle before frame 0
+bool g_timelapse_grow = false;     // grow the procgen plants sapling->tree over the capture
+
+// I9-FOLIAGE: stored procgen plant instances so the geometry can be RE-BAKED at a changing
+// growth stage (the live-growth render bridge) -- a plant grows sapling->tree over time.
+struct ProcgenPlantInstance {
+    glm::vec3 worldPos;
+    glm::quat rot;
+    float effScale;
+    Luminumbra::Components::PlantGenomeComponent genome;
+};
+std::vector<ProcgenPlantInstance> g_procgenPlants;
+float g_procgenStageF = 5.0f;          // growth: 0 = Seed .. 5 = Fruiting (drives structure + size)
+float g_procgenLastBakedStage = -2.0f;
+glm::vec3 g_procgenSunDir = glm::vec3(0.0f, 1.0f, 0.0f);
+
+// Re-bake the combined procgen plant mesh at growth `stageF` and push it to the pass. Young
+// stages -> shallower branch recursion + smaller size; deterministic pure functions.
+void BakeProcgenPlants(Luminumbra::Rendering::PlantProcgenPass* pp, float stageF) {
+    if (!pp) return;
+    if (g_procgenPlants.empty()) { pp->set_enabled(false); return; }
+    const int kFruiting = static_cast<int>(Luminumbra::Components::PlantStage::Fruiting);
+    const std::uint8_t stage =
+        static_cast<std::uint8_t>(std::clamp(static_cast<int>(stageF), 0, kFruiting));
+    const float growF = 0.16f + 0.84f * std::clamp(stageF / static_cast<float>(kFruiting), 0.0f, 1.0f);
+    luminumbra::foliage::PlantEnvDir env;
+    env.sun_dir = g_procgenSunDir;
+    env.phototropism = 0.5f;
+    std::vector<Luminumbra::Rendering::PlantProcgenPass::Vertex> verts;
+    std::vector<std::uint32_t> indices;
+    for (const ProcgenPlantInstance& inst : g_procgenPlants) {
+        const luminumbra::foliage::PlantStructure ps =
+            luminumbra::foliage::GeneratePlant(inst.genome, stage, env);
+        const luminumbra::foliage::ProcMesh pm = luminumbra::foliage::TessellatePlant(ps);
+        const glm::mat3 rot = glm::mat3_cast(inst.rot);
+        const float sc = inst.effScale * growF;
+        const std::size_t leafVertStart = pm.vertices.size() >= ps.leaves.size() * 4u
+            ? pm.vertices.size() - ps.leaves.size() * 4u : pm.vertices.size();
+        const std::uint32_t baseVert = static_cast<std::uint32_t>(verts.size());
+        for (std::size_t vi = 0; vi < pm.vertices.size(); ++vi) {
+            const luminumbra::foliage::ProcVertex& src = pm.vertices[vi];
+            Luminumbra::Rendering::PlantProcgenPass::Vertex v;
+            v.pos = rot * (src.pos * sc) + inst.worldPos;
+            v.normal = glm::normalize(rot * src.normal);
+            v.uv = glm::vec2(vi >= leafVertStart ? 1.0f : 0.0f, src.uv.y);
+            verts.push_back(v);
+        }
+        for (std::uint32_t idx : pm.indices) indices.push_back(baseVert + idx);
+    }
+    g_procgenLastBakedStage = stageF;
+    if (verts.empty()) { pp->set_enabled(false); return; }
+    const std::uint64_t sig =
+        ((static_cast<std::uint64_t>(g_procgenPlants.size()) << 24) ^
+         static_cast<std::uint64_t>(stageF * 1000.0f)) | 1ull;
+    pp->set_plants(verts, indices, sig);
+    pp->set_enabled(true);
+}
 std::unique_ptr<Luminumbra::Client::Rml_UIManager> g_uiManager;
 std::unique_ptr<Luminumbra::Client::WorldLoadingVisualizer> g_loading_visualizer;
 
@@ -1414,6 +1470,8 @@ int main(int argc, char* argv[]) {
     // --auto-create-world --auto-enter-world (and --no-ui for a clean frame).
     g_timelapse_frames = GetCommandLineIntOption(argc, argv, "--timelapse-frames", 0);
     g_timelapse_ticks = GetCommandLineIntOption(argc, argv, "--timelapse-ticks", 60);
+    g_timelapse_grow = HasCommandLineFlag(argc, argv, "--timelapse-grow");
+    if (g_timelapse_grow) g_procgenStageF = 0.0f;  // start as seeds; grow sapling->tree over the capture
     {
         const std::string ds = GetCommandLineOption(argc, argv, "--timelapse-daystep", "");
         if (!ds.empty()) { try { g_timelapse_daystep = std::stof(ds); } catch (...) {} }
@@ -3323,9 +3381,8 @@ int main(int argc, char* argv[]) {
                         luminumbra::foliage::PlantEnvDir plantEnv;
                         plantEnv.sun_dir = -glm::normalize(renderPipeline.sun_direction());
                         plantEnv.phototropism = 0.5f;
-                        std::vector<Luminumbra::Rendering::PlantProcgenPass::Vertex> procgenVerts;
-                        std::vector<std::uint32_t> procgenIndices;
                         int procgenCount = 0;
+                        g_procgenPlants.clear();
                         for (float dz = -reach; dz <= reach && placed < kMaxInstances; dz += cell) {
                             for (float dx = -reach; dx <= reach && placed < kMaxInstances; dx += cell) {
                                 // Clustered density: a low-frequency mask makes groves
@@ -3390,67 +3447,31 @@ int main(int argc, char* argv[]) {
                                         sm.materialId = 3u; // row0 roughness; UV branch overrides albedo/normal
                                     }
                                 }
-                                // I9-FOLIAGE: bake the PROCEDURAL plant for this position
-                                // into the combined render-only mesh (flag-gated, bounded).
+                                // I9-FOLIAGE: store this position's procedural plant; the mesh
+                                // is (re-)baked at the current growth stage by BakeProcgenPlants
+                                // (so a plant can grow sapling->tree over time).
                                 if (useProcgenHere) {
-                                    // Mature/Fruiting stage so the plant reads as a grown
-                                    // tree (deeper recursion -> fuller canopy). PURE function
-                                    // of (genome, stage, atmosphere) -> deterministic geometry.
-                                    const std::uint8_t stage = static_cast<std::uint8_t>(
-                                        Luminumbra::Components::PlantStage::Fruiting);
-                                    const luminumbra::foliage::PlantStructure ps =
-                                        luminumbra::foliage::GeneratePlant(pgenome, stage, plantEnv);
-                                    const luminumbra::foliage::ProcMesh pm =
-                                        luminumbra::foliage::TessellatePlant(ps);
-                                    // Transform the LOCAL plant mesh to world space: scale by
-                                    // the same effScale as the visible tree (sim->visual size
-                                    // cue), yaw by treeRot, then translate to treePos.
-                                    const glm::mat3 rot = glm::mat3_cast(treeRot);
-                                    const glm::vec3 worldPos(treePos.x, treePos.y, treePos.z);
-                                    const std::uint32_t baseVert =
-                                        static_cast<std::uint32_t>(procgenVerts.size());
-                                    // Leaf cards are the last (s.leaves.size()*4) vertices the
-                                    // tessellator appends; everything before is branch geometry.
-                                    const std::size_t leafVertStart =
-                                        pm.vertices.size() >= ps.leaves.size() * 4u
-                                            ? pm.vertices.size() - ps.leaves.size() * 4u
-                                            : pm.vertices.size();
-                                    procgenVerts.reserve(procgenVerts.size() + pm.vertices.size());
-                                    for (std::size_t vi = 0; vi < pm.vertices.size(); ++vi) {
-                                        const luminumbra::foliage::ProcVertex& src = pm.vertices[vi];
-                                        Luminumbra::Rendering::PlantProcgenPass::Vertex v;
-                                        v.pos = rot * (src.pos * effScale) + worldPos;
-                                        v.normal = glm::normalize(rot * src.normal);
-                                        // Pack a clean bark/leaf class flag into uv.x for the
-                                        // fragment shader (0 = woody branch, 1 = leaf card).
-                                        v.uv = glm::vec2(vi >= leafVertStart ? 1.0f : 0.0f, src.uv.y);
-                                        procgenVerts.push_back(v);
-                                    }
-                                    procgenIndices.reserve(procgenIndices.size() + pm.indices.size());
-                                    for (std::uint32_t idx : pm.indices) {
-                                        procgenIndices.push_back(baseVert + idx);
-                                    }
+                                    ProcgenPlantInstance inst;
+                                    inst.worldPos = glm::vec3(treePos.x, treePos.y, treePos.z);
+                                    inst.rot = treeRot;
+                                    inst.effScale = effScale;
+                                    inst.genome = pgenome;
+                                    g_procgenPlants.push_back(inst);
                                     ++procgenCount;
                                 }
                                 ++placed;
                             }
                         }
                         LUMINUMBRA_CORE_INFO("T-I8 trees: scattered {} tree instances", placed);
-                        // I9-FOLIAGE: push the combined procedural-plant mesh to the
-                        // render-only pass + enable it (flag-gated). OFF by default ->
-                        // empty buffers, pass stays disabled, render byte-identical.
+                        // I9-FOLIAGE: bake the stored procedural plants at the current growth
+                        // stage + enable the pass (flag-gated). OFF/empty -> pass disabled,
+                        // render byte-identical. Growth re-bakes happen per-frame in the loop.
+                        g_procgenSunDir = plantEnv.sun_dir;
                         if (auto* pp = renderPipeline.plant_procgen()) {
-                            if (procgenPlants && !procgenVerts.empty()) {
-                                // Signature derives from the deterministic scatter (anchor-
-                                // seeded rng) + the baked plant count, so the upload happens
-                                // once and is skipped on unchanged frames.
-                                const std::uint64_t sig =
-                                    (rng ^ (static_cast<std::uint64_t>(procgenCount) << 1)) | 1ull;
-                                pp->set_plants(procgenVerts, procgenIndices, sig);
-                                pp->set_enabled(true);
-                                LUMINUMBRA_CORE_INFO(
-                                    "I9-FOLIAGE: baked {} procedural plants ({} verts, {} indices)",
-                                    procgenCount, procgenVerts.size(), procgenIndices.size());
+                            if (procgenPlants) {
+                                BakeProcgenPlants(pp, g_procgenStageF);
+                                LUMINUMBRA_CORE_INFO("I9-FOLIAGE: {} procedural plants (stage {:.1f})",
+                                                     g_procgenPlants.size(), g_procgenStageF);
                             } else {
                                 pp->set_enabled(false);
                             }
@@ -5282,6 +5303,11 @@ int main(int argc, char* argv[]) {
                         g_timelapse_tod += g_timelapse_daystep;
                         if (g_timelapse_tod >= 1.0f) g_timelapse_tod -= 1.0f;
                         renderPipeline.set_time_of_day(g_timelapse_tod);
+                    }
+                    if (g_timelapse_grow) {  // grow the procgen plants sapling -> tree across the capture
+                        g_procgenStageF = 5.0f * static_cast<float>(g_timelapse_captured) /
+                                          static_cast<float>(std::max(1, g_timelapse_frames - 1));
+                        BakeProcgenPlants(renderPipeline.plant_procgen(), g_procgenStageF);
                     }
                 }
             }
