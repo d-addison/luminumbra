@@ -171,19 +171,24 @@ void BakeProcgenPlants(Luminumbra::Rendering::PlantProcgenPass* pp, float stageF
 // I9-ECO: rebuild creature markers (small octahedra, red = predator, blue = prey) at the
 // creatures' CURRENT positions and push to the procgen pass. Called per frame so the markers
 // track the brain-driven movement. Render-only.
-void BakeCreatureMarkers(Luminumbra::Rendering::PlantProcgenPass* pp, entt::registry& reg) {
+void BakeCreatureMarkers(Luminumbra::Rendering::PlantProcgenPass* pp, entt::registry& reg,
+                         Luminumbra::Systems::SHIELD_WorldSystem* ws) {
     if (!pp) return;
     std::vector<Luminumbra::Rendering::PlantProcgenPass::Vertex> verts;
     std::vector<std::uint32_t> indices;
     auto view = reg.view<const Luminumbra::Components::CreatureComponent,
                          const Luminumbra::Components::TransformComponent>();
-    constexpr float r = 0.7f, halfH = 1.1f;
+    constexpr float r = 1.5f, halfH = 2.2f;  // sized to read clearly from the high demo camera
     static const int tri[8][3] = {{0, 2, 3}, {0, 3, 4}, {0, 4, 5}, {0, 5, 2},
                                   {1, 3, 2}, {1, 4, 3}, {1, 5, 4}, {1, 2, 5}};
     for (auto e : view) {
         const auto& tf = view.get<const Luminumbra::Components::TransformComponent>(e);
         const auto& cr = view.get<const Luminumbra::Components::CreatureComponent>(e);
-        const glm::vec3 c(tf.position.x, tf.position.y + halfH, tf.position.z);
+        // The deterministic brain moves creatures in X/Z only (terrain-independent, libm-free).
+        // GROUND the marker here at bake time (pure render): sit it on the terrain at its current
+        // X/Z so it walks the surface instead of floating/clipping as the ground rolls.
+        const float groundY = ws ? ws->GetTerrainHeightAt(tf.position.x, tf.position.z) : tf.position.y;
+        const glm::vec3 c(tf.position.x, groundY + halfH, tf.position.z);
         const glm::vec3 col = cr.is_predator ? glm::vec3(0.75f, 0.12f, 0.12f)
                                              : glm::vec3(0.18f, 0.5f, 0.85f);
         const glm::vec3 P[6] = {c + glm::vec3(0, halfH, 0), c - glm::vec3(0, halfH, 0),
@@ -3362,15 +3367,17 @@ int main(int argc, char* argv[]) {
                     // Growth captures frame a tighter view of the hero cluster in front; otherwise
                     // an elevated look over the grove.
                     const bool showcase = g_timelapse_grow || g_timelapse_season;
-                    // Ecology demo: an elevated, pulled-back look over the field so the
-                    // predator (red) chasing / prey (blue) fleeing reads as motion across it.
+                    // Ecology demo: a HIGH, wide, near-top-down look over the whole field so
+                    // the herd scattering away from the predator (and the predator weaving
+                    // toward the nearest prey) reads as clear motion across the ground, and
+                    // nobody runs out of frame as they spread.
                     const glm::vec3 camPos = g_timelapse_creatures
-                        ? glm::vec3(sp.x, sp.y + 11.0f, sp.z + 26.0f)
+                        ? glm::vec3(sp.x, sp.y + 30.0f, sp.z + 30.0f)
                         : showcase
                         ? glm::vec3(sp.x, sp.y + 4.0f, sp.z + 22.0f)
                         : glm::vec3(sp.x, sp.y + 7.0f, sp.z + 20.0f);
                     const glm::vec3 target = g_timelapse_creatures
-                        ? glm::vec3(sp.x, sp.y + 1.0f, sp.z + 2.0f)
+                        ? glm::vec3(sp.x, sp.y, sp.z - 8.0f)
                         : showcase
                         ? glm::vec3(sp.x, sp.y + 3.0f, sp.z + 10.0f)
                         : glm::vec3(sp.x, sp.y + 2.0f, sp.z);
@@ -3765,7 +3772,8 @@ int main(int argc, char* argv[]) {
                     // I9-ECO: re-bake the creature markers from the live (just-ticked) positions
                     // so the ecology timelapse shows them actually moving each frame.
                     if (g_timelapse_creatures) {
-                        BakeCreatureMarkers(renderPipeline.plant_procgen(), gameSession->GetRegistry());
+                        BakeCreatureMarkers(renderPipeline.plant_procgen(), gameSession->GetRegistry(),
+                                            gameSession->GetWorldSystem());
                     }
                     renderPipeline.render_frame(gameSession->GetRegistry(), *gameSession->GetWorldSystem(), *g_camera, deltaTime, wireframe_mode);
                     if (scenario_config.active() && currentState == GameState::IN_GAME) {
