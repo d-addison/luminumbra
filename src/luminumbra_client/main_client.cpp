@@ -3155,8 +3155,8 @@ int main(int argc, char* argv[]) {
                         g_camera->Pitch = 0.0f;
                         g_camera->updateCameraVectors();
                     }
-                } else if (g_playerController) {
-                    g_playerController->Update(deltaTime);
+                } else if (g_playerController && !g_show_settings) {
+                    g_playerController->Update(deltaTime);  // movement paused while the menu is open
                 }
                 if (auto* physics = gameSession->GetPhysicsSystem()) physics->update(deltaTime);
                 // T-I3-4: fixed 30 Hz simulation tick (SimulationClock +
@@ -4998,6 +4998,19 @@ int main(int argc, char* argv[]) {
                     if (ImGui::Checkbox("VSync", &us.vsync)) {
                         glfwSwapInterval(us.vsync ? 1 : 0);
                     }
+                    {
+                        // Window mode — applied live via ApplyWindowMode (no-op on capture-pinned runs).
+                        const char* modes[] = {"windowed", "borderless", "fullscreen"};
+                        int cur = 1;  // default borderless
+                        for (int i = 0; i < 3; ++i)
+                            if (us.window_mode == modes[i]) cur = i;
+                        if (ImGui::Combo("Window mode", &cur, modes, 3)) {
+                            us.window_mode = modes[cur];
+                            const WindowMode m = ParseWindowMode(us.window_mode, g_windowState.mode);
+                            ApplyWindowMode(window, g_windowState, m);
+                        }
+                    }
+                    ImGui::TextDisabled("audio volumes are saved but not yet applied");
                     if (ImGui::CollapsingHeader("Controls (keyboard)")) {
                         for (const auto& def : Luminumbra::Client::kInputActionDefs) {
                             const int idx = static_cast<int>(def.action);
@@ -5262,6 +5275,7 @@ void SetGameState(GLFWwindow* window, GameStateManager& gameStateManager, GameSt
 
 void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
     (void)window;
+    if (g_show_settings) return;  // settings menu open (cursor freed) -> don't swing the camera
     if (firstMouse) {
         lastX = (float)xpos;
         lastY = (float)ypos;
