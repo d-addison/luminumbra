@@ -10,6 +10,7 @@
 #include "../ai/TerritorySystem.h"              // §4: home territory + homing bias (+30)
 #include "../ai/PredatorPackSystem.h"           // §4: pack flanking coordination (+31)
 #include "../ai/MigrationSystem.h"              // §4: seasonal migration drive (+32)
+#include "../ai/SteeringConsumer.h"             // §4: blend bias outputs into wish (integration)
 #include "../components/AlarmComponents.h"
 #include "../components/PackHunterComponents.h"
 #include "../components/MigratoryComponents.h"
@@ -210,43 +211,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 luminumbra::ai::RunMateSeekingOnTick(m_registry);
 
                 // 2e-steer: blend the §4 bias systems' outputs (computed last tick, slot 7) into
-                // the wish velocity before the physics bridge applies it: a PACK predator steers
-                // to its FLANK approach point (so the pack surrounds the prey, not all charging
-                // one spot); a migratory creature drifts toward its seasonal target; a territorial
-                // creature is pulled home. Each is opt-in (its component); no component -> untouched.
-                {
-                    namespace Comp = Luminumbra::Components;
-                    namespace dm = ::Luminumbra::DeterministicMath;
-                    auto sv = m_registry.view<Comp::CreatureComponent, Comp::TransformComponent>();
-                    for (auto e : sv) {
-                        auto& cr = sv.get<Comp::CreatureComponent>(e);
-                        if (cr.eaten) continue;
-                        const auto& tf = sv.get<Comp::TransformComponent>(e);
-                        // Pack flanking overrides the predator's wish toward its flank point.
-                        if (cr.is_predator) {
-                            if (auto* pk = m_registry.try_get<Comp::PackHunterComponent>(e);
-                                pk && pk->in_pack) {
-                                const float dx = pk->coord_x - tf.position.x;
-                                const float dz = pk->coord_z - tf.position.z;
-                                const float d = dm::Sqrt(dx * dx + dz * dz);
-                                if (d > 1.0e-3f) {
-                                    const float sp = cr.move_speed * 1.5f / d;
-                                    cr.wish_x = dx * sp;
-                                    cr.wish_z = dz * sp;
-                                }
-                            }
-                        }
-                        // Migration + territory add a gentle homing/seasonal drift on top.
-                        if (auto* mig = m_registry.try_get<Comp::MigratoryComponent>(e)) {
-                            cr.wish_x += mig->wish_x;
-                            cr.wish_z += mig->wish_z;
-                        }
-                        if (auto* tb = m_registry.try_get<Comp::TerritoryBiasComponent>(e)) {
-                            cr.wish_x += tb->wish_x;
-                            cr.wish_z += tb->wish_z;
-                        }
-                    }
-                }
+                // the wish velocity before the physics bridge applies it -- pack flank steer,
+                // migration drift, territory homing. Extracted to ai/SteeringConsumer.h so this
+                // integration layer is unit-tested independently of the producers.
+                luminumbra::ai::RunSteeringConsumerOnTick(m_registry);
 
                 // 2e-phys: TRUE-PHYSICS locomotion bridge. Creatures carrying a
                 // CreaturePhysicsComponent are driven by the deterministic Jolt avatar
