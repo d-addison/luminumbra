@@ -155,6 +155,10 @@ bool ParseHeader(Cursor& c, ReplayHeader& h) {
     std::uint8_t reserved = 0;
     if (!c.GetU8(reserved)) return false;
     if (!c.GetU16(h.version)) return false;
+    // Refuse a version mismatch LOUDLY (the header's binding contract): a future/unknown LREC1
+    // version would have a different record layout, so parsing it under today's assumptions
+    // would silently mis-decode into garbage. Reject instead (Factorio breaks silently; we don't).
+    if (h.version != kLrec1Version) return false;
     if (!c.GetU16(h.tick_rate_hz)) return false;
     std::uint64_t header_tick_count = 0; // read separately (also in trailer)
     if (!c.GetU64(header_tick_count)) return false;

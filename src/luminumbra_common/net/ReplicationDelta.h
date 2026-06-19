@@ -44,11 +44,18 @@ namespace Luminumbra::Net {
     for (const ReplEntityState& e : baseline.entities) {
         if (seen.find(e.entity_id) == seen.end()) delta.removed_ids.push_back(e.entity_id);
     }
+    // ALSO carry the caller-stamped despawns on `current` (explicit/pending removals -- e.g. a
+    // spent transient or a disconnected client's avatar whose id is not in the acked baseline's
+    // replicated set). Without this, delta mode silently drops those removals that full mode
+    // delivers, leaving a stale ghost on the client. Union + dedup keeps full==delta parity.
+    for (std::uint32_t id : current.removed_ids) delta.removed_ids.push_back(id);
     std::sort(delta.entities.begin(), delta.entities.end(),
               [](const ReplEntityState& a, const ReplEntityState& b) {
                   return a.entity_id < b.entity_id;
               });
     std::sort(delta.removed_ids.begin(), delta.removed_ids.end());
+    delta.removed_ids.erase(std::unique(delta.removed_ids.begin(), delta.removed_ids.end()),
+                            delta.removed_ids.end());
     return delta;
 }
 
@@ -66,6 +73,12 @@ namespace Luminumbra::Net {
     full.server_tick = delta.server_tick;
     full.snapshot_seq = delta.snapshot_seq;
     full.acked_usercmd_tick = delta.acked_usercmd_tick;
+    // Surface this frame's despawns on the reconstructed snapshot, exactly as full-snapshot mode
+    // does (ReplicationEndpoint stamps snap.removed_ids). A TRANSIENT removal -- an id never in
+    // the entity set (a spent projectile, a just-joined leaver) -- has no entity to drop, so
+    // removed_ids is the ONLY signal the consumer gets; dropping it here would leave a stale
+    // ghost and break full==delta parity.
+    full.removed_ids = delta.removed_ids;
     full.entities.reserve(set.size());
     for (const auto& [id, e] : set) full.entities.push_back(e);  // map -> ascending id
     return full;
