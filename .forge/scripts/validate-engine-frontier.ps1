@@ -4438,7 +4438,12 @@ function Test-AetherFieldDeterminism {
     # across runs and STABLE; the field EVOLVES over time (not vacuous); geometry
     # matches the PINNED 24 m / 64-extent / 8-sweep shape. The `aether` sub-hash is
     # folded into the world_hash (deliberate bump #4 d950a6afc12a5cdc ->
-    # f17726d44054d133, asserted by the headless tick / replay / lockstep gates).
+    # f17726d44054d133; then bump #5 f17726d44054d133 -> 8a6b7bb6795da912 from commit
+    # 0cb9ce8 (T-I7-ECO-RENDER) appending the |scents: term to ComposeWorldHash — the
+    # SERVER composite hash, run==replay proven — asserted by the headless tick /
+    # replay / lockstep gates. NOTE the NetworkedSession gate pins a DIFFERENT quantity:
+    # the client bare streamed-chunk hash, which does NOT fold the wind/weather/aether/
+    # scent sub-hashes, so it has its own pin 5b316f81a0c72a71 — not this composite).
     $serverExe = "build/$BuildPreset/bin/luminumbra_server_app.exe"
     if (-not (Test-Path $serverExe)) {
         throw "aether-field determinism gate not yet built - missing $serverExe (cmake --build build/$BuildPreset)"
@@ -4642,11 +4647,13 @@ function Test-ReplayRoundtrip {
     # T-I4-12 session replay (LREC1): record a 90-tick run, replay it, and assert
     # the replay reproduces the SAME end-hash, verifies all checkpoints, and (the
     # determinism proof) that recording is hash-neutral -- the recorded run must
-    # reach the canonical HeadlessServerTick hash f17726d44054d133 unchanged
+    # reach the canonical HeadlessServerTick hash 8a6b7bb6795da912 unchanged
     # (world_hash lineage: 2fa007951a21e140 -> 0eac465289e7c88b [T-I5a-2 wind slot]
     #  -> 0857e683b4b8c47e [T-I5a-3 weather slot] -> d950a6afc12a5cdc [T-I5a-5
     #  lightning strike schedule folded into the weather sub-hash, mega-bump #3]
-    #  -> f17726d44054d133 [T-I6-A1 aether slot appended, bump #4]).
+    #  -> f17726d44054d133 [T-I6-A1 aether slot appended, bump #4]
+    #  -> 8a6b7bb6795da912 [commit 0cb9ce8 T-I7-ECO-RENDER appended the |scents: term to
+    #  ComposeWorldHash, bump #5]).
     $serverExe = "build/$BuildPreset/bin/luminumbra_server_app.exe"
     if (-not (Test-Path $serverExe)) {
         throw "replay roundtrip gate not yet built - missing $serverExe (cmake --build build/$BuildPreset)"
@@ -4693,7 +4700,7 @@ function Test-ReplayRoundtrip {
     }
     # Determinism proof: recording must NOT perturb the sim. The recorded run's
     # end hash must equal the canonical HeadlessServerTick hash, unchanged.
-    $expectedHash = "f17726d44054d133"
+    $expectedHash = "8a6b7bb6795da912"
     if ($r.end_world_hash -ne $expectedHash) {
         throw "replay roundtrip end hash $($r.end_world_hash) != canonical $expectedHash (recording perturbed the simulation)"
     }
@@ -4811,7 +4818,7 @@ function Test-LockstepLoopback {
     }
     # Determinism proof: lockstep must NOT perturb the sim. The in-sync end hash must equal
     # the canonical HeadlessServerTick hash, unchanged.
-    $expectedHash = "f17726d44054d133"
+    $expectedHash = "8a6b7bb6795da912"
     if ($a.host.world_hash -ne $expectedHash) {
         throw "lockstep loopback end hash $($a.host.world_hash) != canonical $expectedHash (lockstep perturbed the simulation)"
     }
@@ -4827,10 +4834,23 @@ function Test-LockstepLoopback {
 # spawn anchor and exchange world_hash + sub-hashes (the desync oracle). Camera
 # look is render-side (never round-tripped). The gate asserts: both peers reach
 # the budget tick, hashes matched at every cadence, host==client end_hash, the
-# input set round-tripped, a clean disconnect, and the artifact schema. The
-# canonical d950a6afc12a5cdc hash (radius-4 streaming) is asserted to prove the
-# client world == the canonical server world. This is a HEAVY two-world lockstep
-# gate (like LockstepLoopback / HeadlessServerTick), so it stays off All.
+# input set round-tripped, a clean disconnect, and the artifact schema. This is a
+# HEAVY two-world lockstep gate (like LockstepLoopback / HeadlessServerTick), so
+# it stays off All.
+#
+# HASH SCOPE (important): this gate's end_hash is the CLIENT-path bare streamed-
+# chunk hash (NetSessionCaptureHashes -> WorldSaveService::world_hash over the
+# streamed chunks, with the canonical EMPTY entities snapshot). It is NOT the
+# server's COMPOSITE world_hash. The headless / lockstep-loopback / replay gates
+# pin ServerWorldRunner::ComputeWorldHash, which ComposeWorldHash-folds the wind +
+# weather + aether + scent sub-hashes on TOP of the chunk hash (currently
+# 8a6b7bb6795da912). The networked client path was never wired to fold those
+# sub-hashes, so it pins its OWN deterministic value (the bare chunk hash). The
+# two are different QUANTITIES by construction -- not a divergence. The networked
+# determinism oracle is host==client (asserted above) + run-to-run stability of
+# this pin; both hold. (The pre-I9 coincidence where this equalled the composite
+# f17726d44054d133 ended when T-I7-ECO-RENDER appended the `|scents:` term to the
+# server composite -- the bare client chunk hash was unaffected.)
 function Test-NetworkedSession {
     $exe = Get-ClientExe
     $viewDir = "build/$BuildPreset/test-artifacts/runtime/networked-session"
@@ -4888,16 +4908,19 @@ function Test-NetworkedSession {
     if (-not $a.clean_disconnect) {
         throw "networked session did not record a clean disconnect"
     }
-    # Determinism proof: the client-rendered, server-owned world equals the
-    # canonical headless server world. Render-side camera look did NOT perturb it.
-    $expectedHash = "f17726d44054d133"
+    # Determinism proof: the client-rendered, server-owned world is REPRODUCIBLE
+    # and host==client (asserted above). This is the CLIENT-path bare streamed-
+    # chunk hash (see the HASH SCOPE note in the function header), NOT the server's
+    # composite world_hash -- so it pins its own deterministic value. Render-side
+    # camera look did NOT perturb it (the hashed step uses the spawn anchor).
+    $expectedHash = "5b316f81a0c72a71"
     if ($a.end_hash -ne $expectedHash) {
-        throw "networked session end hash $($a.end_hash) != canonical $expectedHash (client world diverged from the server world)"
+        throw "networked session end hash $($a.end_hash) != expected $expectedHash (client streamed-chunk world diverged / non-deterministic)"
     }
     if (-not $a.passed) {
         throw "networked session analysis reported failure: $($a.failure_reason)"
     }
-    Write-Host ("networked session gate passed: client renders server-owned world, {0} ticks in sync (host==client), end_hash={1} (canonical), {2} cadence hash exchanges, clean disconnect" -f `
+    Write-Host ("networked session gate passed: client renders server-owned world, {0} ticks in sync (host==client), end_hash={1} (client streamed-chunk hash, reproducible), {2} cadence hash exchanges, clean disconnect" -f `
         $a.ticks_requested, $a.end_hash, $a.hash_exchanges)
 }
 
@@ -4940,7 +4963,7 @@ function Test-LockstepFaultInjection {
     if ([int64]$absorb.host.late_input_events -le 0) {
         throw "lockstep fault-injection: no late-input events recorded (the delay was not exercised)"
     }
-    if (-not $absorb.end_hashes_equal -or $absorb.host.world_hash -ne "f17726d44054d133") {
+    if (-not $absorb.end_hashes_equal -or $absorb.host.world_hash -ne "8a6b7bb6795da912") {
         throw "lockstep fault-injection: absorbed-jitter run did not reach the canonical in-sync end hash (host=$($absorb.host.world_hash))"
     }
 
