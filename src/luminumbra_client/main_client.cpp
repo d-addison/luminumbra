@@ -84,6 +84,18 @@ int g_rebindCaptureAction = -1;
 // ticks run per real frame, NOT the tick dt — so determinism + run==replay hold (tick sequence
 // unchanged; per-tick world_hash unchanged). Leveraged by the timelapse capture.
 float g_timeScale = 1.0f;
+// --timelapse capture: dump a frame sequence of the LIVE loaded world while sim-time (and,
+// optionally, the day clock) fast-forward, for tools/timelapse.py. 0 = off. Run with
+// --no-ui for a clean capture. Normal per-frame ticking is paused; the capture loop owns
+// advancement (g_timelapse_ticks fixed ticks per captured frame).
+int g_timelapse_frames = 0;
+int g_timelapse_ticks = 60;        // sim ticks advanced between captured frames (2 s at 30 Hz)
+float g_timelapse_daystep = 0.0f;  // time-of-day advance per frame [0,1] (shade/sky drift); 0 = leave
+int g_timelapse_captured = 0;
+int g_timelapse_settle = 0;
+float g_timelapse_tod = 0.25f;     // current time-of-day when daystep > 0 (0.25 = morning)
+std::filesystem::path g_timelapse_dir;
+static constexpr int kTimelapseSettleFrames = 45;  // let the world stream/settle before frame 0
 std::unique_ptr<Luminumbra::Client::Rml_UIManager> g_uiManager;
 std::unique_ptr<Luminumbra::Client::WorldLoadingVisualizer> g_loading_visualizer;
 
@@ -1397,6 +1409,28 @@ int main(int argc, char* argv[]) {
         runtime_boot_metrics_enabled,
         runtime_boot_frames,
         runtime_boot_output);
+
+    // --timelapse capture mode (docs/timelapse.md). Single-player; pair with
+    // --auto-create-world --auto-enter-world (and --no-ui for a clean frame).
+    g_timelapse_frames = GetCommandLineIntOption(argc, argv, "--timelapse-frames", 0);
+    g_timelapse_ticks = GetCommandLineIntOption(argc, argv, "--timelapse-ticks", 60);
+    {
+        const std::string ds = GetCommandLineOption(argc, argv, "--timelapse-daystep", "");
+        if (!ds.empty()) { try { g_timelapse_daystep = std::stof(ds); } catch (...) {} }
+        const std::string td = GetCommandLineOption(argc, argv, "--timelapse-dir", "");
+        g_timelapse_dir = !td.empty()
+            ? std::filesystem::path(td)
+            : (!scenario_config.artifact_dir.empty() ? scenario_config.artifact_dir / "timelapse"
+                                                     : std::filesystem::path("timelapse"));
+    }
+    if (g_timelapse_frames > 0) {
+        std::error_code _tl_ec;
+        std::filesystem::create_directories(g_timelapse_dir, _tl_ec);
+        g_timeScale = 0.0f;  // pause normal ticking; the capture loop advances the sim
+        LUMINUMBRA_CORE_INFO("Timelapse: {} frames, {} ticks/frame, daystep {:.4f} -> {}",
+                             g_timelapse_frames, g_timelapse_ticks, g_timelapse_daystep,
+                             g_timelapse_dir.string());
+    }
     RuntimeScenarioFrameRecorder lod_ground_frame_recorder(
         scenario_config.lod_ground_smoke(),
         scenario_config.coverage_radius,
@@ -5086,12 +5120,12 @@ int main(int argc, char* argv[]) {
         }
         
         if (currentState == GameState::IN_GAME) {
-            if (g_imgui_enabled && g_playerController) {
+            if (g_imgui_enabled && g_playerController && g_timelapse_frames == 0) {
                 g_playerController->RenderDebugUI();
             }
             // Always-on time-scale indicator (when not real-time) so slow-mo / fast-forward
             // / pause is obvious at a glance.
-            if (g_imgui_enabled && g_timeScale != 1.0f) {
+            if (g_imgui_enabled && g_timeScale != 1.0f && g_timelapse_frames == 0) {
                 ImGui::SetNextWindowPos(ImVec2(10.0f, 60.0f), ImGuiCond_Always);
                 ImGui::SetNextWindowBgAlpha(0.5f);
                 if (ImGui::Begin("##timescale", nullptr,
@@ -5106,7 +5140,7 @@ int main(int argc, char* argv[]) {
             // Settings menu (F8 to toggle; frees the cursor). Render-only; user.* is never
             // hashed. Changes apply live and "Save" persists them to the per-user overlay.
             // The polished RML settings screen (settings.rml) is the follow-on (task #12).
-            if (g_imgui_enabled && g_show_settings && g_camera) {
+            if (g_imgui_enabled && g_show_settings && g_camera && g_timelapse_frames == 0) {
                 ImGui::SetNextWindowSize(ImVec2(340, 0), ImGuiCond_FirstUseEver);
                 if (ImGui::Begin("Settings (F8)")) {
                     luminumbra::core::UserSettings& us = g_systemConfig.user();
@@ -5204,6 +5238,41 @@ int main(int argc, char* argv[]) {
         if (g_imgui_enabled) {
             ImGui::Render();
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        }
+
+        // --timelapse: dump the rendered frame, then fast-forward sim-time (+ the day clock)
+        // for the next one. Pair with --no-ui so no overlay is baked into the frame.
+        if (g_timelapse_frames > 0 && currentState == GameState::IN_GAME && gameSession) {
+            if (g_timelapse_settle < kTimelapseSettleFrames) {
+                ++g_timelapse_settle;  // let the world stream/settle before frame 0
+            } else {
+                int vw = 0, vh = 0;
+                glfwGetFramebufferSize(window, &vw, &vh);
+                if (vw > 0 && vh > 0) {
+                    std::vector<unsigned char> px(
+                        static_cast<std::size_t>(vw) * static_cast<std::size_t>(vh) * 3u);
+                    glReadBuffer(GL_BACK);
+                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                    glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+                    char nm[32];
+                    std::snprintf(nm, sizeof(nm), "frame_%04d.ppm", g_timelapse_captured);
+                    if (WritePixelBufferPpm(g_timelapse_dir / nm, vw, vh, px)) ++g_timelapse_captured;
+                }
+                if (g_timelapse_captured >= g_timelapse_frames) {
+                    LUMINUMBRA_CORE_INFO("Timelapse: captured {} frames -> {}",
+                                         g_timelapse_captured, g_timelapse_dir.string());
+                    glfwSetWindowShouldClose(window, GLFW_TRUE);
+                } else {
+                    // Advance the SIM (weather/wind/creatures/plants) by K fixed ticks for the
+                    // next frame; normal per-frame ticking is paused (g_timeScale = 0).
+                    for (int i = 0; i < g_timelapse_ticks; ++i) gameSession->TickSimulation(1.0 / 30.0);
+                    if (g_timelapse_daystep > 0.0f) {  // drift the sun/sky for shade-over-time
+                        g_timelapse_tod += g_timelapse_daystep;
+                        if (g_timelapse_tod >= 1.0f) g_timelapse_tod -= 1.0f;
+                        renderPipeline.set_time_of_day(g_timelapse_tod);
+                    }
+                }
+            }
         }
 
         glfwSwapBuffers(window);
