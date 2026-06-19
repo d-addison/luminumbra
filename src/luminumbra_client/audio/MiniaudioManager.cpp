@@ -319,6 +319,12 @@ bool MiniaudioManager::SetEventPosition(AudioEventHandle handle, const glm::vec3
     return false;
 }
 
+void MiniaudioManager::SetMasterVolume(float volume) {
+    if (m_engine) {
+        ma_engine_set_volume(m_engine.get(), volume);
+    }
+}
+
 bool MiniaudioManager::SetEventVolume(AudioEventHandle handle, float volume) {
     auto it = m_activeSounds.find(handle);
     if (it != m_activeSounds.end()) {

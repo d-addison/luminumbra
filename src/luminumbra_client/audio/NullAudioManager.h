@@ -102,6 +102,8 @@ public:
         WriteTelemetry("stop_music");
     }
 
+    void SetMasterVolume(float) override {}  // null backend: no-op
+
     bool StopEvent(AudioEventHandle, bool = true) override {
         ++m_stop_event_calls;
         WriteTelemetry("stop_event");

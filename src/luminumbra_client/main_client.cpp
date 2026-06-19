@@ -1514,6 +1514,7 @@ int main(int argc, char* argv[]) {
         audioManager = Luminumbra::Client::CreateAudioManager(root_path_str);
     }
     audioManager->Init();
+    audioManager->SetMasterVolume(g_systemConfig.user().audio_master);  // apply persisted master volume
     audioManager->LoadBank("data/audio/sfx_main.bank.json");
     audioManager->LoadBank("data/audio/music.bank.json");
 
@@ -5010,7 +5011,10 @@ int main(int argc, char* argv[]) {
                             ApplyWindowMode(window, g_windowState, m);
                         }
                     }
-                    ImGui::TextDisabled("audio volumes are saved but not yet applied");
+                    if (ImGui::SliderFloat("Master volume", &us.audio_master, 0.0f, 1.0f, "%.2f")) {
+                        if (audioManager) audioManager->SetMasterVolume(us.audio_master);  // applied live
+                    }
+                    ImGui::TextDisabled("sfx/music volumes saved (need per-bus routing)");
                     if (ImGui::CollapsingHeader("Controls (keyboard)")) {
                         for (const auto& def : Luminumbra::Client::kInputActionDefs) {
                             const int idx = static_cast<int>(def.action);

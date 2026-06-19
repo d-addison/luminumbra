@@ -32,6 +32,9 @@ public:
     virtual void PlayMusic(const AudioEventID& musicEventID) = 0;
     virtual void StopMusic() = 0;
 
+    // Master output gain [0,1] (user.audio.master). Render-only player setting.
+    virtual void SetMasterVolume(float volume) = 0;
+
     virtual bool StopEvent(AudioEventHandle handle, bool immediate = true) = 0;
     virtual bool SetEventPosition(AudioEventHandle handle, const glm::vec3& position) = 0;
     virtual bool SetEventVolume(AudioEventHandle handle, float volume) = 0;
