@@ -421,7 +421,12 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
                 m_instanced_static_mesh_shader->setInt("u_skinnedAlbedoLayer", -1);
                 m_instanced_static_mesh_shader->setInt("u_skinnedNormalLayer", -1);
                 m_instanced_static_mesh_shader->setInt("u_alphaTest", 0);
-                m_instanced_static_mesh_shader->setFloat("u_windStrength", 0.0f);
+                // VAST-FOREST: the procedural LEAF submeshes (no texture lane) still sway in the
+                // wind (height-scaled); bark/trunk + rigid props stay at 0. Keyed on the palette
+                // key suffix so only procgen leaves flutter.
+                const bool isLeaf = group_key.basePath.size() >= 5 &&
+                                    group_key.basePath.rfind("_leaf") == group_key.basePath.size() - 5;
+                m_instanced_static_mesh_shader->setFloat("u_windStrength", isLeaf ? 0.85f : 0.0f);
             }
         }
         // I8: clamp to the VBO capacity so an oversized group can't overrun the
