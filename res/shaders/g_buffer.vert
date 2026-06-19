@@ -24,6 +24,7 @@ out VS_OUT {
     vec3 WorldNormal;  // WORLD SPACE (triplanar blend weights + normal mapping)
     vec2 UV;           // mesh UV (terrain has none -> 0; T-I4-8)
     flat uint MaterialID;
+    vec3 Tint;         // per-instance tint (terrain: white = no-op, matches g_buffer.frag VS_OUT)
 } vs_out;
 
 // Uniforms for transforming the entire chunk mesh
@@ -85,6 +86,7 @@ void main()
     vs_out.Normal = viewNormal;
     vs_out.UV = vec2(0.0); // terrain uses triplanar projection, not mesh UVs
     vs_out.MaterialID = aMaterialID;
+    vs_out.Tint = vec3(1.0);  // terrain is never per-instance tinted
 
     // Far-region radial clip band: positive only between the near and far radii.
     // gl_ClipDistance[0] < 0 -> the GL clips the primitive before rasterization.

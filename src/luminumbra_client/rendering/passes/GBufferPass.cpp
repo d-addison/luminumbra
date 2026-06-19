@@ -10,6 +10,7 @@
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/world/Chunk.h"
 
+#include <cmath> // std::sin/std::floor for the render-only per-instance tint hash
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 
@@ -59,6 +60,11 @@ void GBufferPass::init_instanced_static_mesh(const std::filesystem::path& root_p
     // after frustum culling; glBufferSubData does NOT resize, so the draw path
     // also clamps to kStaticInstanceCapacity.
     glBufferData(GL_ARRAY_BUFFER, kStaticInstanceCapacity * sizeof(glm::mat4), nullptr, GL_DYNAMIC_DRAW);
+    // Per-instance albedo tint VBO (vast-forest genetic/seasonal leaf+bark colour variation).
+    glGenBuffers(1, &m_instanceTintVBO);
+    PassGl::label_gl_object(GL_BUFFER, m_instanceTintVBO, "static_mesh.instance_tints");
+    glBindBuffer(GL_ARRAY_BUFFER, m_instanceTintVBO);
+    glBufferData(GL_ARRAY_BUFFER, kStaticInstanceCapacity * sizeof(glm::vec3), nullptr, GL_DYNAMIC_DRAW);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
@@ -148,6 +154,7 @@ void GBufferPass::destroy_gbuffer() {
 
 void GBufferPass::destroy_instanced_static_mesh() {
     if (m_instanceMatrixVBO) { glDeleteBuffers(1, &m_instanceMatrixVBO); m_instanceMatrixVBO = 0; }
+    if (m_instanceTintVBO) { glDeleteBuffers(1, &m_instanceTintVBO); m_instanceTintVBO = 0; }
 }
 
 void GBufferPass::destroy_skinned_mesh() {
@@ -367,7 +374,15 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
         }
         return {nullptr, basePath};
     };
-    std::map<StaticGroupKey, std::vector<glm::mat4>> visible_instance_groups;
+    // Each visible group carries parallel instance matrices + per-instance albedo tints
+    // (vast-forest leaf/bark colour variation). Tint defaults to white (no-op) for non-trees.
+    struct InstanceBatch { std::vector<glm::mat4> mats; std::vector<glm::vec3> tints; };
+    std::map<StaticGroupKey, InstanceBatch> visible_instance_groups;
+    // Render-only deterministic position hash -> [0,1] (never feeds the sim/world_hash).
+    auto hash01 = [](const glm::vec3& p, float salt) {
+        float s = std::sin(glm::dot(p, glm::vec3(12.9898f, 78.233f, 37.719f)) + salt) * 43758.5453f;
+        return s - std::floor(s);
+    };
     for (auto entity : view) {
         auto const& transform = view.get<const Components::TransformComponent>(entity);
         auto const& mesh_info = view.get<const Components::StaticMeshComponent>(entity);
@@ -394,10 +409,29 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
             glm::mat4 model = glm::translate(glm::mat4(1.0f), transform.position);
             model *= glm::mat4_cast(transform.rotation);
             model = glm::scale(model, transform.scale);
-            visible_instance_groups[{drawPath, mesh_info.meshPath, mesh_info.materialId}].push_back(model);
+            // Per-instance tint: procedural LEAF submeshes get a green->autumn-gold genetic
+            // variation (+ brightness jitter); BARK a subtle warm-brown variation; everything
+            // else white (no-op). Keyed on the palette "_leaf"/"_bark" suffix.
+            glm::vec3 tint(1.0f);
+            const std::string& bp = mesh_info.meshPath;
+            auto endsWith = [&](const char* suf, std::size_t n) {
+                return bp.size() >= n && bp.compare(bp.size() - n, n, suf) == 0;
+            };
+            if (endsWith("_leaf", 5)) {
+                const float h = hash01(transform.position, 0.0f);
+                const float b = 0.8f + 0.45f * hash01(transform.position, 11.3f);
+                tint = glm::mix(glm::vec3(0.72f, 1.18f, 0.55f), glm::vec3(1.30f, 1.02f, 0.40f), h * h) * b;
+            } else if (endsWith("_bark", 5)) {
+                const float h = hash01(transform.position, 5.1f);
+                tint = glm::vec3(0.82f + 0.32f * h, 0.78f + 0.22f * h, 0.72f + 0.20f * h);
+            }
+            auto& batch = visible_instance_groups[{drawPath, mesh_info.meshPath, mesh_info.materialId}];
+            batch.mats.push_back(model);
+            batch.tints.push_back(tint);
         }
     }
-    for (const auto& [group_key, matrices] : visible_instance_groups) {
+    for (const auto& [group_key, batch] : visible_instance_groups) {
+        const std::vector<glm::mat4>& matrices = batch.mats;
         Mesh* mesh = m_meshCache[group_key.drawPath].get();
         if (!mesh || matrices.empty()) continue;
         m_instanced_static_mesh_shader->setInt("u_materialId", static_cast<int>(group_key.materialId));
@@ -433,14 +467,20 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
         // buffer (glBufferSubData does not resize). Trees cap well under this.
         const GLsizei instance_count = static_cast<GLsizei>(
             std::min<std::size_t>(matrices.size(), static_cast<std::size_t>(kStaticInstanceCapacity)));
+        glBindVertexArray(mesh->vao);
         glBindBuffer(GL_ARRAY_BUFFER, m_instanceMatrixVBO);
         glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(instance_count) * sizeof(glm::mat4), matrices.data());
-        glBindVertexArray(mesh->vao);
         for (int i = 0; i < 4; i++) {
             glEnableVertexAttribArray(3 + i);
             glVertexAttribPointer(3 + i, 4, GL_FLOAT, GL_FALSE, sizeof(glm::mat4), (void*)(sizeof(glm::vec4) * i));
             glVertexAttribDivisor(3 + i, 1);
         }
+        // Per-instance albedo tint at location 7 (divisor 1).
+        glBindBuffer(GL_ARRAY_BUFFER, m_instanceTintVBO);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(instance_count) * sizeof(glm::vec3), batch.tints.data());
+        glEnableVertexAttribArray(7);
+        glVertexAttribPointer(7, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
+        glVertexAttribDivisor(7, 1);
         glDrawElementsInstanced(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, 0, instance_count);
         glBindVertexArray(0);
     }

@@ -66,6 +66,7 @@ in VS_OUT {
     vec3 WorldNormal;  // WORLD SPACE
     vec2 UV;           // mesh UV (skinned/static texturing, T-I4-8)
     flat uint MaterialID;
+    vec3 Tint;         // per-instance albedo tint (1,1,1 = no-op)
 } fs_in;
 
 // T-I6 terrain visual-fidelity (BF4/BF1 floor), RENDER-ONLY: the 256px terrain
@@ -321,6 +322,6 @@ void main()
     float material_id_normalized = float(fs_in.MaterialID) / 255.0;
     gNormalMaterial = vec4(encoded_normal * 0.5 + 0.5, 0.0, material_id_normalized);
 
-    gAlbedoRoughness = vec4(albedo, roughness);
+    gAlbedoRoughness = vec4(albedo * fs_in.Tint, roughness);
     gMetallicAO = vec2(metallic, ao);
 }
