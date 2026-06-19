@@ -15,6 +15,7 @@
 #include "rendering/RenderPipeline.h"
 #include "rendering/passes/WaterPass.h"
 #include "rendering/passes/ParticlePass.h" // T-I5a-1: EmitterDescriptor + accessor type
+#include "rendering/passes/PlantProcgenPass.h" // I9-FOLIAGE: render-only procedural plant bake (flag-gated)
 #include "rendering/LightningBolt.h" // T-I5a-5 (B3): deterministic bolt geometry
 #include "rendering/WorldLoadingVisualizer.h"
 #include "ui/Rml_UIManager.h"
@@ -24,6 +25,7 @@
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/components/PlantComponents.h"   // I9-FOLIAGE
 #include "luminumbra_common/systems/PlantGrowthSystem.h"    // I9-FOLIAGE phenotype/genome
+#include "luminumbra_common/systems/PlantProcgen.h"         // I9-FOLIAGE procedural plant geometry (render-only)
 #include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
@@ -3243,6 +3245,27 @@ int main(int argc, char* argv[]) {
                         const float kSlopeMax = 5.5f;     // skip steeper than this
                         const float reach = kReach, cell = kCell, hs = kHeightSample;
                         int placed = 0;
+                        // I9-FOLIAGE (render.plant_procgen, OFF by default): when the flag
+                        // is on, GROW the new PROCEDURAL plants (space-colonization branch
+                        // skeleton -> tessellated bark cylinders + sun-facing leaf cards)
+                        // for a bounded subset of the SAME scatter positions and draw them
+                        // in the deferred geometry pass, instead of relying only on the
+                        // baked tree models. RENDER-ONLY, never hashed; bounded to keep it
+                        // cheap. The genome/maturity reuse the per-position seeded streams
+                        // below, so the layout stays deterministic + reproducible.
+                        const bool procgenPlants =
+                            g_systemConfig.enabled(luminumbra::core::SysKey::RenderPlantProcgen);
+                        constexpr int kProcgenPlantCap = 200; // cheap, bounded
+                        // Phototropism uses the scene's REAL sun: m_sun.direction is the
+                        // light TRAVEL direction (away from the sun), so the unit direction
+                        // TO the sun is its negation. Sampled once at bake time (the bake is
+                        // rebuilt only when the flag toggles / positions change).
+                        luminumbra::foliage::PlantEnvDir plantEnv;
+                        plantEnv.sun_dir = -glm::normalize(renderPipeline.sun_direction());
+                        plantEnv.phototropism = 0.5f;
+                        std::vector<Luminumbra::Rendering::PlantProcgenPass::Vertex> procgenVerts;
+                        std::vector<std::uint32_t> procgenIndices;
+                        int procgenCount = 0;
                         for (float dz = -reach; dz <= reach && placed < kMaxInstances; dz += cell) {
                             for (float dx = -reach; dx <= reach && placed < kMaxInstances; dx += cell) {
                                 // Clustered density: a low-frequency mask makes groves
@@ -3301,10 +3324,71 @@ int main(int argc, char* argv[]) {
                                     sm.meshPath = part;
                                     sm.materialId = 3u; // row0 roughness; UV branch overrides albedo/normal
                                 }
+                                // I9-FOLIAGE: bake the PROCEDURAL plant for this position
+                                // into the combined render-only mesh (flag-gated, bounded).
+                                if (procgenPlants && procgenCount < kProcgenPlantCap) {
+                                    // Mature/Fruiting stage so the plant reads as a grown
+                                    // tree (deeper recursion -> fuller canopy). PURE function
+                                    // of (genome, stage, atmosphere) -> deterministic geometry.
+                                    const std::uint8_t stage = static_cast<std::uint8_t>(
+                                        Luminumbra::Components::PlantStage::Fruiting);
+                                    const luminumbra::foliage::PlantStructure ps =
+                                        luminumbra::foliage::GeneratePlant(pgenome, stage, plantEnv);
+                                    const luminumbra::foliage::ProcMesh pm =
+                                        luminumbra::foliage::TessellatePlant(ps);
+                                    // Transform the LOCAL plant mesh to world space: scale by
+                                    // the same effScale as the visible tree (sim->visual size
+                                    // cue), yaw by treeRot, then translate to treePos.
+                                    const glm::mat3 rot = glm::mat3_cast(treeRot);
+                                    const glm::vec3 worldPos(treePos.x, treePos.y, treePos.z);
+                                    const std::uint32_t baseVert =
+                                        static_cast<std::uint32_t>(procgenVerts.size());
+                                    // Leaf cards are the last (s.leaves.size()*4) vertices the
+                                    // tessellator appends; everything before is branch geometry.
+                                    const std::size_t leafVertStart =
+                                        pm.vertices.size() >= ps.leaves.size() * 4u
+                                            ? pm.vertices.size() - ps.leaves.size() * 4u
+                                            : pm.vertices.size();
+                                    procgenVerts.reserve(procgenVerts.size() + pm.vertices.size());
+                                    for (std::size_t vi = 0; vi < pm.vertices.size(); ++vi) {
+                                        const luminumbra::foliage::ProcVertex& src = pm.vertices[vi];
+                                        Luminumbra::Rendering::PlantProcgenPass::Vertex v;
+                                        v.pos = rot * (src.pos * effScale) + worldPos;
+                                        v.normal = glm::normalize(rot * src.normal);
+                                        // Pack a clean bark/leaf class flag into uv.x for the
+                                        // fragment shader (0 = woody branch, 1 = leaf card).
+                                        v.uv = glm::vec2(vi >= leafVertStart ? 1.0f : 0.0f, src.uv.y);
+                                        procgenVerts.push_back(v);
+                                    }
+                                    procgenIndices.reserve(procgenIndices.size() + pm.indices.size());
+                                    for (std::uint32_t idx : pm.indices) {
+                                        procgenIndices.push_back(baseVert + idx);
+                                    }
+                                    ++procgenCount;
+                                }
                                 ++placed;
                             }
                         }
                         LUMINUMBRA_CORE_INFO("T-I8 trees: scattered {} tree instances", placed);
+                        // I9-FOLIAGE: push the combined procedural-plant mesh to the
+                        // render-only pass + enable it (flag-gated). OFF by default ->
+                        // empty buffers, pass stays disabled, render byte-identical.
+                        if (auto* pp = renderPipeline.plant_procgen()) {
+                            if (procgenPlants && !procgenVerts.empty()) {
+                                // Signature derives from the deterministic scatter (anchor-
+                                // seeded rng) + the baked plant count, so the upload happens
+                                // once and is skipped on unchanged frames.
+                                const std::uint64_t sig =
+                                    (rng ^ (static_cast<std::uint64_t>(procgenCount) << 1)) | 1ull;
+                                pp->set_plants(procgenVerts, procgenIndices, sig);
+                                pp->set_enabled(true);
+                                LUMINUMBRA_CORE_INFO(
+                                    "I9-FOLIAGE: baked {} procedural plants ({} verts, {} indices)",
+                                    procgenCount, procgenVerts.size(), procgenIndices.size());
+                            } else {
+                                pp->set_enabled(false);
+                            }
+                        }
                     }
                 }
                 // T-I5b-visual-sweep: run the entire deterministic capture matrix

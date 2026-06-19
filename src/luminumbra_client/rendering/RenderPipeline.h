@@ -22,7 +22,7 @@
 // Forward declarations
 namespace Luminumbra { class Chunk; class JobSystem; }
 namespace Luminumbra::Systems { class SHIELD_WorldSystem; struct TerrainGenParams; }
-namespace Luminumbra::Rendering { class Shader; class Camera; class ShadowPass; class GBufferPass; class SsaoPass; class LightingPass; class WaterPass; class SkyboxPass; class ParticlePass; class FoliagePass; class FarLodSystem; class ShieldRtFarFieldPass; }
+namespace Luminumbra::Rendering { class Shader; class Camera; class ShadowPass; class GBufferPass; class SsaoPass; class LightingPass; class WaterPass; class SkyboxPass; class ParticlePass; class FoliagePass; class PlantProcgenPass; class FarLodSystem; class ShieldRtFarFieldPass; }
 
 namespace Luminumbra::Rendering {
 
@@ -678,6 +678,19 @@ public:
     FoliagePass* foliage() { return m_foliage_pass.get(); }
     const FoliagePass* foliage() const { return m_foliage_pass.get(); }
 
+    // --- Procedural plants (I9-FOLIAGE, behind render.plant_procgen). ---
+    // The procgen plant pass owns a dedicated VAO/VBO/EBO + a small dedicated
+    // shader writing the deferred G-buffer. The client bakes one combined
+    // world-space plant mesh and pushes it via set_plants; the pass draws it in
+    // the geometry pass. OFF by default (zero GL work) so render is byte-stable.
+    PlantProcgenPass* plant_procgen() { return m_plant_procgen_pass.get(); }
+    const PlantProcgenPass* plant_procgen() const { return m_plant_procgen_pass.get(); }
+    // Render-only accessor for the current sun TRAVEL direction (the lighting
+    // pass's m_sun.direction — points away from the sun, i.e. the direction the
+    // light travels). The unit direction TO the sun is the negation. Exposed so
+    // the procgen plant bake can feed phototropism the scene's real sun.
+    glm::vec3 sun_direction() const { return m_sun.direction; }
+
     // --- Waterfalls (T-I5b-4, W1). ---
     // World-deterministic site detection (river course x steep height drop),
     // computed once per world and CACHED here (camera/frame independent —
@@ -704,6 +717,7 @@ private:
     friend class SkyboxPass;
     friend class ParticlePass;
     friend class FoliagePass;
+    friend class PlantProcgenPass;
 
     struct ChunkMeshSnapshot {
         ChunkID id = 0;
@@ -848,6 +862,7 @@ private:
     std::unique_ptr<SkyboxPass> m_skybox_pass;
     std::unique_ptr<ParticlePass> m_particle_pass; // T-I5a-1
     std::unique_ptr<FoliagePass> m_foliage_pass;   // T-I5b-1
+    std::unique_ptr<PlantProcgenPass> m_plant_procgen_pass; // I9-FOLIAGE (flag-gated)
     std::unique_ptr<ShieldRtFarFieldPass> m_shieldrt_far_pass; // T-I6-A3b (flag-gated)
     JobSystem* m_job_system = nullptr;             // attached pre-startup; forwarded to passes built in startup()
     bool m_far_field_runtime_requested = false;    // --enable-far-field-gpu-raymarch

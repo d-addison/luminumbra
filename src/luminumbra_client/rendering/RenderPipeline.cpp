@@ -32,6 +32,7 @@
 #include "passes/SkyboxPass.h"
 #include "passes/ParticlePass.h"
 #include "passes/FoliagePass.h"
+#include "passes/PlantProcgenPass.h" // I9-FOLIAGE: render-only procedural plants (flag-gated)
 #include "passes/SsaoPass.h"
 #include "passes/WaterPass.h"
 #include <stb_image.h>
@@ -594,7 +595,8 @@ RenderPipeline::RenderPipeline()
       m_water_pass(std::make_unique<WaterPass>()),
       m_skybox_pass(std::make_unique<SkyboxPass>()),
       m_particle_pass(std::make_unique<ParticlePass>()),
-      m_foliage_pass(std::make_unique<FoliagePass>()) {}
+      m_foliage_pass(std::make_unique<FoliagePass>()),
+      m_plant_procgen_pass(std::make_unique<PlantProcgenPass>()) {}
 RenderPipeline::~RenderPipeline() {
     cleanup_gpu_resources();
 }
@@ -619,6 +621,7 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         m_skybox_pass->init_geometry();
         m_particle_pass->init_buffers(); // T-I5a-1: persistent-mapped instance pool
         m_foliage_pass->init_buffers();  // T-I5b-1: persistent-mapped scatter pool
+        m_plant_procgen_pass->init_buffers(); // I9-FOLIAGE: dedicated procgen plant VAO/VBO/EBO
         // T-I6-A3b: experimental SHIELD-RT far-field raymarch pass. Compiled +
         // resident only when the compile-time gate is on (runtime opt-in still
         // required to render); render output is unchanged when the gate is off.
@@ -1675,6 +1678,26 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // 2. GEOMETRY / G-BUFFER PASS
     begin_gpu_pass_timer(GpuTimerPass::GBuffer);
     m_gbuffer_pass->execute(*this, registry, renderable_chunk_snapshots, camera, frustum_planes);
+    // 2a. I9-FOLIAGE (render.plant_procgen): draw the procedural plants into the
+    // SAME G-buffer the static meshes just wrote. The combined world-space mesh
+    // is baked + pushed by the client (set_plants); OFF by default, so this is a
+    // no-op (zero GL work) and the render is byte-identical. Bind the G-buffer
+    // FBO + its 4 draw buffers and depth-test (GL_LESS) so the plants occlude /
+    // are occluded correctly, mirroring the far-field injection below.
+    if (m_plant_procgen_pass && m_plant_procgen_pass->enabled() &&
+        m_plant_procgen_pass->index_count() > 0) {
+        glBindFramebuffer(GL_FRAMEBUFFER, m_gbuffer_pass->gbuffer().fbo_id);
+        const GLenum pp_bufs[4] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1,
+                                   GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3};
+        glDrawBuffers(4, pp_bufs);
+        glViewport(0, 0, m_screen_width, m_screen_height);
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LESS);
+        glDepthMask(GL_TRUE);
+        glDisable(GL_CULL_FACE); // procgen branches/leaves are 2-sided
+        m_plant_procgen_pass->execute(*this, camera);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
     end_gpu_pass_timer(GpuTimerPass::GBuffer);
     glBindVertexArray(0);  // Unbind after gbuffer pass
     glDisable(GL_CULL_FACE);
@@ -1927,6 +1950,7 @@ void RenderPipeline::init_shaders() {
     m_particle_pass->init_shader(m_root_path); // T-I5a-1
     m_foliage_pass->init_shader(m_root_path);  // T-I5b-1
     m_foliage_pass->init_compute(m_root_path); // T-I6 #4: GPU grass scatter (graceful CPU fallback)
+    m_plant_procgen_pass->init_shader(m_root_path); // I9-FOLIAGE: procedural plant G-buffer shader
     m_shadow_pass->init_shader(m_root_path);
     m_ssao_pass->init_shaders(m_root_path);
     m_water_pass->init_shader(m_root_path);
@@ -2093,6 +2117,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_skybox_pass->destroy_geometry();
     if (m_particle_pass) { m_particle_pass->destroy_buffers(); } // T-I5a-1
     if (m_foliage_pass) { m_foliage_pass->destroy_buffers(); m_foliage_pass->destroy_compute(); }   // T-I5b-1 / T-I6 #4
+    if (m_plant_procgen_pass) { m_plant_procgen_pass->destroy_buffers(); } // I9-FOLIAGE
     m_sky_lut.destroy(); // T-I5a-6: release scattering LUT textures
     m_gbuffer_pass->destroy_instanced_static_mesh();
     m_gbuffer_pass->destroy_skinned_mesh();
@@ -2110,6 +2135,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_skybox_pass->reset_shader();
     if (m_particle_pass) { m_particle_pass->reset_shader(); } // T-I5a-1
     if (m_foliage_pass) { m_foliage_pass->reset_shader(); }   // T-I5b-1
+    if (m_plant_procgen_pass) { m_plant_procgen_pass->reset_shader(); } // I9-FOLIAGE
     m_aerial_shader.reset(); // T-I5a-6: aerial-perspective fullscreen shader
     m_waterfall_shader.reset(); // T-I5b-4: waterfall falling-sheet shader
     m_shadow_pass->reset_shader();
