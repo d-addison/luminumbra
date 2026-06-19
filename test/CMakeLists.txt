@@ -129,6 +129,10 @@ add_executable(common_tests
     common/AetherFieldSystem_test.cpp
     common/HydraulicErosion_test.cpp
     common/WorldStreamingState_test.cpp
+    sim/fire_spread_test.cpp
+    sim/soil_nutrient_test.cpp
+    sim/pollination_test.cpp
+    sim/plant_disease_test.cpp
 )
 
 target_compile_definitions(common_tests PRIVATE
