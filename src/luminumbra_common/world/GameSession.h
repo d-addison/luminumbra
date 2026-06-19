@@ -15,6 +15,11 @@ namespace luminumbra::ai {
     class ScentField;
 }
 
+namespace luminumbra::foliage {
+    class SoilGrid;        // soil nutrient field (systems/SoilNutrientSystem.h)
+    class IrrigationGrid;  // soil-moisture field (systems/IrrigationSystem.h)
+}
+
 namespace Luminumbra {
     class JobSystem;
 
@@ -194,6 +199,10 @@ private:
     std::unique_ptr<Systems::WeatherSystem> m_weatherSystem;
     std::unique_ptr<Systems::AetherFieldSystem> m_aetherFieldSystem;
     std::unique_ptr<luminumbra::ai::ScentField> m_scentField;
+    // Living-world substrate fields (lazily created when a participant first opts in, so a world
+    // with none stays byte-identical). Anchored at the spawn point with a fixed grid extent.
+    std::unique_ptr<luminumbra::foliage::SoilGrid> m_soilGrid;
+    std::unique_ptr<luminumbra::foliage::IrrigationGrid> m_irrigationGrid;
     JobSystem* m_jobSystem = nullptr;
 
     // Generate a unique world ID
