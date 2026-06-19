@@ -2,6 +2,8 @@
 add_executable(world_generation_test
     shield/test_world_generation.cpp
     shield/test_meshing_determinism.cpp
+    shield/worldgen_hardening_test.cpp
+    shield/meshing_hardening_test.cpp
 )
 
 target_include_directories(world_generation_test PRIVATE
@@ -32,6 +34,7 @@ target_link_libraries(sdf_gpu_cpu_parity_test PRIVATE
 
 add_executable(worldgen_layer_snapshot_test
     shield/test_worldgen_layer_snapshots.cpp
+    shield/worldgen_layers_hardening_test.cpp
 )
 
 target_compile_definitions(worldgen_layer_snapshot_test PRIVATE
