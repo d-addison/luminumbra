@@ -7,6 +7,7 @@
 
 #include "luminumbra_common/components/PlantComponents.h"
 #include "luminumbra_common/systems/PlantGrowthSystem.h"
+#include "luminumbra_common/systems/FarmingSystem.h"
 #include "luminumbra_common/core/DeterministicRng.h"
 
 #include <vector>
@@ -124,4 +125,55 @@ TEST(PlantGrowth, GrowsThroughStagesAndFavourableEnvironmentGrowsFaster) {
     EXPECT_GT(good.stage, 0u);                          // advanced past Seed
     EXPECT_GE(good.quality, poor.quality);              // harsh env accrues stress -> lower quality
     EXPECT_GT(good.growth_points, 0u);
+}
+
+TEST(Farming, WateringBoostsGrowthInHarshEnv) {
+    DeterministicRng rng = DeterministicRng::seeded(F::kPlantSeedOffset, 77);
+    const auto genome = F::RandomGenome(rng);
+    entt::registry reg;
+    const auto watered = F::PlantSeed(reg, Luminumbra::Vec3(0, 0, 0), genome, 0, 0);
+    const auto dry     = F::PlantSeed(reg, Luminumbra::Vec3(5, 0, 0), genome, 0, 0);
+    F::EnvSampler harsh = [](const C::TransformComponent&) {
+        return F::PlantEnvSample{0.5f, 0.10f, 0.6f, 0.4f}; }; // dry
+    for (std::uint64_t t = 1; t <= 300; ++t) {
+        F::Water(reg.get<C::PlantGrowthComponent>(watered), 200); // tend the watered one
+        F::RunPlantGrowthSystemOnTick(reg, t, harsh);
+    }
+    const auto& w = reg.get<C::PlantGrowthComponent>(watered);
+    const auto& d = reg.get<C::PlantGrowthComponent>(dry);
+    EXPECT_GT(w.growth_points, d.growth_points); // watering boosts growth in a dry cell
+    EXPECT_GE(w.quality, d.quality);             // and eases stress -> higher quality
+}
+
+TEST(Farming, PlantGrowHarvestBreedLoop) {
+    entt::registry reg;
+    DeterministicRng rng = DeterministicRng::seeded(F::kPlantSeedOffset, 88);
+    const auto gA = F::RandomGenome(rng);
+    const auto gB = F::RandomGenome(rng);
+    const auto a = F::PlantSeed(reg, Luminumbra::Vec3(0, 0, 0), gA, 1, 0);
+    const auto b = F::PlantSeed(reg, Luminumbra::Vec3(3, 0, 0), gB, 1, 0);
+    F::EnvSampler ideal = [](const C::TransformComponent&) {
+        return F::PlantEnvSample{0.5f, 0.95f, 0.95f, 0.95f}; };
+    for (std::uint64_t t = 1; t <= 2500; ++t) {
+        F::Water(reg.get<C::PlantGrowthComponent>(a), 120);
+        F::Water(reg.get<C::PlantGrowthComponent>(b), 120);
+        F::RunPlantGrowthSystemOnTick(reg, t, ideal);
+    }
+    const auto& ga = reg.get<C::PlantGrowthComponent>(a);
+    EXPECT_GE(ga.stage, static_cast<std::uint8_t>(C::PlantStage::Mature)); // grew to harvestable
+
+    const auto h = F::Harvest(ga, reg.get<C::PlantGenomeComponent>(a));
+    EXPECT_TRUE(h.harvestable);
+    EXPECT_GT(h.yield, 0.0f);
+    EXPECT_GT(h.seeds, 0);
+
+    // A seedling (Seed stage) is NOT harvestable.
+    const auto seedling = F::PlantSeed(reg, Luminumbra::Vec3(9, 0, 0), gA, 1, 0);
+    EXPECT_FALSE(F::Harvest(reg.get<C::PlantGrowthComponent>(seedling),
+                            reg.get<C::PlantGenomeComponent>(seedling)).harvestable);
+
+    // Cross the two grown parents -> an in-bounds child seed-genome.
+    DeterministicRng brng = DeterministicRng::seeded(F::kPlantSeedOffset, 999, 2);
+    const auto child = F::CrossBreed(gA, gB, brng);
+    for (float v : child.genes) { EXPECT_GE(v, 0.0f); EXPECT_LE(v, 1.0f); }
 }
