@@ -2,6 +2,7 @@
 
 #include "PassGlHelpers.h"
 #include "../FarLodSystem.h"
+#include "../TreeLod.h" // Track-B: per-instance distance LOD mesh selection (render-only)
 #include "core/Log.h"
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
@@ -14,6 +15,8 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <string>
+#include <utility> // std::pair for the LOD-resolve helper return
 
 #include <GLFW/glfw3.h> // I8: glfwGetTime() for render-only tree wind animation
 
@@ -308,15 +311,62 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
     // T-I3-16: groups carry the material id (per-group uniform) so each
     // static mesh renders with its component material instead of the old
     // hardcoded grass id.
-    std::map<std::pair<std::string, std::uint32_t>, std::vector<glm::mat4>> visible_instance_groups;
+    //
+    // Track-B (roadmap pillar B): per-instance distance LOD. Each instance picks a
+    // LOD bucket from its camera distance (SelectTreeLod) and the group is keyed by
+    // the RESOLVED LOD mesh path so distant trees draw a coarser variant. The
+    // material/texture lane is still looked up by the BASE asset path so the LOD
+    // swap never loses the tree's bark/leaf textures. RENDER-ONLY: nothing here is
+    // hashed or fed back into the sim. If a LOD variant file is missing the load
+    // returns null and we transparently fall back to the base (LOD0) mesh, so a
+    // world with no LOD variants is byte-identical to the pre-LOD renderer.
+    const glm::vec3 cameraPos = camera.Position;
+    static const TreeLodConfig kTreeLodCfg = []() {
+        TreeLodConfig c; // data-driven defaults; render.tree_lod.* may override later.
+        return c;
+    }();
+    struct StaticGroupKey {
+        std::string drawPath;   // resolved LOD mesh path actually drawn
+        std::string basePath;   // original asset path for texture/material lookup
+        std::uint32_t materialId = 0;
+        bool operator<(const StaticGroupKey& o) const {
+            if (drawPath != o.drawPath) return drawPath < o.drawPath;
+            if (basePath != o.basePath) return basePath < o.basePath;
+            return materialId < o.materialId;
+        }
+    };
+    // Resolves (loading + caching) the mesh for a candidate path, falling back to
+    // the base LOD0 path if the LOD variant cannot be loaded. Returns the path that
+    // actually resolved so the group is keyed by what is really drawn.
+    auto resolve_mesh = [&](const std::string& candidatePath,
+                            const std::string& basePath) -> std::pair<Mesh*, std::string> {
+        if (m_meshCache.find(candidatePath) == m_meshCache.end()) {
+            std::string full = (pipeline.m_root_path / candidatePath).string();
+            m_meshCache[candidatePath] = MeshLoader::Load(full);
+        }
+        Mesh* m = m_meshCache[candidatePath].get();
+        if (m) return {m, candidatePath};
+        if (candidatePath != basePath) {
+            if (m_meshCache.find(basePath) == m_meshCache.end()) {
+                std::string full = (pipeline.m_root_path / basePath).string();
+                m_meshCache[basePath] = MeshLoader::Load(full);
+            }
+            Mesh* base = m_meshCache[basePath].get();
+            if (base) return {base, basePath};
+        }
+        return {nullptr, basePath};
+    };
+    std::map<StaticGroupKey, std::vector<glm::mat4>> visible_instance_groups;
     for (auto entity : view) {
         auto const& transform = view.get<const Components::TransformComponent>(entity);
         auto const& mesh_info = view.get<const Components::StaticMeshComponent>(entity);
-        if (m_meshCache.find(mesh_info.meshPath) == m_meshCache.end()) {
-            std::string full_mesh_path = (pipeline.m_root_path / mesh_info.meshPath).string();
-            m_meshCache[mesh_info.meshPath] = MeshLoader::Load(full_mesh_path);
-        }
-        Mesh* mesh = m_meshCache[mesh_info.meshPath].get();
+        // Pick the LOD bucket from this instance's distance to the render camera,
+        // then resolve the LOD variant path (with LOD0 fallback). Distance uses the
+        // instance origin; the near/far thresholds make the near field unchanged.
+        const float dist = glm::length(transform.position - cameraPos);
+        const int lod = SelectTreeLod(dist, kTreeLodCfg);
+        const std::string candidatePath = LodMeshPath(mesh_info.meshPath, lod);
+        auto [mesh, drawPath] = resolve_mesh(candidatePath, mesh_info.meshPath);
         if (!mesh) continue;
         glm::vec3 world_sphere_center = transform.position + glm::vec3(mesh->boundingSphere);
         float radius = mesh->boundingSphere.w * glm::max(glm::max(transform.scale.x, transform.scale.y), transform.scale.z);
@@ -333,19 +383,20 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
             glm::mat4 model = glm::translate(glm::mat4(1.0f), transform.position);
             model *= glm::mat4_cast(transform.rotation);
             model = glm::scale(model, transform.scale);
-            visible_instance_groups[{mesh_info.meshPath, mesh_info.materialId}].push_back(model);
+            visible_instance_groups[{drawPath, mesh_info.meshPath, mesh_info.materialId}].push_back(model);
         }
     }
     for (const auto& [group_key, matrices] : visible_instance_groups) {
-        Mesh* mesh = m_meshCache[group_key.first].get();
+        Mesh* mesh = m_meshCache[group_key.drawPath].get();
         if (!mesh || matrices.empty()) continue;
-        m_instanced_static_mesh_shader->setInt("u_materialId", static_cast<int>(group_key.second));
+        m_instanced_static_mesh_shader->setInt("u_materialId", static_cast<int>(group_key.materialId));
         // I8 static-model UV texture lane: if this mesh has registered bark/leaf
         // textures, bind the static-model array to unit 3 and set its albedo/normal
         // layers (+ alpha-test) so g_buffer.frag's UV branch samples the model's own
         // texture by mesh UV instead of the world-projected terrain triplanar.
+        // Track-B: texture lookup uses the BASE path so LOD variants keep textures.
         {
-            const auto* smt = pipeline.static_model_tex(group_key.first);
+            const auto* smt = pipeline.static_model_tex(group_key.basePath);
             glActiveTexture(GL_TEXTURE3);
             if (smt && pipeline.static_model_texture_array() != 0) {
                 glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.static_model_texture_array());
