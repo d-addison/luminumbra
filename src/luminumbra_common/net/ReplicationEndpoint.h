@@ -27,6 +27,7 @@
 
 #include "LockstepSession.h"        // ILockstepTransport
 #include "ReplicationProtocol.h"
+#include "ReplicationDelta.h"        // MakeSnapshotDelta / ApplySnapshotDelta
 
 namespace Luminumbra::Net {
 
@@ -67,6 +68,18 @@ public:
     }
     [[nodiscard]] int aoi_chunk_radius() const { return m_aoi_chunk_radius; }
 
+    // T-I6 P3.1: ack-driven DELTA-vs-acked snapshot compression (the bandwidth win
+    // that makes 20-32+ players affordable). OFF by default -> full snapshots, wire-
+    // identical to P3.0 (the canonical baselines hold). When ON, each client is sent
+    // only what CHANGED since the snapshot it last ACKed (MakeSnapshotDelta), tagged
+    // with that baseline's seq (delta_from_seq); the client reconstructs the full set
+    // (ApplySnapshotDelta). Loss-tolerant by construction: the server keeps deltaing
+    // against the last-ACKED baseline until a newer ack arrives, so a dropped delta is
+    // recovered by the next one (no stranded client). Validate over NetworkSim
+    // (injected loss/jitter) -- the single-PC unblocker for this slice.
+    void SetDeltaCompression(bool on) { m_delta = on; }
+    [[nodiscard]] bool delta_compression() const { return m_delta; }
+
     // Builds a SnapshotMsg from the authoritative entity set and sends it to every
     // connected client (each its own monotonically increasing seq + acked_usercmd_
     // tick). When AOI is enabled the per-client `entities` is filtered to that
@@ -94,8 +107,14 @@ private:
         ILockstepTransport* transport = nullptr;
         UsercmdReceiver inbound;
         std::uint32_t next_snapshot_seq = 1;
+        // T-I6 P3.1: per-client FULL (post-AOI) snapshots we have sent, keyed by seq,
+        // so a delta can be computed against whichever one the client last ACKed.
+        // Pruned below the acked seq (older baselines can never be referenced again).
+        std::map<std::uint32_t, SnapshotMsg> sent_history;
     };
     std::map<std::uint32_t, ClientLink> m_clients; // ordered -> deterministic broadcast order
+    bool m_delta = false;                          // delta-vs-acked compression (off = full snapshots)
+    static constexpr std::size_t kServerHistoryCap = 256; // bound per-client baseline retention
     std::int64_t m_aoi_radius_mm = 0;              // 0 = mm-radius AOI disabled (full set)
     int m_aoi_chunk_radius = -1;                   // < 0 = chunk AOI disabled
     std::int64_t m_aoi_chunk_size_mm = 0;          // chunk edge length (mm) for chunk AOI
@@ -131,6 +150,11 @@ private:
     SnapshotReceiver m_receiver;
     std::uint64_t m_latest_usercmd_tick = 0;
     bool m_sent_any_usercmd = false;
+    // T-I6 P3.1: reconstructed FULL snapshots, keyed by seq, so an incoming delta can
+    // be applied against the exact baseline it was deltaed from (delta_from_seq). A
+    // full snapshot (delta_from_seq==0) is used directly. Bounded; oldest evicted.
+    std::map<std::uint32_t, SnapshotMsg> m_recon_history;
+    static constexpr std::size_t kClientHistoryCap = 256;
 };
 
 // T-I6 P3.3: client-side REMOTE-ENTITY INTERPOLATION (research mp-prediction-

@@ -128,9 +128,39 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
             snap.entities = entities; // AOI disabled, or this client has no avatar yet
         }
         snap.removed_ids = merged_removed;
+
+        // T-I6 P3.1: ack-driven delta-vs-acked compression. `snap` is this client's
+        // FULL post-AOI set at this seq. In delta mode we send only what changed since
+        // the baseline the client last ACKed (MakeSnapshotDelta auto-derives removed_ids
+        // from the baseline diff, so despawns ride along); the FULL set is retained as
+        // the next baseline. With no usable acked baseline yet we send a full snapshot
+        // (delta_from_seq == 0). Off -> wire-identical to P3.0.
+        SnapshotMsg outgoing;
+        if (m_delta) {
+            const std::uint32_t acked = link.inbound.acked_snapshot_seq();
+            const auto base_it = (acked != 0) ? link.sent_history.find(acked)
+                                              : link.sent_history.end();
+            if (base_it != link.sent_history.end()) {
+                outgoing = MakeSnapshotDelta(base_it->second, snap); // header from snap
+                outgoing.delta_from_seq = acked;
+            } else {
+                outgoing = snap;            // no baseline the client can apply -> full
+                outgoing.delta_from_seq = 0;
+            }
+            link.sent_history[snap.snapshot_seq] = snap;
+            for (auto it = link.sent_history.begin(); it != link.sent_history.end();) {
+                if (it->first < acked) it = link.sent_history.erase(it); else ++it;
+            }
+            while (link.sent_history.size() > kServerHistoryCap) {
+                link.sent_history.erase(link.sent_history.begin());
+            }
+        } else {
+            outgoing = snap;                // P3.0 full-snapshot mode
+        }
+
         // State snapshots are UNRELIABLE: a dropped one is superseded by the next
         // (most-recent-wins). Over Steam this maps to k_nSteamNetworkingSend_Unreliable.
-        const std::vector<std::uint8_t> frame = EncodeSnapshot(snap);
+        const std::vector<std::uint8_t> frame = EncodeSnapshot(outgoing);
         m_last_broadcast_total_bytes += frame.size();
         if (frame.size() > m_last_broadcast_max_client_bytes) {
             m_last_broadcast_max_client_bytes = frame.size();
@@ -261,9 +291,27 @@ void ReplicationClient::PumpInbound() {
         ReplMessageType type;
         if (!PeekReplMessageType(frame, type)) continue;
         if (type == ReplMessageType::Snapshot) {
-            SnapshotMsg snap;
-            if (DecodeSnapshot(frame, snap) && m_receiver.Receive(snap)) {
+            // T-I6 P3.1: reconstruct the full set. delta_from_seq==0 is a complete
+            // snapshot (use directly); otherwise apply the delta onto the baseline we
+            // reconstructed at that seq. A missing baseline (e.g. heavy loss pruned it)
+            // means we can't apply this frame -- drop it; the server keeps deltaing
+            // against the last-acked baseline, so a later frame re-converges us.
+            SnapshotMsg raw;
+            if (!DecodeSnapshot(frame, raw)) continue;
+            SnapshotMsg full;
+            if (raw.delta_from_seq == 0) {
+                full = std::move(raw);
+            } else {
+                const auto it = m_recon_history.find(raw.delta_from_seq);
+                if (it == m_recon_history.end()) continue;
+                full = ApplySnapshotDelta(it->second, raw);
+            }
+            if (m_receiver.Receive(full)) {
                 got_new_snapshot = true;
+                m_recon_history[full.snapshot_seq] = full;
+                while (m_recon_history.size() > kClientHistoryCap) {
+                    m_recon_history.erase(m_recon_history.begin());
+                }
             }
         }
         // Usercmd/Ack are client->server only; ignore if echoed back.

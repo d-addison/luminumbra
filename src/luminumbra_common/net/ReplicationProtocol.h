@@ -84,6 +84,13 @@ struct ReplEntityState {
 struct SnapshotMsg {
     std::uint64_t server_tick = 0;
     std::uint32_t snapshot_seq = 0;        // monotonically increasing per receiver
+    // T-I6 P3.1: the baseline seq this snapshot was DELTA-compressed against (Quake3
+    // "deltaFrom"). 0 = a FULL snapshot (no baseline; decode it standalone). When
+    // non-zero the receiver reconstructs the full set via ApplySnapshotDelta against
+    // the snapshot it previously reconstructed at this seq. Ack-driven: the server
+    // only ever deltas against a seq the client has ACKed, so a dropped delta never
+    // strands the client (the next delta is still against the same acked baseline).
+    std::uint32_t delta_from_seq = 0;
     std::uint64_t acked_usercmd_tick = 0;  // newest usercmd the server has folded in (reconciliation)
     std::vector<ReplEntityState> entities;
     // T-I6 P6: explicit RELIABLE despawn -- ids that LEFT this client's set (died /

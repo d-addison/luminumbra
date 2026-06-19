@@ -109,6 +109,7 @@ add_executable(common_tests
     common/PlantProcgen_test.cpp
     common/NetworkSim_test.cpp
     common/ReplicationDelta_test.cpp
+    common/ReplicationDeltaLoop_test.cpp
     common/EngineContracts_test.cpp
     common/FarLodStore_test.cpp
     common/GameSessionHeadlessWorld_test.cpp
