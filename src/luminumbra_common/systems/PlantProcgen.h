@@ -116,4 +116,63 @@ inline std::vector<glm::vec3> GeneratePlantMesh(const Comp::PlantGenomeComponent
     return out;
 }
 
+// --- Rich plant structure: tapered branches (pipe-model radii) + sun-facing leaves ---
+// What a renderer tessellates into cylinders + leaf quads. Still pure/deterministic.
+
+struct PlantBranch {
+    glm::vec3 a;   // base
+    glm::vec3 b;   // tip
+    float radius;  // pipe-model cross-section radius of this segment
+    int depth;
+};
+struct PlantLeaf {
+    glm::vec3 pos;     // attach point (a terminal twig tip)
+    glm::vec3 normal;  // facing direction (toward the sun under phototropism)
+};
+struct PlantStructure {
+    std::vector<PlantBranch> branches;
+    std::vector<PlantLeaf> leaves;
+};
+
+inline constexpr float kTwigRadius = 0.01f;  // terminal-twig base radius (pipe-model leaf unit)
+
+// Post-order recursion: returns this branch's pipe-model radius. Da Vinci / Borchert-Honda
+// pipe model — a parent's cross-section area equals the sum of its children's
+// (r_parent = sqrt(Sum r_child^2)) -> a naturally thick trunk tapering to thin twigs.
+inline float GrowPlant(const glm::vec3& base, const glm::vec3& dir, float len, int depth,
+                       const ProcgenParams& p, const PlantEnvDir& env, PlantStructure& s) {
+    const glm::vec3 tip = base + dir * len;
+    if (depth >= p.max_depth) {
+        s.branches.push_back({base, tip, kTwigRadius, depth});
+        const glm::vec3 leaf_n = (p.photo > 0.0f) ? NormDet(env.sun_dir) : dir;  // leaves face the light
+        s.leaves.push_back({tip, leaf_n});
+        return kTwigRadius;
+    }
+    constexpr float kGoldenAngle = 2.39996323f;
+    float sum_r2 = 0.0f;
+    for (int i = 0; i < p.child_count; ++i) {
+        const float az = kGoldenAngle * static_cast<float>(i + 1) + static_cast<float>(depth) * 0.7f;
+        glm::vec3 cdir = RotateBranch(dir, p.branch_tilt, az);
+        if (p.photo > 0.0f) cdir = NormDet(cdir * (1.0f - p.photo) + env.sun_dir * p.photo);
+        const float rc = GrowPlant(tip, cdir, len * p.length_ratio, depth + 1, p, env, s);
+        sum_r2 += rc * rc;
+    }
+    const float r = dm::Sqrt(sum_r2);  // pipe model
+    s.branches.push_back({base, tip, r, depth});
+    return r;
+}
+
+// PURE: identical (genome, stage, env) -> identical structure on any platform.
+inline PlantStructure GeneratePlant(const Comp::PlantGenomeComponent& genome, std::uint8_t stage,
+                                    const PlantEnvDir& env = {}) {
+    PlantStructure s;
+    const ProcgenParams p = DeriveParams(genome, stage, env);
+    // The whole plant leans toward the sun (atmospheric), at half the per-branch strength.
+    const glm::vec3 up(0.0f, 1.0f, 0.0f);
+    const glm::vec3 trunk_dir =
+        (p.photo > 0.0f) ? NormDet(up * (1.0f - p.photo * 0.5f) + env.sun_dir * (p.photo * 0.5f)) : up;
+    GrowPlant(glm::vec3(0.0f), trunk_dir, p.trunk_len, 0, p, env, s);
+    return s;
+}
+
 }  // namespace luminumbra::foliage

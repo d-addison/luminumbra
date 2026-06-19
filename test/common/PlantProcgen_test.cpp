@@ -3,6 +3,7 @@
 // generator is a pure, libm-free, deterministic function of (genome, stage).
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -111,6 +112,75 @@ TEST(PlantProcgen, PhototropismBendsTowardSun) {
 TEST(PlantProcgen, CrossPlatformGolden) {
     const auto m = GeneratePlantMesh(UniformGenome(0.3f), kFruiting);
     EXPECT_EQ(HashMesh(m), 4793091320348283183ull);  // libm-free determinism golden
+}
+
+// --- Rich structure (pipe-model branches + sun-facing leaves) ---
+
+using luminumbra::foliage::GeneratePlant;
+using luminumbra::foliage::PlantStructure;
+
+std::uint64_t HashStructure(const PlantStructure& s) {
+    std::vector<glm::vec3> flat;
+    for (const auto& br : s.branches) {
+        flat.push_back(br.a);
+        flat.push_back(br.b);
+        flat.push_back(glm::vec3(br.radius, static_cast<float>(br.depth), 0.0f));
+    }
+    for (const auto& lf : s.leaves) {
+        flat.push_back(lf.pos);
+        flat.push_back(lf.normal);
+    }
+    return HashMesh(flat);
+}
+
+// Pipe-model: the trunk (depth 0) is the thickest segment.
+TEST(PlantProcgen, PipeModelTrunkThickest) {
+    const PlantStructure s = GeneratePlant(UniformGenome(0.6f), kFruiting);
+    ASSERT_FALSE(s.branches.empty());
+    float trunk_r = -1.0f, max_r = 0.0f;
+    for (const auto& br : s.branches) {
+        max_r = std::max(max_r, br.radius);
+        if (br.depth == 0) trunk_r = br.radius;
+    }
+    EXPECT_GT(trunk_r, 0.0f);
+    EXPECT_FLOAT_EQ(trunk_r, max_r);  // root carries every leaf's cross-section -> thickest
+}
+
+// Leaves grow with maturity, and a leafier genome grows more of them.
+TEST(PlantProcgen, LeafCountScalesWithStageAndGenome) {
+    const Comp::PlantGenomeComponent g = UniformGenome(0.6f);
+    std::size_t prev = 0;
+    for (std::uint8_t st = 0; st < static_cast<std::uint8_t>(Comp::PlantStage::Count); ++st) {
+        const std::size_t n = GeneratePlant(g, st).leaves.size();
+        EXPECT_GE(n, prev);
+        prev = n;
+    }
+    const std::size_t leafy = GeneratePlant(UniformGenome(0.7f), kFruiting).leaves.size();
+    const std::size_t sparse = GeneratePlant(UniformGenome(0.3f), kFruiting).leaves.size();
+    EXPECT_GT(leafy, sparse);
+}
+
+// ATMOSPHERIC: the whole plant (trunk included) leans toward the sun.
+TEST(PlantProcgen, TrunkLeansTowardSun) {
+    using luminumbra::foliage::PlantEnvDir;
+    const Comp::PlantGenomeComponent g = UniformGenome(0.6f);
+
+    auto trunk_tip_x = [](const PlantStructure& s) {
+        for (const auto& br : s.branches)
+            if (br.depth == 0) return br.b.x;
+        return 0.0f;
+    };
+    const float straight = trunk_tip_x(GeneratePlant(g, kFruiting));  // sun up -> no lean
+    PlantEnvDir leaning;
+    leaning.sun_dir = glm::vec3(0.7071f, 0.7071f, 0.0f);
+    leaning.phototropism = 0.6f;
+    EXPECT_NEAR(straight, 0.0f, 1e-4f);
+    EXPECT_GT(trunk_tip_x(GeneratePlant(g, kFruiting, leaning)), 0.05f);  // leans toward +x sun
+}
+
+TEST(PlantProcgen, StructureGolden) {
+    const std::uint64_t h = HashStructure(GeneratePlant(UniformGenome(0.6f), kFruiting));
+    EXPECT_EQ(h, 776720397350691645ull);  // libm-free determinism golden (branches + leaves)
 }
 
 }  // namespace
