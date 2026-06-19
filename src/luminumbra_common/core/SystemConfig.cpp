@@ -36,6 +36,7 @@ constexpr KeyMeta kKeys[] = {
     {SysKey::SimErosion, Section::Sim, "sim", "erosion"},
     {SysKey::RenderMoonlight, Section::Render, "render", "moonlight"},
     {SysKey::RenderTreeWind, Section::Render, "render", "tree_wind"},
+    {SysKey::RenderPlantProcgen, Section::Render, "render", "plant_procgen"},
 };
 
 constexpr ParamMeta kParams[] = {

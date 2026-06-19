@@ -50,6 +50,7 @@ enum class SysKey : std::uint8_t {
     // --- render.* (render-only; never hashed) ---
     RenderMoonlight,
     RenderTreeWind,
+    RenderPlantProcgen,  // grow scattered plants via the procgen instead of baked models
     Count
 };
 
