@@ -186,8 +186,9 @@ void BakeCreatureMarkers(Luminumbra::Rendering::PlantProcgenPass* pp, entt::regi
         // The Jolt avatar body owns the position now (gravity/terrain collision), so the
         // transform's Y is the resolved capsule centre -- draw the marker right there.
         const glm::vec3 c(tf.position.x, tf.position.y, tf.position.z);
-        const glm::vec3 col = cr.is_predator ? glm::vec3(0.75f, 0.12f, 0.12f)
-                                             : glm::vec3(0.18f, 0.5f, 0.85f);
+        const glm::vec3 col = cr.eaten      ? glm::vec3(0.92f, 0.88f, 0.75f)   // caught -> pale bone carcass
+                              : cr.is_predator ? glm::vec3(0.75f, 0.12f, 0.12f)  // predator -> red
+                                               : glm::vec3(0.18f, 0.5f, 0.85f);  // prey -> blue
         const glm::vec3 P[6] = {c + glm::vec3(0, halfH, 0), c - glm::vec3(0, halfH, 0),
                                 c + glm::vec3(r, 0, 0),      c + glm::vec3(0, 0, r),
                                 c - glm::vec3(r, 0, 0),      c - glm::vec3(0, 0, r)};
@@ -3641,6 +3642,9 @@ int main(int argc, char* argv[]) {
                                 auto& cr = reg.emplace<Luminumbra::Components::CreatureComponent>(e);
                                 cr.is_predator = predator;
                                 cr.hunger = hunger;
+                                // The predator is a bit faster than the herd so it can run down a
+                                // straggler (otherwise equal flee/hunt speeds never close the gap).
+                                cr.move_speed = predator ? 4.2f : 3.0f;
                                 if (phys) {
                                     const std::size_t idx =
                                         phys->create_avatar_character(glm::vec3(cx, cy, cz));

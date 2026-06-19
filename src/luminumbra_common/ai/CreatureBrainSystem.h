@@ -36,6 +36,9 @@ struct CreatureBrainStats {
 // How strongly herd flocking biases the action heading (unit-scale; the action dir is also
 // unit, so this is a fractional blend that keeps flee/hunt dominant).
 inline constexpr float kHerdWeight = 0.8f;
+// Predator catch reach (m) and how much catching a prey sates the predator's hunger.
+inline constexpr float kCatchRadius = 2.2f;
+inline constexpr float kCatchSatiation = 0.8f;
 
 // Advance every CreatureComponent by one fixed tick. Pure function of registry state + dt.
 inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, float dt) {
@@ -53,32 +56,52 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
         entt::entity e;
         float x, z;
         bool predator;
+        bool eaten;
     };
     std::vector<Snap> snap;
     snap.reserve(ents.size());
     for (auto e : ents) {
         const auto& tf = view.get<Comp::TransformComponent>(e);
-        snap.push_back({e, tf.position.x, tf.position.z, view.get<Comp::CreatureComponent>(e).is_predator});
+        const auto& c = view.get<Comp::CreatureComponent>(e);
+        snap.push_back({e, tf.position.x, tf.position.z, c.is_predator, c.eaten});
     }
 
     for (auto e : ents) {
         auto& tf = view.get<Comp::TransformComponent>(e);
         auto& cr = view.get<Comp::CreatureComponent>(e);
+
+        // A caught carcass is inert: it neither decides nor moves (physics still grounds it).
+        if (cr.eaten) {
+            cr.wish_x = 0.0f;
+            cr.wish_z = 0.0f;
+            ++stats.updated;
+            continue;
+        }
         const float sx = tf.position.x, sz = tf.position.z;
 
-        // Nearest OPPOSITE-role creature: prey -> nearest predator (threat); predator -> prey (food).
+        // Nearest LIVE opposite-role creature: prey -> nearest predator (threat); predator ->
+        // nearest live prey (food). Carcasses are skipped so a predator moves on to live prey.
         float bestDist = 1.0e9f, tx = sx, tz = sz;
         bool found = false;
+        entt::entity te = entt::null;
         for (const Snap& o : snap) {
-            if (o.e == e || o.predator == cr.is_predator) continue;
+            if (o.e == e || o.predator == cr.is_predator || o.eaten) continue;
             const float dx = o.x - sx, dz = o.z - sz;
             const float d = dm::Sqrt(dx * dx + dz * dz);
             if (d < bestDist) {
                 bestDist = d;
                 tx = o.x;
                 tz = o.z;
+                te = o.e;
                 found = true;
             }
+        }
+
+        // Catch: a predator within reach of its nearest live prey EATS it -- the prey becomes
+        // a carcass and the predator's hunger is sated. Marking is idempotent + id-ordered.
+        if (cr.is_predator && found && bestDist < kCatchRadius && reg.valid(te)) {
+            reg.get<Comp::CreatureComponent>(te).eaten = true;
+            cr.hunger = utility_clamp01(cr.hunger - kCatchSatiation);
         }
 
         CreatureSenses s;
