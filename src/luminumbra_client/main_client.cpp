@@ -97,6 +97,7 @@ float g_timelapse_tod = 0.0f;      // starting time-of-day (0 = noon/brightest; 
 std::filesystem::path g_timelapse_dir;
 static constexpr int kTimelapseSettleFrames = 45;  // let the world stream/settle before frame 0
 bool g_timelapse_grow = false;     // grow the procgen plants sapling->tree over the capture
+bool g_timelapse_season = false;   // drift summer->autumn leaf color over the capture
 
 // I9-FOLIAGE: stored procgen plant instances so the geometry can be RE-BAKED at a changing
 // growth stage (the live-growth render bridge) -- a plant grows sapling->tree over time.
@@ -1484,6 +1485,8 @@ int main(int argc, char* argv[]) {
     g_timelapse_ticks = GetCommandLineIntOption(argc, argv, "--timelapse-ticks", 60);
     g_timelapse_grow = HasCommandLineFlag(argc, argv, "--timelapse-grow");
     if (g_timelapse_grow) g_procgenStageF = 0.0f;  // start as seeds; grow sapling->tree over the capture
+    g_timelapse_season = HasCommandLineFlag(argc, argv, "--timelapse-season");
+    if (g_timelapse_season) g_season = 0.0f;  // start summer-green; drift to autumn over the capture
     {
         const std::string ds = GetCommandLineOption(argc, argv, "--timelapse-daystep", "");
         if (!ds.empty()) { try { g_timelapse_daystep = std::stof(ds); } catch (...) {} }
@@ -3312,10 +3315,11 @@ int main(int argc, char* argv[]) {
                     const auto sp = gameSession->GetMetadata().spawnPoint;
                     // Growth captures frame a tighter view of the hero cluster in front; otherwise
                     // an elevated look over the grove.
-                    const glm::vec3 camPos = g_timelapse_grow
+                    const bool showcase = g_timelapse_grow || g_timelapse_season;
+                    const glm::vec3 camPos = showcase
                         ? glm::vec3(sp.x, sp.y + 4.0f, sp.z + 22.0f)
                         : glm::vec3(sp.x, sp.y + 7.0f, sp.z + 20.0f);
-                    const glm::vec3 target = g_timelapse_grow
+                    const glm::vec3 target = showcase
                         ? glm::vec3(sp.x, sp.y + 3.0f, sp.z + 10.0f)
                         : glm::vec3(sp.x, sp.y + 2.0f, sp.z);
                     const glm::vec3 d = glm::normalize(target - camPos);
@@ -3528,7 +3532,7 @@ int main(int argc, char* argv[]) {
                         // Growth showcase: a cluster of bigger HERO plants right in front of the
                         // fixed grow-mode camera, so the foreground is dominated by plants visibly
                         // growing (the scattered grove alone reads as distant background).
-                        if (g_timelapse_grow && procgenPlants) {
+                        if ((g_timelapse_grow || g_timelapse_season) && procgenPlants) {
                             const glm::vec3 heroOffsets[] = {
                                 {-5.0f, 0.0f, 9.0f}, {0.0f, 0.0f, 12.0f}, {5.0f, 0.0f, 8.0f},
                                 {-2.5f, 0.0f, 6.0f}, {2.5f, 0.0f, 6.5f}};
@@ -5386,9 +5390,15 @@ int main(int argc, char* argv[]) {
                         if (g_timelapse_tod >= 1.0f) g_timelapse_tod -= 1.0f;
                         renderPipeline.set_time_of_day(g_timelapse_tod);
                     }
-                    if (g_timelapse_grow) {  // grow the procgen plants sapling -> tree across the capture
-                        g_procgenStageF = 5.0f * static_cast<float>(g_timelapse_captured) /
-                                          static_cast<float>(std::max(1, g_timelapse_frames - 1));
+                    if (g_timelapse_season) {  // drift summer -> autumn leaf color across the capture
+                        g_season = static_cast<float>(g_timelapse_captured) /
+                                   static_cast<float>(std::max(1, g_timelapse_frames - 1));
+                    }
+                    if (g_timelapse_grow || g_timelapse_season) {  // re-bake on stage/season change
+                        if (g_timelapse_grow) {
+                            g_procgenStageF = 5.0f * static_cast<float>(g_timelapse_captured) /
+                                              static_cast<float>(std::max(1, g_timelapse_frames - 1));
+                        }
                         BakeProcgenPlants(renderPipeline.plant_procgen(), g_procgenStageF);
                     }
                 }

@@ -20,10 +20,22 @@ out VS_OUT {
 uniform mat4 projection;
 uniform mat4 view;
 uniform mat3 u_normalViewMatrix; // mat3(view): world normal -> view normal
+uniform float u_time = 0.0;          // render wall-clock; never feeds the sim
+uniform float u_windStrength = 0.0;  // 0 = still
 
 void main()
 {
-    vec4 viewPos = view * vec4(aPos, 1.0);
+    // Render-only WIND SWAY: only the leaf cards (aUV.x == 1) sway; the woody trunk/branches
+    // stay rigid. Two octaves for a natural flutter. Mirrors instanced_mesh.vert.
+    vec3 worldPos = aPos;
+    if (u_windStrength > 0.0) {
+        float phase = worldPos.x * 0.35 + worldPos.z * 0.27;
+        float sway = (sin(u_time * 1.3 + phase) * 0.12 + sin(u_time * 2.9 + phase * 1.7) * 0.05)
+                     * u_windStrength * aUV.x;
+        worldPos.x += sway;
+        worldPos.z += sway * 0.6;
+    }
+    vec4 viewPos = view * vec4(worldPos, 1.0);
     vs_out.FragPos = vec3(viewPos);
     vs_out.Normal = normalize(u_normalViewMatrix * aNormal);
     vs_out.UV = aUV;
