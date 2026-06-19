@@ -34,10 +34,11 @@ namespace luminumbra::game {
 
 namespace DM = ::Luminumbra::DeterministicMath;
 
-// Reserved seed-stream offset for the light-tools track (registry: wind+11 ..
-// photo-scoring+24, light-tools within the 11..30 band). The scorer is PURE (no
-// rng), so this is recorded for collision-avoidance but intentionally never consumed.
-inline constexpr std::uint64_t kLightToolsSeedOffset = 25ull;
+// Reserved seed-stream offset for the light-tools track (registry: ... photo-scoring+24,
+// weather-events+25, ..., decomposition+27, light-tools+28 — the free slot between
+// decomposition+27 and circadian+29). The scorer is PURE (no rng), so this is recorded for
+// collision-avoidance but intentionally never consumed.
+inline constexpr std::uint64_t kLightToolsSeedOffset = 28ull;
 
 // ---------------------------------------------------------------------------
 // Value types.

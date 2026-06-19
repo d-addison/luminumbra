@@ -139,6 +139,12 @@ inline int StarsForTotal(float total) {
 inline ShotVerdict EvaluateShot(const ShotInput& in) {
     ShotVerdict v;
 
+    // (0) No subject in frame -> a zero verdict (0 stars). The optical axes
+    // (ExposureQuality / SubjectIsolation) depend only on lens + scene facts and are
+    // nonzero even for an empty frame, so without this gate a photo of nothing could
+    // still earn a star. A photograph with no subject is not a photograph.
+    if (in.composition.subjects.empty()) return v;
+
     // (1) Rubric: grade what is IN the frame.
     const ::luminumbra::photo::PhotoScore rubric =
         ::luminumbra::photo::ScorePhoto(in.composition);

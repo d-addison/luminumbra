@@ -92,7 +92,7 @@ inline constexpr float kHarshForage = 0.50f;
 // ---------------------------------------------------------------------------
 // Pure float helpers (no libm).
 // ---------------------------------------------------------------------------
-inline float Clamp01(float v) {
+inline float DifficultyClamp01(float v) {
     if (v < 0.0f) return 0.0f;
     if (v > 1.0f) return 1.0f;
     return v;
@@ -102,7 +102,7 @@ inline float Clamp01(float v) {
 // arithmetic (no libm). Monotonically increasing on [0,1] with zero slope at both
 // ends, giving a smooth S-curve. s(0)=0, s(1)=1, s strictly increasing in between.
 inline float SmoothStep01(float t) {
-    const float u = Clamp01(t);
+    const float u = DifficultyClamp01(t);
     return u * u * (3.0f - 2.0f * u);
 }
 
@@ -122,7 +122,7 @@ inline float SmoothBand(float a, float b, float t) {
 // than extrapolating to nonsense.
 // ---------------------------------------------------------------------------
 inline DifficultyParams DifficultyAt(float difficulty01) {
-    const float t = Clamp01(difficulty01);
+    const float t = DifficultyClamp01(difficulty01);
     DifficultyParams p;
     p.growth_speed      = SmoothBand(kRelaxGrowth,   kHarshGrowth,   t);
     p.mutation_rate     = SmoothBand(kRelaxMutation, kHarshMutation, t);

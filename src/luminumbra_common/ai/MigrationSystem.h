@@ -20,8 +20,9 @@
 //   * DRIVE (transition-peaking): migrations happen WHEN the seasons turn, not at the solstices.
 //     The four transition phases are season01 = 0, 0.25, 0.5, 0.75 (the quarter boundaries); the
 //     drive peaks there and falls to ~0 at the quarter MIDPOINTS (0.125, 0.375, ...). We build
-//     this from |sin(4*pi*season01)| — a libm-free wave that is 0 at every 0.125 step and 1 at
-//     every transition — giving two strong (spring/autumn) and two shoulder pushes per year, all
+//     this from |cos(4*pi*season01)| — a libm-free wave that is 1 at every transition (season01 =
+//     0, 0.25, 0.5, 0.75) and 0 at every quarter midpoint (0.125, 0.375, ...) — giving two strong
+//     (spring/autumn) and two shoulder pushes per year, all
 //     bounded to [0,1]. A small threshold floors the tiny mid-season residue to a clean 0 so a
 //     settled creature emits an exactly-zero wish (and the gate stays crisp).
 //
@@ -108,7 +109,7 @@ struct MigrationStats {
 
 // The seasonal DRIVE for a given (wrapped) season phase: peaks at the four season transitions
 // (season01 = 0, 0.25, 0.5, 0.75) and falls to ~0 at the quarter midpoints. Built from
-// |sin(4*pi*season01)| (libm-free), then floored so the mid-season residue is a clean 0. In
+// |cos(4*pi*season01)| (libm-free), then floored so the mid-season residue is a clean 0. In
 // [0,1]. Pure function of season01.
 [[nodiscard]] inline float MigrationDriveAt(float season01) {
     const float s = MigrationWrap01(season01);

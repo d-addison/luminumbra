@@ -100,7 +100,11 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
 
         // Catch: a predator within reach of its nearest live prey EATS it -- the prey becomes
         // a carcass and the predator's hunger is sated. Marking is idempotent + id-ordered.
-        if (cr.is_predator && found && bestDist < kCatchRadius && reg.valid(te)) {
+        // The target was chosen from the PRE-tick snapshot, so an earlier (lower-id) predator
+        // this same tick may have already eaten it -- re-check the LIVE eaten flag so one prey
+        // sates at most ONE predator per tick (no feeding from an already-dead carcass).
+        if (cr.is_predator && found && bestDist < kCatchRadius && reg.valid(te) &&
+            !reg.get<Comp::CreatureComponent>(te).eaten) {
             reg.get<Comp::CreatureComponent>(te).eaten = true;
             cr.hunger = utility_clamp01(cr.hunger - kCatchSatiation);
         }
