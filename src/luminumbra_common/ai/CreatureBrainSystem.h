@@ -11,6 +11,7 @@
 // so the canonical roster is byte-identical (the component is the opt-in, like PlantTag).
 
 #include "CreatureBrain.h"
+#include "Flocking.h"
 
 #include "../components/CoreComponents.h"
 #include "../components/CreatureComponents.h"
@@ -18,6 +19,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include <entt/entt.hpp>
@@ -30,6 +32,10 @@ namespace dm = ::Luminumbra::DeterministicMath;
 struct CreatureBrainStats {
     int updated = 0;
 };
+
+// How strongly herd flocking biases the action heading (unit-scale; the action dir is also
+// unit, so this is a fractional blend that keeps flee/hunt dominant).
+inline constexpr float kHerdWeight = 0.8f;
 
 // Advance every CreatureComponent by one fixed tick. Pure function of registry state + dt.
 inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, float dt) {
@@ -113,8 +119,34 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
                 break;
         }
 
-        // Resolve the heading into a wish VELOCITY (m/s). Flee/hunt sprint at 1.5x cruise.
-        const float len = dm::Sqrt(dirx * dirx + dirz * dirz);
+        // Normalize the action heading to a unit direction so herd flocking (a unit-scale
+        // steer) blends in at a comparable weight.
+        float adirx = 0.0f, adirz = 0.0f;
+        const float alen = dm::Sqrt(dirx * dirx + dirz * dirz);
+        if (alen > 1.0e-5f) {
+            adirx = dirx / alen;
+            adirz = dirz / alen;
+        }
+
+        // Herd flocking: for moving creatures, bias the heading by cohesion/separation over
+        // SAME-ROLE neighbours (from the pre-tick snapshot) so prey flee as a coherent herd
+        // (and predators can pack) instead of each moving alone. A lone creature has no
+        // same-role neighbour -> zero steer -> behaviour unchanged (keeps the 1v1 tests exact).
+        if (act == CreatureAction::Flee || act == CreatureAction::Hunt ||
+            act == CreatureAction::Wander) {
+            std::vector<std::pair<float, float>> herd;
+            herd.reserve(snap.size());
+            for (const Snap& o : snap) {
+                if (o.e == e || o.predator != cr.is_predator) continue;
+                herd.emplace_back(o.x, o.z);
+            }
+            const FlockSteer fs = ComputeFlockSteer(sx, sz, herd);
+            adirx += fs.x * kHerdWeight;
+            adirz += fs.z * kHerdWeight;
+        }
+
+        // Resolve the blended heading into a wish VELOCITY (m/s). Flee/hunt sprint at 1.5x.
+        const float len = dm::Sqrt(adirx * adirx + adirz * adirz);
         cr.wish_x = 0.0f;
         cr.wish_z = 0.0f;
         if (len > 1.0e-5f) {
@@ -122,8 +154,8 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
             const float speed = (act == CreatureAction::Flee || act == CreatureAction::Hunt)
                                     ? cr.move_speed * 1.5f
                                     : cr.move_speed;
-            cr.wish_x = dirx * inv * speed;
-            cr.wish_z = dirz * inv * speed;
+            cr.wish_x = adirx * inv * speed;
+            cr.wish_z = adirz * inv * speed;
             cr.stamina = utility_clamp01(cr.stamina - 0.10f * dt);  // moving tires
             // When a Jolt character owns this creature (CreaturePhysicsComponent), it
             // integrates the wish velocity against the terrain (gravity/collision/slopes);
