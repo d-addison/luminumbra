@@ -171,6 +171,38 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             if (creatures.begin() != creatures.end()) {
                 luminumbra::ai::RunCreatureBrainSystemOnTick(
                     m_registry, static_cast<float>(m_simulationClock.fixed_dt()));
+
+                // 2e-phys: TRUE-PHYSICS locomotion bridge. Creatures carrying a
+                // CreaturePhysicsComponent are driven by the deterministic Jolt avatar
+                // controller (the same one player/networked avatars use): push the brain's
+                // wish velocity in, step the avatars once at the fixed dt (index-ordered =
+                // deterministic same-binary, mirrors ServerWorldRunner), and read the
+                // terrain-resolved position (gravity/collision/slopes) back into the
+                // transform. Gated on a physics system + at least one physics creature, so
+                // the canonical roster (none) keeps world_hash byte-identical.
+                if (m_physicsSystem) {
+                    auto phys = m_registry.view<Luminumbra::Components::CreaturePhysicsComponent,
+                                                Luminumbra::Components::CreatureComponent,
+                                                Luminumbra::Components::TransformComponent>();
+                    if (phys.begin() != phys.end()) {
+                        std::vector<entt::entity> pe(phys.begin(), phys.end());
+                        std::sort(pe.begin(), pe.end(), [](entt::entity a, entt::entity b) {
+                            return entt::to_integral(a) < entt::to_integral(b);
+                        });
+                        for (auto e : pe) {
+                            const auto& cr = phys.get<Luminumbra::Components::CreatureComponent>(e);
+                            const auto& cp = phys.get<Luminumbra::Components::CreaturePhysicsComponent>(e);
+                            m_physicsSystem->set_avatar_wish_velocity(cp.avatar_index,
+                                                                      glm::vec2(cr.wish_x, cr.wish_z));
+                        }
+                        m_physicsSystem->update_avatars(static_cast<float>(m_simulationClock.fixed_dt()));
+                        for (auto e : pe) {
+                            const auto& cp = phys.get<Luminumbra::Components::CreaturePhysicsComponent>(e);
+                            phys.get<Luminumbra::Components::TransformComponent>(e).position =
+                                m_physicsSystem->get_avatar_position(cp.avatar_index);
+                        }
+                    }
+                }
             }
         }
 

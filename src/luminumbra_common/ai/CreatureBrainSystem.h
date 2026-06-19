@@ -113,15 +113,26 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
                 break;
         }
 
+        // Resolve the heading into a wish VELOCITY (m/s). Flee/hunt sprint at 1.5x cruise.
         const float len = dm::Sqrt(dirx * dirx + dirz * dirz);
+        cr.wish_x = 0.0f;
+        cr.wish_z = 0.0f;
         if (len > 1.0e-5f) {
             const float inv = 1.0f / len;
             const float speed = (act == CreatureAction::Flee || act == CreatureAction::Hunt)
                                     ? cr.move_speed * 1.5f
                                     : cr.move_speed;
-            tf.position.x += dirx * inv * speed * dt;
-            tf.position.z += dirz * inv * speed * dt;
+            cr.wish_x = dirx * inv * speed;
+            cr.wish_z = dirz * inv * speed;
             cr.stamina = utility_clamp01(cr.stamina - 0.10f * dt);  // moving tires
+            // When a Jolt character owns this creature (CreaturePhysicsComponent), it
+            // integrates the wish velocity against the terrain (gravity/collision/slopes);
+            // the physics bridge reads the resolved position back. Otherwise — the pure,
+            // unit-tested path — integrate X/Z directly here (terrain-independent).
+            if (!reg.all_of<Comp::CreaturePhysicsComponent>(e)) {
+                tf.position.x += cr.wish_x * dt;
+                tf.position.z += cr.wish_z * dt;
+            }
         }
         cr.hunger = utility_clamp01(cr.hunger + 0.02f * dt);  // hunger grows
         ++stats.updated;
