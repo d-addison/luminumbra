@@ -76,6 +76,21 @@ leaves** + a **sun-leaning trunk**. Still a pure, libm-free, deterministic funct
   leafier genome grows more; **A-009** trunk leans toward a non-vertical sun (deterministically);
   **A-010** pinned structure golden (`776720397350691645`).
 
+## Addendum C — richer plant detail (track 3, planned)
+
+Pure-generator extensions (headlessly testable; additive to `PlantProcgen.h`, do NOT break the
+existing `GeneratePlant`/`TessellatePlant`/`ProcMesh` API while the render integration is in flight):
+- **R-A10 (genetic + seasonal color)** Per-leaf and per-bark albedo derived from the genome
+  (a color/chroma gene) and a seasonal phase input (spring green → autumn ochre/red → winter bare).
+  Add an albedo to `ProcVertex` (additive field with a sane default) so the tessellation carries it.
+  ACs: deterministic; autumn phase shifts leaf albedo toward red/ochre vs. summer; bare-winter drops
+  leaf count.
+- **R-A11 (2nd species)** A small data-driven species table (genome ranges + structural biases, e.g.
+  conifer = low branch-tilt + tall, broadleaf = wide) so the world grows distinct species, not one
+  shape rescaled. AC: two species at the same stage produce structurally distinct meshes; deterministic.
+- **R-A12 (branch detail)** Optional taper-within-segment + slight deterministic gnarl so trunks read
+  as organic, not perfect cones. AC: deterministic; vertex budget still bounded.
+
 ## Verify With
 `cmake --build --preset debug --target common_tests` (msys64 PATH first) then
 `ctest --test-dir build/debug -R "PlantProcgen" --output-on-failure` (10 tests).
