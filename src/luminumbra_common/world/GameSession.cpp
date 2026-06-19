@@ -202,12 +202,32 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             luminumbra::foliage::EnvSampler plant_env =
                 [this](const Luminumbra::Components::TransformComponent& tf) {
                     luminumbra::foliage::PlantEnvSample s;
-                    const float precip = m_weatherSystem
-                        ? m_weatherSystem->PrecipitationAt(tf.position) : 0.0f;
-                    s.moisture = luminumbra::foliage::clamp01(0.35f + precip * 0.65f);
-                    s.temperature = 0.5f;  // neutral until a sim temperature field is exposed
-                    s.light = 0.75f;
-                    s.soil_quality = 0.6f;
+                    const Luminumbra::Vec3 p = tf.position;
+                    // Moisture: weather precipitation (rain -> growth).
+                    const float precip = m_weatherSystem ? m_weatherSystem->PrecipitationAt(p) : 0.0f;
+                    s.moisture = luminumbra::foliage::clamp01(0.30f + precip * 0.70f);
+                    // Soil + temperature from the TERRAIN: surface-material favourability
+                    // (grass/soil rich, sand/stone poor) and an altitude lapse (higher
+                    // ground is colder -> alpine vs lowland growth). The real atmospheric/
+                    // terrain coupling. (Only runs for opt-in sim plants, so the per-plant
+                    // world queries are bounded.)
+                    float soil = 0.5f, temp = 0.55f;
+                    if (m_worldSystem) {
+                        const float th = m_worldSystem->GetTerrainHeightAt(p.x, p.z);
+                        switch (m_worldSystem->SurfaceVertexMaterial(p.x, p.z, th)) {
+                            case Luminumbra::MaterialType::Grass: soil = 0.95f; break;
+                            case Luminumbra::MaterialType::Soil:  soil = 0.85f; break;
+                            case Luminumbra::MaterialType::Sand:  soil = 0.45f; break;
+                            case Luminumbra::MaterialType::Stone: soil = 0.30f; break;
+                            default:                              soil = 0.25f; break;
+                        }
+                        const float altitude = th - static_cast<float>(Luminumbra::SEA_LEVEL);
+                        temp = luminumbra::foliage::clamp01(
+                            0.60f - (altitude > 0.0f ? altitude : 0.0f) * 0.00045f);
+                    }
+                    s.soil_quality = soil;
+                    s.temperature = temp;
+                    s.light = 0.75f; // season/time-of-day coupling is a render-side follow-up
                     return s;
                 };
             luminumbra::foliage::RunPlantGrowthSystemOnTick(m_registry, current_tick, plant_env);
