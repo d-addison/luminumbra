@@ -3645,6 +3645,19 @@ int main(int argc, char* argv[]) {
                                 // The predator is a bit faster than the herd so it can run down a
                                 // straggler (otherwise equal flee/hunt speeds never close the gap).
                                 cr.move_speed = predator ? 4.2f : 3.0f;
+                                // Track (a): give PREY a heritable genome so well-fed,
+                                // healthy, mature prey reproduce (CreatureReproductionSystem,
+                                // GameSession slot 2e-evo) and selection becomes visible over
+                                // the timelapse. move_speed mirrors the CreatureComponent so
+                                // behaviour is unchanged until traits drift in offspring.
+                                // Offspring are created mid-sim WITHOUT a Jolt avatar body, so
+                                // they fall back to the brain's direct X/Z integration (the
+                                // CreatureBrainSystem path when no CreaturePhysicsComponent).
+                                if (!predator) {
+                                    auto& gn = reg.emplace<
+                                        Luminumbra::Components::CreatureGenomeComponent>(e);
+                                    gn.move_speed = cr.move_speed;
+                                }
                                 if (phys) {
                                     const std::size_t idx =
                                         phys->create_avatar_character(glm::vec3(cx, cy, cz));

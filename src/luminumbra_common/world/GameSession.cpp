@@ -1,6 +1,7 @@
 #include "GameSession.h"
 #include "../ai/InstinctSystem.h"
 #include "../ai/CreatureBrainSystem.h"
+#include "../ai/CreatureReproductionSystem.h"  // Track (a): generational evolution (+16)
 #include "../ai/InstinctLocomotionSystem.h"
 #include "../ai/PerceptionSystem.h"
 #include "../ai/ScentDepositSystem.h"
@@ -203,6 +204,17 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                         }
                     }
                 }
+
+                // 2e-evo: Track (a) — generational creature EVOLUTION. After the brain
+                // moves/feeds/catches, well-fed healthy mature prey carrying a
+                // CreatureGenomeComponent reproduce, passing a SEEDED-mutated genome to one
+                // offspring (selection: caught prey leave none). Deterministic — id-ordered,
+                // libm-free, RNG seeded purely from (offset 16 + parent id + tick) (the +16
+                // reproduction seed offset; wind+11/weather+12-13/aether+14/plant+15 above).
+                // Per-entity opt-in (genome component): a roster whose creatures carry no
+                // genome — and any world with no creatures — creates nothing, so the
+                // canonical NetworkStateHash baseline stays byte-identical.
+                luminumbra::ai::RunCreatureReproductionOnTick(m_registry, current_tick);
             }
         }
 
