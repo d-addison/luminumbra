@@ -1,5 +1,7 @@
 #include "core/SystemConfig.h"
 
+#include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -41,6 +43,38 @@ constexpr ParamMeta kParams[] = {
     {SysParam::MoonlightStrength, SysKey::RenderMoonlight, "strength", false, 0.0f, glm::vec3(0.0f)},
     {SysParam::MoonlightColor, SysKey::RenderMoonlight, "color", true, 0.0f, glm::vec3(0.6f, 0.7f, 1.0f)},
 };
+
+// Overlay the `user.*` section of `data` onto `user`, setting only named fields (merge
+// semantics: an absent field keeps its current/default value). render-client-only; never hashed.
+void ParseUserSection(const nlohmann::json& data, UserSettings& user) {
+    if (!data.is_object() || !data.contains("user") || !data["user"].is_object()) return;
+    const nlohmann::json& u = data["user"];
+
+    if (u.contains("video") && u["video"].is_object()) {
+        const nlohmann::json& v = u["video"];
+        if (v.contains("resolution") && v["resolution"].is_string())
+            user.resolution = v["resolution"].get<std::string>();
+        if (v.contains("window_mode") && v["window_mode"].is_string())
+            user.window_mode = v["window_mode"].get<std::string>();
+        if (v.contains("vsync") && v["vsync"].is_boolean()) user.vsync = v["vsync"].get<bool>();
+        if (v.contains("fov") && v["fov"].is_number()) user.fov = v["fov"].get<float>();
+        if (v.contains("render_scale") && v["render_scale"].is_number())
+            user.render_scale = v["render_scale"].get<float>();
+        if (v.contains("mouse_sensitivity") && v["mouse_sensitivity"].is_number())
+            user.mouse_sensitivity = v["mouse_sensitivity"].get<float>();
+    }
+    if (u.contains("audio") && u["audio"].is_object()) {
+        const nlohmann::json& a = u["audio"];
+        if (a.contains("master") && a["master"].is_number()) user.audio_master = a["master"].get<float>();
+        if (a.contains("sfx") && a["sfx"].is_number()) user.audio_sfx = a["sfx"].get<float>();
+        if (a.contains("music") && a["music"].is_number()) user.audio_music = a["music"].get<float>();
+    }
+    if (u.contains("controls") && u["controls"].is_object()) {
+        for (const auto& [action, key] : u["controls"].items()) {
+            if (key.is_number_integer()) user.keybinds[action] = key.get<int>();
+        }
+    }
+}
 
 }  // namespace
 
@@ -88,6 +122,8 @@ SystemConfig SystemConfig::FromJsonString(const std::string& json_text) {
             }
         }
     }
+
+    ParseUserSection(data, cfg.m_user);  // user.* (client-only, never hashed)
     return cfg;
 }
 
@@ -141,6 +177,93 @@ std::string SystemConfig::ComputeConfigSubHash() const {
 
     if (!any) return {};  // all sim defaults -> byte-identical baseline
     return Luminumbra::Persistence::StableChecksum(bytes.str());
+}
+
+int SystemConfig::keybind(const std::string& action, int fallback) const {
+    const auto it = m_user.keybinds.find(action);
+    return it != m_user.keybinds.end() ? it->second : fallback;
+}
+
+void SystemConfig::OverlayUserFromJsonString(const std::string& json_text) {
+    nlohmann::json data;
+    try {
+        data = nlohmann::json::parse(json_text);
+    } catch (const nlohmann::json::parse_error&) {
+        return;  // malformed overlay -> leave settings unchanged
+    }
+    ParseUserSection(data, m_user);  // only user.*; sim/render ignored
+}
+
+SystemConfig SystemConfig::LoadLayered(const std::string& defaults_path,
+                                       const std::string& overlay_path) {
+    SystemConfig cfg = LoadFromFile(defaults_path);  // sim/render/user from defaults (missing -> defaults)
+    std::ifstream overlay(overlay_path);
+    if (overlay) {
+        std::ostringstream buffer;
+        buffer << overlay.rdbuf();
+        cfg.OverlayUserFromJsonString(buffer.str());  // per-user file overrides only user.*
+    }
+    return cfg;
+}
+
+bool SystemConfig::SaveUserOverlay(const std::string& path) const {
+    // Serialize ONLY the user.* section (no sim/render leakage). Ordered keybinds -> deterministic.
+    nlohmann::json user;
+    user["video"] = {
+        {"resolution", m_user.resolution},
+        {"window_mode", m_user.window_mode},
+        {"vsync", m_user.vsync},
+        {"fov", m_user.fov},
+        {"render_scale", m_user.render_scale},
+        {"mouse_sensitivity", m_user.mouse_sensitivity},
+    };
+    user["audio"] = {
+        {"master", m_user.audio_master},
+        {"sfx", m_user.audio_sfx},
+        {"music", m_user.audio_music},
+    };
+    nlohmann::json controls = nlohmann::json::object();
+    for (const auto& [action, key] : m_user.keybinds) controls[action] = key;
+    user["controls"] = controls;
+
+    nlohmann::json doc;
+    doc["_comment"] = "Luminumbra per-user settings overlay (user.* only; client-only, never hashed).";
+    doc["user"] = user;
+
+    std::error_code ec;
+    const std::filesystem::path out(path);
+    if (out.has_parent_path()) std::filesystem::create_directories(out.parent_path(), ec);
+
+    // Atomic-ish write: temp file then rename over the target.
+    const std::filesystem::path tmp = out.string() + ".tmp";
+    {
+        std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
+        if (!file) return false;
+        file << doc.dump(2) << '\n';
+        if (!file) return false;
+    }
+    std::filesystem::rename(tmp, out, ec);
+    if (ec) {
+        std::filesystem::remove(tmp, ec);
+        return false;
+    }
+    return true;
+}
+
+std::string SystemConfig::DefaultUserOverlayPath() {
+#if defined(_WIN32)
+    if (const char* appdata = std::getenv("APPDATA")) {
+        return (std::filesystem::path(appdata) / "Luminumbra" / "settings.json").string();
+    }
+#else
+    if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) {
+        return (std::filesystem::path(xdg) / "luminumbra" / "settings.json").string();
+    }
+    if (const char* home = std::getenv("HOME")) {
+        return (std::filesystem::path(home) / ".config" / "luminumbra" / "settings.json").string();
+    }
+#endif
+    return "settings.json";  // last-resort: cwd
 }
 
 }  // namespace luminumbra::core
