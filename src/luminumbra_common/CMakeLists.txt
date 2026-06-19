@@ -4,6 +4,15 @@ include("${CMAKE_CURRENT_LIST_DIR}/sources.cmake")
 # Create the static library with all its source files at once.
 add_library(luminumbra_common STATIC ${COMMON_SOURCES})
 
+# GameSession.cpp drives the whole fixed-tick system roster, instantiating ~16 entt component
+# storages in one TU. Under GCC 15 at -O0 that tips the compiler into EXTERNALIZING the inline
+# std helpers entt's paged storage needs (std::__advance / ranges::iter_move on the page-pointer
+# vectors), producing undefined references at link time. Compiling just this file at -O1 emits
+# the needed inline helpers out-of-line. Determinism is preserved: -ffp-contract=off stays on
+# (no FMA) and GCC does NOT reorder IEEE float ops without -ffast-math, so results are bit-
+# identical to -O0; verified by the NetworkStateHash run==replay gate.
+set_source_files_properties(world/GameSession.cpp PROPERTIES COMPILE_OPTIONS "-O1")
+
 target_include_directories(luminumbra_common PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_SOURCE_DIR}/vendor/spdlog/include"
