@@ -21,7 +21,7 @@
 namespace Luminumbra::Rendering {
 
 // Number of LOD buckets we support (LOD0 = full asset, LOD1..LOD2 = coarser).
-inline constexpr int kTreeLodCount = 3;
+inline constexpr int kTreeLodCount = 4;
 
 // Data-driven LOD distance thresholds (world units, render-only -- NEVER hashed).
 // An instance whose camera distance is < lod1Distance draws LOD0 (the full,
@@ -37,8 +37,11 @@ struct TreeLodConfig {
     bool enabled = true;
     // Near radius around the camera that always renders the full mesh.
     float lod1Distance = 140.0f;
-    // Beyond this, render the coarsest LOD.
+    // Beyond this, render the coarse procedural mesh.
     float lod2Distance = 320.0f;
+    // Beyond this, render the cheap FAR-FIELD cross-billboard (LOD3) — a few quads
+    // instead of branch geometry, so a vast forest stays in budget out to the horizon.
+    float lod3Distance = 620.0f;
 };
 
 // Returns the LOD bucket index [0 .. kTreeLodCount-1] for a tree instance at the
@@ -48,6 +51,9 @@ struct TreeLodConfig {
 inline int SelectTreeLod(float cameraDistance, const TreeLodConfig& cfg) {
     if (!cfg.enabled) {
         return 0;
+    }
+    if (cameraDistance >= cfg.lod3Distance) {
+        return 3;
     }
     if (cameraDistance >= cfg.lod2Distance) {
         return 2;

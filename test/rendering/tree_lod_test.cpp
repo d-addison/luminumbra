@@ -55,7 +55,13 @@ TEST(TreeLod, MidDistancePicksLod1) {
 TEST(TreeLod, FarDistancePicksLod2) {
     const auto cfg = MakeConfig();
     EXPECT_EQ(SelectTreeLod(cfg.lod2Distance, cfg), 2);
-    EXPECT_EQ(SelectTreeLod(5000.0f, cfg), 2);
+    EXPECT_EQ(SelectTreeLod(cfg.lod3Distance - 0.001f, cfg), 2);
+}
+
+TEST(TreeLod, VeryFarPicksLod3Billboard) {
+    const auto cfg = MakeConfig();
+    EXPECT_EQ(SelectTreeLod(cfg.lod3Distance, cfg), 3);
+    EXPECT_EQ(SelectTreeLod(5000.0f, cfg), 3);
 }
 
 TEST(TreeLod, SelectionIsMonotonicInDistance) {
@@ -116,8 +122,8 @@ TEST(TreeLod, VisibleTriangleBudgetDropsWithLod) {
     const auto cfg = MakeConfig();
     // Representative LOD0 triangle count for one tree (all 3 parts combined).
     constexpr std::uint64_t kLod0Tris = 12000;
-    // Fraction of LOD0 tris per LOD bucket (LOD1 ~ 1/2, LOD2 ~ 1/6).
-    const double kFrac[Luminumbra::Rendering::kTreeLodCount] = {1.0, 0.5, 1.0 / 6.0};
+    // Fraction of LOD0 tris per LOD bucket (LOD1 ~ 1/2, LOD2 ~ 1/6, LOD3 billboard ~ 1/2000).
+    const double kFrac[Luminumbra::Rendering::kTreeLodCount] = {1.0, 0.5, 1.0 / 6.0, 6.0 / 12000.0};
 
     std::uint64_t baselineTris = 0; // everything at LOD0
     std::uint64_t lodTris = 0;      // distance-selected LOD
