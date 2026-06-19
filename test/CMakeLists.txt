@@ -518,6 +518,7 @@ add_executable(frontier_gates_test
     ai/deterministic_rng_test.cpp
     ai/perception_test.cpp
     ai/evolution_test.cpp
+    ai/plant_growth_test.cpp
     ai/awareness_test.cpp
     ai/perception_system_test.cpp
     ai/scent_steering_system_test.cpp
