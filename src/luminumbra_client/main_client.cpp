@@ -30,6 +30,7 @@
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/core/SystemConfig.h"  // user.* video/audio/controls settings
 #include "luminumbra_common/network/NetworkLoopbackAuthority.h"
 #include "debug/WorldGenViewer.h"
 #include "nlohmann/json.hpp"
@@ -68,6 +69,10 @@ using namespace Luminumbra::Client::ScenarioHarness;
 // --- Global Pointers ---
 std::unique_ptr<Luminumbra::Rendering::Camera> g_camera;
 std::unique_ptr<Luminumbra::Client::PlayerController> g_playerController;
+// Single client config: defaults (data/common/systems.json) overlaid by the writable
+// per-user settings file (%APPDATA%/Luminumbra/settings.json). user.* is client-only,
+// never hashed (docs/STANDARDS.md §5). Loaded once at startup (before window creation).
+luminumbra::core::SystemConfig g_systemConfig;
 std::unique_ptr<Luminumbra::Client::Rml_UIManager> g_uiManager;
 std::unique_ptr<Luminumbra::Client::WorldLoadingVisualizer> g_loading_visualizer;
 
@@ -1443,9 +1448,19 @@ int main(int argc, char* argv[]) {
         glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GL_TRUE);
     #endif
 
+    // Load player settings (defaults + per-user overlay) before window setup so VSync etc.
+    // can be applied immediately. Never hashed; missing overlay -> struct defaults.
+    g_systemConfig = luminumbra::core::SystemConfig::LoadLayered(
+        "data/common/systems.json", luminumbra::core::SystemConfig::DefaultUserOverlayPath());
+
     GLFWwindow* window = glfwCreateWindow(create_width, create_height, "Luminumbra", nullptr, nullptr);
     LUMINUMBRA_ASSERT(window, "Failed to create GLFW window!");
     glfwMakeContextCurrent(window);
+
+    // VSync from user settings (user.video.vsync). This is the ONLY glfwSwapInterval call;
+    // before this the swap interval was never set (driver default = uncapped). Default OFF
+    // preserves the uncapped 300fps target; the settings menu flips it.
+    glfwSwapInterval(g_systemConfig.user().vsync ? 1 : 0);
 
     // [[maybe_unused]]: LUMINUMBRA_ASSERT compiles out in release builds
     // (T-I3-20 release perf lane builds with -Werror).
@@ -1616,6 +1631,8 @@ int main(int argc, char* argv[]) {
                     );
                 }
                 g_camera = std::make_unique<Luminumbra::Rendering::Camera>(gameSession->GetMetadata().spawnPoint);
+                g_camera->MouseSensitivity = g_systemConfig.user().mouse_sensitivity;  // user.video.mouse_sensitivity
+                g_camera->Zoom = g_systemConfig.user().fov;                             // user.video.fov
                 g_playerController = std::make_unique<Luminumbra::Client::PlayerController>(window, g_camera.get(), gameSession->GetPhysicsSystem());
                 if (g_world_render_data_initialized) {
                     renderPipeline.clear_all_chunk_data();
@@ -2127,6 +2144,8 @@ int main(int argc, char* argv[]) {
                         g_loading_visualizer->EndVisualization();
                     }
                     g_camera = std::make_unique<Luminumbra::Rendering::Camera>(gameSession->GetMetadata().spawnPoint);
+                    g_camera->MouseSensitivity = g_systemConfig.user().mouse_sensitivity;  // user.video.mouse_sensitivity
+                    g_camera->Zoom = g_systemConfig.user().fov;                             // user.video.fov
                     g_playerController = std::make_unique<Luminumbra::Client::PlayerController>(window, g_camera.get(), gameSession->GetPhysicsSystem());
                     if (g_world_render_data_initialized) {
                         renderPipeline.clear_all_chunk_data();
@@ -4956,6 +4975,32 @@ int main(int argc, char* argv[]) {
         if (currentState == GameState::IN_GAME) {
             if (g_imgui_enabled && g_playerController) {
                 g_playerController->RenderDebugUI();
+            }
+            // Live player settings (render-only; user.* is never hashed). Lets the player
+            // change look sensitivity / FOV / VSync now and persist them to the per-user
+            // overlay. The polished RML settings screen (settings.rml) is the follow-on.
+            if (g_imgui_enabled && g_camera) {
+                ImGui::SetNextWindowSize(ImVec2(330, 0), ImGuiCond_FirstUseEver);
+                if (ImGui::Begin("Settings")) {
+                    luminumbra::core::UserSettings& us = g_systemConfig.user();
+                    if (ImGui::SliderFloat("Look sensitivity", &us.mouse_sensitivity, 0.01f, 1.0f, "%.3f")) {
+                        g_camera->MouseSensitivity = us.mouse_sensitivity;  // applied live
+                    }
+                    if (ImGui::SliderFloat("FOV", &us.fov, 30.0f, 110.0f, "%.0f deg")) {
+                        g_camera->Zoom = us.fov;
+                    }
+                    if (ImGui::Checkbox("VSync", &us.vsync)) {
+                        glfwSwapInterval(us.vsync ? 1 : 0);
+                    }
+                    if (ImGui::Button("Save settings")) {
+                        const std::string path =
+                            luminumbra::core::SystemConfig::DefaultUserOverlayPath();
+                        const bool ok = g_systemConfig.SaveUserOverlay(path);
+                        LUMINUMBRA_CORE_INFO("Settings {} ({})", ok ? "saved" : "save FAILED", path);
+                    }
+                    ImGui::TextDisabled("user.* — client-only, never hashed");
+                }
+                ImGui::End();
             }
             if (g_imgui_enabled && show_worldgen_viewer && worldGenViewer) {
                 worldGenViewer->UpdateAndRender(show_worldgen_viewer, gameSession->GetWorldSystem());
