@@ -1,0 +1,11 @@
+{
+  "_comment": "SystemConfig GAME PROFILE (§1a, critique Objection 5). The intended-shipping ON set, gated ALONGSIDE the all-off systems.json baseline so integration risk is not deferred to flip-on day. Select with LUMIN_SYSTEMS=data/common/systems.game.json. SEED: equals the all-off baseline today (nothing changes sim state yet); each pillar that lands flips its flag ON here and re-blesses the game-profile baseline.",
+  "sim": {
+    "plant_growth": { "enabled": false, "params": { "mutation_rate": 0.05 } },
+    "erosion": { "enabled": false }
+  },
+  "render": {
+    "moonlight": { "enabled": false, "params": { "strength": 0.0, "color": [0.6, 0.7, 1.0] } },
+    "tree_wind": { "enabled": false }
+  }
+}

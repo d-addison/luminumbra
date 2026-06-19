@@ -13,6 +13,64 @@ Forge repo for forge bugs/PRs: `D:\Coding\forge-new` (push allowed; gh = `rv-dad
 
 ---
 
+## 0.5. CRITIQUE REVISIONS — owner-approved 2026-06-18 (THESE OVERRIDE §1–§6 BELOW)
+
+A `/forge-critique` devil's-advocate pass (report:
+`.forge/critique-handoff-roadmap-20260618-221947.md`) verified this doc's facts as sound but
+found 3 blockers + structural issues. Owner adopted the revised scope. **Where the text below
+conflicts with this section, this section wins.**
+
+1. **Hash contract (fixes a contradiction — refined after grounding in the code).** Codebase
+   check (`persistence/WorldPersistenceRoundtrip.h:100`) shows per-system sub-hashes are
+   **ADDITIVE and SEPARATE** from the top-level `world_hash` ("unchanged byte-for-byte" by them),
+   and each is **empty `{}` when its system has no participants** (wind/weather/aether/scent/
+   plant). So model a `config` sub-hash on those: it is an additive field that **does NOT touch
+   the top-level `world_hash`** (canonical `d950a6afc12a5cdc` holds — **zero re-pin** from
+   introducing SystemConfig), and `ComputeConfigSubHash()` returns empty `{}` when every `sim.*`
+   flag is at default (sub-hash set byte-identical too). A `sim.*` flag only moves the top-level
+   hash when it actually changes sim STATE (its owning pillar's deliberate, intrinsic bump).
+   Render flags never touch any hash. **Full contract: `.forge/specs/system-config/spec.md` P2.**
+   (This is cleaner than the critique's original "one intentional re-pin"; that's superseded.)
+2. **Split §1.** **§1a (FIRST, ~1 slice):** minimal `enabled(flag)` + typed `param()` over a
+   static default table, implemented as a **resolved immutable per-tick snapshot** — packed
+   bitset for flags, flat enum-indexed array for params; `enabled()` is an O(1) bit test
+   (perf AC: zero alloc/locking per entity on hot paths, 36k-entity / 30Hz budget). New
+   systems consume §1a. **§1b (LAZY, deferred):** migrate each *existing* toggle only when
+   already touching that subsystem, each with a before/after determinism+visual diff proving
+   zero behavior change. **No big-bang migration.**
+3. **Reorder D before C.** Erosion (D) lands BEFORE SHIELD-RT (C) so C is blessed against final
+   terrain. Only terrain-independent C parts (sky-stencil, aerial-perspective LUT) may precede D.
+4. **Game-profile baseline.** Maintain a first-class **"game profile"** config (intended-ON set;
+   seed = today's known-green behavior) gated ALONGSIDE the all-off baseline. Every slice keeps
+   BOTH green. Bless named bundles ("ecology", "weather", "photography"), not just all-off.
+5. **Tiered process.** **T1 full lifecycle:** §1, C, E, F. **T2 (spec+tests+verify):** §4
+   self-contained systems (fire/soil/pollination/disease). **T3 (test+implement):** mechanical
+   toggles (overlays, difficulty). Determinism tests mandatory for ALL sim items; visual
+   re-bless only on render-touching slices.
+6. **Scope F to the seam.** Land/keep `ILockstepTransport` + TCP local path for determinism +
+   API shape only. DEFER delta-snapshot/prediction/reconciliation until a 2nd test box OR a
+   deterministic network-sim harness (injected loss/latency) exists. Steam over-the-wire stays
+   blocked on single-PC.
+7. **Float-determinism AC for A/D.** Procedural geometry is VISUAL-ONLY; any value the sim
+   consumes is quantized to fixed-point at the sim boundary; sim-read erosion offset field is
+   baked to integers + committed + hashed as data (not recomputed in float per platform). Add a
+   `-ffp-contract`/`-ffast-math` on/off hash-parity test.
+8. **Rollback + prioritization.** Baseline break → **revert the slice by default**; re-pin only
+   with a written justification of why the change is intended. Tag each commit with its
+   baseline-state hash. Tag every item **game-critical / engine-foundational / gold-plating**;
+   pull from the backlog by priority, not list order.
+
+**Revised order:** §1a → §1b (lazy, opportunistic) → A → B → **D → C** → E → §4 (fire/soil/
+pollination first, T2) → F-seam → G (pure-sim capture-scoring fixture only; full photo loop
+stays LAST per the engine-first directive).
+
+**G-ordering note:** the critique suggested pulling photography forward, but standing owner
+directive (memory `long-range-roadmap`, `iteration-4-priorities`) is *engine first, photography
+100% last*. Resolution: only a pure-sim capture-scoring determinism fixture is pulled forward;
+the actual photo/camera loop stays last.
+
+---
+
 ## 0. State at handoff (what's DONE — committed local-only, all gated green)
 
 Living-World Foliage pillar is COMPLETE at sim/farming/atmospheric/visual level. 7 commits:
@@ -65,8 +123,11 @@ plugs into a consistent on/off + tuning seam.
   foliage density (`render.grass.density_scale`, `render.tree_scatter.{count,cell,grove...}`),
   tree LOD/impostors, atmosphere (fold `LUMIN_ATMOS`), grade (fold `LUMIN_GRADE`).
 - Convention for ALL pillars below: **every new system reads `SystemConfig::enabled("<key>")` in its
-  init/tick and is OFF by default until its gate is green** (keeps canonical baselines byte-identical,
-  matching the plant-pillar opt-in discipline). Tuning params live beside the flag.
+  init/tick and is OFF by default until its gate is green** (matching the plant-pillar opt-in
+  discipline). Tuning params live beside the flag. **NOTE (§0.5.1):** "byte-identical baseline" is
+  superseded — render flags never touch the hash; sim flags use a versioned default-constant
+  sub-hash → one intentional re-pin at §1, zero at defaults after. See §0.5 for the corrected contract
+  and §0.5.4 for the required game-profile ON baseline.
 - Optional: a tiny in-game debug overlay / console to flip render flags live (render-only).
 
 **TDD — write these tests RED first** (before `SystemConfig.cpp` exists): (a) a missing/empty
@@ -271,14 +332,20 @@ flag, how it couples to existing weather/terrain/plant/ecology state, and the mi
 
 ---
 
-## 6. Suggested order for the next session(s)
+## 6. Suggested order for the next session(s)  — SUPERSEDED BY §0.5 (revised order)
 
-1. **§1 SystemConfig feature-flag layer** (substrate; migrate existing toggles).
+> ⚠️ The numbered list below is the ORIGINAL order. §0.5 overrides it: §1 is split §1a→§1b,
+> and **D (erosion) runs BEFORE C (SHIELD-RT)** — item 4 here had them backwards. Use the
+> §0.5 "Revised order" line. Kept below for history.
+
+1. **§1 SystemConfig feature-flag layer** (substrate) — now **§1a minimal first, §1b lazy** (§0.5.2).
 2. **§3.A foliage polish** (live-growth bridge + procgen — finishes the headline pillar) and
    **§3.B tree LOD/impostors** (perf) — both plug into the flags.
 3. Brainstorm + slice **§4 new systems** (fire/soil/pollination first — they deepen the farming game).
-4. **§3.C SHIELD-RT** then **§3.D erosion** (erosion bumps hash before SHIELD-RT bless).
-5. **§3.E AI/ecology**, **§3.F networking**, **§3.G photography** (the game loop, last).
+4. ~~**§3.C SHIELD-RT** then **§3.D erosion**~~ → **§3.D erosion THEN §3.C SHIELD-RT** (§0.5.3:
+   erosion bumps hash + changes geometry before SHIELD-RT bless).
+5. **§3.E AI/ecology**, **§3.F networking** (seam only, §0.5.6), **§3.G photography**
+   (pure-sim capture-scoring fixture only; full loop LAST per engine-first directive).
 
 Run each through the §2 forge loop. Commit per slice (no push), split unrelated concerns, keep the
 gates green, re-bless on intentional look changes.
