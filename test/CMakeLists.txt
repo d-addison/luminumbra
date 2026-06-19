@@ -144,6 +144,21 @@ target_link_libraries(common_tests PRIVATE
     luminumbra_common
 )
 
+# Track-B (roadmap pillar B): render-only tree LOD distance selection. The header
+# under test (src/luminumbra_client/rendering/TreeLod.h) is OpenGL-free pure logic,
+# so this target needs no client lib / GL link -- just the include root + gtest.
+add_executable(tree_lod_test
+    rendering/tree_lod_test.cpp
+)
+
+target_include_directories(tree_lod_test PRIVATE
+    ../src
+)
+
+target_link_libraries(tree_lod_test PRIVATE
+    gtest_main
+)
+
 add_executable(render_smoke_test
     rendering/render_smoke_test.cpp
 )
@@ -628,6 +643,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     worldgen_layer_snapshot_test
     asset_processor_round_trip_test
     common_tests
+    tree_lod_test
     render_smoke_test
     render_capture_test
     waterfall_visual_test
