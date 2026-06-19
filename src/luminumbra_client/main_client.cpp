@@ -27,6 +27,8 @@
 #include "luminumbra_common/components/CreatureComponents.h" // I9-ECO creature markers
 #include "luminumbra_common/components/CombustionComponents.h" // sim.fire demo markers
 #include "luminumbra_common/components/AlarmComponents.h"      // herd-alarm collective flee
+#include "luminumbra_common/components/MortalComponents.h"     // lifespan / natural death
+#include "luminumbra_common/components/DecayComponents.h"      // decomposition (carcass fades)
 #include "luminumbra_common/systems/PlantGrowthSystem.h"    // I9-FOLIAGE phenotype/genome
 #include "luminumbra_common/systems/PlantProcgen.h"         // I9-FOLIAGE procedural plant geometry (render-only)
 #include "luminumbra_common/systems/WaterSystem.h"
@@ -211,9 +213,19 @@ void BakeCreatureMarkers(Luminumbra::Rendering::PlantProcgenPass* pp, entt::regi
             preyCol = kGenPalette[gn->generation < 4u ? gn->generation : 3u];
             sizeMul = gn->size_scale;
         }
-        const glm::vec3 col = cr.eaten      ? glm::vec3(0.92f, 0.88f, 0.75f)   // caught -> pale bone carcass
-                              : cr.is_predator ? glm::vec3(0.75f, 0.12f, 0.12f)  // predator -> red
-                                               : preyCol;                         // prey -> by generation
+        glm::vec3 col = cr.eaten      ? glm::vec3(0.92f, 0.88f, 0.75f)   // dead -> pale bone carcass
+                        : cr.is_predator ? glm::vec3(0.75f, 0.12f, 0.12f)  // predator -> red
+                                         : preyCol;                         // prey -> by generation
+        // Decomposition: a decaying carcass SHRINKS + darkens to nothing (skip when fully gone),
+        // so the population visibly self-bounds via death -> decay.
+        if (const auto* dec = reg.try_get<Luminumbra::Components::DecayComponent>(e)) {
+            if (dec->fully_decomposed) continue;  // returned to the soil -> no marker
+            if (dec->decay_ticks > 0 && dec->decay_duration > 0) {
+                const float t = static_cast<float>(dec->decay_ticks) / static_cast<float>(dec->decay_duration);
+                sizeMul *= (1.0f - 0.8f * t);          // shrink as it rots
+                col *= (1.0f - 0.7f * t);              // darken toward the soil
+            }
+        }
         const float rr = r * sizeMul, hh = halfH * sizeMul;
         const glm::vec3 P[6] = {c + glm::vec3(0, hh, 0), c - glm::vec3(0, hh, 0),
                                 c + glm::vec3(rr, 0, 0),     c + glm::vec3(0, 0, rr),
@@ -3810,6 +3822,18 @@ int main(int argc, char* argv[]) {
                                         cr.stamina = 1.0f;
                                         gn.age_ticks = 80u;  // just under kReproMaturityTicks (90)
                                     }
+                                }
+                                // Full LIFE CYCLE (calm demo): creatures age and die of old age
+                                // (LifespanSystem), then decompose to nothing (DecompositionSystem) --
+                                // so the population self-bounds (birth -> life -> death -> decay)
+                                // instead of growing without limit. Seeded lifespan per creature.
+                                if (g_timelapse_calm) {
+                                    auto& mort = reg.emplace<Luminumbra::Components::MortalComponent>(e);
+                                    const std::uint32_t jit =
+                                        static_cast<std::uint32_t>(entt::to_integral(e) * 2654435761u) % 240u;
+                                    mort.lifespan_ticks = 420u + jit;   // ~14-22s @30Hz
+                                    auto& dec = reg.emplace<Luminumbra::Components::DecayComponent>(e);
+                                    dec.decay_duration = 120u;          // carcass fades over ~4s after death
                                 }
                                 if (phys) {
                                     const std::size_t idx =
