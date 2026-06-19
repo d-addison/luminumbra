@@ -6817,7 +6817,7 @@ void ApplyLocomotionFromJson(
     profile.flock_radius = data.value("flock_radius", profile.flock_radius);
     profile.cohesion_strength = data.value("cohesion_strength", profile.cohesion_strength);
     profile.alignment_strength = data.value("alignment_strength", profile.alignment_strength);
-    registry.get_or_emplace<Luminumbra::Components::LocomotionIntentComponent>(entity);
+    (void)registry.get_or_emplace<Luminumbra::Components::LocomotionIntentComponent>(entity);
     scene.ecology_locomotion = true;
 }
 
@@ -6849,8 +6849,8 @@ void ApplyScentSenseFromJson(
     sense.strength = data.value("strength", sense.strength);
     sense.floor = data.value("floor", sense.floor);
     sense.weber_k = data.value("weber_k", sense.weber_k);
-    registry.get_or_emplace<Luminumbra::Components::LocomotionProfile>(entity);
-    registry.get_or_emplace<Luminumbra::Components::LocomotionIntentComponent>(entity);
+    (void)registry.get_or_emplace<Luminumbra::Components::LocomotionProfile>(entity);
+    (void)registry.get_or_emplace<Luminumbra::Components::LocomotionIntentComponent>(entity);
     scene.ecology_scent_sense = sense.channel >= 0;
     scene.ecology_locomotion = true;
 }
@@ -6868,7 +6868,7 @@ void ApplyPerceptionFromJson(
     perception.facing_z = data.value("facing_z", perception.facing_z);
     perception.faction = static_cast<std::uint32_t>(
         data.value("faction", static_cast<int>(perception.faction)));
-    registry.get_or_emplace<Luminumbra::Components::AwarenessComponent>(entity);
+    (void)registry.get_or_emplace<Luminumbra::Components::AwarenessComponent>(entity);
     scene.ecology_perception = true;
 }
 
