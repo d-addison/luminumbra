@@ -222,6 +222,9 @@ TEST(UiSmokeTest, AuthoredRmlDocumentsLoadAndExposeRequiredElements) {
         {"main_menu.rml", {"main_menu", "new_world_btn", "load_world_btn", "settings_btn", "quit_btn", "notification", "notification_text"}},
         {"world_creation.rml", {"world_name", "world_seed", "world_type", "back_btn", "create_btn"}},
         {"world_selection.rml", {"filter_all", "filter_recent", "filter_favorites", "back_btn", "load_selected_btn", "import_world_btn"}},
+        {"settings.rml", {"settings", "setting_resolution", "setting_window_mode", "setting_vsync",
+                          "setting_fov", "setting_mouse_sensitivity", "setting_audio_master",
+                          "setting_audio_sfx", "setting_audio_music", "apply_settings_btn", "back_btn"}},
     };
 
     int required_elements_checked = 0;
@@ -400,6 +403,109 @@ TEST(UiSmokeTest, AuthoredMenuInteractionsNavigateAndInvokeCallbacks) {
         created_world->type,
         *loaded_world_id,
         quit_requested);
+
+    ui.Shutdown();
+}
+
+// settings.rml round-trip: the SettingsBridge getters seed the form on load,
+// changing a control pushes through the matching setter live, and Apply & Save
+// flushes every control and invokes Save(). Reaches the screen via the
+// main-menu settings_btn navigation path (the menu "open settings" flow).
+TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
+    HiddenGlContext context;
+    if (!context.ready()) {
+        GTEST_SKIP() << context.error();
+    }
+
+    const fs::path source_root = SourceRoot();
+    Luminumbra::Client::Rml_UIManager ui((source_root.string() + "/"));
+    ui.Init(context.window(), nullptr);
+    ASSERT_NE(ui.GetContext(), nullptr);
+
+    // In-memory model the bridge reads from / writes to.
+    struct Model {
+        std::string resolution = "1920x1080";
+        std::string window_mode = "borderless";
+        bool vsync = true;
+        float fov = 45.0f;
+        float sensitivity = 0.025f;
+        float audio_master = 1.0f;
+        float audio_sfx = 1.0f;
+        float audio_music = 1.0f;
+        int save_count = 0;
+    } model;
+
+    Luminumbra::Client::SettingsBridge sb;
+    sb.GetResolution = [&] { return model.resolution; };
+    sb.SetResolution = [&](const std::string& v) { model.resolution = v; };
+    sb.GetWindowMode = [&] { return model.window_mode; };
+    sb.SetWindowMode = [&](const std::string& v) { model.window_mode = v; };
+    sb.GetVSync = [&] { return model.vsync; };
+    sb.SetVSync = [&](bool v) { model.vsync = v; };
+    sb.GetFov = [&] { return model.fov; };
+    sb.SetFov = [&](float v) { model.fov = v; };
+    sb.GetMouseSensitivity = [&] { return model.sensitivity; };
+    sb.SetMouseSensitivity = [&](float v) { model.sensitivity = v; };
+    sb.GetAudioMaster = [&] { return model.audio_master; };
+    sb.SetAudioMaster = [&](float v) { model.audio_master = v; };
+    sb.GetAudioSfx = [&] { return model.audio_sfx; };
+    sb.SetAudioSfx = [&](float v) { model.audio_sfx = v; };
+    sb.GetAudioMusic = [&] { return model.audio_music; };
+    sb.SetAudioMusic = [&](float v) { model.audio_music = v; };
+    sb.Save = [&] { ++model.save_count; return true; };
+    ui.SetSettingsBridge(std::move(sb));
+
+    // Open the settings screen via the main-menu "Settings" button.
+    Rml::ElementDocument* main_menu = LoadDocumentAndFind(ui, "main_menu.rml", "main_menu");
+    ASSERT_NE(main_menu, nullptr);
+    ClickAndUpdate(ui, main_menu->GetElementById("settings_btn"));
+
+    Rml::ElementDocument* settings = FindDocumentByElementId(ui.GetContext(), "settings");
+    ASSERT_NE(settings, nullptr) << "settings_btn must navigate to settings.rml";
+
+    // PopulateSettingsForm: every control is seeded from the bridge getters.
+    auto control_value = [&](const char* id) -> std::string {
+        Rml::Element* el = settings->GetElementById(id);
+        auto* control = dynamic_cast<Rml::ElementFormControl*>(el);
+        return control ? std::string(control->GetValue()) : std::string();
+    };
+    EXPECT_EQ(control_value("setting_resolution"), "1920x1080");
+    EXPECT_EQ(control_value("setting_window_mode"), "borderless");
+    EXPECT_EQ(control_value("setting_vsync"), "on");
+    EXPECT_EQ(std::stof(control_value("setting_fov")), 45.0f);
+    EXPECT_NEAR(std::stof(control_value("setting_mouse_sensitivity")), 0.025f, 1e-4f);
+
+    // Live-apply: change a control and dispatch "change"; the matching setter fires.
+    auto change_control = [&](const char* id, const std::string& value) {
+        Rml::Element* el = settings->GetElementById(id);
+        ASSERT_NE(el, nullptr) << id;
+        auto* control = dynamic_cast<Rml::ElementFormControl*>(el);
+        ASSERT_NE(control, nullptr) << id;
+        control->SetValue(value);
+        Rml::Dictionary params;
+        el->DispatchEvent(Rml::EventId::Change, params);
+        ui.Update();
+    };
+
+    change_control("setting_window_mode", "fullscreen");
+    EXPECT_EQ(model.window_mode, "fullscreen");
+
+    change_control("setting_vsync", "off");
+    EXPECT_FALSE(model.vsync);
+
+    change_control("setting_fov", "90");
+    EXPECT_FLOAT_EQ(model.fov, 90.0f);
+
+    change_control("setting_mouse_sensitivity", "0.5");
+    EXPECT_NEAR(model.sensitivity, 0.5f, 1e-4f);
+
+    change_control("setting_audio_master", "0.4");
+    EXPECT_NEAR(model.audio_master, 0.4f, 1e-4f);
+
+    // Apply & Save flushes every control then persists via Save().
+    EXPECT_EQ(model.save_count, 0);
+    ClickAndUpdate(ui, settings->GetElementById("apply_settings_btn"));
+    EXPECT_EQ(model.save_count, 1) << "Apply & Save must invoke the bridge Save()";
 
     ui.Shutdown();
 }
