@@ -137,6 +137,10 @@ add_executable(common_tests
     sim/lifespan_test.cpp
     sim/wildlife_foliage_test.cpp
     sim/photo_scoring_test.cpp
+    sim/weather_event_test.cpp
+    sim/herd_alarm_test.cpp
+    sim/difficulty_test.cpp
+    sim/photo_codex_test.cpp
 )
 
 target_compile_definitions(common_tests PRIVATE
