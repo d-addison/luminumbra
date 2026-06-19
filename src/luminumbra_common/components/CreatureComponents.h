@@ -6,6 +6,7 @@
 // All fields are sim state (integer-ish floats, deterministic); geometry/rendering is separate.
 
 #include <cstddef>
+#include <cstdint>
 
 namespace Luminumbra::Components {
 
@@ -33,6 +34,35 @@ struct CreatureComponent {
 // back into the TransformComponent. avatar_index is the slot in PhysicsSystem's avatar pool.
 struct CreaturePhysicsComponent {
     std::size_t avatar_index = 0;
+};
+
+// Track (a) — CREATURE EVOLUTION: the heritable genome carried by a creature plus the
+// per-creature reproduction bookkeeping (age + cooldown). Presence of this component is the
+// per-entity opt-in for the CreatureReproductionSystem (luminumbra::ai): a world whose
+// creatures carry NO genome never reproduces, so the canonical roster stays byte-identical
+// (NetworkStateHash baseline green) and existing brain behaviour is unchanged.
+//
+// The trait fields mirror luminumbra::ai::CreatureGenome (kept here as plain floats so the
+// component header has no dependency on the ai/ layer). The reproduction system applies these
+// to CreatureComponent (e.g. move_speed) so selection is visible in behaviour. DEFAULTS
+// reproduce today's brain constants exactly (move_speed 3.0), so a default-stamped creature
+// behaves identically to one with no genome.
+struct CreatureGenomeComponent {
+    // --- heritable traits (mirror ai::CreatureGenome field order) ---
+    float move_speed = 3.0f;        // m/s cruise
+    float vigilance = 0.5f;         // flee bias (reserved behaviour hook)
+    float hunger_threshold = 0.3f;  // reproduce only when hunger <= this
+    float size_scale = 1.0f;        // visual/sim size cue
+
+    // --- reproduction bookkeeping (integer ticks; deterministic) ---
+    // Ticks since this creature was born/spawned. A creature must reach maturity before it
+    // can reproduce.
+    std::uint32_t age_ticks = 0;
+    // Ticks remaining before this creature may reproduce again (set after each birth so
+    // populations grow at a bounded rate rather than exploding).
+    std::uint32_t reproduce_cooldown = 0;
+    // Generation index (0 = founder); offspring = parent generation + 1. Telemetry only.
+    std::uint32_t generation = 0;
 };
 
 }  // namespace Luminumbra::Components
