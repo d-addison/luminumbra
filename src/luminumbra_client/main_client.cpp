@@ -22,6 +22,8 @@
 #include "audio/IAudioManager.h"
 #include "audio/NullAudioManager.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/components/PlantComponents.h"   // I9-FOLIAGE
+#include "luminumbra_common/systems/PlantGrowthSystem.h"    // I9-FOLIAGE phenotype/genome
 #include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
@@ -3239,8 +3241,25 @@ int main(int argc, char* argv[]) {
                                 // seeded layout stays reproducible.
                                 const float s = kScaleMin + frand() * kScaleSpan;
                                 const Luminumbra::Vec3 treePos(x, h, zc);
-                                const Luminumbra::Vec3 treeScale(s, s, s);
                                 const auto treeRot = glm::angleAxis(frand() * 6.2831853f, glm::vec3(0.0f, 1.0f, 0.0f));
+                                // I9-FOLIAGE: bake deterministic GENETIC + MATURITY size
+                                // variation so the grove reads as GROWN — a mix of saplings
+                                // .. mature trees from a position-seeded plant genome + age.
+                                // Uses its OWN rng stream so the frand() layout above is
+                                // unchanged. (The full sim plant pillar — genome/growth/
+                                // breeding/tick — is separate + tested; this is its visible
+                                // size cue. A render bridge for growth-over-time is a follow-up.)
+                                auto pgen = luminumbra::core::DeterministicRng::seeded(
+                                    luminumbra::foliage::kPlantSeedOffset,
+                                    static_cast<std::uint64_t>(static_cast<std::int64_t>(treePos.x)) * 0x9E3779B1ull,
+                                    static_cast<std::uint64_t>(static_cast<std::int64_t>(treePos.z)) * 0x85EBCA77ull);
+                                const auto pgenome = luminumbra::foliage::RandomGenome(pgen);
+                                const float maturity = pgen.next_unit();          // 0 sapling .. 1 mature
+                                const float maturityScale = 0.18f + 0.82f * maturity;
+                                const float geneticSize =
+                                    0.7f + luminumbra::foliage::ExpressGenome(pgenome).max_scale * 0.21f; // ~0.83..1.2
+                                const float effScale = s * maturityScale * geneticSize;
+                                const Luminumbra::Vec3 treeScale(effScale, effScale, effScale);
                                 static const char* const kTreeParts[3] = {
                                     "data/models/trees/tree_small_02_trunk.lmesh",
                                     "data/models/trees/tree_small_02_branches.lmesh",
