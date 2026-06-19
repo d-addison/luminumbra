@@ -127,6 +127,7 @@ add_executable(common_tests
     common/WindFieldSystem_test.cpp
     common/WeatherSystem_test.cpp
     common/AetherFieldSystem_test.cpp
+    common/fields_hardening_test.cpp
     common/HydraulicErosion_test.cpp
     common/WorldStreamingState_test.cpp
     sim/fire_spread_test.cpp
@@ -581,6 +582,9 @@ add_executable(frontier_gates_test
     ai/scent_deposit_system_test.cpp
     ai/ecology_demo_test.cpp
     ai/stimulus_channel_gate_test.cpp
+    ai/perception_scent_hardening_test.cpp
+    ai/utility_instinct_hardening_test.cpp
+    ai/flocking_evolution_hardening_test.cpp
     scripting/lua_api_manifest_gate_test.cpp
     fields/scalar_field_diffusion_gate_test.cpp
     persistence/world_save_service_test.cpp

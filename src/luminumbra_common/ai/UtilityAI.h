@@ -18,7 +18,10 @@
 
 namespace luminumbra::ai {
 
-inline float utility_clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
+// Clamp to [0,1]. NaN-safe: a NaN input floors to 0 (NOT through — both v<0 and v>1 are false
+// for NaN, so the naive form would propagate NaN into UtilityAction::Score and make a NaN-scoring
+// action silently unselectable). The leading !(v>0) catches NaN and negatives in one branch.
+inline float utility_clamp01(float v) { return !(v > 0.0f) ? 0.0f : (v > 1.0f ? 1.0f : v); }
 
 // Response curve over a normalized input [0,1] -> [0,1].
 enum class CurveType : std::uint8_t {
