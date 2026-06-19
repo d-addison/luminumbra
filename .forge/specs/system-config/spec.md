@@ -71,6 +71,21 @@ move) — that is the intrinsic, deliberate, per-feature bump, re-pinned then pe
   (`persistence/WorldPersistenceRoundtrip.h`), supplied by
   `SystemConfig::ComputeConfigSubHash()`, exactly mirroring the `wind`/`weather`/`aether` slots.
   The top-level `world_hash` is UNCHANGED by this addition.
+  - **CRITICAL (verified 2026-06-18):** the top-level `world_hash` is
+    `ServerWorldRunner::ComposeWorldHash`, a LITERAL append-chain
+    `StableChecksum(chunk + "|wind:" + … + "|scents:" + scent)`. Adding a `"|config:"` term
+    THERE would change the checksum **even when config is empty** (a deliberate bump). So
+    R-2.1 must populate ONLY the **additive struct field** `out_sub.config` in
+    `ServerWorldRunner::ComputeWorldSubHashes` (and `ComputeWorldHashAndSubHashes`) — and must
+    **NOT** touch `ComposeWorldHash`. That keeps the top-level hash byte-identical (zero re-pin)
+    while still surfacing config drift to the desync-localization oracle.
+  - **Ownership:** the server needs its own `SystemConfig` (loaded from
+    `data/common/systems.json` only — NO per-user overlay; `user.*` is client-only). At
+    defaults `ComputeConfigSubHash()` is empty → `out_sub.config == ""`, identical to today.
+  - **Baseline-break check before landing:** confirm no gate serializes the WHOLE
+    `WorldStreamingStateSubHashes` struct (all fields) against a pinned literal — if one does,
+    adding an empty `config` field changes that JSON and needs a re-pin (mechanical, not a
+    world_hash bump). Verify with the determinism/NetworkStateHash gate.
 - **R-2.2** `ComputeConfigSubHash()` returns empty `{}` when **every `sim.*` flag and param is
   at its compiled default**. Otherwise it is `Persistence::StableChecksum("config:v1:" + <the
   sorted, canonical serialization of NON-DEFAULT sim entries only>)`. Order-independent:
