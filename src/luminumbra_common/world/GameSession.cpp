@@ -214,7 +214,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 // Per-entity opt-in (genome component): a roster whose creatures carry no
                 // genome — and any world with no creatures — creates nothing, so the
                 // canonical NetworkStateHash baseline stays byte-identical.
-                luminumbra::ai::RunCreatureReproductionOnTick(m_registry, current_tick);
+                const auto repro = luminumbra::ai::RunCreatureReproductionOnTick(m_registry, current_tick);
+                if (repro.born > 0) {
+                    LUMINUMBRA_CORE_INFO("I9-EVO: {} offspring born at tick {}", repro.born, current_tick);
+                }
             }
         }
 

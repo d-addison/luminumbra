@@ -85,7 +85,7 @@ inline CreatureReproductionStats RunCreatureReproductionOnTick(entt::registry& r
     // tick. We don't create entities here — that would invalidate the view.
     struct Birth {
         entt::entity parent;
-        Comp::CreatureGenome offspring;
+        CreatureGenome offspring;
         float px, py, pz;       // parent position (offspring spawns near it)
         bool predator;
         std::uint32_t generation;  // offspring generation

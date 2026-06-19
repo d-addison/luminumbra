@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <string>
 #include <utility> // std::pair for the LOD-resolve helper return
+#include <filesystem> // existence-probe LOD variants before loading (avoid load-error spam)
 
 #include <GLFW/glfw3.h> // I8: glfwGetTime() for render-only tree wind animation
 
@@ -342,7 +343,10 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
                             const std::string& basePath) -> std::pair<Mesh*, std::string> {
         if (m_meshCache.find(candidatePath) == m_meshCache.end()) {
             std::string full = (pipeline.m_root_path / candidatePath).string();
-            m_meshCache[candidatePath] = MeshLoader::Load(full);
+            // Only load the LOD variant if it exists on disk; an absent .lodN.lmesh caches a
+            // null and falls back to LOD0 SILENTLY (no MeshLoader "failed header" error spam).
+            m_meshCache[candidatePath] =
+                std::filesystem::exists(full) ? MeshLoader::Load(full) : nullptr;
         }
         Mesh* m = m_meshCache[candidatePath].get();
         if (m) return {m, candidatePath};
