@@ -10,8 +10,12 @@ uniform sampler2D gAlbedoRoughness;   // RGBA8: RGB albedo + roughness
 uniform sampler2D gMetallicAO;        // RG16F: Metallic + AO
 uniform sampler2D u_ssao;
 
-// Material lookup (256 x 3 rows; row 2 v=0.8333 holds emissive_intensity/scale)
+// Material lookup (256 x 4 rows; row 2 holds emissive_intensity/scale)
 uniform sampler2D u_materialLUT;
+// I8: derive row-center v-coords from a single row count (must match
+// RenderPipeline::init_material_lut ROWS and g_buffer.frag LUT_ROWS).
+const int LUT_ROWS = 4;
+float lutRowV(int row) { return (float(row) + 0.5) / float(LUT_ROWS); }
 // Rescales the normalized emissive_intensity LUT column back to world units.
 // Must match RenderPipeline::kEmissiveLutScale.
 uniform float u_emissiveLutScale = 8.0;
@@ -344,6 +348,38 @@ void main() {
     Lo += CalculateLightContribution(L_sun, V, Normal, F0, Albedo, Metallic, a2, k, sunRadiance)
           * shadow * (1.0 - cloud_shadow);
 
+    // I8 moonlight (owner: "there should be some brightness from the moon"):
+    // a dim cool directional fill so night terrain reads as FORMED (directional
+    // N.L gives contrast/detail) rather than a flat near-black sheet. Derived
+    // entirely from the (working) sun uniforms: the moon is the anti-sun, and it
+    // ramps in as the sun color fades to ~0 below the horizon (see L_moon below
+    // for the direction). Diffuse-only + unshadowed (moonlight is soft; we
+    // avoid a second shadow pass). u_sun.color is already x-transmittance scaled.
+    float sunLum = max(u_sun.color.r, max(u_sun.color.g, u_sun.color.b));
+    float nightFactor = 1.0 - smoothstep(0.0, 0.06, sunLum); // ~0 day -> ~1 night
+    if (nightFactor > 0.001) {
+        // The lighting pass uses u_sun.direction directly as the toward-light
+        // vector L. The moon's TRAVEL direction is -u_sun.direction (anti-sun),
+        // so its toward-light vector is +u_sun.direction — i.e. the same form the
+        // sun uses, which correctly lights the up-facing terrain at night.
+        vec3 L_moon = normalize(u_sun.direction);
+        float NdotL_moon = max(dot(Normal, L_moon), 0.0);
+        // Cool moonlight. The magnitude is high because terrain albedos are dark
+        // (linear ~0.01-0.07), so the albedo*radiance product needs a strong key
+        // to lift night ground to a visible-but-clearly-night tone. Tuned against
+        // the FLAT_DARK_NO_DETAIL gate (needs std_luma > 6 with form).
+        const vec3 kMoonColor = vec3(0.24, 0.32, 0.58);
+        vec3 moonRadiance = kMoonColor * (nightFactor * SUN_IRRADIANCE_SCALE);
+        vec3 moonDiffuse = (Albedo / PI) * moonRadiance * NdotL_moon;
+        // Desaturate toward the cool moon hue: warm (dusty) albedo would otherwise
+        // read as daytime-yellow under the key. Moonlit night vision is low-
+        // saturation + blue-shifted (Purkinje), so pull the lit result partway
+        // toward its own luma scaled by the cool moon tint.
+        float moonLuma = dot(moonDiffuse, vec3(0.2126, 0.7152, 0.0722));
+        moonDiffuse = mix(moonDiffuse, moonLuma * vec3(0.6, 0.8, 1.3), 0.35);
+        Lo += moonDiffuse;
+    }
+
     // Point Lights with early rejection
     for (int i = 0; i < u_pointLightCount; ++i) {
         vec3 lightVec = u_pointLights[i].position - FragPos;
@@ -377,13 +413,14 @@ void main() {
     // Fix: MaterialID is already decoded from normalData.a above, not matData.a
     
     // T-I4-9 emissive calibration: the emission -> lighting -> glow chain is
-    // driven by the materials-LUT emissive_intensity column (row 2, v=0.8333),
+    // driven by the materials-LUT emissive_intensity column (row 2, v=0.625),
     // rescaled from the normalized LUT value. A material with intensity 0 emits
     // no glow; the glow scales LINEARLY and MONOTONICALLY with intensity so the
     // authored value maps predictably to on-screen luminance (calibration table
     // documents the transfer curve). The crystal's prismatic look is preserved
     // as the glow's color/shape; intensity only scales magnitude.
-    float emissiveIntensity = texture(u_materialLUT, vec2(float(MaterialID) / 255.0, 0.8333)).r * u_emissiveLutScale;
+    // I8: material LUT widened to 4 rows; row 2 = emissive (center via lutRowV).
+    float emissiveIntensity = texture(u_materialLUT, vec2(float(MaterialID) / 255.0, lutRowV(2))).r * u_emissiveLutScale;
     if (emissiveIntensity > 0.0) {
         // Inner magical glow
         float glowPulse = sin(u_time * 2.0) * 0.3 + 0.7;

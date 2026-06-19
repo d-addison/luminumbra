@@ -14,12 +14,19 @@ vec2 encode_octahedral(vec3 n) {
     return n.z >= 0.0 ? n.xy : octWrap(n.xy);
 }
 
-// Material lookup texture (256 x 3 rows, T-I4-7/T-I4-9). Row centers for a
-// 3-tall NEAREST texture are v = 1/6, 1/2, 5/6:
-//   row 0 (v=0.1667): [metallic, roughness, ao, magical]
-//   row 1 (v=0.5):    [texture_layer/255, normal_layer/255, tiling/64, has_texture]
-//   row 2 (v=0.8333): [emissive_intensity/scale, reserved...]  (read by lighting)
+// Material lookup texture (256 x 4 rows, T-I4-7/T-I4-9/I8). Row centers for a
+// 4-tall NEAREST texture are v = (row+0.5)/4 = 0.125, 0.375, 0.625, 0.875:
+//   row 0 (v=0.125): [metallic, roughness, ao, magical]
+//   row 1 (v=0.375): [texture_layer/255, normal_layer/255, tiling/64, has_texture]
+//   row 2 (v=0.625): [emissive_intensity/scale, albedo_scale, reserved] (emissive read by lighting)
+//   row 3 (v=0.875): [albedo_tint.rgb, reserved]  (I8 dusty-BF1 palette)
 uniform sampler2D u_materialLUT;
+// I8: single source of truth for the LUT row count. Row-center v-coords are
+// derived from it so a future row-count bump can't leave stale literals that
+// silently sample the wrong row under NEAREST filtering. MUST match
+// RenderPipeline::init_material_lut ROWS.
+const int LUT_ROWS = 4;
+float lutRowV(int row) { return (float(row) + 0.5) / float(LUT_ROWS); }
 
 // T-I4-7 triplanar terrain arrays (texture arrays, not bindless — design §10).
 // Layer indices come from the material LUT texture_layer / normal_layer columns.
@@ -42,6 +49,7 @@ uniform mat3 u_normalViewMatrix;
 uniform sampler2DArray u_skinnedTextures;
 uniform int u_skinnedAlbedoLayer = -1;
 uniform int u_skinnedNormalLayer = -1;
+uniform int u_alphaTest = 0; // I8: 1 = luma-keyed cutout (tree leaves), 0 = opaque
 
 // T-I3-9 far-LOD: view-space radius (meters) inside which far-region mesh
 // fragments are discarded - the live chunk ring owns that space (live wins;
@@ -162,13 +170,19 @@ void main()
 
     // --- Material properties from lookup texture ---
     float matIndex = float(fs_in.MaterialID) / 255.0;
-    vec4 matProps = texture(u_materialLUT, vec2(matIndex, 0.16667)); // row 0
-    vec4 texInfo  = texture(u_materialLUT, vec2(matIndex, 0.5));     // row 1
+    // I8: sample at the row centers derived from LUT_ROWS (no magic literals).
+    vec4 matProps = texture(u_materialLUT, vec2(matIndex, lutRowV(0))); // row 0
+    vec4 texInfo  = texture(u_materialLUT, vec2(matIndex, lutRowV(1))); // row 1
     // T-I5b-5-water-backlog: row 2 G channel is the per-material albedo multiplier
     // (default 1.0). Applied to the baked textured albedo below so a physically-
     // bright photographic texture (the noon sun-bright sand flat) calibrates to a
     // natural lit tone that survives tonemapping below the ACES clip. Render-only.
-    float albedoScale = texture(u_materialLUT, vec2(matIndex, 0.83333)).g; // row 2
+    float albedoScale = texture(u_materialLUT, vec2(matIndex, lutRowV(2))).g; // row 2
+    // I8 dusty-BF1 palette: row 3 RGB is the per-material warm albedo tint
+    // (default 1,1,1 = no-op). Applied alongside albedoScale in the triplanar
+    // branch only, so flat/UV(model) paths are untouched. Render-only content
+    // base-color nudge; distinct from the post LUMIN_GRADE / LUMIN_ATMOS stages.
+    vec3 albedoTint = texture(u_materialLUT, vec2(matIndex, lutRowV(3))).rgb; // row 3
 
     float metallic = matProps.r;
     float roughness = matProps.g;
@@ -217,7 +231,18 @@ void main()
         // texture array by the mesh UVs; optionally perturbs the normal by a
         // tangent-derivative-free approximation (UV-space normal map, applied in
         // world space via the geometric normal as the z axis).
+        // I8: also the static-model lane (tree bark/leaf) — same UV sampling.
         albedo = texture(u_skinnedTextures, vec3(fs_in.UV, float(u_skinnedAlbedoLayer))).rgb;
+        // I8 leaf cutout: the source leaf textures are RGB leaf-cards on a BLACK
+        // background (no alpha), so key the cutout off luminance — the black inter-
+        // leaf gaps are discarded, leaving the lit leaf shapes. NOTE: the array is
+        // SRGB8, so `albedo` here is LINEAR; medium-green leaves are only ~0.06-0.1
+        // linear luma, so the threshold must be low (black bg is ~0). Only active
+        // for alpha-test parts (leaves); opaque otherwise.
+        if (u_alphaTest == 1) {
+            float leafLuma = dot(albedo, vec3(0.299, 0.587, 0.114));
+            if (leafLuma < 0.025) discard;
+        }
         if (u_skinnedNormalLayer >= 0) {
             vec3 tn = texture(u_skinnedTextures, vec3(fs_in.UV, float(u_skinnedNormalLayer))).xyz * 2.0 - 1.0;
             // Build an ad-hoc tangent basis from the geometric world normal so
@@ -256,7 +281,7 @@ void main()
             float jitter = (vnoise(fs_in.WorldPos * 0.05) - 0.5) * 0.18; // ~20 m break-up
             float rockW = smoothstep(0.80 + jitter, 0.50 + jitter, geomSlope); // steep -> rock
             if (rockW > 0.002) {
-                vec4 rockInfo = texture(u_materialLUT, vec2(1.0/255.0, 0.5)); // Stone row 1
+                vec4 rockInfo = texture(u_materialLUT, vec2(1.0/255.0, lutRowV(1))); // Stone row 1
                 float rockTex   = floor(rockInfo.r * 255.0 + 0.5);
                 float rockNrm   = floor(rockInfo.g * 255.0 + 0.5);
                 float rockScale = 1.0 / max(rockInfo.b * 64.0, 0.0625);
@@ -278,7 +303,8 @@ void main()
         // and skinned paths are untouched (no spurious scaling of the case-switch
         // base colors). Brings the noon sun-bright sand flat down to a natural lit
         // tone below the ACES clip.
-        albedo = baseAlbedo * albedoScale;
+        // I8 dusty-BF1 palette: warm albedo tint (default 1,1,1 -> byte-identical).
+        albedo = baseAlbedo * albedoScale * albedoTint;
         roughness = baseRoughness; // I7.1-PBR B1d: per-texel terrain roughness
         textured = true;
     }

@@ -1060,12 +1060,13 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
     glUniform1f(glGetUniformLocation(lighting_program, "u_emissiveLutScale"), kEmissiveLutScale);
 
     // Empty material LUT (material 1 has no emission row -> glow path skipped).
-    std::vector<float> lut(static_cast<size_t>(256) * 3 * 4, 0.0f);
+    // I8: 4 rows to match the production LUT height (all zeros -> emissive 0).
+    std::vector<float> lut(static_cast<size_t>(256) * 4 * 4, 0.0f);
     GLuint lut_tex = 0;
     glGenTextures(1, &lut_tex);
     glActiveTexture(GL_TEXTURE8);
     glBindTexture(GL_TEXTURE_2D, lut_tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 256, 3, 0, GL_RGBA, GL_FLOAT, lut.data());
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 256, 4, 0, GL_RGBA, GL_FLOAT, lut.data());
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -1784,13 +1785,15 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
         {4, "Sand",      3, 2.5f, 0.80f},
         {5, "Deepslate", 4, 4.0f, 0.95f},
     }};
-    // T-I5b-5-water-backlog: the LUT is now 3 rows to mirror
+    // T-I5b-5-water-backlog / I8: the LUT is now 4 rows to mirror
     // RenderPipeline::init_material_lut - row 2 G carries the per-material
-    // albedo_scale (default 1.0). The g_buffer shader samples row 2 (v=0.8333)
-    // and multiplies the baked albedo by it; with a 2-row LUT that sample read
-    // garbage (row 1's normal_layer/255) and crushed every plate dark, so the
-    // gate must author the third row at scale 1.0 (no calibration change).
-    std::vector<float> lut(static_cast<size_t>(256) * 3 * 4, 0.0f);
+    // albedo_scale (default 1.0). The g_buffer shader samples row 2 (v=0.625
+    // after the I8 3->4 row widening) and multiplies the baked albedo by it;
+    // with too-few rows that sample read garbage (a neighbor row) and crushed
+    // every plate dark, so the gate must author row 2 at scale 1.0 (no
+    // calibration change). Row 3 (albedo_tint) is left at 0 -> the triplanar
+    // tint multiply would zero the albedo, so author it at 1.0 below.
+    std::vector<float> lut(static_cast<size_t>(256) * 4 * 4, 0.0f);
     auto set_row1 = [&](int id, int layer, float tiling) {
         const size_t base = (static_cast<size_t>(256) + id) * 4u; // row 1
         lut[base + 0] = static_cast<float>(layer) / 255.0f;
@@ -1803,6 +1806,15 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
         lut[base + 0] = 0.0f;          // emissive_intensity/scale (non-emissive)
         lut[base + 1] = albedo_scale;  // T-I5b-5 albedo_scale (G channel)
     };
+    // I8: row 3 RGB = albedo_tint. The g_buffer triplanar branch multiplies the
+    // baked albedo by this, so it MUST be authored to 1.0 or textured plates go
+    // black. Default no-op tint = [1,1,1].
+    auto set_row3 = [&](int id) {
+        const size_t base = (static_cast<size_t>(3) * 256u + id) * 4u; // row 3
+        lut[base + 0] = 1.0f;
+        lut[base + 1] = 1.0f;
+        lut[base + 2] = 1.0f;
+    };
     // Row 0 G channel = per-plate authored roughness (T-I4-10); the G-buffer
     // stores it in gAlbedoRoughness.a, which the gate reads back per plate.
     for (const auto& p : plates) lut[(static_cast<size_t>(p.id)) * 4 + 1] = p.roughness;
@@ -1811,10 +1823,11 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     // the albedo_scale calibration is exercised separately by the FarLodHorizon
     // sand-flat band). Every id defaults to 1.0 so the row-2 sample is a no-op.
     for (int id = 0; id < 256; ++id) set_row2(id, 1.0f);
+    for (int id = 0; id < 256; ++id) set_row3(id); // I8: no-op tint [1,1,1]
     GLuint material_lut = 0;
     glGenTextures(1, &material_lut);
     glBindTexture(GL_TEXTURE_2D, material_lut);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 256, 3, 0, GL_RGBA, GL_FLOAT, lut.data());
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 256, 4, 0, GL_RGBA, GL_FLOAT, lut.data());
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -2384,10 +2397,13 @@ TEST(RenderSmokeTest, EmissiveCalibrationMonotonic) {
     const GLint lutLoc = glGetUniformLocation(program, "u_materialLUT");
     glUniform1i(lutLoc, 8);
 
-    // Material LUT (256 x 3). Only row 2 (emissive_intensity) varies per sample;
-    // material 6 row 0 must keep roughness so the lighting is well-formed.
+    // Material LUT (256 x 4; I8 widened 3->4 to add the albedo_tint row). Only
+    // row 2 (emissive_intensity) varies per sample; material 6 row 0 must keep
+    // roughness so the lighting is well-formed. The row count MUST match the
+    // production LUT height so the shader's row-center v-coords (0.625 = row 2)
+    // resolve to the same row under NEAREST filtering.
     auto build_lut = [&](float intensity) {
-        std::vector<float> lut(static_cast<size_t>(256) * 3 * 4, 0.0f);
+        std::vector<float> lut(static_cast<size_t>(256) * 4 * 4, 0.0f);
         // row 0 material 6: metallic 0.1, roughness 0.05, ao 1, magical 1.
         lut[(static_cast<size_t>(6)) * 4 + 0] = 0.1f;
         lut[(static_cast<size_t>(6)) * 4 + 1] = 0.05f;
@@ -2413,7 +2429,7 @@ TEST(RenderSmokeTest, EmissiveCalibrationMonotonic) {
         std::vector<float> lut = build_lut(intensities[i]);
         glActiveTexture(GL_TEXTURE8);
         glBindTexture(GL_TEXTURE_2D, lut_tex);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 256, 3, 0, GL_RGBA, GL_FLOAT, lut.data());
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 256, 4, 0, GL_RGBA, GL_FLOAT, lut.data());
 
         const GLfloat clear0[4] = {0, 0, 0, 1};
         glClearBufferfv(GL_COLOR, 0, clear0);

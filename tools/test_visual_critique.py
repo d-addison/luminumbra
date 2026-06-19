@@ -65,11 +65,23 @@ a = frame(80.0)
 a[: H // 3] = (50.0, 130.0, 60.0)     # green curtain in the sky band
 check("aurora_dusk", a, {"tod": "dusk"}, expect_present=["AURORA_AT_DUSK"])
 
-# --- FOLIAGE_SPARSE: daytime down-view with no green ground cover ---
+# --- FOLIAGE_SPARSE: NEUTRAL noon down-view with no green ground cover ---
 a = frame(110.0)
 a[2 * H // 3:] = (130.0, 110.0, 100.0)  # brown/grey ground, not green
-check("foliage_sparse", a, {"daytime": True, "pitched_down": True, "storm": False},
+check("foliage_sparse_noon", a,
+      {"daytime": True, "pitched_down": True, "storm": False, "tod": "noon"},
       expect_present=["FOLIAGE_SPARSE"])
+
+# --- FOLIAGE_SPARSE must NOT false-fire under warm RAKING dusk light ---
+# Present foliage reads orange (r>g) and dim under low warm sun, so the green-
+# cover heuristic measures ~0 cover even though grass IS there. The detector must
+# only assert on the neutral noon cell, never warm dusk/dawn. (Regression guard
+# for the I8 re-bless: the dusk cell flagged a present-foliage false positive.)
+a = frame(70.0)
+a[2 * H // 3:] = (95.0, 55.0, 35.0)     # warm, dim, orange-lit grass (g << r)
+check("foliage_sparse_dusk_no_false_positive", a,
+      {"daytime": True, "pitched_down": True, "storm": False, "tod": "dusk"},
+      expect_absent=["FOLIAGE_SPARSE"])
 
 # --- NIGHT_STORM_TOO_BLACK: storm night, >85% black, low contrast ---
 a = frame(18.0)

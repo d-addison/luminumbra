@@ -224,11 +224,20 @@ def analyze_array(a, m):
             flags.append("AURORA_AT_DUSK")
 
     # --- foliage ground cover in daytime down-view ---
+    # The green-cover heuristic ((g>r+8)&(g>bl+8)&(g>50)) only detects foliage
+    # reliably under NEUTRAL, BRIGHT daylight. Under warm RAKING light (dawn/dusk)
+    # healthy grass reads orange (r>g) and dim (g<50), so the test yields FALSE
+    # NEGATIVES — the foliage is present, just warm-lit (measured: noon cover ~0.58
+    # vs dusk ~0.008 for the SAME scatter). Foliage placement is time-of-day-
+    # invariant, so assert presence on the canonical neutral NOON cell only — the
+    # same noon-as-reference principle the LOW_TEXTURE_DETAIL raking scale uses.
+    # cover is still recorded for every cell as telemetry. Pinned by
+    # tools/test_visual_critique.py (noon asserts; warm dusk does not false-fire).
     if daytime and m.get("pitched_down") and not storm:
         gr = region(a,"ground"); r,g,bl = gr[...,0], gr[...,1], gr[...,2]
         cover = float(((g > r+8)&(g > bl+8)&(g>50)).mean())
         metrics["ground_green_cover_frac"] = cover
-        if cover < T["foliage_ground_green_min"]:
+        if tod == "noon" and cover < T["foliage_ground_green_min"]:
             flags.append("FOLIAGE_SPARSE")
 
     # --- rain streak anisotropy in storm horizon cells ---

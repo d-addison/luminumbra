@@ -12,9 +12,21 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 
+#include <algorithm>
+#include <cstddef>
+
+#include <GLFW/glfw3.h> // I8: glfwGetTime() for render-only tree wind animation
+
 #include "luminumbra_common/animation/AnimationRuntime.h"
 
 namespace Luminumbra::Rendering {
+
+// I8: capacity of the shared per-(mesh,material) instance-matrix VBO. The draw
+// path clamps uploads + draw counts to this so a group larger than capacity can
+// never run glBufferSubData past the buffer end (GL_INVALID_VALUE -> garbage /
+// dropped instances). Must exceed the largest single instance group; the tree
+// scatter caps well under this (see main_client.cpp kMaxInstances).
+static constexpr GLsizei kStaticInstanceCapacity = 16384;
 
 GBufferPass::GBufferPass() = default;
 GBufferPass::~GBufferPass() = default;
@@ -32,7 +44,10 @@ void GBufferPass::init_instanced_static_mesh(const std::filesystem::path& root_p
     glGenBuffers(1, &m_instanceMatrixVBO);
     PassGl::label_gl_object(GL_BUFFER, m_instanceMatrixVBO, "static_mesh.instance_matrices");
     glBindBuffer(GL_ARRAY_BUFFER, m_instanceMatrixVBO);
-    glBufferData(GL_ARRAY_BUFFER, 10000 * sizeof(glm::mat4), nullptr, GL_DYNAMIC_DRAW);
+    // I8: capacity must cover the largest single (mesh, material) instance group
+    // after frustum culling; glBufferSubData does NOT resize, so the draw path
+    // also clamps to kStaticInstanceCapacity.
+    glBufferData(GL_ARRAY_BUFFER, kStaticInstanceCapacity * sizeof(glm::mat4), nullptr, GL_DYNAMIC_DRAW);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
@@ -280,6 +295,9 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
     m_instanced_static_mesh_shader->setInt("u_skinnedTextures", 3);
     m_instanced_static_mesh_shader->setInt("u_skinnedAlbedoLayer", -1);
     m_instanced_static_mesh_shader->setInt("u_skinnedNormalLayer", -1);
+    m_instanced_static_mesh_shader->setInt("u_alphaTest", 0); // I8: per-group override below
+    m_instanced_static_mesh_shader->setFloat("u_time", static_cast<float>(glfwGetTime())); // I8 wind
+    m_instanced_static_mesh_shader->setFloat("u_windStrength", 0.0f); // per-group override below
     // I7.1-PBR B1d: per-texel terrain roughness map (unit 4) — g_buffer.frag is
     // shared, so every program using it must bind a valid array to unit 4.
     glActiveTexture(GL_TEXTURE4);
@@ -322,15 +340,41 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
         Mesh* mesh = m_meshCache[group_key.first].get();
         if (!mesh || matrices.empty()) continue;
         m_instanced_static_mesh_shader->setInt("u_materialId", static_cast<int>(group_key.second));
+        // I8 static-model UV texture lane: if this mesh has registered bark/leaf
+        // textures, bind the static-model array to unit 3 and set its albedo/normal
+        // layers (+ alpha-test) so g_buffer.frag's UV branch samples the model's own
+        // texture by mesh UV instead of the world-projected terrain triplanar.
+        {
+            const auto* smt = pipeline.static_model_tex(group_key.first);
+            glActiveTexture(GL_TEXTURE3);
+            if (smt && pipeline.static_model_texture_array() != 0) {
+                glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.static_model_texture_array());
+                m_instanced_static_mesh_shader->setInt("u_skinnedAlbedoLayer", smt->albedoLayer);
+                m_instanced_static_mesh_shader->setInt("u_skinnedNormalLayer", smt->normalLayer);
+                m_instanced_static_mesh_shader->setInt("u_alphaTest", smt->alphaTest ? 1 : 0);
+                // I8: textured tree parts sway in the wind (rigid props stay at 0).
+                m_instanced_static_mesh_shader->setFloat("u_windStrength", 1.0f);
+            } else {
+                glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_skinnedTextureArray ? pipeline.m_skinnedTextureArray : pipeline.m_terrainTextureArray);
+                m_instanced_static_mesh_shader->setInt("u_skinnedAlbedoLayer", -1);
+                m_instanced_static_mesh_shader->setInt("u_skinnedNormalLayer", -1);
+                m_instanced_static_mesh_shader->setInt("u_alphaTest", 0);
+                m_instanced_static_mesh_shader->setFloat("u_windStrength", 0.0f);
+            }
+        }
+        // I8: clamp to the VBO capacity so an oversized group can't overrun the
+        // buffer (glBufferSubData does not resize). Trees cap well under this.
+        const GLsizei instance_count = static_cast<GLsizei>(
+            std::min<std::size_t>(matrices.size(), static_cast<std::size_t>(kStaticInstanceCapacity)));
         glBindBuffer(GL_ARRAY_BUFFER, m_instanceMatrixVBO);
-        glBufferSubData(GL_ARRAY_BUFFER, 0, matrices.size() * sizeof(glm::mat4), matrices.data());
+        glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(instance_count) * sizeof(glm::mat4), matrices.data());
         glBindVertexArray(mesh->vao);
         for (int i = 0; i < 4; i++) {
             glEnableVertexAttribArray(3 + i);
             glVertexAttribPointer(3 + i, 4, GL_FLOAT, GL_FALSE, sizeof(glm::mat4), (void*)(sizeof(glm::vec4) * i));
             glVertexAttribDivisor(3 + i, 1);
         }
-        glDrawElementsInstanced(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, 0, matrices.size());
+        glDrawElementsInstanced(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, 0, instance_count);
         glBindVertexArray(0);
     }
 }

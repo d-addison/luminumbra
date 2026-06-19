@@ -184,6 +184,16 @@ void main() {
 
     vec3 color = (ambient + direct) * ao;
 
+    // I8 moonlight: a dim COOL fill so night grass reads with the terrain's moonlit
+    // tone instead of near-black. Ramps in as the sun fades (u_sunIntensity -> 0).
+    // DESATURATED toward a blue moon hue (not the grass green): moonlit night vision
+    // is low-saturation + blue-shifted (Purkinje), AND a green night-grass tip at the
+    // horizon trips the GREEN_SKY_SPECKLE gate. Drive it by the blade's LUMINANCE
+    // through a cool blue tint, so it can never read as a green speck.
+    float nightFactor = 1.0 - clamp(u_sunIntensity, 0.0, 1.0);
+    float moonLuma = max(dot(albedo, LUMA), 0.0);
+    color += moonLuma * vec3(0.06, 0.10, 0.20) * (nightFactor * ao);
+
     // Filmic tonemap + gamma, byte-identical to lighting_pass.frag, so the lit
     // blade lands in the same sRGB space as the surrounding tonemapped terrain
     // (the lighting FBO this pass blends into is already tonemapped).

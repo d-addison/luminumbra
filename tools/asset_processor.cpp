@@ -539,6 +539,18 @@ bool process_texture(const std::string& input_path, const std::string& output_pa
     return process_texture_resized(input_path, output_path, 0, false);
 }
 
+// I8: optional triangle budget for the static (.lmesh) path, set by main() from
+// --max-tris. A file-static keeps process_gltf's 2-arg signature intact so the
+// asset round-trip tests (which forward-declare process_gltf(string,string)) and
+// the CMake auto-asset rule keep linking unchanged. 0 = no decimation.
+static size_t g_max_tris = 0;
+// I8: when >= 0, export ONLY this global primitive index (counted across all
+// meshes) instead of merging every primitive. Multi-material assets (e.g. the
+// tree: trunk/branch/leaves, each with its OWN atlas + UV set) are split into
+// one .lmesh per part so each part samples its correct texture via the static-
+// model UV lane. -1 = merge all (default, unchanged behaviour).
+static int g_only_primitive = -1;
+
 void process_gltf(const std::string& input_path, const std::string& output_path) {
     cgltf_options options = {};
     cgltf_data* data = nullptr;
@@ -567,21 +579,38 @@ void process_gltf(const std::string& input_path, const std::string& output_path)
     size_t vertex_offset = 0;
 
     // FIX: Loop through all meshes and all primitives to combine them.
+    int global_prim_index = -1;
     for (size_t mesh_idx = 0; mesh_idx < data->meshes_count; ++mesh_idx) {
         for (size_t prim_idx = 0; prim_idx < data->meshes[mesh_idx].primitives_count; ++prim_idx) {
+            ++global_prim_index;
+            // I8: per-part export — skip primitives that aren't the requested one.
+            if (g_only_primitive >= 0 && global_prim_index != g_only_primitive) continue;
             cgltf_primitive* primitive = &data->meshes[mesh_idx].primitives[prim_idx];
-            
+
             cgltf_accessor* index_accessor = primitive->indices;
             cgltf_accessor* pos_accessor = nullptr;
             cgltf_accessor* norm_accessor = nullptr;
             cgltf_accessor* uv_accessor = nullptr;
 
+            // I8: pick the UV SET the base-color texture actually uses (gltf
+            // texCoord index). The tree's branches sample TEXCOORD_1; trunk/leaves
+            // sample TEXCOORD_0. Taking "the first texcoord" textures branches with
+            // the wrong UVs. Fall back to set 0 when no material/texture.
+            int wanted_uv_set = 0;
+            if (primitive->material && primitive->material->has_pbr_metallic_roughness) {
+                wanted_uv_set = primitive->material->pbr_metallic_roughness.base_color_texture.texcoord;
+            }
+            cgltf_accessor* uv_fallback = nullptr;
             for (size_t i = 0; i < primitive->attributes_count; ++i) {
                 cgltf_attribute* attr = &primitive->attributes[i];
                 if (attr->type == cgltf_attribute_type_position) pos_accessor = attr->data;
                 if (attr->type == cgltf_attribute_type_normal) norm_accessor = attr->data;
-                if (attr->type == cgltf_attribute_type_texcoord) uv_accessor = attr->data;
+                if (attr->type == cgltf_attribute_type_texcoord) {
+                    if (attr->index == wanted_uv_set) uv_accessor = attr->data;
+                    if (!uv_fallback) uv_fallback = attr->data;
+                }
             }
+            if (!uv_accessor) uv_accessor = uv_fallback;
 
             if (!index_accessor || !pos_accessor || !norm_accessor || !uv_accessor) {
                 std::cerr << "Warning: Skipping primitive " << prim_idx << " in mesh " << mesh_idx << " due to missing attributes." << std::endl;
@@ -628,6 +657,35 @@ void process_gltf(const std::string& input_path, const std::string& output_path)
     meshopt_optimizeVertexCache(optimized_indices.data(), optimized_indices.data(), optimized_indices.size(), unique_vertex_count);
     meshopt_optimizeOverdraw(optimized_indices.data(), optimized_indices.data(), optimized_indices.size(), &optimized_vertices[0].pos[0], unique_vertex_count, sizeof(Vertex), 1.05f);
     meshopt_optimizeVertexFetch(optimized_vertices.data(), optimized_indices.data(), optimized_indices.size(), optimized_vertices.data(), unique_vertex_count, sizeof(Vertex));
+
+    // I8: optional decimation to a triangle budget (LOD0). Photogrammetry/SpeedTree
+    // exports can be millions of tris (tree_small_02 = ~2.06M); at instance scale
+    // that is a vertex/overdraw bomb with no LOD. meshopt_simplify collapses toward
+    // the target while bounding the geometric error and preserving the UV seams;
+    // we then re-optimize and COMPACT the vertex buffer so the written mesh is tight.
+    if (g_max_tris > 0 && optimized_indices.size() / 3 > g_max_tris) {
+        const size_t target_index_count = g_max_tris * 3;
+        std::vector<unsigned int> simplified(optimized_indices.size());
+        float result_error = 0.0f;
+        // meshopt_SimplifySparse: the asset may be many DISCONNECTED components
+        // (foliage leaf cards). Without it, isolated small cards are collapsed as
+        // "small features" and the canopy vanishes; with it, coverage is preserved.
+        const size_t simplified_count = meshopt_simplify(
+            simplified.data(), optimized_indices.data(), optimized_indices.size(),
+            &optimized_vertices[0].pos[0], unique_vertex_count, sizeof(Vertex),
+            target_index_count, /*target_error*/ 0.10f, meshopt_SimplifySparse, &result_error);
+        simplified.resize(simplified_count);
+        optimized_indices.swap(simplified);
+        meshopt_optimizeVertexCache(optimized_indices.data(), optimized_indices.data(),
+            optimized_indices.size(), unique_vertex_count);
+        const size_t new_vertex_count = meshopt_optimizeVertexFetch(
+            optimized_vertices.data(), optimized_indices.data(), optimized_indices.size(),
+            optimized_vertices.data(), unique_vertex_count, sizeof(Vertex));
+        optimized_vertices.resize(new_vertex_count);
+        unique_vertex_count = new_vertex_count;
+        std::cout << "  - Simplified to " << (optimized_indices.size() / 3)
+                  << " tris (target " << g_max_tris << ", rel error " << result_error << ")" << std::endl;
+    }
 
     float min_ext[3] = { FLT_MAX, FLT_MAX, FLT_MAX };
     float max_ext[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
@@ -679,7 +737,11 @@ void process_gltf(const std::string& input_path, const std::string& output_path)
 int main(int argc, char* argv[]) {
     if (argc < 3) {
         std::cerr << "Usage: AssetProcessor.exe <input.glb|input.png> <output.lmesh|output.ltex> "
-                     "[target_size] [--preview-png]" << std::endl;
+                     "[target_size] [--preview-png] [--max-tris N]" << std::endl;
+        std::cerr << "  --max-tris N : for .lmesh output, decimate the mesh to <= N triangles (LOD0)"
+                  << std::endl;
+        std::cerr << "  --primitive N : for .lmesh output, export ONLY global primitive N (per-part split"
+                     " of a multi-material asset) using that part's own UV set" << std::endl;
         std::cerr << "  target_size : for .ltex output, resize the source to N x N before mipping "
                      "(0 / omitted = native)" << std::endl;
         std::cerr << "  --preview-png : for .ltex output, also write a sibling <stem>.png of the "
@@ -714,6 +776,24 @@ int main(int argc, char* argv[]) {
         return process_texture_resized(argv[1], output_path, target_size, emit_preview_png) ? 0 : 1;
     }
 
+    // I8: optional triangle budget for the static (.lmesh) path. --max-tris N
+    // decimates the combined mesh to <= N triangles (LOD0). Used to bring
+    // photogrammetry/SpeedTree exports down to an instanceable poly count.
+    size_t max_tris = 0;
+    for (int a = 3; a < argc; ++a) {
+        const std::string arg = argv[a];
+        if (arg == "--max-tris" && a + 1 < argc) {
+            try { max_tris = static_cast<size_t>(std::stoull(argv[++a])); }
+            catch (...) { std::cerr << "Error: --max-tris needs an integer" << std::endl; return 1; }
+        } else if (arg == "--primitive" && a + 1 < argc) {
+            try { g_only_primitive = std::stoi(argv[++a]); }
+            catch (...) { std::cerr << "Error: --primitive needs an integer" << std::endl; return 1; }
+        } else {
+            std::cerr << "Error: unrecognized argument '" << arg << "'" << std::endl;
+            return 1;
+        }
+    }
+    g_max_tris = max_tris;
     process_gltf(argv[1], output_path);
     return 0;
 }
