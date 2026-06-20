@@ -200,6 +200,31 @@ target_link_libraries(tree_lod_test PRIVATE
     gtest_main
 )
 
+# far-field-source-unification (FR-003 / AC-003): pillar-B's first slice -- the forest
+# perf-BUDGET RED harness. OpenGL-free: it models the foliage draw load (instance /
+# draw-call / triangle counts) at a pinned 16k-tree load over the pure TreeLod.h
+# selection + the GBufferPass batching model, emits forest_perf_budget.json, and
+# RED-fails the geometry budget at today's load (impostors flip it green in Wave 3).
+# Links luminumbra_common for DeterministicMath + nlohmann_json (no world/GL).
+add_executable(forest_perf_budget_test
+    rendering/forest_perf_budget_test.cpp
+)
+
+target_compile_definitions(forest_perf_budget_test PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+    LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts"
+)
+
+target_include_directories(forest_perf_budget_test PRIVATE
+    ../src
+    ../src/luminumbra_common
+)
+
+target_link_libraries(forest_perf_budget_test PRIVATE
+    gtest_main
+    luminumbra_common
+)
+
 add_executable(render_smoke_test
     rendering/render_smoke_test.cpp
 )
@@ -748,6 +773,19 @@ set(LUMINUMBRA_GTEST_TARGETS
 foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
     gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120)
 endforeach()
+
+# far-field-source-unification (FR-003 / AC-003): the forest perf-BUDGET harness is
+# registered under the "manual" label and is INTENTIONALLY RED at today's 16k-tree
+# load (no octahedral impostor atlas yet). It is excluded from the default gate so the
+# build + default ctest run stay green; run it deliberately to see the RED budget:
+#   default gate (skip it):   ctest -LE manual
+#   run the budget harness:   ctest -L manual -R ForestPerfBudget --output-on-failure
+# The -Mode FarFieldForestBudget validator reads its forest_perf_budget.json and
+# asserts the over-budget RED state; Wave-3 impostors flip it green.
+add_test(NAME ForestPerfBudget COMMAND forest_perf_budget_test)
+set_tests_properties(ForestPerfBudget PROPERTIES
+    LABELS "manual;perf;budget"
+    TIMEOUT 300)
 
 # T-I4-15: register the spike benchmark under the "manual" label. It is
 # evidence-only (not a required gate) and its Debug runtime (~25s, and can exceed
