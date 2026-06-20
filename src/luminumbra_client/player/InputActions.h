@@ -23,6 +23,14 @@ enum class InputAction : int {
     NoclipUp,
     NoclipDown,
     ToggleNoclip,
+    // Pillar-G photo-mode capture loop (g-vertical-slice spike). Read-only w.r.t. sim:
+    // these drive a client-only PhotoModeState + capture/persist, never a tick.
+    TogglePhotoMode,
+    Shutter,
+    LensApertureUp,    // stop DOWN (larger f-number, deeper DoF)
+    LensApertureDown,  // open UP   (smaller f-number, shallower DoF / more bokeh)
+    LensFocusUp,       // push focus distance farther
+    LensFocusDown,     // pull focus distance nearer
     Count
 };
 
@@ -47,6 +55,12 @@ inline constexpr std::array<InputActionDef, kInputActionCount> kInputActionDefs 
     {InputAction::NoclipUp,     "NoclipUp",     GLFW_KEY_SPACE},
     {InputAction::NoclipDown,   "NoclipDown",   GLFW_KEY_LEFT_CONTROL},
     {InputAction::ToggleNoclip, "ToggleNoclip", GLFW_KEY_V},
+    {InputAction::TogglePhotoMode,  "TogglePhotoMode",  GLFW_KEY_P},
+    {InputAction::Shutter,          "Shutter",          GLFW_KEY_ENTER},
+    {InputAction::LensApertureUp,   "LensApertureUp",   GLFW_KEY_RIGHT_BRACKET},
+    {InputAction::LensApertureDown, "LensApertureDown", GLFW_KEY_LEFT_BRACKET},
+    {InputAction::LensFocusUp,      "LensFocusUp",      GLFW_KEY_EQUAL},
+    {InputAction::LensFocusDown,    "LensFocusDown",    GLFW_KEY_MINUS},
 }};
 
 }  // namespace Luminumbra::Client

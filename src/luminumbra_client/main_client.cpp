@@ -36,6 +36,7 @@
 #include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
+#include "luminumbra_common/game/PhotoMode.h"  // g-vertical-slice: photo-mode capture loop (read-only observer)
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"  // user.* video/audio/controls settings
@@ -77,6 +78,14 @@ using namespace Luminumbra::Client::ScenarioHarness;
 // --- Global Pointers ---
 std::unique_ptr<Luminumbra::Rendering::Camera> g_camera;
 std::unique_ptr<Luminumbra::Client::PlayerController> g_playerController;
+
+// g-vertical-slice spike: client-only photo-mode state + progression codex. NOT sim
+// state — neither participates in any baseline NetworkStateHash (PhotoCodex.h
+// documents this), so photo mode is a pure read-mostly observer. The lens is nudged
+// by the PlayerController's aperture/focus inputs; the codex keeps the best score per
+// species across the session.
+luminumbra::game::PhotoModeState g_photoMode;
+luminumbra::game::PhotoCodex     g_photoCodex;
 // Single client config: defaults (data/common/systems.json) overlaid by the writable
 // per-user settings file (%APPDATA%/Luminumbra/settings.json). user.* is client-only,
 // never hashed (docs/STANDARDS.md §5). Loaded once at startup (before window creation).
@@ -181,6 +190,57 @@ void BakeProcgenPlants(Luminumbra::Rendering::PlantProcgenPass* pp, float stageF
          static_cast<std::uint64_t>(stageF * 1000.0f)) | 1ull;
     pp->set_plants(verts, indices, sig);
     pp->set_enabled(true);
+}
+
+// g-vertical-slice spike: gather the in-frustum creature subjects for a photo-mode
+// CAPTURE. STRICTLY a read-only observer — it takes a CONST registry + CONST camera,
+// projects each creature's world position into NDC via the camera's view*proj, and
+// derives a deterministic species/luminance proxy (R1/OQ-A: no luminance component to
+// read, so a constant scene-luminance + the predator-role species proxy; no new sim
+// component). It mutates NOTHING, so it cannot perturb world_hash (the sim-isolation
+// gate test pins this on the pure path).
+std::vector<luminumbra::game::PhotoSubjectView> GatherPhotoSubjects(
+    const entt::registry& reg,
+    const Luminumbra::Rendering::Camera& camera,
+    int width,
+    int height) {
+    std::vector<luminumbra::game::PhotoSubjectView> views;
+    if (width <= 0 || height <= 0) return views;
+
+    const glm::mat4 proj = glm::perspective(
+        glm::radians(camera.Zoom),
+        static_cast<float>(width) / static_cast<float>(height),
+        camera.GetNearPlane(), camera.GetFarPlane());
+    const glm::mat4 view_proj = proj * camera.GetViewMatrix();
+
+    auto cr_view = reg.view<const Luminumbra::Components::CreatureComponent,
+                            const Luminumbra::Components::TransformComponent>();
+    for (const entt::entity e : cr_view) {
+        const auto& tf = cr_view.get<const Luminumbra::Components::TransformComponent>(e);
+        const auto& cr = cr_view.get<const Luminumbra::Components::CreatureComponent>(e);
+
+        const glm::vec3 world(tf.position.x, tf.position.y, tf.position.z);
+        const glm::vec4 clip = view_proj * glm::vec4(world, 1.0f);
+
+        luminumbra::game::PhotoSubjectView pv;
+        pv.in_frustum = (clip.w > 0.0f);
+        if (pv.in_frustum) {
+            const glm::vec3 ndc = glm::vec3(clip) / clip.w;
+            pv.in_frustum = (ndc.x >= -1.0f && ndc.x <= 1.0f && ndc.y >= -1.0f && ndc.y <= 1.0f);
+            pv.ndc_x = ndc.x;
+            pv.ndc_y = ndc.y;
+        }
+        const glm::vec3 cam_to = world - camera.Position;
+        const float dist = glm::length(cam_to);
+        pv.distance_m = dist > 0.01f ? dist : 0.01f;
+        pv.size_m = 1.0f;  // ~creature footprint
+        // Apparent footprint falls off with distance (a far subject fills less frame).
+        pv.size = luminumbra::game::PhotoModeClamp01(pv.size_m / (pv.distance_m * 0.5f + 1.0f));
+        pv.light = 0.6f;   // scene-luminance proxy (no per-creature luminance component)
+        pv.species_id = cr.is_predator ? 1 : 2;  // deterministic role proxy
+        views.push_back(pv);
+    }
+    return views;
 }
 
 // I9-ECO: rebuild creature markers (small octahedra, red = predator, blue = prey) at the
@@ -4061,6 +4121,76 @@ int main(int argc, char* argv[]) {
                                                gameSession->GetWorldSystem());
                     }
                     renderPipeline.render_frame(gameSession->GetRegistry(), *gameSession->GetWorldSystem(), *g_camera, deltaTime, wireframe_mode);
+
+                    // --- g-vertical-slice spike: photo-mode capture loop ---
+                    // Runs AFTER render_frame, on the RENDER side, against a CONST
+                    // registry: it reads camera + creature state, scores via the landed
+                    // PhotoSession scorers, and on shutter persists a PPM + verdict
+                    // sidecar into photos/. It NEVER ticks the sim or mutates the
+                    // registry, so determinism cannot regress (the sim-isolation gate
+                    // test pins the pure path). The interactive-only guard keeps it out
+                    // of the automated scenario/gate runs.
+                    if (g_playerController && currentState == GameState::IN_GAME &&
+                        !scenario_config.active()) {
+                        g_photoMode.active = g_playerController->photo_mode_active();
+                        if (g_photoMode.active) {
+                            // Apply lens nudges (aperture stops + focus metres), clamped
+                            // to sane photographic ranges.
+                            g_photoMode.lens.aperture_f += g_playerController->consume_aperture_nudge();
+                            if (g_photoMode.lens.aperture_f < 1.0f) g_photoMode.lens.aperture_f = 1.0f;
+                            if (g_photoMode.lens.aperture_f > 32.0f) g_photoMode.lens.aperture_f = 32.0f;
+                            g_photoMode.lens.focus_distance_m += g_playerController->consume_focus_nudge();
+                            if (g_photoMode.lens.focus_distance_m < 0.2f) g_photoMode.lens.focus_distance_m = 0.2f;
+                            if (g_photoMode.lens.focus_distance_m > 200.0f) g_photoMode.lens.focus_distance_m = 200.0f;
+
+                            if (g_playerController->consume_shutter_request()) {
+                                int cap_w = 0, cap_h = 0;
+                                glfwGetFramebufferSize(window, &cap_w, &cap_h);
+                                // Build the shot from the live frame (CONST registry read).
+                                const std::vector<luminumbra::game::PhotoSubjectView> subjects =
+                                    GatherPhotoSubjects(gameSession->GetRegistry(), *g_camera, cap_w, cap_h);
+                                const luminumbra::game::ShotInput shot =
+                                    luminumbra::game::BuildShotInput(subjects, g_photoMode.lens, 0.6f);
+                                const luminumbra::game::ShotVerdict verdict =
+                                    luminumbra::game::CaptureShot(g_photoCodex, shot);
+                                g_photoMode.last_total = verdict.total;
+                                g_photoMode.last_stars = verdict.stars;
+                                ++g_photoMode.captures;
+
+                                // Persist the framebuffer (PPM) + a verdict sidecar.
+                                std::error_code _photo_ec;
+                                const std::filesystem::path photo_dir =
+                                    std::filesystem::path(root_path_str) / "photos";
+                                std::filesystem::create_directories(photo_dir, _photo_ec);
+                                const std::string stamp =
+                                    "photo-" + std::to_string(g_photoMode.captures);
+                                if (cap_w > 0 && cap_h > 0) {
+                                    std::vector<unsigned char> px(
+                                        static_cast<std::size_t>(cap_w) * static_cast<std::size_t>(cap_h) * 3u);
+                                    glReadBuffer(GL_BACK);
+                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                                    glReadPixels(0, 0, cap_w, cap_h, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+                                    WritePixelBufferPpm(photo_dir / (stamp + ".ppm"), cap_w, cap_h, px);
+                                }
+                                luminumbra::game::PhotoSidecar side;
+                                side.stamp = stamp;
+                                side.verdict = verdict;
+                                side.species_id = shot.main_species_id;
+                                side.lens = g_photoMode.lens;
+                                std::ofstream sidecar(photo_dir / (stamp + ".photo.json"),
+                                                      std::ios::binary | std::ios::trunc);
+                                if (sidecar) {
+                                    const std::string json =
+                                        luminumbra::game::SerializePhotoSidecar(side);
+                                    sidecar.write(json.data(),
+                                                  static_cast<std::streamsize>(json.size()));
+                                }
+                                LUMINUMBRA_CORE_INFO("Photo captured: {} stars (total {}), saved {}",
+                                                     verdict.stars, verdict.total, stamp);
+                            }
+                        }
+                    }
+
                     if (scenario_config.active() && currentState == GameState::IN_GAME) {
                         ++scenario_frame_count;
                         const auto now = std::chrono::steady_clock::now();

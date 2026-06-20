@@ -68,6 +68,30 @@ public:
     void ApplyKeyBindings(const luminumbra::core::SystemConfig& cfg);
     [[nodiscard]] int key(InputAction action) const { return m_keys[static_cast<std::size_t>(action)]; }
 
+    // --- Pillar-G photo-mode capture loop (g-vertical-slice spike) ---
+    // Strictly read-only w.r.t. sim: these flags drive a client-only PhotoModeState
+    // and capture/persist, never a tick or a registry mutation.
+    [[nodiscard]] bool photo_mode_active() const { return m_photoModeActive; }
+    // Edge-triggered shutter request: returns true ONCE per shutter key press, then
+    // self-clears, so the caller captures exactly one frame per press.
+    [[nodiscard]] bool consume_shutter_request() {
+        const bool fired = m_shutterRequested;
+        m_shutterRequested = false;
+        return fired;
+    }
+    // Net lens nudges accumulated since the last consume (aperture stops + focus
+    // metres), applied by the caller to its PhotoModeState lens. Self-clears.
+    [[nodiscard]] float consume_aperture_nudge() {
+        const float n = m_apertureNudge;
+        m_apertureNudge = 0.0f;
+        return n;
+    }
+    [[nodiscard]] float consume_focus_nudge() {
+        const float n = m_focusNudge;
+        m_focusNudge = 0.0f;
+        return n;
+    }
+
 private:
     PlayerReplayInputFrame ReadLiveInputFrame() const;
     void UpdateWalking(float deltaTime, const glm::vec3& wishDir, bool jumpPressed, bool crouchPressed, bool sprintHeld);
@@ -101,6 +125,14 @@ private:
     bool m_wantsToCrouch = false;
     bool m_hasInitializedPhysicsPlayer = false;
     std::uint64_t m_replayFrameCounter = 0;
+
+    // Pillar-G photo-mode (spike): client-only, NOT sim state. The toggle flips
+    // m_photoModeActive; the shutter sets an edge-triggered one-shot flag; the lens
+    // keys accumulate nudges the main loop applies to its PhotoModeState lens.
+    bool  m_photoModeActive = false;
+    bool  m_shutterRequested = false;
+    float m_apertureNudge = 0.0f; // f-number stops (+ = stop down, - = open up)
+    float m_focusNudge = 0.0f;    // metres (+ = farther, - = nearer)
 };
 
 } // namespace Luminumbra::Client

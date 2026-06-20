@@ -186,6 +186,27 @@ void PlayerController::ProcessKeyInput(int key, int action) {
         }
     }
 
+    // --- Pillar-G photo mode (g-vertical-slice spike) — read-only w.r.t. sim ---
+    // Toggle photo mode on/off; while active the shutter + lens nudges are armed.
+    // None of these touch the physics body, the registry, or a tick — they only set
+    // client-only flags the main loop reads after render.
+    if (key == this->key(InputAction::TogglePhotoMode) && action == GLFW_PRESS) {
+        m_photoModeActive = !m_photoModeActive;
+        LUMINUMBRA_CORE_INFO(m_photoModeActive ? "Photo mode ON. [/] aperture, -/= focus, Enter to shutter."
+                                               : "Photo mode OFF.");
+    }
+    if (m_photoModeActive) {
+        if (key == this->key(InputAction::Shutter) && action == GLFW_PRESS) {
+            m_shutterRequested = true;
+        }
+        // Lens nudges fire on press AND repeat so holding ramps the value.
+        const bool pressed = (action == GLFW_PRESS || action == GLFW_REPEAT);
+        if (pressed && key == this->key(InputAction::LensApertureUp))   m_apertureNudge += 0.3f;
+        if (pressed && key == this->key(InputAction::LensApertureDown)) m_apertureNudge -= 0.3f;
+        if (pressed && key == this->key(InputAction::LensFocusUp))      m_focusNudge += 0.25f;
+        if (pressed && key == this->key(InputAction::LensFocusDown))    m_focusNudge -= 0.25f;
+    }
+
     // --- Mode-Specific Controls ---
     if (m_mode == MovementMode::Walking) {
         // These actions are events; they set a flag that is consumed in the Update loop.
