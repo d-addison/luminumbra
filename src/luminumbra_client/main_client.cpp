@@ -155,6 +155,11 @@ std::string g_ui_screenshot_screen;          // "" = inactive; else e.g. "main_m
 std::filesystem::path g_ui_screenshot_shot;  // full screenshot path (.ppm)
 bool g_ui_fixtures = false;                   // seed deterministic UI fixture data
 int g_ui_screenshot_settle = 0;              // frames waited before capture
+// F4 — live scenic menu backdrop: a golden-hour world rendered behind the menus (matching the
+// references). Stood up at boot while staying in MAIN_MENU; the menu render branch draws it
+// under the transparent UI with a slow auto-orbit. Replaced cleanly when a real world loads.
+bool g_menu_backdrop_active = false;
+float g_menu_backdrop_yaw = 30.0f;           // orbit accumulator (degrees)
 bool g_timelapse_grow = false;     // grow the procgen plants sapling->tree over the capture
 bool g_timelapse_season = false;   // drift summer->autumn leaf color over the capture
 bool g_timelapse_creatures = false; // spawn predators/prey + render markers (ecology demo)
@@ -2239,6 +2244,9 @@ int main(int argc, char* argv[]) {
         renderPipeline.prepare_world_swap();
         // 1. Synchronously create the world systems and metadata. This is fast.
         if (gameSession->CreateWorld(name, seed, worldType)) {
+            // A real world replaces the F4 menu-backdrop world; stop the menu-branch from
+            // rendering with the (now game-owned) camera/world.
+            g_menu_backdrop_active = false;
             if (auto* world_system = gameSession->GetWorldSystem()) {
                 renderPipeline.SetupGPUSDFIntegration(*world_system);
             }
@@ -2466,6 +2474,44 @@ int main(int argc, char* argv[]) {
             world_system->clear_world(nullptr);
         }
         glfwSetWindowShouldClose(window, true);
+    }
+
+    // F4 — stand up the live scenic menu backdrop world. Synchronous so the first menu frame
+    // already shows terrain. Skipped for automated runs that drive their own world (scenario,
+    // auto-create, boot-metrics, timelapse, render-benchmark) and via --no-menu-backdrop.
+    {
+        const bool drives_own_world =
+            scenario_config.active() ||
+            HasCommandLineFlag(argc, argv, "--auto-create-world") ||
+            runtime_boot_recorder.enabled() ||
+            g_timelapse_frames > 0 ||
+            !g_render_benchmark_path.empty();
+        const bool want_backdrop =
+            !drives_own_world &&
+            !HasCommandLineFlag(argc, argv, "--no-menu-backdrop") &&
+            gameStateManager.GetCurrentState() == GameState::MAIN_MENU;
+        if (want_backdrop) {
+            renderPipeline.prepare_world_swap();
+            if (gameSession->CreateWorld("Menu Vista", "lumina-menu", "mountains")) {
+                if (auto* ws = gameSession->GetWorldSystem()) {
+                    renderPipeline.SetupGPUSDFIntegration(*ws);
+                    gameSession->LoadWorldState();
+                    if (gameSession->GetPhysicsSystem()) {
+                        ws->EnsureSurfaceReadyNear(gameSession->GetMetadata().spawnPoint,
+                                                   gameSession->GetPhysicsSystem(), 4, 2);
+                    }
+                    const auto sp = gameSession->GetMetadata().spawnPoint;
+                    // Elevated hilltop vantage looking slightly down at the valley, like the refs.
+                    g_camera = std::make_unique<Luminumbra::Rendering::Camera>(
+                        glm::vec3(sp.x, sp.y + 45.0f, sp.z), glm::vec3(0.0f, 1.0f, 0.0f),
+                        /*yaw*/ 30.0f, /*pitch*/ -10.0f);
+                    g_camera->Zoom = 55.0f;  // scenic FOV
+                    g_world_render_data_initialized = true;
+                    g_menu_backdrop_active = true;
+                    LUMINUMBRA_CORE_INFO("Menu backdrop world ready (live golden-hour vista).");
+                }
+            }
+        }
     }
 
     int exit_code = 0;
@@ -6101,6 +6147,17 @@ int main(int argc, char* argv[]) {
                     }
                 }
             } else { // Main Menu, etc.
+                // F4: render the live scenic world behind the menu, with a slow auto-orbit, at
+                // golden hour. The menu UI bodies are transparent (game_theme.rcss) so the world
+                // shows through. render_frame draws to the back buffer BEFORE the UI pass.
+                if (g_menu_backdrop_active && g_camera && gameSession && gameSession->GetWorldSystem()) {
+                    g_menu_backdrop_yaw += deltaTime * 1.4f;  // gentle drift (deg/s)
+                    g_camera->Yaw = g_menu_backdrop_yaw;
+                    g_camera->updateCameraVectors();
+                    renderPipeline.set_time_of_day(0.23f);    // warm low sun (golden hour)
+                    renderPipeline.render_frame(gameSession->GetRegistry(), *gameSession->GetWorldSystem(),
+                                                *g_camera, deltaTime, wireframe_mode);
+                }
                 if (g_uiManager) {
                     g_uiManager->Render();
                 }

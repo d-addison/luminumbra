@@ -1,0 +1,5 @@
+{ "camera": { "pos": [8, 44, 8], "yaw": 35, "pitch": -10, "fov": 60 },
+  "time_of_day": 0.0,
+  "clouds": { "coverage": 0.35, "plane_height": 1100, "shadow": false },
+  "weather": { "type": "none", "intensity": 0.0 },
+  "screenshot": "references/compare/rockclose.ppm" }

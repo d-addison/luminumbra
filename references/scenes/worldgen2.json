@@ -1,0 +1,5 @@
+{ "camera": { "pos": [8, 62, 8], "yaw": 35, "pitch": -7, "fov": 64 },
+  "time_of_day": 0.04,
+  "clouds": { "coverage": 0.4, "plane_height": 1100, "shadow": false },
+  "weather": { "type": "none", "intensity": 0.0 },
+  "screenshot": "references/compare/worldgen2.ppm" }
