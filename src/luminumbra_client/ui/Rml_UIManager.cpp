@@ -7,6 +7,7 @@
 #include <functional>
 #include <cstdio>
 #include <string>
+#include <chrono>
 #include <GLFW/glfw3.h>
 
 namespace Luminumbra::Client {
@@ -216,9 +217,15 @@ void Rml_UIManager::Shutdown() {
 void Rml_UIManager::Update() {
     if (m_context) {
         ProcessDocumentLoadRequest(); // Process async loads
+        // T006: only push dimensions on an actual size change — a per-frame SetDimensions can
+        // needlessly dirty layout even when the size is unchanged.
         int width, height;
         glfwGetWindowSize(m_window, &width, &height);
-        m_context->SetDimensions(Rml::Vector2i(width, height));
+        if (width != m_lastWidth || height != m_lastHeight) {
+            m_context->SetDimensions(Rml::Vector2i(width, height));
+            m_lastWidth = width;
+            m_lastHeight = height;
+        }
         m_context->Update();
     }
 }
@@ -236,8 +243,13 @@ void Rml_UIManager::Render() {
         // (GL_SRC_ALPHA) double-darkens any semi-transparent fill/text.
         glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
         glDisable(GL_DEPTH_TEST);
-        
+
+        // T007: time the UI draw submission (CPU side; the UI is off the deterministic sim path, so
+        // wall-clock here is fine). Meaningful while the renderer is unbatched (draw-call-bound).
+        const auto ui_t0 = std::chrono::high_resolution_clock::now();
         m_context->Render();
+        const auto ui_t1 = std::chrono::high_resolution_clock::now();
+        m_lastUiFrameMs = std::chrono::duration<double, std::milli>(ui_t1 - ui_t0).count();
 
         glEnable(GL_DEPTH_TEST);
     }

@@ -61,6 +61,10 @@ public:
     void Update();
     void Render();
 
+    // T007: last UI-pass submit time in ms (CPU draw-submission cost; meaningful while the UI
+    // renderer is unbatched). A GPU timer-query refinement is deferred to the perf-hardening phase.
+    double GetLastUiFrameMs() const { return m_lastUiFrameMs; }
+
     void RequestLoadDocument(std::string path);
     
     // Fixed: GetContext() is now defined inline here, solving the redefinition error.
@@ -105,6 +109,13 @@ private:
     std::string m_documentToLoad;
     std::string m_activeDocument;
     std::string m_selectedWorldId;
+
+    // T006: cache the last pushed context size so SetDimensions only fires on an actual resize
+    // (a per-frame SetDimensions can needlessly dirty layout). -1 forces the first push.
+    int m_lastWidth = -1;
+    int m_lastHeight = -1;
+    // T007: last UI-pass CPU submit time (ms).
+    double m_lastUiFrameMs = 0.0;
 
     // Static pointer to the active instance for callbacks
     static Rml_UIManager* s_active_manager;

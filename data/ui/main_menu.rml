@@ -7,8 +7,8 @@
     <body id="main_menu" class="fade-in">
         <!-- Main title with quantum effect -->
         <div class="container">
-            <h1>Luminumbra</h1>
-            <p class="subtitle">The Quantum Engine</p>
+            <h1>luminumbra</h1>
+            <p class="subtitle">a world to photograph</p>
             
             <!-- Main navigation -->
             <div id="nav">

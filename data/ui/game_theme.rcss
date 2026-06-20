@@ -1,25 +1,51 @@
+/* ============================================================================
+   game_theme.rcss — "Zen / Photographic Calm" visual language.
+   Palette: warm-dusk near-black #16130E · ivory ink #F2EDE4 · sage #8FA68E ·
+   dusk-gold focus #C9A86A · warm surfaces #1F1B14 · hairlines #3A3326.
+   Type: Lora serif, light weight, generous letter-spacing, lots of space.
+   Linked AFTER base.rcss (which supplies block/inline structural defaults).
+   ============================================================================ */
+
 body {
     width: 100%;
     height: 100%;
-    color: #ffffff;
+    color: #F2EDE4;
     font-family: Lora;
-    background-color: #1a1a1a;
+    background-color: #14110B;
+    /* Warm dusk gradient — soft light from above fading to a dark vignette, so the field has depth
+       instead of a flat fill. (A live blurred-world / photo backdrop is the later T020 backdrop task.) */
+    decorator: linear-gradient(180deg, #2A2114 0%, #17130C 46%, #0B0906 100%);
 }
 
+/* Main menu: centre the hero + nav vertically and horizontally. */
+body#main_menu {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+}
+
+/* ---- Title / hero ---- */
 h1 {
-    font-size: 96px;
+    font-size: 74px;
     text-align: center;
-    color: #ffffff;
-    font-weight: bold;
+    color: #F2EDE4;
+    font-weight: normal;
+    letter-spacing: 5px;
+    margin-top: 8px;
+    margin-bottom: 2px;
 }
 
 p.subtitle {
     text-align: center;
     font-style: italic;
-    color: #cccccc;
-    font-size: 22px;
+    color: #8FA68E;
+    font-size: 21px;
+    letter-spacing: 1px;
+    margin-bottom: 40px;
 }
 
+/* ---- Main-menu navigation ---- */
 div#nav {
     text-align: center;
     width: 300px;
@@ -27,33 +53,46 @@ div#nav {
     margin-right: auto;
 }
 
-/* Base button look. Inline-block by default (from base.rcss); pages opt into
-   block/full-width via a component class (e.g. #nav button). This scoping is what
-   stops filter rows + list buttons from stacking at 280px. */
+/* Base button: a calm "ghost" — hairline border, transparent fill, sage on hover. */
 button {
-    height: 50px;
-    padding-left: 18px;
-    padding-right: 18px;
-    background-color: #4f5b66;
-    border-width: 2px;
-    border-color: #8d99ae;
-    color: #ffffff;
-    font-size: 20px;
-    font-weight: bold;
+    height: 48px;
+    line-height: 46px;          /* vertically centre the single-line label */
+    padding-left: 22px;
+    padding-right: 22px;
+    /* faint translucent fill so labels stay readable over the busy world backdrop */
+    background-color: rgba(20, 17, 11, 130);
+    border-width: 1px;
+    border-color: #6B6450;
+    color: #F2EDE4;
+    font-size: 19px;
+    font-weight: normal;
     font-family: Lora;
     text-align: center;
+}
+
+button:hover {
+    background-color: #8FA68E;
+    border-color: #A9C0A0;
+    color: #16130E;
+}
+
+button:active {
+    background-color: #7A9079;
+    border-color: #8FA68E;
+    color: #16130E;
 }
 
 /* Main-menu navigation: the big stacked, centered buttons. */
 #nav button {
     display: block;
     width: 280px;
-    margin-bottom: 20px;
+    margin-bottom: 16px;
     margin-left: auto;
     margin-right: auto;
+    letter-spacing: 1px;
 }
 
-/* Small inline buttons — the filter row in Load World (All / Recent / Favorites). */
+/* Small inline buttons — the filter row in Load World. */
 .btn-sm {
     height: auto;
     width: auto;
@@ -63,18 +102,6 @@ button {
     margin-right: 8px;
 }
 
-button:hover {
-    background-color: #d80032;
-    border-color: #ff4d6d;
-    color: #ffffff;
-}
-
-button:active {
-    background-color: #b8002a;
-    border-color: #d80032;
-    color: #ffffff;
-}
-
 .container {
     text-align: center;
     width: 100%;
@@ -82,20 +109,19 @@ button:active {
 
 .version-info {
     position: absolute;
-    bottom: 16px;
-    right: 16px;
-    color: #999999;
+    bottom: 18px;
+    right: 20px;
+    color: #6E6656;
     font-size: 12px;
+    letter-spacing: 1px;
 }
 
-/* ============================================================
-   Settings screen (settings.rml)
-   Reuses the dusty/quantum palette of the main menu. These
-   classes are additive — existing screens don't use them.
-   ============================================================ */
+/* ============================================================================
+   Forms / settings — same Zen palette, left-aligned, spacious.
+   ============================================================================ */
 
 .form-container {
-    width: 640px;
+    width: 660px;
     margin-left: auto;
     margin-right: auto;
     text-align: left;
@@ -107,66 +133,69 @@ button:active {
 }
 
 .settings-section {
-    margin-bottom: 28px;
-    padding: 18px;
-    background-color: #232a31;
+    margin-bottom: 30px;
+    padding: 22px;
+    background-color: #1F1B14;
     border-width: 1px;
-    border-color: #3a444f;
+    border-color: #3A3326;
+}
+
+h2 {
+    font-weight: normal;
+    letter-spacing: 2px;
 }
 
 h2.settings-heading {
-    font-size: 26px;
-    color: #ff4d6d;
-    font-weight: bold;
-    margin-bottom: 14px;
+    font-size: 24px;
+    color: #8FA68E;
+    font-weight: normal;
+    letter-spacing: 3px;
+    margin-bottom: 16px;
     border-bottom-width: 1px;
-    border-bottom-color: #4f5b66;
-    padding-bottom: 6px;
+    border-bottom-color: #3A3326;
+    padding-bottom: 8px;
 }
 
 .settings-row {
     display: block;
-    margin-bottom: 16px;
+    margin-bottom: 18px;
 }
 
 .settings-row label {
     display: block;
-    color: #e6e6e6;
-    font-size: 18px;
-    margin-bottom: 6px;
+    color: #D8CFBC;
+    font-size: 17px;
+    margin-bottom: 7px;
+    letter-spacing: 0.5px;
 }
 
 .settings-value {
-    color: #8d99ae;
-    font-size: 16px;
-    font-weight: bold;
+    color: #C9A86A;
+    font-size: 15px;
 }
 
 .form-control {
     display: block;
     width: 100%;
-    height: 36px;
-    background-color: #1a1f24;
-    border-width: 2px;
-    border-color: #4f5b66;
-    color: #ffffff;
-    font-size: 17px;
+    height: 38px;
+    background-color: #14110C;
+    border-width: 1px;
+    border-color: #3A3326;
+    color: #F2EDE4;
+    font-size: 16px;
     font-family: Lora;
-    padding-left: 8px;
-    padding-right: 8px;
+    padding-left: 10px;
+    padding-right: 10px;
 }
 
 .form-control:focus {
-    border-color: #ff4d6d;
+    border-color: #C9A86A;
 }
 
-select.form-control {
-    height: 36px;
-}
-
+select.form-control { height: 38px; }
 select.form-control option {
-    background-color: #1a1f24;
-    color: #ffffff;
+    background-color: #14110C;
+    color: #F2EDE4;
 }
 
 .settings-slider {
@@ -176,43 +205,36 @@ select.form-control option {
 }
 
 input.settings-slider slidertrack {
-    background-color: #1a1f24;
+    background-color: #14110C;
     border-width: 1px;
-    border-color: #4f5b66;
-    height: 8px;
-    margin-top: 8px;
+    border-color: #3A3326;
+    height: 6px;
+    margin-top: 9px;
 }
 
 input.settings-slider sliderbar {
-    width: 18px;
+    width: 16px;
     height: 22px;
-    background-color: #8d99ae;
-    border-width: 1px;
-    border-color: #ff4d6d;
+    background-color: #8FA68E;
+    border-width: 0px;
 }
 
-input.settings-slider sliderbar:hover {
-    background-color: #ff4d6d;
-}
+input.settings-slider sliderbar:hover { background-color: #A9C0A0; }
 
 .field-help {
-    color: #999999;
-    font-size: 14px;
+    color: #8A8270;
+    font-size: 13px;
     font-style: italic;
-    margin-top: 4px;
+    margin-top: 5px;
 }
 
-.settings-keybinds {
-    color: #cccccc;
-    font-size: 15px;
-}
+.settings-keybinds { color: #B3A892; font-size: 14px; }
 
 .button-container {
     text-align: center;
-    margin-top: 12px;
+    margin-top: 16px;
 }
 
-/* Lay the Back / Apply buttons out side by side rather than stacked. */
 .button-container button {
     display: inline-block;
     width: 200px;
@@ -220,35 +242,31 @@ input.settings-slider sliderbar:hover {
     margin-right: 10px;
 }
 
+/* Primary action (Create World) — a soft sage-green affirmative. */
 .btn-success {
-    background-color: #2f6f3e;
-    border-color: #4caf6a;
+    border-color: #6E8A6A;
+    color: #BFD6B6;
 }
-
 .btn-success:hover {
-    background-color: #3a8a4c;
-    border-color: #6fdc8c;
+    background-color: #6E8A6A;
+    border-color: #8FA68E;
+    color: #16130E;
 }
 
 .notification {
     position: absolute;
     top: 24px;
     left: 50%;
-    margin-left: -160px;
-    width: 320px;
-    padding: 12px;
-    background-color: #2f6f3e;
+    margin-left: -170px;
+    width: 340px;
+    padding: 14px;
+    background-color: #1F1B14;
     border-width: 1px;
-    border-color: #6fdc8c;
-    color: #ffffff;
+    border-color: #8FA68E;
+    color: #F2EDE4;
     text-align: center;
-    font-size: 16px;
+    font-size: 15px;
 }
 
-.notification.hidden {
-    display: none;
-}
-
-.hidden {
-    display: none;
-}
+.notification.hidden { display: none; }
+.hidden { display: none; }
