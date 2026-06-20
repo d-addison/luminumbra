@@ -107,6 +107,15 @@ float g_timeScale = 1.0f;
 // --no-ui for a clean capture. Normal per-frame ticking is paused; the capture loop owns
 // advancement (g_timelapse_ticks fixed ticks per captured frame).
 int g_timelapse_frames = 0;
+// Render-optimization (render-optimization-index FR-002): --render-benchmark <path>.
+// Boots auto-world, lets it settle, then averages the per-pass GPU timers
+// (RenderPassFrameStats *_gpu_ms) over g_render_benchmark_frames in-world frames and
+// writes a JSON report (per-pass avg ms + total + cloud_quality) before exiting. The
+// repeatable, fixed-scenario capture the release per-pass budget RED gate consumes
+// (no human in-world). Empty path = off. Pair with --auto-create-world --auto-enter-world.
+std::string g_render_benchmark_path;
+int g_render_benchmark_frames = 120;   // measured frames (after warm-up)
+int g_render_benchmark_warmup = 60;    // frames discarded before measuring (stream/settle)
 int g_timelapse_ticks = 60;        // sim ticks advanced between captured frames (2 s at 30 Hz)
 float g_timelapse_daystep = 0.0f;  // time-of-day advance per frame [0,1] (shade/sky drift); 0 = leave
 int g_timelapse_captured = 0;
@@ -1779,6 +1788,13 @@ int main(int argc, char* argv[]) {
         runtime_boot_metrics_enabled,
         runtime_boot_frames,
         runtime_boot_output);
+
+    // --render-benchmark <path>: average per-pass GPU timers over N settled in-world
+    // frames -> JSON (render-optimization budget-gate capture). Pair with
+    // --auto-create-world --auto-enter-world.
+    g_render_benchmark_path = GetCommandLineOption(argc, argv, "--render-benchmark", "");
+    g_render_benchmark_frames = GetCommandLineIntOption(argc, argv, "--render-benchmark-frames", 120);
+    g_render_benchmark_warmup = GetCommandLineIntOption(argc, argv, "--render-benchmark-warmup", 60);
 
     // --timelapse capture mode (docs/timelapse.md). Single-player; pair with
     // --auto-create-world --auto-enter-world (and --no-ui for a clean frame).
@@ -6031,6 +6047,61 @@ int main(int argc, char* argv[]) {
         if (g_imgui_enabled) {
             ImGui::Render();
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        }
+
+        // --render-benchmark: average the per-pass GPU timers (RenderPassFrameStats
+        // *_gpu_ms) over N settled in-world frames, then write a JSON report and exit.
+        // The repeatable, fixed-scenario capture the release per-pass budget gate
+        // consumes (render-optimization-index FR-002). Render-only / measurement only.
+        if (!g_render_benchmark_path.empty() && currentState == GameState::IN_GAME && gameSession) {
+            static int rb_warm = 0;
+            static int rb_count = 0;
+            static double rb_shadow = 0, rb_gbuffer = 0, rb_ssao = 0, rb_ssao_blur = 0,
+                          rb_lighting = 0, rb_water = 0, rb_skybox = 0, rb_particle = 0,
+                          rb_foliage = 0, rb_aerial = 0, rb_final = 0, rb_total = 0;
+            const auto& s = renderPipeline.get_last_render_pass_stats();
+            if (rb_warm < g_render_benchmark_warmup) {
+                ++rb_warm;
+            } else if (rb_count < g_render_benchmark_frames) {
+                rb_shadow += s.shadow_gpu_ms;   rb_gbuffer += s.gbuffer_gpu_ms;
+                rb_ssao += s.ssao_gpu_ms;       rb_ssao_blur += s.ssao_blur_gpu_ms;
+                rb_lighting += s.lighting_gpu_ms; rb_water += s.water_gpu_ms;
+                rb_skybox += s.skybox_gpu_ms;   rb_particle += s.particle_gpu_ms;
+                rb_foliage += s.foliage_gpu_ms; rb_aerial += s.aerial_gpu_ms;
+                rb_final += s.final_blit_gpu_ms;
+                rb_total += s.shadow_gpu_ms + s.gbuffer_gpu_ms + s.ssao_gpu_ms + s.ssao_blur_gpu_ms
+                          + s.lighting_gpu_ms + s.water_gpu_ms + s.skybox_gpu_ms + s.particle_gpu_ms
+                          + s.foliage_gpu_ms + s.aerial_gpu_ms + s.final_blit_gpu_ms;
+                ++rb_count;
+            } else {
+                const double n = static_cast<double>(std::max(1, rb_count));
+                nlohmann::json j;
+                j["schema"] = "luminumbra.render_benchmark.v1";
+                j["frames"] = rb_count;
+                j["warmup_frames"] = g_render_benchmark_warmup;
+                j["width"] = renderPipeline.screen_width();
+                j["height"] = renderPipeline.screen_height();
+                j["cloud_quality"] = renderPipeline.get_cloud_quality();
+                j["gpu_timers_supported"] = s.gpu_timers_supported;
+                j["avg_ms"] = {
+                    {"shadow", rb_shadow / n}, {"gbuffer", rb_gbuffer / n}, {"ssao", rb_ssao / n},
+                    {"ssao_blur", rb_ssao_blur / n}, {"ssao_total", (rb_ssao + rb_ssao_blur) / n},
+                    {"lighting", rb_lighting / n}, {"water", rb_water / n}, {"skybox", rb_skybox / n},
+                    {"particle", rb_particle / n}, {"foliage", rb_foliage / n}, {"aerial", rb_aerial / n},
+                    {"final_blit", rb_final / n}, {"total", rb_total / n}
+                };
+                std::error_code _rb_ec;
+                const std::filesystem::path rb_path(g_render_benchmark_path);
+                if (rb_path.has_parent_path()) std::filesystem::create_directories(rb_path.parent_path(), _rb_ec);
+                std::ofstream out(rb_path);
+                out << j.dump(2);
+                out.close();
+                LUMINUMBRA_CORE_INFO("Render benchmark: {} frames -> {} (skybox {:.3f} ms, ssao {:.3f} ms, total {:.3f} ms, cloud_quality {})",
+                                     rb_count, g_render_benchmark_path, rb_skybox / n, (rb_ssao + rb_ssao_blur) / n, rb_total / n,
+                                     renderPipeline.get_cloud_quality());
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
+                rb_count = g_render_benchmark_frames + 1; // latch: stop re-dumping
+            }
         }
 
         // --timelapse: dump the rendered frame, then fast-forward sim-time (+ the day clock)
