@@ -154,7 +154,15 @@ float cloudShadow(vec3 worldPos) {
     if (dh <= 0.0) return 0.0;
     float t = dh / toSun.y;                 // distance along the sun ray to the plane
     vec2 hitXZ = worldPos.xz + toSun.xz * t;
-    float coverage = cloudCoverageAt(hitXZ);
+    // Soft PENUMBRA: average the coverage over a small kernel at the cloud plane so
+    // the cast shadow has soft edges instead of a hard decal. Only paid when cloud
+    // shadows are enabled (early-out above), so the common in-game path is free.
+    const float r = 70.0; // metres at the cloud plane
+    float coverage = cloudCoverageAt(hitXZ) * 0.40
+                   + cloudCoverageAt(hitXZ + vec2( r, 0.0)) * 0.15
+                   + cloudCoverageAt(hitXZ + vec2(-r, 0.0)) * 0.15
+                   + cloudCoverageAt(hitXZ + vec2(0.0,  r)) * 0.15
+                   + cloudCoverageAt(hitXZ + vec2(0.0, -r)) * 0.15;
     return clamp(coverage * u_cloudShadowStrength, 0.0, 1.0);
 }
 
@@ -246,13 +254,16 @@ float CalculateShadow(vec3 fragPos, vec3 normal, vec3 lightDir, float viewDepth)
     float bias = max(0.005 * (1.0 - dot(normal, lightDir)), 0.001);
     vec2 texelSize = 1.0 / vec2(textureSize(u_shadowCascades, 0).xy);
     
-    for(int x = -1; x <= 1; ++x) {
-        for(int y = -1; y <= 1; ++y) {
-            float pcfDepth = texture(u_shadowCascades, vec3(projCoords.xy + vec2(x, y) * texelSize, cascadeIndex)).r; 
-            shadow += currentDepth - bias > pcfDepth ? 1.0 : 0.0;        
+    // 5x5 PCF (25 taps) for softer shadow edges / less harsh terminators than the
+    // prior 3x3. Cheap in this pass (lighting is ~0.15 ms); soft contact shadows
+    // read far more naturally than the hard 3x3 step.
+    for(int x = -2; x <= 2; ++x) {
+        for(int y = -2; y <= 2; ++y) {
+            float pcfDepth = texture(u_shadowCascades, vec3(projCoords.xy + vec2(x, y) * texelSize, cascadeIndex)).r;
+            shadow += currentDepth - bias > pcfDepth ? 1.0 : 0.0;
         }
     }
-    return 1.0 - (shadow / 9.0);
+    return 1.0 - (shadow / 25.0);
 }
 vec3 TriPlanar(vec3 worldPos, vec3 normal, sampler2DArray texArray, float layer, float scale) {
     vec3 relPos = worldPos - u_terrainOrigin; vec2 uv_y=relPos.xz*scale; vec2 uv_x=relPos.zy*scale; vec2 uv_z=relPos.xy*scale;
