@@ -617,10 +617,12 @@ add_executable(frontier_gates_test
     ai/utility_instinct_hardening_test.cpp
     ai/flocking_evolution_hardening_test.cpp
     scripting/lua_api_manifest_gate_test.cpp
+    scripting/lua_sandbox_escape_test.cpp
     fields/scalar_field_diffusion_gate_test.cpp
     persistence/world_save_service_test.cpp
     persistence/world_save_region_format_test.cpp
     persistence/persistence_hardening_test.cpp
+    persistence/save_load_corruption_corpus_test.cpp
 )
 
 target_compile_definitions(frontier_gates_test PRIVATE
@@ -633,6 +635,24 @@ target_include_directories(frontier_gates_test PRIVATE
 )
 
 target_link_libraries(frontier_gates_test PRIVATE
+    gtest_main
+    luminumbra_common
+)
+
+# Second-class adversarial pass (FR-005): Jolt tunneling / penetration test. A fast
+# dynamic sphere fired at a thin static heightfield floor must not pass through it.
+# Drives the real PhysicsSystem (luminumbra_common carries Jolt) -- no GL needed.
+add_executable(jolt_tunneling_test
+    physics/jolt_tunneling_test.cpp
+)
+
+target_include_directories(jolt_tunneling_test PRIVATE
+    ../src
+    ../src/luminumbra_common
+    ../include
+)
+
+target_link_libraries(jolt_tunneling_test PRIVATE
     gtest_main
     luminumbra_common
 )
@@ -719,6 +739,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     initial_world_loading_perf_test
     runtime_world_visual_validation_test
     frontier_gates_test
+    jolt_tunneling_test
     capture_scale_test
     isolation_config_test
 )

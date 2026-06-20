@@ -505,10 +505,20 @@ bool WorldSaveService::load_world(
     if (v2_present) {
         std::sort(region_files.begin(), region_files.end());
         state.clear();
+        // A torn/corrupt region that fails partway (truncated payload, bit-flipped
+        // LZ4, a bad record after good ones) must NOT leave the caller with a
+        // partially-populated world it would mistake for a real one. Every hard-error
+        // exit clears the state so a rejected load is always observably empty (the
+        // load_world contract: false => no usable world). The clean-miss / success
+        // paths are unaffected.
+        const auto reject = [&state]() {
+            state.clear();
+            return false;
+        };
         for (const std::filesystem::path& path : region_files) {
             std::vector<RegionRecord> records;
             if (!ReadRegionFile(path, records, &errors)) {
-                return false;
+                return reject();
             }
             for (const RegionRecord& record : records) {
                 if (record.lod_level != 0) {
@@ -516,11 +526,11 @@ bool WorldSaveService::load_world(
                 }
                 const std::shared_ptr<Chunk> chunk = DecodeChunkRecord(record, path, &errors);
                 if (!chunk) {
-                    return false;
+                    return reject();
                 }
                 if (!state.insert_chunk(chunk)) {
                     errors.push_back("duplicate chunk id across region files: " + path.string());
-                    return false;
+                    return reject();
                 }
             }
         }

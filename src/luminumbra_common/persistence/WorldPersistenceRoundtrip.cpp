@@ -686,27 +686,36 @@ bool LoadWorldStreamingStateSnapshotJson(
         }
 
         out_state.clear();
+        // A malformed/torn snapshot that fails partway through the chunk array (bad
+        // chunk id, duplicate, or a parse error mid-stream) must not leave the caller
+        // a partially-populated world it would mistake for real. Every hard-error exit
+        // clears the state so a rejected load is always observably empty.
+        const auto reject = [&out_state]() {
+            out_state.clear();
+            return false;
+        };
         for (const nlohmann::json& chunk_json : snapshot.at("chunks")) {
             const IVec3 coords = IVec3FromJson(chunk_json.at("coords"));
             auto chunk = std::make_shared<Chunk>(coords);
             ApplyChunkJson(chunk_json, *chunk);
             if (chunk->get_id() != chunk_json.at("chunk_id").get<ChunkID>()) {
                 errors.push_back("chunk id does not match serialized coordinates");
-                return false;
+                return reject();
             }
             if (!out_state.insert_chunk(chunk)) {
                 errors.push_back("duplicate chunk id in world snapshot");
-                return false;
+                return reject();
             }
         }
 
         if (out_state.size() != snapshot.at("chunk_count").get<std::size_t>()) {
             errors.push_back("loaded chunk count does not match snapshot chunk_count");
-            return false;
+            return reject();
         }
         return true;
     } catch (const std::exception& e) {
         errors.push_back(std::string("failed to load world snapshot: ") + e.what());
+        out_state.clear();
         return false;
     }
 }
