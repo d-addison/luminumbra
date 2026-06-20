@@ -6063,6 +6063,20 @@ int main(int argc, char* argv[]) {
         // The repeatable, fixed-scenario capture the release per-pass budget gate
         // consumes (render-optimization-index FR-002). Render-only / measurement only.
         if (!g_render_benchmark_path.empty() && currentState == GameState::IN_GAME && gameSession) {
+            // Pin a FIXED camera pose + time-of-day so the per-pass GPU costs are
+            // reproducible run-to-run. The gameplay spawn camera settles to a
+            // variable view (physics/orientation), which otherwise swings the
+            // measured frame total 2-3x and makes the budget gate meaningless. A
+            // fixed pose at the deterministic spawn, looking down-and-out over the
+            // terrain toward the horizon + sky, is a representative + reproducible
+            // budget scenario. Set every frame so gravity/settle can't drift it.
+            if (g_camera) {
+                g_camera->Position = glm::vec3(8.0f, 52.0f, 8.0f);
+                g_camera->Yaw = 35.0f;
+                g_camera->Pitch = -12.0f;
+                g_camera->updateCameraVectors();
+            }
+            renderPipeline.set_time_of_day(0.04f); // fixed near-noon (clouds + lit terrain)
             static int rb_warm = 0;
             static int rb_count = 0;
             static double rb_shadow = 0, rb_gbuffer = 0, rb_ssao = 0, rb_ssao_blur = 0,
@@ -6091,6 +6105,7 @@ int main(int argc, char* argv[]) {
                 j["width"] = renderPipeline.screen_width();
                 j["height"] = renderPipeline.screen_height();
                 j["cloud_quality"] = renderPipeline.get_cloud_quality();
+                j["ssao_quality"] = renderPipeline.get_ssao_quality();
                 j["gpu_timers_supported"] = s.gpu_timers_supported;
                 j["avg_ms"] = {
                     {"shadow", rb_shadow / n}, {"gbuffer", rb_gbuffer / n}, {"ssao", rb_ssao / n},
