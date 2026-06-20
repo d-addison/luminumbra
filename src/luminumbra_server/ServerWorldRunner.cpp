@@ -6,6 +6,15 @@
 #include <cstdlib>
 #include <utility>
 
+#include "luminumbra_common/ai/EcologyHash.h"
+#include "luminumbra_common/components/CoreComponents.h"
+#include "luminumbra_common/components/CreatureComponents.h"
+#include "luminumbra_common/components/AlarmComponents.h"
+#include "luminumbra_common/components/DecayComponents.h"
+#include "luminumbra_common/components/MigratoryComponents.h"
+#include "luminumbra_common/components/MortalComponents.h"
+#include "luminumbra_common/components/PackHunterComponents.h"
+#include "luminumbra_common/components/TerritoryComponents.h"
 #include "luminumbra_common/core/Log.h"
 #include "luminumbra_common/ecs/EntitySnapshot.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
@@ -77,14 +86,67 @@ std::string ScentSubHash(world::GameSession* session) {
 // bytes before "|aether:" are unchanged (wind/weather sub-hashes are intact).
 // T-I7-ECO-RENDER appends the `scents` term after aether, preserving the whole
 // pre-ecology byte prefix while making live scent fields authoritative.
+// gate-populated-world-replay appends the `ecology` term LAST (canonical bump #6,
+// 8a6b7bb6795da912 -> d8f84cf6d7d0b978 empty-roster composite): the id-ordered
+// creature-state sub-hash.
+// Append-only, so the bytes before "|ecology:" (chunk + wind + weather + aether +
+// scents) are byte-identical to the pre-fold composite -- the empty-roster default
+// folds an EMPTY ecology value, so the composite differs from pre-fold ONLY by the
+// appended "|ecology:" suffix (additivity guard, AC-003).
 std::string ComposeWorldHash(const std::string& chunk_hash,
                              const std::string& wind_hash,
                              const std::string& weather_hash,
                              const std::string& aether_hash,
-                             const std::string& scent_hash) {
+                             const std::string& scent_hash,
+                             const std::string& ecology_hash) {
     return Persistence::StableChecksum(
         chunk_hash + "|wind:" + wind_hash + "|weather:" + weather_hash +
-        "|aether:" + aether_hash + "|scents:" + scent_hash);
+        "|aether:" + aether_hash + "|scents:" + scent_hash +
+        "|ecology:" + ecology_hash);
+}
+
+// gate-populated-world-replay (T001): spawn the deterministic KINEMATIC creature
+// roster into `registry`. This mirrors the gtest ecology_pipeline_test Populate
+// fixture (2 predators + 6 prey, with genomes/alarm/mortal/decay/migratory/
+// territory) component-for-component and value-for-value, with the ONLY
+// difference being positions offset from the spawn anchor's XZ (so they sit in
+// the world the headless runner streams). KINEMATIC -- NO CreaturePhysicsComponent
+// -- so the brain integrates X/Z directly (terrain-independent) and the roster is
+// a pure function of (seed, preset) via the anchor. Y is set to the anchor's Y but
+// is sim-irrelevant on the kinematic lane.
+void SpawnEcologyRoster(entt::registry& r, const Vec3& anchor) {
+    namespace Comp = ::Luminumbra::Components;
+    const float ox = anchor.x;
+    const float oz = anchor.z;
+    const float oy = anchor.y;
+
+    auto pred = [&](float x, float z) {
+        auto e = r.create();
+        auto& tf = r.emplace<Comp::TransformComponent>(e);
+        tf.position = Vec3(ox + x, oy, oz + z);
+        auto& cr = r.emplace<Comp::CreatureComponent>(e);
+        cr.is_predator = true; cr.hunger = 0.9f; cr.move_speed = 4.2f;
+        r.emplace<Comp::PackHunterComponent>(e);
+        r.emplace<Comp::MortalComponent>(e).lifespan_ticks = 5000u;
+    };
+    int idx = 0;
+    auto prey = [&](float x, float z) {
+        auto e = r.create();
+        auto& tf = r.emplace<Comp::TransformComponent>(e);
+        tf.position = Vec3(ox + x, oy, oz + z);
+        auto& cr = r.emplace<Comp::CreatureComponent>(e);
+        cr.is_predator = false; cr.hunger = 0.05f; cr.stamina = 1.0f; cr.move_speed = 3.0f;
+        auto& gn = r.emplace<Comp::CreatureGenomeComponent>(e);
+        gn.female = (idx++ % 2 == 0); gn.age_ticks = 100u;
+        r.emplace<Comp::AlarmComponent>(e);
+        r.emplace<Comp::MortalComponent>(e).lifespan_ticks = 600u;
+        r.emplace<Comp::DecayComponent>(e).decay_duration = 90u;
+        r.emplace<Comp::MigratoryComponent>(e);
+        r.emplace<Comp::TerritoryComponent>(e);
+        r.emplace<Comp::TerritoryBiasComponent>(e);
+    };
+    pred(-6.0f, 9.0f); pred(6.0f, 9.0f);
+    for (int i = 0; i < 6; ++i) prey(-7.0f + i * 2.4f, -2.0f);
 }
 
 std::pair<int, int> HorizontalChunkCoords(const Vec3& position) {
@@ -255,6 +317,20 @@ bool ServerWorldRunner::Boot() {
         }
     }
 
+    // gate-populated-world-replay (T001): spawn the deterministic KINEMATIC
+    // creature roster into the SAME registry GameSession::TickSimulation ticks, so
+    // the hardened ecology stack runs LIVE in the headless binary. Opt-in
+    // (ecology_roster); default false leaves the roster empty -> the ecology
+    // sub-hash is empty/neutral and the composite world_hash differs from pre-fold
+    // only by the appended `|ecology:` suffix (additivity guard). The roster is
+    // spawned AFTER the surface horizon is ready (anchor Y resolved), though the
+    // kinematic lane never queries terrain.
+    if (m_config.ecology_roster) {
+        SpawnEcologyRoster(m_session->GetRegistry(), spawn_anchor);
+        LUMINUMBRA_CORE_INFO("ServerWorldRunner: spawned deterministic ecology roster ({} creatures, kinematic).",
+                             CreatureCount());
+    }
+
     m_booted = true;
     return true;
 }
@@ -357,7 +433,8 @@ std::string ServerWorldRunner::ComputeWorldHash() {
                             WindSubHash(m_session.get()),
                             WeatherSubHash(m_session.get()),
                             AetherSubHash(m_session.get()),
-                            ScentSubHash(m_session.get()));
+                            ScentSubHash(m_session.get()),
+                            ComputeEcologySubHash());
 }
 
 Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHashes() {
@@ -426,12 +503,15 @@ void ServerWorldRunner::ComputeWorldHashAndSubHashes(
     const std::string weather_hash = WeatherSubHash(m_session.get());
     const std::string aether_hash = AetherSubHash(m_session.get());
     const std::string scent_hash = ScentSubHash(m_session.get());
+    const std::string ecology_hash = ComputeEcologySubHash();
 
     Persistence::WorldSaveService service;
-    // T-I5a-2 (A2) + T-I5a-3 (B1) + T-I6-A1 MEGA-BUMPS: composite world_hash
-    // (chunk + wind + weather + aether + scents).
+    // T-I5a-2 (A2) + T-I5a-3 (B1) + T-I6-A1 + gate-populated-world-replay
+    // MEGA-BUMPS: composite world_hash (chunk + wind + weather + aether + scents +
+    // ecology).
     out_world_hash = ComposeWorldHash(
-        service.world_hash(state), wind_hash, weather_hash, aether_hash, scent_hash);
+        service.world_hash(state), wind_hash, weather_hash, aether_hash, scent_hash,
+        ecology_hash);
 
     const std::string entities_snapshot =
         Ecs::SerializeEntityRegistrySnapshotJson(World::BuildAvatarEntitySnapshot(m_avatars));
@@ -483,6 +563,25 @@ std::size_t ServerWorldRunner::LoadedChunkCount() const {
 
 std::uint64_t ServerWorldRunner::TickCount() const {
     return m_session ? m_session->GetSimulationTickCount() : 0;
+}
+
+std::string ServerWorldRunner::ComputeEcologySubHash() const {
+    // gate-populated-world-replay: id-ordered hash over the live creature roster
+    // (empty/neutral when none). Pure read over the session registry; no quiesce
+    // needed (creature state is registry-resident, not chunk-derived).
+    if (!m_session) {
+        return {};
+    }
+    return luminumbra::ai::ComputeEcologySubHash(m_session->GetRegistry());
+}
+
+std::size_t ServerWorldRunner::CreatureCount() const {
+    if (!m_session) {
+        return 0;
+    }
+    return m_session->GetRegistry()
+        .view<const ::Luminumbra::Components::CreatureComponent>()
+        .size();
 }
 
 void ServerWorldRunner::Shutdown(world::WorldStateSaveReport* shutdown_save_report) {

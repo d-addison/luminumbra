@@ -69,6 +69,13 @@ struct ServerCliOptions {
     // double-run already asserts the entities sub-hash matches, so --smoke --avatars N
     // validates avatar determinism through the existing gate path.
     int avatars = 0;
+    // gate-populated-world-replay: --ecology-roster spawns the fixed deterministic
+    // KINEMATIC creature roster (2 predators + 6 prey, gtest Populate fixture) into
+    // the headless world so the hardened ecology stack runs LIVE. With --smoke the
+    // double-run asserts run==replay across ALL sub-hashes incl. the new ecology
+    // term (the PopulatedWorldReplay gate). DEFAULT off (empty roster -> neutral
+    // ecology sub-hash -> additive `|ecology:` suffix only).
+    bool ecology_roster = false;
     // T-I6 P3.1c: --replicate runs the authoritative server + an in-process loopback
     // ReplicationClient, broadcasts the avatar states each tick, and asserts the client
     // mirrors the server avatars (end-to-end live replication in the harness).
@@ -245,6 +252,8 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
             if (const char* v = next_value(i)) options.autosave_ticks = std::strtoull(v, nullptr, 10);
         } else if (std::strcmp(arg, "--avatars") == 0) {
             if (const char* v = next_value(i)) options.avatars = std::atoi(v);
+        } else if (std::strcmp(arg, "--ecology-roster") == 0) {
+            options.ecology_roster = true;
         } else if (std::strcmp(arg, "--replicate") == 0) {
             options.replicate = true;
         } else if (std::strcmp(arg, "--npcs") == 0) {
@@ -291,6 +300,7 @@ Luminumbra::Server::ServerWorldRunnerConfig RunnerConfigFrom(const ServerCliOpti
     config.collision_radius = options.collision_radius;
     config.autosave_interval_ticks = options.autosave_ticks;
     config.avatar_count = options.avatars;
+    config.ecology_roster = options.ecology_roster;
     return config;
 }
 
@@ -315,6 +325,11 @@ struct SmokeRunResult {
     // T-I4-11: per-system sub-hashes (additive; top-level world_hash unchanged).
     Luminumbra::Persistence::WorldStreamingStateSubHashes sub_hashes;
     std::string scent_hash;
+    // gate-populated-world-replay: id-ordered ecology sub-hash (empty when no
+    // roster) + creature counts before/after the run (non-vacuity oracle).
+    std::string ecology_hash;
+    std::size_t creature_count_start = 0;
+    std::size_t creature_count_end = 0;
     std::string world_id;
     Luminumbra::Server::ServerTickReport ticks;
     std::size_t chunks_streamed = 0;
@@ -341,6 +356,11 @@ SmokeRunResult RunSmokeOnce(const ServerCliOptions& options, const char* run_lab
         return result;
     }
 
+    // gate-populated-world-replay: capture the creature count BEFORE the run so
+    // the gate can assert non-vacuity (start != end => the ecology actually
+    // birthed/culled creatures over the horizon, not a frozen roster).
+    result.creature_count_start = runner.CreatureCount();
+
     result.ticks = runner.RunFixedTicks(options.ticks);
     // T-I6 P2: avatar physics telemetry — confirm the server-authoritative avatar
     // characters SETTLED on the terrain (grounded; not fallen through the world).
@@ -357,6 +377,8 @@ SmokeRunResult RunSmokeOnce(const ServerCliOptions& options, const char* run_lab
     result.world_hash = runner.ComputeWorldHash();
     result.sub_hashes = runner.ComputeWorldSubHashes();
     result.scent_hash = runner.Session() ? runner.Session()->ComputeScentSubHash() : std::string();
+    result.ecology_hash = runner.ComputeEcologySubHash();
+    result.creature_count_end = runner.CreatureCount();
     result.chunks_streamed = runner.StreamedChunkCount();
     result.world_id = runner.Session()->GetMetadata().worldId;
     const fs::path save_dir = runner.Session()->GetWorldSaveDir();
@@ -387,7 +409,10 @@ nlohmann::json SmokeRunJson(const SmokeRunResult& run) {
             {"weather", run.sub_hashes.weather},
             {"aether", run.sub_hashes.aether},
             {"scents", run.scent_hash},
+            {"ecology", run.ecology_hash},
         }},
+        {"entity_count_start", run.creature_count_start},
+        {"entity_count_end", run.creature_count_end},
         {"world_id", run.world_id},
         {"ticks_executed", run.ticks.ticks_executed},
         {"frames_executed", run.ticks.frames_executed},
@@ -424,7 +449,8 @@ int RunSmoke(const ServerCliOptions& options) {
         first.sub_hashes.wind == replay.sub_hashes.wind &&
         first.sub_hashes.weather == replay.sub_hashes.weather &&
         first.sub_hashes.aether == replay.sub_hashes.aether &&
-        first.scent_hash == replay.scent_hash;
+        first.scent_hash == replay.scent_hash &&
+        first.ecology_hash == replay.ecology_hash;
 
     const bool deterministic = first.ok && replay.ok &&
         first.world_hash == replay.world_hash && sub_hashes_match;
@@ -454,6 +480,7 @@ int RunSmoke(const ServerCliOptions& options) {
             {"weather", first.sub_hashes.weather},
             {"aether", first.sub_hashes.aether},
             {"scents", first.scent_hash},
+            {"ecology", first.ecology_hash},
         }},
         {"sub_hashes_replay", {
             {"terrain", replay.sub_hashes.terrain},
@@ -464,8 +491,13 @@ int RunSmoke(const ServerCliOptions& options) {
             {"weather", replay.sub_hashes.weather},
             {"aether", replay.sub_hashes.aether},
             {"scents", replay.scent_hash},
+            {"ecology", replay.ecology_hash},
         }},
         {"sub_hashes_match", sub_hashes_match},
+        {"entity_count_start", first.creature_count_start},
+        {"entity_count_end", first.creature_count_end},
+        {"entity_count_start_replay", replay.creature_count_start},
+        {"entity_count_end_replay", replay.creature_count_end},
         {"deterministic", deterministic},
         {"passed", passed},
     };

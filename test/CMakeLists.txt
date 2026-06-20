@@ -162,6 +162,7 @@ add_executable(common_tests
     sim/photo_filters_test.cpp
     sim/steering_consumer_test.cpp
     sim/ecology_pipeline_test.cpp
+    sim/ecology_hash_test.cpp
     sim/movement_hardening_test.cpp
     sim/lifecycle_hardening_test.cpp
     sim/environment_hardening_test.cpp

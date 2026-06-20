@@ -49,6 +49,20 @@ struct ServerWorldRunnerConfig {
     // headless lane (single spawn anchor, empty entity snapshot). Network
     // connections drive this list in P3; this config is the test/prep entry point.
     int avatar_count = 0;
+    // gate-populated-world-replay (T001): spawn a fixed deterministic KINEMATIC
+    // creature roster (the gtest ecology_pipeline_test Populate fixture: 2
+    // predators + 6 prey, with genomes/alarm/mortal/decay/migratory/territory)
+    // into the SAME registry GameSession::TickSimulation ticks, so the hardened
+    // ecology stack (brain -> mate-seek -> steering -> reproduce -> lifespan ->
+    // decompose -> pack -> migration -> territory) runs LIVE in the headless
+    // binary. v1 is KINEMATIC -- NO CreaturePhysicsComponent (the byte-identical
+    // default lane; phase-2 physics-creature roster is tracked separately).
+    // Positions are offset from the spawn anchor (a pure fn of seed/preset), so
+    // the roster + its ecology sub-hash are a pure function of (seed, preset).
+    // DEFAULT false -> empty roster -> the ecology sub-hash is empty/neutral and
+    // the composite world_hash differs from pre-fold ONLY by the appended
+    // `|ecology:` suffix (additivity guard).
+    bool ecology_roster = false;
 };
 
 struct ServerTickReport {
@@ -111,6 +125,15 @@ public:
     std::size_t StreamedChunkCount();
     std::size_t LoadedChunkCount() const;
     [[nodiscard]] std::uint64_t TickCount() const;
+
+    // gate-populated-world-replay: the id-ordered ecology sub-hash over the live
+    // creature roster (empty/neutral string when no creature is spawned). Folded
+    // into ComposeWorldHash as the 6th canonical term and surfaced to the gate
+    // for the run==replay assertion.
+    std::string ComputeEcologySubHash() const;
+    // gate-populated-world-replay: live count of CreatureComponent-bearing
+    // entities (for the gate's non-vacuity check: start != end => births/culls).
+    [[nodiscard]] std::size_t CreatureCount() const;
 
     world::GameSession* Session() { return m_session.get(); }
 
