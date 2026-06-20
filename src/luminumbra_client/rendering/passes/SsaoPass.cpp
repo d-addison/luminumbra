@@ -134,8 +134,10 @@ void SsaoPass::execute_ssao(RenderPipeline& pipeline, const Camera& camera) {
         m_ssao.gtaoShader->setInt("gNormalMaterial", 1);
         m_ssao.gtaoShader->setMat4("u_projection", projection);
         m_ssao.gtaoShader->setVec2("u_screenSize", screen_size);
-        // quality 1 = Low; 2 = High full-res; 3 = High at half-res.
-        const bool high = quality >= 2;
+        // quality 1 = Low full-res; 2 = High full-res; 3 = half-res (Low spp — the
+        // bilateral upsample/denoise compensates, and half-res already cuts the
+        // fragment count ~4x, so High spp there is wasteful + busts the budget).
+        const bool high = (quality == 2);
         m_ssao.gtaoShader->setInt("u_sliceCount", high ? 3 : 2);
         m_ssao.gtaoShader->setInt("u_stepsPerSlice", high ? 6 : 4);
         m_ssao.gtaoShader->setFloat("u_radius", 0.8f);

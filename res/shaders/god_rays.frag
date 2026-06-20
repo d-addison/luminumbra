@@ -15,7 +15,7 @@ uniform vec2 u_sunUV;        // sun screen-space position [0,1]
 uniform float u_sunVisible;  // 0..1 master gate (above horizon + on screen)
 uniform float u_strength;    // overall intensity
 
-const int SAMPLES = 48;
+const int SAMPLES = 24; // radial blur stays smooth at 24; keeps the pass cheap
 
 void main() {
     if (u_sunVisible <= 0.0) { FragColor = vec4(0.0); return; }
