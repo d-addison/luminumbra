@@ -2609,6 +2609,11 @@ int main(int argc, char* argv[]) {
                     }
                     g_world_render_data_initialized = true;
                     SetGameState(window, gameStateManager, GameState::IN_GAME);
+                    // T030 (Phase 3): show the diegetic HUD during normal play. Skipped in headless
+                    // scenario capture so the visual gates stay overlay-free.
+                    if (!scenario_config.active() && g_uiManager) {
+                        g_uiManager->RequestLoadDocument("hud.rml");
+                    }
                     if (scenario_config.active()) {
                         last_readiness_report = EvaluateReadiness(scenario_config, gameSession.get());
                         if (!last_readiness_report.ready) {
@@ -5900,6 +5905,13 @@ int main(int argc, char* argv[]) {
             }
         }
         
+        // T030: render the RmlUi overlay in-game too (HUD / photo-mode / pause), over the scene and
+        // under the ImGui debug layer. Menus still render via the else-branch above; this path shows
+        // whatever in-game document is loaded (hud.rml on entry).
+        if (currentState == GameState::IN_GAME && g_uiManager) {
+            g_uiManager->Render();
+        }
+
         if (g_imgui_enabled) {
             ImGui::Render();
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
