@@ -99,7 +99,10 @@ void main() {
     // at low sun (dawn/dusk morning mist). Hilltops above the fog top stay clear.
     float heightF = clamp((u_fogHeight - worldPos.y) / max(u_fogThickness, 1.0), 0.0, 1.0);
     heightF *= heightF; // denser toward the valley floor
-    float lowSunMist = mix(0.35, 1.0, 1.0 - smoothstep(0.10, 0.55, u_sunCosZenith));
+    // Mist is a DAWN/DUSK phenomenon: zero at high sun (midday has no valley fog),
+    // ramping to full only as the sun nears/drops below the horizon. (Also stops the
+    // pale midday mist reading as "sky below the horizon" in the PlayerView gate.)
+    float lowSunMist = 1.0 - smoothstep(0.08, 0.42, u_sunCosZenith);
     float groundFog = (1.0 - exp(-dist * u_groundFogDensity * heightF)) * lowSunMist;
     groundFog *= clamp(u_skyDayFactor, 0.0, 1.0); // vanish at true night like the dome
     fog = max(fog, clamp(groundFog, 0.0, 0.9));
