@@ -113,6 +113,18 @@ RmlRenderer::RmlRenderer() {
 
     m_translation_loc = glGetUniformLocation(m_program, "translation");
     m_projection_loc = glGetUniformLocation(m_program, "projection");
+
+    // 1x1 opaque-white fallback texture for untextured (solid-colour) geometry. RmlUi passes
+    // texture handle 0 for every background-color / border / button fill; binding white makes
+    // `texture(uTexture,uv) * fragColor` resolve to the fill colour instead of sampling an
+    // unbound texture (black), which previously painted the entire UI black-on-black.
+    const unsigned char white_px[4] = {255, 255, 255, 255};
+    glGenTextures(1, &m_whiteTexture);
+    glBindTexture(GL_TEXTURE_2D, m_whiteTexture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white_px);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindTexture(GL_TEXTURE_2D, 0);
 }
 
 void RmlRenderer::SetViewport(int width, int height) {
@@ -157,7 +169,9 @@ void RmlRenderer::RenderGeometry(Rml::CompiledGeometryHandle handle, Rml::Vector
     glUniformMatrix4fv(m_projection_loc, 1, false, proj.data());
     glUniformMatrix4fv(m_translation_loc, 1, false, trans.data());
     
-    glBindTexture(GL_TEXTURE_2D, (GLuint)texture);
+    // Untextured solid-colour geometry arrives with handle 0 → bind the 1x1 white fallback so
+    // the fill colour survives the texture multiply (otherwise every background renders black).
+    glBindTexture(GL_TEXTURE_2D, texture ? (GLuint)texture : m_whiteTexture);
     glBindVertexArray(geometry->vao);
     glDrawElements(GL_TRIANGLES, geometry->num_indices, GL_UNSIGNED_INT, nullptr);
     glBindVertexArray(0);

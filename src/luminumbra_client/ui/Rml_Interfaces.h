@@ -60,6 +60,10 @@ private:
     GLuint m_program = 0;
     GLint m_translation_loc = -1, m_projection_loc = -1;
     int m_width = 0, m_height = 0;
+    // 1x1 opaque-white texture bound for untextured (solid-colour) geometry, so the
+    // `texture(uTexture,uv) * fragColor` shader yields the fill colour instead of black
+    // when RmlUi passes texture handle 0 (every background-color / border / button fill).
+    GLuint m_whiteTexture = 0;
 };
 
 } // namespace Luminumbra::Client

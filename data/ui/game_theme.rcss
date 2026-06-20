@@ -6,7 +6,13 @@ body {
     background-color: #1a1a1a;
 }
 
+/* RmlUi ships no browser-style default stylesheet, so structural elements default to
+   display:inline — headings/paragraphs then shrink-to-fit and flow left, and text-align
+   has nothing to center. Restore block layout like a browser would. */
+h2, p, label { display: block; }
+
 h1 {
+    display: block;
     font-size: 96px;
     text-align: center;
     color: #ffffff;
