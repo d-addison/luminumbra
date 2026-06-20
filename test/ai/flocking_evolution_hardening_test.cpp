@@ -21,7 +21,10 @@
 #include "luminumbra_common/ai/Flocking.h"
 #include "luminumbra_common/core/DeterministicRng.h"
 
+#include "../support/SeededShuffle.h"
+
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <string>
 #include <utility>
@@ -126,6 +129,31 @@ TEST(FlockHardening, RunEqualsReplaySameOrder) {
     const FlockSteer b = ComputeFlockSteer(0.4f, -0.6f, n);
     EXPECT_EQ(a.x, b.x);
     EXPECT_EQ(a.z, b.z);
+}
+
+// ORDER-INDEPENDENCE via a DETERMINISTIC SEEDED SHUFFLE (test-rigor KD-2 / NFR-001).
+// RunEqualsReplaySameOrder above re-runs the SAME order and so cannot catch the order
+// dependence the boids bug (a8b689c) was. The reverse/rotate tests above use ad-hoc
+// permutations; this closes that gap with the integer-SEEDED Fisher-Yates NFR-001 wants,
+// over the VERIFIED order-diverging set, asserting byte-identical steer.
+TEST(FlockHardening, SeededShuffleOrderIdentical) {
+    NList base = DivergingSet();
+    NList shuffled = Luminumbra::TestSupport::SeededShuffled(base, /*seed=*/0x51EED99u);
+    bool reordered = false;  // guard R-4: the seed must actually permute.
+    for (std::size_t i = 0; i < base.size(); ++i)
+        if (shuffled[i] != base[i]) { reordered = true; break; }
+    ASSERT_TRUE(reordered) << "seed must actually permute the neighbour order";
+
+    const FlockSteer a = ComputeFlockSteer(0.4f, -0.6f, base);
+    const FlockSteer b = ComputeFlockSteer(0.4f, -0.6f, shuffled);
+    EXPECT_FLOAT_EQ(a.x, b.x) << "steer must not depend on (seeded-shuffled) neighbour order";
+    EXPECT_FLOAT_EQ(a.z, b.z) << "steer must not depend on (seeded-shuffled) neighbour order";
+
+    // A second, independent seed -> a different permutation -> same steer.
+    NList shuffled2 = Luminumbra::TestSupport::SeededShuffled(base, /*seed=*/0xA17EED3u);
+    const FlockSteer c = ComputeFlockSteer(0.4f, -0.6f, shuffled2);
+    EXPECT_FLOAT_EQ(a.x, c.x);
+    EXPECT_FLOAT_EQ(a.z, c.z);
 }
 
 // ---------------------------------------------------------------------------
@@ -258,6 +286,40 @@ TEST(EvoHardening, BlendCrossoverRunEqualsReplay) {
     ASSERT_EQ(c1.size(), c2.size());
     for (std::size_t i = 0; i < c1.size(); ++i)
         EXPECT_FLOAT_EQ(c1[i], c2[i]) << "bred gene " << i << " not reproducible";
+}
+
+// ORACLE (test-rigor KD-4): INDEPENDENT-RECOMPUTE + GOLDEN-LITERAL for BlendCrossover.
+// BlendCrossoverRunEqualsReplay above only proves the operator is reproducible (zero
+// correctness signal). This recomputes the expected child by HAND from the documented
+// formula child[i] = a[i] + (b[i]-a[i])*u with u=rng.next_unit() per gene (Evolution.h:
+// 57-60), driving a SECOND identically-seeded rng in the SAME draw order, then pins the
+// result to frozen golden literals. A sign/operator flip in the lerp breaks BOTH the
+// recompute (different code path) and the golden (fixed numbers) -> RED (mutation-pass).
+TEST(EvoHardening, BlendCrossoverOracle) {
+    std::vector<float> a = {0.1f, -0.4f, 0.7f, -0.9f};
+    std::vector<float> b = {-0.2f, 0.8f, -0.3f, 0.5f};
+    const std::uint64_t kSeed = 0x0A11CE99ull;
+
+    DeterministicRng prod(kSeed);
+    const std::vector<float> child = BlendCrossover(a, b, prod);
+
+    // Independent recompute with a second, identically-seeded rng, SAME draw order.
+    DeterministicRng oracle(kSeed);
+    std::array<float, 4> expect{};
+    for (std::size_t i = 0; i < 4; ++i) {
+        const float u = oracle.next_unit();
+        expect[i] = a[i] + (b[i] - a[i]) * u;
+    }
+    ASSERT_EQ(child.size(), 4u);
+    for (std::size_t i = 0; i < 4; ++i)
+        EXPECT_FLOAT_EQ(child[i], expect[i]) << "bred gene " << i << " != hand recompute";
+
+    // GOLDEN LITERALS (frozen on THIS toolchain). A draw-ORDER regression that the
+    // recompute would track in lockstep is ALSO caught here (fixed numbers).
+    EXPECT_NEAR(child[0], -0.04411011f, 1e-5f);
+    EXPECT_NEAR(child[1], 0.62961972f, 1e-5f);
+    EXPECT_NEAR(child[2], 0.22541648f, 1e-5f);
+    EXPECT_NEAR(child[3], 0.33877230f, 1e-5f);
 }
 
 // run==replay of a FULL next generation, EXACT (operator==): every gene of every

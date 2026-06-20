@@ -45,6 +45,8 @@
 #include "components/TerritoryComponents.h"
 #include "components/ThirstComponents.h"
 
+#include "../support/SeededShuffle.h"
+
 namespace {
 
 namespace Comp = ::Luminumbra::Components;
@@ -209,6 +211,107 @@ TEST(PackHarden, OrderIndependentMultiTick) {
         EXPECT_EQ(a[i], b[i]);
         EXPECT_EQ(a[i], c[i]) << "flank result must depend on geometry, not spawn order";
     }
+}
+
+// ORDER-INDEPENDENCE via a DETERMINISTIC SEEDED SHUFFLE (test-rigor KD-2 / NFR-001).
+// OrderIndependentMultiTick above uses ad-hoc std::reverse/std::rotate; this adds the
+// integer-SEEDED permutation NFR-001 mandates so the reorder is itself reproducible.
+TEST(PackHarden, OrderIndependentSeededShuffle) {
+    struct Spec { float x, z; bool predator; bool prey; };
+    std::vector<Spec> base = {
+        {-4.0f, 0.0f, true, false}, {0.0f, 1.0f, true, false}, {4.0f, 0.0f, true, false},
+        {-2.0f, 2.0f, true, false}, {0.0f, 30.0f, false, true}, {12.0f, 28.0f, false, true},
+        {-8.0f, 33.0f, false, true},
+    };
+    auto build = [](const std::vector<Spec>& order) {
+        entt::registry r;
+        std::vector<entt::entity> es;
+        for (const auto& sp : order)
+            es.push_back(sp.prey ? spawnPrey(r, sp.x, sp.z)
+                                  : spawnPredator(r, sp.x, sp.z, sp.predator));
+        for (std::uint64_t t = 0; t < 8; ++t) RunPredatorPackOnTick(r, t);
+        std::vector<std::tuple<float, float, float, float, int>> out;
+        for (std::size_t i = 0; i < order.size(); ++i) {
+            if (order[i].prey) continue;
+            const auto& tf = r.get<Comp::TransformComponent>(es[i]);
+            const auto& pk = r.get<Comp::PackHunterComponent>(es[i]);
+            out.push_back({tf.position.x, tf.position.z, pk.coord_x, pk.coord_z,
+                           static_cast<int>(pk.in_pack)});
+        }
+        std::sort(out.begin(), out.end());
+        return out;
+    };
+    const auto baseline = build(base);
+
+    auto shuffled = Luminumbra::TestSupport::SeededShuffled(base, /*seed=*/0xBADC0DEu);
+    bool reordered = false;  // guard R-4: the seed must actually permute.
+    for (std::size_t i = 0; i < base.size(); ++i)
+        if (shuffled[i].x != base[i].x || shuffled[i].z != base[i].z) { reordered = true; break; }
+    ASSERT_TRUE(reordered) << "seed must actually permute the spawn order";
+
+    const auto fromShuffle = build(shuffled);
+    ASSERT_EQ(baseline.size(), fromShuffle.size());
+    for (std::size_t i = 0; i < baseline.size(); ++i)
+        EXPECT_EQ(baseline[i], fromShuffle[i])
+            << "flank result must depend on geometry, not (seeded-shuffled) spawn order";
+}
+
+// ORACLE (test-rigor KD-5): the FLANK RING POINT geometry, recomputed independently +
+// pinned to golden literals. The flank target is
+//   baseAngle = Atan2(preyZ-cz, preyX-cx); angle = baseAngle + (2*pi/packSize)*rank;
+//   target = prey + kFlankStandoff*(Cos angle, Sin angle)   (PredatorPackSystem.h:210-215)
+// and the emitted coord is the UNIT vector self->target. We use a pack of THREE and place
+// the rank-1 member EXACTLY on the prey, so its target-self vector IS the standoff ring
+// vector and its unit coord reduces to (Cos angle, Sin angle) — recomputed here with the
+// SAME dm:: functions (R-1). packSize=3 is deliberate: a pack of 2 has step=pi, so a
+// +step*rank -> -step*rank sign flip maps rank-1 to the SAME point and cannot be caught;
+// with step=2*pi/3 the flip moves the rank-1 angle from baseAngle+2pi/3 to baseAngle-2pi/3,
+// flipping coord_x's sign -> RED (proven in mutation-pass-results.md).
+TEST(PackHarden, FlankPointGeometryOracle) {
+    using luminumbra::ai::kFlankStandoff;
+    entt::registry r;
+    // Prey to the NORTH; three predators south of it, all pairwise within kPackRadius=20.
+    // Positional flank rank = sort by x then z: B(x=4)->0, A(x=10)->1, C(x=16)->2.
+    const float preyX = 10.0f, preyZ = 20.0f;
+    const float ax = 10.0f, az = 20.0f;  // A: rank 1, sits EXACTLY on the prey
+    const float bx = 4.0f, bz = 8.0f;    // B: rank 0
+    const float cxp = 16.0f, czp = 8.0f; // C: rank 2
+    auto pa = spawnPredator(r, ax, az);
+    auto pb = spawnPredator(r, bx, bz);
+    auto pc = spawnPredator(r, cxp, czp);
+    spawnPrey(r, preyX, preyZ);
+    RunPredatorPackOnTick(r, 0);
+
+    const auto& pkA = r.get<Comp::PackHunterComponent>(pa);
+    ASSERT_EQ(pkA.in_pack, 1u);
+    ASSERT_EQ(r.get<Comp::PackHunterComponent>(pb).in_pack, 1u);
+    ASSERT_EQ(r.get<Comp::PackHunterComponent>(pc).in_pack, 1u);
+
+    // INDEPENDENT recompute of the geometry, mirroring the source EXACTLY.
+    const float cx = (ax + bx + cxp) / 3.0f;
+    const float cz = (az + bz + czp) / 3.0f;
+    const float baseAngle = dm::Atan2(preyZ - cz, preyX - cx);
+    const float step = dm::kTwoPi / 3.0f;
+    const float angleA = baseAngle + step * 1.0f;  // A is rank 1
+    // A is ON the prey, so its unit coord toward (prey + standoff*(Cos,Sin)) is exactly
+    // (Cos angleA, Sin angleA).
+    const float expX = dm::Cos(angleA);
+    const float expZ = dm::Sin(angleA);
+    EXPECT_NEAR(pkA.coord_x, expX, 1e-5f);
+    EXPECT_NEAR(pkA.coord_z, expZ, 1e-5f);
+
+    // Emitted coord is unit length (the consumer relies on it).
+    const float lenA = dm::Sqrt(pkA.coord_x * pkA.coord_x + pkA.coord_z * pkA.coord_z);
+    EXPECT_NEAR(lenA, 1.0f, 1e-3f);
+    (void)kFlankStandoff;
+
+    // GOLDEN LITERAL (frozen on THIS toolchain): centroid is due-south of the prey so
+    // baseAngle = +pi/2; A is rank 1 so angleA = pi/2 + 2pi/3 = 7pi/6 -> coord ~ (-0.866, -0.5).
+    // A rank-term sign flip sends angleA to pi/2 - 2pi/3 = -pi/6 -> coord ~ (+0.866, -0.5),
+    // flipping coord_x's SIGN — so this golden (and the recompute) go RED. See
+    // mutation-pass-results.md.
+    EXPECT_NEAR(pkA.coord_x, -0.8660254f, 1e-3f);
+    EXPECT_NEAR(pkA.coord_z, -0.5000000f, 1e-3f);
 }
 
 // ===========================================================================

@@ -19,6 +19,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <vector>
@@ -26,10 +27,14 @@
 #include <entt/entt.hpp>
 
 #include "ai/CircadianSystem.h"
+#include "ai/CreatureGenome.h"
 #include "ai/CreatureReproductionSystem.h"
 #include "ai/DecompositionSystem.h"
+#include "ai/Evolution.h"
 #include "ai/LifespanSystem.h"
 #include "ai/WildlifeFoliageSystem.h"
+
+#include "../support/SeededShuffle.h"
 
 #include "components/CircadianComponents.h"
 #include "components/CoreComponents.h"
@@ -288,6 +293,137 @@ TEST(ReproHardening, RunEqualsReplay) {
     build(a);
     build(b);
     EXPECT_TRUE(run(a) == run(b)) << "reproduction is not run==replay deterministic";
+}
+
+// --- ORDER-INDEPENDENCE (test-rigor KD-3): the load-bearing NEW variant. ---
+// run==replay (above) re-runs the SAME spawn order twice and so can NEVER expose the
+// order-dependence the boids bug (a8b689c) actually was. RunMatingResolveOnTick CLAIMS
+// order-independence via an id-SORTED traversal + a male-snapshot/male_used courtship
+// resolution (CreatureReproductionSystem.h:127-130,155-176): WHO pairs with WHOM, and
+// therefore the BIRTH COUNT and the per-generation POPULATION STRUCTURE, must NOT depend
+// on the order creatures were spawned.
+//
+// IMPORTANT (the honest invariant): a birth's per-baby genome VALUES and SEX are seeded
+// from the PARENT ENTITY IDS (CreatureReproductionSystem.h:184-190), and entt assigns ids
+// in spawn order, so the raw genome numbers legitimately change when the spawn order
+// changes — that is NOT an order-dependence bug. What MUST stay invariant is the pairing
+// outcome: the number of births and the generation histogram. A boids-style iteration-order
+// bug (a female grabbing the "wrong" male because the visit order leaked into the pairing)
+// would change exactly those. We feed the SAME herd in a deterministic SEEDED-SHUFFLED
+// (and reversed) spawn order and assert that histogram is byte-identical.
+namespace {
+// A spawn spec for the order-independence herd. The SET is fixed; only the order varies.
+struct ReproSpec { float x, z; bool female; };
+
+// Build the herd in the given spawn order, run N repro ticks, and return the
+// spawn-order-INVARIANT signature: total population + a generation histogram (gen -> count).
+// (Genome VALUES are intentionally excluded — they are id-seeded, see the note above.)
+std::vector<std::uint32_t> reproGenerationHistogram(const std::vector<ReproSpec>& order) {
+    entt::registry r;
+    for (const auto& sp : order) spawnFertile(r, sp.x, sp.z, sp.female);
+    for (std::uint64_t t = 0; t < 600; ++t) {
+        luminumbra::ai::RunMateSeekingOnTick(r);
+        luminumbra::ai::RunMatingResolveOnTick(r, t, 0x5EED1234ull);
+    }
+    std::vector<std::uint32_t> hist;  // index = generation, value = count
+    auto v = r.view<Comp::CreatureGenomeComponent>();
+    for (auto e : v) {
+        const auto g = v.get<Comp::CreatureGenomeComponent>(e).generation;
+        if (g >= hist.size()) hist.resize(g + 1u, 0u);
+        ++hist[g];
+    }
+    return hist;
+}
+}  // namespace
+
+TEST(ReproHardening, OrderIndependentSeededShuffle) {
+    std::vector<ReproSpec> base = {
+        {0.0f, 0.0f, true},  {0.10f, 0.0f, true},  {0.20f, 0.0f, true},
+        {0.0f, 0.2f, false}, {0.10f, 0.2f, false}, {0.20f, 0.2f, false},
+    };
+    const auto baseline = reproGenerationHistogram(base);
+    // The herd must actually breed, else the test is vacuous (gen-1+ births present).
+    ASSERT_GT(baseline.size(), 1u) << "herd never bred — test would be vacuous";
+
+    // Deterministic seeded permutation that ACTUALLY reorders (guard R-4 false-green).
+    auto shuffled = Luminumbra::TestSupport::SeededShuffled(base, /*seed=*/0xC0FFEEu);
+    bool reordered = false;
+    for (std::size_t i = 0; i < base.size(); ++i) {
+        if (shuffled[i].x != base[i].x || shuffled[i].z != base[i].z ||
+            shuffled[i].female != base[i].female) {
+            reordered = true;
+            break;
+        }
+    }
+    ASSERT_TRUE(reordered) << "seed must actually permute the spawn order";
+
+    const auto fromShuffle = reproGenerationHistogram(shuffled);
+    EXPECT_EQ(baseline, fromShuffle)
+        << "seeded-shuffled spawn order changed the birth/generation structure "
+           "— reproduction PAIRING is NOT order-independent";
+
+    // A second, independent permutation (reversed) — pins it as general order-invariance.
+    std::vector<ReproSpec> rev(base.rbegin(), base.rend());
+    const auto fromRev = reproGenerationHistogram(rev);
+    EXPECT_EQ(baseline, fromRev)
+        << "reversed spawn order changed the birth/generation structure";
+}
+
+// --- ORACLE (test-rigor KD-4): INDEPENDENT-RECOMPUTE + GOLDEN-LITERAL for the genome
+//     math. BreedOffspring(a,b,rng) = BlendCrossover then GaussianMutate then clamp
+//     (CreatureGenome.h:87-94). This recomputes the expected child by HAND from the
+//     documented formulas with a SECOND, identically-seeded rng pulling the draws in the
+//     SAME order (Evolution.h:53-62 then :38-48) — a different code path, so a sign/op
+//     flip in the production operators breaks it (unlike a run==replay self-compare). ---
+TEST(ReproHardening, BreedOffspringOracle) {
+    using luminumbra::ai::CreatureGenome;
+    using luminumbra::ai::CreatureGeneBounds;
+    using luminumbra::ai::CreatureGenomeToGenes;
+    using luminumbra::ai::ClampGene;
+    using luminumbra::ai::kCreatureMutationSigmaFrac;
+    using luminumbra::core::DeterministicRng;
+
+    CreatureGenome pa;
+    pa.move_speed = 2.0f; pa.vigilance = 0.20f; pa.hunger_threshold = 0.10f; pa.size_scale = 0.80f;
+    CreatureGenome pb;
+    pb.move_speed = 6.0f; pb.vigilance = 0.90f; pb.hunger_threshold = 0.50f; pb.size_scale = 1.60f;
+
+    const std::uint64_t kSeed = 0xBEEF00D1ull;
+
+    // PRODUCTION result.
+    DeterministicRng prod(kSeed);
+    const CreatureGenome child = luminumbra::ai::BreedOffspring(pa, pb, prod);
+
+    // INDEPENDENT hand recompute, mirroring the EXACT source draw order:
+    //   phase 1 (BlendCrossover): one next_unit() per gene, child = a + (b-a)*u
+    //   phase 2 (GaussianMutate): one next_gaussian() per gene, child += g*sigma*range, clamp
+    const auto genesA = CreatureGenomeToGenes(pa);
+    const auto genesB = CreatureGenomeToGenes(pb);
+    const auto bounds = CreatureGeneBounds();
+    DeterministicRng oracle(kSeed);
+    std::array<float, 4> expect{};
+    for (std::size_t i = 0; i < 4; ++i) {
+        const float u = oracle.next_unit();
+        expect[i] = genesA[i] + (genesB[i] - genesA[i]) * u;
+    }
+    for (std::size_t i = 0; i < 4; ++i) {
+        const float range = bounds[i].hi - bounds[i].lo;
+        expect[i] += oracle.next_gaussian() * kCreatureMutationSigmaFrac * range;
+        expect[i] = ClampGene(expect[i], bounds[i]);
+    }
+
+    EXPECT_FLOAT_EQ(child.move_speed, expect[0]);
+    EXPECT_FLOAT_EQ(child.vigilance, expect[1]);
+    EXPECT_FLOAT_EQ(child.hunger_threshold, expect[2]);
+    EXPECT_FLOAT_EQ(child.size_scale, expect[3]);
+
+    // GOLDEN LITERALS (frozen on THIS toolchain from the recompute above). A draw-ORDER
+    // regression (e.g. mutate-before-cross) that the recompute would track in lockstep is
+    // ALSO caught here, since these are fixed numbers, not derived from the same rng.
+    EXPECT_NEAR(child.move_speed, 1.75438714f, 1e-5f);
+    EXPECT_NEAR(child.vigilance, 0.41084281f, 1e-5f);
+    EXPECT_NEAR(child.hunger_threshold, 0.20820478f, 1e-5f);
+    EXPECT_NEAR(child.size_scale, 1.17190635f, 1e-5f);
 }
 
 // ===========================================================================
