@@ -3872,7 +3872,14 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     // low-sun arc, so dusk is a genuine partial-day value and night collapses to
     // ~0. Noon (sun_up ~0.95) stays pinned at 1.0, so the noon dome and the
     // albedo/ambient calibrations that depend on it are untouched.
-    m_skyDayFactor = glm::smoothstep(-0.05f, 0.55f, sun_up_factor);
+    // GOLDEN HOUR (reference-loop finding): the old (-0.05, 0.55) band collapsed the
+    // dome to ~9% brightness the instant the sun reached the horizon, so the warm
+    // low-sun scattering went black and the dome's warm post-grade (gated on
+    // dayFactor) switched OFF at dusk — day jumped straight to night, no sunset.
+    // Widen + lower the band so civil twilight stays lit and WARM: ~0.5-0.6 at the
+    // horizon, full day while the sun is up, collapsing to 0 only once the sun is
+    // well below (deep night still dark). This is what makes dawn/dusk glow.
+    m_skyDayFactor = glm::smoothstep(-0.28f, 0.18f, sun_up_factor);
 
     glm::vec3 noonColor(1.0f, 0.95f, 0.85f);
     glm::vec3 horizonColor(1.0f, 0.6f, 0.2f);
