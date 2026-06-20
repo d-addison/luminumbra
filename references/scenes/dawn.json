@@ -1,0 +1,24 @@
+{
+  "_comment": "target references/dawn_mist.png \u00e2\u20ac\u201d low gold sun + valley fog",
+  "camera": {
+    "pos": [
+      8,
+      70,
+      8
+    ],
+    "yaw": 110,
+    "pitch": -20,
+    "fov": 62
+  },
+  "time_of_day": 0.76,
+  "clouds": {
+    "coverage": 0.4,
+    "plane_height": 1000,
+    "shadow": false
+  },
+  "weather": {
+    "type": "fog",
+    "intensity": 0.55
+  },
+  "screenshot": "references/compare/dawn.ppm"
+}

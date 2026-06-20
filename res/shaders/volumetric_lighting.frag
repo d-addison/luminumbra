@@ -37,6 +37,12 @@ uniform float u_aerialMaxDistance = 1600.0;
 // veil with b clamped <= g -> warm hazy depth without blue-tinting ground).
 uniform float u_inscatterStrength = 60.0;
 uniform float u_atmosphereWarmth = 1.0;
+// VALLEY / GROUND FOG: a ground-hugging mist layer that pools in low terrain and
+// fades with altitude, so valleys fill with morning/evening mist while hilltops
+// stay clear. Defaulted (C++ need not set them); stronger at low sun (dawn/dusk).
+uniform float u_groundFogDensity = 0.022; // accumulation per metre of view depth
+uniform float u_fogHeight = 70.0;         // world Y where the mist top fades out
+uniform float u_fogThickness = 52.0;      // metres of vertical falloff to the top
 
 const float PI = 3.14159265359;
 
@@ -88,6 +94,16 @@ void main() {
     float fog = 1.0 - exp(-dist * u_aerialDensity);
     fog = clamp(fog, 0.0, 1.0);
 
+    // VALLEY / GROUND FOG: density rises toward the valley floor (low worldPos.y),
+    // fades out above u_fogHeight, accumulates over view distance, and is strongest
+    // at low sun (dawn/dusk morning mist). Hilltops above the fog top stay clear.
+    float heightF = clamp((u_fogHeight - worldPos.y) / max(u_fogThickness, 1.0), 0.0, 1.0);
+    heightF *= heightF; // denser toward the valley floor
+    float lowSunMist = mix(0.35, 1.0, 1.0 - smoothstep(0.10, 0.55, u_sunCosZenith));
+    float groundFog = (1.0 - exp(-dist * u_groundFogDensity * heightF)) * lowSunMist;
+    groundFog *= clamp(u_skyDayFactor, 0.0, 1.0); // vanish at true night like the dome
+    fog = max(fog, clamp(groundFog, 0.0, 0.9));
+
     // In-scatter color from the shared sky scattering, scaled into the HDR
     // display range and gated by the night envelope so distance fog vanishes at
     // night exactly as the dome darkens.
@@ -129,9 +145,17 @@ void main() {
                 (inscatter * (2.43 * inscatter + 0.59) + 0.14);
     inscatter = pow(max(inscatter, vec3(0.0)), vec3(1.0 / 2.2));
 
+    // VALLEY MIST is luminous (pale), not just the warm sky hue over dark ground.
+    // Lift the in-scatter toward a pale warm-white where the ground fog dominates so
+    // morning/evening mist reads as actual mist filling the valleys. Tinted slightly
+    // by the warm low-sun hue so it stays palette-coherent.
+    float mistAmt = clamp(groundFog / 0.9, 0.0, 1.0);
+    vec3 mistColor = mix(vec3(0.82, 0.84, 0.90), aHue, 0.35); // pale, faintly warm
+    inscatter = mix(inscatter, mistColor, mistAmt * 0.7);
+
     // Keep a hint of far terrain rather than a pure sky veil so the long view
     // still reads (Distant-Horizons style) instead of dissolving to flat sky.
-    fog = min(fog, 0.92);
+    fog = min(fog, 0.94);
 
     // alpha = fog composites the aerial haze OVER the lit terrain.
     FragColor = vec4(inscatter, fog);
