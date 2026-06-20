@@ -102,6 +102,14 @@ u64 ComputeTerrainParamsHash(const Systems::TerrainGenParams& params, int seed) 
         FnvMixValue(hash, params.river_depth);
         FnvMixValue(hash, params.river_max_carve);
     }
+    // Slice 2: mix lake params ONLY when lakes are enabled (byte-zero drift off).
+    if (params.lakes_enabled) {
+        FnvMixValue(hash, static_cast<u8>(4));
+        FnvMixValue(hash, params.lake_frequency);
+        FnvMixValue(hash, params.lake_threshold);
+        FnvMixValue(hash, params.lake_depth);
+        FnvMixValue(hash, params.lake_max_carve);
+    }
     // T-I4-4: mix the structure template content hash ONLY when structures are
     // enabled, so structure presets' pristine far tiles invalidate on a template
     // change while non-structure worlds keep byte-identical far-tile cache keys.

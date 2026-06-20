@@ -334,6 +334,14 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
         params.river_pv_max = features.value("river_pv_max", params.river_pv_max);
         params.river_max_carve = features.value("river_max_carve", params.river_max_carve);
     }
+    // Slice 2: lakes. Opt-in via features.lakes_enabled; absent -> off (byte-zero).
+    if (features.value("lakes_enabled", false)) {
+        params.lakes_enabled = true;
+        params.lake_frequency = features.value("lake_frequency", params.lake_frequency);
+        params.lake_threshold = features.value("lake_threshold", params.lake_threshold);
+        params.lake_depth = features.value("lake_depth", params.lake_depth);
+        params.lake_max_carve = features.value("lake_max_carve", params.lake_max_carve);
+    }
     ParseMaterialsBlock(gen_params, result.extras.materials, preset_path, result.warnings);
 
     // Unknown-key audit over every consumed scope.
@@ -350,7 +358,9 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
                     {"caves_enabled", "cave_frequency", "cave_threshold",
                      "cave_carve_value", "rivers_enabled", "structures_enabled",
                      "river_frequency", "river_depth", "river_pv_min",
-                     "river_pv_max", "river_max_carve"},
+                     "river_pv_max", "river_max_carve",
+                     "lakes_enabled", "lake_frequency", "lake_threshold",
+                     "lake_depth", "lake_max_carve"},
                     preset_path, result.warnings);
 
     result.ok = true;

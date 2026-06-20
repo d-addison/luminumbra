@@ -48,6 +48,11 @@
       "river_pv_min": -1.0,
       "river_pv_max": -0.84,
       "river_max_carve": 8.0,
+      "lakes_enabled": true,
+      "lake_frequency": 0.0009,
+      "lake_threshold": 0.5,
+      "lake_depth": 4.0,
+      "lake_max_carve": 14.0,
       "structures_enabled": true
     }
   }

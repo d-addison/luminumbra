@@ -487,6 +487,15 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
         sample.final_height -= RiverCarveAmount(sample.final_height, influence);
     }
 
+    // Slice 2: lake basins. Where the lake field is high, pull the surface toward a
+    // floor below SEA_LEVEL so the global water plane fills it (mirrors the river
+    // carve; lake_max_carve gates it to low terrain only). Skipped (byte-zero) when
+    // lakes are disabled. Kept byte-identical to ComputeShapedHeightGrid.
+    if (m_params.lakes_enabled) {
+        const float lake_influence = LakeInfluenceFromNoise(world_x, world_z);
+        sample.final_height -= LakeCarveAmount(sample.final_height, lake_influence);
+    }
+
     // T-I6-A2: hydraulic/thermal relief (decision a). Added LAST so the baked
     // drainage/talus sits in the final surface EVERY height consumer reads
     // (collision/spawn/water/far-LOD/mesh). The per-region bake samples the
@@ -616,6 +625,38 @@ float SHIELD_WorldSystem::RiverCarveAmount(float final_height, float influence) 
         return 0.0f;
     }
     return std::min(final_height - channel_floor, m_params.river_max_carve * influence);
+}
+
+float SHIELD_WorldSystem::LakeInfluenceFromNoise(float world_x, float world_z) const {
+    // Lake field: a smooth FBM (reusing the continentalness generator at seed +11)
+    // so lakes are blobby basins. Influence ramps 0->1 above lake_threshold. Pure;
+    // 0 when lakes are disabled.
+    if (!m_params.lakes_enabled || !m_continentalness_generator) {
+        return 0.0f;
+    }
+    const float v = m_continentalness_generator->GenSingle2D(
+        world_x * m_params.lake_frequency,
+        world_z * m_params.lake_frequency,
+        m_seed + 11);
+    if (v < m_params.lake_threshold) {
+        return 0.0f;
+    }
+    const float span = std::max(1e-4f, 1.0f - m_params.lake_threshold);
+    return std::clamp((v - m_params.lake_threshold) / span, 0.0f, 1.0f);
+}
+
+float SHIELD_WorldSystem::LakeCarveAmount(float final_height, float influence) const {
+    // Pull the surface toward a floor below SEA_LEVEL so the global water plane
+    // fills the basin. lake_max_carve * influence clamps the drop, so only terrain
+    // already near sea level becomes a lake (peaks stay dry). Zero outside a lake.
+    if (influence <= 0.0f) {
+        return 0.0f;
+    }
+    const float lake_floor = SEA_LEVEL - m_params.lake_depth * influence;
+    if (final_height <= lake_floor) {
+        return 0.0f;
+    }
+    return std::min(final_height - lake_floor, m_params.lake_max_carve * influence);
 }
 
 float SHIELD_WorldSystem::GetTerrainHeightAtCoarse(
@@ -789,6 +830,14 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
                 const float world_z = static_cast<float>(base_z + z);
                 const float influence = RiverInfluenceFromNoise(world_x, world_z);
                 terrain_height -= RiverCarveAmount(terrain_height, influence);
+            }
+
+            // Slice 2 lake carve — byte-identical to ComputeShapedHeightSampleImpl.
+            if (m_params.lakes_enabled) {
+                const float world_x = static_cast<float>(base_x + x);
+                const float world_z = static_cast<float>(base_z + z);
+                const float lake_influence = LakeInfluenceFromNoise(world_x, world_z);
+                terrain_height -= LakeCarveAmount(terrain_height, lake_influence);
             }
 
             out[i] = terrain_height;

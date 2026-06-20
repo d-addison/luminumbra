@@ -96,6 +96,17 @@ struct TerrainGenParams {
     float river_pv_max = -0.85f;  // valleys band upper edge (folded PV)
     float river_depth = 8.0f;     // metres the channel floor sits below SEA_LEVEL
     float river_max_carve = 60.0f; // clamp on terrain lowered into the channel
+    // Lakes (worldgen-richness slice 2): static water basins. Where the lake field
+    // (smooth FBM, seed +11) exceeds lake_threshold, the terrain is pulled toward a
+    // floor below SEA_LEVEL so the EXISTING global water plane fills it (no
+    // WaterSystem change, like rivers). lake_max_carve naturally gates lakes to LOW
+    // terrain only (a peak can't be carved below sea level), so lakes form in
+    // basins. Disabled -> byte-zero drift (world_hash unchanged).
+    bool lakes_enabled = false;
+    float lake_frequency = 0.0008f;  // ~1200 m feature scale
+    float lake_threshold = 0.55f;    // lake field value above which a lake forms
+    float lake_depth = 4.0f;         // metres the lake floor sits below SEA_LEVEL
+    float lake_max_carve = 14.0f;    // clamp -> only terrain within ~14 m of sea becomes lake
     // fnv1a64 of the canonicalized biome table content, stamped by the world
     // system when it loads the table (0 when biomes are disabled or the table
     // failed to load). ComputeTerrainParamsHash mixes this in so pristine
@@ -640,6 +651,11 @@ private:
     // influence [0, 1] (pure; 0 outside the band). Factored out so the coarse
     // anti-aliased sampler can re-evaluate the carve over a footprint stencil.
     float RiverCarveAmount(float final_height, float influence) const;
+    // Lakes (slice 2): lake influence [0,1] from the smooth lake field (seed +11),
+    // and the carve toward a sub-SEA_LEVEL floor. Mirror the river helpers so the
+    // scalar + batched height paths stay byte-identical. 0 when lakes disabled.
+    float LakeInfluenceFromNoise(float world_x, float world_z) const;
+    float LakeCarveAmount(float final_height, float influence) const;
     // Monotone piecewise-linear spline over sorted [input, output] control
     // points: endpoint-clamped, plain lerp between neighbors, `fallback` when
     // the point list is empty.
