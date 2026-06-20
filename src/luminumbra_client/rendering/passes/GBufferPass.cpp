@@ -419,8 +419,13 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
             };
             if (endsWith("_leaf", 5)) {
                 const float h = hash01(transform.position, 0.0f);
-                const float b = 0.8f + 0.45f * hash01(transform.position, 11.3f);
-                tint = glm::mix(glm::vec3(0.72f, 1.18f, 0.55f), glm::vec3(1.30f, 1.02f, 0.40f), h * h) * b;
+                const float b = 0.70f + 0.30f * hash01(transform.position, 11.3f);
+                // Natural foliage green -> autumn gold. The green channel stays <= 1
+                // (no over-boost): leaves now carry a real textured green albedo, so
+                // the old 1.18 green-boost (x up to 1.25 brightness) pushed them to a
+                // neon lime that washed the horizon sky-band (GREEN_SKY_SPECKLE) and
+                // read unnaturally. This modulates the texture instead of inflating it.
+                tint = glm::mix(glm::vec3(0.62f, 0.90f, 0.48f), glm::vec3(1.05f, 0.82f, 0.42f), h * h) * b;
             } else if (endsWith("_bark", 5)) {
                 const float h = hash01(transform.position, 5.1f);
                 tint = glm::vec3(0.82f + 0.32f * h, 0.78f + 0.22f * h, 0.72f + 0.20f * h);
