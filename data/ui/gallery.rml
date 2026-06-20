@@ -1,0 +1,64 @@
+<rml>
+    <head>
+        <title>Gallery - Luminumbra</title>
+        <link type="text/css" href="base.rcss" />
+        <link type="text/css" href="game_theme.rcss" />
+        <link type="text/css" href="pages.rcss" />
+    </head>
+    <body id="gallery">
+        <div class="container gallery-container">
+            <h1 class="gallery-heading">gallery</h1>
+            <p class="subtitle">moments you kept</p>
+
+            <!-- Flexbox grid of photo thumbnail cards (placeholder tiles). -->
+            <div class="gallery-grid">
+                <div class="photo-card">
+                    <div class="photo-thumb"></div>
+                    <div class="photo-meta">
+                        <span class="photo-title">dawn over the basin</span>
+                        <span class="photo-stars">★★★★☆</span>
+                    </div>
+                </div>
+                <div class="photo-card">
+                    <div class="photo-thumb"></div>
+                    <div class="photo-meta">
+                        <span class="photo-title">sage hollow</span>
+                        <span class="photo-stars">★★★☆☆</span>
+                    </div>
+                </div>
+                <div class="photo-card">
+                    <div class="photo-thumb"></div>
+                    <div class="photo-meta">
+                        <span class="photo-title">low fog, still water</span>
+                        <span class="photo-stars">★★★★★</span>
+                    </div>
+                </div>
+                <div class="photo-card">
+                    <div class="photo-thumb"></div>
+                    <div class="photo-meta">
+                        <span class="photo-title">last light, ridge</span>
+                        <span class="photo-stars">★★☆☆☆</span>
+                    </div>
+                </div>
+                <div class="photo-card">
+                    <div class="photo-thumb"></div>
+                    <div class="photo-meta">
+                        <span class="photo-title">wanderer at rest</span>
+                        <span class="photo-stars">★★★★☆</span>
+                    </div>
+                </div>
+                <div class="photo-card">
+                    <div class="photo-thumb"></div>
+                    <div class="photo-meta">
+                        <span class="photo-title">amber canopy</span>
+                        <span class="photo-stars">★★★☆☆</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="button-container">
+                <button id="back_btn" class="btn btn-secondary">Back</button>
+            </div>
+        </div>
+    </body>
+</rml>

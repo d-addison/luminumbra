@@ -1,0 +1,31 @@
+<rml>
+    <head>
+        <title>HUD - Luminumbra</title>
+        <link type="text/css" href="base.rcss" />
+        <link type="text/css" href="game_theme.rcss" />
+        <link type="text/css" href="pages.rcss" />
+    </head>
+    <body id="hud">
+        <!-- Unobtrusive corner cluster: time-of-day, lens hint, capture cue.
+             Diegetic + mostly transparent so it never competes with the world. -->
+        <div class="hud-corner">
+            <div class="hud-time">
+                <span class="hud-time-value">17:42</span>
+                <span class="hud-time-label">dusk</span>
+            </div>
+
+            <div class="hud-lens">
+                <span class="hud-lens-focal">50mm</span>
+                <span class="hud-lens-sep">·</span>
+                <span class="hud-lens-aperture">f/2.8</span>
+                <span class="hud-lens-sep">·</span>
+                <span class="hud-lens-ev">ev +0.3</span>
+            </div>
+
+            <div class="hud-capture-cue">
+                <span class="hud-capture-dot"></span>
+                <span class="hud-capture-text">capture ready</span>
+            </div>
+        </div>
+    </body>
+</rml>

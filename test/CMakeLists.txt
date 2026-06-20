@@ -384,6 +384,39 @@ else()
     target_link_libraries(ui_smoke_test PRIVATE OpenGL::GL)
 endif()
 
+# T008 — UI page-load test. Mirrors ui_smoke_test: live headless RmlUi context
+# (hidden GL window), loads every shipped data/ui/*.rml and asserts a populated body.
+add_executable(ui_page_load_test
+    ui/ui_page_load_test.cpp
+    ../src/luminumbra_client/ui/core/UIComponent.cpp
+    ../src/luminumbra_client/ui/core/UIStateManager.cpp
+)
+
+target_compile_definitions(ui_page_load_test PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+    LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts"
+)
+
+target_include_directories(ui_page_load_test PRIVATE
+    ../src
+    ../src/luminumbra_client
+)
+
+target_link_libraries(ui_page_load_test PRIVATE
+    gtest_main
+    luminumbra_client
+)
+
+if(WIN32)
+    target_link_libraries(ui_page_load_test PRIVATE opengl32)
+elseif(APPLE)
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(ui_page_load_test PRIVATE ${OPENGL_LIBRARIES})
+else()
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(ui_page_load_test PRIVATE OpenGL::GL)
+endif()
+
 add_executable(initial_world_loading_perf_test
     performance/initial_world_loading_perf_test.cpp
 )
@@ -763,6 +796,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     waterfall_visual_test
     particle_determinism_test
     ui_smoke_test
+    ui_page_load_test
     initial_world_loading_perf_test
     runtime_world_visual_validation_test
     frontier_gates_test

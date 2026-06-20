@@ -1,0 +1,413 @@
+/* ============================================================================
+   pages.rcss — in-game page styles in the "Zen / Photographic Calm" language.
+   Covers: HUD, photo mode, pause, gallery.
+   Palette (from game_theme.rcss): warm-dusk near-black #16130E / #14110B ·
+   ivory ink #F2EDE4 · sage #8FA68E · dusk-gold focus #C9A86A ·
+   warm surface #1F1B14 · hairline #3A3326 · muted ink #8A8270.
+   Linked AFTER base.rcss + game_theme.rcss in every page.
+   ============================================================================ */
+
+/* ============================================================================
+   1. HUD — minimal diegetic corner cluster. Mostly transparent, never boxed.
+   ============================================================================ */
+
+/* The HUD body itself is a transparent pass-through over the live world. */
+body#hud {
+    background-color: transparent;
+    decorator: none;
+}
+
+.hud-corner {
+    position: absolute;
+    bottom: 28px;
+    left: 32px;
+    width: 240px;
+    text-align: left;
+    color: #F2EDE4;
+    letter-spacing: 1px;
+}
+
+.hud-time {
+    margin-bottom: 6px;
+}
+
+.hud-time-value {
+    font-size: 30px;
+    color: #F2EDE4;
+    letter-spacing: 2px;
+}
+
+.hud-time-label {
+    font-size: 14px;
+    font-style: italic;
+    color: #8FA68E;
+    margin-left: 8px;
+    letter-spacing: 2px;
+}
+
+.hud-lens {
+    font-size: 14px;
+    color: #D8CFBC;
+    letter-spacing: 1px;
+    margin-bottom: 10px;
+}
+
+.hud-lens-sep {
+    color: #6E6656;
+    margin-left: 5px;
+    margin-right: 5px;
+}
+
+.hud-capture-cue {
+    font-size: 13px;
+    color: #C9A86A;
+    letter-spacing: 2px;
+}
+
+/* Small gold dot signalling a clean, capture-ready frame. */
+.hud-capture-dot {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    border-radius: 4px;
+    background-color: #C9A86A;
+    margin-right: 8px;
+}
+
+/* ============================================================================
+   2. Photo mode — viewfinder, rule-of-thirds, readout, shutter, verdict.
+   ============================================================================ */
+
+/* Photo mode looks through to the world, so the field stays transparent. */
+body#photo_mode {
+    background-color: transparent;
+    decorator: none;
+}
+
+/* The viewfinder window: a centred frame inset from the screen edges. */
+.viewfinder {
+    position: absolute;
+    top: 6%;
+    left: 6%;
+    width: 88%;
+    height: 78%;
+    border-width: 1px;
+    border-color: #3A3326;
+}
+
+/* --- Rule-of-thirds hairlines --- */
+.thirds-line {
+    position: absolute;
+    background-color: #F2EDE4;
+    opacity: 0.16;
+}
+
+.thirds-v {
+    top: 0px;
+    width: 1px;
+    height: 100%;
+}
+.thirds-v1 { left: 33.33%; }
+.thirds-v2 { left: 66.66%; }
+
+.thirds-h {
+    left: 0px;
+    height: 1px;
+    width: 100%;
+}
+.thirds-h1 { top: 33.33%; }
+.thirds-h2 { top: 66.66%; }
+
+/* --- Corner ticks: short dusk-gold accents at each viewfinder corner. --- */
+.vf-corner {
+    position: absolute;
+    width: 22px;
+    height: 22px;
+    border-color: #C9A86A;
+}
+.vf-corner-tl {
+    top: -1px; left: -1px;
+    border-top-width: 2px;
+    border-left-width: 2px;
+}
+.vf-corner-tr {
+    top: -1px; right: -1px;
+    border-top-width: 2px;
+    border-right-width: 2px;
+}
+.vf-corner-bl {
+    bottom: -1px; left: -1px;
+    border-bottom-width: 2px;
+    border-left-width: 2px;
+}
+.vf-corner-br {
+    bottom: -1px; right: -1px;
+    border-bottom-width: 2px;
+    border-right-width: 2px;
+}
+
+/* Centre focus reticle — a faint sage ring. */
+.vf-reticle {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 44px;
+    height: 44px;
+    margin-top: -22px;
+    margin-left: -22px;
+    border-width: 1px;
+    border-color: #8FA68E;
+    border-radius: 24px;
+    opacity: 0.55;
+}
+
+/* --- Bottom readout row --- */
+.photo-readout {
+    position: absolute;
+    bottom: 4%;
+    left: 6%;
+    width: 88%;
+    height: 92px;
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.readout-group {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+}
+
+.readout-cell {
+    display: block;
+    width: 92px;
+    text-align: left;
+    margin-right: 18px;
+}
+
+.readout-label {
+    display: block;
+    font-size: 12px;
+    color: #8A8270;
+    letter-spacing: 2px;
+    margin-bottom: 3px;
+}
+
+.readout-value {
+    display: block;
+    font-size: 22px;
+    color: #F2EDE4;
+    letter-spacing: 1px;
+}
+
+/* --- Shutter affordance: a calm concentric ring. --- */
+.shutter {
+    display: block;
+    text-align: center;
+    width: 96px;
+}
+
+.shutter-ring {
+    width: 58px;
+    height: 58px;
+    margin-left: auto;
+    margin-right: auto;
+    border-width: 2px;
+    border-color: #C9A86A;
+    border-radius: 32px;
+    background-color: rgba(20, 17, 11, 110);
+}
+
+.shutter-core {
+    width: 38px;
+    height: 38px;
+    margin-top: 8px;
+    margin-left: 8px;
+    background-color: #F2EDE4;
+    border-radius: 20px;
+    opacity: 0.85;
+}
+
+.shutter:hover .shutter-core { opacity: 1.0; }
+
+.shutter-hint {
+    display: block;
+    font-size: 12px;
+    color: #8A8270;
+    letter-spacing: 2px;
+    margin-top: 6px;
+}
+
+/* --- Post-capture star verdict panel (hidden by default). --- */
+.verdict-panel {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 360px;
+    margin-left: -180px;
+    margin-top: -130px;
+    padding: 28px;
+    background-color: #1F1B14;
+    border-width: 1px;
+    border-color: #3A3326;
+    text-align: center;
+}
+
+.verdict-heading {
+    font-size: 26px;
+    color: #8FA68E;
+    font-weight: normal;
+    letter-spacing: 4px;
+    margin-bottom: 14px;
+}
+
+.verdict-stars {
+    margin-bottom: 12px;
+}
+
+.verdict-star {
+    font-size: 30px;
+    color: #3A3326;
+    letter-spacing: 4px;
+}
+
+.verdict-star-on {
+    color: #C9A86A;
+}
+
+.verdict-note {
+    font-size: 14px;
+    font-style: italic;
+    color: #B3A892;
+    letter-spacing: 1px;
+    margin-bottom: 20px;
+}
+
+.verdict-actions {
+    text-align: center;
+}
+
+.verdict-actions button {
+    display: inline-block;
+    width: 130px;
+    margin-left: 8px;
+    margin-right: 8px;
+}
+
+/* ============================================================================
+   3. Pause — dim overlay + centred ghost-button nav.
+   ============================================================================ */
+
+body#pause {
+    background-color: transparent;
+    decorator: none;
+}
+
+/* Dim scrim drops the frozen world back behind the menu. */
+.pause-overlay {
+    position: absolute;
+    top: 0px;
+    left: 0px;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(11, 9, 6, 190);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+}
+
+.pause-panel {
+    width: 320px;
+    text-align: center;
+}
+
+.pause-heading {
+    font-size: 60px;
+    color: #F2EDE4;
+    font-weight: normal;
+    letter-spacing: 6px;
+    margin-bottom: 2px;
+}
+
+/* The pause nav reuses #nav stacked-ghost-button layout from game_theme.rcss. */
+
+/* ============================================================================
+   4. Gallery — heading + flexbox grid of photo cards + back button.
+   ============================================================================ */
+
+body#gallery {
+    display: block;
+}
+
+.gallery-container {
+    width: 80%;
+    max-width: 1200px;
+    margin-left: auto;
+    margin-right: auto;
+    padding-top: 40px;
+    text-align: center;
+}
+
+.gallery-heading {
+    font-size: 56px;
+    letter-spacing: 5px;
+    margin-bottom: 2px;
+}
+
+/* Flexbox grid — wraps fixed-width cards with generous gaps. */
+.gallery-grid {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: flex-start;
+    margin-top: 24px;
+    margin-bottom: 24px;
+}
+
+.photo-card {
+    width: 280px;
+    margin: 14px;
+    padding: 10px;
+    background-color: #1F1B14;
+    border-width: 1px;
+    border-color: #3A3326;
+}
+
+.photo-card:hover {
+    border-color: #8FA68E;
+}
+
+/* Placeholder thumbnail tile — a soft warm field with a vignette. */
+.photo-thumb {
+    width: 100%;
+    height: 168px;
+    background-color: #14110C;
+    decorator: linear-gradient(135deg, #2A2114 0%, #17130C 60%, #0B0906 100%);
+    border-width: 1px;
+    border-color: #3A3326;
+}
+
+.photo-meta {
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 8px;
+}
+
+.photo-title {
+    font-size: 15px;
+    color: #D8CFBC;
+    font-style: italic;
+    letter-spacing: 1px;
+}
+
+.photo-stars {
+    font-size: 14px;
+    color: #C9A86A;
+    letter-spacing: 1px;
+}

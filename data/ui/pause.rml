@@ -1,0 +1,23 @@
+<rml>
+    <head>
+        <title>Paused - Luminumbra</title>
+        <link type="text/css" href="base.rcss" />
+        <link type="text/css" href="game_theme.rcss" />
+        <link type="text/css" href="pages.rcss" />
+    </head>
+    <body id="pause">
+        <!-- Dim overlay drops the world back so the menu reads calmly on top. -->
+        <div class="pause-overlay">
+            <div class="pause-panel">
+                <h1 class="pause-heading">paused</h1>
+                <p class="subtitle">the world waits</p>
+
+                <div id="nav">
+                    <button id="resume_btn" class="btn">Resume</button>
+                    <button id="settings_btn" class="btn">Settings</button>
+                    <button id="quit_menu_btn" class="btn btn-accent">Quit to Menu</button>
+                </div>
+            </div>
+        </div>
+    </body>
+</rml>
