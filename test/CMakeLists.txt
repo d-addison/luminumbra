@@ -853,6 +853,14 @@ string(TOLOWER "${LUMINUMBRA_TEST_BASELINE_BUILD_PRESET}" LUMINUMBRA_TEST_BASELI
 if(LUMINUMBRA_TEST_BASELINE_BUILD_PRESET STREQUAL "")
     set(LUMINUMBRA_TEST_BASELINE_BUILD_PRESET "debug")
 endif()
+# coverage-instrumentation slice: the coverage preset reuses CMAKE_BUILD_TYPE=Debug
+# but lives in build/coverage and is validated with -BuildPreset coverage, which
+# asserts build_preset == "coverage" on every artifact. Label the configure-time
+# baseline artifacts (ctest_manifest, coverage_summary, ui_screenshots) as
+# "coverage" in that tree so the whole UiTestBaseline gate runs cleanly there.
+if(LUMINUMBRA_ENABLE_COVERAGE)
+    set(LUMINUMBRA_TEST_BASELINE_BUILD_PRESET "coverage")
+endif()
 
 set(LUMINUMBRA_TEST_ARTIFACT_ROOT "${CMAKE_BINARY_DIR}/test-artifacts")
 file(MAKE_DIRECTORY

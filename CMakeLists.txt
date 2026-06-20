@@ -13,6 +13,46 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 option(LUMINUMBRA_WARNINGS_AS_ERRORS "Treat first-party compiler warnings as errors" OFF)
 option(LUMINUMBRA_ENABLE_ASAN "Enable AddressSanitizer for first-party targets in Debug builds" OFF)
+option(LUMINUMBRA_ENABLE_COVERAGE "Instrument first-party targets with gcov coverage counters (--coverage)" OFF)
+
+# Coverage instrumentation (coverage-instrumentation slice). Applied ONLY when
+# LUMINUMBRA_ENABLE_COVERAGE is set, which is owned exclusively by the dedicated
+# `coverage` preset (binaryDir build/coverage). It appends GCC/Clang's
+# --coverage (== -fprofile-arcs -ftest-coverage) to compile + link options of
+# first-party targets so gcov emits .gcno/.gcda counters. It is a no-op on MSVC
+# (no gcov) and never touches -ffp-contract=off: the determinism contract is
+# about FP contraction / integer RNG / id-ordering, none of which --coverage
+# relaxes, and the coverage tree is never hashed, so any residual codegen drift
+# is irrelevant. Vendor targets are untouched (the helper only runs on
+# first-party targets routed through luminumbra_configure_first_party_target).
+function(luminumbra_enable_coverage TARGET_NAME)
+  if(NOT LUMINUMBRA_ENABLE_COVERAGE)
+    return()
+  endif()
+  if(NOT TARGET ${TARGET_NAME})
+    return()
+  endif()
+  if(MSVC)
+    return()
+  endif()
+  get_target_property(_lec_type ${TARGET_NAME} TYPE)
+  if(_lec_type STREQUAL "INTERFACE_LIBRARY")
+    return()
+  endif()
+  # Instrument this target's own translation units (PRIVATE).
+  target_compile_options(${TARGET_NAME} PRIVATE --coverage)
+  if(_lec_type STREQUAL "STATIC_LIBRARY" OR _lec_type STREQUAL "OBJECT_LIBRARY"
+     OR _lec_type STREQUAL "SHARED_LIBRARY")
+    # An instrumented library's objects reference the gcov runtime
+    # (__gcov_init / __gcov_merge_add ...). Propagate --coverage to LINK as
+    # PUBLIC so every consumer (test executables, the apps) pulls in the gcov
+    # runtime and links cleanly, even if the consumer itself is not routed
+    # through luminumbra_configure_first_party_target.
+    target_link_options(${TARGET_NAME} PUBLIC --coverage)
+  else()
+    target_link_options(${TARGET_NAME} PRIVATE --coverage)
+  endif()
+endfunction()
 
 function(luminumbra_configure_first_party_target TARGET_NAME)
   if(NOT TARGET ${TARGET_NAME})
@@ -44,6 +84,8 @@ function(luminumbra_configure_first_party_target TARGET_NAME)
       target_link_options(${TARGET_NAME} PRIVATE $<$<CONFIG:Debug>:-fsanitize=address>)
     endif()
   endif()
+
+  luminumbra_enable_coverage(${TARGET_NAME})
 endfunction()
 
 # T-I4-11 determinism contract (FP flag pinning). The simulation-authority
@@ -192,3 +234,13 @@ foreach(FIRST_PARTY_TARGET IN ITEMS
 )
   luminumbra_configure_first_party_target(${FIRST_PARTY_TARGET})
 endforeach()
+
+# coverage-instrumentation slice: the client library (rendering / ui / audio
+# source) was historically NOT routed through
+# luminumbra_configure_first_party_target, so it never carried the first-party
+# -Werror/-Wall/-Wextra set (it has pre-existing -Wswitch/-Wsign-compare
+# findings out of scope here). To measure rendering/ui/audio coverage WITHOUT
+# retroactively turning those warnings into hard errors, instrument it for
+# coverage ONLY (no warning-as-error flags). This is a no-op unless the
+# `coverage` preset set LUMINUMBRA_ENABLE_COVERAGE.
+luminumbra_enable_coverage(luminumbra_client)

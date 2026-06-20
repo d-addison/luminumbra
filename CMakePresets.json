@@ -53,6 +53,16 @@
         "CMAKE_BUILD_TYPE": "Release",
         "LUMINUMBRA_ENABLE_ASAN": "OFF"
       }
+    },
+    {
+      "name": "coverage",
+      "displayName": "Coverage",
+      "description": "Debug build instrumented with gcov (--coverage) for measured line/branch coverage. Isolated into build/coverage; NEVER used for determinism/world_hash gates.",
+      "inherits": "debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "LUMINUMBRA_ENABLE_COVERAGE": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -71,6 +81,10 @@
     {
       "name": "release",
       "configurePreset": "release"
+    },
+    {
+      "name": "coverage",
+      "configurePreset": "coverage"
     }
   ],
   "testPresets": [
@@ -91,6 +105,13 @@
     {
       "name": "release",
       "configurePreset": "release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "coverage",
+      "configurePreset": "coverage",
       "output": {
         "outputOnFailure": true
       }
