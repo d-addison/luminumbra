@@ -3204,7 +3204,12 @@ void RenderPipeline::init_material_lut() {
     const int MATERIAL_COUNT = 256;
     const int ROWS = 4;
 
-    std::vector<glm::vec4> materialData(static_cast<size_t>(MATERIAL_COUNT) * ROWS, glm::vec4(0.1f, 0.8f, 1.0f, 0.0f));
+    // Default fill: NON-metallic (metallic 0). A 0.1 metallic default tinted the
+    // Fresnel F0 toward albedo on every material without an explicit row — notably
+    // the skinned avatar (which falls through to the default), producing a spurious
+    // cyan/blue specular lobe. Dielectric default (metallic 0, F0 0.04) is correct;
+    // real metals set their own row.
+    std::vector<glm::vec4> materialData(static_cast<size_t>(MATERIAL_COUNT) * ROWS, glm::vec4(0.0f, 0.8f, 1.0f, 0.0f));
     auto row0 = [&](int id) -> glm::vec4& { return materialData[static_cast<size_t>(id)]; };
     auto row1 = [&](int id) -> glm::vec4& { return materialData[static_cast<size_t>(MATERIAL_COUNT + id)]; };
     auto row2 = [&](int id) -> glm::vec4& { return materialData[static_cast<size_t>(2 * MATERIAL_COUNT + id)]; };
@@ -3214,7 +3219,7 @@ void RenderPipeline::init_material_lut() {
     // channel is now DRIVEN by the materials.json roughness column (default 0.85)
     // via the parsed LUT; metallic/AO/magical keep their authored values. The
     // roughness feeds the G-buffer and the lighting specular response.
-    row0(0) = glm::vec4(0.1f, 0.8f, 1.0f, 0.0f);   // Air/Default
+    row0(0) = glm::vec4(0.0f, 0.8f, 1.0f, 0.0f);   // Air/Default (dielectric)
     row0(1) = glm::vec4(0.05f, 0.85f, 1.0f, 0.0f); // Stone
     row0(2) = glm::vec4(0.0f, 0.9f, 1.0f, 0.0f);   // Soil
     row0(3) = glm::vec4(0.0f, 0.8f, 1.0f, 0.0f);   // Grass
