@@ -130,6 +130,21 @@ bool g_fixed_cam = false;
 glm::vec3 g_fixed_cam_pos(0.0f);
 float g_fixed_cam_yaw = 0.0f;
 float g_fixed_cam_pitch = 0.0f;
+// --scene-config <json>: declaratively COMPOSE a scene (camera+fov, time-of-day,
+// weather, clouds, fog) to match a reference image, render a settled frame, and
+// screenshot it. The reference-driven fidelity loop: compose -> render -> compare.
+// Reuses the fixed-cam + timelapse single-frame capture; these add atmosphere.
+bool g_scene_active = false;
+std::filesystem::path g_scene_dir;  // output dir for the scene screenshot
+float g_scene_fov = 0.0f;            // 0 = leave camera default
+int g_scene_weather = 0;            // 0 none, 1 rain, 2 snow, 3 fog, 4 storm
+float g_scene_weather_intensity = 0.0f;
+bool g_scene_clouds = false;        // push a cloud state
+float g_scene_cloud_coverage = 0.45f;
+float g_scene_cloud_biome = 0.0f;
+float g_scene_cloud_plane = 900.0f;
+bool g_scene_cloud_shadow = false;
+float g_scene_cloud_shadow_strength = 0.0f;
 bool g_timelapse_grow = false;     // grow the procgen plants sapling->tree over the capture
 bool g_timelapse_season = false;   // drift summer->autumn leaf color over the capture
 bool g_timelapse_creatures = false; // spawn predators/prey + render markers (ecology demo)
@@ -1818,6 +1833,52 @@ int main(int argc, char* argv[]) {
         if (!cy.empty()) { try { g_fixed_cam_yaw = std::stof(cy); } catch (...) {} }
         const std::string cpi = GetCommandLineOption(argc, argv, "--cam-pitch", "");
         if (!cpi.empty()) { try { g_fixed_cam_pitch = std::stof(cpi); } catch (...) {} }
+    }
+    // --scene-config <json>: compose a full scene to match a reference, then capture.
+    if (const std::string sc = GetCommandLineOption(argc, argv, "--scene-config", ""); !sc.empty()) {
+        try {
+            std::ifstream f(sc);
+            nlohmann::json j; f >> j;
+            g_scene_active = true;
+            if (j.contains("camera")) {
+                const auto& c = j["camera"];
+                if (c.contains("pos") && c["pos"].size() == 3) {
+                    g_fixed_cam_pos = glm::vec3(c["pos"][0].get<float>(), c["pos"][1].get<float>(), c["pos"][2].get<float>());
+                    g_fixed_cam = true;
+                }
+                if (c.contains("yaw")) g_fixed_cam_yaw = c["yaw"].get<float>();
+                if (c.contains("pitch")) g_fixed_cam_pitch = c["pitch"].get<float>();
+                if (c.contains("fov")) g_scene_fov = c["fov"].get<float>();
+            }
+            if (j.contains("time_of_day")) g_timelapse_tod = j["time_of_day"].get<float>();
+            if (j.contains("weather")) {
+                const auto& w = j["weather"];
+                const std::string t = w.value("type", "none");
+                g_scene_weather = (t == "rain") ? 1 : (t == "snow") ? 2 : (t == "fog") ? 3 : (t == "storm") ? 4 : 0;
+                g_scene_weather_intensity = w.value("intensity", 0.0f);
+            }
+            if (j.contains("clouds")) {
+                const auto& cl = j["clouds"];
+                g_scene_clouds = true;
+                g_scene_cloud_coverage = cl.value("coverage", 0.45f);
+                g_scene_cloud_biome = cl.value("biome_variation", 0.0f);
+                g_scene_cloud_plane = cl.value("plane_height", 900.0f);
+                g_scene_cloud_shadow = cl.value("shadow", false);
+                g_scene_cloud_shadow_strength = cl.value("shadow_strength", 0.0f);
+            }
+            // Drive the single-frame capture through the timelapse path.
+            const std::string shot = j.value("screenshot", std::string("references/compare/scene.ppm"));
+            std::filesystem::path shotPath(shot);
+            g_scene_dir = shotPath.has_parent_path() ? shotPath.parent_path() : std::filesystem::path(".");
+            // Scene capture is self-contained (handled at the render site, own g_scene_dir
+            // so the later --timelapse-dir default can't clobber it). tod applied per-frame.
+            std::error_code _sc_ec;
+            std::filesystem::create_directories(g_scene_dir, _sc_ec);
+            LUMINUMBRA_CORE_INFO("Scene-config loaded: {} (tod {:.3f}, weather {}, clouds {}) -> {}",
+                                 sc, g_timelapse_tod, g_scene_weather, g_scene_clouds, g_timelapse_dir.string());
+        } catch (const std::exception& e) {
+            LUMINUMBRA_CORE_ERROR("Scene-config parse failed: {}", e.what());
+        }
     }
 
     // --timelapse capture mode (docs/timelapse.md). Single-player; pair with
@@ -4205,7 +4266,47 @@ int main(int argc, char* argv[]) {
                         g_camera->Pitch = g_fixed_cam_pitch;
                         g_camera->updateCameraVectors();
                     }
+                    if (g_scene_active) {
+                        if (g_scene_fov > 0.0f && g_camera) g_camera->Zoom = g_scene_fov;
+                        renderPipeline.set_time_of_day(g_timelapse_tod);
+                        using WT = Luminumbra::Rendering::WeatherType;
+                        const WT wt = (g_scene_weather == 1) ? WT::Rain : (g_scene_weather == 2) ? WT::Snow
+                                    : (g_scene_weather == 3) ? WT::Fog : (g_scene_weather == 4) ? WT::Storm : WT::None;
+                        renderPipeline.set_weather(wt, g_scene_weather_intensity);
+                        if (g_scene_clouds) {
+                            Luminumbra::Rendering::CloudRenderState cs;
+                            cs.enabled = true;
+                            cs.shadow_enabled = g_scene_cloud_shadow;
+                            cs.coverage_amount = g_scene_cloud_coverage;
+                            cs.biome_variation = g_scene_cloud_biome;
+                            cs.plane_height = g_scene_cloud_plane;
+                            cs.shadow_strength = g_scene_cloud_shadow_strength;
+                            renderPipeline.set_cloud_state(cs);
+                        }
+                    }
                     renderPipeline.render_frame(gameSession->GetRegistry(), *gameSession->GetWorldSystem(), *g_camera, deltaTime, wireframe_mode);
+
+                    // --scene-config: self-contained capture. Settle a few frames (world
+                    // stream + atmosphere), then read the clean back buffer (BEFORE any UI
+                    // overlay this frame) and write the screenshot, then close.
+                    if (g_scene_active) {
+                        static int s_scene_settle = 0;
+                        if (s_scene_settle < 55) {
+                            ++s_scene_settle;
+                        } else {
+                            int vw = 0, vh = 0;
+                            glfwGetFramebufferSize(window, &vw, &vh);
+                            if (vw > 0 && vh > 0) {
+                                std::vector<unsigned char> px(static_cast<std::size_t>(vw) * static_cast<std::size_t>(vh) * 3u);
+                                glReadBuffer(GL_BACK);
+                                glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                                glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+                                WritePixelBufferPpm(g_scene_dir / "frame_0000.ppm", vw, vh, px);
+                                LUMINUMBRA_CORE_INFO("Scene capture written -> {}/frame_0000.ppm ({}x{})", g_scene_dir.string(), vw, vh);
+                            }
+                            glfwSetWindowShouldClose(window, GLFW_TRUE);
+                        }
+                    }
 
                     // --- g-vertical-slice spike: photo-mode capture loop ---
                     // Runs AFTER render_frame, on the RENDER side, against a CONST
