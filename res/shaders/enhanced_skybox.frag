@@ -656,12 +656,17 @@ void main()
         // green cast appears. The dawn sun (cosZenith ~0.47) is well inside it. The
         // blue-dominant noon dome (B >= G) is untouched on both counts.
         float skyLuma = dot(skyColor, kLumaW);
-        float brightDome = smoothstep(0.35, 0.7, skyLuma);   // bright day/dawn only
+        // Fire on the dimmer dusk dome too (lowered from 0.35): the golden-hour dusk
+        // dome is now dimmer than noon for the luminance ordering, and the green cast
+        // lives in those mid-luma pixels — the old threshold let it survive and trip
+        // the dusk aurora-green gate. Still 0 at very low luma (deep night stars/aurora).
+        float brightDome = smoothstep(0.08, 0.40, skyLuma);
         float lowSunGate = 1.0 - smoothstep(0.55, 0.78, u_sunCosZenith); // off at noon
         float rb = max(skyColor.r, skyColor.b);
-        // Only a green lead over BOTH channels counts (yellow-green dawn cast).
+        // Only a green lead over BOTH channels counts (yellow-green dawn/dusk cast).
+        // Fully remove it (1.0) so the low-sun sky is firmly warm (R >= G), never green.
         float greenLead = max(skyColor.g - rb, 0.0);
-        skyColor.g -= greenLead * 0.85 * brightDome * lowSunGate
+        skyColor.g -= greenLead * 1.0 * brightDome * lowSunGate
                       * clamp(aerialNightFade, 0.0, 1.0);
     }
 

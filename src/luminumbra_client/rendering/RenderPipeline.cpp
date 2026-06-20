@@ -3928,7 +3928,7 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     // Widen + lower the band so civil twilight stays lit and WARM: ~0.5-0.6 at the
     // horizon, full day while the sun is up, collapsing to 0 only once the sun is
     // well below (deep night still dark). This is what makes dawn/dusk glow.
-    m_skyDayFactor = glm::smoothstep(-0.28f, 0.18f, sun_up_factor);
+    m_skyDayFactor = glm::smoothstep(-0.22f, 0.34f, sun_up_factor);
 
     glm::vec3 noonColor(1.0f, 0.95f, 0.85f);
     glm::vec3 horizonColor(1.0f, 0.6f, 0.2f);

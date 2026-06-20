@@ -175,10 +175,12 @@ void SkyboxPass::execute(RenderPipeline& pipeline, const Camera& camera, bool dr
         // ~0 at the horizon (dusk/dawn), negative once the sun has set.
         const float sun_up_factor =
             glm::dot(pipeline.m_sun.direction, glm::vec3(0.0f, -1.0f, 0.0f));
-        // Open only once the sun is a clear margin below the horizon: 0 at
-        // sun_up_factor >= -0.12 (still twilight/dusk), full by -0.30 (deep night).
+        // Open only once the sun is WELL below the horizon so the aurora is fully
+        // absent through dusk/twilight (the TimeOfDaySweep aurora-gating asserts no
+        // green chroma at dusk) and only the deep-night sky shows curtains: 0 at
+        // sun_up_factor >= -0.22 (dusk/twilight), full by -0.42 (deep night).
         const float aurora_strength =
-            glm::smoothstep(-0.12f, -0.30f, sun_up_factor);
+            glm::smoothstep(-0.22f, -0.42f, sun_up_factor);
         m_skybox_shader->setFloat("u_auroraStrength", aurora_strength);
 
         const float storm_floor =
