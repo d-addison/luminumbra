@@ -1,6 +1,6 @@
 {
   "name": "Default",
-  "description": "Standard world generation with varied, DEM-grounded foothills terrain",
+  "description": "Varied, DEM-grounded foothills with biomes, rivers, and hydraulic drainage relief",
   "schema_rev": 5,
   "generation_params": {
     "terrain": {
@@ -21,16 +21,33 @@
         "continental_spline": [[-1.0, -5.0], [-0.3, 2.0], [0.1, 7.0], [0.5, 12.0], [1.0, 20.0]],
         "erosion_spline": [[-1.0, 0.7], [-0.4, 0.45], [0.0, 0.3], [0.5, 0.18], [1.0, 0.12]],
         "peaks_spline": [[-1.0, 0.0], [0.3, 0.05], [0.7, 0.4], [1.0, 1.0]]
+      },
+      "hydro": {
+        "enabled": true,
+        "iterations": 8,
+        "cell_size_m": 8.0,
+        "talus_height": 2.6,
+        "thermal_rate": 0.3,
+        "solubility": 0.06,
+        "deposition": 0.15,
+        "sediment_capacity": 0.35,
+        "max_offset": 10.0
       }
     },
     "biomes": {
+      "table": "common/biomes.json",
       "temperature_frequency": 0.005,
       "humidity_frequency": 0.005
     },
     "features": {
       "caves_enabled": true,
       "cave_frequency": 0.02,
-      "rivers_enabled": false,
+      "rivers_enabled": true,
+      "river_frequency": 0.0016,
+      "river_depth": 4.0,
+      "river_pv_min": -1.0,
+      "river_pv_max": -0.84,
+      "river_max_carve": 8.0,
       "structures_enabled": true
     }
   }
