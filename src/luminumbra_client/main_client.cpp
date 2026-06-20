@@ -136,6 +136,7 @@ float g_fixed_cam_pitch = 0.0f;
 // Reuses the fixed-cam + timelapse single-frame capture; these add atmosphere.
 bool g_scene_active = false;
 std::filesystem::path g_scene_dir;  // output dir for the scene screenshot
+std::filesystem::path g_scene_shot; // full screenshot path (.ppm)
 float g_scene_fov = 0.0f;            // 0 = leave camera default
 int g_scene_weather = 0;            // 0 none, 1 rain, 2 snow, 3 fog, 4 storm
 float g_scene_weather_intensity = 0.0f;
@@ -1869,6 +1870,8 @@ int main(int argc, char* argv[]) {
             // Drive the single-frame capture through the timelapse path.
             const std::string shot = j.value("screenshot", std::string("references/compare/scene.ppm"));
             std::filesystem::path shotPath(shot);
+            shotPath.replace_extension(".ppm"); // WritePixelBufferPpm writes PPM
+            g_scene_shot = shotPath;
             g_scene_dir = shotPath.has_parent_path() ? shotPath.parent_path() : std::filesystem::path(".");
             // Scene capture is self-contained (handled at the render site, own g_scene_dir
             // so the later --timelapse-dir default can't clobber it). tod applied per-frame.
@@ -4301,8 +4304,8 @@ int main(int argc, char* argv[]) {
                                 glReadBuffer(GL_BACK);
                                 glPixelStorei(GL_PACK_ALIGNMENT, 1);
                                 glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
-                                WritePixelBufferPpm(g_scene_dir / "frame_0000.ppm", vw, vh, px);
-                                LUMINUMBRA_CORE_INFO("Scene capture written -> {}/frame_0000.ppm ({}x{})", g_scene_dir.string(), vw, vh);
+                                WritePixelBufferPpm(g_scene_shot, vw, vh, px);
+                                LUMINUMBRA_CORE_INFO("Scene capture written -> {} ({}x{})", g_scene_shot.string(), vw, vh);
                             }
                             glfwSetWindowShouldClose(window, GLFW_TRUE);
                         }
