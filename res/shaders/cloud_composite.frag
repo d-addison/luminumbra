@@ -28,8 +28,12 @@ uniform sampler2D u_sceneDepth; // full-res G-buffer depth (D32F)
 void main() {
     // Scene depth == 1.0 (cleared far plane) marks a sky pixel; anything closer is
     // lit geometry already present in the lighting FBO, which we leave untouched.
+    // Sky == cleared far-plane depth (exactly 1.0). Anything closer is geometry —
+    // keep it (discard the sky here). The old 0.999999 threshold was looser than the
+    // legacy GL_LEQUAL sky mask, so terrain near the far plane (depth in [0.999999,1))
+    // got the sky composited over it -> stars/sky bleeding through distant ground.
     float d = texture(u_sceneDepth, TexCoords).r;
-    if (d < 0.999999) {
+    if (d < 1.0) {
         discard;
     }
     FragColor = vec4(texture(u_cloudColor, TexCoords).rgb, 1.0);

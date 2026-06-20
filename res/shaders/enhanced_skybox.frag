@@ -305,13 +305,28 @@ vec3 renderClouds(vec3 viewDir, vec3 baseColor, float dayFactor) {
 
     // Storm deck reads charcoal-grey (menacing), not bright white.
     cloudColor = mix(cloudColor, cloudColor * 0.66, structureWeight);
-    // Night tint so clouds silhouette against the dark dome.
-    cloudColor = mix(cloudColor, cloudColor * 0.12 + vec3(0.02, 0.02, 0.03), 1.0 - dayFactor);
+    // GOLDEN HOUR: warm the lit cloud body toward the low-sun colour so dawn/dusk
+    // clouds GLOW orange/pink from the side instead of going to flat silhouette.
+    // sunTransmittance reddens at low sun; ramp this in as the sun drops (peaks at
+    // the horizon, off at high noon) and weight by the sun-facing phase already in
+    // `scatter`. Render-only.
+    {
+        vec3 warmSun = sunTransmittance(u_sunCosZenith);
+        float lowSun = 1.0 - smoothstep(0.10, 0.55, u_sunCosZenith); // 0 noon -> 1 low sun
+        float lit = clamp(dot(viewDir, u_sunDirection) * 0.5 + 0.5, 0.0, 1.0); // sun-facing
+        cloudColor = mix(cloudColor, cloudColor * (vec3(1.0) + warmSun * 1.6), lowSun * (0.35 + 0.65 * lit) * dayFactor);
+    }
+    // Night tint so clouds silhouette against the dark dome -- but ONLY in true
+    // night, not through twilight (else dusk/dawn clouds read as dark silhouettes
+    // even while the sky still glows). Gated on a sharp night ramp.
+    float nightT = 1.0 - smoothstep(0.0, 0.32, dayFactor);
+    cloudColor = mix(cloudColor, cloudColor * 0.12 + vec3(0.02, 0.02, 0.03), nightT);
 
     // NIGHT-STORM floor: keep a night overcast legible without lifting the
     // clear-night dome (u_stormSkyFloor is 0 for clear sky).
     float nightStormFloor = u_stormSkyFloor * (1.0 - dayFactor) * 0.16;
-    float cloudBright = max(dayFactor * 1.04, nightStormFloor);
+    // Keep clouds bright through twilight (was dayFactor*1.04 -> halved at dusk).
+    float cloudBright = max(0.5 + 0.55 * dayFactor, nightStormFloor);
     cloudColor *= cloudBright;
 
     return mix(baseColor, cloudColor, alpha);
@@ -571,6 +586,12 @@ void main()
     vec3 moonGlowColor = vec3(0.8, 0.9, 1.0) * moonGlow;
     skyColor = mix(skyColor + moonGlowColor, moonSurface, moonMask);
 
+    // --- STARS (before clouds so the cloud layer OCCLUDES them) ---
+    // Stars were added AFTER the clouds, so they shone through overcast. Adding them
+    // into the base sky here means renderClouds' front-to-back composite covers them
+    // wherever there is cloud, and leaves them where the sky is clear.
+    skyColor += renderStars(viewDir, nightFactor);
+
     // --- 4. CLOUDS WITH ATMOSPHERIC LIGHTING ---
     skyColor = renderClouds(viewDir, skyColor, dayFactor);
 
@@ -586,9 +607,6 @@ void main()
         vec3 stormMurk = vec3(0.020, 0.024, 0.034);
         skyColor += stormMurk * stormNight * aboveHorizon;
     }
-
-    // --- 5. STARS ---
-    skyColor += renderStars(viewDir, nightFactor);
 
     // --- 6. MAGICAL AURORA (NIGHT-ONLY; gated by the deep-night envelope) ---
     skyColor += renderAurora(viewDir, dayFactor);
