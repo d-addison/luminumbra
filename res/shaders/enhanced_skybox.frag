@@ -421,8 +421,10 @@ vec3 renderAurora(vec3 viewDir, float dayFactor) {
 
     // --- vertical structure: striations running UP the sheet -------------------
     // Fine vertical filaments give the curtain its rayed texture; they scroll
-    // upward slowly. Keyed to height so they run vertically, not across.
-    float striation = 0.65 + 0.35 * fbm(vec2(curtainCoord * 5.0, height * 9.0 - t * 2.0), 3);
+    // upward slowly. Kept SMOOTH + low-contrast (lower amplitude + frequency) so the
+    // aurora reads as soft luminous curtains rather than high-frequency green specks
+    // — sharp striations registered as firefly speckle in the up-view sky critique.
+    float striation = 0.82 + 0.18 * fbm(vec2(curtainCoord * 3.0, height * 5.0 - t * 1.5), 3);
     sheet *= striation;
 
     // --- height envelope: curtains hang from the upper dome --------------------

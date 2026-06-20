@@ -172,12 +172,25 @@ def analyze_array(a, m):
     if metrics["blown_frac"] > T["blown_frac_washed"]:
         flags.append("WASHED_OUT")
 
-    # --- green-firefly speckle (anywhere, weighted to the sky) ---
+    # --- green-firefly speckle (the old cyan-billboard foliage bug) ---
+    # The "sky" region is the TOP THIRD of the frame, which is only actually sky for
+    # level / upward views. In a DOWN-pitched view (e.g. down35) the top third is
+    # terrain + foliage, so green tree canopies there are legitimate ground content,
+    # NOT sky fireflies. Only run the sky-firefly check where the top third is sky.
     sky = region(a, "sky")
     sky_specks = isolated_green_mask(sky)
     speck_frac = float(sky_specks.mean())
     metrics["sky_green_speck_frac"] = speck_frac
-    if speck_frac > T["sky_green_speck_frac"]:
+    _is_down_view = str(m.get("angle", "")).startswith("down")
+    # Fireflies (the cyan-billboard bug) are SPARSE green dots on a non-green sky. A
+    # legitimate AURORA is a connected green FIELD that fills much of the night sky.
+    # Distinguish them: if a large fraction of the sky is green-ish, it's an aurora
+    # (the night-aurora-presence gate WANTS that) -> not firefly speckle.
+    _sr, _sg, _sb = sky[..., 0], sky[..., 1], sky[..., 2]
+    green_field_frac = float((((_sg > _sr + 15) & (_sg > _sb + 15)).mean()))
+    metrics["sky_green_field_frac"] = green_field_frac
+    if (speck_frac > T["sky_green_speck_frac"] and not _is_down_view
+            and green_field_frac < 0.06):
         flags.append("GREEN_SKY_SPECKLE")
 
     storm = bool(m.get("storm"))
