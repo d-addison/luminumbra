@@ -6,13 +6,7 @@ body {
     background-color: #1a1a1a;
 }
 
-/* RmlUi ships no browser-style default stylesheet, so structural elements default to
-   display:inline — headings/paragraphs then shrink-to-fit and flow left, and text-align
-   has nothing to center. Restore block layout like a browser would. */
-h2, p, label { display: block; }
-
 h1 {
-    display: block;
     font-size: 96px;
     text-align: center;
     color: #ffffff;
@@ -33,13 +27,13 @@ div#nav {
     margin-right: auto;
 }
 
+/* Base button look. Inline-block by default (from base.rcss); pages opt into
+   block/full-width via a component class (e.g. #nav button). This scoping is what
+   stops filter rows + list buttons from stacking at 280px. */
 button {
-    display: block;
-    width: 280px;
     height: 50px;
-    margin-bottom: 20px;
-    margin-left: auto;
-    margin-right: auto;
+    padding-left: 18px;
+    padding-right: 18px;
     background-color: #4f5b66;
     border-width: 2px;
     border-color: #8d99ae;
@@ -48,6 +42,25 @@ button {
     font-weight: bold;
     font-family: Lora;
     text-align: center;
+}
+
+/* Main-menu navigation: the big stacked, centered buttons. */
+#nav button {
+    display: block;
+    width: 280px;
+    margin-bottom: 20px;
+    margin-left: auto;
+    margin-right: auto;
+}
+
+/* Small inline buttons — the filter row in Load World (All / Recent / Favorites). */
+.btn-sm {
+    height: auto;
+    width: auto;
+    padding-top: 6px;
+    padding-bottom: 6px;
+    font-size: 15px;
+    margin-right: 8px;
 }
 
 button:hover {

@@ -1,0 +1,33 @@
+/* ============================================================================
+   base.rcss — structural defaults for every Luminumbra document.
+
+   RmlUi ships no browser-style default stylesheet, so unstyled elements default
+   to display:inline — headings/paragraphs shrink-to-fit, flow left, and ignore
+   text-align; block containers collapse. This file restores browser-like block
+   layout so pages lay out correctly WITHOUT per-element display hacks.
+
+   Linked FIRST by every document (before game_theme.rcss). Design tokens
+   (palette/type/spacing) live in game_theme.rcss; this file is layout-only.
+   ============================================================================ */
+
+/* Structural elements are block-level (like a browser's UA stylesheet). */
+body, div, section, article, header, footer, nav, main, aside,
+h1, h2, h3, h4, h5, h6, p, ul, ol, li, form, fieldset, figure, blockquote {
+    display: block;
+}
+
+/* Labels default to block (stacked above their control); rows override inline. */
+label { display: block; }
+
+/* Inline-flow elements. */
+span, a, em, strong, small, b, i, img, handle { display: inline; }
+
+/* Form controls and buttons default to inline-block (NOT full-width block) so a
+   page must opt into block/centered layout via a component class — this is what
+   stops the global button rule from stacking filter rows + list buttons. */
+button, input, select, textarea { display: inline-block; }
+
+/* Utility. */
+.hidden { display: none; }
+.row { display: block; }
+.inline { display: inline-block; }

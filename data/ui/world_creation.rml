@@ -1,6 +1,7 @@
 <rml>
     <head>
         <title>Create New World - Luminumbra</title>
+        <link type="text/css" href="base.rcss" />
         <link type="text/css" href="game_theme.rcss" />
     </head>
     <body id="world_creation" class="fade-in">

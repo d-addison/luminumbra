@@ -1,6 +1,7 @@
 <rml>
     <head>
         <title>Settings - Luminumbra</title>
+        <link type="text/css" href="base.rcss" />
         <link type="text/css" href="game_theme.rcss" />
     </head>
     <body id="settings" class="fade-in">

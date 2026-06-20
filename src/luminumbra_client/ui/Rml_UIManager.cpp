@@ -230,7 +230,11 @@ void Rml_UIManager::Render() {
         m_renderInterface.SetViewport(width, height);
         
         glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        // RmlUi 6.1 emits PREMULTIPLIED-alpha vertex colours + font glyphs (vendor/CMakeLists.txt:88
+        // pins GIT_TAG 6.1), and the shader does texture*vertexColour — so the correct blend is
+        // (GL_ONE, GL_ONE_MINUS_SRC_ALPHA), matching RmlUi's reference GL3 backend. Straight-alpha
+        // (GL_SRC_ALPHA) double-darkens any semi-transparent fill/text.
+        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
         glDisable(GL_DEPTH_TEST);
         
         m_context->Render();
