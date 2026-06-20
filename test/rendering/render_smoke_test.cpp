@@ -334,6 +334,8 @@ std::vector<ShaderProgramSpec> PipelineProgramSpecs() {
         {"cloud_composite", "ssao.vert", "cloud_composite.frag"},
         // Render-optimization (ssao-gtao): XeGTAO horizon-slice AO variant.
         {"ssao_gtao", "ssao.vert", "ssao_gtao.frag"},
+        // Render-optimization (ssao-gtao FR-003): joint-bilateral AO upsample.
+        {"ssao_bilateral_upsample", "ssao.vert", "ssao_bilateral_upsample.frag"},
     };
 }
 

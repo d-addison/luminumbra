@@ -2008,7 +2008,7 @@ int main(int argc, char* argv[]) {
     if (const char* cq = std::getenv("LUMIN_CLOUD_QUALITY")) {
         cloud_quality = std::atoi(cq);
     }
-    int ssao_quality = 2;  // 0 legacy SSAO, 1 GTAO Low, 2 GTAO High
+    int ssao_quality = 3;  // 0 legacy, 1 GTAO Low, 2 GTAO High, 3 GTAO half-res (default)
     if (const char* sq = std::getenv("LUMIN_SSAO_QUALITY")) {
         ssao_quality = std::atoi(sq);
     }

@@ -110,6 +110,13 @@ struct SSAOData {
     // ssao_quality > 0. Renders into the same FBOs as the legacy SSAO so the blur
     // + lighting AO tap are unchanged. Null/quality 0 -> legacy ssaoShader path.
     std::unique_ptr<Shader> gtaoShader;
+    // ssao_quality 3 = HALF-RES GTAO: render GTAO into a 1/2-per-axis FBO (1/4 the
+    // fragments) then joint-bilateral depth-aware upsample to full res (this replaces
+    // the box blur on that path). The AO budget holds even on dense views.
+    GLuint halfFBO = 0;
+    GLuint halfTex = 0; // half-res AO (R16F)
+    u32 halfW = 0, halfH = 0;
+    std::unique_ptr<Shader> upsampleShader;
 };
 
 // Engine-generic runtime weather state (T-I2-17b). Default Off: the weather
@@ -614,11 +621,12 @@ public:
     int get_cloud_quality() const { return m_cloud_quality; }
 
     // Render-optimization (ssao-gtao): AO algorithm/quality. 0 = legacy 64-sample
-    // hemisphere SSAO (byte-identical default); 1 = GTAO Low (2 slices x 4 = 8 spp);
-    // 2 = GTAO High (3 slices x 6 = 18 spp). RENDER-ONLY (no world_hash impact),
-    // opt-in. Same FBOs/blur, so no reallocation; safe any time. Driven by the
-    // client from LUMIN_SSAO_QUALITY.
-    void set_ssao_quality(int quality) { m_ssao_quality = (quality < 0) ? 0 : (quality > 2 ? 2 : quality); }
+    // hemisphere SSAO (byte-identical default); 1 = GTAO Low (8 spp) full-res;
+    // 2 = GTAO High (18 spp) full-res; 3 = GTAO High at HALF-RES + joint-bilateral
+    // depth-aware upsample (cheapest, budget-holding even on dense views — the
+    // recommended default). RENDER-ONLY (no world_hash impact). Driven by
+    // LUMIN_SSAO_QUALITY.
+    void set_ssao_quality(int quality) { m_ssao_quality = (quality < 0) ? 0 : (quality > 3 ? 3 : quality); }
     int get_ssao_quality() const { return m_ssao_quality; }
 
     // T-I5a-5 (B3): render-only lightning control. set_lightning_state pushes the
