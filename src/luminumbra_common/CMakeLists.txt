@@ -11,7 +11,24 @@ add_library(luminumbra_common STATIC ${COMMON_SOURCES})
 # the needed inline helpers out-of-line. Determinism is preserved: -ffp-contract=off stays on
 # (no FMA) and GCC does NOT reorder IEEE float ops without -ffast-math, so results are bit-
 # identical to -O0; verified by the NetworkStateHash run==replay gate.
-set_source_files_properties(world/GameSession.cpp PROPERTIES COMPILE_OPTIONS "-O1")
+#
+# T-transcendental FR-003: the opt level of THIS one TU is asymmetric with the rest
+# of the (-O0 debug) library, which is exactly how FMA/opt drift sneaks in. The
+# Test-SimOptLevelParity gate builds a second tree with LUMINUMBRA_SIM_O0_PARITY=ON
+# (overriding this file to -O2 -- a link-safe MORE-optimized level, since plain -O0
+# reintroduces the vague-linkage link error above) and asserts the headless
+# world_hash is identical, proving opt-level invariance.
+option(LUMINUMBRA_SIM_O0_PARITY
+       "Build GameSession.cpp at a sim-parity opt level for the O0/O1 world_hash invariance gate" OFF)
+if(LUMINUMBRA_SIM_O0_PARITY)
+    # -O2 (not -O0): -O0 reintroduces the entt vague-linkage undefined-reference link
+    # error this override exists to dodge. -O2 is link-safe and a STRONGER opt level
+    # than the normal -O1, so world_hash parity across -O1 vs -O2 is a stricter proof
+    # of opt-level invariance than -O0 vs -O1 would have been.
+    set_source_files_properties(world/GameSession.cpp PROPERTIES COMPILE_OPTIONS "-O2")
+else()
+    set_source_files_properties(world/GameSession.cpp PROPERTIES COMPILE_OPTIONS "-O1")
+endif()
 
 target_include_directories(luminumbra_common PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}"

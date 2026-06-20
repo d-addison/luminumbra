@@ -41,12 +41,16 @@ namespace luminumbra::ai {
     return dot >= cos_half_fov * dist;
 }
 
-// Convert a FOV in DEGREES to the cos(half-angle) the cone test expects. NOT for
-// the per-tick sim path (uses std::cos): call it once at spawn / on a genome FOV
-// gene, store the result. Provided so callers have a single conversion point.
+// Convert a FOV in DEGREES to the cos(half-angle) the cone test expects. Call it
+// once at spawn / on a genome FOV gene and store the result (the per-tick cone
+// test consumes the stored `vision_cos_half_fov`, never this conversion). Routed
+// through DeterministicMath::Cos -- not std::cos -- so even the spawn-time value is
+// cross-platform bit-stable (std::cos differs per libm; that is the whole reason
+// DeterministicMath::Cos is a minimax polynomial). Provided so callers have a
+// single conversion point.
 [[nodiscard]] inline float FovDegreesToCosHalf(float fov_degrees) {
     const float half_rad = (fov_degrees * 0.5f) * 0.017453292519943295f; // pi/180
-    return std::cos(half_rad);
+    return Luminumbra::DeterministicMath::Cos(half_rad);
 }
 
 // Perceived loudness of a sound of `source_loudness` emitted at distance `dist`

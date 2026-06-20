@@ -1,6 +1,7 @@
 #include "PlayerAvatar.h"
 
 #include "../components/CoreComponents.h"
+#include "../core/DeterministicMath.h"
 
 #include <glm/gtc/quaternion.hpp>
 
@@ -26,8 +27,11 @@ Vec3 DeterministicAvatarSpawnOffset(std::uint32_t player_id) {
     constexpr float kGoldenAngle = 2.39996323f; // radians (137.5 degrees)
     constexpr float kSpacingM = 4.0f;           // ~4 m between adjacent avatars
     const float angle = static_cast<float>(player_id) * kGoldenAngle;
-    const float radius = kSpacingM * std::sqrt(static_cast<float>(player_id));
-    return Vec3(radius * std::cos(angle), 0.0f, radius * std::sin(angle));
+    // DeterministicMath:: (not libm) so the spawn layout is cross-platform
+    // bit-stable: this offset feeds avatar position -> the `entities` world_hash.
+    const float radius = kSpacingM * DeterministicMath::Sqrt(static_cast<float>(player_id));
+    return Vec3(radius * DeterministicMath::Cos(angle), 0.0f,
+                radius * DeterministicMath::Sin(angle));
 }
 
 Ecs::EntityRegistrySnapshot BuildAvatarEntitySnapshot(const std::vector<PlayerAvatar>& avatars) {
@@ -74,7 +78,9 @@ std::vector<Net::ReplEntityState> BuildEntityReplStates(const entt::registry& re
         s.pz_mm = Net::ReplQuantPos(tf.position.z);
         // Yaw from the transform's facing (rotate +Z forward, atan2 in the XZ plane).
         const Vec3 fwd = tf.rotation * Vec3(0.0f, 0.0f, 1.0f);
-        s.yaw_mrad = Net::ReplQuantAngle(std::atan2(fwd.x, fwd.z));
+        // DeterministicMath::Atan2 (not libm) -- this yaw feeds yaw_mrad onto the
+        // replication wire, so it must be cross-platform bit-stable.
+        s.yaw_mrad = Net::ReplQuantAngle(DeterministicMath::Atan2(fwd.x, fwd.z));
         s.flags = rep.flags;
         s.type_id = rep.type_id;
         s.anim_state = rep.anim_state;
