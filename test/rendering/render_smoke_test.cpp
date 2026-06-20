@@ -336,6 +336,8 @@ std::vector<ShaderProgramSpec> PipelineProgramSpecs() {
         {"ssao_gtao", "ssao.vert", "ssao_gtao.frag"},
         // Render-optimization (ssao-gtao FR-003): joint-bilateral AO upsample.
         {"ssao_bilateral_upsample", "ssao.vert", "ssao_bilateral_upsample.frag"},
+        // Fidelity: screen-space crepuscular rays (god rays).
+        {"god_rays", "ssao.vert", "god_rays.frag"},
     };
 }
 

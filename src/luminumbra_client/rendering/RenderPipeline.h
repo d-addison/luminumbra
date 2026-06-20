@@ -935,6 +935,9 @@ private:
     // the previously dormant volumetric_lighting.frag. Render-only (design §2).
     SkyAtmosphereLut m_sky_lut;
     std::unique_ptr<Shader> m_aerial_shader;
+    // Screen-space crepuscular rays (god rays). Additive pass over the lit scene when
+    // the sun is above the horizon + on screen. Render-only.
+    std::unique_ptr<Shader> m_god_rays_shader;
     // T-I5b-4 (W1): the animated falling-sheet shader (waterfall.frag) the live
     // pipeline draws over detected waterfall sites. Render-only dressing.
     std::unique_ptr<Shader> m_waterfall_shader;

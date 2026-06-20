@@ -1846,6 +1846,50 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
         glBindVertexArray(0);
     }
 
+    // 7b2. GOD RAYS (screen-space crepuscular rays): additive shafts fanning from the
+    // sun around occluders (clouds/terrain). Only when the sun is above the horizon
+    // and on screen (zero cost otherwise). Reads the post-sky opaque snapshot.
+    if (m_god_rays_shader && m_god_rays_shader->IsValid() && m_screen_quad_vao != 0) {
+        const glm::vec3 toSun = -m_sun.direction;
+        float sun_visible = glm::smoothstep(-0.02f, 0.12f, toSun.y); // above horizon
+        glm::vec2 sun_uv(0.0f);
+        if (sun_visible > 0.0f) {
+            const glm::vec4 clip = projection * glm::mat4(glm::mat3(view)) * glm::vec4(toSun, 1.0f);
+            if (clip.w > 0.0f) {
+                const glm::vec2 ndc = glm::vec2(clip) / clip.w;
+                sun_uv = ndc * 0.5f + 0.5f;
+                const float onx = glm::smoothstep(-0.35f, 0.05f, sun_uv.x) * (1.0f - glm::smoothstep(0.95f, 1.35f, sun_uv.x));
+                const float ony = glm::smoothstep(-0.35f, 0.05f, sun_uv.y) * (1.0f - glm::smoothstep(0.95f, 1.35f, sun_uv.y));
+                sun_visible *= onx * ony;
+            } else {
+                sun_visible = 0.0f;
+            }
+        }
+        const FrameBufferObject& lf = m_lighting_pass->lighting_fbo();
+        if (sun_visible > 0.002f && lf.fbo_id && lf.opaque_color_texture) {
+            glBindFramebuffer(GL_FRAMEBUFFER, lf.fbo_id);
+            glViewport(0, 0, m_screen_width, m_screen_height);
+            const GLboolean depth_was = glIsEnabled(GL_DEPTH_TEST);
+            glDisable(GL_DEPTH_TEST);
+            const GLboolean blend_was = glIsEnabled(GL_BLEND);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_ONE, GL_ONE); // additive
+            m_god_rays_shader->use();
+            glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, lf.opaque_color_texture);
+            m_god_rays_shader->setInt("u_scene", 0);
+            m_god_rays_shader->setVec2("u_sunUV", sun_uv);
+            m_god_rays_shader->setFloat("u_sunVisible", sun_visible);
+            m_god_rays_shader->setFloat("u_strength", 0.85f);
+            glBindVertexArray(m_screen_quad_vao);
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            glBindVertexArray(0);
+            glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, 0);
+            if (!blend_was) glDisable(GL_BLEND);
+            if (depth_was) glEnable(GL_DEPTH_TEST);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        }
+    }
+
     // 7c. FOLIAGE PASS (T-I5b-1, F1): instanced ground-cover scatter blended
     // into the lit HDR target. Depth-tested against the scene depth (blitted into
     // the lighting FBO at step 5), so the cards occlude correctly. The scatter
@@ -2024,6 +2068,11 @@ void RenderPipeline::init_shaders() {
         (m_root_path / "res/shaders/ssao.vert").string().c_str(),
         (m_root_path / "res/shaders/cloud_composite.frag").string().c_str());
     label_gl_object(GL_PROGRAM, m_cloud_composite_shader ? m_cloud_composite_shader->Id() : 0u, "shader.cloud_composite");
+    // Screen-space crepuscular rays.
+    m_god_rays_shader = std::make_unique<Shader>(
+        (m_root_path / "res/shaders/ssao.vert").string().c_str(),
+        (m_root_path / "res/shaders/god_rays.frag").string().c_str());
+    label_gl_object(GL_PROGRAM, m_god_rays_shader ? m_god_rays_shader->Id() : 0u, "shader.god_rays");
 }
 
 void RenderPipeline::init_sky_lut() {

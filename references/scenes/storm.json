@@ -1,0 +1,6 @@
+{ "_comment": "target references/storm_moor.png — structured overcast deck + rain",
+  "camera": { "pos": [8, 58, 8], "yaw": 70, "pitch": -6, "fov": 62 },
+  "time_of_day": 0.10,
+  "clouds": { "coverage": 0.88, "plane_height": 900, "shadow": true, "shadow_strength": 0.5 },
+  "weather": { "type": "storm", "intensity": 0.8 },
+  "screenshot": "references/compare/storm.ppm" }
