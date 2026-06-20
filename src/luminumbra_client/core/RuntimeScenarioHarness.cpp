@@ -7788,7 +7788,42 @@ struct NetSessionPeerContext {
     Luminumbra::world::GameSession* session = nullptr;
     Luminumbra::Vec3 spawn_anchor{0.0f};
     double fixed_dt = 1.0 / 30.0;
+    // gate-populated-world-replay (RD-001 tripwire): the client peer owns NO
+    // independent wind/weather/aether/scent/ecology field state — it renders the
+    // server-authoritative world via `session` and captures only the bare chunk
+    // hash. Those fields are SERVER-side (GameSession::Get*FieldSystem /
+    // ComputeScentSubHash / ai::ComputeEcologySubHash, folded by the server's
+    // ComposeWorldHash). If a client-owned copy of any of them is ever added to
+    // this context, the size assert below fails to compile — forcing a revisit of
+    // the deferred client-fold decision (Decision 2) before the hash quantities
+    // can silently diverge.
 };
+namespace net_capture_tripwire {
+// Reference layout: the EXACTLY-three members the client peer is allowed to own
+// (a pointer to the server-authoritative session it renders, the hashed-step
+// anchor, and the fixed dt). No wind/weather/aether/scent/ecology field state.
+struct ExpectedPeerContextLayout {
+    Luminumbra::world::GameSession* session = nullptr;
+    Luminumbra::Vec3 spawn_anchor{0.0f};
+    double fixed_dt = 1.0 / 30.0;
+};
+// Same intent for the captured message: tick + the bare-chunk sub-hash set only.
+struct ExpectedHashMsgLayout {
+    std::uint64_t tick = 0;
+    std::string world_hash, terrain, water, entities;
+};
+}  // namespace net_capture_tripwire
+static_assert(sizeof(NetSessionPeerContext) ==
+                  sizeof(net_capture_tripwire::ExpectedPeerContextLayout),
+              "NetSessionPeerContext gained a member: the client peer must NOT own "
+              "independent wind/weather/aether/scent/ecology state (gate-populated-"
+              "world-replay RD-001 / Decision 2 — client fold is deferred). Revisit "
+              "the fold decision before adding folded sub-term state here.");
+static_assert(sizeof(Luminumbra::Net::HashMsg) ==
+                  sizeof(net_capture_tripwire::ExpectedHashMsgLayout),
+              "Luminumbra::Net::HashMsg shape changed: a composite sub-term "
+              "(wind/weather/aether/scents/ecology) must not be folded into the "
+              "client capture path without revisiting the deferred client fold.");
 
 // T-I4-14: the client's WORLD-AFFECTING input set is EMPTY today (no gameplay
 // inputs yet). The empty blob still travels the lockstep path -- it is collected
@@ -7828,10 +7863,24 @@ bool NetSessionApplyStep(std::uint64_t /*tick*/, const std::vector<std::uint8_t>
     return ran == 1;
 }
 
-// Captures this peer's authoritative hashes (world_hash + terrain/water/entities
-// sub-hashes) over the live streamed-chunk snapshot -- the SAME machinery
-// ServerWorldRunner::ComputeWorldHashAndSubHashes uses, so the two peers' hashes
-// are directly comparable by the desync oracle.
+// Captures this peer's CLIENT-PATH hashes (the BARE streamed-chunk world_hash +
+// terrain/water/entities sub-hashes) over the live streamed-chunk snapshot.
+//
+// rev 13 (gate-populated-world-replay, RD-001 / Decision 2 — DEFERRED client fold):
+// this is NOT the same quantity as ServerWorldRunner::ComputeWorldHashAndSubHashes.
+// The server COMPOSITE world_hash ComposeWorldHash-folds five MORE
+// server-authoritative sub-terms on top of the chunk hash —
+// wind|weather|aether|scents|ecology — none of which the client owns independent
+// state for (those fields live on the server-authoritative session; the client
+// renders the server's world). So the client deliberately pins the bare chunk hash
+// (its own deterministic value, 5b316f81a0c72a71), and the NetworkedSession oracle
+// is host==client over THIS client quantity on both peers (both compute the same
+// bare hash) — directly comparable, not the composite. Wiring the client to fold
+// the full canonical quantity (per-sub-hash cadence comparison) is a recorded
+// follow-up, intentionally not done here. The static_assert below is the tripwire
+// that keeps this honest: it fails to compile if a client-owned wind/weather/
+// aether/scent/ecology field is ever added to this capture context without
+// revisiting the fold decision.
 void NetSessionCaptureHashes(std::uint64_t tick, Luminumbra::Net::HashMsg& out, void* user) {
     auto* ctx = static_cast<NetSessionPeerContext*>(user);
     out.tick = tick;
