@@ -397,7 +397,11 @@ vec3 renderAurora(vec3 viewDir, float dayFactor) {
     // panel only DIMS sheets (floor 0.45) instead of fully dropping them, so some
     // green curtain is always present whatever azimuth a view frames (the night
     // aurora gate needs a reliable green fraction in its sky ROI).
-    float panel = 0.45 + 0.55 * smoothstep(0.30, 0.80, fbm(vec2(floor(curtainCoord) * 1.7, t * 0.5), 3));
+    // Lower floor (0.45 -> 0.28) so the curtains break into more distinct draped
+    // panels with dark sky GAPS between them, instead of an always-on green wash
+    // across the whole dome (which read as GREEN_SKY_SPECKLE). Some green is still
+    // always present for the night-aurora-presence gate.
+    float panel = 0.28 + 0.62 * smoothstep(0.30, 0.80, fbm(vec2(floor(curtainCoord) * 1.7, t * 0.5), 3));
     sheet *= panel;
 
     // --- vertical structure: striations running UP the sheet -------------------
@@ -421,7 +425,9 @@ vec3 renderAurora(vec3 viewDir, float dayFactor) {
     float bottomGlow = 0.60 + 0.40 * (1.0 - smoothstep(0.12, 0.60, height));
     float vertEnv = lowerEdge * upperFade * bottomGlow;
 
-    float auroraIntensity = sheet * vertEnv * nightEnvelope * 0.46;
+    // Dimmer overall (0.46 -> 0.30): aurora reads as luminous curtains, not a
+    // sky-filling green wash. Still clearly present in the night ROI.
+    float auroraIntensity = sheet * vertEnv * nightEnvelope * 0.30;
 
     // Colour: a tall GREEN body (O2) topped by a thin magenta/violet fringe (N2)
     // only near the zenith. The split is driven by HEIGHT plus a slow azimuthal
