@@ -420,7 +420,10 @@ void BuildProcgenTreePalette(Luminumbra::Rendering::RenderPipeline& rp, const gl
         glm::vec3 lo(1.0e9f), hi(-1.0e9f);       // tree AABB (from LOD0)
         float leafLoY = 1.0e9f, leafHiY = -1.0e9f; // canopy vertical band (leaf verts)
         for (int lod = 0; lod < 3; ++lod) {
-            const fol::ProcMesh pm = fol::TessellatePlant(ps, radialForLod[lod]);
+            // Larger leaf cards -> fuller canopy from the same leaf COUNT (render-only
+            // tessellation param; no PlantStructure/sim change, no world_hash impact).
+            // The alpha-cut leaf texture overlaps into a denser canopy vs the default 0.20.
+            const fol::ProcMesh pm = fol::TessellatePlant(ps, radialForLod[lod], 0.36f);
             const std::size_t leafStart =
                 pm.vertices.size() >= leafQuads * 4u ? pm.vertices.size() - leafQuads * 4u
                                                      : pm.vertices.size();
