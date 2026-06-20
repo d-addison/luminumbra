@@ -119,9 +119,18 @@ vec3 triplanar_albedo(vec3 worldPos, vec3 weights, float layer, float scale) {
     vec3 cz = texture(u_terrainTextures, vec3(uv_z, layer)).rgb;
     vec3 sharp = cx * weights.x + cy * weights.y + cz * weights.z;
     // Mip-blurred base for the unsharp mask (mean-preserving high-freq boost).
-    vec3 bx = textureLod(u_terrainTextures, vec3(uv_x, layer), kDetailBlurLod).rgb;
-    vec3 by = textureLod(u_terrainTextures, vec3(uv_y, layer), kDetailBlurLod).rgb;
-    vec3 bz = textureLod(u_terrainTextures, vec3(uv_z, layer), kDetailBlurLod).rgb;
+    // Track the fragment's ACTUAL mip and keep the blur a fixed number of mips
+    // ABOVE it, instead of pinning the blur at kDetailBlurLod. Pinned, the sharp
+    // sample minified at distance until sharp~=blur and the detail gain collapsed
+    // -> flat plastic terrain at mid/far range. Tracking the mip preserves a
+    // constant sharp-vs-blur separation across the whole view distance, so surface
+    // detail survives to the horizon. Mean-preserving (unsharp), so the calibration
+    // luminance is unchanged near camera.
+    float baseLod = max(textureQueryLod(u_terrainTextures, uv_y).y, 0.0);
+    float blurLod = baseLod + kDetailBlurLod;
+    vec3 bx = textureLod(u_terrainTextures, vec3(uv_x, layer), blurLod).rgb;
+    vec3 by = textureLod(u_terrainTextures, vec3(uv_y, layer), blurLod).rgb;
+    vec3 bz = textureLod(u_terrainTextures, vec3(uv_z, layer), blurLod).rgb;
     vec3 blur = bx * weights.x + by * weights.y + bz * weights.z;
     return clamp(blur + (sharp - blur) * kDetailGain, 0.0, 1.0);
 }
