@@ -11,10 +11,12 @@ body {
     height: 100%;
     color: #F2EDE4;
     font-family: Lora;
-    background-color: #14110B;
-    /* Warm dusk gradient — soft light from above fading to a dark vignette, so the field has depth
-       instead of a flat fill. (A live blurred-world / photo backdrop is the later T020 backdrop task.) */
-    decorator: linear-gradient(180deg, #2A2114 0%, #17130C 46%, #0B0906 100%);
+    /* F4: the menus render over the LIVE golden-hour world (main_client renders a scenic world
+       behind the menu branch). Keep the field transparent so the world shows through; a gentle
+       top-to-bottom darkening veil lifts text legibility without hiding the vista. When the
+       backdrop is disabled the cleared back buffer shows through as near-black. */
+    background-color: transparent;
+    decorator: linear-gradient(180deg, rgba(11,9,6,90) 0%, rgba(11,9,6,40) 35%, rgba(11,9,6,120) 100%);
 }
 
 /* Main menu: centre the hero + nav vertically and horizontally. */
