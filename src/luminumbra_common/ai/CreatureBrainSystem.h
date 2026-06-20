@@ -12,6 +12,7 @@
 
 #include "CreatureBrain.h"
 #include "Flocking.h"
+#include "SpatialGrid.h"
 
 #include "../components/AlarmComponents.h"
 #include "../components/CoreComponents.h"
@@ -67,7 +68,31 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
         snap.push_back({e, tf.position.x, tf.position.z, c.is_predator, c.eaten});
     }
 
-    for (auto e : ents) {
+    // Herd-flocking acceleration: bucket the snapshot into a per-role uniform spatial grid
+    // ONCE per tick (cell size == flocking neighbour radius), so each creature gathers its
+    // same-role herd via a 3x3-cell radius query (O(N+k)) instead of scanning the whole
+    // snapshot (the former O(N^2) herd gather). Determinism is unchanged: the grid only
+    // narrows WHICH same-role neighbours are visited and in what order, and the downstream
+    // Flocking accumulation is order-invariant (fixed-point). The herd membership matches the
+    // old full scan EXACTLY (same role, self excluded later via index, eaten same-role bodies
+    // still counted), so the gathered SET — and the steer — is byte-identical.
+    UniformSpatialGrid predGrid(FlockParams{}.neighbor_radius);
+    UniformSpatialGrid preyGrid(FlockParams{}.neighbor_radius);
+    {
+        std::vector<GridPoint> predPts, preyPts;
+        predPts.reserve(snap.size());
+        preyPts.reserve(snap.size());
+        for (std::uint32_t i = 0; i < snap.size(); ++i) {
+            const Snap& o = snap[i];
+            (o.predator ? predPts : preyPts).push_back({i, o.x, o.z});
+        }
+        predGrid.Build(predPts);
+        preyGrid.Build(preyPts);
+    }
+    std::vector<std::uint32_t> herdHits;  // reused query scratch buffer across creatures
+
+    for (std::size_t selfIdx = 0; selfIdx < ents.size(); ++selfIdx) {
+        const entt::entity e = ents[selfIdx];
         auto& tf = view.get<Comp::TransformComponent>(e);
         auto& cr = view.get<Comp::CreatureComponent>(e);
 
@@ -170,11 +195,19 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
         // same-role neighbour -> zero steer -> behaviour unchanged (keeps the 1v1 tests exact).
         if (act == CreatureAction::Flee || act == CreatureAction::Hunt ||
             act == CreatureAction::Wander) {
+            // Radius-query the SAME-ROLE grid for the 3x3 cell block around self (cell size ==
+            // neighbour radius, so this is a superset of every neighbour within the cohesion
+            // radius; ComputeFlockSteer distance-filters internally exactly as the old full
+            // scan did). Exclude self by snapshot index. The Flocking accumulation is
+            // order-invariant, so the bucket visitation order does not affect the steer.
+            herdHits.clear();
+            const UniformSpatialGrid& grid = cr.is_predator ? predGrid : preyGrid;
+            grid.QueryRadius(sx, sz, herdHits);
             std::vector<std::pair<float, float>> herd;
-            herd.reserve(snap.size());
-            for (const Snap& o : snap) {
-                if (o.e == e || o.predator != cr.is_predator) continue;
-                herd.emplace_back(o.x, o.z);
+            herd.reserve(herdHits.size());
+            for (std::uint32_t hi : herdHits) {
+                if (static_cast<std::size_t>(hi) == selfIdx) continue;
+                herd.emplace_back(snap[hi].x, snap[hi].z);
             }
             const FlockSteer fs = ComputeFlockSteer(sx, sz, herd);
             adirx += fs.x * kHerdWeight;

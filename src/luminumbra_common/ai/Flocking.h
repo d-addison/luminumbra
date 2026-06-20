@@ -10,7 +10,7 @@
 
 #include "../core/DeterministicMath.h"
 
-#include <algorithm>
+#include <cstdint>
 #include <utility>
 #include <vector>
 
@@ -31,6 +31,30 @@ struct FlockSteer {
     float z = 0.0f;
 };
 
+// ORDER-INDEPENDENCE (the header's load-bearing determinism claim). IEEE-754 float addition
+// is NOT associative, so accumulating the cohesion/separation sums in the caller's neighbour
+// order would make the last ULPs depend on that order — breaking run==replay if the gather
+// order ever varies (and the spatial-grid query in CreatureBrainSystem deliberately does NOT
+// gather in a fixed order). Rather than sort the neighbours into a canonical order every call
+// (an O(n log n) tax on the hot tick), we accumulate the four reduction sums in FIXED-POINT
+// int64 at `kFlockFixedScale`. Integer addition IS associative + commutative, so the sums are
+// a pure function of the neighbour SET regardless of visitation order — order-independent by
+// construction, with no per-call sort + vector copy. Each per-neighbour term is computed in
+// float exactly as before (so a single term is bit-identical); only the REDUCTION moves to
+// fixed point. Scale 2^20 keeps centroid precision (~1e-6 at radius 12) and cannot overflow
+// int64 even at crowded N (max separation term ~1e5 * 2^20 ~ 1e11, * thousands of neighbours
+// stays well under 9.2e18).
+inline constexpr double kFlockFixedScale = 1048576.0;  // 2^20
+
+inline std::int64_t ToFixed(float v) {
+    return static_cast<std::int64_t>(static_cast<double>(v) * kFlockFixedScale +
+                                     (v >= 0.0f ? 0.5 : -0.5));
+}
+
+inline float FromFixed(std::int64_t v) {
+    return static_cast<float>(static_cast<double>(v) / kFlockFixedScale);
+}
+
 // neighbours: same-role creature positions (x, z) EXCLUDING self.
 inline FlockSteer ComputeFlockSteer(float sx, float sz,
                                     const std::vector<std::pair<float, float>>& neighbors,
@@ -38,37 +62,31 @@ inline FlockSteer ComputeFlockSteer(float sx, float sz,
     FlockSteer steer;
     if (neighbors.empty()) return steer;
 
-    // ORDER-INDEPENDENCE (the contract above). IEEE-754 float addition is NOT associative, so
-    // accumulating the cohesion/separation sums in the caller's neighbour order would make the
-    // last ULPs depend on that order — breaking run==replay if the gather order ever varies.
-    // Sort into a canonical (lexicographic position) order FIRST so the accumulation is a pure
-    // function of the neighbour SET, not its order. Neighbour lists are small + local, so the
-    // O(n log n) is negligible against the per-tick brain cost.
-    std::vector<std::pair<float, float>> ordered(neighbors);
-    std::sort(ordered.begin(), ordered.end());
-
-    // Cohesion: centroid of neighbours within the cohesion radius.
-    float cx = 0.0f, cz = 0.0f;
+    // Cohesion: centroid of neighbours within the cohesion radius (sums in fixed point).
+    // Separation: push off neighbours below the separation radius (sums in fixed point).
+    std::int64_t cx_fp = 0, cz_fp = 0;
     int cohesion_count = 0;
-    float sepx = 0.0f, sepz = 0.0f;
-    for (const auto& [nx, nz] : ordered) {
+    std::int64_t sepx_fp = 0, sepz_fp = 0;
+    for (const auto& [nx, nz] : neighbors) {
         const float dx = nx - sx, dz = nz - sz;
         const float dist = dm::Sqrt(dx * dx + dz * dz);
         if (dist <= p.neighbor_radius) {
-            cx += nx;
-            cz += nz;
+            cx_fp += ToFixed(nx);
+            cz_fp += ToFixed(nz);
             ++cohesion_count;
         }
         if (dist > 1.0e-5f && dist < p.separation_radius) {
             // Away from this neighbour, weighted by how close it is (1 at touching -> 0 at radius).
             const float inv = 1.0f / dist;
             const float crowd = 1.0f - dist / p.separation_radius;
-            sepx += (sx - nx) * inv * crowd;
-            sepz += (sz - nz) * inv * crowd;
+            sepx_fp += ToFixed((sx - nx) * inv * crowd);
+            sepz_fp += ToFixed((sz - nz) * inv * crowd);
         }
     }
 
     if (cohesion_count > 0) {
+        const float cx = FromFixed(cx_fp);
+        const float cz = FromFixed(cz_fp);
         const float invn = 1.0f / static_cast<float>(cohesion_count);
         const float toward_x = cx * invn - sx;
         const float toward_z = cz * invn - sz;
@@ -79,8 +97,8 @@ inline FlockSteer ComputeFlockSteer(float sx, float sz,
             steer.z += toward_z * k;
         }
     }
-    steer.x += sepx * p.separation_weight;
-    steer.z += sepz * p.separation_weight;
+    steer.x += FromFixed(sepx_fp) * p.separation_weight;
+    steer.z += FromFixed(sepz_fp) * p.separation_weight;
     return steer;
 }
 
