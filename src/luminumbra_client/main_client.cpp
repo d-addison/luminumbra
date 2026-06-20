@@ -85,6 +85,7 @@ std::unique_ptr<Luminumbra::Client::PlayerController> g_playerController;
 // by the PlayerController's aperture/focus inputs; the codex keeps the best score per
 // species across the session.
 luminumbra::game::PhotoModeState g_photoMode;
+static bool g_photoModeUiShown = false;  // T031: photo_mode.rml vs hud.rml is the active in-game overlay
 luminumbra::game::PhotoCodex     g_photoCodex;
 // Single client config: defaults (data/common/systems.json) overlaid by the writable
 // per-user settings file (%APPDATA%/Luminumbra/settings.json). user.* is client-only,
@@ -4138,6 +4139,17 @@ int main(int argc, char* argv[]) {
                     if (g_playerController && currentState == GameState::IN_GAME &&
                         !scenario_config.active()) {
                         g_photoMode.active = g_playerController->photo_mode_active();
+                        // T031: swap the in-game overlay between the HUD and the photo-mode viewfinder
+                        // when photo mode toggles (the capture loop + lens nudges below already exist).
+                        if (g_uiManager) {
+                            if (g_photoMode.active && !g_photoModeUiShown) {
+                                g_uiManager->RequestLoadDocument("photo_mode.rml");
+                                g_photoModeUiShown = true;
+                            } else if (!g_photoMode.active && g_photoModeUiShown) {
+                                g_uiManager->RequestLoadDocument("hud.rml");
+                                g_photoModeUiShown = false;
+                            }
+                        }
                         if (g_photoMode.active) {
                             // Apply lens nudges (aperture stops + focus metres), clamped
                             // to sane photographic ranges.
