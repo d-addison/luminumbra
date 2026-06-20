@@ -172,6 +172,11 @@ void Rml_UIManager::Init(GLFWwindow* window, IAudioManager* audioManager) {
     m_window = window;
     m_audioManager = audioManager;
 
+    if (!static_cast<bool>(m_renderInterface)) {
+        LUMINUMBRA_CORE_ERROR("RmlUi GL3 render interface failed to construct (GL not ready?).");
+        return;
+    }
+
     Rml::SetSystemInterface(&m_systemInterface);
     Rml::SetFileInterface(&m_fileInterface);
     Rml::SetRenderInterface(&m_renderInterface);
@@ -231,28 +236,27 @@ void Rml_UIManager::Update() {
 }
 
 void Rml_UIManager::Render() {
-    if (m_context) {
-        int width, height;
-        glfwGetFramebufferSize(m_window, &width, &height);
-        m_renderInterface.SetViewport(width, height);
-        
-        glEnable(GL_BLEND);
-        // RmlUi 6.1 emits PREMULTIPLIED-alpha vertex colours + font glyphs (vendor/CMakeLists.txt:88
-        // pins GIT_TAG 6.1), and the shader does texture*vertexColour — so the correct blend is
-        // (GL_ONE, GL_ONE_MINUS_SRC_ALPHA), matching RmlUi's reference GL3 backend. Straight-alpha
-        // (GL_SRC_ALPHA) double-darkens any semi-transparent fill/text.
-        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-        glDisable(GL_DEPTH_TEST);
+    if (!m_context) return;
 
-        // T007: time the UI draw submission (CPU side; the UI is off the deterministic sim path, so
-        // wall-clock here is fine). Meaningful while the renderer is unbatched (draw-call-bound).
-        const auto ui_t0 = std::chrono::high_resolution_clock::now();
-        m_context->Render();
-        const auto ui_t1 = std::chrono::high_resolution_clock::now();
-        m_lastUiFrameMs = std::chrono::duration<double, std::milli>(ui_t1 - ui_t0).count();
+    int width, height;
+    glfwGetFramebufferSize(m_window, &width, &height);
+    // BeginFrame asserts a >=1 viewport; skip minimised frames.
+    if (width < 1 || height < 1) return;
 
-        glEnable(GL_DEPTH_TEST);
-    }
+    m_renderInterface.SetViewport(width, height);
+
+    // The GL3 backend's BeginFrame/EndFrame fully manage GL state (blend, depth, stencil,
+    // scissor, viewport, FBO bindings) and restore the caller's state on EndFrame — so the
+    // world and ImGui passes around this call are unaffected. It composites the UI (with its
+    // layer/filter stack) into its own MSAA framebuffer and blits the result onto the default
+    // backbuffer with premultiplied-alpha blend, so the world shows through transparent UI.
+    // T007: time the UI draw submission (CPU side; the UI is off the deterministic sim path).
+    const auto ui_t0 = std::chrono::high_resolution_clock::now();
+    m_renderInterface.BeginFrame();
+    m_context->Render();
+    m_renderInterface.EndFrame();
+    const auto ui_t1 = std::chrono::high_resolution_clock::now();
+    m_lastUiFrameMs = std::chrono::duration<double, std::milli>(ui_t1 - ui_t0).count();
 }
 
 void Rml_UIManager::RequestLoadDocument(std::string path) {

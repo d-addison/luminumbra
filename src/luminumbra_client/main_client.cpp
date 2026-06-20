@@ -146,6 +146,15 @@ float g_scene_cloud_biome = 0.0f;
 float g_scene_cloud_plane = 900.0f;
 bool g_scene_cloud_shadow = false;
 float g_scene_cloud_shadow_strength = 0.0f;
+// --ui-screenshot <screen>: the UI fidelity gate. Force the menu state, load <screen>.rml,
+// let layout/fonts settle, then capture the back buffer (which holds the UI over the menu
+// backdrop) and exit. Drives the reference-driven compose->render->compare loop for the UI,
+// mirroring --scene-config for the 3D scene. Output is PPM (converted to PNG by the harness
+// script for critique). Optional --ui-fixtures seeds deterministic list/gallery/settings data.
+std::string g_ui_screenshot_screen;          // "" = inactive; else e.g. "main_menu"
+std::filesystem::path g_ui_screenshot_shot;  // full screenshot path (.ppm)
+bool g_ui_fixtures = false;                   // seed deterministic UI fixture data
+int g_ui_screenshot_settle = 0;              // frames waited before capture
 bool g_timelapse_grow = false;     // grow the procgen plants sapling->tree over the capture
 bool g_timelapse_season = false;   // drift summer->autumn leaf color over the capture
 bool g_timelapse_creatures = false; // spawn predators/prey + render markers (ecology demo)
@@ -498,6 +507,66 @@ void BuildProcgenTreePalette(Luminumbra::Rendering::RenderPipeline& rp, const gl
     }
     g_treePaletteCount = built;
     LUMINUMBRA_CORE_INFO("VAST-FOREST: built procedural tree palette of {} entries (x4 LODs incl far-field billboard)", built);
+}
+
+// ROCK FORMATIONS (worldgen-richness slice 1): a small palette of procedural
+// faceted boulder meshes, registered into the instanced static-mesh cache and
+// scattered as thousands of cheap instances (same render-only path as the trees;
+// never hashed, no world_hash impact). Stone material id -> the stone triplanar
+// texture via the instanced g_buffer path (no new art). Each palette entry is a
+// deformed icosahedron (flat-shaded faces read as rocky), with per-entry
+// non-uniform scale + per-vertex radial noise for variety.
+int g_rockPaletteCount = 0;
+constexpr int kRockPaletteSize = 8;
+void BuildProcgenRockPalette(Luminumbra::Rendering::RenderPipeline& rp) {
+    if (g_rockPaletteCount > 0) return;
+    using V = Luminumbra::Rendering::Vertex;
+    const float t = 1.6180339887f;
+    const glm::vec3 ico[12] = {
+        {-1, t, 0}, {1, t, 0}, {-1, -t, 0}, {1, -t, 0},
+        {0, -1, t}, {0, 1, t}, {0, -1, -t}, {0, 1, -t},
+        {t, 0, -1}, {t, 0, 1}, {-t, 0, -1}, {-t, 0, 1}
+    };
+    const int faces[20][3] = {
+        {0,11,5},{0,5,1},{0,1,7},{0,7,10},{0,10,11},
+        {1,5,9},{5,11,4},{11,10,2},{10,7,6},{7,1,8},
+        {3,9,4},{3,4,2},{3,2,6},{3,6,8},{3,8,9},
+        {4,9,5},{2,4,11},{6,2,10},{8,6,7},{9,8,1}
+    };
+    auto h01 = [](int a, int b) {
+        std::uint64_t z = static_cast<std::uint64_t>(static_cast<std::uint32_t>(a * 73856093) ^
+                                                     static_cast<std::uint32_t>(b * 19349663)) + 0x9E3779B97F4A7C15ull;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+        z = z ^ (z >> 31);
+        return static_cast<float>((z >> 11) * (1.0 / 9007199254740992.0));
+    };
+    int built = 0;
+    for (int p = 0; p < kRockPaletteSize; ++p) {
+        const glm::vec3 baseScale(0.7f + 0.7f * h01(p, 1), 0.45f + 0.7f * h01(p, 2), 0.7f + 0.7f * h01(p, 3));
+        glm::vec3 dv[12];
+        for (int i = 0; i < 12; ++i) {
+            const glm::vec3 n = glm::normalize(ico[i]);
+            const float r = 0.72f + 0.55f * h01(p * 13 + i, 7); // radial roughness
+            dv[i] = n * r * baseScale;
+        }
+        std::vector<V> verts; std::vector<std::uint32_t> idx;
+        verts.reserve(60); idx.reserve(60);
+        for (int f = 0; f < 20; ++f) {
+            const glm::vec3 a = dv[faces[f][0]], b = dv[faces[f][1]], c = dv[faces[f][2]];
+            const glm::vec3 nrm = glm::normalize(glm::cross(b - a, c - a)); // flat-shaded face
+            const std::uint32_t k = static_cast<std::uint32_t>(verts.size());
+            verts.push_back({a, nrm, {0.0f, 0.0f}});
+            verts.push_back({b, nrm, {1.0f, 0.0f}});
+            verts.push_back({c, nrm, {0.0f, 1.0f}});
+            idx.push_back(k); idx.push_back(k + 1); idx.push_back(k + 2);
+        }
+        rp.register_procgen_mesh("procgen://rock_" + std::to_string(p),
+                                 Luminumbra::Rendering::MeshLoader::CreateFromArrays(verts, idx));
+        ++built;
+    }
+    g_rockPaletteCount = built;
+    LUMINUMBRA_CORE_INFO("VAST-FOREST: built procedural rock palette of {} entries", built);
 }
 
 std::unique_ptr<Luminumbra::Client::Rml_UIManager> g_uiManager;
@@ -1884,6 +1953,23 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // --ui-screenshot <screen> [--ui-screenshot-out <path>] [--ui-fixtures]: capture a single
+    // UI screen for the fidelity gate. The render site (menu branch) loads the document, settles,
+    // reads the back buffer and exits. Screen names map to the data/ui/*.rml documents.
+    if (const std::string uss = GetCommandLineOption(argc, argv, "--ui-screenshot", ""); !uss.empty()) {
+        g_ui_screenshot_screen = uss;
+        g_ui_fixtures = HasCommandLineFlag(argc, argv, "--ui-fixtures");
+        const std::string out = GetCommandLineOption(argc, argv, "--ui-screenshot-out",
+                                                     std::string("references/compare/ui-") + uss + ".ppm");
+        std::filesystem::path outPath(out);
+        outPath.replace_extension(".ppm"); // WritePixelBufferPpm writes PPM
+        g_ui_screenshot_shot = outPath;
+        std::error_code _ui_ec;
+        if (outPath.has_parent_path()) std::filesystem::create_directories(outPath.parent_path(), _ui_ec);
+        LUMINUMBRA_CORE_INFO("UI screenshot mode: screen='{}' fixtures={} -> {}",
+                             g_ui_screenshot_screen, g_ui_fixtures, g_ui_screenshot_shot.string());
+    }
+
     // --timelapse capture mode (docs/timelapse.md). Single-player; pair with
     // --auto-create-world --auto-enter-world (and --no-ui for a clean frame).
     g_timelapse_frames = GetCommandLineIntOption(argc, argv, "--timelapse-frames", 0);
@@ -2290,7 +2376,11 @@ int main(int argc, char* argv[]) {
     SetGameState(window, gameStateManager, GameState::MAIN_MENU);
     audioManager->PlayMusic("music_main_menu");
     if (g_uiManager) {
-        g_uiManager->RequestLoadDocument("main_menu.rml");
+        // --ui-screenshot: open the requested screen directly in menu state instead of the menu.
+        const std::string boot_doc = g_ui_screenshot_screen.empty()
+                                         ? std::string("main_menu.rml")
+                                         : (g_ui_screenshot_screen + ".rml");
+        g_uiManager->RequestLoadDocument(boot_doc);
     }
 
     // The endurance and water gates assert visible water; the default
@@ -3982,6 +4072,52 @@ int main(int argc, char* argv[]) {
                             }
                         }
                         LUMINUMBRA_CORE_INFO("T-I8 trees: scattered {} tree instances", placed);
+
+                        // ROCK FORMATIONS (worldgen-richness slice 1): scatter the procedural
+                        // rock palette as instanced static meshes — DENSER on steep terrain
+                        // (scree / rocky outcrops), a sparse baseline of boulders on open
+                        // ground, and rare large sentinels. Stone material -> stone triplanar
+                        // (no new art). RENDER-ONLY (never hashed), reusing anchor/terr/frand;
+                        // the frand() stream simply continues after the trees, so the layout
+                        // stays deterministic + reproducible.
+                        BuildProcgenRockPalette(renderPipeline);
+                        if (g_rockPaletteCount > 0) {
+                            const float rReach = 900.0f;   // metres from spawn anchor
+                            const float rCell = 19.0f;     // grid pitch
+                            const float rHS = 3.0f;        // slope probe radius
+                            const int   rCap = 14000;      // instance cap
+                            int rocksPlaced = 0;
+                            for (float gz = -rReach; gz <= rReach && rocksPlaced < rCap; gz += rCell) {
+                                for (float gx = -rReach; gx <= rReach && rocksPlaced < rCap; gx += rCell) {
+                                    const float rx = anchor.x + gx + (frand() - 0.5f) * rCell;
+                                    const float rz = anchor.z + gz + (frand() - 0.5f) * rCell;
+                                    const float hC = terr(rx, rz);
+                                    if (hC <= 0.5f) continue; // skip underwater (SEA_LEVEL=0)
+                                    const float sx = terr(rx + rHS, rz) - terr(rx - rHS, rz);
+                                    const float sz = terr(rx, rz + rHS) - terr(rx, rz - rHS);
+                                    const float slope = std::sqrt(sx * sx + sz * sz) / rHS;
+                                    // baseline boulders on flats; many more on slopes (scree).
+                                    const float density = 0.05f + std::min(slope * 0.9f, 0.7f);
+                                    if (frand() >= density) continue;
+                                    const int pidx = static_cast<int>(
+                                        (static_cast<std::uint64_t>(static_cast<std::int64_t>(rx) * 73856093) ^
+                                         static_cast<std::uint64_t>(static_cast<std::int64_t>(rz) * 19349663)) %
+                                        static_cast<std::uint64_t>(g_rockPaletteCount));
+                                    float s = 0.8f + frand() * 2.2f;          // small..medium
+                                    if (frand() > 0.93f) s *= 2.6f;           // rare sentinel boulders
+                                    const auto e = reg.create();
+                                    auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
+                                    tf.position = Luminumbra::Vec3(rx, hC - 0.35f * s, rz); // settle into ground
+                                    tf.scale = Luminumbra::Vec3(s, s * (0.7f + 0.5f * frand()), s);
+                                    tf.rotation = glm::angleAxis(frand() * 6.2831853f, glm::vec3(0.0f, 1.0f, 0.0f));
+                                    auto& sm = reg.emplace<Luminumbra::Components::StaticMeshComponent>(e);
+                                    sm.meshPath = "procgen://rock_" + std::to_string(pidx);
+                                    sm.materialId = 1u; // Stone -> stone triplanar texture
+                                    ++rocksPlaced;
+                                }
+                            }
+                            LUMINUMBRA_CORE_INFO("ROCKS: scattered {} rock instances", rocksPlaced);
+                        }
                         // Growth showcase: a cluster of bigger HERO plants right in front of the
                         // fixed grow-mode camera, so the foreground is dominated by plants visibly
                         // growing (the scattered grove alone reads as distant background).
@@ -5967,6 +6103,25 @@ int main(int argc, char* argv[]) {
             } else { // Main Menu, etc.
                 if (g_uiManager) {
                     g_uiManager->Render();
+                }
+                // --ui-screenshot: settle layout/fonts/textures, then read the back buffer
+                // (now holding the UI over the menu backdrop) and exit. Mirrors --scene-config.
+                if (!g_ui_screenshot_screen.empty()) {
+                    if (g_ui_screenshot_settle < 30) {
+                        ++g_ui_screenshot_settle;
+                    } else {
+                        int vw = 0, vh = 0;
+                        glfwGetFramebufferSize(window, &vw, &vh);
+                        if (vw > 0 && vh > 0) {
+                            std::vector<unsigned char> px(static_cast<std::size_t>(vw) * static_cast<std::size_t>(vh) * 3u);
+                            glReadBuffer(GL_BACK);
+                            glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                            glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+                            WritePixelBufferPpm(g_ui_screenshot_shot, vw, vh, px);
+                            LUMINUMBRA_CORE_INFO("UI screenshot written -> {} ({}x{})", g_ui_screenshot_shot.string(), vw, vh);
+                        }
+                        glfwSetWindowShouldClose(window, GLFW_TRUE);
+                    }
                 }
             }
         }

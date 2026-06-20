@@ -45,7 +45,18 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/ui/Rml_Interfaces.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ui/Rml_UIManager.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ui/core/UIDataStream.cpp
+    # RmlUi reference GL3 backend (vendored copy of the 6.1 renderer). It implements the
+    # layered/filter/clip-mask render API the hand-rolled RmlRenderer stubbed out, so
+    # backdrop-filter / filter / box-shadow actually render. Compiled against the engine's
+    # own glad loader via RMLUI_GL3_CUSTOM_LOADER (set below) instead of its bundled glad.
+    ${CMAKE_CURRENT_LIST_DIR}/ui/gl3/RmlUi_Renderer_GL3.cpp
 )
+
+# Route the vendored GL3 backend at the engine's glad (gl 4.6 core) instead of the glad 2.x
+# loader it bundles — two GL loaders in one link would collide. The custom-loader hook makes
+# RmlGL3::Initialize/Shutdown no-ops (the engine already owns the GL context + loader).
+set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/ui/gl3/RmlUi_Renderer_GL3.cpp
+    PROPERTIES COMPILE_DEFINITIONS "RMLUI_GL3_CUSTOM_LOADER=<glad/glad.h>")
 
 # List of vendor source files that need to be compiled with the client.
 set(CLIENT_VENDOR_SOURCES

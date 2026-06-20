@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Rml_Interfaces.h" // The one true source for interface definitions
+#include "gl3/RmlUi_Renderer_GL3.h" // RmlUi 6.1 reference backend: real blur/box-shadow/layers
 #include <RmlUi/Core.h>
 #include <string>
 #include <functional>
@@ -99,7 +100,12 @@ private:
     // Interfaces are now members, their lifetime is tied to the manager.
     RmlSystem m_systemInterface;
     RmlFileInterface m_fileInterface;
-    RmlRenderer m_renderInterface;
+    // RmlUi's reference GL3 backend (replaces the hand-rolled RmlRenderer): implements the
+    // layered render API (PushLayer/CompositeLayers/CompileFilter) so frosted glass, soft
+    // shadows, and the live blurred backdrop actually render. Built in this ctor, so GL/glad
+    // must already be initialised when the manager is constructed (main_client: glad at the
+    // GLFW context, manager constructed right after).
+    RenderInterface_GL3 m_renderInterface;
     
     Rml::Context* m_context = nullptr;
     GLFWwindow* m_window = nullptr;
