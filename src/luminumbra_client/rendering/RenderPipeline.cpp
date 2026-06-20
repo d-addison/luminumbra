@@ -618,6 +618,7 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         m_shadow_pass->init_shadow_map();
         m_ssao_pass->init_ssao(screen_width, screen_height);
         init_screen_quad();
+        init_halfres_cloud(); // no-op unless cloud quality was set > 0 before startup
         m_skybox_pass->init_geometry();
         m_particle_pass->init_buffers(); // T-I5a-1: persistent-mapped instance pool
         m_foliage_pass->init_buffers();  // T-I5b-1: persistent-mapped scatter pool
@@ -1769,10 +1770,49 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
     glBlitFramebuffer(0, 0, m_screen_width, m_screen_height, 0, 0, m_screen_width, m_screen_height, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
 
-    // 6. SKYBOX PASS (Renders to m_lighting_fbo before transparent water blends)
-    glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
+    // 6. SKYBOX / SKY-DOME PASS (Renders to m_lighting_fbo before transparent water blends)
     begin_gpu_pass_timer(GpuTimerPass::Skybox);
-    m_skybox_pass->execute(*this, camera, false);
+    if (m_cloud_quality > 0 && m_halfres_cloud.fbo &&
+        m_cloud_composite_shader && m_cloud_composite_shader->IsValid()) {
+        // Render-optimization (cloud-raymarch-optimization, slice 1): raymarch the
+        // sky dome at reduced resolution, then depth-mask-composite it into the
+        // lighting FBO. The expensive cloud march pays for 1/4 (half) or 1/16
+        // (quarter) of the fragments. RENDER-ONLY (no world_hash impact); sky
+        // pixels only (scene depth == far plane), reproducing the legacy GL_LEQUAL
+        // sky mask. Quality 0 takes the byte-identical legacy path below.
+        //
+        // (a) Dome -> reduced-res FBO. No depth attachment / depth test off: the
+        //     dome fills every texel (the sky mask is reapplied at composite time).
+        const GLboolean blend_was = glIsEnabled(GL_BLEND);
+        if (blend_was) glDisable(GL_BLEND);
+        glBindFramebuffer(GL_FRAMEBUFFER, m_halfres_cloud.fbo);
+        glViewport(0, 0, static_cast<GLsizei>(m_halfres_cloud.width), static_cast<GLsizei>(m_halfres_cloud.height));
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        m_skybox_pass->execute(*this, camera, false);
+        // (b) Depth-masked upsample composite -> lighting FBO (full res). Writes the
+        //     bilinear-upsampled sky only where the scene depth is the far plane.
+        glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
+        glViewport(0, 0, m_screen_width, m_screen_height);
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        m_cloud_composite_shader->use();
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m_halfres_cloud.color_texture);
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m_gbuffer_pass->gbuffer().depth_texture);
+        m_cloud_composite_shader->setInt("u_cloudColor", 0);
+        m_cloud_composite_shader->setInt("u_sceneDepth", 1);
+        glBindVertexArray(m_screen_quad_vao);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glBindVertexArray(0);
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, 0);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, 0);
+        glDepthMask(GL_TRUE);
+        glEnable(GL_DEPTH_TEST);
+        if (blend_was) glEnable(GL_BLEND);
+    } else {
+        glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
+        m_skybox_pass->execute(*this, camera, false);
+    }
     end_gpu_pass_timer(GpuTimerPass::Skybox);
     glBindVertexArray(0);  // Unbind after skybox pass
 
@@ -1915,6 +1955,7 @@ void RenderPipeline::on_resize(u32 new_width, u32 new_height) {
     m_gbuffer_pass->init_gbuffer(new_width, new_height);
     m_ssao_pass->destroy_ssao();
     m_ssao_pass->init_ssao(new_width, new_height);
+    init_halfres_cloud(); // re-size the reduced-res sky-dome target (no-op at quality 0)
     m_frustumCache.valid = false;
     ++m_resize_generation;
     LUMINUMBRA_CORE_INFO("RenderPipeline resized targets to {}x{} (resize generation {})", new_width, new_height, m_resize_generation);
@@ -1976,6 +2017,13 @@ void RenderPipeline::init_shaders() {
         (m_root_path / "res/shaders/basic.vert").string().c_str(),
         (m_root_path / "res/shaders/waterfall.frag").string().c_str());
     label_gl_object(GL_PROGRAM, m_waterfall_shader ? m_waterfall_shader->Id() : 0u, "shader.waterfall");
+    // Render-optimization (cloud-raymarch-optimization, slice 1): the depth-masked
+    // upsample that composites the reduced-res sky dome into the lighting FBO.
+    // Reuses the SSAO fullscreen-quad vertex stage. Only used when cloud quality > 0.
+    m_cloud_composite_shader = std::make_unique<Shader>(
+        (m_root_path / "res/shaders/ssao.vert").string().c_str(),
+        (m_root_path / "res/shaders/cloud_composite.frag").string().c_str());
+    label_gl_object(GL_PROGRAM, m_cloud_composite_shader ? m_cloud_composite_shader->Id() : 0u, "shader.cloud_composite");
 }
 
 void RenderPipeline::init_sky_lut() {
@@ -2069,6 +2117,64 @@ void RenderPipeline::execute_aerial_pass(const Camera& camera) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+// --- Render-optimization: reduced-res sky-dome (cloud-raymarch-optimization, slice 1) ---
+
+void RenderPipeline::set_cloud_quality(int quality) {
+    if (quality < 0) quality = 0;
+    if (quality > 2) quality = 2;
+    if (quality == m_cloud_quality) return;
+    m_cloud_quality = quality;
+    if (m_started) {
+        init_halfres_cloud();
+    }
+    LUMINUMBRA_CORE_INFO("Cloud render quality set to {} ({})", m_cloud_quality,
+                         m_cloud_quality == 0 ? "full" : (m_cloud_quality == 1 ? "half" : "quarter"));
+}
+
+void RenderPipeline::destroy_halfres_cloud() {
+    if (m_halfres_cloud.color_texture) { glDeleteTextures(1, &m_halfres_cloud.color_texture); m_halfres_cloud.color_texture = 0; }
+    if (m_halfres_cloud.fbo) { glDeleteFramebuffers(1, &m_halfres_cloud.fbo); m_halfres_cloud.fbo = 0; }
+    m_halfres_cloud.width = 0;
+    m_halfres_cloud.height = 0;
+    m_halfres_cloud.scale = 0;
+}
+
+void RenderPipeline::init_halfres_cloud() {
+    // Quality 0 -> release the target; the legacy full-res dome draw runs instead.
+    if (m_cloud_quality <= 0) { destroy_halfres_cloud(); return; }
+    const int scale = (m_cloud_quality >= 2) ? 4 : 2;
+    u32 w = m_screen_width / static_cast<u32>(scale);
+    u32 h = m_screen_height / static_cast<u32>(scale);
+    if (w == 0) w = 1;
+    if (h == 0) h = 1;
+    // Already sized correctly -> nothing to do.
+    if (m_halfres_cloud.fbo && m_halfres_cloud.width == w &&
+        m_halfres_cloud.height == h && m_halfres_cloud.scale == scale) {
+        return;
+    }
+    destroy_halfres_cloud();
+    glGenFramebuffers(1, &m_halfres_cloud.fbo);
+    glGenTextures(1, &m_halfres_cloud.color_texture);
+    label_gl_object(GL_FRAMEBUFFER, m_halfres_cloud.fbo, "cloud_halfres.fbo");
+    label_gl_object(GL_TEXTURE, m_halfres_cloud.color_texture, "cloud_halfres.color");
+    glBindTexture(GL_TEXTURE_2D, m_halfres_cloud.color_texture);
+    // RGBA16F to match the HDR lighting target the dome normally writes into; LINEAR
+    // so the composite gets a free bilinear upsample.
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, static_cast<GLsizei>(w), static_cast<GLsizei>(h), 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_halfres_cloud.fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_halfres_cloud.color_texture, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    m_halfres_cloud.width = w;
+    m_halfres_cloud.height = h;
+    m_halfres_cloud.scale = scale;
+    LUMINUMBRA_CORE_INFO("Half-res cloud target allocated {}x{} (1/{} per axis)", w, h, scale);
+}
+
 void RenderPipeline::init_screen_quad() {
     const float quadVertices[] = { -1.0f,  1.0f, 0.0f, 0.0f, 1.0f, -1.0f, -1.0f, 0.0f, 0.0f, 0.0f, 1.0f,  1.0f, 0.0f, 1.0f, 1.0f, 1.0f, -1.0f, 0.0f, 1.0f, 0.0f, };
     glGenVertexArrays(1, &m_screen_quad_vao);
@@ -2119,6 +2225,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_gbuffer_pass->destroy_gbuffer();
     m_shadow_pass->destroy_shadow_map();
     m_ssao_pass->destroy_ssao();
+    destroy_halfres_cloud(); // render-optimization: reduced-res sky-dome target
     if (m_screen_quad_vao) { glDeleteVertexArrays(1, &m_screen_quad_vao); m_screen_quad_vao = 0; }
     if (m_screen_quad_vbo) { glDeleteBuffers(1, &m_screen_quad_vbo); m_screen_quad_vbo = 0; }
     m_skybox_pass->destroy_geometry();

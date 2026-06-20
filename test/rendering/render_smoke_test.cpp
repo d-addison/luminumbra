@@ -329,6 +329,9 @@ std::vector<ShaderProgramSpec> PipelineProgramSpecs() {
         {"volumetric_lighting", "volumetric_lighting.vert", "volumetric_lighting.frag"},
         {"magical_particles", "magical_particles.vert", "magical_particles.frag", "magical_particles.geom"},
         {"foliage", "foliage.vert", "foliage.frag"},
+        // Render-optimization (cloud-raymarch-optimization, slice 1): the depth-masked
+        // upsample compositing the reduced-res sky dome into the lighting FBO.
+        {"cloud_composite", "ssao.vert", "cloud_composite.frag"},
     };
 }
 

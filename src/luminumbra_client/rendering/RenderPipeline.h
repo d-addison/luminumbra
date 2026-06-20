@@ -598,6 +598,17 @@ public:
     void set_cloud_state(const CloudRenderState& state);
     const CloudRenderState& get_cloud_state() const { return m_cloud_state; }
 
+    // Render-optimization (cloud-raymarch-optimization): cloud/sky-dome render
+    // quality. 0 = full (legacy full-res dome draw, byte-identical to before);
+    // 1 = half (dome raymarched into a 1/2-per-axis FBO + depth-masked upsample
+    // composite, the ~-3 ms structural win); 2 = quarter (1/4 per axis). The
+    // half/quarter path is RENDER-ONLY (no world_hash impact) and opt-in, so the
+    // default (0) leaves every existing visual gate byte-stable. Driven by the
+    // client from LUMIN_CLOUD_QUALITY (and, later, render.cloud_quality). Lazily
+    // (re)allocates the reduced-res FBO; safe to call before or after startup.
+    void set_cloud_quality(int quality);
+    int get_cloud_quality() const { return m_cloud_quality; }
+
     // T-I5a-5 (B3): render-only lightning control. set_lightning_state pushes the
     // full-scene light pulse + bolt polyline for the current frame; the LightingPass
     // injects the pulse and rasterizes the bolt. Pass an inactive state (default) to
@@ -857,6 +868,26 @@ private:
     CloudRenderState m_cloud_state;
     float m_cloud_phase = 0.0f;
     void advance_cloud_phase(float deltaTime);
+    // Render-optimization (cloud-raymarch-optimization, slice 1): reduced-res sky
+    // dome target + composite. m_cloud_quality 0 keeps the legacy full-res dome
+    // draw (these stay 0/unused). Quality 1/2 renders the dome into m_halfres_cloud
+    // at 1/2 or 1/4 per axis, then m_cloud_composite_shader upsamples + depth-masks
+    // it into the lighting FBO. Render-only; never hashed.
+    int m_cloud_quality = 0;
+    struct HalfResCloudTarget {
+        u32 fbo = 0;
+        u32 color_texture = 0; // RGBA16F reduced-res sky dome
+        u32 width = 0;
+        u32 height = 0;
+        int scale = 0;         // axis divisor the buffer is sized for (1=>off, 2, 4)
+    };
+    HalfResCloudTarget m_halfres_cloud;
+    std::unique_ptr<Shader> m_cloud_composite_shader;
+    // (Re)allocate m_halfres_cloud for the current screen size + m_cloud_quality.
+    // No-op when quality 0 (releases any existing target). Idempotent if already
+    // sized correctly.
+    void init_halfres_cloud();
+    void destroy_halfres_cloud();
     // T-I5a-5 (B3): render-only lightning pulse + bolt state for the current frame.
     LightningRenderState m_lightning_state;
     std::unique_ptr<FarLodSystem> m_farlod;

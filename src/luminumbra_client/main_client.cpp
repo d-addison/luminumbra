@@ -1956,6 +1956,14 @@ int main(int argc, char* argv[]) {
         scenario_config.isolation_layers, scenario_config.isolation_backdrop));
     // T-I3-9: far-LOD tile builds ride the JobSystem Normal lane.
     renderPipeline.attach_farlod_job_system(&jobSystem);
+    // Render-optimization (cloud-raymarch-optimization): opt-in reduced-res sky-dome
+    // quality knob, matching the existing LUMIN_* render-tuning idiom. Unset -> 0
+    // (full, byte-identical legacy path). 1 = half (1/2 per axis), 2 = quarter.
+    // Applied after startup() below once the GL targets exist. Render-only.
+    int cloud_quality = 0;
+    if (const char* cq = std::getenv("LUMIN_CLOUD_QUALITY")) {
+        cloud_quality = std::atoi(cq);
+    }
     if (!renderPipeline.startup(framebufferWidth, framebufferHeight, root_dir)) {
         LUMINUMBRA_CORE_ERROR("FATAL: Render pipeline startup failed.");
         runtime_state_recorder.capture("render_pipeline_startup_failed", &jobSystem, gameSession.get(), &renderPipeline, 0, {});
@@ -1972,6 +1980,11 @@ int main(int argc, char* argv[]) {
         glfwDestroyWindow(window);
         glfwTerminate();
         return -1;
+    }
+    // Render-optimization (cloud-raymarch-optimization): apply the reduced-res
+    // sky-dome quality once the GL targets exist. No-op at 0 (full).
+    if (cloud_quality > 0) {
+        renderPipeline.set_cloud_quality(cloud_quality);
     }
     // T-I4-DR-split-lint: data-driven skinned-mesh texture set. The scenario
     // config resolved the .ltex paths (from the game archetype JSON or a generic
