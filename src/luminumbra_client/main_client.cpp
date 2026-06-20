@@ -123,6 +123,13 @@ int g_timelapse_settle = 0;
 float g_timelapse_tod = 0.0f;      // starting time-of-day (0 = noon/brightest; drifts by daystep)
 std::filesystem::path g_timelapse_dir;
 static constexpr int kTimelapseSettleFrames = 45;  // let the world stream/settle before frame 0
+// Fixed camera-pose override (--cam-pos x,y,z [--cam-yaw d] [--cam-pitch d]): pins
+// g_camera every frame for reproducible/controllable screenshots + benchmarks. Keep
+// the position within the streamed area (near spawn) so chunks are resident.
+bool g_fixed_cam = false;
+glm::vec3 g_fixed_cam_pos(0.0f);
+float g_fixed_cam_yaw = 0.0f;
+float g_fixed_cam_pitch = 0.0f;
 bool g_timelapse_grow = false;     // grow the procgen plants sapling->tree over the capture
 bool g_timelapse_season = false;   // drift summer->autumn leaf color over the capture
 bool g_timelapse_creatures = false; // spawn predators/prey + render markers (ecology demo)
@@ -1795,6 +1802,20 @@ int main(int argc, char* argv[]) {
     g_render_benchmark_path = GetCommandLineOption(argc, argv, "--render-benchmark", "");
     g_render_benchmark_frames = GetCommandLineIntOption(argc, argv, "--render-benchmark-frames", 120);
     g_render_benchmark_warmup = GetCommandLineIntOption(argc, argv, "--render-benchmark-warmup", 60);
+    {
+        const std::string cp = GetCommandLineOption(argc, argv, "--cam-pos", "");
+        if (!cp.empty()) {
+            float x = 0, y = 0, z = 0;
+            if (std::sscanf(cp.c_str(), "%f,%f,%f", &x, &y, &z) == 3) {
+                g_fixed_cam_pos = glm::vec3(x, y, z);
+                g_fixed_cam = true;
+            }
+        }
+        const std::string cy = GetCommandLineOption(argc, argv, "--cam-yaw", "");
+        if (!cy.empty()) { try { g_fixed_cam_yaw = std::stof(cy); } catch (...) {} }
+        const std::string cpi = GetCommandLineOption(argc, argv, "--cam-pitch", "");
+        if (!cpi.empty()) { try { g_fixed_cam_pitch = std::stof(cpi); } catch (...) {} }
+    }
 
     // --timelapse capture mode (docs/timelapse.md). Single-player; pair with
     // --auto-create-world --auto-enter-world (and --no-ui for a clean frame).
@@ -1976,13 +1997,15 @@ int main(int argc, char* argv[]) {
     // quality knob, matching the existing LUMIN_* render-tuning idiom. Unset -> 0
     // (full, byte-identical legacy path). 1 = half (1/2 per axis), 2 = quarter.
     // Applied after startup() below once the GL targets exist. Render-only.
-    int cloud_quality = 0;
+    // Render-optimization defaults are now ON (owner-blessed 2026-06-20): half-res
+    // clouds + GTAO High. The half-res cloud composite is validated visually faithful
+    // (skybox 4.14->0.88 ms); GTAO is the ground-truth AO. Set LUMIN_CLOUD_QUALITY=0 /
+    // LUMIN_SSAO_QUALITY=0 to fall back to the legacy full-res paths for A/B.
+    int cloud_quality = 1; // 0 full, 1 half, 2 quarter
     if (const char* cq = std::getenv("LUMIN_CLOUD_QUALITY")) {
         cloud_quality = std::atoi(cq);
     }
-    // Render-optimization (ssao-gtao): opt-in GTAO. 0 = legacy 64-sample SSAO
-    // (byte-identical default); 1 = GTAO High (18 spp). Render-only.
-    int ssao_quality = 0;
+    int ssao_quality = 2;  // 0 legacy SSAO, 1 GTAO Low, 2 GTAO High
     if (const char* sq = std::getenv("LUMIN_SSAO_QUALITY")) {
         ssao_quality = std::atoi(sq);
     }
@@ -2005,12 +2028,8 @@ int main(int argc, char* argv[]) {
     }
     // Render-optimization (cloud-raymarch-optimization): apply the reduced-res
     // sky-dome quality once the GL targets exist. No-op at 0 (full).
-    if (cloud_quality > 0) {
-        renderPipeline.set_cloud_quality(cloud_quality);
-    }
-    if (ssao_quality > 0) {
-        renderPipeline.set_ssao_quality(ssao_quality);
-    }
+    renderPipeline.set_cloud_quality(cloud_quality); // default 1 (half); env can set 0
+    renderPipeline.set_ssao_quality(ssao_quality);   // default 2 (GTAO High); env can set 0
     // T-I4-DR-split-lint: data-driven skinned-mesh texture set. The scenario
     // config resolved the .ltex paths (from the game archetype JSON or a generic
     // test texture); hand them to the generic RenderPipeline loader so no
@@ -4176,6 +4195,12 @@ int main(int argc, char* argv[]) {
                     if (g_timelapse_fire) {
                         BakeCombustibleMarkers(renderPipeline.plant_procgen(), gameSession->GetRegistry(),
                                                gameSession->GetWorldSystem());
+                    }
+                    if (g_fixed_cam && g_camera) {
+                        g_camera->Position = g_fixed_cam_pos;
+                        g_camera->Yaw = g_fixed_cam_yaw;
+                        g_camera->Pitch = g_fixed_cam_pitch;
+                        g_camera->updateCameraVectors();
                     }
                     renderPipeline.render_frame(gameSession->GetRegistry(), *gameSession->GetWorldSystem(), *g_camera, deltaTime, wireframe_mode);
 
