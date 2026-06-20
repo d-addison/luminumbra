@@ -309,8 +309,12 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
     if (auto* e = document->GetElementById("new_world_btn")) AddClickSoundListener(e, [this](Rml::Event&){ this->RequestLoadDocument("world_creation.rml"); });
     if (auto* e = document->GetElementById("load_world_btn")) AddClickSoundListener(e, [this](Rml::Event&){ this->RequestLoadDocument("world_selection.rml"); });
     if (auto* e = document->GetElementById("settings_btn")) AddClickSoundListener(e, [this](Rml::Event&){ this->RequestLoadDocument("settings.rml"); });
+    if (auto* e = document->GetElementById("gallery_btn")) AddClickSoundListener(e, [this](Rml::Event&){ this->RequestLoadDocument("gallery.rml"); });
     if (auto* e = document->GetElementById("quit_btn")) AddClickSoundListener(e, [this](Rml::Event&){ glfwSetWindowShouldClose(this->m_window, true); });
     if (auto* e = document->GetElementById("back_btn")) AddClickSoundListener(e, [this](Rml::Event&){ this->RequestLoadDocument("main_menu.rml"); });
+    // Pause menu (pause.rml): route resume / quit-to-menu back to main_client (it owns cursor + state).
+    if (auto* e = document->GetElementById("resume_btn")) AddClickSoundListener(e, [this](Rml::Event&){ if (m_pauseActionCallback) m_pauseActionCallback("resume"); });
+    if (auto* e = document->GetElementById("quit_menu_btn")) AddClickSoundListener(e, [this](Rml::Event&){ if (m_pauseActionCallback) m_pauseActionCallback("quit"); });
 
     // settings.rml: populate widgets from current settings, then wire live change + Apply.
     BindSettingsListeners(document);

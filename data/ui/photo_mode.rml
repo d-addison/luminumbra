@@ -30,11 +30,11 @@
             <div class="readout-group">
                 <div class="readout-cell">
                     <span class="readout-label">aperture</span>
-                    <span class="readout-value">f/2.8</span>
+                    <span class="readout-value" id="ro_aperture">f/2.8</span>
                 </div>
                 <div class="readout-cell">
                     <span class="readout-label">focus</span>
-                    <span class="readout-value">3.4m</span>
+                    <span class="readout-value" id="ro_focus">3.4m</span>
                 </div>
                 <div class="readout-cell">
                     <span class="readout-label">ev</span>
@@ -58,7 +58,7 @@
         <!-- Post-capture star verdict — hidden until a frame is taken. -->
         <div id="verdict-panel" class="verdict-panel hidden">
             <h2 class="verdict-heading">captured</h2>
-            <div class="verdict-stars">
+            <div class="verdict-stars" id="verdict_stars">
                 <span class="verdict-star verdict-star-on">★</span>
                 <span class="verdict-star verdict-star-on">★</span>
                 <span class="verdict-star verdict-star-on">★</span>

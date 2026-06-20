@@ -94,6 +94,7 @@ luminumbra::core::SystemConfig g_systemConfig;
 // Settings menu (F8) — frees the cursor so the ImGui panel is clickable. While
 // g_rebindCaptureAction >= 0 the next key press is captured as that action's binding.
 bool g_show_settings = false;
+bool g_paused = false;  // T032: in-game pause overlay active
 int g_rebindCaptureAction = -1;
 // host_timescale-style engine time control (Source/GMod-like). 1.0 = real time, 0 = paused,
 // <1 slow-mo, >1 fast-forward. Render/client playback rate: scales how many FIXED 30 Hz sim
@@ -474,6 +475,7 @@ void scroll_callback(GLFWwindow* window, double xoffset, double yoffset);
 void GLAPIENTRY GLDebugMessageCallback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* message, const void* userParam);
 void GLFWErrorCallback(int error, const char* description);
 void SetGameState(GLFWwindow* window, GameStateManager& gameStateManager, GameState newState);
+void SetGamePaused(GLFWwindow* window, bool paused);
 
 // --- Global State ---
 float lastX = 1280 / 2.0f;
@@ -2147,6 +2149,16 @@ int main(int argc, char* argv[]) {
                 luminumbra::core::SystemConfig::DefaultUserOverlayPath());
         };
         g_uiManager->SetSettingsBridge(std::move(sb));
+        // T032: pause-menu actions route here (main_client owns game state + cursor).
+        g_uiManager->SetPauseActionCallback([window, &gameStateManager](const std::string& act) {
+            if (act == "resume") {
+                SetGamePaused(window, false);
+            } else if (act == "quit") {
+                SetGamePaused(window, false);
+                SetGameState(window, gameStateManager, GameState::MAIN_MENU);
+                if (g_uiManager) g_uiManager->RequestLoadDocument("main_menu.rml");
+            }
+        });
     }
 
     glfwSetKeyCallback(window, key_callback);
@@ -4137,7 +4149,7 @@ int main(int argc, char* argv[]) {
                     // test pins the pure path). The interactive-only guard keeps it out
                     // of the automated scenario/gate runs.
                     if (g_playerController && currentState == GameState::IN_GAME &&
-                        !scenario_config.active()) {
+                        !scenario_config.active() && !g_paused) {
                         g_photoMode.active = g_playerController->photo_mode_active();
                         // T031: swap the in-game overlay between the HUD and the photo-mode viewfinder
                         // when photo mode toggles (the capture loop + lens nudges below already exist).
@@ -4160,6 +4172,21 @@ int main(int argc, char* argv[]) {
                             if (g_photoMode.lens.focus_distance_m < 0.2f) g_photoMode.lens.focus_distance_m = 0.2f;
                             if (g_photoMode.lens.focus_distance_m > 200.0f) g_photoMode.lens.focus_distance_m = 200.0f;
 
+                            // T031: live-bind the viewfinder readouts to the current lens.
+                            if (g_uiManager && g_uiManager->GetContext()) {
+                                if (auto* doc = g_uiManager->GetContext()->GetDocument("photo_mode")) {
+                                    char rbuf[24];
+                                    if (auto* e = doc->GetElementById("ro_aperture")) {
+                                        std::snprintf(rbuf, sizeof(rbuf), "f/%.1f", g_photoMode.lens.aperture_f);
+                                        e->SetInnerRML(rbuf);
+                                    }
+                                    if (auto* e = doc->GetElementById("ro_focus")) {
+                                        std::snprintf(rbuf, sizeof(rbuf), "%.1fm", g_photoMode.lens.focus_distance_m);
+                                        e->SetInnerRML(rbuf);
+                                    }
+                                }
+                            }
+
                             if (g_playerController->consume_shutter_request()) {
                                 int cap_w = 0, cap_h = 0;
                                 glfwGetFramebufferSize(window, &cap_w, &cap_h);
@@ -4173,6 +4200,22 @@ int main(int argc, char* argv[]) {
                                 g_photoMode.last_total = verdict.total;
                                 g_photoMode.last_stars = verdict.stars;
                                 ++g_photoMode.captures;
+
+                                // T031: reveal the star-verdict panel on the overlay (filled to last_stars).
+                                if (g_uiManager && g_uiManager->GetContext()) {
+                                    if (auto* doc = g_uiManager->GetContext()->GetDocument("photo_mode")) {
+                                        if (auto* panel = doc->GetElementById("verdict-panel")) panel->SetClass("hidden", false);
+                                        if (auto* st = doc->GetElementById("verdict_stars")) {
+                                            std::string stars_rml;
+                                            for (int si = 0; si < 5; ++si) {
+                                                stars_rml += (si < g_photoMode.last_stars)
+                                                    ? "<span class=\"verdict-star verdict-star-on\">\xE2\x98\x85</span>"
+                                                    : "<span class=\"verdict-star\">\xE2\x98\x85</span>";
+                                            }
+                                            st->SetInnerRML(stars_rml);
+                                        }
+                                    }
+                                }
 
                                 // Persist the framebuffer (PPM) + a verdict sidecar.
                                 std::error_code _photo_ec;
@@ -6120,6 +6163,11 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
         g_rebindCaptureAction = -1;
         return;
     }
+    // Escape: toggle the in-game pause overlay (only in a world, and not while the F8 panel is up).
+    if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS && g_playerController && !g_show_settings) {
+        SetGamePaused(window, !g_paused);
+        return;
+    }
     // F8: toggle the settings menu and free/restore the cursor so the panel is usable.
     if (key == GLFW_KEY_F8 && action == GLFW_PRESS) {
         g_show_settings = !g_show_settings;
@@ -6213,9 +6261,30 @@ void SetGameState(GLFWwindow* window, GameStateManager& gameStateManager, GameSt
     }
 }
 
+void SetGamePaused(GLFWwindow* window, bool paused) {
+    g_paused = paused;
+    if (paused) {
+        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        if (g_uiManager) {
+            glfwSetCursorPosCallback(window, Luminumbra::Client::Rml_UIManager::CursorPosCallback);
+            glfwSetMouseButtonCallback(window, Luminumbra::Client::Rml_UIManager::MouseButtonCallback);
+            glfwSetScrollCallback(window, Luminumbra::Client::Rml_UIManager::ScrollCallback);
+            g_uiManager->RequestLoadDocument("pause.rml");
+        }
+    } else {
+        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        glfwSetCursorPosCallback(window, mouse_callback);
+        glfwSetScrollCallback(window, scroll_callback);
+        glfwSetMouseButtonCallback(window, nullptr);
+        firstMouse = true;
+        g_photoModeUiShown = false;  // re-sync the in-game overlay next frame
+        if (g_uiManager) g_uiManager->RequestLoadDocument("hud.rml");
+    }
+}
+
 void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
     (void)window;
-    if (g_show_settings) return;  // settings menu open (cursor freed) -> don't swing the camera
+    if (g_show_settings || g_paused) return;  // settings/pause open (cursor freed) -> don't swing the camera
     if (firstMouse) {
         lastX = (float)xpos;
         lastY = (float)ypos;

@@ -16,6 +16,8 @@ class IAudioManager;
 // --- Callbacks for UI interaction ---
 using WorldCreationCallback = std::function<void(const std::string&, const std::string&, const std::string&)>;
 using LoadWorldCallback = std::function<void(const std::string&)>;
+// Pause-menu actions ("resume" / "quit") routed back to main_client, which owns game state + cursor.
+using PauseActionCallback = std::function<void(const std::string&)>;
 
 // --- Settings bridge ---
 // The UI layer must not depend on luminumbra_common's SystemConfig directly (it lives in
@@ -73,6 +75,7 @@ public:
     void SetWorldCreationCallback(WorldCreationCallback callback) { m_worldCreationCallback = std::move(callback); }
     void SetLoadWorldCallback(LoadWorldCallback callback) { m_loadWorldCallback = std::move(callback); }
     void SetSettingsBridge(SettingsBridge bridge) { m_settingsBridge = std::move(bridge); }
+    void SetPauseActionCallback(PauseActionCallback cb) { m_pauseActionCallback = std::move(cb); }
 
     // Static GLFW callbacks that forward to the active manager instance
     static void KeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);
@@ -105,6 +108,7 @@ private:
     WorldCreationCallback m_worldCreationCallback;
     LoadWorldCallback m_loadWorldCallback;
     SettingsBridge m_settingsBridge;
+    PauseActionCallback m_pauseActionCallback;
     
     std::string m_documentToLoad;
     std::string m_activeDocument;

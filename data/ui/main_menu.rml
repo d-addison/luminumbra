@@ -21,6 +21,9 @@
                 <button id="settings_btn" class="btn btn-secondary">
                     Settings
                 </button>
+                <button id="gallery_btn" class="btn btn-secondary">
+                    Gallery
+                </button>
                 <button id="quit_btn" class="btn btn-accent">
                     Quit
                 </button>
