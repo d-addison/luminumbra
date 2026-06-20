@@ -19,8 +19,12 @@ SsaoPass::~SsaoPass() = default;
 void SsaoPass::init_shaders(const std::filesystem::path& root_path) {
     m_ssao.ssaoShader = std::make_unique<Shader>((root_path / "res/shaders/ssao.vert").string().c_str(), (root_path / "res/shaders/ssao.frag").string().c_str());
     m_ssao.blurShader = std::make_unique<Shader>((root_path / "res/shaders/ssao.vert").string().c_str(), (root_path / "res/shaders/ssao_blur.frag").string().c_str());
+    // Render-optimization (ssao-gtao): GTAO horizon-slice variant, used when
+    // ssao_quality > 0. Same fullscreen-quad vertex stage + same FBO target.
+    m_ssao.gtaoShader = std::make_unique<Shader>((root_path / "res/shaders/ssao.vert").string().c_str(), (root_path / "res/shaders/ssao_gtao.frag").string().c_str());
     PassGl::label_gl_object(GL_PROGRAM, m_ssao.ssaoShader ? m_ssao.ssaoShader->Id() : 0u, "shader.ssao");
     PassGl::label_gl_object(GL_PROGRAM, m_ssao.blurShader ? m_ssao.blurShader->Id() : 0u, "shader.ssao_blur");
+    PassGl::label_gl_object(GL_PROGRAM, m_ssao.gtaoShader ? m_ssao.gtaoShader->Id() : 0u, "shader.ssao_gtao");
 }
 
 void SsaoPass::init_ssao(u32 width, u32 height) {
@@ -81,23 +85,43 @@ void SsaoPass::destroy_ssao() {
 void SsaoPass::reset_shaders() {
     m_ssao.ssaoShader.reset();
     m_ssao.blurShader.reset();
+    m_ssao.gtaoShader.reset();
 }
 
 void SsaoPass::execute_ssao(RenderPipeline& pipeline, const Camera& camera) {
     glBindFramebuffer(GL_FRAMEBUFFER, m_ssao.fbo);
     glClear(GL_COLOR_BUFFER_BIT);
-    m_ssao.ssaoShader->use();
-    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, pipeline.m_gbuffer_pass->gbuffer().position_texture);
-    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, pipeline.m_gbuffer_pass->gbuffer().normal_texture);
-    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_ssao.noiseTexture);
-    m_ssao.ssaoShader->setInt("gPosition", 0);
-    m_ssao.ssaoShader->setInt("gNormalMaterial", 1);
-    m_ssao.ssaoShader->setInt("u_noiseTexture", 2);
-    for (unsigned int i = 0; i < 64; ++i)
-        m_ssao.ssaoShader->setVec3("u_samples[" + std::to_string(i) + "]", m_ssao.kernel[i]);
-    glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)pipeline.m_screen_width / (float)pipeline.m_screen_height, camera.GetNearPlane(), camera.GetFarPlane());
-    m_ssao.ssaoShader->setMat4("u_projection", projection);
-    m_ssao.ssaoShader->setVec2("u_screenSize", glm::vec2(pipeline.m_screen_width, pipeline.m_screen_height));
+    const glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)pipeline.m_screen_width / (float)pipeline.m_screen_height, camera.GetNearPlane(), camera.GetFarPlane());
+    const glm::vec2 screen_size(pipeline.m_screen_width, pipeline.m_screen_height);
+
+    if (pipeline.get_ssao_quality() > 0 && m_ssao.gtaoShader && m_ssao.gtaoShader->IsValid()) {
+        // Render-optimization (ssao-gtao): XeGTAO horizon-slice AO into the same FBO.
+        // 18 spp (3x6) vs the legacy 64; reads the SAME view-space G-buffer.
+        m_ssao.gtaoShader->use();
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, pipeline.m_gbuffer_pass->gbuffer().position_texture);
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, pipeline.m_gbuffer_pass->gbuffer().normal_texture);
+        m_ssao.gtaoShader->setInt("gPosition", 0);
+        m_ssao.gtaoShader->setInt("gNormalMaterial", 1);
+        m_ssao.gtaoShader->setMat4("u_projection", projection);
+        m_ssao.gtaoShader->setVec2("u_screenSize", screen_size);
+        // quality 1 = Low (2x4 = 8 spp), 2 = High (3x6 = 18 spp).
+        const bool high = pipeline.get_ssao_quality() >= 2;
+        m_ssao.gtaoShader->setInt("u_sliceCount", high ? 3 : 2);
+        m_ssao.gtaoShader->setInt("u_stepsPerSlice", high ? 6 : 4);
+        m_ssao.gtaoShader->setFloat("u_radius", 0.8f);
+    } else {
+        m_ssao.ssaoShader->use();
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, pipeline.m_gbuffer_pass->gbuffer().position_texture);
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, pipeline.m_gbuffer_pass->gbuffer().normal_texture);
+        glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_ssao.noiseTexture);
+        m_ssao.ssaoShader->setInt("gPosition", 0);
+        m_ssao.ssaoShader->setInt("gNormalMaterial", 1);
+        m_ssao.ssaoShader->setInt("u_noiseTexture", 2);
+        for (unsigned int i = 0; i < 64; ++i)
+            m_ssao.ssaoShader->setVec3("u_samples[" + std::to_string(i) + "]", m_ssao.kernel[i]);
+        m_ssao.ssaoShader->setMat4("u_projection", projection);
+        m_ssao.ssaoShader->setVec2("u_screenSize", screen_size);
+    }
     glBindVertexArray(pipeline.m_screen_quad_vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     pipeline.m_last_render_pass_stats.ssao_draws++;

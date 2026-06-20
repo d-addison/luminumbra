@@ -1980,6 +1980,12 @@ int main(int argc, char* argv[]) {
     if (const char* cq = std::getenv("LUMIN_CLOUD_QUALITY")) {
         cloud_quality = std::atoi(cq);
     }
+    // Render-optimization (ssao-gtao): opt-in GTAO. 0 = legacy 64-sample SSAO
+    // (byte-identical default); 1 = GTAO High (18 spp). Render-only.
+    int ssao_quality = 0;
+    if (const char* sq = std::getenv("LUMIN_SSAO_QUALITY")) {
+        ssao_quality = std::atoi(sq);
+    }
     if (!renderPipeline.startup(framebufferWidth, framebufferHeight, root_dir)) {
         LUMINUMBRA_CORE_ERROR("FATAL: Render pipeline startup failed.");
         runtime_state_recorder.capture("render_pipeline_startup_failed", &jobSystem, gameSession.get(), &renderPipeline, 0, {});
@@ -2001,6 +2007,9 @@ int main(int argc, char* argv[]) {
     // sky-dome quality once the GL targets exist. No-op at 0 (full).
     if (cloud_quality > 0) {
         renderPipeline.set_cloud_quality(cloud_quality);
+    }
+    if (ssao_quality > 0) {
+        renderPipeline.set_ssao_quality(ssao_quality);
     }
     // T-I4-DR-split-lint: data-driven skinned-mesh texture set. The scenario
     // config resolved the .ltex paths (from the game archetype JSON or a generic

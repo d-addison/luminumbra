@@ -332,6 +332,8 @@ std::vector<ShaderProgramSpec> PipelineProgramSpecs() {
         // Render-optimization (cloud-raymarch-optimization, slice 1): the depth-masked
         // upsample compositing the reduced-res sky dome into the lighting FBO.
         {"cloud_composite", "ssao.vert", "cloud_composite.frag"},
+        // Render-optimization (ssao-gtao): XeGTAO horizon-slice AO variant.
+        {"ssao_gtao", "ssao.vert", "ssao_gtao.frag"},
     };
 }
 

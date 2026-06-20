@@ -106,6 +106,10 @@ struct SSAOData {
     std::vector<glm::vec3> kernel;
     std::unique_ptr<Shader> ssaoShader;
     std::unique_ptr<Shader> blurShader;
+    // Render-optimization (ssao-gtao): XeGTAO horizon-slice AO, selected when
+    // ssao_quality > 0. Renders into the same FBOs as the legacy SSAO so the blur
+    // + lighting AO tap are unchanged. Null/quality 0 -> legacy ssaoShader path.
+    std::unique_ptr<Shader> gtaoShader;
 };
 
 // Engine-generic runtime weather state (T-I2-17b). Default Off: the weather
@@ -609,6 +613,14 @@ public:
     void set_cloud_quality(int quality);
     int get_cloud_quality() const { return m_cloud_quality; }
 
+    // Render-optimization (ssao-gtao): AO algorithm/quality. 0 = legacy 64-sample
+    // hemisphere SSAO (byte-identical default); 1 = GTAO Low (2 slices x 4 = 8 spp);
+    // 2 = GTAO High (3 slices x 6 = 18 spp). RENDER-ONLY (no world_hash impact),
+    // opt-in. Same FBOs/blur, so no reallocation; safe any time. Driven by the
+    // client from LUMIN_SSAO_QUALITY.
+    void set_ssao_quality(int quality) { m_ssao_quality = (quality < 0) ? 0 : (quality > 2 ? 2 : quality); }
+    int get_ssao_quality() const { return m_ssao_quality; }
+
     // T-I5a-5 (B3): render-only lightning control. set_lightning_state pushes the
     // full-scene light pulse + bolt polyline for the current frame; the LightingPass
     // injects the pulse and rasterizes the bolt. Pass an inactive state (default) to
@@ -874,6 +886,7 @@ private:
     // at 1/2 or 1/4 per axis, then m_cloud_composite_shader upsamples + depth-masks
     // it into the lighting FBO. Render-only; never hashed.
     int m_cloud_quality = 0;
+    int m_ssao_quality = 0; // render-optimization (ssao-gtao): 0 legacy SSAO, 1 GTAO High
     struct HalfResCloudTarget {
         u32 fbo = 0;
         u32 color_texture = 0; // RGBA16F reduced-res sky dome
