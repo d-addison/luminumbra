@@ -1084,7 +1084,24 @@ public:
     u32 static_model_texture_array() const { return m_staticModelTextureArray; }
     const StaticModelTex* static_model_tex(const std::string& mesh_path) const {
         auto it = m_staticModelTextures.find(mesh_path);
-        return it == m_staticModelTextures.end() ? nullptr : &it->second;
+        if (it != m_staticModelTextures.end()) return &it->second;
+        // VAST-FOREST: the procedural tree palette (procgen://tree_N_{leaf,bark}[.lodN])
+        // has no JSON entry, so its leaf/bark submeshes fell through to the world
+        // triplanar GRASS texture with NO alpha cutout -> flat green solid blobs.
+        // Reuse the baked tree-part textures by part suffix: leaves -> the alpha-tested
+        // leaf plate (cutout foliage cards), bark -> the branch plate. Render-only.
+        if (mesh_path.rfind("procgen://tree", 0) == 0) {
+            const char* baked = nullptr;
+            if (mesh_path.find("_leaf") != std::string::npos)
+                baked = "data/models/trees/tree_small_02_leaves.lmesh";
+            else if (mesh_path.find("_bark") != std::string::npos)
+                baked = "data/models/trees/tree_small_02_branches.lmesh";
+            if (baked) {
+                auto b = m_staticModelTextures.find(baked);
+                if (b != m_staticModelTextures.end()) return &b->second;
+            }
+        }
+        return nullptr;
     }
 private:
 private:
