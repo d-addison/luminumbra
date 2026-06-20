@@ -95,6 +95,7 @@ luminumbra::core::SystemConfig g_systemConfig;
 // g_rebindCaptureAction >= 0 the next key press is captured as that action's binding.
 bool g_show_settings = false;
 bool g_paused = false;  // T032: in-game pause overlay active
+bool g_show_gpu_profiler = false;  // F3: live per-pass GPU profiler overlay
 int g_rebindCaptureAction = -1;
 // host_timescale-style engine time control (Source/GMod-like). 1.0 = real time, 0 = paused,
 // <1 slow-mo, >1 fast-forward. Render/client playback rate: scales how many FIXED 30 Hz sim
@@ -5862,6 +5863,53 @@ int main(int argc, char* argv[]) {
                 }
                 ImGui::End();
             }
+            // Live GPU profiler (F3): per-pass GPU-ms + draw/instance counts read from the render
+            // pipeline's GL_TIMESTAMP timer ring (render-side only; never hashed). The first real
+            // interactive readout for the engine optimization pass.
+            if (g_imgui_enabled && g_show_gpu_profiler && currentState == GameState::IN_GAME &&
+                g_timelapse_frames == 0) {
+                const auto& gp = renderPipeline.get_last_render_pass_stats();
+                ImGui::SetNextWindowPos(ImVec2(10.0f, 120.0f), ImGuiCond_FirstUseEver);
+                ImGui::SetNextWindowBgAlpha(0.85f);
+                if (ImGui::Begin("GPU Profiler (F3)", &g_show_gpu_profiler, ImGuiWindowFlags_AlwaysAutoResize)) {
+                    const double total_ms =
+                        gp.shadow_gpu_ms + gp.gbuffer_gpu_ms + gp.ssao_gpu_ms + gp.ssao_blur_gpu_ms +
+                        gp.lighting_gpu_ms + gp.water_gpu_ms + gp.skybox_gpu_ms + gp.particle_gpu_ms +
+                        gp.foliage_gpu_ms + gp.aerial_gpu_ms + gp.final_blit_gpu_ms;
+                    if (!gp.gpu_timers_supported) {
+                        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "GPU timers unsupported on this context");
+                    }
+                    const ImVec4 over(1.0f, 0.45f, 0.45f, 1.0f);
+                    const ImVec4 okc(0.70f, 0.85f, 0.70f, 1.0f);
+                    ImGui::TextColored(total_ms > 3.333 ? over : okc,
+                                       "GPU frame total: %6.3f ms   (budget 3.333 ms @ 300fps)", total_ms);
+                    const double ui_ms = g_uiManager ? g_uiManager->GetLastUiFrameMs() : 0.0;
+                    ImGui::Text("UI submit (CPU): %6.3f ms", ui_ms);
+                    ImGui::Separator();
+                    auto row = [&](const char* name, double ms) {
+                        ImGui::TextColored(ms > 1.0 ? over : okc, "  %-11s %7.3f ms", name, ms);
+                    };
+                    row("gbuffer",   gp.gbuffer_gpu_ms);
+                    row("shadow",    gp.shadow_gpu_ms);
+                    row("lighting",  gp.lighting_gpu_ms);
+                    row("foliage",   gp.foliage_gpu_ms);
+                    row("particle",  gp.particle_gpu_ms);
+                    row("water",     gp.water_gpu_ms);
+                    row("ssao",      gp.ssao_gpu_ms + gp.ssao_blur_gpu_ms);
+                    row("aerial",    gp.aerial_gpu_ms);
+                    row("skybox",    gp.skybox_gpu_ms);
+                    row("final_blit",gp.final_blit_gpu_ms);
+                    ImGui::Separator();
+                    ImGui::Text("terrain : %5zu draws  %5zu chunks  %7zu tris",
+                                gp.terrain_draws, gp.terrain_visible_chunks, gp.terrain_indices_drawn / 3);
+                    ImGui::Text("far-LOD : %5zu draws  %7zu tris", gp.far_region_draws, gp.far_indices_drawn / 3);
+                    ImGui::Text("foliage : %5zu draws  %7zu instances", gp.foliage_draws, gp.foliage_instances_drawn);
+                    ImGui::Text("particle: %5zu draws  %7zu instances", gp.particle_draws, gp.particles_drawn);
+                    ImGui::Text("shadow  : %5zu draws", gp.shadow_draws);
+                    ImGui::Text("water   : %5zu draws", gp.water_draws);
+                }
+                ImGui::End();
+            }
             // Settings menu (F8 to toggle; frees the cursor). Render-only; user.* is never
             // hashed. Changes apply live and "Save" persists them to the per-user overlay.
             // The polished RML settings screen (settings.rml) is the follow-on (task #12).
@@ -6166,6 +6214,11 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
     // Escape: toggle the in-game pause overlay (only in a world, and not while the F8 panel is up).
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS && g_playerController && !g_show_settings) {
         SetGamePaused(window, !g_paused);
+        return;
+    }
+    // F3: toggle the live per-pass GPU profiler overlay.
+    if (key == GLFW_KEY_F3 && action == GLFW_PRESS) {
+        g_show_gpu_profiler = !g_show_gpu_profiler;
         return;
     }
     // F8: toggle the settings menu and free/restore the cursor so the panel is usable.
