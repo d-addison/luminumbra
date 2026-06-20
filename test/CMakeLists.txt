@@ -375,6 +375,30 @@ target_link_libraries(initial_world_loading_perf_test PRIVATE
     luminumbra_common
 )
 
+# perf-lane-and-ecology-tick (KDD-6 / T011): the EcologyTickPerf gate exe. A
+# standalone target (NOT folded into common_tests) so the validator gate can run
+# JUST this measurement (300 ticks x 3 roster sizes) without dragging the whole
+# common test suite, and so it can be built in release for representative numbers.
+# Links luminumbra_common (PUBLIC entt + nlohmann_json) + gtest; no world/GL.
+add_executable(ecology_tick_perf_test
+    sim/ecology_tick_perf_test.cpp
+)
+
+target_compile_definitions(ecology_tick_perf_test PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+    LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts"
+)
+
+target_include_directories(ecology_tick_perf_test PRIVATE
+    ../src
+    ../src/luminumbra_common
+)
+
+target_link_libraries(ecology_tick_perf_test PRIVATE
+    gtest_main
+    luminumbra_common
+)
+
 add_executable(runtime_world_visual_validation_test
     performance/runtime_world_visual_validation_test.cpp
 )

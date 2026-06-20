@@ -17,6 +17,23 @@
 #include "entt/entt.hpp"
 #include "nlohmann/json.hpp"
 
+#include "ai/CreatureBrainSystem.h"
+#include "ai/CreatureReproductionSystem.h"
+#include "ai/DecompositionSystem.h"
+#include "ai/HerdAlarmSystem.h"
+#include "ai/LifespanSystem.h"
+#include "ai/MigrationSystem.h"
+#include "ai/PredatorPackSystem.h"
+#include "ai/SteeringConsumer.h"
+#include "ai/TerritorySystem.h"
+#include "components/AlarmComponents.h"
+#include "components/CreatureComponents.h"
+#include "components/DecayComponents.h"
+#include "components/MigratoryComponents.h"
+#include "components/MortalComponents.h"
+#include "components/PackHunterComponents.h"
+#include "components/TerritoryComponents.h"
+#include "core/DeterministicMath.h"
 #include "core/JobSystem.h"
 #include "systems/PhysicsSystem.h"
 #include "systems/SHIELD_WorldSystem.h"
@@ -294,6 +311,58 @@ void WriteJson(const fs::path& path, const nlohmann::json& data) {
     std::ofstream output(path);
     ASSERT_TRUE(output) << path.string();
     output << std::setw(2) << data << "\n";
+}
+
+// perf-lane-and-ecology-tick (KDD-4): the `ecology` benchmark scenario. Spawns a
+// fixed kinematic creature roster (same component set as the gate-populated-world
+// -replay roster, laid out by phyllotaxis) and ticks the GameSession-slot-order
+// ecology stack once per benchmark frame, so the lane's frame-ms floor includes a
+// representative live-ecology cost. This is the FRAME-MS scenario; the dedicated
+// N-scaling gate (median+p99 at N in {256,1k,4k}) is ecology_tick_perf_test.
+namespace EcoComp = ::Luminumbra::Components;
+namespace EcoMath = ::Luminumbra::DeterministicMath;
+
+void SpawnEcologyBenchmarkRoster(entt::registry& r, int n) {
+    constexpr float kGoldenAngle = 2.39996323f;  // 137.5 deg, radians
+    constexpr float kSpacing = 5.0f;
+    int prey_idx = 0;
+    for (int i = 0; i < n; ++i) {
+        const float angle = static_cast<float>(i) * kGoldenAngle;
+        const float radius = kSpacing * EcoMath::Sqrt(static_cast<float>(i));
+        auto e = r.create();
+        auto& tf = r.emplace<EcoComp::TransformComponent>(e);
+        tf.position = Vec3(radius * EcoMath::Cos(angle), 0.0f, radius * EcoMath::Sin(angle));
+        auto& cr = r.emplace<EcoComp::CreatureComponent>(e);
+        if (i % 9 == 0) {
+            cr.is_predator = true; cr.hunger = 0.9f; cr.move_speed = 4.2f;
+            r.emplace<EcoComp::PackHunterComponent>(e);
+            r.emplace<EcoComp::MortalComponent>(e).lifespan_ticks = 1000000u;
+        } else {
+            cr.is_predator = false; cr.hunger = 0.05f; cr.stamina = 1.0f; cr.move_speed = 3.0f;
+            auto& gn = r.emplace<EcoComp::CreatureGenomeComponent>(e);
+            gn.female = (prey_idx++ % 2 == 0); gn.age_ticks = 100u;
+            r.emplace<EcoComp::AlarmComponent>(e);
+            r.emplace<EcoComp::MortalComponent>(e).lifespan_ticks = 1000000u;
+            r.emplace<EcoComp::DecayComponent>(e).decay_duration = 90u;
+            r.emplace<EcoComp::MigratoryComponent>(e);
+            r.emplace<EcoComp::TerritoryComponent>(e);
+            r.emplace<EcoComp::TerritoryBiasComponent>(e);
+        }
+    }
+}
+
+void EcologyBenchmarkTick(entt::registry& r, std::uint64_t tick) {
+    constexpr float dt = 1.0f / 30.0f;
+    luminumbra::ai::RunCreatureBrainSystemOnTick(r, dt);
+    luminumbra::ai::RunMateSeekingOnTick(r);
+    luminumbra::ai::RunSteeringConsumerOnTick(r);
+    luminumbra::ai::RunMatingResolveOnTick(r, tick);
+    luminumbra::ai::RunHerdAlarmOnTick(r, dt);
+    luminumbra::ai::RunLifespanOnTick(r, tick);
+    luminumbra::ai::RunDecompositionOnTick(r, tick);
+    luminumbra::ai::RunPredatorPackOnTick(r, tick);
+    luminumbra::ai::RunMigrationOnTick(r, 0.25f);
+    luminumbra::ai::RunTerritoryOnTick(r, tick);
 }
 
 } // namespace
@@ -582,6 +651,8 @@ TEST(InitialWorldLoadingPerfTest, PerformanceFrameworkBenchmarkScenariosWriteBud
         "idle_horizon",
         "pan_camera",
         "streaming_walk",
+        "forest",
+        "ecology",
         "chunk_churn",
         "shader_warmup",
         "shutdown",
@@ -723,6 +794,71 @@ TEST(InitialWorldLoadingPerfTest, PerformanceFrameworkBenchmarkScenariosWriteBud
         const float z = 8.0f + std::sin(angle) * radius;
         return Vec3(x, world.GetTerrainHeightAt(x, z) + 1.95f, z);
     });
+
+    // perf-lane-and-ecology-tick (KDD-4/KDD-5, FR-001, AC-004): the `forest`
+    // scenario. The headless perf test has NO GL context, so it cannot run the
+    // client foliage instancer or take a GPU timer query -- those are DEFERRED to
+    // far-field-source-unification FR-003 (the SHARED forest harness). What this
+    // lane CAN produce honestly is the CPU-side instance/draw/triangle counts that
+    // are known pre-upload: a pinned 16k-tree forest load. We emit those counts +
+    // a frame-ms sample from a dense streaming pass, and mark the scenario
+    // verified:false ("renders, perf-unverified") until a blessed GPU floor covers
+    // it. The counts are deterministic constants here (the canonical 16k-tree
+    // forest fixture), NOT a live GL gather, by design of the headless split.
+    constexpr std::size_t kForestInstanceCount = 16000u;
+    // Canonical billboard/low-LOD tree impostor draw batching: instanced, so draw
+    // calls are the LOD-bucket count, not per-instance. ~4 LOD buckets for the
+    // far-field forest (near mesh / mid impostor / far billboard / shadow pass).
+    constexpr std::size_t kForestDrawCalls = 4u;
+    // Triangle budget: canonical mid-LOD tree ~ 320 tris; the lane records the
+    // CPU-side upper bound so far-field's GPU gate can compare against it.
+    constexpr std::size_t kForestTrisPerInstance = 320u;
+    const std::size_t forest_before = scenario_results.size();
+    run_update_scenario("forest", 16, [&](int frame) {
+        // A dense walk through a forested radius to load the foliage-bearing
+        // chunks; positions are deterministic (no RNG).
+        const float angle = static_cast<float>(frame) * 0.4f;
+        const float radius = 40.0f;
+        const float x = 8.0f + std::cos(angle) * radius;
+        const float z = 8.0f + std::sin(angle) * radius;
+        return Vec3(x, world.GetTerrainHeightAt(x, z) + 1.95f, z);
+    });
+    {
+        nlohmann::json& forest_entry = scenario_results[forest_before];
+        forest_entry["instance_count"] = kForestInstanceCount;
+        forest_entry["draw_calls"] = kForestDrawCalls;
+        forest_entry["foliage_tris"] = kForestInstanceCount * kForestTrisPerInstance;
+        // AC-004: the 16k forest "renders, perf-unverified" until a blessed floor
+        // (with a GPU timer query, owned by far-field-source-unification FR-003)
+        // certifies it.
+        forest_entry["verified"] = false;
+        forest_entry["verification_note"] =
+            "renders, perf-unverified: CPU-side instance/draw/tri counts only; "
+            "GPU frame-ms timer query deferred to far-field-source-unification FR-003";
+    }
+
+    // perf-lane-and-ecology-tick (KDD-4/KDD-6): the `ecology` frame-ms scenario.
+    // Ticks a fixed kinematic creature roster through the GameSession-slot-order
+    // ecology stack once per benchmark frame so the floor lane includes live
+    // ecology cost. A modest fixed N keeps the benchmark fast; the N-scaling
+    // (256/1k/4k) median+p99 gate is the dedicated ecology_tick_perf_test exe.
+    {
+        constexpr int kEcologyBenchmarkRoster = 512;
+        entt::registry ecology_registry;
+        SpawnEcologyBenchmarkRoster(ecology_registry, kEcologyBenchmarkRoster);
+        std::vector<double> ecology_samples_ms;
+        constexpr int kEcologyFrames = 20;
+        ecology_samples_ms.reserve(kEcologyFrames);
+        for (int frame = 0; frame < kEcologyFrames; ++frame) {
+            Timer ecology_timer;
+            EcologyBenchmarkTick(ecology_registry, static_cast<std::uint64_t>(frame));
+            ecology_samples_ms.push_back(ecology_timer.elapsed_ms());
+        }
+        nlohmann::json ecology_entry = scenario_result(
+            "ecology", ecology_samples_ms, world.get_runtime_chunk_stats(), 0u, 0u, 0u, 0u);
+        ecology_entry["creature_count"] = kEcologyBenchmarkRoster;
+        scenario_results.push_back(ecology_entry);
+    }
 
     run_update_scenario("chunk_churn", 12, [&](int frame) {
         const float x = (frame % 2 == 0) ? 96.0f : -96.0f;
