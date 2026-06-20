@@ -10,12 +10,13 @@
         <div class="pause-overlay">
             <div class="pause-panel">
                 <h1 class="pause-heading">paused</h1>
-                <p class="subtitle">the world waits</p>
+                <div class="pause-ornament">◆</div>
 
                 <div id="nav">
-                    <button id="resume_btn" class="btn">Resume</button>
-                    <button id="settings_btn" class="btn">Settings</button>
-                    <button id="quit_menu_btn" class="btn btn-accent">Quit to Menu</button>
+                    <button id="resume_btn" class="btn btn-selected">resume</button>
+                    <button id="settings_btn" class="btn">settings</button>
+                    <button id="gallery_btn" class="btn">gallery</button>
+                    <button id="quit_menu_btn" class="btn">quit to menu</button>
                 </div>
             </div>
         </div>

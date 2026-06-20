@@ -25,32 +25,42 @@
             <div class="vf-reticle"></div>
         </div>
 
-        <!-- Bottom readout row: aperture, focus, EV, ISO + shutter affordance. -->
+        <!-- Bottom EXIF strip — spread evenly across the frame. -->
         <div class="photo-readout">
             <div class="readout-group">
                 <div class="readout-cell">
                     <span class="readout-label">aperture</span>
-                    <span class="readout-value" id="ro_aperture">f/2.8</span>
+                    <span class="readout-value" id="ro_aperture">f/1.8</span>
                 </div>
                 <div class="readout-cell">
-                    <span class="readout-label">focus</span>
-                    <span class="readout-value" id="ro_focus">3.4m</span>
-                </div>
-                <div class="readout-cell">
-                    <span class="readout-label">ev</span>
-                    <span class="readout-value">+0.3</span>
+                    <span class="readout-label">shutter</span>
+                    <span class="readout-value">25.0s</span>
                 </div>
                 <div class="readout-cell">
                     <span class="readout-label">iso</span>
-                    <span class="readout-value">200</span>
+                    <span class="readout-value">100</span>
+                </div>
+                <div class="readout-cell">
+                    <span class="readout-label">exposure</span>
+                    <span class="readout-value">0.0</span>
+                </div>
+                <div class="readout-cell">
+                    <span class="readout-label">focal</span>
+                    <span class="readout-value">35mm</span>
+                </div>
+                <div class="readout-cell">
+                    <span class="readout-label">white bal</span>
+                    <span class="readout-value">5600k</span>
+                </div>
+                <div class="readout-cell">
+                    <span class="readout-label">format</span>
+                    <span class="readout-value">raw</span>
                 </div>
             </div>
 
-            <!-- Shutter affordance — a calm ring, not a loud button. -->
+            <!-- Shutter minimized — reference has no prominent shutter button. -->
             <div class="shutter">
-                <div class="shutter-ring">
-                    <div class="shutter-core"></div>
-                </div>
+                <div class="shutter-ring"></div>
                 <span class="shutter-hint">space</span>
             </div>
         </div>

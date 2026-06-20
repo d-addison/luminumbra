@@ -8,30 +8,31 @@
         <!-- Main title with quantum effect -->
         <div class="container">
             <h1>luminumbra</h1>
-            <p class="subtitle">a world to photograph</p>
-            
+            <p class="subtitle">a novel in photographs</p>
+            <div class="title-divider"></div>
+
             <!-- Main navigation -->
             <div id="nav">
-                <button id="new_world_btn" class="btn btn-primary">
+                <button id="new_world_btn" class="btn">
                     New World
                 </button>
-                <button id="load_world_btn" class="btn btn-primary">
-                    Load World
+                <button id="load_world_btn" class="btn">
+                    Continue
                 </button>
-                <button id="settings_btn" class="btn btn-secondary">
-                    Settings
-                </button>
-                <button id="gallery_btn" class="btn btn-secondary">
+                <button id="gallery_btn" class="btn">
                     Gallery
                 </button>
-                <button id="quit_btn" class="btn btn-accent">
+                <button id="settings_btn" class="btn">
+                    Settings
+                </button>
+                <button id="quit_btn" class="btn">
                     Quit
                 </button>
             </div>
-            
+
             <!-- Version info -->
             <div class="version-info">
-                <p class="text-sm text-center">Version 0.1.0 Alpha | Build 2025.08</p>
+                <p class="text-sm text-center">v0.1.0 alpha</p>
             </div>
         </div>
         

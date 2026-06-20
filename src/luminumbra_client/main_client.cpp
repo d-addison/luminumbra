@@ -151,10 +151,12 @@ float g_scene_cloud_shadow_strength = 0.0f;
 // backdrop) and exit. Drives the reference-driven compose->render->compare loop for the UI,
 // mirroring --scene-config for the 3D scene. Output is PPM (converted to PNG by the harness
 // script for critique). Optional --ui-fixtures seeds deterministic list/gallery/settings data.
-std::string g_ui_screenshot_screen;          // "" = inactive; else e.g. "main_menu"
-std::filesystem::path g_ui_screenshot_shot;  // full screenshot path (.ppm)
+std::string g_ui_screenshot_screen;          // "" = inactive; else the CURRENT screen being captured
+std::vector<std::string> g_ui_screens;       // batch list (one window pop captures them all in sequence)
+std::size_t g_ui_screen_index = 0;           // which screen in g_ui_screens is being captured
+std::filesystem::path g_ui_screenshot_dir;   // output dir; each screen -> ui-<screen>.ppm
 bool g_ui_fixtures = false;                   // seed deterministic UI fixture data
-int g_ui_screenshot_settle = 0;              // frames waited before capture
+int g_ui_screenshot_settle = 0;              // frames waited before capture of the current screen
 // F4 — live scenic menu backdrop: a golden-hour world rendered behind the menus (matching the
 // references). Stood up at boot while staying in MAIN_MENU; the menu render branch draws it
 // under the transparent UI with a slow auto-orbit. Replaced cleanly when a real world loads.
@@ -1962,17 +1964,22 @@ int main(int argc, char* argv[]) {
     // UI screen for the fidelity gate. The render site (menu branch) loads the document, settles,
     // reads the back buffer and exits. Screen names map to the data/ui/*.rml documents.
     if (const std::string uss = GetCommandLineOption(argc, argv, "--ui-screenshot", ""); !uss.empty()) {
-        g_ui_screenshot_screen = uss;
+        // Comma-separated list -> capture every screen in ONE window session (batch), minimising
+        // display disruption. Each writes <dir>/ui-<screen>.ppm.
+        for (std::size_t start = 0; start <= uss.size();) {
+            const std::size_t comma = uss.find(',', start);
+            const std::string name = uss.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+            if (!name.empty()) g_ui_screens.push_back(name);
+            if (comma == std::string::npos) break;
+            start = comma + 1;
+        }
         g_ui_fixtures = HasCommandLineFlag(argc, argv, "--ui-fixtures");
-        const std::string out = GetCommandLineOption(argc, argv, "--ui-screenshot-out",
-                                                     std::string("references/compare/ui-") + uss + ".ppm");
-        std::filesystem::path outPath(out);
-        outPath.replace_extension(".ppm"); // WritePixelBufferPpm writes PPM
-        g_ui_screenshot_shot = outPath;
+        g_ui_screenshot_dir = GetCommandLineOption(argc, argv, "--ui-screenshot-dir", "references/compare");
         std::error_code _ui_ec;
-        if (outPath.has_parent_path()) std::filesystem::create_directories(outPath.parent_path(), _ui_ec);
-        LUMINUMBRA_CORE_INFO("UI screenshot mode: screen='{}' fixtures={} -> {}",
-                             g_ui_screenshot_screen, g_ui_fixtures, g_ui_screenshot_shot.string());
+        std::filesystem::create_directories(g_ui_screenshot_dir, _ui_ec);
+        if (!g_ui_screens.empty()) g_ui_screenshot_screen = g_ui_screens.front();
+        LUMINUMBRA_CORE_INFO("UI screenshot mode: {} screen(s), fixtures={} -> {}/ui-*.ppm",
+                             g_ui_screens.size(), g_ui_fixtures, g_ui_screenshot_dir.string());
     }
 
     // --timelapse capture mode (docs/timelapse.md). Single-player; pair with
@@ -2492,23 +2499,33 @@ int main(int argc, char* argv[]) {
             gameStateManager.GetCurrentState() == GameState::MAIN_MENU;
         if (want_backdrop) {
             renderPipeline.prepare_world_swap();
-            if (gameSession->CreateWorld("Menu Vista", "lumina-menu", "mountains")) {
+            // Reproduce the blessed golden-hour "dusk" scene (references/scenes/dusk.json) behind
+            // the menu: same default seed + mountains preset, the same proven Y=58 / yaw~95 /
+            // pitch -2 / fov 62 vantage over the lit valley, dusk tod, and cloud cover. This is a
+            // known-good lit composition, not a guess.
+            if (gameSession->CreateWorld("Menu Vista", "424242", "mountains")) {
                 if (auto* ws = gameSession->GetWorldSystem()) {
                     renderPipeline.SetupGPUSDFIntegration(*ws);
                     gameSession->LoadWorldState();
+                    // Surface-ready around the FIXED vantage (8,*,8), not the spawn point, so the
+                    // framed valley is streamed in before the first menu frame.
                     if (gameSession->GetPhysicsSystem()) {
-                        ws->EnsureSurfaceReadyNear(gameSession->GetMetadata().spawnPoint,
-                                                   gameSession->GetPhysicsSystem(), 4, 2);
+                        ws->EnsureSurfaceReadyNear(Luminumbra::Vec3(8.0f, 58.0f, 8.0f),
+                                                   gameSession->GetPhysicsSystem(), 6, 2);
                     }
-                    const auto sp = gameSession->GetMetadata().spawnPoint;
-                    // Elevated hilltop vantage looking slightly down at the valley, like the refs.
                     g_camera = std::make_unique<Luminumbra::Rendering::Camera>(
-                        glm::vec3(sp.x, sp.y + 45.0f, sp.z), glm::vec3(0.0f, 1.0f, 0.0f),
-                        /*yaw*/ 30.0f, /*pitch*/ -10.0f);
-                    g_camera->Zoom = 55.0f;  // scenic FOV
+                        glm::vec3(8.0f, 58.0f, 8.0f), glm::vec3(0.0f, 1.0f, 0.0f),
+                        /*yaw*/ 95.0f, /*pitch*/ -2.0f);
+                    g_camera->Zoom = 62.0f;  // scenic FOV (matches dusk.json)
+                    // Soft cloud cover for the warm dusk sky.
+                    Luminumbra::Rendering::CloudRenderState cs;
+                    cs.enabled = true;
+                    cs.coverage_amount = 0.6f;
+                    cs.plane_height = 900.0f;
+                    renderPipeline.set_cloud_state(cs);
                     g_world_render_data_initialized = true;
                     g_menu_backdrop_active = true;
-                    LUMINUMBRA_CORE_INFO("Menu backdrop world ready (live golden-hour vista).");
+                    LUMINUMBRA_CORE_INFO("Menu backdrop world ready (blessed golden-hour dusk vista).");
                 }
             }
         }
@@ -6151,19 +6168,22 @@ int main(int argc, char* argv[]) {
                 // golden hour. The menu UI bodies are transparent (game_theme.rcss) so the world
                 // shows through. render_frame draws to the back buffer BEFORE the UI pass.
                 if (g_menu_backdrop_active && g_camera && gameSession && gameSession->GetWorldSystem()) {
-                    g_menu_backdrop_yaw += deltaTime * 1.4f;  // gentle drift (deg/s)
-                    g_camera->Yaw = g_menu_backdrop_yaw;
+                    // Gentle yaw oscillation around the lit-valley heading (95°) for a living, slow
+                    // parallax that never rotates away into dark/back-lit terrain.
+                    g_menu_backdrop_yaw += deltaTime;  // phase accumulator (seconds)
+                    g_camera->Yaw = 95.0f + 6.0f * std::sin(g_menu_backdrop_yaw * 0.12f);
                     g_camera->updateCameraVectors();
-                    renderPipeline.set_time_of_day(0.23f);    // warm low sun (golden hour)
+                    renderPipeline.set_time_of_day(0.24f);    // dusk golden hour (matches dusk.json)
                     renderPipeline.render_frame(gameSession->GetRegistry(), *gameSession->GetWorldSystem(),
                                                 *g_camera, deltaTime, wireframe_mode);
                 }
                 if (g_uiManager) {
                     g_uiManager->Render();
                 }
-                // --ui-screenshot: settle layout/fonts/textures, then read the back buffer
-                // (now holding the UI over the menu backdrop) and exit. Mirrors --scene-config.
-                if (!g_ui_screenshot_screen.empty()) {
+                // --ui-screenshot: settle layout/fonts/textures, capture the back buffer (now
+                // holding the UI over the menu backdrop), then advance to the next batched screen
+                // (one window session captures them all). Mirrors --scene-config.
+                if (!g_ui_screens.empty() && g_ui_screen_index < g_ui_screens.size()) {
                     if (g_ui_screenshot_settle < 30) {
                         ++g_ui_screenshot_settle;
                     } else {
@@ -6174,10 +6194,20 @@ int main(int argc, char* argv[]) {
                             glReadBuffer(GL_BACK);
                             glPixelStorei(GL_PACK_ALIGNMENT, 1);
                             glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
-                            WritePixelBufferPpm(g_ui_screenshot_shot, vw, vh, px);
-                            LUMINUMBRA_CORE_INFO("UI screenshot written -> {} ({}x{})", g_ui_screenshot_shot.string(), vw, vh);
+                            const std::filesystem::path shot =
+                                g_ui_screenshot_dir / ("ui-" + g_ui_screens[g_ui_screen_index] + ".ppm");
+                            WritePixelBufferPpm(shot, vw, vh, px);
+                            LUMINUMBRA_CORE_INFO("UI screenshot written -> {} ({}x{})", shot.string(), vw, vh);
                         }
-                        glfwSetWindowShouldClose(window, GLFW_TRUE);
+                        // Advance to the next screen, or finish.
+                        ++g_ui_screen_index;
+                        if (g_ui_screen_index < g_ui_screens.size()) {
+                            g_ui_screenshot_screen = g_ui_screens[g_ui_screen_index];
+                            g_ui_screenshot_settle = 0;
+                            if (g_uiManager) g_uiManager->RequestLoadDocument(g_ui_screens[g_ui_screen_index] + ".rml");
+                        } else {
+                            glfwSetWindowShouldClose(window, GLFW_TRUE);
+                        }
                     }
                 }
             }

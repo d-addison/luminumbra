@@ -6,58 +6,48 @@
         <link type="text/css" href="pages.rcss" />
     </head>
     <body id="gallery">
+        <a id="back_btn" class="gallery-back">‹</a>
+
         <div class="container gallery-container">
             <h1 class="gallery-heading">gallery</h1>
-            <p class="subtitle">moments you kept</p>
+            <div class="gallery-ornament"></div>
+            <p class="subtitle gallery-subtitle">moments you kept</p>
 
-            <!-- Flexbox grid of photo thumbnail cards (placeholder tiles). -->
+            <!-- Tight 4-up photo wall — image + shadow only, no frames/captions. -->
             <div class="gallery-grid">
                 <div class="photo-card">
                     <div class="photo-thumb"></div>
-                    <div class="photo-meta">
-                        <span class="photo-title">dawn over the basin</span>
-                        <span class="photo-stars">★★★★☆</span>
-                    </div>
                 </div>
                 <div class="photo-card">
                     <div class="photo-thumb"></div>
-                    <div class="photo-meta">
-                        <span class="photo-title">sage hollow</span>
-                        <span class="photo-stars">★★★☆☆</span>
-                    </div>
                 </div>
                 <div class="photo-card">
                     <div class="photo-thumb"></div>
-                    <div class="photo-meta">
-                        <span class="photo-title">low fog, still water</span>
-                        <span class="photo-stars">★★★★★</span>
-                    </div>
+                    <span class="photo-fav">★</span>
                 </div>
                 <div class="photo-card">
                     <div class="photo-thumb"></div>
-                    <div class="photo-meta">
-                        <span class="photo-title">last light, ridge</span>
-                        <span class="photo-stars">★★☆☆☆</span>
-                    </div>
                 </div>
                 <div class="photo-card">
                     <div class="photo-thumb"></div>
-                    <div class="photo-meta">
-                        <span class="photo-title">wanderer at rest</span>
-                        <span class="photo-stars">★★★★☆</span>
-                    </div>
                 </div>
                 <div class="photo-card">
                     <div class="photo-thumb"></div>
-                    <div class="photo-meta">
-                        <span class="photo-title">amber canopy</span>
-                        <span class="photo-stars">★★★☆☆</span>
-                    </div>
+                </div>
+                <div class="photo-card">
+                    <div class="photo-thumb"></div>
+                </div>
+                <div class="photo-card">
+                    <div class="photo-thumb"></div>
                 </div>
             </div>
 
-            <div class="button-container">
-                <button id="back_btn" class="btn btn-secondary">Back</button>
+            <div class="gallery-pager">
+                <span class="pager-arrow">‹</span>
+                <span class="pager-dot pager-dot-active"></span>
+                <span class="pager-dot"></span>
+                <span class="pager-dot"></span>
+                <span class="pager-arrow">›</span>
             </div>
         </div>
     </body>

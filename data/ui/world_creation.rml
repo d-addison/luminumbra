@@ -5,44 +5,46 @@
         <link type="text/css" href="game_theme.rcss" />
     </head>
     <body id="world_creation" class="fade-in">
-        <div class="container">
-            <h1>Create New World</h1>
-            
+        <div class="creation-panel">
+            <h1>create world</h1>
+            <div class="title-ornament">&#9670;</div>
+
             <!-- World creation form -->
             <div class="form-container">
                 <form id="world_creation_form">
                     <!-- World name input -->
                     <div class="form-group">
-                        <label for="world_name">World Name</label>
-                        <input type="text" 
-                               id="world_name" 
-                               name="world_name" 
-                               placeholder="Enter world name..." 
+                        <label for="world_name">world name</label>
+                        <input type="text"
+                               id="world_name"
+                               name="world_name"
+                               placeholder="Enter world name..."
                                value="New World"
-                               class="form-control" 
+                               class="form-control"
                                required />
-                        <div class="field-help">
-                            Choose a unique name for your world
-                        </div>
                     </div>
-                    
+
                     <!-- World seed input -->
                     <div class="form-group">
-                        <label for="world_seed">Seed (Optional)</label>
-                        <input type="text" 
-                               id="world_seed" 
-                               name="world_seed" 
+                        <label for="world_seed">seed</label>
+                        <input type="text"
+                               id="world_seed"
+                               name="world_seed"
                                placeholder="Leave empty for random generation..."
                                class="form-control" />
-                        <div class="field-help">
-                            Enter a seed for repeatable world generation
-                        </div>
                     </div>
-                    
-                    <!-- World type selection -->
+
+                    <!-- World type: visual preset chips; hidden select keeps C++ read. -->
                     <div class="form-group">
-                        <label for="world_type">World Type</label>
-                        <select id="world_type" name="world_type" class="form-control">
+                        <label>landscape preset</label>
+                        <div class="preset-row">
+                            <span class="preset-chip selected">hills</span>
+                            <span class="preset-chip">lake</span>
+                            <span class="preset-chip">mons</span>
+                            <span class="preset-chip">forest</span>
+                        </div>
+                        <!-- chips are decorative for now; wiring TODO: drive #world_type -->
+                        <select id="world_type" name="world_type" class="form-control hidden">
                             <option value="default">Default Terrain</option>
                             <option value="archipelago">Archipelago</option>
                             <option value="mountains">Mountainous</option>
@@ -51,23 +53,16 @@
                             <option value="desert">Desert Wasteland</option>
                             <option value="frozen">Frozen Tundra</option>
                         </select>
-                        <div class="field-help">
-                            Choose the primary terrain type for your world
-                        </div>
                     </div>
+
+                    <button id="create_btn" class="btn">
+                        create
+                    </button>
                 </form>
             </div>
-            
-            <!-- Action buttons -->
-            <div class="button-container">
-                <button id="back_btn" class="btn btn-secondary">
-                    Back
-                </button>
-                <button id="create_btn" class="btn btn-success">
-                    Create World
-                </button>
-            </div>
-            
+
+            <span id="back_btn" class="back-link">&#8249; back</span>
+
             <!-- Progress indicator (hidden by default) -->
             <div id="creation_progress" class="hidden mt-lg">
                 <div class="progress-container">
