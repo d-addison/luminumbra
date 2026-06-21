@@ -816,15 +816,22 @@ private:
     // Hydro PREFETCH (re-enable erosion without the on-demand bake hitch): regions
     // currently queued for a background bake, so PrefetchHydroRegions doesn't
     // re-dispatch the same region every tick before its job lands.
-    std::set<std::pair<std::int64_t, std::int64_t>> m_hydro_prefetch_inflight;
-    std::mutex m_hydro_prefetch_mutex;
+    // mutable: PrefetchHydroRegions is const (FR-B3 — the far-LOD scheduler holds a
+    // const SHIELD_WorldSystem* and warms far regions ahead of the bake). It only
+    // touches the deterministic, recompute-on-load hydro caches (already mutable),
+    // so const-correctness is preserved (no world_hash-affecting state changes).
+    mutable std::set<std::pair<std::int64_t, std::int64_t>> m_hydro_prefetch_inflight;
+    mutable std::mutex m_hydro_prefetch_mutex;
 
 public:
     // Bake the hydraulic-erosion regions covering a disc around (cx,cz) AHEAD of
     // demand, on background jobs, so when chunk-gen samples the height the region
     // is already warm in the cache (no main-thread / gen-critical-path bake stall —
     // the cause of the laggy-while-flying with hydro on). No-op when hydro is off.
-    void PrefetchHydroRegions(float cx, float cz, float radius_m);
+    // const: only mutates the deterministic recompute-on-load hydro caches (mutable),
+    // so the far-LOD scheduler (which holds a const SHIELD_WorldSystem*) can warm far
+    // regions ahead of BuildPristineFarLodTile (FR-B3).
+    void PrefetchHydroRegions(float cx, float cz, float radius_m) const;
 };
 
 } // namespace Luminumbra::Systems

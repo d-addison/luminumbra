@@ -384,6 +384,20 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system, const
             continue;
         }
 
+        // FR-B3: warm the hydraulic-erosion regions this far tile will sample
+        // BEFORE dispatching its build, so BuildPristineFarLodTile ->
+        // GetTerrainHeightAtCoarse -> SampleHydroOffsetMeters finds the regions
+        // already baked instead of stalling the build worker on a cold per-region
+        // bake. The radius covers the tile's own 512 m region plus a margin so its
+        // border samples (which read into the neighbour region) are also warm.
+        // No-op when hydro is disabled. Deterministic (recompute-on-load), so this
+        // only affects timing, never the tile bytes -> run==replay holds.
+        {
+            const float region_cx = (static_cast<float>(want.rx) + 0.5f) * kRegionSize;
+            const float region_cz = (static_cast<float>(want.rz) + 0.5f) * kRegionSize;
+            m_world->PrefetchHydroRegions(region_cx, region_cz, kRegionSize);
+        }
+
         m_pending[key] = want.tier;
         ++dispatched;
         auto shared = m_shared;

@@ -415,6 +415,21 @@ void ShieldRtFarFieldPass::update(const Systems::SHIELD_WorldSystem& world,
     m_building = true;
     auto shared = m_shared;
     const Systems::SHIELD_WorldSystem* world_ptr = &world;
+    // FR-B3: warm the hydraulic-erosion regions the 7x7 far-field grid will sample
+    // ON SEPARATE background jobs before kicking off the single assemble_field job,
+    // so the (expensive) per-region erosion bakes run in PARALLEL across the pool
+    // instead of serializing inside the one assemble worker. No-op when hydro is
+    // disabled. Deterministic recompute-on-load -> affects timing only, not the
+    // baked field bytes (run==replay holds). The disc covers the full assembled
+    // region span (kRegionRadius regions of 512 m) plus a region of margin for the
+    // grid's border samples.
+    {
+        constexpr float kRegionMeters = 512.0f;
+        const float disc_cx = (static_cast<float>(center_rx) + 0.5f) * kRegionMeters;
+        const float disc_cz = (static_cast<float>(center_rz) + 0.5f) * kRegionMeters;
+        const float disc_r = (static_cast<float>(kRegionRadius) + 1.0f) * kRegionMeters;
+        world.PrefetchHydroRegions(disc_cx, disc_cz, disc_r);
+    }
     m_inflight_handle = m_job_system->dispatch_batch(
         {[shared, world_ptr, center_rx, center_rz, params_hash]() {
             FieldData fd = assemble_field(*world_ptr, center_rx, center_rz, params_hash);

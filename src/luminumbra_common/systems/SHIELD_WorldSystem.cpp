@@ -779,7 +779,7 @@ float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x, float world_z) 
     return a + (b - a) * fz;
 }
 
-void SHIELD_WorldSystem::PrefetchHydroRegions(float cx, float cz, float radius_m) {
+void SHIELD_WorldSystem::PrefetchHydroRegions(float cx, float cz, float radius_m) const {
     // Warm the hydraulic-erosion region cache AHEAD of chunk-gen demand on
     // background jobs, so the (expensive) per-region bake never lands on the
     // gen/main critical path when the camera flies into new terrain. Each region
@@ -875,14 +875,37 @@ float SHIELD_WorldSystem::ContinentalBaseHeight(float world_x, float world_z) co
 }
 
 float SHIELD_WorldSystem::LakeSurfaceLevel(float world_x, float world_z) const {
-    // Snap to a coarse grid so the lake surface is CONSTANT (flat) over a lake's
-    // extent — sampling ContinentalBaseHeight per-point gave a smoothly-varying
-    // surface that read as a concave/tilted lake. The carve + the water mesh both
-    // reference this, so the basin floor and the surface stay consistent.
+    // FR-B2: the lake surface must be near-constant (flat) over a lake's extent AND
+    // continuous across the coarse-cell boundaries. The old code snapped to the
+    // NEAREST 768 m node (std::round), so a lake straddling a cell boundary saw two
+    // different surface levels and STEPPED at the seam. Instead, sample
+    // ContinentalBaseHeight at the FOUR surrounding 768 m grid nodes and BILINEARLY
+    // interpolate: the result is continuous everywhere (no step), still very flat
+    // within a basin (the continental base is low-frequency, so the four nodes of a
+    // single lake's enclosing cell are nearly equal). The carve (LakeCarveAmount via
+    // WaterLevelAt) and the water mesh both call this, so basin floor and surface
+    // stay consistent — the basin floor remains BELOW the surface because the carve
+    // references the SAME interpolated value. Pure fn of (x,z,params,seed),
+    // evaluated identically in every path.
     constexpr float kLakeCellMeters = 768.0f;
-    const float sx = std::round(world_x / kLakeCellMeters) * kLakeCellMeters;
-    const float sz = std::round(world_z / kLakeCellMeters) * kLakeCellMeters;
-    return ContinentalBaseHeight(sx, sz) - m_params.lake_bank_offset;
+    const float gx = world_x / kLakeCellMeters;
+    const float gz = world_z / kLakeCellMeters;
+    const float fx0 = std::floor(gx);
+    const float fz0 = std::floor(gz);
+    const float tx = gx - fx0; // [0,1) within the cell
+    const float tz = gz - fz0;
+    const float x0 = fx0 * kLakeCellMeters;
+    const float z0 = fz0 * kLakeCellMeters;
+    const float x1 = x0 + kLakeCellMeters;
+    const float z1 = z0 + kLakeCellMeters;
+    const float h00 = ContinentalBaseHeight(x0, z0);
+    const float h10 = ContinentalBaseHeight(x1, z0);
+    const float h01 = ContinentalBaseHeight(x0, z1);
+    const float h11 = ContinentalBaseHeight(x1, z1);
+    const float a = h00 + (h10 - h00) * tx;
+    const float b = h01 + (h11 - h01) * tx;
+    const float surface = a + (b - a) * tz;
+    return surface - m_params.lake_bank_offset;
 }
 
 float SHIELD_WorldSystem::WaterLevelAt(float world_x, float world_z) const {
@@ -1092,20 +1115,26 @@ float SHIELD_WorldSystem::GetTerrainHeightAtCoarse(
     // stencil) otherwise MISSES the lake carve the near path applies after
     // pre_carve_height, so lakes would pop in at the LOD seam. Apply the lake carve
     // here too (one cheap point-sample of the smooth lake field) so lakes read
-    // consistently into the distance. NOTE: deliberately do NOT apply the hydro
-    // offset here — SampleHydroOffsetMeters bakes a hydraulic-erosion region per
-    // sample, and the far field spans the whole 6x view distance, so baking it for
-    // every coarse/far tile stalls world load. Hydro is sub-metre drainage detail
-    // invisible at range, so the far field simply omits it (matches the prior
-    // fast far-field behaviour); near chunks still bake it.
+    // consistently into the distance.
     if (m_params.lakes_enabled) {
         const float lake_surface = LakeSurfaceLevel(world_x, world_z);
         result -= LakeCarveAmount(result, LakeInfluenceFromNoise(world_x, world_z), lake_surface);
     }
     // FR-A3 rim depression — same single point-sample the near/grid paths apply, so
     // dolines dip the surface consistently into the far field (matches the lake
-    // carve handling above; hydro is still deliberately omitted at range).
+    // carve handling above).
     result -= SurfaceBreakRimDepression(world_x, world_z);
+    // FR-B3 far/amplified hydro seam fix: the near path adds the baked hydraulic
+    // erosion offset (ComputeShapedHeightSampleImpl), so omitting it here left a
+    // faint near/far drainage STEP at the live/far LOD boundary. Add the SAME
+    // offset on the coarse/far path so near and far agree. SampleHydroOffsetMeters
+    // is deterministic + recompute-on-load (per-region bake, cached), so run==replay
+    // holds; the hitch is hidden by PrefetchHydroRegions warming the far regions
+    // ahead of the bake (FarLodSystem + the far-field pass). No-op when hydro is
+    // disabled (the guard skips the bake entirely, matching the near path).
+    if (m_params.hydro_enabled) {
+        result += SampleHydroOffsetMeters(world_x, world_z);
+    }
     return result;
 }
 

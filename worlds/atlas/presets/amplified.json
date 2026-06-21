@@ -24,7 +24,7 @@
         "peaks_spline": [[-1.0, 0.0], [0.2, 0.06], [0.6, 0.45], [1.0, 1.0]]
       },
       "hydro": {
-        "enabled": false,
+        "enabled": true,
         "iterations": 8,
         "cell_size_m": 8.0,
         "talus_height": 2.6,
