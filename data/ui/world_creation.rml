@@ -43,6 +43,8 @@
                             <span class="preset-chip" data-preset="mountains">mons</span>
                             <span class="preset-chip" data-preset="temperate_forest">forest</span>
                         </div>
+                        <!-- Saved user presets are injected here as additional chips (C++). -->
+                        <div class="preset-row user-preset-row" id="user_presets_row"></div>
                         <!-- chips drive the hidden #world_type select via a C++ click handler. -->
                         <select id="world_type" name="world_type" class="form-control hidden">
                             <option value="default">Default Terrain</option>
@@ -207,6 +209,12 @@
                                     <label>island mask</label>
                                     <span class="toggle worldgen-param" data-path="terrain.island_mask_enabled" data-type="bool"><span class="toggle-knob"></span></span>
                                 </div>
+                            </div>
+
+                            <!-- Save the current config as a reusable named preset. -->
+                            <div class="save-preset-group">
+                                <input type="text" id="save_preset_name" class="form-control save-preset-name" placeholder="name this world type..." />
+                                <span id="save_preset_btn" class="btn save-preset-btn">save preset</span>
                             </div>
 
                         </div>

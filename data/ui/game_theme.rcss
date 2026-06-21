@@ -676,6 +676,53 @@ body#world_creation {
     color: #F4EFE6;
 }
 
+/* Saved user presets: a second chip row (dusk-gold tint to set them apart from curated) +
+   the inline "save preset" control. */
+.user-preset-row { margin-top: 8px; }
+.user-preset-row:empty { margin-top: 0; }
+.user-preset-chip { border-color: rgba(201, 168, 106, 90); color: #D8C6A2; }
+.user-preset-chip.selected {
+    background-color: rgba(201, 168, 106, 70);
+    border-color: #C9A86A;
+    color: #F4EFE6;
+}
+
+.save-preset-group {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    margin-top: 18px;
+    padding-top: 16px;
+    border-top-width: 1px;
+    border-top-color: rgba(242, 237, 228, 22);
+}
+.save-preset-name {
+    flex: 1 1 0;
+    height: 34px;
+    background-color: transparent;
+    border-width: 0;
+    border-bottom-width: 1px;
+    border-bottom-color: rgba(242, 237, 228, 45);
+    color: #F2EDE4;
+    font-size: 15px;
+    font-family: Lora;
+    margin-right: 14px;
+}
+.save-preset-name:focus { border-bottom-color: #C9A86A; }
+.save-preset-btn {
+    height: 36px;
+    line-height: 34px;
+    padding-left: 18px;
+    padding-right: 18px;
+    background-color: rgba(20, 17, 11, 110);
+    border-width: 1px;
+    border-color: rgba(201, 168, 106, 110);
+    color: #EDE6D8;
+    font-size: 13px;
+    letter-spacing: 2px;
+}
+.save-preset-btn:hover { background-color: rgba(201, 168, 106, 80); border-color: #C9A86A; color: #16130E; }
+
 #world_creation #create_btn {
     display: block;
     width: 64%;

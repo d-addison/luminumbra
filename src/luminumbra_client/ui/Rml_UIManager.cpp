@@ -476,7 +476,25 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
         }
     }
 
-    // If this is the create-world screen, seed the customize form from the selected preset.
+    // Save the current config as a named, reusable user preset.
+    if (auto* save_btn = document->GetElementById("save_preset_btn")) {
+        AddClickSoundListener(save_btn, [this, document](Rml::Event&) {
+            if (!m_worldPresetSaver) return;
+            const std::string name = ReadFormControlValue(document->GetElementById("save_preset_name"), "");
+            const std::string baseType = ReadFormControlValue(document->GetElementById("world_type"), "default");
+            const std::string saved = m_worldPresetSaver(name, baseType, CollectWorldGenParams(document));
+            if (auto* note = document->GetElementById("notification")) {
+                note->SetClass("hidden", false);
+                if (auto* txt = document->GetElementById("notification_text")) {
+                    txt->SetInnerRML(saved.empty() ? "Could not save preset" : "Preset saved");
+                }
+            }
+            if (!saved.empty()) this->PopulateUserPresets(document);
+        });
+    }
+
+    // If this is the create-world screen, seed the customize form from the selected preset and
+    // list any saved user presets as chips.
     if (document->GetElementById("customize_body")) {
         std::string preset = "default";
         Rml::ElementList chips;
@@ -485,6 +503,7 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
             if (c->IsClassSet("selected")) { preset = c->GetAttribute<Rml::String>("data-preset", "default"); break; }
         }
         SeedWorldGenParams(document, preset);
+        PopulateUserPresets(document);
     }
 }
 
@@ -509,6 +528,39 @@ void Rml_UIManager::SeedWorldGenParams(Rml::ElementDocument* document, const std
                 if (!vals.empty()) vals[0]->SetInnerRML(value);
             }
         }
+    }
+}
+
+void Rml_UIManager::PopulateUserPresets(Rml::ElementDocument* document) {
+    if (!document || !m_worldPresetList) return;
+    Rml::Element* row = document->GetElementById("user_presets_row");
+    if (!row) return;
+    // Rebuild from scratch (avoids duplicates on re-entry).
+    while (row->GetNumChildren() > 0) row->RemoveChild(row->GetChild(0));
+
+    for (const auto& [name, type] : m_worldPresetList()) {
+        Rml::ElementPtr chip = document->CreateElement("span");
+        if (!chip) continue;
+        chip->SetClassNames("preset-chip user-preset-chip");
+        chip->SetAttribute("data-preset", type);
+        chip->SetInnerRML(name);
+        Rml::Element* added = row->AppendChild(std::move(chip));
+        // Same behaviour as the curated chips: select + drive #world_type + re-seed the form.
+        added->AddEventListener("click", new LambdaEventListener([this, document](Rml::Event& event) {
+            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click");
+            Rml::Element* c = event.GetTargetElement();
+            while (c && c->GetAttribute<Rml::String>("data-preset", "").empty()) c = c->GetParentNode();
+            if (!c) return;
+            Rml::ElementList all;
+            document->GetElementsByClassName(all, "preset-chip");
+            for (Rml::Element* x : all) x->SetClass("selected", false);
+            c->SetClass("selected", true);
+            const std::string preset = c->GetAttribute<Rml::String>("data-preset", "default");
+            if (auto* sel = document->GetElementById("world_type")) {
+                if (auto* fc = dynamic_cast<Rml::ElementFormControl*>(sel)) fc->SetValue(preset);
+            }
+            this->SeedWorldGenParams(document, preset);
+        }));
     }
 }
 

@@ -647,6 +647,59 @@ TEST(UiSmokeTest, RedesignedControlsAreFunctional) {
     ui.Shutdown();
 }
 
+// Save-as-named-preset: create-world lists saved user presets as selectable chips, and the
+// "save preset" control hands the current config (name + base + params) to the saver.
+TEST(UiSmokeTest, SaveAndListUserPresetsAreFunctional) {
+    HiddenGlContext context;
+    if (!context.ready()) {
+        GTEST_SKIP() << context.error();
+    }
+    const fs::path source_root = SourceRoot();
+    Luminumbra::Client::Rml_UIManager ui((source_root.string() + "/"));
+    ui.Init(context.window(), nullptr);
+    ASSERT_NE(ui.GetContext(), nullptr);
+
+    struct Saved { std::string name; std::string base; std::size_t count = 0; };
+    std::optional<Saved> saved;
+    ui.SetWorldPresetSaver([&](const std::string& name, const std::string& base,
+                               const std::vector<Luminumbra::Client::WorldGenParam>& p) -> std::string {
+        saved = Saved{name, base, p.size()};
+        return "user_test_type";
+    });
+    ui.SetWorldPresetList([&]() -> std::vector<std::pair<std::string, std::string>> {
+        return {{"My Canyon", "user_my_canyon"}};
+    });
+    ui.SetWorldParamGetter([&](const std::string&, const std::string&) { return std::string(); });
+
+    Rml::ElementDocument* wc = LoadDocumentAndFind(ui, "world_creation.rml", "world_creation");
+    ASSERT_NE(wc, nullptr);
+
+    // The saved user preset was injected as a chip.
+    Rml::Element* row = wc->GetElementById("user_presets_row");
+    ASSERT_NE(row, nullptr);
+    ASSERT_EQ(row->GetNumChildren(), 1) << "one saved user preset chip expected";
+    Rml::Element* user_chip = row->GetChild(0);
+    ASSERT_NE(user_chip, nullptr);
+    EXPECT_EQ(user_chip->GetAttribute<Rml::String>("data-preset", ""), "user_my_canyon");
+
+    // Save the current config under a name -> the saver receives name + base + the param set.
+    SetControlValue(wc, "save_preset_name", "Test Type");
+    ClickAndUpdate(ui, wc->GetElementById("save_preset_btn"));
+    ASSERT_TRUE(saved.has_value());
+    EXPECT_EQ(saved->name, "Test Type");
+    EXPECT_EQ(saved->base, "default");
+    EXPECT_GT(saved->count, 20u) << "the full customize param set must be handed to the saver";
+
+    // Selecting the injected user chip drives the hidden world_type to its id.
+    ClickAndUpdate(ui, row->GetChild(0));
+    EXPECT_TRUE(row->GetChild(0)->IsClassSet("selected"));
+    auto* type_sel = dynamic_cast<Rml::ElementFormControl*>(wc->GetElementById("world_type"));
+    ASSERT_NE(type_sel, nullptr);
+    EXPECT_EQ(std::string(type_sel->GetValue()), "user_my_canyon");
+
+    ui.Shutdown();
+}
+
 // T-I3-21: token-based Subscribe/Unsubscribe on Property<T> (no GL needed).
 TEST(UiSmokeTest, PropertyTokenUnsubscribeStopsCallbacks) {
     using Luminumbra::Client::UI::Property;

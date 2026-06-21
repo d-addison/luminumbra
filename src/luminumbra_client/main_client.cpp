@@ -2471,6 +2471,64 @@ int main(int argc, char* argv[]) {
                 return "";
             }
         });
+        // Save the current customize-form config as a reusable, named USER preset
+        // (worlds/atlas/presets/user_<slug>.json). Worlds created from it still embed their own
+        // resolved params, so the saved file is a starting template, not a load-bearing dependency.
+        g_uiManager->SetWorldPresetSaver([root_path_str](const std::string& displayName,
+                                                         const std::string& baseType,
+                                                         const std::vector<Luminumbra::Client::WorldGenParam>& params) -> std::string {
+            try {
+                const std::filesystem::path presets_dir =
+                    std::filesystem::path(root_path_str) / "worlds" / "atlas" / "presets";
+                std::ifstream in(presets_dir / (baseType + ".json"));
+                if (!in) return "";
+                nlohmann::json base;
+                in >> base;
+                Luminumbra::Client::CustomPresetResult merged = Luminumbra::Client::BuildCustomPreset(base, params);
+                std::string slug;
+                for (char ch : displayName) {
+                    if (std::isalnum(static_cast<unsigned char>(ch)))
+                        slug += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                    else if ((ch == ' ' || ch == '-' || ch == '_') && !slug.empty() && slug.back() != '_')
+                        slug += '_';
+                }
+                while (!slug.empty() && slug.back() == '_') slug.pop_back();
+                if (slug.empty()) slug = "preset";
+                const std::string worldType = "user_" + slug.substr(0, 32);
+                merged.json["name"] = displayName.empty() ? std::string("Custom") : displayName;
+                std::ofstream out(presets_dir / (worldType + ".json"), std::ios::binary);
+                if (!out) return "";
+                out << merged.json.dump(2);
+                LUMINUMBRA_CORE_INFO("Saved user world preset: {}", worldType);
+                return worldType;
+            } catch (const std::exception& e) {
+                LUMINUMBRA_CORE_ERROR("Save preset failed: {}", e.what());
+                return "";
+            }
+        });
+        // Enumerate saved user presets (user_*.json) so create-world can offer them as chips.
+        g_uiManager->SetWorldPresetList([root_path_str]() -> std::vector<std::pair<std::string, std::string>> {
+            std::vector<std::pair<std::string, std::string>> out;
+            try {
+                const std::filesystem::path presets_dir =
+                    std::filesystem::path(root_path_str) / "worlds" / "atlas" / "presets";
+                if (!std::filesystem::exists(presets_dir)) return out;
+                for (const auto& entry : std::filesystem::directory_iterator(presets_dir)) {
+                    if (entry.path().extension() != ".json") continue;
+                    const std::string stem = entry.path().stem().string();
+                    if (stem.rfind("user_", 0) != 0) continue;
+                    std::string name = stem;
+                    try {
+                        std::ifstream f(entry.path());
+                        nlohmann::json j;
+                        f >> j;
+                        name = j.value("name", stem);
+                    } catch (...) {}
+                    out.emplace_back(name, stem);
+                }
+            } catch (...) {}
+            return out;
+        });
         // Wire the RML Settings screen (settings.rml) to the SystemConfig user settings.
         // Live-apply mirrors the F8 ImGui panel; Save persists the per-user overlay.
         // Reference g_systemConfig directly (a global) so no captured local dangles.

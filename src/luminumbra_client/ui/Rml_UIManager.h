@@ -24,6 +24,13 @@ using WorldCreationCallback = std::function<void(const std::string& name, const 
 // Read a generation parameter's current value from a preset (for seeding the customize form
 // when a preset chip is selected). Returns "" if the preset doesn't set that key.
 using WorldParamGetter = std::function<std::string(const std::string& worldType, const std::string& path)>;
+// Save the current customize-form config (base preset + overrides) as a reusable, named user
+// preset; returns the new world-type id (e.g. "user_my_canyon") on success, "" on failure.
+using WorldPresetSaver = std::function<std::string(const std::string& displayName, const std::string& baseType,
+                                                   const std::vector<WorldGenParam>& params)>;
+// List saved user presets as (display name, world-type id) so create-world can offer them as
+// selectable starting points alongside the curated presets.
+using WorldPresetList = std::function<std::vector<std::pair<std::string, std::string>>()>;
 using LoadWorldCallback = std::function<void(const std::string&)>;
 // Pause-menu actions ("resume" / "quit") routed back to main_client, which owns game state + cursor.
 using PauseActionCallback = std::function<void(const std::string&)>;
@@ -91,6 +98,8 @@ public:
     
     void SetWorldCreationCallback(WorldCreationCallback callback) { m_worldCreationCallback = std::move(callback); }
     void SetWorldParamGetter(WorldParamGetter getter) { m_worldParamGetter = std::move(getter); }
+    void SetWorldPresetSaver(WorldPresetSaver saver) { m_worldPresetSaver = std::move(saver); }
+    void SetWorldPresetList(WorldPresetList lister) { m_worldPresetList = std::move(lister); }
     void SetLoadWorldCallback(LoadWorldCallback callback) { m_loadWorldCallback = std::move(callback); }
     void SetSettingsBridge(SettingsBridge bridge) { m_settingsBridge = std::move(bridge); }
     void SetPauseActionCallback(PauseActionCallback cb) { m_pauseActionCallback = std::move(cb); }
@@ -118,6 +127,10 @@ private:
     // WorldParamGetter), updating slider values + toggle states + value labels.
     void SeedWorldGenParams(Rml::ElementDocument* document, const std::string& worldType);
 
+    // world_creation.rml: enumerate saved user presets and (re)build a selectable chip for each
+    // in #user_presets_row, wired like the curated preset chips.
+    void PopulateUserPresets(Rml::ElementDocument* document);
+
     // Interfaces are now members, their lifetime is tied to the manager.
     RmlSystem m_systemInterface;
     RmlFileInterface m_fileInterface;
@@ -134,6 +147,8 @@ private:
     
     WorldCreationCallback m_worldCreationCallback;
     WorldParamGetter m_worldParamGetter;
+    WorldPresetSaver m_worldPresetSaver;
+    WorldPresetList m_worldPresetList;
     LoadWorldCallback m_loadWorldCallback;
     SettingsBridge m_settingsBridge;
     PauseActionCallback m_pauseActionCallback;
