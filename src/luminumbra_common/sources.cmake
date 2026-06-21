@@ -81,6 +81,8 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/world/GameSession.cpp
     # Spec 002 Item 2: semantic-knob -> generation_params response table + persisted layer.
     ${CMAKE_CURRENT_LIST_DIR}/world/KnobLayer.cpp
+    # Spec 002 Item 4: constrained fixed-topology layer graph (compiles bit-exact to params).
+    ${CMAKE_CURRENT_LIST_DIR}/world/LayerGraph.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/MarchingCubes.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/PlayerAvatar.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/StructurePlacement.cpp

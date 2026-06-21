@@ -2,7 +2,9 @@
 #include <imgui.h>
 #include <glm/glm.hpp>
 #include <string>
+#include <nlohmann/json.hpp>
 #include "core/Log.h"
+#include "luminumbra_common/world/LayerGraph.h"
 
 namespace Luminumbra::Client {
 
@@ -117,7 +119,87 @@ void WorldGenViewer::UpdateAndRender(bool& is_open, Systems::SHIELD_WorldSystem*
         }
     }
 
+    // Spec 002 Item 4: the constrained layer-graph authoring panel, behind the
+    // --worldgen-graph flag (m_graphEnabled). Renders the fixed pipeline stages as
+    // ImGui cards (edges implicit/fixed in v1) over a preset JSON derived from the
+    // viewer's current params. Read-only view in v1.
+    if (m_graphEnabled) {
+        RenderLayerGraphPanel();
+    }
+
     ImGui::End();
+}
+
+void WorldGenViewer::RenderLayerGraphPanel() {
+    if (!ImGui::CollapsingHeader("Layer Graph (constrained)", ImGuiTreeNodeFlags_DefaultOpen)) {
+        return;
+    }
+    using namespace Luminumbra::world;
+
+    // Build a preset JSON from the viewer's current scalar params (the subset the
+    // inspector exposes). This mirrors the shipped generation_params schema so the
+    // decomposition is the SAME fixed topology the create-world graph authors. The
+    // engine LayerGraph guarantees Compile(graph) is bit-exact to this JSON.
+    nlohmann::json preset;
+    nlohmann::json& gp = preset["generation_params"];
+    gp["terrain"] = {
+        {"base_frequency", m_params.base_frequency},
+        {"base_amplitude", m_params.base_amplitude},
+        {"octaves", m_params.octaves},
+        {"persistence", m_params.persistence},
+        {"lacunarity", m_params.lacunarity},
+        {"height_offset", m_params.height_offset},
+        {"island_mask_enabled", m_params.island_mask_enabled},
+    };
+    gp["features"] = {
+        {"caves_enabled", m_params.caves_enabled},
+        {"cave_frequency", m_params.cave_frequency},
+    };
+
+    const LayerGraph graph = LayerGraphFromPreset(preset);
+
+    ImGui::TextDisabled("Schema: %s  |  fixed topology, edges implicit", LayerGraphSchema());
+    ImGui::Text("Pipeline order (base FBM -> ... -> materials):");
+
+    // One ImGui "card" per stage, drawn top-to-bottom in the fixed edge order.
+    bool first = true;
+    for (const LayerNode& n : graph.nodes) {
+        if (!first) {
+            // A fixed downward edge marker between consecutive stage cards.
+            ImGui::Indent(12.0f);
+            ImGui::TextDisabled("|");
+            ImGui::TextDisabled("v");
+            ImGui::Unindent(12.0f);
+        }
+        first = false;
+
+        ImGui::PushID(LayerStageId(n.stage));
+        ImGui::BeginChild(LayerStageId(n.stage), ImVec2(0, 0),
+                          ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_Border);
+        ImGui::TextColored(n.present ? ImVec4(0.7f, 0.9f, 1.0f, 1.0f)
+                                     : ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
+                           "%s", LayerStageLabel(n.stage));
+        if (!n.present) {
+            ImGui::TextDisabled("  (inactive in this preset)");
+        } else if (n.params.is_object()) {
+            for (auto it = n.params.begin(); it != n.params.end(); ++it) {
+                // Compact one-line readout of each scalar in the stage slice.
+                ImGui::BulletText("%s = %s", it.key().c_str(), it.value().dump().c_str());
+            }
+        }
+        ImGui::EndChild();
+        ImGui::PopID();
+    }
+
+    // The bit-exact round-trip the determinism test pins, surfaced live so the
+    // authoring tool proves Compile(graph) == the source params at a glance.
+    const nlohmann::json compiled = CompileLayerGraph(graph);
+    const bool bit_exact = (compiled == gp);
+    ImGui::Separator();
+    ImGui::TextColored(bit_exact ? ImVec4(0.5f, 1.0f, 0.5f, 1.0f)
+                                 : ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+                       "compile(graph) %s bit-exact to generation_params",
+                       bit_exact ? "==" : "!=");
 }
 
 void WorldGenViewer::RegenerateTexture() {

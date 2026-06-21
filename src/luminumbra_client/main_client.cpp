@@ -2744,6 +2744,14 @@ int main(int argc, char* argv[]) {
     std::unique_ptr<Luminumbra::Client::WorldGenViewer> worldGenViewer;
     if (g_imgui_enabled) {
         worldGenViewer = std::make_unique<Luminumbra::Client::WorldGenViewer>();
+        // Spec 002 Item 4: --worldgen-graph turns on the constrained layer-graph
+        // authoring panel inside the inspector (a flagged INTERNAL dev tool, NOT
+        // the shipping RmlUi create surface) and opens the inspector at boot.
+        if (HasCommandLineFlag(argc, argv, "--worldgen-graph")) {
+            worldGenViewer->SetGraphEnabled(true);
+            show_worldgen_viewer = true;
+            LUMINUMBRA_CORE_INFO("--worldgen-graph: constrained layer-graph authoring panel enabled (F7 toggles the inspector)");
+        }
     }
 
     // Spec 002 Item 1: the create-world LIVE WORLD-PREVIEW DIORAMA controller.
