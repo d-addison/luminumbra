@@ -4759,6 +4759,77 @@ int main(int argc, char* argv[]) {
                             renderPipeline.set_cloud_state(cs);
                         }
                     }
+                    // FOLIAGE in normal play: the GPU grass scatter was previously only
+                    // built for the foliage_visual_smoke gate, so the live world had no
+                    // grass. Load the scatter set once, then rebuild the per-chunk scatter
+                    // over the visible ring each frame (wind-swayed). RENDER-ONLY (one-way,
+                    // never hashed). rebuild_instances elides work when chunks are unchanged.
+                    if (auto* foliage = renderPipeline.foliage()) {
+                        auto* fol_ws = gameSession->GetWorldSystem();
+                        if (fol_ws != nullptr && g_camera) {
+                            static bool s_foliage_loaded = false;
+                            if (!s_foliage_loaded) {
+                                foliage->load_scatter_set(root_dir / "data/common/foliage/scatter_set.json");
+                                foliage->set_fade_distances(130.0f, 210.0f); // grass out to ~210 m
+                                foliage->set_density_scale(1.0f);
+                                s_foliage_loaded = true;
+                            }
+                            glm::vec2 wind_xz(0.0f, 0.0f);
+                            if (auto* wind = gameSession->GetWindFieldSystem()) {
+                                const Luminumbra::Vec2 w = wind->SampleWind(Luminumbra::Vec3(
+                                    g_camera->Position.x, g_camera->Position.y, g_camera->Position.z));
+                                wind_xz = glm::vec2(w.x, w.y);
+                            }
+                            foliage->set_wind(wind_xz);
+                            Luminumbra::Client::ScenarioHarness::FoliageScatterContext fol_ctx{fol_ws};
+                            std::vector<Luminumbra::Rendering::FoliagePass::ChunkScatter> chunk_scatter;
+                            const auto& fol_renderable = fol_ws->get_renderable_chunks();
+                            chunk_scatter.reserve(fol_renderable.size());
+                            for (const Luminumbra::Chunk* chunk : fol_renderable) {
+                                if (chunk == nullptr) { continue; }
+                                const Luminumbra::IVec3 c = chunk->get_coords();
+                                const float origin_x = static_cast<float>(c.x * Luminumbra::CHUNK_SIZE_X);
+                                const float origin_z = static_cast<float>(c.z * Luminumbra::CHUNK_SIZE_Z);
+                                const float center_x = origin_x + Luminumbra::CHUNK_SIZE_X * 0.5f;
+                                const float center_z = origin_z + Luminumbra::CHUNK_SIZE_Z * 0.5f;
+                                const float surf_h = fol_ws->GetTerrainHeightAt(center_x, center_z);
+                                const float chunk_y0 = static_cast<float>(c.y * Luminumbra::CHUNK_SIZE_Y);
+                                if (surf_h < chunk_y0 || surf_h >= chunk_y0 + Luminumbra::CHUNK_SIZE_Y) { continue; }
+                                const Luminumbra::u8 biome_id = fol_ws->BiomeIdAt(center_x, center_z);
+                                const float density = fol_ws->biomes_enabled()
+                                    ? fol_ws->biome_table().vegetation_for(biome_id).density
+                                    : 0.3f;
+                                Luminumbra::Rendering::FoliagePass::ChunkScatter cs;
+                                cs.chunk_xz = glm::ivec2(c.x, c.z);
+                                cs.origin = glm::vec3(origin_x, 0.0f, origin_z);
+                                cs.extent_m = static_cast<float>(Luminumbra::CHUNK_SIZE_X);
+                                cs.biome_id = biome_id;
+                                cs.density = density;
+                                chunk_scatter.push_back(cs);
+                            }
+                            foliage->rebuild_instances(
+                                chunk_scatter,
+                                &Luminumbra::Client::ScenarioHarness::FoliageSurfaceQuery,
+                                &fol_ctx, g_camera->Position);
+                        }
+                    }
+
+                    // Ambient atmosphere particles: a soft drift of pollen/dust motes
+                    // around the player. Spawned once; its origin follows the camera
+                    // each frame so the motes are always present as you explore.
+                    {
+                        static std::uint32_t s_ambient_motes =
+                            Luminumbra::Rendering::ParticlePass::kInvalidEmitter;
+                        if (auto* particles = renderPipeline.particles()) {
+                            if (s_ambient_motes == Luminumbra::Rendering::ParticlePass::kInvalidEmitter) {
+                                s_ambient_motes = particles->add_emitter(
+                                    root_dir / "data/common/particles/ambient_motes.json",
+                                    g_camera->Position);
+                            } else {
+                                particles->set_emitter_origin(s_ambient_motes, g_camera->Position);
+                            }
+                        }
+                    }
                     renderPipeline.render_frame(gameSession->GetRegistry(), *gameSession->GetWorldSystem(), *g_camera, deltaTime, wireframe_mode);
 
                     // --scene-config: self-contained capture. Settle a few frames (world

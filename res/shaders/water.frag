@@ -81,6 +81,27 @@ vec2 ripple_gradient(vec2 p, float t, vec2 flow)
     return grad;
 }
 
+// Smooth 2D value noise (bilinear-interpolated hash) — replaces the old blocky
+// floor()-cell foam hash that read as a hard pixel grid on the surface.
+float foam_hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+float foam_noise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f); // smoothstep interpolation
+    float a = foam_hash(i);
+    float b = foam_hash(i + vec2(1.0, 0.0));
+    float c = foam_hash(i + vec2(0.0, 1.0));
+    float d = foam_hash(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+// Two octaves of smoothly-drifting noise for broken-but-soft foam.
+float foam_fbm(vec2 p, float t, vec2 flow) {
+    vec2 q = p + flow * t;
+    return 0.6 * foam_noise(q) + 0.4 * foam_noise(q * 2.3 + t * 0.5);
+}
+
 vec3 world_pos_from_depth(float depth, vec2 screen_uv) {
     float z = depth * 2.0 - 1.0;
     vec4 clip_space_pos = vec4(screen_uv * 2.0 - 1.0, z, 1.0);
@@ -304,11 +325,13 @@ void main()
     float shoreline_band = smoothstep(0.9, 0.1, water_depth);
     float foam_phase = water_depth * 8.0 - u_time * 1.6 + (flow_vector.x + flow_vector.y) * 4.0;
     float foam_wave = 0.5 + 0.5 * sin(foam_phase);
-    vec2 foam_cell = floor(fs_in.world_pos.xz * 6.0 + flow_vector * u_time * 2.0);
-    float foam_sparkle = fract(sin(dot(foam_cell, vec2(127.1, 311.7)) + floor(u_time * 3.0) * 0.731) * 43758.5453);
+    // Smooth animated noise (was a blocky floor()-cell hash -> hard pixel grid).
+    // Sampled in world space at ~1.5 m features so foam reads as soft broken froth
+    // at any view distance instead of a fixed-screen grid.
+    float foam_sparkle = foam_fbm(fs_in.world_pos.xz * 0.7, u_time * 0.6, flow_vector);
     float flow_foam = flow_data.b;
 
-    float foam_factor = clamp(shoreline_band * (0.70 + 0.45 * foam_wave + 0.45 * foam_sparkle) + flow_foam * 0.5, 0.0, 1.0);
+    float foam_factor = clamp(shoreline_band * (0.55 + 0.55 * foam_wave + 0.55 * foam_sparkle) + flow_foam * 0.5, 0.0, 1.0);
     // Foam is bright wind-whipped froth lit by the sky/sun; it is NOT emissive.
     // The base colour is near-white (luminance ~0.95), so without dimming it was
     // the brightest thing in a night frame -- the self-lit cyan-white shore band

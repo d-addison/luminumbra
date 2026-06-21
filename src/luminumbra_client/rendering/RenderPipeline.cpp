@@ -1611,6 +1611,12 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
 
     update_time_of_day(deltaTime);
     gather_lights(registry);
+    // Underwater detection: the aerial pass becomes a murky-water volume when the
+    // camera sits below the local water surface (sea OR a perched lake).
+    {
+        const float water_level = world_system.WaterLevelAt(camera.Position.x, camera.Position.z);
+        m_underwater_factor = (camera.Position.y < water_level - 0.05f) ? 1.0f : 0.0f;
+    }
     auto renderable_chunks = world_system.get_renderable_chunks();
     auto renderable_chunk_snapshots = build_chunk_snapshots(renderable_chunks);
     m_last_mesh_upload_stats = {};
@@ -2156,6 +2162,7 @@ void RenderPipeline::execute_aerial_pass(const Camera& camera) {
     const float sun_up = glm::dot(m_sun.direction, glm::vec3(0.0f, -1.0f, 0.0f));
     m_aerial_shader->setFloat("u_sunCosZenith", sun_up);
     m_aerial_shader->setFloat("u_skyDayFactor", m_skyDayFactor);
+    m_aerial_shader->setFloat("u_underwater", m_underwater_factor);
     // T-I7 controllable atmosphere: feed the data-driven aerial-perspective
     // parameters (previously hardcoded shader defaults) so the far-field depth
     // can be dialed crisp <-> realistic <-> dramatic. Optional tuning override:

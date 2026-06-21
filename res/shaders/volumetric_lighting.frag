@@ -44,6 +44,13 @@ uniform float u_groundFogDensity = 0.022; // accumulation per metre of view dept
 uniform float u_fogHeight = 70.0;         // world Y where the mist top fades out
 uniform float u_fogThickness = 52.0;      // metres of vertical falloff to the top
 
+// UNDERWATER: when the camera is submerged this pass becomes a murky-water volume
+// instead of atmospheric haze — a blue-green tint thickening with view distance
+// (limited visibility), applied over EVERYTHING including the surface/sky above.
+uniform float u_underwater = 0.0;             // 1.0 when the camera is below a water surface
+uniform vec3  u_underwaterTint = vec3(0.04, 0.18, 0.26);
+uniform float u_underwaterVisibility = 26.0;  // metres to near-full murk
+
 const float PI = 3.14159265359;
 
 vec3 worldPositionFromDepth(vec2 uv, float depth) {
@@ -77,6 +84,23 @@ vec3 sunTransmittance(float cosZenith) {
 
 void main() {
     float sceneDepth = texture(gDepth, TexCoords).r;
+
+    // UNDERWATER volume: fog EVERYTHING (scene + the surface/sky above) with a
+    // blue-green murk that thickens with view distance, so submerging reads as
+    // being underwater (limited visibility) rather than dry air with a tint.
+    if (u_underwater > 0.5) {
+        float d;
+        if (sceneDepth >= 0.9999) {
+            d = u_underwaterVisibility * 4.0; // far/surface -> deep murk
+        } else {
+            vec3 wp = worldPositionFromDepth(TexCoords, sceneDepth);
+            d = length(wp - u_viewPos);
+        }
+        float murk = 1.0 - exp(-d / max(1.0, u_underwaterVisibility));
+        FragColor = vec4(u_underwaterTint, clamp(murk, 0.0, 0.92));
+        return;
+    }
+
     // Far-depth (sky) pixels: the dome + its own scattering already supply the
     // color. Leave them untouched (alpha 0) so the horizon sky-ratio that
     // FarLodHorizon measures does not move.

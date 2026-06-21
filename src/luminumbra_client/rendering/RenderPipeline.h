@@ -892,6 +892,9 @@ private:
     // clamped m_sun.intensity (which saturates to 1 while the sun is still low,
     // leaving the dusk dome stuck at full midday and the night dome bright).
     float m_skyDayFactor = 1.0f;
+    // 1.0 when the render camera is below a water surface (drives the aerial pass's
+    // underwater murk). Set per-frame in render_frame from WaterLevelAt.
+    float m_underwater_factor = 0.0f;
     // T-I5a-7 (C2): SEASON state, all DERIVED from m_seasonTick (a pure function
     // of the authoritative sim tick -- no wall-clock, no float accumulator). The
     // phase/declination/tint are recomputed inside update_time_of_day from the
