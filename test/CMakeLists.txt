@@ -127,6 +127,7 @@ add_executable(common_tests
     common/SimulationClock_test.cpp
     common/StructurePlacement_test.cpp
     common/TerrainPresetLoader_test.cpp
+    common/KnobLayer_test.cpp
     common/WindFieldSystem_test.cpp
     common/WeatherSystem_test.cpp
     common/AetherFieldSystem_test.cpp
@@ -1018,6 +1019,7 @@ file(WRITE "${LUMINUMBRA_TEST_ARTIFACT_ROOT}/testing/ctest_manifest.json"
     "    \"UiSmokeTest.GalleryBackNavigationAndContentArePresent\",\n"
     "    \"UiSmokeTest.WorldSelectEmptyGuardAndHotReload\",\n"
     "    \"UiSmokeTest.UserPresetDeleteRenameAndOverwriteConfirmAreFunctional\",\n"
+    "    \"UiSmokeTest.SemanticKnobsSeedDriveCallbackAndPreview\",\n"
     "    \"WorldgenOverrideTest.BuildCustomPresetAppliesOnlyRealDeltas\",\n"
     "    \"WorldgenOverrideTest.EveryCustomizeParamPathIsAKnownWorldgenKey\",\n"
     "    \"WorldgenOverrideTest.MenuImageSourcesResolveToExistingTga\",\n"

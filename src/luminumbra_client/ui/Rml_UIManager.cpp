@@ -161,6 +161,22 @@ static std::string ReadFormControlValue(Rml::Element* element, const std::string
 static std::vector<WorldGenParam> CollectWorldGenParams(Rml::ElementDocument* document) {
     std::vector<WorldGenParam> out;
     if (!document) return out;
+    // Spec 002 Item 2: the SEMANTIC KNOBS travel first, as WorldGenParam entries
+    // with path "knob.<id>" + type "knob" (value in [0,1]). The host splits these
+    // off and feeds them to the engine-side KnobLayer; the raw .worldgen-param
+    // entries below are the sparse advanced-panel OVERRIDE diff overlaid on top.
+    Rml::ElementList knobs;
+    document->GetElementsByClassName(knobs, "worldgen-knob");
+    for (Rml::Element* el : knobs) {
+        if (!el) continue;
+        const std::string id = el->GetAttribute<Rml::String>("data-knob", "");
+        if (id.empty()) continue;
+        WorldGenParam p;
+        p.path = "knob." + id;
+        p.type = "knob";
+        p.value = ReadFormControlValue(el, "0.5");
+        out.push_back(std::move(p));
+    }
     Rml::ElementList controls;
     document->GetElementsByClassName(controls, "worldgen-param");
     for (Rml::Element* el : controls) {
@@ -539,6 +555,23 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
         }
     }
 
+    // Spec 002 Item 2: semantic-knob sliders — live-update the adjacent
+    // .knob-value label (the host reads the knob positions each frame to drive
+    // the engine KnobLayer + the live preview rebuild).
+    {
+        Rml::ElementList kslid;
+        document->GetElementsByClassName(kslid, "worldgen-knob");
+        for (Rml::Element* el : kslid) {
+            el->AddEventListener("change", new LambdaEventListener([](Rml::Event& ev) {
+                Rml::Element* slider = ev.GetTargetElement();
+                if (!slider || !slider->GetParentNode()) return;
+                Rml::ElementList vals;
+                slider->GetParentNode()->GetElementsByClassName(vals, "knob-value");
+                if (!vals.empty()) vals[0]->SetInnerRML(ReadFormControlValue(slider, "0.5"));
+            }));
+        }
+    }
+
     // Save the current config as a named, reusable user preset. If the name's slug already
     // has a saved preset, WorldPresetSaver silently overwrites — so gate it behind an explicit
     // overwrite-confirm modal instead of clobbering the existing preset without warning.
@@ -664,6 +697,27 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
 
 void Rml_UIManager::SeedWorldGenParams(Rml::ElementDocument* document, const std::string& worldType) {
     if (!document || !m_worldParamGetter) return;
+
+    // Spec 002 Item 2: seed the semantic knobs from the preset's persisted knob
+    // layer (path convention "knob.<id>"). A curated preset has none -> the
+    // getter returns "" and the knob keeps its NEUTRAL 0.5 (never inverse-lerped).
+    Rml::ElementList knobs;
+    document->GetElementsByClassName(knobs, "worldgen-knob");
+    for (Rml::Element* el : knobs) {
+        const std::string id = el->GetAttribute<Rml::String>("data-knob", "");
+        if (id.empty()) continue;
+        const std::string value = m_worldParamGetter(worldType, "knob." + id);
+        const std::string v = value.empty() ? std::string("0.5") : value;
+        if (auto* fc = dynamic_cast<Rml::ElementFormControl*>(el)) {
+            fc->SetValue(v);
+            if (el->GetParentNode()) {
+                Rml::ElementList vals;
+                el->GetParentNode()->GetElementsByClassName(vals, "knob-value");
+                if (!vals.empty()) vals[0]->SetInnerRML(v);
+            }
+        }
+    }
+
     Rml::ElementList controls;
     document->GetElementsByClassName(controls, "worldgen-param");
     for (Rml::Element* el : controls) {

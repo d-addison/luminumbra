@@ -83,12 +83,46 @@
                         </select>
                     </div>
 
-                    <!-- Collapsible advanced worldgen parameters. Collapsed by default;
+                    <!-- Spec 002 Item 2: SEMANTIC KNOBS — the DEFAULT create surface.
+                         6 outcome knobs (data-knob id, [0,1]); the host applies the
+                         engine-side KnobLayer response curves, then overlays any
+                         advanced-panel override diff. Curated presets carry no knob
+                         layer, so these seed NEUTRAL (0.5) — never inverse-lerped. -->
+                    <div class="knob-section">
+                        <h3 class="param-group-heading">world feel</h3>
+                        <div class="settings-row knob-row">
+                            <label>mountainousness <span class="knob-value">0.5</span></label>
+                            <input type="range" class="worldgen-knob settings-slider" data-knob="mountainousness" min="0" max="1" step="0.01" value="0.5" />
+                        </div>
+                        <div class="settings-row knob-row">
+                            <label>ruggedness <span class="knob-value">0.5</span></label>
+                            <input type="range" class="worldgen-knob settings-slider" data-knob="ruggedness" min="0" max="1" step="0.01" value="0.5" />
+                        </div>
+                        <div class="settings-row knob-row">
+                            <label>wetness <span class="knob-value">0.5</span></label>
+                            <input type="range" class="worldgen-knob settings-slider" data-knob="wetness" min="0" max="1" step="0.01" value="0.5" />
+                        </div>
+                        <div class="settings-row knob-row">
+                            <label>erosion / age <span class="knob-value">0.5</span></label>
+                            <input type="range" class="worldgen-knob settings-slider" data-knob="erosion" min="0" max="1" step="0.01" value="0.5" />
+                        </div>
+                        <div class="settings-row knob-row">
+                            <label>climate <span class="knob-value">0.5</span></label>
+                            <input type="range" class="worldgen-knob settings-slider" data-knob="climate" min="0" max="1" step="0.01" value="0.5" />
+                        </div>
+                        <div class="settings-row knob-row">
+                            <label>feature density <span class="knob-value">0.5</span></label>
+                            <input type="range" class="worldgen-knob settings-slider" data-knob="feature_density" min="0" max="1" step="0.01" value="0.5" />
+                        </div>
+                    </div>
+
+                    <!-- Collapsible ADVANCED raw worldgen parameters. Collapsed by default;
                          a C++ click handler toggles .collapsed on #customize_body and the
-                         caret glyph, then seeds the controls per-preset. -->
+                         caret glyph, then seeds the controls per-preset. Edits here overlay
+                         the knob layer as a sparse raw-override diff (both persist). -->
                     <div class="customize-section">
                         <div class="customize-header" id="customize_toggle">
-                            <span class="customize-label">customize world</span>
+                            <span class="customize-label">advanced parameters</span>
                             <span class="customize-caret" id="customize_caret">+</span>
                         </div>
                         <div class="customize-body collapsed" id="customize_body">

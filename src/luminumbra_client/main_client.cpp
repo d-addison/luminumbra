@@ -21,6 +21,7 @@
 #include "ui/Rml_UIManager.h"
 #include "ui/core/UIHotReload.h"
 #include "world/WorldgenOverride.h"
+#include "luminumbra_common/world/KnobLayer.h" // Spec 002 Item 2: semantic-knob layer + startup invariant
 #include "world/WorldgenPreview.h"
 #include "audio/AudioManagerFactory.h"
 #include "audio/IAudioManager.h"
@@ -2347,14 +2348,35 @@ int main(int argc, char* argv[]) {
                 if (in) {
                     nlohmann::json base;
                     in >> base;
-                    Luminumbra::Client::CustomPresetResult merged =
-                        Luminumbra::Client::BuildCustomPreset(base, params);
-                    if (merged.changed) {
-                        merged.json["name"] = name;
-                        customPresetJson = merged.json.dump(2);
-                        customPtr = &customPresetJson;
-                        LUMINUMBRA_CORE_INFO("World customized: {} override(s) applied, {} skipped",
-                                             merged.applied, merged.skipped);
+                    // Spec 002 Item 2: the form carries semantic-knob entries
+                    // ("knob.<id>"/type "knob") alongside any advanced raw
+                    // overrides. If knobs are present, resolve through the engine
+                    // KnobLayer (knobs -> response curves, then overlay the sparse
+                    // override diff) and persist BOTH layers for exact reopen;
+                    // otherwise keep the legacy raw-override-only path.
+                    bool hasKnobs = false;
+                    for (const auto& p : params)
+                        if (p.type == "knob" || p.path.rfind("knob.", 0) == 0) { hasKnobs = true; break; }
+                    if (hasKnobs) {
+                        Luminumbra::Client::KnobPresetResult kr =
+                            Luminumbra::Client::BuildKnobResolvedPreset(base, params);
+                        if (kr.changed) {
+                            kr.json["name"] = name;
+                            customPresetJson = kr.json.dump(2);
+                            customPtr = &customPresetJson;
+                            LUMINUMBRA_CORE_INFO("World knob layer: {} knob(s), {} override(s)",
+                                                 kr.knob_count, kr.override_count);
+                        }
+                    } else {
+                        Luminumbra::Client::CustomPresetResult merged =
+                            Luminumbra::Client::BuildCustomPreset(base, params);
+                        if (merged.changed) {
+                            merged.json["name"] = name;
+                            customPresetJson = merged.json.dump(2);
+                            customPtr = &customPresetJson;
+                            LUMINUMBRA_CORE_INFO("World customized: {} override(s) applied, {} skipped",
+                                                 merged.applied, merged.skipped);
+                        }
                     }
                 }
             } catch (const std::exception& e) {
@@ -2456,6 +2478,19 @@ int main(int argc, char* argv[]) {
     };
 
     if (g_uiManager) {
+        // Spec 002 Item 2: startup invariant — every semantic-knob spline endpoint
+        // must lie within its mapped param's declared range (and splines be
+        // monotone with neutral==default). A violation is a programming error in
+        // the knob map, so fail loud at boot rather than ship a knob that drives a
+        // param out of range.
+        {
+            std::vector<std::string> knob_errors;
+            if (!Luminumbra::world::ValidateKnobEndpoints(knob_errors)) {
+                for (const std::string& e : knob_errors)
+                    LUMINUMBRA_CORE_ERROR("KnobLayer invariant violated: {}", e);
+                throw std::runtime_error("KnobLayer endpoint validation failed (see log)");
+            }
+        }
         g_uiManager->SetWorldCreationCallback(start_world_creation);
         // Seed the create-world customize form from a preset: read generation_params.<path>.
         g_uiManager->SetWorldParamGetter([root_path_str](const std::string& worldType,
@@ -2467,6 +2502,19 @@ int main(int argc, char* argv[]) {
                 if (!in) return "";
                 nlohmann::json j;
                 in >> j;
+                // Spec 002 Item 2: seed a semantic knob from the preset's persisted
+                // knob layer (path "knob.<id>"). Curated presets carry none -> "" ->
+                // the knob stays NEUTRAL (0.5), never inverse-lerped.
+                if (path.rfind("knob.", 0) == 0) {
+                    const std::string id = path.substr(5);
+                    const auto klp = nlohmann::json::json_pointer("/generation_params/knob_layer/knobs");
+                    if (j.contains(klp) && j.at(klp).is_object() && j.at(klp).contains(id) &&
+                        j.at(klp).at(id).is_number()) {
+                        std::ostringstream os; os << j.at(klp).at(id).get<double>();
+                        return os.str();
+                    }
+                    return "";
+                }
                 // "biomes" toggle reflects whether the preset sets a biome table.
                 if (path == "biomes.enabled") {
                     const nlohmann::json::json_pointer tjp("/generation_params/biomes/table");
@@ -2500,12 +2548,24 @@ int main(int argc, char* argv[]) {
                 if (!in) return "";
                 nlohmann::json base;
                 in >> base;
-                Luminumbra::Client::CustomPresetResult merged = Luminumbra::Client::BuildCustomPreset(base, params);
+                // Spec 002 Item 2: persist BOTH the knob layer (knob vector +
+                // baseline + override diff) AND the resolved params, so reloading
+                // the saved user preset restores the exact knob positions. Falls
+                // back to the raw-override-only path when no knobs are present.
+                bool hasKnobs = false;
+                for (const auto& p : params)
+                    if (p.type == "knob" || p.path.rfind("knob.", 0) == 0) { hasKnobs = true; break; }
+                nlohmann::json saved;
+                if (hasKnobs) {
+                    saved = Luminumbra::Client::BuildKnobResolvedPreset(base, params).json;
+                } else {
+                    saved = Luminumbra::Client::BuildCustomPreset(base, params).json;
+                }
                 const std::string worldType = "user_" + UserPresetSlug(displayName);
-                merged.json["name"] = displayName.empty() ? std::string("Custom") : displayName;
+                saved["name"] = displayName.empty() ? std::string("Custom") : displayName;
                 std::ofstream out(presets_dir / (worldType + ".json"), std::ios::binary);
                 if (!out) return "";
-                out << merged.json.dump(2);
+                out << saved.dump(2);
                 LUMINUMBRA_CORE_INFO("Saved user world preset: {}", worldType);
                 return worldType;
             } catch (const std::exception& e) {
@@ -6578,11 +6638,19 @@ int main(int argc, char* argv[]) {
                                 std::ifstream in(base_path);
                                 if (in) {
                                     nlohmann::json base; in >> base;
-                                    Luminumbra::Client::CustomPresetResult merged =
-                                        Luminumbra::Client::BuildCustomPreset(base, pv.params);
+                                    // Spec 002 Item 2: resolve the live diorama through
+                                    // the engine KnobLayer when the form carries knobs
+                                    // (knobs -> response curves + overlay overrides), so
+                                    // sliding a knob regenerates the preview.
+                                    bool hasKnobs = false;
+                                    for (const auto& p : pv.params)
+                                        if (p.type == "knob" || p.path.rfind("knob.", 0) == 0) { hasKnobs = true; break; }
+                                    nlohmann::json resolved =
+                                        hasKnobs ? Luminumbra::Client::BuildKnobResolvedPreset(base, pv.params).json
+                                                 : Luminumbra::Client::BuildCustomPreset(base, pv.params).json;
                                     const std::filesystem::path data_root =
                                         std::filesystem::path(root_path_str) / "data";
-                                    worldgenPreview->set_candidate(merged.json, data_root, seedVal);
+                                    worldgenPreview->set_candidate(resolved, data_root, seedVal);
                                 }
                             } catch (const std::exception& e) {
                                 LUMINUMBRA_CORE_WARN("Preview candidate build failed: {}", e.what());

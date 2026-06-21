@@ -840,6 +840,26 @@ body#world_creation {
 }
 
 /* ---- Collapsible "customize world" advanced worldgen params ---- */
+/* Spec 002 Item 2: the SEMANTIC KNOBS are the default surface — a prominent
+   "world feel" block above the advanced fold. Same dusk palette as the params. */
+.knob-section {
+    margin-top: 20px;
+    margin-bottom: 8px;
+}
+.knob-row {
+    margin-bottom: 14px;
+}
+.knob-row label {
+    font-size: 14px;
+    color: rgba(232, 222, 204, 220);
+    letter-spacing: 1px;
+}
+.knob-value {
+    float: right;
+    color: #C9A86A;
+    font-size: 13px;
+}
+
 .customize-section {
     margin-top: 24px;
 }

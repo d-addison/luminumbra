@@ -3,6 +3,8 @@
 #include <charconv>
 #include <cmath>
 
+#include "luminumbra_common/world/KnobLayer.h"
+
 namespace Luminumbra::Client {
 
 namespace {
@@ -91,6 +93,62 @@ CustomPresetResult BuildCustomPreset(const nlohmann::json& base, const std::vect
         }
     }
 
+    return result;
+}
+
+KnobPresetResult BuildKnobResolvedPreset(const nlohmann::json& base,
+                                         const std::vector<WorldGenParam>& params) {
+    using namespace Luminumbra::world;
+    KnobPresetResult result;
+
+    // 1. Split knob entries from raw advanced-panel override entries.
+    KnobVector knobs = NeutralKnobVector();
+    std::vector<WorldGenParam> raw;
+    raw.reserve(params.size());
+    bool knob_moved = false;
+    for (const WorldGenParam& p : params) {
+        if (p.type == "knob" || p.path.rfind("knob.", 0) == 0) {
+            const std::string id = (p.path.rfind("knob.", 0) == 0) ? p.path.substr(5) : p.path;
+            Knob k;
+            if (!KnobFromId(id, k)) continue;
+            float v = 0.5f;
+            { const char* b = p.value.c_str(); std::from_chars(b, b + p.value.size(), v); }
+            if (v < 0.0f) v = 0.0f; if (v > 1.0f) v = 1.0f;
+            knobs[static_cast<std::size_t>(k)] = v;
+            ++result.knob_count;
+            if (std::fabs(v - 0.5f) > 1e-4f) knob_moved = true;
+        } else {
+            raw.push_back(p);
+        }
+    }
+
+    // 2. Apply the knob layer over the baseline (curated preset snapshot).
+    const nlohmann::json knob_applied = ApplyKnobLayer(base, knobs);
+
+    // 3. The raw overrides are the SPARSE diff vs the KNOB-APPLIED base (so an
+    //    advanced edit that merely matches the knob result records nothing). Reuse
+    //    BuildCustomPreset's typed diff to find the real deltas.
+    const CustomPresetResult diff = BuildCustomPreset(knob_applied, raw);
+    std::vector<KnobOverride> overrides;
+    // BuildCustomPreset wrote the applied deltas into diff.json; recover them as a
+    // typed override list by re-walking `raw` against knob_applied.
+    for (const WorldGenParam& p : raw) {
+        if (p.path.empty()) continue;
+        std::string ptr = "/generation_params/";
+        for (char ch : p.path) ptr += (ch == '.') ? '/' : ch;
+        const nlohmann::json::json_pointer jp(ptr);
+        if (!diff.json.contains(jp)) continue;
+        // Keep only entries whose value actually differs from the knob-applied base.
+        if (knob_applied.contains(jp) && diff.json.at(jp) == knob_applied.at(jp)) continue;
+        overrides.push_back(KnobOverride{p.path, p.value, p.type.empty() ? std::string("float") : p.type});
+    }
+    result.override_count = static_cast<int>(overrides.size());
+
+    // 4. Persist BOTH layers: resolved generation_params (full) + the knob_layer
+    //    (knobs + baseline snapshot + override diff) for exact reopen.
+    result.json = base;
+    WriteKnobLayer(result.json, base, knobs, overrides);
+    result.changed = knob_moved || !overrides.empty();
     return result;
 }
 

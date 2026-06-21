@@ -1174,3 +1174,84 @@ TEST(WorldgenOverrideTest, EveryCustomizeParamPathIsAKnownWorldgenKey) {
     }
     EXPECT_GE(checked, 25) << "expected the full customize param set";
 }
+
+// Spec 002 Item 2 e2e: the SEMANTIC KNOBS are the default surface. They seed
+// from the preset's persisted knob layer via the WorldParamGetter (neutral 0.5
+// when a curated preset carries none), moving a knob reaches the create callback
+// as a "knob.<id>" entry, and the knob is exposed in the live-preview state so
+// the diorama regenerates. Drives the REAL Rml_UIManager headless.
+TEST(UiSmokeTest, SemanticKnobsSeedDriveCallbackAndPreview) {
+    HiddenGlContext context;
+    if (!context.ready()) {
+        GTEST_SKIP() << context.error();
+    }
+    const fs::path source_root = SourceRoot();
+    Luminumbra::Client::Rml_UIManager ui((source_root.string() + "/"));
+    ui.Init(context.window(), nullptr);
+    ASSERT_NE(ui.GetContext(), nullptr);
+
+    // The getter serves one knob ("wetness"=0.8) from a "persisted" layer; every
+    // other knob has no persisted value -> the control keeps its NEUTRAL 0.5.
+    ui.SetWorldParamGetter([&](const std::string&, const std::string& path) -> std::string {
+        if (path == "knob.wetness") return "0.8";
+        return std::string();  // curated -> neutral
+    });
+    std::optional<std::vector<Luminumbra::Client::WorldGenParam>> created_params;
+    ui.SetWorldCreationCallback([&](const std::string&, const std::string&, const std::string&,
+                                    const std::vector<Luminumbra::Client::WorldGenParam>& params) {
+        created_params = params;
+    });
+
+    Rml::ElementDocument* wc = LoadDocumentAndFind(ui, "world_creation.rml", "world_creation");
+    ASSERT_NE(wc, nullptr);
+
+    // Six knobs render as the default surface.
+    Rml::ElementList knobs;
+    wc->GetElementsByClassName(knobs, "worldgen-knob");
+    ASSERT_EQ(knobs.size(), 6u) << "exactly the six outcome knobs are the default surface";
+
+    auto knob_by_id = [&](const std::string& id) -> Rml::Element* {
+        for (auto* el : knobs) if (el->GetAttribute<Rml::String>("data-knob", "") == id) return el;
+        return nullptr;
+    };
+
+    // wetness seeds from the persisted layer (0.8); a knob with no persisted value
+    // stays neutral (0.5) — NEVER inverse-lerped.
+    Rml::Element* wetness = knob_by_id("wetness");
+    Rml::Element* mountains = knob_by_id("mountainousness");
+    ASSERT_NE(wetness, nullptr);
+    ASSERT_NE(mountains, nullptr);
+    EXPECT_NEAR(std::stof(dynamic_cast<Rml::ElementFormControl*>(wetness)->GetValue()), 0.8f, 0.01f)
+        << "wetness must seed from the persisted knob layer";
+    EXPECT_NEAR(std::stof(dynamic_cast<Rml::ElementFormControl*>(mountains)->GetValue()), 0.5f, 0.01f)
+        << "an unset knob stays neutral, not inverse-lerped";
+
+    // Move the mountainousness knob, then create -> a knob.mountainousness entry
+    // with the moved value reaches the callback (bound through the bridge, not raw).
+    dynamic_cast<Rml::ElementFormControl*>(mountains)->SetValue("0.9");
+    ClickAndUpdate(ui, wc->GetElementById("create_btn"));
+    ASSERT_TRUE(created_params.has_value());
+    bool found_mtn = false, found_wet = false;
+    for (const auto& p : *created_params) {
+        if (p.path == "knob.mountainousness") {
+            EXPECT_EQ(p.type, "knob");
+            EXPECT_NEAR(std::stof(p.value), 0.9f, 0.01f);
+            found_mtn = true;
+        }
+        if (p.path == "knob.wetness" && std::abs(std::stof(p.value) - 0.8f) < 0.01f) found_wet = true;
+    }
+    EXPECT_TRUE(found_mtn) << "the moved knob must reach the create callback as knob.<id>";
+    EXPECT_TRUE(found_wet) << "the seeded knob must travel too";
+
+    // The knob is also exposed in the live-preview state, so the host rebuilds the
+    // diorama when it moves (this is what regenerates the preview).
+    auto pv = ui.GetWorldCreationPreviewState();
+    EXPECT_TRUE(pv.active);
+    bool preview_has_knob = false;
+    for (const auto& p : pv.params)
+        if (p.path == "knob.mountainousness" && std::abs(std::stof(p.value) - 0.9f) < 0.01f)
+            preview_has_knob = true;
+    EXPECT_TRUE(preview_has_knob) << "the knob must drive the live preview state";
+
+    ui.Shutdown();
+}
