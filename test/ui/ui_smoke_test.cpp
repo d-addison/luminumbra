@@ -6,6 +6,7 @@
 #include <RmlUi/Core.h>
 #include <RmlUi/Core/Elements/ElementFormControl.h>
 
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -224,7 +225,12 @@ TEST(UiSmokeTest, AuthoredRmlDocumentsLoadAndExposeRequiredElements) {
         {"world_selection.rml", {"filter_all", "filter_recent", "filter_favorites", "back_btn", "load_selected_btn", "import_world_btn"}},
         {"settings.rml", {"settings", "setting_resolution", "setting_window_mode", "setting_vsync",
                           "setting_fov", "setting_mouse_sensitivity", "setting_audio_master",
-                          "setting_audio_sfx", "setting_audio_music", "apply_settings_btn", "back_btn"}},
+                          "setting_audio_sfx", "setting_audio_music", "apply_settings_btn", "back_btn",
+                          "vsync_toggle", "window_mode_prev", "window_mode_next", "window_mode_value"}},
+        {"pause.rml", {"pause", "resume_btn", "settings_btn", "gallery_btn", "quit_menu_btn"}},
+        {"gallery.rml", {"gallery", "back_btn"}},
+        {"hud.rml", {"hud"}},
+        {"photo_mode.rml", {"photo_mode"}},
     };
 
     int required_elements_checked = 0;
@@ -329,12 +335,14 @@ TEST(UiSmokeTest, AuthoredMenuInteractionsNavigateAndInvokeCallbacks) {
         std::string name;
         std::string seed;
         std::string type;
+        std::vector<Luminumbra::Client::WorldGenParam> params;
     };
 
     std::optional<CreatedWorld> created_world;
     std::optional<std::string> loaded_world_id;
-    ui.SetWorldCreationCallback([&](const std::string& name, const std::string& seed, const std::string& type) {
-        created_world = CreatedWorld{name, seed, type};
+    ui.SetWorldCreationCallback([&](const std::string& name, const std::string& seed, const std::string& type,
+                                    const std::vector<Luminumbra::Client::WorldGenParam>& params) {
+        created_world = CreatedWorld{name, seed, type, params};
     });
     ui.SetLoadWorldCallback([&](const std::string& world_id) {
         loaded_world_id = world_id;
@@ -506,6 +514,132 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
     EXPECT_EQ(model.save_count, 0);
     ClickAndUpdate(ui, settings->GetElementById("apply_settings_btn"));
     EXPECT_EQ(model.save_count, 1) << "Apply & Save must invoke the bridge Save()";
+
+    ui.Shutdown();
+}
+
+// The cinematic redesign's custom widgets are FUNCTIONAL (not just decorative): the vsync
+// toggle and window-mode stepper drive the bridge, keybind rows seed from / begin a rebind,
+// the create-world preset chips drive the hidden world_type, the customize section expands,
+// and worldgen param overrides are collected into the create callback.
+TEST(UiSmokeTest, RedesignedControlsAreFunctional) {
+    HiddenGlContext context;
+    if (!context.ready()) {
+        GTEST_SKIP() << context.error();
+    }
+    const fs::path source_root = SourceRoot();
+    Luminumbra::Client::Rml_UIManager ui((source_root.string() + "/"));
+    ui.Init(context.window(), nullptr);
+    ASSERT_NE(ui.GetContext(), nullptr);
+
+    struct Model {
+        bool vsync = true;
+        std::string window_mode = "borderless";
+        int save_count = 0;
+    } model;
+    std::string last_rebind_action;
+    Luminumbra::Client::SettingsBridge sb;
+    sb.GetVSync = [&] { return model.vsync; };
+    sb.SetVSync = [&](bool v) { model.vsync = v; };
+    sb.GetWindowMode = [&] { return model.window_mode; };
+    sb.SetWindowMode = [&](const std::string& v) { model.window_mode = v; };
+    sb.GetKeybind = [&](const std::string& action) -> std::string { return action == "Jump" ? "Space" : "?"; };
+    sb.BeginRebind = [&](const std::string& action) { last_rebind_action = action; };
+    sb.Save = [&] { ++model.save_count; return true; };
+    ui.SetSettingsBridge(std::move(sb));
+
+    std::optional<std::vector<Luminumbra::Client::WorldGenParam>> created_params;
+    std::optional<std::string> created_type;
+    ui.SetWorldCreationCallback([&](const std::string&, const std::string&, const std::string& type,
+                                    const std::vector<Luminumbra::Client::WorldGenParam>& params) {
+        created_type = type;
+        created_params = params;
+    });
+    ui.SetWorldParamGetter([&](const std::string&, const std::string& path) -> std::string {
+        return path == "terrain.base_amplitude" ? std::string("34") : std::string();
+    });
+
+    // --- settings: custom widgets drive the bridge ---
+    Rml::ElementDocument* settings = LoadDocumentAndFind(ui, "settings.rml", "settings");
+    ASSERT_NE(settings, nullptr);
+
+    // vsync toggle: seeded .on from GetVSync (true); a click flips it and drives SetVSync.
+    Rml::Element* vsync_toggle = settings->GetElementById("vsync_toggle");
+    ASSERT_NE(vsync_toggle, nullptr);
+    EXPECT_TRUE(vsync_toggle->IsClassSet("on")) << "vsync toggle seeds .on from GetVSync";
+    ClickAndUpdate(ui, vsync_toggle);
+    EXPECT_FALSE(model.vsync);
+    EXPECT_FALSE(vsync_toggle->IsClassSet("on"));
+
+    // window-mode stepper: value seeded from GetWindowMode; "next" cycles borderless->fullscreen.
+    Rml::Element* wm_value = settings->GetElementById("window_mode_value");
+    ASSERT_NE(wm_value, nullptr);
+    EXPECT_EQ(wm_value->GetInnerRML(), "borderless");
+    ClickAndUpdate(ui, settings->GetElementById("window_mode_next"));
+    EXPECT_EQ(model.window_mode, "fullscreen");
+    EXPECT_EQ(wm_value->GetInnerRML(), "fullscreen");
+
+    // keybind rows: chip seeded from GetKeybind; clicking the row begins a rebind for that action.
+    Rml::ElementList kb_rows;
+    settings->GetElementsByClassName(kb_rows, "keybind-rebind");
+    ASSERT_FALSE(kb_rows.empty());
+    Rml::Element* jump_row = nullptr;
+    for (auto* r : kb_rows) {
+        if (r->GetAttribute<Rml::String>("data-action", "") == "Jump") jump_row = r;
+    }
+    ASSERT_NE(jump_row, nullptr);
+    if (auto* chip = settings->GetElementById("kb_Jump")) EXPECT_EQ(chip->GetInnerRML(), "Space");
+    ClickAndUpdate(ui, jump_row);
+    EXPECT_EQ(last_rebind_action, "Jump");
+
+    // --- world creation: customize + preset chips + param overrides ---
+    Rml::ElementDocument* wc = LoadDocumentAndFind(ui, "world_creation.rml", "world_creation");
+    ASSERT_NE(wc, nullptr);
+
+    // amplitude slider seeds from the param getter (34), not its authored default.
+    Rml::ElementList wgp;
+    wc->GetElementsByClassName(wgp, "worldgen-param");
+    ASSERT_FALSE(wgp.empty());
+    Rml::Element* amp = nullptr;
+    for (auto* el : wgp) {
+        if (el->GetAttribute<Rml::String>("data-path", "") == "terrain.base_amplitude") amp = el;
+    }
+    ASSERT_NE(amp, nullptr);
+    EXPECT_NEAR(std::stof(dynamic_cast<Rml::ElementFormControl*>(amp)->GetValue()), 34.0f, 0.5f)
+        << "amplitude must seed from the param getter (34), not its authored default";
+
+    // customize toggle expands the collapsed body.
+    Rml::Element* body = wc->GetElementById("customize_body");
+    ASSERT_NE(body, nullptr);
+    EXPECT_TRUE(body->IsClassSet("collapsed"));
+    ClickAndUpdate(ui, wc->GetElementById("customize_toggle"));
+    EXPECT_FALSE(body->IsClassSet("collapsed"));
+
+    // preset chip drives the hidden world_type select.
+    Rml::ElementList chips;
+    wc->GetElementsByClassName(chips, "preset-chip");
+    Rml::Element* mons = nullptr;
+    for (auto* c : chips) {
+        if (c->GetAttribute<Rml::String>("data-preset", "") == "mountains") mons = c;
+    }
+    ASSERT_NE(mons, nullptr);
+    ClickAndUpdate(ui, mons);
+    EXPECT_TRUE(mons->IsClassSet("selected"));
+    auto* type_sel = dynamic_cast<Rml::ElementFormControl*>(wc->GetElementById("world_type"));
+    ASSERT_NE(type_sel, nullptr);
+    EXPECT_EQ(std::string(type_sel->GetValue()), "mountains");
+
+    // override a param then create -> the override reaches the create callback.
+    dynamic_cast<Rml::ElementFormControl*>(amp)->SetValue("123");
+    ClickAndUpdate(ui, wc->GetElementById("create_btn"));
+    ASSERT_TRUE(created_params.has_value());
+    EXPECT_EQ(*created_type, "mountains");
+    bool found = false;
+    for (const auto& p : *created_params) {
+        // Range inputs report formatted floats (e.g. "123.000000"); compare numerically.
+        if (p.path == "terrain.base_amplitude" && std::abs(std::stof(p.value) - 123.0f) < 0.5f) found = true;
+    }
+    EXPECT_TRUE(found) << "worldgen param override must reach the create callback";
 
     ui.Shutdown();
 }
