@@ -38,6 +38,10 @@ struct CreatureBrainStats {
 // How strongly herd flocking biases the action heading (unit-scale; the action dir is also
 // unit, so this is a fractional blend that keeps flee/hunt dominant).
 inline constexpr float kHerdWeight = 0.8f;
+// How strongly herd flocking matches the group's mean heading (Reynolds alignment, the 3rd term).
+// 0 = OFF, which keeps the steer byte-identical to the cohesion+separation result (canonical roster
+// + 1v1 tests stay exact). Tune > 0 to make a herd converge to a common heading.
+inline constexpr float kAlignmentWeight = 0.0f;
 // Predator catch reach (m) and how much catching a prey sates the predator's hunger.
 inline constexpr float kCatchRadius = 2.2f;
 inline constexpr float kCatchSatiation = 0.8f;
@@ -57,6 +61,7 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
     struct Snap {
         entt::entity e;
         float x, z;
+        float hx, hz;  // prior-tick heading (wish velocity) for the Reynolds alignment term
         bool predator;
         bool eaten;
     };
@@ -65,7 +70,7 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
     for (auto e : ents) {
         const auto& tf = view.get<Comp::TransformComponent>(e);
         const auto& c = view.get<Comp::CreatureComponent>(e);
-        snap.push_back({e, tf.position.x, tf.position.z, c.is_predator, c.eaten});
+        snap.push_back({e, tf.position.x, tf.position.z, c.wish_x, c.wish_z, c.is_predator, c.eaten});
     }
 
     // Herd-flocking acceleration: bucket the snapshot into a per-role uniform spatial grid
@@ -204,12 +209,20 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
             const UniformSpatialGrid& grid = cr.is_predator ? predGrid : preyGrid;
             grid.QueryRadius(sx, sz, herdHits);
             std::vector<std::pair<float, float>> herd;
+            std::vector<std::pair<float, float>> herdHeadings;  // index-aligned with `herd`
             herd.reserve(herdHits.size());
+            herdHeadings.reserve(herdHits.size());
             for (std::uint32_t hi : herdHits) {
                 if (static_cast<std::size_t>(hi) == selfIdx) continue;
                 herd.emplace_back(snap[hi].x, snap[hi].z);
+                herdHeadings.emplace_back(snap[hi].hx, snap[hi].hz);
             }
-            const FlockSteer fs = ComputeFlockSteer(sx, sz, herd);
+            // alignment_weight default 0 (kAlignmentWeight) -> alignment is skipped and the steer is
+            // byte-identical to the cohesion+separation result; passing headings has zero effect
+            // until the weight is tuned > 0.
+            FlockParams fp{};
+            fp.alignment_weight = kAlignmentWeight;
+            const FlockSteer fs = ComputeFlockSteer(sx, sz, herd, fp, &herdHeadings);
             adirx += fs.x * kHerdWeight;
             adirz += fs.z * kHerdWeight;
         }

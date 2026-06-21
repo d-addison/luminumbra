@@ -19,10 +19,11 @@ namespace luminumbra::ai {
 namespace dm = ::Luminumbra::DeterministicMath;
 
 struct FlockParams {
-    float neighbor_radius = 12.0f;    // cohesion considers same-role neighbours within this
+    float neighbor_radius = 12.0f;    // cohesion + alignment consider same-role neighbours within this
     float separation_radius = 3.0f;   // separation kicks in below this spacing
     float cohesion_weight = 0.6f;     // pull toward the group centroid
     float separation_weight = 1.4f;   // push off crowding (dominates up close)
+    float alignment_weight = 0.0f;    // match the group's mean heading (3rd Reynolds term; 0 = off)
 };
 
 // A steering vector in the XZ plane (NOT normalized; the caller blends + renormalizes).
@@ -56,24 +57,41 @@ inline float FromFixed(std::int64_t v) {
 }
 
 // neighbours: same-role creature positions (x, z) EXCLUDING self.
-inline FlockSteer ComputeFlockSteer(float sx, float sz,
-                                    const std::vector<std::pair<float, float>>& neighbors,
-                                    const FlockParams& p = {}) {
+// neighbor_headings (optional): per-neighbour heading vectors (wx, wz), index-aligned with
+// `neighbors`, used ONLY for the alignment term when `p.alignment_weight > 0`. Pass nullptr (or
+// leave alignment_weight at 0) to skip alignment entirely — the steer is then byte-identical to the
+// cohesion+separation-only result, so existing callers and goldens are unaffected. Like cohesion,
+// the heading sum is reduced in int64 fixed point so it is order-independent w.r.t. the grid gather.
+inline FlockSteer ComputeFlockSteer(
+    float sx, float sz,
+    const std::vector<std::pair<float, float>>& neighbors,
+    const FlockParams& p = {},
+    const std::vector<std::pair<float, float>>* neighbor_headings = nullptr) {
     FlockSteer steer;
     if (neighbors.empty()) return steer;
 
+    const bool do_align = p.alignment_weight > 0.0f && neighbor_headings != nullptr &&
+                          neighbor_headings->size() == neighbors.size();
+
     // Cohesion: centroid of neighbours within the cohesion radius (sums in fixed point).
     // Separation: push off neighbours below the separation radius (sums in fixed point).
+    // Alignment: mean heading of neighbours within the cohesion radius (sums in fixed point).
     std::int64_t cx_fp = 0, cz_fp = 0;
     int cohesion_count = 0;
     std::int64_t sepx_fp = 0, sepz_fp = 0;
-    for (const auto& [nx, nz] : neighbors) {
+    std::int64_t ahx_fp = 0, ahz_fp = 0;
+    for (std::size_t i = 0; i < neighbors.size(); ++i) {
+        const float nx = neighbors[i].first, nz = neighbors[i].second;
         const float dx = nx - sx, dz = nz - sz;
         const float dist = dm::Sqrt(dx * dx + dz * dz);
         if (dist <= p.neighbor_radius) {
             cx_fp += ToFixed(nx);
             cz_fp += ToFixed(nz);
             ++cohesion_count;
+            if (do_align) {
+                ahx_fp += ToFixed((*neighbor_headings)[i].first);
+                ahz_fp += ToFixed((*neighbor_headings)[i].second);
+            }
         }
         if (dist > 1.0e-5f && dist < p.separation_radius) {
             // Away from this neighbour, weighted by how close it is (1 at touching -> 0 at radius).
@@ -85,9 +103,9 @@ inline FlockSteer ComputeFlockSteer(float sx, float sz,
     }
 
     if (cohesion_count > 0) {
+        const float invn = 1.0f / static_cast<float>(cohesion_count);
         const float cx = FromFixed(cx_fp);
         const float cz = FromFixed(cz_fp);
-        const float invn = 1.0f / static_cast<float>(cohesion_count);
         const float toward_x = cx * invn - sx;
         const float toward_z = cz * invn - sz;
         const float len = dm::Sqrt(toward_x * toward_x + toward_z * toward_z);
@@ -95,6 +113,18 @@ inline FlockSteer ComputeFlockSteer(float sx, float sz,
             const float k = p.cohesion_weight / len;
             steer.x += toward_x * k;
             steer.z += toward_z * k;
+        }
+        if (do_align) {
+            // Toward the unit mean neighbour heading * alignment_weight (mirrors cohesion's
+            // unit-normalize-then-weight, so the term is commensurate with cohesion/separation).
+            const float mhx = FromFixed(ahx_fp) * invn;
+            const float mhz = FromFixed(ahz_fp) * invn;
+            const float al = dm::Sqrt(mhx * mhx + mhz * mhz);
+            if (al > 1.0e-5f) {
+                const float ak = p.alignment_weight / al;
+                steer.x += mhx * ak;
+                steer.z += mhz * ak;
+            }
         }
     }
     steer.x += FromFixed(sepx_fp) * p.separation_weight;

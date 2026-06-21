@@ -57,4 +57,44 @@ TEST(Flocking, BeyondRadiusIgnored) {
     EXPECT_FLOAT_EQ(s.z, 0.0f);
 }
 
+// Alignment OFF (default weight 0) is byte-identical whether or not headings are passed — so the
+// CreatureBrainSystem call that now always passes headings stays exact vs the old positions-only
+// steer (canonical roster + 1v1 goldens unaffected).
+TEST(Flocking, AlignmentOffIsByteIdenticalToNoHeadings) {
+    std::vector<std::pair<float, float>> n = {{8.0f, 0.0f}, {2.0f, 1.0f}, {-5.0f, 4.0f}};
+    std::vector<std::pair<float, float>> headings = {{0.0f, 1.0f}, {0.0f, 1.0f}, {0.0f, 1.0f}};
+    const FlockSteer base = ComputeFlockSteer(0.5f, 0.5f, n);          // positions-only
+    FlockParams p;                                                     // alignment_weight == 0
+    const FlockSteer withH = ComputeFlockSteer(0.5f, 0.5f, n, p, &headings);
+    EXPECT_FLOAT_EQ(base.x, withH.x);
+    EXPECT_FLOAT_EQ(base.z, withH.z);
+}
+
+// Alignment ON: neighbours all heading +z make the steer gain a +z component vs the
+// alignment-off baseline (the 3rd Reynolds term pulls toward the group's mean heading).
+TEST(Flocking, AlignmentMatchesMeanHeading) {
+    std::vector<std::pair<float, float>> n = {{8.0f, 0.0f}, {9.0f, 1.0f}, {9.0f, -1.0f}};
+    std::vector<std::pair<float, float>> headings = {{0.0f, 2.0f}, {0.0f, 3.0f}, {0.0f, 2.5f}};
+    const FlockSteer off = ComputeFlockSteer(0.0f, 0.0f, n);
+    FlockParams p;
+    p.alignment_weight = 1.0f;
+    const FlockSteer on = ComputeFlockSteer(0.0f, 0.0f, n, p, &headings);
+    EXPECT_GT(on.z, off.z + 0.5f) << "alignment should bias the steer toward the +z mean heading";
+}
+
+// Order independence WITH alignment on: shuffling neighbours + their headings together yields the
+// identical steer (the heading sum is reduced in fixed point, like cohesion/separation).
+TEST(Flocking, AlignmentOrderIndependent) {
+    std::vector<std::pair<float, float>> na = {{8.0f, 0.0f}, {2.0f, 1.0f}, {-5.0f, 4.0f}};
+    std::vector<std::pair<float, float>> ha = {{1.0f, 2.0f}, {0.5f, 1.0f}, {-1.0f, 3.0f}};
+    std::vector<std::pair<float, float>> nb = {{-5.0f, 4.0f}, {8.0f, 0.0f}, {2.0f, 1.0f}};
+    std::vector<std::pair<float, float>> hb = {{-1.0f, 3.0f}, {1.0f, 2.0f}, {0.5f, 1.0f}};
+    FlockParams p;
+    p.alignment_weight = 0.7f;
+    const FlockSteer sa = ComputeFlockSteer(0.5f, 0.5f, na, p, &ha);
+    const FlockSteer sb = ComputeFlockSteer(0.5f, 0.5f, nb, p, &hb);
+    EXPECT_FLOAT_EQ(sa.x, sb.x);
+    EXPECT_FLOAT_EQ(sa.z, sb.z);
+}
+
 }  // namespace
