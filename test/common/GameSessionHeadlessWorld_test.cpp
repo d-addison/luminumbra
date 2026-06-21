@@ -5,11 +5,15 @@
 #include <gtest/gtest.h>
 
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/world/GameSession.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 
 namespace fs = std::filesystem;
 
@@ -107,6 +111,56 @@ TEST(GameSessionHeadlessWorldTest, HeadlessCreateWorldSucceedsWithPresetOnly) {
         EXPECT_FALSE(session.GetMetadata().worldId.empty());
         // World metadata landed inside the headless root.
         EXPECT_TRUE(fs::exists(root.path() / "worlds" / "saves" / session.GetMetadata().worldId / "world_info.json"));
+    }
+    jobs.shutdown();
+}
+
+// A customized world embeds its resolved preset in its OWN save dir (no global custom files) and
+// actually generates different terrain. Proves the create-world custom-params path below the UI
+// callback boundary, which the UI e2e cannot reach.
+TEST(GameSessionHeadlessWorldTest, CustomPresetEmbedsInSaveAndChangesTerrain) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup();
+    {
+        // Base world from the named preset.
+        GameSession base;
+        base.SetJobSystem(&jobs);
+        base.SetRootPath(root.root_string());
+        ASSERT_TRUE(base.CreateWorld("Base", "777", "default"));
+        ASSERT_NE(base.GetWorldSystem(), nullptr);
+
+        // Customized world: same seed, much larger amplitude (a resolved preset built off default).
+        std::ifstream pf(root.path() / "worlds" / "atlas" / "presets" / "default.json");
+        nlohmann::json j;
+        pf >> j;
+        const double orig = j["generation_params"]["terrain"]["base_amplitude"].get<double>();
+        j["generation_params"]["terrain"]["base_amplitude"] = orig + 120.0;
+        const std::string custom = j.dump();
+
+        GameSession custom_world;
+        custom_world.SetJobSystem(&jobs);
+        custom_world.SetRootPath(root.root_string());
+        ASSERT_TRUE(custom_world.CreateWorld("Custom", "777", "default", &custom));
+        ASSERT_NE(custom_world.GetWorldSystem(), nullptr);
+
+        // The resolved preset is embedded in THIS world's save dir; worldType keeps the base name.
+        const fs::path embedded =
+            root.path() / "worlds" / "saves" / custom_world.GetMetadata().worldId / "preset.json";
+        EXPECT_TRUE(fs::exists(embedded)) << "custom preset must be embedded in the world's own save";
+        EXPECT_EQ(custom_world.GetMetadata().worldType, "default") << "worldType records the base name";
+
+        // The cranked amplitude must change generated terrain at some sampled point.
+        const std::vector<std::pair<float, float>> pts = {{8.f, 8.f}, {41.f, 17.f}, {-33.f, 52.f}};
+        bool differs = false;
+        for (const auto& [x, z] : pts) {
+            if (base.GetWorldSystem()->GetTerrainHeightAt(x, z) !=
+                custom_world.GetWorldSystem()->GetTerrainHeightAt(x, z)) {
+                differs = true;
+                break;
+            }
+        }
+        EXPECT_TRUE(differs) << "a larger amplitude override must produce different terrain";
     }
     jobs.shutdown();
 }
