@@ -30,6 +30,7 @@
 #include "../components/GrazeableComponent.h"
 #include "../ai/InstinctLocomotionSystem.h"
 #include "../ai/PerceptionSystem.h"
+#include "../ai/ForagingSystem.h"  // FR-3: ant-trail foraging (Deneubourg double-bridge)
 #include "../ai/ScentDepositSystem.h"
 #include "../ai/ScentField.h"
 #include "../ai/ScentSteeringSystem.h"
@@ -197,10 +198,21 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         // no scent emitter/sensor components means no field mutation, while active
         // ecology worlds get deterministic deposit -> diffuse/evaporate -> clamp.
         const bool scent_active = HasScentParticipants();
-        if (scent_active && m_scentField) {
-            luminumbra::ai::RunScentDepositOnTick(
-                m_registry, *m_scentField, ScentOriginFor(m_metadata.spawnPoint.x),
-                ScentOriginFor(m_metadata.spawnPoint.z), kScentCellSize);
+        // FR-3: ant foraging deposits trails into the SAME scent field (channels 2/3), so it runs in
+        // this slot BEFORE the diffuse/evaporate Step (its deposits then diffuse + evaporate this
+        // tick, like creature scent). Opt-in via ForagerComponent: a roster with none is a no-op, so
+        // the canonical roster (and any scent-only world) is byte-identical. Integer/id-ordered/libm-free.
+        const auto foragers_view = m_registry.view<const Luminumbra::Components::ForagerComponent>();
+        const bool foraging_active = foragers_view.begin() != foragers_view.end();
+        if ((scent_active || foraging_active) && m_scentField) {
+            if (scent_active) {
+                luminumbra::ai::RunScentDepositOnTick(
+                    m_registry, *m_scentField, ScentOriginFor(m_metadata.spawnPoint.x),
+                    ScentOriginFor(m_metadata.spawnPoint.z), kScentCellSize);
+            }
+            if (foraging_active) {
+                luminumbra::ai::RunForagingOnTick(m_registry, *m_scentField);
+            }
             // FR-2: advect the scent downwind by the PRIOR-tick wind (the wind field is updated
             // later this tick at slot 3, so sampling here keeps the slot order stable). Convert
             // world-units/sec -> cells/step via dt and the cell size. Scale 0 -> zero wind ->
