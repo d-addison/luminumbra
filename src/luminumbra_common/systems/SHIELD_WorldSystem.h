@@ -365,6 +365,17 @@ public:
     // sdf_data empty and skipping the 3D cave-noise grid entirely. All
     // existing callers default to full generation.
     void GenerateChunkData(::Luminumbra::Chunk& chunk, int target_step = 1) const;
+    // FR-B1: stamp authored structure voxels into a freshly generated FULL-RES
+    // chunk (sdf_data populated, step <= 1). Enumerates every structure site
+    // whose footprint can reach this chunk (chunk AABB padded by each pool's
+    // footprint_radius), drops each site to a single integer floor of the
+    // surface (computed once per site, identical across all chunks/paths), skips
+    // sub-SEA_LEVEL sites, then for each in-bounds assembled voxel sets
+    // sdf_data = -1 (solid) and lazily-allocated material_data = voxel.material.
+    // No-op (and no allocation) when structures are disabled or sdf_data is empty
+    // (coarse step>1 path), so pristine/structures-off worlds stay byte-identical.
+    // base_pos is the chunk's world-voxel origin (chunk.get_coords() * CHUNK_SIZE).
+    void StampStructuresIntoChunk(::Luminumbra::Chunk& chunk, const IVec3& base_pos) const;
     // T-I6 Wave C: stream around MULTIPLE anchors (multi-player / multi-camera). The
     // wanted-set is the UNION of each anchor's disc; the shared active-chunk budget and
     // eviction use distance-to-CLOSEST-anchor. The single-anchor overload below forwards

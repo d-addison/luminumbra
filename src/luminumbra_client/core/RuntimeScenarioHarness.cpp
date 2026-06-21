@@ -4769,6 +4769,13 @@ bool CarveSphereIntoChunk(Luminumbra::Chunk& chunk, const Luminumbra::Vec3& cent
                     static_cast<std::size_t>(z) * size_x * size_y;
                 if (carve_density > chunk.sdf_data[index]) {
                     chunk.sdf_data[index] = carve_density;
+                    // FR-B1: carving to air clears any authored structure
+                    // material at this voxel so a mined structure voxel reads as
+                    // plain air (sdf air + material 0), not lingering Stone.
+                    if (!chunk.material_data.empty() &&
+                        index < chunk.material_data.size()) {
+                        chunk.material_data[index] = 0u;
+                    }
                     carved = true;
                 }
             }

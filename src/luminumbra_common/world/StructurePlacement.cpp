@@ -1,6 +1,7 @@
 #include "StructurePlacement.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <fstream>
 #include <system_error>
 
@@ -188,12 +189,53 @@ StructureTemplatePool LoadStructureTemplatePool(
         pool.errors.push_back("structure type '" + type + "' has no piece templates");
     }
 
+    // FR-B1: conservative X/Z footprint half-extent (metres) of any assembled
+    // structure relative to the site origin. Max over every piece of:
+    //  - each box's max(|min|, |min + size|) on X and Z, and
+    //  - each socket attach position on X and Z (sockets can translate jigsaw
+    //    candidate pieces away from the origin during assembly).
+    // long long + std::llabs keep the intermediates overflow-free; clamped to a
+    // non-negative int. Used to pad the chunk AABB so boundary-straddling
+    // structures are enumerated by every chunk they touch.
+    {
+        long long max_extent = 0;
+        const auto consider = [&max_extent](long long value) {
+            const long long a = std::llabs(value);
+            if (a > max_extent) {
+                max_extent = a;
+            }
+        };
+        for (const StructurePiece& piece : pool.pieces) {
+            for (const StructureBox& box : piece.boxes) {
+                consider(static_cast<long long>(box.min.x));
+                consider(static_cast<long long>(box.min.x) + box.size.x);
+                consider(static_cast<long long>(box.min.z));
+                consider(static_cast<long long>(box.min.z) + box.size.z);
+            }
+            for (const StructureSocket& socket : piece.sockets) {
+                // A candidate piece's join socket coincides with a root socket
+                // world position, so the candidate's far box corner can reach up
+                // to (root socket reach) + (candidate piece extent). Bound it by
+                // doubling the larger of the two contributing magnitudes; this is
+                // a conservative superset (over-coverage only widens the disjoint
+                // enumeration, never changes which voxels a chunk writes).
+                consider(2ll * static_cast<long long>(socket.position.x));
+                consider(2ll * static_cast<long long>(socket.position.z));
+            }
+        }
+        if (max_extent > 1000000ll) {
+            max_extent = 1000000ll; // sanity clamp; far beyond any real template
+        }
+        pool.footprint_radius = static_cast<int>(max_extent);
+    }
+
     // Content hash over the canonicalized pool (placement params + pieces).
     u64 h = kFnvOffsetBasis;
     FnvMixValue(h, pool.spacing);
     FnvMixValue(h, pool.separation);
     FnvMixValue(h, pool.salt);
     FnvMixValue(h, pool.density);
+    FnvMixValue(h, pool.footprint_radius);
     for (const StructurePiece& piece : pool.pieces) {
         FnvMix(h, piece.name.data(), piece.name.size());
         for (const StructureBox& box : piece.boxes) {

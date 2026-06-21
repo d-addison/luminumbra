@@ -33,6 +33,7 @@ const std::vector<std::string>& PersistedFields() {
         "state",
         "sdf_data",
         "heightmap_data",
+        "material_data",
         "mesh_vertices",
         "mesh_indices",
         "water_mesh_vertices",
@@ -233,6 +234,9 @@ nlohmann::json ChunkToJson(const Chunk& chunk) {
         {"state_value", static_cast<int>(state)},
         {"sdf_data", chunk.sdf_data},
         {"heightmap_data", chunk.heightmap_data},
+        // FR-B1: per-voxel structure material channel. Empty for non-structure
+        // chunks => serializes as [] => byte-identical for structures-off worlds.
+        {"material_data", chunk.material_data},
         {"mesh_vertices", MeshVerticesToJson(chunk.mesh_vertices)},
         {"mesh_indices", chunk.mesh_indices},
         {"water_mesh_vertices", MeshVerticesToJson(chunk.water_mesh_vertices)},
@@ -266,6 +270,9 @@ void ApplyChunkJson(const nlohmann::json& value, Chunk& chunk) {
     chunk.set_state(ChunkStateFromName(value.at("state").get<std::string>()));
     chunk.sdf_data = value.at("sdf_data").get<std::vector<float>>();
     chunk.heightmap_data = value.at("heightmap_data").get<std::vector<float>>();
+    // FR-B1: tolerant read (default empty) so old saves without the field still
+    // load and the single-missing-field negative fixture is unaffected.
+    chunk.material_data = value.value("material_data", std::vector<u8>{});
     chunk.mesh_vertices = MeshVerticesFromJson(value.at("mesh_vertices"));
     chunk.mesh_indices = value.at("mesh_indices").get<std::vector<u32>>();
     chunk.water_mesh_vertices = MeshVerticesFromJson(value.at("water_mesh_vertices"));
@@ -770,6 +777,9 @@ WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(const WorldStre
             {"state_value", full.at("state_value")},
             {"sdf_data", full.at("sdf_data")},
             {"heightmap_data", full.at("heightmap_data")},
+            // FR-B1: structure material channel is terrain worldgen output.
+            // Empty vector => [] => byte-zero contribution for structures-off.
+            {"material_data", full.at("material_data")},
         });
 
         // Mesh: surface + water mesh geometry and meshing bookkeeping.

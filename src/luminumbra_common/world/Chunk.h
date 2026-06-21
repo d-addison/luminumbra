@@ -48,6 +48,16 @@ public:
     std::vector<f32> sdf_data;
     std::vector<f32> heightmap_data;
 
+    // FR-B1 per-voxel material channel. Parallel to sdf_data, same index formula
+    // (x + y*(CHUNK_SIZE_X+1) + z*(CHUNK_SIZE_X+1)*(CHUNK_SIZE_Y+1)). LAZILY
+    // allocated: stays EMPTY for chunks with no authored structure voxels so
+    // pristine/structures-off worlds serialize and hash byte-identically. Only
+    // StampStructuresIntoChunk allocates it (assign(padded_volume, 0) where
+    // 0 = MaterialType::Air sentinel = "no authored material; classify
+    // analytically"). Guard .empty() before every read. Far-LOD (step>1) chunks
+    // carry no structure material (documented gap) and never allocate this.
+    std::vector<u8> material_data;
+
     // --- Render Data ---
     std::vector<VoxelVertex> mesh_vertices;
     std::vector<u32> mesh_indices;
@@ -66,6 +76,12 @@ public:
     // pending and sdf_data is never written off the main thread.
     std::vector<f32> pending_sdf_data;
     std::vector<f32> pending_heightmap_data;
+    // FR-B1: the off-thread LOD0 promotion lane stamps structure materials into
+    // the scratch chunk and stages them here for main-thread publication
+    // alongside pending_sdf_data (else a promoted chunk loses its structure
+    // materials -> run != replay). Empty when the promoted chunk has no
+    // structure voxels (lazy alloc preserved across the lane).
+    std::vector<u8> pending_material_data;
 
     std::atomic<bool> has_collision{false};
     std::atomic<int> current_lod{-1};

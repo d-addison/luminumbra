@@ -126,6 +126,7 @@ add_executable(common_tests
     common/ServerHeadlessHygiene_test.cpp
     common/SimulationClock_test.cpp
     common/StructurePlacement_test.cpp
+    common/StructureStamping_test.cpp
     common/TerrainPresetLoader_test.cpp
     common/KnobLayer_test.cpp
     common/LayerGraph_test.cpp

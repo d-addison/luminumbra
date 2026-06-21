@@ -66,6 +66,17 @@ struct StructureTemplatePool {
     std::vector<std::string> errors;
     std::vector<std::string> warnings;
     u64 content_hash = 0;
+    // FR-B1: conservative half-extent (metres) of any assembled structure on the
+    // X/Z plane relative to the site origin. Computed once in
+    // LoadStructureTemplatePool as the max over every piece's boxes (and socket
+    // attach points, which can translate jigsaw pieces away from the origin) of
+    // max(|min|, |min + size|) on X and Z. The chunk-stamp enumeration pads the
+    // chunk AABB by this radius so a structure whose voxels straddle a chunk
+    // border (cairn boxes have negative mins) is enumerated by every chunk it
+    // touches; each chunk then writes only the in-bounds voxels (disjoint subset
+    // => boundary-complete, no double-stamp, order-independent). Folded into
+    // content_hash so a template change self-invalidates far tiles.
+    int footprint_radius = 0;
 
     bool ok() const { return errors.empty() && !pieces.empty(); }
 };

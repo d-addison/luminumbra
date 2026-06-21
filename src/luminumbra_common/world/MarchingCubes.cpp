@@ -948,6 +948,19 @@ void PolygoniseTerrain(
 
     const float* const sdf = chunk.sdf_data.data();
 
+    // FR-B1: per-voxel structure material channel (parallel to sdf, same index
+    // formula). Empty for chunks with no authored structure voxels => the stored
+    // material is never consulted and PASS 1b stays byte-identical to today.
+    const bool has_material =
+        chunk.material_data.size() == chunk.sdf_data.size();
+    const u8* const material = has_material ? chunk.material_data.data() : nullptr;
+    // Stored override material captured per emitted vertex during PASS 1 (0 = no
+    // override; classify analytically). Re-applied after PASS 1b only where != 0.
+    std::vector<u8> vertex_material_override;
+    if (has_material) {
+        vertex_material_override.reserve(CHUNK_VOLUME / 4);
+    }
+
     // --- PASS 1: Generate unique vertices and triangle indices ---
     std::size_t cells_visited = 0;
     std::size_t active_cells = 0;
@@ -985,10 +998,12 @@ void PolygoniseTerrain(
                         if (cached_index != kNoCachedVertex) {
                             vert_indices[i] = cached_index;
                         } else {
-                            Vec3 p1 = gridcell.p[edge_connections[i][0]];
-                            Vec3 p2 = gridcell.p[edge_connections[i][1]];
-                            f32 v1 = gridcell.val[edge_connections[i][0]];
-                            f32 v2 = gridcell.val[edge_connections[i][1]];
+                            const int corner_a = edge_connections[i][0];
+                            const int corner_b = edge_connections[i][1];
+                            Vec3 p1 = gridcell.p[corner_a];
+                            Vec3 p2 = gridcell.p[corner_b];
+                            f32 v1 = gridcell.val[corner_a];
+                            f32 v2 = gridcell.val[corner_b];
                             Vec3 new_pos = VertexInterp(isolevel, p1, p2, v1, v2);
 
                             // T-I4-DR-shaping-perf: material is classified in a
@@ -1002,6 +1017,18 @@ void PolygoniseTerrain(
                             u32 new_idx = static_cast<u32>(vertices.size() - 1);
                             vert_indices[i] = new_idx;
                             cached_index = new_idx;
+
+                            // FR-B1: capture the authored material of this edge's
+                            // SOLID corner (val < isolevel). First-writer-wins on
+                            // the shared edge cache => stamped per edge exactly
+                            // once, fixed scan order => deterministic. 0 = no
+                            // authored material (classify analytically in 1b).
+                            if (has_material) {
+                                const int solid_corner =
+                                    (v1 < isolevel) ? corner_a : corner_b;
+                                vertex_material_override.push_back(
+                                    material[cell_base + kCornerIndexOffsets[solid_corner]]);
+                            }
                         }
                     }
                 }
@@ -1058,6 +1085,17 @@ void PolygoniseTerrain(
                                              materials.data());
         for (size_t i = 0; i < vertices.size(); ++i) {
             vertices[i].material_id = materials[i];
+        }
+        // FR-B1: override the analytic classification with the authored structure
+        // material on vertices created on a structure edge-corner (override != 0).
+        // Empty material_data => vertex_material_override is empty => no-op =>
+        // PASS 1b byte-identical to today.
+        if (has_material && vertex_material_override.size() == vertices.size()) {
+            for (size_t i = 0; i < vertices.size(); ++i) {
+                if (vertex_material_override[i] != 0) {
+                    vertices[i].material_id = static_cast<u32>(vertex_material_override[i]);
+                }
+            }
         }
     }
 

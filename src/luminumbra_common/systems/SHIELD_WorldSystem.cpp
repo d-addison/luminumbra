@@ -3100,6 +3100,89 @@ SHIELD_WorldSystem::FrustumSurfaceCoverageStats SHIELD_WorldSystem::get_frustum_
     return stats;
 }
 
+void SHIELD_WorldSystem::StampStructuresIntoChunk(
+    Luminumbra::Chunk& chunk, const IVec3& base_pos) const {
+    // Guard: only the full-res path (sdf_data populated). The step>1 coarse path
+    // leaves sdf_data empty and carries no structure material (documented gap).
+    if (!m_structures_enabled || m_structure_pools.empty() || chunk.sdf_data.empty()) {
+        return;
+    }
+
+    const int size_x = CHUNK_SIZE_X + 1;
+    const int size_y = CHUNK_SIZE_Y + 1;
+    const int size_z = CHUNK_SIZE_Z + 1;
+    const size_t padded_volume = static_cast<size_t>(size_x) * size_y * size_z;
+    if (chunk.sdf_data.size() != padded_volume) {
+        return; // defensive: mismatched lattice, do not stamp
+    }
+
+    // Chunk voxel-coordinate bounds (the padded lattice spans [base, base+SIZE]
+    // inclusive; voxels owned by this chunk for stamping are [base, base+SIZE]
+    // so shared boundary voxels are written consistently by each neighbour).
+    const int min_x = base_pos.x;
+    const int min_y = base_pos.y;
+    const int min_z = base_pos.z;
+
+    for (const World::StructureTemplatePool& pool : m_structure_pools) {
+        if (!pool.ok()) {
+            continue;
+        }
+        // Enumerate sites over the chunk X/Z AABB padded by the pool footprint,
+        // so a structure whose voxels straddle the chunk border is seen here.
+        const int pad = std::max(0, pool.footprint_radius);
+        const std::vector<World::StructureSite> sites = World::SitesInArea(
+            pool, m_seed,
+            min_x - pad, min_z - pad,
+            base_pos.x + CHUNK_SIZE_X + pad + 1,
+            base_pos.z + CHUNK_SIZE_Z + pad + 1);
+
+        for (const World::StructureSite& enumerated : sites) {
+            // Drop the site to a SINGLE integer floor of the surface height,
+            // computed once per site so every chunk/path that touches this
+            // structure agrees on its Y (determinism: identical across paths).
+            const float surface = GetTerrainHeightAt(
+                static_cast<float>(enumerated.origin.x),
+                static_cast<float>(enumerated.origin.z));
+            if (surface < SEA_LEVEL) {
+                continue; // no half-submerged structures (deterministic skip)
+            }
+            const int floor_y = static_cast<int>(std::floor(surface));
+
+            World::StructureSite site = enumerated;
+            site.origin.y = floor_y;
+            const std::vector<World::StructureVoxel> voxels =
+                World::AssembleStructure(pool, site);
+
+            for (const World::StructureVoxel& voxel : voxels) {
+                // Only write voxels that fall inside this chunk's lattice. The
+                // padded enumeration makes neighbouring chunks each own a
+                // disjoint subset of a straddling structure (boundary-complete,
+                // no double-stamp, order-independent).
+                const int lx = voxel.position.x - min_x;
+                const int ly = voxel.position.y - min_y;
+                const int lz = voxel.position.z - min_z;
+                if (lx < 0 || lx >= size_x ||
+                    ly < 0 || ly >= size_y ||
+                    lz < 0 || lz >= size_z) {
+                    continue;
+                }
+                const size_t index =
+                    static_cast<size_t>(lx) +
+                    static_cast<size_t>(ly) * size_x +
+                    static_cast<size_t>(lz) * size_x * size_y;
+
+                // Lazily allocate the material channel on first stamp (0 = Air
+                // sentinel). Empty for non-structure chunks => byte-identical.
+                if (chunk.material_data.empty()) {
+                    chunk.material_data.assign(padded_volume, 0u);
+                }
+                chunk.sdf_data[index] = -1.0f;          // solid
+                chunk.material_data[index] = voxel.material;
+            }
+        }
+    }
+}
+
 void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_step) const {
    const IVec3 coords = chunk.get_coords();
    const IVec3 base_pos = coords * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
@@ -3183,6 +3266,10 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_
            }
        }
        
+       // FR-B1: stamp authored structure voxels into the now-complete SDF
+       // (solid density + per-voxel material). No-op when structures disabled.
+       StampStructuresIntoChunk(chunk, base_pos);
+
        // Generation produces the canonical voxel data; only post-generation
        // edits count as unsaved dirty state.
        chunk.clear_voxel_data_dirty();
@@ -3286,6 +3373,11 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_
            }
        }
    }
+
+   // FR-B1: stamp authored structure voxels into the populated SDF (solid
+   // density + per-voxel material) before the dirty flag is cleared. No-op when
+   // structures are disabled or sdf_data is empty (coarse step>1 path).
+   StampStructuresIntoChunk(chunk, base_pos);
 
    // Generation produces the canonical voxel data; only post-generation edits
    // count as unsaved dirty state.
@@ -3486,6 +3578,12 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
                     if (backfilled_voxel_data) {
                         chunk->pending_sdf_data = std::move(scratch.sdf_data);
                         chunk->pending_heightmap_data = std::move(scratch.heightmap_data);
+                        // FR-B1: carry the structure material channel through the
+                        // promotion lane. GenerateChunkData stamped it into the
+                        // scratch chunk; staging it here (empty when the promoted
+                        // chunk has no structure voxels) keeps promoted chunks'
+                        // structure materials, so run == replay.
+                        chunk->pending_material_data = std::move(scratch.material_data);
                     }
                 }
                 chunk->pending_water_mesh_vertices = std::move(scratch.water_mesh_vertices);
@@ -3557,6 +3655,9 @@ void SHIELD_WorldSystem::process_completed_meshing_jobs() {
                     // clear (matching GenerateChunkData's contract).
                     chunk->sdf_data = std::move(chunk->pending_sdf_data);
                     chunk->heightmap_data = std::move(chunk->pending_heightmap_data);
+                    // FR-B1: publish the promoted structure material channel
+                    // alongside the SDF (empty -> empty, lazy alloc preserved).
+                    chunk->material_data = std::move(chunk->pending_material_data);
                     chunk->clear_voxel_data_dirty();
                 }
                 chunk->mesh_vertices = std::move(chunk->pending_mesh_vertices);
@@ -3583,6 +3684,7 @@ void SHIELD_WorldSystem::process_completed_meshing_jobs() {
         chunk->pending_water_mesh_indices.clear();
         chunk->pending_sdf_data.clear();
         chunk->pending_heightmap_data.clear();
+        chunk->pending_material_data.clear();
         chunk->pending_mesh_ready.store(false, std::memory_order_release);
         chunk->pending_mesh_failed.store(false, std::memory_order_release);
         chunk->pending_lod.store(-1, std::memory_order_release);
