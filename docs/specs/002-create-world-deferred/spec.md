@@ -46,39 +46,57 @@ GL context; `ctest_manifest.json` hardcodes `"passed": true`; the validator only
   the validator's `required_ui_tests`. Separate a GL-free contract from GL-required assertions
   (mirror the WaterfallVisual `gl_skip_reason` pattern).
 
-## BLOCKER 2 — Preview-cost spike (must precede Item 1 commit)
-Measure: per-regen `SHIELD_WorldSystem` construction cost + memory (it loads the biome table + walks
-the structures dir in `reinitialize_noise`, and the first `GetTerrainHeightAt` triggers a hydraulic
-bake whose cache lives on the throwaway world). Confirm the 96² sample budget. Decide the params
-boundary (in-memory vs temp file) **without refactoring the loader**. Outcome reshapes Item 1 + AC-1.
+## BLOCKER 2 — Preview-render spike (must precede Item 1 commit)
+The preview is a REAL rendered diorama (not a height thumbnail), so the spike measures the *render*
+path, not a sampler. Stand up a bounded preview world (real `SHIELD_WorldSystem` with candidate
+params/seed) + `EnsureSurfaceReadyNear` at a small radius, render it once via the existing
+`renderPipeline.render_frame` into a small offscreen FBO (512–768 px), and measure: (a) per-frame
+render cost at that size/radius (must hold the create-screen frame budget), (b) world rebuild cost on
+a param change (construct/`set_params` + re-stream), (c) memory. Decide the streaming radius + FBO
+size that frame-budget allows. The menu-backdrop path (main_client renders a live world behind the
+menu) and `debug/WorldGenViewer` (`RecreateWorldSystem` + `RegenerateTexture`) already prove this is
+feasible — reuse them. **No loader/`TerrainGenParams` refactor.**
 
 ---
 
-## Item 1 — Live preview (HIGH ROI)
-**Goal:** a small thumbnail of the *current* params that updates as you tune, so it's a feedback loop.
+## Item 1 — Live world-preview diorama (the create-world centerpiece)
+**Goal:** a **Photoshop-style preview pane** showing a rendered 3D **slice/diorama** of the candidate
+world that updates in **REAL TIME** as you slide the knobs or change weather/time-of-day, and that you
+**orbit by dragging the mouse** (turntable — NOT a flythrough). Water reads as water, **waterfalls
+show**, biomes are colored by the real shaders, the sky/weather is the real atmosphere.
 
-**Design (post-critique):**
-- **Truthful image, not a bare heightmap.** `GetTerrainHeightAt` is elevation-only (no biome color,
-  no water — rivers/lakes are *carved* so they'd read as dark pits). v1 preview MUST be one of:
-  (a) **render the real low-res pipeline to a small FBO** (preferred; reuse `WorldGenViewer`'s
-  `RegenerateTexture` path), or (b) a thumbnail colorized by **biome id** + the **sea plane** drawn
-  at sea level, **labeled "elevation preview — not final look."** Never ship an unlabeled hypsometric
-  ramp that misrepresents the world.
-- **One cached preview world**, reused via `set_params`/`set_seed` (NOT reconstructed per regen);
-  keep its hydro cache warm. For a height thumbnail, sample with hydro/biome/structures bypassed.
-- **Synchronous** sample+encode on the main thread (the UI has no JobSystem; texture upload is
-  GL-thread-only). Upload via **`GenerateTexture`** (raw bytes) — no temp file, no `LoadTexture`
-  cache-staleness. Debounce ~250 ms; latest-wins via a generation counter.
-- **Cache invalidation:** assign the new texture handle directly (GenerateTexture) or
-  `ReleaseTextures` the prior preview; do NOT rely on "toggle src".
-- **Sampling:** window ≥1 continentalness wavelength (~1–2 km) so macro knobs read; supersample
-  (2×2) or use `GetTerrainHeightAtCoarse` so river carve/cliffs don't alias.
-- **Failure fallback:** if params don't load, show a placeholder thumbnail + a non-blocking note
-  (the loader can be transiently RED during the concurrent-edit window).
+**Design:**
+- **Render the real pipeline to an offscreen FBO.** A bounded preview world — a real
+  `SHIELD_WorldSystem(jobSystem, water, candidateParams, seed)` streamed around a fixed center via
+  `EnsureSurfaceReadyNear` at a small radius — is rendered by the existing `renderPipeline.render_frame`
+  (terrain marching-cubes mesh + water + **waterfalls** + atmosphere/weather/lighting) into a small
+  FBO (~512–768 px). This is the truthful preview, reusing the same renderer as the game.
+- **Orbit / turntable camera.** The camera orbits a fixed look-at center; mouse-drag over the preview
+  rect spins yaw/pitch (arcball), scroll zooms, a reset-view control re-centers. NOT first-person.
+- **Bounded "slice" framing.** Show a contained diorama region (a tile), softly vignetted/clipped at
+  the edges so it reads as a model on a table, not infinite terrain.
+- **Real-time, live controls.** While the create screen is active, re-render the FBO each frame the
+  camera/params/weather changed. Sliding a knob (Item 2) rebuilds the preview world (`set_params`,
+  debounced ~250 ms) and the diorama updates live. A small **weather + time-of-day control row**
+  (clear/rain/snow/fog/storm + a tod slider) drives `renderPipeline.set_weather` /
+  `set_time_of_day` / `set_cloud_state` so the sky/precip update live.
+- **UI integration.** Show the FBO color texture in the create-world panel — either bind it to an
+  RmlUi element via the GL3 backend's texture handle, or (simpler) have the main loop blit the
+  preview FBO into the create-screen viewport rect under the transparent UI (the menu-backdrop
+  already renders a live world behind the menu — mirror that, scoped to the preview rect). Route
+  mouse events over the preview rect to the orbit controller.
+- **Perf:** small FBO + bounded streaming radius; rebuild the preview world only on param change
+  (debounced); cap the preview chunk radius to hold the frame budget; pause re-rendering when the
+  create screen isn't visible or nothing changed.
+- **Failure fallback:** if a candidate preset fails to build, keep the last good diorama + a
+  non-blocking note (the loader can be transiently RED during the concurrent-edit window).
 
-**Tests:** `WorldgenPreview` unit — same params→identical output; amplitude↑→measurably higher relief
-stat; encoder under a pinned perf budget (own `TerrainGenParams` literal, **not** `default.json`).
-Logic test: 5 rapid regen requests → exactly one encode (newest). A render-doesn't-crash headless test.
+**Controls:** orbit (drag), zoom (scroll), reset-view, weather selector, time-of-day slider.
+
+**Tests (headless GL):** the preview world builds + `render_frame`-to-FBO without crashing; changing
+params (own fixed `TerrainGenParams` literal, NOT `default.json`) changes the FBO pixels; changing
+weather/tod changes the FBO pixels; orbit changes the view; a per-frame render budget assertion at the
+preview FBO size; rebuild is debounced/latest-wins (5 rapid param changes → one world rebuild).
 
 ## Item 2 — Semantic knobs (default surface) — gated behind Item 1
 **Goal:** ~6 outcome knobs as the default surface; raw 28 demoted to an "advanced" fold.
@@ -138,11 +156,13 @@ is visible/editable — WITHOUT a free-topology evaluator (determinism non-goal)
 ## Acceptance criteria (testable)
 - [ ] AC-3a: with the pinned UI tests forced to skip, the gate **fails** (skip≠pass); with GL present
       all pinned UI tests run green.
-- [ ] AC-spike: documented per-regen cost + chosen preview path; AC-1 budget set from it.
-- [ ] AC-1: `WorldgenPreview` encode completes under the pinned budget on its own params literal; 5
-      rapid requests → exactly one (newest) encode (debounce/latest-wins). (No wall-clock e2e.)
-- [ ] AC-1b: the preview image is labeled/colorized so it is not mistaken for the final render (water
-      reads as water, not pits).
+- [ ] AC-spike: documented preview-world render cost (per-frame at FBO size + rebuild on param change)
+      + the chosen streaming radius / FBO size that holds the create-screen frame budget.
+- [ ] AC-1: the preview renders a real diorama of the candidate world to an FBO; changing params,
+      weather, or time-of-day changes the FBO pixels; mouse-drag orbits the view; world rebuild on
+      param change is debounced/latest-wins (5 rapid changes → one rebuild).
+- [ ] AC-1b: the diorama uses the real renderer (water/waterfalls/biome shaders/atmosphere) — not a
+      hypsometric thumbnail — and holds the create-screen frame budget.
 - [ ] AC-2: 6 knobs drive the params via response curves; each knob's relief metric is monotone over
       0→1; reopening a saved world re-derives knob positions within a stated tolerance (model A: exact).
 - [ ] AC-2b: curated presets are never flattened by a knob touch (authored splines preserved).
