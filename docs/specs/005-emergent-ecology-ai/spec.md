@@ -60,11 +60,16 @@ engine/game decoupling).
   (`CreatureReproductionSystem.h:208-232`, currently stamps transform+creature+genome only) must
   stamp `PerceptionComponent` from the child genome. Rides the existing reproduction RNG stream
   (offset 16). Enables predator/prey sensory divergence under selection.
-- **FR-5 Scale + divergence (CORRECTED — partly done).** The herd query ALREADY uses `SpatialGrid`
-  (`CreatureBrainSystem.h:79-91`); only the opposite-role *catch-target* scan is still O(N)
-  (`CreatureBrainSystem.h:113-124`). Real work = move that scan to the existing opposite-role grid; add
-  a deterministic evolution-divergence scenario fixture + per-generation trait telemetry; validate
-  20–48 agents within tick + replication budgets.
+- **FR-5 Scale + divergence (CORRECTED — partly done; DELIVERED test-only).** The herd query ALREADY
+  uses `SpatialGrid` (`CreatureBrainSystem.h:79-91`); only the opposite-role *catch-target* scan is
+  still O(N) (`CreatureBrainSystem.h:113-124`). **Delivered:** read-only sensory telemetry
+  (`ai/CreatureTelemetry.h`, `ComputeSensoryMeans`) + a divergence fixture (predator cones narrow /
+  prey cones widen under opposing selection on the FR-4 genes) + a 40-agent brain-tick run==replay
+  test — all test-only, zero hash change. **Intentionally deferred (documented):** (a) the opposite-
+  role scan → grid micro-opt is NOT worth a behaviour/hash change — the O(N) scan holds the 20–48
+  budget trivially and a radius-limited grid query would change the global-nearest result; (b) wiring
+  `PerceptionComponent` FOV/range INTO the brain's targeting so divergence arises EMERGENTLY from
+  survival (not an injected selection rule) is a hash-moving follow-up for its own slice + re-pin.
 
 ## Non-Functional / Determinism
 Integer/fixed-point, id-ordered, libm-free (`DeterministicMath`), unsigned hashing; run==replay

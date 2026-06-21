@@ -703,6 +703,7 @@ add_executable(frontier_gates_test
     ai/creature_reproduction_test.cpp
     ai/flocking_test.cpp
     ai/foraging_test.cpp
+    ai/creature_divergence_test.cpp
     ai/awareness_test.cpp
     ai/perception_system_test.cpp
     ai/scent_steering_system_test.cpp
