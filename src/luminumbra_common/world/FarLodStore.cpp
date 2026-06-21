@@ -115,6 +115,13 @@ u64 ComputeTerrainParamsHash(const Systems::TerrainGenParams& params, int seed) 
         FnvMixValue(hash, static_cast<u8>(5));
         FnvMixValue(hash, params.biome_relief_strength);
     }
+    // Slice 4: cliff terracing (only when enabled).
+    if (params.cliffs_enabled) {
+        FnvMixValue(hash, static_cast<u8>(6));
+        FnvMixValue(hash, params.cliff_frequency);
+        FnvMixValue(hash, params.cliff_threshold);
+        FnvMixValue(hash, params.cliff_step);
+    }
     // T-I4-4: mix the structure template content hash ONLY when structures are
     // enabled, so structure presets' pristine far tiles invalidate on a template
     // change while non-structure worlds keep byte-identical far-tile cache keys.

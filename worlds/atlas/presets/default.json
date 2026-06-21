@@ -55,6 +55,10 @@
       "lake_threshold": 0.5,
       "lake_depth": 4.0,
       "lake_max_carve": 14.0,
+      "cliffs_enabled": true,
+      "cliff_frequency": 0.0011,
+      "cliff_threshold": 0.4,
+      "cliff_step": 11.0,
       "structures_enabled": true
     }
   }

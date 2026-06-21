@@ -87,6 +87,16 @@ struct TerrainGenParams {
     bool biome_relief_enabled = false;
     float biome_relief_strength = 0.45f; // ridge scale span: warm *(1-s) .. cold *(1+s)
 
+    // Cliffs / escarpments (slice 4): in cliff-zones (a smooth noise mask, seed
+    // +12) the shaped height snaps toward flat benches with steep risers, so the
+    // marching-cubes surface forms mesa/canyon cliff faces. Pure heightfield ->
+    // no holes / floating geometry, fully deterministic. Blended by the mask so
+    // cliff zones sit naturally amid normal foothills. Disabled -> byte-zero drift.
+    bool cliffs_enabled = false;
+    float cliff_frequency = 0.0011f; // cliff-zone mask feature scale
+    float cliff_threshold = 0.35f;   // mask value above which terracing engages
+    float cliff_step = 11.0f;        // metres per bench (cliff face height)
+
     // --- T-I4-3 PV-band rivers (default-off) ---
     // Chunk-local river carve on the +10 ridged noise (seed registry). The
     // folded PV value PV = 1 - |3*|r| - 2| (Minecraft 1.18 weirdness->PV) of
@@ -664,6 +674,10 @@ private:
     // scalar + batched height paths stay byte-identical. 0 when lakes disabled.
     float LakeInfluenceFromNoise(float world_x, float world_z) const;
     float LakeCarveAmount(float final_height, float influence) const;
+    // Slice 4: terrace the height into cliff benches inside cliff-zones (smooth
+    // mask, seed +12). Pure; returns `height` unchanged when cliffs disabled or
+    // outside a cliff zone. Shared by the scalar + batched paths (byte-identical).
+    float CliffTerracedHeight(float world_x, float world_z, float height) const;
     // Monotone piecewise-linear spline over sorted [input, output] control
     // points: endpoint-clamped, plain lerp between neighbors, `fallback` when
     // the point list is empty.

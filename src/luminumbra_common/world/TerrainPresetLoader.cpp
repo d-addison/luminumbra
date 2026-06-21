@@ -347,6 +347,13 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
         params.lake_depth = features.value("lake_depth", params.lake_depth);
         params.lake_max_carve = features.value("lake_max_carve", params.lake_max_carve);
     }
+    // Slice 4: cliffs. Opt-in via features.cliffs_enabled; absent -> off (byte-zero).
+    if (features.value("cliffs_enabled", false)) {
+        params.cliffs_enabled = true;
+        params.cliff_frequency = features.value("cliff_frequency", params.cliff_frequency);
+        params.cliff_threshold = features.value("cliff_threshold", params.cliff_threshold);
+        params.cliff_step = features.value("cliff_step", params.cliff_step);
+    }
     ParseMaterialsBlock(gen_params, result.extras.materials, preset_path, result.warnings);
 
     // Unknown-key audit over every consumed scope.
@@ -365,7 +372,9 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
                      "river_frequency", "river_depth", "river_pv_min",
                      "river_pv_max", "river_max_carve",
                      "lakes_enabled", "lake_frequency", "lake_threshold",
-                     "lake_depth", "lake_max_carve"},
+                     "lake_depth", "lake_max_carve",
+                     "cliffs_enabled", "cliff_frequency", "cliff_threshold",
+                     "cliff_step"},
                     preset_path, result.warnings);
 
     result.ok = true;

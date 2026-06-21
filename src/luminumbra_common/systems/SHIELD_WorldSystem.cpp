@@ -471,6 +471,9 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
     } else {
         terrain_height = m_params.height_offset + sample.base_noise * m_params.base_amplitude;
     }
+    // Slice 4 cliffs: terrace the shaped height inside cliff zones (byte-identical
+    // to ComputeShapedHeightGrid). No-op when cliffs disabled / outside a zone.
+    terrain_height = CliffTerracedHeight(world_x, world_z, terrain_height);
     sample.pre_island_height = terrain_height;
     sample.final_height = terrain_height;
 
@@ -671,6 +674,30 @@ float SHIELD_WorldSystem::LakeCarveAmount(float final_height, float influence) c
     return std::min(final_height - lake_floor, m_params.lake_max_carve * influence);
 }
 
+float SHIELD_WorldSystem::CliffTerracedHeight(float world_x, float world_z, float height) const {
+    if (!m_params.cliffs_enabled || !m_continentalness_generator) {
+        return height;
+    }
+    const float mask_noise = m_continentalness_generator->GenSingle2D(
+        world_x * m_params.cliff_frequency,
+        world_z * m_params.cliff_frequency,
+        m_seed + 12);
+    const float mask = std::clamp((mask_noise - m_params.cliff_threshold) / 0.15f, 0.0f, 1.0f);
+    if (mask <= 0.0f) {
+        return height;
+    }
+    // Snap toward flat benches (treads) joined by steep risers (cliff faces): the
+    // fractional part of height/step is held flat until 0.55 then ramps sharply to
+    // the next bench, so the surface reads as terraced mesa/canyon walls.
+    const float step = std::max(1.0f, m_params.cliff_step);
+    const float t = height / step;
+    const float base = std::floor(t);
+    const float frac = t - base;
+    const float riser = glm::smoothstep(0.55f, 0.95f, frac);
+    const float terraced = (base + riser) * step;
+    return height + (terraced - height) * mask;
+}
+
 float SHIELD_WorldSystem::GetTerrainHeightAtCoarse(
     float world_x, float world_z, int sample_step) const {
     // Full-res path is byte-identical to GetTerrainHeightAt (the carve is a
@@ -842,6 +869,11 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
             float terrain_height = m_params.height_offset + base_level
                 + amplitude_multiplier * (base_noise[i] * m_params.base_amplitude)
                 + ridge;
+
+            // Slice 4 cliffs — byte-identical to ComputeShapedHeightSampleImpl.
+            terrain_height = CliffTerracedHeight(static_cast<float>(base_x + x),
+                                                 static_cast<float>(base_z + z),
+                                                 terrain_height);
 
             if (m_params.island_mask_enabled) {
                 const float mask = glm::smoothstep(0.1f, 0.25f, island_noise[i]);
