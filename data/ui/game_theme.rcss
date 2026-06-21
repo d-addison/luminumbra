@@ -594,7 +594,7 @@ body#world_creation {
 
 .creation-panel {
     width: 64%;
-    max-width: 960px;
+    max-width: 1000px;
     margin: 0 auto;
     padding: 48px 72px 52px;
     text-align: center;
@@ -698,5 +698,71 @@ body#world_creation {
     border-color: #B6CBAE;
     color: #16130E;
     box-shadow: none;
+}
+
+/* ---- Collapsible "customize world" advanced worldgen params ---- */
+.customize-section {
+    margin-top: 24px;
+}
+
+/* Clickable header row — dusk-gold hairline above, spread label + caret. */
+.customize-header {
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    padding-top: 16px;
+    padding-bottom: 4px;
+    border-top-width: 1px;
+    border-top-color: rgba(201, 168, 106, 90);
+    letter-spacing: 3px;
+}
+.customize-header:hover .customize-label { color: #F2EDE4; }
+.customize-header:hover .customize-caret { color: #E0C488; }
+
+.customize-label {
+    color: #C9C0AE;
+    font-size: 13px;
+    letter-spacing: 3px;
+}
+.customize-caret {
+    color: #C9A86A;
+    font-size: 16px;
+    letter-spacing: 0;
+}
+
+/* Bounded, scrollable body so the panel stays on screen when expanded. */
+.customize-body {
+    max-height: 360px;
+    overflow-y: auto;
+    margin-top: 14px;
+}
+.customize-body.collapsed { display: none; }
+
+.param-group {
+    margin-bottom: 18px;
+}
+.param-group-heading {
+    font-size: 13px;
+    letter-spacing: 4px;
+    color: rgba(201, 184, 154, 200);
+    font-weight: normal;
+    margin-top: 0;
+    margin-bottom: 12px;
+}
+
+/* Tighter than the stock .settings-row. */
+.param-row {
+    margin-bottom: 12px;
+}
+.param-row label {
+    font-size: 14px;
+    color: rgba(224, 215, 198, 200);
+    letter-spacing: 1px;
+}
+.param-value {
+    float: right;
+    color: #C9A86A;
+    font-size: 13px;
 }
 

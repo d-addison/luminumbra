@@ -59,6 +59,7 @@
 #include <csignal>
 #include <ctime>
 #include <filesystem>
+#include <cctype>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -2300,12 +2301,57 @@ int main(int argc, char* argv[]) {
     std::chrono::steady_clock::time_point scenario_play_started_at{};
     RuntimeReadinessReport last_readiness_report;
 
-    auto start_world_creation = [&](const std::string& name, const std::string& seed, const std::string& worldType) {
+    auto start_world_creation = [&](const std::string& name, const std::string& seed,
+                                    const std::string& worldType,
+                                    const std::vector<Luminumbra::Client::WorldGenParam>& params) {
         // T-I3-9: drain in-flight far-LOD tile builds before CreateWorld
         // replaces the world system they sample.
         renderPipeline.prepare_world_swap();
+
+        // If the create-world "customize" form provided overrides, merge them onto the chosen
+        // base preset and write a persistent custom preset; the world is created from that. The
+        // file persists so the world reloads with its exact parameters. No overrides -> the base
+        // preset name is used unchanged (the common path).
+        std::string actualType = worldType;
+        if (!params.empty()) {
+            try {
+                const std::filesystem::path presets_dir =
+                    std::filesystem::path(root_path_str) / "worlds" / "atlas" / "presets";
+                std::ifstream in(presets_dir / (worldType + ".json"));
+                if (in) {
+                    nlohmann::json j;
+                    in >> j;
+                    for (const auto& p : params) {
+                        std::string ptr = "/generation_params/";
+                        for (char ch : p.path) ptr += (ch == '.') ? '/' : ch;
+                        const nlohmann::json::json_pointer jp(ptr);
+                        if (p.type == "bool") {
+                            j[jp] = (p.value == "true" || p.value == "1");
+                        } else if (p.type == "int") {
+                            try { j[jp] = std::stoi(p.value); } catch (...) {}
+                        } else {
+                            try { j[jp] = std::stof(p.value); } catch (...) {}
+                        }
+                    }
+                    std::string safe;
+                    for (char ch : name) if (std::isalnum(static_cast<unsigned char>(ch)))
+                        safe += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                    if (safe.empty()) safe = "world";
+                    const std::size_t h = std::hash<std::string>{}(name + "|" + seed + "|" + std::to_string(params.size()));
+                    actualType = "custom_" + safe.substr(0, 20) + "_" + std::to_string(h % 100000u);
+                    j["name"] = name;
+                    std::ofstream out(presets_dir / (actualType + ".json"));
+                    out << j.dump(2);
+                    LUMINUMBRA_CORE_INFO("Custom world preset written: {} ({} overrides)", actualType, params.size());
+                }
+            } catch (const std::exception& e) {
+                LUMINUMBRA_CORE_ERROR("Custom preset build failed ({}); falling back to '{}'", e.what(), worldType);
+                actualType = worldType;
+            }
+        }
+
         // 1. Synchronously create the world systems and metadata. This is fast.
-        if (gameSession->CreateWorld(name, seed, worldType)) {
+        if (gameSession->CreateWorld(name, seed, actualType)) {
             // A real world replaces the F4 menu-backdrop world; stop the menu-branch from
             // rendering with the (now game-owned) camera/world.
             g_menu_backdrop_active = false;
@@ -2399,6 +2445,30 @@ int main(int argc, char* argv[]) {
 
     if (g_uiManager) {
         g_uiManager->SetWorldCreationCallback(start_world_creation);
+        // Seed the create-world customize form from a preset: read generation_params.<path>.
+        g_uiManager->SetWorldParamGetter([root_path_str](const std::string& worldType,
+                                                         const std::string& path) -> std::string {
+            try {
+                const std::filesystem::path pf = std::filesystem::path(root_path_str) /
+                    "worlds" / "atlas" / "presets" / (worldType + ".json");
+                std::ifstream in(pf);
+                if (!in) return "";
+                nlohmann::json j;
+                in >> j;
+                std::string ptr = "/generation_params/";
+                for (char ch : path) ptr += (ch == '.') ? '/' : ch;
+                const nlohmann::json::json_pointer jp(ptr);
+                if (!j.contains(jp)) return "";
+                const nlohmann::json& v = j[jp];
+                if (v.is_boolean()) return v.get<bool>() ? "true" : "false";
+                if (v.is_number_integer()) return std::to_string(v.get<long long>());
+                if (v.is_number()) { std::ostringstream os; os << v.get<double>(); return os.str(); }
+                if (v.is_string()) return v.get<std::string>();
+                return "";
+            } catch (...) {
+                return "";
+            }
+        });
         // Wire the RML Settings screen (settings.rml) to the SystemConfig user settings.
         // Live-apply mirrors the F8 ImGui panel; Save persists the per-user overlay.
         // Reference g_systemConfig directly (a global) so no captured local dangles.
@@ -2492,7 +2562,7 @@ int main(int argc, char* argv[]) {
                                                             : scenario_config.world_preset)
                    : "default");
     if (scenario_config.auto_create_world || HasCommandLineFlag(argc, argv, "--auto-create-world") || runtime_boot_recorder.enabled()) {
-        start_world_creation("Automated Test World", "424242", scenario_world_type);
+        start_world_creation("Automated Test World", "424242", scenario_world_type, {});
     }
 
     std::unique_ptr<Luminumbra::Client::WorldGenViewer> worldGenViewer;

@@ -155,6 +155,31 @@ static std::string ReadFormControlValue(Rml::Element* element, const std::string
     return element ? element->GetAttribute<Rml::String>("value", fallback) : fallback;
 }
 
+// Gather every .worldgen-param control in the create-world customize form into the override
+// list the host merges onto the base preset. Bool params read their toggle .on class; numeric
+// params read their form-control value.
+static std::vector<WorldGenParam> CollectWorldGenParams(Rml::ElementDocument* document) {
+    std::vector<WorldGenParam> out;
+    if (!document) return out;
+    Rml::ElementList controls;
+    document->GetElementsByClassName(controls, "worldgen-param");
+    for (Rml::Element* el : controls) {
+        if (!el) continue;
+        WorldGenParam p;
+        p.path = el->GetAttribute<Rml::String>("data-path", "");
+        p.type = el->GetAttribute<Rml::String>("data-type", "float");
+        if (p.path.empty()) continue;
+        if (p.type == "bool") {
+            p.value = el->IsClassSet("on") ? "true" : "false";
+        } else {
+            p.value = ReadFormControlValue(el, "");
+            if (p.value.empty()) continue;
+        }
+        out.push_back(std::move(p));
+    }
+    return out;
+}
+
 // --- Static Instance for Callbacks ---
 Rml_UIManager* Rml_UIManager::s_active_manager = nullptr;
 
@@ -393,14 +418,14 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
                 std::string name = ReadFormControlValue(name_input, "New World");
                 std::string seed = ReadFormControlValue(seed_input, "");
                 std::string type = ReadFormControlValue(type_select, "default");
-                m_worldCreationCallback(name, seed, type);
+                // Gather the customize-form overrides; the host merges them onto the base preset.
+                m_worldCreationCallback(name, seed, type, CollectWorldGenParams(doc));
             }
         });
     }
 
-    // Landscape preset chips (world_creation): clicking a chip selects it and drives the hidden
-    // #world_type select that create_btn reads. (SetControlValue is defined later in this file,
-    // so set the control value inline here.)
+    // Landscape preset chips (world_creation): clicking a chip selects it, drives the hidden
+    // #world_type select that create_btn reads, and re-seeds the customize form from that preset.
     {
         Rml::ElementList chips;
         document->GetElementsByClassName(chips, "preset-chip");
@@ -417,7 +442,72 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
                 if (auto* sel = document->GetElementById("world_type")) {
                     if (auto* fc = dynamic_cast<Rml::ElementFormControl*>(sel)) fc->SetValue(preset);
                 }
+                this->SeedWorldGenParams(document, preset);
             });
+        }
+    }
+
+    // Customize section: expand/collapse the advanced worldgen params.
+    if (auto* toggle = document->GetElementById("customize_toggle")) {
+        toggle->AddEventListener("click", new LambdaEventListener([this, document](Rml::Event&) {
+            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click");
+            auto* body = document->GetElementById("customize_body");
+            const bool collapsed = body && body->IsClassSet("collapsed");
+            if (body) body->SetClass("collapsed", !collapsed);
+            if (auto* caret = document->GetElementById("customize_caret")) {
+                caret->SetInnerRML(collapsed ? "&#8211;" : "+");  // "–" when open, "+" when closed
+            }
+        }));
+    }
+
+    // Worldgen sliders: live-update the adjacent .param-value label as they move.
+    {
+        Rml::ElementList sliders;
+        document->GetElementsByClassName(sliders, "worldgen-param");
+        for (Rml::Element* el : sliders) {
+            if (el->GetAttribute<Rml::String>("data-type", "") == "bool") continue;
+            el->AddEventListener("change", new LambdaEventListener([](Rml::Event& ev) {
+                Rml::Element* slider = ev.GetTargetElement();
+                if (!slider || !slider->GetParentNode()) return;
+                Rml::ElementList vals;
+                slider->GetParentNode()->GetElementsByClassName(vals, "param-value");
+                if (!vals.empty()) vals[0]->SetInnerRML(ReadFormControlValue(slider, ""));
+            }));
+        }
+    }
+
+    // If this is the create-world screen, seed the customize form from the selected preset.
+    if (document->GetElementById("customize_body")) {
+        std::string preset = "default";
+        Rml::ElementList chips;
+        document->GetElementsByClassName(chips, "preset-chip");
+        for (Rml::Element* c : chips) {
+            if (c->IsClassSet("selected")) { preset = c->GetAttribute<Rml::String>("data-preset", "default"); break; }
+        }
+        SeedWorldGenParams(document, preset);
+    }
+}
+
+void Rml_UIManager::SeedWorldGenParams(Rml::ElementDocument* document, const std::string& worldType) {
+    if (!document || !m_worldParamGetter) return;
+    Rml::ElementList controls;
+    document->GetElementsByClassName(controls, "worldgen-param");
+    for (Rml::Element* el : controls) {
+        const std::string path = el->GetAttribute<Rml::String>("data-path", "");
+        const std::string type = el->GetAttribute<Rml::String>("data-type", "float");
+        if (path.empty()) continue;
+        const std::string value = m_worldParamGetter(worldType, path);
+        if (value.empty()) continue;  // preset doesn't set this key -> keep the control's default
+        if (type == "bool") {
+            el->SetClass("on", value == "true" || value == "1");
+        } else if (auto* fc = dynamic_cast<Rml::ElementFormControl*>(el)) {
+            fc->SetValue(value);
+            // Mirror into the adjacent value label.
+            if (el->GetParentNode()) {
+                Rml::ElementList vals;
+                el->GetParentNode()->GetElementsByClassName(vals, "param-value");
+                if (!vals.empty()) vals[0]->SetInnerRML(value);
+            }
         }
     }
 }

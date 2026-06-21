@@ -6,6 +6,7 @@
 #include <string>
 #include <functional>
 #include <memory>
+#include <vector>
 #include <utility> // For std::move
 
 struct GLFWwindow;
@@ -15,7 +16,21 @@ namespace Luminumbra::Client {
 class IAudioManager;
 
 // --- Callbacks for UI interaction ---
-using WorldCreationCallback = std::function<void(const std::string&, const std::string&, const std::string&)>;
+// A single overridden world-generation parameter from the create-world "customize" form:
+// `path` is the dotted JSON key under generation_params (e.g. "terrain.base_amplitude"),
+// `value` the string value, `type` one of "float" | "int" | "bool". The host merges these
+// onto the chosen preset to build a custom world.
+struct WorldGenParam {
+    std::string path;
+    std::string value;
+    std::string type;
+};
+using WorldCreationCallback = std::function<void(const std::string& name, const std::string& seed,
+                                                 const std::string& worldType,
+                                                 const std::vector<WorldGenParam>& params)>;
+// Read a generation parameter's current value from a preset (for seeding the customize form
+// when a preset chip is selected). Returns "" if the preset doesn't set that key.
+using WorldParamGetter = std::function<std::string(const std::string& worldType, const std::string& path)>;
 using LoadWorldCallback = std::function<void(const std::string&)>;
 // Pause-menu actions ("resume" / "quit") routed back to main_client, which owns game state + cursor.
 using PauseActionCallback = std::function<void(const std::string&)>;
@@ -82,6 +97,7 @@ public:
     Rml::Context* GetContext() { return m_context; }
     
     void SetWorldCreationCallback(WorldCreationCallback callback) { m_worldCreationCallback = std::move(callback); }
+    void SetWorldParamGetter(WorldParamGetter getter) { m_worldParamGetter = std::move(getter); }
     void SetLoadWorldCallback(LoadWorldCallback callback) { m_loadWorldCallback = std::move(callback); }
     void SetSettingsBridge(SettingsBridge bridge) { m_settingsBridge = std::move(bridge); }
     void SetPauseActionCallback(PauseActionCallback cb) { m_pauseActionCallback = std::move(cb); }
@@ -105,6 +121,10 @@ private:
     void ApplySettingFromElement(Rml::Element* element);
     void BindSettingsListeners(Rml::ElementDocument* document);
 
+    // world_creation.rml: seed every .worldgen-param control from the given preset (via the
+    // WorldParamGetter), updating slider values + toggle states + value labels.
+    void SeedWorldGenParams(Rml::ElementDocument* document, const std::string& worldType);
+
     // Interfaces are now members, their lifetime is tied to the manager.
     RmlSystem m_systemInterface;
     RmlFileInterface m_fileInterface;
@@ -120,6 +140,7 @@ private:
     IAudioManager* m_audioManager = nullptr;
     
     WorldCreationCallback m_worldCreationCallback;
+    WorldParamGetter m_worldParamGetter;
     LoadWorldCallback m_loadWorldCallback;
     SettingsBridge m_settingsBridge;
     PauseActionCallback m_pauseActionCallback;
