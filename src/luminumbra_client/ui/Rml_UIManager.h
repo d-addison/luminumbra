@@ -2,6 +2,7 @@
 
 #include "Rml_Interfaces.h" // The one true source for interface definitions
 #include "gl3/RmlUi_Renderer_GL3.h" // RmlUi 6.1 reference backend: real blur/box-shadow/layers
+#include "world/WorldgenOverride.h" // WorldGenParam transport (engine-owned, not UI)
 #include <RmlUi/Core.h>
 #include <string>
 #include <functional>
@@ -16,15 +17,7 @@ namespace Luminumbra::Client {
 class IAudioManager;
 
 // --- Callbacks for UI interaction ---
-// A single overridden world-generation parameter from the create-world "customize" form:
-// `path` is the dotted JSON key under generation_params (e.g. "terrain.base_amplitude"),
-// `value` the string value, `type` one of "float" | "int" | "bool". The host merges these
-// onto the chosen preset to build a custom world.
-struct WorldGenParam {
-    std::string path;
-    std::string value;
-    std::string type;
-};
+// WorldGenParam (the customize-form param transport) lives in the world layer, not here.
 using WorldCreationCallback = std::function<void(const std::string& name, const std::string& seed,
                                                  const std::string& worldType,
                                                  const std::vector<WorldGenParam>& params)>;

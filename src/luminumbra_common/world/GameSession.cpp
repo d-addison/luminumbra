@@ -101,6 +101,23 @@ fs::path PresetPathFor(const std::string& root_path, const std::string& world_ty
     return RuntimeRoot(root_path) / "worlds" / "atlas" / "presets" / (world_type + ".json");
 }
 
+// Clamp generation params to sane invariants BEFORE building the world system. The preset loader
+// only type-checks; a customized (or hand-edited) preset can still carry octaves=0, negative
+// amplitude, persistence outside (0,1], etc., which are degenerate/UB in the noise backend. This
+// runs on both the create and load paths so headless/server generation is protected too.
+void ClampTerrainParams(TerrainGenParams& p) {
+    p.octaves = std::clamp(p.octaves, 1, 12);
+    p.persistence = std::clamp(p.persistence, 0.05f, 1.0f);
+    p.lacunarity = std::max(p.lacunarity, 1.0f);
+    p.base_frequency = std::max(p.base_frequency, 1e-5f);
+    p.base_amplitude = std::max(p.base_amplitude, 0.0f);
+    p.peaks_amplitude = std::max(p.peaks_amplitude, 0.0f);
+    p.peaks_frequency = std::max(p.peaks_frequency, 1e-5f);
+    p.domain_warp_amplitude = std::max(p.domain_warp_amplitude, 0.0f);
+    p.hydro_iterations = std::max(p.hydro_iterations, 0);
+    p.cliff_step = std::max(p.cliff_step, 0.0f);
+}
+
 float ScentOriginFor(float anchor) {
     return anchor - (static_cast<float>(kScentFieldCells) * kScentCellSize * 0.5f);
 }
@@ -449,7 +466,8 @@ WorldConfigValidationResult GameSession::ValidateWorldConfig(
     return result;
 }
 
-bool GameSession::CreateWorld(const std::string& name, const std::string& seed, const std::string& worldType) {
+bool GameSession::CreateWorld(const std::string& name, const std::string& seed, const std::string& worldType,
+                              const std::string* customPresetJson) {
     if (!m_jobSystem) {
         LUMINUMBRA_CORE_ERROR("JobSystem not set before creating world");
         return false;
@@ -484,17 +502,37 @@ bool GameSession::CreateWorld(const std::string& name, const std::string& seed, 
     m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
     m_physicsSystem->startup();
 
-    const TerrainPresetLoadResult preset = LoadTerrainPreset(validation.preset_path);
+    // Customized world: embed the resolved preset in THIS world's own save dir and generate from
+    // it, so the world is self-contained (no global custom files / dangling references).
+    fs::path preset_to_load = validation.preset_path;
+    if (customPresetJson) {
+        const fs::path world_preset = fs::path(worldPath) / "preset.json";
+        std::ofstream pf(world_preset, std::ios::binary);
+        if (pf) {
+            pf << *customPresetJson;
+            if (pf.good()) {
+                preset_to_load = world_preset;
+                LUMINUMBRA_CORE_INFO("Custom world preset embedded in save: {}", world_preset.string());
+            } else {
+                LUMINUMBRA_CORE_ERROR("Embedded preset write failed; using base preset '{}'", worldType);
+            }
+        } else {
+            LUMINUMBRA_CORE_ERROR("Could not open embedded preset for write; using base preset '{}'", worldType);
+        }
+    }
+
+    const TerrainPresetLoadResult preset = LoadTerrainPreset(preset_to_load);
     if (!preset.ok) {
         for (const std::string& error : preset.errors) {
             LUMINUMBRA_CORE_ERROR("World preset load failed: {}", error);
         }
         return false;
     }
-    const TerrainGenParams& params = preset.params;
+    TerrainGenParams params = preset.params;
+    ClampTerrainParams(params);
 
     int world_seed = StringToSeed(m_metadata.seed);
-    LUMINUMBRA_CORE_INFO("Loaded world preset '{}': height_offset={}, amplitude={}, caves={}", 
+    LUMINUMBRA_CORE_INFO("Loaded world preset '{}': height_offset={}, amplitude={}, caves={}",
         worldType, params.height_offset, params.base_amplitude, params.caves_enabled);
 
      // 1. Create the World System
@@ -597,14 +635,23 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     }
     
     // --- Load Generation Preset ---
-    const TerrainPresetLoadResult preset = LoadTerrainPreset(validation.preset_path);
+    // Prefer this world's OWN embedded preset (custom worlds) over the named global preset, so a
+    // copied/shared save reproduces its exact terrain regardless of the curated presets dir.
+    fs::path preset_to_load = validation.preset_path;
+    const fs::path embedded_preset = fs::path(worldPath) / "preset.json";
+    if (fs::exists(embedded_preset)) {
+        preset_to_load = embedded_preset;
+        LUMINUMBRA_CORE_INFO("Loading embedded world preset: {}", embedded_preset.string());
+    }
+    const TerrainPresetLoadResult preset = LoadTerrainPreset(preset_to_load);
     if (!preset.ok) {
         for (const std::string& error : preset.errors) {
             LUMINUMBRA_CORE_ERROR("World preset load failed: {}", error);
         }
         return false;
     }
-    const TerrainGenParams& params = preset.params;
+    TerrainGenParams params = preset.params;
+    ClampTerrainParams(params);
 
     int world_seed = StringToSeed(m_metadata.seed);
 

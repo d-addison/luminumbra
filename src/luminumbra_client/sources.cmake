@@ -41,6 +41,9 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/WaterPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/ShieldRtFarFieldPass.cpp
 
+    # World (client-side)
+    ${CMAKE_CURRENT_LIST_DIR}/world/WorldgenOverride.cpp
+
     # UI
     ${CMAKE_CURRENT_LIST_DIR}/ui/Rml_Interfaces.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ui/Rml_UIManager.cpp

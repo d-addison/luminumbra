@@ -65,8 +65,19 @@ public:
     GameSession();
     ~GameSession();
 
-    // Initialize a new world with the given parameters
-    bool CreateWorld(const std::string& name, const std::string& seed, const std::string& worldType);
+    // Initialize a new world with the given parameters.
+    // customPresetJson (optional): a fully-resolved preset JSON (base preset + create-world
+    // customize overrides). When provided it is written into THIS world's own save dir
+    // (worlds/saves/<id>/preset.json) and used for generation, so the world is self-contained and
+    // copyable — no global custom-preset files, no dangling references. worldType still records the
+    // base preset name (provenance + asset validation). When null, the named preset is used.
+    bool CreateWorld(const std::string& name, const std::string& seed, const std::string& worldType,
+                     const std::string* customPresetJson);
+    // 3-arg overload (named-preset path). Kept as a distinct overload — not a default arg — so
+    // translation units compiled against the prior header still resolve a real symbol.
+    bool CreateWorld(const std::string& name, const std::string& seed, const std::string& worldType) {
+        return CreateWorld(name, seed, worldType, nullptr);
+    }
 
     // Load an existing world from disk
     bool LoadWorld(const std::string& worldId);

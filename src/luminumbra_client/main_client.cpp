@@ -20,6 +20,7 @@
 #include "rendering/WorldLoadingVisualizer.h"
 #include "ui/Rml_UIManager.h"
 #include "ui/core/UIHotReload.h"
+#include "world/WorldgenOverride.h"
 #include "audio/AudioManagerFactory.h"
 #include "audio/IAudioManager.h"
 #include "audio/NullAudioManager.h"
@@ -2316,50 +2317,37 @@ int main(int argc, char* argv[]) {
         // replaces the world system they sample.
         renderPipeline.prepare_world_swap();
 
-        // If the create-world "customize" form provided overrides, merge them onto the chosen
-        // base preset and write a persistent custom preset; the world is created from that. The
-        // file persists so the world reloads with its exact parameters. No overrides -> the base
-        // preset name is used unchanged (the common path).
-        std::string actualType = worldType;
+        // If the customize form changed any param from the base preset, build a resolved preset
+        // (base + only the real deltas) and hand it to CreateWorld, which embeds it in THIS world's
+        // own save dir. No global custom files, no collisions, no dangling references. If nothing
+        // changed, customPtr stays null and the curated base preset is used unchanged.
+        std::string customPresetJson;
+        const std::string* customPtr = nullptr;
         if (!params.empty()) {
             try {
-                const std::filesystem::path presets_dir =
-                    std::filesystem::path(root_path_str) / "worlds" / "atlas" / "presets";
-                std::ifstream in(presets_dir / (worldType + ".json"));
+                const std::filesystem::path base_path =
+                    std::filesystem::path(root_path_str) / "worlds" / "atlas" / "presets" / (worldType + ".json");
+                std::ifstream in(base_path);
                 if (in) {
-                    nlohmann::json j;
-                    in >> j;
-                    for (const auto& p : params) {
-                        std::string ptr = "/generation_params/";
-                        for (char ch : p.path) ptr += (ch == '.') ? '/' : ch;
-                        const nlohmann::json::json_pointer jp(ptr);
-                        if (p.type == "bool") {
-                            j[jp] = (p.value == "true" || p.value == "1");
-                        } else if (p.type == "int") {
-                            try { j[jp] = std::stoi(p.value); } catch (...) {}
-                        } else {
-                            try { j[jp] = std::stof(p.value); } catch (...) {}
-                        }
+                    nlohmann::json base;
+                    in >> base;
+                    Luminumbra::Client::CustomPresetResult merged =
+                        Luminumbra::Client::BuildCustomPreset(base, params);
+                    if (merged.changed) {
+                        merged.json["name"] = name;
+                        customPresetJson = merged.json.dump(2);
+                        customPtr = &customPresetJson;
+                        LUMINUMBRA_CORE_INFO("World customized: {} override(s) applied, {} skipped",
+                                             merged.applied, merged.skipped);
                     }
-                    std::string safe;
-                    for (char ch : name) if (std::isalnum(static_cast<unsigned char>(ch)))
-                        safe += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-                    if (safe.empty()) safe = "world";
-                    const std::size_t h = std::hash<std::string>{}(name + "|" + seed + "|" + std::to_string(params.size()));
-                    actualType = "custom_" + safe.substr(0, 20) + "_" + std::to_string(h % 100000u);
-                    j["name"] = name;
-                    std::ofstream out(presets_dir / (actualType + ".json"));
-                    out << j.dump(2);
-                    LUMINUMBRA_CORE_INFO("Custom world preset written: {} ({} overrides)", actualType, params.size());
                 }
             } catch (const std::exception& e) {
-                LUMINUMBRA_CORE_ERROR("Custom preset build failed ({}); falling back to '{}'", e.what(), worldType);
-                actualType = worldType;
+                LUMINUMBRA_CORE_ERROR("Custom preset build failed ({}); using base preset '{}'", e.what(), worldType);
             }
         }
 
         // 1. Synchronously create the world systems and metadata. This is fast.
-        if (gameSession->CreateWorld(name, seed, actualType)) {
+        if (gameSession->CreateWorld(name, seed, worldType, customPtr)) {
             // A real world replaces the F4 menu-backdrop world; stop the menu-branch from
             // rendering with the (now game-owned) camera/world.
             g_menu_backdrop_active = false;
