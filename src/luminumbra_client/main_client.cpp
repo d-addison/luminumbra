@@ -3335,6 +3335,8 @@ int main(int argc, char* argv[]) {
         if (g_rb_active) g_rb_frame_start = std::chrono::steady_clock::now();
         double rb_sim_ms = 0.0;     // spec 004: this frame's sim-tick CPU cost
         double rb_stream_ms = 0.0;  // spec 004: this frame's streaming CPU cost
+        double rb_foliage_ms = 0.0; // spec 004: this frame's foliage rebuild_instances cost
+        double rb_ui_ms = 0.0;      // spec 004: this frame's UI (RmlUi + ImGui) render cost
         // Declared at loop scope (not inside the case) so the case labels below
         // don't "jump over" an initialized local (ill-formed in a switch).
         std::chrono::steady_clock::time_point _rb_sim_t0{}, _rb_stream_t0{};
@@ -5155,10 +5157,13 @@ int main(int argc, char* argv[]) {
                                 cs.density = density;
                                 chunk_scatter.push_back(cs);
                             }
+                            const auto _rb_fol_t0 = std::chrono::steady_clock::now(); // spec 004
                             foliage->rebuild_instances(
                                 chunk_scatter,
                                 &Luminumbra::Client::ScenarioHarness::FoliageSurfaceQuery,
                                 &fol_ctx, g_camera->Position);
+                            rb_foliage_ms = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - _rb_fol_t0).count(); // spec 004
                         }
                     }
 
@@ -7258,6 +7263,7 @@ int main(int argc, char* argv[]) {
         // T030: render the RmlUi overlay in-game too (HUD / photo-mode / pause), over the scene and
         // under the ImGui debug layer. Menus still render via the else-branch above; this path shows
         // whatever in-game document is loaded (hud.rml on entry).
+        const auto _rb_ui_t0 = std::chrono::steady_clock::now(); // spec 004
         if (currentState == GameState::IN_GAME && g_uiManager) {
             g_uiManager->Render();
         }
@@ -7266,6 +7272,8 @@ int main(int argc, char* argv[]) {
             ImGui::Render();
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         }
+        if (g_rb_active) rb_ui_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - _rb_ui_t0).count(); // spec 004
 
         // --render-benchmark: pin a FIXED, FOREST-DENSE camera pose + time-of-day so
         // the budget capture is reproducible AND actually stresses the static-prop
@@ -7368,7 +7376,7 @@ int main(int argc, char* argv[]) {
                           rb_foliage = 0, rb_aerial = 0, rb_final = 0, rb_total = 0;
             static double rb_cpu = 0, rb_present = 0, rb_wall = 0, rb_power = 0, rb_clock = 0;
             static double rb_cpu_prep = 0, rb_cpu_shadow = 0, rb_cpu_gbuf = 0, rb_cpu_post = 0, rb_cpu_prop = 0;
-            static double rb_sim = 0, rb_stream = 0;
+            static double rb_sim = 0, rb_stream = 0, rb_foliage_rebuild = 0, rb_ui = 0;
             static bool rb_nv_ever = false;
 
             if (rb_warm < g_render_benchmark_warmup) {
@@ -7388,6 +7396,7 @@ int main(int argc, char* argv[]) {
                 rb_cpu_gbuf += s.cpu_gbuffer_ms; rb_cpu_post += s.cpu_post_ms;
                 rb_cpu_prop += s.cpu_static_prop_ms;
                 rb_sim += rb_sim_ms; rb_stream += rb_stream_ms;
+                rb_foliage_rebuild += rb_foliage_ms; rb_ui += rb_ui_ms;
                 if (nv) { rb_power += gpu_power_w; rb_clock += gpu_clock_mhz; ++rb_nv_count; rb_nv_ever = true; }
                 ++rb_count;
 
@@ -7449,7 +7458,9 @@ int main(int argc, char* argv[]) {
                     {"cpu_static_prop_ms", rb_cpu_prop / n},
                     {"cpu_post_ms", rb_cpu_post / n},
                     {"sim_tick_ms", rb_sim / n},
-                    {"streaming_ms", rb_stream / n}
+                    {"streaming_ms", rb_stream / n},
+                    {"foliage_rebuild_ms", rb_foliage_rebuild / n},
+                    {"ui_render_ms", rb_ui / n}
                 };
                 // Heuristic bound attribution for the log line: CPU-bound if the
                 // CPU submit dominates the GPU pass-timer sum.
@@ -7470,11 +7481,15 @@ int main(int argc, char* argv[]) {
                     "  CPU submit breakdown: prepare {:.3f} | shadow {:.3f} | gbuffer {:.3f} "
                     "(static_prop {:.3f}) | post {:.3f} ms",
                     rb_cpu_prep / n, rb_cpu_shadow / n, rb_cpu_gbuf / n, rb_cpu_prop / n, rb_cpu_post / n);
-                LUMINUMBRA_CORE_INFO(
-                    "  NON-render frame CPU: sim_tick {:.3f} ms | streaming {:.3f} ms | "
-                    "(render_frame total ~{:.3f} ms; rest = UI/input/scenario/other)",
-                    rb_sim / n, rb_stream / n,
-                    (rb_cpu_prep + rb_cpu_shadow + rb_cpu_gbuf + rb_cpu_post) / n);
+                {
+                    const double _rf = (rb_cpu_prep + rb_cpu_shadow + rb_cpu_gbuf + rb_cpu_post) / n;
+                    const double _known = _rf + rb_sim / n + rb_stream / n + rb_foliage_rebuild / n + rb_ui / n;
+                    LUMINUMBRA_CORE_INFO(
+                        "  NON-render frame CPU: sim {:.3f} | streaming {:.3f} | foliage_rebuild {:.3f} | "
+                        "ui_render {:.3f} ms | render_frame {:.3f} ms | unattributed {:.3f} ms (poll/scenario/etc)",
+                        rb_sim / n, rb_stream / n, rb_foliage_rebuild / n, rb_ui / n, _rf,
+                        std::max(0.0, cpu - _known));
+                }
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
                 rb_count = g_render_benchmark_frames + 1; // latch: stop re-dumping
             }
