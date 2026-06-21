@@ -2647,6 +2647,17 @@ TEST(WorldGenLayerSnapshotTest, AuthoredPresetsMeetDemReferenceRealismBands) {
             continue;
         }
         const std::string preset_name = entry.path().stem().string();
+        // Stylized presets (e.g. "amplified") opt OUT of the DEM realism bands via
+        // "realism_exempt": true — they are deliberately exaggerated (Minecraft-
+        // Amplified style), not claims of natural DEM-grounded terrain.
+        {
+            std::ifstream pf(entry.path());
+            nlohmann::json pj;
+            pf >> pj;
+            if (pj.value("realism_exempt", false)) {
+                continue;
+            }
+        }
         const std::string klass = LandscapeClassFor(preset_name);
         const TerrainGenParams params = LoadPresetParams(entry.path());
         SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
