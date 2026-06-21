@@ -105,6 +105,40 @@ far-field voids/arches) is isolated to a final re-pin tier.
 - [ ] T090: Full gate sweep + clock-lock A/B proof + re-bless visual goldens once + before/after PNGs +
   numbers to owner + closeout handoff. No push.
 
+## Session Log / Findings
+
+### Phase 0 — LANDED + VERIFIED (commit 205fda28)
+Measurement substrate built and proven. On the forest-DENSE pose (3840×1581, release):
+- **wall 16–29 ms, cpu_submit 16–29 ms, present 0.2–0.45 ms, gpu_pass_sum 3.9–6.9 ms,
+  GPU 45–62 W / 1632–1854 MHz, bound=cpu.** The spec thesis is confirmed with hard numbers:
+  the frame is overwhelmingly CPU-submit-bound and the GPU starves + downclocks (1.6–1.9 GHz / <65 W
+  vs 3.09 GHz / 300 W boost). The old benchmark pose (pitch −12, looking down) culled most of the
+  forest and hid this (~256 fps); the dense shallow pose exposes the true ~34–62 fps worst case.
+- Added: CPU-submit/present/wall split + NVML power/clock (`NvmlSampler.h`, dynamic-load, guarded),
+  forest-dense pose, schema `v2`, `--render-benchmark-screenshot`, RenderBudget gate parses v2 +
+  prints honest metrics. RenderBudget stays intentionally RED on `total` (the spec-004 target).
+- Determinism: untouched by construction (client render/measurement only; no sim/common/server/
+  scatter/hash code). No re-pin.
+
+### Phase 1+2 architectural realization (READ BEFORE STARTING)
+MDI for props is NOT a drop-in reuse of `draw_chunks_mdi`. Props are **heterogeneous meshes**
+(`GBufferPass.cpp:469-533`: each group has its own `mesh->vao`/index buffer + per-group uniforms:
+`u_materialId`, `u_skinnedAlbedoLayer/NormalLayer`, `u_alphaTest`, `u_windStrength`, `u_forceFlat`).
+A single `glMultiDrawElementsIndirect` draws from ONE bound VAO/index buffer with no uniform changes,
+so the GPU-driven path requires:
+1. **A shared static-prop mesh pool** — upload each unique prop mesh (incl. LOD variants) into a
+   shared VBO+EBO once, record `{firstIndex, baseVertex, indexCount}` per mesh (mirrors the chunk pool
+   at `RenderPipeline.cpp:241`). The cull/LOD compute then emits one `DrawElementsIndirectCommand` per
+   (mesh-variant) with `baseInstance` into a shared instance buffer.
+2. **Per-instance material attributes** — fold `materialId`, `albedoLayer`, `normalLayer`, `alphaTest`,
+   `windStrength`, `forceFlat`, `tint` into the instance SSBO so `instanced_mesh.vert`/`g_buffer.frag`
+   read them PER-INSTANCE (today they are per-group uniforms). All props then draw under ONE bound
+   texture array (`static_model_texture_array`) with ~1–2 MDI calls. This is the load-bearing change
+   that lets Phase 2's compute cull write indirect args with zero CPU per-entity work.
+Because of this coupling, treat Phase 1 (pool + MDI of the already-CPU-grouped batches) and Phase 2
+(compute cull feeding the same structure) as one focused GPU-driven rewrite. Keep the CPU path alive
+behind a flag until the draw-count + visible-instance parity test passes on the dense pose.
+
 ## Gate Criteria
 The plan phase is complete when:
 - [x] All tasks defined with clear acceptance criteria (above + spec ACs).
