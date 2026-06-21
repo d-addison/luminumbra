@@ -35,6 +35,7 @@
 
 #include "../components/CoreComponents.h"
 #include "../components/CreatureComponents.h"
+#include "../components/InstinctComponents.h"  // PerceptionComponent (FR-4 sensory phenotype)
 #include "../core/DeterministicMath.h"
 #include "../core/DeterministicRng.h"
 
@@ -178,16 +179,24 @@ inline CreatureReproductionStats RunMatingResolveOnTick(entt::registry& reg, std
 
         CreatureGenome fG; fG.move_speed = gn.move_speed; fG.vigilance = gn.vigilance;
         fG.hunger_threshold = gn.hunger_threshold; fG.size_scale = gn.size_scale;
+        fG.vision_cos_half_fov = gn.vision_cos_half_fov; fG.vision_range = gn.vision_range;
+        fG.hearing_range = gn.hearing_range;
         CreatureGenome mG; mG.move_speed = mgn.move_speed; mG.vigilance = mgn.vigilance;
         mG.hunger_threshold = mgn.hunger_threshold; mG.size_scale = mgn.size_scale;
+        mG.vision_cos_half_fov = mgn.vision_cos_half_fov; mG.vision_range = mgn.vision_range;
+        mG.hearing_range = mgn.hearing_range;
 
         luminumbra::core::DeterministicRng rng = luminumbra::core::DeterministicRng::seeded(
             kReproSeedOffset ^ world_seed,
             (static_cast<std::uint64_t>(entt::to_integral(e)) * 0x9E3779B97F4A7C15ull) ^
                 static_cast<std::uint64_t>(entt::to_integral(maleE)),
             tick);
-        const CreatureGenome childG = BreedOffspring(fG, mG, rng);
+        CreatureGenome childG = BreedOffspring(fG, mG, rng);
         const bool childFemale = (rng.next_u64() & 1ull) == 0ull;
+        // FR-4: inherit the SENSORY genes from draws taken AFTER the core breed + sex draw, so the
+        // 4-gene core genome and the sex bit are byte-identical to before this slice (the ecology
+        // hash reads only move_speed/generation/age_ticks, so it is unchanged for genome rosters).
+        childG = BreedSensoryInto(childG, fG, mG, rng);
 
         const auto& mtf = view.get<Comp::TransformComponent>(maleE);
         Birth b;
@@ -222,11 +231,24 @@ inline CreatureReproductionStats RunMatingResolveOnTick(entt::registry& reg, std
         gn.vigilance = b.genome.vigilance;
         gn.hunger_threshold = b.genome.hunger_threshold;
         gn.size_scale = b.genome.size_scale;
+        gn.vision_cos_half_fov = b.genome.vision_cos_half_fov;
+        gn.vision_range = b.genome.vision_range;
+        gn.hearing_range = b.genome.hearing_range;
         gn.age_ticks = 0;
         gn.reproduce_cooldown = kReproCooldownTicks;  // newborn can't immediately breed
         gn.generation = b.generation;
         gn.female = b.female;
         gn.courting_ticks = 0;
+
+        // FR-4: express the sensory genes into a PerceptionComponent so the offspring's senses are
+        // genetically determined (vision cone + range, hearing range). PerceptionComponent is pure
+        // data — it is not in the ecology hash, and the perception system needs an AwarenessComponent
+        // to act — so this is inert for the canonical hash and only bites where a roster opts its
+        // creatures into sensing. This is the read side that makes sensory divergence observable.
+        auto& pc = reg.emplace<Comp::PerceptionComponent>(child);
+        pc.vision_cos_half_fov = b.genome.vision_cos_half_fov;
+        pc.vision_range = b.genome.vision_range;
+        pc.ear.range = b.genome.hearing_range;
 
         ++stats.born;
     }

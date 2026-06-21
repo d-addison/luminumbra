@@ -53,6 +53,12 @@ struct CreatureGenomeComponent {
     float vigilance = 0.5f;         // flee bias (reserved behaviour hook)
     float hunger_threshold = 0.3f;  // reproduce only when hunger <= this
     float size_scale = 1.0f;        // visual/sim size cue
+    // --- FR-4 SENSORY genes (mirror ai::CreatureGenome; defaults == PerceptionComponent defaults
+    // so a default-stamped creature perceives identically to before). Heritable + mutable -> the
+    // perceptual phenotype that diverges under selection. ---
+    float vision_cos_half_fov = 0.5f; // cos(half FOV); lower = wider cone
+    float vision_range = 20.0f;       // m
+    float hearing_range = 24.0f;      // m
 
     // --- reproduction bookkeeping (integer ticks; deterministic) ---
     // Ticks since this creature was born/spawned. A creature must reach maturity before it

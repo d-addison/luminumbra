@@ -38,6 +38,15 @@ struct CreatureGenome {
     float vigilance = 0.5f;        // 0 oblivious .. 1 paranoid (flee bias; reserved hook)
     float hunger_threshold = 0.3f; // reproduce only when hunger <= this (well-fed gate)
     float size_scale = 1.0f;       // visual/sim size cue (>1 bigger); inherited + mutated
+    // --- FR-4 SENSORY genes (the perceptual phenotype). Defaults reproduce the engine's hard-coded
+    // PerceptionComponent / HearingProfile defaults EXACTLY, so a default-genome creature perceives
+    // identically to before this slice. Heritable + mutable -> predator/prey SENSORY divergence under
+    // selection (narrow far-seeing predator cone vs wide near hearing-led prey). Carried OUTSIDE the
+    // 4-gene core GA vector so the existing breeding RNG stream (and the ecology hash) is untouched;
+    // inherited by BreedSensoryInto from draws taken AFTER the core breed + sex draw. ---
+    float vision_cos_half_fov = 0.5f; // cos(half FOV); lower = WIDER cone, higher = narrower
+    float vision_range = 20.0f;       // m (matches PerceptionComponent.vision_range)
+    float hearing_range = 24.0f;      // m (matches HearingProfile.range)
 };
 
 // Number of genes in the flat vector encoding (mirrors CreatureGenome's fields, in order).
@@ -91,6 +100,44 @@ inline constexpr float kCreatureMutationSigmaFrac = 0.08f;
     std::vector<float> child = BlendCrossover(CreatureGenomeToGenes(a), CreatureGenomeToGenes(b), rng);
     GaussianMutate(child, bv, kCreatureMutationSigmaFrac, rng);
     return CreatureGenomeFromGenes(child);
+}
+
+// --- FR-4 SENSORY genes: kept separate from the 4-gene core so the existing breeding RNG stream is
+// byte-identical. Inheritance draws are taken AFTER BreedOffspring + the sex draw (see
+// CreatureReproductionSystem), so the core genome and child sex are unaffected. ---
+inline constexpr std::size_t kCreatureSensoryGeneCount = 3;
+
+// Canonical inclusive bounds: a wide cone (cos ~0.2 ~= 156 deg) for prey down to a narrow cone
+// (cos ~0.95 ~= 36 deg) for a focused predator; vision/hearing ranges in a sane metre band.
+[[nodiscard]] inline std::array<GeneBound, kCreatureSensoryGeneCount> CreatureSensoryGeneBounds() {
+    return {GeneBound{0.2f, 0.95f},   // vision_cos_half_fov
+            GeneBound{6.0f, 45.0f},   // vision_range (m)
+            GeneBound{6.0f, 45.0f}};  // hearing_range (m)
+}
+
+[[nodiscard]] inline std::vector<float> CreatureSensoryToGenes(const CreatureGenome& g) {
+    return {g.vision_cos_half_fov, g.vision_range, g.hearing_range};
+}
+
+inline void ApplySensoryGenes(CreatureGenome& g, const std::vector<float>& v) {
+    if (v.size() > 0) g.vision_cos_half_fov = v[0];
+    if (v.size() > 1) g.vision_range = v[1];
+    if (v.size() > 2) g.hearing_range = v[2];
+}
+
+// Inherit the SENSORY genes (sexual blend-crossover + mutate) into an already-bred `child`, using
+// rng draws taken AFTER the core BreedOffspring + sex draw. Returns the child with its sensory genes
+// set; the core genome fields are left untouched. Deterministic for a given rng state.
+[[nodiscard]] inline CreatureGenome BreedSensoryInto(CreatureGenome child, const CreatureGenome& a,
+                                                     const CreatureGenome& b,
+                                                     luminumbra::core::DeterministicRng& rng) {
+    const auto bounds = CreatureSensoryGeneBounds();
+    std::vector<GeneBound> bv(bounds.begin(), bounds.end());
+    std::vector<float> genes =
+        BlendCrossover(CreatureSensoryToGenes(a), CreatureSensoryToGenes(b), rng);
+    GaussianMutate(genes, bv, kCreatureMutationSigmaFrac, rng);
+    ApplySensoryGenes(child, genes);
+    return child;
 }
 
 }  // namespace luminumbra::ai

@@ -11,6 +11,7 @@
 #include "ai/CreatureReproductionSystem.h"
 #include "components/CoreComponents.h"
 #include "components/CreatureComponents.h"
+#include "components/InstinctComponents.h"  // PerceptionComponent (FR-4)
 
 namespace {
 
@@ -18,6 +19,10 @@ namespace Comp = ::Luminumbra::Components;
 using luminumbra::ai::RunMateSeekingOnTick;
 using luminumbra::ai::RunMatingResolveOnTick;
 using luminumbra::ai::kCourtshipTicks;
+using luminumbra::ai::CreatureGenome;
+using luminumbra::ai::BreedOffspring;
+using luminumbra::ai::BreedSensoryInto;
+using luminumbra::ai::CreatureSensoryGeneBounds;
 
 // Spawn a prey with a genome. `ready` => mature, well-fed, healthy, off cooldown.
 entt::entity spawnMate(entt::registry& r, float x, float z, bool female, bool ready = true) {
@@ -146,6 +151,70 @@ TEST(CreatureReproduction, Deterministic) {
         return out;
     };
     EXPECT_EQ(run(), run());
+}
+
+// FR-4: the SENSORY genes inherit as a bounded blend+mutate and are deterministic for a given rng.
+TEST(CreatureReproduction, SensoryGenesInheritWithinBoundsAndDeterministic) {
+    CreatureGenome a; a.vision_cos_half_fov = 0.30f; a.vision_range = 10.0f; a.hearing_range = 12.0f;
+    CreatureGenome b; b.vision_cos_half_fov = 0.90f; b.vision_range = 40.0f; b.hearing_range = 38.0f;
+    const auto bounds = CreatureSensoryGeneBounds();
+    auto breed = [&](std::uint64_t seed) {
+        luminumbra::core::DeterministicRng rng = luminumbra::core::DeterministicRng::seeded(seed, 1, 2);
+        return BreedSensoryInto(CreatureGenome{}, a, b, rng);
+    };
+    const CreatureGenome c1 = breed(7);
+    const CreatureGenome c2 = breed(7);
+    EXPECT_FLOAT_EQ(c1.vision_cos_half_fov, c2.vision_cos_half_fov);  // run==replay
+    EXPECT_FLOAT_EQ(c1.vision_range, c2.vision_range);
+    EXPECT_FLOAT_EQ(c1.hearing_range, c2.hearing_range);
+    EXPECT_GE(c1.vision_cos_half_fov, bounds[0].lo); EXPECT_LE(c1.vision_cos_half_fov, bounds[0].hi);
+    EXPECT_GE(c1.vision_range, bounds[1].lo);        EXPECT_LE(c1.vision_range, bounds[1].hi);
+    EXPECT_GE(c1.hearing_range, bounds[2].lo);       EXPECT_LE(c1.hearing_range, bounds[2].hi);
+}
+
+// FR-4 determinism guard: breeding the sensory genes (drawn AFTER the core breed + sex draw) leaves
+// the 4-gene CORE genome and the sex bit byte-identical -> the ecology hash (move_speed/gen/age) is
+// unchanged for genome rosters, so this slice needs no re-pin.
+TEST(CreatureReproduction, SensoryBreedingDoesNotPerturbCoreGenomeOrSex) {
+    CreatureGenome a; a.move_speed = 2.5f; a.vision_range = 11.0f;
+    CreatureGenome b; b.move_speed = 6.5f; b.vision_range = 39.0f;
+    // Path 1: core breed + sex only (the pre-FR-4 stream).
+    luminumbra::core::DeterministicRng r1 = luminumbra::core::DeterministicRng::seeded(9, 3, 4);
+    const CreatureGenome core1 = BreedOffspring(a, b, r1);
+    const bool sex1 = (r1.next_u64() & 1ull) == 0ull;
+    // Path 2: same stream, then sensory breeding appended after the sex draw.
+    luminumbra::core::DeterministicRng r2 = luminumbra::core::DeterministicRng::seeded(9, 3, 4);
+    CreatureGenome core2 = BreedOffspring(a, b, r2);
+    const bool sex2 = (r2.next_u64() & 1ull) == 0ull;
+    core2 = BreedSensoryInto(core2, a, b, r2);
+    EXPECT_FLOAT_EQ(core1.move_speed, core2.move_speed);
+    EXPECT_FLOAT_EQ(core1.vigilance, core2.vigilance);
+    EXPECT_FLOAT_EQ(core1.hunger_threshold, core2.hunger_threshold);
+    EXPECT_FLOAT_EQ(core1.size_scale, core2.size_scale);
+    EXPECT_EQ(sex1, sex2);
+}
+
+// FR-4: a born offspring is stamped with a PerceptionComponent expressed from its genome.
+TEST(CreatureReproduction, OffspringPerceptionStampedFromGenome) {
+    entt::registry r;
+    auto f = spawnMate(r, 0.0f, 0.0f, true);
+    auto m = spawnMate(r, 1.0f, 0.0f, false);
+    // Distinct sensory genes so the child's values are clearly genome-driven (and in-bounds).
+    auto& fg = r.get<Comp::CreatureGenomeComponent>(f);
+    fg.vision_cos_half_fov = 0.85f; fg.vision_range = 35.0f; fg.hearing_range = 30.0f;
+    auto& mg = r.get<Comp::CreatureGenomeComponent>(m);
+    mg.vision_cos_half_fov = 0.80f; mg.vision_range = 33.0f; mg.hearing_range = 28.0f;
+    for (std::uint32_t t = 0; t < kCourtshipTicks + 2; ++t) RunMatingResolveOnTick(r, t);
+    entt::entity child = entt::null;
+    for (auto e : r.view<Comp::CreatureGenomeComponent>())
+        if (r.get<Comp::CreatureGenomeComponent>(e).generation == 1u) child = e;
+    ASSERT_TRUE(child != entt::null) << "a child should exist";  // boolean form: no entt::null_t printer
+    ASSERT_TRUE(r.all_of<Comp::PerceptionComponent>(child)) << "offspring must carry PerceptionComponent";
+    const auto& gn = r.get<Comp::CreatureGenomeComponent>(child);
+    const auto& pc = r.get<Comp::PerceptionComponent>(child);
+    EXPECT_FLOAT_EQ(pc.vision_cos_half_fov, gn.vision_cos_half_fov);  // expressed from the genome
+    EXPECT_FLOAT_EQ(pc.vision_range, gn.vision_range);
+    EXPECT_FLOAT_EQ(pc.ear.range, gn.hearing_range);
 }
 
 }  // namespace
