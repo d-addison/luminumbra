@@ -314,8 +314,14 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
         mix(m_enabled ? 0x9E3779B97F4A7C15ull : 0x1ull);
         mix(static_cast<std::uint64_t>(cell(camera_pos.x)) * 73856093ull ^
             (static_cast<std::uint64_t>(cell(camera_pos.z)) * 19349663ull));
-        mix(static_cast<std::uint64_t>(std::llround(m_wind_xz.x * 2.0f)) ^
-            (static_cast<std::uint64_t>(std::llround(m_wind_xz.y * 2.0f)) << 16));
+        // spec 004: wind is NOT in the rebuild signature. The wind field drifts
+        // every frame, so including it forced a full scatter re-bake (~5-9 ms,
+        // incl. surface re-queries + SSBO re-uploads) just to refresh the baked
+        // per-instance sway vector. The visible waving is u_time-driven in the
+        // grass shader; the baked sway direction lags wind by at most one real
+        // rebuild (a camera-cell cross or chunk-set change), which is visually
+        // negligible. Dropping it lets the scatter cache actually ELIDE on a
+        // static / slow camera. RENDER-ONLY.
         mix(static_cast<std::uint64_t>(std::llround(m_fade_start_m)) ^
             (static_cast<std::uint64_t>(std::llround(m_fade_end_m)) << 20));
         mix(static_cast<std::uint64_t>(std::llround(m_density_scale * 100.0f)));
