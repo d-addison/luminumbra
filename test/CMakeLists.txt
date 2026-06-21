@@ -804,8 +804,19 @@ set(LUMINUMBRA_GTEST_TARGETS
     capture_scale_test
     isolation_config_test
 )
+# Gate honesty (spec 002, Item 3a): a GTEST_SKIP exits 0, so ctest counts it as PASS — meaning the
+# headless RmlUi UI suite (which GTEST_SKIPs without a GL context) could go GREEN with zero coverage
+# on a gate runner that lacks GL. These tests assert real behaviour and MUST run, not skip. Promote
+# any "[ SKIPPED ]" line from the UI targets to a ctest FAILURE via FAIL_REGULAR_EXPRESSION. The
+# GL-free cases in these binaries never print SKIPPED, so a fully-GL run stays green.
+set(LUMINUMBRA_GL_REQUIRED_UI_TARGETS ui_smoke_test ui_page_load_test)
 foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
-    gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120)
+    if(_lum_gtest_target IN_LIST LUMINUMBRA_GL_REQUIRED_UI_TARGETS)
+        gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
+            PROPERTIES FAIL_REGULAR_EXPRESSION "SKIPPED")
+    else()
+        gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120)
+    endif()
 endforeach()
 
 # far-field-source-unification (FR-003 / AC-003): the forest perf-BUDGET harness is
