@@ -153,6 +153,10 @@
                             <div class="param-group">
                                 <h3 class="param-group-heading">biomes</h3>
 
+                                <div class="settings-row-inline param-row">
+                                    <label>biomes</label>
+                                    <span class="toggle worldgen-param on" data-path="biomes.enabled" data-type="bool"><span class="toggle-knob"></span></span>
+                                </div>
                                 <div class="settings-row param-row">
                                     <label>temperature scale <span class="param-value">0.003</span></label>
                                     <input type="range" class="worldgen-param settings-slider" data-path="biomes.temperature_frequency" data-type="float" min="0.001" max="0.01" step="0.0005" value="0.003" />
@@ -198,6 +202,10 @@
                                 <div class="settings-row-inline param-row">
                                     <label>structures</label>
                                     <span class="toggle worldgen-param on" data-path="features.structures_enabled" data-type="bool"><span class="toggle-knob"></span></span>
+                                </div>
+                                <div class="settings-row-inline param-row">
+                                    <label>island mask</label>
+                                    <span class="toggle worldgen-param" data-path="terrain.island_mask_enabled" data-type="bool"><span class="toggle-knob"></span></span>
                                 </div>
                             </div>
 

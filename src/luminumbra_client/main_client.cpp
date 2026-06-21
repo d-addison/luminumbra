@@ -2451,6 +2451,12 @@ int main(int argc, char* argv[]) {
                 if (!in) return "";
                 nlohmann::json j;
                 in >> j;
+                // "biomes" toggle reflects whether the preset sets a biome table.
+                if (path == "biomes.enabled") {
+                    const nlohmann::json::json_pointer tjp("/generation_params/biomes/table");
+                    const bool on = j.contains(tjp) && j.at(tjp).is_string() && !j.at(tjp).get<std::string>().empty();
+                    return on ? "true" : "false";
+                }
                 std::string ptr = "/generation_params/";
                 for (char ch : path) ptr += (ch == '.') ? '/' : ch;
                 const nlohmann::json::json_pointer jp(ptr);

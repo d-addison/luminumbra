@@ -41,6 +41,24 @@ CustomPresetResult BuildCustomPreset(const nlohmann::json& base, const std::vect
 
     for (const WorldGenParam& p : params) {
         if (p.path.empty()) { ++result.skipped; continue; }
+
+        // The whole biome system has no explicit flag — it is on iff biomes.table is set. Map the
+        // "biomes" toggle to that: off clears the table, on restores it (default if the base had none).
+        if (p.path == "biomes.enabled") {
+            const bool on = (p.value == "true" || p.value == "1");
+            const auto tjp = nlohmann::json::json_pointer("/generation_params/biomes/table");
+            const std::string base_table =
+                (base.contains(tjp) && base.at(tjp).is_string()) ? base.at(tjp).get<std::string>() : std::string();
+            const std::string desired = on ? (base_table.empty() ? std::string("common/biomes.json") : base_table)
+                                           : std::string();
+            if (desired != base_table) {
+                result.json[tjp] = desired;
+                result.changed = true;
+                ++result.applied;
+            }
+            continue;
+        }
+
         const nlohmann::json::json_pointer jp = PointerFor(p.path);
         const bool base_has = base.contains(jp);
 

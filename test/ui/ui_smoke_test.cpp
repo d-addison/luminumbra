@@ -9,7 +9,9 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <optional>
+#include <set>
 #include <regex>
 #include <sstream>
 #include <string>
@@ -18,6 +20,7 @@
 #include "ui/Rml_UIManager.h"
 #include "ui/core/UIComponent.h"
 #include "ui/core/UIStateManager.h"
+#include "world/WorldgenOverride.h"
 
 namespace fs = std::filesystem;
 
@@ -739,4 +742,98 @@ TEST(UiSmokeTest, DestroyedComponentReceivesNoPropertyMutations) {
     EXPECT_EQ(callback_fires, 2);
 
     ui.Shutdown();
+}
+
+// BuildCustomPreset is the merge below the create callback (no GL): it must apply ONLY the
+// overrides that differ from the base, leave the rest byte-identical, and special-case the
+// biomes toggle (which has no flag — it maps to biomes.table). This is the unit that the e2e
+// can only observe up to the callback boundary.
+TEST(WorldgenOverrideTest, BuildCustomPresetAppliesOnlyRealDeltas) {
+    using Luminumbra::Client::BuildCustomPreset;
+    using P = Luminumbra::Client::WorldGenParam;
+
+    nlohmann::json base = {
+        {"generation_params", {
+            {"terrain", {{"base_amplitude", 34.0}, {"octaves", 5}}},
+            {"features", {{"caves_enabled", true}}},
+            {"biomes", {{"table", "common/biomes.json"}}},
+        }},
+    };
+
+    // amplitude unchanged (34), octaves 5->8, caves on->off, biomes on->off (clears table).
+    std::vector<P> params = {
+        {"terrain.base_amplitude", "34.000000", "float"},
+        {"terrain.octaves", "8.000000", "int"},
+        {"features.caves_enabled", "false", "bool"},
+        {"biomes.enabled", "false", "bool"},
+    };
+    auto r = BuildCustomPreset(base, params);
+    EXPECT_TRUE(r.changed);
+    EXPECT_EQ(r.applied, 3) << "the unchanged amplitude must not count as an override";
+    EXPECT_DOUBLE_EQ(r.json["generation_params"]["terrain"]["base_amplitude"].get<double>(), 34.0);
+    EXPECT_EQ(r.json["generation_params"]["terrain"]["octaves"].get<int>(), 8);
+    EXPECT_EQ(r.json["generation_params"]["features"]["caves_enabled"].get<bool>(), false);
+    EXPECT_EQ(r.json["generation_params"]["biomes"]["table"].get<std::string>(), "");
+
+    // Nothing actually different from the base -> no customization at all.
+    std::vector<P> noop = {
+        {"terrain.base_amplitude", "34.0", "float"},
+        {"terrain.octaves", "5", "int"},
+        {"features.caves_enabled", "true", "bool"},
+        {"biomes.enabled", "true", "bool"},
+    };
+    EXPECT_FALSE(BuildCustomPreset(base, noop).changed) << "an untouched form must not customize";
+
+    // Unparseable numeric is skipped, not silently zeroed.
+    std::vector<P> bad = {{"terrain.base_amplitude", "not-a-number", "float"}};
+    auto rb = BuildCustomPreset(base, bad);
+    EXPECT_FALSE(rb.changed);
+    EXPECT_EQ(rb.skipped, 1);
+}
+
+// Drift guard: every worldgen-param data-path authored in world_creation.rml must be a real
+// generation_params key (present in some curated preset, or a known default-only key). Catches a
+// typo'd path that would silently no-op both seeding and the override.
+TEST(WorldgenOverrideTest, EveryCustomizeParamPathIsAKnownWorldgenKey) {
+    const fs::path root = SourceRoot();
+
+    std::set<std::string> known;
+    std::function<void(const nlohmann::json&, const std::string&)> walk =
+        [&](const nlohmann::json& node, const std::string& prefix) {
+            if (node.is_object()) {
+                for (auto it = node.begin(); it != node.end(); ++it) {
+                    walk(it.value(), prefix.empty() ? it.key() : prefix + "." + it.key());
+                }
+            } else if (!prefix.empty()) {
+                known.insert(prefix);
+            }
+        };
+    for (const auto& entry : fs::directory_iterator(root / "worlds/atlas/presets")) {
+        if (entry.path().extension() != ".json") continue;
+        std::ifstream f(entry.path());
+        if (!f) continue;
+        nlohmann::json j;
+        try { f >> j; } catch (...) { continue; }
+        if (j.contains("generation_params")) walk(j["generation_params"], "");
+    }
+    // Keys the loader reads with defaults that the curated presets may omit, plus the synthetic
+    // biomes toggle (maps to biomes.table).
+    for (const char* k : {"terrain.island_mask_enabled", "terrain.hydro.iterations",
+                          "terrain.hydro.thermal_rate", "features.lakes_enabled", "features.lake_depth",
+                          "features.lake_frequency", "features.cliffs_enabled", "features.cliff_step",
+                          "features.cliff_frequency", "biomes.relief_enabled", "biomes.relief_strength",
+                          "biomes.enabled"}) {
+        known.insert(k);
+    }
+
+    const std::string rml = ReadTextFile(root / "data/ui/world_creation.rml");
+    ASSERT_FALSE(rml.empty());
+    const std::regex path_regex(R"(data-path\s*=\s*\"([^\"]+)\")");
+    int checked = 0;
+    for (std::sregex_iterator it(rml.begin(), rml.end(), path_regex), end; it != end; ++it) {
+        const std::string path = (*it)[1].str();
+        EXPECT_GT(known.count(path), 0u) << "RML data-path is not a known worldgen key: " << path;
+        ++checked;
+    }
+    EXPECT_GE(checked, 25) << "expected the full customize param set";
 }
