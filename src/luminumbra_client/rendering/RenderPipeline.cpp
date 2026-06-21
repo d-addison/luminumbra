@@ -7,6 +7,7 @@
 #include "rendering/Camera.h"
 #include "rendering/passes/ShieldRtFarFieldPass.h"
 #include <algorithm>
+#include <chrono> // spec 004: CPU per-phase submit cost
 #include <unordered_set>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/constants.hpp>
@@ -1608,6 +1609,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     if (!m_started) {
         return;
     }
+    const auto _cpu_t0 = std::chrono::steady_clock::now(); // spec 004: CPU per-phase submit cost
 
     update_time_of_day(deltaTime);
     gather_lights(registry);
@@ -1683,15 +1685,18 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // Use cached planes
     std::memcpy(frustum_planes, m_frustumCache.planes, sizeof(frustum_planes));
 
+    const auto _cpu_prep = std::chrono::steady_clock::now(); // spec 004
      // 1. SHADOW PASS
     begin_gpu_pass_timer(GpuTimerPass::Shadow);
     m_shadow_pass->execute(*this, renderable_chunk_snapshots, camera);
     end_gpu_pass_timer(GpuTimerPass::Shadow);
+    const auto _cpu_shadow = std::chrono::steady_clock::now(); // spec 004
     glViewport(0, 0, m_screen_width, m_screen_height);
 
     // 2. GEOMETRY / G-BUFFER PASS
     begin_gpu_pass_timer(GpuTimerPass::GBuffer);
     m_gbuffer_pass->execute(*this, registry, renderable_chunk_snapshots, camera, frustum_planes);
+    const auto _cpu_gbuf = std::chrono::steady_clock::now(); // spec 004
     // 2a. I9-FOLIAGE (render.plant_procgen): draw the procedural plants into the
     // SAME G-buffer the static meshes just wrote. The combined world-space mesh
     // is baked + pushed by the client (set_plants); OFF by default, so this is a
@@ -2017,6 +2022,20 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     finish_gpu_pass_timer_frame();
     refresh_render_pass_metadata();
+
+    // spec 004 Phase 0/1: record CPU per-phase submit cost (this frame).
+    {
+        auto ms = [](auto a, auto b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+        const auto _cpu_end = std::chrono::steady_clock::now();
+        m_last_render_pass_stats.cpu_prepare_ms = ms(_cpu_t0, _cpu_prep);
+        m_last_render_pass_stats.cpu_shadow_ms = ms(_cpu_prep, _cpu_shadow);
+        m_last_render_pass_stats.cpu_gbuffer_ms = ms(_cpu_shadow, _cpu_gbuf);
+        m_last_render_pass_stats.cpu_post_ms = ms(_cpu_gbuf, _cpu_end);
+        m_last_render_pass_stats.cpu_static_prop_ms =
+            m_gbuffer_pass ? m_gbuffer_pass->last_static_prop_cpu_ms() : 0.0;
+    }
 
     // iter-6 A0: every pass marker must be balanced by frame end, else the
     // Nsight/RenderDoc capture (which the SHIELD-RT tracer decision depends on)

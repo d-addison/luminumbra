@@ -3333,6 +3333,11 @@ int main(int argc, char* argv[]) {
         // spec 004 Phase 0: CPU-submit clock starts at frame top when benchmarking.
         const bool g_rb_active = !g_render_benchmark_path.empty();
         if (g_rb_active) g_rb_frame_start = std::chrono::steady_clock::now();
+        double rb_sim_ms = 0.0;     // spec 004: this frame's sim-tick CPU cost
+        double rb_stream_ms = 0.0;  // spec 004: this frame's streaming CPU cost
+        // Declared at loop scope (not inside the case) so the case labels below
+        // don't "jump over" an initialized local (ill-formed in a switch).
+        std::chrono::steady_clock::time_point _rb_sim_t0{}, _rb_stream_t0{};
 
         if (scenario_failed) {
             exit_code = 2;
@@ -4502,6 +4507,7 @@ int main(int argc, char* argv[]) {
                 // with the host), so the default per-frame tick + camera-anchored
                 // streaming are SKIPPED here -- ticking twice would desync from the
                 // host, and camera-anchored streaming would diverge the hashed world.
+                _rb_sim_t0 = std::chrono::steady_clock::now(); // spec 004
                 if (!scenario_config.networked_session_smoke()) {
                 if (g_timeScale == 1.0f) {
                     gameSession->TickSimulation(static_cast<double>(deltaTime));  // byte-identical default (gates run here)
@@ -4521,6 +4527,9 @@ int main(int argc, char* argv[]) {
                         ran += static_cast<int>(t);
                     }
                 }  // g_timeScale == 0 -> paused (no sim ticks; render/streaming continue)
+                rb_sim_ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - _rb_sim_t0).count(); // spec 004
+                _rb_stream_t0 = std::chrono::steady_clock::now(); // spec 004
                 if (gameSession->GetWorldSystem() && (g_playerController || g_camera)) {
                     const Luminumbra::Vec3 streaming_position =
                         ((scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.cloud_shadow_smoke() || scenario_config.precipitation_smoke() || scenario_config.timeofday_sweep_smoke() || scenario_config.lod_boundary_oscillation_smoke() || scenario_config.lod_seam_arrival_smoke() || scenario_config.player_view_smoke() || scenario_config.farlod_horizon_smoke() || scenario_config.skinned_mesh_visual_smoke() || scenario_config.creature_slice_smoke()) && scenario_ready && g_camera)
@@ -4532,6 +4541,8 @@ int main(int argc, char* argv[]) {
                         gameSession->GetPhysicsSystem()
                     );
                 }
+                rb_stream_ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - _rb_stream_t0).count(); // spec 004
                 } // T-I4-14: end !networked_session_smoke default-tick guard
                 break;
             case GameState::MAIN_MENU:
@@ -7356,6 +7367,8 @@ int main(int argc, char* argv[]) {
                           rb_lighting = 0, rb_water = 0, rb_skybox = 0, rb_particle = 0,
                           rb_foliage = 0, rb_aerial = 0, rb_final = 0, rb_total = 0;
             static double rb_cpu = 0, rb_present = 0, rb_wall = 0, rb_power = 0, rb_clock = 0;
+            static double rb_cpu_prep = 0, rb_cpu_shadow = 0, rb_cpu_gbuf = 0, rb_cpu_post = 0, rb_cpu_prop = 0;
+            static double rb_sim = 0, rb_stream = 0;
             static bool rb_nv_ever = false;
 
             if (rb_warm < g_render_benchmark_warmup) {
@@ -7371,6 +7384,10 @@ int main(int argc, char* argv[]) {
                           + s.lighting_gpu_ms + s.water_gpu_ms + s.skybox_gpu_ms + s.particle_gpu_ms
                           + s.foliage_gpu_ms + s.aerial_gpu_ms + s.final_blit_gpu_ms;
                 rb_cpu += cpu_submit_ms; rb_present += present_ms; rb_wall += wall_ms;
+                rb_cpu_prep += s.cpu_prepare_ms; rb_cpu_shadow += s.cpu_shadow_ms;
+                rb_cpu_gbuf += s.cpu_gbuffer_ms; rb_cpu_post += s.cpu_post_ms;
+                rb_cpu_prop += s.cpu_static_prop_ms;
+                rb_sim += rb_sim_ms; rb_stream += rb_stream_ms;
                 if (nv) { rb_power += gpu_power_w; rb_clock += gpu_clock_mhz; ++rb_nv_count; rb_nv_ever = true; }
                 ++rb_count;
 
@@ -7424,7 +7441,15 @@ int main(int argc, char* argv[]) {
                     {"frame_wall_ms", wall},
                     {"gpu_pass_sum_ms", gpu_sum},
                     {"gpu_power_w", rb_nv_ever ? rb_power / np : 0.0},
-                    {"gpu_clock_mhz", rb_nv_ever ? rb_clock / np : 0.0}
+                    {"gpu_clock_mhz", rb_nv_ever ? rb_clock / np : 0.0},
+                    // spec 004: CPU submit broken down by phase (localizes the bound).
+                    {"cpu_prepare_ms", rb_cpu_prep / n},
+                    {"cpu_shadow_ms", rb_cpu_shadow / n},
+                    {"cpu_gbuffer_ms", rb_cpu_gbuf / n},
+                    {"cpu_static_prop_ms", rb_cpu_prop / n},
+                    {"cpu_post_ms", rb_cpu_post / n},
+                    {"sim_tick_ms", rb_sim / n},
+                    {"streaming_ms", rb_stream / n}
                 };
                 // Heuristic bound attribution for the log line: CPU-bound if the
                 // CPU submit dominates the GPU pass-timer sum.
@@ -7441,6 +7466,15 @@ int main(int argc, char* argv[]) {
                     rb_count, g_render_benchmark_path, wall, wall > 0.0 ? 1000.0 / wall : 0.0, cpu,
                     rb_present / n, gpu_sum, rb_nv_ever ? rb_power / np : 0.0,
                     rb_nv_ever ? rb_clock / np : 0.0, j["bound"].get<std::string>());
+                LUMINUMBRA_CORE_INFO(
+                    "  CPU submit breakdown: prepare {:.3f} | shadow {:.3f} | gbuffer {:.3f} "
+                    "(static_prop {:.3f}) | post {:.3f} ms",
+                    rb_cpu_prep / n, rb_cpu_shadow / n, rb_cpu_gbuf / n, rb_cpu_prop / n, rb_cpu_post / n);
+                LUMINUMBRA_CORE_INFO(
+                    "  NON-render frame CPU: sim_tick {:.3f} ms | streaming {:.3f} ms | "
+                    "(render_frame total ~{:.3f} ms; rest = UI/input/scenario/other)",
+                    rb_sim / n, rb_stream / n,
+                    (rb_cpu_prep + rb_cpu_shadow + rb_cpu_gbuf + rb_cpu_post) / n);
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
                 rb_count = g_render_benchmark_frames + 1; // latch: stop re-dumping
             }

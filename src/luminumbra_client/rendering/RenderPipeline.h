@@ -422,6 +422,16 @@ public:
         // staying 0.0 on frames with no refresh.
         double sky_full_precompute_ms = 0.0;
         double sky_view_refresh_ms = 0.0;
+        // spec 004 Phase 0/1: CPU-side per-phase submit cost (std::chrono, this
+        // frame, NOT 2-frame-delayed like the GPU timers). The frame is
+        // CPU-submit-bound, so this localizes WHERE the CPU time goes — the GPU
+        // pass-timer sum cannot. cpu_gbuffer includes chunks+props+farlod+foliage
+        // geometry; cpu_static_prop is the static-mesh sub-cost within it.
+        double cpu_prepare_ms = 0.0;     // snapshots + GPU resource mgmt + culling + farlod
+        double cpu_shadow_ms = 0.0;      // shadow pass CPU submit
+        double cpu_gbuffer_ms = 0.0;     // g-buffer pass CPU submit (chunks + props + geo)
+        double cpu_static_prop_ms = 0.0; // static-mesh submit within the g-buffer pass
+        double cpu_post_ms = 0.0;        // ssao + lighting + skybox + water + particles + final
     };
 
     struct RenderPassMetadata {

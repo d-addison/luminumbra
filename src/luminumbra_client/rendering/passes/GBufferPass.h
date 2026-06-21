@@ -7,6 +7,8 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <unordered_map>
+#include <cstdint>
 
 namespace Luminumbra::Rendering {
 
@@ -47,6 +49,8 @@ public:
     const std::unique_ptr<Shader>& instanced_static_mesh_shader() const { return m_instanced_static_mesh_shader; }
     const std::unique_ptr<Shader>& skinned_mesh_shader() const { return m_skinned_mesh_shader; }
     GLuint instance_matrix_vbo() const { return m_instanceMatrixVBO; }
+    // spec 004: CPU submit cost of the static-prop pass on the last frame (ms).
+    double last_static_prop_cpu_ms() const { return m_last_static_prop_cpu_ms; }
     GLuint joint_palette_ssbo() const { return m_jointPaletteSSBO; }
 
     // Register a runtime-built mesh under a synthetic key (e.g. "procgen://tree_3_leaf") so the
@@ -78,6 +82,45 @@ private:
     GLuint m_instanceTintVBO = 0;  // per-instance albedo tint (vast-forest colour variation)
     GLuint m_jointPaletteSSBO = 0;
     std::size_t m_jointPaletteSSBOCapacityBytes = 0;
+
+    // spec 004 Phase 1 — cached static-prop instance data. Props are scattered
+    // ONCE and never move, so their model matrix + albedo tint + base-mesh hash
+    // are precomputed once instead of rebuilt for ALL ~84k instances every frame
+    // (the measured CPU-submit bottleneck: lines that built translate*rotate*scale
+    // + the leaf/bark tint hash per instance per frame). Per frame we only do
+    // distance->LOD + frustum cull (still using the per-LOD resolved mesh sphere,
+    // so the visible set is identical) + append into the reused per-group buffers.
+    // RENDER-ONLY; rebuilt when the static-mesh population changes. This flat array
+    // is also the upload-once source Phase 2's GPU compute cull will consume.
+    struct CachedStaticProp {
+        glm::mat4 model;            // precomputed translate * rotate * scale
+        glm::vec3 position;         // transform.position (distance + sphere center)
+        glm::vec3 tint;             // precomputed per-instance albedo tint
+        float maxScale = 1.0f;      // max(scale.xyz) for the cull radius
+        std::uint64_t baseMeshHash = 0; // fnv64(meshPath) — resolve memo / group key seed
+        std::uint32_t pathIndex = 0;    // index into m_propMeshPaths (stable storage)
+        std::uint32_t materialId = 0;
+    };
+    std::vector<CachedStaticProp> m_staticPropCache;
+    std::vector<std::string> m_propMeshPaths;   // interned unique mesh paths
+    std::size_t m_staticPropCachePopulation = SIZE_MAX; // invalidation signal
+    void build_static_prop_cache(entt::registry& registry);
+
+    // Reused across frames (avoid per-frame unordered_map / vector reallocation).
+    // A group's mesh / drawPath / basePath / material are fixed by its key, so we
+    // keep the metadata and only clear the per-frame mats/tints vectors.
+    struct InstanceBatchCached {
+        Mesh* mesh = nullptr;
+        std::string drawPath;
+        std::string basePath;
+        std::uint32_t materialId = 0;
+        std::vector<glm::mat4> mats;
+        std::vector<glm::vec3> tints;
+        bool active = false;        // appeared this frame
+    };
+    std::unordered_map<std::uint64_t, InstanceBatchCached> m_visibleGroups;
+    std::unordered_map<std::uint64_t, std::pair<Mesh*, std::string>> m_resolveMemo; // persistent
+    double m_last_static_prop_cpu_ms = 0.0; // spec 004: CPU submit cost, last frame
 };
 
 } // namespace Luminumbra::Rendering
