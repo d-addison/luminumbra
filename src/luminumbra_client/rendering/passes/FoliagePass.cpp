@@ -635,23 +635,36 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
                     GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | GL_COMMAND_BARRIER_BIT);
     glUseProgram(0);
 
-    // --- Read the count + the generated blades back into m_instances (gate +
-    // scatter-cache surface). Rebuild-only, so the sync stall is infrequent. ---
-    GLuint count = 0;
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_count_ssbo);
-    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, sizeof(GLuint) * 2, sizeof(GLuint), &count);
-    count = std::min<GLuint>(count, static_cast<GLuint>(kMaxInstances));
+    // --- Read the count + the generated blades back into m_instances. This is
+    // ONLY needed by the FoliageInstancing gate's instance_hash() — execute()
+    // draws straight from m_blade_ssbo via glDrawArraysIndirect (the count lives
+    // in m_count_ssbo, GPU-resident). The readback is a synchronous
+    // glGetBufferSubData that blocks the CPU on compute completion (~5 ms on the
+    // dense pose — spec 004's measured "foliage_rebuild" cost). So skip it unless
+    // the gate needs it; the indirect draw uses the true GPU count regardless. ---
+    if (m_readback_enabled) {
+        GLuint count = 0;
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_count_ssbo);
+        glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, sizeof(GLuint) * 2, sizeof(GLuint), &count);
+        count = std::min<GLuint>(count, static_cast<GLuint>(kMaxInstances));
 
-    m_instances.resize(count);
-    if (count > 0) {
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_blade_ssbo);
-        glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
-                           static_cast<GLsizeiptr>(count) * sizeof(InstanceRecord),
-                           m_instances.data());
+        m_instances.resize(count);
+        if (count > 0) {
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_blade_ssbo);
+            glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
+                               static_cast<GLsizeiptr>(count) * sizeof(InstanceRecord),
+                               m_instances.data());
+        }
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+        m_frame_instance_count = count;
+    } else {
+        // No CPU readback (no sync stall). The exact CPU-side count is unused for
+        // rendering; mark nonzero so execute() issues the indirect draw, which
+        // draws the GPU-resident count (0 or more) on its own. m_instances stays
+        // empty (instance_hash() is gate-only and not consulted in this mode).
+        m_instances.clear();
+        m_frame_instance_count = kMaxInstances; // proceed marker; GPU decides the real count
     }
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
-
-    m_frame_instance_count = count;
     m_gpu_active = true;
     return true;
 }

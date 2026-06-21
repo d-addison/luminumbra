@@ -156,6 +156,13 @@ public:
     // projected at the instance (cheap distance-attenuated copy). RENDER-ONLY. ---
     void set_wind(const glm::vec2& wind_xz) { m_wind_xz = wind_xz; }
     glm::vec2 wind() const { return m_wind_xz; }
+    // spec 004: the GPU scatter path reads the generated blades back to the CPU
+    // (m_instances) ONLY so the FoliageInstancing gate's instance_hash() works.
+    // That readback is a synchronous glGetBufferSubData -> a ~5 ms CPU stall on
+    // the hot path. execute() draws straight from the SSBO via glDrawArraysIndirect,
+    // so normal play / the budget benchmark disable the readback (default ON keeps
+    // the gate exact). RENDER-ONLY.
+    void set_readback_enabled(bool e) { m_readback_enabled = e; }
     void set_sway_strength(float amplitude, float speed) {
         m_sway_amplitude = amplitude;
         m_sway_speed = speed;
@@ -238,6 +245,7 @@ private:
     u32 m_arch_ssbo = 0;
     bool m_gpu_scatter = false;
     bool m_gpu_active = false;
+    bool m_readback_enabled = true; // spec 004: gate needs CPU readback; play/benchmark disable it
     std::array<u32, kRingFrames> m_instance_vbo{};
     std::array<InstanceRecord*, kRingFrames> m_instance_ptr{};
     std::size_t m_ring_cursor = 0;
