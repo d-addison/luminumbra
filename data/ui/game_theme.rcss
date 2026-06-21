@@ -804,6 +804,16 @@ body#world_creation {
     letter-spacing: 2px;
 }
 .save-preset-btn:hover { background-color: rgba(201, 168, 106, 80); border-color: #C9A86A; color: #16130E; }
+.rename-preset-btn { margin-left: 8px; }
+
+/* Per-chip delete affordance on saved user presets (curated chips have none). */
+.user-preset-chip { position: relative; }
+.preset-delete {
+    margin-left: 8px;
+    color: rgba(242, 237, 228, 120);
+    font-size: 11px;
+}
+.preset-delete:hover { color: #E8765A; }
 
 #world_creation #create_btn {
     display: block;

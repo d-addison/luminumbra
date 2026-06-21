@@ -700,6 +700,290 @@ TEST(UiSmokeTest, SaveAndListUserPresetsAreFunctional) {
     ui.Shutdown();
 }
 
+// Item 3b: pause menu (pause.rml) routes resume/quit back through the PauseActionCallback with
+// the right action string, and its settings/gallery buttons navigate. Drives the real manager.
+TEST(UiSmokeTest, PauseMenuActionsAndNavigationAreFunctional) {
+    HiddenGlContext context;
+    if (!context.ready()) {
+        GTEST_SKIP() << context.error();
+    }
+    const fs::path source_root = SourceRoot();
+    Luminumbra::Client::Rml_UIManager ui((source_root.string() + "/"));
+    ui.Init(context.window(), nullptr);
+    ASSERT_NE(ui.GetContext(), nullptr);
+
+    std::vector<std::string> pause_actions;
+    ui.SetPauseActionCallback([&](const std::string& act) { pause_actions.push_back(act); });
+
+    Rml::ElementDocument* pause = LoadDocumentAndFind(ui, "pause.rml", "pause");
+    ASSERT_NE(pause, nullptr);
+
+    // resume_btn -> "resume".
+    ClickAndUpdate(ui, pause->GetElementById("resume_btn"));
+    ASSERT_FALSE(pause_actions.empty());
+    EXPECT_EQ(pause_actions.back(), "resume") << "resume_btn must route \"resume\"";
+
+    // quit_menu_btn -> "quit".
+    ClickAndUpdate(ui, pause->GetElementById("quit_menu_btn"));
+    ASSERT_GE(pause_actions.size(), 2u);
+    EXPECT_EQ(pause_actions.back(), "quit") << "quit_menu_btn must route \"quit\"";
+
+    // settings_btn navigates to settings.rml.
+    ClickAndUpdate(ui, pause->GetElementById("settings_btn"));
+    EXPECT_NE(FindDocumentByElementId(ui.GetContext(), "settings"), nullptr)
+        << "pause settings_btn must navigate to settings.rml";
+
+    // gallery_btn navigates to gallery.rml (from the pause menu again).
+    pause = LoadDocumentAndFind(ui, "pause.rml", "pause");
+    ASSERT_NE(pause, nullptr);
+    ClickAndUpdate(ui, pause->GetElementById("gallery_btn"));
+    EXPECT_NE(FindDocumentByElementId(ui.GetContext(), "gallery"), nullptr)
+        << "pause gallery_btn must navigate to gallery.rml";
+
+    ui.Shutdown();
+}
+
+// Item 3b: the gallery (gallery.rml) back-arrow returns to the main menu and the photo wall +
+// pager are present.
+TEST(UiSmokeTest, GalleryBackNavigationAndContentArePresent) {
+    HiddenGlContext context;
+    if (!context.ready()) {
+        GTEST_SKIP() << context.error();
+    }
+    const fs::path source_root = SourceRoot();
+    Luminumbra::Client::Rml_UIManager ui((source_root.string() + "/"));
+    ui.Init(context.window(), nullptr);
+    ASSERT_NE(ui.GetContext(), nullptr);
+
+    Rml::ElementDocument* gallery = LoadDocumentAndFind(ui, "gallery.rml", "gallery");
+    ASSERT_NE(gallery, nullptr);
+
+    // Photo cards + pager dots are present (not an empty shell).
+    Rml::ElementList cards;
+    gallery->GetElementsByClassName(cards, "photo-card");
+    EXPECT_GE(cards.size(), 4u) << "gallery must show a photo wall";
+    Rml::ElementList dots;
+    gallery->GetElementsByClassName(dots, "pager-dot");
+    EXPECT_GE(dots.size(), 1u) << "gallery pager must be present";
+
+    // The back arrow returns to the main menu.
+    ClickAndUpdate(ui, gallery->GetElementById("back_btn"));
+    EXPECT_NE(FindDocumentByElementId(ui.GetContext(), "main_menu"), nullptr)
+        << "gallery back arrow must navigate to main_menu.rml";
+
+    ui.Shutdown();
+}
+
+// Item 3b: world-select load button must NOT fire the load callback with no selection, and the
+// active document hot-reloads via ReloadActiveDocument().
+TEST(UiSmokeTest, WorldSelectEmptyGuardAndHotReload) {
+    HiddenGlContext context;
+    if (!context.ready()) {
+        GTEST_SKIP() << context.error();
+    }
+    const fs::path source_root = SourceRoot();
+    Luminumbra::Client::Rml_UIManager ui((source_root.string() + "/"));
+    ui.Init(context.window(), nullptr);
+    ASSERT_NE(ui.GetContext(), nullptr);
+
+    int load_calls = 0;
+    ui.SetLoadWorldCallback([&](const std::string&) { ++load_calls; });
+
+    Rml::ElementDocument* ws = LoadDocumentAndFind(ui, "world_selection.rml", "world_selection");
+    ASSERT_NE(ws, nullptr);
+
+    // Clear any authored default selection so the guard is exercised on an empty selection.
+    Rml::ElementList items;
+    ws->GetElementsByClassName(items, "list-item");
+    for (Rml::Element* item : items) {
+        item->RemoveAttribute("data-selected");
+        item->SetClass("selected", false);
+    }
+    // The manager tracks selection internally; reloading the doc resets it to empty.
+    ui.ReloadActiveDocument();
+    ui.Update();
+    ws = FindDocumentByElementId(ui.GetContext(), "world_selection");
+    ASSERT_NE(ws, nullptr) << "ReloadActiveDocument must re-load the world-selection screen";
+
+    // With nothing selected, clicking load must be a guarded no-op (no callback).
+    Rml::Element* load_btn = ws->GetElementById("load_selected_btn");
+    ASSERT_NE(load_btn, nullptr);
+    ClickAndUpdate(ui, load_btn);
+    EXPECT_EQ(load_calls, 0) << "load_selected_btn must not fire the callback with no selection";
+
+    // Selecting an item then loading DOES fire (proves the guard, not a dead button).
+    Rml::Element* first = FirstWorldListItem(ws);
+    ASSERT_NE(first, nullptr);
+    ClickAndUpdate(ui, first);
+    ClickAndUpdate(ui, ws->GetElementById("load_selected_btn"));
+    EXPECT_EQ(load_calls, 1) << "load fires once a world is selected";
+
+    ui.Shutdown();
+}
+
+// Item 3b: every <img src> authored in the world-select + gallery screens must resolve to an
+// existing TGA on disk (RmlUi images are TGA-only; a typo'd thumb path renders nothing).
+TEST(WorldgenOverrideTest, MenuImageSourcesResolveToExistingTga) {
+    const fs::path root = SourceRoot();
+    const std::regex img_regex(R"(<img[^>]*src\s*=\s*\"([^\"]+)\")", std::regex::icase);
+    int checked = 0;
+    for (const char* doc : {"world_selection.rml", "gallery.rml"}) {
+        const std::string rml = ReadTextFile(root / "data/ui" / doc);
+        ASSERT_FALSE(rml.empty()) << doc;
+        for (std::sregex_iterator it(rml.begin(), rml.end(), img_regex), end; it != end; ++it) {
+            const std::string src = (*it)[1].str();
+            const fs::path resolved = root / "data/ui" / src;
+            EXPECT_TRUE(fs::exists(resolved)) << doc << " <img src> does not resolve: " << src;
+            EXPECT_EQ(fs::path(src).extension(), ".tga") << "RmlUi images must be TGA: " << src;
+            ++checked;
+        }
+    }
+    EXPECT_GE(checked, 4) << "expected several authored thumbnails across the two screens";
+}
+
+// Item 3b: user-preset MANAGEMENT — delete, rename, and the overwrite-collision confirm. The
+// saver silently overwrites on slug collision, so the UI must gate it behind a confirm modal.
+TEST(UiSmokeTest, UserPresetDeleteRenameAndOverwriteConfirmAreFunctional) {
+    HiddenGlContext context;
+    if (!context.ready()) {
+        GTEST_SKIP() << context.error();
+    }
+    const fs::path source_root = SourceRoot();
+    Luminumbra::Client::Rml_UIManager ui((source_root.string() + "/"));
+    ui.Init(context.window(), nullptr);
+    ASSERT_NE(ui.GetContext(), nullptr);
+
+    // In-memory preset store the bridges operate on (display name -> world-type id).
+    std::vector<std::pair<std::string, std::string>> store = {{"My Canyon", "user_my_canyon"}};
+    auto slug = [](const std::string& name) {
+        std::string s;
+        for (char ch : name) {
+            if (std::isalnum(static_cast<unsigned char>(ch))) s += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            else if ((ch == ' ' || ch == '-' || ch == '_') && !s.empty() && s.back() != '_') s += '_';
+        }
+        while (!s.empty() && s.back() == '_') s.pop_back();
+        return s.empty() ? std::string("preset") : s.substr(0, 32);
+    };
+
+    int save_count = 0;
+    std::string last_saved_name;
+    ui.SetWorldParamGetter([&](const std::string&, const std::string&) { return std::string(); });
+    ui.SetWorldPresetList([&]() { return store; });
+    ui.SetWorldPresetSaver([&](const std::string& name, const std::string&,
+                               const std::vector<Luminumbra::Client::WorldGenParam>&) -> std::string {
+        const std::string type = "user_" + slug(name);
+        // overwrite-or-insert by id (mirrors the on-disk saver).
+        for (auto& e : store) if (e.second == type) { e.first = name; ++save_count; last_saved_name = name; return type; }
+        store.emplace_back(name, type);
+        ++save_count;
+        last_saved_name = name;
+        return type;
+    });
+    ui.SetWorldPresetExists([&](const std::string& name) -> bool {
+        const std::string type = "user_" + slug(name);
+        for (const auto& e : store) if (e.second == type) return true;
+        return false;
+    });
+    ui.SetWorldPresetDeleter([&](const std::string& worldType) -> bool {
+        for (auto it = store.begin(); it != store.end(); ++it) {
+            if (it->second == worldType) { store.erase(it); return true; }
+        }
+        return false;
+    });
+    ui.SetWorldPresetRenamer([&](const std::string& worldType, const std::string& newName) -> std::string {
+        const std::string newType = "user_" + slug(newName);
+        for (auto& e : store) if (e.second == worldType) { e.first = newName; e.second = newType; return newType; }
+        return "";
+    });
+
+    Rml::ElementDocument* wc = LoadDocumentAndFind(ui, "world_creation.rml", "world_creation");
+    ASSERT_NE(wc, nullptr);
+
+    Rml::Element* row = wc->GetElementById("user_presets_row");
+    ASSERT_NE(row, nullptr);
+    ASSERT_EQ(row->GetNumChildren(), 1) << "one seeded user preset chip";
+
+    // --- OVERWRITE-COLLISION CONFIRM ---
+    // Saving under the existing "My Canyon" name must NOT save immediately — it shows the modal.
+    SetControlValue(wc, "save_preset_name", "My Canyon");
+    ClickAndUpdate(ui, wc->GetElementById("save_preset_btn"));
+    EXPECT_EQ(save_count, 0) << "a colliding name must not silently overwrite";
+    Rml::Element* ow_modal = wc->GetElementById("preset_overwrite_modal");
+    ASSERT_NE(ow_modal, nullptr);
+    EXPECT_FALSE(ow_modal->IsClassSet("hidden")) << "overwrite-confirm modal must be shown on collision";
+
+    // Cancel dismisses without saving.
+    ClickAndUpdate(ui, wc->GetElementById("cancel_overwrite_btn"));
+    EXPECT_TRUE(ow_modal->IsClassSet("hidden"));
+    EXPECT_EQ(save_count, 0);
+
+    // Re-trigger and CONFIRM -> the save proceeds (the overwrite the user opted into).
+    ClickAndUpdate(ui, wc->GetElementById("save_preset_btn"));
+    EXPECT_FALSE(ow_modal->IsClassSet("hidden"));
+    ClickAndUpdate(ui, wc->GetElementById("confirm_overwrite_btn"));
+    EXPECT_TRUE(ow_modal->IsClassSet("hidden"));
+    EXPECT_EQ(save_count, 1) << "confirming overwrite must commit the save";
+    EXPECT_EQ(store.size(), 1u) << "overwriting must not add a second preset";
+
+    // A NON-colliding name saves directly (no modal).
+    SetControlValue(wc, "save_preset_name", "Fresh Vista");
+    ClickAndUpdate(ui, wc->GetElementById("save_preset_btn"));
+    EXPECT_TRUE(ow_modal->IsClassSet("hidden")) << "a non-colliding name must not show the modal";
+    EXPECT_EQ(save_count, 2);
+    EXPECT_EQ(store.size(), 2u);
+
+    // --- RENAME ---
+    // Select the user preset, type a new name, rename.
+    wc = FindDocumentByElementId(ui.GetContext(), "world_creation");
+    ASSERT_NE(wc, nullptr);
+    row = wc->GetElementById("user_presets_row");
+    ASSERT_NE(row, nullptr);
+    ASSERT_GE(row->GetNumChildren(), 1);
+    // Select the "My Canyon" chip.
+    Rml::Element* canyon_chip = nullptr;
+    for (int i = 0; i < row->GetNumChildren(); ++i) {
+        if (row->GetChild(i)->GetAttribute<Rml::String>("data-preset", "") == "user_my_canyon")
+            canyon_chip = row->GetChild(i);
+    }
+    ASSERT_NE(canyon_chip, nullptr);
+    ClickAndUpdate(ui, canyon_chip);
+    auto* type_sel = dynamic_cast<Rml::ElementFormControl*>(wc->GetElementById("world_type"));
+    ASSERT_NE(type_sel, nullptr);
+    EXPECT_EQ(std::string(type_sel->GetValue()), "user_my_canyon");
+    SetControlValue(wc, "save_preset_name", "Grand Gorge");
+    ClickAndUpdate(ui, wc->GetElementById("rename_preset_btn"));
+    bool found_renamed = false;
+    for (const auto& e : store) if (e.first == "Grand Gorge" && e.second == "user_grand_gorge") found_renamed = true;
+    EXPECT_TRUE(found_renamed) << "rename must update the saved preset's name + id";
+    for (const auto& e : store) EXPECT_NE(e.second, "user_my_canyon") << "old id must be gone after rename";
+
+    // --- DELETE ---
+    wc = FindDocumentByElementId(ui.GetContext(), "world_creation");
+    ASSERT_NE(wc, nullptr);
+    row = wc->GetElementById("user_presets_row");
+    ASSERT_NE(row, nullptr);
+    const std::size_t before_delete = store.size();
+    // Click a chip's delete affordance -> the delete-confirm modal appears with the pending id.
+    Rml::Element* del_ctrl = wc->GetElementById("del_user_grand_gorge");
+    ASSERT_NE(del_ctrl, nullptr) << "each user chip has a delete affordance";
+    ClickAndUpdate(ui, del_ctrl);
+    Rml::Element* del_modal = wc->GetElementById("preset_delete_modal");
+    ASSERT_NE(del_modal, nullptr);
+    EXPECT_FALSE(del_modal->IsClassSet("hidden")) << "delete must require a confirm";
+    EXPECT_EQ(del_modal->GetAttribute<Rml::String>("data-pending", ""), "user_grand_gorge");
+    // Cancel keeps it.
+    ClickAndUpdate(ui, wc->GetElementById("cancel_delete_preset_btn"));
+    EXPECT_TRUE(del_modal->IsClassSet("hidden"));
+    EXPECT_EQ(store.size(), before_delete);
+    // Confirm deletes.
+    ClickAndUpdate(ui, del_ctrl);
+    ClickAndUpdate(ui, wc->GetElementById("confirm_delete_preset_btn"));
+    EXPECT_EQ(store.size(), before_delete - 1) << "confirming delete removes the preset";
+    for (const auto& e : store) EXPECT_NE(e.second, "user_grand_gorge");
+
+    ui.Shutdown();
+}
+
 // T-I3-21: token-based Subscribe/Unsubscribe on Property<T> (no GL needed).
 TEST(UiSmokeTest, PropertyTokenUnsubscribeStopsCallbacks) {
     using Luminumbra::Client::UI::Property;

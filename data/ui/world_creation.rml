@@ -237,10 +237,13 @@
                                 </div>
                             </div>
 
-                            <!-- Save the current config as a reusable named preset. -->
+                            <!-- Save the current config as a reusable named preset. The
+                                 rename button retargets the currently-selected USER preset
+                                 to the typed name (curated presets are immutable). -->
                             <div class="save-preset-group">
                                 <input type="text" id="save_preset_name" class="form-control save-preset-name" placeholder="name this world type..." />
                                 <span id="save_preset_btn" class="btn save-preset-btn">save preset</span>
+                                <span id="rename_preset_btn" class="btn save-preset-btn rename-preset-btn">rename</span>
                             </div>
 
                         </div>
@@ -265,6 +268,42 @@
             </div>
         </div>
         
+        <!-- Overwrite-collision confirm: shown when saving under a name whose slug
+             already has a user preset on disk. WorldPresetSaver silently overwrites,
+             so the UI guards it with an explicit confirm. -->
+        <div id="preset_overwrite_modal" class="modal-overlay hidden">
+            <div class="modal">
+                <div class="modal-header">
+                    <h2 class="modal-title">Overwrite Preset</h2>
+                </div>
+                <div class="modal-body">
+                    <p>A preset named "<span id="preset_overwrite_name"></span>" already exists. Overwrite it?</p>
+                    <p class="text-sm text-secondary">This replaces the saved preset.</p>
+                </div>
+                <div class="modal-footer">
+                    <button id="cancel_overwrite_btn" class="btn btn-secondary">Cancel</button>
+                    <button id="confirm_overwrite_btn" class="btn btn-danger">Overwrite</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Delete-confirm for a saved user preset. -->
+        <div id="preset_delete_modal" class="modal-overlay hidden">
+            <div class="modal">
+                <div class="modal-header">
+                    <h2 class="modal-title">Delete Preset</h2>
+                </div>
+                <div class="modal-body">
+                    <p>Delete the saved preset "<span id="preset_delete_name"></span>"?</p>
+                    <p class="text-sm text-secondary">This action cannot be undone.</p>
+                </div>
+                <div class="modal-footer">
+                    <button id="cancel_delete_preset_btn" class="btn btn-secondary">Cancel</button>
+                    <button id="confirm_delete_preset_btn" class="btn btn-danger">Delete</button>
+                </div>
+            </div>
+        </div>
+
         <!-- Notification area -->
         <div id="notification" class="notification hidden">
             <span id="notification_text"></span>

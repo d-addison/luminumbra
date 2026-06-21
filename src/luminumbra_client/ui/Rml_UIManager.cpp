@@ -539,20 +539,87 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
         }
     }
 
-    // Save the current config as a named, reusable user preset.
+    // Save the current config as a named, reusable user preset. If the name's slug already
+    // has a saved preset, WorldPresetSaver silently overwrites — so gate it behind an explicit
+    // overwrite-confirm modal instead of clobbering the existing preset without warning.
     if (auto* save_btn = document->GetElementById("save_preset_btn")) {
         AddClickSoundListener(save_btn, [this, document](Rml::Event&) {
             if (!m_worldPresetSaver) return;
             const std::string name = ReadFormControlValue(document->GetElementById("save_preset_name"), "");
-            const std::string baseType = ReadFormControlValue(document->GetElementById("world_type"), "default");
-            const std::string saved = m_worldPresetSaver(name, baseType, CollectWorldGenParams(document));
-            if (auto* note = document->GetElementById("notification")) {
-                note->SetClass("hidden", false);
-                if (auto* txt = document->GetElementById("notification_text")) {
-                    txt->SetInnerRML(saved.empty() ? "Could not save preset" : "Preset saved");
-                }
+            if (m_worldPresetExists && m_worldPresetExists(name)) {
+                // Show the overwrite-confirm modal; the confirm button commits the save.
+                if (auto* modal = document->GetElementById("preset_overwrite_modal"))
+                    modal->SetClass("hidden", false);
+                if (auto* label = document->GetElementById("preset_overwrite_name"))
+                    label->SetInnerRML(name);
+                return;
             }
-            if (!saved.empty()) this->PopulateUserPresets(document);
+            this->CommitSavePreset(document, name);
+        });
+    }
+
+    // Overwrite-confirm modal: confirm commits the (overwriting) save; cancel just dismisses.
+    if (auto* confirm = document->GetElementById("confirm_overwrite_btn")) {
+        AddClickSoundListener(confirm, [this, document](Rml::Event&) {
+            if (auto* modal = document->GetElementById("preset_overwrite_modal"))
+                modal->SetClass("hidden", true);
+            const std::string name = ReadFormControlValue(document->GetElementById("save_preset_name"), "");
+            this->CommitSavePreset(document, name);
+        });
+    }
+    if (auto* cancel = document->GetElementById("cancel_overwrite_btn")) {
+        AddClickSoundListener(cancel, [document](Rml::Event&) {
+            if (auto* modal = document->GetElementById("preset_overwrite_modal"))
+                modal->SetClass("hidden", true);
+        });
+    }
+
+    // Rename the currently-selected USER preset to the typed name. Curated presets have no
+    // user-type id, so the renamer no-ops on them. Confirm/cancel reuse the rename flow inline.
+    if (auto* rename_btn = document->GetElementById("rename_preset_btn")) {
+        AddClickSoundListener(rename_btn, [this, document](Rml::Event&) {
+            if (!m_worldPresetRenamer) return;
+            const std::string worldType = ReadFormControlValue(document->GetElementById("world_type"), "default");
+            const std::string newName = ReadFormControlValue(document->GetElementById("save_preset_name"), "");
+            auto note = [&](const std::string& msg) {
+                if (auto* n = document->GetElementById("notification")) {
+                    n->SetClass("hidden", false);
+                    if (auto* t = document->GetElementById("notification_text")) t->SetInnerRML(msg);
+                }
+            };
+            if (worldType.rfind("user_", 0) != 0) { note("Select a saved preset to rename"); return; }
+            if (newName.empty()) { note("Enter a new name"); return; }
+            const std::string renamed = m_worldPresetRenamer(worldType, newName);
+            if (renamed.empty()) { note("Could not rename preset"); return; }
+            note("Preset renamed");
+            // Point #world_type at the (possibly new) id and refresh the chip row.
+            if (auto* sel = document->GetElementById("world_type")) {
+                if (auto* fc = dynamic_cast<Rml::ElementFormControl*>(sel)) fc->SetValue(renamed);
+            }
+            this->PopulateUserPresets(document);
+        });
+    }
+
+    // Delete-confirm modal: confirm deletes the pending preset; cancel dismisses.
+    if (auto* confirm = document->GetElementById("confirm_delete_preset_btn")) {
+        AddClickSoundListener(confirm, [this, document](Rml::Event&) {
+            Rml::Element* modal = document->GetElementById("preset_delete_modal");
+            const std::string worldType = modal ? modal->GetAttribute<Rml::String>("data-pending", "") : "";
+            if (modal) modal->SetClass("hidden", true);
+            if (!m_worldPresetDeleter || worldType.empty()) return;
+            const bool ok = m_worldPresetDeleter(worldType);
+            if (auto* n = document->GetElementById("notification")) {
+                n->SetClass("hidden", false);
+                if (auto* t = document->GetElementById("notification_text"))
+                    t->SetInnerRML(ok ? "Preset deleted" : "Could not delete preset");
+            }
+            if (ok) this->PopulateUserPresets(document);
+        });
+    }
+    if (auto* cancel = document->GetElementById("cancel_delete_preset_btn")) {
+        AddClickSoundListener(cancel, [document](Rml::Event&) {
+            if (auto* modal = document->GetElementById("preset_delete_modal"))
+                modal->SetClass("hidden", true);
         });
     }
 
@@ -632,11 +699,40 @@ void Rml_UIManager::PopulateUserPresets(Rml::ElementDocument* document) {
         chip->SetClassNames("preset-chip user-preset-chip");
         chip->SetAttribute("data-preset", type);
         chip->SetInnerRML(name);
+        // A small delete affordance per user chip (curated chips have none). The id encodes
+        // the preset type so the e2e can target a specific chip's delete control.
+        Rml::ElementPtr del = document->CreateElement("span");
+        if (del) {
+            del->SetClassNames("preset-delete");
+            del->SetId("del_" + type);
+            del->SetAttribute("data-delete", type);
+            del->SetInnerRML("&#10005;");  // ✕
+            chip->AppendChild(std::move(del));
+        }
         Rml::Element* added = row->AppendChild(std::move(chip));
         // Same behaviour as the curated chips: select + drive #world_type + re-seed the form.
+        // A click on the inner delete control opens the delete-confirm modal instead.
         added->AddEventListener("click", new LambdaEventListener([this, document](Rml::Event& event) {
             if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click");
-            Rml::Element* c = event.GetTargetElement();
+            Rml::Element* target = event.GetTargetElement();
+            // Delete affordance: walk up looking for a data-delete before the chip's data-preset.
+            for (Rml::Element* t = target; t; t = t->GetParentNode()) {
+                const std::string del = t->GetAttribute<Rml::String>("data-delete", "");
+                if (!del.empty()) {
+                    std::string disp = del;
+                    if (m_worldPresetList) {
+                        for (const auto& [n, ty] : m_worldPresetList()) if (ty == del) { disp = n; break; }
+                    }
+                    if (auto* modal = document->GetElementById("preset_delete_modal")) {
+                        modal->SetClass("hidden", false);
+                        modal->SetAttribute("data-pending", del);
+                    }
+                    if (auto* lbl = document->GetElementById("preset_delete_name")) lbl->SetInnerRML(disp);
+                    return;
+                }
+                if (!t->GetAttribute<Rml::String>("data-preset", "").empty()) break;
+            }
+            Rml::Element* c = target;
             while (c && c->GetAttribute<Rml::String>("data-preset", "").empty()) c = c->GetParentNode();
             if (!c) return;
             Rml::ElementList all;
@@ -650,6 +746,18 @@ void Rml_UIManager::PopulateUserPresets(Rml::ElementDocument* document) {
             this->SeedWorldGenParams(document, preset);
         }));
     }
+}
+
+void Rml_UIManager::CommitSavePreset(Rml::ElementDocument* document, const std::string& name) {
+    if (!document || !m_worldPresetSaver) return;
+    const std::string baseType = ReadFormControlValue(document->GetElementById("world_type"), "default");
+    const std::string saved = m_worldPresetSaver(name, baseType, CollectWorldGenParams(document));
+    if (auto* note = document->GetElementById("notification")) {
+        note->SetClass("hidden", false);
+        if (auto* txt = document->GetElementById("notification_text"))
+            txt->SetInnerRML(saved.empty() ? "Could not save preset" : "Preset saved");
+    }
+    if (!saved.empty()) this->PopulateUserPresets(document);
 }
 
 // --- settings.rml support ---

@@ -31,6 +31,15 @@ using WorldPresetSaver = std::function<std::string(const std::string& displayNam
 // List saved user presets as (display name, world-type id) so create-world can offer them as
 // selectable starting points alongside the curated presets.
 using WorldPresetList = std::function<std::vector<std::pair<std::string, std::string>>()>;
+// Returns true if saving under `displayName` would collide with an existing user preset
+// (same derived slug). The UI uses this to gate the silently-overwriting saver behind an
+// explicit "overwrite?" confirm. Optional — if unwired, saves proceed without a confirm.
+using WorldPresetExists = std::function<bool(const std::string& displayName)>;
+// Delete a saved user preset by its world-type id (e.g. "user_my_canyon"); true on success.
+using WorldPresetDeleter = std::function<bool(const std::string& worldType)>;
+// Rename a saved user preset (worldType) to `newDisplayName`; returns the (possibly new)
+// world-type id on success, "" on failure. The id may change because it's slug-derived.
+using WorldPresetRenamer = std::function<std::string(const std::string& worldType, const std::string& newDisplayName)>;
 using LoadWorldCallback = std::function<void(const std::string&)>;
 // Pause-menu actions ("resume" / "quit") routed back to main_client, which owns game state + cursor.
 using PauseActionCallback = std::function<void(const std::string&)>;
@@ -124,6 +133,9 @@ public:
     void SetWorldParamGetter(WorldParamGetter getter) { m_worldParamGetter = std::move(getter); }
     void SetWorldPresetSaver(WorldPresetSaver saver) { m_worldPresetSaver = std::move(saver); }
     void SetWorldPresetList(WorldPresetList lister) { m_worldPresetList = std::move(lister); }
+    void SetWorldPresetExists(WorldPresetExists exists) { m_worldPresetExists = std::move(exists); }
+    void SetWorldPresetDeleter(WorldPresetDeleter deleter) { m_worldPresetDeleter = std::move(deleter); }
+    void SetWorldPresetRenamer(WorldPresetRenamer renamer) { m_worldPresetRenamer = std::move(renamer); }
     void SetLoadWorldCallback(LoadWorldCallback callback) { m_loadWorldCallback = std::move(callback); }
     void SetSettingsBridge(SettingsBridge bridge) { m_settingsBridge = std::move(bridge); }
     void SetPauseActionCallback(PauseActionCallback cb) { m_pauseActionCallback = std::move(cb); }
@@ -155,6 +167,11 @@ private:
     // in #user_presets_row, wired like the curated preset chips.
     void PopulateUserPresets(Rml::ElementDocument* document);
 
+    // world_creation.rml: commit the current customize config as a named user preset via the
+    // saver, then refresh the chip row + notification. Factored so the direct save path and the
+    // overwrite-confirm path share one implementation.
+    void CommitSavePreset(Rml::ElementDocument* document, const std::string& name);
+
     // Interfaces are now members, their lifetime is tied to the manager.
     RmlSystem m_systemInterface;
     RmlFileInterface m_fileInterface;
@@ -173,6 +190,9 @@ private:
     WorldParamGetter m_worldParamGetter;
     WorldPresetSaver m_worldPresetSaver;
     WorldPresetList m_worldPresetList;
+    WorldPresetExists m_worldPresetExists;
+    WorldPresetDeleter m_worldPresetDeleter;
+    WorldPresetRenamer m_worldPresetRenamer;
     LoadWorldCallback m_loadWorldCallback;
     SettingsBridge m_settingsBridge;
     PauseActionCallback m_pauseActionCallback;
