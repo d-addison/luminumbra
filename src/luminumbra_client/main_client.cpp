@@ -9,6 +9,7 @@
 #include "core/Debug.h"
 #include "core/GameState.h"
 #include "core/RuntimeScenarioHarness.h"
+#include "core/NvmlSampler.h" // spec 004 Phase 0: optional GPU power/clock sampling
 #include "player/PlayerController.h"
 #include "rendering/Camera.h"
 #include "rendering/FarLodSystem.h"
@@ -161,6 +162,10 @@ int g_timelapse_frames = 0;
 std::string g_render_benchmark_path;
 int g_render_benchmark_frames = 120;   // measured frames (after warm-up)
 int g_render_benchmark_warmup = 60;    // frames discarded before measuring (stream/settle)
+// spec 004 Phase 0: optional PPM screenshot of the forest-DENSE budget pose,
+// dumped on the final measured frame (verifies the pose is actually dense +
+// supplies the owner's before/after PNGs). Empty = off.
+std::string g_render_benchmark_screenshot;
 int g_timelapse_ticks = 60;        // sim ticks advanced between captured frames (2 s at 30 Hz)
 float g_timelapse_daystep = 0.0f;  // time-of-day advance per frame [0,1] (shade/sky drift); 0 = leave
 int g_timelapse_captured = 0;
@@ -2146,6 +2151,7 @@ int main(int argc, char* argv[]) {
     g_render_benchmark_path = GetCommandLineOption(argc, argv, "--render-benchmark", "");
     g_render_benchmark_frames = GetCommandLineIntOption(argc, argv, "--render-benchmark-frames", 120);
     g_render_benchmark_warmup = GetCommandLineIntOption(argc, argv, "--render-benchmark-warmup", 60);
+    g_render_benchmark_screenshot = GetCommandLineOption(argc, argv, "--render-benchmark-screenshot", "");
     {
         const std::string cp = GetCommandLineOption(argc, argv, "--cam-pos", "");
         if (!cp.empty()) {
@@ -3304,6 +3310,14 @@ int main(int argc, char* argv[]) {
     NetworkedSessionDriver networked_session_driver;
     bool networked_session_begun = false;
     bool networked_session_done = false;
+    // spec 004 Phase 0: honest CPU-vs-GPU attribution for --render-benchmark.
+    // wall = max(CPU_submit, GPU_work) + present. NVML is loaded lazily on the
+    // first measured frame (optional / guarded).
+    Luminumbra::Client::NvmlSampler g_rb_nvml;
+    bool g_rb_nvml_tried = false;
+    bool g_rb_nvml_ok = false;
+    std::chrono::steady_clock::time_point g_rb_frame_start{};
+    std::chrono::steady_clock::time_point g_rb_before_swap{};
     const auto median_of = [](std::vector<double> samples) -> double {
         if (samples.empty()) {
             return 0.0;
@@ -3316,6 +3330,9 @@ int main(int argc, char* argv[]) {
         float deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
         deltaTime = std::min(deltaTime, 1.0f / 20.0f);
+        // spec 004 Phase 0: CPU-submit clock starts at frame top when benchmarking.
+        const bool g_rb_active = !g_render_benchmark_path.empty();
+        if (g_rb_active) g_rb_frame_start = std::chrono::steady_clock::now();
 
         if (scenario_failed) {
             exit_code = 2;
@@ -7239,74 +7256,24 @@ int main(int argc, char* argv[]) {
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         }
 
-        // --render-benchmark: average the per-pass GPU timers (RenderPassFrameStats
-        // *_gpu_ms) over N settled in-world frames, then write a JSON report and exit.
-        // The repeatable, fixed-scenario capture the release per-pass budget gate
-        // consumes (render-optimization-index FR-002). Render-only / measurement only.
+        // --render-benchmark: pin a FIXED, FOREST-DENSE camera pose + time-of-day so
+        // the budget capture is reproducible AND actually stresses the static-prop
+        // submit path spec 004 optimizes (an open-horizon pose under-samples the
+        // 40-110k-instance loop). High over the grove looking out at a shallow
+        // downward angle frames a deep carpet of canopy stretching to the horizon
+        // (max instances in frustum + max overdraw). Set every frame so gravity /
+        // settle can't drift it; it takes effect on the NEXT rendered frame. The
+        // GPU-timer averaging + the honest CPU-submit/present/NVML accounting run
+        // AFTER glfwSwapBuffers (see the post-swap block) so present + wall-clock
+        // are measured, not just the GPU per-pass timer sum.
         if (!g_render_benchmark_path.empty() && currentState == GameState::IN_GAME && gameSession) {
-            // Pin a FIXED camera pose + time-of-day so the per-pass GPU costs are
-            // reproducible run-to-run. The gameplay spawn camera settles to a
-            // variable view (physics/orientation), which otherwise swings the
-            // measured frame total 2-3x and makes the budget gate meaningless. A
-            // fixed pose at the deterministic spawn, looking down-and-out over the
-            // terrain toward the horizon + sky, is a representative + reproducible
-            // budget scenario. Set every frame so gravity/settle can't drift it.
             if (g_camera) {
-                g_camera->Position = glm::vec3(8.0f, 52.0f, 8.0f);
+                g_camera->Position = glm::vec3(8.0f, 56.0f, 8.0f);
                 g_camera->Yaw = 35.0f;
-                g_camera->Pitch = -12.0f;
+                g_camera->Pitch = -6.0f;  // shallow: deep forest carpet, not down at near ground
                 g_camera->updateCameraVectors();
             }
             renderPipeline.set_time_of_day(0.04f); // fixed near-noon (clouds + lit terrain)
-            static int rb_warm = 0;
-            static int rb_count = 0;
-            static double rb_shadow = 0, rb_gbuffer = 0, rb_ssao = 0, rb_ssao_blur = 0,
-                          rb_lighting = 0, rb_water = 0, rb_skybox = 0, rb_particle = 0,
-                          rb_foliage = 0, rb_aerial = 0, rb_final = 0, rb_total = 0;
-            const auto& s = renderPipeline.get_last_render_pass_stats();
-            if (rb_warm < g_render_benchmark_warmup) {
-                ++rb_warm;
-            } else if (rb_count < g_render_benchmark_frames) {
-                rb_shadow += s.shadow_gpu_ms;   rb_gbuffer += s.gbuffer_gpu_ms;
-                rb_ssao += s.ssao_gpu_ms;       rb_ssao_blur += s.ssao_blur_gpu_ms;
-                rb_lighting += s.lighting_gpu_ms; rb_water += s.water_gpu_ms;
-                rb_skybox += s.skybox_gpu_ms;   rb_particle += s.particle_gpu_ms;
-                rb_foliage += s.foliage_gpu_ms; rb_aerial += s.aerial_gpu_ms;
-                rb_final += s.final_blit_gpu_ms;
-                rb_total += s.shadow_gpu_ms + s.gbuffer_gpu_ms + s.ssao_gpu_ms + s.ssao_blur_gpu_ms
-                          + s.lighting_gpu_ms + s.water_gpu_ms + s.skybox_gpu_ms + s.particle_gpu_ms
-                          + s.foliage_gpu_ms + s.aerial_gpu_ms + s.final_blit_gpu_ms;
-                ++rb_count;
-            } else {
-                const double n = static_cast<double>(std::max(1, rb_count));
-                nlohmann::json j;
-                j["schema"] = "luminumbra.render_benchmark.v1";
-                j["frames"] = rb_count;
-                j["warmup_frames"] = g_render_benchmark_warmup;
-                j["width"] = renderPipeline.screen_width();
-                j["height"] = renderPipeline.screen_height();
-                j["cloud_quality"] = renderPipeline.get_cloud_quality();
-                j["ssao_quality"] = renderPipeline.get_ssao_quality();
-                j["gpu_timers_supported"] = s.gpu_timers_supported;
-                j["avg_ms"] = {
-                    {"shadow", rb_shadow / n}, {"gbuffer", rb_gbuffer / n}, {"ssao", rb_ssao / n},
-                    {"ssao_blur", rb_ssao_blur / n}, {"ssao_total", (rb_ssao + rb_ssao_blur) / n},
-                    {"lighting", rb_lighting / n}, {"water", rb_water / n}, {"skybox", rb_skybox / n},
-                    {"particle", rb_particle / n}, {"foliage", rb_foliage / n}, {"aerial", rb_aerial / n},
-                    {"final_blit", rb_final / n}, {"total", rb_total / n}
-                };
-                std::error_code _rb_ec;
-                const std::filesystem::path rb_path(g_render_benchmark_path);
-                if (rb_path.has_parent_path()) std::filesystem::create_directories(rb_path.parent_path(), _rb_ec);
-                std::ofstream out(rb_path);
-                out << j.dump(2);
-                out.close();
-                LUMINUMBRA_CORE_INFO("Render benchmark: {} frames -> {} (skybox {:.3f} ms, ssao {:.3f} ms, total {:.3f} ms, cloud_quality {})",
-                                     rb_count, g_render_benchmark_path, rb_skybox / n, (rb_ssao + rb_ssao_blur) / n, rb_total / n,
-                                     renderPipeline.get_cloud_quality());
-                glfwSetWindowShouldClose(window, GLFW_TRUE);
-                rb_count = g_render_benchmark_frames + 1; // latch: stop re-dumping
-            }
         }
 
         // --timelapse: dump the rendered frame, then fast-forward sim-time (+ the day clock)
@@ -7357,8 +7324,129 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // spec 004 Phase 0: CPU-submit ends here (all GL work for the frame is
+        // queued); present begins. With vsync off the swap drains the driver
+        // queue, so its duration is the GPU/present wait.
+        if (g_rb_active) g_rb_before_swap = std::chrono::steady_clock::now();
         glfwSwapBuffers(window);
+
+        // spec 004 Phase 0 — HONEST measurement substrate. wall = max(CPU_submit,
+        // GPU_work) + present. The old benchmark summed per-pass GPU timers ONLY
+        // and was blind to the CPU-submit win this spec buys; it also ran at idle
+        // clock, so it now reports NVML power+clock to prove the GPU is at boost.
+        if (g_rb_active && currentState == GameState::IN_GAME && gameSession) {
+            const auto rb_now = std::chrono::steady_clock::now();
+            const double cpu_submit_ms =
+                std::chrono::duration<double, std::milli>(g_rb_before_swap - g_rb_frame_start).count();
+            const double present_ms =
+                std::chrono::duration<double, std::milli>(rb_now - g_rb_before_swap).count();
+            static std::chrono::steady_clock::time_point rb_prev_end{};
+            double wall_ms = 0.0;
+            if (rb_prev_end.time_since_epoch().count() != 0)
+                wall_ms = std::chrono::duration<double, std::milli>(rb_now - rb_prev_end).count();
+            rb_prev_end = rb_now;
+
+            if (!g_rb_nvml_tried) { g_rb_nvml_tried = true; g_rb_nvml_ok = g_rb_nvml.init(); }
+            double gpu_power_w = 0.0, gpu_clock_mhz = 0.0;
+            const bool nv = g_rb_nvml_ok && g_rb_nvml.sample(gpu_power_w, gpu_clock_mhz);
+
+            const auto& s = renderPipeline.get_last_render_pass_stats();
+            static int rb_warm = 0, rb_count = 0, rb_nv_count = 0;
+            static double rb_shadow = 0, rb_gbuffer = 0, rb_ssao = 0, rb_ssao_blur = 0,
+                          rb_lighting = 0, rb_water = 0, rb_skybox = 0, rb_particle = 0,
+                          rb_foliage = 0, rb_aerial = 0, rb_final = 0, rb_total = 0;
+            static double rb_cpu = 0, rb_present = 0, rb_wall = 0, rb_power = 0, rb_clock = 0;
+            static bool rb_nv_ever = false;
+
+            if (rb_warm < g_render_benchmark_warmup) {
+                ++rb_warm;
+            } else if (rb_count < g_render_benchmark_frames) {
+                rb_shadow += s.shadow_gpu_ms;   rb_gbuffer += s.gbuffer_gpu_ms;
+                rb_ssao += s.ssao_gpu_ms;       rb_ssao_blur += s.ssao_blur_gpu_ms;
+                rb_lighting += s.lighting_gpu_ms; rb_water += s.water_gpu_ms;
+                rb_skybox += s.skybox_gpu_ms;   rb_particle += s.particle_gpu_ms;
+                rb_foliage += s.foliage_gpu_ms; rb_aerial += s.aerial_gpu_ms;
+                rb_final += s.final_blit_gpu_ms;
+                rb_total += s.shadow_gpu_ms + s.gbuffer_gpu_ms + s.ssao_gpu_ms + s.ssao_blur_gpu_ms
+                          + s.lighting_gpu_ms + s.water_gpu_ms + s.skybox_gpu_ms + s.particle_gpu_ms
+                          + s.foliage_gpu_ms + s.aerial_gpu_ms + s.final_blit_gpu_ms;
+                rb_cpu += cpu_submit_ms; rb_present += present_ms; rb_wall += wall_ms;
+                if (nv) { rb_power += gpu_power_w; rb_clock += gpu_clock_mhz; ++rb_nv_count; rb_nv_ever = true; }
+                ++rb_count;
+
+                // Dump the forest-dense pose on the LAST measured frame (verifies
+                // density + supplies before/after PNGs). The back buffer was just
+                // swapped to front, so read GL_FRONT.
+                if (rb_count == g_render_benchmark_frames && !g_render_benchmark_screenshot.empty()) {
+                    int vw = 0, vh = 0;
+                    glfwGetFramebufferSize(window, &vw, &vh);
+                    if (vw > 0 && vh > 0) {
+                        std::vector<unsigned char> px(static_cast<std::size_t>(vw) * static_cast<std::size_t>(vh) * 3u);
+                        glReadBuffer(GL_FRONT);
+                        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                        glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+                        WritePixelBufferPpm(std::filesystem::path(g_render_benchmark_screenshot), vw, vh, px);
+                        LUMINUMBRA_CORE_INFO("Render benchmark screenshot -> {} ({}x{})",
+                                             g_render_benchmark_screenshot, vw, vh);
+                    }
+                }
+            } else {
+                const double n = static_cast<double>(std::max(1, rb_count));
+                const double np = static_cast<double>(std::max(1, rb_nv_count));
+                const double gpu_sum = rb_total / n;
+                const double wall = rb_wall / n;
+                const double cpu = rb_cpu / n;
+                nlohmann::json j;
+                j["schema"] = "luminumbra.render_benchmark.v2";
+                j["frames"] = rb_count;
+                j["warmup_frames"] = g_render_benchmark_warmup;
+                j["width"] = renderPipeline.screen_width();
+                j["height"] = renderPipeline.screen_height();
+                j["pose"] = "forest_dense";
+                j["cloud_quality"] = renderPipeline.get_cloud_quality();
+                j["ssao_quality"] = renderPipeline.get_ssao_quality();
+                j["gpu_timers_supported"] = s.gpu_timers_supported;
+                j["nvml_supported"] = rb_nv_ever;
+                // Per-pass GPU timer averages (kept for back-compat with the
+                // RenderBudget per-pass budgets).
+                j["avg_ms"] = {
+                    {"shadow", rb_shadow / n}, {"gbuffer", rb_gbuffer / n}, {"ssao", rb_ssao / n},
+                    {"ssao_blur", rb_ssao_blur / n}, {"ssao_total", (rb_ssao + rb_ssao_blur) / n},
+                    {"lighting", rb_lighting / n}, {"water", rb_water / n}, {"skybox", rb_skybox / n},
+                    {"particle", rb_particle / n}, {"foliage", rb_foliage / n}, {"aerial", rb_aerial / n},
+                    {"final_blit", rb_final / n}, {"total", gpu_sum}
+                };
+                // The honest frame attribution (the numbers that actually decide
+                // whether we are CPU-bound or GPU-bound).
+                j["avg"] = {
+                    {"cpu_submit_ms", cpu},
+                    {"present_ms", rb_present / n},
+                    {"frame_wall_ms", wall},
+                    {"gpu_pass_sum_ms", gpu_sum},
+                    {"gpu_power_w", rb_nv_ever ? rb_power / np : 0.0},
+                    {"gpu_clock_mhz", rb_nv_ever ? rb_clock / np : 0.0}
+                };
+                // Heuristic bound attribution for the log line: CPU-bound if the
+                // CPU submit dominates the GPU pass-timer sum.
+                j["bound"] = (cpu > gpu_sum * 1.1) ? "cpu" : "gpu_or_present";
+                std::error_code _rb_ec;
+                const std::filesystem::path rb_path(g_render_benchmark_path);
+                if (rb_path.has_parent_path()) std::filesystem::create_directories(rb_path.parent_path(), _rb_ec);
+                std::ofstream out(rb_path);
+                out << j.dump(2);
+                out.close();
+                LUMINUMBRA_CORE_INFO(
+                    "Render benchmark: {} frames -> {} | wall {:.3f} ms ({:.0f} fps) | cpu_submit {:.3f} ms | "
+                    "present {:.3f} ms | gpu_pass_sum {:.3f} ms | power {:.0f} W | clock {:.0f} MHz | bound={}",
+                    rb_count, g_render_benchmark_path, wall, wall > 0.0 ? 1000.0 / wall : 0.0, cpu,
+                    rb_present / n, gpu_sum, rb_nv_ever ? rb_power / np : 0.0,
+                    rb_nv_ever ? rb_clock / np : 0.0, j["bound"].get<std::string>());
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
+                rb_count = g_render_benchmark_frames + 1; // latch: stop re-dumping
+            }
+        }
     }
+    g_rb_nvml.shutdown(); // spec 004 Phase 0: release NVML if it was loaded
 
     if (scenario_config.active() &&
         scenario_config.timed_run_seconds > 0 &&

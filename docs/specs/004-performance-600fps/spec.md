@@ -1,153 +1,185 @@
-# Spec 004 — Path to 600 fps (Performance PRD, first draft)
+# Spec 004 — Path to 600 fps
 
-> **Status: PRD FIRST DRAFT (research-grounded, not yet scoped for execution).** Produced from a
-> 6-agent ultracode research workflow (2026-06-21) grounded in the actual render code + AAA
-> technique sources. Detailed facet findings + citations: `research-brief.md` (companion).
-> This draft is for owner review/iteration before it becomes an executable spec.
+> **Status: APPROVED (executable).** Promoted 2026-06-21 from the research-grounded PRD first draft
+> (6-agent ultracode workflow). Companion research: `research-brief.md`. Owner decisions baked in
+> (§Owner Decisions). Sibling pattern: `docs/specs/003-worldgen-water-render-deferred/spec.md`
+> (gate/re-pin discipline). Shared files `main_client.cpp`, `TerrainPresetLoader.*` are co-edited by
+> the create-world dev (spec 002) — **additive seams only**.
 
-## 1. Summary & Vision
-luminumbra runs a vast, **Battlefield-1/Frostbite-floor** voxel forest at **600 fps (1.67 ms/frame)**
-on the RTX 5070 Ti at 3840×1600 — by **inverting where work happens, not by cutting beauty**. The
-measured truth (spec 003 C2) is that the frame is **CPU/present-bound**: ~40–110k static-prop
-entities are walked single-threaded every frame (cull + `SelectTreeLod` + FNV grouping + per-group
-`glBufferSubData` + `glDrawElementsInstanced`), so the GPU **starves and downclocks** (26–41 W /
-200–1900 MHz vs 300 W / 3090 MHz) and a 58 % triangle cut moved `gbuffer_ms` by **zero**. North star:
-(1) move static-prop cull/LOD/submit **onto the GPU** so the CPU stops gating and the card clocks
-back up; (2) **collapse foliage overdraw**; (3) add a **TAA→TAAU** temporal substrate for per-pixel
-headroom and DLSS-ready groundwork. Beauty is held or **raised** throughout. Everything stays
-**render-only** (sim is integer/fixed-point 30 Hz, never hashed), so determinism is untouched.
+## Context
+luminumbra renders a vast Battlefield-1/Frostbite-floor voxel forest at ~256 fps (~3.9 ms) at
+3840×1600 on the RTX 5070 Ti. Spec 003's C2 work measured the frame is **CPU/present-bound, not
+GPU-bound**: ~40–110k static-prop entities are walked single-threaded every frame
+(`GBufferPass::geometry_pass_static_meshes` — per-entity `glm::length` + `SelectTreeLod` + FNV64
+grouping into `unordered_map`/`vector<mat4>` + per-group `glBufferSubData` + N
+`glDrawElementsInstanced`), so the GPU starves and **downclocks** (26–41 W / 200–1900 MHz vs 300 W /
+3090 MHz) and a 58 % triangle cut moved `gbuffer_ms` by **zero**. This spec **inverts where work
+happens, without cutting beauty**: (1) move prop cull/LOD/submit onto the GPU so the CPU stops gating
+and the card clocks back up; (2) collapse foliage overdraw; (3) add a TAA→TAAU temporal substrate.
+The render path is **render-only** (sim is integer/fixed-point 30 Hz, never hashed), so determinism
+is untouched — the single constraint is preserving the seeded `frand()` scatter call ORDER.
 
-## 2. Measured Baseline & Problem Statement
-- Current: ~256 fps (≈3.9 ms) at 3840×1600; RenderBudget total 3.83–3.89 ms (skybox/ssao within budget).
-- **CPU/present-bound, not GPU-bound:** GPU idles at 26–41 W / 200–1900 MHz during the benchmark; a
-  58 % forest-triangle cut left `gbuffer_ms` unchanged. Per-pass GPU timers measured at 200 MHz are
-  meaningless — clock must be reported alongside ms.
-- **Foliage cost is overdraw-bound**, separate from triangle count.
-- **Latent bug:** `kStaticInstanceCapacity = 16384` (`GBufferPass.cpp:515`) silently clamps below the
-  ~110k true prop set (≈28k tree-parts + 14k rocks + 40k bushes) — props may be dropped per group.
-- **Measurement is blind today:** `--render-benchmark` sums per-pass GPU timers only; it will show a
-  FLAT result for a CPU-submit win and under-reports overdraw. Fixing this is a prerequisite.
+## Owner Decisions (resolved 2026-06-21)
+1. **Target = "as high as possible while holding the BF1 floor"** — not a hard 1.67 ms cliff. Exit =
+   measured improvement + no regression + a documented bound; still report the 600 fps / 1.67 ms
+   number on the dense pose.
+2. **Frame pacing = benchmark-only first, with a ship knob** — vsync-off + sleep+spin pacer drives the
+   benchmark/RenderBudget gate; expose as a settings knob (default vsync-on for desktop); decide the
+   shipping default later once measured.
+3. **TAAU = Quality 1.5×, static, knob** — default Quality 1.5×/dim (~44 % pixels), fixed render-scale
+   knob, **no dynamic resolution**; never ship Performance 2.0× as default.
+4. **Include BOTH A3 (far-field-void/arches) AND C2 (octahedral impostor atlas).** C2 is render-only
+   (joins FR-R). A3 is **worldgen → `world_hash`-affecting** → isolated FR-W tier with ONE re-pin,
+   sequenced LAST so it never entangles the render determinism story.
 
-## 3. Goals / Non-Goals
-**Goals:** 1.67 ms/frame on a forest-DENSE fixed pose with the GPU at boost clock; hold/raise the BF1
-fidelity floor; render-only (no sim/world_hash change); honest CPU-vs-GPU attribution.
-**Non-Goals (this PRD):** a Vulkan backend (stay GL 4.5, Vulkan-aware); `GL_ARB_bindless_texture`
-(stay array-based per design §10); DLSS/hw-RT (Vulkan-gated, future); any sim/determinism change; any
-fidelity regression to win the budget.
+## Goals
+- Maximize fps on a forest-DENSE fixed pose at 3840×1600 with the GPU at boost clock; report the
+  600 fps / 1.67 ms figure + the bound that remains.
+- Hold or RAISE the BF1 fidelity floor (props cast shadows; TAAU temporal AA; impostor far-canopy).
+- Honest CPU-vs-GPU attribution (wall = max(CPU_submit, GPU_work) + present; NVML power/clock).
+- FR-R tier render-only (no `world_hash` re-pin); FR-W tier (A3) batched into ONE re-pin.
 
-## 4. Budget Model
-600 fps = **1.67 ms wall-clock = max(CPU_submit, GPU_work) + present** — NOT a sum of GPU pass timers.
-Today ~3.9 ms is gated by CPU submit (proven by the downclock + the no-op triangle cut). We buy the
-budget in two moves: **(a)** CPU submit from a ~3.9 ms-gating 40–110k-entity loop → **<1 ms** (a few
-compute dispatches + 1–2 MDI calls); **(b)** once the CPU stops gating, the GPU **upclocks ~1.5–3×**
-(the hidden multiplier — the same passes run far faster at boost), then **overdraw collapse** (depth
-pre-pass: 3–8× canopy shading → 1×) + **TAAU Quality** (~44 % pixels → ~1.6–1.9× per-pixel headroom
-for ~0.6–1.0 ms reconstruct) bring GPU work under 1.67 ms. **Pacing:** vsync ON leaves the GPU idle →
-downclock; run vsync-off with a sleep+spin pacer + shallow render-ahead to hold boost clock.
+## Non-Goals
+- A Vulkan backend (stay GL 4.5, Vulkan-aware); `GL_ARB_bindless_texture` (stay array-based);
+  DLSS/hw-RT (Vulkan-gated, future); dynamic resolution; any sim/determinism change beyond the FR-W
+  re-pin; any fidelity regression to win the budget; the create-world UI surface (spec 002).
 
-## 5. Architecture — GPU-Driven Static-Prop Submission (the headline lever)
-Upload the full static-prop set **once** to an SSBO `{pos, scale, quat, tint, meshId, boundingSphere}`
-at world-scatter (preserving the seeded `frand()` call ORDER — load-bearing for determinism). A
-compute shader does frustum test + distance→LOD bucket + atomic-append survivors into per-LOD ranges
-and writes the indirect-command `instanceCount`s; the CPU issues **one `glMultiDrawElementsIndirect`
-per material** with ZERO per-entity work. `SelectTreeLod`/`LodMeshPath` move into the compute shader
-(deleting the per-frame `entt` loop, FNV grouping, `resolveMemo`, and per-group `glBufferSubData`
-syncs). **Reuse, not greenfield:** the engine already has `RenderPipeline::draw_chunks_mdi`
-(`RenderPipeline.cpp:1252`, persistent command buffer, baseInstance-indexed — sidesteps the
-`gl_DrawID` ext risk), persistent-mapped pools (chunk/foliage/particle), and the
-compute→count_ssbo→indirect shape (`FoliagePass.cpp:614-657`). **Keep indirect args GPU-resident** —
-never read back the count on the hot path (the FoliagePass readback at `:640-651` is the anti-pattern).
+## Budget Model
+600 fps = **1.67 ms wall-clock = max(CPU_submit, GPU_work) + present** — NOT a sum of GPU pass timers
+(the current benchmark's blind metric). Today ~3.9 ms is CPU-submit-gated (proven by the downclock +
+the no-op triangle cut). Two moves: **(a)** CPU submit from a ~3.9 ms-gating 40–110k-entity loop →
+**<1 ms** (a few compute dispatches + 1–2 MDI calls); **(b)** once CPU stops gating, the GPU
+**upclocks ~1.5–3×** (same passes run far faster at boost), then **overdraw collapse** (depth-prepass:
+3–8× canopy shading → 1×) + **TAAU Quality** (~44 % pixels → ~1.6–1.9× per-pixel headroom for ~0.6–1.0
+ms reconstruct) bring GPU work under budget. **Pacing:** vsync ON idles the GPU → downclock; run
+vsync-off + sleep+spin pacer + shallow render-ahead to hold boost clock.
 
-## 6. Architecture — Overdraw Collapse
-(a) **Depth/Z pre-pass** for alpha-tested trees/bushes, then re-draw into the G-buffer with
-`glDepthFunc(GL_EQUAL)` + `glDepthMask(FALSE)` so each canopy pixel shades exactly once (MUST come
-AFTER GPU-driving, else it doubles CPU draws). (b) Grass `GL_BLEND` → **alpha-TEST** to restore
-early-Z, softened with A2C / in-shader dither + **mip-coverage alpha lift** to hold distant density.
-(c) Extend the existing `g_buffer.frag` `u_forceFlat`/`u_macroRockOverlay`-off cheap paths. This is
-the lever that finally moves `gbuffer_ms`.
+## Functional Requirements
 
-## 7. Architecture — Temporal Substrate (TAA → TAAU)
-Halton[2,3] projection jitter + a **motion-vector G-buffer attachment** (MUST cover shader-side wind
-in `instanced_mesh.vert` — a known MV hazard) + history buffer + neighborhood-clamp resolve (free
-edge AA first), then upgrade to temporal **upsampling** (hand-rolled TAAU or FSR2 GL path) with a
-**render-scale knob**, default **Quality 1.5×/dim** (never ship Performance 2.0× as default). These
-are exactly DLSS4's required inputs → cheap future Vulkan unlock.
+### FR-R · Render-only (no `world_hash` re-pin) — Phases 0–7
+- **FR-R0 (measurement substrate, PREREQUISITE).** `--render-benchmark` today
+  (`main_client.cpp:7242-7310`) sums per-pass GPU timers (`RenderPassFrameStats *_gpu_ms`) into
+  `rb_total` under swap-interval 0 — **blind to CPU-submit/present** and emits schema
+  `luminumbra.render_benchmark.v1`. It already pins a FIXED pose (`8,52,8`, Yaw 35, Pitch −12,
+  near-noon) but that pose is a generic horizon view, **not forest-dense**. Add: (1) CPU-submit +
+  present split (wall = max(CPU,GPU)+present); (2) **NVML** GPU power + clock sampling (does NOT exist
+  in source today — add it, guarded/optional so non-NVIDIA + headless still build/run); (3) a
+  forest-DENSE pose; (4) bump schema → `v2`. Update the `RenderBudget` gate
+  (`validate-engine-frontier.ps1:6429-6481`) in lockstep (it hard-rejects unexpected schema, reads
+  `avg_ms.total`, and currently uses `--auto-create-world`). 0 fps gain — un-blinds everything.
+- **FR-R1 (persistent pool + MDI).** Replace per-group `glBufferSubData` (`GBufferPass.cpp:519`) + N
+  `glDrawElementsInstanced` (:531) with a triple-buffered persistent-mapped pool + **one
+  `glMultiDrawElementsIndirect` per material** across LOD batches (reuse `draw_chunks_mdi`,
+  `RenderPipeline.cpp:1252-1352`, baseInstance-indexed — sidesteps `gl_DrawID`). **Fix the capacity
+  bug:** `kStaticInstanceCapacity = 16384` (`GBufferPass.cpp:34`, clamp :516) silently drops below the
+  ~110k prop set — size the pool for the TOTAL set and grow. First real upclock. Touch
+  `instanced_mesh.vert` (baseInstance addressing).
+- **FR-R2 (GPU compute cull + LOD select — HEADLINE).** Upload the full static-prop set **once** to an
+  SSBO `{pos, scale, quat, tint, meshId, boundingSphere}` at world-scatter
+  (`main_client.cpp:4532-4776`, **preserving the seeded `frand()` call ORDER** — load-bearing for
+  determinism). A `prop_cull.comp` compute shader does frustum test + distance→LOD bucket +
+  atomic-append survivors into per-LOD ranges and writes the indirect `instanceCount`s; the CPU issues
+  one MDI per material with ZERO per-entity work. `SelectTreeLod`/`LodMeshPath` move into the compute
+  shader; delete the per-frame `entt` loop + FNV grouping + per-group `glBufferSubData`. **Keep
+  indirect args GPU-resident** — never read back the count on the hot path (the FoliagePass
+  `glGetBufferSubData` at `FoliagePass.cpp:641-642` is the anti-pattern). Use
+  `glMultiDrawElementsIndirectCount`. Ends the downclock.
+- **FR-R3 (props cast shadows).** Feed the prop indirect buffer into `ShadowPass::execute`
+  (`ShadowPass.cpp:54-100`; today draws chunks only, :74-97). Fidelity RAISE + stress-tests the
+  GPU-driven path under the 4× cascade multiplier.
+- **FR-R4 (overdraw collapse).** MUST come AFTER FR-R2 (else it doubles CPU draws). (a) Depth/Z
+  pre-pass for alpha-tested trees/bushes, re-draw into the G-buffer with `glDepthFunc(GL_EQUAL)` +
+  `glDepthMask(FALSE)` so each canopy pixel shades once. (b) Grass `GL_BLEND` → **alpha-TEST** (restore
+  early-Z) + A2C / in-shader dither + **mandatory mip-coverage alpha lift** to hold distant density.
+  (c) Extend the `g_buffer.frag` cheap paths. The lever that finally moves `gbuffer_ms`.
+- **FR-R5 (TAA → TAAU).** Halton[2,3] projection jitter + a **motion-vector G-buffer attachment**
+  (MUST cover shader-side wind in `instanced_mesh.vert` — a known MV hazard) + history buffer +
+  neighborhood-clamp resolve (free edge AA first), then temporal **upsampling** with a render-scale
+  knob, **default Quality 1.5×/dim** (Owner Decision 3). Exactly DLSS4's required inputs → cheap future
+  Vulkan unlock.
+- **FR-R6 (frame pacing / anti-downclock + cheap beauty).** vsync-off + sleep+spin pacer at a stable
+  high cap + shallow render-ahead (hand-rolled Reflex-style just-in-time submit; no Reflex on GL).
+  Benchmark-driven now; exposed as a settings knob (Owner Decision 2). Verify via NVML that power
+  climbs toward 300 W / clock toward 3090 MHz. Cheap beauty (contact shadows, per-texel roughness) only
+  if budget allows.
+- **FR-R7 (C2 octahedral impostor atlas).** Replace the overdraw-heavy LOD3 cross-billboards for trees
+  with an octahedral impostor atlas (bake inline). Render-only; fidelity-UP for far canopy + an
+  overdraw cut. Slots into the LOD selection from FR-R2.
 
-## 8. Frame Pacing & Anti-Downclock
-vsync-off + sleep+spin pacer at a stable high cap, shallow render-ahead queue, continuous GPU work to
-hold boost clock (hand-rolled Reflex-style just-in-time submit; no Reflex on GL). Verify via NVML that
-power climbs toward 300 W and clock toward 3090 MHz.
+### FR-W · Worldgen tier (ONE re-pin, sequenced LAST) — Phase A3
+- **FR-W1 (A3 far-field-void/arches follow-up).** Complete the far-field visibility of the
+  surface-breaking features spec 003 added (sinkholes / arches / cave-mouths) so they read at distance
+  (far-LOD SDF / impostor of the void). `world_hash`-affecting → isolated re-pin tier (spec-003
+  pattern): all procgen hashing **unsigned**, guard normalize/division (release-only UB), and
+  **byte-identical when the feature is disabled** (empty-case byte-zero hashing) so off-worlds don't
+  move. Re-pin ONLY the gates whose preset enables the feature (verify each before touching).
 
-## 9. Phased Roadmap (each: lever → expected gain → touch points; re-measure between)
-- **Phase 0 — Honest measurement substrate (PREREQUISITE).** CPU-submit/present split + NVML
-  power/clock sampling + a forest-DENSE fixed pose in `--render-benchmark`. 0 fps but un-blinds
-  everything. `main_client.cpp:~7242`, `RenderPassFrameStats`.
-- **Phase 1 — Persistent instance pool + MDI (do-now, low risk).** Replace per-group
-  `glBufferSubData` + N `glDrawElementsInstanced` with a triple-buffered persistent pool + one
-  `glMultiDrawElementsIndirect` per material (reuse `draw_chunks_mdi`). First real upclock.
-  `GBufferPass::geometry_pass_static_meshes` (330-533), `instanced_mesh.vert`, bump capacity.
-- **Phase 2 — GPU compute cull + LOD select (the headline lever).** Upload-once SSBO + `prop_cull.comp`
-  → indirect; delete the 40–110k CPU loop. Ends the downclock.
-- **Phase 3 — Props cast shadows via the same indirect buffer.** BF1-floor RAISE + stress-tests the
-  GPU-driven path under the 4× cascade multiplier. `ShadowPass::execute`.
-- **Phase 4 — Foliage overdraw collapse** (after GPU-driving). Depth-prepass/EQUAL + grass alpha-test+A2C.
-- **Phase 5 — TAA → TAAU** (per-pixel headroom + DLSS groundwork).
-- **Phase 6 — Frame pacing / anti-downclock + cheap beauty** (contact shadows, per-texel roughness).
-- **Phase 7 — DEFER: two-phase Hi-Z occlusion cull + octahedral impostor atlas + dithered LOD cross-fade.**
-  Re-measure first; only if cull/far-canopy is the new ceiling.
+## Non-Functional Requirements
+- **NFR-1 (determinism):** `run==replay` byte-exact always holds. FR-R tier = **zero `world_hash`
+  change** (only constraint: preserve `frand()` scatter order on SSBO upload). FR-W tier = ONE batched
+  re-pin (literals ~4688/5213/5331/5435/5485 in `validate-engine-frontier.ps1` — verify each;
+  re-pinning a gate whose preset doesn't enable the feature turns green→red). All procgen/GPU hashing
+  unsigned; guard normalize/division. Re-run `HeadlessServerTick`/`PopulatedWorldReplay` each phase.
+- **NFR-2 (memory):** instance SSBO sized for the TOTAL prop set + growth headroom (not clamped at
+  16384); compute-cull scratch + indirect args sized per material/LOD; impostor atlas bounded.
+- **NFR-3 (fidelity floor):** hold/raise BF1/Frostbite floor; perf opts must keep the floor (crisp
+  TAAU upsample, lit/textured far field, seamless LOD); no ghosting/flicker beyond gate tolerance.
+- **NFR-4 (concurrency):** `main_client.cpp`, `TerrainPresetLoader.*` co-edited by spec 002 — additive
+  seams only. After a `.h` struct change misbehaves in release, `--clean-first` (stale-obj cross-TU).
+- **NFR-5 (portability):** NVML + the GL 4.5 paths degrade gracefully (NVML optional/guarded; no hard
+  dependency that breaks headless or non-NVIDIA CI).
 
-## 10. Beauty-Floor Plan
-Hold-and-raise, never trade down. Phases 1–3 are pixel-identical by construction (same
-meshes/tints/LODs — validate draw-count + visible-instance **parity** vs the CPU path before deleting
-it); Phase 3 ADDS prop shadows. Phase 4 depth-prepass is visually identical; grass alpha-test needs
-the mandatory mip-coverage alpha lift to hold density. Phase 5 TAAU RAISES baseline quality (temporal
-AA), gated by render-scale (Quality default). Phase 7 impostors give true far-canopy silhouettes vs
-the current overdraw-heavy cross-billboards. Re-bless visual goldens ONCE at the final TAAU output.
+## Phased Roadmap (each: lever → expected gain → touch points; re-measure between)
+- **Phase 0 (FR-R0)** — measurement substrate. `main_client.cpp:7242-7310`, `RenderPassFrameStats`,
+  `validate-engine-frontier.ps1:6429`. 0 fps; un-blinds.
+- **Phase 1 (FR-R1)** — persistent pool + MDI + capacity fix. `GBufferPass.cpp:34/292-534`,
+  `instanced_mesh.vert`. First upclock.
+- **Phase 2 (FR-R2)** — GPU compute cull + LOD; delete the CPU loop. `prop_cull.comp` (new), scatter
+  SSBO, `GBufferPass`. Ends the downclock (headline).
+- **Phase 3 (FR-R3)** — props cast shadows via the indirect buffer. `ShadowPass.cpp:74-97`.
+- **Phase 4 (FR-R4)** — overdraw collapse (depth-prepass/EQUAL + grass alpha-test+A2C). After Phase 2.
+- **Phase 5 (FR-R5)** — TAA → TAAU Quality 1.5× + render-scale knob.
+- **Phase 6 (FR-R6)** — frame pacing / anti-downclock + cheap beauty.
+- **Phase 7 (FR-R7 / C2)** — octahedral impostor atlas for far LOD.
+- **Phase A3 (FR-W1, LAST)** — far-field-void/arches; ONE re-pin; byte-identical when disabled.
 
-## 11. Measurement & Attribution Plan
-Fix attribution BEFORE Phase 1: (1) CPU-submit/present split (wall = max(CPU, GPU)); (2) NVML
-power+clock per frame (success = power→300 W, clock→3090 MHz); (3) forest-DENSE fixed pose; (4)
-clock-lock A/B (`nvidia-smi --lock-gpu-clocks`) to prove CPU-vs-GPU bound; (5) draw-count + visible-
-instance parity assertion before deleting the CPU path; (6) ≥60-frame warmup so boost settles.
+## Determinism & Re-Pin Impact
+FR-R (Phases 0–7) → no `world_hash` re-pin; pinned literals stay: PopulatedWorldReplay
+`f314123daebb6cd1`, canonical `cf9c8cddf7156cd6`, NetworkedSession `ddfc228811d9f32b`. FR-W (A3) → ONE
+re-pin of affected gates + regenerate persistence fixtures (local-dev re-pin is fine). Visual goldens
+re-bless ONCE at the final TAAU output (parity-first); props-cast-shadows added.
 
-## 12. GL-vs-Vulkan Decision
-**STAY OpenGL 4.5** for the whole 600 fps push; keep Vulkan-aware; defer the backend. Every lever
-that buys 600 fps is GL-native and half-built in-engine (MDI, persistent SSBOs, compute cull, FSR2
-TAAU). DLSS/hw-RT are Vulkan-gated and NOT on the 600 fps critical path. The MV-buffer + jitter +
-history built in Phase 5 are exactly DLSS4's inputs and the indirect path maps 1:1 to
-`VkDrawIndexedIndirectCommand`, so the future Vulkan migration is cheap. Revisit Vulkan only when
-DLSS4/hw-RT becomes the next fidelity frontier.
-
-## 13. Risks & Mitigations
+## Risks & Mitigations
 GPU-cull readback re-introduces a sync stall (keep args GPU-resident, `…IndirectCount`); measurement
-blindness (Phase 0 mandatory); capacity clamp at 16384 (size SSBO for the total + growth); scatter-
-order determinism (preserve `frand()` order); depth-prepass before GPU-driving regresses (ordering);
-TAA artifacts on thin foliage/wind MV (reactive mask, correct MVs, Quality default); per-instance
-materials must fold into the SSBO or MDI batches break; vsync-off pacer thrash (sleep+spin hybrid).
+blindness (Phase 0 mandatory); capacity clamp at 16384 (size for total + growth); scatter-order
+determinism (preserve `frand()` order); depth-prepass before GPU-driving regresses (ordering); TAA
+artifacts on thin foliage/wind MV (reactive mask, correct MVs, Quality default); per-instance materials
+must fold into the SSBO or MDI batches break; vsync-off pacer thrash (sleep+spin hybrid); A3 entangling
+render determinism (isolated FR-W tier, sequenced last, single re-pin); NVML absent on CI (guard/optional).
 
-## 14. Determinism & Re-Pin Impact
-All changes are **render-only** → no `world_hash` re-pin. The single constraint: the SSBO upload must
-preserve the seeded `frand()` scatter call ORDER. Visual goldens re-bless ONCE at the final output.
+## GL-vs-Vulkan Decision
+**STAY OpenGL 4.5** for the whole push; Vulkan-aware; defer the backend. Every 600 fps lever is
+GL-native + half-built in-engine (MDI, persistent SSBOs, compute cull, FSR2-style TAAU). DLSS/hw-RT are
+Vulkan-gated and NOT on the critical path; the MV-buffer + jitter + history (Phase 5) are exactly
+DLSS4's inputs and the indirect path maps 1:1 to `VkDrawIndexedIndirectCommand`, so a future Vulkan
+migration is cheap. Revisit Vulkan only when DLSS4/hw-RT becomes the next fidelity frontier.
 
-## 15. Engine-Fit / Reuse Inventory
-MDI: `RenderPipeline::draw_chunks_mdi` (`RenderPipeline.cpp:1252-1345`). Persistent pools:
-`RenderPipeline.cpp:241`, `FoliagePass.cpp:106-117`. Compute→indirect: `FoliagePass.cpp:521-657,
-741-746`. Target to rewrite: `GBufferPass::geometry_pass_static_meshes` (`GBufferPass.cpp:330-533`),
-buffers (`:51-69`). Scatter site: `main_client.cpp:~483-700, ~4532-4776`. Shadows: `ShadowPass.cpp:74-97`.
-
-## 16. Acceptance Criteria & Exit Gates (for the eventual executable spec)
-- [ ] AC-0: benchmark reports CPU-submit/present split + NVML power/clock on a forest-dense pose.
-- [ ] AC-1/2: static-prop submit is GPU-driven (1–2 MDI calls/material, no per-frame entity loop);
-      draw-count + visible-instance parity vs the old CPU path proven before deletion.
-- [ ] AC-bound: clock-lock A/B shows the frame flips from CPU-bound to GPU-bound after Phase 2; GPU
-      power climbs toward TDP / clock toward boost.
-- [ ] AC-overdraw: depth-prepass makes canopy shade ~1× (gbuffer_ms drops materially).
-- [ ] AC-taau: TAAU Quality holds the BF1 floor (no ghosting/flicker beyond gate tolerance) on the dense pose.
-- [ ] AC-600: **600 fps (≤1.67 ms)** on the forest-dense pose at 3840×1600 with the GPU at boost clock.
-- [ ] AC-beauty: all visual gates green at the re-blessed TAAU output; props cast shadows; no fidelity regression.
-
-## Open Questions (for owner)
-- Accept vsync-off + a custom frame pacer as the shipping default, or only in benchmark mode?
-- TAAU default quality tier (1.5× Quality recommended) and is dynamic-resolution acceptable?
-- Is 600 fps the firm target, or "as high as possible while holding the floor" (the levers are the same)?
-- Priority vs. the deferred A3 far-field-void / arches and the C2 impostor-atlas follow-up.
+## Acceptance Criteria & Exit Gates
+- [ ] **AC-0:** benchmark reports CPU-submit/present split + NVML power/clock on a forest-DENSE pose
+      (schema v2); `RenderBudget` gate updated in lockstep.
+- [ ] **AC-1/2:** static-prop submit is GPU-driven (1–2 MDI/material, no per-frame entity loop);
+      draw-count + visible-instance **parity** vs the old CPU path proven BEFORE deletion; capacity
+      sized for the total set (no props dropped).
+- [ ] **AC-bound:** clock-lock A/B (`nvidia-smi --lock-gpu-clocks`) shows the frame flips
+      CPU-bound→GPU-bound after Phase 2; GPU power climbs toward TDP / clock toward boost.
+- [ ] **AC-shadow:** props cast shadows via the indirect buffer.
+- [ ] **AC-overdraw:** depth-prepass makes canopy shade ~1× (`gbuffer_ms` drops materially).
+- [ ] **AC-taau:** TAAU Quality 1.5× holds the BF1 floor (no ghosting/flicker beyond tolerance) on the
+      dense pose.
+- [ ] **AC-fps:** fps maximized on the dense pose at 3840×1600 at boost clock; the 600 fps / 1.67 ms
+      figure reported with the remaining bound documented (Owner Decision 1 — not a hard cliff).
+- [ ] **AC-c2:** octahedral impostor atlas live for far LOD (fidelity-up vs cross-billboards).
+- [ ] **AC-a3:** far-field-void/arches visible at distance; FR-W re-pin done; off-worlds byte-identical.
+- [ ] **AC-beauty:** all FR-R determinism gates green (no re-pin); FR-W gates re-pinned once; visual
+      gates green at the re-blessed output; no fidelity regression. Owner gets before/after PNGs +
+      per-pass + CPU/clock numbers.
