@@ -688,6 +688,11 @@ private:
     // ridge/detail) — the level a lake's surface nestles at. Low-frequency so a
     // lake reads ~flat over its extent. Pure.
     float ContinentalBaseHeight(float world_x, float world_z) const;
+    // FLAT lake surface: ContinentalBaseHeight sampled at a coarse-snapped position
+    // so the surface is constant over a lake (a smoothly-varying surface reads as a
+    // concave/tilted lake). The carve + water mesh both use this so basin + surface
+    // agree. Pure.
+    float LakeSurfaceLevel(float world_x, float world_z) const;
     // Slice 4: terrace the height into cliff benches inside cliff-zones (smooth
     // mask, seed +12). Pure; returns `height` unchanged when cliffs disabled or
     // outside a cliff zone. Shared by the scalar + batched paths (byte-identical).

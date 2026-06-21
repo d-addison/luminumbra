@@ -104,6 +104,21 @@ int g_rebindCaptureAction = -1;
 
 // Short human label for a GLFW key code (for the settings controls list). Printable keys use
 // glfwGetKeyName; special keys are named explicitly.
+// Derive the user-preset slug (and world-type id "user_<slug>") from a display name.
+// Shared by the save/exists/rename bridges so collision detection matches save behaviour.
+static std::string UserPresetSlug(const std::string& displayName) {
+    std::string slug;
+    for (char ch : displayName) {
+        if (std::isalnum(static_cast<unsigned char>(ch)))
+            slug += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        else if ((ch == ' ' || ch == '-' || ch == '_') && !slug.empty() && slug.back() != '_')
+            slug += '_';
+    }
+    while (!slug.empty() && slug.back() == '_') slug.pop_back();
+    if (slug.empty()) slug = "preset";
+    return slug.substr(0, 32);
+}
+
 static std::string KeyDisplayLabel(int key) {
     switch (key) {
         case GLFW_KEY_SPACE: return "Space";
@@ -2486,16 +2501,7 @@ int main(int argc, char* argv[]) {
                 nlohmann::json base;
                 in >> base;
                 Luminumbra::Client::CustomPresetResult merged = Luminumbra::Client::BuildCustomPreset(base, params);
-                std::string slug;
-                for (char ch : displayName) {
-                    if (std::isalnum(static_cast<unsigned char>(ch)))
-                        slug += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-                    else if ((ch == ' ' || ch == '-' || ch == '_') && !slug.empty() && slug.back() != '_')
-                        slug += '_';
-                }
-                while (!slug.empty() && slug.back() == '_') slug.pop_back();
-                if (slug.empty()) slug = "preset";
-                const std::string worldType = "user_" + slug.substr(0, 32);
+                const std::string worldType = "user_" + UserPresetSlug(displayName);
                 merged.json["name"] = displayName.empty() ? std::string("Custom") : displayName;
                 std::ofstream out(presets_dir / (worldType + ".json"), std::ios::binary);
                 if (!out) return "";
@@ -2529,6 +2535,55 @@ int main(int argc, char* argv[]) {
                 }
             } catch (...) {}
             return out;
+        });
+        // Collision check: does saving under this display name target an existing user preset?
+        // (The saver silently overwrites; the UI uses this to gate it behind a confirm.)
+        g_uiManager->SetWorldPresetExists([root_path_str](const std::string& displayName) -> bool {
+            try {
+                const std::filesystem::path pf = std::filesystem::path(root_path_str) / "worlds" /
+                    "atlas" / "presets" / ("user_" + UserPresetSlug(displayName) + ".json");
+                return std::filesystem::exists(pf);
+            } catch (...) { return false; }
+        });
+        // Delete a saved user preset by its world-type id (user_<slug>). Guards against deleting
+        // anything that isn't a user preset.
+        g_uiManager->SetWorldPresetDeleter([root_path_str](const std::string& worldType) -> bool {
+            try {
+                if (worldType.rfind("user_", 0) != 0) return false;
+                const std::filesystem::path pf = std::filesystem::path(root_path_str) / "worlds" /
+                    "atlas" / "presets" / (worldType + ".json");
+                std::error_code ec;
+                const bool removed = std::filesystem::remove(pf, ec);
+                if (removed) LUMINUMBRA_CORE_INFO("Deleted user world preset: {}", worldType);
+                return removed && !ec;
+            } catch (...) { return false; }
+        });
+        // Rename a saved user preset: rewrite its "name" field and move it to the new slug-derived
+        // id (user_<newslug>.json), removing the old file. Returns the new world-type id, "" on fail.
+        g_uiManager->SetWorldPresetRenamer([root_path_str](const std::string& worldType,
+                                                           const std::string& newDisplayName) -> std::string {
+            try {
+                if (worldType.rfind("user_", 0) != 0) return "";
+                const std::filesystem::path dir = std::filesystem::path(root_path_str) / "worlds" /
+                    "atlas" / "presets";
+                const std::filesystem::path src = dir / (worldType + ".json");
+                if (!std::filesystem::exists(src)) return "";
+                nlohmann::json j;
+                { std::ifstream in(src); if (!in) return ""; in >> j; }
+                j["name"] = newDisplayName.empty() ? std::string("Custom") : newDisplayName;
+                const std::string newType = "user_" + UserPresetSlug(newDisplayName);
+                const std::filesystem::path dst = dir / (newType + ".json");
+                { std::ofstream out(dst, std::ios::binary); if (!out) return ""; out << j.dump(2); }
+                if (newType != worldType) {
+                    std::error_code ec;
+                    std::filesystem::remove(src, ec);
+                }
+                LUMINUMBRA_CORE_INFO("Renamed user preset {} -> {}", worldType, newType);
+                return newType;
+            } catch (const std::exception& e) {
+                LUMINUMBRA_CORE_ERROR("Rename preset failed: {}", e.what());
+                return "";
+            }
         });
         // Wire the RML Settings screen (settings.rml) to the SystemConfig user settings.
         // Live-apply mirrors the F8 ImGui panel; Save persists the per-user overlay.
@@ -4373,7 +4428,7 @@ int main(int argc, char* argv[]) {
                                     const float rx = anchor.x + gx + (frand() - 0.5f) * rCell;
                                     const float rz = anchor.z + gz + (frand() - 0.5f) * rCell;
                                     const float hC = terr(rx, rz);
-                                    if (hC <= 0.5f) continue; // skip underwater (SEA_LEVEL=0)
+                                    if (hC <= ws->WaterLevelAt(rx, rz) + 0.3f) continue; // not underwater (sea or lake)
                                     const float sx = terr(rx + rHS, rz) - terr(rx - rHS, rz);
                                     const float sz = terr(rx, rz + rHS) - terr(rx, rz - rHS);
                                     const float slope = std::sqrt(sx * sx + sz * sz) / rHS;

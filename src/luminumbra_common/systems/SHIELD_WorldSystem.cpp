@@ -508,7 +508,7 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
     // lakes are disabled. Kept byte-identical to ComputeShapedHeightGrid.
     if (m_params.lakes_enabled) {
         const float lake_influence = LakeInfluenceFromNoise(world_x, world_z);
-        const float lake_surface = ContinentalBaseHeight(world_x, world_z) - m_params.lake_bank_offset;
+        const float lake_surface = LakeSurfaceLevel(world_x, world_z);
         sample.final_height -= LakeCarveAmount(sample.final_height, lake_influence, lake_surface);
     }
 
@@ -677,14 +677,24 @@ float SHIELD_WorldSystem::ContinentalBaseHeight(float world_x, float world_z) co
            EvaluateShapingSpline(m_params.continental_spline, continentalness, 0.0f);
 }
 
+float SHIELD_WorldSystem::LakeSurfaceLevel(float world_x, float world_z) const {
+    // Snap to a coarse grid so the lake surface is CONSTANT (flat) over a lake's
+    // extent — sampling ContinentalBaseHeight per-point gave a smoothly-varying
+    // surface that read as a concave/tilted lake. The carve + the water mesh both
+    // reference this, so the basin floor and the surface stay consistent.
+    constexpr float kLakeCellMeters = 768.0f;
+    const float sx = std::round(world_x / kLakeCellMeters) * kLakeCellMeters;
+    const float sz = std::round(world_z / kLakeCellMeters) * kLakeCellMeters;
+    return ContinentalBaseHeight(sx, sz) - m_params.lake_bank_offset;
+}
+
 float SHIELD_WorldSystem::WaterLevelAt(float world_x, float world_z) const {
-    // Sea level everywhere, RAISED to the local lake surface inside a lake basin so
-    // perched lakes sit at their basin elevation. max() with SEA_LEVEL keeps lakes
-    // that dip below sea level merged with the ocean.
+    // Sea level everywhere, RAISED to the local (flat) lake surface inside a lake
+    // basin so perched lakes sit at their basin elevation. max() with SEA_LEVEL
+    // keeps lakes that dip below sea level merged with the ocean.
     float level = SEA_LEVEL;
     if (m_params.lakes_enabled && LakeInfluenceFromNoise(world_x, world_z) > 0.0f) {
-        const float lake_surface = ContinentalBaseHeight(world_x, world_z) - m_params.lake_bank_offset;
-        level = std::max(level, lake_surface);
+        level = std::max(level, LakeSurfaceLevel(world_x, world_z));
     }
     return level;
 }
@@ -768,7 +778,7 @@ float SHIELD_WorldSystem::GetTerrainHeightAtCoarse(
     // invisible at range, so the far field simply omits it (matches the prior
     // fast far-field behaviour); near chunks still bake it.
     if (m_params.lakes_enabled) {
-        const float lake_surface = ContinentalBaseHeight(world_x, world_z) - m_params.lake_bank_offset;
+        const float lake_surface = LakeSurfaceLevel(world_x, world_z);
         result -= LakeCarveAmount(result, LakeInfluenceFromNoise(world_x, world_z), lake_surface);
     }
     return result;
@@ -937,7 +947,7 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
                 const float world_x = static_cast<float>(base_x + x);
                 const float world_z = static_cast<float>(base_z + z);
                 const float lake_influence = LakeInfluenceFromNoise(world_x, world_z);
-                const float lake_surface = ContinentalBaseHeight(world_x, world_z) - m_params.lake_bank_offset;
+                const float lake_surface = LakeSurfaceLevel(world_x, world_z);
                 terrain_height -= LakeCarveAmount(terrain_height, lake_influence, lake_surface);
             }
 
