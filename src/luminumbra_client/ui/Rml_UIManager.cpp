@@ -202,19 +202,19 @@ Rml_UIManager* Rml_UIManager::s_active_manager = nullptr;
 Rml_UIManager::PreviewState Rml_UIManager::GetWorldCreationPreviewState() const {
     PreviewState st;
     if (!m_context) return st;
-    // Find the loaded, VISIBLE document that owns the live-preview pane.
+    // Find the loaded, VISIBLE create-world document. The live diorama renders
+    // FULL-SCREEN behind the form (cinematic backdrop), so the form itself — not a
+    // bounded preview box — is the active marker.
     Rml::ElementDocument* doc = nullptr;
-    Rml::Element* pane = nullptr;
     for (int i = 0; i < m_context->GetNumDocuments(); ++i) {
         Rml::ElementDocument* d = m_context->GetDocument(i);
         if (!d || !d->IsVisible()) continue;
-        if (Rml::Element* p = d->GetElementById("preview_pane")) {
+        if (d->GetElementById("world_creation_form")) {
             doc = d;
-            pane = p;
             break;
         }
     }
-    if (!doc || !pane) return st;
+    if (!doc) return st;
 
     st.active = true;
     st.params = CollectWorldGenParams(doc);
@@ -235,15 +235,9 @@ Rml_UIManager::PreviewState Rml_UIManager::GetWorldCreationPreviewState() const 
         try { st.tod = std::stof(v); } catch (...) { st.tod = 0.24f; }
     }
 
-    // Pane rect in PIXELS (border box). RmlUi reports CSS px == framebuffer px
-    // here (dp ratio 1 on the GL3 backend), matching glfw cursor/framebuffer
-    // coords. Round to the nearest device pixel.
-    const Rml::Vector2f off = pane->GetAbsoluteOffset(Rml::BoxArea::Border);
-    const Rml::Vector2f size = pane->GetBox().GetSize(Rml::BoxArea::Border);
-    st.pane_x = static_cast<int>(off.x + 0.5f);
-    st.pane_y = static_cast<int>(off.y + 0.5f);
-    st.pane_w = static_cast<int>(size.x + 0.5f);
-    st.pane_h = static_cast<int>(size.y + 0.5f);
+    // The diorama is full-screen, so there is no bounded pane rect to report; the
+    // host orbits when the cursor is over the world backdrop (outside the form
+    // panel), not over a fixed box. Leave pane_* at 0.
     return st;
 }
 

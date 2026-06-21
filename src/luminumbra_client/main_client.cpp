@@ -6624,7 +6624,7 @@ int main(int argc, char* argv[]) {
                 bool previewActive = false;
                 if (g_uiManager && worldgenPreview) {
                     pv = g_uiManager->GetWorldCreationPreviewState();
-                    previewActive = pv.active && pv.pane_w > 4 && pv.pane_h > 4;
+                    previewActive = pv.active;  // full-screen diorama; no bounded pane rect
                 }
 
                 // F4: render the live scenic world behind the menu, with a slow auto-orbit, at
@@ -6697,12 +6697,15 @@ int main(int argc, char* argv[]) {
                         worldgenPreview->set_time_of_day(pv.tod);
                         if (g_uiManager->ConsumeWorldCreationResetView()) worldgenPreview->reset_view();
 
-                        // Mouse orbit: drag over the pane spins, scroll zooms.
+                        // Orbit/zoom when the cursor is over the WORLD backdrop, i.e.
+                        // not over the create panel or a control. RmlUi reports the
+                        // hovered element; the bare backdrop is the document body
+                        // (id "world_creation"), so a null/body hover == over the world.
                         double cx = 0.0, cy = 0.0; glfwGetCursorPos(window, &cx, &cy);
                         const bool lmb = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
-                        const bool overPane = cx >= pv.pane_x && cx < (pv.pane_x + pv.pane_w) &&
-                                              cy >= pv.pane_y && cy < (pv.pane_y + pv.pane_h);
-                        if (lmb && overPane && !worldgenPreviewDragging) {
+                        Rml::Element* hover = g_uiManager->GetContext() ? g_uiManager->GetContext()->GetHoverElement() : nullptr;
+                        const bool overWorld = (hover == nullptr) || (hover->GetId() == "world_creation");
+                        if (lmb && overWorld && !worldgenPreviewDragging) {
                             worldgenPreviewDragging = true;
                             worldgenPreviewLastCursorX = cx; worldgenPreviewLastCursorY = cy;
                         } else if (!lmb) {
@@ -6716,10 +6719,10 @@ int main(int argc, char* argv[]) {
                             worldgenPreview->orbit(dx * 0.35f, -dy * 0.35f);
                         }
 
-                        // Scroll wheel over the pane zooms the diorama in/out. The
+                        // Scroll wheel over the world zooms the diorama in/out. The
                         // menu scroll callback accrues the delta; consume + reset it
-                        // here (only applied when the cursor is over the pane).
-                        if (overPane && g_menu_scroll_accum != 0.0) {
+                        // here (only applied when the cursor is over the world).
+                        if (overWorld && g_menu_scroll_accum != 0.0) {
                             worldgenPreview->zoom(static_cast<float>(g_menu_scroll_accum));
                         }
                         g_menu_scroll_accum = 0.0;
