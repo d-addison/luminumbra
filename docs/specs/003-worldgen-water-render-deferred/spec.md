@@ -52,24 +52,44 @@ scalar/batched/coarse height paths, `GenerateChunkData`); `World::SitesInArea`/`
 - **FR-A2 (bush/shrub layer):** Add a bush palette (reuse `BuildProcgenRockPalette` icosphere,
   ~0.3–0.6× scale, denser clustering) scattered by `FoliagePass` and driven by `BiomeTable`
   vegetation density. Render-only (vegetation is out of `content_hash`).
-- **FR-A3 (true far-field SDF — hybrid):** Add `SHIELD_WorldSystem::SampleCaveColumnCoarse(x,z,step)`
-  as the single cave-reduction source (one `GenSingle3D` per scanned y, reusing `apply_cave_field`).
-  The coarse-chunk mesher and the far-tile bake both call it. Add sparse `cave_column_offsets`/
-  `cave_spans` to `FarLodTile` (versioned, empty-on-old-tile back-compat); emit cave geometry only
-  on flagged columns. Tier: full caves to ~768 m (F1), cave-mouths to ~1280 m (F2), heightfield
-  beyond. Overhang-creating runtime edits propagate via `ApplyChunkSdfToFarLodTile`. Surface
-  vertices stay byte-identical to today (seam preserved). All bake hashing unsigned.
+- **FR-A3 (surface-breaking caves + far-field SDF) — RE-SCOPED (owner, 2026-06-21).** Red-team
+  found the original "hybrid far-field cave" plan UNSOUND: `apply_cave_field = max(terrain_density,
+  surface_capped_cave_density)` only carves DOWNWARD and the 18 m surface cap means caves NEVER break
+  the surface or overhang → far-field cave geometry would be fully occluded by the heightfield skin
+  (renders nothing). Owner chose to **add genuine surface-breaking features** so there is something to
+  show: deterministic **sinkholes / arches / cave-mouths** authored into the SDF (lower/condition the
+  18 m cap where a feature is placed), which is a **near-field worldgen change → world_hash-affecting
+  → re-pin** (joins the Wave-B cluster). THEN the far-field reduction (`SampleCaveColumnCoarse` single
+  source; sparse `cave_column_offsets`/`cave_spans` on a **versioned** `FarLodTile` with byte-zero
+  empty-case hashing so disabled worlds stay byte-identical; cave geometry only on flagged columns;
+  F1 full / F2 mouths / fade) renders them at distance, with the seam-fallback (`ReadTransitionFace…`)
+  and boundary skirts taught to consult the same cave samples so the live/far boundary doesn't crack.
+  Needs a **research pass first** (deterministic sinkhole/arch/cave-mouth authoring) before detailed
+  design. All hashing unsigned; guard normalize/division.
 
 ### FR-B · World_hash-affecting (batched → ONE re-pin)
-- **FR-B1 (material channel + voxel structures):** Add lazily-allocated `material_data` +
-  `pending_material_data` (`std::vector<u8>`) to `Chunk`. `StampStructuresIntoChunk` runs at the
-  end of every `GenerateChunkData` path (after caves + river carve), enumerates `SitesInArea` over
-  the chunk AABB padded by a per-pool footprint radius, drops each site to the surface via
-  `GetTerrainHeightAt`, skips sub-`SEA_LEVEL` sites, and stamps `AssembleStructure` voxels as
-  `sdf_data=-1` + authored material. Marching cubes emits per-vertex material from `material_data`
-  with the analytic classifier as fallback (empty ⇒ byte-identical to today). `material_data` folds
-  into chunk JSON (tolerant read), `PersistedFields`, `RequiredChunkFormatFields`, and the **terrain**
-  sub-hash. Mining clears `sdf_data` + `material_data` (mineable).
+- **FR-B1 (material channel + voxel structures) — red-team-hardened.** Add lazily-allocated
+  `material_data` **+ `pending_material_data`** (`std::vector<u8>`) to `Chunk`. The stamp helper runs
+  **inside `GenerateChunkData`** (NOT only at the tail) so it executes for the off-thread LOD0
+  scratch generation too; called from BOTH the CPU branch (before `clear_voxel_data_dirty`) AND the
+  GPU branch (before its early return, after `sdf_data` is full); explicitly **skipped on the step>1
+  coarse path**. The meshing job must move `scratch.material_data → chunk->pending_material_data` and
+  `process_completed_meshing_jobs` must publish it alongside `pending_sdf_data` (else promoted chunks
+  lose structure materials → run≠replay). Enumerate `SitesInArea` over the chunk AABB **padded by a
+  per-pool footprint radius** (cairn boxes have negative mins → boundary structures); drop each site
+  to a **single integer floor of `GetTerrainHeightAt(site.x,z)` computed once per site** (identical
+  across all chunks/paths); skip sub-`SEA_LEVEL` sites; stamp only in-bounds voxels (`sdf_data=-1` +
+  material). Marching cubes (first-writer-wins edge cache, fixed scan order): PASS 1b classifies
+  analytically, then re-applies stored material only where it is `!=0` — empty `material_data` ⇒
+  byte-identical. Persistence: add to `ChunkToJson`/`ApplyChunkJson` (**tolerant read; do NOT add to
+  `RequiredChunkFormatFields`** — breaks old-save back-compat + the single-missing-field negative
+  fixture), `PersistedFields`, and the **terrain** sub-hash (empty vector serializes `[]` ⇒ byte-zero
+  for structures-off worlds). Mining clears `sdf_data`+`material_data` (find the LIVE edit path, not
+  just the harness). Lazy alloc = exact padded volume, guard `.empty()` everywhere. Far-LOD carries
+  no structure material (documented gap). **Re-pin ONLY the gates whose preset actually enables
+  structures** — `structures_enabled` defaults false, so the empty-roster gates likely DON'T move
+  (re-pinning them would turn green→red); verify each before touching, include line ~5485 if it moves.
+  All footprint/coord math unsigned/guarded.
 - **FR-B2 (lake spill-level):** Replace the 768 m snap in `LakeSurfaceLevel` with a per-basin
   flood-fill / spill-level so boundary-straddling lakes don't step; keep `WaterLevelAt`, the carve,
   and the `WaterSystem` rest-clamp consistent with the single source of truth.
