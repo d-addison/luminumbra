@@ -1,0 +1,6 @@
+{ "_comment": "spec 003 verification: noon, low camera across vegetated terrain + water (bushes + foam)",
+  "camera": { "pos": [8, 32, 8], "yaw": 35, "pitch": -10, "fov": 68 },
+  "time_of_day": 0.0,
+  "clouds": { "coverage": 0.3, "plane_height": 1400, "shadow": true },
+  "weather": { "type": "none", "intensity": 0.0 },
+  "screenshot": "references/compare/foliage_day.ppm" }

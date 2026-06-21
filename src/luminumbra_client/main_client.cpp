@@ -640,6 +640,85 @@ void BuildProcgenRockPalette(Luminumbra::Rendering::RenderPipeline& rp) {
     LUMINUMBRA_CORE_INFO("VAST-FOREST: built procedural rock palette of {} entries", built);
 }
 
+// SHRUB/BUSH LAYER (spec 003 FR-A2): a small palette of procedural bush meshes,
+// registered into the SAME instanced static-mesh cache as the trees/rocks and
+// scattered as cheap instances on flatter, vegetated ground (the opposite niche
+// to the scree rocks). Each entry is a CLUSTER of 2-3 squashed, deformed
+// icospheres (overlapping lobes read as a leafy shrub), green leaf material via
+// the instanced g_buffer path (no new art). RENDER-ONLY (never hashed, no
+// world_hash impact) — mirrors BuildProcgenRockPalette exactly, including the
+// unsigned-only position hash (signed int*prime overflow is release-only UB that
+// miscompiles to a NaN-normal stall — see memory procgen-hash-signed-overflow-ub).
+int g_bushPaletteCount = 0;
+constexpr int kBushPaletteSize = 6;
+void BuildProcgenBushPalette(Luminumbra::Rendering::RenderPipeline& rp) {
+    if (g_bushPaletteCount > 0) return;
+    using V = Luminumbra::Rendering::Vertex;
+    const float t = 1.6180339887f;
+    const glm::vec3 ico[12] = {
+        {-1, t, 0}, {1, t, 0}, {-1, -t, 0}, {1, -t, 0},
+        {0, -1, t}, {0, 1, t}, {0, -1, -t}, {0, 1, -t},
+        {t, 0, -1}, {t, 0, 1}, {-t, 0, -1}, {-t, 0, 1}
+    };
+    const int faces[20][3] = {
+        {0,11,5},{0,5,1},{0,1,7},{0,7,10},{0,10,11},
+        {1,5,9},{5,11,4},{11,10,2},{10,7,6},{7,1,8},
+        {3,9,4},{3,4,2},{3,2,6},{3,6,8},{3,8,9},
+        {4,9,5},{2,4,11},{6,2,10},{8,6,7},{9,8,1}
+    };
+    auto h01 = [](int a, int b) {
+        std::uint32_t ua = static_cast<std::uint32_t>(static_cast<std::int64_t>(a)) * 73856093u;
+        std::uint32_t ub = static_cast<std::uint32_t>(static_cast<std::int64_t>(b)) * 19349663u;
+        std::uint64_t z = static_cast<std::uint64_t>(ua ^ ub) + 0x9E3779B97F4A7C15ull;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+        z = z ^ (z >> 31);
+        return static_cast<float>((z >> 11) * (1.0 / 9007199254740992.0));
+    };
+    int built = 0;
+    for (int p = 0; p < kBushPaletteSize; ++p) {
+        std::vector<V> verts; std::vector<std::uint32_t> idx;
+        verts.reserve(180); idx.reserve(180);
+        // 2-3 overlapping lobes per bush; each a squashed, deformed icosphere.
+        const int lobes = 2 + static_cast<int>(h01(p, 41) * 2.0f); // 2..3
+        for (int l = 0; l < lobes; ++l) {
+            // lobe centre offset (low + spread out so the cluster reads as a mound).
+            const glm::vec3 centre(
+                (h01(p * 7 + l, 11) - 0.5f) * 0.9f,
+                0.18f + 0.30f * h01(p * 7 + l, 12),
+                (h01(p * 7 + l, 13) - 0.5f) * 0.9f);
+            // squashed (wider than tall) so it sits like a shrub, not a ball.
+            const glm::vec3 lobeScale(
+                0.40f + 0.30f * h01(p * 7 + l, 14),
+                0.26f + 0.22f * h01(p * 7 + l, 15),
+                0.40f + 0.30f * h01(p * 7 + l, 16));
+            glm::vec3 dv[12];
+            for (int i = 0; i < 12; ++i) {
+                const glm::vec3 n = glm::normalize(ico[i]);
+                const float r = 0.78f + 0.42f * h01((p * 7 + l) * 13 + i, 7); // leafy roughness
+                dv[i] = centre + n * r * lobeScale;
+            }
+            for (int f = 0; f < 20; ++f) {
+                const glm::vec3 a = dv[faces[f][0]], b = dv[faces[f][1]], c = dv[faces[f][2]];
+                const glm::vec3 cr = glm::cross(b - a, c - a);
+                const float crLen = glm::length(cr);
+                const glm::vec3 nrm = (crLen > 1e-6f) ? (cr / crLen)
+                                                      : glm::normalize(a - centre + glm::vec3(0.0f, 1e-3f, 0.0f));
+                const std::uint32_t k = static_cast<std::uint32_t>(verts.size());
+                verts.push_back({a, nrm, {0.0f, 0.0f}});
+                verts.push_back({b, nrm, {1.0f, 0.0f}});
+                verts.push_back({c, nrm, {0.0f, 1.0f}});
+                idx.push_back(k); idx.push_back(k + 1); idx.push_back(k + 2);
+            }
+        }
+        rp.register_procgen_mesh("procgen://bush_" + std::to_string(p),
+                                 Luminumbra::Rendering::MeshLoader::CreateFromArrays(verts, idx));
+        ++built;
+    }
+    g_bushPaletteCount = built;
+    LUMINUMBRA_CORE_INFO("VAST-FOREST: built procedural bush palette of {} entries", built);
+}
+
 std::unique_ptr<Luminumbra::Client::Rml_UIManager> g_uiManager;
 // F3 — UI hot reload: watches data/ui and reloads the active document on .rml/.rcss edits
 // (opt-in via --ui-hot-reload, so the 1s filesystem poll is off during normal/gate runs).
@@ -4530,6 +4609,58 @@ int main(int argc, char* argv[]) {
                                 }
                             }
                             LUMINUMBRA_CORE_INFO("ROCKS: scattered {} rock instances", rocksPlaced);
+                        }
+
+                        // SHRUB/BUSH LAYER (spec 003 FR-A2): scatter the procedural bush
+                        // palette on flatter, vegetated ground — driven by the per-biome
+                        // vegetation density (the same signal that drives the grass scatter),
+                        // so deserts/rock stay sparse and forests/meadows fill with shrubs.
+                        // The niche is the COMPLEMENT of the rocks: bushes on flats/gentle
+                        // slopes, rocks on scree. RENDER-ONLY (never hashed); the frand()
+                        // stream continues after the rocks so the layout stays deterministic.
+                        BuildProcgenBushPalette(renderPipeline);
+                        if (g_bushPaletteCount > 0) {
+                            const float bReach = 850.0f;   // metres from spawn anchor
+                            const float bCell = 8.0f;      // grid pitch (lush undergrowth, denser than trees)
+                            const float bHS = 3.0f;        // slope probe radius
+                            const int   bCap = 40000;      // instance cap
+                            int bushPlaced = 0;
+                            for (float gz = -bReach; gz <= bReach && bushPlaced < bCap; gz += bCell) {
+                                for (float gx = -bReach; gx <= bReach && bushPlaced < bCap; gx += bCell) {
+                                    const float bx = anchor.x + gx + (frand() - 0.5f) * bCell;
+                                    const float bz = anchor.z + gz + (frand() - 0.5f) * bCell;
+                                    const float hC = terr(bx, bz);
+                                    if (hC <= ws->WaterLevelAt(bx, bz) + 0.5f) continue; // not in water
+                                    const float sx = terr(bx + bHS, bz) - terr(bx - bHS, bz);
+                                    const float sz = terr(bx, bz + bHS) - terr(bx, bz - bHS);
+                                    const float slope = std::sqrt(sx * sx + sz * sz) / bHS;
+                                    if (slope > 0.85f) continue; // shrubs avoid steep/cliff (rocks own that)
+                                    // per-biome vegetation density gates cover; flats favoured.
+                                    const Luminumbra::u8 biome_id = ws->BiomeIdAt(bx, bz);
+                                    const float veg = ws->biomes_enabled()
+                                        ? ws->biome_table().vegetation_for(biome_id).density
+                                        : 0.3f;
+                                    // Undergrowth is lush on vegetated flats; falls off on slope.
+                                    const float density = std::min(1.0f, veg * 1.8f) * (1.0f - std::min(slope, 0.7f) * 0.85f);
+                                    if (frand() >= density) continue;
+                                    const int pidx = static_cast<int>(
+                                        (static_cast<std::uint64_t>(static_cast<std::int64_t>(bx) * 73856093) ^
+                                         static_cast<std::uint64_t>(static_cast<std::int64_t>(bz) * 19349663)) %
+                                        static_cast<std::uint64_t>(g_bushPaletteCount));
+                                    float s = 1.1f + frand() * 1.6f;          // small..medium shrubs
+                                    if (frand() > 0.95f) s *= 1.9f;           // rare large bush
+                                    const auto e = reg.create();
+                                    auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
+                                    tf.position = Luminumbra::Vec3(bx, hC - 0.12f * s, bz); // settle into ground
+                                    tf.scale = Luminumbra::Vec3(s, s * (0.7f + 0.4f * frand()), s);
+                                    tf.rotation = glm::angleAxis(frand() * 6.2831853f, glm::vec3(0.0f, 1.0f, 0.0f));
+                                    auto& sm = reg.emplace<Luminumbra::Components::StaticMeshComponent>(e);
+                                    sm.meshPath = "procgen://bush_" + std::to_string(pidx);
+                                    sm.materialId = 3u; // grass/green leaf material (shrub foliage)
+                                    ++bushPlaced;
+                                }
+                            }
+                            LUMINUMBRA_CORE_INFO("BUSHES: scattered {} shrub instances", bushPlaced);
                         }
                         // Growth showcase: a cluster of bigger HERO plants right in front of the
                         // fixed grow-mode camera, so the foreground is dominated by plants visibly
