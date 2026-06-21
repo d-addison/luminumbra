@@ -167,6 +167,24 @@ spec 003 C2's premise) optimizes the wrong target. **Awaiting owner decision on 
 3. The GPU-driven prop rewrite (old Phases 2–7) drops to LOW priority (≤1 ms); keep C2/A3 as fidelity
    items, not perf levers.
 
+### Re-scope execution (commits 7b18150f …)
+- **Foliage readback stall — LANDED (7b18150f).** Removed the synchronous `glGetBufferSubData`
+  (FoliagePass.cpp:641) from the hot path (render-only; `set_readback_enabled`, default-on for the
+  gate, off in play/benchmark; draws straight from the SSBO via `glDrawArraysIndirect`). Grass parity
+  confirmed.
+- **MEASUREMENT BLOCKER:** benchmark A/B is unreliable — the GPU clock floats 896–2851 MHz between
+  runs (DVFS; frame is CPU-bound), swinging every metric ~3×. `nvidia-smi --lock-gpu-clocks` needs
+  ADMIN (denied in the sandboxed shell). For reliable A/B going forward, the owner must lock the clock
+  in an admin shell, OR we verify by WORK-COUNTS (rebuilds/re-meshes performed), which are
+  clock-independent.
+- **Root cause identified:** both streaming (~11–13 ms) and foliage rebuild (~5–9 ms) do FULL work
+  every frame on a STATIC camera. Streaming `SHIELD_WorldSystem::update` (`:1933`) runs, per frame:
+  `process_completed_meshing_jobs`, `PrefetchHydroRegions` (768 m/anchor), and an O(N) scan over ALL
+  loaded chunks (`:1953`) — `update_chunk_activation` is correctly throttled, these are not. The
+  foliage scatter cache fails to elide (sig thrashes on per-frame `set_wind` + streaming chunk-set
+  churn). **Next: make this redundant per-frame work elide (verified by work-counts), starting with
+  streaming (owner OK'd a batched re-pin if a fix touches world_hash).**
+
 ## Gate Criteria
 The plan phase is complete when:
 - [x] All tasks defined with clear acceptance criteria (above + spec ACs).
