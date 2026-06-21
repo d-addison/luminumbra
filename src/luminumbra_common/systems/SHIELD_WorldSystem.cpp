@@ -628,6 +628,52 @@ float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x, float world_z) 
     return a + (b - a) * fz;
 }
 
+void SHIELD_WorldSystem::PrefetchHydroRegions(float cx, float cz, float radius_m) {
+    // Warm the hydraulic-erosion region cache AHEAD of chunk-gen demand on
+    // background jobs, so the (expensive) per-region bake never lands on the
+    // gen/main critical path when the camera flies into new terrain. Each region
+    // bakes ONCE; the inflight set stops re-dispatching it before its job lands,
+    // and the cache check stops re-dispatching baked regions.
+    const float cs = m_params.hydro_cell_size_m;
+    if (!m_params.hydro_enabled || m_job_system == nullptr || cs <= 0.0f) {
+        return;
+    }
+    const float region_m = static_cast<float>(kHydroRegionCells) * cs; // 512 m
+    const std::int64_t reach = static_cast<std::int64_t>(std::ceil(radius_m / region_m)) + 1;
+    const std::int64_t crx =
+        HydroFloorDiv(static_cast<std::int64_t>(std::floor(cx / cs)), kHydroRegionCells);
+    const std::int64_t crz =
+        HydroFloorDiv(static_cast<std::int64_t>(std::floor(cz / cs)), kHydroRegionCells);
+    std::vector<Job> jobs;
+    for (std::int64_t dz = -reach; dz <= reach; ++dz) {
+        for (std::int64_t dx = -reach; dx <= reach; ++dx) {
+            const std::pair<std::int64_t, std::int64_t> rkey(crx + dx, crz + dz);
+            {
+                std::shared_lock<std::shared_mutex> rl(m_hydro_mutex);
+                if (m_hydro_cache.find(rkey) != m_hydro_cache.end()) {
+                    continue; // already baked
+                }
+            }
+            {
+                std::lock_guard<std::mutex> g(m_hydro_prefetch_mutex);
+                if (!m_hydro_prefetch_inflight.insert(rkey).second) {
+                    continue; // already queued
+                }
+            }
+            const float sample_x = static_cast<float>(rkey.first * kHydroRegionCells) * cs + region_m * 0.5f;
+            const float sample_z = static_cast<float>(rkey.second * kHydroRegionCells) * cs + region_m * 0.5f;
+            jobs.emplace_back([this, rkey, sample_x, sample_z]() {
+                SampleHydroOffsetMeters(sample_x, sample_z); // triggers + caches the region bake
+                std::lock_guard<std::mutex> g(m_hydro_prefetch_mutex);
+                m_hydro_prefetch_inflight.erase(rkey);
+            });
+        }
+    }
+    if (!jobs.empty()) {
+        m_job_system->dispatch_batch(jobs); // fire-and-forget background bakes
+    }
+}
+
 float SHIELD_WorldSystem::RiverCarveAmount(float final_height, float influence) const {
     // Carve depth at a single column given its river influence [0, 1]. Pure
     // function: lowers the surface toward a per-influence channel floor below
@@ -1573,6 +1619,14 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
 void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3>& anchor_positions, PhysicsSystem* physics_system) {
     clear_completed_job_handle(m_streaming_state.generation_job_handle);
     process_completed_meshing_jobs();
+
+    // Hydro prefetch: warm the erosion-region cache around each anchor AHEAD of
+    // chunk-gen on background jobs, so re-enabled hydro never bakes on the gen/main
+    // critical path (the fix for the laggy-while-flying with hydro on). No-op when
+    // hydro is disabled. 768 m covers the live ring (~512 m) plus a region of lead.
+    for (const Vec3& anchor : anchor_positions) {
+        PrefetchHydroRegions(anchor.x, anchor.z, 768.0f);
+    }
 
     m_last_streaming_budget_stats = {};
     m_last_streaming_budget_stats.update_interval_frames = STREAMING_ACTIVATION_INTERVAL_FRAMES;

@@ -82,15 +82,15 @@
         ]
       },
       "hydro": {
-        "enabled": false,
-        "iterations": 8,
+        "enabled": true,
+        "iterations": 4,
         "cell_size_m": 8.0,
         "talus_height": 2.6,
         "thermal_rate": 0.3,
         "solubility": 0.06,
         "deposition": 0.15,
         "sediment_capacity": 0.35,
-        "max_offset": 10.0
+        "max_offset": 8.0
       }
     },
     "biomes": {

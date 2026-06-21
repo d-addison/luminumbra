@@ -7,6 +7,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <mutex>
+#include <set>
 #include <shared_mutex>
 #include <unordered_map>
 #include <memory>
@@ -757,6 +759,18 @@ private:
     // multithreaded chunk-gen jobs); only the one-time per-region bake takes the
     // exclusive lock, and the bake itself runs OUTSIDE any lock (pure function).
     mutable std::shared_mutex m_hydro_mutex;
+    // Hydro PREFETCH (re-enable erosion without the on-demand bake hitch): regions
+    // currently queued for a background bake, so PrefetchHydroRegions doesn't
+    // re-dispatch the same region every tick before its job lands.
+    std::set<std::pair<std::int64_t, std::int64_t>> m_hydro_prefetch_inflight;
+    std::mutex m_hydro_prefetch_mutex;
+
+public:
+    // Bake the hydraulic-erosion regions covering a disc around (cx,cz) AHEAD of
+    // demand, on background jobs, so when chunk-gen samples the height the region
+    // is already warm in the cache (no main-thread / gen-critical-path bake stall —
+    // the cause of the laggy-while-flying with hydro on). No-op when hydro is off.
+    void PrefetchHydroRegions(float cx, float cz, float radius_m);
 };
 
 } // namespace Luminumbra::Systems
