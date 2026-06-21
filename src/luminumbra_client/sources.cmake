@@ -45,6 +45,7 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/ui/Rml_Interfaces.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ui/Rml_UIManager.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ui/core/UIDataStream.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/ui/core/UIHotReload.cpp
     # RmlUi reference GL3 backend (vendored copy of the 6.1 renderer). It implements the
     # layered/filter/clip-mask render API the hand-rolled RmlRenderer stubbed out, so
     # backdrop-filter / filter / box-shadow actually render. Compiled against the engine's

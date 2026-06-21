@@ -2,6 +2,7 @@
 #include "audio/IAudioManager.h"
 #include <RmlUi/Core.h>
 #include <RmlUi/Core/Elements/ElementFormControl.h>
+#include <RmlUi/Core/Factory.h>
 #include <RmlUi/Debugger.h>
 #include <utility>
 #include <functional>
@@ -261,6 +262,19 @@ void Rml_UIManager::Render() {
 
 void Rml_UIManager::RequestLoadDocument(std::string path) {
     m_documentToLoad = std::move(path);
+}
+
+void Rml_UIManager::ReloadActiveDocument() {
+    if (!m_context || m_activeDocument.empty()) return;
+    // Drop cached stylesheets/templates so edited .rcss/.rml is re-read from disk.
+    Rml::Factory::ClearStyleSheetCache();
+    Rml::Factory::ClearTemplateCache();
+    // LoadDocument early-returns when the path equals the active document; clear it to force
+    // a genuine reload of the same screen.
+    const std::string doc = m_activeDocument;
+    m_activeDocument.clear();
+    LoadDocument(doc);
+    LUMINUMBRA_CORE_INFO("UI hot-reloaded: {}", doc);
 }
 
 // REMOVED: GetContext() is now in the header.

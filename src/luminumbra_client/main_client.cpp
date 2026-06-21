@@ -19,6 +19,7 @@
 #include "rendering/LightningBolt.h" // T-I5a-5 (B3): deterministic bolt geometry
 #include "rendering/WorldLoadingVisualizer.h"
 #include "ui/Rml_UIManager.h"
+#include "ui/core/UIHotReload.h"
 #include "audio/AudioManagerFactory.h"
 #include "audio/IAudioManager.h"
 #include "audio/NullAudioManager.h"
@@ -583,6 +584,9 @@ void BuildProcgenRockPalette(Luminumbra::Rendering::RenderPipeline& rp) {
 }
 
 std::unique_ptr<Luminumbra::Client::Rml_UIManager> g_uiManager;
+// F3 — UI hot reload: watches data/ui and reloads the active document on .rml/.rcss edits
+// (opt-in via --ui-hot-reload, so the 1s filesystem poll is off during normal/gate runs).
+Luminumbra::Client::UI::UIHotReload g_uiHotReload;
 std::unique_ptr<Luminumbra::Client::WorldLoadingVisualizer> g_loading_visualizer;
 
 // --- Forward Declarations ---
@@ -2162,6 +2166,16 @@ int main(int argc, char* argv[]) {
     if (!scenario_config.no_ui) {
         g_uiManager = std::make_unique<Luminumbra::Client::Rml_UIManager>(root_path_str);
         g_uiManager->Init(window, audioManager.get());
+        // F3 — opt-in UI hot reload: watch data/ui and reload the active document on edits.
+        if (HasCommandLineFlag(argc, argv, "--ui-hot-reload")) {
+            g_uiHotReload.SetEnabled(true);
+            g_uiHotReload.WatchDirectory("data/ui", "rml");
+            g_uiHotReload.WatchDirectory("data/ui", "rcss");
+            g_uiHotReload.SetReloadCallback([](const std::string&) {
+                if (g_uiManager) g_uiManager->ReloadActiveDocument();
+            });
+            LUMINUMBRA_CORE_INFO("UI hot reload enabled (watching data/ui for .rml/.rcss edits).");
+        }
     }
 
     Luminumbra::Rendering::RenderPipeline renderPipeline;
@@ -2848,7 +2862,8 @@ int main(int argc, char* argv[]) {
         if (g_uiManager) {
             g_uiManager->Update();
         }
-        
+        g_uiHotReload.Update();  // F3: no-op unless --ui-hot-reload enabled it (1s-throttled)
+
         GameState currentState = gameStateManager.GetCurrentState();
         
         if (g_imgui_enabled) {

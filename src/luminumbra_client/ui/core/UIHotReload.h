@@ -3,6 +3,7 @@
 #include <string>
 #include <unordered_map>
 #include <chrono>
+#include <filesystem>
 #include <functional>
 
 namespace Luminumbra::Client::UI {
@@ -41,7 +42,7 @@ public:
 private:
     struct WatchedFile {
         std::string path;
-        std::chrono::file_time_type lastWriteTime;
+        std::filesystem::file_time_type lastWriteTime;
         bool isDirectory;
         std::string extension; // For directory watches
     };
@@ -56,7 +57,7 @@ private:
     // Internal methods
     bool CheckFileChanged(WatchedFile& watchedFile);
     void ScanDirectory(const std::string& directoryPath, const std::string& extension);
-    std::chrono::file_time_type GetFileWriteTime(const std::string& filePath);
+    std::filesystem::file_time_type GetFileWriteTime(const std::string& filePath);
     bool FileExists(const std::string& filePath);
 };
 

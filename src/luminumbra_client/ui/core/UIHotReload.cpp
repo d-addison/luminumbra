@@ -162,11 +162,11 @@ void UIHotReload::ScanDirectory(const std::string& directoryPath, const std::str
     }
 }
 
-std::chrono::file_time_type UIHotReload::GetFileWriteTime(const std::string& filePath) {
+std::filesystem::file_time_type UIHotReload::GetFileWriteTime(const std::string& filePath) {
     try {
         return std::filesystem::last_write_time(filePath);
     } catch (const std::filesystem::filesystem_error&) {
-        return std::chrono::file_time_type::min();
+        return std::filesystem::file_time_type::min();
     }
 }
 

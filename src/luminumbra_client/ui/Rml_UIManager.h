@@ -69,6 +69,10 @@ public:
     double GetLastUiFrameMs() const { return m_lastUiFrameMs; }
 
     void RequestLoadDocument(std::string path);
+
+    // Hot reload (F3): clear RmlUi's stylesheet/template caches and reload the active document
+    // so .rml/.rcss edits show without a restart. Called from the UIHotReload watcher callback.
+    void ReloadActiveDocument();
     
     // Fixed: GetContext() is now defined inline here, solving the redefinition error.
     Rml::Context* GetContext() { return m_context; }
