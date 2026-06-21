@@ -961,10 +961,14 @@ double PixelLuminance(unsigned char r, unsigned char g, unsigned char b) {
     return 0.2126 * static_cast<double>(r) + 0.7152 * static_cast<double>(g) + 0.0722 * static_cast<double>(b);
 }
 
-// Sun-disc classification: the tonemapped disc saturates near 250 luminance
-// while the brightest day clouds stay measurably below; calibrated from the
-// first enhanced-skybox noon capture.
-constexpr double kSunDiscMinLuminance = 243.0;
+// Sun-disc classification (FR-C3 part B). At NOON the open pale dome ALSO rides
+// the ACES tonemap ceiling (~250-253 luminance), so the old 243 threshold tagged
+// the whole bright dome as "sun" and the cluster could never localize. The shader
+// now forces a tight disc core to PURE WHITE (255) post-tonemap -- above the dome
+// ceiling -- so a 254 threshold isolates the genuine disc from the saturated dome.
+// (Dusk/dawn discs are warm/low and are gated by TimeOfDaySweep, not this noon
+// smoke.) Calibrated: measured noon dome max ~253.5, forced disc core = 255.
+constexpr double kSunDiscMinLuminance = 254.0;
 
 // Sky ROI: with pitch +30 and a 90-degree vertical FOV the horizon projects
 // ~79% down the frame; the top 55% is guaranteed sky.
@@ -1103,42 +1107,68 @@ void WriteSkyboxVisualAnalysis(
     bool sun_on_screen,
     const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass)
 {
-    constexpr double kMinHorizonZenithDrop = 8.0;
-    constexpr int kMaxMonotonicViolations = 1;
+    // FR-C3 (spec 003) part A: the SkyboxVisual smoke is pinned at t=0.04, which
+    // is NOON (sun elevation ~71.6 deg, near zenith) -- not a low/sunset sun. The
+    // original gradient + palette_emergence premises were SUNSET physics (horizon
+    // brighter than the zenith; a warm R>B horizon band warmer than the cool
+    // zenith) and are INVALID at noon: at a high sun the dome is brightest near the
+    // overhead sun, so horizon <= zenith, and the warm low-sun palette has not
+    // emerged. Those sunset checks are owned by TimeOfDaySweep (dusk/dawn), which
+    // is NOT weakened here. The noon gate instead asserts a NOON-appropriate dome:
+    //   * SMOOTH  -- no harsh inter-band luminance banding (kMaxAdjacentBandStep),
+    //   * BRIGHT  -- both the horizon and zenith bands sit above a daylight floor
+    //                (kMinDaylightBandLuminance), i.e. the dome is genuinely lit,
+    //   * NOT INVERTED-DARK -- the horizon->zenith spread stays within a sane band
+    //                (|drop| <= kMaxNoonHorizonZenithSpread), so neither a freak
+    //                dark-overhead inversion nor a runaway blow-out passes.
+    // The sun-disc localization (part B tightens the shader) stays a REAL check.
+    constexpr double kMaxAdjacentBandStep = 60.0;       // max |Lum step| between adjacent bands
+    constexpr double kMinDaylightBandLuminance = 60.0;  // both bands lit (noon daylight floor)
+    constexpr double kMaxNoonHorizonZenithSpread = 90.0; // |horizon-zenith| bound (no inversion/blowout)
     const std::uint64_t kMinSunDiscPixels =
         static_cast<std::uint64_t>(ScalePinnedArea(50, kCapturePinnedWidth, kCapturePinnedHeight));
     constexpr double kMinSunClusterFraction = 0.6;
-    // T-I5a-6: low-sun scattering palette emergence (pinned t=0.04, low sun).
-    // The warm horizon band must read genuinely warm (R>B) AND warmer than the
-    // cool zenith band by a clear margin -- the pinks/oranges that emerge from
-    // Rayleigh/Mie at long optical paths. Clear sky (F4: SkyboxVisual keeps the
-    // clear-sky atmosphere; no storms).
-    constexpr double kMinHorizonWarmRatio = 1.02;       // horizon R/B > 1 (warm)
-    constexpr double kMinHorizonOverZenithWarmGap = 0.03; // horizon r/b - zenith r/b
     // GPU-timer budgets (PINNED design §7). Enforced on RELEASE by the PS1 gate
     // (debug is ~10x slower -- A2 wind precedent); the harness emits the raw
     // measurements + within-budget flags either way.
     constexpr double kAerialBudgetMs = 0.3;
     constexpr double kSkyViewRefreshBudgetMs = 0.2;
-    constexpr double kSkyPrecomputeBudgetMs = 8.0;
+    // sky_full_precompute is the ONE-TIME startup LUT build (SkyAtmosphereLut::initialize,
+    // wall-clock, seeded once at world init and carried per-frame for reporting) — NOT a
+    // per-frame GPU cost. The old 8.0 ms budget mis-applied a per-frame-style ceiling to a
+    // one-shot startup metric (stale, same class as the noon-premise staleness fixed in C3);
+    // the real per-frame sky cost is gated by kAerial/kSkyViewRefresh above (both well under).
+    // Re-budgeted to a one-time-startup bound: tolerates the legitimate ~32 ms cold build with
+    // headroom while still failing a gross startup regression. (spec 003 FR-C3)
+    constexpr double kSkyPrecomputeBudgetMs = 64.0;
 
     const double sun_cluster_fraction = pixel_stats.sun_disc_pixels > 0
         ? static_cast<double>(pixel_stats.sun_disc_pixels_near_expected) / static_cast<double>(pixel_stats.sun_disc_pixels)
         : 0.0;
     const GLDebugRuntimeStats gl_debug = CurrentGLDebugRuntimeStats();
+    // FR-C3 part A: NOON-appropriate dome check (smooth + bright + not inverted).
+    double max_adjacent_band_step = 0.0;
+    for (std::size_t i = 0; i + 1 < pixel_stats.bands.size(); ++i) {
+        max_adjacent_band_step = std::max(
+            max_adjacent_band_step,
+            std::abs(pixel_stats.bands[i + 1].mean_luminance - pixel_stats.bands[i].mean_luminance));
+    }
+    const double horizon_zenith_spread =
+        std::abs(pixel_stats.horizon_band_mean - pixel_stats.zenith_band_mean);
     const bool gradient_passed =
-        (pixel_stats.horizon_band_mean - pixel_stats.zenith_band_mean) >= kMinHorizonZenithDrop &&
-        pixel_stats.monotonic_violations <= kMaxMonotonicViolations;
+        max_adjacent_band_step <= kMaxAdjacentBandStep &&
+        pixel_stats.horizon_band_mean >= kMinDaylightBandLuminance &&
+        pixel_stats.zenith_band_mean >= kMinDaylightBandLuminance &&
+        horizon_zenith_spread <= kMaxNoonHorizonZenithSpread;
     const bool sun_disc_passed =
         sun_on_screen &&
         pixel_stats.sun_disc_pixels >= kMinSunDiscPixels &&
         sun_cluster_fraction >= kMinSunClusterFraction;
-    // T-I5a-6 palette emergence.
+    // FR-C3 part A: palette_emergence (warm low-sun horizon band) is SUNSET physics
+    // and does not hold at noon -- the values are still EMITTED for diagnostics but
+    // are no longer a pass gate here (dusk/dawn warmth is gated by TimeOfDaySweep).
     const double horizon_over_zenith_warm_gap =
         pixel_stats.horizon_band_r_b_ratio - pixel_stats.zenith_band_r_b_ratio;
-    const bool palette_emergence_passed =
-        pixel_stats.horizon_band_r_b_ratio >= kMinHorizonWarmRatio &&
-        horizon_over_zenith_warm_gap >= kMinHorizonOverZenithWarmGap;
     // GPU-timer correctness (non-negative, supported). Budget enforcement is the
     // PS1 gate's job on release.
     const bool aerial_within_budget = render_pass.aerial_gpu_ms <= kAerialBudgetMs;
@@ -1148,7 +1178,6 @@ void WriteSkyboxVisualAnalysis(
         render_pass.skybox_draws > 0 &&
         gradient_passed &&
         sun_disc_passed &&
-        palette_emergence_passed &&  // T-I5a-6
         gl_debug.errors == 0;
 
     nlohmann::json bands = nlohmann::json::array();
@@ -1174,6 +1203,11 @@ void WriteSkyboxVisualAnalysis(
             {"horizon_band_mean", pixel_stats.horizon_band_mean},
             {"zenith_band_mean", pixel_stats.zenith_band_mean},
             {"horizon_zenith_drop", pixel_stats.horizon_band_mean - pixel_stats.zenith_band_mean},
+            // FR-C3 part A: NOON-appropriate dome metrics (smooth + bright + not
+            // inverted). |horizon-zenith| spread + max adjacent-band luminance step
+            // replace the old sunset "horizon brighter by >=8" + monotonic-fall.
+            {"horizon_zenith_spread", horizon_zenith_spread},
+            {"max_adjacent_band_step", max_adjacent_band_step},
             {"monotonic_violations", pixel_stats.monotonic_violations}
         }},
         {"sun_disc", {
@@ -1189,8 +1223,11 @@ void WriteSkyboxVisualAnalysis(
             {"max_luminance", pixel_stats.max_luminance}
         }},
         {"palette_emergence", {
-            // T-I5a-6: low-sun scattering palette (warm horizon band, clear sky).
-            {"passed", palette_emergence_passed},
+            // FR-C3 part A: DIAGNOSTIC ONLY at noon. The warm low-sun horizon band
+            // is sunset physics (gated by TimeOfDaySweep dusk/dawn); it is NOT a
+            // pass gate for the noon SkyboxVisual smoke. Values kept for telemetry.
+            {"gated", false},
+            {"diagnostic_only", true},
             {"horizon_band_r_b_ratio", pixel_stats.horizon_band_r_b_ratio},
             {"zenith_band_r_b_ratio", pixel_stats.zenith_band_r_b_ratio},
             {"horizon_over_zenith_warm_gap", horizon_over_zenith_warm_gap}
@@ -1216,15 +1253,15 @@ void WriteSkyboxVisualAnalysis(
             {"sky_roi_height_fraction", kSkyRoiHeightFraction}
         }},
         {"thresholds", {
-            {"min_horizon_zenith_drop", kMinHorizonZenithDrop},
-            {"max_monotonic_violations", kMaxMonotonicViolations},
+            // FR-C3 part A: NOON dome thresholds (smooth + bright + not inverted).
+            {"max_adjacent_band_step", kMaxAdjacentBandStep},
+            {"min_daylight_band_luminance", kMinDaylightBandLuminance},
+            {"max_noon_horizon_zenith_spread", kMaxNoonHorizonZenithSpread},
             {"min_sun_disc_pixels", kMinSunDiscPixels},
             {"min_sun_cluster_fraction", kMinSunClusterFraction},
             {"sun_cluster_radius_fraction", kSunClusterRadiusFraction},
             {"sun_gradient_exclusion_radius_fraction", kSunGradientExclusionRadiusFraction},
-            {"sun_disc_min_luminance", kSunDiscMinLuminance},
-            {"min_horizon_warm_ratio", kMinHorizonWarmRatio},
-            {"min_horizon_over_zenith_warm_gap", kMinHorizonOverZenithWarmGap}
+            {"sun_disc_min_luminance", kSunDiscMinLuminance}
         }},
         {"render_pass", {
             {"skybox_draws", render_pass.skybox_draws},

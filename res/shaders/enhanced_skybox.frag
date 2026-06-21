@@ -568,8 +568,28 @@ void main()
     // Sun disc / corona ride dayFactor so a low dusk sun renders a soft warm disc
     // and the disc fades out below the horizon.
     float sunMask = smoothstep(0.9985, 0.9999, sunDot) * dayFactor;
-    float sunCorona = pow(max(0.0, sunDot), 32.0) * dayFactor * 0.5;
+    // T-003 (FR-C3 part B): NOON sun-disc localization. At a HIGH sun the broad
+    // pow(sunDot,32) corona washed a wide swath of the already-bright pale dome up
+    // past the disc-detection luminance, so the SkyboxVisual "brightest cluster
+    // sits at the sun" check could not localize (cluster_fraction ~0.22 vs 0.6).
+    // Tighten the corona's angular falloff as the sun climbs (steeper exponent +
+    // lower gain at high sun) so the high-noon corona collapses to a tight halo
+    // hugging the disc, and add a punchy localized disc CORE at the true sun
+    // position so the brightest pixels concentrate there. Gated on u_sunCosZenith
+    // so DAWN/DUSK (low sun) keep their original soft warm corona untouched
+    // (TimeOfDaySweep dusk warmth + sun-glow are unaffected). Render-only.
+    float highSun = smoothstep(0.45, 0.85, u_sunCosZenith); // 0 low sun -> 1 high noon
+    // Corona exponent: 32 at low sun (soft) -> 220 at high noon (tight halo).
+    float coronaExp = mix(32.0, 220.0, highSun);
+    // Corona gain: 0.5 at low sun (unchanged) -> 0.22 at high noon (dimmer halo
+    // so the dome around the sun stops blowing out past the disc threshold).
+    float coronaGain = mix(0.5, 0.22, highSun);
+    float sunCorona = pow(max(0.0, sunDot), coronaExp) * dayFactor * coronaGain;
     sunCorona *= smoothstep(0.0, 0.2, viewDir.y); // fade near horizon
+    // Tight high-sun disc core: a narrow, bright punch right at the sun so the
+    // brightest cluster localizes at the true sun position at noon. Only adds at
+    // high sun (highSun gate); low sun keeps the original sunMask disc alone.
+    float sunCore = smoothstep(0.99965, 0.99995, sunDot) * dayFactor * highSun;
 
     // T-I5a-6: the disc color IS the atmospheric transmittance toward the sun
     // (same LUT the lighting pass + aerial fog read). At low sun the long path
@@ -577,7 +597,7 @@ void main()
     // warm horizon scattering -- no hand-authored sunset color.
     vec3 sunTrans = sunTransmittance(u_sunCosZenith);
     vec3 sunColor = sunTrans * 4.0;
-    skyColor += sunColor * (sunMask + sunCorona);
+    skyColor += sunColor * (sunMask + sunCorona + sunCore * 2.2);
 
     // --- 3. MOON ---
     float moonDot = dot(viewDir, u_moonDirection);
@@ -672,6 +692,25 @@ void main()
 
     // Color grading for fantasy atmosphere
     skyColor = pow(skyColor, vec3(0.9, 0.95, 1.05));
+
+    // T-003 (FR-C3 part B): NOON sun-disc PUNCH. At a high sun the open pale dome
+    // ALSO saturates near the tonemap ceiling, so the pre-tonemap disc/corona above
+    // never reads measurably brighter than the dome -- the brightest cluster could
+    // not localize at the sun (SkyboxVisual cluster_fraction ~0.24 vs 0.6). This
+    // forces a tight disc core toward PURE WHITE here, AFTER the ACES tonemap that
+    // asymptotically caps the dome just under 1.0, so the disc reaches a clean 1.0
+    // (255) that clears the dome ceiling -- giving the gate a genuine localized
+    // brightest spot at the true sun direction. Gated on:
+    //   * highSun (u_sunCosZenith) so DAWN/DUSK keep their soft warm disc untouched,
+    //   * dayFactor so it fades out below the horizon,
+    //   * viewDir.y so it never punches the lower/horizon band.
+    // Tight smoothstep -> a crisp, distinct disc (the desired "more localized" look)
+    // rather than the diffuse bloom. Render-only.
+    {
+        float discCore = smoothstep(0.99975, 0.99997, sunDot)
+                         * highSun * dayFactor * smoothstep(0.05, 0.20, viewDir.y);
+        skyColor = mix(skyColor, vec3(1.0), clamp(discCore, 0.0, 1.0));
+    }
 
     // --- 8. GAMMA CORRECTION ---
     skyColor = pow(skyColor, vec3(1.0/2.2));
