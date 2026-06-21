@@ -329,7 +329,12 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
     if (auto* e = document->GetElementById("settings_btn")) AddClickSoundListener(e, [this](Rml::Event&){ this->RequestLoadDocument("settings.rml"); });
     if (auto* e = document->GetElementById("gallery_btn")) AddClickSoundListener(e, [this](Rml::Event&){ this->RequestLoadDocument("gallery.rml"); });
     if (auto* e = document->GetElementById("quit_btn")) AddClickSoundListener(e, [this](Rml::Event&){ glfwSetWindowShouldClose(this->m_window, true); });
-    if (auto* e = document->GetElementById("back_btn")) AddClickSoundListener(e, [this](Rml::Event&){ this->RequestLoadDocument("main_menu.rml"); });
+    if (auto* e = document->GetElementById("back_btn")) AddClickSoundListener(e, [this, document](Rml::Event&){
+        // Leaving settings persists the live-applied changes (sliders apply on change; the
+        // overlay is saved here since there's no explicit apply button in the new design).
+        if (document->GetId() == "settings" && m_settingsBridge.Save) m_settingsBridge.Save();
+        this->RequestLoadDocument("main_menu.rml");
+    });
     // Pause menu (pause.rml): route resume / quit-to-menu back to main_client (it owns cursor + state).
     if (auto* e = document->GetElementById("resume_btn")) AddClickSoundListener(e, [this](Rml::Event&){ if (m_pauseActionCallback) m_pauseActionCallback("resume"); });
     if (auto* e = document->GetElementById("quit_menu_btn")) AddClickSoundListener(e, [this](Rml::Event&){ if (m_pauseActionCallback) m_pauseActionCallback("quit"); });
@@ -391,6 +396,29 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
                 m_worldCreationCallback(name, seed, type);
             }
         });
+    }
+
+    // Landscape preset chips (world_creation): clicking a chip selects it and drives the hidden
+    // #world_type select that create_btn reads. (SetControlValue is defined later in this file,
+    // so set the control value inline here.)
+    {
+        Rml::ElementList chips;
+        document->GetElementsByClassName(chips, "preset-chip");
+        for (Rml::Element* chip : chips) {
+            AddClickSoundListener(chip, [this, document](Rml::Event& event) {
+                Rml::Element* c = event.GetTargetElement();
+                while (c && c->GetAttribute<Rml::String>("data-preset", "").empty()) c = c->GetParentNode();
+                if (!c) return;
+                Rml::ElementList all;
+                document->GetElementsByClassName(all, "preset-chip");
+                for (Rml::Element* x : all) x->SetClass("selected", false);
+                c->SetClass("selected", true);
+                const std::string preset = c->GetAttribute<Rml::String>("data-preset", "default");
+                if (auto* sel = document->GetElementById("world_type")) {
+                    if (auto* fc = dynamic_cast<Rml::ElementFormControl*>(sel)) fc->SetValue(preset);
+                }
+            });
+        }
     }
 }
 
@@ -467,6 +495,27 @@ void Rml_UIManager::PopulateSettingsForm(Rml::ElementDocument* document) {
         const float v = b.GetAudioMusic();
         SetControlValue(document->GetElementById("setting_audio_music"), FormatFloat(v, 2));
         SetValueLabel(document, "setting_audio_music_value", FormatPercent(v));
+    }
+
+    // Custom widgets mirror the hidden controls: vsync toggle .on state, window-mode stepper
+    // label, and each keybind chip filled from the live bindings.
+    if (b.GetVSync) {
+        if (auto* toggle = document->GetElementById("vsync_toggle")) toggle->SetClass("on", b.GetVSync());
+    }
+    if (b.GetWindowMode) {
+        if (auto* val = document->GetElementById("window_mode_value")) val->SetInnerRML(b.GetWindowMode());
+    }
+    if (b.GetKeybind) {
+        Rml::ElementList rows;
+        document->GetElementsByClassName(rows, "keybind-rebind");
+        for (Rml::Element* row : rows) {
+            const std::string action = row->GetAttribute<Rml::String>("data-action", "");
+            if (action.empty()) continue;
+            if (auto* chip = document->GetElementById("kb_" + action)) {
+                const std::string label = b.GetKeybind(action);
+                if (!label.empty()) chip->SetInnerRML(label);
+            }
+        }
     }
 }
 
@@ -553,6 +602,73 @@ void Rml_UIManager::BindSettingsListeners(Rml::ElementDocument* document) {
         }));
         apply->AddEventListener("mouseover", new LambdaEventListener([this](Rml::Event&) {
             if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_hover");
+        }));
+    }
+
+    // --- Custom widgets that drive the hidden form controls (settings apply live + persist) ---
+    auto persist = [this]() { if (m_settingsBridge.Save) m_settingsBridge.Save(); };
+
+    // vsync toggle: flip .on, mirror to hidden #setting_vsync, apply + save.
+    if (auto* toggle = document->GetElementById("vsync_toggle")) {
+        toggle->AddEventListener("click", new LambdaEventListener([this, document, persist](Rml::Event&) {
+            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click");
+            auto* t = document->GetElementById("vsync_toggle");
+            const bool now_on = !(t && t->IsClassSet("on"));
+            if (t) t->SetClass("on", now_on);
+            if (auto* sel = document->GetElementById("setting_vsync")) {
+                SetControlValue(sel, now_on ? "on" : "off");
+                this->ApplySettingFromElement(sel);
+            }
+            persist();
+        }));
+    }
+
+    // window-mode stepper: cycle windowed/borderless/fullscreen, mirror to hidden select.
+    auto cycle_window = [this, document, persist](int dir) {
+        static const char* kModes[] = {"windowed", "borderless", "fullscreen"};
+        auto* val = document->GetElementById("window_mode_value");
+        std::string cur = val ? val->GetInnerRML() : std::string("borderless");
+        int idx = 1;
+        for (int i = 0; i < 3; ++i) if (cur == kModes[i]) idx = i;
+        idx = (idx + dir + 3) % 3;
+        const std::string next = kModes[idx];
+        if (val) val->SetInnerRML(next);
+        if (auto* sel = document->GetElementById("setting_window_mode")) {
+            SetControlValue(sel, next);
+            this->ApplySettingFromElement(sel);
+        }
+        persist();
+    };
+    if (auto* prev = document->GetElementById("window_mode_prev")) {
+        prev->AddEventListener("click", new LambdaEventListener([this, cycle_window](Rml::Event&) {
+            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click");
+            cycle_window(-1);
+        }));
+    }
+    if (auto* next = document->GetElementById("window_mode_next")) {
+        next->AddEventListener("click", new LambdaEventListener([this, cycle_window](Rml::Event&) {
+            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click");
+            cycle_window(+1);
+        }));
+    }
+
+    // keybind rows: click to capture the next key as that action's binding (chip updates on the
+    // next settings open). Highlights the active row and shows a prompt.
+    Rml::ElementList kb_rows;
+    document->GetElementsByClassName(kb_rows, "keybind-rebind");
+    for (Rml::Element* row : kb_rows) {
+        row->AddEventListener("click", new LambdaEventListener([this, document](Rml::Event& ev) {
+            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click");
+            Rml::Element* r = ev.GetTargetElement();
+            while (r && r->GetAttribute<Rml::String>("data-action", "").empty()) r = r->GetParentNode();
+            if (!r) return;
+            const std::string action = r->GetAttribute<Rml::String>("data-action", "");
+            Rml::ElementList all;
+            document->GetElementsByClassName(all, "keybind-rebind");
+            for (Rml::Element* x : all) x->SetClass("selected", false);
+            r->SetClass("selected", true);
+            if (auto* chip = document->GetElementById("kb_" + action)) chip->SetInnerRML("press a key");
+            if (m_settingsBridge.BeginRebind) m_settingsBridge.BeginRebind(action);
         }));
     }
 }

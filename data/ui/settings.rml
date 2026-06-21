@@ -59,19 +59,19 @@
                                    min="0" max="1" step="0.01" value="1" class="form-control settings-slider" />
                         </div>
 
-                        <!-- vsync (visual toggle; wiring TODO: drive #setting_vsync) -->
+                        <!-- vsync toggle (drives hidden #setting_vsync via C++ handler) -->
                         <div class="form-group settings-row-inline">
                             <label>vsync</label>
-                            <span class="toggle on"><span class="toggle-knob"></span></span>
+                            <span class="toggle on" id="vsync_toggle"><span class="toggle-knob"></span></span>
                         </div>
 
-                        <!-- window mode (visual stepper; wiring TODO: drive #setting_window_mode) -->
+                        <!-- window mode stepper (drives hidden #setting_window_mode) -->
                         <div class="form-group settings-row-inline">
                             <label>window mode</label>
                             <span class="stepper">
-                                <span class="stepper-arrow">&#8249;</span>
-                                <span class="stepper-value">borderless</span>
-                                <span class="stepper-arrow">&#8250;</span>
+                                <span class="stepper-arrow" id="window_mode_prev">&#8249;</span>
+                                <span class="stepper-value" id="window_mode_value">borderless</span>
+                                <span class="stepper-arrow" id="window_mode_next">&#8250;</span>
                             </span>
                         </div>
                     </div>
@@ -80,30 +80,32 @@
                     <div class="settings-column settings-section">
                         <h2 class="settings-heading">controls</h2>
 
-                        <!-- Keybind rows are decorative for now; wiring TODO. -->
-                        <div class="keybind-row selected">
-                            <span class="keybind-label">take photo</span>
-                            <span class="keybind-chip">F</span>
+                        <!-- Keybind rows bound to real input actions; click a row to rebind
+                             (the next key press is captured). Chips are filled from the current
+                             bindings on load. -->
+                        <div class="keybind-row keybind-rebind" data-action="TogglePhotoMode">
+                            <span class="keybind-label">photo mode</span>
+                            <span class="keybind-chip" id="kb_TogglePhotoMode">P</span>
                         </div>
-                        <div class="keybind-row">
-                            <span class="keybind-label">focus</span>
-                            <span class="keybind-chip">R</span>
+                        <div class="keybind-row keybind-rebind" data-action="Shutter">
+                            <span class="keybind-label">shutter</span>
+                            <span class="keybind-chip" id="kb_Shutter">Enter</span>
                         </div>
-                        <div class="keybind-row">
-                            <span class="keybind-label">zoom</span>
-                            <span class="keybind-chip">scroll</span>
+                        <div class="keybind-row keybind-rebind" data-action="MoveForward">
+                            <span class="keybind-label">move forward</span>
+                            <span class="keybind-chip" id="kb_MoveForward">W</span>
                         </div>
-                        <div class="keybind-row">
-                            <span class="keybind-label">journal</span>
-                            <span class="keybind-chip">J</span>
+                        <div class="keybind-row keybind-rebind" data-action="MoveBack">
+                            <span class="keybind-label">move back</span>
+                            <span class="keybind-chip" id="kb_MoveBack">S</span>
                         </div>
-                        <div class="keybind-row">
-                            <span class="keybind-label">map</span>
-                            <span class="keybind-chip">M</span>
+                        <div class="keybind-row keybind-rebind" data-action="Jump">
+                            <span class="keybind-label">jump</span>
+                            <span class="keybind-chip" id="kb_Jump">Space</span>
                         </div>
-                        <div class="keybind-row">
-                            <span class="keybind-label">pause</span>
-                            <span class="keybind-chip">Esc</span>
+                        <div class="keybind-row keybind-rebind" data-action="Sprint">
+                            <span class="keybind-label">sprint</span>
+                            <span class="keybind-chip" id="kb_Sprint">Shift</span>
                         </div>
                     </div>
                 </div>

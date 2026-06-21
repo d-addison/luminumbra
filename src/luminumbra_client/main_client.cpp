@@ -98,6 +98,31 @@ bool g_show_settings = false;
 bool g_paused = false;  // T032: in-game pause overlay active
 bool g_show_gpu_profiler = false;  // F3: live per-pass GPU profiler overlay
 int g_rebindCaptureAction = -1;
+
+// Short human label for a GLFW key code (for the settings controls list). Printable keys use
+// glfwGetKeyName; special keys are named explicitly.
+static std::string KeyDisplayLabel(int key) {
+    switch (key) {
+        case GLFW_KEY_SPACE: return "Space";
+        case GLFW_KEY_ENTER: return "Enter";
+        case GLFW_KEY_LEFT_SHIFT: case GLFW_KEY_RIGHT_SHIFT: return "Shift";
+        case GLFW_KEY_LEFT_CONTROL: case GLFW_KEY_RIGHT_CONTROL: return "Ctrl";
+        case GLFW_KEY_LEFT_ALT: case GLFW_KEY_RIGHT_ALT: return "Alt";
+        case GLFW_KEY_ESCAPE: return "Esc";
+        case GLFW_KEY_TAB: return "Tab";
+        case GLFW_KEY_LEFT_BRACKET: return "[";
+        case GLFW_KEY_RIGHT_BRACKET: return "]";
+        case GLFW_KEY_EQUAL: return "=";
+        case GLFW_KEY_MINUS: return "-";
+        default: break;
+    }
+    if (const char* n = glfwGetKeyName(key, 0); n && n[0]) {
+        std::string s(n);
+        for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        return s;
+    }
+    return "?";
+}
 // host_timescale-style engine time control (Source/GMod-like). 1.0 = real time, 0 = paused,
 // <1 slow-mo, >1 fast-forward. Render/client playback rate: scales how many FIXED 30 Hz sim
 // ticks run per real frame, NOT the tick dt — so determinism + run==replay hold (tick sequence
@@ -2400,6 +2425,22 @@ int main(int argc, char* argv[]) {
         sb.SetAudioSfx = [](float v) { g_systemConfig.user().audio_sfx = v; };
         sb.GetAudioMusic = [] { return g_systemConfig.user().audio_music; };
         sb.SetAudioMusic = [](float v) { g_systemConfig.user().audio_music = v; };
+        // Controls: resolve the current binding label, and begin capturing the next key press
+        // as a rebind (the existing key_callback applies it into user().keybinds[action]).
+        sb.GetKeybind = [](const std::string& action) -> std::string {
+            for (const auto& def : Luminumbra::Client::kInputActionDefs) {
+                if (action == def.name) return KeyDisplayLabel(g_systemConfig.keybind(def.name, def.default_key));
+            }
+            return "";
+        };
+        sb.BeginRebind = [](const std::string& action) {
+            for (std::size_t i = 0; i < Luminumbra::Client::kInputActionDefs.size(); ++i) {
+                if (action == Luminumbra::Client::kInputActionDefs[i].name) {
+                    g_rebindCaptureAction = static_cast<int>(i);
+                    return;
+                }
+            }
+        };
         sb.Save = [] {
             return g_systemConfig.SaveUserOverlay(
                 luminumbra::core::SystemConfig::DefaultUserOverlayPath());
@@ -4175,7 +4216,7 @@ int main(int argc, char* argv[]) {
                         // the frand() stream simply continues after the trees, so the layout
                         // stays deterministic + reproducible.
                         BuildProcgenRockPalette(renderPipeline);
-                        if (g_rockPaletteCount > 0) {
+                        if (g_rockPaletteCount > 0 && std::getenv("LUMIN_NO_ROCKS") == nullptr) {
                             const float rReach = 900.0f;   // metres from spawn anchor
                             const float rCell = 19.0f;     // grid pitch
                             const float rHS = 3.0f;        // slope probe radius

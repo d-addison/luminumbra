@@ -38,12 +38,12 @@
                     <div class="form-group">
                         <label>landscape preset</label>
                         <div class="preset-row">
-                            <span class="preset-chip selected">hills</span>
-                            <span class="preset-chip">lake</span>
-                            <span class="preset-chip">mons</span>
-                            <span class="preset-chip">forest</span>
+                            <span class="preset-chip selected" data-preset="default">hills</span>
+                            <span class="preset-chip" data-preset="archipelago">lake</span>
+                            <span class="preset-chip" data-preset="mountains">mons</span>
+                            <span class="preset-chip" data-preset="temperate_forest">forest</span>
                         </div>
-                        <!-- chips are decorative for now; wiring TODO: drive #world_type -->
+                        <!-- chips drive the hidden #world_type select via a C++ click handler. -->
                         <select id="world_type" name="world_type" class="form-control hidden">
                             <option value="default">Default Terrain</option>
                             <option value="archipelago">Archipelago</option>

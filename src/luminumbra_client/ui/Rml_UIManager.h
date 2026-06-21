@@ -45,6 +45,10 @@ struct SettingsBridge {
     std::function<void(float)> SetAudioSfx;
     std::function<float()> GetAudioMusic;
     std::function<void(float)> SetAudioMusic;
+    // Controls: current binding label for a logical action (e.g. "MoveForward" -> "W"), and a
+    // request to capture the next key press as that action's new binding. Optional/skippable.
+    std::function<std::string(const std::string&)> GetKeybind;
+    std::function<void(const std::string&)> BeginRebind;
     // Persist the user overlay (returns true on success).
     std::function<bool()> Save;
 };
