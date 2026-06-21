@@ -53,6 +53,8 @@ struct TerrainBiomesPreset {
     std::string resolved_table_path; // absolute path handed to TerrainGenParams
     float temperature_frequency = 0.005f;
     float humidity_frequency = 0.005f;
+    bool relief_enabled = false;        // slice 3: temperature-driven ridge scaling
+    float relief_strength = 0.45f;
 };
 
 // generation_params.features flags beyond the cave params consumed through

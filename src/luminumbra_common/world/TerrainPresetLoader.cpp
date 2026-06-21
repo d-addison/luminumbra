@@ -117,6 +117,8 @@ void ParseBiomesBlock(const nlohmann::json& gen_params,
     biomes.present = true;
     biomes.temperature_frequency = block.value("temperature_frequency", biomes.temperature_frequency);
     biomes.humidity_frequency = block.value("humidity_frequency", biomes.humidity_frequency);
+    biomes.relief_enabled = block.value("relief_enabled", biomes.relief_enabled);
+    biomes.relief_strength = block.value("relief_strength", biomes.relief_strength);
     biomes.table = block.value("table", std::string{});
     biomes.enabled = !biomes.table.empty();
     if (biomes.enabled) {
@@ -130,7 +132,8 @@ void ParseBiomesBlock(const nlohmann::json& gen_params,
         biomes.resolved_table_path = (data_root / biomes.table).lexically_normal().string();
     }
     WarnUnknownKeys(block, "generation_params.biomes",
-                    {"temperature_frequency", "humidity_frequency", "table"},
+                    {"temperature_frequency", "humidity_frequency", "table",
+                     "relief_enabled", "relief_strength"},
                     preset_path, warnings);
 }
 
@@ -306,6 +309,8 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
         params.biome_table_path = biomes.resolved_table_path;
         params.temperature_frequency = biomes.temperature_frequency;
         params.humidity_frequency = biomes.humidity_frequency;
+        params.biome_relief_enabled = biomes.relief_enabled;
+        params.biome_relief_strength = biomes.relief_strength;
     }
     // Features river/structure flags: rivers (T-I4-3) and structures (T-I4-4)
     // are CONSUMED when the preset opts in; an absent flag keeps the feature off

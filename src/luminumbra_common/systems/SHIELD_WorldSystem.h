@@ -78,6 +78,14 @@ struct TerrainGenParams {
     std::string biome_table_path;
     float temperature_frequency = 0.005f;
     float humidity_frequency = 0.005f;
+    // Per-biome morphology (slice 3): when enabled, the peaks/ridge term is scaled
+    // by the (continuous) temperature field — cold/alpine ground gets taller, more
+    // rugged peaks; warm lowlands stay gentler — so biomes differ in SHAPE, not
+    // just material. Smooth (climate noise is continuous) so there are no seams,
+    // and it only touches the ridge term (base relief unchanged) to keep the
+    // hypsometric/spectral realism gate in band. Disabled -> byte-zero drift.
+    bool biome_relief_enabled = false;
+    float biome_relief_strength = 0.45f; // ridge scale span: warm *(1-s) .. cold *(1+s)
 
     // --- T-I4-3 PV-band rivers (default-off) ---
     // Chunk-local river carve on the +10 ridged noise (seed registry). The

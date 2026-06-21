@@ -110,6 +110,11 @@ u64 ComputeTerrainParamsHash(const Systems::TerrainGenParams& params, int seed) 
         FnvMixValue(hash, params.lake_depth);
         FnvMixValue(hash, params.lake_max_carve);
     }
+    // Slice 3: per-biome relief modulation (only when enabled).
+    if (params.biome_relief_enabled) {
+        FnvMixValue(hash, static_cast<u8>(5));
+        FnvMixValue(hash, params.biome_relief_strength);
+    }
     // T-I4-4: mix the structure template content hash ONLY when structures are
     // enabled, so structure presets' pristine far tiles invalidate on a template
     // change while non-structure worlds keep byte-identical far-tile cache keys.

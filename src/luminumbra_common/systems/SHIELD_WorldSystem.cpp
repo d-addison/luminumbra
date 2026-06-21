@@ -442,6 +442,18 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
         const float erosion_01 = std::clamp((erosion + 1.0f) * 0.5f, 0.0f, 1.0f);
         ridge = EvaluateShapingSpline(m_params.peaks_spline, peaks_valleys, 0.0f)
             * m_params.peaks_amplitude * std::max(0.0f, 1.0f - erosion_01);
+
+        // Slice 3 per-biome morphology: scale the ridge by the (continuous)
+        // temperature field — cold ground (alpine) gets taller/rugged peaks, warm
+        // lowlands gentler. Only the ridge term; smooth so no seams. Byte-identical
+        // to the batched path in ComputeShapedHeightGrid.
+        if (m_params.biome_relief_enabled && m_temperature_generator) {
+            const float temp = m_temperature_generator->GenSingle2D(
+                world_x * m_params.temperature_frequency,
+                world_z * m_params.temperature_frequency, m_seed + 8);
+            const float cold01 = std::clamp(0.5f - 0.5f * temp, 0.0f, 1.0f);
+            ridge *= 1.0f + m_params.biome_relief_strength * (2.0f * cold01 - 1.0f);
+        }
     }
 
     sample.base_noise = m_terrain_generator->GenSingle2D(
@@ -813,8 +825,19 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
             const float amplitude_multiplier =
                 EvaluateShapingSpline(m_params.erosion_spline, erosion, 1.0f);
             const float erosion_01 = std::clamp((erosion + 1.0f) * 0.5f, 0.0f, 1.0f);
-            const float ridge = EvaluateShapingSpline(m_params.peaks_spline, peaks_valleys, 0.0f)
+            float ridge = EvaluateShapingSpline(m_params.peaks_spline, peaks_valleys, 0.0f)
                 * m_params.peaks_amplitude * std::max(0.0f, 1.0f - erosion_01);
+
+            // Slice 3 per-biome morphology — byte-identical to ComputeShapedHeightSampleImpl.
+            if (m_params.biome_relief_enabled && m_temperature_generator) {
+                const float world_x = static_cast<float>(base_x + x);
+                const float world_z = static_cast<float>(base_z + z);
+                const float temp = m_temperature_generator->GenSingle2D(
+                    world_x * m_params.temperature_frequency,
+                    world_z * m_params.temperature_frequency, m_seed + 8);
+                const float cold01 = std::clamp(0.5f - 0.5f * temp, 0.0f, 1.0f);
+                ridge *= 1.0f + m_params.biome_relief_strength * (2.0f * cold01 - 1.0f);
+            }
 
             float terrain_height = m_params.height_offset + base_level
                 + amplitude_multiplier * (base_noise[i] * m_params.base_amplitude)
