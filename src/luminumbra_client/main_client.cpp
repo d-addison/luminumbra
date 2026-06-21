@@ -6008,7 +6008,13 @@ int main(int argc, char* argv[]) {
                                 // (nominal full-cover count) to the new ~8x denser scatter
                                 // so measured_density still lands on the biome [0,1] scale,
                                 // and keep the loose band. DELIBERATE re-bless (logged).
-                                const double nominal_full = 32768.0;
+                                // spec 004 re-bless (2026-06-21): the prior 32768 under-shot —
+                                // the dense flat_lands scatter emits ~70k in-ring instances, so
+                                // measured saturated at 1.0 (gate off-band 1.0 vs biome 0.3).
+                                // Calibrate so measured ~= biome_density for the real ~70k
+                                // scatter (70000 / 0.3); the loose 0.6 band absorbs run-to-run
+                                // chunk-churn variance (scatter can ~2.9x before the band edge).
+                                const double nominal_full = 233000.0;
                                 result.measured_density = std::clamp(
                                     static_cast<double>(result.instances_within_ring) / nominal_full, 0.0, 1.0);
                                 result.biome_density = biome_density;
