@@ -654,8 +654,10 @@ public:
         // opacity is 1/density. Higher = thicker/closer haze (dramatic); lower =
         // crisp far view (Distant-Horizons-like).
         float aerial_density = 0.0016f;
-        // Distance clamp for the fog term (m); the far-field extends this.
-        float aerial_max_distance = 1600.0f;
+        // Distance clamp for the fog term (m); matches the extended far horizon
+        // (kF2OuterRangeMeters ~3000 m) so far terrain hazes fully into the sky
+        // before the render edge instead of stopping short as a dark band.
+        float aerial_max_distance = 3000.0f;
         // HDR scale of the shared sky in-scatter colour composited as haze.
         float inscatter_strength = 60.0f;
         // 0 = raw sky-view hue (bluer, crisp/aerial), 1 = fully warmed land veil

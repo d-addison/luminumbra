@@ -44,8 +44,10 @@ class FarLodSystem {
 public:
     // Pinned numbers (design-decisions.md section 4).
     static constexpr float kF1OuterRangeMeters = 768.0f;
-    static constexpr float kF2OuterRangeMeters = 1536.0f;
-    static constexpr std::size_t kResidentBudgetBytes = 128ull * 1024ull * 1024ull;
+    // Extended far horizon (playtest: no visible render edge from mountaintops).
+    // F2 streams to ~3000 m; the camera FAR_PLANE (3200 m) clears it + margin.
+    static constexpr float kF2OuterRangeMeters = 3000.0f;
+    static constexpr std::size_t kResidentBudgetBytes = 384ull * 1024ull * 1024ull;
     // Live chunk ring horizontal reach (RENDER_DISTANCE chunks): regions
     // fully inside this disc are owned by live chunks and never drawn far.
     static constexpr float kLiveRingRadiusMeters = 512.0f;
@@ -62,7 +64,7 @@ public:
     // frustum-edge corner rasterized as the horizon sky-sliver (a tall thin
     // terrain streak crossing into the sky). Clipping just inside removes them
     // with no visible loss - nothing past the 1000 m far plane was drawable.
-    static constexpr float kFarClipOuterRadiusMeters = 950.0f;
+    static constexpr float kFarClipOuterRadiusMeters = 3050.0f;
     // Far meshes sit slightly below the live surface so live geometry always
     // wins where the two coincide (quantization can lift far samples at most
     // 1/32 m above the analytic surface).
