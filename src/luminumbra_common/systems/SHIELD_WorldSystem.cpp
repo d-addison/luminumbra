@@ -726,7 +726,21 @@ float SHIELD_WorldSystem::GetTerrainHeightAtCoarse(
             carve_sum += RiverCarveAmount(h, RiverInfluenceFromNoise(sx, sz));
         }
     }
-    return h - carve_sum / 9.0f;
+    float result = h - carve_sum / 9.0f;
+    // Slice 5 far-field fidelity: the coarse reconstruction (pre_carve + river
+    // stencil) otherwise MISSES the lake carve and hydro offset that the near path
+    // applies after pre_carve_height, so lakes + drainage relief would pop in at
+    // the LOD seam and far terrain would disagree with near. Apply them here too
+    // (point samples; lakes/hydro are smooth/low-frequency so no stencil needed),
+    // matching ComputeShapedHeightSampleImpl. Render-only: this sampler feeds the
+    // coarse/far-LOD mesh + far tiles (never hashed), so world_hash is unchanged.
+    if (m_params.lakes_enabled) {
+        result -= LakeCarveAmount(result, LakeInfluenceFromNoise(world_x, world_z));
+    }
+    if (m_params.hydro_enabled) {
+        result += SampleHydroOffsetMeters(world_x, world_z);
+    }
+    return result;
 }
 
 float SHIELD_WorldSystem::ComputeShapedHeight(float world_x, float world_z) const {
