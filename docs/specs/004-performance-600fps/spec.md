@@ -6,6 +6,27 @@
 > (gate/re-pin discipline). Shared files `main_client.cpp`, `TerrainPresetLoader.*` are co-edited by
 > the create-world dev (spec 002) — **additive seams only**.
 
+## ⚠ MEASURED REALITY (2026-06-21, Phase 0/1) — RE-SCOPE IN PROGRESS
+Phase 0's honest profiling **invalidated the premise below** (inherited from spec 003 C2). On the
+forest-dense pose the frame is CPU-bound, but the cost is NOT static-prop submission. Full breakdown
+(release, dense pose; commits 205fda28 / ba1c43b1 / a45605fd):
+
+```
+cpu_submit ~22-29 ms  =  streaming 8-11 ms        (WorldSystem::update — deterministic)
+                      +  foliage_rebuild ~5.3 ms  (FoliagePass readback stall @ FoliagePass.cpp:641 — render-only)
+                      +  unattributed ~5 ms        (glfwPollEvents / scenario harness / chunk_scatter build)
+                      +  render_frame ~2-3 ms      (static_prop submit only ~0.7-1.0 ms!)
+                      +  sim 0.14 ms | ui_render 0.08 ms  (negligible)
+```
+
+**The GPU-driven static-prop rewrite (FR-R1..R3, R7 below) saves <1 ms — it is NOT the bottleneck.**
+Real ≤1.67 ms path = streaming + foliage-readback + poll/scenario. Owner (2026-06-21): localize the
+14 ms first (DONE), allow a batched re-pin for streaming if needed. **Re-scoped attack order:**
+(1) foliage rebuild readback stall (render-only, safe); (2) streaming WorldSystem::update; (3) the
+unattributed poll/scenario. FR-R0/R1 (measurement + prop cache + capacity fix) already LANDED and are
+kept. The sections below are the ORIGINAL plan — retained for history; treat FR-R2/R3/R7 as low-priority
+fidelity/scale items, not perf levers. See `plan.md` Session Log for the live re-scope.
+
 ## Context
 luminumbra renders a vast Battlefield-1/Frostbite-floor voxel forest at ~256 fps (~3.9 ms) at
 3840×1600 on the RTX 5070 Ti. Spec 003's C2 work measured the frame is **CPU/present-bound, not
