@@ -28,27 +28,27 @@ body#main_menu {
 }
 
 body#main_menu .container {
-    padding-top: 13%;
+    padding-top: 18%;
 }
 
 /* ---- Title / hero ---- */
 h1 {
-    font-size: 88px;
+    font-size: 96px;
     text-align: center;
     color: #F6F1E8;
     font-weight: normal;
-    letter-spacing: 18px;
+    letter-spacing: 22px;
     margin-top: 8px;
-    margin-bottom: 6px;
+    margin-bottom: 10px;
 }
 
 p.subtitle {
     text-align: center;
     font-style: italic;
     color: #C9B89A;
-    font-size: 16px;
-    letter-spacing: 4px;
-    margin-bottom: 28px;
+    font-size: 17px;
+    letter-spacing: 5px;
+    margin-bottom: 32px;
 }
 
 /* Shared title ornaments (used across settings / world pages). */
@@ -71,23 +71,23 @@ p.subtitle {
 /* ---- Main-menu navigation ---- */
 div#nav {
     text-align: center;
-    width: 300px;
+    width: 360px;
     margin-left: auto;
     margin-right: auto;
 }
 
 /* Base button: a frosted pill — translucent warm fill, dusk-gold hairline, blur. */
 button {
-    height: 52px;
-    line-height: 50px;          /* vertically centre the single-line label */
+    height: 58px;
+    line-height: 56px;          /* vertically centre the single-line label */
     padding-left: 28px;
     padding-right: 28px;
-    background-color: rgba(36, 30, 22, 90);
+    background-color: rgba(34, 28, 20, 140);
     border-width: 1px;
-    border-color: rgba(201, 168, 106, 70);
+    border-color: rgba(201, 168, 106, 110);
     border-radius: 26px;
     color: #EDE5D6;
-    font-size: 18px;
+    font-size: 20px;
     font-weight: normal;
     font-family: Lora;
     text-align: center;
@@ -111,11 +111,11 @@ button:active {
 /* Main-menu navigation: the big stacked, centered frosted pills. */
 #nav button {
     display: block;
-    width: 300px;
-    margin-bottom: 14px;
+    width: 360px;
+    margin-bottom: 16px;
     margin-left: auto;
     margin-right: auto;
-    letter-spacing: 3px;
+    letter-spacing: 4px;
 }
 
 /* Small inline buttons — the filter row in Load World. */
@@ -158,24 +158,33 @@ button:active {
     overflow: visible;
 }
 
+/* body#settings layout — flex-centre the panel. */
+body#settings {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+}
+
 /* body#settings header */
 body#settings h1 {
-    font-size: 34px;
-    letter-spacing: 14px;
-    color: rgba(242, 237, 228, 200);
+    font-size: 42px;
+    letter-spacing: 16px;
+    color: #F2EDE4;
     font-weight: normal;
-    margin: 10px 0 6px;
+    margin: 0 0 6px 0;
     text-align: center;
 }
 
 /* One frosted panel containing both columns. */
 .settings-panel {
-    width: 900px;
-    margin: 18px auto 0;
-    padding: 40px 48px 28px;
+    width: 1080px;
+    max-width: 76%;
+    margin: 0 auto;
+    padding: 48px 64px 40px;
     text-align: left;
-    background-color: rgba(28, 24, 18, 110);
-    backdrop-filter: blur(18px);
+    background-color: rgba(24, 20, 15, 150);
+    backdrop-filter: blur(22px);
     border-width: 1px;
     border-color: rgba(242, 237, 228, 28);
     box-shadow: 0px 18px 60px rgba(0, 0, 0, 120);
@@ -206,7 +215,7 @@ h2 {
 
 h2.settings-heading {
     font-size: 15px;
-    color: rgba(201, 184, 154, 150);
+    color: rgba(206, 189, 158, 210);
     font-weight: normal;
     letter-spacing: 4px;
     margin-bottom: 22px;
@@ -216,20 +225,20 @@ h2.settings-heading {
 
 .settings-row {
     display: block;
-    margin-bottom: 18px;
+    margin-bottom: 22px;
 }
 
 .settings-row label {
     display: block;
-    color: rgba(216, 207, 188, 140);
-    font-size: 15px;
+    color: rgba(224, 215, 198, 200);
+    font-size: 16px;
     margin-bottom: 8px;
     letter-spacing: 1px;
 }
 
 .settings-value {
     color: #C9A86A;
-    font-size: 14px;
+    font-size: 15px;
     float: right;
 }
 
@@ -243,8 +252,8 @@ h2.settings-heading {
 }
 .settings-row-inline label {
     display: block;
-    color: rgba(216, 207, 188, 140);
-    font-size: 15px;
+    color: rgba(224, 215, 198, 200);
+    font-size: 16px;
     letter-spacing: 1px;
     margin-bottom: 0;
 }
@@ -305,7 +314,7 @@ h2.settings-heading {
 }
 .keybind-row:hover { background-color: rgba(242, 237, 228, 18); }
 .keybind-label {
-    color: rgba(216, 207, 188, 150);
+    color: rgba(224, 215, 198, 200);
     font-size: 15px;
     letter-spacing: 1px;
 }
@@ -368,10 +377,10 @@ select.form-control option {
 }
 
 input.settings-slider slidertrack {
-    background-color: rgba(242, 237, 228, 45);
+    background-color: rgba(242, 237, 228, 70);
     border-width: 0;
-    height: 3px;
-    margin-top: 11px;
+    height: 4px;
+    margin-top: 10px;
 }
 
 input.settings-slider sliderbar {
@@ -584,13 +593,13 @@ body#world_creation {
 }
 
 .creation-panel {
-    width: 62%;
-    max-width: 880px;
+    width: 64%;
+    max-width: 960px;
     margin: 0 auto;
-    padding: 40px 64px 44px;
+    padding: 48px 72px 52px;
     text-align: center;
-    background-color: rgba(22, 19, 14, 90);
-    backdrop-filter: blur(18px);
+    background-color: rgba(22, 19, 14, 140);
+    backdrop-filter: blur(22px);
     border-width: 1px;
     border-color: rgba(242, 237, 228, 28);
     box-shadow: 0px 24px 70px rgba(8, 6, 4, 150);
@@ -598,8 +607,8 @@ body#world_creation {
 }
 
 #world_creation h1 {
-    font-size: 30px;
-    letter-spacing: 12px;
+    font-size: 40px;
+    letter-spacing: 14px;
     color: #EDE6D8;
     margin: 4px 0 6px;
 }
@@ -611,10 +620,14 @@ body#world_creation {
     text-align: left;
 }
 
+#world_creation .form-group {
+    margin-bottom: 28px;
+}
+
 #world_creation .form-group label {
     display: block;
-    color: #9A917C;
-    font-size: 12px;
+    color: #C3B9A2;
+    font-size: 13px;
     letter-spacing: 3px;
     margin-bottom: 8px;
 }
@@ -624,7 +637,7 @@ body#world_creation {
     background-color: transparent;
     border-width: 0;
     border-bottom-width: 1px;
-    border-bottom-color: rgba(242, 237, 228, 45);
+    border-bottom-color: rgba(242, 237, 228, 70);
     height: 34px;
     font-size: 18px;
     padding: 0;
@@ -641,14 +654,14 @@ body#world_creation {
 }
 .preset-chip {
     flex: 1 1 0;
-    height: 38px;
-    line-height: 36px;
+    height: 42px;
+    line-height: 40px;
     margin-right: 10px;
-    background-color: rgba(20, 17, 11, 70);
+    background-color: rgba(20, 17, 11, 110);
     border-width: 1px;
     border-color: rgba(242, 237, 228, 38);
     color: #C9C0AE;
-    font-size: 14px;
+    font-size: 15px;
     letter-spacing: 2px;
     text-align: center;
 }
@@ -665,11 +678,11 @@ body#world_creation {
 
 #world_creation #create_btn {
     display: block;
-    width: 60%;
-    max-width: 360px;
+    width: 64%;
+    max-width: 400px;
     margin: 0 auto;
-    height: 44px;
-    line-height: 42px;
+    height: 48px;
+    line-height: 46px;
     background-color: rgba(20, 17, 11, 110);
     border-width: 1px;
     border-color: rgba(242, 237, 228, 55);

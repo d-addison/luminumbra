@@ -41,21 +41,21 @@
                 <!-- World list items (dynamically populated) -->
                 <div id="world_list_items" class="cards-row">
                     <div class="list-item selected" data-world-id="world_1661381313_1234">
-                        <div class="world-thumbnail"></div>
+                        <img class="world-thumbnail" src="thumbs/thumb_0.tga"/>
                         <h3 class="list-item-title">luminecoast</h3>
                         <p class="list-item-description">42 days &#183; 318 captures &#183; default</p>
                         <div class="select-dot"></div>
                     </div>
 
                     <div class="list-item" data-world-id="world_1661381599_5678">
-                        <div class="world-thumbnail"></div>
+                        <img class="world-thumbnail" src="thumbs/thumb_2.tga"/>
                         <h3 class="list-item-title">vellumvalley</h3>
                         <p class="list-item-description">18 days &#183; 127 captures &#183; valley</p>
                         <div class="select-dot"></div>
                     </div>
 
                     <div class="list-item" data-world-id="world_1661381742_9012">
-                        <div class="world-thumbnail"></div>
+                        <img class="world-thumbnail" src="thumbs/thumb_5.tga"/>
                         <h3 class="list-item-title">niveuspeak</h3>
                         <p class="list-item-description">7 days &#183; 64 captures &#183; alpine</p>
                         <div class="select-dot"></div>

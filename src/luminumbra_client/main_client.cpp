@@ -162,6 +162,12 @@ int g_ui_screenshot_settle = 0;              // frames waited before capture of 
 // under the transparent UI with a slow auto-orbit. Replaced cleanly when a real world loads.
 bool g_menu_backdrop_active = false;
 float g_menu_backdrop_yaw = 30.0f;           // orbit accumulator (degrees)
+// F5 — thumbnail generation: capture N clean (no-UI) backdrop frames at varied yaw/time-of-day
+// in one window session, for use as world-select + gallery photo thumbnails. --ui-thumbs N.
+int g_ui_thumbs = 0;                          // 0 = off; else number of thumbnails to capture
+std::filesystem::path g_ui_thumbs_dir;        // output dir; each -> thumb_<i>.ppm
+int g_ui_thumbs_index = 0;
+int g_ui_thumbs_settle = 0;
 bool g_timelapse_grow = false;     // grow the procgen plants sapling->tree over the capture
 bool g_timelapse_season = false;   // drift summer->autumn leaf color over the capture
 bool g_timelapse_creatures = false; // spawn predators/prey + render markers (ecology demo)
@@ -1980,6 +1986,16 @@ int main(int argc, char* argv[]) {
         if (!g_ui_screens.empty()) g_ui_screenshot_screen = g_ui_screens.front();
         LUMINUMBRA_CORE_INFO("UI screenshot mode: {} screen(s), fixtures={} -> {}/ui-*.ppm",
                              g_ui_screens.size(), g_ui_fixtures, g_ui_screenshot_dir.string());
+    }
+
+    // --ui-thumbs N [--ui-thumbs-dir d]: capture N clean landscape thumbnails from the menu
+    // backdrop world (varied yaw + time-of-day), one window session. For world/gallery tiles.
+    if (const int n = GetCommandLineIntOption(argc, argv, "--ui-thumbs", 0); n > 0) {
+        g_ui_thumbs = n;
+        g_ui_thumbs_dir = GetCommandLineOption(argc, argv, "--ui-thumbs-dir", "data/ui/thumbs");
+        std::error_code _t_ec;
+        std::filesystem::create_directories(g_ui_thumbs_dir, _t_ec);
+        LUMINUMBRA_CORE_INFO("UI thumbnail mode: {} thumbs -> {}/thumb_*.ppm", g_ui_thumbs, g_ui_thumbs_dir.string());
     }
 
     // --timelapse capture mode (docs/timelapse.md). Single-player; pair with
@@ -6162,6 +6178,36 @@ int main(int argc, char* argv[]) {
                             glfwSetWindowShouldClose(window, true);
                         }
                     }
+                }
+            } else if (g_ui_thumbs > 0 && g_menu_backdrop_active && g_camera && gameSession &&
+                       gameSession->GetWorldSystem() && g_ui_thumbs_index < g_ui_thumbs) {
+                // F5: capture N clean landscape thumbnails (no UI) at varied yaw + time-of-day.
+                const float yaw = 40.0f + static_cast<float>(g_ui_thumbs_index) * 47.0f;
+                const float tod = 0.16f + 0.025f * static_cast<float>(g_ui_thumbs_index % 5);
+                g_camera->Yaw = yaw;
+                g_camera->Pitch = -14.0f;  // look down to frame the lit landscape, not just sky
+                g_camera->updateCameraVectors();
+                renderPipeline.set_time_of_day(tod);
+                renderPipeline.render_frame(gameSession->GetRegistry(), *gameSession->GetWorldSystem(),
+                                            *g_camera, deltaTime, wireframe_mode);
+                if (g_ui_thumbs_settle < 28) {
+                    ++g_ui_thumbs_settle;
+                } else {
+                    int vw = 0, vh = 0;
+                    glfwGetFramebufferSize(window, &vw, &vh);
+                    if (vw > 0 && vh > 0) {
+                        std::vector<unsigned char> px(static_cast<std::size_t>(vw) * static_cast<std::size_t>(vh) * 3u);
+                        glReadBuffer(GL_BACK);
+                        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                        glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+                        const std::filesystem::path shot =
+                            g_ui_thumbs_dir / ("thumb_" + std::to_string(g_ui_thumbs_index) + ".ppm");
+                        WritePixelBufferPpm(shot, vw, vh, px);
+                        LUMINUMBRA_CORE_INFO("UI thumb written -> {} ({}x{})", shot.string(), vw, vh);
+                    }
+                    ++g_ui_thumbs_index;
+                    g_ui_thumbs_settle = 0;
+                    if (g_ui_thumbs_index >= g_ui_thumbs) glfwSetWindowShouldClose(window, GLFW_TRUE);
                 }
             } else { // Main Menu, etc.
                 // F4: render the live scenic world behind the menu, with a slow auto-orbit, at

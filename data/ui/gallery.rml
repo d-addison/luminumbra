@@ -16,29 +16,29 @@
             <!-- Tight 4-up photo wall — image + shadow only, no frames/captions. -->
             <div class="gallery-grid">
                 <div class="photo-card">
-                    <div class="photo-thumb"></div>
+                    <img class="photo-thumb" src="thumbs/thumb_0.tga"/>
                 </div>
                 <div class="photo-card">
-                    <div class="photo-thumb"></div>
+                    <img class="photo-thumb" src="thumbs/thumb_1.tga"/>
                 </div>
                 <div class="photo-card">
-                    <div class="photo-thumb"></div>
+                    <img class="photo-thumb" src="thumbs/thumb_2.tga"/>
                     <span class="photo-fav">★</span>
                 </div>
                 <div class="photo-card">
-                    <div class="photo-thumb"></div>
+                    <img class="photo-thumb" src="thumbs/thumb_3.tga"/>
                 </div>
                 <div class="photo-card">
-                    <div class="photo-thumb"></div>
+                    <img class="photo-thumb" src="thumbs/thumb_4.tga"/>
                 </div>
                 <div class="photo-card">
-                    <div class="photo-thumb"></div>
+                    <img class="photo-thumb" src="thumbs/thumb_5.tga"/>
                 </div>
                 <div class="photo-card">
-                    <div class="photo-thumb"></div>
+                    <img class="photo-thumb" src="thumbs/thumb_6.tga"/>
                 </div>
                 <div class="photo-card">
-                    <div class="photo-thumb"></div>
+                    <img class="photo-thumb" src="thumbs/thumb_7.tga"/>
                 </div>
             </div>
 
