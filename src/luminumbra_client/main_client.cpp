@@ -21,6 +21,7 @@
 #include "ui/Rml_UIManager.h"
 #include "ui/core/UIHotReload.h"
 #include "world/WorldgenOverride.h"
+#include "world/WorldgenPreview.h"
 #include "audio/AudioManagerFactory.h"
 #include "audio/IAudioManager.h"
 #include "audio/NullAudioManager.h"
@@ -2630,6 +2631,19 @@ int main(int argc, char* argv[]) {
         worldGenViewer = std::make_unique<Luminumbra::Client::WorldGenViewer>();
     }
 
+    // Spec 002 Item 1: the create-world LIVE WORLD-PREVIEW DIORAMA controller.
+    // Owns a bounded candidate world + an offscreen FBO + an orbit camera; the
+    // menu render branch feeds it the current form's candidate params/weather/tod,
+    // renders it to the FBO via the real pipeline, and blits it into the
+    // #preview_pane screen rect under the transparent create panel. Built lazily
+    // on first create-world activation so a headless/automated run pays nothing.
+    auto worldgenPreview = std::make_unique<Luminumbra::Client::WorldgenPreview>();
+    // Last candidate signature so we only re-derive + push params when the form
+    // actually changed (the controller then debounces the rebuild).
+    std::string worldgenPreviewLastSig;
+    bool worldgenPreviewDragging = false;
+    double worldgenPreviewLastCursorX = 0.0, worldgenPreviewLastCursorY = 0.0;
+
     if (runtime_boot_recorder.enabled() && gameStateManager.GetCurrentState() == GameState::IN_GAME) {
         LUMINUMBRA_CORE_INFO("Runtime boot metrics mode: capturing fixed frames through streaming scheduler.");
         if (gameSession->GetWorldSystem() && gameSession->GetPhysicsSystem()) {
@@ -4272,7 +4286,9 @@ int main(int argc, char* argv[]) {
                                 const float x = anchor.x + dx + (frand() * 2.0f - 1.0f) * cell * 0.5f;
                                 const float zc = anchor.z + dz + (frand() * 2.0f - 1.0f) * cell * 0.5f;
                                 const float h = terr(x, zc);
-                                if (h < Luminumbra::SEA_LEVEL + 1.0f) continue; // above water
+                                // Keep trees out of water at ANY elevation (sea + perched
+                                // lakes), not just sea level; a shoreline margin is fine.
+                                if (h < ws->WaterLevelAt(x, zc) + 1.0f) continue;
                                 const float slope = glm::max(
                                     glm::max(std::abs(terr(x + hs, zc) - h), std::abs(terr(x - hs, zc) - h)),
                                     glm::max(std::abs(terr(x, zc + hs) - h), std::abs(terr(x, zc - hs) - h)));
@@ -6409,6 +6425,104 @@ int main(int argc, char* argv[]) {
                     renderPipeline.render_frame(gameSession->GetRegistry(), *gameSession->GetWorldSystem(),
                                                 *g_camera, deltaTime, wireframe_mode);
                 }
+
+                // Spec 002 Item 1: LIVE WORLD-PREVIEW DIORAMA. When the create-world
+                // screen is up, feed the candidate params/weather/tod, render the
+                // candidate world into the preview FBO, and blit it into the
+                // #preview_pane screen rect on the backbuffer (the frosted pane is
+                // transparent so the diorama shows through; the UI pass draws the
+                // frame + vignette on top). Mouse drag/scroll over the pane orbits.
+                if (g_uiManager && worldgenPreview) {
+                    auto pv = g_uiManager->GetWorldCreationPreviewState();
+                    if (pv.active && pv.pane_w > 4 && pv.pane_h > 4) {
+                        worldgenPreview->set_active(true);
+
+                        // Re-derive the candidate world ONLY when the form changed.
+                        // BuildCustomPreset diffs the form against the base preset;
+                        // we hand the resolved JSON + data root to the in-memory
+                        // loader seam so biome/structure tables resolve correctly.
+                        std::string sig = pv.worldType;
+                        for (const auto& p : pv.params) { sig += '|'; sig += p.path; sig += '='; sig += p.value; }
+                        int seedVal = 4242;
+                        if (sig != worldgenPreviewLastSig) {
+                            worldgenPreviewLastSig = sig;
+                            try {
+                                const std::filesystem::path base_path =
+                                    std::filesystem::path(root_path_str) / "worlds" / "atlas" / "presets" / (pv.worldType + ".json");
+                                std::ifstream in(base_path);
+                                if (in) {
+                                    nlohmann::json base; in >> base;
+                                    Luminumbra::Client::CustomPresetResult merged =
+                                        Luminumbra::Client::BuildCustomPreset(base, pv.params);
+                                    const std::filesystem::path data_root =
+                                        std::filesystem::path(root_path_str) / "data";
+                                    worldgenPreview->set_candidate(merged.json, data_root, seedVal);
+                                }
+                            } catch (const std::exception& e) {
+                                LUMINUMBRA_CORE_WARN("Preview candidate build failed: {}", e.what());
+                            }
+                        }
+
+                        // Live look controls.
+                        using PW = Luminumbra::Client::WorldgenPreview::Weather;
+                        PW w = PW::Clear;
+                        if (pv.weather == "rain") w = PW::Rain;
+                        else if (pv.weather == "snow") w = PW::Snow;
+                        else if (pv.weather == "fog") w = PW::Fog;
+                        else if (pv.weather == "storm") w = PW::Storm;
+                        worldgenPreview->set_weather(w);
+                        worldgenPreview->set_time_of_day(pv.tod);
+                        if (g_uiManager->ConsumeWorldCreationResetView()) worldgenPreview->reset_view();
+
+                        // Mouse orbit: drag over the pane spins, scroll zooms.
+                        int fbW = 0, fbH = 0; glfwGetFramebufferSize(window, &fbW, &fbH);
+                        double cx = 0.0, cy = 0.0; glfwGetCursorPos(window, &cx, &cy);
+                        const bool lmb = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+                        const bool overPane = cx >= pv.pane_x && cx < (pv.pane_x + pv.pane_w) &&
+                                              cy >= pv.pane_y && cy < (pv.pane_y + pv.pane_h);
+                        if (lmb && overPane && !worldgenPreviewDragging) {
+                            worldgenPreviewDragging = true;
+                            worldgenPreviewLastCursorX = cx; worldgenPreviewLastCursorY = cy;
+                        } else if (!lmb) {
+                            worldgenPreviewDragging = false;
+                        }
+                        if (worldgenPreviewDragging) {
+                            const float dx = static_cast<float>(cx - worldgenPreviewLastCursorX);
+                            const float dy = static_cast<float>(cy - worldgenPreviewLastCursorY);
+                            worldgenPreviewLastCursorX = cx; worldgenPreviewLastCursorY = cy;
+                            // Drag right -> spin right; drag down -> tilt down.
+                            worldgenPreview->orbit(dx * 0.35f, -dy * 0.35f);
+                        }
+
+                        // Debounced rebuild + render-to-FBO at the pane size.
+                        worldgenPreview->ensure_target(pv.pane_w, pv.pane_h);
+                        worldgenPreview->tick(deltaTime);
+                        if (worldgenPreview->render(renderPipeline, deltaTime)) {
+                            // Blit the preview FBO into the pane rect on the backbuffer.
+                            // GL framebuffer origin is bottom-left; the pane rect is
+                            // top-left, so flip Y for the destination.
+                            const int dstX0 = pv.pane_x;
+                            const int dstX1 = pv.pane_x + pv.pane_w;
+                            const int dstY0 = fbH - (pv.pane_y + pv.pane_h);
+                            const int dstY1 = fbH - pv.pane_y;
+                            // Read from the preview FBO via a temporary read binding.
+                            GLuint readFbo = 0; glGenFramebuffers(1, &readFbo);
+                            glBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo);
+                            glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                                                   worldgenPreview->color_texture(), 0);
+                            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+                            glBlitFramebuffer(0, 0, worldgenPreview->target_width(), worldgenPreview->target_height(),
+                                              dstX0, dstY0, dstX1, dstY1, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+                            glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+                            glDeleteFramebuffers(1, &readFbo);
+                        }
+                    } else {
+                        worldgenPreview->set_active(false);
+                        worldgenPreviewLastSig.clear();
+                        worldgenPreviewDragging = false;
+                    }
+                }
+
                 if (g_uiManager) {
                     g_uiManager->Render();
                 }

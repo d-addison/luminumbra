@@ -7,6 +7,8 @@
 #include <fstream>
 #include <string>
 
+#include <nlohmann/json.hpp>
+
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 
 namespace fs = std::filesystem;
@@ -14,6 +16,7 @@ namespace fs = std::filesystem;
 namespace {
 
 using Luminumbra::world::LoadTerrainPreset;
+using Luminumbra::world::LoadTerrainPresetFromJson;
 using Luminumbra::world::TerrainPresetLoadResult;
 
 #ifndef LUMINUMBRA_SOURCE_ROOT
@@ -265,6 +268,70 @@ TEST(TerrainPresetLoaderTest, MissingGenerationParamsIsAnError) {
     ASSERT_EQ(result.errors.size(), 1u);
     EXPECT_NE(result.errors.front().find("missing object generation_params"), std::string::npos);
     fs::remove(path);
+}
+
+// Spec 002 Item 1: the in-memory seam (LoadTerrainPresetFromJson) must produce
+// the SAME params/extras as the on-disk loader for identical content — proving
+// the file path simply delegates and the create-world live preview gets the same
+// world the on-disk create would. Uses a FIXED literal with a biome table so the
+// data-root-relative resolution is exercised (NOT default.json — owned by the
+// concurrent worldgen agent).
+TEST(TerrainPresetLoaderTest, InMemorySeamMatchesOnDiskLoad) {
+    const std::string kPreset = R"({
+      "name": "SeamParity",
+      "generation_params": {
+        "terrain": {
+          "base_frequency": 0.013,
+          "base_amplitude": 47.0,
+          "octaves": 5,
+          "persistence": 0.55,
+          "lacunarity": 2.1,
+          "height_offset": 9.0,
+          "shaping": { "enabled": true, "peaks_amplitude": 40.0 }
+        },
+        "biomes": { "table": "common/biomes.json", "relief_enabled": true },
+        "features": {
+          "caves_enabled": true, "cave_frequency": 0.02,
+          "rivers_enabled": true, "structures_enabled": true,
+          "cliffs_enabled": true
+        }
+      }
+    })";
+
+    // On-disk: write into the real preset dir tree so the four-parents-up data
+    // root resolves to <source_root>/data (where common/biomes.json lives).
+    const fs::path disk_path = PresetDir() / "luminumbra_seam_parity_preset.json";
+    {
+        std::ofstream out(disk_path, std::ios::binary | std::ios::trunc);
+        out << kPreset;
+    }
+    const TerrainPresetLoadResult disk = LoadTerrainPreset(disk_path);
+    fs::remove(disk_path);
+    ASSERT_TRUE(disk.ok) << (disk.errors.empty() ? "" : disk.errors.front());
+
+    // In-memory: same content, explicit data root = <source_root>/data.
+    const fs::path data_root = fs::path(LUMINUMBRA_SOURCE_ROOT) / "data";
+    const nlohmann::json parsed = nlohmann::json::parse(kPreset);
+    const TerrainPresetLoadResult mem =
+        LoadTerrainPresetFromJson(parsed, data_root, "<seam-parity>");
+    ASSERT_TRUE(mem.ok) << (mem.errors.empty() ? "" : mem.errors.front());
+
+    // Consumed params parity (the bytes the world system + world_hash consume).
+    EXPECT_FLOAT_EQ(mem.params.base_frequency, disk.params.base_frequency);
+    EXPECT_FLOAT_EQ(mem.params.base_amplitude, disk.params.base_amplitude);
+    EXPECT_EQ(mem.params.octaves, disk.params.octaves);
+    EXPECT_FLOAT_EQ(mem.params.height_offset, disk.params.height_offset);
+    EXPECT_EQ(mem.params.shaping_enabled, disk.params.shaping_enabled);
+    EXPECT_EQ(mem.params.biomes_enabled, disk.params.biomes_enabled);
+    EXPECT_EQ(mem.params.biome_table_path, disk.params.biome_table_path);
+    EXPECT_EQ(mem.params.biome_relief_enabled, disk.params.biome_relief_enabled);
+    EXPECT_EQ(mem.params.rivers_enabled, disk.params.rivers_enabled);
+    EXPECT_EQ(mem.params.cliffs_enabled, disk.params.cliffs_enabled);
+    EXPECT_EQ(mem.params.structures_enabled, disk.params.structures_enabled);
+    EXPECT_EQ(mem.params.structures_data_dir, disk.params.structures_data_dir);
+    // The resolved table path must be a real absolute path into the data root.
+    EXPECT_FALSE(mem.params.biome_table_path.empty());
+    EXPECT_NE(mem.params.biome_table_path.find("biomes.json"), std::string::npos);
 }
 
 } // namespace

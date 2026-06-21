@@ -1929,16 +1929,23 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
         glBindVertexArray(0);
     }
 
-    // 9. FINAL BLIT TO SCREEN
+    // 9. FINAL BLIT TO SCREEN (or to the offscreen preview target, Item 1).
     begin_gpu_pass_timer(GpuTimerPass::FinalBlit);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0); // Default framebuffer
+    // Spec 002 Item 1: when a preview FBO is bound, the lit scene is copied into
+    // it instead of the default framebuffer. The destination rect is the preview
+    // dims; the source is the (preview-sized, via on_resize) lighting FBO, so the
+    // copy is a 1:1 filtered blit. Default path (no target) is byte-identical.
+    const GLuint draw_fbo = m_offscreen_target_active ? m_offscreen_target_fbo : 0u;
+    const u32 dst_w = m_offscreen_target_active ? m_offscreen_target_w : m_screen_width;
+    const u32 dst_h = m_offscreen_target_active ? m_offscreen_target_h : m_screen_height;
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw_fbo);
 
-    // Clear the default framebuffer first to prevent artifacts
+    // Clear the destination first to prevent artifacts.
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    glBlitFramebuffer(0, 0, m_screen_width, m_screen_height, 0, 0, m_screen_width, m_screen_height, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    glBlitFramebuffer(0, 0, m_screen_width, m_screen_height, 0, 0, dst_w, dst_h, GL_COLOR_BUFFER_BIT, GL_LINEAR);
     m_last_render_pass_stats.final_blits++;
     end_gpu_pass_timer(GpuTimerPass::FinalBlit);
 
@@ -2003,6 +2010,26 @@ void RenderPipeline::on_resize(u32 new_width, u32 new_height) {
     m_frustumCache.valid = false;
     ++m_resize_generation;
     LUMINUMBRA_CORE_INFO("RenderPipeline resized targets to {}x{} (resize generation {})", new_width, new_height, m_resize_generation);
+}
+
+void RenderPipeline::set_offscreen_target(u32 fbo, u32 fbo_w, u32 fbo_h) {
+    // Spec 002 Item 1: redirect the final blit into a caller-owned FBO. A zero
+    // FBO or degenerate size clears the redirect (back to the default-0 path).
+    if (fbo == 0 || fbo_w == 0 || fbo_h == 0) {
+        clear_offscreen_target();
+        return;
+    }
+    m_offscreen_target_active = true;
+    m_offscreen_target_fbo = fbo;
+    m_offscreen_target_w = fbo_w;
+    m_offscreen_target_h = fbo_h;
+}
+
+void RenderPipeline::clear_offscreen_target() {
+    m_offscreen_target_active = false;
+    m_offscreen_target_fbo = 0;
+    m_offscreen_target_w = 0;
+    m_offscreen_target_h = 0;
 }
 
 void RenderPipeline::clear_all_chunk_data() {

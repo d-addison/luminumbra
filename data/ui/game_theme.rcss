@@ -615,6 +615,88 @@ body#world_creation {
 
 #world_creation .title-ornament { margin-bottom: 34px; }
 
+/* Spec 002 Item 1 — live world-preview diorama. The pane is a TRANSPARENT
+   framed hole: the host blits the rendered candidate world into this rect under
+   the panel, so the pane itself only draws the frosted frame + vignette. */
+.preview-section {
+    width: 100%;
+    margin-bottom: 30px;
+}
+.preview-pane {
+    width: 100%;
+    height: 320px;
+    position: relative;
+    background-color: transparent;
+    border-width: 1px;
+    border-color: rgba(242, 237, 228, 45);
+    box-shadow: 0px 18px 50px rgba(8, 6, 4, 150), inset 0px 0px 60px rgba(8, 6, 4, 90);
+    border-radius: 2px;
+}
+/* Soft edge-darkening so the slice reads as a model on a table, not infinite
+   terrain. A radial vignette via inset shadow over the framed render. */
+.preview-vignette {
+    width: 100%;
+    height: 100%;
+    box-shadow: inset 0px 0px 90px 20px rgba(8, 6, 4, 170);
+    border-radius: 2px;
+}
+.preview-reset {
+    position: absolute;
+    top: 10px;
+    right: 12px;
+    height: 26px;
+    line-height: 24px;
+    padding: 0 12px;
+    background-color: rgba(20, 17, 11, 150);
+    border-width: 1px;
+    border-color: rgba(242, 237, 228, 55);
+    color: #D8CDB8;
+    font-size: 12px;
+    letter-spacing: 2px;
+}
+.preview-reset:hover { border-color: #C9A86A; color: #F4EFE6; }
+.preview-hint {
+    position: absolute;
+    bottom: 8px;
+    left: 0;
+    width: 100%;
+    text-align: center;
+    color: rgba(216, 205, 184, 150);
+    font-size: 11px;
+    letter-spacing: 3px;
+}
+.preview-controls { margin-top: 14px; }
+.preview-weather-row {
+    display: flex;
+    flex-direction: row;
+    margin-bottom: 12px;
+}
+.preview-weather {
+    flex: 1 1 0;
+    height: 34px;
+    line-height: 32px;
+    margin-right: 8px;
+    background-color: rgba(20, 17, 11, 110);
+    border-width: 1px;
+    border-color: rgba(242, 237, 228, 38);
+    color: #C9C0AE;
+    font-size: 13px;
+    letter-spacing: 2px;
+    text-align: center;
+}
+.preview-weather:last-child { margin-right: 0; }
+.preview-weather:hover { border-color: #8FA68E; color: #F2EDE4; }
+.preview-weather.selected {
+    background-color: rgba(143, 166, 142, 70);
+    border-color: #B6CBAE;
+    color: #F4EFE6;
+}
+.preview-tod-row label {
+    color: #C3B9A2;
+    font-size: 13px;
+    letter-spacing: 3px;
+}
+
 #world_creation .form-container {
     width: 100%;
     text-align: left;

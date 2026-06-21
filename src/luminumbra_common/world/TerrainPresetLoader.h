@@ -19,6 +19,8 @@
 #include <string>
 #include <vector>
 
+#include <nlohmann/json_fwd.hpp>
+
 #include "../systems/SHIELD_WorldSystem.h" // Systems::TerrainGenParams
 
 namespace Luminumbra::world {
@@ -128,5 +130,20 @@ struct TerrainPresetLoadResult {
 // result carries ok=false and human-readable messages; params/extras are only
 // meaningful when ok=true.
 TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path);
+
+// Spec 002 Item 1 (ADDITIVE in-memory seam — no struct/behavior change). Parses
+// an ALREADY-PARSED preset JSON with an EXPLICIT data root, so a host that holds
+// candidate preset JSON in memory (the create-world live preview) gets identical
+// TerrainGenParams WITHOUT round-tripping through a temp file (the temp-file
+// route resolves the biome/structure table paths against the wrong data root —
+// they are resolved relative to <data_root> here). `data_root` is the absolute
+// path to the `data/` directory (the same root the on-disk loader derives as
+// four parents up from the preset file + "data"). `provenance` only labels the
+// unknown-key warnings. LoadTerrainPreset(path) reads+parses the file and
+// DELEGATES here with the file-derived data root, so on-disk loads are
+// byte-identical to before.
+TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
+                                                  const std::filesystem::path& data_root,
+                                                  const std::string& provenance = "<memory>");
 
 } // namespace Luminumbra::world

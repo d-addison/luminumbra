@@ -183,6 +183,69 @@ static std::vector<WorldGenParam> CollectWorldGenParams(Rml::ElementDocument* do
 // --- Static Instance for Callbacks ---
 Rml_UIManager* Rml_UIManager::s_active_manager = nullptr;
 
+Rml_UIManager::PreviewState Rml_UIManager::GetWorldCreationPreviewState() const {
+    PreviewState st;
+    if (!m_context) return st;
+    // Find the loaded, VISIBLE document that owns the live-preview pane.
+    Rml::ElementDocument* doc = nullptr;
+    Rml::Element* pane = nullptr;
+    for (int i = 0; i < m_context->GetNumDocuments(); ++i) {
+        Rml::ElementDocument* d = m_context->GetDocument(i);
+        if (!d || !d->IsVisible()) continue;
+        if (Rml::Element* p = d->GetElementById("preview_pane")) {
+            doc = d;
+            pane = p;
+            break;
+        }
+    }
+    if (!doc || !pane) return st;
+
+    st.active = true;
+    st.params = CollectWorldGenParams(doc);
+    st.worldType = ReadFormControlValue(doc->GetElementById("world_type"), "default");
+
+    // Selected weather pill (defaults to clear).
+    Rml::ElementList pills;
+    doc->GetElementsByClassName(pills, "preview-weather");
+    for (Rml::Element* p : pills) {
+        if (p && p->IsClassSet("selected")) {
+            st.weather = p->GetAttribute<Rml::String>("data-weather", "clear");
+            break;
+        }
+    }
+    // Time-of-day slider.
+    if (Rml::Element* tod = doc->GetElementById("preview_tod")) {
+        const std::string v = ReadFormControlValue(tod, "0.24");
+        try { st.tod = std::stof(v); } catch (...) { st.tod = 0.24f; }
+    }
+
+    // Pane rect in PIXELS (border box). RmlUi reports CSS px == framebuffer px
+    // here (dp ratio 1 on the GL3 backend), matching glfw cursor/framebuffer
+    // coords. Round to the nearest device pixel.
+    const Rml::Vector2f off = pane->GetAbsoluteOffset(Rml::BoxArea::Border);
+    const Rml::Vector2f size = pane->GetBox().GetSize(Rml::BoxArea::Border);
+    st.pane_x = static_cast<int>(off.x + 0.5f);
+    st.pane_y = static_cast<int>(off.y + 0.5f);
+    st.pane_w = static_cast<int>(size.x + 0.5f);
+    st.pane_h = static_cast<int>(size.y + 0.5f);
+    return st;
+}
+
+bool Rml_UIManager::ConsumeWorldCreationResetView() {
+    if (!m_context) return false;
+    for (int i = 0; i < m_context->GetNumDocuments(); ++i) {
+        Rml::ElementDocument* d = m_context->GetDocument(i);
+        if (!d || !d->IsVisible()) continue;
+        if (Rml::Element* btn = d->GetElementById("preview_reset_btn")) {
+            if (btn->IsClassSet("reset-pending")) {
+                btn->SetClass("reset-pending", false);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 // --- Constructor / Destructor ---
 Rml_UIManager::Rml_UIManager(const std::string& asset_root_path) 
     : m_fileInterface(asset_root_path) {
@@ -490,6 +553,31 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
                 }
             }
             if (!saved.empty()) this->PopulateUserPresets(document);
+        });
+    }
+
+    // Spec 002 Item 1: live-preview weather pills. Clicking one selects it (the
+    // host reads .preview-weather.selected each frame and drives set_weather).
+    {
+        Rml::ElementList pills;
+        document->GetElementsByClassName(pills, "preview-weather");
+        for (Rml::Element* pill : pills) {
+            AddClickSoundListener(pill, [document](Rml::Event& event) {
+                Rml::Element* p = event.GetTargetElement();
+                while (p && p->GetAttribute<Rml::String>("data-weather", "").empty()) p = p->GetParentNode();
+                if (!p) return;
+                Rml::ElementList all;
+                document->GetElementsByClassName(all, "preview-weather");
+                for (Rml::Element* x : all) x->SetClass("selected", false);
+                p->SetClass("selected", true);
+            });
+        }
+    }
+    // Live-preview reset-view: a marker class the host polls + clears (orbit reset
+    // lives host-side in WorldgenPreview). Toggling .reset-pending signals it.
+    if (auto* reset = document->GetElementById("preview_reset_btn")) {
+        AddClickSoundListener(reset, [](Rml::Event& event) {
+            if (Rml::Element* e = event.GetTargetElement()) e->SetClass("reset-pending", true);
         });
     }
 

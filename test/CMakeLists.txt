@@ -417,6 +417,38 @@ else()
     target_link_libraries(ui_page_load_test PRIVATE OpenGL::GL)
 endif()
 
+# Spec 002 Item 1 — the create-world LIVE WORLD-PREVIEW DIORAMA. Drives the real
+# RenderPipeline headlessly through the WorldgenPreview controller (offscreen FBO
+# render of a bounded candidate world). GL-required: SKIP -> ctest FAILURE (3a).
+add_executable(worldgen_preview_test
+    ui/worldgen_preview_test.cpp
+)
+
+target_compile_definitions(worldgen_preview_test PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+    LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts"
+)
+
+target_include_directories(worldgen_preview_test PRIVATE
+    ../src
+    ../src/luminumbra_client
+)
+
+target_link_libraries(worldgen_preview_test PRIVATE
+    gtest_main
+    luminumbra_client
+)
+
+if(WIN32)
+    target_link_libraries(worldgen_preview_test PRIVATE opengl32)
+elseif(APPLE)
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(worldgen_preview_test PRIVATE ${OPENGL_LIBRARIES})
+else()
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(worldgen_preview_test PRIVATE OpenGL::GL)
+endif()
+
 add_executable(initial_world_loading_perf_test
     performance/initial_world_loading_perf_test.cpp
 )
@@ -797,6 +829,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     particle_determinism_test
     ui_smoke_test
     ui_page_load_test
+    worldgen_preview_test
     initial_world_loading_perf_test
     runtime_world_visual_validation_test
     frontier_gates_test
@@ -809,7 +842,7 @@ set(LUMINUMBRA_GTEST_TARGETS
 # on a gate runner that lacks GL. These tests assert real behaviour and MUST run, not skip. Promote
 # any "[ SKIPPED ]" line from the UI targets to a ctest FAILURE via FAIL_REGULAR_EXPRESSION. The
 # GL-free cases in these binaries never print SKIPPED, so a fully-GL run stays green.
-set(LUMINUMBRA_GL_REQUIRED_UI_TARGETS ui_smoke_test ui_page_load_test)
+set(LUMINUMBRA_GL_REQUIRED_UI_TARGETS ui_smoke_test ui_page_load_test worldgen_preview_test)
 foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
     if(_lum_gtest_target IN_LIST LUMINUMBRA_GL_REQUIRED_UI_TARGETS)
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
@@ -982,7 +1015,13 @@ file(WRITE "${LUMINUMBRA_TEST_ARTIFACT_ROOT}/testing/ctest_manifest.json"
     "    \"UiSmokeTest.RedesignedControlsAreFunctional\",\n"
     "    \"UiSmokeTest.SaveAndListUserPresetsAreFunctional\",\n"
     "    \"WorldgenOverrideTest.BuildCustomPresetAppliesOnlyRealDeltas\",\n"
-    "    \"WorldgenOverrideTest.EveryCustomizeParamPathIsAKnownWorldgenKey\"\n"
+    "    \"WorldgenOverrideTest.EveryCustomizeParamPathIsAKnownWorldgenKey\",\n"
+    "    \"WorldgenPreviewTest.RendersCandidateDioramaToTargetWithoutCrashing\",\n"
+    "    \"WorldgenPreviewTest.ChangingParamsChangesTargetPixels\",\n"
+    "    \"WorldgenPreviewTest.ChangingWeatherAndTimeOfDayChangesTargetPixels\",\n"
+    "    \"WorldgenPreviewTest.OrbitChangesTheView\",\n"
+    "    \"WorldgenPreviewTest.RebuildIsDebouncedAndLatestWins\",\n"
+    "    \"WorldgenPreviewTest.PerFrameRenderHoldsPreviewBudget\"\n"
     "  ],\n"
     "  \"excluded_patterns\": [\n"
     "    \"_NOT_BUILT$\"\n"

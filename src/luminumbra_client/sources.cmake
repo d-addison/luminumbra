@@ -43,6 +43,7 @@ set(CLIENT_INTERNAL_SOURCES
 
     # World (client-side)
     ${CMAKE_CURRENT_LIST_DIR}/world/WorldgenOverride.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/world/WorldgenPreview.cpp
 
     # UI
     ${CMAKE_CURRENT_LIST_DIR}/ui/Rml_Interfaces.cpp

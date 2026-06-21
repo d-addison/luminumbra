@@ -535,6 +535,21 @@ public:
     // resize_generation() so callers (the WindowModeStress gate) can assert
     // targets were actually rebuilt (T-I4-DR-window-modes).
     void on_resize(u32 new_width, u32 new_height);
+
+    // Spec 002 Item 1 (ADDITIVE offscreen render-target redirect for the
+    // create-world live preview diorama). When an offscreen target is set, the
+    // FINAL BLIT of render_frame writes its lit color into the given FBO (color
+    // attachment 0, sized fbo_w x fbo_h) INSTEAD of the default framebuffer 0.
+    // Every internal pass (G-buffer/SSAO/lighting) is unchanged; callers that
+    // want a small, budget-holding preview also call on_resize(fbo_w, fbo_h) for
+    // the preview's lifetime so the internal passes match the preview dims. The
+    // blit is a filtered copy from the lighting FBO (m_screen_*) to the preview
+    // FBO. clear_offscreen_target() restores the default-0 path (byte-identical
+    // to the legacy behaviour). Render-only; nothing is hashed.
+    void set_offscreen_target(u32 fbo, u32 fbo_w, u32 fbo_h);
+    void clear_offscreen_target();
+    bool has_offscreen_target() const { return m_offscreen_target_active; }
+
     u32 screen_width() const { return m_screen_width; }
     u32 screen_height() const { return m_screen_height; }
     // Count of render-target reallocations since startup (one per real
@@ -855,6 +870,14 @@ private:
     // Render-target reallocation counter (T-I4-DR-window-modes). Bumped once per
     // real on_resize so the resize-stress gate can assert targets were rebuilt.
     u64 m_resize_generation = 0;
+    // Spec 002 Item 1: offscreen render-target redirect for the live preview.
+    // When active, render_frame's final blit targets m_offscreen_target_fbo at
+    // m_offscreen_target_w/h instead of framebuffer 0. Default inactive == the
+    // legacy default-0 blit (byte-identical).
+    bool m_offscreen_target_active = false;
+    u32 m_offscreen_target_fbo = 0;
+    u32 m_offscreen_target_w = 0;
+    u32 m_offscreen_target_h = 0;
     std::filesystem::path m_root_path;
 
     DirectionalLight m_sun;

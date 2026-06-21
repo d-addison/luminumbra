@@ -13,7 +13,7 @@ namespace {
 void WarnUnknownKeys(const nlohmann::json& object,
                      const char* scope,
                      std::initializer_list<const char*> known_keys,
-                     const std::filesystem::path& preset_path,
+                     const std::string& provenance,
                      std::vector<std::string>& warnings) {
     if (!object.is_object()) {
         return;
@@ -27,7 +27,7 @@ void WarnUnknownKeys(const nlohmann::json& object,
             }
         }
         if (!known) {
-            std::string warning = "world preset '" + preset_path.string() +
+            std::string warning = "world preset '" + provenance +
                                   "' has unknown key " + scope + "." + item.key();
             LUMINUMBRA_CORE_WARN("{}", warning);
             warnings.push_back(std::move(warning));
@@ -54,7 +54,7 @@ std::vector<std::array<float, 2>> ParseSplinePoints(const nlohmann::json& block,
 
 void ParseShapingBlock(const nlohmann::json& terrain,
                        TerrainShapingPreset& shaping,
-                       const std::filesystem::path& preset_path,
+                       const std::string& provenance,
                        std::vector<std::string>& warnings) {
     if (!JsonHasObject(terrain, "shaping")) {
         return;
@@ -76,12 +76,12 @@ void ParseShapingBlock(const nlohmann::json& terrain,
                      "peaks_frequency", "peaks_amplitude", "domain_warp_amplitude",
                      "domain_warp_frequency", "continental_spline", "erosion_spline",
                      "peaks_spline"},
-                    preset_path, warnings);
+                    provenance, warnings);
 }
 
 void ParseHydroBlock(const nlohmann::json& terrain,
                      TerrainHydroPreset& hydro,
-                     const std::filesystem::path& preset_path,
+                     const std::string& provenance,
                      std::vector<std::string>& warnings) {
     if (!JsonHasObject(terrain, "hydro")) {
         return;
@@ -103,12 +103,13 @@ void ParseHydroBlock(const nlohmann::json& terrain,
                     {"enabled", "iterations", "cell_size_m", "talus_height",
                      "thermal_rate", "rain_per_sweep", "solubility", "deposition",
                      "evaporation", "sediment_capacity", "max_offset"},
-                    preset_path, warnings);
+                    provenance, warnings);
 }
 
 void ParseBiomesBlock(const nlohmann::json& gen_params,
                       TerrainBiomesPreset& biomes,
-                      const std::filesystem::path& preset_path,
+                      const std::filesystem::path& data_root,
+                      const std::string& provenance,
                       std::vector<std::string>& warnings) {
     if (!JsonHasObject(gen_params, "biomes")) {
         return;
@@ -122,24 +123,21 @@ void ParseBiomesBlock(const nlohmann::json& gen_params,
     biomes.table = block.value("table", std::string{});
     biomes.enabled = !biomes.table.empty();
     if (biomes.enabled) {
-        // The table path is relative to the data/ root. Presets live at
-        // <root>/worlds/atlas/presets/<name>.json, so the data root is four
-        // parents up from the preset file. Resolve to an absolute path here so
-        // the world system never needs the runtime root.
-        std::error_code ec;
-        const std::filesystem::path preset_dir = std::filesystem::absolute(preset_path, ec).parent_path();
-        const std::filesystem::path data_root = preset_dir.parent_path().parent_path().parent_path() / "data";
+        // The table path is relative to the data/ root, resolved against the
+        // explicit data_root the caller supplied (the on-disk loader derives it
+        // four parents up from the preset; the in-memory seam is handed it
+        // directly so the table resolves correctly without a temp file).
         biomes.resolved_table_path = (data_root / biomes.table).lexically_normal().string();
     }
     WarnUnknownKeys(block, "generation_params.biomes",
                     {"temperature_frequency", "humidity_frequency", "table",
                      "relief_enabled", "relief_strength"},
-                    preset_path, warnings);
+                    provenance, warnings);
 }
 
 void ParseMaterialsBlock(const nlohmann::json& gen_params,
                          TerrainMaterialsPreset& materials,
-                         const std::filesystem::path& preset_path,
+                         const std::string& provenance,
                          std::vector<std::string>& warnings) {
     if (!JsonHasObject(gen_params, "materials")) {
         return;
@@ -147,7 +145,7 @@ void ParseMaterialsBlock(const nlohmann::json& gen_params,
     const nlohmann::json& block = gen_params["materials"];
     materials.present = true;
     WarnUnknownKeys(block, "generation_params.materials", {"strata", "veins"},
-                    preset_path, warnings);
+                    provenance, warnings);
 
     if (block.contains("strata") && block["strata"].is_array()) {
         for (const auto& entry : block["strata"]) {
@@ -160,7 +158,7 @@ void ParseMaterialsBlock(const nlohmann::json& gen_params,
             stratum.thickness = entry.value("thickness", 0);
             WarnUnknownKeys(entry, "generation_params.materials.strata[]",
                             {"material", "max_depth", "thickness"},
-                            preset_path, warnings);
+                            provenance, warnings);
             materials.strata.push_back(std::move(stratum));
         }
     }
@@ -188,7 +186,7 @@ void ParseMaterialsBlock(const nlohmann::json& gen_params,
             WarnUnknownKeys(entry, "generation_params.materials.veins[]",
                             {"material", "host_materials", "noise_frequency",
                              "noise_threshold", "max_altitude"},
-                            preset_path, warnings);
+                            provenance, warnings);
             materials.veins.push_back(std::move(vein));
         }
     }
@@ -213,18 +211,35 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
         return result;
     }
 
+    // The table/structure paths are relative to the data/ root. Presets live at
+    // <root>/worlds/atlas/presets/<name>.json, so the data root is four parents
+    // up from the preset file. Derive it here and hand it to the in-memory parse
+    // so on-disk loads are byte-identical to before.
+    std::error_code ec;
+    const std::filesystem::path preset_dir =
+        std::filesystem::absolute(preset_path, ec).parent_path();
+    const std::filesystem::path data_root =
+        preset_dir.parent_path().parent_path().parent_path() / "data";
+    return LoadTerrainPresetFromJson(data, data_root, preset_path.string());
+}
+
+TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
+                                                  const std::filesystem::path& data_root,
+                                                  const std::string& provenance) {
+    TerrainPresetLoadResult result;
+
     if (!JsonHasObject(data, "generation_params")) {
-        result.errors.push_back("world preset is missing object generation_params: " + preset_path.string());
+        result.errors.push_back("world preset is missing object generation_params: " + provenance);
         return result;
     }
 
     const nlohmann::json& gen_params = data["generation_params"];
     if (!JsonHasObject(gen_params, "terrain")) {
-        result.errors.push_back("world preset is missing object generation_params.terrain: " + preset_path.string());
+        result.errors.push_back("world preset is missing object generation_params.terrain: " + provenance);
         return result;
     }
     if (!JsonHasObject(gen_params, "features")) {
-        result.errors.push_back("world preset is missing object generation_params.features: " + preset_path.string());
+        result.errors.push_back("world preset is missing object generation_params.features: " + provenance);
         return result;
     }
 
@@ -265,7 +280,7 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
     // Shaping block: parsed into extras AND consumed (T-I3-10) - the loader is
     // the one place preset shaping data lands in TerrainGenParams, so every
     // host (GameSession, tests, headless server) gets identical params.
-    ParseShapingBlock(terrain, result.extras.shaping, preset_path, result.warnings);
+    ParseShapingBlock(terrain, result.extras.shaping, provenance, result.warnings);
     if (result.extras.shaping.present) {
         const TerrainShapingPreset& shaping = result.extras.shaping;
         params.shaping_enabled = shaping.enabled;
@@ -283,7 +298,7 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
     // Hydro block (T-I6-A2): hydraulic/thermal relief. Default-off; a preset opts
     // in via "hydro": {"enabled": true, ...}. Mapped into TerrainGenParams.hydro_*
     // (deliberate world_hash-affecting feature when enabled).
-    ParseHydroBlock(terrain, result.extras.hydro, preset_path, result.warnings);
+    ParseHydroBlock(terrain, result.extras.hydro, provenance, result.warnings);
     if (result.extras.hydro.present) {
         const TerrainHydroPreset& hydro = result.extras.hydro;
         params.hydro_enabled = hydro.enabled;
@@ -302,7 +317,7 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
     // Biomes block: parsed into extras AND consumed when it opts in via a
     // table. With no table the consumed params keep biomes_enabled=false ->
     // byte-zero drift from the pre-biome implementation.
-    ParseBiomesBlock(gen_params, result.extras.biomes, preset_path, result.warnings);
+    ParseBiomesBlock(gen_params, result.extras.biomes, data_root, provenance, result.warnings);
     if (result.extras.biomes.present && result.extras.biomes.enabled) {
         const TerrainBiomesPreset& biomes = result.extras.biomes;
         params.biomes_enabled = true;
@@ -321,13 +336,8 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
     result.extras.features.structures_enabled = features.value("structures_enabled", false);
     params.structures_enabled = result.extras.features.structures_enabled;
     if (params.structures_enabled) {
-        // Resolve <data_root>/common/structures to an absolute path (same data
-        // root the biome table resolves against: four parents up from the preset).
-        std::error_code ec;
-        const std::filesystem::path preset_dir =
-            std::filesystem::absolute(preset_path, ec).parent_path();
-        const std::filesystem::path data_root =
-            preset_dir.parent_path().parent_path().parent_path() / "data";
+        // Resolve <data_root>/common/structures to an absolute path (the same
+        // data root the biome table resolves against, supplied by the caller).
         params.structures_data_dir =
             (data_root / "common" / "structures").lexically_normal().string();
     }
@@ -346,6 +356,7 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
         params.lake_threshold = features.value("lake_threshold", params.lake_threshold);
         params.lake_depth = features.value("lake_depth", params.lake_depth);
         params.lake_max_carve = features.value("lake_max_carve", params.lake_max_carve);
+        params.lake_bank_offset = features.value("lake_bank_offset", params.lake_bank_offset);
     }
     // Slice 4: cliffs. Opt-in via features.cliffs_enabled; absent -> off (byte-zero).
     if (features.value("cliffs_enabled", false)) {
@@ -354,28 +365,28 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
         params.cliff_threshold = features.value("cliff_threshold", params.cliff_threshold);
         params.cliff_step = features.value("cliff_step", params.cliff_step);
     }
-    ParseMaterialsBlock(gen_params, result.extras.materials, preset_path, result.warnings);
+    ParseMaterialsBlock(gen_params, result.extras.materials, provenance, result.warnings);
 
     // Unknown-key audit over every consumed scope.
     WarnUnknownKeys(data, "$", {"name", "description", "schema_rev", "generation_params"},
-                    preset_path, result.warnings);
+                    provenance, result.warnings);
     WarnUnknownKeys(gen_params, "generation_params", {"terrain", "biomes", "features", "materials"},
-                    preset_path, result.warnings);
+                    provenance, result.warnings);
     WarnUnknownKeys(terrain, "generation_params.terrain",
                     {"base_frequency", "base_amplitude", "octaves", "persistence",
                      "lacunarity", "height_offset", "island_mask_enabled",
                      "island_mask_frequency", "shaping", "hydro"},
-                    preset_path, result.warnings);
+                    provenance, result.warnings);
     WarnUnknownKeys(features, "generation_params.features",
                     {"caves_enabled", "cave_frequency", "cave_threshold",
                      "cave_carve_value", "rivers_enabled", "structures_enabled",
                      "river_frequency", "river_depth", "river_pv_min",
                      "river_pv_max", "river_max_carve",
                      "lakes_enabled", "lake_frequency", "lake_threshold",
-                     "lake_depth", "lake_max_carve",
+                     "lake_depth", "lake_max_carve", "lake_bank_offset",
                      "cliffs_enabled", "cliff_frequency", "cliff_threshold",
                      "cliff_step"},
-                    preset_path, result.warnings);
+                    provenance, result.warnings);
 
     result.ok = true;
     return result;

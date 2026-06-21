@@ -96,6 +96,30 @@ public:
     // Fixed: GetContext() is now defined inline here, solving the redefinition error.
     Rml::Context* GetContext() { return m_context; }
     
+    // Spec 002 Item 1: the host reads this each frame to drive the live preview
+    // diorama. `active` is true only while world_creation.rml is the loaded,
+    // visible document AND its #preview_pane exists. The pane rect is in PIXELS
+    // (top-left origin, matching glfw framebuffer coords). worldType + params are
+    // the CURRENT form state (so sliding a knob re-derives the candidate world).
+    // weather is the selected pill ("clear"|"rain"|"snow"|"fog"|"storm"), tod the
+    // time-of-day slider [0,1]. The host blits its preview FBO into pane_{x,y,w,h}
+    // and routes mouse drag/scroll over that rect to the orbit controller.
+    struct PreviewState {
+        bool active = false;
+        std::string worldType = "default";
+        std::vector<WorldGenParam> params;
+        int pane_x = 0;
+        int pane_y = 0;
+        int pane_w = 0;
+        int pane_h = 0;
+        std::string weather = "clear";
+        float tod = 0.24f;
+    };
+    PreviewState GetWorldCreationPreviewState() const;
+    // Returns true once after the reset-view control was clicked, clearing the
+    // pending marker (the host then re-centers the orbit camera).
+    bool ConsumeWorldCreationResetView();
+
     void SetWorldCreationCallback(WorldCreationCallback callback) { m_worldCreationCallback = std::move(callback); }
     void SetWorldParamGetter(WorldParamGetter getter) { m_worldParamGetter = std::move(getter); }
     void SetWorldPresetSaver(WorldPresetSaver saver) { m_worldPresetSaver = std::move(saver); }
