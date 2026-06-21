@@ -340,15 +340,14 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
         TreeLodConfig c; // data-driven defaults; render.tree_lod.* may override later.
         return c;
     }();
-    struct StaticGroupKey {
-        std::string drawPath;   // resolved LOD mesh path actually drawn
-        std::string basePath;   // original asset path for texture/material lookup
-        std::uint32_t materialId = 0;
-        bool operator<(const StaticGroupKey& o) const {
-            if (drawPath != o.drawPath) return drawPath < o.drawPath;
-            if (basePath != o.basePath) return basePath < o.basePath;
-            return materialId < o.materialId;
-        }
+    // Cheap FNV-1a over a path string — used to key the per-frame resolve memo and
+    // the instance groups by uint64 instead of allocating/copying std::strings per
+    // instance (the old per-instance string alloc + std::map-of-strings was a large
+    // per-frame CPU tax that made flying laggy with tens of thousands of instances).
+    auto fnv64 = [](const std::string& s, std::uint64_t seed) {
+        std::uint64_t h = seed;
+        for (unsigned char c : s) { h ^= c; h *= 1099511628211ull; }
+        return h;
     };
     // Resolves (loading + caching) the mesh for a candidate path, falling back to
     // the base LOD0 path if the LOD variant cannot be loaded. Returns the path that
@@ -376,8 +375,18 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
     };
     // Each visible group carries parallel instance matrices + per-instance albedo tints
     // (vast-forest leaf/bark colour variation). Tint defaults to white (no-op) for non-trees.
-    struct InstanceBatch { std::vector<glm::mat4> mats; std::vector<glm::vec3> tints; };
-    std::map<StaticGroupKey, InstanceBatch> visible_instance_groups;
+    struct InstanceBatch {
+        Mesh* mesh = nullptr;
+        std::string drawPath;     // resolved LOD mesh path actually drawn
+        std::string basePath;     // original asset path for texture/material lookup
+        std::uint32_t materialId = 0;
+        std::vector<glm::mat4> mats; std::vector<glm::vec3> tints;
+    };
+    // Per-frame memo: (basePath,lod) -> resolved {mesh, drawPath}, so the expensive
+    // LodMeshPath() string build + resolve_mesh() lookup run ONCE per distinct mesh
+    // variant per frame (~hundreds) instead of once per instance (~tens of thousands).
+    std::unordered_map<std::uint64_t, std::pair<Mesh*, std::string>> resolveMemo;
+    std::unordered_map<std::uint64_t, InstanceBatch> visible_instance_groups;
     // Render-only deterministic position hash -> [0,1] (never feeds the sim/world_hash).
     auto hash01 = [](const glm::vec3& p, float salt) {
         float s = std::sin(glm::dot(p, glm::vec3(12.9898f, 78.233f, 37.719f)) + salt) * 43758.5453f;
@@ -387,13 +396,22 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
         auto const& transform = view.get<const Components::TransformComponent>(entity);
         auto const& mesh_info = view.get<const Components::StaticMeshComponent>(entity);
         // Pick the LOD bucket from this instance's distance to the render camera,
-        // then resolve the LOD variant path (with LOD0 fallback). Distance uses the
-        // instance origin; the near/far thresholds make the near field unchanged.
+        // then resolve the LOD variant path (with LOD0 fallback) THROUGH THE MEMO so
+        // we don't allocate a path string per instance. Distance uses the instance
+        // origin; the near/far thresholds make the near field unchanged.
         const float dist = glm::length(transform.position - cameraPos);
         const int lod = SelectTreeLod(dist, kTreeLodCfg);
-        const std::string candidatePath = LodMeshPath(mesh_info.meshPath, lod);
-        auto [mesh, drawPath] = resolve_mesh(candidatePath, mesh_info.meshPath);
+        const std::uint64_t rkey = fnv64(mesh_info.meshPath, 1469598103934665603ull)
+                                 ^ (static_cast<std::uint64_t>(lod) * 0x9E3779B97F4A7C15ull);
+        auto rit = resolveMemo.find(rkey);
+        if (rit == resolveMemo.end()) {
+            const std::string candidatePath = LodMeshPath(mesh_info.meshPath, lod);
+            auto resolved = resolve_mesh(candidatePath, mesh_info.meshPath);
+            rit = resolveMemo.emplace(rkey, std::make_pair(resolved.first, std::move(resolved.second))).first;
+        }
+        Mesh* mesh = rit->second.first;
         if (!mesh) continue;
+        const std::string& drawPath = rit->second.second;
         glm::vec3 world_sphere_center = transform.position + glm::vec3(mesh->boundingSphere);
         float radius = mesh->boundingSphere.w * glm::max(glm::max(transform.scale.x, transform.scale.y), transform.scale.z);
         bool culled = false;
@@ -430,23 +448,31 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
                 const float h = hash01(transform.position, 5.1f);
                 tint = glm::vec3(0.82f + 0.32f * h, 0.78f + 0.22f * h, 0.72f + 0.20f * h);
             }
-            auto& batch = visible_instance_groups[{drawPath, mesh_info.meshPath, mesh_info.materialId}];
+            // Group by a cheap uint64 (no per-instance string alloc/copy/compare).
+            const std::uint64_t gkey = rkey ^ (static_cast<std::uint64_t>(mesh_info.materialId) * 0x100000001B3ull);
+            auto& batch = visible_instance_groups[gkey];
+            if (batch.mats.empty()) {
+                batch.mesh = mesh;
+                batch.drawPath = drawPath;
+                batch.basePath = mesh_info.meshPath;
+                batch.materialId = mesh_info.materialId;
+            }
             batch.mats.push_back(model);
             batch.tints.push_back(tint);
         }
     }
-    for (const auto& [group_key, batch] : visible_instance_groups) {
+    for (const auto& [gkey, batch] : visible_instance_groups) {
         const std::vector<glm::mat4>& matrices = batch.mats;
-        Mesh* mesh = m_meshCache[group_key.drawPath].get();
+        Mesh* mesh = batch.mesh;
         if (!mesh || matrices.empty()) continue;
-        m_instanced_static_mesh_shader->setInt("u_materialId", static_cast<int>(group_key.materialId));
+        m_instanced_static_mesh_shader->setInt("u_materialId", static_cast<int>(batch.materialId));
         // I8 static-model UV texture lane: if this mesh has registered bark/leaf
         // textures, bind the static-model array to unit 3 and set its albedo/normal
         // layers (+ alpha-test) so g_buffer.frag's UV branch samples the model's own
         // texture by mesh UV instead of the world-projected terrain triplanar.
         // Track-B: texture lookup uses the BASE path so LOD variants keep textures.
         {
-            const auto* smt = pipeline.static_model_tex(group_key.basePath);
+            const auto* smt = pipeline.static_model_tex(batch.basePath);
             glActiveTexture(GL_TEXTURE3);
             if (smt && pipeline.static_model_texture_array() != 0) {
                 glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.static_model_texture_array());
@@ -463,8 +489,8 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
                 // VAST-FOREST: the procedural LEAF submeshes (no texture lane) still sway in the
                 // wind (height-scaled); bark/trunk + rigid props stay at 0. Keyed on the palette
                 // key suffix so only procgen leaves flutter.
-                const bool isLeaf = group_key.basePath.size() >= 5 &&
-                                    group_key.basePath.rfind("_leaf") == group_key.basePath.size() - 5;
+                const bool isLeaf = batch.basePath.size() >= 5 &&
+                                    batch.basePath.rfind("_leaf") == batch.basePath.size() - 5;
                 m_instanced_static_mesh_shader->setFloat("u_windStrength", isLeaf ? 0.85f : 0.0f);
             }
         }
