@@ -61,16 +61,40 @@ public:
             static_cast<std::size_t>(x), static_cast<std::size_t>(z), amount);
     }
 
-    // Advance every channel one step: diffuse (spread), then evaporate (decay
-    // toward zero by `evaporation` in [0,1]). `diffusion_iters`/`diffusion_rate`
-    // pass through to the conservative solver. Evaporation is applied AFTER
-    // diffusion so a fresh deposit both spreads and begins to fade.
-    void Step(double diffusion_rate, std::size_t diffusion_iters, double evaporation) {
+    // Advance every channel one step: (optionally) ADVECT downwind, then diffuse
+    // (spread), then evaporate (decay toward zero by `evaporation` in [0,1]).
+    // `diffusion_iters`/`diffusion_rate` pass through to the conservative solver.
+    // Evaporation is applied AFTER diffusion so a fresh deposit both spreads and
+    // begins to fade.
+    //
+    // T-I9-AI E2 (FR-2) wind-advection: `wind_cx`/`wind_cz` are the wind vector in
+    // CELLS PER STEP (the caller converts world-units/sec via dt and cell size).
+    // The pre-pass is a semi-Lagrangian backtrace — each cell samples UPWIND
+    // (x - wind, z - wind) with bilinear interpolation, so the whole field drifts
+    // in the +wind direction (downwind), letting a predator track prey UP-wind.
+    // Default (0,0) wind SKIPS advection entirely, so the step is byte-identical to
+    // the diffuse+evaporate-only result (canonical roster unchanged). Deterministic:
+    // double math, fixed traversal order, edge-clamped sampling — no RNG/wall-clock.
+    void Step(double diffusion_rate, std::size_t diffusion_iters, double evaporation,
+              double wind_cx = 0.0, double wind_cz = 0.0) {
         const double keep = 1.0 - (evaporation < 0.0 ? 0.0 : (evaporation > 1.0 ? 1.0 : evaporation));
         const bool did_diffuse = diffusion_iters > 0 && diffusion_rate > 0.0;
+        const bool advect = (wind_cx != 0.0 || wind_cz != 0.0) && m_w > 0 && m_h > 0;
         const std::size_t W = static_cast<std::size_t>(m_w);
         const std::size_t H = static_cast<std::size_t>(m_h);
         for (auto& field : m_ch) {
+            if (advect) {
+                // Snapshot the channel, then rewrite each cell from its upwind source.
+                std::vector<double> src(W * H);
+                for (std::size_t y = 0; y < H; ++y)
+                    for (std::size_t x = 0; x < W; ++x) src[y * W + x] = field.at(x, y);
+                for (std::size_t y = 0; y < H; ++y) {
+                    for (std::size_t x = 0; x < W; ++x) {
+                        field.set(x, y, BilinearClamped(src, static_cast<double>(x) - wind_cx,
+                                                        static_cast<double>(y) - wind_cz));
+                    }
+                }
+            }
             if (did_diffuse) {
                 (void)field.diffuse(diffusion_iters, diffusion_rate);
                 // The conservative 4-neighbour solver leaves a parity (checkerboard)
@@ -176,6 +200,30 @@ public:
 private:
     [[nodiscard]] bool valid(int ch, int x, int z) const {
         return ch >= 0 && ch < static_cast<int>(m_ch.size()) && in_bounds(x, z);
+    }
+
+    // Bilinear sample of a row-major W*H buffer at (fx,fz), edge-clamped. Used by the
+    // semi-Lagrangian advection backtrace. After clamping, fx/fz are >= 0 so the int
+    // cast == floor (no libm floor needed). Deterministic double arithmetic.
+    [[nodiscard]] double BilinearClamped(const std::vector<double>& s, double fx, double fz) const {
+        const double maxx = static_cast<double>(m_w - 1);
+        const double maxz = static_cast<double>(m_h - 1);
+        if (fx < 0.0) fx = 0.0; else if (fx > maxx) fx = maxx;
+        if (fz < 0.0) fz = 0.0; else if (fz > maxz) fz = maxz;
+        const int x0 = static_cast<int>(fx);
+        const int z0 = static_cast<int>(fz);
+        const int x1 = x0 + 1 < m_w ? x0 + 1 : x0;
+        const int z1 = z0 + 1 < m_h ? z0 + 1 : z0;
+        const double tx = fx - static_cast<double>(x0);
+        const double tz = fz - static_cast<double>(z0);
+        const std::size_t W = static_cast<std::size_t>(m_w);
+        const double v00 = s[static_cast<std::size_t>(z0) * W + static_cast<std::size_t>(x0)];
+        const double v10 = s[static_cast<std::size_t>(z0) * W + static_cast<std::size_t>(x1)];
+        const double v01 = s[static_cast<std::size_t>(z1) * W + static_cast<std::size_t>(x0)];
+        const double v11 = s[static_cast<std::size_t>(z1) * W + static_cast<std::size_t>(x1)];
+        const double a = v00 + (v10 - v00) * tx;
+        const double b = v01 + (v11 - v01) * tx;
+        return a + (b - a) * tz;
     }
     int m_w;
     int m_h;

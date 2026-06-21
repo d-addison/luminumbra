@@ -80,6 +80,10 @@ constexpr std::size_t kScentDiffusionIterations = 4;
 constexpr double kScentEvaporation = 0.05;
 constexpr double kScentTauMin = 1.0e-9;
 constexpr double kScentTauMax = 1.0e6;
+// FR-2 scent wind-advection strength. 0 = OFF -> ScentField::Step skips advection and the scent
+// field (and the ecology sub-hash) is byte-identical to the diffuse+evaporate-only result. Tune > 0
+// (with a scents+ecology re-pin) to make scent drift downwind so predators can track prey up-wind.
+constexpr double kScentWindAdvectionScale = 0.0;
 
 void AddValidationError(Luminumbra::world::WorldConfigValidationResult& result, std::string error) {
     result.errors.push_back(std::move(error));
@@ -197,7 +201,20 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             luminumbra::ai::RunScentDepositOnTick(
                 m_registry, *m_scentField, ScentOriginFor(m_metadata.spawnPoint.x),
                 ScentOriginFor(m_metadata.spawnPoint.z), kScentCellSize);
-            m_scentField->Step(kScentDiffusionRate, kScentDiffusionIterations, kScentEvaporation);
+            // FR-2: advect the scent downwind by the PRIOR-tick wind (the wind field is updated
+            // later this tick at slot 3, so sampling here keeps the slot order stable). Convert
+            // world-units/sec -> cells/step via dt and the cell size. Scale 0 -> zero wind ->
+            // Step skips advection -> byte-identical (no re-pin until tuned on).
+            double wind_cx = 0.0, wind_cz = 0.0;
+            if (kScentWindAdvectionScale != 0.0 && m_windFieldSystem) {
+                const Luminumbra::Vec2 w = m_windFieldSystem->SampleWind(m_metadata.spawnPoint);
+                const double k = kScentWindAdvectionScale * m_simulationClock.fixed_dt() /
+                                 static_cast<double>(kScentCellSize);
+                wind_cx = static_cast<double>(w.x) * k;
+                wind_cz = static_cast<double>(w.y) * k;
+            }
+            m_scentField->Step(kScentDiffusionRate, kScentDiffusionIterations, kScentEvaporation,
+                               wind_cx, wind_cz);
             m_scentField->Clamp(kScentTauMin, kScentTauMax);
         }
 

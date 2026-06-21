@@ -122,3 +122,59 @@ TEST(ScentField, IsDeterministicAcrossRuns) {
     const double b = run();
     EXPECT_EQ(a, b); // bit-identical accumulation across identical runs
 }
+
+// FR-2 wind-advection: a pure +X wind shifts the deposited blob downwind (+X). With an integer
+// wind the semi-Lagrangian backtrace lands exactly on source cells, so the blob translates cleanly.
+TEST(ScentField, WindAdvectionDriftsScentDownwind) {
+    ScentField f(20, 16, 1);
+    f.Deposit(0, 4, 8, 100.0);
+    // No diffusion / no evaporation: isolate the advection. Wind = (+2, 0) cells/step.
+    f.Step(/*rate=*/0.0, /*iters=*/0, /*evap=*/0.0, /*wind_cx=*/2.0, /*wind_cz=*/0.0);
+    EXPECT_NEAR(f.Sample(0, 6, 8), 100.0, 1e-9); // blob arrived 2 cells downwind (+X)
+    EXPECT_NEAR(f.Sample(0, 4, 8), 0.0, 1e-9);   // original cell now samples empty upwind
+}
+
+// Default (zero) wind is byte-identical to the no-wind 3-arg Step — so the canonical scent tick
+// (which passes 0 until tuned) is unchanged and needs no re-pin.
+TEST(ScentField, ZeroWindStepMatchesNoWindStep) {
+    ScentField a(16, 16, 2), b(16, 16, 2);
+    a.Deposit(0, 5, 6, 30.0); b.Deposit(0, 5, 6, 30.0);
+    a.Deposit(1, 9, 9, 12.0); b.Deposit(1, 9, 9, 12.0);
+    for (int i = 0; i < 4; ++i) {
+        a.Step(0.2, 2, 0.05);               // no wind args (legacy call)
+        b.Step(0.2, 2, 0.05, 0.0, 0.0);     // explicit zero wind
+    }
+    for (int c = 0; c < 2; ++c)
+        for (int z = 0; z < 16; ++z)
+            for (int x = 0; x < 16; ++x)
+                EXPECT_DOUBLE_EQ(a.Sample(c, x, z), b.Sample(c, x, z));
+}
+
+// Advection (incl. fractional/bilinear wind) is deterministic across identical runs (run==replay).
+TEST(ScentField, WindAdvectionIsDeterministic) {
+    auto run = []() {
+        ScentField f(18, 18, 1);
+        f.Deposit(0, 4, 4, 25.0);
+        for (int i = 0; i < 6; ++i) f.Step(0.18, 2, 0.05, 1.5, -0.5);
+        double acc = 0.0;
+        for (int z = 0; z < 18; ++z)
+            for (int x = 0; x < 18; ++x) acc += f.Sample(0, x, z);
+        return acc;
+    };
+    EXPECT_EQ(run(), run());
+}
+
+// Hunt-enabling property: advection carries prey scent FURTHER downwind than diffusion alone, so a
+// predator downwind detects scent it otherwise could not — the cue to then move up-wind to the prey.
+TEST(ScentField, WindCarriesScentFartherDownwindThanDiffusionAlone) {
+    ScentField wind(24, 12, 1), still(24, 12, 1);
+    wind.Deposit(0, 4, 6, 100.0);
+    still.Deposit(0, 4, 6, 100.0);
+    for (int i = 0; i < 8; ++i) {
+        wind.Step(0.2, 2, 0.02, /*wind_cx=*/1.0, /*wind_cz=*/0.0);
+        still.Step(0.2, 2, 0.02, 0.0, 0.0);
+    }
+    // Far downwind (+X of the source), the advected field carries measurably more scent.
+    EXPECT_GT(wind.Sample(0, 14, 6), still.Sample(0, 14, 6));
+    EXPECT_GT(wind.Sample(0, 14, 6), 0.0);
+}
