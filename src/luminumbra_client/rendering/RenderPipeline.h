@@ -759,6 +759,15 @@ public:
     }
     WaterfallSiteCache& waterfall_cache() { return m_waterfall_sites; }
 
+    // T-I5b-4 (W1): build the live waterfall DRESSING for `world` (call once
+    // after the world is entered). Queries waterfall_sites(world), bakes one
+    // vertical world-space quad per site into m_waterfall_vao/_vbo (drawn by the
+    // falling-sheet shader in render_frame), records the per-site crest/foot Y
+    // for the shader's height-down-the-fall normalization, and emits an A1 spray
+    // emitter at each plunge foot (capped to bound particle cost). RENDER-ONLY
+    // dressing on a world-deterministic site set — never hashed (one-way).
+    void prepare_waterfalls(const Systems::SHIELD_WorldSystem& world);
+
 private:
     // Extracted render pass classes (T-I2-11). Passes own their GL resources
     // (FBOs/textures/shaders); the pipeline keeps orchestration order, shared
@@ -969,6 +978,15 @@ private:
     // T-I5b-4 (W1): the animated falling-sheet shader (waterfall.frag) the live
     // pipeline draws over detected waterfall sites. Render-only dressing.
     std::unique_ptr<Shader> m_waterfall_shader;
+    // T-I5b-4 (W1): baked waterfall sheet geometry. One vertical world-space quad
+    // (6 verts, interleaved pos+normal) per detected site, all packed into one
+    // VBO; m_waterfall_sheet_sites keeps the per-site crest/foot Y the shader needs
+    // to normalize height-down-the-fall (drawn as 6-vert sub-ranges). Built once by
+    // prepare_waterfalls; render-only, never hashed. Released in cleanup_gpu_resources().
+    GLuint m_waterfall_vao = 0;
+    GLuint m_waterfall_vbo = 0;
+    std::vector<WaterfallSite> m_waterfall_sheet_sites;
+    bool m_waterfall_geometry_built = false;
     double m_sky_full_precompute_ms = 0.0;
     double m_sky_view_refresh_ms = 0.0; // last sky-view refresh cost (0 = none this frame)
     // Sky-derived scattering ambient (the sky-view hemisphere integral); folded

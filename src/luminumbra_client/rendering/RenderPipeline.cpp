@@ -1835,6 +1835,65 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
         glBindVertexArray(0);  // Unbind after water pass
     }
 
+    // 7-W. WATERFALL SHEETS (T-I5b-4, W1): the animated falling-sheet veil drawn
+    // over each detected waterfall site. Render-only dressing on a world-
+    // deterministic site set (never hashed). Drawn after water, into the lit FBO,
+    // as a translucent double-sided veil (depth-test on, depth-write off, blend on
+    // so it layers over the scene + each other). A no-op (zero draws) when no
+    // sites were baked, so existing visual gates stay byte-stable.
+    if (m_waterfall_geometry_built && m_waterfall_vao != 0 &&
+        !m_waterfall_sheet_sites.empty() &&
+        m_waterfall_shader && m_waterfall_shader->IsValid()) {
+        glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
+        glViewport(0, 0, m_screen_width, m_screen_height);
+
+        // Save GL state we toggle so it is restored exactly afterwards.
+        const GLboolean blend_was = glIsEnabled(GL_BLEND);
+        const GLboolean cull_was = glIsEnabled(GL_CULL_FACE);
+        const GLboolean depth_was = glIsEnabled(GL_DEPTH_TEST);
+        const GLboolean poly_off_was = glIsEnabled(GL_POLYGON_OFFSET_FILL);
+
+        m_waterfall_shader->use();
+        m_waterfall_shader->setMat4("model", glm::mat4(1.0f));
+        m_waterfall_shader->setMat4("view", view);
+        m_waterfall_shader->setMat4("projection", projection);
+        m_waterfall_shader->setMat3("normalMatrix", glm::mat3(1.0f));
+        m_waterfall_shader->setFloat("u_time", static_cast<float>(glfwGetTime()));
+        m_waterfall_shader->setVec3("u_camera_pos", camera.Position);
+        const glm::vec3 sun_color = (m_sun.color != glm::vec3(0.0f))
+                                        ? m_sun.color
+                                        : glm::vec3(1.0f);
+        m_waterfall_shader->setVec3("u_sun_color", sun_color);
+
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glEnable(GL_DEPTH_TEST);        // self-sufficient: don't rely on the water pass leaving it on
+        glDepthMask(GL_FALSE);          // translucent veil: don't occlude
+        glDisable(GL_CULL_FACE);        // double-sided sheet
+        // The sheet hugs the cliff face the river carved (same surface WaterPass/terrain
+        // draws), so pull it slightly toward the camera in depth to avoid z-fighting /
+        // being hidden behind the toe of the drop.
+        glEnable(GL_POLYGON_OFFSET_FILL);
+        glPolygonOffset(-1.0f, -1.0f);
+
+        glBindVertexArray(m_waterfall_vao);
+        for (std::size_t i = 0; i < m_waterfall_sheet_sites.size(); ++i) {
+            const WaterfallSite& s = m_waterfall_sheet_sites[i];
+            m_waterfall_shader->setFloat("u_crest_y", s.crest.y);
+            m_waterfall_shader->setFloat("u_foot_y", s.foot.y);
+            glDrawArrays(GL_TRIANGLES, static_cast<GLint>(i * 6), 6);
+        }
+        glBindVertexArray(0);
+
+        // Restore GL state: depth writes on, cull/blend/depth-test/poly-offset as they were.
+        glDepthMask(GL_TRUE);
+        glPolygonOffset(0.0f, 0.0f);
+        if (poly_off_was) glEnable(GL_POLYGON_OFFSET_FILL); else glDisable(GL_POLYGON_OFFSET_FILL);
+        if (depth_was) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+        if (cull_was) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
+        if (blend_was) glEnable(GL_BLEND); else glDisable(GL_BLEND);
+    }
+
     // 7a. WEATHER OVERLAY (owned by SkyboxPass): defer until after water so
     // screen-space rain/fog remains a full-scene composite while sky/cloud/aurora
     // still render before water.
@@ -2311,6 +2370,11 @@ void RenderPipeline::cleanup_gpu_resources() {
     destroy_halfres_cloud(); // render-optimization: reduced-res sky-dome target
     if (m_screen_quad_vao) { glDeleteVertexArrays(1, &m_screen_quad_vao); m_screen_quad_vao = 0; }
     if (m_screen_quad_vbo) { glDeleteBuffers(1, &m_screen_quad_vbo); m_screen_quad_vbo = 0; }
+    // T-I5b-4 (W1): release the baked waterfall sheet geometry.
+    if (m_waterfall_vao) { glDeleteVertexArrays(1, &m_waterfall_vao); m_waterfall_vao = 0; }
+    if (m_waterfall_vbo) { glDeleteBuffers(1, &m_waterfall_vbo); m_waterfall_vbo = 0; }
+    m_waterfall_sheet_sites.clear();
+    m_waterfall_geometry_built = false;
     m_skybox_pass->destroy_geometry();
     if (m_particle_pass) { m_particle_pass->destroy_buffers(); } // T-I5a-1
     if (m_foliage_pass) { m_foliage_pass->destroy_buffers(); m_foliage_pass->destroy_compute(); }   // T-I5b-1 / T-I6 #4
@@ -2341,6 +2405,126 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_last_render_pass_metadata.clear();
     m_terrain_texture_fallback_layers = 0;
     m_started = false;
+}
+
+// T-I5b-4 (W1): bake the live waterfall DRESSING for `world`. Builds one vertical
+// world-space quad per detected site into m_waterfall_vao/_vbo and emits one A1
+// spray emitter per site (capped). RENDER-ONLY: the SITES are a pure function of
+// the generated world (camera/frame independent, same seed -> same sites), but
+// the dressing geometry/spray are never hashed (one-way, critique F2/F5).
+void RenderPipeline::prepare_waterfalls(const Systems::SHIELD_WorldSystem& world) {
+    // Re-bakeable: drop any prior geometry so a re-enter rebuilds cleanly.
+    if (m_waterfall_vao) { glDeleteVertexArrays(1, &m_waterfall_vao); m_waterfall_vao = 0; }
+    if (m_waterfall_vbo) { glDeleteBuffers(1, &m_waterfall_vbo); m_waterfall_vbo = 0; }
+    m_waterfall_sheet_sites.clear();
+    m_waterfall_geometry_built = false;
+
+    // World-deterministic detection (cached). Copy into m_waterfall_sheet_sites so
+    // the per-site crest/foot Y survive even if the cache is later cleared.
+    const std::vector<WaterfallSite>& sites = waterfall_sites(world);
+    if (sites.empty()) {
+        LUMINUMBRA_CORE_INFO("[waterfall] prepare_waterfalls: 0 sites detected (no dressing)");
+        return;
+    }
+    m_waterfall_sheet_sites = sites;
+
+    // Interleaved pos(3) + normal(3) per vertex; 6 verts (two triangles) per site.
+    constexpr int kFloatsPerVertex = 6;
+    constexpr int kVertsPerSite = 6;
+    std::vector<float> verts;
+    verts.reserve(m_waterfall_sheet_sites.size() * kVertsPerSite * kFloatsPerVertex);
+
+    constexpr float kMinWidth = 2.0f;     // a sane minimum sheet width (m)
+    constexpr float kMinRun   = 0.5f;     // ensure the foot is advanced downstream
+    const glm::vec3 up(0.0f, 1.0f, 0.0f);
+
+    for (const WaterfallSite& s : m_waterfall_sheet_sites) {
+        // Downhill flow azimuth in XZ. Guard div-by-zero on normalize (fallback +X).
+        glm::vec2 flow2 = s.flow_dir;
+        float flow_len = std::sqrt(flow2.x * flow2.x + flow2.y * flow2.y);
+        if (flow_len > 1e-5f) {
+            flow2 /= flow_len;
+        } else {
+            flow2 = glm::vec2(1.0f, 0.0f);
+        }
+        const glm::vec3 flow_dir(flow2.x, 0.0f, flow2.y);
+        // Cross-flow axis (the sheet's horizontal width direction): perpendicular
+        // to flow in XZ. cross(up, flow_dir) is unit (both unit + orthogonal).
+        const glm::vec3 cross_axis = glm::cross(up, flow_dir);
+
+        const float width = std::max(s.width, kMinWidth);
+        const float half_w = width * 0.5f;
+        const float run = std::max(s.run_length, kMinRun);
+
+        // Lip (top) at the crest XZ; foot (bottom) advanced downstream by the run.
+        const float top_y = s.crest.y;
+        const float bot_y = s.foot.y;
+        const glm::vec3 top_center(s.crest.x, top_y, s.crest.z);
+        const glm::vec3 bot_center = top_center + flow_dir * run + glm::vec3(0.0f, bot_y - top_y, 0.0f);
+
+        // Four corners of the vertical sheet (left/right along the cross axis).
+        const glm::vec3 tl = top_center - cross_axis * half_w;
+        const glm::vec3 tr = top_center + cross_axis * half_w;
+        const glm::vec3 bl = bot_center - cross_axis * half_w;
+        const glm::vec3 br = bot_center + cross_axis * half_w;
+
+        // Normal: horizontal, perpendicular to the sheet. cross(cross_axis, up)
+        // == flow_dir (the downstream-facing horizontal normal). The sheet is
+        // drawn double-sided (cull off) so the exact orientation is cosmetic.
+        glm::vec3 n = glm::cross(cross_axis, up);
+        float nlen = glm::length(n);
+        n = (nlen > 1e-5f) ? (n / nlen) : glm::vec3(0.0f, 0.0f, 1.0f);
+
+        auto push_vert = [&](const glm::vec3& p) {
+            verts.push_back(p.x); verts.push_back(p.y); verts.push_back(p.z);
+            verts.push_back(n.x); verts.push_back(n.y); verts.push_back(n.z);
+        };
+        // Triangle 1: tl, bl, br ; Triangle 2: tl, br, tr.
+        push_vert(tl); push_vert(bl); push_vert(br);
+        push_vert(tl); push_vert(br); push_vert(tr);
+    }
+
+    // Upload the combined sheet geometry to a dedicated VAO/VBO.
+    glGenVertexArrays(1, &m_waterfall_vao);
+    glGenBuffers(1, &m_waterfall_vbo);
+    glBindVertexArray(m_waterfall_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, m_waterfall_vbo);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
+                 verts.data(), GL_STATIC_DRAW);
+    // location 0 = aPos, location 1 = aNormal (basic.vert layout).
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, kFloatsPerVertex * sizeof(float),
+                          reinterpret_cast<void*>(0));
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, kFloatsPerVertex * sizeof(float),
+                          reinterpret_cast<void*>(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    label_gl_object(GL_VERTEX_ARRAY, m_waterfall_vao, "waterfall.sheet_vao");
+    label_gl_object(GL_BUFFER, m_waterfall_vbo, "waterfall.sheet_vbo");
+    m_waterfall_geometry_built = true;
+
+    // A1 spray: one mist emitter per plunge foot, capped to bound particle cost.
+    constexpr std::size_t kMaxSpray = 24;
+    std::size_t spray_count = 0;
+    if (m_particle_pass) {
+        const std::filesystem::path spray_json =
+            m_root_path / "data/common/particles/waterfall_spray.json";
+        for (const WaterfallSite& s : m_waterfall_sheet_sites) {
+            if (spray_count >= kMaxSpray) break;
+            m_particle_pass->add_waterfall_spray(spray_json, s.foot, s.drop_height, s.width);
+            ++spray_count;
+        }
+    }
+
+    if (m_waterfall_sheet_sites.size() > kMaxSpray) {
+        LUMINUMBRA_CORE_INFO("[waterfall] prepare_waterfalls: {} sites; sheets drawn for all, spray capped to {}",
+                             m_waterfall_sheet_sites.size(), kMaxSpray);
+    } else {
+        LUMINUMBRA_CORE_INFO("[waterfall] prepare_waterfalls: {} sites (sheets + {} spray emitters)",
+                             m_waterfall_sheet_sites.size(), spray_count);
+    }
 }
 
 // --- RESOURCE MANAGEMENT ---

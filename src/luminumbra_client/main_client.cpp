@@ -2479,6 +2479,15 @@ int main(int argc, char* argv[]) {
             g_menu_backdrop_active = false;
             if (auto* world_system = gameSession->GetWorldSystem()) {
                 renderPipeline.SetupGPUSDFIntegration(*world_system);
+                // spec 003 FR-A1: bake the live waterfall dressing once for this
+                // world. Detection is a pure function of the generated world
+                // (river course x steep height drop), so it is valid here even
+                // before chunks stream in; the sheets + A1 spray are render-only
+                // (never hashed). Covers both the runtime-scenario bypass path and
+                // the interactive loading path below.
+                renderPipeline.prepare_waterfalls(*world_system);
+                LUMINUMBRA_CORE_INFO("Waterfall dressing prepared: {} site(s).",
+                                     renderPipeline.waterfall_sites(*world_system).size());
             }
 
             // T-I2-12: restore persisted chunk state AFTER the world systems

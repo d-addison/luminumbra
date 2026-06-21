@@ -272,10 +272,34 @@ void PhysicsSystem::update_player(const glm::vec3& wish_velocity, bool wants_to_
     
     // Set the calculated velocity on the character controller.
     m_player_character->SetLinearVelocity(desired_velocity);
-    
+
     // Update the character controller, which will handle movement and collision.
     // The gravity parameter here is used for ground detection, not for applying acceleration.
-    m_player_character->Update(dt, m_jolt_system->GetGravity(), BroadPhaseLayerFilterAll(), ObjectLayerFilterAll(), JPH::BodyFilter(), JPH::ShapeFilter(), *m_temp_allocator);
+    //
+    // TRAVERSAL-LITE step-up / mantle (spec 003 FR-C1): use Jolt's ExtendedUpdate
+    // instead of the plain Update. ExtendedUpdate runs WalkStairs internally, which
+    // robustly lifts the capsule over short ledges (up to mWalkStairsStepUp high)
+    // when forward motion is blocked by a low obstacle that has clear space above --
+    // exactly the "step up a ledge without jumping" behaviour we want. This is NOT a
+    // climb FSM and NOT wall-scaling: mMaxSlopeAngle still blocks steep faces taller
+    // than the step, and the lift only triggers when there's horizontal wish motion.
+    //
+    // All settings are FIXED constants (no wall-clock / no random) so the path stays
+    // deterministic. NOTE: this is the CLIENT-ONLY local player controller; the
+    // server-authoritative avatars (update_avatars, which fold into the entities
+    // sub-hash) are deliberately left on plain Update -> no world_hash change.
+    JPH::CharacterVirtual::ExtendedUpdateSettings step_settings;
+    // Lift over ledges up to ~0.7 m (knee/waist height) -- mounts short steps and
+    // small ledges without a jump. Jolt default is 0.4 m; we raise it for traversal.
+    step_settings.mWalkStairsStepUp = JPH::Vec3(0.0f, 0.7f, 0.0f);
+    // Match the step-down sweep so the character settles back onto the surface after
+    // cresting a step (otherwise it can briefly float off the top of the ledge).
+    step_settings.mWalkStairsStepDownExtra = JPH::Vec3(0.0f, -0.7f, 0.0f);
+    // Keep the default stick-to-floor sweep so it tracks down the far side of a step.
+    // (mStickToFloorStepDown left at its default of {0,-0.5,0}.)
+    m_player_character->ExtendedUpdate(dt, m_jolt_system->GetGravity(), step_settings,
+                                       BroadPhaseLayerFilterAll(), ObjectLayerFilterAll(),
+                                       JPH::BodyFilter(), JPH::ShapeFilter(), *m_temp_allocator);
 }
 
 void PhysicsSystem::set_player_crouched(bool is_crouched) {

@@ -67,17 +67,19 @@ void main() {
 
     // Vertical streak structure: sharpen the noise into bright filaments so the
     // cascade reads as falling threads of water.
-    float streaks = pow(turbulence, 1.6);
+    float streaks = pow(turbulence, 1.3);
 
-    // --- Colour: blue-white cascade, brightening toward froth. ---
-    vec3 deep_water  = vec3(0.20, 0.42, 0.62);
-    vec3 bright_foam = vec3(0.92, 0.97, 1.0);
-    vec3 cascade = mix(deep_water, bright_foam, clamp(streaks * 1.3, 0.0, 1.0));
+    // --- Colour: AERATED blue-white cascade so it reads as falling water, NOT
+    // the calm blue lake surface behind it. The body is a bright churned blue and
+    // the streaks lift to near-white froth. ---
+    vec3 aerated_body = vec3(0.55, 0.74, 0.88);  // bright churned water (lighter than the lake)
+    vec3 bright_foam  = vec3(0.95, 0.98, 1.0);
+    vec3 cascade = mix(aerated_body, bright_foam, clamp(streaks * 1.6, 0.0, 1.0));
 
-    // --- Foam bands at the crest and the plunge foot. ---
-    // Crest froth (top ~12%) and plunge-pool foam (bottom ~22%) churn white.
-    float crest_foam = smoothstep(0.12, 0.0, fall_t);
-    float plunge_foam = smoothstep(0.78, 1.0, fall_t);
+    // --- Foam bands at the crest and the plunge foot (widened so they read). ---
+    // Crest froth (top ~18%) and plunge-pool foam (bottom ~30%) churn white.
+    float crest_foam = smoothstep(0.18, 0.0, fall_t);
+    float plunge_foam = smoothstep(0.70, 1.0, fall_t);
     // Animate the plunge foam so the pool roils.
     float roil = 0.5 + 0.5 * value_noise(vec2(lane * 4.0, u_time * 2.2));
     plunge_foam *= (0.6 + 0.4 * roil);
@@ -91,7 +93,7 @@ void main() {
 
     // Sheet opacity: brighter where the streaks/foam are, with a soft floor so
     // the falling water always reads as a translucent veil.
-    float alpha = clamp(0.45 + streaks * 0.45 + foam * 0.35, 0.45, 0.98);
+    float alpha = clamp(0.60 + streaks * 0.35 + foam * 0.35, 0.60, 0.98);
 
     o_frag_color = vec4(lit, alpha);
 }

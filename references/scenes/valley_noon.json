@@ -1,0 +1,6 @@
+{ "_comment": "spec 003 A1: noon aerial over the river valley to show tuned waterfall veils along the channels",
+  "camera": { "pos": [8, 90, 8], "yaw": 35, "pitch": -32, "fov": 70 },
+  "time_of_day": 0.0,
+  "clouds": { "coverage": 0.3, "plane_height": 1400, "shadow": true },
+  "weather": { "type": "none", "intensity": 0.0 },
+  "screenshot": "references/compare/valley_noon.ppm" }
