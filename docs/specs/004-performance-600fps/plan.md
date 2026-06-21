@@ -185,6 +185,28 @@ spec 003 C2's premise) optimizes the wrong target. **Awaiting owner decision on 
   churn). **Next: make this redundant per-frame work elide (verified by work-counts), starting with
   streaming (owner OK'd a batched re-pin if a fix touches world_hash).**
 
+### Stabilize + streaming root cause (commits 4748f57a …)
+- **Gate suite stabilized:** FoliageInstancing was PRE-EXISTING RED (coverage_density saturated:
+  ~70k in-ring instances / 32768 normalizer = 1.0 vs biome 0.3). Re-blessed the normalizer to 233000
+  (matches the intended dense scatter; the prior 256→2048 bump left it stale). Gate now GREEN.
+  Test-only; no engine change.
+- **Streaming root cause PINNED (`SHIELD_WorldSystem::update`, :1933-~2270).** The ~10 ms is ~5
+  redundant FULL O(N)-over-all-loaded-chunks passes EVERY frame, none gated on camera movement /
+  dirtiness, so they run in full even on a static, fully-meshed world:
+  1. state-count scan (`:1953`) — telemetry counts
+  2. `meshed_columns` unordered_map BUILD (`:2027`) — per-frame map alloc + O(N) fill
+  3. meshing-candidate loop + `std::sort` (`:2011-2241`) — distance/LOD per chunk to pick remesh work
+  4. physics-collider scan (`:2247`) — iterates all chunks to find any missing collision
+  5. final state-count scan (`:2264`) — telemetry counts
+  (`update_chunk_activation` IS correctly throttled; `PrefetchHydroRegions` early-returns hydro-off.)
+  **Fix (next, owner OK'd a re-pin): gate passes 2-4 on an anchor-moved / chunk-dirty signal (skip the
+  candidate rebuild + map build when nothing changed), and track "chunks needing collision" in a small
+  set instead of scanning all. world_hash-safe in principle (mesh/collision scheduling is render/
+  physics-side, not the hashed sim state) — VERIFY with HeadlessServerTick + PopulatedWorldReplay; use
+  the re-pin allowance only if a determinism gate legitimately moves. Verify the win by WORK-COUNTS
+  (candidates built / chunks scanned per static frame → ~0), which are clock-independent (the GPU-clock
+  DVFS noise blocks reliable ms A/B without admin clock-lock).**
+
 ## Gate Criteria
 The plan phase is complete when:
 - [x] All tasks defined with clear acceptance criteria (above + spec ACs).
