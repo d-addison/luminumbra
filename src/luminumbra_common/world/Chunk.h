@@ -84,6 +84,10 @@ public:
     std::vector<f32> water_level_data;
     std::vector<Vec2> water_flow_data;
     std::vector<f32> water_sim_terrain_height;
+    // Worldgen rest level per cell (WaterLevelAt: lake surface in basins, sea level
+    // elsewhere). The flow sim is clamped to never drain a cell below this, so
+    // perched lakes stay filled at their basin elevation instead of flowing out.
+    std::vector<f32> water_rest_level;
     std::atomic<bool> has_water_sim{false};
     std::atomic<bool> water_mesh_generated{false};
     std::atomic<int> current_water_resolution{8}; // Current water grid resolution (4, 8, 16, or 32)

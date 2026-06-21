@@ -122,6 +122,7 @@ void WaterSystem::update(entt::registry& registry, const std::unordered_map<Chun
             chunk_ptr->water_level_data.assign(sim_size, SEA_LEVEL);
             chunk_ptr->water_flow_data.assign(sim_size, Vec2(0.0f));
             chunk_ptr->water_sim_terrain_height.resize(sim_size);
+            chunk_ptr->water_rest_level.assign(sim_size, SEA_LEVEL);
             const IVec3 c_coords = chunk_ptr->get_coords();
             const float cell_width_x = CHUNK_SIZE_X / (float)initial_resolution;
             const float cell_width_z = CHUNK_SIZE_Z / (float)initial_resolution;
@@ -130,7 +131,15 @@ void WaterSystem::update(entt::registry& registry, const std::unordered_map<Chun
                 for (int x = 0; x < initial_resolution; ++x) {
                     float world_x = c_coords.x * CHUNK_SIZE_X + (x + 0.5f) * cell_width_x;
                     float world_z = c_coords.z * CHUNK_SIZE_Z + (z + 0.5f) * cell_width_z;
-                    chunk_ptr->water_sim_terrain_height[z * initial_resolution + x] = m_shield_system->GetTerrainHeightAt(world_x, world_z);
+                    const int cell = z * initial_resolution + x;
+                    // Seed the resting water surface from the worldgen: sea level
+                    // everywhere, raised to the local lake surface inside basins so
+                    // perched lakes start (and, via the rest-level clamp below, stay)
+                    // filled at their basin elevation.
+                    const float rest = m_shield_system->WaterLevelAt(world_x, world_z);
+                    chunk_ptr->water_level_data[cell] = rest;
+                    chunk_ptr->water_rest_level[cell] = rest;
+                    chunk_ptr->water_sim_terrain_height[cell] = m_shield_system->GetTerrainHeightAt(world_x, world_z);
                 }
             }
             chunk_ptr->has_water_sim.store(true);
@@ -320,6 +329,16 @@ void WaterSystem::dispatch_simulation_jobs(const std::vector<Chunk*>& chunks_to_
 
     for (WaterSimulationTask& task : tasks) {
         task.chunk->water_level_data = std::move(task.output.water_levels);
+        // Pin to the worldgen rest level: the flow sim may ripple a cell ABOVE its
+        // rest surface but never drain it below, so perched lakes (rest > sea level)
+        // stay filled at their basin elevation instead of flowing downhill/out.
+        const std::vector<f32>& rest = task.chunk->water_rest_level;
+        std::vector<f32>& lvl = task.chunk->water_level_data;
+        if (rest.size() == lvl.size()) {
+            for (std::size_t i = 0; i < lvl.size(); ++i) {
+                if (lvl[i] < rest[i]) lvl[i] = rest[i];
+            }
+        }
         task.chunk->water_flow_data = std::move(task.output.flow_data);
         task.chunk->max_water_delta_last_tick = task.output.max_delta;
         if (task.output.max_delta > 1.0e-4f && task.chunk->water_mesh_generated.load(std::memory_order_relaxed)) {

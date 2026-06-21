@@ -9,7 +9,7 @@
       "octaves": 6,
       "persistence": 0.5,
       "lacunarity": 2.0,
-      "height_offset": 20.0,
+      "height_offset": 5.0,
       "shaping": {
         "enabled": true,
         "continentalness_frequency": 0.0012,
@@ -18,9 +18,68 @@
         "peaks_amplitude": 20.0,
         "domain_warp_amplitude": 14.0,
         "domain_warp_frequency": 0.004,
-        "continental_spline": [[-1.0, -6.0], [-0.3, -1.0], [0.1, 3.0], [0.5, 9.0], [1.0, 18.0]],
-        "erosion_spline": [[-1.0, 0.7], [-0.4, 0.45], [0.0, 0.3], [0.5, 0.18], [1.0, 0.12]],
-        "peaks_spline": [[-1.0, 0.0], [0.3, 0.05], [0.7, 0.4], [1.0, 1.0]]
+        "continental_spline": [
+          [
+            -1.0,
+            -9.0
+          ],
+          [
+            -0.3,
+            -2.0
+          ],
+          [
+            0.1,
+            3.0
+          ],
+          [
+            0.5,
+            9.0
+          ],
+          [
+            1.0,
+            18.0
+          ]
+        ],
+        "erosion_spline": [
+          [
+            -1.0,
+            0.7
+          ],
+          [
+            -0.4,
+            0.45
+          ],
+          [
+            0.0,
+            0.3
+          ],
+          [
+            0.5,
+            0.18
+          ],
+          [
+            1.0,
+            0.12
+          ]
+        ],
+        "peaks_spline": [
+          [
+            -1.0,
+            0.0
+          ],
+          [
+            0.3,
+            0.05
+          ],
+          [
+            0.7,
+            0.4
+          ],
+          [
+            1.0,
+            1.0
+          ]
+        ]
       },
       "hydro": {
         "enabled": false,
@@ -52,9 +111,10 @@
       "river_max_carve": 8.0,
       "lakes_enabled": true,
       "lake_frequency": 0.0009,
-      "lake_threshold": 0.5,
-      "lake_depth": 4.0,
-      "lake_max_carve": 14.0,
+      "lake_threshold": 0.52,
+      "lake_depth": 5.0,
+      "lake_max_carve": 22.0,
+      "lake_bank_offset": 2.0,
       "cliffs_enabled": true,
       "cliff_frequency": 0.0011,
       "cliff_threshold": 0.4,

@@ -109,6 +109,7 @@ u64 ComputeTerrainParamsHash(const Systems::TerrainGenParams& params, int seed) 
         FnvMixValue(hash, params.lake_threshold);
         FnvMixValue(hash, params.lake_depth);
         FnvMixValue(hash, params.lake_max_carve);
+        FnvMixValue(hash, params.lake_bank_offset);
     }
     // Slice 3: per-biome relief modulation (only when enabled).
     if (params.biome_relief_enabled) {

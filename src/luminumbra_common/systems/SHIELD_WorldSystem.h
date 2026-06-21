@@ -114,17 +114,20 @@ struct TerrainGenParams {
     float river_pv_max = -0.85f;  // valleys band upper edge (folded PV)
     float river_depth = 8.0f;     // metres the channel floor sits below SEA_LEVEL
     float river_max_carve = 60.0f; // clamp on terrain lowered into the channel
-    // Lakes (worldgen-richness slice 2): static water basins. Where the lake field
-    // (smooth FBM, seed +11) exceeds lake_threshold, the terrain is pulled toward a
-    // floor below SEA_LEVEL so the EXISTING global water plane fills it (no
-    // WaterSystem change, like rivers). lake_max_carve naturally gates lakes to LOW
-    // terrain only (a peak can't be carved below sea level), so lakes form in
-    // basins. Disabled -> byte-zero drift (world_hash unchanged).
+    // Lakes (elevation lakes): where the lake field (smooth FBM, seed +11) exceeds
+    // lake_threshold, the terrain is carved into a basin BELOW the LOCAL surface
+    // level (ContinentalBaseHeight - lake_bank_offset), not below SEA_LEVEL — so a
+    // basin on a mountain or in a valley gets a lake at THAT elevation (alpine
+    // tarns, valley pools), held by its higher rim. WaterLevelAt returns that local
+    // surface for the water mesh + the WaterSystem rest level (which pins the lake
+    // so the flow sim can't drain it). Sea-level oceans still form wherever the
+    // continental base dips below SEA_LEVEL. Disabled -> byte-zero drift.
     bool lakes_enabled = false;
-    float lake_frequency = 0.0008f;  // ~1200 m feature scale
-    float lake_threshold = 0.55f;    // lake field value above which a lake forms
-    float lake_depth = 4.0f;         // metres the lake floor sits below SEA_LEVEL
-    float lake_max_carve = 14.0f;    // clamp -> only terrain within ~14 m of sea becomes lake
+    float lake_frequency = 0.0009f;  // ~1100 m feature scale
+    float lake_threshold = 0.52f;    // lake field value above which a lake forms (moderate)
+    float lake_depth = 5.0f;         // metres the basin floor sits below the lake surface
+    float lake_max_carve = 22.0f;    // clamp on terrain lowered into the basin
+    float lake_bank_offset = 2.0f;   // lake surface sits this far below the local land level (banks)
     // fnv1a64 of the canonicalized biome table content, stamped by the world
     // system when it loads the table (0 when biomes are disabled or the table
     // failed to load). ComputeTerrainParamsHash mixes this in so pristine
@@ -345,6 +348,11 @@ public:
     std::vector<::Luminumbra::Chunk*> get_renderable_chunks();
     float get_density_at(const Vec3& world_pos) const;
     float GetTerrainHeightAt(float world_x, float world_z) const;
+    // Elevation-aware water surface level at a column: the local lake surface
+    // inside a lake basin (held above the carved floor by its rim), or SEA_LEVEL
+    // elsewhere. The WaterSystem seeds + pins its per-cell rest level from this so
+    // lakes sit at their basin elevation (mountain/valley) and never drain. Pure.
+    float WaterLevelAt(float world_x, float world_z) const;
     // T-I4-DR-river-seam-sliver: coarse-LOD height. Identical to
     // GetTerrainHeightAt for step <= 1 (full-res byte-identical). For step > 1
     // the river carve - and ONLY the carve - is anti-aliased over the
@@ -673,7 +681,13 @@ private:
     // and the carve toward a sub-SEA_LEVEL floor. Mirror the river helpers so the
     // scalar + batched height paths stay byte-identical. 0 when lakes disabled.
     float LakeInfluenceFromNoise(float world_x, float world_z) const;
-    float LakeCarveAmount(float final_height, float influence) const;
+    // Carve toward a basin floor below `lake_surface` (the LOCAL lake level), so a
+    // lake forms at its basin elevation, not at SEA_LEVEL. 0 when not in a lake.
+    float LakeCarveAmount(float final_height, float influence, float lake_surface) const;
+    // Smooth regional base elevation (height_offset + continental spline only, no
+    // ridge/detail) — the level a lake's surface nestles at. Low-frequency so a
+    // lake reads ~flat over its extent. Pure.
+    float ContinentalBaseHeight(float world_x, float world_z) const;
     // Slice 4: terrace the height into cliff benches inside cliff-zones (smooth
     // mask, seed +12). Pure; returns `height` unchanged when cliffs disabled or
     // outside a cliff zone. Shared by the scalar + batched paths (byte-identical).

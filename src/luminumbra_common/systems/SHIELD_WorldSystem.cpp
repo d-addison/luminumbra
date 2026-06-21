@@ -508,7 +508,8 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
     // lakes are disabled. Kept byte-identical to ComputeShapedHeightGrid.
     if (m_params.lakes_enabled) {
         const float lake_influence = LakeInfluenceFromNoise(world_x, world_z);
-        sample.final_height -= LakeCarveAmount(sample.final_height, lake_influence);
+        const float lake_surface = ContinentalBaseHeight(world_x, world_z) - m_params.lake_bank_offset;
+        sample.final_height -= LakeCarveAmount(sample.final_height, lake_influence, lake_surface);
     }
 
     // T-I6-A2: hydraulic/thermal relief (decision a). Added LAST so the baked
@@ -660,14 +661,43 @@ float SHIELD_WorldSystem::LakeInfluenceFromNoise(float world_x, float world_z) c
     return std::clamp((v - m_params.lake_threshold) / span, 0.0f, 1.0f);
 }
 
-float SHIELD_WorldSystem::LakeCarveAmount(float final_height, float influence) const {
-    // Pull the surface toward a floor below SEA_LEVEL so the global water plane
-    // fills the basin. lake_max_carve * influence clamps the drop, so only terrain
-    // already near sea level becomes a lake (peaks stay dry). Zero outside a lake.
+float SHIELD_WorldSystem::ContinentalBaseHeight(float world_x, float world_z) const {
+    // Smooth regional base: height_offset + the continental spline of the
+    // continentalness control noise (seed +3) ONLY — no ridge, no base detail
+    // noise. Low-frequency, so a lake's surface (derived from this) reads ~flat
+    // over its extent. With shaping off it is simply the flat height_offset.
+    if (!m_params.shaping_enabled || !m_continentalness_generator) {
+        return m_params.height_offset;
+    }
+    const float continentalness = m_continentalness_generator->GenSingle2D(
+        world_x * m_params.continentalness_frequency,
+        world_z * m_params.continentalness_frequency,
+        m_seed + 3);
+    return m_params.height_offset +
+           EvaluateShapingSpline(m_params.continental_spline, continentalness, 0.0f);
+}
+
+float SHIELD_WorldSystem::WaterLevelAt(float world_x, float world_z) const {
+    // Sea level everywhere, RAISED to the local lake surface inside a lake basin so
+    // perched lakes sit at their basin elevation. max() with SEA_LEVEL keeps lakes
+    // that dip below sea level merged with the ocean.
+    float level = SEA_LEVEL;
+    if (m_params.lakes_enabled && LakeInfluenceFromNoise(world_x, world_z) > 0.0f) {
+        const float lake_surface = ContinentalBaseHeight(world_x, world_z) - m_params.lake_bank_offset;
+        level = std::max(level, lake_surface);
+    }
+    return level;
+}
+
+float SHIELD_WorldSystem::LakeCarveAmount(float final_height, float influence, float lake_surface) const {
+    // Carve a basin whose floor sits lake_depth below the LOCAL lake surface (which
+    // is at the basin's elevation, not SEA_LEVEL — that is what lets a lake form on
+    // a mountain/valley). lake_max_carve * influence clamps the drop so the rim
+    // (low influence) stays above the surface and holds the water. Zero outside.
     if (influence <= 0.0f) {
         return 0.0f;
     }
-    const float lake_floor = SEA_LEVEL - m_params.lake_depth * influence;
+    const float lake_floor = lake_surface - m_params.lake_depth * influence;
     if (final_height <= lake_floor) {
         return 0.0f;
     }
@@ -738,7 +768,8 @@ float SHIELD_WorldSystem::GetTerrainHeightAtCoarse(
     // invisible at range, so the far field simply omits it (matches the prior
     // fast far-field behaviour); near chunks still bake it.
     if (m_params.lakes_enabled) {
-        result -= LakeCarveAmount(result, LakeInfluenceFromNoise(world_x, world_z));
+        const float lake_surface = ContinentalBaseHeight(world_x, world_z) - m_params.lake_bank_offset;
+        result -= LakeCarveAmount(result, LakeInfluenceFromNoise(world_x, world_z), lake_surface);
     }
     return result;
 }
@@ -901,12 +932,13 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
                 terrain_height -= RiverCarveAmount(terrain_height, influence);
             }
 
-            // Slice 2 lake carve — byte-identical to ComputeShapedHeightSampleImpl.
+            // Lake carve — byte-identical to ComputeShapedHeightSampleImpl.
             if (m_params.lakes_enabled) {
                 const float world_x = static_cast<float>(base_x + x);
                 const float world_z = static_cast<float>(base_z + z);
                 const float lake_influence = LakeInfluenceFromNoise(world_x, world_z);
-                terrain_height -= LakeCarveAmount(terrain_height, lake_influence);
+                const float lake_surface = ContinentalBaseHeight(world_x, world_z) - m_params.lake_bank_offset;
+                terrain_height -= LakeCarveAmount(terrain_height, lake_influence, lake_surface);
             }
 
             out[i] = terrain_height;
