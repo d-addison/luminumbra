@@ -139,6 +139,34 @@ Because of this coupling, treat Phase 1 (pool + MDI of the already-CPU-grouped b
 (compute cull feeding the same structure) as one focused GPU-driven rewrite. Keep the CPU path alive
 behind a flag until the draw-count + visible-instance parity test passes on the dense pose.
 
+### Phase 1 — LANDED + a SPEC-INVALIDATING finding (commit ba1c43b1)
+Cached static-prop instance data (precomputed matrix+tint, reused group buffers) + fixed the
+`kStaticInstanceCapacity` 16384 clamp (→131072). Render parity confirmed (identical forest). But the
+CPU-submit did NOT move — so I added CPU per-phase profiling, which **overturns the spec's inherited
+premise**. On the dense pose (release):
+
+```
+cpu_submit ~28.4 ms  =  render_frame ~3.1 ms   (static_prop submit only ~1.0 ms!)
+                      +  sim_tick     ~0.19 ms  (well-decoupled — not a problem)
+                      +  streaming    ~11 ms    (WorldSystem::update, even on a STATIC camera)
+                      +  ~14 ms       other     (UI / foliage rebuild + readback stall / scenario / poll)
+```
+
+**The static-prop submit loop — spec 004's entire headline lever (Phases 1–3, 7) — is ~1 ms, not the
+bottleneck.** Moving it to the GPU saves <1 ms. The real frame cost is **world streaming (~11 ms)** +
+**~14 ms of other per-frame CPU**. The render pipeline itself is only ~3 ms. Spec 004 as written (from
+spec 003 C2's premise) optimizes the wrong target. **Awaiting owner decision on re-scope** (see below).
+
+#### Re-scope candidates (the actual ≤1.67 ms path)
+1. **World streaming ~11 ms** — `gameSession->GetWorldSystem()->update()` costs ~11 ms PER FRAME on a
+   static camera (no new chunks should be streaming). Likely re-scanning the full loaded-chunk ring /
+   physics broadphase / snapshot rebuild every frame. Biggest single lever. Investigate + make
+   incremental/threaded.
+2. **~14 ms "other"** — localize next: foliage `rebuild_instances` + the known `glGetBufferSubData`
+   sync stall (`FoliagePass.cpp:641`), ImGui overlay, `glfwPollEvents`, scenario-harness per-frame work.
+3. The GPU-driven prop rewrite (old Phases 2–7) drops to LOW priority (≤1 ms); keep C2/A3 as fidelity
+   items, not perf levers.
+
 ## Gate Criteria
 The plan phase is complete when:
 - [x] All tasks defined with clear acceptance criteria (above + spec ACs).
