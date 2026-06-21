@@ -314,14 +314,21 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
         mix(m_enabled ? 0x9E3779B97F4A7C15ull : 0x1ull);
         mix(static_cast<std::uint64_t>(cell(camera_pos.x)) * 73856093ull ^
             (static_cast<std::uint64_t>(cell(camera_pos.z)) * 19349663ull));
-        // spec 004: wind is NOT in the rebuild signature. The wind field drifts
-        // every frame, so including it forced a full scatter re-bake (~5-9 ms,
-        // incl. surface re-queries + SSBO re-uploads) just to refresh the baked
-        // per-instance sway vector. The visible waving is u_time-driven in the
-        // grass shader; the baked sway direction lags wind by at most one real
-        // rebuild (a camera-cell cross or chunk-set change), which is visually
-        // negligible. Dropping it lets the scatter cache actually ELIDE on a
-        // static / slow camera. RENDER-ONLY.
+        // spec 004: wind is in the rebuild signature ONLY in gate mode
+        // (m_readback_enabled). The wind field drifts every frame, so including
+        // it in normal play forced a full scatter re-bake (~5-9 ms: surface
+        // re-queries + SSBO re-uploads) just to refresh the baked per-instance
+        // sway vector — and the visible waving is u_time-driven shader-side, so
+        // a one-rebuild-stale baked sway direction is visually negligible.
+        // Dropping it lets the scatter cache ELIDE on a static/slow camera.
+        // The FoliageInstancing gate, however, deliberately rebuilds with calm
+        // vs windy wind and compares the baked sway (its wind-bridge isolation),
+        // so in gate mode (readback on) wind MUST stay in the sig or the windy
+        // rebuild would elide and the sway test would see no delta. RENDER-ONLY.
+        if (m_readback_enabled) {
+            mix(static_cast<std::uint64_t>(std::llround(m_wind_xz.x * 2.0f)) ^
+                (static_cast<std::uint64_t>(std::llround(m_wind_xz.y * 2.0f)) << 16));
+        }
         mix(static_cast<std::uint64_t>(std::llround(m_fade_start_m)) ^
             (static_cast<std::uint64_t>(std::llround(m_fade_end_m)) << 20));
         mix(static_cast<std::uint64_t>(std::llround(m_density_scale * 100.0f)));

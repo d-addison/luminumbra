@@ -5122,13 +5122,15 @@ int main(int argc, char* argv[]) {
                                 foliage->load_scatter_set(root_dir / "data/common/foliage/scatter_set.json");
                                 foliage->set_fade_distances(130.0f, 210.0f); // grass out to ~210 m
                                 foliage->set_density_scale(1.0f);
-                                // spec 004: normal play / budget benchmark draw the grass
-                                // straight from the SSBO (glDrawArraysIndirect) — the CPU
-                                // readback (a ~5 ms sync stall) is only for the FoliageInstancing
-                                // gate, which runs in the separate foliage_visual_smoke path.
-                                foliage->set_readback_enabled(false);
                                 s_foliage_loaded = true;
                             }
+                            // spec 004: skip the foliage CPU readback (a ~5 ms sync
+                            // stall — see FoliagePass::set_readback_enabled) in
+                            // scenario-LESS runs (normal play + the budget benchmark),
+                            // which draw straight from the SSBO. Any active scenario
+                            // (every gate, incl. FoliageInstancing's foliage_visual_smoke)
+                            // KEEPS the readback so instance_hash()/coverage stay exact.
+                            foliage->set_readback_enabled(scenario_config.active());
                             glm::vec2 wind_xz(0.0f, 0.0f);
                             if (auto* wind = gameSession->GetWindFieldSystem()) {
                                 const Luminumbra::Vec2 w = wind->SampleWind(Luminumbra::Vec3(
