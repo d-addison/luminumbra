@@ -96,7 +96,19 @@ public:
     // pipeline. Builds the world lazily on first use. On a build failure keeps
     // the last good frame and sets last_build_failed(). Returns true if a frame
     // was rendered. dt is seconds (drives atmosphere/weather animation).
+    // NOTE: this resizes the shared deferred pipeline to the FBO size and back,
+    // which is fine for a one-shot headless capture/test but too costly per-frame
+    // on a shared pipeline — the LIVE create screen uses render_to_backbuffer().
     bool render(Rendering::RenderPipeline& pipeline, float dt);
+
+    // Live create-screen render: draw the candidate world FULL-SCREEN to the
+    // backbuffer through the engine pipeline at its CURRENT size (no offscreen
+    // FBO, no per-frame pipeline resize — the "framed hole" the create panel
+    // frames). This is the cheap, smooth path used by the running game; the host
+    // suppresses the separate menu backdrop while it's active so only ONE world
+    // renders. Builds the world lazily/debounced like render(). Returns true if a
+    // frame was drawn (false while a build is pending and no world exists yet).
+    bool render_to_backbuffer(Rendering::RenderPipeline& pipeline, float dt);
 
     bool world_ready() const { return m_world != nullptr; }
     bool last_build_failed() const { return m_last_build_failed; }
@@ -111,6 +123,7 @@ public:
 private:
     void build_world_now();                 // synchronous rebuild from pending params
     void configure_camera(Rendering::Camera& cam) const; // orbit -> Camera pose
+    void apply_look(Rendering::RenderPipeline& pipeline) const; // weather/tod/clouds
 
     // GL offscreen target.
     GLuint m_fbo = 0;

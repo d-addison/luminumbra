@@ -207,6 +207,11 @@ int g_ui_screenshot_settle = 0;              // frames waited before capture of 
 // under the transparent UI with a slow auto-orbit. Replaced cleanly when a real world loads.
 bool g_menu_backdrop_active = false;
 float g_menu_backdrop_yaw = 30.0f;           // orbit accumulator (degrees)
+// Spec 002 Item 1: scroll-wheel accumulator for the create-world preview diorama.
+// GLFW scroll is event-driven (no poll API), so the menu scroll callback accrues
+// the wheel delta here and the preview block consumes it each frame to drive
+// WorldgenPreview::zoom() when the cursor is over the #preview_pane rect.
+double g_menu_scroll_accum = 0.0;
 // F5 — thumbnail generation: capture N clean (no-UI) backdrop frames at varied yaw/time-of-day
 // in one window session, for use as world-select + gallery photo thumbnails. --ui-thumbs N.
 int g_ui_thumbs = 0;                          // 0 = off; else number of thumbnails to capture
@@ -646,6 +651,10 @@ void framebuffer_size_callback(GLFWwindow* window, int width, int height);
 void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods);
 void mouse_callback(GLFWwindow* window, double xpos, double ypos);
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset);
+// Spec 002 Item 1: menu-state scroll callback — forwards to RmlUi (so menu lists
+// still scroll) AND accrues the wheel delta into g_menu_scroll_accum so the
+// create-world preview block can zoom the diorama when the cursor is over the pane.
+void menu_scroll_callback(GLFWwindow* window, double xoffset, double yoffset);
 void GLAPIENTRY GLDebugMessageCallback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* message, const void* userParam);
 void GLFWErrorCallback(int error, const char* description);
 void SetGameState(GLFWwindow* window, GameStateManager& gameStateManager, GameState newState);
@@ -6606,10 +6615,23 @@ int main(int argc, char* argv[]) {
                     if (g_ui_thumbs_index >= g_ui_thumbs) glfwSetWindowShouldClose(window, GLFW_TRUE);
                 }
             } else { // Main Menu, etc.
+                // Spec 002 Item 1: is the create-world live preview active this frame?
+                // (world_creation.rml loaded + #preview_pane present + sized). When it
+                // is, the candidate world IS the backdrop — we render ONE world (the
+                // candidate, full-screen) and SUPPRESS the separate menu-vista backdrop,
+                // so the create screen pays for a single render with no FBO/resize churn.
+                Luminumbra::Client::Rml_UIManager::PreviewState pv;
+                bool previewActive = false;
+                if (g_uiManager && worldgenPreview) {
+                    pv = g_uiManager->GetWorldCreationPreviewState();
+                    previewActive = pv.active && pv.pane_w > 4 && pv.pane_h > 4;
+                }
+
                 // F4: render the live scenic world behind the menu, with a slow auto-orbit, at
                 // golden hour. The menu UI bodies are transparent (game_theme.rcss) so the world
                 // shows through. render_frame draws to the back buffer BEFORE the UI pass.
-                if (g_menu_backdrop_active && g_camera && gameSession && gameSession->GetWorldSystem()) {
+                // Suppressed while the create-world preview owns the world render.
+                if (!previewActive && g_menu_backdrop_active && g_camera && gameSession && gameSession->GetWorldSystem()) {
                     // Gentle yaw oscillation around the lit-valley heading (95°) for a living, slow
                     // parallax that never rotates away into dark/back-lit terrain.
                     g_menu_backdrop_yaw += deltaTime;  // phase accumulator (seconds)
@@ -6621,14 +6643,13 @@ int main(int argc, char* argv[]) {
                 }
 
                 // Spec 002 Item 1: LIVE WORLD-PREVIEW DIORAMA. When the create-world
-                // screen is up, feed the candidate params/weather/tod, render the
-                // candidate world into the preview FBO, and blit it into the
-                // #preview_pane screen rect on the backbuffer (the frosted pane is
-                // transparent so the diorama shows through; the UI pass draws the
-                // frame + vignette on top). Mouse drag/scroll over the pane orbits.
+                // screen is up, feed the candidate params/weather/tod and render the
+                // candidate world FULL-SCREEN to the backbuffer (the "framed hole" the
+                // create panel frames). The menu UI bodies are transparent so the world
+                // shows through; the #preview_pane frames the primary viewing area.
+                // Mouse drag/scroll over the pane orbits/zooms the turntable camera.
                 if (g_uiManager && worldgenPreview) {
-                    auto pv = g_uiManager->GetWorldCreationPreviewState();
-                    if (pv.active && pv.pane_w > 4 && pv.pane_h > 4) {
+                    if (previewActive) {
                         worldgenPreview->set_active(true);
 
                         // Re-derive the candidate world ONLY when the form changed.
@@ -6677,7 +6698,6 @@ int main(int argc, char* argv[]) {
                         if (g_uiManager->ConsumeWorldCreationResetView()) worldgenPreview->reset_view();
 
                         // Mouse orbit: drag over the pane spins, scroll zooms.
-                        int fbW = 0, fbH = 0; glfwGetFramebufferSize(window, &fbW, &fbH);
                         double cx = 0.0, cy = 0.0; glfwGetCursorPos(window, &cx, &cy);
                         const bool lmb = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
                         const bool overPane = cx >= pv.pane_x && cx < (pv.pane_x + pv.pane_w) &&
@@ -6696,32 +6716,25 @@ int main(int argc, char* argv[]) {
                             worldgenPreview->orbit(dx * 0.35f, -dy * 0.35f);
                         }
 
-                        // Debounced rebuild + render-to-FBO at the pane size.
-                        worldgenPreview->ensure_target(pv.pane_w, pv.pane_h);
-                        worldgenPreview->tick(deltaTime);
-                        if (worldgenPreview->render(renderPipeline, deltaTime)) {
-                            // Blit the preview FBO into the pane rect on the backbuffer.
-                            // GL framebuffer origin is bottom-left; the pane rect is
-                            // top-left, so flip Y for the destination.
-                            const int dstX0 = pv.pane_x;
-                            const int dstX1 = pv.pane_x + pv.pane_w;
-                            const int dstY0 = fbH - (pv.pane_y + pv.pane_h);
-                            const int dstY1 = fbH - pv.pane_y;
-                            // Read from the preview FBO via a temporary read binding.
-                            GLuint readFbo = 0; glGenFramebuffers(1, &readFbo);
-                            glBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo);
-                            glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
-                                                   worldgenPreview->color_texture(), 0);
-                            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-                            glBlitFramebuffer(0, 0, worldgenPreview->target_width(), worldgenPreview->target_height(),
-                                              dstX0, dstY0, dstX1, dstY1, GL_COLOR_BUFFER_BIT, GL_LINEAR);
-                            glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-                            glDeleteFramebuffers(1, &readFbo);
+                        // Scroll wheel over the pane zooms the diorama in/out. The
+                        // menu scroll callback accrues the delta; consume + reset it
+                        // here (only applied when the cursor is over the pane).
+                        if (overPane && g_menu_scroll_accum != 0.0) {
+                            worldgenPreview->zoom(static_cast<float>(g_menu_scroll_accum));
                         }
+                        g_menu_scroll_accum = 0.0;
+
+                        // Debounced rebuild, then render the candidate world FULL-SCREEN
+                        // to the backbuffer (no offscreen FBO, no per-frame pipeline
+                        // resize). render_frame clears + fills the backbuffer; the UI
+                        // pass draws the frosted frame/vignette on top.
+                        worldgenPreview->tick(deltaTime);
+                        worldgenPreview->render_to_backbuffer(renderPipeline, deltaTime);
                     } else {
                         worldgenPreview->set_active(false);
                         worldgenPreviewLastSig.clear();
                         worldgenPreviewDragging = false;
+                        g_menu_scroll_accum = 0.0;  // drop stale wheel deltas from other menus
                     }
                 }
 
@@ -7334,7 +7347,7 @@ void SetGameState(GLFWwindow* window, GameStateManager& gameStateManager, GameSt
         if (g_uiManager) {
             // Set UI-related callbacks
             glfwSetCursorPosCallback(window, Luminumbra::Client::Rml_UIManager::CursorPosCallback);
-            glfwSetScrollCallback(window, Luminumbra::Client::Rml_UIManager::ScrollCallback);
+            glfwSetScrollCallback(window, menu_scroll_callback);  // RmlUi + create-world preview zoom
             glfwSetMouseButtonCallback(window, Luminumbra::Client::Rml_UIManager::MouseButtonCallback);
         } else {
             glfwSetCursorPosCallback(window, nullptr);
@@ -7389,6 +7402,14 @@ void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
     }
     if (g_camera) g_camera->ProcessMouseScroll((float)yoffset);
     if (g_playerController) g_playerController->ProcessMouseScroll(yoffset);
+}
+
+void menu_scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
+    // Keep RmlUi's scroll behaviour for menu lists/galleries...
+    Luminumbra::Client::Rml_UIManager::ScrollCallback(window, xoffset, yoffset);
+    // ...and accrue the vertical wheel delta for the create-world preview zoom.
+    // The preview block consumes + resets this each frame (only when over the pane).
+    g_menu_scroll_accum += yoffset;
 }
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height) {

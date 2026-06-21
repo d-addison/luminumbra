@@ -199,22 +199,7 @@ void WorldgenPreview::configure_camera(Rendering::Camera& cam) const {
     cam.updateCameraVectors();
 }
 
-bool WorldgenPreview::render(Rendering::RenderPipeline& pipeline, float dt) {
-    if (!m_active) return false;
-    if (m_fbo == 0) {
-        return false; // no target allocated yet
-    }
-    // Lazy first build so a screen that becomes active renders immediately.
-    if (!m_built_once || m_world == nullptr) {
-        build_world_now();
-    }
-    if (m_world == nullptr) {
-        return false; // build failed; caller keeps the last good frame
-    }
-
-    Rendering::Camera cam(glm::vec3(kCenterX, kCenterY, kCenterZ + m_dist));
-    configure_camera(cam);
-
+void WorldgenPreview::apply_look(Rendering::RenderPipeline& pipeline) const {
     // Live weather / time-of-day through the SAME pipeline knobs the game uses.
     Rendering::WeatherType wt = Rendering::WeatherType::None;
     float intensity = 0.0f;
@@ -232,9 +217,28 @@ bool WorldgenPreview::render(Rendering::RenderPipeline& pipeline, float dt) {
     clouds.coverage_amount = (m_weather == Weather::Clear) ? 0.35f : 0.7f;
     clouds.plane_height = 900.0f;
     pipeline.set_cloud_state(clouds);
+}
+
+bool WorldgenPreview::render(Rendering::RenderPipeline& pipeline, float dt) {
+    if (!m_active) return false;
+    if (m_fbo == 0) {
+        return false; // no target allocated yet
+    }
+    // Lazy first build so a screen that becomes active renders immediately.
+    if (!m_built_once || m_world == nullptr) {
+        build_world_now();
+    }
+    if (m_world == nullptr) {
+        return false; // build failed; caller keeps the last good frame
+    }
+
+    Rendering::Camera cam(glm::vec3(kCenterX, kCenterY, kCenterZ + m_dist));
+    configure_camera(cam);
+    apply_look(pipeline);
 
     // Redirect the engine pipeline's final blit into the preview FBO and size the
-    // internal passes to the preview dims for this frame, then restore.
+    // internal passes to the preview dims for this frame, then restore. (Costly on
+    // a shared pipeline — used only for one-shot headless capture/tests.)
     const u32 prev_w = pipeline.screen_width();
     const u32 prev_h = pipeline.screen_height();
     pipeline.on_resize(static_cast<u32>(m_fbo_w), static_cast<u32>(m_fbo_h));
@@ -246,6 +250,28 @@ bool WorldgenPreview::render(Rendering::RenderPipeline& pipeline, float dt) {
     if (prev_w != 0 && prev_h != 0) {
         pipeline.on_resize(prev_w, prev_h);
     }
+    return true;
+}
+
+bool WorldgenPreview::render_to_backbuffer(Rendering::RenderPipeline& pipeline, float dt) {
+    if (!m_active) return false;
+    // Lazy first build so a screen that becomes active renders immediately.
+    if (!m_built_once || m_world == nullptr) {
+        build_world_now();
+    }
+    if (m_world == nullptr) {
+        return false; // build failed; caller keeps the last good frame
+    }
+
+    Rendering::Camera cam(glm::vec3(kCenterX, kCenterY, kCenterZ + m_dist));
+    configure_camera(cam);
+    apply_look(pipeline);
+
+    // Draw straight to the backbuffer at the pipeline's CURRENT (full-screen) size
+    // — no offscreen target, no on_resize. The create panel frames this as the
+    // diorama "window"; the menu backdrop is suppressed by the host while active,
+    // so this is the single world render on the create screen.
+    pipeline.render_frame(m_registry, *m_world, cam, dt, /*wireframe*/ false);
     return true;
 }
 
