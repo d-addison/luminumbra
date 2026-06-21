@@ -59,6 +59,10 @@ struct WaterfallSite {
     glm::vec2 flow_dir{0.0f, 0.0f};
     // Mean slope across the drop (drop_height / run_length), the "steepness".
     float steepness = 0.0f;
+    // Creation source: false = river-course lip (steep drop in the river channel);
+    // true = perched-lake/tarn OUTLET (a rim dropoff where the lake spills over).
+    // Diagnostic only (NOT hashed) — both kinds bake the same sheet dressing.
+    bool lake_outlet = false;
 };
 
 // Fixed detection parameters (PINNED — changing these changes the site set and
@@ -73,6 +77,16 @@ struct WaterfallDetectParams {
     float river_threshold = 0.05f; // RiverInfluenceAt above this == on the river course
     float cluster_radius = 24.0f;  // de-dup radius (m): lips within this collapse to one site
     int   half_extent = 768;       // analysis window half-extent (m) around the origin
+    // --- Lake / tarn OUTLET detection (spec 003 A1.1) ---
+    // A perched lake (WaterLevelAt > SEA_LEVEL) that spills over its rim down a
+    // slope creates a waterfall at the rim. A lake cell qualifies as an outlet
+    // crest when an OUTSIDE neighbour (not itself in the lake) has terrain that
+    // falls >= lake_outlet_min_drop below the lake surface within a short
+    // downhill run. Tuned so only true rim dropoffs qualify, not gentle shores.
+    float lake_surface_epsilon = 0.25f;   // WaterLevelAt must exceed SEA_LEVEL by this to be "in a lake"
+    float lake_outlet_min_drop = 3.0f;    // min terrain fall below lake surface at the rim (m)
+    float lake_outlet_min_steepness = 0.40f; // min drop/run slope of the rim dropoff
+    float lake_outlet_max_run = 20.0f;    // longest downhill run scanned past the rim (m)
 };
 
 // Stable, hashable key for the per-world site cache: the world seed plus the

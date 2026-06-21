@@ -31,6 +31,7 @@ struct LipCandidate {
     float width = 0.0f;
     glm::vec2 flow{0.0f, 0.0f};
     float steepness = 0.0f;
+    bool lake_outlet = false;
 };
 
 } // namespace
@@ -141,8 +142,126 @@ std::vector<WaterfallSite> DetectWaterfalls(
         }
     }
 
+    // --- 1b. Scan perched-lake / tarn RIMS for spill (outlet) dropoffs. ---
+    // Spec 003 A1.1 / OWNER directive: waterfalls must also be CREATED BY a lake
+    // spilling over its rim. A cell that is INSIDE a perched lake (WaterLevelAt >
+    // SEA_LEVEL) whose downhill direction leaves the lake and FALLS away below the
+    // lake surface over a short run is a spill point — a waterfall crest at the
+    // rim. PURE: every value is a function of (seed, params) via WaterLevelAt +
+    // GetTerrainHeightAt. Only runs when lakes are enabled (else byte-zero work).
+    if (world.get_params().lakes_enabled) {
+        const float lake_eps = std::max(0.0f, params.lake_surface_epsilon);
+        const int lake_max_steps =
+            std::max(1, static_cast<int>(params.lake_outlet_max_run / step));
+        for (int zi = 0; zi < side; ++zi) {
+            const float cz = static_cast<float>(-half) + static_cast<float>(zi) * step;
+            for (int xi = 0; xi < side; ++xi) {
+                const float cx = static_cast<float>(-half) + static_cast<float>(xi) * step;
+
+                // Must be inside (or at the surface of) a perched lake.
+                const float lake_surface = world.WaterLevelAt(cx, cz);
+                if (lake_surface <= Luminumbra::SEA_LEVEL + lake_eps) {
+                    continue;
+                }
+
+                // Downhill terrain gradient (central difference). Points uphill.
+                const float hxp = world.GetTerrainHeightAt(cx + step, cz);
+                const float hxn = world.GetTerrainHeightAt(cx - step, cz);
+                const float hzp = world.GetTerrainHeightAt(cx, cz + step);
+                const float hzn = world.GetTerrainHeightAt(cx, cz - step);
+                glm::vec2 grad((hxp - hxn), (hzp - hzn));
+                const float grad_len = std::sqrt(grad.x * grad.x + grad.y * grad.y);
+                if (grad_len < 1e-4f) {
+                    continue; // flat lake interior — no spill direction
+                }
+                const glm::vec2 down(-grad.x / grad_len, -grad.y / grad_len);
+
+                // The immediate downhill neighbour must leave the lake (be OUTSIDE
+                // this lake basin), otherwise we are still in the lake interior.
+                const float nx = cx + down.x * step;
+                const float nz = cz + down.y * step;
+                const float neigh_surface = world.WaterLevelAt(nx, nz);
+                const bool neigh_outside =
+                    neigh_surface <= Luminumbra::SEA_LEVEL + lake_eps ||
+                    neigh_surface < lake_surface - 0.05f; // a lower water body downstream
+                if (!neigh_outside) {
+                    continue;
+                }
+
+                // Walk downhill past the rim; measure how far the terrain falls
+                // below the lake surface (the spill drop). Require a steep dropoff.
+                float run = 0.0f;
+                float prev_h = lake_surface;
+                float best_drop = 0.0f;
+                float best_run = 0.0f;
+                glm::vec3 best_foot(cx, lake_surface, cz);
+                for (int s = 1; s <= lake_max_steps; ++s) {
+                    const float sx = cx + down.x * step * static_cast<float>(s);
+                    const float sz = cz + down.y * step * static_cast<float>(s);
+                    const float hs = world.GetTerrainHeightAt(sx, sz);
+                    if (hs > prev_h + 0.05f) {
+                        break; // climbing again — past the dropoff
+                    }
+                    run += step;
+                    const float drop = lake_surface - hs;
+                    if (drop > best_drop) {
+                        best_drop = drop;
+                        best_run = run;
+                        best_foot = glm::vec3(sx, hs, sz);
+                    }
+                    prev_h = hs;
+                    if (best_drop >= params.lake_outlet_min_drop && best_run > 0.0f) {
+                        const float slope_now = best_drop / std::max(best_run, step);
+                        if (slope_now >= params.lake_outlet_min_steepness) {
+                            break;
+                        }
+                    }
+                }
+
+                if (best_drop < params.lake_outlet_min_drop || best_run <= 0.0f) {
+                    continue;
+                }
+                const float steepness = best_drop / std::max(best_run, step);
+                if (steepness < params.lake_outlet_min_steepness) {
+                    continue;
+                }
+
+                LipCandidate lip;
+                // Crest sits at the lake surface at the rim (connected upstream).
+                lip.crest = glm::vec3(cx, lake_surface, cz);
+                lip.foot = best_foot;
+                lip.drop = best_drop;
+                lip.run = best_run;
+                lip.steepness = steepness;
+                lip.flow = down;
+                lip.width = 4.0f; // a lake outlet reads as a modest channel
+                lip.lake_outlet = true;
+                lips.push_back(lip);
+            }
+        }
+    }
+
     if (lips.empty()) {
         return sites;
+    }
+
+    // --- 1c. CONNECT each lip to the live water surfaces (spec 003 A1.1). -----
+    // Upstream: pin the crest Y to the UPSTREAM water surface (river/lake) at the
+    // lip so the sheet starts AT the water, not the bare channel floor. For lake
+    // outlets the crest Y is already the lake surface; for river lips this lifts
+    // the crest from the carved channel floor to the river/sea surface.
+    // Downstream: raise the foot Y to max(terrain, WaterLevelAt(foot)) so when the
+    // fall lands in an existing river/lake/sea the sheet reaches that surface.
+    // NOTE: where the foot is dry we leave it at terrain — auto-creating a plunge
+    // POOL (new standing water) would be a sim/world_hash-affecting change and is
+    // DEFERRED (out of scope; do NOT modify WaterSystem). Render-only here.
+    for (LipCandidate& lip : lips) {
+        const float crest_water = world.WaterLevelAt(lip.crest.x, lip.crest.z);
+        lip.crest.y = std::max(lip.crest.y, crest_water);
+        const float foot_water = world.WaterLevelAt(lip.foot.x, lip.foot.z);
+        lip.foot.y = std::max(lip.foot.y, foot_water);
+        // Recompute drop after the surface connection (clamp non-negative).
+        lip.drop = std::max(0.0f, lip.crest.y - lip.foot.y);
     }
 
     // --- 2. De-duplicate lips into discrete sites. -----------------------
@@ -163,6 +282,11 @@ std::vector<WaterfallSite> DetectWaterfalls(
 
     const float cluster_r2 = params.cluster_radius * params.cluster_radius;
     for (const LipCandidate& lip : lips) {
+        // Surface connection can flatten a lip (foot water meets crest water) — a
+        // sheet with no real fall would render as a degenerate quad; drop it.
+        if (lip.drop < params.min_drop) {
+            continue;
+        }
         bool merged = false;
         for (const WaterfallSite& existing : sites) {
             const float dx = existing.crest.x - lip.crest.x;
@@ -183,6 +307,7 @@ std::vector<WaterfallSite> DetectWaterfalls(
         site.width = lip.width;
         site.flow_dir = lip.flow;
         site.steepness = lip.steepness;
+        site.lake_outlet = lip.lake_outlet;
         sites.push_back(site);
     }
 
@@ -210,6 +335,7 @@ uint64_t HashWaterfallSites(const std::vector<WaterfallSite>& sites) {
             quant_mm(s.foot.x),  quant_mm(s.foot.y),  quant_mm(s.foot.z),
             quant_mm(s.drop_height), quant_mm(s.run_length), quant_mm(s.width),
             quant_mm(s.flow_dir.x),  quant_mm(s.flow_dir.y), quant_mm(s.steepness),
+            s.lake_outlet ? 1 : 0,
         };
         fnv1a(h, q, sizeof(q));
     }
