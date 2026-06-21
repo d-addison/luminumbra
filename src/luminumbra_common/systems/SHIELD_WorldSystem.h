@@ -94,7 +94,7 @@ struct TerrainGenParams {
     // cliff zones sit naturally amid normal foothills. Disabled -> byte-zero drift.
     bool cliffs_enabled = false;
     float cliff_frequency = 0.0011f; // cliff-zone mask feature scale
-    float cliff_threshold = 0.35f;   // mask value above which terracing engages
+    float cliff_threshold = 0.4f;    // mask value above which terracing engages (matches default.json)
     float cliff_step = 11.0f;        // metres per bench (cliff face height)
 
     // --- T-I4-3 PV-band rivers (default-off) ---
