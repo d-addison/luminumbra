@@ -72,15 +72,19 @@ TEST(TerrainPresetLoaderTest, LoadsShippedDefaultPreset) {
 
     EXPECT_TRUE(result.extras.biomes.present);
     EXPECT_FLOAT_EQ(result.extras.biomes.temperature_frequency, 0.005f);
-    // Default ships a biomes block WITHOUT a table, so biomes stay disabled
-    // (byte-zero) and the consumed params keep biomes_enabled false.
-    EXPECT_FALSE(result.extras.biomes.enabled);
-    EXPECT_FALSE(result.params.biomes_enabled);
+    // Default was ENRICHED (worldgen "enrich default" slice): it now ships a biome table, rivers,
+    // hydraulic erosion, lakes, cliffs and per-biome relief, so these are all consumed/enabled
+    // (the prior monochrome default had them off). This test pins the currently shipped preset.
+    EXPECT_TRUE(result.extras.biomes.enabled);
+    EXPECT_TRUE(result.params.biomes_enabled);
+    EXPECT_FALSE(result.params.biome_table_path.empty());
+    EXPECT_TRUE(result.params.biome_relief_enabled);
     EXPECT_TRUE(result.extras.features.present);
-    // T-I4-3: default does NOT opt into rivers (rivers ship only on mountains),
-    // so the consumed params keep rivers_enabled false -> byte-zero drift.
-    EXPECT_FALSE(result.extras.features.rivers_enabled);
-    EXPECT_FALSE(result.params.rivers_enabled);
+    EXPECT_TRUE(result.extras.features.rivers_enabled);
+    EXPECT_TRUE(result.params.rivers_enabled);
+    EXPECT_TRUE(result.params.lakes_enabled);
+    EXPECT_TRUE(result.params.cliffs_enabled);
+    EXPECT_TRUE(result.params.hydro_enabled);
     EXPECT_TRUE(result.extras.features.structures_enabled);
     // Default now ships a shaping block (T-I4-DR DEM realism calibration).
     EXPECT_TRUE(result.extras.shaping.present);
