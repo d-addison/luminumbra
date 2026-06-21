@@ -251,6 +251,7 @@ void GBufferPass::geometry_pass_chunks(RenderPipeline& pipeline,
     glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_terrainRoughnessArray ? pipeline.m_terrainRoughnessArray : pipeline.m_terrainTextureArray);
     m_geometry_shader->setInt("u_terrainRoughness", 4);
     m_geometry_shader->setInt("u_terrainRoughnessValid", pipeline.m_terrainRoughnessValid);
+    m_geometry_shader->setInt("u_macroRockOverlay", 1); // FR-C2: terrain keeps the macro rock overlay
 
     // Perform hierarchical frustum culling
     std::vector<const RenderPipeline::ChunkCullEntry*> visible_chunks;
@@ -314,6 +315,10 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
     m_instanced_static_mesh_shader->setInt("u_skinnedAlbedoLayer", -1);
     m_instanced_static_mesh_shader->setInt("u_skinnedNormalLayer", -1);
     m_instanced_static_mesh_shader->setInt("u_alphaTest", 0); // I8: per-group override below
+    // FR-C2: instanced foliage/props skip the terrain-only macro rock overlay (a per-fragment
+    // vnoise + up to 3 triplanar samples) — a leaf/bark/bush card never wants rock texturing,
+    // and the forest's heavy overdraw made this branch a top G-buffer cost. Terrain keeps it.
+    m_instanced_static_mesh_shader->setInt("u_macroRockOverlay", 0);
     m_instanced_static_mesh_shader->setFloat("u_time", static_cast<float>(glfwGetTime())); // I8 wind
     m_instanced_static_mesh_shader->setFloat("u_windStrength", 0.0f); // per-group override below
     // I7.1-PBR B1d: per-texel terrain roughness map (unit 4) — g_buffer.frag is
@@ -481,6 +486,7 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
                 m_instanced_static_mesh_shader->setInt("u_alphaTest", smt->alphaTest ? 1 : 0);
                 // I8: textured tree parts sway in the wind (rigid props stay at 0).
                 m_instanced_static_mesh_shader->setFloat("u_windStrength", 1.0f);
+                m_instanced_static_mesh_shader->setInt("u_forceFlat", 0);
             } else {
                 glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_skinnedTextureArray ? pipeline.m_skinnedTextureArray : pipeline.m_terrainTextureArray);
                 m_instanced_static_mesh_shader->setInt("u_skinnedAlbedoLayer", -1);
@@ -492,6 +498,16 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
                 const bool isLeaf = batch.basePath.size() >= 5 &&
                                     batch.basePath.rfind("_leaf") == batch.basePath.size() - 5;
                 m_instanced_static_mesh_shader->setFloat("u_windStrength", isLeaf ? 0.85f : 0.0f);
+                // FR-C2: procgen FOLIAGE cards (leaves + bushes, no texture lane) take the flat
+                // path at DISTANCE (LOD1+) — there the world-projected grass triplanar (6-9
+                // texture-array samples/fragment) is invisible on a fluttering card but was a top
+                // G-buffer cost under forest overdraw, and the per-instance green tint carries the
+                // colour. The NEAR band (LOD0, the group drawn from the un-suffixed base mesh)
+                // KEEPS the full triplanar so foreground foliage the player reads up close is
+                // unchanged. Bark/trunk always keep triplanar (read as wood bark texture).
+                const bool isBush = batch.basePath.find("procgen://bush_") != std::string::npos;
+                const bool isFarLod = batch.drawPath.find(".lod") != std::string::npos;
+                m_instanced_static_mesh_shader->setInt("u_forceFlat", ((isLeaf || isBush) && isFarLod) ? 1 : 0);
             }
         }
         // I8: clamp to the VBO capacity so an oversized group can't overrun the

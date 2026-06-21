@@ -36,6 +36,12 @@ struct TreeLodConfig {
     // falls back to LOD0 for any LOD whose file is missing).
     bool enabled = true;
     // Near radius around the camera that always renders the full mesh.
+    // FR-C2 (spec 003) note: these thresholds were investigated as a lever but kept at the
+    // blessed values. The instanced-foliage G-buffer cost is fill/OVERDRAW-bound, not triangle-
+    // bound (measured: cutting forest triangles ~58% via LOD distance changes did NOT move
+    // gbuffer ms), and pulling LOD3 inward made it WORSE — the cross-billboards are large flat
+    // surfaces that add overdraw at oblique/aerial poses. So the win came from cheaper foliage
+    // FRAGMENTS (see u_macroRockOverlay / u_forceFlat in g_buffer.frag), not LOD distance.
     float lod1Distance = 140.0f;
     // Beyond this, render the coarse procedural mesh.
     float lod2Distance = 320.0f;

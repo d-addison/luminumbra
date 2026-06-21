@@ -609,14 +609,60 @@ void BuildProcgenRockPalette(Luminumbra::Rendering::RenderPipeline& rp) {
         z = z ^ (z >> 31);
         return static_cast<float>((z >> 11) * (1.0 / 9007199254740992.0));
     };
+    // FR-C2 RENDER-ONLY LOD: an octahedron hull (6 axis-extreme verts, 8 flat faces)
+    // built from the deformed icosahedron's AABB — reads as the same boulder silhouette
+    // at distance for ~8 tris (vs 20). Used for LOD1/LOD2 so distant rocks (>140m / >320m)
+    // shed geometry; LOD3 (>620m) collapses to a crossed billboard (~4 tris).
+    auto buildRockHull = [](const glm::vec3& lo, const glm::vec3& hi) {
+        const glm::vec3 c = (lo + hi) * 0.5f;
+        const glm::vec3 ex[6] = {
+            {hi.x, c.y, c.z}, {lo.x, c.y, c.z},
+            {c.x, hi.y, c.z}, {c.x, lo.y, c.z},
+            {c.x, c.y, hi.z}, {c.x, c.y, lo.z}};
+        // 8 octahedron faces (+X/-X top/bottom rings).
+        const int of[8][3] = {
+            {0,2,4},{4,2,1},{1,2,5},{5,2,0},
+            {0,4,3},{4,1,3},{1,5,3},{5,0,3}};
+        std::vector<V> v; std::vector<std::uint32_t> i; v.reserve(24); i.reserve(24);
+        for (int f = 0; f < 8; ++f) {
+            const glm::vec3 a = ex[of[f][0]], b = ex[of[f][1]], cc = ex[of[f][2]];
+            const glm::vec3 cr = glm::cross(b - a, cc - a);
+            const float crLen = glm::length(cr);
+            const glm::vec3 nrm = (crLen > 1e-6f) ? (cr / crLen) : glm::vec3(0,1,0);
+            const std::uint32_t k = static_cast<std::uint32_t>(v.size());
+            v.push_back({a, nrm, {0,0}}); v.push_back({b, nrm, {1,0}}); v.push_back({cc, nrm, {0,1}});
+            i.push_back(k); i.push_back(k+1); i.push_back(k+2);
+        }
+        return Luminumbra::Rendering::MeshLoader::CreateFromArrays(v, i);
+    };
+    // FR-C2 far-field billboard: two crossed vertical quads spanning the boulder AABB
+    // (~4 tris) — the stone triplanar material colours them, so a distant scree field
+    // stays in budget. Mirrors the tree LOD3 cross-billboard.
+    auto buildRockBillboard = [](const glm::vec3& lo, const glm::vec3& hi) {
+        const float W = std::max({hi.x, -lo.x, hi.z, -lo.z, 0.2f});
+        const float yLo = lo.y, yHi = std::max(hi.y, lo.y + 0.2f);
+        std::vector<V> v; std::vector<std::uint32_t> i;
+        auto quad = [&](glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 d, glm::vec3 n) {
+            const std::uint32_t k = static_cast<std::uint32_t>(v.size());
+            v.push_back({a, n, {0,0}}); v.push_back({b, n, {1,0}});
+            v.push_back({c, n, {1,1}}); v.push_back({d, n, {0,1}});
+            i.push_back(k); i.push_back(k+1); i.push_back(k+2);
+            i.push_back(k); i.push_back(k+2); i.push_back(k+3);
+        };
+        quad({-W, yLo, 0}, {W, yLo, 0}, {W, yHi, 0}, {-W, yHi, 0}, {0,0,1});
+        quad({0, yLo, -W}, {0, yLo, W}, {0, yHi, W}, {0, yHi, -W}, {1,0,0});
+        return Luminumbra::Rendering::MeshLoader::CreateFromArrays(v, i);
+    };
     int built = 0;
     for (int p = 0; p < kRockPaletteSize; ++p) {
         const glm::vec3 baseScale(0.7f + 0.7f * h01(p, 1), 0.45f + 0.7f * h01(p, 2), 0.7f + 0.7f * h01(p, 3));
         glm::vec3 dv[12];
+        glm::vec3 lo(1.0e9f), hi(-1.0e9f);
         for (int i = 0; i < 12; ++i) {
             const glm::vec3 n = glm::normalize(ico[i]);
             const float r = 0.72f + 0.55f * h01(p * 13 + i, 7); // radial roughness
             dv[i] = n * r * baseScale;
+            lo = glm::min(lo, dv[i]); hi = glm::max(hi, dv[i]);
         }
         std::vector<V> verts; std::vector<std::uint32_t> idx;
         verts.reserve(60); idx.reserve(60);
@@ -632,8 +678,14 @@ void BuildProcgenRockPalette(Luminumbra::Rendering::RenderPipeline& rp) {
             verts.push_back({c, nrm, {0.0f, 1.0f}});
             idx.push_back(k); idx.push_back(k + 1); idx.push_back(k + 2);
         }
-        rp.register_procgen_mesh("procgen://rock_" + std::to_string(p),
+        const std::string base = "procgen://rock_" + std::to_string(p);
+        rp.register_procgen_mesh(base,
                                  Luminumbra::Rendering::MeshLoader::CreateFromArrays(verts, idx));
+        // RENDER-ONLY distance LODs (GBufferPass SelectTreeLod path picks these by camera
+        // distance; absent = fall back to LOD0). LOD1+LOD2 = octahedron hull, LOD3 = billboard.
+        rp.register_procgen_mesh(base + ".lod1", buildRockHull(lo, hi));
+        rp.register_procgen_mesh(base + ".lod2", buildRockHull(lo, hi));
+        rp.register_procgen_mesh(base + ".lod3", buildRockBillboard(lo, hi));
         ++built;
     }
     g_rockPaletteCount = built;
@@ -675,10 +727,51 @@ void BuildProcgenBushPalette(Luminumbra::Rendering::RenderPipeline& rp) {
         z = z ^ (z >> 31);
         return static_cast<float>((z >> 11) * (1.0 / 9007199254740992.0));
     };
+    // FR-C2 RENDER-ONLY LOD helpers (mirror the rock palette): an 8-face octahedron mound
+    // sized to the cluster AABB (~8 tris vs 40-60) for LOD1/LOD2, and a crossed billboard
+    // (~4 tris) for the far field. The grass/leaf material colours them, so distant
+    // undergrowth stays in budget. Selected by GBufferPass SelectTreeLod by camera distance.
+    auto buildBushHull = [](const glm::vec3& lo, const glm::vec3& hi) {
+        const glm::vec3 c = (lo + hi) * 0.5f;
+        const glm::vec3 ex[6] = {
+            {hi.x, c.y, c.z}, {lo.x, c.y, c.z},
+            {c.x, hi.y, c.z}, {c.x, lo.y, c.z},
+            {c.x, c.y, hi.z}, {c.x, c.y, lo.z}};
+        const int of[8][3] = {
+            {0,2,4},{4,2,1},{1,2,5},{5,2,0},
+            {0,4,3},{4,1,3},{1,5,3},{5,0,3}};
+        std::vector<V> v; std::vector<std::uint32_t> i; v.reserve(24); i.reserve(24);
+        for (int f = 0; f < 8; ++f) {
+            const glm::vec3 a = ex[of[f][0]], b = ex[of[f][1]], cc = ex[of[f][2]];
+            const glm::vec3 cr = glm::cross(b - a, cc - a);
+            const float crLen = glm::length(cr);
+            const glm::vec3 nrm = (crLen > 1e-6f) ? (cr / crLen) : glm::vec3(0,1,0);
+            const std::uint32_t k = static_cast<std::uint32_t>(v.size());
+            v.push_back({a, nrm, {0,0}}); v.push_back({b, nrm, {1,0}}); v.push_back({cc, nrm, {0,1}});
+            i.push_back(k); i.push_back(k+1); i.push_back(k+2);
+        }
+        return Luminumbra::Rendering::MeshLoader::CreateFromArrays(v, i);
+    };
+    auto buildBushBillboard = [](const glm::vec3& lo, const glm::vec3& hi) {
+        const float W = std::max({hi.x, -lo.x, hi.z, -lo.z, 0.2f});
+        const float yLo = std::min(lo.y, 0.0f), yHi = std::max(hi.y, yLo + 0.2f);
+        std::vector<V> v; std::vector<std::uint32_t> i;
+        auto quad = [&](glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 d, glm::vec3 n) {
+            const std::uint32_t k = static_cast<std::uint32_t>(v.size());
+            v.push_back({a, n, {0,0}}); v.push_back({b, n, {1,0}});
+            v.push_back({c, n, {1,1}}); v.push_back({d, n, {0,1}});
+            i.push_back(k); i.push_back(k+1); i.push_back(k+2);
+            i.push_back(k); i.push_back(k+2); i.push_back(k+3);
+        };
+        quad({-W, yLo, 0}, {W, yLo, 0}, {W, yHi, 0}, {-W, yHi, 0}, {0,0,1});
+        quad({0, yLo, -W}, {0, yLo, W}, {0, yHi, W}, {0, yHi, -W}, {1,0,0});
+        return Luminumbra::Rendering::MeshLoader::CreateFromArrays(v, i);
+    };
     int built = 0;
     for (int p = 0; p < kBushPaletteSize; ++p) {
         std::vector<V> verts; std::vector<std::uint32_t> idx;
         verts.reserve(180); idx.reserve(180);
+        glm::vec3 lo(1.0e9f), hi(-1.0e9f);   // cluster AABB for the LOD hull/billboard
         // 2-3 overlapping lobes per bush; each a squashed, deformed icosphere.
         const int lobes = 2 + static_cast<int>(h01(p, 41) * 2.0f); // 2..3
         for (int l = 0; l < lobes; ++l) {
@@ -697,6 +790,7 @@ void BuildProcgenBushPalette(Luminumbra::Rendering::RenderPipeline& rp) {
                 const glm::vec3 n = glm::normalize(ico[i]);
                 const float r = 0.78f + 0.42f * h01((p * 7 + l) * 13 + i, 7); // leafy roughness
                 dv[i] = centre + n * r * lobeScale;
+                lo = glm::min(lo, dv[i]); hi = glm::max(hi, dv[i]);
             }
             for (int f = 0; f < 20; ++f) {
                 const glm::vec3 a = dv[faces[f][0]], b = dv[faces[f][1]], c = dv[faces[f][2]];
@@ -711,8 +805,13 @@ void BuildProcgenBushPalette(Luminumbra::Rendering::RenderPipeline& rp) {
                 idx.push_back(k); idx.push_back(k + 1); idx.push_back(k + 2);
             }
         }
-        rp.register_procgen_mesh("procgen://bush_" + std::to_string(p),
+        const std::string base = "procgen://bush_" + std::to_string(p);
+        rp.register_procgen_mesh(base,
                                  Luminumbra::Rendering::MeshLoader::CreateFromArrays(verts, idx));
+        // RENDER-ONLY distance LODs (GBufferPass picks by camera distance; absent -> LOD0).
+        rp.register_procgen_mesh(base + ".lod1", buildBushHull(lo, hi));
+        rp.register_procgen_mesh(base + ".lod2", buildBushHull(lo, hi));
+        rp.register_procgen_mesh(base + ".lod3", buildBushBillboard(lo, hi));
         ++built;
     }
     g_bushPaletteCount = built;
@@ -2249,7 +2348,11 @@ int main(int argc, char* argv[]) {
     // VSync from user settings (user.video.vsync). This is the ONLY glfwSwapInterval call;
     // before this the swap interval was never set (driver default = uncapped). Default OFF
     // preserves the uncapped 300fps target; the settings menu flips it.
-    glfwSwapInterval(g_systemConfig.user().vsync ? 1 : 0);
+    // FR-C2: the --render-benchmark capture ALWAYS runs uncapped (swap interval 0) regardless
+    // of the persisted user vsync setting — a vsync-capped present leaves the GPU idle between
+    // frames, which downclocks it and inflates every per-pass GPU timer, making the budget gate
+    // unreproducible. The fixed-scenario budget must measure the saturated/boosted GPU state.
+    glfwSwapInterval((!g_render_benchmark_path.empty() || g_systemConfig.user().vsync == false) ? 0 : 1);
 
     // [[maybe_unused]]: LUMINUMBRA_ASSERT compiles out in release builds
     // (T-I3-20 release perf lane builds with -Werror).

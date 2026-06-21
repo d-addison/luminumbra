@@ -51,6 +51,22 @@ uniform int u_skinnedAlbedoLayer = -1;
 uniform int u_skinnedNormalLayer = -1;
 uniform int u_alphaTest = 0; // I8: 1 = luma-keyed cutout (tree leaves), 0 = opaque
 
+// FR-C2 (spec 003): macro ROCK-on-steep-faces overlay is a TERRAIN-only macro-variation
+// (natural cliffs read as scree). It costs vnoise + up to 3 extra triplanar samples per
+// fragment. Instanced foliage/props (procgen trees/bushes/rocks) used materials 1-3 and so
+// paid this every leaf/bark fragment — heavily overdrawn — for no visual benefit (a leaf
+// card should never sample rock). Terrain sets this to 1 (byte-identical to before); the
+// instanced static-mesh path sets it to 0, which skips the branch entirely. RENDER-ONLY.
+uniform int u_macroRockOverlay = 1;
+
+// FR-C2 (spec 003): force the cheap FLAT-material path (skip ALL triplanar sampling) for the
+// procedural foliage cards (leaves + bushes). These are alpha-keyed, heavily overdrawn, and
+// get their colour almost entirely from the per-instance green tint — the world-projected
+// grass triplanar (6-9 texture-array samples/fragment) is invisible on a fluttering leaf card
+// but was the single largest G-buffer cost in the forest. The flat grass base colour × Tint
+// reads the same at the densities this draws. Terrain/bark/rock keep triplanar (set to 0).
+uniform int u_forceFlat = 0;
+
 // T-I3-9 far-LOD: view-space radius (meters) inside which far-region mesh
 // fragments are discarded - the live chunk ring owns that space (live wins;
 // the under-terrain far fill must not show through live LOD seam cracks at
@@ -263,7 +279,7 @@ void main()
             worldN = normalize(t * tn.x + b * tn.y + worldN * max(tn.z, 0.1));
         }
         textured = true;
-    } else if (texInfo.a > 0.5) {
+    } else if (texInfo.a > 0.5 && u_forceFlat == 0) {
         float texLayer = floor(texInfo.r * 255.0 + 0.5);
         float normLayer = floor(texInfo.g * 255.0 + 0.5);
         float tiling = max(texInfo.b * 64.0, 0.0625);
@@ -287,7 +303,7 @@ void main()
         // materials.json (no hardcoded layer index). Steep faces blend toward rock with
         // a world-space-noise-jittered boundary so cliffs read as natural scree, not a
         // clean contour line.
-        if (fs_in.MaterialID >= 1u && fs_in.MaterialID <= 3u) {
+        if (u_macroRockOverlay == 1 && fs_in.MaterialID >= 1u && fs_in.MaterialID <= 3u) {
             float jitter = (vnoise(fs_in.WorldPos * 0.05) - 0.5) * 0.18; // ~20 m break-up
             float rockW = smoothstep(0.80 + jitter, 0.50 + jitter, geomSlope); // steep -> rock
             if (rockW > 0.002) {
