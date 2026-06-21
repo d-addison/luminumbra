@@ -574,8 +574,13 @@ void BuildProcgenRockPalette(Luminumbra::Rendering::RenderPipeline& rp) {
         {4,9,5},{2,4,11},{6,2,10},{8,6,7},{9,8,1}
     };
     auto h01 = [](int a, int b) {
-        std::uint64_t z = static_cast<std::uint64_t>(static_cast<std::uint32_t>(a * 73856093) ^
-                                                     static_cast<std::uint32_t>(b * 19349663)) + 0x9E3779B97F4A7C15ull;
+        // Unsigned arithmetic throughout: `a * 73856093` as signed int overflows
+        // (a can exceed 29 here) which is UB the -O3/LTO release build miscompiles
+        // (debug wraps, release does not) — the root cause of a release-only hang
+        // (degenerate face -> NaN normal -> stall). Unsigned wraps deterministically.
+        std::uint32_t ua = static_cast<std::uint32_t>(static_cast<std::int64_t>(a)) * 73856093u;
+        std::uint32_t ub = static_cast<std::uint32_t>(static_cast<std::int64_t>(b)) * 19349663u;
+        std::uint64_t z = static_cast<std::uint64_t>(ua ^ ub) + 0x9E3779B97F4A7C15ull;
         z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
         z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
         z = z ^ (z >> 31);
@@ -594,7 +599,10 @@ void BuildProcgenRockPalette(Luminumbra::Rendering::RenderPipeline& rp) {
         verts.reserve(60); idx.reserve(60);
         for (int f = 0; f < 20; ++f) {
             const glm::vec3 a = dv[faces[f][0]], b = dv[faces[f][1]], c = dv[faces[f][2]];
-            const glm::vec3 nrm = glm::normalize(glm::cross(b - a, c - a)); // flat-shaded face
+            const glm::vec3 cr = glm::cross(b - a, c - a);
+            const float crLen = glm::length(cr);
+            const glm::vec3 nrm = (crLen > 1e-6f) ? (cr / crLen)               // flat-shaded face
+                                                  : glm::normalize(a);          // degenerate -> radial fallback (no NaN)
             const std::uint32_t k = static_cast<std::uint32_t>(verts.size());
             verts.push_back({a, nrm, {0.0f, 0.0f}});
             verts.push_back({b, nrm, {1.0f, 0.0f}});
@@ -4286,7 +4294,7 @@ int main(int argc, char* argv[]) {
                         // the frand() stream simply continues after the trees, so the layout
                         // stays deterministic + reproducible.
                         BuildProcgenRockPalette(renderPipeline);
-                        if (g_rockPaletteCount > 0 && std::getenv("LUMIN_NO_ROCKS") == nullptr) {
+                        if (g_rockPaletteCount > 0) {
                             const float rReach = 900.0f;   // metres from spawn anchor
                             const float rCell = 19.0f;     // grid pitch
                             const float rHS = 3.0f;        // slope probe radius
