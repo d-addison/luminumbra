@@ -64,8 +64,11 @@ scalar/batched/coarse height paths, `GenerateChunkData`); `World::SitesInArea`/`
   empty-case hashing so disabled worlds stay byte-identical; cave geometry only on flagged columns;
   F1 full / F2 mouths / fade) renders them at distance, with the seam-fallback (`ReadTransitionFace…`)
   and boundary skirts taught to consult the same cave samples so the live/far boundary doesn't crack.
-  Needs a **research pass first** (deterministic sinkhole/arch/cave-mouth authoring) before detailed
-  design. All hashing unsigned; guard normalize/division.
+  Research DONE → see `A3-surface-breaking-caves-research.md`. Load-bearing mechanism: make the 18 m
+  cap a **per-column field** `effective_cap(x,z)=mix(18,0,featureMask(x,z))` so cave noise reaches the
+  surface ONLY inside hashed feature footprints (byte-identical when disabled). Reuses `SplitMix64`/
+  `CellSeed`; hard-max/exp-smin only (order-free); 7-phase rollout (Phase 0 byte-identical, no re-pin).
+  All hashing unsigned; guard normalize/division.
 
 ### FR-B · World_hash-affecting (batched → ONE re-pin)
 - **FR-B1 (material channel + voxel structures) — red-team-hardened.** Add lazily-allocated
