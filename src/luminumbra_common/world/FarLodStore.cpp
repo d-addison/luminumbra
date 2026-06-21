@@ -173,6 +173,17 @@ u64 ComputeTerrainParamsHash(const Systems::TerrainGenParams& params, int seed) 
         FnvMixValue(hash, params.hydro_sediment_capacity);
         FnvMixValue(hash, params.hydro_max_offset);
     }
+    // FR-A3: mix surface-break params ONLY when enabled, so dolines/cave-mouths
+    // tuning invalidates pristine far-LOD tiles. Disabled worlds skip the block
+    // (byte-stable cache key -> byte-zero drift). marker 0x07.
+    if (params.surface_breaks_enabled) {
+        FnvMixValue(hash, static_cast<u8>(6)); // marker 0x07 (6th conditional block)
+        FnvMixValue(hash, params.surface_break_density);
+        FnvMixValue(hash, params.feature_cell_size);
+        FnvMixValue(hash, params.max_feature_radius);
+        FnvMixValue(hash, params.carve_smoothness);
+        FnvMixValue(hash, params.entrance_min_cap);
+    }
     return hash;
 }
 

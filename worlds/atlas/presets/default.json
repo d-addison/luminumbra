@@ -119,7 +119,13 @@
       "cliff_frequency": 0.0011,
       "cliff_threshold": 0.4,
       "cliff_step": 11.0,
-      "structures_enabled": true
+      "structures_enabled": true,
+      "surface_breaks_enabled": true,
+      "surface_break_density": 0.18,
+      "feature_cell_size": 128.0,
+      "max_feature_radius": 18.0,
+      "carve_smoothness": 3.0,
+      "entrance_min_cap": 2.0
     }
   }
 }

@@ -33,6 +33,17 @@ uniform float u_caveFrequency;
 uniform float u_caveThreshold;
 uniform float u_caveCarveValue;
 
+// FR-A3 surface-break parameters (mirror TerrainGenParams). When disabled the
+// per-column cap stays at CAVE_SURFACE_CAP_DEPTH and no carve is applied, so the
+// SDF is byte-equivalent to the pre-A3 shader.
+uniform bool u_surfaceBreaksEnabled;
+uniform float u_surfaceBreakDensity;
+uniform float u_featureCellSize;
+uniform float u_maxFeatureRadius;
+uniform float u_carveSmoothness;
+uniform float u_entranceMinCap;
+uniform int u_worldSeed;
+
 // Island mask parameters
 uniform bool u_islandMaskEnabled;
 uniform float u_islandMaskFrequency;
@@ -45,6 +56,7 @@ const int CHUNK_SIZE = 17; // 16 + 1 for padding
 const float SEA_LEVEL = 0.0;
 const float CAVE_SURFACE_CAP_DEPTH = 18.0;
 const float CAVE_SURFACE_FULL_DEPTH = 24.0;
+const float CAVE_SURFACE_CAP_BAND = CAVE_SURFACE_FULL_DEPTH - CAVE_SURFACE_CAP_DEPTH;
 
 // Multi-octave noise sampling with hardware acceleration
 float sampleTerrainNoise(vec3 pos) {
@@ -90,9 +102,206 @@ float sampleIslandMask(vec2 pos) {
     return smoothstep(0.1, 0.25, island_value);
 }
 
-float caveSurfaceBlend(float terrain_density) {
+// FR-A3 generalized cap blend: depth at which the cave field starts to win is the
+// per-column effective_cap. Byte-equivalent to the original when cap == 18.
+float caveSurfaceBlend(float terrain_density, float effective_cap) {
     float depth_below_surface = max(0.0, -terrain_density);
-    return smoothstep(CAVE_SURFACE_CAP_DEPTH, CAVE_SURFACE_FULL_DEPTH, depth_below_surface);
+    return smoothstep(effective_cap, effective_cap + CAVE_SURFACE_CAP_BAND, depth_below_surface);
+}
+
+// ---- FR-A3 64-bit hash math, emulated with uvec2 (hi, lo). Same magic constants
+// as the CPU SbSplitMix64 / SbCellSeed so placement is bit-identical. ----
+uvec2 u64_add(uvec2 a, uvec2 b) {
+    uint lo = a.y + b.y;
+    uint carry = (lo < a.y) ? 1u : 0u;
+    uint hi = a.x + b.x + carry;
+    return uvec2(hi, lo);
+}
+uvec2 u64_xor(uvec2 a, uvec2 b) { return uvec2(a.x ^ b.x, a.y ^ b.y); }
+uvec2 u64_shr(uvec2 a, int s) {
+    if (s == 0) return a;
+    if (s < 32) return uvec2(a.x >> s, (a.y >> s) | (a.x << (32 - s)));
+    return uvec2(0u, a.x >> (s - 32));
+}
+// 64x64 -> low 64 multiply (schoolbook on 32-bit limbs).
+uvec2 u64_mul(uvec2 a, uvec2 b) {
+    uint a0 = a.y & 0xFFFFu, a1 = a.y >> 16;
+    uint a2 = a.x & 0xFFFFu, a3 = a.x >> 16;
+    uint b0 = b.y & 0xFFFFu, b1 = b.y >> 16;
+    uint b2 = b.x & 0xFFFFu, b3 = b.x >> 16;
+    uint c0 = a0 * b0;
+    uint c1 = (c0 >> 16) + a0 * b1 + a1 * b0;
+    uint c2 = (c1 >> 16) + a0 * b2 + a1 * b1 + a2 * b0;
+    uint c3 = (c2 >> 16) + a0 * b3 + a1 * b2 + a2 * b1 + a3 * b0;
+    uint lo = (c0 & 0xFFFFu) | (c1 << 16);
+    uint hi = (c2 & 0xFFFFu) | (c3 << 16);
+    return uvec2(hi, lo);
+}
+
+const uvec2 SB_FNV_OFFSET = uvec2(0xCBF29CE4u, 0x84222325u); // 14695981039346656037
+const uvec2 SB_FNV_PRIME  = uvec2(0x00000100u, 0x000001B3u); // 1099511628211
+const uvec2 SB_SM_INC     = uvec2(0x9E3779B9u, 0x7F4A7C15u);
+const uvec2 SB_SM_M1      = uvec2(0xBF58476Du, 0x1CE4E5B9u);
+const uvec2 SB_SM_M2      = uvec2(0x94D049BBu, 0x133111EBu);
+
+uvec2 sbFnvMix32(uvec2 h, uint value) {
+    for (int i = 0; i < 4; ++i) {
+        uint byteVal = (value >> (i * 8)) & 0xFFu;
+        h = u64_xor(h, uvec2(0u, byteVal));
+        h = u64_mul(h, SB_FNV_PRIME);
+    }
+    return h;
+}
+
+uvec2 sbCellSeed(int worldSeed, uint salt, int cx, int cz) {
+    uvec2 h = SB_FNV_OFFSET;
+    h = sbFnvMix32(h, uint(worldSeed));
+    h = sbFnvMix32(h, salt);
+    h = sbFnvMix32(h, uint(cx));
+    h = sbFnvMix32(h, uint(cz));
+    return h;
+}
+
+// SplitMix64.next(): advances `state`, returns the mixed output. Returns next
+// output; the caller threads `state` between calls.
+uvec2 g_sbState;
+uvec2 sbNext() {
+    g_sbState = u64_add(g_sbState, SB_SM_INC);
+    uvec2 z = g_sbState;
+    z = u64_mul(u64_xor(z, u64_shr(z, 30)), SB_SM_M1);
+    z = u64_mul(u64_xor(z, u64_shr(z, 27)), SB_SM_M2);
+    z = u64_xor(z, u64_shr(z, 31));
+    return z;
+}
+float sbNextUnit() {
+    uvec2 z = u64_shr(sbNext(), 11); // 53-bit mantissa
+    // value = z * 2^-53. z fits in 53 bits: hi has up to 21 bits.
+    float fhi = float(z.x); // bits 32..52
+    float flo = float(z.y); // bits 0..31
+    return (fhi * 4294967296.0 + flo) * (1.0 / 9007199254740992.0);
+}
+
+// IQ vertical capsule (negative inside). p2 = (radial, vertical).
+float sdVerticalCapsuleG(float pr, float py, float h, float r) {
+    float cy = py - clamp(py, 0.0, h);
+    return sqrt(pr * pr + cy * cy) - r;
+}
+// IQ capped cone (negative inside). pr = radial distance, py = vertical.
+float sdCappedConeG(float pr, float py, float h, float r1, float r2) {
+    float qx = pr;
+    vec2 k1 = vec2(r2, h);
+    vec2 k2 = vec2(r2 - r1, 2.0 * h);
+    float cax = qx - min(qx, (py < 0.0) ? r1 : r2);
+    float cay = abs(py) - h;
+    float k2dot = dot(k2, k2);
+    float t = clamp(dot(vec2(k1.x - qx, k1.y - py), k2) / max(1e-6, k2dot), 0.0, 1.0);
+    float cbx = qx - k1.x + k2.x * t;
+    float cby = py - k1.y + k2.y * t;
+    float s = (cbx < 0.0 && cay < 0.0) ? -1.0 : 1.0;
+    return s * sqrt(min(cax * cax + cay * cay, cbx * cbx + cby * cby));
+}
+
+const uint SB_SALT = 0x0A3CA7E5u; // kSurfaceBreakSalt
+
+struct SbFeature { bool valid; float cx; float cz; float radius; float depth; bool shaft; };
+
+SbFeature decodeSurfaceBreakCell(int cellX, int cellZ) {
+    SbFeature f; f.valid = false; f.cx = 0.0; f.cz = 0.0; f.radius = 0.0; f.depth = 0.0; f.shaft = false;
+    g_sbState = sbCellSeed(u_worldSeed, SB_SALT, cellX, cellZ);
+    float accept = sbNextUnit();
+    if (accept >= u_surfaceBreakDensity) return f;
+    float cs = u_featureCellSize;
+    float jx = sbNextUnit();
+    float jz = sbNextUnit();
+    f.cx = (float(cellX) + jx) * cs;
+    f.cz = (float(cellZ) + jz) * cs;
+    float u = sbNextUnit();
+    float beta = 2.5;
+    float dmin = 6.0;
+    float dmax = min(120.0, 2.0 * u_maxFeatureRadius);
+    float diameter = dmin * pow(max(1e-4, 1.0 - u), -1.0 / (beta - 1.0));
+    diameter = clamp(diameter, dmin, dmax);
+    f.radius = min(0.5 * diameter, u_maxFeatureRadius * 0.999);
+    float depthFrac = 0.2 + 0.3 * sbNextUnit();
+    f.depth = depthFrac * diameter;
+    f.shaft = sbNextUnit() < 0.25;
+    f.valid = true;
+    return f;
+}
+
+float sbFloorDivCell(float world, float cs) { return floor(world / cs); }
+
+// Sample the per-column effective cap + carve at (world_pos, surface_h). Mirrors
+// the CPU SHIELD_WorldSystem::sample_surface_breaks (interior-proximity probe uses
+// the same cave-noise source available on the GPU path).
+void sampleSurfaceBreaks(vec3 world_pos, float surface_h, float cave_factor,
+                         out float effective_cap, out float carve) {
+    effective_cap = CAVE_SURFACE_CAP_DEPTH;
+    carve = 0.0;
+    if (!u_surfaceBreaksEnabled || u_featureCellSize <= 0.0) return;
+    int baseCx = int(sbFloorDivCell(world_pos.x, u_featureCellSize));
+    int baseCz = int(sbFloorDivCell(world_pos.z, u_featureCellSize));
+    float minCap = CAVE_SURFACE_CAP_DEPTH;
+    float maxCarve = 0.0;
+    for (int dz = -1; dz <= 1; ++dz) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            SbFeature f = decodeSurfaceBreakCell(baseCx + dx, baseCz + dz);
+            if (!f.valid) continue;
+            float ddx = world_pos.x - f.cx;
+            float ddz = world_pos.z - f.cz;
+            float dist2 = ddx * ddx + ddz * ddz;
+            if (dist2 >= f.radius * f.radius) continue;
+            float dist = sqrt(dist2);
+            float t = 1.0 - (dist / f.radius);
+            // Cave-mouth: lift cap only where the cave field is already carved.
+            // GPU cave_factor is the sampled cave noise; same threshold test.
+            bool interior_carved = cave_factor > u_caveThreshold;
+            if (interior_carved) {
+                float capHere = CAVE_SURFACE_CAP_DEPTH +
+                    (u_entranceMinCap - CAVE_SURFACE_CAP_DEPTH) * smoothstep(0.0, 1.0, t);
+                minCap = min(minCap, capHere);
+            }
+            float ry = surface_h - world_pos.y;
+            float sd;
+            if (f.shaft) {
+                sd = sdVerticalCapsuleG(dist, ry, f.depth, f.radius * 0.45);
+            } else {
+                float h = f.depth * 0.5;
+                sd = sdCappedConeG(dist, ry - h, h, f.radius * 0.15, f.radius);
+            }
+            maxCarve = max(maxCarve, max(0.0, -sd));
+        }
+    }
+    effective_cap = minCap;
+    carve = maxCarve;
+}
+
+float expSmax(float a, float b, float k) {
+    if (k <= 0.0) return max(a, b);
+    return k * log2(exp2(a / k) + exp2(b / k));
+}
+
+// FR-A3 2D rim depression (metres to subtract from the surface). Mirrors the CPU
+// SurfaceBreakRimDepression so the GPU heightfield dips at dolines too.
+float surfaceBreakRimDepression(vec2 world_xz) {
+    if (!u_surfaceBreaksEnabled || u_featureCellSize <= 0.0) return 0.0;
+    int baseCx = int(sbFloorDivCell(world_xz.x, u_featureCellSize));
+    int baseCz = int(sbFloorDivCell(world_xz.y, u_featureCellSize));
+    float dip = 0.0;
+    for (int dz = -1; dz <= 1; ++dz) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            SbFeature f = decodeSurfaceBreakCell(baseCx + dx, baseCz + dz);
+            if (!f.valid) continue;
+            float ddx = world_xz.x - f.cx;
+            float ddz = world_xz.y - f.cz;
+            float dist2 = ddx * ddx + ddz * ddz;
+            if (dist2 >= f.radius * f.radius) continue;
+            float dist = sqrt(dist2);
+            float t = 1.0 - (dist / f.radius);
+            dip = max(dip, 0.35 * f.depth * smoothstep(0.0, 1.0, t));
+        }
+    }
+    return dip;
 }
 
 float calculateSDF(vec3 world_pos, float terrain_height, float cave_factor, float island_mask) {
@@ -103,14 +312,31 @@ float calculateSDF(vec3 world_pos, float terrain_height, float cave_factor, floa
     
     // CPU SDF convention: negative is solid, positive is empty.
     float terrain_density = world_pos.y - terrain_height;
-    
-    // Apply cave carving
+
+    // FR-A3: per-column effective cap + analytic sinkhole carve. Mirrors the CPU
+    // sample_surface_breaks + apply_cave_field. When surface-breaks are disabled
+    // effective_cap stays 18 and carve stays 0 -> byte-equivalent to the pre-A3 path.
+    float effective_cap = CAVE_SURFACE_CAP_DEPTH;
+    float feature_carve = 0.0;
+    if (u_surfaceBreaksEnabled) {
+        // FR-A3 rim depression folded into the height (matches CPU height paths).
+        terrain_height -= surfaceBreakRimDepression(world_pos.xz);
+        terrain_density = world_pos.y - terrain_height;
+        sampleSurfaceBreaks(world_pos, terrain_height, cave_factor, effective_cap, feature_carve);
+    }
+
+    // Apply cave carving with the per-column cap.
     if (u_cavesEnabled && cave_factor > u_caveThreshold) {
         float cave_density = u_caveCarveValue * (cave_factor - u_caveThreshold);
-        float capped_cave_density = mix(terrain_density, cave_density, caveSurfaceBlend(terrain_density));
+        float capped_cave_density = mix(terrain_density, cave_density, caveSurfaceBlend(terrain_density, effective_cap));
         terrain_density = max(terrain_density, capped_cave_density);
     }
-    
+
+    // CSG subtraction of the sinkhole funnel (order-free; exp-smax for a soft lip).
+    if (feature_carve > 0.0) {
+        terrain_density = expSmax(terrain_density, -feature_carve, u_carveSmoothness);
+    }
+
     return terrain_density;
 }
 

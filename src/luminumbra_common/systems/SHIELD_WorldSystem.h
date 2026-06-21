@@ -39,6 +39,32 @@ struct TerrainGenParams {
     float cave_threshold = 0.7f;
     float cave_carve_value = 2.0f;
 
+    // --- FR-A3 surface-breaking caves / sinkholes / cave-mouths (default-off) ---
+    // Makes the 18 m surface cap (kCaveSurfaceCapDepth) a PER-COLUMN field so the
+    // EXISTING cave noise reaches the surface ONLY inside hashed feature
+    // footprints, plus a bounded analytic sinkhole carve. Placement is a pure
+    // unsigned fn of integer doline-cell coords + seed (SplitMix64 + CellSeed with
+    // a distinct salt), combined with caves via commutative+associative ops only
+    // (hard max / exp-smin) so chunk seams and the SIMD/scalar paths cannot
+    // diverge. The carve is VISUAL/terrain-field only (the integer sim reads the
+    // resulting density classification, never the float carve math), same rule as
+    // procedural trees. When surface_breaks_enabled == false every path takes the
+    // ORIGINAL float-op sequence (sample_surface_breaks returns {18,0} and the
+    // helpers fall through), so the output is byte-identical -> world_hash
+    // unchanged. World_hash-affecting when enabled -> deliberate re-pin.
+    //   feature_cell_size  -- doline cell grid pitch (~128 m); a 3x3 neighbor scan
+    //                         suffices because max_feature_radius < feature_cell_size.
+    //   max_feature_radius -- finite support clamp on a feature's surface footprint.
+    //   carve_smoothness   -- exp-smin k for the cone/capsule lip (0 => hard max).
+    //   entrance_min_cap   -- floor the per-column cap drops to inside a feature
+    //                         (0 => cave noise fully exposed; small positive keeps a thin lip).
+    bool surface_breaks_enabled = false;
+    float surface_break_density = 0.0f;   // Bernoulli accept prob per doline cell
+    float feature_cell_size = 128.0f;     // doline cell pitch (m)
+    float max_feature_radius = 60.0f;     // MUST be < feature_cell_size (asserted)
+    float carve_smoothness = 0.0f;        // exp-smin k (0 => hard max)
+    float entrance_min_cap = 0.0f;        // metres the cap floors to inside a feature
+
     bool island_mask_enabled = false;
     float island_mask_frequency = 0.004f;
 
@@ -699,6 +725,23 @@ private:
     // mask, seed +12). Pure; returns `height` unchanged when cliffs disabled or
     // outside a cliff zone. Shared by the scalar + batched paths (byte-identical).
     float CliffTerracedHeight(float world_x, float world_z, float height) const;
+    // FR-A3: 2D rim depression (metres to LOWER the surface) from the nearest
+    // surface-break feature, so dolines DIP the heightfield even on the
+    // SDF-ignoring coarse/far path. Pure fn of (world_x, world_z, seed); returns 0
+    // when surface_breaks disabled. Folded into all three height paths
+    // (ComputeShapedHeightSampleImpl, ComputeShapedHeightGrid, GetTerrainHeightAtCoarse)
+    // so near/far/coarse stay byte-identical.
+    float SurfaceBreakRimDepression(float world_x, float world_z) const;
+    // FR-A3: the ONE shared surface-break sampler. Returns the per-column effective
+    // cap (18 outside any feature, lowered toward entrance_min_cap inside a
+    // cave-mouth/doline where the interior-proximity probe shows the cave noise is
+    // already carved) and the analytic sinkhole carve (>=0) at world_pos. All four
+    // CPU cave call sites route through this so the float-op sequence is
+    // byte-identical across paths and chunk seams (absolute world coords only).
+    // Returns {kCaveSurfaceCapDepth, 0} when surface_breaks_enabled is false (the
+    // disabled path stays byte-identical to the pre-A3 implementation).
+    struct SurfaceBreakSample { float effective_cap; float carve; };
+    SurfaceBreakSample sample_surface_breaks(const Vec3& world_pos, float surface_h) const;
     // Monotone piecewise-linear spline over sorted [input, output] control
     // points: endpoint-clamped, plain lerp between neighbors, `fallback` when
     // the point list is empty.

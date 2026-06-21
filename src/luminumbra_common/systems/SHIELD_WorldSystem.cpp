@@ -64,27 +64,172 @@ namespace {
 
 constexpr float kCaveSurfaceCapDepth = 18.0f;
 constexpr float kCaveSurfaceFullDepth = 24.0f;
+// FR-A3: surface-break feature width above the cap. The blend ramps from a
+// per-column effective_cap to effective_cap + this, so when effective_cap drops
+// to 0 inside a feature footprint the cave noise reaches the surface.
+constexpr float kCaveSurfaceCapBand = kCaveSurfaceFullDepth - kCaveSurfaceCapDepth;
+
+// FR-A3: distinct placement salt for surface-break dolines/cave-mouths, kept
+// separate from every structure/biome stream (StructurePlacement salts).
+constexpr u32 kSurfaceBreakSalt = 0xA3CA7E5u;
 
 float smoothstep01(float value) {
     const float t = std::clamp(value, 0.0f, 1.0f);
     return t * t * (3.0f - 2.0f * t);
 }
 
-float cave_surface_blend(float terrain_density) {
+// FR-A3 generalized cap blend: the depth at which the cave field starts to win is
+// the PER-COLUMN effective_cap (18 everywhere except inside a feature footprint).
+// Byte-identical to the original cave_surface_blend(td) when effective_cap == 18.
+float cave_surface_blend(float terrain_density, float effective_cap) {
     const float depth_below_surface = std::max(0.0f, -terrain_density);
-    return smoothstep01((depth_below_surface - kCaveSurfaceCapDepth) /
-                        (kCaveSurfaceFullDepth - kCaveSurfaceCapDepth));
+    return smoothstep01((depth_below_surface - effective_cap) / kCaveSurfaceCapBand);
 }
 
-float surface_capped_cave_density(float terrain_density, float raw_cave_noise, const TerrainGenParams& params) {
+float surface_capped_cave_density(float terrain_density, float raw_cave_noise,
+                                  const TerrainGenParams& params, float effective_cap) {
     const float cave_val = std::clamp((raw_cave_noise + 1.0f) * 0.5f, 0.0f, 1.0f);
     const float cave_density = (cave_val - params.cave_threshold) * params.cave_carve_value;
-    const float cap_blend = cave_surface_blend(terrain_density);
+    const float cap_blend = cave_surface_blend(terrain_density, effective_cap);
     return terrain_density + (cave_density - terrain_density) * cap_blend;
 }
 
-float apply_cave_field(float terrain_density, float raw_cave_noise, const TerrainGenParams& params) {
-    return std::max(terrain_density, surface_capped_cave_density(terrain_density, raw_cave_noise, params));
+// CSG smooth subtraction via EXPONENTIAL smin (associative + commutative -> order-
+// free across SIMD lanes and chunk seams). k <= 0 => hard max (crisp). Subtraction
+// of carve C from field F is max(F, -C); the soft form is -smin(-F, C, k) folded
+// into max via the exp identity. Implemented directly as the associative
+// exp combine so disabling (k<=0) is the exact hard max.
+float exp_smax(float a, float b, float k) {
+    if (k <= 0.0f) {
+        return std::max(a, b);
+    }
+    // -k * log2(exp2(-a/k) + exp2(-b/k)) is the exp-smin; smax(a,b)=-smin(-a,-b).
+    const float res = std::exp2(a / k) + std::exp2(b / k);
+    return k * std::log2(res);
+}
+
+// FR-A3 apply: combine caves with the per-column cap, then CSG-subtract the
+// analytic sinkhole carve. max(F, -carve) opens the funnel (carve>0 -> -carve<0 ->
+// where terrain is solid/negative this can flip it positive == air). Order-free.
+// When effective_cap==18 and feature_carve==0 and carve_smoothness<=0 this is
+// byte-identical to the original apply_cave_field.
+float apply_cave_field(float terrain_density, float raw_cave_noise,
+                       const TerrainGenParams& params, float effective_cap,
+                       float feature_carve) {
+    const float caves = std::max(terrain_density,
+        surface_capped_cave_density(terrain_density, raw_cave_noise, params, effective_cap));
+    if (feature_carve <= 0.0f) {
+        return caves;
+    }
+    return exp_smax(caves, -feature_carve, params.carve_smoothness);
+}
+
+// ---- FR-A3 deterministic placement primitives (mirror StructurePlacement) ----
+// All-unsigned; no int*prime UB. Same magic constants as the GLSL port so CPU and
+// GPU produce bit-identical placement.
+constexpr u64 kSbFnvOffsetBasis = 14695981039346656037ull;
+constexpr u64 kSbFnvPrime = 1099511628211ull;
+
+void SbFnvMix32(u64& hash, u32 value) {
+    for (int i = 0; i < 4; ++i) {
+        hash ^= static_cast<u64>((value >> (i * 8)) & 0xFFu);
+        hash *= kSbFnvPrime;
+    }
+}
+
+// Per-cell stream seed: world seed + salt + signed cell coords (two's-complement
+// reinterpreted as u32, matching the GLSL int->uint bit reinterpretation).
+u64 SbCellSeed(int world_seed, u32 salt, int cell_x, int cell_z) {
+    u64 h = kSbFnvOffsetBasis;
+    SbFnvMix32(h, static_cast<u32>(world_seed));
+    SbFnvMix32(h, salt);
+    SbFnvMix32(h, static_cast<u32>(cell_x));
+    SbFnvMix32(h, static_cast<u32>(cell_z));
+    return h;
+}
+
+struct SbSplitMix64 {
+    u64 state;
+    explicit SbSplitMix64(u64 seed) : state(seed) {}
+    u64 next() {
+        state += 0x9E3779B97F4A7C15ull;
+        u64 z = state;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+        return z ^ (z >> 31);
+    }
+    float next_unit() {
+        return static_cast<float>(next() >> 11) * (1.0f / 9007199254740992.0f);
+    }
+};
+
+// IQ signed-distance primitives (negative inside). Used to carve sinkholes.
+// sdVerticalCapsule: cenote shaft, a vertical capsule of radius r and height h
+// rising from p0 = base. Here p is the point relative to the capsule base.
+float sdVerticalCapsule(float px, float py, float pz, float h, float r) {
+    const float cy = py - std::clamp(py, 0.0f, h);
+    return std::sqrt(px * px + cy * cy + pz * pz) - r;
+}
+
+// sdCappedCone (IQ): a funnel. h = half-height, r1 = bottom radius, r2 = top
+// radius. p is relative to the cone center. We use it inverted (wide at top) for a
+// doline funnel by passing r1 < r2.
+float sdCappedCone(float px, float py, float pz, float h, float r1, float r2) {
+    const float qx = std::sqrt(px * px + pz * pz);
+    const float k1x = r2, k1y = h;
+    const float k2x = r2 - r1, k2y = 2.0f * h;
+    const float cax = qx - std::min(qx, (py < 0.0f) ? r1 : r2);
+    const float cay = std::abs(py) - h;
+    const float k2dot = k2x * k2x + k2y * k2y;
+    const float t = std::clamp(((k1x - qx) * k2x + (k1y - py) * k2y) / std::max(1e-6f, k2dot), 0.0f, 1.0f);
+    const float cbx = qx - k1x + k2x * t;
+    const float cby = py - k1y + k2y * t;
+    const float s = (cbx < 0.0f && cay < 0.0f) ? -1.0f : 1.0f;
+    return s * std::sqrt(std::min(cax * cax + cay * cay, cbx * cbx + cby * cby));
+}
+
+// Decoded surface-break feature (one accepted doline cell).
+struct SurfaceBreakFeature {
+    bool valid = false;
+    float center_x = 0.0f;
+    float center_z = 0.0f;
+    float radius = 0.0f;   // surface footprint radius (m), < max_feature_radius
+    float depth = 0.0f;    // funnel depth (m)
+    bool shaft = false;    // true => vertical capsule (cenote), false => cone funnel
+};
+
+// Decode the feature (if any) authored in doline cell (cx, cz). Pure fn of seed +
+// cell coords. The same decode runs on CPU and GPU.
+SurfaceBreakFeature DecodeSurfaceBreakCell(int seed, int cx, int cz,
+                                           const TerrainGenParams& params) {
+    SurfaceBreakFeature f;
+    SbSplitMix64 rng(SbCellSeed(seed, kSurfaceBreakSalt, cx, cz));
+    const float accept = rng.next_unit();
+    if (accept >= params.surface_break_density) {
+        return f; // rejected -> no feature in this cell
+    }
+    const float cs = params.feature_cell_size;
+    // Jittered center inside the cell (keep a margin so the footprint stays in the
+    // 3x3 scan: center jitter is full-cell but radius < cell guarantees support
+    // reaches at most into the immediate neighbor cells).
+    const float jx = rng.next_unit();
+    const float jz = rng.next_unit();
+    f.center_x = (static_cast<float>(cx) + jx) * cs;
+    f.center_z = (static_cast<float>(cz) + jz) * cs;
+    // Power-law diameter (truncated Pareto, beta ~ 2.5): D = Dmin * (1-u)^(-1/(b-1)).
+    const float u = rng.next_unit();
+    constexpr float kBeta = 2.5f;
+    constexpr float kDmin = 6.0f;   // metres
+    const float kDmax = std::min(120.0f, 2.0f * params.max_feature_radius);
+    float diameter = kDmin * std::pow(std::max(1e-4f, 1.0f - u), -1.0f / (kBeta - 1.0f));
+    diameter = std::clamp(diameter, kDmin, kDmax);
+    f.radius = std::min(0.5f * diameter, params.max_feature_radius * 0.999f);
+    // Depth ~ 0.2..0.5 * D.
+    const float depth_frac = 0.2f + 0.3f * rng.next_unit();
+    f.depth = depth_frac * diameter;
+    f.shaft = rng.next_unit() < 0.25f; // a quarter are deep cenote shafts
+    f.valid = true;
+    return f;
 }
 
 // Legacy single-material classifier (biome_id == kNoBiome). Kept as the exact
@@ -512,6 +657,12 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
         sample.final_height -= LakeCarveAmount(sample.final_height, lake_influence, lake_surface);
     }
 
+    // FR-A3: sinkhole/cave-mouth RIM depression. Dips the heightfield inside a
+    // doline footprint so the feature reads at distance/coarse-LOD (the SDF carve
+    // alone is invisible on the SDF-ignoring far path). Folded into ALL THREE
+    // height paths byte-identically. No-op (0) when surface_breaks disabled.
+    sample.final_height -= SurfaceBreakRimDepression(world_x, world_z);
+
     // T-I6-A2: hydraulic/thermal relief (decision a). Added LAST so the baked
     // drainage/talus sits in the final surface EVERY height consumer reads
     // (collision/spawn/water/far-LOD/mesh). The per-region bake samples the
@@ -784,6 +935,130 @@ float SHIELD_WorldSystem::CliffTerracedHeight(float world_x, float world_z, floa
     return height + (terraced - height) * mask;
 }
 
+// FR-A3 shared surface-break sampler. Scans the fixed 3x3 doline-cell neighborhood
+// around world_pos, decodes each cell deterministically, and combines features with
+// order-free ops (min cap, max carve). For each feature it runs an
+// interior-proximity probe (one extra cave-noise read at y = surface - capDepth) so
+// the cap is only lifted where the cave field is ALREADY carved -> never a blind pit.
+SHIELD_WorldSystem::SurfaceBreakSample
+SHIELD_WorldSystem::sample_surface_breaks(const Vec3& world_pos, float surface_h) const {
+    SurfaceBreakSample out{kCaveSurfaceCapDepth, 0.0f};
+    if (!m_params.surface_breaks_enabled) {
+        return out; // byte-identical disabled path
+    }
+    const float cs = m_params.feature_cell_size;
+    if (cs <= 0.0f) {
+        return out;
+    }
+    const int base_cx = static_cast<int>(std::floor(world_pos.x / cs));
+    const int base_cz = static_cast<int>(std::floor(world_pos.z / cs));
+
+    float min_cap = kCaveSurfaceCapDepth; // lower = more exposed
+    float max_carve = 0.0f;
+    for (int dz = -1; dz <= 1; ++dz) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            const int cx = base_cx + dx;
+            const int cz = base_cz + dz;
+            const SurfaceBreakFeature f = DecodeSurfaceBreakCell(m_seed, cx, cz, m_params);
+            if (!f.valid) {
+                continue;
+            }
+            const float ddx = world_pos.x - f.center_x;
+            const float ddz = world_pos.z - f.center_z;
+            const float dist2 = ddx * ddx + ddz * ddz;
+            if (dist2 >= f.radius * f.radius) {
+                continue; // outside this feature's finite support
+            }
+            const float dist = std::sqrt(dist2);
+            const float t = 1.0f - (dist / f.radius); // 1 at center -> 0 at rim
+
+            // CAVE MOUTH: lift the cap only if the interior-proximity probe shows the
+            // cave noise is already carved at depth under this column. The probe is a
+            // single extra GenSingle3D at y = surface - capDepth, classified with the
+            // same threshold the cave field uses.
+            const float probe_y = surface_h - kCaveSurfaceCapDepth;
+            const float cave_noise = m_cave_generator->GenSingle3D(
+                world_pos.x * m_params.cave_frequency,
+                probe_y * m_params.cave_frequency,
+                world_pos.z * m_params.cave_frequency, m_seed + 1);
+            const float cave_val = std::clamp((cave_noise + 1.0f) * 0.5f, 0.0f, 1.0f);
+            const bool interior_carved = cave_val > m_params.cave_threshold;
+            if (interior_carved) {
+                // Smoothly drop the cap from 18 toward entrance_min_cap across the
+                // footprint (deeper toward center). Min combine == order-free.
+                const float cap_here =
+                    kCaveSurfaceCapDepth +
+                    (m_params.entrance_min_cap - kCaveSurfaceCapDepth) * smoothstep01(t);
+                min_cap = std::min(min_cap, cap_here);
+            }
+
+            // SINKHOLE carve (always, gated by footprint): a funnel/shaft whose mouth
+            // sits at the surface and reaches `depth` down. We carve in the SDF where
+            // the point is within the inverted cone/capsule. The carve magnitude is the
+            // negative signed distance (positive inside the funnel), clamped >= 0.
+            // Point relative to the funnel: x/z relative to center; y relative to the
+            // surface (downward positive => use surface - world_pos.y so the funnel
+            // opens at the surface and deepens downward).
+            const float ry = surface_h - world_pos.y; // metres below surface
+            float sd;
+            if (f.shaft) {
+                // Vertical capsule from surface (y=0 at surface) to depth.
+                sd = sdVerticalCapsule(dist, ry, 0.0f, f.depth, f.radius * 0.45f);
+            } else {
+                // Inverted capped cone: wide at the surface (top), narrow at the floor.
+                // Cone center is at half-depth below the surface.
+                const float h = f.depth * 0.5f;
+                const float cone_y = ry - h; // shift so cone spans [0, depth]
+                sd = sdCappedCone(dist, cone_y, 0.0f, h, f.radius * 0.15f, f.radius);
+            }
+            const float carve_here = std::max(0.0f, -sd);
+            max_carve = std::max(max_carve, carve_here);
+        }
+    }
+    out.effective_cap = min_cap;
+    out.carve = max_carve;
+    return out;
+}
+
+// FR-A3 2D rim depression for the height paths (coarse/far visibility). A shallow
+// bowl that DIPS the surface inside a doline footprint so the feature reads even on
+// the SDF-ignoring coarse path. Pure 2D (no cave probe) so it is cheap to fold into
+// every height consumer; returns metres to subtract from the surface height.
+float SHIELD_WorldSystem::SurfaceBreakRimDepression(float world_x, float world_z) const {
+    if (!m_params.surface_breaks_enabled) {
+        return 0.0f;
+    }
+    const float cs = m_params.feature_cell_size;
+    if (cs <= 0.0f) {
+        return 0.0f;
+    }
+    const int base_cx = static_cast<int>(std::floor(world_x / cs));
+    const int base_cz = static_cast<int>(std::floor(world_z / cs));
+    float dip = 0.0f; // metres to lower the surface (max combine == order-free)
+    for (int dz = -1; dz <= 1; ++dz) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            const SurfaceBreakFeature f =
+                DecodeSurfaceBreakCell(m_seed, base_cx + dx, base_cz + dz, m_params);
+            if (!f.valid) {
+                continue;
+            }
+            const float ddx = world_x - f.center_x;
+            const float ddz = world_z - f.center_z;
+            const float dist2 = ddx * ddx + ddz * ddz;
+            if (dist2 >= f.radius * f.radius) {
+                continue;
+            }
+            const float dist = std::sqrt(dist2);
+            const float t = 1.0f - (dist / f.radius);
+            // A smooth bowl: up to ~0.35*depth at center, 0 at rim. Kept shallower
+            // than the SDF carve so the near-field 3D throat still dominates close up.
+            const float bowl = 0.35f * f.depth * smoothstep01(t);
+            dip = std::max(dip, bowl);
+        }
+    }
+    return dip;
+}
+
 float SHIELD_WorldSystem::GetTerrainHeightAtCoarse(
     float world_x, float world_z, int sample_step) const {
     // Full-res path is byte-identical to GetTerrainHeightAt (the carve is a
@@ -827,6 +1102,10 @@ float SHIELD_WorldSystem::GetTerrainHeightAtCoarse(
         const float lake_surface = LakeSurfaceLevel(world_x, world_z);
         result -= LakeCarveAmount(result, LakeInfluenceFromNoise(world_x, world_z), lake_surface);
     }
+    // FR-A3 rim depression — same single point-sample the near/grid paths apply, so
+    // dolines dip the surface consistently into the far field (matches the lake
+    // carve handling above; hydro is still deliberately omitted at range).
+    result -= SurfaceBreakRimDepression(world_x, world_z);
     return result;
 }
 
@@ -996,6 +1275,10 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
                 const float lake_surface = LakeSurfaceLevel(world_x, world_z);
                 terrain_height -= LakeCarveAmount(terrain_height, lake_influence, lake_surface);
             }
+
+            // FR-A3 rim depression — byte-identical to ComputeShapedHeightSampleImpl.
+            terrain_height -= SurfaceBreakRimDepression(static_cast<float>(base_x + x),
+                                                        static_cast<float>(base_z + z));
 
             out[i] = terrain_height;
         }
@@ -1394,8 +1677,10 @@ void SHIELD_WorldSystem::ClassifyVertexMaterials(
                 (p.x) * m_params.cave_frequency,
                 (world_y) * m_params.cave_frequency,
                 (p.z) * m_params.cave_frequency, m_seed + 1);
-            final_density = std::max(terrain_density,
-                surface_capped_cave_density(terrain_density, cave_noise, m_params));
+            const SurfaceBreakSample sb =
+                sample_surface_breaks(Vec3(p.x, world_y, p.z), final_height);
+            final_density = apply_cave_field(terrain_density, cave_noise, m_params,
+                                             sb.effective_cap, sb.carve);
         }
         MaterialType material = MaterialType::Air;
         if (final_density < 0.0f) {
@@ -2501,8 +2786,11 @@ WorldGenLayerSample SHIELD_WorldSystem::SampleWorldGenLayers(const Vec3& world_p
             m_seed + 1
         );
         sample.cave_value = std::clamp((sample.cave_noise + 1.0f) * 0.5f, 0.0f, 1.0f);
-        sample.cave_density = surface_capped_cave_density(sample.terrain_density, sample.cave_noise, m_params);
-        sample.final_density = std::max(sample.terrain_density, sample.cave_density);
+        const SurfaceBreakSample sb = sample_surface_breaks(world_pos, sample.final_height);
+        sample.cave_density = surface_capped_cave_density(sample.terrain_density,
+            sample.cave_noise, m_params, sb.effective_cap);
+        sample.final_density = apply_cave_field(sample.terrain_density, sample.cave_noise,
+            m_params, sb.effective_cap, sb.carve);
     }
 
     sample.solid = sample.final_density < 0.0f;
@@ -2528,7 +2816,9 @@ float SHIELD_WorldSystem::get_density_at_from_precalculated(const Vec3& world_po
     if (m_params.caves_enabled) {
         // <<< FIX: The function returns the value directly.
         float cave_noise = m_cave_generator->GenSingle3D(world_pos.x * m_params.cave_frequency, world_pos.y * m_params.cave_frequency, world_pos.z * m_params.cave_frequency, m_seed + 1);
-        terrain_density = apply_cave_field(terrain_density, cave_noise, m_params);
+        const SurfaceBreakSample sb = sample_surface_breaks(world_pos, terrain_height);
+        terrain_density = apply_cave_field(terrain_density, cave_noise, m_params,
+                                           sb.effective_cap, sb.carve);
     }
     return terrain_density;
 }
@@ -2978,7 +3268,12 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_
                if (m_params.caves_enabled) {
                    // For 3D noise buffer in [x][y][z] layout (x varies fastest):
                    size_t cave_read_idx = static_cast<size_t>(x) + static_cast<size_t>(y) * size_x + static_cast<size_t>(z) * size_x * size_y;
-                   terrain_density = apply_cave_field(terrain_density, cave_noise[cave_read_idx], m_params);
+                   const Vec3 cave_world_pos(static_cast<float>(base_pos.x + x),
+                                             current_world_y,
+                                             static_cast<float>(base_pos.z + z));
+                   const SurfaceBreakSample sb = sample_surface_breaks(cave_world_pos, terrain_h);
+                   terrain_density = apply_cave_field(terrain_density, cave_noise[cave_read_idx],
+                                                      m_params, sb.effective_cap, sb.carve);
                }
                
                if (y == 0) {

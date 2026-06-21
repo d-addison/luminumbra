@@ -358,6 +358,30 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
         params.lake_max_carve = features.value("lake_max_carve", params.lake_max_carve);
         params.lake_bank_offset = features.value("lake_bank_offset", params.lake_bank_offset);
     }
+    // FR-A3: surface-breaking caves / sinkholes / cave-mouths. Opt-in via
+    // features.surface_breaks_enabled; absent -> off (byte-zero drift). When on, the
+    // 18 m cave cap becomes a per-column field inside hashed doline footprints.
+    if (features.value("surface_breaks_enabled", false)) {
+        params.surface_breaks_enabled = true;
+        params.surface_break_density =
+            features.value("surface_break_density", params.surface_break_density);
+        params.feature_cell_size =
+            features.value("feature_cell_size", params.feature_cell_size);
+        params.max_feature_radius =
+            features.value("max_feature_radius", params.max_feature_radius);
+        params.carve_smoothness =
+            features.value("carve_smoothness", params.carve_smoothness);
+        params.entrance_min_cap =
+            features.value("entrance_min_cap", params.entrance_min_cap);
+        // The 3x3 doline-cell scan only suffices if a feature's finite support
+        // stays inside the immediate neighborhood. Clamp defensively rather than
+        // crash a release world load on a bad preset.
+        if (params.max_feature_radius >= params.feature_cell_size) {
+            result.warnings.push_back(
+                "surface_breaks: max_feature_radius >= feature_cell_size; clamping radius");
+            params.max_feature_radius = params.feature_cell_size * 0.49f;
+        }
+    }
     // Slice 4: cliffs. Opt-in via features.cliffs_enabled; absent -> off (byte-zero).
     if (features.value("cliffs_enabled", false)) {
         params.cliffs_enabled = true;
@@ -385,7 +409,10 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
                      "lakes_enabled", "lake_frequency", "lake_threshold",
                      "lake_depth", "lake_max_carve", "lake_bank_offset",
                      "cliffs_enabled", "cliff_frequency", "cliff_threshold",
-                     "cliff_step"},
+                     "cliff_step",
+                     "surface_breaks_enabled", "surface_break_density",
+                     "feature_cell_size", "max_feature_radius",
+                     "carve_smoothness", "entrance_min_cap"},
                     provenance, result.warnings);
 
     result.ok = true;

@@ -1,0 +1,6 @@
+{ "_comment": "spec 003 A3: ground-level view aimed at the large doline at world (365,362) on the default preset (seed 424242)",
+  "camera": { "pos": [300, 70, 300], "yaw": 45, "pitch": -28, "fov": 75 },
+  "time_of_day": 0.0,
+  "clouds": { "coverage": 0.3, "plane_height": 1400, "shadow": true },
+  "weather": { "type": "none", "intensity": 0.0 },
+  "screenshot": "references/compare/a3_sinkhole_ground.ppm" }
