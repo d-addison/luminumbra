@@ -246,6 +246,27 @@ unverified determinism-critical change (attempt #1 proved the cost). Execute the
 recovers: implement per the map in 2 increments (collision pending-set, then the dirty gate), run all 6
 determinism gates after each (warm baseline staged).
 
+### Streaming attempt #2 — SOUND but reverted on a false alarm; re-pin is the path
+Implemented the determinism-safe design: elide ONLY Step 2+3 (candidate build) on a `dirty_generation`
+gate (bumped at process_completed_meshing_jobs / EnsureSurfaceReadyNear / gen-completion edge) +
+anchor/count/activation/!drained + a "world still streaming" net (loading/meshing/renderable). Step 4
+collision + telemetry scans NOT gated. Results:
+- **Determinism-SAFE:** HeadlessServerTick GREEN; every other determinism gate shows run==replay /
+  host==peer IN SYNC. The attempt-#1 non-determinism is GONE.
+- **Geometry-correct:** PlayerView + WorldVisualSweep GREEN.
+- The deterministic `world_hash` SHIFTED (canonical cf9c8→1ac7813a, populated f314→09e011, networked
+  ddfc→dab221) — a benign mesh-dispatch-trajectory change (mesh_version counters are hashed); needs a
+  5-gate re-pin (owner pre-authorized).
+- **FarLodHorizon: PRE-EXISTING RED, not mine** — fails at BASELINE too (sliver 541px vs 142 threshold,
+  station[0] far field 51/132; attempt #2 was marginally better at 488px). Add to the known-RED list
+  (TimeOfDaySweep/WeatherVisual/CloudShadow). I reverted attempt #2 on this false alarm; the tree is
+  green (cf9c8). **The change is landable: re-apply attempt #2 + re-pin the 5 determinism literals +
+  regenerate persistence fixtures.** Caveat to weigh: re-pinning permanently changes the canonical
+  world_hash contract, and the hash proved sensitive to gate-logic tweaks (pin the FINAL version's
+  values, don't tweak after). Alternative if a re-pin is unwanted: behavior-IDENTICAL opts (collision
+  pending-set drained every tick + telemetry dedup + candidate-loop micro-opts) keep all gates green
+  with ZERO re-pin, but are smaller wins (don't elide the candidate loop).
+
 ## Gate Criteria
 The plan phase is complete when:
 - [x] All tasks defined with clear acceptance criteria (above + spec ACs).
