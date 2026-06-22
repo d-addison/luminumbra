@@ -134,4 +134,50 @@ TEST(SpeciesRegistry, MakePlantFromSpeciesSpawnsAndStampsLifecycle) {
     EXPECT_EQ(gen1.genes, gen2.genes);
 }
 
+// I9-FOLIAGE Phase 5B: the player-facing FarmingController loop (seed -> tend -> harvest), all on
+// the deterministic FarmingSystem verbs. Client-agnostic, so unit-testable here.
+TEST(SpeciesRegistry, FarmingControllerLoop) {
+    namespace C = ::Luminumbra::Components;
+    F::SpeciesRegistry reg;
+    std::string err;
+    ASSERT_TRUE(reg.AddFromJsonText(kWheat, err)) << err;
+    const auto* w = reg.Find("wheat");
+    ASSERT_NE(w, nullptr);
+
+    entt::registry r;
+    DeterministicRng rng = DeterministicRng::seeded(7, 1, 1);
+    F::FarmingController fc;
+    EXPECT_EQ(fc.seeds, 5);
+
+    // Seed consumes a seed + spawns a PlantTag plant.
+    const entt::entity e = fc.Seed(r, ::Luminumbra::Vec3{0.0f, 0.0f, 0.0f}, *w, rng, 10);
+    ASSERT_TRUE(e != entt::null);
+    EXPECT_EQ(fc.seeds, 4);
+    EXPECT_TRUE(r.all_of<C::PlantTag>(e));
+
+    // NearestPlant: found within reach, null outside.
+    EXPECT_TRUE(F::FarmingController::NearestPlant(r, ::Luminumbra::Vec3{1.0f, 0.0f, 1.0f}, 5.0f) == e);
+    EXPECT_TRUE(F::FarmingController::NearestPlant(r, ::Luminumbra::Vec3{100.0f, 0.0f, 100.0f}, 5.0f) == entt::null);
+
+    // Water raises the tended husbandry bonus.
+    const auto tended0 = r.get<C::PlantGrowthComponent>(e).tended;
+    EXPECT_TRUE(fc.Water(r, e));
+    EXPECT_GT(r.get<C::PlantGrowthComponent>(e).tended, tended0);
+
+    // Harvesting an immature plant fails; no inventory change.
+    EXPECT_FALSE(fc.Harvest(r, e).harvestable);
+    EXPECT_EQ(fc.harvests, 0);
+
+    // Force mature + quality, then harvest -> banks yield + returned seeds, removes the annual plant.
+    r.get<C::PlantGrowthComponent>(e).stage = static_cast<std::uint8_t>(C::PlantStage::Fruiting);
+    r.get<C::PlantGrowthComponent>(e).quality = 80;
+    const int seedsBefore = fc.seeds;
+    const auto hr = fc.Harvest(r, e);
+    EXPECT_TRUE(hr.harvestable);
+    EXPECT_EQ(fc.harvests, 1);
+    EXPECT_GT(fc.total_yield, 0.0f);
+    EXPECT_GE(fc.seeds, seedsBefore);  // harvest returns seeds
+    EXPECT_FALSE(r.valid(e));          // annual plant removed
+}
+
 }  // namespace

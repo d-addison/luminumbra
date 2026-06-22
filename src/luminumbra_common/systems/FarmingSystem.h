@@ -99,4 +99,65 @@ inline Comp::PlantGenomeComponent CrossBreed(const Comp::PlantGenomeComponent& a
     return BreedPlants(a, b, rng);
 }
 
+// I9-FOLIAGE Phase 5B: a small, deterministic PLAYER-FACING farming controller. Picks the nearest
+// plant to a world position (the player's aim point) and applies a verb, tracking a seed + harvest
+// inventory. CLIENT-AGNOSTIC (no input / render / GL deps) so it is unit-testable; the client binds
+// InputActions to these methods and reads the counters for the HUD. The verbs themselves are the pure
+// FarmingSystem functions above, so the sim stays integer/deterministic.
+struct FarmingController {
+    int seeds = 5;          // plantable seeds on hand
+    int harvests = 0;       // successful harvests (telemetry / HUD)
+    float total_yield = 0.0f;
+
+    // Nearest PlantTag entity within `reach` metres (horizontal), or entt::null. id-ordered tiebreak.
+    [[nodiscard]] static entt::entity NearestPlant(const entt::registry& reg,
+                                                   const ::Luminumbra::Vec3& pos, float reach) {
+        entt::entity best = entt::null;
+        float bestD = reach * reach;  // only plants within reach qualify
+        auto view = reg.view<const Comp::PlantTag, const Comp::TransformComponent>();
+        for (const entt::entity e : view) {
+            const auto& tf = view.get<const Comp::TransformComponent>(e);
+            const float dx = tf.position.x - pos.x, dz = tf.position.z - pos.z;
+            const float d = dx * dx + dz * dz;
+            if (d > bestD) continue;
+            if (best == entt::null || d < bestD || (d == bestD && e < best)) { bestD = d; best = e; }
+        }
+        return best;
+    }
+
+    // Plant a seed from a species template (consumes one seed). entt::null if out of seeds.
+    entt::entity Seed(entt::registry& reg, const ::Luminumbra::Vec3& pos, const SpeciesTemplate& tmpl,
+                      luminumbra::core::DeterministicRng& rng, std::uint64_t tick) {
+        if (seeds <= 0) return entt::null;
+        --seeds;
+        return MakePlantFromSpecies(reg, pos, tmpl, rng, tick);
+    }
+
+    bool Water(entt::registry& reg, entt::entity e) {
+        if (!reg.valid(e) || !reg.all_of<Comp::PlantGrowthComponent>(e)) return false;
+        luminumbra::foliage::Water(reg.get<Comp::PlantGrowthComponent>(e));
+        return true;
+    }
+    bool Fertilize(entt::registry& reg, entt::entity e) {
+        if (!reg.valid(e) || !reg.all_of<Comp::PlantGrowthComponent>(e)) return false;
+        luminumbra::foliage::Fertilize(reg.get<Comp::PlantGrowthComponent>(e));
+        return true;
+    }
+
+    // Harvest a mature plant: bank yield + returned seeds, then remove the plant (annual). Returns
+    // the HarvestResult (harvestable=false if the target is not ready / invalid).
+    HarvestResult Harvest(entt::registry& reg, entt::entity e) {
+        HarvestResult r;
+        if (!reg.valid(e) || !reg.all_of<Comp::PlantGrowthComponent, Comp::PlantGenomeComponent>(e)) return r;
+        r = luminumbra::foliage::Harvest(reg.get<Comp::PlantGrowthComponent>(e),
+                                         reg.get<Comp::PlantGenomeComponent>(e));
+        if (!r.harvestable) return r;
+        ++harvests;
+        total_yield += r.yield;
+        seeds += r.seeds;
+        reg.destroy(e);  // annual loop; perennial reset is a follow-on
+        return r;
+    }
+};
+
 } // namespace luminumbra::foliage

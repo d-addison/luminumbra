@@ -249,6 +249,11 @@ float g_procgenStageF = 5.0f;          // growth: 0 = Seed .. 5 = Fruiting (driv
 float g_procgenLastBakedStage = -2.0f;
 glm::vec3 g_procgenSunDir = glm::vec3(0.0f, 1.0f, 0.0f);
 float g_season = 0.0f;                  // 0 = summer green .. 1 = autumn ochre (seasonal leaf color)
+// I9-FOLIAGE Phase 5B: player farming state. The controller holds the seed/harvest inventory; the
+// species registry is loaded once for player seeding. Interactive-only (never touched by gates).
+luminumbra::foliage::FarmingController g_farming;
+luminumbra::foliage::SpeciesRegistry g_farmSpecies;
+bool g_farmSpeciesLoaded = false;
 
 // Re-bake the combined procgen plant mesh at growth `stageF` and push it to the pass. Young
 // stages -> shallower branch recursion + smaller size; deterministic pure functions.
@@ -5299,6 +5304,12 @@ int main(int argc, char* argv[]) {
                             }
                         }
                     }
+                    // I9-FOLIAGE Phase 5B: re-bake the LIVE sim plant roster each frame so player-seeded
+                    // (and growing) plants render at their current stage. No-op when there are no sim
+                    // plants (leaves the procgen scatter on the pass untouched); once the player farms,
+                    // their plants take the pass.
+                    if (auto* ppp = renderPipeline.plant_procgen())
+                        BakeSimPlants(ppp, gameSession->GetRegistry(), g_procgenSunDir, g_season);
                     renderPipeline.render_frame(gameSession->GetRegistry(), *gameSession->GetWorldSystem(), *g_camera, deltaTime, wireframe_mode);
 
                     // --scene-config: self-contained capture. Settle a few frames (world
@@ -5320,6 +5331,54 @@ int main(int argc, char* argv[]) {
                                 LUMINUMBRA_CORE_INFO("Scene capture written -> {} ({}x{})", g_scene_shot.string(), vw, vh);
                             }
                             glfwSetWindowShouldClose(window, GLFW_TRUE);
+                        }
+                    }
+
+                    // --- I9-FOLIAGE Phase 5B: player FARMING verbs (F/G/H/J) ---
+                    // Plant / water / fertilize / harvest the plant nearest the player's aim point,
+                    // via the deterministic FarmingSystem verbs (FarmingController). Edge-triggered
+                    // (one action per key press). Interactive-only guard keeps it out of the
+                    // scenario/gate runs, so determinism is unaffected (gates never press these keys).
+                    if (g_playerController && currentState == GameState::IN_GAME &&
+                        !scenario_config.active() && !g_paused && gameSession && g_camera) {
+                        if (!g_farmSpeciesLoaded) {
+                            std::vector<std::string> ferr;
+                            g_farmSpecies.LoadFromDirectory(root_dir / "data/common/foliage/species", ferr);
+                            g_farmSpeciesLoaded = true;
+                        }
+                        static bool s_fp = false, s_fw = false, s_ff = false, s_fh = false;
+                        auto farmEdge = [&](Luminumbra::Client::InputAction a, bool& prev) {
+                            const bool now = glfwGetKey(window, g_playerController->key(a)) == GLFW_PRESS;
+                            const bool fired = now && !prev; prev = now; return fired;
+                        };
+                        const glm::vec3 ffwd = glm::normalize(glm::vec3(g_camera->Front.x, 0.0f, g_camera->Front.z));
+                        const glm::vec3 aimXZ = glm::vec3(g_camera->Position) + ffwd * 3.0f;
+                        const float aimY = gameSession->GetWorldSystem()
+                            ? gameSession->GetWorldSystem()->GetTerrainHeightAt(aimXZ.x, aimXZ.z) : aimXZ.y;
+                        const Luminumbra::Vec3 aim(aimXZ.x, aimY, aimXZ.z);
+                        auto& freg = gameSession->GetRegistry();
+                        const std::uint64_t ftick = gameSession->GetSimulationTickCount();
+                        using IA = Luminumbra::Client::InputAction;
+                        if (farmEdge(IA::FarmPlant, s_fp)) {
+                            if (const auto* tmpl = g_farmSpecies.Find("wheat")) {
+                                auto frng = luminumbra::core::DeterministicRng::seeded(
+                                    luminumbra::foliage::kPlantSeedOffset,
+                                    static_cast<std::uint64_t>(static_cast<std::int64_t>(aimXZ.x * 8.0f)),
+                                    static_cast<std::uint64_t>(static_cast<std::int64_t>(aimXZ.z * 8.0f)) ^ ftick);
+                                if (g_farming.Seed(freg, aim, *tmpl, frng, ftick) != entt::null)
+                                    LUMINUMBRA_CORE_INFO("Farm: planted wheat ({} seeds left)", g_farming.seeds);
+                            }
+                        }
+                        const auto fpick = [&]() {
+                            return luminumbra::foliage::FarmingController::NearestPlant(freg, aim, 3.0f);
+                        };
+                        if (farmEdge(IA::FarmWater, s_fw)) g_farming.Water(freg, fpick());
+                        if (farmEdge(IA::FarmFertilize, s_ff)) g_farming.Fertilize(freg, fpick());
+                        if (farmEdge(IA::FarmHarvest, s_fh)) {
+                            const auto hr = g_farming.Harvest(freg, fpick());
+                            if (hr.harvestable)
+                                LUMINUMBRA_CORE_INFO("Farm: harvested yield {:.2f} (+{} seeds, {} total)",
+                                                     hr.yield, hr.seeds, g_farming.harvests);
                         }
                     }
 
@@ -7234,6 +7293,21 @@ int main(int argc, char* argv[]) {
                                  ImGuiWindowFlags_NoMove)) {
                     if (g_timeScale == 0.0f) ImGui::Text("|| PAUSED  (\\ to resume)");
                     else ImGui::Text("TIME  x%.2f", g_timeScale);
+                }
+                ImGui::End();
+            }
+            // I9-FOLIAGE Phase 5B: minimal crop HUD — seed/harvest inventory + the farming verb hints.
+            if (g_imgui_enabled && currentState == GameState::IN_GAME && !scenario_config.active() &&
+                g_timelapse_frames == 0) {
+                ImGui::SetNextWindowPos(ImVec2(10.0f, 92.0f), ImGuiCond_Always);
+                ImGui::SetNextWindowBgAlpha(0.45f);
+                if (ImGui::Begin("##farmhud", nullptr,
+                                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                                 ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs |
+                                 ImGuiWindowFlags_NoMove)) {
+                    ImGui::Text("FARM  seeds:%d  harvests:%d  yield:%.1f",
+                                g_farming.seeds, g_farming.harvests, g_farming.total_yield);
+                    ImGui::TextDisabled("F plant   G water   H fertilize   J harvest");
                 }
                 ImGui::End();
             }
