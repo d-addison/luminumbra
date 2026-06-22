@@ -65,7 +65,7 @@ TEST(TerrainPresetLoaderTest, LoadsShippedDefaultPreset) {
     EXPECT_EQ(result.params.octaves, 6);
     EXPECT_FLOAT_EQ(result.params.persistence, 0.5f);
     EXPECT_FLOAT_EQ(result.params.lacunarity, 2.0f);
-    EXPECT_FLOAT_EQ(result.params.height_offset, 20.0f);
+    EXPECT_FLOAT_EQ(result.params.height_offset, 5.0f);
     EXPECT_FALSE(result.params.island_mask_enabled);
     EXPECT_TRUE(result.params.caves_enabled);
     EXPECT_FLOAT_EQ(result.params.cave_frequency, 0.02f);
