@@ -1986,10 +1986,12 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
     // harness); gameplay teleports stream in normally.
 
     // Decouple the expensive chunk activation/deactivation logic from the frame rate.
+    bool activation_ran_this_tick = false;
     m_update_tick_counter++;
     if (m_update_tick_counter >= STREAMING_ACTIVATION_INTERVAL_FRAMES) {
         update_chunk_activation(anchor_positions, physics_system);
         m_update_tick_counter = 0;
+        activation_ran_this_tick = true;
     }
 
     // Step 2: Update the water system using the now-current list of active chunks.
@@ -2013,6 +2015,26 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
     std::vector<MeshingWorkItem> chunks_to_mesh_jobs;
     chunks_to_mesh_jobs.reserve(MAX_CHUNKS_TO_PROCESS_PER_FRAME);
 
+    // spec 004 streaming elision GATE. Run the Step-2/3 meshing-candidate pass only when something
+    // the pass cares about changed since it last fully drained. RUN signals are deterministic +
+    // main-thread-observed (NO job-completion timing — the attempt-#1 trap): a dirty-generation delta
+    // (a chunk insert/erase / synchronous rebuild bumped it), an EXACT anchor-vector change (LOD keys
+    // on continuous distance, so any sub-chunk anchor motion can flip a band — no threshold, no
+    // quantization), a chunk-count delta, an activation tick, or a previous pass that did not reach
+    // quiescence. On a settled static pose all are false, so the O(N) meshed_columns build + candidate
+    // scan + sort + dispatch are skipped entirely. Step 4 (collision) and the telemetry scans run
+    // unchanged every tick.
+    const bool anchor_changed = (anchor_positions != m_last_anchor_positions);
+    const bool count_changed = (m_streaming_state.chunks.size() != m_last_chunk_count);
+    const bool generation_dirty = (m_dirty_generation != m_last_serviced_generation);
+    const bool streaming_dirty = generation_dirty || anchor_changed || count_changed ||
+                                 activation_ran_this_tick || !m_last_pass_drained;
+    m_last_anchor_positions = anchor_positions;
+    m_last_chunk_count = m_streaming_state.chunks.size();
+    // Hoisted out of the gated block: the queue-depth telemetry below (after the gate) reads it.
+    // Recomputed FRESH inside every non-elided pass (never a stale cross-frame dispatch input).
+    std::size_t terrain_meshing_backlog = 0;
+    if (streaming_dirty) {
     // Snapshot meshed-chunk LODs per horizontal column so the candidate loop
     // below can cheaply detect coarse chunks whose transition skirts went
     // stale because a finer neighbor arrived AFTER this chunk was meshed.
@@ -2164,7 +2186,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
     }
 
     m_last_streaming_budget_stats.meshing_candidates = meshing_candidates.size();
-    std::size_t terrain_meshing_backlog = 0;
+    terrain_meshing_backlog = 0;
     for (const MeshingCandidate& candidate : meshing_candidates) {
         if (candidate.terrain_mesh_required) {
             ++terrain_meshing_backlog;
@@ -2240,6 +2262,22 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
     if (!chunks_to_mesh_jobs.empty() && !meshing_job_active) {
         dispatch_meshing_jobs(chunks_to_mesh_jobs);
     }
+
+        // Post-pass QUIESCENCE test (decides whether a FUTURE tick may elide — NOT whether THIS pass
+        // ran). The world is settled iff this pass produced no candidates, left nothing deferred, and
+        // no gen/mesh jobs are in flight. Job-active state is read ONLY here; on the per-tick-quiesced
+        // hashed paths it is deterministic. Advancing m_last_serviced_generation only at quiescence
+        // means a budget-deferred remesh (deferred_meshing>0) or any produced candidate keeps the gate
+        // sticky-open next tick, so chained seam/transition propagation always converges.
+        const bool produced_work = !meshing_candidates.empty() ||
+                                   m_last_streaming_budget_stats.deferred_meshing > 0;
+        const bool quiescent = !produced_work && !meshing_jobs_active() &&
+                               !has_active_job(m_streaming_state.generation_job_handle);
+        m_last_pass_drained = quiescent;
+        if (quiescent) {
+            m_last_serviced_generation = m_dirty_generation;
+        }
+    }  // streaming_dirty gate
 
     // Step 4. Time-slice the creation of expensive physics colliders on the main thread
     if (physics_system) {
@@ -2779,6 +2817,9 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
     LUMINUMBRA_CORE_INFO("Initial surface horizon ready: radius={}, surface_chunks={}, rebuilt={}, lod0={}, lod1={}, lod2={}, collision_radius={}, collisions={}",
         radius, chunks_to_consider_for_collision.size(), chunks_to_build.size(),
         lod_counts[0], lod_counts[1], lod_counts[2], collision_range, collision_count);
+    // spec 004 streaming elision: this synchronous rebuild can mutate a SETTLED world (carve / teleport
+    // / boot) WITHOUT a chunk-count or anchor delta, so re-open the candidate-pass gate explicitly.
+    ++m_dirty_generation;
     return true;
 }
 

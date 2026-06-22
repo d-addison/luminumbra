@@ -579,6 +579,20 @@ private:
     std::size_t m_recent_queue_depth_count = 0;
     std::size_t m_recent_queue_depth_cursor = 0;
 
+    // spec 004 streaming elision: skip the O(N) Step-2/3 meshing-candidate pass on FULLY SETTLED
+    // ticks. The decision to RUN the pass keys ONLY on deterministic, main-thread-observed signals
+    // (a dirty-generation delta, EXACT anchor-vector inequality, chunk-count delta, an activation
+    // tick, or a not-yet-drained previous pass) — NEVER on job-completion timing (the attempt-#1
+    // determinism trap). Job-active state is consulted ONLY to decide whether the world has reached
+    // quiescence (so a future tick MAY elide), which on the per-tick-quiesced hashed paths is itself
+    // deterministic. Collision (Step 4) is left UNTOUCHED. `m_dirty_generation` is bumped at the
+    // chunk insert/erase + synchronous-rebuild sites that mutate a settled world.
+    std::uint64_t m_dirty_generation = 0;
+    std::uint64_t m_last_serviced_generation = 0;
+    std::vector<Vec3> m_last_anchor_positions;
+    std::size_t m_last_chunk_count = 0;
+    bool m_last_pass_drained = false;  // sticky: false forces the next tick's candidate pass to run
+
     const std::vector<ChunkLOD> m_lod_levels = {
         {0, 1, 192.0f},  // LOD 0: Full detail up to 192 meters (~12 chunks)
         {1, 2, 384.0f},  // LOD 1: Half resolution up to 384 meters (~24 chunks)
