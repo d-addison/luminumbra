@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+namespace Luminumbra::Ecs { struct EntityRegistrySnapshot; }
+
 namespace Luminumbra::Persistence {
 
 // Counters describing one incremental save pass over the streaming state.
@@ -51,6 +53,19 @@ public:
     static std::filesystem::path region_directory(const std::filesystem::path& save_dir);
     static std::filesystem::path region_file_path(const std::filesystem::path& save_dir, int rx, int rz);
     static std::filesystem::path world_manifest_path(const std::filesystem::path& save_dir);
+
+    // I9-FOLIAGE Phase 3B: plant entity snapshot persisted as a SIBLING to the chunk container
+    // (region/plant-entities.json). Generic over the engine's EntityRegistrySnapshot; the plant
+    // projection lives in foliage/PlantPersistence.h. An EMPTY snapshot writes NO file (and removes a
+    // stale one) so a no-plant save is byte-identical. The chunk LMR1 path is UNTOUCHED.
+    static std::filesystem::path plant_entities_path(const std::filesystem::path& save_dir);
+    static bool save_plant_entities(const Luminumbra::Ecs::EntityRegistrySnapshot& snapshot,
+                                    const std::filesystem::path& save_dir,
+                                    std::vector<std::string>* errors = nullptr);
+    // A missing file is a clean miss: out is emptied, returns true.
+    static bool load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapshot& out,
+                                    const std::filesystem::path& save_dir,
+                                    std::vector<std::string>* errors = nullptr);
 
     // Region addressing: rx = floor(chunk_x / 32), rz = floor(chunk_z / 32).
     static constexpr int kRegionChunkSpan = 32;

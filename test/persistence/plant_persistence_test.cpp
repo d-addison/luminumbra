@@ -16,6 +16,9 @@
 #include "luminumbra_common/components/SoilComponents.h"
 #include "luminumbra_common/ecs/EntitySnapshot.h"
 #include "luminumbra_common/persistence/PlantPersistence.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
+
+#include <filesystem>
 
 namespace {
 
@@ -115,6 +118,45 @@ TEST(PlantPersistence, GenesSurviveFullPrecision) {
     ASSERT_EQ(b.view<C::PlantTag>().size(), 1u);
     for (auto pe : b.view<C::PlantTag>())
         EXPECT_EQ(b.get<C::PlantGenomeComponent>(pe).genes, saved) << "genes survive bit-exact";
+}
+
+// Phase 3B disk path: WorldSaveService writes/reads plant-entities.json byte-exact.
+TEST(PlantPersistence, DiskSaveLoadByteExact) {
+    namespace fs = std::filesystem;
+    namespace SS = ::Luminumbra::Persistence;
+    entt::registry a;
+    barePlant(a, 0.0f, static_cast<std::uint8_t>(C::PlantStage::Seed), 500);
+    const auto p1 = barePlant(a, 1.0f, static_cast<std::uint8_t>(C::PlantStage::Mature), 12000);
+    a.emplace<C::SoilFeederComponent>(p1, C::SoilFeederComponent{800, 4200});
+    const auto snap = F::BuildPlantEntitySnapshot(a);
+    const std::string json = E::SerializeEntityRegistrySnapshotJson(snap);
+
+    const fs::path dir = fs::temp_directory_path() / "lumin_plant_persist_disk";
+    fs::remove_all(dir);
+    std::vector<std::string> errs;
+    ASSERT_TRUE(SS::WorldSaveService::save_plant_entities(snap, dir, &errs))
+        << (errs.empty() ? "" : errs.front());
+    E::EntityRegistrySnapshot loaded;
+    ASSERT_TRUE(SS::WorldSaveService::load_plant_entities(loaded, dir, &errs));
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), json) << "disk save->load byte-exact";
+    fs::remove_all(dir);
+}
+
+// A no-plant save writes NO file and loads as a clean (empty) miss -> byte-identical no-plant save.
+TEST(PlantPersistence, EmptyRosterWritesNoFile) {
+    namespace fs = std::filesystem;
+    namespace SS = ::Luminumbra::Persistence;
+    const fs::path dir = fs::temp_directory_path() / "lumin_plant_persist_empty";
+    fs::remove_all(dir);
+    std::vector<std::string> errs;
+    E::EntityRegistrySnapshot empty;
+    ASSERT_TRUE(SS::WorldSaveService::save_plant_entities(empty, dir, &errs));
+    EXPECT_FALSE(fs::exists(SS::WorldSaveService::plant_entities_path(dir)))
+        << "no-plant save writes no plant-entities.json";
+    E::EntityRegistrySnapshot loaded;
+    ASSERT_TRUE(SS::WorldSaveService::load_plant_entities(loaded, dir, &errs));  // clean miss
+    EXPECT_TRUE(loaded.entities.empty());
+    fs::remove_all(dir);
 }
 
 }  // namespace

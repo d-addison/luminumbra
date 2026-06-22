@@ -1,6 +1,7 @@
 #include "WorldSaveService.h"
 
 #include "WorldPersistenceRoundtrip.h"
+#include "../ecs/EntitySnapshot.h"  // Phase 3B: plant entity snapshot persistence
 
 #include "nlohmann/json.hpp"
 
@@ -371,6 +372,59 @@ std::filesystem::path WorldSaveService::region_file_path(const std::filesystem::
 
 std::filesystem::path WorldSaveService::world_manifest_path(const std::filesystem::path& save_dir) {
     return region_directory(save_dir) / kWorldManifestFileName;
+}
+
+std::filesystem::path WorldSaveService::plant_entities_path(const std::filesystem::path& save_dir) {
+    return region_directory(save_dir) / "plant-entities.json";
+}
+
+bool WorldSaveService::save_plant_entities(const Luminumbra::Ecs::EntityRegistrySnapshot& snapshot,
+                                           const std::filesystem::path& save_dir,
+                                           std::vector<std::string>* errors) {
+    const std::filesystem::path path = plant_entities_path(save_dir);
+    std::error_code ec;
+    if (snapshot.entities.empty()) {
+        // No plants -> no file (a no-plant save is byte-identical). Retire any stale file.
+        std::filesystem::remove(path, ec);
+        return true;
+    }
+    std::filesystem::create_directories(path.parent_path(), ec);
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output.is_open()) {
+        AddError(errors, "failed to open plant entities file for writing: " + path.string());
+        return false;
+    }
+    output << Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(snapshot);
+    output.flush();
+    if (!output.good()) {
+        AddError(errors, "failed to write plant entities file: " + path.string());
+        return false;
+    }
+    return true;
+}
+
+bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapshot& out,
+                                           const std::filesystem::path& save_dir,
+                                           std::vector<std::string>* errors) {
+    out = Luminumbra::Ecs::EntityRegistrySnapshot{};
+    const std::filesystem::path path = plant_entities_path(save_dir);
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec)) {
+        return true;  // clean miss: a fresh / no-plant world
+    }
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        AddError(errors, "failed to open plant entities file: " + path.string());
+        return false;
+    }
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    std::vector<std::string> load_errors;
+    if (!Luminumbra::Ecs::LoadEntityRegistrySnapshotJson(ss.str(), out, load_errors)) {
+        for (const auto& e : load_errors) AddError(errors, e);
+        return false;
+    }
+    return true;
 }
 
 void WorldSaveService::region_coords_for_chunk(const IVec3& chunk_coords, int& out_rx, int& out_rz) {

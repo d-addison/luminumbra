@@ -51,6 +51,7 @@
 #include "../systems/AetherFieldSystem.h"
 #include "../core/Log.h"
 #include "../persistence/WorldSaveService.h"
+#include "../persistence/PlantPersistence.h"  // Phase 3B: plant save/load projection
 #include "../persistence/WorldPersistenceRoundtrip.h" // Persistence::StableChecksum (ComputeScentSubHash)
 #include "TerrainPresetLoader.h"
 #include "WorldStreamingState.h"
@@ -836,12 +837,17 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir, WorldS
     }
     result.chunks_total = state.size();
 
+    // I9-FOLIAGE Phase 3B: project the live plant roster ONCE and persist it as a sibling file in
+    // BOTH the dirty-empty and the normal save path (plants are independent of chunk dirtiness). An
+    // empty roster writes NO file, so a no-plant save stays byte-identical (the save-less path holds).
+    const auto plant_snapshot = luminumbra::foliage::BuildPlantEntitySnapshot(m_registry);
+
     const std::vector<ChunkID> dirty_ids = state.dirty_chunk_ids();
     result.chunks_dirty = dirty_ids.size();
     if (dirty_ids.empty()) {
-        // Nothing to persist. Without an existing snapshot this keeps a
-        // save-less world byte-for-byte on the fresh-world path (the chunks/
-        // directory is never created).
+        // No dirty CHUNKS. Without an existing snapshot this keeps a save-less, no-plant world
+        // byte-for-byte (no chunks/ dir created); a planted world still persists its plants here.
+        Persistence::WorldSaveService::save_plant_entities(plant_snapshot, save_dir, nullptr);
         if (report) {
             *report = result;
         }
@@ -869,6 +875,11 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir, WorldS
     } else {
         const Persistence::WorldSaveDirtyReport dirty_report = service.save_dirty_chunks(state, save_dir, &errors);
         ok = dirty_report.saved;
+    }
+
+    // Phase 3B: persist plants alongside the chunk write (empty roster -> no file -> byte-identical).
+    if (!Persistence::WorldSaveService::save_plant_entities(plant_snapshot, save_dir, &errors)) {
+        ok = false;
     }
 
     for (const std::string& error : errors) {
@@ -938,6 +949,19 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
 
         if (m_worldSystem->adopt_streamed_chunk(chunk)) {
             ++adopted;
+        }
+    }
+
+    // I9-FOLIAGE Phase 3B: reload persisted plant entities into the live registry (a missing file is
+    // a clean miss). Geometry rebakes from the reloaded genome+stage on the render bridge.
+    {
+        Luminumbra::Ecs::EntityRegistrySnapshot plant_snapshot;
+        std::vector<std::string> plant_errors;
+        if (Persistence::WorldSaveService::load_plant_entities(plant_snapshot, save_dir, &plant_errors)) {
+            luminumbra::foliage::ApplyPlantEntitySnapshot(m_registry, plant_snapshot);
+        } else {
+            for (const std::string& e : plant_errors)
+                LUMINUMBRA_CORE_ERROR("Plant state load failed: {}", e);
         }
     }
 
