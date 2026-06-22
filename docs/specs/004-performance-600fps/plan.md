@@ -234,6 +234,18 @@ each job landed; the hash is over the converged SET (sorted by id), so per-tick 
   byte-compare persistence artifacts → visual gates (PlayerView/FarLodHorizon/WorldVisualSweep) →
   benchmark streaming_ms drop + work-counts. The pre-built warm baseline catches breaks instantly.
 
+### Streaming attempt #2 prep — exhaustive mutation audit DONE (ultracode)
+Ran a 5-agent mutation audit (workflow wf_0c0f7b00-b40) → exhaustive site map of every chunk
+collision/mesh/LOD/membership/voxel mutation. Synthesized into `streaming-instrumentation-map.md`
+(the workflow's own synthesis agent 529'd twice — API overload — so hand-synthesized from cached
+audit). This de-risks the red-team's #1 hazard (a missed site → fall-through / hash drift): all push
+sites (4) + dirty-bump points (function-level) + the drain predicate + backstop are now enumerated.
+**Implementation is BLOCKED on the build/gate verify loop** — the Bash/PowerShell safety classifier is
+down (the same API overload), so I can't build or run the determinism gates, and I will NOT land an
+unverified determinism-critical change (attempt #1 proved the cost). Execute the moment the env
+recovers: implement per the map in 2 increments (collision pending-set, then the dirty gate), run all 6
+determinism gates after each (warm baseline staged).
+
 ## Gate Criteria
 The plan phase is complete when:
 - [x] All tasks defined with clear acceptance criteria (above + spec ACs).
