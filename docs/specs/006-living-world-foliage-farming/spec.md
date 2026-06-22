@@ -65,12 +65,13 @@ bridge is the separate `PlantProcgenPass`); procedural geometry in the sim (geom
      and populated `f314123daebb6cd1→114ff66cc032576d` (PopulatedWorldReplay). NetworkedSession
      (`ddfc228811d9f32b`) is the CLIENT bare-chunk hash, NOT the composite — unchanged. All three
      re-pinned gates green; run==replay holds; plants sub-hash verified in the populated gate.
-   - **3B (REMAINING — greenfield):** plant PERSISTENCE. Audit finding: `WorldSaveService` persists
-     ONLY chunk voxel data today; entity persistence is a generic `ecs/EntitySnapshot.h` framework
-     with NO game-entity payloads wired. 3B = serialize plant components (Plant*/Soil/Disease/
-     Pollination/CropLifecycle) through `WorldSaveService` save/load (entity-id allocation, regional-vs-
-     global file scope) + a planted-field save→load byte-exact roundtrip (the `EntitySnapshot` harness
-     + `WorldPersistenceRoundtrip` give the test scaffold). Sizeable; its own slice.
+   - **3B (DONE):** plant PERSISTENCE. `persistence/PlantPersistence.h` projects every PlantTag's sim
+     truth (genome + growth/soil/disease/pollination/lifecycle + transform) into the generic
+     `ecs/EntitySnapshot` framework and reconstructs it (geometry stays visual-only). `WorldSaveService`
+     gained sibling `save_plant_entities`/`load_plant_entities` writing `region/plant-entities.json`
+     next to the chunk container (empty roster → no file → byte-identical; chunk LMR1 path untouched).
+     `GameSession` save/load orchestrate build-on-save / apply-on-load. Disk-only → no world_hash
+     impact, no re-pin. Tests: byte-exact projection + disk roundtrip + genes bit-exact + empty-neutral.
 4. **Phase 4 — render bridge (visual-only):** `BakeSimPlants` iterates the real `PlantTag` view →
    `GeneratePlant(genome, sim stage, env)` + `TessellatePlant` → `PlantProcgenPass`; demote
    `g_procgenStageF` to a debug override. Timelapse shows geometry advancing with sim stage;
