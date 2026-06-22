@@ -8,8 +8,10 @@
 #include <vector>
 
 #include "luminumbra_common/components/PlantComponents.h"
+#include "luminumbra_common/components/CropLifecycleComponents.h"
 #include "luminumbra_common/core/DeterministicRng.h"
 #include "luminumbra_common/foliage/SpeciesRegistry.h"
+#include "luminumbra_common/systems/FarmingSystem.h"  // MakePlantFromSpecies
 
 namespace {
 namespace F = luminumbra::foliage;
@@ -81,6 +83,55 @@ TEST(SpeciesRegistry, LoadsShippedSpeciesFromDirectory) {
     EXPECT_FALSE(wheat->perennial);              // annual crop
     EXPECT_TRUE(oak->perennial);                 // perennial tree
     EXPECT_GT(oak->lifespan_ticks, wheat->lifespan_ticks);
+}
+
+// I9-FOLIAGE Phase 5A wiring: MakePlantFromSpecies is the single bridge from a data-driven species
+// template to a live PlantTag entity — it samples the genome, plants the seed, and stamps the crop
+// lifecycle, deterministically.
+TEST(SpeciesRegistry, MakePlantFromSpeciesSpawnsAndStampsLifecycle) {
+    F::SpeciesRegistry reg;
+    std::string err;
+    ASSERT_TRUE(reg.AddFromJsonText(kWheat, err)) << err;
+    const auto* w = reg.Find("wheat");
+    ASSERT_NE(w, nullptr);
+
+    const std::uint16_t sid = F::SpeciesId16("wheat");
+    EXPECT_NE(sid, 0) << "0 is the unspecified sentinel; a real species must not collide with it";
+    EXPECT_EQ(sid, F::SpeciesId16("wheat")) << "SpeciesId16 is stable for a given id";
+    EXPECT_NE(sid, F::SpeciesId16("oak")) << "distinct ids hash distinctly (no collision here)";
+
+    auto spawn = [&] {
+        entt::registry r;
+        DeterministicRng rng = DeterministicRng::seeded(101, 5, 9);
+        const entt::entity e = F::MakePlantFromSpecies(r, ::Luminumbra::Vec3{1.0f, 2.0f, 3.0f}, *w, rng, 42);
+        return std::make_pair(std::move(r), e);
+    };
+
+    auto [r1, e1] = spawn();
+    ASSERT_TRUE(e1 != entt::null);
+    ASSERT_TRUE(r1.all_of<C::PlantTag>(e1));
+    ASSERT_TRUE(r1.all_of<C::PlantGrowthComponent>(e1));
+    ASSERT_TRUE(r1.all_of<C::PlantGenomeComponent>(e1));
+    ASSERT_TRUE(r1.all_of<C::CropLifecycleComponent>(e1));
+    ASSERT_TRUE(r1.all_of<C::TransformComponent>(e1));
+
+    const auto& g1 = r1.get<C::PlantGrowthComponent>(e1);
+    EXPECT_EQ(g1.species_id, sid);
+    EXPECT_EQ(g1.planted_tick, 42u);
+    const auto& cl1 = r1.get<C::CropLifecycleComponent>(e1);
+    EXPECT_FALSE(cl1.perennial);                 // wheat is annual
+    EXPECT_EQ(cl1.lifespan_ticks, 900u);         // from the template
+    EXPECT_EQ(cl1.species_id, sid);
+    const auto& tf1 = r1.get<C::TransformComponent>(e1);
+    EXPECT_FLOAT_EQ(tf1.position.x, 1.0f);
+    EXPECT_FLOAT_EQ(tf1.position.y, 2.0f);
+    EXPECT_FLOAT_EQ(tf1.position.z, 3.0f);
+
+    // Determinism: same seed -> identical sampled genome (run==replay).
+    auto [r2, e2] = spawn();
+    const auto& gen1 = r1.get<C::PlantGenomeComponent>(e1);
+    const auto& gen2 = r2.get<C::PlantGenomeComponent>(e2);
+    EXPECT_EQ(gen1.genes, gen2.genes);
 }
 
 }  // namespace

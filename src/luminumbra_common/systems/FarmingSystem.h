@@ -7,7 +7,9 @@
 // integer where it matters (geometry is visual-only; this is sim truth).
 
 #include "../components/PlantComponents.h"
+#include "../components/CropLifecycleComponents.h" // CropLifecycleComponent (perennial/lifespan stamp)
 #include "PlantGrowthSystem.h" // ExpressGenome, BreedPlants, Comp alias, namespace
+#include "../foliage/SpeciesRegistry.h" // SpeciesTemplate, SampleGenome, SpeciesId16
 #include "../core/DeterministicRng.h"
 
 #include <cstdint>
@@ -29,6 +31,25 @@ inline entt::entity PlantSeed(entt::registry& reg, const ::Luminumbra::Vec3& pos
     g.species_id = species_id;
     g.planted_tick = tick;
     g.last_tick = tick;
+    return e;
+}
+
+// Spawn a plant FROM A SPECIES TEMPLATE: sample an in-bounds, heritable genome from the species'
+// per-gene ranges (seeded), plant the seed, and stamp the crop lifecycle (annual/perennial + lifespan)
+// so the generational loop (CropLifecycleSystem) applies. This is the single wiring point between the
+// data-driven SpeciesRegistry and the live sim. Deterministic from `rng` + `tick`. species_id is the
+// stable hash of the template id (round-trips through persistence + the plant sub-hash). Geometry stays
+// visual-only; world_hash is unaffected until this is actually called (plants are opt-in via PlantTag).
+inline entt::entity MakePlantFromSpecies(entt::registry& reg, const ::Luminumbra::Vec3& pos,
+                                         const SpeciesTemplate& tmpl,
+                                         luminumbra::core::DeterministicRng& rng, std::uint64_t tick) {
+    const std::uint16_t sid = SpeciesId16(tmpl.id);
+    const Comp::PlantGenomeComponent genome = SpeciesRegistry::SampleGenome(tmpl, rng);
+    const entt::entity e = PlantSeed(reg, pos, genome, sid, tick);
+    auto& cl = reg.emplace<Comp::CropLifecycleComponent>(e);
+    cl.perennial = tmpl.perennial;
+    cl.lifespan_ticks = tmpl.lifespan_ticks;
+    cl.species_id = sid;
     return e;
 }
 

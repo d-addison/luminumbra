@@ -54,6 +54,17 @@ struct SpeciesTemplate {
 
 inline float SpeciesClamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
 
+// Stable 16-bit species id derived from the template id string (FNV-1a, folded to 16 bits). Stable
+// across file-set changes and runs (NOT a load-order index), so it round-trips through persistence
+// (CropLifecycleComponent.species_id / PlantGrowthComponent.species_id) and the plant sub-hash. 0 is
+// reserved for "unspecified", so a real species never collides with it.
+[[nodiscard]] inline std::uint16_t SpeciesId16(const std::string& id) {
+    std::uint64_t h = 1469598103934665603ull;  // FNV offset basis
+    for (unsigned char c : id) { h ^= c; h *= 1099511628211ull; }
+    const std::uint16_t v = static_cast<std::uint16_t>((h ^ (h >> 32)) & 0xFFFFu);
+    return v == 0 ? 1 : v;
+}
+
 // Parse ONE species template from JSON. Genes default to the full [0,1] range when unspecified;
 // unknown gene names are ignored. Returns false + an error only on a missing/empty id.
 [[nodiscard]] inline bool ParseSpeciesTemplate(const nlohmann::json& j, SpeciesTemplate& out,
