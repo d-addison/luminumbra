@@ -1994,6 +1994,17 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
         glBindVertexArray(0);
     }
 
+    // FR-R5 TAAU §17: resolve the OPAQUE lit color BEFORE the transparent particle/lightning
+    // composite. Transparents can't write the gbuffer motion-vector MRT, so a resolve placed
+    // after them would temporally blend them along the opaque surface's motion (or zero for sky)
+    // -> smeared rain streaks / ghosted bolt. Resolving first keeps history particle-free and lets
+    // particles + lightning composite fresh on the stable resolved image. Flag-gated (render.taau);
+    // OFF -> no-op. (Pre-§17 this ran just before the blit; moving it up is render-only, gate-neutral
+    // when TAAU is OFF, which is the default and what every visual gate runs with.)
+    if (m_taau_enabled) {
+        execute_taau_resolve();
+    }
+
     // 8. PARTICLE PASS (T-I5a-1): forward-lit, soft-faded transparent particles
     // blended into the lit HDR target after the skybox. Render-only motion is
     // advanced first; the descriptor schedule (the sim-deterministic surface) is
@@ -2016,12 +2027,6 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     if (m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Lightning)) {
         m_lighting_pass->execute_lightning_overlay(*this, camera);
         glBindVertexArray(0);
-    }
-
-    // FR-R5 TAAU: temporal resolve over the fully-composited lit color, in place, just before the
-    // blit. Flag-gated (render.taau); OFF -> no-op and the lighting color blits through unchanged.
-    if (m_taau_enabled) {
-        execute_taau_resolve();
     }
 
     // 9. FINAL BLIT TO SCREEN (or to the offscreen preview target, Item 1).
