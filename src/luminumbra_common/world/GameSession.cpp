@@ -31,6 +31,7 @@
 #include "../ai/InstinctLocomotionSystem.h"
 #include "../ai/PerceptionSystem.h"
 #include "../ai/ForagingSystem.h"  // FR-3: ant-trail foraging (Deneubourg double-bridge)
+#include "../systems/CropLifecycleSystem.h"  // FR-G Phase 2: germination / annual-perennial lifecycle
 #include "../ai/ScentDepositSystem.h"
 #include "../ai/ScentField.h"
 #include "../ai/ScentSteeringSystem.h"
@@ -454,6 +455,11 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 fol::RunPollinationOnTick(m_registry, current_tick, windXZ);
             if (!m_registry.view<Comp::PlantHealthComponent>().empty())
                 fol::RunPlantDiseaseOnTick(m_registry, current_tick);
+            // FR-G germination (Phase 2): ripe plants senesce -> annual dies + reseeds, perennial
+            // resets + reseeds (child genome = the pollination cross, computed just above, or self).
+            // Runs AFTER pollination so next_genome is fresh. Opt-in via CropLifecycleComponent.
+            if (!m_registry.view<Comp::CropLifecycleComponent>().empty())
+                fol::RunCropLifecycleOnTick(m_registry, current_tick);
             if (!m_registry.view<Comp::CombustibleComponent>().empty())
                 luminumbra::sim::RunFireSpreadOnTick(m_registry, current_tick, windXZ);
             if (!m_registry.view<Comp::GrazeableComponent>().empty())
