@@ -568,6 +568,8 @@ public:
     u32 screen_width() const { return m_screen_width; }
     u32 screen_height() const { return m_screen_height; }
     const glm::mat4& prev_view_proj() const { return m_prev_view_proj; }  // FR-R5 TAAU motion vectors
+    void set_taau_enabled(bool e) { m_taau_enabled = e; }                 // render.taau (client wires from SystemConfig)
+    const glm::vec2& taau_jitter_ndc() const { return m_taau_jitter_ndc; } // sub-pixel projection jitter for the G-buffer
     // Count of render-target reallocations since startup (one per real
     // on_resize). Surfaced as telemetry so the resize-stress gate can verify
     // targets were rebuilt during the mid-run mode toggles.
@@ -992,6 +994,17 @@ private:
     // the previously dormant volumetric_lighting.frag. Render-only (design §2).
     SkyAtmosphereLut m_sky_lut;
     std::unique_ptr<Shader> m_aerial_shader;
+    // FR-R5 TAAU resolve (render.taau, default OFF). Motion-reprojected temporal AA over the lit HDR
+    // color with a 3x3 neighborhood-clamp anti-ghost; ping-pong history. Flag OFF -> the pass never
+    // runs and the lighting color blits through unchanged (byte-identical default render).
+    std::unique_ptr<Shader> m_taau_shader;
+    GLuint m_taau_fbo = 0;
+    GLuint m_taau_history[2] = {0u, 0u};  // RGBA16F resolved-color history (ping-pong)
+    int m_taau_history_write = 0;
+    bool m_taau_history_valid = false;
+    bool m_taau_enabled = false;
+    glm::vec2 m_taau_jitter_ndc = glm::vec2(0.0f);  // current-frame sub-pixel projection jitter (NDC); (0,0) when OFF
+    unsigned m_taau_frame = 0u;                      // Halton sequence index
     // Screen-space crepuscular rays (god rays). Additive pass over the lit scene when
     // the sun is above the horizon + on screen. Render-only.
     std::unique_ptr<Shader> m_god_rays_shader;
@@ -1014,6 +1027,9 @@ private:
     glm::vec3 m_skyScatterAmbient{0.0f};
     void init_sky_lut();
     void execute_aerial_pass(const Camera& camera);
+    void init_taau(u32 width, u32 height);   // FR-R5 TAAU history/FBO
+    void destroy_taau();
+    void execute_taau_resolve();             // motion-reprojected temporal resolve (flag-gated)
 public:
     const SkyAtmosphereLut& sky_lut() const { return m_sky_lut; }
 private:

@@ -619,6 +619,7 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         m_shadow_pass->init_shadow_map();
         m_ssao_pass->init_ssao(screen_width, screen_height);
         init_screen_quad();
+        init_taau(screen_width, screen_height); // FR-R5 TAAU history/FBO (used only when render.taau on)
         init_halfres_cloud(); // no-op unless cloud quality was set > 0 before startup
         m_skybox_pass->init_geometry();
         m_particle_pass->init_buffers(); // T-I5a-1: persistent-mapped instance pool
@@ -1663,7 +1664,25 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
 
     glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)m_screen_width / (float)m_screen_height, camera.GetNearPlane(), camera.GetFarPlane());
     glm::mat4 view = camera.GetViewMatrix();
-    
+
+    // FR-R5 TAAU: per-frame Halton[2,3] sub-pixel jitter for the G-buffer projection. Computed ONLY
+    // when TAAU is on; (0,0) otherwise so the default render (and frustum culling, which uses the
+    // UNJITTERED projection above) is byte-identical. GBufferPass applies it; the resolve un-jitters
+    // the motion vectors with the same offset.
+    if (m_taau_enabled && m_screen_width > 0 && m_screen_height > 0) {
+        auto halton = [](unsigned i, unsigned base) {
+            float f = 1.0f, r = 0.0f;
+            while (i > 0u) { f /= (float)base; r += f * (float)(i % base); i /= base; }
+            return r;
+        };
+        const unsigned idx = (m_taau_frame % 16u) + 1u;
+        m_taau_jitter_ndc = glm::vec2((halton(idx, 2u) - 0.5f) * 2.0f / (float)m_screen_width,
+                                      (halton(idx, 3u) - 0.5f) * 2.0f / (float)m_screen_height);
+        ++m_taau_frame;
+    } else {
+        m_taau_jitter_ndc = glm::vec2(0.0f);
+    }
+
     // Cache frustum planes to avoid recalculation when camera hasn't changed significantly
     glm::vec4 frustum_planes[6];
     const float POSITION_THRESHOLD = 0.5f;  // Less sensitive to prevent cache thrashing
@@ -1999,6 +2018,12 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
         glBindVertexArray(0);
     }
 
+    // FR-R5 TAAU: temporal resolve over the fully-composited lit color, in place, just before the
+    // blit. Flag-gated (render.taau); OFF -> no-op and the lighting color blits through unchanged.
+    if (m_taau_enabled) {
+        execute_taau_resolve();
+    }
+
     // 9. FINAL BLIT TO SCREEN (or to the offscreen preview target, Item 1).
     begin_gpu_pass_timer(GpuTimerPass::FinalBlit);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
@@ -2094,6 +2119,8 @@ void RenderPipeline::on_resize(u32 new_width, u32 new_height) {
     m_gbuffer_pass->init_gbuffer(new_width, new_height);
     m_ssao_pass->destroy_ssao();
     m_ssao_pass->init_ssao(new_width, new_height);
+    destroy_taau();
+    init_taau(new_width, new_height); // FR-R5 TAAU history invalidated on resize
     init_halfres_cloud(); // re-size the reduced-res sky-dome target (no-op at quality 0)
     m_frustumCache.valid = false;
     ++m_resize_generation;
@@ -2188,6 +2215,11 @@ void RenderPipeline::init_shaders() {
         (m_root_path / "res/shaders/ssao.vert").string().c_str(),
         (m_root_path / "res/shaders/god_rays.frag").string().c_str());
     label_gl_object(GL_PROGRAM, m_god_rays_shader ? m_god_rays_shader->Id() : 0u, "shader.god_rays");
+    // FR-R5 TAAU resolve. Reuses the SSAO fullscreen-quad vertex stage.
+    m_taau_shader = std::make_unique<Shader>(
+        (m_root_path / "res/shaders/ssao.vert").string().c_str(),
+        (m_root_path / "res/shaders/taau_resolve.frag").string().c_str());
+    label_gl_object(GL_PROGRAM, m_taau_shader ? m_taau_shader->Id() : 0u, "shader.taau_resolve");
 }
 
 void RenderPipeline::init_sky_lut() {
@@ -2354,6 +2386,87 @@ void RenderPipeline::init_screen_quad() {
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
     glBindVertexArray(0);
+}
+
+// --- FR-R5 TAAU resolve (render.taau, default OFF) ---
+
+void RenderPipeline::init_taau(u32 width, u32 height) {
+    if (width == 0 || height == 0) return;
+    glGenFramebuffers(1, &m_taau_fbo);
+    label_gl_object(GL_FRAMEBUFFER, m_taau_fbo, "taau.fbo");
+    for (int i = 0; i < 2; ++i) {
+        glGenTextures(1, &m_taau_history[i]);
+        glBindTexture(GL_TEXTURE_2D, m_taau_history[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
+    m_taau_history_write = 0;
+    m_taau_history_valid = false;  // no usable history until the first resolve fills it
+}
+
+void RenderPipeline::destroy_taau() {
+    if (m_taau_fbo) { glDeleteFramebuffers(1, &m_taau_fbo); m_taau_fbo = 0; }
+    for (int i = 0; i < 2; ++i) {
+        if (m_taau_history[i]) { glDeleteTextures(1, &m_taau_history[i]); m_taau_history[i] = 0; }
+    }
+    m_taau_history_valid = false;
+}
+
+void RenderPipeline::execute_taau_resolve() {
+    if (!m_taau_shader || !m_taau_shader->IsValid() || m_taau_fbo == 0 ||
+        m_screen_quad_vao == 0 || m_screen_width == 0 || m_screen_height == 0) {
+        return;
+    }
+    const int wr = m_taau_history_write;
+    const int rd = 1 - wr;
+    auto& lfbo = m_lighting_pass->lighting_fbo();
+
+    // Resolve current (lit HDR) + motion-reprojected history -> history[wr].
+    glBindFramebuffer(GL_FRAMEBUFFER, m_taau_fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_taau_history[wr], 0);
+    const GLenum draw0[1] = { GL_COLOR_ATTACHMENT0 };
+    glDrawBuffers(1, draw0);
+    glViewport(0, 0, m_screen_width, m_screen_height);
+
+    const GLboolean depth_was = glIsEnabled(GL_DEPTH_TEST);
+    glDisable(GL_DEPTH_TEST);
+    const GLboolean blend_was = glIsEnabled(GL_BLEND);
+    glDisable(GL_BLEND);
+
+    m_taau_shader->use();
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, lfbo.color_texture);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m_taau_history[rd]);
+    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_gbuffer_pass->gbuffer().motion_vector_texture);
+    m_taau_shader->setInt("u_current", 0);
+    m_taau_shader->setInt("u_history", 1);
+    m_taau_shader->setInt("u_motion", 2);
+    m_taau_shader->setVec2("u_texel", glm::vec2(1.0f / (float)m_screen_width, 1.0f / (float)m_screen_height));
+    m_taau_shader->setFloat("u_blend", 0.9f);
+    m_taau_shader->setInt("u_history_valid", m_taau_history_valid ? 1 : 0);
+
+    glBindVertexArray(m_screen_quad_vao);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glBindVertexArray(0);
+
+    // Copy the resolved result back into the lighting color so the final blit shows it; keep
+    // history[wr] for next frame's reprojection.
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, m_taau_fbo);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, lfbo.fbo_id);
+    glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    glBlitFramebuffer(0, 0, m_screen_width, m_screen_height, 0, 0, m_screen_width, m_screen_height,
+                      GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+    if (depth_was) glEnable(GL_DEPTH_TEST);
+    if (blend_was) glEnable(GL_BLEND);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glActiveTexture(GL_TEXTURE0);
+    m_taau_history_write = rd;   // ping-pong
+    m_taau_history_valid = true;
 }
 
 // --- CLEANUP ---

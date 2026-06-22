@@ -2550,6 +2550,8 @@ int main(int argc, char* argv[]) {
     // sky-dome quality once the GL targets exist. No-op at 0 (full).
     renderPipeline.set_cloud_quality(cloud_quality); // default 1 (half); env can set 0
     renderPipeline.set_ssao_quality(ssao_quality);   // default 2 (GTAO High); env can set 0
+    // FR-R5 TAAU: enable the temporal resolve from the render.taau flag (default OFF -> byte-identical).
+    renderPipeline.set_taau_enabled(g_systemConfig.enabled(luminumbra::core::SysKey::RenderTaau));
     // T-I4-DR-split-lint: data-driven skinned-mesh texture set. The scenario
     // config resolved the .ltex paths (from the game archetype JSON or a generic
     // test texture); hand them to the generic RenderPipeline loader so no

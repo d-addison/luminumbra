@@ -51,6 +51,7 @@ enum class SysKey : std::uint8_t {
     RenderMoonlight,
     RenderTreeWind,
     RenderPlantProcgen,  // grow scattered plants via the procgen instead of baked models
+    RenderTaau,          // FR-R5 temporal AA resolve (motion-reprojected history); default OFF
     Count
 };
 

@@ -75,9 +75,11 @@ uniform int u_forceFlat = 0;
 // the clip; live chunk and static mesh draws never set it.
 uniform float u_farClipInnerRadius;
 
-// FR-R5 (TAAU): previous-frame view-projection + inverse screen size for motion vectors.
+// FR-R5 (TAAU): previous-frame view-projection + inverse screen size for motion vectors, plus this
+// frame's sub-pixel projection jitter (removed from the current position so motion stays jitter-free).
 uniform mat4 u_prev_view_proj;
 uniform vec2 u_inv_screen_size;
+uniform vec2 u_jitter_ndc;
 
 // Input from the vertex shader, with "flat" interpolation for the integer ID
 in VS_OUT {
@@ -359,7 +361,7 @@ void main()
     // ABSOLUTE world position through last frame's view-proj. Captures camera/rigid motion
     // (wind/skinned animation reproject as static -> deferred follow-on). The w<=0 guard (point
     // behind the previous camera, or an unset identity prev-VP on frame 0) yields zero motion.
-    vec2 currNdc = gl_FragCoord.xy * u_inv_screen_size * 2.0 - 1.0;
+    vec2 currNdc = gl_FragCoord.xy * u_inv_screen_size * 2.0 - 1.0 - u_jitter_ndc; // remove jitter
     vec4 prevClip = u_prev_view_proj * vec4(fs_in.WorldPos, 1.0);
     gMotionVector = (prevClip.w > 1e-5) ? (currNdc - prevClip.xy / prevClip.w) : vec2(0.0);
 }
