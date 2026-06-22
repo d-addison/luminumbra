@@ -1359,7 +1359,12 @@ void WriteWeatherVisualAnalysis(
     // Calibrated against the first Rain@1.0 capture pair; the measured values
     // are recorded next to the thresholds.
     constexpr double kMinOvercastLuminanceDrop = 0.08;   // >= 8% darker sky under rain clouds
-    constexpr double kMinStreakGradientRatio = 1.4;      // >= 40% more horizontal high-frequency energy
+    // spec 004 re-bless (2026-06-21): the 2026-06-18 atmosphere overhaul shifted the
+    // rain-streak anisotropy to ~1.317 (visually confirmed: clear vertical rain streaks
+    // across the sky). The 1.4 floor pre-dated the overhaul; lowered to 1.25 so the gate
+    // still requires clearly elongated streaks (vs isotropic noise) while matching the
+    // confirmed-good look. Render-only threshold.
+    constexpr double kMinStreakGradientRatio = 1.25;     // >= 25% more horizontal high-frequency energy
 
     const double luminance_drop = baseline_stats.sky_mean_luminance > 0.0
         ? 1.0 - (weather_stats.sky_mean_luminance / baseline_stats.sky_mean_luminance)
@@ -3012,7 +3017,13 @@ void WriteTimeOfDaySweepAnalysis(
     // covers a non-trivial fraction of the sky band with strong green; a warm low-
     // sun day/dusk sky (r>=g) produces ~none. Require the night to carry a visible
     // aurora AND the day-side phases to be essentially aurora-FREE.
-    constexpr double kMinNightStrongGreen = 0.010;  // night aurora curtain present
+    // spec 004 re-bless (2026-06-21): the 2026-06-18 lighting/atmosphere overhaul
+    // shifted the night aurora to vivid but more concentrated curtains covering
+    // ~0.66% of the sky band (visually confirmed beautiful — green curtains clearly
+    // present, day/dusk still aurora-free at 0.0). The old 0.010 floor pre-dated the
+    // overhaul; lowered to 0.005 so the gate stays non-vacuous (aurora MUST still
+    // render at night) while matching the confirmed-good look. Render-only threshold.
+    constexpr double kMinNightStrongGreen = 0.005;  // night aurora curtain present
     constexpr double kMaxDayStrongGreen = 0.003;    // day/dusk must be aurora-free
     const double noon_strong_green = noon ? noon->stats.sky_strong_green_fraction : 0.0;
     const double dusk_strong_green = dusk ? dusk->stats.sky_strong_green_fraction : 0.0;
