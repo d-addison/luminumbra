@@ -155,7 +155,19 @@ struct FarmingController {
         ++harvests;
         total_yield += r.yield;
         seeds += r.seeds;
-        reg.destroy(e);  // annual loop; perennial reset is a follow-on
+        // Perennial (e.g. a promoted wild tree / oak) REGROWS: reset to a vegetative stage instead of
+        // dying, bumping the generation. Annual is removed. (CropLifecycleSystem owns the senescence
+        // loop; this is the player-harvest counterpart so harvesting a perennial doesn't delete it.)
+        auto* cl = reg.try_get<Comp::CropLifecycleComponent>(e);
+        if (cl != nullptr && cl->perennial) {
+            auto& g = reg.get<Comp::PlantGrowthComponent>(e);
+            g.stage = static_cast<std::uint8_t>(Comp::PlantStage::Sprout);
+            g.growth_points = 0u;
+            ++cl->generations;
+            cl->ripe_ticks = 0u;
+        } else {
+            reg.destroy(e);  // annual: consumed
+        }
         return r;
     }
 };

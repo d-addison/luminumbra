@@ -180,4 +180,27 @@ TEST(SpeciesRegistry, FarmingControllerLoop) {
     EXPECT_FALSE(r.valid(e));          // annual plant removed
 }
 
+// Phase 5B perennial reset: harvesting a PERENNIAL plant regrows it (reset to vegetative + generation
+// bump) instead of destroying it; an annual is consumed (covered in FarmingControllerLoop).
+TEST(SpeciesRegistry, FarmingHarvestPerennialRegrows) {
+    namespace C = ::Luminumbra::Components;
+    entt::registry r;
+    F::FarmingController fc;
+    const entt::entity e = r.create();
+    r.emplace<C::PlantTag>(e);
+    r.emplace<C::PlantGenomeComponent>(e);
+    auto& g = r.emplace<C::PlantGrowthComponent>(e);
+    g.stage = static_cast<std::uint8_t>(C::PlantStage::Fruiting);
+    g.quality = 70;
+    auto& cl = r.emplace<C::CropLifecycleComponent>(e);
+    cl.perennial = true;
+
+    const auto hr = fc.Harvest(r, e);
+    EXPECT_TRUE(hr.harvestable);
+    EXPECT_TRUE(r.valid(e)) << "perennial regrows, not destroyed";
+    EXPECT_EQ(r.get<C::PlantGrowthComponent>(e).stage, static_cast<std::uint8_t>(C::PlantStage::Sprout));
+    EXPECT_EQ(r.get<C::CropLifecycleComponent>(e).generations, 1);
+    EXPECT_EQ(fc.harvests, 1);
+}
+
 }  // namespace
