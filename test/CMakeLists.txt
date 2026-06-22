@@ -169,6 +169,7 @@ add_executable(common_tests
     sim/ecology_pipeline_test.cpp
     sim/ecology_hash_test.cpp
     sim/crop_lifecycle_test.cpp
+    sim/species_registry_test.cpp
     sim/movement_hardening_test.cpp
     sim/lifecycle_hardening_test.cpp
     sim/environment_hardening_test.cpp

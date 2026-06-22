@@ -1,0 +1,16 @@
+{
+  "id": "wheat",
+  "render_archetype": "grass_crop",
+  "perennial": false,
+  "lifespan_ticks": 900,
+  "genes": {
+    "GrowthRate": [0.60, 0.90],
+    "MaxScale": [0.15, 0.35],
+    "DroughtTolerance": [0.20, 0.45],
+    "ColdTolerance": [0.35, 0.65],
+    "HeatTolerance": [0.30, 0.60],
+    "LeafDensity": [0.45, 0.75],
+    "Yield": [0.55, 0.90],
+    "Hardiness": [0.25, 0.50]
+  }
+}
