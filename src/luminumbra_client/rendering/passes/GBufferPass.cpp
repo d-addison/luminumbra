@@ -129,8 +129,18 @@ void GBufferPass::init_gbuffer(u32 width, u32 height) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT3, GL_TEXTURE_2D, m_gbuffer.material_texture, 0);
 
-    const GLenum attachments[4] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3 };
-    glDrawBuffers(4, attachments);
+    // Motion vectors: RG16F (signed NDC delta = current - previous screen position).
+    // spec 004 FR-R5 (TAAU) foundation; spec 007 particle Phase 3 writes velocity here.
+    glGenTextures(1, &m_gbuffer.motion_vector_texture);
+    PassGl::label_gl_object(GL_TEXTURE, m_gbuffer.motion_vector_texture, "gbuffer.motion_vectors");
+    glBindTexture(GL_TEXTURE_2D, m_gbuffer.motion_vector_texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG16F, width, height, 0, GL_RG, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT4, GL_TEXTURE_2D, m_gbuffer.motion_vector_texture, 0);
+
+    const GLenum attachments[5] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3, GL_COLOR_ATTACHMENT4 };
+    glDrawBuffers(5, attachments);
 
     // Depth texture (unchanged)
     glGenTextures(1, &m_gbuffer.depth_texture);
@@ -155,6 +165,7 @@ void GBufferPass::destroy_gbuffer() {
     if (m_gbuffer.normal_texture) { glDeleteTextures(1, &m_gbuffer.normal_texture); m_gbuffer.normal_texture = 0; }
     if (m_gbuffer.albedo_texture) { glDeleteTextures(1, &m_gbuffer.albedo_texture); m_gbuffer.albedo_texture = 0; }
     if (m_gbuffer.material_texture) { glDeleteTextures(1, &m_gbuffer.material_texture); m_gbuffer.material_texture = 0; }
+    if (m_gbuffer.motion_vector_texture) { glDeleteTextures(1, &m_gbuffer.motion_vector_texture); m_gbuffer.motion_vector_texture = 0; }
     if (m_gbuffer.depth_texture) { glDeleteTextures(1, &m_gbuffer.depth_texture); m_gbuffer.depth_texture = 0; }
 }
 

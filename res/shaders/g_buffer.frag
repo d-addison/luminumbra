@@ -3,6 +3,7 @@ layout (location = 0) out vec3 gPosition;          // RGB16F: full view-space po
 layout (location = 1) out vec4 gNormalMaterial;    // RGB10A2: Octahedral normal + material ID
 layout (location = 2) out vec4 gAlbedoRoughness;   // RGBA8: RGB albedo + roughness
 layout (location = 3) out vec2 gMetallicAO;        // RG16F: Metallic + AO
+layout (location = 4) out vec2 gMotionVector;      // RG16F: screen motion (NDC delta); FR-R5/TAAU
 
 // Octahedral normal encoding functions
 vec2 octWrap(vec2 v) {
@@ -349,4 +350,9 @@ void main()
 
     gAlbedoRoughness = vec4(albedo * fs_in.Tint, roughness);
     gMetallicAO = vec2(metallic, ao);
+    // FR-R5 (TAAU) foundation: static-geometry motion vectors are zero for now (the
+    // camera-reprojection motion math + TAAU resolve are the follow-on increment).
+    // The attachment exists + is defined so spec 007's particle pass can write its
+    // per-particle velocity here, and a future resolve can consume it.
+    gMotionVector = vec2(0.0);
 }
