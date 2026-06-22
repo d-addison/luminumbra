@@ -311,7 +311,13 @@ void main()
         // materials.json (no hardcoded layer index). Steep faces blend toward rock with
         // a world-space-noise-jittered boundary so cliffs read as natural scree, not a
         // clean contour line.
-        if (u_macroRockOverlay == 1 && fs_in.MaterialID >= 1u && fs_in.MaterialID <= 3u) {
+        // Perf (gbuffer §GPU): rockW = smoothstep(0.80+jitter, 0.50+jitter, geomSlope) is
+        // exactly 0 for any geomSlope >= 0.89 (max jitter = (1-0.5)*0.18 = 0.09, so the upper
+        // edge never exceeds 0.89). Flat ground (the majority of terrain pixels) therefore
+        // contributed NOTHING but still paid for the vnoise + smoothstep every fragment. Gating
+        // on geomSlope < 0.89 skips that work on flat terrain and is BYTE-IDENTICAL (the skipped
+        // fragments had rockW==0 -> base material unchanged) -> no visual change, no gate re-bless.
+        if (u_macroRockOverlay == 1 && geomSlope < 0.89 && fs_in.MaterialID >= 1u && fs_in.MaterialID <= 3u) {
             float jitter = (vnoise(fs_in.WorldPos * 0.05) - 0.5) * 0.18; // ~20 m break-up
             float rockW = smoothstep(0.80 + jitter, 0.50 + jitter, geomSlope); // steep -> rock
             if (rockW > 0.002) {
