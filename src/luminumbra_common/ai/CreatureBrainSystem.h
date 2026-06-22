@@ -110,6 +110,20 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
         }
         const float sx = tf.position.x, sz = tf.position.z;
 
+        // FR-5 emergent PERCEPTION: a creature carrying a sensory genome only TARGETS the opposite-
+        // role creatures it can actually SENSE — hearing is omnidirectional within hearing_range;
+        // vision is a gene-width cone (vision_cos_half_fov) within vision_range, faced along the
+        // prior-tick heading. Heritable + mutable sensory genes are thus SELECTED by survival (a
+        // creature that cannot sense a threat/food misses it). Genome-less creatures keep the
+        // unfiltered global-nearest scan (byte-identical to the pre-FR-5 brain; empty-roster worlds
+        // run the whole brain as a no-op, so canonical/networked hashes are unaffected).
+        const Comp::CreatureGenomeComponent* sg = reg.try_get<Comp::CreatureGenomeComponent>(e);
+        float faceX = 0.0f, faceZ = 0.0f;
+        if (sg != nullptr) {
+            const float hh = dm::Sqrt(snap[selfIdx].hx * snap[selfIdx].hx + snap[selfIdx].hz * snap[selfIdx].hz);
+            if (hh > 1e-4f) { faceX = snap[selfIdx].hx / hh; faceZ = snap[selfIdx].hz / hh; }
+        }
+
         // Nearest LIVE opposite-role creature: prey -> nearest predator (threat); predator ->
         // nearest live prey (food). Carcasses are skipped so a predator moves on to live prey.
         float bestDist = 1.0e9f, tx = sx, tz = sz;
@@ -119,6 +133,20 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
             if (o.e == e || o.predator == cr.is_predator || o.eaten) continue;
             const float dx = o.x - sx, dz = o.z - sz;
             const float d = dm::Sqrt(dx * dx + dz * dz);
+            if (sg != nullptr) {
+                // Perceivable? hearing (omnidirectional within range) OR vision (cone within range).
+                bool sensed = (d <= sg->hearing_range);
+                if (!sensed && d <= sg->vision_range) {
+                    if (faceX == 0.0f && faceZ == 0.0f) {
+                        sensed = true;  // no prior heading (stationary) -> vision omnidirectional in range
+                    } else if (d > 1e-4f) {
+                        sensed = ((dx * faceX + dz * faceZ) / d) >= sg->vision_cos_half_fov;
+                    } else {
+                        sensed = true;  // target coincident with self
+                    }
+                }
+                if (!sensed) continue;
+            }
             if (d < bestDist) {
                 bestDist = d;
                 tx = o.x;
