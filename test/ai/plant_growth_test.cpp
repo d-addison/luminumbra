@@ -6,8 +6,12 @@
 #include "gtest/gtest.h"
 
 #include "luminumbra_common/components/PlantComponents.h"
+#include "luminumbra_common/components/DiseaseComponents.h"
+#include "luminumbra_common/components/SoilComponents.h"
 #include "luminumbra_common/systems/PlantGrowthSystem.h"
 #include "luminumbra_common/systems/FarmingSystem.h"
+#include "luminumbra_common/systems/SoilNutrientSystem.h"
+#include "luminumbra_common/systems/IrrigationSystem.h"
 #include "luminumbra_common/core/DeterministicRng.h"
 
 #include <vector>
@@ -176,4 +180,95 @@ TEST(Farming, PlantGrowHarvestBreedLoop) {
     DeterministicRng brng = DeterministicRng::seeded(F::kPlantSeedOffset, 999, 2);
     const auto child = F::CrossBreed(gA, gB, brng);
     for (float v : child.genes) { EXPECT_GE(v, 0.0f); EXPECT_LE(v, 1.0f); }
+}
+
+// --- FR-G4 (Phase 1): env-loop couplings — blight slows growth, monoculture starves the soil,
+// irrigation moistens a cell. RED-first for the closed environment loop. ---
+
+// Grow one plant under a fixed env with an optional infection load (PlantHealthComponent).
+static C::PlantGrowthComponent GrowOnePlantInfected(const C::PlantGenomeComponent& genome,
+                                                    const F::PlantEnvSample& env,
+                                                    std::uint16_t infection) {
+    entt::registry reg;
+    const auto e = reg.create();
+    reg.emplace<C::TransformComponent>(e).position = Luminumbra::Vec3(0, 0, 0);
+    reg.emplace<C::PlantTag>(e);
+    reg.emplace<C::PlantGenomeComponent>(e, genome);
+    reg.emplace<C::PlantGrowthComponent>(e);
+    reg.emplace<C::PlantHealthComponent>(e).infection = infection;
+    F::EnvSampler sampler = [&](const C::TransformComponent&) { return env; };
+    for (std::uint64_t t = 1; t <= 300; ++t) F::RunPlantGrowthSystemOnTick(reg, t, sampler);
+    return reg.get<C::PlantGrowthComponent>(e);
+}
+
+TEST(PlantGrowth, BlightSlowsGrowth) {
+    DeterministicRng rng = DeterministicRng::seeded(F::kPlantSeedOffset, 41);
+    const auto genome = F::RandomGenome(rng);
+    const F::PlantEnvSample env{0.5f, 0.9f, 0.95f, 0.9f};  // otherwise-ideal env
+    const auto healthy  = GrowOnePlantInfected(genome, env, 0);     // no infection
+    const auto blighted = GrowOnePlantInfected(genome, env, 1000);  // fully infected
+    EXPECT_GT(healthy.growth_points, blighted.growth_points) << "blight saps growth";
+    EXPECT_GE(healthy.stage, blighted.stage);
+    // A healthy plant (infection 0) is byte-identical to one with no health component at all.
+    F::EnvSampler sampler = [&](const C::TransformComponent&) { return env; };
+    const auto noHealth = GrowOnePlant(genome, env);
+    EXPECT_EQ(healthy.growth_points, noHealth.growth_points);
+    EXPECT_EQ(healthy.stress_points, noHealth.stress_points);
+}
+
+TEST(PlantGrowth, MonocultureStarvesSharedSoil) {
+    // A CROWDED cell (a monoculture of mature feeders) drains its soil; a far UNFED cell stays at
+    // the soil baseline. Growth reading the depleted soil grows measurably less -> monoculture starves.
+    F::SoilGrid soil(16, 16);
+    entt::registry sreg;
+    auto feeder = [&](float x, float z) {
+        auto e = sreg.create();
+        sreg.emplace<C::TransformComponent>(e).position = Luminumbra::Vec3(x, 0.0f, z);
+        sreg.emplace<C::PlantTag>(e);
+        sreg.emplace<C::SoilFeederComponent>(e);
+        sreg.emplace<C::PlantGrowthComponent>(e).stage =
+            static_cast<std::uint8_t>(C::PlantStage::Fruiting);  // feeds hardest
+    };
+    // A dense monoculture (eight fruiting feeders) on one cell drains it far below the baseline.
+    for (int i = 0; i < 8; ++i) feeder(0.5f, 0.5f);
+    for (int t = 0; t < 400; ++t) F::RunSoilNutrientOnTick(sreg, soil, 0.0f, 0.0f, 1.0f);
+    const int nutCrowded = F::NutrientAt(soil, 0.5f, 0.5f, 0.0f, 0.0f, 1.0f);
+    const int nutUnfed   = F::NutrientAt(soil, 12.5f, 12.5f, 0.0f, 0.0f, 1.0f);  // no feeders -> baseline
+    EXPECT_LT(nutCrowded, nutUnfed) << "the monoculture depletes its shared cell below the baseline";
+
+    // Coupling: growth reading the (now frozen) soil grows LESS on the starved cell. Soil is the
+    // limiting factor here, so the nutrient gap shows through as a growth gap.
+    DeterministicRng rng = DeterministicRng::seeded(F::kPlantSeedOffset, 63);
+    const auto genome = F::RandomGenome(rng);
+    auto growAt = [&](float x, float z) {
+        entt::registry reg;
+        const auto e = reg.create();
+        reg.emplace<C::TransformComponent>(e).position = Luminumbra::Vec3(x, 0.0f, z);
+        reg.emplace<C::PlantTag>(e);
+        reg.emplace<C::PlantGenomeComponent>(e, genome);
+        reg.emplace<C::PlantGrowthComponent>(e);
+        F::EnvSampler s = [&](const C::TransformComponent& tf) {
+            F::PlantEnvSample env{0.5f, 0.5f, 0.7f, 0.0f};
+            const int nut = F::NutrientAt(soil, tf.position.x, tf.position.z, 0.0f, 0.0f, 1.0f);
+            // Normalise by kSoilBaseline (the 1.0 level), NOT 1000 — soil-limited growth.
+            env.soil_quality = F::clamp01(static_cast<float>(nut) / static_cast<float>(F::kSoilBaseline));
+            return env;
+        };
+        for (std::uint64_t t = 1; t <= 400; ++t) F::RunPlantGrowthSystemOnTick(reg, t, s);
+        return reg.get<C::PlantGrowthComponent>(e).growth_points;
+    };
+    EXPECT_LT(growAt(0.5f, 0.5f), growAt(12.5f, 12.5f)) << "the monoculture starves itself -> slower growth";
+}
+
+TEST(PlantGrowth, IrrigationMoistensCellForGrowth) {
+    // A water source raises moisture in its cell above a far-off dry cell.
+    F::IrrigationGrid grid(16, 16);
+    entt::registry wreg;
+    auto src = wreg.create();
+    wreg.emplace<C::TransformComponent>(src).position = Luminumbra::Vec3(0.5f, 0.0f, 0.5f);
+    wreg.emplace<C::WaterSourceComponent>(src);
+    for (int t = 0; t < 60; ++t) F::RunIrrigationOnTick(wreg, grid, 0.0f, 0.0f, 1.0f);
+    const int moistNear = F::MoistureAt(grid, 0.5f, 0.5f, 0.0f, 0.0f, 1.0f);
+    const int moistFar  = F::MoistureAt(grid, 14.5f, 14.5f, 0.0f, 0.0f, 1.0f);
+    EXPECT_GT(moistNear, moistFar) << "irrigation raises moisture near the water source";
 }

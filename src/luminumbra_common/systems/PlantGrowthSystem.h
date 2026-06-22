@@ -13,6 +13,7 @@
 
 #include "../components/PlantComponents.h"
 #include "../components/CoreComponents.h"
+#include "../components/DiseaseComponents.h"  // FR-G4: blight saps growth (opt-in PlantHealthComponent)
 #include "../ai/Evolution.h"
 #include "../core/DeterministicRng.h"
 
@@ -86,6 +87,11 @@ inline float Suitability(const PlantPhenotype& ph, const PlantEnvSample& env) {
     return clamp01(tempOk * moistOk * lightOk * soilOk);
 }
 
+// FR-G4 (Phase 1): how much a FULLY infected plant (infection == 1000) loses off its growth
+// suitability. Scales linearly with infection load; a healthy plant (0) is unaffected, so this is
+// byte-identical for any roster whose plants carry no PlantHealthComponent.
+inline constexpr float kBlightSuitPenalty = 0.85f;
+
 // Fixed-point growth thresholds (milli-units) to advance OUT of each stage.
 inline std::uint32_t StageThreshold(std::uint8_t stage) {
     static const std::array<std::uint32_t, Comp::kPlantStageCount> kThresh = {
@@ -120,8 +126,17 @@ inline PlantGrowthStats RunPlantGrowthSystemOnTick(
         // FARMING husbandry: tending (water/fertilize) lifts the cell's suitability
         // and is consumed slowly, so the player must keep tending (DST-style).
         const float tendBonus = static_cast<float>(growth.tended) * (1.0f / 255.0f) * 0.45f;
-        const float suit = clamp01(Suitability(ph, env) + tendBonus);
+        float suit = clamp01(Suitability(ph, env) + tendBonus);
         if (growth.tended > 0) --growth.tended; // wears off (deterministic decay)
+
+        // FR-G4: active disease saps growth. Infection is fixed-point milli (0..1000); a fully
+        // infected plant loses kBlightSuitPenalty of its suitability. Opt-in via PlantHealthComponent
+        // (no health component -> no penalty -> byte-identical for health-free plant rosters).
+        if (const auto* health = reg.try_get<const Comp::PlantHealthComponent>(e)) {
+            const float infFrac = static_cast<float>(health->infection) /
+                                  static_cast<float>(Comp::kDiseaseUnitScale);
+            suit = clamp01(suit * (1.0f - kBlightSuitPenalty * infFrac));
+        }
 
         // Fixed-point growth increment (truncated; deterministic). Poor cells grow
         // slower AND accrue stress (the DST husbandry model: stress -> low quality).

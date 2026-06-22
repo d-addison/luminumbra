@@ -338,6 +338,31 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             m_aetherFieldSystem->Update(current_tick, m_metadata.spawnPoint, m_windFieldSystem.get());
         }
 
+        // 5b. FR-G4 (Phase 1): the soil-nutrient + irrigation-moisture FIELDS update BEFORE plant
+        // growth (slot 6) so growth reads FRESH availability, not last tick's (the prior order had
+        // growth at slot 6 reading grids that only updated at slot 7 -> a 1-tick-stale env). Opt-in
+        // via WaterSource/SoilFeeder; a world with none updates no grid, so the canonical roster is
+        // byte-identical. The shared foliage field anchor (origin + cell size) is hoisted here so
+        // both the growth env-sampler (slot 6) and the §4 living-world systems (slot 7) share it.
+        constexpr int kFoliageFieldCells = 256;     // grid extent (cells)
+        constexpr float kFoliageFieldCell = 1.0f;   // metres / cell
+        const float foliageOriginX = m_metadata.spawnPoint.x - kFoliageFieldCells * kFoliageFieldCell * 0.5f;
+        const float foliageOriginZ = m_metadata.spawnPoint.z - kFoliageFieldCells * kFoliageFieldCell * 0.5f;
+        {
+            namespace Comp = Luminumbra::Components;
+            namespace fol = luminumbra::foliage;
+            if (!m_registry.view<Comp::WaterSourceComponent>().empty()) {
+                if (!m_irrigationGrid)
+                    m_irrigationGrid = std::make_unique<fol::IrrigationGrid>(kFoliageFieldCells, kFoliageFieldCells);
+                fol::RunIrrigationOnTick(m_registry, *m_irrigationGrid, foliageOriginX, foliageOriginZ, kFoliageFieldCell);
+            }
+            if (!m_registry.view<Comp::SoilFeederComponent>().empty()) {
+                if (!m_soilGrid)
+                    m_soilGrid = std::make_unique<fol::SoilGrid>(kFoliageFieldCells, kFoliageFieldCells);
+                fol::RunSoilNutrientOnTick(m_registry, *m_soilGrid, foliageOriginX, foliageOriginZ, kFoliageFieldCell);
+            }
+        }
+
         // 6. I9-FOLIAGE: deterministic plant GROWTH. Game-data opt-in (PlantTag):
         // no plants -> the system never runs and world_hash stays byte-identical
         // (same discipline as scent). The environment is ATMOSPHERIC — moisture is
@@ -346,12 +371,21 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         // (temperature/light/soil coupling are follow-ups; neutral for now.)
         if (HasPlantParticipants()) {
             luminumbra::foliage::EnvSampler plant_env =
-                [this](const Luminumbra::Components::TransformComponent& tf) {
+                [this, foliageOriginX, foliageOriginZ, current_tick](
+                    const Luminumbra::Components::TransformComponent& tf) {
                     luminumbra::foliage::PlantEnvSample s;
                     const Luminumbra::Vec3 p = tf.position;
-                    // Moisture: weather precipitation (rain -> growth).
+                    // Moisture: weather precipitation (rain -> growth) + irrigation (player watering).
                     const float precip = m_weatherSystem ? m_weatherSystem->PrecipitationAt(p) : 0.0f;
                     s.moisture = luminumbra::foliage::clamp01(0.30f + precip * 0.70f);
+                    // FR-G4: fold the freshly-updated IRRIGATION grid (milli 0..1000) into moisture —
+                    // watered cells grow better (watered-beats-dry). No grid -> unchanged.
+                    if (m_irrigationGrid) {
+                        const int moist = luminumbra::foliage::MoistureAt(
+                            *m_irrigationGrid, p.x, p.z, foliageOriginX, foliageOriginZ, kFoliageFieldCell);
+                        s.moisture = luminumbra::foliage::clamp01(
+                            s.moisture + static_cast<float>(moist) / 1000.0f * 0.5f);
+                    }
                     // Soil + temperature from the TERRAIN: surface-material favourability
                     // (grass/soil rich, sand/stone poor) and an altitude lapse (higher
                     // ground is colder -> alpine vs lowland growth). The real atmospheric/
@@ -372,44 +406,50 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                             0.60f - (altitude > 0.0f ? altitude : 0.0f) * 0.00045f);
                     }
                     s.soil_quality = soil;
+                    // FR-G4: fold the freshly-updated SOIL-NUTRIENT grid (milli 0..1000) into soil
+                    // quality. Foragers/feeders DEPLETE the cell, so a monoculture on one cell starves
+                    // itself (monoculture-starves). No grid -> unchanged terrain quality.
+                    if (m_soilGrid) {
+                        const int nut = luminumbra::foliage::NutrientAt(
+                            *m_soilGrid, p.x, p.z, foliageOriginX, foliageOriginZ, kFoliageFieldCell);
+                        // NutrientAt is milli-of-milli (kSoilBaseline == 1.0 nutrient), so normalise
+                        // by kSoilBaseline (NOT 1000) to a [0,1] fraction before blending.
+                        const float nutFrac = static_cast<float>(nut) /
+                                              static_cast<float>(luminumbra::foliage::kSoilBaseline);
+                        s.soil_quality =
+                            luminumbra::foliage::clamp01(s.soil_quality * 0.5f + nutFrac * 0.5f);
+                    }
                     s.temperature = temp;
-                    s.light = 0.75f; // season/time-of-day coupling is a render-side follow-up
+                    // FR-G4: real day/night LIGHT from the sim clock (was a 0.75 stub). Triangular day
+                    // curve peaking at noon, with a twilight floor so growth slows (not halts) at
+                    // night. kTicksPerDay = 20-min day @30Hz (mirrors the circadian slot).
+                    constexpr std::uint64_t kTicksPerDay = 30ull * 60ull * 20ull;
+                    const float tod01 = static_cast<float>(current_tick % kTicksPerDay) /
+                                        static_cast<float>(kTicksPerDay);
+                    const float noonDist = tod01 < 0.5f ? (0.5f - tod01) : (tod01 - 0.5f);
+                    const float day = 1.0f - 2.0f * noonDist;  // 0 at midnight -> 1 at noon
+                    s.light = luminumbra::foliage::clamp01(0.15f + 0.85f * day);
                     return s;
                 };
             luminumbra::foliage::RunPlantGrowthSystemOnTick(m_registry, current_tick, plant_env);
         }
 
-        // 7. LIVING-WORLD SYSTEMS (§4): irrigation / soil / pollination / disease / fire /
-        // wildlife-grazing / lifespan. Each is per-entity OPT-IN via its own participant
-        // component, so a world carrying none runs ZERO of them and world_hash stays
-        // byte-identical (canonical NetworkStateHash baseline holds) — same discipline as
-        // plants/creatures/scent. Deterministic (id-ordered, libm-free, seeded-from-ints).
-        // Fixed run order for run==replay. The soil/moisture fields are lazily created on first
-        // participant + anchored at the spawn point. Wind coupling (fire/pollination) is a
-        // follow-up; passing still air for now.
+        // 7. LIVING-WORLD SYSTEMS (§4): pollination / disease / fire / wildlife-grazing / lifespan /
+        // … Each is per-entity OPT-IN via its own participant component, so a world carrying none runs
+        // ZERO of them and world_hash stays byte-identical (canonical NetworkStateHash baseline holds)
+        // — same discipline as plants/creatures/scent. Deterministic (id-ordered, libm-free,
+        // seeded-from-ints). Fixed run order for run==replay. NOTE: the soil-nutrient + irrigation
+        // FIELDS now update at slot 5b (BEFORE plant growth) so growth reads fresh availability; only
+        // the consumers remain here. Wind coupling (fire/pollination) drifts downwind.
         {
             namespace Comp = Luminumbra::Components;
             namespace fol = luminumbra::foliage;
-            constexpr int kFieldCells = 256;        // grid extent (cells)
-            constexpr float kFieldCell = 1.0f;      // metres / cell
-            const float originX = m_metadata.spawnPoint.x - kFieldCells * kFieldCell * 0.5f;
-            const float originZ = m_metadata.spawnPoint.z - kFieldCells * kFieldCell * 0.5f;
             // Wind coupling: fire spreads + pollen drifts DOWNWIND, sampled from the
             // (already deterministic, already-hashed) wind field at the anchor.
             const ::Luminumbra::Vec2 windXZ =
                 m_windFieldSystem ? m_windFieldSystem->SampleWind(m_metadata.spawnPoint)
                                   : ::Luminumbra::Vec2(0.0f);
 
-            if (!m_registry.view<Comp::WaterSourceComponent>().empty()) {
-                if (!m_irrigationGrid)
-                    m_irrigationGrid = std::make_unique<fol::IrrigationGrid>(kFieldCells, kFieldCells);
-                fol::RunIrrigationOnTick(m_registry, *m_irrigationGrid, originX, originZ, kFieldCell);
-            }
-            if (!m_registry.view<Comp::SoilFeederComponent>().empty()) {
-                if (!m_soilGrid)
-                    m_soilGrid = std::make_unique<fol::SoilGrid>(kFieldCells, kFieldCells);
-                fol::RunSoilNutrientOnTick(m_registry, *m_soilGrid, originX, originZ, kFieldCell);
-            }
             if (!m_registry.view<Comp::PlantGenomeComponent>().empty())
                 fol::RunPollinationOnTick(m_registry, current_tick, windXZ);
             if (!m_registry.view<Comp::PlantHealthComponent>().empty())
