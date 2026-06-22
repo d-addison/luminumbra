@@ -75,6 +75,10 @@ uniform int u_forceFlat = 0;
 // the clip; live chunk and static mesh draws never set it.
 uniform float u_farClipInnerRadius;
 
+// FR-R5 (TAAU): previous-frame view-projection + inverse screen size for motion vectors.
+uniform mat4 u_prev_view_proj;
+uniform vec2 u_inv_screen_size;
+
 // Input from the vertex shader, with "flat" interpolation for the integer ID
 in VS_OUT {
     vec3 FragPos;      // VIEW SPACE
@@ -350,9 +354,12 @@ void main()
 
     gAlbedoRoughness = vec4(albedo * fs_in.Tint, roughness);
     gMetallicAO = vec2(metallic, ao);
-    // FR-R5 (TAAU) foundation: static-geometry motion vectors are zero for now (the
-    // camera-reprojection motion math + TAAU resolve are the follow-on increment).
-    // The attachment exists + is defined so spec 007's particle pass can write its
-    // per-particle velocity here, and a future resolve can consume it.
-    gMotionVector = vec2(0.0);
+    // FR-R5 (TAAU): screen-space motion vector = current screen pos - reprojected previous pos.
+    // Current pos is exact from gl_FragCoord (NDC); previous pos reprojects this surface point's
+    // ABSOLUTE world position through last frame's view-proj. Captures camera/rigid motion
+    // (wind/skinned animation reproject as static -> deferred follow-on). The w<=0 guard (point
+    // behind the previous camera, or an unset identity prev-VP on frame 0) yields zero motion.
+    vec2 currNdc = gl_FragCoord.xy * u_inv_screen_size * 2.0 - 1.0;
+    vec4 prevClip = u_prev_view_proj * vec4(fs_in.WorldPos, 1.0);
+    gMotionVector = (prevClip.w > 1e-5) ? (currNdc - prevClip.xy / prevClip.w) : vec2(0.0);
 }

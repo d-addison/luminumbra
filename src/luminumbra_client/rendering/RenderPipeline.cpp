@@ -2041,6 +2041,10 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // Nsight/RenderDoc capture (which the SHIELD-RT tracer decision depends on)
     // is garbled even though pixels are unaffected. Cheap debug-only guard.
     assert(PassGl::debug_group_depth() == 0 && "unbalanced GL debug-group push/pop in render_frame");
+
+    // FR-R5 TAAU: remember this frame's UNJITTERED view-proj so next frame's G-buffer can write
+    // screen-space motion vectors (reproject each surface point's world position to where it was).
+    m_prev_view_proj = projection * view;
 }
 
 void RenderPipeline::update_aether_field(const std::vector<float>& cells, float world_origin_x,

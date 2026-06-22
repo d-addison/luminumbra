@@ -567,6 +567,7 @@ public:
 
     u32 screen_width() const { return m_screen_width; }
     u32 screen_height() const { return m_screen_height; }
+    const glm::mat4& prev_view_proj() const { return m_prev_view_proj; }  // FR-R5 TAAU motion vectors
     // Count of render-target reallocations since startup (one per real
     // on_resize). Surfaced as telemetry so the resize-stress gate can verify
     // targets were rebuilt during the mid-run mode toggles.
@@ -891,6 +892,10 @@ private:
 
     u32 m_screen_width = 0;
     u32 m_screen_height = 0;
+    // FR-R5 TAAU: previous-frame UNJITTERED view-projection, used by the G-buffer to write
+    // screen-space motion vectors (current screen pos - reprojected previous screen pos).
+    // Advanced at render_frame end; identity on frame 0 (the shader's w<=0 guard => zero motion).
+    glm::mat4 m_prev_view_proj = glm::mat4(1.0f);
     // Render-target reallocation counter (T-I4-DR-window-modes). Bumped once per
     // real on_resize so the resize-stress gate can assert targets were rebuilt.
     u64 m_resize_generation = 0;

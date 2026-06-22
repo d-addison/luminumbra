@@ -232,6 +232,12 @@ void GBufferPass::geometry_pass_chunks(RenderPipeline& pipeline,
 
     m_geometry_shader->setMat4("projection", projection);
     m_geometry_shader->setMat4("view", view);
+    // FR-R5 TAAU: previous-frame view-proj + inverse screen size so the fragment shader writes
+    // screen-space motion vectors (curr screen pos - reprojected prev pos). Identity prev (frame 0)
+    // -> the shader's w<=0 guard yields zero motion.
+    m_geometry_shader->setMat4("u_prev_view_proj", pipeline.prev_view_proj());
+    m_geometry_shader->setVec2("u_inv_screen_size",
+        glm::vec2(1.0f / (float)pipeline.m_screen_width, 1.0f / (float)pipeline.m_screen_height));
     // View rotation: triplanar normal mapping (T-I4-7) perturbs the normal in
     // world space then rotates it into view space for the octahedral G-buffer.
     m_geometry_shader->setMat3("u_normalViewMatrix", glm::mat3(view));
@@ -381,6 +387,9 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
     const glm::mat4 static_view = camera.GetViewMatrix();
     m_instanced_static_mesh_shader->setMat4("projection", glm::perspective(glm::radians(camera.Zoom), (float)pipeline.m_screen_width / (float)pipeline.m_screen_height, camera.GetNearPlane(), camera.GetFarPlane()));
     m_instanced_static_mesh_shader->setMat4("view", static_view);
+    m_instanced_static_mesh_shader->setMat4("u_prev_view_proj", pipeline.prev_view_proj());  // FR-R5 TAAU motion vectors
+    m_instanced_static_mesh_shader->setVec2("u_inv_screen_size",
+        glm::vec2(1.0f / (float)pipeline.m_screen_width, 1.0f / (float)pipeline.m_screen_height));
     m_instanced_static_mesh_shader->setMat3("u_normalViewMatrix", glm::mat3(static_view));
     // Triplanar terrain arrays + LUT (T-I4-7): a static mesh tagged with a
     // textured material id (e.g. grass props) reuses the terrain triplanar path.
@@ -587,6 +596,9 @@ void GBufferPass::geometry_pass_skinned_meshes(RenderPipeline& pipeline,
     const glm::mat4 skinned_view = camera.GetViewMatrix();
     m_skinned_mesh_shader->setMat4("projection", glm::perspective(glm::radians(camera.Zoom), (float)pipeline.m_screen_width / (float)pipeline.m_screen_height, camera.GetNearPlane(), camera.GetFarPlane()));
     m_skinned_mesh_shader->setMat4("view", skinned_view);
+    m_skinned_mesh_shader->setMat4("u_prev_view_proj", pipeline.prev_view_proj());  // FR-R5 TAAU motion vectors
+    m_skinned_mesh_shader->setVec2("u_inv_screen_size",
+        glm::vec2(1.0f / (float)pipeline.m_screen_width, 1.0f / (float)pipeline.m_screen_height));
     m_skinned_mesh_shader->setMat3("u_normalViewMatrix", glm::mat3(skinned_view));
     // Triplanar terrain arrays + LUT (T-I4-7).
     glActiveTexture(GL_TEXTURE0);
