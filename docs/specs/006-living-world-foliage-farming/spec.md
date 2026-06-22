@@ -56,13 +56,21 @@ bridge is the separate `PlantProcgenPass`); procedural geometry in the sim (geom
    22=lifespan, 23=wildlife-foliage) — the registry is allocated through +35. Claim the next free
    slots **+36 germination / +37 season** (re-grep `*SeedOffset` immediately before claiming). Test:
    N-season drift → germinated child genome matches the cross; run==replay.
-3. **Phase 3 — persistence + hash (the ONLY new top-level hash term across all tracks):** serialize
-   plant/genome/soil/disease/pollination in `WorldSaveService` + roundtrip; **wire the EXISTING
-   `GameSession::ComputePlantSubHash()` (`GameSession.cpp:968`, already implemented) into
-   `ServerWorldRunner::ComposeWorldHash`** (`ServerWorldRunner.cpp:96-106`, currently
-   `chunk|wind|weather|aether|scents|ecology`) — appended LAST after `ecology`, gated so empty-roster/
-   no-plant is byte-identical — plus the matching `NetworkStateHash` term. Test: save→load byte-exact
-   for a planted field; no-plant baseline UNCHANGED.
+3. **Phase 3 — hash + persistence (the ONLY new top-level hash term across all tracks).** Split into:
+   - **3A (DONE):** wired the EXISTING `GameSession::ComputePlantSubHash()` into
+     `ServerWorldRunner::ComposeWorldHash` (now `chunk|wind|weather|aether|scents|ecology|plants`,
+     appended LAST, empty-neutral) + the `main_server` smoke/replay `plants` sub-hash + the gate
+     `plants` section. Re-pinned the moved composite literals in `validate-engine-frontier.ps1`:
+     empty-roster `cf9c8cddf7156cd6→ab0869af701f1816` (ReplayRoundtrip/LockstepLoopback/FaultInjection)
+     and populated `f314123daebb6cd1→114ff66cc032576d` (PopulatedWorldReplay). NetworkedSession
+     (`ddfc228811d9f32b`) is the CLIENT bare-chunk hash, NOT the composite — unchanged. All three
+     re-pinned gates green; run==replay holds; plants sub-hash verified in the populated gate.
+   - **3B (REMAINING — greenfield):** plant PERSISTENCE. Audit finding: `WorldSaveService` persists
+     ONLY chunk voxel data today; entity persistence is a generic `ecs/EntitySnapshot.h` framework
+     with NO game-entity payloads wired. 3B = serialize plant components (Plant*/Soil/Disease/
+     Pollination/CropLifecycle) through `WorldSaveService` save/load (entity-id allocation, regional-vs-
+     global file scope) + a planted-field save→load byte-exact roundtrip (the `EntitySnapshot` harness
+     + `WorldPersistenceRoundtrip` give the test scaffold). Sizeable; its own slice.
 4. **Phase 4 — render bridge (visual-only):** `BakeSimPlants` iterates the real `PlantTag` view →
    `GeneratePlant(genome, sim stage, env)` + `TessellatePlant` → `PlantProcgenPass`; demote
    `g_procgenStageF` to a debug override. Timelapse shows geometry advancing with sim stage;

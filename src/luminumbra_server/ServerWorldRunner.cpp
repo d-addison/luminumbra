@@ -98,11 +98,16 @@ std::string ComposeWorldHash(const std::string& chunk_hash,
                              const std::string& weather_hash,
                              const std::string& aether_hash,
                              const std::string& scent_hash,
-                             const std::string& ecology_hash) {
+                             const std::string& ecology_hash,
+                             const std::string& plant_hash) {
+    // I9-FOLIAGE Phase 3 (bump #7): fold the plant sub-hash in LAST, append-only. An empty plant
+    // roster yields an empty plant_hash (GameSession::ComputePlantSubHash), so the composite differs
+    // from the pre-fold value ONLY by the literal "|plants:" suffix (additivity guard) — the bytes
+    // before it stay byte-identical. This moved the canonical empty-roster composite once.
     return Persistence::StableChecksum(
         chunk_hash + "|wind:" + wind_hash + "|weather:" + weather_hash +
         "|aether:" + aether_hash + "|scents:" + scent_hash +
-        "|ecology:" + ecology_hash);
+        "|ecology:" + ecology_hash + "|plants:" + plant_hash);
 }
 
 // gate-populated-world-replay (T001): spawn the deterministic KINEMATIC creature
@@ -434,7 +439,8 @@ std::string ServerWorldRunner::ComputeWorldHash() {
                             WeatherSubHash(m_session.get()),
                             AetherSubHash(m_session.get()),
                             ScentSubHash(m_session.get()),
-                            ComputeEcologySubHash());
+                            ComputeEcologySubHash(),
+                            m_session->ComputePlantSubHash());  // Phase 3: plant fold (empty-neutral)
 }
 
 Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHashes() {
@@ -504,14 +510,14 @@ void ServerWorldRunner::ComputeWorldHashAndSubHashes(
     const std::string aether_hash = AetherSubHash(m_session.get());
     const std::string scent_hash = ScentSubHash(m_session.get());
     const std::string ecology_hash = ComputeEcologySubHash();
+    const std::string plant_hash = m_session->ComputePlantSubHash();  // Phase 3: empty-neutral
 
     Persistence::WorldSaveService service;
-    // T-I5a-2 (A2) + T-I5a-3 (B1) + T-I6-A1 + gate-populated-world-replay
-    // MEGA-BUMPS: composite world_hash (chunk + wind + weather + aether + scents +
-    // ecology).
+    // T-I5a-2 (A2) + T-I5a-3 (B1) + T-I6-A1 + gate-populated-world-replay + I9-FOLIAGE Phase 3
+    // MEGA-BUMPS: composite world_hash (chunk + wind + weather + aether + scents + ecology + plants).
     out_world_hash = ComposeWorldHash(
         service.world_hash(state), wind_hash, weather_hash, aether_hash, scent_hash,
-        ecology_hash);
+        ecology_hash, plant_hash);
 
     const std::string entities_snapshot =
         Ecs::SerializeEntityRegistrySnapshotJson(World::BuildAvatarEntitySnapshot(m_avatars));

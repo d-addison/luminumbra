@@ -328,6 +328,9 @@ struct SmokeRunResult {
     // gate-populated-world-replay: id-ordered ecology sub-hash (empty when no
     // roster) + creature counts before/after the run (non-vacuity oracle).
     std::string ecology_hash;
+    // I9-FOLIAGE Phase 3: id-ordered plant sub-hash (empty when no PlantTag roster). Folded into the
+    // composite world_hash (bump #7) and surfaced here so the gate verifies plant run==replay too.
+    std::string plant_hash;
     std::size_t creature_count_start = 0;
     std::size_t creature_count_end = 0;
     std::string world_id;
@@ -378,6 +381,7 @@ SmokeRunResult RunSmokeOnce(const ServerCliOptions& options, const char* run_lab
     result.sub_hashes = runner.ComputeWorldSubHashes();
     result.scent_hash = runner.Session() ? runner.Session()->ComputeScentSubHash() : std::string();
     result.ecology_hash = runner.ComputeEcologySubHash();
+    result.plant_hash = runner.Session() ? runner.Session()->ComputePlantSubHash() : std::string();
     result.creature_count_end = runner.CreatureCount();
     result.chunks_streamed = runner.StreamedChunkCount();
     result.world_id = runner.Session()->GetMetadata().worldId;
@@ -410,6 +414,7 @@ nlohmann::json SmokeRunJson(const SmokeRunResult& run) {
             {"aether", run.sub_hashes.aether},
             {"scents", run.scent_hash},
             {"ecology", run.ecology_hash},
+            {"plants", run.plant_hash},
         }},
         {"entity_count_start", run.creature_count_start},
         {"entity_count_end", run.creature_count_end},
@@ -450,7 +455,8 @@ int RunSmoke(const ServerCliOptions& options) {
         first.sub_hashes.weather == replay.sub_hashes.weather &&
         first.sub_hashes.aether == replay.sub_hashes.aether &&
         first.scent_hash == replay.scent_hash &&
-        first.ecology_hash == replay.ecology_hash;
+        first.ecology_hash == replay.ecology_hash &&
+        first.plant_hash == replay.plant_hash;
 
     const bool deterministic = first.ok && replay.ok &&
         first.world_hash == replay.world_hash && sub_hashes_match;
