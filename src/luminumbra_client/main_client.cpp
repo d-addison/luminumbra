@@ -36,6 +36,7 @@
 #include "luminumbra_common/components/PackHunterComponents.h" // coordinated pack hunting
 #include "luminumbra_common/components/DecayComponents.h"      // decomposition (carcass fades)
 #include "luminumbra_common/systems/PlantGrowthSystem.h"    // I9-FOLIAGE phenotype/genome
+#include "luminumbra_common/systems/FarmingSystem.h"        // I9-FOLIAGE MakePlantFromSpecies (Phase 5A) + SpeciesRegistry
 #include "luminumbra_common/systems/PlantProcgen.h"         // I9-FOLIAGE procedural plant geometry (render-only)
 #include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
@@ -224,6 +225,7 @@ std::filesystem::path g_ui_thumbs_dir;        // output dir; each -> thumb_<i>.p
 int g_ui_thumbs_index = 0;
 int g_ui_thumbs_settle = 0;
 bool g_timelapse_grow = false;     // grow the procgen plants sapling->tree over the capture
+bool g_timelapse_simgrow = false;  // seed SIM PlantTag plants + grow them via the real growth tick (Phase 4 bridge)
 bool g_timelapse_season = false;   // drift summer->autumn leaf color over the capture
 bool g_timelapse_creatures = false; // spawn predators/prey + render markers (ecology demo)
 bool g_timelapse_calm = false;      // calm (no-predator) grazing herd -> reproduction/evolution demo
@@ -302,6 +304,79 @@ void BakeProcgenPlants(Luminumbra::Rendering::PlantProcgenPass* pp, float stageF
          static_cast<std::uint64_t>(stageF * 1000.0f)) | 1ull;
     pp->set_plants(verts, indices, sig);
     pp->set_enabled(true);
+}
+
+// I9-FOLIAGE Phase 4: SIM->RENDER plant bridge. Bake the LIVE sim plant roster (every PlantTag entity
+// at its ACTUAL PlantGrowthComponent.stage) into the procgen pass, so on-screen geometry tracks the
+// deterministic sim (species genome, growth stage, world transform) — NOT the client-side g_procgenStageF
+// scrubber (which is demoted to a debug-only override for the non-sim showcase). Pure visual-only: it
+// reads sim truth and emits geometry, never writes back into the sim / world_hash. Returns the plant
+// count baked (0 -> the caller may fall back to the client-side procgen showcase). Deterministic draw
+// order (ascending entity) gives a stable cache signature that changes as plants grow.
+std::size_t BakeSimPlants(Luminumbra::Rendering::PlantProcgenPass* pp, const entt::registry& reg,
+                          const glm::vec3& sunDir, float season) {
+    if (!pp) return 0;
+    namespace C = Luminumbra::Components;
+    auto view = reg.view<const C::PlantTag, const C::PlantGenomeComponent,
+                         const C::PlantGrowthComponent, const C::TransformComponent>();
+    std::vector<entt::entity> ents(view.begin(), view.end());
+    std::sort(ents.begin(), ents.end());
+    if (ents.empty()) return 0;
+
+    const int kFruiting = static_cast<int>(C::PlantStage::Fruiting);
+    luminumbra::foliage::PlantEnvDir env;
+    env.sun_dir = sunDir;
+    env.phototropism = 0.5f;
+    using G = C::PlantGene;
+
+    std::vector<Luminumbra::Rendering::PlantProcgenPass::Vertex> verts;
+    std::vector<std::uint32_t> indices;
+    std::uint64_t sig = 1469598103934665603ull;  // FNV basis; folds (entity, stage) so growth re-uploads
+    for (const entt::entity e : ents) {
+        const auto& genome = view.get<const C::PlantGenomeComponent>(e);
+        const auto& g = view.get<const C::PlantGrowthComponent>(e);
+        const auto& tf = view.get<const C::TransformComponent>(e);
+        const std::uint8_t stage = static_cast<std::uint8_t>(
+            std::clamp<int>(static_cast<int>(g.stage), 0, kFruiting));
+        const float growF = 0.16f + 0.84f *
+            std::clamp(static_cast<float>(stage) / static_cast<float>(kFruiting), 0.0f, 1.0f);
+
+        const luminumbra::foliage::PlantStructure ps = luminumbra::foliage::GeneratePlant(genome, stage, env);
+        const luminumbra::foliage::ProcMesh pm = luminumbra::foliage::TessellatePlant(ps);
+
+        // Deterministic per-plant yaw + scale from the entity id / genome (visual variety only).
+        const std::uint32_t eid = static_cast<std::uint32_t>(entt::to_integral(e));
+        const float yaw = (static_cast<float>((eid * 2654435761u) >> 8) / 16777216.0f) * 6.2831853f;
+        const glm::mat3 rot = glm::mat3_cast(glm::angleAxis(yaw, glm::vec3(0.0f, 1.0f, 0.0f)));
+        const float sc = (0.6f + 1.8f * genome.gene(G::MaxScale)) * growF;
+        const glm::vec3 worldPos(tf.position.x, tf.position.y, tf.position.z);
+
+        const std::size_t leafVertStart = pm.vertices.size() >= ps.leaves.size() * 4u
+            ? pm.vertices.size() - ps.leaves.size() * 4u : pm.vertices.size();
+        const float hueVar = genome.gene(G::LeafDensity);
+        const float valVar = genome.gene(G::Hardiness);
+        const glm::vec3 summerLeaf(0.09f + 0.10f * hueVar, 0.32f + 0.22f * valVar, 0.07f + 0.05f * hueVar);
+        const glm::vec3 autumnLeaf(0.42f + 0.10f * hueVar, 0.20f + 0.10f * valVar, 0.05f);
+        const glm::vec3 leafColor = glm::mix(summerLeaf, autumnLeaf, std::clamp(season, 0.0f, 1.0f));
+        const glm::vec3 barkColor(0.16f + 0.06f * valVar, 0.10f, 0.06f);
+        const std::uint32_t baseVert = static_cast<std::uint32_t>(verts.size());
+        for (std::size_t vi = 0; vi < pm.vertices.size(); ++vi) {
+            const luminumbra::foliage::ProcVertex& src = pm.vertices[vi];
+            Luminumbra::Rendering::PlantProcgenPass::Vertex v;
+            v.pos = rot * (src.pos * sc) + worldPos;
+            v.normal = glm::normalize(rot * src.normal);
+            const bool isLeaf = vi >= leafVertStart;
+            v.uv = glm::vec2(isLeaf ? 1.0f : 0.0f, src.uv.y);
+            v.color = isLeaf ? leafColor : barkColor;
+            verts.push_back(v);
+        }
+        for (const std::uint32_t idx : pm.indices) indices.push_back(baseVert + idx);
+        sig = (sig ^ ((static_cast<std::uint64_t>(eid) << 8) ^ static_cast<std::uint64_t>(stage))) * 1099511628211ull;
+    }
+    if (verts.empty()) { pp->set_enabled(false); return 0; }
+    pp->set_plants(verts, indices, sig | 1ull);
+    pp->set_enabled(true);
+    return ents.size();
 }
 
 // g-vertical-slice spike: gather the in-frustum creature subjects for a photo-mode
@@ -2253,6 +2328,7 @@ int main(int argc, char* argv[]) {
     g_timelapse_ticks = GetCommandLineIntOption(argc, argv, "--timelapse-ticks", 60);
     g_timelapse_grow = HasCommandLineFlag(argc, argv, "--timelapse-grow");
     if (g_timelapse_grow) g_procgenStageF = 0.0f;  // start as seeds; grow sapling->tree over the capture
+    g_timelapse_simgrow = HasCommandLineFlag(argc, argv, "--timelapse-simgrow");
     g_timelapse_season = HasCommandLineFlag(argc, argv, "--timelapse-season");
     if (g_timelapse_season) g_season = 0.0f;  // start summer-green; drift to autumn over the capture
     g_timelapse_creatures = HasCommandLineFlag(argc, argv, "--timelapse-creatures");
@@ -4475,7 +4551,7 @@ int main(int argc, char* argv[]) {
                     const auto sp = gameSession->GetMetadata().spawnPoint;
                     // Growth captures frame a tighter view of the hero cluster in front; otherwise
                     // an elevated look over the grove.
-                    const bool showcase = g_timelapse_grow || g_timelapse_season;
+                    const bool showcase = g_timelapse_grow || g_timelapse_season || g_timelapse_simgrow;
                     // Ecology demo: a HIGH, wide, near-top-down look over the whole field so
                     // the herd scattering away from the predator (and the predator weaving
                     // toward the nearest prey) reads as clear motion across the ground, and
@@ -4824,12 +4900,43 @@ int main(int argc, char* argv[]) {
                                 g_procgenPlants.push_back(inst);
                             }
                         }
-                        // I9-FOLIAGE: bake the stored procedural plants at the current growth
-                        // stage + enable the pass (flag-gated). OFF/empty -> pass disabled,
-                        // render byte-identical. Growth re-bakes happen per-frame in the loop.
+                        // I9-FOLIAGE Phase 4: SIM plant seeding for the REAL-growth showcase. Spawn a
+                        // hero cluster of LIVE PlantTag plants (data-driven species via the Phase 5A
+                        // MakePlantFromSpecies) into the SESSION registry, so the deterministic
+                        // PlantGrowthSystem advances them Seed->Fruiting each tick and BakeSimPlants
+                        // renders their TRUE stage. Under time-scale they visibly grow on capture.
+                        if (g_timelapse_simgrow) {
+                            luminumbra::foliage::SpeciesRegistry species;
+                            std::vector<std::string> sperr;
+                            species.LoadFromDirectory(root_dir / "data/common/foliage/species", sperr);
+                            const char* picks[] = {"wheat", "oak", "wheat", "oak", "wheat"};
+                            const glm::vec3 simOffsets[] = {
+                                {-5.0f, 0.0f, 9.0f}, {0.0f, 0.0f, 12.0f}, {5.0f, 0.0f, 8.0f},
+                                {-2.5f, 0.0f, 6.0f}, {2.5f, 0.0f, 6.5f}};
+                            auto sgen = luminumbra::core::DeterministicRng::seeded(
+                                luminumbra::foliage::kPlantSeedOffset, 4242u, 7u);
+                            int seeded = 0;
+                            for (std::size_t i = 0; i < 5; ++i) {
+                                const auto* tmpl = species.Find(picks[i]);
+                                if (!tmpl) continue;
+                                const float hx = anchor.x + simOffsets[i].x, hz = anchor.z + simOffsets[i].z;
+                                luminumbra::foliage::MakePlantFromSpecies(
+                                    reg, Luminumbra::Vec3(hx, terr(hx, hz), hz), *tmpl, sgen, 0);
+                                ++seeded;
+                            }
+                            LUMINUMBRA_CORE_INFO("I9-FOLIAGE Phase 4: seeded {} SIM plants (real growth tick)", seeded);
+                        }
+                        // I9-FOLIAGE: bake plants + enable the pass. The SIM bridge (Phase 4) takes
+                        // priority when the session carries live PlantTag plants — geometry tracks the
+                        // deterministic growth tick; otherwise fall back to the client-side procgen
+                        // showcase (g_procgenStageF, demoted to a debug scrubber). OFF/empty -> pass
+                        // disabled, render byte-identical. Growth re-bakes happen per-frame in the loop.
                         g_procgenSunDir = plantEnv.sun_dir;
                         if (auto* pp = renderPipeline.plant_procgen()) {
-                            if (procgenPlants) {
+                            const std::size_t simPlants = BakeSimPlants(pp, reg, g_procgenSunDir, g_season);
+                            if (simPlants > 0) {
+                                LUMINUMBRA_CORE_INFO("I9-FOLIAGE Phase 4: baked {} SIM plants (sim->render bridge)", simPlants);
+                            } else if (procgenPlants) {
                                 BakeProcgenPlants(pp, g_procgenStageF);
                                 LUMINUMBRA_CORE_INFO("I9-FOLIAGE: {} procedural plants (stage {:.1f})",
                                                      g_procgenPlants.size(), g_procgenStageF);
@@ -7351,6 +7458,13 @@ int main(int argc, char* argv[]) {
                                               static_cast<float>(std::max(1, g_timelapse_frames - 1));
                         }
                         BakeProcgenPlants(renderPipeline.plant_procgen(), g_procgenStageF);
+                    }
+                    // I9-FOLIAGE Phase 4: re-bake LIVE sim plants each captured frame so the timelapse
+                    // shows their REAL growth (the session tick advanced PlantGrowthSystem since the
+                    // last bake). Visual-only; sim/world_hash untouched.
+                    if (g_timelapse_simgrow && gameSession) {
+                        BakeSimPlants(renderPipeline.plant_procgen(), gameSession->GetRegistry(),
+                                      g_procgenSunDir, g_season);
                     }
                 }
             }
