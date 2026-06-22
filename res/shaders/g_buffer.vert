@@ -25,6 +25,7 @@ out VS_OUT {
     vec2 UV;           // mesh UV (terrain has none -> 0; T-I4-8)
     flat uint MaterialID;
     vec3 Tint;         // per-instance tint (terrain: white = no-op, matches g_buffer.frag VS_OUT)
+    vec3 PrevWorldPos; // §13 TAAU: terrain is static -> == WorldPos (camera-only reprojection)
 } vs_out;
 
 // Uniforms for transforming the entire chunk mesh
@@ -78,6 +79,7 @@ void main()
     }
     vec4 worldPos = vec4(worldPos3, 1.0);
     vs_out.WorldPos = worldPos3;
+    vs_out.PrevWorldPos = worldPos3;  // §13: terrain doesn't move in world space
     vs_out.WorldNormal = worldNormal;
 
     // Calculate view-space position

@@ -90,6 +90,7 @@ in VS_OUT {
     vec2 UV;           // mesh UV (skinned/static texturing, T-I4-8)
     flat uint MaterialID;
     vec3 Tint;         // per-instance albedo tint (1,1,1 = no-op)
+    vec3 PrevWorldPos; // §13 TAAU: world pos with PREVIOUS-frame wind sway (== WorldPos for static)
 } fs_in;
 
 // T-I6 terrain visual-fidelity (BF4/BF1 floor), RENDER-ONLY: the 256px terrain
@@ -362,6 +363,9 @@ void main()
     // (wind/skinned animation reproject as static -> deferred follow-on). The w<=0 guard (point
     // behind the previous camera, or an unset identity prev-VP on frame 0) yields zero motion.
     vec2 currNdc = gl_FragCoord.xy * u_inv_screen_size * 2.0 - 1.0 - u_jitter_ndc; // remove jitter
-    vec4 prevClip = u_prev_view_proj * vec4(fs_in.WorldPos, 1.0);
+    // §13: reproject the PREVIOUS-frame world position (wind sway included) through the previous
+    // view-proj. For static geometry PrevWorldPos == WorldPos, so this is identical to camera-only
+    // reprojection; for wind-swayed foliage it cancels the per-frame sway delta (no tree-top ghosting).
+    vec4 prevClip = u_prev_view_proj * vec4(fs_in.PrevWorldPos, 1.0);
     gMotionVector = (prevClip.w > 1e-5) ? (currNdc - prevClip.xy / prevClip.w) : vec2(0.0);
 }

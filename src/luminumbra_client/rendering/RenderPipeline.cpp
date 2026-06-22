@@ -2070,6 +2070,9 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // FR-R5 TAAU: remember this frame's UNJITTERED view-proj so next frame's G-buffer can write
     // screen-space motion vectors (reproject each surface point's world position to where it was).
     m_prev_view_proj = projection * view;
+    // §13 TAAU: also remember this frame's wind wall-clock so next frame's instanced vertex shader
+    // can reconstruct where each wind-swayed vertex WAS (camera-only reprojection ghosts tree-tops).
+    m_prev_time = static_cast<float>(glfwGetTime());
 }
 
 void RenderPipeline::update_aether_field(const std::vector<float>& cells, float world_origin_x,

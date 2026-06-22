@@ -18,6 +18,7 @@ out VS_OUT {
     vec2 UV;           // mesh UV (unused for instanced terrain props; T-I4-8)
     flat uint MaterialID;
     vec3 Tint;         // per-instance albedo tint (1,1,1 = no-op)
+    vec3 PrevWorldPos; // §13 TAAU: world pos with PREVIOUS-frame wind sway
 } vs_out;
 
 uniform mat4 projection;
@@ -28,7 +29,23 @@ uniform int u_materialId;
 // I8 wind (render-only): u_windStrength is per-draw-group (trees > 0, rigid props 0);
 // u_time animates the sway. Render wall-clock; never feeds the sim.
 uniform float u_time = 0.0;
+uniform float u_prevTime = 0.0;   // §13 TAAU: previous frame's wind clock (for motion vectors)
 uniform float u_windStrength = 0.0;
+
+// §13: the wind sway displacement at a given wall-clock time. Kept as a function so the
+// current and previous frames apply byte-identical math (only the time differs) — the
+// motion vector is then exactly the per-frame sway delta, with no drift from a mismatch.
+vec3 windSway(vec3 base, float t)
+{
+    if (u_windStrength <= 0.0) return base;
+    float swayHeight = max(aPos.y, 0.0);
+    float phase = base.x * 0.15 + base.z * 0.13;
+    float sway = (sin(t * 1.3 + phase) * 0.06 +
+                  sin(t * 2.7 + phase * 1.7) * 0.025) * swayHeight * u_windStrength;
+    base.x += sway;
+    base.z += sway * 0.6;
+    return base;
+}
 
 void main()
 {
@@ -38,14 +55,11 @@ void main()
     // I8 wind sway: upper geometry sways, the base stays planted (amount scales
     // with local height aPos.y). Phase varies by world position so neighbouring
     // trees don't sway in unison; two octaves give a natural gust + flutter.
-    if (u_windStrength > 0.0) {
-        float swayHeight = max(aPos.y, 0.0);
-        float phase = worldPos.x * 0.15 + worldPos.z * 0.13;
-        float sway = (sin(u_time * 1.3 + phase) * 0.06 +
-                      sin(u_time * 2.7 + phase * 1.7) * 0.025) * swayHeight * u_windStrength;
-        worldPos.x += sway;
-        worldPos.z += sway * 0.6;
-    }
+    // §13: phase uses the UNDISPLACED world x/z (same both frames) so the only
+    // delta between current and previous is the time argument.
+    vec3 undisplaced = vec3(worldPos);
+    worldPos = vec4(windSway(undisplaced, u_time), 1.0);
+    vs_out.PrevWorldPos = windSway(undisplaced, u_prevTime);
 
     vs_out.WorldPos = vec3(worldPos);
     vs_out.WorldNormal = normalize(mat3(aInstanceMatrix) * aNormal);

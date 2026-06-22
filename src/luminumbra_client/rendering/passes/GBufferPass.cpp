@@ -424,6 +424,9 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
     // and the forest's heavy overdraw made this branch a top G-buffer cost. Terrain keeps it.
     m_instanced_static_mesh_shader->setInt("u_macroRockOverlay", 0);
     m_instanced_static_mesh_shader->setFloat("u_time", static_cast<float>(glfwGetTime())); // I8 wind
+    // §13 TAAU: prev-frame wind clock so the vert reconstructs each swayed vertex's PREVIOUS world
+    // position -> the G-buffer motion vector tracks wind sway, not just camera motion (no tree-top ghost).
+    m_instanced_static_mesh_shader->setFloat("u_prevTime", pipeline.prev_time());
     m_instanced_static_mesh_shader->setFloat("u_windStrength", 0.0f); // per-group override below
     // I7.1-PBR B1d: per-texel terrain roughness map (unit 4) — g_buffer.frag is
     // shared, so every program using it must bind a valid array to unit 4.

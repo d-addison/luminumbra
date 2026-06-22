@@ -3477,6 +3477,9 @@ int main(int argc, char* argv[]) {
         double rb_stream_ms = 0.0;  // spec 004: this frame's streaming CPU cost
         double rb_foliage_ms = 0.0; // spec 004: this frame's foliage rebuild_instances cost
         double rb_ui_ms = 0.0;      // spec 004: this frame's UI (RmlUi + ImGui) render cost
+        double rb_render_call_ms = 0.0; // spec 004 §12: full render_frame() wall (incl. unmeasured pass CPU submit)
+        double rb_poll_ms = 0.0;        // spec 004 §12: glfwPollEvents wall (input/window message pump)
+        double rb_scatter_ms = 0.0;     // spec 004 §12: per-frame foliage chunk_scatter BUILD (terrain/biome sample per renderable chunk)
         // Declared at loop scope (not inside the case) so the case labels below
         // don't "jump over" an initialized local (ill-formed in a switch).
         std::chrono::steady_clock::time_point _rb_sim_t0{}, _rb_stream_t0{};
@@ -3510,7 +3513,11 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        std::chrono::steady_clock::time_point _rb_poll_t0{};
+        if (g_rb_active) _rb_poll_t0 = std::chrono::steady_clock::now();
         glfwPollEvents();
+        if (g_rb_active) rb_poll_ms = std::chrono::duration<double, std::milli>(
+                             std::chrono::steady_clock::now() - _rb_poll_t0).count();
 
         // Debounced framebuffer resize (T-I4-DR-window-modes): coalesce a burst
         // of drag events into one RenderPipeline::on_resize once the size has
@@ -5310,31 +5317,60 @@ int main(int argc, char* argv[]) {
                             }
                             foliage->set_wind(wind_xz);
                             Luminumbra::Client::ScenarioHarness::FoliageScatterContext fol_ctx{fol_ws};
-                            std::vector<Luminumbra::Rendering::FoliagePass::ChunkScatter> chunk_scatter;
+                            const auto _rb_scatter_t0 = std::chrono::steady_clock::now(); // §12: scatter-build cost
+                            // spec 004 §12: the scatter build (a GetTerrainHeightAt + BiomeIdAt per
+                            // renderable chunk) was the frame's BIGGEST CPU cost (~5.3 ms) yet it's a
+                            // pure function of the renderable-chunk SET — independent of camera/time.
+                            // Cache it; rebuild only when that set changes (cheap coord-XOR signature
+                            // vs the expensive per-chunk terrain sampling). rebuild_instances still runs
+                            // every frame (camera LOD/fade), so foliage stays camera-responsive.
+                            // Gated OFF while any scenario is active so every gate rebuilds byte-exact
+                            // (mirrors the readback gating above) — zero gate/determinism impact.
+                            static std::vector<Luminumbra::Rendering::FoliagePass::ChunkScatter> s_cached_scatter;
+                            static std::uint64_t s_cached_scatter_sig = ~0ull;
                             const auto& fol_renderable = fol_ws->get_renderable_chunks();
-                            chunk_scatter.reserve(fol_renderable.size());
+                            std::uint64_t scatter_sig = fol_renderable.size();
                             for (const Luminumbra::Chunk* chunk : fol_renderable) {
                                 if (chunk == nullptr) { continue; }
                                 const Luminumbra::IVec3 c = chunk->get_coords();
-                                const float origin_x = static_cast<float>(c.x * Luminumbra::CHUNK_SIZE_X);
-                                const float origin_z = static_cast<float>(c.z * Luminumbra::CHUNK_SIZE_Z);
-                                const float center_x = origin_x + Luminumbra::CHUNK_SIZE_X * 0.5f;
-                                const float center_z = origin_z + Luminumbra::CHUNK_SIZE_Z * 0.5f;
-                                const float surf_h = fol_ws->GetTerrainHeightAt(center_x, center_z);
-                                const float chunk_y0 = static_cast<float>(c.y * Luminumbra::CHUNK_SIZE_Y);
-                                if (surf_h < chunk_y0 || surf_h >= chunk_y0 + Luminumbra::CHUNK_SIZE_Y) { continue; }
-                                const Luminumbra::u8 biome_id = fol_ws->BiomeIdAt(center_x, center_z);
-                                const float density = fol_ws->biomes_enabled()
-                                    ? fol_ws->biome_table().vegetation_for(biome_id).density
-                                    : 0.3f;
-                                Luminumbra::Rendering::FoliagePass::ChunkScatter cs;
-                                cs.chunk_xz = glm::ivec2(c.x, c.z);
-                                cs.origin = glm::vec3(origin_x, 0.0f, origin_z);
-                                cs.extent_m = static_cast<float>(Luminumbra::CHUNK_SIZE_X);
-                                cs.biome_id = biome_id;
-                                cs.density = density;
-                                chunk_scatter.push_back(cs);
+                                scatter_sig = scatter_sig * 1099511628211ull
+                                    ^ (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.x))
+                                       | (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.z)) << 21)
+                                       | (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.y)) << 42));
                             }
+                            const bool scatter_rebuild =
+                                scenario_config.active() || scatter_sig != s_cached_scatter_sig;
+                            if (scatter_rebuild) {
+                                s_cached_scatter.clear();
+                                s_cached_scatter.reserve(fol_renderable.size());
+                                for (const Luminumbra::Chunk* chunk : fol_renderable) {
+                                    if (chunk == nullptr) { continue; }
+                                    const Luminumbra::IVec3 c = chunk->get_coords();
+                                    const float origin_x = static_cast<float>(c.x * Luminumbra::CHUNK_SIZE_X);
+                                    const float origin_z = static_cast<float>(c.z * Luminumbra::CHUNK_SIZE_Z);
+                                    const float center_x = origin_x + Luminumbra::CHUNK_SIZE_X * 0.5f;
+                                    const float center_z = origin_z + Luminumbra::CHUNK_SIZE_Z * 0.5f;
+                                    const float surf_h = fol_ws->GetTerrainHeightAt(center_x, center_z);
+                                    const float chunk_y0 = static_cast<float>(c.y * Luminumbra::CHUNK_SIZE_Y);
+                                    if (surf_h < chunk_y0 || surf_h >= chunk_y0 + Luminumbra::CHUNK_SIZE_Y) { continue; }
+                                    const Luminumbra::u8 biome_id = fol_ws->BiomeIdAt(center_x, center_z);
+                                    const float density = fol_ws->biomes_enabled()
+                                        ? fol_ws->biome_table().vegetation_for(biome_id).density
+                                        : 0.3f;
+                                    Luminumbra::Rendering::FoliagePass::ChunkScatter cs;
+                                    cs.chunk_xz = glm::ivec2(c.x, c.z);
+                                    cs.origin = glm::vec3(origin_x, 0.0f, origin_z);
+                                    cs.extent_m = static_cast<float>(Luminumbra::CHUNK_SIZE_X);
+                                    cs.biome_id = biome_id;
+                                    cs.density = density;
+                                    s_cached_scatter.push_back(cs);
+                                }
+                                s_cached_scatter_sig = scatter_sig;
+                            }
+                            const std::vector<Luminumbra::Rendering::FoliagePass::ChunkScatter>& chunk_scatter =
+                                s_cached_scatter;
+                            rb_scatter_ms = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - _rb_scatter_t0).count(); // §12
                             const auto _rb_fol_t0 = std::chrono::steady_clock::now(); // spec 004
                             foliage->rebuild_instances(
                                 chunk_scatter,
@@ -5367,7 +5403,11 @@ int main(int argc, char* argv[]) {
                     // their plants take the pass.
                     if (auto* ppp = renderPipeline.plant_procgen())
                         RebakeAllPlants(ppp, gameSession->GetRegistry(), g_procgenSunDir, g_season);
+                    std::chrono::steady_clock::time_point _rb_rcall_t0{};
+                    if (g_rb_active) _rb_rcall_t0 = std::chrono::steady_clock::now();
                     renderPipeline.render_frame(gameSession->GetRegistry(), *gameSession->GetWorldSystem(), *g_camera, deltaTime, wireframe_mode);
+                    if (g_rb_active) rb_render_call_ms = std::chrono::duration<double, std::milli>(
+                                         std::chrono::steady_clock::now() - _rb_rcall_t0).count();
 
                     // --scene-config: self-contained capture. Settle a few frames (world
                     // stream + atmosphere), then read the clean back buffer (BEFORE any UI
@@ -7650,6 +7690,7 @@ int main(int argc, char* argv[]) {
             static double rb_cpu = 0, rb_present = 0, rb_wall = 0, rb_power = 0, rb_clock = 0;
             static double rb_cpu_prep = 0, rb_cpu_shadow = 0, rb_cpu_gbuf = 0, rb_cpu_post = 0, rb_cpu_prop = 0;
             static double rb_sim = 0, rb_stream = 0, rb_foliage_rebuild = 0, rb_ui = 0;
+            static double rb_render_call = 0, rb_poll = 0, rb_scatter = 0;  // §12 unattributed-CPU localization
             static bool rb_nv_ever = false;
 
             if (rb_warm < g_render_benchmark_warmup) {
@@ -7670,6 +7711,7 @@ int main(int argc, char* argv[]) {
                 rb_cpu_prop += s.cpu_static_prop_ms;
                 rb_sim += rb_sim_ms; rb_stream += rb_stream_ms;
                 rb_foliage_rebuild += rb_foliage_ms; rb_ui += rb_ui_ms;
+                rb_render_call += rb_render_call_ms; rb_poll += rb_poll_ms; rb_scatter += rb_scatter_ms;
                 if (nv) { rb_power += gpu_power_w; rb_clock += gpu_clock_mhz; ++rb_nv_count; rb_nv_ever = true; }
                 ++rb_count;
 
@@ -7733,7 +7775,10 @@ int main(int argc, char* argv[]) {
                     {"sim_tick_ms", rb_sim / n},
                     {"streaming_ms", rb_stream / n},
                     {"foliage_rebuild_ms", rb_foliage_rebuild / n},
-                    {"ui_render_ms", rb_ui / n}
+                    {"ui_render_ms", rb_ui / n},
+                    {"render_frame_wall_ms", rb_render_call / n},
+                    {"poll_ms", rb_poll / n},
+                    {"scatter_build_ms", rb_scatter / n}
                 };
                 // Heuristic bound attribution for the log line: CPU-bound if the
                 // CPU submit dominates the GPU pass-timer sum.
@@ -7755,12 +7800,21 @@ int main(int argc, char* argv[]) {
                     "(static_prop {:.3f}) | post {:.3f} ms",
                     rb_cpu_prep / n, rb_cpu_shadow / n, rb_cpu_gbuf / n, rb_cpu_prop / n, rb_cpu_post / n);
                 {
-                    const double _rf = (rb_cpu_prep + rb_cpu_shadow + rb_cpu_gbuf + rb_cpu_post) / n;
-                    const double _known = _rf + rb_sim / n + rb_stream / n + rb_foliage_rebuild / n + rb_ui / n;
+                    // §12 — render_frame() FULL wall captures every pass's CPU submit
+                    // (skybox/water/foliage/lighting/aerial had no cpu_* sub-timer);
+                    // poll is the window/input pump. Whatever remains after these +
+                    // sim/stream/foliage-rebuild/ui is the true residual (scenario harness, etc).
+                    const double _rcall = rb_render_call / n, _poll = rb_poll / n, _scatter = rb_scatter / n;
+                    const double _known = _rcall + _poll + _scatter + rb_sim / n + rb_stream / n
+                                        + rb_foliage_rebuild / n + rb_ui / n;
                     LUMINUMBRA_CORE_INFO(
-                        "  NON-render frame CPU: sim {:.3f} | streaming {:.3f} | foliage_rebuild {:.3f} | "
-                        "ui_render {:.3f} ms | render_frame {:.3f} ms | unattributed {:.3f} ms (poll/scenario/etc)",
-                        rb_sim / n, rb_stream / n, rb_foliage_rebuild / n, rb_ui / n, _rf,
+                        "  NON-render frame CPU: sim {:.3f} | streaming {:.3f} | scatter_build {:.3f} | "
+                        "foliage_rebuild {:.3f} | ui_render {:.3f} | poll {:.3f} ms",
+                        rb_sim / n, rb_stream / n, _scatter, rb_foliage_rebuild / n, rb_ui / n, _poll);
+                    LUMINUMBRA_CORE_INFO(
+                        "  render_frame FULL wall {:.3f} ms (vs cpu_* sub-timers {:.3f}: the delta is "
+                        "skybox/water/foliage/lighting/aerial submit) | residual {:.3f} ms",
+                        _rcall, (rb_cpu_prep + rb_cpu_shadow + rb_cpu_gbuf + rb_cpu_post) / n,
                         std::max(0.0, cpu - _known));
                 }
                 glfwSetWindowShouldClose(window, GLFW_TRUE);

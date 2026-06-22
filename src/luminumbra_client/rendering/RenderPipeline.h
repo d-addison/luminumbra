@@ -568,6 +568,7 @@ public:
     u32 screen_width() const { return m_screen_width; }
     u32 screen_height() const { return m_screen_height; }
     const glm::mat4& prev_view_proj() const { return m_prev_view_proj; }  // FR-R5 TAAU motion vectors
+    float prev_time() const { return m_prev_time; }                       // §13 TAAU: prev-frame wind wall-clock
     void set_taau_enabled(bool e) { m_taau_enabled = e; }                 // render.taau (client wires from SystemConfig)
     const glm::vec2& taau_jitter_ndc() const { return m_taau_jitter_ndc; } // sub-pixel projection jitter for the G-buffer
     // Count of render-target reallocations since startup (one per real
@@ -898,6 +899,7 @@ private:
     // screen-space motion vectors (current screen pos - reprojected previous screen pos).
     // Advanced at render_frame end; identity on frame 0 (the shader's w<=0 guard => zero motion).
     glm::mat4 m_prev_view_proj = glm::mat4(1.0f);
+    float m_prev_time = 0.0f;  // §13 TAAU: prev-frame wind wall-clock (instanced vert prev-pos)
     // Render-target reallocation counter (T-I4-DR-window-modes). Bumped once per
     // real on_resize so the resize-stress gate can assert targets were rebuilt.
     u64 m_resize_generation = 0;

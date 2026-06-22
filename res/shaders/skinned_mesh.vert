@@ -27,6 +27,7 @@ out VS_OUT {
     vec2 UV;           // mesh UV (skinned/creature texturing, T-I4-8)
     flat uint MaterialID;
     vec3 Tint;         // per-instance tint (skinned: white = no-op, matches g_buffer.frag VS_OUT)
+    vec3 PrevWorldPos; // §13 TAAU: camera-reprojected (prev-bone-palette skinning is a follow-up)
 } vs_out;
 
 uniform mat4 model;
@@ -49,6 +50,7 @@ void main()
     // World-space position/normal (triplanar fallback; T-I4-7 interface match).
     vec4 worldPos = model * skinnedPos;
     vs_out.WorldPos = vec3(worldPos);
+    vs_out.PrevWorldPos = vec3(worldPos);  // §13: camera-reproject only (no prev-bone pose yet)
     vs_out.WorldNormal = normalize(mat3(model) * (skinNormal * aNormal));
 
     mat4 viewModel = view * model;
