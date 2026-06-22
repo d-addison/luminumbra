@@ -238,8 +238,15 @@ struct ProcgenPlantInstance {
     glm::quat rot;
     float effScale;
     Luminumbra::Components::PlantGenomeComponent genome;
+    // Plant unification: a decoration-tier scatter plant PROMOTED to a sim PlantTag entity (on player
+    // interaction) is suppressed here so it is not double-drawn — the sim tier now owns it.
+    bool suppressed = false;
 };
 std::vector<ProcgenPlantInstance> g_procgenPlants;
+// Bumped whenever the scatter set changes (a promotion suppresses an instance) so the combined plant
+// re-bake knows to rebuild the cached scatter geometry. The sim tier is keyed separately.
+std::uint64_t g_scatterRevision = 0;
+std::uint64_t g_lastCombinedPlantSig = 0;  // cache key for the composited scatter+sim mesh upload
 // Cache of the last-baked procedural TREE mesh, so the creature timelapse can draw the
 // programmatic trees AND the moving creature markers through the single PlantProcgenPass
 // (creatures are appended to this each frame).
@@ -270,6 +277,7 @@ void BakeProcgenPlants(Luminumbra::Rendering::PlantProcgenPass* pp, float stageF
     std::vector<Luminumbra::Rendering::PlantProcgenPass::Vertex> verts;
     std::vector<std::uint32_t> indices;
     for (const ProcgenPlantInstance& inst : g_procgenPlants) {
+        if (inst.suppressed) continue;  // promoted to a sim PlantTag -> the sim tier draws it now
         const luminumbra::foliage::PlantStructure ps =
             luminumbra::foliage::GeneratePlant(inst.genome, stage, env);
         const luminumbra::foliage::ProcMesh pm = luminumbra::foliage::TessellatePlant(ps);
@@ -311,22 +319,33 @@ void BakeProcgenPlants(Luminumbra::Rendering::PlantProcgenPass* pp, float stageF
     pp->set_enabled(true);
 }
 
-// I9-FOLIAGE Phase 4: SIM->RENDER plant bridge. Bake the LIVE sim plant roster (every PlantTag entity
-// at its ACTUAL PlantGrowthComponent.stage) into the procgen pass, so on-screen geometry tracks the
-// deterministic sim (species genome, growth stage, world transform) — NOT the client-side g_procgenStageF
-// scrubber (which is demoted to a debug-only override for the non-sim showcase). Pure visual-only: it
-// reads sim truth and emits geometry, never writes back into the sim / world_hash. Returns the plant
-// count baked (0 -> the caller may fall back to the client-side procgen showcase). Deterministic draw
-// order (ascending entity) gives a stable cache signature that changes as plants grow.
-std::size_t BakeSimPlants(Luminumbra::Rendering::PlantProcgenPass* pp, const entt::registry& reg,
-                          const glm::vec3& sunDir, float season) {
+// Plant unification: composite the DECORATION-tier scatter (g_procgenTreeVerts cache, rebuilt by
+// BakeProcgenPlants when the scatter changes) with the SIM-tier PlantTag plants (each at its live
+// PlantGrowthComponent stage) into the single PlantProcgenPass. This is the ONE unified plant RENDER;
+// the SIM stays split — only PlantTag entities tick/persist/hash, the vast scatter is render-only.
+// So a player-planted/promoted plant ADDS to the forest rather than replacing it. Sig-gated on
+// (scatter revision + the sim roster's ids/stages) so a settled frame is a no-op. Pure visual-only:
+// reads sim truth, never writes back into the sim / world_hash.
+std::size_t RebakeAllPlants(Luminumbra::Rendering::PlantProcgenPass* pp, const entt::registry& reg,
+                            const glm::vec3& sunDir, float season) {
     if (!pp) return 0;
     namespace C = Luminumbra::Components;
     auto view = reg.view<const C::PlantTag, const C::PlantGenomeComponent,
                          const C::PlantGrowthComponent, const C::TransformComponent>();
     std::vector<entt::entity> ents(view.begin(), view.end());
     std::sort(ents.begin(), ents.end());
-    if (ents.empty()) return 0;
+
+    // Cheap change key: scatter revision + each sim plant's (id, stage). Skip rebuild+upload when
+    // unchanged (the common settled frame).
+    std::uint64_t sig = 1469598103934665603ull ^ (g_scatterRevision * 1099511628211ull);
+    for (const entt::entity e : ents) {
+        const auto& gg = view.get<const C::PlantGrowthComponent>(e);
+        sig = (sig ^ ((static_cast<std::uint64_t>(entt::to_integral(e)) << 8) ^
+                      static_cast<std::uint64_t>(gg.stage))) * 1099511628211ull;
+    }
+    sig |= 1ull;
+    if (sig == g_lastCombinedPlantSig) return ents.size();
+    g_lastCombinedPlantSig = sig;
 
     const int kFruiting = static_cast<int>(C::PlantStage::Fruiting);
     luminumbra::foliage::PlantEnvDir env;
@@ -334,9 +353,9 @@ std::size_t BakeSimPlants(Luminumbra::Rendering::PlantProcgenPass* pp, const ent
     env.phototropism = 0.5f;
     using G = C::PlantGene;
 
-    std::vector<Luminumbra::Rendering::PlantProcgenPass::Vertex> verts;
-    std::vector<std::uint32_t> indices;
-    std::uint64_t sig = 1469598103934665603ull;  // FNV basis; folds (entity, stage) so growth re-uploads
+    // Base = the cached decoration scatter (already excludes promoted/suppressed instances).
+    std::vector<Luminumbra::Rendering::PlantProcgenPass::Vertex> verts = g_procgenTreeVerts;
+    std::vector<std::uint32_t> indices = g_procgenTreeIndices;
     for (const entt::entity e : ents) {
         const auto& genome = view.get<const C::PlantGenomeComponent>(e);
         const auto& g = view.get<const C::PlantGrowthComponent>(e);
@@ -376,12 +395,50 @@ std::size_t BakeSimPlants(Luminumbra::Rendering::PlantProcgenPass* pp, const ent
             verts.push_back(v);
         }
         for (const std::uint32_t idx : pm.indices) indices.push_back(baseVert + idx);
-        sig = (sig ^ ((static_cast<std::uint64_t>(eid) << 8) ^ static_cast<std::uint64_t>(stage))) * 1099511628211ull;
     }
-    if (verts.empty()) { pp->set_enabled(false); return 0; }
-    pp->set_plants(verts, indices, sig | 1ull);
+    if (verts.empty()) { pp->set_enabled(false); return ents.size(); }
+    pp->set_plants(verts, indices, sig);
     pp->set_enabled(true);
     return ents.size();
+}
+
+// Plant unification — PROMOTION: turn the decoration-tier scatter plant nearest `aim` (within `reach`)
+// into a SIM-tier PlantTag entity, so the player can tend a wild forest tree into a living, growing,
+// persisting plant. The promoted plant inherits the scatter instance's genome + a grown (Mature)
+// perennial state; the scatter instance is SUPPRESSED (so it is not double-drawn) and the scatter
+// revision bumped (the caller rebuilds the scatter cache). Sim stays bounded — promotion is gated by
+// player interaction. Returns the new entity, or entt::null if no scatter plant is in reach.
+entt::entity PromoteNearestScatter(entt::registry& reg, const glm::vec3& aim, float reach,
+                                   std::uint64_t tick) {
+    namespace C = Luminumbra::Components;
+    int best = -1;
+    float bestD = reach * reach;
+    for (std::size_t i = 0; i < g_procgenPlants.size(); ++i) {
+        const ProcgenPlantInstance& inst = g_procgenPlants[i];
+        if (inst.suppressed) continue;
+        const float dx = inst.worldPos.x - aim.x, dz = inst.worldPos.z - aim.z;
+        const float d = dx * dx + dz * dz;
+        if (d <= bestD) { bestD = d; best = static_cast<int>(i); }
+    }
+    if (best < 0) return entt::null;
+    ProcgenPlantInstance& inst = g_procgenPlants[static_cast<std::size_t>(best)];
+    const entt::entity e = reg.create();
+    auto& tf = reg.emplace<C::TransformComponent>(e);
+    tf.position = Luminumbra::Vec3(inst.worldPos.x, inst.worldPos.y, inst.worldPos.z);
+    reg.emplace<C::PlantTag>(e);
+    reg.emplace<C::PlantGenomeComponent>(e, inst.genome);
+    auto& g = reg.emplace<C::PlantGrowthComponent>(e);
+    g.species_id = luminumbra::foliage::SpeciesId16("wild");
+    g.stage = static_cast<std::uint8_t>(C::PlantStage::Mature);  // a grown forest tree
+    g.planted_tick = tick;
+    g.last_tick = tick;
+    auto& cl = reg.emplace<C::CropLifecycleComponent>(e);  // promoted wild trees persist + regrow
+    cl.perennial = true;
+    cl.lifespan_ticks = 4800u;
+    cl.species_id = g.species_id;
+    inst.suppressed = true;
+    ++g_scatterRevision;
+    return e;
 }
 
 // g-vertical-slice spike: gather the in-frustum creature subjects for a photo-mode
@@ -4933,23 +4990,23 @@ int main(int argc, char* argv[]) {
                             }
                             LUMINUMBRA_CORE_INFO("I9-FOLIAGE Phase 4: seeded {} SIM plants (real growth tick)", seeded);
                         }
-                        // I9-FOLIAGE: bake plants + enable the pass. The SIM bridge (Phase 4) takes
-                        // priority when the session carries live PlantTag plants — geometry tracks the
-                        // deterministic growth tick; otherwise fall back to the client-side procgen
-                        // showcase (g_procgenStageF, demoted to a debug scrubber). OFF/empty -> pass
-                        // disabled, render byte-identical. Growth re-bakes happen per-frame in the loop.
+                        // Plant unification: build the DECORATION scatter cache first (BakeProcgenPlants
+                        // -> g_procgenTreeVerts), then composite the SIM-tier PlantTag plants on top via
+                        // RebakeAllPlants (one pass, both tiers). Player-planted/promoted plants ADD to
+                        // the forest rather than replacing it. OFF/empty -> pass disabled. Growth +
+                        // promotion re-bakes happen per-frame in the loop (sig-gated, so cheap).
                         g_procgenSunDir = plantEnv.sun_dir;
                         if (auto* pp = renderPipeline.plant_procgen()) {
-                            const std::size_t simPlants = BakeSimPlants(pp, reg, g_procgenSunDir, g_season);
-                            if (simPlants > 0) {
-                                LUMINUMBRA_CORE_INFO("I9-FOLIAGE Phase 4: baked {} SIM plants (sim->render bridge)", simPlants);
-                            } else if (procgenPlants) {
-                                BakeProcgenPlants(pp, g_procgenStageF);
-                                LUMINUMBRA_CORE_INFO("I9-FOLIAGE: {} procedural plants (stage {:.1f})",
+                            if (procgenPlants) {
+                                BakeProcgenPlants(pp, g_procgenStageF);  // build + cache the scatter
+                                LUMINUMBRA_CORE_INFO("I9-FOLIAGE: {} procedural scatter plants (stage {:.1f})",
                                                      g_procgenPlants.size(), g_procgenStageF);
                             } else {
                                 pp->set_enabled(false);
                             }
+                            const std::size_t simPlants = RebakeAllPlants(pp, reg, g_procgenSunDir, g_season);
+                            if (simPlants > 0)
+                                LUMINUMBRA_CORE_INFO("Plant unification: composited {} sim plants over the scatter", simPlants);
                         }
                         // I9-ECO ecology demo: spawn a hungry predator above a row of prey, then
                         // let the live CreatureBrain tick (GameSession) move them — predator hunts
@@ -5309,7 +5366,7 @@ int main(int argc, char* argv[]) {
                     // plants (leaves the procgen scatter on the pass untouched); once the player farms,
                     // their plants take the pass.
                     if (auto* ppp = renderPipeline.plant_procgen())
-                        BakeSimPlants(ppp, gameSession->GetRegistry(), g_procgenSunDir, g_season);
+                        RebakeAllPlants(ppp, gameSession->GetRegistry(), g_procgenSunDir, g_season);
                     renderPipeline.render_frame(gameSession->GetRegistry(), *gameSession->GetWorldSystem(), *g_camera, deltaTime, wireframe_mode);
 
                     // --scene-config: self-contained capture. Settle a few frames (world
@@ -5369,8 +5426,16 @@ int main(int argc, char* argv[]) {
                                     LUMINUMBRA_CORE_INFO("Farm: planted wheat ({} seeds left)", g_farming.seeds);
                             }
                         }
-                        const auto fpick = [&]() {
-                            return luminumbra::foliage::FarmingController::NearestPlant(freg, aim, 3.0f);
+                        // Tend the nearest plant; if there's no SIM plant in reach but a wild scatter
+                        // tree is, PROMOTE it to a sim plant first (unification: one continuum).
+                        bool promoted = false;
+                        const auto fpick = [&]() -> entt::entity {
+                            entt::entity e = luminumbra::foliage::FarmingController::NearestPlant(freg, aim, 3.0f);
+                            if (e == entt::null) {
+                                e = PromoteNearestScatter(freg, aim, 3.0f, ftick);
+                                if (e != entt::null) { promoted = true; LUMINUMBRA_CORE_INFO("Farm: promoted a wild plant to a tended crop"); }
+                            }
+                            return e;
                         };
                         if (farmEdge(IA::FarmWater, s_fw)) g_farming.Water(freg, fpick());
                         if (farmEdge(IA::FarmFertilize, s_ff)) g_farming.Fertilize(freg, fpick());
@@ -5379,6 +5444,11 @@ int main(int argc, char* argv[]) {
                             if (hr.harvestable)
                                 LUMINUMBRA_CORE_INFO("Farm: harvested yield {:.2f} (+{} seeds, {} total)",
                                                      hr.yield, hr.seeds, g_farming.harvests);
+                        }
+                        // A promotion suppressed a scatter instance -> rebuild the scatter cache so the
+                        // next composite re-bake (RebakeAllPlants) drops the now-promoted dup.
+                        if (promoted) {
+                            if (auto* fpp = renderPipeline.plant_procgen()) BakeProcgenPlants(fpp, g_procgenStageF);
                         }
                     }
 
@@ -7539,8 +7609,8 @@ int main(int argc, char* argv[]) {
                     // shows their REAL growth (the session tick advanced PlantGrowthSystem since the
                     // last bake). Visual-only; sim/world_hash untouched.
                     if (g_timelapse_simgrow && gameSession) {
-                        BakeSimPlants(renderPipeline.plant_procgen(), gameSession->GetRegistry(),
-                                      g_procgenSunDir, g_season);
+                        RebakeAllPlants(renderPipeline.plant_procgen(), gameSession->GetRegistry(),
+                                        g_procgenSunDir, g_season);
                     }
                 }
             }
