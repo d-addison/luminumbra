@@ -207,6 +207,33 @@ spec 003 C2's premise) optimizes the wrong target. **Awaiting owner decision on 
   (candidates built / chunks scanned per static frame → ~0), which are clock-independent (the GPU-clock
   DVFS noise blocks reliable ms A/B without admin clock-lock).**
 
+### Streaming attempt #1 — REVERTED (determinism), constraint EMPIRICALLY proven
+Ran an ultracode workflow (8 agents: investigate → design → 3-lens red-team; saved
+`streaming-opt-design.json`). Implemented the conservative job-state gate (elide passes 2-4 when
+anchor static + no jobs active/landing + count stable + not activation-tick). **It broke determinism**
+— `HeadlessServerTick` run-1 `1ac7813a…` ≠ run-2 `398e0667…` (two runs of the SAME input diverge). The
+red-team predicted the exact cause: **`has_collision` IS hashed; collision creation is throttled at 16/
+frame so it spans multiple ticks; job-completion timing is non-deterministic; eliding pass-4 on a
+"job-inactive" tick leaves collisions pending past the convergence point in one run but not the other.**
+Reverted (re-confirmed green, `cf9c8cddf7156cd6`). **RULED OUT: any elision gated on job-activity state
+on the hashed server.** Why the baseline is deterministic despite job-timing jitter: it runs passes 3/4
+EVERY tick, so all eligible chunks reach meshed/has_collision by the hash point regardless of which tick
+each job landed; the hash is over the converged SET (sorted by id), so per-tick order/timing washes out.
+
+**Refined determinism-safe design (next attempt):**
+- **Collision (pass 4):** replace the O(N) scan with a `m_pending_collision` set drained EVERY tick
+  (NOT gated) under the existing 16/frame cap. Determinism-safe because it converges identically to the
+  baseline every-tick scan (end-set is what's hashed); just O(pending) not O(N). This is the red-team's
+  Cleanup A done safely (every-tick drain, never elided).
+- **Telemetry (passes 1+5):** dedup to one scan; preserve values on any skipped frame. Safe (not hashed).
+- **Candidate build (passes 2+3):** the hard part — can only elide on a signal observed the SAME tick
+  as the (non-deterministic-timing) state transition. Gate on `dirty_generation` bumped INSIDE
+  `process_completed_meshing_jobs` at the Ready/Idle apply (main-thread-observed) + inserts/erases/edits,
+  NOT on job-activity polling. Must verify run==replay per-tick, not just end-state.
+- Verify regimen: rebuild server+client → all 6 determinism gates GREEN (hashes match pinned) →
+  byte-compare persistence artifacts → visual gates (PlayerView/FarLodHorizon/WorldVisualSweep) →
+  benchmark streaming_ms drop + work-counts. The pre-built warm baseline catches breaks instantly.
+
 ## Gate Criteria
 The plan phase is complete when:
 - [x] All tasks defined with clear acceptance criteria (above + spec ACs).
