@@ -718,6 +718,7 @@ add_executable(frontier_gates_test
     scripting/lua_sandbox_escape_test.cpp
     fields/scalar_field_diffusion_gate_test.cpp
     persistence/world_save_service_test.cpp
+    persistence/plant_persistence_test.cpp
     persistence/world_save_region_format_test.cpp
     persistence/persistence_hardening_test.cpp
     persistence/save_load_corruption_corpus_test.cpp
