@@ -76,6 +76,9 @@ struct ServerCliOptions {
     // term (the PopulatedWorldReplay gate). DEFAULT off (empty roster -> neutral
     // ecology sub-hash -> additive `|ecology:` suffix only).
     bool ecology_roster = false;
+    // I9-FOLIAGE Phase 3D: --planted-roster spawns a deterministic 6-plant roster so the smoke
+    // exercises the plant sub-hash + growth + persistence end-to-end (default off -> empty/neutral).
+    bool planted_roster = false;
     // T-I6 P3.1c: --replicate runs the authoritative server + an in-process loopback
     // ReplicationClient, broadcasts the avatar states each tick, and asserts the client
     // mirrors the server avatars (end-to-end live replication in the harness).
@@ -254,6 +257,8 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
             if (const char* v = next_value(i)) options.avatars = std::atoi(v);
         } else if (std::strcmp(arg, "--ecology-roster") == 0) {
             options.ecology_roster = true;
+        } else if (std::strcmp(arg, "--planted-roster") == 0) {
+            options.planted_roster = true;
         } else if (std::strcmp(arg, "--replicate") == 0) {
             options.replicate = true;
         } else if (std::strcmp(arg, "--npcs") == 0) {
@@ -301,6 +306,7 @@ Luminumbra::Server::ServerWorldRunnerConfig RunnerConfigFrom(const ServerCliOpti
     config.autosave_interval_ticks = options.autosave_ticks;
     config.avatar_count = options.avatars;
     config.ecology_roster = options.ecology_roster;
+    config.planted_roster = options.planted_roster;
     return config;
 }
 

@@ -19,6 +19,7 @@
 #include "luminumbra_common/ecs/EntitySnapshot.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
+#include "luminumbra_common/systems/FarmingSystem.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
@@ -152,6 +153,26 @@ void SpawnEcologyRoster(entt::registry& r, const Vec3& anchor) {
     };
     pred(-6.0f, 9.0f); pred(6.0f, 9.0f);
     for (int i = 0; i < 6; ++i) prey(-7.0f + i * 2.4f, -2.0f);
+}
+
+// I9-FOLIAGE Phase 3D: spawn a deterministic PLANT roster so the headless smoke exercises the plant
+// path end-to-end (ComputePlantSubHash non-empty, PlantGrowthSystem ticking, persistence roundtrip)
+// rather than only the empty-neutral path. Uses the Phase 5A MakePlantFromSpecies (sample genome ->
+// PlantSeed -> stamp CropLifecycle) from an INLINE species template (no file I/O), seeded from ints, so
+// the roster is a pure function of (seed, preset) via the anchor -> run==replay.
+void SpawnPlantRoster(entt::registry& r, const Vec3& anchor) {
+    namespace fol = luminumbra::foliage;
+    fol::SpeciesTemplate tmpl;
+    tmpl.id = "smoke_crop";
+    tmpl.perennial = false;
+    tmpl.lifespan_ticks = 900u;
+    tmpl.gene_lo.fill(0.30f);
+    tmpl.gene_hi.fill(0.70f);
+    auto rng = luminumbra::core::DeterministicRng::seeded(fol::kPlantSeedOffset, 9001u, 7u);
+    for (int i = 0; i < 6; ++i) {
+        const Vec3 pos(anchor.x - 6.0f + static_cast<float>(i) * 2.0f, anchor.y, anchor.z + 4.0f);
+        fol::MakePlantFromSpecies(r, pos, tmpl, rng, 0u);
+    }
 }
 
 std::pair<int, int> HorizontalChunkCoords(const Vec3& position) {
@@ -334,6 +355,13 @@ bool ServerWorldRunner::Boot() {
         SpawnEcologyRoster(m_session->GetRegistry(), spawn_anchor);
         LUMINUMBRA_CORE_INFO("ServerWorldRunner: spawned deterministic ecology roster ({} creatures, kinematic).",
                              CreatureCount());
+    }
+
+    // I9-FOLIAGE Phase 3D: opt-in plant roster so the smoke exercises the plant sub-hash + growth +
+    // persistence end-to-end (empty otherwise -> plant_hash neutral). Pure fn of (seed, preset).
+    if (m_config.planted_roster) {
+        SpawnPlantRoster(m_session->GetRegistry(), spawn_anchor);
+        LUMINUMBRA_CORE_INFO("ServerWorldRunner: spawned deterministic plant roster (6 plants).");
     }
 
     m_booted = true;

@@ -63,6 +63,9 @@ struct ServerWorldRunnerConfig {
     // the composite world_hash differs from pre-fold ONLY by the appended
     // `|ecology:` suffix (additivity guard).
     bool ecology_roster = false;
+    // I9-FOLIAGE Phase 3D: opt-in deterministic PLANT roster (6 plants) so the smoke exercises the
+    // plant sub-hash + growth + persistence end-to-end. DEFAULT false -> empty -> plant_hash neutral.
+    bool planted_roster = false;
 };
 
 struct ServerTickReport {
