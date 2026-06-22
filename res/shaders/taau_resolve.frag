@@ -13,6 +13,7 @@ uniform sampler2D u_history;   // previous resolved color (RGBA16F)
 uniform sampler2D u_motion;    // RG16F screen motion vector (NDC delta = curr - prev), G-buffer
 uniform vec2  u_texel;         // 1 / screen size
 uniform float u_blend;         // history weight when stable (e.g. 0.9); first frame forced to 0
+uniform float u_sharpness;     // post-resolve unsharp strength (recovers temporal-blur softness)
 uniform int   u_history_valid; // 0 on the first frame / after a resize -> use current only
 
 void main() {
@@ -39,12 +40,14 @@ void main() {
     // surface that changed shading/occlusion this frame cannot drag an old color forward.
     vec3 nmin = curr;
     vec3 nmax = curr;
+    vec3 nsum = curr;  // 3x3 sum (incl. centre) -> mean, for the unsharp sharpen below
     for (int dy = -1; dy <= 1; ++dy) {
         for (int dx = -1; dx <= 1; ++dx) {
             if (dx == 0 && dy == 0) continue;
             vec3 c = texture(u_current, TexCoords + vec2(float(dx), float(dy)) * u_texel).rgb;
             nmin = min(nmin, c);
             nmax = max(nmax, c);
+            nsum += c;
         }
     }
     hist = clamp(hist, nmin, nmax);
@@ -53,5 +56,11 @@ void main() {
     // current frame under fast motion so reprojection error / smearing stays bounded.
     float speed = length(motion);
     float blend = u_blend * (1.0 - clamp(speed * 8.0, 0.0, 1.0) * 0.6);
-    FragColor = vec4(mix(curr, hist, blend), 1.0);
+    vec3 resolved = mix(curr, hist, blend);
+
+    // Unsharp sharpen: TAA's history blend + bilinear reprojection soften the image; pull the result
+    // away from the 3x3 current-color mean to recover crispness (clamped non-negative for HDR).
+    vec3 mean = nsum * (1.0 / 9.0);
+    resolved = max(resolved + u_sharpness * (resolved - mean), vec3(0.0));
+    FragColor = vec4(resolved, 1.0);
 }

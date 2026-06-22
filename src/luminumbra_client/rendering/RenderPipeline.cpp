@@ -2446,6 +2446,7 @@ void RenderPipeline::execute_taau_resolve() {
     m_taau_shader->setInt("u_motion", 2);
     m_taau_shader->setVec2("u_texel", glm::vec2(1.0f / (float)m_screen_width, 1.0f / (float)m_screen_height));
     m_taau_shader->setFloat("u_blend", 0.9f);
+    m_taau_shader->setFloat("u_sharpness", 0.4f);  // recover TAA temporal-blur softness
     m_taau_shader->setInt("u_history_valid", m_taau_history_valid ? 1 : 0);
 
     glBindVertexArray(m_screen_quad_vao);
