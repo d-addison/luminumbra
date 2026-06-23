@@ -183,6 +183,7 @@ int g_timelapse_ticks = 60;        // sim ticks advanced between captured frames
 float g_timelapse_daystep = 0.0f;  // time-of-day advance per frame [0,1] (shade/sky drift); 0 = leave
 int g_timelapse_captured = 0;
 int g_timelapse_settle = 0;
+bool g_timelapse_dig = false;       // Spec 009: progressively carve a trench mid-capture (terraform demo)
 float g_timelapse_tod = 0.0f;      // starting time-of-day (0 = noon/brightest; drifts by daystep)
 std::filesystem::path g_timelapse_dir;
 static constexpr int kTimelapseSettleFrames = 45;  // let the world stream/settle before frame 0
@@ -2451,6 +2452,7 @@ int main(int argc, char* argv[]) {
     g_timelapse_calm = HasCommandLineFlag(argc, argv, "--timelapse-calm");
     if (g_timelapse_calm) g_timelapse_creatures = true;  // calm mode is a creature scenario
     g_timelapse_fire = HasCommandLineFlag(argc, argv, "--timelapse-fire");
+    g_timelapse_dig = HasCommandLineFlag(argc, argv, "--timelapse-dig");
     {
         const std::string ds = GetCommandLineOption(argc, argv, "--timelapse-daystep", "");
         if (!ds.empty()) { try { g_timelapse_daystep = std::stof(ds); } catch (...) {} }
@@ -4710,14 +4712,18 @@ int main(int argc, char* argv[]) {
                     // the herd scattering away from the predator (and the predator weaving
                     // toward the nearest prey) reads as clear motion across the ground, and
                     // nobody runs out of frame as they spread.
-                    const glm::vec3 camPos = g_timelapse_fire
+                    const glm::vec3 camPos = g_timelapse_dig
+                        ? glm::vec3(sp.x + 10.0f, sp.y + 6.0f, sp.z + 10.0f)  // close, low 3/4 look at the crater
+                        : g_timelapse_fire
                         ? glm::vec3(sp.x, sp.y + 34.0f, sp.z + 36.0f)  // high look over the burn patch
                         : g_timelapse_creatures
                         ? glm::vec3(sp.x, sp.y + 30.0f, sp.z + 30.0f)
                         : showcase
                         ? glm::vec3(sp.x, sp.y + 4.0f, sp.z + 22.0f)
                         : glm::vec3(sp.x, sp.y + 7.0f, sp.z + 20.0f);
-                    const glm::vec3 target = g_timelapse_fire
+                    const glm::vec3 target = g_timelapse_dig
+                        ? glm::vec3(sp.x, sp.y - 3.0f, sp.z)  // the deepening crater at spawn
+                        : g_timelapse_fire
                         ? glm::vec3(sp.x, sp.y, sp.z)
                         : g_timelapse_creatures
                         ? glm::vec3(sp.x, sp.y, sp.z - 8.0f)
@@ -7857,6 +7863,22 @@ int main(int argc, char* argv[]) {
                                          g_timelapse_captured, g_timelapse_dir.string());
                     glfwSetWindowShouldClose(window, GLFW_TRUE);
                 } else {
+                    // Spec 009 terraform demo: from the 3rd captured frame, carve a trench that
+                    // marches from +Z toward spawn (one sphere/frame), then let the fast-forward
+                    // ticks below drain/redirect any water into the freshly-cut channel. Carve
+                    // BEFORE the ticks so the water responds within this same frame's advance.
+                    if (g_timelapse_dig && g_timelapse_captured >= 2 && gameSession->GetWorldSystem()) {
+                        const auto sp = gameSession->GetMetadata().spawnPoint;
+                        const int dig_i = g_timelapse_captured - 2;   // 0,1,2,... after a 2-frame establishing hold
+                        const float surf = gameSession->GetWorldSystem()->GetTerrainHeightAt(sp.x, sp.z);
+                        // DEEPEN a crater at spawn: drop the sphere center ~1 m/frame so the pit visibly
+                        // descends, with a generous radius so the excavation reads clearly at close range.
+                        const float cy = surf - 0.5f - static_cast<float>(dig_i) * 1.0f;
+                        const int n = gameSession->GetWorldSystem()->EditTerrainVoxel(
+                            Luminumbra::Vec3(sp.x, cy, sp.z), 4.5f, /*fill=*/false,
+                            gameSession->GetPhysicsSystem());
+                        LUMINUMBRA_CORE_INFO("Timelapse-dig: carved {} chunk(s), crater floor y={:.1f}", n, cy);
+                    }
                     // Fast-forward the SIM (weather/wind/creatures/plants) by K EXTRA fixed
                     // ticks for the next frame (on top of the normal per-frame tick). Physics
                     // runs normally each frame so the player stays grounded.
