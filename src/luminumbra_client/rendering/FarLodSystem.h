@@ -78,7 +78,13 @@ public:
     // shoreline keeps winning the depth test, matching the terrain depth bias.
     static constexpr u32 kFarWaterMaterialId = 200u;
     static constexpr float kFarWaterDepthBiasMeters = 0.0625f;
-    // Per-frame integration caps keep upload hitches bounded.
+    // Per-frame integration caps keep upload hitches bounded. NOTE (spec 008 WS-2 follow-up):
+    // raising the upload cap to 16 was tried to force the dense mountains far-ring to converge
+    // before the debug horizon-gate capture, but (a) it did NOT fix debug (the real limit there
+    // is worker build-COMPLETION throughput, ~8/frame, not the upload cap), (b) the ring already
+    // converges at 6 in the RELEASE lane, and (c) 16 main-thread far-tile uploads/frame caused a
+    // visible hitch when flying through fill-in. So it stays at 6 — the deliberate smoothness
+    // value. Mountains residency is a release-lane property; the gate fix + diagnostics stand.
     static constexpr std::size_t kMaxBuildDispatchesPerFrame = 8;
     static constexpr std::size_t kMaxUploadsPerFrame = 6;
 
@@ -99,6 +105,15 @@ public:
         std::size_t water_sheet_indices = 0;
         std::size_t builds_completed_total = 0;
         std::size_t evictions_total = 0;
+        // spec 008 WS-2 diagnostics (per-frame, reset each update()): distinguish a
+        // build-throttle/evict-thrash bottleneck from BuildPristineFarLodTile empty-mesh
+        // failures when the mountains-preset horizon gate reports persistent missing regions.
+        std::size_t builds_dispatched = 0;       // build jobs dispatched this frame (<= kMaxBuildDispatchesPerFrame)
+        std::size_t builds_integrated_ok = 0;    // completed builds integrated to resident this frame
+        std::size_t builds_integrated_failed = 0;// completed builds rejected this frame (empty mesh / epoch mismatch)
+        std::size_t builds_failed_total = 0;     // cumulative rejected builds (nonzero => empty-mesh failures, hypothesis b)
+        std::size_t evictions_this_frame = 0;    // regions evicted this frame (wanted-set + budget)
+        std::size_t pending_depth = 0;           // build jobs in flight at end of update()
     };
 
     FarLodSystem();

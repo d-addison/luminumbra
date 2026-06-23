@@ -5,7 +5,9 @@
 #include <shared_mutex>
 #include <array>
 #include <atomic>
+#include <chrono> // TEMP diag (spec 008 follow-up): per-sub-phase streaming timing
 #include <cmath>
+#include <cstring> // std::memcpy for the deterministic water-state hash
 #include <algorithm> // Required for std::max and std::min
 #include <filesystem>
 #include <limits>
@@ -1931,8 +1933,17 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_pos
 }
 
 void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3>& anchor_positions, PhysicsSystem* physics_system) {
+    // TEMP diag (spec 008 follow-up): split the 300ms+ streaming spike by sub-phase.
+    m_dbg_stream = {};
+    auto _dbg_prev = std::chrono::steady_clock::now();
+    auto _dbg_split = [&](double& slot) {
+        const auto _n = std::chrono::steady_clock::now();
+        slot += std::chrono::duration<double, std::milli>(_n - _dbg_prev).count();
+        _dbg_prev = _n;
+    };
     clear_completed_job_handle(m_streaming_state.generation_job_handle);
     process_completed_meshing_jobs();
+    _dbg_split(m_dbg_stream.process_completed);
 
     // Hydro prefetch: warm the erosion-region cache around each anchor AHEAD of
     // chunk-gen on background jobs, so re-enabled hydro never bakes on the gen/main
@@ -1970,6 +1981,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
             ++m_last_streaming_budget_stats.meshing_chunks;
         }
     }
+    _dbg_split(m_dbg_stream.telemetry); // TEMP diag: hydro prefetch + telemetry count loop 1
 
     // Engine streaming stays fully asynchronous: on a camera discontinuity
     // (teleport, or a per-frame jump forced by a slow renderer driving a
@@ -1989,16 +2001,19 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
     bool activation_ran_this_tick = false;
     m_update_tick_counter++;
     if (m_update_tick_counter >= STREAMING_ACTIVATION_INTERVAL_FRAMES) {
-        update_chunk_activation(anchor_positions, physics_system);
+        // activation may elide itself (return false) when the residency set is provably unchanged;
+        // only count it as "ran" when it actually did work, so the meshing gate stays accurate.
+        activation_ran_this_tick = update_chunk_activation(anchor_positions, physics_system);
         m_update_tick_counter = 0;
-        activation_ran_this_tick = true;
     }
+    _dbg_split(m_dbg_stream.activation); // TEMP diag
 
     // Step 2: Update the water system using the now-current list of active chunks.
     // This MUST happen before meshing jobs are dispatched.
     if (m_water_system) {
         m_water_system->update(registry, m_streaming_state.chunks);
     }
+    _dbg_split(m_dbg_stream.water); // TEMP diag
 
     // Step 3: Schedule meshing jobs for chunks that need it.
     struct MeshingCandidate {
@@ -2278,10 +2293,18 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
             m_last_serviced_generation = m_dirty_generation;
         }
     }  // streaming_dirty gate
+    _dbg_split(m_dbg_stream.meshing_pass); // TEMP diag: Step 3 meshing-candidate pass + dispatch
 
-    // Step 4. Time-slice the creation of expensive physics colliders on the main thread
-    if (physics_system) {
+    // Step 4. Time-slice the creation of expensive physics colliders on the main thread.
+    // spec 008 WS-1: the eligibility scan is O(N) over every streamed chunk. Gate it on
+    // m_collision_pass_dirty so a SETTLED world skips it entirely. The flag is set at the two
+    // has_collision=false reset sites (remesh/LOD0 promotion + synchronous rebuild) and cleared
+    // here once a scan drains all eligible chunks without hitting the per-frame cap. The scan body
+    // is unchanged, so the set of colliders created (and has_collision, which feeds world_hash) is
+    // identical to before — only redundant settled-tick walks are removed.
+    if (physics_system && m_collision_pass_dirty) {
         int collision_meshes_created_this_frame = 0;
+        bool hit_frame_cap = false;
         for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
             if (chunk_ptr->get_state() == ChunkState::Ready && !chunk_ptr->has_collision.load()) {
                 // Only create collision for the highest LOD terrain mesh
@@ -2290,12 +2313,18 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
 
                     collision_meshes_created_this_frame++;
                     if (collision_meshes_created_this_frame >= MAX_COLLISION_MESHES_PER_FRAME) {
+                        hit_frame_cap = true;
                         break;
                     }
                 }
             }
         }
+        // Hitting the cap means eligible chunks may remain past the break, so stay dirty for the
+        // next tick. Otherwise the loop visited every chunk and created colliders for all eligible
+        // ones, so there is no collision work left until something resets has_collision again.
+        m_collision_pass_dirty = hit_frame_cap;
     }
+    _dbg_split(m_dbg_stream.collision); // TEMP diag
 
     m_last_streaming_budget_stats.active_chunks_after = m_streaming_state.chunks.size();
     clear_streaming_state_counts(m_last_streaming_budget_stats);
@@ -2360,9 +2389,9 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
     );
 }
 
-void SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchors, PhysicsSystem* physics_system) {
+bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchors, PhysicsSystem* physics_system) {
     if (anchors.empty()) {
-        return;  // no anchors -> nothing to stream around (caller guarantees >= 1 in practice)
+        return false;  // no anchors -> nothing to stream around (caller guarantees >= 1 in practice)
     }
     // Per-anchor chunk coordinates (the wanted-set is the UNION of each anchor's disc;
     // eviction below keeps a chunk if it is in range of ANY anchor). One anchor ->
@@ -2371,6 +2400,23 @@ void SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
     camera_chunks.reserve(anchors.size());
     for (const Vec3& a : anchors) {
         camera_chunks.push_back(world_to_chunk_coords(a));
+    }
+
+    // spec 008 follow-up (streaming residual): ELIDE the whole pass when the residency set is
+    // provably unchanged. The wanted disc is chunk-granular and keyed only on the anchor CHUNK
+    // coords, so sub-chunk camera motion never changes it. If the anchor chunks are identical to
+    // last activation, no world mutation happened (dirty_generation), and the last activation
+    // created NOTHING (scheduled+deferred == 0 -> every wanted chunk was already resident), then
+    // re-running would enumerate the same disc (all already resident -> create 0) and evict 0
+    // (anchor static). So the pass is a pure no-op and we skip its O(radius^2) enumeration + O(N)
+    // eviction scan. Signals are deterministic main-thread state (NEVER job-activity timing), so
+    // residency — and world_hash — are byte-identical to running it. This is the dominant per-tick
+    // CPU cost while stationary at high render distance.
+    if (m_activation_has_run &&
+        m_dirty_generation == m_last_activation_dirty_generation &&
+        m_last_activation_pending == 0 &&
+        camera_chunks == m_last_activation_camera_chunks) {
+        return false;
     }
     struct GenerationCandidate {
         IVec3 coords;
@@ -2633,6 +2679,16 @@ void SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
         }
         m_streaming_state.chunks.erase(id);
     }
+
+    // spec 008 follow-up: record the elision signals for next tick. m_last_activation_pending == 0
+    // next time (with a static anchor + no world mutation) means this pass made the world fully
+    // resident, so the next activation can be skipped.
+    m_activation_has_run = true;
+    m_last_activation_camera_chunks = camera_chunks;
+    m_last_activation_dirty_generation = m_dirty_generation;
+    m_last_activation_pending = m_last_streaming_budget_stats.scheduled_generation +
+                                m_last_streaming_budget_stats.deferred_generation;
+    return true;
 }
 
 bool SHIELD_WorldSystem::EnsureCollisionReadyNear(const Vec3& world_pos, PhysicsSystem* physics_system, int horizontal_radius) {
@@ -2820,12 +2876,147 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
     // spec 004 streaming elision: this synchronous rebuild can mutate a SETTLED world (carve / teleport
     // / boot) WITHOUT a chunk-count or anchor delta, so re-open the candidate-pass gate explicitly.
     ++m_dirty_generation;
+    // spec 008 WS-1: the rebuild reset has_collision=false on its remeshed chunks (some on worker
+    // threads, now joined) and synchronously collided only the in-range subset, so re-open the gated
+    // collision scan to backfill colliders for any out-of-range LOD0 chunks. Main-thread store.
+    m_collision_pass_dirty = true;
     return true;
 }
 
 float SHIELD_WorldSystem::GetTerrainHeightAt(float world_x, float world_z) const {
     // T-I3-10: delegates to the one shared height implementation.
     return ComputeShapedHeightSample(world_x, world_z).final_height;
+}
+
+SHIELD_WorldSystem::WaterStateHash SHIELD_WorldSystem::debug_water_state_hash() const {
+    // Fold the live water-sim state across resident chunks, sorted by chunk id so the result is
+    // order-independent. Spec 009: FNV-1a over the FIXED-POINT int32 bits of water_depth_mm +
+    // water_bed_mm (millimetres) — integers are bit-identical across compilers/CPUs so host==peer
+    // holds, and the float water_level/flow arrays are now RENDER-ONLY and are NO LONGER hashed.
+    std::vector<ChunkID> ids;
+    ids.reserve(m_streaming_state.chunks.size());
+    for (const auto& [id, c] : m_streaming_state.chunks) {
+        if (c && c->has_water_sim.load(std::memory_order_acquire)) ids.push_back(id);
+    }
+    std::sort(ids.begin(), ids.end());
+    WaterStateHash out;
+    out.water_chunks = ids.size();
+    std::uint64_t h = 1469598103934665603ull;
+    auto mix = [&h](std::uint64_t v) { h ^= v; h *= 1099511628211ull; };
+    for (ChunkID id : ids) {
+        const auto& c = m_streaming_state.chunks.at(id);
+        mix(static_cast<std::uint64_t>(id));
+        for (const std::int32_t d : c->water_depth_mm) mix(static_cast<std::uint64_t>(static_cast<std::uint32_t>(d)));
+        for (const std::int32_t b : c->water_bed_mm)   mix(static_cast<std::uint64_t>(static_cast<std::uint32_t>(b)));
+    }
+    out.hash = h;
+    return out;
+}
+
+bool SHIELD_WorldSystem::debug_water_mass_ok() const {
+    return m_water_system ? m_water_system->dbg_mass_ok() : true;
+}
+
+int SHIELD_WorldSystem::debug_water_seam_wet_pairs() const {
+    return m_water_system ? m_water_system->dbg_seam_wet_pairs() : 0;
+}
+
+std::int64_t SHIELD_WorldSystem::debug_max_water_depth_mm() const {
+    std::int64_t mx = 0;
+    for (const auto& [id, c] : m_streaming_state.chunks) {
+        if (c && c->has_water_sim.load(std::memory_order_acquire)) {
+            for (const std::int32_t d : c->water_depth_mm) if (d > mx) mx = d;
+        }
+    }
+    return mx;
+}
+
+// Spec 009 Phase 2: terraform the water bed (dig/dam) — delegates to the WaterSystem.
+int SHIELD_WorldSystem::EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, float radius_m) {
+    return m_water_system ? m_water_system->EditTerrainBed(world_pos, delta_mm, radius_m) : 0;
+}
+
+// Spec 009 Phase 2 — PLAYER-FACING terraform: carve/fill the VOXEL terrain in-world,
+// then couple the water to the new bed. Edits the signed density field (sdf_data) of
+// every streamed chunk the sphere overlaps. Positive density is air (same convention
+// as CarveSphereIntoChunk / MarchingCubes), so a DIG raises each in-range sample to at
+// least (radius - distance) [carve to air] and a FILL lowers it to at most -(radius -
+// distance) [pack solid]. Boundary (+1) samples are edited identically in every chunk
+// that shares them — the world-space sample math is position-only — so a carve spanning
+// a chunk seam stays watertight after remesh. Each touched chunk is marked voxel-dirty +
+// LOD-invalidated so the existing surface-rebuild path remeshes it (generation is skipped
+// for chunks that already carry sdf data, so the edit survives), then EnsureSurfaceReadyNear
+// rebuilds the mesh + collider band and the water bed is resampled (dig drains, fill dams).
+// Deterministic: the edit is a pure function of (world_pos, radius_m, fill); sdf_data is
+// hashed + persisted directly (WorldPersistenceRoundtrip), and sqrt is IEEE-754
+// correctly-rounded — the same determinism contract the green persistence carve relies on.
+// Returns the number of chunks actually modified.
+int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos, float radius_m, bool fill,
+                                         PhysicsSystem* physics_system) {
+    if (radius_m <= 0.0f) return 0;
+    constexpr int size_x = CHUNK_SIZE_X + 1;
+    constexpr int size_y = CHUNK_SIZE_Y + 1;
+    constexpr int size_z = CHUNK_SIZE_Z + 1;
+    constexpr std::size_t expected =
+        static_cast<std::size_t>(size_x) * static_cast<std::size_t>(size_y) * static_cast<std::size_t>(size_z);
+
+    // Chunk-coord AABB the sphere can touch (carve may span several chunks).
+    const IVec3 lo = world_to_chunk_coords(world_pos - Vec3(radius_m, radius_m, radius_m));
+    const IVec3 hi = world_to_chunk_coords(world_pos + Vec3(radius_m, radius_m, radius_m));
+    int edited = 0;
+    for (int cz = lo.z; cz <= hi.z; ++cz)
+    for (int cy = lo.y; cy <= hi.y; ++cy)
+    for (int cx = lo.x; cx <= hi.x; ++cx) {
+        const auto chunk = find_streamed_chunk(IVec3(cx, cy, cz));
+        if (!chunk || chunk->sdf_data.size() != expected) continue;
+        const IVec3 base = chunk->get_coords() * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+        bool changed = false;
+        for (int z = 0; z < size_z; ++z)
+        for (int y = 0; y < size_y; ++y)
+        for (int x = 0; x < size_x; ++x) {
+            const float dx = static_cast<float>(base.x + x) - world_pos.x;
+            const float dy = static_cast<float>(base.y + y) - world_pos.y;
+            const float dz = static_cast<float>(base.z + z) - world_pos.z;
+            const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (dist > radius_m) continue;
+            const std::size_t idx =
+                static_cast<std::size_t>(x) +
+                static_cast<std::size_t>(y) * static_cast<std::size_t>(size_x) +
+                static_cast<std::size_t>(z) * static_cast<std::size_t>(size_x) * static_cast<std::size_t>(size_y);
+            const float mag = radius_m - dist;
+            if (!fill) {
+                // DIG → carve to air (raise toward +mag).
+                if (mag > chunk->sdf_data[idx]) {
+                    chunk->sdf_data[idx] = mag;
+                    if (!chunk->material_data.empty() && idx < chunk->material_data.size())
+                        chunk->material_data[idx] = 0u;
+                    changed = true;
+                }
+            } else {
+                // FILL → pack solid (lower toward -mag).
+                if (-mag < chunk->sdf_data[idx]) {
+                    chunk->sdf_data[idx] = -mag;
+                    changed = true;
+                }
+            }
+        }
+        if (changed) {
+            chunk->mark_voxel_data_dirty();
+            chunk->current_lod.store(-1, std::memory_order_release);
+            ++edited;
+        }
+    }
+    if (edited > 0) {
+        // Remesh + rebuild colliders for the edited band (rings in chunk units).
+        const int rings = static_cast<int>(radius_m / static_cast<float>(CHUNK_SIZE_X)) + 2;
+        EnsureSurfaceReadyNear(world_pos, physics_system, rings, rings);
+        // Couple the water: a dig lowers the bed (drain), a fill raises it (dam). The bed
+        // delta tracks the carve depth at the sphere center (~radius below the surface).
+        const std::int32_t delta_mm =
+            static_cast<std::int32_t>((fill ? 1.0f : -1.0f) * radius_m * 1000.0f);
+        EditTerrainBed(world_pos, delta_mm, radius_m);
+    }
+    return edited;
 }
 
 WorldGenLayerSample SHIELD_WorldSystem::SampleWorldGenLayers(const Vec3& world_pos) const {
@@ -3736,6 +3927,9 @@ void SHIELD_WorldSystem::process_completed_meshing_jobs() {
                 chunk->applied_transition_faces.store(job_chunk.transition_faces, std::memory_order_release);
                 chunk->mesh_version++;
                 chunk->has_collision.store(false, std::memory_order_release);
+                // spec 008 WS-1: a remesh / LOD0 promotion just cleared this chunk's collider, so
+                // re-open the gated collision scan (Step 4) to rebuild it. Main-thread store.
+                m_collision_pass_dirty = true;
             }
             chunk->water_mesh_vertices = std::move(chunk->pending_water_mesh_vertices);
             chunk->water_mesh_indices = std::move(chunk->pending_water_mesh_indices);

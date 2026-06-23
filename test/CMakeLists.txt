@@ -118,6 +118,7 @@ add_executable(common_tests
     common/GameSessionHeadlessWorld_test.cpp
     common/JobSystem_test.cpp
     common/MultiAnchorStreaming_test.cpp
+    common/WaterDeterminism_test.cpp
     common/PlayerAvatar_test.cpp
     common/ReplicationProtocol_test.cpp
     common/ReplicationEndpoint_test.cpp

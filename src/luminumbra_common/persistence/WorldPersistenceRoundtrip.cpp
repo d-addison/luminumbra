@@ -50,6 +50,8 @@ const std::vector<std::string>& PersistedFields() {
         "water_level_data",
         "water_flow_data",
         "water_sim_terrain_height",
+        "water_depth_mm",
+        "water_bed_mm",
         "water_state"
     };
     return fields;
@@ -81,6 +83,8 @@ const std::vector<std::string>& RequiredChunkFormatFields() {
         "water_level_data",
         "water_flow_data",
         "water_sim_terrain_height",
+        "water_depth_mm",
+        "water_bed_mm",
         "water_state"
     };
     return fields;
@@ -255,6 +259,10 @@ nlohmann::json ChunkToJson(const Chunk& chunk) {
         {"water_level_data", chunk.water_level_data},
         {"water_flow_data", Vec2ArrayToJson(chunk.water_flow_data)},
         {"water_sim_terrain_height", chunk.water_sim_terrain_height},
+        // Spec 009: the AUTHORITATIVE fixed-point water sim state (mm). water_level_data/flow are now
+        // render-only mirrors; these are what the sim continues from on load (no re-seed from worldgen).
+        {"water_depth_mm", chunk.water_depth_mm},
+        {"water_bed_mm", chunk.water_bed_mm},
         {"has_water_sim", chunk.has_water_sim.load(std::memory_order_acquire)},
         {"water_mesh_generated", chunk.water_mesh_generated.load(std::memory_order_acquire)},
         {"current_water_resolution", chunk.current_water_resolution.load(std::memory_order_acquire)},
@@ -291,6 +299,13 @@ void ApplyChunkJson(const nlohmann::json& value, Chunk& chunk) {
     chunk.water_level_data = value.at("water_level_data").get<std::vector<float>>();
     chunk.water_flow_data = Vec2ArrayFromJson(value.at("water_flow_data"));
     chunk.water_sim_terrain_height = value.at("water_sim_terrain_height").get<std::vector<float>>();
+    // Spec 009: restore the authoritative fixed-point water state (absent in pre-009 saves -> empty,
+    // the sim re-seeds on the next tick). water_edge_flux is transient (not hashed) -> not persisted.
+    chunk.water_depth_mm = value.contains("water_depth_mm")
+        ? value.at("water_depth_mm").get<std::vector<std::int32_t>>() : std::vector<std::int32_t>{};
+    chunk.water_bed_mm = value.contains("water_bed_mm")
+        ? value.at("water_bed_mm").get<std::vector<std::int32_t>>() : std::vector<std::int32_t>{};
+    chunk.water_edge_flux.clear();
     const nlohmann::json& water_state = value.contains("water_state") ? value.at("water_state") : value;
     chunk.has_water_sim.store(water_state.at("has_water_sim").get<bool>(), std::memory_order_release);
     chunk.water_mesh_generated.store(water_state.at("water_mesh_generated").get<bool>(), std::memory_order_release);

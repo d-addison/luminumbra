@@ -79,6 +79,18 @@ public:
     void destroy();
     bool ready() const { return m_transmittance_tex != 0 && m_multiscatter_tex != 0 && m_skyview_tex != 0; }
 
+    // spec 008 WS-4: route refresh_sky_view through a GPU compute shader instead of the CPU
+    // march. render.sky_lut_gpu, default OFF (CPU). The GPU path samples the already-uploaded
+    // transmittance/multiscatter textures and writes the sky-view texture, closing the §16
+    // debug-build per-frame refresh stall during a time-of-day sweep. GPU-VALIDATION PENDING
+    // (written while the GPU was locked); a compile/link failure falls back to the CPU march.
+    void set_gpu_skyview_enabled(bool e) { m_use_gpu_skyview = e; }
+
+    // spec 008 WS-4 §9: pre-compile the GPU compute programs BEFORE the timed initialize() so the
+    // one-time driver shader-compile cost is not counted against the precompute budget. No-op when
+    // the GPU path is off or already warmed. Call once before initialize().
+    void prewarm_gpu_compute();
+
     GLuint transmittance_texture() const { return m_transmittance_tex; }
     GLuint multiscatter_texture() const { return m_multiscatter_tex; }
     GLuint sky_view_texture() const { return m_skyview_tex; }
@@ -114,9 +126,25 @@ private:
     glm::vec3 m_sky_ambient{0.0f};
     bool m_base_built = false;
 
+    // spec 008 WS-4: GPU-compute sky-view path (default OFF). Lazily-compiled compute program +
+    // an SSBO (3 floats/texel) that doubles as the PBO upload source and the ambient readback.
+    bool m_use_gpu_skyview = false;
+    GLuint m_skyview_compute_prog = 0;
+    GLuint m_transmittance_compute_prog = 0;  // spec 008 WS-4 §9: one-shot init LUTs on GPU
+    GLuint m_multiscatter_compute_prog = 0;
+    GLuint m_skyview_ssbo = 0;
+
     void build_transmittance_cpu();
     void build_multiscatter_cpu();
     void build_sky_view_cpu(const glm::vec3& sun_dir_world);
+    // Returns true and fills the sky-view texture via compute; false if GPU resources
+    // could not be created (caller falls back to build_sky_view_cpu).
+    bool build_sky_view_gpu(const glm::vec3& sun_dir_world);
+    bool ensure_skyview_compute_resources();
+    // spec 008 WS-4 §9: build ALL three LUTs (transmittance + multiscatter + sky-view) on the GPU
+    // at startup so the one-shot precompute drops under the 8 ms budget. Returns false on any GPU
+    // resource failure (caller falls back to the full CPU build).
+    bool build_sky_lut_gpu_init(const glm::vec3& sun_dir_world);
 
     // Sampling helpers over the CPU buffers (used during the multi-scatter and
     // sky-view builds so all three LUTs share one transmittance source).

@@ -2,6 +2,7 @@
 
 #include "../../../include/luminumbra/core/Types.h"
 #include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <vector>
 #include "core/Log.h"
@@ -104,6 +105,15 @@ public:
     // elsewhere). The flow sim is clamped to never drain a cell below this, so
     // perched lakes stay filled at their basin elevation instead of flowing out.
     std::vector<f32> water_rest_level;
+    // --- Spec 009: fixed-point FLOWING-water state (HASHED; millimetres, deterministic) ---
+    // The virtual-pipes (Mei) solver runs on integers so host==peer is bit-exact (the hash
+    // FNV-1a's the raw bits). Surface height = water_bed_mm + water_depth_mm. The float arrays
+    // above become RENDER-ONLY mirrors (water_level_data regenerated from mm for the mesher).
+    std::vector<std::int32_t> water_depth_mm;  // water depth above bed (mm, >= 0). size = resolution^2
+    std::vector<std::int32_t> water_bed_mm;    // terrain bed height (mm). re-sampled on edit (Phase 2)
+    // Per-edge persisted outflow flux (mm-vol/tick), signed: +q drains the lower-index cell toward
+    // its +X or +Z neighbour. Layout: [2*i + 0] = +X edge of cell i, [2*i + 1] = +Z edge. size = 2*res^2.
+    std::vector<std::int32_t> water_edge_flux;
     std::atomic<bool> has_water_sim{false};
     std::atomic<bool> water_mesh_generated{false};
     std::atomic<int> current_water_resolution{8}; // Current water grid resolution (4, 8, 16, or 32)

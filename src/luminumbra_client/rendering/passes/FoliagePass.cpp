@@ -4,6 +4,8 @@
 #include "LightingPass.h"
 #include "PassGlHelpers.h"
 #include "core/Log.h"
+#include <iterator>
+#include <limits>
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
 
@@ -292,6 +294,7 @@ bool FoliagePass::load_scatter_set(const std::filesystem::path& json_path) {
         return false;
     }
     m_enabled = true;
+    ++m_chunk_cache_gen;  // archetypes changed -> invalidate the per-chunk instance cache
     LUMINUMBRA_CORE_INFO("FoliagePass: loaded {} scatter archetypes from '{}'.",
                          m_archetypes.size(), json_path.string());
     return true;
@@ -342,7 +345,7 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
             chunk_acc ^= splitmix64(ch);  // XOR fold -> order-independent over the chunk list
         }
         mix(chunk_acc);
-        if (m_scatter_built && sig == m_last_scatter_sig) {
+        if (m_scatter_built && sig == m_last_scatter_sig && !m_foliage_build_backlog) {
             return;  // unchanged -> reuse the last build (ring VBO + frame_instance_count)
         }
         m_last_scatter_sig = sig;
@@ -364,15 +367,17 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
     }
     m_gpu_active = false;
 
-    // Total archetype weight for the deterministic per-instance archetype pick.
-    float total_weight = 0.0f;
-    for (const auto& a : m_archetypes) {
-        total_weight += a.density_weight;
-    }
-    if (total_weight <= 0.0f) {
-        total_weight = 1.0f;
-    }
-
+    // spec 008 follow-up: emit from the per-chunk CAMERA-INDEPENDENT cache. Each renderable chunk's
+    // records are built once (the expensive SurfaceQuery + hashing) and reused as the camera moves;
+    // this loop only applies the cheap camera distance-fade culls and a fresh wind sway. The emit
+    // order (chunk order, then candidate-index order) and the global kMaxInstances truncation match
+    // the old single-pass loop exactly, so m_instances is byte-identical -> RENDER-ONLY / gate-safe.
+    // Budget the uncached chunk BUILDS this frame (see m_foliage_build_backlog). Cached chunks are
+    // free to emit; only first-time builds (the SurfaceQuery cost) are rate-limited so a fast-moving
+    // streaming burst fades foliage in over a few frames instead of one ~960ms hitch.
+    constexpr int kMaxChunkBuildsPerFrame = 4;
+    int builds_left = kMaxChunkBuildsPerFrame;
+    bool deferred_any = false;
     for (const ChunkScatter& chunk : chunks) {
         if (chunk.density <= 0.0f) {
             continue;
@@ -387,6 +392,102 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
             continue;
         }
 
+        // Use the cached records if present+current; otherwise build at most kMaxChunkBuildsPerFrame
+        // new chunks this frame and defer the rest (they fade in over subsequent frames).
+        const std::uint64_t key =
+            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(chunk.chunk_xz.x))) |
+            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(chunk.chunk_xz.y)) << 32);
+        const std::vector<InstanceRecord>* cachedp = nullptr;
+        auto cit = m_chunk_cache.find(key);
+        if (cit != m_chunk_cache.end() && cit->second.gen == m_chunk_cache_gen) {
+            cachedp = &cit->second.records;
+        } else if (builds_left > 0) {
+            cachedp = &build_or_get_chunk_records(chunk, query, query_ctx);
+            --builds_left;
+        } else {
+            deferred_any = true;  // over budget this frame -> build on a later frame
+            continue;
+        }
+
+        const std::vector<InstanceRecord>& cached = *cachedp;
+        for (const InstanceRecord& src : cached) {
+            if (m_instances.size() >= kMaxInstances) {
+                break;
+            }
+            // Per-instance distance-fade hard cull (camera-dependent; cheap).
+            const float dxc = src.pos[0] - camera_pos.x;
+            const float dzc = src.pos[2] - camera_pos.z;
+            if (std::sqrt(dxc * dxc + dzc * dzc) > m_fade_end_m) {
+                continue;
+            }
+            InstanceRecord rec = src;
+            // sway rides FRESH from the current wind (cached record bakes 0). sway_scale (0/1) is
+            // preserved in color[3] (to_unorm8 -> 0 or 255), so sway = wind * scale reproduces the
+            // uncached loop's baked vector exactly.
+            if (rec.color[3] != 0) {
+                rec.sway[0] = m_wind_xz.x;
+                rec.sway[1] = m_wind_xz.y;
+            } else {
+                rec.sway[0] = 0.0f;
+                rec.sway[1] = 0.0f;
+            }
+            m_instances.push_back(rec);
+        }
+        if (m_instances.size() >= kMaxInstances) {
+            break;
+        }
+    }
+
+    // Prune cache entries whose chunk is no longer renderable once it grows past a soft cap, so a
+    // long traverse doesn't accumulate per-chunk records without bound.
+    if (m_chunk_cache.size() > 768) {
+        for (auto it = m_chunk_cache.begin(); it != m_chunk_cache.end();) {
+            bool live = false;
+            for (const ChunkScatter& c : chunks) {
+                const std::uint64_t k =
+                    (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.chunk_xz.x))) |
+                    (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.chunk_xz.y)) << 32);
+                if (k == it->first) { live = true; break; }
+            }
+            it = live ? std::next(it) : m_chunk_cache.erase(it);
+        }
+    }
+
+    // Suppress scatter-cache elision next frame while builds remain pending, so the rebuild keeps
+    // draining the backlog (fading the rest of the foliage in) even if the camera holds still.
+    m_foliage_build_backlog = deferred_any;
+
+    map_instances_for_frame();
+}
+
+// spec 008 follow-up: build (or fetch the cached) camera-independent instance records for one chunk.
+// This is the moved body of the old per-instance scatter loop, MINUS the camera distance cull (applied
+// by the caller) and with sway baked as 0 (set fresh per frame at copy). Pure function of chunk_xz +
+// the static terrain surface query + m_density_scale + m_archetypes (keyed by chunk_xz, invalidated by
+// m_chunk_cache_gen). RENDER-ONLY; produces byte-identical output to the old single-pass loop.
+const std::vector<FoliagePass::InstanceRecord>& FoliagePass::build_or_get_chunk_records(
+    const ChunkScatter& chunk, SurfaceQuery query, void* query_ctx) {
+    const std::uint64_t key =
+        (static_cast<std::uint64_t>(static_cast<std::uint32_t>(chunk.chunk_xz.x))) |
+        (static_cast<std::uint64_t>(static_cast<std::uint32_t>(chunk.chunk_xz.y)) << 32);
+    auto it = m_chunk_cache.find(key);
+    if (it != m_chunk_cache.end() && it->second.gen == m_chunk_cache_gen) {
+        return it->second.records;
+    }
+    CachedChunkRecords& slot = m_chunk_cache[key];
+    slot.gen = m_chunk_cache_gen;
+    slot.records.clear();
+
+    // Total archetype weight for the deterministic per-instance archetype pick.
+    float total_weight = 0.0f;
+    for (const auto& a : m_archetypes) {
+        total_weight += a.density_weight;
+    }
+    if (total_weight <= 0.0f) {
+        total_weight = 1.0f;
+    }
+
+    {
         // Number of candidate slots scales with density (capped). Each candidate
         // is a deterministic hash draw; slope/moisture decide the emit.
         const std::size_t candidates = std::min<std::size_t>(
@@ -395,9 +496,6 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
                 chunk.density * static_cast<float>(kMaxCandidatesPerChunk) * m_density_scale)));
 
         for (uint32_t idx = 0; idx < candidates; ++idx) {
-            if (m_instances.size() >= kMaxInstances) {
-                break;
-            }
             const uint64_t h0 = placement_hash(chunk.chunk_xz.x, chunk.chunk_xz.y,
                                                chunk.biome_id, idx);
             const uint64_t h1 = splitmix64(h0 ^ 0x2545F4914F6CDD1Dull);
@@ -410,16 +508,9 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
             const float wx = chunk.origin.x + fx * chunk.extent_m;
             const float wz = chunk.origin.z + fz * chunk.extent_m;
 
-            // Distance-fade hard cull: instances whose ANCHOR is past the fade
-            // end are never emitted (gate: no foliage beyond the live ring). The
-            // shader fade handles the soft band in [fade_start, fade_end]; this
-            // keeps the CPU set itself ring-bounded.
-            const float inst_dist =
-                std::sqrt((wx - camera_pos.x) * (wx - camera_pos.x) +
-                          (wz - camera_pos.z) * (wz - camera_pos.z));
-            if (inst_dist > m_fade_end_m) {
-                continue;
-            }
+            // NOTE: the per-instance distance-fade hard cull lives in the CALLER now (it depends on
+            // the camera); these cached records are camera-independent. The caller skips any record
+            // whose anchor is past m_fade_end_m before emitting, preserving the ring-bounded set.
 
             const SurfaceSample surf = query(query_ctx, wx, wz);
             if (!surf.valid) {
@@ -486,11 +577,10 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
             }
             const ArchetypeData& arch = m_archetypes[arch_index];
 
-            // Per-instance wind sway: the camera-region wind vector, attenuated
-            // by the per-archetype sway flag. Pebbles/clutter (sways=false) get
-            // zero displacement and a zero sway-flag scale so they never wave.
+            // Per-archetype sway FLAG (0/1). Pebbles/clutter (sways=false) never wave. The actual
+            // sway VECTOR is set by the caller per frame from the live wind (so a re-cached chunk
+            // never carries a stale wind direction); here it bakes 0 and rides the flag in alpha.
             const float sway_scale = arch.sways ? 1.0f : 0.0f;
-            const glm::vec2 sway = m_wind_xz * sway_scale;
 
             InstanceRecord rec;
             rec.pos[0] = wx;
@@ -517,18 +607,15 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
             rec.color[1] = to_unorm8(cg);
             rec.color[2] = to_unorm8(cb);
             rec.color[3] = to_unorm8(sway_scale); // sway-flag scale rides in alpha
-            rec.sway[0] = sway.x;
-            rec.sway[1] = sway.y;
+            rec.sway[0] = 0.0f;  // set fresh per frame by the caller from the live wind
+            rec.sway[1] = 0.0f;
             rec.phase = encode_f16(hash_unit(h1) * 6.2831853f);
             rec.facing = encode_f16(hash_unit(h0) * 6.2831853f);
-            m_instances.push_back(rec);
-        }
-        if (m_instances.size() >= kMaxInstances) {
-            break;
+            slot.records.push_back(rec);
         }
     }
 
-    map_instances_for_frame();
+    return slot.records;
 }
 
 bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
@@ -548,6 +635,17 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
     chunk_params.reserve(chunks.size());
     const int gv = kSurfaceGridVerts;
 
+    // spec 008 follow-up: the per-chunk surface grid is the expensive part (kSurfaceGridVerts^2
+    // GetTerrainHeightAt calls) and is CAMERA-INDEPENDENT (pure function of chunk_xz + static
+    // terrain). Cache it per chunk and only BUILD a budgeted few new chunks per frame so a fast
+    // streaming burst doesn't re-sample every chunk's grid at once (~1s hitch). Deferred chunks
+    // contribute no foliage this frame and build over the next few (foliage fades in — RENDER-ONLY).
+    // In gate mode (m_readback_enabled) build everything (no defer) so the FoliageInstancing gate's
+    // instance_hash sees the full, exact scatter.
+    const int gv2 = gv * gv;
+    const int kMaxSurfBuildsPerFrame = m_readback_enabled ? std::numeric_limits<int>::max() : 4;
+    int builds_left = kMaxSurfBuildsPerFrame;
+    bool deferred_any = false;
     for (const ChunkScatter& chunk : chunks) {
         if (chunk.density <= 0.0f) {
             continue;
@@ -558,6 +656,35 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
         if (cd - chunk.extent_m > m_fade_end_m) {
             continue;
         }
+
+        const std::uint64_t key =
+            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(chunk.chunk_xz.x))) |
+            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(chunk.chunk_xz.y)) << 32);
+        const std::vector<glm::vec4>* gridp = nullptr;
+        auto git = m_surf_grid_cache.find(key);
+        if (git != m_surf_grid_cache.end()) {
+            gridp = &git->second;
+        } else if (builds_left > 0) {
+            // Build (and cache) this chunk's surface grid. Grid vert (gx,gy) maps to local [0,1]^2.
+            std::vector<glm::vec4> grid;
+            grid.reserve(static_cast<std::size_t>(gv2));
+            for (int gy = 0; gy < gv; ++gy) {
+                for (int gx = 0; gx < gv; ++gx) {
+                    const float lx = static_cast<float>(gx) / static_cast<float>(kSurfaceGrid);
+                    const float lz = static_cast<float>(gy) / static_cast<float>(kSurfaceGrid);
+                    const float wx = chunk.origin.x + lx * chunk.extent_m;
+                    const float wz = chunk.origin.z + lz * chunk.extent_m;
+                    const SurfaceSample s = query(query_ctx, wx, wz);
+                    grid.emplace_back(s.height, s.moisture, s.slope, s.valid ? 1.0f : 0.0f);
+                }
+            }
+            gridp = &m_surf_grid_cache.emplace(key, std::move(grid)).first->second;
+            --builds_left;
+        } else {
+            deferred_any = true;  // over budget this frame -> build on a later frame
+            continue;
+        }
+
         GpuChunk gc;
         gc.origin_extent[0] = chunk.origin.x;
         gc.origin_extent[1] = chunk.origin.y;
@@ -568,17 +695,22 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
         gc.id_density[2] = static_cast<float>(chunk.biome_id);
         gc.id_density[3] = chunk.density;
         chunk_params.push_back(gc);
+        surf_grid.insert(surf_grid.end(), gridp->begin(), gridp->end());
+    }
 
-        // Sample the surface grid. Grid vert (gx,gy) maps to local [0,1]^2.
-        for (int gy = 0; gy < gv; ++gy) {
-            for (int gx = 0; gx < gv; ++gx) {
-                const float lx = static_cast<float>(gx) / static_cast<float>(kSurfaceGrid);
-                const float lz = static_cast<float>(gy) / static_cast<float>(kSurfaceGrid);
-                const float wx = chunk.origin.x + lx * chunk.extent_m;
-                const float wz = chunk.origin.z + lz * chunk.extent_m;
-                const SurfaceSample s = query(query_ctx, wx, wz);
-                surf_grid.emplace_back(s.height, s.moisture, s.slope, s.valid ? 1.0f : 0.0f);
+    // Suppress scatter-cache elision next frame while builds remain pending (drain the backlog even
+    // if the camera holds still); prune cache entries for chunks no longer renderable past a soft cap.
+    m_foliage_build_backlog = deferred_any;
+    if (m_surf_grid_cache.size() > 768) {
+        for (auto it = m_surf_grid_cache.begin(); it != m_surf_grid_cache.end();) {
+            bool live = false;
+            for (const ChunkScatter& c : chunks) {
+                const std::uint64_t k =
+                    (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.chunk_xz.x))) |
+                    (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.chunk_xz.y)) << 32);
+                if (k == it->first) { live = true; break; }
             }
+            it = live ? std::next(it) : m_surf_grid_cache.erase(it);
         }
     }
 

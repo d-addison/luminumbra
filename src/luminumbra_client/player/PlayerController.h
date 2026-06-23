@@ -59,6 +59,9 @@ public:
 
     MovementMode GetMovementMode() const { return m_mode; }
     glm::vec3 GetPosition() const { return m_position; }
+    // TEMP diag (--profile-fly): drive the player forward at a constant noclip speed without reading
+    // live input, so the headless moving profiler advances the streaming anchor at a bounded rate.
+    void ProfileDriveNoclip(float deltaTime, const glm::vec3& wishDir) { UpdateNoclip(deltaTime, wishDir, false); }
     void ProcessMouseScroll(double yoffset);
     void RenderDebugUI();
 

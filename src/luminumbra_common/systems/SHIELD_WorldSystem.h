@@ -526,12 +526,48 @@ public:
     bool EnsureCollisionReadyNear(const Vec3& world_pos, PhysicsSystem* physics_system, int horizontal_radius = 1);
     bool EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSystem* physics_system, int surface_radius, int collision_radius);
     const StreamingBudgetFrameStats& get_last_streaming_budget_stats() const { return m_last_streaming_budget_stats; }
+
+    // TEMP diag (spec 008 follow-up): per-sub-phase ms of the last update() to localize the
+    // 300ms+ streaming spike when moving. Removed once the amortization lands.
+    struct DbgStreamTimings {
+        double process_completed = 0.0;
+        double telemetry = 0.0;
+        double activation = 0.0;
+        double water = 0.0;
+        double meshing_pass = 0.0;
+        double collision = 0.0;
+    };
+    const DbgStreamTimings& dbg_stream_timings() const { return m_dbg_stream; }
     const StreamingTelemetryStats& get_streaming_telemetry_stats() const { return m_streaming_telemetry_stats; }
     const std::vector<ChunkLOD>& get_lod_levels() const { return m_lod_levels; }
     RuntimeChunkStats get_runtime_chunk_stats() const;
     CameraLocalCoverageStats get_camera_local_coverage_stats(const Vec3& camera_position, int horizontal_radius) const;
     float get_density_at_from_precalculated(const Vec3& world_pos, float terrain_height) const;
-    
+
+    // spec 008 follow-up: a deterministic, order-independent hash of the LIVE water-sim state
+    // (water_level_data + water_flow_data folded across resident chunks, sorted by chunk id) plus
+    // the count of chunks carrying a water sim. Test/telemetry hook for the live-water determinism
+    // gate — the existing fixture gates never tick live water, so they cannot catch a non-determ-
+    // inistic water-sim change (e.g. an async integration). Two independent sessions ticked with the
+    // same seed+anchors must produce identical hash sequences.
+    struct WaterStateHash { std::uint64_t hash = 0; std::size_t water_chunks = 0; };
+    WaterStateHash debug_water_state_hash() const;
+    // Spec 009 gate hooks: AC-2 mass invariant held last tick; AC-1 the max live water depth (mm)
+    // across resident chunks (> 0 once a river has filled). Debug/test only.
+    [[nodiscard]] bool debug_water_mass_ok() const;
+    [[nodiscard]] std::int64_t debug_max_water_depth_mm() const;
+    [[nodiscard]] int debug_water_seam_wet_pairs() const; // spec 009 Phase 3 cross-chunk continuity
+
+    // Spec 009 Phase 2 — terraform the water bed (dig delta<0 / dam delta>0) within radius_m of
+    // world_pos; the fixed-point solver then drains/pools. Returns cells edited.
+    int EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, float radius_m);
+
+    // Spec 009 Phase 2 — PLAYER-FACING terraform: carve (fill=false) or fill (fill=true) a
+    // sphere of radius_m into the voxel terrain at world_pos, remesh + rebuild colliders, and
+    // couple the water bed (dig drains, fill dams). Deterministic + persisted (edits sdf_data).
+    // Returns the number of chunks modified.
+    int EditTerrainVoxel(const Vec3& world_pos, float radius_m, bool fill, PhysicsSystem* physics_system);
+
     // GPU SDF generation integration
     void SetGPUSDFCallback(std::function<bool(const IVec3&, const TerrainGenParams&, int, std::vector<float>&)> callback);
 
@@ -569,6 +605,7 @@ private:
 
     StreamingState m_streaming_state;
     StreamingBudgetFrameStats m_last_streaming_budget_stats;
+    DbgStreamTimings m_dbg_stream;  // TEMP diag
     StreamingTelemetryStats m_streaming_telemetry_stats;
     uint64_t m_deferred_backlog_age_frames = 0;
     // T-I5b-DR-streaming-drain: trailing per-frame queue-depth ring used to
@@ -585,13 +622,36 @@ private:
     // tick, or a not-yet-drained previous pass) — NEVER on job-completion timing (the attempt-#1
     // determinism trap). Job-active state is consulted ONLY to decide whether the world has reached
     // quiescence (so a future tick MAY elide), which on the per-tick-quiesced hashed paths is itself
-    // deterministic. Collision (Step 4) is left UNTOUCHED. `m_dirty_generation` is bumped at the
+    // deterministic. `m_dirty_generation` is bumped at the
     // chunk insert/erase + synchronous-rebuild sites that mutate a settled world.
     std::uint64_t m_dirty_generation = 0;
     std::uint64_t m_last_serviced_generation = 0;
     std::vector<Vec3> m_last_anchor_positions;
+
+    // spec 008 follow-up (streaming residual): elide update_chunk_activation's O(radius^2) wanted-set
+    // enumeration + O(N) eviction scan when the residency set is PROVABLY unchanged — the anchor
+    // chunk coords are identical, no world mutation since (dirty_generation), and the last activation
+    // created NOTHING (scheduled+deferred == 0, i.e. every wanted chunk was already resident). All
+    // signals are deterministic main-thread state (NOT job-activity timing — the attempt-#1 trap),
+    // so the skip is residency-equivalent and run==replay / host==peer stay byte-identical. This is
+    // the dominant per-tick cost while stationary at high render distance.
+    bool m_activation_has_run = false;
+    std::vector<IVec3> m_last_activation_camera_chunks;
+    std::uint64_t m_last_activation_dirty_generation = 0;
+    std::size_t m_last_activation_pending = 0;  // scheduled_generation + deferred_generation last pass
     std::size_t m_last_chunk_count = 0;
     bool m_last_pass_drained = false;  // sticky: false forces the next tick's candidate pass to run
+
+    // spec 008 WS-1 streaming-residual: gate the O(N) per-tick collision-creation scan (Step 4) so a
+    // SETTLED world (every Ready/LOD0 chunk already has its collider) skips the scan entirely instead
+    // of walking all chunks every tick. The flag is a PRECISE, main-thread, deterministic work signal:
+    // set true at exactly the two sites that reset has_collision=false (remesh / LOD0 promotion in
+    // process_completed_meshing_jobs, and the synchronous surface-horizon rebuild) — NOT job-activity
+    // state (cf. the attempt-#1 trap above). Cleared only when a scan visits every chunk without
+    // hitting the per-frame cap (i.e. it drained all eligible work). Starts true so the first tick
+    // scans. The scan body itself is byte-identical to before, so collision eligibility/order — and
+    // thus has_collision, which feeds world_hash — is unchanged; only redundant settled-tick scans go.
+    bool m_collision_pass_dirty = true;
 
     const std::vector<ChunkLOD> m_lod_levels = {
         {0, 1, 192.0f},  // LOD 0: Full detail up to 192 meters (~12 chunks)
@@ -640,7 +700,9 @@ private:
     std::unordered_map<u64, ColumnSurfaceSpan> m_column_surface_span_cache;
 
     // --- Helper Functions ---
-    void update_chunk_activation(const std::vector<Vec3>& anchors, PhysicsSystem* physics_system);
+    // Returns true if it actually ran the activation pass (false if it was elided because the
+    // wanted residency set is provably unchanged). spec 008 follow-up (streaming-residual).
+    bool update_chunk_activation(const std::vector<Vec3>& anchors, PhysicsSystem* physics_system);
     // Signature updated to use shared_ptr
     struct MeshingWorkItem {
         std::shared_ptr<::Luminumbra::Chunk> chunk;

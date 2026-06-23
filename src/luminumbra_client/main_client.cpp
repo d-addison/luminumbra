@@ -13,6 +13,8 @@
 #include "player/PlayerController.h"
 #include "rendering/Camera.h"
 #include "rendering/FarLodSystem.h"
+#include "rendering/FrameScan.h" // framescan: deterministic what's-in-frame scan tool (render-only)
+#include "rendering/SceneSurvey.h" // survey: autonomous tour+screenshot of world POIs (render-only)
 #include "rendering/RenderPipeline.h"
 #include "rendering/passes/WaterPass.h"
 #include "rendering/passes/ParticlePass.h" // T-I5a-1: EmitterDescriptor + accessor type
@@ -161,6 +163,16 @@ int g_timelapse_frames = 0;
 // repeatable, fixed-scenario capture the release per-pass budget RED gate consumes
 // (no human in-world). Empty path = off. Pair with --auto-create-world --auto-enter-world.
 std::string g_render_benchmark_path;
+// TEMP diag (spec 008 follow-up): --play-paths runs a scenario's scripted camera but with the
+// NORMAL-PLAY render/streaming paths (foliage GPU readback OFF, scatter cache ON) instead of the
+// gate-mode paths a scenario normally forces. Lets a headless moving scenario profile what the
+// player actually experiences (the gate-mode foliage readback/cache-disable hugely inflate cost).
+bool g_play_paths = false;
+// TEMP diag (spec 008 follow-up): --profile-fly <seconds> drives the player FORWARD at a constant
+// noclip speed in NORMAL-PLAY mode (no scenario, no gate-mode) so the SLOWFRAME logger captures a
+// representative moving cost without the time-based scenario camera's teleport-under-load feedback.
+// Pair with --auto-create-world --auto-enter-world --no-audio. 0 = off.
+double g_profile_fly_seconds = 0.0;
 int g_render_benchmark_frames = 120;   // measured frames (after warm-up)
 int g_render_benchmark_warmup = 60;    // frames discarded before measuring (stream/settle)
 // spec 004 Phase 0: optional PPM screenshot of the forest-DENSE budget pose,
@@ -197,6 +209,22 @@ float g_scene_cloud_biome = 0.0f;
 float g_scene_cloud_plane = 900.0f;
 bool g_scene_cloud_shadow = false;
 float g_scene_cloud_shadow_strength = 0.0f;
+// framescan: --frame-scan <out.json> boots the auto-world, pins a FIXED forest-dense
+// camera pose + near-noon time-of-day (reproducible), lets the world settle, then
+// reads back the settled frame's G-buffer material-id attachment + back color buffer
+// and writes a per-material coverage/luminance + water + foliage JSON report, then
+// exits. RENDER-ONLY: the scan issues no draws and never touches sim/world_hash, so
+// running it twice on the same world produces an IDENTICAL report. Pair with
+// --auto-create-world --auto-enter-world. Empty = off.
+std::string g_frame_scan_path;
+bool g_frame_scan_active = false;
+int g_frame_scan_settle = 0;
+static constexpr int kFrameScanSettleFrames = 90; // let chunks stream + atmosphere settle
+// --survey <dir>: autonomous tour — discover POIs (waterfall/cliff/grass/lake) in the generated
+// world, teleport+stream+settle at each, write a screenshot + frame-scan per POI. Empty = off.
+std::string g_survey_dir;
+bool g_survey_active = false;
+int g_survey_settle = 0;
 // --ui-screenshot <screen>: the UI fidelity gate. Force the menu state, load <screen>.rml,
 // let layout/fonts settle, then capture the back buffer (which holds the UI over the menu
 // backdrop) and exit. Drives the reference-driven compose->render->compare loop for the UI,
@@ -1527,7 +1555,14 @@ private:
                     {"farlod_region_draws", farlod_stats.region_draws},
                     {"farlod_indices_drawn", farlod_stats.indices_drawn},
                     {"farlod_builds_completed_total", farlod_stats.builds_completed_total},
-                    {"farlod_evictions_total", farlod_stats.evictions_total}
+                    {"farlod_evictions_total", farlod_stats.evictions_total},
+                    // spec 008 WS-2: per-frame scheduler diagnostics for the mountains residency trace.
+                    {"farlod_builds_dispatched", farlod_stats.builds_dispatched},
+                    {"farlod_builds_integrated_ok", farlod_stats.builds_integrated_ok},
+                    {"farlod_builds_integrated_failed", farlod_stats.builds_integrated_failed},
+                    {"farlod_builds_failed_total", farlod_stats.builds_failed_total},
+                    {"farlod_evictions_this_frame", farlod_stats.evictions_this_frame},
+                    {"farlod_pending_depth", farlod_stats.pending_depth}
                 };
             }
         }
@@ -2286,6 +2321,8 @@ int main(int argc, char* argv[]) {
     // frames -> JSON (render-optimization budget-gate capture). Pair with
     // --auto-create-world --auto-enter-world.
     g_render_benchmark_path = GetCommandLineOption(argc, argv, "--render-benchmark", "");
+    g_play_paths = HasCommandLineFlag(argc, argv, "--play-paths"); // TEMP diag: normal-play paths under a scripted scenario camera
+    g_profile_fly_seconds = static_cast<double>(GetCommandLineIntOption(argc, argv, "--profile-fly", 0)); // TEMP diag: constant-speed eye-level moving profiler (normal-play, self-exits)
     g_render_benchmark_frames = GetCommandLineIntOption(argc, argv, "--render-benchmark-frames", 120);
     g_render_benchmark_warmup = GetCommandLineIntOption(argc, argv, "--render-benchmark-warmup", 60);
     g_render_benchmark_screenshot = GetCommandLineOption(argc, argv, "--render-benchmark-screenshot", "");
@@ -2350,6 +2387,23 @@ int main(int argc, char* argv[]) {
         } catch (const std::exception& e) {
             LUMINUMBRA_CORE_ERROR("Scene-config parse failed: {}", e.what());
         }
+    }
+
+    // framescan: --frame-scan <out.json>. Pin the same forest-dense pose the render
+    // benchmark uses so the scan is reproducible + stresses real coverage, then write
+    // the what's-in-frame report and exit. Render-only (no draws, no world_hash).
+    if (const std::string fs = GetCommandLineOption(argc, argv, "--frame-scan", ""); !fs.empty()) {
+        g_frame_scan_active = true;
+        g_frame_scan_path = fs;
+        LUMINUMBRA_CORE_INFO("Frame-scan armed -> {} (auto-world, fixed pose, settle {} frames)",
+                             g_frame_scan_path, kFrameScanSettleFrames);
+    }
+    // --survey <dir>: autonomous POI tour + per-scene screenshot/frame-scan. Pair with
+    // --auto-create-world --auto-enter-world --no-audio.
+    if (const std::string sv = GetCommandLineOption(argc, argv, "--survey", ""); !sv.empty()) {
+        g_survey_active = true;
+        g_survey_dir = sv;
+        LUMINUMBRA_CORE_INFO("Scene survey armed -> {} (auto-world; tours waterfall/cliff/grass/lake)", g_survey_dir);
     }
 
     // --ui-screenshot <screen> [--ui-screenshot-out <path>] [--ui-fixtures]: capture a single
@@ -2575,6 +2629,9 @@ int main(int argc, char* argv[]) {
         scenario_config.isolation_layers, scenario_config.isolation_backdrop));
     // T-I3-9: far-LOD tile builds ride the JobSystem Normal lane.
     renderPipeline.attach_farlod_job_system(&jobSystem);
+    // spec 008 WS-4 §9: set the sky-LUT GPU flag BEFORE startup() so the one-shot precompute
+    // (init_sky_lut, inside startup) takes the GPU compute path. render.sky_lut_gpu, default OFF.
+    renderPipeline.set_sky_lut_gpu_enabled(g_systemConfig.enabled(luminumbra::core::SysKey::RenderSkyLutGpu));
     // Render-optimization (cloud-raymarch-optimization): opt-in reduced-res sky-dome
     // quality knob, matching the existing LUMIN_* render-tuning idiom. Unset -> 0
     // (full, byte-identical legacy path). 1 = half (1/2 per axis), 2 = quarter.
@@ -2614,6 +2671,7 @@ int main(int argc, char* argv[]) {
     renderPipeline.set_ssao_quality(ssao_quality);   // default 2 (GTAO High); env can set 0
     // FR-R5 TAAU: enable the temporal resolve from the render.taau flag (default OFF -> byte-identical).
     renderPipeline.set_taau_enabled(g_systemConfig.enabled(luminumbra::core::SysKey::RenderTaau));
+    // (render.sky_lut_gpu is set BEFORE startup above so init_sky_lut also takes the GPU path.)
     // T-I4-DR-split-lint: data-driven skinned-mesh texture set. The scenario
     // config resolved the .ltex paths (from the game archetype JSON or a generic
     // test texture); hand them to the generic RenderPipeline loader so no
@@ -3082,7 +3140,11 @@ int main(int argc, char* argv[]) {
                 scenario_config.world_visual_sweep())
                    ? (scenario_config.world_preset.empty() ? std::string("archipelago")
                                                             : scenario_config.world_preset)
-                   : "default");
+                   // General auto-create (e.g. --survey / --frame-scan): honour an explicit
+                   // --world-preset so the tools can tour ANY preset (mountains, archipelago, ...),
+                   // else the historical "default" world.
+                   : (scenario_config.world_preset.empty() ? std::string("default")
+                                                            : scenario_config.world_preset));
     if (scenario_config.auto_create_world || HasCommandLineFlag(argc, argv, "--auto-create-world") || runtime_boot_recorder.enabled()) {
         start_world_creation("Automated Test World", "424242", scenario_world_type, {});
     }
@@ -3473,6 +3535,8 @@ int main(int argc, char* argv[]) {
         // spec 004 Phase 0: CPU-submit clock starts at frame top when benchmarking.
         const bool g_rb_active = !g_render_benchmark_path.empty();
         if (g_rb_active) g_rb_frame_start = std::chrono::steady_clock::now();
+        // TEMP diag (spec 008 follow-up): always-on frame wall to localize slideshow-on-move frames.
+        const auto _frameStart = std::chrono::steady_clock::now();
         double rb_sim_ms = 0.0;     // spec 004: this frame's sim-tick CPU cost
         double rb_stream_ms = 0.0;  // spec 004: this frame's streaming CPU cost
         double rb_foliage_ms = 0.0; // spec 004: this frame's foliage rebuild_instances cost
@@ -3480,6 +3544,7 @@ int main(int argc, char* argv[]) {
         double rb_render_call_ms = 0.0; // spec 004 §12: full render_frame() wall (incl. unmeasured pass CPU submit)
         double rb_poll_ms = 0.0;        // spec 004 §12: glfwPollEvents wall (input/window message pump)
         double rb_scatter_ms = 0.0;     // spec 004 §12: per-frame foliage chunk_scatter BUILD (terrain/biome sample per renderable chunk)
+        double rb_rebake_ms = 0.0;      // TEMP diag: per-frame RebakeAllPlants (procgen plant composite re-bake)
         // Declared at loop scope (not inside the case) so the case labels below
         // don't "jump over" an initialized local (ill-formed in a switch).
         std::chrono::steady_clock::time_point _rb_sim_t0{}, _rb_stream_t0{};
@@ -3513,10 +3578,9 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        std::chrono::steady_clock::time_point _rb_poll_t0{};
-        if (g_rb_active) _rb_poll_t0 = std::chrono::steady_clock::now();
+        const auto _rb_poll_t0 = std::chrono::steady_clock::now(); // always-on (TEMP diag)
         glfwPollEvents();
-        if (g_rb_active) rb_poll_ms = std::chrono::duration<double, std::milli>(
+        rb_poll_ms = std::chrono::duration<double, std::milli>(
                              std::chrono::steady_clock::now() - _rb_poll_t0).count();
 
         // Debounced framebuffer resize (T-I4-DR-window-modes): coalesce a burst
@@ -3595,20 +3659,22 @@ int main(int argc, char* argv[]) {
                         );
                     }
                     LUMINUMBRA_CORE_INFO("World generation phase complete. Entering world.");
+                    g_camera = std::make_unique<Luminumbra::Rendering::Camera>(gameSession->GetMetadata().spawnPoint);
+                    g_camera->MouseSensitivity = g_systemConfig.user().mouse_sensitivity;  // user.video.mouse_sensitivity
+                    g_camera->Zoom = g_systemConfig.user().fov;                             // user.video.fov
+                    if (g_world_render_data_initialized) {
+                        renderPipeline.clear_all_chunk_data();
+                    }
+                    g_world_render_data_initialized = true;
+
                     audioManager->StopMusic();
                     audioManager->PlayOneShot2D("ui_world_loaded"); // Play a sound on completion
                     if (g_loading_visualizer) {
                         g_loading_visualizer->EndVisualization();
                     }
-                    g_camera = std::make_unique<Luminumbra::Rendering::Camera>(gameSession->GetMetadata().spawnPoint);
-                    g_camera->MouseSensitivity = g_systemConfig.user().mouse_sensitivity;  // user.video.mouse_sensitivity
-                    g_camera->Zoom = g_systemConfig.user().fov;                             // user.video.fov
                     g_playerController = std::make_unique<Luminumbra::Client::PlayerController>(window, g_camera.get(), gameSession->GetPhysicsSystem());
                     g_playerController->ApplyKeyBindings(g_systemConfig);  // user.controls.* (rebindable)
-                    if (g_world_render_data_initialized) {
-                        renderPipeline.clear_all_chunk_data();
-                    }
-                    g_world_render_data_initialized = true;
+                    // (camera created + chunk data cleared + upload backlog drained above, before entry)
                     SetGameState(window, gameStateManager, GameState::IN_GAME);
                     // T030 (Phase 3): show the diegetic HUD during normal play. Skipped in headless
                     // scenario capture so the visual gates stay overlay-free.
@@ -4612,6 +4678,23 @@ int main(int argc, char* argv[]) {
                         g_camera->Pitch = 0.0f;
                         g_camera->updateCameraVectors();
                     }
+                } else if (g_profile_fly_seconds > 0.0 && g_playerController && g_camera) {
+                    // TEMP diag (--profile-fly): drive the player FORWARD at a constant noclip speed in
+                    // normal-play mode so the SLOWFRAME logger captures a representative MOVING cost
+                    // without the time-based scenario camera's teleport-under-load feedback. deltaTime is
+                    // clamped (<=50ms) so per-frame movement stays bounded even on a slow frame → no
+                    // teleport/active-set explosion. A slow yaw drift sweeps varied terrain (rivers/biomes).
+                    // Self-exits after g_profile_fly_seconds. UpdateNoclip directly advances position
+                    // (bypasses physics); streaming anchor = GetPosition() follows.
+                    static double s_profile_start = glfwGetTime();
+                    const double elapsed = glfwGetTime() - s_profile_start;
+                    g_camera->Yaw = static_cast<float>(std::fmod(elapsed * 6.0, 360.0));  // ~1 rev / 60s
+                    g_camera->Pitch = 0.0f;
+                    g_camera->updateCameraVectors();
+                    glm::vec3 fwd(g_camera->Front.x, 0.0f, g_camera->Front.z);
+                    if (glm::length(fwd) > 1e-4f) fwd = glm::normalize(fwd);
+                    g_playerController->ProfileDriveNoclip(deltaTime, fwd);
+                    if (elapsed > g_profile_fly_seconds) glfwSetWindowShouldClose(window, true);
                 } else if (g_playerController && !g_show_settings) {
                     g_playerController->Update(deltaTime);  // movement paused while the menu is open
                 }
@@ -5298,8 +5381,13 @@ int main(int argc, char* argv[]) {
                             static bool s_foliage_loaded = false;
                             if (!s_foliage_loaded) {
                                 foliage->load_scatter_set(root_dir / "data/common/foliage/scatter_set.json");
-                                foliage->set_fade_distances(130.0f, 210.0f); // grass out to ~210 m
-                                foliage->set_density_scale(1.0f);
+                                // Grass overhaul: concentrate the instance budget into a DENSE NEAR carpet
+                                // (detail-near, texture-far — the AAA approach) instead of a thin scatter
+                                // spread to 210 m. The global instance cap redistributes nearest-first, so a
+                                // tighter fade makes the near field a believable carpet instead of sparse
+                                // lit slivers over bare ground. RENDER-ONLY.
+                                foliage->set_fade_distances(48.0f, 92.0f);
+                                foliage->set_density_scale(1.6f);
                                 s_foliage_loaded = true;
                             }
                             // spec 004: skip the foliage CPU readback (a ~5 ms sync
@@ -5308,7 +5396,7 @@ int main(int argc, char* argv[]) {
                             // which draw straight from the SSBO. Any active scenario
                             // (every gate, incl. FoliageInstancing's foliage_visual_smoke)
                             // KEEPS the readback so instance_hash()/coverage stay exact.
-                            foliage->set_readback_enabled(scenario_config.active());
+                            foliage->set_readback_enabled(scenario_config.active() && !g_play_paths);
                             glm::vec2 wind_xz(0.0f, 0.0f);
                             if (auto* wind = gameSession->GetWindFieldSystem()) {
                                 const Luminumbra::Vec2 w = wind->SampleWind(Luminumbra::Vec3(
@@ -5339,33 +5427,61 @@ int main(int argc, char* argv[]) {
                                        | (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.y)) << 42));
                             }
                             const bool scatter_rebuild =
-                                scenario_config.active() || scatter_sig != s_cached_scatter_sig;
+                                (scenario_config.active() && !g_play_paths) || scatter_sig != s_cached_scatter_sig;
                             if (scatter_rebuild) {
+                                // spec 008 follow-up: each per-chunk ChunkScatter (GetTerrainHeightAt +
+                                // BiomeIdAt at the chunk centre) is a pure function of the chunk + the
+                                // static terrain/biome, so cache it per chunk id. The full rebuild on a
+                                // chunk-set change then only COMPUTES the newly-streamed chunks instead
+                                // of re-sampling every renderable chunk (~130ms while moving). The y-band
+                                // reject is cached too (stored as accepted=false). RENDER-ONLY.
+                                struct ScatterEntry { bool accepted; Luminumbra::Rendering::FoliagePass::ChunkScatter cs; };
+                                static std::unordered_map<Luminumbra::ChunkID, ScatterEntry> s_scatter_by_chunk;
                                 s_cached_scatter.clear();
                                 s_cached_scatter.reserve(fol_renderable.size());
                                 for (const Luminumbra::Chunk* chunk : fol_renderable) {
                                     if (chunk == nullptr) { continue; }
-                                    const Luminumbra::IVec3 c = chunk->get_coords();
-                                    const float origin_x = static_cast<float>(c.x * Luminumbra::CHUNK_SIZE_X);
-                                    const float origin_z = static_cast<float>(c.z * Luminumbra::CHUNK_SIZE_Z);
-                                    const float center_x = origin_x + Luminumbra::CHUNK_SIZE_X * 0.5f;
-                                    const float center_z = origin_z + Luminumbra::CHUNK_SIZE_Z * 0.5f;
-                                    const float surf_h = fol_ws->GetTerrainHeightAt(center_x, center_z);
-                                    const float chunk_y0 = static_cast<float>(c.y * Luminumbra::CHUNK_SIZE_Y);
-                                    if (surf_h < chunk_y0 || surf_h >= chunk_y0 + Luminumbra::CHUNK_SIZE_Y) { continue; }
-                                    const Luminumbra::u8 biome_id = fol_ws->BiomeIdAt(center_x, center_z);
-                                    const float density = fol_ws->biomes_enabled()
-                                        ? fol_ws->biome_table().vegetation_for(biome_id).density
-                                        : 0.3f;
-                                    Luminumbra::Rendering::FoliagePass::ChunkScatter cs;
-                                    cs.chunk_xz = glm::ivec2(c.x, c.z);
-                                    cs.origin = glm::vec3(origin_x, 0.0f, origin_z);
-                                    cs.extent_m = static_cast<float>(Luminumbra::CHUNK_SIZE_X);
-                                    cs.biome_id = biome_id;
-                                    cs.density = density;
-                                    s_cached_scatter.push_back(cs);
+                                    const Luminumbra::ChunkID id = chunk->get_id();
+                                    auto it = s_scatter_by_chunk.find(id);
+                                    if (it == s_scatter_by_chunk.end()) {
+                                        const Luminumbra::IVec3 c = chunk->get_coords();
+                                        const float origin_x = static_cast<float>(c.x * Luminumbra::CHUNK_SIZE_X);
+                                        const float origin_z = static_cast<float>(c.z * Luminumbra::CHUNK_SIZE_Z);
+                                        const float center_x = origin_x + Luminumbra::CHUNK_SIZE_X * 0.5f;
+                                        const float center_z = origin_z + Luminumbra::CHUNK_SIZE_Z * 0.5f;
+                                        const float surf_h = fol_ws->GetTerrainHeightAt(center_x, center_z);
+                                        const float chunk_y0 = static_cast<float>(c.y * Luminumbra::CHUNK_SIZE_Y);
+                                        ScatterEntry entry{};
+                                        if (surf_h < chunk_y0 || surf_h >= chunk_y0 + Luminumbra::CHUNK_SIZE_Y) {
+                                            entry.accepted = false;
+                                        } else {
+                                            const Luminumbra::u8 biome_id = fol_ws->BiomeIdAt(center_x, center_z);
+                                            const float density = fol_ws->biomes_enabled()
+                                                ? fol_ws->biome_table().vegetation_for(biome_id).density
+                                                : 0.3f;
+                                            entry.accepted = true;
+                                            entry.cs.chunk_xz = glm::ivec2(c.x, c.z);
+                                            entry.cs.origin = glm::vec3(origin_x, 0.0f, origin_z);
+                                            entry.cs.extent_m = static_cast<float>(Luminumbra::CHUNK_SIZE_X);
+                                            entry.cs.biome_id = biome_id;
+                                            entry.cs.density = density;
+                                        }
+                                        it = s_scatter_by_chunk.emplace(id, entry).first;
+                                    }
+                                    if (it->second.accepted) { s_cached_scatter.push_back(it->second.cs); }
                                 }
                                 s_cached_scatter_sig = scatter_sig;
+                                // Bound the cache: drop entries no longer renderable once it grows large.
+                                if (s_scatter_by_chunk.size() > 4096) {
+                                    std::unordered_set<Luminumbra::ChunkID> live;
+                                    live.reserve(fol_renderable.size());
+                                    for (const Luminumbra::Chunk* ch : fol_renderable) {
+                                        if (ch) { live.insert(ch->get_id()); }
+                                    }
+                                    for (auto pit = s_scatter_by_chunk.begin(); pit != s_scatter_by_chunk.end();) {
+                                        pit = live.count(pit->first) ? std::next(pit) : s_scatter_by_chunk.erase(pit);
+                                    }
+                                }
                             }
                             const std::vector<Luminumbra::Rendering::FoliagePass::ChunkScatter>& chunk_scatter =
                                 s_cached_scatter;
@@ -5401,12 +5517,16 @@ int main(int argc, char* argv[]) {
                     // (and growing) plants render at their current stage. No-op when there are no sim
                     // plants (leaves the procgen scatter on the pass untouched); once the player farms,
                     // their plants take the pass.
-                    if (auto* ppp = renderPipeline.plant_procgen())
-                        RebakeAllPlants(ppp, gameSession->GetRegistry(), g_procgenSunDir, g_season);
-                    std::chrono::steady_clock::time_point _rb_rcall_t0{};
-                    if (g_rb_active) _rb_rcall_t0 = std::chrono::steady_clock::now();
+                    {
+                        const auto _fb0 = std::chrono::steady_clock::now(); // TEMP diag: per-frame foliage rebake
+                        if (auto* ppp = renderPipeline.plant_procgen())
+                            RebakeAllPlants(ppp, gameSession->GetRegistry(), g_procgenSunDir, g_season);
+                        rb_rebake_ms = std::chrono::duration<double, std::milli>(
+                                            std::chrono::steady_clock::now() - _fb0).count();
+                    }
+                    const auto _rb_rcall_t0 = std::chrono::steady_clock::now(); // always-on (TEMP diag)
                     renderPipeline.render_frame(gameSession->GetRegistry(), *gameSession->GetWorldSystem(), *g_camera, deltaTime, wireframe_mode);
-                    if (g_rb_active) rb_render_call_ms = std::chrono::duration<double, std::milli>(
+                    rb_render_call_ms = std::chrono::duration<double, std::milli>(
                                          std::chrono::steady_clock::now() - _rb_rcall_t0).count();
 
                     // --scene-config: self-contained capture. Settle a few frames (world
@@ -5426,6 +5546,77 @@ int main(int argc, char* argv[]) {
                                 glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
                                 WritePixelBufferPpm(g_scene_shot, vw, vh, px);
                                 LUMINUMBRA_CORE_INFO("Scene capture written -> {} ({}x{})", g_scene_shot.string(), vw, vh);
+                            }
+                            glfwSetWindowShouldClose(window, GLFW_TRUE);
+                        }
+                    }
+
+                    // survey: autonomous POI tour. Let the spawn world settle a few frames, then
+                    // discover + capture a waterfall / cliff / grass field / lake (teleport + stream
+                    // + settle + screenshot + frame-scan per POI), then exit. RENDER-ONLY.
+                    if (g_survey_active && currentState == GameState::IN_GAME && gameSession &&
+                        gameSession->GetWorldSystem() && g_camera) {
+                        if (g_survey_settle < 45) {
+                            ++g_survey_settle;
+                        } else {
+                            Luminumbra::Rendering::RunSceneSurvey(
+                                window, *gameSession, renderPipeline, *g_camera,
+                                std::filesystem::path(g_survey_dir),
+                                root_dir / "data/common/materials.json", wireframe_mode);
+                            glfwSetWindowShouldClose(window, GLFW_TRUE);
+                        }
+                    }
+
+                    // framescan: deterministic what's-in-frame scan. Pin the SAME forest-dense
+                    // pose + near-noon time-of-day the render benchmark uses (reproducible +
+                    // real coverage), settle, then read the settled frame's G-buffer material-id
+                    // attachment + clean back buffer (BEFORE any UI overlay) and write the
+                    // per-material coverage/luminance + water + foliage report. RENDER-ONLY: the
+                    // scan issues no draws and never feeds world_hash, so a second run on the same
+                    // world is byte-identical. Pinned every frame so settle can't drift the pose.
+                    if (g_frame_scan_active && currentState == GameState::IN_GAME && gameSession) {
+                        if (g_camera) {
+                            // Eye-level ground-inspection pose: low + a gentle down-pitch so the
+                            // near-field grass/rock/terrain fill the lower frame (card shape + specks
+                            // are visible), with terrain to the horizon above. Deterministic fixed pose.
+                            g_camera->Position = glm::vec3(8.0f, 24.0f, 8.0f);
+                            g_camera->Yaw = 35.0f;
+                            g_camera->Pitch = -14.0f;
+                            g_camera->updateCameraVectors();
+                        }
+                        renderPipeline.set_time_of_day(0.04f); // fixed near-noon (lit terrain)
+                        if (g_frame_scan_settle < kFrameScanSettleFrames) {
+                            ++g_frame_scan_settle; // let chunks stream + atmosphere settle
+                        } else {
+                            int vw = 0, vh = 0;
+                            glfwGetFramebufferSize(window, &vw, &vh);
+                            const Luminumbra::Rendering::FrameScanReport rep =
+                                Luminumbra::Rendering::ScanFrame(
+                                    renderPipeline, vw, vh,
+                                    root_dir / "data/common/materials.json");
+                            if (rep.ok &&
+                                Luminumbra::Rendering::WriteFrameScanReport(
+                                    rep, std::filesystem::path(g_frame_scan_path))) {
+                                LUMINUMBRA_CORE_INFO(
+                                    "Frame-scan written -> {} ({}x{}): {} materials, water {:.1f}%, foliage {} inst, mean luma {:.3f}",
+                                    g_frame_scan_path, rep.width, rep.height, rep.materials.size(),
+                                    rep.water_coverage * 100.0, rep.foliage_instances,
+                                    rep.mean_frame_luminance);
+                                // Also dump the scanned back buffer as a PPM next to the JSON, so the
+                                // scan is a full diagnostic (numbers + the exact image they describe).
+                                if (vw > 0 && vh > 0) {
+                                    std::vector<unsigned char> px(
+                                        static_cast<std::size_t>(vw) * static_cast<std::size_t>(vh) * 3u);
+                                    glReadBuffer(GL_BACK);
+                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                                    glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+                                    std::filesystem::path img(g_frame_scan_path);
+                                    img.replace_extension(".ppm");
+                                    WritePixelBufferPpm(img, vw, vh, px);
+                                    LUMINUMBRA_CORE_INFO("Frame-scan image -> {}", img.string());
+                                }
+                            } else {
+                                LUMINUMBRA_CORE_ERROR("Frame-scan failed -> {}", g_frame_scan_path);
                             }
                             glfwSetWindowShouldClose(window, GLFW_TRUE);
                         }
@@ -5489,6 +5680,33 @@ int main(int argc, char* argv[]) {
                         // next composite re-bake (RebakeAllPlants) drops the now-promoted dup.
                         if (promoted) {
                             if (auto* fpp = renderPipeline.plant_procgen()) BakeProcgenPlants(fpp, g_procgenStageF);
+                        }
+                    }
+
+                    // --- Spec 009 Phase 2: player TERRAFORM verbs (R dig / T fill) ---
+                    // Carve (R) or raise (T) the voxel terrain at the player's aim point via the
+                    // deterministic SHIELD_WorldSystem::EditTerrainVoxel — it edits sdf_data, remeshes,
+                    // rebuilds colliders, and couples the water bed so a dig DRAINS a river/lake and a
+                    // fill DAMS it. Edge-triggered (one carve per press). Interactive-only guard keeps it
+                    // out of scenario/gate runs, so determinism is unaffected (gates never press R/T).
+                    if (g_playerController && currentState == GameState::IN_GAME &&
+                        !scenario_config.active() && !g_paused && gameSession && g_camera &&
+                        gameSession->GetWorldSystem()) {
+                        static bool s_dig = false, s_fill = false;
+                        const bool dig_now  = glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS;
+                        const bool fill_now = glfwGetKey(window, GLFW_KEY_T) == GLFW_PRESS;
+                        const bool dig_fired  = dig_now  && !s_dig;   s_dig  = dig_now;
+                        const bool fill_fired = fill_now && !s_fill;  s_fill = fill_now;
+                        if (dig_fired || fill_fired) {
+                            // Aim where the player looks: a point ~5 m down the camera ray.
+                            constexpr float kReach = 5.0f, kRadius = 3.0f;
+                            const glm::vec3 aim = glm::vec3(g_camera->Position) +
+                                                  glm::normalize(g_camera->Front) * kReach;
+                            const int n = gameSession->GetWorldSystem()->EditTerrainVoxel(
+                                Luminumbra::Vec3(aim.x, aim.y, aim.z), kRadius,
+                                /*fill=*/fill_fired, gameSession->GetPhysicsSystem());
+                            LUMINUMBRA_CORE_INFO("Terraform: {} {} chunk(s) at ({:.1f},{:.1f},{:.1f})",
+                                                 fill_fired ? "filled" : "dug", n, aim.x, aim.y, aim.z);
                         }
                     }
 
@@ -6660,6 +6878,11 @@ int main(int argc, char* argv[]) {
 
                                         FarLodHorizonStationCapture capture;
                                         capture.station = farlod_horizon_stations[station_index];
+                                        // spec 008 WS-2: record the resolved eye world position so the
+                                        // analysis can confirm all stations share one XZ (constant ring).
+                                        capture.camera_world_x = g_camera->Position.x;
+                                        capture.camera_world_y = g_camera->Position.y;
+                                        capture.camera_world_z = g_camera->Position.z;
                                         capture.sky = AnalyzePlayerViewPixels(
                                             frame_pixels, screenshot_width, screenshot_height, horizon_row_from_top);
                                         int band_top = 0;
@@ -6708,6 +6931,15 @@ int main(int argc, char* argv[]) {
                                             // T-I4-DR-far-water-sheet: far water sheet draw counts.
                                             capture.water_sheet_draws = farlod_stats.water_sheet_draws;
                                             capture.water_sheet_indices = farlod_stats.water_sheet_indices;
+                                            // spec 008 WS-2: far-LOD scheduler diagnostics at capture time.
+                                            capture.builds_dispatched = farlod_stats.builds_dispatched;
+                                            capture.builds_integrated_ok = farlod_stats.builds_integrated_ok;
+                                            capture.builds_integrated_failed = farlod_stats.builds_integrated_failed;
+                                            capture.builds_failed_total = farlod_stats.builds_failed_total;
+                                            capture.builds_completed_total = farlod_stats.builds_completed_total;
+                                            capture.evictions_this_frame = farlod_stats.evictions_this_frame;
+                                            capture.evictions_total = farlod_stats.evictions_total;
+                                            capture.pending_depth = farlod_stats.pending_depth;
                                         }
                                         // T-I4-DR-sliver-baseline-diff: PAIRED far-OFF
                                         // baseline at the EXACT same camera/frame. The
@@ -7660,7 +7892,30 @@ int main(int argc, char* argv[]) {
         // queued); present begins. With vsync off the swap drains the driver
         // queue, so its duration is the GPU/present wait.
         if (g_rb_active) g_rb_before_swap = std::chrono::steady_clock::now();
+        const auto _beforeSwap = std::chrono::steady_clock::now();
         glfwSwapBuffers(window);
+        // TEMP diag (spec 008 follow-up): localize slideshow-on-move frames. Logs the phase split
+        // for any frame slower than ~30 fps. sim = TickSimulation (physics+ecology), stream =
+        // SHIELD_WorldSystem::update, render = render_frame() CPU, present = swap wait.
+        {
+            const auto _now = std::chrono::steady_clock::now();
+            const double _wallMs = std::chrono::duration<double, std::milli>(_now - _frameStart).count();
+            const double _presentMs = std::chrono::duration<double, std::milli>(_now - _beforeSwap).count();
+            static int _slowN = 0;
+            if (_wallMs > 12.0 && _slowN++ < 400) {
+                const double _other = _wallMs - rb_sim_ms - rb_stream_ms - rb_render_call_ms - _presentMs;
+                LUMINUMBRA_CORE_WARN(
+                    "SLOWFRAME {:.1f}ms ({:.0f}fps): sim={:.1f} stream={:.1f} render={:.1f} present={:.1f} other={:.1f} | foliage_inst={:.1f} scatter={:.1f} rebake={:.1f} poll={:.1f}",
+                    _wallMs, 1000.0 / _wallMs, rb_sim_ms, rb_stream_ms, rb_render_call_ms, _presentMs, _other,
+                    rb_foliage_ms, rb_scatter_ms, rb_rebake_ms, rb_poll_ms);
+                if (gameSession && gameSession->GetWorldSystem()) {
+                    const auto& st = gameSession->GetWorldSystem()->dbg_stream_timings();
+                    LUMINUMBRA_CORE_WARN(
+                        "  stream-split: process_completed={:.1f} telemetry={:.1f} activation={:.1f} water={:.1f} meshing_pass={:.1f} collision={:.1f}",
+                        st.process_completed, st.telemetry, st.activation, st.water, st.meshing_pass, st.collision);
+                }
+            }
+        }
 
         // spec 004 Phase 0 — HONEST measurement substrate. wall = max(CPU_submit,
         // GPU_work) + present. The old benchmark summed per-pass GPU timers ONLY

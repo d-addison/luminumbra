@@ -1,6 +1,7 @@
 #pragma once
 #include "../core/JobSystem.h"
 #include "entt/entt.hpp"
+#include <cstdint>
 #include <unordered_map>
 #include <memory>
 #include <vector>
@@ -92,6 +93,11 @@ public:
 
     void apply_displacement(const Vec3& world_pos, f32 volume);
 
+    // Spec 009 Phase 2 — TERRAFORM the water bed: adjust water_bed_mm by delta_mm (dig<0 / dam>0) for
+    // cells within radius_m of world_pos + wake them; the fixed-point solver then drains/pools for free.
+    // Deterministic (replicate as a command for host==peer). Returns cells edited.
+    int EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, float radius_m);
+
     // --- Adaptive Water Grid System ---
     
     /**
@@ -150,6 +156,31 @@ private:
     // This is updated each frame in the `update` call.
 
     const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>* m_active_chunks = nullptr;
+
+    // spec 008 follow-up (streaming-burst amortization): rotating cursor for the per-tick water-sim
+    // budget. When more chunks are active than MAX_WATER_SIMS_PER_TICK, we sim a DETERMINISTIC window
+    // (sorted by chunk id) and rotate it each tick so every chunk sims over a few ticks instead of
+    // all-at-once (which blocked the main thread ~450ms on m_job_system->wait when moving into water).
+    // Deterministic (no job-timing dependence) — guarded by the WaterDeterminism live-water gate.
+    // Spec 009 mass-conservation telemetry (AC-2): last tick's total source/sink (mm) and whether the
+    // integer mass invariant held (Σdepth change == Σsource − Σsink). Render/debug only — not hashed.
+public:
+    [[nodiscard]] std::int64_t dbg_last_source_mm() const { return m_dbg_last_source_mm; }
+    [[nodiscard]] std::int64_t dbg_last_sink_mm() const { return m_dbg_last_sink_mm; }
+    [[nodiscard]] bool dbg_mass_ok() const { return m_dbg_mass_ok; }
+    // Spec 009 Phase 3: cross-chunk CONTINUITY proof — last tick's count of chunk-seam cell-pairs with
+    // water depth>0 on BOTH sides (a river/lake spanning a chunk border). >0 proves cross-chunk flux works.
+    [[nodiscard]] int dbg_seam_wet_pairs() const { return m_dbg_seam_wet_pairs; }
+private:
+    std::int64_t m_dbg_last_source_mm = 0;
+    std::int64_t m_dbg_last_sink_mm = 0;
+    bool m_dbg_mass_ok = true;
+    int m_dbg_seam_wet_pairs = 0;
+
+    std::size_t m_water_sim_cursor = 0;
+    // spec 008 follow-up: rotating cursor for the per-tick water-grid RESIZE budget (see
+    // MAX_WATER_RESIZES_PER_TICK). Same deterministic-window amortization as m_water_sim_cursor.
+    std::size_t m_water_resize_cursor = 0;
     EntityID m_camera_entity = entt::null;
 
 

@@ -1257,6 +1257,26 @@ struct FarLodHorizonStationCapture {
     // the regression guard that the band is not a fully white-washed sand sheet.
     std::uint64_t boundary_band_sand_flat_pixels = 0;
     double boundary_band_sand_flat_ratio = 0.0;
+    // spec 008 WS-2 diagnostics: far-LOD scheduler activity at capture time. The
+    // per-frame counters snapshot this tick's dispatch/integrate/evict; the cumulative
+    // totals separate the two hypotheses for persistent mountains-preset missing regions
+    // — builds_failed_total > 0 means BuildPristineFarLodTile returned empty meshes
+    // (hypothesis b), while a large evictions_total relative to builds_completed_total
+    // means evict/rebuild thrash the 8/frame dispatch cap can't keep up with (hypothesis a).
+    std::size_t builds_dispatched = 0;
+    std::size_t builds_integrated_ok = 0;
+    std::size_t builds_integrated_failed = 0;
+    std::size_t builds_failed_total = 0;
+    std::size_t builds_completed_total = 0;
+    std::size_t evictions_this_frame = 0;
+    std::size_t evictions_total = 0;
+    std::size_t pending_depth = 0;
+    // spec 008 WS-2: resolved eye world position at capture time. All stations should share
+    // one XZ (only yaw/pitch/height sweep), so the wanted ring is identical — this empirically
+    // confirms it rather than relying on reading ApplyFarLodHorizonCamera.
+    float camera_world_x = 0.0f;
+    float camera_world_y = 0.0f;
+    float camera_world_z = 0.0f;
 };
 
 // T-I4-DR-far-water-sheet / T-I5b-5-water-backlog: classifies the live/far

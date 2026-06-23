@@ -676,6 +676,13 @@ bool RenderPipeline::has_procgen_mesh(const std::string& key) const {
     return m_gbuffer_pass && m_gbuffer_pass->has_cached_mesh(key);
 }
 
+// framescan: expose the G-buffer attachments (read-only) for the what's-in-frame
+// scan tool. Forwards to the owning GBufferPass. RENDER-ONLY — only returns
+// existing GL texture ids; nothing is hashed or written to sim state.
+const GBuffer& RenderPipeline::gbuffer() const {
+    return m_gbuffer_pass->gbuffer();
+}
+
 void RenderPipeline::attach_farlod_job_system(JobSystem* job_system) {
     // Stored so passes CONSTRUCTED IN startup() (which runs after this call) can be
     // wired too — the far-field pass is one such, and without this it silently fell
@@ -1888,6 +1895,12 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
                                         ? m_sun.color
                                         : glm::vec3(1.0f);
         m_waterfall_shader->setVec3("u_sun_color", sun_color);
+        // Scene-light the waterfall (bright-waterfall fix): drive u_scene_light from the
+        // sun-up factor with a small night floor so the cascade is LIT by the scene and
+        // darkens at dusk/night instead of emitting near-white. RENDER-ONLY (the standalone
+        // WaterfallVisual gate never sets this uniform -> it keeps the shader default 1.0).
+        const float waterfall_scene_lit = 0.10f + 0.90f * glm::clamp(m_sun.intensity, 0.0f, 1.0f);
+        m_waterfall_shader->setVec3("u_scene_light", glm::vec3(waterfall_scene_lit));
 
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -1905,7 +1918,8 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
             const WaterfallSite& s = m_waterfall_sheet_sites[i];
             m_waterfall_shader->setFloat("u_crest_y", s.crest.y);
             m_waterfall_shader->setFloat("u_foot_y", s.foot.y);
-            glDrawArrays(GL_TRIANGLES, static_cast<GLint>(i * 6), 6);
+            // 12 verts/site: the vertical sheet (0..5) + the horizontal plunge-pool quad (6..11).
+            glDrawArrays(GL_TRIANGLES, static_cast<GLint>(i * 12), 12);
         }
         glBindVertexArray(0);
 
@@ -2236,6 +2250,9 @@ void RenderPipeline::init_sky_lut() {
     // cost in render telemetry (budget ≤ 8.0 ms on release). Render-only.
     update_time_of_day(0.0f); // seed m_sun.direction for the initial sky-view
     const glm::vec3 toward_sun = -glm::normalize(m_sun.direction);
+    // spec 008 WS-4 §9: compile the GPU compute programs OUTSIDE the timed precompute so the
+    // one-time driver shader-compile cost isn't charged to the budget (no-op when the knob is off).
+    m_sky_lut.prewarm_gpu_compute();
     double precompute_ms = 0.0;
     if (m_sky_lut.initialize(toward_sun, &precompute_ms)) {
         m_skyScatterAmbient = m_sky_lut.sky_ambient();
@@ -2573,9 +2590,11 @@ void RenderPipeline::prepare_waterfalls(const Systems::SHIELD_WorldSystem& world
     }
     m_waterfall_sheet_sites = sites;
 
-    // Interleaved pos(3) + normal(3) per vertex; 6 verts (two triangles) per site.
+    // Interleaved pos(3) + normal(3) per vertex; 12 verts per site = the vertical SHEET (6) +
+    // a horizontal plunge-POOL quad at the foot (6) so the fall visibly lands in water (the
+    // "connect to water" fix — the pool reads as roiling foam because the shader's fall_t≈1 there).
     constexpr int kFloatsPerVertex = 6;
-    constexpr int kVertsPerSite = 6;
+    constexpr int kVertsPerSite = 12;
     std::vector<float> verts;
     verts.reserve(m_waterfall_sheet_sites.size() * kVertsPerSite * kFloatsPerVertex);
 
@@ -2602,7 +2621,11 @@ void RenderPipeline::prepare_waterfalls(const Systems::SHIELD_WorldSystem& world
         const float run = std::max(s.run_length, kMinRun);
 
         // Lip (top) at the crest XZ; foot (bottom) advanced downstream by the run.
-        const float top_y = s.crest.y;
+        // CONNECT-TO-WATER: anchor the lip to the upstream WATER surface where the river/lake
+        // actually carries water (WaterLevelAt > terrain), so the sheet starts AT the water
+        // instead of floating on dry rock. Falls back to the terrain crest on perched/dry drops.
+        const float crest_water = world.WaterLevelAt(s.crest.x, s.crest.z);
+        const float top_y = std::max(s.crest.y, crest_water);
         const float bot_y = s.foot.y;
         const glm::vec3 top_center(s.crest.x, top_y, s.crest.z);
         const glm::vec3 bot_center = top_center + flow_dir * run + glm::vec3(0.0f, bot_y - top_y, 0.0f);
@@ -2627,6 +2650,21 @@ void RenderPipeline::prepare_waterfalls(const Systems::SHIELD_WorldSystem& world
         // Triangle 1: tl, bl, br ; Triangle 2: tl, br, tr.
         push_vert(tl); push_vert(bl); push_vert(br);
         push_vert(tl); push_vert(br); push_vert(tr);
+
+        // PLUNGE POOL: a horizontal foamy water quad at the foot so the fall lands IN water
+        // (visually connects sheet -> pool). Centred at the foot, sized ~1.6x the sheet width,
+        // facing UP; at y≈foot the shader's fall_t≈1 -> roiling plunge foam, so it reads as a pool.
+        n = up; // these 6 verts face up (overrides the sheet's horizontal normal in push_vert)
+        const float pool_half = std::max(half_w * 1.6f, 2.0f);
+        const glm::vec3 pc(bot_center.x, bot_y + 0.10f, bot_center.z);
+        const glm::vec3 pa = cross_axis * pool_half;  // width axis
+        const glm::vec3 pb = flow_dir * pool_half;    // downstream axis
+        const glm::vec3 ptl = pc - pa - pb;
+        const glm::vec3 ptr = pc + pa - pb;
+        const glm::vec3 pbl = pc - pa + pb;
+        const glm::vec3 pbr = pc + pa + pb;
+        push_vert(ptl); push_vert(pbl); push_vert(pbr);
+        push_vert(ptl); push_vert(pbr); push_vert(ptr);
     }
 
     // Upload the combined sheet geometry to a dedicated VAO/VBO.
@@ -2771,7 +2809,18 @@ void RenderPipeline::manage_chunk_gpu_resources(const std::vector<ChunkMeshSnaps
         upload_budget_limit = 16u;
     }
     const std::size_t upload_budget = std::min(upload_candidates.size(), upload_budget_limit);
+    // spec 008 follow-up (streaming-burst amortization): a FIXED count budget (up to 64) of
+    // freshly-streamed chunk meshes uploaded in one frame spikes render to 40ms+ when moving into a
+    // dense region (a fixed count of LARGE meshes = a big hitch — research: Zylann godot_voxel uses a
+    // per-frame TIME budget, not a count). Time-slice the upload: drain nearest-first (already sorted)
+    // until ~kTerrainUploadBudgetMs is spent, then defer the rest to following frames. A small floor
+    // (kMinTerrainUploadsPerFrame) guarantees forward progress so the near field still fills quickly.
+    // Render-only: the GPU geometry pool is NOT hashed (chunk mesh CONTENT is set in the world tick),
+    // so WHICH frame a mesh uploads is determinism-neutral — no lockstep impact, no gate change.
+    constexpr double kTerrainUploadBudgetMs = 3.0;
+    const auto _upload_t0 = std::chrono::steady_clock::now();
     float farthest_selected_distance = 0.0f;
+    std::size_t processed = upload_budget;
     for (std::size_t i = 0; i < upload_budget; ++i) {
         const TerrainUploadCandidate& candidate = upload_candidates[i];
         if (candidate.is_new) {
@@ -2792,12 +2841,19 @@ void RenderPipeline::manage_chunk_gpu_resources(const std::vector<ChunkMeshSnaps
             payload.vertices.size() * sizeof(VoxelVertex) + payload.indices.size() * sizeof(u32);
         upload_chunk_mesh(chunk, payload);
         m_last_mesh_upload_stats.terrain_uploads++;
+
+        if (i + 1 >= kMinTerrainUploadsPerFrame &&
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - _upload_t0).count() > kTerrainUploadBudgetMs) {
+            processed = i + 1;  // time slice spent; defer the remainder (nearest-first already done)
+            break;
+        }
     }
     m_last_mesh_upload_stats.terrain_uploads_deferred = upload_candidates.size() - m_last_mesh_upload_stats.terrain_uploads;
     m_last_mesh_upload_stats.terrain_farthest_selected_distance_sq = farthest_selected_distance;
-    if (upload_candidates.size() > upload_budget) {
+    if (upload_candidates.size() > processed) {
         float nearest_deferred = std::numeric_limits<float>::max();
-        for (std::size_t i = upload_budget; i < upload_candidates.size(); ++i) {
+        for (std::size_t i = processed; i < upload_candidates.size(); ++i) {
             const TerrainUploadCandidate& candidate = upload_candidates[i];
             if (candidate.is_new) {
                 ++m_last_mesh_upload_stats.terrain_new_uploads_deferred;

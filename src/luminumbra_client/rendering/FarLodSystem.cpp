@@ -213,6 +213,11 @@ void FarLodSystem::integrate_completed_builds() {
         const u64 key = region_key(result.rx, result.rz);
         m_pending.erase(key);
         if (result.epoch != m_epoch || result.mesh.vertices.empty() || result.mesh.indices.empty()) {
+            // spec 008 WS-2: a build that returned an empty mesh (or raced an epoch swap)
+            // never becomes resident — counted so the gate can tell empty-mesh failures
+            // apart from build-throttle starvation on the mountains preset.
+            ++m_stats.builds_integrated_failed;
+            ++m_stats.builds_failed_total;
             continue;
         }
 
@@ -306,6 +311,7 @@ void FarLodSystem::integrate_completed_builds() {
             m_residents.emplace(key, region);
         }
         ++m_stats.builds_completed_total;
+        ++m_stats.builds_integrated_ok;  // spec 008 WS-2: completed build became resident this frame
     }
 }
 
@@ -315,8 +321,15 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system, const
     m_stats.enabled = m_enabled;
     m_stats.region_draws = 0;
     m_stats.indices_drawn = 0;
+    // spec 008 WS-2: reset the per-frame diagnostic counters before this tick's
+    // integrate/dispatch/evict so they reflect THIS frame only.
+    m_stats.builds_dispatched = 0;
+    m_stats.builds_integrated_ok = 0;
+    m_stats.builds_integrated_failed = 0;
+    m_stats.evictions_this_frame = 0;
 
     if (!m_enabled || !m_job_system) {
+        m_stats.pending_depth = m_pending.size();
         m_stats.regions_wanted = 0;
         m_stats.regions_missing = 0;
         m_stats.regions_building = m_pending.size();
@@ -463,6 +476,7 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system, const
             release_region(it->second);
             it = m_residents.erase(it);
             ++m_stats.evictions_total;
+            ++m_stats.evictions_this_frame;
         } else {
             ++it;
         }
@@ -482,6 +496,7 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system, const
         release_region(victim->second);
         m_residents.erase(victim);
         ++m_stats.evictions_total;
+        ++m_stats.evictions_this_frame;
     }
 
     m_stats.regions_wanted = wanted.size();
@@ -489,6 +504,9 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system, const
     m_stats.regions_building = m_pending.size();
     m_stats.regions_resident = m_residents.size();
     m_stats.resident_bytes = resident_bytes;
+    // spec 008 WS-2: build jobs dispatched this frame + jobs still in flight.
+    m_stats.builds_dispatched = dispatched;
+    m_stats.pending_depth = m_pending.size();
 }
 
 void FarLodSystem::draw_gbuffer(

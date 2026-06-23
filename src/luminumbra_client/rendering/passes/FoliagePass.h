@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -67,7 +68,9 @@ public:
     // 1.0, ignoring biome) FAILS — desert would carpet too. 4096 -> ~0.73 coverage tracks
     // the plains 0.3 density (in-band). "Continuous turf" in a scene is therefore the
     // biome's vegetation density (data/common/biomes.json), not this raw cap.
-    static constexpr std::size_t kMaxCandidatesPerChunk = 4096;
+    static constexpr std::size_t kMaxCandidatesPerChunk = 8192; // grass overhaul: 2x denser per-chunk
+                                                                // carpet (paired with the tighter near
+                                                                // fade so the global cap still fits).
 
     // Packed 36-byte instance record (matches the GL vertex-attribute layout).
 #pragma pack(push, 1)
@@ -148,7 +151,7 @@ public:
     // biome's vegetation density (which folds into the biome content-hash / params
     // marker — determinism-adjacent). Default 1.0 == byte-identical to the biome-tracked
     // density; the FoliageInstancing gate (which runs the default) is unaffected.
-    void set_density_scale(float scale) { m_density_scale = scale > 0.0f ? scale : 1.0f; }
+    void set_density_scale(float scale) { m_density_scale = scale > 0.0f ? scale : 1.0f; ++m_chunk_cache_gen; }
     float density_scale() const { return m_density_scale; }
 
     // --- Per-frame wind bridge (one-way). The caller pushes the camera-region
@@ -230,6 +233,16 @@ private:
                                SurfaceQuery query, void* query_ctx,
                                const glm::vec3& camera_pos);
 
+    // spec 008 follow-up (foliage streaming-burst amortization): build (or fetch the cached)
+    // CAMERA-INDEPENDENT instance records for one chunk. The records (position/size/color/phase/
+    // facing) are a pure function of chunk_xz + the static terrain surface query + density_scale +
+    // archetypes, so they are computed ONCE per chunk and reused as the camera moves. The per-frame
+    // rebuild then just copies these with the cheap camera distance-fade cull applied and a fresh
+    // wind sway — eliminating the ~660ms re-query when moving. sway is baked as 0 here and set at
+    // copy time so the output matches the uncached loop exactly. RENDER-ONLY.
+    const std::vector<InstanceRecord>& build_or_get_chunk_records(
+        const ChunkScatter& chunk, SurfaceQuery query, void* query_ctx);
+
     std::unique_ptr<Shader> m_shader;
     u32 m_vao = 0;
 
@@ -275,6 +288,27 @@ private:
     // meaningful perf cost. Deeper grass work (moonlit grass, dusk brightness,
     // BF1-grove shading) is the Phase 1 foliage substrate.
     float m_density_scale = 1.35f; // #1b-lush: showcase density multiplier (1.0 = baseline)
+
+    // spec 008 follow-up: per-chunk CAMERA-INDEPENDENT instance cache (see build_or_get_chunk_records).
+    // Keyed by packed chunk_xz. Each entry stores the generation it was built at; when m_chunk_cache_gen
+    // bumps (density scale / archetypes changed) the entry is stale and rebuilt on next use. Bounded by
+    // pruning chunks absent from the current renderable set once the cache grows past a soft cap.
+    struct CachedChunkRecords { std::uint64_t gen = 0; std::vector<InstanceRecord> records; };
+    std::unordered_map<std::uint64_t, CachedChunkRecords> m_chunk_cache;
+    std::uint64_t m_chunk_cache_gen = 1;
+    // spec 008 follow-up: the GPU scatter path (rebuild_instances_gpu, the path that actually runs
+    // in normal play) sampled the per-chunk SURFACE GRID (kSurfaceGridVerts^2 GetTerrainHeightAt
+    // calls) on the CPU for EVERY renderable chunk on every rebuild — ~1s when moving. The grid is a
+    // pure function of chunk_xz + the static terrain, so cache it per chunk (keyed by packed chunk_xz)
+    // and rebuild only a budgeted few new chunks per frame. Keyed identically to m_chunk_cache.
+    std::unordered_map<std::uint64_t, std::vector<glm::vec4>> m_surf_grid_cache;
+    // spec 008 follow-up: when MOVING fast, many chunks stream into the renderable set in one frame,
+    // and building their (uncached) records all at once re-ran hundreds of SurfaceQuery calls -> a
+    // ~960ms hitch. Budget the per-frame chunk-record BUILDS; chunks over budget contribute no
+    // foliage this frame and build over the next few frames (the foliage fades in — RENDER-ONLY, so
+    // no determinism impact). While a build backlog exists the scatter-cache elision is suppressed so
+    // the rebuild keeps draining it even when the camera is still.
+    bool m_foliage_build_backlog = false;
 };
 
 } // namespace Luminumbra::Rendering

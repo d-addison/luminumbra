@@ -38,6 +38,7 @@ constexpr KeyMeta kKeys[] = {
     {SysKey::RenderTreeWind, Section::Render, "render", "tree_wind"},
     {SysKey::RenderPlantProcgen, Section::Render, "render", "plant_procgen"},
     {SysKey::RenderTaau, Section::Render, "render", "taau"},
+    {SysKey::RenderSkyLutGpu, Section::Render, "render", "sky_lut_gpu"},
 };
 
 constexpr ParamMeta kParams[] = {

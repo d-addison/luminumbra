@@ -570,6 +570,8 @@ public:
     const glm::mat4& prev_view_proj() const { return m_prev_view_proj; }  // FR-R5 TAAU motion vectors
     float prev_time() const { return m_prev_time; }                       // §13 TAAU: prev-frame wind wall-clock
     void set_taau_enabled(bool e) { m_taau_enabled = e; }                 // render.taau (client wires from SystemConfig)
+    // spec 008 WS-4: route sky-view LUT (init + refresh) through GPU compute. render.sky_lut_gpu, default OFF.
+    void set_sky_lut_gpu_enabled(bool e) { m_sky_lut.set_gpu_skyview_enabled(e); }
     const glm::vec2& taau_jitter_ndc() const { return m_taau_jitter_ndc; } // sub-pixel projection jitter for the G-buffer
     // Count of render-target reallocations since startup (one per real
     // on_resize). Surfaced as telemetry so the resize-stress gate can verify
@@ -590,6 +592,15 @@ public:
     static constexpr size_t texture_resident_budget_bytes() { return kTextureResidentBudgetBytes; }
     std::vector<ShaderHealthEntry> get_shader_health() const;
     RenderHealthSnapshot get_render_health_snapshot(bool drain_gl_errors = false) const;
+    // framescan: read-only access to the G-buffer attachments for the
+    // what's-in-frame scan tool. The normal/material attachment (RGBA8) carries
+    // the material id in its ALPHA byte (g_buffer.frag writes alpha =
+    // MaterialID/255, so the byte == MaterialID). The FrameScan tool reads this
+    // id attachment + the back color buffer to compute per-material coverage and
+    // luminance. RENDER-ONLY: this only exposes existing GL texture ids, it never
+    // writes sim state or feeds world_hash. Defined in the .cpp because GBufferPass
+    // is forward-declared here.
+    const GBuffer& gbuffer() const;
     // Generated caustics texture id (0 when unavailable). Exposed for the
     // runtime scenario harness caustics-animation probe (T-I2-16).
     u32 water_caustics_texture() const;

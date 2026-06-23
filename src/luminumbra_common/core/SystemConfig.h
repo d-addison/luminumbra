@@ -52,6 +52,7 @@ enum class SysKey : std::uint8_t {
     RenderTreeWind,
     RenderPlantProcgen,  // grow scattered plants via the procgen instead of baked models
     RenderTaau,          // FR-R5 temporal AA resolve (motion-reprojected history); default OFF
+    RenderSkyLutGpu,     // spec 008 WS-4: sky LUTs (init + refresh) via GPU compute instead of CPU integration; default OFF
     Count
 };
 

@@ -6009,6 +6009,8 @@ void WriteFarLodHorizonAnalysis(
     std::size_t final_resident = 0;
     std::size_t final_draws = 0;
     std::size_t final_indices = 0;
+    // spec 008 WS-2: true once the most-converged (min-missing) station has been recorded.
+    bool had_converged_capture = false;
     double max_sky_ratio = 0.0;
     double max_band_sky_ratio = 0.0;
     std::uint64_t max_band_void_clusters = 0;
@@ -6065,12 +6067,27 @@ void WriteFarLodHorizonAnalysis(
             elevated_band_resolved = true;
             elevated_boundary_band_sand_flat_ratio = capture.boundary_band_sand_flat_ratio;
         }
-        final_missing = capture.regions_missing;
-        final_resident_bytes = capture.resident_bytes;
-        final_wanted = capture.regions_wanted;
-        final_resident = capture.regions_resident;
-        final_draws = capture.region_draws;
-        final_indices = capture.far_indices_drawn;
+        // spec 008 WS-2: the residency coverage measure must reflect the CONVERGED ring,
+        // not whichever station happened to be captured last. All stations share the same
+        // XZ eye position, so the wanted ring is identical and residency monotonically fills
+        // in; one station captured mid-build (e.g. the `elevated` outlier added last) would
+        // otherwise drive the gate with a transient missing count. Take the values from the
+        // MOST-CONVERGED station (minimum regions_missing) so coverage + budget read a single
+        // coherent, settled capture. Only consider stations whose wanted ring has populated
+        // (regions_wanted > 0): an early station captured before the far system seeded its
+        // ring reports wanted=0/missing=0 trivially and must NOT win the min (it would make
+        // the gate read "no resident/wanted regions"). `had_converged_capture` guards the
+        // all-stations-empty case (far disabled).
+        if (capture.regions_wanted > 0 &&
+            (!had_converged_capture || capture.regions_missing < final_missing)) {
+            had_converged_capture = true;
+            final_missing = capture.regions_missing;
+            final_resident_bytes = capture.resident_bytes;
+            final_wanted = capture.regions_wanted;
+            final_resident = capture.regions_resident;
+            final_draws = capture.region_draws;
+            final_indices = capture.far_indices_drawn;
+        }
 
         station_rows.push_back({
             {"name", capture.station.name},
@@ -6118,6 +6135,25 @@ void WriteFarLodHorizonAnalysis(
                 {"far_indices_drawn", capture.far_indices_drawn},
                 {"water_sheet_draws", capture.water_sheet_draws},
                 {"water_sheet_indices", capture.water_sheet_indices},
+                // spec 008 WS-2: scheduler diagnostics to root-cause persistent missing regions.
+                {"builds_dispatched", capture.builds_dispatched},
+                {"builds_integrated_ok", capture.builds_integrated_ok},
+                {"builds_integrated_failed", capture.builds_integrated_failed},
+                {"builds_failed_total", capture.builds_failed_total},
+                {"builds_completed_total", capture.builds_completed_total},
+                {"evictions_this_frame", capture.evictions_this_frame},
+                {"evictions_total", capture.evictions_total},
+                {"pending_depth", capture.pending_depth},
+            }},
+            // spec 008 WS-2: resolved eye WORLD position at capture (confirms all stations share
+            // one XZ so the wanted ring is identical; only yaw/pitch/height differ).
+            {"camera", {
+                {"world_x", capture.camera_world_x},
+                {"world_y", capture.camera_world_y},
+                {"world_z", capture.camera_world_z},
+                {"yaw_degrees", capture.station.yaw_degrees},
+                {"pitch_degrees", capture.station.pitch_degrees},
+                {"eye_height_meters", capture.station.eye_height_meters},
             }},
             {"far_water", {
                 {"boundary_band_water_pixels", capture.boundary_band_water_pixels},
@@ -6130,9 +6166,10 @@ void WriteFarLodHorizonAnalysis(
         });
     }
 
-    // After-settle gates evaluate the LAST captured station's scheduler state
-    // (the wanted set stops changing once every station holds the same eye
-    // position; only the view direction sweeps).
+    // spec 008 WS-2: after-settle gates evaluate the MOST-CONVERGED station's scheduler
+    // state (minimum regions_missing across stations). Every station holds the same XZ eye
+    // position so the wanted ring is identical and residency fills in monotonically; reading
+    // the converged station avoids failing the gate on a single station captured mid-build.
     const bool coverage_passed = !captures.empty() && final_missing <= kFarLodHorizonMaxMissingRegions;
     const bool budget_passed = !captures.empty() && final_resident_bytes < kFarLodHorizonResidentBudgetBytes;
     // gpu timer support is hardware-dependent; without timers the delta gate
