@@ -211,6 +211,20 @@ target_link_libraries(tree_lod_test PRIVATE
     gtest_main
 )
 
+# Wave-3 far-field impostors: the hemi-octahedral view<->tile mapping math (GL-free,
+# the shared source of truth for the atlas bake + the impostor shader).
+add_executable(octa_impostor_test
+    rendering/octa_impostor_test.cpp
+)
+
+target_include_directories(octa_impostor_test PRIVATE
+    ../src
+)
+
+target_link_libraries(octa_impostor_test PRIVATE
+    gtest_main
+)
+
 # far-field-source-unification (FR-003 / AC-003): pillar-B's first slice -- the forest
 # perf-BUDGET RED harness. OpenGL-free: it models the foliage draw load (instance /
 # draw-call / triangle counts) at a pinned 16k-tree load over the pure TreeLod.h
