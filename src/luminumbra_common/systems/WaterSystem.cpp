@@ -654,17 +654,36 @@ void WaterSystem::dispatch_simulation_jobs(const std::vector<Chunk*>& chunks_to_
         tasks.push_back(std::move(task));
     }
 
-    // spec 008 follow-up (streaming-burst amortization): run the per-chunk water sim INLINE on the
-    // main thread instead of dispatching to the shared JobSystem and blocking on wait(). Each task
-    // reads only immutable snapshots and writes its OWN output (no cross-chunk shared state), so
-    // sequential execution is BYTE-IDENTICAL to the parallel batch — run==replay / host==peer hold
-    // (guarded by the WaterDeterminism live-water gate). The dispatch+wait was the moving-water
-    // killer: 18 trivial water jobs took ~1300ms because wait() blocked behind the flood of
-    // streaming/meshing jobs already queued on the same JobSystem (classic head-of-line blocking).
-    // The water compute itself is only a few ms (4 neighbour reads + a few flops per cell), so
-    // inlining removes the stall entirely with no determinism or correctness change.
-    for (WaterSimulationTask& task : tasks) {
-        simulate_chunk_water(*task.snapshot, task.neighbors, task.output);
+    // Run the per-chunk water sim. Each task reads only immutable snapshots and writes its
+    // OWN output (no cross-chunk shared state), so the result is BYTE-IDENTICAL whether the
+    // tasks run sequentially or in parallel — run==replay / host==peer hold (the
+    // WaterDeterminism gate + the HeadlessServerTick run==replay oracle guard this; the water
+    // sub-hash is SIM TRUTH and is in world_hash, unlike the now-excluded render mesh).
+    //
+    // PARALLELIZED at HIGH priority (water was the #1 moving-frame killer, ~12-30ms). The
+    // earlier fix ran this INLINE because the original code dispatched at NORMAL priority and
+    // wait()ed, blocking behind the streaming/meshing flood already on the Normal lane
+    // (head-of-line blocking, ~1300ms). The fix is to jump the queue: dispatching at HIGH
+    // priority makes workers PREFER the water batch over queued Normal jobs, and wait(handle)
+    // is scoped to THIS batch's completion counter (not the whole queue), so it returns in
+    // ~(total / workers). kNormalServiceInterval keeps streaming progressing. Falls back to
+    // inline for tiny batches (dispatch overhead) or no job system (degenerate lane).
+    constexpr std::size_t kWaterSimParallelMinChunks = 4;
+    if (m_job_system && tasks.size() >= kWaterSimParallelMinChunks) {
+        std::vector<Job> jobs;
+        jobs.reserve(tasks.size());
+        for (std::size_t ti = 0; ti < tasks.size(); ++ti) {
+            WaterSimulationTask* tp = &tasks[ti];  // per-task pointer captured by value
+            jobs.push_back([this, tp]() {
+                simulate_chunk_water(*tp->snapshot, tp->neighbors, tp->output);
+            });
+        }
+        const JobHandle handle = m_job_system->dispatch_batch(jobs, JobPriority::High);
+        m_job_system->wait(handle);
+    } else {
+        for (WaterSimulationTask& task : tasks) {
+            simulate_chunk_water(*task.snapshot, task.neighbors, task.output);
+        }
     }
 
     for (WaterSimulationTask& task : tasks) {
