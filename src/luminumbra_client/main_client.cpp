@@ -5195,8 +5195,16 @@ int main(int argc, char* argv[]) {
                                     const float wz = anchor.z + std::sin(ang) * rad;
                                     const float gy = terr(wx, wz);
                                     if (gy <= ws->WaterLevelAt(wx, wz) + 0.3f) continue;  // not in water
-                                    const auto& sp =
-                                        g_creatureSpecies.all()[static_cast<std::size_t>(i) % g_creatureSpecies.size()];
+                                    // Biome-appropriate species: pick among the species that
+                                    // inhabit the local biome (generalists included); fall back
+                                    // to the full roster if the biome lists none.
+                                    const std::string& biome_name =
+                                        ws->biome_table().name_for(ws->BiomeIdAt(wx, wz));
+                                    const luminumbra::ai::CreatureSpecies* sp_sel =
+                                        g_creatureSpecies.SelectForBiome(biome_name, static_cast<std::size_t>(i));
+                                    const auto& sp = sp_sel
+                                        ? *sp_sel
+                                        : g_creatureSpecies.all()[static_cast<std::size_t>(i) % g_creatureSpecies.size()];
                                     const float size = 0.8f + wgen.next_unit() * 0.7f;  // genome size variety
                                     const auto e = reg.create();
                                     auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);

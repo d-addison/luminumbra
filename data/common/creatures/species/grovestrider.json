@@ -4,5 +4,6 @@
   "display_name": "Grovestrider",
   "predator": false,
   "rarity": 0.35,
-  "base_color": [0.36, 0.42, 0.30]
+  "base_color": [0.36, 0.42, 0.30],
+  "biomes": ["wetland", "plains"]
 }

@@ -36,11 +36,20 @@ struct CreatureSpecies {
     bool predator = false;           // role default (prey unless stated)
     float rarity = 0.5f;             // [0,1] discovery prestige (codex/scoring hook)
     float base_color[3] = {0.45f, 0.42f, 0.38f};  // Phase 2 recolor seed (linear RGB)
+    // Biomes this species inhabits (by biome name, e.g. "wetland"). EMPTY = lives
+    // anywhere (a generalist), so undated/legacy data still spawns everywhere.
+    std::vector<std::string> biomes;
 
     // The codex/spawn key — FNV-1a of `id`, identical to the value spawn sites stamp
     // onto CreatureComponent::species_id.
     [[nodiscard]] std::uint16_t species_id() const {
         return Comp::CreatureSpeciesId16(id.c_str());
+    }
+    // Does this species live in `biome`? A generalist (empty list) lives everywhere.
+    [[nodiscard]] bool lives_in(const std::string& biome) const {
+        if (biomes.empty()) return true;
+        for (const std::string& b : biomes) if (b == biome) return true;
+        return false;
     }
 };
 
@@ -65,6 +74,9 @@ struct CreatureSpecies {
     }
     if (j.contains("base_color") && j.at("base_color").is_array() && j.at("base_color").size() >= 3) {
         for (int i = 0; i < 3; ++i) out.base_color[i] = j.at("base_color")[i].get<float>();
+    }
+    if (j.contains("biomes") && j.at("biomes").is_array()) {
+        for (const auto& b : j.at("biomes")) if (b.is_string()) out.biomes.push_back(b.get<std::string>());
     }
     return true;
 }
@@ -130,6 +142,23 @@ public:
 
     [[nodiscard]] std::size_t size() const { return m_species.size(); }
     [[nodiscard]] const std::vector<CreatureSpecies>& all() const { return m_species; }
+
+    // The species that inhabit `biome` (generalists included), in registry order.
+    [[nodiscard]] std::vector<const CreatureSpecies*> SpeciesInBiome(const std::string& biome) const {
+        std::vector<const CreatureSpecies*> out;
+        for (const auto& s : m_species) if (s.lives_in(biome)) out.push_back(&s);
+        return out;
+    }
+
+    // Deterministically pick the `pick`-th species (modulo count) that inhabits `biome`.
+    // Returns nullptr only when NO species (not even a generalist) matches — callers fall
+    // back to the full roster. Pure: `pick` selects, no rng.
+    [[nodiscard]] const CreatureSpecies* SelectForBiome(const std::string& biome,
+                                                        std::size_t pick) const {
+        const std::vector<const CreatureSpecies*> in = SpeciesInBiome(biome);
+        if (in.empty()) return nullptr;
+        return in[pick % in.size()];
+    }
 
 private:
     std::vector<CreatureSpecies> m_species;

@@ -4,5 +4,6 @@
   "display_name": "Ridgeback Stalker",
   "predator": true,
   "rarity": 0.7,
-  "base_color": [0.30, 0.26, 0.24]
+  "base_color": [0.30, 0.26, 0.24],
+  "biomes": ["alpine", "tundra"]
 }

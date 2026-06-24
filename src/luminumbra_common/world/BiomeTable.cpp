@@ -281,6 +281,17 @@ const BiomeVegetation& BiomeTable::vegetation_for(u8 biome_id) const {
     return m_default_vegetation;
 }
 
+const std::string& BiomeTable::name_for(u8 biome_id) const {
+    static const std::string kNoneName = "none";
+    if (biome_id < m_id_to_index.size()) {
+        const u8 index = m_id_to_index[biome_id];
+        if (index != kNoBiome && index < m_biomes.size()) {
+            return m_biomes[index].name;
+        }
+    }
+    return kNoneName;
+}
+
 // NOTE: reverb AND vegetation are deliberately NOT mixed into
 // compute_content_hash(). The
 // content hash gates the terrain far-LOD cache (ComputeTerrainParamsHash), and

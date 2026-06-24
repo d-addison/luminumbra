@@ -127,6 +127,10 @@ public:
     // density) for kNoBiome / any unknown id. Render-only (foliage scatter).
     const BiomeVegetation& vegetation_for(u8 biome_id) const;
 
+    // Biome NAME for an id (e.g. "wetland"); "none" for kNoBiome / unknown ids.
+    // Used to match creature species' biome lists to the local biome at spawn.
+    const std::string& name_for(u8 biome_id) const;
+
     // fnv1a64 over the canonicalized table content (see header note).
     u64 content_hash() const { return m_content_hash; }
 
