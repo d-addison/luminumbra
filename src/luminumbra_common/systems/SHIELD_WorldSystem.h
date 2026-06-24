@@ -504,6 +504,11 @@ public:
 
     // --- API for WorldGenViewer ---
     const TerrainGenParams& get_params() const { return m_params; }
+    // True when a GPU-SDF generation callback is registered (experimental, opt-in via
+    // enable_gpu_sdf_runtime). When set, a chunk's heightmap_data is the MARCHED SDF surface (:3695),
+    // which is NOT byte-identical to GetTerrainHeightAt — so heightmap-reuse consumers (water init) must
+    // fall back to the analytic sampler. Unset in the headless server + default client (CPU shaping path).
+    bool has_gpu_sdf_callback() const { return static_cast<bool>(m_gpu_sdf_callback); }
     // T-I3-9 (far-LOD): read-only seed accessor so the far-LOD scheduler can
     // key its pristine tile cache (seed, params_hash) without re-deriving the
     // seed. Minimal insertion - no height/noise path is touched.

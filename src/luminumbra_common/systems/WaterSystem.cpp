@@ -349,7 +349,39 @@ void WaterSystem::update(entt::registry& registry, const std::unordered_map<Chun
         }
         to_init.push_back(chunk_ptr.get());
     }
-    auto seed_chunk_water = [this](Chunk* cp) {
+
+    // (worst-frame fix) The dominant moving cost is INIT re-sampling worldgen per cell (~16ms/frame,
+    // profiled). The terrain half (GetTerrainHeightAt) is BYTE-IDENTICAL to the heightmap the mesher
+    // already computed into heightmap_data (proven by the EXPECT_EQ parity gate, commit 8348e0e9), so
+    // REUSE it — a cheap array read instead of a ~125us multi-octave sample. Read it HERE on the MAIN
+    // THREAD: an active chunk's LIVE heightmap_data is only ever (re)written by the main-thread LOD publish
+    // (process_completed_meshing_jobs); off-thread meshing writes scratch/pending, never the live array.
+    // So this read cannot race, and the workers below get a PRIVATE copy (never touch heightmap_data) —
+    // unlike the broken App 1 worker-side read (see the water-heightmap-read-race note). Skipped for
+    // GPU-SDF chunks (heightmap = marched SDF surface != GetTerrainHeightAt) and !shaping; those fall back
+    // to the sampler, which yields the SAME bits, so water_bed_mm is byte-identical either way -> NO re-pin.
+    const int hm_stride = CHUNK_SIZE_X + 1; // heightmap is (CHUNK_SIZE_X+1)^2, x-fastest
+    const bool reuse_heightmap = m_shield_system->get_params().shaping_enabled &&
+                                 !m_shield_system->has_gpu_sdf_callback();
+    std::vector<std::vector<float>> terrain_seed(to_init.size()); // [i] empty => worker samples the sampler
+    if (reuse_heightmap) {
+        const int res = WATER_SIM_RESOLUTION;
+        for (std::size_t i = 0; i < to_init.size(); ++i) {
+            const Chunk* cp = to_init[i];
+            if (static_cast<int>(cp->heightmap_data.size()) != hm_stride * hm_stride) continue;
+            terrain_seed[i].resize(static_cast<std::size_t>(res) * res);
+            for (int z = 0; z < res; ++z) {
+                for (int x = 0; x < res; ++x) {
+                    // Water cell centre is chunk-local (2x+1, 2z+1) — an integer heightmap node, and
+                    // heightmap[node] == GetTerrainHeightAt(node) to the BIT (parity gate) -> byte-exact.
+                    terrain_seed[i][static_cast<std::size_t>(z) * res + x] =
+                        cp->heightmap_data[(2 * x + 1) + (2 * z + 1) * hm_stride];
+                }
+            }
+        }
+    }
+
+    auto seed_chunk_water = [this](Chunk* cp, const std::vector<float>& terrain) {
         // Spec 009 Phase 3: init directly at the fixed camera-independent sim resolution (no later
         // camera-driven resize -> the hashed grid is uniform + stable on every peer).
         const int initial_resolution = WATER_SIM_RESOLUTION;
@@ -367,6 +399,7 @@ void WaterSystem::update(entt::registry& registry, const std::unordered_map<Chun
         const IVec3 c_coords = cp->get_coords();
         const float cell_width_x = CHUNK_SIZE_X / (float)initial_resolution;
         const float cell_width_z = CHUNK_SIZE_Z / (float)initial_resolution;
+        const bool have_terrain = (terrain.size() == sim_size); // main thread pre-read the heightmap
         for (int z = 0; z < initial_resolution; ++z) {
             for (int x = 0; x < initial_resolution; ++x) {
                 float world_x = c_coords.x * CHUNK_SIZE_X + (x + 0.5f) * cell_width_x;
@@ -375,12 +408,16 @@ void WaterSystem::update(entt::registry& registry, const std::unordered_map<Chun
                 // Seed the resting surface from worldgen: sea level, raised to the local lake
                 // surface inside basins so perched lakes start (and stay) filled.
                 const float rest = m_shield_system->WaterLevelAt(world_x, world_z);
-                const float terrain = m_shield_system->GetTerrainHeightAt(world_x, world_z);
+                // Reuse the mesher's heightmap (byte-identical) when the main thread provided it; else
+                // sample GetTerrainHeightAt directly — same bits, so water_bed_mm is identical either way.
+                const float terrain_h = have_terrain
+                    ? terrain[cell]
+                    : m_shield_system->GetTerrainHeightAt(world_x, world_z);
                 cp->water_level_data[cell] = rest;
                 cp->water_rest_level[cell] = rest;
-                cp->water_sim_terrain_height[cell] = terrain;
-                cp->water_bed_mm[cell] = static_cast<std::int32_t>(std::lround(terrain * MM_PER_M));
-                const long depth0 = std::lround(static_cast<double>(rest - terrain) * MM_PER_M);
+                cp->water_sim_terrain_height[cell] = terrain_h;
+                cp->water_bed_mm[cell] = static_cast<std::int32_t>(std::lround(terrain_h * MM_PER_M));
+                const long depth0 = std::lround(static_cast<double>(rest - terrain_h) * MM_PER_M);
                 cp->water_depth_mm[cell] = static_cast<std::int32_t>(depth0 > 0 ? depth0 : 0);
             }
         }
@@ -391,14 +428,19 @@ void WaterSystem::update(entt::registry& registry, const std::unordered_map<Chun
     if (m_job_system && to_init.size() >= 2) {
         std::vector<Job> jobs;
         jobs.reserve(to_init.size());
-        for (Chunk* cp : to_init) {
-            jobs.push_back([cp, &seed_chunk_water]() { seed_chunk_water(cp); });
+        for (std::size_t i = 0; i < to_init.size(); ++i) {
+            Chunk* cp = to_init[i];
+            // &terrain_seed + i by value: terrain_seed outlives the synchronous wait() below, and its
+            // outer vector is never reallocated after sizing, so terrain_seed[i] stays valid.
+            jobs.push_back([cp, i, &terrain_seed, &seed_chunk_water]() {
+                seed_chunk_water(cp, terrain_seed[i]);
+            });
         }
         const JobHandle handle = m_job_system->dispatch_batch(jobs, JobPriority::High);
         m_job_system->wait(handle);
     } else {
-        for (Chunk* cp : to_init) {
-            seed_chunk_water(cp);
+        for (std::size_t i = 0; i < to_init.size(); ++i) {
+            seed_chunk_water(to_init[i], terrain_seed[i]);
         }
     }
 
