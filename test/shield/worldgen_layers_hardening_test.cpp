@@ -405,8 +405,13 @@ TEST(WorldgenHardening, SeamHeightMatchesGetTerrainHeightAt) {
             const float stored = chunk.heightmap_data[HeightIndex(x, z)];
             const float analytic = world.GetTerrainHeightAt(
                 static_cast<float>(base.x + x), static_cast<float>(base.z + z));
-            EXPECT_FLOAT_EQ(stored, analytic)
-                << "heightmap node disagrees with GetTerrainHeightAt at world ("
+            // BYTE-EXACT (was EXPECT_FLOAT_EQ = 4-ULP). The batched heightmap fill
+            // (ComputeShapedHeightGrid / GenUniformGrid2D, SIMD) and the scalar
+            // GetTerrainHeightAt (GenSingle2D) must agree to the BIT for either to be a
+            // determinism-safe stand-in for the other (e.g. the water init reading the
+            // heightmap instead of re-sampling, where lround->mm tips on a sub-ULP diff).
+            EXPECT_EQ(stored, analytic)
+                << "heightmap node BIT-disagrees with GetTerrainHeightAt at world ("
                 << (base.x + x) << "," << (base.z + z) << ")";
         }
     }
