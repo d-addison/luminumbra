@@ -129,30 +129,9 @@ public:
 
 private:
 
-    struct WaterChunkSnapshot {
-        ChunkID id{};
-        IVec3 coords{};
-        int resolution = 0;
-        std::vector<f32> water_levels;
-        std::vector<Vec2> flow_data;
-        std::vector<f32> terrain_height;
-    };
-
-    struct WaterChunkSimulationOutput {
-        std::vector<f32> water_levels;
-        std::vector<Vec2> flow_data;
-        f32 max_delta = 0.0f;
-    };
-
-    struct WaterSimNeighbors {
-        const WaterChunkSnapshot* north = nullptr;
-        const WaterChunkSnapshot* south = nullptr;
-        const WaterChunkSnapshot* east  = nullptr;
-        const WaterChunkSnapshot* west  = nullptr;
-    };
-
-    void dispatch_simulation_jobs(const std::vector<Chunk*>& chunks_to_simulate);
-    void simulate_chunk_water(const WaterChunkSnapshot& snapshot, const WaterSimNeighbors& neighbors, WaterChunkSimulationOutput& output);
+    // (water-perf-200fps spec Step 1) The float render-mirror sim (dispatch_simulation_jobs /
+    // simulate_chunk_water + its WaterChunkSnapshot/Output/Neighbors structs) was DEAD CODE — zero
+    // callers; the live path is the integer Spec 009 StepChunkWaterFixed. Removed.
     Vec3 get_camera_position(entt::registry& registry) const;
 
 

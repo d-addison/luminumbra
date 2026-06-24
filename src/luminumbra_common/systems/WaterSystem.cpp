@@ -128,7 +128,11 @@ void StepChunkWaterFixed(Chunk& c, SHIELD_WorldSystem& shield,
     const std::int32_t sea_mm = 0; // SEA_LEVEL == 0
     auto IDX = [res](int x, int z) { return z * res + x; };
 
-    const std::vector<std::int32_t> depth_before = depth; // for the activity delta + remesh signal
+    // (Step 3) reuse scratch storage across calls (single-threaded, non-recursive sim) — fully
+    // overwritten each call, so byte-identical. assign() keeps capacity, dropping the per-tick alloc.
+    thread_local std::vector<std::int32_t> tl_depth_before;
+    tl_depth_before.assign(depth.begin(), depth.end()); // for the activity delta + remesh signal
+    const std::vector<std::int32_t>& depth_before = tl_depth_before;
 
     // --- Phase 0: SOURCES (deterministic, pure function of position) ---
     // Spec 010 FINITE HYDROLOGY: when finite_hydrology is on, water is a CONSERVED quantity — there is
@@ -136,13 +140,24 @@ void StepChunkWaterFixed(Chunk& c, SHIELD_WorldSystem& shield,
     // you drain stays drained and depressions fill when it rains (real-life cycle). The classic Spec 009
     // behaviour (perpetual river springs) is the finite_hydrology==false default.
     if (!finite_hydrology) {
-        for (int z = 0; z < res; ++z) for (int x = 0; x < res; ++x) {
-            const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
-            const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
-            if (shield.RiverInfluenceAt(wx, wz) >= RIVER_SOURCE_THRESHOLD) {
-                depth[IDX(x, z)] += RIVER_DISCHARGE_MM;
-                out_src += RIVER_DISCHARGE_MM;
+        // (Step 2) The river source is a PURE function of cell position, so cache it once instead of
+        // re-running the per-cell noise (RiverInfluenceAt) every tick. The size-guard rebuilds the
+        // mask lazily on first sim / after a resize / for persistence-loaded chunks (which skip the
+        // init loop) — same cell-centre formula, same threshold/discharge, same row order, so the
+        // consumed result is BYTE-IDENTICAL to the per-tick computation (run==replay / host==peer).
+        if (static_cast<int>(c.water_src_mm.size()) != n) {
+            c.water_src_mm.assign(n, 0);
+            for (int z = 0; z < res; ++z) for (int x = 0; x < res; ++x) {
+                const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
+                const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
+                if (shield.RiverInfluenceAt(wx, wz) >= RIVER_SOURCE_THRESHOLD) {
+                    c.water_src_mm[IDX(x, z)] = RIVER_DISCHARGE_MM;
+                }
             }
+        }
+        for (int i = 0; i < n; ++i) {
+            depth[i] += c.water_src_mm[i];      // += 0 for non-source cells (byte-identical)
+            out_src += c.water_src_mm[i];
         }
     }
     // RAIN: deterministic uniform input (mm/tick; the caller scales it by the weather precipitation).
@@ -154,7 +169,10 @@ void StepChunkWaterFixed(Chunk& c, SHIELD_WorldSystem& shield,
     }
 
     // --- Phase 1: FLUX on +X and +Z internal edges, from the read-only surface snapshot ---
-    std::vector<std::int64_t> surf(n);
+    // (Step 3) thread_local scratch, resize-without-shrink; all n entries written below, so
+    // byte-identical to a fresh value-initialized vector.
+    thread_local std::vector<std::int64_t> surf;
+    surf.resize(n);
     for (int i = 0; i < n; ++i) surf[i] = static_cast<std::int64_t>(bed[i]) + depth[i];
     auto compute_edge = [&](int i, int j, int eidx) {
         const std::int64_t dSurf = surf[i] - surf[j];
@@ -559,261 +577,6 @@ void WaterSystem::update(entt::registry& registry, const std::unordered_map<Chun
             chunk->is_water_sleeping.store(false, std::memory_order_relaxed);
         }
     }
-}
-
-void WaterSystem::dispatch_simulation_jobs(const std::vector<Chunk*>& chunks_to_simulate) {
-    if (!m_active_chunks) {
-        return;
-    }
-
-    std::unordered_map<ChunkID, WaterChunkSnapshot> water_snapshots;
-
-    // spec 008 follow-up: build snapshots ONLY for the chunks we will simulate + their 4 XZ neighbors
-    // (the only chunks the sim reads, via find_neighbor). The previous loop snapshotted EVERY active
-    // chunk — 3 vector copies per chunk over the WHOLE active set — which cost ~345ms when moving into
-    // water-heavy terrain regardless of the sim cap. Scoping to needed chunks is determinism-NEUTRAL:
-    // the simulated chunks get the identical inputs (their + their neighbors' snapshots) they got
-    // before; the unused snapshots of non-neighbor chunks were never read. Bounded by the sim cap.
-    std::unordered_set<ChunkID> needed;
-    needed.reserve(chunks_to_simulate.size() * 5u);
-    for (const Chunk* c : chunks_to_simulate) {
-        if (!c) continue;
-        const IVec3 co = c->get_coords();
-        needed.insert(c->get_id());
-        needed.insert(Chunk::calculate_id(co + IVec3(0, 0, 1)));
-        needed.insert(Chunk::calculate_id(co + IVec3(0, 0, -1)));
-        needed.insert(Chunk::calculate_id(co + IVec3(1, 0, 0)));
-        needed.insert(Chunk::calculate_id(co + IVec3(-1, 0, 0)));
-    }
-    water_snapshots.reserve(needed.size());
-    for (const ChunkID id : needed) {
-        const auto it = m_active_chunks->find(id);
-        if (it == m_active_chunks->end() || !it->second) {
-            continue;
-        }
-        const Chunk& chunk = *it->second;
-        const int resolution = GetWaterResolution(chunk);
-        if (!HasCompleteWaterGrid(chunk, resolution)) {
-            continue;
-        }
-
-        const size_t cell_count = GetWaterCellCount(resolution);
-        WaterChunkSnapshot snapshot;
-        snapshot.id = chunk.get_id();
-        snapshot.coords = chunk.get_coords();
-        snapshot.resolution = resolution;
-        snapshot.water_levels.assign(chunk.water_level_data.begin(), chunk.water_level_data.begin() + cell_count);
-        snapshot.flow_data.assign(chunk.water_flow_data.begin(), chunk.water_flow_data.begin() + cell_count);
-        snapshot.terrain_height.assign(chunk.water_sim_terrain_height.begin(), chunk.water_sim_terrain_height.begin() + cell_count);
-        water_snapshots.emplace(snapshot.id, std::move(snapshot));
-    }
-
-    struct WaterSimulationTask {
-        Chunk* chunk = nullptr;
-        const WaterChunkSnapshot* snapshot = nullptr;
-        WaterSimNeighbors neighbors;
-        WaterChunkSimulationOutput output;
-    };
-
-    std::vector<WaterSimulationTask> tasks;
-    tasks.reserve(chunks_to_simulate.size());
-
-    for (Chunk* chunk : chunks_to_simulate) {
-        if (!chunk) {
-            continue;
-        }
-
-        auto snapshot_it = water_snapshots.find(chunk->get_id());
-        if (snapshot_it == water_snapshots.end()) {
-            continue;
-        }
-
-        const WaterChunkSnapshot& snapshot = snapshot_it->second;
-        WaterSimulationTask task;
-        task.chunk = chunk;
-        task.snapshot = &snapshot;
-        task.output.water_levels.resize(GetWaterCellCount(snapshot.resolution));
-        task.output.flow_data.resize(GetWaterCellCount(snapshot.resolution));
-
-        auto find_neighbor = [&](int dx, int dz) -> const WaterChunkSnapshot* {
-            IVec3 neighbor_coords = snapshot.coords + IVec3(dx, 0, dz);
-            auto active_it = m_active_chunks->find(Chunk::calculate_id(neighbor_coords));
-            if (active_it == m_active_chunks->end() || !active_it->second) {
-                return nullptr;
-            }
-
-            auto neighbor_snapshot_it = water_snapshots.find(active_it->second->get_id());
-            return neighbor_snapshot_it != water_snapshots.end() ? &neighbor_snapshot_it->second : nullptr;
-        };
-
-        task.neighbors.north = find_neighbor(0, 1);
-        task.neighbors.south = find_neighbor(0, -1);
-        task.neighbors.east  = find_neighbor(1, 0);
-        task.neighbors.west  = find_neighbor(-1, 0);
-
-        tasks.push_back(std::move(task));
-    }
-
-    // Run the per-chunk water sim. Each task reads only immutable snapshots and writes its
-    // OWN output (no cross-chunk shared state), so the result is BYTE-IDENTICAL whether the
-    // tasks run sequentially or in parallel — run==replay / host==peer hold (the
-    // WaterDeterminism gate + the HeadlessServerTick run==replay oracle guard this; the water
-    // sub-hash is SIM TRUTH and is in world_hash, unlike the now-excluded render mesh).
-    //
-    // PARALLELIZED at HIGH priority (water was the #1 moving-frame killer, ~12-30ms). The
-    // earlier fix ran this INLINE because the original code dispatched at NORMAL priority and
-    // wait()ed, blocking behind the streaming/meshing flood already on the Normal lane
-    // (head-of-line blocking, ~1300ms). The fix is to jump the queue: dispatching at HIGH
-    // priority makes workers PREFER the water batch over queued Normal jobs, and wait(handle)
-    // is scoped to THIS batch's completion counter (not the whole queue), so it returns in
-    // ~(total / workers). kNormalServiceInterval keeps streaming progressing. Falls back to
-    // inline for tiny batches (dispatch overhead) or no job system (degenerate lane).
-    constexpr std::size_t kWaterSimParallelMinChunks = 4;
-    if (m_job_system && tasks.size() >= kWaterSimParallelMinChunks) {
-        std::vector<Job> jobs;
-        jobs.reserve(tasks.size());
-        for (std::size_t ti = 0; ti < tasks.size(); ++ti) {
-            WaterSimulationTask* tp = &tasks[ti];  // per-task pointer captured by value
-            jobs.push_back([this, tp]() {
-                simulate_chunk_water(*tp->snapshot, tp->neighbors, tp->output);
-            });
-        }
-        const JobHandle handle = m_job_system->dispatch_batch(jobs, JobPriority::High);
-        m_job_system->wait(handle);
-    } else {
-        for (WaterSimulationTask& task : tasks) {
-            simulate_chunk_water(*task.snapshot, task.neighbors, task.output);
-        }
-    }
-
-    for (WaterSimulationTask& task : tasks) {
-        task.chunk->water_level_data = std::move(task.output.water_levels);
-        // Pin to the worldgen rest level: the flow sim may ripple a cell ABOVE its
-        // rest surface but never drain it below, so perched lakes (rest > sea level)
-        // stay filled at their basin elevation instead of flowing downhill/out.
-        const std::vector<f32>& rest = task.chunk->water_rest_level;
-        std::vector<f32>& lvl = task.chunk->water_level_data;
-        if (rest.size() == lvl.size()) {
-            for (std::size_t i = 0; i < lvl.size(); ++i) {
-                if (lvl[i] < rest[i]) lvl[i] = rest[i];
-            }
-        }
-        task.chunk->water_flow_data = std::move(task.output.flow_data);
-        task.chunk->max_water_delta_last_tick = task.output.max_delta;
-        if (task.output.max_delta > 1.0e-4f && task.chunk->water_mesh_generated.load(std::memory_order_relaxed)) {
-            task.chunk->water_mesh_dirty_ticks++;
-        }
-        if (task.chunk->water_mesh_dirty_ticks >= WATER_MESH_DIRTY_TICK_INTERVAL) {
-            task.chunk->water_mesh_generated.store(false);
-            task.chunk->water_mesh_dirty_ticks = 0;
-        }
-    }
-}
-
-void WaterSystem::simulate_chunk_water(const WaterChunkSnapshot& snapshot, const WaterSimNeighbors& neighbors, WaterChunkSimulationOutput& output) {
-    const int resolution = snapshot.resolution;
-    if (resolution <= 1) {
-        return;
-    }
-
-    const size_t cell_count = GetWaterCellCount(resolution);
-    output.water_levels.resize(cell_count);
-    output.flow_data.resize(cell_count);
-
-    float max_delta_this_tick = 0.0f;
-    const IVec2 neighbors_offset[4] = {{0, 1}, {0, -1}, {1, 0}, {-1, 0}};
-
-    auto sample_neighbor_edge = [&](const WaterChunkSnapshot* neighbor, int x, int z, int dx, int dz) -> float {
-        if (!neighbor || neighbor->resolution <= 1) {
-            return SEA_LEVEL;
-        }
-
-        const int neighbor_resolution = neighbor->resolution;
-        if (neighbor->water_levels.size() < GetWaterCellCount(neighbor_resolution)) {
-            return SEA_LEVEL;
-        }
-
-        int sample_x = 0;
-        int sample_z = 0;
-
-        if (dx < 0) {
-            sample_x = neighbor_resolution - 1;
-            sample_z = std::clamp(static_cast<int>(((z + 0.5f) / resolution) * neighbor_resolution), 0, neighbor_resolution - 1);
-        } else if (dx > 0) {
-            sample_x = 0;
-            sample_z = std::clamp(static_cast<int>(((z + 0.5f) / resolution) * neighbor_resolution), 0, neighbor_resolution - 1);
-        } else if (dz < 0) {
-            sample_x = std::clamp(static_cast<int>(((x + 0.5f) / resolution) * neighbor_resolution), 0, neighbor_resolution - 1);
-            sample_z = neighbor_resolution - 1;
-        } else {
-            sample_x = std::clamp(static_cast<int>(((x + 0.5f) / resolution) * neighbor_resolution), 0, neighbor_resolution - 1);
-            sample_z = 0;
-        }
-
-        return neighbor->water_levels[sample_z * neighbor_resolution + sample_x];
-    };
-
-    for (int z = 0; z < resolution; ++z) {
-        for (int x = 0; x < resolution; ++x) {
-            const int idx_center = z * resolution + x;
-            const float h_center = snapshot.water_levels[idx_center];
-            
-            float total_outflow = 0.0f;
-            float total_inflow = 0.0f;
-            Vec2 new_flow_vector = {0.0f, 0.0f};
-
-            for(int i = 0; i < 4; ++i) {
-                int nx = x + neighbors_offset[i].x;
-                int nz = z + neighbors_offset[i].y;
-                float h_neighbor = SEA_LEVEL;
-
-                if (nx >= 0 && nx < resolution && nz >= 0 && nz < resolution) {
-                    h_neighbor = snapshot.water_levels[nz * resolution + nx];
-                } else if (nx < 0) {
-                    h_neighbor = sample_neighbor_edge(neighbors.west, x, z, -1, 0);
-                } else if (nx >= resolution) {
-                    h_neighbor = sample_neighbor_edge(neighbors.east, x, z, 1, 0);
-                } else if (nz < 0) {
-                    h_neighbor = sample_neighbor_edge(neighbors.south, x, z, 0, -1);
-                } else if (nz >= resolution) {
-                    h_neighbor = sample_neighbor_edge(neighbors.north, x, z, 0, 1);
-                }
-
-                float diff = h_center - h_neighbor;
-                
-                if (diff > MIN_FLOW_DIFF) {
-                    float outflow = diff * FLOW_CONSTANT;
-                    total_outflow += outflow;
-                    new_flow_vector += Vec2(neighbors_offset[i]) * outflow;
-                } else if (-diff > MIN_FLOW_DIFF) {
-                    float inflow = -diff * FLOW_CONSTANT;
-                    total_inflow += inflow;
-                }
-            }
-            
-            const float terrain_h = snapshot.terrain_height[idx_center];
-            const float water_depth = h_center - terrain_h;
-
-            if (water_depth > 0) {
-                 total_outflow = std::min(total_outflow, water_depth * MAX_WATER_COMPRESSION);
-            } else {
-                 total_outflow = 0;
-            }
-            
-            float final_height = h_center - total_outflow + total_inflow;
-            output.water_levels[idx_center] = final_height;
-            
-            // <<< OPTIMIZATION: Measure water activity >>>
-            const float delta = std::abs(final_height - h_center);
-            if (delta > max_delta_this_tick) {
-                max_delta_this_tick = delta;
-            }
-            
-            output.flow_data[idx_center] = glm::mix(snapshot.flow_data[idx_center], new_flow_vector, 0.5f);
-        }
-    }
-    
-    output.max_delta = max_delta_this_tick;
 }
 
 f32 WaterSystem::get_water_level_at(float world_x, float world_z) const {

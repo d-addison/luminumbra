@@ -114,6 +114,11 @@ public:
     // Per-edge persisted outflow flux (mm-vol/tick), signed: +q drains the lower-index cell toward
     // its +X or +Z neighbour. Layout: [2*i + 0] = +X edge of cell i, [2*i + 1] = +Z edge. size = 2*res^2.
     std::vector<std::int32_t> water_edge_flux;
+    // (water-perf-200fps spec Step 2) Cached per-cell RIVER SOURCE mask (mm/tick): RIVER_DISCHARGE_MM
+    // where RiverInfluenceAt(cell) >= threshold, else 0. A pure function of cell position, so it is
+    // computed ONCE (lazily, size-guarded in StepChunkWaterFixed) instead of re-evaluating the noise
+    // every tick. NOT serialized and NOT hashed (a derived accelerator); size = resolution^2.
+    std::vector<std::int32_t> water_src_mm;
     std::atomic<bool> has_water_sim{false};
     std::atomic<bool> water_mesh_generated{false};
     std::atomic<int> current_water_resolution{8}; // Current water grid resolution (4, 8, 16, or 32)
