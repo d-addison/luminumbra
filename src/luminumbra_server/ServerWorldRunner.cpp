@@ -132,6 +132,7 @@ void SpawnEcologyRoster(entt::registry& r, const Vec3& anchor) {
         tf.position = Vec3(ox + x, oy, oz + z);
         auto& cr = r.emplace<Comp::CreatureComponent>(e);
         cr.is_predator = true; cr.hunger = 0.9f; cr.move_speed = 4.2f;
+        cr.species_id = Comp::CreatureSpeciesId16("ridgeback_stalker");
         r.emplace<Comp::PackHunterComponent>(e);
         r.emplace<Comp::MortalComponent>(e).lifespan_ticks = 5000u;
     };
@@ -142,6 +143,7 @@ void SpawnEcologyRoster(entt::registry& r, const Vec3& anchor) {
         tf.position = Vec3(ox + x, oy, oz + z);
         auto& cr = r.emplace<Comp::CreatureComponent>(e);
         cr.is_predator = false; cr.hunger = 0.05f; cr.stamina = 1.0f; cr.move_speed = 3.0f;
+        cr.species_id = Comp::CreatureSpeciesId16("grovestrider");
         auto& gn = r.emplace<Comp::CreatureGenomeComponent>(e);
         gn.female = (idx++ % 2 == 0); gn.age_ticks = 100u;
         r.emplace<Comp::AlarmComponent>(e);

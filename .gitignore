@@ -36,6 +36,8 @@ imgui.ini
 .forge/trace-log.jsonl
 .forge/trace-log.jsonl.lock
 .forge/tmp/
+# Transient build/run capture logs dumped during dev iteration (not source of truth)
+.forge/artifacts/
 
 # Local-only project data
 /worlds/saves/

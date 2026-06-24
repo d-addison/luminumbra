@@ -10,8 +10,31 @@
 
 namespace Luminumbra::Components {
 
+// Stable 16-bit creature SPECIES id derived from a species name string (FNV-1a folded
+// to 16 bits) — the same scheme foliage uses (foliage::SpeciesId16), kept here as a
+// dependency-light free function so the spawn sites and the codex agree on the key.
+// 0 is reserved for "unspecified" (a creature with no resolved species), so a named
+// species never collides with the unset default. This is IDENTITY metadata: it is set
+// once at spawn and never mutated, and is deliberately NOT folded into the ecology
+// sub-hash (ai/EcologyHash.h) — adding a constant, never-changing identity tag would
+// not alter sim behaviour, and leaving it out keeps every existing determinism baseline
+// byte-identical. The PHOTO CODEX (client-only, hash-free) reads it as the species key.
+[[nodiscard]] inline std::uint16_t CreatureSpeciesId16(const char* id) {
+    std::uint64_t h = 1469598103934665603ull;  // FNV offset basis
+    for (const char* p = id; p && *p; ++p) {
+        h ^= static_cast<unsigned char>(*p);
+        h *= 1099511628211ull;  // FNV prime
+    }
+    const std::uint16_t v = static_cast<std::uint16_t>((h ^ (h >> 32)) & 0xFFFFu);
+    return v == 0 ? 1 : v;
+}
+
 struct CreatureComponent {
     bool is_predator = false;   // role: predators hunt prey; prey flee predators + graze
+    // Codex species identity (CreatureSpeciesId16 of the archetype/species name). 0 ==
+    // unspecified -> the photo codex falls back to the predator/prey role proxy. Set at
+    // spawn, inherited by offspring, never mutated; not in the ecology sub-hash.
+    std::uint16_t species_id = 0;
     float hunger = 0.0f;        // 0 sated .. 1 starving (grows each tick)
     float stamina = 1.0f;       // 0 exhausted .. 1 fresh
     float move_speed = 3.0f;    // m/s cruise

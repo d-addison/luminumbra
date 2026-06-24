@@ -520,7 +520,12 @@ std::vector<luminumbra::game::PhotoSubjectView> GatherPhotoSubjects(
         // Apparent footprint falls off with distance (a far subject fills less frame).
         pv.size = luminumbra::game::PhotoModeClamp01(pv.size_m / (pv.distance_m * 0.5f + 1.0f));
         pv.light = 0.6f;   // scene-luminance proxy (no per-creature luminance component)
-        pv.species_id = cr.is_predator ? 1 : 2;  // deterministic role proxy
+        // Real per-creature species identity (set at spawn from the archetype) keys the
+        // codex; fall back to the predator/prey role proxy only for unspecified (0)
+        // creatures so the codex can fill with actual species rather than two buckets.
+        pv.species_id = cr.species_id != 0
+                            ? static_cast<int>(cr.species_id)
+                            : (cr.is_predator ? 1 : 2);
         views.push_back(pv);
     }
     return views;
@@ -5195,6 +5200,8 @@ int main(int argc, char* argv[]) {
                                 tf.position = Luminumbra::Vec3(cx, cy, cz);
                                 auto& cr = reg.emplace<Luminumbra::Components::CreatureComponent>(e);
                                 cr.is_predator = predator;
+                                cr.species_id = Luminumbra::Components::CreatureSpeciesId16(
+                                    predator ? "ridgeback_stalker" : "grovestrider");
                                 cr.hunger = hunger;
                                 // The predator is a bit faster than the herd so it can run down a
                                 // straggler (otherwise equal flee/hunt speeds never close the gap).

@@ -149,7 +149,7 @@ inline CreatureReproductionStats RunMatingResolveOnTick(entt::registry& reg, std
         }
     }
 
-    struct Birth { CreatureGenome genome; float x, y, z; std::uint32_t generation; bool female; };
+    struct Birth { CreatureGenome genome; float x, y, z; std::uint32_t generation; bool female; std::uint16_t species_id; };
     std::vector<Birth> births;
     std::vector<bool> male_used(males.size(), false);
 
@@ -206,6 +206,7 @@ inline CreatureReproductionStats RunMatingResolveOnTick(entt::registry& reg, std
         b.z = (tf.position.z + mtf.position.z) * 0.5f + kReproSpawnRadius;
         b.generation = (gn.generation > mgn.generation ? gn.generation : mgn.generation) + 1u;
         b.female = childFemale;
+        b.species_id = cr.species_id;  // offspring inherit the mother's codex species identity
         births.push_back(b);
 
         gn.courting_ticks = 0;
@@ -222,6 +223,7 @@ inline CreatureReproductionStats RunMatingResolveOnTick(entt::registry& reg, std
 
         auto& cr = reg.emplace<Comp::CreatureComponent>(child);
         cr.is_predator = false;
+        cr.species_id = b.species_id;  // inherit codex species from the mother
         cr.hunger = 0.5f;
         cr.stamina = 1.0f;
         cr.move_speed = b.genome.move_speed;
