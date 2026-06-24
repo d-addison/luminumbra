@@ -91,7 +91,12 @@ set(CLIENT_SOURCES
 # T-I3-18: RuntimeScenarioHarness.cpp instantiates enough EnTT storage
 # templates (debug, no inlining) to overflow the default COFF section limit
 # on MinGW; -mbig-obj lifts it (same pattern googletest/nlohmann use).
+# main_client.cpp is a large monolith that likewise overflows once it gains more
+# EnTT emplace/view instantiations (relocation truncated to fit IMAGE_REL_AMD64_ADDR32NB);
+# give it the same treatment so the app TU keeps room to grow.
 if(MINGW)
     set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/core/RuntimeScenarioHarness.cpp
+        PROPERTIES COMPILE_OPTIONS "-Wa,-mbig-obj")
+    set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/main_client.cpp
         PROPERTIES COMPILE_OPTIONS "-Wa,-mbig-obj")
 endif()

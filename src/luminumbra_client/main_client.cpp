@@ -48,6 +48,7 @@
 #include "luminumbra_common/ai/CreatureSpeciesRegistry.h"  // species id -> display name for the codex/discovery HUD
 #include "luminumbra_common/game/Objectives.h"  // progression goals surfaced on the HUD
 #include "luminumbra_common/game/CodexView.h"  // pure presentation model for the codex browse screen
+#include "luminumbra_common/animation/AnimationRuntime.h"  // skinned skeleton/clip loaders for ambient wildlife
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"  // user.* video/audio/controls settings
@@ -5147,6 +5148,95 @@ int main(int argc, char* argv[]) {
                             }
                             LUMINUMBRA_CORE_INFO("BUSHES: scattered {} shrub instances", bushPlaced);
                         }
+
+                        // LIVING WORLD: ambient WILDLIFE for interactive play. The world had
+                        // no creatures in normal play (only timelapse markers / scenario rigs),
+                        // so the codex/objectives loop had nothing to photograph. Spawn a small,
+                        // species-varied herd of SKINNED, animated, grounded creatures around the
+                        // spawn anchor: each is the grovestrider rig recolored by its species
+                        // base_color and scaled by a genome size — GameSession's SamplePosesOnTick
+                        // animates them, the CreatureBrain wanders them (grounded via a Jolt
+                        // avatar like the timelapse herd), and GatherPhotoSubjects sees them so the
+                        // codex fills in normal play. Render+client-sim only; the gated headless
+                        // world_hash is the server's and is unaffected. Skipped in capture/scenario
+                        // modes (they own their own creature handling).
+                        const bool interactive_play =
+                            !scenario_config.active() && g_timelapse_frames == 0 && !g_timelapse_creatures;
+                        if (interactive_play && g_creatureSpecies.size() > 0) {
+                            namespace anim = luminumbra::animation;
+                            static anim::Skeleton s_wildlife_skeleton;
+                            static anim::AnimationClip s_wildlife_idle;
+                            static bool s_wildlife_loaded = false;
+                            static bool s_wildlife_ok = false;
+                            if (!s_wildlife_loaded) {
+                                s_wildlife_loaded = true;
+                                anim::SkinnedMeshAsset masset;
+                                anim::AnimClipAsset iclip;
+                                const std::filesystem::path gmesh =
+                                    root_dir / "data/models/creatures/grovestrider/grovestrider.lmesh";
+                                const std::filesystem::path gidle =
+                                    root_dir / "data/models/creatures/grovestrider/grovestrider.idle.lanim";
+                                if (anim::LoadSkinnedMeshAsset(gmesh.string(), masset) &&
+                                    anim::LoadAnimClipAsset(gidle.string(), iclip)) {
+                                    s_wildlife_skeleton = anim::BuildSkeleton(masset);
+                                    s_wildlife_idle = anim::BuildClip(iclip);
+                                    s_wildlife_ok = true;
+                                }
+                            }
+                            if (s_wildlife_ok) {
+                                auto* phys = gameSession->GetPhysicsSystem();
+                                auto wgen = luminumbra::core::DeterministicRng::seeded(0xFA0FA0u, 4242u, 1u);
+                                const int kHerd = 12;
+                                int wlSpawned = 0;
+                                for (int i = 0; i < kHerd; ++i) {
+                                    const float ang = wgen.next_unit() * 6.2831853f;
+                                    const float rad = 10.0f + wgen.next_unit() * 60.0f;
+                                    const float wx = anchor.x + std::cos(ang) * rad;
+                                    const float wz = anchor.z + std::sin(ang) * rad;
+                                    const float gy = terr(wx, wz);
+                                    if (gy <= ws->WaterLevelAt(wx, wz) + 0.3f) continue;  // not in water
+                                    const auto& sp =
+                                        g_creatureSpecies.all()[static_cast<std::size_t>(i) % g_creatureSpecies.size()];
+                                    const float size = 0.8f + wgen.next_unit() * 0.7f;  // genome size variety
+                                    const auto e = reg.create();
+                                    auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
+                                    tf.position = Luminumbra::Vec3(wx, gy + 1.2f, wz);  // settle onto ground
+                                    tf.scale = Luminumbra::Vec3(size);
+                                    tf.rotation = glm::angleAxis(ang, glm::vec3(0.0f, 1.0f, 0.0f));
+                                    auto& sm = reg.emplace<Luminumbra::Components::SkinnedMeshComponent>(e);
+                                    sm.meshPath = "data/models/creatures/grovestrider/grovestrider.lmesh";
+                                    sm.materialId = 3u;
+                                    sm.tintR = sp.base_color[0];
+                                    sm.tintG = sp.base_color[1];
+                                    sm.tintB = sp.base_color[2];
+                                    auto& cr = reg.emplace<Luminumbra::Components::CreatureComponent>(e);
+                                    cr.species_id = sp.species_id();
+                                    cr.is_predator = sp.predator;
+                                    cr.hunger = 0.2f;
+                                    cr.move_speed = sp.predator ? 4.0f : 2.6f;
+                                    auto& gn = reg.emplace<Luminumbra::Components::CreatureGenomeComponent>(e);
+                                    gn.move_speed = cr.move_speed;
+                                    gn.size_scale = size;
+                                    gn.female = (i % 2 == 0);
+                                    gn.age_ticks = 100u;
+                                    auto& pl = reg.emplace<anim::AnimationPlayerComponent>(e);
+                                    pl.skeleton = &s_wildlife_skeleton;
+                                    pl.clip = &s_wildlife_idle;
+                                    pl.time = wgen.next_unit() * 2.0;  // staggered phase
+                                    pl.looping = true;
+                                    if (phys) {
+                                        const std::size_t idx =
+                                            phys->create_avatar_character(glm::vec3(wx, gy + 1.2f, wz));
+                                        reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
+                                    }
+                                    ++wlSpawned;
+                                }
+                                LUMINUMBRA_CORE_INFO(
+                                    "Living world: spawned {} skinned, species-varied ambient creatures around spawn",
+                                    wlSpawned);
+                            }
+                        }
+
                         // Growth showcase: a cluster of bigger HERO plants right in front of the
                         // fixed grow-mode camera, so the foreground is dominated by plants visibly
                         // growing (the scattered grove alone reads as distant background).
