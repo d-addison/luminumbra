@@ -32,6 +32,8 @@
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/components/PlantComponents.h"   // I9-FOLIAGE
 #include "luminumbra_common/components/CreatureComponents.h" // I9-ECO creature markers
+#include "luminumbra_common/components/ThirstComponents.h"   // ambient-wildlife thirst + water holes
+#include "luminumbra_common/components/ScavengerComponent.h" // ambient-wildlife predator scavenging
 #include "luminumbra_common/components/CombustionComponents.h" // sim.fire demo markers
 #include "luminumbra_common/components/AlarmComponents.h"      // herd-alarm collective flee
 #include "luminumbra_common/components/MortalComponents.h"     // lifespan / natural death
@@ -5188,13 +5190,25 @@ int main(int argc, char* argv[]) {
                                 auto wgen = luminumbra::core::DeterministicRng::seeded(0xFA0FA0u, 4242u, 1u);
                                 const int kHerd = 12;
                                 int wlSpawned = 0;
+                                int wlHoles = 0;
                                 for (int i = 0; i < kHerd; ++i) {
                                     const float ang = wgen.next_unit() * 6.2831853f;
                                     const float rad = 10.0f + wgen.next_unit() * 60.0f;
                                     const float wx = anchor.x + std::cos(ang) * rad;
                                     const float wz = anchor.z + std::sin(ang) * rad;
                                     const float gy = terr(wx, wz);
-                                    if (gy <= ws->WaterLevelAt(wx, wz) + 0.3f) continue;  // not in water
+                                    if (gy <= ws->WaterLevelAt(wx, wz) + 0.3f) {
+                                        // Water cell: drop a few DRINKING SPOTS at the water so the
+                                        // wired thirst system has somewhere to steer creatures. Capped.
+                                        if (wlHoles < 3) {
+                                            const auto he = reg.create();
+                                            auto& htf = reg.emplace<Luminumbra::Components::TransformComponent>(he);
+                                            htf.position = Luminumbra::Vec3(wx, ws->WaterLevelAt(wx, wz), wz);
+                                            reg.emplace<Luminumbra::Components::WaterHoleComponent>(he).radius = 6.0f;
+                                            ++wlHoles;
+                                        }
+                                        continue;  // not in water
+                                    }
                                     // Biome-appropriate species: pick among the species that
                                     // inhabit the local biome (generalists included); fall back
                                     // to the full roster if the biome lists none.
@@ -5227,6 +5241,13 @@ int main(int argc, char* argv[]) {
                                     gn.size_scale = size;
                                     gn.female = (i % 2 == 0);
                                     gn.age_ticks = 100u;
+                                    // Survival: every creature thirsts (seeks the drinking spots
+                                    // above); predators also scavenge carrion. Activates the wired
+                                    // Thirst/Scavenging tick systems in the living world.
+                                    auto& th = reg.emplace<Luminumbra::Components::ThirstComponent>(e);
+                                    th.thirst = 0.1f + wgen.next_unit() * 0.25f;
+                                    if (sp.predator)
+                                        reg.emplace<Luminumbra::Components::ScavengerComponent>(e);
                                     auto& pl = reg.emplace<anim::AnimationPlayerComponent>(e);
                                     pl.skeleton = &s_wildlife_skeleton;
                                     pl.clip = &s_wildlife_idle;
