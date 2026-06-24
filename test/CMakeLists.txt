@@ -155,6 +155,7 @@ add_executable(common_tests
     sim/species_identity_test.cpp
     sim/creature_species_registry_test.cpp
     sim/objectives_test.cpp
+    sim/codex_view_test.cpp
     sim/decomposition_test.cpp
     sim/circadian_test.cpp
     sim/territory_test.cpp

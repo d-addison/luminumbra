@@ -47,6 +47,7 @@
 #include "luminumbra_common/game/PhotoMode.h"  // g-vertical-slice: photo-mode capture loop (read-only observer)
 #include "luminumbra_common/ai/CreatureSpeciesRegistry.h"  // species id -> display name for the codex/discovery HUD
 #include "luminumbra_common/game/Objectives.h"  // progression goals surfaced on the HUD
+#include "luminumbra_common/game/CodexView.h"  // pure presentation model for the codex browse screen
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"  // user.* video/audio/controls settings
@@ -109,6 +110,10 @@ luminumbra::ai::CreatureSpeciesRegistry g_creatureSpecies;
 luminumbra::game::ObjectiveSet g_objectives;
 bool g_objectivesInit = false;
 std::string g_objHudSig;
+// Creature codex browse overlay (client-only). g_codexOpen toggles via the ToggleCodex
+// key; g_codexSig throttles re-population so rows are rebuilt only when discovery changes.
+bool g_codexOpen = false;
+std::string g_codexSig;
 // Single client config: defaults (data/common/systems.json) overlaid by the writable
 // per-user settings file (%APPDATA%/Luminumbra/settings.json). user.* is client-only,
 // never hashed (docs/STANDARDS.md §5). Loaded once at startup (before window creation).
@@ -5831,15 +5836,65 @@ int main(int argc, char* argv[]) {
                     if (g_playerController && currentState == GameState::IN_GAME &&
                         !scenario_config.active() && !g_paused) {
                         g_photoMode.active = g_playerController->photo_mode_active();
+
+                        // Codex browse overlay (client-only). Its toggle takes precedence
+                        // over the HUD/viewfinder swap below and cannot open while the
+                        // viewfinder is active. Closing it resyncs the hud-swap state.
+                        if (g_playerController->consume_codex_toggle() && !g_photoMode.active) {
+                            g_codexOpen = !g_codexOpen;
+                            if (g_uiManager) {
+                                g_uiManager->RequestLoadDocument(g_codexOpen ? "codex.rml" : "hud.rml");
+                                g_photoModeUiShown = false;
+                                g_codexSig.clear();  // force a repopulate on next open
+                            }
+                        }
+
                         // T031: swap the in-game overlay between the HUD and the photo-mode viewfinder
                         // when photo mode toggles (the capture loop + lens nudges below already exist).
-                        if (g_uiManager) {
+                        if (!g_codexOpen && g_uiManager) {
                             if (g_photoMode.active && !g_photoModeUiShown) {
                                 g_uiManager->RequestLoadDocument("photo_mode.rml");
                                 g_photoModeUiShown = true;
                             } else if (!g_photoMode.active && g_photoModeUiShown) {
                                 g_uiManager->RequestLoadDocument("hud.rml");
                                 g_photoModeUiShown = false;
+                            }
+                        }
+
+                        // While the codex is open, populate it from the live codex+registry
+                        // (throttled by g_codexSig: only rebuild rows when discovery state
+                        // changes). Skips the HUD objective update below.
+                        if (g_codexOpen && g_uiManager && g_uiManager->GetContext()) {
+                            if (auto* doc = g_uiManager->GetContext()->GetDocument("codex")) {
+                                const luminumbra::game::CodexView cv =
+                                    luminumbra::game::BuildCodexView(g_creatureSpecies, g_photoCodex);
+                                const int pct = static_cast<int>(cv.completeness * 100.0f + 0.5f);
+                                std::string sig = std::to_string(cv.discovered_count) + "/" +
+                                    std::to_string(cv.total_species) + "|" + std::to_string(pct);
+                                if (sig != g_codexSig) {
+                                    g_codexSig = sig;
+                                    if (auto* h = doc->GetElementById("codex_completion")) {
+                                        h->SetInnerRML(std::to_string(cv.discovered_count) + " / " +
+                                            std::to_string(cv.total_species) + " discovered \xC2\xB7 " +
+                                            std::to_string(pct) + "%");
+                                    }
+                                    if (auto* list = doc->GetElementById("codex_list")) {
+                                        std::string rows_rml;
+                                        for (const auto& r : cv.rows) {
+                                            std::string stars;
+                                            for (int s = 0; s < 5; ++s)
+                                                stars += (s < r.stars) ? "\xE2\x98\x85" : "\xE2\x98\x86";
+                                            const std::string cls = r.discovered
+                                                ? "codex-row codex-found" : "codex-row codex-locked";
+                                            const std::string name = r.discovered ? r.display_name : "? ? ?";
+                                            rows_rml += "<div class=\"" + cls + "\">"
+                                                "<span class=\"codex-name\">" + name + "</span>"
+                                                "<span class=\"codex-stars\">" + stars + "</span>"
+                                                "</div>";
+                                        }
+                                        list->SetInnerRML(rows_rml);
+                                    }
+                                }
                             }
                         }
 
@@ -5852,7 +5907,7 @@ int main(int argc, char* argv[]) {
                                 static_cast<int>(Luminumbra::Components::CreatureSpeciesId16("grovestrider")));
                             g_objectivesInit = true;
                         }
-                        if (!g_photoMode.active && g_uiManager && g_uiManager->GetContext()) {
+                        if (!g_codexOpen && !g_photoMode.active && g_uiManager && g_uiManager->GetContext()) {
                             if (auto* hud = g_uiManager->GetContext()->GetDocument("hud")) {
                                 const luminumbra::game::Objective* cur =
                                     g_objectives.next_incomplete(g_photoCodex);

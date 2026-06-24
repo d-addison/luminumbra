@@ -31,6 +31,7 @@ enum class InputAction : int {
     LensApertureDown,  // open UP   (smaller f-number, shallower DoF / more bokeh)
     LensFocusUp,       // push focus distance farther
     LensFocusDown,     // pull focus distance nearer
+    ToggleCodex,       // open/close the creature codex browse screen (client-only)
     // I9-FOLIAGE Phase 5B farming verbs: act on the plant nearest the player's aim. The sim verbs
     // are deterministic (FarmingSystem.h); only fire on a key press, so headless gates are unaffected.
     FarmPlant,         // plant a seed at the aim point
@@ -67,6 +68,7 @@ inline constexpr std::array<InputActionDef, kInputActionCount> kInputActionDefs 
     {InputAction::LensApertureDown, "LensApertureDown", GLFW_KEY_LEFT_BRACKET},
     {InputAction::LensFocusUp,      "LensFocusUp",      GLFW_KEY_EQUAL},
     {InputAction::LensFocusDown,    "LensFocusDown",    GLFW_KEY_MINUS},
+    {InputAction::ToggleCodex,      "ToggleCodex",      GLFW_KEY_C},
     {InputAction::FarmPlant,        "FarmPlant",        GLFW_KEY_F},
     {InputAction::FarmWater,        "FarmWater",        GLFW_KEY_G},
     {InputAction::FarmFertilize,    "FarmFertilize",    GLFW_KEY_H},

@@ -195,6 +195,10 @@ void PlayerController::ProcessKeyInput(int key, int action) {
         LUMINUMBRA_CORE_INFO(m_photoModeActive ? "Photo mode ON. [/] aperture, -/= focus, Enter to shutter."
                                                : "Photo mode OFF.");
     }
+    // Codex screen toggle (client-only overlay): edge-triggered, consumed by the main loop.
+    if (key == this->key(InputAction::ToggleCodex) && action == GLFW_PRESS) {
+        m_codexToggleRequested = true;
+    }
     if (m_photoModeActive) {
         if (key == this->key(InputAction::Shutter) && action == GLFW_PRESS) {
             m_shutterRequested = true;

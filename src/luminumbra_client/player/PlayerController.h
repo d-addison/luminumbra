@@ -94,6 +94,13 @@ public:
         m_focusNudge = 0.0f;
         return n;
     }
+    // Edge-triggered codex open/close request: true ONCE per ToggleCodex press, then
+    // self-clears. Client-only (a UI overlay), never touches the sim.
+    [[nodiscard]] bool consume_codex_toggle() {
+        const bool fired = m_codexToggleRequested;
+        m_codexToggleRequested = false;
+        return fired;
+    }
 
 private:
     PlayerReplayInputFrame ReadLiveInputFrame() const;
@@ -136,6 +143,7 @@ private:
     bool  m_shutterRequested = false;
     float m_apertureNudge = 0.0f; // f-number stops (+ = stop down, - = open up)
     float m_focusNudge = 0.0f;    // metres (+ = farther, - = nearer)
+    bool  m_codexToggleRequested = false;  // edge-triggered codex screen open/close
 };
 
 } // namespace Luminumbra::Client
