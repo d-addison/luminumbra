@@ -9,6 +9,7 @@
 #include "rendering/Camera.h"
 #include "luminumbra_common/animation/AnimationRuntime.h"
 #include "luminumbra_common/ai/CreatureSpeciesRegistry.h"  // Phase 2: species base_color -> creature tint
+#include "luminumbra_common/systems/CreatureProcgen.h"      // Phase 2: genome -> body-proportion build
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/InstinctComponents.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
@@ -6622,6 +6623,18 @@ SkinnedMeshVisualTarget SpawnSkinnedMeshVisualEntity(
         const auto entity = registry.create();
         auto& transform = registry.emplace<Luminumbra::Components::TransformComponent>(entity);
         transform.position = Luminumbra::Vec3(rx, ry, mesh_z);
+        // Phase 2 procedural BUILD: a deterministic per-index spread of body proportions so
+        // the showcase row reads as DISTINCT silhouettes (tall/stocky/long), not clones.
+        {
+            luminumbra::creature::CreatureBuildGenome bg;
+            bg.height = static_cast<float>((i * 7 + 2) % 10) / 9.0f;
+            bg.girth  = static_cast<float>((i * 3 + 5) % 10) / 9.0f;
+            bg.length = static_cast<float>((i * 5 + 1) % 10) / 9.0f;
+            bg.size   = 1.0f;
+            const luminumbra::creature::CreatureBuild build =
+                luminumbra::creature::ComputeCreatureBuild(bg);
+            transform.scale = Luminumbra::Vec3(build.scale_x, build.scale_y, build.scale_z);
+        }
         auto& mesh_component = registry.emplace<Luminumbra::Components::SkinnedMeshComponent>(entity);
         mesh_component.meshPath = use_mesh_path;
         mesh_component.materialId = kRowMaterials[i % 5];

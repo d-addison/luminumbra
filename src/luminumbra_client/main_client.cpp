@@ -51,6 +51,7 @@
 #include "luminumbra_common/game/Objectives.h"  // progression goals surfaced on the HUD
 #include "luminumbra_common/game/CodexView.h"  // pure presentation model for the codex browse screen
 #include "luminumbra_common/animation/AnimationRuntime.h"  // skinned skeleton/clip loaders for ambient wildlife
+#include "luminumbra_common/systems/CreatureProcgen.h"  // genome -> body-proportion build (procedural silhouette)
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"  // user.* video/audio/controls settings
@@ -5219,11 +5220,21 @@ int main(int argc, char* argv[]) {
                                     const auto& sp = sp_sel
                                         ? *sp_sel
                                         : g_creatureSpecies.all()[static_cast<std::size_t>(i) % g_creatureSpecies.size()];
-                                    const float size = 0.8f + wgen.next_unit() * 0.7f;  // genome size variety
+                                    const float size = 0.8f + wgen.next_unit() * 0.7f;  // overall size multiplier
+                                    // Procedural BUILD: non-uniform body proportions from sampled
+                                    // build genes give each creature a distinct silhouette
+                                    // (tall/stocky/long) from the same mesh (CreatureProcgen).
+                                    luminumbra::creature::CreatureBuildGenome bg;
+                                    bg.height = wgen.next_unit();
+                                    bg.girth  = wgen.next_unit();
+                                    bg.length = wgen.next_unit();
+                                    bg.size   = size;
+                                    const luminumbra::creature::CreatureBuild build =
+                                        luminumbra::creature::ComputeCreatureBuild(bg);
                                     const auto e = reg.create();
                                     auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
                                     tf.position = Luminumbra::Vec3(wx, gy + 1.2f, wz);  // settle onto ground
-                                    tf.scale = Luminumbra::Vec3(size);
+                                    tf.scale = Luminumbra::Vec3(build.scale_x, build.scale_y, build.scale_z);
                                     tf.rotation = glm::angleAxis(ang, glm::vec3(0.0f, 1.0f, 0.0f));
                                     auto& sm = reg.emplace<Luminumbra::Components::SkinnedMeshComponent>(e);
                                     sm.meshPath = "data/models/creatures/grovestrider/grovestrider.lmesh";
