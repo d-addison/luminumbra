@@ -331,64 +331,74 @@ void WaterSystem::update(entt::registry& registry, const std::unordered_map<Chun
 
     auto source_view = registry.view<const Components::TransformComponent, const Components::WaterSourceComponent>();
 
-    int water_inits_this_tick = 0;
+    // (water-perf-200fps init follow-on) First-time water INIT is the dominant water-frame cost:
+    // per cell it samples the worldgen (WaterLevelAt + GetTerrainHeightAt), time-sliced to
+    // MAX_WATER_INITS_PER_TICK chunks/tick (spec 008). Collect THIS tick's chunks in the SAME
+    // selection order + cap as before, then SEED THEM IN PARALLEL. Each chunk writes ONLY its own
+    // arrays from read-only worldgen queries — already thread-safe (the streamer generates chunks on
+    // these same workers and terrain is byte-identical run-to-run) — so parallel seeding is
+    // BYTE-IDENTICAL to sequential. run==replay / host==peer hold (validated by --smoke).
+    std::vector<Chunk*> to_init;
     for (const auto& active_chunk : active_chunks) {
         const auto& chunk_ptr = active_chunk.second;
-        if (!chunk_ptr) {
+        if (!chunk_ptr || chunk_ptr->has_water_sim.load()) {
             continue;
         }
-
-        if (!chunk_ptr->has_water_sim.load()) {
-            // spec 008 follow-up: time-slice first-time water init so a burst of newly-streamed
-            // water chunks doesn't spike the tick. Deferred chunks stay un-inited (has_water_sim
-            // false) and are picked up over the next ticks.
-            if (water_inits_this_tick >= MAX_WATER_INITS_PER_TICK) {
-                continue;
+        if (static_cast<int>(to_init.size()) >= MAX_WATER_INITS_PER_TICK) {
+            break;  // same cap as the old water_inits_this_tick counter
+        }
+        to_init.push_back(chunk_ptr.get());
+    }
+    auto seed_chunk_water = [this](Chunk* cp) {
+        // Spec 009 Phase 3: init directly at the fixed camera-independent sim resolution (no later
+        // camera-driven resize -> the hashed grid is uniform + stable on every peer).
+        const int initial_resolution = WATER_SIM_RESOLUTION;
+        cp->current_water_resolution.store(initial_resolution);
+        const size_t sim_size = static_cast<size_t>(initial_resolution) * initial_resolution;
+        cp->water_level_data.assign(sim_size, SEA_LEVEL);
+        cp->water_flow_data.assign(sim_size, Vec2(0.0f));
+        cp->water_sim_terrain_height.resize(sim_size);
+        cp->water_rest_level.assign(sim_size, SEA_LEVEL);
+        // Spec 009: fixed-point flowing-water state (HASHED). bed = terrain, depth = standing water
+        // above bed; lakes/sea start filled, dry land + perched channels fill from the sources.
+        cp->water_depth_mm.assign(sim_size, 0);
+        cp->water_bed_mm.assign(sim_size, 0);
+        cp->water_edge_flux.assign(2 * sim_size, 0);
+        const IVec3 c_coords = cp->get_coords();
+        const float cell_width_x = CHUNK_SIZE_X / (float)initial_resolution;
+        const float cell_width_z = CHUNK_SIZE_Z / (float)initial_resolution;
+        for (int z = 0; z < initial_resolution; ++z) {
+            for (int x = 0; x < initial_resolution; ++x) {
+                float world_x = c_coords.x * CHUNK_SIZE_X + (x + 0.5f) * cell_width_x;
+                float world_z = c_coords.z * CHUNK_SIZE_Z + (z + 0.5f) * cell_width_z;
+                const int cell = z * initial_resolution + x;
+                // Seed the resting surface from worldgen: sea level, raised to the local lake
+                // surface inside basins so perched lakes start (and stay) filled.
+                const float rest = m_shield_system->WaterLevelAt(world_x, world_z);
+                const float terrain = m_shield_system->GetTerrainHeightAt(world_x, world_z);
+                cp->water_level_data[cell] = rest;
+                cp->water_rest_level[cell] = rest;
+                cp->water_sim_terrain_height[cell] = terrain;
+                cp->water_bed_mm[cell] = static_cast<std::int32_t>(std::lround(terrain * MM_PER_M));
+                const long depth0 = std::lround(static_cast<double>(rest - terrain) * MM_PER_M);
+                cp->water_depth_mm[cell] = static_cast<std::int32_t>(depth0 > 0 ? depth0 : 0);
             }
-            ++water_inits_this_tick;
-            // Spec 009 Phase 3: init directly at the fixed camera-independent sim resolution (no later
-            // camera-driven resize -> the hashed grid is uniform + stable on every peer).
-            int initial_resolution = WATER_SIM_RESOLUTION;
-            chunk_ptr->current_water_resolution.store(initial_resolution);
-            
-            const size_t sim_size = initial_resolution * initial_resolution;
-            chunk_ptr->water_level_data.assign(sim_size, SEA_LEVEL);
-            chunk_ptr->water_flow_data.assign(sim_size, Vec2(0.0f));
-            chunk_ptr->water_sim_terrain_height.resize(sim_size);
-            chunk_ptr->water_rest_level.assign(sim_size, SEA_LEVEL);
-            // Spec 009: fixed-point flowing-water state (HASHED). bed = terrain, depth = standing water
-            // above bed (lakes/sea start filled, dry land + perched river channels start dry and fill
-            // from the river sources). edge flux starts at rest.
-            chunk_ptr->water_depth_mm.assign(sim_size, 0);
-            chunk_ptr->water_bed_mm.assign(sim_size, 0);
-            chunk_ptr->water_edge_flux.assign(2 * sim_size, 0);
-            const IVec3 c_coords = chunk_ptr->get_coords();
-            const float cell_width_x = CHUNK_SIZE_X / (float)initial_resolution;
-            const float cell_width_z = CHUNK_SIZE_Z / (float)initial_resolution;
-
-            for (int z = 0; z < initial_resolution; ++z) {
-                for (int x = 0; x < initial_resolution; ++x) {
-                    float world_x = c_coords.x * CHUNK_SIZE_X + (x + 0.5f) * cell_width_x;
-                    float world_z = c_coords.z * CHUNK_SIZE_Z + (z + 0.5f) * cell_width_z;
-                    const int cell = z * initial_resolution + x;
-                    // Seed the resting water surface from the worldgen: sea level
-                    // everywhere, raised to the local lake surface inside basins so
-                    // perched lakes start (and, via the rest-level clamp below, stay)
-                    // filled at their basin elevation.
-                    const float rest = m_shield_system->WaterLevelAt(world_x, world_z);
-                    const float terrain = m_shield_system->GetTerrainHeightAt(world_x, world_z);
-                    chunk_ptr->water_level_data[cell] = rest;
-                    chunk_ptr->water_rest_level[cell] = rest;
-                    chunk_ptr->water_sim_terrain_height[cell] = terrain;
-                    // Spec 009 fixed-point seed (mm): bed = terrain; depth = standing water above bed.
-                    chunk_ptr->water_bed_mm[cell] = static_cast<std::int32_t>(std::lround(terrain * MM_PER_M));
-                    const long depth0 = std::lround(static_cast<double>(rest - terrain) * MM_PER_M);
-                    chunk_ptr->water_depth_mm[cell] = static_cast<std::int32_t>(depth0 > 0 ? depth0 : 0);
-                }
-            }
-            chunk_ptr->has_water_sim.store(true);
-            chunk_ptr->water_mesh_generated.store(false);
-            chunk_ptr->water_mesh_dirty_ticks = 0;
+        }
+        cp->has_water_sim.store(true);
+        cp->water_mesh_generated.store(false);
+        cp->water_mesh_dirty_ticks = 0;
+    };
+    if (m_job_system && to_init.size() >= 2) {
+        std::vector<Job> jobs;
+        jobs.reserve(to_init.size());
+        for (Chunk* cp : to_init) {
+            jobs.push_back([cp, &seed_chunk_water]() { seed_chunk_water(cp); });
+        }
+        const JobHandle handle = m_job_system->dispatch_batch(jobs, JobPriority::High);
+        m_job_system->wait(handle);
+    } else {
+        for (Chunk* cp : to_init) {
+            seed_chunk_water(cp);
         }
     }
 
