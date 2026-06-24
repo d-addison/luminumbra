@@ -252,6 +252,14 @@ body#photo_mode {
     margin-bottom: 20px;
 }
 
+/* First-time species discovery — the codex-fill payoff, emphasised in warm gold. */
+.verdict-note.verdict-discovery {
+    color: #E8C572;
+    font-style: normal;
+    font-weight: bold;
+    letter-spacing: 2px;
+}
+
 .verdict-actions {
     text-align: center;
 }

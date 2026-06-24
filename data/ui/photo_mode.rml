@@ -67,7 +67,7 @@
 
         <!-- Post-capture star verdict — hidden until a frame is taken. -->
         <div id="verdict-panel" class="verdict-panel hidden">
-            <h2 class="verdict-heading">captured</h2>
+            <h2 class="verdict-heading" id="verdict_heading">captured</h2>
             <div class="verdict-stars" id="verdict_stars">
                 <span class="verdict-star verdict-star-on">★</span>
                 <span class="verdict-star verdict-star-on">★</span>
@@ -75,7 +75,7 @@
                 <span class="verdict-star">★</span>
                 <span class="verdict-star">★</span>
             </div>
-            <p class="verdict-note">balanced light · subject on the third</p>
+            <p class="verdict-note" id="verdict_note">balanced light · subject on the third</p>
             <div class="verdict-actions">
                 <button id="verdict_keep_btn" class="btn">Keep</button>
                 <button id="verdict_retake_btn" class="btn">Retake</button>

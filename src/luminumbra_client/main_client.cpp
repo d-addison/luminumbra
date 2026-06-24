@@ -45,6 +45,7 @@
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/game/PhotoMode.h"  // g-vertical-slice: photo-mode capture loop (read-only observer)
+#include "luminumbra_common/ai/CreatureSpeciesRegistry.h"  // species id -> display name for the codex/discovery HUD
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"  // user.* video/audio/controls settings
@@ -96,6 +97,10 @@ std::unique_ptr<Luminumbra::Client::PlayerController> g_playerController;
 luminumbra::game::PhotoModeState g_photoMode;
 static bool g_photoModeUiShown = false;  // T031: photo_mode.rml vs hud.rml is the active in-game overlay
 luminumbra::game::PhotoCodex     g_photoCodex;
+// Data-driven creature species metadata (display names + rarity) the codex/discovery HUD
+// resolve a captured species_id against. Loaded once from data/common/creatures/species
+// after the runtime root is known; client-only, never hashed.
+luminumbra::ai::CreatureSpeciesRegistry g_creatureSpecies;
 // Single client config: defaults (data/common/systems.json) overlaid by the writable
 // per-user settings file (%APPDATA%/Luminumbra/settings.json). user.* is client-only,
 // never hashed (docs/STANDARDS.md §5). Loaded once at startup (before window creation).
@@ -2596,6 +2601,18 @@ int main(int argc, char* argv[]) {
     auto gameSession = std::make_unique<Luminumbra::world::GameSession>();
     gameSession->SetJobSystem(&jobSystem);
     gameSession->SetRootPath(root_path_str);
+
+    // Load creature species metadata (display names + rarity) for the codex/discovery
+    // HUD. Missing/partial data degrades gracefully: DisplayName() falls back to
+    // "Species #<id>", so the capture loop never blanks out.
+    {
+        std::vector<std::string> species_errors;
+        const std::filesystem::path species_dir =
+            std::filesystem::path(root_path_str) / "data" / "common" / "creatures" / "species";
+        const std::size_t loaded = g_creatureSpecies.LoadFromDirectory(species_dir, species_errors);
+        LUMINUMBRA_CORE_INFO("Loaded {} creature species from {}", loaded, species_dir.string());
+        for (const std::string& e : species_errors) LUMINUMBRA_CORE_WARN("creature species: {}", e);
+    }
     // T-I3-6 asset-manifest split: the engine validates simulation
     // requirements only; the CLIENT declares the renderer/UI assets it needs
     // before any world create/load. This list matches the pre-split
@@ -5850,16 +5867,46 @@ int main(int argc, char* argv[]) {
                                     GatherPhotoSubjects(gameSession->GetRegistry(), *g_camera, cap_w, cap_h);
                                 const luminumbra::game::ShotInput shot =
                                     luminumbra::game::BuildShotInput(subjects, g_photoMode.lens, 0.6f);
+                                // Was this species already in the codex BEFORE the capture? A
+                                // subject-bearing shot of a never-seen species is a DISCOVERY.
+                                const bool had_subject = !shot.composition.subjects.empty();
+                                const bool was_known =
+                                    had_subject && g_photoCodex.discovered(shot.main_species_id);
                                 const luminumbra::game::ShotVerdict verdict =
                                     luminumbra::game::CaptureShot(g_photoCodex, shot);
                                 g_photoMode.last_total = verdict.total;
                                 g_photoMode.last_stars = verdict.stars;
                                 ++g_photoMode.captures;
 
+                                const bool is_discovery = had_subject && !was_known;
+                                const std::string species_name = had_subject
+                                    ? g_creatureSpecies.DisplayName(
+                                          static_cast<std::uint16_t>(shot.main_species_id))
+                                    : std::string("no subject");
+
                                 // T031: reveal the star-verdict panel on the overlay (filled to last_stars).
+                                // Phase 1: name the subject + flag a first-time DISCOVERY so the codex
+                                // fill is felt at the moment of capture.
                                 if (g_uiManager && g_uiManager->GetContext()) {
                                     if (auto* doc = g_uiManager->GetContext()->GetDocument("photo_mode")) {
                                         if (auto* panel = doc->GetElementById("verdict-panel")) panel->SetClass("hidden", false);
+                                        if (auto* heading = doc->GetElementById("verdict_heading")) {
+                                            heading->SetInnerRML(had_subject ? species_name : "captured");
+                                        }
+                                        if (auto* note = doc->GetElementById("verdict_note")) {
+                                            if (is_discovery) {
+                                                note->SetInnerRML("New species discovered! \xE2\x98\x85 " +
+                                                    std::to_string(g_photoCodex.species_count()) +
+                                                    " in codex");
+                                                note->SetClass("verdict-discovery", true);
+                                            } else if (had_subject) {
+                                                note->SetInnerRML("Codex updated \xC2\xB7 best shot kept");
+                                                note->SetClass("verdict-discovery", false);
+                                            } else {
+                                                note->SetInnerRML("no subject in frame");
+                                                note->SetClass("verdict-discovery", false);
+                                            }
+                                        }
                                         if (auto* st = doc->GetElementById("verdict_stars")) {
                                             std::string stars_rml;
                                             for (int si = 0; si < 5; ++si) {

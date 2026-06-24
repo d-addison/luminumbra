@@ -1,0 +1,8 @@
+{
+  "schema": "luminumbra.creature.species.v1",
+  "id": "mire_lurker",
+  "display_name": "Mire Lurker",
+  "predator": true,
+  "rarity": 0.78,
+  "base_color": [0.24, 0.30, 0.22]
+}
