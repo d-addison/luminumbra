@@ -425,23 +425,15 @@ void WaterSystem::update(entt::registry& registry, const std::unordered_map<Chun
         cp->water_mesh_generated.store(false);
         cp->water_mesh_dirty_ticks = 0;
     };
-    if (m_job_system && to_init.size() >= 2) {
-        std::vector<Job> jobs;
-        jobs.reserve(to_init.size());
-        for (std::size_t i = 0; i < to_init.size(); ++i) {
-            Chunk* cp = to_init[i];
-            // &terrain_seed + i by value: terrain_seed outlives the synchronous wait() below, and its
-            // outer vector is never reallocated after sizing, so terrain_seed[i] stays valid.
-            jobs.push_back([cp, i, &terrain_seed, &seed_chunk_water]() {
-                seed_chunk_water(cp, terrain_seed[i]);
-            });
-        }
-        const JobHandle handle = m_job_system->dispatch_batch(jobs, JobPriority::High);
-        m_job_system->wait(handle);
-    } else {
-        for (std::size_t i = 0; i < to_init.size(); ++i) {
-            seed_chunk_water(to_init[i], terrain_seed[i]);
-        }
+    // (worst-frame fix) Seed INLINE on the main thread — NOT dispatch_batch + wait(). With the terrain
+    // half now a free heightmap read, the per-chunk compute is cheap (WaterLevelAt + integer fill). The old
+    // parallel path's wait() was HEAD-OF-LINE blocked behind the flooded streaming/meshing job queue (the
+    // same pathology the water-SIM hit — see moving-lag notes: "18 trivial jobs took ~1300ms because wait()
+    // blocked behind the streaming flood"), so most of its ~16ms was QUEUE WAIT, not work. Inline pays only
+    // the (now small) compute and skips the wait. Each chunk writes only its own arrays -> byte-identical
+    // to the parallel version -> world_hash unchanged (no re-pin).
+    for (std::size_t i = 0; i < to_init.size(); ++i) {
+        seed_chunk_water(to_init[i], terrain_seed[i]);
     }
 
     for (auto entity : source_view) {
