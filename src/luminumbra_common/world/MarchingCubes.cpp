@@ -1292,13 +1292,20 @@ void GenerateWaterMesh(
     const Vec3 normal = {0.0f, 1.0f, 0.0f}; // Water surface normal is always up
     const u32 water_mat_id = static_cast<u32>(MaterialType::Water);
     constexpr float kMinRenderableWaterDepth = 0.05f;
+    // Spec 010 fix: cull on the ACTUAL standing depth (water_depth_mm, which terraform edits update), NOT
+    // on (water_level - GetTerrainHeightAt). GetTerrainHeightAt is pure worldgen and is blind to runtime
+    // digs, so water filling a CARVED basin (its surface below the original worldgen height) was wrongly
+    // judged "underground" and never rendered. The per-cell depth is edit-aware, so dug/rain ponds show.
+    constexpr std::int32_t kMinRenderableWaterDepthMm = 50; // 5 cm
+    const bool have_depth = (chunk.water_depth_mm.size() ==
+                             static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution));
 
     const float cell_width_x = static_cast<float>(CHUNK_SIZE_X) / static_cast<float>(resolution);
     const float cell_width_z = static_cast<float>(CHUNK_SIZE_Z) / static_cast<float>(resolution);
 
     for (int z = 0; z < resolution; ++z) {
         for (int x = 0; x < resolution; ++x) {
-            // Get the water and terrain heights at the four corners of this water grid cell
+            // Get the water surface heights at the four corners of this water grid cell
             float world_x0 = chunk_base_pos.x + x * cell_width_x;
             float world_z0 = chunk_base_pos.z + z * cell_width_z;
             float world_x1 = world_x0 + cell_width_x;
@@ -1309,16 +1316,16 @@ void GenerateWaterMesh(
             float water_h01 = SampleChunkWaterLevel(chunk, world_x0, world_z1, resolution);
             float water_h11 = SampleChunkWaterLevel(chunk, world_x1, world_z1, resolution);
 
-            float terrain_h00 = world_system.GetTerrainHeightAt(world_x0, world_z0);
-            float terrain_h10 = world_system.GetTerrainHeightAt(world_x1, world_z0);
-            float terrain_h01 = world_system.GetTerrainHeightAt(world_x0, world_z1);
-            float terrain_h11 = world_system.GetTerrainHeightAt(world_x1, world_z1);
-            
-            // Only generate a quad if water has meaningful depth above the terrain at any corner.
-            if ((water_h00 - terrain_h00) > kMinRenderableWaterDepth ||
-                (water_h10 - terrain_h10) > kMinRenderableWaterDepth ||
-                (water_h01 - terrain_h01) > kMinRenderableWaterDepth ||
-                (water_h11 - terrain_h11) > kMinRenderableWaterDepth) {
+            // Render a quad where this cell holds standing water (edit-aware depth). Fall back to the
+            // legacy worldgen-height test only if the depth array is unavailable.
+            bool renderable;
+            if (have_depth) {
+                renderable = chunk.water_depth_mm[static_cast<std::size_t>(z) * resolution + x] >
+                             kMinRenderableWaterDepthMm;
+            } else {
+                renderable = (water_h00 - world_system.GetTerrainHeightAt(world_x0, world_z0)) > kMinRenderableWaterDepth;
+            }
+            if (renderable) {
                 u32 base_idx = static_cast<u32>(water_vertices.size());
                 
                 // Define vertices relative to chunk origin

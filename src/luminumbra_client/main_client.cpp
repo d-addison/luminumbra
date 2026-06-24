@@ -4791,7 +4791,9 @@ int main(int argc, char* argv[]) {
                         Luminumbra::Vec3 vp; float bed = 0.0f;
                         if (ws->debug_lowest_land_pos(vp, bed)) {
                             g_drain_state.P = vp; g_drain_state.init = true;
-                            ws->EditTerrainVoxel(vp, 4.5f, /*fill=*/false, gameSession->GetPhysicsSystem());
+                            // Deep bowl (5 m): water collects BELOW the grass line so it reads as a clear
+                            // pool rather than a thin sheet hidden under grass cards; hard rain fills it high.
+                            ws->EditTerrainVoxel(vp, 5.0f, /*fill=*/false, gameSession->GetPhysicsSystem());
                             LUMINUMBRA_CORE_INFO("Timelapse-rain: valley basin at ({:.1f},{:.1f},{:.1f}), bed {:.1f} m",
                                                  vp.x, vp.y, vp.z, bed);
                         }
