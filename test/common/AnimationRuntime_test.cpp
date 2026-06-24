@@ -204,13 +204,14 @@ TEST(AnimationRuntime, FixedTickDrivesPoseSamplingFirstInTickOrder) {
     player.skeleton = &skeleton;
     player.clip = &clip;
 
-    // 0.1 s of frame time = exactly three 30 Hz ticks.
+    // 0.1 s of frame time is 3 possible 30 Hz ticks, but GameSession clamps catch-up at 2 ticks/frame
+    // (GameSession.h spike guard), so 2 ticks run this frame.
     const std::uint32_t ticks = session.TickSimulation(0.1);
-    EXPECT_EQ(ticks, 3u);
-    EXPECT_EQ(session.GetSimulationTickCount(), 3u);
+    EXPECT_EQ(ticks, 2u);
+    EXPECT_EQ(session.GetSimulationTickCount(), 2u);
 
     const double fixedDt = session.GetSimulationClock().fixed_dt();
-    EXPECT_DOUBLE_EQ(player.time, 3.0 * fixedDt);
+    EXPECT_DOUBLE_EQ(player.time, 2.0 * fixedDt);
 
     // The sampled pose must equal a direct SamplePose at the tick time and the
     // palette must be populated for GPU skinning.

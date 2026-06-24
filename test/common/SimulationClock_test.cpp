@@ -119,16 +119,20 @@ SessionRunResult RunHostedSimulation() {
     bus.publish(1, "physics.impulse", "crate:push", -1);
     bus.publish(3, "audio.event", "stone:slide");
 
-    // Frame 1: 0.1 s -> ticks 1..3 execute; everything for ticks <= 3 drains
-    // in deterministic tick/lane/sequence order.
-    EXPECT_EQ(session.TickSimulation(0.1), 3u);
+    // GameSession's clock clamps catch-up at 2 ticks/frame (GameSession.h: spike guard), so a 0.1 s
+    // frame yields 2 ticks (the 3rd possible tick's TIME is dropped, but no tick id is skipped — the
+    // cadence just falls behind real-time). Frame 1 -> ticks 1..2; events for ticks <= 2 drain in
+    // deterministic tick/lane/sequence order.
+    EXPECT_EQ(session.TickSimulation(0.1), 2u);
 
-    // Late-published events for an already-future tick drain on that tick.
+    // Late-published events for an already-future tick drain when that tick runs.
     bus.publish(5, "script.trigger", "torch:light");
     bus.publish(5, "ai.intent", "npc-2:wait", -1);
 
-    // Frame 2: 0.1 s -> ticks 4..6 execute, draining the tick-5 events.
-    EXPECT_EQ(session.TickSimulation(0.1), 3u);
+    // Frame 2 -> ticks 3..4 (draining the tick-3 audio event); Frame 3 -> ticks 5..6 (draining the
+    // tick-5 events). Three 0.1 s frames reach tick 6 under the 2-tick/frame clamp.
+    EXPECT_EQ(session.TickSimulation(0.1), 2u);
+    EXPECT_EQ(session.TickSimulation(0.1), 2u);
 
     SessionRunResult result;
     result.tick_count = session.GetSimulationTickCount();
@@ -168,7 +172,7 @@ TEST(GameSessionTickSimulationTest, FutureTickEventsStayQueuedUntilEligible) {
     OrderedEventBus& bus = session.GetSimulationEventBus();
     bus.publish(100, "future.topic", "payload");
 
-    EXPECT_EQ(session.TickSimulation(0.1), 3u); // ticks 1..3
+    EXPECT_EQ(session.TickSimulation(0.1), 2u); // ticks 1..2 (clamped at 2/frame in GameSession)
     EXPECT_EQ(bus.pending_count(), 1u);
 }
 
