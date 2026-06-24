@@ -46,6 +46,7 @@
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/game/PhotoMode.h"  // g-vertical-slice: photo-mode capture loop (read-only observer)
 #include "luminumbra_common/ai/CreatureSpeciesRegistry.h"  // species id -> display name for the codex/discovery HUD
+#include "luminumbra_common/game/Objectives.h"  // progression goals surfaced on the HUD
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"  // user.* video/audio/controls settings
@@ -101,6 +102,13 @@ luminumbra::game::PhotoCodex     g_photoCodex;
 // resolve a captured species_id against. Loaded once from data/common/creatures/species
 // after the runtime root is known; client-only, never hashed.
 luminumbra::ai::CreatureSpeciesRegistry g_creatureSpecies;
+// Progression goals surfaced on the in-game HUD. Initialised lazily once in-game with the
+// default world's first creature so the starter chain is always achievable. Client-only,
+// never hashed. g_objHudSig caches the last-rendered tracker text so the DOM is only
+// touched when the current objective / progress actually changes.
+luminumbra::game::ObjectiveSet g_objectives;
+bool g_objectivesInit = false;
+std::string g_objHudSig;
 // Single client config: defaults (data/common/systems.json) overlaid by the writable
 // per-user settings file (%APPDATA%/Luminumbra/settings.json). user.* is client-only,
 // never hashed (docs/STANDARDS.md §5). Loaded once at startup (before window creation).
@@ -5832,6 +5840,42 @@ int main(int argc, char* argv[]) {
                             } else if (!g_photoMode.active && g_photoModeUiShown) {
                                 g_uiManager->RequestLoadDocument("hud.rml");
                                 g_photoModeUiShown = false;
+                            }
+                        }
+
+                        // Phase 1: lazily build the starter objective chain keyed on the
+                        // default world's first creature, then surface the current goal +
+                        // progress on the HUD. Throttled by g_objHudSig so the DOM is only
+                        // written when the current objective or its progress changes.
+                        if (!g_objectivesInit) {
+                            g_objectives = luminumbra::game::DefaultObjectives(
+                                static_cast<int>(Luminumbra::Components::CreatureSpeciesId16("grovestrider")));
+                            g_objectivesInit = true;
+                        }
+                        if (!g_photoMode.active && g_uiManager && g_uiManager->GetContext()) {
+                            if (auto* hud = g_uiManager->GetContext()->GetDocument("hud")) {
+                                const luminumbra::game::Objective* cur =
+                                    g_objectives.next_incomplete(g_photoCodex);
+                                const std::uint32_t done = g_objectives.completed_count(g_photoCodex);
+                                std::string title = "All goals complete";
+                                float progress = 1.0f;
+                                if (cur) {
+                                    title = cur->title;
+                                    progress = luminumbra::game::EvaluateObjective(*cur, g_photoCodex).progress;
+                                }
+                                const int pct = static_cast<int>(progress * 100.0f + 0.5f);
+                                std::string sig = std::to_string(done) + "/" +
+                                    std::to_string(g_objectives.size()) + "|" + title + "|" +
+                                    std::to_string(pct);
+                                if (sig != g_objHudSig) {
+                                    g_objHudSig = sig;
+                                    if (auto* e = hud->GetElementById("obj_title")) e->SetInnerRML(title);
+                                    if (auto* e = hud->GetElementById("obj_progress"))
+                                        e->SetInnerRML(std::to_string(pct) + "%");
+                                    if (auto* e = hud->GetElementById("obj_count"))
+                                        e->SetInnerRML(std::to_string(done) + " / " +
+                                                       std::to_string(g_objectives.size()) + " goals");
+                                }
                             }
                         }
                         if (g_photoMode.active) {

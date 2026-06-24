@@ -14,5 +14,16 @@
             </div>
             <div class="hud-watermark-sub">24 exposures</div>
         </div>
+
+        <!-- Objective tracker — the current progression goal + its progress. Updated
+             from the live PhotoCodex while the HUD (not the viewfinder) is shown. -->
+        <div class="hud-objective">
+            <div class="hud-objective-row">
+                <span class="hud-objective-label">objective</span>
+                <span class="hud-objective-progress" id="obj_progress">0%</span>
+            </div>
+            <div class="hud-objective-title" id="obj_title">Photograph your first creature</div>
+            <div class="hud-objective-count" id="obj_count">0 / 5 goals</div>
+        </div>
     </body>
 </rml>

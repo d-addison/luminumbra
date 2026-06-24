@@ -50,6 +50,43 @@ body#hud {
 .hud-time-label { display: none; }
 .hud-lens { display: none; }
 .hud-capture-cue { display: none; }
+
+/* Objective tracker — top-left, quiet and diegetic like the watermark. */
+.hud-objective {
+    position: absolute;
+    top: 24px;
+    left: 28px;
+    width: 280px;
+    text-align: left;
+    color: rgba(242, 237, 228, 90);
+}
+.hud-objective-row {
+    display: block;
+}
+.hud-objective-label {
+    font-size: 10px;
+    letter-spacing: 3px;
+    color: rgba(242, 237, 228, 65);
+    text-transform: uppercase;
+}
+.hud-objective-progress {
+    font-size: 10px;
+    letter-spacing: 1px;
+    color: #C9A86A;
+    float: right;
+}
+.hud-objective-title {
+    font-size: 14px;
+    color: rgba(242, 237, 228, 220);
+    letter-spacing: 1px;
+    margin-top: 2px;
+}
+.hud-objective-count {
+    font-size: 10px;
+    color: rgba(242, 237, 228, 65);
+    letter-spacing: 2px;
+    margin-top: 2px;
+}
 .hud-capture-dot { display: none; }
 
 /* ============================================================================
