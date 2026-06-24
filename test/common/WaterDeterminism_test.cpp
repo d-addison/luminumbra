@@ -246,4 +246,55 @@ TEST(WaterDeterminism, PlayerVoxelDigIsDeterministicCarvesTerrainAndDrains) {
     EXPECT_NE(a.post_hash, a.pre_hash)  << "the voxel dig had no effect on the water state";
 }
 
+// Spec 010 FINITE HYDROLOGY — rain-fed, drainable, conserved water. Tick a world with the perpetual
+// river source REMOVED and a deterministic rain input, and confirm the water state is run==replay
+// identical, mass-conserving, and that rain actually accumulates (max depth grows).
+struct HydroResult {
+    std::vector<std::uint64_t> hashes;
+    std::int64_t land_water = 0;  // standing water ON LAND (excludes the sea) — the rain ground-truth
+    bool mass_ok = true;
+};
+
+HydroResult run_rain_hydrology(const std::string& root, int ticks, std::int32_t rain_mm, std::int32_t evap_mm) {
+    JobSystem jobs; jobs.startup();
+    HydroResult r;
+    {
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(root);
+        EXPECT_TRUE(session.CreateWorld("Hydro", "777", "default"));
+        SHIELD_WorldSystem* world = session.GetWorldSystem();
+        auto* physics = session.GetPhysicsSystem();
+        world->SetWaterHydrology(/*finite=*/true, rain_mm, evap_mm);  // no source, rain on, optional evap
+        const Vec3 spawn = session.GetMetadata().spawnPoint;
+        const Vec3 anchor(spawn.x, world->GetTerrainHeightAt(spawn.x, spawn.z) + 2.0f, spawn.z);
+        for (int t = 0; t < ticks; ++t) {
+            world->update(session.GetRegistry(), {anchor}, physics);
+            world->wait_for_streaming_jobs();
+            if (!world->debug_water_mass_ok()) r.mass_ok = false;
+            r.hashes.push_back(world->debug_water_state_hash().hash);
+        }
+        r.land_water = world->debug_land_water_volume_mm();
+    }
+    jobs.shutdown();
+    return r;
+}
+
+// Finite hydrology must be deterministic AND rain must genuinely accumulate ON LAND (not just leave the
+// pre-existing sea, which a max-depth probe can't distinguish). Compare a rain run to a no-rain run on the
+// identical world: the rain run must hold strictly more land water, and be run==replay identical.
+TEST(WaterDeterminism, FiniteHydrologyRainFillsLandDeterministically) {
+    const HeadlessRoot root;
+    const HydroResult rain_a = run_rain_hydrology(root.root_string(), 64, /*rain=*/30, /*evap=*/0);
+    const HydroResult rain_b = run_rain_hydrology(root.root_string(), 64, /*rain=*/30, /*evap=*/0);
+    const HydroResult dry    = run_rain_hydrology(root.root_string(), 64, /*rain=*/0,  /*evap=*/0);
+    EXPECT_TRUE(rain_a.mass_ok) << "finite-hydrology mass invariant VIOLATED (rain/evap accounting bug)";
+    EXPECT_EQ(rain_a.hashes, rain_b.hashes)
+        << "finite-hydrology water state diverged run-to-run — rain path is NON-DETERMINISTIC";
+    EXPECT_EQ(rain_a.land_water, rain_b.land_water) << "land water differs run-to-run — non-deterministic";
+    EXPECT_GT(rain_a.land_water, dry.land_water)
+        << "rain did NOT add water on land (rain=" << rain_a.land_water << " vs dry=" << dry.land_water
+        << ") — the rainfall input is not accumulating in the terrain";
+}
+
 } // namespace

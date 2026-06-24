@@ -2955,6 +2955,51 @@ std::int64_t SHIELD_WorldSystem::debug_water_volume_near(const Vec3& center, flo
     return sum;
 }
 
+// Total standing water on LAND (cells whose bed sits clearly above sea level) — isolates rain-fed
+// puddles/ponds from the sea, which the global max-depth probe is pinned to. Sum of depth_mm.
+std::int64_t SHIELD_WorldSystem::debug_land_water_volume_mm() const {
+    std::int64_t sum = 0;
+    for (const auto& [id, c] : m_streaming_state.chunks) {
+        if (!c || !c->has_water_sim.load(std::memory_order_acquire)) continue;
+        const std::size_t nb = c->water_bed_mm.size();
+        if (c->water_depth_mm.size() != nb) continue;
+        for (std::size_t i = 0; i < nb; ++i) {
+            if (c->water_bed_mm[i] > 500) sum += c->water_depth_mm[i]; // bed > 0.5 m above sea => land
+        }
+    }
+    return sum;
+}
+
+// Lowest LAND cell (bed above sea) in a carvable chunk — the natural valley floor where rainfall
+// collects. Returns its world pos (surface = bed) + bed height; false if no land chunk is streamed.
+bool SHIELD_WorldSystem::debug_lowest_land_pos(Vec3& pos_out, float& bed_m_out) const {
+    constexpr std::size_t kFullSdf =
+        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    std::int32_t lowest = 0x7fffffff;
+    bool found = false;
+    for (const auto& [id, c] : m_streaming_state.chunks) {
+        if (!c || !c->has_water_sim.load(std::memory_order_acquire)) continue;
+        if (c->sdf_data.size() != kFullSdf) continue;
+        const int res = static_cast<int>(c->current_water_resolution.load());
+        if (res <= 1 || static_cast<int>(c->water_bed_mm.size()) != res * res) continue;
+        const IVec3 cc = c->get_coords();
+        const float cw_x = static_cast<float>(CHUNK_SIZE_X) / static_cast<float>(res);
+        const float cw_z = static_cast<float>(CHUNK_SIZE_Z) / static_cast<float>(res);
+        for (int z = 0; z < res; ++z) for (int x = 0; x < res; ++x) {
+            const std::int32_t b = c->water_bed_mm[z * res + x];
+            if (b > 2000 && b < lowest) {  // above sea (valley floor, not coast) and the lowest so far
+                lowest = b;
+                const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
+                const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
+                pos_out = Vec3(wx, static_cast<float>(b) / 1000.0f, wz);
+                bed_m_out = static_cast<float>(b) / 1000.0f;
+                found = true;
+            }
+        }
+    }
+    return found;
+}
+
 // Find a SHORELINE worth filming: a deep-water cell (in a carvable full-sdf chunk) that sits right
 // next to genuinely DRY land (terrain well above the water surface). Returns the water cell as the
 // carve start, the unit direction from the water toward the dry bank, the water surface height, and
@@ -3053,6 +3098,11 @@ Vec3 SHIELD_WorldSystem::debug_deepest_water_pos(std::int64_t* depth_mm_out) con
 // Spec 009 Phase 2: terraform the water bed (dig/dam) — delegates to the WaterSystem.
 int SHIELD_WorldSystem::EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, float radius_m) {
     return m_water_system ? m_water_system->EditTerrainBed(world_pos, delta_mm, radius_m) : 0;
+}
+
+// Spec 010: configure the finite-hydrology cycle (no perpetual source + rain + evaporation).
+void SHIELD_WorldSystem::SetWaterHydrology(bool finite, std::int32_t rain_mm_per_tick, std::int32_t evap_mm_per_tick) {
+    if (m_water_system) m_water_system->SetHydrology(finite, rain_mm_per_tick, evap_mm_per_tick);
 }
 
 // Spec 009 Phase 2 — PLAYER-FACING terraform: carve/fill the VOXEL terrain in-world,

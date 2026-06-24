@@ -559,6 +559,8 @@ public:
     [[nodiscard]] Vec3 debug_deepest_water_pos(std::int64_t* depth_mm_out = nullptr) const; // anchor capture on real water
     void debug_force_water_remesh(); // render-only: refresh all water surfaces next frame (capture tooling)
     [[nodiscard]] std::int64_t debug_water_volume_near(const Vec3& center, float radius_m) const; // drain ground-truth
+    [[nodiscard]] std::int64_t debug_land_water_volume_mm() const; // rain-fed water on land (excludes the sea)
+    [[nodiscard]] bool debug_lowest_land_pos(Vec3& pos_out, float& bed_m_out) const; // valley floor where rain collects
     [[nodiscard]] bool debug_find_shoreline(Vec3& water_pos_out, float& to_land_x, float& to_land_z,
                                             float& water_surf_out, float& bank_height_out) const; // filmable shoreline
     [[nodiscard]] int debug_water_seam_wet_pairs() const; // spec 009 Phase 3 cross-chunk continuity
@@ -566,6 +568,10 @@ public:
     // Spec 009 Phase 2 — terraform the water bed (dig delta<0 / dam delta>0) within radius_m of
     // world_pos; the fixed-point solver then drains/pools. Returns cells edited.
     int EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, float radius_m);
+
+    // Spec 010 — configure finite hydrology: finite removes the perpetual river source (drainable water),
+    // rain_mm_per_tick adds rainfall (caller scales by weather precip), evap_mm_per_tick recedes ponds.
+    void SetWaterHydrology(bool finite, std::int32_t rain_mm_per_tick, std::int32_t evap_mm_per_tick);
 
     // Spec 009 Phase 2 — PLAYER-FACING terraform: carve (fill=false) or fill (fill=true) a
     // sphere of radius_m into the voxel terrain at world_pos, remesh + rebuild colliders, and

@@ -110,7 +110,8 @@ int PositiveMod(int value, int divisor) {
 // the mass-conservation invariant (AC-2). Everything that feeds the hash is integer + row-major fixed
 // order -> bit-exact host==peer / run==replay.
 void StepChunkWaterFixed(Chunk& c, SHIELD_WorldSystem& shield,
-                         std::int64_t& out_src, std::int64_t& out_sink) {
+                         std::int64_t& out_src, std::int64_t& out_sink,
+                         bool finite_hydrology, std::int32_t rain_mm, std::int32_t evap_mm) {
     const int res = GetWaterResolution(c);
     if (res <= 1) return;
     const int n = res * res;
@@ -130,13 +131,26 @@ void StepChunkWaterFixed(Chunk& c, SHIELD_WorldSystem& shield,
     const std::vector<std::int32_t> depth_before = depth; // for the activity delta + remesh signal
 
     // --- Phase 0: SOURCES (deterministic, pure function of position) ---
-    for (int z = 0; z < res; ++z) for (int x = 0; x < res; ++x) {
-        const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
-        const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
-        if (shield.RiverInfluenceAt(wx, wz) >= RIVER_SOURCE_THRESHOLD) {
-            depth[IDX(x, z)] += RIVER_DISCHARGE_MM;
-            out_src += RIVER_DISCHARGE_MM;
+    // Spec 010 FINITE HYDROLOGY: when finite_hydrology is on, water is a CONSERVED quantity — there is
+    // NO perpetual river source. Bodies are fed by RAIN and emptied by drainage/evaporation, so a basin
+    // you drain stays drained and depressions fill when it rains (real-life cycle). The classic Spec 009
+    // behaviour (perpetual river springs) is the finite_hydrology==false default.
+    if (!finite_hydrology) {
+        for (int z = 0; z < res; ++z) for (int x = 0; x < res; ++x) {
+            const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
+            const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
+            if (shield.RiverInfluenceAt(wx, wz) >= RIVER_SOURCE_THRESHOLD) {
+                depth[IDX(x, z)] += RIVER_DISCHARGE_MM;
+                out_src += RIVER_DISCHARGE_MM;
+            }
         }
+    }
+    // RAIN: deterministic uniform input (mm/tick; the caller scales it by the weather precipitation).
+    // It lands on every column; the flux below carries it to the low spots, so rainfall pools into
+    // puddles -> ponds -> lakes and runs off slopes toward the sea.
+    if (rain_mm > 0) {
+        for (int i = 0; i < n; ++i) depth[i] += rain_mm;
+        out_src += static_cast<std::int64_t>(rain_mm) * n;
     }
 
     // --- Phase 1: FLUX on +X and +Z internal edges, from the read-only surface snapshot ---
@@ -199,8 +213,16 @@ void StepChunkWaterFixed(Chunk& c, SHIELD_WorldSystem& shield,
         if (bed[i] <= sea_mm) { // ocean is an infinite SINK: settle the surface at sea level
             const std::int32_t target = sea_mm - bed[i]; // depth giving surface == sea level (>= 0)
             if (depth[i] > target) { out_sink += (depth[i] - target); depth[i] = target; }
-        } else if (depth[i] > 0 && depth[i] < EVAP_MM) { // cull sub-mm films on dry land
-            out_sink += depth[i]; depth[i] = 0;
+        } else {
+            // Spec 010 EVAPORATION (finite hydrology): above-sea standing water loses evap_mm/tick, so
+            // without rain ponds slowly recede — the drying half of the cycle. (Caller keeps it gentle.)
+            if (evap_mm > 0 && depth[i] > 0) {
+                const std::int32_t e = depth[i] < evap_mm ? depth[i] : evap_mm;
+                depth[i] -= e; out_sink += e;
+            }
+            if (depth[i] > 0 && depth[i] < EVAP_MM) { // cull sub-mm films on dry land
+                out_sink += depth[i]; depth[i] = 0;
+            }
         }
         std::int32_t dl = depth[i] - depth_before[i]; if (dl < 0) dl = -dl;
         if (dl > max_delta) max_delta = dl;
@@ -410,7 +432,12 @@ void WaterSystem::update(entt::registry& registry, const std::unordered_map<Chun
             continue;
         }
 
-        if (chunk_ptr->has_water_sim.load() && !chunk_ptr->is_water_sleeping.load(std::memory_order_relaxed)) {
+        // Spec 010: when rain is falling, keep EVERY water chunk awake — rain must land on dry, otherwise
+        // sleeping, land so puddles/ponds form in the low spots (sleeping chunks are skipped and never get
+        // rain). Without rain this is the normal "simulate only active chunks" fast path.
+        const bool rain_active = m_rain_mm_per_tick > 0;
+        if (chunk_ptr->has_water_sim.load() &&
+            (rain_active || !chunk_ptr->is_water_sleeping.load(std::memory_order_relaxed))) {
             chunks_to_sim.push_back(chunk_ptr.get());
         }
     }
@@ -450,7 +477,8 @@ void WaterSystem::update(entt::registry& registry, const std::unordered_map<Chun
     }
     std::int64_t src_mm = 0, sink_mm = 0;
     for (Chunk* chunk : chunks_to_sim) {
-        StepChunkWaterFixed(*chunk, *m_shield_system, src_mm, sink_mm);
+        StepChunkWaterFixed(*chunk, *m_shield_system, src_mm, sink_mm,
+                            m_finite_hydrology, m_rain_mm_per_tick, m_evap_mm_per_tick);
     }
 
     // Cross-chunk owner-edge shared flux. Each chunk OWNS its +X (east) and +Z (north) boundary edges;

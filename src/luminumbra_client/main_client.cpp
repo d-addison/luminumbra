@@ -185,6 +185,8 @@ int g_timelapse_captured = 0;
 int g_timelapse_settle = 0;
 bool g_timelapse_dig = false;       // Spec 009: progressively carve a trench mid-capture (terraform demo)
 bool g_timelapse_drain = false;     // Spec 009 money shot: anchor on a real river/lake, breach the bank, drain it
+bool g_timelapse_rain = false;      // Spec 010: finite hydrology — rain fills the land, then drain stays drained
+int  g_timelapse_rain_mm = 18;      // rain rate (mm/tick) for the rain demo
 struct TimelapseDrainState { bool init = false; Luminumbra::Vec3 P{0.0f, 0.0f, 0.0f}; float dhx = 0.0f, dhz = 1.0f; float surf = 0.0f; };
 TimelapseDrainState g_drain_state;
 float g_timelapse_tod = 0.0f;      // starting time-of-day (0 = noon/brightest; drifts by daystep)
@@ -2457,6 +2459,8 @@ int main(int argc, char* argv[]) {
     g_timelapse_fire = HasCommandLineFlag(argc, argv, "--timelapse-fire");
     g_timelapse_dig = HasCommandLineFlag(argc, argv, "--timelapse-dig");
     g_timelapse_drain = HasCommandLineFlag(argc, argv, "--timelapse-drain");
+    g_timelapse_rain = HasCommandLineFlag(argc, argv, "--timelapse-rain");
+    g_timelapse_rain_mm = GetCommandLineIntOption(argc, argv, "--timelapse-rain-mm", 18);
     {
         const std::string ds = GetCommandLineOption(argc, argv, "--timelapse-daystep", "");
         if (!ds.empty()) { try { g_timelapse_daystep = std::stof(ds); } catch (...) {} }
@@ -4716,7 +4720,9 @@ int main(int argc, char* argv[]) {
                     // the herd scattering away from the predator (and the predator weaving
                     // toward the nearest prey) reads as clear motion across the ground, and
                     // nobody runs out of frame as they spread.
-                    const glm::vec3 camPos = g_timelapse_dig
+                    const glm::vec3 camPos = g_timelapse_rain
+                        ? glm::vec3(sp.x + 2.0f, sp.y + 16.0f, sp.z + 26.0f)  // elevated overlook for rain pooling
+                        : g_timelapse_dig
                         ? glm::vec3(sp.x + 10.0f, sp.y + 6.0f, sp.z + 10.0f)  // close, low 3/4 look at the crater
                         : g_timelapse_fire
                         ? glm::vec3(sp.x, sp.y + 34.0f, sp.z + 36.0f)  // high look over the burn patch
@@ -4725,7 +4731,9 @@ int main(int argc, char* argv[]) {
                         : showcase
                         ? glm::vec3(sp.x, sp.y + 4.0f, sp.z + 22.0f)
                         : glm::vec3(sp.x, sp.y + 7.0f, sp.z + 20.0f);
-                    const glm::vec3 target = g_timelapse_dig
+                    const glm::vec3 target = g_timelapse_rain
+                        ? glm::vec3(sp.x, sp.y - 2.0f, sp.z)  // look down over the filling valley
+                        : g_timelapse_dig
                         ? glm::vec3(sp.x, sp.y - 3.0f, sp.z)  // the deepening crater at spawn
                         : g_timelapse_fire
                         ? glm::vec3(sp.x, sp.y, sp.z)
@@ -4768,6 +4776,31 @@ int main(int argc, char* argv[]) {
                         const glm::vec3 targetD = basin - glm::vec3(0.0f, 1.5f, 0.0f);
                         const glm::vec3 dd = glm::normalize(targetD - camPosD);
                         g_camera->Position = camPosD;
+                        g_camera->Yaw = glm::degrees(std::atan2(dd.z, dd.x));
+                        g_camera->Pitch = glm::degrees(std::asin(std::clamp(dd.y, -1.0f, 1.0f)));
+                        g_camera->updateCameraVectors();
+                    }
+                }
+                // Spec 010 RAIN demo: once settled, turn on finite hydrology + rain, find the natural valley
+                // floor (where rainfall collects), deepen it into a clear closed basin, and frame it.
+                if (g_timelapse_rain && g_camera && gameSession && gameSession->GetWorldSystem() &&
+                    g_timelapse_settle >= kTimelapseSettleFrames) {
+                    auto* ws = gameSession->GetWorldSystem();
+                    if (!g_drain_state.init) {
+                        ws->SetWaterHydrology(/*finite=*/true, g_timelapse_rain_mm, /*evap=*/0);
+                        Luminumbra::Vec3 vp; float bed = 0.0f;
+                        if (ws->debug_lowest_land_pos(vp, bed)) {
+                            g_drain_state.P = vp; g_drain_state.init = true;
+                            ws->EditTerrainVoxel(vp, 4.5f, /*fill=*/false, gameSession->GetPhysicsSystem());
+                            LUMINUMBRA_CORE_INFO("Timelapse-rain: valley basin at ({:.1f},{:.1f},{:.1f}), bed {:.1f} m",
+                                                 vp.x, vp.y, vp.z, bed);
+                        }
+                    }
+                    if (g_drain_state.init) {
+                        const glm::vec3 P(g_drain_state.P.x, g_drain_state.P.y, g_drain_state.P.z);
+                        const glm::vec3 camPosR = P + glm::vec3(11.0f, 9.0f, 11.0f);
+                        const glm::vec3 dd = glm::normalize((P - glm::vec3(0.0f, 1.0f, 0.0f)) - camPosR);
+                        g_camera->Position = camPosR;
                         g_camera->Yaw = glm::degrees(std::atan2(dd.z, dd.x));
                         g_camera->Pitch = glm::degrees(std::asin(std::clamp(dd.y, -1.0f, 1.0f)));
                         g_camera->updateCameraVectors();
@@ -7951,6 +7984,22 @@ int main(int argc, char* argv[]) {
                                                  n, cx, cz,
                                                  static_cast<double>(gameSession->GetWorldSystem()->debug_max_water_depth_mm()) / 1000.0);
                         }
+                    }
+                    // Spec 010 FINITE HYDROLOGY demo: Act 1 turns on rain (no perpetual source) and the
+                    // land fills from rainfall — water collects in the low spots. Act 2 turns rain OFF and
+                    // evaporation ON: the water does NOT refill (finite) and slowly recedes. The volume
+                    // trace tells the story.
+                    if (g_timelapse_rain && g_drain_state.init && gameSession->GetWorldSystem()) {
+                        auto* wsr = gameSession->GetWorldSystem();
+                        wsr->debug_force_water_remesh();
+                        const int rainOff = (g_timelapse_frames * 3) / 5;  // Act 1 rains, Act 2 dries
+                        if (g_timelapse_captured == rainOff) {
+                            wsr->SetWaterHydrology(/*finite=*/true, /*rain=*/0, /*evap=*/2);
+                            LUMINUMBRA_CORE_INFO("Timelapse-rain: rain OFF + evaporation ON — water is finite, it recedes (no refill)");
+                        }
+                        const std::int64_t vol = wsr->debug_water_volume_near(g_drain_state.P, 14.0f);
+                        LUMINUMBRA_CORE_INFO("Timelapse-rain[f{}]: basin vol = {}, LAND water = {} mm-cells",
+                                             g_timelapse_captured, vol, wsr->debug_land_water_volume_mm());
                     }
                     // Fast-forward the SIM (weather/wind/creatures/plants) by K EXTRA fixed
                     // ticks for the next frame (on top of the normal per-frame tick). Physics

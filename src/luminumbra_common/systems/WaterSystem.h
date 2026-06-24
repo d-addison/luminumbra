@@ -98,6 +98,16 @@ public:
     // Deterministic (replicate as a command for host==peer). Returns cells edited.
     int EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, float radius_m);
 
+    // Spec 010 FINITE HYDROLOGY: configure the conserved-water cycle. finite=true removes the perpetual
+    // river source (water becomes finite/drainable); rain_mm_per_tick adds uniform rainfall (the caller
+    // scales it by weather precipitation); evap_mm_per_tick recedes above-sea standing water. All integer
+    // -> deterministic. Defaults (false,0,0) == classic Spec 009 behaviour, so gates stay green.
+    void SetHydrology(bool finite, std::int32_t rain_mm_per_tick, std::int32_t evap_mm_per_tick) {
+        m_finite_hydrology = finite;
+        m_rain_mm_per_tick = rain_mm_per_tick;
+        m_evap_mm_per_tick = evap_mm_per_tick;
+    }
+
     // --- Adaptive Water Grid System ---
     
     /**
@@ -156,6 +166,11 @@ private:
     // This is updated each frame in the `update` call.
 
     const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>* m_active_chunks = nullptr;
+
+    // Spec 010 finite-hydrology config (set via SetHydrology; integer -> deterministic).
+    bool m_finite_hydrology = false;
+    std::int32_t m_rain_mm_per_tick = 0;
+    std::int32_t m_evap_mm_per_tick = 0;
 
     // spec 008 follow-up (streaming-burst amortization): rotating cursor for the per-tick water-sim
     // budget. When more chunks are active than MAX_WATER_SIMS_PER_TICK, we sim a DETERMINISTIC window
