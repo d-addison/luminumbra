@@ -2,6 +2,10 @@
 build/
 out/
 cmake-build-*/
+# Transient build/run log dumps written to the repo root during dev iteration
+/build_*.txt
+/tl_run.log
+/wl_run.log
 CMakeFiles/
 CMakeCache.txt
 compile_commands.json
