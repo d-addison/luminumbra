@@ -185,7 +185,7 @@ int g_timelapse_captured = 0;
 int g_timelapse_settle = 0;
 bool g_timelapse_dig = false;       // Spec 009: progressively carve a trench mid-capture (terraform demo)
 bool g_timelapse_drain = false;     // Spec 009 money shot: anchor on a real river/lake, breach the bank, drain it
-struct TimelapseDrainState { bool init = false; Luminumbra::Vec3 P{0.0f, 0.0f, 0.0f}; float dhx = 0.0f, dhz = 1.0f; };
+struct TimelapseDrainState { bool init = false; Luminumbra::Vec3 P{0.0f, 0.0f, 0.0f}; float dhx = 0.0f, dhz = 1.0f; float surf = 0.0f; };
 TimelapseDrainState g_drain_state;
 float g_timelapse_tod = 0.0f;      // starting time-of-day (0 = noon/brightest; drifts by daystep)
 std::filesystem::path g_timelapse_dir;
@@ -4747,26 +4747,25 @@ int main(int argc, char* argv[]) {
                     g_timelapse_settle >= kTimelapseSettleFrames) {
                     auto* ws = gameSession->GetWorldSystem();
                     if (!g_drain_state.init) {
-                        std::int64_t dmm = 0;
-                        const Luminumbra::Vec3 P = ws->debug_deepest_water_pos(&dmm);
-                        float best_h = 1e9f, bx = 0.0f, bz = 1.0f;
-                        for (int a = 0; a < 8; ++a) {
-                            const float ang = static_cast<float>(a) * 0.7853981634f;
-                            const float ox = std::cos(ang), oz = std::sin(ang);
-                            const float h = ws->GetTerrainHeightAt(P.x + ox * 10.0f, P.z + oz * 10.0f);
-                            if (h < best_h) { best_h = h; bx = ox; bz = oz; }
+                        // Anchor on a real SHORELINE — deep water beside a tall DRY bank — so cutting the
+                        // bank floods the dry side (verified by the rising inland-volume probe below).
+                        Luminumbra::Vec3 wp; float tlx = 0.0f, tlz = 1.0f, wsurf = 0.0f, bank = 0.0f;
+                        if (ws->debug_find_shoreline(wp, tlx, tlz, wsurf, bank)) {
+                            g_drain_state.P = wp; g_drain_state.dhx = tlx; g_drain_state.dhz = tlz;
+                            g_drain_state.surf = wsurf; g_drain_state.init = true;
+                            LUMINUMBRA_CORE_INFO("Timelapse-drain: shoreline at ({:.1f},{:.1f},{:.1f}), surf {:.1f} m, dry bank {:.1f} m, toward-land ({:.2f},{:.2f})",
+                                                 wp.x, wp.y, wp.z, wsurf, bank, tlx, tlz);
                         }
-                        g_drain_state.P = P; g_drain_state.dhx = bx; g_drain_state.dhz = bz;
-                        g_drain_state.init = (dmm > 0);
-                        LUMINUMBRA_CORE_INFO("Timelapse-drain: anchored on {:.2f} m water at ({:.1f},{:.1f},{:.1f}), downhill ({:.2f},{:.2f})",
-                                             static_cast<double>(dmm) / 1000.0, P.x, P.y, P.z, bx, bz);
                     }
                     if (g_drain_state.init) {
                         const glm::vec3 P(g_drain_state.P.x, g_drain_state.P.y, g_drain_state.P.z);
                         const glm::vec3 dh = glm::normalize(glm::vec3(g_drain_state.dhx, 0.0f, g_drain_state.dhz));
                         const glm::vec3 side(-dh.z, 0.0f, dh.x);
-                        const glm::vec3 camPosD = P - dh * 5.0f + side * 9.0f + glm::vec3(0.0f, 4.5f, 0.0f);
-                        const glm::vec3 targetD = P + dh * 6.0f - glm::vec3(0.0f, 0.5f, 0.0f);
+                        // Frame the BASIN itself (3 m onto the bank), close + low, looking slightly down so
+                        // the advancing waterline against the green slope is the clear subject.
+                        const glm::vec3 basin = P + dh * 3.0f;
+                        const glm::vec3 camPosD = P - dh * 4.0f + side * 6.0f + glm::vec3(0.0f, 4.5f, 0.0f);
+                        const glm::vec3 targetD = basin - glm::vec3(0.0f, 1.5f, 0.0f);
                         const glm::vec3 dd = glm::normalize(targetD - camPosD);
                         g_camera->Position = camPosD;
                         g_camera->Yaw = glm::degrees(std::atan2(dd.z, dd.x));
@@ -7922,18 +7921,31 @@ int main(int argc, char* argv[]) {
                     // below the waterline so the body drains through it. The fast-forward ticks below let
                     // the solver push water out each frame; the level visibly drops.
                     if (g_timelapse_drain && g_drain_state.init && gameSession->GetWorldSystem()) {
-                        gameSession->GetWorldSystem()->debug_force_water_remesh();  // smooth per-frame surface
-                        const int holdN = std::max(6, g_timelapse_frames / 4);  // Phase A: watch the water
-                        if (g_timelapse_captured >= holdN) {
+                        auto* wsd = gameSession->GetWorldSystem();
+                        wsd->debug_force_water_remesh();  // smooth per-frame surface
+                        // GROUND TRUTH: water volume in a disc over the INLAND target region (where the
+                        // channel is cut). If the water really floods into the new cut, this RISES from ~0.
+                        const Luminumbra::Vec3 inland(g_drain_state.P.x + g_drain_state.dhx * 6.0f,
+                                                      g_drain_state.P.y,
+                                                      g_drain_state.P.z + g_drain_state.dhz * 6.0f);
+                        const std::int64_t vol = wsd->debug_water_volume_near(inland, 10.0f);
+                        LUMINUMBRA_CORE_INFO("Timelapse-drain[f{}]: inland water volume (Sum depth) = {} mm-cells",
+                                             g_timelapse_captured, vol);
+                        // Three acts: A) hold on the dry bank, B) carve a contained MODERATE-depth basin
+                        // into it (touching the sea so it floods), C) STOP carving and hold while the sea
+                        // fills the basin up to its level on camera. Moderate depth so it fills in-window.
+                        const int holdN  = std::max(6, g_timelapse_frames / 5);            // Act A end
+                        const int carveN = holdN + std::max(10, g_timelapse_frames / 3);   // Act B end
+                        if (g_timelapse_captured >= holdN && g_timelapse_captured < carveN) {
                             const int k = g_timelapse_captured - holdN;
-                            const float cx = g_drain_state.P.x + g_drain_state.dhx * (1.2f * static_cast<float>(k));
-                            const float cz = g_drain_state.P.z + g_drain_state.dhz * (1.2f * static_cast<float>(k));
-                            const float surf = gameSession->GetWorldSystem()->GetTerrainHeightAt(cx, cz);
-                            // Cut a channel whose FLOOR sits ~1.5 m below the pool surface so the body
-                            // actually empties through it (overlapping spheres -> a continuous trench).
-                            const float floor_y = std::min(surf - 1.0f, g_drain_state.P.y - 1.5f);
+                            // Bowl 3 m onto the bank, always touching the sea; WIDEN it (fixed 2 m depth)
+                            // so a pool grows into the green bank and stays IN FRAME.
+                            const float cx = g_drain_state.P.x + g_drain_state.dhx * 3.0f;
+                            const float cz = g_drain_state.P.z + g_drain_state.dhz * 3.0f;
+                            const float radius = 3.0f + 0.34f * static_cast<float>(k);   // 3 -> ~11 m wide
+                            const float floor_y = g_drain_state.surf - 1.5f;             // shallow+wide -> fills fast, spreads
                             const int n = gameSession->GetWorldSystem()->EditTerrainVoxel(
-                                Luminumbra::Vec3(cx, floor_y, cz), 3.5f, /*fill=*/false,
+                                Luminumbra::Vec3(cx, floor_y, cz), radius, /*fill=*/false,
                                 gameSession->GetPhysicsSystem());
                             LUMINUMBRA_CORE_INFO("Timelapse-drain: breach {} chunk(s) at ({:.1f},{:.1f}); max depth now {:.2f} m",
                                                  n, cx, cz,

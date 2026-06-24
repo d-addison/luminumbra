@@ -2931,6 +2931,77 @@ std::int64_t SHIELD_WorldSystem::debug_max_water_depth_mm() const {
     return mx;
 }
 
+// Total water VOLUME proxy (sum of depth_mm) over cells within radius_m of a world XZ point —
+// the ground-truth measure of whether a region's water is actually draining (falling) or not.
+std::int64_t SHIELD_WorldSystem::debug_water_volume_near(const Vec3& center, float radius_m) const {
+    const float r2 = radius_m * radius_m;
+    std::int64_t sum = 0;
+    for (const auto& [id, c] : m_streaming_state.chunks) {
+        if (!c || !c->has_water_sim.load(std::memory_order_acquire)) continue;
+        const int res = static_cast<int>(c->current_water_resolution.load());
+        if (res <= 1 || static_cast<int>(c->water_depth_mm.size()) != res * res) continue;
+        const IVec3 cc = c->get_coords();
+        const float cw_x = static_cast<float>(CHUNK_SIZE_X) / static_cast<float>(res);
+        const float cw_z = static_cast<float>(CHUNK_SIZE_Z) / static_cast<float>(res);
+        for (int z = 0; z < res; ++z) {
+            for (int x = 0; x < res; ++x) {
+                const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
+                const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
+                const float dx = wx - center.x, dz = wz - center.z;
+                if (dx * dx + dz * dz <= r2) sum += c->water_depth_mm[z * res + x];
+            }
+        }
+    }
+    return sum;
+}
+
+// Find a SHORELINE worth filming: a deep-water cell (in a carvable full-sdf chunk) that sits right
+// next to genuinely DRY land (terrain well above the water surface). Returns the water cell as the
+// carve start, the unit direction from the water toward the dry bank, the water surface height, and
+// the bank height. Picks the tallest dry bank found (most dramatic dry->flooded contrast). False if
+// no such shoreline is streamed (e.g. open sea surrounded by sea). This is what makes a convincing
+// "carve the bank, water floods the dry side" shot — the naive deepest-water cell is mid-ocean.
+bool SHIELD_WorldSystem::debug_find_shoreline(Vec3& water_pos_out, float& to_land_x, float& to_land_z,
+                                              float& water_surf_out, float& bank_height_out) const {
+    constexpr std::size_t kFullSdf =
+        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    float best_bank = -1e9f;
+    bool found = false;
+    for (const auto& [id, c] : m_streaming_state.chunks) {
+        if (!c || !c->has_water_sim.load(std::memory_order_acquire)) continue;
+        if (c->sdf_data.size() != kFullSdf) continue;
+        const int res = static_cast<int>(c->current_water_resolution.load());
+        if (res <= 1 || static_cast<int>(c->water_depth_mm.size()) != res * res ||
+            static_cast<int>(c->water_bed_mm.size()) != res * res) continue;
+        const IVec3 cc = c->get_coords();
+        const float cw_x = static_cast<float>(CHUNK_SIZE_X) / static_cast<float>(res);
+        const float cw_z = static_cast<float>(CHUNK_SIZE_Z) / static_cast<float>(res);
+        for (int z = 0; z < res; ++z) {
+            for (int x = 0; x < res; ++x) {
+                if (c->water_depth_mm[z * res + x] < 2500) continue;  // need real depth (>=2.5 m)
+                const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
+                const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
+                const float surf = static_cast<float>(c->water_bed_mm[z * res + x] +
+                                                      c->water_depth_mm[z * res + x]) / 1000.0f;
+                for (int a = 0; a < 8; ++a) {
+                    const float ang = static_cast<float>(a) * 0.7853981634f;
+                    const float ox = std::cos(ang), oz = std::sin(ang);
+                    const float th = GetTerrainHeightAt(wx + ox * 8.0f, wz + oz * 8.0f);
+                    const float bank = th - surf;  // dry bank height above the water
+                    if (bank > best_bank && bank > 2.5f) {
+                        best_bank = bank;
+                        water_pos_out = Vec3(wx, surf, wz);
+                        to_land_x = ox; to_land_z = oz;
+                        water_surf_out = surf; bank_height_out = bank;
+                        found = true;
+                    }
+                }
+            }
+        }
+    }
+    return found;
+}
+
 // Render-only: force every simulated water chunk to regenerate its surface mesh next frame.
 // Used by capture tooling so a draining body updates its visible surface every frame instead of
 // on the coalesced WATER_MESH_DIRTY_TICK_INTERVAL cadence. Does NOT touch the hashed sim state.

@@ -558,6 +558,9 @@ public:
     [[nodiscard]] std::int64_t debug_max_water_depth_mm() const;
     [[nodiscard]] Vec3 debug_deepest_water_pos(std::int64_t* depth_mm_out = nullptr) const; // anchor capture on real water
     void debug_force_water_remesh(); // render-only: refresh all water surfaces next frame (capture tooling)
+    [[nodiscard]] std::int64_t debug_water_volume_near(const Vec3& center, float radius_m) const; // drain ground-truth
+    [[nodiscard]] bool debug_find_shoreline(Vec3& water_pos_out, float& to_land_x, float& to_land_z,
+                                            float& water_surf_out, float& bank_height_out) const; // filmable shoreline
     [[nodiscard]] int debug_water_seam_wet_pairs() const; // spec 009 Phase 3 cross-chunk continuity
 
     // Spec 009 Phase 2 — terraform the water bed (dig delta<0 / dam delta>0) within radius_m of
