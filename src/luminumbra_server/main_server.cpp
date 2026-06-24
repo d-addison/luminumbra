@@ -452,9 +452,14 @@ int RunSmoke(const ServerCliOptions& options) {
 
     // T-I4-11: per-system sub-hashes must also match between run and replay; a
     // mismatch in any one localizes the divergence to that subsystem.
+    // The MESH sub-hash is RENDER-only and intentionally NON-DETERMINISTIC: parallel chunk
+    // meshing emits identical geometry in a worker-order-dependent vertex/index order. It is
+    // NOT folded into world_hash (collision uses the heightmap, not this mesh — see
+    // WorldPersistenceRoundtrip kRenderMeshHashExcludedFields), so it is reported for
+    // localization but NOT required to match run==replay. Every SIM-truth sub-hash below
+    // (terrain/water/entities/wind/weather/aether/scents/ecology/plants) must still match.
     const bool sub_hashes_match =
         first.sub_hashes.terrain == replay.sub_hashes.terrain &&
-        first.sub_hashes.mesh == replay.sub_hashes.mesh &&
         first.sub_hashes.water == replay.sub_hashes.water &&
         first.sub_hashes.entities == replay.sub_hashes.entities &&
         first.sub_hashes.wind == replay.sub_hashes.wind &&

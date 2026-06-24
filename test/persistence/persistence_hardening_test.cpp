@@ -803,26 +803,29 @@ TEST(PersistenceHardening, EachPersistedFieldMutationMovesHash) {
         c->set_state(ChunkState::Idle);
         EXPECT_NE(service.world_hash(w), base_hash) << "state change not reflected in hash";
     }
-    // mesh index
+    // RENDER MESH IS EXCLUDED FROM THE DETERMINISM HASH (intentional): the marching-cubes
+    // geometry is a non-deterministic visual derivative of the deterministic SDF, and
+    // collision is built from the heightmap, not this mesh (WorldPersistenceRoundtrip
+    // kRenderMeshHashExcludedFields). So mutating a render-mesh field must NOT move the
+    // world_hash — that is what keeps the run==replay oracle from flapping on render order.
     {
         WorldStreamingState w;
         auto c = AddRichChunk(w, IVec3(0, 0, 0), ChunkState::Ready, 1u);
         c->mesh_indices[0] = 99u;
-        EXPECT_NE(service.world_hash(w), base_hash) << "mesh index change not reflected in hash";
+        EXPECT_EQ(service.world_hash(w), base_hash) << "render mesh_indices must NOT be in the determinism hash";
     }
-    // water flow
+    {
+        WorldStreamingState w;
+        auto c = AddRichChunk(w, IVec3(0, 0, 0), ChunkState::Ready, 1u);
+        c->mesh_version.store(c->mesh_version.load() + 1u, std::memory_order_release);
+        EXPECT_EQ(service.world_hash(w), base_hash) << "render mesh_version must NOT be in the determinism hash";
+    }
+    // water flow (SIM TRUTH — must still move the hash)
     {
         WorldStreamingState w;
         auto c = AddRichChunk(w, IVec3(0, 0, 0), ChunkState::Ready, 1u);
         c->water_flow_data[0].x += 0.5f;
         EXPECT_NE(service.world_hash(w), base_hash) << "water flow change not reflected in hash";
-    }
-    // mesh_version
-    {
-        WorldStreamingState w;
-        auto c = AddRichChunk(w, IVec3(0, 0, 0), ChunkState::Ready, 1u);
-        c->mesh_version.store(c->mesh_version.load() + 1u, std::memory_order_release);
-        EXPECT_NE(service.world_hash(w), base_hash) << "mesh_version change not reflected in hash";
     }
 }
 

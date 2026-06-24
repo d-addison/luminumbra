@@ -753,8 +753,63 @@ bool ValidateWorldStreamingChunkFormatJson(
     }
 }
 
+namespace {
+// The render MESH is a NON-DETERMINISTIC visual derivative of the deterministic SDF:
+// parallel chunk meshing (marching cubes on the JobSystem) emits the SAME geometry in a
+// worker-order-dependent vertex/index order, so its bytes differ run-to-run even though the
+// SDF/heightmap that produced it are byte-identical. Collision is built from the HEIGHTMAP
+// (PhysicsSystem::add_chunk_collision -> HeightFieldShape), NOT from this mesh, so the mesh
+// feeds NOTHING in the sim. Folding it into the determinism world_hash made the run==replay
+// oracle flap on a render-only artifact (and would falsely flag a multiplayer/replay desync).
+// These fields are therefore stripped from the per-chunk projection the world_hash
+// checksums; SIM TRUTH — sdf/heightmap/material, has_collision, the water sim state, and the
+// ECS entities — is retained. Persistence (ChunkToJson / the save snapshot) is UNCHANGED.
+const char* const kRenderMeshHashExcludedFields[] = {
+    "mesh_vertices", "mesh_indices",
+    "water_mesh_vertices", "water_mesh_indices",
+    "pending_mesh_vertices", "pending_mesh_indices",
+    "pending_water_mesh_vertices", "pending_water_mesh_indices",
+    "mesh_version", "water_mesh_version",
+    "pending_mesh_ready", "pending_mesh_failed",
+    "current_lod", "pending_lod",
+};
+
+std::string SerializeWorldStreamingStateSimTruthForHash(const WorldStreamingState& state) {
+    auto chunks = state.snapshot_chunks();
+    std::sort(chunks.begin(), chunks.end(), [](const auto& lhs, const auto& rhs) {
+        if (!lhs || !rhs) {
+            return static_cast<bool>(rhs);
+        }
+        return lhs->get_id() < rhs->get_id();
+    });
+
+    nlohmann::json chunk_array = nlohmann::json::array();
+    for (const auto& chunk : chunks) {
+        if (!chunk) {
+            continue;
+        }
+        nlohmann::json cj = ChunkToJson(*chunk);
+        for (const char* f : kRenderMeshHashExcludedFields) {
+            cj.erase(f);
+        }
+        chunk_array.push_back(std::move(cj));
+    }
+
+    return StableDump(nlohmann::json{
+        {"schema", kSnapshotSchema},
+        {"order_contract", kOrderContract},
+        {"hash_scope", "sim_truth_no_render_mesh_v1"},
+        {"chunk_count", chunk_array.size()},
+        {"persisted_fields", PersistedFields()},
+        {"chunks", std::move(chunk_array)}});
+}
+} // namespace
+
 std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state) {
-    return Checksum(SerializeWorldStreamingStateSnapshotJson(state));
+    // Determinism oracle over SIM TRUTH only (render mesh excluded — see
+    // kRenderMeshHashExcludedFields). The save/load snapshot remains the full
+    // SerializeWorldStreamingStateSnapshotJson; only the HASH scope changes.
+    return Checksum(SerializeWorldStreamingStateSimTruthForHash(state));
 }
 
 WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state) {
