@@ -202,7 +202,14 @@ public:
 private:
     entt::registry m_registry;
     WorldMetadata m_metadata;
-    luminumbra::core::SimulationClock m_simulationClock;
+    // perf (water-perf-200fps spec Step 6): cap catch-up to 2 ticks/frame (default is 4) so a
+    // single slow frame replays at most 2 sim ticks instead of 4 — halving the worst-case
+    // TickSimulation spike. Scoped HERE (not the shared SimulationClock.h constant, which
+    // SimulationClock_test pins at 4). Determinism-safe: over-cap ticks are already dropped (not
+    // replayed) and the clamp NEVER fires under the fixed-dt headless oracle, so --smoke run==replay
+    // is byte-identical.
+    luminumbra::core::SimulationClock m_simulationClock{
+        luminumbra::core::SimulationClock::kCanonicalTickRateHz, 2u};
     luminumbra::simulation::OrderedEventBus m_simulationEventBus;
     std::unique_ptr<Systems::SHIELD_WorldSystem> m_worldSystem;
     std::unique_ptr<Systems::WaterSystem> m_waterSystem;
