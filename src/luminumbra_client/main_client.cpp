@@ -5919,9 +5919,11 @@ int main(int argc, char* argv[]) {
                                     progress = luminumbra::game::EvaluateObjective(*cur, g_photoCodex).progress;
                                 }
                                 const int pct = static_cast<int>(progress * 100.0f + 0.5f);
+                                // Onboarding hint shows until the first capture lands a species.
+                                const bool show_tutorial = g_photoCodex.species_count() == 0;
                                 std::string sig = std::to_string(done) + "/" +
                                     std::to_string(g_objectives.size()) + "|" + title + "|" +
-                                    std::to_string(pct);
+                                    std::to_string(pct) + "|" + (show_tutorial ? "t1" : "t0");
                                 if (sig != g_objHudSig) {
                                     g_objHudSig = sig;
                                     if (auto* e = hud->GetElementById("obj_title")) e->SetInnerRML(title);
@@ -5930,6 +5932,8 @@ int main(int argc, char* argv[]) {
                                     if (auto* e = hud->GetElementById("obj_count"))
                                         e->SetInnerRML(std::to_string(done) + " / " +
                                                        std::to_string(g_objectives.size()) + " goals");
+                                    if (auto* e = hud->GetElementById("tutorial_hint"))
+                                        e->SetClass("hidden", !show_tutorial);
                                 }
                             }
                         }

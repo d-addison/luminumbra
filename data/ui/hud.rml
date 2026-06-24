@@ -15,6 +15,14 @@
             <div class="hud-watermark-sub">24 exposures</div>
         </div>
 
+        <!-- First-boot onboarding hint. Auto-hidden by the client once the first
+             capture records a species. -->
+        <div class="hud-tutorial" id="tutorial_hint">
+            <div class="hud-tutorial-line">Find a creature, then <strong>P</strong> to raise your camera</div>
+            <div class="hud-tutorial-line">Frame it &middot; <strong>Enter</strong> to capture &middot; <strong>[ ]</strong> aperture &middot; <strong>- =</strong> focus</div>
+            <div class="hud-tutorial-line"><strong>C</strong> opens your codex</div>
+        </div>
+
         <!-- Objective tracker — the current progression goal + its progress. Updated
              from the live PhotoCodex while the HUD (not the viewfinder) is shown. -->
         <div class="hud-objective">

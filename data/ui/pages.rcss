@@ -51,6 +51,25 @@ body#hud {
 .hud-lens { display: none; }
 .hud-capture-cue { display: none; }
 
+/* First-boot onboarding hint — centred low, faint, auto-hidden after first capture. */
+.hud-tutorial {
+    position: absolute;
+    bottom: 80px;
+    left: 50%;
+    margin-left: -300px;
+    width: 600px;
+    text-align: center;
+    color: rgba(242, 237, 228, 150);
+}
+.hud-tutorial-line {
+    font-size: 13px;
+    letter-spacing: 1px;
+    margin-bottom: 4px;
+}
+.hud-tutorial strong {
+    color: #C9A86A;
+}
+
 /* Objective tracker — top-left, quiet and diegetic like the watermark. */
 .hud-objective {
     position: absolute;
