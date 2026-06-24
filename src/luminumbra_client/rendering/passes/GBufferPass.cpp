@@ -682,6 +682,9 @@ void GBufferPass::geometry_pass_skinned_meshes(RenderPipeline& pipeline,
         model = glm::scale(model, transform.scale);
         m_skinned_mesh_shader->setMat4("model", model);
         m_skinned_mesh_shader->setInt("u_materialId", static_cast<int>(mesh_info.materialId));
+        // Phase 2: per-creature albedo tint from the species base_color (white = no-op).
+        m_skinned_mesh_shader->setVec3("u_albedo_tint",
+            glm::vec3(mesh_info.tintR, mesh_info.tintG, mesh_info.tintB));
 
         const std::size_t palette_bytes = player.palette.size() * sizeof(float);
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_jointPaletteSSBO);

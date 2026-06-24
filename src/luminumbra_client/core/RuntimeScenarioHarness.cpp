@@ -8,6 +8,7 @@
 #include "core/Log.h"
 #include "rendering/Camera.h"
 #include "luminumbra_common/animation/AnimationRuntime.h"
+#include "luminumbra_common/ai/CreatureSpeciesRegistry.h"  // Phase 2: species base_color -> creature tint
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/InstinctComponents.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
@@ -6607,6 +6608,14 @@ SkinnedMeshVisualTarget SpawnSkinnedMeshVisualEntity(
     // not in lock-step (reads as separate players). At n==1 this is byte-identical
     // to the original single test rig (offset 0, material 4, phase 0).
     const std::uint32_t kRowMaterials[5] = {4u, 2u, 1u, 3u, 0u};
+    // Phase 2 procedural creatures: load the species registry so the row's per-creature
+    // distinction also reads as DISTINCT SPECIES — each entity takes a species base_color
+    // tint, cycling the registered species. Degrades to white (no-op) if none load.
+    luminumbra::ai::CreatureSpeciesRegistry row_species;
+    {
+        std::vector<std::string> _sp_errs;
+        row_species.LoadFromDirectory(root_dir / "data" / "common" / "creatures" / "species", _sp_errs);
+    }
     for (int i = 0; i < n; ++i) {
         const float rx = mesh_x + (static_cast<float>(i) - static_cast<float>(n - 1) * 0.5f) * kRowSpacingM;
         const float ry = world_system->GetTerrainHeightAt(rx, mesh_z);
@@ -6616,6 +6625,12 @@ SkinnedMeshVisualTarget SpawnSkinnedMeshVisualEntity(
         auto& mesh_component = registry.emplace<Luminumbra::Components::SkinnedMeshComponent>(entity);
         mesh_component.meshPath = use_mesh_path;
         mesh_component.materialId = kRowMaterials[i % 5];
+        if (row_species.size() > 0) {
+            const auto& sp = row_species.all()[static_cast<std::size_t>(i) % row_species.size()];
+            mesh_component.tintR = sp.base_color[0];
+            mesh_component.tintG = sp.base_color[1];
+            mesh_component.tintB = sp.base_color[2];
+        }
         auto& player = registry.emplace<anim::AnimationPlayerComponent>(entity);
         player.skeleton = use_skeleton;
         player.clip = use_clip;
@@ -7152,6 +7167,18 @@ CreatureSliceScene SpawnCreatureSliceScene(
         auto& mesh_component = registry.emplace<Luminumbra::Components::SkinnedMeshComponent>(creature);
         mesh_component.meshPath = mesh_relative;
         mesh_component.materialId = creature_data.value("material_id", 2u);
+        // Phase 2: tint the creature from its species base_color (by archetype name), so
+        // the rendered creature matches its codex identity. White (no-op) if unregistered.
+        {
+            luminumbra::ai::CreatureSpeciesRegistry _sp_reg;
+            std::vector<std::string> _sp_errs;
+            _sp_reg.LoadFromDirectory(root_dir / "data" / "common" / "creatures" / "species", _sp_errs);
+            if (const auto* sp = _sp_reg.FindByName(scene.archetype_name)) {
+                mesh_component.tintR = sp->base_color[0];
+                mesh_component.tintG = sp->base_color[1];
+                mesh_component.tintB = sp->base_color[2];
+            }
+        }
         auto& player = registry.emplace<anim::AnimationPlayerComponent>(creature);
         player.skeleton = &g_creature_skeleton;
         scene.active_clip = "idle";

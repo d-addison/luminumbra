@@ -50,6 +50,11 @@ uniform mat3 u_normalViewMatrix;
 uniform sampler2DArray u_skinnedTextures;
 uniform int u_skinnedAlbedoLayer = -1;
 uniform int u_skinnedNormalLayer = -1;
+// Phase 2 procedural creatures: per-creature albedo tint (linear RGB), set per skinned
+// draw from the species base_color. Defaults to white so an unset/uninitialised creature
+// renders exactly as authored; only multiplies the skinned albedo sample below, so no
+// other (terrain/static) path is affected.
+uniform vec3 u_albedo_tint = vec3(1.0);
 uniform int u_alphaTest = 0; // I8: 1 = luma-keyed cutout (tree leaves), 0 = opaque
 
 // FR-C2 (spec 003): macro ROCK-on-steep-faces overlay is a TERRAIN-only macro-variation
@@ -101,7 +106,9 @@ in VS_OUT {
 // (sharp ~= blur), so it lifts the visible near/mid terrain. Cheap (3 extra
 // textureLod + a few mults).
 const float kDetailBlurLod = 3.0;   // mip level used as the unsharp low-freq base
-const float kDetailGain    = 2.2;   // high-freq amplification (>1 sharpens)
+const float kDetailGain    = 1.4;   // high-freq amplification (>1 sharpens). Grass overhaul: lowered
+                                    // 2.2->1.4 so the terrain (esp. grass) stops reading as a wavy/liquid
+                                    // "algae" surface — softer relief, less amplified ripple. RENDER-ONLY.
 // NOTE: a normal-map strength boost was tried here and dropped — it amplifies a
 // pre-existing sky-ambient blue-speckle LIGHTING artifact on terrain facets without
 // adding meaningful detail (the albedo unsharp carries the gain). The speckle is a
@@ -189,7 +196,12 @@ float triplanar_roughness(vec3 worldPos, vec3 weights, float layer, float scale)
     float rx = texture(u_terrainRoughness, vec3(uv_x, layer)).r;
     float ry = texture(u_terrainRoughness, vec3(uv_y, layer)).r;
     float rz = texture(u_terrainRoughness, vec3(uv_z, layer)).r;
-    return clamp(rx * weights.x + ry * weights.y + rz * weights.z, 0.04, 1.0);
+    // Rock-speckle fix (render-only): the AmbientCG roughness plates carry a sparse
+    // scatter of near-zero (near-mirror) texels. At the noon sun those collapse GGX
+    // a2 -> ~0 and spike a pinpoint white specular highlight = the BRIGHT SPECKS on
+    // rock/terrain. Raise the floor to 0.35 (matte stone) so micro-variation survives
+    // (0.35..1.0) without the mirror spikes. Shared by all terrain mats (all matte). No world_hash.
+    return clamp(rx * weights.x + ry * weights.y + rz * weights.z, 0.35, 1.0);
 }
 
 void main()
@@ -266,7 +278,7 @@ void main()
         // tangent-derivative-free approximation (UV-space normal map, applied in
         // world space via the geometric normal as the z axis).
         // I8: also the static-model lane (tree bark/leaf) — same UV sampling.
-        albedo = texture(u_skinnedTextures, vec3(fs_in.UV, float(u_skinnedAlbedoLayer))).rgb;
+        albedo = texture(u_skinnedTextures, vec3(fs_in.UV, float(u_skinnedAlbedoLayer))).rgb * u_albedo_tint;
         // I8 leaf cutout: the source leaf textures are RGB leaf-cards on a BLACK
         // background (no alpha), so key the cutout off luminance — the black inter-
         // leaf gaps are discarded, leaving the lit leaf shapes. NOTE: the array is

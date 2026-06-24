@@ -54,6 +54,13 @@ struct StaticMeshComponent {
 struct SkinnedMeshComponent {
     std::string meshPath; // .lmesh v2 (LMS2)
     std::uint32_t materialId = 1;
+    // Phase 2 procedural creatures: per-creature albedo tint (linear RGB), seeded from
+    // the species base_color so distinct species read as distinct fauna without new art.
+    // Defaults to white = no-op (the skinned shader multiplies the sampled albedo by it;
+    // white leaves the creature exactly as authored). RENDER-only, never hashed.
+    float tintR = 1.0f;
+    float tintG = 1.0f;
+    float tintB = 1.0f;
 };
 
 // T-I6 P6.1: marks an entity for network REPLICATION to clients. The authoritative
