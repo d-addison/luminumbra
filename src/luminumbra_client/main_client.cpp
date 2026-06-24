@@ -248,6 +248,11 @@ std::string g_frame_scan_path;
 bool g_frame_scan_active = false;
 int g_frame_scan_settle = 0;
 static constexpr int kFrameScanSettleFrames = 90; // let chunks stream + atmosphere settle
+// Watchdog: a headless auto-capture must NEVER hang. If the world hasn't reached
+// IN_GAME and completed the scan within this many render-loop frames (boot + stream +
+// settle is normally ~500-700), abort with a clear error instead of looping forever.
+static constexpr int kFrameScanWatchdogFrames = 4000;
+int g_frame_scan_watchdog = 0;
 // --survey <dir>: autonomous tour — discover POIs (waterfall/cliff/grass/lake) in the generated
 // world, teleport+stream+settle at each, write a screenshot + frame-scan per POI. Empty = off.
 std::string g_survey_dir;
@@ -2428,7 +2433,12 @@ int main(int argc, char* argv[]) {
     if (const std::string fs = GetCommandLineOption(argc, argv, "--frame-scan", ""); !fs.empty()) {
         g_frame_scan_active = true;
         g_frame_scan_path = fs;
-        LUMINUMBRA_CORE_INFO("Frame-scan armed -> {} (auto-world, fixed pose, settle {} frames)",
+        // Self-sufficient: --frame-scan IMPLIES the auto-world boot it needs (it must reach IN_GAME
+        // for the settle/capture to run). Without this, omitting --auto-create-world/--auto-enter-world
+        // left the client looping in the menu forever. A watchdog in the render loop is the backstop.
+        scenario_config.auto_create_world = true;
+        scenario_config.auto_enter_world = true;
+        LUMINUMBRA_CORE_INFO("Frame-scan armed -> {} (auto-world implied, fixed pose, settle {} frames)",
                              g_frame_scan_path, kFrameScanSettleFrames);
     }
     // --survey <dir>: autonomous POI tour + per-scene screenshot/frame-scan. Pair with
@@ -5819,6 +5829,16 @@ int main(int argc, char* argv[]) {
                     // per-material coverage/luminance + water + foliage report. RENDER-ONLY: the
                     // scan issues no draws and never feeds world_hash, so a second run on the same
                     // world is byte-identical. Pinned every frame so settle can't drift the pose.
+                    // Watchdog (runs EVERY frame while scanning, regardless of game state): if the
+                    // world never reaches IN_GAME + settles within the deadline, abort cleanly so a
+                    // headless capture can never hang the whole run (e.g. a wedged loading screen).
+                    if (g_frame_scan_active && ++g_frame_scan_watchdog > kFrameScanWatchdogFrames) {
+                        LUMINUMBRA_CORE_ERROR(
+                            "Frame-scan watchdog: did not settle within {} frames (state={}). Aborting "
+                            "without a report.",
+                            kFrameScanWatchdogFrames, static_cast<int>(currentState));
+                        glfwSetWindowShouldClose(window, GLFW_TRUE);
+                    }
                     if (g_frame_scan_active && currentState == GameState::IN_GAME && gameSession) {
                         if (g_camera) {
                             // Eye-level ground-inspection pose: low + a gentle down-pitch so the
