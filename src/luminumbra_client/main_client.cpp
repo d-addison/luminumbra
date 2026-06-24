@@ -184,6 +184,9 @@ float g_timelapse_daystep = 0.0f;  // time-of-day advance per frame [0,1] (shade
 int g_timelapse_captured = 0;
 int g_timelapse_settle = 0;
 bool g_timelapse_dig = false;       // Spec 009: progressively carve a trench mid-capture (terraform demo)
+bool g_timelapse_drain = false;     // Spec 009 money shot: anchor on a real river/lake, breach the bank, drain it
+struct TimelapseDrainState { bool init = false; Luminumbra::Vec3 P{0.0f, 0.0f, 0.0f}; float dhx = 0.0f, dhz = 1.0f; };
+TimelapseDrainState g_drain_state;
 float g_timelapse_tod = 0.0f;      // starting time-of-day (0 = noon/brightest; drifts by daystep)
 std::filesystem::path g_timelapse_dir;
 static constexpr int kTimelapseSettleFrames = 45;  // let the world stream/settle before frame 0
@@ -2453,6 +2456,7 @@ int main(int argc, char* argv[]) {
     if (g_timelapse_calm) g_timelapse_creatures = true;  // calm mode is a creature scenario
     g_timelapse_fire = HasCommandLineFlag(argc, argv, "--timelapse-fire");
     g_timelapse_dig = HasCommandLineFlag(argc, argv, "--timelapse-dig");
+    g_timelapse_drain = HasCommandLineFlag(argc, argv, "--timelapse-drain");
     {
         const std::string ds = GetCommandLineOption(argc, argv, "--timelapse-daystep", "");
         if (!ds.empty()) { try { g_timelapse_daystep = std::stof(ds); } catch (...) {} }
@@ -4735,6 +4739,40 @@ int main(int argc, char* argv[]) {
                     g_camera->Yaw = glm::degrees(std::atan2(d.z, d.x));
                     g_camera->Pitch = glm::degrees(std::asin(std::clamp(d.y, -1.0f, 1.0f)));
                     g_camera->updateCameraVectors();
+                }
+                // Spec 009 money shot: once the world has settled (water filled), anchor the camera on
+                // the deepest real water cell and frame it from a low side vantage looking toward the
+                // bank we'll breach. Computed once; the carve happens in the capture/advance block.
+                if (g_timelapse_drain && g_camera && gameSession && gameSession->GetWorldSystem() &&
+                    g_timelapse_settle >= kTimelapseSettleFrames) {
+                    auto* ws = gameSession->GetWorldSystem();
+                    if (!g_drain_state.init) {
+                        std::int64_t dmm = 0;
+                        const Luminumbra::Vec3 P = ws->debug_deepest_water_pos(&dmm);
+                        float best_h = 1e9f, bx = 0.0f, bz = 1.0f;
+                        for (int a = 0; a < 8; ++a) {
+                            const float ang = static_cast<float>(a) * 0.7853981634f;
+                            const float ox = std::cos(ang), oz = std::sin(ang);
+                            const float h = ws->GetTerrainHeightAt(P.x + ox * 10.0f, P.z + oz * 10.0f);
+                            if (h < best_h) { best_h = h; bx = ox; bz = oz; }
+                        }
+                        g_drain_state.P = P; g_drain_state.dhx = bx; g_drain_state.dhz = bz;
+                        g_drain_state.init = (dmm > 0);
+                        LUMINUMBRA_CORE_INFO("Timelapse-drain: anchored on {:.2f} m water at ({:.1f},{:.1f},{:.1f}), downhill ({:.2f},{:.2f})",
+                                             static_cast<double>(dmm) / 1000.0, P.x, P.y, P.z, bx, bz);
+                    }
+                    if (g_drain_state.init) {
+                        const glm::vec3 P(g_drain_state.P.x, g_drain_state.P.y, g_drain_state.P.z);
+                        const glm::vec3 dh = glm::normalize(glm::vec3(g_drain_state.dhx, 0.0f, g_drain_state.dhz));
+                        const glm::vec3 side(-dh.z, 0.0f, dh.x);
+                        const glm::vec3 camPosD = P - dh * 5.0f + side * 9.0f + glm::vec3(0.0f, 4.5f, 0.0f);
+                        const glm::vec3 targetD = P + dh * 6.0f - glm::vec3(0.0f, 0.5f, 0.0f);
+                        const glm::vec3 dd = glm::normalize(targetD - camPosD);
+                        g_camera->Position = camPosD;
+                        g_camera->Yaw = glm::degrees(std::atan2(dd.z, dd.x));
+                        g_camera->Pitch = glm::degrees(std::asin(std::clamp(dd.y, -1.0f, 1.0f)));
+                        g_camera->updateCameraVectors();
+                    }
                 }
                 if (auto* physics = gameSession->GetPhysicsSystem()) physics->update(deltaTime * g_timeScale);
                 // T-I3-4: fixed 30 Hz simulation tick (SimulationClock +
@@ -7878,6 +7916,29 @@ int main(int argc, char* argv[]) {
                             Luminumbra::Vec3(sp.x, cy, sp.z), 4.5f, /*fill=*/false,
                             gameSession->GetPhysicsSystem());
                         LUMINUMBRA_CORE_INFO("Timelapse-dig: carved {} chunk(s), crater floor y={:.1f}", n, cy);
+                    }
+                    // Spec 009 money shot: after a hold that shows the water body, breach the bank — step
+                    // a carve sphere from the water OUT along the downhill direction, cutting a channel
+                    // below the waterline so the body drains through it. The fast-forward ticks below let
+                    // the solver push water out each frame; the level visibly drops.
+                    if (g_timelapse_drain && g_drain_state.init && gameSession->GetWorldSystem()) {
+                        gameSession->GetWorldSystem()->debug_force_water_remesh();  // smooth per-frame surface
+                        const int holdN = std::max(6, g_timelapse_frames / 4);  // Phase A: watch the water
+                        if (g_timelapse_captured >= holdN) {
+                            const int k = g_timelapse_captured - holdN;
+                            const float cx = g_drain_state.P.x + g_drain_state.dhx * (1.2f * static_cast<float>(k));
+                            const float cz = g_drain_state.P.z + g_drain_state.dhz * (1.2f * static_cast<float>(k));
+                            const float surf = gameSession->GetWorldSystem()->GetTerrainHeightAt(cx, cz);
+                            // Cut a channel whose FLOOR sits ~1.5 m below the pool surface so the body
+                            // actually empties through it (overlapping spheres -> a continuous trench).
+                            const float floor_y = std::min(surf - 1.0f, g_drain_state.P.y - 1.5f);
+                            const int n = gameSession->GetWorldSystem()->EditTerrainVoxel(
+                                Luminumbra::Vec3(cx, floor_y, cz), 3.5f, /*fill=*/false,
+                                gameSession->GetPhysicsSystem());
+                            LUMINUMBRA_CORE_INFO("Timelapse-drain: breach {} chunk(s) at ({:.1f},{:.1f}); max depth now {:.2f} m",
+                                                 n, cx, cz,
+                                                 static_cast<double>(gameSession->GetWorldSystem()->debug_max_water_depth_mm()) / 1000.0);
+                        }
                     }
                     // Fast-forward the SIM (weather/wind/creatures/plants) by K EXTRA fixed
                     // ticks for the next frame (on top of the normal per-frame tick). Physics

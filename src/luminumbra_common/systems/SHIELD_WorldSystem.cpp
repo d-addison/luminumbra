@@ -2931,6 +2931,54 @@ std::int64_t SHIELD_WorldSystem::debug_max_water_depth_mm() const {
     return mx;
 }
 
+// Render-only: force every simulated water chunk to regenerate its surface mesh next frame.
+// Used by capture tooling so a draining body updates its visible surface every frame instead of
+// on the coalesced WATER_MESH_DIRTY_TICK_INTERVAL cadence. Does NOT touch the hashed sim state.
+void SHIELD_WorldSystem::debug_force_water_remesh() {
+    for (const auto& [id, c] : m_streaming_state.chunks) {
+        if (c && c->has_water_sim.load(std::memory_order_acquire)) {
+            c->water_mesh_generated.store(false);
+            c->water_mesh_dirty_ticks = 0;
+        }
+    }
+}
+
+// World position (surface_y = bed+depth) of the deepest wet water cell across all simulated
+// chunks — used by capture tooling to anchor a camera/dig on a real river or lake. Returns the
+// origin and *depth_mm_out=0 if no water is simulated.
+Vec3 SHIELD_WorldSystem::debug_deepest_water_pos(std::int64_t* depth_mm_out) const {
+    std::int64_t best = 0;
+    Vec3 best_pos(0.0f, 0.0f, 0.0f);
+    // Only full-res (lod-0) chunks are CARVABLE (EditTerrainVoxel's exact test), so anchoring on
+    // one guarantees the breach lands — coarse far chunks carry water but no editable sdf.
+    constexpr std::size_t kFullSdf =
+        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    for (const auto& [id, c] : m_streaming_state.chunks) {
+        if (!c || !c->has_water_sim.load(std::memory_order_acquire)) continue;
+        if (c->sdf_data.size() != kFullSdf) continue;
+        const int res = static_cast<int>(c->current_water_resolution.load());
+        if (res <= 1 || static_cast<int>(c->water_depth_mm.size()) != res * res ||
+            static_cast<int>(c->water_bed_mm.size()) != res * res) continue;
+        const IVec3 cc = c->get_coords();
+        const float cw_x = static_cast<float>(CHUNK_SIZE_X) / static_cast<float>(res);
+        const float cw_z = static_cast<float>(CHUNK_SIZE_Z) / static_cast<float>(res);
+        for (int z = 0; z < res; ++z) {
+            for (int x = 0; x < res; ++x) {
+                const std::int32_t d = c->water_depth_mm[z * res + x];
+                if (d <= best) continue;
+                best = d;
+                const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
+                const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
+                const float surf_y =
+                    static_cast<float>(c->water_bed_mm[z * res + x] + d) / 1000.0f;
+                best_pos = Vec3(wx, surf_y, wz);
+            }
+        }
+    }
+    if (depth_mm_out) *depth_mm_out = best;
+    return best_pos;
+}
+
 // Spec 009 Phase 2: terraform the water bed (dig/dam) — delegates to the WaterSystem.
 int SHIELD_WorldSystem::EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, float radius_m) {
     return m_water_system ? m_water_system->EditTerrainBed(world_pos, delta_mm, radius_m) : 0;
