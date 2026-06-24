@@ -11,6 +11,8 @@
 #include "../ai/PredatorPackSystem.h"           // §4: pack flanking coordination (+31)
 #include "../ai/MigrationSystem.h"              // §4: seasonal migration drive (+32)
 #include "../ai/SteeringConsumer.h"             // §4: blend bias outputs into wish (integration)
+#include "../ai/ThirstSystem.h"                 // §4: water-seeking / drinking (+33)
+#include "../ai/ScavengingSystem.h"             // §4: carcass scavenging (death -> food) (+34)
 #include "../components/AlarmComponents.h"
 #include "../components/PackHunterComponents.h"
 #include "../components/MigratoryComponents.h"
@@ -263,6 +265,37 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 // migration drift, territory homing. Extracted to ai/SteeringConsumer.h so this
                 // integration layer is unit-tested independently of the producers.
                 luminumbra::ai::RunSteeringConsumerOnTick(m_registry);
+
+                // 2e-survival: water-seeking (THIRST) + carcass SCAVENGING — built sim
+                // systems wired into the live tick. Opt-in via ThirstComponent /
+                // ScavengerComponent (+ WaterHoleComponent water sources / carcasses); a
+                // roster carrying none is a pure no-op, so the canonical NetworkStateHash
+                // stays byte-identical. Thirst rises + drinks at water; hungry scavengers
+                // feed on carcasses (death -> food). Each writes its OWN component's wish,
+                // blended into the creature wish below so the physics bridge walks them there.
+                luminumbra::ai::RunThirstOnTick(
+                    m_registry, static_cast<float>(m_simulationClock.fixed_dt()));
+                luminumbra::ai::RunScavengingOnTick(m_registry, current_tick);
+                {
+                    // Additive blend of the survival wishes into CreatureComponent.wish so a
+                    // thirsty/scavenging creature actually steers to water/carrion. Entities
+                    // without the opt-in components are untouched (try_get -> null), keeping
+                    // the baseline byte-identical; the physics bridge below consumes wish_x/z.
+                    auto sv = m_registry.view<Luminumbra::Components::CreatureComponent>();
+                    for (auto e : sv) {
+                        auto& cr = sv.get<Luminumbra::Components::CreatureComponent>(e);
+                        if (const auto* th =
+                                m_registry.try_get<Luminumbra::Components::ThirstComponent>(e)) {
+                            cr.wish_x += th->wish_x;
+                            cr.wish_z += th->wish_z;
+                        }
+                        if (const auto* scv =
+                                m_registry.try_get<Luminumbra::Components::ScavengerComponent>(e)) {
+                            cr.wish_x += scv->wish_x;
+                            cr.wish_z += scv->wish_z;
+                        }
+                    }
+                }
 
                 // 2e-phys: TRUE-PHYSICS locomotion bridge. Creatures carrying a
                 // CreaturePhysicsComponent are driven by the deterministic Jolt avatar
