@@ -14,6 +14,7 @@
 #include "rendering/Camera.h"
 #include "rendering/FarLodSystem.h"
 #include "rendering/FrameScan.h" // framescan: deterministic what's-in-frame scan tool (render-only)
+#include "rendering/ImpostorBake.h" // Wave-3 far-field tree impostor atlas bake (render-only)
 #include "rendering/SceneSurvey.h" // survey: autonomous tour+screenshot of world POIs (render-only)
 #include "rendering/RenderPipeline.h"
 #include "rendering/passes/WaterPass.h"
@@ -253,6 +254,11 @@ static constexpr int kFrameScanSettleFrames = 90; // let chunks stream + atmosph
 // settle is normally ~500-700), abort with a clear error instead of looping forever.
 static constexpr int kFrameScanWatchdogFrames = 4000;
 int g_frame_scan_watchdog = 0;
+// --bake-tree-impostor <out.ppm>: Wave-3 far-field impostor atlas bake. Renders the static tree parts
+// from the hemi-octahedral view directions into an atlas (+ coverage JSON) and exits. Needs only GL +
+// the tree meshes (no world), so it runs on the first render-loop frame. Render-only.
+std::string g_bake_impostor_path;
+bool g_bake_impostor_done = false;
 // --survey <dir>: autonomous tour — discover POIs (waterfall/cliff/grass/lake) in the generated
 // world, teleport+stream+settle at each, write a screenshot + frame-scan per POI. Empty = off.
 std::string g_survey_dir;
@@ -2441,6 +2447,11 @@ int main(int argc, char* argv[]) {
         LUMINUMBRA_CORE_INFO("Frame-scan armed -> {} (auto-world implied, fixed pose, settle {} frames)",
                              g_frame_scan_path, kFrameScanSettleFrames);
     }
+    // --bake-tree-impostor <out.ppm>: bake the far-field tree impostor atlas (no world needed).
+    if (const std::string bp = GetCommandLineOption(argc, argv, "--bake-tree-impostor", ""); !bp.empty()) {
+        g_bake_impostor_path = bp;
+        LUMINUMBRA_CORE_INFO("Impostor-bake armed -> {} (GL atlas bake on first frame, then exit)", bp);
+    }
     // --survey <dir>: autonomous POI tour + per-scene screenshot/frame-scan. Pair with
     // --auto-create-world --auto-enter-world --no-audio.
     if (const std::string sv = GetCommandLineOption(argc, argv, "--survey", ""); !sv.empty()) {
@@ -3641,6 +3652,25 @@ int main(int argc, char* argv[]) {
         glfwPollEvents();
         rb_poll_ms = std::chrono::duration<double, std::milli>(
                              std::chrono::steady_clock::now() - _rb_poll_t0).count();
+
+        // --bake-tree-impostor: GL is ready at the loop top and the bake needs no world, so run the
+        // octahedral atlas bake ONCE here (independent of game state), write the atlas + coverage JSON,
+        // then exit. Placed at the loop top so it can't be skipped by a state-gated render branch.
+        if (!g_bake_impostor_path.empty() && !g_bake_impostor_done) {
+            g_bake_impostor_done = true;
+            Luminumbra::Rendering::OctaImpostorGrid bakeGrid; // 8x8 tiles x 128px (defaults)
+            const Luminumbra::Rendering::ImpostorBakeResult br =
+                Luminumbra::Rendering::BakeTreeImpostorAtlas(g_bake_impostor_path, root_dir.string(), bakeGrid);
+            if (br.ok) {
+                LUMINUMBRA_CORE_INFO(
+                    "Impostor atlas baked -> {} ({}x{} px): mean coverage {:.3f}, min tile {:.3f}",
+                    g_bake_impostor_path, br.atlas_size, br.atlas_size, br.mean_coverage, br.min_coverage);
+            } else {
+                LUMINUMBRA_CORE_ERROR("Impostor bake failed: {}", br.error);
+            }
+            glfwSetWindowShouldClose(window, GLFW_TRUE);
+            continue;
+        }
 
         // Debounced framebuffer resize (T-I4-DR-window-modes): coalesce a burst
         // of drag events into one RenderPipeline::on_resize once the size has
