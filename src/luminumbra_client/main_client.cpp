@@ -6247,6 +6247,8 @@ int main(int argc, char* argv[]) {
                             }
 
                             if (g_playerController->consume_shutter_request()) {
+                                // The core action gets its sound: a soft camera shutter on every capture.
+                                if (audioManager) audioManager->PlayOneShot2D("camera_shutter");
                                 int cap_w = 0, cap_h = 0;
                                 glfwGetFramebufferSize(window, &cap_w, &cap_h);
                                 // Build the shot from the live frame (CONST registry read).

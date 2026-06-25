@@ -68,6 +68,12 @@
       "attenuation_model": "linear",
       "min_distance": 1.0,
       "max_distance": 16.0
+    },
+    "camera_shutter": {
+      "files": ["assets/audio/sfx/ui/camera_shutter.ogg"],
+      "volume": 0.85,
+      "pitch_variation": 0.04,
+      "is_2d": true
     }
   }
 }
