@@ -1,7 +1,19 @@
 # Design note: water-sim lockstep determinism (streaming-arrival coupling)
 
-**Status:** interim **C landed** (`254cec1f`) — full B′ still open · **Author:** determinism investigation (2026-06-25)
-**Related:** spec 009 (flowing water), `water-heightmap-read-race` memory, commits `7d605399` (bed), `254cec1f` (C)
+**Status:** RESOLVED — C landed (`254cec1f`); **B′ verified UNNECESSARY** (`7592f84c`) · **Author:** determinism investigation (2026-06-25)
+**Related:** spec 009 (flowing water), `water-heightmap-read-race` memory, commits `7d605399` (bed), `254cec1f` (C), `7592f84c` (moving harness)
+
+> **VERDICT (B′ not needed):** A new `--smoke-moving` harness (drifts the streaming anchor
+> ~0.5 m/tick so chunks stream in/out *during* the run — the moving case the static smoke
+> can't exercise) is **0 flakes in 22 cold boots**. The moving case is deterministic, so the
+> heavy B′ streaming-core rewrite is NOT required. It already holds because `RunFixedTicks`
+> calls `wait_for_streaming_jobs()` EVERY tick — chunk arrival is a deterministic function of
+> (anchor, tick) independent of async job SPEED, and by the next activation all jobs have
+> completed so the pressure-adaptive radius always sees a settled no-active-jobs state (this
+> mitigates the "Critical refinement" concern below). Interim C handles the initial residency;
+> the per-tick barrier handles chunks streamed in while moving. The cold-vs-warm proxy
+> exercises the same per-machine speed difference two peers would have, so it generalizes to
+> lockstep. **B′ below is retained for the record but is not planned.**
 
 > **Update (C landed):** `ServerWorldRunner::Boot` now settles streaming + water to a
 > steady state (water reaches a static fixed point — it sleeps) before the counted sim,
