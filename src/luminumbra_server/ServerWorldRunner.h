@@ -66,6 +66,10 @@ struct ServerWorldRunnerConfig {
     // I9-FOLIAGE Phase 3D: opt-in deterministic PLANT roster (6 plants) so the smoke exercises the
     // plant sub-hash + growth + persistence end-to-end. DEFAULT false -> empty -> plant_hash neutral.
     bool planted_roster = false;
+    // B' determinism harness: when true, RunFixedTicks DRIFTS the streaming anchor deterministically
+    // each tick (chunks stream in/out during the run) to reproduce moving-case water determinism that
+    // the boot warm-up (interim C) does not cover. DEFAULT false -> the static (fixed-anchor) lane.
+    bool moving_anchor = false;
 };
 
 struct ServerTickReport {

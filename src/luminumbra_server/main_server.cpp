@@ -79,6 +79,10 @@ struct ServerCliOptions {
     // I9-FOLIAGE Phase 3D: --planted-roster spawns a deterministic 6-plant roster so the smoke
     // exercises the plant sub-hash + growth + persistence end-to-end (default off -> empty/neutral).
     bool planted_roster = false;
+    // B' determinism harness: --smoke-moving drifts the streaming anchor deterministically each tick
+    // so chunks stream IN/OUT during the run (the static smoke never does). It reproduces the
+    // moving-case water determinism the boot warm-up (interim C) does NOT cover. Implies --smoke.
+    bool moving = false;
     // T-I6 P3.1c: --replicate runs the authoritative server + an in-process loopback
     // ReplicationClient, broadcasts the avatar states each tick, and asserts the client
     // mirrors the server avatars (end-to-end live replication in the harness).
@@ -259,6 +263,9 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
             options.ecology_roster = true;
         } else if (std::strcmp(arg, "--planted-roster") == 0) {
             options.planted_roster = true;
+        } else if (std::strcmp(arg, "--smoke-moving") == 0) {
+            options.smoke = true;
+            options.moving = true;
         } else if (std::strcmp(arg, "--replicate") == 0) {
             options.replicate = true;
         } else if (std::strcmp(arg, "--npcs") == 0) {
@@ -307,6 +314,7 @@ Luminumbra::Server::ServerWorldRunnerConfig RunnerConfigFrom(const ServerCliOpti
     config.avatar_count = options.avatars;
     config.ecology_roster = options.ecology_roster;
     config.planted_roster = options.planted_roster;
+    config.moving_anchor = options.moving;
     return config;
 }
 

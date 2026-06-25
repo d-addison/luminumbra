@@ -468,7 +468,16 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         // around the UNION of avatar positions (multi-anchor); with none, the
         // single spawn anchor via the Vec3 overload (byte-identical to pre-P1).
         if (m_avatars.empty()) {
-            world_system->update(m_session->GetRegistry(), spawn_anchor, physics_system);
+            Vec3 anchor = spawn_anchor;
+            if (m_config.moving_anchor) {
+                // B' harness: walk the streaming anchor +X/+Z each tick so chunks stream IN ahead and
+                // OUT behind during the run. ~0.5 m/tick -> ~45 m over 90 ticks (~3 chunks). Pure fn of
+                // the tick -> both --smoke runs drift identically; any run!=replay is the moving-case
+                // water nondeterminism (interim C only settles the INITIAL residency).
+                const float d = 0.5f * static_cast<float>(report.ticks_executed);
+                anchor = Vec3(spawn_anchor.x + d, spawn_anchor.y, spawn_anchor.z + d);
+            }
+            world_system->update(m_session->GetRegistry(), anchor, physics_system);
         } else {
             std::vector<Vec3> anchors;
             anchors.reserve(m_avatars.size());
