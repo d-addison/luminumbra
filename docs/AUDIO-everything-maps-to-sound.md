@@ -47,29 +47,26 @@ dead. This is a game-feel gate, not a nice-to-have.
   and is guarded off in scenario/gate runs, so `world_hash` and the gates are untouched.
 
 ## Wired today (commits on `feat/polyglot-audit-roadmap`)
-Footsteps (grass/stone by surface material), **camera shutter** (on capture), UI click +
-world-loaded chime, **menu music**, constant ambient bed (**forest rustle + birdsong +
-wind**), **rain** (reactive to `WeatherSystem::PrecipitationAt`), **thunder** (during heavy
-storms), **water** (when standing water is within ~14 m), and **creature calls** (nearest
-live creature, ~every 11 s).
+Footsteps (grass/stone/**soil/sand/water/crystal** by surface material), **camera shutter**
+(on capture), UI click + world-loaded chime, **menu music**, constant ambient bed (**forest
+rustle + birdsong + wind**), **rain** (reactive to `WeatherSystem::PrecipitationAt`),
+**thunder** (during heavy storms), **water** (when standing water is within ~14 m), and
+**creature calls** (nearest live creature, ~every 11 s). **Farming verbs** (plant/water/
+fertilize/harvest, at the aim point on success). **Terraform** (dig sample picked by the
+material being cut — soil/stone/sand — and a place/thud on fill). **Discovery chime** (first-
+time codex fill at capture). **Objective-complete chime** (edge-triggered on the goal count).
 
 ## The audit — features that SHOULD make sound but DON'T yet
 These are the gaps to close (each is a wire-up + usually one generated sample):
-1. **Farming verbs** (F plant / G water / H fertilize / J harvest) — silent. Need: seed
-   press, water trickle, fertilise scatter, harvest pluck. (`main_client.cpp` farm block.)
-2. **Photo verdict + discovery** — the shutter fires, but a great shot / a **new-species
-   discovery** has no sting/chime. Big game-feel miss for a photography game.
-3. **Objective complete** — no success chime when a goal finishes.
-4. **Codex open/close** (C), **species picker** (V) — no UI tick/page sound.
-5. **Terraform** (R dig / T fill) — silent. Need dig + place/thud.
-6. **Creature FOOTSTEPS** — creatures are brain-driven and move **silently**, even though a
+1. **Codex open/close** (C), **species picker** (V) — no UI tick/page sound.
+2. **Creature FOOTSTEPS** — creatures are brain-driven and move **silently**, even though a
    `creature_grovestrider_footstep` event exists. Wire it to creature locomotion.
-7. **Per-species creature voices** — only grovestrider has a call; the other 9 species reuse
+3. **Per-species creature voices** — only grovestrider has a call; the other 9 species reuse
    nothing. Each species should get (or share a tagged pool of) calls.
-8. **Wind gusts** — wind is a constant bed; it should swell with the wind-field strength
+4. **Wind gusts** — wind is a constant bed; it should swell with the wind-field strength
    (needs a runtime ambient-volume setter — not yet exposed).
-9. **Menu/UI** — RmlUi button hover/click are not wired to `ui_button_click`/`ui_button_hover`.
-10. **Plant promotion**, water terraform **drain/dam**, day/night transition, low-health /
+5. **Menu/UI** — RmlUi button hover/click are not wired to `ui_button_click`/`ui_button_hover`.
+6. **Plant promotion**, water terraform **drain/dam**, day/night transition, low-health /
     danger cues, etc.
 
 ## Process going forward
