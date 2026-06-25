@@ -366,6 +366,57 @@ bool ServerWorldRunner::Boot() {
         LUMINUMBRA_CORE_INFO("ServerWorldRunner: spawned deterministic plant roster (6 plants).");
     }
 
+    // --- C (determinism interim): settle water to a steady state BEFORE the counted sim ---
+    // The water sim only sleeps after 120 consecutive calm ticks, but a short run (e.g. the
+    // 90-tick --smoke) measures water MID-settle, so each chunk's depth depends on WHICH tick
+    // it streamed in (async meshing arrival). That made the WATER sub-hash flake cold-vs-warm
+    // and would desync two lockstep peers with different timing (water is a halting peer hash
+    // oracle). Here we drive streaming + water to a settled steady state on the SHARED boot
+    // path both peers run, so the subsequent sim starts from the (trajectory-independent)
+    // equilibrium. Bounded: settle residency (stable chunk count), then run water until every
+    // chunk is calm (asleep) or a hard cap. If water does NOT reach a static fixed point this
+    // will hit the cap and the smoke will still flake — that result decides option C vs B'
+    // (see docs/water-sim-lockstep-determinism.md). Server/lockstep boot only.
+    {
+        auto* ws = m_session->GetWorldSystem();
+        auto* phys = m_session->GetPhysicsSystem();
+        auto stream_once = [&]() {
+            if (m_avatars.empty()) {
+                ws->update(m_session->GetRegistry(), spawn_anchor, phys);
+            } else {
+                std::vector<Vec3> anchors;
+                anchors.reserve(m_avatars.size());
+                for (const World::PlayerAvatar& a : m_avatars) anchors.push_back(a.position);
+                ws->update(m_session->GetRegistry(), anchors, phys);
+            }
+            ws->wait_for_streaming_jobs();
+        };
+        // Phase 1: settle chunk residency (count stable for several consecutive iters).
+        std::size_t last_count = static_cast<std::size_t>(-1);
+        int stable = 0;
+        for (int i = 0; i < 400 && stable < 8; ++i) {
+            stream_once();
+            const std::size_t count = ws->snapshot_streamed_chunks().size();
+            stable = (count == last_count) ? stable + 1 : 0;
+            last_count = count;
+        }
+        // Phase 2: settle WATER to equilibrium — run until no water chunk is awake (calm past
+        // the 120-tick sleep threshold) or a hard cap. Early-out keeps the common case cheap.
+        constexpr int kWaterSettleCap = 400;
+        int calm_streak = 0;
+        for (int i = 0; i < kWaterSettleCap && calm_streak < 4; ++i) {
+            stream_once();
+            std::size_t water_chunks = 0, awake = 0;
+            for (const auto& c : ws->snapshot_streamed_chunks()) {
+                if (c && c->has_water_sim.load(std::memory_order_acquire)) {
+                    ++water_chunks;
+                    if (!c->is_water_sleeping.load(std::memory_order_relaxed)) ++awake;
+                }
+            }
+            calm_streak = (water_chunks > 0 && awake == 0) ? calm_streak + 1 : 0;
+        }
+    }
+
     m_booted = true;
     return true;
 }
