@@ -6087,8 +6087,10 @@ int main(int argc, char* argv[]) {
                                     luminumbra::foliage::kPlantSeedOffset,
                                     static_cast<std::uint64_t>(static_cast<std::int64_t>(aimXZ.x * 8.0f)),
                                     static_cast<std::uint64_t>(static_cast<std::int64_t>(aimXZ.z * 8.0f)) ^ ftick);
-                                if (g_farming.Seed(freg, aim, tmpl, frng, ftick) != entt::null)
+                                if (g_farming.Seed(freg, aim, tmpl, frng, ftick) != entt::null) {
+                                    if (audioManager) audioManager->PlayOneShot("farm_plant", glm::vec3(aim.x, aim.y, aim.z));
                                     LUMINUMBRA_CORE_INFO("Farm: planted {} ({} seeds left)", tmpl.id, g_farming.seeds);
+                                }
                             }
                         }
                         // Tend the nearest plant; if there's no SIM plant in reach but a wild scatter
@@ -6102,13 +6104,20 @@ int main(int argc, char* argv[]) {
                             }
                             return e;
                         };
-                        if (farmEdge(IA::FarmWater, s_fw)) g_farming.Water(freg, fpick());
-                        if (farmEdge(IA::FarmFertilize, s_ff)) g_farming.Fertilize(freg, fpick());
+                        const glm::vec3 aimSnd(aim.x, aim.y, aim.z);
+                        if (farmEdge(IA::FarmWater, s_fw)) {
+                            if (g_farming.Water(freg, fpick()) && audioManager) audioManager->PlayOneShot("farm_water", aimSnd);
+                        }
+                        if (farmEdge(IA::FarmFertilize, s_ff)) {
+                            if (g_farming.Fertilize(freg, fpick()) && audioManager) audioManager->PlayOneShot("farm_fertilize", aimSnd);
+                        }
                         if (farmEdge(IA::FarmHarvest, s_fh)) {
                             const auto hr = g_farming.Harvest(freg, fpick());
-                            if (hr.harvestable)
+                            if (hr.harvestable) {
+                                if (audioManager) audioManager->PlayOneShot("farm_harvest", aimSnd);
                                 LUMINUMBRA_CORE_INFO("Farm: harvested yield {:.2f} (+{} seeds, {} total)",
                                                      hr.yield, hr.seeds, g_farming.harvests);
+                            }
                         }
                         // A promotion suppressed a scatter instance -> rebuild the scatter cache so the
                         // next composite re-bake (RebakeAllPlants) drops the now-promoted dup.
@@ -6139,6 +6148,26 @@ int main(int argc, char* argv[]) {
                             const int n = gameSession->GetWorldSystem()->EditTerrainVoxel(
                                 Luminumbra::Vec3(aim.x, aim.y, aim.z), kRadius,
                                 /*fill=*/fill_fired, gameSession->GetPhysicsSystem());
+                            // Everything maps to sound: digging picks its sample from the
+                            // material we're cutting into; filling is a single pack-in-place thud.
+                            if (audioManager) {
+                                if (fill_fired) {
+                                    audioManager->PlayOneShot("terraform_place", aim);
+                                } else {
+                                    const float th = gameSession->GetWorldSystem()->GetTerrainHeightAt(aim.x, aim.z);
+                                    const char* dev = "dig_soil";
+                                    switch (gameSession->GetWorldSystem()->SurfaceVertexMaterial(aim.x, aim.z, th)) {
+                                        case Luminumbra::MaterialType::Stone:
+                                        case Luminumbra::MaterialType::Deepslate:
+                                        case Luminumbra::MaterialType::LuminCrystal: dev = "dig_stone"; break;
+                                        case Luminumbra::MaterialType::Sand:         dev = "dig_sand";  break;
+                                        case Luminumbra::MaterialType::Soil:
+                                        case Luminumbra::MaterialType::Grass:
+                                        default:                                     dev = "dig_soil";  break;
+                                    }
+                                    audioManager->PlayOneShot(dev, aim);
+                                }
+                            }
                             LUMINUMBRA_CORE_INFO("Terraform: {} {} chunk(s) at ({:.1f},{:.1f},{:.1f})",
                                                  fill_fired ? "filled" : "dug", n, aim.x, aim.y, aim.z);
                         }
@@ -6231,6 +6260,11 @@ int main(int argc, char* argv[]) {
                                 const luminumbra::game::Objective* cur =
                                     g_objectives.next_incomplete(g_photoCodex);
                                 const std::uint32_t done = g_objectives.completed_count(g_photoCodex);
+                                // Everything maps to sound: a newly-completed goal rings the
+                                // success chime once (edge-triggered on the completed count).
+                                static std::uint32_t s_objDoneLast = 0;
+                                if (done > s_objDoneLast && audioManager) audioManager->PlayOneShot2D("objective_complete");
+                                s_objDoneLast = done;
                                 std::string title = "All goals complete";
                                 float progress = 1.0f;
                                 if (cur) {
@@ -6394,6 +6428,10 @@ int main(int argc, char* argv[]) {
                                         }
                                     }
                                 }
+
+                                // Everything maps to sound: a first-time codex fill rings the
+                                // discovery chime at the moment of capture (2D, UI-felt).
+                                if (is_discovery && audioManager) audioManager->PlayOneShot2D("discovery");
 
                                 // Persist the framebuffer (PPM) + a verdict sidecar.
                                 std::error_code _photo_ec;

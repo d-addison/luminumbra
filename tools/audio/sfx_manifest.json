@@ -35,6 +35,16 @@
     { "out": "sfx/player/footstep_water_1.mp3", "duration": 0.6, "prompt": "a single footstep splashing in shallow water, a soft wet splash and trickle, natural foley" },
     { "out": "sfx/player/footstep_water_2.mp3", "duration": 0.6, "prompt": "a single step wading in shallow water, a gentle splash, natural" },
     { "out": "sfx/player/footstep_crystal_1.mp3", "duration": 0.6, "prompt": "a single footstep on smooth crystal, a soft glassy chime-tap with a faint gentle resonance, magical, clean" },
-    { "out": "sfx/player/footstep_crystal_2.mp3", "duration": 0.6, "prompt": "a single step on a crystalline surface, a delicate bright glassy tap with a short ring, magical, soft" }
+    { "out": "sfx/player/footstep_crystal_2.mp3", "duration": 0.6, "prompt": "a single step on a crystalline surface, a delicate bright glassy tap with a short ring, magical, soft" },
+    { "out": "sfx/terraform/dig_soil.mp3", "duration": 0.7, "prompt": "a single shovel dig into soft soil, a muffled earthy scoop and crumble, natural foley, no music" },
+    { "out": "sfx/terraform/dig_stone.mp3", "duration": 0.7, "prompt": "a single pick strike chipping stone, a sharp rocky crack and crumble, natural foley" },
+    { "out": "sfx/terraform/dig_sand.mp3", "duration": 0.7, "prompt": "a single scoop dig into sand, a soft granular shovel shuffle, natural foley" },
+    { "out": "sfx/terraform/place.mp3", "duration": 0.6, "prompt": "a single soft thud of earth dropped and packed into place, a muffled dirt plop, natural foley" },
+    { "out": "sfx/farm/plant.mp3", "duration": 0.6, "prompt": "a soft press of a seed into soil and a gentle pat, a small earthy planting sound, natural" },
+    { "out": "sfx/farm/water.mp3", "duration": 1.2, "prompt": "a gentle watering-can pour, soft trickling water onto soil, calm, natural foley" },
+    { "out": "sfx/farm/fertilize.mp3", "duration": 0.9, "prompt": "a soft scatter of dry granular fertilizer onto soil, a gentle sprinkle, natural" },
+    { "out": "sfx/farm/harvest.mp3", "duration": 0.6, "prompt": "a soft snip and pluck of a ripe plant being harvested, a gentle leafy rustle and pop, natural" },
+    { "out": "sfx/ui/discovery.mp3", "duration": 2.0, "prompt": "a warm magical discovery chime, a gentle rising shimmer revealing something new, wondrous and soft, pleasant" },
+    { "out": "sfx/ui/objective_complete.mp3", "duration": 1.6, "prompt": "a soft uplifting success chime, a short warm two-or-three note resolve for a completed goal, gentle, satisfying" }
   ]
 }

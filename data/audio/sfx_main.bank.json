@@ -109,6 +109,16 @@
       "pitch_variation": 0.04,
       "is_2d": true
     },
+    "dig_soil":  { "files": ["assets/audio/sfx/terraform/dig_soil.mp3"],  "volume": 0.7, "pitch_variation": 0.10, "is_3d": true, "attenuation_model": "linear", "min_distance": 1.0, "max_distance": 20.0 },
+    "dig_stone": { "files": ["assets/audio/sfx/terraform/dig_stone.mp3"], "volume": 0.7, "pitch_variation": 0.10, "is_3d": true, "attenuation_model": "linear", "min_distance": 1.0, "max_distance": 20.0 },
+    "dig_sand":  { "files": ["assets/audio/sfx/terraform/dig_sand.mp3"],  "volume": 0.7, "pitch_variation": 0.10, "is_3d": true, "attenuation_model": "linear", "min_distance": 1.0, "max_distance": 20.0 },
+    "terraform_place": { "files": ["assets/audio/sfx/terraform/place.mp3"], "volume": 0.7, "pitch_variation": 0.10, "is_3d": true, "attenuation_model": "linear", "min_distance": 1.0, "max_distance": 20.0 },
+    "farm_plant":     { "files": ["assets/audio/sfx/farm/plant.mp3"],     "volume": 0.7, "pitch_variation": 0.08, "is_3d": true, "attenuation_model": "linear", "min_distance": 1.0, "max_distance": 16.0 },
+    "farm_water":     { "files": ["assets/audio/sfx/farm/water.mp3"],     "volume": 0.7, "pitch_variation": 0.06, "is_3d": true, "attenuation_model": "linear", "min_distance": 1.0, "max_distance": 16.0 },
+    "farm_fertilize": { "files": ["assets/audio/sfx/farm/fertilize.mp3"], "volume": 0.7, "pitch_variation": 0.06, "is_3d": true, "attenuation_model": "linear", "min_distance": 1.0, "max_distance": 16.0 },
+    "farm_harvest":   { "files": ["assets/audio/sfx/farm/harvest.mp3"],   "volume": 0.7, "pitch_variation": 0.08, "is_3d": true, "attenuation_model": "linear", "min_distance": 1.0, "max_distance": 16.0 },
+    "discovery":          { "files": ["assets/audio/sfx/ui/discovery.mp3"],          "volume": 0.8, "is_2d": true },
+    "objective_complete": { "files": ["assets/audio/sfx/ui/objective_complete.mp3"], "volume": 0.75, "is_2d": true },
     "ambient_forest": {
       "files": ["assets/audio/sfx/environment/forest_rustle.mp3"],
       "volume": 0.35,
