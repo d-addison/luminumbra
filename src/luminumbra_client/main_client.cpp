@@ -3706,7 +3706,36 @@ int main(int argc, char* argv[]) {
         g_uiHotReload.Update();  // F3: no-op unless --ui-hot-reload enabled it (1s-throttled)
 
         GameState currentState = gameStateManager.GetCurrentState();
-        
+
+        // Player FOOTSTEPS (interactive audio): when the player walks, play a footstep keyed to the
+        // surface material under them (stone vs grass/soil/etc.), at a distance-based cadence so it
+        // tracks speed. Render/audio-only; live play only (never in scenario captures, so determinism
+        // and the visual gates are untouched). Stride length / speed gates are tunable by ear.
+        if (currentState == GameState::IN_GAME && audioManager && g_camera && !g_paused &&
+            !scenario_config.active() && gameSession && gameSession->GetWorldSystem()) {
+            static glm::vec3 s_footLastPos = g_camera->Position;
+            static float s_footDist = 0.0f;
+            const glm::vec3 fp = g_camera->Position;
+            const float fdx = fp.x - s_footLastPos.x, fdz = fp.z - s_footLastPos.z;
+            const float fhoriz = std::sqrt(fdx * fdx + fdz * fdz);
+            s_footLastPos = fp;
+            const float fspeed = deltaTime > 0.0f ? fhoriz / static_cast<float>(deltaTime) : 0.0f;
+            if (fspeed < 0.8f || fspeed > 25.0f) {
+                s_footDist = 0.0f;  // standing still, or a teleport/respawn jump -> reset
+            } else {
+                s_footDist += fhoriz;
+                if (s_footDist >= 1.9f) {  // stride length (m)
+                    s_footDist = 0.0f;
+                    auto* fws = gameSession->GetWorldSystem();
+                    const float fth = fws->GetTerrainHeightAt(fp.x, fp.z);
+                    const char* fev =
+                        (fws->SurfaceVertexMaterial(fp.x, fp.z, fth) == Luminumbra::MaterialType::Stone)
+                            ? "footstep_stone" : "footstep_grass";
+                    audioManager->PlayOneShot(fev, glm::vec3(fp.x, fth, fp.z));
+                }
+            }
+        }
+
         if (g_imgui_enabled) {
             ImGui_ImplOpenGL3_NewFrame();
             ImGui_ImplGlfw_NewFrame();
