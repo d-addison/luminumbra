@@ -17,6 +17,8 @@
 
 namespace Luminumbra::Rendering {
 
+class RenderPipeline; // for the loaded static-model texture array + per-part layers
+
 struct ImpostorBakeResult {
     bool ok = false;
     int atlas_size = 0;       // atlas side length in pixels (gridResolution * tileResolution)
@@ -28,10 +30,12 @@ struct ImpostorBakeResult {
 // Bakes the tree leaf + branch parts into an octahedral impostor atlas and writes:
 //   <outBasePath>            -> the atlas as a binary PPM (RGB; tree on a keyed background)
 //   <outBasePath>.json       -> { atlas_size, grid, mean_coverage, min_coverage, per-tile coverage }
-// rootDir is the asset root (the tree parts load from rootDir/data/models/trees/...).
-// Requires a current GL context. Returns coverage stats / an error.
+// rootDir is the asset root (the tree parts load from rootDir/data/models/trees/...). rp supplies the
+// loaded static-model texture array + per-part albedo layer / luma-cutout flag so the bake renders the
+// REAL bark/leaf textures (leaves luma-keyed, matching g_buffer.frag). Requires a current GL context.
 ImpostorBakeResult BakeTreeImpostorAtlas(const std::string& outPpmPath,
                                          const std::string& rootDir,
+                                         const RenderPipeline& rp,
                                          const OctaImpostorGrid& grid);
 
 } // namespace Luminumbra::Rendering

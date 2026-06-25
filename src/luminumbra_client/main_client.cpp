@@ -3660,7 +3660,8 @@ int main(int argc, char* argv[]) {
             g_bake_impostor_done = true;
             Luminumbra::Rendering::OctaImpostorGrid bakeGrid; // 8x8 tiles x 128px (defaults)
             const Luminumbra::Rendering::ImpostorBakeResult br =
-                Luminumbra::Rendering::BakeTreeImpostorAtlas(g_bake_impostor_path, root_dir.string(), bakeGrid);
+                Luminumbra::Rendering::BakeTreeImpostorAtlas(g_bake_impostor_path, root_dir.string(),
+                                                             renderPipeline, bakeGrid);
             if (br.ok) {
                 LUMINUMBRA_CORE_INFO(
                     "Impostor atlas baked -> {} ({}x{} px): mean coverage {:.3f}, min tile {:.3f}",
