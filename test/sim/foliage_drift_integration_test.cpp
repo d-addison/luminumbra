@@ -15,11 +15,13 @@
 #include "luminumbra_common/components/CropLifecycleComponents.h"
 #include "luminumbra_common/components/PlantComponents.h"
 #include "luminumbra_common/components/PollinationComponents.h"
+#include "luminumbra_common/components/SoilComponents.h"
 #include "luminumbra_common/core/DeterministicRng.h"
 #include "luminumbra_common/foliage/SpeciesRegistry.h"
 #include "luminumbra_common/systems/CropLifecycleSystem.h"
 #include "luminumbra_common/systems/FarmingSystem.h"
 #include "luminumbra_common/systems/PollinationSystem.h"
+#include "luminumbra_common/systems/SoilNutrientSystem.h"
 
 namespace {
 
@@ -99,6 +101,27 @@ TEST(FoliageDrift, SenescenceGerminatesCrossedChild) {
     }
     EXPECT_EQ(total, 2u) << "two annual parents germinate two children";
     EXPECT_EQ(crossed, total) << "every germinated child carries the pollination cross, not a self copy";
+}
+
+// Live-spawned plants FEED on soil (the monoculture-starves loop): a dense cell of game-spawned
+// mature feeders draws its shared cell's nutrient far below an unplanted cell. The growth tick reads
+// NutrientAt back into suitability, so a crowded monoculture self-limits until rotated / fertilised.
+TEST(FoliageDrift, SpawnedMonocultureDepletesSoil) {
+    entt::registry r;
+    DeterministicRng rng = DeterministicRng::seeded(F::kPlantSeedOffset, 5);
+    constexpr float kCell = 4.0f, kOrigin = 0.0f;
+    for (int i = 0; i < 8; ++i) {  // 8 feeders packed into the single cell [0,kCell)
+        const auto e = F::MakePlantFromSpecies(r, Luminumbra::Vec3(0.1f * i, 0, 0.1f * i), testCrop(), rng, 0);
+        EXPECT_TRUE(r.all_of<C::SoilFeederComponent>(e)) << "a spawned plant must feed on soil";
+        setStage(r, e, C::PlantStage::Fruiting);  // fruiting plants feed hardest
+    }
+    F::SoilGrid soil(4, 4);  // every cell starts at the rich baseline
+    const std::int32_t before = F::NutrientAt(soil, 0.0f, 0.0f, kOrigin, kOrigin, kCell);
+    for (int t = 0; t < 120; ++t) F::RunSoilNutrientOnTick(r, soil, kOrigin, kOrigin, kCell);
+    const std::int32_t fed = F::NutrientAt(soil, 0.0f, 0.0f, kOrigin, kOrigin, kCell);
+    const std::int32_t unplanted = F::NutrientAt(soil, 3.0f * kCell, 3.0f * kCell, kOrigin, kOrigin, kCell);
+    EXPECT_LT(fed, before) << "a dense monoculture draws its shared cell's nutrient down";
+    EXPECT_LT(fed, unplanted) << "only the planted cell starves; an unplanted cell stays rich";
 }
 
 // run == replay: the whole live loop (spawn -> pollinate -> germinate) is byte-deterministic.

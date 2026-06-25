@@ -124,6 +124,7 @@ inline CropLifecycleStats RunCropLifecycleOnTick(entt::registry& reg, std::uint6
         // fresh PollinationComponent starts unpollinated; it crosses once the child flowers near a donor.
         reg.emplace<Comp::PollinationTag>(child);
         reg.emplace<Comp::PollinationComponent>(child);
+        reg.emplace<Comp::SoilFeederComponent>(child);  // children feed on soil too (FarmingSystem opt-in parity)
     }
     for (auto e : deaths) reg.destroy(e);
     return stats;

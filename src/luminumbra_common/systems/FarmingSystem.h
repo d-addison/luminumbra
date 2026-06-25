@@ -9,6 +9,7 @@
 #include "../components/PlantComponents.h"
 #include "../components/CropLifecycleComponents.h" // CropLifecycleComponent (perennial/lifespan stamp)
 #include "../components/PollinationComponents.h"    // PollinationTag/Component — cross-pollination opt-in
+#include "../components/SoilComponents.h"            // SoilFeederComponent — soil-nutrient draw opt-in
 #include "PlantGrowthSystem.h" // ExpressGenome, BreedPlants, Comp alias, namespace
 #include "../foliage/SpeciesRegistry.h" // SpeciesTemplate, SampleGenome, SpeciesId16
 #include "../core/DeterministicRng.h"
@@ -58,6 +59,11 @@ inline entt::entity MakePlantFromSpecies(entt::registry& reg, const ::Luminumbra
     // never drifts). Additive: no plants -> both ticks are no-ops, canonical world_hash unchanged.
     reg.emplace<Comp::PollinationTag>(e);
     reg.emplace<Comp::PollinationComponent>(e);
+    // Soil-feeder opt-in: a real plant DRAWS nutrient from its cell (scaled by growth stage), so a
+    // dense monoculture depletes the shared soil and self-limits (the growth tick reads NutrientAt
+    // back into suitability) — the player must rotate / fertilise. Additive: no feeders -> the soil
+    // tick is a no-op and the grid is never touched, so the canonical world_hash is unchanged.
+    reg.emplace<Comp::SoilFeederComponent>(e);
     return e;
 }
 
