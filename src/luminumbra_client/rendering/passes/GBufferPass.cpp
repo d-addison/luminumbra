@@ -72,6 +72,25 @@ void GBufferPass::init_instanced_static_mesh(const std::filesystem::path& root_p
     glBindBuffer(GL_ARRAY_BUFFER, m_instanceTintVBO);
     glBufferData(GL_ARRAY_BUFFER, kStaticInstanceCapacity * sizeof(glm::vec3), nullptr, GL_DYNAMIC_DRAW);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    // Wave-3 far-field tree impostors: a camera-facing billboard (quad corners from gl_VertexID) with a
+    // single per-instance vec4 (xyz=tree base pos, w=scale) at location 0, divisor 1. Writes the same
+    // G-buffer attachments as g_buffer.frag so impostors light + depth-sort like real tree geometry.
+    m_tree_impostor_shader = std::make_unique<Shader>(
+        (root_path / "res/shaders/tree_impostor.vert").string().c_str(),
+        (root_path / "res/shaders/tree_impostor.frag").string().c_str());
+    PassGl::label_gl_object(GL_PROGRAM, m_tree_impostor_shader ? m_tree_impostor_shader->Id() : 0u, "shader.tree_impostor");
+    glGenBuffers(1, &m_impostorInstanceVBO);
+    glBindBuffer(GL_ARRAY_BUFFER, m_impostorInstanceVBO);
+    glBufferData(GL_ARRAY_BUFFER, kStaticInstanceCapacity * sizeof(glm::vec4), nullptr, GL_DYNAMIC_DRAW);
+    glGenVertexArrays(1, &m_impostorVAO);
+    glBindVertexArray(m_impostorVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, m_impostorInstanceVBO);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, sizeof(glm::vec4), (void*)0);
+    glVertexAttribDivisor(0, 1);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
 void GBufferPass::init_skinned_mesh(const std::filesystem::path& root_path) {
@@ -447,10 +466,13 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
     // bark/leaf textures. RENDER-ONLY. Missing LOD variant -> LOD0 fallback, so a
     // world with no LOD variants is byte-identical to the pre-LOD renderer.
     const glm::vec3 cameraPos = camera.Position;
-    static const TreeLodConfig kTreeLodCfg = []() {
-        TreeLodConfig c; // data-driven defaults; render.tree_lod.* may override later.
-        return c;
-    }();
+    const bool impostorsOn = pipeline.tree_impostor_enabled();
+    TreeLodConfig kTreeLodCfg; // data-driven defaults; render.tree_lod.* may override later.
+    if (impostorsOn) {
+        // The octa impostor is a single cheap quad (unlike the wide cross-billboard, which added
+        // overdraw at 620 m), so kick LOD3 in much earlier to actually replace the far-field stand.
+        kTreeLodCfg.lod3Distance = 200.0f;
+    }
     // Resolves (loading + caching) the mesh for a candidate path, falling back to
     // the base LOD0 path if the LOD variant cannot be loaded. Returns the path that
     // actually resolved so the group is keyed by what is really drawn.
@@ -483,9 +505,27 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
     // (persistent memo)->frustum cull (per-LOD mesh sphere -> identical visible
     // set)->append the PRECOMPUTED matrix + tint. The old per-frame matrix build +
     // leaf/bark tint hash over all ~84k instances is gone (now done once at cache build).
+    // Wave-3 far-field tree impostors: collected here, drawn after the mesh groups. One billboard per
+    // tree (triggered on the leaf part; bark/trunk at LOD3 are folded into the same impostor).
+    std::vector<glm::vec4> impostorInstances;
+    int impostorMatId = 0;
     for (const CachedStaticProp& cp : m_staticPropCache) {
         const float dist = glm::length(cp.position - cameraPos);
         const int lod = SelectTreeLod(dist, kTreeLodCfg);
+        if (impostorsOn && lod == 3) {
+            const std::string& bp = m_propMeshPaths[cp.pathIndex];
+            if (bp.find("tree") != std::string::npos) { // a tree part -> impostor replaces it at LOD3
+                const bool isLeaf = bp.find("leaf") != std::string::npos; // "leaf"/"leaves"
+                if (isLeaf) {
+                    const glm::vec3 c = cp.position + glm::vec3(0.0f, pipeline.tree_impostor_sphere_y() * cp.maxScale, 0.0f);
+                    const float r = pipeline.tree_impostor_radius() * cp.maxScale;
+                    bool culled = false;
+                    for (int i = 0; i < 6; i++) { if (glm::dot(glm::vec4(c, 1.0f), frustum_planes[i]) < -r) { culled = true; break; } }
+                    if (!culled) { impostorInstances.emplace_back(cp.position, cp.maxScale); impostorMatId = static_cast<int>(cp.materialId); }
+                }
+                continue; // all LOD3 tree parts are folded into the billboard
+            }
+        }
         const std::uint64_t rkey = cp.baseMeshHash
                                  ^ (static_cast<std::uint64_t>(lod) * 0x9E3779B97F4A7C15ull);
         auto rit = m_resolveMemo.find(rkey);
@@ -587,6 +627,33 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
         glDrawElementsInstanced(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, 0, instance_count);
         glBindVertexArray(0);
     }
+
+    // Wave-3 far-field tree impostors: one camera-facing billboard per collected far tree, sampling the
+    // octahedral atlas into the same G-buffer attachments. ONE instanced draw + one shared atlas for the
+    // whole far field (the draw-call/triangle collapse the forest_perf_budget gate targets).
+    if (impostorsOn && !impostorInstances.empty() && m_tree_impostor_shader) {
+        const GLsizei count = static_cast<GLsizei>(
+            std::min<std::size_t>(impostorInstances.size(), static_cast<std::size_t>(kStaticInstanceCapacity)));
+        m_tree_impostor_shader->use();
+        m_tree_impostor_shader->setMat4("u_view", static_view);
+        m_tree_impostor_shader->setMat4("u_proj", static_proj);
+        m_tree_impostor_shader->setVec3("u_cameraPos", cameraPos);
+        m_tree_impostor_shader->setFloat("u_radius", pipeline.tree_impostor_radius());
+        m_tree_impostor_shader->setFloat("u_sphereY", pipeline.tree_impostor_sphere_y());
+        m_tree_impostor_shader->setFloat("u_grid", static_cast<float>(pipeline.tree_impostor_grid()));
+        m_tree_impostor_shader->setFloat("u_materialId", static_cast<float>(impostorMatId) / 255.0f);
+        m_tree_impostor_shader->setInt("u_albedo", 0);
+        m_tree_impostor_shader->setInt("u_normal", 1);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, pipeline.tree_impostor_albedo());
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, pipeline.tree_impostor_normal());
+        glBindBuffer(GL_ARRAY_BUFFER, m_impostorInstanceVBO);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(count) * sizeof(glm::vec4), impostorInstances.data());
+        glBindVertexArray(m_impostorVAO);
+        glDisable(GL_CULL_FACE);
+        glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, count);
+        glBindVertexArray(0);
+    }
+
     m_last_static_prop_cpu_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - _sp_t0).count();
 }

@@ -1178,6 +1178,24 @@ private:
     int m_staticModelNextLayer = 0; // next free layer pair to fill
     std::unordered_map<std::string, StaticModelTex> m_staticModelTextures; // meshPath -> layers
     void init_static_model_texture_array();
+
+public:
+    // Wave-3 far-field tree impostors (opt-in via LUMIN_TREE_IMPOSTORS=1; default OFF). The atlas is
+    // baked once at init (BakeTreeImpostorAtlasToTextures) and the GBuffer LOD3 path draws one
+    // camera-facing quad per far tree sampling it. Read-only accessors for GBufferPass.
+    bool  tree_impostor_enabled() const { return m_treeImpostorsEnabled; }
+    u32   tree_impostor_albedo()  const { return m_treeImpostorAlbedo; }
+    u32   tree_impostor_normal()  const { return m_treeImpostorNormal; }
+    int   tree_impostor_grid()    const { return m_treeImpostorGrid; }
+    float tree_impostor_radius()  const { return m_treeImpostorRadius; }
+    float tree_impostor_sphere_y() const { return m_treeImpostorSphereY; }
+private:
+    bool  m_treeImpostorsEnabled = false;
+    u32   m_treeImpostorAlbedo = 0;
+    u32   m_treeImpostorNormal = 0;
+    int   m_treeImpostorGrid = 0;
+    float m_treeImpostorRadius = 0.0f;
+    float m_treeImpostorSphereY = 0.0f;
     // Loads albedo+normal .ltex into the next free layer pair; returns false +
     // keeps the flat fallback on failure. Layer indices come back via the outs.
     bool load_static_model_texture_set(const std::filesystem::path& albedo_path,

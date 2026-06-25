@@ -19,6 +19,7 @@
 #include <utility>
 #include <GLFW/glfw3.h>
 #include "Mesh.h"
+#include "ImpostorBake.h" // Wave-3 far-field tree impostor atlas (opt-in)
 #include "../../include/luminumbra/core/Types.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include <cmath>
@@ -640,6 +641,21 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         init_terrain_textures();
         init_skinned_texture_array();
         register_static_model_textures(); // I8: tree-part bark/leaf textures
+        // Wave-3 far-field tree impostors (opt-in LUMIN_TREE_IMPOSTORS=1; default OFF). Bake the impostor
+        // atlas now that the tree textures are loaded; the GBuffer LOD3 path samples it.
+        if (const char* e = std::getenv("LUMIN_TREE_IMPOSTORS"); e && e[0] && e[0] != '0') {
+            OctaImpostorGrid g; g.gridResolution = 12;
+            const ImpostorAtlasTextures ia = BakeTreeImpostorAtlasToTextures(m_root_path.string(), *this, g);
+            if (ia.ok) {
+                m_treeImpostorAlbedo = ia.albedoTex; m_treeImpostorNormal = ia.normalTex;
+                m_treeImpostorGrid = ia.grid; m_treeImpostorRadius = ia.radius; m_treeImpostorSphereY = ia.sphereY;
+                m_treeImpostorsEnabled = true;
+                LUMINUMBRA_CORE_INFO("Tree impostors ON: atlas baked ({}x{} grid, radius {:.1f})",
+                                     ia.grid, ia.grid, ia.radius);
+            } else {
+                LUMINUMBRA_CORE_WARN("Tree impostor bake failed: {}", ia.error);
+            }
+        }
         init_material_lut();
         init_texture_residency();
         m_water_pass->init_water_fallback_textures();

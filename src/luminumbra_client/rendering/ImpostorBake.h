@@ -38,4 +38,21 @@ ImpostorBakeResult BakeTreeImpostorAtlas(const std::string& outPpmPath,
                                          const RenderPipeline& rp,
                                          const OctaImpostorGrid& grid);
 
+// Runtime variant: bakes the impostor atlas into two KEPT GL_TEXTURE_2D handles (albedo + object-space
+// normal) for the runtime LOD3 impostor draw to sample. The caller owns/deletes the textures. Also
+// reports the tree's local-space bounding sphere (center + radius) so the runtime billboard can be sized
+// to match the geometry it replaces. No disk output. Requires a current GL context.
+struct ImpostorAtlasTextures {
+    bool ok = false;
+    unsigned int albedoTex = 0; // GL_TEXTURE_2D, atlas_size^2, sRGB-encoded albedo (magenta = empty)
+    unsigned int normalTex = 0; // GL_TEXTURE_2D, atlas_size^2, encoded object-space normal
+    int grid = 0;               // tiles per axis (== OctaImpostorGrid.gridResolution)
+    float sphereY = 0;          // tree local bounding-sphere center Y (height the billboard centers on)
+    float radius = 0;           // tree local bounding-sphere radius (billboard half-size)
+    std::string error;
+};
+ImpostorAtlasTextures BakeTreeImpostorAtlasToTextures(const std::string& rootDir,
+                                                      const RenderPipeline& rp,
+                                                      const OctaImpostorGrid& grid);
+
 } // namespace Luminumbra::Rendering

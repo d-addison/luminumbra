@@ -80,6 +80,11 @@ private:
     std::map<std::string, std::unique_ptr<Mesh>> m_skinnedMeshCache;
     GLuint m_instanceMatrixVBO = 0;
     GLuint m_instanceTintVBO = 0;  // per-instance albedo tint (vast-forest colour variation)
+    // Wave-3 far-field tree impostors (opt-in). One camera-facing quad per far tree, sampling the
+    // RenderPipeline impostor atlas. Lazily initialised on first use when impostors are enabled.
+    std::unique_ptr<Shader> m_tree_impostor_shader;
+    GLuint m_impostorInstanceVBO = 0; // per-instance vec4 (xyz=tree base pos, w=scale)
+    GLuint m_impostorVAO = 0;
     GLuint m_jointPaletteSSBO = 0;
     std::size_t m_jointPaletteSSBOCapacityBytes = 0;
 
