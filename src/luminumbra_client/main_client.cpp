@@ -3741,6 +3741,69 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // LIVING-WORLD AUDIO: weather-reactive RAIN + occasional CREATURE CALLS. Periodic in live play;
+        // render/audio-only (reads sim state, never mutates -> determinism + gates untouched).
+        if (currentState == GameState::IN_GAME && audioManager && g_camera && !g_paused &&
+            !scenario_config.active() && gameSession) {
+            static float s_envTimer = 0.0f, s_callTimer = 0.0f;
+            static bool s_rainOn = false, s_waterOn = false;
+            s_envTimer += static_cast<float>(deltaTime);
+            s_callTimer += static_cast<float>(deltaTime);
+            const glm::vec3 pc = g_camera->Position;
+            if (s_envTimer >= 0.5f) {
+                s_envTimer = 0.0f;
+                // Rain: tie ambient_rain to the live weather precipitation at the player (hysteresis so
+                // it doesn't flutter at a storm-cell edge). Same field the foliage growth reads.
+                if (auto* weather = gameSession->GetWeatherSystem()) {
+                    const float precip = weather->PrecipitationAt(Luminumbra::Vec3(pc.x, pc.y, pc.z));
+                    if (!s_rainOn && precip > 0.18f) {
+                        audioManager->PlayAmbientLoop("ambient_rain", pc, 1.0e6f); s_rainOn = true;
+                    } else if (s_rainOn && precip < 0.08f) {
+                        audioManager->StopAmbientLoop("ambient_rain"); s_rainOn = false;
+                    }
+                    // Thunder during a real storm (heavy precip), spaced ~22 s apart (random distant/close).
+                    static float s_thunderTimer = 0.0f;
+                    if (precip > 0.40f) {
+                        s_thunderTimer += 0.5f;  // this branch runs once per 0.5 s tick above
+                        if (s_thunderTimer >= 22.0f) { s_thunderTimer = 0.0f; audioManager->PlayOneShot2D("thunder"); }
+                    } else {
+                        s_thunderTimer = 0.0f;
+                    }
+                }
+                // Water: a gentle stream bed when standing water is within ~14 m (a ring probe of the
+                // water surface vs terrain). Fades in/out as you approach / leave a river or lake.
+                if (auto* ws2 = gameSession->GetWorldSystem()) {
+                    static const float off[5][2] = {{0, 0}, {14, 0}, {-14, 0}, {0, 14}, {0, -14}};
+                    bool nearWater = false;
+                    for (const auto& o : off) {
+                        const float wx = pc.x + o[0], wz = pc.z + o[1];
+                        if (ws2->WaterLevelAt(wx, wz) > ws2->GetTerrainHeightAt(wx, wz) + 0.4f) { nearWater = true; break; }
+                    }
+                    if (nearWater && !s_waterOn) { audioManager->PlayAmbientLoop("ambient_stream", pc, 1.0e6f); s_waterOn = true; }
+                    else if (!nearWater && s_waterOn) { audioManager->StopAmbientLoop("ambient_stream"); s_waterOn = false; }
+                }
+            }
+            // Occasional call from the nearest LIVE creature (<50 m) so the world has voices.
+            if (s_callTimer >= 11.0f) {
+                s_callTimer = 0.0f;
+                const auto& reg = gameSession->GetRegistry();
+                auto cview = reg.view<const Luminumbra::Components::CreatureComponent,
+                                      const Luminumbra::Components::TransformComponent>();
+                entt::entity best = entt::null;
+                float bestD = 50.0f * 50.0f;
+                glm::vec3 bestPos(0.0f);
+                for (auto e : cview) {
+                    if (cview.get<const Luminumbra::Components::CreatureComponent>(e).eaten) continue;
+                    const auto& tf = cview.get<const Luminumbra::Components::TransformComponent>(e);
+                    const float dx = tf.position.x - pc.x, dz = tf.position.z - pc.z;
+                    const float d2 = dx * dx + dz * dz;
+                    if (d2 < bestD) { bestD = d2; best = e; bestPos = glm::vec3(tf.position.x, tf.position.y, tf.position.z); }
+                }
+                if (best != entt::null) audioManager->PlayOneShot("creature_grovestrider_call", bestPos);
+                else s_callTimer = 8.0f;  // nobody near -> check again soon
+            }
+        }
+
         if (g_imgui_enabled) {
             ImGui_ImplOpenGL3_NewFrame();
             ImGui_ImplGlfw_NewFrame();
@@ -3809,6 +3872,7 @@ int main(int argc, char* argv[]) {
                         const glm::vec3 ambPos(sp.x, sp.y, sp.z);
                         audioManager->PlayAmbientLoop("ambient_forest", ambPos, 1.0e6f);
                         audioManager->PlayAmbientLoop("ambient_birds", ambPos, 1.0e6f);
+                        audioManager->PlayAmbientLoop("ambient_wind", ambPos, 1.0e6f);
                     }
                     if (g_loading_visualizer) {
                         g_loading_visualizer->EndVisualization();

@@ -23,6 +23,8 @@
     { "out": "sfx/creatures/grovestrider/footstep_1.mp3", "duration": 0.6, "prompt": "a soft heavy creature footstep on grass, a gentle padded thud, large animal, natural" },
     { "out": "sfx/creatures/grovestrider/footstep_2.mp3", "duration": 0.6, "prompt": "a soft heavy creature footstep on soft earth, padded thud, large gentle animal, natural" },
     { "out": "sfx/creatures/grovestrider/footstep_3.mp3", "duration": 0.6, "prompt": "a soft padded footfall of a large herbivore on grass, gentle thud, natural foley" },
-    { "out": "sfx/ui/camera_shutter.mp3", "duration": 0.7, "prompt": "a soft satisfying camera shutter, a single gentle mechanical click-and-snap of a film SLR taking one photo, clean and crisp, short, no reverb" }
+    { "out": "sfx/ui/camera_shutter.mp3", "duration": 0.7, "prompt": "a soft satisfying camera shutter, a single gentle mechanical click-and-snap of a film SLR taking one photo, clean and crisp, short, no reverb" },
+    { "out": "sfx/weather/thunder_1.mp3", "duration": 5.0, "prompt": "distant rolling thunder, a deep low rumble fading slowly, natural summer storm, soft and far away, not sharp" },
+    { "out": "sfx/weather/thunder_close_1.mp3", "duration": 4.0, "prompt": "a closer thunderclap, a deep resonant boom with a rolling tail, natural storm, powerful but not harsh" }
   ]
 }

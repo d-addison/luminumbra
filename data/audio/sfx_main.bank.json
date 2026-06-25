@@ -89,6 +89,26 @@
       "files": ["assets/audio/sfx/environment/water_stream.mp3"],
       "volume": 0.30,
       "is_3d": true
+    },
+    "ambient_wind": {
+      "files": ["assets/audio/sfx/weather/wind_light.mp3"],
+      "volume": 0.20,
+      "is_3d": true
+    },
+    "ambient_rain": {
+      "files": ["assets/audio/sfx/weather/rain_light_loop.mp3"],
+      "volume": 0.55,
+      "is_3d": true
+    },
+    "thunder": {
+      "files": [
+        "assets/audio/sfx/weather/thunder_1.mp3",
+        "assets/audio/sfx/weather/thunder_close_1.mp3"
+      ],
+      "volume": 0.7,
+      "pitch_variation": 0.08,
+      "strategy": "random",
+      "is_2d": true
     }
   }
 }
