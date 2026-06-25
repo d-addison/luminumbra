@@ -395,6 +395,9 @@ void GBufferPass::build_static_prop_cache(entt::registry& registry) {
             tint = glm::vec3(0.82f + 0.32f * h, 0.78f + 0.22f * h, 0.72f + 0.20f * h);
         }
         cp.tint = tint;
+        // Wave-3 impostor classification (once here; the per-frame loop must not string-search the far field).
+        cp.impostorTree = bp.find("tree") != std::string::npos;
+        cp.impostorLeaf = cp.impostorTree && bp.find("leaf") != std::string::npos; // "_leaf" / "leaves"
         cp.baseMeshHash = fnv64(mesh_info.meshPath, 1469598103934665603ull);
         cp.pathIndex = intern(mesh_info.meshPath);
         cp.materialId = mesh_info.materialId;
@@ -507,24 +510,21 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
     // leaf/bark tint hash over all ~84k instances is gone (now done once at cache build).
     // Wave-3 far-field tree impostors: collected here, drawn after the mesh groups. One billboard per
     // tree (triggered on the leaf part; bark/trunk at LOD3 are folded into the same impostor).
-    std::vector<glm::vec4> impostorInstances;
+    std::vector<glm::vec4>& impostorInstances = m_impostorInstances;
+    impostorInstances.clear(); // keep capacity across frames (no per-frame realloc)
     int impostorMatId = 0;
     for (const CachedStaticProp& cp : m_staticPropCache) {
         const float dist = glm::length(cp.position - cameraPos);
         const int lod = SelectTreeLod(dist, kTreeLodCfg);
-        if (impostorsOn && lod == 3) {
-            const std::string& bp = m_propMeshPaths[cp.pathIndex];
-            if (bp.find("tree") != std::string::npos) { // a tree part -> impostor replaces it at LOD3
-                const bool isLeaf = bp.find("leaf") != std::string::npos; // "leaf"/"leaves"
-                if (isLeaf) {
-                    const glm::vec3 c = cp.position + glm::vec3(0.0f, pipeline.tree_impostor_sphere_y() * cp.maxScale, 0.0f);
-                    const float r = pipeline.tree_impostor_radius() * cp.maxScale;
-                    bool culled = false;
-                    for (int i = 0; i < 6; i++) { if (glm::dot(glm::vec4(c, 1.0f), frustum_planes[i]) < -r) { culled = true; break; } }
-                    if (!culled) { impostorInstances.emplace_back(cp.position, cp.maxScale); impostorMatId = static_cast<int>(cp.materialId); }
-                }
-                continue; // all LOD3 tree parts are folded into the billboard
+        if (impostorsOn && lod == 3 && cp.impostorTree) { // a tree part -> impostor replaces it at LOD3
+            if (cp.impostorLeaf) { // the per-tree representative; bark/trunk are folded into the billboard
+                const glm::vec3 c = cp.position + glm::vec3(0.0f, pipeline.tree_impostor_sphere_y() * cp.maxScale, 0.0f);
+                const float r = pipeline.tree_impostor_radius() * cp.maxScale;
+                bool culled = false;
+                for (int i = 0; i < 6; i++) { if (glm::dot(glm::vec4(c, 1.0f), frustum_planes[i]) < -r) { culled = true; break; } }
+                if (!culled) { impostorInstances.emplace_back(cp.position, cp.maxScale); impostorMatId = static_cast<int>(cp.materialId); }
             }
+            continue; // all LOD3 tree parts are folded into the billboard
         }
         const std::uint64_t rkey = cp.baseMeshHash
                                  ^ (static_cast<std::uint64_t>(lod) * 0x9E3779B97F4A7C15ull);

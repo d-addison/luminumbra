@@ -85,6 +85,7 @@ private:
     std::unique_ptr<Shader> m_tree_impostor_shader;
     GLuint m_impostorInstanceVBO = 0; // per-instance vec4 (xyz=tree base pos, w=scale)
     GLuint m_impostorVAO = 0;
+    std::vector<glm::vec4> m_impostorInstances; // reused per frame (keep capacity, no realloc)
     GLuint m_jointPaletteSSBO = 0;
     std::size_t m_jointPaletteSSBOCapacityBytes = 0;
 
@@ -105,6 +106,10 @@ private:
         std::uint64_t baseMeshHash = 0; // fnv64(meshPath) — resolve memo / group key seed
         std::uint32_t pathIndex = 0;    // index into m_propMeshPaths (stable storage)
         std::uint32_t materialId = 0;
+        // Wave-3 impostors: classified ONCE at cache build (not per-frame string search). 1 = this prop
+        // is a tree part replaced by the LOD3 impostor; impostorLeaf = the per-tree representative.
+        bool impostorTree = false;
+        bool impostorLeaf = false;
     };
     std::vector<CachedStaticProp> m_staticPropCache;
     std::vector<std::string> m_propMeshPaths;   // interned unique mesh paths
