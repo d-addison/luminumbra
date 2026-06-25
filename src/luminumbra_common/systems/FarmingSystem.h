@@ -8,6 +8,7 @@
 
 #include "../components/PlantComponents.h"
 #include "../components/CropLifecycleComponents.h" // CropLifecycleComponent (perennial/lifespan stamp)
+#include "../components/PollinationComponents.h"    // PollinationTag/Component — cross-pollination opt-in
 #include "PlantGrowthSystem.h" // ExpressGenome, BreedPlants, Comp alias, namespace
 #include "../foliage/SpeciesRegistry.h" // SpeciesTemplate, SampleGenome, SpeciesId16
 #include "../core/DeterministicRng.h"
@@ -50,6 +51,13 @@ inline entt::entity MakePlantFromSpecies(entt::registry& reg, const ::Luminumbra
     cl.perennial = tmpl.perennial;
     cl.lifespan_ticks = tmpl.lifespan_ticks;
     cl.species_id = sid;
+    // Cross-pollination opt-in: a real plant DRIFTS genetically over seasons — once it flowers it
+    // donates pollen to (and receives from) neighbours, and the cross seeds the next generation
+    // (PollinationSystem -> next_genome -> CropLifecycleSystem germination). Without this opt-in the
+    // pollination tick skips the plant and germination falls back to a self copy (the loop runs but
+    // never drifts). Additive: no plants -> both ticks are no-ops, canonical world_hash unchanged.
+    reg.emplace<Comp::PollinationTag>(e);
+    reg.emplace<Comp::PollinationComponent>(e);
     return e;
 }
 

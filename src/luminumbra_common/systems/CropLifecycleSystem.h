@@ -119,6 +119,11 @@ inline CropLifecycleStats RunCropLifecycleOnTick(entt::registry& reg, std::uint6
         clc.perennial = b.perennial;
         clc.lifespan_ticks = b.lifespan;
         clc.species_id = b.species;
+        // Carry the cross-pollination opt-in so the generational loop keeps drifting (a child that
+        // could not itself be pollinated would freeze the field's genetics after one generation). A
+        // fresh PollinationComponent starts unpollinated; it crosses once the child flowers near a donor.
+        reg.emplace<Comp::PollinationTag>(child);
+        reg.emplace<Comp::PollinationComponent>(child);
     }
     for (auto e : deaths) reg.destroy(e);
     return stats;

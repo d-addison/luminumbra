@@ -144,6 +144,11 @@ inline void ApplyPlantEntitySnapshot(entt::registry& reg,
                 h.state = d.at("state").get<std::uint8_t>();
                 h.infected_ticks = d.at("infected_ticks").get<std::uint32_t>();
             } else if (comp.type == "Pollination") {
+                // Restore the opt-in TAG too (a marker carries no data, so it isn't serialized): a
+                // persisted PollinationComponent means the plant participated in cross-pollination, and
+                // the pollination tick views PollinationTag — without it a reloaded field would stop
+                // drifting. Co-emplaced with the component (they are always added together at spawn).
+                reg.emplace<C::PollinationTag>(e);
                 auto& pc = reg.emplace<C::PollinationComponent>(e);
                 pc.pollinated = d.at("pollinated").get<bool>();
                 pc.last_pollen_tick = d.at("last_pollen_tick").get<std::uint64_t>();
