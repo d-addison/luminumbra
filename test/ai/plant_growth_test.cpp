@@ -131,6 +131,31 @@ TEST(PlantGrowth, GrowsThroughStagesAndFavourableEnvironmentGrowsFaster) {
     EXPECT_GT(good.growth_points, 0u);
 }
 
+// FR-G (season): ideal_temp derives from the genome's heat/cold tolerance, so a heat-tolerant plant
+// thrives in a WARM env and a cold-tolerant plant in a COOL env — the basis of season-driven growth
+// (different plants peak in different seasons when the env temperature swings annually).
+TEST(PlantGrowth, HeatVsColdGenomePreferDifferentTemperatures) {
+    using G = C::PlantGene;
+    auto makeGenome = [](float heat, float cold) {
+        C::PlantGenomeComponent g;
+        g.genes.fill(0.5f);
+        g.genes[static_cast<std::size_t>(G::HeatTolerance)] = heat;
+        g.genes[static_cast<std::size_t>(G::ColdTolerance)] = cold;
+        return g;
+    };
+    const auto heatLover = makeGenome(0.9f, 0.1f);  // ideal_temp -> warm (~0.82)
+    const auto coldLover = makeGenome(0.1f, 0.9f);  // ideal_temp -> cool (~0.18)
+    EXPECT_GT(F::ExpressGenome(heatLover).ideal_temp, F::ExpressGenome(coldLover).ideal_temp)
+        << "a heat-tolerant genome prefers a warmer temperature";
+
+    const F::PlantEnvSample warm{0.85f, 0.7f, 0.8f, 0.7f};
+    const F::PlantEnvSample cool{0.15f, 0.7f, 0.8f, 0.7f};
+    EXPECT_GT(GrowOnePlant(heatLover, warm).growth_points, GrowOnePlant(heatLover, cool).growth_points)
+        << "the heat-lover grows more in warmth (summer)";
+    EXPECT_GT(GrowOnePlant(coldLover, cool).growth_points, GrowOnePlant(coldLover, warm).growth_points)
+        << "the cold-lover grows more in the cool (winter)";
+}
+
 TEST(Farming, WateringBoostsGrowthInHarshEnv) {
     DeterministicRng rng = DeterministicRng::seeded(F::kPlantSeedOffset, 77);
     const auto genome = F::RandomGenome(rng);

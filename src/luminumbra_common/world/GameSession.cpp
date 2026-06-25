@@ -466,6 +466,20 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                     const float noonDist = tod01 < 0.5f ? (0.5f - tod01) : (tod01 - 0.5f);
                     const float day = 1.0f - 2.0f * noonDist;  // 0 at midnight -> 1 at noon
                     s.light = luminumbra::foliage::clamp01(0.15f + 0.85f * day);
+                    // FR-G (season): a deterministic ANNUAL temperature swing folded onto the terrain
+                    // temp so growth varies across the year — colder in winter (slower growth + cold
+                    // stress), warmer in summer. Triangular (libm-free) over a year of kSeasonDays
+                    // in-game days; tick-based -> run==replay (kSeasonSeedOffset 37 reserved, no RNG).
+                    // Only opt-in plant rosters run this, so the canonical (no-plant) world is unchanged.
+                    constexpr std::uint64_t kSeasonDays = 8ull;
+                    const std::uint64_t kTicksPerYear = kTicksPerDay * kSeasonDays;
+                    const float season01 = static_cast<float>(current_tick % kTicksPerYear) /
+                                           static_cast<float>(kTicksPerYear);
+                    const float midDist = season01 < 0.5f ? (0.5f - season01) : (season01 - 0.5f);
+                    const float warmth = 1.0f - 2.0f * midDist;   // 0 = midwinter -> 1 = midsummer
+                    constexpr float kSeasonAmplitude = 0.30f;     // +-0.15 temperature swing
+                    s.temperature = luminumbra::foliage::clamp01(
+                        s.temperature + (warmth - 0.5f) * kSeasonAmplitude);
                     return s;
                 };
             luminumbra::foliage::RunPlantGrowthSystemOnTick(m_registry, current_tick, plant_env);

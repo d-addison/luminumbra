@@ -55,7 +55,11 @@ inline PlantPhenotype ExpressGenome(const Comp::PlantGenomeComponent& g) {
     PlantPhenotype p;
     p.growth_per_tick = 4.0f + g.gene(G::GrowthRate) * 16.0f;        // 4..20 milli/tick
     p.max_scale       = 0.6f + g.gene(G::MaxScale) * 1.8f;           // 0.6..2.4
-    p.ideal_temp      = 0.5f;                                        // species-neutral for now
+    // FR-G (season): preferred temperature from the heat/cold tolerance balance — a heat-tolerant
+    // genome likes it WARM (ideal -> ~0.9, thrives in summer), a cold-tolerant one likes it COOL
+    // (ideal -> ~0.1, thrives in winter). Combined with the seasonal env-temperature swing, different
+    // plants thrive in different seasons (emergent, genome-driven). Pure -> deterministic.
+    p.ideal_temp      = clamp01(0.5f + 0.4f * (g.gene(G::HeatTolerance) - g.gene(G::ColdTolerance)));
     p.drought_tol     = clamp01(g.gene(G::DroughtTolerance) * 0.7f + hardiness * 0.3f);
     p.cold_tol        = clamp01(g.gene(G::ColdTolerance)    * 0.7f + hardiness * 0.3f);
     p.heat_tol        = clamp01(g.gene(G::HeatTolerance)    * 0.7f + hardiness * 0.3f);
