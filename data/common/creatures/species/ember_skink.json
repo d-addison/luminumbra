@@ -1,0 +1,9 @@
+{
+  "schema": "luminumbra.creature.species.v1",
+  "id": "ember_skink",
+  "display_name": "Ember Skink",
+  "predator": false,
+  "rarity": 0.7,
+  "base_color": [0.72, 0.38, 0.18],
+  "biomes": ["desert", "alpine"]
+}

@@ -1,0 +1,9 @@
+{
+  "schema": "luminumbra.creature.species.v1",
+  "id": "glimmer_finch",
+  "display_name": "Glimmer Finch",
+  "predator": false,
+  "rarity": 0.8,
+  "base_color": [0.86, 0.78, 0.28],
+  "biomes": ["plains", "wetland"]
+}

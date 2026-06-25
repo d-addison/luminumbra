@@ -85,6 +85,34 @@ TEST(SpeciesRegistry, LoadsShippedSpeciesFromDirectory) {
     EXPECT_GT(oak->lifespan_ticks, wheat->lifespan_ticks);
 }
 
+// Content: the shipped crops span SEASONAL niches so different crops thrive in different seasons
+// (the genome ideal_temp + the annual env-temperature swing make this emergent). maize/sungourd
+// lean WARM (HeatTolerance > ColdTolerance), frostberry/moonpetal lean COOL. Guards the data.
+TEST(SpeciesRegistry, ShippedCropsSpanSeasonalNiches) {
+    F::SpeciesRegistry reg;
+    std::vector<std::string> errors;
+    const std::filesystem::path dir =
+        std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) / "data" / "common" / "foliage" / "species";
+    const std::size_t n = reg.LoadFromDirectory(dir, errors);
+    EXPECT_GE(n, 6u) << (errors.empty() ? "" : errors.front());  // oak, wheat + the 4 new crops
+    using G = C::PlantGene;
+    auto leansWarm = [](const F::SpeciesTemplate* t) {
+        const auto h = static_cast<std::size_t>(G::HeatTolerance);
+        const auto c = static_cast<std::size_t>(G::ColdTolerance);
+        return (t->gene_lo[h] + t->gene_hi[h]) > (t->gene_lo[c] + t->gene_hi[c]);
+    };
+    for (const char* warm : {"maize", "sungourd"}) {
+        const auto* t = reg.Find(warm);
+        ASSERT_NE(t, nullptr) << warm << " crop missing";
+        EXPECT_TRUE(leansWarm(t)) << warm << " should be a warm-season crop";
+    }
+    for (const char* cool : {"frostberry", "moonpetal"}) {
+        const auto* t = reg.Find(cool);
+        ASSERT_NE(t, nullptr) << cool << " crop missing";
+        EXPECT_FALSE(leansWarm(t)) << cool << " should be a cool-season crop";
+    }
+}
+
 // I9-FOLIAGE Phase 5A wiring: MakePlantFromSpecies is the single bridge from a data-driven species
 // template to a live PlantTag entity — it samples the genome, plants the seed, and stamps the crop
 // lifecycle, deterministically.

@@ -1,0 +1,16 @@
+{
+  "id": "maize",
+  "render_archetype": "tall_grain",
+  "perennial": false,
+  "lifespan_ticks": 1100,
+  "genes": {
+    "GrowthRate": [0.55, 0.85],
+    "MaxScale": [0.55, 0.85],
+    "DroughtTolerance": [0.30, 0.55],
+    "ColdTolerance": [0.10, 0.30],
+    "HeatTolerance": [0.70, 0.95],
+    "LeafDensity": [0.55, 0.85],
+    "Yield": [0.65, 0.95],
+    "Hardiness": [0.30, 0.55]
+  }
+}

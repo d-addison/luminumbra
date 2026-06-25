@@ -5,7 +5,9 @@
 // (never a blank). Pure: JSON text in, no filesystem, no world_hash.
 #include <gtest/gtest.h>
 
+#include <filesystem>
 #include <string>
+#include <vector>
 
 #include "ai/CreatureSpeciesRegistry.h"
 #include "components/CreatureComponents.h"
@@ -45,6 +47,26 @@ TEST(CreatureSpeciesRegistry, LoadsAndResolvesIdToDisplayNameAndMetadata) {
     EXPECT_TRUE(stalker->predator);
     // Unspecified rarity defaults to mid.
     EXPECT_FLOAT_EQ(stalker->rarity, 0.5f);
+}
+
+// Content: the live creatures/species directory loads cleanly and includes the shipped roster
+// (6 originals + 4 added) so the living-world ambient spawn + the photography codex have variety.
+// Guards that the data files parse and carry the right predator/prey role.
+TEST(CreatureSpeciesRegistry, LoadsShippedSpeciesFromDirectory) {
+    CreatureSpeciesRegistry reg;
+    std::vector<std::string> errors;
+    const std::filesystem::path dir =
+        std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) / "data" / "common" / "creatures" / "species";
+    const std::size_t n = reg.LoadFromDirectory(dir, errors);
+    EXPECT_GE(n, 10u) << (errors.empty() ? "" : errors.front());  // 6 original + 4 added
+    struct Expect { const char* id; bool predator; };
+    const Expect added[] = {{"dusk_heron", false}, {"ember_skink", false},
+                            {"gloomstalker", true}, {"glimmer_finch", false}};
+    for (const Expect& e : added) {
+        const auto* s = reg.Find(Components::CreatureSpeciesId16(e.id));
+        ASSERT_NE(s, nullptr) << e.id << " missing from the shipped roster";
+        EXPECT_EQ(s->predator, e.predator) << e.id;
+    }
 }
 
 TEST(CreatureSpeciesRegistry, DisplayNameFallsBackForUnregisteredId) {

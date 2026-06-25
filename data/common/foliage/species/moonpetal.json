@@ -1,0 +1,16 @@
+{
+  "id": "moonpetal",
+  "render_archetype": "night_flower",
+  "perennial": true,
+  "lifespan_ticks": 2000,
+  "genes": {
+    "GrowthRate": [0.30, 0.55],
+    "MaxScale": [0.20, 0.45],
+    "DroughtTolerance": [0.15, 0.40],
+    "ColdTolerance": [0.60, 0.88],
+    "HeatTolerance": [0.20, 0.45],
+    "LeafDensity": [0.70, 0.95],
+    "Yield": [0.20, 0.50],
+    "Hardiness": [0.45, 0.70]
+  }
+}

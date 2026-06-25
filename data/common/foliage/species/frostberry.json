@@ -1,0 +1,16 @@
+{
+  "id": "frostberry",
+  "render_archetype": "berry_shrub",
+  "perennial": true,
+  "lifespan_ticks": 2600,
+  "genes": {
+    "GrowthRate": [0.20, 0.45],
+    "MaxScale": [0.35, 0.60],
+    "DroughtTolerance": [0.25, 0.50],
+    "ColdTolerance": [0.75, 0.98],
+    "HeatTolerance": [0.10, 0.30],
+    "LeafDensity": [0.50, 0.80],
+    "Yield": [0.45, 0.75],
+    "Hardiness": [0.65, 0.92]
+  }
+}
