@@ -25,6 +25,16 @@
     { "out": "sfx/creatures/grovestrider/footstep_3.mp3", "duration": 0.6, "prompt": "a soft padded footfall of a large herbivore on grass, gentle thud, natural foley" },
     { "out": "sfx/ui/camera_shutter.mp3", "duration": 0.7, "prompt": "a soft satisfying camera shutter, a single gentle mechanical click-and-snap of a film SLR taking one photo, clean and crisp, short, no reverb" },
     { "out": "sfx/weather/thunder_1.mp3", "duration": 5.0, "prompt": "distant rolling thunder, a deep low rumble fading slowly, natural summer storm, soft and far away, not sharp" },
-    { "out": "sfx/weather/thunder_close_1.mp3", "duration": 4.0, "prompt": "a closer thunderclap, a deep resonant boom with a rolling tail, natural storm, powerful but not harsh" }
+    { "out": "sfx/weather/thunder_close_1.mp3", "duration": 4.0, "prompt": "a closer thunderclap, a deep resonant boom with a rolling tail, natural storm, powerful but not harsh" },
+    { "out": "sfx/player/footstep_soil_1.mp3", "duration": 0.5, "prompt": "a single soft footstep on bare soil and dirt, a muffled earthy thud, dry, natural foley" },
+    { "out": "sfx/player/footstep_soil_2.mp3", "duration": 0.5, "prompt": "a single footstep on packed dirt, a low soft earthy press, natural" },
+    { "out": "sfx/player/footstep_soil_3.mp3", "duration": 0.5, "prompt": "a single quiet step on bare earth, a muted dusty thud, natural foley" },
+    { "out": "sfx/player/footstep_sand_1.mp3", "duration": 0.5, "prompt": "a single footstep on soft dry sand, a quiet granular shuffle, natural, no music" },
+    { "out": "sfx/player/footstep_sand_2.mp3", "duration": 0.5, "prompt": "a single step on sand, a soft grainy crunch and shift, natural foley" },
+    { "out": "sfx/player/footstep_sand_3.mp3", "duration": 0.5, "prompt": "a single light footstep on fine sand, a soft sandy slide, natural" },
+    { "out": "sfx/player/footstep_water_1.mp3", "duration": 0.6, "prompt": "a single footstep splashing in shallow water, a soft wet splash and trickle, natural foley" },
+    { "out": "sfx/player/footstep_water_2.mp3", "duration": 0.6, "prompt": "a single step wading in shallow water, a gentle splash, natural" },
+    { "out": "sfx/player/footstep_crystal_1.mp3", "duration": 0.6, "prompt": "a single footstep on smooth crystal, a soft glassy chime-tap with a faint gentle resonance, magical, clean" },
+    { "out": "sfx/player/footstep_crystal_2.mp3", "duration": 0.6, "prompt": "a single step on a crystalline surface, a delicate bright glassy tap with a short ring, magical, soft" }
   ]
 }

@@ -3733,9 +3733,18 @@ int main(int argc, char* argv[]) {
                     s_footDist = 0.0f;
                     auto* fws = gameSession->GetWorldSystem();
                     const float fth = fws->GetTerrainHeightAt(fp.x, fp.z);
-                    const char* fev =
-                        (fws->SurfaceVertexMaterial(fp.x, fp.z, fth) == Luminumbra::MaterialType::Stone)
-                            ? "footstep_stone" : "footstep_grass";
+                    // Material-based footstep: the surface under the player picks the sound.
+                    const char* fev = "footstep_grass";
+                    switch (fws->SurfaceVertexMaterial(fp.x, fp.z, fth)) {
+                        case Luminumbra::MaterialType::Stone:
+                        case Luminumbra::MaterialType::Deepslate:    fev = "footstep_stone";   break;
+                        case Luminumbra::MaterialType::Soil:         fev = "footstep_soil";    break;
+                        case Luminumbra::MaterialType::Sand:         fev = "footstep_sand";    break;
+                        case Luminumbra::MaterialType::Water:        fev = "footstep_water";   break;
+                        case Luminumbra::MaterialType::LuminCrystal: fev = "footstep_crystal"; break;
+                        case Luminumbra::MaterialType::Grass:
+                        default:                                     fev = "footstep_grass";   break;
+                    }
                     audioManager->PlayOneShot(fev, glm::vec3(fp.x, fth, fp.z));
                 }
             }

@@ -69,6 +69,40 @@
       "min_distance": 1.0,
       "max_distance": 16.0
     },
+    "footstep_soil": {
+      "files": [
+        "assets/audio/sfx/player/footstep_soil_1.mp3",
+        "assets/audio/sfx/player/footstep_soil_2.mp3",
+        "assets/audio/sfx/player/footstep_soil_3.mp3"
+      ],
+      "volume": 0.50, "pitch_variation": 0.10, "strategy": "random",
+      "is_3d": true, "attenuation_model": "linear", "min_distance": 1.0, "max_distance": 16.0
+    },
+    "footstep_sand": {
+      "files": [
+        "assets/audio/sfx/player/footstep_sand_1.mp3",
+        "assets/audio/sfx/player/footstep_sand_2.mp3",
+        "assets/audio/sfx/player/footstep_sand_3.mp3"
+      ],
+      "volume": 0.50, "pitch_variation": 0.10, "strategy": "random",
+      "is_3d": true, "attenuation_model": "linear", "min_distance": 1.0, "max_distance": 16.0
+    },
+    "footstep_water": {
+      "files": [
+        "assets/audio/sfx/player/footstep_water_1.mp3",
+        "assets/audio/sfx/player/footstep_water_2.mp3"
+      ],
+      "volume": 0.60, "pitch_variation": 0.10, "strategy": "random",
+      "is_3d": true, "attenuation_model": "linear", "min_distance": 1.0, "max_distance": 18.0
+    },
+    "footstep_crystal": {
+      "files": [
+        "assets/audio/sfx/player/footstep_crystal_1.mp3",
+        "assets/audio/sfx/player/footstep_crystal_2.mp3"
+      ],
+      "volume": 0.55, "pitch_variation": 0.08, "strategy": "random",
+      "is_3d": true, "attenuation_model": "linear", "min_distance": 1.0, "max_distance": 20.0
+    },
     "camera_shutter": {
       "files": ["assets/audio/sfx/ui/camera_shutter.mp3"],
       "volume": 0.85,
