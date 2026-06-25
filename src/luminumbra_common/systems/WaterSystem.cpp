@@ -368,6 +368,17 @@ void WaterSystem::update(entt::registry& registry, const std::unordered_map<Chun
         const int res = WATER_SIM_RESOLUTION;
         for (std::size_t i = 0; i < to_init.size(); ++i) {
             const Chunk* cp = to_init[i];
+            // DETERMINISM (cold-first-run fix): reuse the heightmap ONLY at the finest LOD
+            // (current_lod == 0), where it is byte-identical to GetTerrainHeightAt (the EXPECT_EQ
+            // parity gate). A chunk that is water-initialized while still at a COARSE / not-yet-
+            // promoted LOD carries a heightmap that does NOT match the sampler, and WHETHER it has
+            // reached LOD0 by init time is streaming-timing-dependent — so the old size-only gate
+            // seeded a timing-dependent water_bed_mm (cold run-1 != warm run-2; --smoke water
+            // sub-hash flaked). For any non-LOD0 chunk we leave terrain_seed[i] empty so
+            // seed_chunk_water falls back to the pure sampler, which yields the SAME bits the LOD0
+            // heightmap would — so water_bed_mm is deterministic regardless of streaming timing,
+            // while LOD0 chunks (the common settled case) keep the cheap heightmap-reuse fast path.
+            if (cp->current_lod.load(std::memory_order_acquire) != 0) continue;
             if (static_cast<int>(cp->heightmap_data.size()) != hm_stride * hm_stride) continue;
             terrain_seed[i].resize(static_cast<std::size_t>(res) * res);
             for (int z = 0; z < res; ++z) {
