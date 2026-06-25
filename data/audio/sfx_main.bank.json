@@ -20,9 +20,9 @@
     },
     "creature_grovestrider_footstep": {
       "files": [
-        "assets/audio/sfx/creatures/grovestrider/footstep_1.ogg",
-        "assets/audio/sfx/creatures/grovestrider/footstep_2.ogg",
-        "assets/audio/sfx/creatures/grovestrider/footstep_3.ogg"
+        "assets/audio/sfx/creatures/grovestrider/footstep_1.mp3",
+        "assets/audio/sfx/creatures/grovestrider/footstep_2.mp3",
+        "assets/audio/sfx/creatures/grovestrider/footstep_3.mp3"
       ],
       "volume": 1.0,
       "strategy": "random",
@@ -32,7 +32,7 @@
       "max_distance": 50.0
     },
     "creature_grovestrider_call": {
-      "files": ["assets/audio/sfx/creatures/grovestrider/call_1.ogg"],
+      "files": ["assets/audio/sfx/creatures/grovestrider/call_1.mp3"],
       "volume": 0.9,
       "pitch_variation": 0.08,
       "is_3d": true,
@@ -42,10 +42,10 @@
     },
     "footstep_grass": {
       "files": [
-        "assets/audio/sfx/player/footstep_grass_1.ogg",
-        "assets/audio/sfx/player/footstep_grass_2.ogg",
-        "assets/audio/sfx/player/footstep_grass_3.ogg",
-        "assets/audio/sfx/player/footstep_grass_4.ogg"
+        "assets/audio/sfx/player/footstep_grass_1.mp3",
+        "assets/audio/sfx/player/footstep_grass_2.mp3",
+        "assets/audio/sfx/player/footstep_grass_3.mp3",
+        "assets/audio/sfx/player/footstep_grass_4.mp3"
       ],
       "volume": 0.55,
       "pitch_variation": 0.10,
@@ -57,9 +57,9 @@
     },
     "footstep_stone": {
       "files": [
-        "assets/audio/sfx/player/footstep_stone_1.ogg",
-        "assets/audio/sfx/player/footstep_stone_2.ogg",
-        "assets/audio/sfx/player/footstep_stone_3.ogg"
+        "assets/audio/sfx/player/footstep_stone_1.mp3",
+        "assets/audio/sfx/player/footstep_stone_2.mp3",
+        "assets/audio/sfx/player/footstep_stone_3.mp3"
       ],
       "volume": 0.55,
       "pitch_variation": 0.10,
@@ -70,10 +70,25 @@
       "max_distance": 16.0
     },
     "camera_shutter": {
-      "files": ["assets/audio/sfx/ui/camera_shutter.ogg"],
+      "files": ["assets/audio/sfx/ui/camera_shutter.mp3"],
       "volume": 0.85,
       "pitch_variation": 0.04,
       "is_2d": true
+    },
+    "ambient_forest": {
+      "files": ["assets/audio/sfx/environment/forest_rustle.mp3"],
+      "volume": 0.35,
+      "is_3d": true
+    },
+    "ambient_birds": {
+      "files": ["assets/audio/sfx/environment/forest_birds.mp3"],
+      "volume": 0.22,
+      "is_3d": true
+    },
+    "ambient_stream": {
+      "files": ["assets/audio/sfx/environment/water_stream.mp3"],
+      "volume": 0.30,
+      "is_3d": true
     }
   }
 }

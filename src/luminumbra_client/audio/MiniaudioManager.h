@@ -135,8 +135,8 @@ public:
     void SetGlobalReverb(float wet, float dry, float decay);
     
     // Environmental Audio
-    void PlayAmbientLoop(const AudioEventID& eventID, const glm::vec3& position, float radius);
-    void StopAmbientLoop(const AudioEventID& eventID);
+    void PlayAmbientLoop(const AudioEventID& eventID, const glm::vec3& position, float radius) override;
+    void StopAmbientLoop(const AudioEventID& eventID) override;
     
     // Spatial Audio Clustering Integration
     void SetPhysicsSystem(::Luminumbra::Systems::PhysicsSystem* physics_system);

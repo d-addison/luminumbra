@@ -102,6 +102,9 @@ public:
         WriteTelemetry("stop_music");
     }
 
+    void PlayAmbientLoop(const AudioEventID&, const glm::vec3&, float) override {}  // null backend: no-op
+    void StopAmbientLoop(const AudioEventID&) override {}                           // null backend: no-op
+
     void SetMasterVolume(float) override {}  // null backend: no-op
 
     bool StopEvent(AudioEventHandle, bool = true) override {

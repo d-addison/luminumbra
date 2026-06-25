@@ -448,8 +448,15 @@ void MiniaudioManager::PlayAmbientLoop(const AudioEventID& eventID, const glm::v
     auto sound = std::make_unique<ma_sound>();
     const std::string full_path = m_rootPath + def->files[0];
     
-    if (ma_sound_init_from_file(m_engine.get(), full_path.c_str(), 
-                               MA_SOUND_FLAG_STREAM, NULL, NULL, sound.get()) == MA_SUCCESS) {
+    // Decode the (short) loop fully into memory instead of streaming: ogg streaming can fail
+    // silently, and a pre-decoded buffer loops seamlessly. Log failure so a missing/!decodable
+    // ambient file is diagnosable rather than silent.
+    const ma_result amb_rc = ma_sound_init_from_file(m_engine.get(), full_path.c_str(),
+                                                     MA_SOUND_FLAG_DECODE, NULL, NULL, sound.get());
+    if (amb_rc != MA_SUCCESS) {
+        LUMINUMBRA_CORE_WARN("PlayAmbientLoop: failed to load '{}' (ma_result {})", full_path, static_cast<int>(amb_rc));
+    }
+    if (amb_rc == MA_SUCCESS) {
         ma_sound_set_position(sound.get(), position.x, position.y, position.z);
         ma_sound_set_volume(sound.get(), def->volume * m_currentEnvironment.ambient_volume);
         ma_sound_set_looping(sound.get(), true);

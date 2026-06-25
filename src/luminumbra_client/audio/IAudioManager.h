@@ -32,6 +32,11 @@ public:
     virtual void PlayMusic(const AudioEventID& musicEventID) = 0;
     virtual void StopMusic() = 0;
 
+    // Looping ambient bed (streamed, 3D). Re-calling with the same id restarts it; a huge
+    // radius makes it an effectively constant world ambience. Render-only.
+    virtual void PlayAmbientLoop(const AudioEventID& eventID, const glm::vec3& position, float radius) = 0;
+    virtual void StopAmbientLoop(const AudioEventID& eventID) = 0;
+
     // Master output gain [0,1] (user.audio.master). Render-only player setting.
     virtual void SetMasterVolume(float volume) = 0;
 

@@ -3707,6 +3707,11 @@ int main(int argc, char* argv[]) {
 
         GameState currentState = gameStateManager.GetCurrentState();
 
+        // 3D audio LISTENER follows the player so footsteps / ambient bed / creature sounds spatialize
+        // correctly (without this the listener sits at the origin and positional audio is near-silent).
+        if (currentState == GameState::IN_GAME && audioManager && g_camera) {
+            audioManager->SetListenerTransform(g_camera->Position, g_camera->Front, g_camera->Up);
+        }
         // Player FOOTSTEPS (interactive audio): when the player walks, play a footstep keyed to the
         // surface material under them (stone vs grass/soil/etc.), at a distance-based cadence so it
         // tracks speed. Render/audio-only; live play only (never in scenario captures, so determinism
@@ -3796,6 +3801,15 @@ int main(int argc, char* argv[]) {
 
                     audioManager->StopMusic();
                     audioManager->PlayOneShot2D("ui_world_loaded"); // Play a sound on completion
+                    // Start the constant ambient soundscape (zen atmosphere): a gentle forest-rustle
+                    // bed + soft birdsong, centred at spawn with a huge radius so it stays audible as
+                    // the player roams (the listener follows the player each frame). Volumes in the bank.
+                    {
+                        const auto& sp = gameSession->GetMetadata().spawnPoint;
+                        const glm::vec3 ambPos(sp.x, sp.y, sp.z);
+                        audioManager->PlayAmbientLoop("ambient_forest", ambPos, 1.0e6f);
+                        audioManager->PlayAmbientLoop("ambient_birds", ambPos, 1.0e6f);
+                    }
                     if (g_loading_visualizer) {
                         g_loading_visualizer->EndVisualization();
                     }
