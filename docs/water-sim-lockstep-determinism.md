@@ -1,7 +1,18 @@
 # Design note: water-sim lockstep determinism (streaming-arrival coupling)
 
-**Status:** design / not yet implemented · **Author:** determinism investigation (2026-06-25)
-**Related:** spec 009 (flowing water), `water-heightmap-read-race` memory, commit `7d605399`
+**Status:** interim **C landed** (`254cec1f`) — full B′ still open · **Author:** determinism investigation (2026-06-25)
+**Related:** spec 009 (flowing water), `water-heightmap-read-race` memory, commits `7d605399` (bed), `254cec1f` (C)
+
+> **Update (C landed):** `ServerWorldRunner::Boot` now settles streaming + water to a
+> steady state (water reaches a static fixed point — it sleeps) before the counted sim,
+> so the start state is the trajectory-independent equilibrium. Default `--smoke` is now
+> **0 flakes in 24 cold boots** (was ~66%, ~15% after the bed fix); `--planted-roster` /
+> `--ecology-roster` stay run==replay. Canonical hashes changed (water starts at
+> equilibrium): default `b05b642e → 6f008a9f`, planted `47f237c7`, ecology `9f0dd5b9`.
+> No code pins these literals, so no code re-pin was needed. **C settles the INITIAL
+> residency only** — chunks streaming in *during play* (moving) still hit the per-tick
+> trajectory coupling, so **B′ (below) remains the full fix.** Trade-off: adds server
+> boot warm-up time.
 
 ## Problem
 
