@@ -78,6 +78,33 @@ Before implementing, confirm two things in code:
    for the *initial horizon* (synchronously emplaced at boot, `SHIELD_WorldSystem.cpp:2742-2746`)
    and only the *streamed-in-during-play* chunks are async — which would narrow the fix.
 
+## Critical refinement (found while confirming code point #2)
+
+`update_chunk_activation` (`SHIELD_WorldSystem.cpp:2430-2451`) computes the per-tick
+`target_radius` via `streaming_radius_for_pressure(...)`, which **takes
+`has_active_job(generation)` and `meshing_jobs_active()` as inputs**, and sets
+`generation_budget = 0` whenever a generation job is active. So the *wanted/scheduled
+chunk set itself adapts to async job-activity timing* — not just chunk-arrival timing.
+This means the determinism leak is upstream of water entirely: **the sim-relevant chunk
+set per tick is throttled by async streaming pressure.**
+
+Consequence for Option B: it is not enough to change *when water-init fires*. The fix
+must give the **simulation** a chunk set that is a pure function of (anchor, tick) and
+**independent of the adaptive/async render-streaming pressure**. Concretely:
+
+- **B′ (refined):** separate a **deterministic sim residency set** (fixed sim radius
+  around the deterministic anchor, chunk objects emplaced synchronously per tick like the
+  boot horizon at `2742-2746`) from the **adaptive render-streaming set** (the existing
+  pressure-throttled, async path — keeps driving LOD/meshing for visuals). Water (and any
+  hashed sim) operate on the deterministic sim set via the pure sampler; rendering keeps
+  the adaptive set. This is the lockstep-correct separation: **sim residency is
+  deterministic; render residency is best-effort.**
+
+This is a meaty, perf-sensitive change to the streaming core (the adaptive pressure logic
+exists to avoid frame spikes — spec 008). It should land behind a flag / be validated for
+both determinism (the verification plan below) and streaming perf (no regression in the
+moving-frame / streaming budgets).
+
 ## Verification plan
 
 - **Cold-boot flake rate:** loop `luminumbra_server_app --smoke --artifact` ≥20× under
