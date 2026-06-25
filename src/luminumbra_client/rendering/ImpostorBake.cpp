@@ -33,18 +33,24 @@ GLuint CompileBakeProgram(std::string& err) {
     const char* kVert =
         "#version 450 core\n"
         "layout(location=0) in vec3 aPos;\n"
+        "layout(location=1) in vec3 aNorm;\n"
         "layout(location=2) in vec2 aUV;\n"
         "uniform mat4 uMVP;\n"
         "out vec2 vUV;\n"
-        "void main(){ vUV = aUV; gl_Position = uMVP * vec4(aPos, 1.0); }\n";
+        "out vec3 vNorm;\n"
+        "void main(){ vUV = aUV; vNorm = aNorm; gl_Position = uMVP * vec4(aPos, 1.0); }\n";
+    // MRT: attachment 0 = albedo (sRGB-encoded for viewing), 1 = object-space normal (encoded). The
+    // octa impostor stores the captured normal so the runtime can light the billboard like real geometry.
     const char* kFrag =
         "#version 450 core\n"
         "in vec2 vUV;\n"
+        "in vec3 vNorm;\n"
         "uniform sampler2DArray uTex;\n"
         "uniform int  uLayer;      // albedo array layer; < 0 => use uFlat\n"
         "uniform vec3 uFlat;\n"
         "uniform int  uAlphaTest;  // 1 => luma-keyed leaf cutout (matches g_buffer.frag)\n"
-        "out vec4 frag;\n"
+        "layout(location=0) out vec4 oAlbedo;\n"
+        "layout(location=1) out vec4 oNormal;\n"
         "void main(){\n"
         "  vec3 col;\n"
         "  if (uLayer < 0) { col = uFlat; }\n"
@@ -56,7 +62,8 @@ GLuint CompileBakeProgram(std::string& err) {
         "    }\n"
         "    col = a;\n"
         "  }\n"
-        "  frag = vec4(pow(col, vec3(1.0/2.2)), 1.0); // linear albedo -> sRGB for the viewed atlas\n"
+        "  oAlbedo = vec4(pow(col, vec3(1.0/2.2)), 1.0); // linear albedo -> sRGB for the viewed atlas\n"
+        "  oNormal = vec4(normalize(vNorm) * 0.5 + 0.5, 1.0);\n"
         "}\n";
     auto compile = [&](GLenum type, const char* src) -> GLuint {
         GLuint s = glCreateShader(type);
@@ -136,24 +143,30 @@ ImpostorBakeResult BakeTreeImpostorAtlas(const std::string& outPpmPath, const st
     const GLuint prog = CompileBakeProgram(err);
     if (!prog) { out.error = "bake shader: " + err; return out; }
 
-    // --- Atlas FBO (RGBA8 color + depth). ---
-    GLuint fbo = 0, colorTex = 0, depthRb = 0;
+    // --- Atlas FBO: 2 RGBA8 color attachments (albedo + normal) + depth. ---
+    GLuint fbo = 0, colorTex = 0, normalTex = 0, depthRb = 0;
     glGenFramebuffers(1, &fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    glGenTextures(1, &colorTex);
-    glBindTexture(GL_TEXTURE_2D, colorTex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, atlas, atlas, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, colorTex, 0);
+    auto makeColor = [&](GLuint& tex, int attach) {
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, atlas, atlas, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + attach, GL_TEXTURE_2D, tex, 0);
+    };
+    makeColor(colorTex, 0);
+    makeColor(normalTex, 1);
+    const GLenum drawBufs[2] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1 };
+    glDrawBuffers(2, drawBufs);
     glGenRenderbuffers(1, &depthRb);
     glBindRenderbuffer(GL_RENDERBUFFER, depthRb);
     glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, atlas, atlas);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depthRb);
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
         out.error = "impostor atlas FBO incomplete";
-        glDeleteFramebuffers(1, &fbo); glDeleteTextures(1, &colorTex); glDeleteRenderbuffers(1, &depthRb);
-        glDeleteProgram(prog);
+        glDeleteFramebuffers(1, &fbo); glDeleteTextures(1, &colorTex); glDeleteTextures(1, &normalTex);
+        glDeleteRenderbuffers(1, &depthRb); glDeleteProgram(prog);
         return out;
     }
 
@@ -174,7 +187,7 @@ ImpostorBakeResult BakeTreeImpostorAtlas(const std::string& outPpmPath, const st
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     const float D = unionR * 2.0f;     // camera distance (ortho => only affects clipping, not size)
-    const float hr = unionR * 0.62f;   // ortho half-extent: tighten so the tree fills the tile
+    const float hr = unionR * 0.52f;   // ortho half-extent: tighten so the tree fills the tile
     for (int j = 0; j < n; ++j) {
         for (int i = 0; i < n; ++i) {
             const Vec3f d3 = OctaTileDirection(i, j, grid);
@@ -198,10 +211,14 @@ ImpostorBakeResult BakeTreeImpostorAtlas(const std::string& outPpmPath, const st
     }
     glBindVertexArray(0);
 
-    // --- Readback + coverage stats. ---
+    // --- Readback (albedo + normal) + coverage stats. ---
     std::vector<unsigned char> rgb(static_cast<std::size_t>(atlas) * atlas * 3u);
+    std::vector<unsigned char> nrm(static_cast<std::size_t>(atlas) * atlas * 3u);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
     glReadPixels(0, 0, atlas, atlas, GL_RGB, GL_UNSIGNED_BYTE, rgb.data());
+    glReadBuffer(GL_COLOR_ATTACHMENT1);
+    glReadPixels(0, 0, atlas, atlas, GL_RGB, GL_UNSIGNED_BYTE, nrm.data());
 
     std::vector<float> tileCov(static_cast<std::size_t>(n) * n, 0.0f);
     const unsigned char bgR = static_cast<unsigned char>(kBackground.r * 255.0f);
@@ -226,6 +243,15 @@ ImpostorBakeResult BakeTreeImpostorAtlas(const std::string& outPpmPath, const st
     }
     out.mean_coverage = static_cast<float>(covSum / (static_cast<double>(n) * n));
 
+    // Normal atlas path: "<stem>_normal.ppm" (next to the albedo atlas).
+    std::string normalPath = outPpmPath;
+    {
+        const auto dot = normalPath.find_last_of('.');
+        if (dot != std::string::npos) normalPath.insert(dot, "_normal");
+        else normalPath += "_normal";
+    }
+    WritePpm(normalPath, atlas, atlas, nrm); // best-effort companion output
+
     if (!WritePpm(outPpmPath, atlas, atlas, rgb)) {
         out.error = "failed to write atlas PPM: " + outPpmPath;
     } else {
@@ -242,6 +268,7 @@ ImpostorBakeResult BakeTreeImpostorAtlas(const std::string& outPpmPath, const st
 
     glDeleteFramebuffers(1, &fbo);
     glDeleteTextures(1, &colorTex);
+    glDeleteTextures(1, &normalTex);
     glDeleteRenderbuffers(1, &depthRb);
     glDeleteProgram(prog);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);

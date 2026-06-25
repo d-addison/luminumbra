@@ -3658,7 +3658,8 @@ int main(int argc, char* argv[]) {
         // then exit. Placed at the loop top so it can't be skipped by a state-gated render branch.
         if (!g_bake_impostor_path.empty() && !g_bake_impostor_done) {
             g_bake_impostor_done = true;
-            Luminumbra::Rendering::OctaImpostorGrid bakeGrid; // 8x8 tiles x 128px (defaults)
+            Luminumbra::Rendering::OctaImpostorGrid bakeGrid;
+            bakeGrid.gridResolution = 12; // 12x12 = 144 views for smoother runtime view blending
             const Luminumbra::Rendering::ImpostorBakeResult br =
                 Luminumbra::Rendering::BakeTreeImpostorAtlas(g_bake_impostor_path, root_dir.string(),
                                                              renderPipeline, bakeGrid);
