@@ -85,10 +85,12 @@ constexpr std::size_t kScentDiffusionIterations = 4;
 constexpr double kScentEvaporation = 0.05;
 constexpr double kScentTauMin = 1.0e-9;
 constexpr double kScentTauMax = 1.0e6;
-// FR-2 scent wind-advection strength. 0 = OFF -> ScentField::Step skips advection and the scent
-// field (and the ecology sub-hash) is byte-identical to the diffuse+evaporate-only result. Tune > 0
-// (with a scents+ecology re-pin) to make scent drift downwind so predators can track prey up-wind.
-constexpr double kScentWindAdvectionScale = 0.0;
+// FR-2 scent wind-advection strength. 0 = OFF -> ScentField::Step skips advection. Tuned ON at 1.0
+// (advect at the TRUE wind velocity — the physically-correct semi-Lagrangian drift) so scent drifts
+// downwind and a predator can track prey up-wind. Only worlds with scent/forager participants carry a
+// scent field, so the canonical empty roster is still byte-identical (default --smoke unchanged); the
+// populated PopulatedWorldReplay gate stays run==replay (deterministic double math), so no literal re-pin.
+constexpr double kScentWindAdvectionScale = 1.0;
 
 void AddValidationError(Luminumbra::world::WorldConfigValidationResult& result, std::string error) {
     result.errors.push_back(std::move(error));

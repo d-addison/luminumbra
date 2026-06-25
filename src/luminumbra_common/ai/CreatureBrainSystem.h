@@ -40,8 +40,11 @@ struct CreatureBrainStats {
 inline constexpr float kHerdWeight = 0.8f;
 // How strongly herd flocking matches the group's mean heading (Reynolds alignment, the 3rd term).
 // 0 = OFF, which keeps the steer byte-identical to the cohesion+separation result (canonical roster
-// + 1v1 tests stay exact). Tune > 0 to make a herd converge to a common heading.
-inline constexpr float kAlignmentWeight = 0.0f;
+// + 1v1 tests stay exact). Tuned ON (0.5, just below cohesion 0.6) so a herd converges to a common
+// heading — emergent flocking. A lone creature has no same-role neighbour -> zero steer -> 1v1
+// flee/hunt behaviour is unchanged; the canonical (empty-roster) world runs the brain as a no-op,
+// so default --smoke is byte-identical and the populated gate stays run==replay (no literal re-pin).
+inline constexpr float kAlignmentWeight = 0.5f;
 // Predator catch reach (m) and how much catching a prey sates the predator's hunger.
 inline constexpr float kCatchRadius = 2.2f;
 inline constexpr float kCatchSatiation = 0.8f;

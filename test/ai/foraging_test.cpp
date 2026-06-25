@@ -3,6 +3,7 @@
 // sim: integer cells, id-ordered, libm-free, deterministic.
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 
@@ -97,6 +98,34 @@ TEST(Foraging, ShorterRouteDeliversMore) {
     };
     EXPECT_GT(routeDeliveries(3, 200), routeDeliveries(12, 200))
         << "the shorter round trip should yield more deliveries (shortest-path reinforcement)";
+}
+
+// FR-3 evaporation contrast (the double-bridge / Deneubourg basis): evaporation (rho > 0) bounds the
+// trail to an equilibrium so the ACTIVE route stays a sharp, followable signal, whereas ZERO
+// evaporation lets every visited cell accumulate without bound — the trail SATURATES and the colony
+// can no longer tell routes apart (the stagnation the MAX-MIN ant system guards against, spec FR-3
+// "stagnates at rho=0"). Identical foraging traffic under rho=0.05 vs rho=0; the no-evaporation peak
+// trail grows far larger (unbounded buildup). Pure grid sim, deterministic.
+TEST(Foraging, EvaporationBoundsTrailZeroRhoSaturates) {
+    auto peakTrail = [](double rho) {
+        entt::registry r;
+        ScentField f(40, 5, 4);
+        spawnForager(r, 0, 0);
+        spawnFood(r, 5, 0);
+        for (int t = 0; t < 400; ++t) {
+            RunForagingOnTick(r, f, {});
+            f.Step(0.2, 1, rho);
+        }
+        double peak = 0.0;
+        for (int c = 2; c < 4; ++c)
+            for (int z = 0; z < 5; ++z)
+                for (int x = 0; x < 40; ++x) peak = std::max(peak, f.Sample(c, x, z));
+        return peak;
+    };
+    const double evap = peakTrail(0.05);  // bounded equilibrium
+    const double none = peakTrail(0.0);   // unbounded accumulation -> saturation
+    EXPECT_GT(none, evap * 2.0) << "zero evaporation lets the trail accumulate unbounded (stagnation); "
+                                   "evaporation bounds it so the active route stays distinguished";
 }
 
 // Pure trail following (goal_weight 0): with a pre-seeded food-trail gradient an OUTBOUND forager

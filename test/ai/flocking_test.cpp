@@ -2,6 +2,7 @@
 // separation away from crowding, libm-free + order-independent (run==replay).
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <utility>
 #include <vector>
 
@@ -80,6 +81,61 @@ TEST(Flocking, AlignmentMatchesMeanHeading) {
     p.alignment_weight = 1.0f;
     const FlockSteer on = ComputeFlockSteer(0.0f, 0.0f, n, p, &headings);
     EXPECT_GT(on.z, off.z + 0.5f) << "alignment should bias the steer toward the +z mean heading";
+}
+
+// FR-1 CONVERGENCE (spec 005 acceptance: "a herd converges to a common heading"). This is the
+// dynamic the CreatureBrainSystem now enables by tuning kAlignmentWeight on (0.5). We isolate the
+// alignment term (cohesion/separation weights 0) over a tight static cluster and iterate each
+// agent's heading toward the alignment steer: with alignment ON the differently-headed agents
+// converge to a common direction (concentration R -> ~1); with alignment OFF the headings never
+// change (R stays at its spread-out initial value). Deterministic (fixed-point reduction).
+TEST(Flocking, AlignmentConvergesHeadingsOverIterations) {
+    // 5 agents in a cluster, all within the 12 m neighbour radius of each other.
+    const std::vector<std::pair<float, float>> pos = {{0, 0}, {4, 0}, {0, 4}, {4, 4}, {2, 6}};
+    // Initial unit headings spread around the circle (low concentration).
+    const std::vector<std::pair<float, float>> head0 = {
+        {1, 0}, {0, 1}, {-1, 0}, {0, -1}, {0.70710678f, 0.70710678f}};
+
+    // Concentration R = |mean of unit headings| in [0,1] (1 = perfectly aligned, 0 = uniform spread).
+    auto concentration = [](const std::vector<std::pair<float, float>>& h) {
+        float sx = 0.0f, sz = 0.0f;
+        for (const auto& v : h) {
+            const float m = std::sqrt(v.first * v.first + v.second * v.second);
+            if (m > 1e-6f) { sx += v.first / m; sz += v.second / m; }
+        }
+        return std::sqrt(sx * sx + sz * sz) / static_cast<float>(h.size());
+    };
+
+    // Iterate: each agent rotates its heading toward the alignment steer over its neighbours.
+    auto settle = [&](float align_w) {
+        std::vector<std::pair<float, float>> h = head0;
+        for (int it = 0; it < 40; ++it) {
+            std::vector<std::pair<float, float>> next = h;
+            for (std::size_t i = 0; i < pos.size(); ++i) {
+                std::vector<std::pair<float, float>> np, nh;
+                for (std::size_t j = 0; j < pos.size(); ++j) {
+                    if (j == i) continue;
+                    np.push_back(pos[j]);
+                    nh.push_back(h[j]);
+                }
+                FlockParams p;
+                p.cohesion_weight = 0.0f;     // isolate alignment
+                p.separation_weight = 0.0f;
+                p.alignment_weight = align_w;
+                const FlockSteer s = ComputeFlockSteer(pos[i].first, pos[i].second, np, p, &nh);
+                const float bx = h[i].first + s.x, bz = h[i].second + s.z;
+                const float m = std::sqrt(bx * bx + bz * bz);
+                if (m > 1e-5f) next[i] = {bx / m, bz / m};
+            }
+            h = next;
+        }
+        return concentration(h);
+    };
+
+    const float off = settle(0.0f);  // alignment off: headings frozen at the spread-out start
+    const float on = settle(0.6f);   // alignment on: headings converge toward a common direction
+    EXPECT_GT(on, off + 0.2f) << "alignment should concentrate the herd toward a common heading";
+    EXPECT_GT(on, 0.8f) << "the herd should be strongly aligned after settling";
 }
 
 // Order independence WITH alignment on: shuffling neighbours + their headings together yields the
