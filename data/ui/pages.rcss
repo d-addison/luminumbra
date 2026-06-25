@@ -108,6 +108,44 @@ body#hud {
 }
 .hud-capture-dot { display: none; }
 
+/* Farming HUD — top-right, mirrors the objective tracker's quiet diegetic style. */
+.hud-farming {
+    position: absolute;
+    top: 24px;
+    right: 28px;
+    width: 280px;
+    text-align: right;
+    color: rgba(242, 237, 228, 90);
+}
+.hud-farming-row {
+    display: block;
+}
+.hud-farming-label {
+    font-size: 10px;
+    letter-spacing: 3px;
+    color: rgba(242, 237, 228, 65);
+    text-transform: uppercase;
+}
+.hud-farming-inv {
+    font-size: 10px;
+    letter-spacing: 1px;
+    color: #C9A86A;
+    float: left;
+}
+.hud-farming-crop {
+    font-size: 14px;
+    color: rgba(242, 237, 228, 220);
+    letter-spacing: 1px;
+    margin-top: 2px;
+}
+.hud-farming-hint {
+    font-size: 10px;
+    color: rgba(242, 237, 228, 65);
+    letter-spacing: 1px;
+    margin-top: 4px;
+}
+.hud-farming-hint strong { color: #C9A86A; }
+
 /* ============================================================================
    2. Photo mode — viewfinder, rule-of-thirds, readout, shutter, verdict.
    ============================================================================ */

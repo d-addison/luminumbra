@@ -115,6 +115,10 @@ luminumbra::ai::CreatureSpeciesRegistry g_creatureSpecies;
 luminumbra::game::ObjectiveSet g_objectives;
 bool g_objectivesInit = false;
 std::string g_objHudSig;
+// I9-FOLIAGE Phase 5B: farming HUD signature — caches the last-rendered seed/harvest
+// inventory + facing-crop text so the DOM is only touched when it actually changes.
+// Client-only, never hashed (reads sim state, never mutates it).
+std::string g_farmHudSig;
 // Creature codex browse overlay (client-only). g_codexOpen toggles via the ToggleCodex
 // key; g_codexSig throttles re-population so rows are rebuilt only when discovery changes.
 bool g_codexOpen = false;
@@ -328,6 +332,9 @@ float g_season = 0.0f;                  // 0 = summer green .. 1 = autumn ochre 
 luminumbra::foliage::FarmingController g_farming;
 luminumbra::foliage::SpeciesRegistry g_farmSpecies;
 bool g_farmSpeciesLoaded = false;
+// Player-selected species to plant (index into g_farmSpecies.all(); V cycles it). So FarmPlant
+// isn't hard-coded to wheat — the player picks oak/wheat/etc. from the data-driven registry.
+int g_farmSelectedSpecies = 0;
 
 // Re-bake the combined procgen plant mesh at growth `stageF` and push it to the pass. Young
 // stages -> shallower branch recursion + smaller size; deterministic pure functions.
@@ -5931,7 +5938,18 @@ int main(int argc, char* argv[]) {
                             g_farmSpecies.LoadFromDirectory(root_dir / "data/common/foliage/species", ferr);
                             g_farmSpeciesLoaded = true;
                         }
-                        static bool s_fp = false, s_fw = false, s_ff = false, s_fh = false;
+                        static bool s_fp = false, s_fw = false, s_ff = false, s_fh = false, s_fv = false;
+                        // V cycles the selected species to plant (data-driven; oak/wheat/...).
+                        {
+                            const bool fv_now = glfwGetKey(window, GLFW_KEY_V) == GLFW_PRESS;
+                            const std::size_t n = g_farmSpecies.all().size();
+                            if (fv_now && !s_fv && n > 0) {
+                                g_farmSelectedSpecies = (g_farmSelectedSpecies + 1) % static_cast<int>(n);
+                                LUMINUMBRA_CORE_INFO("Farm: selected species '{}'",
+                                                     g_farmSpecies.all()[g_farmSelectedSpecies].id);
+                            }
+                            s_fv = fv_now;
+                        }
                         auto farmEdge = [&](Luminumbra::Client::InputAction a, bool& prev) {
                             const bool now = glfwGetKey(window, g_playerController->key(a)) == GLFW_PRESS;
                             const bool fired = now && !prev; prev = now; return fired;
@@ -5945,13 +5963,16 @@ int main(int argc, char* argv[]) {
                         const std::uint64_t ftick = gameSession->GetSimulationTickCount();
                         using IA = Luminumbra::Client::InputAction;
                         if (farmEdge(IA::FarmPlant, s_fp)) {
-                            if (const auto* tmpl = g_farmSpecies.Find("wheat")) {
+                            const auto& species = g_farmSpecies.all();
+                            if (!species.empty()) {
+                                const luminumbra::foliage::SpeciesTemplate& tmpl =
+                                    species[static_cast<std::size_t>(g_farmSelectedSpecies) % species.size()];
                                 auto frng = luminumbra::core::DeterministicRng::seeded(
                                     luminumbra::foliage::kPlantSeedOffset,
                                     static_cast<std::uint64_t>(static_cast<std::int64_t>(aimXZ.x * 8.0f)),
                                     static_cast<std::uint64_t>(static_cast<std::int64_t>(aimXZ.z * 8.0f)) ^ ftick);
-                                if (g_farming.Seed(freg, aim, *tmpl, frng, ftick) != entt::null)
-                                    LUMINUMBRA_CORE_INFO("Farm: planted wheat ({} seeds left)", g_farming.seeds);
+                                if (g_farming.Seed(freg, aim, tmpl, frng, ftick) != entt::null)
+                                    LUMINUMBRA_CORE_INFO("Farm: planted {} ({} seeds left)", tmpl.id, g_farming.seeds);
                             }
                         }
                         // Tend the nearest plant; if there's no SIM plant in reach but a wild scatter
@@ -6116,6 +6137,58 @@ int main(int argc, char* argv[]) {
                                                        std::to_string(g_objectives.size()) + " goals");
                                     if (auto* e = hud->GetElementById("tutorial_hint"))
                                         e->SetClass("hidden", !show_tutorial);
+                                }
+                            }
+                        }
+                        // I9-FOLIAGE Phase 5B: farming HUD — seed/harvest inventory + the crop the
+                        // player is facing (stage + quality + a harvest hint). Shown once the player
+                        // is near a crop or has farmed, so it never clutters a non-farming session.
+                        // Signature-gated like the objective tracker; render-only (reads sim state).
+                        if (!g_codexOpen && !g_photoMode.active && g_uiManager && g_uiManager->GetContext() &&
+                            gameSession && g_camera) {
+                            if (auto* hud = g_uiManager->GetContext()->GetDocument("hud")) {
+                                namespace FC = Luminumbra::Components;
+                                const auto& freg = gameSession->GetRegistry();
+                                const glm::vec3 ffwd =
+                                    glm::normalize(glm::vec3(g_camera->Front.x, 0.0f, g_camera->Front.z));
+                                const glm::vec3 aimXZ = glm::vec3(g_camera->Position) + ffwd * 3.0f;
+                                const Luminumbra::Vec3 aimv(aimXZ.x, g_camera->Position.y, aimXZ.z);
+                                const entt::entity crop =
+                                    luminumbra::foliage::FarmingController::NearestPlant(freg, aimv, 3.0f);
+                                // Show once farming is in play: a crop in reach, a seed spent / harvest made,
+                                // or the player has cycled the species picker (so it's discoverable).
+                                const bool farmed = g_farming.seeds != 5 || g_farming.harvests > 0;
+                                const bool show = (crop != entt::null) || farmed || g_farmSelectedSpecies != 0;
+                                std::string cropText = "no crop in reach";
+                                if (crop != entt::null && freg.all_of<FC::PlantGrowthComponent>(crop)) {
+                                    const auto& g = freg.get<FC::PlantGrowthComponent>(crop);
+                                    static const char* kStage[] = {
+                                        "seed", "sprout", "juvenile", "mature", "flowering", "fruiting"};
+                                    const int s = g.stage < 6 ? static_cast<int>(g.stage) : 5;
+                                    // Optional species name (reverse-map the stable id; default "crop").
+                                    std::string sname = "crop";
+                                    if (g_farmSpeciesLoaded) {
+                                        for (const auto& t : g_farmSpecies.all())
+                                            if (luminumbra::foliage::SpeciesId16(t.id) == g.species_id) { sname = t.id; break; }
+                                    }
+                                    cropText = sname + " - " + kStage[s] + " - quality " +
+                                               std::to_string(static_cast<int>(g.quality));
+                                    if (g.stage >= static_cast<std::uint8_t>(FC::PlantStage::Mature))
+                                        cropText += " - ready (J)";
+                                }
+                                // Selected planting species (V cycles it) shown so the player knows what F plants.
+                                std::string selName = "wheat";
+                                if (g_farmSpeciesLoaded && !g_farmSpecies.all().empty())
+                                    selName = g_farmSpecies.all()[
+                                        static_cast<std::size_t>(g_farmSelectedSpecies) % g_farmSpecies.all().size()].id;
+                                const std::string inv = selName + " - " + std::to_string(g_farming.seeds) +
+                                    " seeds - " + std::to_string(g_farming.harvests) + " harvested";
+                                const std::string sig = (show ? "1" : "0") + inv + "|" + cropText;
+                                if (sig != g_farmHudSig) {
+                                    g_farmHudSig = sig;
+                                    if (auto* e = hud->GetElementById("farming_panel")) e->SetClass("hidden", !show);
+                                    if (auto* e = hud->GetElementById("farm_inv")) e->SetInnerRML(inv);
+                                    if (auto* e = hud->GetElementById("farm_crop")) e->SetInnerRML(cropText);
                                 }
                             }
                         }
