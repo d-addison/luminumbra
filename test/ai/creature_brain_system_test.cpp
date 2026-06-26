@@ -8,6 +8,7 @@
 #include <entt/entt.hpp>
 
 #include "ai/CreatureBrainSystem.h"
+#include "components/CircadianComponents.h"
 #include "components/CoreComponents.h"
 #include "components/CreatureComponents.h"
 
@@ -106,6 +107,38 @@ TEST(CreatureBrainSystem, EnergyRecoversWhileResting) {
         << "a sated, exhausted, safe creature should Rest";
     EXPECT_GT(out.energy, 0.30f) << "resting should recover energy";
     EXPECT_LE(out.energy, 1.0f) << "energy stays clamped <= 1";
+}
+
+// Spec 011: a tired creature in its circadian OFF-phase (activity 0) and safe SLEEPS at its
+// spot, recovering energy without moving.
+TEST(CreatureBrainSystem, SleepsInOffPhaseWhenTired) {
+    entt::registry r;
+    const entt::entity e = spawn(r, 0.0f, 0.0f, /*predator*/ false, /*hunger*/ 0.0f);
+    auto& cr = r.get<Comp::CreatureComponent>(e);
+    cr.stamina = 1.0f;   // not exhausted -> Rest util ~0, so Sleep must win on its own merits
+    cr.energy = 0.20f;   // tired
+    auto& cc = r.emplace<Comp::CircadianComponent>(e);
+    cc.activity = 0.0f;  // deep off-phase (night for a diurnal creature)
+    tick(r, 30);
+    const auto& out = r.get<Comp::CreatureComponent>(e);
+    EXPECT_EQ(out.last_action, static_cast<int>(luminumbra::ai::CreatureAction::Sleep))
+        << "a tired, safe creature in its off-phase should sleep";
+    EXPECT_GT(out.energy, 0.20f) << "sleeping recovers energy";
+    EXPECT_NEAR(xOf(r, e), 0.0f, 1.0e-4f) << "a sleeping creature does not wander off";
+}
+
+// A creature with NO CircadianComponent (activity defaults to 1.0) NEVER sleeps, even tired,
+// so worlds without circadian participants are byte-identical to before Sleep existed.
+TEST(CreatureBrainSystem, NoCircadianNeverSleeps) {
+    entt::registry r;
+    const entt::entity e = spawn(r, 0.0f, 0.0f, /*predator*/ false, /*hunger*/ 0.0f);
+    auto& cr = r.get<Comp::CreatureComponent>(e);
+    cr.stamina = 1.0f;
+    cr.energy = 0.05f;  // very tired, but no circadian clock -> always "active"
+    tick(r, 30);
+    EXPECT_NE(r.get<Comp::CreatureComponent>(e).last_action,
+              static_cast<int>(luminumbra::ai::CreatureAction::Sleep))
+        << "without a circadian clock a creature must never sleep (byte-identical guarantee)";
 }
 
 // run == replay: identical setup + ticks -> identical final positions.

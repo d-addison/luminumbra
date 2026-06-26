@@ -15,6 +15,7 @@
 #include "SpatialGrid.h"
 
 #include "../components/AlarmComponents.h"
+#include "../components/CircadianComponents.h"
 #include "../components/CoreComponents.h"
 #include "../components/CreatureComponents.h"
 #include "../core/DeterministicMath.h"
@@ -54,6 +55,8 @@ inline constexpr float kCatchSatiation = 0.8f;
 // to the sim trajectory today -- a tracked need until Phase E/F wires the circadian-gated Sleep.
 inline constexpr float kEnergyDrainPerSecond = 0.006f;
 inline constexpr float kEnergyRestRecover    = 0.080f;
+// Sleep recovers energy faster than Rest (deep rest at the nest/off-phase).
+inline constexpr float kEnergySleepRecover   = 0.160f;
 
 // Advance every CreatureComponent by one fixed tick. Pure function of registry state + dt.
 inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, float dt) {
@@ -180,7 +183,10 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
         s.is_predator = cr.is_predator;
         s.hunger = cr.hunger;
         s.stamina = cr.stamina;
-        s.energy = cr.energy;  // plumbed for Phase E/F Sleep utility; unused by DecideCreatureAction today
+        s.energy = cr.energy;
+        // Circadian off-phase drives Sleep. Absent component -> activity stays 1.0 (always
+        // active) -> Sleep utility 0 -> byte-identical to a world with no circadian creatures.
+        if (const auto* cc = reg.try_get<Comp::CircadianComponent>(e)) s.circadian_activity = cc->activity;
         const float nearNorm = found ? (1.0f - utility_clamp01(bestDist / 30.0f)) : 0.0f;
         if (cr.is_predator) {
             s.food_proximity = nearNorm;
@@ -221,6 +227,12 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
             case CreatureAction::Rest:
                 cr.stamina = utility_clamp01(cr.stamina + 0.3f * dt);  // recover sprint fuel
                 cr.energy  = utility_clamp01(cr.energy + kEnergyRestRecover * dt);  // and rest off fatigue
+                break;
+            case CreatureAction::Sleep:
+                // Deep rest: stay put (dirx/dirz remain 0 -> no wish velocity) and recover energy
+                // fast. Stamina recovers too. The per-tick drain below still applies (net recover).
+                cr.stamina = utility_clamp01(cr.stamina + 0.3f * dt);
+                cr.energy  = utility_clamp01(cr.energy + kEnergySleepRecover * dt);
                 break;
         }
 
