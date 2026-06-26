@@ -39,6 +39,10 @@
     "tree_wind": { "enabled": false },
     "plant_procgen": { "enabled": true },
     "sky_lut_gpu": { "enabled": true },
-    "circadian": { "enabled": false, "params": { "amplitude": 1.0 } }
+    "circadian": { "enabled": false, "params": { "amplitude": 1.0 } },
+    "_spawn_comment": "Client-only ambient living-world spawn (never hashed). enabled:false -> compiled defaults. Tune how many creatures/ants populate the world + their speeds.",
+    "creature_spawn": { "enabled": false, "params": {
+      "herd_count": 12, "predator_speed": 4.0, "prey_speed": 2.6, "initial_hunger": 0.2 } },
+    "foraging_colony": { "enabled": false, "params": { "ant_count": 24, "food_amount": 1000000 } }
   }
 }

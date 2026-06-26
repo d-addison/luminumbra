@@ -62,6 +62,8 @@ enum class SysKey : std::uint8_t {
     RenderTaau,          // FR-R5 temporal AA resolve (motion-reprojected history); default OFF
     RenderSkyLutGpu,     // spec 008 WS-4: sky LUTs (init + refresh) via GPU compute instead of CPU integration; default OFF
     RenderCircadian,     // diurnal/nocturnal activity-curve amplitude; default OFF (component-gated)
+    RenderCreatureSpawn, // ambient creature spawn counts/speeds (client-only; never hashed)
+    RenderForagingColony,// ant-colony spawn (client-only)
     Count
 };
 
@@ -100,6 +102,10 @@ enum class SysParam : std::uint8_t {
     ForagingDeposit, ForagingTrailWeight, ForagingGoalWeight,
     // render.circadian.* — activity curve amplitude (render-only)
     CircadianAmplitude,
+    // render.creature_spawn.* — ambient living-world spawn (client-only; never hashed)
+    SpawnHerdCount, SpawnPredatorSpeed, SpawnPreySpeed, SpawnInitialHunger,
+    // render.foraging_colony.* — ant colony spawn (client-only)
+    ColonyAntCount, ColonyFoodAmount,
     Count
 };
 

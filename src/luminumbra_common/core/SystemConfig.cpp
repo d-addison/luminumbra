@@ -46,6 +46,8 @@ constexpr KeyMeta kKeys[] = {
     {SysKey::RenderTaau, Section::Render, "render", "taau"},
     {SysKey::RenderSkyLutGpu, Section::Render, "render", "sky_lut_gpu"},
     {SysKey::RenderCircadian, Section::Render, "render", "circadian"},
+    {SysKey::RenderCreatureSpawn, Section::Render, "render", "creature_spawn"},
+    {SysKey::RenderForagingColony, Section::Render, "render", "foraging_colony"},
 };
 
 constexpr ParamMeta kParams[] = {
@@ -95,6 +97,14 @@ constexpr ParamMeta kParams[] = {
     {SysParam::ForagingGoalWeight, SysKey::SimForaging, "goal_weight", false, 1.0f, glm::vec3(0.0f)},
     // render.circadian.*
     {SysParam::CircadianAmplitude, SysKey::RenderCircadian, "amplitude", false, 1.0f, glm::vec3(0.0f)},
+    // render.creature_spawn.* — client-only ambient spawn (defaults mirror main_client)
+    {SysParam::SpawnHerdCount, SysKey::RenderCreatureSpawn, "herd_count", false, 12.0f, glm::vec3(0.0f)},
+    {SysParam::SpawnPredatorSpeed, SysKey::RenderCreatureSpawn, "predator_speed", false, 4.0f, glm::vec3(0.0f)},
+    {SysParam::SpawnPreySpeed, SysKey::RenderCreatureSpawn, "prey_speed", false, 2.6f, glm::vec3(0.0f)},
+    {SysParam::SpawnInitialHunger, SysKey::RenderCreatureSpawn, "initial_hunger", false, 0.2f, glm::vec3(0.0f)},
+    // render.foraging_colony.*
+    {SysParam::ColonyAntCount, SysKey::RenderForagingColony, "ant_count", false, 24.0f, glm::vec3(0.0f)},
+    {SysParam::ColonyFoodAmount, SysKey::RenderForagingColony, "food_amount", false, 1000000.0f, glm::vec3(0.0f)},
 };
 
 // Overlay the `user.*` section of `data` onto `user`, setting only named fields (merge

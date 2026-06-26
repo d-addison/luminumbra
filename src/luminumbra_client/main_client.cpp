@@ -5568,7 +5568,17 @@ int main(int argc, char* argv[]) {
                             if (s_wildlife_ok) {
                                 auto* phys = gameSession->GetPhysicsSystem();
                                 auto wgen = luminumbra::core::DeterministicRng::seeded(0xFA0FA0u, 4242u, 1u);
-                                const int kHerd = 12;
+                                // Full control: ambient spawn count/speeds from systems.json
+                                // render.creature_spawn (client-only; compiled defaults when OFF).
+                                using SK = luminumbra::core::SysKey;
+                                using SP = luminumbra::core::SysParam;
+                                const bool spawnCfg = g_systemConfig.enabled(SK::RenderCreatureSpawn);
+                                const int kHerd = spawnCfg
+                                    ? std::max(0, static_cast<int>(g_systemConfig.param(SP::SpawnHerdCount, 12.0f)))
+                                    : 12;
+                                const float cfgPredSpeed = spawnCfg ? g_systemConfig.param(SP::SpawnPredatorSpeed, 4.0f) : 4.0f;
+                                const float cfgPreySpeed = spawnCfg ? g_systemConfig.param(SP::SpawnPreySpeed, 2.6f) : 2.6f;
+                                const float cfgInitHunger = spawnCfg ? g_systemConfig.param(SP::SpawnInitialHunger, 0.2f) : 0.2f;
                                 int wlSpawned = 0;
                                 int wlHoles = 0;
                                 for (int i = 0; i < kHerd; ++i) {
@@ -5624,8 +5634,8 @@ int main(int argc, char* argv[]) {
                                     auto& cr = reg.emplace<Luminumbra::Components::CreatureComponent>(e);
                                     cr.species_id = sp.species_id();
                                     cr.is_predator = sp.predator;
-                                    cr.hunger = 0.2f;
-                                    cr.move_speed = sp.predator ? 4.0f : 2.6f;
+                                    cr.hunger = cfgInitHunger;
+                                    cr.move_speed = sp.predator ? cfgPredSpeed : cfgPreySpeed;
                                     auto& gn = reg.emplace<Luminumbra::Components::CreatureGenomeComponent>(e);
                                     gn.move_speed = cr.move_speed;
                                     gn.size_scale = size;
@@ -5679,14 +5689,22 @@ int main(int argc, char* argv[]) {
                                     };
                                     const int nestCx = clampCell(gameSession->ScentWorldToCellX(csp.x));
                                     const int nestCz = clampCell(gameSession->ScentWorldToCellZ(csp.z) + 6);
+                                    // Full control: colony size + food from systems.json render.foraging_colony.
+                                    const bool colCfg = g_systemConfig.enabled(luminumbra::core::SysKey::RenderForagingColony);
+                                    const int antCount = colCfg
+                                        ? std::max(0, static_cast<int>(g_systemConfig.param(luminumbra::core::SysParam::ColonyAntCount, 24.0f)))
+                                        : 24;
+                                    const std::int32_t foodAmount = colCfg
+                                        ? static_cast<std::int32_t>(g_systemConfig.param(luminumbra::core::SysParam::ColonyFoodAmount, 1000000.0f))
+                                        : 1000000;
                                     auto placeFood = [&](int cx, int cz) {
                                         const auto fe = reg.create();
                                         auto& fs = reg.emplace<Luminumbra::Components::FoodSourceComponent>(fe);
-                                        fs.cell_x = clampCell(cx); fs.cell_z = clampCell(cz); fs.amount = 1000000;
+                                        fs.cell_x = clampCell(cx); fs.cell_z = clampCell(cz); fs.amount = foodAmount;
                                     };
                                     placeFood(nestCx + 14, nestCz);       // far food (long path)
                                     placeFood(nestCx - 9,  nestCz + 4);   // near food (short path)
-                                    for (int ai = 0; ai < 24; ++ai) {
+                                    for (int ai = 0; ai < antCount; ++ai) {
                                         const auto ae = reg.create();
                                         auto& fg = reg.emplace<Luminumbra::Components::ForagerComponent>(ae);
                                         fg.cell_x = nestCx; fg.cell_z = nestCz;
@@ -5696,8 +5714,8 @@ int main(int argc, char* argv[]) {
                                                                        csp.y, gameSession->ScentCellToWorldZ(nestCz));
                                         tf.scale = Luminumbra::Vec3(0.18f, 0.18f, 0.18f);
                                     }
-                                    LUMINUMBRA_CORE_INFO("Forager colony: nest cell ({},{}) + 2 food + 24 ants",
-                                                         nestCx, nestCz);
+                                    LUMINUMBRA_CORE_INFO("Forager colony: nest cell ({},{}) + 2 food + {} ants",
+                                                         nestCx, nestCz, antCount);
                                 }
                             }
                         }
