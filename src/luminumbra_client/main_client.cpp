@@ -4214,30 +4214,48 @@ int main(int argc, char* argv[]) {
                 const auto& sp = gameSession->GetMetadata().spawnPoint;
                 int placed = 0;
                 float firstX = 0.0f, firstY = 0.0f, firstZ = 0.0f;
-                for (int gz = -6; gz <= 6 && placed < 48; ++gz) {
-                    for (int gx = -6; gx <= 6 && placed < 48; ++gx) {
-                        const float wx = sp.x + static_cast<float>(gx) * 26.0f;
-                        const float wz = sp.z + static_cast<float>(gz) * 26.0f;
-                        const float surf = fws->GetTerrainHeightAt(wx, wz);
-                        // Probe down through the surface cap into the cave volume.
-                        for (float dy = 20.0f; dy < 90.0f; dy += 2.5f) {
-                            const float wy = surf - dy;
-                            if (fws->get_density_at(Luminumbra::Vec3(wx, wy, wz)) < 0.0f) { // cave air
-                                const auto e = freg.create();
-                                auto& tf = freg.emplace<Luminumbra::Components::TransformComponent>(e);
-                                tf.position = Luminumbra::Vec3(wx, wy + 0.6f, wz);
-                                auto& pl = freg.emplace<Luminumbra::Components::PointLightComponent>(e);
-                                pl.color = Luminumbra::Vec3(0.45f, 0.78f, 1.0f); // cyan lumin glow
-                                pl.intensity = 4.5f;
-                                pl.radius = 24.0f;
-                                if (placed == 0) { firstX = wx; firstY = wy; firstZ = wz; }
-                                ++placed;
-                                break;
+                // Cave bug B: the old grid probe dropped a crystal at the FIRST air below
+                // surf-20m, which in an open valley/depression is just sky -> crystals
+                // floated in open dips, not caves. Use the roof-checked enclosed-cave
+                // locator (the same FindEnclosedCave the --debug-goto camera + hero crystal
+                // use): scan several deterministic near-spawn anchors and light the REAL
+                // enclosed cavern found near each. Client-only point lights (never hashed);
+                // pure deterministic SDF reads -> reproducible, no re-pin.
+                {
+                    constexpr float kAnchorStep   = 120.0f;        // metres between anchors
+                    constexpr float kSearchRadius = 140.0f;        // per-anchor enclosed-cave search
+                    constexpr float kMinSepSq     = 20.0f * 20.0f; // de-dup nearby hits
+                    std::vector<glm::vec3> caveCenters;
+                    for (int gz = -2; gz <= 2 && placed < 16; ++gz) {
+                        for (int gx = -2; gx <= 2 && placed < 16; ++gx) {
+                            const glm::vec3 anchorW(sp.x + static_cast<float>(gx) * kAnchorStep,
+                                                    sp.y,
+                                                    sp.z + static_cast<float>(gz) * kAnchorStep);
+                            auto cave = Luminumbra::Debug::FindEnclosedCave(*fws, anchorW, kSearchRadius);
+                            if (!cave) continue;
+                            const glm::vec3 c = cave->target; // interior void point of the cavern
+                            // Skip if a crystal already lit a cavern at essentially this spot
+                            // (neighbouring anchors can resolve to the same big cave).
+                            bool dup = false;
+                            for (const glm::vec3& prev : caveCenters) {
+                                const glm::vec3 d = prev - c;
+                                if (glm::dot(d, d) < kMinSepSq) { dup = true; break; }
                             }
+                            if (dup) continue;
+                            caveCenters.push_back(c);
+                            const auto e = freg.create();
+                            auto& tf = freg.emplace<Luminumbra::Components::TransformComponent>(e);
+                            tf.position = Luminumbra::Vec3(c.x, c.y + 0.6f, c.z);
+                            auto& pl = freg.emplace<Luminumbra::Components::PointLightComponent>(e);
+                            pl.color = Luminumbra::Vec3(0.45f, 0.78f, 1.0f); // cyan lumin glow
+                            pl.intensity = 4.5f;
+                            pl.radius = 24.0f;
+                            if (placed == 0) { firstX = c.x; firstY = c.y; firstZ = c.z; }
+                            ++placed;
                         }
                     }
                 }
-                LUMINUMBRA_CORE_INFO("Lumin crystals: placed {} cave glow point-lights near spawn; "
+                LUMINUMBRA_CORE_INFO("Lumin crystals: placed {} enclosed-cave glow point-lights near spawn; "
                                      "first at world ({:.1f}, {:.1f}, {:.1f})", placed, firstX, firstY, firstZ);
                 // Guarantee the located ENCLOSED cave (the one --debug-goto frames) is lit: drop a
                 // brighter hero crystal at its centre so the deep roofed pockets the grid scatter
@@ -5697,6 +5715,21 @@ int main(int argc, char* argv[]) {
                                 // Keep trees out of water at ANY elevation (sea + perched
                                 // lakes), not just sea level; a shoreline margin is fine.
                                 if (h < ws->WaterLevelAt(x, zc) + 1.0f) continue;
+                                // ROOFED-CAVE REJECT (cave bug A): terr()==GetTerrainHeightAt is
+                                // the analytic heightmap surface and ignores the cave SDF, so a
+                                // column whose heightmap point sits under a cavern roof would grow
+                                // a tree deep underground. Reject if SOLID terrain lies just above
+                                // the surface (get_density_at >= 0 == solid; < 0 == cave air).
+                                // Render-only scatter (never hashed) -> pure SDF read, no re-pin.
+                                {
+                                    bool roofed = false;
+                                    for (float up = 1.0f; up <= 6.0f; up += 1.0f) {
+                                        if (ws->get_density_at(Luminumbra::Vec3(x, h + up, zc)) >= 0.0f) {
+                                            roofed = true; break;
+                                        }
+                                    }
+                                    if (roofed) continue;
+                                }
                                 const float slope = glm::max(
                                     glm::max(std::abs(terr(x + hs, zc) - h), std::abs(terr(x - hs, zc) - h)),
                                     glm::max(std::abs(terr(x, zc + hs) - h), std::abs(terr(x, zc - hs) - h)));

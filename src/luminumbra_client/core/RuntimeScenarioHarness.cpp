@@ -2034,6 +2034,24 @@ Luminumbra::Rendering::FoliagePass::SurfaceSample FoliageSurfaceQuery(
         s.valid = false;
         return s;
     }
+    // ROOFED-CAVE REJECT (cave bug A): GetTerrainHeightAt is the ANALYTIC heightmap
+    // surface and ignores the cave SDF. Where a cavern roof rises above that surface,
+    // the heightmap point sits INSIDE a roofed air pocket, so grass cards were being
+    // planted on ledges deep in cave chambers (green albedo patches underground). Only
+    // OPEN-SKY columns should grow ground cover: probe straight up from the surface and
+    // reject if SOLID terrain (get_density_at >= 0) lies within a short overhead span.
+    // Same air-convention (density < 0 == air) the enclosed-cave locator uses. Pure
+    // read of the deterministic SDF — render-only, never hashed.
+    {
+        constexpr float kRoofProbeM = 6.0f;   // solid this far overhead == roofed
+        constexpr float kRoofStep   = 1.0f;
+        for (float up = kRoofStep; up <= kRoofProbeM; up += kRoofStep) {
+            if (ws->get_density_at(Luminumbra::Vec3(world_x, h + up, world_z)) >= 0.0f) {
+                s.valid = false; // a roof overhead -> underground, no sky-lit grass
+                return s;
+            }
+        }
+    }
     // Slope from a 1 m central finite difference of the shaped height (pure).
     const float hx = ws->GetTerrainHeightAt(world_x + 1.0f, world_z);
     const float hz = ws->GetTerrainHeightAt(world_x, world_z + 1.0f);
