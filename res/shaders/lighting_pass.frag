@@ -76,6 +76,22 @@ struct PointLight {
 uniform PointLight u_pointLights[MAX_POINT_LIGHTS];
 uniform int u_pointLightCount;
 
+// --- Cave / sky-visibility ambient occlusion (render-only, default OFF) ---
+// SSAO uses a ~0.8m radius, so a fragment deep in a cave still receives the FULL
+// daylight sky-ambient and reads as flat-lit grey, swamping any point light placed
+// there. This term marches a short ray from the fragment toward the sky through the
+// view-space G-buffer; if geometry blocks the upward ray the fragment is occluded
+// from the sky and its AMBIENT (sky+ground-bounce) fades toward u_caveAmbientFloor.
+// Sun/moon/point lights are NOT touched, so a lamp in a now-dark cave reads naturally.
+// GATED by u_caveAmbientOcclusion (0 = OFF => skyVis==1 => pixel-identical to pre-fix).
+uniform float u_caveAmbientOcclusion;  // master gate: 0 = OFF (default, C++ sets it)
+uniform float u_caveSkyMaxDist;        // metres of upward ray to probe
+uniform int   u_caveSkySteps;          // march samples
+uniform float u_caveAmbientFloor;      // residual ambient deep inside (0..1)
+uniform float u_caveThickness;         // m: occluder depth band
+uniform mat4  u_projection;            // view -> clip, to step the ray in screen space
+uniform vec2  u_screenSize;            // pixels
+
 // T-I5a-8 (C3): wind-advected cloud cast-shadow uniforms. The coverage field is a
 // pure function of replicated weather state + tick + wind, evaluated render-side;
 // nothing here writes back into the sim (critique F2, one-way). directSun is
@@ -294,6 +310,49 @@ vec3 CalculateLightContribution(vec3 L, vec3 V, vec3 N, vec3 F0, vec3 albedo, fl
     return (kD * albedo / PI + specular) * radiance * NdotL;
 }
 
+// Long-range sky visibility via an upward view-space ray-march against the
+// G-buffer. Returns 1.0 = fully open to the sky, -> u_caveAmbientFloor when the
+// fragment is roofed over (cave/overhang). Cheap: u_caveSkySteps depth taps.
+// Only called when u_caveAmbientOcclusion > 0.5 (see main); zero cost when OFF.
+float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
+    // Sky direction in VIEW space (world +Y rotated by the view rotation). The
+    // upper-left 3x3 of u_inverseView maps view->world; its transpose maps the
+    // world up vector into view space.
+    vec3 worldUp = vec3(0.0, 1.0, 0.0);
+    vec3 skyDirView = normalize(transpose(mat3(u_inverseView)) * worldUp);
+    // Start a bit off the surface along the normal to avoid self-occlusion, then
+    // march toward the sky. Sample the G-buffer view-space position; if a sampled
+    // surface is CLOSER to the eye than the ray point by more than u_caveThickness,
+    // the ray is blocked.
+    vec3 ro = viewPosFrag + viewNrm * 0.05;
+    float occluded = 0.0;
+    float stepLen = u_caveSkyMaxDist / float(max(u_caveSkySteps, 1));
+    for (int s = 1; s <= 32; ++s) {
+        if (s > u_caveSkySteps) break;          // dynamic bound (const loop cap)
+        vec3 p = ro + skyDirView * (stepLen * float(s));
+        // Project to screen.
+        vec4 clip = u_projection * vec4(p, 1.0);
+        if (clip.w <= 0.0) break;               // behind eye -> stop
+        vec2 uv = (clip.xy / clip.w) * 0.5 + 0.5;
+        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) break; // off-screen = treat as open
+        vec3 sampPos = texture(gPosition, uv).rgb;
+        // gPosition is 0 where nothing was rendered (sky); skip those (open).
+        if (dot(sampPos, sampPos) < 1e-6) continue;
+        // The ray point p and the stored surface sampPos share the same screen
+        // pixel. If the stored surface is in FRONT of the ray sample (closer to
+        // the eye) within the thickness band, a ceiling/overhang occludes this
+        // upward sample.
+        float rayDepth  = length(p);
+        float surfDepth = length(sampPos);
+        if (surfDepth < rayDepth - 0.05 && (rayDepth - surfDepth) < u_caveSkyMaxDist) {
+            // Weight nearer occluders more (closer ceiling = darker).
+            occluded = max(occluded, 1.0 - float(s - 1) / float(u_caveSkySteps));
+        }
+    }
+    // occluded in [0,1]; map to a sky-visibility multiplier in [floor,1].
+    return mix(1.0, u_caveAmbientFloor, clamp(occluded, 0.0, 1.0));
+}
+
 void main() {
     // --- Step 1: Decode compressed G-Buffer ---
     
@@ -494,7 +553,17 @@ void main() {
     vec3 hemiAmbient = mix(groundBounce, u_skyAmbientColor, hemi);
     vec3 ambientDiffuse  = kD_amb * Albedo * hemiAmbient;
     vec3 ambientSpecular = F_amb * hemiAmbient;
-    vec3 ambient = (ambientDiffuse + ambientSpecular) * ao;
+    // Long-range sky visibility: roofed-over (cave/overhang) fragments lose the
+    // flat sky-ambient fill so deep interiors go near-black and any point light
+    // placed there reads as a real pool of light. GATED (default OFF) -> the
+    // skyVis multiplier is exactly 1.0 when u_caveAmbientOcclusion==0, so the
+    // shipped path is pixel-identical. Applied to AMBIENT ONLY; Lo (sun/moon/
+    // point) is untouched.
+    float skyVis = 1.0;
+    if (u_caveAmbientOcclusion > 0.5) {
+        skyVis = computeSkyVisibility(viewPos, viewNormal);
+    }
+    vec3 ambient = (ambientDiffuse + ambientSpecular) * ao * skyVis;
     vec3 color = ambient + Lo + caustics + crystalGlow + aetherGlow; // + A1d aether glow
 
     // T-I5b-5-water-backlog (seabed waterline terracing de-band): the far seabed

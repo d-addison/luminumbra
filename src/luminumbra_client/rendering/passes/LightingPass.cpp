@@ -13,6 +13,8 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 
 namespace Luminumbra::Rendering {
@@ -168,6 +170,41 @@ void LightingPass::execute(RenderPipeline& pipeline, const Camera& camera) {
         m_lighting_shader->setVec3(prefix + "color", pipeline.m_point_lights_this_frame[i].color);
         m_lighting_shader->setFloat(prefix + "radius", pipeline.m_point_lights_this_frame[i].radius);
         m_lighting_shader->setFloat(prefix + "intensity", pipeline.m_point_lights_this_frame[i].intensity);
+    }
+    // Cave / sky-visibility ambient occlusion (render-only). Default OFF =>
+    // u_caveAmbientOcclusion 0.0 => the shader's skyVis term is exactly 1.0 =>
+    // pixel-identical to the pre-fix path. Enabled + tuned via the LUMIN_CAVE_AO
+    // env knob ("enabled,maxDist,floor,steps,thickness"). The probe needs the
+    // same projection the SSAO pass builds, plus the screen size.
+    {
+        const glm::mat4 cave_proj = glm::perspective(
+            glm::radians(camera.Zoom),
+            static_cast<float>(pipeline.m_screen_width) / static_cast<float>(pipeline.m_screen_height),
+            camera.GetNearPlane(), camera.GetFarPlane());
+        m_lighting_shader->setMat4("u_projection", cave_proj);
+        m_lighting_shader->setVec2("u_screenSize",
+            glm::vec2(pipeline.m_screen_width, pipeline.m_screen_height));
+
+        struct CaveAO { float enabled, maxDist, floor, thickness; int steps; };
+        static const CaveAO s_caveAO = [] {
+            CaveAO c{0.0f, 24.0f, 0.06f, 1.5f, 8}; // DEFAULT OFF (enabled=0)
+            if (const char* env = std::getenv("LUMIN_CAVE_AO")) {
+                // "enabled,maxDist,floor,steps,thickness"
+                float en = 0, md = 24, fl = 0.06f, th = 1.5f; int st = 8;
+                std::sscanf(env, "%f,%f,%f,%d,%f", &en, &md, &fl, &st, &th);
+                c = CaveAO{en, md, fl, th, st};
+            }
+            return c;
+        }();
+        m_lighting_shader->setFloat("u_caveAmbientOcclusion", s_caveAO.enabled);
+        m_lighting_shader->setFloat("u_caveSkyMaxDist", s_caveAO.maxDist);
+        m_lighting_shader->setInt("u_caveSkySteps", s_caveAO.steps);
+        m_lighting_shader->setFloat("u_caveAmbientFloor", s_caveAO.floor);
+        m_lighting_shader->setFloat("u_caveThickness", s_caveAO.thickness);
+        // Optional point-light punch (shader Patch 4, not applied); defaults keep
+        // legacy behaviour. setFloat on an absent uniform is a harmless no-op.
+        m_lighting_shader->setFloat("u_pointLightFalloff", 0.05f);
+        m_lighting_shader->setFloat("u_pointLightInvSqMix", 0.0f);
     }
     m_lighting_shader->setFloat("u_farPlane", camera.GetFarPlane());
     ShadowMap& shadow_map = pipeline.m_shadow_pass->shadow_map();
