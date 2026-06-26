@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <numeric>
+#include <thread>
 #include <vector>
 
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
@@ -132,6 +133,26 @@ std::size_t Foreground(const std::vector<unsigned char>& px) {
 constexpr int kPreviewW = 640;
 constexpr int kPreviewH = 480;
 
+// TASK #6: the world BUILD now runs on a background worker thread; tick() (past
+// the debounce) only SIGNALS it, and render()/render_to_backbuffer() adopt the
+// finished build (pending->live swap + the rebuild_generation bump) on the GL
+// thread. So a test drives a rebuild by: tick(past-debounce) to signal, then
+// pump render() until the generation advances (the worker finished + the swap
+// happened). This helper blocks (bounded) on that lifecycle so the rest of the
+// assertions stay exactly as before.
+inline bool PumpRebuild(Luminumbra::Client::WorldgenPreview& preview,
+                        Luminumbra::Rendering::RenderPipeline& pipeline,
+                        unsigned expect_generation) {
+    for (int i = 0; i < 2000; ++i) {
+        preview.render(pipeline, 1.0f / 60.0f); // adopts a finished build on the GL thread
+        if (preview.rebuild_generation() >= expect_generation && preview.world_ready()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return preview.rebuild_generation() >= expect_generation && preview.world_ready();
+}
+
 struct PreviewFixture {
     Luminumbra::Rendering::RenderPipeline pipeline;
     Luminumbra::Client::WorldgenPreview preview;
@@ -143,9 +164,11 @@ struct PreviewFixture {
         preview.set_active(true);
         preview.ensure_target(kPreviewW, kPreviewH);
         preview.set_params(FixedCandidate(), /*seed*/ 4242);
-        // Build synchronously now (bypass the debounce) so the first render has a
-        // world: tick with a dt past the debounce window.
+        // Signal the background build (past the debounce), then pump render() until
+        // the worker finishes and the GL-thread swap lands, so the first render has
+        // a world (TASK #6: the build is asynchronous).
         preview.tick(1.0f);
+        PumpRebuild(preview, pipeline, /*expect_generation*/ 1u);
     }
 };
 
@@ -184,7 +207,9 @@ TEST(WorldgenPreviewTest, ChangingParamsChangesTargetPixels) {
     p.height_offset = 30.0f;
     const unsigned gen0 = fx.preview.rebuild_generation();
     fx.preview.set_params(p, 4242);
-    fx.preview.tick(1.0f); // past debounce -> rebuild
+    fx.preview.tick(1.0f); // past debounce -> SIGNAL the background rebuild
+    // Pump render() until the worker finishes + the GL-thread swap bumps the gen.
+    ASSERT_TRUE(PumpRebuild(fx.preview, fx.pipeline, gen0 + 1u));
     EXPECT_EQ(fx.preview.rebuild_generation(), gen0 + 1u);
     ASSERT_TRUE(fx.preview.render(fx.pipeline, 1.0f / 60.0f));
     const std::vector<unsigned char> after = ReadTarget(fx.preview);
@@ -250,11 +275,15 @@ TEST(WorldgenPreviewTest, RebuildIsDebouncedAndLatestWins) {
     }
     EXPECT_EQ(fx.preview.rebuild_generation(), gen0) << "no rebuild should fire mid-burst";
 
-    // Let the debounce window elapse -> exactly ONE rebuild for the whole burst.
+    // Let the debounce window elapse -> the burst collapses to ONE signalled build.
+    // Pump render() until the worker finishes + the GL-thread swap bumps the gen
+    // (TASK #6: the actual rebuild + generation bump are asynchronous).
     fx.preview.tick(1.0f);
-    EXPECT_EQ(fx.preview.rebuild_generation(), gen0 + 1u);
-    // And no further rebuild once settled.
+    ASSERT_TRUE(PumpRebuild(fx.preview, fx.pipeline, gen0 + 1u));
+    EXPECT_EQ(fx.preview.rebuild_generation(), gen0 + 1u) << "exactly one rebuild for the burst";
+    // And no further rebuild once settled (dirty was cleared at signal time).
     fx.preview.tick(1.0f);
+    fx.preview.render(fx.pipeline, 1.0f / 60.0f);
     EXPECT_EQ(fx.preview.rebuild_generation(), gen0 + 1u);
 }
 

@@ -17,21 +17,37 @@
 // TerrainGenParams via the in-memory loader seam (LoadTerrainPresetFromJson)
 // with the correct data root, constructs a real world system, and renders it.
 //
-// Threading: SHIELD_WorldSystem here runs with NO JobSystem (synchronous, like
-// WorldGenViewer + the menu backdrop's bounded build), so construct + stream +
-// render all happen on the calling (GL/main) thread.
+// Threading (TASK #6): the world BUILD (worldgen + meshing + WaterSystem init)
+// is CPU-only (no GL) and runs on a background worker thread so a debounced knob
+// change never stalls the create screen. The worker writes ONLY *pending* members
+// (m_pending_world / m_pending_water / m_pending_registry); the render/main thread
+// reads the *live* members and performs the pending->live swap + bumps
+// m_rebuild_generation ON THE GL THREAD (so the TASK #4 foliage rebuild + any GL
+// upload stay main-thread). Same seed/params/sequence -> identical world; only
+// WHEN the rebuild completes changes (render-only -> zero world_hash impact).
 
 #include <glad/glad.h>
 
+#include <atomic>
+#include <condition_variable>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include <nlohmann/json_fwd.hpp>
 
 #include <entt/entt.hpp>
 
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h" // Systems::TerrainGenParams
+
+// TASK #4: the FoliagePass ChunkScatter record is stored as a cached member so
+// the preview scatters vegetation exactly like the real world path. The shared
+// surface-query context/callback (ScenarioHarness::FoliageScatterContext /
+// FoliageSurfaceQuery) are only used in the .cpp, so that header is included there.
+#include "rendering/passes/FoliagePass.h"          // Rendering::FoliagePass::ChunkScatter
 
 namespace Luminumbra::Rendering { class RenderPipeline; class Camera; }
 namespace Luminumbra { class JobSystem; }
@@ -87,9 +103,11 @@ public:
     void set_active(bool active) { m_active = active; }
     bool active() const { return m_active; }
 
-    // Advance the debounce timer; performs at most ONE world rebuild when the
-    // debounce window elapses on the latest pending candidate. Returns true if a
-    // rebuild happened this tick. dt is seconds.
+    // Advance the debounce timer; when the debounce window elapses on the latest
+    // pending candidate this SIGNALS the background worker to (re)build the world
+    // (TASK #6). The actual pending->live swap happens later, on the GL thread, in
+    // render()/render_to_backbuffer(). Returns true if a build was signalled this
+    // tick. dt is seconds.
     bool tick(float dt);
 
     // Render the current candidate world into the offscreen FBO via the engine
@@ -121,9 +139,18 @@ public:
     static Luminumbra::Vec3 look_at_center();
 
 private:
-    void build_world_now();                 // synchronous rebuild from pending params
+    // TASK #6: the background worker loop + the helpers it/the main thread use.
+    void start_worker();                    // spin up m_build_thread (once)
+    void worker_loop();                     // worker: drains m_build_pending
+    void build_world_pending();             // CPU-only build into PENDING members (worker thread)
+    void swap_pending_into_live();          // GL thread: pending->live + bump generation + foliage refresh marker
     void configure_camera(Rendering::Camera& cam) const; // orbit -> Camera pose
     void apply_look(Rendering::RenderPipeline& pipeline) const; // weather/tod/clouds
+
+    // TASK #4: (re)build the deterministic foliage scatter for the live world's
+    // bounded chunk set, but only once per actual world rebuild (cached by
+    // m_rebuild_generation so it is a one-shot per world build, not per-frame).
+    void rebuild_foliage_if_needed(Rendering::RenderPipeline& pipeline);
 
     // GL offscreen target.
     GLuint m_fbo = 0;
@@ -132,6 +159,7 @@ private:
     int m_fbo_w = 0;
     int m_fbo_h = 0;
 
+    // --- LIVE world (read by the render/main thread only). ---
     // Candidate world params (resolved) + the live built world.
     std::unique_ptr<Systems::SHIELD_WorldSystem> m_world;
     // The water system linked to m_world. WITHOUT this, a lake/archipelago (water) preset
@@ -142,10 +170,25 @@ private:
     std::unique_ptr<Systems::WaterSystem> m_water;
     // The synchronous EnsureSurfaceReadyNear streaming path requires a non-null
     // physics system; lazily created on the first build (collision_radius 0 so it
-    // only ever touches the single center chunk).
+    // only ever touches the single center chunk). Shared by the worker (build) and
+    // the main thread (update during swap); created on the main thread BEFORE the
+    // worker is launched so the worker never races its creation.
     std::unique_ptr<Systems::PhysicsSystem> m_physics;
-    entt::registry m_registry; // owned scratch registry for the preview world
-    Systems::TerrainGenParams m_pending_params;
+    entt::registry m_registry; // LIVE renderable registry for the preview world
+
+    // --- PENDING world (written ONLY by the worker thread). The main/render
+    // thread reads these solely inside swap_pending_into_live() once m_build_done
+    // is set, then moves them into the live members. Ordered AFTER the live
+    // members so they tear down first; reset water-before-world to match the dtor
+    // dependency order (water holds a SHIELD_WorldSystem*). ---
+    std::unique_ptr<Systems::SHIELD_WorldSystem> m_pending_world;
+    std::unique_ptr<Systems::WaterSystem> m_pending_water;
+    entt::registry m_pending_registry;
+
+    // --- Debounce + the queued candidate (guarded by m_candidate_mutex; the
+    // worker snapshots them under the lock at the start of each build). ---
+    std::mutex m_candidate_mutex;
+    Systems::TerrainGenParams m_pending_params; // latest requested params
     int m_pending_seed = 1337;
     bool m_have_pending = false;     // a candidate is queued
     bool m_pending_dirty = false;    // pending differs from the built world
@@ -153,6 +196,26 @@ private:
     static constexpr float kDebounceSeconds = 0.25f;
     unsigned m_rebuild_generation = 0;
     bool m_built_once = false;
+
+    // --- Worker thread + its signals. ---
+    std::thread m_build_thread;
+    std::mutex m_build_mutex;
+    std::condition_variable m_build_cv;
+    std::atomic<bool> m_build_pending{false}; // main->worker: build the queued candidate
+    std::atomic<bool> m_build_done{false};    // worker->main: pending world is ready to swap
+    std::atomic<bool> m_shutdown{false};      // dtor: stop the worker
+    // A build has been requested and not yet adopted by a swap (covers the window
+    // where the worker has consumed m_build_pending but not yet set m_build_done).
+    // The lazy first-build kick checks this so it never double-submits.
+    std::atomic<bool> m_build_inflight{false};
+    bool m_first_build_requested = false;     // the lazy first-build kick fired once (don't re-kick)
+
+    // TASK #4: foliage scatter cache (render-only). The scatter is a deterministic
+    // pure function of the world; rebuild it once per actual world rebuild.
+    std::vector<Rendering::FoliagePass::ChunkScatter> m_foliage_scatter; // per-chunk inputs for the live world
+    unsigned m_last_foliage_generation = ~0u; // m_rebuild_generation the scatter was built at
+    bool m_foliage_loaded = false;            // scatter archetype set loaded once
+    std::filesystem::path m_data_root;        // data/ root (for the scatter set json)
 
     // Look state.
     Weather m_weather = Weather::Clear;

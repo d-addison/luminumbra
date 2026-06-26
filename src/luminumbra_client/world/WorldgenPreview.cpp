@@ -8,8 +8,10 @@
 #include <nlohmann/json.hpp>
 
 #include "core/Log.h"
+#include "core/RuntimeScenarioHarness.h"           // ScenarioHarness::FoliageScatterContext / FoliageSurfaceQuery
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/WaterSystem.h"
+#include "luminumbra_common/world/Chunk.h"        // Luminumbra::Chunk (renderable chunk coords)
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "rendering/Camera.h"
 #include "rendering/RenderPipeline.h"
@@ -28,6 +30,13 @@ constexpr float kCenterZ = 8.0f;
 // notes); large enough that the framed slice fills the diorama.
 constexpr int kSurfaceRadius = 4;
 constexpr int kCollisionRadius = 0; // no gameplay collision needed for a preview
+
+// TASK #4: foliage fade band. The preview is a tight diorama (radius_4 ring
+// around the center), so keep the fade end well inside the streamed footprint —
+// near a believable carpet, no foliage past the bounded slice.
+constexpr float kFoliageFadeStartM = 60.0f;
+constexpr float kFoliageFadeEndM = 96.0f;
+constexpr float kFoliagePreviewDensityScale = 1.6f; // showcase density (render-only)
 }  // namespace
 
 Luminumbra::Vec3 WorldgenPreview::look_at_center() {
@@ -43,11 +52,26 @@ WorldgenPreview::WorldgenPreview() {
 }
 
 WorldgenPreview::~WorldgenPreview() {
+    // TASK #6: stop the worker FIRST (it touches m_pending_*); join before any
+    // member tears down so a build in flight can't write into freed state.
+    m_shutdown.store(true);
+    {
+        std::lock_guard<std::mutex> lk(m_build_mutex);
+        m_build_pending.store(true); // wake the worker so it observes shutdown
+    }
+    m_build_cv.notify_all();
+    if (m_build_thread.joinable()) {
+        m_build_thread.join();
+    }
+
     if (m_color_texture) glDeleteTextures(1, &m_color_texture);
     if (m_depth_rbo) glDeleteRenderbuffers(1, &m_depth_rbo);
     if (m_fbo) glDeleteFramebuffers(1, &m_fbo);
     // Tear down in dependency order: water holds a SHIELD_WorldSystem*, the world holds
-    // collision refs into physics. Drop water -> world -> (physics destructs last by member order).
+    // collision refs into physics. Drop water -> world for BOTH the pending and live
+    // sets (physics destructs last by member order).
+    m_pending_water.reset();
+    m_pending_world.reset();
     m_water.reset();
     m_world.reset();
 }
@@ -100,10 +124,13 @@ void WorldgenPreview::set_candidate(const nlohmann::json& resolved_preset_json,
         LUMINUMBRA_CORE_WARN("WorldgenPreview candidate parse failed: {}", m_last_error);
         return;
     }
+    // Remember the data root so the foliage scatter set (TASK #4) resolves.
+    m_data_root = data_root;
     set_params(result.params, seed);
 }
 
 void WorldgenPreview::set_params(const Systems::TerrainGenParams& params, int seed) {
+    std::lock_guard<std::mutex> lk(m_candidate_mutex);
     m_pending_params = params;
     m_pending_seed = seed;
     m_have_pending = true;
@@ -140,54 +167,224 @@ void WorldgenPreview::reset_view() {
     m_dist = 120.0f;
 }
 
-bool WorldgenPreview::tick(float dt) {
-    if (!m_active) return false;
-    if (!m_have_pending || !m_pending_dirty) {
-        // No pending change; nothing to rebuild. (A first-use build is forced by
-        // render() when no world exists yet.)
-        return false;
+void WorldgenPreview::start_worker() {
+    if (m_build_thread.joinable()) {
+        return; // already running
     }
-    if (m_debounce_remaining > 0.0f) {
-        m_debounce_remaining -= dt;
-        if (m_debounce_remaining > 0.0f) {
-            return false; // still settling
-        }
-    }
-    build_world_now();
-    return true;
-}
-
-void WorldgenPreview::build_world_now() {
-    // Bring up the physics system lazily on the first build (the synchronous
-    // EnsureSurfaceReadyNear streaming path requires a non-null physics system;
-    // collision_radius 0 keeps it to the single center chunk).
+    // The synchronous EnsureSurfaceReadyNear streaming path requires a non-null
+    // physics system; create it on the MAIN thread BEFORE the worker exists so the
+    // worker never races its construction (it only ever reads m_physics).
     if (!m_physics) {
         m_physics = std::make_unique<Systems::PhysicsSystem>();
         m_physics->startup();
     }
+    m_build_thread = std::thread([this] { worker_loop(); });
+}
 
-    // Reconstruct the preview world from the pending candidate params/seed. No
-    // JobSystem -> EnsureSurfaceReadyNear builds + meshes its bounded chunk set
-    // synchronously on this thread (the per-chunk jobs run inline).
-    m_registry.clear();
-    // Drop the old water system FIRST (it points at the world we're about to replace).
-    m_water.reset();
-    m_world = std::make_unique<Systems::SHIELD_WorldSystem>(
-        /*job_system*/ nullptr, /*water_system*/ nullptr, m_pending_params, m_pending_seed);
+void WorldgenPreview::worker_loop() {
+    for (;;) {
+        {
+            std::unique_lock<std::mutex> lk(m_build_mutex);
+            // Wait for a build request. CRITICAL: also wait until any PREVIOUS
+            // result has been consumed by the main thread (m_build_done cleared in
+            // the swap) before starting the next build — otherwise this worker
+            // would overwrite m_pending_* while the main thread is moving it out
+            // (a data race on the pending world/water/registry). This serialises
+            // pending ownership: worker owns it while building; main owns it during
+            // the swap; never both at once.
+            m_build_cv.wait(lk, [this] {
+                return m_shutdown.load() ||
+                       (m_build_pending.load() && !m_build_done.load());
+            });
+            if (m_shutdown.load()) {
+                return;
+            }
+            m_build_pending.store(false);
+        }
+        if (m_shutdown.load()) {
+            return;
+        }
+        // Build the queued candidate into the PENDING members only (CPU/no-GL).
+        build_world_pending();
+        // Signal the main/render thread to swap pending->live on the GL thread.
+        // The worker now blocks (next loop iteration) until that swap clears
+        // m_build_done, so pending stays stable for the main thread to move.
+        m_build_done.store(true);
+    }
+}
+
+void WorldgenPreview::build_world_pending() {
+    // WORKER THREAD. Writes ONLY m_pending_* members. No GL here: worldgen,
+    // EnsureSurfaceReadyNear (meshing) and WaterSystem are all CPU — in the real
+    // game they run on worker threads too.
+
+    // Snapshot the latest requested params/seed under the candidate lock.
+    Systems::TerrainGenParams params;
+    int seed = 0;
+    {
+        std::lock_guard<std::mutex> lk(m_candidate_mutex);
+        params = m_pending_params;
+        seed = m_pending_seed;
+    }
+
+    m_pending_registry.clear();
+    // Drop a stale pending water FIRST (it points at the pending world we replace).
+    m_pending_water.reset();
+    m_pending_world = std::make_unique<Systems::SHIELD_WorldSystem>(
+        /*job_system*/ nullptr, /*water_system*/ nullptr, params, seed);
     // Link a water system (no JobSystem needed — WaterSystem never dereferences it), exactly as
     // the game world does (GameSession). This is what makes a lake/ocean preset build its water
     // meshes and render water as water; without it the water render path crashes on a null system.
-    m_water = std::make_unique<Systems::WaterSystem>(/*job_system*/ nullptr, m_world.get());
-    m_world->SetWaterSystem(m_water.get());
-    m_world->EnsureSurfaceReadyNear(look_at_center(), m_physics.get(), kSurfaceRadius, kCollisionRadius);
-    // Pull the streamed chunks into the renderable set.
-    m_world->update(m_registry, look_at_center(), m_physics.get());
+    m_pending_water = std::make_unique<Systems::WaterSystem>(/*job_system*/ nullptr, m_pending_world.get());
+    m_pending_world->SetWaterSystem(m_pending_water.get());
+    m_pending_world->EnsureSurfaceReadyNear(look_at_center(), m_physics.get(), kSurfaceRadius, kCollisionRadius);
+    // Pull the streamed chunks into the renderable set (into the PENDING registry).
+    m_pending_world->update(m_pending_registry, look_at_center(), m_physics.get());
+}
 
-    m_pending_dirty = false;
+void WorldgenPreview::swap_pending_into_live() {
+    // GL/MAIN THREAD. Called only after observing m_build_done == true, at which
+    // point the worker is BLOCKED (its loop waits for m_build_done to clear before
+    // touching pending again), so the main thread solely owns the pending members
+    // here. Move pending->live. Reset the live water before the live world (water
+    // holds a SHIELD_WorldSystem*), then adopt the pending set in the same order.
+    m_water.reset();
+    m_world = std::move(m_pending_world);
+    m_water = std::move(m_pending_water);
+    m_registry = std::move(m_pending_registry);
+    m_pending_registry.clear();
+    m_pending_world.reset();
+    m_pending_water.reset();
+
     m_built_once = true;
     m_last_build_failed = false;
     m_last_error.clear();
-    ++m_rebuild_generation;
+    ++m_rebuild_generation; // render-only: the foliage rebuild + tests key off this
+
+    // Release the worker: clear done + wake it so it may start any queued build
+    // (it only resumes touching pending now that we've moved it out). A build is
+    // still "in flight" iff another candidate was queued (m_build_pending) while
+    // this one was building — keep the flag set in that case so the lazy kick
+    // stays suppressed; otherwise clear it (this build is fully adopted).
+    {
+        std::lock_guard<std::mutex> lk(m_build_mutex);
+        m_build_done.store(false);
+        m_build_inflight.store(m_build_pending.load());
+    }
+    m_build_cv.notify_one();
+}
+
+bool WorldgenPreview::tick(float dt) {
+    if (!m_active) return false;
+    bool dirty = false;
+    {
+        std::lock_guard<std::mutex> lk(m_candidate_mutex);
+        if (!m_have_pending || !m_pending_dirty) {
+            // No pending change; nothing to rebuild. (A first-use build is forced
+            // by render() when no world exists yet.)
+            return false;
+        }
+        if (m_debounce_remaining > 0.0f) {
+            m_debounce_remaining -= dt;
+            if (m_debounce_remaining > 0.0f) {
+                return false; // still settling
+            }
+        }
+        // Hand this candidate off to the worker. Clear the dirty flag NOW (under
+        // the lock) so subsequent ticks don't re-signal the same build; a new
+        // set_params() landing mid-build re-arms m_pending_dirty + the debounce,
+        // and the next elapsed tick re-signals -> latest-wins.
+        m_pending_dirty = false;
+        dirty = true;
+    }
+    if (!dirty) return false;
+
+    // TASK #6: the debounce elapsed — SIGNAL the worker rather than building here.
+    // The worker snapshots the latest params under m_candidate_mutex, so a change
+    // landing between now and the snapshot is still latest-wins. The pending->live
+    // swap + generation bump happen later on the GL thread (render path).
+    start_worker();
+    {
+        std::lock_guard<std::mutex> lk(m_build_mutex);
+        m_build_inflight.store(true);
+        m_build_pending.store(true);
+    }
+    m_build_cv.notify_one();
+    return true;
+}
+
+void WorldgenPreview::rebuild_foliage_if_needed(Rendering::RenderPipeline& pipeline) {
+    // TASK #4: build the deterministic per-chunk foliage scatter ONCE per actual
+    // world rebuild (cached by m_rebuild_generation), mirroring the live-game
+    // path (main_client normal-play rebake). RENDER-ONLY: the FoliagePass hashes
+    // nothing into world_hash.
+    if (m_world == nullptr) {
+        return;
+    }
+    if (m_last_foliage_generation == m_rebuild_generation) {
+        return; // already built for this world rebuild
+    }
+    Rendering::FoliagePass* foliage = pipeline.foliage();
+    if (foliage == nullptr) {
+        m_last_foliage_generation = m_rebuild_generation; // no pass -> nothing to do, don't retry
+        return;
+    }
+
+    // Load the scatter archetype set once (the SAME set the live game uses). The
+    // data root is the absolute path to data/; the scatter set lives under
+    // common/foliage/. If we never received a data root (pure set_params caller),
+    // skip the load — the pass stays disabled and renders no foliage.
+    if (!m_foliage_loaded && !m_data_root.empty()) {
+        if (foliage->load_scatter_set(m_data_root / "common/foliage/scatter_set.json")) {
+            foliage->set_fade_distances(kFoliageFadeStartM, kFoliageFadeEndM);
+            foliage->set_density_scale(kFoliagePreviewDensityScale);
+        }
+        m_foliage_loaded = true; // attempt once; on failure the pass stays empty
+    }
+
+    // Build the per-chunk scatter inputs from the live world's renderable chunks —
+    // derived EXACTLY like the real path (chunk origin/extent, biome id, biome
+    // vegetation density), so the preview scatter matches the game.
+    m_foliage_scatter.clear();
+    const auto& renderable = m_world->get_renderable_chunks();
+    m_foliage_scatter.reserve(renderable.size());
+    for (const Luminumbra::Chunk* chunk : renderable) {
+        if (chunk == nullptr) { continue; }
+        const Luminumbra::IVec3 c = chunk->get_coords();
+        const float origin_x = static_cast<float>(c.x * Luminumbra::CHUNK_SIZE_X);
+        const float origin_z = static_cast<float>(c.z * Luminumbra::CHUNK_SIZE_Z);
+        const float center_x = origin_x + Luminumbra::CHUNK_SIZE_X * 0.5f;
+        const float center_z = origin_z + Luminumbra::CHUNK_SIZE_Z * 0.5f;
+        const float surf_h = m_world->GetTerrainHeightAt(center_x, center_z);
+        // Only the chunk straddling the surface column contributes scatter (skip
+        // clearly sub-surface / sky chunks).
+        const float chunk_y0 = static_cast<float>(c.y * Luminumbra::CHUNK_SIZE_Y);
+        if (surf_h < chunk_y0 || surf_h >= chunk_y0 + Luminumbra::CHUNK_SIZE_Y) {
+            continue;
+        }
+        const Luminumbra::u8 biome_id = m_world->BiomeIdAt(center_x, center_z);
+        const float density = m_world->biomes_enabled()
+            ? m_world->biome_table().vegetation_for(biome_id).density
+            : 0.3f; // default temperate density when biomes are off
+        Rendering::FoliagePass::ChunkScatter cs;
+        cs.chunk_xz = glm::ivec2(c.x, c.z);
+        cs.origin = glm::vec3(origin_x, 0.0f, origin_z);
+        cs.extent_m = static_cast<float>(Luminumbra::CHUNK_SIZE_X);
+        cs.biome_id = biome_id;
+        cs.density = density;
+        m_foliage_scatter.push_back(cs);
+    }
+
+    // No wind in the static diorama (the shader still animates sway via u_time);
+    // pass the live world as the surface-query context (height/slope/moisture).
+    foliage->set_wind(glm::vec2(0.0f, 0.0f));
+    ScenarioHarness::FoliageScatterContext ctx{m_world.get()};
+    foliage->rebuild_instances(
+        m_foliage_scatter,
+        &ScenarioHarness::FoliageSurfaceQuery,
+        &ctx, glm::vec3(kCenterX, kCenterY, kCenterZ));
+
+    m_last_foliage_generation = m_rebuild_generation;
 }
 
 void WorldgenPreview::configure_camera(Rendering::Camera& cam) const {
@@ -234,13 +431,32 @@ bool WorldgenPreview::render(Rendering::RenderPipeline& pipeline, float dt) {
     if (m_fbo == 0) {
         return false; // no target allocated yet
     }
-    // Lazy first build so a screen that becomes active renders immediately.
-    if (!m_built_once || m_world == nullptr) {
-        build_world_now();
+    // TASK #6: adopt any completed background build (GL thread). swap clears
+    // m_build_done + wakes the worker. Lazy first build signals the worker and
+    // waits via the same path (no world until it lands).
+    if (m_build_done.load()) {
+        swap_pending_into_live();
+    }
+    if (!m_built_once && m_world == nullptr && !m_first_build_requested &&
+        !m_build_inflight.load()) {
+        // Lazy first build: kick the worker ONCE so a screen that becomes active
+        // renders as soon as the build lands. Guarded by m_build_inflight so it
+        // does NOT re-signal when a build was already queued (e.g. tick() signalled
+        // it) or is mid-build — which would queue a spurious extra rebuild.
+        m_first_build_requested = true;
+        start_worker();
+        {
+            std::lock_guard<std::mutex> lk(m_build_mutex);
+            m_build_inflight.store(true);
+            m_build_pending.store(true);
+        }
+        m_build_cv.notify_one();
     }
     if (m_world == nullptr) {
-        return false; // build failed; caller keeps the last good frame
+        return false; // build still pending; caller keeps the last good frame
     }
+
+    rebuild_foliage_if_needed(pipeline);
 
     Rendering::Camera cam(glm::vec3(kCenterX, kCenterY, kCenterZ + m_dist));
     configure_camera(cam);
@@ -265,13 +481,28 @@ bool WorldgenPreview::render(Rendering::RenderPipeline& pipeline, float dt) {
 
 bool WorldgenPreview::render_to_backbuffer(Rendering::RenderPipeline& pipeline, float dt) {
     if (!m_active) return false;
-    // Lazy first build so a screen that becomes active renders immediately.
-    if (!m_built_once || m_world == nullptr) {
-        build_world_now();
+    // TASK #6: adopt any completed background build (GL thread) before rendering.
+    // swap clears m_build_done + wakes the worker.
+    if (m_build_done.load()) {
+        swap_pending_into_live();
+    }
+    if (!m_built_once && m_world == nullptr && !m_first_build_requested &&
+        !m_build_inflight.load()) {
+        // Lazy first build: kick the worker ONCE (see render() for the rationale).
+        m_first_build_requested = true;
+        start_worker();
+        {
+            std::lock_guard<std::mutex> lk(m_build_mutex);
+            m_build_inflight.store(true);
+            m_build_pending.store(true);
+        }
+        m_build_cv.notify_one();
     }
     if (m_world == nullptr) {
-        return false; // build failed; caller keeps the last good frame
+        return false; // build still pending; caller keeps the last good frame
     }
+
+    rebuild_foliage_if_needed(pipeline);
 
     Rendering::Camera cam(glm::vec3(kCenterX, kCenterY, kCenterZ + m_dist));
     configure_camera(cam);
