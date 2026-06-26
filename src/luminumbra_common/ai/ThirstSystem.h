@@ -62,6 +62,13 @@ struct ThirstStats {
     int drinking = 0;      // creatures inside a water hole's radius this tick
 };
 
+// Full-control tuning (defaults == the k* constants -> byte-identical). From SystemConfig sim.thirst.
+struct ThirstTuning {
+    float rise_rate      = kThirstRise;
+    float drink_rate     = kThirstDrink;
+    float seek_threshold = kThirstSeekThreshold;
+};
+
 [[nodiscard]] inline float ThirstClamp01(float v) {
     if (v < 0.0f) return 0.0f;
     if (v > 1.0f) return 1.0f;
@@ -72,7 +79,7 @@ struct ThirstStats {
 // let them drink when in range. id-ordered. `dt` scales the rise/drink rates so the behaviour
 // is frame-rate independent (the sim runs a fixed dt; the parameter keeps the signature honest
 // and lets tests exercise multiple ticks).
-inline ThirstStats RunThirstOnTick(entt::registry& reg, float dt) {
+inline ThirstStats RunThirstOnTick(entt::registry& reg, float dt, const ThirstTuning& tuning = {}) {
     ThirstStats stats;
 
     // Snapshot every water hole once (deterministic, read-only this tick). id-ordered for a
@@ -106,8 +113,8 @@ inline ThirstStats RunThirstOnTick(entt::registry& reg, float dt) {
     if (ents.empty()) return stats;  // empty roster -> pure no-op.
 
     // dt-scaled rates: the sim's fixed dt (~1/30s) gives the tuned per-second constants.
-    const float rise = kThirstRise * dt;
-    const float drink = kThirstDrink * dt;
+    const float rise = tuning.rise_rate * dt;
+    const float drink = tuning.drink_rate * dt;
 
     for (auto e : ents) {
         auto& th = view.get<Comp::ThirstComponent>(e);
@@ -169,7 +176,7 @@ inline ThirstStats RunThirstOnTick(entt::registry& reg, float dt) {
 
         // Thirsty enough to seek? Write a unit direction toward the hole, scaled by thirst,
         // so a parched creature pulls harder than a mildly-thirsty one.
-        if (th.thirst >= kThirstSeekThreshold && dist > 0.0f) {
+        if (th.thirst >= tuning.seek_threshold && dist > 0.0f) {
             const float inv = 1.0f / dist;
             th.wish_x = best_dx * inv * th.thirst;
             th.wish_z = best_dz * inv * th.thirst;

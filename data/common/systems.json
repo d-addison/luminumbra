@@ -16,12 +16,25 @@
       "alignment_weight": 0.5,
       "catch_radius": 2.2,
       "catch_satiation": 0.8
-    } }
+    } },
+    "_fullcontrol_comment": "Per-system creature tuning (spec 011 full-control). Each enabled:false -> compiled defaults (byte-identical); the shown values ARE the defaults. Flip enabled:true + edit a number to tune live. sim.* are hashed when enabled; the canonical baseline keeps them all OFF.",
+    "wildlife_foliage": { "enabled": false, "params": {
+      "graze_radius": 3.0, "graze_per_creature": 0.05, "regrow_per_tick": 0.01, "feed_per_graze": 0.02 } },
+    "thirst": { "enabled": false, "params": {
+      "rise_rate_per_second": 0.04, "drink_rate_per_second": 0.5, "seek_threshold": 0.3 } },
+    "scavenging": { "enabled": false, "params": {
+      "hunger_threshold": 0.3, "feed_radius": 1.5, "feed_rate_per_tick": 0.05 } },
+    "reproduction": { "enabled": false, "params": {
+      "maturity_ticks": 90, "cooldown_ticks": 300, "healthy_stamina": 0.5,
+      "mate_seek_radius": 45.0, "courtship_radius": 2.6, "courtship_ticks": 90, "spawn_radius": 1.2 } },
+    "foraging": { "enabled": false, "params": {
+      "deposit": 1.0, "trail_weight": 8.0, "goal_weight": 1.0 } }
   },
   "render": {
     "moonlight": { "enabled": false, "params": { "strength": 0.0, "color": [0.6, 0.7, 1.0] } },
     "tree_wind": { "enabled": false },
     "plant_procgen": { "enabled": true },
-    "sky_lut_gpu": { "enabled": true }
+    "sky_lut_gpu": { "enabled": true },
+    "circadian": { "enabled": false, "params": { "amplitude": 1.0 } }
   }
 }

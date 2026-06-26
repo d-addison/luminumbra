@@ -10,7 +10,11 @@
 #include "../../../include/luminumbra/core/Types.h"
 #include "../core/SimulationClock.h"
 #include "../simulation/SimulationEventBus.h"
-#include "../ai/CreatureBrainSystem.h"  // ai::EcologyTuning (data-driven brain tuning, critique #3)
+#include "../ai/CreatureBrainSystem.h"      // ai::EcologyTuning (data-driven brain tuning, critique #3)
+#include "../ai/WildlifeFoliageSystem.h"    // ai::WildlifeFoliageTuning (full-control)
+#include "../ai/ThirstSystem.h"             // ai::ThirstTuning
+#include "../ai/ScavengingSystem.h"         // ai::ScavengingTuning
+#include "../ai/ForagingSystem.h"           // ai::ForagingParams
 
 namespace luminumbra::ai {
     class ScentField;
@@ -193,6 +197,13 @@ public:
     // SystemConfig sim.ecology (ai::ResolveEcologyTuning). Set once after construction.
     void SetEcologyTuning(const luminumbra::ai::EcologyTuning& t) { m_ecologyTuning = t; }
     [[nodiscard]] const luminumbra::ai::EcologyTuning& GetEcologyTuning() const { return m_ecologyTuning; }
+    // Full-control: per-system creature tuning. All default to compiled constants -> byte-identical
+    // until the client/server overrides them from SystemConfig (ai::Resolve* in SimTuningConfig.h).
+    void SetWildlifeFoliageTuning(const luminumbra::ai::WildlifeFoliageTuning& t) { m_wildlifeFoliageTuning = t; }
+    void SetThirstTuning(const luminumbra::ai::ThirstTuning& t) { m_thirstTuning = t; }
+    void SetScavengingTuning(const luminumbra::ai::ScavengingTuning& t) { m_scavengingTuning = t; }
+    void SetForagingTuning(const luminumbra::ai::ForagingParams& t) { m_foragingTuning = t; }
+    void SetCircadianAmplitude(float a) { m_circadianAmplitude = a; }
 
     // --- Fixed-rate simulation (T-I3-4) ---
     // Advances the 30 Hz simulation clock by one variable-dt frame and runs
@@ -220,6 +231,11 @@ public:
 private:
     entt::registry m_registry;
     luminumbra::ai::EcologyTuning m_ecologyTuning{};  // critique #3: defaults == compiled constants
+    luminumbra::ai::WildlifeFoliageTuning m_wildlifeFoliageTuning{};  // full-control: defaults preserved
+    luminumbra::ai::ThirstTuning m_thirstTuning{};
+    luminumbra::ai::ScavengingTuning m_scavengingTuning{};
+    luminumbra::ai::ForagingParams m_foragingTuning{};
+    float m_circadianAmplitude = 1.0f;
     WorldMetadata m_metadata;
     // perf (water-perf-200fps spec Step 6): cap catch-up to 2 ticks/frame (default is 4) so a
     // single slow frame replays at most 2 sim ticks instead of 4 — halving the worst-case

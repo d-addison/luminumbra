@@ -52,6 +52,7 @@
 #include "luminumbra_common/game/PhotoMode.h"  // g-vertical-slice: photo-mode capture loop (read-only observer)
 #include "luminumbra_common/ai/CreatureSpeciesRegistry.h"  // species id -> display name for the codex/discovery HUD
 #include "luminumbra_common/ai/EcologyTuningConfig.h"       // critique #3: resolve sim.ecology brain tuning
+#include "luminumbra_common/ai/SimTuningConfig.h"           // full-control: resolve per-system creature tuning
 #include "luminumbra_common/game/Objectives.h"  // progression goals surfaced on the HUD
 #include "luminumbra_common/game/CodexView.h"  // pure presentation model for the codex browse screen
 #include "luminumbra_common/animation/AnimationRuntime.h"  // skinned skeleton/clip loaders for ambient wildlife
@@ -2688,9 +2689,14 @@ int main(int argc, char* argv[]) {
     auto gameSession = std::make_unique<Luminumbra::world::GameSession>();
     gameSession->SetJobSystem(&jobSystem);
     gameSession->SetRootPath(root_path_str);
-    // Critique #3: data-drive the creature-brain tuning from systems.json (sim.ecology). OFF by
-    // default -> compiled constants -> byte-identical; enable + set values to tune live behaviour.
+    // Full control: data-drive every creature system from systems.json. All OFF by default ->
+    // compiled constants -> byte-identical; enable a block + set values to tune live behaviour.
     gameSession->SetEcologyTuning(luminumbra::ai::ResolveEcologyTuning(g_systemConfig));
+    gameSession->SetWildlifeFoliageTuning(luminumbra::ai::ResolveWildlifeFoliageTuning(g_systemConfig));
+    gameSession->SetThirstTuning(luminumbra::ai::ResolveThirstTuning(g_systemConfig));
+    gameSession->SetScavengingTuning(luminumbra::ai::ResolveScavengingTuning(g_systemConfig));
+    gameSession->SetForagingTuning(luminumbra::ai::ResolveForagingTuning(g_systemConfig));
+    gameSession->SetCircadianAmplitude(luminumbra::ai::ResolveCircadianAmplitude(g_systemConfig));
 
     // Load creature species metadata (display names + rarity) for the codex/discovery
     // HUD. Missing/partial data degrades gracefully: DisplayName() falls back to

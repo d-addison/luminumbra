@@ -64,7 +64,8 @@ struct CircadianStats {
 // [0,1) first (the caller's clock may overshoot at a day boundary), then mapped to an angle
 // and run through DeterministicMath::Cos. Returns activity in [0,1]: diurnal peaks at noon
 // (t=0.5), nocturnal peaks at midnight (t=0). Pure + deterministic; no rng, no libm.
-[[nodiscard]] inline float CircadianActivity(float time_of_day01, bool nocturnal) {
+[[nodiscard]] inline float CircadianActivity(float time_of_day01, bool nocturnal,
+                                             float amplitude = 1.0f) {
     // Wrap to [0,1) so a clock that reports e.g. 1.25 or -0.1 still maps onto the day. Done
     // with float +-* and an integer floor so it is bit-stable (no libm fmod).
     float t = time_of_day01;
@@ -79,14 +80,17 @@ struct CircadianStats {
 
     // Diurnal: 0.5*(1 - cos) -> 0 at midnight, 1 at noon.
     // Nocturnal: 0.5*(1 + cos) -> 1 at midnight, 0 at noon (the inverse).
-    const float a = nocturnal ? 0.5f * (1.0f + c) : 0.5f * (1.0f - c);
+    // amplitude scales day/night contrast (1.0 = default curve, byte-identical; >1 sharpens,
+    // <1 flattens). Clamp keeps activity in [0,1].
+    const float a = amplitude * (nocturnal ? 0.5f * (1.0f + c) : 0.5f * (1.0f - c));
     return CircadianClamp01(a);
 }
 
 // RunCircadianOnTick: write every participating creature's activity from the day clock.
 // id-ordered. `time_of_day01` is the caller-supplied fraction of the day in [0,1] (0/1 =
 // midnight, 0.5 = noon). Returns participation stats. Empty roster -> pure no-op.
-inline CircadianStats RunCircadianOnTick(entt::registry& reg, float time_of_day01) {
+inline CircadianStats RunCircadianOnTick(entt::registry& reg, float time_of_day01,
+                                         float amplitude = 1.0f) {
     CircadianStats stats;
 
     auto view = reg.view<Comp::CircadianComponent>();
@@ -103,7 +107,7 @@ inline CircadianStats RunCircadianOnTick(entt::registry& reg, float time_of_day0
     for (auto e : ents) {
         auto& cc = view.get<Comp::CircadianComponent>(e);
         const bool nocturnal = cc.nocturnal != 0;
-        cc.activity = CircadianActivity(time_of_day01, nocturnal);
+        cc.activity = CircadianActivity(time_of_day01, nocturnal, amplitude);
         ++stats.participants;
         if (nocturnal) {
             ++stats.nocturnal;

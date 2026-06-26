@@ -217,7 +217,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                     ScentOriginFor(m_metadata.spawnPoint.z), kScentCellSize);
             }
             if (foraging_active) {
-                luminumbra::ai::RunForagingOnTick(m_registry, *m_scentField);
+                luminumbra::ai::RunForagingOnTick(m_registry, *m_scentField, m_foragingTuning);
             }
             // FR-2: advect the scent downwind by the PRIOR-tick wind (the wind field is updated
             // later this tick at slot 3, so sampling here keeps the slot order stable). Convert
@@ -276,8 +276,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 // feed on carcasses (death -> food). Each writes its OWN component's wish,
                 // blended into the creature wish below so the physics bridge walks them there.
                 luminumbra::ai::RunThirstOnTick(
-                    m_registry, static_cast<float>(m_simulationClock.fixed_dt()));
-                luminumbra::ai::RunScavengingOnTick(m_registry, current_tick);
+                    m_registry, static_cast<float>(m_simulationClock.fixed_dt()), m_thirstTuning);
+                luminumbra::ai::RunScavengingOnTick(m_registry, current_tick, m_scavengingTuning);
                 {
                     // Additive blend of the survival wishes into CreatureComponent.wish so a
                     // thirsty/scavenging creature actually steers to water/carrion. Entities
@@ -513,7 +513,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             if (!m_registry.view<Comp::CombustibleComponent>().empty())
                 luminumbra::sim::RunFireSpreadOnTick(m_registry, current_tick, windXZ);
             if (!m_registry.view<Comp::GrazeableComponent>().empty())
-                luminumbra::ai::RunWildlifeFoliageOnTick(m_registry, current_tick);
+                luminumbra::ai::RunWildlifeFoliageOnTick(m_registry, current_tick, m_wildlifeFoliageTuning);
             if (!m_registry.view<Comp::MortalComponent>().empty())
                 luminumbra::ai::RunLifespanOnTick(m_registry, current_tick);
             // Herd alarm: propagate collective vigilance among same-role creatures. The brain
@@ -529,7 +529,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 constexpr std::uint64_t kTicksPerDay = 30ull * 60ull * 20ull;  // 20-min day @30Hz
                 const float tod01 = static_cast<float>(current_tick % kTicksPerDay) /
                                     static_cast<float>(kTicksPerDay);
-                luminumbra::ai::RunCircadianOnTick(m_registry, tod01);
+                luminumbra::ai::RunCircadianOnTick(m_registry, tod01, m_circadianAmplitude);
             }
             // Territory: claim home + emit a homing bias (movement blends it like mate-seeking).
             if (!m_registry.view<Comp::TerritoryComponent>().empty())

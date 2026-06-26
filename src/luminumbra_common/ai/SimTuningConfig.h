@@ -1,0 +1,63 @@
+#pragma once
+
+// Spec 011 "full control": resolve each per-system creature tuning from SystemConfig.
+// Mirrors EcologyTuningConfig.h. Each Resolve* returns the COMPILED DEFAULTS when its sim key is
+// OFF (the shipped baseline) -> byte-identical behaviour + empty config sub-hash. Only the
+// client/server include this and feed the results into GameSession::Set*Tuning.
+
+#include "core/SystemConfig.h"
+#include "WildlifeFoliageSystem.h"  // WildlifeFoliageTuning
+#include "ThirstSystem.h"           // ThirstTuning
+#include "ScavengingSystem.h"       // ScavengingTuning
+#include "ForagingSystem.h"         // ForagingParams
+
+namespace luminumbra::ai {
+
+[[nodiscard]] inline WildlifeFoliageTuning ResolveWildlifeFoliageTuning(const core::SystemConfig& c) {
+    WildlifeFoliageTuning t;
+    if (!c.enabled(core::SysKey::SimWildlifeFoliage)) return t;
+    using P = core::SysParam;
+    t.graze_radius       = c.param(P::WfGrazeRadius, t.graze_radius);
+    t.graze_per_creature = c.param(P::WfGrazePerCreature, t.graze_per_creature);
+    t.regrow_per_tick    = c.param(P::WfRegrowPerTick, t.regrow_per_tick);
+    t.feed_per_graze     = c.param(P::WfFeedPerGraze, t.feed_per_graze);
+    return t;
+}
+
+[[nodiscard]] inline ThirstTuning ResolveThirstTuning(const core::SystemConfig& c) {
+    ThirstTuning t;
+    if (!c.enabled(core::SysKey::SimThirst)) return t;
+    using P = core::SysParam;
+    t.rise_rate      = c.param(P::ThirstRiseRate, t.rise_rate);
+    t.drink_rate     = c.param(P::ThirstDrinkRate, t.drink_rate);
+    t.seek_threshold = c.param(P::ThirstSeekThreshold, t.seek_threshold);
+    return t;
+}
+
+[[nodiscard]] inline ScavengingTuning ResolveScavengingTuning(const core::SystemConfig& c) {
+    ScavengingTuning t;
+    if (!c.enabled(core::SysKey::SimScavenging)) return t;
+    using P = core::SysParam;
+    t.hunger_threshold = c.param(P::ScavHungerThreshold, t.hunger_threshold);
+    t.feed_radius      = c.param(P::ScavFeedRadius, t.feed_radius);
+    t.feed_rate        = c.param(P::ScavFeedRate, t.feed_rate);
+    return t;
+}
+
+[[nodiscard]] inline ForagingParams ResolveForagingTuning(const core::SystemConfig& c) {
+    ForagingParams t;  // defaults {1.0, 8.0, 1.0}
+    if (!c.enabled(core::SysKey::SimForaging)) return t;
+    using P = core::SysParam;
+    t.deposit      = c.param(P::ForagingDeposit, static_cast<float>(t.deposit));
+    t.trail_weight = c.param(P::ForagingTrailWeight, static_cast<float>(t.trail_weight));
+    t.goal_weight  = c.param(P::ForagingGoalWeight, static_cast<float>(t.goal_weight));
+    return t;
+}
+
+// render.circadian.amplitude (render-only; never hashed). 1.0 when OFF -> byte-identical.
+[[nodiscard]] inline float ResolveCircadianAmplitude(const core::SystemConfig& c) {
+    if (!c.enabled(core::SysKey::RenderCircadian)) return 1.0f;
+    return c.param(core::SysParam::CircadianAmplitude, 1.0f);
+}
+
+}  // namespace luminumbra::ai

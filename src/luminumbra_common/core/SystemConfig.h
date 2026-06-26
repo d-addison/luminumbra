@@ -48,12 +48,20 @@ enum class SysKey : std::uint8_t {
     SimPlantGrowth = 0,
     SimErosion,
     SimEcology,  // creature-brain tuning (energy/sleep/hunger/stamina/herd/catch); default OFF
+    // Spec 011 "full control": per-system creature sim tuning. All default OFF -> compiled
+    // defaults -> byte-identical. Append-only (canonical order); never reorder.
+    SimWildlifeFoliage,  // grazing/regrowth coupling
+    SimThirst,           // thirst rise / drink / seek threshold
+    SimScavenging,       // carcass scavenging hunger/feed
+    SimReproduction,     // maturity/cooldown/courtship/spawn pacing
+    SimForaging,         // ant pheromone deposit/trail/goal
     // --- render.* (render-only; never hashed) ---
     RenderMoonlight,
     RenderTreeWind,
     RenderPlantProcgen,  // grow scattered plants via the procgen instead of baked models
     RenderTaau,          // FR-R5 temporal AA resolve (motion-reprojected history); default OFF
     RenderSkyLutGpu,     // spec 008 WS-4: sky LUTs (init + refresh) via GPU compute instead of CPU integration; default OFF
+    RenderCircadian,     // diurnal/nocturnal activity-curve amplitude; default OFF (component-gated)
     Count
 };
 
@@ -75,6 +83,19 @@ enum class SysParam : std::uint8_t {
     EcoAlignmentWeight,     // sim.ecology.alignment_weight
     EcoCatchRadius,         // sim.ecology.catch_radius
     EcoCatchSatiation,      // sim.ecology.catch_satiation
+    // sim.wildlife_foliage.* — defaults mirror WildlifeFoliageSystem.h
+    WfGrazeRadius, WfGrazePerCreature, WfRegrowPerTick, WfFeedPerGraze,
+    // sim.thirst.* — defaults mirror ThirstSystem.h
+    ThirstRiseRate, ThirstDrinkRate, ThirstSeekThreshold,
+    // sim.scavenging.* — defaults mirror ScavengingSystem.h
+    ScavHungerThreshold, ScavFeedRadius, ScavFeedRate,
+    // sim.reproduction.* — defaults mirror CreatureReproductionSystem.h (tick fields cast from float)
+    ReproMaturityTicks, ReproCooldownTicks, ReproHealthyStamina, ReproMateSeekRadius,
+    ReproCourtshipRadius, ReproCourtshipTicks, ReproSpawnRadius,
+    // sim.foraging.* — defaults mirror ForagingSystem.h ForagingParams
+    ForagingDeposit, ForagingTrailWeight, ForagingGoalWeight,
+    // render.circadian.* — activity curve amplitude (render-only)
+    CircadianAmplitude,
     Count
 };
 
@@ -127,7 +148,7 @@ private:
     static constexpr std::size_t kParamCount = static_cast<std::size_t>(SysParam::Count);
 
     std::uint32_t m_enabled = 0;                       // packed flag bitset (<=32 keys)
-    std::uint32_t m_param_set = 0;                     // which params were explicitly set
+    std::uint64_t m_param_set = 0;                     // which params were explicitly set (<=64 params)
     std::array<glm::vec3, kParamCount> m_params{};     // scalar params live in .x
     UserSettings m_user{};                             // client-only; never hashed
 };

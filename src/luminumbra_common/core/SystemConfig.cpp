@@ -35,11 +35,17 @@ constexpr KeyMeta kKeys[] = {
     {SysKey::SimPlantGrowth, Section::Sim, "sim", "plant_growth"},
     {SysKey::SimErosion, Section::Sim, "sim", "erosion"},
     {SysKey::SimEcology, Section::Sim, "sim", "ecology"},
+    {SysKey::SimWildlifeFoliage, Section::Sim, "sim", "wildlife_foliage"},
+    {SysKey::SimThirst, Section::Sim, "sim", "thirst"},
+    {SysKey::SimScavenging, Section::Sim, "sim", "scavenging"},
+    {SysKey::SimReproduction, Section::Sim, "sim", "reproduction"},
+    {SysKey::SimForaging, Section::Sim, "sim", "foraging"},
     {SysKey::RenderMoonlight, Section::Render, "render", "moonlight"},
     {SysKey::RenderTreeWind, Section::Render, "render", "tree_wind"},
     {SysKey::RenderPlantProcgen, Section::Render, "render", "plant_procgen"},
     {SysKey::RenderTaau, Section::Render, "render", "taau"},
     {SysKey::RenderSkyLutGpu, Section::Render, "render", "sky_lut_gpu"},
+    {SysKey::RenderCircadian, Section::Render, "render", "circadian"},
 };
 
 constexpr ParamMeta kParams[] = {
@@ -58,6 +64,33 @@ constexpr ParamMeta kParams[] = {
     {SysParam::EcoAlignmentWeight, SysKey::SimEcology, "alignment_weight", false, 0.5f, glm::vec3(0.0f)},
     {SysParam::EcoCatchRadius, SysKey::SimEcology, "catch_radius", false, 2.2f, glm::vec3(0.0f)},
     {SysParam::EcoCatchSatiation, SysKey::SimEcology, "catch_satiation", false, 0.8f, glm::vec3(0.0f)},
+    // sim.wildlife_foliage.* — defaults MUST match WildlifeFoliageSystem.h
+    {SysParam::WfGrazeRadius, SysKey::SimWildlifeFoliage, "graze_radius", false, 3.0f, glm::vec3(0.0f)},
+    {SysParam::WfGrazePerCreature, SysKey::SimWildlifeFoliage, "graze_per_creature", false, 0.05f, glm::vec3(0.0f)},
+    {SysParam::WfRegrowPerTick, SysKey::SimWildlifeFoliage, "regrow_per_tick", false, 0.01f, glm::vec3(0.0f)},
+    {SysParam::WfFeedPerGraze, SysKey::SimWildlifeFoliage, "feed_per_graze", false, 0.02f, glm::vec3(0.0f)},
+    // sim.thirst.* — defaults MUST match ThirstSystem.h
+    {SysParam::ThirstRiseRate, SysKey::SimThirst, "rise_rate_per_second", false, 0.04f, glm::vec3(0.0f)},
+    {SysParam::ThirstDrinkRate, SysKey::SimThirst, "drink_rate_per_second", false, 0.5f, glm::vec3(0.0f)},
+    {SysParam::ThirstSeekThreshold, SysKey::SimThirst, "seek_threshold", false, 0.3f, glm::vec3(0.0f)},
+    // sim.scavenging.* — defaults MUST match ScavengingSystem.h
+    {SysParam::ScavHungerThreshold, SysKey::SimScavenging, "hunger_threshold", false, 0.3f, glm::vec3(0.0f)},
+    {SysParam::ScavFeedRadius, SysKey::SimScavenging, "feed_radius", false, 1.5f, glm::vec3(0.0f)},
+    {SysParam::ScavFeedRate, SysKey::SimScavenging, "feed_rate_per_tick", false, 0.05f, glm::vec3(0.0f)},
+    // sim.reproduction.* — defaults MUST match CreatureReproductionSystem.h
+    {SysParam::ReproMaturityTicks, SysKey::SimReproduction, "maturity_ticks", false, 90.0f, glm::vec3(0.0f)},
+    {SysParam::ReproCooldownTicks, SysKey::SimReproduction, "cooldown_ticks", false, 300.0f, glm::vec3(0.0f)},
+    {SysParam::ReproHealthyStamina, SysKey::SimReproduction, "healthy_stamina", false, 0.5f, glm::vec3(0.0f)},
+    {SysParam::ReproMateSeekRadius, SysKey::SimReproduction, "mate_seek_radius", false, 45.0f, glm::vec3(0.0f)},
+    {SysParam::ReproCourtshipRadius, SysKey::SimReproduction, "courtship_radius", false, 2.6f, glm::vec3(0.0f)},
+    {SysParam::ReproCourtshipTicks, SysKey::SimReproduction, "courtship_ticks", false, 90.0f, glm::vec3(0.0f)},
+    {SysParam::ReproSpawnRadius, SysKey::SimReproduction, "spawn_radius", false, 1.2f, glm::vec3(0.0f)},
+    // sim.foraging.* — defaults MUST match ForagingSystem.h ForagingParams
+    {SysParam::ForagingDeposit, SysKey::SimForaging, "deposit", false, 1.0f, glm::vec3(0.0f)},
+    {SysParam::ForagingTrailWeight, SysKey::SimForaging, "trail_weight", false, 8.0f, glm::vec3(0.0f)},
+    {SysParam::ForagingGoalWeight, SysKey::SimForaging, "goal_weight", false, 1.0f, glm::vec3(0.0f)},
+    // render.circadian.*
+    {SysParam::CircadianAmplitude, SysKey::RenderCircadian, "amplitude", false, 1.0f, glm::vec3(0.0f)},
 };
 
 // Overlay the `user.*` section of `data` onto `user`, setting only named fields (merge
@@ -130,11 +163,11 @@ SystemConfig SystemConfig::FromJsonString(const std::string& json_text) {
                 if (value.is_array() && value.size() == 3) {
                     cfg.m_params[pi] = glm::vec3(value[0].get<float>(), value[1].get<float>(),
                                                  value[2].get<float>());
-                    cfg.m_param_set |= (1u << static_cast<unsigned>(pm.id));
+                    cfg.m_param_set |= (1ull << static_cast<unsigned>(pm.id));
                 }
             } else if (value.is_number()) {
                 cfg.m_params[pi].x = value.get<float>();
-                cfg.m_param_set |= (1u << static_cast<unsigned>(pm.id));
+                cfg.m_param_set |= (1ull << static_cast<unsigned>(pm.id));
             }
         }
     }

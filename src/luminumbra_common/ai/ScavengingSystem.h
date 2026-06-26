@@ -79,6 +79,13 @@ struct ScavengingStats {
     return v;
 }
 
+// Full-control tuning (defaults == the k* constants -> byte-identical). From SystemConfig sim.scavenging.
+struct ScavengingTuning {
+    float hunger_threshold = kScavengeHungerThreshold;
+    float feed_radius      = kScavengeFeedRadius;
+    float feed_rate        = kScavengeFeedRate;
+};
+
 // Is this creature a CARCASS (dead body available to scavenge)? eaten prey OR a flagged-dead
 // mortal. `mortal` may be null (creature carries no MortalComponent).
 [[nodiscard]] inline bool ScavengeIsCarcass(const Comp::CreatureComponent& cr,
@@ -91,7 +98,8 @@ struct ScavengingStats {
 // RunScavengingOnTick: hungry scavengers seek + eat the nearest carcass. id-ordered,
 // two-phase snapshot (order-independent). Returns telemetry; mutates ScavengerComponent
 // .wish_x/z + .feeding and CreatureComponent.hunger on feeding scavengers.
-inline ScavengingStats RunScavengingOnTick(entt::registry& reg, std::uint64_t /*tick*/) {
+inline ScavengingStats RunScavengingOnTick(entt::registry& reg, std::uint64_t /*tick*/,
+                                           const ScavengingTuning& tuning = {}) {
     ScavengingStats stats;
 
     // ---- PHASE 1: snapshot every CARCASS position (read-only; order-independent) ----
@@ -136,7 +144,7 @@ inline ScavengingStats RunScavengingOnTick(entt::registry& reg, std::uint64_t /*
         const auto* selfMortal = reg.try_get<Comp::MortalComponent>(e);
         const bool selfDead = ScavengeIsCarcass(cr, selfMortal);
         if (selfDead) continue;
-        if (cr.hunger <= kScavengeHungerThreshold) continue;  // sated enough — ignore food.
+        if (cr.hunger <= tuning.hunger_threshold) continue;  // sated enough — ignore food.
         if (carcasses.empty()) continue;                      // nothing to scavenge.
 
         // Find the NEAREST carcass (deterministic Sqrt distance; first-found wins ties, and
@@ -159,9 +167,9 @@ inline ScavengingStats RunScavengingOnTick(entt::registry& reg, std::uint64_t /*
 
         // Within feed radius: feed (lower hunger) and flag feeding. Hold position (zero wish)
         // so the scavenger settles on the carcass rather than overshooting it.
-        if (bestD <= kScavengeFeedRadius) {
+        if (bestD <= tuning.feed_radius) {
             sc.feeding = 1;
-            cr.hunger = ScavengeClamp01(cr.hunger - kScavengeFeedRate);
+            cr.hunger = ScavengeClamp01(cr.hunger - tuning.feed_rate);
             ++stats.feeding;
             // wish stays (0,0) — already on the food.
             continue;

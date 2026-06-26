@@ -67,6 +67,16 @@ inline constexpr float kFeedPerGraze     = 0.02f;  // hunger reduced on a creatu
 inline constexpr float kBiomassMin       = 0.0f;
 inline constexpr float kBiomassMax       = 1.0f;
 
+// Full-control tuning: fields default to the constants above, so a default-constructed
+// WildlifeFoliageTuning is byte-identical. Threaded via the optional Run arg; resolved from
+// SystemConfig sim.wildlife_foliage when that system is enabled.
+struct WildlifeFoliageTuning {
+    float graze_radius       = kGrazeRadius;
+    float graze_per_creature = kGrazePerCreature;
+    float regrow_per_tick    = kRegrowPerTick;
+    float feed_per_graze     = kFeedPerGraze;
+};
+
 inline float clampBiomass(float v) {
     if (v < kBiomassMin) return kBiomassMin;
     if (v > kBiomassMax) return kBiomassMax;
@@ -85,8 +95,10 @@ struct WildlifeFoliageStats {
 // Advance the wildlife-foliage coupling by ONE fixed tick. Pure function of registry
 // state. id-ordered; graze pressure is summed per plant (order-independent) and feed is
 // summed per creature, then both are applied in id-ordered passes.
-inline WildlifeFoliageStats RunWildlifeFoliageOnTick(entt::registry& reg, std::uint64_t tick) {
+inline WildlifeFoliageStats RunWildlifeFoliageOnTick(entt::registry& reg, std::uint64_t tick,
+                                                     const WildlifeFoliageTuning& tuning = {}) {
     WildlifeFoliageStats stats;
+    const float graze_radius_sq = tuning.graze_radius * tuning.graze_radius;
 
     // --- 1. Snapshot NON-PREDATOR creature positions, id-ordered (order-stable). ---
     struct Grazer { entt::entity e; float x, z; };
@@ -134,16 +146,16 @@ inline WildlifeFoliageStats RunWildlifeFoliageOnTick(entt::registry& reg, std::u
             const float dx = grazers[gi].x - ptf.position.x;
             const float dz = grazers[gi].z - ptf.position.z;
             const float d2 = dx * dx + dz * dz;
-            if (d2 <= kGrazeRadiusSq) {
+            if (d2 <= graze_radius_sq) {
                 ++n_in_range;
-                if (has_biomass) feed[gi] += kFeedPerGraze;  // only a living plant feeds
+                if (has_biomass) feed[gi] += tuning.feed_per_graze;  // only a living plant feeds
             }
         }
 
         if (n_in_range > 0) {
             // Graze/trample: biomass drops proportional to the number of grazers (so a
             // herd flattens a patch faster). Constant-step float arithmetic.
-            const float removed_req = kGrazePerCreature * static_cast<float>(n_in_range);
+            const float removed_req = tuning.graze_per_creature * static_cast<float>(n_in_range);
             const float before = clampBiomass(gz.biomass);
             const float after = clampBiomass(before - removed_req);
             gz.biomass = after;
@@ -153,7 +165,7 @@ inline WildlifeFoliageStats RunWildlifeFoliageOnTick(entt::registry& reg, std::u
         } else {
             // Ungrazed: regrow slowly toward the cap.
             const float before = clampBiomass(gz.biomass);
-            const float after = clampBiomass(before + kRegrowPerTick);
+            const float after = clampBiomass(before + tuning.regrow_per_tick);
             gz.biomass = after;
             stats.biomass_regrown += (after - before);
         }
