@@ -35,6 +35,7 @@
 #include "passes/ParticlePass.h"
 #include "passes/FoliagePass.h"
 #include "passes/PlantProcgenPass.h" // I9-FOLIAGE: render-only procedural plants (flag-gated)
+#include "passes/GroundDecalPass.h"  // spec 011 FR-C: render-only pheromone ground decal (flag-gated)
 #include "passes/SsaoPass.h"
 #include "passes/WaterPass.h"
 #include <stb_image.h>
@@ -598,7 +599,14 @@ RenderPipeline::RenderPipeline()
       m_skybox_pass(std::make_unique<SkyboxPass>()),
       m_particle_pass(std::make_unique<ParticlePass>()),
       m_foliage_pass(std::make_unique<FoliagePass>()),
-      m_plant_procgen_pass(std::make_unique<PlantProcgenPass>()) {}
+      m_plant_procgen_pass(std::make_unique<PlantProcgenPass>()),
+      m_ground_decal_pass(std::make_unique<GroundDecalPass>()) {}
+
+// Spec 011 FR-C: forward the one-way scent snapshot to the decal pass (render-only;
+// defined here where GroundDecalPass is a complete type).
+void RenderPipeline::UpdateScentDecals(const ScentFieldRenderMirror& mirror) {
+    if (m_ground_decal_pass) m_ground_decal_pass->update_scent(mirror);
+}
 RenderPipeline::~RenderPipeline() {
     cleanup_gpu_resources();
 }
@@ -626,6 +634,7 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         m_particle_pass->init_buffers(); // T-I5a-1: persistent-mapped instance pool
         m_foliage_pass->init_buffers();  // T-I5b-1: persistent-mapped scatter pool
         m_plant_procgen_pass->init_buffers(); // I9-FOLIAGE: dedicated procgen plant VAO/VBO/EBO
+        m_ground_decal_pass->init_buffers();  // spec 011 FR-C: decal VAO + lazy scent texture
         // T-I6-A3b: experimental SHIELD-RT far-field raymarch pass. Compiled +
         // resident only when the compile-time gate is on (runtime opt-in still
         // required to render); render output is unchanged when the gate is off.
@@ -1802,6 +1811,33 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
         end_gpu_pass_timer(GpuTimerPass::FarFieldRaymarch);
     }
 
+    // 2c. PHEROMONE GROUND DECALS (spec 011 FR-C, render-only sim->render mirror).
+    // Additively tint the ALBEDO attachment where forager food/home scent trails
+    // exist, AFTER the G-buffer is fully populated but BEFORE SSAO + lighting, so the
+    // trails are AO-darkened and lit as ground detail. Determinism-neutral: reads the
+    // one-way ScentFieldRenderMirror, never the sim. No-op (zero draws) until a valid,
+    // non-empty mirror is uploaded (default-OFF), so the render stays byte-identical.
+    if (m_ground_decal_pass && m_ground_decal_pass->active()) {
+        glBindFramebuffer(GL_FRAMEBUFFER, m_gbuffer_pass->gbuffer().fbo_id);
+        const GLenum gd_bufs[1] = {GL_COLOR_ATTACHMENT2};  // albedo only
+        glDrawBuffers(1, gd_bufs);
+        glViewport(0, 0, m_screen_width, m_screen_height);
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        glDisable(GL_CULL_FACE);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE);  // additive trail tint
+        m_ground_decal_pass->execute(m_gbuffer_pass->gbuffer().position_texture,
+                                     glm::inverse(camera.GetViewMatrix()));
+        glDisable(GL_BLEND);
+        glDepthMask(GL_TRUE);
+        glEnable(GL_DEPTH_TEST);
+        const GLenum gd_restore[4] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1,
+                                      GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3};
+        glDrawBuffers(4, gd_restore);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
+
     // 3. SSAO PASS
     begin_gpu_pass_timer(GpuTimerPass::Ssao);
     m_ssao_pass->execute_ssao(*this, camera);
@@ -2224,6 +2260,7 @@ void RenderPipeline::init_shaders() {
     m_foliage_pass->init_shader(m_root_path);  // T-I5b-1
     m_foliage_pass->init_compute(m_root_path); // T-I6 #4: GPU grass scatter (graceful CPU fallback)
     m_plant_procgen_pass->init_shader(m_root_path); // I9-FOLIAGE: procedural plant G-buffer shader
+    m_ground_decal_pass->init_shader(m_root_path);  // spec 011 FR-C: pheromone decal shader
     m_shadow_pass->init_shader(m_root_path);
     m_ssao_pass->init_shaders(m_root_path);
     m_water_pass->init_shader(m_root_path);
@@ -2558,6 +2595,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     if (m_particle_pass) { m_particle_pass->destroy_buffers(); } // T-I5a-1
     if (m_foliage_pass) { m_foliage_pass->destroy_buffers(); m_foliage_pass->destroy_compute(); }   // T-I5b-1 / T-I6 #4
     if (m_plant_procgen_pass) { m_plant_procgen_pass->destroy_buffers(); } // I9-FOLIAGE
+    if (m_ground_decal_pass) { m_ground_decal_pass->destroy_buffers(); }   // spec 011 FR-C
     m_sky_lut.destroy(); // T-I5a-6: release scattering LUT textures
     m_gbuffer_pass->destroy_instanced_static_mesh();
     m_gbuffer_pass->destroy_skinned_mesh();
@@ -2576,6 +2614,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     if (m_particle_pass) { m_particle_pass->reset_shader(); } // T-I5a-1
     if (m_foliage_pass) { m_foliage_pass->reset_shader(); }   // T-I5b-1
     if (m_plant_procgen_pass) { m_plant_procgen_pass->reset_shader(); } // I9-FOLIAGE
+    if (m_ground_decal_pass) { m_ground_decal_pass->reset_shader(); }   // spec 011 FR-C
     m_aerial_shader.reset(); // T-I5a-6: aerial-perspective fullscreen shader
     m_waterfall_shader.reset(); // T-I5b-4: waterfall falling-sheet shader
     m_shadow_pass->reset_shader();

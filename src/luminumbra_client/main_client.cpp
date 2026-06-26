@@ -13,6 +13,7 @@
 #include "player/PlayerController.h"
 #include "rendering/Camera.h"
 #include "rendering/FarLodSystem.h"
+#include "rendering/ScentFieldRenderMirror.h" // spec 011 FR-C: one-way scent snapshot for the ground decal
 #include "rendering/FrameScan.h" // framescan: deterministic what's-in-frame scan tool (render-only)
 #include "rendering/ImpostorBake.h" // Wave-3 far-field tree impostor atlas bake (render-only)
 #include "rendering/SceneSurvey.h" // survey: autonomous tour+screenshot of world POIs (render-only)
@@ -305,6 +306,8 @@ bool g_timelapse_grow = false;     // grow the procgen plants sapling->tree over
 bool g_timelapse_simgrow = false;  // seed SIM PlantTag plants + grow them via the real growth tick (Phase 4 bridge)
 bool g_timelapse_season = false;   // drift summer->autumn leaf color over the capture
 bool g_timelapse_creatures = false; // spawn predators/prey + render markers (ecology demo)
+bool g_timelapse_living = false;    // capture the LIVING WORLD (ambient creatures + forager colony)
+                                    // during a timelapse, so the scent trail / rest poses are showable
 bool g_timelapse_calm = false;      // calm (no-predator) grazing herd -> reproduction/evolution demo
 bool g_timelapse_fire = false;      // ignite a patch of combustible foliage -> sim.fire spread demo
 
@@ -2632,6 +2635,7 @@ int main(int argc, char* argv[]) {
     g_timelapse_season = HasCommandLineFlag(argc, argv, "--timelapse-season");
     if (g_timelapse_season) g_season = 0.0f;  // start summer-green; drift to autumn over the capture
     g_timelapse_creatures = HasCommandLineFlag(argc, argv, "--timelapse-creatures");
+    g_timelapse_living = HasCommandLineFlag(argc, argv, "--timelapse-living");
     g_timelapse_calm = HasCommandLineFlag(argc, argv, "--timelapse-calm");
     if (g_timelapse_calm) g_timelapse_creatures = true;  // calm mode is a creature scenario
     g_timelapse_fire = HasCommandLineFlag(argc, argv, "--timelapse-fire");
@@ -4172,6 +4176,40 @@ int main(int argc, char* argv[]) {
                     }
                 }
             }
+
+            // Spec 011 FR-C: one-way sim->render snapshot of the deposited scent trails
+            // (ch 2 = food, ch 3 = home) for the pheromone GROUND DECAL. A const Sample()
+            // read of the just-completed tick on this same (single) thread -> race-free;
+            // the sim never reads the mirror back, so it is determinism-neutral. Gated by
+            // LUMIN_SCENT_DECAL so the default render stays byte-identical until opted in.
+            static const bool s_scentDecal = (std::getenv("LUMIN_SCENT_DECAL") != nullptr);
+            if (s_scentDecal) {
+                static Luminumbra::Rendering::ScentFieldRenderMirror s_scentMirror;
+                const auto* sf = gameSession->GetScentField();
+                const int n = gameSession->ScentFieldCells();
+                if (sf && n > 0) {
+                    if (s_scentMirror.cells != n) s_scentMirror.resize(n);
+                    bool any = false;
+                    for (int z = 0; z < n; ++z) {
+                        for (int x = 0; x < n; ++x) {
+                            const std::size_t i = (static_cast<std::size_t>(z) * n + x) * 2;
+                            const float food = static_cast<float>(sf->Sample(2, x, z));
+                            const float home = static_cast<float>(sf->Sample(3, x, z));
+                            s_scentMirror.rg[i + 0] = food;
+                            s_scentMirror.rg[i + 1] = home;
+                            if (food > 0.0f || home > 0.0f) any = true;
+                        }
+                    }
+                    s_scentMirror.cell_size = gameSession->ScentCellSize();
+                    s_scentMirror.origin_x = gameSession->ScentCellToWorldX(0);
+                    s_scentMirror.origin_z = gameSession->ScentCellToWorldZ(0);
+                    s_scentMirror.any_scent = any;
+                    s_scentMirror.valid = true;
+                } else {
+                    s_scentMirror.valid = false;
+                }
+                renderPipeline.UpdateScentDecals(s_scentMirror);  // upload before render_frame
+            }
         }
 
         if (g_imgui_enabled) {
@@ -5695,7 +5733,8 @@ int main(int argc, char* argv[]) {
                         // world_hash is the server's and is unaffected. Skipped in capture/scenario
                         // modes (they own their own creature handling).
                         const bool interactive_play =
-                            !scenario_config.active() && g_timelapse_frames == 0 && !g_timelapse_creatures;
+                            !scenario_config.active() && !g_timelapse_creatures &&
+                            (g_timelapse_frames == 0 || g_timelapse_living);
                         if (interactive_play && g_creatureSpecies.size() > 0) {
                             namespace anim = luminumbra::animation;
                             static anim::Skeleton s_wildlife_skeleton;
