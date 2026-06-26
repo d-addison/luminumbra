@@ -5525,8 +5525,14 @@ int main(int argc, char* argv[]) {
                     std::chrono::steady_clock::now() - _rb_sim_t0).count(); // spec 004
                 _rb_stream_t0 = std::chrono::steady_clock::now(); // spec 004
                 if (gameSession->GetWorldSystem() && (g_playerController || g_camera)) {
-                    const Luminumbra::Vec3 streaming_position =
-                        ((scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.cloud_shadow_smoke() || scenario_config.precipitation_smoke() || scenario_config.timeofday_sweep_smoke() || scenario_config.lod_boundary_oscillation_smoke() || scenario_config.lod_seam_arrival_smoke() || scenario_config.player_view_smoke() || scenario_config.farlod_horizon_smoke() || scenario_config.skinned_mesh_visual_smoke() || scenario_config.creature_slice_smoke()) && scenario_ready && g_camera)
+                    // Anchor world streaming on the CAMERA (not the spawn-bound player) whenever a
+                    // fixed/scenario camera drives the view — otherwise a --cam-pos far from spawn
+                    // streams chunks around the player at spawn and the camera sees an unloaded,
+                    // unlit void (the "far-camera renders black" bug). g_fixed_cam covers the
+                    // capture/showcase path; the scenario smokes keep their existing behaviour.
+                    const bool cam_anchored = (g_fixed_cam ||
+                        ((scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.cloud_shadow_smoke() || scenario_config.precipitation_smoke() || scenario_config.timeofday_sweep_smoke() || scenario_config.lod_boundary_oscillation_smoke() || scenario_config.lod_seam_arrival_smoke() || scenario_config.player_view_smoke() || scenario_config.farlod_horizon_smoke() || scenario_config.skinned_mesh_visual_smoke() || scenario_config.creature_slice_smoke()) && scenario_ready)) && g_camera;
+                    const Luminumbra::Vec3 streaming_position = cam_anchored
                             ? Luminumbra::Vec3(g_camera->Position)
                             : (g_playerController ? Luminumbra::Vec3(g_playerController->GetPosition()) : Luminumbra::Vec3(g_camera->Position));
                     gameSession->GetWorldSystem()->update(
