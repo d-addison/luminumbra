@@ -32,6 +32,8 @@ struct UserSettings {
     bool vsync = false;                      // default OFF: preserve today's uncapped 300fps target
     float fov = 45.0f;
     float render_scale = 1.0f;
+    float ui_scale = 1.0f;  // HUD/UI density-independent-pixel ratio (0.5..2.5); 1.0 = native px.
+                            // Lets players scale the HUD up on big/4K/ultrawide displays.
     float mouse_sensitivity = 0.025f;  // 25% of the prior 0.1 default (owner request 2026-06-18)
     // audio (0..1)
     float audio_master = 1.0f;

@@ -602,10 +602,14 @@ std::vector<luminumbra::game::PhotoSubjectView> GatherPhotoSubjects(
 // I9-ECO: rebuild creature markers (small octahedra, red = predator, blue = prey) at the
 // creatures' CURRENT positions and push to the procgen pass. Called per frame so the markers
 // track the brain-driven movement. Render-only.
-void BakeCreatureMarkers(Luminumbra::Rendering::PlantProcgenPass* pp, entt::registry& reg) {
+void BakeCreatureMarkers(Luminumbra::Rendering::PlantProcgenPass* pp, entt::registry& reg,
+                         Luminumbra::world::GameSession* gs = nullptr) {
     if (!pp) return;
     // Markers only: the procedural FOREST now renders through the instanced static-mesh path
-    // (vast, LOD'd), so this pass draws just the moving creature octahedra.
+    // (vast, LOD'd), so this pass draws just the moving creature octahedra. Spec 011 Phase C/D:
+    // when `gs` is supplied, the forager colony (ants + food piles + nest anchor) is rendered
+    // INTO THE SAME buffer so the shared PlantProcgenPass geometry is one upload (never two
+    // set_plants calls clobbering each other).
     std::vector<Luminumbra::Rendering::PlantProcgenPass::Vertex> verts;
     std::vector<std::uint32_t> indices;
     auto view = reg.view<const Luminumbra::Components::CreatureComponent,
@@ -613,6 +617,26 @@ void BakeCreatureMarkers(Luminumbra::Rendering::PlantProcgenPass* pp, entt::regi
     constexpr float r = 1.0f, halfH = 1.3f;  // ~matches the Jolt capsule; reads from the demo camera
     static const int tri[8][3] = {{0, 2, 3}, {0, 3, 4}, {0, 4, 5}, {0, 5, 2},
                                   {1, 3, 2}, {1, 4, 3}, {1, 5, 4}, {1, 2, 5}};
+    // Append one octahedron (centre c, horizontal radius rr, vertical half-height hh, colour).
+    auto emitOcta = [&](const glm::vec3& c, float rr, float hh, const glm::vec3& color) {
+        const glm::vec3 P[6] = {c + glm::vec3(0, hh, 0), c - glm::vec3(0, hh, 0),
+                                c + glm::vec3(rr, 0, 0),     c + glm::vec3(0, 0, rr),
+                                c - glm::vec3(rr, 0, 0),     c - glm::vec3(0, 0, rr)};
+        const std::uint32_t base = static_cast<std::uint32_t>(verts.size());
+        for (const glm::vec3& p : P) {
+            Luminumbra::Rendering::PlantProcgenPass::Vertex v;
+            v.pos = p;
+            v.normal = glm::normalize(p - c);
+            v.uv = glm::vec2(0.0f, 0.0f);  // bark flag -> no wind sway, vertex color albedo
+            v.color = color;
+            verts.push_back(v);
+        }
+        for (const auto& t : tri) {
+            indices.push_back(base + t[0]);
+            indices.push_back(base + t[1]);
+            indices.push_back(base + t[2]);
+        }
+    };
     for (auto e : view) {
         const auto& tf = view.get<const Luminumbra::Components::TransformComponent>(e);
         const auto& cr = view.get<const Luminumbra::Components::CreatureComponent>(e);
@@ -655,24 +679,47 @@ void BakeCreatureMarkers(Luminumbra::Rendering::PlantProcgenPass* pp, entt::regi
             sizeMul *= 0.8f; restSquash = 0.70f; col *= 0.85f;
         }
         const float rr = r * sizeMul, hh = halfH * sizeMul * restSquash;
-        const glm::vec3 P[6] = {c + glm::vec3(0, hh, 0), c - glm::vec3(0, hh, 0),
-                                c + glm::vec3(rr, 0, 0),     c + glm::vec3(0, 0, rr),
-                                c - glm::vec3(rr, 0, 0),     c - glm::vec3(0, 0, rr)};
-        const std::uint32_t base = static_cast<std::uint32_t>(verts.size());
-        for (const glm::vec3& p : P) {
-            Luminumbra::Rendering::PlantProcgenPass::Vertex v;
-            v.pos = p;
-            v.normal = glm::normalize(p - c);
-            v.uv = glm::vec2(0.0f, 0.0f);  // bark flag -> no wind sway, vertex color albedo
-            v.color = col;
-            verts.push_back(v);
+        emitOcta(c, rr, hh, col);
+    }
+
+    // Spec 011 Phase C/D — forager colony render (anchor-only, client-visual). Renders the
+    // ants shuttling, the food piles, and the nest ANCHOR. All reads (TransformComponent
+    // mirror, cell->world, terrain height) are render-only; nothing steers or writes sim.
+    if (gs) {
+        auto* ws = gs->GetWorldSystem();
+        int nestCx = -1, nestCz = -1;
+        auto fgview = reg.view<const Luminumbra::Components::ForagerComponent,
+                               const Luminumbra::Components::TransformComponent>();
+        for (auto e : fgview) {
+            const auto& fg = fgview.get<const Luminumbra::Components::ForagerComponent>(e);
+            const auto& tf = fgview.get<const Luminumbra::Components::TransformComponent>(e);
+            nestCx = fg.home_x; nestCz = fg.home_z;  // every ant shares the nest cell
+            const glm::vec3 c(tf.position.x, tf.position.y + 0.2f, tf.position.z);
+            // A LADEN ant (carrying food home) glows amber; an outbound ant is pale.
+            const glm::vec3 col = fg.carrying_food ? glm::vec3(0.95f, 0.65f, 0.15f)
+                                                   : glm::vec3(0.85f, 0.82f, 0.70f);
+            emitOcta(c, 0.30f, 0.30f, col);
         }
-        for (const auto& t : tri) {
-            indices.push_back(base + t[0]);
-            indices.push_back(base + t[1]);
-            indices.push_back(base + t[2]);
+        // Food piles (green), cell->world. Skip depleted sources.
+        auto foodv = reg.view<const Luminumbra::Components::FoodSourceComponent>();
+        for (auto e : foodv) {
+            const auto& fs = foodv.get<const Luminumbra::Components::FoodSourceComponent>(e);
+            if (fs.amount <= 0) continue;
+            const float wx = gs->ScentCellToWorldX(fs.cell_x);
+            const float wz = gs->ScentCellToWorldZ(fs.cell_z);
+            const float wy = (ws ? ws->GetTerrainHeightAt(wx, wz) : 0.0f) + 0.4f;
+            emitOcta(glm::vec3(wx, wy, wz), 0.7f, 0.7f, glm::vec3(0.30f, 0.80f, 0.25f));
+        }
+        // Nest ANCHOR (tan mound) at the colony's home cell — the "home" the trails radiate
+        // from. Anchor-only: it is decoration, never a steering target (Option A).
+        if (nestCx >= 0) {
+            const float wx = gs->ScentCellToWorldX(nestCx);
+            const float wz = gs->ScentCellToWorldZ(nestCz);
+            const float wy = (ws ? ws->GetTerrainHeightAt(wx, wz) : 0.0f) + 0.5f;
+            emitOcta(glm::vec3(wx, wy, wz), 1.2f, 0.9f, glm::vec3(0.55f, 0.40f, 0.25f));
         }
     }
+
     static std::uint64_t s_sig = 1000;
     ++s_sig;  // creatures move every frame -> always re-upload
     if (verts.empty()) { pp->set_enabled(false); return; }
@@ -3229,6 +3276,15 @@ int main(int argc, char* argv[]) {
             g_systemConfig.user().mouse_sensitivity = v;
             if (g_camera) g_camera->MouseSensitivity = v;
         };
+        sb.GetUiScale = [] { return g_systemConfig.user().ui_scale; };
+        sb.SetUiScale = [](float v) {
+            // Clamp to the supported HUD-scale band and apply LIVE via the RmlUi context's
+            // density-independent-pixel ratio (scales all px-based HUD/UI uniformly).
+            if (v < 0.5f) v = 0.5f; else if (v > 2.5f) v = 2.5f;
+            g_systemConfig.user().ui_scale = v;
+            if (g_uiManager && g_uiManager->GetContext())
+                g_uiManager->GetContext()->SetDensityIndependentPixelRatio(v);
+        };
         sb.GetAudioMaster = [] { return g_systemConfig.user().audio_master; };
         sb.SetAudioMaster = [&audioManager](float v) {
             g_systemConfig.user().audio_master = v;
@@ -3262,6 +3318,13 @@ int main(int argc, char* argv[]) {
                 luminumbra::core::SystemConfig::DefaultUserOverlayPath());
         };
         g_uiManager->SetSettingsBridge(std::move(sb));
+        // Apply the PERSISTED UI/HUD scale to the freshly-created RmlUi context so the HUD
+        // boots at the player's chosen size (e.g. scaled up on a 4K/ultrawide display).
+        if (g_uiManager->GetContext()) {
+            float boot_ui_scale = g_systemConfig.user().ui_scale;
+            if (boot_ui_scale < 0.5f) boot_ui_scale = 0.5f; else if (boot_ui_scale > 2.5f) boot_ui_scale = 2.5f;
+            g_uiManager->GetContext()->SetDensityIndependentPixelRatio(boot_ui_scale);
+        }
         // T032: pause-menu actions route here (main_client owns game state + cursor).
         g_uiManager->SetPauseActionCallback([window, &gameStateManager](const std::string& act) {
             if (act == "resume") {
@@ -6061,7 +6124,8 @@ int main(int argc, char* argv[]) {
                         // bake markers from the physics-resolved positions.
                         AttachMissingCreatureBodies(gameSession->GetPhysicsSystem(),
                                                     gameSession->GetRegistry());
-                        BakeCreatureMarkers(renderPipeline.plant_procgen(), gameSession->GetRegistry());
+                        BakeCreatureMarkers(renderPipeline.plant_procgen(), gameSession->GetRegistry(),
+                                            gameSession.get());
                     }
                     if (g_timelapse_fire) {
                         BakeCombustibleMarkers(renderPipeline.plant_procgen(), gameSession->GetRegistry(),

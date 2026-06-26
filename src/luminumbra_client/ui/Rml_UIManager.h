@@ -62,6 +62,8 @@ struct SettingsBridge {
     std::function<void(float)> SetFov;
     std::function<float()> GetMouseSensitivity;
     std::function<void(float)> SetMouseSensitivity;
+    std::function<float()> GetUiScale;          // HUD/UI density-independent-pixel ratio (0.5..2.5)
+    std::function<void(float)> SetUiScale;
     // Audio (0..1)
     std::function<float()> GetAudioMaster;
     std::function<void(float)> SetAudioMaster;

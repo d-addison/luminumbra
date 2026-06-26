@@ -920,6 +920,11 @@ void Rml_UIManager::PopulateSettingsForm(Rml::ElementDocument* document) {
         SetControlValue(document->GetElementById("setting_mouse_sensitivity"), FormatFloat(s, 3));
         SetValueLabel(document, "setting_mouse_sensitivity_value", FormatFloat(s, 3));
     }
+    if (b.GetUiScale) {
+        const float s = b.GetUiScale();
+        SetControlValue(document->GetElementById("setting_ui_scale"), FormatFloat(s, 2));
+        SetValueLabel(document, "setting_ui_scale_value", FormatPercent(s));
+    }
 
     // Audio
     if (b.GetAudioMaster) {
@@ -985,6 +990,10 @@ void Rml_UIManager::ApplySettingFromElement(Rml::Element* element) {
         const float f = as_float(0.025f);
         if (b.SetMouseSensitivity) b.SetMouseSensitivity(f);
         if (doc) SetValueLabel(doc, "setting_mouse_sensitivity_value", FormatFloat(f, 3));
+    } else if (id == "setting_ui_scale") {
+        const float f = as_float(1.0f);
+        if (b.SetUiScale) b.SetUiScale(f);
+        if (doc) SetValueLabel(doc, "setting_ui_scale_value", FormatPercent(f));
     } else if (id == "setting_audio_master") {
         const float f = as_float(1.0f);
         if (b.SetAudioMaster) b.SetAudioMaster(f);
@@ -1014,7 +1023,7 @@ void Rml_UIManager::BindSettingsListeners(Rml::ElementDocument* document) {
     // Live-apply every control on "change" (sliders, selects).
     static const char* kControlIds[] = {
         "setting_resolution", "setting_window_mode", "setting_vsync",
-        "setting_fov", "setting_mouse_sensitivity",
+        "setting_fov", "setting_mouse_sensitivity", "setting_ui_scale",
         "setting_audio_master", "setting_audio_sfx", "setting_audio_music",
     };
     for (const char* control_id : kControlIds) {

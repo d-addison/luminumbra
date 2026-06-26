@@ -123,6 +123,8 @@ void ParseUserSection(const nlohmann::json& data, UserSettings& user) {
         if (v.contains("fov") && v["fov"].is_number()) user.fov = v["fov"].get<float>();
         if (v.contains("render_scale") && v["render_scale"].is_number())
             user.render_scale = v["render_scale"].get<float>();
+        if (v.contains("ui_scale") && v["ui_scale"].is_number())
+            user.ui_scale = v["ui_scale"].get<float>();
         if (v.contains("mouse_sensitivity") && v["mouse_sensitivity"].is_number())
             user.mouse_sensitivity = v["mouse_sensitivity"].get<float>();
     }
@@ -278,6 +280,7 @@ bool SystemConfig::SaveUserOverlay(const std::string& path) const {
         {"vsync", m_user.vsync},
         {"fov", m_user.fov},
         {"render_scale", m_user.render_scale},
+        {"ui_scale", m_user.ui_scale},
         {"mouse_sensitivity", m_user.mouse_sensitivity},
     };
     user["audio"] = {
