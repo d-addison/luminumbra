@@ -4190,6 +4190,7 @@ int main(int argc, char* argv[]) {
                 if (sf && n > 0) {
                     if (s_scentMirror.cells != n) s_scentMirror.resize(n);
                     bool any = false;
+                    float maxScent = 0.0f;
                     for (int z = 0; z < n; ++z) {
                         for (int x = 0; x < n; ++x) {
                             const std::size_t i = (static_cast<std::size_t>(z) * n + x) * 2;
@@ -4198,8 +4199,14 @@ int main(int argc, char* argv[]) {
                             s_scentMirror.rg[i + 0] = food;
                             s_scentMirror.rg[i + 1] = home;
                             if (food > 0.0f || home > 0.0f) any = true;
+                            if (food > maxScent) maxScent = food;
+                            if (home > maxScent) maxScent = home;
                         }
                     }
+                    // Calibration diagnostic: the decal shader's u_scentScale wants ~1/peak.
+                    static int s_scentLog = 0;
+                    if ((s_scentLog++ % 15) == 0)
+                        LUMINUMBRA_CORE_INFO("Scent decal: peak trail value = {:.4f}", maxScent);
                     s_scentMirror.cell_size = gameSession->ScentCellSize();
                     s_scentMirror.origin_x = gameSession->ScentCellToWorldX(0);
                     s_scentMirror.origin_z = gameSession->ScentCellToWorldZ(0);

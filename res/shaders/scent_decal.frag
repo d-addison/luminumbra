@@ -43,11 +43,14 @@ void main() {
     }
 
     vec2 scent = texture(u_scentField, uv).rg;   // R=food, G=home
+    // The food trail (laden ants, nest<-food) is the crisp hero path -> full weight.
+    // The home trail (outbound ants) spreads broadly near the nest -> down-weight it so
+    // it reads as a faint halo, not a blob that swamps the amber path.
     float foodI = clamp(scent.r * u_scentScale, 0.0, 1.0);
-    float homeI = clamp(scent.g * u_scentScale, 0.0, 1.0);
+    float homeI = clamp(scent.g * u_scentScale * 0.55, 0.0, 1.0);
 
     vec3  tint = FOOD_COLOR * foodI + HOME_COLOR * homeI;
-    float intensity = max(foodI, homeI);
+    float intensity = max(foodI, homeI * 0.7);
     if (intensity <= 0.0025) { FragColor = vec4(0.0); return; }
 
     // glBlendFunc(SRC_ALPHA, ONE): rgb scaled by alpha, so carry strength in .a.

@@ -44,7 +44,7 @@ private:
     int    m_tex_extent = 0;
     bool   m_active = false;
     float  m_origin_x = 0.0f, m_origin_z = 0.0f, m_inv_world_span = 0.0f;
-    float  m_scent_scale = 1.5f; // raw Sample() -> intensity (calibrated against deposits)
+    float  m_scent_scale = 0.9f; // raw Sample() -> intensity (peak deposit ~3.4 -> visible gradient)
 };
 
 } // namespace Luminumbra::Rendering
