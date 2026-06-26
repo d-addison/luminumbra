@@ -376,9 +376,15 @@ void SHIELD_WorldSystem::reinitialize_noise() {
     terrain_fractal->SetGain(m_params.persistence);
     m_terrain_generator = terrain_fractal;
 
-    // 2. Cave Generator (3D Perlin Noise)
+    // 2. Cave Generator (3D Perlin Noise) — the cheese BODY field.
     auto cave_noise = FastNoise::New<FastNoise::Perlin>();
     m_cave_generator = cave_noise;
+    // 2b. Spec 013 noise-router SPAGHETTI tunnel field (a second, decorrelated Perlin).
+    // Built ONLY when the preset opts into the noise-router style, so legacy worlds never
+    // construct this node and stay byte-identical.
+    if (m_params.cave_style != 0) {
+        m_spaghetti_generator = FastNoise::New<FastNoise::Perlin>();
+    }
 
     // 3. Island Mask Generator (Low-frequency Simplex)
     auto island_noise = FastNoise::New<FastNoise::Simplex>();
@@ -965,6 +971,44 @@ float SHIELD_WorldSystem::CliffTerracedHeight(float world_x, float world_z, floa
 // order-free ops (min cap, max carve). For each feature it runs an
 // interior-proximity probe (one extra cave-noise read at y = surface - capDepth) so
 // the cap is only lifted where the cave field is ALREADY carved -> never a blind pit.
+// Spec 013: the single cave-carve composition point (MC-1.18 noise-router, on an SDF).
+// Legacy (cave_style==0): exactly the pre-existing cheese BODY threshold + cap + doline
+// carve -> byte-identical. Noise-router (cave_style==1): ALSO carve SPAGHETTI tunnels at
+// the zero-crossing EDGE of a second Perlin (abs(noise) < thickness => air), composed via
+// the surface cap + a hard max so isolated cheese bubbles become a connected network.
+float SHIELD_WorldSystem::EvaluateCaveDensity(const Vec3& wp, float terrain_density,
+                                              float effective_cap, float feature_carve,
+                                              const float* precomputed_cheese) const {
+    // Cheese BODY field — identical args to the legacy site, so the legacy result is bit-exact.
+    // The hot batched-chunk path passes its precomputed batch value to skip a re-sample.
+    const float cheese = precomputed_cheese
+        ? *precomputed_cheese
+        : m_cave_generator->GenSingle3D(wp.x * m_params.cave_frequency,
+                                        wp.y * m_params.cave_frequency,
+                                        wp.z * m_params.cave_frequency, m_seed + 1);
+    float density = apply_cave_field(terrain_density, cheese, m_params, effective_cap, feature_carve);
+
+    if (m_params.cave_style == 0 || !m_spaghetti_generator) {
+        return density; // legacy path: byte-identical to before this feature existed
+    }
+
+    // SPAGHETTI tunnels: |noise| small => near a tunnel centerline => air. Seed +20 keeps
+    // the tunnel field decorrelated from the cheese field (m_seed + 1).
+    const float sp = m_spaghetti_generator->GenSingle3D(
+        wp.x * m_params.spaghetti_frequency, wp.y * m_params.spaghetti_frequency,
+        wp.z * m_params.spaghetti_frequency, m_seed + 20);
+    const float thickness = std::max(1e-4f, m_params.spaghetti_thickness);
+    const float edge = thickness - std::abs(sp);  // >0 inside the tunnel, peak at the centerline
+    if (edge > 0.0f) {
+        const float tunnel_density = (edge / thickness) * m_params.cave_carve_value;
+        // Respect the per-column surface cap exactly like the cheese field (no surface breaches).
+        const float cap_blend = cave_surface_blend(terrain_density, effective_cap);
+        const float capped = terrain_density + (tunnel_density - terrain_density) * cap_blend;
+        density = std::max(density, capped);
+    }
+    return density;
+}
+
 SHIELD_WorldSystem::SurfaceBreakInfo
 SHIELD_WorldSystem::FindLargestSurfaceBreak(float near_x, float near_z, float scan_radius_m) const {
     SurfaceBreakInfo best;
@@ -1729,14 +1773,10 @@ void SHIELD_WorldSystem::ClassifyVertexMaterials(
         const float terrain_density = world_y - final_height;
         float final_density = terrain_density;
         if (m_params.caves_enabled) {
-            const float cave_noise = m_cave_generator->GenSingle3D(
-                (p.x) * m_params.cave_frequency,
-                (world_y) * m_params.cave_frequency,
-                (p.z) * m_params.cave_frequency, m_seed + 1);
-            const SurfaceBreakSample sb =
-                sample_surface_breaks(Vec3(p.x, world_y, p.z), final_height);
-            final_density = apply_cave_field(terrain_density, cave_noise, m_params,
-                                             sb.effective_cap, sb.carve);
+            const Vec3 wp(p.x, world_y, p.z);
+            const SurfaceBreakSample sb = sample_surface_breaks(wp, final_height);
+            // Spec 013: single composition point (cheese + noise-router spaghetti tunnels).
+            final_density = EvaluateCaveDensity(wp, terrain_density, sb.effective_cap, sb.carve);
         }
         MaterialType material = MaterialType::Air;
         if (final_density < 0.0f) {
@@ -3243,9 +3283,11 @@ WorldGenLayerSample SHIELD_WorldSystem::SampleWorldGenLayers(const Vec3& world_p
         sample.cave_value = std::clamp((sample.cave_noise + 1.0f) * 0.5f, 0.0f, 1.0f);
         const SurfaceBreakSample sb = sample_surface_breaks(world_pos, sample.final_height);
         sample.cave_density = surface_capped_cave_density(sample.terrain_density,
-            sample.cave_noise, m_params, sb.effective_cap);
-        sample.final_density = apply_cave_field(sample.terrain_density, sample.cave_noise,
-            m_params, sb.effective_cap, sb.carve);
+            sample.cave_noise, m_params, sb.effective_cap);  // cheese component (diagnostic)
+        // Spec 013: final density routes through the single composition point so it includes
+        // the noise-router spaghetti tunnels (legacy result stays bit-exact: same cheese noise).
+        sample.final_density = EvaluateCaveDensity(world_pos, sample.terrain_density,
+                                                   sb.effective_cap, sb.carve);
     }
 
     sample.solid = sample.final_density < 0.0f;
@@ -3269,11 +3311,9 @@ WorldGenLayerSample SHIELD_WorldSystem::SampleWorldGenLayers(const Vec3& world_p
 float SHIELD_WorldSystem::get_density_at_from_precalculated(const Vec3& world_pos, float terrain_height) const {
     float terrain_density = world_pos.y - terrain_height;
     if (m_params.caves_enabled) {
-        // <<< FIX: The function returns the value directly.
-        float cave_noise = m_cave_generator->GenSingle3D(world_pos.x * m_params.cave_frequency, world_pos.y * m_params.cave_frequency, world_pos.z * m_params.cave_frequency, m_seed + 1);
+        // Spec 013: single composition point (cheese + noise-router spaghetti).
         const SurfaceBreakSample sb = sample_surface_breaks(world_pos, terrain_height);
-        terrain_density = apply_cave_field(terrain_density, cave_noise, m_params,
-                                           sb.effective_cap, sb.carve);
+        terrain_density = EvaluateCaveDensity(world_pos, terrain_density, sb.effective_cap, sb.carve);
     }
     return terrain_density;
 }
@@ -3814,8 +3854,12 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_
                                              current_world_y,
                                              static_cast<float>(base_pos.z + z));
                    const SurfaceBreakSample sb = sample_surface_breaks(cave_world_pos, terrain_h);
-                   terrain_density = apply_cave_field(terrain_density, cave_noise[cave_read_idx],
-                                                      m_params, sb.effective_cap, sb.carve);
+                   // Spec 013: single composition point. Pass the precomputed batch cheese
+                   // noise so the hot path skips a re-sample (legacy bit-exact); noise-router
+                   // adds spaghetti tunnels per-voxel.
+                   terrain_density = EvaluateCaveDensity(cave_world_pos, terrain_density,
+                                                         sb.effective_cap, sb.carve,
+                                                         &cave_noise[cave_read_idx]);
                }
                
                if (y == 0) {

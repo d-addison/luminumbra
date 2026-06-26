@@ -276,6 +276,11 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
     params.cave_frequency = features.value("cave_frequency", 0.02f);
     params.cave_threshold = features.value("cave_threshold", params.cave_threshold);
     params.cave_carve_value = features.value("cave_carve_value", params.cave_carve_value);
+    // Spec 013: cave style (0 = legacy cheese-only, byte-identical; 1 = noise-router with
+    // spaghetti tunnels). Absent => 0 => existing presets unchanged.
+    params.cave_style = features.value("cave_style", params.cave_style);
+    params.spaghetti_frequency = features.value("spaghetti_frequency", params.spaghetti_frequency);
+    params.spaghetti_thickness = features.value("spaghetti_thickness", params.spaghetti_thickness);
 
     // Shaping block: parsed into extras AND consumed (T-I3-10) - the loader is
     // the one place preset shaping data lands in TerrainGenParams, so every
@@ -416,7 +421,8 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
                      "cliff_step",
                      "surface_breaks_enabled", "surface_break_density",
                      "feature_cell_size", "max_feature_radius",
-                     "carve_smoothness", "entrance_min_cap"},
+                     "carve_smoothness", "entrance_min_cap",
+                     "cave_style", "spaghetti_frequency", "spaghetti_thickness"},
                     provenance, result.warnings);
 
     result.ok = true;

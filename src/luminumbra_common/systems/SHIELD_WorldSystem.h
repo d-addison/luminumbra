@@ -38,6 +38,14 @@ struct TerrainGenParams {
     float cave_frequency = 0.02f;
     float cave_threshold = 0.7f;
     float cave_carve_value = 2.0f;
+    // Spec 013: cave STYLE. 0 = legacy single 3D-Perlin BODY threshold (cheese-only,
+    // byte-identical to all pre-existing worlds). 1 = noise-router (Minecraft-1.18-style):
+    // the legacy cheese rooms PLUS spaghetti winding tunnels carved at the zero-crossing
+    // EDGE of a second Perlin (abs(noise) < thickness => air) so caves become connected
+    // networks, not isolated bubbles. Opt-in per preset; legacy stays byte-identical.
+    int   cave_style = 0;
+    float spaghetti_frequency = 0.04f;  // tunnel noise scale (higher = tighter winding)
+    float spaghetti_thickness = 0.08f;  // |noise| < this carves a tunnel (wider = fatter)
 
     // --- FR-A3 surface-breaking caves / sinkholes / cave-mouths (default-off) ---
     // Makes the 18 m surface cap (kCaveSurfaceCapDepth) a PER-COLUMN field so the
@@ -387,6 +395,13 @@ public:
     std::vector<::Luminumbra::Chunk*> get_renderable_chunks();
     float get_density_at(const Vec3& world_pos) const;
     float GetTerrainHeightAt(float world_x, float world_z) const;
+    // Spec 013: the single cave-carve composition point. Samples the cheese BODY noise
+    // (byte-identical to the legacy path) and, in noise-router style (cave_style==1), adds
+    // spaghetti EDGE tunnels, composed via the existing order-free smax. Called identically
+    // by every density site (mesh / collision / query) so they cannot disagree.
+    float EvaluateCaveDensity(const Vec3& world_pos, float terrain_density,
+                              float effective_cap, float feature_carve,
+                              const float* precomputed_cheese = nullptr) const;
     // Spec 013 P1: locate the LARGEST doline / surface-break (cave mouth) within
     // `scan_radius_m` of a point. Pure read of the deterministic placement; used to aim a
     // camera at a dramatic cave opening (dolines follow a power-law, so most are small).
@@ -874,6 +889,7 @@ private:
     // Noise states for procedural generation
     FastNoise::SmartNode<FastNoise::Generator> m_terrain_generator;
     FastNoise::SmartNode<FastNoise::Generator> m_cave_generator;
+    FastNoise::SmartNode<FastNoise::Generator> m_spaghetti_generator; // spec 013 noise-router tunnels (built iff cave_style==1)
     FastNoise::SmartNode<FastNoise::Generator> m_island_mask_generator;
     // T-I3-10 shaping control noises (only built when shaping_enabled; seed
     // offsets +3/+4/+5 for continentalness/erosion/peaks, the single warp
