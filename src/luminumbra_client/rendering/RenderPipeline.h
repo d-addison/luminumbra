@@ -22,7 +22,7 @@
 // Forward declarations
 namespace Luminumbra { class Chunk; class JobSystem; }
 namespace Luminumbra::Systems { class SHIELD_WorldSystem; struct TerrainGenParams; }
-namespace Luminumbra::Rendering { class Shader; class Camera; class ShadowPass; class GBufferPass; class SsaoPass; class LightingPass; class WaterPass; class SkyboxPass; class ParticlePass; class FoliagePass; class PlantProcgenPass; class FarLodSystem; class ShieldRtFarFieldPass; class GroundDecalPass; struct ScentFieldRenderMirror; }
+namespace Luminumbra::Rendering { class Shader; class Camera; class ShadowPass; class GBufferPass; class SsaoPass; class LightingPass; class WaterPass; class SkyboxPass; class ParticlePass; class FoliagePass; class PlantProcgenPass; class FarLodSystem; class ShieldRtFarFieldPass; class GroundDecalPass; class DebugViewPass; struct ScentFieldRenderMirror; }
 
 namespace Luminumbra::Rendering {
 
@@ -774,6 +774,9 @@ public:
     // Spec 011 FR-C: push the one-way scent snapshot for the pheromone ground decal.
     // Defined in the .cpp (GroundDecalPass is forward-declared here). Render-only.
     void UpdateScentDecals(const ScentFieldRenderMirror& mirror);
+    // Render-only G-buffer debug visualizer (DebugViewPass::Mode; 0 = off, normal render).
+    // Diagnostic only: never touches sim state or world_hash. Default-OFF.
+    void set_debug_view(int mode);
 
     // Vast procedural-tree palette: register a runtime-built mesh under a synthetic key into the
     // instanced static-mesh cache (forwards to GBufferPass). Lets the world scatter thousands of
@@ -1006,6 +1009,7 @@ private:
     std::unique_ptr<FoliagePass> m_foliage_pass;   // T-I5b-1
     std::unique_ptr<PlantProcgenPass> m_plant_procgen_pass; // I9-FOLIAGE (flag-gated)
     std::unique_ptr<GroundDecalPass> m_ground_decal_pass;   // spec 011 FR-C pheromone trail (default-OFF)
+    std::unique_ptr<DebugViewPass> m_debug_view_pass;       // render-only G-buffer debug overlay (default-OFF)
     std::unique_ptr<ShieldRtFarFieldPass> m_shieldrt_far_pass; // T-I6-A3b (flag-gated)
     JobSystem* m_job_system = nullptr;             // attached pre-startup; forwarded to passes built in startup()
     bool m_far_field_runtime_requested = false;    // --enable-far-field-gpu-raymarch

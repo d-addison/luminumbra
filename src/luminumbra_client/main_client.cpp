@@ -230,6 +230,7 @@ static constexpr int kTimelapseSettleFrames = 45;  // let the world stream/settl
 // Fixed camera-pose override (--cam-pos x,y,z [--cam-yaw d] [--cam-pitch d]): pins
 // g_camera every frame for reproducible/controllable screenshots + benchmarks. Keep
 // the position within the streamed area (near spawn) so chunks are resident.
+static int g_debug_view_mode = 0; // render-only G-buffer debug overlay: 0=off,1=albedo,2=normal,3=depth,4=material,5=position (F6 cycles)
 bool g_fixed_cam = false;
 glm::vec3 g_fixed_cam_pos(0.0f);
 float g_fixed_cam_yaw = 0.0f;
@@ -2512,6 +2513,14 @@ int main(int argc, char* argv[]) {
     // --render-benchmark <path>: average per-pass GPU timers over N settled in-world
     // frames -> JSON (render-optimization budget-gate capture). Pair with
     // --auto-create-world --auto-enter-world.
+    // --debug-view <albedo|normal|depth|material|position>: render-only G-buffer overlay (default off).
+    if (const std::string dv = GetCommandLineOption(argc, argv, "--debug-view", ""); !dv.empty()) {
+        if      (dv == "albedo")   g_debug_view_mode = 1;
+        else if (dv == "normal")   g_debug_view_mode = 2;
+        else if (dv == "depth")    g_debug_view_mode = 3;
+        else if (dv == "material") g_debug_view_mode = 4;
+        else if (dv == "position") g_debug_view_mode = 5;
+    }
     g_render_benchmark_path = GetCommandLineOption(argc, argv, "--render-benchmark", "");
     g_play_paths = HasCommandLineFlag(argc, argv, "--play-paths"); // TEMP diag: normal-play paths under a scripted scenario camera
     g_profile_fly_seconds = static_cast<double>(GetCommandLineIntOption(argc, argv, "--profile-fly", 0)); // TEMP diag: constant-speed eye-level moving profiler (normal-play, self-exits)
@@ -6487,6 +6496,7 @@ int main(int argc, char* argv[]) {
                                             std::chrono::steady_clock::now() - _fb0).count();
                     }
                     const auto _rb_rcall_t0 = std::chrono::steady_clock::now(); // always-on (TEMP diag)
+                    renderPipeline.set_debug_view(g_debug_view_mode);  // render-only; 0 = byte-identical default (F6 / --debug-view)
                     renderPipeline.render_frame(gameSession->GetRegistry(), *gameSession->GetWorldSystem(), *g_camera, deltaTime, wireframe_mode);
                     rb_render_call_ms = std::chrono::duration<double, std::milli>(
                                          std::chrono::steady_clock::now() - _rb_rcall_t0).count();
@@ -9616,6 +9626,13 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
     // F3: toggle the live per-pass GPU profiler overlay.
     if (key == GLFW_KEY_F3 && action == GLFW_PRESS) {
         g_show_gpu_profiler = !g_show_gpu_profiler;
+        return;
+    }
+    // F6: cycle the render-only G-buffer debug view (off -> albedo -> normal -> depth ->
+    // material -> position -> off). Diagnostic only; never affects sim/world_hash. The main
+    // loop pushes g_debug_view_mode into the pipeline each frame.
+    if (key == GLFW_KEY_F6 && action == GLFW_PRESS) {
+        g_debug_view_mode = (g_debug_view_mode + 1) % 6;  // 0..5
         return;
     }
     // F8: toggle the settings menu and free/restore the cursor so the panel is usable.

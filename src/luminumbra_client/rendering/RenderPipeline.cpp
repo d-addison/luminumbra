@@ -36,6 +36,7 @@
 #include "passes/FoliagePass.h"
 #include "passes/PlantProcgenPass.h" // I9-FOLIAGE: render-only procedural plants (flag-gated)
 #include "passes/GroundDecalPass.h"  // spec 011 FR-C: render-only pheromone ground decal (flag-gated)
+#include "passes/DebugViewPass.h"    // render-only G-buffer debug visualizer (default-OFF)
 #include "passes/SsaoPass.h"
 #include "passes/WaterPass.h"
 #include <stb_image.h>
@@ -600,12 +601,18 @@ RenderPipeline::RenderPipeline()
       m_particle_pass(std::make_unique<ParticlePass>()),
       m_foliage_pass(std::make_unique<FoliagePass>()),
       m_plant_procgen_pass(std::make_unique<PlantProcgenPass>()),
-      m_ground_decal_pass(std::make_unique<GroundDecalPass>()) {}
+      m_ground_decal_pass(std::make_unique<GroundDecalPass>()),
+      m_debug_view_pass(std::make_unique<DebugViewPass>()) {}
 
 // Spec 011 FR-C: forward the one-way scent snapshot to the decal pass (render-only;
 // defined here where GroundDecalPass is a complete type).
 void RenderPipeline::UpdateScentDecals(const ScentFieldRenderMirror& mirror) {
     if (m_ground_decal_pass) m_ground_decal_pass->update_scent(mirror);
+}
+
+// Render-only debug-view override (0 = off). Never feeds world_hash.
+void RenderPipeline::set_debug_view(int mode) {
+    if (m_debug_view_pass) m_debug_view_pass->set_mode(mode);
 }
 RenderPipeline::~RenderPipeline() {
     cleanup_gpu_resources();
@@ -635,6 +642,7 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         m_foliage_pass->init_buffers();  // T-I5b-1: persistent-mapped scatter pool
         m_plant_procgen_pass->init_buffers(); // I9-FOLIAGE: dedicated procgen plant VAO/VBO/EBO
         m_ground_decal_pass->init_buffers();  // spec 011 FR-C: decal VAO + lazy scent texture
+        m_debug_view_pass->init_buffers();    // render-only debug-view VAO (default-OFF)
         // T-I6-A3b: experimental SHIELD-RT far-field raymarch pass. Compiled +
         // resident only when the compile-time gate is on (runtime opt-in still
         // required to render); render output is unchanged when the gate is off.
@@ -2127,6 +2135,17 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     m_last_render_pass_stats.final_blits++;
     end_gpu_pass_timer(GpuTimerPass::FinalBlit);
 
+    // Render-only debug-view OVERRIDE: when enabled, redraw the bound target (screen or
+    // offscreen) with a single-channel G-buffer view, REPLACING the composited image so a
+    // human/frame-scan can tell "dark night" from a lighting/geometry bug. Gated on mode !=
+    // None so the default path is byte-identical. Diagnostic; never touches sim/world_hash.
+    if (m_debug_view_pass && m_debug_view_pass->mode() != DebugViewPass::None) {
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw_fbo);
+        glViewport(0, 0, static_cast<GLsizei>(dst_w), static_cast<GLsizei>(dst_h));
+        m_debug_view_pass->set_camera_planes(camera.GetNearPlane(), camera.GetFarPlane());
+        m_debug_view_pass->execute(m_gbuffer_pass->gbuffer(), m_debug_view_pass->mode());
+    }
+
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     finish_gpu_pass_timer_frame();
     refresh_render_pass_metadata();
@@ -2272,6 +2291,7 @@ void RenderPipeline::init_shaders() {
     m_foliage_pass->init_compute(m_root_path); // T-I6 #4: GPU grass scatter (graceful CPU fallback)
     m_plant_procgen_pass->init_shader(m_root_path); // I9-FOLIAGE: procedural plant G-buffer shader
     m_ground_decal_pass->init_shader(m_root_path);  // spec 011 FR-C: pheromone decal shader
+    m_debug_view_pass->init_shader(m_root_path);    // render-only G-buffer debug shader
     m_shadow_pass->init_shader(m_root_path);
     m_ssao_pass->init_shaders(m_root_path);
     m_water_pass->init_shader(m_root_path);
@@ -2607,6 +2627,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     if (m_foliage_pass) { m_foliage_pass->destroy_buffers(); m_foliage_pass->destroy_compute(); }   // T-I5b-1 / T-I6 #4
     if (m_plant_procgen_pass) { m_plant_procgen_pass->destroy_buffers(); } // I9-FOLIAGE
     if (m_ground_decal_pass) { m_ground_decal_pass->destroy_buffers(); }   // spec 011 FR-C
+    if (m_debug_view_pass) { m_debug_view_pass->destroy_buffers(); }       // render-only debug view
     m_sky_lut.destroy(); // T-I5a-6: release scattering LUT textures
     m_gbuffer_pass->destroy_instanced_static_mesh();
     m_gbuffer_pass->destroy_skinned_mesh();
@@ -2626,6 +2647,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     if (m_foliage_pass) { m_foliage_pass->reset_shader(); }   // T-I5b-1
     if (m_plant_procgen_pass) { m_plant_procgen_pass->reset_shader(); } // I9-FOLIAGE
     if (m_ground_decal_pass) { m_ground_decal_pass->reset_shader(); }   // spec 011 FR-C
+    if (m_debug_view_pass) { m_debug_view_pass->reset_shader(); }       // render-only debug view
     m_aerial_shader.reset(); // T-I5a-6: aerial-perspective fullscreen shader
     m_waterfall_shader.reset(); // T-I5b-4: waterfall falling-sheet shader
     m_shadow_pass->reset_shader();

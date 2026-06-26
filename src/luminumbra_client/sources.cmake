@@ -16,6 +16,7 @@ set(CLIENT_INTERNAL_SOURCES
     # Debug
     ${CMAKE_CURRENT_LIST_DIR}/debug/RuntimeOverlaySchema.cpp
     ${CMAKE_CURRENT_LIST_DIR}/debug/WorldGenViewer.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/debug/DebugCamera.cpp
 
     # Player
     ${CMAKE_CURRENT_LIST_DIR}/player/PlayerController.cpp
@@ -24,6 +25,8 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/CaptureHooks.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarLodSystem.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FrameScan.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FrameHealth.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/GlDebugOutput.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/ImpostorBake.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/SceneSurvey.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/LightningBolt.cpp
@@ -41,6 +44,7 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/FoliagePass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/PlantProcgenPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/GroundDecalPass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/DebugViewPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/SsaoPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/WaterPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/ShieldRtFarFieldPass.cpp
