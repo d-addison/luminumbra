@@ -394,7 +394,11 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
     // Unknown-key audit over every consumed scope.
     WarnUnknownKeys(data, "$", {"name", "description", "schema_rev", "generation_params"},
                     provenance, result.warnings);
-    WarnUnknownKeys(gen_params, "generation_params", {"terrain", "biomes", "features", "materials"},
+    // "knob_layer" is the semantic-knob layer the create-world UI writes alongside the resolved
+    // params (KnobLayer.h/WriteKnobLayer); it is consumed by the KnobLayer loader, not here, so
+    // whitelist it to avoid a spurious unknown-key warning on every saved/knob-adjusted preset.
+    WarnUnknownKeys(gen_params, "generation_params",
+                    {"terrain", "biomes", "features", "materials", "knob_layer"},
                     provenance, result.warnings);
     WarnUnknownKeys(terrain, "generation_params.terrain",
                     {"base_frequency", "base_amplitude", "octaves", "persistence",

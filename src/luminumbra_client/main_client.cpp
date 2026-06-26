@@ -3968,16 +3968,20 @@ int main(int argc, char* argv[]) {
                                     Luminumbra::Components::TransformComponent>();
             std::uint32_t totalDeliveries = 0;
             int antCount = 0;
+            const int fgCells = gameSession->ScentFieldCells();
             for (auto e : fgview) {
                 const auto& fg = fgview.get<Luminumbra::Components::ForagerComponent>(e);
                 auto& tf = fgview.get<Luminumbra::Components::TransformComponent>(e);
+                totalDeliveries += fg.deliveries;
+                ++antCount;
+                // Belt-and-suspenders with the ForagingSystem clamp: never map an off-grid cell to
+                // world space (a far-OOB GetTerrainHeightAt is a crash/garbage). Skip if somehow OOB.
+                if (fg.cell_x < 0 || fg.cell_x >= fgCells || fg.cell_z < 0 || fg.cell_z >= fgCells) continue;
                 const float wx = gameSession->ScentCellToWorldX(fg.cell_x);
                 const float wz = gameSession->ScentCellToWorldZ(fg.cell_z);
                 tf.position.x = wx;
                 tf.position.z = wz;
                 tf.position.y = fws ? fws->GetTerrainHeightAt(wx, wz) + 0.15f : tf.position.y;
-                totalDeliveries += fg.deliveries;
-                ++antCount;
             }
             if (antCount > 0) {
                 static float s_forageLog = 0.0f;
@@ -5650,12 +5654,21 @@ int main(int argc, char* argv[]) {
                                 // transform (visible marker render is a follow-on). Client-only: no re-pin.
                                 {
                                     const auto& csp = gameSession->GetMetadata().spawnPoint;
-                                    const int nestCx = gameSession->ScentWorldToCellX(csp.x);
-                                    const int nestCz = gameSession->ScentWorldToCellZ(csp.z) + 6;
+                                    // Clamp every colony cell to the scent grid [0, cells): if the
+                                    // spawn anchor maps near a grid edge, an unclamped nest/food offset
+                                    // would land off-grid and the per-frame mirror would sample terrain
+                                    // at a far-OOB world coordinate (crash). Keep a margin so the nest
+                                    // and both food sources stay reachable inside the field.
+                                    const int cells = gameSession->ScentFieldCells();
+                                    const auto clampCell = [cells](int c) {
+                                        return c < 0 ? 0 : (c >= cells ? cells - 1 : c);
+                                    };
+                                    const int nestCx = clampCell(gameSession->ScentWorldToCellX(csp.x));
+                                    const int nestCz = clampCell(gameSession->ScentWorldToCellZ(csp.z) + 6);
                                     auto placeFood = [&](int cx, int cz) {
                                         const auto fe = reg.create();
                                         auto& fs = reg.emplace<Luminumbra::Components::FoodSourceComponent>(fe);
-                                        fs.cell_x = cx; fs.cell_z = cz; fs.amount = 1000000;
+                                        fs.cell_x = clampCell(cx); fs.cell_z = clampCell(cz); fs.amount = 1000000;
                                     };
                                     placeFood(nestCx + 14, nestCz);       // far food (long path)
                                     placeFood(nestCx - 9,  nestCz + 4);   // near food (short path)

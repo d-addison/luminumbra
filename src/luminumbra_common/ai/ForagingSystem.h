@@ -120,6 +120,14 @@ inline ForagingStats RunForagingOnTick(entt::registry& reg, ScentField& field,
         if (bestDir >= 0) {
             a.cell_x += kDX[bestDir];
             a.cell_z += kDZ[bestDir];
+            // Keep the forager ON the grid. An unclamped step can walk a cell off the field
+            // (e.g. a nest/food placed near an edge), and a downstream render mirror would then
+            // map it to a far-out-of-bounds world coordinate and sample terrain there (crash /
+            // garbage). Clamp to the valid cell range — deterministic integer math.
+            if (a.cell_x < 0) a.cell_x = 0;
+            else if (a.cell_x >= field.width()) a.cell_x = field.width() - 1;
+            if (a.cell_z < 0) a.cell_z = 0;
+            else if (a.cell_z >= field.height()) a.cell_z = field.height() - 1;
         }
 
         // 4. Arrival transitions.
