@@ -9,6 +9,7 @@
 
 #include "core/Log.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
+#include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "rendering/Camera.h"
 #include "rendering/RenderPipeline.h"
@@ -45,7 +46,9 @@ WorldgenPreview::~WorldgenPreview() {
     if (m_color_texture) glDeleteTextures(1, &m_color_texture);
     if (m_depth_rbo) glDeleteRenderbuffers(1, &m_depth_rbo);
     if (m_fbo) glDeleteFramebuffers(1, &m_fbo);
-    // Destroy the world before its physics system (world holds collision refs).
+    // Tear down in dependency order: water holds a SHIELD_WorldSystem*, the world holds
+    // collision refs into physics. Drop water -> world -> (physics destructs last by member order).
+    m_water.reset();
     m_world.reset();
 }
 
@@ -167,8 +170,15 @@ void WorldgenPreview::build_world_now() {
     // JobSystem -> EnsureSurfaceReadyNear builds + meshes its bounded chunk set
     // synchronously on this thread (the per-chunk jobs run inline).
     m_registry.clear();
+    // Drop the old water system FIRST (it points at the world we're about to replace).
+    m_water.reset();
     m_world = std::make_unique<Systems::SHIELD_WorldSystem>(
         /*job_system*/ nullptr, /*water_system*/ nullptr, m_pending_params, m_pending_seed);
+    // Link a water system (no JobSystem needed — WaterSystem never dereferences it), exactly as
+    // the game world does (GameSession). This is what makes a lake/ocean preset build its water
+    // meshes and render water as water; without it the water render path crashes on a null system.
+    m_water = std::make_unique<Systems::WaterSystem>(/*job_system*/ nullptr, m_world.get());
+    m_world->SetWaterSystem(m_water.get());
     m_world->EnsureSurfaceReadyNear(look_at_center(), m_physics.get(), kSurfaceRadius, kCollisionRadius);
     // Pull the streamed chunks into the renderable set.
     m_world->update(m_registry, look_at_center(), m_physics.get());

@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "nlohmann/json.hpp"
+#include "entt/entt.hpp"
 #include "core/JobSystem.h"
 #include "systems/SHIELD_WorldSystem.h"
 #include "systems/PhysicsSystem.h"
@@ -700,6 +701,43 @@ TEST(WorldGenLayerSnapshotTest, GeneratedSpawnCollisionPreventsFallThrough) {
     const glm::vec3 final_position = physics.get_player_position();
     EXPECT_GT(final_position.y, terrain_height - 2.0f);
     EXPECT_LT(final_position.y, terrain_height + 12.0f);
+    physics.shutdown();
+}
+
+// CRASH REPRO (create-world "lake" preview): WorldgenPreview::build_world_now builds the
+// candidate with a NULL job_system AND NULL water_system, then EnsureSurfaceReadyNear + update.
+// Selecting the "lake" chip (archipelago) + the lakes toggle enables lakes -> basins carve below
+// sea level. The user hit a 0xC0000005 here. This drives that EXACT sequence so a regression
+// segfaults the suite (and proves the fix). No GL needed -> CPU build/mesh path only.
+TEST(WorldGenLayerSnapshotTest, LakePreviewBuildWithNullSystemsDoesNotCrash) {
+    TerrainGenParams params;
+    params.base_frequency = 0.01f;
+    params.base_amplitude = 24.0f;
+    params.octaves = 4;
+    params.persistence = 0.5f;
+    params.lacunarity = 2.0f;
+    params.height_offset = 2.0f;        // low -> basins dip below sea level (real lake water)
+    params.caves_enabled = true;
+    params.shaping_enabled = true;      // builds the continentalness generator lakes require
+    params.island_mask_enabled = true;  // archipelago
+    params.lakes_enabled = true;        // the lakes toggle the user set
+    params.lake_depth = 6.0f;
+
+    SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);  // preview: NULL job system
+    // The fix: link a WaterSystem (no JobSystem) exactly as WorldgenPreview now does, so the water
+    // build/update/render paths have a valid system. WaterSystem never dereferences the job system.
+    WaterSystem water(/*job_system*/ nullptr, &world);
+    world.SetWaterSystem(&water);
+    PhysicsSystem physics;
+    physics.startup();
+
+    // The preview centers on (8, 40, 8), surface radius 4 / collision 0, then update()s (which
+    // now also ticks the water system + generates water meshes for the lake/ocean).
+    const Vec3 center(8.0f, 40.0f, 8.0f);
+    world.EnsureSurfaceReadyNear(center, &physics, 4, 0);
+    entt::registry reg;
+    world.update(reg, center, &physics);
+    SUCCEED() << "lake preview build + water link completed without crashing";
     physics.shutdown();
 }
 

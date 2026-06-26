@@ -35,7 +35,7 @@
 
 namespace Luminumbra::Rendering { class RenderPipeline; class Camera; }
 namespace Luminumbra { class JobSystem; }
-namespace Luminumbra::Systems { class PhysicsSystem; }
+namespace Luminumbra::Systems { class PhysicsSystem; class WaterSystem; }
 
 namespace Luminumbra::Client {
 
@@ -134,6 +134,12 @@ private:
 
     // Candidate world params (resolved) + the live built world.
     std::unique_ptr<Systems::SHIELD_WorldSystem> m_world;
+    // The water system linked to m_world. WITHOUT this, a lake/archipelago (water) preset
+    // builds + renders with a null water system and the water render path crashes (0xC0000005)
+    // — the create-world "lake" crash. Linking it (like the game world) makes water meshes
+    // generate and renders water as water (the header's stated intent). Declared AFTER m_world
+    // so it destructs FIRST (it holds a SHIELD_WorldSystem*); also reset before each rebuild.
+    std::unique_ptr<Systems::WaterSystem> m_water;
     // The synchronous EnsureSurfaceReadyNear streaming path requires a non-null
     // physics system; lazily created on the first build (collision_radius 0 so it
     // only ever touches the single center chunk).
