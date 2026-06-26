@@ -387,6 +387,18 @@ public:
     std::vector<::Luminumbra::Chunk*> get_renderable_chunks();
     float get_density_at(const Vec3& world_pos) const;
     float GetTerrainHeightAt(float world_x, float world_z) const;
+    // Spec 013 P1: locate the LARGEST doline / surface-break (cave mouth) within
+    // `scan_radius_m` of a point. Pure read of the deterministic placement; used to aim a
+    // camera at a dramatic cave opening (dolines follow a power-law, so most are small).
+    // found=false when surface breaks are disabled or none in range.
+    struct SurfaceBreakInfo {
+        bool  found = false;
+        float x = 0.0f, z = 0.0f;   // world centre of the doline
+        float radius = 0.0f;        // surface footprint radius (m)
+        float depth = 0.0f;         // funnel depth (m)
+        bool  shaft = false;        // true => vertical cenote shaft
+    };
+    SurfaceBreakInfo FindLargestSurfaceBreak(float near_x, float near_z, float scan_radius_m) const;
     // Elevation-aware water surface level at a column: the local lake surface
     // inside a lake basin (held above the carved floor by its rim), or SEA_LEVEL
     // elsewhere. The WaterSystem seeds + pins its per-cell rest level from this so

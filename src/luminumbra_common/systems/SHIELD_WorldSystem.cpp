@@ -965,6 +965,31 @@ float SHIELD_WorldSystem::CliffTerracedHeight(float world_x, float world_z, floa
 // order-free ops (min cap, max carve). For each feature it runs an
 // interior-proximity probe (one extra cave-noise read at y = surface - capDepth) so
 // the cap is only lifted where the cave field is ALREADY carved -> never a blind pit.
+SHIELD_WorldSystem::SurfaceBreakInfo
+SHIELD_WorldSystem::FindLargestSurfaceBreak(float near_x, float near_z, float scan_radius_m) const {
+    SurfaceBreakInfo best;
+    if (!m_params.surface_breaks_enabled) return best;
+    const float cs = m_params.feature_cell_size;
+    if (cs <= 0.0f) return best;
+    const int cells = static_cast<int>(std::ceil(scan_radius_m / cs)) + 1;
+    const int bcx = static_cast<int>(std::floor(near_x / cs));
+    const int bcz = static_cast<int>(std::floor(near_z / cs));
+    const float r2 = scan_radius_m * scan_radius_m;
+    for (int dz = -cells; dz <= cells; ++dz) {
+        for (int dx = -cells; dx <= cells; ++dx) {
+            const SurfaceBreakFeature f = DecodeSurfaceBreakCell(m_seed, bcx + dx, bcz + dz, m_params);
+            if (!f.valid) continue;
+            const float ddx = f.center_x - near_x, ddz = f.center_z - near_z;
+            if (ddx * ddx + ddz * ddz > r2) continue;
+            if (f.radius > best.radius) {  // prefer the biggest (most dramatic) opening
+                best.found = true; best.x = f.center_x; best.z = f.center_z;
+                best.radius = f.radius; best.depth = f.depth; best.shaft = f.shaft;
+            }
+        }
+    }
+    return best;
+}
+
 SHIELD_WorldSystem::SurfaceBreakSample
 SHIELD_WorldSystem::sample_surface_breaks(const Vec3& world_pos, float surface_h) const {
     SurfaceBreakSample out{kCaveSurfaceCapDepth, 0.0f};

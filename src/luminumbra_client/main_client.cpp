@@ -4131,6 +4131,21 @@ int main(int argc, char* argv[]) {
         if (currentState == GameState::IN_GAME && !g_paused && !scenario_config.active() && gameSession) {
             auto& freg = gameSession->GetRegistry();
             auto* fws = gameSession->GetWorldSystem();
+            // Spec 013 P1: one-time locate the largest doline near spawn (cave-mouth aim cue).
+            static bool s_dolineLogged = false;
+            if (!s_dolineLogged && fws) {
+                s_dolineLogged = true;
+                const auto& sp = gameSession->GetMetadata().spawnPoint;
+                const auto sb = fws->FindLargestSurfaceBreak(sp.x, sp.z, 500.0f);
+                if (sb.found) {
+                    const float sh = fws->GetTerrainHeightAt(sb.x, sb.z);
+                    LUMINUMBRA_CORE_INFO("Largest doline near spawn: world ({:.1f}, {:.1f}, {:.1f}) "
+                                         "radius={:.1f}m depth={:.1f}m shaft={}",
+                                         sb.x, sh, sb.z, sb.radius, sb.depth, sb.shaft ? 1 : 0);
+                } else {
+                    LUMINUMBRA_CORE_INFO("No doline found within 500m of spawn (surface breaks off or sparse).");
+                }
+            }
             auto fgview = freg.view<Luminumbra::Components::ForagerComponent,
                                     Luminumbra::Components::TransformComponent>();
             std::uint32_t totalDeliveries = 0;
