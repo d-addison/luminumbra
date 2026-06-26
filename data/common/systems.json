@@ -2,11 +2,26 @@
   "_comment": "SystemConfig registry (§1a). DEFAULT / all-off baseline: every system OFF so the canonical world_hash (d950a6afc12a5cdc) and visual baselines stay byte-identical. Spec: .forge/specs/system-config/spec.md. sim.* may change sim state (hashed when enabled); render.* is render-only (never hashed). systems.game.json is the intended-ON profile.",
   "sim": {
     "plant_growth": { "enabled": false, "params": { "mutation_rate": 0.05 } },
-    "erosion": { "enabled": false }
+    "erosion": { "enabled": false },
+    "_ecology_comment": "Creature-brain tuning (spec 011). enabled:false -> the compiled defaults are used (byte-identical). Set enabled:true to apply these values; the shown values ARE the defaults, so flip enabled alone changes nothing until you tweak a number. Levers: energy/sleep cadence, hunger/stamina pacing, herd cohesion (herd_weight/alignment_weight), predator reach (catch_radius/satiation).",
+    "ecology": { "enabled": false, "params": {
+      "energy_drain_per_second": 0.006,
+      "energy_rest_recover": 0.080,
+      "energy_sleep_recover": 0.160,
+      "hunger_growth_per_second": 0.02,
+      "hunger_graze_sate": 0.5,
+      "stamina_rest_recover": 0.3,
+      "stamina_move_drain": 0.10,
+      "herd_weight": 0.8,
+      "alignment_weight": 0.5,
+      "catch_radius": 2.2,
+      "catch_satiation": 0.8
+    } }
   },
   "render": {
     "moonlight": { "enabled": false, "params": { "strength": 0.0, "color": [0.6, 0.7, 1.0] } },
     "tree_wind": { "enabled": false },
-    "plant_procgen": { "enabled": true }
+    "plant_procgen": { "enabled": true },
+    "sky_lut_gpu": { "enabled": true }
   }
 }

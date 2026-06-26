@@ -10,6 +10,7 @@
 #include "../../../include/luminumbra/core/Types.h"
 #include "../core/SimulationClock.h"
 #include "../simulation/SimulationEventBus.h"
+#include "../ai/CreatureBrainSystem.h"  // ai::EcologyTuning (data-driven brain tuning, critique #3)
 
 namespace luminumbra::ai {
     class ScentField;
@@ -187,6 +188,12 @@ public:
 
     entt::registry& GetRegistry() { return m_registry; }
 
+    // Spec 011 critique #3: data-driven creature-brain tuning (energy/sleep/hunger/stamina/herd/
+    // catch). Defaults to the compiled constants -> byte-identical until a caller overrides it from
+    // SystemConfig sim.ecology (ai::ResolveEcologyTuning). Set once after construction.
+    void SetEcologyTuning(const luminumbra::ai::EcologyTuning& t) { m_ecologyTuning = t; }
+    [[nodiscard]] const luminumbra::ai::EcologyTuning& GetEcologyTuning() const { return m_ecologyTuning; }
+
     // --- Fixed-rate simulation (T-I3-4) ---
     // Advances the 30 Hz simulation clock by one variable-dt frame and runs
     // the produced fixed ticks (clamped to the clock's catch-up limit). Per
@@ -212,6 +219,7 @@ public:
 
 private:
     entt::registry m_registry;
+    luminumbra::ai::EcologyTuning m_ecologyTuning{};  // critique #3: defaults == compiled constants
     WorldMetadata m_metadata;
     // perf (water-perf-200fps spec Step 6): cap catch-up to 2 ticks/frame (default is 4) so a
     // single slow frame replays at most 2 sim ticks instead of 4 — halving the worst-case

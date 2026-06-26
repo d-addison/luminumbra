@@ -57,9 +57,35 @@ inline constexpr float kEnergyDrainPerSecond = 0.006f;
 inline constexpr float kEnergyRestRecover    = 0.080f;
 // Sleep recovers energy faster than Rest (deep rest at the nest/off-phase).
 inline constexpr float kEnergySleepRecover   = 0.160f;
+// Per-second need rates that were inline literals (defaults preserved exactly).
+inline constexpr float kHungerGrowthPerSecond   = 0.02f;  // hunger grows while awake
+inline constexpr float kHungerGrazeSatePerSecond = 0.5f;  // grazing sates hunger
+inline constexpr float kStaminaRestRecover      = 0.3f;   // Rest/Sleep recover sprint fuel
+inline constexpr float kStaminaMoveDrain        = 0.10f;  // moving tires
 
-// Advance every CreatureComponent by one fixed tick. Pure function of registry state + dt.
-inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, float dt) {
+// Spec 011 critique #3: DATA-DRIVEN ecology tuning. Every field defaults to the constant above,
+// so a default-constructed EcologyTuning reproduces today's behaviour BYTE-IDENTICALLY (the brain
+// tick, the tests, and the canonical gate roster are all unchanged unless a caller overrides it
+// from SystemConfig `sim.ecology`). This makes the difficulty/balance levers tunable from data
+// (energy/sleep cadence, hunger/stamina pacing, herd cohesion, predator reach) with no recompile.
+struct EcologyTuning {
+    float energy_drain_per_second   = kEnergyDrainPerSecond;
+    float energy_rest_recover       = kEnergyRestRecover;
+    float energy_sleep_recover      = kEnergySleepRecover;
+    float hunger_growth_per_second  = kHungerGrowthPerSecond;
+    float hunger_graze_sate         = kHungerGrazeSatePerSecond;
+    float stamina_rest_recover      = kStaminaRestRecover;
+    float stamina_move_drain        = kStaminaMoveDrain;
+    float herd_weight               = kHerdWeight;
+    float alignment_weight          = kAlignmentWeight;
+    float catch_radius              = kCatchRadius;
+    float catch_satiation           = kCatchSatiation;
+};
+
+// Advance every CreatureComponent by one fixed tick. Pure function of registry state + dt + tuning.
+// `tuning` defaults to the compiled constants, so existing callers/tests are byte-identical.
+inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, float dt,
+                                                       const EcologyTuning& tuning = {}) {
     CreatureBrainStats stats;
     auto view = reg.view<Comp::CreatureComponent, Comp::TransformComponent>();
 
@@ -173,10 +199,10 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
         // The target was chosen from the PRE-tick snapshot, so an earlier (lower-id) predator
         // this same tick may have already eaten it -- re-check the LIVE eaten flag so one prey
         // sates at most ONE predator per tick (no feeding from an already-dead carcass).
-        if (cr.is_predator && found && bestDist < kCatchRadius && reg.valid(te) &&
+        if (cr.is_predator && found && bestDist < tuning.catch_radius && reg.valid(te) &&
             !reg.get<Comp::CreatureComponent>(te).eaten) {
             reg.get<Comp::CreatureComponent>(te).eaten = true;
-            cr.hunger = utility_clamp01(cr.hunger - kCatchSatiation);
+            cr.hunger = utility_clamp01(cr.hunger - tuning.catch_satiation);
         }
 
         CreatureSenses s;
@@ -222,17 +248,17 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
                 break;
             }
             case CreatureAction::Graze:
-                cr.hunger = utility_clamp01(cr.hunger - 0.5f * dt);  // eating sates
+                cr.hunger = utility_clamp01(cr.hunger - tuning.hunger_graze_sate * dt);  // eating sates
                 break;
             case CreatureAction::Rest:
-                cr.stamina = utility_clamp01(cr.stamina + 0.3f * dt);  // recover sprint fuel
-                cr.energy  = utility_clamp01(cr.energy + kEnergyRestRecover * dt);  // and rest off fatigue
+                cr.stamina = utility_clamp01(cr.stamina + tuning.stamina_rest_recover * dt);  // sprint fuel
+                cr.energy  = utility_clamp01(cr.energy + tuning.energy_rest_recover * dt);  // rest off fatigue
                 break;
             case CreatureAction::Sleep:
                 // Deep rest: stay put (dirx/dirz remain 0 -> no wish velocity) and recover energy
                 // fast. Stamina recovers too. The per-tick drain below still applies (net recover).
-                cr.stamina = utility_clamp01(cr.stamina + 0.3f * dt);
-                cr.energy  = utility_clamp01(cr.energy + kEnergySleepRecover * dt);
+                cr.stamina = utility_clamp01(cr.stamina + tuning.stamina_rest_recover * dt);
+                cr.energy  = utility_clamp01(cr.energy + tuning.energy_sleep_recover * dt);
                 break;
         }
 
@@ -272,10 +298,10 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
             // byte-identical to the cohesion+separation result; passing headings has zero effect
             // until the weight is tuned > 0.
             FlockParams fp{};
-            fp.alignment_weight = kAlignmentWeight;
+            fp.alignment_weight = tuning.alignment_weight;
             const FlockSteer fs = ComputeFlockSteer(sx, sz, herd, fp, &herdHeadings);
-            adirx += fs.x * kHerdWeight;
-            adirz += fs.z * kHerdWeight;
+            adirx += fs.x * tuning.herd_weight;
+            adirz += fs.z * tuning.herd_weight;
         }
 
         // Resolve the blended heading into a wish VELOCITY (m/s). Flee/hunt sprint at 1.5x.
@@ -289,7 +315,7 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
                                     : cr.move_speed;
             cr.wish_x = adirx * inv * speed;
             cr.wish_z = adirz * inv * speed;
-            cr.stamina = utility_clamp01(cr.stamina - 0.10f * dt);  // moving tires
+            cr.stamina = utility_clamp01(cr.stamina - tuning.stamina_move_drain * dt);  // moving tires
             // When a Jolt character owns this creature (CreaturePhysicsComponent), it
             // integrates the wish velocity against the terrain (gravity/collision/slopes);
             // the physics bridge reads the resolved position back. Otherwise — the pure,
@@ -299,8 +325,8 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
                 tf.position.z += cr.wish_z * dt;
             }
         }
-        cr.hunger = utility_clamp01(cr.hunger + 0.02f * dt);  // hunger grows
-        cr.energy = utility_clamp01(cr.energy - kEnergyDrainPerSecond * dt);  // being awake tires (Rest net-recovers)
+        cr.hunger = utility_clamp01(cr.hunger + tuning.hunger_growth_per_second * dt);  // hunger grows
+        cr.energy = utility_clamp01(cr.energy - tuning.energy_drain_per_second * dt);  // awake tires (Rest net-recovers)
         ++stats.updated;
     }
     return stats;

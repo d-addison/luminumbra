@@ -253,7 +253,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             auto creatures = m_registry.view<const Luminumbra::Components::CreatureComponent>();
             if (creatures.begin() != creatures.end()) {
                 luminumbra::ai::RunCreatureBrainSystemOnTick(
-                    m_registry, static_cast<float>(m_simulationClock.fixed_dt()));
+                    m_registry, static_cast<float>(m_simulationClock.fixed_dt()), m_ecologyTuning);
 
                 // 2e-mate: SEXUAL reproduction, phase A. Ready creatures (mature, well-fed,
                 // off cooldown) carrying a CreatureGenomeComponent steer toward the nearest

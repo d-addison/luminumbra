@@ -47,6 +47,7 @@ enum class SysKey : std::uint8_t {
     // --- sim.* (may change sim state; included in ComputeConfigSubHash when enabled) ---
     SimPlantGrowth = 0,
     SimErosion,
+    SimEcology,  // creature-brain tuning (energy/sleep/hunger/stamina/herd/catch); default OFF
     // --- render.* (render-only; never hashed) ---
     RenderMoonlight,
     RenderTreeWind,
@@ -61,6 +62,19 @@ enum class SysParam : std::uint8_t {
     PlantMutationRate = 0,  // sim.plant_growth.mutation_rate (scalar)
     MoonlightStrength,      // render.moonlight.strength (scalar)
     MoonlightColor,         // render.moonlight.color (vec3)
+    // sim.ecology.* — creature-brain tuning (all scalar). Defaults mirror CreatureBrainSystem.h
+    // constants, so leaving sim.ecology OFF (or unset) is byte-identical to the compiled behaviour.
+    EcoEnergyDrain,         // sim.ecology.energy_drain_per_second
+    EcoEnergyRestRecover,   // sim.ecology.energy_rest_recover
+    EcoEnergySleepRecover,  // sim.ecology.energy_sleep_recover
+    EcoHungerGrowth,        // sim.ecology.hunger_growth_per_second
+    EcoHungerGrazeSate,     // sim.ecology.hunger_graze_sate
+    EcoStaminaRestRecover,  // sim.ecology.stamina_rest_recover
+    EcoStaminaMoveDrain,    // sim.ecology.stamina_move_drain
+    EcoHerdWeight,          // sim.ecology.herd_weight
+    EcoAlignmentWeight,     // sim.ecology.alignment_weight
+    EcoCatchRadius,         // sim.ecology.catch_radius
+    EcoCatchSatiation,      // sim.ecology.catch_satiation
     Count
 };
 

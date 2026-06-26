@@ -34,6 +34,7 @@ struct ParamMeta {
 constexpr KeyMeta kKeys[] = {
     {SysKey::SimPlantGrowth, Section::Sim, "sim", "plant_growth"},
     {SysKey::SimErosion, Section::Sim, "sim", "erosion"},
+    {SysKey::SimEcology, Section::Sim, "sim", "ecology"},
     {SysKey::RenderMoonlight, Section::Render, "render", "moonlight"},
     {SysKey::RenderTreeWind, Section::Render, "render", "tree_wind"},
     {SysKey::RenderPlantProcgen, Section::Render, "render", "plant_procgen"},
@@ -45,6 +46,18 @@ constexpr ParamMeta kParams[] = {
     {SysParam::PlantMutationRate, SysKey::SimPlantGrowth, "mutation_rate", false, 0.05f, glm::vec3(0.0f)},
     {SysParam::MoonlightStrength, SysKey::RenderMoonlight, "strength", false, 0.0f, glm::vec3(0.0f)},
     {SysParam::MoonlightColor, SysKey::RenderMoonlight, "color", true, 0.0f, glm::vec3(0.6f, 0.7f, 1.0f)},
+    // sim.ecology.* — defaults MUST match CreatureBrainSystem.h's k* constants (byte-identical when off).
+    {SysParam::EcoEnergyDrain, SysKey::SimEcology, "energy_drain_per_second", false, 0.006f, glm::vec3(0.0f)},
+    {SysParam::EcoEnergyRestRecover, SysKey::SimEcology, "energy_rest_recover", false, 0.080f, glm::vec3(0.0f)},
+    {SysParam::EcoEnergySleepRecover, SysKey::SimEcology, "energy_sleep_recover", false, 0.160f, glm::vec3(0.0f)},
+    {SysParam::EcoHungerGrowth, SysKey::SimEcology, "hunger_growth_per_second", false, 0.02f, glm::vec3(0.0f)},
+    {SysParam::EcoHungerGrazeSate, SysKey::SimEcology, "hunger_graze_sate", false, 0.5f, glm::vec3(0.0f)},
+    {SysParam::EcoStaminaRestRecover, SysKey::SimEcology, "stamina_rest_recover", false, 0.3f, glm::vec3(0.0f)},
+    {SysParam::EcoStaminaMoveDrain, SysKey::SimEcology, "stamina_move_drain", false, 0.10f, glm::vec3(0.0f)},
+    {SysParam::EcoHerdWeight, SysKey::SimEcology, "herd_weight", false, 0.8f, glm::vec3(0.0f)},
+    {SysParam::EcoAlignmentWeight, SysKey::SimEcology, "alignment_weight", false, 0.5f, glm::vec3(0.0f)},
+    {SysParam::EcoCatchRadius, SysKey::SimEcology, "catch_radius", false, 2.2f, glm::vec3(0.0f)},
+    {SysParam::EcoCatchSatiation, SysKey::SimEcology, "catch_satiation", false, 0.8f, glm::vec3(0.0f)},
 };
 
 // Overlay the `user.*` section of `data` onto `user`, setting only named fields (merge
