@@ -641,9 +641,10 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         init_terrain_textures();
         init_skinned_texture_array();
         register_static_model_textures(); // I8: tree-part bark/leaf textures
-        // Wave-3 far-field tree impostors (opt-in LUMIN_TREE_IMPOSTORS=1; default OFF). Bake the impostor
-        // atlas now that the tree textures are loaded; the GBuffer LOD3 path samples it.
-        if (const char* e = std::getenv("LUMIN_TREE_IMPOSTORS"); e && e[0] && e[0] != '0') {
+        // Wave-3 far-field tree impostors: DEFAULT ON (set LUMIN_TREE_IMPOSTORS=0 to disable for
+        // an A/B). Perf-validated win (render-benchmark forest_dense), scales with far tree count.
+        // Bake the atlas now that the tree textures are loaded; the GBuffer LOD3 path samples it.
+        if (const char* e = std::getenv("LUMIN_TREE_IMPOSTORS"); !e || (e[0] && e[0] != '0')) {
             OctaImpostorGrid g; g.gridResolution = 12;
             const ImpostorAtlasTextures ia = BakeTreeImpostorAtlasToTextures(m_root_path.string(), *this, g);
             if (ia.ok) {
