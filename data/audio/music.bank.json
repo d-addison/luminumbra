@@ -4,19 +4,19 @@
   "events": {
     "music_main_menu": {
       "files": ["assets/audio/music/themes/main_menu_theme.mp3"],
-      "volume": 0.6,
+      "volume": 0.40,
       "is_2d": true,
       "looping": true
     },
     "music_exploration": {
       "files": ["assets/audio/music/themes/exploration_theme.mp3"],
-      "volume": 0.34,
+      "volume": 0.14,
       "is_2d": true,
       "looping": true
     },
     "music_dusk": {
       "files": ["assets/audio/music/themes/dusk_theme.mp3"],
-      "volume": 0.34,
+      "volume": 0.14,
       "is_2d": true,
       "looping": true
     }
