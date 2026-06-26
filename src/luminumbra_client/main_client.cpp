@@ -6835,6 +6835,20 @@ int main(int argc, char* argv[]) {
                                 }
                             }
                         }
+                        // Spec 013 FR-0: photo-mode ENVIRONMENT scrub state (time-of-day + weather).
+                        // Render-only overrides of the visual day clock + weather overlay; they NEVER
+                        // touch the sim clock or WeatherSystem (world_hash unaffected).
+                        static bool  s_photoEnvEngaged = false;
+                        static float s_photoTod = 0.5f;
+                        static int   s_photoWeatherIdx = 0;
+                        static bool  s_photoWeatherActive = false;
+                        if (!g_photoMode.active && s_photoEnvEngaged) {
+                            // Left photo mode: release the day-clock hold (live clock resumes); the
+                            // per-frame sim weather push restores driven weather next frame.
+                            s_photoEnvEngaged = false;
+                            s_photoWeatherActive = false;
+                            renderPipeline.set_time_of_day_hold(false);
+                        }
                         if (g_photoMode.active) {
                             // Apply lens nudges (aperture stops + focus metres), clamped
                             // to sane photographic ranges.
@@ -6859,6 +6873,29 @@ int main(int argc, char* argv[]) {
                                 g_photoMode.lens.iso *= std::pow(2.0f, iso_stops);
                                 if (g_photoMode.lens.iso < 50.0f) g_photoMode.lens.iso = 50.0f;
                                 if (g_photoMode.lens.iso > 25600.0f) g_photoMode.lens.iso = 25600.0f;
+                            }
+
+                            // Spec 013 FR-0.1/0.2: TIME-OF-DAY scrub (K/L) + WEATHER cycle (T).
+                            // On entry, seed the scrub from the live clock and HOLD it (so the
+                            // per-frame auto-advance stops); each frame push the scrubbed values to
+                            // the render pipeline. Render-only — the sim is never touched.
+                            if (!s_photoEnvEngaged) {
+                                s_photoEnvEngaged = true;
+                                s_photoTod = renderPipeline.get_time_of_day();
+                                renderPipeline.set_time_of_day_hold(true);
+                            }
+                            s_photoTod += g_playerController->consume_tod_nudge();
+                            s_photoTod -= std::floor(s_photoTod);  // wrap to [0,1)
+                            renderPipeline.set_time_of_day(s_photoTod);
+                            if (const int wc = g_playerController->consume_weather_cycle(); wc != 0) {
+                                s_photoWeatherActive = true;
+                                s_photoWeatherIdx = (((s_photoWeatherIdx + wc) % 5) + 5) % 5;
+                            }
+                            if (s_photoWeatherActive) {
+                                using WT = Luminumbra::Rendering::WeatherType;
+                                static const WT kW[5] = {WT::None, WT::Fog, WT::Rain, WT::Snow, WT::Storm};
+                                renderPipeline.set_weather(kW[s_photoWeatherIdx],
+                                                           s_photoWeatherIdx == 0 ? 0.0f : 0.7f);
                             }
 
                             // T031: live-bind the viewfinder readouts to the current lens.
@@ -6894,6 +6931,18 @@ int main(int argc, char* argv[]) {
                                         const char* tag = (d > 0.5f) ? " dark" : (d < -0.5f) ? " bright" : " ok";
                                         std::snprintf(rbuf, sizeof(rbuf), "%+.1f EV%s", d, tag);
                                         e->SetInnerRML(rbuf);
+                                    }
+                                    // Spec 013: time-of-day phase (golden-hour cue for the photographer)
+                                    // + the active weather preset.
+                                    if (auto* e = doc->GetElementById("ro_tod")) {
+                                        const float elev = renderPipeline.get_sun_elevation_rad();
+                                        const char* ph = (elev > 0.6f) ? "midday" : (elev > 0.12f) ? "day"
+                                                       : (elev > -0.08f) ? "golden" : "night";
+                                        e->SetInnerRML(ph);
+                                    }
+                                    if (auto* e = doc->GetElementById("ro_weather")) {
+                                        static const char* kWN[5] = {"clear", "fog", "rain", "snow", "storm"};
+                                        e->SetInnerRML(s_photoWeatherActive ? kWN[s_photoWeatherIdx] : "live");
                                     }
                                 }
                             }

@@ -107,6 +107,18 @@ public:
         m_isoNudge = 0.0f;
         return n;
     }
+    // Spec 013: photo-mode time-of-day scrub (net normalized-day delta, + = toward dusk)
+    // and an edge-triggered weather-preset cycle count. Self-clear.
+    [[nodiscard]] float consume_tod_nudge() {
+        const float n = m_todNudge;
+        m_todNudge = 0.0f;
+        return n;
+    }
+    [[nodiscard]] int consume_weather_cycle() {
+        const int n = m_weatherCycle;
+        m_weatherCycle = 0;
+        return n;
+    }
     // Edge-triggered codex open/close request: true ONCE per ToggleCodex press, then
     // self-clears. Client-only (a UI overlay), never touches the sim.
     [[nodiscard]] bool consume_codex_toggle() {
@@ -158,6 +170,8 @@ private:
     float m_focusNudge = 0.0f;    // metres (+ = farther, - = nearer)
     float m_shutterSpeedNudge = 0.0f; // shutter-speed stops (+ = faster / less light)
     float m_isoNudge = 0.0f;          // ISO stops (+ = higher ISO / more sensitivity)
+    float m_todNudge = 0.0f;          // spec 013: photo-mode time-of-day scrub delta
+    int   m_weatherCycle = 0;         // spec 013: photo-mode weather-preset cycle count
     bool  m_codexToggleRequested = false;  // edge-triggered codex screen open/close
 };
 

@@ -610,6 +610,9 @@ public:
     // photo-mode capture so a shot can record the time-of-day it was taken at (spec 012
     // ObservationMetadata). Never feeds the sim / world_hash.
     float get_time_of_day() const { return m_timeOfDay; }
+    // Spec 013 FR-0.1: hold the day clock at its current value (photo-mode TOD scrub) so
+    // update_time_of_day stops auto-advancing; set_time_of_day still moves it. Render-only.
+    void set_time_of_day_hold(bool hold) { m_timeOfDayHold = hold; }
     // T-I5a-7 (C2): SEASON / celestial model. The season phase is a PURE FUNCTION
     // of the authoritative TICK COUNT (integer epoch math; DeterministicMath for
     // the sun-path trig) -- never wall-clock, never a free-running float
@@ -910,6 +913,7 @@ private:
 
     void update_time_of_day(float deltaTime);
     float m_timeOfDay = 0.5f; // Start at sunrise
+    bool  m_timeOfDayHold = false; // spec 013: freeze auto-advance for photo-mode TOD scrub
     float m_dayDurationSeconds = 60.0f;
 
     u32 m_screen_width = 0;

@@ -214,6 +214,11 @@ void PlayerController::ProcessKeyInput(int key, int action) {
         if (pressed && key == this->key(InputAction::LensShutterDown))  m_shutterSpeedNudge -= 0.333f;
         if (pressed && key == this->key(InputAction::LensIsoUp))        m_isoNudge += 0.333f;
         if (pressed && key == this->key(InputAction::LensIsoDown))      m_isoNudge -= 0.333f;
+        // Spec 013: photo-mode environment scrub. TOD ramps on press+repeat (smooth scrub);
+        // weather cycles once per discrete PRESS (not repeat).
+        if (pressed && key == this->key(InputAction::PhotoTodBack))     m_todNudge -= 0.02f;
+        if (pressed && key == this->key(InputAction::PhotoTodForward))  m_todNudge += 0.02f;
+        if (action == GLFW_PRESS && key == this->key(InputAction::PhotoWeatherCycle)) ++m_weatherCycle;
     }
 
     // --- Mode-Specific Controls ---

@@ -45,6 +45,14 @@
                     <span class="readout-value" id="ro_ev">+0.0 EV ok</span>
                 </div>
                 <div class="readout-cell">
+                    <span class="readout-label">light (k/l)</span>
+                    <span class="readout-value" id="ro_tod">day</span>
+                </div>
+                <div class="readout-cell">
+                    <span class="readout-label">weather (t)</span>
+                    <span class="readout-value" id="ro_weather">live</span>
+                </div>
+                <div class="readout-cell">
                     <span class="readout-label">focal</span>
                     <span class="readout-value">35mm</span>
                 </div>

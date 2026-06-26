@@ -35,6 +35,9 @@ enum class InputAction : int {
     LensShutterDown,   // SLOWER shutter (more light / lower EV)
     LensIsoUp,         // raise ISO (more sensitivity / lower required EV)
     LensIsoDown,       // lower ISO (less sensitivity / higher required EV)
+    PhotoTodBack,      // photo mode: scrub time-of-day BACKWARD (toward dawn) — spec 013
+    PhotoTodForward,   // photo mode: scrub time-of-day FORWARD (toward dusk/night)
+    PhotoWeatherCycle, // photo mode: cycle weather/atmosphere preset (clear/fog/rain/snow/storm)
     ToggleCodex,       // open/close the creature codex browse screen (client-only)
     // I9-FOLIAGE Phase 5B farming verbs: act on the plant nearest the player's aim. The sim verbs
     // are deterministic (FarmingSystem.h); only fire on a key press, so headless gates are unaffected.
@@ -76,6 +79,9 @@ inline constexpr std::array<InputActionDef, kInputActionCount> kInputActionDefs 
     {InputAction::LensShutterDown,  "LensShutterDown",  GLFW_KEY_COMMA},
     {InputAction::LensIsoUp,        "LensIsoUp",        GLFW_KEY_APOSTROPHE},
     {InputAction::LensIsoDown,      "LensIsoDown",      GLFW_KEY_SEMICOLON},
+    {InputAction::PhotoTodBack,     "PhotoTodBack",     GLFW_KEY_K},
+    {InputAction::PhotoTodForward,  "PhotoTodForward",  GLFW_KEY_L},
+    {InputAction::PhotoWeatherCycle,"PhotoWeatherCycle",GLFW_KEY_T},
     {InputAction::ToggleCodex,      "ToggleCodex",      GLFW_KEY_C},
     {InputAction::FarmPlant,        "FarmPlant",        GLFW_KEY_F},
     {InputAction::FarmWater,        "FarmWater",        GLFW_KEY_G},

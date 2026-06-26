@@ -4340,8 +4340,13 @@ void RenderPipeline::cleanup_gpu_sdf_system() {
 }
 
 void RenderPipeline::update_time_of_day(float deltaTime) {
-    m_timeOfDay += deltaTime / m_dayDurationSeconds;
-    m_timeOfDay = fmod(m_timeOfDay, 1.0f);
+    // Spec 013 FR-0.1: while HELD (photo-mode time-of-day scrub), the day clock does NOT
+    // auto-advance — the externally-set m_timeOfDay (via set_time_of_day) persists and the
+    // sun/season below recompute from it. Render-only; never touches the sim clock.
+    if (!m_timeOfDayHold) {
+        m_timeOfDay += deltaTime / m_dayDurationSeconds;
+        m_timeOfDay = fmod(m_timeOfDay, 1.0f);
+    }
 
     // T-I5a-7 (C2): SEASON phase as a PURE FUNCTION of the tick count. Integer
     // epoch math (modulo the long-period year), then a single DeterministicMath
