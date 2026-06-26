@@ -4,6 +4,13 @@
   "display_name": "Mire Lurker",
   "predator": true,
   "rarity": 0.78,
-  "base_color": [0.24, 0.30, 0.22],
-  "biomes": ["wetland"]
+  "base_color": [
+    0.24,
+    0.3,
+    0.22
+  ],
+  "biomes": [
+    "wetland"
+  ],
+  "nocturnal": true
 }

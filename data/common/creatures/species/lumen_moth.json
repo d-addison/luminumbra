@@ -4,6 +4,14 @@
   "display_name": "Lumen Moth",
   "predator": false,
   "rarity": 0.85,
-  "base_color": [0.72, 0.68, 0.95],
-  "biomes": ["wetland", "plains"]
+  "base_color": [
+    0.72,
+    0.68,
+    0.95
+  ],
+  "biomes": [
+    "wetland",
+    "plains"
+  ],
+  "nocturnal": true
 }

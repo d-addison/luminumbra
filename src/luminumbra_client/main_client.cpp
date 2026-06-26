@@ -5627,21 +5627,11 @@ int main(int argc, char* argv[]) {
                                         reg.emplace<Luminumbra::Components::ScavengerComponent>(e);
                                     // Spec 011: a circadian clock -> the creature sleeps in its
                                     // off-phase (diurnal at night, nocturnal by day). The brain's
-                                    // Sleep utility reads CircadianComponent.activity; a handful of
-                                    // species are nocturnal, the rest diurnal. Activates the wired
-                                    // (previously dormant) CircadianSystem in the living world.
-                                    {
-                                        auto& circ = reg.emplace<Luminumbra::Components::CircadianComponent>(e);
-                                        static const std::uint16_t kNocturnal[] = {
-                                            Luminumbra::Components::CreatureSpeciesId16("gloomstalker"),
-                                            Luminumbra::Components::CreatureSpeciesId16("lumen_moth"),
-                                            Luminumbra::Components::CreatureSpeciesId16("mire_lurker"),
-                                            Luminumbra::Components::CreatureSpeciesId16("ridgeback_stalker"),
-                                        };
-                                        circ.nocturnal = 0;
-                                        for (std::uint16_t n : kNocturnal)
-                                            if (cr.species_id == n) { circ.nocturnal = 1; break; }
-                                    }
+                                    // Sleep utility reads CircadianComponent.activity. Nocturnal is
+                                    // now a per-species DATA flag (creatures/species/*.json), so a new
+                                    // species can be nocturnal without a client recompile.
+                                    reg.emplace<Luminumbra::Components::CircadianComponent>(e).nocturnal =
+                                        sp.nocturnal ? 1u : 0u;
                                     auto& pl = reg.emplace<anim::AnimationPlayerComponent>(e);
                                     pl.skeleton = &s_wildlife_skeleton;
                                     pl.clip = &s_wildlife_idle;

@@ -34,6 +34,8 @@ struct CreatureSpecies {
     std::string id;                  // stable species name, e.g. "grovestrider"
     std::string display_name;        // player-facing, e.g. "Grovestrider"
     bool predator = false;           // role default (prey unless stated)
+    bool nocturnal = false;          // spec 011: active by night (sleeps by day); data-driven so a
+                                     // new species can be nocturnal without a client recompile
     float rarity = 0.5f;             // [0,1] discovery prestige (codex/scoring hook)
     float base_color[3] = {0.45f, 0.42f, 0.38f};  // Phase 2 recolor seed (linear RGB)
     // Biomes this species inhabits (by biome name, e.g. "wetland"). EMPTY = lives
@@ -68,6 +70,8 @@ struct CreatureSpecies {
         out.display_name = j.at("display_name").get<std::string>();
     if (j.contains("predator") && j.at("predator").is_boolean())
         out.predator = j.at("predator").get<bool>();
+    if (j.contains("nocturnal") && j.at("nocturnal").is_boolean())
+        out.nocturnal = j.at("nocturnal").get<bool>();
     if (j.contains("rarity") && j.at("rarity").is_number()) {
         float r = j.at("rarity").get<float>();
         out.rarity = r < 0.0f ? 0.0f : (r > 1.0f ? 1.0f : r);
