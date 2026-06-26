@@ -16,6 +16,8 @@
 #include "rendering/ScentFieldRenderMirror.h" // spec 011 FR-C: one-way scent snapshot for the ground decal
 #include "rendering/FrameScan.h" // framescan: deterministic what's-in-frame scan tool (render-only)
 #include "rendering/FrameHealth.h" // auto frame-health anomaly verdict (black/unlit/blown), render-only
+#include "rendering/GlDebugOutput.h" // KHR_debug callback + debug groups/labels (env-gated LUMIN_GL_DEBUG)
+#include "debug/DebugCamera.h"       // deterministic feature locator (--debug-goto cave|doline)
 #include "rendering/ImpostorBake.h" // Wave-3 far-field tree impostor atlas bake (render-only)
 #include "rendering/SceneSurvey.h" // survey: autonomous tour+screenshot of world POIs (render-only)
 #include "rendering/RenderPipeline.h"
@@ -232,6 +234,7 @@ static constexpr int kTimelapseSettleFrames = 45;  // let the world stream/settl
 // g_camera every frame for reproducible/controllable screenshots + benchmarks. Keep
 // the position within the streamed area (near spawn) so chunks are resident.
 static int g_debug_view_mode = 0; // render-only G-buffer debug overlay: 0=off,1=albedo,2=normal,3=depth,4=material,5=position (F6 cycles)
+std::string g_debug_goto;         // --debug-goto cave|doline|spawn: deterministically frame a feature for capture
 bool g_fixed_cam = false;
 glm::vec3 g_fixed_cam_pos(0.0f);
 float g_fixed_cam_yaw = 0.0f;
@@ -2523,6 +2526,9 @@ int main(int argc, char* argv[]) {
         else if (dv == "position") g_debug_view_mode = 5;
     }
     g_render_benchmark_path = GetCommandLineOption(argc, argv, "--render-benchmark", "");
+    // --debug-goto cave|doline|spawn: after the world loads, deterministically locate the
+    // feature + set the fixed camera to frame it (pair with --auto-create-world/--timelapse).
+    g_debug_goto = GetCommandLineOption(argc, argv, "--debug-goto", "");
     g_play_paths = HasCommandLineFlag(argc, argv, "--play-paths"); // TEMP diag: normal-play paths under a scripted scenario camera
     g_profile_fly_seconds = static_cast<double>(GetCommandLineIntOption(argc, argv, "--profile-fly", 0)); // TEMP diag: constant-speed eye-level moving profiler (normal-play, self-exits)
     g_render_benchmark_frames = GetCommandLineIntOption(argc, argv, "--render-benchmark-frames", 120);
@@ -2782,11 +2788,10 @@ int main(int argc, char* argv[]) {
         ImGui_ImplOpenGL3_Init("#version 450");
     }
 
-    #ifdef LUMINUMBRA_DEBUG
-        glEnable(GL_DEBUG_OUTPUT);
-        glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
-        glDebugMessageCallback(GLDebugMessageCallback, nullptr);
-    #endif
+    // KHR_debug driver-error/warning callback -> engine log, for finding GL issues. Env-gated
+    // (LUMIN_GL_DEBUG=1) + default-OFF (synchronous debug output is slow); supersedes the old
+    // LUMINUMBRA_DEBUG block. Also enables readable RenderDoc captures via debug groups/labels.
+    Luminumbra::Rendering::GlDebug::InstallGlDebugCallback();
 
     int framebufferWidth, framebufferHeight;
     glfwGetFramebufferSize(window, &framebufferWidth, &framebufferHeight);
@@ -4169,6 +4174,32 @@ int main(int argc, char* argv[]) {
                                          sb.x, sh, sb.z, sb.radius, sb.depth, sb.shaft ? 1 : 0);
                 } else {
                     LUMINUMBRA_CORE_INFO("No doline found within 500m of spawn (surface breaks off or sparse).");
+                }
+            }
+
+            // Debug suite: --debug-goto cave|doline|spawn — deterministically frame a feature so
+            // captures (--timelapse/--frame-scan) can SEE it (the gap that blocked cave shots).
+            // Sets the fixed camera; the streaming anchor follows it (far-camera bug already fixed).
+            static bool s_debugGotoDone = false;
+            if (!s_debugGotoDone && fws && !g_debug_goto.empty()) {
+                s_debugGotoDone = true;
+                const auto& dsp = gameSession->GetMetadata().spawnPoint;
+                const glm::vec3 dnear(dsp.x, dsp.y, dsp.z);
+                std::optional<Luminumbra::Debug::DebugCamPose> pose;
+                if (g_debug_goto == "cave")        pose = Luminumbra::Debug::FindEnclosedCave(*fws, dnear, 256.0f);
+                else if (g_debug_goto == "doline") pose = Luminumbra::Debug::FindDoline(*fws, dnear, 500.0f);
+                else if (g_debug_goto == "spawn")  pose = Luminumbra::Debug::FrameFeature(dnear, 24.0f);
+                if (pose) {
+                    g_fixed_cam_pos = pose->pos; g_fixed_cam_yaw = pose->yaw; g_fixed_cam_pitch = pose->pitch;
+                    g_fixed_cam = true;
+                    if (g_camera) {
+                        g_camera->Position = pose->pos; g_camera->Yaw = pose->yaw;
+                        g_camera->Pitch = pose->pitch; g_camera->updateCameraVectors();
+                    }
+                    LUMINUMBRA_CORE_INFO("--debug-goto {}: framed ({:.1f},{:.1f},{:.1f}) yaw {:.0f} pitch {:.0f}",
+                                         g_debug_goto, pose->pos.x, pose->pos.y, pose->pos.z, pose->yaw, pose->pitch);
+                } else {
+                    LUMINUMBRA_CORE_WARN("--debug-goto {}: no '{}' feature found near spawn", g_debug_goto, g_debug_goto);
                 }
             }
 
