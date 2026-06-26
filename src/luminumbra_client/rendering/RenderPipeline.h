@@ -1373,7 +1373,7 @@ private:
     std::vector<PointLight> m_point_lights_this_frame;
     const int MAX_POINT_LIGHTS = 32;
 
-    void gather_lights(entt::registry& registry);
+    void gather_lights(entt::registry& registry, const glm::vec3& camera_pos);
 
     bool m_started = false;
     

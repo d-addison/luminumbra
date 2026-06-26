@@ -1551,23 +1551,34 @@ void RenderPipeline::finish_gpu_pass_timer_frame() {
     ++m_gpu_timers.frame_index;
 }
 
-void RenderPipeline::gather_lights(entt::registry& registry) {
+void RenderPipeline::gather_lights(entt::registry& registry, const glm::vec3& camera_pos) {
     m_point_lights_this_frame.clear();
     auto view = registry.view<const Components::TransformComponent, const Components::PointLightComponent>();
-    
-    for (auto entity : view) {
-        if (m_point_lights_this_frame.size() >= MAX_POINT_LIGHTS) break;
 
+    // Gather ALL candidate lights with squared distance to the camera, then keep the
+    // NEAREST MAX_POINT_LIGHTS. Fixes the gap where the old code took the first 32 in
+    // arbitrary ECS order — so a cave full of crystals lights the ones AROUND the player,
+    // not random distant ones. Render-only (never touches world_hash).
+    struct Cand { PointLight light; float d2; };
+    std::vector<Cand> cands;
+    for (auto entity : view) {
         auto const& transform = view.get<const Components::TransformComponent>(entity);
         auto const& light_data = view.get<const Components::PointLightComponent>(entity);
-
         PointLight light;
         light.position = transform.position;
         light.color = light_data.color;
         light.radius = light_data.radius;
         light.intensity = light_data.intensity;
-        m_point_lights_this_frame.push_back(light);
+        const glm::vec3 d = glm::vec3(light.position.x, light.position.y, light.position.z) - camera_pos;
+        cands.push_back({light, glm::dot(d, d)});
     }
+    if (static_cast<int>(cands.size()) > MAX_POINT_LIGHTS) {
+        std::nth_element(cands.begin(), cands.begin() + MAX_POINT_LIGHTS, cands.end(),
+                         [](const Cand& a, const Cand& b) { return a.d2 < b.d2; });
+        cands.resize(static_cast<std::size_t>(MAX_POINT_LIGHTS));
+    }
+    m_point_lights_this_frame.reserve(cands.size());
+    for (const auto& c : cands) m_point_lights_this_frame.push_back(c.light);
 }
 
 std::vector<RenderPipeline::ChunkMeshSnapshot> RenderPipeline::build_chunk_snapshots(const std::vector<Chunk*>& renderable_chunks) const {
@@ -1646,7 +1657,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     const auto _cpu_t0 = std::chrono::steady_clock::now(); // spec 004: CPU per-phase submit cost
 
     update_time_of_day(deltaTime);
-    gather_lights(registry);
+    gather_lights(registry, camera.Position);
     // Underwater detection: the aerial pass becomes a murky-water volume when the
     // camera sits below the local water surface (sea OR a perched lake).
     {

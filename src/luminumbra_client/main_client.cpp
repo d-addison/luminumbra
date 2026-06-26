@@ -39,6 +39,7 @@
 #include "luminumbra_common/components/ForagingComponents.h" // spec 011: ant-trail forager colonies
 #include "luminumbra_common/components/ScavengerComponent.h" // ambient-wildlife predator scavenging
 #include "luminumbra_common/components/CombustionComponents.h" // sim.fire demo markers
+#include "luminumbra_common/components/LightingComponents.h"   // spec 013: lumin-crystal cave point lights
 #include "luminumbra_common/components/AlarmComponents.h"      // herd-alarm collective flee
 #include "luminumbra_common/components/MortalComponents.h"     // lifespan / natural death
 #include "luminumbra_common/components/PackHunterComponents.h" // coordinated pack hunting
@@ -720,6 +721,20 @@ void BakeCreatureMarkers(Luminumbra::Rendering::PlantProcgenPass* pp, entt::regi
             const float wz = gs->ScentCellToWorldZ(nestCz);
             const float wy = (ws ? ws->GetTerrainHeightAt(wx, wz) : 0.0f) + 0.5f;
             emitOcta(glm::vec3(wx, wy, wz), 1.2f, 0.9f, glm::vec3(0.55f, 0.40f, 0.25f));
+        }
+
+        // Spec 013: LUMIN CRYSTALS — a tall bright shard at each cave point-light. It sits
+        // inside its own glow so it reads as a luminous crystal (and is the photo subject the
+        // light makes visible). The PointLightComponent does the actual cave illumination.
+        auto plview = reg.view<const Luminumbra::Components::PointLightComponent,
+                               const Luminumbra::Components::TransformComponent>();
+        for (auto e : plview) {
+            const auto& pl = plview.get<const Luminumbra::Components::PointLightComponent>(e);
+            const auto& tf = plview.get<const Luminumbra::Components::TransformComponent>(e);
+            const glm::vec3 c(tf.position.x, tf.position.y, tf.position.z);
+            const glm::vec3 col = glm::clamp(
+                glm::vec3(pl.color.x, pl.color.y, pl.color.z) * 1.4f, 0.0f, 1.0f);
+            emitOcta(c, 0.45f, 1.1f, col);  // a slender upright crystal shard
         }
     }
 
@@ -4146,6 +4161,45 @@ int main(int argc, char* argv[]) {
                     LUMINUMBRA_CORE_INFO("No doline found within 500m of spawn (surface breaks off or sparse).");
                 }
             }
+
+            // Spec 013: LUMIN CRYSTALS — emissive point lights that light dark caves (so you can
+            // see + photograph underground without sunlight) and double as photo subjects. A
+            // deterministic grid scan near spawn probes downward for cave-air (get_density_at < 0)
+            // and drops a cyan glow-crystal at the first opening. Client-only (not hashed); the
+            // point lights are gathered + nearest-32-culled by the render pipeline each frame.
+            static bool s_crystalsSpawned = false;
+            if (!s_crystalsSpawned && fws) {
+                s_crystalsSpawned = true;
+                const auto& sp = gameSession->GetMetadata().spawnPoint;
+                int placed = 0;
+                float firstX = 0.0f, firstY = 0.0f, firstZ = 0.0f;
+                for (int gz = -6; gz <= 6 && placed < 48; ++gz) {
+                    for (int gx = -6; gx <= 6 && placed < 48; ++gx) {
+                        const float wx = sp.x + static_cast<float>(gx) * 26.0f;
+                        const float wz = sp.z + static_cast<float>(gz) * 26.0f;
+                        const float surf = fws->GetTerrainHeightAt(wx, wz);
+                        // Probe down through the surface cap into the cave volume.
+                        for (float dy = 20.0f; dy < 90.0f; dy += 2.5f) {
+                            const float wy = surf - dy;
+                            if (fws->get_density_at(Luminumbra::Vec3(wx, wy, wz)) < 0.0f) { // cave air
+                                const auto e = freg.create();
+                                auto& tf = freg.emplace<Luminumbra::Components::TransformComponent>(e);
+                                tf.position = Luminumbra::Vec3(wx, wy + 0.6f, wz);
+                                auto& pl = freg.emplace<Luminumbra::Components::PointLightComponent>(e);
+                                pl.color = Luminumbra::Vec3(0.45f, 0.78f, 1.0f); // cyan lumin glow
+                                pl.intensity = 4.5f;
+                                pl.radius = 24.0f;
+                                if (placed == 0) { firstX = wx; firstY = wy; firstZ = wz; }
+                                ++placed;
+                                break;
+                            }
+                        }
+                    }
+                }
+                LUMINUMBRA_CORE_INFO("Lumin crystals: placed {} cave glow point-lights near spawn; "
+                                     "first at world ({:.1f}, {:.1f}, {:.1f})", placed, firstX, firstY, firstZ);
+            }
+
             auto fgview = freg.view<Luminumbra::Components::ForagerComponent,
                                     Luminumbra::Components::TransformComponent>();
             std::uint32_t totalDeliveries = 0;
