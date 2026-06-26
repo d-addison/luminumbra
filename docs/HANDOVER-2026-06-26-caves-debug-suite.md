@@ -113,9 +113,22 @@ Example repro for the cave-lighting bug:
 
 ## 4. Open follow-ups (not regressions — deliberate next work)
 
+> **UPDATE 2026-06-26 (later same day): follow-ups 1, 2, 3, 5 LANDED on `feat/polyglot-audit-roadmap`.**
+> Commits: `2f3c8eec` foliage+crystal fix · `f3e1082b` cave sky-visibility scaffold ·
+> (FLIP harness) · (RHI spec 014). Determinism re-verified: `--smoke` default stays
+> `6f008a9f637c40b7`, run==replay. See §6 for status + the HONEST cave-lighting caveat + a new finding.
+
 1. **Cave lighting fix** (§2 #1+#2) — highest priority; the lumin-crystal payoff + cave
    photography depend on it. Iterate with `--debug-view`.
-2. **Underground foliage gate** (§2 #3) — cheap, clear bug.
+   **→ PARTIAL (`f3e1082b`).** Landed a default-OFF **sky-visibility ambient term** (`LUMIN_CAVE_AO`
+   env knob; fades AMBIENT-only toward a floor when a fragment's ceiling is occluded, leaving
+   sun/moon/point lights intact). It is **screen-space (SSR-class)** and I could **not** prove a
+   visible win in blind headless captures — see §6. The proper fix is **world-space** (per-chunk
+   sky-occlusion bake or RT-GI from the MC-mesh BLAS, spec 014). The scaffold + `u_projection`/
+   `u_screenSize` plumbing a world-space version reuses is in place; it fails BRIGHT, never wrongly black.
+2. **Underground foliage gate** (§2 #3) — cheap, clear bug. **→ DONE (`2f3c8eec`).** Roof probe in
+   `FoliageSurfaceQuery` + tree scatter (reject if solid within 6 m overhead). Also fixed §2 #4:
+   crystal scatter now uses `FindEnclosedCave` (16 deterministic enclosed-cave lights, not open dips).
 3. **RHI / Vulkan+DX12 migration** — brainstorm done; research recommends **Diligent Engine**
    (Apache-2.0; only lib with Vulkan+DX12+**GL** backends + built-in RT — the GL backend lets GL
    and Vulkan run behind one RHI for in-process FLIP parity). DLSS via NVIDIA Streamline; shaders
@@ -139,3 +152,42 @@ Example repro for the cave-lighting bug:
 - Captures: `--timelapse-frames N --timelapse-dir <d>` + `tools/ppm_to_png.py`; `--render-benchmark`.
 - Caves: `--world-preset caverns` (client) / `--preset caverns` (server); `cave_style:1` enables
   the noise-router; params `spaghetti_*`, `worley_*` in the preset `features` block.
+
+---
+
+## 6. Post-handover follow-up results (2026-06-26 later)
+
+Landed the §4 follow-ups (commits in the §4 banner). Determinism held throughout
+(`--smoke == 6f008a9f637c40b7`, run==replay; all four changes are render-only or planning docs).
+
+**DONE & proven**
+- **Underground foliage gate (§2 #3) + crystal-on-real-cave (§2 #4)** — `2f3c8eec`. Roof probe
+  (solid within 6 m overhead ⇒ reject) at the single `FoliageSurfaceQuery` chokepoint + the tree
+  scatter; crystals switched to `FindEnclosedCave`. Log confirms **16 enclosed-cave lights at
+  identical coords across runs** (first `-217.2,-33.9,-213.9`), proving the deterministic locator
+  finds real roofed chambers, not open dips.
+- **FLIP golden-image harness** — `tools/flip_diff.py` (+ `golden_update.py`, `docs/visual-regression.md`).
+  4-tier backend, heatmap, `--selftest` PASSES (luma + stdlib here; `pip install flip-evaluator` for true FLIP).
+- **RHI spec 014** — `docs/specs/014-rhi-vulkan-dx12-migration/spec.md` (Diligent / Streamline-DLSS /
+  single-source HLSL / RT from MC-mesh BLAS, FLIP-gated pass-by-pass).
+
+**PARTIAL — HONEST caveat (read before trusting the cave-AO)**
+- **Cave sky-visibility ambient term** — `f3e1082b`, **default OFF** (`LUMIN_CAVE_AO="en,maxDist,floor,steps,thickness"`).
+  Mechanism is sound (upward view-space ray-march fades ambient-only toward a floor when roofed;
+  point/sun/moon lights untouched), gated, determinism-neutral, builds & runs without crash. **BUT I
+  could not demonstrate a visible improvement in blind headless captures.** It is screen-space: the
+  probe only darkens a fragment whose ceiling is **on-screen above it**. Every reachable cave framing
+  near spawn defeats that: the `--debug-goto cave` hero target is a **shallow water-grotto** (y=-3.2),
+  `--cam-pos` into the deep cave looks **outward/horizontally**, and `--debug-goto doline` at the
+  framed time is **night-black** (no ambient to remove). `dol_off` vs `dol_on` came out pixel-identical.
+  **Next:** a world-space sky-occlusion bake per chunk (feed a real AO term) OR RT-GI (spec 014) — that
+  is the real cave-lighting win; the committed scaffold is a safe placeholder + reusable plumbing.
+  Capture set: `build/debug/test-artifacts/cave-lighting/{lit_off,lit_on,deep_off,deep_on,dol_off,dol_on}.png`.
+
+**NEW finding surfaced by these captures (not yet fixed)**
+- **Foliage billboard cards render full-bright at night.** In the `dol_*` top-down night captures the
+  terrain is correctly black but grass/leaf cards float as **bright white/green/blue quads** — the
+  foliage card path is not receiving the same darkening as deferred terrain (likely a flat/unlit or
+  full-albedo foliage shade path, or missing ambient/sun attenuation on cards). Distinct from the
+  underground-foliage bug (that was placement; this is shading). Worth a `--debug-view albedo` vs lit
+  A/B on a surface field at night to localize. Add to the cave/rendering problem catalog (§2) as #10.
