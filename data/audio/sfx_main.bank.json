@@ -113,6 +113,7 @@
     "dig_stone": { "files": ["assets/audio/sfx/terraform/dig_stone.mp3"], "volume": 0.7, "pitch_variation": 0.10, "is_3d": true, "attenuation_model": "linear", "min_distance": 1.0, "max_distance": 20.0 },
     "dig_sand":  { "files": ["assets/audio/sfx/terraform/dig_sand.mp3"],  "volume": 0.7, "pitch_variation": 0.10, "is_3d": true, "attenuation_model": "linear", "min_distance": 1.0, "max_distance": 20.0 },
     "terraform_place": { "files": ["assets/audio/sfx/terraform/place.mp3"], "volume": 0.7, "pitch_variation": 0.10, "is_3d": true, "attenuation_model": "linear", "min_distance": 1.0, "max_distance": 20.0 },
+    "water_rush": { "files": ["assets/audio/sfx/terraform/water_rush.mp3"], "volume": 0.75, "pitch_variation": 0.06, "is_3d": true, "attenuation_model": "linear", "min_distance": 1.0, "max_distance": 30.0 },
     "farm_plant":     { "files": ["assets/audio/sfx/farm/plant.mp3"],     "volume": 0.7, "pitch_variation": 0.08, "is_3d": true, "attenuation_model": "linear", "min_distance": 1.0, "max_distance": 16.0 },
     "farm_water":     { "files": ["assets/audio/sfx/farm/water.mp3"],     "volume": 0.7, "pitch_variation": 0.06, "is_3d": true, "attenuation_model": "linear", "min_distance": 1.0, "max_distance": 16.0 },
     "farm_fertilize": { "files": ["assets/audio/sfx/farm/fertilize.mp3"], "volume": 0.7, "pitch_variation": 0.06, "is_3d": true, "attenuation_model": "linear", "min_distance": 1.0, "max_distance": 16.0 },
@@ -121,6 +122,18 @@
     "objective_complete": { "files": ["assets/audio/sfx/ui/objective_complete.mp3"], "volume": 0.75, "is_2d": true },
     "ui_codex_open":      { "files": ["assets/audio/sfx/ui/codex_open.mp3"],         "volume": 0.7, "is_2d": true },
     "ui_codex_close":     { "files": ["assets/audio/sfx/ui/codex_close.mp3"],        "volume": 0.7, "is_2d": true },
+    "time_dawn":          { "files": ["assets/audio/sfx/ui/time_dawn.mp3"],          "volume": 0.45, "is_2d": true },
+    "time_dusk":          { "files": ["assets/audio/sfx/ui/time_dusk.mp3"],          "volume": 0.45, "is_2d": true },
+    "creature_wingbeat": {
+      "files": ["assets/audio/sfx/creatures/common/wingbeat_1.mp3", "assets/audio/sfx/creatures/common/wingbeat_2.mp3"],
+      "volume": 0.6, "pitch_variation": 0.12, "strategy": "random",
+      "is_3d": true, "attenuation_model": "linear", "min_distance": 1.0, "max_distance": 35.0
+    },
+    "creature_footstep_light": {
+      "files": ["assets/audio/sfx/creatures/common/footstep_light_1.mp3", "assets/audio/sfx/creatures/common/footstep_light_2.mp3"],
+      "volume": 0.5, "pitch_variation": 0.12, "strategy": "random",
+      "is_3d": true, "attenuation_model": "linear", "min_distance": 1.0, "max_distance": 22.0
+    },
     "creature_ashen_corvid_call":      { "files": ["assets/audio/sfx/creatures/ashen_corvid/call_1.mp3"],      "volume": 0.85, "pitch_variation": 0.10, "is_3d": true, "attenuation_model": "linear", "min_distance": 3.0, "max_distance": 80.0 },
     "creature_dusk_heron_call":        { "files": ["assets/audio/sfx/creatures/dusk_heron/call_1.mp3"],        "volume": 0.85, "pitch_variation": 0.10, "is_3d": true, "attenuation_model": "linear", "min_distance": 3.0, "max_distance": 80.0 },
     "creature_ember_skink_call":       { "files": ["assets/audio/sfx/creatures/ember_skink/call_1.mp3"],       "volume": 0.80, "pitch_variation": 0.10, "is_3d": true, "attenuation_model": "linear", "min_distance": 2.0, "max_distance": 50.0 },

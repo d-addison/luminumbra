@@ -56,6 +56,13 @@
     { "out": "sfx/creatures/lumen_moth/call_1.mp3", "duration": 1.4, "prompt": "a soft papery wing-flutter with a faint high airy hum, a large moth in gentle flight, delicate and quiet" },
     { "out": "sfx/creatures/mire_lurker/call_1.mp3", "duration": 1.6, "prompt": "a wet guttural croak and low groan from a swamp creature, bubbly and deep, damp, natural, one call" },
     { "out": "sfx/creatures/ridgeback_stalker/call_1.mp3", "duration": 1.8, "prompt": "a deep rumbling snarl of a large predator, throaty and resonant, a warning growl, natural, one call" },
-    { "out": "sfx/creatures/tide_grazer/call_1.mp3", "duration": 2.2, "prompt": "a low mournful moan of a large gentle grazer, soft and whale-like and resonant, calm, one long call" }
+    { "out": "sfx/creatures/tide_grazer/call_1.mp3", "duration": 2.2, "prompt": "a low mournful moan of a large gentle grazer, soft and whale-like and resonant, calm, one long call" },
+    { "out": "sfx/ui/time_dawn.mp3", "duration": 2.4, "prompt": "a soft gentle dawn cue, a warm brightening swell with a faint birdsong shimmer rising, hopeful and calm, no harshness" },
+    { "out": "sfx/ui/time_dusk.mp3", "duration": 2.4, "prompt": "a soft gentle dusk cue, a calm settling evening tone with faint crickets fading in, warm and low, peaceful" },
+    { "out": "sfx/creatures/common/wingbeat_1.mp3", "duration": 0.7, "prompt": "a single soft bird wingbeat, a gentle whoosh of feathers flapping once, natural, short, no music" },
+    { "out": "sfx/creatures/common/wingbeat_2.mp3", "duration": 0.8, "prompt": "a soft pair of bird wing flaps, a gentle feathery whoosh of a bird in flight, natural" },
+    { "out": "sfx/creatures/common/footstep_light_1.mp3", "duration": 0.5, "prompt": "a tiny light skittering footstep of a small lizard on soil, a faint quick dry patter, natural foley" },
+    { "out": "sfx/creatures/common/footstep_light_2.mp3", "duration": 0.5, "prompt": "a small reptile's quick light scuttle on the ground, a faint dry patter, natural" },
+    { "out": "sfx/terraform/water_rush.mp3", "duration": 1.6, "prompt": "a sudden rush of water flowing and draining away over earth, a wet gushing whoosh settling into a trickle, natural foley, no music" }
   ]
 }

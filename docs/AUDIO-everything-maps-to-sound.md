@@ -71,14 +71,17 @@ pointer and every interactive control routes through it).
 > uninit'd in `Shutdown()`. Any 3D one-shot was affected; it only reproduced once a 3D
 > one-shot actually fired during a settled headless run.
 
-## The audit — features that SHOULD make sound but DON'T yet
-These are the remaining gaps (lower-value or needing more plumbing):
-1. **Water terraform drain/dam** — a dedicated drain/refill whoosh when a terraform edit
-   re-routes water (needs detecting a water-level delta, not just the dig itself).
-2. **Day/night transition** — a soft dawn/dusk ambience shift (needs a time-of-day hook into
-   the audio loop).
-3. **Distinct creature footstep timbres** per surface/species (today all grounded creatures
-   share the soft `creature_grovestrider_footstep` pool) and **wingbeats** for fliers.
+Also wired: **day/night cues** (`time_dawn`/`time_dusk` as the sun crosses the horizon —
+detected from `RenderPipeline::sun_direction().y`), **flier wingbeats** (corvid/heron/finch/
+moth tick `creature_wingbeat` instead of footsteps), **light skitter** for the skink
+(`creature_footstep_light`), and a **water rush** (`water_rush`) when a terraform edit borders
+standing water (the dig-drains / fill-dams coupling, now heard).
+
+## The audit — status
+The original audit is **closed**: every player verb, perceivable state change, and nearby
+world event now has a wired sound. Future polish (not gaps, enrichment): unique per-species
+footstep timbres beyond heavy/light, surface-aware creature footsteps, and richer weather
+layers. The rule stands — wire sound for anything new in the same change.
 
 ## Process going forward
 Treat this doc + `sfx_manifest.json` as the audio backlog. When you touch a system, wire its

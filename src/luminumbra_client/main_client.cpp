@@ -3835,14 +3835,16 @@ int main(int argc, char* argv[]) {
                     s_callTimer = 8.0f;  // nobody near -> check again soon
                 }
             }
-            // Creature FOOTSTEPS: grounded creatures near the player tick a soft footfall as they
-            // travel — stride-accumulated from real movement, so cadence tracks speed. Fliers
-            // (corvid/heron/finch/moth) are skipped; their calls/wingbeats carry them. Render-only.
+            // Creature LOCOMOTION sound: grounded creatures near the player tick a soft footfall
+            // as they travel (stride-accumulated from real movement, so cadence tracks speed);
+            // fliers (corvid/heron/finch/moth) get wingbeats at a longer interval; the small
+            // skink gets a light skitter. Render-only.
             {
-                static std::unordered_set<std::uint16_t> s_fliers;
+                static std::unordered_set<std::uint16_t> s_fliers, s_light;
                 if (s_fliers.empty()) {
                     for (const char* f : {"ashen_corvid", "dusk_heron", "glimmer_finch", "lumen_moth"})
                         s_fliers.insert(Luminumbra::Components::CreatureSpeciesId16(f));
+                    s_light.insert(Luminumbra::Components::CreatureSpeciesId16("ember_skink"));
                 }
                 static std::unordered_map<std::uint32_t, std::pair<glm::vec2, float>> s_stride;
                 if (s_stride.size() > 512) s_stride.clear();  // bound: render-only bookkeeping
@@ -3851,10 +3853,15 @@ int main(int argc, char* argv[]) {
                                       const Luminumbra::Components::TransformComponent>();
                 for (auto e : fview) {
                     const auto& cc = fview.get<const Luminumbra::Components::CreatureComponent>(e);
-                    if (cc.eaten || s_fliers.count(cc.species_id)) continue;
+                    if (cc.eaten) continue;
                     const auto& tf = fview.get<const Luminumbra::Components::TransformComponent>(e);
                     const float dx = tf.position.x - pc.x, dz = tf.position.z - pc.z;
                     if (dx * dx + dz * dz > 35.0f * 35.0f) continue;  // only the audible ones
+                    // Pick the gait sound + stride length by species class.
+                    const char* gait = "creature_grovestrider_footstep";
+                    float kStride = 1.7f;
+                    if (s_fliers.count(cc.species_id))     { gait = "creature_wingbeat";       kStride = 3.0f; }
+                    else if (s_light.count(cc.species_id)) { gait = "creature_footstep_light"; kStride = 1.0f; }
                     const glm::vec2 cur(tf.position.x, tf.position.z);
                     const auto key = static_cast<std::uint32_t>(entt::to_integral(e));
                     auto it = s_stride.find(key);
@@ -3863,12 +3870,24 @@ int main(int argc, char* argv[]) {
                     it->second.first = cur;
                     if (moved > 5.0f) continue;  // ignore teleport-sized jumps (re-anchor/respawn)
                     it->second.second += moved;
-                    constexpr float kStride = 1.7f;
                     if (it->second.second >= kStride) {
                         it->second.second -= kStride;
-                        audioManager->PlayOneShot("creature_grovestrider_footstep",
-                                                  glm::vec3(tf.position.x, tf.position.y, tf.position.z));
+                        audioManager->PlayOneShot(gait, glm::vec3(tf.position.x, tf.position.y, tf.position.z));
                     }
+                }
+            }
+            // Day/night: a soft cue as the sun crosses the horizon — brightening at dawn, settling
+            // at dusk. Sun elevation = -sun_direction().y (the vector points away from the sun).
+            // The state only flips once clearly past the horizon, so it fires once per transition.
+            {
+                static int s_sunUp = -1;  // -1 uninit, 0 below horizon, 1 above
+                const float elev = -renderPipeline.sun_direction().y;
+                const int up = elev > 0.0f ? 1 : 0;
+                if (s_sunUp == -1) {
+                    s_sunUp = up;
+                } else if (up != s_sunUp) {
+                    if (up == 1 && elev > 0.03f)       { audioManager->PlayOneShot2D("time_dawn"); s_sunUp = 1; }
+                    else if (up == 0 && elev < -0.03f) { audioManager->PlayOneShot2D("time_dusk"); s_sunUp = 0; }
                 }
             }
         }
@@ -6232,6 +6251,16 @@ int main(int argc, char* argv[]) {
                                     }
                                     audioManager->PlayOneShot(dev, aim);
                                 }
+                                // Water re-routes when the edit borders standing water (a dig DRAINS,
+                                // a fill DAMS) -> a one-shot rush so the coupling is heard, not just seen.
+                                auto* tws = gameSession->GetWorldSystem();
+                                static const float ring[5][2] = {{0, 0}, {4, 0}, {-4, 0}, {0, 4}, {0, -4}};
+                                bool bordersWater = false;
+                                for (const auto& o : ring) {
+                                    const float wx = aim.x + o[0], wz = aim.z + o[1];
+                                    if (tws->WaterLevelAt(wx, wz) > tws->GetTerrainHeightAt(wx, wz) + 0.4f) { bordersWater = true; break; }
+                                }
+                                if (bordersWater) audioManager->PlayOneShot("water_rush", aim);
                             }
                             LUMINUMBRA_CORE_INFO("Terraform: {} {} chunk(s) at ({:.1f},{:.1f},{:.1f})",
                                                  fill_fired ? "filled" : "dug", n, aim.x, aim.y, aim.z);
