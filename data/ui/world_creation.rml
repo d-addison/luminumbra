@@ -133,12 +133,12 @@
                                     <input type="range" class="worldgen-param settings-slider" data-path="terrain.base_frequency" data-type="float" min="0.001" max="0.05" step="0.001" value="0.01" />
                                 </div>
                                 <div class="settings-row param-row">
-                                    <label>amplitude <span class="param-value">60</span></label>
-                                    <input type="range" class="worldgen-param settings-slider" data-path="terrain.base_amplitude" data-type="float" min="0" max="200" step="1" value="60" />
+                                    <label>amplitude <span class="param-value">34</span></label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="terrain.base_amplitude" data-type="float" min="0" max="200" step="1" value="34" />
                                 </div>
                                 <div class="settings-row param-row">
-                                    <label>octaves <span class="param-value">5</span></label>
-                                    <input type="range" class="worldgen-param settings-slider" data-path="terrain.octaves" data-type="int" min="1" max="8" step="1" value="5" />
+                                    <label>octaves <span class="param-value">6</span></label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="terrain.octaves" data-type="int" min="1" max="8" step="1" value="6" />
                                 </div>
                                 <div class="settings-row param-row">
                                     <label>persistence <span class="param-value">0.5</span></label>
@@ -149,24 +149,24 @@
                                     <input type="range" class="worldgen-param settings-slider" data-path="terrain.lacunarity" data-type="float" min="1.5" max="3" step="0.1" value="2" />
                                 </div>
                                 <div class="settings-row param-row">
-                                    <label>height offset <span class="param-value">10</span></label>
-                                    <input type="range" class="worldgen-param settings-slider" data-path="terrain.height_offset" data-type="float" min="-50" max="100" step="1" value="10" />
+                                    <label>height offset <span class="param-value">5</span></label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="terrain.height_offset" data-type="float" min="-50" max="100" step="1" value="5" />
                                 </div>
                                 <div class="settings-row-inline param-row">
                                     <label>shaping</label>
                                     <span class="toggle worldgen-param on" data-path="terrain.shaping.enabled" data-type="bool"><span class="toggle-knob"></span></span>
                                 </div>
                                 <div class="settings-row param-row">
-                                    <label>peak height <span class="param-value">52</span></label>
-                                    <input type="range" class="worldgen-param settings-slider" data-path="terrain.shaping.peaks_amplitude" data-type="float" min="0" max="150" step="1" value="52" />
+                                    <label>peak height <span class="param-value">20</span></label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="terrain.shaping.peaks_amplitude" data-type="float" min="0" max="150" step="1" value="20" />
                                 </div>
                                 <div class="settings-row param-row">
-                                    <label>peak scale <span class="param-value">0.0025</span></label>
-                                    <input type="range" class="worldgen-param settings-slider" data-path="terrain.shaping.peaks_frequency" data-type="float" min="0.001" max="0.01" step="0.0005" value="0.0025" />
+                                    <label>peak scale <span class="param-value">0.004</span></label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="terrain.shaping.peaks_frequency" data-type="float" min="0.001" max="0.01" step="0.0005" value="0.004" />
                                 </div>
                                 <div class="settings-row param-row">
-                                    <label>domain warp <span class="param-value">20</span></label>
-                                    <input type="range" class="worldgen-param settings-slider" data-path="terrain.shaping.domain_warp_amplitude" data-type="float" min="0" max="60" step="1" value="20" />
+                                    <label>domain warp <span class="param-value">14</span></label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="terrain.shaping.domain_warp_amplitude" data-type="float" min="0" max="60" step="1" value="14" />
                                 </div>
                             </div>
 
@@ -179,8 +179,8 @@
                                     <span class="toggle worldgen-param on" data-path="terrain.hydro.enabled" data-type="bool"><span class="toggle-knob"></span></span>
                                 </div>
                                 <div class="settings-row param-row">
-                                    <label>erosion passes <span class="param-value">9</span></label>
-                                    <input type="range" class="worldgen-param settings-slider" data-path="terrain.hydro.iterations" data-type="int" min="0" max="20" step="1" value="9" />
+                                    <label>erosion passes <span class="param-value">4</span></label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="terrain.hydro.iterations" data-type="int" min="0" max="20" step="1" value="4" />
                                 </div>
                                 <div class="settings-row param-row">
                                     <label>thermal rate <span class="param-value">0.3</span></label>
@@ -200,11 +200,27 @@
                                 </div>
                                 <div class="settings-row-inline param-row">
                                     <label>lakes</label>
-                                    <span class="toggle worldgen-param" data-path="features.lakes_enabled" data-type="bool"><span class="toggle-knob"></span></span>
+                                    <span class="toggle worldgen-param on" data-path="features.lakes_enabled" data-type="bool"><span class="toggle-knob"></span></span>
                                 </div>
                                 <div class="settings-row param-row">
-                                    <label>lake depth <span class="param-value">6</span></label>
-                                    <input type="range" class="worldgen-param settings-slider" data-path="features.lake_depth" data-type="float" min="0" max="20" step="0.5" value="6" />
+                                    <label>lake depth <span class="param-value">5</span></label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="features.lake_depth" data-type="float" min="0" max="20" step="0.5" value="5" />
+                                </div>
+                                <div class="settings-row param-row">
+                                    <label>lake density <span class="param-value">0.0009</span></label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="features.lake_frequency" data-type="float" min="0.0003" max="0.003" step="0.0001" value="0.0009" />
+                                </div>
+                                <div class="settings-row param-row">
+                                    <label>lake threshold <span class="param-value">0.52</span></label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="features.lake_threshold" data-type="float" min="0.3" max="0.8" step="0.01" value="0.52" />
+                                </div>
+                                <div class="settings-row param-row">
+                                    <label>lake carve <span class="param-value">22</span></label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="features.lake_max_carve" data-type="float" min="0" max="40" step="1" value="22" />
+                                </div>
+                                <div class="settings-row param-row">
+                                    <label>lake bank offset <span class="param-value">2</span></label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="features.lake_bank_offset" data-type="float" min="0" max="8" step="0.5" value="2" />
                                 </div>
                             </div>
 
@@ -217,16 +233,16 @@
                                     <span class="toggle worldgen-param on" data-path="biomes.enabled" data-type="bool"><span class="toggle-knob"></span></span>
                                 </div>
                                 <div class="settings-row param-row">
-                                    <label>temperature scale <span class="param-value">0.003</span></label>
-                                    <input type="range" class="worldgen-param settings-slider" data-path="biomes.temperature_frequency" data-type="float" min="0.001" max="0.01" step="0.0005" value="0.003" />
+                                    <label>temperature scale <span class="param-value">0.005</span></label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="biomes.temperature_frequency" data-type="float" min="0.001" max="0.01" step="0.0005" value="0.005" />
                                 </div>
                                 <div class="settings-row param-row">
-                                    <label>humidity scale <span class="param-value">0.004</span></label>
-                                    <input type="range" class="worldgen-param settings-slider" data-path="biomes.humidity_frequency" data-type="float" min="0.001" max="0.01" step="0.0005" value="0.004" />
+                                    <label>humidity scale <span class="param-value">0.005</span></label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="biomes.humidity_frequency" data-type="float" min="0.001" max="0.01" step="0.0005" value="0.005" />
                                 </div>
                                 <div class="settings-row-inline param-row">
                                     <label>per-biome relief</label>
-                                    <span class="toggle worldgen-param" data-path="biomes.relief_enabled" data-type="bool"><span class="toggle-knob"></span></span>
+                                    <span class="toggle worldgen-param on" data-path="biomes.relief_enabled" data-type="bool"><span class="toggle-knob"></span></span>
                                 </div>
                                 <div class="settings-row param-row">
                                     <label>relief strength <span class="param-value">0.45</span></label>
@@ -243,12 +259,12 @@
                                     <span class="toggle worldgen-param on" data-path="features.caves_enabled" data-type="bool"><span class="toggle-knob"></span></span>
                                 </div>
                                 <div class="settings-row param-row">
-                                    <label>cave density <span class="param-value">0.03</span></label>
-                                    <input type="range" class="worldgen-param settings-slider" data-path="features.cave_frequency" data-type="float" min="0.005" max="0.05" step="0.001" value="0.03" />
+                                    <label>cave density <span class="param-value">0.02</span></label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="features.cave_frequency" data-type="float" min="0.005" max="0.05" step="0.001" value="0.02" />
                                 </div>
                                 <div class="settings-row-inline param-row">
                                     <label>cliffs</label>
-                                    <span class="toggle worldgen-param" data-path="features.cliffs_enabled" data-type="bool"><span class="toggle-knob"></span></span>
+                                    <span class="toggle worldgen-param on" data-path="features.cliffs_enabled" data-type="bool"><span class="toggle-knob"></span></span>
                                 </div>
                                 <div class="settings-row param-row">
                                     <label>cliff height <span class="param-value">11</span></label>

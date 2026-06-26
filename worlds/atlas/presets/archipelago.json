@@ -44,6 +44,8 @@
       "caves_enabled": true,
       "cave_frequency": 0.03,
       "rivers_enabled": false,
+      "lakes_enabled": false,
+      "cliffs_enabled": false,
       "structures_enabled": true
     }
   }

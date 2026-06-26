@@ -10,6 +10,7 @@
       "persistence": 0.5,
       "lacunarity": 2.0,
       "height_offset": 5.0,
+      "island_mask_enabled": false,
       "shaping": {
         "enabled": true,
         "continentalness_frequency": 0.0012,

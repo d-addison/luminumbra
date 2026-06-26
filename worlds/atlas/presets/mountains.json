@@ -22,6 +22,7 @@
         "erosion_spline": [[-1.0, 0.5], [-0.6, 0.36], [-0.35, 0.25], [0.0, 0.18], [0.4, 0.13], [1.0, 0.1]],
         "peaks_spline": [[-1.0, 0.0], [0.35, 0.08], [0.72, 0.5], [1.0, 1.0]]
       },
+      "island_mask_enabled": false,
       "hydro": {
         "enabled": true,
         "iterations": 9,
@@ -37,7 +38,8 @@
     "biomes": {
       "table": "common/biomes.json",
       "temperature_frequency": 0.003,
-      "humidity_frequency": 0.004
+      "humidity_frequency": 0.004,
+      "relief_enabled": false
     },
     "features": {
       "caves_enabled": true,
@@ -48,6 +50,8 @@
       "river_pv_min": -1.0,
       "river_pv_max": -0.82,
       "river_max_carve": 10.0,
+      "lakes_enabled": false,
+      "cliffs_enabled": false,
       "structures_enabled": true
     }
   }

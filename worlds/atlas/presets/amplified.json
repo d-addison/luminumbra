@@ -23,6 +23,7 @@
         "erosion_spline": [[-1.0, 0.85], [-0.5, 0.55], [0.0, 0.35], [0.5, 0.2], [1.0, 0.1]],
         "peaks_spline": [[-1.0, 0.0], [0.2, 0.06], [0.6, 0.45], [1.0, 1.0]]
       },
+      "island_mask_enabled": false,
       "hydro": {
         "enabled": true,
         "iterations": 8,
