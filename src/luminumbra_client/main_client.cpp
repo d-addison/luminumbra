@@ -2680,6 +2680,7 @@ int main(int argc, char* argv[]) {
     }
     audioManager->Init();
     audioManager->SetMasterVolume(g_systemConfig.user().audio_master);  // apply persisted master volume
+    audioManager->SetMusicVolume(g_systemConfig.user().audio_music);    // apply persisted music-bus volume
     audioManager->LoadBank("data/audio/sfx_main.bank.json");
     audioManager->LoadBank("data/audio/music.bank.json");
 
@@ -3153,7 +3154,10 @@ int main(int argc, char* argv[]) {
         sb.GetAudioSfx = [] { return g_systemConfig.user().audio_sfx; };
         sb.SetAudioSfx = [](float v) { g_systemConfig.user().audio_sfx = v; };
         sb.GetAudioMusic = [] { return g_systemConfig.user().audio_music; };
-        sb.SetAudioMusic = [](float v) { g_systemConfig.user().audio_music = v; };
+        sb.SetAudioMusic = [&audioManager](float v) {
+            g_systemConfig.user().audio_music = v;
+            if (audioManager) audioManager->SetMusicVolume(v);  // applied live to the music bus
+        };
         // Controls: resolve the current binding label, and begin capturing the next key press
         // as a rebind (the existing key_callback applies it into user().keybinds[action]).
         sb.GetKeybind = [](const std::string& action) -> std::string {
@@ -8510,7 +8514,10 @@ int main(int argc, char* argv[]) {
                     if (ImGui::SliderFloat("Master volume", &us.audio_master, 0.0f, 1.0f, "%.2f")) {
                         if (audioManager) audioManager->SetMasterVolume(us.audio_master);  // applied live
                     }
-                    ImGui::TextDisabled("sfx/music volumes saved (need per-bus routing)");
+                    if (ImGui::SliderFloat("Music volume", &us.audio_music, 0.0f, 1.0f, "%.2f")) {
+                        if (audioManager) audioManager->SetMusicVolume(us.audio_music);  // applied live (music bus)
+                    }
+                    ImGui::TextDisabled("sfx volume saved (needs per-shot bus routing)");
                     if (ImGui::CollapsingHeader("Controls (keyboard)")) {
                         for (const auto& def : Luminumbra::Client::kInputActionDefs) {
                             const int idx = static_cast<int>(def.action);

@@ -43,6 +43,9 @@ public:
 
     // Master output gain [0,1] (user.audio.master). Render-only player setting.
     virtual void SetMasterVolume(float volume) = 0;
+    // Music-bus gain [0,1] (user.audio.music): scales the music bed independently of master/SFX,
+    // applied to the currently-playing track and all future PlayMusic. Render-only.
+    virtual void SetMusicVolume(float volume) = 0;
 
     virtual bool StopEvent(AudioEventHandle handle, bool immediate = true) = 0;
     virtual bool SetEventPosition(AudioEventHandle handle, const glm::vec3& position) = 0;

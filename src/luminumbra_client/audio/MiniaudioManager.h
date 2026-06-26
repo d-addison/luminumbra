@@ -122,6 +122,7 @@ public:
     void StopMusic();
 
     void SetMasterVolume(float volume) override;
+    void SetMusicVolume(float volume) override;
 
     bool StopEvent(AudioEventHandle handle, bool immediate = true) override;
     bool SetEventPosition(AudioEventHandle handle, const glm::vec3& position) override;
@@ -167,6 +168,7 @@ private:
     // For music
     std::unique_ptr<ma_sound> m_currentMusic;
     AudioEventID m_currentMusicID;
+    float m_musicVolume = 1.0f;  // music-bus gain (user.audio.music); multiplies the bank volume
 
     // Environmental Audio
     AudioEnvironment m_currentEnvironment;

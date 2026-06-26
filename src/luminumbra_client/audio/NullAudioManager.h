@@ -107,6 +107,7 @@ public:
     void SetAmbientVolume(const AudioEventID&, float) override {}                   // null backend: no-op
 
     void SetMasterVolume(float) override {}  // null backend: no-op
+    void SetMusicVolume(float) override {}   // null backend: no-op
 
     bool StopEvent(AudioEventHandle, bool = true) override {
         ++m_stop_event_calls;

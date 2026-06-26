@@ -291,7 +291,7 @@ void MiniaudioManager::PlayMusic(const AudioEventID& musicEventID) {
         return;
     }
     
-    ma_sound_set_volume(m_currentMusic.get(), def->volume);
+    ma_sound_set_volume(m_currentMusic.get(), def->volume * m_musicVolume);
     ma_sound_set_looping(m_currentMusic.get(), def->is_looping);
     ma_sound_start(m_currentMusic.get());
 
@@ -343,6 +343,17 @@ bool MiniaudioManager::SetEventPosition(AudioEventHandle handle, const glm::vec3
 void MiniaudioManager::SetMasterVolume(float volume) {
     if (m_engine) {
         ma_engine_set_volume(m_engine.get(), volume);
+    }
+}
+
+void MiniaudioManager::SetMusicVolume(float volume) {
+    m_musicVolume = volume < 0.0f ? 0.0f : volume;
+    // Re-scale the track that's already playing so the slider is felt immediately.
+    if (m_currentMusic) {
+        const AudioEventDefinition* def = nullptr;
+        auto it = m_eventDefinitions.find(m_currentMusicID);
+        if (it != m_eventDefinitions.end()) def = &it->second;
+        ma_sound_set_volume(m_currentMusic.get(), (def ? def->volume : 1.0f) * m_musicVolume);
     }
 }
 
