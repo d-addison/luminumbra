@@ -169,6 +169,17 @@ public:
     const luminumbra::ai::ScentField* GetScentField() const { return m_scentField.get(); }
     [[nodiscard]] std::string ComputeScentSubHash() const;
 
+    // Spec 011: scent/foraging GRID <-> WORLD mapping. Foraging cells are integers on the
+    // ScentField, centered on the spawn anchor. The client colony spawner uses these to place a
+    // nest + food at cells and to mirror each forager's authoritative cell back to a world
+    // position for rendering. Pure helpers (no sim state); safe to call any time after init.
+    [[nodiscard]] float ScentCellSize() const;
+    [[nodiscard]] int   ScentFieldCells() const;
+    [[nodiscard]] int   ScentWorldToCellX(float world_x) const;
+    [[nodiscard]] int   ScentWorldToCellZ(float world_z) const;
+    [[nodiscard]] float ScentCellToWorldX(int cell_x) const;
+    [[nodiscard]] float ScentCellToWorldZ(int cell_z) const;
+
     // I9-FOLIAGE: opt-in plant pillar. True if any entity carries a PlantTag (then
     // the growth system runs each tick). The plant sub-hash folds the id-ordered
     // integer growth state for run==replay verification; empty when no plants.

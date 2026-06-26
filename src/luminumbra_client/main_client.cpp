@@ -35,6 +35,7 @@
 #include "luminumbra_common/components/CreatureComponents.h" // I9-ECO creature markers
 #include "luminumbra_common/components/ThirstComponents.h"   // ambient-wildlife thirst + water holes
 #include "luminumbra_common/components/CircadianComponents.h" // spec 011: diurnal/nocturnal sleep clock
+#include "luminumbra_common/components/ForagingComponents.h" // spec 011: ant-trail forager colonies
 #include "luminumbra_common/components/ScavengerComponent.h" // ambient-wildlife predator scavenging
 #include "luminumbra_common/components/CombustionComponents.h" // sim.fire demo markers
 #include "luminumbra_common/components/AlarmComponents.h"      // herd-alarm collective flee
@@ -3957,6 +3958,42 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // Spec 011: mirror each forager's authoritative grid cell -> a world transform so the
+        // colony has live positions, and a 10 s delivery-count heartbeat proving the double-bridge
+        // actually forages in the live world (deliveries accrue => ants are completing trips).
+        if (currentState == GameState::IN_GAME && !g_paused && !scenario_config.active() && gameSession) {
+            auto& freg = gameSession->GetRegistry();
+            auto* fws = gameSession->GetWorldSystem();
+            auto fgview = freg.view<Luminumbra::Components::ForagerComponent,
+                                    Luminumbra::Components::TransformComponent>();
+            std::uint32_t totalDeliveries = 0;
+            int antCount = 0;
+            for (auto e : fgview) {
+                const auto& fg = fgview.get<Luminumbra::Components::ForagerComponent>(e);
+                auto& tf = fgview.get<Luminumbra::Components::TransformComponent>(e);
+                const float wx = gameSession->ScentCellToWorldX(fg.cell_x);
+                const float wz = gameSession->ScentCellToWorldZ(fg.cell_z);
+                tf.position.x = wx;
+                tf.position.z = wz;
+                tf.position.y = fws ? fws->GetTerrainHeightAt(wx, wz) + 0.15f : tf.position.y;
+                totalDeliveries += fg.deliveries;
+                ++antCount;
+            }
+            if (antCount > 0) {
+                static float s_forageLog = 0.0f;
+                static std::uint32_t s_lastDeliveries = 0;
+                s_forageLog += static_cast<float>(deltaTime);
+                if (s_forageLog >= 10.0f) {
+                    s_forageLog = 0.0f;
+                    if (totalDeliveries != s_lastDeliveries) {
+                        LUMINUMBRA_CORE_INFO("Forager colony: {} total deliveries (double-bridge foraging live)",
+                                             totalDeliveries);
+                        s_lastDeliveries = totalDeliveries;
+                    }
+                }
+            }
+        }
+
         if (g_imgui_enabled) {
             ImGui_ImplOpenGL3_NewFrame();
             ImGui_ImplGlfw_NewFrame();
@@ -5605,6 +5642,36 @@ int main(int argc, char* argv[]) {
                                 LUMINUMBRA_CORE_INFO(
                                     "Living world: spawned {} skinned, species-varied ambient creatures around spawn",
                                     wlSpawned);
+                                // Spec 011: a forager COLONY -- a nest + ants that shuttle to food,
+                                // laying pheromone trails. The wired-but-dormant ForagingSystem (slot
+                                // 2c, Deneubourg double-bridge) ticks once ForagerComponents exist, so
+                                // the colony self-organises onto the SHORTER nest->food path. Cells are
+                                // integers on the scent field; a per-frame mirror gives each ant a world
+                                // transform (visible marker render is a follow-on). Client-only: no re-pin.
+                                {
+                                    const auto& csp = gameSession->GetMetadata().spawnPoint;
+                                    const int nestCx = gameSession->ScentWorldToCellX(csp.x);
+                                    const int nestCz = gameSession->ScentWorldToCellZ(csp.z) + 6;
+                                    auto placeFood = [&](int cx, int cz) {
+                                        const auto fe = reg.create();
+                                        auto& fs = reg.emplace<Luminumbra::Components::FoodSourceComponent>(fe);
+                                        fs.cell_x = cx; fs.cell_z = cz; fs.amount = 1000000;
+                                    };
+                                    placeFood(nestCx + 14, nestCz);       // far food (long path)
+                                    placeFood(nestCx - 9,  nestCz + 4);   // near food (short path)
+                                    for (int ai = 0; ai < 24; ++ai) {
+                                        const auto ae = reg.create();
+                                        auto& fg = reg.emplace<Luminumbra::Components::ForagerComponent>(ae);
+                                        fg.cell_x = nestCx; fg.cell_z = nestCz;
+                                        fg.home_x = nestCx; fg.home_z = nestCz;
+                                        auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(ae);
+                                        tf.position = Luminumbra::Vec3(gameSession->ScentCellToWorldX(nestCx),
+                                                                       csp.y, gameSession->ScentCellToWorldZ(nestCz));
+                                        tf.scale = Luminumbra::Vec3(0.18f, 0.18f, 0.18f);
+                                    }
+                                    LUMINUMBRA_CORE_INFO("Forager colony: nest cell ({},{}) + 2 food + 24 ants",
+                                                         nestCx, nestCz);
+                                }
                             }
                         }
 

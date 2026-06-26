@@ -1048,6 +1048,23 @@ uint32_t GameSession::StringToSeed(const std::string& seedStr) {
     }
 }
 
+// Spec 011: scent/foraging grid <-> world helpers. The field is kScentFieldCells wide, cell
+// kScentCellSize, centered on the spawn anchor (ScentOriginFor). Used by the client colony spawner.
+float GameSession::ScentCellSize() const { return kScentCellSize; }
+int   GameSession::ScentFieldCells() const { return kScentFieldCells; }
+int   GameSession::ScentWorldToCellX(float world_x) const {
+    return static_cast<int>(std::lround((world_x - ScentOriginFor(m_metadata.spawnPoint.x)) / kScentCellSize));
+}
+int   GameSession::ScentWorldToCellZ(float world_z) const {
+    return static_cast<int>(std::lround((world_z - ScentOriginFor(m_metadata.spawnPoint.z)) / kScentCellSize));
+}
+float GameSession::ScentCellToWorldX(int cell_x) const {
+    return ScentOriginFor(m_metadata.spawnPoint.x) + static_cast<float>(cell_x) * kScentCellSize;
+}
+float GameSession::ScentCellToWorldZ(int cell_z) const {
+    return ScentOriginFor(m_metadata.spawnPoint.z) + static_cast<float>(cell_z) * kScentCellSize;
+}
+
 void GameSession::InitializeScentField(const Vec3& /*anchor*/) {
     m_scentField = std::make_unique<luminumbra::ai::ScentField>(
         kScentFieldCells, kScentFieldCells, kScentFieldChannels);
