@@ -191,3 +191,39 @@ Landed the §4 follow-ups (commits in the §4 banner). Determinism held througho
   full-albedo foliage shade path, or missing ambient/sun attenuation on cards). Distinct from the
   underground-foliage bug (that was placement; this is shading). Worth a `--debug-view albedo` vs lit
   A/B on a surface field at night to localize. Add to the cave/rendering problem catalog (§2) as #10.
+
+---
+
+## 7. Night-lighting + foliage/marker/leaf round (2026-06-26 later) — LANDED
+
+Commit `080e18a7` (render-only; `--smoke` stays `6f008a9f637c40b7`, run==replay).
+
+- **Moon casts light + shadows at night** (was: very dark). The shadow cascade now re-keys onto a real
+  overhead **moon direction** when the sun is below the horizon (`get_light_space_matrices`), and the
+  `lighting_pass.frag` moon term samples that cascade (real cast shadows) + a brighter cool key + a
+  **wrapped Lambert** (NdotL*0.6+0.25) that fills the camera-facing slopes an overhead moon leaves
+  black. `nightAmbient` lifted to a real cool skylight. Midnight mean-luma **8 (black) → 18 (dim cool
+  navigable)**; an early over-tune hit 73 (day-bright wash) — landed between. Capture set:
+  `build/debug/test-artifacts/night-lighting/`.
+- **Foliage cards darken at night** (§2 #10 FIXED) — re-keyed off the deferred sun-colour nightFactor
+  (not u_sunIntensity) + a shared `u_moonDir` cool moon fill, so blades darken WITH the scene.
+- **Emissive markers** (§2 #5 FIXED) — creature/forager/crystal beacons pack emissive into the unused
+  `gNormalMaterial.b`; lighting adds an albedo-tinted glow faded by daylight. Green creature beacons
+  glow clearly at night; non-marker geometry pixel-identical.
+- **Far-tree leaf caps** (§2 #8 FIXED) — horizontal canopy cap on the far LOD3 leaf billboard so
+  aerial views read green instead of bare trunks (+2 tris/far tree).
+
+**KEY ARCHITECTURAL FINDING (memory: "atmosphere-color-not-intensity"):** the Hillaire scattering
+atmosphere drives light **hue** but NOT **intensity** — sun/moon/ambient brightness are authored ramps.
+So the night hand-tuning above is the *interim*; the real fix is to couple intensity to the LUT.
+
+## 8. New spec from `/forge-brainstorm` — 015 atmospheric lighting + colored glass
+
+`docs/specs/015-atmospheric-lighting-colored-glass/spec.md` (committed). Owner decisions:
+**atmosphere SPINE first**, colored glass to **full OIT + refraction**. Three composable pillars:
+(A) couple light INTENSITY to the scattering LUT + exposure [retires the night hand-tuning above];
+(B) froxel volumetric god-rays / fog that catches light; (C) full OIT colored glass + colored shadow
+maps + screen-space refraction [→ colored god-rays through stained glass]. Render-only; gate is FLIP
+visual parity + intentional re-bless. Companion to spec 014 (RHI) — volumetrics + OIT port behind it.
+**Next implementation step = Pillar A** (it retires the §7 night ramps and makes all times-of-day
+correct from the physics; note it triggers a deliberate visual-golden re-bless storm).
