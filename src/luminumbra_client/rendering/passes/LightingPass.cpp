@@ -140,6 +140,11 @@ void LightingPass::execute(RenderPipeline& pipeline, const Camera& camera) {
     m_lighting_shader->setVec3("u_viewPos", camera.Position);
     m_lighting_shader->setVec3("u_sun.direction", pipeline.m_sun.direction);
     m_lighting_shader->setVec3("u_sun.color", pipeline.m_sun.color);
+    // moon-shadows: the moon's TOWARD-LIGHT direction (anti-sun, overhead at
+    // midnight; same convention the shader uses for u_sun.direction). The shader
+    // lights + keys the cast-shadow lookup off this so moonlit terrain has real
+    // directional form and shadows from the now-moon shadow cascade.
+    m_lighting_shader->setVec3("u_moonDir", pipeline.m_moonLightDir);
     m_lighting_shader->setFloat("u_sea_level", SEA_LEVEL);
     // T-I7 cinematic grade (BF1-style): BOLD default — lifted exposure, rich
     // saturation, strong contrast, and a cool-shadow / warm-highlight split-tone

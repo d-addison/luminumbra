@@ -30,6 +30,13 @@ vec2 encode_octahedral(vec3 n) {
 const vec3 kBarkAlbedo = vec3(0.20, 0.12, 0.06);  // brown trunk/branch
 const vec3 kLeafAlbedo = vec3(0.16, 0.42, 0.12);  // green canopy
 uniform int u_plantMaterialId = 3; // Grass id: shaded as soft vegetation by lighting
+// EMISSIVE MARKERS: when this pass draws the gameplay BEACON octahedra (creatures /
+// foragers / food / nest / crystals), the C++ sets u_markerEmissive>0 so each marker
+// glows in its own (species-tinted) albedo even with no sky/cave light. Stored in the
+// otherwise-unused gNormalMaterial.b channel; the lighting pass reads it and adds an
+// additive glow scaled DOWN by daylight. Default 0.0 -> .b stays 0.0 -> pixel-identical
+// to the pre-change G-buffer for any non-marker use of this shader.
+uniform float u_markerEmissive = 0.0;
 
 void main()
 {
@@ -46,7 +53,9 @@ void main()
     gPosition = fs_in.FragPos;
     vec2 encoded_normal = encode_octahedral(normalize(fs_in.Normal));
     float material_id_normalized = float(u_plantMaterialId) / 255.0;
-    gNormalMaterial = vec4(encoded_normal * 0.5 + 0.5, 0.0, material_id_normalized);
+    // Pack the emissive strength into the (previously 0.0) .b channel; the lighting
+    // pass multiplies the marker's albedo by this to make it a glowing beacon.
+    gNormalMaterial = vec4(encoded_normal * 0.5 + 0.5, clamp(u_markerEmissive, 0.0, 1.0), material_id_normalized);
     gAlbedoRoughness = vec4(albedo, roughness);
     gMetallicAO = vec2(0.0, 1.0);
 }

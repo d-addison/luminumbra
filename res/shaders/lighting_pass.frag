@@ -65,6 +65,11 @@ struct SunLight {
     vec3 color;
 };
 uniform SunLight u_sun;
+// moon-shadows: the moon's toward-light direction (anti-sun, overhead at
+// midnight), uploaded by LightingPass.cpp from m_moonLightDir. Used directly as
+// the L vector for the night moon term AND to key the cast-shadow lookup, since
+// at night get_light_space_matrices builds the cascade from this same direction.
+uniform vec3 u_moonDir;
 
 #define MAX_POINT_LIGHTS 32
 struct PointLight {
@@ -432,22 +437,52 @@ void main() {
         // vector L. The moon's TRAVEL direction is -u_sun.direction (anti-sun),
         // so its toward-light vector is +u_sun.direction — i.e. the same form the
         // sun uses, which correctly lights the up-facing terrain at night.
-        vec3 L_moon = normalize(u_sun.direction);
+        // moon-shadows: the moon is now a REAL directional key that CASTS shadows,
+        // not just a flat fill. L_moon is the uploaded toward-light dir (anti-sun,
+        // overhead at midnight) — at night get_light_space_matrices builds the
+        // shadow cascade from this SAME direction, so CalculateShadow(...,L_moon)
+        // gives genuine moon cast/received shadows. Render-only.
+        vec3 L_moon = normalize(u_moonDir);
         float NdotL_moon = max(dot(Normal, L_moon), 0.0);
-        // Cool moonlight. The magnitude is high because terrain albedos are dark
-        // (linear ~0.01-0.07), so the albedo*radiance product needs a strong key
-        // to lift night ground to a visible-but-clearly-night tone. Tuned against
-        // the FLAT_DARK_NO_DETAIL gate (needs std_luma > 6 with form).
-        const vec3 kMoonColor = vec3(0.24, 0.32, 0.58);
-        vec3 moonRadiance = kMoonColor * (nightFactor * SUN_IRRADIANCE_SCALE);
-        vec3 moonDiffuse = (Albedo / PI) * moonRadiance * NdotL_moon;
-        // Desaturate toward the cool moon hue: warm (dusty) albedo would otherwise
-        // read as daytime-yellow under the key. Moonlit night vision is low-
-        // saturation + blue-shifted (Purkinje), so pull the lit result partway
-        // toward its own luma scaled by the cool moon tint.
-        float moonLuma = dot(moonDiffuse, vec3(0.2126, 0.7152, 0.0722));
-        moonDiffuse = mix(moonDiffuse, moonLuma * vec3(0.6, 0.8, 1.3), 0.35);
-        Lo += moonDiffuse;
+        // Cast-shadow term from the (now moon-keyed) cascade. Moonlight is dim, so
+        // a touch of softening: lift the floor a hair to avoid harsh black edges /
+        // peter-panning from the wider-spread night cascade, while still reading as
+        // a directional shadow.
+        float moonShadow = CalculateShadow(FragPos, Normal, L_moon, abs(viewPos.z));
+        // Moonlight is SOFT: keep a high floor so cast shadows read as gentle
+        // contrast, not crushed black (a low floor left the whole foreground near-
+        // black when the night cascade reported everything shadowed). 0.5 => moon
+        // shadows dim to half, never to void; the night stays navigable.
+        moonShadow = mix(0.5, 1.0, moonShadow); // soft moon-shadow floor
+        // Cool moonlight key. Brighter than the old fill so a moonlit night is
+        // clearly NAVIGABLE (form + value), but obviously cooler + dimmer than day.
+        // Terrain albedos are dark (linear ~0.01-0.07), so the albedo*radiance
+        // product needs a strong cool key to lift night ground to a moonlit tone.
+        const vec3 kMoonColor = vec3(0.40, 0.52, 0.92);
+        const float kMoonKeyScale = 1.3; // overall moonlight brightness lever
+        vec3 moonRadiance = kMoonColor * (nightFactor * kMoonKeyScale * SUN_IRRADIANCE_SCALE);
+        // WRAPPED Lambert: an overhead midnight moon gives camera-facing SLOPES
+        // NdotL~0, which left them pure black (the night ambient sits on the wrong
+        // hemisphere to fill them). A modest wrap (NdotL*0.6+0.25) lets the moon
+        // softly fill slopes + undersides so the night is NAVIGABLE, while the low
+        // floor + cast-shadow term keep it clearly NIGHT (dim, directional) not a
+        // flat day-bright wash.
+        float moonWrap = NdotL_moon * 0.6 + 0.25;
+        vec3 moonDiffuse = (Albedo / PI) * moonRadiance * moonWrap;
+        // Soft, cheap specular highlight so wet/low-roughness night surfaces catch
+        // a cool moon glint (sun uses the full BRDF; the moon gets a light Blinn-
+        // Phong lobe to stay inexpensive). Reuses the existing N, V, and Roughness.
+        vec3 H_moon = normalize(L_moon + V);
+        float specPow = mix(8.0, 64.0, 1.0 - Roughness);
+        float moonSpec = pow(max(dot(Normal, H_moon), 0.0), specPow) * (1.0 - Roughness) * 0.35;
+        vec3 moonSpecular = kMoonColor * (nightFactor * kMoonKeyScale * SUN_IRRADIANCE_SCALE) * moonSpec * NdotL_moon;
+        vec3 moonLit = (moonDiffuse + moonSpecular) * moonShadow;
+        // Desaturate toward the cool moon hue (Purkinje shift): warm (dusty) albedo
+        // would otherwise read daytime-yellow under the key. Pull the lit result
+        // partway toward its own luma scaled by the cool moon tint.
+        float moonLuma = dot(moonLit, vec3(0.2126, 0.7152, 0.0722));
+        moonLit = mix(moonLit, moonLuma * vec3(0.55, 0.75, 1.35), 0.55);
+        Lo += moonLit;
     }
 
     // Point Lights with early rejection
@@ -564,7 +599,22 @@ void main() {
         skyVis = computeSkyVisibility(viewPos, viewNormal);
     }
     vec3 ambient = (ambientDiffuse + ambientSpecular) * ao * skyVis;
-    vec3 color = ambient + Lo + caustics + crystalGlow + aetherGlow; // + A1d aether glow
+
+    // EMISSIVE GAMEPLAY MARKERS: PlantProcgenPass beacons (creatures/foragers/food/
+    // nest/crystals) pack a per-fragment emissive strength into gNormalMaterial.b
+    // (0.0 for all normal geometry, so this term vanishes everywhere else). The glow
+    // uses the marker's OWN albedo (already species-tinted) so each beacon glows its
+    // own colour, and is faded with daylight (sunLum, computed above) so it BLAZES in
+    // dark caves / at night but stays subtle in full sun.
+    float markerEmissive = normalData.b;
+    vec3 markerGlow = vec3(0.0);
+    if (markerEmissive > 0.0) {
+        float daylight = smoothstep(0.0, 0.30, sunLum);       // ~0 night -> 1 day
+        float dayFade  = mix(1.0, 0.18, daylight);            // dim, never off, by day
+        markerGlow = Albedo * (markerEmissive * 6.0 * dayFade);
+    }
+
+    vec3 color = ambient + Lo + caustics + crystalGlow + aetherGlow + markerGlow; // + emissive markers
 
     // T-I5b-5-water-backlog (seabed waterline terracing de-band): the far seabed
     // is a height-quantized heightfield (kFarLodHeightQuantScale = 1/16 m). Where

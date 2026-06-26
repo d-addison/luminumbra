@@ -121,6 +121,12 @@ void PlantProcgenPass::execute(RenderPipeline& pipeline, const Camera& camera) {
     m_shader->setMat3("u_normalViewMatrix", glm::mat3(view));
     m_shader->setFloat("u_time", static_cast<float>(glfwGetTime()));  // render-only leaf sway
     m_shader->setFloat("u_windStrength", 1.0f);
+    // This pass now draws ONLY the gameplay marker octahedra (creatures / foragers /
+    // crystals). Make them self-luminous beacons so they read as glowing motes in dark
+    // caves where there is no sky light. Packed into gNormalMaterial.b; the lighting
+    // pass adds an albedo-tinted glow faded by daylight. (Default uniform is 0.0, so
+    // the G-buffer is pixel-identical whenever this is not set.)
+    m_shader->setFloat("u_markerEmissive", 0.55f);
 
     glBindVertexArray(m_vao);
     glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(m_index_count), GL_UNSIGNED_INT, nullptr);

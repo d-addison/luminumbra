@@ -54,6 +54,13 @@ uniform vec3  u_sunColor;      // CPU-side: already scaled by sun intensity/tran
 uniform float u_sunIntensity;  // [0,1] sun-up factor (0 at night)
 uniform vec3  u_ambientColor;  // == u_skyAmbientColor (already PI-scaled)
 
+// foliage-night: MOON toward-light direction, SAME convention as u_sunDirection
+// negated (i.e. -u_moonDir is the moon TRAVEL dir). Uploaded by FoliagePass from
+// pipeline.m_moonLightDir, the identical value the deferred lighting pass keys its
+// moon term + night cascades off (moon-shadows workstream). Defaults to overhead
+// (anti-sun at midnight) so a missing-uniform path still lights blades sanely.
+uniform vec3  u_moonDir;        // toward-light dir of the moon (anti-sun)
+
 // T-I5b-DR-foliage-green: projected cloud cast-shadow uniforms, mirroring the
 // lighting pass so a storm-overcast cell darkens the blades like the terrain.
 // All default to "no clouds" so a missing-uniform path is a no-op.
@@ -173,6 +180,22 @@ void main() {
     vec3  greenAmbient = albedo * ambientLum;
     vec3  skyTint = u_ambientColor * albedo;       // raw (blue-leaning) sky*albedo
     vec3  ambient = mix(greenAmbient, skyTint, 0.20);
+    // NIGHT GATE (foliage night-glow fix): the dusk/aurora band keeps u_ambientColor
+    // elevated + blue (m_sun.intensity only reaches 0 below -0.1 sun elevation), so
+    // up-facing ambient-dominated cards stayed near-WHITE (~rgb 239,248,254) at night
+    // while the terrain went dark. Tie the foliage ambient to the sun-up factor with a
+    // small night floor so the blades darken WITH the scene across the whole dusk band;
+    // the moonlight fill below re-adds a dim cool tone. RENDER-ONLY.
+    // Mirror the DEFERRED path's night transition EXACTLY: lighting_pass.frag
+    // computes nightFactor = 1 - smoothstep(0, 0.06, sunLum) from the SUN COLOUR
+    // luminance (which actually reaches 0 at night), NOT from u_sunIntensity (which
+    // stays elevated across the dusk band). Drop the sky ambient to ZERO at night
+    // with NO floor so the blades collapse with the terrain's hemispheric ambient;
+    // the moon fill below re-adds the same dim cool tone the deferred moon gives the
+    // terrain. RENDER-ONLY.
+    float sunLum = max(max(u_sunColor.r, u_sunColor.g), u_sunColor.b);
+    float nightFactor = 1.0 - smoothstep(0.0, 0.06, sunLum);
+    ambient *= (1.0 - nightFactor);
     // Overcast strongly cuts the diffuse sky light reaching the ground cover.
     ambient *= (1.0 - 0.9 * lightLoss);
 
@@ -180,19 +203,31 @@ void main() {
     // collapses to ~0 at night (u_sunColor is pre-scaled CPU-side). Cloud-shadow
     // attenuated like the terrain's direct sun.
     vec3 sunRadiance = u_sunColor * SUN_IRRADIANCE_SCALE;
-    vec3 direct = (albedo / PI) * sunRadiance * ndl * (1.0 - lightLoss);
+    // Grass overhaul: SOFTEN the direct term (x0.6). Vertical blade cards rake the sun on
+    // their faces and were blowing out to bright yellow slivers (reading as fake lit decals,
+    // not grass). A gentler direct + the existing green ambient keeps a believable lit-grass
+    // body with bright TIPS (via the AO gradient) instead of uniform blown-out blades. RENDER-ONLY.
+    vec3 direct = (albedo / PI) * sunRadiance * ndl * (1.0 - lightLoss) * 0.6;
 
     vec3 color = (ambient + direct) * ao;
 
-    // I8 moonlight: a dim COOL fill so night grass reads with the terrain's moonlit
-    // tone instead of near-black. Ramps in as the sun fades (u_sunIntensity -> 0).
-    // DESATURATED toward a blue moon hue (not the grass green): moonlit night vision
-    // is low-saturation + blue-shifted (Purkinje), AND a green night-grass tip at the
-    // horizon trips the GREEN_SKY_SPECKLE gate. Drive it by the blade's LUMINANCE
-    // through a cool blue tint, so it can never read as a green speck.
-    float nightFactor = 1.0 - clamp(u_sunIntensity, 0.0, 1.0);
-    float moonLuma = max(dot(albedo, LUMA), 0.0);
-    color += moonLuma * vec3(0.06, 0.10, 0.20) * (nightFactor * ao);
+    // MOON FILL (foliage-night): mirror the deferred moon in lighting_pass.frag so
+    // night grass reads with the SAME dim cool moonlit tone as the terrain beside it,
+    // not near-black and not a glowing card. The deferred path uses a DIFFUSE moon
+    // with kMoonColor = vec3(0.24, 0.32, 0.58), lit from the moon's toward-light
+    // direction; we replicate it here keyed off nightFactor (the sun-colour ramp
+    // above) so it fades in precisely as the directional sun fades out. Lit through
+    // the blade's green albedo + a desaturated cool moon hue: low-saturation /
+    // blue-shifted (Purkinje) night vision, and never a saturated green tip that
+    // could trip the GREEN_SKY_SPECKLE gate.
+    const vec3 kMoonColor = vec3(0.24, 0.32, 0.58);
+    float ndlMoon = max(dot(N, -normalize(u_moonDir)), 0.0);
+    // Wrap the moon Lambert a little (half-lit) so vertical blade backs aren't pure
+    // black under an overhead midnight moon; keep it dim. Hue = blade albedo crossed
+    // with the cool moon colour so it stays desaturated + blue-leaning.
+    float moonWrap = ndlMoon * 0.7 + 0.3;
+    vec3 moonFill = (albedo * kMoonColor) * moonWrap;
+    color += moonFill * (nightFactor * ao) * (1.0 - lightLoss);
 
     // Filmic tonemap + gamma, byte-identical to lighting_pass.frag, so the lit
     // blade lands in the same sRGB space as the surrounding tonemapped terrain

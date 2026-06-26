@@ -875,6 +875,10 @@ void FoliagePass::execute(RenderPipeline& pipeline, const Camera& camera) {
     m_shader->setVec3("u_sunColor", pipeline.m_sun.color);
     m_shader->setFloat("u_sunIntensity", pipeline.m_sun.intensity);
     m_shader->setVec3("u_ambientColor", pipeline.m_skyAmbientColor);
+    // foliage-night: feed the SAME moon toward-light direction the deferred lighting
+    // pass keys its moon term off (moon-shadows workstream), so night blades pick up
+    // the identical cool moonlit tone as the terrain instead of glowing.
+    m_shader->setVec3("u_moonDir", pipeline.m_moonLightDir);
 
     // T-I5b-DR-foliage-green: feed the SAME projected cloud cast-shadow state the
     // lighting pass uses, so storm-overcast cells drive the blades DARK like the

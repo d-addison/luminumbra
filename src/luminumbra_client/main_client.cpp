@@ -888,6 +888,13 @@ void BuildProcgenTreePalette(Luminumbra::Rendering::RenderPipeline& rp, const gl
         const glm::vec3 up(0, 1, 0);
         addQuad(bbLeafV, bbLeafI, {-W, cLo, 0}, {W, cLo, 0}, {W, cHi, 0}, {-W, cHi, 0}, up);     // X-facing
         addQuad(bbLeafV, bbLeafI, {0, cLo, -W}, {0, cLo, W}, {0, cHi, W}, {0, cHi, -W}, up);     // Z-facing
+        // FAR-TREE LEAVES (handover §2 #8): the two crossed quads above are VERTICAL, so an
+        // aerial / top-down view sees them edge-on and the canopy vanishes -> bare brown trunk
+        // skeleton. Add a HORIZONTAL canopy "cap" over the top of the leaf band so looking DOWN
+        // at a far tree still reads green leaf coverage. Up-facing normal (matches the leaf cards);
+        // ~mid-to-upper canopy height; render-only, +2 tris/far tree, green tint via fs_in.Tint.
+        const float capY = cLo + (cHi - cLo) * 0.72f;
+        addQuad(bbLeafV, bbLeafI, {-W, capY, -W}, {W, capY, -W}, {W, capY, W}, {-W, capY, W}, up); // top cap
         std::vector<V> bbBarkV; std::vector<std::uint32_t> bbBarkI;
         const float tw = W * 0.12f;
         addQuad(bbBarkV, bbBarkI, {-tw, 0, 0}, {tw, 0, 0}, {tw, cLo, 0}, {-tw, cLo, 0}, glm::vec3(0, 0, 1));

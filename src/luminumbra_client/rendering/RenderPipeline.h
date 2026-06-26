@@ -941,6 +941,15 @@ private:
 
     DirectionalLight m_sun;
     glm::vec3 m_moonDirection;
+    // Moon TOWARD-LIGHT direction (same convention as m_sun.direction: the value
+    // is used directly as the L vector in the lighting pass and as the cascade
+    // light direction at night). The moon is the anti-sun, overhead at midnight.
+    // Distinct from m_moonDirection (the moon TRAVEL dir consumed by SkyboxPass
+    // to place the moon disc), which is intentionally left unchanged.
+    glm::vec3 m_moonLightDir{0.0f, -1.0f, 0.0f};
+    // Moon elevation factor: dot(m_moonLightDir,(0,-1,0)); >0 when the moon is
+    // above the horizon. Drives the day->moon cascade switch.
+    float m_moonUpFactor = 0.0f;
     glm::vec3 m_skyAmbientColor;
     // T-I7 controllable atmosphere (aerial perspective) parameters.
     AtmosphereParams m_atmosphere{};

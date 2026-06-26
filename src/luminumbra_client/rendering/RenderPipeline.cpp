@@ -4504,11 +4504,23 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     m_sun.color *= m_seasonPaletteTint;
 
     m_moonDirection = -m_sun.direction;
-    // I8 (owner: "there should be some brightness from the moon"): the moonlight
-    // fill is derived ENTIRELY in lighting_pass.frag from the (already-uploaded)
-    // u_sun uniforms — the moon is the anti-sun, so its light direction is
-    // -u_sun.direction and it ramps in as u_sun.color fades to ~0 at night. No
-    // extra per-frame uniform upload needed. Render-only.
+    // moon-shadows (owner: "moon not seemingly to cast light and thus shadows at
+    // night causing it to be very dark"): the moon now casts a real directional
+    // key + cast shadows at night, not just a flat fill. m_moonLightDir is the
+    // moon's TOWARD-LIGHT vector in the SAME convention the lighting pass uses for
+    // u_sun.direction (used directly as the L vector, and as the cascade light
+    // direction at night). The moon orbits OPPOSITE the sun: the sun toward-light
+    // form is normalize(vec3(sin(a), -cos(a), tilt)); the moon at angle a+PI is
+    // normalize(vec3(-sin(a), cos(a), tilt)), which is overhead (0,-1,tilt) at
+    // midnight (a=PI) — exactly when the sun is below the horizon. It is uploaded
+    // as u_moonDir (LightingPass.cpp) and consumed by get_light_space_matrices to
+    // re-key the single shadow cascade onto the moon while the sun is down.
+    // m_moonDirection above (the moon TRAVEL dir) is left untouched: SkyboxPass
+    // still uses it to place the moon disc.
+    m_moonLightDir = glm::normalize(glm::vec3(-std::sin(sun_angle_rad),
+                                              std::cos(sun_angle_rad),
+                                              season_tilt_z));
+    m_moonUpFactor = glm::dot(m_moonLightDir, glm::vec3(0.0f, -1.0f, 0.0f));
 
     // Ambient scales by the same PI as SUN_IRRADIANCE_SCALE (lighting_pass
     // exposure audit): these values were tuned against the pre-audit sun, so
@@ -4517,7 +4529,14 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     // LodSeamRisk near_black_ratio regressions on DEM-realistic terrain).
     constexpr float kAmbientIrradianceScale = 3.14159265f;
     glm::vec3 dayAmbient = glm::vec3(0.1f, 0.15f, 0.2f) * kAmbientIrradianceScale;
-    glm::vec3 nightAmbient = glm::vec3(0.01f, 0.02f, 0.04f) * kAmbientIrradianceScale;
+    // moon-shadows: a real NIGHT SKYLIGHT fill (was 0.01,0.02,0.04). The moon
+    // directional only lights up-facing ground; camera-facing SLOPES get NdotL~0
+    // from an overhead moon, so without skylight they read pure black at night
+    // (daytime fills them via the ~10x-larger day ambient). A moonlit sky IS a
+    // large soft cool light source — lift the night hemisphere ambient so slopes
+    // and moon-shadowed areas stay dim-but-NAVIGABLE and cool, while the moon
+    // directional still gives form + cast shadows on flat ground. Cool/blue-biased.
+    glm::vec3 nightAmbient = glm::vec3(0.060f, 0.090f, 0.165f) * kAmbientIrradianceScale;
     m_skyAmbientColor = glm::mix(nightAmbient, dayAmbient, m_sun.intensity);
     // T-I5a-6: tint the daytime ambient HUE toward the sky-view scattering
     // ambient (the same LUT integral) while preserving the calibrated ambient
@@ -4701,7 +4720,16 @@ std::vector<glm::mat4> RenderPipeline::get_light_space_matrices(const Camera& ca
         glm::vec3 center = glm::vec3(0.0f);
         for(const auto& v : corners) center += glm::vec3(v);
         center /= corners.size();
-        glm::mat4 light_view = glm::lookAt(center - m_sun.direction, center, glm::vec3(0.0f, 1.0f, 0.0f));
+        // moon-shadows: the single shadow cascade follows whichever luminary is
+        // ABOVE the horizon. By day the sun direction is used (unchanged). Once the
+        // sun drops below the horizon its direction is degenerate (points up, would
+        // build a useless below-ground shadow map), so we re-key the cascade onto
+        // the MOON direction (overhead at midnight) — this is what lets moonlit
+        // surfaces cast/receive real shadows at night. Switch on the sun's
+        // elevation; m_moonLightDir is the anti-sun toward-light dir.
+        const float sun_up = glm::dot(m_sun.direction, glm::vec3(0.0f, -1.0f, 0.0f));
+        const glm::vec3 light_dir = (sun_up < 0.0f) ? m_moonLightDir : m_sun.direction;
+        glm::mat4 light_view = glm::lookAt(center - light_dir, center, glm::vec3(0.0f, 1.0f, 0.0f));
         float minX = std::numeric_limits<float>::max(), maxX = std::numeric_limits<float>::lowest();
         float minY = std::numeric_limits<float>::max(), maxY = std::numeric_limits<float>::lowest();
         float minZ = std::numeric_limits<float>::max(), maxZ = std::numeric_limits<float>::lowest();
