@@ -34,15 +34,15 @@
                 </div>
                 <div class="readout-cell">
                     <span class="readout-label">shutter</span>
-                    <span class="readout-value">25.0s</span>
+                    <span class="readout-value" id="ro_shutter">1/125</span>
                 </div>
                 <div class="readout-cell">
                     <span class="readout-label">iso</span>
-                    <span class="readout-value">100</span>
+                    <span class="readout-value" id="ro_iso">ISO 100</span>
                 </div>
                 <div class="readout-cell">
                     <span class="readout-label">exposure</span>
-                    <span class="readout-value">0.0</span>
+                    <span class="readout-value" id="ro_ev">+0.0 EV ok</span>
                 </div>
                 <div class="readout-cell">
                     <span class="readout-label">focal</span>
