@@ -3907,10 +3907,13 @@ int main(int argc, char* argv[]) {
         if (currentState == GameState::IN_GAME && audioManager && g_camera && !g_paused &&
             !scenario_config.active() && gameSession) {
             static float s_envTimer = 0.0f, s_callTimer = 0.0f, s_sleepTimer = 0.0f;
+            static float s_feedTimer = 0.0f, s_colonyTimer = 0.0f;
             static bool s_rainOn = false, s_waterOn = false;
             s_envTimer += static_cast<float>(deltaTime);
             s_callTimer += static_cast<float>(deltaTime);
             s_sleepTimer += static_cast<float>(deltaTime);
+            s_feedTimer += static_cast<float>(deltaTime);
+            s_colonyTimer += static_cast<float>(deltaTime);
             const glm::vec3 pc = g_camera->Position;
             if (s_envTimer >= 0.5f) {
                 s_envTimer = 0.0f;
@@ -4007,6 +4010,59 @@ int main(int argc, char* argv[]) {
                 }
                 if (best != entt::null) audioManager->PlayOneShot("creature_sleep", bestPos);
                 else s_sleepTimer = 4.0f;  // none asleep nearby -> re-check sooner
+            }
+            // Spec 011 Phase G — per-action audio: the nearest GRAZING creature (<20 m) emits a
+            // soft feed/chew every ~5 s (a drink/sip instead if it is feeding right at the water's
+            // edge). last_action == Graze (CreatureAction::Graze = 1). Render-only.
+            if (s_feedTimer >= 5.0f) {
+                s_feedTimer = 0.0f;
+                const auto& reg = gameSession->GetRegistry();
+                auto* ws3 = gameSession->GetWorldSystem();
+                auto gview = reg.view<const Luminumbra::Components::CreatureComponent,
+                                      const Luminumbra::Components::TransformComponent>();
+                entt::entity best = entt::null;
+                float bestD = 20.0f * 20.0f;
+                glm::vec3 bestPos(0.0f);
+                for (auto e : gview) {
+                    const auto& cc = gview.get<const Luminumbra::Components::CreatureComponent>(e);
+                    if (cc.eaten || cc.last_action != 1 /* CreatureAction::Graze */) continue;
+                    const auto& tf = gview.get<const Luminumbra::Components::TransformComponent>(e);
+                    const float dx = tf.position.x - pc.x, dz = tf.position.z - pc.z;
+                    const float d2 = dx * dx + dz * dz;
+                    if (d2 < bestD) { bestD = d2; best = e; bestPos = glm::vec3(tf.position.x, tf.position.y, tf.position.z); }
+                }
+                if (best != entt::null) {
+                    // Drinking proxy: if the grazer is at the water's edge, it sips instead of chews.
+                    const bool atWater = ws3 &&
+                        ws3->WaterLevelAt(bestPos.x, bestPos.z) > ws3->GetTerrainHeightAt(bestPos.x, bestPos.z) + 0.2f;
+                    audioManager->PlayOneShot(atWater ? "creature_drink" : "creature_feed", bestPos);
+                } else {
+                    s_feedTimer = 3.0f;  // nobody grazing nearby -> re-check sooner
+                }
+            }
+            // Spec 011 Phase G — colony bed: a faint chitter from the nearest forager NEST (<25 m)
+            // every ~5 s, so an active ant colony reads as alive. Keyed on the colony's shared home
+            // cell (every ForagerComponent carries it). Render-only.
+            if (s_colonyTimer >= 5.0f) {
+                s_colonyTimer = 0.0f;
+                const auto& reg = gameSession->GetRegistry();
+                auto* ws4 = gameSession->GetWorldSystem();
+                auto nview = reg.view<const Luminumbra::Components::ForagerComponent>();
+                bool haveNest = false; glm::vec3 nestPos(0.0f); float bestD = 25.0f * 25.0f;
+                for (auto e : nview) {
+                    const auto& fg = nview.get<const Luminumbra::Components::ForagerComponent>(e);
+                    const float wx = gameSession->ScentCellToWorldX(fg.home_x);
+                    const float wz = gameSession->ScentCellToWorldZ(fg.home_z);
+                    const float dx = wx - pc.x, dz = wz - pc.z;
+                    const float d2 = dx * dx + dz * dz;
+                    if (d2 < bestD) {
+                        bestD = d2; haveNest = true;
+                        const float wy = (ws4 ? ws4->GetTerrainHeightAt(wx, wz) : 0.0f) + 0.3f;
+                        nestPos = glm::vec3(wx, wy, wz);
+                    }
+                }
+                if (haveNest) audioManager->PlayOneShot("creature_colony", nestPos);
+                else s_colonyTimer = 3.0f;
             }
             // Creature LOCOMOTION sound: grounded creatures near the player tick a soft footfall
             // as they travel (stride-accumulated from real movement, so cadence tracks speed);

@@ -139,6 +139,21 @@
       "volume": 0.45, "pitch_variation": 0.08,
       "is_3d": true, "attenuation_model": "linear", "min_distance": 1.0, "max_distance": 18.0
     },
+    "creature_feed": {
+      "files": ["assets/audio/sfx/creatures/common/feed_chew.mp3"],
+      "volume": 0.40, "pitch_variation": 0.12,
+      "is_3d": true, "attenuation_model": "linear", "min_distance": 1.5, "max_distance": 22.0
+    },
+    "creature_drink": {
+      "files": ["assets/audio/sfx/creatures/common/drink_sip.mp3"],
+      "volume": 0.42, "pitch_variation": 0.10,
+      "is_3d": true, "attenuation_model": "linear", "min_distance": 1.5, "max_distance": 22.0
+    },
+    "creature_colony": {
+      "files": ["assets/audio/sfx/creatures/common/colony_chitter.mp3"],
+      "volume": 0.35, "pitch_variation": 0.06,
+      "is_3d": true, "attenuation_model": "linear", "min_distance": 2.0, "max_distance": 30.0
+    },
     "creature_ashen_corvid_call":      { "files": ["assets/audio/sfx/creatures/ashen_corvid/call_1.mp3"],      "volume": 0.85, "pitch_variation": 0.10, "is_3d": true, "attenuation_model": "linear", "min_distance": 3.0, "max_distance": 80.0 },
     "creature_dusk_heron_call":        { "files": ["assets/audio/sfx/creatures/dusk_heron/call_1.mp3"],        "volume": 0.85, "pitch_variation": 0.10, "is_3d": true, "attenuation_model": "linear", "min_distance": 3.0, "max_distance": 80.0 },
     "creature_ember_skink_call":       { "files": ["assets/audio/sfx/creatures/ember_skink/call_1.mp3"],       "volume": 0.80, "pitch_variation": 0.10, "is_3d": true, "attenuation_model": "linear", "min_distance": 2.0, "max_distance": 50.0 },
