@@ -3980,6 +3980,12 @@ int main(int argc, char* argv[]) {
             std::uint32_t totalDeliveries = 0;
             int antCount = 0;
             const int fgCells = gameSession->ScentFieldCells();
+            // Perf (critique #5): foragers live on discrete integer scent-grid cells, and terrain
+            // height at a cell is a fixed (deterministic) function of the world. Cache height by cell
+            // so the expensive GetTerrainHeightAt (full domain-warp Perlin) runs once per cell, not
+            // once per ant per frame. Cleared if it grows (a new world re-keys the cells).
+            static std::unordered_map<std::uint32_t, float> s_cellHeight;
+            if (s_cellHeight.size() > 8192) s_cellHeight.clear();
             for (auto e : fgview) {
                 const auto& fg = fgview.get<Luminumbra::Components::ForagerComponent>(e);
                 auto& tf = fgview.get<Luminumbra::Components::TransformComponent>(e);
@@ -3992,7 +3998,14 @@ int main(int argc, char* argv[]) {
                 const float wz = gameSession->ScentCellToWorldZ(fg.cell_z);
                 tf.position.x = wx;
                 tf.position.z = wz;
-                tf.position.y = fws ? fws->GetTerrainHeightAt(wx, wz) + 0.15f : tf.position.y;
+                if (fws) {
+                    const std::uint32_t cellKey = (static_cast<std::uint32_t>(fg.cell_x) << 16) |
+                                                  static_cast<std::uint32_t>(fg.cell_z & 0xFFFF);
+                    auto it = s_cellHeight.find(cellKey);
+                    if (it == s_cellHeight.end())
+                        it = s_cellHeight.emplace(cellKey, fws->GetTerrainHeightAt(wx, wz)).first;
+                    tf.position.y = it->second + 0.15f;
+                }
             }
             if (antCount > 0) {
                 static float s_forageLog = 0.0f;
