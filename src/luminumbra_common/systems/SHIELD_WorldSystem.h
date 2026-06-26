@@ -46,6 +46,8 @@ struct TerrainGenParams {
     int   cave_style = 0;
     float spaghetti_frequency = 0.04f;  // tunnel noise scale (higher = tighter winding)
     float spaghetti_thickness = 0.08f;  // |noise| < this carves a tunnel (wider = fatter)
+    float worley_frequency = 0.016f;    // CHEESE cavern cell scale (lower = bigger rooms)
+    float worley_threshold = 0.62f;     // F1/F3 < this => open room (cell interior); higher = more/bigger caverns
 
     // --- FR-A3 surface-breaking caves / sinkholes / cave-mouths (default-off) ---
     // Makes the 18 m surface cap (kCaveSurfaceCapDepth) a PER-COLUMN field so the
@@ -890,6 +892,7 @@ private:
     FastNoise::SmartNode<FastNoise::Generator> m_terrain_generator;
     FastNoise::SmartNode<FastNoise::Generator> m_cave_generator;
     FastNoise::SmartNode<FastNoise::Generator> m_spaghetti_generator; // spec 013 noise-router tunnels (built iff cave_style==1)
+    FastNoise::SmartNode<FastNoise::Generator> m_worley_generator;    // spec 013 Worley CHEESE caverns (built iff cave_style==1)
     FastNoise::SmartNode<FastNoise::Generator> m_island_mask_generator;
     // T-I3-10 shaping control noises (only built when shaping_enabled; seed
     // offsets +3/+4/+5 for continentalness/erosion/peaks, the single warp

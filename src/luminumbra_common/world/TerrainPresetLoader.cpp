@@ -281,6 +281,8 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
     params.cave_style = features.value("cave_style", params.cave_style);
     params.spaghetti_frequency = features.value("spaghetti_frequency", params.spaghetti_frequency);
     params.spaghetti_thickness = features.value("spaghetti_thickness", params.spaghetti_thickness);
+    params.worley_frequency = features.value("worley_frequency", params.worley_frequency);
+    params.worley_threshold = features.value("worley_threshold", params.worley_threshold);
 
     // Shaping block: parsed into extras AND consumed (T-I3-10) - the loader is
     // the one place preset shaping data lands in TerrainGenParams, so every
@@ -422,7 +424,8 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
                      "surface_breaks_enabled", "surface_break_density",
                      "feature_cell_size", "max_feature_radius",
                      "carve_smoothness", "entrance_min_cap",
-                     "cave_style", "spaghetti_frequency", "spaghetti_thickness"},
+                     "cave_style", "spaghetti_frequency", "spaghetti_thickness",
+                     "worley_frequency", "worley_threshold"},
                     provenance, result.warnings);
 
     result.ok = true;

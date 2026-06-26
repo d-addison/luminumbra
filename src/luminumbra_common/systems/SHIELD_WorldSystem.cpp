@@ -384,6 +384,14 @@ void SHIELD_WorldSystem::reinitialize_noise() {
     // construct this node and stay byte-identical.
     if (m_params.cave_style != 0) {
         m_spaghetti_generator = FastNoise::New<FastNoise::Perlin>();
+        // 2c. Worley CHEESE caverns: cellular F1/F3 edge field -> big ROUNDED rooms (vs the
+        // Perlin body's blobs). Index0Div1 returns F1/F3 in [0,1]: small at cell centres
+        // (carve = open room), ->1 at cell walls (stone). Built only in noise-router style.
+        auto worley = FastNoise::New<FastNoise::CellularDistance>();
+        worley->SetDistanceIndex0(0);
+        worley->SetDistanceIndex1(2); // F1 and F3
+        worley->SetReturnType(FastNoise::CellularDistance::ReturnType::Index0Div1);
+        m_worley_generator = worley;
     }
 
     // 3. Island Mask Generator (Low-frequency Simplex)
@@ -1005,6 +1013,22 @@ float SHIELD_WorldSystem::EvaluateCaveDensity(const Vec3& wp, float terrain_dens
         const float cap_blend = cave_surface_blend(terrain_density, effective_cap);
         const float capped = terrain_density + (tunnel_density - terrain_density) * cap_blend;
         density = std::max(density, capped);
+    }
+
+    // WORLEY CHEESE caverns: big ROUNDED rooms at cell interiors. F1/F3 (Index0Div1) is small
+    // at a cell centre -> carve an open room; ->1 at the cell wall -> stone. Low frequency =>
+    // dramatic chambers. Composed via the same surface cap + max as the cheese/spaghetti terms.
+    if (m_worley_generator) {
+        const float w = m_worley_generator->GenSingle3D(
+            wp.x * m_params.worley_frequency, wp.y * m_params.worley_frequency,
+            wp.z * m_params.worley_frequency, m_seed + 21);
+        const float room = m_params.worley_threshold - w;  // >0 inside a room (w below threshold)
+        if (room > 0.0f) {
+            const float room_density = (room / std::max(1e-4f, m_params.worley_threshold)) * m_params.cave_carve_value;
+            const float cap_blend = cave_surface_blend(terrain_density, effective_cap);
+            const float capped = terrain_density + (room_density - terrain_density) * cap_blend;
+            density = std::max(density, capped);
+        }
     }
     return density;
 }
