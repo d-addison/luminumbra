@@ -22,9 +22,16 @@
 > Hunger already sates on Graze + predation; `ScavengingSystem`/`WildlifeFoliageSystem` exist.
 > So Phase B is mostly food-source placement + the graze-depletes-source link, not new behavior.
 >
-> **Next:** Phase D nests/home anchors → Phase C foraging colonies (the ant-trail activation,
-> the original ask) → Phase F full arbiter polish + FR-A3 energy consequences (these move the
-> gate hash → the first real engine-frontier re-pin) → Phase G rest poses + night-quiet.
+> - **Phase C — forager colony SIM activation** (`7d92fd37`): the client living-world spawn
+>   seeds a nest + 24 foragers + 2 food sources (short/long path) on the scent grid; the dormant
+>   `RunForagingOnTick` now runs live, ants lay trails and the colony converges on the shorter
+>   path. New GameSession scent-grid↔world accessors + a per-frame cell→transform mirror + a
+>   delivery heartbeat. Client-only → no re-pin. (Proven by `foraging_test`; the colony spawns.)
+>
+> **Next:** forager **marker rendering** (mirror is ready — render the 24 ants as small markers +
+> ideally the pheromone trail as a ground overlay; render-only). Then Phase D nests for the
+> larger creatures, Phase F full arbiter polish + FR-A3 energy consequences (these move the gate
+> hash → the first real engine-frontier re-pin), and Phase G rest poses + night-quiet.
 
 ## Context
 
