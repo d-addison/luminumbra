@@ -198,6 +198,9 @@ TEST(PhotoMode, SidecarSerializationIsDeterministic) {
     side.verdict = v;
     side.species_id = in.main_species_id;
     side.lens = in.lens;
+    side.observation.subject_action = 5;     // Sleep
+    side.observation.time_of_day = 0.75f;
+    side.observation.scene_luminance = 0.62f;
 
     const std::string a = SerializePhotoSidecar(side);
     const std::string b = SerializePhotoSidecar(side);
@@ -205,6 +208,11 @@ TEST(PhotoMode, SidecarSerializationIsDeterministic) {
     // The sidecar names the principal species + carries the star rating.
     EXPECT_NE(a.find("\"species_id\": 42"), std::string::npos);
     EXPECT_NE(a.find("\"stars\":"), std::string::npos);
+    // Spec 012: the sidecar carries the observation context (behaviour/time/light).
+    EXPECT_NE(a.find("\"observation\""), std::string::npos);
+    EXPECT_NE(a.find("\"subject_action\": 5"), std::string::npos);
+    EXPECT_NE(a.find("\"time_of_day\":"), std::string::npos);
+    EXPECT_NE(a.find("\"scene_luminance\":"), std::string::npos);
 }
 
 // ---------------------------------------------------------------------------

@@ -94,6 +94,19 @@ public:
         m_focusNudge = 0.0f;
         return n;
     }
+    // Manual-exposure nudges (spec 012): net SHUTTER-SPEED stops (+ = faster/less light)
+    // and net ISO stops (+ = higher ISO) accumulated since the last consume. The caller
+    // applies them multiplicatively to its lens shutter_s / iso. Self-clears.
+    [[nodiscard]] float consume_shutter_speed_nudge() {
+        const float n = m_shutterSpeedNudge;
+        m_shutterSpeedNudge = 0.0f;
+        return n;
+    }
+    [[nodiscard]] float consume_iso_nudge() {
+        const float n = m_isoNudge;
+        m_isoNudge = 0.0f;
+        return n;
+    }
     // Edge-triggered codex open/close request: true ONCE per ToggleCodex press, then
     // self-clears. Client-only (a UI overlay), never touches the sim.
     [[nodiscard]] bool consume_codex_toggle() {
@@ -143,6 +156,8 @@ private:
     bool  m_shutterRequested = false;
     float m_apertureNudge = 0.0f; // f-number stops (+ = stop down, - = open up)
     float m_focusNudge = 0.0f;    // metres (+ = farther, - = nearer)
+    float m_shutterSpeedNudge = 0.0f; // shutter-speed stops (+ = faster / less light)
+    float m_isoNudge = 0.0f;          // ISO stops (+ = higher ISO / more sensitivity)
     bool  m_codexToggleRequested = false;  // edge-triggered codex screen open/close
 };
 

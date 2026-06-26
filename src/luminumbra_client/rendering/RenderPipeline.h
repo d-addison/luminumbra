@@ -605,6 +605,11 @@ public:
     // runtime scenario harness caustics-animation probe (T-I2-16).
     u32 water_caustics_texture() const;
     void set_time_of_day(float normalized_time);
+    // Current normalized day phase [0,1) (the value last pushed via set_time_of_day /
+    // advanced by update_time_of_day). RENDER-DERIVED, read-only: exposed for the
+    // photo-mode capture so a shot can record the time-of-day it was taken at (spec 012
+    // ObservationMetadata). Never feeds the sim / world_hash.
+    float get_time_of_day() const { return m_timeOfDay; }
     // T-I5a-7 (C2): SEASON / celestial model. The season phase is a PURE FUNCTION
     // of the authoritative TICK COUNT (integer epoch math; DeterministicMath for
     // the sun-path trig) -- never wall-clock, never a free-running float

@@ -31,6 +31,10 @@ enum class InputAction : int {
     LensApertureDown,  // open UP   (smaller f-number, shallower DoF / more bokeh)
     LensFocusUp,       // push focus distance farther
     LensFocusDown,     // pull focus distance nearer
+    LensShutterUp,     // FASTER shutter (less light / higher EV) — spec 012 manual exposure
+    LensShutterDown,   // SLOWER shutter (more light / lower EV)
+    LensIsoUp,         // raise ISO (more sensitivity / lower required EV)
+    LensIsoDown,       // lower ISO (less sensitivity / higher required EV)
     ToggleCodex,       // open/close the creature codex browse screen (client-only)
     // I9-FOLIAGE Phase 5B farming verbs: act on the plant nearest the player's aim. The sim verbs
     // are deterministic (FarmingSystem.h); only fire on a key press, so headless gates are unaffected.
@@ -68,6 +72,10 @@ inline constexpr std::array<InputActionDef, kInputActionCount> kInputActionDefs 
     {InputAction::LensApertureDown, "LensApertureDown", GLFW_KEY_LEFT_BRACKET},
     {InputAction::LensFocusUp,      "LensFocusUp",      GLFW_KEY_EQUAL},
     {InputAction::LensFocusDown,    "LensFocusDown",    GLFW_KEY_MINUS},
+    {InputAction::LensShutterUp,    "LensShutterUp",    GLFW_KEY_PERIOD},
+    {InputAction::LensShutterDown,  "LensShutterDown",  GLFW_KEY_COMMA},
+    {InputAction::LensIsoUp,        "LensIsoUp",        GLFW_KEY_APOSTROPHE},
+    {InputAction::LensIsoDown,      "LensIsoDown",      GLFW_KEY_SEMICOLON},
     {InputAction::ToggleCodex,      "ToggleCodex",      GLFW_KEY_C},
     {InputAction::FarmPlant,        "FarmPlant",        GLFW_KEY_F},
     {InputAction::FarmWater,        "FarmWater",        GLFW_KEY_G},

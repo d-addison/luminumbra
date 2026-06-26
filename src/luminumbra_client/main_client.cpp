@@ -521,6 +521,20 @@ entt::entity PromoteNearestScatter(entt::registry& reg, const glm::vec3& aim, fl
     return e;
 }
 
+// Spec 012 P1: map the sun's elevation (radians, >0 above horizon) to a photographic
+// scene luminance [0,1] for photo scoring. Night (sun below horizon) is dark (~0.06);
+// low/golden-hour sun lands near the ideal (~0.5-0.7); midday is bright but not blown
+// (~0.85). CLIENT render-derived feedback ONLY — never sim / world_hash — so libm
+// (std::sin/std::pow) is fine here (unlike the pure photo headers, which stay libm-free).
+inline float SceneLuminanceFromSunElevation(float sun_elev_rad) {
+    const float e = std::sin(sun_elev_rad);  // [-1,1], fraction of the way above horizon
+    if (e <= 0.0f) {
+        // Twilight → night: a small floor that dims toward midnight (e == -1).
+        return luminumbra::game::PhotoModeClamp01(0.06f + 0.10f * (1.0f + e));
+    }
+    return luminumbra::game::PhotoModeClamp01(0.15f + 0.70f * std::pow(e, 0.3f));
+}
+
 // g-vertical-slice spike: gather the in-frustum creature subjects for a photo-mode
 // CAPTURE. STRICTLY a read-only observer — it takes a CONST registry + CONST camera,
 // projects each creature's world position into NDC via the camera's view*proj, and
@@ -532,7 +546,8 @@ std::vector<luminumbra::game::PhotoSubjectView> GatherPhotoSubjects(
     const entt::registry& reg,
     const Luminumbra::Rendering::Camera& camera,
     int width,
-    int height) {
+    int height,
+    float scene_luminance = 0.6f) {
     std::vector<luminumbra::game::PhotoSubjectView> views;
     if (width <= 0 || height <= 0) return views;
 
@@ -565,13 +580,20 @@ std::vector<luminumbra::game::PhotoSubjectView> GatherPhotoSubjects(
         pv.size_m = 1.0f;  // ~creature footprint
         // Apparent footprint falls off with distance (a far subject fills less frame).
         pv.size = luminumbra::game::PhotoModeClamp01(pv.size_m / (pv.distance_m * 0.5f + 1.0f));
-        pv.light = 0.6f;   // scene-luminance proxy (no per-creature luminance component)
+        // Spec 012 P1: scene luminance is now driven by the sun (time-of-day), passed in
+        // from the render pipeline's sun elevation, so golden hour rewards and night
+        // punishes. No per-creature luminance component exists, so all subjects share the
+        // scene's light this frame (a far better proxy than the old hardcoded 0.6).
+        pv.light = scene_luminance;
         // Real per-creature species identity (set at spawn from the archetype) keys the
         // codex; fall back to the predator/prey role proxy only for unspecified (0)
         // creatures so the codex can fill with actual species rather than two buckets.
         pv.species_id = cr.species_id != 0
                             ? static_cast<int>(cr.species_id)
                             : (cr.is_predator ? 1 : 2);
+        // Spec 012 P4: carry the subject's current behaviour so the principal subject's
+        // action reaches the capture's ObservationMetadata (behaviour objectives).
+        pv.subject_action = cr.last_action;
         views.push_back(pv);
     }
     return views;
@@ -621,7 +643,18 @@ void BakeCreatureMarkers(Luminumbra::Rendering::PlantProcgenPass* pp, entt::regi
                 col *= (1.0f - 0.7f * t);              // darken toward the soil
             }
         }
-        const float rr = r * sizeMul, hh = halfH * sizeMul;
+        // Spec 011 Phase G — rest poses: a resting/sleeping creature reads as "bedded
+        // down" — the marker shrinks, SQUATS (flattens vertically), and dims, so a
+        // sleeping subject is visibly distinct from an awake one. This is what a behaviour
+        // photo objective (spec 012 BehavioralMatch) is shot against. Render-only; the
+        // action is the brain's last_action (Rest=4, Sleep=5).
+        float restSquash = 1.0f;
+        if (cr.last_action == 5) {        // Sleep — most settled
+            sizeMul *= 0.6f; restSquash = 0.45f; col *= 0.70f;
+        } else if (cr.last_action == 4) { // Rest — partly settled
+            sizeMul *= 0.8f; restSquash = 0.70f; col *= 0.85f;
+        }
+        const float rr = r * sizeMul, hh = halfH * sizeMul * restSquash;
         const glm::vec3 P[6] = {c + glm::vec3(0, hh, 0), c - glm::vec3(0, hh, 0),
                                 c + glm::vec3(rr, 0, 0),     c + glm::vec3(0, 0, rr),
                                 c - glm::vec3(rr, 0, 0),     c - glm::vec3(0, 0, rr)};
@@ -6646,6 +6679,22 @@ int main(int argc, char* argv[]) {
                             if (g_photoMode.lens.focus_distance_m < 0.2f) g_photoMode.lens.focus_distance_m = 0.2f;
                             if (g_photoMode.lens.focus_distance_m > 200.0f) g_photoMode.lens.focus_distance_m = 200.0f;
 
+                            // Spec 012 P3: manual exposure — shutter speed + ISO nudges
+                            // applied multiplicatively in stops. + shutter stop = FASTER
+                            // (less light, shorter time); + ISO stop = higher sensitivity.
+                            const float shutter_stops = g_playerController->consume_shutter_speed_nudge();
+                            if (shutter_stops != 0.0f) {
+                                g_photoMode.lens.shutter_s *= std::pow(2.0f, -shutter_stops);
+                                if (g_photoMode.lens.shutter_s < 1.0f / 4000.0f) g_photoMode.lens.shutter_s = 1.0f / 4000.0f;
+                                if (g_photoMode.lens.shutter_s > 30.0f) g_photoMode.lens.shutter_s = 30.0f;
+                            }
+                            const float iso_stops = g_playerController->consume_iso_nudge();
+                            if (iso_stops != 0.0f) {
+                                g_photoMode.lens.iso *= std::pow(2.0f, iso_stops);
+                                if (g_photoMode.lens.iso < 50.0f) g_photoMode.lens.iso = 50.0f;
+                                if (g_photoMode.lens.iso > 25600.0f) g_photoMode.lens.iso = 25600.0f;
+                            }
+
                             // T031: live-bind the viewfinder readouts to the current lens.
                             if (g_uiManager && g_uiManager->GetContext()) {
                                 if (auto* doc = g_uiManager->GetContext()->GetDocument("photo_mode")) {
@@ -6658,6 +6707,28 @@ int main(int argc, char* argv[]) {
                                         std::snprintf(rbuf, sizeof(rbuf), "%.1fm", g_photoMode.lens.focus_distance_m);
                                         e->SetInnerRML(rbuf);
                                     }
+                                    // Spec 012 P3: shutter + ISO + a live EV meter so the
+                                    // player sees whether they are exposing for the light.
+                                    if (auto* e = doc->GetElementById("ro_shutter")) {
+                                        const float ss = g_photoMode.lens.shutter_s;
+                                        if (ss >= 1.0f) std::snprintf(rbuf, sizeof(rbuf), "%.1fs", ss);
+                                        else std::snprintf(rbuf, sizeof(rbuf), "1/%d", static_cast<int>(1.0f / ss + 0.5f));
+                                        e->SetInnerRML(rbuf);
+                                    }
+                                    if (auto* e = doc->GetElementById("ro_iso")) {
+                                        std::snprintf(rbuf, sizeof(rbuf), "ISO %d", static_cast<int>(g_photoMode.lens.iso + 0.5f));
+                                        e->SetInnerRML(rbuf);
+                                    }
+                                    if (auto* e = doc->GetElementById("ro_ev")) {
+                                        const float live_lum = SceneLuminanceFromSunElevation(
+                                            renderPipeline.get_sun_elevation_rad());
+                                        const float lens_ev = luminumbra::game::ExposureValue(g_photoMode.lens);
+                                        const float target_ev = 6.0f + live_lum * 9.0f; // kSceneEvMin + lum*kSceneEvSpan
+                                        const float d = lens_ev - target_ev;            // + = under (dark), - = over (blown)
+                                        const char* tag = (d > 0.5f) ? " dark" : (d < -0.5f) ? " bright" : " ok";
+                                        std::snprintf(rbuf, sizeof(rbuf), "%+.1f EV%s", d, tag);
+                                        e->SetInnerRML(rbuf);
+                                    }
                                 }
                             }
 
@@ -6666,11 +6737,21 @@ int main(int argc, char* argv[]) {
                                 if (audioManager) audioManager->PlayOneShot2D("camera_shutter");
                                 int cap_w = 0, cap_h = 0;
                                 glfwGetFramebufferSize(window, &cap_w, &cap_h);
+                                // Spec 012 P1: scene luminance follows the sun so the
+                                // player must expose for the light (golden hour rewards,
+                                // night punishes). Render-derived; never feeds world_hash.
+                                const float scene_lum = SceneLuminanceFromSunElevation(
+                                    renderPipeline.get_sun_elevation_rad());
                                 // Build the shot from the live frame (CONST registry read).
                                 const std::vector<luminumbra::game::PhotoSubjectView> subjects =
-                                    GatherPhotoSubjects(gameSession->GetRegistry(), *g_camera, cap_w, cap_h);
+                                    GatherPhotoSubjects(gameSession->GetRegistry(), *g_camera, cap_w, cap_h, scene_lum);
+                                // Spec 012 P4: stamp the capture's time-of-day; BuildShotInput
+                                // fills the principal subject's behaviour + scene luminance.
+                                luminumbra::game::ObservationMetadata obs;
+                                obs.time_of_day = renderPipeline.get_time_of_day();
                                 const luminumbra::game::ShotInput shot =
-                                    luminumbra::game::BuildShotInput(subjects, g_photoMode.lens, 0.6f);
+                                    luminumbra::game::BuildShotInput(subjects, g_photoMode.lens, scene_lum,
+                                                                     0.5f, 1.0f, obs);
                                 // Was this species already in the codex BEFORE the capture? A
                                 // subject-bearing shot of a never-seen species is a DISCOVERY.
                                 const bool had_subject = !shot.composition.subjects.empty();
@@ -6753,6 +6834,7 @@ int main(int argc, char* argv[]) {
                                 side.verdict = verdict;
                                 side.species_id = shot.main_species_id;
                                 side.lens = g_photoMode.lens;
+                                side.observation = shot.observation; // spec 012: behaviour/time/light context
                                 std::ofstream sidecar(photo_dir / (stamp + ".photo.json"),
                                                       std::ios::binary | std::ios::trunc);
                                 if (sidecar) {

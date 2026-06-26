@@ -31,6 +31,8 @@ enum class ObjectiveKind : std::uint8_t {
     DiscoverSpecies,    // discover the species `species_id`
     StarRating,         // own a >= `min_stars` shot of species `species_id`
     CollectionScore,    // reach a total collection score of `min_score`
+    BehavioralMatch,    // capture a subject performing `target_action` (a brain action
+                        // value; if `species_id` > 0, of that species — else any species)
 };
 
 // One objective. `title` is the player-facing line; the params are interpreted per kind.
@@ -39,9 +41,10 @@ struct Objective {
     ObjectiveKind kind = ObjectiveKind::DiscoverCount;
     std::string  title;
     int          target_count = 0;                  // DiscoverCount
-    int          species_id = 0;                    // DiscoverSpecies / StarRating
+    int          species_id = 0;                    // DiscoverSpecies / StarRating / BehavioralMatch (0 = any)
     int          min_stars = 0;                     // StarRating (0..5)
     float        min_score = 0.0f;                  // CollectionScore
+    int          target_action = -1;                // BehavioralMatch: brain action value (<0 = unset)
 };
 
 // The evaluated state of one objective against a codex.
@@ -96,6 +99,17 @@ inline ObjectiveStatus EvaluateObjective(const Objective& o, const PhotoCodex& c
             const float need = o.min_score > 0.0f ? o.min_score : 1.0f;
             s.complete = have >= need;
             s.progress = ObjectiveClamp01(have / need);
+            break;
+        }
+        case ObjectiveKind::BehavioralMatch: {
+            // Complete once a capture of the target behaviour exists — of the named
+            // species (species_id > 0) or of ANY species (species_id <= 0). Binary:
+            // you have either photographed the behaviour or you have not.
+            const bool got = o.species_id > 0
+                                 ? codex.behavior_captured(o.species_id, o.target_action)
+                                 : codex.behavior_captured_any(o.target_action);
+            s.complete = got;
+            s.progress = got ? 1.0f : 0.0f;
             break;
         }
     }
@@ -167,6 +181,15 @@ inline ObjectiveSet DefaultObjectives(int first_species_id) {
     Objective o4; o4.id = 4; o4.kind = ObjectiveKind::CollectionScore;
     o4.min_score = 3.0f; o4.title = "Build a collection worth 3.0";
     set.Add(o4);
+
+    // Behaviour-driven goal: catch a creature in its daily life, not just present it.
+    // target_action 5 == the brain's Sleep action (CreatureBrain CreatureAction::Sleep);
+    // species_id 0 == any species. Satisfied by photographing a sleeping (rest-posed)
+    // creature — the living-world depth the codex now rewards.
+    Objective o5; o5.id = 5; o5.kind = ObjectiveKind::BehavioralMatch;
+    o5.target_action = 5; o5.species_id = 0;
+    o5.title = "Photograph a sleeping creature";
+    set.Add(o5);
     return set;
 }
 

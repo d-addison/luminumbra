@@ -32,6 +32,8 @@
 > ideally the pheromone trail as a ground overlay; render-only). Then Phase D nests for the
 > larger creatures, Phase F full arbiter polish + FR-A3 energy consequences (these move the gate
 > hash → the first real engine-frontier re-pin), and Phase G rest poses + night-quiet.
+>
+> **Determinism fork RESOLVED — Option A (anchor-only nests), 2026-06-26:** Nests/homes are CLIENT-VISUAL ANCHORS only this sprint, NOT server-authoritative steering. Ambient creatures run client-side and are NOT in world_hash; foragers stay client-ambient (never added to the server/canonical SpawnEcologyRoster), so the scent sub-hash stays empty server-side and there are ZERO canonical world_hash bumps this sprint. Server-authoritative nests + return-home steering are DEFERRED to the multiplayer sprint. This matches the single-PC testing constraint (no two-box LAN). See the revised FR-C3 / FR-D2 / FR-E1 below.
 
 ## Context
 
@@ -150,6 +152,7 @@ large creatures**; needs = **full arbiter** (hunger+thirst+energy+circadian); at
   when hungry and a food source is in range, a large creature may carry food toward its
   home/nest (FR-D) and feed there. Distinct from swarm trails (no dense pheromone road);
   reuses the needs arbiter, not necessarily the ant pheromone channel.
+  Under Option A, large creatures forage opportunistically but do NOT carry food toward a client-only home anchor (that steering would diverge in multiplayer). Drop the carry-toward-home steering this sprint; large creatures feed in place. ScentField stays CLIENT-ONLY/visual; FR-C3 must NOT use scent pathing (scent is not initialized server-side).
 - **FR-C4 (scent integration).** Colony trails use the existing `ScentField` channels
   (deposit on the laden path, follow on the outbound) — confirm the deposit/sense wiring is
   active for foragers and order-invariant.
@@ -159,9 +162,7 @@ large creatures**; needs = **full arbiter** (hunger+thirst+energy+circadian); at
 - **FR-D1 (home anchor).** Every creature that sleeps/returns gets a deterministic **home
   anchor** (a world cell), assigned at spawn (near the spawn point / biome-appropriate).
   Colonies share one nest; solitary creatures each get a home.
-- **FR-D2 (return-home).** A `ReturnHome` steering target (or a Sleep precondition) routes a
-  creature back toward its anchor when it intends to rest/sleep, reusing the existing
-  locomotion/pathing (A*-grid fallback already present).
+- **FR-D2 (return-home).** Under Option A this sprint, the home anchor is a CLIENT-VISUAL marker co-located with the creature, NOT a steering target: there is NO new wish-velocity writer (TerritoryBiasComponent in GameSession.cpp remains the only active homing writer, already in the canonical roster). 'ReturnHome' steering that writes wish velocity on client-only ambient creatures would diverge between client and server in multiplayer (the server roster has no such component) and is therefore DEFERRED. Creatures rest/sleep WHERE they are (Sleep is already circadian+energy gated and needs no destination); the nest is decoration that reads as 'home'.
 - **FR-D3 (nest as origin).** The nest is the forage origin (colony) and the sleep site
   (all). Nests are deterministic, bounded in number, and empty-roster-neutral.
 
@@ -170,6 +171,7 @@ large creatures**; needs = **full arbiter** (hunger+thirst+energy+circadian); at
 - **FR-E1 (Sleep action).** Add `CreatureAction::Sleep`. Precondition: at/near home anchor
   AND in the creature's inactive circadian phase AND low energy. While sleeping: `wish`
   velocity = 0, energy recovers fastest, perception range is **dampened** (more vulnerable).
+  DETERMINISM: the Sleep precondition is the circadian phase + low energy + safety ONLY (already landed and byte-identical). It is NOT hard-gated on home-anchor proximity (that would require client/server-synced anchor state under Option A's client-only creatures); 'at/near home' is satisfied decoratively by placing the nest marker where the creature beds down, not by steering it home.
 - **FR-E2 (circadian gates the brain).** `DecideCreatureAction` reads the `CircadianComponent`
   day phase: Sleep utility is high in the inactive phase, near-zero in the active phase;
   diurnal creatures sleep at night, nocturnal by day. This is the missing brain↔circadian link.
@@ -214,6 +216,7 @@ large creatures**; needs = **full arbiter** (hunger+thirst+energy+circadian); at
   (germination/season). Reserve and document, e.g. **+38 needs, +39 food placement, +40
   forager/colony spawn, +41 nest placement, +42 sleep** (re-grep `*SeedOffset` immediately
   before claiming; append-only, never reuse +1..+37).
+  NOTE (2026-06-26): under Option A the new daily-life behaviours consume NO rng — Circadian and Territory both already consume zero rng (offsets +29/+30 reserved, no draw), nests/sleep are anchor-only with no stochastic placement, and foragers reuse the existing deterministic id-ordered ForagingSystem. So seed offsets +38..+42 are RESERVED but UNUSED this sprint; do not claim a draw you do not make.
 - **NFR-3 (empty-roster neutrality).** With no creatures / no foragers / no food sources,
   every new sub-hash returns the neutral value and all-off baselines stay byte-identical
   (the established opt-in-component pattern).

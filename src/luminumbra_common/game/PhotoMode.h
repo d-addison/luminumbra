@@ -73,6 +73,9 @@ struct PhotoSubjectView {
     float distance_m = 3.0f;   // metres from camera (drives the optical DoF/isolation terms)
     float size_m     = 0.5f;   // physical size in metres
     bool  in_frustum = true;   // out-of-frustum views are dropped by BuildShotInput
+    int   subject_action = -1; // the subject's behaviour at capture (brain action; <0 = none).
+                               // Carried so the PRINCIPAL subject's behaviour reaches the
+                               // capture's ObservationMetadata (spec 012 behaviour objectives).
 };
 
 // ---------------------------------------------------------------------------
@@ -104,12 +107,18 @@ inline ShotInput BuildShotInput(const std::vector<PhotoSubjectView>& views,
                                 const LensSettings& lens,
                                 float scene_luminance,
                                 float frame_exposure = 0.5f,
-                                float frame_focus = 1.0f) {
+                                float frame_focus = 1.0f,
+                                const ObservationMetadata& observation = {}) {
     ShotInput in;
     in.lens            = lens;
     in.scene_luminance = PhotoModeClamp01(scene_luminance);
     in.composition.exposure = PhotoModeClamp01(frame_exposure);
     in.composition.focus    = PhotoModeClamp01(frame_focus);
+    // Annotation: carry the caller's context (time_of_day) and stamp the light from the
+    // scene luminance the shot was built with. The principal subject's behaviour is filled
+    // below once the main subject is resolved.
+    in.observation = observation;
+    in.observation.scene_luminance = in.scene_luminance;
 
     // Project each in-frustum view into the existing PhotoSubject, tracking the
     // largest by apparent size to pick the principal subject. Iterate in the given
@@ -151,6 +160,7 @@ inline ShotInput BuildShotInput(const std::vector<PhotoSubjectView>& views,
                 in.main_species_id         = view.species_id;
                 in.main_subject_distance_m = view.distance_m;
                 in.main_subject_size_m     = view.size_m;
+                in.observation.subject_action = view.subject_action; // principal subject's behaviour
                 break;
             }
             ++appended;
@@ -190,6 +200,7 @@ struct PhotoSidecar {
     ShotVerdict  verdict;        // stars + axes + total
     int          species_id = 0; // principal subject
     LensSettings lens;           // the lens the shot was taken with
+    ObservationMetadata observation; // behaviour/time/light context at capture (spec 012)
 };
 
 // Format one float with 6 fixed decimals using only integer/char ops (no <iomanip>,
@@ -243,6 +254,11 @@ inline std::string SerializePhotoSidecar(const PhotoSidecar& side) {
     out += "    \"focus_distance_m\": " + PhotoFormatFixed6(side.lens.focus_distance_m) + ",\n";
     out += "    \"iso\": " + PhotoFormatFixed6(side.lens.iso) + ",\n";
     out += "    \"shutter_s\": " + PhotoFormatFixed6(side.lens.shutter_s) + "\n";
+    out += "  },\n";
+    out += "  \"observation\": {\n";
+    out += "    \"subject_action\": " + std::to_string(side.observation.subject_action) + ",\n";
+    out += "    \"time_of_day\": " + PhotoFormatFixed6(side.observation.time_of_day) + ",\n";
+    out += "    \"scene_luminance\": " + PhotoFormatFixed6(side.observation.scene_luminance) + "\n";
     out += "  }\n";
     out += "}\n";
     return out;

@@ -71,7 +71,7 @@ TEST(Objectives, CollectionScoreAccumulates) {
 TEST(Objectives, StarterSetAdvancesAndReportsNextIncomplete) {
     const int grove = 1234;
     ObjectiveSet set = DefaultObjectives(grove);
-    ASSERT_EQ(set.size(), 5u);
+    ASSERT_EQ(set.size(), 6u);
 
     PhotoCodex codex;
     // Nothing done: the first incomplete is "photograph your first creature".
@@ -85,10 +85,46 @@ TEST(Objectives, StarterSetAdvancesAndReportsNextIncomplete) {
     codex.Record(grove, 0.90f);
     EXPECT_GE(set.completed_count(codex), 2u);
 
-    // Discover six species, each a strong shot -> every starter objective completes.
+    // Discover six species, each a strong shot -> every species/score goal completes,
+    // but the behavioural goal still pends (none captured asleep yet).
     for (int i = 0; i < 6; ++i) codex.Record(grove + 100 + i, 0.90f);
+    EXPECT_FALSE(set.all_complete(codex));
+    const Objective* pending = set.next_incomplete(codex);
+    ASSERT_NE(pending, nullptr);
+    EXPECT_EQ(pending->kind, ObjectiveKind::BehavioralMatch);
+
+    // Photograph a sleeping creature (brain action 5 == Sleep) -> the set completes.
+    codex.Record(grove, 0.90f, /*subject_action=*/5);
     EXPECT_TRUE(set.all_complete(codex));
     EXPECT_EQ(set.next_incomplete(codex), nullptr);
+}
+
+// BehavioralMatch is binary on whether the target behaviour was ever captured. With
+// species_id 0 it matches ANY species; with a species it matches only that one.
+TEST(Objectives, BehavioralMatchAnyAndSpeciesScoped) {
+    PhotoCodex codex;
+
+    Objective any_sleep; any_sleep.kind = ObjectiveKind::BehavioralMatch;
+    any_sleep.target_action = 5; any_sleep.species_id = 0;  // any species asleep
+    Objective grove_sleep; grove_sleep.kind = ObjectiveKind::BehavioralMatch;
+    grove_sleep.target_action = 5; grove_sleep.species_id = 1234; // the grovestrider asleep
+
+    EXPECT_FALSE(EvaluateObjective(any_sleep, codex).complete);
+    EXPECT_FALSE(EvaluateObjective(grove_sleep, codex).complete);
+
+    // A plain (no-behaviour) capture does not satisfy a behavioural goal.
+    codex.Record(1234, 0.8f);
+    EXPECT_FALSE(EvaluateObjective(any_sleep, codex).complete);
+
+    // Capture a DIFFERENT species asleep -> the any-species goal completes, the
+    // grovestrider-scoped one does not.
+    codex.Record(99, 0.5f, /*subject_action=*/5);
+    EXPECT_TRUE(EvaluateObjective(any_sleep, codex).complete);
+    EXPECT_FALSE(EvaluateObjective(grove_sleep, codex).complete);
+
+    // Capture the grovestrider asleep -> the scoped goal completes too.
+    codex.Record(1234, 0.6f, /*subject_action=*/5);
+    EXPECT_TRUE(EvaluateObjective(grove_sleep, codex).complete);
 }
 
 }  // namespace

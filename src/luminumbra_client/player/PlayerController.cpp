@@ -209,6 +209,11 @@ void PlayerController::ProcessKeyInput(int key, int action) {
         if (pressed && key == this->key(InputAction::LensApertureDown)) m_apertureNudge -= 0.3f;
         if (pressed && key == this->key(InputAction::LensFocusUp))      m_focusNudge += 0.25f;
         if (pressed && key == this->key(InputAction::LensFocusDown))    m_focusNudge -= 0.25f;
+        // Manual exposure (spec 012): shutter speed + ISO in 1/3-stop steps.
+        if (pressed && key == this->key(InputAction::LensShutterUp))    m_shutterSpeedNudge += 0.333f;
+        if (pressed && key == this->key(InputAction::LensShutterDown))  m_shutterSpeedNudge -= 0.333f;
+        if (pressed && key == this->key(InputAction::LensIsoUp))        m_isoNudge += 0.333f;
+        if (pressed && key == this->key(InputAction::LensIsoDown))      m_isoNudge -= 0.333f;
     }
 
     // --- Mode-Specific Controls ---

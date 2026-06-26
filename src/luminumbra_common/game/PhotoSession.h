@@ -55,6 +55,10 @@ struct ShotInput {
     int   main_species_id      = 0;               // principal subject's species (codex key)
     float main_subject_distance_m = 3.0f;         // principal subject distance (metres)
     float main_subject_size_m  = 0.5f;            // principal subject physical size (metres)
+    // ANNOTATION ONLY — the principal subject's behaviour/time/light context at capture.
+    // EvaluateShot NEVER reads this (it is not a scoring input); CommitShot folds its
+    // subject_action into the codex so behaviour objectives can match later.
+    ObservationMetadata observation;
 };
 
 // ---------------------------------------------------------------------------
@@ -70,23 +74,28 @@ struct ShotVerdict {
 };
 
 // ---------------------------------------------------------------------------
-// VERDICT WEIGHTING (sum to 1.0). Composition leads (the single most teachable
-// photographic skill), then a combined exposure axis, then focus/isolation. These
-// are the SESSION-level weights over the three blended axes; the per-axis blends
-// below fold the optical (PhotoCamera) terms into the rubric (PhotoScoring) terms.
+// VERDICT WEIGHTING (sum to 1.0). REBALANCED toward LENS CRAFT (spec 012): focus/
+// isolation now LEADS, composition second, exposure third. The old 0.40/0.30/0.30
+// taught "composition > optics", which made the aperture/focus and manual-exposure
+// mechanics nearly weightless feedback. Tilting toward focus (0.40) makes deliberate
+// DoF the highest-value decision, while composition (0.35) still anchors framing so a
+// creamy-bokeh snapshot of a badly-framed subject cannot win on lens alone (guarded by
+// the WellComposedDeepBeatsBadlyComposedShallow test).
 // ---------------------------------------------------------------------------
-inline constexpr float kVerdictWComposition    = 0.40f;
-inline constexpr float kVerdictWExposure       = 0.30f;
-inline constexpr float kVerdictWFocusIsolation = 0.30f;
+inline constexpr float kVerdictWComposition    = 0.35f;
+inline constexpr float kVerdictWExposure       = 0.25f;
+inline constexpr float kVerdictWFocusIsolation = 0.40f;
 
-// Per-axis blend weights folding the optics into the rubric. The rubric (what is
-// actually IN frame) leads; the optics (the lens facts) refine.
+// Per-axis blend weights folding the optics into the rubric. REBALANCED so the lens
+// facts LEAD on the two optical axes (the player's exposure + focus decisions are the
+// new skill the mechanic teaches): the rubric (what is in frame) still anchors them so
+// neither axis is pure-optics.
 //   exposure  = kExpRubric * PhotoScoring.lighting + kExpOptics * PhotoCamera.ExposureQuality
 //   focus_iso = kFiRubric  * PhotoScoring.focus    + kFiOptics  * PhotoCamera.SubjectIsolation
-inline constexpr float kExpRubric = 0.5f;
-inline constexpr float kExpOptics = 0.5f;
-inline constexpr float kFiRubric  = 0.5f;
-inline constexpr float kFiOptics  = 0.5f;
+inline constexpr float kExpRubric = 0.4f;
+inline constexpr float kExpOptics = 0.6f;
+inline constexpr float kFiRubric  = 0.4f;
+inline constexpr float kFiOptics  = 0.6f;
 
 // ---------------------------------------------------------------------------
 // STAR THRESHOLDS. Stars are a monotonic step function of `total` in [0,1]:
@@ -188,7 +197,7 @@ inline ShotVerdict EvaluateShot(const ShotInput& in) {
 // codex max keeps the best) though it counts as another capture.
 // ---------------------------------------------------------------------------
 inline void CommitShot(PhotoCodex& codex, const ShotInput& in, const ShotVerdict& verdict) {
-    codex.Record(in.main_species_id, verdict.total);
+    codex.Record(in.main_species_id, verdict.total, in.observation.subject_action);
 }
 
 } // namespace luminumbra::game

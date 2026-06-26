@@ -123,6 +123,65 @@ TEST(PhotoSession, GreatBeatsBad) {
     EXPECT_GE(good.stars, bad.stars);
 }
 
+// REBALANCE GUARD (spec 012): focus/optics now lead, but composition must still
+// anchor the verdict — a well-composed, sharp DEEP shot (f/8, poor isolation) beats a
+// badly-composed shallow one (f/1.4, creamy bokeh) so lens craft cannot buy a win on a
+// poorly-framed subject. Without the composition anchor the focus tilt would invert this.
+TEST(PhotoSession, WellComposedDeepBeatsBadlyComposedShallow) {
+    // Well composed, deep stop (f/8): bold subject on a thirds power point, sharp,
+    // ideal light; everything-sharp lens => low isolation.
+    ShotInput deep;
+    {
+        photo::PhotoSubject s;
+        s.ndc_x = luminumbra::photo::kThird; s.ndc_y = luminumbra::photo::kThird;
+        s.size = 0.6f; s.light = 0.7f; s.species_id = 1;
+        deep.composition.subjects.push_back(s);
+        deep.composition.exposure = 0.5f; deep.composition.focus = 1.0f;
+        deep.lens.focal_length_mm = 50.0f; deep.lens.aperture_f = 8.0f;
+        deep.lens.focus_distance_m = 3.0f; deep.lens.iso = 100.0f; deep.lens.shutter_s = 0.004f;
+        deep.main_species_id = 1; deep.main_subject_distance_m = 3.0f; deep.main_subject_size_m = 0.6f;
+        deep.scene_luminance = 0.5f;
+    }
+    // Badly composed, wide open (f/1.4): subject jammed in the corner, tiny, but tack
+    // sharp with a creamy shallow DoF on it.
+    ShotInput shallow;
+    {
+        photo::PhotoSubject s;
+        s.ndc_x = 0.97f; s.ndc_y = 0.97f; s.size = 0.06f; s.light = 0.7f; s.species_id = 2;
+        shallow.composition.subjects.push_back(s);
+        shallow.composition.exposure = 0.5f; shallow.composition.focus = 1.0f;
+        shallow.lens.focal_length_mm = 85.0f; shallow.lens.aperture_f = 1.4f;
+        shallow.lens.focus_distance_m = 3.0f; shallow.lens.iso = 100.0f; shallow.lens.shutter_s = 0.004f;
+        shallow.main_species_id = 2; shallow.main_subject_distance_m = 3.0f; shallow.main_subject_size_m = 0.5f;
+        shallow.scene_luminance = 0.5f;
+    }
+
+    const ShotVerdict d = EvaluateShot(deep);
+    const ShotVerdict h = EvaluateShot(shallow);
+    EXPECT_GT(d.focus_isolation, 0.0f);
+    EXPECT_GT(h.focus_isolation, d.focus_isolation);   // the shallow shot DOES win the optics axis
+    EXPECT_GT(d.composition, h.composition);            // ...but loses framing badly
+    EXPECT_GT(d.total, h.total);                        // and composition anchors the overall win
+}
+
+// CommitShot folds the capture's ObservationMetadata.subject_action into the codex so
+// the behavioural progression layer can later match it. A plain capture sets no bit.
+TEST(PhotoSession, CommitCarriesBehaviourIntoCodex) {
+    PhotoCodex codex;
+    ShotInput in = MakeGreatShot();         // species 42
+
+    // Plain capture: no behaviour recorded.
+    CommitShot(codex, in, EvaluateShot(in));
+    EXPECT_FALSE(codex.behavior_captured_any(5));
+
+    // A capture annotated as the subject SLEEPING (brain action 5) sets the bit.
+    in.observation.subject_action = 5;
+    CommitShot(codex, in, EvaluateShot(in));
+    EXPECT_TRUE(codex.behavior_captured_any(5));
+    EXPECT_TRUE(codex.behavior_captured(42, 5));
+    EXPECT_FALSE(codex.behavior_captured(42, 3)); // never captured hunting
+}
+
 // All verdict axes + total stay in [0,1].
 TEST(PhotoSession, VerdictAxesAreClamped) {
     for (const ShotInput& in : {MakeGreatShot(), MakeBadShot()}) {
