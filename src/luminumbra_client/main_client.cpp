@@ -4239,6 +4239,22 @@ int main(int argc, char* argv[]) {
                 }
                 LUMINUMBRA_CORE_INFO("Lumin crystals: placed {} cave glow point-lights near spawn; "
                                      "first at world ({:.1f}, {:.1f}, {:.1f})", placed, firstX, firstY, firstZ);
+                // Guarantee the located ENCLOSED cave (the one --debug-goto frames) is lit: drop a
+                // brighter hero crystal at its centre so the deep roofed pockets the grid scatter
+                // misses still glow. Same deterministic locator the debug camera uses -> they align.
+                const auto& csp2 = gameSession->GetMetadata().spawnPoint;
+                if (auto cave = Luminumbra::Debug::FindEnclosedCave(
+                        *fws, glm::vec3(csp2.x, csp2.y, csp2.z), 256.0f)) {
+                    const auto ce = freg.create();
+                    auto& ctf = freg.emplace<Luminumbra::Components::TransformComponent>(ce);
+                    ctf.position = Luminumbra::Vec3(cave->target.x, cave->target.y, cave->target.z);
+                    auto& cpl = freg.emplace<Luminumbra::Components::PointLightComponent>(ce);
+                    cpl.color = Luminumbra::Vec3(0.55f, 0.85f, 1.0f);
+                    cpl.intensity = 6.0f;   // hero crystal in the located enclosed cave
+                    cpl.radius = 40.0f;
+                    LUMINUMBRA_CORE_INFO("Lumin crystal: hero light in enclosed cave at ({:.1f}, {:.1f}, {:.1f})",
+                                         cave->target.x, cave->target.y, cave->target.z);
+                }
             }
 
             auto fgview = freg.view<Luminumbra::Components::ForagerComponent,
