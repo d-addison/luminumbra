@@ -134,6 +134,11 @@
       "volume": 0.5, "pitch_variation": 0.12, "strategy": "random",
       "is_3d": true, "attenuation_model": "linear", "min_distance": 1.0, "max_distance": 22.0
     },
+    "creature_sleep": {
+      "files": ["assets/audio/sfx/creatures/common/sleep_breath.mp3"],
+      "volume": 0.45, "pitch_variation": 0.08,
+      "is_3d": true, "attenuation_model": "linear", "min_distance": 1.0, "max_distance": 18.0
+    },
     "creature_ashen_corvid_call":      { "files": ["assets/audio/sfx/creatures/ashen_corvid/call_1.mp3"],      "volume": 0.85, "pitch_variation": 0.10, "is_3d": true, "attenuation_model": "linear", "min_distance": 3.0, "max_distance": 80.0 },
     "creature_dusk_heron_call":        { "files": ["assets/audio/sfx/creatures/dusk_heron/call_1.mp3"],        "volume": 0.85, "pitch_variation": 0.10, "is_3d": true, "attenuation_model": "linear", "min_distance": 3.0, "max_distance": 80.0 },
     "creature_ember_skink_call":       { "files": ["assets/audio/sfx/creatures/ember_skink/call_1.mp3"],       "volume": 0.80, "pitch_variation": 0.10, "is_3d": true, "attenuation_model": "linear", "min_distance": 2.0, "max_distance": 50.0 },

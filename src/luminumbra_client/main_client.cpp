@@ -3798,10 +3798,11 @@ int main(int argc, char* argv[]) {
         // render/audio-only (reads sim state, never mutates -> determinism + gates untouched).
         if (currentState == GameState::IN_GAME && audioManager && g_camera && !g_paused &&
             !scenario_config.active() && gameSession) {
-            static float s_envTimer = 0.0f, s_callTimer = 0.0f;
+            static float s_envTimer = 0.0f, s_callTimer = 0.0f, s_sleepTimer = 0.0f;
             static bool s_rainOn = false, s_waterOn = false;
             s_envTimer += static_cast<float>(deltaTime);
             s_callTimer += static_cast<float>(deltaTime);
+            s_sleepTimer += static_cast<float>(deltaTime);
             const glm::vec3 pc = g_camera->Position;
             if (s_envTimer >= 0.5f) {
                 s_envTimer = 0.0f;
@@ -3876,6 +3877,28 @@ int main(int argc, char* argv[]) {
                 } else {
                     s_callTimer = 8.0f;  // nobody near -> check again soon
                 }
+            }
+            // Spec 011: a soft sleeping breath from the nearest SLEEPING creature (<18 m) every
+            // ~6 s, so a creature bedded down for the night reads as alive, not frozen. last_action
+            // == Sleep (CreatureAction::Sleep = 5). Render-only; one breath at a time stays subtle.
+            if (s_sleepTimer >= 6.0f) {
+                s_sleepTimer = 0.0f;
+                const auto& reg = gameSession->GetRegistry();
+                auto sview = reg.view<const Luminumbra::Components::CreatureComponent,
+                                      const Luminumbra::Components::TransformComponent>();
+                entt::entity best = entt::null;
+                float bestD = 18.0f * 18.0f;
+                glm::vec3 bestPos(0.0f);
+                for (auto e : sview) {
+                    const auto& cc = sview.get<const Luminumbra::Components::CreatureComponent>(e);
+                    if (cc.eaten || cc.last_action != 5 /* CreatureAction::Sleep */) continue;
+                    const auto& tf = sview.get<const Luminumbra::Components::TransformComponent>(e);
+                    const float dx = tf.position.x - pc.x, dz = tf.position.z - pc.z;
+                    const float d2 = dx * dx + dz * dz;
+                    if (d2 < bestD) { bestD = d2; best = e; bestPos = glm::vec3(tf.position.x, tf.position.y, tf.position.z); }
+                }
+                if (best != entt::null) audioManager->PlayOneShot("creature_sleep", bestPos);
+                else s_sleepTimer = 4.0f;  // none asleep nearby -> re-check sooner
             }
             // Creature LOCOMOTION sound: grounded creatures near the player tick a soft footfall
             // as they travel (stride-accumulated from real movement, so cadence tracks speed);
