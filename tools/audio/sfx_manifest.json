@@ -63,6 +63,8 @@
     { "out": "sfx/creatures/common/wingbeat_2.mp3", "duration": 0.8, "prompt": "a soft pair of bird wing flaps, a gentle feathery whoosh of a bird in flight, natural" },
     { "out": "sfx/creatures/common/footstep_light_1.mp3", "duration": 0.5, "prompt": "a tiny light skittering footstep of a small lizard on soil, a faint quick dry patter, natural foley" },
     { "out": "sfx/creatures/common/footstep_light_2.mp3", "duration": 0.5, "prompt": "a small reptile's quick light scuttle on the ground, a faint dry patter, natural" },
-    { "out": "sfx/terraform/water_rush.mp3", "duration": 1.6, "prompt": "a sudden rush of water flowing and draining away over earth, a wet gushing whoosh settling into a trickle, natural foley, no music" }
+    { "out": "sfx/terraform/water_rush.mp3", "duration": 1.6, "prompt": "a sudden rush of water flowing and draining away over earth, a wet gushing whoosh settling into a trickle, natural foley, no music" },
+    { "out": "music/themes/exploration_theme.mp3", "duration": 22.0, "loop": true, "prompt": "a calm ambient music bed for peaceful daytime exploration, soft warm evolving synth pad with gentle airy textures and a faint slow melody, serene and spacious, zen nature game, seamless loop, no percussion" },
+    { "out": "music/themes/dusk_theme.mp3", "duration": 22.0, "loop": true, "prompt": "a soft contemplative ambient music bed for nightfall, low warm evolving pad with a gentle wistful tone, calm and intimate, sparse and slow, zen nature game at dusk, seamless loop, no percussion" }
   ]
 }

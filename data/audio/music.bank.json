@@ -7,6 +7,18 @@
       "volume": 0.6,
       "is_2d": true,
       "looping": true
+    },
+    "music_exploration": {
+      "files": ["assets/audio/music/themes/exploration_theme.mp3"],
+      "volume": 0.34,
+      "is_2d": true,
+      "looping": true
+    },
+    "music_dusk": {
+      "files": ["assets/audio/music/themes/dusk_theme.mp3"],
+      "volume": 0.34,
+      "is_2d": true,
+      "looping": true
     }
   }
 }

@@ -3886,8 +3886,8 @@ int main(int argc, char* argv[]) {
                 if (s_sunUp == -1) {
                     s_sunUp = up;
                 } else if (up != s_sunUp) {
-                    if (up == 1 && elev > 0.03f)       { audioManager->PlayOneShot2D("time_dawn"); s_sunUp = 1; }
-                    else if (up == 0 && elev < -0.03f) { audioManager->PlayOneShot2D("time_dusk"); s_sunUp = 0; }
+                    if (up == 1 && elev > 0.03f)       { audioManager->PlayOneShot2D("time_dawn"); audioManager->PlayMusic("music_exploration"); s_sunUp = 1; }
+                    else if (up == 0 && elev < -0.03f) { audioManager->PlayOneShot2D("time_dusk"); audioManager->PlayMusic("music_dusk"); s_sunUp = 0; }
                 }
             }
         }
@@ -3962,6 +3962,11 @@ int main(int argc, char* argv[]) {
                         audioManager->PlayAmbientLoop("ambient_birds", ambPos, 1.0e6f);
                         audioManager->PlayAmbientLoop("ambient_wind", ambPos, 1.0e6f);
                     }
+                    // Under the ambient bed, a soft in-game music bed picked by the time of day
+                    // (day = exploration, night = dusk). The dawn/dusk detector swaps it at the
+                    // horizon crossings. PlayMusic is a no-op if that track is already playing.
+                    audioManager->PlayMusic(-renderPipeline.sun_direction().y > 0.0f
+                                                ? "music_exploration" : "music_dusk");
                     if (g_loading_visualizer) {
                         g_loading_visualizer->EndVisualization();
                     }
