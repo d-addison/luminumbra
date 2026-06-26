@@ -34,6 +34,7 @@
 #include "luminumbra_common/components/PlantComponents.h"   // I9-FOLIAGE
 #include "luminumbra_common/components/CreatureComponents.h" // I9-ECO creature markers
 #include "luminumbra_common/components/ThirstComponents.h"   // ambient-wildlife thirst + water holes
+#include "luminumbra_common/components/CircadianComponents.h" // spec 011: diurnal/nocturnal sleep clock
 #include "luminumbra_common/components/ScavengerComponent.h" // ambient-wildlife predator scavenging
 #include "luminumbra_common/components/CombustionComponents.h" // sim.fire demo markers
 #include "luminumbra_common/components/AlarmComponents.h"      // herd-alarm collective flee
@@ -5549,6 +5550,23 @@ int main(int argc, char* argv[]) {
                                     th.thirst = 0.1f + wgen.next_unit() * 0.25f;
                                     if (sp.predator)
                                         reg.emplace<Luminumbra::Components::ScavengerComponent>(e);
+                                    // Spec 011: a circadian clock -> the creature sleeps in its
+                                    // off-phase (diurnal at night, nocturnal by day). The brain's
+                                    // Sleep utility reads CircadianComponent.activity; a handful of
+                                    // species are nocturnal, the rest diurnal. Activates the wired
+                                    // (previously dormant) CircadianSystem in the living world.
+                                    {
+                                        auto& circ = reg.emplace<Luminumbra::Components::CircadianComponent>(e);
+                                        static const std::uint16_t kNocturnal[] = {
+                                            Luminumbra::Components::CreatureSpeciesId16("gloomstalker"),
+                                            Luminumbra::Components::CreatureSpeciesId16("lumen_moth"),
+                                            Luminumbra::Components::CreatureSpeciesId16("mire_lurker"),
+                                            Luminumbra::Components::CreatureSpeciesId16("ridgeback_stalker"),
+                                        };
+                                        circ.nocturnal = 0;
+                                        for (std::uint16_t n : kNocturnal)
+                                            if (cr.species_id == n) { circ.nocturnal = 1; break; }
+                                    }
                                     auto& pl = reg.emplace<anim::AnimationPlayerComponent>(e);
                                     pl.skeleton = &s_wildlife_skeleton;
                                     pl.clip = &s_wildlife_idle;
