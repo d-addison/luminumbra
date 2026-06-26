@@ -15,6 +15,7 @@
 #include "rendering/FarLodSystem.h"
 #include "rendering/ScentFieldRenderMirror.h" // spec 011 FR-C: one-way scent snapshot for the ground decal
 #include "rendering/FrameScan.h" // framescan: deterministic what's-in-frame scan tool (render-only)
+#include "rendering/FrameHealth.h" // auto frame-health anomaly verdict (black/unlit/blown), render-only
 #include "rendering/ImpostorBake.h" // Wave-3 far-field tree impostor atlas bake (render-only)
 #include "rendering/SceneSurvey.h" // survey: autonomous tour+screenshot of world POIs (render-only)
 #include "rendering/RenderPipeline.h"
@@ -6596,6 +6597,47 @@ int main(int argc, char* argv[]) {
                                     img.replace_extension(".ppm");
                                     WritePixelBufferPpm(img, vw, vh, px);
                                     LUMINUMBRA_CORE_INFO("Frame-scan image -> {}", img.string());
+
+                                    // Frame-HEALTH verdict on the SAME settled frame (reuses px; render-only,
+                                    // no sim). Auto-flags black/unlit/blown/NaN so a broken frame is caught
+                                    // WITHOUT a human eyeballing the PPM — the 'detect what's wrong' capability.
+                                    std::vector<float> pos_rgb16f;
+                                    std::vector<unsigned char> albedo_rgb8;
+                                    const auto& gb_h = renderPipeline.gbuffer();
+                                    if (gb_h.position_texture != 0 &&
+                                        renderPipeline.screen_width()  == static_cast<std::uint32_t>(vw) &&
+                                        renderPipeline.screen_height() == static_cast<std::uint32_t>(vh)) {
+                                        pos_rgb16f.resize(static_cast<std::size_t>(vw) * vh * 3u);
+                                        glBindTexture(GL_TEXTURE_2D, gb_h.position_texture);
+                                        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                                        glGetTexImage(GL_TEXTURE_2D, 0, GL_RGB, GL_FLOAT, pos_rgb16f.data());
+                                        if (gb_h.albedo_texture != 0) {
+                                            albedo_rgb8.resize(static_cast<std::size_t>(vw) * vh * 3u);
+                                            glBindTexture(GL_TEXTURE_2D, gb_h.albedo_texture);
+                                            glGetTexImage(GL_TEXTURE_2D, 0, GL_RGB, GL_UNSIGNED_BYTE, albedo_rgb8.data());
+                                        }
+                                        glBindTexture(GL_TEXTURE_2D, 0);
+                                    }
+                                    const auto health = Luminumbra::Rendering::AnalyzeFrameHealth(
+                                        vw, vh, px, pos_rgb16f, albedo_rgb8);
+                                    {
+                                        std::filesystem::path hp(g_frame_scan_path);
+                                        hp.replace_extension(".health.json");
+                                        std::ofstream hf(hp, std::ios::binary | std::ios::trunc);
+                                        if (hf) {
+                                            const std::string j = Luminumbra::Rendering::FrameHealthToJson(health);
+                                            hf.write(j.data(), static_cast<std::streamsize>(j.size()));
+                                        }
+                                    }
+                                    if (health.verdict.anomalous) {
+                                        LUMINUMBRA_CORE_ERROR(
+                                            "Frame-health ANOMALY: {} (mean luma {:.4f}, coverage {:.1f}%, black {:.1f}%)",
+                                            health.verdict.reason, health.mean_luminance,
+                                            health.gbuffer_coverage * 100.0, health.black_fraction * 100.0);
+                                    } else {
+                                        LUMINUMBRA_CORE_INFO("Frame-health OK (mean luma {:.4f}, coverage {:.1f}%)",
+                                            health.mean_luminance, health.gbuffer_coverage * 100.0);
+                                    }
                                 }
                             } else {
                                 LUMINUMBRA_CORE_ERROR("Frame-scan failed -> {}", g_frame_scan_path);
