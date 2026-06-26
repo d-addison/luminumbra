@@ -361,6 +361,25 @@ void main()
         textured = true;
     }
 
+    // MACRO ALBEDO VARIATION (handover §2 #6, all-distance terrain detail): the
+    // rock/soil triplanar textures mip to a flat uniform tone at vista distance, so
+    // terrain — and cave walls especially — read as a single flat brown. Modulate
+    // albedo by a low-frequency WORLD-SPACE value noise: computed analytically per
+    // fragment, it does NOT mip away, so terrain keeps organic large-scale tonal
+    // variation at ANY distance (the BF-style macro-variation lift). Two octaves,
+    // natural-ground ids only (1..5; crystal/water/far-water untouched), subtle
+    // +-12% so it reads as natural mottling, not blotches. Render-only; the mesh and
+    // world_hash are untouched.
+    if (fs_in.MaterialID >= 1u && fs_in.MaterialID <= 5u) {
+        float macro  = vnoise(fs_in.WorldPos * 0.012) * 0.6 + vnoise(fs_in.WorldPos * 0.045) * 0.4;
+        float macroH = vnoise(fs_in.WorldPos * 0.020 + vec3(31.7));
+        albedo *= (1.0 + (macro - 0.5) * 0.45); // +-22% brightness mottle
+        // Warm<->cool hue mottle so rock/soil reads as VARIED stone (iron/ochre vs
+        // grey/slate) instead of one flat mud tone — the part that actually breaks
+        // the uniform-brown look at distance.
+        albedo *= mix(vec3(1.10, 1.02, 0.90), vec3(0.90, 0.96, 1.08), macroH);
+    }
+
     // --- G-Buffer output ---
     gPosition = fs_in.FragPos;
 

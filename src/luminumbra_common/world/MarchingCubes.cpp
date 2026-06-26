@@ -1034,6 +1034,16 @@ void PolygoniseTerrain(
                 }
 
                 const Vec3 density_gradient = EstimateDensityGradient(gridcell);
+                // #7 SMOOTHER MC NORMALS (handover §2 #7): the analytic SDF-density
+                // gradient is the true surface normal direction (points toward AIR /
+                // +density = outward). It was computed here only to orient triangle
+                // winding; seed it onto each emitted vertex too, BLENDED with the
+                // area-weighted face-normal smoothing in PASS 2 below. On thin features
+                // / cave walls the pure face-average produced washboard ripple +
+                // faceting; the smooth analytic gradient settles them. Render-only:
+                // mesh NORMALS are excluded from world_hash.
+                const Vec3 grad_n = (glm::dot(density_gradient, density_gradient) > 1.0e-12f)
+                    ? glm::normalize(density_gradient) : Vec3(0.0f);
                 const auto& tri_row = triTable[cube_index];
                 for (int i = 0; tri_row[i] != -1; i += 3) {
                     u32 i0 = vert_indices[tri_row[i]];
@@ -1060,6 +1070,15 @@ void PolygoniseTerrain(
                     indices.push_back(i0);
                     indices.push_back(i1);
                     indices.push_back(i2);
+                }
+                // Seed the analytic gradient onto every vertex this cell emitted (valid
+                // edges only; vert_indices is set under the same edge_mask gate above).
+                // Shared edge-cache vertices accumulate each adjacent cell's gradient ->
+                // smooth cross-cell averaging before PASS 2 adds the face normals.
+                for (int e = 0; e < 12; ++e) {
+                    if (edge_mask & (1u << e)) {
+                        vertices[vert_indices[e]].normal += grad_n;
+                    }
                 }
             }
         }
