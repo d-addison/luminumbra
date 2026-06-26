@@ -217,6 +217,18 @@ Commit `080e18a7` (render-only; `--smoke` stays `6f008a9f637c40b7`, run==replay)
 atmosphere drives light **hue** but NOT **intensity** — sun/moon/ambient brightness are authored ramps.
 So the night hand-tuning above is the *interim*; the real fix is to couple intensity to the LUT.
 
+### Cave/terrain polish §2 #6 + #7 — LANDED (`d53c99c5`, render-only, --smoke `6f008a9f637c40b7`)
+- **#6 flat cave walls = NOT cave-specific, NOT missing textures.** Investigation: stone/soil/deepslate
+  all carry `has_texture` and DO enter the triplanar path; the textures load fine. They mip to a flat
+  uniform brown at **vista distance**. The surface hides this under lit grass; underground bare-rock
+  cave WALLS show it. Fix = **macro albedo variation**: a low-frequency world-space value noise
+  (per-fragment, survives mip-blur) giving rock/soil ±22% brightness + warm↔cool hue mottle so rock
+  reads as varied stone at any distance. (A material-id triplanar branch was tried + reverted as dead
+  code.) Subtle but real; a deeper win would be higher-contrast detail textures / close-range detail.
+- **#7 jagged MC surfaces** = the per-cell SDF density gradient (true normal) was computed only for
+  triangle winding, then discarded. Now seeded onto each vertex, blended with the face-normal
+  smoothing. Subtle in wide vistas; helps thin features. Mesh normals not hashed.
+
 ## 8. New spec from `/forge-brainstorm` — 015 atmospheric lighting + colored glass
 
 `docs/specs/015-atmospheric-lighting-colored-glass/spec.md` (committed). Owner decisions:
