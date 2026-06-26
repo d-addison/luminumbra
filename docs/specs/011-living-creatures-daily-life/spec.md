@@ -1,9 +1,30 @@
 # Spec 011: Living Creatures — Needs, Foraging Colonies & Daily Life
 
-> Status: DRAFT (created 2026-06-25). Builds on spec 005 (emergent ecology AI),
+> Status: IN PROGRESS (created 2026-06-25). Builds on spec 005 (emergent ecology AI),
 > spec 006 (foliage/farming — the plants creatures eat), and the existing but
 > dormant foraging substrate. Companion to the standing
 > `docs/AUDIO-everything-maps-to-sound.md` rule.
+>
+> **Landed 2026-06-25:**
+> - **Phase A — energy need** (`f5ffafb2`): `CreatureComponent.energy` drains awake /
+>   recovers on Rest; plumbed into senses. Byte-identical (`--smoke` 6f008a9f, no re-pin).
+> - **Phase E — Sleep action** (`32617737`): `CreatureAction::Sleep`, circadian-gated
+>   (off-phase × tired × safe); creatures with no `CircadianComponent` score it 0 →
+>   byte-identical until activated.
+> - **Phase E — activation** (`c5eeb377`): the ambient living-world (client) creatures get
+>   `CircadianComponent` (species-keyed diurnal/nocturnal) so they actually sleep at their
+>   off-phase. Client-only (not the gate roster, which starts at midnight) → no re-pin.
+> - **Phase G — sleep audio** (`71364abc`): the nearest sleeping creature breathes (3D).
+>
+> **Discovered already-built (just needs participants, like foraging):** thirst/drinking is
+> a full system (`ThirstSystem`, +33) AND already activated on the live spawn
+> (`ThirstComponent` stamped) — drinking works in play given `WaterHoleComponent`s.
+> Hunger already sates on Graze + predation; `ScavengingSystem`/`WildlifeFoliageSystem` exist.
+> So Phase B is mostly food-source placement + the graze-depletes-source link, not new behavior.
+>
+> **Next:** Phase D nests/home anchors → Phase C foraging colonies (the ant-trail activation,
+> the original ask) → Phase F full arbiter polish + FR-A3 energy consequences (these move the
+> gate hash → the first real engine-frontier re-pin) → Phase G rest poses + night-quiet.
 
 ## Context
 
