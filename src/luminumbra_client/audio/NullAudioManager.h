@@ -104,6 +104,7 @@ public:
 
     void PlayAmbientLoop(const AudioEventID&, const glm::vec3&, float) override {}  // null backend: no-op
     void StopAmbientLoop(const AudioEventID&) override {}                           // null backend: no-op
+    void SetAmbientVolume(const AudioEventID&, float) override {}                   // null backend: no-op
 
     void SetMasterVolume(float) override {}  // null backend: no-op
 

@@ -55,19 +55,30 @@ rustle + birdsong + wind**), **rain** (reactive to `WeatherSystem::Precipitation
 fertilize/harvest, at the aim point on success). **Terraform** (dig sample picked by the
 material being cut — soil/stone/sand — and a place/thud on fill). **Discovery chime** (first-
 time codex fill at capture). **Objective-complete chime** (edge-triggered on the goal count).
+**Codex open/close** (`ui_codex_open`/`ui_codex_close`) + **species picker** tick (V).
+**Creature footsteps** (grounded species near the player, stride-accumulated from real
+movement; fliers skipped). **Per-species voices** (all 10 species have a `creature_<id>_call`;
+the nearest-creature call picks by species id). **Wind-gust swell** (the wind bed's volume
+breathes with the live wind-field magnitude via `IAudioManager::SetAmbientVolume`). **Plant
+promotion** (a wild plant becoming a tended crop plays `farm_plant`). **RmlUi menu buttons**
+already play `ui_button_click`/`ui_button_hover` (verified — the manager holds the audio
+pointer and every interactive control routes through it).
+
+> **Engine fix (2026-06-25):** wiring creature footsteps surfaced a latent use-after-free —
+> `MiniaudioManager::PlayOneShot` (3D) parked its `ma_sound` in a *local* `unique_ptr` that
+> was freed on return while the mixing thread was still reading it (crash 0xC0000005). Fixed
+> by parking fire-and-forget 3D one-shots in `m_oneShotSounds`, reaped in `Update()` and
+> uninit'd in `Shutdown()`. Any 3D one-shot was affected; it only reproduced once a 3D
+> one-shot actually fired during a settled headless run.
 
 ## The audit — features that SHOULD make sound but DON'T yet
-These are the gaps to close (each is a wire-up + usually one generated sample):
-1. **Codex open/close** (C), **species picker** (V) — no UI tick/page sound.
-2. **Creature FOOTSTEPS** — creatures are brain-driven and move **silently**, even though a
-   `creature_grovestrider_footstep` event exists. Wire it to creature locomotion.
-3. **Per-species creature voices** — only grovestrider has a call; the other 9 species reuse
-   nothing. Each species should get (or share a tagged pool of) calls.
-4. **Wind gusts** — wind is a constant bed; it should swell with the wind-field strength
-   (needs a runtime ambient-volume setter — not yet exposed).
-5. **Menu/UI** — RmlUi button hover/click are not wired to `ui_button_click`/`ui_button_hover`.
-6. **Plant promotion**, water terraform **drain/dam**, day/night transition, low-health /
-    danger cues, etc.
+These are the remaining gaps (lower-value or needing more plumbing):
+1. **Water terraform drain/dam** — a dedicated drain/refill whoosh when a terraform edit
+   re-routes water (needs detecting a water-level delta, not just the dig itself).
+2. **Day/night transition** — a soft dawn/dusk ambience shift (needs a time-of-day hook into
+   the audio loop).
+3. **Distinct creature footstep timbres** per surface/species (today all grounded creatures
+   share the soft `creature_grovestrider_footstep` pool) and **wingbeats** for fliers.
 
 ## Process going forward
 Treat this doc + `sfx_manifest.json` as the audio backlog. When you touch a system, wire its

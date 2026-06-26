@@ -137,7 +137,8 @@ public:
     // Environmental Audio
     void PlayAmbientLoop(const AudioEventID& eventID, const glm::vec3& position, float radius) override;
     void StopAmbientLoop(const AudioEventID& eventID) override;
-    
+    void SetAmbientVolume(const AudioEventID& eventID, float scale) override;
+
     // Spatial Audio Clustering Integration
     void SetPhysicsSystem(::Luminumbra::Systems::PhysicsSystem* physics_system);
     void EnableSpatialClustering(bool enabled) { m_spatial_clustering_enabled = enabled; }
@@ -157,6 +158,11 @@ private:
     // For controllable, active sounds
     std::unordered_map<AudioEventHandle, std::unique_ptr<ma_sound>> m_activeSounds;
     AudioEventHandle m_nextHandle = 1;
+
+    // Fire-and-forget 3D one-shots (PlayOneShot). These MUST outlive the call: miniaudio's
+    // mixing thread reads the ma_sound until it finishes, so the node has to stay alive (and be
+    // ma_sound_uninit'd, not just freed) — Update() reaps the ones that have stopped playing.
+    std::vector<std::unique_ptr<ma_sound>> m_oneShotSounds;
 
     // For music
     std::unique_ptr<ma_sound> m_currentMusic;

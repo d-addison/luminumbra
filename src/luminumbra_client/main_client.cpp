@@ -68,6 +68,8 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <unordered_map>
+#include <unordered_set>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -3791,6 +3793,14 @@ int main(int argc, char* argv[]) {
                     if (nearWater && !s_waterOn) { audioManager->PlayAmbientLoop("ambient_stream", pc, 1.0e6f); s_waterOn = true; }
                     else if (!nearWater && s_waterOn) { audioManager->StopAmbientLoop("ambient_stream"); s_waterOn = false; }
                 }
+                // Wind GUSTS: the wind bed never stops, but its volume breathes with the live
+                // wind-field magnitude so a gust is actually felt (calm still whispers).
+                if (auto* weather2 = gameSession->GetWeatherSystem()) {
+                    const auto wsmp = weather2->SampleAt(Luminumbra::Vec3(pc.x, pc.y, pc.z));
+                    const float windMag = std::sqrt(wsmp.wind.x * wsmp.wind.x + wsmp.wind.y * wsmp.wind.y);
+                    const float swell = 0.5f + std::min(windMag / 6.0f, 1.0f) * 1.1f;  // [0.5 .. 1.6]
+                    audioManager->SetAmbientVolume("ambient_wind", swell);
+                }
             }
             // Occasional call from the nearest LIVE creature (<50 m) so the world has voices.
             if (s_callTimer >= 11.0f) {
@@ -3801,15 +3811,65 @@ int main(int argc, char* argv[]) {
                 entt::entity best = entt::null;
                 float bestD = 50.0f * 50.0f;
                 glm::vec3 bestPos(0.0f);
+                std::uint16_t bestSpecies = 0;
                 for (auto e : cview) {
-                    if (cview.get<const Luminumbra::Components::CreatureComponent>(e).eaten) continue;
+                    const auto& cc = cview.get<const Luminumbra::Components::CreatureComponent>(e);
+                    if (cc.eaten) continue;
                     const auto& tf = cview.get<const Luminumbra::Components::TransformComponent>(e);
                     const float dx = tf.position.x - pc.x, dz = tf.position.z - pc.z;
                     const float d2 = dx * dx + dz * dz;
-                    if (d2 < bestD) { bestD = d2; best = e; bestPos = glm::vec3(tf.position.x, tf.position.y, tf.position.z); }
+                    if (d2 < bestD) {
+                        bestD = d2; best = e; bestSpecies = cc.species_id;
+                        bestPos = glm::vec3(tf.position.x, tf.position.y, tf.position.z);
+                    }
                 }
-                if (best != entt::null) audioManager->PlayOneShot("creature_grovestrider_call", bestPos);
-                else s_callTimer = 8.0f;  // nobody near -> check again soon
+                if (best != entt::null) {
+                    // Per-species voice: map the species id -> "creature_<id>_call". Every species
+                    // has a call event in the bank; an unspecified/legacy id falls back to grovestrider.
+                    std::string ev = "creature_grovestrider_call";
+                    for (const auto& sp : g_creatureSpecies.all()) {
+                        if (sp.species_id() == bestSpecies) { ev = "creature_" + sp.id + "_call"; break; }
+                    }
+                    audioManager->PlayOneShot(ev, bestPos);
+                } else {
+                    s_callTimer = 8.0f;  // nobody near -> check again soon
+                }
+            }
+            // Creature FOOTSTEPS: grounded creatures near the player tick a soft footfall as they
+            // travel — stride-accumulated from real movement, so cadence tracks speed. Fliers
+            // (corvid/heron/finch/moth) are skipped; their calls/wingbeats carry them. Render-only.
+            {
+                static std::unordered_set<std::uint16_t> s_fliers;
+                if (s_fliers.empty()) {
+                    for (const char* f : {"ashen_corvid", "dusk_heron", "glimmer_finch", "lumen_moth"})
+                        s_fliers.insert(Luminumbra::Components::CreatureSpeciesId16(f));
+                }
+                static std::unordered_map<std::uint32_t, std::pair<glm::vec2, float>> s_stride;
+                if (s_stride.size() > 512) s_stride.clear();  // bound: render-only bookkeeping
+                const auto& reg = gameSession->GetRegistry();
+                auto fview = reg.view<const Luminumbra::Components::CreatureComponent,
+                                      const Luminumbra::Components::TransformComponent>();
+                for (auto e : fview) {
+                    const auto& cc = fview.get<const Luminumbra::Components::CreatureComponent>(e);
+                    if (cc.eaten || s_fliers.count(cc.species_id)) continue;
+                    const auto& tf = fview.get<const Luminumbra::Components::TransformComponent>(e);
+                    const float dx = tf.position.x - pc.x, dz = tf.position.z - pc.z;
+                    if (dx * dx + dz * dz > 35.0f * 35.0f) continue;  // only the audible ones
+                    const glm::vec2 cur(tf.position.x, tf.position.z);
+                    const auto key = static_cast<std::uint32_t>(entt::to_integral(e));
+                    auto it = s_stride.find(key);
+                    if (it == s_stride.end()) { s_stride.emplace(key, std::make_pair(cur, 0.0f)); continue; }
+                    const float moved = glm::distance(cur, it->second.first);
+                    it->second.first = cur;
+                    if (moved > 5.0f) continue;  // ignore teleport-sized jumps (re-anchor/respawn)
+                    it->second.second += moved;
+                    constexpr float kStride = 1.7f;
+                    if (it->second.second >= kStride) {
+                        it->second.second -= kStride;
+                        audioManager->PlayOneShot("creature_grovestrider_footstep",
+                                                  glm::vec3(tf.position.x, tf.position.y, tf.position.z));
+                    }
+                }
             }
         }
 
@@ -6061,6 +6121,7 @@ int main(int argc, char* argv[]) {
                             const std::size_t n = g_farmSpecies.all().size();
                             if (fv_now && !s_fv && n > 0) {
                                 g_farmSelectedSpecies = (g_farmSelectedSpecies + 1) % static_cast<int>(n);
+                                if (audioManager) audioManager->PlayOneShot2D("ui_button_click");
                                 LUMINUMBRA_CORE_INFO("Farm: selected species '{}'",
                                                      g_farmSpecies.all()[g_farmSelectedSpecies].id);
                             }
@@ -6100,7 +6161,11 @@ int main(int argc, char* argv[]) {
                             entt::entity e = luminumbra::foliage::FarmingController::NearestPlant(freg, aim, 3.0f);
                             if (e == entt::null) {
                                 e = PromoteNearestScatter(freg, aim, 3.0f, ftick);
-                                if (e != entt::null) { promoted = true; LUMINUMBRA_CORE_INFO("Farm: promoted a wild plant to a tended crop"); }
+                                if (e != entt::null) {
+                                    promoted = true;
+                                    if (audioManager) audioManager->PlayOneShot("farm_plant", glm::vec3(aim.x, aim.y, aim.z));
+                                    LUMINUMBRA_CORE_INFO("Farm: promoted a wild plant to a tended crop");
+                                }
                             }
                             return e;
                         };
@@ -6190,6 +6255,7 @@ int main(int argc, char* argv[]) {
                         // viewfinder is active. Closing it resyncs the hud-swap state.
                         if (g_playerController->consume_codex_toggle() && !g_photoMode.active) {
                             g_codexOpen = !g_codexOpen;
+                            if (audioManager) audioManager->PlayOneShot2D(g_codexOpen ? "ui_codex_open" : "ui_codex_close");
                             if (g_uiManager) {
                                 g_uiManager->RequestLoadDocument(g_codexOpen ? "codex.rml" : "hud.rml");
                                 g_photoModeUiShown = false;

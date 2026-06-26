@@ -55,6 +55,16 @@ void MiniaudioManager::Update() {
             ++it;
         }
     }
+
+    // Reap fire-and-forget 3D one-shots (PlayOneShot) that have finished playing.
+    for (auto it = m_oneShotSounds.begin(); it != m_oneShotSounds.end(); ) {
+        if (!ma_sound_is_playing(it->get())) {
+            ma_sound_uninit(it->get());
+            it = m_oneShotSounds.erase(it);
+        } else {
+            ++it;
+        }
+    }
     
     // Update wind effects on active sounds
     UpdateWindEffect();
@@ -70,6 +80,14 @@ void MiniaudioManager::Shutdown() {
             ma_sound_uninit(sound_ptr.get());
         }
         m_activeSounds.clear();
+        for (auto& sound_ptr : m_oneShotSounds) {
+            ma_sound_uninit(sound_ptr.get());
+        }
+        m_oneShotSounds.clear();
+        for (auto& [id, sound_ptr] : m_ambientSounds) {
+            ma_sound_uninit(sound_ptr.get());
+        }
+        m_ambientSounds.clear();
         ma_engine_uninit(m_engine.get());
         m_engine = nullptr;
         LUMINUMBRA_CORE_ERROR("Miniaudio Manager Shutdown.");
@@ -236,7 +254,10 @@ bool MiniaudioManager::PlayOneShot(const AudioEventID& eventID, const glm::vec3&
     ApplyEnvironmentalEffects(sound.get(), def);
     ma_sound_start(sound.get());
 
-    // Fire-and-forget: sound will clean itself up
+    // Keep the node alive until it finishes (the mixing thread is still reading it). Update()
+    // reaps stopped one-shots. Parking it here instead of a local unique_ptr fixes a
+    // use-after-free: returning would have freed the ma_sound mid-playback.
+    m_oneShotSounds.push_back(std::move(sound));
     return true;
 }
 
@@ -476,6 +497,15 @@ void MiniaudioManager::StopAmbientLoop(const AudioEventID& eventID) {
         ma_sound_uninit(it->second.get());
         m_ambientSounds.erase(it);
     }
+}
+
+void MiniaudioManager::SetAmbientVolume(const AudioEventID& eventID, float scale) {
+    auto it = m_ambientSounds.find(eventID);
+    if (it == m_ambientSounds.end()) return;  // that bed isn't playing -> nothing to scale
+    auto dit = m_eventDefinitions.find(eventID);
+    const float base = (dit != m_eventDefinitions.end()) ? dit->second.volume : 1.0f;
+    if (scale < 0.0f) scale = 0.0f;
+    ma_sound_set_volume(it->second.get(), base * scale * m_currentEnvironment.ambient_volume);
 }
 
 void MiniaudioManager::ApplyEnvironmentalEffects(ma_sound* sound, const AudioEventDefinition* def) {

@@ -45,6 +45,17 @@
     { "out": "sfx/farm/fertilize.mp3", "duration": 0.9, "prompt": "a soft scatter of dry granular fertilizer onto soil, a gentle sprinkle, natural" },
     { "out": "sfx/farm/harvest.mp3", "duration": 0.6, "prompt": "a soft snip and pluck of a ripe plant being harvested, a gentle leafy rustle and pop, natural" },
     { "out": "sfx/ui/discovery.mp3", "duration": 2.0, "prompt": "a warm magical discovery chime, a gentle rising shimmer revealing something new, wondrous and soft, pleasant" },
-    { "out": "sfx/ui/objective_complete.mp3", "duration": 1.6, "prompt": "a soft uplifting success chime, a short warm two-or-three note resolve for a completed goal, gentle, satisfying" }
+    { "out": "sfx/ui/objective_complete.mp3", "duration": 1.6, "prompt": "a soft uplifting success chime, a short warm two-or-three note resolve for a completed goal, gentle, satisfying" },
+    { "out": "sfx/ui/codex_open.mp3", "duration": 0.8, "prompt": "a soft leather-bound journal opening, a gentle paper-and-leather page flip, warm and quiet, short" },
+    { "out": "sfx/ui/codex_close.mp3", "duration": 0.7, "prompt": "a soft journal closing, a gentle muffled book-cover thump and page settle, warm, short" },
+    { "out": "sfx/creatures/ashen_corvid/call_1.mp3", "duration": 1.2, "prompt": "a single harsh crow caw, a raven-like corvid call, natural bird, slightly hoarse, one call" },
+    { "out": "sfx/creatures/dusk_heron/call_1.mp3", "duration": 1.4, "prompt": "a single hoarse heron squawk, a wading bird's harsh rasping croak, natural, one call" },
+    { "out": "sfx/creatures/ember_skink/call_1.mp3", "duration": 0.9, "prompt": "a small reptile's short warm hiss and dry chirr, a little lizard chirrup, natural, one call" },
+    { "out": "sfx/creatures/glimmer_finch/call_1.mp3", "duration": 1.2, "prompt": "a bright cheerful finch chirp and a short rising trill, a small songbird, sweet and clear, natural" },
+    { "out": "sfx/creatures/gloomstalker/call_1.mp3", "duration": 1.6, "prompt": "a low menacing predator growl, a soft throaty rumble of a large stalking cat, ominous but not loud, natural" },
+    { "out": "sfx/creatures/lumen_moth/call_1.mp3", "duration": 1.4, "prompt": "a soft papery wing-flutter with a faint high airy hum, a large moth in gentle flight, delicate and quiet" },
+    { "out": "sfx/creatures/mire_lurker/call_1.mp3", "duration": 1.6, "prompt": "a wet guttural croak and low groan from a swamp creature, bubbly and deep, damp, natural, one call" },
+    { "out": "sfx/creatures/ridgeback_stalker/call_1.mp3", "duration": 1.8, "prompt": "a deep rumbling snarl of a large predator, throaty and resonant, a warning growl, natural, one call" },
+    { "out": "sfx/creatures/tide_grazer/call_1.mp3", "duration": 2.2, "prompt": "a low mournful moan of a large gentle grazer, soft and whale-like and resonant, calm, one long call" }
   ]
 }

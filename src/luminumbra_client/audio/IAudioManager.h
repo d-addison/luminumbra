@@ -36,6 +36,10 @@ public:
     // radius makes it an effectively constant world ambience. Render-only.
     virtual void PlayAmbientLoop(const AudioEventID& eventID, const glm::vec3& position, float radius) = 0;
     virtual void StopAmbientLoop(const AudioEventID& eventID) = 0;
+    // Live volume scale for an active ambient loop (re-applies the bank base * scale * env).
+    // No-op if that loop isn't currently playing. Lets a bed swell/fade at runtime — e.g. the
+    // wind bed rising with the wind-field strength. Render-only.
+    virtual void SetAmbientVolume(const AudioEventID& eventID, float scale) = 0;
 
     // Master output gain [0,1] (user.audio.master). Render-only player setting.
     virtual void SetMasterVolume(float volume) = 0;
