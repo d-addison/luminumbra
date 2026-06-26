@@ -79,6 +79,35 @@ TEST(CreatureBrainSystem, EatenPreyIsInert) {
     EXPECT_NEAR(xOf(r, prey), 0.0f, 1.0e-4f) << "a carcass must not move";
 }
 
+// Spec 011 Phase A: energy (the long-term sleep need) DRAINS while a creature is active.
+// A fresh, mildly-hungry lone prey grazes/wanders -> energy ticks down from full.
+TEST(CreatureBrainSystem, EnergyDrainsWhileActive) {
+    entt::registry r;
+    const entt::entity e = spawn(r, 0.0f, 0.0f, /*predator*/ false, /*hunger*/ 0.5f);
+    auto& cr = r.get<Comp::CreatureComponent>(e);
+    cr.stamina = 1.0f;  // fresh -> will not Rest
+    ASSERT_FLOAT_EQ(cr.energy, 1.0f);
+    tick(r, 200);
+    EXPECT_LT(r.get<Comp::CreatureComponent>(e).energy, 1.0f) << "being awake should tire the creature";
+    EXPECT_GE(r.get<Comp::CreatureComponent>(e).energy, 0.0f) << "energy stays clamped >= 0";
+}
+
+// Energy RECOVERS while Resting (net positive vs the per-tick drain). A sated, exhausted, safe
+// prey chooses Rest, which recovers energy faster than being awake drains it.
+TEST(CreatureBrainSystem, EnergyRecoversWhileResting) {
+    entt::registry r;
+    const entt::entity e = spawn(r, 0.0f, 0.0f, /*predator*/ false, /*hunger*/ 0.0f);  // sated -> won't graze
+    auto& cr = r.get<Comp::CreatureComponent>(e);
+    cr.stamina = 0.0f;   // exhausted -> Rest scores highest (safe + low stamina)
+    cr.energy = 0.30f;
+    tick(r, 60);
+    const auto& out = r.get<Comp::CreatureComponent>(e);
+    EXPECT_EQ(out.last_action, static_cast<int>(luminumbra::ai::CreatureAction::Rest))
+        << "a sated, exhausted, safe creature should Rest";
+    EXPECT_GT(out.energy, 0.30f) << "resting should recover energy";
+    EXPECT_LE(out.energy, 1.0f) << "energy stays clamped <= 1";
+}
+
 // run == replay: identical setup + ticks -> identical final positions.
 TEST(CreatureBrainSystem, Deterministic) {
     auto run = [] {

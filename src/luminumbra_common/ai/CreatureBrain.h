@@ -21,6 +21,8 @@ struct CreatureSenses {
     float threat_proximity = 0.0f; // 0 none .. 1 predator adjacent
     float food_proximity = 0.0f;   // 0 none .. 1 food/prey adjacent
     float stamina = 1.0f;          // 0 exhausted .. 1 fresh
+    float energy = 1.0f;           // 0 exhausted .. 1 rested (Spec 011: long-term sleep need;
+                                   // plumbed now, consumed by Sleep utility in Phase E/F)
     bool is_predator = false;      // role
 };
 

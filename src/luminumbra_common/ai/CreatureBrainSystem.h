@@ -48,6 +48,12 @@ inline constexpr float kAlignmentWeight = 0.5f;
 // Predator catch reach (m) and how much catching a prey sates the predator's hunger.
 inline constexpr float kCatchRadius = 2.2f;
 inline constexpr float kCatchSatiation = 0.8f;
+// Spec 011 Phase A: energy (long-term sleep need). Drains slowly every tick (being awake costs
+// energy); Rest recovers it faster than it drains (net positive). Per-second rates (scaled by dt).
+// Energy is NOT yet read by DecideCreatureAction and NOT in world_hash, so these are byte-identical
+// to the sim trajectory today -- a tracked need until Phase E/F wires the circadian-gated Sleep.
+inline constexpr float kEnergyDrainPerSecond = 0.006f;
+inline constexpr float kEnergyRestRecover    = 0.080f;
 
 // Advance every CreatureComponent by one fixed tick. Pure function of registry state + dt.
 inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, float dt) {
@@ -174,6 +180,7 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
         s.is_predator = cr.is_predator;
         s.hunger = cr.hunger;
         s.stamina = cr.stamina;
+        s.energy = cr.energy;  // plumbed for Phase E/F Sleep utility; unused by DecideCreatureAction today
         const float nearNorm = found ? (1.0f - utility_clamp01(bestDist / 30.0f)) : 0.0f;
         if (cr.is_predator) {
             s.food_proximity = nearNorm;
@@ -212,7 +219,8 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
                 cr.hunger = utility_clamp01(cr.hunger - 0.5f * dt);  // eating sates
                 break;
             case CreatureAction::Rest:
-                cr.stamina = utility_clamp01(cr.stamina + 0.3f * dt);  // recover
+                cr.stamina = utility_clamp01(cr.stamina + 0.3f * dt);  // recover sprint fuel
+                cr.energy  = utility_clamp01(cr.energy + kEnergyRestRecover * dt);  // and rest off fatigue
                 break;
         }
 
@@ -280,6 +288,7 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
             }
         }
         cr.hunger = utility_clamp01(cr.hunger + 0.02f * dt);  // hunger grows
+        cr.energy = utility_clamp01(cr.energy - kEnergyDrainPerSecond * dt);  // being awake tires (Rest net-recovers)
         ++stats.updated;
     }
     return stats;
