@@ -62,19 +62,32 @@ struct CreatureReproductionStats {
     int courting = 0;    // ready females currently adjacent to a ready male
 };
 
+// Full-control tuning (defaults == the k* constants -> byte-identical). From SystemConfig
+// sim.reproduction. Tick fields are integer; the float-valued config params are cast on resolve.
+struct ReproductionTuning {
+    std::uint32_t maturity_ticks  = kReproMaturityTicks;
+    std::uint32_t cooldown_ticks  = kReproCooldownTicks;
+    std::uint32_t courtship_ticks = kCourtshipTicks;
+    float healthy_stamina = kReproHealthyStamina;
+    float mate_seek_radius = kMateSeekRadius;
+    float courtship_radius = kCourtshipRadius;
+    float spawn_radius = kReproSpawnRadius;
+};
+
 // Ready to mate? (prey, alive, mature, off cooldown, well-fed, healthy)
 [[nodiscard]] inline bool IsReadyToMate(const Comp::CreatureComponent& cr,
-                                        const Comp::CreatureGenomeComponent& gn) {
-    return !cr.eaten && !cr.is_predator && gn.age_ticks >= kReproMaturityTicks &&
+                                        const Comp::CreatureGenomeComponent& gn,
+                                        const ReproductionTuning& t = {}) {
+    return !cr.eaten && !cr.is_predator && gn.age_ticks >= t.maturity_ticks &&
            gn.reproduce_cooldown == 0 && cr.hunger <= gn.hunger_threshold &&
-           cr.stamina >= kReproHealthyStamina;
+           cr.stamina >= t.healthy_stamina;
 }
 
 // PHASE A (run BEFORE the physics bridge): ready creatures steer toward the nearest ready
 // opposite-sex mate by OVERRIDING the brain's wish velocity — unless they are fleeing a
 // threat (survival beats courtship). When already within courtship range they hold still
 // (wish 0) so they stay together and court. id-ordered; reads a pre snapshot (order-stable).
-inline void RunMateSeekingOnTick(entt::registry& reg) {
+inline void RunMateSeekingOnTick(entt::registry& reg, const ReproductionTuning& tuning = {}) {
     auto view = reg.view<Comp::CreatureComponent, Comp::CreatureGenomeComponent,
                          Comp::TransformComponent>();
     struct M { entt::entity e; float x, z; bool female; bool ready; };
@@ -88,14 +101,14 @@ inline void RunMateSeekingOnTick(entt::registry& reg) {
         const auto& tf = view.get<Comp::TransformComponent>(e);
         const auto& cr = view.get<Comp::CreatureComponent>(e);
         const auto& gn = view.get<Comp::CreatureGenomeComponent>(e);
-        snap.push_back({e, tf.position.x, tf.position.z, gn.female, IsReadyToMate(cr, gn)});
+        snap.push_back({e, tf.position.x, tf.position.z, gn.female, IsReadyToMate(cr, gn, tuning)});
     }
     for (std::size_t i = 0; i < ents.size(); ++i) {
         const M& self = snap[i];
         if (!self.ready) continue;
         auto& cr = view.get<Comp::CreatureComponent>(self.e);
         if (cr.last_action == static_cast<int>(CreatureAction::Flee)) continue;  // survival first
-        float best = kMateSeekRadius, mx = 0.0f, mz = 0.0f;
+        float best = tuning.mate_seek_radius, mx = 0.0f, mz = 0.0f;
         bool found = false;
         for (const M& o : snap) {
             if (o.e == self.e || !o.ready || o.female == self.female) continue;
@@ -106,7 +119,7 @@ inline void RunMateSeekingOnTick(entt::registry& reg) {
         if (!found) continue;
         const float dx = mx - self.x, dz = mz - self.z;
         const float d = dm::Sqrt(dx * dx + dz * dz);
-        if (d > kCourtshipRadius && d > 1.0e-5f) {
+        if (d > tuning.courtship_radius && d > 1.0e-5f) {
             const float inv = cr.move_speed / d;
             cr.wish_x = dx * inv;   // steer toward the mate (overrides the brain's wander)
             cr.wish_z = dz * inv;
@@ -121,7 +134,8 @@ inline void RunMateSeekingOnTick(entt::registry& reg) {
 // adjacent opposite-sex pairs, and birth one offspring per completed courtship (female-driven
 // so each completion makes exactly one baby; the chosen male is consumed for the tick).
 inline CreatureReproductionStats RunMatingResolveOnTick(entt::registry& reg, std::uint64_t tick,
-                                                        std::uint64_t world_seed = 0) {
+                                                        std::uint64_t world_seed = 0,
+                                                        const ReproductionTuning& tuning = {}) {
     CreatureReproductionStats stats;
     auto view = reg.view<Comp::CreatureComponent, Comp::CreatureGenomeComponent,
                          Comp::TransformComponent>();
@@ -143,7 +157,7 @@ inline CreatureReproductionStats RunMatingResolveOnTick(entt::registry& reg, std
     for (auto e : ents) {
         const auto& cr = view.get<Comp::CreatureComponent>(e);
         const auto& gn = view.get<Comp::CreatureGenomeComponent>(e);
-        if (!gn.female && IsReadyToMate(cr, gn)) {
+        if (!gn.female && IsReadyToMate(cr, gn, tuning)) {
             const auto& tf = view.get<Comp::TransformComponent>(e);
             males.push_back({e, tf.position.x, tf.position.z});
         }
@@ -157,10 +171,10 @@ inline CreatureReproductionStats RunMatingResolveOnTick(entt::registry& reg, std
     for (auto e : ents) {
         auto& cr = view.get<Comp::CreatureComponent>(e);
         auto& gn = view.get<Comp::CreatureGenomeComponent>(e);
-        if (!gn.female || !IsReadyToMate(cr, gn)) { continue; }
+        if (!gn.female || !IsReadyToMate(cr, gn, tuning)) { continue; }
         const auto& tf = view.get<Comp::TransformComponent>(e);
         int best = -1;
-        float bestDist = kCourtshipRadius;
+        float bestDist = tuning.courtship_radius;
         for (std::size_t m = 0; m < males.size(); ++m) {
             if (male_used[m]) continue;
             const float dx = males[m].x - tf.position.x, dz = males[m].z - tf.position.z;
@@ -170,7 +184,7 @@ inline CreatureReproductionStats RunMatingResolveOnTick(entt::registry& reg, std
         if (best < 0) { gn.courting_ticks = 0; continue; }  // no mate adjacent -> reset
         ++stats.courting;
         ++gn.courting_ticks;
-        if (gn.courting_ticks < kCourtshipTicks) continue;  // still courting
+        if (gn.courting_ticks < tuning.courtship_ticks) continue;  // still courting
 
         // Courtship complete -> a baby. Consume this male for the tick.
         const entt::entity maleE = males[static_cast<std::size_t>(best)].e;
@@ -203,15 +217,15 @@ inline CreatureReproductionStats RunMatingResolveOnTick(entt::registry& reg, std
         b.genome = childG;
         b.x = (tf.position.x + mtf.position.x) * 0.5f;
         b.y = (tf.position.y + mtf.position.y) * 0.5f;
-        b.z = (tf.position.z + mtf.position.z) * 0.5f + kReproSpawnRadius;
+        b.z = (tf.position.z + mtf.position.z) * 0.5f + tuning.spawn_radius;
         b.generation = (gn.generation > mgn.generation ? gn.generation : mgn.generation) + 1u;
         b.female = childFemale;
         b.species_id = cr.species_id;  // offspring inherit the mother's codex species identity
         births.push_back(b);
 
         gn.courting_ticks = 0;
-        gn.reproduce_cooldown = kReproCooldownTicks;
-        mgn.reproduce_cooldown = kReproCooldownTicks;
+        gn.reproduce_cooldown = tuning.cooldown_ticks;
+        mgn.reproduce_cooldown = tuning.cooldown_ticks;
     }
 
     // Create offspring AFTER the read pass (no view invalidation mid-iteration).
@@ -237,7 +251,7 @@ inline CreatureReproductionStats RunMatingResolveOnTick(entt::registry& reg, std
         gn.vision_range = b.genome.vision_range;
         gn.hearing_range = b.genome.hearing_range;
         gn.age_ticks = 0;
-        gn.reproduce_cooldown = kReproCooldownTicks;  // newborn can't immediately breed
+        gn.reproduce_cooldown = tuning.cooldown_ticks;  // newborn can't immediately breed
         gn.generation = b.generation;
         gn.female = b.female;
         gn.courting_ticks = 0;

@@ -15,6 +15,7 @@
 #include "../ai/ThirstSystem.h"             // ai::ThirstTuning
 #include "../ai/ScavengingSystem.h"         // ai::ScavengingTuning
 #include "../ai/ForagingSystem.h"           // ai::ForagingParams
+#include "../ai/CreatureReproductionSystem.h"  // ai::ReproductionTuning
 
 namespace luminumbra::ai {
     class ScentField;
@@ -203,6 +204,7 @@ public:
     void SetThirstTuning(const luminumbra::ai::ThirstTuning& t) { m_thirstTuning = t; }
     void SetScavengingTuning(const luminumbra::ai::ScavengingTuning& t) { m_scavengingTuning = t; }
     void SetForagingTuning(const luminumbra::ai::ForagingParams& t) { m_foragingTuning = t; }
+    void SetReproductionTuning(const luminumbra::ai::ReproductionTuning& t) { m_reproductionTuning = t; }
     void SetCircadianAmplitude(float a) { m_circadianAmplitude = a; }
 
     // --- Fixed-rate simulation (T-I3-4) ---
@@ -235,6 +237,7 @@ private:
     luminumbra::ai::ThirstTuning m_thirstTuning{};
     luminumbra::ai::ScavengingTuning m_scavengingTuning{};
     luminumbra::ai::ForagingParams m_foragingTuning{};
+    luminumbra::ai::ReproductionTuning m_reproductionTuning{};
     float m_circadianAmplitude = 1.0f;
     WorldMetadata m_metadata;
     // perf (water-perf-200fps spec Step 6): cap catch-up to 2 ticks/frame (default is 4) so a

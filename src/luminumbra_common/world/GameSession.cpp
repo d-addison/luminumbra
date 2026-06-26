@@ -260,7 +260,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 // ready OPPOSITE-SEX mate by overriding the brain's wish velocity (unless
                 // fleeing) — so the physics bridge below actually walks them together. Opt-in
                 // (genome component); no genome -> untouched.
-                luminumbra::ai::RunMateSeekingOnTick(m_registry);
+                luminumbra::ai::RunMateSeekingOnTick(m_registry, m_reproductionTuning);
 
                 // 2e-steer: blend the §4 bias systems' outputs (computed last tick, slot 7) into
                 // the wish velocity before the physics bridge applies it -- pack flank steer,
@@ -338,7 +338,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 // (id-ordered, libm-free, RNG seeded from offset 16 + parent ids + tick).
                 // Per-entity opt-in (genome component): no genome / no creatures -> nothing
                 // created, so the canonical NetworkStateHash baseline stays byte-identical.
-                const auto repro = luminumbra::ai::RunMatingResolveOnTick(m_registry, current_tick);
+                const auto repro = luminumbra::ai::RunMatingResolveOnTick(
+                    m_registry, current_tick, /*world_seed*/ 0ull, m_reproductionTuning);
                 if (repro.born > 0) {
                     LUMINUMBRA_CORE_INFO("I9-EVO: {} offspring born (sexual) at tick {}", repro.born, current_tick);
                 }

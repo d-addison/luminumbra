@@ -10,6 +10,7 @@
 #include "ThirstSystem.h"           // ThirstTuning
 #include "ScavengingSystem.h"       // ScavengingTuning
 #include "ForagingSystem.h"         // ForagingParams
+#include "CreatureReproductionSystem.h"  // ReproductionTuning
 
 namespace luminumbra::ai {
 
@@ -51,6 +52,20 @@ namespace luminumbra::ai {
     t.deposit      = c.param(P::ForagingDeposit, static_cast<float>(t.deposit));
     t.trail_weight = c.param(P::ForagingTrailWeight, static_cast<float>(t.trail_weight));
     t.goal_weight  = c.param(P::ForagingGoalWeight, static_cast<float>(t.goal_weight));
+    return t;
+}
+
+[[nodiscard]] inline ReproductionTuning ResolveReproductionTuning(const core::SystemConfig& c) {
+    ReproductionTuning t;
+    if (!c.enabled(core::SysKey::SimReproduction)) return t;
+    using P = core::SysParam;
+    t.maturity_ticks  = static_cast<std::uint32_t>(c.param(P::ReproMaturityTicks, static_cast<float>(t.maturity_ticks)));
+    t.cooldown_ticks  = static_cast<std::uint32_t>(c.param(P::ReproCooldownTicks, static_cast<float>(t.cooldown_ticks)));
+    t.courtship_ticks = static_cast<std::uint32_t>(c.param(P::ReproCourtshipTicks, static_cast<float>(t.courtship_ticks)));
+    t.healthy_stamina  = c.param(P::ReproHealthyStamina, t.healthy_stamina);
+    t.mate_seek_radius = c.param(P::ReproMateSeekRadius, t.mate_seek_radius);
+    t.courtship_radius = c.param(P::ReproCourtshipRadius, t.courtship_radius);
+    t.spawn_radius     = c.param(P::ReproSpawnRadius, t.spawn_radius);
     return t;
 }
 

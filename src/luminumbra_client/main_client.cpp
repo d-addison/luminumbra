@@ -2696,6 +2696,7 @@ int main(int argc, char* argv[]) {
     gameSession->SetThirstTuning(luminumbra::ai::ResolveThirstTuning(g_systemConfig));
     gameSession->SetScavengingTuning(luminumbra::ai::ResolveScavengingTuning(g_systemConfig));
     gameSession->SetForagingTuning(luminumbra::ai::ResolveForagingTuning(g_systemConfig));
+    gameSession->SetReproductionTuning(luminumbra::ai::ResolveReproductionTuning(g_systemConfig));
     gameSession->SetCircadianAmplitude(luminumbra::ai::ResolveCircadianAmplitude(g_systemConfig));
 
     // Load creature species metadata (display names + rarity) for the codex/discovery
