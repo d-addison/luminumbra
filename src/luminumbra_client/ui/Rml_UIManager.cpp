@@ -9,6 +9,11 @@
 #include <cstdio>
 #include <string>
 #include <chrono>
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <vector>
+#include <nlohmann/json.hpp>
 #include <GLFW/glfw3.h>
 
 namespace Luminumbra::Client {
@@ -406,6 +411,7 @@ void Rml_UIManager::LoadDocument(const std::string& rml_path) {
     m_activeDocument = rml_path;
     m_selectedWorldId.clear();
     BindEventListeners(document);
+    if (document->GetId() == "gallery") PopulateGallery(document);
     document->Show();
 }
 
@@ -840,6 +846,55 @@ std::string FormatPercent(float v01) {
 }
 
 }  // namespace
+
+void Rml_UIManager::PopulateGallery(Rml::ElementDocument* document) {
+    if (!document) return;
+    Rml::Element* grid = document->GetElementById("gallery_grid");
+    if (!grid) return;
+
+    namespace fs = std::filesystem;
+    std::error_code ec;
+
+    // Each shutter writes data/ui/captures/cap_<N>.tga; collect them newest-first.
+    std::vector<int> ids;
+    const fs::path thumbs_dir = "data/ui/captures";
+    if (fs::exists(thumbs_dir, ec)) {
+        for (const auto& entry : fs::directory_iterator(thumbs_dir, ec)) {
+            if (entry.path().extension() != ".tga") continue;
+            const std::string stem = entry.path().stem().string();  // "cap_<N>"
+            if (stem.rfind("cap_", 0) != 0) continue;
+            try { ids.push_back(std::stoi(stem.substr(4))); } catch (...) {}
+        }
+    }
+    std::sort(ids.begin(), ids.end(), std::greater<int>());
+
+    if (ids.empty()) {
+        grid->SetInnerRML(
+            "<p class=\"gallery-empty\">No photos yet \xE2\x80\x94 enter a world, raise the "
+            "viewfinder, and press the shutter. Your shots appear here.</p>");
+        return;
+    }
+
+    std::string html;
+    int shown = 0;
+    for (int id : ids) {
+        if (shown++ >= 12) break;  // one page of the most recent captures
+        // Star rating from the sidecar (photos/photo-<N>.photo.json), if it's there.
+        int stars = 0;
+        std::ifstream sf(fs::path("photos") / ("photo-" + std::to_string(id) + ".photo.json"));
+        if (sf) {
+            try {
+                nlohmann::json j; sf >> j;
+                if (j.contains("stars") && j["stars"].is_number_integer()) stars = j["stars"].get<int>();
+            } catch (...) {}
+        }
+        html += "<div class=\"photo-card\"><img class=\"photo-thumb\" src=\"captures/cap_" +
+                std::to_string(id) + ".tga\"/>";
+        if (stars >= 4) html += "<span class=\"photo-fav\">\xE2\x98\x85</span>";
+        html += "</div>";
+    }
+    grid->SetInnerRML(html);
+}
 
 void Rml_UIManager::PopulateSettingsForm(Rml::ElementDocument* document) {
     if (!document) return;

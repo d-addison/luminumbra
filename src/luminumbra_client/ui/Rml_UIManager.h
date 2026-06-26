@@ -155,6 +155,9 @@ private:
 
     // settings.rml support: populate widgets from the bridge on load, and push a single
     // changed widget's value back through the bridge live.
+    // gallery.rml: replace the placeholder grid with the player's real captures (newest first),
+    // each thumbnail loaded from data/ui/captures/cap_<N>.tga written at shutter time.
+    void PopulateGallery(Rml::ElementDocument* document);
     void PopulateSettingsForm(Rml::ElementDocument* document);
     void ApplySettingFromElement(Rml::Element* element);
     void BindSettingsListeners(Rml::ElementDocument* document);

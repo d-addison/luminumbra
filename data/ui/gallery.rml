@@ -13,8 +13,9 @@
             <div class="gallery-ornament"></div>
             <p class="subtitle gallery-subtitle">moments you kept</p>
 
-            <!-- Tight 4-up photo wall — image + shadow only, no frames/captions. -->
-            <div class="gallery-grid">
+            <!-- Tight 4-up photo wall — populated at runtime from the player's real captures
+                 (PopulateGallery). The static cards below are a fallback for the fixture/preview. -->
+            <div id="gallery_grid" class="gallery-grid">
                 <div class="photo-card">
                     <img class="photo-thumb" src="thumbs/thumb_0.tga"/>
                 </div>
