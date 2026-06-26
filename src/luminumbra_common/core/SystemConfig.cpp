@@ -64,6 +64,10 @@ constexpr ParamMeta kParams[] = {
     {SysParam::EcoAlignmentWeight, SysKey::SimEcology, "alignment_weight", false, 0.5f, glm::vec3(0.0f)},
     {SysParam::EcoCatchRadius, SysKey::SimEcology, "catch_radius", false, 2.2f, glm::vec3(0.0f)},
     {SysParam::EcoCatchSatiation, SysKey::SimEcology, "catch_satiation", false, 0.8f, glm::vec3(0.0f)},
+    {SysParam::EcoFlockNeighborRadius, SysKey::SimEcology, "flock_neighbor_radius", false, 12.0f, glm::vec3(0.0f)},
+    {SysParam::EcoFlockSeparationRadius, SysKey::SimEcology, "flock_separation_radius", false, 3.0f, glm::vec3(0.0f)},
+    {SysParam::EcoFlockCohesionWeight, SysKey::SimEcology, "flock_cohesion_weight", false, 0.6f, glm::vec3(0.0f)},
+    {SysParam::EcoFlockSeparationWeight, SysKey::SimEcology, "flock_separation_weight", false, 1.4f, glm::vec3(0.0f)},
     // sim.wildlife_foliage.* — defaults MUST match WildlifeFoliageSystem.h
     {SysParam::WfGrazeRadius, SysKey::SimWildlifeFoliage, "graze_radius", false, 3.0f, glm::vec3(0.0f)},
     {SysParam::WfGrazePerCreature, SysKey::SimWildlifeFoliage, "graze_per_creature", false, 0.05f, glm::vec3(0.0f)},

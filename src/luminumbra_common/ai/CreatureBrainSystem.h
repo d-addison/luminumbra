@@ -80,6 +80,11 @@ struct EcologyTuning {
     float alignment_weight          = kAlignmentWeight;
     float catch_radius              = kCatchRadius;
     float catch_satiation           = kCatchSatiation;
+    // Boids/Reynolds flocking geometry (defaults == Flocking.h FlockParams -> byte-identical).
+    float flock_neighbor_radius     = 12.0f;  // grid cell + cohesion/alignment neighbour radius (m)
+    float flock_separation_radius   = 3.0f;   // separation kicks in below this spacing (m)
+    float flock_cohesion_weight     = 0.6f;   // pull toward the group centroid
+    float flock_separation_weight   = 1.4f;   // push off crowding
 };
 
 // Advance every CreatureComponent by one fixed tick. Pure function of registry state + dt + tuning.
@@ -119,8 +124,8 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
     // Flocking accumulation is order-invariant (fixed-point). The herd membership matches the
     // old full scan EXACTLY (same role, self excluded later via index, eaten same-role bodies
     // still counted), so the gathered SET — and the steer — is byte-identical.
-    UniformSpatialGrid predGrid(FlockParams{}.neighbor_radius);
-    UniformSpatialGrid preyGrid(FlockParams{}.neighbor_radius);
+    UniformSpatialGrid predGrid(tuning.flock_neighbor_radius);
+    UniformSpatialGrid preyGrid(tuning.flock_neighbor_radius);
     {
         std::vector<GridPoint> predPts, preyPts;
         predPts.reserve(snap.size());
@@ -298,7 +303,11 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
             // byte-identical to the cohesion+separation result; passing headings has zero effect
             // until the weight is tuned > 0.
             FlockParams fp{};
-            fp.alignment_weight = tuning.alignment_weight;
+            fp.neighbor_radius   = tuning.flock_neighbor_radius;
+            fp.separation_radius = tuning.flock_separation_radius;
+            fp.cohesion_weight   = tuning.flock_cohesion_weight;
+            fp.separation_weight = tuning.flock_separation_weight;
+            fp.alignment_weight  = tuning.alignment_weight;
             const FlockSteer fs = ComputeFlockSteer(sx, sz, herd, fp, &herdHeadings);
             adirx += fs.x * tuning.herd_weight;
             adirz += fs.z * tuning.herd_weight;

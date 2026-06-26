@@ -83,6 +83,10 @@ enum class SysParam : std::uint8_t {
     EcoAlignmentWeight,     // sim.ecology.alignment_weight
     EcoCatchRadius,         // sim.ecology.catch_radius
     EcoCatchSatiation,      // sim.ecology.catch_satiation
+    EcoFlockNeighborRadius,   // sim.ecology.flock_neighbor_radius
+    EcoFlockSeparationRadius, // sim.ecology.flock_separation_radius
+    EcoFlockCohesionWeight,   // sim.ecology.flock_cohesion_weight
+    EcoFlockSeparationWeight, // sim.ecology.flock_separation_weight
     // sim.wildlife_foliage.* — defaults mirror WildlifeFoliageSystem.h
     WfGrazeRadius, WfGrazePerCreature, WfRegrowPerTick, WfFeedPerGraze,
     // sim.thirst.* — defaults mirror ThirstSystem.h

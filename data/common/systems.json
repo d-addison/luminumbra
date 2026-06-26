@@ -15,7 +15,11 @@
       "herd_weight": 0.8,
       "alignment_weight": 0.5,
       "catch_radius": 2.2,
-      "catch_satiation": 0.8
+      "catch_satiation": 0.8,
+      "flock_neighbor_radius": 12.0,
+      "flock_separation_radius": 3.0,
+      "flock_cohesion_weight": 0.6,
+      "flock_separation_weight": 1.4
     } },
     "_fullcontrol_comment": "Per-system creature tuning (spec 011 full-control). Each enabled:false -> compiled defaults (byte-identical); the shown values ARE the defaults. Flip enabled:true + edit a number to tune live. sim.* are hashed when enabled; the canonical baseline keeps them all OFF.",
     "wildlife_foliage": { "enabled": false, "params": {

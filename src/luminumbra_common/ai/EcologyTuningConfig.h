@@ -28,6 +28,10 @@ namespace luminumbra::ai {
     t.alignment_weight         = cfg.param(P::EcoAlignmentWeight,    t.alignment_weight);
     t.catch_radius             = cfg.param(P::EcoCatchRadius,        t.catch_radius);
     t.catch_satiation          = cfg.param(P::EcoCatchSatiation,     t.catch_satiation);
+    t.flock_neighbor_radius    = cfg.param(P::EcoFlockNeighborRadius,   t.flock_neighbor_radius);
+    t.flock_separation_radius  = cfg.param(P::EcoFlockSeparationRadius, t.flock_separation_radius);
+    t.flock_cohesion_weight    = cfg.param(P::EcoFlockCohesionWeight,   t.flock_cohesion_weight);
+    t.flock_separation_weight  = cfg.param(P::EcoFlockSeparationWeight, t.flock_separation_weight);
     return t;
 }
 
