@@ -43,6 +43,7 @@
 // game concept. The opaque input blob is exactly the InputRecord payload of LREC1.
 
 #include <cstdint>
+#include <cstddef>
 #include <deque>
 #include <map>
 #include <memory>
@@ -182,6 +183,52 @@ private:
 std::pair<std::unique_ptr<LoopbackTransport>, std::unique_ptr<LoopbackTransport>>
 MakeLoopbackPair();
 
+// --- Outbound backpressure queue (Spec 019 FR-D) -----------------------------------
+// A bounded outbound byte buffer that REPLACES the old WSAEWOULDBLOCK busy-spin in
+// TcpTransport::SendFrame. Framed bytes are appended whole and NEVER dropped. DrainOnce
+// pushes the queued bytes through a non-blocking `send_some` sink, advancing only while
+// the sink makes progress and STOPPING (not spinning) the moment it would-blocks -- the
+// unsent remainder stays queued for a later drain. A high-water mark signals when the
+// producer should apply backpressure (a bounded blocking wait on writability) rather
+// than let the queue grow without bound; it NEVER causes a drop.
+struct OutboundByteQueue {
+    static constexpr std::size_t kDefaultHighWaterBytes = 4u * 1024u * 1024u; // 4 MiB
+
+    std::vector<std::uint8_t> buf;  // pending bytes; the live window is [off, buf.size())
+    std::size_t off = 0;            // consumed-prefix offset (compacted away on Append)
+    std::size_t high_water = kDefaultHighWaterBytes;
+
+    [[nodiscard]] bool Empty() const { return off >= buf.size(); }
+    [[nodiscard]] std::size_t PendingBytes() const { return buf.size() - off; }
+    [[nodiscard]] bool OverHighWater() const { return PendingBytes() >= high_water; }
+
+    // Appends one complete frame's bytes (caller has already length-prefixed). Compacts
+    // the consumed prefix first so the buffer never accumulates already-sent bytes.
+    void Append(const std::uint8_t* data, std::size_t n) {
+        if (off > 0) {
+            buf.erase(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(off));
+            off = 0;
+        }
+        buf.insert(buf.end(), data, data + n);
+    }
+
+    // Drains via `send_some(data, len) -> int`:  >0 bytes accepted (progress; keep
+    // going), 0 would-block (STOP -- no busy-spin -- remainder retained), <0 fatal.
+    // Returns 1 fully drained, 0 would-block (bytes remain), -1 fatal. NEVER drops.
+    template <typename SendSome>
+    int DrainOnce(SendSome&& send_some) {
+        while (off < buf.size()) {
+            const int n = send_some(buf.data() + off, buf.size() - off);
+            if (n < 0) return -1;
+            if (n == 0) return 0;
+            off += static_cast<std::size_t>(n);
+        }
+        buf.clear();
+        off = 0;
+        return 1;
+    }
+};
+
 // Real TCP transport (loopback + LAN scope, ONE remote). Length-prefixed frames over a
 // blocking-but-polled stream socket: SendFrame writes [u32 LE frame-len][frame] and
 // TryReceiveFrame non-blockingly reassembles one complete frame from a receive buffer.
@@ -211,11 +258,13 @@ public:
 
 private:
     bool PumpRecv(); // pulls available bytes into m_recv_buffer; sets m_peer_closed on EOF
+    int FlushSendNonBlocking(); // drains m_send_q via non-blocking send; -1 = fatal/peer-gone
 
     std::intptr_t m_socket = -1; // SOCKET (winsock) / fd; -1 = none
     std::intptr_t m_listen_socket = -1;
     bool m_peer_closed = false;
     std::vector<std::uint8_t> m_recv_buffer; // accumulates partial frames
+    OutboundByteQueue m_send_q; // bounded outbound queue (Spec 019 FR-D; no busy-spin)
 };
 
 // --- Session configuration ---------------------------------------------------------

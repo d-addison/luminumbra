@@ -289,6 +289,9 @@ namespace {
 
 bool TcpTransport::PumpRecv() {
     if (m_socket < 0) return false;
+    // Opportunistically push any queued outbound bytes (non-blocking; no spin) whenever
+    // we pump -- an earlier would-block may have left a remainder that can now go out.
+    if (!m_send_q.Empty() && FlushSendNonBlocking() < 0) { m_peer_closed = true; }
     char buf[4096];
     for (;;) {
         const int n = ::recv(static_cast<SOCKET>(m_socket), buf, sizeof(buf), 0);
@@ -363,21 +366,51 @@ bool TcpTransport::Connect(const std::string& host, std::uint16_t port, int time
     return true;
 }
 
+int TcpTransport::FlushSendNonBlocking() {
+    if (m_socket < 0) return -1;
+    // Push as much of the queued outbound bytes as the kernel send buffer will take right
+    // now. DrainOnce advances while ::send makes progress and STOPS the instant it
+    // would-blocks (returns 0) -- it never spins on a zero-progress send (Spec 019 FR-D,
+    // replacing the old `if (err == WSAEWOULDBLOCK) continue;`). The unsent remainder
+    // stays queued for the next flush; nothing is dropped.
+    return m_send_q.DrainOnce([this](const std::uint8_t* p, std::size_t len) -> int {
+        const int want = static_cast<int>(std::min<std::size_t>(len, 1u << 20));
+        const int n = ::send(static_cast<SOCKET>(m_socket),
+                             reinterpret_cast<const char*>(p), want, 0);
+        if (n > 0) return n;
+        const int err = ::WSAGetLastError();
+        if (err == WSAEWOULDBLOCK) return 0; // would-block -> stop draining (no busy-spin)
+        return -1;                            // real error -> fatal/disconnect
+    });
+}
+
 bool TcpTransport::SendFrame(const std::vector<std::uint8_t>& frame, FrameDelivery /*delivery*/) {
     if (m_socket < 0 || m_peer_closed) return false;
+    // Frame = [u32 LE len][payload]; APPEND it whole to the bounded outbound queue. The
+    // queue NEVER drops a message (Spec 019 FR-D high-water backpressure policy).
     std::vector<std::uint8_t> out;
     PutU32(out, static_cast<std::uint32_t>(frame.size()));
     out.insert(out.end(), frame.begin(), frame.end());
-    std::size_t sent = 0;
-    while (sent < out.size()) {
-        const int n = ::send(static_cast<SOCKET>(m_socket),
-                             reinterpret_cast<const char*>(out.data() + sent),
-                             static_cast<int>(out.size() - sent), 0);
-        if (n > 0) { sent += static_cast<std::size_t>(n); continue; }
-        const int err = ::WSAGetLastError();
-        if (err == WSAEWOULDBLOCK) continue; // retry (small frames; rarely blocks)
-        m_peer_closed = true;
-        return false;
+    m_send_q.Append(out.data(), out.size());
+
+    // Opportunistic non-blocking flush; a would-block leaves the remainder queued.
+    if (FlushSendNonBlocking() < 0) { m_peer_closed = true; return false; }
+
+    // High-water backpressure: if the kernel send buffer is saturated and the queue has
+    // grown past the high-water mark, BLOCK on socket writability via select and keep
+    // draining -- a BOUNDED blocking wait, NEVER a busy-spin -- until we are back under
+    // the mark. The loop makes guaranteed progress each pass (drain-below-mark and exit,
+    // or select-timeout and bail), so it cannot iterate unboundedly. A peer that stops
+    // draining (select timeout) is treated as gone: the queued bytes are retained and the
+    // failure is surfaced to the caller rather than dropped.
+    while (m_send_q.OverHighWater()) {
+        fd_set wfds;
+        FD_ZERO(&wfds);
+        FD_SET(static_cast<SOCKET>(m_socket), &wfds);
+        timeval tv{5, 0}; // 5s ceiling per writability wait
+        const int sel = ::select(0, nullptr, &wfds, nullptr, &tv);
+        if (sel <= 0) { m_peer_closed = true; return false; } // peer not draining
+        if (FlushSendNonBlocking() < 0) { m_peer_closed = true; return false; }
     }
     return true;
 }
@@ -416,6 +449,7 @@ bool TcpTransport::TryReceiveFrame(std::vector<std::uint8_t>&) { return false; }
 bool TcpTransport::IsPeerConnected() const { return false; }
 void TcpTransport::Close() {}
 bool TcpTransport::PumpRecv() { return false; }
+int TcpTransport::FlushSendNonBlocking() { return 0; }
 
 #endif // _WIN32
 

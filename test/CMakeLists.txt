@@ -123,6 +123,7 @@ add_executable(common_tests
     common/ReplicationProtocol_test.cpp
     common/ReplicationEndpoint_test.cpp
     common/LockstepSession_test.cpp
+    common/LockstepBackpressure_test.cpp
     common/ReplayStream_test.cpp
     common/ServerHeadlessHygiene_test.cpp
     common/SimulationClock_test.cpp
