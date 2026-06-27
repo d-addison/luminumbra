@@ -39,8 +39,11 @@
 #include "passes/DebugViewPass.h"    // render-only G-buffer debug visualizer (default-OFF)
 #include "passes/SsaoPass.h"
 #include "passes/WaterPass.h"
+#include "passes/FinalBlitPass.h" // Spec 016-P1-T01: FinalBlit on the RenderContext seam
+#include "RenderContext.h"        // Spec 016: per-frame pass contract
 #include <stb_image.h>
 #include <nlohmann/json.hpp>
+#include <fstream>
 
 // T-I5a-6: the Hillaire scattering-LUT implementation is compiled into this TU
 // rather than added as a separate source file (the vendored meshoptimizer
@@ -602,7 +605,8 @@ RenderPipeline::RenderPipeline()
       m_foliage_pass(std::make_unique<FoliagePass>()),
       m_plant_procgen_pass(std::make_unique<PlantProcgenPass>()),
       m_ground_decal_pass(std::make_unique<GroundDecalPass>()),
-      m_debug_view_pass(std::make_unique<DebugViewPass>()) {}
+      m_debug_view_pass(std::make_unique<DebugViewPass>()),
+      m_final_blit_pass(std::make_unique<FinalBlitPass>()) {}
 
 // Spec 011 FR-C: forward the one-way scent snapshot to the decal pass (render-only;
 // defined here where GroundDecalPass is a complete type).
@@ -715,6 +719,74 @@ bool RenderPipeline::has_procgen_mesh(const std::string& key) const {
 // existing GL texture ids; nothing is hashed or written to sim state.
 const GBuffer& RenderPipeline::gbuffer() const {
     return m_gbuffer_pass->gbuffer();
+}
+
+// Spec 016 render gate: in-process A/B parity for the FinalBlit conversion.
+// Resolves the CURRENT lit scene to twin offscreen targets — once via the
+// verbatim legacy blit, once via the RenderContext-seam FinalBlitPass — then
+// reads both back to PPM. Same source, same frame => any non-zero FLIP isolates a
+// behavior change in the extraction. Call after a settled frame; the harness then
+// flip_diffs finalblit_legacy.ppm vs finalblit_seam.ppm (expect ~0).
+bool RenderPipeline::capture_finalblit_parity(const std::filesystem::path& out_dir) {
+    const GLsizei w = static_cast<GLsizei>(m_screen_width);
+    const GLsizei h = static_cast<GLsizei>(m_screen_height);
+    if (w <= 0 || h <= 0) return false;
+    const GLuint lit = m_lighting_pass->lighting_fbo().fbo_id;
+
+    auto make_target = [&](GLuint& fbo, GLuint& tex) {
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glGenFramebuffers(1, &fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    };
+    GLuint fboA = 0, texA = 0, fboB = 0, texB = 0;
+    make_target(fboA, texA);
+    make_target(fboB, texB);
+    bool ok = (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+    glBindFramebuffer(GL_FRAMEBUFFER, fboA);
+    ok = ok && (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+
+    RenderContext ctx;
+    ctx.screen_width = m_screen_width;
+    ctx.screen_height = m_screen_height;
+    ctx.offscreen_active = true; // route both blits to a chosen offscreen target
+    ctx.offscreen_w = m_screen_width;
+    ctx.offscreen_h = m_screen_height;
+    ctx.registry = &m_render_registry;
+    ctx.lit_scene = m_render_registry.adopt_fbo("lit_scene", lit);
+
+    ctx.offscreen_fbo = fboA;
+    FinalBlitPass::execute_legacy(ctx); // A = pre-conversion blit
+    ctx.offscreen_fbo = fboB;
+    m_final_blit_pass->execute(ctx);    // B = RenderContext-seam blit
+
+    auto read_and_write = [&](GLuint fbo, const std::filesystem::path& path) -> bool {
+        std::vector<unsigned char> px(static_cast<size_t>(w) * static_cast<size_t>(h) * 3u);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+        std::ofstream f(path, std::ios::binary | std::ios::trunc);
+        if (!f) return false;
+        f << "P6\n" << w << " " << h << "\n255\n";
+        f.write(reinterpret_cast<const char*>(px.data()), static_cast<std::streamsize>(px.size()));
+        return static_cast<bool>(f);
+    };
+    std::error_code ec;
+    std::filesystem::create_directories(out_dir, ec);
+    ok = ok && read_and_write(fboA, out_dir / "finalblit_legacy.ppm");
+    ok = ok && read_and_write(fboB, out_dir / "finalblit_seam.ppm");
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fboA);
+    glDeleteFramebuffers(1, &fboB);
+    glDeleteTextures(1, &texA);
+    glDeleteTextures(1, &texB);
+    return ok;
 }
 
 void RenderPipeline::attach_farlod_job_system(JobSystem* job_system) {
@@ -2116,22 +2188,33 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     }
 
     // 9. FINAL BLIT TO SCREEN (or to the offscreen preview target, Item 1).
-    begin_gpu_pass_timer(GpuTimerPass::FinalBlit);
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
-    // Spec 002 Item 1: when a preview FBO is bound, the lit scene is copied into
-    // it instead of the default framebuffer. The destination rect is the preview
-    // dims; the source is the (preview-sized, via on_resize) lighting FBO, so the
-    // copy is a 1:1 filtered blit. Default path (no target) is byte-identical.
+    // Spec 016-P1-T01: routed through the RenderContext seam (FinalBlitPass) — the
+    // first pass off RenderPipeline&. Byte-identical to the prior inline blit; the
+    // pipeline keeps the GPU-timer + stats orchestration around the call. The lit
+    // scene is adopted into the registry as "lit_scene" (wrap-existing, since the
+    // lighting FBO is still owned by LightingPass during the migration).
+    // Spec 002 Item 1: when a preview FBO is bound, the lit scene is copied into it
+    // instead of the default framebuffer (1:1 filtered blit). Default path
+    // (no target) is byte-identical.
     const GLuint draw_fbo = m_offscreen_target_active ? m_offscreen_target_fbo : 0u;
     const u32 dst_w = m_offscreen_target_active ? m_offscreen_target_w : m_screen_width;
     const u32 dst_h = m_offscreen_target_active ? m_offscreen_target_h : m_screen_height;
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw_fbo);
 
-    // Clear the destination first to prevent artifacts.
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-    glBlitFramebuffer(0, 0, m_screen_width, m_screen_height, 0, 0, dst_w, dst_h, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    begin_gpu_pass_timer(GpuTimerPass::FinalBlit);
+    {
+        RenderContext ctx;
+        ctx.camera = &camera;
+        ctx.delta_time = deltaTime;
+        ctx.screen_width = m_screen_width;
+        ctx.screen_height = m_screen_height;
+        ctx.offscreen_active = m_offscreen_target_active;
+        ctx.offscreen_fbo = m_offscreen_target_fbo;
+        ctx.offscreen_w = m_offscreen_target_w;
+        ctx.offscreen_h = m_offscreen_target_h;
+        ctx.registry = &m_render_registry;
+        ctx.lit_scene = m_render_registry.adopt_fbo("lit_scene", m_lighting_pass->lighting_fbo().fbo_id);
+        m_final_blit_pass->execute(ctx);
+    }
     m_last_render_pass_stats.final_blits++;
     end_gpu_pass_timer(GpuTimerPass::FinalBlit);
 

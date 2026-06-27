@@ -10,6 +10,7 @@
 #include <utility>
 #include <glm/glm.hpp>
 #include "Mesh.h"
+#include "RenderResourceRegistry.h" // Spec 016: render resource registry (value member)
 #include "SkyAtmosphereLut.h" // T-I5a-6: Hillaire 2020 scattering LUTs
 #include "WaterfallDetect.h"  // T-I5b-4: world-deterministic waterfall sites
 #include <map>
@@ -22,7 +23,7 @@
 // Forward declarations
 namespace Luminumbra { class Chunk; class JobSystem; }
 namespace Luminumbra::Systems { class SHIELD_WorldSystem; struct TerrainGenParams; }
-namespace Luminumbra::Rendering { class Shader; class Camera; class ShadowPass; class GBufferPass; class SsaoPass; class LightingPass; class WaterPass; class SkyboxPass; class ParticlePass; class FoliagePass; class PlantProcgenPass; class FarLodSystem; class ShieldRtFarFieldPass; class GroundDecalPass; class DebugViewPass; struct ScentFieldRenderMirror; }
+namespace Luminumbra::Rendering { class Shader; class Camera; class ShadowPass; class GBufferPass; class SsaoPass; class LightingPass; class WaterPass; class SkyboxPass; class ParticlePass; class FoliagePass; class PlantProcgenPass; class FarLodSystem; class ShieldRtFarFieldPass; class GroundDecalPass; class DebugViewPass; class FinalBlitPass; struct ScentFieldRenderMirror; }
 
 namespace Luminumbra::Rendering {
 
@@ -601,6 +602,14 @@ public:
     // writes sim state or feeds world_hash. Defined in the .cpp because GBufferPass
     // is forward-declared here.
     const GBuffer& gbuffer() const;
+    // Spec 016 render gate: in-process A/B parity for the FinalBlit conversion.
+    // Given the CURRENT lit-scene FBO (already rendered this frame), resolve it to
+    // screen size BOTH ways — execute_legacy (verbatim pre-conversion blit) into
+    // target A and FinalBlitPass::execute (RenderContext seam) into target B —
+    // then read both back and write A/B PPMs under out_dir. Because both blits
+    // consume the identical source in the same frame, any non-zero FLIP isolates a
+    // behavior change in the extraction (must be ~0). Returns false on GL/IO error.
+    bool capture_finalblit_parity(const std::filesystem::path& out_dir);
     // Generated caustics texture id (0 when unavailable). Exposed for the
     // runtime scenario harness caustics-animation probe (T-I2-16).
     u32 water_caustics_texture() const;
@@ -1020,6 +1029,8 @@ private:
     std::unique_ptr<GroundDecalPass> m_ground_decal_pass;   // spec 011 FR-C pheromone trail (default-OFF)
     std::unique_ptr<DebugViewPass> m_debug_view_pass;       // render-only G-buffer debug overlay (default-OFF)
     std::unique_ptr<ShieldRtFarFieldPass> m_shieldrt_far_pass; // T-I6-A3b (flag-gated)
+    std::unique_ptr<FinalBlitPass> m_final_blit_pass;      // Spec 016-P1-T01: first pass on the RenderContext seam
+    RenderResourceRegistry m_render_registry;             // Spec 016: typed render-resource handles (adopt/lookup)
     JobSystem* m_job_system = nullptr;             // attached pre-startup; forwarded to passes built in startup()
     bool m_far_field_runtime_requested = false;    // --enable-far-field-gpu-raymarch
     Client::ScenarioHarness::IsolationConfig m_isolation_config; // T-I6 (default {All,Scene} = no-op)

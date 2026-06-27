@@ -265,6 +265,11 @@ float g_scene_cloud_shadow_strength = 0.0f;
 std::string g_frame_scan_path;
 bool g_frame_scan_active = false;
 int g_frame_scan_settle = 0;
+// Spec 016 render gate: --render-parity-finalblit <dir> reuses the frame-scan
+// boot/settle, then captures the FinalBlit in-process A/B parity pair (legacy vs
+// RenderContext-seam blit) under <dir>. Render-only; the harness flip_diffs them.
+bool g_render_parity_active = false;
+std::filesystem::path g_render_parity_dir;
 static constexpr int kFrameScanSettleFrames = 90; // let chunks stream + atmosphere settle
 // Watchdog: a headless auto-capture must NEVER hang. If the world hasn't reached
 // IN_GAME and completed the scan within this many render-loop frames (boot + stream +
@@ -2617,6 +2622,18 @@ int main(int argc, char* argv[]) {
         scenario_config.auto_enter_world = true;
         LUMINUMBRA_CORE_INFO("Frame-scan armed -> {} (auto-world implied, fixed pose, settle {} frames)",
                              g_frame_scan_path, kFrameScanSettleFrames);
+    }
+    // Spec 016 render gate: --render-parity-finalblit <dir>. Reuse the frame-scan
+    // boot/settle (same fixed pose), then capture the FinalBlit A/B parity pair.
+    if (const std::string rp = GetCommandLineOption(argc, argv, "--render-parity-finalblit", ""); !rp.empty()) {
+        g_render_parity_active = true;
+        g_render_parity_dir = std::filesystem::path(rp);
+        g_frame_scan_active = true;
+        g_frame_scan_path = (g_render_parity_dir / "parity_scan.json").string();
+        scenario_config.auto_create_world = true;
+        scenario_config.auto_enter_world = true;
+        LUMINUMBRA_CORE_INFO("Render-parity (FinalBlit) armed -> {} (auto-world implied, settle {} frames)",
+                             g_render_parity_dir.string(), kFrameScanSettleFrames);
     }
     // --bake-tree-impostor <out.ppm>: bake the far-field tree impostor atlas (no world needed).
     if (const std::string bp = GetCommandLineOption(argc, argv, "--bake-tree-impostor", ""); !bp.empty()) {
@@ -6658,6 +6675,14 @@ int main(int argc, char* argv[]) {
                         if (g_frame_scan_settle < kFrameScanSettleFrames) {
                             ++g_frame_scan_settle; // let chunks stream + atmosphere settle
                         } else {
+                            // Spec 016 render gate: capture FinalBlit in-process A/B parity on the
+                            // settled frame (legacy vs RenderContext-seam blit of the SAME lit scene).
+                            if (g_render_parity_active) {
+                                if (renderPipeline.capture_finalblit_parity(g_render_parity_dir))
+                                    LUMINUMBRA_CORE_INFO("FinalBlit parity captured -> {}", g_render_parity_dir.string());
+                                else
+                                    LUMINUMBRA_CORE_ERROR("FinalBlit parity capture FAILED");
+                            }
                             int vw = 0, vh = 0;
                             glfwGetFramebufferSize(window, &vw, &vh);
                             const Luminumbra::Rendering::FrameScanReport rep =
