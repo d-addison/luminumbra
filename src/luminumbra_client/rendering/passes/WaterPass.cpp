@@ -1,11 +1,8 @@
 #include "WaterPass.h"
 
-#include "GBufferPass.h"
-#include "LightingPass.h"
 #include "PassGlHelpers.h"
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
-#include "luminumbra_common/world/Chunk.h"
 
 #include <GLFW/glfw3.h>
 #include <glm/gtc/matrix_transform.hpp>
@@ -105,7 +102,7 @@ void WaterPass::reset_shader() {
 // lighting pass (which runs earlier in the frame) samples the previous
 // frame's pattern through black_texture(); a one-frame lag is invisible for
 // a slowly-flowing intensity field.
-void WaterPass::generate_caustics(RenderPipeline& pipeline) {
+void WaterPass::generate_caustics(const RenderContext& ctx) {
     if (m_caustics_fbo == 0 || !m_caustics_shader || !m_caustics_shader->IsValid()) {
         return;
     }
@@ -115,23 +112,22 @@ void WaterPass::generate_caustics(RenderPipeline& pipeline) {
     glDisable(GL_DEPTH_TEST);
 
     m_caustics_shader->use();
-    m_caustics_shader->setFloat("u_time", static_cast<float>(glfwGetTime()));
+    m_caustics_shader->setFloat("u_time", ctx.time_seconds);
     m_caustics_shader->setVec2("u_resolution", glm::vec2(kCausticsResolution, kCausticsResolution));
 
-    glBindVertexArray(pipeline.m_screen_quad_vao);
+    glBindVertexArray(ctx.screen_quad_vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
 
     glEnable(GL_DEPTH_TEST);
-    glBindFramebuffer(GL_FRAMEBUFFER, pipeline.m_lighting_pass->lighting_fbo().fbo_id);
-    glViewport(0, 0, pipeline.m_screen_width, pipeline.m_screen_height);
+    glBindFramebuffer(GL_FRAMEBUFFER, ctx.lit_scene.id);
+    glViewport(0, 0, ctx.screen_width, ctx.screen_height);
 }
 
-void WaterPass::execute(RenderPipeline& pipeline,
-                        const std::vector<RenderPipeline::ChunkMeshSnapshot>& renderable_chunks,
-                        const Camera& camera) {
+WaterDrawStats WaterPass::execute(const RenderContext& ctx, const WaterPassInput& input, const Camera& camera) {
+    WaterDrawStats stats;
     // --- 0. Generate the animated caustics pattern (offscreen) ---
-    generate_caustics(pipeline);
+    generate_caustics(ctx);
 
     // --- 1. Set OpenGL State ---
     glEnable(GL_BLEND);
@@ -142,7 +138,7 @@ void WaterPass::execute(RenderPipeline& pipeline,
     // --- 2. Activate Shader and Set Uniforms ---
     m_water_shader->use();
 
-    glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)pipeline.m_screen_width / (float)pipeline.m_screen_height, camera.GetNearPlane(), camera.GetFarPlane());
+    glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)ctx.screen_width / (float)ctx.screen_height, camera.GetNearPlane(), camera.GetFarPlane());
     glm::mat4 view = camera.GetViewMatrix();
 
     // Set matrices
@@ -155,11 +151,11 @@ void WaterPass::execute(RenderPipeline& pipeline,
 
     // Set scene and material properties (as before)
     m_water_shader->setVec3("u_camera_pos", camera.Position);
-    m_water_shader->setVec2("u_screen_size", glm::vec2(pipeline.m_screen_width, pipeline.m_screen_height));
-    m_water_shader->setFloat("u_time", static_cast<float>(glfwGetTime()));
-    m_water_shader->setVec3("u_sun_direction", pipeline.m_sun.direction);
-    m_water_shader->setVec3("u_sun_color", pipeline.m_sun.color);
-    m_water_shader->setVec3("u_sky_color", approximate_sky_reflection_color(pipeline.m_sun.intensity));
+    m_water_shader->setVec2("u_screen_size", glm::vec2(ctx.screen_width, ctx.screen_height));
+    m_water_shader->setFloat("u_time", ctx.time_seconds);
+    m_water_shader->setVec3("u_sun_direction", ctx.sun.direction);
+    m_water_shader->setVec3("u_sun_color", ctx.sun.color);
+    m_water_shader->setVec3("u_sky_color", approximate_sky_reflection_color(ctx.sun.intensity));
     m_water_shader->setVec3("u_shallow_color", glm::vec3(0.3, 0.8, 0.7));
     m_water_shader->setVec3("u_deep_color", glm::vec3(0.02, 0.18, 0.34));
     m_water_shader->setFloat("u_water_depth_scaler", 0.2f);
@@ -167,11 +163,11 @@ void WaterPass::execute(RenderPipeline& pipeline,
 
     // Bind textures (as before)
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, pipeline.m_lighting_pass->lighting_fbo().opaque_color_texture);
+    glBindTexture(GL_TEXTURE_2D, ctx.opaque_scene.id);
     m_water_shader->setInt("u_opaque_scene_color", 0);
 
     glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, pipeline.m_gbuffer_pass->gbuffer().depth_texture);
+    glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_depth.id);
     m_water_shader->setInt("u_opaque_depth", 1);
 
     glActiveTexture(GL_TEXTURE2);
@@ -193,19 +189,14 @@ void WaterPass::execute(RenderPipeline& pipeline,
     // old u_foam_texture slot (black fallback) is gone.
 
     // --- 3. Draw Water Meshes ---
-    for (const auto& chunk : renderable_chunks) {
-        auto it = pipeline.m_water_render_data.find(chunk.id);
-        if (it != pipeline.m_water_render_data.end() && it->second.element_count > 0) {
-            const auto& render_data = it->second;
-
-            glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(chunk.coords * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z)));
-            m_water_shader->setMat4("u_model", model);
-
-            glBindVertexArray(render_data.vao_id);
-            glDrawElements(GL_TRIANGLES, render_data.element_count, GL_UNSIGNED_INT, 0);
-            pipeline.m_last_render_pass_stats.water_draws++;
-            pipeline.m_last_render_pass_stats.water_indices_drawn += render_data.element_count;
-        }
+    // Spec 016: iterate the pre-built draw list (same chunk order -> byte-stable);
+    // stats returned for the call site to fold in.
+    for (const auto& item : input.draw_items) {
+        m_water_shader->setMat4("u_model", item.model);
+        glBindVertexArray(item.vao_id);
+        glDrawElements(GL_TRIANGLES, item.element_count, GL_UNSIGNED_INT, 0);
+        stats.water_draws++;
+        stats.water_indices += item.element_count;
     }
 
     // --- 4. Restore OpenGL State ---
@@ -213,6 +204,7 @@ void WaterPass::execute(RenderPipeline& pipeline,
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
     glEnable(GL_CULL_FACE);
+    return stats;
 }
 
 } // namespace Luminumbra::Rendering

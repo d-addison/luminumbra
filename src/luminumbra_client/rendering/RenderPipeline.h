@@ -709,7 +709,7 @@ private:
     friend class GBufferPass;
     // SsaoPass friend removed (Spec 016-P2-T02): SsaoPass now reads from RenderContext.
     friend class LightingPass;
-    friend class WaterPass;
+    // WaterPass friend removed (Spec 016-P3-T16): reads from RenderContext + WaterPassInput.
     friend class SkyboxPass;
     // ParticlePass + FoliagePass friends removed (Spec 016-P3-T18/T17): read from RenderContext.
     // PlantProcgenPass friend removed (Spec 016-P3-T14): reads from RenderContext.
@@ -747,6 +747,8 @@ private:
     // Spec 016 (016-P3-T18/T17): Particle + Foliage pass contracts.
     RenderContext make_particle_context(const Camera& camera);
     RenderContext make_foliage_context(const Camera& camera);
+    // Spec 016 (016-P3-T16): Water pass contract (draw list built at the call site).
+    RenderContext make_water_context(const Camera& camera);
 
     std::vector<ChunkMeshSnapshot> build_chunk_snapshots(const std::vector<Chunk*>& renderable_chunks) const;
 

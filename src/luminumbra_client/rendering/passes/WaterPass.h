@@ -1,6 +1,7 @@
 #pragma once
 
-#include "../RenderPipeline.h"
+#include "../RenderContext.h"
+#include "../RenderInputs.h"
 
 #include <filesystem>
 #include <memory>
@@ -50,9 +51,10 @@ public:
     void destroy_water_fallback_textures();
     void reset_shader();
 
-    void execute(RenderPipeline& pipeline,
-                 const std::vector<RenderPipeline::ChunkMeshSnapshot>& renderable_chunks,
-                 const Camera& camera);
+    // Spec 016 (016-P3-T16): RenderContext seam. Draw list (WaterPassInput) is
+    // built at the call site from m_water_render_data in chunk order (byte-stable);
+    // returns water draw/index counts the caller folds into stats.
+    WaterDrawStats execute(const RenderContext& ctx, const WaterPassInput& input, const Camera& camera);
 
     const std::unique_ptr<Shader>& shader() const { return m_water_shader; }
     u32 flat_normal_texture() const { return m_water_flat_normal_texture; }
@@ -69,7 +71,7 @@ public:
     u32 caustics_fbo() const { return m_caustics_fbo; }
 
 private:
-    void generate_caustics(RenderPipeline& pipeline);
+    void generate_caustics(const RenderContext& ctx);
 
     std::unique_ptr<Shader> m_water_shader;
     std::unique_ptr<Shader> m_caustics_shader;

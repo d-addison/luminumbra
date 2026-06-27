@@ -857,6 +857,24 @@ RenderContext RenderPipeline::make_foliage_context(const Camera& camera) {
 // pipeline owns that, once per frame, before both passes). The only dropped
 // statement vs today is `visible.reserve(renderable_chunks.size())`, a capacity
 // hint with no effect on draw order or stats — so output is byte-identical.
+// Spec 016 (T16-Water): the Water pass contract — lit-scene draw target,
+// opaque-scene + g-buffer depth for refraction/SSR, the shared quad, sun light,
+// and the per-frame time snapshot. The draw list travels separately (WaterPassInput).
+RenderContext RenderPipeline::make_water_context(const Camera& camera) {
+    RenderContext ctx;
+    ctx.camera = &camera;
+    ctx.screen_width = m_screen_width;
+    ctx.screen_height = m_screen_height;
+    ctx.registry = &m_render_registry;
+    ctx.screen_quad_vao = m_screen_quad_vao;
+    ctx.time_seconds = m_wall_clock_time;
+    ctx.sun = m_sun;
+    ctx.lit_scene = m_render_registry.adopt_fbo("lit_scene", m_lighting_pass->lighting_fbo().fbo_id);
+    ctx.opaque_scene = m_render_registry.adopt_texture("opaque_scene", m_lighting_pass->lighting_fbo().opaque_color_texture);
+    ctx.gbuffer_depth = m_render_registry.adopt_texture("gbuffer_depth", m_gbuffer_pass->gbuffer().depth_texture);
+    return ctx;
+}
+
 SubmitTerrainChunksFn RenderPipeline::make_terrain_submitter() {
     return [this](const glm::vec4 (&frustum_planes)[6]) -> TerrainSubmitStats {
         std::vector<const ChunkCullEntry*> visible_chunks;
@@ -2150,8 +2168,22 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     m_lighting_pass->copy_lighting_color_to_opaque_texture(*this);
     glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
     if (m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Water)) {
+        // Spec 016 (T16): build the water draw list from m_water_render_data in
+        // chunk order (byte-stable) + the ctx, then run the seam.
+        RenderContext water_ctx = make_water_context(camera);
+        WaterPassInput water_input;
+        for (const auto& chunk : renderable_chunk_snapshots) {
+            auto it = m_water_render_data.find(chunk.id);
+            if (it != m_water_render_data.end() && it->second.element_count > 0) {
+                glm::mat4 model = glm::translate(glm::mat4(1.0f),
+                    glm::vec3(chunk.coords * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z)));
+                water_input.draw_items.push_back({model, it->second.vao_id, it->second.element_count});
+            }
+        }
         begin_gpu_pass_timer(GpuTimerPass::Water);
-        m_water_pass->execute(*this, renderable_chunk_snapshots, camera);
+        const WaterDrawStats water_stats = m_water_pass->execute(water_ctx, water_input, camera);
+        m_last_render_pass_stats.water_draws += water_stats.water_draws;
+        m_last_render_pass_stats.water_indices_drawn += water_stats.water_indices;
         end_gpu_pass_timer(GpuTimerPass::Water);
         glBindVertexArray(0);  // Unbind after water pass
     }
