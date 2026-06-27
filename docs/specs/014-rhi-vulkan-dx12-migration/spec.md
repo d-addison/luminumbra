@@ -38,6 +38,23 @@
 > not a hash. Any sim/worldgen touch (there should be none) must keep the legacy `default` preset
 > byte-identical: `--smoke == 6f008a9f637c40b7`.
 
+> **REVISED 2026-06-26 (engine-infrastructure critique, finding F3 —
+> `.forge/critique-engine-infrastructure-framework-20260626-200421.md`).** The critique flags a
+> *hidden big-bang*: the original Phase A required **all 13 passes** expressed behind the seam with
+> **no raw-GL escape hatch** (`FR-A.5`) AND **full-pipeline** GL-via-Diligent FLIP parity (`FR-B.1`)
+> *before* the first Vulkan pass (Group C) — i.e. the whole renderer is committed to Diligent before
+> any backend is proven. Two corrections, folded in below:
+> 1. **Diligent is the backend, not the framework.** The engine owns a thin render abstraction —
+>    **spec 016 (render framework: frame graph / pass contracts / resource registry)** — and Diligent
+>    implements *behind* it. 014 expresses passes against the **016 seam**, not against Diligent's API
+>    directly, so the engine is not hostage to one library's resource model.
+> 2. **Pilot before commit (new Phase A0).** Prove the seam end-to-end on **one low-risk pass
+>    (DebugViewPass) + one high-risk pass (lighting or SSAO)** through the FULL stack — 016 contract +
+>    shader reflection (Group F brought *earlier* for the pilot pair) + dual-backend (GL-via-Diligent
+>    **and** native Vulkan) FLIP parity — **before** porting the remaining passes. Raw GL stays as a
+>    **comparison backend** during migration, not as an unstructured per-pass escape hatch.
+> `FR-A.5`, `FR-B.1`, and the phasing are amended accordingly (see the ⟦F3⟧ marks).
+
 ## Context
 
 Luminumbra renders with a hand-rolled **OpenGL 4.5 deferred pipeline**: ~12 passes — shadow, gbuffer,
@@ -97,24 +114,49 @@ near-field mesh). It is sequenced strictly by **risk**: cheapest, most-reversibl
 - **FR-A.1 (vendor + device).** Vendor Diligent Engine (Apache-2.0) via FetchContent (per the
   worktree/vendor hazard in memory — FetchContent, not a junction). Introduce an `IRenderDevice` /
   swapchain wrapper that creates a Diligent render device + swapchain and exposes our window surface.
-- **FR-A.2 (resource seam).** Express the renderer's buffers, textures, samplers, and render targets as
-  Diligent resources behind a thin RHI type set (`RhiBuffer`, `RhiTexture`, `RhiPipeline`, `RhiCmd`),
-  so passes allocate/bind through the seam, not through GL calls.
+- **FR-A.2 (resource seam — ⟦F3 clarified⟧).** Express the renderer's buffers, textures, samplers, and
+  render targets behind a thin RHI type set (`RhiBuffer`, `RhiTexture`, `RhiPipeline`, `RhiCmd`), so
+  passes allocate/bind through the seam, not through GL calls. **These `Rhi*` types are the
+  backend-facing *implementation* of spec 016's engine-owned resource handles — ONE abstraction, two
+  layers: spec 016 defines the engine-/pass-facing `RenderContext` + typed handles + resource
+  registry; this spec backs those handles with Diligent resources (GL/Vulkan/DX12). Passes see the
+  016 handles; the `Rhi*` types live beneath them. They are not a second, competing engine-facing
+  abstraction.** (Avoids the double-abstraction trap; see spec 016 OQ-2.)
 - **FR-A.3 (pipeline + command seam).** Express pipeline state (shaders, blend/depth/raster, vertex
   layout) and command recording (begin pass, bind, draw/dispatch, barriers) through Diligent's PSO +
   command-list model. The ~12 passes record into RHI command lists.
 - **FR-A.4 (G-Buffer + deferred targets).** The deferred G-Buffer (and all intermediate render targets:
   shadow atlas, ssao, lighting accum, water, taau history) become RHI textures with explicit layouts/
   barriers — Diligent's explicit-state model makes Vulkan/DX12 layout transitions correct by construction.
-- **FR-A.5 (seam covers all 13 passes).** The seam must cover, by name: shadow, gbuffer, ssao, lighting,
-  water, skybox, particle, foliage, plant-procgen, aerial, TAAU, blit, GroundDecalPass, DebugViewPass.
-  No pass keeps a raw-GL escape hatch once ported (a pass is either GL-via-Diligent or backend-native).
+- **FR-A.5 (seam covers all 13 passes — ⟦F3 amended⟧).** The seam must *eventually* cover, by name:
+  shadow, gbuffer, ssao, lighting, water, skybox, particle, foliage, plant-procgen, aerial, TAAU,
+  blit, GroundDecalPass, DebugViewPass — and a fully-ported pass keeps no raw-GL escape hatch (it is
+  GL-via-Diligent or backend-native). **But this is the END STATE of the pass-by-pass port (Group D),
+  NOT a Phase-A precondition.** Phase A only requires the seam to exist and the **pilot pair**
+  (`FR-A0.*`) to run through it. The seam is the engine-owned **spec 016** abstraction; Diligent is
+  its backend (do not express passes against Diligent's API directly).
+
+- **FR-A0.1 (pilot pair — NEW, ⟦F3⟧).** Before mass porting, prove the full stack on **two** passes:
+  **DebugViewPass** (low risk: one fullscreen triangle, no G-Buffer dep) and **one high-risk pass**
+  (lighting or ssao — real G-Buffer reads, shadow/ssao inputs, a non-trivial shader). Both run
+  through the spec-016 contract, with their shaders ported to single-source HLSL + reflection
+  (Group F, pulled earlier for the pilot pair only).
+- **FR-A0.2 (dual-backend pilot parity — NEW, ⟦F3⟧).** Each pilot pass must FLIP-match across **both**
+  GL-via-Diligent **and** native Vulkan, in-process, before Group D begins. This proves shader
+  translation, resource binding, debug parity, and Vulkan behavior on a *representative* hard pass —
+  the things the big-bang would have discovered late.
+- **FR-A0.3 (raw GL as comparison backend — NEW, ⟦F3⟧).** Raw GL is retained as a **comparison
+  backend** for FLIP diffing during migration, not as an unstructured escape hatch inside ported
+  passes. A pass is: raw-GL (not yet ported), GL-via-Diligent, or backend-native — never a hybrid.
 
 ### Group B — GL backend via Diligent (no-change baseline, keep shipping)
 
-- **FR-B.1 (GL-via-Diligent baseline).** Bring up Diligent's **OpenGL** backend first and route the
-  full pipeline through it. This is the **no-change baseline**: rendered output must FLIP-match the
-  current raw-GL output within the parity harness's threshold.
+- **FR-B.1 (GL-via-Diligent baseline — ⟦F3 amended⟧).** Bring up Diligent's **OpenGL** backend behind
+  the spec-016 seam. Each pass's GL-via-Diligent output must FLIP-match the current raw-GL output
+  within threshold and is registered as that pass's parity reference. **This baseline is built
+  INCREMENTALLY as passes port (it is not a full-13-pass gate that must complete before the Phase-A0
+  Vulkan pilot).** The pilot pair proves GL-via-Diligent *and* native Vulkan together (FR-A0.2);
+  full-pipeline GL-via-Diligent parity is reached over Groups A→D, not up front.
 - **FR-B.2 (shipping path unchanged).** GL-via-Diligent remains the **default ship backend** until a
   given pass's Vulkan/DX12 path is parity-proven. Backend selection is a runtime/env flag
   (e.g. `LUMIN_RHI=gl|vulkan|dx12`), defaulting to GL.
@@ -264,19 +306,30 @@ near-field mesh). It is sequenced strictly by **risk**: cheapest, most-reversibl
 
 ## Suggested phasing (risk order — cheapest, most-reversible first)
 
-1. **Phase A — RHI seam + GL-via-Diligent baseline** (Groups A, B). Vendor Diligent, express the 13
-   passes behind the seam, run on Diligent's GL backend, FLIP-match raw-GL, register the baseline. Most
-   reversible: still 100% GL, just abstracted.
-2. **Phase B — Vulkan device + DebugViewPass, FLIP-diffed** (Group C). The **cheapest first real step**:
-   one fullscreen pass on Vulkan, diffed in-process against GL. Proves the whole pattern end-to-end.
-3. **Phase C — Single-source HLSL shaders** (Group F). Port shaders to HLSL, FLIP-validated on
-   GL-via-Diligent first (isolates shader-port defects from backend defects), unblocking native Vulkan/DX12.
-4. **Phase D — Pass-by-pass Vulkan port** (Group D). Port remaining passes Vulkan-native in risk order,
-   each FLIP+frame-health gated, until Vulkan is full-pipeline parity.
-5. **Phase E — DX12 backend** (Group E). Device bring-up + per-pass FLIP, reusing the HLSL/DXIL compile.
-6. **Phase F — DLSS via Streamline** (Group G). Replace TAAU on RTX; TAAU fallback retained.
-7. **Phase G — RT-GI/AO** (Group H). BLAS from MC mesh + TLAS over streamed chunks; closes the cave gap.
-8. **Phase H — RT reflections** (Group I). TLAS-traced reflections for water/reflective surfaces.
+1. **Phase A — RHI seam (engine-owned, over spec 016)** (Group A). Vendor Diligent and stand up the
+   `RenderContext`/resource/command seam **as spec 016's render framework**, with Diligent as its
+   backend. Do **not** require all 13 passes ported here — just the seam + enough scaffolding for the
+   pilot. Most reversible: still 100% raw GL except the pilot.
+2. **Phase A0 — Pilot pair, dual-backend FLIP** (⟦F3⟧ Groups A0 + early F). Port **DebugViewPass**
+   (low risk) **and one high-risk pass** (lighting or ssao) through the seam, with their shaders on
+   single-source HLSL + reflection, and prove **GL-via-Diligent AND native Vulkan FLIP parity** on
+   both, in-process. This is the real go/no-go on Diligent: if shader translation, binding, or Vulkan
+   parity is wrong, we learn it here on 2 passes, not after committing the whole renderer.
+3. **Phase B — Single-source HLSL for remaining passes** (Group F). With the pilot proving the shader
+   path, port the rest of the shaders to HLSL, FLIP-validated on GL-via-Diligent first (isolates
+   shader-port defects from backend defects).
+4. **Phase C — Pass-by-pass port** (Groups B baseline + D), incrementally registering each pass's
+   GL-via-Diligent baseline (FR-B.1) and then its native Vulkan parity (FR-D.2), in risk order, until
+   Vulkan is full-pipeline parity and `FR-A.5`'s no-escape-hatch end state holds.
+5. **Phase D — DX12 backend** (Group E). Device bring-up + per-pass FLIP, reusing the HLSL/DXIL compile.
+6. **Phase E — DLSS via Streamline** (Group G). Replace TAAU on RTX; TAAU fallback retained.
+7. **Phase F — RT-GI/AO** (Group H). BLAS from MC mesh + TLAS over streamed chunks; closes the cave gap.
+8. **Phase G — RT reflections** (Group I). TLAS-traced reflections for water/reflective surfaces.
+
+> ⟦F3⟧ Net change vs. the original phasing: the old "Phase A — express all 13 passes + full-pipeline
+> GL baseline before any Vulkan" is replaced by **Phase A (seam only) → Phase A0 (2-pass dual-backend
+> pilot) → incremental baseline+port**. The big-bang precondition is gone; the rest of the sequence
+> (DX12, DLSS, RT) is unchanged.
 
 ## Open Questions
 
