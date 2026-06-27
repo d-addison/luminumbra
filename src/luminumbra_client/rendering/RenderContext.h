@@ -143,7 +143,7 @@ struct RenderContext {
 
     // Group M — stat out-pointers (passes that mutate stats in-place).
     std::size_t* lighting_draws = nullptr;   // <- &m_last_render_pass_stats.lighting_draws
-    u32* skybox_draw_counter = nullptr;      // <- &m_last_render_pass_stats.skybox_draws
+    std::size_t* skybox_draw_counter = nullptr; // <- &m_last_render_pass_stats.skybox_draws (size_t)
 
     // Destination resolution helpers (screen vs offscreen preview target).
     FboHandle dest_fbo() const {

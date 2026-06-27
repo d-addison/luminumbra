@@ -708,11 +708,13 @@ private:
     // ShadowPass friend removed (Spec 016-P2-T10): reads from RenderContext + ShadowPassInput + make_terrain_submitter().
     // GBufferPass friend removed (Spec 016-P2-T11): converted pass has 0 pipeline refs (RenderContext + GBufferPassInput).
     // SsaoPass friend removed (Spec 016-P2-T02): SsaoPass now reads from RenderContext.
-    friend class LightingPass;
+    // LightingPass friend removed (Spec 016-P2-T12): RenderContext seam (cascade fixup hoisted to make_lighting_context).
     // WaterPass friend removed (Spec 016-P3-T16): reads from RenderContext + WaterPassInput.
-    friend class SkyboxPass;
+    // SkyboxPass friend removed (Spec 016-P1-T04): RenderContext seam (opaque-copy relocated to the call site).
     // ParticlePass + FoliagePass friends removed (Spec 016-P3-T18/T17): read from RenderContext.
     // PlantProcgenPass friend removed (Spec 016-P3-T14): reads from RenderContext.
+    // === Spec 016 AC-001: the RenderPipeline friend list is EMPTY — every render
+    // === pass is decoupled from the god-object behind the RenderContext seam.
 
     struct ChunkMeshSnapshot {
         ChunkID id = 0;
@@ -752,6 +754,10 @@ private:
     // Spec 016 (016-P2-T11): GBuffer pass contract (frame state; submit callback +
     // far-LOD + static-model lane + impostors travel via GBufferPassInput).
     RenderContext make_gbuffer_context(const Camera& camera, const glm::vec4 frustum_planes[6]);
+    // Spec 016 (016-P2-T12 / 016-P1-T04): Lighting + Skybox pass contracts.
+    // make_lighting_context also runs the hoisted shadow-cascade fixup (CPU-only).
+    RenderContext make_lighting_context(const Camera& camera);
+    RenderContext make_skybox_context(const Camera& camera);
 
     std::vector<ChunkMeshSnapshot> build_chunk_snapshots(const std::vector<Chunk*>& renderable_chunks) const;
 

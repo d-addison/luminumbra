@@ -1,10 +1,8 @@
 #include "LightingPass.h"
 
-#include "GBufferPass.h"
 #include "PassGlHelpers.h"
-#include "ShadowPass.h"
-#include "SsaoPass.h"
-#include "WaterPass.h"
+#include "../RenderContext.h"
+#include "../ShadowMap.h"
 #include "core/Log.h"
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
@@ -78,7 +76,7 @@ void LightingPass::reset_shader() {
     m_lighting_shader.reset();
 }
 
-void LightingPass::copy_lighting_color_to_opaque_texture(RenderPipeline& pipeline) {
+void LightingPass::copy_lighting_color_to_opaque_texture(const RenderContext& ctx) {
     if (!m_lighting_fbo.fbo_id || !m_lighting_fbo.color_texture || !m_lighting_fbo.opaque_color_texture) {
         return;
     }
@@ -86,38 +84,38 @@ void LightingPass::copy_lighting_color_to_opaque_texture(RenderPipeline& pipelin
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_lighting_fbo.fbo_id);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glBindTexture(GL_TEXTURE_2D, m_lighting_fbo.opaque_color_texture);
-    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, pipeline.m_screen_width, pipeline.m_screen_height);
+    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, ctx.screen_width, ctx.screen_height);
     glBindTexture(GL_TEXTURE_2D, 0);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 }
 
-void LightingPass::execute(RenderPipeline& pipeline, const Camera& camera) {
+void LightingPass::execute(const RenderContext& ctx) {
+    const Camera& camera = *ctx.camera;
     glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_fbo.fbo_id);
-    glViewport(0, 0, pipeline.m_screen_width, pipeline.m_screen_height);
+    glViewport(0, 0, ctx.screen_width, ctx.screen_height);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     m_lighting_shader->use();
-    const GBuffer& gbuffer = pipeline.m_gbuffer_pass->gbuffer();
-    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, gbuffer.position_texture);    // View-space position
-    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, gbuffer.normal_texture);      // Octahedral normal + material
-    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, gbuffer.albedo_texture);      // Albedo + roughness
-    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, gbuffer.material_texture);    // Metallic + AO
-    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, gbuffer.depth_texture);
-    glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_shadow_pass->shadow_map().depth_texture_array);
-    glActiveTexture(GL_TEXTURE6); glBindTexture(GL_TEXTURE_2D, pipeline.m_ssao_pass->ssao().ssaoColorBufferBlur);
-    glActiveTexture(GL_TEXTURE7); glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_terrainTextureArray);
-    glActiveTexture(GL_TEXTURE8); glBindTexture(GL_TEXTURE_2D, pipeline.m_materialLUT);
-    glActiveTexture(GL_TEXTURE9); glBindTexture(GL_TEXTURE_2D, pipeline.m_water_pass->black_texture());
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_position.id);    // View-space position
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_normal.id);      // Octahedral normal + material
+    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_albedo.id);      // Albedo + roughness
+    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_material.id);    // Metallic + AO
+    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_depth.id);
+    glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.shadow_depth_array.id);
+    glActiveTexture(GL_TEXTURE6); glBindTexture(GL_TEXTURE_2D, ctx.ssao_blur.id);
+    glActiveTexture(GL_TEXTURE7); glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.terrain_textures.id);
+    glActiveTexture(GL_TEXTURE8); glBindTexture(GL_TEXTURE_2D, ctx.material_lut.id);
+    glActiveTexture(GL_TEXTURE9); glBindTexture(GL_TEXTURE_2D, ctx.caustics_tex.id);
     // T-I6-A1d: Aetheric emissive field at unit 10 (gated by u_aetherActive). When
     // no field is uploaded the texture is 0 and u_aetherActive=0, so the glow term
     // is skipped -> pixel-identical to the pre-A1d path.
     glActiveTexture(GL_TEXTURE10);
-    glBindTexture(GL_TEXTURE_2D, pipeline.m_aetherFieldTexture);
+    glBindTexture(GL_TEXTURE_2D, ctx.aether_field.id);
     m_lighting_shader->setInt("u_aetherField", 10);
-    if (pipeline.m_aetherFieldActive && pipeline.m_aetherFieldExtent > 0) {
-        const float world_span = static_cast<float>(pipeline.m_aetherFieldExtent) *
-                                 pipeline.m_aetherFieldCellSize;
+    if (ctx.aether_active && ctx.aether_extent > 0) {
+        const float world_span = static_cast<float>(ctx.aether_extent) *
+                                 ctx.aether_cell_size;
         m_lighting_shader->setFloat("u_aetherActive", 1.0f);
-        m_lighting_shader->setVec2("u_aetherFieldWorldOrigin", pipeline.m_aetherFieldWorldOrigin);
+        m_lighting_shader->setVec2("u_aetherFieldWorldOrigin", ctx.aether_world_origin);
         m_lighting_shader->setFloat("u_aetherFieldInvWorldSpan",
                                     world_span > 0.0f ? (1.0f / world_span) : 0.0f);
     } else {
@@ -134,17 +132,17 @@ void LightingPass::execute(RenderPipeline& pipeline, const Camera& camera) {
     m_lighting_shader->setInt("u_ssao", 6);
     m_lighting_shader->setInt("u_terrainTextures", 7);
     m_lighting_shader->setInt("u_materialLUT", 8);
-    m_lighting_shader->setFloat("u_emissiveLutScale", RenderPipeline::kEmissiveLutScale);
+    m_lighting_shader->setFloat("u_emissiveLutScale", ctx.emissive_lut_scale);
     m_lighting_shader->setInt("u_causticsTexture", 9);
-    m_lighting_shader->setVec3("u_skyAmbientColor", pipeline.m_skyAmbientColor);
+    m_lighting_shader->setVec3("u_skyAmbientColor", ctx.sky_ambient_color);
     m_lighting_shader->setVec3("u_viewPos", camera.Position);
-    m_lighting_shader->setVec3("u_sun.direction", pipeline.m_sun.direction);
-    m_lighting_shader->setVec3("u_sun.color", pipeline.m_sun.color);
+    m_lighting_shader->setVec3("u_sun.direction", ctx.sun.direction);
+    m_lighting_shader->setVec3("u_sun.color", ctx.sun.color);
     // moon-shadows: the moon's TOWARD-LIGHT direction (anti-sun, overhead at
     // midnight; same convention the shader uses for u_sun.direction). The shader
     // lights + keys the cast-shadow lookup off this so moonlit terrain has real
     // directional form and shadows from the now-moon shadow cascade.
-    m_lighting_shader->setVec3("u_moonDir", pipeline.m_moonLightDir);
+    m_lighting_shader->setVec3("u_moonDir", ctx.moon_light_dir);
     m_lighting_shader->setFloat("u_sea_level", SEA_LEVEL);
     // T-I7 cinematic grade (BF1-style): BOLD default — lifted exposure, rich
     // saturation, strong contrast, and a cool-shadow / warm-highlight split-tone
@@ -168,13 +166,13 @@ void LightingPass::execute(RenderPipeline& pipeline, const Camera& camera) {
     m_lighting_shader->setVec3("u_shadowTint", glm::vec3(0.88f, 0.96f, 1.14f));   // cool
     m_lighting_shader->setVec3("u_highlightTint", glm::vec3(1.14f, 1.04f, 0.84f)); // warm
     m_lighting_shader->setFloat("u_splitToneStrength", 0.55f);
-    m_lighting_shader->setInt("u_pointLightCount", static_cast<int>(pipeline.m_point_lights_this_frame.size()));
-    for(size_t i = 0; i < pipeline.m_point_lights_this_frame.size(); ++i) {
+    m_lighting_shader->setInt("u_pointLightCount", static_cast<int>(ctx.point_lights->size()));
+    for(size_t i = 0; i < ctx.point_lights->size(); ++i) {
         std::string prefix = "u_pointLights[" + std::to_string(i) + "].";
-        m_lighting_shader->setVec3(prefix + "position", pipeline.m_point_lights_this_frame[i].position);
-        m_lighting_shader->setVec3(prefix + "color", pipeline.m_point_lights_this_frame[i].color);
-        m_lighting_shader->setFloat(prefix + "radius", pipeline.m_point_lights_this_frame[i].radius);
-        m_lighting_shader->setFloat(prefix + "intensity", pipeline.m_point_lights_this_frame[i].intensity);
+        m_lighting_shader->setVec3(prefix + "position", (*ctx.point_lights)[i].position);
+        m_lighting_shader->setVec3(prefix + "color", (*ctx.point_lights)[i].color);
+        m_lighting_shader->setFloat(prefix + "radius", (*ctx.point_lights)[i].radius);
+        m_lighting_shader->setFloat(prefix + "intensity", (*ctx.point_lights)[i].intensity);
     }
     // Cave / sky-visibility ambient occlusion (render-only). Default OFF =>
     // u_caveAmbientOcclusion 0.0 => the shader's skyVis term is exactly 1.0 =>
@@ -184,11 +182,11 @@ void LightingPass::execute(RenderPipeline& pipeline, const Camera& camera) {
     {
         const glm::mat4 cave_proj = glm::perspective(
             glm::radians(camera.Zoom),
-            static_cast<float>(pipeline.m_screen_width) / static_cast<float>(pipeline.m_screen_height),
+            static_cast<float>(ctx.screen_width) / static_cast<float>(ctx.screen_height),
             camera.GetNearPlane(), camera.GetFarPlane());
         m_lighting_shader->setMat4("u_projection", cave_proj);
         m_lighting_shader->setVec2("u_screenSize",
-            glm::vec2(pipeline.m_screen_width, pipeline.m_screen_height));
+            glm::vec2(ctx.screen_width, ctx.screen_height));
 
         struct CaveAO { float enabled, maxDist, floor, thickness; int steps; };
         static const CaveAO s_caveAO = [] {
@@ -212,17 +210,13 @@ void LightingPass::execute(RenderPipeline& pipeline, const Camera& camera) {
         m_lighting_shader->setFloat("u_pointLightInvSqMix", 0.0f);
     }
     m_lighting_shader->setFloat("u_farPlane", camera.GetFarPlane());
-    ShadowMap& shadow_map = pipeline.m_shadow_pass->shadow_map();
-    if (!PassGl::has_valid_shadow_cascade_splits(shadow_map)) {
-        LUMINUMBRA_CORE_ERROR("Shadow cascade splits were invalid during lighting; restoring defaults.");
-        PassGl::set_default_shadow_cascade_splits(shadow_map);
-    }
-    if (shadow_map.light_space_matrices.size() < ShadowMap::CASCADE_COUNT) {
-        shadow_map.light_space_matrices = pipeline.get_light_space_matrices(camera);
-    }
-    m_lighting_shader->setVec4("u_cascadeSplits", glm::vec4(shadow_map.cascade_splits[1], shadow_map.cascade_splits[2], shadow_map.cascade_splits[3], shadow_map.cascade_splits[4]));
+    // Spec 016-P2-T12: the shadow-cascade validity/refresh fixup (which MUTATES the
+    // shared ShadowMap private state + calls the pipeline-private
+    // get_light_space_matrices) is hoisted to make_lighting_context; the resolved
+    // splits + matrices arrive via ctx.cascade_splits + ctx.light_space_matrices.
+    m_lighting_shader->setVec4("u_cascadeSplits", ctx.cascade_splits);
     for (int i = 0; i < ShadowMap::CASCADE_COUNT; ++i) {
-        m_lighting_shader->setMat4("u_lightSpaceMatrices[" + std::to_string(i) + "]", shadow_map.light_space_matrices[i]);
+        m_lighting_shader->setMat4("u_lightSpaceMatrices[" + std::to_string(i) + "]", (*ctx.light_space_matrices)[i]);
     }
     glm::vec3 terrainOrigin(floor(camera.Position.x / CHUNK_SIZE_X) * CHUNK_SIZE_X, 0.0f, floor(camera.Position.z / CHUNK_SIZE_Z) * CHUNK_SIZE_Z);
     m_lighting_shader->setVec3("u_terrainOrigin", terrainOrigin);
@@ -232,7 +226,7 @@ void LightingPass::execute(RenderPipeline& pipeline, const Camera& camera) {
     // shadow stay registered. u_cloudShadowEnabled==0 is the zero-cost OFF path
     // (the gate captures clouds-on vs clouds-off lighting ms). RENDER-ONLY (F2).
     {
-        const CloudRenderState& cloud = pipeline.get_cloud_state();
+        const CloudRenderState& cloud = ctx.cloud_state;
         const bool shadow_on = cloud.enabled && cloud.shadow_enabled && cloud.shadow_strength > 0.0f;
         m_lighting_shader->setInt("u_cloudShadowEnabled", shadow_on ? 1 : 0);
         m_lighting_shader->setVec2("u_cloudScrollOffset", cloud.scroll_offset);
@@ -242,21 +236,20 @@ void LightingPass::execute(RenderPipeline& pipeline, const Camera& camera) {
         m_lighting_shader->setFloat("u_cloudShadowStrength", cloud.shadow_strength);
         m_lighting_shader->setVec3("u_cloudSunDir", cloud.sun_travel_dir);
     }
-    glBindVertexArray(pipeline.m_screen_quad_vao);
+    glBindVertexArray(ctx.screen_quad_vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    pipeline.m_last_render_pass_stats.lighting_draws++;
+    if (ctx.lighting_draws) ++(*ctx.lighting_draws);
     glBindVertexArray(0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-void LightingPass::execute_lightning_overlay(RenderPipeline& pipeline, const Camera& camera) {
-    (void)camera;
-    const LightningRenderState& lit = pipeline.get_lightning_state();
+void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
+    const LightningRenderState& lit = *ctx.lightning_state;
     if (!lit.active || lit.pulse_intensity <= 0.0f) {
         return; // zero-cost OFF path (no strike this frame)
     }
-    const int w = static_cast<int>(pipeline.m_screen_width);
-    const int h = static_cast<int>(pipeline.m_screen_height);
+    const int w = static_cast<int>(ctx.screen_width);
+    const int h = static_cast<int>(ctx.screen_height);
     if (w <= 0 || h <= 0 || !m_lighting_fbo.fbo_id || !m_lighting_fbo.color_texture) {
         return;
     }
@@ -331,13 +324,13 @@ void LightingPass::execute_lightning_overlay(RenderPipeline& pipeline, const Cam
             "u_bolt[" + std::to_string(i) + "]", lit.bolt_points_ndc[static_cast<std::size_t>(i)]);
     }
 
-    glBindVertexArray(pipeline.m_screen_quad_vao);
+    glBindVertexArray(ctx.screen_quad_vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
     glEnable(GL_DEPTH_TEST);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-    pipeline.m_last_render_pass_stats.lighting_draws++;
+    if (ctx.lighting_draws) ++(*ctx.lighting_draws);
 }
 
 } // namespace Luminumbra::Rendering

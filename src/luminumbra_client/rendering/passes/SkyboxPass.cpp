@@ -1,8 +1,7 @@
 #include "SkyboxPass.h"
 
-#include "GBufferPass.h"
-#include "LightingPass.h"
 #include "PassGlHelpers.h"
+#include "core/IsolationConfig.h"
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
 
@@ -80,7 +79,7 @@ void SkyboxPass::reset_shader() {
     m_weather_shader.reset();
 }
 
-void SkyboxPass::execute(RenderPipeline& pipeline, const Camera& camera, bool draw_weather_overlay) {
+void SkyboxPass::execute(const RenderContext& ctx, const Camera& camera, bool draw_weather_overlay) {
     glDepthFunc(GL_LEQUAL);
     // The camera sits inside the skybox cube, so its upward faces wind
     // clockwise from the inside view and were backface-culled (black wedges
@@ -96,7 +95,7 @@ void SkyboxPass::execute(RenderPipeline& pipeline, const Camera& camera, bool dr
     // capture chain is a v2 deferral.)
     {
         namespace SH = Luminumbra::Client::ScenarioHarness;
-        const SH::IsolationConfig& iso = pipeline.isolation_config();
+        const SH::IsolationConfig& iso = *ctx.isolation;
         int backdrop_mode = 0;
         glm::vec3 backdrop_color(0.02f);
         switch (iso.backdrop) {
@@ -109,7 +108,7 @@ void SkyboxPass::execute(RenderPipeline& pipeline, const Camera& camera, bool dr
         m_skybox_shader->setInt("u_backdropMode", backdrop_mode);
         m_skybox_shader->setVec3("u_backdropColor", backdrop_color);
     }
-    glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)pipeline.m_screen_width / (float)pipeline.m_screen_height, camera.GetNearPlane(), camera.GetFarPlane());
+    glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)ctx.screen_width / (float)ctx.screen_height, camera.GetNearPlane(), camera.GetFarPlane());
     glm::mat4 view = glm::mat4(glm::mat3(camera.GetViewMatrix())); // remove translation
     m_skybox_shader->setMat4("view", view);
     m_skybox_shader->setMat4("projection", projection);
@@ -117,32 +116,32 @@ void SkyboxPass::execute(RenderPipeline& pipeline, const Camera& camera, bool dr
     // noon). The skybox shader compares dot(viewDir, u_sunDirection) against
     // ~1 to place the sun/moon discs, so it needs the toward-body directions:
     // with the old wiring the discs sat below the horizon and never rendered.
-    m_skybox_shader->setVec3("u_sunDirection", -pipeline.m_sun.direction);
-    m_skybox_shader->setVec3("u_moonDirection", -pipeline.m_moonDirection);
-    m_skybox_shader->setFloat("u_sunIntensity", pipeline.m_sun.intensity);
+    m_skybox_shader->setVec3("u_sunDirection", -ctx.sun.direction);
+    m_skybox_shader->setVec3("u_moonDirection", -ctx.moon_direction);
+    m_skybox_shader->setFloat("u_sunIntensity", ctx.sun.intensity);
     // T-I4-DR-tod-sky-balance: continuous day->twilight->night factor from the
     // sun elevation (1 sun high, ~0 sun below horizon). The dome derives its
     // brightness/tint from this instead of the clamped u_sunIntensity, so the
     // dusk dome warms/darkens and the night dome goes genuinely dark in lockstep
     // with the terrain lighting that shares the same elevation signal.
-    m_skybox_shader->setFloat("u_skyDayFactor", pipeline.m_skyDayFactor);
-    m_skybox_shader->setFloat("u_time", (float)glfwGetTime());
+    m_skybox_shader->setFloat("u_skyDayFactor", ctx.sky_day_factor);
+    m_skybox_shader->setFloat("u_time", ctx.time_seconds);
     // T-I5a-6: bind the Hillaire scattering LUTs. The sky-view LUT supplies the
     // dome COLOR and the transmittance LUT colors the sun disc; both are shared
     // with the lighting pass + aerial-perspective term for a coherent palette.
-    const bool sky_lut_ready = pipeline.m_sky_lut.ready();
+    const bool sky_lut_ready = ctx.sky_lut_ready;
     if (sky_lut_ready) {
         glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, pipeline.m_sky_lut.sky_view_texture());
+        glBindTexture(GL_TEXTURE_2D, ctx.sky_view_lut.id);
         glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, pipeline.m_sky_lut.transmittance_texture());
+        glBindTexture(GL_TEXTURE_2D, ctx.transmittance_lut.id);
         m_skybox_shader->setInt("u_skyViewLut", 0);
         m_skybox_shader->setInt("u_transmittanceLut", 1);
     }
     m_skybox_shader->setInt("u_useSkyLut", sky_lut_ready ? 1 : 0);
     // dot(toward-sun, up): the transmittance LUT's mu axis. up is +Y; the
     // pipeline stores the light-travel direction, so toward-sun is -direction.
-    m_skybox_shader->setFloat("u_sunCosZenith", glm::dot(-pipeline.m_sun.direction, glm::vec3(0.0f, 1.0f, 0.0f)));
+    m_skybox_shader->setFloat("u_sunCosZenith", glm::dot(-ctx.sun.direction, glm::vec3(0.0f, 1.0f, 0.0f)));
     // T-I5a-8 (C3): push the wind-advected cloud-coverage state to the sky-dome.
     // The shader holds GLSL defaults, but the live scroll offset/coverage must be
     // pushed each frame or the dome clouds never drift (and never register with the
@@ -152,7 +151,7 @@ void SkyboxPass::execute(RenderPipeline& pipeline, const Camera& camera, bool dr
     // palette gate frames; the cloud.enabled flag gates the PROJECTED CAST SHADOW
     // + wind scroll in the lighting pass, not the visual dome layer.
     {
-        const CloudRenderState& cloud = pipeline.get_cloud_state();
+        const CloudRenderState& cloud = ctx.cloud_state;
         const float coverage = cloud.coverage_amount;
         m_skybox_shader->setVec2("u_cloudScrollOffset", cloud.scroll_offset);
         m_skybox_shader->setFloat("u_cloudCoverageAmount", coverage);
@@ -174,7 +173,7 @@ void SkyboxPass::execute(RenderPipeline& pipeline, const Camera& camera, bool dr
         // sun_up_factor = dot(light-travel-dir, down) = sun elevation sign; >0 day,
         // ~0 at the horizon (dusk/dawn), negative once the sun has set.
         const float sun_up_factor =
-            glm::dot(pipeline.m_sun.direction, glm::vec3(0.0f, -1.0f, 0.0f));
+            glm::dot(ctx.sun.direction, glm::vec3(0.0f, -1.0f, 0.0f));
         // Open only once the sun is WELL below the horizon so the aurora is fully
         // absent through dusk/twilight (the TimeOfDaySweep aurora-gating asserts no
         // green chroma at dusk) and only the deep-night sky shows curtains: 0 at
@@ -184,12 +183,12 @@ void SkyboxPass::execute(RenderPipeline& pipeline, const Camera& camera, bool dr
         m_skybox_shader->setFloat("u_auroraStrength", aurora_strength);
 
         const float storm_floor =
-            glm::clamp(pipeline.get_weather_state().storm_intensity, 0.0f, 1.0f);
+            glm::clamp(ctx.weather_state->storm_intensity, 0.0f, 1.0f);
         m_skybox_shader->setFloat("u_stormSkyFloor", storm_floor);
     }
     glBindVertexArray(m_skybox_vao);
     glDrawArrays(GL_TRIANGLES, 0, 36);
-    pipeline.m_last_render_pass_stats.skybox_draws++;
+    (*ctx.skybox_draw_counter)++;
     glBindVertexArray(0);
     if (sky_lut_ready) {
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, 0);
@@ -200,30 +199,28 @@ void SkyboxPass::execute(RenderPipeline& pipeline, const Camera& camera, bool dr
     }
     glDepthFunc(GL_LESS);
 
-    if (draw_weather_overlay && pipeline.m_weather_type != WeatherType::None && pipeline.m_weather_intensity > 0.0f) {
-        execute_weather_overlay(pipeline, camera, projection);
+    if (draw_weather_overlay && ctx.weather_type != WeatherType::None && ctx.weather_intensity > 0.0f) {
+        execute_weather_overlay(ctx, camera, projection);
     }
 }
 
-void SkyboxPass::execute_weather_overlay(RenderPipeline& pipeline, const Camera& camera) {
-    if (pipeline.m_weather_type == WeatherType::None || pipeline.m_weather_intensity <= 0.0f) {
+void SkyboxPass::execute_weather_overlay(const RenderContext& ctx, const Camera& camera) {
+    if (ctx.weather_type == WeatherType::None || ctx.weather_intensity <= 0.0f) {
         return;
     }
     const glm::mat4 projection = glm::perspective(
         glm::radians(camera.Zoom),
-        static_cast<float>(pipeline.m_screen_width) / static_cast<float>(pipeline.m_screen_height),
+        static_cast<float>(ctx.screen_width) / static_cast<float>(ctx.screen_height),
         camera.GetNearPlane(),
         camera.GetFarPlane());
-    execute_weather_overlay(pipeline, camera, projection);
+    execute_weather_overlay(ctx, camera, projection);
 }
 
-void SkyboxPass::execute_weather_overlay(RenderPipeline& pipeline, const Camera& camera, const glm::mat4& projection) {
+void SkyboxPass::execute_weather_overlay(const RenderContext& ctx, const Camera& camera, const glm::mat4& projection) {
     if (!m_weather_shader || !m_weather_shader->IsValid()) {
         return;
     }
-    const FrameBufferObject& lighting_fbo = pipeline.m_lighting_pass->lighting_fbo();
-    const GBuffer& gbuffer = pipeline.m_gbuffer_pass->gbuffer();
-    if (!lighting_fbo.fbo_id || !lighting_fbo.opaque_color_texture || !pipeline.m_screen_quad_vao) {
+    if (!ctx.lit_scene.id || !ctx.opaque_scene.id || !ctx.screen_quad_vao) {
         return;
     }
 
@@ -231,32 +228,39 @@ void SkyboxPass::execute_weather_overlay(RenderPipeline& pipeline, const Camera&
     // consumed by the water pass this frame, so it is free to reuse) so the
     // overlay can read the full scene while writing back into the lighting
     // FBO color attachment.
-    pipeline.m_lighting_pass->copy_lighting_color_to_opaque_texture(pipeline);
-    glBindFramebuffer(GL_FRAMEBUFFER, lighting_fbo.fbo_id);
+    //
+    // Spec 016 (016-P1-T04): this snapshot copy used to be done here via
+    // pipeline.m_lighting_pass->copy_lighting_color_to_opaque_texture(pipeline).
+    // A pass can no longer reach RenderPipeline, so the copy is RELOCATED to the
+    // RenderPipeline call site, performed under the SAME guard (weather active +
+    // valid overlay shader + complete lighting FBO + screen quad) immediately
+    // before this overlay runs (identical sequence point). ctx.opaque_scene
+    // therefore already holds the post-water snapshot when we read it below.
+    glBindFramebuffer(GL_FRAMEBUFFER, ctx.lit_scene.id);
     glDisable(GL_DEPTH_TEST);
 
     m_weather_shader->use();
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, lighting_fbo.opaque_color_texture);
+    glBindTexture(GL_TEXTURE_2D, ctx.opaque_scene.id);
     glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, gbuffer.depth_texture);
+    glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_depth.id);
     glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, gbuffer.position_texture);
+    glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_position.id);
     glActiveTexture(GL_TEXTURE3);
-    glBindTexture(GL_TEXTURE_2D, gbuffer.normal_texture);
+    glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_normal.id);
     m_weather_shader->setInt("u_sceneColor", 0);
     m_weather_shader->setInt("u_sceneDepth", 1);
     m_weather_shader->setInt("gPosition", 2);
     m_weather_shader->setInt("gNormal", 3);
-    m_weather_shader->setFloat("u_time", (float)glfwGetTime());
+    m_weather_shader->setFloat("u_time", ctx.time_seconds);
     m_weather_shader->setVec3("u_cameraPos", camera.Position);
     m_weather_shader->setMat4("u_inverseView", glm::inverse(camera.GetViewMatrix()));
     m_weather_shader->setMat4("u_inverseProjection", glm::inverse(projection));
     // Weather fog scattering follows the lighting-pass convention (the
     // light-travel direction), unlike the skybox disc uniforms above.
-    m_weather_shader->setVec3("u_sunDirection", pipeline.m_sun.direction);
-    m_weather_shader->setVec3("u_sunColor", pipeline.m_sun.color);
-    m_weather_shader->setFloat("u_sunIntensity", pipeline.m_sun.intensity);
+    m_weather_shader->setVec3("u_sunDirection", ctx.sun.direction);
+    m_weather_shader->setVec3("u_sunColor", ctx.sun.color);
+    m_weather_shader->setFloat("u_sunIntensity", ctx.sun.intensity);
 
     // T-I5a-3 (B1): the weather uniforms are SIM-DRIVEN when a replicated weather
     // state has been pushed (one-way, F2): the WeatherSystem region category +
@@ -273,8 +277,8 @@ void SkyboxPass::execute_weather_overlay(RenderPipeline& pipeline, const Camera&
     float wetness = 0.0f;
     glm::vec3 wind_dir(1.0f, 0.0f, 0.0f);
     float wind_strength = 0.0f;
-    if (pipeline.m_weather_state.driven) {
-        const WeatherRenderState& w = pipeline.m_weather_state;
+    if (ctx.weather_state->driven) {
+        const WeatherRenderState& w = *ctx.weather_state;
         rain = w.rain_intensity;
         snow = w.snow_intensity;
         fog = w.fog_density;
@@ -286,8 +290,8 @@ void SkyboxPass::execute_weather_overlay(RenderPipeline& pipeline, const Camera&
         // Legacy DEBUG mapping. Rain carries a sub-lightning storm component
         // (overcast darkening without flashes) and light fog; Storm enables the
         // full storm path.
-        const float intensity = pipeline.m_weather_intensity;
-        switch (pipeline.m_weather_type) {
+        const float intensity = ctx.weather_intensity;
+        switch (ctx.weather_type) {
             case WeatherType::Rain:
                 rain = intensity;
                 storm = 0.25f * intensity;
@@ -319,7 +323,7 @@ void SkyboxPass::execute_weather_overlay(RenderPipeline& pipeline, const Camera&
     m_weather_shader->setVec3("u_windDirection", wind_dir);
     m_weather_shader->setFloat("u_windStrength", wind_strength);
 
-    glBindVertexArray(pipeline.m_screen_quad_vao);
+    glBindVertexArray(ctx.screen_quad_vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
     glActiveTexture(GL_TEXTURE0);

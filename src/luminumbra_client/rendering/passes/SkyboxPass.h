@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../RenderPipeline.h"
+#include "../RenderContext.h"
 
 #include <filesystem>
 #include <memory>
@@ -16,6 +16,13 @@ class Shader;
 // T-I2-17b: also owns the optional screen-space weather overlay
 // (weather_system.frag). The pipeline can defer the overlay so transparent
 // water still blends over the sky before rain/fog composite over the full scene.
+//
+// Spec 016 (016-P1-T04): converted to the RenderContext seam. execute() and the
+// weather overlay read frame state through a const RenderContext& (built by
+// RenderPipeline::make_skybox_context) instead of RenderPipeline&. The cross-pass
+// opaque-snapshot copy that the overlay used to perform via m_lighting_pass is
+// RELOCATED to the RenderPipeline call site (done under the same guard, at the
+// same sequence point); skybox_draws is bumped through ctx.skybox_draw_counter.
 class SkyboxPass {
 public:
     SkyboxPass();
@@ -26,8 +33,8 @@ public:
     void destroy_geometry();
     void reset_shader();
 
-    void execute(RenderPipeline& pipeline, const Camera& camera, bool draw_weather_overlay = true);
-    void execute_weather_overlay(RenderPipeline& pipeline, const Camera& camera);
+    void execute(const RenderContext& ctx, const Camera& camera, bool draw_weather_overlay = true);
+    void execute_weather_overlay(const RenderContext& ctx, const Camera& camera);
 
     const std::unique_ptr<Shader>& shader() const { return m_skybox_shader; }
     const std::unique_ptr<Shader>& weather_shader() const { return m_weather_shader; }
@@ -35,7 +42,7 @@ public:
     u32 vbo() const { return m_skybox_vbo; }
 
 private:
-    void execute_weather_overlay(RenderPipeline& pipeline, const Camera& camera, const glm::mat4& projection);
+    void execute_weather_overlay(const RenderContext& ctx, const Camera& camera, const glm::mat4& projection);
 
     std::unique_ptr<Shader> m_skybox_shader;
     std::unique_ptr<Shader> m_weather_shader;

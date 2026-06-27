@@ -851,6 +851,113 @@ RenderContext RenderPipeline::make_foliage_context(const Camera& camera) {
     return ctx;
 }
 
+// Spec 016 (016-P2-T12): build the Lighting pass contract from pipeline state.
+// Mirrors make_water_context/make_ssao_context (adopt_texture wrap-existing GL
+// names; PODs by value). The shadow-cascade fixup is HOISTED here from
+// LightingPass::execute because it mutates the shared ShadowMap private state and
+// calls the pipeline-private get_light_space_matrices — both unavailable to a
+// friendless pass. The fixup is CPU-only (no GL), so moving it ahead of the
+// Lighting GPU timer leaves the measured GPU work and every pixel unchanged.
+RenderContext RenderPipeline::make_lighting_context(const Camera& camera) {
+    RenderContext ctx;
+    ctx.camera = &camera;
+    ctx.screen_width = m_screen_width;
+    ctx.screen_height = m_screen_height;
+    ctx.registry = &m_render_registry;
+    ctx.screen_quad_vao = m_screen_quad_vao;
+
+    // Group B — G-buffer attachment handles (adopt-by-name; wrap-existing GL names).
+    ctx.gbuffer_position = m_render_registry.adopt_texture("gbuffer_position", m_gbuffer_pass->gbuffer().position_texture);
+    ctx.gbuffer_normal   = m_render_registry.adopt_texture("gbuffer_normal",   m_gbuffer_pass->gbuffer().normal_texture);
+    ctx.gbuffer_albedo   = m_render_registry.adopt_texture("gbuffer_albedo",   m_gbuffer_pass->gbuffer().albedo_texture);
+    ctx.gbuffer_material = m_render_registry.adopt_texture("gbuffer_material", m_gbuffer_pass->gbuffer().material_texture);
+    ctx.gbuffer_depth    = m_render_registry.adopt_texture("gbuffer_depth",    m_gbuffer_pass->gbuffer().depth_texture);
+
+    // Group E — shadow / SSAO / caustics reads.
+    ctx.shadow_depth_array = m_render_registry.adopt_texture("shadow_depth_array", m_shadow_pass->shadow_map().depth_texture_array);
+    ctx.ssao_blur          = m_render_registry.adopt_texture("ssao_blur",          m_ssao_pass->ssao().ssaoColorBufferBlur);
+    ctx.caustics_tex       = m_render_registry.adopt_texture("caustics_tex",       m_water_pass->black_texture());
+
+    // Group F — terrain / material arrays.
+    ctx.terrain_textures = m_render_registry.adopt_texture("terrain_textures", m_terrainTextureArray);
+    ctx.material_lut     = m_render_registry.adopt_texture("material_lut",     m_materialLUT);
+
+    // Group G — aether field.
+    ctx.aether_field        = m_render_registry.adopt_texture("aether_field", m_aetherFieldTexture);
+    ctx.aether_active       = m_aetherFieldActive;
+    ctx.aether_extent       = m_aetherFieldExtent;
+    ctx.aether_cell_size    = m_aetherFieldCellSize;
+    ctx.aether_world_origin = m_aetherFieldWorldOrigin;
+
+    // Group H — light/atmosphere scalars & vectors.
+    ctx.sun                = m_sun;
+    ctx.sky_ambient_color  = m_skyAmbientColor;
+    ctx.moon_light_dir     = m_moonLightDir;
+    ctx.emissive_lut_scale = kEmissiveLutScale;
+    ctx.point_lights       = &m_point_lights_this_frame;
+    ctx.cloud_state        = m_cloud_state;
+    ctx.lightning_state    = &m_lightning_state;
+
+    // Shadow-cascade fixup HOISTED from LightingPass::execute (mutates the shared
+    // ShadowMap private state + calls the pipeline-private get_light_space_matrices).
+    ShadowMap& shadow_map = m_shadow_pass->shadow_map();
+    if (!PassGl::has_valid_shadow_cascade_splits(shadow_map)) {
+        LUMINUMBRA_CORE_ERROR("Shadow cascade splits were invalid during lighting; restoring defaults.");
+        PassGl::set_default_shadow_cascade_splits(shadow_map);
+    }
+    if (shadow_map.light_space_matrices.size() < ShadowMap::CASCADE_COUNT) {
+        shadow_map.light_space_matrices = get_light_space_matrices(camera);
+    }
+    ctx.cascade_splits = glm::vec4(shadow_map.cascade_splits[1], shadow_map.cascade_splits[2],
+                                   shadow_map.cascade_splits[3], shadow_map.cascade_splits[4]);
+    ctx.light_space_matrices = &shadow_map.light_space_matrices;
+
+    // Group M — stats out-pointer (execute + lightning overlay bump in place).
+    ctx.lighting_draws = &m_last_render_pass_stats.lighting_draws;
+    return ctx;
+}
+
+// Spec 016 (016-P1-T04): the Skybox/sky-dome + weather-overlay pass contract.
+// The dome reads isolation/sun/moon/sky-day/LUTs/cloud/weather + the per-frame
+// time snapshot; the deferred weather overlay additionally reads the lit-scene
+// draw target (lit_scene), the post-water opaque snapshot (opaque_scene), and the
+// g-buffer depth/position/normal. Handles are adopted wrap-existing (the FBOs /
+// textures are still owned by Lighting/GBuffer during the migration). Built AFTER
+// the gbuffer->lighting depth blit, mirroring the production sequence. The dome's
+// skybox_draws bump rides ctx.skybox_draw_counter (Group M out-pointer).
+RenderContext RenderPipeline::make_skybox_context(const Camera& camera) {
+    RenderContext ctx;
+    ctx.camera = &camera;
+    ctx.screen_width = m_screen_width;
+    ctx.screen_height = m_screen_height;
+    ctx.registry = &m_render_registry;
+    ctx.screen_quad_vao = m_screen_quad_vao;
+    ctx.time_seconds = m_wall_clock_time;
+    ctx.sun = m_sun;
+    ctx.moon_direction = m_moonDirection;
+    ctx.sky_day_factor = m_skyDayFactor;
+    ctx.sky_lut_ready = m_sky_lut.ready();
+    ctx.cloud_state = m_cloud_state;
+    ctx.weather_state = &m_weather_state;
+    ctx.weather_type = m_weather_type;
+    ctx.weather_intensity = m_weather_intensity;
+    ctx.isolation = &m_isolation_config;
+    ctx.skybox_draw_counter = &m_last_render_pass_stats.skybox_draws;
+    // Adopt the scattering LUTs only when ready -- exactly when the dome binds
+    // them (the dome guards on ctx.sky_lut_ready; left as default {0} otherwise).
+    if (m_sky_lut.ready()) {
+        ctx.sky_view_lut = m_render_registry.adopt_texture("sky_view_lut", m_sky_lut.sky_view_texture());
+        ctx.transmittance_lut = m_render_registry.adopt_texture("transmittance_lut", m_sky_lut.transmittance_texture());
+    }
+    // Weather-overlay reaches (also harmless for the dome path, which ignores them).
+    ctx.lit_scene = m_render_registry.adopt_fbo("lit_scene", m_lighting_pass->lighting_fbo().fbo_id);
+    ctx.opaque_scene = m_render_registry.adopt_texture("opaque_scene", m_lighting_pass->lighting_fbo().opaque_color_texture);
+    ctx.gbuffer_depth = m_render_registry.adopt_texture("gbuffer_depth", m_gbuffer_pass->gbuffer().depth_texture);
+    ctx.gbuffer_position = m_render_registry.adopt_texture("gbuffer_position", m_gbuffer_pass->gbuffer().position_texture);
+    ctx.gbuffer_normal = m_render_registry.adopt_texture("gbuffer_normal", m_gbuffer_pass->gbuffer().normal_texture);
+    return ctx;
+}
+
 // Spec 016 terrain-submit seam (Codex-signed-off). Reproduces the EXACT current
 // GBuffer/Shadow submit (CullHierarchical + draw_chunks_mdi) and RETURNS the
 // counts — no stats mutation, no sort/cache/readback, no hierarchy rebuild (the
@@ -2170,10 +2277,15 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
         glBindVertexArray(0);  // Unbind after SSAO blur
     }
 
-    // 4. LIGHTING PASS (Renders to m_lighting_fbo)
+    // 4. LIGHTING PASS (Renders to m_lighting_fbo) — Spec 016-P2-T12 RenderContext seam.
     glEnable(GL_CULL_FACE);
+    // Built ONCE at function scope (NOT a {} block): the same lighting_ctx is reused
+    // by the opaque-copy (step 7) and lightning-overlay (step 8b) below — the fields
+    // they read are frame-stable, so reuse == rebuild. make_lighting_context also runs
+    // the hoisted shadow-cascade fixup (CPU-only, render-neutral) before the GPU timer.
+    RenderContext lighting_ctx = make_lighting_context(camera);
     begin_gpu_pass_timer(GpuTimerPass::Lighting);
-    m_lighting_pass->execute(*this, camera);
+    m_lighting_pass->execute(lighting_ctx);
     end_gpu_pass_timer(GpuTimerPass::Lighting);
     glBindVertexArray(0);  // Unbind after lighting pass
 
@@ -2183,7 +2295,10 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     glBlitFramebuffer(0, 0, m_screen_width, m_screen_height, 0, 0, m_screen_width, m_screen_height, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
 
     // 6. SKYBOX / SKY-DOME PASS (Renders to m_lighting_fbo before transparent water blends)
+    // Spec 016 (016-P1-T04): build the skybox ctx AFTER the gbuffer->lighting depth
+    // blit (step 5) so the adopted handles + state match the production sequence.
     begin_gpu_pass_timer(GpuTimerPass::Skybox);
+    RenderContext skybox_ctx = make_skybox_context(camera);
     if (m_cloud_quality > 0 && m_halfres_cloud.fbo &&
         m_cloud_composite_shader && m_cloud_composite_shader->IsValid()) {
         // Render-optimization (cloud-raymarch-optimization, slice 1): raymarch the
@@ -2201,7 +2316,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
         glViewport(0, 0, static_cast<GLsizei>(m_halfres_cloud.width), static_cast<GLsizei>(m_halfres_cloud.height));
         glDisable(GL_DEPTH_TEST);
         glDepthMask(GL_FALSE);
-        m_skybox_pass->execute(*this, camera, false);
+        m_skybox_pass->execute(skybox_ctx, camera, false);
         // (b) Depth-masked upsample composite -> lighting FBO (full res). Writes the
         //     bilinear-upsampled sky only where the scene depth is the far plane.
         glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
@@ -2223,7 +2338,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
         if (blend_was) glEnable(GL_BLEND);
     } else {
         glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
-        m_skybox_pass->execute(*this, camera, false);
+        m_skybox_pass->execute(skybox_ctx, camera, false);
     }
     end_gpu_pass_timer(GpuTimerPass::Skybox);
     glBindVertexArray(0);  // Unbind after skybox pass
@@ -2232,7 +2347,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // Water keeps depth writes off for transparency. Drawing the sky first prevents
     // cloud/aurora sky pixels from overwriting water over far-depth/background
     // samples while still giving refraction a stable pre-water color source.
-    m_lighting_pass->copy_lighting_color_to_opaque_texture(*this);
+    m_lighting_pass->copy_lighting_color_to_opaque_texture(lighting_ctx);
     glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
     if (m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Water)) {
         // Spec 016 (T16): build the water draw list from m_water_render_data in
@@ -2324,8 +2439,23 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // 7a. WEATHER OVERLAY (owned by SkyboxPass): defer until after water so
     // screen-space rain/fog remains a full-scene composite while sky/cloud/aurora
     // still render before water.
-    m_skybox_pass->execute_weather_overlay(*this, camera);
-    glBindVertexArray(0);
+    // Spec 016 (016-P1-T04): the post-water opaque snapshot the overlay reads is
+    // RELOCATED here from inside SkyboxPass (a friendless pass can't call Lighting).
+    // Guarded by the SAME conditions the overlay runs under, so opaque_color_texture
+    // (also read by god-rays below) stays byte-identical to the prior behavior.
+    {
+        const FrameBufferObject& lighting_fbo = m_lighting_pass->lighting_fbo();
+        const bool overlay_will_run =
+            m_weather_type != WeatherType::None && m_weather_intensity > 0.0f &&
+            m_skybox_pass->weather_shader() && m_skybox_pass->weather_shader()->IsValid() &&
+            lighting_fbo.fbo_id && lighting_fbo.opaque_color_texture && m_screen_quad_vao;
+        RenderContext weather_ctx = make_skybox_context(camera);
+        if (overlay_will_run) {
+            m_lighting_pass->copy_lighting_color_to_opaque_texture(weather_ctx);
+        }
+        m_skybox_pass->execute_weather_overlay(weather_ctx, camera);
+        glBindVertexArray(0);
+    }
 
     // 7b. AERIAL-PERSPECTIVE PASS (T-I5a-6): analytic distance-fog in-scatter
     // over the lit scene, wiring the dormant volumetric_lighting.frag. Reads the
@@ -2443,7 +2573,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // captured by the FinalBlit-adjacent timing; the PerfRegression budget (≤ 0.5 ms)
     // is bounded by the overlay being a single additive full-screen quad.
     if (m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Lightning)) {
-        m_lighting_pass->execute_lightning_overlay(*this, camera);
+        m_lighting_pass->execute_lightning_overlay(lighting_ctx);
         glBindVertexArray(0);
     }
 

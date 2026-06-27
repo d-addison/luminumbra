@@ -1,21 +1,24 @@
 #pragma once
 
-#include "../RenderPipeline.h"
+#include "../RenderContext.h"
+#include "../FrameBufferObject.h"
 
 #include <filesystem>
 #include <memory>
 
 namespace Luminumbra::Rendering {
 
-class Camera;
 class Shader;
 
 // Deferred lighting render pass extracted from RenderPipeline (T-I2-11e).
 // Owns the lighting FBO (HDR color + opaque color copy + depth renderbuffer)
-// and the lighting shader. The pipeline keeps orchestration order, the
-// shared screen quad, G-Buffer/shadow/SSAO inputs (read through the pass
-// accessors), light gathering, stats collection, and the GPU timer
-// issue/collect calls.
+// and the lighting shader. Spec 016-P2-T12: routed through the RenderContext
+// seam — execute()/copy/overlay read frame state (g-buffer/shadow/ssao/caustics/
+// terrain/aether/light state, screen, the shared quad, stats out-pointer) from
+// the RenderContext instead of RenderPipeline. The shadow-cascade fixup (which
+// mutates the shared ShadowMap private state + calls a pipeline-private) is
+// hoisted to make_lighting_context at the call site; ctx.cascade_splits +
+// ctx.light_space_matrices carry the resolved values.
 class LightingPass {
 public:
     LightingPass();
@@ -29,8 +32,8 @@ public:
     void destroy_lighting_fbo();
     void reset_shader();
 
-    void copy_lighting_color_to_opaque_texture(RenderPipeline& pipeline);
-    void execute(RenderPipeline& pipeline, const Camera& camera);
+    void copy_lighting_color_to_opaque_texture(const RenderContext& ctx);
+    void execute(const RenderContext& ctx);
 
     // T-I5a-5 (B3): full-scene lightning light-pulse + bolt overlay. A strike is a
     // deterministic SIM world event (in the `weather` world_hash sub-hash); this is
@@ -40,7 +43,7 @@ public:
     // main lighting shader only shades G-buffer geometry; the skybox overwrites sky
     // pixels). A no-op (zero added cost) when no strike is active. Owned by the
     // LightingPass so the lightning injection stays part of the lighting subsystem.
-    void execute_lightning_overlay(RenderPipeline& pipeline, const Camera& camera);
+    void execute_lightning_overlay(const RenderContext& ctx);
 
     FrameBufferObject& lighting_fbo() { return m_lighting_fbo; }
     const FrameBufferObject& lighting_fbo() const { return m_lighting_fbo; }
