@@ -17,6 +17,8 @@
 #include "passes/SsaoData.h"        // Spec 016: SSAOData (extracted; still read here for stats)
 #include "RenderFrameTypes.h"        // Spec 016: light/weather/cloud PODs (extracted)
 #include "FrameBufferObject.h"      // Spec 016: FrameBufferObject (extracted)
+#include "StaticModelTex.h"         // Spec 016: StaticModelTex hoisted to namespace scope
+#include "TerrainSubmit.h"          // Spec 016: SubmitTerrainChunksFn + TerrainSubmitStats
 #include "SkyAtmosphereLut.h" // T-I5a-6: Hillaire 2020 scattering LUTs
 #include "WaterfallDetect.h"  // T-I5b-4: world-deterministic waterfall sites
 #include <map>
@@ -1098,7 +1100,9 @@ public:
     // own UVs. Used to give the tree parts (trunk/branch/leaves) real bark/leaf
     // textures instead of the world-projected terrain triplanar. Per-meshPath
     // layer + alpha-test lookup is consumed by GBufferPass::geometry_pass_static_meshes.
-    struct StaticModelTex { int albedoLayer = -1; int normalLayer = -1; bool alphaTest = false; };
+    // Spec 016: StaticModelTex hoisted to namespace scope (StaticModelTex.h);
+    // alias keeps RenderPipeline::StaticModelTex (ImpostorBake.cpp:100) compatible.
+    using StaticModelTex = Luminumbra::Rendering::StaticModelTex;
 private:
     u32 m_staticModelTextureArray = 0;
     static constexpr int kStaticModelTextureResolution = 512;
@@ -1346,6 +1350,11 @@ private:
     // vector of ChunkCullEntry, which is defined just above.
     void draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& visible_chunks,
                          std::size_t& out_draws, std::size_t& out_indices);
+    // Spec 016 (Codex-signed-off terrain-submit seam): a callback wrapping the
+    // pipeline-owned CullHierarchical + draw_chunks_mdi, shared by GBuffer + Shadow
+    // so neither needs friend access for terrain submission. Returns counts; the
+    // caller folds them into pass stats.
+    SubmitTerrainChunksFn make_terrain_submitter();
 
     struct TerrainCullingCache {
         u64 chunk_set_signature = 0;

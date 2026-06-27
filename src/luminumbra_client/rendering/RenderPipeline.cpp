@@ -851,6 +851,23 @@ RenderContext RenderPipeline::make_foliage_context(const Camera& camera) {
     return ctx;
 }
 
+// Spec 016 terrain-submit seam (Codex-signed-off). Reproduces the EXACT current
+// GBuffer/Shadow submit (CullHierarchical + draw_chunks_mdi) and RETURNS the
+// counts — no stats mutation, no sort/cache/readback, no hierarchy rebuild (the
+// pipeline owns that, once per frame, before both passes). The only dropped
+// statement vs today is `visible.reserve(renderable_chunks.size())`, a capacity
+// hint with no effect on draw order or stats — so output is byte-identical.
+SubmitTerrainChunksFn RenderPipeline::make_terrain_submitter() {
+    return [this](const glm::vec4 (&frustum_planes)[6]) -> TerrainSubmitStats {
+        std::vector<const ChunkCullEntry*> visible_chunks;
+        m_hierarchicalCuller.CullHierarchical(frustum_planes, visible_chunks);
+        std::size_t draws = 0;
+        std::size_t indices = 0;
+        draw_chunks_mdi(visible_chunks, draws, indices);
+        return TerrainSubmitStats{ visible_chunks.size(), draws, indices };
+    };
+}
+
 // Spec 016 (016-P2-T02) SSAO parity gate. For a MECHANICAL conversion (the GL
 // sequence is a verbatim copy, only operands changed pipeline.X -> ctx.X) the sole
 // risk is make_ssao_context mis-mapping a field, so we (1) assert every ctx field
