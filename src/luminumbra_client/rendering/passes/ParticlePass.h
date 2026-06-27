@@ -1,10 +1,12 @@
 #pragma once
 
-#include "../RenderPipeline.h"
+#include "../RenderContext.h"
+#include "../RenderFrameTypes.h"
 
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <glm/glm.hpp>
 #include <memory>
 #include <string>
 #include <vector>
@@ -159,6 +161,11 @@ public:
     u32 instance_buffer(std::size_t ring) const { return m_instance_vbo[ring % kRingFrames]; }
     bool has_emitters() const { return !m_active_emitters.empty(); }
     std::size_t live_particle_count() const { return m_live_count; }
+    // Spec 016 (T18-Particle): the instance count update() prepared for this
+    // frame, exposed so RenderPipeline::capture_particle_parity can assert
+    // execute()'s return value (the relocated stat source) without friending the
+    // pass.
+    std::size_t frame_instance_count() const { return m_frame_instance_count; }
 
     // --- Emitter lifecycle (game-data driven). ---
     // Loads an emitter descriptor from data/common/particles/<file>. Returns the
@@ -226,7 +233,11 @@ public:
 
     // Blends the live particles into the lighting HDR target. Reads the
     // G-buffer depth for soft-particle fade. No-op when no live particles.
-    void execute(RenderPipeline& pipeline, const Camera& camera);
+    // Spec 016 (T18-Particle): reads its inputs (sun/ambient/point-lights/
+    // G-buffer depth/lit-scene draw target) from the RenderContext seam instead
+    // of RenderPipeline&. RETURNS the instances drawn (0 on a no-op) so the
+    // pipeline owns the stat bump at the call site.
+    std::size_t execute(const RenderContext& ctx, const Camera& camera);
 
 private:
     struct ActiveEmitter {

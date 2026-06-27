@@ -828,20 +828,18 @@ void FoliagePass::map_instances_for_frame() {
     m_frame_instance_count = count;
 }
 
-void FoliagePass::execute(RenderPipeline& pipeline, const Camera& camera) {
+std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera) {
     if (!m_enabled || !m_shader || !m_shader->IsValid() ||
         m_frame_instance_count == 0 || m_vao == 0) {
-        return;
+        return 0;
     }
 
-    const FrameBufferObject& lighting_fbo = pipeline.m_lighting_pass->lighting_fbo();
-    const GBuffer& gbuffer = pipeline.m_gbuffer_pass->gbuffer();
-    if (!lighting_fbo.fbo_id) {
-        return;
+    if (!ctx.lit_scene.id) {
+        return 0;
     }
 
-    glBindFramebuffer(GL_FRAMEBUFFER, lighting_fbo.fbo_id);
-    glViewport(0, 0, pipeline.m_screen_width, pipeline.m_screen_height);
+    glBindFramebuffer(GL_FRAMEBUFFER, ctx.lit_scene.id);
+    glViewport(0, 0, ctx.screen_width, ctx.screen_height);
 
     // Opaque-ish ground cover: depth test AND write against the scene depth so
     // the cards occlude correctly, alpha-tested in the frag shader. Blend on for
@@ -859,32 +857,32 @@ void FoliagePass::execute(RenderPipeline& pipeline, const Camera& camera) {
     m_shader->use();
     const glm::mat4 projection = glm::perspective(
         glm::radians(camera.Zoom),
-        static_cast<float>(pipeline.m_screen_width) / static_cast<float>(pipeline.m_screen_height),
+        static_cast<float>(ctx.screen_width) / static_cast<float>(ctx.screen_height),
         camera.GetNearPlane(), camera.GetFarPlane());
     const glm::mat4 view = camera.GetViewMatrix();
     m_shader->setMat4("u_view", view);
     m_shader->setMat4("u_projection", projection);
     m_shader->setVec3("u_cameraPos", camera.Position);
-    m_shader->setFloat("u_time", static_cast<float>(glfwGetTime()));
+    m_shader->setFloat("u_time", ctx.time_seconds);
     m_shader->setFloat("u_swayAmplitude", m_sway_amplitude);
     m_shader->setFloat("u_swaySpeed", m_sway_speed);
     m_shader->setFloat("u_fadeStart", m_fade_start_m);
     m_shader->setFloat("u_fadeEnd", m_fade_end_m);
 
-    m_shader->setVec3("u_sunDirection", pipeline.m_sun.direction);
-    m_shader->setVec3("u_sunColor", pipeline.m_sun.color);
-    m_shader->setFloat("u_sunIntensity", pipeline.m_sun.intensity);
-    m_shader->setVec3("u_ambientColor", pipeline.m_skyAmbientColor);
+    m_shader->setVec3("u_sunDirection", ctx.sun.direction);
+    m_shader->setVec3("u_sunColor", ctx.sun.color);
+    m_shader->setFloat("u_sunIntensity", ctx.sun.intensity);
+    m_shader->setVec3("u_ambientColor", ctx.sky_ambient_color);
     // foliage-night: feed the SAME moon toward-light direction the deferred lighting
     // pass keys its moon term off (moon-shadows workstream), so night blades pick up
     // the identical cool moonlit tone as the terrain instead of glowing.
-    m_shader->setVec3("u_moonDir", pipeline.m_moonLightDir);
+    m_shader->setVec3("u_moonDir", ctx.moon_light_dir);
 
     // T-I5b-DR-foliage-green: feed the SAME projected cloud cast-shadow state the
     // lighting pass uses, so storm-overcast cells drive the blades DARK like the
     // terrain (no more teal glow under storm). Cleanly disabled when clouds are
     // off (enabled==0 -> the shader's cloud term is a no-op).
-    const Luminumbra::Rendering::CloudRenderState& cloud = pipeline.m_cloud_state;
+    const Luminumbra::Rendering::CloudRenderState& cloud = ctx.cloud_state;
     const bool cloud_on = cloud.enabled && cloud.shadow_enabled;
     m_shader->setInt("u_cloudShadowEnabled", cloud_on ? 1 : 0);
     m_shader->setVec2("u_cloudScrollOffset", cloud.scroll_offset);
@@ -893,8 +891,6 @@ void FoliagePass::execute(RenderPipeline& pipeline, const Camera& camera) {
     m_shader->setFloat("u_cloudPlaneHeight", cloud.plane_height);
     m_shader->setFloat("u_cloudShadowStrength", cloud.shadow_strength);
     m_shader->setVec3("u_cloudSunDir", cloud.sun_travel_dir);
-
-    (void)gbuffer; // depth already copied into the lighting FBO by the pipeline
 
     glBindVertexArray(m_vao);
     // T-I6 #4/T-I6-010: when the GPU scatter path built this frame, draw straight
@@ -912,8 +908,6 @@ void FoliagePass::execute(RenderPipeline& pipeline, const Camera& camera) {
         // each) so a blade reads as upright cover from any angle, not a flat decal.
         glDrawArraysInstanced(GL_TRIANGLES, 0, 12, static_cast<GLsizei>(m_frame_instance_count));
     }
-    pipeline.m_last_render_pass_stats.foliage_draws++;
-    pipeline.m_last_render_pass_stats.foliage_instances_drawn += m_frame_instance_count;
     glBindVertexArray(0);
 
     if (cull_was_enabled) {
@@ -922,6 +916,8 @@ void FoliagePass::execute(RenderPipeline& pipeline, const Camera& camera) {
     glDisable(GL_BLEND);
     glDepthMask(GL_TRUE);
     glDepthFunc(GL_LESS);
+
+    return m_frame_instance_count;
 }
 
 uint64_t FoliagePass::instance_hash() const {

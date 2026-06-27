@@ -709,8 +709,7 @@ private:
     friend class LightingPass;
     friend class WaterPass;
     friend class SkyboxPass;
-    friend class ParticlePass;
-    friend class FoliagePass;
+    // ParticlePass + FoliagePass friends removed (Spec 016-P3-T18/T17): read from RenderContext.
     // PlantProcgenPass friend removed (Spec 016-P3-T14): reads from RenderContext.
 
     struct ChunkMeshSnapshot {
@@ -743,6 +742,9 @@ private:
     // Spec 016 (016-P3-T14): the PlantProcgen pass contract (screen size + the
     // per-frame wall-clock snapshot). Camera is a separate execute() arg.
     RenderContext make_plant_context();
+    // Spec 016 (016-P3-T18/T17): Particle + Foliage pass contracts.
+    RenderContext make_particle_context(const Camera& camera);
+    RenderContext make_foliage_context(const Camera& camera);
 
     std::vector<ChunkMeshSnapshot> build_chunk_snapshots(const std::vector<Chunk*>& renderable_chunks) const;
 

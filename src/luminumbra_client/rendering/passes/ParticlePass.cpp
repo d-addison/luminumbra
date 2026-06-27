@@ -1,7 +1,5 @@
 #include "ParticlePass.h"
 
-#include "GBufferPass.h"
-#include "LightingPass.h"
 #include "PassGlHelpers.h"
 #include "core/Log.h"
 #include "rendering/Camera.h"
@@ -613,21 +611,19 @@ void ParticlePass::update(float dt) {
     m_frame_instance_count = written;
 }
 
-void ParticlePass::execute(RenderPipeline& pipeline, const Camera& camera) {
+std::size_t ParticlePass::execute(const RenderContext& ctx, const Camera& camera) {
     // No-op (zero draw work) when nothing to render: keeps existing visual gates
     // byte-stable.
     if (!m_shader || !m_shader->IsValid() || m_frame_instance_count == 0 || m_vao == 0) {
-        return;
+        return 0;
     }
 
-    const FrameBufferObject& lighting_fbo = pipeline.m_lighting_pass->lighting_fbo();
-    const GBuffer& gbuffer = pipeline.m_gbuffer_pass->gbuffer();
-    if (!lighting_fbo.fbo_id) {
-        return;
+    if (!ctx.lit_scene.id) {
+        return 0;
     }
 
-    glBindFramebuffer(GL_FRAMEBUFFER, lighting_fbo.fbo_id);
-    glViewport(0, 0, pipeline.m_screen_width, pipeline.m_screen_height);
+    glBindFramebuffer(GL_FRAMEBUFFER, ctx.lit_scene.id);
+    glViewport(0, 0, ctx.screen_width, ctx.screen_height);
 
     // Transparent particles: test against scene depth but do not write depth,
     // and blend additively into the HDR lighting target.
@@ -664,7 +660,7 @@ void ParticlePass::execute(RenderPipeline& pipeline, const Camera& camera) {
     m_shader->use();
     const glm::mat4 projection = glm::perspective(
         glm::radians(camera.Zoom),
-        static_cast<float>(pipeline.m_screen_width) / static_cast<float>(pipeline.m_screen_height),
+        static_cast<float>(ctx.screen_width) / static_cast<float>(ctx.screen_height),
         camera.GetNearPlane(), camera.GetFarPlane());
     const glm::mat4 view = camera.GetViewMatrix();
     // T-I5b-DR-storm-blockers (M7): cache the camera screen basis so next frame's
@@ -682,22 +678,22 @@ void ParticlePass::execute(RenderPipeline& pipeline, const Camera& camera) {
     m_shader->setVec3("u_cameraPos", camera.Position);
     m_shader->setFloat("u_time", static_cast<float>(glfwGetTime()));
     m_shader->setVec2("u_screenSize",
-                      glm::vec2(static_cast<float>(pipeline.m_screen_width),
-                                static_cast<float>(pipeline.m_screen_height)));
+                      glm::vec2(static_cast<float>(ctx.screen_width),
+                                static_cast<float>(ctx.screen_height)));
     m_shader->setFloat("u_nearPlane", camera.GetNearPlane());
     m_shader->setFloat("u_farPlane", camera.GetFarPlane());
 
     // Forward lighting: sun + ambient + the nearest few point lights.
-    m_shader->setVec3("u_sunDirection", pipeline.m_sun.direction);
-    m_shader->setVec3("u_sunColor", pipeline.m_sun.color);
-    m_shader->setFloat("u_sunIntensity", pipeline.m_sun.intensity);
-    m_shader->setVec3("u_ambientColor", pipeline.m_skyAmbientColor);
+    m_shader->setVec3("u_sunDirection", ctx.sun.direction);
+    m_shader->setVec3("u_sunColor", ctx.sun.color);
+    m_shader->setFloat("u_sunIntensity", ctx.sun.intensity);
+    m_shader->setVec3("u_ambientColor", ctx.sky_ambient_color);
 
     const int max_lights = 4;
-    int light_count = std::min(static_cast<int>(pipeline.m_point_lights_this_frame.size()), max_lights);
+    int light_count = std::min(static_cast<int>(ctx.point_lights->size()), max_lights);
     m_shader->setInt("u_pointLightCount", light_count);
     for (int i = 0; i < light_count; ++i) {
-        const PointLight& l = pipeline.m_point_lights_this_frame[static_cast<std::size_t>(i)];
+        const PointLight& l = (*ctx.point_lights)[static_cast<std::size_t>(i)];
         const std::string base = "u_pointLights[" + std::to_string(i) + "].";
         m_shader->setVec3(base + "position", l.position);
         m_shader->setVec3(base + "color", l.color);
@@ -707,7 +703,7 @@ void ParticlePass::execute(RenderPipeline& pipeline, const Camera& camera) {
 
     // Soft-particle depth read from the G-buffer depth attachment.
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, gbuffer.depth_texture);
+    glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_depth.id);
     m_shader->setInt("u_sceneDepth", 0);
 
     // Point the VAO's binding 0 at this frame's ring slot, then instanced-draw
@@ -715,8 +711,6 @@ void ParticlePass::execute(RenderPipeline& pipeline, const Camera& camera) {
     glBindVertexArray(m_vao);
     glBindVertexBuffer(0, m_instance_vbo[m_ring_cursor], 0, sizeof(InstanceRecord));
     glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, static_cast<GLsizei>(m_frame_instance_count));
-    pipeline.m_last_render_pass_stats.particle_draws++;
-    pipeline.m_last_render_pass_stats.particles_drawn += m_frame_instance_count;
     glBindVertexArray(0);
 
     glActiveTexture(GL_TEXTURE0);
@@ -727,6 +721,7 @@ void ParticlePass::execute(RenderPipeline& pipeline, const Camera& camera) {
     glDisable(GL_BLEND);
     glDepthMask(GL_TRUE);
     glDepthFunc(GL_LESS);
+    return m_frame_instance_count;
 }
 
 } // namespace Luminumbra::Rendering

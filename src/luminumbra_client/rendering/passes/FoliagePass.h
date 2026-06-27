@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../RenderPipeline.h"
+#include "../RenderContext.h"
 
 #include <array>
 #include <cstdint>
@@ -200,9 +200,12 @@ public:
                            SurfaceQuery query, void* query_ctx,
                            const glm::vec3& camera_pos);
 
-    // Draws the live foliage instances into the lit HDR target. Reads scene
-    // depth for occlusion. No-op when no instances or disabled.
-    void execute(RenderPipeline& pipeline, const Camera& camera);
+    // Draws the live foliage instances into the lit HDR target (ctx.lit_scene).
+    // Reads scene depth for occlusion. No-op (returns 0) when no instances or
+    // disabled. Spec 016-P3-T17: reads frame state from the RenderContext seam
+    // (sun/ambient/moon/cloud/time/lit_scene) instead of RenderPipeline; RETURNS
+    // the instance count drawn so the call site owns the stat bump.
+    std::size_t execute(const RenderContext& ctx, const Camera& camera);
 
     // --- Gate hooks (FoliageInstancing). All PURE; never touch GL. ---
     // The deterministic placement hash, exposed so the gate can assert the

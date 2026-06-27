@@ -816,6 +816,41 @@ RenderContext RenderPipeline::make_plant_context() {
     return ctx;
 }
 
+// Spec 016 (T18-Particle): the Particle pass contract (lit-scene draw target,
+// g-buffer depth, sun/ambient/point-lights, screen). Handles adopted wrap-existing.
+RenderContext RenderPipeline::make_particle_context(const Camera& camera) {
+    RenderContext ctx;
+    ctx.camera = &camera;
+    ctx.screen_width = m_screen_width;
+    ctx.screen_height = m_screen_height;
+    ctx.registry = &m_render_registry;
+    ctx.sun = m_sun;
+    ctx.sky_ambient_color = m_skyAmbientColor;
+    ctx.point_lights = &m_point_lights_this_frame;
+    ctx.gbuffer_depth = m_render_registry.adopt_texture(
+        "gbuffer_depth", m_gbuffer_pass->gbuffer().depth_texture);
+    ctx.lit_scene = m_render_registry.adopt_fbo(
+        "lit_scene", m_lighting_pass->lighting_fbo().fbo_id);
+    return ctx;
+}
+
+// Spec 016 (T17-Foliage): the Foliage pass contract (lit-scene draw target,
+// sun/ambient/moon/cloud light state, screen, per-frame time for shader sway).
+RenderContext RenderPipeline::make_foliage_context(const Camera& camera) {
+    RenderContext ctx;
+    ctx.camera = &camera;
+    ctx.screen_width = m_screen_width;
+    ctx.screen_height = m_screen_height;
+    ctx.registry = &m_render_registry;
+    ctx.time_seconds = m_wall_clock_time;
+    ctx.sun = m_sun;
+    ctx.sky_ambient_color = m_skyAmbientColor;
+    ctx.moon_light_dir = m_moonLightDir;
+    ctx.cloud_state = m_cloud_state;
+    ctx.lit_scene = m_render_registry.adopt_fbo("lit_scene", m_lighting_pass->lighting_fbo().fbo_id);
+    return ctx;
+}
+
 // Spec 016 (016-P2-T02) SSAO parity gate. For a MECHANICAL conversion (the GL
 // sequence is a verbatim copy, only operands changed pipeline.X -> ctx.X) the sole
 // risk is make_ssao_context mis-mapping a field, so we (1) assert every ctx field
@@ -2240,8 +2275,16 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // visual gates stay byte-stable. RENDER-ONLY (one-way, never feeds the sim).
     if (m_foliage_pass &&
         m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Foliage)) {
+        RenderContext foliage_ctx = make_foliage_context(camera);
         begin_gpu_pass_timer(GpuTimerPass::Foliage);
-        m_foliage_pass->execute(*this, camera);
+        const std::size_t foliage_drawn = m_foliage_pass->execute(foliage_ctx, camera);
+        // Stats moved out of FoliagePass::execute (Spec 016-P3-T17): bump only when
+        // the pass actually drew (return > 0), so a disabled/empty no-op frame does
+        // not corrupt foliage_draws/foliage_instances_drawn.
+        if (foliage_drawn > 0) {
+            m_last_render_pass_stats.foliage_draws++;
+            m_last_render_pass_stats.foliage_instances_drawn += foliage_drawn;
+        }
         end_gpu_pass_timer(GpuTimerPass::Foliage);
         glBindVertexArray(0);
     }
@@ -2265,9 +2308,16 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     if (m_particle_pass &&
         m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Particles)) {
         m_particle_pass->update(deltaTime);
+        RenderContext particle_ctx = make_particle_context(camera);
         begin_gpu_pass_timer(GpuTimerPass::Particle);
-        m_particle_pass->execute(*this, camera);
+        const std::size_t particles_drawn = m_particle_pass->execute(particle_ctx, camera);
         end_gpu_pass_timer(GpuTimerPass::Particle);
+        // Spec 016 (T18-Particle): stat bumps relocated out of the pass; bump only
+        // when the pass actually drew (preserves the original guarded behavior).
+        if (particles_drawn > 0) {
+            m_last_render_pass_stats.particle_draws++;
+            m_last_render_pass_stats.particles_drawn += particles_drawn;
+        }
         glBindVertexArray(0);
     }
 
