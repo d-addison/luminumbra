@@ -25,6 +25,18 @@ ReplEntityState MakeEntity(std::uint32_t id, std::int32_t x, std::int32_t y, std
     return e;
 }
 
+// spec-019 FR-E: a transport whose SendFrame ALWAYS reports would-block / gone peer, so
+// the server's per-client outbound queue accumulates -- exercises the queue-depth + drop
+// metrics deterministically without real sockets. Reports the peer still connected so the
+// server keeps broadcasting to it (a backed-up, not yet pruned, client).
+struct BlockedSendTransport final : ILockstepTransport {
+    bool SendFrame(const std::vector<std::uint8_t>&,
+                   FrameDelivery = FrameDelivery::Reliable) override { return false; }
+    bool TryReceiveFrame(std::vector<std::uint8_t>&) override { return false; }
+    [[nodiscard]] bool IsPeerConnected() const override { return true; }
+    void Close() override {}
+};
+
 TEST(ReplicationEndpoint, FullLoopOverLoopback) {
     auto pair = MakeLoopbackPair();
     ILockstepTransport* server_end = pair.first.get();
@@ -509,6 +521,91 @@ TEST(ReplicationEndpoint, StaleSnapshotDoesNotRegress) {
     client.PumpInbound();
     EXPECT_EQ(client.snapshot().snapshot_seq, 2u);
     EXPECT_EQ(client.snapshot().entities[0].px_mm, 200);
+}
+
+// spec-019 FR-E-002: SNAPSHOT AGING. The per-client snapshot age = how many seqs behind
+// the client's last-ACKed baseline is (last_sent_seq - acked_seq). It climbs while a
+// client stops acking and resets to 0 once it catches up -- the falling-behind signal.
+TEST(ReplicationMetrics, SnapshotAgeTracksAckGap) {
+    auto pair = MakeLoopbackPair();
+    ReplicationServer server;
+    server.AddClient(1, pair.first.get());
+    ReplicationClient client(1, pair.second.get());
+    std::vector<ReplEntityState> entities = {MakeEntity(1, 0, 0, 0)};
+
+    EXPECT_EQ(server.SnapshotAge(1), 0u);        // nothing sent yet
+    EXPECT_EQ(server.SnapshotAge(999), 0u);      // unknown client -> 0, no crash
+
+    server.BroadcastSnapshot(10, entities);      // seq 1, unacked
+    server.BroadcastSnapshot(20, entities);      // seq 2
+    server.BroadcastSnapshot(30, entities);      // seq 3
+    EXPECT_EQ(server.SnapshotAge(1), 3u);        // 3 sent, 0 acked
+    EXPECT_EQ(server.OutboundQueueDepth(1), 0u); // connected loopback accepted every send
+
+    client.PumpInbound();                        // applies newest (seq 3), auto-acks 3
+    server.PumpInbound();                        // server folds the ack
+    EXPECT_EQ(server.AckedSnapshotSeq(1), 3u);
+    EXPECT_EQ(server.SnapshotAge(1), 0u);        // caught up
+}
+
+// spec-019 FR-E-001: OUTBOUND QUEUE DEPTH + drop counter. A peer that never accepts a
+// send backs frames up in the per-client outbound queue; depth (and its high-water) climb,
+// and overflow past the bound drops the oldest frames and counts them.
+TEST(ReplicationMetrics, OutboundQueueDepthGrowsAndDropsUnderBackpressure) {
+    BlockedSendTransport blocked;
+    ReplicationServer server;
+    server.AddClient(1, &blocked);
+    std::vector<ReplEntityState> entities = {MakeEntity(1, 0, 0, 0)};
+
+    EXPECT_EQ(server.OutboundQueueDepth(1), 0u);
+    for (int i = 1; i <= 3; ++i) server.BroadcastSnapshot(static_cast<std::uint64_t>(i), entities);
+    EXPECT_EQ(server.OutboundQueueDepth(1), 3u);      // nothing flushed -> 3 buffered
+    EXPECT_EQ(server.PeakOutboundQueueDepth(1), 3u);
+    EXPECT_EQ(server.DroppedFrames(1), 0u);           // still under the bound
+    EXPECT_EQ(server.QueueDepthP95(), 3u);            // single client -> its own depth
+    EXPECT_EQ(server.SnapshotAge(1), 3u);             // no acks possible either
+    EXPECT_EQ(server.ThrottledFrames(1), 0u);         // throttle is FR-D; metric present, 0 here
+
+    // Push well past the queue bound -> the oldest frames are dropped and counted, depth
+    // saturates at the bound rather than growing without limit. The iteration count must
+    // exceed ReplicationServer::kOutboundQueueCap (256) for any drop to occur.
+    for (int i = 0; i < 600; ++i) server.BroadcastSnapshot(static_cast<std::uint64_t>(100 + i), entities);
+    EXPECT_GT(server.DroppedFrames(1), 0u);
+    EXPECT_LE(server.OutboundQueueDepth(1), 256u);    // bounded (kOutboundQueueCap)
+    EXPECT_GE(server.PeakOutboundQueueDepth(1), server.OutboundQueueDepth(1));
+}
+
+// spec-019 FR-E-003 / NFR-005: the SOAK GATE p95. With many clients where most fall
+// behind, the across-clients p95 snapshot age reflects the laggards -- the number the
+// 32-client soak fails on if it exceeds budget. On loopback every send is accepted, so the
+// queue-depth p95 stays 0 (backpressure shows up only when a transport refuses).
+TEST(ReplicationMetrics, P95AcrossClientsForSoakGate) {
+    constexpr int N = 20;
+    std::vector<decltype(MakeLoopbackPair())> pairs;
+    pairs.reserve(N);
+    ReplicationServer server;
+    std::vector<std::unique_ptr<ReplicationClient>> clients;
+    std::vector<ReplEntityState> entities;
+    for (int i = 0; i < N; ++i) {
+        pairs.push_back(MakeLoopbackPair());
+        const std::uint32_t id = static_cast<std::uint32_t>(i + 1);
+        server.AddClient(id, pairs.back().first.get());
+        clients.push_back(std::make_unique<ReplicationClient>(id, pairs.back().second.get()));
+        entities.push_back(MakeEntity(id, i * 1000, 0, 0));
+    }
+    ASSERT_EQ(server.client_count(), static_cast<std::size_t>(N));
+
+    // Five broadcast rounds; only client id 1 keeps up (pumps + acks each round). The rest
+    // never pump, so their snapshot age climbs to 5.
+    for (int round = 0; round < 5; ++round) {
+        server.BroadcastSnapshot(static_cast<std::uint64_t>(10 + round), entities);
+        clients[0]->PumpInbound();
+        server.PumpInbound();
+    }
+    EXPECT_EQ(server.SnapshotAge(1), 0u);   // kept up
+    EXPECT_EQ(server.SnapshotAge(2), 5u);   // a laggard
+    EXPECT_EQ(server.SnapshotAgeP95(), 5u); // p95 dominated by the 19 laggards
+    EXPECT_EQ(server.QueueDepthP95(), 0u);  // loopback accepted everything
 }
 
 } // namespace

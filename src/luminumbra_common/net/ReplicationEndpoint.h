@@ -19,9 +19,16 @@
 // Engine-generic + world_hash-neutral: this is render/transport-side glue; the
 // authoritative sim state is supplied to BroadcastSnapshot and consumed from
 // LatestUsercmd by the caller (the server tick / the client input+render).
+//
+// SCALE PATH (spec 019 FR-A): server-authoritative delta replication here -- NOT
+// lockstep -- is THE 20-32+ player session path. Delta-vs-acked (default at scale) +
+// chunk-AOI bound per-client egress by local density, not headcount; one slow/leaving
+// client never shared-fate-stalls the others. Architecture: docs/networking-scale-
+// architecture.md. Lockstep (LockstepSession.h) is the determinism oracle / small co-op.
 
 #include <algorithm>
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <vector>
 
@@ -77,6 +84,9 @@ public:
     // against the last-ACKED baseline until a newer ack arrives, so a dropped delta is
     // recovered by the next one (no stranded client). Validate over NetworkSim
     // (injected loss/jitter) -- the single-PC unblocker for this slice.
+    // SCALE PATH (spec 019 FR-A-002): default-OFF keeps the canonical full-snapshot
+    // baselines bit-exact, but the 20-32 player session ENABLES this -- delta-vs-acked
+    // is the bandwidth win that makes scale affordable (docs/networking-scale-architecture.md).
     void SetDeltaCompression(bool on) { m_delta = on; }
     [[nodiscard]] bool delta_compression() const { return m_delta; }
 
@@ -102,6 +112,29 @@ public:
     [[nodiscard]] std::size_t last_broadcast_total_bytes() const { return m_last_broadcast_total_bytes; }
     [[nodiscard]] std::size_t last_broadcast_max_client_bytes() const { return m_last_broadcast_max_client_bytes; }
 
+    // spec-019 FR-E: per-client BACKPRESSURE + SNAPSHOT-AGING telemetry for the 32-client
+    // soak gate (the p95 early-warning that a real large session is degrading). All values
+    // are derived from transport/ack state -- none feeds world_hash (transport-side glue).
+    //
+    //  OutboundQueueDepth(id)  -- frames produced for this client but NOT yet flushed to
+    //    its transport (a would-block / gone peer leaves them buffered). 0 while the peer
+    //    keeps up. This is the endpoint-level backpressure signal; the bounded send queue
+    //    (FR-D) drains/drops it. PeakOutboundQueueDepth is its session high-water; a frame
+    //    dropped on queue overflow bumps DroppedFrames (snapshots are unreliable, so the
+    //    OLDEST is dropped -- most-recent-wins).
+    //  SnapshotAge(id)         -- how many seqs behind this client's last-ACKed baseline is
+    //    (last_sent_seq - acked_seq, FR-E-002). 0 means it acked the latest; a climbing
+    //    value flags a falling-behind client before it desyncs or stalls.
+    //  QueueDepthP95 / SnapshotAgeP95 -- the across-connected-clients p95 the soak gate
+    //    FAILs on if either exceeds budget (FR-E-003). 0 when there are no clients.
+    [[nodiscard]] std::uint32_t OutboundQueueDepth(std::uint32_t client_id) const;
+    [[nodiscard]] std::uint32_t SnapshotAge(std::uint32_t client_id) const;
+    [[nodiscard]] std::uint32_t PeakOutboundQueueDepth(std::uint32_t client_id) const;
+    [[nodiscard]] std::uint64_t DroppedFrames(std::uint32_t client_id) const;
+    [[nodiscard]] std::uint64_t ThrottledFrames(std::uint32_t client_id) const;
+    [[nodiscard]] std::uint32_t QueueDepthP95() const;
+    [[nodiscard]] std::uint32_t SnapshotAgeP95() const;
+
 private:
     struct ClientLink {
         ILockstepTransport* transport = nullptr;
@@ -111,10 +144,25 @@ private:
         // so a delta can be computed against whichever one the client last ACKed.
         // Pruned below the acked seq (older baselines can never be referenced again).
         std::map<std::uint32_t, SnapshotMsg> sent_history;
+        // spec-019 FR-E: per-client OUTBOUND send queue (backpressure substrate) + cumulative
+        // telemetry. Each broadcast pushes the produced frame here, then flushes as far as the
+        // transport accepts; a would-block / gone peer leaves frames buffered, so outbound.size()
+        // is the live queue-depth metric. Bounded by kOutboundQueueCap: overflow drops the OLDEST
+        // (snapshots are unreliable / most-recent-wins) and increments dropped_frames. A connected
+        // loopback/TCP peer accepts immediately, so the queue drains fully and the wire bytes stay
+        // byte-identical to the prior direct-send path (existing baselines + determinism hold).
+        std::deque<std::vector<std::uint8_t>> outbound;
+        std::uint32_t peak_queue_depth = 0;
+        std::uint64_t dropped_frames = 0;
+        // Cumulative throttle events. The throttle POLICY is FR-D (separate track: throttle a
+        // backed-up client's snapshot cadence); this field is the metric FR-D increments. 0
+        // until that policy lands, so the soak gate's getter is present + stable meanwhile.
+        std::uint64_t throttled_frames = 0;
     };
     std::map<std::uint32_t, ClientLink> m_clients; // ordered -> deterministic broadcast order
     bool m_delta = false;                          // delta-vs-acked compression (off = full snapshots)
     static constexpr std::size_t kServerHistoryCap = 256; // bound per-client baseline retention
+    static constexpr std::size_t kOutboundQueueCap = 256; // bound per-client unflushed send backlog (FR-E)
     std::int64_t m_aoi_radius_mm = 0;              // 0 = mm-radius AOI disabled (full set)
     int m_aoi_chunk_radius = -1;                   // < 0 = chunk AOI disabled
     std::int64_t m_aoi_chunk_size_mm = 0;          // chunk edge length (mm) for chunk AOI

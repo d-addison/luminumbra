@@ -160,12 +160,28 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
 
         // State snapshots are UNRELIABLE: a dropped one is superseded by the next
         // (most-recent-wins). Over Steam this maps to k_nSteamNetworkingSend_Unreliable.
-        const std::vector<std::uint8_t> frame = EncodeSnapshot(outgoing);
+        // spec-019 FR-E: route the produced frame through this client's OUTBOUND queue
+        // (the backpressure substrate), then flush as far as the transport accepts. A
+        // connected loopback/TCP peer accepts immediately, so the queue drains fully and
+        // the wire bytes are byte-identical to the prior direct-send path; a would-block /
+        // gone peer leaves frames buffered -> outbound.size() is the live queue-depth
+        // metric. On overflow drop the OLDEST (unreliable / most-recent-wins) and count it.
+        std::vector<std::uint8_t> frame = EncodeSnapshot(outgoing);
         m_last_broadcast_total_bytes += frame.size();
         if (frame.size() > m_last_broadcast_max_client_bytes) {
             m_last_broadcast_max_client_bytes = frame.size();
         }
-        link.transport->SendFrame(frame, FrameDelivery::Unreliable);
+        link.outbound.push_back(std::move(frame));
+        while (link.outbound.size() > kOutboundQueueCap) {
+            link.outbound.pop_front();
+            ++link.dropped_frames;
+        }
+        while (!link.outbound.empty() &&
+               link.transport->SendFrame(link.outbound.front(), FrameDelivery::Unreliable)) {
+            link.outbound.pop_front();
+        }
+        const std::uint32_t depth = static_cast<std::uint32_t>(link.outbound.size());
+        if (depth > link.peak_queue_depth) link.peak_queue_depth = depth;
     }
 
     // Decay the pending despawns: each was just sent to every surviving client this
@@ -209,6 +225,70 @@ const UsercmdMsg* ReplicationServer::LatestUsercmd(std::uint32_t client_id) cons
 std::uint32_t ReplicationServer::AckedSnapshotSeq(std::uint32_t client_id) const {
     const auto it = m_clients.find(client_id);
     return it == m_clients.end() ? 0u : it->second.inbound.acked_snapshot_seq();
+}
+
+// spec-019 FR-E: backpressure + snapshot-aging telemetry. All derived from live
+// transport/ack state -- additive, world_hash-neutral.
+namespace {
+// last_sent_seq (next_snapshot_seq-1) - acked_seq, floored at 0. Shared form so the
+// per-client getter and the p95 gather agree exactly.
+std::uint32_t SeqAge(std::uint32_t next_snapshot_seq, std::uint32_t acked) {
+    const std::uint32_t last_sent = next_snapshot_seq > 0 ? next_snapshot_seq - 1u : 0u;
+    return last_sent >= acked ? last_sent - acked : 0u;
+}
+// Nearest-rank p95 over an unsorted value set (sorts a copy); 0 for an empty set.
+std::uint32_t Percentile95U32(std::vector<std::uint32_t> v) {
+    if (v.empty()) return 0u;
+    std::sort(v.begin(), v.end());
+    const std::size_t idx = (v.size() - 1) * 95 / 100;
+    return v[idx];
+}
+} // namespace
+
+std::uint32_t ReplicationServer::OutboundQueueDepth(std::uint32_t client_id) const {
+    const auto it = m_clients.find(client_id);
+    return it == m_clients.end() ? 0u : static_cast<std::uint32_t>(it->second.outbound.size());
+}
+
+std::uint32_t ReplicationServer::SnapshotAge(std::uint32_t client_id) const {
+    const auto it = m_clients.find(client_id);
+    if (it == m_clients.end()) return 0u;
+    return SeqAge(it->second.next_snapshot_seq, it->second.inbound.acked_snapshot_seq());
+}
+
+std::uint32_t ReplicationServer::PeakOutboundQueueDepth(std::uint32_t client_id) const {
+    const auto it = m_clients.find(client_id);
+    return it == m_clients.end() ? 0u : it->second.peak_queue_depth;
+}
+
+std::uint64_t ReplicationServer::DroppedFrames(std::uint32_t client_id) const {
+    const auto it = m_clients.find(client_id);
+    return it == m_clients.end() ? 0u : it->second.dropped_frames;
+}
+
+std::uint64_t ReplicationServer::ThrottledFrames(std::uint32_t client_id) const {
+    const auto it = m_clients.find(client_id);
+    return it == m_clients.end() ? 0u : it->second.throttled_frames;
+}
+
+std::uint32_t ReplicationServer::QueueDepthP95() const {
+    std::vector<std::uint32_t> depths;
+    depths.reserve(m_clients.size());
+    for (const auto& [id, link] : m_clients) {
+        (void)id;
+        depths.push_back(static_cast<std::uint32_t>(link.outbound.size()));
+    }
+    return Percentile95U32(std::move(depths));
+}
+
+std::uint32_t ReplicationServer::SnapshotAgeP95() const {
+    std::vector<std::uint32_t> ages;
+    ages.reserve(m_clients.size());
+    for (const auto& [id, link] : m_clients) {
+        (void)id;
+        ages.push_back(SeqAge(link.next_snapshot_seq, link.inbound.acked_snapshot_seq()));
+    }
+    return Percentile95U32(std::move(ages));
 }
 
 void ReplicationClient::SendUsercmd(const UsercmdMsg& cmd) {
