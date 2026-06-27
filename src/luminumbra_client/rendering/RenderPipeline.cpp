@@ -875,6 +875,32 @@ RenderContext RenderPipeline::make_water_context(const Camera& camera) {
     return ctx;
 }
 
+// Spec 016 (016-P2-T11): build the GBuffer pass contract — frame state only; the
+// live-terrain submit callback, far-LOD, root path, static-model UV lane and
+// tree-impostor bundle travel through GBufferPassInput (built at the call site).
+RenderContext RenderPipeline::make_gbuffer_context(const Camera& camera, const glm::vec4 frustum_planes[6]) {
+    RenderContext ctx;
+    ctx.camera = &camera;
+    ctx.screen_width = m_screen_width;
+    ctx.screen_height = m_screen_height;
+    ctx.registry = &m_render_registry;
+    ctx.time_seconds = m_wall_clock_time;
+    ctx.taau_jitter_ndc = m_taau_jitter_ndc;
+    ctx.prev_view_proj = m_prev_view_proj;
+    ctx.prev_time = m_prev_time;
+    ctx.terrain_roughness_valid = m_terrainRoughnessValid;
+    ctx.skinned_albedo_layer = m_skinnedAlbedoLayer;
+    ctx.skinned_normal_layer = m_skinnedNormalLayer;
+    ctx.frustum_planes = frustum_planes;
+    ctx.isolation = &m_isolation_config;
+    ctx.material_lut = m_render_registry.adopt_texture("material_lut", m_materialLUT);
+    ctx.terrain_textures = m_render_registry.adopt_texture("terrain_texture_array", m_terrainTextureArray);
+    ctx.terrain_normals = m_render_registry.adopt_texture("terrain_normal_array", m_terrainNormalArray);
+    ctx.terrain_roughness = m_render_registry.adopt_texture("terrain_roughness_array", m_terrainRoughnessArray);
+    ctx.skinned_textures = m_render_registry.adopt_texture("skinned_texture_array", m_skinnedTextureArray);
+    return ctx;
+}
+
 SubmitTerrainChunksFn RenderPipeline::make_terrain_submitter() {
     return [this](const glm::vec4 (&frustum_planes)[6]) -> TerrainSubmitStats {
         std::vector<const ChunkCullEntry*> visible_chunks;
@@ -2009,9 +2035,35 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     const auto _cpu_shadow = std::chrono::steady_clock::now(); // spec 004
     glViewport(0, 0, m_screen_width, m_screen_height);
 
-    // 2. GEOMETRY / G-BUFFER PASS
+    // 2. GEOMETRY / G-BUFFER PASS (Spec 016-P2-T11: routed through the RenderContext seam).
     begin_gpu_pass_timer(GpuTimerPass::GBuffer);
-    m_gbuffer_pass->execute(*this, registry, renderable_chunk_snapshots, camera, frustum_planes);
+    {
+        RenderContext gbuffer_ctx = make_gbuffer_context(camera, frustum_planes);
+        GBufferPassInput gbuffer_input;
+        // Live-terrain submit: the Codex-signed-off callback (CullHierarchical +
+        // draw_chunks_mdi, byte-identical), shared with ShadowPass.
+        gbuffer_input.submit_terrain_chunks = make_terrain_submitter();
+        gbuffer_input.far_lod = farlod();
+        gbuffer_input.root_path = m_root_path;
+        gbuffer_input.static_model_texture_array = static_model_texture_array();
+        gbuffer_input.static_model_tex =
+            [this](const std::string& mesh_path) { return static_model_tex(mesh_path); };
+        gbuffer_input.tree_impostor_enabled = tree_impostor_enabled();
+        gbuffer_input.tree_impostor_albedo = tree_impostor_albedo();
+        gbuffer_input.tree_impostor_normal = tree_impostor_normal();
+        gbuffer_input.tree_impostor_grid = tree_impostor_grid();
+        gbuffer_input.tree_impostor_radius = tree_impostor_radius();
+        gbuffer_input.tree_impostor_sphere_y = tree_impostor_sphere_y();
+        const GBufferDrawStats gstats = m_gbuffer_pass->execute(gbuffer_ctx, registry, gbuffer_input);
+        // Fold with the EXACT current policy: terrain_visible_chunks '=', rest '+='.
+        m_last_render_pass_stats.terrain_visible_chunks = gstats.terrain_visible_chunks;
+        m_last_render_pass_stats.terrain_draws += gstats.terrain_draws;
+        m_last_render_pass_stats.terrain_indices_drawn += gstats.terrain_indices;
+        m_last_render_pass_stats.far_region_draws += gstats.far_region_draws;
+        m_last_render_pass_stats.far_indices_drawn += gstats.far_indices;
+        m_last_render_pass_stats.skinned_draws += gstats.skinned_draws;
+        m_last_render_pass_stats.skinned_indices_drawn += gstats.skinned_indices;
+    }
     const auto _cpu_gbuf = std::chrono::steady_clock::now(); // spec 004
     // 2a. I9-FOLIAGE (render.plant_procgen): draw the procedural plants into the
     // SAME G-buffer the static meshes just wrote. The combined world-space mesh

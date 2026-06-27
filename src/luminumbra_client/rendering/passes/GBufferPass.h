@@ -1,6 +1,12 @@
 #pragma once
 
-#include "../RenderPipeline.h"
+#include "../RenderContext.h"   // Spec 016: per-frame pass contract (RenderContext)
+#include "../RenderInputs.h"    // Spec 016: GBufferPassInput / GBufferDrawStats
+#include "../GBuffer.h"         // Spec 016: GBuffer attachments (value member)
+
+#include <glad/glad.h>          // GLuint for the owned VBO/VAO/SSBO members
+#include <entt/entt.hpp>        // entt::registry& execute param (un-fwd-declarable typedef)
+#include <glm/glm.hpp>          // glm::vec3/vec4/mat4 in the cached-prop structs
 
 #include <filesystem>
 #include <map>
@@ -9,11 +15,13 @@
 #include <vector>
 #include <unordered_map>
 #include <cstdint>
+#include <cstddef>
 
 namespace Luminumbra::Rendering {
 
 class Camera;
 class Shader;
+class Mesh;
 
 // Deferred geometry (G-Buffer) render pass extracted from RenderPipeline
 // (T-I2-11c). Owns the G-Buffer FBO/attachments, the terrain geometry
@@ -21,6 +29,14 @@ class Shader;
 // instance matrix VBO. The pipeline keeps orchestration order, the shared
 // chunk GPU slots, the culling hierarchy, the material LUT, stats
 // collection, and the GPU timer issue/collect calls.
+//
+// Spec 016 (016-P2-T11): converted to the RenderContext seam. Frame state
+// (camera/screen/time/taau jitter/prev-view-proj/prev-time/material+terrain+
+// skinned arrays/isolation/frustum planes) arrives via RenderContext; the
+// live-terrain submit callback, far-LOD system, root path, static-model UV
+// texture lane and tree-impostor bundle arrive via GBufferPassInput. No
+// RenderPipeline& and no `friend` reach. entt::registry& is a separate param
+// (its type is an un-fwd-declarable typedef).
 class GBufferPass {
 public:
     GBufferPass();
@@ -37,11 +53,12 @@ public:
     void destroy_skinned_mesh();
     void reset_shaders();
 
-    void execute(RenderPipeline& pipeline,
-                 entt::registry& registry,
-                 const std::vector<RenderPipeline::ChunkMeshSnapshot>& renderable_chunks,
-                 const Camera& camera,
-                 const glm::vec4 frustum_planes[6]);
+    // Spec 016 (016-P2-T11): RenderContext seam. Returns the draw stats the
+    // call site folds into RenderPassFrameStats with the exact =/+= policy
+    // (terrain_visible_chunks '=', all other counters '+=').
+    GBufferDrawStats execute(const RenderContext& ctx,
+                             entt::registry& registry,
+                             const GBufferPassInput& input);
 
     GBuffer& gbuffer() { return m_gbuffer; }
     const GBuffer& gbuffer() const { return m_gbuffer; }
@@ -59,18 +76,22 @@ public:
     [[nodiscard]] bool has_cached_mesh(const std::string& key) const;
 
 private:
-    void geometry_pass_chunks(RenderPipeline& pipeline,
-                              const std::vector<RenderPipeline::ChunkMeshSnapshot>& renderable_chunks,
+    void geometry_pass_chunks(const RenderContext& ctx,
+                              const GBufferPassInput& input,
                               const Camera& camera,
-                              const glm::vec4 frustum_planes[6]);
-    void geometry_pass_static_meshes(RenderPipeline& pipeline,
+                              const glm::vec4 (&frustum_planes)[6],
+                              GBufferDrawStats& stats);
+    void geometry_pass_static_meshes(const RenderContext& ctx,
+                                     const GBufferPassInput& input,
                                      entt::registry& registry,
                                      const Camera& camera,
-                                     const glm::vec4 frustum_planes[6]);
-    void geometry_pass_skinned_meshes(RenderPipeline& pipeline,
+                                     const glm::vec4 (&frustum_planes)[6]);
+    void geometry_pass_skinned_meshes(const RenderContext& ctx,
+                                      const GBufferPassInput& input,
                                       entt::registry& registry,
                                       const Camera& camera,
-                                      const glm::vec4 frustum_planes[6]);
+                                      const glm::vec4 (&frustum_planes)[6],
+                                      GBufferDrawStats& stats);
 
     GBuffer m_gbuffer;
     std::unique_ptr<Shader> m_geometry_shader;

@@ -706,7 +706,7 @@ private:
     // (FBOs/textures/shaders); the pipeline keeps orchestration order, shared
     // state, stats collection, and GPU timer issue/collect calls.
     // ShadowPass friend removed (Spec 016-P2-T10): reads from RenderContext + ShadowPassInput + make_terrain_submitter().
-    friend class GBufferPass;
+    // GBufferPass friend removed (Spec 016-P2-T11): converted pass has 0 pipeline refs (RenderContext + GBufferPassInput).
     // SsaoPass friend removed (Spec 016-P2-T02): SsaoPass now reads from RenderContext.
     friend class LightingPass;
     // WaterPass friend removed (Spec 016-P3-T16): reads from RenderContext + WaterPassInput.
@@ -749,6 +749,9 @@ private:
     RenderContext make_foliage_context(const Camera& camera);
     // Spec 016 (016-P3-T16): Water pass contract (draw list built at the call site).
     RenderContext make_water_context(const Camera& camera);
+    // Spec 016 (016-P2-T11): GBuffer pass contract (frame state; submit callback +
+    // far-LOD + static-model lane + impostors travel via GBufferPassInput).
+    RenderContext make_gbuffer_context(const Camera& camera, const glm::vec4 frustum_planes[6]);
 
     std::vector<ChunkMeshSnapshot> build_chunk_snapshots(const std::vector<Chunk*>& renderable_chunks) const;
 

@@ -3,6 +3,7 @@
 #include "PassGlHelpers.h"
 #include "../FarLodSystem.h"
 #include "../TreeLod.h" // Track-B: per-instance distance LOD mesh selection (render-only)
+#include "core/IsolationConfig.h" // Spec 016: ctx.isolation->renders(...) needs the full type
 #include "core/Log.h"
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
@@ -20,8 +21,6 @@
 #include <string>
 #include <utility> // std::pair for the LOD-resolve helper return
 #include <filesystem> // existence-probe LOD variants before loading (avoid load-error spam)
-
-#include <GLFW/glfw3.h> // I8: glfwGetTime() for render-only tree wind animation
 
 #include "luminumbra_common/animation/AnimationRuntime.h"
 
@@ -205,11 +204,12 @@ void GBufferPass::reset_shaders() {
     m_skinned_mesh_shader.reset();
 }
 
-void GBufferPass::execute(RenderPipeline& pipeline,
-                          entt::registry& registry,
-                          const std::vector<RenderPipeline::ChunkMeshSnapshot>& renderable_chunks,
-                          const Camera& camera,
-                          const glm::vec4 frustum_planes[6]) {
+GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
+                                      entt::registry& registry,
+                                      const GBufferPassInput& input) {
+    GBufferDrawStats stats;
+    const Camera& camera = *ctx.camera;
+
     glBindFramebuffer(GL_FRAMEBUFFER, m_gbuffer.fbo_id);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -221,35 +221,44 @@ void GBufferPass::execute(RenderPipeline& pipeline,
     // clear-before-lighting masking the critique rejected — this only OMITS draws.
     // Default config renders() == true for every bit, so this is byte-stable off.
     namespace SH = Luminumbra::Client::ScenarioHarness;
-    const SH::IsolationConfig& iso = pipeline.isolation_config();
+    const SH::IsolationConfig& iso = *ctx.isolation;
+
+    // Spec 016: copy ctx.frustum_planes (a const glm::vec4* pointer) into a local
+    // array so the terrain-submit callback (which takes a const glm::vec4(&)[6]
+    // array reference) and the per-instance cull loops see a real array. Byte-
+    // identical to the frustum_planes[6] that render_frame previously passed by value.
+    glm::vec4 fp[6];
+    for (int i = 0; i < 6; ++i) fp[i] = ctx.frustum_planes[i];
 
     // Pass 1: Render all the terrain chunks (+ far-LOD region meshes). Static
     // props/structures are part of the solid world, so they follow the Terrain bit.
     if (iso.renders(SH::IsolationLayer::Terrain)) {
-        geometry_pass_chunks(pipeline, renderable_chunks, camera, frustum_planes);
+        geometry_pass_chunks(ctx, input, camera, fp, stats);
 
         // Pass 2: Render all instanced static meshes
-        geometry_pass_static_meshes(pipeline, registry, camera, frustum_planes);
+        geometry_pass_static_meshes(ctx, input, registry, camera, fp);
     }
 
     // Pass 3 (T-I3-16): non-instanced skinned meshes (CPU-sampled joint
     // palettes from the fixed-tick animation runtime, GPU skinning).
     if (iso.renders(SH::IsolationLayer::Skinned)) {
-        geometry_pass_skinned_meshes(pipeline, registry, camera, frustum_planes);
+        geometry_pass_skinned_meshes(ctx, input, registry, camera, fp, stats);
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    return stats;
 }
 
-void GBufferPass::geometry_pass_chunks(RenderPipeline& pipeline,
-                                       const std::vector<RenderPipeline::ChunkMeshSnapshot>& renderable_chunks,
+void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
+                                       const GBufferPassInput& input,
                                        const Camera& camera,
-                                       const glm::vec4 frustum_planes[6]) {
+                                       const glm::vec4 (&frustum_planes)[6],
+                                       GBufferDrawStats& stats) {
     m_geometry_shader->use();
-    glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)pipeline.m_screen_width / (float)pipeline.m_screen_height, camera.GetNearPlane(), camera.GetFarPlane());
+    glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)ctx.screen_width / (float)ctx.screen_height, camera.GetNearPlane(), camera.GetFarPlane());
     glm::mat4 view = camera.GetViewMatrix();
     // FR-R5 TAAU: sub-pixel jitter the projection (0 when TAAU off -> byte-identical).
-    const glm::vec2 taau_jit = pipeline.taau_jitter_ndc();
+    const glm::vec2 taau_jit = ctx.taau_jitter_ndc;
     projection[2][0] += taau_jit.x;
     projection[2][1] += taau_jit.y;
 
@@ -259,9 +268,9 @@ void GBufferPass::geometry_pass_chunks(RenderPipeline& pipeline,
     // screen-space motion vectors (curr screen pos - reprojected prev pos). Identity prev (frame 0)
     // -> the shader's w<=0 guard yields zero motion. u_jitter_ndc lets the frag remove this frame's
     // jitter from the current position so motion vectors stay jitter-free.
-    m_geometry_shader->setMat4("u_prev_view_proj", pipeline.prev_view_proj());
+    m_geometry_shader->setMat4("u_prev_view_proj", ctx.prev_view_proj);
     m_geometry_shader->setVec2("u_inv_screen_size",
-        glm::vec2(1.0f / (float)pipeline.m_screen_width, 1.0f / (float)pipeline.m_screen_height));
+        glm::vec2(1.0f / (float)ctx.screen_width, 1.0f / (float)ctx.screen_height));
     m_geometry_shader->setVec2("u_jitter_ndc", taau_jit);
     // View rotation: triplanar normal mapping (T-I4-7) perturbs the normal in
     // world space then rotates it into view space for the octahedral G-buffer.
@@ -278,44 +287,37 @@ void GBufferPass::geometry_pass_chunks(RenderPipeline& pipeline,
 
     // Bind material LUT + triplanar terrain arrays for the G-Buffer pass.
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, pipeline.m_materialLUT);
+    glBindTexture(GL_TEXTURE_2D, ctx.material_lut.id);
     m_geometry_shader->setInt("u_materialLUT", 0);
     glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_terrainTextureArray);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.terrain_textures.id);
     m_geometry_shader->setInt("u_terrainTextures", 1);
     glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_terrainNormalArray);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.terrain_normals.id);
     m_geometry_shader->setInt("u_terrainNormals", 2);
     // u_skinnedTextures must point at a distinct unit (3) even though terrain
     // never samples it: a sampler2DArray sharing unit 0 with the sampler2D LUT is
     // undefined (black draws on some drivers). Bind a valid 2D array there.
     glActiveTexture(GL_TEXTURE3);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_skinnedTextureArray ? pipeline.m_skinnedTextureArray : pipeline.m_terrainTextureArray);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.skinned_textures.id ? ctx.skinned_textures.id : ctx.terrain_textures.id);
     m_geometry_shader->setInt("u_skinnedTextures", 3);
     m_geometry_shader->setInt("u_skinnedAlbedoLayer", -1); // terrain uses triplanar, not UV
     m_geometry_shader->setInt("u_skinnedNormalLayer", -1);
     // I7.1-PBR B1d: per-texel terrain roughness map (unit 4).
     glActiveTexture(GL_TEXTURE4);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_terrainRoughnessArray ? pipeline.m_terrainRoughnessArray : pipeline.m_terrainTextureArray);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.terrain_roughness.id ? ctx.terrain_roughness.id : ctx.terrain_textures.id);
     m_geometry_shader->setInt("u_terrainRoughness", 4);
-    m_geometry_shader->setInt("u_terrainRoughnessValid", pipeline.m_terrainRoughnessValid);
+    m_geometry_shader->setInt("u_terrainRoughnessValid", ctx.terrain_roughness_valid);
     m_geometry_shader->setInt("u_macroRockOverlay", 1); // FR-C2: terrain keeps the macro rock overlay
 
-    // Perform hierarchical frustum culling
-    std::vector<const RenderPipeline::ChunkCullEntry*> visible_chunks;
-    visible_chunks.reserve(renderable_chunks.size());
-    pipeline.m_hierarchicalCuller.CullHierarchical(frustum_planes, visible_chunks);
-    pipeline.m_last_render_pass_stats.terrain_visible_chunks = visible_chunks.size();
-
-    // T-I4-16: ONE (per-bucket) glMultiDrawElementsIndirect over the shared
-    // geometry pool replaces the per-chunk glDrawElements loop. The chunk world
-    // origin reaches g_buffer.vert via the instanced aOrigin attribute; the
-    // pool VAOs carry the VoxelVertex layout, so no per-draw VAO/uniform binds.
-    std::size_t terrain_draws = 0;
-    std::size_t terrain_indices = 0;
-    pipeline.draw_chunks_mdi(visible_chunks, terrain_draws, terrain_indices);
-    pipeline.m_last_render_pass_stats.terrain_draws += terrain_draws;
-    pipeline.m_last_render_pass_stats.terrain_indices_drawn += terrain_indices;
+    // Spec 016: live-terrain submit via the Codex-signed-off callback (wraps
+    // CullHierarchical + draw_chunks_mdi exactly, byte-identical). It returns the
+    // cull/draw/index counts; we fold them into the returned stats with the EXACT
+    // current policy (terrain_visible_chunks '=', draws/indices '+=').
+    const TerrainSubmitStats ts = input.submit_terrain_chunks(frustum_planes);
+    stats.terrain_visible_chunks = ts.visible_chunks;
+    stats.terrain_draws += ts.draws;
+    stats.terrain_indices += ts.indices;
 
     // Far-LOD path uses the per-region model uniform: switch the shader back to
     // the model-uniform origin path before it runs (it never sets this flag).
@@ -326,12 +328,12 @@ void GBufferPass::geometry_pass_chunks(RenderPipeline& pipeline,
     // frustum culling, depth-biased so overlapping live terrain wins. Far
     // draws stay inside the gbuffer GPU timer window; they are excluded from
     // the shadow cascades (ShadowPass never sees them).
-    if (pipeline.m_farlod) {
+    if (input.far_lod) {
         std::size_t far_draws = 0;
         std::size_t far_indices = 0;
-        pipeline.m_farlod->draw_gbuffer(*m_geometry_shader, view, frustum_planes, far_draws, far_indices);
-        pipeline.m_last_render_pass_stats.far_region_draws += far_draws;
-        pipeline.m_last_render_pass_stats.far_indices_drawn += far_indices;
+        input.far_lod->draw_gbuffer(*m_geometry_shader, view, frustum_planes, far_draws, far_indices);
+        stats.far_region_draws += far_draws;
+        stats.far_indices += far_indices;
     }
 
     glBindVertexArray(0);
@@ -406,37 +408,38 @@ void GBufferPass::build_static_prop_cache(entt::registry& registry) {
     m_staticPropCachePopulation = registry.view<const Components::StaticMeshComponent>().size();
 }
 
-void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
+void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
+                                              const GBufferPassInput& input,
                                               entt::registry& registry,
                                               const Camera& camera,
-                                              const glm::vec4 frustum_planes[6]) {
+                                              const glm::vec4 (&frustum_planes)[6]) {
     const auto _sp_t0 = std::chrono::steady_clock::now(); // spec 004: CPU submit cost
     m_instanced_static_mesh_shader->use();
     const glm::mat4 static_view = camera.GetViewMatrix();
-    const glm::vec2 static_taau_jit = pipeline.taau_jitter_ndc();  // FR-R5 TAAU (0 when off)
-    glm::mat4 static_proj = glm::perspective(glm::radians(camera.Zoom), (float)pipeline.m_screen_width / (float)pipeline.m_screen_height, camera.GetNearPlane(), camera.GetFarPlane());
+    const glm::vec2 static_taau_jit = ctx.taau_jitter_ndc;  // FR-R5 TAAU (0 when off)
+    glm::mat4 static_proj = glm::perspective(glm::radians(camera.Zoom), (float)ctx.screen_width / (float)ctx.screen_height, camera.GetNearPlane(), camera.GetFarPlane());
     static_proj[2][0] += static_taau_jit.x;
     static_proj[2][1] += static_taau_jit.y;
     m_instanced_static_mesh_shader->setMat4("projection", static_proj);
     m_instanced_static_mesh_shader->setMat4("view", static_view);
-    m_instanced_static_mesh_shader->setMat4("u_prev_view_proj", pipeline.prev_view_proj());  // FR-R5 TAAU motion vectors
+    m_instanced_static_mesh_shader->setMat4("u_prev_view_proj", ctx.prev_view_proj);  // FR-R5 TAAU motion vectors
     m_instanced_static_mesh_shader->setVec2("u_inv_screen_size",
-        glm::vec2(1.0f / (float)pipeline.m_screen_width, 1.0f / (float)pipeline.m_screen_height));
+        glm::vec2(1.0f / (float)ctx.screen_width, 1.0f / (float)ctx.screen_height));
     m_instanced_static_mesh_shader->setVec2("u_jitter_ndc", static_taau_jit);
     m_instanced_static_mesh_shader->setMat3("u_normalViewMatrix", glm::mat3(static_view));
     // Triplanar terrain arrays + LUT (T-I4-7): a static mesh tagged with a
     // textured material id (e.g. grass props) reuses the terrain triplanar path.
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, pipeline.m_materialLUT);
+    glBindTexture(GL_TEXTURE_2D, ctx.material_lut.id);
     m_instanced_static_mesh_shader->setInt("u_materialLUT", 0);
     glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_terrainTextureArray);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.terrain_textures.id);
     m_instanced_static_mesh_shader->setInt("u_terrainTextures", 1);
     glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_terrainNormalArray);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.terrain_normals.id);
     m_instanced_static_mesh_shader->setInt("u_terrainNormals", 2);
     glActiveTexture(GL_TEXTURE3);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_skinnedTextureArray ? pipeline.m_skinnedTextureArray : pipeline.m_terrainTextureArray);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.skinned_textures.id ? ctx.skinned_textures.id : ctx.terrain_textures.id);
     m_instanced_static_mesh_shader->setInt("u_skinnedTextures", 3);
     m_instanced_static_mesh_shader->setInt("u_skinnedAlbedoLayer", -1);
     m_instanced_static_mesh_shader->setInt("u_skinnedNormalLayer", -1);
@@ -445,17 +448,17 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
     // vnoise + up to 3 triplanar samples) — a leaf/bark/bush card never wants rock texturing,
     // and the forest's heavy overdraw made this branch a top G-buffer cost. Terrain keeps it.
     m_instanced_static_mesh_shader->setInt("u_macroRockOverlay", 0);
-    m_instanced_static_mesh_shader->setFloat("u_time", static_cast<float>(glfwGetTime())); // I8 wind
+    m_instanced_static_mesh_shader->setFloat("u_time", ctx.time_seconds); // I8 wind (per-frame snapshot)
     // §13 TAAU: prev-frame wind clock so the vert reconstructs each swayed vertex's PREVIOUS world
     // position -> the G-buffer motion vector tracks wind sway, not just camera motion (no tree-top ghost).
-    m_instanced_static_mesh_shader->setFloat("u_prevTime", pipeline.prev_time());
+    m_instanced_static_mesh_shader->setFloat("u_prevTime", ctx.prev_time);
     m_instanced_static_mesh_shader->setFloat("u_windStrength", 0.0f); // per-group override below
     // I7.1-PBR B1d: per-texel terrain roughness map (unit 4) — g_buffer.frag is
     // shared, so every program using it must bind a valid array to unit 4.
     glActiveTexture(GL_TEXTURE4);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_terrainRoughnessArray ? pipeline.m_terrainRoughnessArray : pipeline.m_terrainTextureArray);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.terrain_roughness.id ? ctx.terrain_roughness.id : ctx.terrain_textures.id);
     m_instanced_static_mesh_shader->setInt("u_terrainRoughness", 4);
-    m_instanced_static_mesh_shader->setInt("u_terrainRoughnessValid", pipeline.m_terrainRoughnessValid);
+    m_instanced_static_mesh_shader->setInt("u_terrainRoughnessValid", ctx.terrain_roughness_valid);
     // spec 004 Phase 1: refresh the cached prop instance data only when the
     // static-mesh population changes (props are scattered once -> usually a no-op).
     {
@@ -469,7 +472,7 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
     // bark/leaf textures. RENDER-ONLY. Missing LOD variant -> LOD0 fallback, so a
     // world with no LOD variants is byte-identical to the pre-LOD renderer.
     const glm::vec3 cameraPos = camera.Position;
-    const bool impostorsOn = pipeline.tree_impostor_enabled();
+    const bool impostorsOn = input.tree_impostor_enabled;
     TreeLodConfig kTreeLodCfg; // data-driven defaults; render.tree_lod.* may override later.
     if (impostorsOn) {
         // The octa impostor is a single cheap quad (unlike the wide cross-billboard, which added
@@ -482,7 +485,7 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
     auto resolve_mesh = [&](const std::string& candidatePath,
                             const std::string& basePath) -> std::pair<Mesh*, std::string> {
         if (m_meshCache.find(candidatePath) == m_meshCache.end()) {
-            std::string full = (pipeline.m_root_path / candidatePath).string();
+            std::string full = (input.root_path / candidatePath).string();
             // Only load the LOD variant if it exists on disk; an absent .lodN.lmesh caches a
             // null and falls back to LOD0 SILENTLY (no MeshLoader "failed header" error spam).
             m_meshCache[candidatePath] =
@@ -492,7 +495,7 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
         if (m) return {m, candidatePath};
         if (candidatePath != basePath) {
             if (m_meshCache.find(basePath) == m_meshCache.end()) {
-                std::string full = (pipeline.m_root_path / basePath).string();
+                std::string full = (input.root_path / basePath).string();
                 m_meshCache[basePath] = MeshLoader::Load(full);
             }
             Mesh* base = m_meshCache[basePath].get();
@@ -518,8 +521,8 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
         const int lod = SelectTreeLod(dist, kTreeLodCfg);
         if (impostorsOn && lod == 3 && cp.impostorTree) { // a tree part -> impostor replaces it at LOD3
             if (cp.impostorLeaf) { // the per-tree representative; bark/trunk are folded into the billboard
-                const glm::vec3 c = cp.position + glm::vec3(0.0f, pipeline.tree_impostor_sphere_y() * cp.maxScale, 0.0f);
-                const float r = pipeline.tree_impostor_radius() * cp.maxScale;
+                const glm::vec3 c = cp.position + glm::vec3(0.0f, input.tree_impostor_sphere_y * cp.maxScale, 0.0f);
+                const float r = input.tree_impostor_radius * cp.maxScale;
                 bool culled = false;
                 for (int i = 0; i < 6; i++) { if (glm::dot(glm::vec4(c, 1.0f), frustum_planes[i]) < -r) { culled = true; break; } }
                 if (!culled) { impostorInstances.emplace_back(cp.position, cp.maxScale); impostorMatId = static_cast<int>(cp.materialId); }
@@ -573,10 +576,10 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
         // texture by mesh UV instead of the world-projected terrain triplanar.
         // Track-B: texture lookup uses the BASE path so LOD variants keep textures.
         {
-            const auto* smt = pipeline.static_model_tex(batch.basePath);
+            const auto* smt = input.static_model_tex(batch.basePath);
             glActiveTexture(GL_TEXTURE3);
-            if (smt && pipeline.static_model_texture_array() != 0) {
-                glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.static_model_texture_array());
+            if (smt && input.static_model_texture_array != 0) {
+                glBindTexture(GL_TEXTURE_2D_ARRAY, input.static_model_texture_array);
                 m_instanced_static_mesh_shader->setInt("u_skinnedAlbedoLayer", smt->albedoLayer);
                 m_instanced_static_mesh_shader->setInt("u_skinnedNormalLayer", smt->normalLayer);
                 m_instanced_static_mesh_shader->setInt("u_alphaTest", smt->alphaTest ? 1 : 0);
@@ -584,7 +587,7 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
                 m_instanced_static_mesh_shader->setFloat("u_windStrength", 1.0f);
                 m_instanced_static_mesh_shader->setInt("u_forceFlat", 0);
             } else {
-                glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_skinnedTextureArray ? pipeline.m_skinnedTextureArray : pipeline.m_terrainTextureArray);
+                glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.skinned_textures.id ? ctx.skinned_textures.id : ctx.terrain_textures.id);
                 m_instanced_static_mesh_shader->setInt("u_skinnedAlbedoLayer", -1);
                 m_instanced_static_mesh_shader->setInt("u_skinnedNormalLayer", -1);
                 m_instanced_static_mesh_shader->setInt("u_alphaTest", 0);
@@ -638,14 +641,14 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
         m_tree_impostor_shader->setMat4("u_view", static_view);
         m_tree_impostor_shader->setMat4("u_proj", static_proj);
         m_tree_impostor_shader->setVec3("u_cameraPos", cameraPos);
-        m_tree_impostor_shader->setFloat("u_radius", pipeline.tree_impostor_radius());
-        m_tree_impostor_shader->setFloat("u_sphereY", pipeline.tree_impostor_sphere_y());
-        m_tree_impostor_shader->setFloat("u_grid", static_cast<float>(pipeline.tree_impostor_grid()));
+        m_tree_impostor_shader->setFloat("u_radius", input.tree_impostor_radius);
+        m_tree_impostor_shader->setFloat("u_sphereY", input.tree_impostor_sphere_y);
+        m_tree_impostor_shader->setFloat("u_grid", static_cast<float>(input.tree_impostor_grid));
         m_tree_impostor_shader->setFloat("u_materialId", static_cast<float>(impostorMatId) / 255.0f);
         m_tree_impostor_shader->setInt("u_albedo", 0);
         m_tree_impostor_shader->setInt("u_normal", 1);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, pipeline.tree_impostor_albedo());
-        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, pipeline.tree_impostor_normal());
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, input.tree_impostor_albedo);
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, input.tree_impostor_normal);
         glBindBuffer(GL_ARRAY_BUFFER, m_impostorInstanceVBO);
         glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(count) * sizeof(glm::vec4), impostorInstances.data());
         glBindVertexArray(m_impostorVAO);
@@ -658,10 +661,12 @@ void GBufferPass::geometry_pass_static_meshes(RenderPipeline& pipeline,
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - _sp_t0).count();
 }
 
-void GBufferPass::geometry_pass_skinned_meshes(RenderPipeline& pipeline,
+void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
+                                               const GBufferPassInput& input,
                                                entt::registry& registry,
                                                const Camera& camera,
-                                               const glm::vec4 frustum_planes[6]) {
+                                               const glm::vec4 (&frustum_planes)[6],
+                                               GBufferDrawStats& stats) {
     namespace anim = luminumbra::animation;
     auto view = registry.view<const Components::TransformComponent,
                               const Components::SkinnedMeshComponent,
@@ -675,26 +680,26 @@ void GBufferPass::geometry_pass_skinned_meshes(RenderPipeline& pipeline,
 
     m_skinned_mesh_shader->use();
     const glm::mat4 skinned_view = camera.GetViewMatrix();
-    const glm::vec2 skinned_taau_jit = pipeline.taau_jitter_ndc();  // FR-R5 TAAU (0 when off)
-    glm::mat4 skinned_proj = glm::perspective(glm::radians(camera.Zoom), (float)pipeline.m_screen_width / (float)pipeline.m_screen_height, camera.GetNearPlane(), camera.GetFarPlane());
+    const glm::vec2 skinned_taau_jit = ctx.taau_jitter_ndc;  // FR-R5 TAAU (0 when off)
+    glm::mat4 skinned_proj = glm::perspective(glm::radians(camera.Zoom), (float)ctx.screen_width / (float)ctx.screen_height, camera.GetNearPlane(), camera.GetFarPlane());
     skinned_proj[2][0] += skinned_taau_jit.x;
     skinned_proj[2][1] += skinned_taau_jit.y;
     m_skinned_mesh_shader->setMat4("projection", skinned_proj);
     m_skinned_mesh_shader->setMat4("view", skinned_view);
-    m_skinned_mesh_shader->setMat4("u_prev_view_proj", pipeline.prev_view_proj());  // FR-R5 TAAU motion vectors
+    m_skinned_mesh_shader->setMat4("u_prev_view_proj", ctx.prev_view_proj);  // FR-R5 TAAU motion vectors
     m_skinned_mesh_shader->setVec2("u_inv_screen_size",
-        glm::vec2(1.0f / (float)pipeline.m_screen_width, 1.0f / (float)pipeline.m_screen_height));
+        glm::vec2(1.0f / (float)ctx.screen_width, 1.0f / (float)ctx.screen_height));
     m_skinned_mesh_shader->setVec2("u_jitter_ndc", skinned_taau_jit);
     m_skinned_mesh_shader->setMat3("u_normalViewMatrix", glm::mat3(skinned_view));
     // Triplanar terrain arrays + LUT (T-I4-7).
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, pipeline.m_materialLUT);
+    glBindTexture(GL_TEXTURE_2D, ctx.material_lut.id);
     m_skinned_mesh_shader->setInt("u_materialLUT", 0);
     glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_terrainTextureArray);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.terrain_textures.id);
     m_skinned_mesh_shader->setInt("u_terrainTextures", 1);
     glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_terrainNormalArray);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.terrain_normals.id);
     m_skinned_mesh_shader->setInt("u_terrainNormals", 2);
     // T-I4-8: UV-mapped skinned-mesh texture array on unit 3. Skinned creatures
     // take the UV-sampled path (precedence over the terrain LUT triplanar path).
@@ -704,15 +709,15 @@ void GBufferPass::geometry_pass_skinned_meshes(RenderPipeline& pipeline,
     // never left referencing an empty unit (GL_INVALID_OPERATION "program
     // texture usage" otherwise — fires once per skinned draw). The albedo/normal
     // layers below resolve to -1 in that case, so the fallback is never sampled.
-    glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_skinnedTextureArray ? pipeline.m_skinnedTextureArray : pipeline.m_terrainTextureArray);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.skinned_textures.id ? ctx.skinned_textures.id : ctx.terrain_textures.id);
     m_skinned_mesh_shader->setInt("u_skinnedTextures", 3);
-    m_skinned_mesh_shader->setInt("u_skinnedAlbedoLayer", pipeline.m_skinnedTextureArray ? pipeline.m_skinnedAlbedoLayer : -1);
-    m_skinned_mesh_shader->setInt("u_skinnedNormalLayer", pipeline.m_skinnedTextureArray ? pipeline.m_skinnedNormalLayer : -1);
+    m_skinned_mesh_shader->setInt("u_skinnedAlbedoLayer", ctx.skinned_textures.id ? ctx.skinned_albedo_layer : -1);
+    m_skinned_mesh_shader->setInt("u_skinnedNormalLayer", ctx.skinned_textures.id ? ctx.skinned_normal_layer : -1);
     // I7.1-PBR B1d: per-texel terrain roughness map (unit 4) — shared g_buffer.frag.
     glActiveTexture(GL_TEXTURE4);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, pipeline.m_terrainRoughnessArray ? pipeline.m_terrainRoughnessArray : pipeline.m_terrainTextureArray);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.terrain_roughness.id ? ctx.terrain_roughness.id : ctx.terrain_textures.id);
     m_skinned_mesh_shader->setInt("u_terrainRoughness", 4);
-    m_skinned_mesh_shader->setInt("u_terrainRoughnessValid", pipeline.m_terrainRoughnessValid);
+    m_skinned_mesh_shader->setInt("u_terrainRoughnessValid", ctx.terrain_roughness_valid);
 
     for (auto entity : view) {
         auto const& transform = view.get<const Components::TransformComponent>(entity);
@@ -720,7 +725,7 @@ void GBufferPass::geometry_pass_skinned_meshes(RenderPipeline& pipeline,
         auto const& player = view.get<const anim::AnimationPlayerComponent>(entity);
 
         if (m_skinnedMeshCache.find(mesh_info.meshPath) == m_skinnedMeshCache.end()) {
-            std::string full_mesh_path = (pipeline.m_root_path / mesh_info.meshPath).string();
+            std::string full_mesh_path = (input.root_path / mesh_info.meshPath).string();
             m_skinnedMeshCache[mesh_info.meshPath] = MeshLoader::LoadSkinned(full_mesh_path);
         }
         Mesh* mesh = m_skinnedMeshCache[mesh_info.meshPath].get();
@@ -766,8 +771,8 @@ void GBufferPass::geometry_pass_skinned_meshes(RenderPipeline& pipeline,
         glBindVertexArray(mesh->vao);
         glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, 0);
         glBindVertexArray(0);
-        pipeline.m_last_render_pass_stats.skinned_draws++;
-        pipeline.m_last_render_pass_stats.skinned_indices_drawn += mesh->indexCount;
+        stats.skinned_draws++;
+        stats.skinned_indices += mesh->indexCount;
     }
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 }
