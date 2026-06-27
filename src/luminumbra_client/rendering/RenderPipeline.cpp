@@ -805,6 +805,17 @@ RenderContext RenderPipeline::make_ssao_context(const Camera& camera) {
     return ctx;
 }
 
+// Spec 016 (016-P3-T14): the PlantProcgen pass contract (screen size + the single
+// per-frame wall-clock snapshot that feeds u_time leaf sway). Render-only.
+RenderContext RenderPipeline::make_plant_context() {
+    RenderContext ctx;
+    ctx.registry = &m_render_registry;
+    ctx.screen_width = m_screen_width;
+    ctx.screen_height = m_screen_height;
+    ctx.time_seconds = m_wall_clock_time;
+    return ctx;
+}
+
 // Spec 016 (016-P2-T02) SSAO parity gate. For a MECHANICAL conversion (the GL
 // sequence is a verbatim copy, only operands changed pipeline.X -> ctx.X) the sole
 // risk is make_ssao_context mis-mapping a field, so we (1) assert every ctx field
@@ -1808,6 +1819,11 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     }
     const auto _cpu_t0 = std::chrono::steady_clock::now(); // spec 004: CPU per-phase submit cost
 
+    // Spec 016 (Group K): ONE wall-clock snapshot per frame, shared by every pass
+    // via RenderContext.time_seconds so converted passes are deterministic w.r.t.
+    // each other (no per-pass glfwGetTime drift). Render-only (u_time sway etc.).
+    m_wall_clock_time = static_cast<float>(glfwGetTime());
+
     update_time_of_day(deltaTime);
     gather_lights(registry, camera.Position);
     // Underwater detection: the aerial pass becomes a murky-water volume when the
@@ -1929,7 +1945,8 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
         glDepthFunc(GL_LESS);
         glDepthMask(GL_TRUE);
         glDisable(GL_CULL_FACE); // procgen branches/leaves are 2-sided
-        m_plant_procgen_pass->execute(*this, camera);
+        RenderContext plant_ctx = make_plant_context();
+        m_plant_procgen_pass->execute(plant_ctx, camera);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
     end_gpu_pass_timer(GpuTimerPass::GBuffer);

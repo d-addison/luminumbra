@@ -1,6 +1,8 @@
 #pragma once
 
-#include "../RenderPipeline.h"
+#include "../RenderContext.h"
+
+#include <glad/glad.h>
 
 #include <cstdint>
 #include <filesystem>
@@ -32,6 +34,12 @@ class Shader;
 // RENDER-ONLY: nothing here touches the sim or world_hash. When disabled (or
 // no plants pushed) the pass issues zero GL work, so default behaviour is
 // byte-identical.
+//
+// Spec 016 (016-P3-T14): converted to the RenderContext seam. execute() takes a
+// const RenderContext& (screen size + the per-frame time snapshot) instead of a
+// RenderPipeline&, so the pass reaches no pipeline privates and needs no friend.
+// u_time MUST come from ctx.time_seconds (the single per-frame glfwGetTime
+// snapshot), NOT a fresh glfwGetTime, so the seam is deterministic.
 // ===========================================================================
 class PlantProcgenPass {
 public:
@@ -68,7 +76,7 @@ public:
     // Draws the combined plant mesh into the currently-bound G-buffer FBO. The
     // caller binds the FBO + sets the viewport (same pattern as the SHIELD-RT
     // far-field injection). No-op when disabled, no shader, or no geometry.
-    void execute(RenderPipeline& pipeline, const Camera& camera);
+    void execute(const RenderContext& ctx, const Camera& camera);
 
 private:
     std::unique_ptr<Shader> m_shader;

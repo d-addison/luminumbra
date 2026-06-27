@@ -103,7 +103,7 @@ void PlantProcgenPass::set_plants(const std::vector<Vertex>& vertices,
     m_has_geometry = true;
 }
 
-void PlantProcgenPass::execute(RenderPipeline& pipeline, const Camera& camera) {
+void PlantProcgenPass::execute(const RenderContext& ctx, const Camera& camera) {
     if (!m_enabled || !m_has_geometry || m_index_count == 0) {
         return;
     }
@@ -113,13 +113,13 @@ void PlantProcgenPass::execute(RenderPipeline& pipeline, const Camera& camera) {
 
     const glm::mat4 view = camera.GetViewMatrix();
     const glm::mat4 projection = camera.GetProjectionMatrix(
-        static_cast<int>(pipeline.m_screen_width), static_cast<int>(pipeline.m_screen_height));
+        static_cast<int>(ctx.screen_width), static_cast<int>(ctx.screen_height));
 
     m_shader->use();
     m_shader->setMat4("projection", projection);
     m_shader->setMat4("view", view);
     m_shader->setMat3("u_normalViewMatrix", glm::mat3(view));
-    m_shader->setFloat("u_time", static_cast<float>(glfwGetTime()));  // render-only leaf sway
+    m_shader->setFloat("u_time", ctx.time_seconds);  // render-only leaf sway
     m_shader->setFloat("u_windStrength", 1.0f);
     // This pass now draws ONLY the gameplay marker octahedra (creatures / foragers /
     // crystals). Make them self-luminous beacons so they read as glowing motes in dark

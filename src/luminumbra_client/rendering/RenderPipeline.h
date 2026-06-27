@@ -711,7 +711,7 @@ private:
     friend class SkyboxPass;
     friend class ParticlePass;
     friend class FoliagePass;
-    friend class PlantProcgenPass;
+    // PlantProcgenPass friend removed (Spec 016-P3-T14): reads from RenderContext.
 
     struct ChunkMeshSnapshot {
         ChunkID id = 0;
@@ -740,6 +740,9 @@ private:
     // Shared by the render_frame call site and capture_ssao_parity so the gated
     // ctx is exactly the production ctx.
     RenderContext make_ssao_context(const Camera& camera);
+    // Spec 016 (016-P3-T14): the PlantProcgen pass contract (screen size + the
+    // per-frame wall-clock snapshot). Camera is a separate execute() arg.
+    RenderContext make_plant_context();
 
     std::vector<ChunkMeshSnapshot> build_chunk_snapshots(const std::vector<Chunk*>& renderable_chunks) const;
 
@@ -813,6 +816,9 @@ private:
 
     u32 m_screen_width = 0;
     u32 m_screen_height = 0;
+    // Spec 016 (Group K): one glfwGetTime() snapshot per frame (set at render_frame
+    // top), fed to RenderContext.time_seconds for every converted pass.
+    float m_wall_clock_time = 0.0f;
     // FR-R5 TAAU: previous-frame UNJITTERED view-projection, used by the G-buffer to write
     // screen-space motion vectors (current screen pos - reprojected previous screen pos).
     // Advanced at render_frame end; identity on frame 0 (the shader's w<=0 guard => zero motion).
