@@ -1988,8 +1988,23 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
 
     const auto _cpu_prep = std::chrono::steady_clock::now(); // spec 004
      // 1. SHADOW PASS
+    // Spec 016 (T10): precompute light-space matrices (pipeline-private) + the
+    // terrain-submit callback at the call site; the pass submits one per cascade.
     begin_gpu_pass_timer(GpuTimerPass::Shadow);
-    m_shadow_pass->execute(*this, renderable_chunk_snapshots, camera);
+    {
+        RenderContext shadow_ctx;
+        shadow_ctx.registry = &m_render_registry;
+        ShadowPassInput shadow_input;
+        shadow_input.light_space_matrices = get_light_space_matrices(camera);
+        shadow_input.submit_terrain = make_terrain_submitter();
+        const auto shadow_stats = m_shadow_pass->execute(shadow_ctx, shadow_input);
+        for (int i = 0; i < ShadowMap::CASCADE_COUNT; ++i) {
+            m_last_render_pass_stats.shadow_cascade_visible_chunks[i] = shadow_stats[i].visible_chunks;
+            m_last_render_pass_stats.shadow_cascade_draws[i] += shadow_stats[i].draws;
+            m_last_render_pass_stats.shadow_draws += shadow_stats[i].draws;
+            m_last_render_pass_stats.shadow_indices_drawn += shadow_stats[i].indices;
+        }
+    }
     end_gpu_pass_timer(GpuTimerPass::Shadow);
     const auto _cpu_shadow = std::chrono::steady_clock::now(); // spec 004
     glViewport(0, 0, m_screen_width, m_screen_height);

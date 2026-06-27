@@ -705,7 +705,7 @@ private:
     // Extracted render pass classes (T-I2-11). Passes own their GL resources
     // (FBOs/textures/shaders); the pipeline keeps orchestration order, shared
     // state, stats collection, and GPU timer issue/collect calls.
-    friend class ShadowPass;
+    // ShadowPass friend removed (Spec 016-P2-T10): reads from RenderContext + ShadowPassInput + make_terrain_submitter().
     friend class GBufferPass;
     // SsaoPass friend removed (Spec 016-P2-T02): SsaoPass now reads from RenderContext.
     friend class LightingPass;

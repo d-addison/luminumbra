@@ -2,9 +2,7 @@
 
 #include "PassGlHelpers.h"
 #include "core/Log.h"
-#include "rendering/Camera.h"
 #include "rendering/Shader.h"
-#include "luminumbra_common/world/Chunk.h"
 
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -51,18 +49,19 @@ void ShadowPass::reset_shader() {
     m_shadow_shader.reset();
 }
 
-void ShadowPass::execute(RenderPipeline& pipeline,
-                         const std::vector<RenderPipeline::ChunkMeshSnapshot>& renderable_chunks,
-                         const Camera& camera) {
+std::array<TerrainSubmitStats, ShadowMap::CASCADE_COUNT> ShadowPass::execute(const RenderContext& ctx,
+                                                                            const ShadowPassInput& input) {
+    (void)ctx; // Shadow reads no RenderContext fields; its inputs are m_shadow_map + ShadowPassInput.
+    std::array<TerrainSubmitStats, ShadowMap::CASCADE_COUNT> cascade_stats{};
     if (!m_shadow_shader || m_shadow_map.fbo_id == 0 || m_shadow_map.depth_texture_array == 0) {
         LUMINUMBRA_CORE_ERROR("Shadow pass skipped because shadow resources are not initialized.");
-        return;
+        return cascade_stats;
     }
 
-    auto light_space_matrices = pipeline.get_light_space_matrices(camera);
+    const std::vector<glm::mat4>& light_space_matrices = input.light_space_matrices;
     if (light_space_matrices.size() < ShadowMap::CASCADE_COUNT) {
         LUMINUMBRA_CORE_ERROR("Shadow pass skipped because light-space matrices could not be generated.");
-        return;
+        return cascade_stats;
     }
 
     m_shadow_map.light_space_matrices = light_space_matrices;
@@ -83,20 +82,14 @@ void ShadowPass::execute(RenderPipeline& pipeline,
 
         glm::vec4 cascade_planes[6];
         PassGl::ExtractFrustumPlanes(light_space_matrices[i], cascade_planes);
-        std::vector<const RenderPipeline::ChunkCullEntry*> visible_chunks;
-        visible_chunks.reserve(renderable_chunks.size());
-        pipeline.m_hierarchicalCuller.CullHierarchical(cascade_planes, visible_chunks);
-        pipeline.m_last_render_pass_stats.shadow_cascade_visible_chunks[i] = visible_chunks.size();
-
-        std::size_t cascade_draws = 0;
-        std::size_t cascade_indices = 0;
-        pipeline.draw_chunks_mdi(visible_chunks, cascade_draws, cascade_indices);
-        pipeline.m_last_render_pass_stats.shadow_cascade_draws[i] += cascade_draws;
-        pipeline.m_last_render_pass_stats.shadow_draws += cascade_draws;
-        pipeline.m_last_render_pass_stats.shadow_indices_drawn += cascade_indices;
+        // Spec 016: ONE submit per cascade via the Codex-signed-off callback
+        // (reproduces CullHierarchical + draw_chunks_mdi exactly). Returns the
+        // per-cascade counts; the call site folds them into stats with =/+=.
+        cascade_stats[i] = input.submit_terrain(cascade_planes);
     }
     glCullFace(GL_BACK);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    return cascade_stats;
 }
 
 } // namespace Luminumbra::Rendering

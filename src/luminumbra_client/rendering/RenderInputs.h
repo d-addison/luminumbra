@@ -104,4 +104,16 @@ struct WaterDrawStats {
     std::size_t water_indices = 0; // call site: '+=' (water_indices_drawn)
 };
 
+// ----------------------------------------------------------------------------
+// Shadow (T10) — non-ctx inputs for the cascaded shadow pass.
+// ----------------------------------------------------------------------------
+// light_space_matrices are PRECOMPUTED at the call site (get_light_space_matrices,
+// a pipeline-private the terrain-submit callback does not cover). submit_terrain is
+// make_terrain_submitter(); the pass calls it ONCE PER CASCADE and returns the
+// per-cascade TerrainSubmitStats so the call site applies the exact =/+= policy.
+struct ShadowPassInput {
+    std::vector<glm::mat4> light_space_matrices;
+    SubmitTerrainChunksFn submit_terrain;
+};
+
 } // namespace Luminumbra::Rendering

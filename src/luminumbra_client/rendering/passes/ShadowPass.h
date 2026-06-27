@@ -1,7 +1,10 @@
 #pragma once
 
-#include "../RenderPipeline.h"
+#include "../RenderContext.h"
+#include "../RenderInputs.h"
+#include "../ShadowMap.h"
 
+#include <array>
 #include <filesystem>
 #include <memory>
 #include <vector>
@@ -25,9 +28,11 @@ public:
     void destroy_shadow_map();
     void reset_shader();
 
-    void execute(RenderPipeline& pipeline,
-                 const std::vector<RenderPipeline::ChunkMeshSnapshot>& renderable_chunks,
-                 const Camera& camera);
+    // Spec 016 (016-P2-T10): RenderContext seam. Terrain submission goes through
+    // input.submit_terrain (make_terrain_submitter) once per cascade; light-space
+    // matrices are precomputed at the call site. Returns per-cascade submit stats.
+    std::array<TerrainSubmitStats, ShadowMap::CASCADE_COUNT> execute(const RenderContext& ctx,
+                                                                     const ShadowPassInput& input);
 
     ShadowMap& shadow_map() { return m_shadow_map; }
     const ShadowMap& shadow_map() const { return m_shadow_map; }
