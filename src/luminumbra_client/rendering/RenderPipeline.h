@@ -12,6 +12,8 @@
 #include "Mesh.h"
 #include "RenderResourceRegistry.h" // Spec 016: render resource registry (value member)
 #include "RenderContext.h"          // Spec 016: pass contract (make_ssao_context returns by value)
+#include "GBuffer.h"                // Spec 016: GBuffer (extracted)
+#include "ShadowMap.h"              // Spec 016: ShadowMap (extracted)
 #include "passes/SsaoData.h"        // Spec 016: SSAOData (extracted; still read here for stats)
 #include "SkyAtmosphereLut.h" // T-I5a-6: Hillaire 2020 scattering LUTs
 #include "WaterfallDetect.h"  // T-I5b-4: world-deterministic waterfall sites
@@ -42,28 +44,9 @@ struct PointLight {
     float intensity;
 };
 
-struct GBuffer {
-    u32 fbo_id = 0;
-    u32 position_texture = 0;
-    u32 normal_texture = 0;
-    u32 albedo_texture = 0;
-    u32 material_texture = 0;
-    // spec 004 FR-R5 (TAAU foundation): RG16F screen-space motion vectors at
-    // COLOR_ATTACHMENT4. The gbuffer writes zero (static) for now; the particle
-    // pass writes its per-particle velocity here, and the TAAU resolve (follow-on)
-    // consumes it. Establishing the attachment + format/index unblocks spec 007.
-    u32 motion_vector_texture = 0;
-    u32 depth_texture = 0;
-};
-
-struct ShadowMap {
-    u32 fbo_id = 0;
-    u32 depth_texture_array = 0;
-    u32 resolution = 2048;
-    static constexpr int CASCADE_COUNT = 4;
-    std::vector<glm::mat4> light_space_matrices;
-    std::vector<float> cascade_splits;
-};
+// Spec 016 (016-P1): GBuffer + ShadowMap moved to GBuffer.h / ShadowMap.h
+// (included above) so passes + PassGlHelpers reference them without this
+// god-object. Definitions unchanged.
 
 // T-I4-16: a live chunk's terrain geometry now lives inside the shared
 // bucketed persistent-mapped geometry pool (ChunkGeometryPool) instead of a

@@ -2,7 +2,7 @@
 
 #include "PassGlHelpers.h"
 #include "../Shader.h"
-#include "../RenderPipeline.h"   // GBuffer struct
+#include "../GBuffer.h"   // Spec 016: GBuffer struct (extracted; no god-object dep)
 
 namespace Luminumbra::Rendering {
 

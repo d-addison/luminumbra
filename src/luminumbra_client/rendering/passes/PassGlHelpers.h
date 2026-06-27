@@ -10,7 +10,10 @@
 #include <glm/glm.hpp>
 #include <string>
 
-#include "../RenderPipeline.h"
+// Spec 016 (016-P1): only ShadowMap is needed here (cascade-split helpers), so
+// include the extracted header instead of the RenderPipeline god-object — this
+// decouples every pass that includes PassGlHelpers from the pipeline.
+#include "../ShadowMap.h"
 
 namespace Luminumbra::Rendering::PassGl {
 
