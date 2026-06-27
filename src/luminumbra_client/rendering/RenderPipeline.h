@@ -11,6 +11,8 @@
 #include <glm/glm.hpp>
 #include "Mesh.h"
 #include "RenderResourceRegistry.h" // Spec 016: render resource registry (value member)
+#include "RenderContext.h"          // Spec 016: pass contract (make_ssao_context returns by value)
+#include "passes/SsaoData.h"        // Spec 016: SSAOData (extracted; still read here for stats)
 #include "SkyAtmosphereLut.h" // T-I5a-6: Hillaire 2020 scattering LUTs
 #include "WaterfallDetect.h"  // T-I5b-4: world-deterministic waterfall sites
 #include <map>
@@ -105,25 +107,9 @@ struct FrameBufferObject {
     u32 depth_texture = 0;
 };
 
-struct SSAOData {
-    GLuint fbo = 0, blurFBO = 0;
-    GLuint ssaoColorBuffer = 0, ssaoColorBufferBlur = 0;
-    GLuint noiseTexture = 0;
-    std::vector<glm::vec3> kernel;
-    std::unique_ptr<Shader> ssaoShader;
-    std::unique_ptr<Shader> blurShader;
-    // Render-optimization (ssao-gtao): XeGTAO horizon-slice AO, selected when
-    // ssao_quality > 0. Renders into the same FBOs as the legacy SSAO so the blur
-    // + lighting AO tap are unchanged. Null/quality 0 -> legacy ssaoShader path.
-    std::unique_ptr<Shader> gtaoShader;
-    // ssao_quality 3 = HALF-RES GTAO: render GTAO into a 1/2-per-axis FBO (1/4 the
-    // fragments) then joint-bilateral depth-aware upsample to full res (this replaces
-    // the box blur on that path). The AO budget holds even on dense views.
-    GLuint halfFBO = 0;
-    GLuint halfTex = 0; // half-res AO (R16F)
-    u32 halfW = 0, halfH = 0;
-    std::unique_ptr<Shader> upsampleShader;
-};
+// Spec 016 (016-P1): SSAOData moved to passes/SsaoData.h (included above) so
+// SsaoPass owns it without including this god-object. Definition is unchanged;
+// RenderPipeline still reads ssao() resources for inventory/VRAM stats.
 
 // Engine-generic runtime weather state (T-I2-17b). Default Off: the weather
 // overlay issues zero GL work unless a weather type with intensity > 0 is set.
@@ -610,6 +596,12 @@ public:
     // consume the identical source in the same frame, any non-zero FLIP isolates a
     // behavior change in the extraction (must be ~0). Returns false on GL/IO error.
     bool capture_finalblit_parity(const std::filesystem::path& out_dir);
+    // Spec 016 (016-P2-T02) SSAO parity: run the ORIGINAL pipeline-sourced SSAO+blur
+    // GL sequence (golden A-leg) then the ctx-sourced SsaoPass seam (B-leg) into the
+    // pass-owned blur FBO in the same frame, reading back R16F between legs, for each
+    // ssao_quality 0..3. memcmp==0 catches a call-site ctx mis-population. Writes a
+    // ssao_parity.txt verdict under out_dir; returns false on GL/IO error or mismatch.
+    bool capture_ssao_parity(const std::filesystem::path& out_dir, const Camera& camera);
     // Generated caustics texture id (0 when unavailable). Exposed for the
     // runtime scenario harness caustics-animation probe (T-I2-16).
     u32 water_caustics_texture() const;
@@ -827,7 +819,7 @@ private:
     // state, stats collection, and GPU timer issue/collect calls.
     friend class ShadowPass;
     friend class GBufferPass;
-    friend class SsaoPass;
+    // SsaoPass friend removed (Spec 016-P2-T02): SsaoPass now reads from RenderContext.
     friend class LightingPass;
     friend class WaterPass;
     friend class SkyboxPass;
@@ -857,6 +849,11 @@ private:
 
         bool has_mesh() const { return !vertices.empty() && !indices.empty(); }
     };
+
+    // Spec 016 (016-P2-T02): build the SSAO pass contract from pipeline state.
+    // Shared by the render_frame call site and capture_ssao_parity so the gated
+    // ctx is exactly the production ctx.
+    RenderContext make_ssao_context(const Camera& camera);
 
     std::vector<ChunkMeshSnapshot> build_chunk_snapshots(const std::vector<Chunk*>& renderable_chunks) const;
 

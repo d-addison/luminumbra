@@ -47,6 +47,16 @@ struct RenderContext {
     // "lit_scene"). The FinalBlit pass reads this and resolves it to the target.
     FboHandle lit_scene{};
 
+    // --- Spec 016 field-union (grown additively per converted pass) ---
+    // Group A: shared fullscreen-quad VAO (plain GL name, reused by every
+    // fullscreen pass: Ssao, Aerial, GodRays, Taau, Skybox-overlay, Lighting, Water).
+    u32 screen_quad_vao = 0;
+    // Group B: G-buffer attachment handles (adopted by name from the live G-buffer).
+    TextureHandle gbuffer_position{};
+    TextureHandle gbuffer_normal{};
+    // SSAO quality selector (0 legacy, 1/2 GTAO, 3 half-res GTAO) <- m_ssao_quality.
+    int ssao_quality = 0;
+
     // Destination resolution helpers (screen vs offscreen preview target).
     FboHandle dest_fbo() const {
         return offscreen_active ? adopt_fbo(offscreen_fbo) : default_framebuffer();

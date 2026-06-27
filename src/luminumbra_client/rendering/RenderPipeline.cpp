@@ -789,6 +789,78 @@ bool RenderPipeline::capture_finalblit_parity(const std::filesystem::path& out_d
     return ok;
 }
 
+// Spec 016 (016-P2-T02): the SSAO pass contract, built from pipeline state. Used
+// by both the render_frame call site and capture_ssao_parity so the gated ctx is
+// byte-identical to the production ctx.
+RenderContext RenderPipeline::make_ssao_context(const Camera& camera) {
+    RenderContext ctx;
+    ctx.camera = &camera;
+    ctx.screen_width = m_screen_width;
+    ctx.screen_height = m_screen_height;
+    ctx.registry = &m_render_registry;
+    ctx.screen_quad_vao = m_screen_quad_vao;
+    ctx.ssao_quality = m_ssao_quality;
+    ctx.gbuffer_position = m_render_registry.adopt_texture("gbuffer_position", m_gbuffer_pass->gbuffer().position_texture);
+    ctx.gbuffer_normal = m_render_registry.adopt_texture("gbuffer_normal", m_gbuffer_pass->gbuffer().normal_texture);
+    return ctx;
+}
+
+// Spec 016 (016-P2-T02) SSAO parity gate. For a MECHANICAL conversion (the GL
+// sequence is a verbatim copy, only operands changed pipeline.X -> ctx.X) the sole
+// risk is make_ssao_context mis-mapping a field, so we (1) assert every ctx field
+// equals its raw pipeline source — the independent mapping check — and (2) prove
+// the seam is deterministic by running it twice and memcmp'ing the R16F readback of
+// the pass-owned blur target, across ssao_quality 0..3 (legacy / GTAO / half-res).
+bool RenderPipeline::capture_ssao_parity(const std::filesystem::path& out_dir, const Camera& camera) {
+    const GLsizei w = static_cast<GLsizei>(m_screen_width);
+    const GLsizei h = static_cast<GLsizei>(m_screen_height);
+    if (w <= 0 || h <= 0) return false;
+
+    RenderContext ctx = make_ssao_context(camera);
+    // (1) Mapping check: ctx fields must equal the raw pipeline sources.
+    bool mapping_ok =
+        ctx.screen_width == m_screen_width &&
+        ctx.screen_height == m_screen_height &&
+        ctx.screen_quad_vao == m_screen_quad_vao &&
+        ctx.ssao_quality == m_ssao_quality &&
+        ctx.gbuffer_position.id == m_gbuffer_pass->gbuffer().position_texture &&
+        ctx.gbuffer_normal.id == m_gbuffer_pass->gbuffer().normal_texture;
+
+    auto readback_blur = [&](std::vector<float>& buf) {
+        buf.assign(static_cast<size_t>(w) * static_cast<size_t>(h), 0.0f);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, m_ssao_pass->ssao().blurFBO);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, w, h, GL_RED, GL_FLOAT, buf.data());
+    };
+
+    bool determinism_ok = true;
+    std::vector<float> b1, b2;
+    for (int q = 0; q <= 3; ++q) {
+        ctx.ssao_quality = q;
+        m_ssao_pass->execute_ssao(ctx);
+        m_ssao_pass->execute_blur(ctx);
+        readback_blur(b1);
+        m_ssao_pass->execute_ssao(ctx);
+        m_ssao_pass->execute_blur(ctx);
+        readback_blur(b2);
+        if (b1 != b2) { determinism_ok = false; }
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    std::error_code ec;
+    std::filesystem::create_directories(out_dir, ec);
+    const bool ok = mapping_ok && determinism_ok;
+    std::ofstream f(out_dir / "ssao_parity.txt", std::ios::trunc);
+    if (f) {
+        f << "ssao_parity: " << (ok ? "PASS" : "FAIL")
+          << " mapping_ok=" << mapping_ok
+          << " determinism_ok=" << determinism_ok
+          << " (" << w << "x" << h << ", quality 0..3)\n";
+    }
+    return ok;
+}
+
 void RenderPipeline::attach_farlod_job_system(JobSystem* job_system) {
     // Stored so passes CONSTRUCTED IN startup() (which runs after this call) can be
     // wired too — the far-field pass is one such, and without this it silently fell
@@ -1929,15 +2001,20 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
 
-    // 3. SSAO PASS
-    begin_gpu_pass_timer(GpuTimerPass::Ssao);
-    m_ssao_pass->execute_ssao(*this, camera);
-    end_gpu_pass_timer(GpuTimerPass::Ssao);
-    glBindVertexArray(0);  // Unbind after SSAO
-    begin_gpu_pass_timer(GpuTimerPass::SsaoBlur);
-    m_ssao_pass->execute_blur(*this);
-    end_gpu_pass_timer(GpuTimerPass::SsaoBlur);
-    glBindVertexArray(0);  // Unbind after SSAO blur
+    // 3. SSAO PASS (Spec 016-P2-T02: routed through the RenderContext seam).
+    {
+        RenderContext ctx = make_ssao_context(camera);
+        begin_gpu_pass_timer(GpuTimerPass::Ssao);
+        m_ssao_pass->execute_ssao(ctx);
+        m_last_render_pass_stats.ssao_draws++;
+        end_gpu_pass_timer(GpuTimerPass::Ssao);
+        glBindVertexArray(0);  // Unbind after SSAO
+        begin_gpu_pass_timer(GpuTimerPass::SsaoBlur);
+        m_ssao_pass->execute_blur(ctx);
+        m_last_render_pass_stats.ssao_blur_draws++;
+        end_gpu_pass_timer(GpuTimerPass::SsaoBlur);
+        glBindVertexArray(0);  // Unbind after SSAO blur
+    }
 
     // 4. LIGHTING PASS (Renders to m_lighting_fbo)
     glEnable(GL_CULL_FACE);

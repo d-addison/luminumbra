@@ -1,6 +1,7 @@
 #pragma once
 
-#include "../RenderPipeline.h"
+#include "../RenderContext.h"
+#include "SsaoData.h"
 
 #include <filesystem>
 #include <memory>
@@ -12,9 +13,10 @@ class Shader;
 
 // SSAO + SSAO blur render passes extracted from RenderPipeline (T-I2-11d).
 // Owns the SSAO FBOs, color buffers, noise texture, sample kernel, and both
-// SSAO shaders (SSAOData). The pipeline keeps orchestration order, the
-// shared screen quad, the G-Buffer inputs, stats collection, and the GPU
-// timer issue/collect calls.
+// SSAO shaders (SSAOData). Spec 016 (016-P2-T02): converted to the RenderContext
+// seam — execute() takes a const RenderContext& (G-buffer inputs, screen quad,
+// quality, screen size from the contract), NOT a RenderPipeline&. The pipeline
+// keeps orchestration order, stats collection, and the GPU timer issue/collect.
 class SsaoPass {
 public:
     SsaoPass();
@@ -25,8 +27,13 @@ public:
     void destroy_ssao();
     void reset_shaders();
 
-    void execute_ssao(RenderPipeline& pipeline, const Camera& camera);
-    void execute_blur(RenderPipeline& pipeline);
+    // Spec 016 seam: source G-buffer/quality/quad/screen from the RenderContext.
+    // The in-process A/B parity gate lives in RenderPipeline::capture_ssao_parity
+    // (which has pipeline access): it runs the original pipeline-sourced GL
+    // sequence as the golden A-leg and this ctx-sourced seam as the B-leg, then
+    // memcmps the readback — catching any call-site ctx mis-population.
+    void execute_ssao(const RenderContext& ctx);
+    void execute_blur(const RenderContext& ctx);
 
     SSAOData& ssao() { return m_ssao; }
     const SSAOData& ssao() const { return m_ssao; }

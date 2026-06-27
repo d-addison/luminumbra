@@ -1,6 +1,5 @@
 #include "SsaoPass.h"
 
-#include "GBufferPass.h"
 #include "PassGlHelpers.h"
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
@@ -111,25 +110,30 @@ void SsaoPass::reset_shaders() {
     m_ssao.upsampleShader.reset();
 }
 
-void SsaoPass::execute_ssao(RenderPipeline& pipeline, const Camera& camera) {
-    const int quality = pipeline.get_ssao_quality();
+// Spec 016 (016-P2-T02): converted from execute_ssao(RenderPipeline&, Camera&).
+// Mechanical seam swap — identical GL sequence, sourcing G-buffer position/normal,
+// the fullscreen quad, screen size, quality, and camera from the RenderContext.
+// The ssao_draws stat bump moved to the call site (the pipeline owns stats).
+void SsaoPass::execute_ssao(const RenderContext& ctx) {
+    const Camera& camera = *ctx.camera;
+    const int quality = ctx.ssao_quality;
     // quality 3 = half-res GTAO: render into the 1/2-per-axis FBO (1/4 the fragments),
     // then execute_blur does the depth-aware upsample to full res.
     const bool halfres = (quality == 3) && m_ssao.halfFBO != 0 && m_ssao.upsampleShader && m_ssao.upsampleShader->IsValid();
     glBindFramebuffer(GL_FRAMEBUFFER, halfres ? m_ssao.halfFBO : m_ssao.fbo);
     if (halfres) glViewport(0, 0, static_cast<GLsizei>(m_ssao.halfW), static_cast<GLsizei>(m_ssao.halfH));
     glClear(GL_COLOR_BUFFER_BIT);
-    const glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)pipeline.m_screen_width / (float)pipeline.m_screen_height, camera.GetNearPlane(), camera.GetFarPlane());
+    const glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)ctx.screen_width / (float)ctx.screen_height, camera.GetNearPlane(), camera.GetFarPlane());
     // gPosition is FULL-res; the march metric uses the full screen size regardless of
     // the (possibly half-res) output viewport.
-    const glm::vec2 screen_size(pipeline.m_screen_width, pipeline.m_screen_height);
+    const glm::vec2 screen_size(ctx.screen_width, ctx.screen_height);
 
     if (quality > 0 && m_ssao.gtaoShader && m_ssao.gtaoShader->IsValid()) {
         // Render-optimization (ssao-gtao): XeGTAO horizon-slice AO. Reads the SAME
         // view-space G-buffer. High = 3x6 = 18 spp; Low = 2x4 = 8 spp.
         m_ssao.gtaoShader->use();
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, pipeline.m_gbuffer_pass->gbuffer().position_texture);
-        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, pipeline.m_gbuffer_pass->gbuffer().normal_texture);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_position.id);
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_normal.id);
         m_ssao.gtaoShader->setInt("gPosition", 0);
         m_ssao.gtaoShader->setInt("gNormalMaterial", 1);
         m_ssao.gtaoShader->setMat4("u_projection", projection);
@@ -143,8 +147,8 @@ void SsaoPass::execute_ssao(RenderPipeline& pipeline, const Camera& camera) {
         m_ssao.gtaoShader->setFloat("u_radius", 0.8f);
     } else {
         m_ssao.ssaoShader->use();
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, pipeline.m_gbuffer_pass->gbuffer().position_texture);
-        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, pipeline.m_gbuffer_pass->gbuffer().normal_texture);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_position.id);
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_normal.id);
         glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_ssao.noiseTexture);
         m_ssao.ssaoShader->setInt("gPosition", 0);
         m_ssao.ssaoShader->setInt("gNormalMaterial", 1);
@@ -154,31 +158,29 @@ void SsaoPass::execute_ssao(RenderPipeline& pipeline, const Camera& camera) {
         m_ssao.ssaoShader->setMat4("u_projection", projection);
         m_ssao.ssaoShader->setVec2("u_screenSize", screen_size);
     }
-    glBindVertexArray(pipeline.m_screen_quad_vao);
+    glBindVertexArray(ctx.screen_quad_vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    pipeline.m_last_render_pass_stats.ssao_draws++;
     glBindVertexArray(0);
-    if (halfres) glViewport(0, 0, static_cast<GLsizei>(pipeline.m_screen_width), static_cast<GLsizei>(pipeline.m_screen_height));
+    if (halfres) glViewport(0, 0, static_cast<GLsizei>(ctx.screen_width), static_cast<GLsizei>(ctx.screen_height));
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-void SsaoPass::execute_blur(RenderPipeline& pipeline) {
+void SsaoPass::execute_blur(const RenderContext& ctx) {
     // Half-res GTAO (quality 3): joint-bilateral depth-aware upsample of the half-res
     // AO into the full-res blur target (replaces the box blur; also denoises).
-    if (pipeline.get_ssao_quality() == 3 && m_ssao.halfFBO != 0 &&
+    if (ctx.ssao_quality == 3 && m_ssao.halfFBO != 0 &&
         m_ssao.upsampleShader && m_ssao.upsampleShader->IsValid()) {
         glBindFramebuffer(GL_FRAMEBUFFER, m_ssao.blurFBO);
-        glViewport(0, 0, static_cast<GLsizei>(pipeline.m_screen_width), static_cast<GLsizei>(pipeline.m_screen_height));
+        glViewport(0, 0, static_cast<GLsizei>(ctx.screen_width), static_cast<GLsizei>(ctx.screen_height));
         glClear(GL_COLOR_BUFFER_BIT);
         m_ssao.upsampleShader->use();
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m_ssao.halfTex);
-        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, pipeline.m_gbuffer_pass->gbuffer().position_texture);
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_position.id);
         m_ssao.upsampleShader->setInt("u_aoHalf", 0);
         m_ssao.upsampleShader->setInt("gPosition", 1);
         m_ssao.upsampleShader->setVec2("u_halfTexel", glm::vec2(1.0f / (float)m_ssao.halfW, 1.0f / (float)m_ssao.halfH));
-        glBindVertexArray(pipeline.m_screen_quad_vao);
+        glBindVertexArray(ctx.screen_quad_vao);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-        pipeline.m_last_render_pass_stats.ssao_blur_draws++;
         glBindVertexArray(0);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         return;
@@ -189,9 +191,8 @@ void SsaoPass::execute_blur(RenderPipeline& pipeline) {
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, m_ssao.ssaoColorBuffer);
     m_ssao.blurShader->setInt("u_ssaoInput", 0);
-    glBindVertexArray(pipeline.m_screen_quad_vao);
+    glBindVertexArray(ctx.screen_quad_vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    pipeline.m_last_render_pass_stats.ssao_blur_draws++;
     glBindVertexArray(0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }

@@ -270,6 +270,7 @@ int g_frame_scan_settle = 0;
 // RenderContext-seam blit) under <dir>. Render-only; the harness flip_diffs them.
 bool g_render_parity_active = false;
 std::filesystem::path g_render_parity_dir;
+std::string g_render_parity_pass = "finalblit"; // which pass's A/B parity to capture
 static constexpr int kFrameScanSettleFrames = 90; // let chunks stream + atmosphere settle
 // Watchdog: a headless auto-capture must NEVER hang. If the world hasn't reached
 // IN_GAME and completed the scan within this many render-loop frames (boot + stream +
@@ -2632,7 +2633,21 @@ int main(int argc, char* argv[]) {
         g_frame_scan_path = (g_render_parity_dir / "parity_scan.json").string();
         scenario_config.auto_create_world = true;
         scenario_config.auto_enter_world = true;
+        g_render_parity_pass = "finalblit";
         LUMINUMBRA_CORE_INFO("Render-parity (FinalBlit) armed -> {} (auto-world implied, settle {} frames)",
+                             g_render_parity_dir.string(), kFrameScanSettleFrames);
+    }
+    // Spec 016-P2-T02: --render-parity-ssao <dir>. Same boot/settle, captures the
+    // SSAO ctx-mapping + seam-determinism parity gate.
+    if (const std::string rp = GetCommandLineOption(argc, argv, "--render-parity-ssao", ""); !rp.empty()) {
+        g_render_parity_active = true;
+        g_render_parity_dir = std::filesystem::path(rp);
+        g_render_parity_pass = "ssao";
+        g_frame_scan_active = true;
+        g_frame_scan_path = (g_render_parity_dir / "parity_scan.json").string();
+        scenario_config.auto_create_world = true;
+        scenario_config.auto_enter_world = true;
+        LUMINUMBRA_CORE_INFO("Render-parity (SSAO) armed -> {} (auto-world implied, settle {} frames)",
                              g_render_parity_dir.string(), kFrameScanSettleFrames);
     }
     // --bake-tree-impostor <out.ppm>: bake the far-field tree impostor atlas (no world needed).
@@ -6678,10 +6693,15 @@ int main(int argc, char* argv[]) {
                             // Spec 016 render gate: capture FinalBlit in-process A/B parity on the
                             // settled frame (legacy vs RenderContext-seam blit of the SAME lit scene).
                             if (g_render_parity_active) {
-                                if (renderPipeline.capture_finalblit_parity(g_render_parity_dir))
-                                    LUMINUMBRA_CORE_INFO("FinalBlit parity captured -> {}", g_render_parity_dir.string());
+                                bool parity_ok = false;
+                                if (g_render_parity_pass == "ssao" && g_camera)
+                                    parity_ok = renderPipeline.capture_ssao_parity(g_render_parity_dir, *g_camera);
                                 else
-                                    LUMINUMBRA_CORE_ERROR("FinalBlit parity capture FAILED");
+                                    parity_ok = renderPipeline.capture_finalblit_parity(g_render_parity_dir);
+                                if (parity_ok)
+                                    LUMINUMBRA_CORE_INFO("{} parity captured -> {}", g_render_parity_pass, g_render_parity_dir.string());
+                                else
+                                    LUMINUMBRA_CORE_ERROR("{} parity capture FAILED", g_render_parity_pass);
                             }
                             int vw = 0, vh = 0;
                             glfwGetFramebufferSize(window, &vw, &vh);
