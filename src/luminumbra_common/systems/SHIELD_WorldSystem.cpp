@@ -2789,7 +2789,15 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
         return false;
     }
 
+    // Diagnostic breadcrumbs (spec 018 follow-up): EnsureSurfaceReadyNear blocks on
+    // three unbounded job waits during the interactive "CONSTRUCTING WORLD GEOMETRY"
+    // load. If one wedges (the intermittent freeze), the LAST line printed names the
+    // exact phase that hung. Render-only logging; no world_hash impact. Cheap: this
+    // runs at world-load/teleport, not per-frame.
+    const auto _esrn_t0 = std::chrono::steady_clock::now();
+    LUMINUMBRA_CORE_INFO("EnsureSurfaceReadyNear: draining generation jobs (near {:.0f},{:.0f})...", world_pos.x, world_pos.z);
     wait_for_generation_jobs();
+    LUMINUMBRA_CORE_INFO("EnsureSurfaceReadyNear: draining meshing jobs...");
     wait_for_meshing_jobs();
 
     const IVec3 center_chunk = world_to_chunk_coords(world_pos);
@@ -2887,12 +2895,15 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
     }
 
     if (m_job_system && build_jobs.size() > 128u) {
+        LUMINUMBRA_CORE_INFO("EnsureSurfaceReadyNear: dispatching {} collision-build jobs...", build_jobs.size());
         m_job_system->wait(m_job_system->dispatch_batch(build_jobs));
     } else {
         for (auto& job : build_jobs) {
             job();
         }
     }
+    LUMINUMBRA_CORE_INFO("EnsureSurfaceReadyNear: surface ready (took {:.0f}ms)",
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - _esrn_t0).count());
 
     std::unordered_map<u64, const SurfaceHorizonChunk*> surface_by_xz;
     surface_by_xz.reserve(chunks_to_consider_for_collision.size());
