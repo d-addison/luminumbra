@@ -7,7 +7,9 @@
 #include <atomic>
 #include <chrono> // TEMP diag (spec 008 follow-up): per-sub-phase streaming timing
 #include <cmath>
+#include <cstdlib> // std::getenv for the opt-in job watchdog (LUMINUMBRA_JOB_WATCHDOG)
 #include <cstring> // std::memcpy for the deterministic water-state hash
+#include <thread>  // opt-in job-wedge watchdog monitor thread
 #include <algorithm> // Required for std::max and std::min
 #include <filesystem>
 #include <limits>
@@ -2893,6 +2895,24 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
         build_jobs.emplace_back([this, build_chunk]() {
             const auto& chunk = build_chunk.chunk;
             const bool needs_full_sdf = build_chunk.step <= 1;
+            // Stopgap guard (spec 017/018; Codex audit #2 — the most plausible load-hang
+            // cause): a non-empty but WRONG-SIZED full SDF (e.g. a malformed/wrong-version
+            // save) would reach the unit-step PolygoniseTerrain, which assumes a full
+            // (CHUNK_SIZE+1)^3 lattice and reads OUT OF BOUNDS -> heap corruption that can
+            // clobber job-completion state and wedge the "CONSTRUCTING WORLD GEOMETRY" load.
+            // Detect it and clear the buffer so it REGENERATES a correct lattice below
+            // (generation is a pure function of seed/params). Hash-neutral for valid worlds:
+            // a well-formed full SDF is always exactly kFullSdfLattice, so this never fires.
+            constexpr std::size_t kFullSdfLattice =
+                static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+            if (needs_full_sdf && !chunk->sdf_data.empty() &&
+                chunk->sdf_data.size() != kFullSdfLattice) {
+                const IVec3 cc = chunk->get_coords();
+                LUMINUMBRA_CORE_WARN("EnsureSurfaceReadyNear: chunk ({},{},{}) has malformed "
+                    "SDF (size {} != {}); regenerating to avoid out-of-bounds polygonise",
+                    cc.x, cc.y, cc.z, chunk->sdf_data.size(), kFullSdfLattice);
+                chunk->sdf_data.clear();
+            }
             const bool missing_required_data = needs_full_sdf
                 ? chunk->sdf_data.empty()
                 : (chunk->sdf_data.empty() && chunk->heightmap_data.empty());
@@ -2922,7 +2942,39 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
 
     if (m_job_system && build_jobs.size() > 128u) {
         LUMINUMBRA_CORE_INFO("EnsureSurfaceReadyNear: dispatching {} collision-build jobs...", build_jobs.size());
-        m_job_system->wait(m_job_system->dispatch_batch(build_jobs));
+        // Opt-in wedge watchdog (LUMINUMBRA_JOB_WATCHDOG=1): observability ONLY — it never
+        // bails or changes the wait, so it is hash-neutral and stays OFF in determinism gates
+        // (--smoke). On the intermittent "CONSTRUCTING WORLD GEOMETRY" freeze it names the
+        // wedged phase + the chunk neighbourhood every 30s instead of hanging silently.
+        static const bool kJobWatchdog = []() {
+            const char* e = std::getenv("LUMINUMBRA_JOB_WATCHDOG");
+            return e && e[0] == '1';
+        }();
+        const Luminumbra::JobHandle handle = m_job_system->dispatch_batch(build_jobs);
+        if (kJobWatchdog) {
+            std::atomic<bool> wait_done{false};
+            const std::size_t pending = build_jobs.size();
+            const IVec3 wd_center = center_chunk;
+            std::thread watchdog([&wait_done, pending, wd_center]() {
+                using namespace std::chrono_literals;
+                auto next_report = std::chrono::steady_clock::now() + 30s;
+                while (!wait_done.load(std::memory_order_acquire)) {
+                    std::this_thread::sleep_for(500ms);
+                    if (!wait_done.load(std::memory_order_acquire) &&
+                        std::chrono::steady_clock::now() >= next_report) {
+                        LUMINUMBRA_CORE_WARN("JOB_WATCHDOG: EnsureSurfaceReadyNear still waiting on "
+                            "{} surface-build jobs near chunk ({},{},{}) — possible wedge",
+                            pending, wd_center.x, wd_center.y, wd_center.z);
+                        next_report = std::chrono::steady_clock::now() + 30s;
+                    }
+                }
+            });
+            m_job_system->wait(handle);
+            wait_done.store(true, std::memory_order_release);
+            watchdog.join();
+        } else {
+            m_job_system->wait(handle);
+        }
     } else {
         for (auto& job : build_jobs) {
             job();
