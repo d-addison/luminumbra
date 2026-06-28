@@ -73,6 +73,11 @@ uniform vec3 u_moonDir;
 // Spec 015 Pillar A (A-T04): lunar illumination [0,1] -> the "two night modes". 1 = full
 // moon (bright, navigable night + crisp moon shadows); ~0 = new moon (dark, wants a torch).
 uniform float u_moonIllum = 1.0;
+// Spec 015 Pillar A (A-T04, Codex C5): the moon's OWN radiance channel — the cool key
+// colour, set from C++ (RenderContext.moon_radiance) instead of a hardcoded shader const,
+// so the moon can be calibrated/tuned independently of the sun. Default == the prior
+// hardcoded kMoonColor so an unset value is byte-identical.
+uniform vec3 u_moonRadiance = vec3(0.40, 0.52, 0.92);
 
 #define MAX_POINT_LIGHTS 32
 struct PointLight {
@@ -465,10 +470,10 @@ void main() {
         // product needs a strong cool key to lift night ground to a moonlit tone.
         // Spec 015 Pillar A (A-T04): scaled by u_moonIllum (lunar phase) -> a full moon is a
         // proper light source, a new moon barely lights the ground (the two night modes).
-        const vec3 kMoonColor = vec3(0.40, 0.52, 0.92);
+        // Moon key COLOUR now comes from u_moonRadiance (its dedicated C++ channel, Codex C5).
         const float kMoonKeyScale = 1.5; // overall full-moon brightness lever (DayZ-style navigable night)
         float moonKey = nightFactor * kMoonKeyScale * u_moonIllum * SUN_IRRADIANCE_SCALE;
-        vec3 moonRadiance = kMoonColor * moonKey;
+        vec3 moonRadiance = u_moonRadiance * moonKey;
         // WRAPPED Lambert: an overhead midnight moon gives camera-facing SLOPES
         // NdotL~0, which left them pure black (the night ambient sits on the wrong
         // hemisphere to fill them). A modest wrap (NdotL*0.6+0.25) lets the moon
@@ -483,7 +488,7 @@ void main() {
         vec3 H_moon = normalize(L_moon + V);
         float specPow = mix(8.0, 64.0, 1.0 - Roughness);
         float moonSpec = pow(max(dot(Normal, H_moon), 0.0), specPow) * (1.0 - Roughness) * 0.35;
-        vec3 moonSpecular = kMoonColor * moonKey * moonSpec * NdotL_moon;
+        vec3 moonSpecular = u_moonRadiance * moonKey * moonSpec * NdotL_moon;
         vec3 moonLit = (moonDiffuse + moonSpecular) * moonShadow;
         // Desaturate toward the cool moon hue (Purkinje shift): warm (dusty) albedo
         // would otherwise read daytime-yellow under the key. Pull the lit result

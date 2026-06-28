@@ -894,6 +894,7 @@ RenderContext RenderPipeline::make_lighting_context(const Camera& camera) {
     ctx.sky_ambient_color  = m_skyAmbientColor;
     ctx.moon_light_dir     = m_moonLightDir;
     ctx.moon_illumination  = m_moonIllumination; // Spec 015 Pillar A (A-T04): lunar phase / two night modes
+    ctx.moon_radiance      = m_moonRadiance;     // Spec 015 Pillar A (Codex C5): the moon's dedicated radiance channel
     ctx.exposure           = m_pillarA_exposure; // Spec 015 Pillar A (A-T05): TOD eye-adaptation exposure
     ctx.emissive_lut_scale = kEmissiveLutScale;
     ctx.point_lights       = &m_point_lights_this_frame;

@@ -173,6 +173,7 @@ void LightingPass::execute(const RenderContext& ctx) {
     // directional form and shadows from the now-moon shadow cascade.
     m_lighting_shader->setVec3("u_moonDir", ctx.moon_light_dir);
     m_lighting_shader->setFloat("u_moonIllum", ctx.moon_illumination); // Pillar A A-T04: lunar phase
+    m_lighting_shader->setVec3("u_moonRadiance", ctx.moon_radiance);    // Pillar A Codex C5: dedicated moon radiance channel
 
     m_lighting_shader->setFloat("u_sea_level", SEA_LEVEL);
     // T-I7 cinematic grade (BF1-style): BOLD default — lifted exposure, rich

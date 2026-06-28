@@ -918,6 +918,11 @@ private:
     // (LUMIN_MOON env / set_moon_illumination) forces a value for photo/testing.
     float m_moonIllumination = 0.85f;
     float m_moonIllumOverride = -1.0f;
+    // Spec 015 Pillar A (Codex C5): the moon's DEDICATED radiance (cool key colour), fed to the
+    // lighting pass via RenderContext.moon_radiance -> u_moonRadiance instead of a hardcoded shader
+    // const, so the moon is tunable independent of the sun. Default == the prior shader kMoonColor
+    // (byte-identical until deliberately re-calibrated). LUMIN_MOON_RGB overrides for tuning/tests.
+    glm::vec3 m_moonRadiance = glm::vec3(0.40f, 0.52f, 0.92f);
     static constexpr std::uint64_t kTicksPerLunarCycle = 54000ull; // 30 min @ 30 Hz (a lunar "month")
     float m_seasonSunDeclination = 0.0f; // radians, seasonal arc tilt
     float m_sunElevationRad = 0.0f;      // sun elevation this frame (radians)
