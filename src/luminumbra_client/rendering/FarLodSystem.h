@@ -126,6 +126,28 @@ public:
     void set_enabled(bool enabled) { m_enabled = enabled; }
     bool enabled() const { return m_enabled; }
 
+    // Worldgen-preview far-field anchor (render-only). The preview is an external
+    // orbit camera looking at a FIXED diorama centre over a small bounded near
+    // slice. In normal (first-person) mode the wanted region set, the camera-
+    // region cull, and the inner fragment discard are all CAMERA-relative — for
+    // an orbiting camera that produces continuous tile churn and a moving void
+    // disc. set_preview_anchor pins all of that to the diorama centre instead:
+    //   * update() streams the wanted set around `center` (a FIXED tile set, no
+    //     orbit churn) while eviction stays relative to the same anchor;
+    //   * draw_gbuffer() drops the camera-region skip + the camera-relative
+    //     radial clips and instead discards far fragments whose world XZ is
+    //     within `inner_radius_m` of the centre (the live slice owns that space),
+    //     so the coarse far mesh cannot poke through the fine live slice.
+    // The crash-safety drain (prepare_world_swap before the bound world is freed)
+    // is unchanged. clear_preview_anchor() returns to first-person streaming.
+    void set_preview_anchor(const glm::vec3& center, float inner_radius_m) {
+        m_preview_mode = true;
+        m_preview_anchor = center;
+        m_preview_inner_radius = inner_radius_m;
+    }
+    void clear_preview_anchor() { m_preview_mode = false; }
+    bool preview_anchored() const { return m_preview_mode; }
+
     // Waits for in-flight tile builds (they sample the world system) and
     // drops the world binding. MUST run before the bound world is destroyed.
     void prepare_world_swap();
@@ -210,6 +232,12 @@ private:
     // near triangles straddle the camera and rasterize into the horizon
     // sky-sliver; the live ring + neighbor regions cover its footprint).
     glm::vec3 m_last_camera_position{0.0f};
+    // Worldgen-preview far-field anchor (see set_preview_anchor). When
+    // m_preview_mode is set, streaming + the inner discard pin to m_preview_anchor
+    // (the fixed diorama centre) instead of the orbiting camera.
+    bool m_preview_mode = false;
+    glm::vec3 m_preview_anchor{0.0f};
+    float m_preview_inner_radius = 0.0f;
     u64 m_params_hash = 0;
     // Build-result generation: results from a previous world binding are
     // discarded on integration.

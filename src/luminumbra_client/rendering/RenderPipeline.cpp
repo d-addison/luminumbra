@@ -1111,6 +1111,18 @@ void RenderPipeline::drain_far_field_builds() {
     }
 }
 
+void RenderPipeline::set_far_lod_preview_anchor(const glm::vec3& center, float inner_radius_m) {
+    if (m_farlod) {
+        m_farlod->set_preview_anchor(center, inner_radius_m);
+    }
+}
+
+void RenderPipeline::clear_far_lod_preview_anchor() {
+    if (m_farlod) {
+        m_farlod->clear_preview_anchor();
+    }
+}
+
 void RenderPipeline::set_gpu_sdf_runtime_enabled(bool enabled) {
     m_gpu_sdf.runtime_requested = enabled;
     if (!enabled) {

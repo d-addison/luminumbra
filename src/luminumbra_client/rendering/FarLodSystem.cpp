@@ -340,6 +340,13 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system, const
 
     bind_world(world_system);
 
+    // Worldgen-preview far-field: stream the wanted set around the FIXED diorama
+    // centre (a stable tile set, no orbit churn) instead of the orbiting camera.
+    // Eviction below keys off the same anchor so resident centre tiles are not
+    // evicted as the camera orbits away. Normal (first-person) mode streams
+    // around the live camera as before.
+    const glm::vec3 stream_pos = m_preview_mode ? m_preview_anchor : camera_position;
+
     // --- Ring-diff wanted set out to the F2 outer range ---
     struct Wanted {
         int rx;
@@ -348,18 +355,20 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system, const
         float nearest;
     };
     std::vector<Wanted> wanted;
-    const int camera_rx = static_cast<int>(std::floor(camera_position.x / kRegionSize));
-    const int camera_rz = static_cast<int>(std::floor(camera_position.z / kRegionSize));
+    const int camera_rx = static_cast<int>(std::floor(stream_pos.x / kRegionSize));
+    const int camera_rz = static_cast<int>(std::floor(stream_pos.z / kRegionSize));
     const int scan_radius = static_cast<int>(std::ceil(kF2OuterRangeMeters / kRegionSize)) + 1;
     for (int rz = camera_rz - scan_radius; rz <= camera_rz + scan_radius; ++rz) {
         for (int rx = camera_rx - scan_radius; rx <= camera_rx + scan_radius; ++rx) {
-            const float nearest = region_nearest_distance(rx, rz, camera_position);
+            const float nearest = region_nearest_distance(rx, rz, stream_pos);
             if (nearest > kF2OuterRangeMeters) {
                 continue;
             }
             // Live wins: a region the live chunk ring covers entirely is
-            // never drawn far.
-            if (region_farthest_distance(rx, rz, camera_position) <= kLiveRingRadiusMeters) {
+            // never drawn far. (In preview mode the live slice is sub-region, so
+            // every region around the centre is wanted — its far mesh draws under
+            // the slice and the centre-relative inner discard hides it there.)
+            if (region_farthest_distance(rx, rz, stream_pos) <= kLiveRingRadiusMeters) {
                 continue;
             }
             const World::FarLodTier tier =
@@ -486,7 +495,7 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system, const
         auto victim = m_residents.begin();
         float victim_distance = 0.0f;
         for (auto it = m_residents.begin(); it != m_residents.end(); ++it) {
-            const float distance = region_nearest_distance(it->second.rx, it->second.rz, camera_position);
+            const float distance = region_nearest_distance(it->second.rx, it->second.rz, stream_pos);
             if (distance > victim_distance) {
                 victim_distance = distance;
                 victim = it;
@@ -537,10 +546,28 @@ void FarLodSystem::draw_gbuffer(
     glEnable(GL_CLIP_DISTANCE0);
     geometry_shader.setFloat("u_farClipNearRadius", kFarClipInnerRadiusMeters);
     geometry_shader.setFloat("u_farClipFarRadius", kFarClipOuterRadiusMeters);
+    // Worldgen-preview far-field: for the external orbit camera the camera-
+    // relative inner discard (u_farClipInnerRadius) + near radial clip would carve
+    // a moving void disc around the camera, and the camera-region skip would drop
+    // the centre region (where the slice sits). So in preview mode disable those
+    // and instead discard far fragments inside the FIXED live slice via the
+    // centre-relative world-space radius (u_farPreviewInnerRadius). Live geometry
+    // still wins in the slice via the depth bias + polygon offset above.
+    if (m_preview_mode) {
+        geometry_shader.setFloat("u_farClipInnerRadius", 0.0f);
+        geometry_shader.setFloat("u_farClipNearRadius", 0.0f);
+        geometry_shader.setVec2("u_farPreviewCenterXZ",
+                                glm::vec2(m_preview_anchor.x, m_preview_anchor.z));
+        geometry_shader.setFloat("u_farPreviewInnerRadius", m_preview_inner_radius);
+    } else {
+        geometry_shader.setFloat("u_farPreviewInnerRadius", 0.0f);
+    }
     const int camera_rx = static_cast<int>(std::floor(m_last_camera_position.x / kRegionSize));
     const int camera_rz = static_cast<int>(std::floor(m_last_camera_position.z / kRegionSize));
     const auto is_camera_region = [&](const ResidentRegion& region) {
-        return region.rx == camera_rx && region.rz == camera_rz;
+        // Preview mode (external orbit camera over a fixed sub-region slice): skip
+        // no region — the centre region carries the diorama's far field.
+        return !m_preview_mode && region.rx == camera_rx && region.rz == camera_rz;
     };
 
     std::size_t water_draws = 0;
@@ -608,6 +635,7 @@ void FarLodSystem::draw_gbuffer(
     geometry_shader.setFloat("u_farClipInnerRadius", 0.0f);
     geometry_shader.setFloat("u_farClipNearRadius", 0.0f);
     geometry_shader.setFloat("u_farClipFarRadius", 0.0f);
+    geometry_shader.setFloat("u_farPreviewInnerRadius", 0.0f);
 
     m_stats.region_draws = draws_out;
     m_stats.indices_drawn = indices_out;

@@ -447,6 +447,16 @@ public:
     // dispatched for the transient preview world. Restored after the preview's frame.
     void set_far_lod_enabled(bool enabled) { m_far_lod_enabled = enabled; }
 
+    // Worldgen-preview far-field: pin far-LOD streaming + the inner fragment
+    // discard to the FIXED diorama centre (instead of the orbiting preview
+    // camera) so the preview gets a STABLE distant vista with no orbit churn.
+    // inner_radius_m is the live-slice radius the far mesh is hidden behind.
+    // Forwarded to the FarLodSystem (no-op if far-LOD isn't constructed). The
+    // preview sets this each frame it renders and clears it after, so normal game
+    // frames never carry a stale anchor.
+    void set_far_lod_preview_anchor(const glm::vec3& center, float inner_radius_m);
+    void clear_far_lod_preview_anchor();
+
     u32 screen_width() const { return m_screen_width; }
     u32 screen_height() const { return m_screen_height; }
     const glm::mat4& prev_view_proj() const { return m_prev_view_proj; }  // FR-R5 TAAU motion vectors

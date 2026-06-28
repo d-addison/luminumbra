@@ -80,6 +80,18 @@ uniform int u_forceFlat = 0;
 // the clip; live chunk and static mesh draws never set it.
 uniform float u_farClipInnerRadius;
 
+// Worldgen-preview far-field: a CENTER-relative (world-space XZ) variant of the
+// inner clip above. The preview is an external orbit camera looking at a fixed
+// diorama centre, so the camera-relative u_farClipInnerRadius would discard a
+// moving 176 m disc around the orbiting camera (wrong). Instead, far-region
+// fragments whose world XZ lies within u_farPreviewInnerRadius of
+// u_farPreviewCenterXZ are discarded — the small bounded live slice owns that
+// space, so the coarse far mesh cannot poke through it. Default radius 0.0
+// disables it (every game draw + live/static mesh draw); only the preview far
+// draws set it > 0.
+uniform vec2 u_farPreviewCenterXZ;
+uniform float u_farPreviewInnerRadius;
+
 // FR-R5 (TAAU): previous-frame view-projection + inverse screen size for motion vectors, plus this
 // frame's sub-pixel projection jitter (removed from the current position so motion stays jitter-free).
 uniform mat4 u_prev_view_proj;
@@ -212,6 +224,15 @@ void main()
     if (u_farClipInnerRadius > 0.0 &&
         dot(fs_in.FragPos, fs_in.FragPos) < u_farClipInnerRadius * u_farClipInnerRadius) {
         discard; // far-region fragment inside the live ring: live wins
+    }
+    if (u_farPreviewInnerRadius > 0.0) {
+        // Worldgen-preview far-field: discard far fragments inside the fixed
+        // diorama slice (center-relative, world XZ). Keeps the coarse far mesh
+        // from poking through the fine live slice for the external orbit camera.
+        vec2 dxz = fs_in.WorldPos.xz - u_farPreviewCenterXZ;
+        if (dot(dxz, dxz) < u_farPreviewInnerRadius * u_farPreviewInnerRadius) {
+            discard;
+        }
     }
 
     // --- Material properties from lookup texture ---

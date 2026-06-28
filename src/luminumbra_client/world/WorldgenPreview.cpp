@@ -32,6 +32,15 @@ constexpr float kCenterZ = 8.0f;
 constexpr int kSurfaceRadius = 4;
 constexpr int kCollisionRadius = 0; // no gameplay collision needed for a preview
 
+// Worldgen-preview far-field: the centre-relative world-space radius (meters)
+// inside which the streamed far-LOD mesh is discarded — the bounded live slice
+// owns that space, so the coarse far mesh never pokes through the fine slice.
+// One chunk inside the slice's reach (kSurfaceRadius rings of CHUNK_SIZE_X), so
+// the live + far surfaces overlap by a chunk at the handoff (no void band), the
+// same one-chunk overlap the first-person far-LOD uses. CHUNK_SIZE_X = 16 m.
+constexpr float kPreviewFarInnerRadiusM =
+    static_cast<float>((kSurfaceRadius - 1) * Luminumbra::CHUNK_SIZE_X);
+
 // TASK #4: foliage fade band. The preview is a tight diorama (radius_4 ring
 // around the center), so keep the fade end well inside the streamed footprint —
 // near a believable carpet, no foliage past the bounded slice.
@@ -601,18 +610,21 @@ bool WorldgenPreview::render_to_backbuffer(Rendering::RenderPipeline& pipeline, 
     // diorama "window"; the menu backdrop is suppressed by the host while active,
     // so this is the single world render on the create screen.
     //
-    // Far-LOD OFF for the preview turntable. The diorama is a BOUNDED radius-4 slice; the
-    // streaming far-LOD field is anchored to the (orbiting) CAMERA, so spinning the turntable
-    // makes it continuously re-stream/evict the mostly-empty tiles beyond the slice — a
-    // distracting "pops in/out" churn with no real far field to show. A bounded diorama has no
-    // meaningful streamed far-field, so skip it and let the slice render stably from its near
-    // chunks. Crash-safety is UNCHANGED: swap_pending_into_live() + the dtor still drain any
-    // far-LOD job before the world is freed (the real UAF fix). A true distant vista would need
-    // far-LOD anchored to the diorama CENTRE (not the camera) or a larger near radius — a
-    // separate enhancement, tracked as the preview far-field follow-up.
-    pipeline.set_far_lod_enabled(false);
-    pipeline.render_frame(m_registry, *m_world, cam, dt, /*wireframe*/ false);
+    // Far-LOD ON, but anchored to the diorama CENTRE (look_at_center()) rather than
+    // the orbiting camera. The diorama is a BOUNDED radius-4 slice; left camera-
+    // anchored, the streaming far field re-streams/evicts tiles as the turntable
+    // spins (orbit churn) and carves a moving void disc around the camera. Pinning
+    // the anchor to the fixed centre gives a FIXED tile set (no churn) + a real
+    // distant vista beyond the slice, and the centre-relative inner discard hides
+    // the coarse far mesh under the fine live slice (no poke-through, no void band
+    // at the slice edge). Crash-safety is UNCHANGED: swap_pending_into_live() + the
+    // dtor still drain any far-LOD job before the candidate world is freed (the real
+    // UAF fix). The anchor is cleared right after the frame so a subsequent normal
+    // game render never inherits the preview's fixed anchor.
     pipeline.set_far_lod_enabled(true);
+    pipeline.set_far_lod_preview_anchor(look_at_center(), kPreviewFarInnerRadiusM);
+    pipeline.render_frame(m_registry, *m_world, cam, dt, /*wireframe*/ false);
+    pipeline.clear_far_lod_preview_anchor();
     return true;
 }
 
