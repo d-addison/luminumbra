@@ -470,7 +470,10 @@ bool WorldgenPreview::render(Rendering::RenderPipeline& pipeline, float dt) {
     pipeline.on_resize(static_cast<u32>(m_fbo_w), static_cast<u32>(m_fbo_h));
     pipeline.set_offscreen_target(m_fbo, static_cast<u32>(m_fbo_w), static_cast<u32>(m_fbo_h));
 
+    // Far-LOD OFF for the transient (swapped + freed) preview world — see render_to_backbuffer.
+    pipeline.set_far_lod_enabled(false);
     pipeline.render_frame(m_registry, *m_world, cam, dt, /*wireframe*/ false);
+    pipeline.set_far_lod_enabled(true);
 
     pipeline.clear_offscreen_target();
     if (prev_w != 0 && prev_h != 0) {
@@ -512,7 +515,14 @@ bool WorldgenPreview::render_to_backbuffer(Rendering::RenderPipeline& pipeline, 
     // — no offscreen target, no on_resize. The create panel frames this as the
     // diorama "window"; the menu backdrop is suppressed by the host while active,
     // so this is the single world render on the create screen.
+    //
+    // Far-LOD OFF: this transient candidate world is swapped + freed between frames
+    // (swap_pending_into_live above); a far-LOD tile-build job referencing it would
+    // outlive the free -> use-after-free (the create-screen panning crash). The diorama
+    // is covered by its live chunks.
+    pipeline.set_far_lod_enabled(false);
     pipeline.render_frame(m_registry, *m_world, cam, dt, /*wireframe*/ false);
+    pipeline.set_far_lod_enabled(true);
     return true;
 }
 

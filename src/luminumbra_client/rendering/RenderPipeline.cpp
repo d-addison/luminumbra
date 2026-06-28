@@ -2067,7 +2067,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // in the worldgen samplers while panning the create-world screen. The bounded preview
     // diorama is covered by its live chunks and does not need the streaming far-field, so
     // skip far-LOD entirely while rendering offscreen. The game (backbuffer) is unaffected.
-    if (m_farlod && !m_offscreen_target_active) {
+    if (m_farlod && m_far_lod_enabled && !m_offscreen_target_active) {
         m_farlod->update(world_system, camera.Position);
     }
 

@@ -439,6 +439,13 @@ public:
     void set_offscreen_target(u32 fbo, u32 fbo_w, u32 fbo_h);
     void clear_offscreen_target();
     bool has_offscreen_target() const { return m_offscreen_target_active; }
+    // Far-LOD on/off. The worldgen PREVIEW disables it around its render_frame: the preview
+    // swaps + frees its candidate world between frames (WorldgenPreview::swap_pending_into_
+    // live) while far-LOD tile-build jobs run on worker threads holding a reference to it —
+    // a destroyed-world use-after-free (the create-screen panning crash). The bounded preview
+    // diorama is covered by its live chunks; skipping far-LOD means no such jobs are ever
+    // dispatched for the transient preview world. Restored after the preview's frame.
+    void set_far_lod_enabled(bool enabled) { m_far_lod_enabled = enabled; }
 
     u32 screen_width() const { return m_screen_width; }
     u32 screen_height() const { return m_screen_height; }
@@ -852,6 +859,7 @@ private:
     // m_offscreen_target_w/h instead of framebuffer 0. Default inactive == the
     // legacy default-0 blit (byte-identical).
     bool m_offscreen_target_active = false;
+    bool m_far_lod_enabled = true; // worldgen preview disables far-LOD (transient-world UAF)
     u32 m_offscreen_target_fbo = 0;
     u32 m_offscreen_target_w = 0;
     u32 m_offscreen_target_h = 0;
