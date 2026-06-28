@@ -3,19 +3,22 @@
 
 Single source of truth = src/luminumbra_common/core/ConfigSchema.json. Each entry
 declares its section/residency, JSON name, type, default, owner and canonical order.
-This tool emits a behavior-neutral registry header that reproduces the hand-written
-`kKeys` / `kParams` tables in SystemConfig.cpp, and a `--check` mode that proves the
-schema is byte-faithful to the current C++ registry and that hash residency is
-schema-declared (sim => hashed, render => excluded).
+This tool emits the X-macro registry header SystemConfigRegistry.gen.h; SystemConfig.h
+expands it to GENERATE the SysKey/SysParam enums and SystemConfig.cpp expands it to
+GENERATE the kKeys/kParams registries, so the parallel arrays have one authored home
+and cannot drift. `--check` is the CI drift gate: it fails when the committed header is
+stale vs the schema and verifies hash residency is schema-declared (sim => hashed,
+render => excluded).
 
-It is intentionally STANDALONE and additive: it does NOT modify SystemConfig.{h,cpp}
-and does NOT change `ComputeConfigSubHash` semantics, so `--smoke` stays
-6f008a9f637c40b7 and there is no world_hash bump.
+This is a REPRESENTATION change only: the generated KeyMeta/ParamMeta field values are
+byte-identical to the prior hand-written arrays, so `ComputeConfigSubHash` produces a
+character-for-character identical `config:v1:` string (FR-B-005) and `--smoke` stays
+6f008a9f637c40b7 with no world_hash bump.
 
 Usage:
-  python tools/config_codegen.py --check          # residency + registry parity (CI gate)
+  python tools/config_codegen.py --check          # generated-header freshness + residency (CI gate)
   python tools/config_codegen.py --emit OUT.h     # write generated registry header
-  python tools/config_codegen.py --from-cpp       # print a schema derived from the .cpp
+  python tools/config_codegen.py --from-cpp       # print a schema derived from the generated header
 """
 from __future__ import annotations
 
@@ -29,6 +32,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 SCHEMA_PATH = os.path.join(ROOT, "src", "luminumbra_common", "core", "ConfigSchema.json")
 CPP_PATH = os.path.join(ROOT, "src", "luminumbra_common", "core", "SystemConfig.cpp")
+GEN_HEADER_PATH = os.path.join(
+    ROOT, "src", "luminumbra_common", "core", "SystemConfigRegistry.gen.h"
+)
 
 # Map between the C++ `Section::` enum and the schema's declared residency. This IS the
 # residency contract: Sim-section keys are hashed (folded into config:v1:), Render-section
@@ -155,9 +161,11 @@ def emit_header(schema: dict) -> str:
     lines.append("// tables in SystemConfig.cpp. Residency is schema-declared: KEY() rows carry")
     lines.append("// 'hashed' (sim, folded into config:v1:) or 'excluded' (render, never hashed).")
     lines.append("//")
-    lines.append("// X-macro tables let a future refactor generate SysKey/SysParam enums AND the")
-    lines.append("// kKeys/kParams arrays from one authored home without colliding with existing")
-    lines.append("// definitions. This header is additive and is not yet wired into the build.")
+    lines.append("// X-macro tables: SystemConfig.h expands LUMIN_CONFIG_KEY_TABLE/PARAM_TABLE to")
+    lines.append("// generate the SysKey/SysParam enums, and SystemConfig.cpp expands them to build")
+    lines.append("// the kKeys/kParams registries, so the parallel arrays have ONE authored home")
+    lines.append("// (ConfigSchema.json) and cannot drift. Regenerate via tools/config_codegen.py")
+    lines.append("// --emit; tools/config_codegen.py --check fails CI if this file is stale.")
     lines.append("")
     lines.append("// KEY(enum, Section, \"json_section\", \"json_name\", residency)")
     lines.append("#define LUMIN_CONFIG_KEY_TABLE(KEY) \\")
@@ -199,27 +207,33 @@ def load_cpp_tables():
 
 def cmd_check() -> int:
     schema = load_schema()
-    cpp_keys, cpp_params = load_cpp_tables()
     sch_keys, sch_params = schema_to_tables(schema)
 
     errors = []
 
-    # 1. Registry parity (behavior-neutral): schema reproduces the C++ tables exactly,
-    #    in canonical order, with identical names/owners/types/defaults.
-    if sch_keys != cpp_keys:
-        errors.append("kKeys mismatch between ConfigSchema.json and SystemConfig.cpp:")
-        for idx in range(max(len(sch_keys), len(cpp_keys))):
-            s = sch_keys[idx] if idx < len(sch_keys) else None
-            c = cpp_keys[idx] if idx < len(cpp_keys) else None
-            if s != c:
-                errors.append(f"  [{idx}] schema={s} cpp={c}")
-    if sch_params != cpp_params:
-        errors.append("kParams mismatch between ConfigSchema.json and SystemConfig.cpp:")
-        for idx in range(max(len(sch_params), len(cpp_params))):
-            s = sch_params[idx] if idx < len(sch_params) else None
-            c = cpp_params[idx] if idx < len(cpp_params) else None
-            if s != c:
-                errors.append(f"  [{idx}] schema={s} cpp={c}")
+    # 1. Generated-header freshness (the drift gate). SystemConfig.h expands the X-macro
+    #    tables in SystemConfigRegistry.gen.h to build the SysKey/SysParam enums and
+    #    SystemConfig.cpp expands them to build the kKeys/kParams registries. So the COMPILED
+    #    registry == this header == the schema (the single authored home). The header MUST be
+    #    byte-identical to a fresh emit; a stale header means the schema drifted from the code
+    #    that actually compiles. (--emit uses text mode like this read, so newline handling
+    #    matches on every platform.)
+    expected_header = emit_header(schema) + "\n"
+    actual_header = None
+    try:
+        with open(GEN_HEADER_PATH, "r", encoding="utf-8") as fh:
+            actual_header = fh.read()
+    except OSError as exc:
+        errors.append(f"  cannot read generated header {GEN_HEADER_PATH}: {exc}")
+    if actual_header is not None and actual_header != expected_header:
+        errors.append(
+            "SystemConfigRegistry.gen.h is STALE vs ConfigSchema.json — the generated registry "
+            "no longer matches the schema. Regenerate it:"
+        )
+        errors.append(
+            "  python tools/config_codegen.py --emit "
+            "src/luminumbra_common/core/SystemConfigRegistry.gen.h"
+        )
 
     # 2. Residency parity: every key declares a known residency, and it agrees with the
     #    C++ Section. sim => hashed, render => excluded. This is the FR-B residency contract.
@@ -262,8 +276,8 @@ def cmd_check() -> int:
     print(
         f"config_codegen --check: PASS - {len(sch_keys)} keys "
         f"({len(sim_keys)} hashed/sim, {len(render_keys)} excluded/render), "
-        f"{len(sch_params)} params; schema is byte-faithful to SystemConfig.cpp and "
-        f"residency is schema-declared."
+        f"{len(sch_params)} params; SystemConfigRegistry.gen.h is fresh vs ConfigSchema.json "
+        f"and residency is schema-declared (the compiled registry has one authored home)."
     )
     return 0
 
@@ -320,13 +334,21 @@ def main(argv=None) -> int:
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--check", action="store_true", help="residency + registry parity gate")
     g.add_argument("--emit", metavar="OUT", help="write generated registry header to OUT")
-    g.add_argument("--from-cpp", action="store_true", help="print a schema derived from the .cpp")
+    g.add_argument(
+        "--from-cpp",
+        action="store_true",
+        help="print a schema derived from the generated registry header (bootstrap/repair)",
+    )
     args = ap.parse_args(argv)
 
     if args.check:
         return cmd_check()
     if args.from_cpp:
-        keys, params = load_cpp_tables()
+        # The kKeys/kParams literal arrays no longer live in SystemConfig.cpp — they are
+        # generated by expanding SystemConfigRegistry.gen.h. Derive the schema from that header
+        # (the X-macro tables) so this bootstrap/repair path stays meaningful.
+        with open(GEN_HEADER_PATH, "r", encoding="utf-8") as fh:
+            keys, params = _parse_header(fh.read())
         print(json.dumps(cpp_to_schema(keys, params), indent=2))
         return 0
     if args.emit:

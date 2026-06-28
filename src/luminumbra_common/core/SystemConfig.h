@@ -21,6 +21,8 @@
 
 #include <glm/glm.hpp>
 
+#include "SystemConfigRegistry.gen.h"  // X-macro registry GENERATED from ConfigSchema.json
+
 namespace luminumbra::core {
 
 // Player-facing settings (client-only; NEVER hashed). Persisted to a writable per-user
@@ -44,70 +46,27 @@ struct UserSettings {
 };
 
 // Compile-time registry of every system flag. sim.* entries first, then render.*.
-// New systems append a key here (single compile-checked source of truth for keys).
+// GENERATED from ConfigSchema.json: the members below expand from LUMIN_CONFIG_KEY_TABLE
+// (SystemConfigRegistry.gen.h), so this enum, the kKeys registry (SystemConfig.cpp) and the
+// config-hash residency share ONE authored home and cannot drift. To add/rename a flag, edit
+// ConfigSchema.json then re-run `python tools/config_codegen.py --emit
+// src/luminumbra_common/core/SystemConfigRegistry.gen.h`. Canonical order == schema order ==
+// the hash's serialization order == the packed bit position; append-only, never reorder.
 enum class SysKey : std::uint8_t {
-    // --- sim.* (may change sim state; included in ComputeConfigSubHash when enabled) ---
-    SimPlantGrowth = 0,
-    SimErosion,
-    SimEcology,  // creature-brain tuning (energy/sleep/hunger/stamina/herd/catch); default OFF
-    // Spec 011 "full control": per-system creature sim tuning. All default OFF -> compiled
-    // defaults -> byte-identical. Append-only (canonical order); never reorder.
-    SimWildlifeFoliage,  // grazing/regrowth coupling
-    SimThirst,           // thirst rise / drink / seek threshold
-    SimScavenging,       // carcass scavenging hunger/feed
-    SimReproduction,     // maturity/cooldown/courtship/spawn pacing
-    SimForaging,         // ant pheromone deposit/trail/goal
-    // --- render.* (render-only; never hashed) ---
-    RenderMoonlight,
-    RenderTreeWind,
-    RenderPlantProcgen,  // grow scattered plants via the procgen instead of baked models
-    RenderTaau,          // FR-R5 temporal AA resolve (motion-reprojected history); default OFF
-    RenderSkyLutGpu,     // spec 008 WS-4: sky LUTs (init + refresh) via GPU compute instead of CPU integration; default OFF
-    RenderCircadian,     // diurnal/nocturnal activity-curve amplitude; default OFF (component-gated)
-    RenderCreatureSpawn, // ambient creature spawn counts/speeds (client-only; never hashed)
-    RenderForagingColony,// ant-colony spawn (client-only)
+#define LUMIN_CONFIG_EMIT_KEY(ENUM, SECTION, JSON_SECTION, JSON_NAME, RESIDENCY) ENUM,
+    LUMIN_CONFIG_KEY_TABLE(LUMIN_CONFIG_EMIT_KEY)
+#undef LUMIN_CONFIG_EMIT_KEY
     Count
 };
 
 // Compile-time registry of tunable params (globally-unique ids; each owned by a SysKey).
+// GENERATED from ConfigSchema.json via LUMIN_CONFIG_PARAM_TABLE. Defaults are authored once
+// in the schema (and cross-checked against the owning-system constants by --check); leaving a
+// sim system OFF/unset is byte-identical to the compiled behaviour. Same edit path as SysKey.
 enum class SysParam : std::uint8_t {
-    PlantMutationRate = 0,  // sim.plant_growth.mutation_rate (scalar)
-    MoonlightStrength,      // render.moonlight.strength (scalar)
-    MoonlightColor,         // render.moonlight.color (vec3)
-    // sim.ecology.* — creature-brain tuning (all scalar). Defaults mirror CreatureBrainSystem.h
-    // constants, so leaving sim.ecology OFF (or unset) is byte-identical to the compiled behaviour.
-    EcoEnergyDrain,         // sim.ecology.energy_drain_per_second
-    EcoEnergyRestRecover,   // sim.ecology.energy_rest_recover
-    EcoEnergySleepRecover,  // sim.ecology.energy_sleep_recover
-    EcoHungerGrowth,        // sim.ecology.hunger_growth_per_second
-    EcoHungerGrazeSate,     // sim.ecology.hunger_graze_sate
-    EcoStaminaRestRecover,  // sim.ecology.stamina_rest_recover
-    EcoStaminaMoveDrain,    // sim.ecology.stamina_move_drain
-    EcoHerdWeight,          // sim.ecology.herd_weight
-    EcoAlignmentWeight,     // sim.ecology.alignment_weight
-    EcoCatchRadius,         // sim.ecology.catch_radius
-    EcoCatchSatiation,      // sim.ecology.catch_satiation
-    EcoFlockNeighborRadius,   // sim.ecology.flock_neighbor_radius
-    EcoFlockSeparationRadius, // sim.ecology.flock_separation_radius
-    EcoFlockCohesionWeight,   // sim.ecology.flock_cohesion_weight
-    EcoFlockSeparationWeight, // sim.ecology.flock_separation_weight
-    // sim.wildlife_foliage.* — defaults mirror WildlifeFoliageSystem.h
-    WfGrazeRadius, WfGrazePerCreature, WfRegrowPerTick, WfFeedPerGraze,
-    // sim.thirst.* — defaults mirror ThirstSystem.h
-    ThirstRiseRate, ThirstDrinkRate, ThirstSeekThreshold,
-    // sim.scavenging.* — defaults mirror ScavengingSystem.h
-    ScavHungerThreshold, ScavFeedRadius, ScavFeedRate,
-    // sim.reproduction.* — defaults mirror CreatureReproductionSystem.h (tick fields cast from float)
-    ReproMaturityTicks, ReproCooldownTicks, ReproHealthyStamina, ReproMateSeekRadius,
-    ReproCourtshipRadius, ReproCourtshipTicks, ReproSpawnRadius,
-    // sim.foraging.* — defaults mirror ForagingSystem.h ForagingParams
-    ForagingDeposit, ForagingTrailWeight, ForagingGoalWeight,
-    // render.circadian.* — activity curve amplitude (render-only)
-    CircadianAmplitude,
-    // render.creature_spawn.* — ambient living-world spawn (client-only; never hashed)
-    SpawnHerdCount, SpawnPredatorSpeed, SpawnPreySpeed, SpawnInitialHunger,
-    // render.foraging_colony.* — ant colony spawn (client-only)
-    ColonyAntCount, ColonyFoodAmount,
+#define LUMIN_CONFIG_EMIT_PARAM(ENUM, OWNER, JSON_NAME, IS_VEC3, SCALAR, VX, VY, VZ) ENUM,
+    LUMIN_CONFIG_PARAM_TABLE(LUMIN_CONFIG_EMIT_PARAM)
+#undef LUMIN_CONFIG_EMIT_PARAM
     Count
 };
 

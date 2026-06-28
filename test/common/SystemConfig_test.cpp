@@ -9,9 +9,11 @@
 #include <sstream>
 #include <string>
 
+#include <iomanip>
 #include <glm/glm.hpp>
 
 #include "luminumbra_common/core/SystemConfig.h"
+#include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"  // StableChecksum
 
 using luminumbra::core::SysKey;
 using luminumbra::core::SysParam;
@@ -121,6 +123,66 @@ TEST(SystemConfig, ConfigSubHashIsOrderIndependentAndStable) {
     const auto hb = SystemConfig::FromJsonString(b).ComputeConfigSubHash();
     EXPECT_FALSE(ha.empty());
     EXPECT_EQ(ha, hb);
+}
+
+// Spec 020 AC-B-002 / FR-B-005 — the SCHEMA-GENERATED kKeys/kParams registries must produce a
+// config:v1: serialization that is BYTE-IDENTICAL to the hand-authored contract. We reconstruct
+// the canonical serialization independently here (same prefix, same setprecision(17), same float
+// literals as the schema defaults) and assert ComputeConfigSubHash == StableChecksum(reconstructed).
+// This pins BOTH the serialization format AND each generated default value, so a drift in either
+// (e.g. a regenerated header with a changed default, or a serializer edit) fails this test rather
+// than silently moving an enabled-system hash. Defaults are never exercised by `--smoke` (which
+// enables no sim system → empty hash), so this is the real guard for the schema-codegen migration.
+std::string ExpectedSubHash(const std::string& canonical_body) {
+    std::ostringstream bytes;
+    bytes << "config:v1:" << std::setprecision(17) << canonical_body;
+    return Luminumbra::Persistence::StableChecksum(bytes.str());
+}
+
+TEST(SystemConfig, ConfigSubHashByteIdenticalSnapshot) {
+    // Single sim key with one scalar param at its compiled default.
+    {
+        std::ostringstream body;
+        body << std::setprecision(17) << "plant_growth:en=1;mutation_rate=" << 0.05f << ';';
+        const auto cfg = SystemConfig::FromJsonString(
+            R"({ "sim": { "plant_growth": { "enabled": true } } })");
+        EXPECT_EQ(cfg.ComputeConfigSubHash(), ExpectedSubHash(body.str()));
+    }
+    // Sim key with NO owned params still emits the enabled marker and nothing after it.
+    {
+        const auto cfg =
+            SystemConfig::FromJsonString(R"({ "sim": { "erosion": { "enabled": true } } })");
+        EXPECT_EQ(cfg.ComputeConfigSubHash(), ExpectedSubHash("erosion:en=1;"));
+    }
+    // Sim key owning multiple scalar params: every owned default is emitted in kParams order.
+    {
+        std::ostringstream body;
+        body << std::setprecision(17) << "foraging:en=1;deposit=" << 1.0f << ";trail_weight="
+             << 8.0f << ";goal_weight=" << 1.0f << ';';
+        const auto cfg =
+            SystemConfig::FromJsonString(R"({ "sim": { "foraging": { "enabled": true } } })");
+        EXPECT_EQ(cfg.ComputeConfigSubHash(), ExpectedSubHash(body.str()));
+    }
+    // Multiple enabled sim keys serialize in kKeys (schema) order: plant_growth precedes erosion.
+    {
+        std::ostringstream body;
+        body << std::setprecision(17) << "plant_growth:en=1;mutation_rate=" << 0.05f
+             << ";erosion:en=1;";
+        const auto cfg = SystemConfig::FromJsonString(
+            R"({ "sim": { "erosion": { "enabled": true },
+                          "plant_growth": { "enabled": true } } })");
+        EXPECT_EQ(cfg.ComputeConfigSubHash(), ExpectedSubHash(body.str()));
+    }
+    // An explicitly-set non-default param overrides the generated default in the same format.
+    {
+        std::ostringstream body;
+        body << std::setprecision(17) << "plant_growth:en=1;mutation_rate=" << 0.2f << ';';
+        const auto cfg = SystemConfig::FromJsonString(
+            R"({ "sim": { "plant_growth": { "enabled": true, "params": { "mutation_rate": 0.2 } } } })");
+        EXPECT_EQ(cfg.ComputeConfigSubHash(), ExpectedSubHash(body.str()));
+    }
+    // All-default (no sim enabled) is the empty baseline — byte-identical to today.
+    EXPECT_EQ(SystemConfig::Defaults().ComputeConfigSubHash(), std::string{});
 }
 
 // AC-SC-005 — enabled() is a cheap, deterministic hot-path query (structural O(1);

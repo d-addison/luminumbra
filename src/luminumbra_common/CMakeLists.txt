@@ -4,6 +4,52 @@ include("${CMAKE_CURRENT_LIST_DIR}/sources.cmake")
 # Create the static library with all its source files at once.
 add_library(luminumbra_common STATIC ${COMMON_SOURCES})
 
+# Spec 020 FR-B-003 — config-schema drift gate (compile/CI). SystemConfig.h/.cpp GENERATE the
+# SysKey/SysParam enums + kKeys/kParams registries by expanding the X-macro tables in
+# core/SystemConfigRegistry.gen.h, whose single authored home is core/ConfigSchema.json. If the
+# committed generated header is stale vs the schema (someone edited the schema but forgot to
+# re-emit), the compiled registry would silently drift. `config_codegen.py --check` proves the
+# header is byte-fresh; run it at configure time and HARD-FAIL on drift. ConfigSchema.json and the
+# generated header are registered as configure dependencies so editing either re-triggers the
+# check. Skipped (with a warning, never a hard fail) when no Python interpreter is available, so
+# the engine still builds on a Python-less box; the engine-frontier gate also enforces --check.
+set(_config_schema "${CMAKE_CURRENT_SOURCE_DIR}/core/ConfigSchema.json")
+set(_config_gen_header "${CMAKE_CURRENT_SOURCE_DIR}/core/SystemConfigRegistry.gen.h")
+set(_config_codegen "${CMAKE_SOURCE_DIR}/tools/config_codegen.py")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${_config_schema}" "${_config_gen_header}" "${_config_codegen}")
+find_package(Python3 COMPONENTS Interpreter QUIET)
+set(_config_python "")
+if(Python3_FOUND)
+    set(_config_python "${Python3_EXECUTABLE}")
+else()
+    foreach(_pyname python python3 py)
+        find_program(_config_py_${_pyname} ${_pyname})
+        if(_config_py_${_pyname})
+            set(_config_python "${_config_py_${_pyname}}")
+            break()
+        endif()
+    endforeach()
+endif()
+if(_config_python)
+    execute_process(
+        COMMAND "${_config_python}" "${_config_codegen}" --check
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        RESULT_VARIABLE _config_check_rc
+        OUTPUT_VARIABLE _config_check_out
+        ERROR_VARIABLE _config_check_err)
+    if(NOT _config_check_rc EQUAL 0)
+        message(FATAL_ERROR
+            "SystemConfig schema drift (config_codegen.py --check failed):\n"
+            "${_config_check_out}${_config_check_err}\n"
+            "Edit core/ConfigSchema.json then regenerate: "
+            "python tools/config_codegen.py --emit src/luminumbra_common/core/SystemConfigRegistry.gen.h")
+    endif()
+    message(STATUS "SystemConfig schema drift check passed (config_codegen.py --check) via ${_config_python}")
+else()
+    message(WARNING "No Python interpreter found: SystemConfig schema drift check (config_codegen.py --check) NOT run at configure time; the engine-frontier gate still enforces it.")
+endif()
+
 # GameSession.cpp drives the whole fixed-tick system roster, instantiating ~16 entt component
 # storages in one TU. Under GCC 15 at -O0 that tips the compiler into EXTERNALIZING the inline
 # std helpers entt's paged storage needs (std::__advance / ranges::iter_move on the page-pointer
