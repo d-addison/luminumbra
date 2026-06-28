@@ -138,6 +138,7 @@ add_executable(common_tests
     common/AetherFieldSystem_test.cpp
     common/fields_hardening_test.cpp
     common/replication_hardening_test.cpp
+    common/replication_scale_test.cpp
     common/lockstep_replay_hardening_test.cpp
     common/world_streaming_hardening_test.cpp
     common/HydraulicErosion_test.cpp
