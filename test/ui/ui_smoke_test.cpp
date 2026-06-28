@@ -618,6 +618,57 @@ TEST(UiSmokeTest, RedesignedControlsAreFunctional) {
     ClickAndUpdate(ui, wc->GetElementById("customize_toggle"));
     EXPECT_FALSE(body->IsClassSet("collapsed"));
 
+    // Wave 0.3: a worldgen-param slider live-updates its SIBLING .param-value label
+    // as it moves (the flex [label][slider][value] row restructure must keep the
+    // change handler — GetParentNode()->.param-value — wired). amp is in the
+    // default-active terrain pane.
+    {
+        auto* amp_fc = dynamic_cast<Rml::ElementFormControl*>(amp);
+        ASSERT_NE(amp_fc, nullptr);
+        amp_fc->SetValue("77");
+        Rml::Dictionary change_params;
+        amp->DispatchEvent(Rml::EventId::Change, change_params);
+        ui.Update();
+        Rml::Element* row = amp->GetParentNode();
+        ASSERT_NE(row, nullptr);
+        Rml::ElementList vals;
+        row->GetElementsByClassName(vals, "param-value");
+        ASSERT_FALSE(vals.empty()) << "the value label must be a sibling of the slider";
+        EXPECT_NEAR(std::stof(vals[0]->GetInnerRML()), 77.0f, 0.5f)
+            << "a param slider must live-update its sibling value label";
+    }
+
+    // Wave 0.3: advanced-param TABS — clicking a tab chip activates ONLY its pane.
+    {
+        Rml::ElementList tabs;
+        wc->GetElementsByClassName(tabs, "param-tab");
+        ASSERT_GE(tabs.size(), 4u) << "terrain/water/biomes/features tab chips";
+        Rml::Element* water_tab = nullptr;
+        for (auto* t : tabs)
+            if (t->GetAttribute<Rml::String>("data-tab", "") == "water") water_tab = t;
+        ASSERT_NE(water_tab, nullptr);
+        ClickAndUpdate(ui, water_tab);
+        EXPECT_TRUE(water_tab->IsClassSet("active"));
+        Rml::ElementList panes;
+        wc->GetElementsByClassName(panes, "param-pane");
+        ASSERT_GE(panes.size(), 4u);
+        int active_panes = 0;
+        for (auto* p : panes) {
+            const bool is_active = p->IsClassSet("active");
+            if (is_active) ++active_panes;
+            EXPECT_EQ(is_active, p->GetAttribute<Rml::String>("data-pane", "") == "water")
+                << "only the clicked tab's pane is active";
+        }
+        EXPECT_EQ(active_panes, 1) << "exactly one advanced pane shows at a time";
+        // Restore the terrain pane so the rest of the test reads the default surface.
+        Rml::Element* terrain_tab = nullptr;
+        for (auto* t : tabs)
+            if (t->GetAttribute<Rml::String>("data-tab", "") == "terrain") terrain_tab = t;
+        ASSERT_NE(terrain_tab, nullptr);
+        ClickAndUpdate(ui, terrain_tab);
+        EXPECT_TRUE(terrain_tab->IsClassSet("active"));
+    }
+
     // preset chip drives the hidden world_type select.
     Rml::ElementList chips;
     wc->GetElementsByClassName(chips, "preset-chip");

@@ -30,6 +30,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -49,7 +50,7 @@
 // FoliageSurfaceQuery) are only used in the .cpp, so that header is included there.
 #include "rendering/passes/FoliagePass.h"          // Rendering::FoliagePass::ChunkScatter
 
-namespace Luminumbra::Rendering { class RenderPipeline; class Camera; }
+namespace Luminumbra::Rendering { class RenderPipeline; class Camera; class ParticlePass; }
 namespace Luminumbra { class JobSystem; }
 namespace Luminumbra::Systems { class PhysicsSystem; class WaterSystem; }
 
@@ -103,6 +104,12 @@ public:
     void set_active(bool active) { m_active = active; }
     bool active() const { return m_active; }
 
+    // Wave 0.3: drop any preview precipitation emitters from the shared
+    // ParticlePass (called by the host when the create screen deactivates so the
+    // preview's rain/snow never lingers into the menu backdrop or the game). A
+    // cheap no-op when no precipitation is active. Render-only.
+    void clear_precipitation(Rendering::RenderPipeline& pipeline);
+
     // Advance the debounce timer; when the debounce window elapses on the latest
     // pending candidate this SIGNALS the background worker to (re)build the world
     // (TASK #6). The actual pending->live swap happens later, on the GL thread, in
@@ -146,6 +153,13 @@ private:
     void swap_pending_into_live(Rendering::RenderPipeline& pipeline); // GL thread: drain far-LOD off the OLD world, then pending->live + bump generation + foliage refresh marker
     void configure_camera(Rendering::Camera& cam) const; // orbit -> Camera pose
     void apply_look(Rendering::RenderPipeline& pipeline) const; // weather/tod/clouds
+    // Wave 0.3: spawn/maintain camera-followed PRECIPITATION particles in the
+    // shared pipeline ParticlePass so the preview's rain/snow/storm read as REAL
+    // falling particles (not just a sky/fog tint). Re-centres the emitter on the
+    // orbit camera each frame and re-spawns only when the weather changes. The
+    // particle MOTION is render-only — it never touches world_hash (one-way rule).
+    void apply_precipitation(Rendering::RenderPipeline& pipeline,
+                             const Rendering::Camera& cam);
 
     // TASK #4: (re)build the deterministic foliage scatter for the live world's
     // bounded chunk set, but only once per actual world rebuild (cached by
@@ -235,6 +249,13 @@ private:
     bool m_active = false;
     bool m_last_build_failed = false;
     std::string m_last_error;
+
+    // Wave 0.3: precipitation emitter state (render-only). m_precip_emitter_id is
+    // the live rain/snow emitter in the shared ParticlePass (kInvalidEmitter when
+    // none); m_precip_spawned_for tracks which weather it was spawned for so a
+    // weather change re-spawns the right emitter.
+    std::uint32_t m_precip_emitter_id = 0xFFFFFFFFu; // ParticlePass::kInvalidEmitter
+    Weather m_precip_spawned_for = Weather::Clear;
 };
 
 } // namespace Luminumbra::Client

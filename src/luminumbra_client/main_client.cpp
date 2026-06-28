@@ -9090,6 +9090,10 @@ int main(int argc, char* argv[]) {
                         int seedVal = 4242;
                         if (sig != worldgenPreviewLastSig) {
                             worldgenPreviewLastSig = sig;
+                            // Wave 0.3: prove a knob/param drag actually drives a
+                            // diorama rebuild — one line per resolved candidate sig so
+                            // a dragged knob is visibly firing the host rebuild branch.
+                            LUMINUMBRA_CORE_INFO("Worldgen preview rebuild: sig={}", sig);
                             try {
                                 const std::filesystem::path base_path =
                                     std::filesystem::path(root_path_str) / "worlds" / "atlas" / "presets" / (pv.worldType + ".json");
@@ -9164,6 +9168,7 @@ int main(int argc, char* argv[]) {
                         worldgenPreview->render_to_backbuffer(renderPipeline, deltaTime);
                     } else {
                         worldgenPreview->set_active(false);
+                        worldgenPreview->clear_precipitation(renderPipeline);  // Wave 0.3: no lingering preview rain
                         worldgenPreviewLastSig.clear();
                         worldgenPreviewDragging = false;
                         g_menu_scroll_accum = 0.0;  // drop stale wheel deltas from other menus

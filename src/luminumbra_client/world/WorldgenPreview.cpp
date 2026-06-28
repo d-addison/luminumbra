@@ -15,6 +15,7 @@
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "rendering/Camera.h"
 #include "rendering/RenderPipeline.h"
+#include "rendering/passes/ParticlePass.h"        // Wave 0.3: preview precipitation particles
 
 namespace Luminumbra::Client {
 
@@ -443,6 +444,66 @@ void WorldgenPreview::apply_look(Rendering::RenderPipeline& pipeline) const {
     pipeline.set_cloud_state(clouds);
 }
 
+void WorldgenPreview::apply_precipitation(Rendering::RenderPipeline& pipeline,
+                                          const Rendering::Camera& cam) {
+    // The preview's set_weather already drives the sky/cloud/fog tint via
+    // apply_look(); this adds the REAL falling particles so rain/snow/storm read
+    // as precipitation, camera-followed (the column always spawns around/above the
+    // orbit camera and falls straight past it). Render-only -> never hashed.
+    auto* particles = pipeline.particles();
+    if (particles == nullptr) return;
+    using PP = Rendering::ParticlePass;
+    // data root may be unset (tests / before the first candidate); without it we
+    // can't resolve the emitter JSON, so leave precipitation off rather than guess.
+    if (m_data_root.empty()) return;
+
+    // Which precip file does the current weather want? Storm reuses the rain
+    // column (heavier look comes from the wind + sky); fog/clear carry none.
+    const char* precip_file = nullptr;
+    if (m_weather == Weather::Rain || m_weather == Weather::Storm)
+        precip_file = "common/particles/precip_rain.json";
+    else if (m_weather == Weather::Snow)
+        precip_file = "common/particles/precip_snow.json";
+
+    if (m_weather != m_precip_spawned_for) {
+        // Weather changed: drop the previous emitters and (re)spawn for the new
+        // weather. clear_emitters() flushes the whole pass — fine on the create
+        // screen, where the preview owns the only particles (the menu backdrop is
+        // suppressed and the in-game ambient/foliage emitters are not running).
+        particles->clear_emitters();
+        m_precip_emitter_id = PP::kInvalidEmitter;
+        m_precip_spawned_for = m_weather;
+        if (precip_file != nullptr) {
+            m_precip_emitter_id =
+                particles->add_emitter(m_data_root / precip_file, cam.Position);
+            // Rain/storm splash on the ground plane (snow just settles).
+            if (m_weather == Weather::Rain || m_weather == Weather::Storm)
+                particles->add_splash_emitter(m_data_root / "common/particles/precip_splash.json");
+        }
+    }
+
+    // Camera-follow: keep the spawn column centred on the orbit camera so it always
+    // fills the framed view as the turntable spins.
+    if (m_precip_emitter_id != PP::kInvalidEmitter)
+        particles->set_emitter_origin(m_precip_emitter_id, cam.Position);
+
+    // Storms slant the rain with a steady cross-wind; calm weather falls straight.
+    particles->set_wind(m_weather == Weather::Storm ? glm::vec3(9.0f, 0.0f, 4.0f)
+                                                    : glm::vec3(0.0f));
+}
+
+void WorldgenPreview::clear_precipitation(Rendering::RenderPipeline& pipeline) {
+    using PP = Rendering::ParticlePass;
+    if (m_precip_spawned_for == Weather::Clear && m_precip_emitter_id == PP::kInvalidEmitter)
+        return; // nothing spawned -> cheap no-op
+    if (auto* particles = pipeline.particles()) {
+        particles->clear_emitters();
+        particles->set_wind(glm::vec3(0.0f));
+    }
+    m_precip_emitter_id = PP::kInvalidEmitter;
+    m_precip_spawned_for = Weather::Clear;
+}
+
 bool WorldgenPreview::render(Rendering::RenderPipeline& pipeline, float dt) {
     if (!m_active) return false;
     m_drain_pipeline = &pipeline; // remember it so the dtor can drain far-LOD before freeing the world
@@ -530,6 +591,10 @@ bool WorldgenPreview::render_to_backbuffer(Rendering::RenderPipeline& pipeline, 
     Rendering::Camera cam(glm::vec3(kCenterX, kCenterY, kCenterZ + m_dist));
     configure_camera(cam);
     apply_look(pipeline);
+    // Wave 0.3: spawn/maintain the camera-followed precipitation particles BEFORE
+    // render_frame (which advances + draws the ParticlePass internally), so rain/
+    // snow/storm show real falling particles in the live diorama.
+    apply_precipitation(pipeline, cam);
 
     // Draw straight to the backbuffer at the pipeline's CURRENT (full-screen) size
     // — no offscreen target, no on_resize. The create panel frames this as the

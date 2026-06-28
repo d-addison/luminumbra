@@ -849,16 +849,42 @@ body#world_creation {
     margin-top: 20px;
     margin-bottom: 8px;
 }
-.knob-row {
-    margin-bottom: 14px;
+
+/* Wave 0.3: flex [label][slider][value] rows so the live value reads BESIDE its
+   slider (align-items:center) instead of floated above a full-width slider. The
+   compound selectors (.settings-row.knob-row / .settings-row.param-row) target
+   ONLY the create-world slider rows; the inline toggle rows (.settings-row-inline
+   .param-row) and the shared block .settings-row keep their own layout. */
+.settings-row.knob-row,
+.settings-row.param-row,
+.settings-row.preview-tod-row {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    margin-bottom: 12px;
 }
-.knob-row label {
+.settings-row.knob-row label,
+.settings-row.param-row label,
+.settings-row.preview-tod-row label {
+    width: 42%;
+    margin-bottom: 0;
     font-size: 14px;
-    color: rgba(232, 222, 204, 220);
+    color: rgba(224, 215, 198, 200);
     letter-spacing: 1px;
 }
-.knob-value {
-    float: right;
+.settings-row.knob-row .settings-slider,
+.settings-row.param-row .settings-slider,
+.settings-row.preview-tod-row .settings-slider {
+    flex: 1 1 auto;
+}
+.knob-row label {
+    color: rgba(232, 222, 204, 220);
+}
+.knob-value,
+.param-value {
+    width: 58px;
+    margin-left: 10px;
+    text-align: right;
     color: #C9A86A;
     font-size: 13px;
 }
@@ -893,13 +919,39 @@ body#world_creation {
     letter-spacing: 0;
 }
 
-/* Bounded, scrollable body so the panel stays on screen when expanded. */
+/* Wave 0.3: the advanced groups are now TAB PANES (one shown at a time), so the
+   body no longer needs to be a bounded scroll container. Dropping overflow-y:auto
+   removes the RmlUi scroll-container that intercepted slider drags inside the
+   panel — sliders are now directly draggable. */
 .customize-body {
-    max-height: 360px;
-    overflow-y: auto;
     margin-top: 14px;
 }
 .customize-body.collapsed { display: none; }
+
+/* Advanced-param TAB strip + panes (Wave 0.3). A chip row toggles .active on one
+   pane; only the active pane renders, so the long advanced column no longer
+   scrolls and the inactive groups don't pile up vertically. */
+.param-tabs {
+    display: flex;
+    flex-direction: row;
+    margin-bottom: 14px;
+}
+.param-tab {
+    color: rgba(216, 207, 188, 150);
+    font-size: 13px;
+    letter-spacing: 2px;
+    padding: 5px 14px;
+    margin-right: 6px;
+    border-bottom-width: 2px;
+    border-bottom-color: rgba(201, 168, 106, 0);
+}
+.param-tab:hover { color: #F2EDE4; }
+.param-tab.active {
+    color: #E0C488;
+    border-bottom-color: rgba(201, 168, 106, 200);
+}
+.param-pane { display: none; }
+.param-pane.active { display: block; }
 
 .param-group {
     margin-bottom: 18px;
@@ -913,18 +965,10 @@ body#world_creation {
     margin-bottom: 12px;
 }
 
-/* Tighter than the stock .settings-row. */
+/* Tighter than the stock .settings-row (applies to the inline toggle rows too;
+   the slider rows get their flex layout from the .settings-row.param-row block
+   above). .param-value styling lives with .knob-value above (flex sibling). */
 .param-row {
     margin-bottom: 12px;
-}
-.param-row label {
-    font-size: 14px;
-    color: rgba(224, 215, 198, 200);
-    letter-spacing: 1px;
-}
-.param-value {
-    float: right;
-    color: #C9A86A;
-    font-size: 13px;
 }
 

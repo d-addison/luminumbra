@@ -539,6 +539,30 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
         }));
     }
 
+    // Wave 0.3: advanced-param TAB strip. Clicking a tab chip activates its pane
+    // (and only its pane), so the long advanced column is split into terrain /
+    // water / biomes / features groups shown one at a time (cuts the scroll).
+    {
+        Rml::ElementList tabs;
+        document->GetElementsByClassName(tabs, "param-tab");
+        for (Rml::Element* tab : tabs) {
+            AddClickSoundListener(tab, [this, document](Rml::Event& event) {
+                Rml::Element* t = event.GetTargetElement();
+                while (t && t->GetAttribute<Rml::String>("data-tab", "").empty()) t = t->GetParentNode();
+                if (!t) return;
+                const std::string which = t->GetAttribute<Rml::String>("data-tab", "");
+                Rml::ElementList all_tabs;
+                document->GetElementsByClassName(all_tabs, "param-tab");
+                for (Rml::Element* x : all_tabs)
+                    x->SetClass("active", x->GetAttribute<Rml::String>("data-tab", "") == which);
+                Rml::ElementList panes;
+                document->GetElementsByClassName(panes, "param-pane");
+                for (Rml::Element* p : panes)
+                    p->SetClass("active", p->GetAttribute<Rml::String>("data-pane", "") == which);
+            });
+        }
+    }
+
     // Worldgen sliders: live-update the adjacent .param-value label as they move.
     {
         Rml::ElementList sliders;
