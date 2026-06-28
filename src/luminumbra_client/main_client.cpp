@@ -301,6 +301,17 @@ std::size_t g_ui_screen_index = 0;           // which screen in g_ui_screens is 
 std::filesystem::path g_ui_screenshot_dir;   // output dir; each screen -> ui-<screen>.ppm
 bool g_ui_fixtures = false;                   // seed deterministic UI fixture data
 int g_ui_screenshot_settle = 0;              // frames waited before capture of the current screen
+// HEADLESS PREVIEW-DIORAMA CAPTURE (--preview-live): for the world_creation screen, the
+// live WorldgenPreview diorama (candidate world + far field + precipitation) builds on a
+// BACKGROUND worker thread, so the fixed 30-frame settle above captures a black backdrop
+// before the world is ready (render_to_backbuffer returns false until world_ready()). When
+// g_ui_preview_live is set, the world_creation capture instead WAITS (bounded, wall-clock
+// timeout) for worldgenPreview->world_ready() + a few post-ready settle frames so the
+// terrain/far-field/atmosphere (and, with --preview-weather rain, falling precipitation)
+// are actually drawn before the backbuffer is read. Render-only; server --smoke unaffected.
+bool g_ui_preview_live = false;              // wait for the live diorama before capturing world_creation
+std::string g_ui_preview_weather;            // optional forced weather chip (e.g. "rain") so precip spawns
+int g_ui_preview_settle_after_ready = 0;     // post-world_ready settle frames accrued (far-LOD/foliage/particles)
 // F4 — live scenic menu backdrop: a golden-hour world rendered behind the menus (matching the
 // references). Stood up at boot while staying in MAIN_MENU; the menu render branch draws it
 // under the transparent UI with a slow auto-orbit. Replaced cleanly when a real world loads.
@@ -2808,8 +2819,16 @@ int main(int argc, char* argv[]) {
         std::error_code _ui_ec;
         std::filesystem::create_directories(g_ui_screenshot_dir, _ui_ec);
         if (!g_ui_screens.empty()) g_ui_screenshot_screen = g_ui_screens.front();
-        LUMINUMBRA_CORE_INFO("UI screenshot mode: {} screen(s), fixtures={} -> {}/ui-*.ppm",
-                             g_ui_screens.size(), g_ui_fixtures, g_ui_screenshot_dir.string());
+        // --preview-live [--preview-weather rain]: for the world_creation screen, wait for the
+        // live diorama (async candidate-world build + far field + precipitation) before capturing,
+        // so the create-world UI redesign, the centre-anchored far field, and the preview rain are
+        // VISUALLY CAPTURABLE headlessly (the default fixed-settle path captures a black backdrop
+        // because the world is still building). Bounded by a wall-clock timeout (never hangs).
+        g_ui_preview_live = HasCommandLineFlag(argc, argv, "--preview-live");
+        g_ui_preview_weather = GetCommandLineOption(argc, argv, "--preview-weather", "");
+        LUMINUMBRA_CORE_INFO("UI screenshot mode: {} screen(s), fixtures={}, preview_live={}, preview_weather='{}' -> {}/ui-*.ppm",
+                             g_ui_screens.size(), g_ui_fixtures, g_ui_preview_live,
+                             g_ui_preview_weather, g_ui_screenshot_dir.string());
     }
 
     // --ui-thumbs N [--ui-thumbs-dir d]: capture N clean landscape thumbnails from the menu
@@ -9121,11 +9140,18 @@ int main(int argc, char* argv[]) {
 
                         // Live look controls.
                         using PW = Luminumbra::Client::WorldgenPreview::Weather;
+                        // Headless capture (--preview-weather) can force a weather chip so the
+                        // diorama spawns precipitation even though no UI pill was clicked; falls
+                        // back to the DOM-selected pill for the interactive create screen.
+                        const std::string weatherSel =
+                            (g_ui_preview_live && !g_ui_preview_weather.empty())
+                                ? g_ui_preview_weather
+                                : pv.weather;
                         PW w = PW::Clear;
-                        if (pv.weather == "rain") w = PW::Rain;
-                        else if (pv.weather == "snow") w = PW::Snow;
-                        else if (pv.weather == "fog") w = PW::Fog;
-                        else if (pv.weather == "storm") w = PW::Storm;
+                        if (weatherSel == "rain") w = PW::Rain;
+                        else if (weatherSel == "snow") w = PW::Snow;
+                        else if (weatherSel == "fog") w = PW::Fog;
+                        else if (weatherSel == "storm") w = PW::Storm;
                         worldgenPreview->set_weather(w);
                         worldgenPreview->set_time_of_day(pv.tod);
                         if (g_uiManager->ConsumeWorldCreationResetView()) worldgenPreview->reset_view();
@@ -9182,9 +9208,49 @@ int main(int argc, char* argv[]) {
                 // holding the UI over the menu backdrop), then advance to the next batched screen
                 // (one window session captures them all). Mirrors --scene-config.
                 if (!g_ui_screens.empty() && g_ui_screen_index < g_ui_screens.size()) {
-                    if (g_ui_screenshot_settle < 30) {
+                    // HEADLESS PREVIEW-DIORAMA CAPTURE: for world_creation under --preview-live,
+                    // the live diorama builds on a background worker, so the fixed 30-frame settle
+                    // would capture a black backdrop before world_ready(). Instead, wait (bounded by
+                    // a wall-clock timeout so we never hang) for the candidate world to build + a
+                    // short post-ready settle (far-LOD/foliage/precipitation drawn), THEN capture.
+                    static std::chrono::steady_clock::time_point s_preview_wait_start{};
+                    static bool s_preview_wait_armed = false;
+                    const bool preview_live_screen =
+                        g_ui_preview_live && g_ui_screens[g_ui_screen_index] == "world_creation";
+                    bool ready_to_capture = false;
+                    if (preview_live_screen) {
+                        if (!s_preview_wait_armed) {
+                            s_preview_wait_armed = true;
+                            s_preview_wait_start = std::chrono::steady_clock::now();
+                            g_ui_preview_settle_after_ready = 0;
+                        }
+                        const bool world_ready = worldgenPreview && worldgenPreview->world_ready();
+                        if (world_ready) ++g_ui_preview_settle_after_ready;
+                        const double waited_s =
+                            std::chrono::duration<double>(std::chrono::steady_clock::now() - s_preview_wait_start).count();
+                        constexpr double kPreviewTimeoutSeconds = 45.0; // hard bound -> never hangs headlessly
+                        constexpr int kPreviewSettleAfterReady = 40;    // post-ready frames for far-LOD/foliage/particles
+                        const bool settled = world_ready && g_ui_preview_settle_after_ready >= kPreviewSettleAfterReady;
+                        const bool timed_out = waited_s >= kPreviewTimeoutSeconds;
+                        ready_to_capture = settled || timed_out;
+                        if (ready_to_capture) {
+                            // One-line, self-diagnosing readiness report so a black/timed-out capture
+                            // tells us WHICH failure happened (no rebuild signal vs build failed vs
+                            // world built but render black) in a single run.
+                            LUMINUMBRA_CORE_INFO(
+                                "Preview-live capture gate: world_ready={} settle_after_ready={} waited={:.1f}s timed_out={} "
+                                "build_failed={} last_error='{}'",
+                                world_ready, g_ui_preview_settle_after_ready, waited_s, timed_out,
+                                worldgenPreview ? worldgenPreview->last_build_failed() : true,
+                                worldgenPreview ? worldgenPreview->last_error() : std::string("<null preview>"));
+                        }
+                    } else if (g_ui_screenshot_settle < 30) {
                         ++g_ui_screenshot_settle;
                     } else {
+                        ready_to_capture = true;
+                    }
+                    if (ready_to_capture) {
+                        s_preview_wait_armed = false; // re-arm for the next screen (batched runs)
                         int vw = 0, vh = 0;
                         glfwGetFramebufferSize(window, &vw, &vh);
                         if (vw > 0 && vh > 0) {
