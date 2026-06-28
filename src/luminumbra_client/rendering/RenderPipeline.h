@@ -515,6 +515,11 @@ public:
     // Season phase in [0,1): 0 == summer solstice, 0.5 == winter solstice. Pure
     // function of the tick count (see kTicksPerSeasonCycle).
     float get_season_phase() const { return m_seasonPhase; }
+    // Spec 015 Pillar A (A-T04): force the lunar illumination [0,1] (1 = full moon, bright
+    // navigable night; ~0 = new moon, dark night). <0 (set via -1) restores the automatic
+    // tick-derived lunar cycle. Render-only; never world_hash.
+    void set_moon_illumination(float illum) { m_moonIllumOverride = illum; }
+    float get_moon_illumination() const { return m_moonIllumination; }
     // Seasonal solar declination offset applied to the sun arc this frame
     // (positive raises the arc / lengthens the day in summer; negative lowers it
     // in winter). Tick-derived, deterministic.
@@ -888,6 +893,14 @@ private:
     // integer tick, so they are reproducible from tick alone and never hashed.
     std::uint64_t m_seasonTick = 0;
     float m_seasonPhase = 0.0f;          // [0,1): 0 summer, 0.5 winter
+    // Spec 015 Pillar A (A-T04): LUNAR PHASE -> the "two night modes". A render-only lunar
+    // cycle (pure function of the tick, like the season; never world_hash) sets how much the
+    // moon lights the night: ~1 full moon (bright, navigable, crisp moon shadows), down to a
+    // starlight floor at new moon (dark night that wants a torch). m_moonIllumOverride>=0
+    // (LUMIN_MOON env / set_moon_illumination) forces a value for photo/testing.
+    float m_moonIllumination = 0.85f;
+    float m_moonIllumOverride = -1.0f;
+    static constexpr std::uint64_t kTicksPerLunarCycle = 54000ull; // 30 min @ 30 Hz (a lunar "month")
     float m_seasonSunDeclination = 0.0f; // radians, seasonal arc tilt
     float m_sunElevationRad = 0.0f;      // sun elevation this frame (radians)
     glm::vec3 m_seasonPaletteTint{1.0f}; // warm(summer)/cool(winter) palette tint

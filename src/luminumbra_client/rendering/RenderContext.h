@@ -108,6 +108,7 @@ struct RenderContext {
     glm::vec3 sky_ambient_color = glm::vec3(0.0f); // <- m_skyAmbientColor
     glm::vec3 moon_light_dir = glm::vec3(0.0f);    // <- m_moonLightDir
     glm::vec3 moon_direction = glm::vec3(0.0f);    // <- m_moonDirection (distinct; keep both)
+    float moon_illumination = 1.0f;                // <- m_moonIllumination (Pillar A A-T04: lunar phase / "two night modes")
     float sky_day_factor = 0.0f;             // <- m_skyDayFactor
     float underwater_factor = 0.0f;          // <- m_underwater_factor
     float emissive_lut_scale = 0.0f;         // <- kEmissiveLutScale

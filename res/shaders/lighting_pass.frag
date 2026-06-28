@@ -70,6 +70,9 @@ uniform SunLight u_sun;
 // the L vector for the night moon term AND to key the cast-shadow lookup, since
 // at night get_light_space_matrices builds the cascade from this same direction.
 uniform vec3 u_moonDir;
+// Spec 015 Pillar A (A-T04): lunar illumination [0,1] -> the "two night modes". 1 = full
+// moon (bright, navigable night + crisp moon shadows); ~0 = new moon (dark, wants a torch).
+uniform float u_moonIllum = 1.0;
 
 #define MAX_POINT_LIGHTS 32
 struct PointLight {
@@ -449,18 +452,23 @@ void main() {
         // peter-panning from the wider-spread night cascade, while still reading as
         // a directional shadow.
         float moonShadow = CalculateShadow(FragPos, Normal, L_moon, abs(viewPos.z));
-        // Moonlight is SOFT: keep a high floor so cast shadows read as gentle
-        // contrast, not crushed black (a low floor left the whole foreground near-
-        // black when the night cascade reported everything shadowed). 0.5 => moon
-        // shadows dim to half, never to void; the night stays navigable.
-        moonShadow = mix(0.5, 1.0, moonShadow); // soft moon-shadow floor
+        // Spec 015 Pillar A (A-T04): the moon-shadow FLOOR scales with the lunar phase.
+        // A FULL moon throws PROPER, crisp cast shadows (floor ~0.25 -> shadows read as real
+        // directional contrast, DayZ bright-night feel); toward NEW moon the moon is too dim
+        // to cast hard shadow, so the floor lifts (~0.7) and shadows fade out gracefully
+        // rather than crushing the already-dark scene to black. (Was a flat 0.5.)
+        float moonShadowFloor = mix(0.70, 0.25, u_moonIllum);
+        moonShadow = mix(moonShadowFloor, 1.0, moonShadow);
         // Cool moonlight key. Brighter than the old fill so a moonlit night is
         // clearly NAVIGABLE (form + value), but obviously cooler + dimmer than day.
         // Terrain albedos are dark (linear ~0.01-0.07), so the albedo*radiance
         // product needs a strong cool key to lift night ground to a moonlit tone.
+        // Spec 015 Pillar A (A-T04): scaled by u_moonIllum (lunar phase) -> a full moon is a
+        // proper light source, a new moon barely lights the ground (the two night modes).
         const vec3 kMoonColor = vec3(0.40, 0.52, 0.92);
-        const float kMoonKeyScale = 1.3; // overall moonlight brightness lever
-        vec3 moonRadiance = kMoonColor * (nightFactor * kMoonKeyScale * SUN_IRRADIANCE_SCALE);
+        const float kMoonKeyScale = 1.5; // overall full-moon brightness lever (DayZ-style navigable night)
+        float moonKey = nightFactor * kMoonKeyScale * u_moonIllum * SUN_IRRADIANCE_SCALE;
+        vec3 moonRadiance = kMoonColor * moonKey;
         // WRAPPED Lambert: an overhead midnight moon gives camera-facing SLOPES
         // NdotL~0, which left them pure black (the night ambient sits on the wrong
         // hemisphere to fill them). A modest wrap (NdotL*0.6+0.25) lets the moon
@@ -475,7 +483,7 @@ void main() {
         vec3 H_moon = normalize(L_moon + V);
         float specPow = mix(8.0, 64.0, 1.0 - Roughness);
         float moonSpec = pow(max(dot(Normal, H_moon), 0.0), specPow) * (1.0 - Roughness) * 0.35;
-        vec3 moonSpecular = kMoonColor * (nightFactor * kMoonKeyScale * SUN_IRRADIANCE_SCALE) * moonSpec * NdotL_moon;
+        vec3 moonSpecular = kMoonColor * moonKey * moonSpec * NdotL_moon;
         vec3 moonLit = (moonDiffuse + moonSpecular) * moonShadow;
         // Desaturate toward the cool moon hue (Purkinje shift): warm (dusty) albedo
         // would otherwise read daytime-yellow under the key. Pull the lit result

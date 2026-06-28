@@ -143,6 +143,8 @@ void LightingPass::execute(const RenderContext& ctx) {
     // lights + keys the cast-shadow lookup off this so moonlit terrain has real
     // directional form and shadows from the now-moon shadow cascade.
     m_lighting_shader->setVec3("u_moonDir", ctx.moon_light_dir);
+    m_lighting_shader->setFloat("u_moonIllum", ctx.moon_illumination); // Pillar A A-T04: lunar phase
+
     m_lighting_shader->setFloat("u_sea_level", SEA_LEVEL);
     // T-I7 cinematic grade (BF1-style): BOLD default — lifted exposure, rich
     // saturation, strong contrast, and a cool-shadow / warm-highlight split-tone

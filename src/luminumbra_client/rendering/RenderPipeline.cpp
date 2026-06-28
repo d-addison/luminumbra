@@ -893,6 +893,7 @@ RenderContext RenderPipeline::make_lighting_context(const Camera& camera) {
     ctx.sun                = m_sun;
     ctx.sky_ambient_color  = m_skyAmbientColor;
     ctx.moon_light_dir     = m_moonLightDir;
+    ctx.moon_illumination  = m_moonIllumination; // Spec 015 Pillar A (A-T04): lunar phase / two night modes
     ctx.exposure           = m_pillarA_exposure; // Spec 015 Pillar A (A-T05): TOD eye-adaptation exposure
     ctx.emissive_lut_scale = kEmissiveLutScale;
     ctx.point_lights       = &m_point_lights_this_frame;
@@ -4996,6 +4997,28 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
                                               season_tilt_z));
     m_moonUpFactor = glm::dot(m_moonLightDir, glm::vec3(0.0f, -1.0f, 0.0f));
 
+    // Spec 015 Pillar A (A-T04): LUNAR PHASE -> the "two night modes" (DayZ-style: bright
+    // moonlit nights vs dark new-moon nights). A deterministic lunar cycle from the tick
+    // (pure function, like the season; render-only, never world_hash) sets the moon's
+    // illuminating power. LUMIN_MOON (parsed once) or set_moon_illumination() forces a value.
+    {
+        static const float s_moon_env = [] {
+            if (const char* e = std::getenv("LUMIN_MOON")) { try { return std::stof(e); } catch (...) {} }
+            return -1.0f;
+        }();
+        const float forced = s_moon_env >= 0.0f ? s_moon_env : m_moonIllumOverride;
+        if (forced >= 0.0f) {
+            m_moonIllumination = glm::clamp(forced, 0.0f, 1.0f);
+        } else {
+            const std::uint64_t tick_in_lunar = m_seasonTick % kTicksPerLunarCycle;
+            const float lunar_t = static_cast<float>(
+                static_cast<double>(tick_in_lunar) / static_cast<double>(kTicksPerLunarCycle));
+            const float full = 0.5f + 0.5f * std::cos(lunar_t * 2.0f * glm::pi<float>()); // 1 full -> 0 new -> 1
+            constexpr float kNewMoonFloor = 0.08f; // starlight floor; new moon is dark, never pitch-zero
+            m_moonIllumination = glm::mix(kNewMoonFloor, 1.0f, full);
+        }
+    }
+
     // Ambient scales by the same PI as SUN_IRRADIANCE_SCALE (lighting_pass
     // exposure audit): these values were tuned against the pre-audit sun, so
     // without the matching scale the sun:ambient balance collapses from ~30%
@@ -5020,7 +5043,12 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     // large soft cool light source — lift the night hemisphere ambient so slopes
     // and moon-shadowed areas stay dim-but-NAVIGABLE and cool, while the moon
     // directional still gives form + cast shadows on flat ground. Cool/blue-biased.
-    glm::vec3 nightAmbient = glm::vec3(0.060f, 0.090f, 0.165f) * kAmbientIrradianceScale;
+    // Spec 015 Pillar A (A-T04): the night skylight FILL scales with the lunar phase so a
+    // full moon gives a brighter, navigable night hemisphere and a new moon a darker one,
+    // never fully black (a starlight floor keeps deep new-moon nights navigable-with-effort).
+    constexpr float kStarlightFrac = 0.40f; // new-moon night keeps ~40% of the moonlit skylight
+    glm::vec3 nightAmbient = glm::vec3(0.060f, 0.090f, 0.165f) * kAmbientIrradianceScale
+                             * glm::mix(kStarlightFrac, 1.0f, m_moonIllumination);
     m_skyAmbientColor = glm::mix(nightAmbient, dayAmbient, m_sun.intensity);
     // T-I5a-6: tint the daytime ambient HUE toward the sky-view scattering
     // ambient (the same LUT integral) while preserving the calibrated ambient

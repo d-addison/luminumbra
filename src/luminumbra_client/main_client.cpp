@@ -255,6 +255,9 @@ float g_scene_cloud_biome = 0.0f;
 float g_scene_cloud_plane = 900.0f;
 bool g_scene_cloud_shadow = false;
 float g_scene_cloud_shadow_strength = 0.0f;
+// Spec 015 Pillar A (A-T04): scene-config "moon" -> lunar illumination [0,1] (1 full moon,
+// ~0 new moon). <0 = leave the automatic tick-derived lunar cycle. For night-mode captures.
+float g_scene_moon = -1.0f;
 // framescan: --frame-scan <out.json> boots the auto-world, pins a FIXED forest-dense
 // camera pose + near-noon time-of-day (reproducible), lets the world settle, then
 // reads back the settled frame's G-buffer material-id attachment + back color buffer
@@ -2578,6 +2581,7 @@ int main(int argc, char* argv[]) {
                 if (c.contains("fov")) g_scene_fov = c["fov"].get<float>();
             }
             if (j.contains("time_of_day")) g_timelapse_tod = j["time_of_day"].get<float>();
+            if (j.contains("moon")) g_scene_moon = j["moon"].get<float>(); // Pillar A A-T04: night-mode capture
             if (j.contains("weather")) {
                 const auto& w = j["weather"];
                 const std::string t = w.value("type", "none");
@@ -6446,6 +6450,7 @@ int main(int argc, char* argv[]) {
                     if (g_scene_active) {
                         if (g_scene_fov > 0.0f && g_camera) g_camera->Zoom = g_scene_fov;
                         renderPipeline.set_time_of_day(g_timelapse_tod);
+                        if (g_scene_moon >= 0.0f) renderPipeline.set_moon_illumination(g_scene_moon); // Pillar A A-T04
                         using WT = Luminumbra::Rendering::WeatherType;
                         const WT wt = (g_scene_weather == 1) ? WT::Rain : (g_scene_weather == 2) ? WT::Snow
                                     : (g_scene_weather == 3) ? WT::Fog : (g_scene_weather == 4) ? WT::Storm : WT::None;
