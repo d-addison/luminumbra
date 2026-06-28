@@ -893,6 +893,7 @@ RenderContext RenderPipeline::make_lighting_context(const Camera& camera) {
     ctx.sun                = m_sun;
     ctx.sky_ambient_color  = m_skyAmbientColor;
     ctx.moon_light_dir     = m_moonLightDir;
+    ctx.exposure           = m_pillarA_exposure; // Spec 015 Pillar A (A-T05): TOD eye-adaptation exposure
     ctx.emissive_lut_scale = kEmissiveLutScale;
     ctx.point_lights       = &m_point_lights_this_frame;
     ctx.cloud_state        = m_cloud_state;
@@ -5021,7 +5022,13 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
             const glm::vec3 scatter_hue = m_skyScatterAmbient / scatter_lum; // luminance-normalized hue
             const float amb_lum = m_skyAmbientColor.r * 0.2126f + m_skyAmbientColor.g * 0.7152f + m_skyAmbientColor.b * 0.0722f;
             const glm::vec3 tinted = scatter_hue * amb_lum;
-            m_skyAmbientColor = glm::mix(m_skyAmbientColor, tinted, 0.5f * m_sun.intensity);
+            // Spec 015 Pillar A (A-T03 / FR-A-002): couple the ambient HUE more fully to
+            // the sky-view scattering LUT (was 0.5) so shadowed surfaces physically pick
+            // up the atmosphere's color across the day (cool noon, warm golden hour). The
+            // calibrated ambient LUMINANCE is preserved (tinted = scatter_hue * amb_lum),
+            // so the LodGround/RenderHealth noon-ambient baselines do not move — only the
+            // ambient hue tracks the LUT. (Magnitude coupling stays in m_pillarA_exposure.)
+            m_skyAmbientColor = glm::mix(m_skyAmbientColor, tinted, 0.9f * m_sun.intensity);
         }
     }
     // T-I5a-7 (C2): carry the seasonal palette tint into the DAYTIME ambient too
@@ -5043,6 +5050,28 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
         if (new_lum > 1e-6f) {
             m_skyAmbientColor *= (amb_lum / new_lum);
         }
+    }
+
+    // Spec 015 Pillar A (A-T05 / FR-A-004 interim): deterministic time-of-day EXPOSURE
+    // (eye adaptation). The atmosphere model spans orders of magnitude day->night; a fixed
+    // exposure leaves night a flat crush and golden hour over-bright. This is a pure
+    // function of the (render-derived) sun elevation — zero readback, deterministic — and
+    // feeds the lighting pass via RenderContext.exposure. It is the interim that the 017
+    // async-readback GPU metering (A-T06) later replaces; photo-mode manual EV (A-T07)
+    // overrides it. Render-only; never world_hash (018 FR-E-003).
+    //
+    // Calibrated so DAY == the prior static LUMIN_GRADE exposure (1.12) -> the noon image
+    // is preserved; lift at night for a navigable moonlit scene; a gentle dip through the
+    // low-sun golden band for contrast/mood.
+    {
+        constexpr float kDayExposure    = 1.12f; // == the prior static s_grade.exposure (noon preserved)
+        constexpr float kNightExposure  = 1.75f; // lift so a moonlit night stays dim-but-navigable
+        constexpr float kGoldenExposure = 1.02f; // gentle dip through the low-sun golden band (mood/contrast)
+        const float day    = glm::smoothstep(-0.05f, 0.30f, sun_up_factor); // 1 high sun -> 0 below horizon
+        const float golden = day * (1.0f - glm::smoothstep(0.18f, 0.45f, sun_up_factor)); // peaks low-but-positive
+        float exposure = glm::mix(kNightExposure, kDayExposure, day);
+        exposure = glm::mix(exposure, kGoldenExposure, golden);
+        m_pillarA_exposure = exposure;
     }
 
     // T-I5a-8 (C3): advance the wind-advected cloud scroll on the same tick-

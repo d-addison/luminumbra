@@ -873,6 +873,12 @@ private:
     // clamped m_sun.intensity (which saturates to 1 while the sun is still low,
     // leaving the dusk dome stuck at full midday and the night dome bright).
     float m_skyDayFactor = 1.0f;
+    // Spec 015 Pillar A (A-T05): deterministic time-of-day exposure (eye adaptation),
+    // computed in update_time_of_day as a pure function of the sun elevation and fed to
+    // the lighting pass via RenderContext.exposure. DAY == the prior static LUMIN_GRADE
+    // exposure (noon image preserved); lifts at night for navigability; dips through the
+    // golden-hour band for contrast/mood. Render-only — never world_hash (018 FR-E-003).
+    float m_pillarA_exposure = 1.12f;
     // 1.0 when the render camera is below a water surface (drives the aerial pass's
     // underwater murk). Set per-frame in render_frame from WaterLevelAt.
     float m_underwater_factor = 0.0f;
