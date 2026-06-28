@@ -159,7 +159,9 @@ void LightingPass::execute(const RenderContext& ctx) {
         }
         return g;
     }();
-    m_lighting_shader->setFloat("u_exposure", s_grade.exposure);
+    // Spec 015 Pillar A (A-T05b): the RenderContext exposure seam slot wins when set; the
+    // sentinel 0 falls back to the static LUMIN_GRADE exposure (byte-identical until A-T05).
+    m_lighting_shader->setFloat("u_exposure", ctx.exposure > 0.0f ? ctx.exposure : s_grade.exposure);
     m_lighting_shader->setFloat("u_saturation", s_grade.saturation);
     m_lighting_shader->setFloat("u_contrast", s_grade.contrast);
     m_lighting_shader->setVec3("u_lightWarmth", glm::vec3(s_grade.wr, s_grade.wg, s_grade.wb));

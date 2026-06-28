@@ -145,6 +145,13 @@ struct RenderContext {
     std::size_t* lighting_draws = nullptr;   // <- &m_last_render_pass_stats.lighting_draws
     std::size_t* skybox_draw_counter = nullptr; // <- &m_last_render_pass_stats.skybox_draws (size_t)
 
+    // Group N — Spec 015 Pillar A (A-T05b): exposure seam slot. Sentinel 0 = "unset" → the
+    // lighting pass falls back to its static LUMIN_GRADE exposure (byte-identical today).
+    // A-T05 populates this with the deterministic time-of-day exposure curve; A-T06 with the
+    // 017-ring metered value; photo-mode manual EV (A-T07) overrides. Render-only — it feeds
+    // only u_exposure, never world_hash (spec 018 FR-E-003).
+    float exposure = 0.0f;
+
     // Destination resolution helpers (screen vs offscreen preview target).
     FboHandle dest_fbo() const {
         return offscreen_active ? adopt_fbo(offscreen_fbo) : default_framebuffer();

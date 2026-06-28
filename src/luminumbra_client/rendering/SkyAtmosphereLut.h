@@ -108,6 +108,22 @@ public:
     // ambient color (the lighting pass u_skyAmbientColor sky-scattering term).
     glm::vec3 sky_ambient() const { return m_sky_ambient; }
 
+    // --- Spec 015 Pillar A magnitude getters (A-T01) ---------------------------------
+    // The atmosphere drives HUE today; Pillar A also couples BRIGHTNESS. These name the
+    // UN-NORMALIZED magnitudes the coupling needs (update_time_of_day currently normalizes
+    // the transmittance and only partially blends the ambient, discarding magnitude). They
+    // forward to the existing getters — the data already exists; what is new is the unit
+    // contract the coupling task (A-T03) reads against.
+    //
+    // sun_irradiance_rgb: the raw ground-viewer transmittance toward the sun = dimensionless
+    // atmospheric EXTINCTION in [0,1] per channel (NOT absolute irradiance). A-T03 multiplies
+    // this by a calibrated kSolarRenderScale (chosen so noon matches today) for sun radiance.
+    glm::vec3 sun_irradiance_rgb(float sun_cos_zenith) const { return sun_transmittance(sun_cos_zenith); }
+    // sky_unit_irradiance_rgb: the hemisphere sky-view irradiance integral at full magnitude,
+    // computed for a UNIT sun (no solar radiance factor in the single-scatter source term).
+    // A-T03 multiplies by a calibrated kSkyAmbientRenderScale; do NOT raw-upload (under-lights).
+    glm::vec3 sky_unit_irradiance_rgb() const { return m_sky_ambient; }
+
     // The sun must move past this cosine delta for a sky-view refresh to fire
     // (~0.8 degree of arc). Keeps the per-frame refresh cost amortized.
     static constexpr float kSunRefreshCosThreshold = 0.0001f;
