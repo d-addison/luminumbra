@@ -569,30 +569,44 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
     float amplitude_multiplier = 1.0f;
     float ridge = 0.0f;
 
-    if (m_params.shaping_enabled) {
+    // Capture the shaping generators into locals ONCE. They are created together with
+    // shaping_enabled in reinitialize_noise() (it first nulls them, then recreates them).
+    // A far-LOD build job runs on a worker thread (FarLodSystem -> BuildPristineFarLodTile
+    // -> here) and can race a worldgen REBUILD / re-seed that is mid-reinitialize_noise on
+    // another thread — observing a transiently-null generator -> a null-pointer call (the
+    // worldgen-preview panning crash). The real (world_hash) worldgen is never sampled
+    // during reinit, so on a hashed world these are always set: the guard is a NO-OP there
+    // and never alters hashed terrain (--smoke stays byte-identical). For the render-only
+    // preview far-field it falls back to the unshaped sample for this point instead of
+    // dereferencing null. Locals also pin the refcounted nodes for the function's duration.
+    const auto warp_gen = m_warp_generator;
+    const auto continental_gen = m_continentalness_generator;
+    const auto erosion_gen = m_erosion_generator;
+    const auto peaks_gen = m_peaks_generator;
+    if (m_params.shaping_enabled && warp_gen && continental_gen && erosion_gen && peaks_gen) {
         // Domain warp (seed +6 / +7) displaces the BASE detail (and pv)
         // sample coordinates; the control channels read the unwarped point so
         // the macro structure stays stable under the warp.
-        const float warp_x = m_params.domain_warp_amplitude * m_warp_generator->GenSingle2D(
+        const float warp_x = m_params.domain_warp_amplitude * warp_gen->GenSingle2D(
             world_x * m_params.domain_warp_frequency,
             world_z * m_params.domain_warp_frequency,
             m_seed + 6);
-        const float warp_z = m_params.domain_warp_amplitude * m_warp_generator->GenSingle2D(
+        const float warp_z = m_params.domain_warp_amplitude * warp_gen->GenSingle2D(
             world_x * m_params.domain_warp_frequency,
             world_z * m_params.domain_warp_frequency,
             m_seed + 7);
         sample_x = world_x + warp_x;
         sample_z = world_z + warp_z;
 
-        const float continentalness = m_continentalness_generator->GenSingle2D(
+        const float continentalness = continental_gen->GenSingle2D(
             world_x * m_params.continentalness_frequency,
             world_z * m_params.continentalness_frequency,
             m_seed + 3);
-        const float erosion = m_erosion_generator->GenSingle2D(
+        const float erosion = erosion_gen->GenSingle2D(
             world_x * m_params.erosion_frequency,
             world_z * m_params.erosion_frequency,
             m_seed + 4);
-        const float peaks_valleys = m_peaks_generator->GenSingle2D(
+        const float peaks_valleys = peaks_gen->GenSingle2D(
             sample_x * m_params.peaks_frequency,
             sample_z * m_params.peaks_frequency,
             m_seed + 5);
