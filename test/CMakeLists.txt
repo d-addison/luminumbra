@@ -313,6 +313,41 @@ else()
     target_link_libraries(render_capture_test PRIVATE OpenGL::GL)
 endif()
 
+# Spec 016 FR-D: shader-resource reflection + layout validation. Compiles small
+# known programs in a hidden GL context and asserts the introspected layout +
+# pass-expectation validation (incl. the hot-reload rollback predicate). Links the
+# reflection TU under test directly (GL-only, no luminumbra_client dependency).
+add_executable(shader_reflection_test
+    rendering/shader_reflection_test.cpp
+    ../src/luminumbra_client/rendering/ShaderReflection.cpp
+)
+
+target_compile_definitions(shader_reflection_test PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+    LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts"
+)
+
+target_include_directories(shader_reflection_test PRIVATE
+    ../src
+    ../src/luminumbra_client
+)
+
+target_link_libraries(shader_reflection_test PRIVATE
+    gtest_main
+    glfw
+    glad
+)
+
+if(WIN32)
+    target_link_libraries(shader_reflection_test PRIVATE opengl32)
+elseif(APPLE)
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(shader_reflection_test PRIVATE ${OPENGL_LIBRARIES})
+else()
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(shader_reflection_test PRIVATE OpenGL::GL)
+endif()
+
 # T-I5a-1: GL-free particle determinism unit tests (emitter descriptor surface).
 add_executable(particle_determinism_test
     rendering/particle_determinism_test.cpp
@@ -857,6 +892,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     tree_lod_test
     render_smoke_test
     render_capture_test
+    shader_reflection_test
     waterfall_visual_test
     particle_determinism_test
     ui_smoke_test

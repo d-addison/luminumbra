@@ -7,8 +7,10 @@
 
 namespace Luminumbra::Rendering {
 
-Shader::Shader(const char* vertexPath, const char* fragmentPath) {
-    m_debug_name = std::string(vertexPath) + " | " + fragmentPath;
+// Compile+link a fresh program from the two source files. Returns a NEW program
+// name, or 0 on any IO/compile/link failure (with m_diagnostic set). Never
+// touches m_id, so the caller (ctor or Reload) owns the adopt/rollback decision.
+GLuint Shader::buildProgram(const char* vertexPath, const char* fragmentPath) {
     std::string vertexCode, fragmentCode;
     std::ifstream vShaderFile, fShaderFile;
     vShaderFile.exceptions(std::ifstream::failbit | std::ifstream::badbit);
@@ -25,22 +27,20 @@ Shader::Shader(const char* vertexPath, const char* fragmentPath) {
     } catch (const std::exception& e) {
         LUMINUMBRA_CORE_ERROR("SHADER IO ERROR ({} / {}): {}", vertexPath, fragmentPath, e.what());
         m_diagnostic = e.what();
-        m_id = 0;
-        return;
+        return 0;
     }
 
     const char* vShaderCode = vertexCode.c_str();
     const char* fShaderCode = fragmentCode.c_str();
-    GLuint vertex = 0, fragment = 0;
 
     // Compile Vertex Shader
-    vertex = glCreateShader(GL_VERTEX_SHADER);
+    GLuint vertex = glCreateShader(GL_VERTEX_SHADER);
     glShaderSource(vertex, 1, &vShaderCode, nullptr);
     glCompileShader(vertex);
     const bool vertex_ok = checkCompileErrors(vertex, "VERTEX");
 
     // Compile Fragment Shader
-    fragment = glCreateShader(GL_FRAGMENT_SHADER);
+    GLuint fragment = glCreateShader(GL_FRAGMENT_SHADER);
     glShaderSource(fragment, 1, &fShaderCode, nullptr);
     glCompileShader(fragment);
     const bool fragment_ok = checkCompileErrors(fragment, "FRAGMENT");
@@ -48,29 +48,40 @@ Shader::Shader(const char* vertexPath, const char* fragmentPath) {
     if (!vertex_ok || !fragment_ok) {
         glDeleteShader(vertex);
         glDeleteShader(fragment);
-        m_id = 0;
-        m_valid = false;
-        return;
+        return 0;
     }
 
     // Link Program
-    m_id = glCreateProgram();
-    glAttachShader(m_id, vertex);
-    glAttachShader(m_id, fragment);
-    glLinkProgram(m_id);
-    const bool program_ok = checkCompileErrors(m_id, "PROGRAM");
+    GLuint program = glCreateProgram();
+    glAttachShader(program, vertex);
+    glAttachShader(program, fragment);
+    glLinkProgram(program);
+    const bool program_ok = checkCompileErrors(program, "PROGRAM");
 
     // Delete the shaders as they're linked into our program now and no longer necessary
     glDeleteShader(vertex);
     glDeleteShader(fragment);
 
     if (!program_ok) {
-        glDeleteProgram(m_id);
-        m_id = 0;
+        glDeleteProgram(program);
+        return 0;
+    }
+    return program;
+}
+
+Shader::Shader(const char* vertexPath, const char* fragmentPath) {
+    m_debug_name = std::string(vertexPath) + " | " + fragmentPath;
+    m_vertex_path = vertexPath;
+    m_fragment_path = fragmentPath;
+
+    m_id = buildProgram(vertexPath, fragmentPath);
+    if (m_id == 0) {
         m_valid = false;
         return;
     }
 
+    // Spec 016 FR-D: introspect the resource layout once at link time.
+    m_reflected = ReflectProgramLayout(m_id);
     m_valid = true;
 }
 
@@ -80,6 +91,58 @@ Shader::~Shader() {
 
 void Shader::use() const {
     if (m_id) glUseProgram(m_id);
+}
+
+// Spec 016 FR-D: validate the bindings a pass adopts against the reflected layout.
+bool Shader::ValidateLayout(const ExpectedLayout& expected) {
+    m_expected = expected;
+    m_has_expected = true;
+    const ValidationResult vr = ValidateReflectedLayout(m_reflected, expected);
+    if (!vr.ok) {
+        LUMINUMBRA_CORE_ERROR("[shader-reflect] {} -- {}", m_debug_name, vr.diagnostic);
+    } else if (vr.had_warning) {
+        LUMINUMBRA_CORE_WARN("[shader-reflect] {} -- {}", m_debug_name, vr.diagnostic);
+    }
+    return vr.ok;
+}
+
+// Spec 016 FR-D-003: rollback-safe hot reload. Build a NEW program; only adopt it
+// if it compiled, linked, and (when a pass expectation is registered) still
+// matches that expectation. On any failure keep the previous good program.
+bool Shader::Reload() {
+    if (m_vertex_path.empty() || m_fragment_path.empty()) {
+        LUMINUMBRA_CORE_WARN("[shader-reload] {} has no stored source paths; cannot reload.", m_debug_name);
+        return false;
+    }
+
+    const GLuint candidate = buildProgram(m_vertex_path.c_str(), m_fragment_path.c_str());
+    if (candidate == 0) {
+        LUMINUMBRA_CORE_ERROR("[shader-reload] {} recompile FAILED; keeping previous program (id {}). {}",
+                              m_debug_name, m_id, m_diagnostic);
+        return false; // rollback: previous m_id untouched
+    }
+
+    const ReflectedLayout candidate_layout = ReflectProgramLayout(candidate);
+    if (m_has_expected) {
+        const ValidationResult vr = ValidateReflectedLayout(candidate_layout, m_expected);
+        if (!vr.ok) {
+            LUMINUMBRA_CORE_ERROR("[shader-reload] {} reflected-layout MISMATCH after edit; "
+                                  "ROLLING BACK to the previous good program. {}",
+                                  m_debug_name, vr.diagnostic);
+            glDeleteProgram(candidate);
+            return false; // rollback: never adopt the broken layout
+        }
+    }
+
+    // Adopt the new program: delete the old one, swap, refresh reflection, and
+    // invalidate the uniform-location cache (locations change with relink).
+    if (m_id) glDeleteProgram(m_id);
+    m_id = candidate;
+    m_reflected = std::move(candidate_layout);
+    m_uniformLocationCache.clear();
+    m_valid = true;
+    LUMINUMBRA_CORE_INFO("[shader-reload] {} reloaded (id {}).", m_debug_name, m_id);
+    return true;
 }
 
 // Helper function to get uniform location from cache or query it if not present
