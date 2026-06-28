@@ -117,6 +117,6 @@ python tools/flip_diff.py --selftest
 
 This harness is **render-only tooling** — it touches no sim/worldgen code and
 therefore does not affect `world_hash`. The legacy default preset stays
-byte-identical (`--smoke == ea9a0121d13bc3bd`). The golden images live under a
+byte-identical (`--smoke == 6f008a9f637c40b7`). The golden images live under a
 `goldens/` tree you choose; they are not part of the deterministic sim contract,
 they are the *visual* contract that sits alongside it.

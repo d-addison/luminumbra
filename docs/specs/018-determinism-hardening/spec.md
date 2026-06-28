@@ -45,7 +45,7 @@ that spec 017 (engine concurrency) consumes, and the **determinism audit gate** 
 
 **This spec writes ZERO engine behavior change.** Its deliverables are: a residency *contract* and
 *assertions* (illegal states fail to compile / fail a gate), test *harnesses* over existing flags,
-and a *checklist gate*. The canonical baseline `--smoke == ea9a0121d13bc3bd`, run==replay, must hold
+and a *checklist gate*. The canonical baseline `--smoke == 6f008a9f637c40b7`, run==replay, must hold
 unchanged at every step — if any FR here moves the hash, that FR is wrong.
 
 ## Goals
@@ -68,7 +68,7 @@ unchanged at every step — if any FR here moves the hash, that FR is wrong.
 - **G-6** — Add a **determinism audit gate / checklist** applied to every new render-adjacent
   feature (exposure, weather, volumetrics, glass, foliage, physics), and expand **sub-hash
   localization** beyond the oldest terrain/water/entities categories so future desyncs localize fast.
-- **G-7** — Preserve the canonical baseline: `--smoke == ea9a0121d13bc3bd`, run==replay, unchanged.
+- **G-7** — Preserve the canonical baseline: `--smoke == 6f008a9f637c40b7`, run==replay, unchanged.
 
 ## Non-Goals
 
@@ -227,7 +227,7 @@ see the **Anchor corrections** note under Key files).
 ## Non-Functional Requirements
 
 - **NFR-001 — Baseline immovable (hard gate).** `luminumbra_server_app --smoke` must equal
-  `ea9a0121d13bc3bd`, run==replay, before and after EVERY change in this spec. This spec adds
+  `6f008a9f637c40b7`, run==replay, before and after EVERY change in this spec. This spec adds
   contracts/tests/gates only; if the hash moves, the change is reverted. (Render mesh stays excluded
   from the match — `main_server.cpp:465-468`; the localization sub-hashes added by FR-F-004 are
   additive/reporting-only, NOT folded — NG-6.)
@@ -257,11 +257,11 @@ Each names a measurable signal / test command. Server flags grounded in
 `src/luminumbra_server/main_server.cpp` arg parsing.
 
 ### Cross-cutting
-- [ ] **AC-001** — `luminumbra_server_app --smoke` equals `ea9a0121d13bc3bd`, run==replay, after
+- [ ] **AC-001** — `luminumbra_server_app --smoke` equals `6f008a9f637c40b7`, run==replay, after
   every change (the gate's `deterministic` + `passed` flags — `main_server.cpp:480-485`).
 - [ ] **AC-002** — `--smoke-moving` is run==replay (the moving-anchor harness still passes;
   `main_server.cpp:266-268`).
-- [ ] **AC-003** — No determinism golden literal is re-pinned (grep the baseline `ea9a0121` across
+- [ ] **AC-003** — No determinism golden literal is re-pinned (grep the baseline `6f008a9f` across
   docs/tests is unchanged); all additions are additive/reporting-only (NFR-004).
 
 ### Group A — two-worlds residency
@@ -308,7 +308,7 @@ Each names a measurable signal / test command. Server flags grounded in
   `RenderPipeline.cpp:4308`/`:4323`, `FoliagePass.cpp:784`) feeds a hash-contributing value
   unless it is delayed+quantized+hashed (FR-E-002).
 - [ ] **AC-E-002** — Spec 015's exposure stage and froxel temporal jitter are asserted render-only:
-  `--smoke == ea9a0121d13bc3bd` holds with spec-015 features toggled (FR-E-003; cross-ref 015
+  `--smoke == 6f008a9f637c40b7` holds with spec-015 features toggled (FR-E-003; cross-ref 015
   NFR-001).
 
 ### Group F — audit gate + localization
@@ -338,7 +338,7 @@ Each names a measurable signal / test command. Server flags grounded in
 
 ## Blocking gates (per phase)
 
-1. **Baseline (AC-001/002/003):** `--smoke == ea9a0121d13bc3bd`, `--smoke-moving` run==replay, no
+1. **Baseline (AC-001/002/003):** `--smoke == 6f008a9f637c40b7`, `--smoke-moving` run==replay, no
    golden re-pinned — at every phase. This spec must never move the hash.
 2. **Matrix (AC-D-*):** the relevant matrix axes pass for the phase landed (cross-worker + replay as
    the fast subset per change; full matrix incl. build-mode + multiprocess on cadence).
@@ -434,7 +434,7 @@ Anchored files:
 1. Build both trees (prepend `C:\msys64\ucrt64\bin`): `cmake --build build` (`build/bin`) and
    `cmake --build --preset debug` (`build/debug`). Record which binary each result came from
    (NFR-003).
-2. `luminumbra_server_app --smoke == ea9a0121d13bc3bd`, run==replay; `--smoke-moving` run==replay —
+2. `luminumbra_server_app --smoke == 6f008a9f637c40b7`, run==replay; `--smoke-moving` run==replay —
    before and after every phase (AC-001/002; NFR-001).
 3. Run the determinism matrix (Group D): cross-worker, throttled/unthrottled, two-process
    (compare `--artifact` JSON), record→replay-in-fresh-process, debug-vs-release. Fast subset per

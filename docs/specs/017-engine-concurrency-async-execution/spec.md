@@ -50,7 +50,7 @@ while render residency is **best-effort**. Wall-clock job-completion timing must
 input.
 
 **Determinism.** This is a concurrency rework, so determinism is the hard gate, not an afterthought.
-`luminumbra_server_app --smoke` must stay `ea9a0121d13bc3bd`, run==replay, after every phase. The
+`luminumbra_server_app --smoke` must stay `6f008a9f637c40b7`, run==replay, after every phase. The
 goal is **hash-neutral**: the deterministic activation queue must reproduce the same chunk-availability
 set per tick that the current per-tick barrier produces (the barrier guarantees arrival is a
 deterministic function of position; the replacement must preserve that). Local-dev `world_hash` bumps
@@ -76,7 +76,7 @@ not waved through.
   average/p50.
 - **G-6** — **Ban new synchronous GPU readbacks** in render code via a CI-checkable allowlist, so the
   anti-pattern cannot silently re-spread.
-- **G-7** — Preserve determinism end-to-end: `world_hash` stays `ea9a0121d13bc3bd`, run==replay,
+- **G-7** — Preserve determinism end-to-end: `world_hash` stays `6f008a9f637c40b7`, run==replay,
   after every phase; hash-neutral is the goal.
 
 ## Non-Goals
@@ -174,7 +174,7 @@ a new instance appears.
   *staged activation*, not a single proportional stall.
 - **FR-B-005 — Hash-neutral activation.** The activation set per tick shall reproduce, bit-for-bit,
   the chunk set the current barrier produces for the determinism scenarios, so `--smoke` stays
-  `ea9a0121d13bc3bd` and run==replay (NFR-001). Any deviation is a reviewed `world_hash` bump, not a
+  `6f008a9f637c40b7` and run==replay (NFR-001). Any deviation is a reviewed `world_hash` bump, not a
   silent one.
 
 ### Group C — Continuations / bounded consumption (retire critical-path `wait()`)
@@ -214,7 +214,7 @@ a new instance appears.
 ## Non-Functional Requirements
 
 - **NFR-001 — Determinism (hard gate).** `luminumbra_server_app --smoke` must stay
-  `ea9a0121d13bc3bd`, run==replay, after **every** phase. Sim advances from the **deterministic
+  `6f008a9f637c40b7`, run==replay, after **every** phase. Sim advances from the **deterministic
   availability set**, NOT wall-clock job completion (the water-lockstep lesson,
   `docs/water-sim-lockstep-determinism.md`). The async/threading rework must not change sim results.
   Hash-neutral is the goal; a bump is a reviewed change to the availability contract, never silent.
@@ -243,7 +243,7 @@ a new instance appears.
 Each is verifiable via the existing harness; the measurable signal / command is named inline.
 
 ### Cross-cutting
-- [ ] **AC-001** — `luminumbra_server_app --smoke` stays `ea9a0121d13bc3bd`, run==replay, after
+- [ ] **AC-001** — `luminumbra_server_app --smoke` stays `6f008a9f637c40b7`, run==replay, after
   **every** phase (Groups A–D).
 - [ ] **AC-002** — `--smoke` produces the **identical** `world_hash` for `worker_count = 1` and the
   default worker count (proves availability set is worker-count-independent, NFR-002).
@@ -312,7 +312,7 @@ Mirrors F4's migration path: ban-new → ring → queue → gates.
 
 ## Blocking gates (per phase)
 
-1. **Determinism (AC-001/002/003):** `--smoke == ea9a0121d13bc3bd`, run==replay, identical across
+1. **Determinism (AC-001/002/003):** `--smoke == 6f008a9f637c40b7`, run==replay, identical across
    worker counts, zero `--smoke-moving` flakes ≥24 runs. Never moves silently.
 2. **Tail latency (AC-D-001/002, AC-B-003):** p95/p99 main-thread wait under `--play-paths` /
    `--smoke-moving` within budget and improved vs. the pre-rework baseline; average frame time is
@@ -395,7 +395,7 @@ Mirrors F4's migration path: ban-new → ring → queue → gates.
 
 1. Build the correct tree (engine-frontier gate uses `build/debug`; prepend `C:\msys64\ucrt64\bin`);
    declare which tree each gate ran in (NFR-007).
-2. **Determinism:** `--smoke` byte-identical (`ea9a0121d13bc3bd`, run==replay) after every phase;
+2. **Determinism:** `--smoke` byte-identical (`6f008a9f637c40b7`, run==replay) after every phase;
    identical across worker counts (AC-002); `--smoke-moving` zero flakes ≥24 (AC-003).
 3. **Tail latency:** `--play-paths` / `--smoke-moving` p95/p99 main-thread wait reported (AC-D-001)
    and within the OQ-4 budget (AC-D-002), improved vs. the phase-1 baseline (AC-B-003).

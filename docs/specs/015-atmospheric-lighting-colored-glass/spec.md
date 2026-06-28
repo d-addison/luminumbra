@@ -43,7 +43,7 @@ that spine: **volumetric participating media** and **OIT colored glass**. They c
 signature shot — a colored god-ray through stained glass landing in fog.
 
 **Determinism:** every pillar is render-only. The sim is render-agnostic; nothing here feeds
-`world_hash` (legacy default stays `ea9a0121d13bc3bd`, `--smoke` run==replay). The gate is **FLIP
+`world_hash` (legacy default stays `6f008a9f637c40b7`, `--smoke` run==replay). The gate is **FLIP
 image parity / visual re-bless** (the `tools/flip_diff.py` harness from spec-adjacent work), not a
 hash. Coupling intensity (Pillar A) WILL move every lit-frame visual golden — that re-bless is
 expected and sequenced deliberately.
@@ -210,7 +210,7 @@ IDs are grouped by pillar. Each is anchored to a verified file/line in the curre
 ## Non-Functional Requirements
 
 - **NFR-001 — Determinism (hard gate).** Every pillar is render-only. `luminumbra_server_app --smoke`
-  must stay `ea9a0121d13bc3bd`, run==replay, after each pillar. Nothing feeds `world_hash`.
+  must stay `6f008a9f637c40b7`, run==replay, after each pillar. Nothing feeds `world_hash`.
 - **NFR-002 — Performance budget.** `--render-benchmark` `frame_wall` / `gpu` p50 must stay within
   the RTX 5070 Ti target budget per pillar. Froxel volumetrics (B) must hold the forest/render budget
   via half-res + temporal reproject; the colored-shadow attachment (C-1) and the OIT pass (C-2) are
@@ -234,7 +234,7 @@ Capture flags: `--world-preset caverns --debug-goto {cave|doline|spawn} --debug-
 --timelapse-dir <d> --auto-create-world --auto-enter-world --no-audio`, then `tools/ppm_to_png.py`.
 
 ### Cross-cutting
-- [ ] **AC-001** — `--smoke` stays `ea9a0121d13bc3bd` (run==replay) after **every** pillar.
+- [ ] **AC-001** — `--smoke` stays `6f008a9f637c40b7` (run==replay) after **every** pillar.
 - [ ] **AC-002** — `--render-benchmark` p50 within budget after every pillar (report the JSON).
 - [ ] **AC-003** — Blessed goldens exist for the scene set {midnight, golden-hour, blue-hour,
   colored-god-ray-through-glass}; each re-bless reviewed via FLIP heatmap.
@@ -304,7 +304,7 @@ sequenced against the **render seam**:
 
 These are the per-phase gates; the **Acceptance Criteria** above are the per-pillar pass list they map to.
 
-1. **Determinism (AC-001):** `--smoke == ea9a0121d13bc3bd`, run==replay (render-only; must never move).
+1. **Determinism (AC-001):** `--smoke == 6f008a9f637c40b7`, run==replay (render-only; must never move).
 2. **Perf (AC-002, AC-B-002):** `--render-benchmark` `frame_wall`/`gpu` p50 within budget; froxel
    volumetrics half-res + temporal must hold the forest/render budget (RTX 5070 Ti @ target fps);
    colored-shadow attachment and OIT pass each measured.
