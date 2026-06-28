@@ -1,10 +1,14 @@
 #include "ServerWorldRunner.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <utility>
+#include <vector>
 
 #include "luminumbra_common/ai/EcologyHash.h"
 #include "luminumbra_common/components/CoreComponents.h"
@@ -25,6 +29,7 @@
 #include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/systems/AetherFieldSystem.h"
+#include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
 
 namespace Luminumbra::Server {
@@ -488,6 +493,13 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         }
         world_system->wait_for_streaming_jobs();
 
+        // Spec 017-B gate (Codex audit #4): record the per-tick availability set right
+        // after the barrier settles it. Observability only (off by default); the digest
+        // reads the settled snapshot and mutates nothing, so the world_hash is unchanged.
+        if (m_config.availability_trace) {
+            m_avail_trace.emplace_back(report.ticks_executed, ComputeAvailabilityDigest());
+        }
+
         if (m_config.autosave_interval_ticks > 0 &&
             report.ticks_executed > 0 &&
             (report.ticks_executed % m_config.autosave_interval_ticks) == 0) {
@@ -505,6 +517,47 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
     report.simulated_seconds = static_cast<double>(report.ticks_executed) * fixed_dt;
     report.wall_seconds = std::chrono::duration<double>(wall_end - wall_start).count();
     return report;
+}
+
+std::string ServerWorldRunner::ComputeAvailabilityDigest() {
+    // The AVAILABILITY SET at this tick = which chunks are settled-resident and at what
+    // LOD/collision state, right after the wait_for_streaming_jobs barrier. We digest the
+    // sorted (id, state, lod, collision) tuples with FNV-1a — deliberately NOT the chunk
+    // CONTENT (sdf/heightmap/mesh): content is a pure function of coords, so a stable set of
+    // resident coords implies stable content. This is the cheap, per-tick-affordable proxy
+    // the spec-017-B activation queue must reproduce when it replaces the barrier. Sorting by
+    // id makes the digest independent of snapshot/container order.
+    auto* world_system = m_session ? m_session->GetWorldSystem() : nullptr;
+    if (!world_system) {
+        return {};
+    }
+    std::vector<std::array<std::int64_t, 4>> rows;
+    for (const auto& chunk : world_system->snapshot_streamed_chunks()) {
+        if (!chunk) continue;
+        rows.push_back({
+            static_cast<std::int64_t>(::Luminumbra::Chunk::calculate_id(chunk->get_coords())),
+            static_cast<std::int64_t>(chunk->get_state()),
+            static_cast<std::int64_t>(chunk->current_lod.load(std::memory_order_acquire)),
+            static_cast<std::int64_t>(chunk->has_collision.load(std::memory_order_acquire) ? 1 : 0),
+        });
+    }
+    std::sort(rows.begin(), rows.end());
+
+    std::uint64_t h = 1469598103934665603ull; // FNV-1a 64-bit offset basis
+    const auto mix = [&h](std::int64_t v) {
+        const auto u = static_cast<std::uint64_t>(v);
+        for (int b = 0; b < 8; ++b) {
+            h ^= (u >> (b * 8)) & 0xffull;
+            h *= 1099511628211ull; // FNV-1a 64-bit prime
+        }
+    };
+    mix(static_cast<std::int64_t>(rows.size())); // count first so an empty set is distinct
+    for (const auto& r : rows) {
+        for (std::int64_t v : r) mix(v);
+    }
+    char buf[17];
+    std::snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(h));
+    return std::string(buf);
 }
 
 std::string ServerWorldRunner::ComputeWorldHash() {

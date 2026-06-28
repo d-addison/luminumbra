@@ -70,6 +70,14 @@ struct ServerWorldRunnerConfig {
     // each tick (chunks stream in/out during the run) to reproduce moving-case water determinism that
     // the boot warm-up (interim C) does not cover. DEFAULT false -> the static (fixed-anchor) lane.
     bool moving_anchor = false;
+    // Spec 017-B GATE (Codex audit #4): when true, RunFixedTicks records a per-tick
+    // AVAILABILITY-SET digest (the sorted resident-chunk id/state/lod/collision set,
+    // captured right after the wait_for_streaming_jobs barrier) into AvailabilityTrace().
+    // Observability ONLY — it reads the settled snapshot and changes nothing, so it is
+    // hash-neutral and stays OFF in the determinism gate. The trace is the baseline a
+    // future activation-queue (017-B) must reproduce per tick when it replaces the barrier.
+    // DEFAULT false -> zero cost, zero behaviour change.
+    bool availability_trace = false;
 };
 
 struct ServerTickReport {
@@ -148,6 +156,14 @@ public:
     // avatar_count == 0). Read-only view for tests/telemetry.
     const std::vector<World::PlayerAvatar>& Avatars() const { return m_avatars; }
 
+    // Spec 017-B gate: the per-tick availability-set trace captured during the last
+    // RunFixedTicks when config.availability_trace was set. Each entry is
+    // (tick_index, digest) where digest is a deterministic FNV-1a over the sorted
+    // resident-chunk (id, state, lod, has_collision) set. Empty unless tracing was on.
+    const std::vector<std::pair<std::uint64_t, std::string>>& AvailabilityTrace() const {
+        return m_avail_trace;
+    }
+
     // T-I6 P3.1d: apply a player's network movement input (normalized world XZ in
     // [-1,1]) to its avatar's physics for the next tick. player_id == avatar index.
     // The caller decodes this from the replicated usercmd; persists until changed.
@@ -163,6 +179,12 @@ private:
     Luminumbra::JobSystem m_jobSystem;
     std::unique_ptr<world::GameSession> m_session;
     std::vector<World::PlayerAvatar> m_avatars; // T-I6 P1: deterministic player avatars
+    // Spec 017-B gate: per-tick (tick_index, availability digest), filled by RunFixedTicks
+    // only when m_config.availability_trace is set. See AvailabilityTrace().
+    std::vector<std::pair<std::uint64_t, std::string>> m_avail_trace;
+    // Deterministic FNV-1a digest of the CURRENT settled resident-chunk availability set
+    // (sorted id/state/lod/collision). Called per tick under the trace flag.
+    std::string ComputeAvailabilityDigest();
     bool m_booted = false;
     bool m_shutdown = false;
 };

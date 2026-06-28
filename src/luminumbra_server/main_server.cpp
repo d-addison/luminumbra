@@ -83,6 +83,11 @@ struct ServerCliOptions {
     // so chunks stream IN/OUT during the run (the static smoke never does). It reproduces the
     // moving-case water determinism the boot warm-up (interim C) does NOT cover. Implies --smoke.
     bool moving = false;
+    // Spec 017-B gate (Codex audit #4): --avail-trace captures the per-tick availability-set
+    // digest in BOTH determinism runs and asserts they match per tick — the baseline a future
+    // activation-queue must reproduce when it replaces the wait_for_streaming_jobs barrier.
+    // Observability only (the digest mutates nothing); implies --smoke.
+    bool availability_trace = false;
     // T-I6 P3.1c: --replicate runs the authoritative server + an in-process loopback
     // ReplicationClient, broadcasts the avatar states each tick, and asserts the client
     // mirrors the server avatars (end-to-end live replication in the harness).
@@ -266,6 +271,9 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
         } else if (std::strcmp(arg, "--smoke-moving") == 0) {
             options.smoke = true;
             options.moving = true;
+        } else if (std::strcmp(arg, "--avail-trace") == 0) {
+            options.smoke = true;
+            options.availability_trace = true;
         } else if (std::strcmp(arg, "--replicate") == 0) {
             options.replicate = true;
         } else if (std::strcmp(arg, "--npcs") == 0) {
@@ -315,6 +323,7 @@ Luminumbra::Server::ServerWorldRunnerConfig RunnerConfigFrom(const ServerCliOpti
     config.ecology_roster = options.ecology_roster;
     config.planted_roster = options.planted_roster;
     config.moving_anchor = options.moving;
+    config.availability_trace = options.availability_trace;
     return config;
 }
 
@@ -347,6 +356,8 @@ struct SmokeRunResult {
     std::string plant_hash;
     std::size_t creature_count_start = 0;
     std::size_t creature_count_end = 0;
+    // Spec 017-B gate: per-tick availability-set trace (empty unless --avail-trace).
+    std::vector<std::pair<std::uint64_t, std::string>> avail_trace;
     std::string world_id;
     Luminumbra::Server::ServerTickReport ticks;
     std::size_t chunks_streamed = 0;
@@ -397,6 +408,7 @@ SmokeRunResult RunSmokeOnce(const ServerCliOptions& options, const char* run_lab
     result.ecology_hash = runner.ComputeEcologySubHash();
     result.plant_hash = runner.Session() ? runner.Session()->ComputePlantSubHash() : std::string();
     result.creature_count_end = runner.CreatureCount();
+    result.avail_trace = runner.AvailabilityTrace(); // empty unless --avail-trace
     result.chunks_streamed = runner.StreamedChunkCount();
     result.world_id = runner.Session()->GetMetadata().worldId;
     const fs::path save_dir = runner.Session()->GetWorldSaveDir();
@@ -479,10 +491,32 @@ int RunSmoke(const ServerCliOptions& options) {
 
     const bool deterministic = first.ok && replay.ok &&
         first.world_hash == replay.world_hash && sub_hashes_match;
+
+    // Spec 017-B gate (Codex audit #4): the per-tick AVAILABILITY-SET trace must be
+    // run==replay. This is the baseline a future activation queue must reproduce when it
+    // replaces the wait_for_streaming_jobs barrier — proving the barrier already yields a
+    // deterministic per-tick availability set, and (post-017-B) that the queue preserves it
+    // tick-for-tick, not merely at the final world_hash. Only evaluated under --avail-trace.
+    bool avail_trace_match = true;
+    long long avail_first_divergent_tick = -1;
+    if (options.availability_trace) {
+        avail_trace_match = (first.avail_trace.size() == replay.avail_trace.size());
+        const std::size_t n = std::min(first.avail_trace.size(), replay.avail_trace.size());
+        for (std::size_t k = 0; k < n; ++k) {
+            if (first.avail_trace[k] != replay.avail_trace[k]) {
+                avail_trace_match = false;
+                avail_first_divergent_tick =
+                    static_cast<long long>(first.avail_trace[k].first);
+                break;
+            }
+        }
+    }
+
     const bool passed = deterministic &&
         first.ticks.ticks_executed == options.ticks &&
         replay.ticks.ticks_executed == options.ticks &&
-        first.chunks_streamed > 0;
+        first.chunks_streamed > 0 &&
+        avail_trace_match;
 
     nlohmann::json artifact{
         {"schema", kServerTickArtifactSchema},
@@ -526,6 +560,28 @@ int RunSmoke(const ServerCliOptions& options) {
         {"deterministic", deterministic},
         {"passed", passed},
     };
+
+    // Spec 017-B gate: emit the per-tick availability trace + run==replay verdict when on.
+    if (options.availability_trace) {
+        nlohmann::json trace = nlohmann::json::array();
+        for (const auto& [tick, digest] : first.avail_trace) {
+            trace.push_back({{"tick", tick}, {"avail", digest}});
+        }
+        artifact["availability_trace"] = std::move(trace);
+        artifact["availability_trace_match"] = avail_trace_match;
+        artifact["availability_trace_first_divergent_tick"] = avail_first_divergent_tick;
+        if (avail_trace_match) {
+            LUMINUMBRA_CORE_INFO(
+                "Availability trace: {} ticks, run==replay MATCH (per-tick availability set is "
+                "deterministic — the spec-017-B activation-queue baseline)",
+                first.avail_trace.size());
+        } else {
+            LUMINUMBRA_CORE_ERROR(
+                "Availability trace MISMATCH at tick {} (first divergent per-tick availability "
+                "set) — sizes {}/{}",
+                avail_first_divergent_tick, first.avail_trace.size(), replay.avail_trace.size());
+        }
+    }
 
     if (!options.artifact_path.empty()) {
         const fs::path artifact_path(options.artifact_path);
