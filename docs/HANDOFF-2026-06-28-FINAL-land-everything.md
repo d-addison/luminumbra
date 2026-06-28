@@ -72,12 +72,16 @@ Per-tick gate: `--avail-trace` (static MATCH; moving convergent). Build-mode axi
   FR-D reflection (DONE) for the pilot pair (DebugView + lighting/SSAO), single-source HLSL. Defer.
 
 ### 6. Loose ends (small, mostly headless)
-- **Preview far-field VISUAL confirm** — `e79c1312` is code-complete but unconfirmed; the
-  `--ui-screenshot` preview-activation hook (workflow wf_0bf4ed9f-208 this session) should make it
-  CI-capturable — check whether that landed. Otherwise: interactive create-world, drag-orbit, look for
-  far terrain past the ~64m slice + no void band + no z-fight in the 48–90m overlap.
-- **Near-field LOD render fidelity** (#8) — decouple a render-LOD radius from `collision_radius` so the
-  preview near slice renders LOD0 (workflow wf_0bf4ed9f-208 — check if landed).
+- **Preview far-field VISUAL confirm — RESOLVED this session** (`860230b1`): the headless capture hook
+  `--ui-screenshot world_creation --preview-live --preview-weather rain` waits for `world_ready()` +
+  settle, then captures the LIVE diorama. Verified non-black (3840×1581, mean luma 77, 100% non-black)
+  showing UI + snow-capped terrain + centre-anchored far field + rain (control without the flag = black).
+  CI can now visually-gate the create-world diorama. (A drag-orbit interactive pass is still nice-to-have
+  for the overlap-band z-fight check, but the vista/UI/rain are confirmed.)
+- **Near-field LOD render fidelity (#8) — LANDED this session** (`a21e088e`): decoupled
+  `render_lod0_radius` from `collision_radius`; the preview now meshes all rings at full-SDF LOD0
+  (caves/overhangs). Behind a default param → game LOD byte-identical (`--smoke 6f008a9f`). Side effect:
+  ~80 preview-only colliders (harmless, bounded, not hashed; pass null physics to preview update() if ever a concern).
 - **020-A FR-B-003** — the schema↔gameplay-constant `static_assert` (schema default vs
   CreatureBrainSystem.h / ThirstSystem.h etc.) was deferred; the schema↔registry freshness gate IS done.
 - **019-C1 over-the-wire 32-client** — in-process ctest covers 32; wire validated at N=4 (single-PC).
