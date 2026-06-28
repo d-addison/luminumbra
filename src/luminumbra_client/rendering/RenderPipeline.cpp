@@ -5002,7 +5002,17 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     // shadow luminance to ~4% (shadowed slopes read near-black, LodGround/
     // LodSeamRisk near_black_ratio regressions on DEM-realistic terrain).
     constexpr float kAmbientIrradianceScale = 3.14159265f;
-    glm::vec3 dayAmbient = glm::vec3(0.1f, 0.15f, 0.2f) * kAmbientIrradianceScale;
+    // Spec 015 Pillar A (A-T03 / FR-A-002 MAGNITUDE): the DAYTIME ambient magnitude is now
+    // coupled to the sky-view hemisphere-irradiance LUT (sky_ambient) instead of a fixed
+    // authored constant, so shadowed surfaces dim + warm PHYSICALLY as the sun lowers, not
+    // just in hue. kSkyAmbientRenderScale is CALIBRATED (measured noon sky_ambient luminance
+    // 0.05291 -> the prior authored noon ambient luminance 0.449) so NOON ambient is
+    // preserved (the LodGround/RenderHealth baseline holds) while lower-sun frames get a
+    // genuinely lower ambient. Falls back to the authored constant if the LUT isn't ready.
+    constexpr float kSkyAmbientRenderScale = 8.49f;
+    glm::vec3 dayAmbient = m_sky_lut.ready()
+        ? m_sky_lut.sky_ambient() * kSkyAmbientRenderScale
+        : glm::vec3(0.1f, 0.15f, 0.2f) * kAmbientIrradianceScale;
     // moon-shadows: a real NIGHT SKYLIGHT fill (was 0.01,0.02,0.04). The moon
     // directional only lights up-facing ground; camera-facing SLOPES get NdotL~0
     // from an overhead moon, so without skylight they read pure black at night
