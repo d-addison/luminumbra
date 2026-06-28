@@ -2059,7 +2059,15 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // Far-LOD scheduling (T-I3-9): ring-diff the wanted region set, integrate
     // finished tile builds (mesh uploads), and evict. Draws happen inside the
     // G-buffer pass after the live chunks.
-    if (m_farlod) {
+    //
+    // NOT for the offscreen worldgen PREVIEW. The preview swaps + DESTROYS its candidate
+    // world between frames (WorldgenPreview::swap_pending_into_live), while far-LOD tile
+    // builds run on worker threads holding a reference to that world — a destroyed-world
+    // use-after-free that surfaced as a null function-pointer call (0xC0000005 @ 0x0) deep
+    // in the worldgen samplers while panning the create-world screen. The bounded preview
+    // diorama is covered by its live chunks and does not need the streaming far-field, so
+    // skip far-LOD entirely while rendering offscreen. The game (backbuffer) is unaffected.
+    if (m_farlod && !m_offscreen_target_active) {
         m_farlod->update(world_system, camera.Position);
     }
 
