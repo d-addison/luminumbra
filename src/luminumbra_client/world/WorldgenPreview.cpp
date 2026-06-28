@@ -31,6 +31,14 @@ constexpr float kCenterZ = 8.0f;
 // notes); large enough that the framed slice fills the diorama.
 constexpr int kSurfaceRadius = 4;
 constexpr int kCollisionRadius = 0; // no gameplay collision needed for a preview
+// Render the ENTIRE bounded slice (all kSurfaceRadius rings) at full-SDF LOD0 so
+// the preview shows real near-field detail — caves, overhangs, runtime SDF —
+// across the whole diorama, not just the centre chunk. Decoupled from
+// kCollisionRadius (#8 follow-up): with collision==0 the legacy rule put only
+// ring 0 at LOD0 and rendered rings 1..4 as coarse heightmap LODs. This is a
+// RENDER-LOD radius only; it builds no extra gameplay collision (the preview has
+// none) and leaves the GAME path / world_hash untouched (game callers omit it).
+constexpr int kRenderLod0Radius = kSurfaceRadius;
 
 // Worldgen-preview far-field: the centre-relative world-space radius (meters)
 // inside which the streamed far-LOD mesh is discarded — the bounded live slice
@@ -255,7 +263,7 @@ void WorldgenPreview::build_world_pending() {
     // meshes and render water as water; without it the water render path crashes on a null system.
     m_pending_water = std::make_unique<Systems::WaterSystem>(/*job_system*/ nullptr, m_pending_world.get());
     m_pending_world->SetWaterSystem(m_pending_water.get());
-    m_pending_world->EnsureSurfaceReadyNear(look_at_center(), m_physics.get(), kSurfaceRadius, kCollisionRadius);
+    m_pending_world->EnsureSurfaceReadyNear(look_at_center(), m_physics.get(), kSurfaceRadius, kCollisionRadius, kRenderLod0Radius);
     // Pull the streamed chunks into the renderable set (into the PENDING registry).
     m_pending_world->update(m_pending_registry, look_at_center(), m_physics.get());
 }

@@ -558,7 +558,13 @@ public:
     };
     JobHandle dispatch_generation_jobs(const std::vector<ChunkGenerationRequest>& chunks_to_generate);
     bool EnsureCollisionReadyNear(const Vec3& world_pos, PhysicsSystem* physics_system, int horizontal_radius = 1);
-    bool EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSystem* physics_system, int surface_radius, int collision_radius);
+    // render_lod0_radius (default -1): the ring distance that renders at full-SDF
+    // LOD0, decoupled from collision_radius. -1 keeps the historical behaviour
+    // (LOD0 boundary == collision_radius) so the GAME path and world_hash are
+    // unchanged. A caller may pass a larger value than collision_radius to render
+    // a wider full-detail near slice (caves/overhangs) without building collision
+    // for it — used by the create-world preview.
+    bool EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSystem* physics_system, int surface_radius, int collision_radius, int render_lod0_radius = -1);
     const StreamingBudgetFrameStats& get_last_streaming_budget_stats() const { return m_last_streaming_budget_stats; }
 
     // TEMP diag (spec 008 follow-up): per-sub-phase ms of the last update() to localize the

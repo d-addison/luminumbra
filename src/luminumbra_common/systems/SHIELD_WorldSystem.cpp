@@ -263,12 +263,19 @@ bool has_active_job(const JobHandle& handle) {
     return handle.counter && handle.counter->load(std::memory_order_acquire) > 0;
 }
 
-int horizon_lod_for_ring(int ring_distance, int surface_radius, int collision_radius) {
-    if (ring_distance <= collision_radius) {
+// LOD selection for a surface horizon ring. `lod0_radius` is the ring distance
+// (inclusive) that renders at full-SDF LOD0; rings beyond it fall to LOD1 then
+// LOD2 by the same 2/3-of-surface_radius threshold as before. Historically the
+// LOD0 boundary was tied to the COLLISION radius (rings that get colliders are
+// the rings rendered at full detail). The preview decouples them: it wants a
+// larger full-detail RENDER slice (caves/overhangs) than its collision radius,
+// so it passes an explicit lod0_radius without paying for gameplay collision.
+int horizon_lod_for_ring(int ring_distance, int surface_radius, int lod0_radius) {
+    if (ring_distance <= lod0_radius) {
         return 0;
     }
 
-    const int mid_lod_ring = std::max(collision_radius, (surface_radius * 2) / 3);
+    const int mid_lod_ring = std::max(lod0_radius, (surface_radius * 2) / 3);
     return ring_distance <= mid_lod_ring ? 1 : 2;
 }
 
@@ -2812,7 +2819,7 @@ bool SHIELD_WorldSystem::EnsureCollisionReadyNear(const Vec3& world_pos, Physics
     return EnsureSurfaceReadyNear(world_pos, physics_system, horizontal_radius, horizontal_radius);
 }
 
-bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSystem* physics_system, int surface_radius, int collision_radius) {
+bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSystem* physics_system, int surface_radius, int collision_radius, int render_lod0_radius) {
     if (!physics_system) {
         return false;
     }
@@ -2831,6 +2838,18 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
     const IVec3 center_chunk = world_to_chunk_coords(world_pos);
     const int radius = std::max(0, surface_radius);
     const int collision_range = std::max(0, collision_radius);
+    // RENDER-LOD0 radius, decoupled from collision (preview fidelity follow-up).
+    // render_lod0_radius < 0 (the default, every game caller) preserves the
+    // historical behaviour exactly: the full-detail LOD0 ring boundary == the
+    // collision radius, so the game's LOD selection — and world_hash — is
+    // unchanged. A caller (the create-world preview) may opt into a LARGER
+    // full-SDF render slice than its collision radius so the visible near rings
+    // render caves/overhangs instead of coarse heightmap LODs, WITHOUT building
+    // any extra gameplay collision (collision still gates on collision_range
+    // below). Clamped to [0, radius] so it never exceeds the built surface disc.
+    const int lod0_range = (render_lod0_radius < 0)
+        ? collision_range
+        : std::clamp(render_lod0_radius, 0, radius);
     struct SurfaceHorizonChunk {
         std::shared_ptr<Luminumbra::Chunk> chunk;
         IVec2 offset{0};
@@ -2856,7 +2875,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
             // passes through so cliff walls are meshed before world enter.
             const ColumnSurfaceSpan span = column_surface_span(chunk_x, chunk_z);
             const int ring_distance = std::max(std::abs(dx), std::abs(dz));
-            const int lod = horizon_lod_for_ring(ring_distance, radius, collision_range);
+            const int lod = horizon_lod_for_ring(ring_distance, radius, lod0_range);
             const int step = get_lod_step_for_level(lod);
             lod_counts[static_cast<std::size_t>(std::clamp(lod, 0, 2))]++;
 
