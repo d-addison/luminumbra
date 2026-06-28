@@ -386,7 +386,10 @@ input.settings-slider slidertrack {
 input.settings-slider sliderbar {
     width: 14px;
     height: 14px;
-    margin-top: -6px;
+    /* Vertically centre the 14px knob on the 4px track (margin-top:10px): the knob
+       centre must sit at the track centre. track top=10, centre=12; knob top must be
+       12-7=5 -> margin-top relative to track top = 5-10 = -5px (was -6, 1px high). */
+    margin-top: -5px;
     border-radius: 7px;
     background-color: #D8CFBC;
     border-width: 0px;

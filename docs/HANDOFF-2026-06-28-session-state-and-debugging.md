@@ -178,6 +178,50 @@ shown `render_to_backbuffer` immediately. **Symbolize → confirm the exact path
 
 ---
 
+## Part 5 — Create-world UI + preview polish backlog (owner punch-list, 2026-06-28)
+
+The owner exercised the create-world screen and surfaced a set of UI/preview issues. Files:
+`data/ui/world_creation.rml`, `data/ui/game_theme.rcss` (RmlUi, hot-reloadable — no C++ build
+needed for RML/RCSS), and the host wiring in `main_client.cpp` (~:9048-9170) +
+`ui/Rml_UIManager.cpp` (knob collection :165-200, customize toggle :530-537). Best worked with
+the headless RmlUi e2e harness `test/ui/ui_smoke_test.cpp` (drives real RmlUi via `Element::Click()`).
+
+1. **Slider knob not vertically centred — FIXED** (`game_theme.rcss` `input.settings-slider
+   sliderbar` margin-top -6 → -5; 14px knob on a 4px track @ margin-top 10 centres at -5).
+2. **"world feel" knob doesn't change the preview.** The wiring EXISTS — the rebuild signature
+   (`main_client.cpp:9088-9089`) concatenates every `pv.params` incl. the knobs (`knob.<id>`),
+   and a sig change calls `BuildKnobResolvedPreset` + `set_candidate` (:9106-9111). So debug:
+   (a) is `pv.params` re-collected from the live form each frame (vs cached/stale)? (b) do the
+   KnobLayer response curves actually move terrain enough to SEE? (c) is the change only in the
+   far field (now hidden because far-LOD is OFF for the preview, item 6)? Add a one-line log of
+   the sig in the rebuild branch to confirm it fires on a knob drag.
+3. **Advanced params can't be interacted with.** The toggle handler exists
+   (`Rml_UIManager.cpp:530-537`, flips `.collapsed` on `#customize_body`). Check: does the click
+   actually fire (log it)? When expanded, `.customize-body { max-height:360px; overflow-y:auto }`
+   — verify RmlUi scroll + slider drag work inside a scroll container (a known RmlUi friction);
+   confirm the sliders aren't covered by a transparent element / the panel's stacking.
+4. **Layout — reduce scrolling, use space.** Owner wants TABS or SECTIONS instead of one long
+   scroll, and the value NEAR the slider, not floated far-right. Today every row is
+   `label (block, value floated right)` then the slider full-width BELOW (`.settings-row`,
+   `.knob-row`, `.param-row`). Proposal: a horizontal row `[label][slider flex][value]` (flex,
+   `align-items:center`) so the value sits beside its slider; group `world feel` / `terrain` /
+   `water` / `biomes` / `features` into tab panes (chips toggle `.active` on one pane). RmlUi
+   supports flexbox + class toggles; no engine change.
+5. **Areas don't load (near + far)** — see Part 4. FAR is the far-LOD-off trade-off; NEAR holes
+   need the preview chunk-streaming audit. The proper fix (drain far-LOD before the preview's
+   world swap, then re-enable far-LOD) restores the far field.
+6. **Weather (rain/snow/storm) looks flat/slow, not like real particles.** Likely the particle
+   pass isn't visible/active in the preview path, OR the preview world's weather drives only the
+   shader overlay, not the `ParticlePass`. Check whether `render_to_backbuffer` runs the particle
+   pass + whether precipitation particles are spawned for the preview world (the game path may
+   gate them on sim state the preview lacks). The `--frame-scan` weather scenes can validate the
+   particle look headlessly.
+
+This is a cohesive focused effort (RML/RCSS + a little host wiring) — a good candidate for a
+dedicated session or a small subagent fan-out (one per item) against the committed RML/RCSS.
+
+---
+
 ## Constraints carried forward (don't relearn these)
 - Prepend `C:\msys64\ucrt64\bin` to PATH for every build/gate. Build the tree you test
   (`build/debug` for the engine-frontier gate; `--preset release` for the dist client).
