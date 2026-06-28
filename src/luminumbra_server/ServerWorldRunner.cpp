@@ -447,6 +447,10 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
     const Vec3 spawn_anchor = m_session->GetMetadata().spawnPoint;
     const double fixed_dt = m_session->GetSimulationClock().fixed_dt();
 
+    // Spec 017-D: per-tick main-thread blocking-wait samples (ms) at the streaming barrier.
+    std::vector<double> wait_samples;
+    wait_samples.reserve(static_cast<std::size_t>(tick_count));
+
     const auto wall_start = std::chrono::steady_clock::now();
     while (report.ticks_executed < tick_count) {
         // One frame == one fixed tick: feeding the clock exactly fixed_dt
@@ -491,7 +495,12 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
             }
             world_system->update(m_session->GetRegistry(), anchors, physics_system);
         }
+        // Spec 017-D: time the main thread BLOCKED in the per-tick streaming barrier — the
+        // latency the activation queue (017-B) targets. Wall-clock, never feeds world_hash.
+        const auto _wait_t0 = std::chrono::steady_clock::now();
         world_system->wait_for_streaming_jobs();
+        wait_samples.push_back(
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - _wait_t0).count());
 
         // Spec 017-B gate (Codex audit #4): record the per-tick availability set right
         // after the barrier settles it. Observability only (off by default); the digest
@@ -516,6 +525,24 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
 
     report.simulated_seconds = static_cast<double>(report.ticks_executed) * fixed_dt;
     report.wall_seconds = std::chrono::duration<double>(wall_end - wall_start).count();
+
+    // Spec 017-D: summarize the per-tick main-thread streaming-wait latency (ms).
+    if (!wait_samples.empty()) {
+        for (double w : wait_samples) report.main_wait_total_ms += w;
+        std::sort(wait_samples.begin(), wait_samples.end());
+        const auto pct = [&wait_samples](double p) {
+            // nearest-rank percentile over the sorted samples
+            const std::size_t n = wait_samples.size();
+            std::size_t idx = static_cast<std::size_t>(std::ceil(p * static_cast<double>(n))) ;
+            if (idx > 0) --idx;
+            if (idx >= n) idx = n - 1;
+            return wait_samples[idx];
+        };
+        report.main_wait_p50_ms = pct(0.50);
+        report.main_wait_p95_ms = pct(0.95);
+        report.main_wait_p99_ms = pct(0.99);
+        report.main_wait_max_ms = wait_samples.back();
+    }
     return report;
 }
 

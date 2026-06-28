@@ -87,6 +87,15 @@ struct ServerTickReport {
     std::uint64_t autosave_writes = 0;
     double simulated_seconds = 0.0;
     double wall_seconds = 0.0;
+    // Spec 017-D: main-thread blocking-wait instrumentation. Time the main thread spends
+    // BLOCKED in the per-tick wait_for_streaming_jobs() barrier (ServerWorldRunner :489) —
+    // the latency the activation queue (017-B) targets. Percentiles over the per-tick
+    // samples (ms). Observability only; never feeds world_hash (wall-clock, like wall_seconds).
+    double main_wait_p50_ms = 0.0;
+    double main_wait_p95_ms = 0.0;
+    double main_wait_p99_ms = 0.0;
+    double main_wait_max_ms = 0.0;
+    double main_wait_total_ms = 0.0;
 };
 
 class ServerWorldRunner {

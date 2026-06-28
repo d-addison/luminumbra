@@ -566,6 +566,21 @@ int RunSmoke(const ServerCliOptions& options) {
         {"passed", passed},
     };
 
+    // Spec 017-D: main-thread streaming-wait latency (the cost the 017-B activation queue
+    // targets). Wall-clock observability — never feeds world_hash.
+    artifact["main_wait_ms"] = {
+        {"p50", first.ticks.main_wait_p50_ms},
+        {"p95", first.ticks.main_wait_p95_ms},
+        {"p99", first.ticks.main_wait_p99_ms},
+        {"max", first.ticks.main_wait_max_ms},
+        {"total", first.ticks.main_wait_total_ms},
+    };
+    LUMINUMBRA_CORE_INFO(
+        "Main-thread streaming-wait (017-D): p50={:.3f}ms p95={:.3f}ms p99={:.3f}ms max={:.3f}ms "
+        "total={:.1f}ms over {} ticks",
+        first.ticks.main_wait_p50_ms, first.ticks.main_wait_p95_ms, first.ticks.main_wait_p99_ms,
+        first.ticks.main_wait_max_ms, first.ticks.main_wait_total_ms, first.ticks.ticks_executed);
+
     // Spec 017-B gate: emit the per-tick availability trace + run==replay verdict when on.
     if (options.availability_trace) {
         nlohmann::json trace = nlohmann::json::array();
