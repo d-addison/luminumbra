@@ -2021,7 +2021,7 @@ void WriteCrashStackTrace(EXCEPTION_POINTERS* xp, const std::filesystem::path& c
     const HANDLE thread = GetCurrentThread();
 
     auto emit = [&](const std::string& s) {
-        if (out) out << s << "\n";
+        if (out) { out << s << "\n"; out.flush(); } // flush per line: the process may be torn down any moment
         LUMINUMBRA_CORE_CRITICAL("{}", s);
     };
 
@@ -2111,7 +2111,11 @@ LONG WINAPI RuntimeUnhandledExceptionFilter(EXCEPTION_POINTERS* exception_info) 
     static std::atomic<bool> s_handling{false};
     bool expected = false;
     if (!s_handling.compare_exchange_strong(expected, true)) {
-        return EXCEPTION_EXECUTE_HANDLER;
+        // A sibling thread (the same parallel fault hits every worker at once) is already
+        // writing the report. Do NOT return — that terminates the process and kills the
+        // writer mid-flush (which left an empty crash file). PARK here; the writer's
+        // return tears the whole process (and us) down once the report is on disk.
+        for (;;) { Sleep(1000); }
     }
 
     const uint32_t exception_code =
