@@ -35,7 +35,7 @@ handles). The boundary is stated explicitly in NFR-007. F8's shader-ABI reflecti
 not owned, here.
 
 **Determinism contract.** Everything in this spec is infrastructure, not new runtime behavior.
-`luminumbra_server_app --smoke` must stay `6f008a9f637c40b7`, run==replay, before and after every
+`luminumbra_server_app --smoke` must stay `ea9a0121d13bc3bd`, run==replay, before and after every
 change. The config-schema codegen (Group B) is a *representation* change only: it must emit
 **byte-identical** compiled defaults and a byte-identical `config:v1:` hash string, so no FR here is
 allowed to bump `world_hash`. This is the structural enforcement of **spec 018 — determinism
@@ -161,7 +161,7 @@ wrong artifact.
   produce a `config:v1:` byte string **character-for-character identical** to the current
   `ComputeConfigSubHash` (`SystemConfig.cpp:217-245`) for every config state: the all-default empty
   string (`:243`, `if (!any) return {}`), and every enabled-system combination. `--smoke` shall stay
-  `6f008a9f637c40b7`.
+  `ea9a0121d13bc3bd`.
 - **FR-B-006 — Pilot scope = lighting/exposure constants first.** The schema migration shall **start**
   with the lighting/exposure-adjacent flags already in the registry (`RenderMoonlight` +
   `MoonlightStrength`/`MoonlightColor`, `SystemConfig.cpp:43, 55-56`) and the spec-015 exposure/froxel/
@@ -188,7 +188,7 @@ wrong artifact.
 
 ## Non-Functional Requirements
 
-- **NFR-001 — Determinism (hard gate).** `luminumbra_server_app --smoke` stays `6f008a9f637c40b7`,
+- **NFR-001 — Determinism (hard gate).** `luminumbra_server_app --smoke` stays `ea9a0121d13bc3bd`,
   run==replay, before and after every FR. No FR in this spec feeds `world_hash`.
 - **NFR-002 — Byte-identical config representation.** Group B is a representation change only: compiled
   defaults and the generated `config:v1:` string are byte-identical to today's (FR-B-005). The
@@ -223,7 +223,7 @@ Each names a measurable signal or command. Gate/build/test commands run via the 
 `C:\msys64\ucrt64\bin` prepended, against the preset tree.
 
 ### Cross-cutting
-- [ ] **AC-001** — `luminumbra_server_app --smoke` stays `6f008a9f637c40b7` (run==replay) after
+- [ ] **AC-001** — `luminumbra_server_app --smoke` stays `ea9a0121d13bc3bd` (run==replay) after
   **every** FR in both groups.
 - [ ] **AC-002** — The engine-frontier gate (`.forge/scripts/validate-engine-frontier.ps1 -Mode
   Build` then the test/gate modes) passes end-to-end against `build/debug` with the new preflight in
@@ -285,7 +285,7 @@ should land first because every B verification run depends on knowing which bina
 
 ## Blocking gates (per phase)
 
-1. **Determinism (AC-001):** `--smoke == 6f008a9f637c40b7`, run==replay. Group B additionally gates on
+1. **Determinism (AC-001):** `--smoke == ea9a0121d13bc3bd`, run==replay. Group B additionally gates on
    the byte-identical config-string snapshot (AC-B-002).
 2. **Engine-frontier gate (AC-002):** the existing `validate-engine-frontier.ps1` lifecycle passes
    against `build/debug` with the new preflight wired in.
@@ -359,7 +359,7 @@ should land first because every B verification run depends on knowing which bina
 ## Verification (end-to-end)
 1. Build the one canonical preset tree (`cmake --build --preset debug`, PATH-prepend
    `C:\msys64\ucrt64\bin`); the two-tree preflight refuses if a root `build/` cache also exists.
-2. `--smoke` byte-identical (`6f008a9f637c40b7`, run==replay) after every FR; Group B additionally
+2. `--smoke` byte-identical (`ea9a0121d13bc3bd`, run==replay) after every FR; Group B additionally
    gates the byte-identical `config:v1:` snapshot (AC-B-002).
 3. Engine-frontier gate (`validate-engine-frontier.ps1`) green against `build/debug` with the
    preflight wired in.

@@ -10,7 +10,7 @@ schema-declared (sim => hashed, render => excluded).
 
 It is intentionally STANDALONE and additive: it does NOT modify SystemConfig.{h,cpp}
 and does NOT change `ComputeConfigSubHash` semantics, so `--smoke` stays
-6f008a9f637c40b7 and there is no world_hash bump.
+ea9a0121d13bc3bd and there is no world_hash bump.
 
 Usage:
   python tools/config_codegen.py --check          # residency + registry parity (CI gate)

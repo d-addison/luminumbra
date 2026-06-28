@@ -52,7 +52,7 @@ under the single-PC constraint.
 015-style "render-only, can't move the hash" claim does **not** apply. What holds: the sim stays
 deterministic and replication is a **read-only observer** of authoritative sim state —
 `BroadcastSnapshot` *consumes* the entity set and *never feeds* `world_hash`. The lockstep
-determinism oracle stays green. So `luminumbra_server_app --smoke` must remain `6f008a9f637c40b7`,
+determinism oracle stays green. So `luminumbra_server_app --smoke` must remain `ea9a0121d13bc3bd`,
 run==replay, throughout this work, and the lockstep desync-oracle hash exchange is unchanged.
 Cross-ref **spec 018 — determinism hardening** (`docs/specs/018-determinism-hardening/`), which owns
 the determinism contract this spec must not regress.
@@ -73,7 +73,7 @@ the determinism contract this spec must not regress.
 - **G-6** — Stand up a **GNS local-multiprocess soak** (the locally-testable real-UDP path) as the
   scale gate *before* Steam; keep Steam SDR behind an explicit deferred-to-hardware item.
 - **G-7** — Preserve determinism: sim stays deterministic; `world_hash` never moves; lockstep oracle
-  stays green (`--smoke == 6f008a9f637c40b7`).
+  stays green (`--smoke == ea9a0121d13bc3bd`).
 
 ## Non-Goals
 
@@ -201,7 +201,7 @@ current tree (see **Key files**). "Replace"/"retire" means the listed current be
 ## Non-Functional Requirements
 
 - **NFR-001 — Determinism (hard gate, sim-side).** `luminumbra_server_app --smoke` must stay
-  `6f008a9f637c40b7`, run==replay, throughout. Replication is a read-only observer of sim state and
+  `ea9a0121d13bc3bd`, run==replay, throughout. Replication is a read-only observer of sim state and
   must never feed `world_hash`; the lockstep desync oracle must stay green. (Cross-ref spec 018.)
   NOTE: this is explicitly NOT the 015 "render-only" exemption — networking touches the sim, so the
   guarantee is "observer-only + oracle-preserved", proven by the unchanged `--smoke` hash.
@@ -232,7 +232,7 @@ prepended (toolchain-PATH gotcha). Criteria are split into **runnable today** (r
 **new gates this spec introduces** (to-be-built; command named even where the harness is new).
 
 ### Cross-cutting (regression — runnable today)
-- [ ] **AC-001** — `luminumbra_server_app --smoke` stays `6f008a9f637c40b7`, run==replay, after every
+- [ ] **AC-001** — `luminumbra_server_app --smoke` stays `ea9a0121d13bc3bd`, run==replay, after every
   group (sim determinism / observer-only invariant; NFR-001).
 - [ ] **AC-002** — The full replication suite stays green: `ctest -R "Replication"` (covers
   `ReplicationEndpoint.*`, `ReplicationScale.*`, `ReplicationDelta*`, `ReplicationProtocol.*`,
@@ -324,7 +324,7 @@ prepended (toolchain-PATH gotcha). Criteria are split into **runnable today** (r
 6. **Steam SDR (deferred).** Tracked as a known gap (OQ-3); validated only on real hardware.
 
 ## Blocking gates (per phase)
-1. **Determinism (AC-001/002):** `--smoke == 6f008a9f637c40b7` run==replay + `ctest -R Replication`
+1. **Determinism (AC-001/002):** `--smoke == ea9a0121d13bc3bd` run==replay + `ctest -R Replication`
    green after every phase (observer-only invariant; spec 018 contract intact).
 2. **No busy-spin (AC-D-001):** the `WSAEWOULDBLOCK`-spin is gone before any scale soak runs (a soak
    over a spinning send path measures the wrong thing).
@@ -384,7 +384,7 @@ prepended (toolchain-PATH gotcha). Criteria are split into **runnable today** (r
 
 ## Verification (end-to-end)
 1. Build both trees (prepend `C:\msys64\ucrt64\bin`); `luminumbra_server_app --smoke` byte-identical
-   (`6f008a9f637c40b7`), run==replay, after every group.
+   (`ea9a0121d13bc3bd`), run==replay, after every group.
 2. `ctest -R Replication` green (existing suite, regression); `ReplicationScale` promoted to required.
 3. Group D: grep confirms the `WSAEWOULDBLOCK`-spin is gone; unit test forces would-block → no spin,
    eventual drain.

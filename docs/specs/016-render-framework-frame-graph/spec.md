@@ -5,7 +5,7 @@
 > and the shader-resource-reflection half of **F8**). This is the **keystone** of the critique's
 > sequencing call: it is the render *framework* that specs 014 (RHI) and 015 (atmospheric lighting
 > Pillars B/C-2) must be built on top of, not underneath. It is render-only — the sim is
-> render-agnostic; nothing here feeds `world_hash` (legacy default stays `6f008a9f637c40b7`,
+> render-agnostic; nothing here feeds `world_hash` (legacy default stays `ea9a0121d13bc3bd`,
 > `--smoke` run==replay). The gate is **FLIP image parity** (`tools/flip_diff.py`) per extracted
 > pass, NOT a hash.
 
@@ -67,7 +67,7 @@ ride on it instead of fighting it.
 
 - **NG-1** — No visual change. Every extraction is FLIP-parity-gated against the current output; this
   is a *structural* refactor, not a look change. (Contrast spec 015, which intentionally moves goldens.)
-- **NG-2** — No sim/worldgen change; `world_hash` untouched (`--smoke == 6f008a9f637c40b7`).
+- **NG-2** — No sim/worldgen change; `world_hash` untouched (`--smoke == ea9a0121d13bc3bd`).
 - **NG-3** — Not the RHI/Vulkan/DX12 port itself (that is spec 014, which lands *behind* this seam).
 - **NG-4** — Not the new effects (015 Pillars B/C-2); they become clients of this framework once it
   exists.
@@ -150,7 +150,7 @@ ride on it instead of fighting it.
 - **NFR-001 — FLIP parity per conversion (the gate).** Every pass extraction/conversion must
   FLIP-match (`tools/flip_diff.py`) the pre-conversion output within threshold. This is a structural
   refactor: the image must not move (contrast 015's intentional re-bless).
-- **NFR-002 — Determinism untouched.** Render-only; `--smoke == 6f008a9f637c40b7`, run==replay, after
+- **NFR-002 — Determinism untouched.** Render-only; `--smoke == ea9a0121d13bc3bd`, run==replay, after
   every step. Nothing here feeds `world_hash`.
 - **NFR-003 — Incremental, always-shippable.** Passes convert one at a time; the build stays green and
   the game renders correctly at every step (no big-bang refactor — the same discipline 014 demands).
@@ -172,7 +172,7 @@ ride on it instead of fighting it.
 - [ ] **AC-003** — The frame order is produced by a declarative graph/descriptor list; the inline
       ordering exceptions are explicit dependencies, not comments.
 - [ ] **AC-004** — Each converted pass FLIP-matches its pre-conversion golden within threshold
-      (`tools/flip_diff.py`), and `--smoke == 6f008a9f637c40b7` after every conversion.
+      (`tools/flip_diff.py`), and `--smoke == ea9a0121d13bc3bd` after every conversion.
 - [ ] **AC-005** — A binding/reflected-layout mismatch between a pass and its shader fails at
       build/load (add a deliberately-wrong-binding test that must fail).
 - [ ] **AC-006** — A shader hot-reload with a mismatched layout rolls back to the previous program
@@ -238,7 +238,7 @@ ride on it instead of fighting it.
 
 1. Build both trees (prepend `C:\msys64\ucrt64\bin`); client+server build clean at every conversion
    step.
-2. `--smoke == 6f008a9f637c40b7`, run==replay, after every conversion (render-only).
+2. `--smoke == ea9a0121d13bc3bd`, run==replay, after every conversion (render-only).
 3. FLIP-diff each converted pass against its pre-conversion golden (`tools/flip_diff.py`) — must stay
    within threshold (no intentional re-bless; the image must not move).
 4. `--render-benchmark` within budget at the milestone.
