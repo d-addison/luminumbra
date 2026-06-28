@@ -64,6 +64,14 @@ WorldgenPreview::~WorldgenPreview() {
         m_build_thread.join();
     }
 
+    // Drain far-LOD jobs that may still be sampling the live preview world BEFORE we
+    // free it below (Codex #6: drain before EVERY live-world free, incl. teardown).
+    // The pipeline is constructed before this controller and so outlives it — the
+    // pointer is valid here. No-op if the preview never rendered (pointer null).
+    if (m_drain_pipeline) {
+        m_drain_pipeline->prepare_world_swap();
+    }
+
     if (m_color_texture) glDeleteTextures(1, &m_color_texture);
     if (m_depth_rbo) glDeleteRenderbuffers(1, &m_depth_rbo);
     if (m_fbo) glDeleteFramebuffers(1, &m_fbo);
@@ -242,12 +250,21 @@ void WorldgenPreview::build_world_pending() {
     m_pending_world->update(m_pending_registry, look_at_center(), m_physics.get());
 }
 
-void WorldgenPreview::swap_pending_into_live() {
+void WorldgenPreview::swap_pending_into_live(Rendering::RenderPipeline& pipeline) {
     // GL/MAIN THREAD. Called only after observing m_build_done == true, at which
     // point the worker is BLOCKED (its loop waits for m_build_done to clear before
     // touching pending again), so the main thread solely owns the pending members
     // here. Move pending->live. Reset the live water before the live world (water
     // holds a SHIELD_WorldSystem*), then adopt the pending set in the same order.
+    //
+    // FIRST drain any in-flight far-LOD tile-build jobs that are still sampling the
+    // OUTGOING live world on worker threads — they hold a pointer to m_world, which
+    // we are about to FREE. Without this drain, re-enabling far-LOD for the preview
+    // reintroduces the create-screen pan use-after-free. prepare_world_swap() waits
+    // the FarLodSystem build handles + the SHIELD-RT far pass, then nulls their
+    // world pointer; the next render_frame re-adopts the freshly-swapped world.
+    pipeline.prepare_world_swap();
+
     m_water.reset();
     m_world = std::move(m_pending_world);
     m_water = std::move(m_pending_water);
@@ -428,6 +445,7 @@ void WorldgenPreview::apply_look(Rendering::RenderPipeline& pipeline) const {
 
 bool WorldgenPreview::render(Rendering::RenderPipeline& pipeline, float dt) {
     if (!m_active) return false;
+    m_drain_pipeline = &pipeline; // remember it so the dtor can drain far-LOD before freeing the world
     if (m_fbo == 0) {
         return false; // no target allocated yet
     }
@@ -435,7 +453,7 @@ bool WorldgenPreview::render(Rendering::RenderPipeline& pipeline, float dt) {
     // m_build_done + wakes the worker. Lazy first build signals the worker and
     // waits via the same path (no world until it lands).
     if (m_build_done.load()) {
-        swap_pending_into_live();
+        swap_pending_into_live(pipeline);
     }
     if (!m_built_once && m_world == nullptr && !m_first_build_requested &&
         !m_build_inflight.load()) {
@@ -484,10 +502,12 @@ bool WorldgenPreview::render(Rendering::RenderPipeline& pipeline, float dt) {
 
 bool WorldgenPreview::render_to_backbuffer(Rendering::RenderPipeline& pipeline, float dt) {
     if (!m_active) return false;
+    m_drain_pipeline = &pipeline; // remember it so the dtor can drain far-LOD before freeing the world
     // TASK #6: adopt any completed background build (GL thread) before rendering.
-    // swap clears m_build_done + wakes the worker.
+    // swap clears m_build_done + wakes the worker (and drains far-LOD off the
+    // outgoing world first, so re-enabling far-LOD below stays use-after-free safe).
     if (m_build_done.load()) {
-        swap_pending_into_live();
+        swap_pending_into_live(pipeline);
     }
     if (!m_built_once && m_world == nullptr && !m_first_build_requested &&
         !m_build_inflight.load()) {
@@ -516,13 +536,12 @@ bool WorldgenPreview::render_to_backbuffer(Rendering::RenderPipeline& pipeline, 
     // diorama "window"; the menu backdrop is suppressed by the host while active,
     // so this is the single world render on the create screen.
     //
-    // Far-LOD OFF: this transient candidate world is swapped + freed between frames
-    // (swap_pending_into_live above); a far-LOD tile-build job referencing it would
-    // outlive the free -> use-after-free (the create-screen panning crash). The diorama
-    // is covered by its live chunks.
-    pipeline.set_far_lod_enabled(false);
+    // Far-LOD ON: the streamed far field (>256m SDF tiles) renders in the diorama.
+    // This is use-after-free safe because swap_pending_into_live() (above) drains any
+    // far-LOD job sampling the OUTGOING world before freeing it, and the dtor drains
+    // before teardown. A far-LOD job dispatched this frame samples the CURRENT live
+    // world, which is only ever freed after a drain — never out from under a job.
     pipeline.render_frame(m_registry, *m_world, cam, dt, /*wireframe*/ false);
-    pipeline.set_far_lod_enabled(true);
     return true;
 }
 

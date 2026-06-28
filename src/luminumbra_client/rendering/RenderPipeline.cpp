@@ -2060,13 +2060,12 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // finished tile builds (mesh uploads), and evict. Draws happen inside the
     // G-buffer pass after the live chunks.
     //
-    // NOT for the offscreen worldgen PREVIEW. The preview swaps + DESTROYS its candidate
-    // world between frames (WorldgenPreview::swap_pending_into_live), while far-LOD tile
-    // builds run on worker threads holding a reference to that world — a destroyed-world
-    // use-after-free that surfaced as a null function-pointer call (0xC0000005 @ 0x0) deep
-    // in the worldgen samplers while panning the create-world screen. The bounded preview
-    // diorama is covered by its live chunks and does not need the streaming far-field, so
-    // skip far-LOD entirely while rendering offscreen. The game (backbuffer) is unaffected.
+    // Skipped while an OFFSCREEN target is bound (the worldgen preview's FBO-capture
+    // path, WorldgenPreview::render): that path does not need the streaming far-field.
+    // The LIVE preview (render_to_backbuffer) DOES run far-LOD so the diorama shows the
+    // far field; it stays use-after-free safe because the preview drains far-LOD off its
+    // candidate world before freeing it (swap_pending_into_live + the dtor call
+    // prepare_world_swap()). m_far_lod_enabled remains a manual override hook.
     if (m_farlod && m_far_lod_enabled && !m_offscreen_target_active) {
         m_farlod->update(world_system, camera.Position);
     }

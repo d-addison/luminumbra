@@ -143,7 +143,7 @@ private:
     void start_worker();                    // spin up m_build_thread (once)
     void worker_loop();                     // worker: drains m_build_pending
     void build_world_pending();             // CPU-only build into PENDING members (worker thread)
-    void swap_pending_into_live();          // GL thread: pending->live + bump generation + foliage refresh marker
+    void swap_pending_into_live(Rendering::RenderPipeline& pipeline); // GL thread: drain far-LOD off the OLD world, then pending->live + bump generation + foliage refresh marker
     void configure_camera(Rendering::Camera& cam) const; // orbit -> Camera pose
     void apply_look(Rendering::RenderPipeline& pipeline) const; // weather/tod/clouds
 
@@ -175,6 +175,14 @@ private:
     // worker is launched so the worker never races its creation.
     std::unique_ptr<Systems::PhysicsSystem> m_physics;
     entt::registry m_registry; // LIVE renderable registry for the preview world
+
+    // The pipeline last rendered through. Far-LOD tile-build jobs (owned by the
+    // pipeline) sample the LIVE preview world on worker threads; before this world
+    // is FREED (swap adopts the next build, or the dtor at teardown) those jobs must
+    // be drained or they read freed memory (the create-screen pan use-after-free).
+    // The pipeline is constructed before this controller and outlives it, so this
+    // raw pointer is valid in the dtor. Set on each render; null until first render.
+    Rendering::RenderPipeline* m_drain_pipeline = nullptr;
 
     // --- PENDING world (written ONLY by the worker thread). The main/render
     // thread reads these solely inside swap_pending_into_live() once m_build_done
