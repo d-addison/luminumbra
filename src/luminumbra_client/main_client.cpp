@@ -2044,6 +2044,24 @@ void WriteCrashStackTrace(EXCEPTION_POINTERS* xp, const std::filesystem::path& c
     }
 
     CONTEXT ctx = *xp->ContextRecord; // StackWalk64 mutates the context as it unwinds.
+    {
+        char b[256];
+        std::snprintf(b, sizeof b, "regs: rip=0x%llX rsp=0x%llX rbp=0x%llX",
+            (unsigned long long)ctx.Rip, (unsigned long long)ctx.Rsp, (unsigned long long)ctx.Rbp);
+        emit(b);
+    }
+    // NULL function-pointer call (rip==0, faulting_addr==0): the CALL already pushed the
+    // return address, so [rsp] holds the CALLER's address. Seed the walk from there so the
+    // first symbolized frame names WHO called null (StackWalk64 can't start from pc==0).
+    if (ctx.Rip == 0 && ctx.Rsp != 0) {
+        const DWORD64 ret = *reinterpret_cast<DWORD64*>(ctx.Rsp);
+        char b[160];
+        std::snprintf(b, sizeof b, "(rip==0: null call — caller return addr [rsp]=0x%llX)",
+            (unsigned long long)ret);
+        emit(b);
+        ctx.Rip = ret;        // pretend we are in the caller
+        ctx.Rsp += 8;         // pop the pushed return address
+    }
     STACKFRAME64 frame{};
     frame.AddrPC.Offset = ctx.Rip;    frame.AddrPC.Mode    = AddrModeFlat;
     frame.AddrFrame.Offset = ctx.Rbp; frame.AddrFrame.Mode = AddrModeFlat;
@@ -2087,6 +2105,15 @@ void WriteCrashStackTrace(EXCEPTION_POINTERS* xp, const std::filesystem::path& c
 }
 
 LONG WINAPI RuntimeUnhandledExceptionFilter(EXCEPTION_POINTERS* exception_info) {
+    // One-shot: a parallel null-pointer fault hits on EVERY worker thread at once. The
+    // first thread in writes the (single, clean) crash report; the rest just terminate
+    // so the log isn't spammed and the report isn't interleaved.
+    static std::atomic<bool> s_handling{false};
+    bool expected = false;
+    if (!s_handling.compare_exchange_strong(expected, true)) {
+        return EXCEPTION_EXECUTE_HANDLER;
+    }
+
     const uint32_t exception_code =
         exception_info && exception_info->ExceptionRecord
             ? static_cast<uint32_t>(exception_info->ExceptionRecord->ExceptionCode)
