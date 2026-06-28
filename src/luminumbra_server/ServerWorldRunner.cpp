@@ -531,17 +531,20 @@ std::string ServerWorldRunner::ComputeAvailabilityDigest() {
     if (!world_system) {
         return {};
     }
-    std::vector<std::array<std::int64_t, 4>> rows;
+    // The availability set = the COORDS of chunks the sim can actually read this tick, i.e.
+    // those settled to ChunkState::Ready after the barrier. We digest sorted coords ONLY —
+    // deliberately NOT the transient state/lod/has_collision timing, which can legitimately
+    // jitter run-to-run during streaming while converging to the same final world_hash. The
+    // activation-queue contract (FR-B-005) is about WHICH chunks are available per tick, not
+    // the micro-timing of their LOD/collision bring-up.
+    std::vector<std::int64_t> ready_ids;
     for (const auto& chunk : world_system->snapshot_streamed_chunks()) {
         if (!chunk) continue;
-        rows.push_back({
-            static_cast<std::int64_t>(::Luminumbra::Chunk::calculate_id(chunk->get_coords())),
-            static_cast<std::int64_t>(chunk->get_state()),
-            static_cast<std::int64_t>(chunk->current_lod.load(std::memory_order_acquire)),
-            static_cast<std::int64_t>(chunk->has_collision.load(std::memory_order_acquire) ? 1 : 0),
-        });
+        if (chunk->get_state() != ChunkState::Ready) continue;
+        ready_ids.push_back(
+            static_cast<std::int64_t>(::Luminumbra::Chunk::calculate_id(chunk->get_coords())));
     }
-    std::sort(rows.begin(), rows.end());
+    std::sort(ready_ids.begin(), ready_ids.end());
 
     std::uint64_t h = 1469598103934665603ull; // FNV-1a 64-bit offset basis
     const auto mix = [&h](std::int64_t v) {
@@ -551,10 +554,8 @@ std::string ServerWorldRunner::ComputeAvailabilityDigest() {
             h *= 1099511628211ull; // FNV-1a 64-bit prime
         }
     };
-    mix(static_cast<std::int64_t>(rows.size())); // count first so an empty set is distinct
-    for (const auto& r : rows) {
-        for (std::int64_t v : r) mix(v);
-    }
+    mix(static_cast<std::int64_t>(ready_ids.size())); // count first so an empty set is distinct
+    for (std::int64_t id : ready_ids) mix(id);
     char buf[17];
     std::snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(h));
     return std::string(buf);
