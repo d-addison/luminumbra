@@ -536,12 +536,18 @@ bool WorldgenPreview::render_to_backbuffer(Rendering::RenderPipeline& pipeline, 
     // diorama "window"; the menu backdrop is suppressed by the host while active,
     // so this is the single world render on the create screen.
     //
-    // Far-LOD ON: the streamed far field (>256m SDF tiles) renders in the diorama.
-    // This is use-after-free safe because swap_pending_into_live() (above) drains any
-    // far-LOD job sampling the OUTGOING world before freeing it, and the dtor drains
-    // before teardown. A far-LOD job dispatched this frame samples the CURRENT live
-    // world, which is only ever freed after a drain — never out from under a job.
+    // Far-LOD OFF for the preview turntable. The diorama is a BOUNDED radius-4 slice; the
+    // streaming far-LOD field is anchored to the (orbiting) CAMERA, so spinning the turntable
+    // makes it continuously re-stream/evict the mostly-empty tiles beyond the slice — a
+    // distracting "pops in/out" churn with no real far field to show. A bounded diorama has no
+    // meaningful streamed far-field, so skip it and let the slice render stably from its near
+    // chunks. Crash-safety is UNCHANGED: swap_pending_into_live() + the dtor still drain any
+    // far-LOD job before the world is freed (the real UAF fix). A true distant vista would need
+    // far-LOD anchored to the diorama CENTRE (not the camera) or a larger near radius — a
+    // separate enhancement, tracked as the preview far-field follow-up.
+    pipeline.set_far_lod_enabled(false);
     pipeline.render_frame(m_registry, *m_world, cam, dt, /*wireframe*/ false);
+    pipeline.set_far_lod_enabled(true);
     return true;
 }
 
