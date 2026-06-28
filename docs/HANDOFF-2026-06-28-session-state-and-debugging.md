@@ -58,8 +58,10 @@ fix), 014 (RHI/Diligent pilot).
 2. **Spec 017 concurrency ring + activation queue** (determinism-sensitive): replaces the
    unbounded `EnsureSurfaceReadyNear` waits (the **world-load hang** root cause — diagnostic
    breadcrumbs already landed) AND unblocks 015 A-T06 async exposure + 016 FR-E. High value.
-3. **The worldgen-preview far-LOD race — proper sync fix** (see Part 3; a guard is in, the race
-   is the real fix).
+3. **Restore worldgen-preview loading** (see Part 4): the crash is fixed by disabling far-LOD for
+   the preview, but that left the **far field absent** + there are **near-field holes**. Proper fix:
+   `swap_pending_into_live()` drains in-flight far-LOD jobs before freeing the world, then re-enable
+   far-LOD for the preview; separately audit the near-field preview chunk streaming for the gaps.
 4. **016 framework remainder**: declarative graph (FR-C), shader reflection (FR-D).
 5. **019-C1** 32-client soak; **018-B/C/E/F**; **020-B**.
 6. **Spec 014** RHI pilot (large, later).
@@ -109,13 +111,20 @@ racing read+write with both stacks instantly. There is already a `debug-asan` pr
 never reproduced it). A scripted orbit + TSAN would have found this in one run.
 
 ### 3.4 The fix discipline
-- A reader-side null-guard stops one crash but not the race. Fix at the **source of the
-  invariant**: here, `reinitialize_noise()` must never leave a generator transiently null
-  (assign in the enabled branch, null only in the `else`) — and ultimately must not run
-  concurrently with far-LOD sampling at all.
+- **CONFIRM the live call path before you fix.** This crash took ~5 partial fixes because each
+  one fixed *near* the symbolized frame on an assumption (guard the generator; gate the offscreen
+  render path) instead of verifying the actual path. The symbolized stack tells you WHERE; a 30-
+  second `grep` for the callers (e.g. `grep "WorldgenPreview::render"` → it uses
+  `render_to_backbuffer`, not `render()`) tells you WHICH path is live. Symbolize → confirm path →
+  then fix. Don't fix the path you assumed.
+- A reader-side null-guard stops one crash but not the underlying defect. Fix at the **source of
+  the invariant / the object's lifetime**: a null call (`rip=0`) deep in code that references an
+  object another thread can FREE = suspect a USE-AFTER-FREE of that object, not just a null member.
+  Here the real fix was the object lifetime (don't dispatch far-LOD jobs against a world the
+  preview frees), not the generators.
 - Worldgen is hashed → any fix there MUST keep `--smoke == 6f008a9f637c40b7`. The never-null
-  reorder and the reader guard are both no-ops for real worlds (generators always present when
-  enabled), so they are determinism-safe; always re-run `--smoke` to confirm.
+  reorder + reader guard + the far-LOD gate are all no-ops for real worlds / render-only, so they
+  are determinism-safe; always re-run `--smoke` to confirm.
 
 ---
 
@@ -131,25 +140,41 @@ JobSystem::worker_loop → run_slot → FarLodSystem::update → BuildPristineFa
     → ComputeShapedHeightSampleImpl → {m_warp_generator | RiverInfluenceFromNoise}->GenSingle2D
 ```
 
-**Root cause:** `SHIELD_WorldSystem::reinitialize_noise()` (SHIELD_WorldSystem.cpp:363) nulls the
-shaping/river/biome generators then recreates them. As you pan, the preview re-seeds/rebuilds its
-candidate world while `FarLodSystem` samples it on worker threads → a build job reads a generator
-in its null window → null call. The real game world never hits this (its worldgen isn't sampled
-during reinit — `EnsureSurfaceReadyNear` waits). **Not the render-seam / Pillar A work.**
+**TRUE root cause (the generator-null theory was a red herring):** a destroyed-world
+**use-after-free**. `WorldgenPreview::swap_pending_into_live()` replaces + FREES the candidate
+world between frames, while far-LOD tile-build jobs dispatched the previous frame are still running
+on worker threads holding a reference to that now-freed world. Reading freed memory (a SmartNode /
+vtable) manifested as a null function-pointer call. That is why guarding individual generators was
+whack-a-mole — EVERY sampler (`ComputeShapedHeightSampleImpl`, `RiverInfluenceFromNoise`,
+`GetTerrainHeightAtCoarse`) reads freed memory. **Not the render-seam / Pillar A work.**
 
-**Fixes applied this session:**
-- `fc360183` — reader guard in `ComputeShapedHeightSampleImpl` (capture the 4 shaping generators
-  to locals + require non-null; unshaped fallback). Stopped the shaping crash; the river path
-  then surfaced (whack-a-mole, as expected).
-- (this commit) — `reinitialize_noise` never-null reorder for the shaping + river blocks (assign
-  in the enabled branch, null in the `else`). `--smoke` re-verified byte-identical.
+**RESOLVED — fix sequence (6 crash traces, ~5 partial fixes; lesson below):**
+- `fc360183` reader guard + `da5eee10` `reinitialize_noise` never-null reorder — defense-in-depth,
+  but only addressed the *null-generator* sub-symptom (kept moving across samplers).
+- `6632157c` disabled far-LOD when `m_offscreen_target_active` — WRONG path: the create-world
+  screen renders via `WorldgenPreview::render_to_backbuffer` (NO offscreen target), so it never fired.
+- **`09a3e6b2` (the real fix):** a `RenderPipeline::set_far_lod_enabled` flag that the preview
+  toggles OFF around `render_frame` in BOTH `render()` and `render_to_backbuffer()`. No far-LOD
+  build job is ever dispatched for the transient/freed preview world → no UAF. Game path untouched,
+  render-only (no `world_hash`). **No longer crashes.**
 
-**STILL OPEN (the proper fix):** a concurrent read+assign of the same `FastNoise::SmartNode` is
-still a data race (UB; no longer a *null* crash, but the refcount race remains). The correct fix:
-**quiesce far-LOD sampling during the preview's world rebuild** (or guard the generator swap with
-the same lock the sampler takes). Also apply the never-null pattern to the remaining generators in
-`reinitialize_noise` (temperature/humidity/biome — temperature is already reader-guarded). Verify
-with the TSAN + scripted-orbit harness from §3.3.
+**THE LESSON (added to §3.4):** the diagnostics were instant every time; the *fixes* were slow
+because I fixed *near* the crash (guard generators → gate the offscreen path I assumed) instead of
+first CONFIRMING the live call path. One `grep` for who calls `WorldgenPreview::render*` would have
+shown `render_to_backbuffer` immediately. **Symbolize → confirm the exact path → then fix.**
+
+**KNOWN ISSUE introduced by the fix — preview areas don't load (near + far):**
+- **FAR** not loading is the *direct, expected* trade-off: far-LOD is now OFF for the preview, so
+  the streaming far-field (>256m, the SDF/far-LOD tiles) is absent in the create-screen diorama.
+- **NEAR** gaps are a SEPARATE preview streaming issue (near-field <256m Marching-Cubes chunks not
+  all arriving) — investigate whether the preview's chunk-build radius / swap timing leaves holes
+  (it may predate this session; the world swaps as you pan).
+- **Proper follow-up that restores BOTH:** make `swap_pending_into_live()` DRAIN the pipeline's
+  in-flight far-LOD build jobs BEFORE freeing the old world (add a `RenderPipeline::drain_far_lod()`
+  that `m_job_system->wait()`s the FarLodSystem build handles), then RE-ENABLE far-LOD for the
+  preview. That removes the UAF at the source so the far-field can render again. Validate with the
+  TSAN + scripted-orbit harness (§3.3) — it would have caught the original UAF in one run. Separately
+  audit the near-field preview streaming for the holes.
 
 ---
 
