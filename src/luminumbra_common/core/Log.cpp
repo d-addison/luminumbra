@@ -1,5 +1,9 @@
 #include "Log.h"
+#include <spdlog/sinks/basic_file_sink.h>
+#include <chrono>
+#include <filesystem>
 #include <mutex>
+#include <vector>
 
 std::shared_ptr<spdlog::logger> Log::s_CoreLogger;
 
@@ -11,15 +15,37 @@ std::mutex& init_mutex() {
 }
 
 std::shared_ptr<spdlog::logger> create_default_logger() {
-    spdlog::set_pattern("%^[%T] %n: %v%$");
-    // spdlog::get returns existing logger if a previous Init() registered it,
-    // avoiding the "logger with name LUMINUMBRA already exists" exception
-    // that spdlog::stdout_color_mt throws on re-registration.
-    auto logger = spdlog::get("LUMINUMBRA");
-    if (!logger) {
-        logger = spdlog::stdout_color_mt("LUMINUMBRA");
+    // spdlog::get returns the existing logger if a previous Init() registered it,
+    // avoiding the "logger with name LUMINUMBRA already exists" re-registration throw.
+    if (auto existing = spdlog::get("LUMINUMBRA")) {
+        return existing;
     }
+
+    std::vector<spdlog::sink_ptr> sinks;
+    auto console = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+    console->set_pattern("%^[%T] %n: %v%$");
+    sinks.push_back(console);
+
+    // Always-on PERSISTENT file sink: the session log survives even when the game is
+    // launched by double-click (no console attached) and after a crash. Truncated each
+    // run so logs/luminumbra.log is always the CURRENT session — the one that crashed —
+    // for post-mortem diagnosis. Console-only fallback if the file can't be opened.
+    try {
+        std::error_code ec;
+        std::filesystem::create_directories("logs", ec);
+        auto file = std::make_shared<spdlog::sinks::basic_file_sink_mt>("logs/luminumbra.log", /*truncate*/ true);
+        file->set_pattern("[%Y-%m-%d %T.%e] [%-8l] %v");
+        sinks.push_back(file);
+    } catch (...) {
+    }
+
+    auto logger = std::make_shared<spdlog::logger>("LUMINUMBRA", sinks.begin(), sinks.end());
     logger->set_level(spdlog::level::trace);
+    // Crash-safety: flush warn/error immediately, and flush everything at least once a
+    // second, so the file holds the final breadcrumbs even if the process dies abruptly.
+    logger->flush_on(spdlog::level::warn);
+    spdlog::register_logger(logger);
+    spdlog::flush_every(std::chrono::seconds(1));
     return logger;
 }
 

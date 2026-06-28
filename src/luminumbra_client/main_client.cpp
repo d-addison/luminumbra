@@ -2004,15 +2004,107 @@ bool WriteMiniDump(EXCEPTION_POINTERS* exception_info, const std::filesystem::pa
     return wrote_dump == TRUE;
 }
 
+// Walk + symbolize the faulting thread's stack at crash time and write it to a
+// readable text file + the (now file-backed) log. The minidump path has been
+// producing EMPTY .dmp files, and logs were stdout-only, so a normal-launch crash
+// left nothing to diagnose. DbgHelp resolves public/export names; the per-frame
+// `module+0xRVA` lets addr2line recover exact file:line from the binary's DWARF
+// (run .forge/scripts/symbolize-crash.ps1 on the crash file). A crash handler must
+// not itself throw — everything here is guarded and bounded.
+void WriteCrashStackTrace(EXCEPTION_POINTERS* xp, const std::filesystem::path& crash_dir) {
+    std::error_code ec;
+    std::filesystem::create_directories(crash_dir, ec);
+    const std::filesystem::path path = crash_dir / ("crash-" + TimestampForFile() + ".txt");
+    std::ofstream out(path);
+
+    const HANDLE proc = GetCurrentProcess();
+    const HANDLE thread = GetCurrentThread();
+
+    auto emit = [&](const std::string& s) {
+        if (out) out << s << "\n";
+        LUMINUMBRA_CORE_CRITICAL("{}", s);
+    };
+
+    const uint32_t code = (xp && xp->ExceptionRecord)
+        ? static_cast<uint32_t>(xp->ExceptionRecord->ExceptionCode) : 0u;
+    void* faddr = (xp && xp->ExceptionRecord) ? xp->ExceptionRecord->ExceptionAddress : nullptr;
+    {
+        char b[160];
+        std::snprintf(b, sizeof b, "=== LUMINUMBRA CRASH  exception=0x%08X  faulting_addr=%p ===", code, faddr);
+        emit(b);
+    }
+
+    SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME | SYMOPT_LOAD_LINES);
+    SymInitialize(proc, nullptr, TRUE);
+
+    if (!xp || !xp->ContextRecord) {
+        emit("(no thread context captured — cannot walk the stack)");
+        SymCleanup(proc);
+        return;
+    }
+
+    CONTEXT ctx = *xp->ContextRecord; // StackWalk64 mutates the context as it unwinds.
+    STACKFRAME64 frame{};
+    frame.AddrPC.Offset = ctx.Rip;    frame.AddrPC.Mode    = AddrModeFlat;
+    frame.AddrFrame.Offset = ctx.Rbp; frame.AddrFrame.Mode = AddrModeFlat;
+    frame.AddrStack.Offset = ctx.Rsp; frame.AddrStack.Mode = AddrModeFlat;
+
+    alignas(SYMBOL_INFO) char symbuf[sizeof(SYMBOL_INFO) + 512];
+    auto* sym = reinterpret_cast<SYMBOL_INFO*>(symbuf);
+
+    for (int i = 0; i < 64; ++i) {
+        if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, proc, thread, &frame, &ctx,
+                         nullptr, SymFunctionTableAccess64, SymGetModuleBase64, nullptr)) {
+            break;
+        }
+        const DWORD64 pc = frame.AddrPC.Offset;
+        if (pc == 0) break;
+
+        const DWORD64 mod_base = SymGetModuleBase64(proc, pc);
+        char mod_name[MAX_PATH] = "?";
+        if (mod_base) {
+            GetModuleFileNameA(reinterpret_cast<HMODULE>(mod_base), mod_name, MAX_PATH);
+        }
+        const DWORD64 rva = mod_base ? (pc - mod_base) : 0;
+
+        std::memset(sym, 0, sizeof(SYMBOL_INFO));
+        sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+        sym->MaxNameLen = 512;
+        DWORD64 disp = 0;
+        const char* fn = SymFromAddr(proc, pc, &disp, sym) ? sym->Name : "??";
+
+        const char* slash = std::strrchr(mod_name, '\\');
+        const char* mod_short = slash ? slash + 1 : mod_name;
+
+        char b[1100];
+        std::snprintf(b, sizeof b, "#%-2d 0x%016llX  %s+0x%llX  %s",
+            i, static_cast<unsigned long long>(pc), mod_short,
+            static_cast<unsigned long long>(rva), fn);
+        emit(b);
+    }
+    emit("=== end stack ===  (resolve file:line with .forge/scripts/symbolize-crash.ps1 <crash.txt>)");
+    SymCleanup(proc);
+}
+
 LONG WINAPI RuntimeUnhandledExceptionFilter(EXCEPTION_POINTERS* exception_info) {
     const uint32_t exception_code =
         exception_info && exception_info->ExceptionRecord
             ? static_cast<uint32_t>(exception_info->ExceptionRecord->ExceptionCode)
             : 0;
+    // Flush buffered breadcrumbs to the file sink FIRST, so logs/luminumbra.log holds
+    // the pre-crash context even if a later step here itself faults.
+    if (auto& lg = Log::GetCoreLogger()) lg->flush();
+
+    const std::filesystem::path crash_dir =
+        g_runtime_state_recorder ? g_runtime_state_recorder->crash_dir()
+                                 : std::filesystem::path("crashes");
+    WriteCrashStackTrace(exception_info, crash_dir);
+
     if (g_runtime_state_recorder) {
         g_runtime_state_recorder->mark_unhandled_exception(exception_code);
         WriteMiniDump(exception_info, g_runtime_state_recorder->crash_dir());
     }
+    if (auto& lg = Log::GetCoreLogger()) lg->flush();
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
