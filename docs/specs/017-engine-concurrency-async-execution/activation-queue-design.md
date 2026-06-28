@@ -78,3 +78,39 @@ function.
 
 Routing: opus inline (determinism-sensitive). This is a multi-session effort; do step 1
 (the decoupling) as its own gated change before the queue.
+
+## Step 1 decoupling — the PRECISE mechanism (code-grounded, 2026-06-28)
+
+Traced the exact LOD0 sim-truth coupling in the STREAMING path:
+- `GenerateChunkData(chunk, target_step)` (`SHIELD_WorldSystem.cpp:3794`): for `target_step > 1`
+  (coarse/far) it generates the HEIGHTMAP ONLY — no SDF (`:3812-3851`); for `target_step <= 1` it
+  generates the full 17^3 SDF.
+- So in streaming, a far chunk is generated coarse (heightmap only). When the anchor approaches and
+  it's promoted to LOD0, the MESHING job (`:4142`) sees `step <= 1 && chunk->sdf_data.empty()` and
+  calls `GenerateChunkData(scratch, 1)` (`:4154-4162`) to backfill the full SDF, staging it into
+  `pending_sdf_data` (`:4190-4198`), published on the main thread by
+  `process_completed_meshing_jobs` (`:4262-4274`). THIS is why meshing is hash-critical.
+- The LOAD path (`EnsureSurfaceReadyNear` build_jobs, `:2892`) already generates the full SDF in the
+  GENERATION job for LOD0 (`GenerateChunkData(*chunk, build_chunk.step)`), so it does NOT backfill —
+  the coupling is STREAMING-only.
+
+**THREAD-SAFETY CONSTRAINT (the crux — do not break it):** the backfill deliberately builds into a
+`scratch` Chunk and stages to `pending_*`, because the live chunk's `sdf_data` "is never touched
+off-thread" (`:4156-4160`) — a concurrent far-LOD/sampler reader must never observe a half-written
+live `sdf_data`. So the decoupling CANNOT just write `sdf_data` eagerly on a worker.
+
+**The cut (step 1):** when the streaming path PROMOTES a chunk to LOD0 (the dispatch site that today
+queues a meshing job for a `sdf_data.empty()` chunk — `dispatch_meshing_jobs` callers around
+`:2323/2385`), instead first dispatch a GENERATION job that builds the full SDF into a staging buffer,
+PUBLISH it to the live `sdf_data` on the MAIN thread (the existing pending→live publish discipline),
+THEN dispatch the meshing job (which now takes the `else` branch `:4163-4166`, reads the populated
+`sdf_data`, and produces the render mesh ONLY — no sim-truth publish). Net: sim-truth (sdf/heightmap →
+hash + collision) is available after GENERATION; the render mesh no longer gates the sim tick, so the
+per-tick `wait_for_streaming_jobs` meshing wait can be removed from the sim's critical path.
+
+**Gate (mandatory, every increment):** DEBUG `--smoke == 6f008a9f637c40b7` byte-identical (the SDF
+VALUES are unchanged — only WHEN they're generated moves; the static set fully settles by tick 90, so
+the final hash must hold) + the STATIC `--avail-trace` per-tick trace identical + `--smoke-moving`
+converges to `cf501b66`. If the static hash moves, the cut changed sim-truth ordering/values — revert
+and find why. Risk: the generation budget (`:2710`) now does more work per LOD0 chunk, which can shift
+the moving per-tick set (already convergent-not-identical) — acceptable iff the final moving hash holds.
