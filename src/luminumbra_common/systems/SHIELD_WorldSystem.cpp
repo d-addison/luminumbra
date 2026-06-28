@@ -401,10 +401,15 @@ void SHIELD_WorldSystem::reinitialize_noise() {
     // 4. T-I3-10 shaping control noises (seed registry: +3 continentalness,
     //    +4 erosion, +5 peaks/valleys, +6/+7 domain warp X/Z). Only built when
     //    the preset opts in; legacy worlds never construct these nodes.
-    m_continentalness_generator = {};
-    m_erosion_generator = {};
-    m_peaks_generator = {};
-    m_warp_generator = {};
+    // RACE FIX (worldgen-preview panning crash): assign each generator member LAST, at
+    // the end of the enabled branch, and null them only in the disabled ELSE. A far-LOD
+    // build job samples the world on a worker thread; if reinitialize_noise nulls a member
+    // then recreates it, that job can observe the transient null and call through it
+    // (0xC0000005 at addr 0x0). Going old->new directly (never through null) closes the
+    // window. End state is identical for every (enabled, disabled) case, so hashed worldgen
+    // is byte-identical (--smoke unchanged). NOTE: a concurrent read+assign of the same
+    // SmartNode is still technically a data race; the proper fix is to quiesce far-LOD
+    // sampling during the preview's world rebuild (see the session handoff).
     if (m_params.shaping_enabled) {
         auto continental_fractal = FastNoise::New<FastNoise::FractalFBm>();
         continental_fractal->SetSource(FastNoise::New<FastNoise::Simplex>());
@@ -422,17 +427,24 @@ void SHIELD_WorldSystem::reinitialize_noise() {
         m_peaks_generator = peaks_fractal;
 
         m_warp_generator = FastNoise::New<FastNoise::Simplex>();
+    } else {
+        m_continentalness_generator = {};
+        m_erosion_generator = {};
+        m_peaks_generator = {};
+        m_warp_generator = {};
     }
 
     // 4b. T-I4-3 river noise (seed registry: +10). A ridged FBm whose folded
     //     PV near-zero band carves the river channels. Built only when the
-    //     preset opts in; legacy worlds never construct it.
-    m_river_generator = {};
+    //     preset opts in; legacy worlds never construct it. (Same never-null race fix:
+    //     assign in the enabled branch, null only in the else.)
     if (m_params.rivers_enabled) {
         auto river_fractal = FastNoise::New<FastNoise::FractalRidged>();
         river_fractal->SetSource(FastNoise::New<FastNoise::Simplex>());
         river_fractal->SetOctaveCount(2);
         m_river_generator = river_fractal;
+    } else {
+        m_river_generator = {};
     }
 
     // 5. T-I4-1 biome climate noises (seed registry: +8 temperature,
