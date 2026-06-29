@@ -313,6 +313,41 @@ else()
     target_link_libraries(render_capture_test PRIVATE OpenGL::GL)
 endif()
 
+# Spec 017-A AC-A-001: async GPU readback ring. Exercises the ring's submit/poll/
+# consume contract against a real hidden GL context. Links the ring TU under test
+# directly (GL-only, no luminumbra_client dependency — same shape as the reflection
+# test below).
+add_executable(async_readback_ring_test
+    rendering/async_readback_ring_test.cpp
+    ../src/luminumbra_client/rendering/AsyncReadbackRing.cpp
+)
+
+target_compile_definitions(async_readback_ring_test PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+    LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts"
+)
+
+target_include_directories(async_readback_ring_test PRIVATE
+    ../src
+    ../src/luminumbra_client
+)
+
+target_link_libraries(async_readback_ring_test PRIVATE
+    gtest_main
+    glfw
+    glad
+)
+
+if(WIN32)
+    target_link_libraries(async_readback_ring_test PRIVATE opengl32)
+elseif(APPLE)
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(async_readback_ring_test PRIVATE ${OPENGL_LIBRARIES})
+else()
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(async_readback_ring_test PRIVATE OpenGL::GL)
+endif()
+
 # Spec 016 FR-D: shader-resource reflection + layout validation. Compiles small
 # known programs in a hidden GL context and asserts the introspected layout +
 # pass-expectation validation (incl. the hot-reload rollback predicate). Links the
@@ -892,6 +927,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     tree_lod_test
     render_smoke_test
     render_capture_test
+    async_readback_ring_test
     shader_reflection_test
     waterfall_visual_test
     particle_determinism_test

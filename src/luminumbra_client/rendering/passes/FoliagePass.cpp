@@ -24,6 +24,12 @@ namespace Luminumbra::Rendering {
 
 namespace {
 
+// Spec 017-A FR-A-004: the foliage async-readback ring slot layout is
+// [u32 instanceCount][kMaxInstances blade records]. The count is copied from
+// m_count_ssbo (DrawArraysIndirectCommand.instanceCount, at byte offset
+// sizeof(GLuint)*2); the blades follow it.
+constexpr std::size_t kReadbackCountBytes = sizeof(GLuint);
+
 // splitmix64 -- the same deterministic mixer the A1 particle pass uses for seed
 // derivation. PURE: no global RNG, no world-seed offset consumed.
 uint64_t splitmix64(uint64_t x) {
@@ -303,6 +309,17 @@ bool FoliagePass::load_scatter_set(const std::filesystem::path& json_path) {
 void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
                                     SurfaceQuery query, void* query_ctx,
                                     const glm::vec3& camera_pos) {
+    // Spec 017-A FR-A-004: drain any COMPLETED async blade readback into
+    // m_instances EVERY frame, BEFORE the scatter-cache elision below. The GPU
+    // blade buffer is unchanged while a build is elided, so a readback submitted on
+    // the last non-elided frame stays valid; draining it here (not only inside
+    // rebuild_instances_gpu, which the elision skips) keeps instance_hash()/coverage
+    // populated on static frames. Stale-safe: m_instances is replaced only when a
+    // newer result arrives, so it is never re-emptied once primed.
+    if (m_readback_enabled) {
+        poll_foliage_readback();
+    }
+
     // Scatter cache (T-I6): the instance set is a pure function of the visible chunk-set,
     // the camera chunk (the per-chunk fade cull), and the wind. It is independent of the
     // frame otherwise (the sway WAVING is animated shader-side by u_time; aSway is just
@@ -352,20 +369,25 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
         m_scatter_built = true;
     }
 
-    m_instances.clear();
-    m_frame_instance_count = 0;
     if (!m_enabled || m_archetypes.empty() || query == nullptr) {
+        m_instances.clear();
+        m_frame_instance_count = 0;
         return;
     }
 
-    // T-I6 #4: GPU scatter path. Generates the SAME records on the GPU (compute +
-    // SSBO) and reads them back into m_instances (so every FoliageInstancing gate
-    // hook + the scatter-cache surface keep working) -- execute() then draws from
-    // the SSBO directly. On any GPU failure fall through to the CPU loop below.
+    // T-I6 #4: GPU scatter path. Generates the records on the GPU (compute + SSBO);
+    // execute() draws from the SSBO directly via glDrawArraysIndirect. Spec 017-A
+    // FR-A-004: it submits the blade readback through the async ring, but does NOT
+    // populate m_instances itself -- that is the per-frame poll_foliage_readback()
+    // drain above (stale-safe), so m_instances is deliberately NOT cleared here.
     if (m_gpu_scatter && rebuild_instances_gpu(chunks, query, query_ctx, camera_pos)) {
         return;
     }
     m_gpu_active = false;
+
+    // CPU fallback path: builds m_instances directly this frame.
+    m_instances.clear();
+    m_frame_instance_count = 0;
 
     // spec 008 follow-up: emit from the per-chunk CAMERA-INDEPENDENT cache. Each renderable chunk's
     // records are built once (the expensive SurfaceQuery + hashing) and reused as the camera moves;
@@ -783,35 +805,66 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
     // --- Read the count + the generated blades back into m_instances. This is
     // ONLY needed by the FoliageInstancing gate's instance_hash() — execute()
     // draws straight from m_blade_ssbo via glDrawArraysIndirect (the count lives
-    // in m_count_ssbo, GPU-resident). The readback is a synchronous
-    // glGetBufferSubData that blocks the CPU on compute completion (~5 ms on the
-    // dense pose — spec 004's measured "foliage_rebuild" cost). So skip it unless
-    // the gate needs it; the indirect draw uses the true GPU count regardless. ---
+    // in m_count_ssbo, GPU-resident). Spec 017-A FR-A-004: this readback used to
+    // be a synchronous glGetBufferSubData that blocked the CPU on compute
+    // completion (~5 ms on the dense pose). It now routes through the async
+    // AsyncReadbackRing — submit issues the GPU->CPU copy + a fence and returns
+    // immediately; consume() yields the most-recent COMPLETED result a later frame
+    // (stale-safe), never stalling. The indirect draw uses the true GPU count
+    // regardless, so play/benchmark still disable the readback entirely. ---
     if (m_readback_enabled) {
-        GLuint count = 0;
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_count_ssbo);
-        glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, sizeof(GLuint) * 2, sizeof(GLuint), &count);
-        count = std::min<GLuint>(count, static_cast<GLuint>(kMaxInstances));
-
-        m_instances.resize(count);
-        if (count > 0) {
-            glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_blade_ssbo);
-            glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
-                               static_cast<GLsizeiptr>(count) * sizeof(InstanceRecord),
-                               m_instances.data());
+        // SUBMIT this frame's blade readback into the async ring (FR-A-004): copy
+        // the count (draw_instance_count at byte offset sizeof(GLuint)*2 in
+        // m_count_ssbo) + the blade buffer GPU->slot and fence. Returns immediately
+        // (no glGetBufferSubData stall). The COMPLETED result is drained into
+        // m_instances by poll_foliage_readback() (called every frame from
+        // rebuild_instances), so it survives the scatter-cache elision.
+        constexpr std::size_t kSlotBytes =
+            kReadbackCountBytes + kMaxInstances * sizeof(InstanceRecord);
+        if (m_readback_ring.ensure(kSlotBytes, 3) && m_readback_ring.begin()) {
+            m_readback_ring.copy_region(m_count_ssbo, sizeof(GLuint) * 2, 0, kReadbackCountBytes);
+            m_readback_ring.copy_region(m_blade_ssbo, 0,
+                                        static_cast<std::ptrdiff_t>(kReadbackCountBytes),
+                                        kMaxInstances * sizeof(InstanceRecord));
+            m_readback_ring.submit();
         }
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
-        m_frame_instance_count = count;
     } else {
-        // No CPU readback (no sync stall). The exact CPU-side count is unused for
-        // rendering; mark nonzero so execute() issues the indirect draw, which
-        // draws the GPU-resident count (0 or more) on its own. m_instances stays
-        // empty (instance_hash() is gate-only and not consulted in this mode).
+        // Play / benchmark: no readback. m_instances is gate-only and unused in this
+        // mode, so keep it empty (mirrors the prior synchronous path's else branch).
         m_instances.clear();
-        m_frame_instance_count = kMaxInstances; // proceed marker; GPU decides the real count
     }
+    // m_frame_instance_count drives execute()'s draw guard + the foliage-instances
+    // stat. In readback mode it tracks the CPU-known (stale) count from the ring
+    // drain (m_instances), so the stat stays honest -- 0 until the first readback
+    // primes it, exactly like the prior synchronous path. In play mode the CPU
+    // count is unused (the indirect draw uses the GPU-resident count), so a
+    // non-zero marker just lets execute() proceed.
+    m_frame_instance_count =
+        m_readback_enabled ? m_instances.size() : static_cast<std::size_t>(kMaxInstances);
     m_gpu_active = true;
     return true;
+}
+
+void FoliagePass::poll_foliage_readback() {
+    // Spec 017-A FR-A-004: drain the most-recent COMPLETED blade readback into
+    // m_instances (stale-safe). Replaces m_instances only when a NEWER result
+    // arrives, so it is never re-emptied once primed -- keeping instance_hash() and
+    // the FoliageInstancing coverage probe non-empty even across cache-elided
+    // frames. RENDER-ONLY.
+    const void* slot = nullptr;
+    std::size_t slot_bytes = 0;
+    if (!m_readback_ring.consume(&slot, &slot_bytes) || slot == nullptr) {
+        return; // no newer completed result this frame -> keep the held set
+    }
+    GLuint count = 0;
+    std::memcpy(&count, slot, kReadbackCountBytes);
+    count = std::min<GLuint>(count, static_cast<GLuint>(kMaxInstances));
+    const InstanceRecord* blades = reinterpret_cast<const InstanceRecord*>(
+        static_cast<const char*>(slot) + kReadbackCountBytes);
+    m_instances.assign(blades, blades + count);
+    // Keep the draw guard / foliage-instances stat synced with the drained set even
+    // on scatter-cache-elided frames (where rebuild_instances_gpu does not run).
+    m_frame_instance_count = m_instances.size();
 }
 
 void FoliagePass::map_instances_for_frame() {

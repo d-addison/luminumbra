@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../RenderContext.h"
+#include "../AsyncReadbackRing.h"
 
 #include <array>
 #include <cstdint>
@@ -235,6 +236,11 @@ private:
     bool rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
                                SurfaceQuery query, void* query_ctx,
                                const glm::vec3& camera_pos);
+    // Spec 017-A FR-A-004: drain the most-recent COMPLETED async blade readback
+    // into m_instances (stale-safe). Called every frame from rebuild_instances so
+    // the gate's instance_hash()/coverage probes stay populated independent of the
+    // scatter-cache elision. RENDER-ONLY.
+    void poll_foliage_readback();
 
     // spec 008 follow-up (foliage streaming-burst amortization): build (or fetch the cached)
     // CAMERA-INDEPENDENT instance records for one chunk. The records (position/size/color/phase/
@@ -262,6 +268,14 @@ private:
     bool m_gpu_scatter = false;
     bool m_gpu_active = false;
     bool m_readback_enabled = true; // spec 004: gate needs CPU readback; play/benchmark disable it
+    // Spec 017-A FR-A-004: the gate-only blade readback routes through this async
+    // ring instead of a synchronous glGetBufferSubData, so it never blocks the
+    // frame. m_instances holds the LAST-COMPLETED result (replaced only when the
+    // ring delivers a newer one) -> it is never re-emptied, keeping instance_hash()
+    // stable + non-empty once primed (an empty hash would break the gate). Lazily
+    // allocated on first readback use, so the play path (readback disabled) pays
+    // nothing. RENDER-ONLY.
+    AsyncReadbackRing m_readback_ring;
     std::array<u32, kRingFrames> m_instance_vbo{};
     std::array<InstanceRecord*, kRingFrames> m_instance_ptr{};
     std::size_t m_ring_cursor = 0;
