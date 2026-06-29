@@ -257,6 +257,11 @@ void FoliagePass::destroy_compute() {
     GLuint bufs[] = {m_chunk_ssbo, m_surf_ssbo, m_blade_ssbo, m_count_ssbo, m_arch_ssbo};
     for (GLuint& b : bufs) { if (b) glDeleteBuffers(1, &b); }
     m_chunk_ssbo = m_surf_ssbo = m_blade_ssbo = m_count_ssbo = m_arch_ssbo = 0;
+    // Free the async-readback ring's GL slots HERE, under a live context, matching
+    // the explicit-teardown convention of every other GL resource in this class
+    // (so the ring's destructor shutdown() is a safe no-op even if FoliagePass is
+    // destroyed after the GL context is gone).
+    m_readback_ring.shutdown();
     m_gpu_scatter = false;
     m_gpu_active = false;
 }
