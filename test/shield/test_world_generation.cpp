@@ -348,8 +348,22 @@ TEST_F(WorldAndWaterTest, DryHighAltitudeCellsStayDryAfterSimulation) {
 
     ASSERT_TRUE(chunk->has_water_sim.load());
     ASSERT_FALSE(chunk->water_level_data.empty());
-    for (float water_level : chunk->water_level_data) {
-        EXPECT_NEAR(water_level, SEA_LEVEL, 1.0e-5f);
+    // WATER-16 contract refresh (spec 021, 2026-07-03): spec 009 made the integer
+    // DEPTH the authoritative dryness (water_depth_mm == 0) and repurposed the
+    // float water_level_data as the resting SURFACE mirror (bed + depth — i.e.
+    // ~terrain height on dry land), seeded from WaterLevelAt at init
+    // (WaterSystem.cpp seed_chunk_water). The old assertion pinned the
+    // pre-spec-009 sentinel convention (dry == SEA_LEVEL) and went RED the day
+    // the new seeding landed — this asserts what "dry" actually means now:
+    // zero standing depth, and a surface that never rises above the bed.
+    ASSERT_EQ(chunk->water_depth_mm.size(), chunk->water_level_data.size());
+    ASSERT_EQ(chunk->water_sim_terrain_height.size(), chunk->water_level_data.size());
+    for (std::size_t i = 0; i < chunk->water_level_data.size(); ++i) {
+        EXPECT_EQ(chunk->water_depth_mm[i], 0)
+            << "high-altitude cell " << i << " gained standing water";
+        EXPECT_LE(chunk->water_level_data[i],
+                  chunk->water_sim_terrain_height[i] + 0.002f)
+            << "cell " << i << " surface mirror rises above its bed (renders wet)";
     }
 
     jobs.shutdown();

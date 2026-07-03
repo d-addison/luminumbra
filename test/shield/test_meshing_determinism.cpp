@@ -130,9 +130,17 @@ TerrainGenParams MakeFlatSurfaceParams() {
 // DETERMINISM HASH GATES
 // =====================================================================================
 
+// SHIELD-17 re-pin (spec 021, 2026-07-03): the step-1 VERTEX hashes below were
+// re-pinned for commit d53c99c5 (2026-06-26, "analytic MC normals") — a
+// deliberate render-only change to unit-step vertex NORMALS. Evidence chain:
+// index hashes + vertex counts UNCHANGED (same topology), coarse steps 2/4
+// UNCHANGED (heightfield path untouched), all pins pass byte-exact at
+// d53c99c5~1, and mesh bytes are world_hash-EXCLUDED so --smoke was unaffected
+// throughout (which is exactly why this drift sat invisible until the full
+// ctest lane ran — the OPS-09 lesson).
 TEST(MeshingDeterminism, ArchipelagoChunkHashesAreStable) {
     const ExpectedMeshHashes expected[3] = {
-        {1, 0xea72d54293c64addull, 0x3810ee7a8afe33d3ull},
+        {1, 0xc9f19ad96ac304caull, 0x3810ee7a8afe33d3ull},
         {2, 0xdc1a13f81cb0558full, 0x394253726e701f4dull},
         {4, 0x7e98cc1435877992ull, 0x8a8b92607bf5a5e1ull},
     };
@@ -143,8 +151,9 @@ TEST(MeshingDeterminism, CaveChunkHashesAreStable) {
     // Steps 2 and 4 use the coarse heightfield path; the 40m-high terrain
     // surface is above this chunk, so the coarse mesh is legitimately empty
     // (FNV-1a-64 offset basis == hash of zero bytes).
+    // Step-1 vertex hash re-pinned for d53c99c5 analytic normals (see above).
     const ExpectedMeshHashes expected[3] = {
-        {1, 0xc8888874cf0ee2cdull, 0x5c5461c111230d31ull},
+        {1, 0x3c13cffb2df9002bull, 0x5c5461c111230d31ull},
         {2, 0xcbf29ce484222325ull, 0xcbf29ce484222325ull},
         {4, 0xcbf29ce484222325ull, 0xcbf29ce484222325ull},
     };
