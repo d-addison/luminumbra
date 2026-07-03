@@ -857,6 +857,14 @@ private:
     // wall-clock meshing_jobs_active() counter read, which stays raw inside
     // the wait/publish machinery only).
     bool meshing_batch_outstanding() const;
+    // SHIELD-03 inc 3 (017-B): THE sim-availability predicate for LOD0 sim
+    // consumers (today: collision eligibility, the one remaining render→sim
+    // coupling — collision is BUILT from the heightmap, but eligibility keys
+    // on the LOD0 render mesh having published). Centralized so the
+    // activation queue's barrier-swap increment redefines exactly ONE
+    // function to queue-owned, tick-keyed availability; no consumer changes
+    // again after that.
+    static bool sim_available_lod0(const ::Luminumbra::Chunk& chunk);
     void wait_for_generation_jobs();
     void wait_for_meshing_jobs();
     void reinitialize_noise();

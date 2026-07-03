@@ -393,6 +393,14 @@ bool SHIELD_WorldSystem::meshing_batch_outstanding() const {
     return !m_streaming_state.meshing_job_chunks.empty();
 }
 
+bool SHIELD_WorldSystem::sim_available_lod0(const ::Luminumbra::Chunk& chunk) {
+    // Barrier-era definition: the LOD0 render mesh has published. The
+    // activation queue redefines this to tick-keyed availability at the
+    // barrier-swap increment (017-B FR-B-005) — one function, all consumers.
+    return chunk.current_lod.load(std::memory_order_acquire) == 0 &&
+           !chunk.mesh_vertices.empty() && !chunk.mesh_indices.empty();
+}
+
 bool SHIELD_WorldSystem::promotion_jobs_active() const {
     return has_active_job(m_streaming_state.promotion_job_handle) ||
            has_active_job(m_streaming_state.promotion_job_handle_high);
@@ -2716,8 +2724,11 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
         bool hit_frame_cap = false;
         for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
             if (chunk_ptr->get_state() == ChunkState::Ready && !chunk_ptr->has_collision.load()) {
-                // Only create collision for the highest LOD terrain mesh
-                if (chunk_ptr->current_lod.load() == 0 && !chunk_ptr->mesh_vertices.empty() && !chunk_ptr->mesh_indices.empty()) {
+                // Only create collision once the chunk is sim-available at
+                // LOD0 (SHIELD-03 inc 3: predicate centralized — collision is
+                // built from the HEIGHTMAP; sim_available_lod0 is the single
+                // place the availability definition lives).
+                if (sim_available_lod0(*chunk_ptr)) {
                     replace_chunk_collision(*physics_system, *chunk_ptr);
 
                     collision_meshes_created_this_frame++;
