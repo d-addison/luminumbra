@@ -428,10 +428,39 @@ Two items discovered and filed during the wave (already in `backlog.json`):
 - **OPS-16** (rank 132, batched) — retire the EngineGameSplitLint allowlist by
   data-driving the enumerated hardcoded game content (species spawn is hash-visible).
 
-Still open in Wave A: OPS-11 (in-progress), SHIELD-04/05, AUDIO-04, UI-12, UI-07, OPS-04,
-OPS-10, OPS-12/FOLIAGE-06. Minor observation filed with the wave: the foliage
-`windy_max_sway` measure reports 8.46 m tip displacement (implausible for ≤0.44 m blades) —
-audit the sway measure's scale when touching FoliagePass next.
+The Wave-A tail landed in the same session (commits 378a7436 → 8d8a56d5): **OPS-10**
+(all 25 tracked test-artifact run-outputs untracked — `git status build/` clean for the
+first time; the 9 read-on-disk render/audio artifacts now fail closed), **OPS-11** (the
+named-phase JobWatchdog helper wraps all three EnsureSurfaceReadyNear waits; unit-tested),
+**SHIELD-04** (wrong-sized-SDF OOB closed on the streaming promotion path + a
+PolygoniseTerrain entry guard; regeneration proven byte-identical), **SHIELD-05**
+(persistence quarantine at save ADOPTION in GameSession — the persistence library stays
+byte-faithful for its corruption-corpus contracts), **AUDIO-04** (bank-integrity + ogg-guard
++ event-literal-resolution + species-call-family ctest), **FOLIAGE-06** (octa_impostor_test
+registered), **UI-07** (`--ui-fixtures` real: gallery fixture source + the root-mismatch fix;
+the gallery e2e is hermetic and green), **UI-12** (gate honesty: all 20 pinned UI names
+cross-checked against `ctest --show-only` reality; ghost-name negative test proven),
+**OPS-12** (manifest roster + floors derived from LUMINUMBRA_GTEST_TARGETS, 22 targets),
+**OPS-04** (validate-build-tree preflight wired into -Mode Build — first live run flagged
+the real concurrent root `build/` tree — + provenance binding on RenderBudget and
+WorldVisualSweep).
+
+**Wave A close (2026-07-02): every ranked hygiene item (34–48) is done.** Carried open:
+RENDER-19 (rank 49, wave-discovered — the interactive world-entry locator stall; M-effort
+background-job refactor, first in queue at resume). Wave gate held: `--smoke ==
+6f008a9f637c40b7` run==replay after every commit; FoliageInstancing + EngineGameSplitLint +
+HeadlessInGameCapture + UiTestBaseline + Build green; `git status` clean.
+
+**Wave-close discovery (the OPS-09 finding validating itself):** the first full default-lane
+ctest run in weeks surfaced three PRE-EXISTING failures (proven identical with the
+pre-Wave-A mesher): the MeshingDeterminism archipelago/cave mesh-hash pins (locked
+2026-06-10) are stale — mesh bytes drifted since and `--smoke` cannot see it (mesh bytes are
+hash-excluded) — and WorldAndWaterTest.DryHighAltitudeCellsStayDryAfterSimulation fails its
+SEA_LEVEL settle contract. Filed as **SHIELD-17** and **WATER-16** (both rank 50, ahead of
+the 017-B chain — a red determinism-adjacent oracle gets fixed before HIGH-hash-risk work
+relies on the suite). Minor observation also carried: the foliage `windy_max_sway` measure
+reports 8.46 m tip displacement (implausible for ≤0.44 m blades) — audit the measure's scale
+when next touching FoliagePass.
 
 ## Spine-inversion register (AC-003)
 

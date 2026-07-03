@@ -667,7 +667,7 @@
    "effort": "M",
    "risk": "medium",
    "dependencies": [],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "NEW: clean-tree gate \u2014 after -Mode All plus a preset configure, git status --porcelain build/debug/test-artifacts is empty",
    "rank": 37
   },
@@ -695,7 +695,7 @@
    "effort": "S",
    "risk": "low",
    "dependencies": [],
-   "status": "in-progress",
+   "status": "done",
    "proving_signal": "NEW: ctest JobWatchdogNamesWedgedPhase \u2014 with LUMINUMBRA_JOB_WATCHDOG=1 and an injected stalled job, each of the three EnsureSurfaceReadyNear waits emits its named-phase warning within the report interval",
    "rank": 39
   },
@@ -749,7 +749,7 @@
    "effort": "M",
    "risk": "low",
    "dependencies": [],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "NEW: gtest StreamingHardening.MalformedSdfChunkRegeneratesOnPromotion \u2014 a non-empty wrong-sized sdf_data chunk entering the meshing dispatch regenerates instead of reading OOB (ASAN-clean); --smoke unchanged",
    "rank": 43
   },
@@ -764,7 +764,7 @@
    "dependencies": [
     "SHIELD-04"
    ],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "NEW: gtest SaveLoadCorruptionCorpus.WrongSizedSdfLatticeIsQuarantinedOnLoad \u2014 a save carrying a truncated SDF lattice loads with the chunk marked regenerate, never fed to unit-step polygonise",
    "rank": 44
   },
@@ -777,7 +777,7 @@
    "effort": "S",
    "risk": "low",
    "dependencies": [],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "NEW: AudioBankIntegrity ctest \u2014 asserts (a) all files referenced by sfx_main/music banks exist on disk, (b) zero .ogg entries in loaded banks, (c) every PlayOneShot/PlayAmbientLoop/PlayMusic event literal in src/luminumbra_client resolves to a bank event",
    "rank": 45
   },
@@ -790,7 +790,7 @@
    "effort": "S",
    "risk": "low",
    "dependencies": [],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "validate-engine-frontier.ps1 -Mode UiTestBaseline negative test \u2014 a manifest missing any pinned name (or a skipped pinned test) FAILS the gate",
    "rank": 46
   },
@@ -803,7 +803,7 @@
    "effort": "S",
    "risk": "low",
    "dependencies": [],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "UiSmokeTest.GalleryBackNavigationAndContentArePresent (test/ui/ui_smoke_test.cpp:799) green on a clean checkout, still pinned skip-as-fail via test/CMakeLists.txt:949",
    "rank": 47
   },
@@ -818,7 +818,7 @@
    "dependencies": [
     "OPS-01"
    ],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "NEW: engine-frontier Build-mode preflight \u2014 -Mode Build invokes validate-build-tree.ps1 and fails on a wrong-tree/copied CMakeCache; -Mode RenderBudget refuses a perf JSON whose exe_hash mismatches the gated binary",
    "rank": 48
   },
@@ -831,7 +831,7 @@
    "effort": "S",
    "risk": "low",
    "dependencies": [],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "NEW: octa_impostor_test ctest registration \u2014 gtest_discover_tests(octa_impostor_test) runs the OctaImpostor encode/decode round-trip cases in the default ctest lane",
    "rank": 49
   },
@@ -844,7 +844,7 @@
    "effort": "S",
    "risk": "low",
    "dependencies": [],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "NEW: re-pinned ctest-manifest floor \u2014 the UiTestBaseline gate fails when registered executables fall below the derived roster count",
    "rank": 49
   },
@@ -875,6 +875,32 @@
    ],
    "status": "todo",
    "proving_signal": "--smoke == 6f008a9f637c40b7 byte-identical + static --avail-trace per-tick trace identical (main_server.cpp:521-532) + --smoke-moving run==replay + validate-determinism-matrix.ps1 green",
+   "rank": 50
+  },
+  {
+   "id": "SHIELD-17",
+   "pillar": "shield",
+   "spec": "018",
+   "summary": "Root-cause + re-pin the stale MeshingDeterminism mesh-hash literals: archipelago/cave step-1 vertex bytes drifted from the 2026-06-10 pins (91bcc053) at some point since; flat-surface still passes; proven pre-existing on 2026-07-02 (identical failure with the pre-Wave-A mesher). Bisect to the moving commit, confirm it was a deliberate mesh change, then re-pin with evidence \u2014 never blind-re-pin (mesh bytes are world_hash-EXCLUDED, so --smoke cannot see this class)",
+   "evidence": "test/shield/test_meshing_determinism.cpp:88, test/shield/test_meshing_determinism.cpp:139",
+   "effort": "M",
+   "risk": "low",
+   "dependencies": [],
+   "status": "todo",
+   "proving_signal": "ctest MeshingDeterminism.* green with the re-pinned table, the moving commit named in the re-pin comment, and --smoke run==replay 6f008a9f637c40b7 unchanged",
+   "rank": 50
+  },
+  {
+   "id": "WATER-16",
+   "pillar": "water",
+   "spec": "009",
+   "summary": "Root-cause the WorldAndWaterTest.DryHighAltitudeCellsStayDryAfterSimulation failure: a high-altitude sky-world chunk's water_level_data no longer settles at SEA_LEVEL after one WaterSystem.update (pre-existing; proven not a Wave-A regression on 2026-07-02) \u2014 determine whether the rotating sim window / bed-value gate work changed dry-cell initialization legitimately (update the test's contract) or a real dry-cells-wet regression shipped",
+   "evidence": "test/shield/test_world_generation.cpp:352, src/luminumbra_common/systems/WaterSystem.cpp:754",
+   "effort": "M",
+   "risk": "medium",
+   "dependencies": [],
+   "status": "todo",
+   "proving_signal": "ctest WorldAndWaterTest.DryHighAltitudeCellsStayDryAfterSimulation green (contract updated with evidence or regression fixed) + ctest WaterDeterminism.* + --smoke run==replay unchanged",
    "rank": 50
   },
   {
