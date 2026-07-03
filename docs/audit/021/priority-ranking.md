@@ -405,6 +405,34 @@ Order per `gpu-modernization-plan.md`; every step FLIP-gated in-process per pass
 | 118 | GPU-P11 / GPU-13 | DLSS via Streamline |
 | 121 | GPU-P13 / GPU-10 | RT-GI/AO |
 
+## Wave A execution record (2026-07-02)
+
+Landed this wave (commits d96d6cb0 → fee7d624): **RENDER-01** (the capture hang was the
+spec-013 crystal-scan CPU stall — 6m25s main-thread in debug; headless automation now skips
+the one-time locator flourishes; NEW HeadlessInGameCapture gate green on both legs),
+**FOLIAGE-01** (root cause: the 2026-06-26 session shipped an INVERTED SDF density
+convention — negative is SOLID, not air — which rejected every open-sky column and
+defoliated the world's grass AND trees while its sibling bug blinded every capture;
+convention fixed in four sites, world restored, FoliageInstancing GREEN with a re-blessed
+saturation normalizer + a 100k decimation floor), **FOLIAGE-11** (refusal diagnostics — a
+gate run can no longer end silent or vacuous-green), **WATER-06**, **FOLIAGE-08** (stranded
+grass-overhaul tuning preserved under `stranded/` — it was fighting the defoliation's
+symptoms), **AETHER-09** (EngineGameSplitLint green: comments reworded, code debt
+enumerated), **RENDER-10** (FR-G-001 `.ipp` hole closed). `--smoke == 6f008a9f637c40b7`
+re-verified after each code commit.
+
+Two items discovered and filed during the wave (already in `backlog.json`):
+
+- **RENDER-19** (rank 49, batched) — the interactive world-entry locator stall (6m25s
+  debug / est. 10–25s release on frame 2); background-job fix with a teardown drain.
+- **OPS-16** (rank 132, batched) — retire the EngineGameSplitLint allowlist by
+  data-driving the enumerated hardcoded game content (species spawn is hash-visible).
+
+Still open in Wave A: OPS-11 (in-progress), SHIELD-04/05, AUDIO-04, UI-12, UI-07, OPS-04,
+OPS-10, OPS-12/FOLIAGE-06. Minor observation filed with the wave: the foliage
+`windy_max_sway` measure reports 8.46 m tip displacement (implausible for ≤0.44 m blades) —
+audit the sway measure's scale when touching FoliagePass next.
+
 ## Spine-inversion register (AC-003)
 
 Exactly one deliberate inversion, justified inline at its rank:

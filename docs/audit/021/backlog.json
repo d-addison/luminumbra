@@ -628,7 +628,7 @@
    "effort": "M",
    "risk": "medium",
    "dependencies": [],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "NEW: HeadlessInGameCapture gate \u2014 --frame-scan (noon) and --scene-config (night) reach report emission with frame-health verdict `nominal` inside the 4000-frame watchdog and exit 0",
    "rank": 34
   },
@@ -641,7 +641,7 @@
    "effort": "M",
    "risk": "medium",
    "dependencies": [],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "engine-frontier gate: validate-engine-frontier.ps1 -Mode FoliageInstancing (green)",
    "rank": 35
   },
@@ -654,7 +654,7 @@
    "effort": "S",
    "risk": "low",
    "dependencies": [],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "NEW: FoliageInstancing gate negative case \u2014 a readback-disabled scenario run produces NO analysis artifact and the gate fails with the explicit readback-disabled diagnostic",
    "rank": 36
   },
@@ -682,7 +682,7 @@
    "dependencies": [
     "RENDER-01"
    ],
-   "status": "in-progress",
+   "status": "done",
    "proving_signal": "ctest WaterfallVisualTest stays green (shader default vec3(1.0) keeps the gate byte-identical) + WorldVisualSweep rerun on a night waterfall cell",
    "rank": 38
   },
@@ -710,7 +710,7 @@
    "dependencies": [
     "FOLIAGE-01"
    ],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "engine-frontier gate: validate-engine-frontier.ps1 -Mode WorldVisualSweep (no NEW flags vs baseline)",
    "rank": 40
   },
@@ -723,7 +723,7 @@
    "effort": "S",
    "risk": "low",
    "dependencies": [],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "validate-engine-frontier.ps1 -Mode RenderReadbackAllowlist extended to .ipp \u2014 the run flags SkyAtmosphereLut.ipp until the site is rerouted onto the ring or documented",
    "rank": 41
   },
@@ -736,7 +736,7 @@
    "effort": "S",
    "risk": "low",
    "dependencies": [],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "validate-engine-frontier.ps1 -Mode EngineGameSplitLint (green on the current tree)",
    "rank": 42
   },
@@ -846,6 +846,19 @@
    "dependencies": [],
    "status": "todo",
    "proving_signal": "NEW: re-pinned ctest-manifest floor \u2014 the UiTestBaseline gate fails when registered executables fall below the derived roster count",
+   "rank": 49
+  },
+  {
+   "id": "RENDER-19",
+   "pillar": "render",
+   "spec": "013",
+   "summary": "Amortize the interactive spec-013 world-entry locator stall: the frame-2 doline+crystal FindEnclosedCave scans cost 6m25s main-thread in the debug build (measured 2026-07-02; est. 10-25s release) \u2014 move to a background JobSystem job with a teardown drain (headless runs now skip them per RENDER-01; the locator itself was also convention-fixed under FOLIAGE-01)",
+   "evidence": "src/luminumbra_client/main_client.cpp:4360, src/luminumbra_client/debug/DebugCamera.cpp:90",
+   "effort": "M",
+   "risk": "medium",
+   "dependencies": [],
+   "status": "todo",
+   "proving_signal": "NEW: WorldEntryStall assertion \u2014 instrumented first-3-frames main-thread max frame time on an interactive-style boot stays < 250 ms (debug) with crystals still placed within 30 s; --smoke unchanged (client-only)",
    "rank": 49
   },
   {
@@ -2359,6 +2372,21 @@
    ],
    "status": "todo",
    "proving_signal": "NEW: ctest ConfigHotReloadRollback \u2014 a schema-invalid config reload preserves the previous applied state without crash; grep shows the mirrored constant authored once in the generated header",
+   "rank": 132
+  },
+  {
+   "id": "OPS-16",
+   "pillar": "buildtestops",
+   "spec": "new",
+   "summary": "Retire the EngineGameSplitLint allowlist: data-drive the enumerated hardcoded game content in engine code \u2014 the ServerWorldRunner grovestrider spawn (hash-visible, needs a re-pin), main_client audio event ids + ambient fauna list + creature model paths + MaterialType::LuminCrystal enumerant uses, RuntimeScenarioHarness showcase model paths, and the SpeciesCodex built-in species table",
+   "evidence": "src/luminumbra_server/ServerWorldRunner.cpp:151, src/luminumbra_client/main_client.cpp:4202, src/luminumbra_common/game/SpeciesCodex.h:134, .forge/scripts/validate-engine-frontier.ps1:5642",
+   "effort": "L",
+   "risk": "medium",
+   "dependencies": [
+    "INSTINCT-12"
+   ],
+   "status": "todo",
+   "proving_signal": "validate-engine-frontier.ps1 -Mode EngineGameSplitLint green with the ops16Debt allowlist EMPTY; PopulatedWorldReplay re-pinned once for the spawn-roster data-driving",
    "rank": 132
   },
   {
