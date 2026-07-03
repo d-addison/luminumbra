@@ -28,6 +28,11 @@ uniform vec3  u_camera_pos;
 uniform float u_crest_y;   // world Y of the lip
 uniform float u_foot_y;    // world Y of the plunge pool
 uniform vec3  u_sun_color; // tint for the lit froth (defaults handled by caller)
+// Scene-light multiplier (sun intensity + ambient floor) so the cascade is LIT by the
+// scene instead of emitting near-white. DEFAULTS to 1.0 so the standalone WaterfallVisual
+// gate (which never sets it) renders byte-identically; the live pipeline sets it from the
+// time-of-day sun intensity so the fall darkens at dusk/night. RENDER-ONLY.
+uniform vec3  u_scene_light = vec3(1.0);
 
 // Cheap hash + value noise for the procedural flow turbulence.
 float hash21(vec2 p) {
@@ -87,13 +92,16 @@ void main() {
     float foam = clamp(crest_foam + plunge_foam, 0.0, 1.0);
     cascade = mix(cascade, bright_foam, foam);
 
-    // Sun-tinted lift so the froth catches light (caller passes the sun colour;
-    // a sensible white default if unset reads as plain bright froth).
-    vec3 lit = cascade * mix(vec3(1.0), u_sun_color, 0.25);
+    // Light the cascade by the SCENE (sun colour+intensity via u_scene_light) instead of
+    // emitting near-white. The 0.25 sun TINT is kept for froth warmth; u_scene_light brings
+    // the whole sheet down to scene exposure (and to near-black at night) — the bright-
+    // waterfall fix.
+    vec3 lit = cascade * mix(vec3(1.0), u_sun_color, 0.25) * u_scene_light;
 
-    // Sheet opacity: brighter where the streaks/foam are, with a soft floor so
-    // the falling water always reads as a translucent veil.
-    float alpha = clamp(0.60 + streaks * 0.35 + foam * 0.35, 0.60, 0.98);
+    // Sheet opacity: the brightness/"too bright" complaint is now handled by u_scene_light
+    // (scene exposure), so keep the veil clearly VISIBLE as falling water — a solid floor so it
+    // reads against the cliff instead of vanishing, denser at the foam/streaks.
+    float alpha = clamp(0.66 + streaks * 0.30 + foam * 0.30, 0.66, 0.97);
 
     o_frag_color = vec4(lit, alpha);
 }
