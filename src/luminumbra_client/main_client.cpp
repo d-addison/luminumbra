@@ -4346,9 +4346,22 @@ int main(int argc, char* argv[]) {
         if (currentState == GameState::IN_GAME && !g_paused && !scenario_config.active() && gameSession) {
             auto& freg = gameSession->GetRegistry();
             auto* fws = gameSession->GetWorldSystem();
+            // RENDER-01 (spec 021): the spec-013 one-time flourishes below (doline log + the
+            // 25-anchor enclosed-cave crystal scatter) walk FindEnclosedCave over millions of
+            // full-SDF get_density_at probes on this frame — a MINUTES-long main-thread stall
+            // in a debug build (confirmed CPU-bound, not a deadlock), which presented as the
+            // headless IN_GAME capture "hang" and defeats the frame-counting watchdog (it only
+            // advances while the render loop spins). Headless automation skips them: captures
+            // want the world + shaders, not spelunking cues. --debug-goto cave still lights its
+            // framed cave (below). Interactive play keeps full behavior (cost tracked as the
+            // world-entry stall item RENDER-19).
+            const bool headless_automation =
+                g_frame_scan_active || g_scene_active || g_play_paths ||
+                !g_render_benchmark_path.empty() || !g_survey_dir.empty() ||
+                g_timelapse_frames > 0;
             // Spec 013 P1: one-time locate the largest doline near spawn (cave-mouth aim cue).
             static bool s_dolineLogged = false;
-            if (!s_dolineLogged && fws) {
+            if (!s_dolineLogged && fws && !headless_automation) {
                 s_dolineLogged = true;
                 const auto& sp = gameSession->GetMetadata().spawnPoint;
                 const auto sb = fws->FindLargestSurfaceBreak(sp.x, sp.z, 500.0f);
@@ -4381,6 +4394,19 @@ int main(int argc, char* argv[]) {
                         g_camera->Position = pose->pos; g_camera->Yaw = pose->yaw;
                         g_camera->Pitch = pose->pitch; g_camera->updateCameraVectors();
                     }
+                    // The crystal scatter is skipped under headless automation (RENDER-01), so a
+                    // captured cave would be pitch-black: light the framed cave from the pose we
+                    // already computed (no second FindEnclosedCave walk).
+                    if (g_debug_goto == "cave" && headless_automation) {
+                        const auto ce = freg.create();
+                        auto& ctf = freg.emplace<Luminumbra::Components::TransformComponent>(ce);
+                        ctf.position = Luminumbra::Vec3(pose->target.x, pose->target.y, pose->target.z);
+                        auto& cpl = freg.emplace<Luminumbra::Components::PointLightComponent>(ce);
+                        cpl.color = Luminumbra::Vec3(0.55f, 0.85f, 1.0f);
+                        cpl.intensity = 6.0f;   // hero crystal (mirrors the interactive one)
+                        cpl.radius = 40.0f;
+                        LUMINUMBRA_CORE_INFO("--debug-goto cave: hero crystal lit at the framed cave (headless)");
+                    }
                     LUMINUMBRA_CORE_INFO("--debug-goto {}: framed ({:.1f},{:.1f},{:.1f}) yaw {:.0f} pitch {:.0f}",
                                          g_debug_goto, pose->pos.x, pose->pos.y, pose->pos.z, pose->yaw, pose->pitch);
                 } else {
@@ -4394,7 +4420,7 @@ int main(int argc, char* argv[]) {
             // and drops a cyan glow-crystal at the first opening. Client-only (not hashed); the
             // point lights are gathered + nearest-32-culled by the render pipeline each frame.
             static bool s_crystalsSpawned = false;
-            if (!s_crystalsSpawned && fws) {
+            if (!s_crystalsSpawned && fws && !headless_automation) {
                 s_crystalsSpawned = true;
                 const auto& sp = gameSession->GetMetadata().spawnPoint;
                 int placed = 0;
