@@ -69,7 +69,8 @@ DebugCamPose FrameFeature(const glm::vec3& feature_world_pos,
 // within `search_radius_m`, and return a camera pose JUST OUTSIDE/INSIDE the
 // opening looking INTO the void.
 //
-// "Enclosed" test at a candidate air sample p (get_density_at(p) < 0):
+// "Enclosed" test at a candidate air sample p (air = get_density_at(p) >= 0; the
+// worldgen density is (y - height) + cave carve, so negative = solid terrain):
 //   * SOLID overhead: at least one solid sample within `roof_probe_m` straight up
 //     (so it's roofed — not open sky / a surface depression),
 //   * an OPENING to look through: a horizontal direction in which the cave-air run

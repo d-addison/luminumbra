@@ -28,11 +28,17 @@ void DirToYawPitch(const glm::vec3& dir_in, float& yaw_deg, float& pitch_deg) {
 inline float Density(const Systems::SHIELD_WorldSystem& world, const glm::vec3& p) {
     return world.get_density_at(Luminumbra::Vec3(p.x, p.y, p.z));
 }
+// DENSITY CONVENTION (authoritative: the mesher) — final_density = (y - height)
+// composed with the cave carve, so NEGATIVE = inside solid terrain and >= 0 = air/
+// void; MarchingCubes classifies the SOLID corner as val < isolevel(0). These
+// helpers originally shipped INVERTED (air = < 0, 2026-06-26), which made every
+// locator hunt rock shelves instead of cave voids and, copied into the foliage/tree
+// roof probes, rejected every open-sky column (the bare-world regression).
 inline bool IsAir(const Systems::SHIELD_WorldSystem& world, const glm::vec3& p) {
-    return Density(world, p) < 0.0f;
+    return Density(world, p) >= 0.0f;
 }
 inline bool IsSolid(const Systems::SHIELD_WorldSystem& world, const glm::vec3& p) {
-    return Density(world, p) >= 0.0f;
+    return Density(world, p) < 0.0f;
 }
 
 // March from `start` along `dir` (unit) while air, in `step` increments, up to

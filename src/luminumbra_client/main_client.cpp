@@ -4416,7 +4416,7 @@ int main(int argc, char* argv[]) {
 
             // Spec 013: LUMIN CRYSTALS — emissive point lights that light dark caves (so you can
             // see + photograph underground without sunlight) and double as photo subjects. A
-            // deterministic grid scan near spawn probes downward for cave-air (get_density_at < 0)
+            // deterministic scan near spawn locates enclosed cave voids (air = get_density_at >= 0)
             // and drops a cyan glow-crystal at the first opening. Client-only (not hashed); the
             // point lights are gathered + nearest-32-culled by the render pipeline each frame.
             static bool s_crystalsSpawned = false;
@@ -5930,12 +5930,14 @@ int main(int argc, char* argv[]) {
                                 // the analytic heightmap surface and ignores the cave SDF, so a
                                 // column whose heightmap point sits under a cavern roof would grow
                                 // a tree deep underground. Reject if SOLID terrain lies just above
-                                // the surface (get_density_at >= 0 == solid; < 0 == cave air).
+                                // the surface. DENSITY CONVENTION (FOLIAGE-01 root cause — this
+                                // probe shipped INVERTED and rejected every open column, removing
+                                // all trees): SOLID = get_density_at < 0; air = >= 0.
                                 // Render-only scatter (never hashed) -> pure SDF read, no re-pin.
                                 {
                                     bool roofed = false;
                                     for (float up = 1.0f; up <= 6.0f; up += 1.0f) {
-                                        if (ws->get_density_at(Luminumbra::Vec3(x, h + up, zc)) >= 0.0f) {
+                                        if (ws->get_density_at(Luminumbra::Vec3(x, h + up, zc)) < 0.0f) {
                                             roofed = true; break;
                                         }
                                     }
