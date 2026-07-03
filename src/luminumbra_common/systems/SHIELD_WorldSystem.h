@@ -632,6 +632,16 @@ public:
     // stage-B batch WITHOUT waiting for it. Lets callers (and tests) observe
     // sim truth going live independently of any render-mesh publish.
     void wait_for_promotion_jobs();
+    // SHIELD-03 inc 4 (017-B): stability WITHOUT publication. Drains every
+    // streaming lane (generation, promotion, meshing) with RAW handle waits —
+    // no pending→live movement, no stage-B dispatch, no state flips — so the
+    // caller (the SAVE path) serializes stable bytes without becoming an
+    // accidental activation event. Publication stays exclusively owned by the
+    // per-tick barrier today and by the activation queue after the swap
+    // (smoke autosaves at ticks 30/60/90 must not activate ahead of D+K).
+    // Handles and outstanding flags are left intact: the next legitimate
+    // publish point observes and publishes exactly as it would have.
+    void quiesce_streaming_jobs_for_save();
     // SHIELD-02 telemetry: lifetime totals of promotion-lane dispatches
     // (batches, chunks). Static smoke runs are expected to record ZERO (the
     // resident set is constant post-boot); moving runs exercise the lane.

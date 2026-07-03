@@ -1441,6 +1441,19 @@
    "rank": 76
   },
   {
+   "id": "WATER-17",
+   "pillar": "water",
+   "spec": "009",
+   "summary": "Heavy-oracle water roundtrip failure (discovered 2026-07-03 during Wave B; proven PRE-EXISTING byte-identically at dbb19318): the boot water settle exits at its 400-iteration cap with ~2577 of 5433 chunks never water-inited and ALL 2856 inited chunks still awake (calm check counts only inited chunks; fresh-seeded chunks start calm; sleep is never reached), so the settle is reproducible (run==replay holds) but NOT idempotent \u2014 a loaded session keeps initing/simming on top of the save and the water sub-hash can never roundtrip (terrain/entities roundtrip clean). Root fix = make settled mean settled: complete water init before calm, reach (or redefine) the sleep fixed point, or adopt option B' per docs/water-sim-lockstep-determinism.md; expect a deliberate world_hash re-bless when it lands.",
+   "evidence": "src/luminumbra_server/ServerWorldRunner.cpp:374-423 (settle + the new settle-exit telemetry), build/debug/test-artifacts/server/server-tick-heavy.json (water-only divergence), --heavy --ticks 0 fails identically",
+   "effort": "L",
+   "risk": "high",
+   "dependencies": [],
+   "status": "todo",
+   "proving_signal": "validate-engine-frontier.ps1 -Mode HeadlessServerTickHeavy green: --heavy --ticks 60 --heavy-resim 30 roundtrip_match AND resim_match true (water section included), with the settle-exit telemetry reporting 0 NOT-water-inited and 0 awake at boot exit",
+   "rank": 77
+  },
+  {
    "id": "ATMO-08",
    "pillar": "atmospheric",
    "spec": "new",

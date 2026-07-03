@@ -420,6 +420,26 @@ bool ServerWorldRunner::Boot() {
             }
             calm_streak = (water_chunks > 0 && awake == 0) ? calm_streak + 1 : 0;
         }
+        // Settle-exit summary: how much water work the settle actually finished.
+        // A non-zero not-inited count means the per-tick init cap outlasted the
+        // calm check (fresh-seeded chunks start calm), i.e. "settled" exited
+        // with init work remaining — the save/load water-roundtrip hazard the
+        // heavy oracle measures.
+        {
+            std::size_t water_chunks = 0, awake = 0, uninited = 0;
+            for (const auto& c : ws->snapshot_streamed_chunks()) {
+                if (!c) continue;
+                if (c->has_water_sim.load(std::memory_order_acquire)) {
+                    ++water_chunks;
+                    if (!c->is_water_sleeping.load(std::memory_order_relaxed)) ++awake;
+                } else {
+                    ++uninited;
+                }
+            }
+            LUMINUMBRA_CORE_INFO(
+                "Boot water settle exit: {} water-inited ({} awake), {} NOT water-inited, {} chunks total",
+                water_chunks, awake, uninited, ws->snapshot_streamed_chunks().size());
+        }
     }
 
     m_booted = true;

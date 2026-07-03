@@ -878,8 +878,15 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir, WorldS
         return false;
     }
 
-    // Quiesce in-flight generation/meshing so chunk data is stable on disk.
-    m_worldSystem->wait_for_streaming_jobs();
+    // Quiesce in-flight generation/promotion/meshing so chunk data is stable
+    // on disk — WITHOUT publishing (SHIELD-03 inc 4): a save must never be an
+    // activation event. Generated chunks are already live (generation writes
+    // live fields); only unpublished mesh/promotion staging stays out, which
+    // the next legitimate publish point (the barrier today, the activation
+    // queue after 017-B) delivers on its own schedule. On the per-tick-
+    // quiesced server paths everything is already drained and published here,
+    // so the saved bytes are identical to the old publishing barrier's.
+    m_worldSystem->quiesce_streaming_jobs_for_save();
 
     WorldStreamingState state;
     for (const auto& chunk : m_worldSystem->snapshot_streamed_chunks()) {

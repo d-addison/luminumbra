@@ -475,6 +475,27 @@ SHIELD_WorldSystem::ActivationShadowReport SHIELD_WorldSystem::activation_shadow
     return report;
 }
 
+void SHIELD_WorldSystem::quiesce_streaming_jobs_for_save() {
+    if (!m_job_system) {
+        return;
+    }
+    if (m_streaming_state.generation_job_handle.counter) {
+        m_job_system->wait(m_streaming_state.generation_job_handle);
+    }
+    if (m_streaming_state.promotion_job_handle_high.counter) {
+        m_job_system->wait(m_streaming_state.promotion_job_handle_high);
+    }
+    if (m_streaming_state.promotion_job_handle.counter) {
+        m_job_system->wait(m_streaming_state.promotion_job_handle);
+    }
+    if (m_streaming_state.meshing_job_handle_high.counter) {
+        m_job_system->wait(m_streaming_state.meshing_job_handle_high);
+    }
+    if (m_streaming_state.meshing_job_handle.counter) {
+        m_job_system->wait(m_streaming_state.meshing_job_handle);
+    }
+}
+
 void SHIELD_WorldSystem::wait_for_promotion_jobs() {
     if (m_job_system && m_streaming_state.promotion_job_handle_high.counter) {
         m_job_system->wait(m_streaming_state.promotion_job_handle_high);
