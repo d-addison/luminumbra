@@ -2674,7 +2674,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
 
 void RenderPipeline::update_aether_field(const std::vector<float>& cells, float world_origin_x,
                                          float world_origin_z, int extent, float cell_size_m) {
-    // One-way sim->render bridge for the Aetheric emissive tap (T-I6-A1d). Empty/
+    // One-way sim->render bridge for the Aether emissive tap (T-I6-A1d). Empty/
     // mismatched input -> inactive (lighting pass adds no glow, pixel-identical).
     if (extent <= 0 ||
         cells.size() != static_cast<std::size_t>(extent) * static_cast<std::size_t>(extent)) {

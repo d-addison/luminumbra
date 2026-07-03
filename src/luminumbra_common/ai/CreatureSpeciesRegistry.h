@@ -31,8 +31,8 @@ namespace Comp = ::Luminumbra::Components;
 // One creature species template. `id` is the stable name (the FNV key the spawners and
 // codex agree on); everything else is presentation/content metadata.
 struct CreatureSpecies {
-    std::string id;                  // stable species name, e.g. "grovestrider"
-    std::string display_name;        // player-facing, e.g. "Grovestrider"
+    std::string id;                  // stable species name, e.g. "deer"
+    std::string display_name;        // player-facing, e.g. "Deer"
     bool predator = false;           // role default (prey unless stated)
     bool nocturnal = false;          // spec 011: active by night (sleeps by day); data-driven so a
                                      // new species can be nocturnal without a client recompile

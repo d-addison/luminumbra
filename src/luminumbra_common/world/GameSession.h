@@ -159,7 +159,7 @@ public:
     Systems::WeatherSystem* GetWeatherSystem() { return m_weatherSystem.get(); }
     const Systems::WeatherSystem* GetWeatherSystem() const { return m_weatherSystem.get(); }
 
-    // T-I6-A1: the deterministic Aetheric scalar field. Sim-authoritative; its
+    // T-I6-A1: the deterministic Aether scalar field. Sim-authoritative; its
     // cell values feed the world_hash `aether` sub-hash. Constructed on world
     // create/load (pure function of the world seed, uses seed+14); updated per
     // fixed tick in TickSimulation AFTER the weather core, around the stream

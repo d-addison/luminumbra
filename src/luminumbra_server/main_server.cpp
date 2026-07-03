@@ -782,7 +782,7 @@ int RunWindBench(const ServerCliOptions& options) {
 }
 
 // ---------------------------------------------------------------------------
-// T-I6-A1 AetherFieldDeterminism driver. Ticks a wind field + the Aetheric
+// T-I6-A1 AetherFieldDeterminism driver. Ticks a wind field + the Aether
 // scalar field together (so the bench exercises the full advection+diffuse
 // pipeline), twice, and asserts the aether sub-hash is bit-identical across
 // runs and evolves over ticks. Same telemetry-only budget treatment as wind.

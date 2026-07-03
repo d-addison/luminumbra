@@ -87,7 +87,7 @@ struct RuntimeScenarioConfig {
     bool replicated = false;
     // T-I6 cinematic: a scripted wildlife scene -- an animal wanders to water, a human
     // shoots an arrow beside it (Jolt projectile), the splash scares the animal and it
-    // flees. Reuses the skinned_mesh_visual_smoke 2-grovestrider spawn (animal + human).
+    // flees. Reuses the skinned_mesh_visual_smoke two-creature spawn (animal + human).
     bool wildlife = false;
     int timed_run_seconds = 0;
     int readiness_timeout_seconds = 120;

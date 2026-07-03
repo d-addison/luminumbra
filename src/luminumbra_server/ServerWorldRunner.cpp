@@ -58,7 +58,7 @@ std::string WeatherSubHash(world::GameSession* session) {
     return weather ? weather->ComputeWeatherSubHash() : std::string();
 }
 
-// T-I6-A1 world_hash bump #4: the aether sub-hash from the session's Aetheric
+// T-I6-A1 world_hash bump #4: the aether sub-hash from the session's Aether
 // scalar field, or empty when none exists (defensive; the headless runner always
 // constructs one on world create/load).
 std::string AetherSubHash(world::GameSession* session) {
@@ -647,7 +647,7 @@ Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHash
     // core (not chunk-derived). Present + stable for the WeatherVisual state-hash
     // assertion and the desync-localization oracle.
     sub.weather = WeatherSubHash(m_session.get());
-    // T-I6-A1: the aether sub-hash slot, supplied from the session's Aetheric
+    // T-I6-A1: the aether sub-hash slot, supplied from the session's Aether
     // scalar field (not chunk-derived). Present + stable for the
     // AetherFieldDeterminism gate and the desync-localization oracle.
     sub.aether = AetherSubHash(m_session.get());

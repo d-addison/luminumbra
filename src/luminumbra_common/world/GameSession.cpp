@@ -365,7 +365,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             m_weatherSystem->Update(current_tick, m_metadata.spawnPoint, m_windFieldSystem.get());
         }
 
-        // 5. T-I6-A1: Aetheric scalar field update. Runs AFTER weather so it
+        // 5. T-I6-A1: Aether scalar field update. Runs AFTER weather so it
         // advects its emission source by the freshly-updated wind grid (and so
         // any future weather coupling reads the current weather). Deterministic
         // (pure function of seed+14, tick, origin[, wind]; DeterministicMath +
@@ -684,7 +684,7 @@ bool GameSession::CreateWorld(const std::string& name, const std::string& seed, 
     m_weatherSystem = std::make_unique<Systems::WeatherSystem>(world_seed);
     LUMINUMBRA_CORE_INFO("Weather system initialized.");
 
-    // 6. T-I6-A1: the deterministic Aetheric scalar field. Pure function of the
+    // 6. T-I6-A1: the deterministic Aether scalar field. Pure function of the
     //    world seed (uses seed+14 for its emission noise); updated per tick AFTER
     //    weather, advected by the wind grid. Feeds the world_hash `aether` slot.
     m_aetherFieldSystem = std::make_unique<Systems::AetherFieldSystem>(world_seed);

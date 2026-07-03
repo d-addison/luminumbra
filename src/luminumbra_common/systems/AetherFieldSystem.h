@@ -1,9 +1,9 @@
 #pragma once
 
-// T-I6-A1: deterministic coarse 2.5D Aetheric scalar field (sim-authoritative).
+// T-I6-A1: deterministic coarse 2.5D Aether scalar field (sim-authoritative).
 //
-// The engine knows only an "emissive scalar field"; game content (LuminCrystal /
-// Glimmer) is what assigns meaning to it. The field is a single non-negative
+// The engine knows only an "emissive scalar field"; game content (the attuned
+// crystals and flora) is what assigns meaning to it. The field is a single non-negative
 // scalar per cell (energy / glow intensity) that game emitters drive and that
 // the renderer taps into the materials-LUT emissive path.
 //

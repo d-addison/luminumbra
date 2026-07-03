@@ -134,7 +134,7 @@ void LightingPass::execute(const RenderContext& ctx) {
     glActiveTexture(GL_TEXTURE7); glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.terrain_textures.id);
     glActiveTexture(GL_TEXTURE8); glBindTexture(GL_TEXTURE_2D, ctx.material_lut.id);
     glActiveTexture(GL_TEXTURE9); glBindTexture(GL_TEXTURE_2D, ctx.caustics_tex.id);
-    // T-I6-A1d: Aetheric emissive field at unit 10 (gated by u_aetherActive). When
+    // T-I6-A1d: Aether emissive field at unit 10 (gated by u_aetherActive). When
     // no field is uploaded the texture is 0 and u_aetherActive=0, so the glow term
     // is skipped -> pixel-identical to the pre-A1d path.
     glActiveTexture(GL_TEXTURE10);

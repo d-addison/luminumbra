@@ -2,14 +2,14 @@
 
 // T-I5a-2 (wind grid): the MINIMUM shared field-storage surface (critique F5).
 //
-// PURPOSE. The wind field (this task) and a scalar Aetheric field (iteration 6)
+// PURPOSE. The wind field (this task) and a scalar Aether field (iteration 6)
 // both need the same coarse, region-following 2.5D cell-grid plumbing: a flat
 // row-major cell store with a fixed cell size + stride, an origin that follows
 // the streamed region, and a canonical iteration order for snapshot/sub-hash.
 // Per F5 (no speculative generality) this header factors ONLY that minimum
 // surface; it is NOT a finished generic solver and there is NO second consumer
 // in 5a. WindFieldSystem is the single concrete consumer; iteration 6 reuses
-// FieldGrid<float> for the Aetheric scalar stack without a rewrite.
+// FieldGrid<float> for the Aether scalar stack without a rewrite.
 //
 // DETERMINISM. FieldGrid is pure storage: flat std::vector<T>, integer indexing,
 // no floating-point ops, no hashed-container iteration, no wall-clock, no RNG.
@@ -23,7 +23,7 @@
 namespace luminumbra::fields {
 
 // Coarse 2.5D cell grid shared by the wind field (vector cells) and the
-// iteration-6 Aetheric field (scalar cells). T is the per-cell payload
+// iteration-6 Aether field (scalar cells). T is the per-cell payload
 // (e.g. a per-layer wind vector struct, or a float). The grid covers a square
 // region of `extent_cells` x `extent_cells` cells of `cell_size_m` metres each,
 // anchored at an integer cell origin that follows the streamed region.

@@ -410,7 +410,7 @@ public:
     void shutdown();
     void render_frame(entt::registry& registry, Systems::SHIELD_WorldSystem& world_system, const Camera& camera, float deltaTime, bool wireframe = false);
 
-    // T-I6-A1d: push the deterministic Aetheric scalar field to the lighting-pass
+    // T-I6-A1d: push the deterministic Aether scalar field to the lighting-pass
     // emissive tap (one-way sim->render bridge, called per frame from the client).
     // `cells` is the row-major extent*extent field; (world_origin_x/z) is the
     // grid's world-space origin; cell_size_m maps world XZ -> texel. Lazily
@@ -1092,7 +1092,7 @@ private:
     u32 m_terrainRoughnessArray = 0;
     int m_terrainRoughnessValid = 0;
     u32 m_materialLUT = 0;
-    // T-I6-A1d: Aetheric scalar field as an R32F texture for the lighting-pass
+    // T-I6-A1d: Aether scalar field as an R32F texture for the lighting-pass
     // emissive tap. Updated per frame from the sim field (one-way bridge).
     // m_aetherFieldActive gates the glow so a no-aether world stays pixel-identical
     // (RenderHealth-neutral until a world enables the field).

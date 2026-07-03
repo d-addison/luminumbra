@@ -2,7 +2,7 @@
 
 // Track game.objectives — the pillar-G PROGRESSION layer that sits on top of the codex
 // and gives the player a REASON to photograph: a set of objectives ("discover N species",
-// "get a 4-star shot of the grovestrider", "build a collection worth X") each evaluated
+// "get a 4-star shot of the flagship creature", "build a collection worth X") each evaluated
 // as a PURE function of the PhotoCodex state. Completing them is what turns "walk around
 // and take pictures" into a game with goals.
 //
@@ -157,7 +157,7 @@ private:
 
 // The starter objective set — the first goals a new player chases. Stable order/ids so
 // the HUD + save are reproducible. `first_species_id` keys the species-specific goals on
-// the first creature the world is known to spawn (e.g. the grovestrider) so the starter
+// the first creature the world is known to spawn (e.g. the flagship herbivore) so the starter
 // goals are always achievable in the default world.
 inline ObjectiveSet DefaultObjectives(int first_species_id) {
     ObjectiveSet set;
