@@ -167,6 +167,9 @@ public:
     // so normal play / the budget benchmark disable the readback (default ON keeps
     // the gate exact). RENDER-ONLY.
     void set_readback_enabled(bool e) { m_readback_enabled = e; }
+    // FOLIAGE-11: the gate must be able to tell a real instance count from the
+    // play-mode kMaxInstances marker (readback OFF publishes the marker).
+    bool readback_enabled() const { return m_readback_enabled; }
     void set_sway_strength(float amplitude, float speed) {
         m_sway_amplitude = amplitude;
         m_sway_speed = speed;

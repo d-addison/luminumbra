@@ -8129,6 +8129,7 @@ int main(int argc, char* argv[]) {
                                 foliage_calm_sampled = true;
                             }
                             if (foliage != nullptr && progress >= 0.85 &&
+                                foliage->readback_enabled() &&
                                 render_pass_stats.foliage_draws > 0 &&
                                 render_pass_stats.foliage_instances_drawn > 0) {
                                 // The placement hash is a pure function of the chunk
@@ -8187,7 +8188,14 @@ int main(int argc, char* argv[]) {
                                 // Calibrate so measured ~= biome_density for the real ~70k
                                 // scatter (70000 / 0.3); the loose 0.6 band absorbs run-to-run
                                 // chunk-churn variance (scatter can ~2.9x before the band edge).
-                                const double nominal_full = 233000.0;
+                                // FOLIAGE-01 re-bless (2026-07-02): the #1b-lush density default
+                                // (FoliagePass m_density_scale 1.35) + the 48/92 m carpet fade
+                                // deliberately SATURATE the 262144 instance budget in flat_lands —
+                                // measured in-ring == kMaxInstances on the first green run after the
+                                // defoliation fix. Calibrate so measured ~= biome_density (0.3) at
+                                // saturation (262144 / 0.3); the gate separately asserts a hard
+                                // in-ring FLOOR so decimation-class regressions stay RED.
+                                const double nominal_full = 873813.0;
                                 result.measured_density = std::clamp(
                                     static_cast<double>(result.instances_within_ring) / nominal_full, 0.0, 1.0);
                                 result.biome_density = biome_density;
@@ -8225,6 +8233,42 @@ int main(int argc, char* argv[]) {
                                             render_pass_stats);
                                     }
                                 }
+                            }
+                            // FOLIAGE-11: never end a gate run SILENT. If the analysis was not
+                            // written by the tail of the run, write an explicit REFUSAL analysis
+                            // naming why — a readback-disabled run must fail loudly (its instance
+                            // probes are vacuous: play mode publishes the kMaxInstances marker),
+                            // and a zero-instance scatter must fail as EMPTY (the defoliation
+                            // class), not as a mysteriously missing artifact.
+                            if (!foliage_capture_written && progress >= 0.97) {
+                                foliage_capture_written = true;
+                                std::string refusal_reason;
+                                if (foliage == nullptr) {
+                                    refusal_reason = "foliage pass unavailable in this run";
+                                } else if (!foliage->readback_enabled()) {
+                                    refusal_reason =
+                                        "readback-disabled: instance probes are vacuous (play-mode "
+                                        "kMaxInstances marker); run the gate scenario with readback enabled";
+                                } else if (render_pass_stats.foliage_draws <= 0) {
+                                    refusal_reason = "no foliage draws reached the render pass";
+                                } else {
+                                    refusal_reason =
+                                        "scatter emitted zero instances (defoliation-class regression)";
+                                }
+                                const nlohmann::json refusal = {
+                                    {"schema", "luminumbra.foliage_instancing.v1"},
+                                    {"passed", false},
+                                    {"refusal", refusal_reason},
+                                    {"render_pass", {
+                                        {"foliage_draws", render_pass_stats.foliage_draws},
+                                        {"foliage_instances_drawn", render_pass_stats.foliage_instances_drawn}
+                                    }}
+                                };
+                                std::ofstream refusal_out(
+                                    scenario_config.artifact_dir / "foliage-instancing-analysis.json");
+                                refusal_out << std::setw(2) << refusal << '\n';
+                                LUMINUMBRA_CORE_ERROR("FoliageInstancing: REFUSAL analysis written ({})",
+                                                      refusal_reason);
                             }
                         }
                         if (scenario_config.precipitation_smoke() && scenario_ready && !precip_windy_capture_written) {
