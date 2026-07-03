@@ -1,8 +1,10 @@
 # 017-B Activation Queue — code-grounded design + prerequisite analysis
 
-Status: DESIGN (2026-06-28). Grounded in the streaming code + the `--avail-trace` / 017-D
+Status: DESIGN (2026-06-28); **STEP 1 (SHIELD-02) LANDED 2026-07-03** — see "Step 1
+LANDED" at the bottom. Grounded in the streaming code + the `--avail-trace` / 017-D
 data landed this session. The naive "remove the barrier" approach WOULD break determinism;
-this note scopes the real work so it doesn't.
+this note scopes the real work so it doesn't. (Line drift note: the barrier call site is
+now `ServerWorldRunner.cpp:501`, not `:489`.)
 
 ## The problem (quantified — 017-D instrumentation)
 
@@ -114,3 +116,55 @@ the final hash must hold) + the STATIC `--avail-trace` per-tick trace identical 
 converges to `cf501b66`. If the static hash moves, the cut changed sim-truth ordering/values — revert
 and find why. Risk: the generation budget (`:2710`) now does more work per LOD0 chunk, which can shift
 the moving per-tick set (already convergent-not-identical) — acceptable iff the final moving hash holds.
+
+## Step 1 LANDED (SHIELD-02, 2026-07-03 — commits 35a7cf71 + 30b2ff40)
+
+**Outcome: ZERO hash movement.** Both baselines held byte-identical (static
+`6f008a9f637c40b7` with the 90-tick per-tick trace IDENTICAL cross-build against the
+pre-change baseline artifact; moving `cf501b6676d67249` run==replay, converging at tick 16
+exactly as before). The "hash-affecting -> re-pin both baselines" prediction above proved
+avoidable — no re-pin was needed. Determinism matrix (workers {1,2} + multiprocess) green.
+
+**Load-bearing correction to this doc's implicit tick topology:** `wait_for_meshing_jobs()`
+itself calls `process_completed_meshing_jobs()` (`SHIELD_WorldSystem.cpp:365`), so under the
+per-tick barrier a promotion dispatched in tick T's Step-3 pass published sim truth + mesh +
+`Ready` at the END OF TICK T, inside the barrier, before the avail-trace digest. The variant
+sketched above ("publish, THEN dispatch the meshing job" across the update/tick boundary)
+would have moved mesh/Ready publication one tick later, shifted the collision tick, and
+changed tick-90 in-flight state (`state`/`has_collision` are hashed) — deterministically
+breaking `cf501b66` under a moving anchor. **What landed instead preserves same-tick
+settlement BY CONSTRUCTION:** a two-stage promotion pipeline sequenced INSIDE the barrier —
+`wait_for_streaming_jobs` = gen drain -> mesh drain (publish) -> promotion drain (publish
+staged sim truth on the main thread + dispatch the render-mesh stage B) -> mesh drain
+(publish stage B). Every per-tick observation point sees exactly the settled state the old
+fused pipeline produced, in both static and moving runs.
+
+What landed (see the commits for full detail):
+- `dispatch_promotion_jobs` / `process_completed_promotion_jobs` / `wait_for_promotion_jobs`
+  — stage A generates the full voxel field into the existing `pending_sdf/heightmap/
+  material_data` staging (never touching live `sdf_data` off-thread, the crux above);
+  the main thread publishes it (the old backfill publish verbatim, dirty flag clear) and
+  only then dispatches stage B down the ordinary meshing lane.
+- The meshing lane is render-only: backfill deleted from the worker lambda and from
+  `process_completed_meshing_jobs`; an in-job tripwire fails any unit-step mesh that
+  reaches the lane without full sim truth; promotion classification happens at DISPATCH
+  time on the main thread (value identical — `sdf_data` is main-thread-owned between
+  dispatch and job start; covers the SHIELD-04 malformed case via one size test).
+- Scheduler gating parity: dispatch gate, quiescence test, and radius-pressure OR in
+  `promotion_pipeline_pending()` (byte-neutral on the per-tick-quiesced server paths;
+  correct one-batch-in-flight backpressure on the client). `Ready`/`has_collision`
+  semantics did NOT change — that redefinition is step 2's contract (SHIELD-03).
+- Proving pin: `test/common/PromotionSimTruthDecoupling_test.cpp` — RED before the cut
+  (sim truth only went live inside the render-mesh publish), GREEN after (sim truth live
+  via `wait_for_promotion_jobs` while `current_lod` is still coarse; byte-equal to pure
+  generation output; unchanged across the mesh publish). Static runs dispatch ZERO
+  promotions (constant resident set post-boot — by design); the moving run's byte-identical
+  hash + the gtest are the lane's exercise evidence.
+
+**Step 2 (SHIELD-03) consequence:** meshing is now OFF the hash-critical path — the
+per-tick barrier's meshing wait gates only render state. The queue work can proceed per
+the step-2 section, with the additional scheduler-de-timing scope documented in the
+Wave-B plan (the dispatch path still reads live job-activity state at
+`streaming_radius_for_pressure` / budget zeroing / dispatch refusal / quiescence, and the
+water `current_lod==0` init gate at `WaterSystem.cpp:381` + collision eligibility mesh
+check at `:2434-2436` still key sim behavior off render artifacts).

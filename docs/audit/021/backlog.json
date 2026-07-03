@@ -873,7 +873,7 @@
     "018-B",
     "SHIELD-13"
    ],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "--smoke == 6f008a9f637c40b7 byte-identical + static --avail-trace per-tick trace identical (main_server.cpp:521-532) + --smoke-moving run==replay + validate-determinism-matrix.ps1 green",
    "rank": 50
   },
