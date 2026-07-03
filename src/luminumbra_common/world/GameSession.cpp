@@ -988,6 +988,31 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         chunk->pending_water_mesh_vertices.clear();
         chunk->pending_water_mesh_indices.clear();
 
+        // SHIELD-05 (spec 021): quarantine a wrong-sized SDF lattice at save
+        // ADOPTION (the persistence library itself stays byte-faithful — its
+        // roundtrip contract is load-bearing for the corruption-corpus tests).
+        // Legitimate persisted sdf_data is EMPTY (T-I3-1 coarse/band producer)
+        // or the full (CHUNK+1)^3 unit-step lattice; anything else is a
+        // corrupt/truncated record which must never reach the unit-step
+        // polygonise paths. Clearing marks the chunk for deterministic
+        // regeneration on its next build/promotion (the saved mesh stays
+        // renderable meanwhile). A truncated lattice is untrustworthy, so any
+        // voxel edits inside it are already lost — regeneration from
+        // seed/params is the least-bad recovery.
+        {
+            constexpr std::size_t kFullSdfLattice =
+                static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
+                (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+            if (!chunk->sdf_data.empty() && chunk->sdf_data.size() != kFullSdfLattice) {
+                LUMINUMBRA_CORE_WARN(
+                    "World load: chunk ({},{},{}) carries a malformed sdf_data lattice "
+                    "(size {} != {} and non-empty) — quarantined for regeneration",
+                    chunk->get_coords().x, chunk->get_coords().y, chunk->get_coords().z,
+                    chunk->sdf_data.size(), kFullSdfLattice);
+                chunk->sdf_data.clear();
+            }
+        }
+
         // Chunks saved mid-transition (Loading/Meshing/Unloading) settle to a
         // stable state; Ready and Idle are restored verbatim (a Ready chunk
         // with an empty mesh is a legitimate air chunk).

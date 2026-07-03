@@ -850,6 +850,28 @@ void PolygoniseTerrain(
         return;
     }
 
+    // SHIELD-04 (spec 021): the unit-step path below indexes the SDF as a full
+    // (CHUNK_SIZE+1)^3 lattice with unchecked corner offsets — a wrong-sized
+    // (non-empty, truncated/oversized) lattice from a corrupt save or a stale
+    // coarse producer would read out of bounds. Last-line belt: reject it here
+    // (empty mesh + warn); the build/promotion paths regenerate malformed
+    // chunks upstream, so a rejected chunk self-heals on its next build. An
+    // EMPTY SDF falls through to the surface scan's normal early-out.
+    {
+        constexpr std::size_t kFullLatticeCount =
+            static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+        if (!chunk.sdf_data.empty() && chunk.sdf_data.size() != kFullLatticeCount) {
+            LUMINUMBRA_CORE_WARN(
+                "PolygoniseTerrain: chunk ({},{},{}) sdf_data size {} != full lattice {} — "
+                "rejecting (no mesh) instead of reading out of bounds",
+                chunk.get_coords().x, chunk.get_coords().y, chunk.get_coords().z,
+                chunk.sdf_data.size(), kFullLatticeCount);
+            chunk.mesh_vertices.clear();
+            chunk.mesh_indices.clear();
+            return;
+        }
+    }
+
     // Debug: Check if chunk has a surface
     bool has_negative = false;
     bool has_positive = false;

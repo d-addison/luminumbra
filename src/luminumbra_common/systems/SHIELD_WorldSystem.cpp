@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include "systems/PhysicsSystem.h"
+#include "../core/JobWatchdog.h" // OPS-11: opt-in named-phase wedge reporter for unbounded waits
 #include "../core/Log.h"
 #include "WaterSystem.h"
 
@@ -2830,10 +2831,19 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
     // exact phase that hung. Render-only logging; no world_hash impact. Cheap: this
     // runs at world-load/teleport, not per-frame.
     const auto _esrn_t0 = std::chrono::steady_clock::now();
+    // OPS-11 (spec 021): ALL THREE unbounded waits in this function run under the
+    // opt-in LUMINUMBRA_JOB_WATCHDOG named-phase reporter (previously only the
+    // collision-build batch below was wrapped, so a generation/meshing wedge still
+    // hung silently). Observability only — hash-neutral, OFF in determinism gates.
+    const bool job_watchdog = Luminumbra::Core::JobWatchdogEnabled();
     LUMINUMBRA_CORE_INFO("EnsureSurfaceReadyNear: draining generation jobs (near {:.0f},{:.0f})...", world_pos.x, world_pos.z);
-    wait_for_generation_jobs();
+    Luminumbra::Core::WaitWithJobWatchdog(job_watchdog,
+        "EnsureSurfaceReadyNear/generation-drain",
+        [this]() { wait_for_generation_jobs(); });
     LUMINUMBRA_CORE_INFO("EnsureSurfaceReadyNear: draining meshing jobs...");
-    wait_for_meshing_jobs();
+    Luminumbra::Core::WaitWithJobWatchdog(job_watchdog,
+        "EnsureSurfaceReadyNear/meshing-drain",
+        [this]() { wait_for_meshing_jobs(); });
 
     const IVec3 center_chunk = world_to_chunk_coords(world_pos);
     const int radius = std::max(0, surface_radius);
@@ -2965,35 +2975,15 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
         // bails or changes the wait, so it is hash-neutral and stays OFF in determinism gates
         // (--smoke). On the intermittent "CONSTRUCTING WORLD GEOMETRY" freeze it names the
         // wedged phase + the chunk neighbourhood every 30s instead of hanging silently.
-        static const bool kJobWatchdog = []() {
-            const char* e = std::getenv("LUMINUMBRA_JOB_WATCHDOG");
-            return e && e[0] == '1';
-        }();
+        // OPS-11: rehomed onto the shared named-phase helper (core/JobWatchdog.h) so all
+        // three waits in this function report identically.
         const Luminumbra::JobHandle handle = m_job_system->dispatch_batch(build_jobs);
-        if (kJobWatchdog) {
-            std::atomic<bool> wait_done{false};
-            const std::size_t pending = build_jobs.size();
-            const IVec3 wd_center = center_chunk;
-            std::thread watchdog([&wait_done, pending, wd_center]() {
-                using namespace std::chrono_literals;
-                auto next_report = std::chrono::steady_clock::now() + 30s;
-                while (!wait_done.load(std::memory_order_acquire)) {
-                    std::this_thread::sleep_for(500ms);
-                    if (!wait_done.load(std::memory_order_acquire) &&
-                        std::chrono::steady_clock::now() >= next_report) {
-                        LUMINUMBRA_CORE_WARN("JOB_WATCHDOG: EnsureSurfaceReadyNear still waiting on "
-                            "{} surface-build jobs near chunk ({},{},{}) — possible wedge",
-                            pending, wd_center.x, wd_center.y, wd_center.z);
-                        next_report = std::chrono::steady_clock::now() + 30s;
-                    }
-                }
-            });
-            m_job_system->wait(handle);
-            wait_done.store(true, std::memory_order_release);
-            watchdog.join();
-        } else {
-            m_job_system->wait(handle);
-        }
+        std::string phase = "EnsureSurfaceReadyNear/collision-build (" +
+            std::to_string(build_jobs.size()) + " jobs near chunk " +
+            std::to_string(center_chunk.x) + "," + std::to_string(center_chunk.y) + "," +
+            std::to_string(center_chunk.z) + ")";
+        Luminumbra::Core::WaitWithJobWatchdog(job_watchdog, std::move(phase),
+            [this, &handle]() { m_job_system->wait(handle); });
     } else {
         for (auto& job : build_jobs) {
             job();
@@ -4170,7 +4160,26 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
 
                 bool backfilled_voxel_data = false;
                 if (terrain_mesh_required) {
-                    if (step <= 1 && chunk->sdf_data.empty()) {
+                    // SHIELD-04 (spec 021): a non-empty but WRONG-SIZED sdf_data (corrupt
+                    // save / stale coarse producer) must never be copied into the
+                    // unit-step polygonise — its corner indexing assumes the full
+                    // (CHUNK+1)^3 lattice and would read out of bounds. Regenerate the
+                    // full lattice instead (mirrors the EnsureSurfaceReadyNear guard;
+                    // generation is a pure function of seed/params, so this is
+                    // hash-neutral for valid worlds).
+                    constexpr std::size_t kFullSdfLattice =
+                        static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
+                        (Luminumbra::CHUNK_SIZE_Y + 1) * (Luminumbra::CHUNK_SIZE_Z + 1);
+                    const bool sdf_malformed = step <= 1 && !chunk->sdf_data.empty() &&
+                                               chunk->sdf_data.size() != kFullSdfLattice;
+                    if (sdf_malformed) {
+                        LUMINUMBRA_CORE_WARN(
+                            "Meshing promotion: chunk ({},{},{}) has malformed sdf_data "
+                            "(size {} != full lattice {}) — regenerating instead of meshing it",
+                            chunk->get_coords().x, chunk->get_coords().y, chunk->get_coords().z,
+                            chunk->sdf_data.size(), kFullSdfLattice);
+                    }
+                    if (step <= 1 && (chunk->sdf_data.empty() || sdf_malformed)) {
                         // LOD0 promotion of a chunk generated surface-band
                         // only (T-I3-1): build the full voxel field into the
                         // scratch chunk here and stage it for main-thread

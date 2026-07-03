@@ -118,6 +118,8 @@ add_executable(common_tests
     common/FarLodStore_test.cpp
     common/GameSessionHeadlessWorld_test.cpp
     common/JobSystem_test.cpp
+    common/JobWatchdog_test.cpp
+    audio/AudioBankIntegrity_test.cpp
     common/MultiAnchorStreaming_test.cpp
     common/WaterDeterminism_test.cpp
     common/PlayerAvatar_test.cpp
@@ -925,6 +927,10 @@ set(LUMINUMBRA_GTEST_TARGETS
     asset_processor_round_trip_test
     common_tests
     tree_lod_test
+    # FOLIAGE-06 (spec 021): the hemi-octa mapping test was built but never
+    # registered — the atlas-bake/shader shared source of truth had zero
+    # executing coverage. GL-free pure math, safe in the default lane.
+    octa_impostor_test
     render_smoke_test
     render_capture_test
     async_readback_ring_test

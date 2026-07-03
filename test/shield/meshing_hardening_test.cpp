@@ -868,3 +868,57 @@ TEST(MeshingHardening, EmptyFieldRemeshClearsPreviousMesh) {
     EXPECT_TRUE(chunk.mesh_vertices.empty()) << "stale surface survived an empty re-mesh";
     EXPECT_TRUE(chunk.mesh_indices.empty());
 }
+
+// ----------------------------------------------------------------------------
+// SHIELD-04 (spec 021): wrong-sized-SDF out-of-bounds hardening. The unit-step
+// polygonise indexes the SDF as a full (CHUNK+1)^3 lattice with unchecked corner
+// offsets, so a non-empty malformed lattice (corrupt save / stale coarse
+// producer) must be REJECTED at entry — never read. These run OOB-clean under
+// ASAN by construction (the guard returns before any lattice indexing).
+// ----------------------------------------------------------------------------
+
+TEST(StreamingHardening, MalformedSdfLatticeIsRejectedNotReadOutOfBounds) {
+    SHIELD_WorldSystem world(nullptr, nullptr, MakeFlatSurfaceParams(), 4242);
+    Chunk chunk(IVec3(0, 0, 0));
+    world.GenerateChunkData(chunk);
+    World::MarchingCubes::PolygoniseTerrain(world, chunk, 0.0f, 1);
+    ASSERT_FALSE(chunk.mesh_vertices.empty()) << "fixture must start with a real surface";
+    ASSERT_EQ(chunk.sdf_data.size(), static_cast<std::size_t>(kLat * kLat * kLat));
+
+    // Truncated lattice (the wrong-sized-save shape): one float short. With a
+    // straddling surface, the old code would index corners past data.end().
+    chunk.sdf_data.resize(chunk.sdf_data.size() - 1u);
+    World::MarchingCubes::PolygoniseTerrain(world, chunk, 0.0f, 1);
+    EXPECT_TRUE(chunk.mesh_vertices.empty())
+        << "a truncated SDF lattice must be rejected (no mesh), not polygonised";
+    EXPECT_TRUE(chunk.mesh_indices.empty());
+
+    // Grossly undersized non-empty lattice (the 4-float corruption-corpus shape).
+    chunk.sdf_data = {-2.0f, -0.5f, 0.25f, 1.0f};
+    World::MarchingCubes::PolygoniseTerrain(world, chunk, 0.0f, 1);
+    EXPECT_TRUE(chunk.mesh_vertices.empty());
+    EXPECT_TRUE(chunk.mesh_indices.empty());
+}
+
+TEST(StreamingHardening, MalformedSdfChunkRegeneratesByteIdenticalToFresh) {
+    // The promotion-path recovery is clear -> GenerateChunkData: prove the
+    // regenerated lattice + mesh are byte-identical to a fresh generation of
+    // the same (seed, params, coords), i.e. the quarantine recovery is
+    // deterministic and hash-neutral for valid worlds.
+    const TerrainGenParams params = MakeArchipelagoParams();
+    const IVec3 coords(1, 0, 2);
+    const MeshResult fresh = GenAndMesh(params, 909, coords, 1);
+    ASSERT_FALSE(fresh.vertices.empty());
+
+    SHIELD_WorldSystem world(nullptr, nullptr, params, 909);
+    Chunk chunk(coords);
+    chunk.sdf_data = {-1.0f, 0.0f, 1.0f};  // malformed survivor of a corrupt save
+    chunk.sdf_data.clear();                 // the quarantine action (SHIELD-05 / promotion guard)
+    world.GenerateChunkData(chunk);         // the deterministic regeneration
+    World::MarchingCubes::PolygoniseTerrain(world, chunk, 0.0f, 1);
+
+    EXPECT_EQ(HashVec(chunk.sdf_data), HashVec(fresh.sdf))
+        << "regenerated SDF must be byte-identical to fresh generation";
+    EXPECT_EQ(HashVec(chunk.mesh_vertices), HashVec(fresh.vertices));
+    EXPECT_EQ(HashVec(chunk.mesh_indices), HashVec(fresh.indices));
+}
