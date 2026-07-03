@@ -642,6 +642,24 @@ public:
     PromotionDispatchTotals promotion_dispatch_totals() const {
         return {m_promotion_batches_dispatched, m_promotion_chunks_dispatched};
     }
+
+    // SHIELD-03 shadow instrumentation (017-B step 2, increment 1): measures
+    // the ACTUAL streaming-pipeline latencies in SIM TICKS that the activation
+    // queue's fixed pipeline-latency K must cover. Observability only — never
+    // hashed, inert unless the host drives the tick (the headless server
+    // runner does under --avail-trace; the client never calls this, so
+    // m_shadow_current_tick stays -1 and every recording site early-outs).
+    void begin_tick_shadow(std::int64_t sim_tick) { m_shadow_current_tick = sim_tick; }
+    struct ActivationShadowReport {
+        // gen-dispatch tick -> first Ready tick, one sample per activated chunk
+        std::vector<std::int64_t> generation_to_ready_ticks;
+        // promotion-dispatch tick -> sim-truth publish tick
+        std::vector<std::int64_t> promotion_to_publish_ticks;
+        std::uint64_t generation_dispatches = 0;   // chunks entered the shadow
+        std::uint64_t promotion_dispatches = 0;
+        std::uint64_t still_pending = 0;           // dispatched, never activated by report time
+    };
+    ActivationShadowReport activation_shadow_report() const;
     // Shared-ownership snapshot of every streamed chunk (save path).
     std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_streamed_chunks() const;
     std::shared_ptr<::Luminumbra::Chunk> find_streamed_chunk(const IVec3& coords) const;
@@ -690,6 +708,19 @@ private:
     // SHIELD-02 telemetry (main-thread, never hashed).
     std::uint64_t m_promotion_batches_dispatched = 0;
     std::uint64_t m_promotion_chunks_dispatched = 0;
+    // SHIELD-03 shadow state (main-thread, never hashed; -1 tick = shadow off).
+    std::int64_t m_shadow_current_tick = -1;
+    std::unordered_map<ChunkID, std::int64_t> m_shadow_generation_dispatch_tick;
+    std::unordered_map<ChunkID, std::int64_t> m_shadow_promotion_dispatch_tick;
+    std::vector<std::int64_t> m_shadow_gen_latency_samples;
+    std::vector<std::int64_t> m_shadow_promo_latency_samples;
+    std::uint64_t m_shadow_gen_dispatches = 0;
+    std::uint64_t m_shadow_promo_dispatches = 0;
+    void shadow_note_generation_dispatch(ChunkID id);
+    void shadow_note_promotion_dispatch(ChunkID id);
+    void shadow_note_ready(ChunkID id);
+    void shadow_note_promotion_published(ChunkID id);
+    void shadow_note_evicted(ChunkID id);
     StreamingBudgetFrameStats m_last_streaming_budget_stats;
     DbgStreamTimings m_dbg_stream;  // TEMP diag
     StreamingTelemetryStats m_streaming_telemetry_stats;

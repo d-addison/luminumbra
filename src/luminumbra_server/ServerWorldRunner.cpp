@@ -471,6 +471,14 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         report.ticks_executed += m_session->TickSimulation(fixed_dt);
         report.frames_executed += 1;
 
+        // SHIELD-03 shadow (017-B step 2, increment 1): drive the activation
+        // latency shadow with the same tick base the availability digest uses.
+        // Observability only — gated on --avail-trace like the digest itself.
+        if (m_config.availability_trace) {
+            world_system->begin_tick_shadow(
+                static_cast<std::int64_t>(report.ticks_executed));
+        }
+
         // Spawn-anchor streaming, then quiesce in-flight generation/meshing
         // so every scheduler decision next frame observes the identical
         // settled state in both determinism runs. T-I6 P1: with avatars, stream
@@ -543,17 +551,47 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         report.main_wait_p99_ms = pct(0.99);
         report.main_wait_max_ms = wait_samples.back();
     }
+
+    // SHIELD-03 shadow (017-B step 2, increment 1): the activation-latency
+    // distribution in SIM TICKS — the empirical basis for the activation
+    // queue's fixed pipeline-latency K. Log-only, never hashed.
+    if (m_config.availability_trace) {
+        if (auto* shadow_world = m_session ? m_session->GetWorldSystem() : nullptr) {
+            auto shadow = shadow_world->activation_shadow_report();
+            const auto pct_ticks = [](std::vector<std::int64_t>& v, double p) -> std::int64_t {
+                if (v.empty()) {
+                    return 0;
+                }
+                std::sort(v.begin(), v.end());
+                std::size_t idx = static_cast<std::size_t>(std::ceil(p * static_cast<double>(v.size())));
+                if (idx > 0) --idx;
+                if (idx >= v.size()) idx = v.size() - 1;
+                return v[idx];
+            };
+            auto& gen = shadow.generation_to_ready_ticks;
+            auto& promo = shadow.promotion_to_publish_ticks;
+            LUMINUMBRA_CORE_INFO(
+                "Activation shadow (017-B K design): gen->Ready n={} p50={} p95={} p99={} max={} ticks; "
+                "promotion->publish n={} p50={} p99={} max={} ticks; dispatched gen={} promo={} still_pending={}",
+                gen.size(), pct_ticks(gen, 0.50), pct_ticks(gen, 0.95), pct_ticks(gen, 0.99),
+                gen.empty() ? 0 : gen.back(),
+                promo.size(), pct_ticks(promo, 0.50), pct_ticks(promo, 0.99),
+                promo.empty() ? 0 : promo.back(),
+                shadow.generation_dispatches, shadow.promotion_dispatches, shadow.still_pending);
+        }
+    }
     return report;
 }
 
 std::string ServerWorldRunner::ComputeAvailabilityDigest() {
-    // The AVAILABILITY SET at this tick = which chunks are settled-resident and at what
-    // LOD/collision state, right after the wait_for_streaming_jobs barrier. We digest the
-    // sorted (id, state, lod, collision) tuples with FNV-1a — deliberately NOT the chunk
-    // CONTENT (sdf/heightmap/mesh): content is a pure function of coords, so a stable set of
-    // resident coords implies stable content. This is the cheap, per-tick-affordable proxy
-    // the spec-017-B activation queue must reproduce when it replaces the barrier. Sorting by
-    // id makes the digest independent of snapshot/container order.
+    // The AVAILABILITY SET at this tick = which chunks are settled to Ready right after the
+    // wait_for_streaming_jobs barrier. We digest the sorted Ready-chunk IDS with FNV-1a —
+    // deliberately NOT the chunk CONTENT (sdf/heightmap/mesh): content is a pure function of
+    // coords, so a stable set of resident coords implies stable content. This is the cheap,
+    // per-tick-affordable proxy the spec-017-B activation queue must reproduce when it
+    // replaces the barrier. Sorting by id makes the digest independent of snapshot/container
+    // order. (An earlier draft digested (id, state, lod, collision) tuples; the code below
+    // is ids-only by design — see the in-body comment.)
     auto* world_system = m_session ? m_session->GetWorldSystem() : nullptr;
     if (!world_system) {
         return {};

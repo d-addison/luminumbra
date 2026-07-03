@@ -397,6 +397,69 @@ bool SHIELD_WorldSystem::promotion_pipeline_pending() const {
            !m_streaming_state.pending_promotion_mesh.empty();
 }
 
+// --- SHIELD-03 shadow instrumentation (017-B step 2, increment 1) ---
+// Latency shadow for the activation-queue K design: how many SIM TICKS elapse
+// between a streaming dispatch and the chunk becoming sim-visible, measured
+// under the real barrier. Main-thread only, never hashed, inert at tick -1.
+
+void SHIELD_WorldSystem::shadow_note_generation_dispatch(ChunkID id) {
+    if (m_shadow_current_tick < 0) {
+        return;
+    }
+    if (m_shadow_generation_dispatch_tick.emplace(id, m_shadow_current_tick).second) {
+        ++m_shadow_gen_dispatches;
+    }
+}
+
+void SHIELD_WorldSystem::shadow_note_promotion_dispatch(ChunkID id) {
+    if (m_shadow_current_tick < 0) {
+        return;
+    }
+    if (m_shadow_promotion_dispatch_tick.emplace(id, m_shadow_current_tick).second) {
+        ++m_shadow_promo_dispatches;
+    }
+}
+
+void SHIELD_WorldSystem::shadow_note_ready(ChunkID id) {
+    if (m_shadow_current_tick < 0) {
+        return;
+    }
+    const auto it = m_shadow_generation_dispatch_tick.find(id);
+    if (it == m_shadow_generation_dispatch_tick.end()) {
+        return;  // boot-path / save-adopted chunk, or a re-mesh — not a first activation
+    }
+    m_shadow_gen_latency_samples.push_back(m_shadow_current_tick - it->second);
+    m_shadow_generation_dispatch_tick.erase(it);
+}
+
+void SHIELD_WorldSystem::shadow_note_promotion_published(ChunkID id) {
+    if (m_shadow_current_tick < 0) {
+        return;
+    }
+    const auto it = m_shadow_promotion_dispatch_tick.find(id);
+    if (it == m_shadow_promotion_dispatch_tick.end()) {
+        return;
+    }
+    m_shadow_promo_latency_samples.push_back(m_shadow_current_tick - it->second);
+    m_shadow_promotion_dispatch_tick.erase(it);
+}
+
+void SHIELD_WorldSystem::shadow_note_evicted(ChunkID id) {
+    m_shadow_generation_dispatch_tick.erase(id);
+    m_shadow_promotion_dispatch_tick.erase(id);
+}
+
+SHIELD_WorldSystem::ActivationShadowReport SHIELD_WorldSystem::activation_shadow_report() const {
+    ActivationShadowReport report;
+    report.generation_to_ready_ticks = m_shadow_gen_latency_samples;
+    report.promotion_to_publish_ticks = m_shadow_promo_latency_samples;
+    report.generation_dispatches = m_shadow_gen_dispatches;
+    report.promotion_dispatches = m_shadow_promo_dispatches;
+    report.still_pending = m_shadow_generation_dispatch_tick.size() +
+                           m_shadow_promotion_dispatch_tick.size();
+    return report;
+}
+
 void SHIELD_WorldSystem::wait_for_promotion_jobs() {
     if (m_job_system && m_streaming_state.promotion_job_handle_high.counter) {
         m_job_system->wait(m_streaming_state.promotion_job_handle_high);
@@ -431,6 +494,7 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs() {
                 // alongside the SDF (empty -> empty, lazy alloc preserved).
                 chunk->material_data = std::move(chunk->pending_material_data);
                 chunk->clear_voxel_data_dirty();
+                shadow_note_promotion_published(chunk->get_id());  // SHIELD-03 shadow
                 m_streaming_state.pending_promotion_mesh.push_back(job_chunk);
             } else {
                 // Stage-A failure: revert the transient Meshing state (the
@@ -512,6 +576,7 @@ void SHIELD_WorldSystem::dispatch_promotion_jobs(const std::vector<MeshingWorkIt
         chunk->pending_lod.store(work_item.lod_level, std::memory_order_release);
         m_streaming_state.promotion_job_chunks.push_back(
             {chunk, work_item.lod_level, work_item.high_priority});
+        shadow_note_promotion_dispatch(chunk->get_id());  // SHIELD-03 shadow
 
         auto& lane_jobs = work_item.high_priority ? high_priority_jobs : normal_priority_jobs;
         lane_jobs.emplace_back([this, chunk]() {
@@ -2945,6 +3010,9 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
     m_last_streaming_budget_stats.deferred_generation = to_create.size() - generate_now.size();
     if (!generate_now.empty()) {
         dispatch_generation_jobs(generate_now);
+        for (const ChunkGenerationRequest& request : generate_now) {
+            shadow_note_generation_dispatch(::Luminumbra::Chunk::calculate_id(request.coords));
+        }
     }
 
     // 5. Unload chunks that are now out of range.
@@ -3005,6 +3073,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
             physics_system->remove_chunk_collision(id);
         }
         m_streaming_state.chunks.erase(id);
+        shadow_note_evicted(id);
     }
 
     // spec 008 follow-up: record the elision signals for next tick. m_last_activation_pending == 0
@@ -4550,6 +4619,9 @@ void SHIELD_WorldSystem::process_completed_meshing_jobs() {
         } else {
             chunk->set_state(Luminumbra::ChunkState::Ready);
         }
+        if (chunk->get_state() == Luminumbra::ChunkState::Ready) {
+            shadow_note_ready(chunk->get_id());  // SHIELD-03 shadow: first-activation latency
+        }
 
         chunk->pending_mesh_vertices.clear();
         chunk->pending_mesh_indices.clear();
@@ -4593,6 +4665,8 @@ void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
         }
     }
     m_streaming_state.chunks.clear();
+    m_shadow_generation_dispatch_tick.clear();
+    m_shadow_promotion_dispatch_tick.clear();
     LUMINUMBRA_CORE_INFO("World cleared.");
 }
 

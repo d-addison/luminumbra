@@ -71,8 +71,10 @@ struct ServerWorldRunnerConfig {
     // the boot warm-up (interim C) does not cover. DEFAULT false -> the static (fixed-anchor) lane.
     bool moving_anchor = false;
     // Spec 017-B GATE (Codex audit #4): when true, RunFixedTicks records a per-tick
-    // AVAILABILITY-SET digest (the sorted resident-chunk id/state/lod/collision set,
-    // captured right after the wait_for_streaming_jobs barrier) into AvailabilityTrace().
+    // AVAILABILITY-SET digest (the sorted Ready-chunk IDS — ids only, deliberately not
+    // state/lod/collision micro-timing; see ComputeAvailabilityDigest — captured right
+    // after the wait_for_streaming_jobs barrier) into AvailabilityTrace(), and drives
+    // the SHIELD-03 activation-latency shadow (begin_tick_shadow).
     // Observability ONLY — it reads the settled snapshot and changes nothing, so it is
     // hash-neutral and stays OFF in the determinism gate. The trace is the baseline a
     // future activation-queue (017-B) must reproduce per tick when it replaces the barrier.
@@ -168,7 +170,7 @@ public:
     // Spec 017-B gate: the per-tick availability-set trace captured during the last
     // RunFixedTicks when config.availability_trace was set. Each entry is
     // (tick_index, digest) where digest is a deterministic FNV-1a over the sorted
-    // resident-chunk (id, state, lod, has_collision) set. Empty unless tracing was on.
+    // Ready-chunk IDS (ids only — see ComputeAvailabilityDigest). Empty unless tracing was on.
     const std::vector<std::pair<std::uint64_t, std::string>>& AvailabilityTrace() const {
         return m_avail_trace;
     }
