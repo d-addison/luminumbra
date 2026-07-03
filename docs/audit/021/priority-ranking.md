@@ -1,0 +1,417 @@
+# Spec 021 — Single Reconciled Priority Ranking (2026-07-02)
+
+> One ranked order across ALL 183 backlog items (FR-D-001), including shipped items marked
+> `done` (FR-D-003), reconciled against the 2026-06-28 merged execution roadmap's dependency
+> spine (FR-D-002). Source of truth for item detail: `docs/audit/021/backlog.json`
+> (validated by `validate_backlog.py`; every item carries a TDD proving-signal).
+> Evidence for every claim lives in the per-pillar critique docs (`pillar-*.md`).
+
+## Ranking criteria (FR-D-004)
+
+Applied in this order, ties broken downward:
+
+1. **Blocker-unblock value** — how many other ranked items (including the entire visual
+   re-bless surface) the item unblocks. This is why the headless IN_GAME capture hang is the
+   #1 actionable item.
+2. **Dependency-spine position** — no item is ranked above an unmet hard dependency from the
+   merged roadmap without an explicit justification note (AC-003). Notes are marked
+   **[SPINE NOTE]**.
+3. **Owner-stated GPU emphasis** — the 014 pilot-gate closure and the GPU deep track are
+   pulled forward relative to a pure defect-first order (charter G-5: "get all the DLSS/RT
+   support").
+4. **Effort** — S/M quick wins float to the top of their tier.
+5. **Risk** — HIGH hash-risk work (017-B, weather region-follow, water hash re-pins) is
+   serialized, never fanned out, and placed where the landed gate suite guards it.
+
+**Joint ranks:** several findings were independently filed by two pillar auditors (each sees
+its own side). They are deliberately kept as separate backlog entries but ranked at ONE
+position, written `A + B`. Treat them as one work item with two acceptance views. Multi-item
+ranks written `A / B` are batches of *distinct* items sharing a rank (not duplicates); only
+`A + B` pairs appear in the cross-pillar duplicate register.
+
+## Spine reconciliation — verified state vs the 2026-06-28 roadmap (FR-D-002, FR-A-002)
+
+The audit re-verified every edge of the merged roadmap's dependency spine against the tree.
+**Most of the spine's prerequisites have already landed** — the roadmap snapshot is 4 days
+stale and materially behind reality:
+
+| Spine edge | Roadmap assumption | Verified 2026-07-02 |
+| --- | --- | --- |
+| 018-B strictly before 017-B | 018-B dormant | **LANDED** (727fbc8c, `ResidencyContract.h` + locked gtests → SHIELD-12 done). 017-B may legally start. |
+| 017-A unblocks 015 A-T06 + 016 FR-E foliage | 017-A future | **LANDED** (ca2616d8/3bba2a52 → RENDER-02/GPU-01/FOLIAGE-02 done). Foliage readback rerouted; A-T06 still open (RENDER-07 + ATMO-05). |
+| 017-B required by 016 FR-E *SDF* retirement | both future | 017-B **OPEN** (SHIELD-02→03). RENDER-06 stays gated behind it — honored below. |
+| 018-E/F gates before readback consumers | future | **LANDED** (OPS-03 done: ReadbackDiscipline + DeterminismAudit + RenderReadbackAllowlist + MovingResidency). Consumers are now legal. |
+| 016 seam + FR-D reflection + registry gate the 014 pilot | 016 partially done | Seam **LANDED** (RENDER-03: friend list empty), FR-D reflection **LANDED** (RENDER-04/GPU-02). **Registry ownership is the ONE unfinished gate leg** (RENDER-12 + GPU-12), plus pilot support legs GPU-04/GPU-05/GPU-09. |
+| 019-C1 soak requires multi-connection accept | Wave-3 future | **LANDED EARLY** (NET-05 done, 45e6963f) via per-client-port multi-accept; the single-port full form is NET-11. |
+| 020-A before 020-B | Wave-0 future | **BOTH LANDED in order** (OPS-01, OPS-02 done). |
+| Determinism law | `--smoke == 6f008a9f637c40b7` | **RE-VERIFIED 2026-07-02** during this audit: run-1 == run-2 == replay, 90 ticks, 5433 chunks. |
+
+**AC-008 compliance record (read-only audit):** the audit's own writes were confined to
+`docs/audit/021/` (plus the charter itself, `docs/specs/021-engine-framework-audit-charter/`,
+untracked before this session). The tracked files dirty in `git status` —
+`res/shaders/waterfall.frag`, `data/common/foliage/scatter_set.json`,
+`data/common/materials.json`, `.forge/config.yaml`, `imgui.ini`, and 12
+`build/debug/test-artifacts/*` files — were all already dirty in the pre-audit baseline
+snapshot and are themselves first-class findings of this audit: WATER-06 (the stranded
+waterfall shader diff), FOLIAGE-08 (the scatter_set edit), and OPS-10 (test-artifact churn —
+the structural reason `git status` is never clean). The `--smoke` half was re-verified
+2026-07-02: `6f008a9f637c40b7`, run-1 == run-2 == replay.
+
+Two live blockers the roadmap did not carry (both emerged after 2026-06-28) are the
+FR-A-003 mandated findings and lead the actionable ranking (AC-007):
+
+- **RENDER-01** — headless IN_GAME render-capture hang (frame-2 main-thread block; the
+  charter's `main_client.cpp:4349` anchor has drifted — see `pillar-render.md` for the
+  verified current anchor). Blocks the 015 re-bless, the 016 parity harness, and every
+  `--frame-scan`/`--scene-config` visual proving-signal below.
+- **SHIELD-01** — the world-load hang: `EnsureSurfaceReadyNear`'s three unbounded waits, now
+  at `SHIELD_WorldSystem.cpp:2834/:2836/:2991` (the charter's `:2825/:2827/:2925` drifted).
+  Stopgap landed (SHIELD-11 done); root fix is the 017-B chain (ranks 50–52).
+
+---
+
+## The ranking
+
+### Ranks 1–33 — Landed foundation (all `done`; re-ranked, not dropped — FR-D-003)
+
+Ordered by how much of the remaining spine each unlocked:
+
+1. **OPS-03** — 018-C/E/F + FR-G-001 gate wave (MovingResidency, ReadbackDiscipline,
+   DeterminismAudit, RenderReadbackAllowlist, per-build matrix baselines). The spine's
+   "gates before consumers" prerequisite — everything below is guarded by this.
+2. **SHIELD-12** — 018-B ResidencyContract landed + locked. Opens 017-B.
+3. **SHIELD-13** — per-tick availability-set trace + static run==replay comparison
+   (report-only by design) + MovingResidency gate. The baseline 017-B must reproduce.
+4. **SHIELD-14** — 017-D wait instrumentation; measured the moving-anchor barrier at
+   p99 239ms (~50% of wall) — the quantified motive for 017-B.
+5. **SHIELD-15** — 017-B activation-queue code-grounded design + step-1 mechanism.
+6. **SHIELD-11** — load-hang stopgap: malformed-SDF guard + LUMINUMBRA_JOB_WATCHDOG +
+   phase breadcrumbs (hash-neutral).
+7. **RENDER-02 + GPU-01 + FOLIAGE-02** — 017-A AsyncReadbackRing + FR-G-001 ban gate +
+   foliage blade readback rerouted. The RHI-shaped readback seam.
+8. **RENDER-03** — 016 pass contract COMPLETE (RenderPipeline friend list empty; every pass
+   on RenderContext + typed handles). Two of the three 014 gate legs closed by this + next.
+9. **RENDER-04 + GPU-02** — 016 FR-D shader reflection + layout validation + hot-reload
+   rollback (LightingPass pilot).
+10. **OPS-01** — 020-A operability core (tree preflight, provenance manifests,
+    stale-capture refusal, manual-tier enumeration).
+11. **OPS-02** — 020-B config codegen for the FULL registry, byte-identical `config:v1:`.
+12. **ATMO-01 + ATMO-02 + RENDER-05** — 015 Pillar A core: LUT magnitude coupling,
+    lunar-phase night modes, deterministic TOD exposure seam, dedicated moon radiance channel.
+13. **WATER-04** — the water main-thread block (~450–1500ms) is DEAD (rotating sim window,
+    inline init, 220ms gate ceiling). Corrects the stale "#1 moving-lag killer" memory.
+14. **WATER-03** — water lockstep desync RESOLVED; canonical hash moved to `6f008a9f`.
+15. **WATER-01** — spec 009 phases 1–3: fixed-point virtual-pipes solver + terraform coupling.
+16. **WATER-02** — spec 010 finite hydrology landed (default-OFF, land-water-probe gated).
+17. **WATER-05** — waterfalls-from-connections landed (lake/tarn rim outlets + surface
+    connection). Corrects stale KNOWN-CONTEXT.
+18. **NET-01** — replication core incl. the ack-driven re-delta loop (landed 2026-06-19;
+    corrects stale memory).
+19. **NET-05** — 019-C1 soak harness + in-process 32-client ReplicationScale (Wave-3 item,
+    landed early; live run was N=4 — see NET-07).
+20. **NET-03** — 019-D1 busy-spin kill via bounded no-drop OutboundByteQueue.
+21. **NET-04** — 019-E1 per-client backpressure metrics + across-client p95s.
+22. **NET-02** — 019 scale-path docs/routing; lockstep demoted to oracle/replay/small-co-op.
+23. **UI-01** — Wave-0.3 create-world punch-list landed IN FULL (flex rows, tab panes,
+    slider-drag fix, knob→preview proof, preview precipitation).
+24. **UI-04** — settings screen built + fully wired (corrects "settings.rml not built").
+25. **UI-02** — headless live-diorama capture (`--preview-live/--preview-weather`).
+26. **UI-05** — creature-codex browse overlay v1 (corrects "codex UI = next").
+27. **UI-03** — lake-preview null-water crash fix (landed 2026-06-25, pre-roadmap).
+28. **FOLIAGE-04** — spec 006 farming loop phases 1–5 end-to-end (growth, germination,
+    persistence, sim→render bridge, verbs + HUD).
+29. **FOLIAGE-03** — octahedral tree impostors landed and flipped DEFAULT-ON
+    (perf-validated; corrects "default-OFF pending validation").
+30. **INSTINCT-01 / INSTINCT-02 / INSTINCT-03** *(batched — distinct done items)* — spec 005
+    complete (boids, advected scent, double-bridge foraging, heritable sensory genes), spec
+    011 ~two-thirds (energy, sleep, forager colony), species_id keystone + registry.
+31. **AETHER-01 / AETHER-02 / AETHER-03** *(batched — distinct done items)* — deterministic
+    aether field sim core, world_hash fold (bump #4, inside the current baseline), inert
+    render emissive tap. The pillar is far more built than the charter assumed — only the
+    client bridge is missing (rank 79).
+32. **AUDIO-01 / AUDIO-02 / AUDIO-03** *(batched — distinct done items)* — one-shot UAF fix,
+    post-audit coverage wave, and the three audio gate modes.
+33. **OPS-14 / SHIELD-16** *(batched — distinct done items)* — crash-diagnostics substrate;
+    preview render-radius decoupling.
+
+### Ranks 34–49 — TIER A: live defects, red/latent-red gates, hygiene quick wins
+
+34. **RENDER-01** — *(AC-007 blocker #1)* root-cause + fix the headless IN_GAME
+    render-capture hang. Highest unblock value in the backlog: gates ranks 68–75 and every
+    visual proving-signal. Signal: NEW HeadlessInGameCapture gate.
+35. **FOLIAGE-01** — FoliageInstancing gate RED (0 blades, debug flat_lands; not a 017-A
+    regression; first step = clean readback-enabled re-run). A red determinism-adjacent gate
+    is a broken oracle — fix before it masks real regressions.
+36. **FOLIAGE-11** — harden the FoliageInstancing analysis writer (readback-disabled runs
+    must fail loudly, not write vacuous green artifacts). Guards 35's diagnosis.
+37. **OPS-10** — stop tracked test-artifact churn (25 committed baselines overwritten per
+    run; silent re-bless risk — confirmed defect; also the reason `git status` is never clean).
+38. **WATER-06** *(in-progress)* — commit the stranded waterfall night-lighting shader fix
+    (HEAD sets a uniform that only exists in an uncommitted `waterfall.frag` diff — a silent
+    GL no-op until committed). Visual verify rides on rank 34.
+39. **OPS-11** *(in-progress)* — extend LUMINUMBRA_JOB_WATCHDOG to all three
+    EnsureSurfaceReadyNear waits (observability for the hang until ranks 51–53 land).
+40. **FOLIAGE-08** — reconcile the uncommitted `scatter_set.json` working-tree edit
+    (commit-with-re-bless or revert; visual state must not ride the tree).
+41. **RENDER-10** — close the FR-G-001 ban-gate coverage hole (`.ipp` files escape the scan;
+    the blocking readback in `SkyAtmosphereLut.ipp` is invisible to the gate).
+42. **AETHER-09** — reconcile the EngineGameSplitLint 'aetheric' noun ban (the mode FAILS on
+    the current tree — a latent red gate).
+43. **SHIELD-04** — wrong-sized-SDF OOB guard on the streaming promotion path (the unguarded
+    half of the load-hang hypothesis; cheap hardening).
+44. **SHIELD-05** — quarantine wrong-sized SDF at the persistence boundary.
+45. **AUDIO-04** — bank-integrity + ogg-guard ctest (mechanically enforce the
+    "everything maps to sound" standing rule + the no-ogg gotcha).
+46. **UI-12** — UI gate honesty tail (validator asserts 3/20 pinned tests; manifest
+    hardcodes passed:true).
+47. **UI-07** — `--ui-fixtures` + hermetic gallery e2e (an environmentally-RED pinned test).
+48. **OPS-04** — wire the two-tree preflight into the frontier gate + extend provenance
+    binding to RenderBudget/visual sweeps.
+49. **OPS-12 / FOLIAGE-06** *(batched — distinct items)* — raise the ctest-manifest floor to
+    the real roster; register the built-but-unregistered `octa_impostor_test`.
+
+### Ranks 50–56 — TIER B: the 017-B concurrency keystone (HIGH hash risk; serialized)
+
+The Wave-1 remainder. All prerequisites landed (ranks 2–6). Opus-inline, one increment at a
+time, availability-trace-verified per increment — never fanned out.
+
+50. **SHIELD-02** — 017-B step 1: decouple sim-truth publish from render meshing (the LOD0
+    backfill puts meshing on the hash-critical path). Gate: byte-identical `--smoke` + static
+    avail-trace MATCH.
+51. **SHIELD-03** — the deterministic activation queue (fixed pipeline-latency-K, tick-keyed
+    availability) replacing the per-tick barrier; targets the measured p99 239ms block.
+52. **SHIELD-01** — *(AC-007 blocker #2)* world-load hang ROOT FIX: bound/replace the three
+    EnsureSurfaceReadyNear waits with the activation model on the boot path. Signal: NEW
+    Test-WorldLoadBounded (20× loads, zero watchdog wedges).
+53. **SHIELD-07 + OPS-13** *(joint — same FR-D-002 axis filed from two pillars)* — the
+    fast/slow-job determinism-matrix throttle axis; the adversarial-timing proof 017-B needs.
+54. **RENDER-06** — 016 FR-E: retire the GPU-SDF synchronous readback onto the ring and
+    empty the FR-G-001 allowlist. **[SPINE]** correctly gated behind 017-B (SDF = sim truth).
+55. **SHIELD-06** — enforce 018-B in production (derive hash-exclusion scope from the
+    declared contract; today no production TU includes `ResidencyContract.h`).
+56. **SHIELD-09** — proper quiesce/epoch sync for the preview reinit-vs-far-LOD race
+    (replaces the landed point-guard).
+
+### Ranks 57–66 — TIER C: 014 pilot-gate closure → the RHI pilot (owner GPU emphasis)
+
+**[SPINE]** The hard gate (Codex #8) = 016 seam ✅ + FR-D reflection ✅ + **registry** (rank
+57) — plus the pilot support legs. The pilot itself sits at rank 66 and is not scheduled
+above any leg (FR-E-002).
+
+57. **RENDER-12 + GPU-12** *(joint)* — render-target ownership into the resource registry
+    (lifetime/load-store/history semantics; Vulkan-shaped). THE unfinished 014 gate leg.
+58. **GPU-04** — put the pilot passes on the seam: DebugViewPass, GroundDecalPass, and the
+    inline TAAU/aerial/god-rays methods onto the RenderContext contract.
+59. **GPU-05 + RENDER-13** *(joint)* — ExpectedLayout coverage 13/13 passes (reflection
+    validation currency for the HLSL port).
+60. **GPU-09** — the in-process dual-backend FLIP parity harness (offline flip_diff is
+    cross-run noisy ~0.057 → unusable as the port gate; in-process same-frame is the rule).
+61. **GPU-P01** — PilotReadiness frontier gate: machine-check all four gate legs; flips green
+    only when the pilot may legally start.
+62. **GPU-06** — link real capture SDKs (RenderDoc in-app API + Nsight path); today
+    marker-only (charter FR-E-003).
+63. **GPU-P02** — vendor Diligent (FetchContent) + `rhi/` device/swapchain bring-up +
+    `LUMIN_RHI=gl|vulkan|dx12` flag, default gl. **[SPINE NOTE — deliberate, justified]**
+    ranked before the gate closes: Codex #8's gate guards the *pilot pass ports*, not
+    vendoring/bring-up, which is CMake+device-only, ports zero passes, and is proven
+    hash-neutral by its own signal (`--smoke` unchanged). Keeps the GPU critical path warm
+    while ranks 57–60 land.
+64. **GPU-P03** — the Rhi* type set beneath the 016 handles + the RhiNoReexport mechanical
+    gate (no Diligent header escapes `rhi/`).
+65. **GPU-P04** — pilot-pair single-source HLSL (DXC→SPIR-V; SPIRV-Cross reflection diffed
+    against the landed GL-introspected layouts).
+66. **GPU-03 + GPU-P05** *(joint — P05 completes the auditor's GPU-03)* — **THE 014 PILOT
+    go/no-go**: pilot pair on GL-via-Diligent AND native Vulkan through the 016 seam,
+    in-process FLIP parity. Unblocks 015 B/C-2 downstream (ranks 74–75).
+
+### Ranks 67–75 — TIER D: 015 finish + render-framework payoff (mostly gated on rank 34)
+
+67. **RENDER-09 + ATMO-04** *(joint)* — A-T07 photo manual EV wired into the exposure seam
+    (today metadata-only). Not blocked by the capture hang (in-process pair signal).
+68. **RENDER-08 + ATMO-03** *(joint)* — moon-radiance calibration + true-midnight re-bless +
+    stale visual-baseline refresh. Needs rank 34.
+69. **RENDER-07 + ATMO-05** *(joint)* — A-T06 GPU auto-exposure through the ring. **[SPINE]**
+    both prerequisites (017-A ring, 018-E/F gates) verified landed; only rank 34 blocks the
+    re-bless.
+70. **ATMO-06** — close or formally amend 015 FR-A-001 (the remaining authored constants vs
+    full LUT-magnitude coupling).
+71. **RENDER-11** — 016 FR-C declarative frame graph (ordering exceptions become explicit
+    edges). Not a 014 gate leg; correctly after the pilot-gate tier. (RENDER-13's
+    follow-through is already covered at rank 59.)
+72. **RENDER-14** — 016 FR-F: decompose `update_time_of_day` + shrink RenderPipeline
+    (5,311 lines vs AC-008's line-drop criterion).
+73. **RENDER-16** — re-validate default-ON half-res GTAO under RenderBudget at native
+    3840x1600 (the AO bless predates Pillar A).
+74. **RENDER-15** — 015 C-1 colored shadow maps through the pass/resource contract.
+    **[SPINE]** after registry (57), before Pillar B (75) — matches Codex #9.
+75. **RENDER-17 then RENDER-18** — 015 Pillar B froxel volumetrics, then C-2 OIT/refraction.
+    **[SPINE]** gated on 016 framework + the 014 pilot (rank 66) — the deferred payoff.
+
+### Ranks 76–99 — TIER E: living-world payoff (high visible value per effort)
+
+76. **ATMO-07** — the live-play weather bridge (sim weather is currently invisible in normal
+    play — audio-only consumers). Machinery exists on both sides; needs rank 34 to prove.
+77. **ATMO-08** — consume the sim lightning StrikeSchedule live (bolt + pulse + delayed
+    thunder), replacing the random 22s timer.
+78. **ATMO-09** — feed the sim tick to `set_season_tick` in live play (seasons currently
+    frozen at tick 0) + couple the foliage autumn palette.
+79. **AETHER-04** — wire the missing sim→render aether bridge (the never-landed A1d 2/2);
+    makes the three landed done-items (rank 31) actually visible. S effort, pillar-scale payoff.
+80. **AETHER-10** — RenderContext-driven glow color/intensity setters.
+81. **INSTINCT-04** — activate the feeding loop (GrazeableComponent participants).
+82. **INSTINCT-07** — stamp the deep-ecology components on the ambient spawn (alarm, pack,
+    migration, territory currently have ZERO live participants).
+83. **INSTINCT-06** — needs consequences: starvation/exhaustion degrade → death → decay.
+    *(Batch 81–83 with one PopulatedWorldReplay re-pin.)*
+84. **INSTINCT-08** — live vertebrate scent tracking (predators hunt upwind in play).
+85. **INSTINCT-05** — complete the IAUS arbiter (Drink/Forage into DecideCreatureAction).
+86. **WATER-07 + ATMO-11** *(joint — solver side + weather side)* — drive spec-010 hydrology
+    rain/evap from `WeatherSystem::PrecipitationAt` (default-OFF, deterministic quantization).
+87. **AUDIO-05** — the SFX bus (persisted slider is currently dead).
+88. **AUDIO-07** — night soundscape (birdsong gated by sun elevation + night bed; pairs the
+    landed moon channel with audible night).
+89. **AUDIO-06** — waterfall roar (sites render silently; ComputeWaterfallRoar has zero call
+    sites).
+90. **AUDIO-08** — distance-delayed thunder cues off storm cells (replaces the 22s timer;
+    pairs with 77).
+91. **UI-06** — world-selection wired to real saves + thumbnails (SetLoadWorldCallback is
+    never called outside tests).
+92. **UI-09** — settings completeness (expose hidden resolution/sfx/music rows, live-apply).
+93. **UI-08** — extend the UI fidelity baseline to all screens at native 3840x1600.
+94. **UI-10** — codex v2: per-species best-capture thumbnails + detail pane.
+95. **UI-11** — sequenced first-session tutorial (find → photograph → codex → objective).
+96. **INSTINCT-10 then INSTINCT-11** — ecology sub-hash v2 (make AI state visible to the
+    oracle) + the real world seed into mating (currently seed=0). One batched re-pin.
+97. **INSTINCT-15** — bless the EcologyTickPerf budgets (measured but unenforced).
+98. **ATMO-10** — unify time authority on the sim tick (retire the wall-clock 60s day).
+99. **ATMO-12** — wire the consumerless WeatherEventSystem into the GameSession tick.
+
+### Ranks 100–112 — TIER E2: water/audio/aether follow-through
+
+100. **WATER-12** — the untested dam half of spec 009 AC-5 (cheap oracle strengthening).
+101. **WATER-13** — prove + document the save/load flow-momentum settle contract.
+102. **WATER-09** — close the water sub-hash localization blind spot (integer state is
+     currently attributed to no section).
+103. **WATER-10** — water-scoped debug-vs-release cross-build hash gate (spec 009 AC-4).
+104. **WATER-08** — sever the two float→sim feedback edges, then exclude the float mirrors
+     from world_hash (ONE deliberate re-blessed bump; the last unlanded water-perf step).
+105. **WATER-11** — waterfalls respond to live water + terraform (needs 104).
+106. **AUDIO-09** — EnvironmentalAudioSystem into the IN_GAME loop with real DSP (reverb is
+     a log stub; fix the `wind_loop.ogg` landmine).
+107. **AUDIO-10** — mix buses + ducking.
+108. **AUDIO-11** — physics-raycast audio occlusion (SetPhysicsSystem is never called).
+109. **AETHER-05** — author the Aetheric completion spec (research-first, per standing rule).
+110. **AETHER-06** — deterministic emitter/sink API + stateful field layer (default-OFF;
+     deliberate bump when ON).
+111. **AETHER-07 then AETHER-11, AETHER-12** — ECS emitter component + Lua sampling seam;
+     aether-modulated emissive materials; first sim/photo-scorer consumers.
+112. **AETHER-08** — Lumin/Umbra dual-polarity channel (after 109/110).
+
+### Ranks 113–121 — TIER F: the GPU deep track (post-pilot; the DLSS/RT payoff)
+
+Order per `gpu-modernization-plan.md`; every step FLIP-gated in-process per pass.
+
+113. **GPU-P09 + GPU-07** *(joint)* — the internal-render-scale seam (registry-owned scaled
+     G-Buffer chain, mip bias, TAAU actually upsampling; scale=1.0 byte-identical). THE DLSS
+     precondition.
+114. **GPU-P06 + GPU-08** *(joint)* — Group-F single-source HLSL port (~53 shaders,
+     risk-ordered batches, ported-HLSL-on-GL FLIP-validated before any backend port).
+115. **FOLIAGE-09** — drop the `GL_ARB_gpu_shader_int64` hard requirement from the scatter
+     compute (bit-exact 32-bit-pair splitmix64) so it ports under the RHI track.
+116. **GPU-P07** — pass-by-pass native-Vulkan port in increasing-coupling order (TAAU last,
+     as the DLSS fallback path) → the full-Vulkan milestone.
+117. **GPU-P10 + GPU-11** *(joint)* — the IUpscaler provider contract; TAAU first provider;
+     FSR2/3 + XeSS named behind the same seam (FR-E-004 — DLSS is never the sole path).
+118. **GPU-P11 + GPU-13** *(joint)* — DLSS via NVIDIA Streamline at the extracted TAAU point
+     (runtime RTX detection, TAAU fallback, dev/ship DLL split). Requires Vulkan/DX12 (116).
+119. **GPU-P08** — DX12 backend bring-up behind the same seam (DXIL reuse of 114).
+120. **GPU-P12** — BLAS/TLAS streaming infrastructure (budgeted refit-vs-rebuild; SDF
+     far-field stays analytic — no far-field BLAS ever).
+121. **GPU-P13 + GPU-10** *(joint)*, then **GPU-P14** — RT-GI/AO pass alongside the untouched
+     software ShieldRtFarFieldPass (augments, never replaces — 014 OQ-3), validated on the
+     caverns scene where it closes the cave-lighting half of the coarse-LOD gap; then RT
+     water reflections.
+
+### Ranks 122–137 — TIER G: scale, structural, and the long tail
+
+122. **NET-06** — delta-vs-acked ON for the scale paths (zero non-test callers today).
+123. **NET-07** — the over-the-wire soak at full N=32 + freeze the bandwidth baseline +
+     NetSoak gate mode.
+124. **NET-08** — GNS over-the-wire matrix (build GNS, loss/jitter/reorder gates over real UDP).
+125. **NET-11** — true single-port multi-connection accept (the real dedicated-server shape;
+     depends on the GNS build at 124).
+126. **NET-09** — the FR-D-002/003 backpressure policy, decided from 123's soak data.
+127. **NET-13** — POSIX TcpTransport (a Linux dedicated server currently cannot network).
+128. **NET-12** — Steam SDR second-machine validation — explicitly deferred to hardware
+     (TDD-LOCK scenario; GNS is the local proxy).
+129. **SHIELD-08** — far-field fidelity: coarse LOD + far tiles reduce the SAME SDF (caves/
+     edits currently vanish at distance). XL; the geometry half of the gap whose lighting
+     half RT-GI (121) covers.
+130. **OPS-05** — retire the root `build/` tree (strict preflight; fix the dormant ci.yml).
+131. **OPS-09** — charter the scheduled local full-gate run (nightly Build → UnitTests →
+     All → matrix-Quick → RenderBudget with a dated artifact).
+132. **OPS-07 then OPS-08** — config owning-constant drift check; generated shared constant
+     header + config-side hot-reload rollback.
+133. **FOLIAGE-05** — re-task the forest budget to a GREEN posture (model the landed
+     impostor path; invert the intentionally-RED gate).
+134. **FOLIAGE-07** — spec 006 Phase 6: per-(genome,stage) mesh cache + instanced draws for
+     10k-plant fields (retire the rebake-everything path).
+135. **FOLIAGE-10** — richer tree morphology under the same deterministic visual-only contract.
+136. **INSTINCT-09** — unify the two AI stacks onto one PerceptionSystem substrate (L/high;
+     after the participant-activation batch proves the IAUS side live).
+137. **INSTINCT-12, INSTINCT-14** — per-species behaviour data; server-authoritative nests
+     (needs 019 online — after 122–126).
+
+### Ranks 138–146 — TIER H: docs/consistency debt (cheap, autonomous-lane filler)
+
+138. **WATER-15** — river-channel fidelity beyond the 8×8 grid (XL/high — parked here
+     deliberately: cost/risk dominates until the GPU track settles; render-side channel
+     detail may obsolete it).
+139. **ATMO-13** — region-follow weather/wind grids (HIGH world_hash-semantics risk; needs
+     its own spec-level determinism design before scheduling).
+140. **ATMO-14** — snow-cover ground response (render-only; after 76/99).
+141. **SHIELD-10** — refresh `docs/shield/sdf-contract.md` (two-tier producer contract) +
+     stale line refs.
+142. **INSTINCT-13** — fix stale determinism-critical comments in CreatureBrainSystem.h.
+143. **WATER-14** — water docs debt (spec 009 status, missing spec-010 directory,
+     stale resolution comment).
+144. **NET-10** — AC-B-001 demotion language in headers + arch-doc line-anchor drift.
+145. **AUDIO-12, AUDIO-13** — prune 7 unloaded ogg banks + 5 orphan header-only systems;
+     refresh the audio architecture doc.
+146. **AUDIO-14, OPS-06, OPS-15, ATMO-15** — photography sound set (pre-iter-7); 'build both
+     trees' doc correction in 016/018/019; the harness operator doc (18 flags); delete the
+     dead `skybox.frag` trap.
+
+---
+
+## Cross-pillar duplicate register (kept as separate items, ranked jointly)
+
+| Joint rank | Items | One work item |
+| --- | --- | --- |
+| 7 | RENDER-02 / GPU-01 / FOLIAGE-02 | 017-A ring (done) |
+| 9 | RENDER-04 / GPU-02 | FR-D reflection (done) |
+| 12 | ATMO-01+02 / RENDER-05 | 015 Pillar A core (done) |
+| 53 | SHIELD-07 / OPS-13 | FR-D-002 job-throttle matrix axis |
+| 57 | RENDER-12 / GPU-12 | registry resource ownership |
+| 59 | GPU-05 / RENDER-13 | ExpectedLayout 13/13 |
+| 66 | GPU-03 / GPU-P05 | the 014 pilot |
+| 67 | RENDER-09 / ATMO-04 | photo manual EV |
+| 68 | RENDER-08 / ATMO-03 | moon calibration re-bless |
+| 69 | RENDER-07 / ATMO-05 | A-T06 auto-exposure |
+| 86 | WATER-07 / ATMO-11 | weather-driven hydrology |
+| 113 | GPU-P09 / GPU-07 | internal-render-scale seam |
+| 114 | GPU-P06 / GPU-08 | Group-F HLSL port |
+| 117 | GPU-P10 / GPU-11 | IUpscaler + FSR/XeSS |
+| 118 | GPU-P11 / GPU-13 | DLSS via Streamline |
+| 121 | GPU-P13 / GPU-10 | RT-GI/AO |
+
+## Spine-inversion register (AC-003)
+
+Exactly one deliberate inversion, justified inline at its rank:
+
+- **Rank 63 (GPU-P02, Diligent vendoring/bring-up) ahead of full pilot-gate closure** — the
+  Codex-#8 gate guards the pilot *pass ports*; vendoring + device bring-up ports zero passes,
+  is hash-neutral by its own proving signal, and de-risks the pilot's longest lead item. The
+  pilot itself (rank 66) remains strictly behind every gate leg (ranks 57–61).
+
+All other orderings honor the spine as verified in the reconciliation table above.
