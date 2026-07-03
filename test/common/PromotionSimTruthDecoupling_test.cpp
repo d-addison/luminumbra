@@ -77,10 +77,7 @@ private:
     fs::path root_;
 };
 
-// DISABLED_ until the SHIELD-02 cut lands (increment 2 removes the prefix): the
-// decoupling pin is deliberately RED on pre-SHIELD-02 code — run it red with
-// --gtest_also_run_disabled_tests to verify the proving signal before the cut.
-TEST(PromotionSimTruthDecoupling, DISABLED_SimTruthPublishesIndependentlyOfRenderMesh) {
+TEST(PromotionSimTruthDecoupling, SimTruthPublishesIndependentlyOfRenderMesh) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup();
@@ -180,6 +177,11 @@ TEST(PromotionSimTruthDecoupling, DISABLED_SimTruthPublishesIndependentlyOfRende
             << "render-mesh publish mutated heightmap_data";
         EXPECT_EQ(HashVec(target->material_data), material_hash)
             << "render-mesh publish mutated material_data";
+
+        // The promotion lane actually carried the work (not some other path).
+        EXPECT_GT(world->promotion_dispatch_totals().chunks, 0u)
+            << "no promotion-lane dispatches recorded — the target was promoted "
+               "by something other than the SHIELD-02 promotion pipeline";
     }
     jobs.shutdown();
 }

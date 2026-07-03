@@ -632,6 +632,16 @@ public:
     // stage-B batch WITHOUT waiting for it. Lets callers (and tests) observe
     // sim truth going live independently of any render-mesh publish.
     void wait_for_promotion_jobs();
+    // SHIELD-02 telemetry: lifetime totals of promotion-lane dispatches
+    // (batches, chunks). Static smoke runs are expected to record ZERO (the
+    // resident set is constant post-boot); moving runs exercise the lane.
+    struct PromotionDispatchTotals {
+        std::uint64_t batches = 0;
+        std::uint64_t chunks = 0;
+    };
+    PromotionDispatchTotals promotion_dispatch_totals() const {
+        return {m_promotion_batches_dispatched, m_promotion_chunks_dispatched};
+    }
     // Shared-ownership snapshot of every streamed chunk (save path).
     std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_streamed_chunks() const;
     std::shared_ptr<::Luminumbra::Chunk> find_streamed_chunk(const IVec3& coords) const;
@@ -677,6 +687,9 @@ private:
     };
 
     StreamingState m_streaming_state;
+    // SHIELD-02 telemetry (main-thread, never hashed).
+    std::uint64_t m_promotion_batches_dispatched = 0;
+    std::uint64_t m_promotion_chunks_dispatched = 0;
     StreamingBudgetFrameStats m_last_streaming_budget_stats;
     DbgStreamTimings m_dbg_stream;  // TEMP diag
     StreamingTelemetryStats m_streaming_telemetry_stats;

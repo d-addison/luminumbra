@@ -351,6 +351,14 @@ SHIELD_WorldSystem::SHIELD_WorldSystem(JobSystem* job_system, WaterSystem* water
 
 SHIELD_WorldSystem::~SHIELD_WorldSystem() {
     wait_for_generation_jobs();
+    // Drain promotion workers with RAW waits — teardown must not publish or
+    // dispatch stage-B jobs, only guarantee no worker still touches chunks.
+    if (m_job_system && m_streaming_state.promotion_job_handle_high.counter) {
+        m_job_system->wait(m_streaming_state.promotion_job_handle_high);
+    }
+    if (m_job_system && m_streaming_state.promotion_job_handle.counter) {
+        m_job_system->wait(m_streaming_state.promotion_job_handle);
+    }
     wait_for_meshing_jobs();
 }
 
@@ -400,12 +408,154 @@ void SHIELD_WorldSystem::wait_for_promotion_jobs() {
 }
 
 void SHIELD_WorldSystem::process_completed_promotion_jobs() {
-    // SHIELD-02: the stage-A sim-truth publish + stage-B render-mesh dispatch
-    // land with the cut. Until dispatch_promotion_jobs feeds this state, the
-    // promotion pipeline is always empty and this is a no-op.
-    if (m_streaming_state.promotion_job_chunks.empty() &&
-        m_streaming_state.pending_promotion_mesh.empty()) {
+    // Stage-A publish: only once BOTH promotion batches have fully drained
+    // (mirrors process_completed_meshing_jobs' both-lanes gate) — publication
+    // order is the dispatch order, which is the deterministic candidate-sort
+    // order, so run == replay.
+    if (!m_streaming_state.promotion_job_chunks.empty() && !promotion_jobs_active()) {
+        for (auto& job_chunk : m_streaming_state.promotion_job_chunks) {
+            auto& chunk = job_chunk.chunk;
+            if (!chunk) {
+                continue;
+            }
+            const bool ready = chunk->pending_promotion_ready.load(std::memory_order_acquire);
+            const bool failed = chunk->pending_promotion_failed.load(std::memory_order_acquire);
+            if (ready && !failed && !chunk->pending_sdf_data.empty()) {
+                // The LOD0-promotion publish (T-I3-1, moved here from
+                // process_completed_meshing_jobs by SHIELD-02): pure
+                // generation output, not an edit — the dirty flag stays
+                // clear (matching GenerateChunkData's contract).
+                chunk->sdf_data = std::move(chunk->pending_sdf_data);
+                chunk->heightmap_data = std::move(chunk->pending_heightmap_data);
+                // FR-B1: publish the promoted structure material channel
+                // alongside the SDF (empty -> empty, lazy alloc preserved).
+                chunk->material_data = std::move(chunk->pending_material_data);
+                chunk->clear_voxel_data_dirty();
+                m_streaming_state.pending_promotion_mesh.push_back(job_chunk);
+            } else {
+                // Stage-A failure: revert the transient Meshing state (the
+                // meshing lane's failure reversion, verbatim) so the chunk
+                // re-candidates on a later pass.
+                if (chunk->mesh_vertices.empty() || chunk->mesh_indices.empty()) {
+                    chunk->set_state(Luminumbra::ChunkState::Idle);
+                } else {
+                    chunk->set_state(Luminumbra::ChunkState::Ready);
+                }
+                chunk->pending_lod.store(-1, std::memory_order_release);
+            }
+            chunk->pending_sdf_data.clear();
+            chunk->pending_heightmap_data.clear();
+            chunk->pending_material_data.clear();
+            chunk->pending_promotion_ready.store(false, std::memory_order_release);
+            chunk->pending_promotion_failed.store(false, std::memory_order_release);
+        }
+        m_streaming_state.promotion_job_chunks.clear();
+        m_streaming_state.promotion_job_handle = {};
+        m_streaming_state.promotion_job_handle_high = {};
+    }
+
+    // Stage-B dispatch: render meshes for published promotions, down the
+    // ordinary meshing lane. The items re-classify as non-promotion there
+    // (their live sdf_data is full now), so there is no recursion.
+    if (!m_streaming_state.pending_promotion_mesh.empty() && !meshing_jobs_active()) {
+        std::vector<MeshingWorkItem> stage_b;
+        stage_b.reserve(m_streaming_state.pending_promotion_mesh.size());
+        for (const auto& item : m_streaming_state.pending_promotion_mesh) {
+            if (!item.chunk) {
+                continue;
+            }
+            // Deterministic orphan guard: a chunk evicted mid-pipeline must
+            // not be resurrected by its render-mesh dispatch (the eviction
+            // pass is main-thread deterministic, so this skip is too).
+            const auto it = m_streaming_state.chunks.find(item.chunk->get_id());
+            if (it == m_streaming_state.chunks.end() || it->second.get() != item.chunk.get()) {
+                continue;
+            }
+            stage_b.push_back({item.chunk, item.lod_level, /*terrain_mesh_required=*/true,
+                               item.high_priority});
+        }
+        m_streaming_state.pending_promotion_mesh.clear();
+        if (!stage_b.empty()) {
+            dispatch_meshing_jobs(stage_b);
+        }
+    }
+}
+
+void SHIELD_WorldSystem::dispatch_promotion_jobs(const std::vector<MeshingWorkItem>& chunks_to_promote) {
+    process_completed_promotion_jobs();
+    if (promotion_jobs_active()) {
+        // One promotion batch in flight at a time (the meshing lane's
+        // semantics); refused items re-candidate on a later pass, exactly as
+        // a refused meshing dispatch would.
         return;
+    }
+
+    std::vector<Luminumbra::Job> high_priority_jobs;
+    std::vector<Luminumbra::Job> normal_priority_jobs;
+    m_streaming_state.promotion_job_chunks.clear();
+    m_streaming_state.promotion_job_chunks.reserve(chunks_to_promote.size());
+    for (const MeshingWorkItem& work_item : chunks_to_promote) {
+        auto& chunk = work_item.chunk;
+        // Same state trajectory as a meshing dispatch: a chunk with an active
+        // (coarse) mesh stays Ready so it keeps rendering while the promotion
+        // is pending; a meshless chunk flips to Meshing.
+        const bool has_active_mesh = chunk->get_state() == Luminumbra::ChunkState::Ready &&
+            !chunk->mesh_vertices.empty() && !chunk->mesh_indices.empty();
+        if (!has_active_mesh) {
+            chunk->set_state(Luminumbra::ChunkState::Meshing);
+        }
+        chunk->pending_sdf_data.clear();
+        chunk->pending_heightmap_data.clear();
+        chunk->pending_material_data.clear();
+        chunk->pending_promotion_ready.store(false, std::memory_order_release);
+        chunk->pending_promotion_failed.store(false, std::memory_order_release);
+        chunk->pending_lod.store(work_item.lod_level, std::memory_order_release);
+        m_streaming_state.promotion_job_chunks.push_back(
+            {chunk, work_item.lod_level, work_item.high_priority});
+
+        auto& lane_jobs = work_item.high_priority ? high_priority_jobs : normal_priority_jobs;
+        lane_jobs.emplace_back([this, chunk]() {
+            try {
+                // Build the full LOD0 voxel field into a scratch chunk and
+                // stage it — the live chunk's sdf_data is never touched off
+                // the main thread (a concurrent far-LOD sampler must never
+                // observe a half-written field).
+                Luminumbra::Chunk scratch(chunk->get_coords());
+                GenerateChunkData(scratch, 1);
+                chunk->pending_sdf_data = std::move(scratch.sdf_data);
+                chunk->pending_heightmap_data = std::move(scratch.heightmap_data);
+                chunk->pending_material_data = std::move(scratch.material_data);
+                chunk->pending_promotion_ready.store(true, std::memory_order_release);
+            } catch (const std::exception& e) {
+                LUMINUMBRA_CORE_ERROR("PROMOTION JOB CRASH: Chunk ({},{},{}) failed: {}",
+                    chunk->get_coords().x, chunk->get_coords().y, chunk->get_coords().z, e.what());
+                chunk->pending_promotion_failed.store(true, std::memory_order_release);
+            } catch (...) {
+                LUMINUMBRA_CORE_ERROR("PROMOTION JOB CRASH: Chunk ({},{},{}) failed with unknown exception",
+                    chunk->get_coords().x, chunk->get_coords().y, chunk->get_coords().z);
+                chunk->pending_promotion_failed.store(true, std::memory_order_release);
+            }
+        });
+    }
+    m_promotion_batches_dispatched++;
+    m_promotion_chunks_dispatched += m_streaming_state.promotion_job_chunks.size();
+
+    if (m_job_system && (!high_priority_jobs.empty() || !normal_priority_jobs.empty())) {
+        if (!high_priority_jobs.empty()) {
+            m_streaming_state.promotion_job_handle_high =
+                m_job_system->dispatch_batch(high_priority_jobs, JobPriority::High);
+        }
+        if (!normal_priority_jobs.empty()) {
+            m_streaming_state.promotion_job_handle = m_job_system->dispatch_batch(normal_priority_jobs);
+        }
+    } else {
+        for (auto& job : high_priority_jobs) {
+            job();
+        }
+        for (auto& job : normal_priority_jobs) {
+            job();
+        }
+        process_completed_promotion_jobs();
     }
 }
 
@@ -2107,6 +2257,11 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
     };
     clear_completed_job_handle(m_streaming_state.generation_job_handle);
     process_completed_meshing_jobs();
+    // SHIELD-02: the client publish point for the promotion lane (the server
+    // publishes inside the per-tick sequenced barrier instead) — publishes
+    // completed stage-A sim truth and dispatches stage B once the meshing
+    // lanes are free.
+    process_completed_promotion_jobs();
     _dbg_split(m_dbg_stream.process_completed);
 
     // Hydro prefetch: warm the erosion-region cache around each anchor AHEAD of
@@ -2371,7 +2526,11 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
             ++terrain_meshing_backlog;
         }
     }
-    const bool meshing_job_active = meshing_jobs_active();
+    // SHIELD-02: the promotion pipeline occupies what used to be meshing-lane
+    // work, so it participates in the same one-batch-in-flight backpressure.
+    // On the per-tick-quiesced server paths both terms are always false here
+    // (the sequenced barrier drained them), so this is byte-neutral there.
+    const bool meshing_job_active = meshing_jobs_active() || promotion_pipeline_pending();
     m_last_streaming_budget_stats.meshing_job_active = meshing_job_active;
     // Scale the per-dispatch meshing batch with the standing terrain backlog:
     // deep backlogs (initial load, fast travel) dispatch larger batches so
@@ -2451,6 +2610,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
         const bool produced_work = !meshing_candidates.empty() ||
                                    m_last_streaming_budget_stats.deferred_meshing > 0;
         const bool quiescent = !produced_work && !meshing_jobs_active() &&
+                               !promotion_pipeline_pending() &&
                                !has_active_job(m_streaming_state.generation_job_handle);
         m_last_pass_drained = quiescent;
         if (quiescent) {
@@ -2596,7 +2756,10 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
         m_last_streaming_budget_stats.loading_chunks,
         m_last_streaming_budget_stats.idle_chunks,
         has_active_job(m_streaming_state.generation_job_handle),
-        meshing_jobs_active(),
+        // SHIELD-02: promotion work counts as meshing-lane pressure (it was
+        // meshing-lane work before the decoupling). Byte-neutral on the
+        // per-tick-quiesced server paths — both terms read false there.
+        meshing_jobs_active() || promotion_pipeline_pending(),
         anchors.size()
     );
 
@@ -2883,6 +3046,15 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
     Luminumbra::Core::WaitWithJobWatchdog(job_watchdog,
         "EnsureSurfaceReadyNear/meshing-drain",
         [this]() { wait_for_meshing_jobs(); });
+    // SHIELD-02: settle the two-stage promotion pipeline too (publish staged
+    // sim truth, dispatch + drain the stage-B render meshes) so the surface
+    // band below observes fully settled chunks, exactly as before the split.
+    Luminumbra::Core::WaitWithJobWatchdog(job_watchdog,
+        "EnsureSurfaceReadyNear/promotion-drain",
+        [this]() {
+            wait_for_promotion_jobs();
+            wait_for_meshing_jobs();
+        });
 
     const IVec3 center_chunk = world_to_chunk_coords(world_pos);
     const int radius = std::max(0, surface_radius);
@@ -4105,6 +4277,50 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
         return;
     }
 
+    // SHIELD-02 (spec 017-B step 1): LOD0 promotions of chunks without a full
+    // voxel field ride the sim-truth PROMOTION lane — stage A generates the
+    // field, the main thread publishes it, and only then is the render mesh
+    // dispatched back through here (stage B, re-classifying as non-promotion
+    // because the live sdf_data is full by then). Meshing never generates.
+    // Classification happens HERE on the main thread (sdf_data is main-thread-
+    // owned between dispatch and job start, so the value matches what the old
+    // in-job test read). SHIELD-04 (spec 021): a non-empty but WRONG-SIZED
+    // sdf_data (corrupt save / stale coarse producer) must never be copied
+    // into the unit-step polygonise — its corner indexing assumes the full
+    // (CHUNK+1)^3 lattice and would read out of bounds; it re-routes through
+    // the promotion lane to regenerate (mirrors the EnsureSurfaceReadyNear
+    // guard; generation is a pure function of seed/params, so this is
+    // hash-neutral for valid worlds).
+    std::vector<MeshingWorkItem> promotion_items;
+    std::vector<MeshingWorkItem> mesh_items;
+    mesh_items.reserve(chunks_to_mesh.size());
+    for (const MeshingWorkItem& work_item : chunks_to_mesh) {
+        const int step = get_lod_step_for_level(work_item.lod_level);
+        const bool needs_sim_truth = work_item.terrain_mesh_required && step <= 1 &&
+                                     work_item.chunk->sdf_data.size() != kFullSdfLattice;
+        if (needs_sim_truth && !work_item.chunk->sdf_data.empty()) {
+            LUMINUMBRA_CORE_WARN(
+                "Meshing promotion: chunk ({},{},{}) has malformed sdf_data "
+                "(size {} != full lattice {}) — regenerating instead of meshing it",
+                work_item.chunk->get_coords().x, work_item.chunk->get_coords().y,
+                work_item.chunk->get_coords().z,
+                work_item.chunk->sdf_data.size(), kFullSdfLattice);
+        }
+        (needs_sim_truth ? promotion_items : mesh_items).push_back(work_item);
+    }
+    // Guard: only hand items to the promotion lane when its whole pipeline is
+    // idle. This makes the stage-B re-entry into dispatch_meshing_jobs
+    // structurally impossible mid-dispatch (the publish inside
+    // dispatch_promotion_jobs' head can only ever see empty state from here),
+    // rather than relying on the caller-side scheduling gate alone. Refused
+    // items re-candidate on a later pass — the meshing lane's semantics.
+    if (!promotion_items.empty() && !promotion_pipeline_pending()) {
+        dispatch_promotion_jobs(promotion_items);
+    }
+    if (mesh_items.empty()) {
+        return;
+    }
+
     // Snapshot meshed-chunk LODs per horizontal column once so the
     // transition-face checks below are hash lookups instead of a full
     // chunk-map scan per face per work item (O(batch * chunks) before,
@@ -4140,34 +4356,12 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
     std::vector<Luminumbra::Job> high_priority_jobs;
     std::vector<Luminumbra::Job> normal_priority_jobs;
     m_streaming_state.meshing_job_chunks.clear();
-    m_streaming_state.meshing_job_chunks.reserve(chunks_to_mesh.size());
-    for (const MeshingWorkItem& work_item : chunks_to_mesh) {
+    m_streaming_state.meshing_job_chunks.reserve(mesh_items.size());
+    for (const MeshingWorkItem& work_item : mesh_items) {
         auto& chunk = work_item.chunk;
         const int lod_level = work_item.lod_level;
         const bool terrain_mesh_required = work_item.terrain_mesh_required;
         const int step = get_lod_step_for_level(lod_level);
-        // SHIELD-02: classify the LOD0 promotion at DISPATCH time on the main
-        // thread (sdf_data is main-thread-owned between dispatch and job
-        // start, so this reads the same value the job used to test). SHIELD-04
-        // (spec 021): a non-empty but WRONG-SIZED sdf_data (corrupt save /
-        // stale coarse producer) must never be copied into the unit-step
-        // polygonise — its corner indexing assumes the full (CHUNK+1)^3
-        // lattice and would read out of bounds. Regenerate the full lattice
-        // instead (mirrors the EnsureSurfaceReadyNear guard; generation is a
-        // pure function of seed/params, so this is hash-neutral for valid
-        // worlds).
-        const bool sdf_malformed = terrain_mesh_required && step <= 1 &&
-                                   !chunk->sdf_data.empty() &&
-                                   chunk->sdf_data.size() != kFullSdfLattice;
-        if (sdf_malformed) {
-            LUMINUMBRA_CORE_WARN(
-                "Meshing promotion: chunk ({},{},{}) has malformed sdf_data "
-                "(size {} != full lattice {}) — regenerating instead of meshing it",
-                chunk->get_coords().x, chunk->get_coords().y, chunk->get_coords().z,
-                chunk->sdf_data.size(), kFullSdfLattice);
-        }
-        const bool needs_sim_truth = terrain_mesh_required && step <= 1 &&
-                                     chunk->sdf_data.size() != kFullSdfLattice;
         const bool has_active_mesh = chunk->get_state() == Luminumbra::ChunkState::Ready &&
             !chunk->mesh_vertices.empty() && !chunk->mesh_indices.empty();
 
@@ -4209,7 +4403,7 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
         m_streaming_state.meshing_job_chunks.push_back({chunk, terrain_mesh_required, transition_faces});
 
         auto& lane_jobs = work_item.high_priority ? high_priority_jobs : normal_priority_jobs;
-        lane_jobs.emplace_back([this, chunk, step, transition_faces, terrain_mesh_required, needs_sim_truth]() {
+        lane_jobs.emplace_back([this, chunk, step, transition_faces, terrain_mesh_required]() {
             try {
                 Luminumbra::Chunk scratch(chunk->get_coords());
                 scratch.water_level_data = chunk->water_level_data;
@@ -4219,21 +4413,33 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
                 scratch.water_mesh_generated.store(false, std::memory_order_release);
                 scratch.current_water_resolution.store(chunk->current_water_resolution.load(std::memory_order_acquire), std::memory_order_release);
 
-                bool backfilled_voxel_data = false;
                 if (terrain_mesh_required) {
-                    if (needs_sim_truth) {
-                        // LOD0 promotion of a chunk generated surface-band
-                        // only (T-I3-1): build the full voxel field into the
-                        // scratch chunk here and stage it for main-thread
-                        // publication alongside the mesh, so the previous
-                        // coarse mesh stays renderable while pending and the
-                        // live chunk's sdf_data is never touched off-thread.
-                        GenerateChunkData(scratch, 1);
-                        backfilled_voxel_data = true;
-                    } else {
-                        scratch.sdf_data = chunk->sdf_data;
-                        scratch.heightmap_data = chunk->heightmap_data;
+                    if (step <= 1 && chunk->sdf_data.size() != kFullSdfLattice) {
+                        // SHIELD-02 tripwire: meshing NEVER generates sim
+                        // truth. A unit-step item without a full live voxel
+                        // field must have been routed through the promotion
+                        // lane at dispatch — reaching here is a regression of
+                        // the 017-B decoupling, not a recoverable state.
+                        LUMINUMBRA_CORE_ERROR(
+                            "MESHING JOB: chunk ({},{},{}) reached the render-only meshing "
+                            "lane without full sim truth (sdf size {} != {}) — the SHIELD-02 "
+                            "promotion routing is broken; failing the mesh",
+                            chunk->get_coords().x, chunk->get_coords().y, chunk->get_coords().z,
+                            chunk->sdf_data.size(), kFullSdfLattice);
+                        chunk->pending_mesh_failed.store(true, std::memory_order_release);
+                        return;
                     }
+                    scratch.sdf_data = chunk->sdf_data;
+                    scratch.heightmap_data = chunk->heightmap_data;
+                    // SHIELD-02: carry the live material channel so stage-B
+                    // promotion meshes classify authored structure voxels
+                    // exactly as the old fused backfill+mesh job did (its
+                    // scratch had materials stamped by GenerateChunkData).
+                    // Also fixes the latent authored-material loss on plain
+                    // remeshes, which copied only sdf+heightmap. Mesh bytes
+                    // are world_hash-excluded either way (empty -> empty,
+                    // FR-B1 lazy alloc preserved).
+                    scratch.material_data = chunk->material_data;
 
                     // 1. Generate the terrain mesh from the SDF data into a scratch chunk.
                     Luminumbra::World::MarchingCubes::PolygoniseTerrain(*this, scratch, 0.0f, step);
@@ -4257,16 +4463,6 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
                 if (terrain_mesh_required) {
                     chunk->pending_mesh_vertices = std::move(scratch.mesh_vertices);
                     chunk->pending_mesh_indices = std::move(scratch.mesh_indices);
-                    if (backfilled_voxel_data) {
-                        chunk->pending_sdf_data = std::move(scratch.sdf_data);
-                        chunk->pending_heightmap_data = std::move(scratch.heightmap_data);
-                        // FR-B1: carry the structure material channel through the
-                        // promotion lane. GenerateChunkData stamped it into the
-                        // scratch chunk; staging it here (empty when the promoted
-                        // chunk has no structure voxels) keeps promoted chunks'
-                        // structure materials, so run == replay.
-                        chunk->pending_material_data = std::move(scratch.material_data);
-                    }
                 }
                 chunk->pending_water_mesh_vertices = std::move(scratch.water_mesh_vertices);
                 chunk->pending_water_mesh_indices = std::move(scratch.water_mesh_indices);
@@ -4330,18 +4526,10 @@ void SHIELD_WorldSystem::process_completed_meshing_jobs() {
 
         if (mesh_ready && !mesh_failed) {
             if (job_chunk.terrain_mesh_required) {
-                if (!chunk->pending_sdf_data.empty()) {
-                    // LOD0-promotion backfill (T-I3-1): publish the full
-                    // voxel field generated inside the meshing job. Pure
-                    // generation output, not an edit - the dirty flag stays
-                    // clear (matching GenerateChunkData's contract).
-                    chunk->sdf_data = std::move(chunk->pending_sdf_data);
-                    chunk->heightmap_data = std::move(chunk->pending_heightmap_data);
-                    // FR-B1: publish the promoted structure material channel
-                    // alongside the SDF (empty -> empty, lazy alloc preserved).
-                    chunk->material_data = std::move(chunk->pending_material_data);
-                    chunk->clear_voxel_data_dirty();
-                }
+                // SHIELD-02 (spec 017-B step 1): the LOD0-promotion backfill
+                // publish that used to live here moved to
+                // process_completed_promotion_jobs — the meshing lane is
+                // render-only and never writes sim truth.
                 chunk->mesh_vertices = std::move(chunk->pending_mesh_vertices);
                 chunk->mesh_indices = std::move(chunk->pending_mesh_indices);
                 chunk->current_lod.store(completed_lod, std::memory_order_release);
@@ -4367,9 +4555,8 @@ void SHIELD_WorldSystem::process_completed_meshing_jobs() {
         chunk->pending_mesh_indices.clear();
         chunk->pending_water_mesh_vertices.clear();
         chunk->pending_water_mesh_indices.clear();
-        chunk->pending_sdf_data.clear();
-        chunk->pending_heightmap_data.clear();
-        chunk->pending_material_data.clear();
+        // SHIELD-02: pending_sdf/heightmap/material_data are promotion-lane
+        // staging now — the meshing lane neither writes nor clears them.
         chunk->pending_mesh_ready.store(false, std::memory_order_release);
         chunk->pending_mesh_failed.store(false, std::memory_order_release);
         chunk->pending_lod.store(-1, std::memory_order_release);
@@ -4381,24 +4568,24 @@ void SHIELD_WorldSystem::process_completed_meshing_jobs() {
 }
 
 void SHIELD_WorldSystem::set_params(const TerrainGenParams& params) {
-    wait_for_generation_jobs();
-    wait_for_meshing_jobs();
+    // SHIELD-02: the full sequenced drain — promotion stage-A jobs run
+    // GenerateChunkData concurrently, so generator state must not be mutated
+    // until the whole pipeline (including stage B) has settled.
+    wait_for_streaming_jobs();
 
     m_params = params;
     reinitialize_noise();
 }
 
 void SHIELD_WorldSystem::set_seed(int seed) {
-    wait_for_generation_jobs();
-    wait_for_meshing_jobs();
+    wait_for_streaming_jobs();
 
     m_seed = seed;
     reinitialize_noise();
 }
 
 void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
-    wait_for_generation_jobs();
-    wait_for_meshing_jobs();
+    wait_for_streaming_jobs();
 
     if (physics_system) {
         for (const auto& [id, chunk] : m_streaming_state.chunks) {
@@ -4410,8 +4597,7 @@ void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
 }
 
 void SHIELD_WorldSystem::regenerate_all_chunks(PhysicsSystem* physics_system) {
-    wait_for_generation_jobs();
-    wait_for_meshing_jobs();
+    wait_for_streaming_jobs();
 
     LUMINUMBRA_CORE_INFO("Regenerating all active chunks...");
     std::vector<IVec3> coords_to_regenerate;
@@ -4439,13 +4625,34 @@ IVec3 SHIELD_WorldSystem::world_to_chunk_coords(const Vec3& position) {
 
 void SHIELD_WorldSystem::SetGPUSDFCallback(std::function<bool(const IVec3&, const TerrainGenParams&, int, std::vector<float>&)> callback) {
     wait_for_generation_jobs();
+    // SHIELD-02: promotion stage-A jobs run GenerateChunkData too (which may
+    // consult the callback) — raw waits; publication is not this call's job.
+    if (m_job_system && m_streaming_state.promotion_job_handle_high.counter) {
+        m_job_system->wait(m_streaming_state.promotion_job_handle_high);
+    }
+    if (m_job_system && m_streaming_state.promotion_job_handle.counter) {
+        m_job_system->wait(m_streaming_state.promotion_job_handle);
+    }
 
     m_gpu_sdf_callback = callback;
 }
 
 void SHIELD_WorldSystem::wait_for_streaming_jobs() {
+    // SHIELD-02 (spec 017-B step 1): the SEQUENCED drain. Sim truth for LOD0
+    // promotions is generated on the promotion lane and published before its
+    // render mesh is dispatched (stage B) — and the whole two-stage pipeline
+    // still settles inside ONE call, so every per-tick observation point
+    // (availability digest, collision pass, water init, world_hash) sees
+    // exactly the same settled state per tick as the old fused pipeline.
     wait_for_generation_jobs();
-    wait_for_meshing_jobs();
+    wait_for_meshing_jobs();      // publish any in-flight render meshes; frees the lanes
+    wait_for_promotion_jobs();    // publish staged sim truth + dispatch stage B
+    wait_for_meshing_jobs();      // publish stage-B render meshes — same call, same tick
+    if (promotion_pipeline_pending()) {
+        LUMINUMBRA_CORE_ERROR(
+            "wait_for_streaming_jobs: promotion pipeline still pending after the "
+            "sequenced drain — the 017-B same-tick settlement invariant is broken");
+    }
 }
 
 std::vector<std::shared_ptr<Luminumbra::Chunk>> SHIELD_WorldSystem::snapshot_streamed_chunks() const {

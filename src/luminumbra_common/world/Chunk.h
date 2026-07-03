@@ -70,18 +70,20 @@ public:
     std::vector<VoxelVertex> pending_water_mesh_vertices;
     std::vector<u32> pending_water_mesh_indices;
 
-    // Voxel data produced inside a meshing job (LOD0 promotion of a chunk
-    // that was generated surface-band-only) staged for publication on the
-    // main thread together with the mesh in process_completed_meshing_jobs,
-    // so the previous coarse mesh stays renderable while the promotion is
-    // pending and sdf_data is never written off the main thread.
+    // SHIELD-02 (spec 017-B step 1): voxel data produced inside a PROMOTION
+    // generation job (LOD0 promotion of a chunk that was generated
+    // surface-band-only), staged for publication on the main thread by
+    // process_completed_promotion_jobs — strictly BEFORE the render-mesh
+    // (stage B) dispatch, so sim truth never waits on meshing and sdf_data is
+    // never written off the main thread. The meshing lane neither writes nor
+    // clears these. The previous coarse mesh stays renderable while pending.
     std::vector<f32> pending_sdf_data;
     std::vector<f32> pending_heightmap_data;
-    // FR-B1: the off-thread LOD0 promotion lane stamps structure materials into
-    // the scratch chunk and stages them here for main-thread publication
-    // alongside pending_sdf_data (else a promoted chunk loses its structure
-    // materials -> run != replay). Empty when the promoted chunk has no
-    // structure voxels (lazy alloc preserved across the lane).
+    // FR-B1: the promotion lane stamps structure materials into the scratch
+    // chunk and stages them here for main-thread publication alongside
+    // pending_sdf_data (else a promoted chunk loses its structure materials
+    // -> run != replay). Empty when the promoted chunk has no structure
+    // voxels (lazy alloc preserved across the lane).
     std::vector<u8> pending_material_data;
 
     std::atomic<bool> has_collision{false};
