@@ -462,6 +462,24 @@ relies on the suite). Minor observation also carried: the foliage `windy_max_swa
 reports 8.46 m tip displacement (implausible for ≤0.44 m blades) — audit the measure's scale
 when next touching FoliagePass.
 
+## Pre-Wave-B close (2026-07-03)
+
+The three items between Wave A and Wave B landed (commits b9276ad2 + 1901c5a7):
+**SHIELD-17** (mesh-hash pins root-caused by two-point check to `d53c99c5` analytic MC
+normals — deliberate render-only; re-pinned WITH the evidence chain, never blind),
+**WATER-16** (the test pinned the pre-spec-009 dry==SEA_LEVEL convention; refreshed to
+assert the authoritative contract: depth==0 + surface≤bed), **RENDER-19** (spec-013
+world-entry scans backgrounded — the 6m25s frame-2 stall became 33 s of parallel
+background jobs with byte-identical crystal placement; teardown drains at all three
+world-transition sites). Full default ctest lane green except the intentionally-RED
+manual ForestPerfBudget (= FOLIAGE-05). Filed during verification: **RENDER-20**
+(rank 76) — the pre-existing ~30 s wildlife/procgen-tree bring-up frame, visible again
+now that the defoliation fix restored real tree building.
+
+Final gates: `--smoke == 6f008a9f637c40b7` run==replay; HeadlessInGameCapture PASS
+(both legs). **Wave B (the 017-B chain, ranks 50–56) is next** — see
+`docs/HANDOFF-2026-07-03-wave-b-fable.md` for the next orchestrator.
+
 ## Spine-inversion register (AC-003)
 
 Exactly one deliberate inversion, justified inline at its rank:

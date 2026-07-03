@@ -857,7 +857,7 @@
    "effort": "M",
    "risk": "medium",
    "dependencies": [],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "NEW: WorldEntryStall assertion \u2014 instrumented first-3-frames main-thread max frame time on an interactive-style boot stays < 250 ms (debug) with crystals still placed within 30 s; --smoke unchanged (client-only)",
    "rank": 49
   },
@@ -886,7 +886,7 @@
    "effort": "M",
    "risk": "low",
    "dependencies": [],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "ctest MeshingDeterminism.* green with the re-pinned table, the moving commit named in the re-pin comment, and --smoke run==replay 6f008a9f637c40b7 unchanged",
    "rank": 50
   },
@@ -899,7 +899,7 @@
    "effort": "M",
    "risk": "medium",
    "dependencies": [],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "ctest WorldAndWaterTest.DryHighAltitudeCellsStayDryAfterSimulation green (contract updated with evidence or regression fixed) + ctest WaterDeterminism.* + --smoke run==replay unchanged",
    "rank": 50
   },
@@ -1423,6 +1423,21 @@
    ],
    "status": "todo",
    "proving_signal": "NEW: LiveWeatherBridge gate \u2014 non-scenario IN_GAME run on a storm-forced seed asserts driven overlay uniforms (rain_intensity>0) + sky-luma drop vs a clear-seed control, reusing the WeatherVisual analyzers",
+   "rank": 76
+  },
+  {
+   "id": "RENDER-20",
+   "pillar": "render",
+   "spec": "new",
+   "summary": "Amortize the ambient-wildlife/procgen-tree bring-up stall: a one-time ~30s (debug) main-thread frame ~30s after world entry when the creature spawn + procedural tree scatter run inline (observed during RENDER-19 verification; pre-existing, and doing REAL work again now that the defoliation fix restored tree building) \u2014 background/timeslice the scatter the same way RENDER-19 backgrounded the spec-013 scans",
+   "evidence": "src/luminumbra_client/main_client.cpp:5940, src/luminumbra_client/main_client.cpp:6135",
+   "effort": "M",
+   "risk": "medium",
+   "dependencies": [
+    "RENDER-19"
+   ],
+   "status": "todo",
+   "proving_signal": "NEW: interactive-boot leash check \u2014 no post-entry main-thread frame exceeds 500 ms (debug) through the first 90 s, with trees + wildlife still present (frame-scan foliage/tree coverage unchanged); --smoke unchanged (client-only)",
    "rank": 76
   },
   {
