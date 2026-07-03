@@ -300,6 +300,31 @@ std::vector<std::string> g_ui_screens;       // batch list (one window pop captu
 std::size_t g_ui_screen_index = 0;           // which screen in g_ui_screens is being captured
 std::filesystem::path g_ui_screenshot_dir;   // output dir; each screen -> ui-<screen>.ppm
 bool g_ui_fixtures = false;                   // seed deterministic UI fixture data
+// RENDER-19 (spec 021): the spec-013 one-time world-entry flourishes (doline
+// locate + the 25-anchor enclosed-cave crystal scan + the hero call) cost
+// minutes of full-SDF probing in a debug build (est. 10-25 s release) and used
+// to run INLINE on the frame-2 main thread — the world-entry stall. They now
+// run as a batch of BACKGROUND JobSystem jobs (pure deterministic SDF reads,
+// the same sampling meshing workers already do concurrently); the main thread
+// polls the handle and creates the point-light entities when the batch lands.
+// TEARDOWN CONTRACT: the jobs hold a raw SHIELD_WorldSystem* — every world
+// transition (CreateWorld / session reset) MUST DrainSpec13WorldScan() first.
+struct Spec13WorldScan {
+    const void* world = nullptr;  // identity guard: consume only for the world scanned
+    Luminumbra::Systems::SHIELD_WorldSystem::SurfaceBreakInfo doline;
+    float doline_surface_h = 0.0f;
+    std::optional<Luminumbra::Debug::DebugCamPose> hero;
+    std::array<std::optional<glm::vec3>, 25> anchor_caves;  // one slot per anchor (disjoint writes)
+};
+static std::shared_ptr<Spec13WorldScan> s_spec13Scan;      // null = idle/consumed
+static Luminumbra::JobHandle s_spec13ScanHandle;
+static void DrainSpec13WorldScan(Luminumbra::JobSystem& jobs) {
+    if (s_spec13ScanHandle.counter) {
+        jobs.wait(s_spec13ScanHandle);
+    }
+    s_spec13ScanHandle = {};
+    s_spec13Scan.reset();
+}
 int g_ui_screenshot_settle = 0;              // frames waited before capture of the current screen
 // HEADLESS PREVIEW-DIORAMA CAPTURE (--preview-live): for the world_creation screen, the
 // live WorldgenPreview diorama (candidate world + far field + precipitation) builds on a
@@ -3218,6 +3243,9 @@ int main(int argc, char* argv[]) {
         }
 
         // 1. Synchronously create the world systems and metadata. This is fast.
+        // RENDER-19: drain any in-flight spec-013 background scan FIRST — its jobs
+        // hold the OLD world system pointer, which CreateWorld is about to replace.
+        DrainSpec13WorldScan(jobSystem);
         if (gameSession->CreateWorld(name, seed, worldType, customPtr)) {
             // A real world replaces the F4 menu-backdrop world; stop the menu-branch from
             // rendering with the (now game-owned) camera/world.
@@ -3706,6 +3734,8 @@ int main(int argc, char* argv[]) {
             // the menu: same default seed + mountains preset, the same proven Y=58 / yaw~95 /
             // pitch -2 / fov 62 vantage over the lit valley, dusk tod, and cloud cover. This is a
             // known-good lit composition, not a guess.
+            // RENDER-19: drain any in-flight spec-013 scan before replacing the world.
+            DrainSpec13WorldScan(jobSystem);
             if (gameSession->CreateWorld("Menu Vista", "424242", "mountains")) {
                 if (auto* ws = gameSession->GetWorldSystem()) {
                     renderPipeline.SetupGPUSDFIntegration(*ws);
@@ -4355,33 +4385,60 @@ int main(int argc, char* argv[]) {
         if (currentState == GameState::IN_GAME && !g_paused && !scenario_config.active() && gameSession) {
             auto& freg = gameSession->GetRegistry();
             auto* fws = gameSession->GetWorldSystem();
-            // RENDER-01 (spec 021): the spec-013 one-time flourishes below (doline log + the
-            // 25-anchor enclosed-cave crystal scatter) walk FindEnclosedCave over millions of
-            // full-SDF get_density_at probes on this frame — a MINUTES-long main-thread stall
-            // in a debug build (confirmed CPU-bound, not a deadlock), which presented as the
-            // headless IN_GAME capture "hang" and defeats the frame-counting watchdog (it only
-            // advances while the render loop spins). Headless automation skips them: captures
-            // want the world + shaders, not spelunking cues. --debug-goto cave still lights its
-            // framed cave (below). Interactive play keeps full behavior (cost tracked as the
-            // world-entry stall item RENDER-19).
+            // RENDER-01 (spec 021): headless automation skips the spec-013 one-time
+            // flourishes entirely — captures want the world + shaders, not spelunking
+            // cues (and the crystal point lights would move visual baselines).
+            // --debug-goto cave still lights its framed cave (below).
             const bool headless_automation =
                 g_frame_scan_active || g_scene_active || g_play_paths ||
                 !g_render_benchmark_path.empty() || !g_survey_dir.empty() ||
                 g_timelapse_frames > 0;
-            // Spec 013 P1: one-time locate the largest doline near spawn (cave-mouth aim cue).
-            static bool s_dolineLogged = false;
-            if (!s_dolineLogged && fws && !headless_automation) {
-                s_dolineLogged = true;
+            // RENDER-19 (spec 021): dispatch the spec-013 scans (doline locate + 25
+            // cave anchors + hero call) as ONE background job batch instead of the
+            // old frame-2 inline walk (6m25s main-thread in debug, est. 10-25 s
+            // release). Pure deterministic SDF reads — the same sampling the meshing
+            // workers already run concurrently. Process-once, matching the old
+            // statics' behavior. Every world transition drains the handle first
+            // (DrainSpec13WorldScan), so the raw fws capture can never dangle.
+            static bool s_spec13ScanDispatched = false;
+            if (!s_spec13ScanDispatched && fws && !headless_automation) {
+                s_spec13ScanDispatched = true;
+                auto scan = std::make_shared<Spec13WorldScan>();
+                scan->world = fws;
                 const auto& sp = gameSession->GetMetadata().spawnPoint;
-                const auto sb = fws->FindLargestSurfaceBreak(sp.x, sp.z, 500.0f);
-                if (sb.found) {
-                    const float sh = fws->GetTerrainHeightAt(sb.x, sb.z);
-                    LUMINUMBRA_CORE_INFO("Largest doline near spawn: world ({:.1f}, {:.1f}, {:.1f}) "
-                                         "radius={:.1f}m depth={:.1f}m shaft={}",
-                                         sb.x, sh, sb.z, sb.radius, sb.depth, sb.shaft ? 1 : 0);
-                } else {
-                    LUMINUMBRA_CORE_INFO("No doline found within 500m of spawn (surface breaks off or sparse).");
+                const glm::vec3 spawn(sp.x, sp.y, sp.z);
+                std::vector<Luminumbra::Job> scan_jobs;
+                scan_jobs.reserve(26);
+                // Job 0: doline locate + the hero enclosed-cave call (spec 013 P1).
+                scan_jobs.emplace_back([scan, fws, spawn]() {
+                    scan->doline = fws->FindLargestSurfaceBreak(spawn.x, spawn.z, 500.0f);
+                    if (scan->doline.found) {
+                        scan->doline_surface_h = fws->GetTerrainHeightAt(scan->doline.x, scan->doline.z);
+                    }
+                    scan->hero = Luminumbra::Debug::FindEnclosedCave(*fws, spawn, 256.0f);
+                });
+                // Jobs 1..25: one enclosed-cave anchor each (disjoint result slots, no
+                // locking; dedup happens at consume time in the ORIGINAL scan order so
+                // crystal placement stays byte-identical to the old sequential walk).
+                for (int gz = -2; gz <= 2; ++gz) {
+                    for (int gx = -2; gx <= 2; ++gx) {
+                        constexpr float kAnchorStep   = 120.0f;  // metres between anchors
+                        constexpr float kSearchRadius = 140.0f;  // per-anchor search
+                        const std::size_t slot = static_cast<std::size_t>((gz + 2) * 5 + (gx + 2));
+                        const glm::vec3 anchorW(spawn.x + static_cast<float>(gx) * kAnchorStep,
+                                                spawn.y,
+                                                spawn.z + static_cast<float>(gz) * kAnchorStep);
+                        scan_jobs.emplace_back([scan, fws, anchorW, slot]() {
+                            if (auto cave = Luminumbra::Debug::FindEnclosedCave(*fws, anchorW, kSearchRadius)) {
+                                scan->anchor_caves[slot] = cave->target;
+                            }
+                        });
+                    }
                 }
+                s_spec13ScanHandle = jobSystem.dispatch_batch(scan_jobs);
+                s_spec13Scan = std::move(scan);
+                LUMINUMBRA_CORE_INFO(
+                    "Spec-013 world scan dispatched to background jobs (doline + 25 cave anchors + hero)");
             }
 
             // Debug suite: --debug-goto cave|doline|spawn — deterministically frame a feature so
@@ -4424,75 +4481,67 @@ int main(int argc, char* argv[]) {
             }
 
             // Spec 013: LUMIN CRYSTALS — emissive point lights that light dark caves (so you can
-            // see + photograph underground without sunlight) and double as photo subjects. A
-            // deterministic scan near spawn locates enclosed cave voids (air = get_density_at >= 0)
-            // and drops a cyan glow-crystal at the first opening. Client-only (not hashed); the
-            // point lights are gathered + nearest-32-culled by the render pipeline each frame.
-            static bool s_crystalsSpawned = false;
-            if (!s_crystalsSpawned && fws && !headless_automation) {
-                s_crystalsSpawned = true;
-                const auto& sp = gameSession->GetMetadata().spawnPoint;
+            // see + photograph underground without sunlight) and double as photo subjects.
+            // RENDER-19: consume the background scan when the batch lands (non-blocking
+            // poll of the JobHandle counter). Dedup runs here in the ORIGINAL sequential
+            // anchor order with the same 16-cap, so placement is byte-identical to the
+            // old inline walk. Client-only point lights (never hashed) — no re-pin.
+            if (s_spec13Scan && s_spec13Scan->world == fws &&
+                (!s_spec13ScanHandle.counter ||
+                 s_spec13ScanHandle.counter->load(std::memory_order_acquire) <= 0)) {
+                const Spec13WorldScan& scan = *s_spec13Scan;
+                // Spec 013 P1: the doline cave-mouth aim cue.
+                if (scan.doline.found) {
+                    LUMINUMBRA_CORE_INFO("Largest doline near spawn: world ({:.1f}, {:.1f}, {:.1f}) "
+                                         "radius={:.1f}m depth={:.1f}m shaft={}",
+                                         scan.doline.x, scan.doline_surface_h, scan.doline.z,
+                                         scan.doline.radius, scan.doline.depth, scan.doline.shaft ? 1 : 0);
+                } else {
+                    LUMINUMBRA_CORE_INFO("No doline found within 500m of spawn (surface breaks off or sparse).");
+                }
+                // Crystal scatter: the roof-checked enclosed caverns found near each anchor
+                // (cave bug B fix preserved — no floating crystals in open dips).
+                constexpr float kMinSepSq = 20.0f * 20.0f;  // de-dup nearby hits
                 int placed = 0;
                 float firstX = 0.0f, firstY = 0.0f, firstZ = 0.0f;
-                // Cave bug B: the old grid probe dropped a crystal at the FIRST air below
-                // surf-20m, which in an open valley/depression is just sky -> crystals
-                // floated in open dips, not caves. Use the roof-checked enclosed-cave
-                // locator (the same FindEnclosedCave the --debug-goto camera + hero crystal
-                // use): scan several deterministic near-spawn anchors and light the REAL
-                // enclosed cavern found near each. Client-only point lights (never hashed);
-                // pure deterministic SDF reads -> reproducible, no re-pin.
-                {
-                    constexpr float kAnchorStep   = 120.0f;        // metres between anchors
-                    constexpr float kSearchRadius = 140.0f;        // per-anchor enclosed-cave search
-                    constexpr float kMinSepSq     = 20.0f * 20.0f; // de-dup nearby hits
-                    std::vector<glm::vec3> caveCenters;
-                    for (int gz = -2; gz <= 2 && placed < 16; ++gz) {
-                        for (int gx = -2; gx <= 2 && placed < 16; ++gx) {
-                            const glm::vec3 anchorW(sp.x + static_cast<float>(gx) * kAnchorStep,
-                                                    sp.y,
-                                                    sp.z + static_cast<float>(gz) * kAnchorStep);
-                            auto cave = Luminumbra::Debug::FindEnclosedCave(*fws, anchorW, kSearchRadius);
-                            if (!cave) continue;
-                            const glm::vec3 c = cave->target; // interior void point of the cavern
-                            // Skip if a crystal already lit a cavern at essentially this spot
-                            // (neighbouring anchors can resolve to the same big cave).
-                            bool dup = false;
-                            for (const glm::vec3& prev : caveCenters) {
-                                const glm::vec3 d = prev - c;
-                                if (glm::dot(d, d) < kMinSepSq) { dup = true; break; }
-                            }
-                            if (dup) continue;
-                            caveCenters.push_back(c);
-                            const auto e = freg.create();
-                            auto& tf = freg.emplace<Luminumbra::Components::TransformComponent>(e);
-                            tf.position = Luminumbra::Vec3(c.x, c.y + 0.6f, c.z);
-                            auto& pl = freg.emplace<Luminumbra::Components::PointLightComponent>(e);
-                            pl.color = Luminumbra::Vec3(0.45f, 0.78f, 1.0f); // cyan lumin glow
-                            pl.intensity = 4.5f;
-                            pl.radius = 24.0f;
-                            if (placed == 0) { firstX = c.x; firstY = c.y; firstZ = c.z; }
-                            ++placed;
-                        }
+                std::vector<glm::vec3> caveCenters;
+                for (const auto& maybe_cave : scan.anchor_caves) {
+                    if (placed >= 16) break;
+                    if (!maybe_cave) continue;
+                    const glm::vec3 c = *maybe_cave;  // interior void point of the cavern
+                    bool dup = false;
+                    for (const glm::vec3& prev : caveCenters) {
+                        const glm::vec3 d = prev - c;
+                        if (glm::dot(d, d) < kMinSepSq) { dup = true; break; }
                     }
+                    if (dup) continue;
+                    caveCenters.push_back(c);
+                    const auto e = freg.create();
+                    auto& tf = freg.emplace<Luminumbra::Components::TransformComponent>(e);
+                    tf.position = Luminumbra::Vec3(c.x, c.y + 0.6f, c.z);
+                    auto& pl = freg.emplace<Luminumbra::Components::PointLightComponent>(e);
+                    pl.color = Luminumbra::Vec3(0.45f, 0.78f, 1.0f);  // cyan lumin glow
+                    pl.intensity = 4.5f;
+                    pl.radius = 24.0f;
+                    if (placed == 0) { firstX = c.x; firstY = c.y; firstZ = c.z; }
+                    ++placed;
                 }
                 LUMINUMBRA_CORE_INFO("Lumin crystals: placed {} enclosed-cave glow point-lights near spawn; "
                                      "first at world ({:.1f}, {:.1f}, {:.1f})", placed, firstX, firstY, firstZ);
-                // Guarantee the located ENCLOSED cave (the one --debug-goto frames) is lit: drop a
-                // brighter hero crystal at its centre so the deep roofed pockets the grid scatter
-                // misses still glow. Same deterministic locator the debug camera uses -> they align.
-                const auto& csp2 = gameSession->GetMetadata().spawnPoint;
-                if (auto cave = Luminumbra::Debug::FindEnclosedCave(
-                        *fws, glm::vec3(csp2.x, csp2.y, csp2.z), 256.0f)) {
+                // Hero crystal in the located enclosed cave (aligns with --debug-goto cave).
+                if (scan.hero) {
                     const auto ce = freg.create();
                     auto& ctf = freg.emplace<Luminumbra::Components::TransformComponent>(ce);
-                    ctf.position = Luminumbra::Vec3(cave->target.x, cave->target.y, cave->target.z);
+                    ctf.position = Luminumbra::Vec3(scan.hero->target.x, scan.hero->target.y, scan.hero->target.z);
                     auto& cpl = freg.emplace<Luminumbra::Components::PointLightComponent>(ce);
                     cpl.color = Luminumbra::Vec3(0.55f, 0.85f, 1.0f);
                     cpl.intensity = 6.0f;   // hero crystal in the located enclosed cave
                     cpl.radius = 40.0f;
                     LUMINUMBRA_CORE_INFO("Lumin crystal: hero light in enclosed cave at ({:.1f}, {:.1f}, {:.1f})",
-                                         cave->target.x, cave->target.y, cave->target.z);
+                                         scan.hero->target.x, scan.hero->target.y, scan.hero->target.z);
                 }
+                s_spec13Scan.reset();
+                s_spec13ScanHandle = {};
             }
 
             auto fgview = freg.view<Luminumbra::Components::ForagerComponent,
@@ -10049,6 +10098,9 @@ int main(int argc, char* argv[]) {
     } else {
         mark_shutdown("imgui_not_started");
     }
+    // RENDER-19: the spec-013 background scan holds a raw world pointer — drain
+    // it before the session (and its world) is destroyed.
+    DrainSpec13WorldScan(jobSystem);
     gameSession.reset();
     mark_shutdown("game_session_reset");
     jobSystem.shutdown();
