@@ -41,6 +41,14 @@ constexpr int STREAMING_MID_VERTICAL_STACK_RADIUS = 12;
 constexpr int STREAMING_MULTI_ANCHOR_MIN_RADIUS = 6;
 constexpr std::size_t STREAMING_APPROX_CHUNKS_PER_SURFACE_COLUMN = 3;
 
+// Full LOD0 SDF lattice size. A chunk whose sdf_data has EXACTLY this size is
+// full-resolution sim truth; anything else (empty = surface-band/coarse
+// generated, wrong-sized = malformed, SHIELD-04) needs the promotion lane to
+// (re)generate the full field before a unit-step polygonise may read it.
+constexpr std::size_t kFullSdfLattice =
+    static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
+    (Luminumbra::CHUNK_SIZE_Y + 1) * (Luminumbra::CHUNK_SIZE_Z + 1);
+
 // T-I4-DR-server-streaming-race: SIMD over-read guard for FastNoise2's
 // GenPositionArray2D. That entry point's tail does an UNCONDITIONAL full-width
 // SIMD load of the input position arrays (FS_Load_f32(&xPosArray[index]) in
@@ -368,6 +376,37 @@ void SHIELD_WorldSystem::wait_for_meshing_jobs() {
 bool SHIELD_WorldSystem::meshing_jobs_active() const {
     return has_active_job(m_streaming_state.meshing_job_handle) ||
            has_active_job(m_streaming_state.meshing_job_handle_high);
+}
+
+bool SHIELD_WorldSystem::promotion_jobs_active() const {
+    return has_active_job(m_streaming_state.promotion_job_handle) ||
+           has_active_job(m_streaming_state.promotion_job_handle_high);
+}
+
+bool SHIELD_WorldSystem::promotion_pipeline_pending() const {
+    return promotion_jobs_active() ||
+           !m_streaming_state.promotion_job_chunks.empty() ||
+           !m_streaming_state.pending_promotion_mesh.empty();
+}
+
+void SHIELD_WorldSystem::wait_for_promotion_jobs() {
+    if (m_job_system && m_streaming_state.promotion_job_handle_high.counter) {
+        m_job_system->wait(m_streaming_state.promotion_job_handle_high);
+    }
+    if (m_job_system && m_streaming_state.promotion_job_handle.counter) {
+        m_job_system->wait(m_streaming_state.promotion_job_handle);
+    }
+    process_completed_promotion_jobs();
+}
+
+void SHIELD_WorldSystem::process_completed_promotion_jobs() {
+    // SHIELD-02: the stage-A sim-truth publish + stage-B render-mesh dispatch
+    // land with the cut. Until dispatch_promotion_jobs feeds this state, the
+    // promotion pipeline is always empty and this is a no-op.
+    if (m_streaming_state.promotion_job_chunks.empty() &&
+        m_streaming_state.pending_promotion_mesh.empty()) {
+        return;
+    }
 }
 
 void SHIELD_WorldSystem::reinitialize_noise() {
@@ -4107,6 +4146,28 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
         const int lod_level = work_item.lod_level;
         const bool terrain_mesh_required = work_item.terrain_mesh_required;
         const int step = get_lod_step_for_level(lod_level);
+        // SHIELD-02: classify the LOD0 promotion at DISPATCH time on the main
+        // thread (sdf_data is main-thread-owned between dispatch and job
+        // start, so this reads the same value the job used to test). SHIELD-04
+        // (spec 021): a non-empty but WRONG-SIZED sdf_data (corrupt save /
+        // stale coarse producer) must never be copied into the unit-step
+        // polygonise — its corner indexing assumes the full (CHUNK+1)^3
+        // lattice and would read out of bounds. Regenerate the full lattice
+        // instead (mirrors the EnsureSurfaceReadyNear guard; generation is a
+        // pure function of seed/params, so this is hash-neutral for valid
+        // worlds).
+        const bool sdf_malformed = terrain_mesh_required && step <= 1 &&
+                                   !chunk->sdf_data.empty() &&
+                                   chunk->sdf_data.size() != kFullSdfLattice;
+        if (sdf_malformed) {
+            LUMINUMBRA_CORE_WARN(
+                "Meshing promotion: chunk ({},{},{}) has malformed sdf_data "
+                "(size {} != full lattice {}) — regenerating instead of meshing it",
+                chunk->get_coords().x, chunk->get_coords().y, chunk->get_coords().z,
+                chunk->sdf_data.size(), kFullSdfLattice);
+        }
+        const bool needs_sim_truth = terrain_mesh_required && step <= 1 &&
+                                     chunk->sdf_data.size() != kFullSdfLattice;
         const bool has_active_mesh = chunk->get_state() == Luminumbra::ChunkState::Ready &&
             !chunk->mesh_vertices.empty() && !chunk->mesh_indices.empty();
 
@@ -4148,7 +4209,7 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
         m_streaming_state.meshing_job_chunks.push_back({chunk, terrain_mesh_required, transition_faces});
 
         auto& lane_jobs = work_item.high_priority ? high_priority_jobs : normal_priority_jobs;
-        lane_jobs.emplace_back([this, chunk, step, transition_faces, terrain_mesh_required]() {
+        lane_jobs.emplace_back([this, chunk, step, transition_faces, terrain_mesh_required, needs_sim_truth]() {
             try {
                 Luminumbra::Chunk scratch(chunk->get_coords());
                 scratch.water_level_data = chunk->water_level_data;
@@ -4160,26 +4221,7 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
 
                 bool backfilled_voxel_data = false;
                 if (terrain_mesh_required) {
-                    // SHIELD-04 (spec 021): a non-empty but WRONG-SIZED sdf_data (corrupt
-                    // save / stale coarse producer) must never be copied into the
-                    // unit-step polygonise — its corner indexing assumes the full
-                    // (CHUNK+1)^3 lattice and would read out of bounds. Regenerate the
-                    // full lattice instead (mirrors the EnsureSurfaceReadyNear guard;
-                    // generation is a pure function of seed/params, so this is
-                    // hash-neutral for valid worlds).
-                    constexpr std::size_t kFullSdfLattice =
-                        static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
-                        (Luminumbra::CHUNK_SIZE_Y + 1) * (Luminumbra::CHUNK_SIZE_Z + 1);
-                    const bool sdf_malformed = step <= 1 && !chunk->sdf_data.empty() &&
-                                               chunk->sdf_data.size() != kFullSdfLattice;
-                    if (sdf_malformed) {
-                        LUMINUMBRA_CORE_WARN(
-                            "Meshing promotion: chunk ({},{},{}) has malformed sdf_data "
-                            "(size {} != full lattice {}) — regenerating instead of meshing it",
-                            chunk->get_coords().x, chunk->get_coords().y, chunk->get_coords().z,
-                            chunk->sdf_data.size(), kFullSdfLattice);
-                    }
-                    if (step <= 1 && (chunk->sdf_data.empty() || sdf_malformed)) {
+                    if (needs_sim_truth) {
                         // LOD0 promotion of a chunk generated surface-band
                         // only (T-I3-1): build the full voxel field into the
                         // scratch chunk here and stage it for main-thread

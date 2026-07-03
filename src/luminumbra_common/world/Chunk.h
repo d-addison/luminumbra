@@ -94,6 +94,13 @@ public:
     std::atomic<u8> applied_transition_faces{0};
     std::atomic<bool> pending_mesh_ready{false};
     std::atomic<bool> pending_mesh_failed{false};
+    // SHIELD-02 (spec 017-B step 1): completion signals for the sim-truth
+    // PROMOTION lane. A promotion generation job stages the full LOD0 voxel
+    // field into pending_sdf/heightmap/material_data and raises _ready; the
+    // main thread publishes it in process_completed_promotion_jobs — before
+    // and independently of any render-mesh publish.
+    std::atomic<bool> pending_promotion_ready{false};
+    std::atomic<bool> pending_promotion_failed{false};
     std::atomic<u32> mesh_version{0};
     std::atomic<u32> water_mesh_version{0};
     

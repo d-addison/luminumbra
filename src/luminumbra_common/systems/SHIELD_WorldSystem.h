@@ -626,6 +626,12 @@ public:
     // Blocks until in-flight generation and meshing jobs complete so chunk
     // voxel/mesh data is stable for hashing and serialization.
     void wait_for_streaming_jobs();
+    // SHIELD-02 (spec 017-B step 1): drains the sim-truth promotion lane ONLY —
+    // waits any in-flight promotion generation jobs, publishes their staged
+    // voxel fields on this (main) thread, and dispatches the render-mesh
+    // stage-B batch WITHOUT waiting for it. Lets callers (and tests) observe
+    // sim truth going live independently of any render-mesh publish.
+    void wait_for_promotion_jobs();
     // Shared-ownership snapshot of every streamed chunk (save path).
     std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_streamed_chunks() const;
     std::shared_ptr<::Luminumbra::Chunk> find_streamed_chunk(const IVec3& coords) const;
@@ -652,6 +658,22 @@ private:
             u8 transition_faces = 0;
         };
         std::vector<MeshingJobChunk> meshing_job_chunks;
+        // SHIELD-02 (spec 017-B step 1): the sim-truth promotion lane. LOD0
+        // promotions of surface-band-only chunks generate their full voxel
+        // field in a PROMOTION generation job (stage A, these handles); the
+        // main thread publishes the staged sim truth in
+        // process_completed_promotion_jobs and only then dispatches the
+        // render-mesh batch (stage B) down the ordinary meshing lane —
+        // meshing never writes sim truth.
+        JobHandle promotion_job_handle;
+        JobHandle promotion_job_handle_high;
+        struct PromotionJobChunk {
+            std::shared_ptr<::Luminumbra::Chunk> chunk;
+            int lod_level = 0;
+            bool high_priority = false;
+        };
+        std::vector<PromotionJobChunk> promotion_job_chunks;   // stage A in flight
+        std::vector<PromotionJobChunk> pending_promotion_mesh; // sim truth live, stage B not yet dispatched
     };
 
     StreamingState m_streaming_state;
@@ -766,6 +788,16 @@ private:
     void dispatch_meshing_jobs(const std::vector<MeshingWorkItem>& chunks_to_mesh);
     void process_completed_meshing_jobs();
     bool meshing_jobs_active() const;
+    // SHIELD-02 promotion lane (see StreamingState). dispatch_promotion_jobs
+    // runs stage A (sim-truth generation into staging);
+    // process_completed_promotion_jobs publishes staged sim truth on the main
+    // thread and dispatches stage B. promotion_pipeline_pending() covers the
+    // whole pipeline (jobs in flight OR unpublished results OR stage B not yet
+    // dispatched) for the scheduling gates that today read meshing activity.
+    void dispatch_promotion_jobs(const std::vector<MeshingWorkItem>& chunks_to_promote);
+    void process_completed_promotion_jobs();
+    bool promotion_jobs_active() const;
+    bool promotion_pipeline_pending() const;
     void wait_for_generation_jobs();
     void wait_for_meshing_jobs();
     void reinitialize_noise();
