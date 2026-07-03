@@ -1097,25 +1097,28 @@ file(MAKE_DIRECTORY
     "${LUMINUMBRA_TEST_ARTIFACT_ROOT}/ui"
 )
 
+# OPS-12 (spec 021): the manifest roster + floors are DERIVED from
+# LUMINUMBRA_GTEST_TARGETS (the single source of truth the gtest_discover_tests
+# loop registers) instead of a hand-maintained 10-name list frozen at floor 10.
+# A target added to the roster is automatically required; one silently dropped
+# from the roster shrinks the floor VISIBLY in review (this block's diff).
+list(LENGTH LUMINUMBRA_GTEST_TARGETS LUMINUMBRA_GTEST_TARGET_COUNT)
+set(LUMINUMBRA_REQUIRED_EXECUTABLES_JSON "")
+foreach(_lum_manifest_target ${LUMINUMBRA_GTEST_TARGETS})
+    string(APPEND LUMINUMBRA_REQUIRED_EXECUTABLES_JSON "    \"${_lum_manifest_target}\",\n")
+endforeach()
+string(REGEX REPLACE ",\n$" "\n" LUMINUMBRA_REQUIRED_EXECUTABLES_JSON "${LUMINUMBRA_REQUIRED_EXECUTABLES_JSON}")
+
 file(WRITE "${LUMINUMBRA_TEST_ARTIFACT_ROOT}/testing/ctest_manifest.json"
     "{\n"
     "  \"schema\": \"luminumbra.testing.ctest_manifest.v1\",\n"
     "  \"generated_by\": \"test/CMakeLists.txt\",\n"
     "  \"build_preset\": \"${LUMINUMBRA_TEST_BASELINE_BUILD_PRESET}\",\n"
-    "  \"policy\": \"baseline gate records the test executables registered through gtest_discover_tests and excludes configure-time *_NOT_BUILT placeholders\",\n"
-    "  \"minimum_test_executables\": 10,\n"
-    "  \"minimum_registered_tests\": 10,\n"
+    "  \"policy\": \"configure-time REGISTRATION manifest: records the gtest_discover_tests roster (derived from LUMINUMBRA_GTEST_TARGETS) and the pinned UI test names; execution results live in ctest, and the UiTestBaseline gate cross-checks these names against ctest --show-only reality\",\n"
+    "  \"minimum_test_executables\": ${LUMINUMBRA_GTEST_TARGET_COUNT},\n"
+    "  \"minimum_registered_tests\": ${LUMINUMBRA_GTEST_TARGET_COUNT},\n"
     "  \"required_executables\": [\n"
-    "    \"world_generation_test\",\n"
-    "    \"sdf_gpu_cpu_parity_test\",\n"
-    "    \"worldgen_layer_snapshot_test\",\n"
-    "    \"asset_processor_round_trip_test\",\n"
-    "    \"common_tests\",\n"
-    "    \"render_smoke_test\",\n"
-    "    \"render_capture_test\",\n"
-    "    \"ui_smoke_test\",\n"
-    "    \"initial_world_loading_perf_test\",\n"
-    "    \"runtime_world_visual_validation_test\"\n"
+    "${LUMINUMBRA_REQUIRED_EXECUTABLES_JSON}"
     "  ],\n"
     "  \"required_ui_tests\": [\n"
     "    \"UiSmokeTest.AuthoredRmlDocumentsLoadAndExposeRequiredElements\",\n"

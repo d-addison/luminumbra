@@ -4,6 +4,7 @@
 #include "gl3/RmlUi_Renderer_GL3.h" // RmlUi 6.1 reference backend: real blur/box-shadow/layers
 #include "world/WorldgenOverride.h" // WorldGenParam transport (engine-owned, not UI)
 #include <RmlUi/Core.h>
+#include <filesystem> // UI-07: gallery fixture capture-source override
 #include <string>
 #include <functional>
 #include <memory>
@@ -142,6 +143,17 @@ public:
     void SetSettingsBridge(SettingsBridge bridge) { m_settingsBridge = std::move(bridge); }
     void SetPauseActionCallback(PauseActionCallback cb) { m_pauseActionCallback = std::move(cb); }
 
+    // UI-07 (spec 001 FR-011, --ui-fixtures): point the gallery at a deterministic
+    // capture source. `capture_dir` is the ABSOLUTE directory PopulateGallery
+    // enumerates for cap_<N>.tga; `img_prefix` is the document-relative <img src>
+    // prefix those ids resolve through (gallery.rml lives in data/ui/, so the
+    // default live dir <root>/data/ui/captures pairs with "captures/"). Unset =
+    // the live shutter-capture path.
+    void SetGalleryCaptureSource(std::filesystem::path capture_dir, std::string img_prefix) {
+        m_galleryCaptureDir = std::move(capture_dir);
+        m_galleryImgPrefix = std::move(img_prefix);
+    }
+
     // Static GLFW callbacks that forward to the active manager instance
     static void KeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);
     static void CharCallback(GLFWwindow* window, unsigned int codepoint);
@@ -205,6 +217,14 @@ private:
     std::string m_documentToLoad;
     std::string m_activeDocument;
     std::string m_selectedWorldId;
+
+    // The asset root the file interface resolves against (kept here too so the
+    // gallery enumerates the SAME root its <img src> paths load through — the
+    // old CWD-relative enumeration only worked when CWD == root). UI-07: an
+    // explicit capture source overrides the live shutter path.
+    std::string m_assetRoot;
+    std::filesystem::path m_galleryCaptureDir;   // empty = <root>/data/ui/captures
+    std::string m_galleryImgPrefix = "captures/"; // document-relative img prefix
 
     // T006: cache the last pushed context size so SetDimensions only fires on an actual resize
     // (a per-frame SetDimensions can needlessly dirty layout). -1 forces the first push.

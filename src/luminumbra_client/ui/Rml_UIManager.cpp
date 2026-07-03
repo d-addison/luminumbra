@@ -262,8 +262,9 @@ bool Rml_UIManager::ConsumeWorldCreationResetView() {
 }
 
 // --- Constructor / Destructor ---
-Rml_UIManager::Rml_UIManager(const std::string& asset_root_path) 
-    : m_fileInterface(asset_root_path) {
+Rml_UIManager::Rml_UIManager(const std::string& asset_root_path)
+    : m_fileInterface(asset_root_path),
+      m_assetRoot(asset_root_path) {
     s_active_manager = this;
 }
 
@@ -879,9 +880,15 @@ void Rml_UIManager::PopulateGallery(Rml::ElementDocument* document) {
     namespace fs = std::filesystem;
     std::error_code ec;
 
-    // Each shutter writes data/ui/captures/cap_<N>.tga; collect them newest-first.
+    // Each shutter writes <root>/data/ui/captures/cap_<N>.tga; collect them
+    // newest-first. UI-07: enumerate against the ASSET ROOT (the same root the
+    // emitted <img src> resolves through — the old CWD-relative lookup silently
+    // found nothing when CWD != root), unless a fixture source was injected
+    // (SetGalleryCaptureSource / --ui-fixtures).
     std::vector<int> ids;
-    const fs::path thumbs_dir = "data/ui/captures";
+    const fs::path thumbs_dir = m_galleryCaptureDir.empty()
+        ? fs::path(m_assetRoot) / "data" / "ui" / "captures"
+        : m_galleryCaptureDir;
     if (fs::exists(thumbs_dir, ec)) {
         for (const auto& entry : fs::directory_iterator(thumbs_dir, ec)) {
             if (entry.path().extension() != ".tga") continue;
@@ -903,17 +910,17 @@ void Rml_UIManager::PopulateGallery(Rml::ElementDocument* document) {
     int shown = 0;
     for (int id : ids) {
         if (shown++ >= 12) break;  // one page of the most recent captures
-        // Star rating from the sidecar (photos/photo-<N>.photo.json), if it's there.
+        // Star rating from the sidecar (<root>/photos/photo-<N>.photo.json), if it's there.
         int stars = 0;
-        std::ifstream sf(fs::path("photos") / ("photo-" + std::to_string(id) + ".photo.json"));
+        std::ifstream sf(fs::path(m_assetRoot) / "photos" / ("photo-" + std::to_string(id) + ".photo.json"));
         if (sf) {
             try {
                 nlohmann::json j; sf >> j;
                 if (j.contains("stars") && j["stars"].is_number_integer()) stars = j["stars"].get<int>();
             } catch (...) {}
         }
-        html += "<div class=\"photo-card\"><img class=\"photo-thumb\" src=\"captures/cap_" +
-                std::to_string(id) + ".tga\"/>";
+        html += "<div class=\"photo-card\"><img class=\"photo-thumb\" src=\"" +
+                m_galleryImgPrefix + "cap_" + std::to_string(id) + ".tga\"/>";
         if (stars >= 4) html += "<span class=\"photo-fav\">\xE2\x98\x85</span>";
         html += "</div>";
     }

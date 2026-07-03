@@ -3036,6 +3036,15 @@ int main(int argc, char* argv[]) {
     if (!scenario_config.no_ui) {
         g_uiManager = std::make_unique<Luminumbra::Client::Rml_UIManager>(root_path_str);
         g_uiManager->Init(window, audioManager.get());
+        // UI-07 (spec 001 FR-011): --ui-fixtures points capture-backed screens at
+        // deterministic committed fixture data so --ui-screenshot output is
+        // reproducible on any checkout (the live gallery is empty until a player
+        // presses the shutter). Gallery today; extend per-screen as fixtures grow.
+        if (g_ui_fixtures) {
+            g_uiManager->SetGalleryCaptureSource(
+                root_dir / "data" / "ui" / "fixtures" / "captures", "fixtures/captures/");
+            LUMINUMBRA_CORE_INFO("UI fixtures: gallery sourcing data/ui/fixtures/captures");
+        }
         // F3 — opt-in UI hot reload: watch data/ui and reload the active document on edits.
         if (HasCommandLineFlag(argc, argv, "--ui-hot-reload")) {
             g_uiHotReload.SetEnabled(true);

@@ -795,7 +795,10 @@ TEST(UiSmokeTest, PauseMenuActionsAndNavigationAreFunctional) {
 }
 
 // Item 3b: the gallery (gallery.rml) back-arrow returns to the main menu and the photo wall +
-// pager are present.
+// pager are present. UI-07: HERMETIC — the photo wall is driven by the committed
+// data/ui/fixtures/captures set (the --ui-fixtures source), not by whatever
+// untracked shutter captures happen to exist on this machine (which made the
+// test environmentally RED on a clean checkout with 0 photos).
 TEST(UiSmokeTest, GalleryBackNavigationAndContentArePresent) {
     HiddenGlContext context;
     if (!context.ready()) {
@@ -805,6 +808,10 @@ TEST(UiSmokeTest, GalleryBackNavigationAndContentArePresent) {
     Luminumbra::Client::Rml_UIManager ui((source_root.string() + "/"));
     ui.Init(context.window(), nullptr);
     ASSERT_NE(ui.GetContext(), nullptr);
+    const fs::path fixtures = source_root / "data" / "ui" / "fixtures" / "captures";
+    ASSERT_TRUE(fs::exists(fixtures / "cap_1.tga"))
+        << "committed gallery fixture set missing: " << fixtures.string();
+    ui.SetGalleryCaptureSource(fixtures, "fixtures/captures/");
 
     Rml::ElementDocument* gallery = LoadDocumentAndFind(ui, "gallery.rml", "gallery");
     ASSERT_NE(gallery, nullptr);
