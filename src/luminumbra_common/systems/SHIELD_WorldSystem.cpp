@@ -368,6 +368,9 @@ void SHIELD_WorldSystem::wait_for_generation_jobs() {
     }
 
     m_streaming_state.generation_job_handle = {};
+    // SHIELD-03 inc 2: main-thread settle point for the publication-keyed
+    // generation-outstanding flag the scheduler reads.
+    m_streaming_state.generation_batch_outstanding = false;
 }
 
 void SHIELD_WorldSystem::wait_for_meshing_jobs() {
@@ -384,6 +387,10 @@ void SHIELD_WorldSystem::wait_for_meshing_jobs() {
 bool SHIELD_WorldSystem::meshing_jobs_active() const {
     return has_active_job(m_streaming_state.meshing_job_handle) ||
            has_active_job(m_streaming_state.meshing_job_handle_high);
+}
+
+bool SHIELD_WorldSystem::meshing_batch_outstanding() const {
+    return !m_streaming_state.meshing_job_chunks.empty();
 }
 
 bool SHIELD_WorldSystem::promotion_jobs_active() const {
@@ -2321,6 +2328,13 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
         _dbg_prev = _n;
     };
     clear_completed_job_handle(m_streaming_state.generation_job_handle);
+    // SHIELD-03 inc 2: the update-start handle observation is a main-thread
+    // event — when the batch has fully drained, settle the publication-keyed
+    // outstanding flag here (the barrier path settles it in
+    // wait_for_generation_jobs; this covers the client's barrier-free path).
+    if (!has_active_job(m_streaming_state.generation_job_handle)) {
+        m_streaming_state.generation_batch_outstanding = false;
+    }
     process_completed_meshing_jobs();
     // SHIELD-02: the client publish point for the promotion lane (the server
     // publishes inside the per-tick sequenced barrier instead) — publishes
@@ -2341,8 +2355,10 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
     m_last_streaming_budget_stats.update_interval_frames = STREAMING_ACTIVATION_INTERVAL_FRAMES;
     m_last_streaming_budget_stats.requested_render_radius = RENDER_DISTANCE;
     m_last_streaming_budget_stats.max_active_chunks_budget = STREAMING_MAX_ACTIVE_CHUNKS_BUDGET;
-    m_last_streaming_budget_stats.generation_job_active = has_active_job(m_streaming_state.generation_job_handle);
-    m_last_streaming_budget_stats.meshing_job_active = meshing_jobs_active();
+    // SHIELD-03 inc 2: telemetry mirrors the publication-keyed signals the
+    // scheduler now reads (not the wall-clock job counters).
+    m_last_streaming_budget_stats.generation_job_active = m_streaming_state.generation_batch_outstanding;
+    m_last_streaming_budget_stats.meshing_job_active = meshing_batch_outstanding();
     m_last_streaming_budget_stats.active_chunks_before = m_streaming_state.chunks.size();
     clear_streaming_state_counts(m_last_streaming_budget_stats);
     for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
@@ -2595,7 +2611,8 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
     // work, so it participates in the same one-batch-in-flight backpressure.
     // On the per-tick-quiesced server paths both terms are always false here
     // (the sequenced barrier drained them), so this is byte-neutral there.
-    const bool meshing_job_active = meshing_jobs_active() || promotion_pipeline_pending();
+    // SHIELD-03 inc 2: publication-keyed (batch outstanding), not wall-clock.
+    const bool meshing_job_active = meshing_batch_outstanding() || promotion_pipeline_pending();
     m_last_streaming_budget_stats.meshing_job_active = meshing_job_active;
     // Scale the per-dispatch meshing batch with the standing terrain backlog:
     // deep backlogs (initial load, fast travel) dispatch larger batches so
@@ -2674,9 +2691,12 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
         // sticky-open next tick, so chained seam/transition propagation always converges.
         const bool produced_work = !meshing_candidates.empty() ||
                                    m_last_streaming_budget_stats.deferred_meshing > 0;
-        const bool quiescent = !produced_work && !meshing_jobs_active() &&
+        // SHIELD-03 inc 2: quiescence keys on the publication-keyed outstanding
+        // signals (main-thread events), not wall-clock job counters — the last
+        // scheduler read to be de-timed ahead of the barrier removal.
+        const bool quiescent = !produced_work && !meshing_batch_outstanding() &&
                                !promotion_pipeline_pending() &&
-                               !has_active_job(m_streaming_state.generation_job_handle);
+                               !m_streaming_state.generation_batch_outstanding;
         m_last_pass_drained = quiescent;
         if (quiescent) {
             m_last_serviced_generation = m_dirty_generation;
@@ -2820,16 +2840,18 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
         m_streaming_state.chunks.size(),
         m_last_streaming_budget_stats.loading_chunks,
         m_last_streaming_budget_stats.idle_chunks,
-        has_active_job(m_streaming_state.generation_job_handle),
+        // SHIELD-03 inc 2: publication-keyed signals — the wanted radius is
+        // now a pure function of main-thread events, never job-counter timing.
+        m_streaming_state.generation_batch_outstanding,
         // SHIELD-02: promotion work counts as meshing-lane pressure (it was
         // meshing-lane work before the decoupling). Byte-neutral on the
         // per-tick-quiesced server paths — both terms read false there.
-        meshing_jobs_active() || promotion_pipeline_pending(),
+        meshing_batch_outstanding() || promotion_pipeline_pending(),
         anchors.size()
     );
 
     m_last_streaming_budget_stats.target_render_radius = target_radius;
-    m_last_streaming_budget_stats.generation_job_active = has_active_job(m_streaming_state.generation_job_handle);
+    m_last_streaming_budget_stats.generation_job_active = m_streaming_state.generation_batch_outstanding;
     int generation_budget = MAX_CHUNKS_TO_PROCESS_PER_FRAME;
     if (anchors.size() > 1u) {
         generation_budget = static_cast<int>(std::min<std::size_t>(
@@ -4311,7 +4333,7 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<ChunkGe
         // so skipping any chunk that already has voxel data (full SDF or the
         // surface-band heightmap) is a no-op for untouched chunks and the
         // load/generation contract for saved ones. A surface-band chunk later
-        // promoted to LOD0 gets its full SDF backfilled by the meshing path.
+        // promoted to LOD0 gets its full SDF via the SHIELD-02 promotion lane.
         const auto existing = m_streaming_state.chunks.find(Chunk::calculate_id(coords));
         if (existing != m_streaming_state.chunks.end() && existing->second &&
             (!existing->second->sdf_data.empty() || !existing->second->heightmap_data.empty())) {
@@ -4332,10 +4354,13 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<ChunkGe
     }
     
     JobHandle handle; // Declare handle outside the if block
-    
+
     if (m_job_system && !jobs.empty()) {
         handle = m_job_system->dispatch_batch(jobs);
         m_streaming_state.generation_job_handle = handle;
+        // SHIELD-03 inc 2: publication-keyed outstanding flag (see the header
+        // comment) — set at dispatch on the main thread.
+        m_streaming_state.generation_batch_outstanding = true;
     }
     return handle; // Return the handle (will be default-constructed/invalid if no jobs were dispatched)
 }

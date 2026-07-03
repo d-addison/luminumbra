@@ -702,6 +702,15 @@ private:
         };
         std::vector<PromotionJobChunk> promotion_job_chunks;   // stage A in flight
         std::vector<PromotionJobChunk> pending_promotion_mesh; // sim truth live, stage B not yet dispatched
+        // SHIELD-03 inc 2 (scheduler de-timing): "a generation batch is
+        // outstanding" as PUBLICATION-KEYED main-thread state — set TRUE at
+        // dispatch, set FALSE at the main-thread settle points
+        // (wait_for_generation_jobs, or the update-start handle observation).
+        // The SCHEDULER reads this instead of the wall-clock job counter, so
+        // its decisions stay a pure function of main-thread events when the
+        // per-tick barrier is later removed. Identical to the counter read at
+        // every scheduler read point under the barrier (both settle there).
+        bool generation_batch_outstanding = false;
     };
 
     StreamingState m_streaming_state;
@@ -842,6 +851,12 @@ private:
     void process_completed_promotion_jobs();
     bool promotion_jobs_active() const;
     bool promotion_pipeline_pending() const;
+    // SHIELD-03 inc 2: publication-keyed "a meshing batch is outstanding" —
+    // meshing_job_chunks is filled at dispatch and cleared at the main-thread
+    // publish, so this is a pure function of main-thread events (unlike the
+    // wall-clock meshing_jobs_active() counter read, which stays raw inside
+    // the wait/publish machinery only).
+    bool meshing_batch_outstanding() const;
     void wait_for_generation_jobs();
     void wait_for_meshing_jobs();
     void reinitialize_noise();
