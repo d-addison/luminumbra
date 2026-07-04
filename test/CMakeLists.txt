@@ -290,6 +290,10 @@ endif()
 
 add_executable(render_capture_test
     rendering/render_capture_test.cpp
+    # GPU-06: the capture-hooks TU under test (GL-free; direct source, same as
+    # shader_reflection_test's ShaderReflection.cpp -- render_capture_test links
+    # luminumbra_common, not luminumbra_client, so no duplicate symbols).
+    ../src/luminumbra_client/rendering/CaptureHooks.cpp
 )
 
 target_compile_definitions(render_capture_test PRIVATE
@@ -299,6 +303,8 @@ target_compile_definitions(render_capture_test PRIVATE
 
 target_include_directories(render_capture_test PRIVATE
     ../src
+    ../src/luminumbra_client
+    ../vendor
 )
 
 target_link_libraries(render_capture_test PRIVATE
