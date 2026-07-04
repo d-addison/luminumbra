@@ -1014,7 +1014,7 @@
    "dependencies": [
     "016"
    ],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "NEW: RegistryOwnershipParity \u2014 WorldVisualSweep rerun + tools/flip_diff.py A/B after the G-Buffer/lighting targets move to registry allocation (byte-identical frame), plus a ctest asserting registry-owned handles survive frame boundaries without per-frame re-adopt",
    "rank": 57
   },
@@ -1029,7 +1029,7 @@
    "dependencies": [
     "RENDER-01"
    ],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "in-process A/B parity (tools/flip_diff.py on --render-parity-* pairs) + validate-engine-frontier.ps1 -Mode RenderBudget + WorldVisualSweep rerun",
    "rank": 57
   },
