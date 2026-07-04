@@ -523,6 +523,33 @@ target_include_directories(rhi_backend_test PRIVATE
 
 target_link_libraries(rhi_backend_test PRIVATE gtest_main)
 
+# spec 021 GPU-P02: the device-creation leg of RhiDeviceBringupGpu. This is the
+# ONLY target in the whole build that links Diligent (GL + Vk static engines) --
+# proof by construction that no shipping binary pulls it. GLFW backs a headless GL
+# context; Device.cpp + RhiBackend.cpp are compiled directly (Diligent stays out of
+# luminumbra_client). Guarded by LUMINUMBRA_ENABLE_DILIGENT so a Diligent-less
+# configure still builds the rest of the suite.
+if(LUMINUMBRA_ENABLE_DILIGENT)
+    add_executable(rhi_device_bringup_test
+        rendering/rhi_device_bringup_test.cpp
+        ../src/luminumbra_client/rendering/rhi/Device.cpp
+        ../src/luminumbra_client/rendering/rhi/RhiBackend.cpp
+    )
+    target_include_directories(rhi_device_bringup_test PRIVATE
+        ../src
+        ../src/luminumbra_client
+    )
+    target_link_libraries(rhi_device_bringup_test PRIVATE
+        gtest_main
+        glfw
+        Diligent-GraphicsEngineOpenGL-static
+        Diligent-GraphicsEngineVk-static
+    )
+    if(WIN32)
+        target_link_libraries(rhi_device_bringup_test PRIVATE opengl32 gdi32 user32)
+    endif()
+endif()
+
 # T-I5a-1: GL-free particle determinism unit tests (emitter descriptor surface).
 add_executable(particle_determinism_test
     rendering/particle_determinism_test.cpp
@@ -1110,6 +1137,11 @@ set(LUMINUMBRA_GTEST_TARGETS
     capture_scale_test
     isolation_config_test
 )
+# spec 021 GPU-P02: register the RHI device-bringup GPU ctest only when Diligent is
+# vendored in (the target does not exist otherwise).
+if(LUMINUMBRA_ENABLE_DILIGENT)
+    list(APPEND LUMINUMBRA_GTEST_TARGETS rhi_device_bringup_test)
+endif()
 # Gate honesty (spec 002, Item 3a): a GTEST_SKIP exits 0, so ctest counts it as PASS — meaning the
 # headless RmlUi UI suite (which GTEST_SKIPs without a GL context) could go GREEN with zero coverage
 # on a gate runner that lacks GL. These tests assert real behaviour and MUST run, not skip. Promote

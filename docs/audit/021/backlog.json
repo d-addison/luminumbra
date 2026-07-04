@@ -1135,7 +1135,7 @@
    "dependencies": [
     "GPU-06"
    ],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "NEW: RhiDeviceBringupGpu ctest \u2014 creates Diligent GL and Vulkan devices/swapchains headless, LUMIN_RHI parses all three values, and --smoke == 6f008a9f637c40b7 is unchanged (vendoring touched CMake only)",
    "rank": 63
   },

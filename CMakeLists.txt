@@ -129,6 +129,11 @@ include(cmake/engine_version.cmake)
 include(cmake/dependencies.cmake)
 add_subdirectory(vendor)
 
+# spec 021 GPU-P02: Diligent Engine (RHI pilot backend) via FetchContent. Only
+# registers the GL/Vk targets -- they are compiled solely by the RhiDeviceBringupGpu
+# ctest, never by a shipping binary, so this does not touch the server/sim build.
+include(cmake/diligent.cmake)
+
 # 1. Add the tools subdirectory so the asset_processor target is created.
 add_subdirectory(tools)
 
