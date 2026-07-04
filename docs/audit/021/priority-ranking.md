@@ -480,6 +480,65 @@ Final gates: `--smoke == 6f008a9f637c40b7` run==replay; HeadlessInGameCapture PA
 (both legs). **Wave B (the 017-B chain, ranks 50–56) is next** — see
 `docs/HANDOFF-2026-07-03-wave-b-fable.md` for the next orchestrator.
 
+## Wave B execution record (2026-07-03 → 07-04)
+
+Landed this wave (commits `35a7cf71 → 67fae941`, 22 commits, strictly serialized, every
+increment individually gated): **SHIELD-02** (017-B step 1 — sim-truth publish decoupled
+from render meshing via the two-stage promotion lane, sequenced INSIDE the barrier so
+settlement stayed same-tick; ZERO hash movement, red→green decoupling gtest), **SHIELD-03**
+(017-B step 2, landed as SIX gated increments: activation-latency shadow → scheduler
+de-timing to publication-keyed reads → sim_available_lod0 centralization → non-publishing
+save quiesce → main-thread generation publication + per-lane batch FIFOs + activate_due
+proven pre-swap by the ActivationQueueSemantics gtest → **THE BARRIER SWAP**:
+`activate_due(tick)` with fixed K=8 replaces the per-tick `wait_for_streaming_jobs`;
+measured **moving main-thread wait p50 28 ms / p99 239–262 ms / ~4.2 s total → 0.001 ms /
+0.001 ms / ≤0.1 ms over 90 ticks**; the moving hash became per-tick-trace run==replay
+MATCH **and worker-count-invariant** — a determinism property the engine never had; the
+wave's ONE sanctioned re-bless: moving debug `cf501b6676d67249 → 0431682a3f8a8a24`,
+release `→ d79fdbbdbfe6580f`; static debug/release BYTE-IDENTICAL throughout, with the
+debug per-tick trace identical to the pre-wave baseline artifact), **SHIELD-01** (the
+world-load hang ROOT FIX — bounded 64-job sub-batch surface builds with named per-batch
+watchdog progress; NEW WorldLoadBounded gate: 20 cold interactive loads at radius 12/4,
+all < 60 s, ~17 s average debug, zero wedges), **SHIELD-07 + OPS-13** (the FR-D-002
+fast/slow-job axis — LUMINUMBRA_JOB_THROTTLE seeded shuffled-pop at the JobSystem pop
+site; the matrix SKIP is gone and throttled runs reproduce the unthrottled baselines),
+**RENDER-06** (the FR-G-001 allowlist is EMPTY — GPU-SDF and sky-LUT blocking readbacks
+retired onto the 017-A ring as bounded zero-timeout polls with CPU fallbacks; the fully
+async GPU worldgen pipeline remains chartered in the GPU track), **SHIELD-06**
+(FR-A-003 enforced, not remembered — the world_hash exclusion scope DERIVES from the
+new kChunkFieldResidency table in core/ResidencyContract.h, now a production-consumed
+contract, with a first-hash completeness check and the HashScopeDerivesFromPartition
+projection pin; byte-neutral), **SHIELD-09** (the worldgen-epoch gate — reinit quiesces
+off-main-thread samplers via a per-job shared_mutex scope, replacing the point guard;
+WorldgenPreviewReinitRace soak with a guaranteed 500 ms contention window).
+
+Discovered and filed during the wave: **WATER-17** (rank 77) — the heavy-oracle water
+roundtrip is pre-existing-red, proven byte-identically at the pre-wave commit and at
+ticks=0; root-caused with new permanent settle-exit telemetry: the boot water settle
+cap-exits with 2577/5433 chunks never water-inited and ALL inited chunks awake, so the
+settle is reproducible but not idempotent. Also fixed en route: FOUR stale/broken gate
+pins — ReplayRoundtrip/LockstepLoopback/LockstepFaultInjection pinned the 2026-06-22-era
+static canonical `ab0869af…` (re-synced to `6f008a9f…` per their own comments), and
+**PopulatedWorldReplay was already red at the pre-wave commit** (two-point check: it
+died on a run-vs-replay MESH sub-hash desync before its golden check could run, so the
+old golden `114ff66c…` had been unreachable for an unknown period; under the queue the
+populated scenario is run==replay through EVERY sub-hash including mesh — an
+improvement — and the golden is re-pinned to the now-deterministic `9f0dd5b9b27ecb9d`,
+ecology sub-hash run==replay, non-vacuous 8→10 entities). The ctest-lane serial-only
+constraint is recorded (a -j4 run produces false failures incl. a WaterDeterminism
+SEGFAULT from test-isolation contention).
+
+**Wave B close (2026-07-04): every ranked 017-B-chain item (50–56) is done.** Wave gate
+held: static `--smoke == 6f008a9f637c40b7` / release `ea9a0121d13bc3bd` byte-identical
+after every commit with the static per-tick availability trace identical to the
+pre-wave baseline; the moving oracle run==replay at every increment (byte-identical
+until the swap, re-blessed once at it); full determinism matrix PASS — 26 cells
+including the new FR-D-002 axes in both builds; HeadlessServerTick + ReplayRoundtrip +
+LockstepLoopback + LockstepFaultInjection + MovingResidency + PopulatedWorldReplay +
+WorldLoadBounded + RenderReadbackAllowlist green; full serial ctest lane green except
+the intentional ForestPerfBudget. **Wave C (014 pilot-gate closure → RHI pilot, ranks
+57–66) is next**, pending owner review of this wave.
+
 ## Spine-inversion register (AC-003)
 
 Exactly one deliberate inversion, justified inline at its rank:

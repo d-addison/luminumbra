@@ -1369,9 +1369,18 @@ TEST(RenderSmokeTest, GpuSdfCallbackSafetyGateEmitsAnalysisArtifact) {
         raw_this_capture_present &&
         disabled_return != std::string::npos &&
         disabled_return < raw_capture;
+    // RENDER-06 (016 FR-E): the contract FLIPPED — the readback is the 017-A
+    // ring + a BOUNDED zero-timeout poll with a CPU-worldgen fallback, and the
+    // infinite blocking primitives are BANNED from this TU outright (the
+    // FR-G-001 gate scans with an EMPTY allowlist; the negative grep pins the
+    // ban here too). The artifact field keeps its historical name; its check
+    // now asserts the bounded-ring shape.
     const bool gpu_readback_is_synchronous =
-        source.find("glClientWaitSync(m_gpu_sdf.compute_fence, GL_SYNC_FLUSH_COMMANDS_BIT, GL_TIMEOUT_IGNORED)") != std::string::npos &&
-        source.find("glMapBuffer(GL_SHADER_STORAGE_BUFFER, GL_READ_ONLY)") != std::string::npos;
+        source.find("m_gpu_sdf.readback_ring.submit()") != std::string::npos &&
+        source.find("m_gpu_sdf.readback_ring.consume(&mapped_data, &mapped_bytes)") != std::string::npos &&
+        source.find("falling back to CPU worldgen") != std::string::npos &&
+        source.find("GL_TIMEOUT_IGNORED") == std::string::npos &&
+        source.find("glMapBuffer(GL_SHADER_STORAGE_BUFFER, GL_READ_ONLY)") == std::string::npos;
     const bool gl_context_required =
         source.find("glUseProgram(m_gpu_sdf.compute_program)") != std::string::npos &&
         source.find("glDispatchCompute(3, 3, 3)") != std::string::npos &&
@@ -1425,10 +1434,15 @@ TEST(RenderSmokeTest, GpuSdfComputeParityGateEmitsAnalysisArtifact) {
     const bool dispatch_covers_grid =
         source.find("glDispatchCompute(3, 3, 3)") != std::string::npos &&
         source.find("ceil(17/8)") != std::string::npos;
+    // RENDER-06 (016 FR-E): the readback contract is the bounded 017-A ring
+    // (submit + zero-timeout consume + deadline + CPU fallback); the old
+    // infinite blocking pair is banned (negative grep, mirrors the FR-G-001
+    // gate's now-empty allowlist).
     const bool deterministic_readback =
-        source.find("glClientWaitSync(m_gpu_sdf.compute_fence, GL_SYNC_FLUSH_COMMANDS_BIT, GL_TIMEOUT_IGNORED)") != std::string::npos &&
-        source.find("glMapBuffer(GL_SHADER_STORAGE_BUFFER, GL_READ_ONLY)") != std::string::npos &&
-        source.find("std::memcpy(out_sdf.data(), mapped_data, sdf_size * sizeof(float))") != std::string::npos;
+        source.find("m_gpu_sdf.readback_ring.submit()") != std::string::npos &&
+        source.find("m_gpu_sdf.readback_ring.consume(&mapped_data, &mapped_bytes)") != std::string::npos &&
+        source.find("std::memcpy(out_sdf.data(), mapped_data, sdf_bytes)") != std::string::npos &&
+        source.find("GL_TIMEOUT_IGNORED") == std::string::npos;
     const bool cpu_worldgen_authoritative_until_parity =
         source.find("world_system.SetGPUSDFCallback({})") != std::string::npos &&
         source.find("authoritative CPU worldgen path until GPU/CPU parity is implemented") != std::string::npos;

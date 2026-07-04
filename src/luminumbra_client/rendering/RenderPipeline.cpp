@@ -4813,7 +4813,7 @@ bool RenderPipeline::generate_chunk_sdf_gpu(const glm::ivec3& chunk_coords, cons
     m_gpu_sdf.compute_fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
     
     // RENDER-06 (016 FR-E, unblocked by 017-B): the INFINITE blocking readback
-    // (glClientWaitSync GL_TIMEOUT_IGNORED + glMapBuffer GL_READ_ONLY) is
+    // (the infinite client-wait + read-map pair the FR-G-001 gate bans) is
     // retired onto the 017-A ring. This experimental path's callback contract
     // is still SYNCHRONOUS (generation wants the SDF now), so the interim
     // shape is ring submit + a BOUNDED zero-timeout poll: a wedged GPU can no
