@@ -6,6 +6,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <set>
@@ -684,18 +685,34 @@ private:
 private:
     struct StreamingState {
         std::unordered_map<ChunkID, std::shared_ptr<::Luminumbra::Chunk>> chunks;
-        JobHandle generation_job_handle;
-        // Meshing work is split across two batches per dispatch: hole-fill
+        // SHIELD-03 inc 5a-2 (017-B): per-lane BATCH FIFOs. Each streaming
+        // dispatch appends a batch record {job handles, its chunks, due_tick};
+        // publication pops FRONT batches in FIFO order (deterministic
+        // publication order = dispatch order). Under the per-tick barrier the
+        // depth never exceeds 1 and every batch publishes the tick it was
+        // dispatched, so this is byte-identical structure-only change; the
+        // barrier swap gives due_tick = dispatch_tick + K its meaning.
+        struct GenerationBatch {
+            JobHandle handle;
+            std::vector<std::shared_ptr<::Luminumbra::Chunk>> chunks;
+            std::int64_t due_tick = -1;
+        };
+        std::deque<GenerationBatch> generation_batches;
+        // Meshing work is split across two job lanes per dispatch: hole-fill
         // candidates (no active mesh yet) ride the High job lane so visible
         // gaps close ahead of bulk LOD/water remeshes on the Normal lane.
-        JobHandle meshing_job_handle;
-        JobHandle meshing_job_handle_high;
         struct MeshingJobChunk {
             std::shared_ptr<::Luminumbra::Chunk> chunk;
             bool terrain_mesh_required = true;
             u8 transition_faces = 0;
         };
-        std::vector<MeshingJobChunk> meshing_job_chunks;
+        struct MeshingBatch {
+            JobHandle handle;       // Normal lane
+            JobHandle handle_high;  // High lane
+            std::vector<MeshingJobChunk> chunks;
+            std::int64_t due_tick = -1;
+        };
+        std::deque<MeshingBatch> meshing_batches;
         // SHIELD-02 (spec 017-B step 1): the sim-truth promotion lane. LOD0
         // promotions of surface-band-only chunks generate their full voxel
         // field in a PROMOTION generation job (stage A, these handles); the
@@ -712,20 +729,10 @@ private:
         };
         std::vector<PromotionJobChunk> promotion_job_chunks;   // stage A in flight
         std::vector<PromotionJobChunk> pending_promotion_mesh; // sim truth live, stage B not yet dispatched
-        // SHIELD-03 inc 2 (scheduler de-timing): "a generation batch is
-        // outstanding" as PUBLICATION-KEYED main-thread state — set TRUE at
-        // dispatch, set FALSE at the main-thread settle points
-        // (wait_for_generation_jobs, or the update-start handle observation).
-        // The SCHEDULER reads this instead of the wall-clock job counter, so
-        // its decisions stay a pure function of main-thread events when the
-        // per-tick barrier is later removed. Identical to the counter read at
-        // every scheduler read point under the barrier (both settle there).
-        bool generation_batch_outstanding = false;
-        // SHIELD-03 inc 5a: the outstanding generation batch's chunks — the
-        // main thread flips their Loading→Idle at publication (the gen job
-        // only stages data + raises pending_generation_ready). Filled at
-        // dispatch, cleared by publish_completed_generation_jobs.
-        std::vector<std::shared_ptr<::Luminumbra::Chunk>> generation_job_chunks;
+        // SHIELD-03: promotion stays a depth-1 lane (its dispatch cadence is
+        // low; stage B rides the meshing FIFO); due_tick joins it for the
+        // activate_due scheduling shell.
+        std::int64_t promotion_due_tick = -1;
     };
 
     StreamingState m_streaming_state;
@@ -873,12 +880,15 @@ private:
     void publish_completed_generation_jobs();
     bool promotion_jobs_active() const;
     bool promotion_pipeline_pending() const;
-    // SHIELD-03 inc 2: publication-keyed "a meshing batch is outstanding" —
-    // meshing_job_chunks is filled at dispatch and cleared at the main-thread
-    // publish, so this is a pure function of main-thread events (unlike the
-    // wall-clock meshing_jobs_active() counter read, which stays raw inside
-    // the wait/publish machinery only).
+    // SHIELD-03 inc 2 (+5a-2): publication-keyed "a batch is outstanding" —
+    // the lane FIFOs are appended at dispatch and popped at the main-thread
+    // publish, so these are pure functions of main-thread events (unlike the
+    // wall-clock *_jobs_active() counter reads, which stay raw inside the
+    // wait/publish machinery only).
     bool meshing_batch_outstanding() const;
+    bool generation_batch_outstanding() const;
+    // Raw counter read (machinery only): any generation batch's jobs in flight.
+    bool generation_jobs_active() const;
     // SHIELD-03 inc 3 (017-B): THE sim-availability predicate for LOD0 sim
     // consumers (today: collision eligibility, the one remaining render→sim
     // coupling — collision is BUILT from the heightmap, but eligibility keys

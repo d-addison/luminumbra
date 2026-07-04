@@ -262,11 +262,8 @@ MaterialType classify_material_legacy(float world_y, float final_height) {
     return MaterialType::Stone;
 }
 
-void clear_completed_job_handle(JobHandle& handle) {
-    if (handle.counter && handle.counter->load(std::memory_order_acquire) == 0) {
-        handle = {};
-    }
-}
+// (clear_completed_job_handle removed by SHIELD-03 inc 5a-2: batch handles
+// now live in the lane FIFOs and retire when their batch publishes.)
 
 bool has_active_job(const JobHandle& handle) {
     return handle.counter && handle.counter->load(std::memory_order_acquire) > 0;
@@ -363,55 +360,87 @@ SHIELD_WorldSystem::~SHIELD_WorldSystem() {
 }
 
 void SHIELD_WorldSystem::wait_for_generation_jobs() {
-    if (m_job_system && m_streaming_state.generation_job_handle.counter) {
-        m_job_system->wait(m_streaming_state.generation_job_handle);
+    if (m_job_system) {
+        for (auto& batch : m_streaming_state.generation_batches) {
+            if (batch.handle.counter) {
+                m_job_system->wait(batch.handle);
+            }
+        }
     }
-
-    m_streaming_state.generation_job_handle = {};
     // SHIELD-03 inc 5a: main-thread generation publication (Loading→Idle
-    // flips) + the inc-2 settle of the publication-keyed outstanding flag.
+    // flips + FIFO pops).
     publish_completed_generation_jobs();
 }
 
 void SHIELD_WorldSystem::publish_completed_generation_jobs() {
-    // Flip every completed batch chunk Loading→Idle ON THE MAIN THREAD (the
-    // gen job only stages data + raises pending_generation_ready — the chunk
-    // state machine is main-thread-owned). A chunk whose job never completed
-    // (crash) keeps Loading and never re-candidates — the same terminal
-    // behavior the old in-job flip had on a crash.
-    for (auto& chunk : m_streaming_state.generation_job_chunks) {
-        if (!chunk) {
-            continue;
+    // Publish FRONT batches whose jobs have all completed, in FIFO order
+    // (publication order == dispatch order — deterministic). Flips are ON THE
+    // MAIN THREAD (the gen job only stages data + raises
+    // pending_generation_ready — the chunk state machine is main-thread-
+    // owned). A chunk whose job never completed (crash) keeps Loading and
+    // never re-candidates — the same terminal behavior the old in-job flip
+    // had on a crash; its batch is popped with the rest once the batch's
+    // counter drains (a crashed job still decrements the batch counter via
+    // JobSystem's completion accounting).
+    while (!m_streaming_state.generation_batches.empty()) {
+        auto& front = m_streaming_state.generation_batches.front();
+        if (has_active_job(front.handle)) {
+            break;  // FIFO head still running — later batches wait their turn
         }
-        if (chunk->pending_generation_ready.load(std::memory_order_acquire)) {
-            chunk->pending_generation_ready.store(false, std::memory_order_release);
-            if (chunk->get_state() == Luminumbra::ChunkState::Loading) {
-                chunk->set_state(Luminumbra::ChunkState::Idle);
+        for (auto& chunk : front.chunks) {
+            if (!chunk) {
+                continue;
+            }
+            if (chunk->pending_generation_ready.load(std::memory_order_acquire)) {
+                chunk->pending_generation_ready.store(false, std::memory_order_release);
+                if (chunk->get_state() == Luminumbra::ChunkState::Loading) {
+                    chunk->set_state(Luminumbra::ChunkState::Idle);
+                }
             }
         }
+        m_streaming_state.generation_batches.pop_front();
     }
-    m_streaming_state.generation_job_chunks.clear();
-    m_streaming_state.generation_batch_outstanding = false;
 }
 
 void SHIELD_WorldSystem::wait_for_meshing_jobs() {
-    if (m_job_system && m_streaming_state.meshing_job_handle_high.counter) {
-        m_job_system->wait(m_streaming_state.meshing_job_handle_high);
-    }
-    if (m_job_system && m_streaming_state.meshing_job_handle.counter) {
-        m_job_system->wait(m_streaming_state.meshing_job_handle);
+    if (m_job_system) {
+        for (auto& batch : m_streaming_state.meshing_batches) {
+            if (batch.handle_high.counter) {
+                m_job_system->wait(batch.handle_high);
+            }
+            if (batch.handle.counter) {
+                m_job_system->wait(batch.handle);
+            }
+        }
     }
 
     process_completed_meshing_jobs();
 }
 
 bool SHIELD_WorldSystem::meshing_jobs_active() const {
-    return has_active_job(m_streaming_state.meshing_job_handle) ||
-           has_active_job(m_streaming_state.meshing_job_handle_high);
+    for (const auto& batch : m_streaming_state.meshing_batches) {
+        if (has_active_job(batch.handle) || has_active_job(batch.handle_high)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool SHIELD_WorldSystem::generation_jobs_active() const {
+    for (const auto& batch : m_streaming_state.generation_batches) {
+        if (has_active_job(batch.handle)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool SHIELD_WorldSystem::meshing_batch_outstanding() const {
-    return !m_streaming_state.meshing_job_chunks.empty();
+    return !m_streaming_state.meshing_batches.empty();
+}
+
+bool SHIELD_WorldSystem::generation_batch_outstanding() const {
+    return !m_streaming_state.generation_batches.empty();
 }
 
 bool SHIELD_WorldSystem::sim_available_lod0(const ::Luminumbra::Chunk& chunk) {
@@ -500,8 +529,10 @@ void SHIELD_WorldSystem::quiesce_streaming_jobs_for_save() {
     if (!m_job_system) {
         return;
     }
-    if (m_streaming_state.generation_job_handle.counter) {
-        m_job_system->wait(m_streaming_state.generation_job_handle);
+    for (auto& batch : m_streaming_state.generation_batches) {
+        if (batch.handle.counter) {
+            m_job_system->wait(batch.handle);
+        }
     }
     if (m_streaming_state.promotion_job_handle_high.counter) {
         m_job_system->wait(m_streaming_state.promotion_job_handle_high);
@@ -509,11 +540,13 @@ void SHIELD_WorldSystem::quiesce_streaming_jobs_for_save() {
     if (m_streaming_state.promotion_job_handle.counter) {
         m_job_system->wait(m_streaming_state.promotion_job_handle);
     }
-    if (m_streaming_state.meshing_job_handle_high.counter) {
-        m_job_system->wait(m_streaming_state.meshing_job_handle_high);
-    }
-    if (m_streaming_state.meshing_job_handle.counter) {
-        m_job_system->wait(m_streaming_state.meshing_job_handle);
+    for (auto& batch : m_streaming_state.meshing_batches) {
+        if (batch.handle_high.counter) {
+            m_job_system->wait(batch.handle_high);
+        }
+        if (batch.handle.counter) {
+            m_job_system->wait(batch.handle);
+        }
     }
 }
 
@@ -2377,14 +2410,12 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
         slot += std::chrono::duration<double, std::milli>(_n - _dbg_prev).count();
         _dbg_prev = _n;
     };
-    clear_completed_job_handle(m_streaming_state.generation_job_handle);
-    // SHIELD-03 inc 2+5a: the update-start handle observation is a main-thread
-    // event — when the batch has fully drained, PUBLISH it here (Loading→Idle
-    // flips + the outstanding-flag settle). The barrier path publishes in
-    // wait_for_generation_jobs; this covers the client's barrier-free path.
-    if (!has_active_job(m_streaming_state.generation_job_handle)) {
-        publish_completed_generation_jobs();
-    }
+    // SHIELD-03 inc 2+5a: the update-start observation is a main-thread event
+    // — publish any fully-drained FRONT generation batches here (Loading→Idle
+    // flips + FIFO pops; the function stops at the first still-running batch).
+    // The barrier path publishes in wait_for_generation_jobs; this covers the
+    // client's barrier-free path.
+    publish_completed_generation_jobs();
     process_completed_meshing_jobs();
     // SHIELD-02: the client publish point for the promotion lane (the server
     // publishes inside the per-tick sequenced barrier instead) — publishes
@@ -2407,7 +2438,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
     m_last_streaming_budget_stats.max_active_chunks_budget = STREAMING_MAX_ACTIVE_CHUNKS_BUDGET;
     // SHIELD-03 inc 2: telemetry mirrors the publication-keyed signals the
     // scheduler now reads (not the wall-clock job counters).
-    m_last_streaming_budget_stats.generation_job_active = m_streaming_state.generation_batch_outstanding;
+    m_last_streaming_budget_stats.generation_job_active = generation_batch_outstanding();
     m_last_streaming_budget_stats.meshing_job_active = meshing_batch_outstanding();
     m_last_streaming_budget_stats.active_chunks_before = m_streaming_state.chunks.size();
     clear_streaming_state_counts(m_last_streaming_budget_stats);
@@ -2746,7 +2777,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
         // scheduler read to be de-timed ahead of the barrier removal.
         const bool quiescent = !produced_work && !meshing_batch_outstanding() &&
                                !promotion_pipeline_pending() &&
-                               !m_streaming_state.generation_batch_outstanding;
+                               !generation_batch_outstanding();
         m_last_pass_drained = quiescent;
         if (quiescent) {
             m_last_serviced_generation = m_dirty_generation;
@@ -2895,7 +2926,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
         m_last_streaming_budget_stats.idle_chunks,
         // SHIELD-03 inc 2: publication-keyed signals — the wanted radius is
         // now a pure function of main-thread events, never job-counter timing.
-        m_streaming_state.generation_batch_outstanding,
+        generation_batch_outstanding(),
         // SHIELD-02: promotion work counts as meshing-lane pressure (it was
         // meshing-lane work before the decoupling). Byte-neutral on the
         // per-tick-quiesced server paths — both terms read false there.
@@ -2904,7 +2935,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
     );
 
     m_last_streaming_budget_stats.target_render_radius = target_radius;
-    m_last_streaming_budget_stats.generation_job_active = m_streaming_state.generation_batch_outstanding;
+    m_last_streaming_budget_stats.generation_job_active = generation_batch_outstanding();
     int generation_budget = MAX_CHUNKS_TO_PROCESS_PER_FRAME;
     if (anchors.size() > 1u) {
         generation_budget = static_cast<int>(std::min<std::size_t>(
@@ -3800,7 +3831,9 @@ float SHIELD_WorldSystem::get_density_at(const Vec3& world_pos) const {
 }
 
 std::vector<Luminumbra::Chunk*> SHIELD_WorldSystem::get_renderable_chunks() {
-    clear_completed_job_handle(m_streaming_state.generation_job_handle);
+    // Client render-path observation: publish drained front generation
+    // batches + completed meshes (main-thread, idempotent).
+    publish_completed_generation_jobs();
     process_completed_meshing_jobs();
 
     std::vector<Luminumbra::Chunk*> renderable;
@@ -3831,7 +3864,7 @@ std::vector<Luminumbra::Chunk*> SHIELD_WorldSystem::get_renderable_chunks() {
 SHIELD_WorldSystem::RuntimeChunkStats SHIELD_WorldSystem::get_runtime_chunk_stats() const {
     RuntimeChunkStats stats;
     stats.total_chunks = m_streaming_state.chunks.size();
-    stats.generation_job_active = has_active_job(m_streaming_state.generation_job_handle);
+    stats.generation_job_active = generation_jobs_active();
     stats.meshing_job_active = meshing_jobs_active();
 
     for (const auto& [id, chunk_ptr] : m_streaming_state.chunks) {
@@ -4372,11 +4405,11 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<IVec3>&
 }
 
 JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<ChunkGenerationRequest>& chunks_to_generate) {
-    clear_completed_job_handle(m_streaming_state.generation_job_handle);
-    if (has_active_job(m_streaming_state.generation_job_handle)) {
-        return {};
-    }
-
+    // SHIELD-03 inc 5a-2: dispatch APPENDS a batch to the lane FIFO (the old
+    // refuse-while-active head guard is gone — the scheduler's budget gate
+    // already prevents scheduling-path double-dispatch, boot-path callers
+    // dispatch-then-wait, and multi-batch flight is the queue's design).
+    StreamingState::GenerationBatch batch;
     std::vector<Luminumbra::Job> jobs;
     for (const auto& request : chunks_to_generate) {
         const IVec3 coords = request.coords;
@@ -4397,11 +4430,9 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<ChunkGe
         chunk->set_state(Luminumbra::ChunkState::Loading);
         m_streaming_state.chunks[chunk->get_id()] = chunk;
 
-        // Chunk generation job created
-
         const int target_step = request.target_step;
         chunk->pending_generation_ready.store(false, std::memory_order_release);
-        m_streaming_state.generation_job_chunks.push_back(chunk);
+        batch.chunks.push_back(chunk);
         jobs.emplace_back([this, chunk, target_step]() {
             GenerateChunkData(*chunk, target_step);
             // SHIELD-03 inc 5a: stage completion only — the MAIN thread flips
@@ -4410,17 +4441,14 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<ChunkGe
             chunk->pending_generation_ready.store(true, std::memory_order_release);
         });
     }
-    
-    JobHandle handle; // Declare handle outside the if block
 
     if (m_job_system && !jobs.empty()) {
-        handle = m_job_system->dispatch_batch(jobs);
-        m_streaming_state.generation_job_handle = handle;
-        // SHIELD-03 inc 2: publication-keyed outstanding flag (see the header
-        // comment) — set at dispatch on the main thread.
-        m_streaming_state.generation_batch_outstanding = true;
+        batch.handle = m_job_system->dispatch_batch(jobs);
+        const JobHandle handle = batch.handle;
+        m_streaming_state.generation_batches.push_back(std::move(batch));
+        return handle;
     }
-    return handle; // Return the handle (will be default-constructed/invalid if no jobs were dispatched)
+    return {}; // no batch dispatched (all requests skipped, or no job system)
 }
 
 void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem>& chunks_to_mesh) {
@@ -4507,8 +4535,10 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
     // prefix first, so this mirrors the existing priority order.
     std::vector<Luminumbra::Job> high_priority_jobs;
     std::vector<Luminumbra::Job> normal_priority_jobs;
-    m_streaming_state.meshing_job_chunks.clear();
-    m_streaming_state.meshing_job_chunks.reserve(mesh_items.size());
+    // SHIELD-03 inc 5a-2: build this dispatch's batch record locally; it is
+    // appended to the lane FIFO at the dispatch below.
+    StreamingState::MeshingBatch mesh_batch;
+    mesh_batch.chunks.reserve(mesh_items.size());
     for (const MeshingWorkItem& work_item : mesh_items) {
         auto& chunk = work_item.chunk;
         const int lod_level = work_item.lod_level;
@@ -4552,7 +4582,7 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
             add_face_if_neighbor_is_finer(0, -1, Luminumbra::World::MarchingCubes::TransitionFaceMinZ);
             add_face_if_neighbor_is_finer(0, 1, Luminumbra::World::MarchingCubes::TransitionFaceMaxZ);
         }
-        m_streaming_state.meshing_job_chunks.push_back({chunk, terrain_mesh_required, transition_faces});
+        mesh_batch.chunks.push_back({chunk, terrain_mesh_required, transition_faces});
 
         auto& lane_jobs = work_item.high_priority ? high_priority_jobs : normal_priority_jobs;
         lane_jobs.emplace_back([this, chunk, step, transition_faces, terrain_mesh_required]() {
@@ -4635,12 +4665,13 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
     }
     if (m_job_system && (!high_priority_jobs.empty() || !normal_priority_jobs.empty())) {
         if (!high_priority_jobs.empty()) {
-            m_streaming_state.meshing_job_handle_high =
+            mesh_batch.handle_high =
                 m_job_system->dispatch_batch(high_priority_jobs, JobPriority::High);
         }
         if (!normal_priority_jobs.empty()) {
-            m_streaming_state.meshing_job_handle = m_job_system->dispatch_batch(normal_priority_jobs);
+            mesh_batch.handle = m_job_system->dispatch_batch(normal_priority_jobs);
         }
+        m_streaming_state.meshing_batches.push_back(std::move(mesh_batch));
     } else {
         for (auto& job : high_priority_jobs) {
             job();
@@ -4648,25 +4679,25 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
         for (auto& job : normal_priority_jobs) {
             job();
         }
-        m_streaming_state.meshing_job_handle.counter = std::make_shared<std::atomic<int>>(0);
+        m_streaming_state.meshing_batches.push_back(std::move(mesh_batch));
         process_completed_meshing_jobs();
     }
 }
 
 void SHIELD_WorldSystem::process_completed_meshing_jobs() {
-    if (!m_streaming_state.meshing_job_handle.counter &&
-        !m_streaming_state.meshing_job_handle_high.counter)
-    {
+    // SHIELD-03 inc 5a-2: publish FRONT batches whose BOTH job lanes have
+    // drained, in FIFO order (publication order == dispatch order —
+    // deterministic). Stops at the first still-running batch so later
+    // batches never publish ahead of an earlier one.
+    while (!m_streaming_state.meshing_batches.empty()) {
+    auto& front_batch = m_streaming_state.meshing_batches.front();
+    if (has_active_job(front_batch.handle) || has_active_job(front_batch.handle_high)) {
         return;
     }
 
-    // Results are published only once BOTH lanes of the dispatch finished, so
-    // mesh application keeps the pre-priority-lane all-or-nothing semantics.
-    if (meshing_jobs_active()) {
-        return;
-    }
-
-    for (const auto& job_chunk : m_streaming_state.meshing_job_chunks) {
+    // Results are published only once BOTH lanes of this dispatch finished,
+    // keeping the pre-priority-lane all-or-nothing semantics per batch.
+    for (const auto& job_chunk : front_batch.chunks) {
         const auto& chunk = job_chunk.chunk;
         if (!chunk) {
             continue;
@@ -4717,9 +4748,8 @@ void SHIELD_WorldSystem::process_completed_meshing_jobs() {
         chunk->pending_lod.store(-1, std::memory_order_release);
     }
 
-    m_streaming_state.meshing_job_chunks.clear();
-    m_streaming_state.meshing_job_handle = {};
-    m_streaming_state.meshing_job_handle_high = {};
+    m_streaming_state.meshing_batches.pop_front();
+    }  // while (front batch drained)
 }
 
 void SHIELD_WorldSystem::set_params(const TerrainGenParams& params) {
