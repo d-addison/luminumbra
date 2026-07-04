@@ -22,6 +22,7 @@ namespace Luminumbra::Rendering {
 class Camera;
 class Shader;
 class Mesh;
+class RenderResourceRegistry;
 
 // Deferred geometry (G-Buffer) render pass extracted from RenderPipeline
 // (T-I2-11c). Owns the G-Buffer FBO/attachments, the terrain geometry
@@ -47,8 +48,12 @@ public:
     // T-I3-16: non-instanced skinned draw stage (skinned_mesh.vert +
     // g_buffer.frag) with a joint-palette SSBO fed by the T-I3-15 runtime.
     void init_skinned_mesh(const std::filesystem::path& root_path);
-    void init_gbuffer(u32 width, u32 height);
-    void destroy_gbuffer();
+    // RENDER-12/GPU-12: the G-buffer FBO + attachments are REGISTRY-OWNED
+    // (allocated/resized/destroyed by the registry, the 014 pilot-gate
+    // ownership leg). The GBuffer struct caches the owned GL ids so every
+    // downstream reader is unchanged.
+    void init_gbuffer(RenderResourceRegistry& registry, u32 width, u32 height);
+    void destroy_gbuffer(RenderResourceRegistry& registry);
     void destroy_instanced_static_mesh();
     void destroy_skinned_mesh();
     void reset_shaders();

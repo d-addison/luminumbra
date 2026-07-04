@@ -635,7 +635,7 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
 
         init_shaders();
         m_lighting_pass->init_lighting_fbo(screen_width, screen_height);
-        m_gbuffer_pass->init_gbuffer(screen_width, screen_height);
+        m_gbuffer_pass->init_gbuffer(m_render_registry, screen_width, screen_height);
         m_shadow_pass->init_shadow_map();
         m_ssao_pass->init_ssao(screen_width, screen_height);
         init_screen_quad();
@@ -2715,8 +2715,8 @@ void RenderPipeline::on_resize(u32 new_width, u32 new_height) {
     // through the shared pipeline state and pick up the new size automatically.
     m_lighting_pass->destroy_lighting_fbo();
     m_lighting_pass->init_lighting_fbo(new_width, new_height);
-    m_gbuffer_pass->destroy_gbuffer();
-    m_gbuffer_pass->init_gbuffer(new_width, new_height);
+    m_gbuffer_pass->destroy_gbuffer(m_render_registry);
+    m_gbuffer_pass->init_gbuffer(m_render_registry, new_width, new_height);
     m_ssao_pass->destroy_ssao();
     m_ssao_pass->init_ssao(new_width, new_height);
     destroy_taau();
@@ -3106,7 +3106,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     }
     m_free_water_render_slots.clear();
     m_lighting_pass->destroy_lighting_fbo();
-    m_gbuffer_pass->destroy_gbuffer();
+    m_gbuffer_pass->destroy_gbuffer(m_render_registry);
     m_shadow_pass->destroy_shadow_map();
     m_ssao_pass->destroy_ssao();
     destroy_halfres_cloud(); // render-optimization: reduced-res sky-dome target

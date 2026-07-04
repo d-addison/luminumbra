@@ -17,6 +17,12 @@ namespace Luminumbra::Rendering {
 namespace {
 
 bool allocate_texture_storage(u32 gl_id, const TextureDesc& desc) {
+    // GL error state is global and sticky: drain any pre-existing flag so the
+    // post-allocation check reflects THIS allocation only (init runs right
+    // after other GL setup that may have left a flag set — otherwise the first
+    // create_texture would false-fail on a stale error).
+    while (glGetError() != GL_NO_ERROR) {
+    }
     const GLenum target = desc.layers > 1 ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D;
     glBindTexture(target, gl_id);
     if (desc.layers > 1) {

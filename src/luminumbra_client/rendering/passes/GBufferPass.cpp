@@ -1,6 +1,7 @@
 #include "GBufferPass.h"
 
 #include "PassGlHelpers.h"
+#include "../RenderResourceRegistry.h"  // RENDER-12/GPU-12: registry-owned G-buffer
 #include "../FarLodSystem.h"
 #include "../TreeLod.h" // Track-B: per-instance distance LOD mesh selection (render-only)
 #include "core/IsolationConfig.h" // Spec 016: ctx.isolation->renders(...) needs the full type
@@ -106,85 +107,87 @@ void GBufferPass::init_skinned_mesh(const std::filesystem::path& root_path) {
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 }
 
-void GBufferPass::init_gbuffer(u32 width, u32 height) {
-    glGenFramebuffers(1, &m_gbuffer.fbo_id);
-    PassGl::label_gl_object(GL_FRAMEBUFFER, m_gbuffer.fbo_id, "gbuffer.fbo");
-    glBindFramebuffer(GL_FRAMEBUFFER, m_gbuffer.fbo_id);
+void GBufferPass::init_gbuffer(RenderResourceRegistry& registry, u32 width, u32 height) {
+    // RENDER-12/GPU-12: allocate the FBO + attachments THROUGH the registry.
+    // Every desc reproduces the exact GL parameters of the retired
+    // glTexImage/glTexParameter calls so the migration is byte-neutral
+    // (flip-score-0 on same-pose captures); the struct caches the owned ids.
+    const auto color_desc = [&](u32 internal_format, u32 format, u32 type,
+                                const char* label) {
+        TextureDesc d;
+        d.width = width;
+        d.height = height;
+        d.internal_format = internal_format;
+        d.format = format;
+        d.type = type;
+        d.min_filter = GL_NEAREST;
+        d.mag_filter = GL_NEAREST;
+        d.expected_layout = "color_attachment";
+        d.debug_label = label;
+        return d;
+    };
 
     // Position: full view-space position for deferred lighting, SSAO, and material projection.
-    glGenTextures(1, &m_gbuffer.position_texture);
-    PassGl::label_gl_object(GL_TEXTURE, m_gbuffer.position_texture, "gbuffer.position");
-    glBindTexture(GL_TEXTURE_2D, m_gbuffer.position_texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, width, height, 0, GL_RGB, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_gbuffer.position_texture, 0);
+    m_gbuffer.position_texture =
+        registry.create_texture("gbuffer_position",
+                                color_desc(GL_RGB16F, GL_RGB, GL_FLOAT, "gbuffer.position")).id;
+    // Normal/Material: RGBA8 (octahedral normal + material ID).
+    m_gbuffer.normal_texture =
+        registry.create_texture("gbuffer_normal",
+                                color_desc(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, "gbuffer.normal_material")).id;
+    // Albedo/Roughness: RGBA8.
+    m_gbuffer.albedo_texture =
+        registry.create_texture("gbuffer_albedo",
+                                color_desc(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, "gbuffer.albedo_roughness")).id;
+    // Metallic/AO: RG16F.
+    m_gbuffer.material_texture =
+        registry.create_texture("gbuffer_material",
+                                color_desc(GL_RG16F, GL_RG, GL_FLOAT, "gbuffer.metallic_ao")).id;
+    // Motion vectors: RG16F (signed NDC delta). spec 004 FR-R5 TAAU foundation.
+    m_gbuffer.motion_vector_texture =
+        registry.create_texture("gbuffer_motion",
+                                color_desc(GL_RG16F, GL_RG, GL_FLOAT, "gbuffer.motion_vectors")).id;
 
-    // Normal/Material: RGBA8 (4 bytes/pixel -> octahedral normal + material ID)
-    glGenTextures(1, &m_gbuffer.normal_texture);
-    PassGl::label_gl_object(GL_TEXTURE, m_gbuffer.normal_texture, "gbuffer.normal_material");
-    glBindTexture(GL_TEXTURE_2D, m_gbuffer.normal_texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, m_gbuffer.normal_texture, 0);
+    // Depth: DEPTH_COMPONENT24, clamp-to-border with a white border.
+    TextureDesc depth_desc = color_desc(GL_DEPTH_COMPONENT24, GL_DEPTH_COMPONENT, GL_FLOAT, "gbuffer.depth");
+    depth_desc.wrap_s = GL_CLAMP_TO_BORDER;
+    depth_desc.wrap_t = GL_CLAMP_TO_BORDER;
+    depth_desc.has_border_color = true;
+    depth_desc.border_color[0] = 1.0f;
+    depth_desc.border_color[1] = 1.0f;
+    depth_desc.border_color[2] = 1.0f;
+    depth_desc.border_color[3] = 1.0f;
+    depth_desc.expected_layout = "depth_attachment";
+    m_gbuffer.depth_texture = registry.create_texture("gbuffer_depth", depth_desc).id;
 
-    // Albedo/Roughness: RGBA8 (4 bytes/pixel -> RGB albedo + roughness)
-    glGenTextures(1, &m_gbuffer.albedo_texture);
-    PassGl::label_gl_object(GL_TEXTURE, m_gbuffer.albedo_texture, "gbuffer.albedo_roughness");
-    glBindTexture(GL_TEXTURE_2D, m_gbuffer.albedo_texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, m_gbuffer.albedo_texture, 0);
-
-    // Metallic/AO: RG16F (4 bytes/pixel -> metallic + ambient occlusion)
-    glGenTextures(1, &m_gbuffer.material_texture);
-    PassGl::label_gl_object(GL_TEXTURE, m_gbuffer.material_texture, "gbuffer.metallic_ao");
-    glBindTexture(GL_TEXTURE_2D, m_gbuffer.material_texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG16F, width, height, 0, GL_RG, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT3, GL_TEXTURE_2D, m_gbuffer.material_texture, 0);
-
-    // Motion vectors: RG16F (signed NDC delta = current - previous screen position).
-    // spec 004 FR-R5 (TAAU) foundation; spec 007 particle Phase 3 writes velocity here.
-    glGenTextures(1, &m_gbuffer.motion_vector_texture);
-    PassGl::label_gl_object(GL_TEXTURE, m_gbuffer.motion_vector_texture, "gbuffer.motion_vectors");
-    glBindTexture(GL_TEXTURE_2D, m_gbuffer.motion_vector_texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG16F, width, height, 0, GL_RG, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT4, GL_TEXTURE_2D, m_gbuffer.motion_vector_texture, 0);
-
-    const GLenum attachments[5] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3, GL_COLOR_ATTACHMENT4 };
-    glDrawBuffers(5, attachments);
-
-    // Depth texture (unchanged)
-    glGenTextures(1, &m_gbuffer.depth_texture);
-    PassGl::label_gl_object(GL_TEXTURE, m_gbuffer.depth_texture, "gbuffer.depth");
-    glBindTexture(GL_TEXTURE_2D, m_gbuffer.depth_texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-    float borderColor[] = { 1.0f, 1.0f, 1.0f, 1.0f };
-    glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_gbuffer.depth_texture, 0);
-
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) LUMINUMBRA_CORE_ERROR("G-Buffer FBO not complete!");
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    FboDesc fbo_desc;
+    fbo_desc.attachments = {
+        {GL_COLOR_ATTACHMENT0, "gbuffer_position"},
+        {GL_COLOR_ATTACHMENT1, "gbuffer_normal"},
+        {GL_COLOR_ATTACHMENT2, "gbuffer_albedo"},
+        {GL_COLOR_ATTACHMENT3, "gbuffer_material"},
+        {GL_COLOR_ATTACHMENT4, "gbuffer_motion"},
+        {GL_DEPTH_ATTACHMENT, "gbuffer_depth"},
+    };
+    fbo_desc.draw_buffers = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2,
+                             GL_COLOR_ATTACHMENT3, GL_COLOR_ATTACHMENT4};
+    fbo_desc.debug_label = "gbuffer.fbo";
+    m_gbuffer.fbo_id = registry.create_fbo("gbuffer_fbo", fbo_desc).id;
+    if (m_gbuffer.fbo_id == 0) {
+        LUMINUMBRA_CORE_ERROR("G-Buffer FBO not complete!");
+    }
 }
 
-void GBufferPass::destroy_gbuffer() {
-    if (m_gbuffer.fbo_id) { glDeleteFramebuffers(1, &m_gbuffer.fbo_id); m_gbuffer.fbo_id = 0; }
-    if (m_gbuffer.position_texture) { glDeleteTextures(1, &m_gbuffer.position_texture); m_gbuffer.position_texture = 0; }
-    if (m_gbuffer.normal_texture) { glDeleteTextures(1, &m_gbuffer.normal_texture); m_gbuffer.normal_texture = 0; }
-    if (m_gbuffer.albedo_texture) { glDeleteTextures(1, &m_gbuffer.albedo_texture); m_gbuffer.albedo_texture = 0; }
-    if (m_gbuffer.material_texture) { glDeleteTextures(1, &m_gbuffer.material_texture); m_gbuffer.material_texture = 0; }
-    if (m_gbuffer.motion_vector_texture) { glDeleteTextures(1, &m_gbuffer.motion_vector_texture); m_gbuffer.motion_vector_texture = 0; }
-    if (m_gbuffer.depth_texture) { glDeleteTextures(1, &m_gbuffer.depth_texture); m_gbuffer.depth_texture = 0; }
+void GBufferPass::destroy_gbuffer(RenderResourceRegistry& registry) {
+    // Ownership contract: the registry deletes the owned GL objects.
+    registry.destroy_owned("gbuffer_fbo");
+    registry.destroy_owned("gbuffer_position");
+    registry.destroy_owned("gbuffer_normal");
+    registry.destroy_owned("gbuffer_albedo");
+    registry.destroy_owned("gbuffer_material");
+    registry.destroy_owned("gbuffer_motion");
+    registry.destroy_owned("gbuffer_depth");
+    m_gbuffer = GBuffer{};
 }
 
 void GBufferPass::destroy_instanced_static_mesh() {
