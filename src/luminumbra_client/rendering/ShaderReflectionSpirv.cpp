@@ -4,58 +4,54 @@
 
 namespace Luminumbra::Rendering {
 
-GLenum SpirvImageTypeToGlSampler(const std::string& t) {
-    // Separate-image forms (HLSL Texture*) and combined forms (GLSL sampler*) both
-    // map to the GL combined-sampler enum GL introspection reports.
-    if (t == "texture2D" || t == "sampler2D") return GL_SAMPLER_2D;
-    if (t == "texture2DArray" || t == "sampler2DArray") return GL_SAMPLER_2D_ARRAY;
-    if (t == "textureCube" || t == "samplerCube") return GL_SAMPLER_CUBE;
-    if (t == "texture3D" || t == "sampler3D") return GL_SAMPLER_3D;
-    if (t == "texture2DShadow" || t == "sampler2DShadow") return GL_SAMPLER_2D_SHADOW;
-    if (t == "textureCubeShadow" || t == "samplerCubeShadow") return GL_SAMPLER_CUBE_SHADOW;
+GLenum ReflectedImageShapeToGlSampler(const std::string& shape) {
+    if (shape == "texture2D") return GL_SAMPLER_2D;
+    if (shape == "texture2DArray") return GL_SAMPLER_2D_ARRAY;
+    if (shape == "textureCube") return GL_SAMPLER_CUBE;
+    if (shape == "textureCubeArray") return GL_SAMPLER_CUBE_MAP_ARRAY;
+    if (shape == "texture3D") return GL_SAMPLER_3D;
+    if (shape == "texture1D") return GL_SAMPLER_1D;
     return 0;
 }
 
-ReflectedLayout ReflectSpirvReflectionJson(const std::string& json_text) {
+ReflectedLayout ReflectSlangReflectionJson(const std::string& json_text) {
     ReflectedLayout layout;
     const nlohmann::json doc = nlohmann::json::parse(json_text, nullptr, /*allow_exceptions=*/false);
-    if (doc.is_discarded() || !doc.is_object()) {
+    if (doc.is_discarded() || !doc.is_object() || !doc.contains("parameters")) {
         return layout;
     }
 
-    // HLSL Texture2D -> "separate_images"; GLSL combined sampler2D -> "textures".
-    const auto add_images = [&](const char* key) {
-        if (!doc.contains(key)) return;
-        for (const auto& img : doc[key]) {
-            ReflectedSampler s;
-            s.name = img.value("name", std::string{});
-            s.type = SpirvImageTypeToGlSampler(img.value("type", std::string{}));
-            s.unit = img.value("binding", 0);
-            layout.samplers.push_back(s);
+    for (const auto& param : doc["parameters"]) {
+        if (!param.contains("type") || !param["type"].is_object()) {
+            continue;
         }
-    };
-    add_images("separate_images");
-    add_images("textures");
+        const auto& type = param["type"];
+        const std::string kind = type.value("kind", std::string{});
 
-    if (doc.contains("outputs")) {
-        for (const auto& o : doc["outputs"]) {
-            ReflectedOutput out;
-            out.name = o.value("name", std::string{});
-            out.location = o.value("location", -1);
-            layout.outputs.push_back(out);
-        }
-    }
-    const auto add_blocks = [&](const char* key, std::vector<ReflectedBlock>& into) {
-        if (!doc.contains(key)) return;
-        for (const auto& b : doc[key]) {
+        if (kind == "resource") {
+            // Only sampled textures map to the GL combined-sampler set; structured/RW
+            // buffers (shape != texture*) return 0 and are skipped.
+            const GLenum gl_type = ReflectedImageShapeToGlSampler(type.value("baseShape", std::string{}));
+            if (gl_type != 0) {
+                ReflectedSampler s;
+                s.name = param.value("name", std::string{});
+                s.type = gl_type;
+                if (param.contains("binding") && param["binding"].is_object()) {
+                    s.unit = param["binding"].value("index", 0);
+                }
+                layout.samplers.push_back(s);
+            }
+        } else if (kind == "constantBuffer") {
             ReflectedBlock block;
-            block.name = b.value("name", std::string{});
-            block.binding = b.value("binding", 0);
-            into.push_back(block);
+            block.name = param.value("name", std::string{});
+            if (param.contains("binding") && param["binding"].is_object()) {
+                block.binding = param["binding"].value("index", 0);
+            }
+            layout.uniform_blocks.push_back(block);
         }
-    };
-    add_blocks("ubos", layout.uniform_blocks);
-    add_blocks("ssbos", layout.storage_blocks);
+        // kind == "samplerState": ignored -- the split-binding-model artifact, not
+        // part of the GL-comparable interface (GL sees combined samplers).
+    }
 
     return layout;
 }

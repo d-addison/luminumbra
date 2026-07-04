@@ -2,7 +2,7 @@
 //
 // For each pilot shader (ssao, debug_view), assert that THREE independent views of
 // its sampler interface agree on {name -> GL sampler type}:
-//   A = spirv-cross --reflect of the DXC-compiled single-source HLSL (build artifact)
+//   A = slangc -reflection-json of the single-source HLSL (build artifact)
 //   B = GL program introspection of the shipping GLSL (ReflectProgramLayout)
 //   C = the declared ExpectedLayout (PassShaderLayouts, the validation currency)
 // A == C is GL-free and always runs (non-vacuous coverage even headless); B == C and
@@ -141,18 +141,18 @@ void RunParity(HiddenGlContext* ctx, const char* pass_name, const char* json_bas
     const std::map<std::string, GLenum> expected = ExpectedSamplerMap(entry->expected.samplers);
     ASSERT_FALSE(expected.empty()) << "'" << pass_name << "' declares no samplers";
 
-    // A: spirv-cross reflection of the DXC-compiled HLSL (GL-free).
+    // A: Slang reflection of the slangc-compiled HLSL (GL-free).
     const std::string json_path = ReflectDir() + "/" + json_basename;
     std::string json_text, err;
     ASSERT_TRUE(ReadTextFile(json_path, json_text, err)) << err;
-    const ReflectedLayout spirv = ReflectSpirvReflectionJson(json_text);
-    const std::map<std::string, GLenum> spirv_map = ReflectedSamplerMap(spirv.samplers);
-    ASSERT_FALSE(spirv_map.empty())
-        << "spirv-cross reflection of " << json_basename << " produced no samplers (vacuous)";
+    const ReflectedLayout slang = ReflectSlangReflectionJson(json_text);
+    const std::map<std::string, GLenum> slang_map = ReflectedSamplerMap(slang.samplers);
+    ASSERT_FALSE(slang_map.empty())
+        << "Slang reflection of " << json_basename << " produced no samplers (vacuous)";
 
     // A == C : the HLSL's reflected interface equals the declared layout.
-    EXPECT_EQ(spirv_map, expected)
-        << "SPIRV-Cross reflected layout != declared ExpectedLayout for '" << pass_name << "'";
+    EXPECT_EQ(slang_map, expected)
+        << "Slang reflected layout != declared ExpectedLayout for '" << pass_name << "'";
 
     // B: GL introspection of the shipping GLSL (adds the third source when GL is up).
     if (ctx != nullptr && ctx->ready()) {
@@ -168,8 +168,8 @@ void RunParity(HiddenGlContext* ctx, const char* pass_name, const char* json_bas
 
         EXPECT_EQ(gl_map, expected)
             << "GL-introspected layout != declared ExpectedLayout for '" << pass_name << "'";
-        EXPECT_EQ(spirv_map, gl_map)
-            << "SPIRV-Cross layout != GL-introspected layout for '" << pass_name << "'";
+        EXPECT_EQ(slang_map, gl_map)
+            << "Slang layout != GL-introspected layout for '" << pass_name << "'";
     } else {
         // A==C already gave non-vacuous coverage; the GL leg is unavailable headless.
         GTEST_LOG_(WARNING) << "no GL context; GL-introspection leg skipped for '"

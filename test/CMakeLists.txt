@@ -506,16 +506,16 @@ else()
     target_link_libraries(shader_reflection_test PRIVATE OpenGL::GL)
 endif()
 
-# spec 021 GPU-P04 / spec 014 FR-A0.1: PilotShaderReflectionParity. Compiles the
-# pilot pair's single-source HLSL with dxc -> SPIR-V, reflects it with spirv-cross
-# (--reflect), and the ctest asserts that reflection == the GL-introspected GLSL
-# layout == the declared ExpectedLayout. dxc is a STANDALONE binary (the mingw ATL
-# DXC-link constraint is irrelevant here); both tools ship with the Vulkan SDK, so
-# gate the target on finding them -- a Diligent-less / SDK-less configure just skips
-# this GPU ctest, like the other GL tests.
-find_program(LUMINUMBRA_DXC dxc HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin")
-find_program(LUMINUMBRA_SPIRV_CROSS spirv-cross HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin")
-if(LUMINUMBRA_DXC AND LUMINUMBRA_SPIRV_CROSS)
+# spec 021 GPU-P04 / spec 014 FR-A0.1 + FR-F.2/F.3: PilotShaderReflectionParity.
+# A SINGLE slangc invocation both compiles the pilot pair's single-source HLSL to
+# SPIR-V (-target spirv) AND emits its reflection (-reflection-json); the ctest
+# asserts that reflection == the GL-introspected GLSL layout == the declared
+# ExpectedLayout. Slang replaces the former dxc + spirv-cross two-tool chain (one
+# tool that compiles for every backend and reflects; see docs/research/). slangc is
+# a STANDALONE binary (no mingw linkage), bundled with the Vulkan SDK since 1.3.296,
+# so gate the target on finding it -- an SDK-less configure just skips this GPU ctest.
+find_program(LUMINUMBRA_SLANGC slangc HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin")
+if(LUMINUMBRA_SLANGC)
     set(_pilot_reflect_dir "${CMAKE_BINARY_DIR}/pilot_shaders")
     file(MAKE_DIRECTORY "${_pilot_reflect_dir}")
     set(_pilot_reflect_jsons "")
@@ -523,12 +523,18 @@ if(LUMINUMBRA_DXC AND LUMINUMBRA_SPIRV_CROSS)
         set(_hlsl "${CMAKE_SOURCE_DIR}/res/shaders/pilot/${_p}.frag.hlsl")
         set(_spv "${_pilot_reflect_dir}/${_p}.frag.spv")
         set(_json "${_pilot_reflect_dir}/${_p}.frag.reflect.json")
+        # -profile ps_6_0 selects the HLSL pixel stage (do NOT also pass -stage: it
+        # double-specifies the stage and warns). -emit-spirv-directly uses Slang's
+        # direct SPIR-V backend (1.3+; its 1.0-1.2 emission is experimental, but the
+        # RTX/Vulkan target supports 1.3 trivially).
         add_custom_command(
-            OUTPUT "${_json}"
-            COMMAND "${LUMINUMBRA_DXC}" -spirv -T ps_6_0 -E main "${_hlsl}" -Fo "${_spv}"
-            COMMAND "${LUMINUMBRA_SPIRV_CROSS}" "${_spv}" --reflect --output "${_json}"
+            OUTPUT "${_json}" "${_spv}"
+            COMMAND "${LUMINUMBRA_SLANGC}" "${_hlsl}"
+                    -profile ps_6_0 -entry main
+                    -target spirv -emit-spirv-directly -O0
+                    -o "${_spv}" -reflection-json "${_json}"
             DEPENDS "${_hlsl}"
-            COMMENT "GPU-P04: ${_p}.frag.hlsl -> SPIR-V -> reflection JSON"
+            COMMENT "GPU-P04: slangc ${_p}.frag.hlsl -> SPIR-V + reflection JSON"
             VERBATIM
         )
         list(APPEND _pilot_reflect_jsons "${_json}")
@@ -566,9 +572,9 @@ if(LUMINUMBRA_DXC AND LUMINUMBRA_SPIRV_CROSS)
         target_link_libraries(pilot_shader_reflection_test PRIVATE OpenGL::GL)
     endif()
     set(LUMINUMBRA_PILOT_SHADER_TEST_AVAILABLE ON)
-    message(STATUS "GPU-P04 PilotShaderReflectionParity enabled (dxc=${LUMINUMBRA_DXC}, spirv-cross=${LUMINUMBRA_SPIRV_CROSS})")
+    message(STATUS "GPU-P04 PilotShaderReflectionParity enabled (slangc=${LUMINUMBRA_SLANGC})")
 else()
-    message(STATUS "GPU-P04 PilotShaderReflectionParity SKIPPED (dxc/spirv-cross not found in VULKAN_SDK)")
+    message(STATUS "GPU-P04 PilotShaderReflectionParity SKIPPED (slangc not found in VULKAN_SDK)")
 endif()
 
 # spec 021 GPU-P02 / spec 014 FR-B.2: the LUMIN_RHI backend-selector parse gate.

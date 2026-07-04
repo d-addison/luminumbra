@@ -204,12 +204,30 @@ near-field mesh). It is sequenced strictly by **risk**: cheapest, most-reversibl
 
 ### Group F — Shaders: GLSL -> HLSL single-source
 
+> **Toolchain decision (2026-07-04, supersedes the DXC + SPIRV-Cross references
+> throughout this spec):** the shader compiler is **Slang** (`slangc`), not the
+> DXC + SPIRV-Cross two-tool chain. A single `slangc` invocation both *compiles*
+> HLSL to SPIR-V/DXIL/GLSL AND *reflects* (`-reflection-json`), collapsing FR-F.2 and
+> FR-F.3 into one tool and adding modules/typed-generics for shared shader code across
+> the multi-pass port. Slang is an **offline build tool** (invoked exactly like DXC
+> was — no library linkage, mingw-irrelevant); Diligent consumes the emitted SPIR-V/
+> DXIL via `SHADER_SOURCE_LANGUAGE_BYTECODE` (Diligent has no native Slang ingest,
+> which is fine). Decided at the pilot boundary while only the GPU-P04 2-shader pilot
+> existed — the cheapest point to switch, before the mass port. Rationale + sources:
+> `docs/research/engine-library-landscape-2026.md` (§ shader-compiler). Determinism is
+> untouched (shader bytes never feed `world_hash`). Authoring stays HLSL.
+
 - **FR-F.1 (single-source HLSL).** Port every pass's GLSL to a single **HLSL** source. No per-backend
   shader forks — one source feeds all three backends.
-- **FR-F.2 (DXC compile).** Compile HLSL with **DXC** to **DXIL** (DX12) and to **SPIR-V** (Vulkan).
-- **FR-F.3 (SPIRV-Cross reflection).** Use **SPIRV-Cross** for reflection (resource binding/layout) and,
-  where Diligent's GL backend needs GLSL, for GLSL emission — so the GL baseline runs the same authored
-  shader logic, keeping the FLIP baseline honest.
+- **FR-F.2 (Slang compile).** Compile HLSL with **Slang** (`slangc`, `-target spirv|dxil|glsl`) to
+  **SPIR-V** (Vulkan), **DXIL** (DX12), and **GLSL** (Diligent's GL backend) — one tool, every backend.
+  Target **SPIR-V 1.3+** (Slang's 1.0–1.2 emission is experimental; the RTX/Vulkan target supports 1.3
+  trivially).
+- **FR-F.3 (Slang reflection).** Use Slang's **`-reflection-json`** for reflection (resource binding/
+  layout) — the same single invocation that compiles also reflects. Where Diligent's GL backend needs
+  GLSL, Slang emits it too, so the GL baseline runs the same authored shader logic, keeping the FLIP
+  baseline honest. (GPU-P04 parses this JSON in `ShaderReflectionSpirv.cpp` and asserts the reflected
+  layout == the GL-introspected GLSL == the declared `ExpectedLayout`.)
 - **FR-F.4 (offline shader build).** Shaders compile **offline** in the asset/build pipeline (DXIL +
   SPIR-V artifacts), with hot-reload preserved in dev (recompile-on-change) per the existing shader
   hot-reload workflow.
