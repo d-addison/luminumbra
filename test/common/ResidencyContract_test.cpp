@@ -8,6 +8,9 @@
 
 #include <gtest/gtest.h>
 
+#include <set>
+#include <string>
+
 namespace {
 
 using luminumbra::core::AvailabilityKey;
@@ -86,4 +89,56 @@ TEST(ResidencyContract, IsResidentSignatureIsPureOfKey) {
     EXPECT_FALSE(fn(k));
 }
 
+// FR-A-003 (SHIELD-06) — the world_hash exclusion scope DERIVES from the declared
+// partition, table-driven. Pins the projection BYTE-EXACTLY to the historical
+// hand-maintained kRenderMeshHashExcludedFields set (so the derivation is
+// hash-neutral) and asserts the load-bearing hashed fields classify Sim. The
+// completeness half (every serialized key is classified) is enforced in
+// production by VerifyChunkFieldResidencyCoverage on the first hashed chunk.
+TEST(ResidencyContract, HashScopeDerivesFromPartition) {
+    using luminumbra::core::kChunkFieldResidency;
+
+    // The historical exclusion set, verbatim — the Render-classified subset of
+    // the table must equal EXACTLY these 14 names (order-insensitive).
+    const std::set<std::string> legacy_excluded = {
+        "mesh_vertices", "mesh_indices",
+        "water_mesh_vertices", "water_mesh_indices",
+        "pending_mesh_vertices", "pending_mesh_indices",
+        "pending_water_mesh_vertices", "pending_water_mesh_indices",
+        "mesh_version", "water_mesh_version",
+        "pending_mesh_ready", "pending_mesh_failed",
+        "current_lod", "pending_lod",
+    };
+
+    std::set<std::string> derived_excluded;
+    std::set<std::string> all_fields;
+    for (const auto& entry : kChunkFieldResidency) {
+        EXPECT_TRUE(all_fields.insert(entry.field).second)
+            << "duplicate field classification: " << entry.field;
+        if (!MayFeedWorldHash(entry.residency)) {
+            derived_excluded.insert(entry.field);
+        }
+    }
+    EXPECT_EQ(derived_excluded, legacy_excluded)
+        << "the derived exclusion scope drifted from the historical hash scope — "
+           "that is a world_hash change and must be a deliberate reviewed bump";
+
+    // Load-bearing hashed fields stay Sim.
+    for (const char* sim_field : {"state", "state_value", "sdf_data", "heightmap_data",
+                                  "material_data", "has_collision", "water_depth_mm",
+                                  "water_bed_mm", "has_water_sim"}) {
+        bool found = false;
+        for (const auto& entry : kChunkFieldResidency) {
+            if (std::string(entry.field) == sim_field) {
+                found = true;
+                EXPECT_TRUE(MayFeedWorldHash(entry.residency))
+                    << sim_field << " must classify Sim (it feeds world_hash)";
+                break;
+            }
+        }
+        EXPECT_TRUE(found) << sim_field << " missing from kChunkFieldResidency";
+    }
+}
+
 }  // namespace
+

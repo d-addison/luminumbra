@@ -13,10 +13,11 @@
 //   that partition as an explicit, named, self-checking contract.
 //
 // SCOPE / NEUTRALITY
-//   This header is SELF-CONTAINED (only <cstdint>), header-only, and BEHAVIOR-NEUTRAL:
-//   it declares vocabulary, a compile-time predicate, and the deterministic-availability
-//   inputs key. It performs NO wiring — it touches no existing system, is folded into no
-//   hash, and is included by no translation unit yet. Spec 017-B consumes it.
+//   This header is SELF-CONTAINED (only <cstdint>) and header-only. Since SHIELD-06 it
+//   is ENFORCED IN PRODUCTION: WorldPersistenceRoundtrip.cpp derives the world_hash
+//   exclusion scope from kChunkFieldResidency below (byte-neutral — the table encodes
+//   the status-quo scope), and Spec 017-B's activation queue implements the FR-B
+//   availability contract.
 //
 //   OQ-1 (residency partition: compile-time type distinction vs runtime registry) is
 //   left OPEN by Spec 018. This header declares the VOCABULARY (named tag types + a
@@ -129,10 +130,80 @@ struct AvailabilityKey {
 //                              or GPU readback.
 //
 //   A deterministic system reads only keys for which IsResident(key) holds (FR-B-002:
-//   the barrier is the only legal availability source) and reads terrain through the pure
-//   sampler, never shared mutable streaming buffers (FR-B-004). Membership is implemented
-//   by the consuming system / Spec 017-B; this header only fixes the contract's SHAPE,
-//   so it stays behavior-neutral. The signature alias documents that shape:
+//   since Spec 017-B landed, the ACTIVATION QUEUE — activate_due(tick) plus the explicit
+//   force drains at boot/hash/mutate/teardown — is the only legal availability source;
+//   the per-tick barrier it replaced was the original wording) and reads terrain through
+//   the pure sampler, never shared mutable streaming buffers (FR-B-004). Membership is
+//   implemented by the consuming system / Spec 017-B; this header only fixes the
+//   contract's SHAPE, so it stays behavior-neutral. The signature alias documents it:
 using IsResidentFn = bool (*)(const AvailabilityKey& key);
+
+// ---------------------------------------------------------------------------------------
+// FR-A-003 — "Enforced, not remembered" (SHIELD-06): the serialized-chunk-field
+// residency table.
+//
+// Every field ChunkToJson serializes is classified here, in the contract's one
+// authoritative location. The persistence hash-exclusion scope is DERIVED from this
+// table (WorldPersistenceRoundtrip.cpp — the first production consumer of this header):
+// a field feeds world_hash iff MayFeedWorldHash(its class). The hash path verifies at
+// first use that every serialized key is classified, so adding a chunk field without
+// classifying it fails LOUDLY instead of silently joining (or silently escaping) the
+// hash. The ResidencyContract.HashScopeDerivesFromPartition gtest pins the projection.
+//
+// Classification is the STATUS QUO hash scope (byte-neutral by construction). Fields
+// whose Sim classification is under review are annotated — reclassifying any of them is
+// a deliberate world_hash bump, never a side effect of this table.
+// ---------------------------------------------------------------------------------------
+struct ChunkFieldResidency {
+    const char* field;
+    ResidencyClass residency;
+};
+inline constexpr ChunkFieldResidency kChunkFieldResidency[] = {
+    // Identity + lifecycle (state/state_value feed the terrain sub-hash).
+    {"coords", ResidencyClass::Sim},
+    {"chunk_id", ResidencyClass::Sim},
+    {"state", ResidencyClass::Sim},
+    {"state_value", ResidencyClass::Sim},
+    // Voxel sim truth.
+    {"sdf_data", ResidencyClass::Sim},
+    {"heightmap_data", ResidencyClass::Sim},
+    {"material_data", ResidencyClass::Sim},
+    // Render meshes + meshing bookkeeping (worker-order-dependent bytes; the
+    // historical kRenderMeshHashExcludedFields set, verbatim).
+    {"mesh_vertices", ResidencyClass::Render},
+    {"mesh_indices", ResidencyClass::Render},
+    {"water_mesh_vertices", ResidencyClass::Render},
+    {"water_mesh_indices", ResidencyClass::Render},
+    {"pending_mesh_vertices", ResidencyClass::Render},
+    {"pending_mesh_indices", ResidencyClass::Render},
+    {"pending_water_mesh_vertices", ResidencyClass::Render},
+    {"pending_water_mesh_indices", ResidencyClass::Render},
+    {"mesh_version", ResidencyClass::Render},
+    {"water_mesh_version", ResidencyClass::Render},
+    {"pending_mesh_ready", ResidencyClass::Render},
+    {"pending_mesh_failed", ResidencyClass::Render},
+    {"current_lod", ResidencyClass::Render},
+    {"pending_lod", ResidencyClass::Render},
+    // Collision (built from the heightmap; hashed).
+    {"has_collision", ResidencyClass::Sim},
+    // Water sim state (spec 009 authoritative fixed-point + mirrors).
+    {"water_level_data", ResidencyClass::Sim},
+    {"water_flow_data", ResidencyClass::Sim},
+    {"water_sim_terrain_height", ResidencyClass::Sim},
+    {"water_depth_mm", ResidencyClass::Sim},
+    {"water_bed_mm", ResidencyClass::Sim},
+    {"has_water_sim", ResidencyClass::Sim},
+    // Status-quo-hashed water bookkeeping, Sim BY PRECEDENT (they are in the
+    // hash today). water_mesh_generated / water_mesh_dirty_ticks smell
+    // render-adjacent and the water section's persistence/settle design is
+    // under WATER-17 — any reclassification is a deliberate bump there.
+    {"water_mesh_generated", ResidencyClass::Sim},
+    {"current_water_resolution", ResidencyClass::Sim},
+    {"is_water_sleeping", ResidencyClass::Sim},
+    {"max_water_delta_last_tick", ResidencyClass::Sim},
+    {"ticks_below_threshold", ResidencyClass::Sim},
+    {"water_mesh_dirty_ticks", ResidencyClass::Sim},
+    {"water_state", ResidencyClass::Sim},
+};
 
 }  // namespace luminumbra::core

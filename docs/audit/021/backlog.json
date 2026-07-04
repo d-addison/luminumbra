@@ -986,7 +986,7 @@
    "dependencies": [
     "018-B"
    ],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "NEW: gtest ResidencyContract.HashScopeDerivesFromPartition \u2014 every hashed chunk field maps to SimResidency and every excluded field to RenderResidency, table-driven; --smoke == 6f008a9f637c40b7 unchanged",
    "rank": 55
   },

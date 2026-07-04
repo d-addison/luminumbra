@@ -1,5 +1,7 @@
 #include "WorldPersistenceRoundtrip.h"
 
+#include "../core/Log.h"
+#include "../core/ResidencyContract.h"  // SHIELD-06: the hash scope derives from the contract
 #include "ecs/EntitySnapshot.h"
 #include "nlohmann/json.hpp"
 
@@ -764,15 +766,40 @@ namespace {
 // These fields are therefore stripped from the per-chunk projection the world_hash
 // checksums; SIM TRUTH — sdf/heightmap/material, has_collision, the water sim state, and the
 // ECS entities — is retained. Persistence (ChunkToJson / the save snapshot) is UNCHANGED.
-const char* const kRenderMeshHashExcludedFields[] = {
-    "mesh_vertices", "mesh_indices",
-    "water_mesh_vertices", "water_mesh_indices",
-    "pending_mesh_vertices", "pending_mesh_indices",
-    "pending_water_mesh_vertices", "pending_water_mesh_indices",
-    "mesh_version", "water_mesh_version",
-    "pending_mesh_ready", "pending_mesh_failed",
-    "current_lod", "pending_lod",
-};
+//
+// SHIELD-06 (spec 018 FR-A-003 "enforced, not remembered"): the exclusion scope is
+// DERIVED from the declared residency partition (core/ResidencyContract.h's
+// kChunkFieldResidency — this TU is the contract's first production consumer). A field
+// is stripped iff !MayFeedWorldHash(its declared class). The projection is byte-
+// identical to the retired hand-maintained kRenderMeshHashExcludedFields list, and the
+// first-hash completeness check below makes an UNCLASSIFIED serialized field a loud
+// error instead of a silent hash join/escape.
+
+// One-time completeness verification: every key ChunkToJson serializes must be
+// classified in the contract table. Runs on the first hashed chunk only.
+void VerifyChunkFieldResidencyCoverage(const nlohmann::json& chunk_json) {
+    static bool verified = false;
+    if (verified) {
+        return;
+    }
+    verified = true;
+    for (const auto& item : chunk_json.items()) {
+        bool classified = false;
+        for (const auto& entry : luminumbra::core::kChunkFieldResidency) {
+            if (item.key() == entry.field) {
+                classified = true;
+                break;
+            }
+        }
+        if (!classified) {
+            LUMINUMBRA_CORE_ERROR(
+                "ResidencyContract coverage HOLE: serialized chunk field '{}' is not "
+                "classified in core/ResidencyContract.h kChunkFieldResidency — classify "
+                "it (Sim = hashed, Render = excluded) before shipping (FR-A-003)",
+                item.key());
+        }
+    }
+}
 
 std::string SerializeWorldStreamingStateSimTruthForHash(const WorldStreamingState& state) {
     auto chunks = state.snapshot_chunks();
@@ -789,8 +816,11 @@ std::string SerializeWorldStreamingStateSimTruthForHash(const WorldStreamingStat
             continue;
         }
         nlohmann::json cj = ChunkToJson(*chunk);
-        for (const char* f : kRenderMeshHashExcludedFields) {
-            cj.erase(f);
+        VerifyChunkFieldResidencyCoverage(cj);
+        for (const auto& entry : luminumbra::core::kChunkFieldResidency) {
+            if (!luminumbra::core::MayFeedWorldHash(entry.residency)) {
+                cj.erase(entry.field);
+            }
         }
         chunk_array.push_back(std::move(cj));
     }
