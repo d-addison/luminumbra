@@ -2,6 +2,7 @@
 
 #include "PassGlHelpers.h"
 #include "../Shader.h"
+#include "../PassShaderLayouts.h" // FR-D: enumerable ExpectedLayout registry (GPU-05)
 #include "../RenderContext.h"   // Spec 016 GPU-04: position texture + camera via ctx
 #include "../Camera.h"
 
@@ -16,6 +17,11 @@ void GroundDecalPass::init_shader(const std::filesystem::path& root_path) {
     const std::string vert = (root_path / "res/shaders/fullscreen_tri.vert").string();
     const std::string frag = (root_path / "res/shaders/scent_decal.frag").string();
     m_shader = std::make_unique<Shader>(vert.c_str(), frag.c_str());
+    // FR-D (GPU-05): validate gPosition + u_scentField against the registry.
+    if (m_shader && m_shader->IsValid()) {
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("scent_decal"))
+            m_shader->ValidateLayout(*layout);
+    }
 }
 
 void GroundDecalPass::init_buffers() {

@@ -1,6 +1,7 @@
 #include "GBufferPass.h"
 
 #include "PassGlHelpers.h"
+#include "../PassShaderLayouts.h" // FR-D: enumerable ExpectedLayout registry (GPU-05)
 #include "../RenderResourceRegistry.h"  // RENDER-12/GPU-12: registry-owned G-buffer
 #include "../FarLodSystem.h"
 #include "../TreeLod.h" // Track-B: per-instance distance LOD mesh selection (render-only)
@@ -52,6 +53,11 @@ bool GBufferPass::has_cached_mesh(const std::string& key) const {
 void GBufferPass::init_geometry_shader(const std::filesystem::path& root_path) {
     m_geometry_shader = std::make_unique<Shader>((root_path / "res/shaders/g_buffer.vert").string().c_str(), (root_path / "res/shaders/g_buffer.frag").string().c_str());
     PassGl::label_gl_object(GL_PROGRAM, m_geometry_shader ? m_geometry_shader->Id() : 0u, "shader.geometry");
+    // FR-D (GPU-05): validate g_buffer.frag's sampler bindings against the registry.
+    if (m_geometry_shader && m_geometry_shader->IsValid()) {
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("gbuffer_geometry"))
+            m_geometry_shader->ValidateLayout(*layout);
+    }
 }
 
 void GBufferPass::init_instanced_static_mesh(const std::filesystem::path& root_path) {
@@ -59,6 +65,11 @@ void GBufferPass::init_instanced_static_mesh(const std::filesystem::path& root_p
     std::string gbuffer_frag_path = (root_path / "res/shaders/g_buffer.frag").string();
     m_instanced_static_mesh_shader = std::make_unique<Shader>(instanced_vert_path.c_str(), gbuffer_frag_path.c_str());
     PassGl::label_gl_object(GL_PROGRAM, m_instanced_static_mesh_shader ? m_instanced_static_mesh_shader->Id() : 0u, "shader.instanced_static_mesh");
+    // Shares g_buffer.frag with the chunk geometry program -> same sampler layout.
+    if (m_instanced_static_mesh_shader && m_instanced_static_mesh_shader->IsValid()) {
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("gbuffer_geometry"))
+            m_instanced_static_mesh_shader->ValidateLayout(*layout);
+    }
     glGenBuffers(1, &m_instanceMatrixVBO);
     PassGl::label_gl_object(GL_BUFFER, m_instanceMatrixVBO, "static_mesh.instance_matrices");
     glBindBuffer(GL_ARRAY_BUFFER, m_instanceMatrixVBO);
@@ -80,6 +91,10 @@ void GBufferPass::init_instanced_static_mesh(const std::filesystem::path& root_p
         (root_path / "res/shaders/tree_impostor.vert").string().c_str(),
         (root_path / "res/shaders/tree_impostor.frag").string().c_str());
     PassGl::label_gl_object(GL_PROGRAM, m_tree_impostor_shader ? m_tree_impostor_shader->Id() : 0u, "shader.tree_impostor");
+    if (m_tree_impostor_shader && m_tree_impostor_shader->IsValid()) {
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("gbuffer_impostor"))
+            m_tree_impostor_shader->ValidateLayout(*layout);
+    }
     glGenBuffers(1, &m_impostorInstanceVBO);
     glBindBuffer(GL_ARRAY_BUFFER, m_impostorInstanceVBO);
     glBufferData(GL_ARRAY_BUFFER, kStaticInstanceCapacity * sizeof(glm::vec4), nullptr, GL_DYNAMIC_DRAW);
@@ -98,6 +113,11 @@ void GBufferPass::init_skinned_mesh(const std::filesystem::path& root_path) {
     std::string gbuffer_frag_path = (root_path / "res/shaders/g_buffer.frag").string();
     m_skinned_mesh_shader = std::make_unique<Shader>(skinned_vert_path.c_str(), gbuffer_frag_path.c_str());
     PassGl::label_gl_object(GL_PROGRAM, m_skinned_mesh_shader ? m_skinned_mesh_shader->Id() : 0u, "shader.skinned_mesh");
+    // Shares g_buffer.frag with the chunk geometry program -> same sampler layout.
+    if (m_skinned_mesh_shader && m_skinned_mesh_shader->IsValid()) {
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("gbuffer_geometry"))
+            m_skinned_mesh_shader->ValidateLayout(*layout);
+    }
     glGenBuffers(1, &m_jointPaletteSSBO);
     PassGl::label_gl_object(GL_BUFFER, m_jointPaletteSSBO, "skinned_mesh.joint_palette");
     // 256 joints (the LMS2 skeleton cap) of column-major mat4.

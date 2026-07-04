@@ -362,6 +362,7 @@ add_executable(pass_context_test
     ../src/luminumbra_client/rendering/passes/GroundDecalPass.cpp
     ../src/luminumbra_client/rendering/Shader.cpp
     ../src/luminumbra_client/rendering/ShaderReflection.cpp
+    ../src/luminumbra_client/rendering/PassShaderLayouts.cpp
 )
 
 target_compile_definitions(pass_context_test PRIVATE
@@ -434,6 +435,7 @@ endif()
 add_executable(shader_reflection_test
     rendering/shader_reflection_test.cpp
     ../src/luminumbra_client/rendering/ShaderReflection.cpp
+    ../src/luminumbra_client/rendering/PassShaderLayouts.cpp
 )
 
 target_compile_definitions(shader_reflection_test PRIVATE

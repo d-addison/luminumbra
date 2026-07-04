@@ -1,6 +1,7 @@
 #include "SsaoPass.h"
 
 #include "../RenderResourceRegistry.h"
+#include "../PassShaderLayouts.h" // FR-D: enumerable ExpectedLayout registry (GPU-05)
 #include "PassGlHelpers.h"
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
@@ -28,6 +29,17 @@ void SsaoPass::init_shaders(const std::filesystem::path& root_path) {
     PassGl::label_gl_object(GL_PROGRAM, m_ssao.blurShader ? m_ssao.blurShader->Id() : 0u, "shader.ssao_blur");
     PassGl::label_gl_object(GL_PROGRAM, m_ssao.gtaoShader ? m_ssao.gtaoShader->Id() : 0u, "shader.ssao_gtao");
     PassGl::label_gl_object(GL_PROGRAM, m_ssao.upsampleShader ? m_ssao.upsampleShader->Id() : 0u, "shader.ssao_bilateral_upsample");
+
+    // FR-D (GPU-05): validate each AO program's sampler bindings against the registry.
+    const auto validate = [](const std::unique_ptr<Shader>& s, const char* name) {
+        if (s && s->IsValid()) {
+            if (const ExpectedLayout* layout = FindPassExpectedLayout(name)) s->ValidateLayout(*layout);
+        }
+    };
+    validate(m_ssao.ssaoShader,     "ssao");
+    validate(m_ssao.blurShader,     "ssao_blur");
+    validate(m_ssao.gtaoShader,     "ssao_gtao");
+    validate(m_ssao.upsampleShader, "ssao_bilateral_upsample");
 }
 
 void SsaoPass::init_ssao(RenderResourceRegistry& registry, u32 width, u32 height) {

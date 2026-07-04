@@ -1,6 +1,7 @@
 #include "SkyboxPass.h"
 
 #include "PassGlHelpers.h"
+#include "../PassShaderLayouts.h" // FR-D: enumerable ExpectedLayout registry (GPU-05)
 #include "core/IsolationConfig.h"
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
@@ -22,6 +23,10 @@ void SkyboxPass::init_shader(const std::filesystem::path& root_path) {
         (root_path / "res/shaders/skybox.vert").string().c_str(),
         (root_path / "res/shaders/enhanced_skybox.frag").string().c_str());
     PassGl::label_gl_object(GL_PROGRAM, m_skybox_shader ? m_skybox_shader->Id() : 0u, "shader.skybox");
+    if (m_skybox_shader && m_skybox_shader->IsValid()) {
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("skybox"))
+            m_skybox_shader->ValidateLayout(*layout);
+    }
 
     // T-I2-17b: screen-space weather overlay (rain/snow/fog/storm). Reuses
     // the fullscreen-quad vertex stage shared by the SSAO passes.
@@ -29,6 +34,12 @@ void SkyboxPass::init_shader(const std::filesystem::path& root_path) {
         (root_path / "res/shaders/ssao.vert").string().c_str(),
         (root_path / "res/shaders/weather_system.frag").string().c_str());
     PassGl::label_gl_object(GL_PROGRAM, m_weather_shader ? m_weather_shader->Id() : 0u, "shader.weather_overlay");
+    // NB: weather_system.frag declares gPosition but never samples it (stripped) ->
+    // the registry entry excludes it, so this validates clean + non-vacuously.
+    if (m_weather_shader && m_weather_shader->IsValid()) {
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("weather_overlay"))
+            m_weather_shader->ValidateLayout(*layout);
+    }
 }
 
 void SkyboxPass::init_geometry() {

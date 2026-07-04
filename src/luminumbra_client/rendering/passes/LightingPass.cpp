@@ -1,6 +1,7 @@
 #include "LightingPass.h"
 
 #include "PassGlHelpers.h"
+#include "../PassShaderLayouts.h"
 #include "../RenderContext.h"
 #include "../RenderResourceRegistry.h"
 #include "../ShadowMap.h"
@@ -26,33 +27,18 @@ void LightingPass::init_shader(const std::filesystem::path& root_path) {
     m_lighting_shader = std::make_unique<Shader>((root_path / "res/shaders/lighting_pass.vert").string().c_str(), (root_path / "res/shaders/lighting_pass.frag").string().c_str());
     PassGl::label_gl_object(GL_PROGRAM, m_lighting_shader ? m_lighting_shader->Id() : 0u, "shader.lighting");
 
-    // Spec 016 FR-D pilot: declare the sampler bindings THIS pass adopts in
-    // execute() (the glActiveTexture+glBindTexture set above) and validate them
-    // against the shader's reflected layout. A TYPE mismatch (e.g. binding a
-    // sampler2DArray where the shader declares sampler2D) would render garbage --
-    // this logs it loudly at load instead. Non-fatal at initial load: the units
-    // are imperative (no layout(binding=)) so unit isn't checked here, and a
-    // stripped-unused sampler only warns. Registering the expectation also arms
-    // the hot-reload rollback (FR-D-003) for this shader.
+    // Spec 016 FR-D (GPU-05/RENDER-13): validate the sampler bindings THIS pass
+    // adopts in execute() (the glActiveTexture+glBindTexture set above) against the
+    // shader's reflected layout. A TYPE mismatch (e.g. binding a sampler2DArray
+    // where the shader declares sampler2D) would render garbage -- this logs it
+    // loudly at load instead. The ExpectedLayout is declared once in the enumerable
+    // PassShaderLayouts registry (the single source the RENDER-13 fixture test +
+    // the GPU-05 coverage gate also read); registering it here also arms the
+    // hot-reload rollback (FR-D-003) for this shader.
     if (m_lighting_shader && m_lighting_shader->IsValid()) {
-        ExpectedLayout expected;
-        expected.pass_name = "lighting";
-        expected.samplers = {
-            {"gPosition",        GL_SAMPLER_2D,       -1},
-            {"gNormalMaterial",  GL_SAMPLER_2D,       -1},
-            {"gAlbedoRoughness", GL_SAMPLER_2D,       -1},
-            {"gMetallicAO",      GL_SAMPLER_2D,       -1},
-            {"u_ssao",           GL_SAMPLER_2D,       -1},
-            {"u_materialLUT",    GL_SAMPLER_2D,       -1},
-            {"u_aetherField",    GL_SAMPLER_2D,       -1},
-            {"u_causticsTexture",GL_SAMPLER_2D,       -1},
-            {"u_shadowCascades", GL_SAMPLER_2D_ARRAY, -1},
-            // NB: u_terrainTextures is bound by execute() at unit 7 but the shader
-            // no longer samples it (legacy tri-planar override removed), so the GL
-            // linker strips it -> intentionally NOT declared here to keep the
-            // load-time validation clean (a stripped-unused sampler only warns).
-        };
-        m_lighting_shader->ValidateLayout(expected);
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("lighting")) {
+            m_lighting_shader->ValidateLayout(*layout);
+        }
     }
 }
 
@@ -311,6 +297,12 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
             (m_root_path / "res/shaders/lightning_overlay.frag").string().c_str());
         PassGl::label_gl_object(GL_PROGRAM,
             m_lightning_overlay_shader ? m_lightning_overlay_shader->Id() : 0u, "shader.lightning_overlay");
+        // FR-D: validate the overlay's one sampler (u_scene) against the registry.
+        if (m_lightning_overlay_shader && m_lightning_overlay_shader->IsValid()) {
+            if (const ExpectedLayout* layout = FindPassExpectedLayout("lightning_overlay")) {
+                m_lightning_overlay_shader->ValidateLayout(*layout);
+            }
+        }
     }
     if (!m_lightning_overlay_shader || !m_lightning_overlay_shader->IsValid()) {
         return;

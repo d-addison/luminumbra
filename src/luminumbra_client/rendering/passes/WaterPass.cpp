@@ -1,6 +1,7 @@
 #include "WaterPass.h"
 
 #include "../RenderResourceRegistry.h"
+#include "../PassShaderLayouts.h" // FR-D: enumerable ExpectedLayout registry (GPU-05)
 #include "PassGlHelpers.h"
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
@@ -35,6 +36,12 @@ WaterPass::~WaterPass() = default;
 void WaterPass::init_shader(const std::filesystem::path& root_path) {
     m_water_shader = std::make_unique<Shader>((root_path / "res/shaders/water.vert").string().c_str(), (root_path / "res/shaders/water.frag").string().c_str());
     PassGl::label_gl_object(GL_PROGRAM, m_water_shader ? m_water_shader->Id() : 0u, "shader.water");
+    // FR-D (GPU-05): validate water.frag's sampler bindings (the caustics generator
+    // program binds no samplers, so it has no registry entry).
+    if (m_water_shader && m_water_shader->IsValid()) {
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("water"))
+            m_water_shader->ValidateLayout(*layout);
+    }
     // T-I2-16a: offscreen caustics generation reuses the shared fullscreen
     // quad layout (lighting_pass.vert) with the dormant caustics fragment
     // shader.

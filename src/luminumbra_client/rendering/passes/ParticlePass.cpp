@@ -1,6 +1,7 @@
 #include "ParticlePass.h"
 
 #include "PassGlHelpers.h"
+#include "../PassShaderLayouts.h" // FR-D: enumerable ExpectedLayout registry (GPU-05)
 #include "core/Log.h"
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
@@ -95,6 +96,11 @@ void ParticlePass::init_shader(const std::filesystem::path& root_path) {
         (root_path / "res/shaders/magical_particles.vert").string().c_str(),
         (root_path / "res/shaders/magical_particles.frag").string().c_str());
     PassGl::label_gl_object(GL_PROGRAM, m_shader ? m_shader->Id() : 0u, "shader.particles");
+    // FR-D (GPU-05): validate the soft-particle depth sampler against the registry.
+    if (m_shader && m_shader->IsValid()) {
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("magical_particles"))
+            m_shader->ValidateLayout(*layout);
+    }
 }
 
 void ParticlePass::init_buffers() {

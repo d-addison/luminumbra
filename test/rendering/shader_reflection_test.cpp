@@ -19,9 +19,15 @@
 #include <GLFW/glfw3.h>
 
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <map>
+#include <sstream>
 #include <string>
+#include <vector>
 
 #include "rendering/ShaderReflection.h"
+#include "rendering/PassShaderLayouts.h" // GPU-05/RENDER-13: the enumerable layout registry
 
 using namespace Luminumbra::Rendering;
 
@@ -97,6 +103,15 @@ GLuint LinkProgram(const char* vs, const char* fs, std::string& err) {
         return 0;
     }
     return p;
+}
+
+bool ReadTextFile(const std::string& path, std::string& out, std::string& err) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) { err = "cannot open " + path; return false; }
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    out = ss.str();
+    return true;
 }
 
 constexpr const char* kVs = R"(#version 450 core
@@ -237,6 +252,123 @@ void main() { FragColor = texture(u_color, vec3(0.5)); }
     // And the original good program still satisfies it.
     EXPECT_TRUE(ValidateReflectedLayout(layout, registered).ok);
     glDeleteProgram(bad);
+}
+
+// ----------------------------------------------------------------------------
+// RENDER-13: the startup layout-validation gate as per-pass fixtures. For every
+// entry in the PassShaderLayouts registry, load the REAL shader pair, reflect the
+// linked program, and assert its registered ExpectedLayout validates:
+//   * ok (no TYPE / UNIT / BINDING mismatch -- the "renders garbage" tripwire), AND
+//   * NON-vacuously: no expected sampler was stripped/absent (had_warning), and every
+//     declared sampler actually reflects. This is what stops a layout from "passing"
+//     by declaring samplers the shader never samples.
+// GTEST_SKIPs headless (needs a real GL context to compile the shaders).
+// ----------------------------------------------------------------------------
+
+std::vector<std::string> RegisteredLayoutNames() {
+    std::vector<std::string> names;
+    for (const auto& e : AllPassShaderLayouts()) names.push_back(e.layout_name);
+    return names;
+}
+
+class PassLayoutValidation : public ::testing::TestWithParam<std::string> {
+protected:
+    HiddenGlContext ctx;
+    void SetUp() override {
+        if (!ctx.ready()) GTEST_SKIP() << "no GL context: " << ctx.error();
+    }
+};
+
+TEST_P(PassLayoutValidation, RealShaderMatchesRegisteredLayoutNonVacuously) {
+    const PassShaderLayout* entry = FindPassShaderLayout(GetParam());
+    ASSERT_NE(entry, nullptr) << "registry lookup failed for " << GetParam();
+
+    const std::string root = LUMINUMBRA_SOURCE_ROOT;
+    std::string vsrc, fsrc, ioerr;
+    ASSERT_TRUE(ReadTextFile(root + "/" + entry->vert, vsrc, ioerr)) << ioerr;
+    ASSERT_TRUE(ReadTextFile(root + "/" + entry->frag, fsrc, ioerr)) << ioerr;
+
+    std::string linkerr;
+    GLuint prog = LinkProgram(vsrc.c_str(), fsrc.c_str(), linkerr);
+    ASSERT_NE(prog, 0u) << entry->layout_name << " (" << entry->frag
+                        << ") failed to build: " << linkerr;
+
+    const ReflectedLayout reflected = ReflectProgramLayout(prog);
+    const ValidationResult vr = ValidateReflectedLayout(reflected, entry->expected);
+
+    EXPECT_TRUE(vr.ok) << entry->layout_name << ": " << vr.diagnostic;
+    EXPECT_FALSE(vr.had_warning)
+        << entry->layout_name
+        << ": an expected sampler is not sampled by the shader (stripped) -> "
+        << vr.diagnostic;
+    for (const auto& s : entry->expected.samplers) {
+        EXPECT_NE(reflected.find_sampler(s.name), nullptr)
+            << entry->layout_name << " expects sampler '" << s.name
+            << "' but the linked shader does not sample it";
+    }
+    glDeleteProgram(prog);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    RegisteredPasses, PassLayoutValidation,
+    ::testing::ValuesIn(RegisteredLayoutNames()),
+    [](const ::testing::TestParamInfo<std::string>& info) { return info.param; });
+
+// ----------------------------------------------------------------------------
+// GPU-05: the ReflectionCoverage gate. Source-scan every pass under
+// rendering/passes/: a pass that binds samplers (glActiveTexture) MUST also
+// register + validate a layout (Shader::ValidateLayout), unless it is explicitly
+// exempted with a reason. Fails listing the unvalidated passes. Pure source scan
+// (no GL) -- runs even headless. This is the complement of the fixtures above:
+// they prove every REGISTERED layout is real; this proves nothing BINDS samplers
+// without being registered.
+// ----------------------------------------------------------------------------
+TEST(ReflectionCoverage, EverySamplerBindingPassRegistersAndValidatesALayout) {
+    namespace fs = std::filesystem;
+    const fs::path passes_dir =
+        fs::path(LUMINUMBRA_SOURCE_ROOT) / "src/luminumbra_client/rendering/passes";
+    ASSERT_TRUE(fs::exists(passes_dir)) << "passes dir not found: " << passes_dir.string();
+
+    // Passes NOT on the Shader::ValidateLayout path, each with the reason it is out.
+    // An exempt pass must still actually bind samplers, else the exemption is stale.
+    const std::map<std::string, std::string> kExempt = {
+        {"ShieldRtFarFieldPass.cpp",
+         "inline hand-compiled GL programs (not res/shaders Shader-class programs), "
+         "so it is not on the Shader::ValidateLayout path"},
+    };
+
+    std::vector<std::string> unvalidated;   // binds samplers but never validates
+    std::vector<std::string> stale_exempt;  // exempt but no longer binds samplers
+
+    for (const auto& de : fs::directory_iterator(passes_dir)) {
+        if (!de.is_regular_file() || de.path().extension() != ".cpp") continue;
+        const std::string name = de.path().filename().string();
+        std::string src, ioerr;
+        ASSERT_TRUE(ReadTextFile(de.path().string(), src, ioerr)) << ioerr;
+
+        const bool binds_samplers = src.find("glActiveTexture") != std::string::npos;
+        const bool validates = src.find("ValidateLayout") != std::string::npos;
+
+        if (kExempt.count(name)) {
+            if (!binds_samplers) stale_exempt.push_back(name);
+            continue;
+        }
+        if (binds_samplers && !validates) unvalidated.push_back(name);
+    }
+
+    std::string unvalidated_msg;
+    for (const auto& n : unvalidated) unvalidated_msg += "\n  - " + n;
+    EXPECT_TRUE(unvalidated.empty())
+        << "these passes bind samplers (glActiveTexture) but never call "
+           "Shader::ValidateLayout -- declare their layout in PassShaderLayouts "
+           "and validate it in init_shader(), or add a reasoned exemption:"
+        << unvalidated_msg;
+
+    std::string stale_msg;
+    for (const auto& n : stale_exempt) stale_msg += "\n  - " + n;
+    EXPECT_TRUE(stale_exempt.empty())
+        << "these passes are exempted from the layout gate but no longer bind "
+           "samplers -- drop the stale exemption:" << stale_msg;
 }
 
 } // namespace
