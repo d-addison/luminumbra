@@ -506,6 +506,23 @@ else()
     target_link_libraries(shader_reflection_test PRIVATE OpenGL::GL)
 endif()
 
+# spec 021 GPU-P02 / spec 014 FR-B.2: the LUMIN_RHI backend-selector parse gate.
+# Pure string logic -- no GL, no Diligent, no GPU. Compiles the RhiBackend TU
+# directly (like shader_reflection_test) so it needs no client/GL link. This is
+# the toolchain-independent half of the RhiDeviceBringupGpu proving signal; the
+# device/swapchain-creation half lives in the GPU ctest added by the pilot.
+add_executable(rhi_backend_test
+    rendering/rhi_backend_test.cpp
+    ../src/luminumbra_client/rendering/rhi/RhiBackend.cpp
+)
+
+target_include_directories(rhi_backend_test PRIVATE
+    ../src
+    ../src/luminumbra_client
+)
+
+target_link_libraries(rhi_backend_test PRIVATE gtest_main)
+
 # T-I5a-1: GL-free particle determinism unit tests (emitter descriptor surface).
 add_executable(particle_determinism_test
     rendering/particle_determinism_test.cpp
@@ -1079,6 +1096,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     registry_ownership_test
     pass_context_test
     shader_reflection_test
+    rhi_backend_test
     waterfall_visual_test
     particle_determinism_test
     ui_smoke_test
