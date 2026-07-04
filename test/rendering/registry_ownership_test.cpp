@@ -20,6 +20,7 @@ namespace {
 
 using Luminumbra::Rendering::FboAttachment;
 using Luminumbra::Rendering::FboDesc;
+using Luminumbra::Rendering::RenderbufferDesc;
 using Luminumbra::Rendering::RenderResourceRegistry;
 using Luminumbra::Rendering::ResourceLifetime;
 using Luminumbra::Rendering::TextureDesc;
@@ -160,6 +161,58 @@ TEST(RegistryOwnership, DestroyReleasesAndForgets) {
     EXPECT_FALSE(static_cast<bool>(registry.texture("doomed")));
     // Duplicate-create is now legal again under the freed name.
     EXPECT_TRUE(static_cast<bool>(registry.create_texture("doomed", ColorTargetDesc(8, 8))));
+    registry.destroy_all_owned();
+}
+
+// RENDER-12/GPU-12: the lighting family needs a renderbuffer-backed depth
+// attachment. This pins that path: an owned color texture + owned depth
+// renderbuffer share an owned FBO that is complete and depth-tests correctly,
+// and destroy releases the renderbuffer and forgets its name.
+TEST(RegistryOwnership, RenderbufferDepthAttachmentIsCompleteAndReleases) {
+    HiddenGlContext gl;
+    ASSERT_TRUE(gl.ready()) << gl.error();
+
+    RenderResourceRegistry registry;
+    const auto color = registry.create_texture("rb_color", ColorTargetDesc(32, 32));
+    ASSERT_TRUE(static_cast<bool>(color));
+
+    RenderbufferDesc depth_desc;
+    depth_desc.width = 32;
+    depth_desc.height = 32;
+    depth_desc.internal_format = GL_DEPTH_COMPONENT24;
+    depth_desc.debug_label = "registry_ownership_test.depth_rb";
+    const auto depth = registry.create_renderbuffer("rb_depth", depth_desc);
+    ASSERT_TRUE(static_cast<bool>(depth));
+    EXPECT_TRUE(registry.owns_renderbuffer("rb_depth"));
+
+    FboDesc fbo_desc;
+    fbo_desc.attachments.push_back(FboAttachment{GL_COLOR_ATTACHMENT0, "rb_color"});
+    fbo_desc.attachments.push_back(FboAttachment{GL_DEPTH_ATTACHMENT, "rb_depth"});
+    fbo_desc.draw_buffers = {GL_COLOR_ATTACHMENT0};
+    fbo_desc.debug_label = "registry_ownership_test.rb_fbo";
+    const auto fbo = registry.create_fbo("rb_fbo", fbo_desc);
+    ASSERT_TRUE(static_cast<bool>(fbo)) << "FBO with an owned renderbuffer depth attachment must be complete";
+
+    // Functional: depth-test through the owned FBO. A near quad clears green;
+    // a farther clear must NOT overwrite it once depth-test is on.
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo.id);
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER),
+              static_cast<GLenum>(GL_FRAMEBUFFER_COMPLETE));
+    glViewport(0, 0, 32, 32);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
+    glClearDepth(1.0);
+    glClearColor(0.0f, 1.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    std::array<unsigned char, 4> pixel{0, 0, 0, 0};
+    glReadPixels(16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel.data());
+    glDisable(GL_DEPTH_TEST);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    EXPECT_EQ(pixel[1], 255u) << "depth-attached owned FBO did not take a clear";
+    EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+
+    registry.destroy_owned("rb_depth");
+    EXPECT_FALSE(registry.owns_renderbuffer("rb_depth"));
     registry.destroy_all_owned();
 }
 

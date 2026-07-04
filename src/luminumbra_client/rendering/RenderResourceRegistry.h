@@ -67,9 +67,21 @@ struct TextureDesc {
     const char* debug_label = nullptr;
 };
 
+// RENDER-12/GPU-12: a registry-owned renderbuffer descriptor (e.g. the lighting
+// FBO's GL_DEPTH_COMPONENT24 depth attachment). Renderbuffers are non-samplable
+// GPU storage attached via glFramebufferRenderbuffer.
+struct RenderbufferDesc {
+    u32 width = 0;
+    u32 height = 0;
+    u32 internal_format = 0;   // raw GL internal format (e.g. GL_DEPTH_COMPONENT24)
+    const char* expected_layout = "depth_attachment";
+    const char* debug_label = nullptr;
+};
+
 struct FboAttachment {
     u32 attachment_point = 0;   // raw GL enum (GL_COLOR_ATTACHMENT0 + i / GL_DEPTH_ATTACHMENT / ...)
-    std::string texture_name;   // an OWNED texture name in this registry
+    std::string texture_name;   // an OWNED texture OR renderbuffer name in this registry
+                                // (attach_fbo resolves textures first, then renderbuffers)
 };
 
 struct FboDesc {
@@ -86,6 +98,7 @@ public:
     // Returns an invalid handle on GL failure or name collision with an
     // existing owned entry. Requires a current GL context.
     TextureHandle create_texture(std::string_view name, const TextureDesc& desc);
+    RenderbufferHandle create_renderbuffer(std::string_view name, const RenderbufferDesc& desc);
     FboHandle create_fbo(std::string_view name, const FboDesc& desc);
     // Delete + recreate the named owned texture's storage at the new size
     // (same desc otherwise) and re-attach every owned FBO that references it.
@@ -100,6 +113,9 @@ public:
     }
     bool owns_fbo(std::string_view name) const {
         return m_owned_fbos.count(std::string(name)) != 0;
+    }
+    bool owns_renderbuffer(std::string_view name) const {
+        return m_owned_renderbuffers.count(std::string(name)) != 0;
     }
     const TextureDesc* owned_texture_desc(std::string_view name) const {
         auto it = m_owned_textures.find(std::string(name));
@@ -154,6 +170,10 @@ private:
         u32 gl_id = 0;
         FboDesc desc;
     };
+    struct OwnedRenderbuffer {
+        u32 gl_id = 0;
+        RenderbufferDesc desc;
+    };
 
     // Disambiguate from the free helpers in RenderResourceHandles.h.
     static FboHandle adopt_fbo_handle(u32 gl_id) { return FboHandle{gl_id, true}; }
@@ -165,6 +185,7 @@ private:
     std::unordered_map<std::string, TextureHandle> m_textures;
     std::unordered_map<std::string, OwnedTexture> m_owned_textures;
     std::unordered_map<std::string, OwnedFbo> m_owned_fbos;
+    std::unordered_map<std::string, OwnedRenderbuffer> m_owned_renderbuffers;
 };
 
 } // namespace Luminumbra::Rendering

@@ -38,6 +38,15 @@ struct BufferHandle {
     bool operator==(const BufferHandle& o) const { return id == o.id; }
 };
 
+// RENDER-12/GPU-12: a registry-owned renderbuffer (e.g. the lighting FBO's depth
+// attachment). Distinct from TextureHandle because a renderbuffer is not
+// samplable and attaches via glFramebufferRenderbuffer, not glFramebufferTexture.
+struct RenderbufferHandle {
+    u32 id = 0; // GL renderbuffer name (0 == invalid)
+    explicit operator bool() const { return id != 0; }
+    bool operator==(const RenderbufferHandle& o) const { return id == o.id; }
+};
+
 // Helpers to construct handles when adopting an existing GL name.
 inline TextureHandle adopt_texture(u32 gl_id) { return TextureHandle{gl_id}; }
 inline FboHandle     adopt_fbo(u32 gl_id)     { return FboHandle{gl_id, true}; }

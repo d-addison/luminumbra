@@ -78,26 +78,70 @@ TextureHandle RenderResourceRegistry::create_texture(std::string_view name, cons
     return handle;
 }
 
+RenderbufferHandle RenderResourceRegistry::create_renderbuffer(std::string_view name,
+                                                               const RenderbufferDesc& desc) {
+    const std::string key(name);
+    if (m_owned_renderbuffers.count(key) != 0) {
+        LUMINUMBRA_CORE_ERROR("RenderResourceRegistry: owned renderbuffer '{}' already exists", key);
+        return RenderbufferHandle{};
+    }
+    if (desc.width == 0 || desc.height == 0 || desc.internal_format == 0) {
+        LUMINUMBRA_CORE_ERROR("RenderResourceRegistry: invalid desc for owned renderbuffer '{}'", key);
+        return RenderbufferHandle{};
+    }
+    // Drain the sticky global GL error flag so the post-allocation check reflects
+    // THIS allocation only (see allocate_texture_storage).
+    while (glGetError() != GL_NO_ERROR) {
+    }
+    OwnedRenderbuffer owned;
+    owned.desc = desc;
+    glGenRenderbuffers(1, &owned.gl_id);
+    glBindRenderbuffer(GL_RENDERBUFFER, owned.gl_id);
+    glRenderbufferStorage(GL_RENDERBUFFER, static_cast<GLenum>(desc.internal_format),
+                          static_cast<GLsizei>(desc.width), static_cast<GLsizei>(desc.height));
+    glBindRenderbuffer(GL_RENDERBUFFER, 0);
+    if (glGetError() != GL_NO_ERROR) {
+        LUMINUMBRA_CORE_ERROR("RenderResourceRegistry: GL storage allocation failed for renderbuffer '{}'", key);
+        glDeleteRenderbuffers(1, &owned.gl_id);
+        return RenderbufferHandle{};
+    }
+    if (desc.debug_label != nullptr) {
+        PassGl::label_gl_object(GL_RENDERBUFFER, owned.gl_id, desc.debug_label);
+    }
+    const RenderbufferHandle handle{owned.gl_id};
+    m_owned_renderbuffers.emplace(key, std::move(owned));
+    return handle;
+}
+
 bool RenderResourceRegistry::attach_fbo(OwnedFbo& fbo_entry) {
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_entry.gl_id);
     for (const FboAttachment& attachment : fbo_entry.desc.attachments) {
-        const auto it = m_owned_textures.find(attachment.texture_name);
-        if (it == m_owned_textures.end()) {
-            LUMINUMBRA_CORE_ERROR(
-                "RenderResourceRegistry: FBO attachment references unknown owned texture '{}'",
-                attachment.texture_name);
-            glBindFramebuffer(GL_FRAMEBUFFER, 0);
-            return false;
+        // Resolve owned textures first, then owned renderbuffers.
+        const auto tex_it = m_owned_textures.find(attachment.texture_name);
+        if (tex_it != m_owned_textures.end()) {
+            const OwnedTexture& tex = tex_it->second;
+            if (tex.desc.layers > 1) {
+                // Layered attachment (e.g. the cascaded shadow atlas).
+                glFramebufferTexture(GL_FRAMEBUFFER, static_cast<GLenum>(attachment.attachment_point),
+                                     tex.gl_id, 0);
+            } else {
+                glFramebufferTexture2D(GL_FRAMEBUFFER, static_cast<GLenum>(attachment.attachment_point),
+                                       GL_TEXTURE_2D, tex.gl_id, 0);
+            }
+            continue;
         }
-        const OwnedTexture& tex = it->second;
-        if (tex.desc.layers > 1) {
-            // Layered attachment (e.g. the cascaded shadow atlas).
-            glFramebufferTexture(GL_FRAMEBUFFER, static_cast<GLenum>(attachment.attachment_point),
-                                 tex.gl_id, 0);
-        } else {
-            glFramebufferTexture2D(GL_FRAMEBUFFER, static_cast<GLenum>(attachment.attachment_point),
-                                   GL_TEXTURE_2D, tex.gl_id, 0);
+        const auto rb_it = m_owned_renderbuffers.find(attachment.texture_name);
+        if (rb_it != m_owned_renderbuffers.end()) {
+            // Renderbuffer attachment (e.g. the lighting FBO depth buffer).
+            glFramebufferRenderbuffer(GL_FRAMEBUFFER, static_cast<GLenum>(attachment.attachment_point),
+                                      GL_RENDERBUFFER, rb_it->second.gl_id);
+            continue;
         }
+        LUMINUMBRA_CORE_ERROR(
+            "RenderResourceRegistry: FBO attachment references unknown owned resource '{}'",
+            attachment.texture_name);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        return false;
     }
     if (fbo_entry.desc.no_color) {
         glDrawBuffer(GL_NONE);
@@ -174,6 +218,10 @@ void RenderResourceRegistry::destroy_owned(std::string_view name) {
         glDeleteTextures(1, &tex_it->second.gl_id);
         m_owned_textures.erase(tex_it);
     }
+    if (const auto rb_it = m_owned_renderbuffers.find(key); rb_it != m_owned_renderbuffers.end()) {
+        glDeleteRenderbuffers(1, &rb_it->second.gl_id);
+        m_owned_renderbuffers.erase(rb_it);
+    }
 }
 
 void RenderResourceRegistry::destroy_all_owned() {
@@ -187,6 +235,11 @@ void RenderResourceRegistry::destroy_all_owned() {
         glDeleteTextures(1, &tex_entry.gl_id);
     }
     m_owned_textures.clear();
+    for (auto& [name, rb_entry] : m_owned_renderbuffers) {
+        (void)name;
+        glDeleteRenderbuffers(1, &rb_entry.gl_id);
+    }
+    m_owned_renderbuffers.clear();
 }
 
 }  // namespace Luminumbra::Rendering
