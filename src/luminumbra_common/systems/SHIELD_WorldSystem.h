@@ -660,6 +660,22 @@ public:
     // hashed, inert unless the host drives the tick (the headless server
     // runner does under --avail-trace; the client never calls this, so
     // m_shadow_current_tick stays -1 and every recording site early-outs).
+    // SHIELD-03 inc 5a-3 (017-B): the sim-tick entry point. The server runner
+    // calls this EVERY tick; the tick stamps batch due_ticks at dispatch
+    // (due = dispatch + kActivationPipelineLatencyTicks) and drives
+    // activate_due after the swap. The client never calls it (tick stays -1:
+    // batches carry due_tick -1 = publish-when-drained, today's semantics).
+    void begin_tick(std::int64_t sim_tick) { m_current_sim_tick = sim_tick; }
+    std::int64_t current_sim_tick() const { return m_current_sim_tick; }
+    // SHIELD-03 (017-B FR-B-005): tick-keyed activation. Publishes, in FIFO
+    // order, exactly the batches whose due_tick is at or before `tick` —
+    // BLOCKING on a due-but-unfinished batch's jobs (K under-covering is a
+    // wall-clock cost, never a schedule change) — plus the promotion lane
+    // when due. Batches with due_tick -1 (dispatched with no tick, i.e. the
+    // client) publish when drained, exactly as today. Replaces the per-tick
+    // wait_for_streaming_jobs barrier at the 5b swap; until then it is
+    // exercised by the ActivationQueueSemantics gtest only.
+    void activate_due(std::int64_t tick);
     void begin_tick_shadow(std::int64_t sim_tick) { m_shadow_current_tick = sim_tick; }
     struct ActivationShadowReport {
         // gen-dispatch tick -> first Ready tick, one sample per activated chunk
@@ -739,6 +755,9 @@ private:
     // SHIELD-02 telemetry (main-thread, never hashed).
     std::uint64_t m_promotion_batches_dispatched = 0;
     std::uint64_t m_promotion_chunks_dispatched = 0;
+    // SHIELD-03 inc 5a-3: the current sim tick (-1 = no tick source, i.e. the
+    // client). Set by begin_tick from the server runner each tick.
+    std::int64_t m_current_sim_tick = -1;
     // SHIELD-03 shadow state (main-thread, never hashed; -1 tick = shadow off).
     std::int64_t m_shadow_current_tick = -1;
     std::unordered_map<ChunkID, std::int64_t> m_shadow_generation_dispatch_tick;
@@ -878,6 +897,12 @@ private:
     // update-start observation (client path); becomes an activate_due
     // responsibility at the barrier swap.
     void publish_completed_generation_jobs();
+    // SHIELD-03 inc 5a-3: publish EXACTLY the front batch of a lane (used by
+    // activate_due for tick-keyed publication; the drain loops above reuse
+    // them). Return false when the front batch's jobs are still running (or
+    // the lane is empty) — the caller decides whether to block first.
+    bool publish_front_generation_batch();
+    bool publish_front_meshing_batch();
     bool promotion_jobs_active() const;
     bool promotion_pipeline_pending() const;
     // SHIELD-03 inc 2 (+5a-2): publication-keyed "a batch is outstanding" —

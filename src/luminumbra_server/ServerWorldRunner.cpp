@@ -491,6 +491,9 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         report.ticks_executed += m_session->TickSimulation(fixed_dt);
         report.frames_executed += 1;
 
+        // SHIELD-03 inc 5a-3: the sim-tick source for the activation queue —
+        // stamps batch due_ticks at dispatch (inert until the barrier swap).
+        world_system->begin_tick(static_cast<std::int64_t>(report.ticks_executed));
         // SHIELD-03 shadow (017-B step 2, increment 1): drive the activation
         // latency shadow with the same tick base the availability digest uses.
         // Observability only — gated on --avail-trace like the digest itself.
