@@ -19,12 +19,13 @@
 //      "score < per-pass threshold" half of the proving signal would be
 //      "0 < anything" -- untested. The recorded magnitude->score curve is what
 //      gives rank 66 an empirical, non-invented threshold basis.
-//   3. SecondBackendParityAwaitsDiligentPilot -- the raw-GL-vs-GL-via-Diligent
-//      leg. Diligent does not exist until GPU-P02 (rank 63); the dual-backend
-//      parity RUN is rank 66 (GPU-03+GPU-P05) acceptance, which reuses this exact
-//      harness + ComputeLumaFlip with the thresholds recorded below. Loud
-//      GTEST_SKIP, not a silent one -- same reasoned-exemption discipline as the
-//      ShieldRt coverage carve-out.
+//   3. SecondBackendParityLandedInRhiPilotFlip -- the raw-GL-vs-GL-via-Diligent
+//      leg. This calibration harness is GL-only (no Diligent link), so its inline
+//      seam is a documented stub; the dual-backend parity RUN (rank 66,
+//      GPU-03+GPU-P05) landed in the Diligent-linked sibling rhi_pilot_flip_test.cpp
+//      (RhiPilotParityGpu), reusing ComputeLumaFlip with the threshold from
+//      dual_backend_flip.json -- leg B verdict GO, bit-identical (FLIP 0.0). Loud
+//      GTEST_SKIP pointing at the landed run, not a silent one.
 //
 // The pass is `basic.vert`/`basic.frag` -- deliberately temporally deterministic
 // (no u_time, no ping-pong history, no random), so "render twice" means "same
@@ -459,22 +460,28 @@ TEST_F(DualBackendFlipInProcessGpu, DiscriminationTracksPerturbationMagnitude) {
     out << "}\n";
 }
 
-// (3) The named dual-backend leg: raw-GL vs GL-via-Diligent. Diligent is not
-// built until GPU-P02 (rank 63); the parity RUN is rank 66's acceptance, which
-// reuses this harness + ComputeLumaFlip with the thresholds recorded above.
-// Loud, reasoned skip -- not a silent pass.
-TEST_F(DualBackendFlipInProcessGpu, SecondBackendParityAwaitsDiligentPilot) {
+// (3) The named dual-backend leg: raw-GL vs GL-via-Diligent. This calibration
+// harness is GL-only by design (no Diligent link), so its inline RhiDiligent seam
+// stays a documented stub -- the real parity RUN (rank 66 / GPU-03+GPU-P05) landed
+// in a Diligent-linked sibling target, test/rendering/rhi_pilot_flip_test.cpp
+// (suite RhiPilotParityGpu), which reuses ComputeLumaFlip with the threshold
+// derived from dual_backend_flip.json. VERDICT (leg B): GO -- GL-via-Diligent is
+// BIT-IDENTICAL to raw-GL (in-process FLIP score 0.0, well under the 0.0027451
+// delta=1 go-threshold; see test-artifacts/rhi_pilot_flip/rhi_pilot_flip.json).
+// This test keeps the stub honest (unavailable here) and points at the landed run.
+TEST_F(DualBackendFlipInProcessGpu, SecondBackendParityLandedInRhiPilotFlip) {
     const std::vector<MeshVertex> mesh = BuildCubeMesh();
     const RenderParams params;
 
     bool available = true;
     const std::vector<std::uint8_t> diligent_frame =
         RenderVia(FlipBackend::RhiDiligent, s_program, mesh, params, &available);
-    ASSERT_FALSE(available) << "RhiDiligent backend unexpectedly reported available before GPU-P02";
+    ASSERT_FALSE(available) << "this GL-only calibration harness intentionally does "
+                               "not link Diligent; the parity RUN is RhiPilotParityGpu";
     EXPECT_TRUE(diligent_frame.empty());
 
-    GTEST_SKIP() << "raw-GL vs GL-via-Diligent parity awaits the Diligent backend "
-                    "(GPU-P02 / rank 63); the dual-backend parity RUN is rank 66 "
-                    "(GPU-03+GPU-P05) acceptance and reuses this harness + "
-                    "ComputeLumaFlip with the thresholds in dual_backend_flip.json.";
+    GTEST_SKIP() << "raw-GL vs GL-via-Diligent parity RUN landed in RhiPilotParityGpu "
+                    "(test/rendering/rhi_pilot_flip_test.cpp, Diligent-linked): leg B "
+                    "verdict GO, bit-identical (FLIP 0.0). This GL-only harness keeps "
+                    "the inline seam a documented stub.";
 }

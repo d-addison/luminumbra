@@ -619,6 +619,48 @@ if(LUMINUMBRA_ENABLE_DILIGENT)
     if(WIN32)
         target_link_libraries(rhi_device_bringup_test PRIVATE opengl32 gdi32 user32)
     endif()
+
+    # spec 021 GPU-03 + GPU-P05 (rank 66) leg B: RhiPilotParityGpu -- the RHI pilot's
+    # backend-fidelity go/no-go. Renders the GPU-09 calibration cube raw-GL (glad) and
+    # GL-via-Diligent (dual_backend_diligent.cpp -- the only render TU that includes
+    # Diligent) in one process and FLIP-compares with the SAME in-process metric GPU-09
+    # calibrated. Links Diligent (GL + Vk) like the bringup test; guarded by the same
+    # LUMINUMBRA_ENABLE_DILIGENT so a Diligent-less configure still builds the suite.
+    add_executable(rhi_pilot_flip_test
+        rendering/rhi_pilot_flip_test.cpp
+        rendering/dual_backend_diligent.cpp
+    )
+    target_compile_definitions(rhi_pilot_flip_test PRIVATE
+        LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+        LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts"
+    )
+    target_include_directories(rhi_pilot_flip_test PRIVATE
+        ../src
+        ../src/luminumbra_client
+        # The GL/Vk engine targets propagate only their own interface/ dirs; the
+        # shared public headers (RefCntAutoPtr.hpp etc.) live under Common/Platforms,
+        # reached via the FetchContent source dir set by cmake/diligent.cmake.
+        "${diligentcore_SOURCE_DIR}/Common/interface"
+        "${diligentcore_SOURCE_DIR}/Platforms/interface"
+        "${diligentcore_SOURCE_DIR}/Platforms/Basic/interface"
+    )
+    target_link_libraries(rhi_pilot_flip_test PRIVATE
+        gtest_main
+        glfw
+        glad
+        glm
+        Diligent-GraphicsEngineOpenGL-static
+        Diligent-GraphicsEngineVk-static
+    )
+    if(WIN32)
+        target_link_libraries(rhi_pilot_flip_test PRIVATE opengl32 gdi32 user32)
+    elseif(APPLE)
+        find_package(OpenGL REQUIRED)
+        target_link_libraries(rhi_pilot_flip_test PRIVATE ${OPENGL_LIBRARIES})
+    else()
+        find_package(OpenGL REQUIRED)
+        target_link_libraries(rhi_pilot_flip_test PRIVATE OpenGL::GL)
+    endif()
 endif()
 
 # T-I5a-1: GL-free particle determinism unit tests (emitter descriptor surface).
@@ -1212,6 +1254,7 @@ set(LUMINUMBRA_GTEST_TARGETS
 # vendored in (the target does not exist otherwise).
 if(LUMINUMBRA_ENABLE_DILIGENT)
     list(APPEND LUMINUMBRA_GTEST_TARGETS rhi_device_bringup_test)
+    list(APPEND LUMINUMBRA_GTEST_TARGETS rhi_pilot_flip_test)
 endif()
 # spec 021 GPU-P04: register the pilot reflection-parity GPU ctest only when the
 # dxc + spirv-cross toolchain was found at configure time.
