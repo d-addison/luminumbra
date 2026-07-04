@@ -285,6 +285,12 @@ sequenced against the **render seam**:
   history buffers, barriers, and backend command semantics — built as first-class graph/RHI clients,
   not legacy GL payload that must be re-ported during 014. ("Compute-shaped so it ports" is treated
   as *insufficient on its own* — the seam must exist first.)
+  - **RHI-pilot gate CLEARED 2026-07-04** (spec-021 rank 66, OQ-6 GO): spec 014's RHI pilot landed a
+    GO verdict — GL-via-Diligent bit-identical and native Vulkan byte-identical to raw-GL on the RTX
+    5070 Ti (commits `4fc41c27`, `31fabfcc`; see `014/spec.md:366`). The **014 half** of the B/C-2
+    gate is now clear; the remaining prerequisite for B/C-2 is spec 016's render framework/seam. C-1
+    (colored shadow maps) was never 014-gated — it builds through the 016 pass/resource contract as
+    the lead and is unblocked independently.
 
 ## Phasing (re-sequenced 2026-06-26 per critique F2)
 

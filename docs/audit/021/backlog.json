@@ -1186,8 +1186,8 @@
     "GPU-12",
     "GPU-09"
    ],
-   "status": "todo",
-   "proving_signal": "NEW: RhiPilotParityGpu ctest \u2014 renders the pilot pair through the 016 seam on GL-via-Diligent and native Vulkan in one process; asserts FLIP score < calibrated per-pass threshold vs the raw-GL golden + frame-health nominal (proves 014 FR-A0.2)",
+   "status": "done",
+   "proving_signal": "NEW: RhiPilotParityGpu ctest \u2014 renders the pilot pair through the 016 seam on GL-via-Diligent and native Vulkan in one process; asserts FLIP score < calibrated per-pass threshold vs the raw-GL golden + frame-health nominal (proves 014 FR-A0.2) [LANDED 2026-07-04: RhiPilotParityGpu 2/2 -- leg B GL-via-Diligent bit-identical (FLIP 0.0 < 0.0027451, 4fc41c27), leg C native-Vulkan byte-identical (FLIP 0.0 < 0.0439216, zero validation errors, 31fabfcc); calibrated thresholds pre-registered from GPU-09 dual_backend_flip.json. OQ-6 recorded GO (014/spec.md:366); 015 C-1/B/C-2 unblock declared (015/spec.md:283). Boundary: backend fidelity closed; Slang shader-port render-match tracked to GPU-08.]",
    "rank": 66
   },
   {
@@ -1204,8 +1204,8 @@
     "GPU-P03",
     "GPU-P04"
    ],
-   "status": "todo",
-   "proving_signal": "Existing (auditor GPU-03): RhiPilotParityGpu ctest \u2014 pilot pair rendered through the 016 seam on GL-via-Diligent and native Vulkan in one process; FLIP score < calibrated per-pass threshold vs the raw-GL golden + frame-health nominal",
+   "status": "done",
+   "proving_signal": "Existing (auditor GPU-03): RhiPilotParityGpu ctest \u2014 pilot pair rendered through the 016 seam on GL-via-Diligent and native Vulkan in one process; FLIP score < calibrated per-pass threshold vs the raw-GL golden + frame-health nominal [LANDED 2026-07-04: pilot go/no-go GO -- leg B (4fc41c27) + leg C (31fabfcc) byte-identical to raw-GL on RTX 5070 Ti; OQ-6 GO recorded, 015 C-1/B/C-2 unblock declared; hash-neutral (--smoke 6f008a9f637c40b7 run==replay).]",
    "rank": 66
   },
   {

@@ -539,6 +539,71 @@ WorldLoadBounded + RenderReadbackAllowlist green; full serial ctest lane green e
 the intentional ForestPerfBudget. **Wave C (014 pilot-gate closure → RHI pilot, ranks
 57–66) is next**, pending owner review of this wave.
 
+## Wave C execution record (2026-07-04)
+
+Landed this wave (commits `15ce5cd2 → 31fabfcc`, 25 commits, strictly serialized, every
+increment individually gated; the wave is **render/RHI/infra work — hash-NEUTRAL end to
+end**, Diligent linked into ctest targets ONLY so `--smoke == 6f008a9f637c40b7` held
+byte-identical throughout): **RENDER-12 + GPU-12** (rank 57 — the render-target ownership
+migration, the highest-blast-radius gate leg: the G-buffer family, shadow atlas, SSAO chain,
+lighting-accum FBO, water-caustics target and TAAU history all moved off RenderPipeline onto
+an owning `RenderResourceRegistry` allocate/own/lifetime path, seven commits A–G, each
+`flip_diff` byte-identical same-pose), **GPU-04** (rank 58 — the pilot-pass seam gap closed:
+DebugViewPass, GroundDecalPass, and the inline aerial/god-rays + TAAU resolve post-passes
+migrated onto the RenderContext contract; DebugView given explicit coverage so the signal is
+non-vacuous), **GPU-05 + RENDER-13** (rank 59 — shader-reflection `ExpectedLayout` coverage
+1/13 → 14/14 across every pass + the NEW ReflectionCoverage gate), **GPU-09** (rank 60 — the
+in-process dual-backend FLIP parity harness required by 014 FR-C.3, the twice-in-one-process
+zero-variance metric the whole pilot is measured on), **GPU-06** (rank 62 — the RenderDoc
+in-app capture API linked as a real trigger, MarkerOnly fallback still headless-green;
+GPU-14 filed), **GPU-P02** (rank 63, the one sanctioned spine inversion — Diligent vendored
+via FetchContent + `rhi/` device/swapchain bring-up + the `LUMIN_RHI=gl|vulkan|dx12` flag +
+headless GL/Vk device creation on this box, ZERO passes ported), **GPU-P01** (rank 61 — the
+PilotReadiness frontier gate over the four 014 hard-gate legs), **GPU-P03** (rank 64 — the
+`Rhi*` backend type set beneath the 016 handles + the RhiNoReexport grep-gate), **GPU-P04**
+(rank 65 — the pilot-pair single-source HLSL port with three-way SPIRV-Cross==GL-introspected
+==ExpectedLayout reflection parity for ssao + debug_view), and **GPU-03 + GPU-P05** (rank 66,
+strictly last — **THE PILOT GO/NO-GO = GO**: the `RhiPilotParityGpu` ctest renders the GPU-09
+calibration cube on GL-via-Diligent and on native Vulkan in one process and FLIP-compares
+each against the raw-GL golden with thresholds pre-registered from GPU-09's calibration.
+**Leg B — GL-via-Diligent is BIT-identical to raw-GL** (FLIP 0.0 < 0.0027451, `4fc41c27`);
+**Leg C — native Vulkan is BYTE-identical to raw-GL** (FLIP 0.0 < 0.0439216, zero
+`VK_LAYER_KHRONOS_validation` errors, `31fabfcc`) — the first render-through-Vulkan in the
+project. Non-vacuous: the flipped-orientation signature (0.0453 / max 0.53) is identical
+across both legs, so raw-GL, GL-via-Diligent and native-Vulkan are all the same bytes on the
+RTX 5070 Ti. OQ-6 recorded GO in `014/spec.md:366`; the 015 C-1/B/C-2 downstream unblock
+declared in `015/spec.md:283`).
+
+Owner-approved infra sweep, folded in before the pilot's shader work: **Slang** replaces the
+dxc+spirv-cross two-tool pilot chain with a single `slangc` (`b73e8953`), and **Tracy**
+landed behind `LUMINUMBRA_ENABLE_TRACY` (off by default, `50c049db`). A grounding research
+brief — the 2026 engine-library landscape vs the Luminumbra stack — was written en route
+(`04b845b3`).
+
+Discovered and fixed during the wave: a bare `cmake --build --preset debug` (the `all`
+target — the documented per-increment gate command) was newly broken by the Diligent
+integration. Diligent's *shared* GL/Vk/Archiver DLLs fail to link under Ninja+mingw (a
+relative `-Wl,--version-script=export.map` that does not resolve from the build root), and
+the two Diligent test-framework libs (`GPU/TestFramework`) build even under
+`DILIGENT_BUILD_TESTS=OFF` and drag the DLLs back via order-only deps. We link only the
+`-static` engine libs, so all five are now `EXCLUDE_FROM_ALL` in `cmake/diligent.cmake` —
+the gate command builds clean again. Also filed: **GPU-14** (during GPU-06).
+
+**Wave C close (2026-07-04): every ranked pilot-gate item (57–66) is done, and the RHI
+pilot go/no-go landed GO.** Wave gate held: after a full clean rebuild, `--smoke ==
+6f008a9f637c40b7` byte-identical run==replay (hash-neutral by construction — no sim code
+touched, Diligent is ctest-only); the rank-66 in-process FLIP verdict artifacts
+(`rhi_pilot_flip.json` leg B GO, `rhi_pilot_flip_vk.json` leg C GO) recorded; the full
+SERIAL ctest lane green — **1608 of 1609 tests pass, the sole failure the chartered
+`ForestPerfBudget`** (two expected non-runs: the disabled throughput benchmark and the
+`SecondBackendParityLandedInRhiPilotFlip` seam stub that now Skips, pointing at the landed
+`RhiPilotParityGpu`); the four GPU tests — `RhiDeviceBringupGpu` 4/4 and `RhiPilotParityGpu`
+legs B/C — all green. The strategic result: the GL → Diligent-RHI → native-Vulkan migration
+path is proven pixel-lossless on this hardware, so 014 Phase A is de-risked and the 015
+volumetrics/OIT pillars are unblocked on the seam. **Paused at the wave boundary for owner
+review**; the next ranked band (67+, led by the now-unblocked 015 atmospheric pillars)
+follows.
+
 ## Spine-inversion register (AC-003)
 
 Exactly one deliberate inversion, justified inline at its rank:

@@ -366,6 +366,21 @@ near-field mesh). It is sequenced strictly by **risk**: cheapest, most-reversibl
 - **OQ-6.** Does Diligent's GL backend reproduce our exact GL state closely enough for sub-threshold FLIP
   on every pass, or will a few passes need tolerance bumps / frame-health-only validation? Discover during
   Phase A (this is the key Phase-A risk).
+  - **RESOLVED 2026-07-04 — GO** (spec-021 rank 66, GPU-03 + GPU-P05). The RHI pilot go/no-go landed as
+    the `RhiPilotParityGpu` ctest (calibrated in-process FLIP, thresholds pre-registered from GPU-09's
+    `dual_backend_flip.json`, not invented). On the RTX 5070 Ti: **GL-via-Diligent is bit-identical to
+    raw-GL** (leg B, FLIP score 0.0 < 0.0027451 delta=1 threshold, commit `4fc41c27`) and **native
+    Vulkan is byte-identical to raw-GL** (leg C, FLIP 0.0 < 0.0439216 delta=16 threshold, zero
+    `VK_LAYER_KHRONOS_validation` errors, commit `31fabfcc`). Non-vacuous: the flipped-orientation
+    score (0.0453 / max 0.53) is identical across both legs, proving real asymmetric lit-cube content
+    that aligns to the golden only unflipped — all three buffers are the same bytes (NVIDIA shares its
+    shader backend across GL/Vulkan; RGBA8 output quantizes sub-LSB FP apart). The no-go fallback
+    (per-pass tolerance bumps + frame-health-only) is **not** needed on this hardware. **Boundary:** the
+    verdict closes OQ-6 on *backend* fidelity (Diligent-GL + native-Vulkan reproduce raw-GL). The
+    orthogonal *shader-port* render-match (Slang-emitted GLSL vs original GLSL, and Slang-output through
+    Diligent) is tracked separately to the GPU-08 mass port — GPU-P04 already landed the reflection
+    half. Threshold caveat: leg C's bound is GPU-vendor-dependent; a non-NVIDIA SKU could land
+    nonzero-but-under-threshold, which is still GO.
 - **OQ-7.** Offline shader artifacts: check DXIL+SPIR-V into the asset pipeline, or build them as a
   CMake step? Lean build-step with cache, to avoid binary churn in git.
 

@@ -63,5 +63,29 @@ if(LUMINUMBRA_ENABLE_DILIGENT)
     FetchContent_MakeAvailable(DiligentCore)
     set(CMAKE_CXX_FLAGS "${_lumin_saved_cxx_flags}")
 
+    # The RHI pilot links ONLY the -static engine libs (test/CMakeLists.txt). Diligent
+    # also defines -shared DLL targets that a bare `cmake --build` (the `all` target)
+    # tries to build; the GL/Vk shared DLLs fail to link under Ninja+mingw because their
+    # `-Wl,--version-script=export.map` link option (GraphicsEngineVulkan/CMakeLists.txt:293,
+    # GraphicsEngineOpenGL/CMakeLists.txt:250) resolves `export.map` relative to the target
+    # dir, which does not exist from the build root where Ninja runs the link. We never
+    # consume the shared DLLs, so drop them from `all` to keep the documented
+    # `cmake --build --preset debug` gate green. The -static targets are unaffected -- they
+    # build on demand as ctest dependencies. The two Diligent test-framework libs
+    # (GPU/TestFramework) build even under DILIGENT_BUILD_TESTS=OFF and list the shared
+    # DLLs as order-only prerequisites, so they drag the DLLs back into `all` even after
+    # the DLLs are excluded -- exclude them too (our ctests use their own gtest_main,
+    # never Diligent's frameworks).
+    foreach(_lumin_diligent_excl
+            Diligent-GraphicsEngineOpenGL-shared
+            Diligent-GraphicsEngineVk-shared
+            Diligent-Archiver-shared
+            Diligent-GPUTestFramework
+            Diligent-TestFramework)
+        if(TARGET ${_lumin_diligent_excl})
+            set_target_properties(${_lumin_diligent_excl} PROPERTIES EXCLUDE_FROM_ALL TRUE)
+        endif()
+    endforeach()
+
     message(STATUS "Diligent Engine vendored via FetchContent (GL + Vulkan, ctest-only linkage)")
 endif()

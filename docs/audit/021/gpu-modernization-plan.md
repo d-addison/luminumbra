@@ -131,7 +131,13 @@ Enforced mechanically: a `RhiNoReexport` gate greps that no file under `renderin
 - Go/no-go on Diligent recorded. **No-go path:** if Diligent's GL backend cannot hit FLIP threshold
   on the high-risk pilot pass (OQ-6), the fallback is per-pass tolerance bumps + frame-health-only
   validation for named passes — an owner/Codex sign-off decision, not silent threshold inflation.
+  - **DONE 2026-07-04 — GO** (rank 66): OQ-6 resolved GO in `014/spec.md:366`; GL-via-Diligent
+    bit-identical (`4fc41c27`) + native Vulkan byte-identical (`31fabfcc`) to raw-GL on the RTX
+    5070 Ti. No-go fallback not exercised.
 - Declared unblock: 015 C-1 → B → C-2 may now build on the proven seam.
+  - **DECLARED 2026-07-04** (rank 66): the RHI-pilot half of the 015 B/C-2 gate is cleared — see
+    `015/spec.md:283`. C-1 (never 014-gated) and B/C-2 may now build on the proven seam once their
+    016 render-framework prerequisite is met.
 
 ### Risks
 
