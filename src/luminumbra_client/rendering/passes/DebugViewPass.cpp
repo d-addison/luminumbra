@@ -2,7 +2,8 @@
 
 #include "PassGlHelpers.h"
 #include "../Shader.h"
-#include "../GBuffer.h"   // Spec 016: GBuffer struct (extracted; no god-object dep)
+#include "../RenderContext.h"   // Spec 016 GPU-04: the pass reads the G-buffer via ctx handles
+#include "../Camera.h"          // near/far planes for Depth-mode linearization
 
 namespace Luminumbra::Rendering {
 
@@ -26,31 +27,36 @@ void DebugViewPass::destroy_buffers() {
 
 void DebugViewPass::reset_shader() { m_shader.reset(); }
 
-void DebugViewPass::execute(const GBuffer& gbuffer, int mode) {
+void DebugViewPass::execute(const RenderContext& ctx) {
     // Default-OFF guard: Mode::None (0) is a true no-op so the normal render is untouched.
-    if (mode == Mode::None) return;
+    if (m_mode == Mode::None) return;
     if (!m_shader || !m_shader->IsValid() || m_vao == 0) return;
 
     // Diagnostic overlay: never depth-test or blend; we fully replace the bound target.
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);
 
+    // Near/far come from the frame camera (ctx), used only for Depth-mode linearization.
+    // Fall back to the historic defaults if a context arrives without a camera.
+    const float near_plane = ctx.camera ? ctx.camera->GetNearPlane() : 0.1f;
+    const float far_plane  = ctx.camera ? ctx.camera->GetFarPlane()  : 4000.0f;
+
     m_shader->use();
-    m_shader->setInt("u_mode", mode);
-    m_shader->setFloat("u_near", m_near);
-    m_shader->setFloat("u_far", m_far);
+    m_shader->setInt("u_mode", m_mode);
+    m_shader->setFloat("u_near", near_plane);
+    m_shader->setFloat("u_far", far_plane);
 
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, gbuffer.position_texture);
+    glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_position.id);
     m_shader->setInt("gPosition", 0);
     glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, gbuffer.normal_texture);
+    glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_normal.id);
     m_shader->setInt("gNormalMaterial", 1);
     glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, gbuffer.albedo_texture);
+    glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_albedo.id);
     m_shader->setInt("gAlbedo", 2);
     glActiveTexture(GL_TEXTURE3);
-    glBindTexture(GL_TEXTURE_2D, gbuffer.depth_texture);
+    glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_depth.id);
     m_shader->setInt("gDepth", 3);
 
     glBindVertexArray(m_vao);

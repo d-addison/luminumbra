@@ -9,7 +9,7 @@
 namespace Luminumbra::Rendering {
 
 class Shader;
-struct GBuffer;
+struct RenderContext;
 
 // Render-only G-buffer DEBUG visualizer. A fullscreen pass that, when enabled, overrides
 // the final composite with a single-channel view of the DEFERRED G-buffer (albedo / normal
@@ -40,23 +40,17 @@ public:
     void set_mode(int mode) { m_mode = mode; }
     int  mode() const { return m_mode; }
 
-    // Optional: camera planes for hardware-depth linearization (sky pixels in Depth mode).
-    void set_camera_planes(float near_plane, float far_plane) {
-        m_near = near_plane;
-        m_far  = far_plane;
-    }
-
     // Draw the debug visualization into the CURRENTLY BOUND framebuffer (the caller binds
-    // the screen/backbuffer + sets the viewport). A no-op when mode == None. Reads the
-    // G-buffer textures by their formats; depth test/blend are disabled internally.
-    void execute(const GBuffer& gbuffer, int mode);
+    // the screen/backbuffer + sets the viewport). A no-op when mode == None. Spec 016 pass
+    // contract (GPU-04): the G-buffer attachment reads come from the RenderContext handles,
+    // and the near/far planes for hardware-depth linearization (Depth mode) from ctx.camera.
+    // depth test/blend are disabled internally.
+    void execute(const RenderContext& ctx);
 
 private:
     std::unique_ptr<Shader> m_shader;
     GLuint m_vao  = 0;          // empty VAO; the VS builds a fullscreen triangle
-    int    m_mode = Mode::None; // default-OFF
-    float  m_near = 0.1f;
-    float  m_far  = 4000.0f;
+    int    m_mode = Mode::None; // default-OFF (pass config, not frame state; set via set_mode)
 };
 
 } // namespace Luminumbra::Rendering

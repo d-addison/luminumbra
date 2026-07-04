@@ -780,6 +780,10 @@ private:
     // make_lighting_context also runs the hoisted shadow-cascade fixup (CPU-only).
     RenderContext make_lighting_context(const Camera& camera);
     RenderContext make_skybox_context(const Camera& camera);
+    // Spec 016 (GPU-04): pilot-pass seam contracts — DebugView (the 014 pilot pass) +
+    // GroundDecal + the inline aerial/god-rays/TAAU post-passes. Render-only diagnostics/
+    // dressing; every field is frame state adopted wrap-existing, never feeds world_hash.
+    RenderContext make_debug_view_context(const Camera& camera);
 
     std::vector<ChunkMeshSnapshot> build_chunk_snapshots(const std::vector<Chunk*>& renderable_chunks) const;
 

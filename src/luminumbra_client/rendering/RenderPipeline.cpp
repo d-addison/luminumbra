@@ -805,6 +805,23 @@ RenderContext RenderPipeline::make_ssao_context(const Camera& camera) {
     return ctx;
 }
 
+// Spec 016 (GPU-04): the DebugView pass contract — the four G-buffer attachments the
+// diagnostic overlay samples (position/normal/albedo/depth) adopted wrap-existing, plus
+// the frame camera for Depth-mode near/far linearization. Render-only; never hashed.
+RenderContext RenderPipeline::make_debug_view_context(const Camera& camera) {
+    RenderContext ctx;
+    ctx.camera = &camera;
+    ctx.screen_width = m_screen_width;
+    ctx.screen_height = m_screen_height;
+    ctx.registry = &m_render_registry;
+    const GBuffer& gb = m_gbuffer_pass->gbuffer();
+    ctx.gbuffer_position = m_render_registry.adopt_texture("gbuffer_position", gb.position_texture);
+    ctx.gbuffer_normal = m_render_registry.adopt_texture("gbuffer_normal", gb.normal_texture);
+    ctx.gbuffer_albedo = m_render_registry.adopt_texture("gbuffer_albedo", gb.albedo_texture);
+    ctx.gbuffer_depth = m_render_registry.adopt_texture("gbuffer_depth", gb.depth_texture);
+    return ctx;
+}
+
 // Spec 016 (016-P3-T14): the PlantProcgen pass contract (screen size + the single
 // per-frame wall-clock snapshot that feeds u_time leaf sway). Render-only.
 RenderContext RenderPipeline::make_plant_context() {
@@ -2637,8 +2654,8 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     if (m_debug_view_pass && m_debug_view_pass->mode() != DebugViewPass::None) {
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw_fbo);
         glViewport(0, 0, static_cast<GLsizei>(dst_w), static_cast<GLsizei>(dst_h));
-        m_debug_view_pass->set_camera_planes(camera.GetNearPlane(), camera.GetFarPlane());
-        m_debug_view_pass->execute(m_gbuffer_pass->gbuffer(), m_debug_view_pass->mode());
+        RenderContext debug_ctx = make_debug_view_context(camera);
+        m_debug_view_pass->execute(debug_ctx);
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
