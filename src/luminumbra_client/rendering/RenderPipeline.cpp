@@ -2999,25 +2999,42 @@ void RenderPipeline::init_taau(u32 width, u32 height) {
     if (width == 0 || height == 0) return;
     glGenFramebuffers(1, &m_taau_fbo);
     label_gl_object(GL_FRAMEBUFFER, m_taau_fbo, "taau.fbo");
+    // RENDER-12/GPU-12: the ping-pong resolved-color history textures are
+    // registry-owned with History lifetime (they persist across frames by design;
+    // resize recreates them without content preservation, matching the FR-R5
+    // "history invalidated on resize"). The FBO stays PASS-OWNED: it is a transient
+    // container whose color attachment is the write-side history, bound per frame in
+    // execute_taau_resolve - not a fixed-layout render target the registry can own.
+    // The desc reproduces the retired glTexImage2D/glTexParameter calls exactly
+    // (RGBA16F, LINEAR, CLAMP_TO_EDGE).
     for (int i = 0; i < 2; ++i) {
-        glGenTextures(1, &m_taau_history[i]);
-        glBindTexture(GL_TEXTURE_2D, m_taau_history[i]);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        TextureDesc history;
+        history.width = width;
+        history.height = height;
+        history.internal_format = GL_RGBA16F;
+        history.format = GL_RGBA;
+        history.type = GL_FLOAT;
+        history.min_filter = GL_LINEAR;
+        history.mag_filter = GL_LINEAR;
+        history.wrap_s = GL_CLAMP_TO_EDGE;
+        history.wrap_t = GL_CLAMP_TO_EDGE;
+        history.lifetime = ResourceLifetime::History;
+        history.expected_layout = "color_attachment";
+        history.debug_label = "taau.history";
+        m_taau_history[i] =
+            m_render_registry.create_texture(i == 0 ? "taau_history_0" : "taau_history_1", history).id;
     }
-    glBindTexture(GL_TEXTURE_2D, 0);
     m_taau_history_write = 0;
     m_taau_history_valid = false;  // no usable history until the first resolve fills it
 }
 
 void RenderPipeline::destroy_taau() {
     if (m_taau_fbo) { glDeleteFramebuffers(1, &m_taau_fbo); m_taau_fbo = 0; }
-    for (int i = 0; i < 2; ++i) {
-        if (m_taau_history[i]) { glDeleteTextures(1, &m_taau_history[i]); m_taau_history[i] = 0; }
-    }
+    // The history textures are registry-owned.
+    m_render_registry.destroy_owned("taau_history_0");
+    m_render_registry.destroy_owned("taau_history_1");
+    m_taau_history[0] = 0;
+    m_taau_history[1] = 0;
     m_taau_history_valid = false;
 }
 
