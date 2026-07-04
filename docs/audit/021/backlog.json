@@ -999,7 +999,7 @@
    "effort": "M",
    "risk": "low",
    "dependencies": [],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "NEW: gtest WorldgenPreviewReinitRace \u2014 concurrent reinitialize_noise + far-LOD-style sampling soak, TSAN/ASAN clean with no null-deref and no post-settle unshaped-fallback flicker",
    "rank": 56
   },

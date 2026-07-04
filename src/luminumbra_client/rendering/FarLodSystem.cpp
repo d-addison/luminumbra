@@ -440,6 +440,11 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system, const
                 loaded = store.load_tile(tier, rx, rz, params_hash, tile);
             }
             if (!loaded) {
+                // SHIELD-09: hold the worldgen-epoch gate while sampling — a
+                // create-world preview knob change (reinitialize_noise) now
+                // QUIESCES this job instead of racing its generator reads
+                // (the worldgen-pan crash class, root-fixed).
+                const auto worldgen_scope = world->acquire_worldgen_sample_scope();
                 tile = World::BuildPristineFarLodTile(*world, tier, rx, rz, params_hash);
             }
 

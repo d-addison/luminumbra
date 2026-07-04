@@ -121,6 +121,7 @@ add_executable(common_tests
     common/JobWatchdog_test.cpp
     audio/AudioBankIntegrity_test.cpp
     common/ActivationQueueSemantics_test.cpp
+    common/WorldgenPreviewReinitRace_test.cpp
     common/MultiAnchorStreaming_test.cpp
     common/PromotionSimTruthDecoupling_test.cpp
     common/WaterDeterminism_test.cpp

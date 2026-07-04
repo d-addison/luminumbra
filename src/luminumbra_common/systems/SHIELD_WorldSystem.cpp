@@ -780,6 +780,7 @@ void SHIELD_WorldSystem::dispatch_promotion_jobs(const std::vector<MeshingWorkIt
         auto& lane_jobs = work_item.high_priority ? high_priority_jobs : normal_priority_jobs;
         lane_jobs.emplace_back([this, chunk]() {
             try {
+                const auto worldgen_scope = acquire_worldgen_sample_scope();  // SHIELD-09
                 // Build the full LOD0 voxel field into a scratch chunk and
                 // stage it — the live chunk's sdf_data is never touched off
                 // the main thread (a concurrent far-LOD sampler must never
@@ -827,6 +828,14 @@ void SHIELD_WorldSystem::dispatch_promotion_jobs(const std::vector<MeshingWorkIt
 }
 
 void SHIELD_WorldSystem::reinitialize_noise() {
+    // SHIELD-09: QUIESCE off-main-thread worldgen samplers for the rebuild.
+    // Every sampling job holds the shared side of the epoch gate for its
+    // duration; taking the exclusive side here waits out in-flight samplers
+    // and blocks new ones until the generator set is consistent again — the
+    // proper fix for the worldgen-preview pan crash (the assign-last ordering
+    // below stays as belt-and-braces, no longer the correctness mechanism).
+    std::unique_lock<std::shared_mutex> worldgen_epoch(m_worldgen_epoch_mutex);
+
     // Terrain height is a pure function of seed/params; drop the cached
     // per-column surface spans whenever either changes.
     m_column_surface_span_cache.clear();
@@ -3419,6 +3428,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
     build_jobs.reserve(chunks_to_build.size());
     for (const SurfaceHorizonChunk& build_chunk : chunks_to_build) {
         build_jobs.emplace_back([this, build_chunk]() {
+            const auto worldgen_scope = acquire_worldgen_sample_scope();  // SHIELD-09
             const auto& chunk = build_chunk.chunk;
             const bool needs_full_sdf = build_chunk.step <= 1;
             // Stopgap guard (spec 017/018; Codex audit #2 — the most plausible load-hang
@@ -4564,6 +4574,7 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<ChunkGe
         chunk->pending_generation_ready.store(false, std::memory_order_release);
         batch.chunks.push_back(chunk);
         jobs.emplace_back([this, chunk, target_step]() {
+            const auto worldgen_scope = acquire_worldgen_sample_scope();  // SHIELD-09
             GenerateChunkData(*chunk, target_step);
             // SHIELD-03 inc 5a: stage completion only — the MAIN thread flips
             // Loading→Idle in publish_completed_generation_jobs, so chunk
@@ -4726,6 +4737,7 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
         auto& lane_jobs = work_item.high_priority ? high_priority_jobs : normal_priority_jobs;
         lane_jobs.emplace_back([this, chunk, step, transition_faces, terrain_mesh_required]() {
             try {
+                const auto worldgen_scope = acquire_worldgen_sample_scope();  // SHIELD-09
                 Luminumbra::Chunk scratch(chunk->get_coords());
                 scratch.water_level_data = chunk->water_level_data;
                 scratch.water_flow_data = chunk->water_flow_data;

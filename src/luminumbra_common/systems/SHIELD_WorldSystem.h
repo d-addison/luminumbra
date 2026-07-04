@@ -643,6 +643,20 @@ public:
     // Handles and outstanding flags are left intact: the next legitimate
     // publish point observes and publishes exactly as it would have.
     void quiesce_streaming_jobs_for_save();
+    // SHIELD-09 (spec 002 follow-up): the worldgen-epoch gate. Every
+    // OFF-MAIN-THREAD worldgen sampling job (generation, promotion, meshing,
+    // boot surface builds, and the client's far-LOD tile builds) holds the
+    // SHARED side for the duration of one job; reinitialize_noise (set_params
+    // / set_seed — the create-world preview's knob path) holds the EXCLUSIVE
+    // side. A generator rebuild therefore QUIESCES in-flight samplers and
+    // blocks new ones instead of racing them — replacing the assign-last
+    // point-guard as the correctness mechanism (the ordering stays as
+    // belt-and-braces). Per-JOB granularity: one lock per chunk/tile job,
+    // negligible. Sampling jobs never take the exclusive side, so there is no
+    // ordering inversion.
+    [[nodiscard]] std::shared_lock<std::shared_mutex> acquire_worldgen_sample_scope() const {
+        return std::shared_lock<std::shared_mutex>(m_worldgen_epoch_mutex);
+    }
     // SHIELD-02 telemetry: lifetime totals of promotion-lane dispatches
     // (batches, chunks). Static smoke runs are expected to record ZERO (the
     // resident set is constant post-boot); moving runs exercise the lane.
@@ -752,6 +766,8 @@ private:
     };
 
     StreamingState m_streaming_state;
+    // SHIELD-09: the worldgen-epoch gate (see acquire_worldgen_sample_scope).
+    mutable std::shared_mutex m_worldgen_epoch_mutex;
     // SHIELD-02 telemetry (main-thread, never hashed).
     std::uint64_t m_promotion_batches_dispatched = 0;
     std::uint64_t m_promotion_chunks_dispatched = 0;
