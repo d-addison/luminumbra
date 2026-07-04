@@ -23,11 +23,18 @@ struct DiligentRenderResult {
                                         // against glReadPixels' bottom-up golden.
 };
 
-// Render the cube into an RGBA8 render target via a Diligent GL device attached to
-// the GL context CURRENT on the calling thread (the caller stands one up first,
-// exactly like CreateHeadlessDevice(Backend::Gl)). No swapchain/window. On any
+// Leg B: render the cube into an RGBA8 render target via a Diligent GL device
+// attached to the GL context CURRENT on the calling thread (the caller stands one up
+// first, exactly like CreateHeadlessDevice(Backend::Gl)). No swapchain/window. On any
 // failure `available` is false and `diagnostic` explains; `pixels` is then empty.
 DiligentRenderResult RenderCubeDiligentGl(const std::vector<MeshVertex>& mesh,
+                                          const RenderParams& params);
+
+// Leg C: render the same cube via a native Vulkan device (its own instance/device,
+// no GL context needed) with VK_LAYER_KHRONOS_validation enabled. Uses a zero-to-one
+// depth projection with the standard Vulkan Y-flip. The first render-through-Vulkan
+// in the project. Same result contract as leg B.
+DiligentRenderResult RenderCubeDiligentVk(const std::vector<MeshVertex>& mesh,
                                           const RenderParams& params);
 
 }  // namespace luminumbra_test

@@ -57,8 +57,12 @@ namespace {
 #define LUMINUMBRA_TEST_ARTIFACT_DIR "."
 #endif
 
-// The pre-registered go-threshold (dual_backend_flip.json delta=1 level).
+// The pre-registered go-thresholds (scratchpad/rank66-preregistered-threshold.md):
+//   leg B (GL-via-Diligent, same driver as raw GL): delta=1 = 0.0027451 (near-bit).
+//   leg C (native Vulkan, different rasterizer/compiler + NDC): delta=16 = 0.0439216
+//     ("no structural/perceptual difference" once conventions are normalised).
 constexpr double kGoThreshold = 0.0027451;
+constexpr double kGoThresholdVk = 0.0439216;
 
 fs::path ArtifactRoot() {
     return fs::path(LUMINUMBRA_TEST_ARTIFACT_DIR) / "rhi_pilot_flip";
@@ -303,6 +307,81 @@ TEST(RhiPilotParityGpu, GlViaDiligentMatchesRawGl) {
     EXPECT_LT(aligned.score, kGoThreshold)
         << "GL-via-Diligent is not pixel-faithful to raw-GL at the pre-registered "
            "sub-perceptual threshold (aligned orientation="
+        << (flipped_is_aligned ? "flipped" : "unflipped")
+        << "). unflipped=" << flip_same.score << " flipped=" << flip_flip.score;
+}
+
+// Leg C: native-Vulkan render vs the raw-GL golden. The first render-through-Vulkan
+// in the project (VK_LAYER_KHRONOS_validation on). Looser threshold than leg B by
+// necessity -- a different rasterizer/compiler and NDC (depth 0..1 + Y-flip), so
+// edge/FP differences are expected; a structural difference is not.
+TEST(RhiPilotParityGpu, NativeVulkanMatchesRawGl) {
+    HiddenGlContext ctx;
+    if (!ctx.ready()) {
+        GTEST_SKIP() << "no headless GL context (needed for the raw-GL golden): "
+                     << ctx.error();
+    }
+
+    const std::vector<MeshVertex> mesh = BuildCubeMesh();
+    ASSERT_FALSE(mesh.empty());
+    const RenderParams params;
+
+    GLuint program = LinkBasicProgram();
+    ASSERT_NE(program, 0u);
+    const std::vector<std::uint8_t> golden = RenderCubeRawGl(program, mesh, params);
+    glDeleteProgram(program);
+    ASSERT_EQ(golden.size(), static_cast<std::size_t>(kCubeWidth) * kCubeHeight * 4u);
+
+    const luminumbra_test::DiligentRenderResult vk =
+        luminumbra_test::RenderCubeDiligentVk(mesh, params);
+    ASSERT_TRUE(vk.available)
+        << "native Vulkan render unavailable: " << vk.diagnostic;
+    ASSERT_EQ(vk.pixels.size(), golden.size());
+
+    using Luminumbra::Rendering::InProcessFlip::ComputeLumaFlip;
+    const auto flip_same =
+        ComputeLumaFlip(golden.data(), vk.pixels.data(), kCubeWidth, kCubeHeight);
+    const std::vector<std::uint8_t> vk_flipped =
+        FlipRowsVertically(vk.pixels, kCubeWidth, kCubeHeight);
+    const auto flip_flip =
+        ComputeLumaFlip(golden.data(), vk_flipped.data(), kCubeWidth, kCubeHeight);
+
+    const bool flipped_is_aligned = flip_flip.score < flip_same.score;
+    const auto& aligned = flipped_is_aligned ? flip_flip : flip_same;
+
+    std::cout << "[RhiPilotParityGpu-Vk] FLIP unflipped score=" << flip_same.score
+              << " max=" << flip_same.max_error
+              << " | flipped score=" << flip_flip.score
+              << " max=" << flip_flip.max_error
+              << " | aligned=" << (flipped_is_aligned ? "flipped" : "unflipped")
+              << " | go_threshold=" << kGoThresholdVk << std::endl;
+
+    fs::create_directories(ArtifactRoot());
+    std::ofstream out(ArtifactRoot() / "rhi_pilot_flip_vk.json");
+    if (out) {
+        out << "{\n";
+        out << "  \"schema\": \"luminumbra.rhi_pilot_flip.v1\",\n";
+        out << "  \"leg\": \"C: native-Vulkan vs raw-GL\",\n";
+        out << "  \"pass\": \"basic\",\n";
+        out << "  \"resolution\": [" << kCubeWidth << ", " << kCubeHeight << "],\n";
+        out << "  \"metric_backend\": \""
+            << Luminumbra::Rendering::InProcessFlip::BackendName() << "\",\n";
+        out << "  \"validation_layers\": \"VK_LAYER_KHRONOS_validation\",\n";
+        out << "  \"go_threshold\": " << kGoThresholdVk << ",\n";
+        out << "  \"score_unflipped\": " << flip_same.score << ",\n";
+        out << "  \"score_flipped\": " << flip_flip.score << ",\n";
+        out << "  \"aligned_orientation\": \""
+            << (flipped_is_aligned ? "flipped" : "unflipped") << "\",\n";
+        out << "  \"aligned_score\": " << aligned.score << ",\n";
+        out << "  \"aligned_max_error\": " << aligned.max_error << ",\n";
+        out << "  \"verdict\": \"" << (aligned.score < kGoThresholdVk ? "GO" : "NO-GO")
+            << "\"\n";
+        out << "}\n";
+    }
+
+    EXPECT_LT(aligned.score, kGoThresholdVk)
+        << "native-Vulkan render is not perceptually faithful to raw-GL at the "
+           "pre-registered leg-C threshold (aligned orientation="
         << (flipped_is_aligned ? "flipped" : "unflipped")
         << "). unflipped=" << flip_same.score << " flipped=" << flip_flip.score;
 }

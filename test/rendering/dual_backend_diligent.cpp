@@ -1,19 +1,21 @@
-// GPU-03 + GPU-P05 (spec 021 rank 66) leg B implementation: render the calibration
-// cube through Diligent's GL backend. This is the FIRST render-through-Diligent code
-// in the project (P02 only created + released a device). It is the only render TU
-// that includes Diligent headers -- no Diligent type escapes (see dual_backend_diligent.h).
+// GPU-03 + GPU-P05 (spec 021 rank 66) legs B + C implementation: render the
+// calibration cube through Diligent's GL backend (leg B) and its native Vulkan
+// backend (leg C). This is the only render TU that includes Diligent headers -- no
+// Diligent type escapes (see dual_backend_diligent.h).
 //
-// Fidelity discipline: the GLSL below is math-identical to res/shaders/basic.{vert,frag}
-// (the raw-GL golden's shader), differing ONLY in that the uniforms live in a std140
-// UBO ("Constants") because Diligent binds constant buffers through its SRB, not the
-// GL default uniform block. normalMatrix is identity, so `mat3(normalMatrix)*aNormal`
-// == `aNormal`; every other term is a direct transcription. Any non-zero FLIP vs the
-// golden is therefore attributable to the BACKEND (or a Y/gamma convention), which is
-// exactly what leg B measures.
+// Both backends run the SAME column-major GLSL (math-identical to
+// res/shaders/basic.{vert,frag}, uniforms in a std140 "Constants" UBO because
+// Diligent binds constant buffers through its SRB, not the GL default block).
+// Column-major GLSL avoids the HLSL row-major mul(v,M) transpose footgun, so the two
+// backends differ ONLY in the compiler + rasterizer + NDC convention -- exactly what
+// legs B/C measure. Leg B (GL, same driver as raw GL) is bit-identical; leg C
+// (Vulkan) uses a zero-to-one depth projection with the standard Y-flip and is
+// compared with a looser threshold because it is a different rasterizer/compiler.
 
 #include "dual_backend_diligent.h"
 
 #include "EngineFactoryOpenGL.h"
+#include "EngineFactoryVk.h"
 #include "RenderDevice.h"
 #include "DeviceContext.h"
 #include "PipelineState.h"
@@ -28,6 +30,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
+#include <glm/ext/matrix_clip_space.hpp>
 
 #include <cstring>
 
@@ -50,10 +53,15 @@ struct Constants {
     float objectColor[4];
 };
 
+// One shader, GLSL_VERBATIM-valid on BOTH GL and Vulkan: #version first, explicit
+// layout(location=) on every varying + output (Vulkan/glslang requires them; GL 4.5
+// accepts them), and layout(binding=) on the UBO (GL 4.2+ and Vulkan). This keeps a
+// single source across backends so leg B stays bit-identical and leg C isolates the
+// backend, not a shader-source difference.
 const char* const kVertGlsl = R"GLSL(#version 450
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
-layout(std140) uniform Constants {
+layout(std140, binding = 0) uniform Constants {
     mat4 g_model;
     mat4 g_view;
     mat4 g_projection;
@@ -63,8 +71,8 @@ layout(std140) uniform Constants {
     vec4 g_lightColor;
     vec4 g_objectColor;
 };
-out vec3 FragPos;
-out vec3 Normal;
+layout(location = 0) out vec3 FragPos;
+layout(location = 1) out vec3 Normal;
 void main() {
     FragPos = vec3(g_model * vec4(aPos, 1.0));
     Normal = mat3(g_normalMatrix) * aNormal;
@@ -73,9 +81,9 @@ void main() {
 )GLSL";
 
 const char* const kFragGlsl = R"GLSL(#version 450
-in vec3 FragPos;
-in vec3 Normal;
-layout(std140) uniform Constants {
+layout(location = 0) in vec3 FragPos;
+layout(location = 1) in vec3 Normal;
+layout(std140, binding = 0) uniform Constants {
     mat4 g_model;
     mat4 g_view;
     mat4 g_projection;
@@ -85,7 +93,7 @@ layout(std140) uniform Constants {
     vec4 g_lightColor;
     vec4 g_objectColor;
 };
-out vec4 FragColor;
+layout(location = 0) out vec4 FragColor;
 void main() {
     float ambientStrength = 0.2;
     vec3 ambient = ambientStrength * g_lightColor.rgb;
@@ -107,32 +115,19 @@ void FillVec4(float* dst, const glm::vec3& v, float w) {
     dst[0] = v.x; dst[1] = v.y; dst[2] = v.z; dst[3] = w;
 }
 
-}  // namespace
-
-DiligentRenderResult RenderCubeDiligentGl(const std::vector<MeshVertex>& mesh,
-                                          const RenderParams& params) {
-    DiligentRenderResult out;
-
-    // --- Device: attach to the GL context current on this thread (caller owns it). ---
-    IEngineFactoryOpenGL* factory = GetEngineFactoryOpenGL();
-    if (factory == nullptr) {
-        out.diagnostic = "GetEngineFactoryOpenGL returned null";
-        return out;
-    }
-    EngineGLCreateInfo create_info;
-    RefCntAutoPtr<IRenderDevice> device;
-    RefCntAutoPtr<IDeviceContext> context;
-    factory->AttachToActiveGLContext(create_info, &device, &context);
-    if (!device || !context) {
-        out.diagnostic = "AttachToActiveGLContext produced a null device/context";
-        return out;
-    }
-
-    // --- Shaders (GLSL verbatim: used as-is, no HLSL cross-compile in this leg). ---
+// The shared render body: create shaders + PSO + buffers + RT, draw, read back via a
+// staging texture. `lang` differs per backend (GL: verbatim; Vulkan: Diligent-GLSL so
+// bindings are assigned for SPIR-V), `projection` carries the backend's NDC. Fills
+// `out.pixels` (top-down, Diligent origin) or `out.diagnostic`. Device/context are
+// owned by the caller.
+bool RenderWithDevice(IRenderDevice* device, IDeviceContext* context,
+                      const glm::mat4& projection, SHADER_SOURCE_LANGUAGE lang,
+                      const std::vector<MeshVertex>& mesh, const RenderParams& params,
+                      DiligentRenderResult& out) {
     auto make_shader = [&](SHADER_TYPE type, const char* src, const char* name,
                            RefCntAutoPtr<IShader>& shader) -> bool {
         ShaderCreateInfo sci;
-        sci.SourceLanguage = SHADER_SOURCE_LANGUAGE_GLSL_VERBATIM;
+        sci.SourceLanguage = lang;
         sci.Desc.ShaderType = type;
         sci.Desc.Name = name;
         sci.Source = src;
@@ -150,10 +145,9 @@ DiligentRenderResult RenderCubeDiligentGl(const std::vector<MeshVertex>& mesh,
         return true;
     };
     RefCntAutoPtr<IShader> vs, ps;
-    if (!make_shader(SHADER_TYPE_VERTEX, kVertGlsl, "cube VS", vs)) return out;
-    if (!make_shader(SHADER_TYPE_PIXEL, kFragGlsl, "cube PS", ps)) return out;
+    if (!make_shader(SHADER_TYPE_VERTEX, kVertGlsl, "cube VS", vs)) return false;
+    if (!make_shader(SHADER_TYPE_PIXEL, kFragGlsl, "cube PS", ps)) return false;
 
-    // --- Pipeline state: 1x RGBA8 RT + D32 depth, no cull, depth-test LESS. ---
     GraphicsPipelineStateCreateInfo pso_ci;
     pso_ci.PSODesc.Name = "cube PSO";
     GraphicsPipelineDesc& gp = pso_ci.GraphicsPipeline;
@@ -175,22 +169,18 @@ DiligentRenderResult RenderCubeDiligentGl(const std::vector<MeshVertex>& mesh,
 
     pso_ci.pVS = vs;
     pso_ci.pPS = ps;
-    // Default resource-variable type STATIC: bind the single UBO on the PSO directly.
 
     RefCntAutoPtr<IPipelineState> pso;
     device->CreateGraphicsPipelineState(pso_ci, &pso);
     if (!pso) {
         out.diagnostic = "CreateGraphicsPipelineState failed";
-        return out;
+        return false;
     }
 
-    // --- Constant buffer (immutable; one draw, fixed transforms/light). ---
     Constants c{};
     const glm::mat4 model(1.0f);
     const glm::mat4 view = glm::lookAt(params.camera_position, params.camera_target,
                                        glm::vec3{0.0f, 1.0f, 0.0f});
-    const glm::mat4 projection = glm::perspective(
-        glm::radians(45.0f), static_cast<float>(kCubeWidth) / kCubeHeight, 0.1f, 128.0f);
     const glm::mat4 normal_matrix(1.0f);
     std::memcpy(c.model, glm::value_ptr(model), sizeof(c.model));
     std::memcpy(c.view, glm::value_ptr(view), sizeof(c.view));
@@ -213,10 +203,9 @@ DiligentRenderResult RenderCubeDiligentGl(const std::vector<MeshVertex>& mesh,
     device->CreateBuffer(cb_desc, &cb_data, &cbuffer);
     if (!cbuffer) {
         out.diagnostic = "CreateBuffer (Constants) failed";
-        return out;
+        return false;
     }
 
-    // Bind the UBO as a static variable on whichever stages reference it.
     bool bound = false;
     for (SHADER_TYPE st : {SHADER_TYPE_VERTEX, SHADER_TYPE_PIXEL}) {
         if (IShaderResourceVariable* var = pso->GetStaticVariableByName(st, "Constants")) {
@@ -226,17 +215,16 @@ DiligentRenderResult RenderCubeDiligentGl(const std::vector<MeshVertex>& mesh,
     }
     if (!bound) {
         out.diagnostic = "PSO exposes no 'Constants' UBO variable to bind";
-        return out;
+        return false;
     }
 
     RefCntAutoPtr<IShaderResourceBinding> srb;
     pso->CreateShaderResourceBinding(&srb, true);
     if (!srb) {
         out.diagnostic = "CreateShaderResourceBinding failed";
-        return out;
+        return false;
     }
 
-    // --- Vertex buffer (immutable). ---
     BufferDesc vb_desc;
     vb_desc.Name = "cube VB";
     vb_desc.Usage = USAGE_IMMUTABLE;
@@ -249,10 +237,9 @@ DiligentRenderResult RenderCubeDiligentGl(const std::vector<MeshVertex>& mesh,
     device->CreateBuffer(vb_desc, &vb_data, &vbo);
     if (!vbo) {
         out.diagnostic = "CreateBuffer (vertex) failed";
-        return out;
+        return false;
     }
 
-    // --- Render target + depth textures. ---
     TextureDesc rt_desc;
     rt_desc.Name = "cube color RT";
     rt_desc.Type = RESOURCE_DIM_TEX_2D;
@@ -272,13 +259,12 @@ DiligentRenderResult RenderCubeDiligentGl(const std::vector<MeshVertex>& mesh,
     device->CreateTexture(ds_desc, nullptr, &depth_tex);
     if (!color_tex || !depth_tex) {
         out.diagnostic = "CreateTexture (RT/depth) failed";
-        return out;
+        return false;
     }
 
     ITextureView* rtv = color_tex->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET);
     ITextureView* dsv = depth_tex->GetDefaultView(TEXTURE_VIEW_DEPTH_STENCIL);
 
-    // --- Draw. ---
     ITextureView* rtvs[] = {rtv};
     context->SetRenderTargets(1, rtvs, dsv, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
     const float clear_color[4] = {kClearR, kClearG, kClearB, 1.0f};
@@ -299,7 +285,6 @@ DiligentRenderResult RenderCubeDiligentGl(const std::vector<MeshVertex>& mesh,
     draw.Flags = DRAW_FLAG_VERIFY_ALL;
     context->Draw(draw);
 
-    // --- Readback via staging texture (GL: CopyTexture -> glReadPixels into PBO). ---
     TextureDesc stg_desc = rt_desc;
     stg_desc.Name = "cube staging";
     stg_desc.BindFlags = BIND_NONE;
@@ -309,7 +294,7 @@ DiligentRenderResult RenderCubeDiligentGl(const std::vector<MeshVertex>& mesh,
     device->CreateTexture(stg_desc, nullptr, &staging);
     if (!staging) {
         out.diagnostic = "CreateTexture (staging) failed";
-        return out;
+        return false;
     }
 
     CopyTextureAttribs copy;
@@ -319,13 +304,13 @@ DiligentRenderResult RenderCubeDiligentGl(const std::vector<MeshVertex>& mesh,
     copy.DstTextureTransitionMode = RESOURCE_STATE_TRANSITION_MODE_TRANSITION;
     context->CopyTexture(copy);
 
-    context->WaitForIdle();  // ensure the glReadPixels-into-PBO has completed
+    context->WaitForIdle();  // ensure the readback copy has completed
 
     MappedTextureSubresource mapped;
     context->MapTextureSubresource(staging, 0, 0, MAP_READ, MAP_FLAG_NONE, nullptr, mapped);
     if (mapped.pData == nullptr) {
         out.diagnostic = "MapTextureSubresource returned null";
-        return out;
+        return false;
     }
 
     const std::size_t row_bytes = static_cast<std::size_t>(kCubeWidth) * 4u;
@@ -336,8 +321,71 @@ DiligentRenderResult RenderCubeDiligentGl(const std::vector<MeshVertex>& mesh,
                     src + static_cast<std::size_t>(y) * mapped.Stride, row_bytes);
     }
     context->UnmapTextureSubresource(staging, 0, 0);
+    return true;
+}
 
-    out.available = true;
+}  // namespace
+
+DiligentRenderResult RenderCubeDiligentGl(const std::vector<MeshVertex>& mesh,
+                                          const RenderParams& params) {
+    DiligentRenderResult out;
+
+    IEngineFactoryOpenGL* factory = GetEngineFactoryOpenGL();
+    if (factory == nullptr) {
+        out.diagnostic = "GetEngineFactoryOpenGL returned null";
+        return out;
+    }
+    EngineGLCreateInfo create_info;
+    RefCntAutoPtr<IRenderDevice> device;
+    RefCntAutoPtr<IDeviceContext> context;
+    factory->AttachToActiveGLContext(create_info, &device, &context);
+    if (!device || !context) {
+        out.diagnostic = "AttachToActiveGLContext produced a null device/context";
+        return out;
+    }
+
+    // GL NDC: right-handed, depth -1..1 (glm default) -- identical to the raw-GL golden.
+    const glm::mat4 projection = glm::perspective(
+        glm::radians(45.0f), static_cast<float>(kCubeWidth) / kCubeHeight, 0.1f, 128.0f);
+
+    if (RenderWithDevice(device, context, projection, SHADER_SOURCE_LANGUAGE_GLSL_VERBATIM,
+                         mesh, params, out)) {
+        out.available = true;
+    }
+    return out;
+}
+
+DiligentRenderResult RenderCubeDiligentVk(const std::vector<MeshVertex>& mesh,
+                                          const RenderParams& params) {
+    DiligentRenderResult out;
+
+    IEngineFactoryVk* factory = GetEngineFactoryVk();
+    if (factory == nullptr) {
+        out.diagnostic = "GetEngineFactoryVk returned null";
+        return out;
+    }
+    EngineVkCreateInfo create_info;
+    create_info.EnableValidation = true;   // VK_LAYER_KHRONOS_validation on -- first Vulkan render
+    RefCntAutoPtr<IRenderDevice> device;
+    RefCntAutoPtr<IDeviceContext> context;
+    factory->CreateDeviceAndContextsVk(create_info, &device, &context);
+    if (!device || !context) {
+        out.diagnostic = "CreateDeviceAndContextsVk produced a null device/context";
+        return out;
+    }
+
+    // Vulkan NDC: right-handed, depth 0..1, plus the standard Y-flip (negate row 1) so
+    // the image is Y-up like GL. CULL_MODE_NONE makes the winding flip harmless. The
+    // residual orientation is still measured both ways by the test.
+    glm::mat4 projection = glm::perspectiveRH_ZO(
+        glm::radians(45.0f), static_cast<float>(kCubeWidth) / kCubeHeight, 0.1f, 128.0f);
+    projection[1][1] *= -1.0f;
+
+    if (RenderWithDevice(device, context, projection, SHADER_SOURCE_LANGUAGE_GLSL_VERBATIM,
+                         mesh, params, out)) {
+        out.available = true;
+    }
+    context->Flush();  // drain before teardown (Diligent warns on unflushed contexts)
     return out;
 }
 
