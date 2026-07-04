@@ -1120,7 +1120,7 @@
    "effort": "M",
    "risk": "low",
    "dependencies": [],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "NEW: RenderCapture.SdkTriggerLive ctest assertion in render_capture_test \u2014 with the RenderDoc in-app API present a capture request returns capture_started=true and a .rdc file exists; MarkerOnly fallback still passes headless",
    "rank": 62
   },
@@ -2710,6 +2710,21 @@
    "status": "todo",
    "proving_signal": "NEW: frontier Files-mode doc check \u2014 Assert-FileExists docs/operability/harness.md plus Assert-Contains for every shipped harness flag",
    "rank": 146
+  },
+  {
+   "id": "GPU-14",
+   "pillar": "gpu",
+   "spec": "021",
+   "summary": "GPU-06 linked the RenderDoc in-app API (real StartFrameCapture/EndFrameCapture bracket + .rdc retrieval); the Nsight and PIX programmatic in-app triggers remain unlinked (IsCaptureSdkAvailable returns false for them) because they require the heavyweight NGFX injection SDK / WinPixGpuCapturer runtime rather than a single vendored header. Link them per charter FR-E-003's Nsight/Streamline clause.",
+   "evidence": "src/luminumbra_client/rendering/CaptureHooks.cpp (IsCaptureSdkAvailable returns false for PIX/Nsight), docs/specs/021-engine-framework-audit-charter/spec.md:155",
+   "effort": "M",
+   "risk": "medium",
+   "dependencies": [
+    "GPU-06"
+   ],
+   "status": "todo",
+   "proving_signal": "NEW: RenderCaptureSdkTrigger.NsightTriggerLive / PixTriggerLive - with the respective SDK present a capture request returns capture_started=true and a capture file exists; both still report not-linked and emit the MarkerOnly fallback headless (mirrors GPU-06's RenderDoc injected-API pattern)",
+   "rank": 78
   }
  ]
 }
