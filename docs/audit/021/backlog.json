@@ -1089,7 +1089,7 @@
    "dependencies": [
     "016"
    ],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "NEW: DualBackendFlipInProcessGpu ctest \u2014 renders the same pass twice in one process (raw-GL vs GL-via-Diligent) and FLIP-diffs the two framebuffers in memory; asserts score < per-pass threshold with zero cross-run variance",
    "rank": 60
   },
