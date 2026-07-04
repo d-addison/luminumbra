@@ -785,6 +785,8 @@ private:
     // dressing; every field is frame state adopted wrap-existing, never feeds world_hash.
     RenderContext make_debug_view_context(const Camera& camera);
     RenderContext make_ground_decal_context(const Camera& camera);
+    RenderContext make_aerial_context(const Camera& camera);
+    RenderContext make_god_rays_context(const Camera& camera);
 
     std::vector<ChunkMeshSnapshot> build_chunk_snapshots(const std::vector<Chunk*>& renderable_chunks) const;
 
@@ -1027,7 +1029,11 @@ private:
     // into m_skyAmbientColor so lighting/ambient share the LUT transmittance.
     glm::vec3 m_skyScatterAmbient{0.0f};
     void init_sky_lut();
-    void execute_aerial_pass(const Camera& camera);
+    // Spec 016 (GPU-04): the inline aerial/god-rays/TAAU post-passes now take a
+    // RenderContext& (frame state from ctx; only the pass-owned shaders + TAAU
+    // history stay members) so they sit on the same seam the pass classes do.
+    void execute_aerial_pass(const RenderContext& ctx);
+    void execute_god_rays(const RenderContext& ctx);
     void init_taau(u32 width, u32 height);   // FR-R5 TAAU history/FBO
     void destroy_taau();
     void execute_taau_resolve();             // motion-reprojected temporal resolve (flag-gated)

@@ -2515,8 +2515,9 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // SAME sky-view/transmittance LUT the skybox uses so the fog palette stays
     // coherent with the sky (warm pinks/oranges at low sun). Budget ≤ 0.3 ms.
     if (m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Aerial)) {
+        RenderContext aerial_ctx = make_aerial_context(camera);
         begin_gpu_pass_timer(GpuTimerPass::Aerial);
-        execute_aerial_pass(camera);
+        execute_aerial_pass(aerial_ctx);
         end_gpu_pass_timer(GpuTimerPass::Aerial);
         glBindVertexArray(0);
     }
@@ -2524,45 +2525,9 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // 7b2. GOD RAYS (screen-space crepuscular rays): additive shafts fanning from the
     // sun around occluders (clouds/terrain). Only when the sun is above the horizon
     // and on screen (zero cost otherwise). Reads the post-sky opaque snapshot.
-    if (m_god_rays_shader && m_god_rays_shader->IsValid() && m_screen_quad_vao != 0) {
-        const glm::vec3 toSun = -m_sun.direction;
-        float sun_visible = glm::smoothstep(-0.02f, 0.12f, toSun.y); // above horizon
-        glm::vec2 sun_uv(0.0f);
-        if (sun_visible > 0.0f) {
-            const glm::vec4 clip = projection * glm::mat4(glm::mat3(view)) * glm::vec4(toSun, 1.0f);
-            if (clip.w > 0.0f) {
-                const glm::vec2 ndc = glm::vec2(clip) / clip.w;
-                sun_uv = ndc * 0.5f + 0.5f;
-                const float onx = glm::smoothstep(-0.35f, 0.05f, sun_uv.x) * (1.0f - glm::smoothstep(0.95f, 1.35f, sun_uv.x));
-                const float ony = glm::smoothstep(-0.35f, 0.05f, sun_uv.y) * (1.0f - glm::smoothstep(0.95f, 1.35f, sun_uv.y));
-                sun_visible *= onx * ony;
-            } else {
-                sun_visible = 0.0f;
-            }
-        }
-        const FrameBufferObject& lf = m_lighting_pass->lighting_fbo();
-        if (sun_visible > 0.002f && lf.fbo_id && lf.opaque_color_texture) {
-            glBindFramebuffer(GL_FRAMEBUFFER, lf.fbo_id);
-            glViewport(0, 0, m_screen_width, m_screen_height);
-            const GLboolean depth_was = glIsEnabled(GL_DEPTH_TEST);
-            glDisable(GL_DEPTH_TEST);
-            const GLboolean blend_was = glIsEnabled(GL_BLEND);
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_ONE, GL_ONE); // additive
-            m_god_rays_shader->use();
-            glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, lf.opaque_color_texture);
-            m_god_rays_shader->setInt("u_scene", 0);
-            m_god_rays_shader->setVec2("u_sunUV", sun_uv);
-            m_god_rays_shader->setFloat("u_sunVisible", sun_visible);
-            m_god_rays_shader->setFloat("u_strength", 0.85f);
-            glBindVertexArray(m_screen_quad_vao);
-            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-            glBindVertexArray(0);
-            glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, 0);
-            if (!blend_was) glDisable(GL_BLEND);
-            if (depth_was) glEnable(GL_DEPTH_TEST);
-            glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        }
+    {
+        RenderContext godray_ctx = make_god_rays_context(camera);
+        execute_god_rays(godray_ctx);
     }
 
     // 7c. FOLIAGE PASS (T-I5b-1, F1): instanced ground-cover scatter blended
@@ -2874,53 +2839,28 @@ void RenderPipeline::init_sky_lut() {
     m_sky_full_precompute_ms = precompute_ms;
 }
 
-void RenderPipeline::execute_aerial_pass(const Camera& camera) {
-    // T-I5a-6: analytic aerial-perspective in-scatter composited OVER the lit
-    // scene in the lighting FBO. Reads the SAME sky-view/transmittance LUTs the
-    // dome uses (coherent palette). A no-op if the LUT/shader are unavailable.
-    if (!m_aerial_shader || !m_aerial_shader->IsValid() || !m_sky_lut.ready() || m_screen_quad_vao == 0) {
-        return;
-    }
-    const FrameBufferObject& lighting_fbo = m_lighting_pass->lighting_fbo();
-    const GBuffer& gbuffer = m_gbuffer_pass->gbuffer();
-    if (!lighting_fbo.fbo_id) {
-        return;
-    }
-
-    glBindFramebuffer(GL_FRAMEBUFFER, lighting_fbo.fbo_id);
-    glViewport(0, 0, m_screen_width, m_screen_height);
-    const GLboolean depth_was_enabled = glIsEnabled(GL_DEPTH_TEST);
-    glDisable(GL_DEPTH_TEST);
-    const GLboolean blend_was_enabled = glIsEnabled(GL_BLEND);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-    m_aerial_shader->use();
-    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, gbuffer.depth_texture);
-    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m_sky_lut.sky_view_texture());
-    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_sky_lut.transmittance_texture());
-    m_aerial_shader->setInt("gDepth", 0);
-    m_aerial_shader->setInt("u_skyViewLut", 1);
-    m_aerial_shader->setInt("u_transmittanceLut", 2);
-    glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom),
-        (float)m_screen_width / (float)m_screen_height, camera.GetNearPlane(), camera.GetFarPlane());
-    m_aerial_shader->setMat4("u_inverseView", glm::inverse(camera.GetViewMatrix()));
-    m_aerial_shader->setMat4("u_inverseProjection", glm::inverse(projection));
-    m_aerial_shader->setVec3("u_viewPos", camera.Position);
-    // Toward-sun direction (sun-disc convention), matching the sky-view LUT frame.
-    m_aerial_shader->setVec3("u_sunDirection", -m_sun.direction);
-    const float sun_up = glm::dot(m_sun.direction, glm::vec3(0.0f, -1.0f, 0.0f));
-    m_aerial_shader->setFloat("u_sunCosZenith", sun_up);
-    m_aerial_shader->setFloat("u_skyDayFactor", m_skyDayFactor);
-    m_aerial_shader->setFloat("u_underwater", m_underwater_factor);
-    // T-I7 controllable atmosphere: feed the data-driven aerial-perspective
-    // parameters (previously hardcoded shader defaults) so the far-field depth
-    // can be dialed crisp <-> realistic <-> dramatic. Optional tuning override:
-    // LUMIN_ATMOS="density,maxDistance,inscatterStrength,warmth" lets a capture
-    // or tuning run dial the look without rebuilding (render-only knob).
+// Spec 016 (GPU-04): the aerial pass contract — sky/atmosphere LUTs (Group D),
+// gbuffer depth, lit-scene target, and the Group I aerial floats resolved AFTER the
+// LUMIN_ATMOS override. Render-only; never feeds world_hash.
+RenderContext RenderPipeline::make_aerial_context(const Camera& camera) {
+    RenderContext ctx;
+    ctx.camera = &camera;
+    ctx.screen_width = m_screen_width;
+    ctx.screen_height = m_screen_height;
+    ctx.registry = &m_render_registry;
+    ctx.screen_quad_vao = m_screen_quad_vao;
+    ctx.sun = m_sun;
+    ctx.sky_day_factor = m_skyDayFactor;
+    ctx.underwater_factor = m_underwater_factor;
+    ctx.sky_lut_ready = m_sky_lut.ready();
+    ctx.sky_view_lut = m_render_registry.adopt_texture("sky_view_lut", m_sky_lut.sky_view_texture());
+    ctx.transmittance_lut = m_render_registry.adopt_texture("transmittance_lut", m_sky_lut.transmittance_texture());
+    ctx.gbuffer_depth = m_render_registry.adopt_texture("gbuffer_depth", m_gbuffer_pass->gbuffer().depth_texture);
+    ctx.lit_scene = m_render_registry.adopt_fbo("lit_scene", m_lighting_pass->lighting_fbo().fbo_id);
+    // T-I7 controllable atmosphere: the data-driven aerial params, with the optional
+    // LUMIN_ATMOS="density,maxDistance,inscatterStrength,warmth" tuning override parsed
+    // ONCE (not per frame). Resolved at the call site per the Group I contract.
     AtmosphereParams atmo = m_atmosphere;
-    // Tuning override parsed ONCE (not per frame): when set, it supersedes the
-    // configured params so a capture/tuning run can sweep the look.
     static const auto s_atmos_override = [] {
         std::optional<AtmosphereParams> ov;
         if (const char* env = std::getenv("LUMIN_ATMOS")) {
@@ -2932,15 +2872,60 @@ void RenderPipeline::execute_aerial_pass(const Camera& camera) {
         }
         return ov;
     }();
-    if (s_atmos_override) {
-        atmo = *s_atmos_override;
-    }
-    m_aerial_shader->setFloat("u_aerialDensity", atmo.aerial_density);
-    m_aerial_shader->setFloat("u_aerialMaxDistance", atmo.aerial_max_distance);
-    m_aerial_shader->setFloat("u_inscatterStrength", atmo.inscatter_strength);
-    m_aerial_shader->setFloat("u_atmosphereWarmth", atmo.warmth);
+    if (s_atmos_override) { atmo = *s_atmos_override; }
+    ctx.aerial_density = atmo.aerial_density;
+    ctx.aerial_max_distance = atmo.aerial_max_distance;
+    ctx.inscatter_strength = atmo.inscatter_strength;
+    ctx.atmosphere_warmth = atmo.warmth;
+    return ctx;
+}
 
-    glBindVertexArray(m_screen_quad_vao);
+void RenderPipeline::execute_aerial_pass(const RenderContext& ctx) {
+    // T-I5a-6: analytic aerial-perspective in-scatter composited OVER the lit
+    // scene in the lighting FBO. Reads the SAME sky-view/transmittance LUTs the
+    // dome uses (coherent palette). A no-op if the LUT/shader are unavailable.
+    // Only the shader stays a member; all frame state comes from ctx.
+    if (!m_aerial_shader || !m_aerial_shader->IsValid() || !ctx.sky_lut_ready || ctx.screen_quad_vao == 0) {
+        return;
+    }
+    const GLuint lit_fbo = ctx.lit_scene.id;
+    if (!lit_fbo) {
+        return;
+    }
+    const Camera& camera = *ctx.camera;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, lit_fbo);
+    glViewport(0, 0, ctx.screen_width, ctx.screen_height);
+    const GLboolean depth_was_enabled = glIsEnabled(GL_DEPTH_TEST);
+    glDisable(GL_DEPTH_TEST);
+    const GLboolean blend_was_enabled = glIsEnabled(GL_BLEND);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    m_aerial_shader->use();
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_depth.id);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, ctx.sky_view_lut.id);
+    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, ctx.transmittance_lut.id);
+    m_aerial_shader->setInt("gDepth", 0);
+    m_aerial_shader->setInt("u_skyViewLut", 1);
+    m_aerial_shader->setInt("u_transmittanceLut", 2);
+    glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom),
+        (float)ctx.screen_width / (float)ctx.screen_height, camera.GetNearPlane(), camera.GetFarPlane());
+    m_aerial_shader->setMat4("u_inverseView", glm::inverse(camera.GetViewMatrix()));
+    m_aerial_shader->setMat4("u_inverseProjection", glm::inverse(projection));
+    m_aerial_shader->setVec3("u_viewPos", camera.Position);
+    // Toward-sun direction (sun-disc convention), matching the sky-view LUT frame.
+    m_aerial_shader->setVec3("u_sunDirection", -ctx.sun.direction);
+    const float sun_up = glm::dot(ctx.sun.direction, glm::vec3(0.0f, -1.0f, 0.0f));
+    m_aerial_shader->setFloat("u_sunCosZenith", sun_up);
+    m_aerial_shader->setFloat("u_skyDayFactor", ctx.sky_day_factor);
+    m_aerial_shader->setFloat("u_underwater", ctx.underwater_factor);
+    m_aerial_shader->setFloat("u_aerialDensity", ctx.aerial_density);
+    m_aerial_shader->setFloat("u_aerialMaxDistance", ctx.aerial_max_distance);
+    m_aerial_shader->setFloat("u_inscatterStrength", ctx.inscatter_strength);
+    m_aerial_shader->setFloat("u_atmosphereWarmth", ctx.atmosphere_warmth);
+
+    glBindVertexArray(ctx.screen_quad_vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
 
@@ -2948,6 +2933,80 @@ void RenderPipeline::execute_aerial_pass(const Camera& camera) {
     if (depth_was_enabled) { glEnable(GL_DEPTH_TEST); }
     glActiveTexture(GL_TEXTURE0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+// Spec 016 (GPU-04): the god-rays pass contract — the lit-scene target + its post-sky
+// opaque snapshot, plus the Group J sun-screen projection COMPUTED here (identical math
+// to the retired inline block) so execute_god_rays reads only ctx. Render-only.
+RenderContext RenderPipeline::make_god_rays_context(const Camera& camera) {
+    RenderContext ctx;
+    ctx.camera = &camera;
+    ctx.screen_width = m_screen_width;
+    ctx.screen_height = m_screen_height;
+    ctx.registry = &m_render_registry;
+    ctx.screen_quad_vao = m_screen_quad_vao;
+    ctx.lit_scene = m_render_registry.adopt_fbo("lit_scene", m_lighting_pass->lighting_fbo().fbo_id);
+    ctx.opaque_scene = m_render_registry.adopt_texture(
+        "opaque_scene", m_lighting_pass->lighting_fbo().opaque_color_texture);
+    // Group J: sun visibility + on-screen UV (crepuscular-ray origin). Zero when the
+    // sun is below the horizon or off-screen -> execute_god_rays becomes a no-op.
+    const glm::vec3 toSun = -m_sun.direction;
+    float sun_visible = glm::smoothstep(-0.02f, 0.12f, toSun.y); // above horizon
+    glm::vec2 sun_uv(0.0f);
+    if (sun_visible > 0.0f) {
+        const glm::mat4 view = camera.GetViewMatrix();
+        const glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom),
+            (float)m_screen_width / (float)m_screen_height, camera.GetNearPlane(), camera.GetFarPlane());
+        const glm::vec4 clip = projection * glm::mat4(glm::mat3(view)) * glm::vec4(toSun, 1.0f);
+        if (clip.w > 0.0f) {
+            const glm::vec2 ndc = glm::vec2(clip) / clip.w;
+            sun_uv = ndc * 0.5f + 0.5f;
+            const float onx = glm::smoothstep(-0.35f, 0.05f, sun_uv.x) * (1.0f - glm::smoothstep(0.95f, 1.35f, sun_uv.x));
+            const float ony = glm::smoothstep(-0.35f, 0.05f, sun_uv.y) * (1.0f - glm::smoothstep(0.95f, 1.35f, sun_uv.y));
+            sun_visible *= onx * ony;
+        } else {
+            sun_visible = 0.0f;
+        }
+    }
+    ctx.sun_visible = sun_visible;
+    ctx.sun_uv_x = sun_uv.x;
+    ctx.sun_uv_y = sun_uv.y;
+    return ctx;
+}
+
+void RenderPipeline::execute_god_rays(const RenderContext& ctx) {
+    // Screen-space crepuscular rays: additive shafts fanning from the sun around
+    // occluders. Only when the sun is above the horizon and on screen (zero cost
+    // otherwise). Only the shader stays a member; all frame state comes from ctx.
+    if (!m_god_rays_shader || !m_god_rays_shader->IsValid() || ctx.screen_quad_vao == 0) {
+        return;
+    }
+    const float sun_visible = ctx.sun_visible;
+    const glm::vec2 sun_uv(ctx.sun_uv_x, ctx.sun_uv_y);
+    const GLuint lit_fbo = ctx.lit_scene.id;
+    const GLuint opaque_tex = ctx.opaque_scene.id;
+    if (sun_visible > 0.002f && lit_fbo && opaque_tex) {
+        glBindFramebuffer(GL_FRAMEBUFFER, lit_fbo);
+        glViewport(0, 0, ctx.screen_width, ctx.screen_height);
+        const GLboolean depth_was = glIsEnabled(GL_DEPTH_TEST);
+        glDisable(GL_DEPTH_TEST);
+        const GLboolean blend_was = glIsEnabled(GL_BLEND);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_ONE, GL_ONE); // additive
+        m_god_rays_shader->use();
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, opaque_tex);
+        m_god_rays_shader->setInt("u_scene", 0);
+        m_god_rays_shader->setVec2("u_sunUV", sun_uv);
+        m_god_rays_shader->setFloat("u_sunVisible", sun_visible);
+        m_god_rays_shader->setFloat("u_strength", 0.85f);
+        glBindVertexArray(ctx.screen_quad_vao);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glBindVertexArray(0);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, 0);
+        if (!blend_was) glDisable(GL_BLEND);
+        if (depth_was) glEnable(GL_DEPTH_TEST);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
 }
 
 // --- Render-optimization: reduced-res sky-dome (cloud-raymarch-optimization, slice 1) ---
