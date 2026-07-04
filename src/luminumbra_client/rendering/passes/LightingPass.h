@@ -9,6 +9,7 @@
 namespace Luminumbra::Rendering {
 
 class Shader;
+class RenderResourceRegistry;
 
 // Deferred lighting render pass extracted from RenderPipeline (T-I2-11e).
 // Owns the lighting FBO (HDR color + opaque color copy + depth renderbuffer)
@@ -28,8 +29,13 @@ public:
     // Root path retained so the lightning overlay program can be lazily built on
     // first strike (T-I5a-5).
     std::filesystem::path m_root_path;
-    void init_lighting_fbo(u32 width, u32 height);
-    void destroy_lighting_fbo();
+    // RENDER-12/GPU-12: the lighting FBO (HDR color attachment + depth
+    // renderbuffer) and the standalone opaque-color copy are REGISTRY-OWNED. The
+    // lightning scene-copy scratch (m_lightning_scene_copy) stays pass-owned - it
+    // is a lazily-sized strike-only scratch, not created here. The
+    // FrameBufferObject struct caches the owned ids so every reader is unchanged.
+    void init_lighting_fbo(RenderResourceRegistry& registry, u32 width, u32 height);
+    void destroy_lighting_fbo(RenderResourceRegistry& registry);
     void reset_shader();
 
     void copy_lighting_color_to_opaque_texture(const RenderContext& ctx);

@@ -2,6 +2,7 @@
 
 #include "PassGlHelpers.h"
 #include "../RenderContext.h"
+#include "../RenderResourceRegistry.h"
 #include "../ShadowMap.h"
 #include "core/Log.h"
 #include "rendering/Camera.h"
@@ -55,49 +56,64 @@ void LightingPass::init_shader(const std::filesystem::path& root_path) {
     }
 }
 
-void LightingPass::init_lighting_fbo(u32 width, u32 height) {
-    glGenFramebuffers(1, &m_lighting_fbo.fbo_id);
-    PassGl::label_gl_object(GL_FRAMEBUFFER, m_lighting_fbo.fbo_id, "lighting.fbo");
-    glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_fbo.fbo_id);
+void LightingPass::init_lighting_fbo(RenderResourceRegistry& registry, u32 width, u32 height) {
+    // RENDER-12/GPU-12: allocate the lighting FBO + attachments THROUGH the
+    // registry. The descs reproduce the retired glTexImage2D/glRenderbufferStorage
+    // calls exactly (RGBA16F LINEAR HDR color; RGBA16F LINEAR + CLAMP_TO_EDGE
+    // opaque copy; DEPTH_COMPONENT24 renderbuffer) so the objects are
+    // parameter-identical; the FrameBufferObject struct caches the owned ids.
+    TextureDesc color;
+    color.width = width;
+    color.height = height;
+    color.internal_format = GL_RGBA16F;  // HDR lighting: avoid clamping colors to [0,1]
+    color.format = GL_RGBA;
+    color.type = GL_FLOAT;
+    color.min_filter = GL_LINEAR;
+    color.mag_filter = GL_LINEAR;
+    color.expected_layout = "color_attachment";
+    color.debug_label = "lighting.color";
+    m_lighting_fbo.color_texture = registry.create_texture("lighting_color", color).id;
 
-    // Color attachment (for the final lit scene)
-    glGenTextures(1, &m_lighting_fbo.color_texture);
-    PassGl::label_gl_object(GL_TEXTURE, m_lighting_fbo.color_texture, "lighting.color");
-    glBindTexture(GL_TEXTURE_2D, m_lighting_fbo.color_texture);
-    // Use RGBA16F for HDR lighting to avoid clamping colors between 0 and 1
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_lighting_fbo.color_texture, 0);
+    // Opaque-color copy: same format, but CLAMP_TO_EDGE. Standalone - the
+    // copy_lighting_color_to_opaque_texture blit target, not an FBO attachment.
+    TextureDesc opaque = color;
+    opaque.wrap_s = GL_CLAMP_TO_EDGE;
+    opaque.wrap_t = GL_CLAMP_TO_EDGE;
+    opaque.expected_layout = "sampled";
+    opaque.debug_label = "lighting.opaque_color_copy";
+    m_lighting_fbo.opaque_color_texture = registry.create_texture("lighting_opaque_color", opaque).id;
 
-    glGenTextures(1, &m_lighting_fbo.opaque_color_texture);
-    PassGl::label_gl_object(GL_TEXTURE, m_lighting_fbo.opaque_color_texture, "lighting.opaque_color_copy");
-    glBindTexture(GL_TEXTURE_2D, m_lighting_fbo.opaque_color_texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    // Depth: a renderbuffer (non-samplable; the depth is blitted from the G-buffer).
+    RenderbufferDesc depth;
+    depth.width = width;
+    depth.height = height;
+    depth.internal_format = GL_DEPTH_COMPONENT24;
+    depth.debug_label = "lighting.depth";
+    m_lighting_fbo.depth_texture = registry.create_renderbuffer("lighting_depth", depth).id;
 
-    // We will blit the depth from the G-Buffer later, so we only need a renderbuffer object for depth testing.
-    // However, if you wanted to do post-processing on this FBO that needs depth, you would use a depth texture.
-    glGenRenderbuffers(1, &m_lighting_fbo.depth_texture); // Note: this is a renderbuffer ID, not a texture ID
-    PassGl::label_gl_object(GL_RENDERBUFFER, m_lighting_fbo.depth_texture, "lighting.depth");
-    glBindRenderbuffer(GL_RENDERBUFFER, m_lighting_fbo.depth_texture);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_lighting_fbo.depth_texture);
-
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+    FboDesc fbo_desc;
+    fbo_desc.attachments = {
+        {GL_COLOR_ATTACHMENT0, "lighting_color"},
+        {GL_DEPTH_ATTACHMENT, "lighting_depth"},
+    };
+    fbo_desc.debug_label = "lighting.fbo";
+    m_lighting_fbo.fbo_id = registry.create_fbo("lighting_fbo", fbo_desc).id;
+    if (m_lighting_fbo.fbo_id == 0) {
         LUMINUMBRA_CORE_ERROR("Lighting FBO not complete!");
-
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
 }
 
-void LightingPass::destroy_lighting_fbo() {
-    if (m_lighting_fbo.fbo_id) { glDeleteFramebuffers(1, &m_lighting_fbo.fbo_id); m_lighting_fbo.fbo_id = 0; }
-    if (m_lighting_fbo.color_texture) { glDeleteTextures(1, &m_lighting_fbo.color_texture); m_lighting_fbo.color_texture = 0; }
-    if (m_lighting_fbo.opaque_color_texture) { glDeleteTextures(1, &m_lighting_fbo.opaque_color_texture); m_lighting_fbo.opaque_color_texture = 0; }
-    if (m_lighting_fbo.depth_texture) { glDeleteRenderbuffers(1, &m_lighting_fbo.depth_texture); m_lighting_fbo.depth_texture = 0; }
+void LightingPass::destroy_lighting_fbo(RenderResourceRegistry& registry) {
+    // Ownership contract: the registry deletes the owned lighting GL objects.
+    registry.destroy_owned("lighting_fbo");
+    registry.destroy_owned("lighting_color");
+    registry.destroy_owned("lighting_opaque_color");
+    registry.destroy_owned("lighting_depth");
+    m_lighting_fbo.fbo_id = 0;
+    m_lighting_fbo.color_texture = 0;
+    m_lighting_fbo.opaque_color_texture = 0;
+    m_lighting_fbo.depth_texture = 0;
+    // The lightning scene-copy scratch is pass-owned (lazy, framebuffer-sized).
     if (m_lightning_scene_copy) { glDeleteTextures(1, &m_lightning_scene_copy); m_lightning_scene_copy = 0; m_lightning_copy_w = 0; m_lightning_copy_h = 0; }
 }
 
