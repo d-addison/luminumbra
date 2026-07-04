@@ -907,14 +907,14 @@
    "id": "SHIELD-03",
    "pillar": "shield",
    "spec": "017-B",
-   "summary": "017-B deterministic activation queue: fixed-pipeline-latency-K tick-keyed availability replacing the per-tick wait_for_streaming_jobs barrier, targeting the moving-anchor p99 239ms main-thread block",
+   "summary": "017-B deterministic activation queue: fixed-pipeline-latency-K tick-keyed availability replacing the per-tick wait_for_streaming_jobs barrier, targeting the moving-anchor p99 239ms main-thread block (LANDED 2026-07-03: p99 239ms -> 0.001ms; moving hash now worker-count-invariant; moving baselines re-blessed debug 0431682a3f8a8a24 / release d79fdbbdbfe6580f)",
    "evidence": "src/luminumbra_server/ServerWorldRunner.cpp:501, docs/specs/017-engine-concurrency-async-execution/activation-queue-design.md:62",
    "effort": "XL",
    "risk": "high",
    "dependencies": [
     "SHIELD-02"
    ],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "Static --avail-trace per-tick MATCH + validate-engine-frontier.ps1 -Mode MovingResidency + validate-determinism-matrix.ps1 + 017-D p99 (ServerTickReport.main_wait_p99_ms) reduction recorded in the artifact",
    "rank": 51
   },
