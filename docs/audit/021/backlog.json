@@ -1059,7 +1059,7 @@
    "dependencies": [
     "GPU-02"
    ],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "NEW: ReflectionCoverage engine-frontier gate \u2014 asserts every pass under rendering/passes/ that binds samplers registers an ExpectedLayout via Shader::ValidateLayout; fails listing unvalidated passes",
    "rank": 59
   },
@@ -1074,7 +1074,7 @@
    "dependencies": [
     "RENDER-04"
    ],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "NEW: startup layout-validation gate \u2014 every pass shader registers an ExpectedLayout and Shader::ValidateLayout returns ok at init (extend shader_reflection_test with per-pass fixtures)",
    "rank": 59
   },
