@@ -1044,7 +1044,7 @@
    "dependencies": [
     "016"
    ],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "Existing: WorldVisualSweep rerun (validate-engine-frontier.ps1 -Mode WorldVisualSweep, :7274) + tools/flip_diff.py A/B of pre/post-conversion captures (byte-identical, score 0)",
    "rank": 58
   },
