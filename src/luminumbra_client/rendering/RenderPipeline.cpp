@@ -637,7 +637,7 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         m_lighting_pass->init_lighting_fbo(screen_width, screen_height);
         m_gbuffer_pass->init_gbuffer(m_render_registry, screen_width, screen_height);
         m_shadow_pass->init_shadow_map(m_render_registry);
-        m_ssao_pass->init_ssao(screen_width, screen_height);
+        m_ssao_pass->init_ssao(m_render_registry, screen_width, screen_height);
         init_screen_quad();
         init_taau(screen_width, screen_height); // FR-R5 TAAU history/FBO (used only when render.taau on)
         init_halfres_cloud(); // no-op unless cloud quality was set > 0 before startup
@@ -2717,8 +2717,8 @@ void RenderPipeline::on_resize(u32 new_width, u32 new_height) {
     m_lighting_pass->init_lighting_fbo(new_width, new_height);
     m_gbuffer_pass->destroy_gbuffer(m_render_registry);
     m_gbuffer_pass->init_gbuffer(m_render_registry, new_width, new_height);
-    m_ssao_pass->destroy_ssao();
-    m_ssao_pass->init_ssao(new_width, new_height);
+    m_ssao_pass->destroy_ssao(m_render_registry);
+    m_ssao_pass->init_ssao(m_render_registry, new_width, new_height);
     destroy_taau();
     init_taau(new_width, new_height); // FR-R5 TAAU history invalidated on resize
     init_halfres_cloud(); // re-size the reduced-res sky-dome target (no-op at quality 0)
@@ -3108,7 +3108,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_lighting_pass->destroy_lighting_fbo();
     m_gbuffer_pass->destroy_gbuffer(m_render_registry);
     m_shadow_pass->destroy_shadow_map(m_render_registry);
-    m_ssao_pass->destroy_ssao();
+    m_ssao_pass->destroy_ssao(m_render_registry);
     destroy_halfres_cloud(); // render-optimization: reduced-res sky-dome target
     if (m_screen_quad_vao) { glDeleteVertexArrays(1, &m_screen_quad_vao); m_screen_quad_vao = 0; }
     if (m_screen_quad_vbo) { glDeleteBuffers(1, &m_screen_quad_vbo); m_screen_quad_vbo = 0; }

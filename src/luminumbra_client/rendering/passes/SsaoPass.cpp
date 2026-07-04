@@ -1,5 +1,6 @@
 #include "SsaoPass.h"
 
+#include "../RenderResourceRegistry.h"
 #include "PassGlHelpers.h"
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
@@ -29,44 +30,52 @@ void SsaoPass::init_shaders(const std::filesystem::path& root_path) {
     PassGl::label_gl_object(GL_PROGRAM, m_ssao.upsampleShader ? m_ssao.upsampleShader->Id() : 0u, "shader.ssao_bilateral_upsample");
 }
 
-void SsaoPass::init_ssao(u32 width, u32 height) {
-    glGenFramebuffers(1, &m_ssao.fbo);
-    glGenFramebuffers(1, &m_ssao.blurFBO);
-    PassGl::label_gl_object(GL_FRAMEBUFFER, m_ssao.fbo, "ssao.fbo");
-    PassGl::label_gl_object(GL_FRAMEBUFFER, m_ssao.blurFBO, "ssao.blur_fbo");
-    glBindFramebuffer(GL_FRAMEBUFFER, m_ssao.fbo);
-    glGenTextures(1, &m_ssao.ssaoColorBuffer);
-    PassGl::label_gl_object(GL_TEXTURE, m_ssao.ssaoColorBuffer, "ssao.raw");
-    glBindTexture(GL_TEXTURE_2D, m_ssao.ssaoColorBuffer);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R16F, width, height, 0, GL_RED, GL_FLOAT, NULL);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_ssao.ssaoColorBuffer, 0);
-    glBindFramebuffer(GL_FRAMEBUFFER, m_ssao.blurFBO);
-    glGenTextures(1, &m_ssao.ssaoColorBufferBlur);
-    PassGl::label_gl_object(GL_TEXTURE, m_ssao.ssaoColorBufferBlur, "ssao.blur");
-    glBindTexture(GL_TEXTURE_2D, m_ssao.ssaoColorBufferBlur);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R16F, width, height, 0, GL_RED, GL_FLOAT, NULL);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_ssao.ssaoColorBufferBlur, 0);
-    // Half-res GTAO target (ssao_quality 3): 1/2 per axis. The horizon march runs at
-    // 1/4 the fragments, then a depth-aware upsample reconstructs full res.
+void SsaoPass::init_ssao(RenderResourceRegistry& registry, u32 width, u32 height) {
+    // RENDER-12/GPU-12: the AO render targets are registry-owned. Each desc
+    // reproduces the retired glTexImage2D/glTexParameter calls exactly (R16F +
+    // the filter/wrap each target used) so the objects are parameter-identical;
+    // the SSAOData struct caches the owned ids. The single-COLOR0 FBOs use the
+    // registry's empty-draw-buffers default (matching the retired code, which
+    // never called glDrawBuffers). The noise texture below stays pass-owned.
+    const auto ao_desc = [](u32 w, u32 h, u32 filter, u32 wrap, const char* label) {
+        TextureDesc d;
+        d.width = w;
+        d.height = h;
+        d.internal_format = GL_R16F;
+        d.format = GL_RED;
+        d.type = GL_FLOAT;
+        d.min_filter = filter;
+        d.mag_filter = filter;
+        d.wrap_s = wrap;  // 0 = leave GL default (the raw/blur targets set no wrap)
+        d.wrap_t = wrap;
+        d.expected_layout = "color_attachment";
+        d.debug_label = label;
+        return d;
+    };
+    const auto ao_fbo = [](const char* tex_name, const char* label) {
+        FboDesc f;
+        f.attachments = {{GL_COLOR_ATTACHMENT0, tex_name}};
+        f.debug_label = label;
+        return f;
+    };
+
+    // Full-res raw AO: R16F, NEAREST, default wrap.
+    m_ssao.ssaoColorBuffer =
+        registry.create_texture("ssao_raw", ao_desc(width, height, GL_NEAREST, 0, "ssao.raw")).id;
+    m_ssao.fbo = registry.create_fbo("ssao_fbo", ao_fbo("ssao_raw", "ssao.fbo")).id;
+    // Full-res blurred AO: R16F, NEAREST, default wrap.
+    m_ssao.ssaoColorBufferBlur =
+        registry.create_texture("ssao_blur", ao_desc(width, height, GL_NEAREST, 0, "ssao.blur")).id;
+    m_ssao.blurFBO = registry.create_fbo("ssao_blur_fbo", ao_fbo("ssao_blur", "ssao.blur_fbo")).id;
+    // Half-res GTAO target (ssao_quality 3): 1/2 per axis, R16F, LINEAR,
+    // CLAMP_TO_EDGE. The horizon march runs at 1/4 the fragments, then a
+    // depth-aware upsample reconstructs full res.
     m_ssao.halfW = (width > 1) ? width / 2u : 1u;
     m_ssao.halfH = (height > 1) ? height / 2u : 1u;
-    glGenFramebuffers(1, &m_ssao.halfFBO);
-    PassGl::label_gl_object(GL_FRAMEBUFFER, m_ssao.halfFBO, "ssao.half_fbo");
-    glBindFramebuffer(GL_FRAMEBUFFER, m_ssao.halfFBO);
-    glGenTextures(1, &m_ssao.halfTex);
-    PassGl::label_gl_object(GL_TEXTURE, m_ssao.halfTex, "ssao.half");
-    glBindTexture(GL_TEXTURE_2D, m_ssao.halfTex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R16F, static_cast<GLsizei>(m_ssao.halfW), static_cast<GLsizei>(m_ssao.halfH), 0, GL_RED, GL_FLOAT, NULL);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_ssao.halfTex, 0);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    m_ssao.halfTex = registry.create_texture(
+        "ssao_half", ao_desc(m_ssao.halfW, m_ssao.halfH, GL_LINEAR, GL_CLAMP_TO_EDGE, "ssao.half")).id;
+    m_ssao.halfFBO = registry.create_fbo("ssao_half_fbo", ao_fbo("ssao_half", "ssao.half_fbo")).id;
+
     std::uniform_real_distribution<float> randomFloats(0.0, 1.0);
     std::default_random_engine generator;
     for (unsigned int i = 0; i < 64; ++i) {
@@ -92,14 +101,22 @@ void SsaoPass::init_ssao(u32 width, u32 height) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
 }
 
-void SsaoPass::destroy_ssao() {
-    if (m_ssao.fbo) { glDeleteFramebuffers(1, &m_ssao.fbo); m_ssao.fbo = 0; }
-    if (m_ssao.blurFBO) { glDeleteFramebuffers(1, &m_ssao.blurFBO); m_ssao.blurFBO = 0; }
-    if (m_ssao.ssaoColorBuffer) { glDeleteTextures(1, &m_ssao.ssaoColorBuffer); m_ssao.ssaoColorBuffer = 0; }
-    if (m_ssao.ssaoColorBufferBlur) { glDeleteTextures(1, &m_ssao.ssaoColorBufferBlur); m_ssao.ssaoColorBufferBlur = 0; }
+void SsaoPass::destroy_ssao(RenderResourceRegistry& registry) {
+    // Ownership contract: the registry deletes the owned AO render targets.
+    registry.destroy_owned("ssao_fbo");
+    registry.destroy_owned("ssao_blur_fbo");
+    registry.destroy_owned("ssao_half_fbo");
+    registry.destroy_owned("ssao_raw");
+    registry.destroy_owned("ssao_blur");
+    registry.destroy_owned("ssao_half");
+    m_ssao.fbo = 0;
+    m_ssao.blurFBO = 0;
+    m_ssao.halfFBO = 0;
+    m_ssao.ssaoColorBuffer = 0;
+    m_ssao.ssaoColorBufferBlur = 0;
+    m_ssao.halfTex = 0;
+    // The 4x4 noise texture is pass-owned (uploaded data) - delete it directly.
     if (m_ssao.noiseTexture) { glDeleteTextures(1, &m_ssao.noiseTexture); m_ssao.noiseTexture = 0; }
-    if (m_ssao.halfFBO) { glDeleteFramebuffers(1, &m_ssao.halfFBO); m_ssao.halfFBO = 0; }
-    if (m_ssao.halfTex) { glDeleteTextures(1, &m_ssao.halfTex); m_ssao.halfTex = 0; }
     m_ssao.halfW = 0; m_ssao.halfH = 0;
 }
 

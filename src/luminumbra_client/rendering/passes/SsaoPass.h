@@ -10,6 +10,7 @@ namespace Luminumbra::Rendering {
 
 class Camera;
 class Shader;
+class RenderResourceRegistry;
 
 // SSAO + SSAO blur render passes extracted from RenderPipeline (T-I2-11d).
 // Owns the SSAO FBOs, color buffers, noise texture, sample kernel, and both
@@ -23,8 +24,13 @@ public:
     ~SsaoPass();
 
     void init_shaders(const std::filesystem::path& root_path);
-    void init_ssao(u32 width, u32 height);
-    void destroy_ssao();
+    // RENDER-12/GPU-12: the AO RENDER TARGETS (raw/blur full-res + half-res GTAO
+    // FBOs and their color textures) are REGISTRY-OWNED. The 4x4 noise texture is
+    // NOT — it carries uploaded pixel data (a static input, not a render target),
+    // so it stays pass-owned. The SSAOData struct caches the owned ids so every
+    // reader is unchanged.
+    void init_ssao(RenderResourceRegistry& registry, u32 width, u32 height);
+    void destroy_ssao(RenderResourceRegistry& registry);
     void reset_shaders();
 
     // Spec 016 seam: source G-buffer/quality/quad/screen from the RenderContext.
