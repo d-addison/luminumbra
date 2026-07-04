@@ -721,6 +721,11 @@ private:
         // per-tick barrier is later removed. Identical to the counter read at
         // every scheduler read point under the barrier (both settle there).
         bool generation_batch_outstanding = false;
+        // SHIELD-03 inc 5a: the outstanding generation batch's chunks — the
+        // main thread flips their Loading→Idle at publication (the gen job
+        // only stages data + raises pending_generation_ready). Filled at
+        // dispatch, cleared by publish_completed_generation_jobs.
+        std::vector<std::shared_ptr<::Luminumbra::Chunk>> generation_job_chunks;
     };
 
     StreamingState m_streaming_state;
@@ -859,6 +864,13 @@ private:
     // dispatched) for the scheduling gates that today read meshing activity.
     void dispatch_promotion_jobs(const std::vector<MeshingWorkItem>& chunks_to_promote);
     void process_completed_promotion_jobs();
+    // SHIELD-03 inc 5a: MAIN-THREAD generation publication — flips completed
+    // (pending_generation_ready) batch chunks Loading→Idle and clears the
+    // batch bookkeeping + outstanding flag. Called from
+    // wait_for_generation_jobs (barrier / mutate-site paths) and the
+    // update-start observation (client path); becomes an activate_due
+    // responsibility at the barrier swap.
+    void publish_completed_generation_jobs();
     bool promotion_jobs_active() const;
     bool promotion_pipeline_pending() const;
     // SHIELD-03 inc 2: publication-keyed "a meshing batch is outstanding" —

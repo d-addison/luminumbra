@@ -368,8 +368,29 @@ void SHIELD_WorldSystem::wait_for_generation_jobs() {
     }
 
     m_streaming_state.generation_job_handle = {};
-    // SHIELD-03 inc 2: main-thread settle point for the publication-keyed
-    // generation-outstanding flag the scheduler reads.
+    // SHIELD-03 inc 5a: main-thread generation publication (Loading→Idle
+    // flips) + the inc-2 settle of the publication-keyed outstanding flag.
+    publish_completed_generation_jobs();
+}
+
+void SHIELD_WorldSystem::publish_completed_generation_jobs() {
+    // Flip every completed batch chunk Loading→Idle ON THE MAIN THREAD (the
+    // gen job only stages data + raises pending_generation_ready — the chunk
+    // state machine is main-thread-owned). A chunk whose job never completed
+    // (crash) keeps Loading and never re-candidates — the same terminal
+    // behavior the old in-job flip had on a crash.
+    for (auto& chunk : m_streaming_state.generation_job_chunks) {
+        if (!chunk) {
+            continue;
+        }
+        if (chunk->pending_generation_ready.load(std::memory_order_acquire)) {
+            chunk->pending_generation_ready.store(false, std::memory_order_release);
+            if (chunk->get_state() == Luminumbra::ChunkState::Loading) {
+                chunk->set_state(Luminumbra::ChunkState::Idle);
+            }
+        }
+    }
+    m_streaming_state.generation_job_chunks.clear();
     m_streaming_state.generation_batch_outstanding = false;
 }
 
@@ -2357,12 +2378,12 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
         _dbg_prev = _n;
     };
     clear_completed_job_handle(m_streaming_state.generation_job_handle);
-    // SHIELD-03 inc 2: the update-start handle observation is a main-thread
-    // event — when the batch has fully drained, settle the publication-keyed
-    // outstanding flag here (the barrier path settles it in
-    // wait_for_generation_jobs; this covers the client's barrier-free path).
+    // SHIELD-03 inc 2+5a: the update-start handle observation is a main-thread
+    // event — when the batch has fully drained, PUBLISH it here (Loading→Idle
+    // flips + the outstanding-flag settle). The barrier path publishes in
+    // wait_for_generation_jobs; this covers the client's barrier-free path.
     if (!has_active_job(m_streaming_state.generation_job_handle)) {
-        m_streaming_state.generation_batch_outstanding = false;
+        publish_completed_generation_jobs();
     }
     process_completed_meshing_jobs();
     // SHIELD-02: the client publish point for the promotion lane (the server
@@ -4379,9 +4400,14 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<ChunkGe
         // Chunk generation job created
 
         const int target_step = request.target_step;
+        chunk->pending_generation_ready.store(false, std::memory_order_release);
+        m_streaming_state.generation_job_chunks.push_back(chunk);
         jobs.emplace_back([this, chunk, target_step]() {
             GenerateChunkData(*chunk, target_step);
-            chunk->set_state(Luminumbra::ChunkState::Idle);
+            // SHIELD-03 inc 5a: stage completion only — the MAIN thread flips
+            // Loading→Idle in publish_completed_generation_jobs, so chunk
+            // lifecycle is never a worker-timing side effect.
+            chunk->pending_generation_ready.store(true, std::memory_order_release);
         });
     }
     
@@ -4806,6 +4832,16 @@ std::shared_ptr<Luminumbra::Chunk> SHIELD_WorldSystem::find_streamed_chunk(const
 bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::Chunk>& chunk) {
     if (!chunk) {
         return false;
+    }
+    // SHIELD-03 inc 5a lifecycle rule (streaming-owned, NOT the persistence
+    // codec's business): a save captured between generation-job completion and
+    // the main-thread Loading→Idle publish (the save quiesce is deliberately
+    // non-publishing) carries Loading WITH populated voxel data. The data is
+    // complete generation output, so the adoptee enters as Idle — a
+    // stuck-Loading adoptee would never re-candidate for anything.
+    if (chunk->get_state() == Luminumbra::ChunkState::Loading &&
+        (!chunk->sdf_data.empty() || !chunk->heightmap_data.empty())) {
+        chunk->set_state(Luminumbra::ChunkState::Idle);
     }
     return m_streaming_state.chunks.emplace(chunk->get_id(), chunk).second;
 }

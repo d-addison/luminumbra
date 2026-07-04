@@ -103,6 +103,13 @@ public:
     // and independently of any render-mesh publish.
     std::atomic<bool> pending_promotion_ready{false};
     std::atomic<bool> pending_promotion_failed{false};
+    // SHIELD-03 inc 5a (017-B): generation-completion signal. The generation
+    // job writes this chunk's voxel data and raises the flag; the MAIN thread
+    // performs the Loading→Idle flip (publish_completed_generation_jobs) — the
+    // chunk state machine is main-thread-owned, so lifecycle is a pure
+    // function of main-thread events (the activation queue's requirement),
+    // never a worker-timing side effect.
+    std::atomic<bool> pending_generation_ready{false};
     std::atomic<u32> mesh_version{0};
     std::atomic<u32> water_mesh_version{0};
     
