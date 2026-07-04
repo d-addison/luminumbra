@@ -971,7 +971,7 @@
    "dependencies": [
     "017-B"
    ],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "validate-engine-frontier.ps1 -Mode RenderReadbackAllowlist green with the RenderPipeline.cpp allowlist entry REMOVED + --smoke == 6f008a9f637c40b7 run==replay",
    "rank": 54
   },

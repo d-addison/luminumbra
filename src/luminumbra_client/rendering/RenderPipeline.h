@@ -1334,6 +1334,9 @@ private:
         
         // Async compute fence for non-blocking operation
         GLsync compute_fence = nullptr;
+        // RENDER-06 (016 FR-E): the SDF readback rides the 017-A ring — no
+        // blocking GL readback primitives remain on this path (FR-G-001).
+        Rendering::AsyncReadbackRing readback_ring;
     };
     GPUSDFSystem m_gpu_sdf;
     

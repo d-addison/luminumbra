@@ -30,6 +30,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "AsyncReadbackRing.h"
+
 namespace Luminumbra::Rendering {
 
 class SkyAtmosphereLut {
@@ -149,6 +151,9 @@ private:
     GLuint m_transmittance_compute_prog = 0;  // spec 008 WS-4 §9: one-shot init LUTs on GPU
     GLuint m_multiscatter_compute_prog = 0;
     GLuint m_skyview_ssbo = 0;
+    // RENDER-06 (016 FR-E): the ambient readback rides the 017-A ring — no
+    // blocking GL readback primitives remain on this path (FR-G-001).
+    Luminumbra::Rendering::AsyncReadbackRing m_skyview_readback;
 
     void build_transmittance_cpu();
     void build_multiscatter_cpu();

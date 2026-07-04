@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstring>
+#include <thread>
 
 namespace Luminumbra::Rendering {
 
@@ -669,16 +671,42 @@ bool SkyAtmosphereLut::build_sky_view_gpu(const glm::vec3& sun_dir_world) {
     glBindTexture(GL_TEXTURE_2D, 0);
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
 
-    // Read the L values back and run the SAME hemisphere ambient reduction as the CPU path so
-    // m_sky_ambient stays consistent. Small buffer; the readback stall is acceptable for the
-    // debug stall-fix (the use case), and an optimization target if ever enabled on release.
+    // RENDER-06 (016 FR-E): the blocking glGetBufferSubData ambient readback is
+    // retired onto the 017-A ring — submit + a BOUNDED zero-timeout poll, so a
+    // wedged GPU can no longer stall this call indefinitely (on timeout the
+    // caller falls back to the CPU sky-view path). Same-invocation consumption
+    // is retained because m_sky_ambient must match the LUT this call built and
+    // the path is the default-OFF debug-stall fix ("the readback stall is
+    // acceptable for the use case"); a fully deferred stale-safe consumer is
+    // the follow-up if this ever ships default-ON.
+    const std::size_t skyview_bytes =
+        sizeof(float) * 3u * static_cast<std::size_t>(kSkyViewWidth) * kSkyViewHeight;
     m_skyview_cpu.assign(static_cast<std::size_t>(kSkyViewWidth) * kSkyViewHeight, glm::vec3(0.0f));
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_skyview_ssbo);
-    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
-                       static_cast<GLsizeiptr>(sizeof(float) * 3u * kSkyViewWidth * kSkyViewHeight),
-                       m_skyview_cpu.data());
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    bool readback_ok = false;
+    if (m_skyview_readback.ensure(skyview_bytes) && m_skyview_readback.begin()) {
+        m_skyview_readback.copy_region(m_skyview_ssbo, 0, 0, skyview_bytes);
+        m_skyview_readback.submit();
+        glFlush();
+        const void* mapped = nullptr;
+        std::size_t mapped_bytes = 0;
+        const auto readback_deadline =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+        while (!(readback_ok = m_skyview_readback.consume(&mapped, &mapped_bytes))) {
+            if (std::chrono::steady_clock::now() >= readback_deadline) {
+                break;
+            }
+            std::this_thread::yield();
+        }
+        if (readback_ok && mapped_bytes >= skyview_bytes) {
+            std::memcpy(m_skyview_cpu.data(), mapped, skyview_bytes);
+        } else {
+            readback_ok = false;
+        }
+    }
     glUseProgram(0);
+    if (!readback_ok) {
+        return false;  // caller falls back to the CPU sky-view path
+    }
 
     glm::vec3 ambient_accum(0.0f);
     float ambient_weight = 0.0f;

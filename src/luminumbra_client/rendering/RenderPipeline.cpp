@@ -4812,23 +4812,46 @@ bool RenderPipeline::generate_chunk_sdf_gpu(const glm::ivec3& chunk_coords, cons
     }
     m_gpu_sdf.compute_fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
     
-    // For now, do synchronous read (async version would check fence in a different frame)
-    glClientWaitSync(m_gpu_sdf.compute_fence, GL_SYNC_FLUSH_COMMANDS_BIT, GL_TIMEOUT_IGNORED);
-    
-    // Read back results
+    // RENDER-06 (016 FR-E, unblocked by 017-B): the INFINITE blocking readback
+    // (glClientWaitSync GL_TIMEOUT_IGNORED + glMapBuffer GL_READ_ONLY) is
+    // retired onto the 017-A ring. This experimental path's callback contract
+    // is still SYNCHRONOUS (generation wants the SDF now), so the interim
+    // shape is ring submit + a BOUNDED zero-timeout poll: a wedged GPU can no
+    // longer hang the caller forever — past the deadline the caller returns
+    // false and generation falls back to the authoritative CPU path. The
+    // fully asynchronous, activation-queue-integrated GPU worldgen pipeline
+    // is chartered in the GPU track (docs/audit/021/gpu-modernization-plan.md);
+    // this path stays behind the closed kEnableExperimentalGpuSdfIntegration
+    // parity gate either way.
     const size_t sdf_size = 17 * 17 * 17;
-    out_sdf.resize(sdf_size);
-    
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_gpu_sdf.sdf_buffer);
-    float* mapped_data = (float*)glMapBuffer(GL_SHADER_STORAGE_BUFFER, GL_READ_ONLY);
-    if (mapped_data) {
-        std::memcpy(out_sdf.data(), mapped_data, sdf_size * sizeof(float));
-        glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
-    } else {
-        LUMINUMBRA_CORE_ERROR("Failed to map GPU SDF buffer for readback");
+    const size_t sdf_bytes = sdf_size * sizeof(float);
+    if (!m_gpu_sdf.readback_ring.ensure(sdf_bytes) || !m_gpu_sdf.readback_ring.begin()) {
+        LUMINUMBRA_CORE_WARN("GPU SDF readback ring unavailable; falling back to CPU worldgen");
         return false;
     }
-    
+    m_gpu_sdf.readback_ring.copy_region(m_gpu_sdf.sdf_buffer, 0, 0, sdf_bytes);
+    m_gpu_sdf.readback_ring.submit();
+    glFlush();
+
+    const void* mapped_data = nullptr;
+    std::size_t mapped_bytes = 0;
+    const auto readback_deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+    while (!m_gpu_sdf.readback_ring.consume(&mapped_data, &mapped_bytes)) {
+        if (std::chrono::steady_clock::now() >= readback_deadline) {
+            LUMINUMBRA_CORE_WARN(
+                "GPU SDF readback timed out (bounded poll); falling back to CPU worldgen");
+            return false;
+        }
+        std::this_thread::yield();
+    }
+    if (mapped_bytes < sdf_bytes) {
+        LUMINUMBRA_CORE_ERROR("GPU SDF readback returned a short payload ({} < {} bytes)",
+                              mapped_bytes, sdf_bytes);
+        return false;
+    }
+    out_sdf.resize(sdf_size);
+    std::memcpy(out_sdf.data(), mapped_data, sdf_bytes);
     return true;
 }
 
