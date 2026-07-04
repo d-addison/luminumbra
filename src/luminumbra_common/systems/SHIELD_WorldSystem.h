@@ -880,7 +880,7 @@ private:
         bool high_priority = false;
     };
     void dispatch_meshing_jobs(const std::vector<MeshingWorkItem>& chunks_to_mesh);
-    void process_completed_meshing_jobs();
+    void process_completed_meshing_jobs(bool force);
     bool meshing_jobs_active() const;
     // SHIELD-02 promotion lane (see StreamingState). dispatch_promotion_jobs
     // runs stage A (sim-truth generation into staging);
@@ -889,20 +889,23 @@ private:
     // whole pipeline (jobs in flight OR unpublished results OR stage B not yet
     // dispatched) for the scheduling gates that today read meshing activity.
     void dispatch_promotion_jobs(const std::vector<MeshingWorkItem>& chunks_to_promote);
-    void process_completed_promotion_jobs();
+    void process_completed_promotion_jobs(bool force);
     // SHIELD-03 inc 5a: MAIN-THREAD generation publication — flips completed
     // (pending_generation_ready) batch chunks Loading→Idle and clears the
     // batch bookkeeping + outstanding flag. Called from
     // wait_for_generation_jobs (barrier / mutate-site paths) and the
     // update-start observation (client path); becomes an activate_due
     // responsibility at the barrier swap.
-    void publish_completed_generation_jobs();
-    // SHIELD-03 inc 5a-3: publish EXACTLY the front batch of a lane (used by
-    // activate_due for tick-keyed publication; the drain loops above reuse
-    // them). Return false when the front batch's jobs are still running (or
-    // the lane is empty) — the caller decides whether to block first.
-    bool publish_front_generation_batch();
-    bool publish_front_meshing_batch();
+    // SHIELD-03 5b: `force` distinguishes the two publication regimes. force
+    // = true (the explicit drains: wait_for_*, boot, hash, mutate sites)
+    // publishes any drained batch regardless of due tick — legal only at
+    // deterministic full-drain points. force = false (the per-frame client
+    // hooks + dispatch heads) publishes a batch only once it is BOTH drained
+    // AND due (due_tick -1 = client batch = due when drained), so on the
+    // server the per-tick schedule belongs exclusively to activate_due.
+    void publish_completed_generation_jobs(bool force);
+    bool publish_front_generation_batch(bool force);
+    bool publish_front_meshing_batch(bool force);
     bool promotion_jobs_active() const;
     bool promotion_pipeline_pending() const;
     // SHIELD-03 inc 2 (+5a-2): publication-keyed "a batch is outstanding" —

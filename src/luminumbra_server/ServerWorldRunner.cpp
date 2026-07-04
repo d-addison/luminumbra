@@ -526,10 +526,15 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
             }
             world_system->update(m_session->GetRegistry(), anchors, physics_system);
         }
-        // Spec 017-D: time the main thread BLOCKED in the per-tick streaming barrier — the
-        // latency the activation queue (017-B) targets. Wall-clock, never feeds world_hash.
+        // SHIELD-03 5b (017-B FR-B-005): THE SWAP. The per-tick full barrier
+        // is replaced by tick-keyed activation — publish exactly the batches
+        // due this tick (dispatch + K), blocking only on a due-but-unfinished
+        // batch. The 017-D timing now measures activate_due's block time (the
+        // number the queue exists to shrink). Wall-clock, never feeds
+        // world_hash. Explicit full drains remain at boot / hash / mutate /
+        // teardown sites via wait_for_streaming_jobs.
         const auto _wait_t0 = std::chrono::steady_clock::now();
-        world_system->wait_for_streaming_jobs();
+        world_system->activate_due(static_cast<std::int64_t>(report.ticks_executed));
         wait_samples.push_back(
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - _wait_t0).count());
 

@@ -58,6 +58,17 @@ constexpr std::size_t kFullSdfLattice =
 // BLOCKS activation (wall-clock cost), it never slips (schedule change).
 constexpr std::int64_t kActivationPipelineLatencyTicks = 8;
 
+// SHIELD-03 5b: deterministic dispatch backpressure — FIFO depth budgets
+// (main-thread pure state, never job timing). Chosen so steady-state dispatch
+// cadence matches the barrier era exactly: generation dispatches at most once
+// per activation pass (every 4 ticks) and a batch lives K=8 ticks → depth
+// alternates 1-2, so 3 never binds; meshing can dispatch every tick → depth
+// reaches K, so K+1 never binds in steady state. The caps exist to bound the
+// pipe if cadence assumptions ever break, not to throttle it.
+constexpr std::size_t kMaxGenerationBatchesInFlight = 3;
+constexpr std::size_t kMaxMeshingBatchesInFlight =
+    static_cast<std::size_t>(kActivationPipelineLatencyTicks) + 1;
+
 // T-I4-DR-server-streaming-race: SIMD over-read guard for FastNoise2's
 // GenPositionArray2D. That entry point's tail does an UNCONDITIONAL full-width
 // SIMD load of the input position arrays (FS_Load_f32(&xPosArray[index]) in
@@ -377,22 +388,33 @@ void SHIELD_WorldSystem::wait_for_generation_jobs() {
         }
     }
     // SHIELD-03 inc 5a: main-thread generation publication (Loading→Idle
-    // flips + FIFO pops).
-    publish_completed_generation_jobs();
+    // flips + FIFO pops). Force: an explicit drain is a legal full-publish.
+    publish_completed_generation_jobs(/*force=*/true);
 }
 
-bool SHIELD_WorldSystem::publish_front_generation_batch() {
-    // Publish EXACTLY the front batch if its jobs have all completed. Flips
-    // are ON THE MAIN THREAD (the gen job only stages data + raises
-    // pending_generation_ready — the chunk state machine is main-thread-
-    // owned). A chunk whose job never completed (crash) keeps Loading and
-    // never re-candidates — the same terminal behavior the old in-job flip
-    // had on a crash; its batch pops with the rest once the batch counter
-    // drains (a crashed job still decrements it).
+bool SHIELD_WorldSystem::publish_front_generation_batch(bool force) {
+    // Publish EXACTLY the front batch if its jobs have all completed AND (in
+    // the non-force regime) its due tick has arrived. Flips are ON THE MAIN
+    // THREAD (the gen job only stages data + raises pending_generation_ready
+    // — the chunk state machine is main-thread-owned). A chunk whose job
+    // never completed (crash) keeps Loading and never re-candidates — the
+    // same terminal behavior the old in-job flip had on a crash; its batch
+    // pops with the rest once the batch counter drains (a crashed job still
+    // decrements it).
     if (m_streaming_state.generation_batches.empty()) {
         return false;
     }
     auto& front = m_streaming_state.generation_batches.front();
+    if (!force && front.due_tick >= 0) {
+        // 017-B: a tick-stamped (server) batch publishes EXCLUSIVELY via
+        // activate_due / the explicit force drains — never via a per-frame
+        // hook. A hook publishing a due batch at update-start would land the
+        // state flips BEFORE the tick's candidate pass while activate_due
+        // lands them after, making the scheduler's view depend on whether
+        // workers happened to be drained at that instant (wall-clock — the
+        // release-moving run!=replay this rule fixed).
+        return false;
+    }
     if (has_active_job(front.handle)) {
         return false;  // FIFO head still running — later batches wait their turn
     }
@@ -411,10 +433,10 @@ bool SHIELD_WorldSystem::publish_front_generation_batch() {
     return true;
 }
 
-void SHIELD_WorldSystem::publish_completed_generation_jobs() {
+void SHIELD_WorldSystem::publish_completed_generation_jobs(bool force) {
     // Drain every publishable front batch, in FIFO order (publication order
     // == dispatch order — deterministic).
-    while (publish_front_generation_batch()) {
+    while (publish_front_generation_batch(force)) {
     }
 }
 
@@ -430,7 +452,7 @@ void SHIELD_WorldSystem::wait_for_meshing_jobs() {
         }
     }
 
-    process_completed_meshing_jobs();
+    process_completed_meshing_jobs(/*force=*/true);
 }
 
 bool SHIELD_WorldSystem::meshing_jobs_active() const {
@@ -586,7 +608,7 @@ void SHIELD_WorldSystem::activate_due(std::int64_t tick) {
         if (m_job_system && front.handle.counter) {
             m_job_system->wait(front.handle);
         }
-        publish_front_generation_batch();
+        publish_front_generation_batch(/*force=*/true);
     }
 
     // Promotion lane (depth 1): publish sim truth + dispatch stage B when due.
@@ -602,7 +624,7 @@ void SHIELD_WorldSystem::activate_due(std::int64_t tick) {
                     m_job_system->wait(m_streaming_state.promotion_job_handle);
                 }
             }
-            process_completed_promotion_jobs();
+            process_completed_promotion_jobs(/*force=*/true);
             if (!promotion_pipeline_pending()) {
                 m_streaming_state.promotion_due_tick = -1;
             }
@@ -626,7 +648,7 @@ void SHIELD_WorldSystem::activate_due(std::int64_t tick) {
                 m_job_system->wait(front.handle);
             }
         }
-        publish_front_meshing_batch();
+        publish_front_meshing_batch(/*force=*/true);
     }
 }
 
@@ -637,15 +659,20 @@ void SHIELD_WorldSystem::wait_for_promotion_jobs() {
     if (m_job_system && m_streaming_state.promotion_job_handle.counter) {
         m_job_system->wait(m_streaming_state.promotion_job_handle);
     }
-    process_completed_promotion_jobs();
+    process_completed_promotion_jobs(/*force=*/true);
 }
 
-void SHIELD_WorldSystem::process_completed_promotion_jobs() {
+void SHIELD_WorldSystem::process_completed_promotion_jobs(bool force) {
     // Stage-A publish: only once BOTH promotion batches have fully drained
-    // (mirrors process_completed_meshing_jobs' both-lanes gate) — publication
-    // order is the dispatch order, which is the deterministic candidate-sort
+    // (mirrors process_completed_meshing_jobs' both-lanes gate) AND, in the
+    // non-force regime, the lane's due tick has arrived — publication order
+    // is the dispatch order, which is the deterministic candidate-sort
     // order, so run == replay.
-    if (!m_streaming_state.promotion_job_chunks.empty() && !promotion_jobs_active()) {
+    // 017-B: a tick-stamped promotion pipeline publishes exclusively via
+    // activate_due / force drains (see publish_front_generation_batch).
+    const bool promotion_due = force || m_streaming_state.promotion_due_tick < 0;
+    if (promotion_due &&
+        !m_streaming_state.promotion_job_chunks.empty() && !promotion_jobs_active()) {
         for (auto& job_chunk : m_streaming_state.promotion_job_chunks) {
             auto& chunk = job_chunk.chunk;
             if (!chunk) {
@@ -691,7 +718,9 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs() {
     // Stage-B dispatch: render meshes for published promotions, down the
     // ordinary meshing lane. The items re-classify as non-promotion there
     // (their live sdf_data is full now), so there is no recursion.
-    if (!m_streaming_state.pending_promotion_mesh.empty() && !meshing_jobs_active()) {
+    // SHIELD-03 5b: gate by FIFO depth (deterministic), not raw job activity.
+    if (!m_streaming_state.pending_promotion_mesh.empty() &&
+        m_streaming_state.meshing_batches.size() < kMaxMeshingBatchesInFlight) {
         std::vector<MeshingWorkItem> stage_b;
         stage_b.reserve(m_streaming_state.pending_promotion_mesh.size());
         for (const auto& item : m_streaming_state.pending_promotion_mesh) {
@@ -716,7 +745,7 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs() {
 }
 
 void SHIELD_WorldSystem::dispatch_promotion_jobs(const std::vector<MeshingWorkItem>& chunks_to_promote) {
-    process_completed_promotion_jobs();
+    process_completed_promotion_jobs(/*force=*/false);
     if (promotion_jobs_active()) {
         // One promotion batch in flight at a time (the meshing lane's
         // semantics); refused items re-candidate on a later pass, exactly as
@@ -793,7 +822,7 @@ void SHIELD_WorldSystem::dispatch_promotion_jobs(const std::vector<MeshingWorkIt
         for (auto& job : normal_priority_jobs) {
             job();
         }
-        process_completed_promotion_jobs();
+        process_completed_promotion_jobs(/*force=*/true);
     }
 }
 
@@ -2493,18 +2522,13 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
         slot += std::chrono::duration<double, std::milli>(_n - _dbg_prev).count();
         _dbg_prev = _n;
     };
-    // SHIELD-03 inc 2+5a: the update-start observation is a main-thread event
-    // — publish any fully-drained FRONT generation batches here (Loading→Idle
-    // flips + FIFO pops; the function stops at the first still-running batch).
-    // The barrier path publishes in wait_for_generation_jobs; this covers the
-    // client's barrier-free path.
-    publish_completed_generation_jobs();
-    process_completed_meshing_jobs();
-    // SHIELD-02: the client publish point for the promotion lane (the server
-    // publishes inside the per-tick sequenced barrier instead) — publishes
-    // completed stage-A sim truth and dispatches stage B once the meshing
-    // lanes are free.
-    process_completed_promotion_jobs();
+    // SHIELD-03 5b: the per-frame publish hooks run in the NON-FORCE regime —
+    // on the server (tick source present) a batch publishes only at its due
+    // tick, so the per-tick schedule belongs exclusively to activate_due; on
+    // the client (due -1) these publish when drained, exactly as before.
+    publish_completed_generation_jobs(/*force=*/false);
+    process_completed_meshing_jobs(/*force=*/false);
+    process_completed_promotion_jobs(/*force=*/false);
     _dbg_split(m_dbg_stream.process_completed);
 
     // Hydro prefetch: warm the erosion-region cache around each anchor AHEAD of
@@ -2771,12 +2795,13 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
             ++terrain_meshing_backlog;
         }
     }
-    // SHIELD-02: the promotion pipeline occupies what used to be meshing-lane
-    // work, so it participates in the same one-batch-in-flight backpressure.
-    // On the per-tick-quiesced server paths both terms are always false here
-    // (the sequenced barrier drained them), so this is byte-neutral there.
-    // SHIELD-03 inc 2: publication-keyed (batch outstanding), not wall-clock.
-    const bool meshing_job_active = meshing_batch_outstanding() || promotion_pipeline_pending();
+    // SHIELD-03 5b: the meshing dispatch gate is the FIFO DEPTH BUDGET —
+    // deterministic main-thread state, never job timing. Promotion
+    // backpressure decoupled from meshing (its own pipeline-pending guard in
+    // dispatch_meshing_jobs routes promotions; a promotion pipeline in flight
+    // must not stall meshing for its whole due window).
+    const bool meshing_job_active =
+        m_streaming_state.meshing_batches.size() >= kMaxMeshingBatchesInFlight;
     m_last_streaming_budget_stats.meshing_job_active = meshing_job_active;
     // Scale the per-dispatch meshing batch with the standing terrain backlog:
     // deep backlogs (initial load, fast travel) dispatch larger batches so
@@ -3027,9 +3052,12 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
                 static_cast<std::size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME) * (anchors.size() - 1u) / 8u
         ));
     }
-    m_last_streaming_budget_stats.generation_budget = m_last_streaming_budget_stats.generation_job_active
-        ? 0
-        : generation_budget;
+    // SHIELD-03 5b: generation dispatch backpressure = FIFO depth budget
+    // (deterministic; the telemetry field above keeps outstanding semantics).
+    m_last_streaming_budget_stats.generation_budget =
+        m_streaming_state.generation_batches.size() >= kMaxGenerationBatchesInFlight
+            ? 0
+            : generation_budget;
 
     std::vector<GenerationCandidate> to_create;
     to_create.reserve(static_cast<std::size_t>((target_radius * 2 + 1) * (target_radius * 2 + 1)));
@@ -3914,10 +3942,10 @@ float SHIELD_WorldSystem::get_density_at(const Vec3& world_pos) const {
 }
 
 std::vector<Luminumbra::Chunk*> SHIELD_WorldSystem::get_renderable_chunks() {
-    // Client render-path observation: publish drained front generation
-    // batches + completed meshes (main-thread, idempotent).
-    publish_completed_generation_jobs();
-    process_completed_meshing_jobs();
+    // Client render-path observation: publish drained-and-due front batches
+    // (main-thread, idempotent; non-force — see the 5b regime note).
+    publish_completed_generation_jobs(/*force=*/false);
+    process_completed_meshing_jobs(/*force=*/false);
 
     std::vector<Luminumbra::Chunk*> renderable;
     renderable.reserve(m_streaming_state.chunks.size());
@@ -4539,8 +4567,10 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<ChunkGe
 }
 
 void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem>& chunks_to_mesh) {
-    process_completed_meshing_jobs();
-    if (meshing_jobs_active()) {
+    process_completed_meshing_jobs(/*force=*/false);
+    // SHIELD-03 5b: refuse by FIFO depth (deterministic), not by raw job
+    // activity. Refused items re-candidate on a later pass, as always.
+    if (m_streaming_state.meshing_batches.size() >= kMaxMeshingBatchesInFlight) {
         return;
     }
 
@@ -4770,17 +4800,23 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
             job();
         }
         m_streaming_state.meshing_batches.push_back(std::move(mesh_batch));
-        process_completed_meshing_jobs();
+        process_completed_meshing_jobs(/*force=*/true);
     }
 }
 
-bool SHIELD_WorldSystem::publish_front_meshing_batch() {
+bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
     // Publish EXACTLY the front batch once BOTH its job lanes have drained
-    // (the pre-priority-lane all-or-nothing semantics, per batch).
+    // (the pre-priority-lane all-or-nothing semantics, per batch) AND (in the
+    // non-force regime) its due tick has arrived.
     if (m_streaming_state.meshing_batches.empty()) {
         return false;
     }
     auto& front_batch = m_streaming_state.meshing_batches.front();
+    if (!force && front_batch.due_tick >= 0) {
+        // 017-B: tick-stamped batches publish exclusively via activate_due /
+        // force drains (see publish_front_generation_batch).
+        return false;
+    }
     if (has_active_job(front_batch.handle) || has_active_job(front_batch.handle_high)) {
         return false;
     }
@@ -4842,11 +4878,11 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch() {
     return true;
 }
 
-void SHIELD_WorldSystem::process_completed_meshing_jobs() {
+void SHIELD_WorldSystem::process_completed_meshing_jobs(bool force) {
     // Drain every publishable front batch, in FIFO order (publication order
-    // == dispatch order — deterministic; stops at the first still-running
-    // batch so later batches never publish ahead of an earlier one).
-    while (publish_front_meshing_batch()) {
+    // == dispatch order — deterministic; stops at the first still-running or
+    // not-yet-due batch so later batches never publish ahead of an earlier one).
+    while (publish_front_meshing_batch(force)) {
     }
 }
 

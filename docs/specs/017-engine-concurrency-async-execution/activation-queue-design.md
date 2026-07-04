@@ -66,7 +66,11 @@ function.
    (visible to the sim) at tick D+K. The queue activates exactly that set each tick, blocking ONLY if
    a scheduled chunk isn't ready yet (shouldn't happen if K covers the gen latency under budget).
    Replaces the per-tick `wait_for_streaming_jobs` (only sim-truth publish gates the sim; render mesh
-   never blocks the tick). FR-B-005 hash-neutral: same availability set per tick as the barrier.
+   never blocks the tick). FR-B-005: the STATIC per-tick set + static literal must hold
+   byte-identical; the MOVING schedule legitimately moves from settle-tick to D+K (a reviewed
+   world_hash bump — the original "same availability set per tick as the barrier" wording here was
+   over-tight for the moving case, whose barrier-era per-tick sets were run-varying anyway;
+   corrected at landing, see Step 2 LANDED).
 
 3. **EnsureSurfaceReadyNear (the interactive LOAD hang)** — the boot-time unbounded waits
    (`:2825/2827/2925`) are a separate target; bound them via the same activation model + the landed
@@ -168,3 +172,54 @@ Wave-B plan (the dispatch path still reads live job-activity state at
 `streaming_radius_for_pressure` / budget zeroing / dispatch refusal / quiescence, and the
 water `current_lod==0` init gate at `WaterSystem.cpp:381` + collision eligibility mesh
 check at `:2434-2436` still key sim behavior off render artifacts).
+
+## Step 2 LANDED (SHIELD-03, 2026-07-03 — the barrier swap)
+
+Landed as SIX gated increments (each byte-identical on both baselines until the swap):
+activation-latency shadow (K evidence: gen→Ready exactly 1 tick under the barrier,
+promotion→publish 0 ticks; wall p99 ~240 ms ≈ 7.2 ticks ⇒ K=8), scheduler de-timing
+(every dispatch-path decision reads PUBLICATION-KEYED main-thread state), sim-consumer
+re-key (collision eligibility → the centralized `sim_available_lod0`; water needed
+NOTHING — its init selection is dispatch-keyed map membership and the :381 lod gate is a
+bit-identical fast-path selector, refuting this doc's earlier worry), non-publishing
+save quiesce (a save is never an activation event), main-thread generation publication
+(gen jobs stage `pending_generation_ready`; the LAST off-thread lifecycle flip removed),
+per-lane batch FIFOs + `activate_due(tick)` (due = dispatch + K; FIFO publication order;
+per-batch blocking on due-but-unfinished, proven by the ActivationQueueSemantics gtest
+BEFORE the swap), then the swap itself: the `ServerWorldRunner` tick path calls
+`activate_due(tick)`; explicit full drains remain at boot/hash/mutate/teardown; per-frame
+client hooks publish only drained-AND-due batches (due -1 = client = when-drained);
+dispatch backpressure = deterministic FIFO depth budgets (generation 3, meshing K+1 —
+never binding in steady state).
+
+**Measured at the swap (90-tick runs):**
+- STATIC: debug `6f008a9f637c40b7` / release `ea9a0121d13bc3bd` BYTE-IDENTICAL + the
+  debug per-tick trace IDENTICAL to the pre-Wave-B baseline artifact — the strong
+  oracle held through the entire wave.
+- MOVING: run==replay at the reviewed new literals — debug `0431682a3f8a8a24`,
+  release `d79fdbbdbfe6580f` — and the per-tick moving trace is now **run==replay
+  MATCH** (barrier era: diverged at tick 16, only converged). Better: the moving hash
+  is now **WORKER-COUNT-INVARIANT** (identical at workers {1,2,4} in both builds, an
+  18-cell matrix PASS) — a determinism property the engine never had (the barrier-era
+  moving hash was only convergent per-run). Availability is a pure function of
+  (dispatch schedule, tick): FR-B-005 measured, not asserted.
+- **Main-thread streaming wait: p50/p95/p99/max = 0.001 ms, total ≤0.1 ms over 90
+  moving ticks — down from p50 28 ms / p99 239–262 ms / total ~4.2 s (~50% of wall).**
+  The moving-lag main-thread block is eliminated.
+- Hard-won rule (found by the release-moving matrix cells): a tick-stamped batch
+  publishes EXCLUSIVELY via activate_due / the explicit force drains. A per-frame hook
+  publishing a merely drained-and-due batch lands the state flips BEFORE that tick's
+  candidate pass while activate_due lands them after — whether workers happen to be
+  drained at update-start is wall-clock, and debug only passed by timing luck. The
+  non-force hooks therefore touch ONLY due_tick<0 (client) batches.
+- Two stale gate pins found + re-synced while assembling the evidence bundle:
+  ReplayRoundtrip / LockstepLoopback / LockstepFaultInjection pinned the 2026-06-22-era
+  static canonical `ab0869af701f1816`; re-synced to `6f008a9f637c40b7` (their own
+  comments state they must equal the HeadlessServerTick canonical).
+
+Evidence bundle: determinism matrix (workers {1,2,4} × static/moving × multiprocess ×
+debug/release), LREC1 ReplayRoundtrip/ReplayDivergence, LockstepLoopback, heavy-oracle
+terrain+entities legs (the water leg is WATER-17 — the pre-existing settle-idempotence
+defect, filed with evidence), MovingResidency gate, ActivationQueueSemantics +
+PromotionSimTruthDecoupling + the meshing/streaming/water/persistence suites.
+Step 3 (the boot path — SHIELD-01) is next.
