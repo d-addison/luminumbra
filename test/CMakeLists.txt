@@ -570,6 +570,26 @@ target_link_libraries(initial_world_loading_perf_test PRIVATE
     luminumbra_common
 )
 
+# SHIELD-01 (spec 017-B step 3): the bounded-world-load proving gate — twenty
+# cold interactive loads (radius 12/4), each < 60 s, watchdog armed. Standalone
+# so the -Mode WorldLoadBounded validator can run just this measurement.
+add_executable(world_load_bounded_test
+    performance/world_load_bounded_test.cpp
+)
+
+target_compile_definitions(world_load_bounded_test PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+)
+
+target_include_directories(world_load_bounded_test PRIVATE
+    ../src
+)
+
+target_link_libraries(world_load_bounded_test PRIVATE
+    gtest_main
+    luminumbra_common
+)
+
 # perf-lane-and-ecology-tick (KDD-6 / T011): the EcologyTickPerf gate exe. A
 # standalone target (NOT folded into common_tests) so the validator gate can run
 # JUST this measurement (300 ticks x 3 roster sizes) without dragging the whole
@@ -943,6 +963,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     ui_page_load_test
     worldgen_preview_test
     initial_world_loading_perf_test
+    world_load_bounded_test
     runtime_world_visual_validation_test
     frontier_gates_test
     jolt_tunneling_test

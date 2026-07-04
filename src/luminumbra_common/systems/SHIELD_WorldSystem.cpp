@@ -3467,20 +3467,39 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
     }
 
     if (m_job_system && build_jobs.size() > 128u) {
-        LUMINUMBRA_CORE_INFO("EnsureSurfaceReadyNear: dispatching {} collision-build jobs...", build_jobs.size());
-        // Opt-in wedge watchdog (LUMINUMBRA_JOB_WATCHDOG=1): observability ONLY — it never
-        // bails or changes the wait, so it is hash-neutral and stays OFF in determinism gates
-        // (--smoke). On the intermittent "CONSTRUCTING WORLD GEOMETRY" freeze it names the
-        // wedged phase + the chunk neighbourhood every 30s instead of hanging silently.
-        // OPS-11: rehomed onto the shared named-phase helper (core/JobWatchdog.h) so all
-        // three waits in this function report identically.
-        const Luminumbra::JobHandle handle = m_job_system->dispatch_batch(build_jobs);
-        std::string phase = "EnsureSurfaceReadyNear/collision-build (" +
-            std::to_string(build_jobs.size()) + " jobs near chunk " +
-            std::to_string(center_chunk.x) + "," + std::to_string(center_chunk.y) + "," +
-            std::to_string(center_chunk.z) + ")";
-        Luminumbra::Core::WaitWithJobWatchdog(job_watchdog, std::move(phase),
-            [this, &handle]() { m_job_system->wait(handle); });
+        // SHIELD-01 (spec 017-B step 3 — the world-load hang ROOT FIX): the
+        // load path never waits on one monolithic batch again. The build set
+        // is dispatched in BOUNDED sub-batches; each wait is watchdog-named
+        // with batch index + running progress, so (a) the worst single wait
+        // is one sub-batch (not thousands of jobs), (b) a wedge is localized
+        // to a 64-chunk neighbourhood with monotone progress visible in the
+        // log, and (c) the load's wall time has a computable per-batch bound
+        // the WorldLoadBounded gate asserts. Opt-in wedge watchdog
+        // (LUMINUMBRA_JOB_WATCHDOG=1): observability only — hash-neutral, OFF
+        // in determinism gates.
+        constexpr std::size_t kBootBuildSubBatch = 64u;
+        const std::size_t total_jobs = build_jobs.size();
+        const std::size_t batch_count = (total_jobs + kBootBuildSubBatch - 1) / kBootBuildSubBatch;
+        LUMINUMBRA_CORE_INFO(
+            "EnsureSurfaceReadyNear: dispatching {} surface-build jobs in {} bounded sub-batches...",
+            total_jobs, batch_count);
+        std::vector<Luminumbra::Job> sub_batch;
+        sub_batch.reserve(kBootBuildSubBatch);
+        std::size_t completed = 0;
+        for (std::size_t begin = 0; begin < total_jobs; begin += kBootBuildSubBatch) {
+            const std::size_t end = std::min(begin + kBootBuildSubBatch, total_jobs);
+            sub_batch.assign(std::make_move_iterator(build_jobs.begin() + static_cast<std::ptrdiff_t>(begin)),
+                             std::make_move_iterator(build_jobs.begin() + static_cast<std::ptrdiff_t>(end)));
+            const Luminumbra::JobHandle handle = m_job_system->dispatch_batch(sub_batch);
+            std::string phase = "EnsureSurfaceReadyNear/surface-build batch " +
+                std::to_string(begin / kBootBuildSubBatch + 1) + "/" + std::to_string(batch_count) +
+                " (" + std::to_string(completed) + "/" + std::to_string(total_jobs) +
+                " built, near chunk " + std::to_string(center_chunk.x) + "," +
+                std::to_string(center_chunk.y) + "," + std::to_string(center_chunk.z) + ")";
+            Luminumbra::Core::WaitWithJobWatchdog(job_watchdog, std::move(phase),
+                [this, &handle]() { m_job_system->wait(handle); });
+            completed = end;
+        }
     } else {
         for (auto& job : build_jobs) {
             job();

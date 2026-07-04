@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <cmath>
 #include <filesystem>
 #include <memory>
 #include <string>

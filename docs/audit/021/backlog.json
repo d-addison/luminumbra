@@ -930,7 +930,7 @@
     "SHIELD-03",
     "SHIELD-11"
    ],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "NEW: engine-frontier Test-WorldLoadBounded \u2014 20x scripted interactive-style world loads (radius 12/4) under LUMINUMBRA_JOB_WATCHDOG complete surface-ready < 60s each with zero watchdog wedge reports; plus --smoke run==replay 6f008a9f637c40b7 unchanged",
    "rank": 52
   },
