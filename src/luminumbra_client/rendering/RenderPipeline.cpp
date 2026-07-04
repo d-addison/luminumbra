@@ -2561,7 +2561,8 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // OFF -> no-op. (Pre-§17 this ran just before the blit; moving it up is render-only, gate-neutral
     // when TAAU is OFF, which is the default and what every visual gate runs with.)
     if (m_taau_enabled) {
-        execute_taau_resolve();
+        RenderContext taau_ctx = make_taau_context();
+        execute_taau_resolve(taau_ctx);
     }
 
     // 8. PARTICLE PASS (T-I5a-1): forward-lit, soft-faded transparent particles
@@ -3128,21 +3129,40 @@ void RenderPipeline::destroy_taau() {
     m_taau_history_valid = false;
 }
 
-void RenderPipeline::execute_taau_resolve() {
+// Spec 016 (GPU-04): the TAAU resolve pass contract — the lit-scene color source +
+// its FBO (blit target) and the gbuffer motion vectors. The TAAU shader, ping-pong
+// history textures (registry-owned per rank 57), FBO, and write-index/valid flags
+// stay members (pass-owned resolve state, like a pass owns its shader). Render-only.
+RenderContext RenderPipeline::make_taau_context() {
+    RenderContext ctx;
+    ctx.screen_width = m_screen_width;
+    ctx.screen_height = m_screen_height;
+    ctx.registry = &m_render_registry;
+    ctx.screen_quad_vao = m_screen_quad_vao;
+    const FrameBufferObject& lfbo = m_lighting_pass->lighting_fbo();
+    ctx.lit_scene_color = m_render_registry.adopt_texture("lit_scene_color", lfbo.color_texture);
+    ctx.lit_scene = m_render_registry.adopt_fbo("lit_scene", lfbo.fbo_id);
+    ctx.motion_vectors = m_render_registry.adopt_texture(
+        "motion_vectors", m_gbuffer_pass->gbuffer().motion_vector_texture);
+    return ctx;
+}
+
+void RenderPipeline::execute_taau_resolve(const RenderContext& ctx) {
     if (!m_taau_shader || !m_taau_shader->IsValid() || m_taau_fbo == 0 ||
-        m_screen_quad_vao == 0 || m_screen_width == 0 || m_screen_height == 0) {
+        ctx.screen_quad_vao == 0 || ctx.screen_width == 0 || ctx.screen_height == 0) {
         return;
     }
     const int wr = m_taau_history_write;
     const int rd = 1 - wr;
-    auto& lfbo = m_lighting_pass->lighting_fbo();
+    const GLuint lit_color = ctx.lit_scene_color.id;
+    const GLuint lit_fbo = ctx.lit_scene.id;
 
     // Resolve current (lit HDR) + motion-reprojected history -> history[wr].
     glBindFramebuffer(GL_FRAMEBUFFER, m_taau_fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_taau_history[wr], 0);
     const GLenum draw0[1] = { GL_COLOR_ATTACHMENT0 };
     glDrawBuffers(1, draw0);
-    glViewport(0, 0, m_screen_width, m_screen_height);
+    glViewport(0, 0, ctx.screen_width, ctx.screen_height);
 
     const GLboolean depth_was = glIsEnabled(GL_DEPTH_TEST);
     glDisable(GL_DEPTH_TEST);
@@ -3150,18 +3170,18 @@ void RenderPipeline::execute_taau_resolve() {
     glDisable(GL_BLEND);
 
     m_taau_shader->use();
-    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, lfbo.color_texture);
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, lit_color);
     glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m_taau_history[rd]);
-    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_gbuffer_pass->gbuffer().motion_vector_texture);
+    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, ctx.motion_vectors.id);
     m_taau_shader->setInt("u_current", 0);
     m_taau_shader->setInt("u_history", 1);
     m_taau_shader->setInt("u_motion", 2);
-    m_taau_shader->setVec2("u_texel", glm::vec2(1.0f / (float)m_screen_width, 1.0f / (float)m_screen_height));
+    m_taau_shader->setVec2("u_texel", glm::vec2(1.0f / (float)ctx.screen_width, 1.0f / (float)ctx.screen_height));
     m_taau_shader->setFloat("u_blend", 0.9f);
     m_taau_shader->setFloat("u_sharpness", 0.4f);  // recover TAA temporal-blur softness
     m_taau_shader->setInt("u_history_valid", m_taau_history_valid ? 1 : 0);
 
-    glBindVertexArray(m_screen_quad_vao);
+    glBindVertexArray(ctx.screen_quad_vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
 
@@ -3169,9 +3189,9 @@ void RenderPipeline::execute_taau_resolve() {
     // history[wr] for next frame's reprojection.
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_taau_fbo);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, lfbo.fbo_id);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, lit_fbo);
     glDrawBuffer(GL_COLOR_ATTACHMENT0);
-    glBlitFramebuffer(0, 0, m_screen_width, m_screen_height, 0, 0, m_screen_width, m_screen_height,
+    glBlitFramebuffer(0, 0, ctx.screen_width, ctx.screen_height, 0, 0, ctx.screen_width, ctx.screen_height,
                       GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
     if (depth_was) glEnable(GL_DEPTH_TEST);

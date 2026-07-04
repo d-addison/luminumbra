@@ -787,6 +787,7 @@ private:
     RenderContext make_ground_decal_context(const Camera& camera);
     RenderContext make_aerial_context(const Camera& camera);
     RenderContext make_god_rays_context(const Camera& camera);
+    RenderContext make_taau_context();
 
     std::vector<ChunkMeshSnapshot> build_chunk_snapshots(const std::vector<Chunk*>& renderable_chunks) const;
 
@@ -1036,7 +1037,7 @@ private:
     void execute_god_rays(const RenderContext& ctx);
     void init_taau(u32 width, u32 height);   // FR-R5 TAAU history/FBO
     void destroy_taau();
-    void execute_taau_resolve();             // motion-reprojected temporal resolve (flag-gated)
+    void execute_taau_resolve(const RenderContext& ctx); // motion-reprojected temporal resolve (flag-gated)
 public:
     const SkyAtmosphereLut& sky_lut() const { return m_sky_lut; }
 private:
