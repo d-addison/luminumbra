@@ -318,6 +318,41 @@ else()
     target_link_libraries(render_capture_test PRIVATE OpenGL::GL)
 endif()
 
+# RENDER-12/GPU-12 (spec 016 FR-B): the registry OWNED-resource contract against
+# a real hidden GL context — frame-boundary survival, resize re-attach, destroy.
+add_executable(registry_ownership_test
+    rendering/registry_ownership_test.cpp
+    ../src/luminumbra_client/rendering/RenderResourceRegistry.cpp
+)
+
+target_compile_definitions(registry_ownership_test PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+    LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts"
+)
+
+target_include_directories(registry_ownership_test PRIVATE
+    ../src
+    ../src/luminumbra_client
+    ../src/luminumbra_common
+)
+
+target_link_libraries(registry_ownership_test PRIVATE
+    gtest_main
+    glfw
+    glad
+    luminumbra_common
+)
+
+if(WIN32)
+    target_link_libraries(registry_ownership_test PRIVATE opengl32)
+elseif(APPLE)
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(registry_ownership_test PRIVATE ${OPENGL_LIBRARIES})
+else()
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(registry_ownership_test PRIVATE OpenGL::GL)
+endif()
+
 # Spec 017-A AC-A-001: async GPU readback ring. Exercises the ring's submit/poll/
 # consume contract against a real hidden GL context. Links the ring TU under test
 # directly (GL-only, no luminumbra_client dependency — same shape as the reflection
@@ -957,6 +992,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     render_smoke_test
     render_capture_test
     async_readback_ring_test
+    registry_ownership_test
     shader_reflection_test
     waterfall_visual_test
     particle_determinism_test
