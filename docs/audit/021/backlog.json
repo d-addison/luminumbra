@@ -1151,7 +1151,7 @@
     "GPU-P02",
     "GPU-12"
    ],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "NEW: RhiNoReexport frontier gate \u2014 greps that no file under rendering/passes/ nor RenderContext.h/RenderResourceHandles.h/RenderResourceRegistry.h includes a Diligent header; plus WorldVisualSweep byte-identical",
    "rank": 64
   },

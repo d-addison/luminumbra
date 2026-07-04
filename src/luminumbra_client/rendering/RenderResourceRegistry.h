@@ -1,6 +1,7 @@
 #pragma once
 
 #include "RenderResourceHandles.h"
+#include "rhi/RhiResource.h"
 
 #include <string>
 #include <string_view>
@@ -162,9 +163,15 @@ public:
     void clear_adopted() { m_fbos.clear(); m_textures.clear(); }
 
 private:
+    // 014 FR-A.2 one-abstraction-two-layers: an owned entry carries its layer-1 GL
+    // object (gl_id) AND an optional layer-2 backend backing (rhi_backing). The
+    // backing is null until a pass is first driven through a Diligent device
+    // (GPU-P05); today it is inert, so the GL path is byte-identical. A pass never
+    // sees either field -- only the layer-1 handle -- so it cannot tell GL from RHI.
     struct OwnedTexture {
         u32 gl_id = 0;
         TextureDesc desc;
+        Rhi::RhiTexture rhi_backing{};
     };
     struct OwnedFbo {
         u32 gl_id = 0;
@@ -173,6 +180,7 @@ private:
     struct OwnedRenderbuffer {
         u32 gl_id = 0;
         RenderbufferDesc desc;
+        Rhi::RhiTexture rhi_backing{};
     };
 
     // Disambiguate from the free helpers in RenderResourceHandles.h.
