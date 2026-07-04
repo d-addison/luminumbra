@@ -428,6 +428,42 @@ else()
     target_link_libraries(async_readback_ring_test PRIVATE OpenGL::GL)
 endif()
 
+# GPU-09 (spec 021 rank 60; spec 016 FR-C.3 / FR-D.2): the in-process dual-backend
+# FLIP parity harness. Renders a temporally-deterministic pass (basic.vert/frag)
+# into an in-memory framebuffer and diffs two framebuffers produced in ONE process
+# with the same perceptual metric as tools/flip_diff.py (rendering/InProcessFlip.h,
+# header-only + GL-free). GL-only, self-contained (no luminumbra_common); the
+# RhiDiligent second-backend leg is wired and loudly skipped until GPU-P02.
+add_executable(dual_backend_flip_test
+    rendering/dual_backend_flip_test.cpp
+)
+
+target_compile_definitions(dual_backend_flip_test PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+    LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts"
+)
+
+target_include_directories(dual_backend_flip_test PRIVATE
+    ../src
+    ../src/luminumbra_client
+)
+
+target_link_libraries(dual_backend_flip_test PRIVATE
+    gtest_main
+    glfw
+    glad
+)
+
+if(WIN32)
+    target_link_libraries(dual_backend_flip_test PRIVATE opengl32)
+elseif(APPLE)
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(dual_backend_flip_test PRIVATE ${OPENGL_LIBRARIES})
+else()
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(dual_backend_flip_test PRIVATE OpenGL::GL)
+endif()
+
 # Spec 016 FR-D: shader-resource reflection + layout validation. Compiles small
 # known programs in a hidden GL context and asserts the introspected layout +
 # pass-expectation validation (incl. the hot-reload rollback predicate). Links the
@@ -1033,6 +1069,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     render_smoke_test
     render_capture_test
     async_readback_ring_test
+    dual_backend_flip_test
     registry_ownership_test
     pass_context_test
     shader_reflection_test
