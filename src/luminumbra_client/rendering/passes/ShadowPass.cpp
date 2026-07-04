@@ -1,5 +1,6 @@
 #include "ShadowPass.h"
 
+#include "../RenderResourceRegistry.h"
 #include "PassGlHelpers.h"
 #include "core/Log.h"
 #include "rendering/Shader.h"
@@ -16,31 +17,50 @@ void ShadowPass::init_shader(const std::filesystem::path& root_path) {
     PassGl::label_gl_object(GL_PROGRAM, m_shadow_shader ? m_shadow_shader->Id() : 0u, "shader.shadow");
 }
 
-void ShadowPass::init_shadow_map() {
-    glGenFramebuffers(1, &m_shadow_map.fbo_id);
-    glGenTextures(1, &m_shadow_map.depth_texture_array);
-    PassGl::label_gl_object(GL_FRAMEBUFFER, m_shadow_map.fbo_id, "shadow.fbo");
-    PassGl::label_gl_object(GL_TEXTURE, m_shadow_map.depth_texture_array, "shadow.depth_cascades");
-    glBindTexture(GL_TEXTURE_2D_ARRAY, m_shadow_map.depth_texture_array);
-    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_DEPTH_COMPONENT32F, m_shadow_map.resolution, m_shadow_map.resolution, ShadowMap::CASCADE_COUNT, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-    float borderColor[] = { 1.0f, 1.0f, 1.0f, 1.0f };
-    glTexParameterfv(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BORDER_COLOR, borderColor);
-    glBindFramebuffer(GL_FRAMEBUFFER, m_shadow_map.fbo_id);
-    glFramebufferTexture(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, m_shadow_map.depth_texture_array, 0);
-    glDrawBuffer(GL_NONE);
-    glReadBuffer(GL_NONE);
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) LUMINUMBRA_CORE_ERROR("Shadow Map FBO not complete!");
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+void ShadowPass::init_shadow_map(RenderResourceRegistry& registry) {
+    // RENDER-12/GPU-12: allocate the layered depth array + no-color FBO THROUGH
+    // the registry. The desc reproduces the exact GL parameters of the retired
+    // glTexImage3D/glTexParameter calls (DEPTH_COMPONENT32F, CASCADE_COUNT layers,
+    // NEAREST, clamp-to-border white border, NO compare mode) so the object is
+    // parameter-identical to the pass code it replaces; the struct caches the ids.
+    TextureDesc depth_desc;
+    depth_desc.width = m_shadow_map.resolution;
+    depth_desc.height = m_shadow_map.resolution;
+    depth_desc.layers = ShadowMap::CASCADE_COUNT;
+    depth_desc.internal_format = GL_DEPTH_COMPONENT32F;
+    depth_desc.format = GL_DEPTH_COMPONENT;
+    depth_desc.type = GL_FLOAT;
+    depth_desc.min_filter = GL_NEAREST;
+    depth_desc.mag_filter = GL_NEAREST;
+    depth_desc.wrap_s = GL_CLAMP_TO_BORDER;
+    depth_desc.wrap_t = GL_CLAMP_TO_BORDER;
+    depth_desc.has_border_color = true;
+    depth_desc.border_color[0] = 1.0f;
+    depth_desc.border_color[1] = 1.0f;
+    depth_desc.border_color[2] = 1.0f;
+    depth_desc.border_color[3] = 1.0f;
+    depth_desc.expected_layout = "depth_attachment";
+    depth_desc.debug_label = "shadow.depth_cascades";
+    m_shadow_map.depth_texture_array =
+        registry.create_texture("shadow_depth_cascades", depth_desc).id;
+
+    FboDesc fbo_desc;
+    fbo_desc.attachments = {{GL_DEPTH_ATTACHMENT, "shadow_depth_cascades"}};
+    fbo_desc.no_color = true;
+    fbo_desc.debug_label = "shadow.fbo";
+    m_shadow_map.fbo_id = registry.create_fbo("shadow_fbo", fbo_desc).id;
+    if (m_shadow_map.fbo_id == 0) {
+        LUMINUMBRA_CORE_ERROR("Shadow Map FBO not complete!");
+    }
     PassGl::set_default_shadow_cascade_splits(m_shadow_map);
 }
 
-void ShadowPass::destroy_shadow_map() {
-    if (m_shadow_map.fbo_id) { glDeleteFramebuffers(1, &m_shadow_map.fbo_id); m_shadow_map.fbo_id = 0; }
-    if (m_shadow_map.depth_texture_array) { glDeleteTextures(1, &m_shadow_map.depth_texture_array); m_shadow_map.depth_texture_array = 0; }
+void ShadowPass::destroy_shadow_map(RenderResourceRegistry& registry) {
+    // Ownership contract: the registry deletes the owned GL objects.
+    registry.destroy_owned("shadow_fbo");
+    registry.destroy_owned("shadow_depth_cascades");
+    m_shadow_map.fbo_id = 0;
+    m_shadow_map.depth_texture_array = 0;
     m_shadow_map.light_space_matrices.clear();
     m_shadow_map.cascade_splits.clear();
 }

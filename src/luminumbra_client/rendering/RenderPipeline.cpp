@@ -636,7 +636,7 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         init_shaders();
         m_lighting_pass->init_lighting_fbo(screen_width, screen_height);
         m_gbuffer_pass->init_gbuffer(m_render_registry, screen_width, screen_height);
-        m_shadow_pass->init_shadow_map();
+        m_shadow_pass->init_shadow_map(m_render_registry);
         m_ssao_pass->init_ssao(screen_width, screen_height);
         init_screen_quad();
         init_taau(screen_width, screen_height); // FR-R5 TAAU history/FBO (used only when render.taau on)
@@ -3107,7 +3107,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_free_water_render_slots.clear();
     m_lighting_pass->destroy_lighting_fbo();
     m_gbuffer_pass->destroy_gbuffer(m_render_registry);
-    m_shadow_pass->destroy_shadow_map();
+    m_shadow_pass->destroy_shadow_map(m_render_registry);
     m_ssao_pass->destroy_ssao();
     destroy_halfres_cloud(); // render-optimization: reduced-res sky-dome target
     if (m_screen_quad_vao) { glDeleteVertexArrays(1, &m_screen_quad_vao); m_screen_quad_vao = 0; }

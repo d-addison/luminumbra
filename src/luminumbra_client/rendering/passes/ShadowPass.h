@@ -13,6 +13,7 @@ namespace Luminumbra::Rendering {
 
 class Camera;
 class Shader;
+class RenderResourceRegistry;
 
 // Cascaded shadow-map render pass extracted from RenderPipeline (T-I2-11b).
 // Owns the shadow depth FBO/texture array and the shadow shader. The pipeline
@@ -24,8 +25,12 @@ public:
     ~ShadowPass();
 
     void init_shader(const std::filesystem::path& root_path);
-    void init_shadow_map();
-    void destroy_shadow_map();
+    // RENDER-12/GPU-12: the cascaded shadow atlas (layered depth array + no-color
+    // FBO) is REGISTRY-OWNED (allocated/destroyed by the registry, the 014
+    // pilot-gate ownership leg). The ShadowMap struct caches the owned GL ids so
+    // every downstream reader is unchanged.
+    void init_shadow_map(RenderResourceRegistry& registry);
+    void destroy_shadow_map(RenderResourceRegistry& registry);
     void reset_shader();
 
     // Spec 016 (016-P2-T10): RenderContext seam. Terrain submission goes through
