@@ -6,6 +6,7 @@
 #include "rendering/Shader.h"
 #include "rendering/Camera.h"
 #include "ExposureModel.h" // Spec 015 Pillar A (A-T07): SelectRenderExposure (manual EV precedence)
+#include "SunLightModel.h" // Spec 015 Pillar A (FR-A-001): SunIrradiance (transmittance-coupled sun magnitude)
 #include "rendering/passes/ShieldRtFarFieldPass.h"
 #include <algorithm>
 #include <chrono> // spec 004: CPU per-phase submit cost
@@ -5071,6 +5072,10 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     // Sun elevation above the horizon (radians). Exposed for the season sweep so
     // it can assert per-season sun-path bands. asin domain-clamped.
     m_sunElevationRad = std::asin(glm::clamp(sun_up_factor, -1.0f, 1.0f));
+    // A 0->1 DAY-FACTOR (not the sun magnitude any more — FR-A-001 moved the direct-sun
+    // magnitude onto the physical transmittance coupling below, m_sun.color). This still
+    // drives the daytime-ness blends: skybox/foliage/particle sun intensity, the water sky
+    // reflection, the waterfall lit-fraction, and the ambient day/night + hue-tint mixes.
     m_sun.intensity = glm::smoothstep(-0.1f, 0.15f, sun_up_factor);
 
     // T-I4-DR-tod-sky-balance: the sky dome's day/twilight/night blend is keyed
@@ -5091,17 +5096,11 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     // well below (deep night still dark). This is what makes dawn/dusk glow.
     m_skyDayFactor = glm::smoothstep(-0.22f, 0.34f, sun_up_factor);
 
-    glm::vec3 noonColor(1.0f, 0.95f, 0.85f);
-    glm::vec3 horizonColor(1.0f, 0.6f, 0.2f);
-    m_sun.color = glm::mix(horizonColor, noonColor, glm::smoothstep(0.0f, 0.25f, sun_up_factor)) * m_sun.intensity;
-
-    // T-I5a-6: refresh the sun-dependent sky-view LUT (no-op unless the sun
-    // moved past the small threshold), and share the SAME atmospheric
-    // transmittance the skybox + aerial pass use so the sun-disc color, sky and
-    // ambient all redden coherently at low sun. The transmittance is normalized
-    // against the overhead-sun reference so the NOON sun color/ambient stay at
-    // their existing calibration (multiplier ≈ 1 at high sun) and only warm as
-    // the sun drops (longer optical path eats blue first -> pink/orange).
+    // T-I5a-6: refresh the sun-dependent sky-view LUT (no-op unless the sun moved past
+    // the small threshold), sharing the SAME atmosphere the skybox + aerial pass use so
+    // the sky and ambient redden coherently at low sun. (The daytime ambient still tints
+    // its HUE from the normalized scattering below; the SUN magnitude is now the physical
+    // transmittance coupling — FR-A-001 — not a normalized-to-~1 hue multiplier.)
     double refresh_ms = 0.0;
     const glm::vec3 toward_sun = -m_sun.direction;
     if (m_sky_lut.ready() && m_sky_lut.refresh_sky_view(toward_sun, &refresh_ms)) {
@@ -5109,19 +5108,22 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     }
     m_sky_view_refresh_ms = refresh_ms; // 0.0 on no-refresh frames; copied into stats after the per-frame reset
 
-    glm::vec3 sun_transmittance(1.0f);
+    // Spec 015 Pillar A (FR-A-001): the direct-sun MAGNITUDE is the LUT transmittance
+    // toward the sun × a top-of-atmosphere solar constant (calibrated 1/t_ref so the
+    // overhead sun == the prior calibrated noon magnitude), replacing the authored
+    // smoothstep intensity ramp + horizonColor hue mix. As the sun lowers the longer
+    // optical path both DIMS and REDDENS the sun from one physical model (blue eaten
+    // first -> the golden hour). See SunLightModel.h. Noon + all high sun (sun_up ≥ 0.25)
+    // stays byte-identical to the prior code (division form, clamp was a no-op there);
+    // only the low-sun arc changes. Render-only; never world_hash.
+    glm::vec3 t_now(1.0f);
+    glm::vec3 t_ref(1.0f);
     if (m_sky_lut.ready()) {
         const float sun_cos = glm::clamp(sun_up_factor, -1.0f, 1.0f);
-        const glm::vec3 t_now = m_sky_lut.sun_transmittance(sun_cos);
-        const glm::vec3 t_ref = m_sky_lut.sun_transmittance(1.0f); // overhead-sun ref
-        sun_transmittance = t_now / glm::max(t_ref, glm::vec3(1e-4f));
-        sun_transmittance = glm::clamp(sun_transmittance, glm::vec3(0.0f), glm::vec3(1.0f));
-        // Only applies while the sun is above the horizon; below it the disc is
-        // gone (m_sun.intensity ≈ 0) and the normalization is meaningless.
-        const float above = glm::smoothstep(-0.05f, 0.1f, sun_up_factor);
-        sun_transmittance = glm::mix(glm::vec3(1.0f), sun_transmittance, above);
+        t_now = m_sky_lut.sun_transmittance(sun_cos);
+        t_ref = m_sky_lut.sun_transmittance(1.0f); // overhead-sun reference
     }
-    m_sun.color *= sun_transmittance;
+    m_sun.color = SunBaseHue() * SunIrradiance(t_now, t_ref, sun_up_factor);
 
     // T-I5a-7 (C2): SEASON PALETTE tint. A small luminance-preserving hue shift
     // selects the biome material/foliage palette feel per season. The direction

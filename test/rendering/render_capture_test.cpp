@@ -31,6 +31,7 @@
 // Spec 015 Pillar A (A-T07 / spec-021 rank 67): the shipping manual-exposure model
 // under test (the SAME functions main_client.cpp + RenderPipeline.cpp call).
 #include "rendering/ExposureModel.h"
+#include "rendering/SunLightModel.h"
 
 namespace fs = std::filesystem;
 
@@ -799,6 +800,60 @@ TEST(ExposureModel, ManualMultiplierMapsLensEvAndPrecedenceSelects) {
     // Both branches are always > 0, so the lighting pass's `ctx.exposure > 0` sentinel
     // wire always fires (no accidental fall-through to the static LUMIN_GRADE exposure).
     EXPECT_GT(R::SelectRenderExposure(base, 1.02f), 0.0f);
+}
+
+// Spec 015 Pillar A (FR-A-001): the direct-sun magnitude is derived from the atmosphere
+// transmittance (SunLightModel::SunIrradiance) — the SAME function RenderPipeline uses to
+// set m_sun.color. This pins the contract: overhead sun preserved, low sun dims AND
+// reddens from that one physical term, below-horizon goes dark. GPU-free (pure logic).
+TEST(SunLightModel, NoonPinnedLowSunDimsAndReddensHorizonCutoff) {
+    namespace R = Luminumbra::Rendering;
+    auto luma = [](const glm::vec3& c) { return 0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b; };
+
+    // A physically-plausible transmittance toward the sun as a function of elevation
+    // (cos of the zenith-ish angle == sun_up_factor). Overhead: short path, near-white and
+    // relatively blue-rich. Low sun: long path, heavily red-shifted (blue eaten first).
+    // Modeled as Beer-Lambert with an air-mass ~ 1/max(cos, eps) and per-channel optical
+    // depth increasing toward blue — the qualitative shape the real Rayleigh LUT produces.
+    auto transmittance = [](float cos_up) {
+        const float mu = std::max(cos_up, 0.02f);
+        const float air_mass = 1.0f / mu;             // grows sharply as the sun lowers
+        const glm::vec3 tau(0.12f, 0.20f, 0.35f);     // R < G < B optical depth (blue eaten first)
+        return glm::vec3(std::exp(-tau.r * air_mass),
+                         std::exp(-tau.g * air_mass),
+                         std::exp(-tau.b * air_mass));
+    };
+    const glm::vec3 t_ref = transmittance(1.0f);      // overhead reference
+
+    // Overhead sun (noon): irradiance is pinned to unit white by the 1/t_ref solar
+    // constant, so m_sun.color == SunBaseHue there (the noon image is preserved).
+    const glm::vec3 noon = R::SunIrradiance(transmittance(1.0f), t_ref, 1.0f);
+    EXPECT_NEAR(noon.r, 1.0f, 1e-4f);
+    EXPECT_NEAR(noon.g, 1.0f, 1e-4f);
+    EXPECT_NEAR(noon.b, 1.0f, 1e-4f);
+
+    // Sweeping the sun DOWN from overhead to the horizon: luminance is monotonically
+    // NON-INCREASING (the sun dims), and the red/blue ratio strictly RISES (it reddens).
+    float prev_luma = luma(noon) + 1e-3f;
+    float prev_rb = noon.r / std::max(noon.b, 1e-6f);
+    for (float cos_up = 0.95f; cos_up >= 0.06f; cos_up -= 0.05f) {
+        const glm::vec3 irr = R::SunIrradiance(transmittance(cos_up), t_ref, cos_up);
+        EXPECT_LE(luma(irr), prev_luma + 1e-4f) << "sun should not brighten as it lowers, cos=" << cos_up;
+        const float rb = irr.r / std::max(irr.b, 1e-6f);
+        EXPECT_GT(rb, prev_rb - 1e-4f) << "sun should redden as it lowers, cos=" << cos_up;
+        prev_luma = luma(irr);
+        prev_rb = rb;
+    }
+
+    // A genuinely low sun is both dimmer AND redder than noon (AC-A-002: golden hour
+    // reddens AND dims from ONE model).
+    const glm::vec3 golden = R::SunIrradiance(transmittance(0.08f), t_ref, 0.08f);
+    EXPECT_LT(luma(golden), luma(noon));
+    EXPECT_GT(golden.r / std::max(golden.b, 1e-6f), noon.r / std::max(noon.b, 1e-6f));
+
+    // Below the horizon the physical disc is gone (the moon path lights the night).
+    const glm::vec3 below = R::SunIrradiance(transmittance(-0.2f), t_ref, -0.2f);
+    EXPECT_NEAR(luma(below), 0.0f, 1e-5f);
 }
 
 TEST(ExposureModel, ExposureScalesLuminanceMonotonicOnGpu) {
