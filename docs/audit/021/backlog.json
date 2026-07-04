@@ -1107,7 +1107,7 @@
     "GPU-12",
     "GPU-09"
    ],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "NEW: PilotReadiness engine-frontier gate mode \u2014 asserts DebugViewPass+pilot partner take const RenderContext&, every sampler-binding pass registers an ExpectedLayout, G-Buffer/lighting targets are registry-allocated, and DualBackendFlipInProcessGpu is registered; fails listing unmet legs",
    "rank": 61
   },
