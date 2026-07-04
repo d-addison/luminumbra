@@ -1,5 +1,6 @@
 #include "WaterPass.h"
 
+#include "../RenderResourceRegistry.h"
 #include "PassGlHelpers.h"
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
@@ -41,55 +42,65 @@ void WaterPass::init_shader(const std::filesystem::path& root_path) {
     PassGl::label_gl_object(GL_PROGRAM, m_caustics_shader ? m_caustics_shader->Id() : 0u, "shader.water_caustics");
 }
 
-void WaterPass::init_water_fallback_textures() {
+void WaterPass::init_water_fallback_textures(RenderResourceRegistry& registry) {
     const unsigned char flat_normal[4] = {128, 128, 255, 255};
     const unsigned char neutral_flow[4] = {128, 128, 0, 0};
     const unsigned char black[4] = {0, 0, 0, 255};
     const unsigned char underwater[4] = {5, 28, 48, 255};
 
+    // Fallback textures stay PASS-OWNED: 1x1 solid-color inputs with uploaded
+    // pixel data, not render targets.
     m_water_flat_normal_texture = make_solid_rgba_texture(flat_normal, "water.fallback.flat_normal");
     m_water_neutral_flow_texture = make_solid_rgba_texture(neutral_flow, "water.fallback.neutral_flow");
     m_water_black_texture = make_solid_rgba_texture(black, "water.fallback.black");
     m_water_underwater_texture = make_solid_rgba_texture(underwater, "water.fallback.underwater");
 
-    // Offscreen caustics target. Zero-initialized so consumers that sample it
-    // before the first generated frame read black, exactly matching the old
-    // fallback behavior. Mirrored repeat avoids hard tile seams: the
-    // wave-interference pattern is not toroidally tileable.
-    const std::vector<unsigned char> zeroed(
-        static_cast<std::size_t>(kCausticsResolution) * static_cast<std::size_t>(kCausticsResolution) * 4u, 0u);
-    glGenTextures(1, &m_caustics_texture);
-    PassGl::label_gl_object(GL_TEXTURE, m_caustics_texture, "water.caustics.texture");
-    glBindTexture(GL_TEXTURE_2D, m_caustics_texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, kCausticsResolution, kCausticsResolution, 0, GL_RGBA, GL_UNSIGNED_BYTE, zeroed.data());
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_MIRRORED_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_MIRRORED_REPEAT);
-    glBindTexture(GL_TEXTURE_2D, 0);
+    // RENDER-12/GPU-12: the offscreen caustics target is registry-owned. The desc
+    // reproduces the retired glTexImage2D/glTexParameter call (RGBA8, LINEAR,
+    // MIRRORED_REPEAT - mirrored repeat avoids hard tile seams since the
+    // wave-interference pattern is not toroidally tileable). It is then cleared to
+    // (0,0,0,0), byte-identical to the retired zero-initialized upload, so
+    // consumers that sample it before the first generated frame read black.
+    TextureDesc caustics;
+    caustics.width = kCausticsResolution;
+    caustics.height = kCausticsResolution;
+    caustics.internal_format = GL_RGBA8;
+    caustics.format = GL_RGBA;
+    caustics.type = GL_UNSIGNED_BYTE;
+    caustics.min_filter = GL_LINEAR;
+    caustics.mag_filter = GL_LINEAR;
+    caustics.wrap_s = GL_MIRRORED_REPEAT;
+    caustics.wrap_t = GL_MIRRORED_REPEAT;
+    caustics.expected_layout = "color_attachment";
+    caustics.debug_label = "water.caustics.texture";
+    m_caustics_texture = registry.create_texture("water_caustics", caustics).id;
 
-    glGenFramebuffers(1, &m_caustics_fbo);
-    glBindFramebuffer(GL_FRAMEBUFFER, m_caustics_fbo);
-    PassGl::label_gl_object(GL_FRAMEBUFFER, m_caustics_fbo, "water.caustics.fbo");
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_caustics_texture, 0);
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        glDeleteFramebuffers(1, &m_caustics_fbo);
-        m_caustics_fbo = 0;
-        glDeleteTextures(1, &m_caustics_texture);
+    FboDesc caustics_fbo;
+    caustics_fbo.attachments = {{GL_COLOR_ATTACHMENT0, "water_caustics"}};
+    caustics_fbo.debug_label = "water.caustics.fbo";
+    m_caustics_fbo = registry.create_fbo("water_caustics_fbo", caustics_fbo).id;
+    if (m_caustics_fbo == 0) {
+        // Match the retired failure path: drop both so consumers fall back to black.
+        registry.destroy_owned("water_caustics");
         m_caustics_texture = 0;
         return;
     }
+    glBindFramebuffer(GL_FRAMEBUFFER, m_caustics_fbo);
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-void WaterPass::destroy_water_fallback_textures() {
+void WaterPass::destroy_water_fallback_textures(RenderResourceRegistry& registry) {
     if (m_water_flat_normal_texture) { glDeleteTextures(1, &m_water_flat_normal_texture); m_water_flat_normal_texture = 0; }
     if (m_water_neutral_flow_texture) { glDeleteTextures(1, &m_water_neutral_flow_texture); m_water_neutral_flow_texture = 0; }
     if (m_water_black_texture) { glDeleteTextures(1, &m_water_black_texture); m_water_black_texture = 0; }
     if (m_water_underwater_texture) { glDeleteTextures(1, &m_water_underwater_texture); m_water_underwater_texture = 0; }
-    if (m_caustics_fbo) { glDeleteFramebuffers(1, &m_caustics_fbo); m_caustics_fbo = 0; }
-    if (m_caustics_texture) { glDeleteTextures(1, &m_caustics_texture); m_caustics_texture = 0; }
+    // The caustics target is registry-owned.
+    registry.destroy_owned("water_caustics_fbo");
+    registry.destroy_owned("water_caustics");
+    m_caustics_fbo = 0;
+    m_caustics_texture = 0;
 }
 
 void WaterPass::reset_shader() {

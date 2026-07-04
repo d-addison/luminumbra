@@ -680,7 +680,7 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         }
         init_material_lut();
         init_texture_residency();
-        m_water_pass->init_water_fallback_textures();
+        m_water_pass->init_water_fallback_textures(m_render_registry);
         init_gpu_sdf_system();
         init_gpu_pass_timers();
         init_mdi_buffers(); // T-I4-16: per-frame MDI command + origin SSBO ring
@@ -3132,7 +3132,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     if (m_skinnedTextureArray) { glDeleteTextures(1, &m_skinnedTextureArray); m_skinnedTextureArray = 0; }
     if (m_materialLUT) { glDeleteTextures(1, &m_materialLUT); m_materialLUT = 0; }
     destroy_texture_residency();
-    m_water_pass->destroy_water_fallback_textures();
+    m_water_pass->destroy_water_fallback_textures(m_render_registry);
     cleanup_gpu_sdf_system();
     destroy_gpu_pass_timers();
     m_gbuffer_pass->reset_shaders();

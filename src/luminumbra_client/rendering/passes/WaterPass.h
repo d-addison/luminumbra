@@ -11,6 +11,7 @@ namespace Luminumbra::Rendering {
 
 class Camera;
 class Shader;
+class RenderResourceRegistry;
 
 // Forward water render pass extracted from RenderPipeline (T-I2-11f).
 // Owns the water shader and the solid-color fallback textures (flat normal,
@@ -47,8 +48,12 @@ public:
     ~WaterPass();
 
     void init_shader(const std::filesystem::path& root_path);
-    void init_water_fallback_textures();
-    void destroy_water_fallback_textures();
+    // RENDER-12/GPU-12: the offscreen caustics generation target (256^2 RGBA8
+    // texture + FBO) is REGISTRY-OWNED. The four 1x1 solid-color fallback
+    // textures stay pass-owned (uploaded data, static inputs). The pass caches
+    // the owned caustics ids so every reader (black_texture accessor) is unchanged.
+    void init_water_fallback_textures(RenderResourceRegistry& registry);
+    void destroy_water_fallback_textures(RenderResourceRegistry& registry);
     void reset_shader();
 
     // Spec 016 (016-P3-T16): RenderContext seam. Draw list (WaterPassInput) is
