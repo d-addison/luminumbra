@@ -537,6 +537,13 @@ public:
     // tick-derived lunar cycle. Render-only; never world_hash.
     void set_moon_illumination(float illum) { m_moonIllumOverride = illum; }
     float get_moon_illumination() const { return m_moonIllumination; }
+    // Spec 015 Pillar A (A-T07 / spec-021 rank 67): photo-mode MANUAL exposure override.
+    // When photo mode is active the player's lens (aperture/shutter/ISO -> EV) drives the
+    // render exposure directly (see ExposureModel.h), OVERRIDING the analytic time-of-day
+    // curve (A-T05) so the photographer exposes for the light. >0 forces the multiplier;
+    // <0 (the default) restores the automatic TOD exposure. Render-only; never world_hash.
+    void set_exposure_override(float mult) { m_exposureOverride = mult; }
+    float get_exposure_override() const { return m_exposureOverride; }
     // Seasonal solar declination offset applied to the sun arc this frame
     // (positive raises the arc / lengthens the day in summer; negative lowers it
     // in winter). Tick-derived, deterministic.
@@ -910,6 +917,12 @@ private:
     // exposure (noon image preserved); lifts at night for navigability; dips through the
     // golden-hour band for contrast/mood. Render-only — never world_hash (018 FR-E-003).
     float m_pillarA_exposure = 1.12f;
+    // Spec 015 Pillar A (A-T07): photo-mode manual exposure override. >0 forces the render
+    // exposure (mapped from the lens EV by ExposureModel::ManualExposureMultiplier) over
+    // m_pillarA_exposure; <0 (default) selects the automatic TOD exposure. See
+    // ExposureModel::SelectRenderExposure — the precedence applied at ctx assembly.
+    // Render-only; never world_hash (018 FR-E-003).
+    float m_exposureOverride = -1.0f;
     // 1.0 when the render camera is below a water surface (drives the aerial pass's
     // underwater murk). Set per-frame in render_frame from WaterLevelAt.
     float m_underwater_factor = 0.0f;

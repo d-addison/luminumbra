@@ -21,6 +21,7 @@
 #include "rendering/ImpostorBake.h" // Wave-3 far-field tree impostor atlas bake (render-only)
 #include "rendering/SceneSurvey.h" // survey: autonomous tour+screenshot of world POIs (render-only)
 #include "rendering/RenderPipeline.h"
+#include "rendering/ExposureModel.h" // Spec 015 Pillar A (A-T07): lens EV -> render exposure multiplier
 #include "rendering/passes/WaterPass.h"
 #include "rendering/passes/ParticlePass.h" // T-I5a-1: EmitterDescriptor + accessor type
 #include "rendering/passes/PlantProcgenPass.h" // I9-FOLIAGE: render-only procedural plant bake (flag-gated)
@@ -7340,6 +7341,9 @@ int main(int argc, char* argv[]) {
                             s_photoEnvEngaged = false;
                             s_photoWeatherActive = false;
                             renderPipeline.set_time_of_day_hold(false);
+                            // Spec 015 Pillar A (A-T07): drop the manual exposure override so
+                            // the automatic time-of-day exposure curve (A-T05) resumes.
+                            renderPipeline.set_exposure_override(-1.0f);
                         }
                         if (g_photoMode.active) {
                             // Apply lens nudges (aperture stops + focus metres), clamped
@@ -7366,6 +7370,14 @@ int main(int argc, char* argv[]) {
                                 if (g_photoMode.lens.iso < 50.0f) g_photoMode.lens.iso = 50.0f;
                                 if (g_photoMode.lens.iso > 25600.0f) g_photoMode.lens.iso = 25600.0f;
                             }
+
+                            // Spec 015 Pillar A (A-T07 / spec-021 rank 67): the lens now drives
+                            // the RENDER exposure. Map the (just-nudged) lens EV to an exposure
+                            // multiplier and push it; it OVERRIDES the analytic TOD exposure curve
+                            // (A-T05) so stopping down darkens and opening up brightens the frame —
+                            // the photographer exposes for the light. Render-only; never world_hash.
+                            renderPipeline.set_exposure_override(
+                                Luminumbra::Rendering::ManualExposureMultiplier(g_photoMode.lens));
 
                             // Spec 013 FR-0.1/0.2: TIME-OF-DAY scrub (K/L) + WEATHER cycle (T).
                             // On entry, seed the scrub from the live clock and HOLD it (so the

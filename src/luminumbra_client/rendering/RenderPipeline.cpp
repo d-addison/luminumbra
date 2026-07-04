@@ -5,6 +5,7 @@
 #include "core/Log.h"
 #include "rendering/Shader.h"
 #include "rendering/Camera.h"
+#include "ExposureModel.h" // Spec 015 Pillar A (A-T07): SelectRenderExposure (manual EV precedence)
 #include "rendering/passes/ShieldRtFarFieldPass.h"
 #include <algorithm>
 #include <chrono> // spec 004: CPU per-phase submit cost
@@ -926,7 +927,9 @@ RenderContext RenderPipeline::make_lighting_context(const Camera& camera) {
     ctx.moon_light_dir     = m_moonLightDir;
     ctx.moon_illumination  = m_moonIllumination; // Spec 015 Pillar A (A-T04): lunar phase / two night modes
     ctx.moon_radiance      = m_moonRadiance;     // Spec 015 Pillar A (Codex C5): the moon's dedicated radiance channel
-    ctx.exposure           = m_pillarA_exposure; // Spec 015 Pillar A (A-T05): TOD eye-adaptation exposure
+    // Spec 015 Pillar A: photo-mode manual EV (A-T07) OVERRIDES the analytic TOD curve
+    // (A-T05); the -1 sentinel (photo mode inactive) selects the TOD exposure.
+    ctx.exposure           = SelectRenderExposure(m_exposureOverride, m_pillarA_exposure);
     ctx.emissive_lut_scale = kEmissiveLutScale;
     ctx.point_lights       = &m_point_lights_this_frame;
     ctx.cloud_state        = m_cloud_state;

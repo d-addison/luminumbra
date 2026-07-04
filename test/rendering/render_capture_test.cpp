@@ -28,6 +28,10 @@
 #include "rendering/CaptureHooks.h"
 #include "renderdoc/renderdoc_app.h"
 
+// Spec 015 Pillar A (A-T07 / spec-021 rank 67): the shipping manual-exposure model
+// under test (the SAME functions main_client.cpp + RenderPipeline.cpp call).
+#include "rendering/ExposureModel.h"
+
 namespace fs = std::filesystem;
 
 using namespace Luminumbra;
@@ -447,6 +451,115 @@ std::vector<unsigned char> RenderScene(GLuint program, const CaptureScene& scene
     return pixels;
 }
 
+// --- Spec 015 Pillar A (A-T07): exposure->luminance pixel-pair harness ---
+// A fullscreen-triangle shader that applies the EXACT exposure + ACES filmic + gamma
+// chain lighting_pass.frag uses (res/shaders/lighting_pass.frag:665-696), with the
+// grade controls at identity so ONLY u_exposure varies. This lets the gate prove, on
+// real GPU pixels, that a larger exposure multiplier yields a strictly brighter frame
+// (the shipping lighting_pass.frag itself is goldened by the visual sweeps).
+constexpr const char* kExposureVert = R"GLSL(
+#version 450 core
+out vec2 TexCoords;
+void main() {
+    vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+    TexCoords = p;
+    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}
+)GLSL";
+
+constexpr const char* kExposureFrag = R"GLSL(
+#version 450 core
+in vec2 TexCoords;
+out vec4 FragColor;
+uniform vec3 u_inColor;    // linear HDR input (pre-exposure)
+uniform float u_exposure;  // the RenderContext.exposure multiplier under test
+void main() {
+    vec3 color = u_inColor;
+    color *= u_exposure;                                                       // :665
+    color = color * (2.51*color + 0.03) / (color*(2.43*color + 0.59) + 0.14);  // ACES :669
+    color = clamp(color, 0.0, 1.0);                                            // :681
+    color = pow(color, vec3(1.0/2.2));                                         // gamma :684
+    color = max(color, vec3(4.0/255.0));                                       // black floor :694
+    FragColor = vec4(color, 1.0);
+}
+)GLSL";
+
+GLuint CompileShaderSource(const char* source, GLenum type) {
+    GLuint shader = glCreateShader(type);
+    glShaderSource(shader, 1, &source, nullptr);
+    glCompileShader(shader);
+    GLint success = GL_FALSE;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+    if (success != GL_TRUE) {
+        ADD_FAILURE() << "inline shader failed to compile\n" << GetShaderInfoLog(shader);
+        glDeleteShader(shader);
+        return 0;
+    }
+    return shader;
+}
+
+GLuint LinkInlineProgram(const char* vs_src, const char* fs_src) {
+    GLuint vs = CompileShaderSource(vs_src, GL_VERTEX_SHADER);
+    GLuint fs = CompileShaderSource(fs_src, GL_FRAGMENT_SHADER);
+    if (vs == 0 || fs == 0) {
+        if (vs) glDeleteShader(vs);
+        if (fs) glDeleteShader(fs);
+        return 0;
+    }
+    GLuint program = glCreateProgram();
+    glAttachShader(program, vs);
+    glAttachShader(program, fs);
+    glLinkProgram(program);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    GLint success = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &success);
+    if (success != GL_TRUE) {
+        ADD_FAILURE() << "inline program failed to link\n" << GetProgramInfoLog(program);
+        glDeleteProgram(program);
+        return 0;
+    }
+    return program;
+}
+
+// Render a full frame of the fixed input color at one exposure and read it back.
+std::vector<unsigned char> RenderFullscreenExposure(GLuint program, const glm::vec3& in_color, float exposure) {
+    GLuint color_texture = 0, depth_rb = 0, fbo = 0, vao = 0;
+    glGenTextures(1, &color_texture);
+    glBindTexture(GL_TEXTURE_2D, color_texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, kCaptureWidth, kCaptureHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glGenRenderbuffers(1, &depth_rb);
+    glBindRenderbuffer(GL_RENDERBUFFER, depth_rb);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, kCaptureWidth, kCaptureHeight);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color_texture, 0);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth_rb);
+    EXPECT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+
+    glGenVertexArrays(1, &vao); // core profile requires a bound VAO for attribute-less draw
+    glBindVertexArray(vao);
+    glViewport(0, 0, kCaptureWidth, kCaptureHeight);
+    glDisable(GL_DEPTH_TEST);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glUseProgram(program);
+    glUniform3f(glGetUniformLocation(program, "u_inColor"), in_color.x, in_color.y, in_color.z);
+    glUniform1f(glGetUniformLocation(program, "u_exposure"), exposure);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+
+    std::vector<unsigned char> pixels(static_cast<std::size_t>(kCaptureWidth) * static_cast<std::size_t>(kCaptureHeight) * 4u);
+    glReadPixels(0, 0, kCaptureWidth, kCaptureHeight, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+
+    glDeleteVertexArrays(1, &vao);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteRenderbuffers(1, &depth_rb);
+    glDeleteTextures(1, &color_texture);
+    return pixels;
+}
+
 } // namespace
 
 TEST(RenderCaptureTest, DeterministicMeshScenesProduceStableImages) {
@@ -635,4 +748,97 @@ TEST(RenderCaptureSdkTrigger, UnsupportedBackendsReportNotLinked) {
     R::CaptureResult marker = R::BuildCaptureReadyMarker(request);
     EXPECT_FALSE(marker.capture_started);
     EXPECT_EQ(marker.marker, "luminumbra.capture.ready:nsight:Nsight");
+}
+
+// Spec 015 Pillar A (A-T07 / spec-021 rank 67): the photo-mode MANUAL exposure model.
+// These gates exercise the SHIPPING functions (ExposureModel.h) that both
+// main_client.cpp (the push site) and RenderPipeline.cpp (the ctx assembly) call, so
+// they are non-vacuous by construction.
+
+TEST(ExposureModel, ManualMultiplierMapsLensEvAndPrecedenceSelects) {
+    namespace R = Luminumbra::Rendering;
+    using luminumbra::game::LensSettings;
+
+    // Default lens -> EXACTLY the day/noon anchor: entering photo mode at the default
+    // lens is continuous with the noon exposure (self-calibrated EV_ref).
+    const LensSettings def{};
+    const float base = R::ManualExposureMultiplier(def);
+    EXPECT_NEAR(base, R::kManualExposureM0, 1e-4f);
+
+    // Stopping DOWN (higher f-number -> higher EV) DARKENS; opening UP BRIGHTENS.
+    LensSettings stopped = def; stopped.aperture_f = 5.6f;  // +2 stops from f/2.8
+    LensSettings opened  = def; opened.aperture_f  = 1.4f;  // -2 stops
+    EXPECT_LT(R::ManualExposureMultiplier(stopped), base);
+    EXPECT_GT(R::ManualExposureMultiplier(opened),  base);
+
+    // Faster shutter DARKENS; slower BRIGHTENS.
+    LensSettings fast = def; fast.shutter_s = def.shutter_s * 0.25f;  // 2 stops faster
+    LensSettings slow = def; slow.shutter_s = def.shutter_s * 4.0f;   // 2 stops slower
+    EXPECT_LT(R::ManualExposureMultiplier(fast), base);
+    EXPECT_GT(R::ManualExposureMultiplier(slow), base);
+
+    // Higher ISO (more sensitive -> lower required EV) BRIGHTENS; lower DARKENS.
+    LensSettings hi_iso = def; hi_iso.iso = 400.0f;  // +2 stops
+    LensSettings lo_iso = def; lo_iso.iso = 50.0f;   // -1 stop
+    EXPECT_GT(R::ManualExposureMultiplier(hi_iso), base);
+    EXPECT_LT(R::ManualExposureMultiplier(lo_iso), base);
+
+    // The extremes CLAMP to the usable band (never pure black / pure white).
+    LensSettings darkest = def;
+    darkest.aperture_f = 32.0f; darkest.shutter_s = 1.0f / 4000.0f; darkest.iso = 50.0f;
+    LensSettings brightest = def;
+    brightest.aperture_f = 1.0f; brightest.shutter_s = 30.0f; brightest.iso = 25600.0f;
+    EXPECT_FLOAT_EQ(R::ManualExposureMultiplier(darkest),   R::kManualExposureMin);
+    EXPECT_FLOAT_EQ(R::ManualExposureMultiplier(brightest), R::kManualExposureMax);
+
+    // Precedence (the exact rule at RenderPipeline.cpp's ctx.exposure assignment): a
+    // positive manual override wins; the -1 sentinel (photo mode inactive) falls back.
+    EXPECT_FLOAT_EQ(R::SelectRenderExposure(0.3f,  1.5f),  0.3f);
+    EXPECT_FLOAT_EQ(R::SelectRenderExposure(-1.0f, 1.5f),  1.5f);
+    EXPECT_FLOAT_EQ(R::SelectRenderExposure(-1.0f, 1.02f), 1.02f);
+    // Both branches are always > 0, so the lighting pass's `ctx.exposure > 0` sentinel
+    // wire always fires (no accidental fall-through to the static LUMIN_GRADE exposure).
+    EXPECT_GT(R::SelectRenderExposure(base, 1.02f), 0.0f);
+}
+
+TEST(ExposureModel, ExposureScalesLuminanceMonotonicOnGpu) {
+    HiddenGlContext context;
+    if (!context.ready()) {
+        GTEST_SKIP() << context.error();
+    }
+    namespace R = Luminumbra::Rendering;
+
+    GLuint program = LinkInlineProgram(kExposureVert, kExposureFrag);
+    ASSERT_NE(program, 0u);
+
+    // A fixed mid-grey linear HDR input; three exposures chosen to stay below ACES
+    // saturation so the tonemapped luminance rises monotonically with exposure.
+    const glm::vec3 in_color{0.18f, 0.18f, 0.18f};
+    const float exposures[3] = {
+        R::kManualExposureMin * 3.0f,  // ~0.3, a dark exposure
+        R::kManualExposureM0,          // 1.12, the noon anchor
+        3.0f,                          // bright but sub-saturation
+    };
+    double luma[3];
+    for (int i = 0; i < 3; ++i) {
+        luma[i] = CalculateImageMetrics(RenderFullscreenExposure(program, in_color, exposures[i])).mean_luminance;
+    }
+    // The genuine two(+)-exposure capture pair: a larger exposure -> a strictly brighter
+    // frame on real GPU pixels.
+    EXPECT_LT(luma[0], luma[1]) << luma[0] << " !< " << luma[1];
+    EXPECT_LT(luma[1], luma[2]) << luma[1] << " !< " << luma[2];
+
+    // And the value a real photo would push: a stopped-down lens (f/8) reads strictly
+    // DARKER than the noon anchor -- the effect the feature promises, end to end from
+    // LensSettings through the shipping mapping to captured luminance.
+    using luminumbra::game::LensSettings;
+    LensSettings stopped{}; stopped.aperture_f = 8.0f;
+    const float stop_mult = R::ManualExposureMultiplier(stopped);
+    const double stop_luma =
+        CalculateImageMetrics(RenderFullscreenExposure(program, in_color, stop_mult)).mean_luminance;
+    const double noon_luma =
+        CalculateImageMetrics(RenderFullscreenExposure(program, in_color, R::kManualExposureM0)).mean_luminance;
+    EXPECT_LT(stop_luma, noon_luma) << "stopping down (" << stop_mult << ") should darken vs noon";
+
+    glDeleteProgram(program);
 }
