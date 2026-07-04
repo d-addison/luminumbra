@@ -134,6 +134,11 @@ add_subdirectory(vendor)
 # ctest, never by a shipping binary, so this does not touch the server/sim build.
 include(cmake/diligent.cmake)
 
+# spec 021 (2026-07 research P1): Tracy Profiler seam. Defines the luminumbra_profiler
+# INTERFACE target (empty + no fetch when LUMINUMBRA_ENABLE_TRACY=OFF, the default),
+# so gate/release builds are byte-identical. Must precede the target subdirectories.
+include(cmake/tracy.cmake)
+
 # 1. Add the tools subdirectory so the asset_processor target is created.
 add_subdirectory(tools)
 

@@ -20,6 +20,7 @@
 #include "luminumbra_common/components/PackHunterComponents.h"
 #include "luminumbra_common/components/TerritoryComponents.h"
 #include "luminumbra_common/core/Log.h"
+#include "luminumbra_common/core/Profiler.h"
 #include "luminumbra_common/ecs/EntitySnapshot.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
@@ -473,6 +474,7 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
 
     const auto wall_start = std::chrono::steady_clock::now();
     while (report.ticks_executed < tick_count) {
+        LUMIN_PROFILE_ZONE_N("server_tick");  // no-op unless LUMINUMBRA_ENABLE_TRACY
         // One frame == one fixed tick: feeding the clock exactly fixed_dt
         // keeps the frame/tick mapping 1:1 and removes wall-clock timing from
         // the simulation entirely (determinism discipline).
@@ -534,9 +536,14 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         // world_hash. Explicit full drains remain at boot / hash / mutate /
         // teardown sites via wait_for_streaming_jobs.
         const auto _wait_t0 = std::chrono::steady_clock::now();
-        world_system->activate_due(static_cast<std::int64_t>(report.ticks_executed));
-        wait_samples.push_back(
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - _wait_t0).count());
+        {
+            LUMIN_PROFILE_ZONE_N("streaming_activate_due");  // the p99 latency the queue exists to shrink
+            world_system->activate_due(static_cast<std::int64_t>(report.ticks_executed));
+        }
+        const double _wait_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - _wait_t0).count();
+        wait_samples.push_back(_wait_ms);
+        LUMIN_PROFILE_PLOT("streaming_wait_ms", _wait_ms);  // no-op unless LUMINUMBRA_ENABLE_TRACY
 
         // Spec 017-B gate (Codex audit #4): record the per-tick availability set right
         // after the barrier settles it. Observability only (off by default); the digest
@@ -556,6 +563,9 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
                 }
             }
         }
+
+        // One server tick == one frame: delimit it for the profiler timeline.
+        LUMIN_PROFILE_FRAME();  // no-op unless LUMINUMBRA_ENABLE_TRACY
     }
     const auto wall_end = std::chrono::steady_clock::now();
 

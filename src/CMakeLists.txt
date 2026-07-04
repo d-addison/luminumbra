@@ -63,6 +63,9 @@ target_include_directories(luminumbra_server_app PRIVATE
 
 target_link_libraries(luminumbra_server_app PRIVATE
     luminumbra_common
+    # Tracy seam: empty INTERFACE when LUMINUMBRA_ENABLE_TRACY=OFF (default) -> zero
+    # effect, byte-identical --smoke. Carries the define + TracyClient when ON.
+    luminumbra_profiler
 )
 
 # First-party hygiene (warnings-as-errors per the build preset).
