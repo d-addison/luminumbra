@@ -506,6 +506,71 @@ else()
     target_link_libraries(shader_reflection_test PRIVATE OpenGL::GL)
 endif()
 
+# spec 021 GPU-P04 / spec 014 FR-A0.1: PilotShaderReflectionParity. Compiles the
+# pilot pair's single-source HLSL with dxc -> SPIR-V, reflects it with spirv-cross
+# (--reflect), and the ctest asserts that reflection == the GL-introspected GLSL
+# layout == the declared ExpectedLayout. dxc is a STANDALONE binary (the mingw ATL
+# DXC-link constraint is irrelevant here); both tools ship with the Vulkan SDK, so
+# gate the target on finding them -- a Diligent-less / SDK-less configure just skips
+# this GPU ctest, like the other GL tests.
+find_program(LUMINUMBRA_DXC dxc HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin")
+find_program(LUMINUMBRA_SPIRV_CROSS spirv-cross HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin")
+if(LUMINUMBRA_DXC AND LUMINUMBRA_SPIRV_CROSS)
+    set(_pilot_reflect_dir "${CMAKE_BINARY_DIR}/pilot_shaders")
+    file(MAKE_DIRECTORY "${_pilot_reflect_dir}")
+    set(_pilot_reflect_jsons "")
+    foreach(_p ssao debug_view)
+        set(_hlsl "${CMAKE_SOURCE_DIR}/res/shaders/pilot/${_p}.frag.hlsl")
+        set(_spv "${_pilot_reflect_dir}/${_p}.frag.spv")
+        set(_json "${_pilot_reflect_dir}/${_p}.frag.reflect.json")
+        add_custom_command(
+            OUTPUT "${_json}"
+            COMMAND "${LUMINUMBRA_DXC}" -spirv -T ps_6_0 -E main "${_hlsl}" -Fo "${_spv}"
+            COMMAND "${LUMINUMBRA_SPIRV_CROSS}" "${_spv}" --reflect --output "${_json}"
+            DEPENDS "${_hlsl}"
+            COMMENT "GPU-P04: ${_p}.frag.hlsl -> SPIR-V -> reflection JSON"
+            VERBATIM
+        )
+        list(APPEND _pilot_reflect_jsons "${_json}")
+    endforeach()
+    add_custom_target(pilot_shader_reflect DEPENDS ${_pilot_reflect_jsons})
+
+    add_executable(pilot_shader_reflection_test
+        rendering/pilot_shader_reflection_test.cpp
+        ../src/luminumbra_client/rendering/ShaderReflection.cpp
+        ../src/luminumbra_client/rendering/ShaderReflectionSpirv.cpp
+        ../src/luminumbra_client/rendering/PassShaderLayouts.cpp
+    )
+    add_dependencies(pilot_shader_reflection_test pilot_shader_reflect)
+    target_compile_definitions(pilot_shader_reflection_test PRIVATE
+        LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+        PILOT_SHADER_REFLECT_DIR="${_pilot_reflect_dir}"
+    )
+    target_include_directories(pilot_shader_reflection_test PRIVATE
+        ../src
+        ../src/luminumbra_client
+    )
+    target_link_libraries(pilot_shader_reflection_test PRIVATE
+        gtest_main
+        glfw
+        glad
+        nlohmann_json::nlohmann_json
+    )
+    if(WIN32)
+        target_link_libraries(pilot_shader_reflection_test PRIVATE opengl32)
+    elseif(APPLE)
+        find_package(OpenGL REQUIRED)
+        target_link_libraries(pilot_shader_reflection_test PRIVATE ${OPENGL_LIBRARIES})
+    else()
+        find_package(OpenGL REQUIRED)
+        target_link_libraries(pilot_shader_reflection_test PRIVATE OpenGL::GL)
+    endif()
+    set(LUMINUMBRA_PILOT_SHADER_TEST_AVAILABLE ON)
+    message(STATUS "GPU-P04 PilotShaderReflectionParity enabled (dxc=${LUMINUMBRA_DXC}, spirv-cross=${LUMINUMBRA_SPIRV_CROSS})")
+else()
+    message(STATUS "GPU-P04 PilotShaderReflectionParity SKIPPED (dxc/spirv-cross not found in VULKAN_SDK)")
+endif()
+
 # spec 021 GPU-P02 / spec 014 FR-B.2: the LUMIN_RHI backend-selector parse gate.
 # Pure string logic -- no GL, no Diligent, no GPU. Compiles the RhiBackend TU
 # directly (like shader_reflection_test) so it needs no client/GL link. This is
@@ -1141,6 +1206,11 @@ set(LUMINUMBRA_GTEST_TARGETS
 # vendored in (the target does not exist otherwise).
 if(LUMINUMBRA_ENABLE_DILIGENT)
     list(APPEND LUMINUMBRA_GTEST_TARGETS rhi_device_bringup_test)
+endif()
+# spec 021 GPU-P04: register the pilot reflection-parity GPU ctest only when the
+# dxc + spirv-cross toolchain was found at configure time.
+if(LUMINUMBRA_PILOT_SHADER_TEST_AVAILABLE)
+    list(APPEND LUMINUMBRA_GTEST_TARGETS pilot_shader_reflection_test)
 endif()
 # Gate honesty (spec 002, Item 3a): a GTEST_SKIP exits 0, so ctest counts it as PASS — meaning the
 # headless RmlUi UI suite (which GTEST_SKIPs without a GL context) could go GREEN with zero coverage

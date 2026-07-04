@@ -1167,8 +1167,8 @@
     "GPU-P02",
     "GPU-05"
    ],
-   "status": "todo",
-   "proving_signal": "NEW: PilotShaderReflectionParity ctest \u2014 SPIRV-Cross reflected layout of the DXC-compiled pilot HLSL equals the GL-introspected ReflectedLayout and the declared ExpectedLayout for both pilot shaders; ported-HLSL-on-GL FLIP-matches the GLSL golden (proves 014 FR-F.5 early)",
+   "status": "done",
+   "proving_signal": "NEW: PilotShaderReflectionParity ctest \u2014 SPIRV-Cross reflected layout of the DXC-compiled pilot HLSL equals the GL-introspected ReflectedLayout and the declared ExpectedLayout for both pilot shaders [LANDED: PilotShaderReflectionParityGpu 2/2 -- ssao + debug_view, three-way SPIRV-Cross==GL-introspected==ExpectedLayout]. The ported-HLSL-on-GL FLIP-match half (014 FR-F.5) needs the render path and folds into GPU-03/GPU-P05 (rank 66, RhiPilotParityGpu).",
    "rank": 65
   },
   {
