@@ -784,6 +784,7 @@ private:
     // GroundDecal + the inline aerial/god-rays/TAAU post-passes. Render-only diagnostics/
     // dressing; every field is frame state adopted wrap-existing, never feeds world_hash.
     RenderContext make_debug_view_context(const Camera& camera);
+    RenderContext make_ground_decal_context(const Camera& camera);
 
     std::vector<ChunkMeshSnapshot> build_chunk_snapshots(const std::vector<Chunk*>& renderable_chunks) const;
 

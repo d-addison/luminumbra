@@ -2,6 +2,8 @@
 
 #include "PassGlHelpers.h"
 #include "../Shader.h"
+#include "../RenderContext.h"   // Spec 016 GPU-04: position texture + camera via ctx
+#include "../Camera.h"
 
 #include <glm/gtc/matrix_inverse.hpp>
 
@@ -62,9 +64,14 @@ void GroundDecalPass::update_scent(const ScentFieldRenderMirror& mirror) {
     m_active = true;
 }
 
-void GroundDecalPass::execute(GLuint gPositionTexture, const glm::mat4& inverse_view) {
+void GroundDecalPass::execute(const RenderContext& ctx) {
     if (!m_active || !m_shader || !m_shader->IsValid() || m_vao == 0 || m_scent_tex == 0)
         return;
+
+    // The decal projects each ground pixel through the inverse view; the frame camera
+    // supplies it (identity fallback only if a context arrives without one).
+    const glm::mat4 inverse_view = ctx.camera ? glm::inverse(ctx.camera->GetViewMatrix())
+                                              : glm::mat4(1.0f);
 
     m_shader->use();
     m_shader->setMat4("u_inverseView", inverse_view);
@@ -73,7 +80,7 @@ void GroundDecalPass::execute(GLuint gPositionTexture, const glm::mat4& inverse_
     m_shader->setFloat("u_scentScale", m_scent_scale);
 
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, gPositionTexture);
+    glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_position.id);
     m_shader->setInt("gPosition", 0);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, m_scent_tex);

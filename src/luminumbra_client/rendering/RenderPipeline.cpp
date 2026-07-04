@@ -822,6 +822,20 @@ RenderContext RenderPipeline::make_debug_view_context(const Camera& camera) {
     return ctx;
 }
 
+// Spec 016 (GPU-04): the GroundDecal pass contract — the G-buffer view-space position the
+// decal projects through, adopted wrap-existing, plus the frame camera for the inverse
+// view. Render-only (one-way scent mirror); never feeds world_hash.
+RenderContext RenderPipeline::make_ground_decal_context(const Camera& camera) {
+    RenderContext ctx;
+    ctx.camera = &camera;
+    ctx.screen_width = m_screen_width;
+    ctx.screen_height = m_screen_height;
+    ctx.registry = &m_render_registry;
+    ctx.gbuffer_position = m_render_registry.adopt_texture(
+        "gbuffer_position", m_gbuffer_pass->gbuffer().position_texture);
+    return ctx;
+}
+
 // Spec 016 (016-P3-T14): the PlantProcgen pass contract (screen size + the single
 // per-frame wall-clock snapshot that feeds u_time leaf sway). Render-only.
 RenderContext RenderPipeline::make_plant_context() {
@@ -2290,8 +2304,8 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
         glDisable(GL_CULL_FACE);
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE);  // additive trail tint
-        m_ground_decal_pass->execute(m_gbuffer_pass->gbuffer().position_texture,
-                                     glm::inverse(camera.GetViewMatrix()));
+        RenderContext decal_ctx = make_ground_decal_context(camera);
+        m_ground_decal_pass->execute(decal_ctx);
         glDisable(GL_BLEND);
         glDepthMask(GL_TRUE);
         glEnable(GL_DEPTH_TEST);

@@ -11,6 +11,7 @@
 namespace Luminumbra::Rendering {
 
 class Shader;
+struct RenderContext;
 
 // Render-only pheromone-trail ground decal (spec 011 FR-C). A fullscreen deferred
 // decal: it reads the G-buffer view-space position, projects each ground pixel into
@@ -34,8 +35,10 @@ public:
     bool active() const { return m_active; }
 
     // Draw the fullscreen decal. Caller binds the G-buffer FBO + the albedo draw buffer
-    // and sets additive blend; passes the view-space position texture + inverse view.
-    void execute(GLuint gPositionTexture, const glm::mat4& inverse_view);
+    // and sets additive blend. Spec 016 pass contract (GPU-04): the view-space position
+    // texture comes from the RenderContext G-buffer handle and the inverse-view from
+    // ctx.camera. A no-op unless a valid, non-empty scent mirror has been uploaded.
+    void execute(const RenderContext& ctx);
 
 private:
     std::unique_ptr<Shader> m_shader;

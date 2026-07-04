@@ -353,6 +353,45 @@ else()
     target_link_libraries(registry_ownership_test PRIVATE OpenGL::GL)
 endif()
 
+# GPU-04 (spec 016 FR-A): the pilot-pass seam contract — DebugView + GroundDecal
+# execute(RenderContext&) active paths against a real hidden GL context (both are
+# default-OFF, so a headless flip is vacuous — this is the non-vacuous proof).
+add_executable(pass_context_test
+    rendering/pass_context_test.cpp
+    ../src/luminumbra_client/rendering/passes/DebugViewPass.cpp
+    ../src/luminumbra_client/rendering/passes/GroundDecalPass.cpp
+    ../src/luminumbra_client/rendering/Shader.cpp
+    ../src/luminumbra_client/rendering/ShaderReflection.cpp
+)
+
+target_compile_definitions(pass_context_test PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+    LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts"
+)
+
+target_include_directories(pass_context_test PRIVATE
+    ../src
+    ../src/luminumbra_client
+    ../src/luminumbra_common
+)
+
+target_link_libraries(pass_context_test PRIVATE
+    gtest_main
+    glfw
+    glad
+    luminumbra_common
+)
+
+if(WIN32)
+    target_link_libraries(pass_context_test PRIVATE opengl32)
+elseif(APPLE)
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(pass_context_test PRIVATE ${OPENGL_LIBRARIES})
+else()
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(pass_context_test PRIVATE OpenGL::GL)
+endif()
+
 # Spec 017-A AC-A-001: async GPU readback ring. Exercises the ring's submit/poll/
 # consume contract against a real hidden GL context. Links the ring TU under test
 # directly (GL-only, no luminumbra_client dependency — same shape as the reflection
@@ -993,6 +1032,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     render_capture_test
     async_readback_ring_test
     registry_ownership_test
+    pass_context_test
     shader_reflection_test
     waterfall_visual_test
     particle_determinism_test
