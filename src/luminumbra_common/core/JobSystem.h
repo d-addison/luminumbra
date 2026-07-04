@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <thread>
 #include <vector>
@@ -88,6 +89,10 @@ private:
         // Moves the front slot out and advances the head. The vacated slot's
         // Job/shared_ptr are reset so referenced state is released promptly.
         PooledJob pop();
+        // SHIELD-07/OPS-13 (spec 018 FR-D-002): pop the slot `offset` places
+        // past the head (swap-with-front then pop) — the throttle's service-
+        // order perturbation primitive. offset must be < size().
+        PooledJob pop_at(std::size_t offset);
 
     private:
         void grow();
@@ -101,6 +106,15 @@ private:
     void worker_loop();
     // Requires m_queue_mutex to be held.
     PooledQueue& queue_for(JobPriority priority);
+    // SHIELD-07/OPS-13 (spec 018 FR-D-002): the fast/slow-job determinism
+    // axis. When LUMINUMBRA_JOB_THROTTLE=<seed> is set at startup, workers pop
+    // a SplitMix64-selected slot from a small window at the queue head instead
+    // of the front — an adversarial, wall-clock-free perturbation of job
+    // SERVICE ORDER (spec 018:359: a naive order-preserving sleep proves
+    // nothing). Off by default: one branch on a bool, hash-neutral-off by
+    // construction. The determinism matrix asserts sim hashes are INVARIANT
+    // under it. Requires m_queue_mutex to be held.
+    PooledJob throttled_pop(PooledQueue& queue);
     // T-I4-17-jobsystem-pod-pool: run a popped slot and complete its batch on
     // every exit path. Static (no JobSystem state) but a member so it can touch
     // the private PooledJob type.
@@ -112,6 +126,10 @@ private:
     // Consecutive High jobs served while Normal work waited; guarded by
     // m_queue_mutex.
     std::size_t m_consecutive_high_served = 0;
+    // FR-D-002 throttle state; counter guarded by m_queue_mutex.
+    bool m_throttle_enabled = false;
+    std::uint64_t m_throttle_seed = 0;
+    std::uint64_t m_throttle_pop_counter = 0;
     mutable std::mutex m_queue_mutex;
     std::condition_variable m_condition;
     std::atomic<bool> m_stop_threads = false;

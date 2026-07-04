@@ -1,4 +1,6 @@
 #include "JobSystem.h"
+#include <algorithm>
+#include <cstdlib>
 #include <exception>
 #include <new>
 #include <string>
@@ -138,6 +140,17 @@ JobSystem::PooledJob JobSystem::PooledQueue::pop() {
     return out;
 }
 
+JobSystem::PooledJob JobSystem::PooledQueue::pop_at(std::size_t offset) {
+    // Caller guarantees offset < size(). Swap the selected slot to the front
+    // and pop — the displaced front job is served later (the FR-D-002 service-
+    // order perturbation); ring invariants (head/tail/size) are untouched.
+    const std::size_t index = (m_head + offset) % m_slots.size();
+    if (index != m_head) {
+        std::swap(m_slots[index], m_slots[m_head]);
+    }
+    return pop();
+}
+
 // ---- JobSystem ----------------------------------------------------------
 
 JobSystem::~JobSystem() {
@@ -163,13 +176,32 @@ void JobSystem::startup(std::size_t worker_count) {
         m_stop_threads.store(false, std::memory_order_release);
         m_accepting_jobs = true;
         m_consecutive_high_served = 0;
+
+        // SHIELD-07/OPS-13 (spec 018 FR-D-002): opt-in adversarial job-service
+        // throttle. Read ONCE at startup (mirrors LUMINUMBRA_JOB_WORKERS);
+        // unset/empty/0 = off = one predictable branch at the pop site.
+        m_throttle_enabled = false;
+        m_throttle_seed = 0;
+        m_throttle_pop_counter = 0;
+        if (const char* throttle = std::getenv("LUMINUMBRA_JOB_THROTTLE")) {
+            const std::uint64_t seed = std::strtoull(throttle, nullptr, 10);
+            if (seed != 0) {
+                m_throttle_enabled = true;
+                m_throttle_seed = seed;
+            }
+        }
     }
 
     m_workers.reserve(num_threads);
     for (std::size_t i = 0; i < num_threads; ++i) {
         m_workers.emplace_back(&JobSystem::worker_loop, this);
     }
-    LUMINUMBRA_CORE_INFO("JobSystem started with " + std::to_string(num_threads) + " threads.");
+    if (m_throttle_enabled) {
+        LUMINUMBRA_CORE_INFO("JobSystem started with " + std::to_string(num_threads) +
+            " threads (FR-D-002 throttle armed, seed " + std::to_string(m_throttle_seed) + ").");
+    } else {
+        LUMINUMBRA_CORE_INFO("JobSystem started with " + std::to_string(num_threads) + " threads.");
+    }
 }
 
 void JobSystem::shutdown() {
@@ -199,6 +231,25 @@ void JobSystem::shutdown() {
 
 JobSystem::PooledQueue& JobSystem::queue_for(JobPriority priority) {
     return priority == JobPriority::High ? m_high_queue : m_normal_queue;
+}
+
+JobSystem::PooledJob JobSystem::throttled_pop(PooledQueue& queue) {
+    // Caller holds m_queue_mutex and guarantees !queue.empty().
+    if (!m_throttle_enabled) {
+        return queue.pop();
+    }
+    // SplitMix64 over (seed, pop counter): a seeded, wall-clock-free selection
+    // from a small window at the head. Adversarial to service order (spec 018
+    // FR-D-002 / OQ-2: the throttle must REORDER, not merely slow) while
+    // repeatable for a given seed and arrival sequence. The matrix asserts sim
+    // hashes are INVARIANT under it.
+    constexpr std::size_t kThrottleWindow = 8;
+    std::uint64_t x = m_throttle_seed + 0x9E3779B97F4A7C15ull * (++m_throttle_pop_counter);
+    x ^= x >> 30; x *= 0xBF58476D1CE4E5B9ull;
+    x ^= x >> 27; x *= 0x94D049BB133111EBull;
+    x ^= x >> 31;
+    const std::size_t window = std::min(queue.size(), kThrottleWindow);
+    return queue.pop_at(static_cast<std::size_t>(x % window));
 }
 
 void JobSystem::dispatch(Job job, JobPriority priority) {
@@ -318,10 +369,10 @@ void JobSystem::worker_loop() {
                 (!high_available || m_consecutive_high_served >= kNormalServiceInterval);
 
             if (serve_normal) {
-                slot = m_normal_queue.pop();
+                slot = throttled_pop(m_normal_queue);
                 m_consecutive_high_served = 0;
             } else {
-                slot = m_high_queue.pop();
+                slot = throttled_pop(m_high_queue);
                 ++m_consecutive_high_served;
             }
         }

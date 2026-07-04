@@ -943,7 +943,7 @@
    "effort": "M",
    "risk": "medium",
    "dependencies": [],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "NEW: determinism-matrix fast-slow axis \u2014 --smoke under LUMINUMBRA_JOB_THROTTLE reproduces 6f008a9f637c40b7 (DEBUG) run==replay and the matrix SKIP note is removed",
    "rank": 53
   },
@@ -956,7 +956,7 @@
    "effort": "M",
    "risk": "medium",
    "dependencies": [],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "validate-determinism-matrix.ps1 with the FR-D-002 axis enabled: throttled --smoke/--smoke-moving run==replay and hash equal to the unthrottled per-build baseline",
    "rank": 53
   },
