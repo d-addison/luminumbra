@@ -590,9 +590,10 @@ the two Diligent test-framework libs (`GPU/TestFramework`) build even under
 the gate command builds clean again. Also filed: **GPU-14** (during GPU-06).
 
 **Wave C close (2026-07-04): every ranked pilot-gate item (57–66) is done, and the RHI
-pilot go/no-go landed GO.** Wave gate held: after a full clean rebuild, `--smoke ==
-6f008a9f637c40b7` byte-identical run==replay (hash-neutral by construction — no sim code
-touched, Diligent is ctest-only); the rank-66 in-process FLIP verdict artifacts
+pilot go/no-go landed GO.** Wave gate held: after a full clean rebuild, BOTH determinism
+smokes run==replay at their established Wave-B baselines — static `--smoke ==
+6f008a9f637c40b7` and moving `--smoke-moving == 0431682a3f8a8a24` (hash-neutral by
+construction — no server/sim code touched, Diligent is ctest-only); the rank-66 in-process FLIP verdict artifacts
 (`rhi_pilot_flip.json` leg B GO, `rhi_pilot_flip_vk.json` leg C GO) recorded; the full
 SERIAL ctest lane green — **1608 of 1609 tests pass, the sole failure the chartered
 `ForestPerfBudget`** (two expected non-runs: the disabled throughput benchmark and the
