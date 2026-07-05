@@ -601,6 +601,14 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
             m_avail_trace.emplace_back(report.ticks_executed, ComputeAvailabilityDigest());
         }
 
+        // WATER-10 (Wave G W1.3): per-tick water-state hash for the debug-vs-release
+        // WaterCrossBuild gate. Reads the settled water grids only (the same read
+        // class as the availability digest); mutates nothing, never feeds world_hash.
+        if (m_config.water_hash_trace) {
+            m_water_hash_trace.emplace_back(report.ticks_executed,
+                                            world_system->debug_water_state_hash().hash);
+        }
+
         if (m_config.autosave_interval_ticks > 0 &&
             report.ticks_executed > 0 &&
             (report.ticks_executed % m_config.autosave_interval_ticks) == 0) {

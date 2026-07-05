@@ -88,6 +88,8 @@ struct ServerCliOptions {
     // activation-queue must reproduce when it replaces the wait_for_streaming_jobs barrier.
     // Observability only (the digest mutates nothing); implies --smoke.
     bool availability_trace = false;
+    bool water_hash_trace = false; // WATER-10
+
     // T-I6 P3.1c: --replicate runs the authoritative server + an in-process loopback
     // ReplicationClient, broadcasts the avatar states each tick, and asserts the client
     // mirrors the server avatars (end-to-end live replication in the harness).
@@ -287,6 +289,11 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
         } else if (std::strcmp(arg, "--avail-trace") == 0) {
             options.smoke = true;
             options.availability_trace = true;
+        } else if (std::strcmp(arg, "--water-hash-trace") == 0) {
+            // WATER-10: per-tick water-state hash sequence into the smoke artifact
+            // (the WaterCrossBuild gate compares debug vs release sequences).
+            options.smoke = true;
+            options.water_hash_trace = true;
         } else if (std::strcmp(arg, "--replicate") == 0) {
             options.replicate = true;
         } else if (std::strcmp(arg, "--npcs") == 0) {
@@ -343,6 +350,7 @@ Luminumbra::Server::ServerWorldRunnerConfig RunnerConfigFrom(const ServerCliOpti
     config.planted_roster = options.planted_roster;
     config.moving_anchor = options.moving;
     config.availability_trace = options.availability_trace;
+    config.water_hash_trace = options.water_hash_trace;
     return config;
 }
 
@@ -377,6 +385,8 @@ struct SmokeRunResult {
     std::size_t creature_count_end = 0;
     // Spec 017-B gate: per-tick availability-set trace (empty unless --avail-trace).
     std::vector<std::pair<std::uint64_t, std::string>> avail_trace;
+    // WATER-10: per-tick water-state hash trace (empty unless --water-hash-trace).
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> water_hash_trace;
     std::string world_id;
     Luminumbra::Server::ServerTickReport ticks;
     std::size_t chunks_streamed = 0;
@@ -428,6 +438,7 @@ SmokeRunResult RunSmokeOnce(const ServerCliOptions& options, const char* run_lab
     result.plant_hash = runner.Session() ? runner.Session()->ComputePlantSubHash() : std::string();
     result.creature_count_end = runner.CreatureCount();
     result.avail_trace = runner.AvailabilityTrace(); // empty unless --avail-trace
+    result.water_hash_trace = runner.WaterHashTrace(); // empty unless --water-hash-trace
     result.chunks_streamed = runner.StreamedChunkCount();
     result.world_id = runner.Session()->GetMetadata().worldId;
     const fs::path save_dir = runner.Session()->GetWorldSaveDir();
@@ -629,6 +640,42 @@ int RunSmoke(const ServerCliOptions& options) {
                 "Availability trace MISMATCH at tick {} for a STATIC anchor (per-tick residency "
                 "should be deterministic — investigate) — sizes {}/{}",
                 avail_first_divergent_tick, first.avail_trace.size(), replay.avail_trace.size());
+        }
+    }
+
+    // WATER-10 (Wave G W1.3): emit the per-tick water-state hash sequence + the
+    // in-process run==replay verdict. The debug-vs-release comparison (the AC-4
+    // host==peer cross-build gate) is validate-determinism-matrix.ps1
+    // -Mode WaterCrossBuild, which diffs this array between the two builds'
+    // artifacts. Hashes serialize as hex STRINGS (JSON numbers lose 64-bit
+    // precision past 2^53).
+    if (options.water_hash_trace) {
+        bool water_trace_match = (first.water_hash_trace.size() == replay.water_hash_trace.size());
+        long long water_first_divergent = -1;
+        const std::size_t wn = std::min(first.water_hash_trace.size(), replay.water_hash_trace.size());
+        for (std::size_t k = 0; k < wn; ++k) {
+            if (first.water_hash_trace[k] != replay.water_hash_trace[k]) {
+                water_trace_match = false;
+                water_first_divergent = static_cast<long long>(first.water_hash_trace[k].first);
+                break;
+            }
+        }
+        nlohmann::json wtrace = nlohmann::json::array();
+        for (const auto& [tick, hash] : first.water_hash_trace) {
+            wtrace.push_back({{"tick", tick}, {"hash", fmt::format("{:016x}", hash)}});
+        }
+        artifact["water_hash_trace"] = std::move(wtrace);
+        artifact["water_hash_trace_match"] = water_trace_match;
+        artifact["water_hash_trace_first_divergent_tick"] = water_first_divergent;
+        if (water_trace_match) {
+            LUMINUMBRA_CORE_INFO(
+                "Water hash trace: {} ticks, run==replay MATCH (per-tick water state is deterministic)",
+                first.water_hash_trace.size());
+        } else {
+            LUMINUMBRA_CORE_WARN(
+                "Water hash trace MISMATCH at tick {} (per-tick water state diverged run-to-run "
+                "IN-PROCESS — investigate before trusting any cross-build diff)",
+                water_first_divergent);
         }
     }
 

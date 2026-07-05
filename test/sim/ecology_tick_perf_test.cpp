@@ -256,8 +256,19 @@ TEST(EcologyTickPerf, MeasuresMedianAndP99AcrossRosterSizes) {
         EXPECT_TRUE(std::isfinite(r.median_ms) && std::isfinite(r.p99_ms))
             << "roster N=" << r.n << " produced a non-finite timing";
         // The gtest itself is NOT the budget gate (budgets live in the
-        // EcologyTickPerf validator against a captured floor); it only asserts the
-        // measurement is well-formed and emits the artifact.
+        // EcologyTickPerf validator against the perf-floor-release.json
+        // ecology_tick block, blessed via capture-ecology-tick-budgets.ps1); it
+        // only asserts the measurement is well-formed and emits the artifact.
+        //
+        // STANDING RULE (spec-021 INSTINCT-15): there is NO ecology budget CAP in
+        // the sim today — the WHOLE creature roster ticks every tick, and these
+        // budgets only measure/enforce that full-roster cost. If holding the
+        // budget ever requires capping per-tick ecology work, the cap MUST be a
+        // deterministic rotating id-sorted window (the WaterSystem
+        // MAX_WATER_SIMS_PER_TICK pattern: sort by stable id, advance a persisted
+        // cursor by the window size each tick), NEVER a time-based/adaptive
+        // cutoff — wall-clock caps make the processed set machine-dependent and
+        // break run==replay and host==peer.
     }
 }
 

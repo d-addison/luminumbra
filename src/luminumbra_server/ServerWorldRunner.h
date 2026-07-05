@@ -80,6 +80,10 @@ struct ServerWorldRunnerConfig {
     // future activation-queue (017-B) must reproduce per tick when it replaces the barrier.
     // DEFAULT false -> zero cost, zero behaviour change.
     bool availability_trace = false;
+    // WATER-10 (Wave G W1.3): record the per-tick water-state hash during
+    // RunFixedTicks — the sequence the debug-vs-release WaterCrossBuild gate
+    // compares. Observability only; never feeds world_hash.
+    bool water_hash_trace = false;
 };
 
 struct ServerTickReport {
@@ -193,6 +197,12 @@ public:
         return m_avail_trace;
     }
 
+    // WATER-10: the per-tick (tick_index, water-state hash) trace captured during the
+    // last RunFixedTicks when config.water_hash_trace was set. Empty unless tracing.
+    const std::vector<std::pair<std::uint64_t, std::uint64_t>>& WaterHashTrace() const {
+        return m_water_hash_trace;
+    }
+
     // T-I6 P3.1d: apply a player's network movement input (normalized world XZ in
     // [-1,1]) to its avatar's physics for the next tick. player_id == avatar index.
     // The caller decodes this from the replicated usercmd; persists until changed.
@@ -211,6 +221,9 @@ private:
     // Spec 017-B gate: per-tick (tick_index, availability digest), filled by RunFixedTicks
     // only when m_config.availability_trace is set. See AvailabilityTrace().
     std::vector<std::pair<std::uint64_t, std::string>> m_avail_trace;
+    // WATER-10: per-tick (tick_index, water-state hash), filled by RunFixedTicks
+    // only when m_config.water_hash_trace is set. See WaterHashTrace().
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> m_water_hash_trace;
     // Deterministic FNV-1a digest of the CURRENT settled resident-chunk availability set
     // (sorted id/state/lod/collision). Called per tick under the trace flag.
     std::string ComputeAvailabilityDigest();
