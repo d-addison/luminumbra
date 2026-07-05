@@ -682,7 +682,9 @@ std::size_t ParticlePass::execute(const RenderContext& ctx, const Camera& camera
     m_shader->setVec3("u_cameraRight", camera.Right);
     m_shader->setVec3("u_cameraUp", camera.Up);
     m_shader->setVec3("u_cameraPos", camera.Position);
-    m_shader->setFloat("u_time", static_cast<float>(glfwGetTime()));
+    // WAVE-F F1: the per-frame wall-clock SNAPSHOT (Group K ctx.time_seconds), not a
+    // live glfwGetTime() read — dispatch must be bit-idempotent per prepared frame.
+    m_shader->setFloat("u_time", ctx.time_seconds);
     m_shader->setVec2("u_screenSize",
                       glm::vec2(static_cast<float>(ctx.screen_width),
                                 static_cast<float>(ctx.screen_height)));

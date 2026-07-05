@@ -861,6 +861,7 @@ RenderContext RenderPipeline::make_particle_context(const Camera& camera) {
     ctx.registry = &m_render_registry;
     ctx.sun = m_sun;
     ctx.sky_ambient_color = m_skyAmbientColor;
+    ctx.time_seconds = m_wall_clock_time; // WAVE-F F1: per-frame snapshot (u_time sway)
     ctx.point_lights = &m_point_lights_this_frame;
     ctx.gbuffer_depth = m_render_registry.adopt_texture(
         "gbuffer_depth", m_gbuffer_pass->gbuffer().depth_texture);
@@ -1871,7 +1872,9 @@ void RenderPipeline::begin_gpu_pass_timer(GpuTimerPass pass) {
     // command-stream annotation: zero effect on rendered pixels (RenderHealth
     // stays byte-stable). Paired with the pop in end_gpu_pass_timer.
     PassGl::push_debug_group(kGpuTimerPassNames[static_cast<size_t>(pass)]);
-    if (!m_gpu_timers.supported) {
+    // WAVE-F F1: the harness's second dispatch suppresses timestamp queries (the
+    // ring slot records once per frame); the debug-group markers stay balanced.
+    if (!m_gpu_timers.supported || m_gpu_timers_suppressed) {
         return;
     }
     GpuTimerFrameSlot& slot = m_gpu_timers.slots[m_gpu_timers.frame_index % kGpuTimerFrameRing];
@@ -1880,7 +1883,7 @@ void RenderPipeline::begin_gpu_pass_timer(GpuTimerPass pass) {
 
 void RenderPipeline::end_gpu_pass_timer(GpuTimerPass pass) {
     PassGl::pop_debug_group();
-    if (!m_gpu_timers.supported) {
+    if (!m_gpu_timers.supported || m_gpu_timers_suppressed) {
         return;
     }
     GpuTimerFrameSlot& slot = m_gpu_timers.slots[m_gpu_timers.frame_index % kGpuTimerFrameRing];
@@ -2089,7 +2092,47 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     if (!m_started) {
         return;
     }
-    const auto _cpu_t0 = std::chrono::steady_clock::now(); // spec 004: CPU per-phase submit cost
+    // WAVE-F F1 (the RENDER-11 unlock): prepare once (ALL per-frame CPU mutation),
+    // dispatch once (the pure GPU stage sequence over the prepared state), then the
+    // per-frame epilogue. Byte-identical to the pre-split monolith by construction —
+    // the bodies moved verbatim. The harness (capture_frame_parity) reuses the same
+    // prepared frame and dispatches TWICE, which must be bit-identical.
+    prepare_frame(registry, world_system, camera, deltaTime, wireframe);
+    dispatch_stages(camera);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    finish_gpu_pass_timer_frame();
+    refresh_render_pass_metadata();
+
+    // spec 004 Phase 0/1: record CPU per-phase submit cost (this frame).
+    {
+        auto ms = [](auto a, auto b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+        const auto _cpu_end = std::chrono::steady_clock::now();
+        m_last_render_pass_stats.cpu_prepare_ms = ms(m_cpu_frame_t0, m_cpu_frame_prep);
+        m_last_render_pass_stats.cpu_shadow_ms = ms(m_cpu_frame_prep, m_cpu_frame_shadow);
+        m_last_render_pass_stats.cpu_gbuffer_ms = ms(m_cpu_frame_shadow, m_cpu_frame_gbuf);
+        m_last_render_pass_stats.cpu_post_ms = ms(m_cpu_frame_gbuf, _cpu_end);
+        m_last_render_pass_stats.cpu_static_prop_ms =
+            m_gbuffer_pass ? m_gbuffer_pass->last_static_prop_cpu_ms() : 0.0;
+    }
+
+    // iter-6 A0: every pass marker must be balanced by frame end, else the
+    // Nsight/RenderDoc capture (which the SHIELD-RT tracer decision depends on)
+    // is garbled even though pixels are unaffected. Cheap debug-only guard.
+    assert(PassGl::debug_group_depth() == 0 && "unbalanced GL debug-group push/pop in render_frame");
+
+    // FR-R5 TAAU: remember this frame's UNJITTERED view-proj so next frame's G-buffer can write
+    // screen-space motion vectors (reproject each surface point's world position to where it was).
+    m_prev_view_proj = m_frame_prepared.projection * m_frame_prepared.view;
+    // §13 TAAU: also remember this frame's wind wall-clock so next frame's instanced vertex shader
+    // can reconstruct where each wind-swayed vertex WAS (camera-only reprojection ghosts tree-tops).
+    m_prev_time = static_cast<float>(glfwGetTime());
+}
+
+void RenderPipeline::prepare_frame(entt::registry& registry, Systems::SHIELD_WorldSystem& world_system, const Camera& camera, float deltaTime, bool wireframe) {
+    m_cpu_frame_t0 = std::chrono::steady_clock::now(); // spec 004: CPU per-phase submit cost
 
     // Spec 016 (Group K): ONE wall-clock snapshot per frame, shared by every pass
     // via RenderContext.time_seconds so converted passes are deterministic w.r.t.
@@ -2137,20 +2180,14 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
         m_farlod->update(world_system, camera.Position);
     }
 
-    // Ensure no VAO is bound at start to prevent artifacts
-    glBindVertexArray(0);
-    
-    glEnable(GL_DEPTH_TEST);
-    
-    // Configure rendering mode
-    if (wireframe) {
-        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-        glLineWidth(2.0f);
-        glDisable(GL_CULL_FACE);  // Disable culling in wireframe for debugging
-    } else {
-        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-        glEnable(GL_CULL_FACE);
-        glCullFace(GL_BACK);
+    // WAVE-F F1: the experimental far-field pass's UPDATE (async build integration,
+    // GL uploads, job dispatch — per-frame CPU mutation) runs in prepare so the
+    // dispatch stage only renders; running dispatch twice must not double-integrate.
+    // Guarded identically to the farfield_raymarch stage below.
+    if (kEnableExperimentalFarFieldGpuRaymarching && m_far_field_runtime_requested &&
+        m_shieldrt_far_pass && m_shieldrt_far_pass->ready() &&
+        m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::FarField)) {
+        m_shieldrt_far_pass->update(world_system, camera.Position);
     }
 
     glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)m_screen_width / (float)m_screen_height, camera.GetNearPlane(), camera.GetFarPlane());
@@ -2195,7 +2232,58 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // Use cached planes
     std::memcpy(frustum_planes, m_frustumCache.planes, sizeof(frustum_planes));
 
-    const auto _cpu_prep = std::chrono::steady_clock::now(); // spec 004
+    // WAVE-F F1: particle MOTION advances in prepare (once per frame), so the
+    // dispatch below only draws — running dispatch twice must not double-advance
+    // motion. Guarded identically to the particles stage's execute.
+    if (m_particle_pass &&
+        m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Particles)) {
+        m_particle_pass->update(deltaTime);
+    }
+
+    // WAVE-F F1: publish the prepared frame dispatch_stages reads.
+    m_frame_prepared.registry = &registry;
+    m_frame_prepared.world_system = &world_system;
+    m_frame_prepared.delta_time = deltaTime;
+    m_frame_prepared.wireframe = wireframe;
+    m_frame_prepared.projection = projection;
+    m_frame_prepared.view = view;
+    std::memcpy(m_frame_prepared.frustum_planes, frustum_planes, sizeof(frustum_planes));
+    m_frame_prepared.renderable_chunk_snapshots = std::move(renderable_chunk_snapshots);
+    m_frame_prepared.valid = true;
+
+    m_cpu_frame_prep = std::chrono::steady_clock::now(); // spec 004
+}
+
+void RenderPipeline::dispatch_stages(const Camera& camera) {
+    // WAVE-F F1: the pure GPU stage sequence over the prepared frame. The stage
+    // bodies below moved VERBATIM from the pre-split render_frame; these aliases
+    // keep them byte-identical. This function must be IDEMPOTENT per prepared
+    // frame (bit-identical pixels when run twice) — no wall-clock reads, no
+    // motion/history advances, no per-frame counters; those live in prepare_frame.
+    entt::registry& registry = *m_frame_prepared.registry;
+    const float deltaTime = m_frame_prepared.delta_time;
+    const glm::mat4& projection = m_frame_prepared.projection;
+    const glm::mat4& view = m_frame_prepared.view;
+    const auto& renderable_chunk_snapshots = m_frame_prepared.renderable_chunk_snapshots;
+    glm::vec4 frustum_planes[6];
+    std::memcpy(frustum_planes, m_frame_prepared.frustum_planes, sizeof(frustum_planes));
+
+    // Ensure no VAO is bound at start to prevent artifacts
+    glBindVertexArray(0);
+
+    glEnable(GL_DEPTH_TEST);
+
+    // Configure rendering mode
+    if (m_frame_prepared.wireframe) {
+        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+        glLineWidth(2.0f);
+        glDisable(GL_CULL_FACE);  // Disable culling in wireframe for debugging
+    } else {
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);
+    }
+
     // RENDER-11 (016 FR-C): reset the frame-graph stage trace, then record each stage id as it
     // dispatches. This is render_frame's REAL dispatch order -- the golden the declarative
     // RenderGraph (BuildLuminumbraFrameGraph) is gated against (schedule() == this trace), so the
@@ -2223,7 +2311,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
         }
     }
     end_gpu_pass_timer(GpuTimerPass::Shadow);
-    const auto _cpu_shadow = std::chrono::steady_clock::now(); // spec 004
+    m_cpu_frame_shadow = std::chrono::steady_clock::now(); // spec 004
     glViewport(0, 0, m_screen_width, m_screen_height);
 
     // 2. GEOMETRY / G-BUFFER PASS (Spec 016-P2-T11: routed through the RenderContext seam).
@@ -2256,7 +2344,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
         m_last_render_pass_stats.skinned_draws += gstats.skinned_draws;
         m_last_render_pass_stats.skinned_indices_drawn += gstats.skinned_indices;
     }
-    const auto _cpu_gbuf = std::chrono::steady_clock::now(); // spec 004
+    m_cpu_frame_gbuf = std::chrono::steady_clock::now(); // spec 004
     // 2a. I9-FOLIAGE (render.plant_procgen): draw the procedural plants into the
     // SAME G-buffer the static meshes just wrote. The combined world-space mesh
     // is baked + pushed by the client (set_plants); OFF by default, so this is a
@@ -2293,7 +2381,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
         m_shieldrt_far_pass && m_shieldrt_far_pass->ready() &&
         m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::FarField)) {
         begin_gpu_pass_timer(GpuTimerPass::FarFieldRaymarch);
-        m_shieldrt_far_pass->update(world_system, camera.Position);
+        // WAVE-F F1: update() hoisted to prepare_frame (dispatch only renders).
         const glm::mat4 ff_view = camera.GetViewMatrix();
         const glm::mat4 ff_proj = camera.GetProjectionMatrix(m_screen_width, m_screen_height);
         const glm::mat4 ff_view_proj = ff_proj * ff_view;
@@ -2489,7 +2577,10 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
         m_waterfall_shader->setMat4("view", view);
         m_waterfall_shader->setMat4("projection", projection);
         m_waterfall_shader->setMat3("normalMatrix", glm::mat3(1.0f));
-        m_waterfall_shader->setFloat("u_time", static_cast<float>(glfwGetTime()));
+        // WAVE-F F1: the per-frame wall-clock SNAPSHOT (prepare_frame), not a live
+        // glfwGetTime() read — dispatch must be bit-idempotent per prepared frame
+        // (sub-µs sway phase shift; render-only).
+        m_waterfall_shader->setFloat("u_time", m_wall_clock_time);
         m_waterfall_shader->setVec3("u_camera_pos", camera.Position);
         const glm::vec3 sun_color = (m_sun.color != glm::vec3(0.0f))
                                         ? m_sun.color
@@ -2622,7 +2713,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     record_frame_stage("particles");
     if (m_particle_pass &&
         m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Particles)) {
-        m_particle_pass->update(deltaTime);
+        // WAVE-F F1: motion advance hoisted to prepare_frame (dispatch only draws).
         RenderContext particle_ctx = make_particle_context(camera);
         begin_gpu_pass_timer(GpuTimerPass::Particle);
         const std::size_t particles_drawn = m_particle_pass->execute(particle_ctx, camera);
@@ -2691,35 +2782,6 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
         m_debug_view_pass->execute(debug_ctx);
     }
 
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    finish_gpu_pass_timer_frame();
-    refresh_render_pass_metadata();
-
-    // spec 004 Phase 0/1: record CPU per-phase submit cost (this frame).
-    {
-        auto ms = [](auto a, auto b) {
-            return std::chrono::duration<double, std::milli>(b - a).count();
-        };
-        const auto _cpu_end = std::chrono::steady_clock::now();
-        m_last_render_pass_stats.cpu_prepare_ms = ms(_cpu_t0, _cpu_prep);
-        m_last_render_pass_stats.cpu_shadow_ms = ms(_cpu_prep, _cpu_shadow);
-        m_last_render_pass_stats.cpu_gbuffer_ms = ms(_cpu_shadow, _cpu_gbuf);
-        m_last_render_pass_stats.cpu_post_ms = ms(_cpu_gbuf, _cpu_end);
-        m_last_render_pass_stats.cpu_static_prop_ms =
-            m_gbuffer_pass ? m_gbuffer_pass->last_static_prop_cpu_ms() : 0.0;
-    }
-
-    // iter-6 A0: every pass marker must be balanced by frame end, else the
-    // Nsight/RenderDoc capture (which the SHIELD-RT tracer decision depends on)
-    // is garbled even though pixels are unaffected. Cheap debug-only guard.
-    assert(PassGl::debug_group_depth() == 0 && "unbalanced GL debug-group push/pop in render_frame");
-
-    // FR-R5 TAAU: remember this frame's UNJITTERED view-proj so next frame's G-buffer can write
-    // screen-space motion vectors (reproject each surface point's world position to where it was).
-    m_prev_view_proj = projection * view;
-    // §13 TAAU: also remember this frame's wind wall-clock so next frame's instanced vertex shader
-    // can reconstruct where each wind-swayed vertex WAS (camera-only reprojection ghosts tree-tops).
-    m_prev_time = static_cast<float>(glfwGetTime());
 }
 
 void RenderPipeline::update_aether_field(const std::vector<float>& cells, float world_origin_x,

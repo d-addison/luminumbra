@@ -803,6 +803,28 @@ private:
 
     std::vector<ChunkMeshSnapshot> build_chunk_snapshots(const std::vector<Chunk*>& renderable_chunks) const;
 
+    // WAVE-F F1 (the RENDER-11 unlock): render_frame is split into prepare_frame (ALL
+    // per-frame CPU mutation — clock snapshot, time-of-day advance, light gathering,
+    // chunk snapshots, GPU resource management, TAAU jitter, frustum, particle motion)
+    // and dispatch_stages (the pure 23-stage GPU dispatch over the prepared state).
+    // dispatch_stages is IDEMPOTENT per prepared frame — running it twice produces
+    // bit-identical pixels — which is what the in-process whole-frame A/B harness
+    // (capture_frame_parity) and the RENDER-11 executor migration gate on.
+    struct FramePrepared {
+        entt::registry* registry = nullptr;
+        Systems::SHIELD_WorldSystem* world_system = nullptr;
+        float delta_time = 0.0f;
+        bool wireframe = false;
+        glm::mat4 projection{1.0f};
+        glm::mat4 view{1.0f};
+        glm::vec4 frustum_planes[6]{};
+        std::vector<ChunkMeshSnapshot> renderable_chunk_snapshots;
+        bool valid = false;
+    };
+    void prepare_frame(entt::registry& registry, Systems::SHIELD_WorldSystem& world_system,
+                       const Camera& camera, float deltaTime, bool wireframe);
+    void dispatch_stages(const Camera& camera);
+
     void ensure_terrain_culling_hierarchy(const std::vector<ChunkMeshSnapshot>& renderable_chunks);
     void manage_chunk_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks, const Camera& camera);
     bool copy_terrain_mesh_payload(const ChunkMeshSnapshot& chunk, ChunkMeshPayload& payload) const;
@@ -1111,6 +1133,19 @@ private:
     RenderPassFrameStats m_last_render_pass_stats;
     std::vector<RenderPassMetadata> m_last_render_pass_metadata;
     std::vector<std::string> m_frame_stage_trace; // RENDER-11 (016 FR-C): last frame's dispatch order
+
+    // WAVE-F F1: the prepared per-frame state dispatch_stages reads (see prepare_frame).
+    FramePrepared m_frame_prepared;
+    // spec 004 CPU per-phase markers — members because they now span the
+    // prepare/dispatch boundary (set in prepare_frame/dispatch_stages, read in the
+    // render_frame epilogue's stats block).
+    std::chrono::steady_clock::time_point m_cpu_frame_t0{};
+    std::chrono::steady_clock::time_point m_cpu_frame_prep{};
+    std::chrono::steady_clock::time_point m_cpu_frame_shadow{};
+    std::chrono::steady_clock::time_point m_cpu_frame_gbuf{};
+    // WAVE-F F1: the harness's SECOND dispatch of a frame suppresses GPU timer-query
+    // records (the ring slot records once per frame; timers are observability only).
+    bool m_gpu_timers_suppressed = false;
 
     u32 m_screen_quad_vao = 0;
     u32 m_screen_quad_vbo = 0;
