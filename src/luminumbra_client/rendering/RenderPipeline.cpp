@@ -7,6 +7,7 @@
 #include "rendering/Camera.h"
 #include "ExposureModel.h" // Spec 015 Pillar A (A-T07): SelectRenderExposure (manual EV precedence)
 #include "SunLightModel.h" // Spec 015 Pillar A (FR-A-001): SunIrradiance (transmittance-coupled sun magnitude)
+#include "TimeOfDayModel.h" // Spec 016 FR-F-001 (RENDER-14): pure time-of-day policy facets (ComputeSeason, ...)
 #include "rendering/passes/ShieldRtFarFieldPass.h"
 #include <algorithm>
 #include <chrono> // spec 004: CPU per-phase submit cost
@@ -5030,32 +5031,17 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
         m_timeOfDay = fmod(m_timeOfDay, 1.0f);
     }
 
-    // T-I5a-7 (C2): SEASON phase as a PURE FUNCTION of the tick count. Integer
-    // epoch math (modulo the long-period year), then a single DeterministicMath
-    // trig evaluation -- NO wall-clock, NO float accumulator (critique F7). The
-    // phase wraps deterministically on kTicksPerSeasonCycle, so the same tick
-    // always yields the same season; the quantity is reproducible from the tick
-    // alone and is never folded into world_hash (render-derived, one-way).
+    // T-I5a-7 (C2) / RENDER-14: SEASON phase / wave / declination as a PURE FUNCTION of the
+    // tick count -- integer epoch math then a single DeterministicMath trig evaluation, no
+    // wall-clock, no float accumulator. Extracted to Rendering::ComputeSeason (TimeOfDayModel.h)
+    // so the frame runs the SAME code the unit gate tests. Phase 0 (the default every
+    // non-season scenario sees) is season-NEUTRAL and reproduces the pre-season sun arc /
+    // palette EXACTLY. Render-derived, one-way, never folded into world_hash.
     namespace DM = Luminumbra::DeterministicMath;
-    const std::uint64_t tick_in_year = m_seasonTick % kTicksPerSeasonCycle;
-    // Integer ratio first (exact), then to float: keeps the mapping a pure
-    // function of the integer tick rather than an accumulated remainder.
-    m_seasonPhase = static_cast<float>(
-        static_cast<double>(tick_in_year) / static_cast<double>(kTicksPerSeasonCycle));
-    // Seasonal sine wave over the year, ZEROED at phase 0 so the DEFAULT season
-    // (tick 0, the state every non-season scenario sees because it never calls
-    // set_season_tick) is season-NEUTRAL and reproduces the pre-T-I5a-7 sun arc /
-    // palette EXACTLY -- the season is a delta layered on top, not a baseline
-    // shift. Phase 0 == spring equinox (neutral); +1 at phase 0.25 (summer
-    // solstice, highest arc / longest day); -1 at phase 0.75 (winter solstice,
-    // lowest arc / shortest day). DeterministicMath::Sin keeps the trig clean.
-    const float season_wave = DM::Sin(m_seasonPhase * DM::kTwoPi);
-    // Axial-tilt amplitude (radians) -> a real per-season change in the sun's
-    // peak elevation. ~23.5 deg Earth obliquity; the existing fixed -0.2f tilt
-    // is replaced by this season-varying declination so summer reads a visibly
-    // higher noon arc than winter.
-    constexpr float kSeasonalTiltAmplitude = 0.41015237f; // ~23.5 degrees
-    m_seasonSunDeclination = kSeasonalTiltAmplitude * season_wave;
+    const Rendering::SeasonState season = Rendering::ComputeSeason(m_seasonTick, kTicksPerSeasonCycle);
+    m_seasonPhase = season.phase;
+    const float season_wave = season.wave;
+    m_seasonSunDeclination = season.sunDeclination;
 
     float sun_angle_rad = m_timeOfDay * 2.0f * glm::pi<float>();
     // The z component carries the seasonal declination (was a constant -0.2f).

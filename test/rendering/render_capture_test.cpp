@@ -32,6 +32,8 @@
 // under test (the SAME functions main_client.cpp + RenderPipeline.cpp call).
 #include "rendering/ExposureModel.h"
 #include "rendering/SunLightModel.h"
+// Spec 016 FR-F-001 (RENDER-14): the pure time-of-day policy facets under test.
+#include "rendering/TimeOfDayModel.h"
 
 namespace fs = std::filesystem;
 
@@ -800,6 +802,57 @@ TEST(ExposureModel, ManualMultiplierMapsLensEvAndPrecedenceSelects) {
     // Both branches are always > 0, so the lighting pass's `ctx.exposure > 0` sentinel
     // wire always fires (no accidental fall-through to the static LUMIN_GRADE exposure).
     EXPECT_GT(R::SelectRenderExposure(base, 1.02f), 0.0f);
+}
+
+// Spec 016 FR-F-001 (RENDER-14): the SEASON facet extracted from update_time_of_day
+// (TimeOfDayModel::ComputeSeason) — the SAME function the frame runs. Byte-exact extraction
+// guard: each output is asserted == the same expression rebuilt from the CANONICAL primitive
+// (DeterministicMath::Sin) directly here — NOT a re-typed copy of the season arithmetic, so a
+// wrong-primitive swap (DM::Sin -> std::sin) or a reassociation diverges — plus phase-0
+// neutrality, exact period wrap, and code-independent analytical solstice anchors. GPU-free.
+TEST(TimeOfDayModel, SeasonIsPureTickFunctionOfCanonicalPrimitives) {
+    namespace R = Luminumbra::Rendering;
+    namespace DM = Luminumbra::DeterministicMath;
+    constexpr std::uint64_t kCycle = 432000ull; // == RenderPipeline::kTicksPerSeasonCycle (4 h @ 30 Hz)
+
+    // Phase-0 NEUTRALITY: tick 0 (the default every non-season scenario sees, because it never
+    // calls set_season_tick) must be EXACTLY season-neutral, or the whole non-season path drifts.
+    const R::SeasonState s0 = R::ComputeSeason(0, kCycle);
+    EXPECT_EQ(s0.phase, 0.0f);
+    EXPECT_EQ(s0.wave, DM::Sin(0.0f)); // exactly the neutral primitive value (0)
+    EXPECT_EQ(s0.sunDeclination, R::kSeasonalTiltAmplitude * s0.wave);
+
+    // Dense sweep: every output bit-exact against the canonical primitive expression. DM::Sin
+    // here is the library's ground-truth primitive (not a copy of the season math), so this is
+    // not a closed loop — a trig swap, a changed cycle constant, or a reassociation all fail.
+    for (std::uint64_t t : {0ull, 1ull, 108000ull, 216000ull, 324000ull, 431999ull,
+                            432000ull, 540000ull, 999999ull, 12345678ull}) {
+        const R::SeasonState s = R::ComputeSeason(t, kCycle);
+        const std::uint64_t tick_in_year = t % kCycle;
+        const float phase = static_cast<float>(
+            static_cast<double>(tick_in_year) / static_cast<double>(kCycle));
+        EXPECT_EQ(s.phase, phase) << "tick=" << t;
+        EXPECT_EQ(s.wave, DM::Sin(phase * DM::kTwoPi)) << "tick=" << t;
+        EXPECT_EQ(s.sunDeclination, R::kSeasonalTiltAmplitude * DM::Sin(phase * DM::kTwoPi)) << "tick=" << t;
+    }
+
+    // WRAP: the period is exactly kCycle ticks — tick 0 == tick kCycle, byte for byte.
+    const R::SeasonState w = R::ComputeSeason(kCycle, kCycle);
+    EXPECT_EQ(w.phase, s0.phase);
+    EXPECT_EQ(w.wave, s0.wave);
+    EXPECT_EQ(w.sunDeclination, s0.sunDeclination);
+
+    // ANALYTICAL anchors (independent of the implementation): the solstices sit at the quarter /
+    // three-quarter year, reach the tilt amplitude, and carry the summer-positive / winter-
+    // negative sign convention the sun-arc code depends on.
+    const R::SeasonState summer = R::ComputeSeason(kCycle / 4, kCycle);       // phase 0.25
+    const R::SeasonState winter = R::ComputeSeason((kCycle * 3) / 4, kCycle); // phase 0.75
+    EXPECT_FLOAT_EQ(summer.phase, 0.25f);
+    EXPECT_FLOAT_EQ(winter.phase, 0.75f);
+    EXPECT_NEAR(summer.wave,  1.0f, 1e-3f);   // summer solstice ~ +1 (highest arc)
+    EXPECT_NEAR(winter.wave, -1.0f, 1e-3f);   // winter solstice ~ -1 (lowest arc)
+    EXPECT_GT(summer.sunDeclination, 0.40f);  // ~ +0.410 rad
+    EXPECT_LT(winter.sunDeclination, -0.40f); // ~ -0.410 rad
 }
 
 // Spec 015 Pillar A (FR-A-001): the direct-sun magnitude is derived from the atmosphere
