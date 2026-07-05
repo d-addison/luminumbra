@@ -3818,6 +3818,24 @@ void SHIELD_WorldSystem::SetWaterHydrology(bool finite, std::int32_t rain_mm_per
     if (m_water_system) m_water_system->SetHydrology(finite, rain_mm_per_tick, evap_mm_per_tick);
 }
 
+// WATER-17: boot-settle mode passthrough (lifts the live-play water caps during Boot only).
+void SHIELD_WorldSystem::SetWaterBootSettleMode(bool on) {
+    if (m_water_system) m_water_system->SetBootSettleMode(on);
+}
+
+// WATER-17: loaded-boot water pause passthrough (see WaterSystem::SetBootPaused).
+void SHIELD_WorldSystem::SetWaterBootPaused(bool on) {
+    if (m_water_system) m_water_system->SetBootPaused(on);
+}
+
+// WATER-17: rotating sim-window cursor persistence seam (see WaterSystem accessors).
+std::size_t SHIELD_WorldSystem::GetWaterSimWindowCursor() const {
+    return m_water_system ? m_water_system->GetSimWindowCursor() : 0u;
+}
+void SHIELD_WorldSystem::SetWaterSimWindowCursor(std::size_t cursor) {
+    if (m_water_system) m_water_system->SetSimWindowCursor(cursor);
+}
+
 // Spec 009 Phase 2 — PLAYER-FACING terraform: carve/fill the VOXEL terrain in-world,
 // then couple the water to the new bed. Edits the signed density field (sdf_data) of
 // every streamed chunk the sphere overlaps. Positive density is air (same convention

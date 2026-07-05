@@ -737,6 +737,58 @@ pixel delta. **Paused at the wave boundary for owner review.** Next: Wave F (REN
 shadows + RENDER-11 execution migration + the 015 Pillar B/C render band) and the ranked band
 beyond, per the handoff.
 
+## Bump A record — WATER-17 (+13, +09) deliberate world_hash re-pin (2026-07-05)
+
+**The campaign's first of three planned hash events** (Bump A = WATER-17; Bump B = WATER-08+09
+[09 pulled forward into A on evidence]; Event P = the instinct band). Owner-authorized scope:
+the full remaining backlog, autonomous, pausing only for visual sign-offs.
+
+**What landed (commits `3c87df7f` RED test + the Bump A fix commit):** the heavy oracle's
+pre-existing water-roundtrip RED is root-caused and GREEN. Four distinct defects, each proven
+by a targeted probe before its fix:
+
+1. **Settle exited with init work remaining** — the 6/tick live init cap outlasted the calm
+   check (2,577 of 5,433 chunks never water-inited). Fix: boot-settle mode
+   (`WaterSystem::SetBootSettleMode`) seeds the ENTIRE pending backlog in parallel at boot.
+2. **The all-asleep fixed point does not exist** — under the 64-chunk rotating sim window the
+   120-calm-tick sleep threshold is arithmetically unreachable (~45 ticks per sleep-counter
+   step × 120 ≫ any cap), and with full-set sim the awake count GROWS (2,202 → 2,513 over
+   iterations 1,700–3,000: wet/dry boundary evap/min-flow limit cycles + wake propagation).
+   Fix: the settle contract is `uninited == 0` + a FIXED deterministic 240-tick transient
+   drain — never "wait for calm".
+3. **Loaded boots advanced water past the saved state** — fix: `SetBootPaused` for the whole
+   Boot of a save-loaded session (restored mid-flow state is authoritative), plus the rotating
+   sim-window cursor persisted in `world_info.json` (`waterSimCursor`) so resim picks the
+   exact windows the original would (verified equal at save/load: 3918 == 3918).
+4. **Wake propagation was iteration-order dependent** — the single-pass neighbour-wake read
+   flags it was mutating, in `unordered_map` order, which differs between a
+   progressively-streamed and a save-adopted session (a REAL host≠peer bug; run==replay never
+   saw it). Fix: two-phase deferred wake (decide against the pre-pass snapshot, then apply);
+   the heavy resim leg went from first-tick divergence to 30/30 tick-by-tick equality.
+
+**Hash-scope changes (the reclassification the residency table parked under WATER-17):**
+`water_mesh_generated` + `water_mesh_dirty_ticks` → Render (meshing bookkeeping mutated by
+the render-side mesh pipeline; also stripped from the legacy nested `water_state` blob in the
+hash projection); `water_edge_flux` (flow momentum) now persisted + hashed Sim truth —
+resolving **WATER-13** (the "transient by design" contract was wrong: zero-momentum restarts
+diverged resim) — and `water_depth_mm`/`water_bed_mm`/`water_edge_flux` folded INTO the water
+sub-hash group — resolving **WATER-09** (only the float mirrors were grouped; a fixed-point
+desync was invisible to localization). New gates: `WaterSubHash.CoversFixedPointState`,
+`WaterPersistenceSettleParity.EdgeFluxRoundTripsExactly`, plus hash-sensitivity cases in
+`PersistenceHardening.EachPersistedFieldMutationMovesHash`.
+
+**Evidence bundle (all green 2026-07-05):** both builds full-tree; smokes run==replay at the
+NEW baselines — DEBUG static `a88cfec6a916d614`, moving `71765d8cbb053d86`; RELEASE static
+`cfa413cc83ac9440`, moving `976173d5e1586e3a` (prior: `6f008a9f637c40b7` /
+`0431682a3f8a8a24` / `ea9a0121d13bc3bd` / `d79fdbbdbfe6580f`); heavy oracle
+roundtrip+resim+settle-contract GREEN (the WATER-17 proving signal); ReplayRoundtrip (LREC1)
+hash-neutral at the new canonical; LockstepLoopback host==peer at the new canonical;
+PopulatedWorldReplay re-pinned `9f0dd5b9b27ecb9d` → `94d4242b725c9876` (ecology run==replay,
+non-vacuous 8→10); determinism matrix workers {1,2,4} × debug/release × static/moving; full
+SERIAL ctest lane green except the chartered `ForestPerfBudget`. Boot cost: fresh-boot settle
+now runs ~241 iterations (~50 s debug) — a loading-phase cost only; loaded boots skip the
+settle entirely.
+
 ## Spine-inversion register (AC-003)
 
 Exactly one deliberate inversion, justified inline at its rank:

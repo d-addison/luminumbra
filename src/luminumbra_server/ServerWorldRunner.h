@@ -115,17 +115,21 @@ public:
     // spawn-anchor streaming with collision ready around the spawn point.
     bool Boot();
 
-    // WATER-17: boot water-settle exit stats. The settle contract is IDEMPOTENCE:
-    // every streamed chunk water-initialized (uninited == 0) and every water chunk
-    // asleep (awake == 0) at exit — i.e. Boot() leaves water at its fixed point, so
-    // save -> load -> Boot() reproduces the same water state (the heavy oracle's
-    // water-roundtrip leg). Populated by Boot(); asserted by the heavy oracle.
+    // WATER-17: boot water-settle exit stats + the settle CONTRACT. A global all-asleep
+    // fixed point does not exist for this solver (wet/dry boundary cells limit-cycle and
+    // wake propagation re-wakes neighbours), so the contract that makes save/load water
+    // round-trip is: FRESH boots leave zero uninitialized chunks (contract_ok) and run a
+    // fixed deterministic transient budget; LOADED boots skip the water settle entirely
+    // (water paused through Boot — water_settle_skipped — the restored mid-flow state is
+    // authoritative) and resume from the persisted sim-window cursor. awake > 0 at exit
+    // is expected and fine. Populated by Boot(); asserted by the heavy oracle.
     struct BootSettleStats {
-        std::size_t water_chunks = 0;  // chunks with has_water_sim at exit
-        std::size_t awake = 0;         // water chunks not asleep at exit
-        std::size_t uninited = 0;      // streamed chunks never water-initialized
-        int iterations = 0;            // phase-2 settle iterations consumed
-        bool idempotent() const { return uninited == 0 && awake == 0; }
+        std::size_t water_chunks = 0;     // chunks with has_water_sim at exit
+        std::size_t awake = 0;            // water chunks not asleep at exit (informational)
+        std::size_t uninited = 0;         // streamed chunks never water-initialized
+        int iterations = 0;               // phase-2 settle iterations consumed
+        bool water_settle_skipped = false; // true = loaded boot (water paused, no settle)
+        bool contract_ok() const { return uninited == 0; }
     };
     const BootSettleStats& GetBootSettleStats() const { return m_boot_settle; }
 

@@ -111,6 +111,9 @@ std::shared_ptr<Chunk> AddRichChunk(
     chunk->water_level_data = {2.0f, 2.25f};
     chunk->water_flow_data = {Vec2(0.25f, -0.125f)};
     chunk->water_sim_terrain_height = {1.0f, 1.5f};
+    // WATER-17/WATER-09 (Bump A): the authoritative fixed-point state (hashed).
+    chunk->water_depth_mm = {static_cast<std::int32_t>(150 + salt), 0};
+    chunk->water_bed_mm = {1000, static_cast<std::int32_t>(1500 + salt)};
     chunk->has_water_sim.store(true, std::memory_order_release);
     chunk->water_mesh_generated.store(true, std::memory_order_release);
     chunk->current_water_resolution.store(16, std::memory_order_release);
@@ -118,6 +121,8 @@ std::shared_ptr<Chunk> AddRichChunk(
     chunk->max_water_delta_last_tick = 0.0625f * static_cast<float>(salt + 1u);
     chunk->ticks_below_threshold = static_cast<int>(salt);
     chunk->water_mesh_dirty_ticks = static_cast<int>(salt + 2u);
+    // WATER-17/WATER-13 (Bump A): flow momentum is persisted + hashed sim truth.
+    chunk->water_edge_flux = {static_cast<std::int32_t>(3 + salt), -7, 0, 12};
     return chunk;
 }
 
@@ -182,6 +187,12 @@ void FlattenChunk(const Chunk& chunk, std::vector<float>& floats, std::vector<st
     floats.push_back(chunk.max_water_delta_last_tick);
     ints.push_back(chunk.ticks_below_threshold);
     ints.push_back(chunk.water_mesh_dirty_ticks);
+    ints.push_back(static_cast<std::int64_t>(chunk.water_depth_mm.size()));
+    for (std::int32_t d : chunk.water_depth_mm) ints.push_back(d);
+    ints.push_back(static_cast<std::int64_t>(chunk.water_bed_mm.size()));
+    for (std::int32_t b : chunk.water_bed_mm) ints.push_back(b);
+    ints.push_back(static_cast<std::int64_t>(chunk.water_edge_flux.size()));
+    for (std::int32_t q : chunk.water_edge_flux) ints.push_back(q);
 }
 
 void ExpectChunkFieldExact(const Chunk& expected, const Chunk& actual) {
@@ -224,6 +235,9 @@ std::shared_ptr<Chunk> CloneChunk(const Chunk& src) {
     copy->water_level_data = src.water_level_data;
     copy->water_flow_data = src.water_flow_data;
     copy->water_sim_terrain_height = src.water_sim_terrain_height;
+    copy->water_depth_mm = src.water_depth_mm;
+    copy->water_bed_mm = src.water_bed_mm;
+    copy->water_edge_flux = src.water_edge_flux;
     copy->has_water_sim.store(src.has_water_sim.load(), std::memory_order_release);
     copy->water_mesh_generated.store(src.water_mesh_generated.load(), std::memory_order_release);
     copy->current_water_resolution.store(src.current_water_resolution.load(), std::memory_order_release);
@@ -406,6 +420,79 @@ TEST(PersistenceHardening, SubHashesIndependentOfInsertionOrder) {
     EXPECT_EQ(sa.terrain, sb.terrain);
     EXPECT_EQ(sa.mesh, sb.mesh);
     EXPECT_EQ(sa.water, sb.water);
+}
+
+// WATER-09 (folded into the WATER-17 Bump A): the water sub-hash covers the
+// AUTHORITATIVE fixed-point state — flipping one water_depth_mm bit (or one flux
+// value) must move the `water` section and ONLY the `water` section. Before this,
+// the group hashed only the float mirrors, so a fixed-point desync was invisible
+// to sub-hash localization.
+TEST(WaterSubHash, CoversFixedPointState) {
+    WorldStreamingState base;
+    AddRichChunk(base, IVec3(0, 0, 0), ChunkState::Ready, 1u);
+    const WorldStreamingStateSubHashes s0 = ComputeWorldStreamingStateSubHashes(base);
+
+    {
+        WorldStreamingState w;
+        auto c = AddRichChunk(w, IVec3(0, 0, 0), ChunkState::Ready, 1u);
+        c->water_depth_mm[0] += 1;
+        const WorldStreamingStateSubHashes s = ComputeWorldStreamingStateSubHashes(w);
+        EXPECT_NE(s.water, s0.water) << "water_depth_mm must move the water sub-hash";
+        EXPECT_EQ(s.terrain, s0.terrain);
+        EXPECT_EQ(s.mesh, s0.mesh);
+    }
+    {
+        WorldStreamingState w;
+        auto c = AddRichChunk(w, IVec3(0, 0, 0), ChunkState::Ready, 1u);
+        c->water_bed_mm[0] += 1;
+        const WorldStreamingStateSubHashes s = ComputeWorldStreamingStateSubHashes(w);
+        EXPECT_NE(s.water, s0.water) << "water_bed_mm must move the water sub-hash";
+        EXPECT_EQ(s.terrain, s0.terrain);
+    }
+    {
+        WorldStreamingState w;
+        auto c = AddRichChunk(w, IVec3(0, 0, 0), ChunkState::Ready, 1u);
+        c->water_edge_flux[0] += 3;
+        const WorldStreamingStateSubHashes s = ComputeWorldStreamingStateSubHashes(w);
+        EXPECT_NE(s.water, s0.water) << "water_edge_flux must move the water sub-hash";
+        EXPECT_EQ(s.terrain, s0.terrain);
+    }
+    // WATER-17: meshing bookkeeping must NOT move the water section (it lives in
+    // the mesh section now — the loaded-boot remesh flips it while water is paused).
+    {
+        WorldStreamingState w;
+        auto c = AddRichChunk(w, IVec3(0, 0, 0), ChunkState::Ready, 1u);
+        c->water_mesh_generated.store(!c->water_mesh_generated.load(), std::memory_order_release);
+        c->water_mesh_dirty_ticks += 9;
+        const WorldStreamingStateSubHashes s = ComputeWorldStreamingStateSubHashes(w);
+        EXPECT_EQ(s.water, s0.water)
+            << "water-mesh bookkeeping must NOT move the water sub-hash (WATER-17)";
+        EXPECT_NE(s.mesh, s0.mesh) << "it localizes under mesh instead";
+    }
+}
+
+// WATER-13 (folded into the WATER-17 Bump A): the save/load flow-momentum
+// contract — water_edge_flux round-trips EXACTLY (it was transient/cleared-on-load
+// before, which made the heavy oracle's resim leg diverge: the loaded session
+// restarted from zero momentum while the original carried its flux).
+TEST(WaterPersistenceSettleParity, EdgeFluxRoundTripsExactly) {
+    TempSaveDir save_dir("flux_roundtrip");
+    WorldSaveService service;
+
+    WorldStreamingState original;
+    auto src = AddRichChunk(original, IVec3(2, 0, -3), ChunkState::Ready, 5u);
+    src->water_edge_flux = {101, -202, 303, -404};
+    const std::vector<std::int32_t> expected_flux = src->water_edge_flux;
+
+    std::vector<std::string> errors;
+    ASSERT_TRUE(service.save_world(original, save_dir.path, &errors));
+    WorldStreamingState restored;
+    std::vector<std::string> load_errors;
+    ASSERT_TRUE(service.load_world(restored, save_dir.path, load_errors));
+    auto loaded = restored.find_chunk(IVec3(2, 0, -3));
+    ASSERT_NE(loaded, nullptr);
+    EXPECT_EQ(loaded->water_edge_flux, expected_flux)
+        << "flow momentum must survive save/load bit-exactly (WATER-13)";
 }
 
 // ---------------------------------------------------------------------------
@@ -826,6 +913,32 @@ TEST(PersistenceHardening, EachPersistedFieldMutationMovesHash) {
         auto c = AddRichChunk(w, IVec3(0, 0, 0), ChunkState::Ready, 1u);
         c->water_flow_data[0].x += 0.5f;
         EXPECT_NE(service.world_hash(w), base_hash) << "water flow change not reflected in hash";
+    }
+    // WATER-17/WATER-13 (Bump A): flow momentum is SIM TRUTH — must move the hash.
+    {
+        WorldStreamingState w;
+        auto c = AddRichChunk(w, IVec3(0, 0, 0), ChunkState::Ready, 1u);
+        c->water_edge_flux[0] += 5;
+        EXPECT_NE(service.world_hash(w), base_hash)
+            << "water_edge_flux change not reflected in hash (WATER-13 momentum)";
+    }
+    // WATER-17 (Bump A): water-mesh bookkeeping is MESHING state, not sim truth — the
+    // render-side mesh pipeline flips it (e.g. the loaded-boot remesh, while the water
+    // sim is paused), so hashing it made the save/load water round-trip impossible.
+    // Mutating it must NOT move the determinism hash.
+    {
+        WorldStreamingState w;
+        auto c = AddRichChunk(w, IVec3(0, 0, 0), ChunkState::Ready, 1u);
+        c->water_mesh_generated.store(!c->water_mesh_generated.load(), std::memory_order_release);
+        EXPECT_EQ(service.world_hash(w), base_hash)
+            << "water_mesh_generated must NOT be in the determinism hash (WATER-17)";
+    }
+    {
+        WorldStreamingState w;
+        auto c = AddRichChunk(w, IVec3(0, 0, 0), ChunkState::Ready, 1u);
+        c->water_mesh_dirty_ticks += 7;
+        EXPECT_EQ(service.world_hash(w), base_hash)
+            << "water_mesh_dirty_ticks must NOT be in the determinism hash (WATER-17)";
     }
 }
 

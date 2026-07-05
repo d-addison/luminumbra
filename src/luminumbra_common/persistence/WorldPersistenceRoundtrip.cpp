@@ -265,6 +265,11 @@ nlohmann::json ChunkToJson(const Chunk& chunk) {
         // render-only mirrors; these are what the sim continues from on load (no re-seed from worldgen).
         {"water_depth_mm", chunk.water_depth_mm},
         {"water_bed_mm", chunk.water_bed_mm},
+        // WATER-17/WATER-13 (Bump A): water_edge_flux is the solver's flow MOMENTUM —
+        // evolution-relevant sim truth. Dropping it on load made the heavy oracle's
+        // resim leg diverge (the loaded session restarted from zero momentum while the
+        // original carried its flux), so it is persisted + hashed like depth/bed.
+        {"water_edge_flux", chunk.water_edge_flux},
         {"has_water_sim", chunk.has_water_sim.load(std::memory_order_acquire)},
         {"water_mesh_generated", chunk.water_mesh_generated.load(std::memory_order_acquire)},
         {"current_water_resolution", chunk.current_water_resolution.load(std::memory_order_acquire)},
@@ -302,12 +307,17 @@ void ApplyChunkJson(const nlohmann::json& value, Chunk& chunk) {
     chunk.water_flow_data = Vec2ArrayFromJson(value.at("water_flow_data"));
     chunk.water_sim_terrain_height = value.at("water_sim_terrain_height").get<std::vector<float>>();
     // Spec 009: restore the authoritative fixed-point water state (absent in pre-009 saves -> empty,
-    // the sim re-seeds on the next tick). water_edge_flux is transient (not hashed) -> not persisted.
+    // the sim re-seeds on the next tick).
     chunk.water_depth_mm = value.contains("water_depth_mm")
         ? value.at("water_depth_mm").get<std::vector<std::int32_t>>() : std::vector<std::int32_t>{};
     chunk.water_bed_mm = value.contains("water_bed_mm")
         ? value.at("water_bed_mm").get<std::vector<std::int32_t>>() : std::vector<std::int32_t>{};
-    chunk.water_edge_flux.clear();
+    // WATER-17/WATER-13 (Bump A): flow momentum round-trips (see ChunkToJson). Saves
+    // that predate the field restore as zeros — the old cleared-on-load behaviour
+    // (momentum re-seeds from surface differences on the next tick).
+    chunk.water_edge_flux = value.contains("water_edge_flux")
+        ? value.at("water_edge_flux").get<std::vector<std::int32_t>>()
+        : std::vector<std::int32_t>(chunk.water_depth_mm.size() * 2u, 0);
     const nlohmann::json& water_state = value.contains("water_state") ? value.at("water_state") : value;
     chunk.has_water_sim.store(water_state.at("has_water_sim").get<bool>(), std::memory_order_release);
     chunk.water_mesh_generated.store(water_state.at("water_mesh_generated").get<bool>(), std::memory_order_release);
@@ -820,6 +830,13 @@ std::string SerializeWorldStreamingStateSimTruthForHash(const WorldStreamingStat
         for (const auto& entry : luminumbra::core::kChunkFieldResidency) {
             if (!luminumbra::core::MayFeedWorldHash(entry.residency)) {
                 cj.erase(entry.field);
+                // WATER-17: the legacy nested water_state blob duplicates the water
+                // bookkeeping fields — strip Render-classified members there too, or
+                // a hash-excluded field (water_mesh_generated / water_mesh_dirty_ticks)
+                // silently re-enters the hash through the nested copy.
+                if (auto ws = cj.find("water_state"); ws != cj.end() && ws->is_object()) {
+                    ws->erase(entry.field);
+                }
             }
         }
         chunk_array.push_back(std::move(cj));
@@ -882,7 +899,11 @@ WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(const WorldStre
             {"material_data", full.at("material_data")},
         });
 
-        // Mesh: surface + water mesh geometry and meshing bookkeeping.
+        // Mesh: surface + water mesh geometry and meshing bookkeeping. WATER-17:
+        // water_mesh_generated / water_mesh_dirty_ticks moved here from the water
+        // group — they are meshing bookkeeping mutated by the render-side mesh
+        // pipeline (the loaded-boot remesh flips them while water is paused), so
+        // hashing them under `water` made the save/load water round-trip impossible.
         mesh_array.push_back(nlohmann::json{
             {"chunk_id", full.at("chunk_id")},
             {"mesh_vertices", full.at("mesh_vertices")},
@@ -895,21 +916,27 @@ WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(const WorldStre
             {"pending_water_mesh_indices", full.at("pending_water_mesh_indices")},
             {"mesh_version", full.at("mesh_version")},
             {"water_mesh_version", full.at("water_mesh_version")},
+            {"water_mesh_generated", full.at("water_mesh_generated")},
+            {"water_mesh_dirty_ticks", full.at("water_mesh_dirty_ticks")},
         });
 
-        // Water: simulation level/flow fields + water state flags.
+        // Water: simulation level/flow fields + water state flags. WATER-09 (folded
+        // into the WATER-17 Bump A): the AUTHORITATIVE fixed-point state (depth/bed
+        // mm + edge flux) is IN the water group — previously only the float mirrors
+        // were, so a fixed-point desync was invisible to water sub-hash localization.
         water_array.push_back(nlohmann::json{
             {"chunk_id", full.at("chunk_id")},
+            {"water_depth_mm", full.at("water_depth_mm")},
+            {"water_bed_mm", full.at("water_bed_mm")},
             {"water_level_data", full.at("water_level_data")},
             {"water_flow_data", full.at("water_flow_data")},
             {"water_sim_terrain_height", full.at("water_sim_terrain_height")},
+            {"water_edge_flux", full.at("water_edge_flux")},
             {"has_water_sim", full.at("has_water_sim")},
-            {"water_mesh_generated", full.at("water_mesh_generated")},
             {"current_water_resolution", full.at("current_water_resolution")},
             {"is_water_sleeping", full.at("is_water_sleeping")},
             {"max_water_delta_last_tick", full.at("max_water_delta_last_tick")},
             {"ticks_below_threshold", full.at("ticks_below_threshold")},
-            {"water_mesh_dirty_ticks", full.at("water_mesh_dirty_ticks")},
         });
     }
 

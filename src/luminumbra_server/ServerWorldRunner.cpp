@@ -259,6 +259,17 @@ bool ServerWorldRunner::Boot() {
         return false;
     }
 
+    // WATER-17: a session booted FROM A SAVE must not advance water anywhere in Boot —
+    // the restored mid-flow state (depths, sleep flags, counters, persisted sim-window
+    // cursor) is authoritative, and the water network flows perpetually, so any boot
+    // stepping advances the loaded session past the original's saved state and the
+    // water sub-hash can never round-trip. Pause BEFORE the first streaming call
+    // (EnsureSurfaceReadyNear runs the water update too); unpause at the end of Boot.
+    const bool water_loaded_from_save = m_session->GetLastLoadedChunkCount() > 0;
+    if (water_loaded_from_save) {
+        world_system->SetWaterBootPaused(true);
+    }
+
     // Spawn-anchor streaming: synchronous surface horizon with collision
     // ready so the physics system can query terrain from tick 1. Meshing
     // stays ON (StreamingProfile meshing-skip is deferred to iteration 4).
@@ -406,28 +417,53 @@ bool ServerWorldRunner::Boot() {
             stable = (count == last_count) ? stable + 1 : 0;
             last_count = count;
         }
-        // Phase 2: settle WATER to equilibrium — run until no water chunk is awake (calm past
-        // the 120-tick sleep threshold) or a hard cap. Early-out keeps the common case cheap.
-        constexpr int kWaterSettleCap = 400;
-        int calm_streak = 0;
+        // Phase 2 (WATER-17): FRESH worlds only — complete water INIT and drain the
+        // initial flood transient. Boot-settle mode lifts the live-play init/sim caps
+        // (see WaterSystem::SetBootSettleMode): under them, init drains at 6/tick while
+        // thousands of chunks wait, and the 64-chunk rotating sim window makes the
+        // 120-calm-tick sleep threshold unreachable for a large awake set. A GLOBAL
+        // all-asleep fixed point does NOT exist for this solver (wet/dry boundary cells
+        // limit-cycle and wake propagation re-wakes neighbours — measured: awake GROWS
+        // past 2500/5433 even after 3000 full-set iterations), so the settle contract
+        // is: (a) every streamed chunk water-initialized (uninited == 0) and (b) a
+        // FIXED, deterministic transient budget of full-set sim ticks — NOT "wait for
+        // calm", which never terminates. Reproducibility across save/load comes from
+        // the loaded-boot water pause + the persisted sim-window cursor, not from
+        // reaching a (nonexistent) static equilibrium.
+        //
+        // LOADED worlds skip this phase entirely: their water is paused for the whole
+        // Boot (see above) — the restored mid-flow state must not be advanced.
         int settle_iters = 0;
-        for (int i = 0; i < kWaterSettleCap && calm_streak < 4; ++i) {
-            ++settle_iters;
-            stream_once();
-            std::size_t water_chunks = 0, awake = 0;
-            for (const auto& c : ws->snapshot_streamed_chunks()) {
-                if (c && c->has_water_sim.load(std::memory_order_acquire)) {
-                    ++water_chunks;
-                    if (!c->is_water_sleeping.load(std::memory_order_relaxed)) ++awake;
+        if (!water_loaded_from_save) {
+            ws->SetWaterBootSettleMode(true);
+            // 2a: init the full backlog (boot mode seeds ALL pending per update; the
+            // loop tolerates late streamers). Bounded.
+            constexpr int kInitSettleCap = 50;
+            std::size_t uninited_now = 0;
+            for (int i = 0; i < kInitSettleCap; ++i) {
+                ++settle_iters;
+                stream_once();
+                uninited_now = 0;
+                for (const auto& c : ws->snapshot_streamed_chunks()) {
+                    if (c && !c->has_water_sim.load(std::memory_order_acquire)) ++uninited_now;
                 }
+                if (uninited_now == 0) break;
             }
-            calm_streak = (water_chunks > 0 && awake == 0) ? calm_streak + 1 : 0;
+            // 2b: exactly kPostInitSettleTicks full-set sim iterations — the flood
+            // transient (lakes/rivers redistributing from their seeded rest levels)
+            // drains and the calm-able majority of chunks reaches sleep. A fixed count
+            // is deterministic (run==replay, host==peer) and bounded by construction.
+            constexpr int kPostInitSettleTicks = 240;
+            for (int i = 0; i < kPostInitSettleTicks; ++i) {
+                ++settle_iters;
+                stream_once();
+            }
+            ws->SetWaterBootSettleMode(false);
         }
-        // Settle-exit summary: how much water work the settle actually finished.
-        // A non-zero not-inited count means the per-tick init cap outlasted the
-        // calm check (fresh-seeded chunks start calm), i.e. "settled" exited
-        // with init work remaining — the save/load water-roundtrip hazard the
-        // heavy oracle measures.
+        // Settle-exit summary (WATER-17): the heavy oracle asserts the settle CONTRACT —
+        // fresh boots leave zero uninitialized chunks; loaded boots skip the settle
+        // (water paused, state preserved). awake > 0 is EXPECTED (the network flows
+        // perpetually); reproducibility comes from the pause + persisted cursor.
         {
             std::size_t water_chunks = 0, awake = 0, uninited = 0;
             for (const auto& c : ws->snapshot_streamed_chunks()) {
@@ -440,15 +476,20 @@ bool ServerWorldRunner::Boot() {
                 }
             }
             LUMINUMBRA_CORE_INFO(
-                "Boot water settle exit: {} water-inited ({} awake), {} NOT water-inited, {} chunks total",
-                water_chunks, awake, uninited, ws->snapshot_streamed_chunks().size());
-            // WATER-17: publish the exit stats — the heavy oracle asserts idempotence
-            // (uninited == 0 && awake == 0) so save/load water can round-trip.
+                "Boot water settle exit: {} water-inited ({} awake), {} NOT water-inited, {} chunks total{}",
+                water_chunks, awake, uninited, ws->snapshot_streamed_chunks().size(),
+                water_loaded_from_save ? " [loaded: water settle skipped, state preserved]" : "");
             m_boot_settle.water_chunks = water_chunks;
             m_boot_settle.awake = awake;
             m_boot_settle.uninited = uninited;
             m_boot_settle.iterations = settle_iters;
+            m_boot_settle.water_settle_skipped = water_loaded_from_save;
         }
+    }
+
+    // WATER-17: live ticks resume the loaded water state exactly where the save left it.
+    if (water_loaded_from_save) {
+        world_system->SetWaterBootPaused(false);
     }
 
     m_booted = true;
@@ -808,6 +849,11 @@ std::size_t ServerWorldRunner::SaveFullSnapshot() {
         }
         return 0;
     }
+    // WATER-17: refresh world_info.json alongside the chunk snapshot so world-level
+    // sim state captured there (the water sim-window cursor) reflects THIS save
+    // moment, not world creation. Without this a loaded session resimulates from a
+    // stale cursor and the water evolution diverges from the original's.
+    m_session->SaveWorld();
     return state.size();
 }
 

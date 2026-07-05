@@ -614,6 +614,22 @@ public:
     // rain_mm_per_tick adds rainfall (caller scales by weather precip), evap_mm_per_tick recedes ponds.
     void SetWaterHydrology(bool finite, std::int32_t rain_mm_per_tick, std::int32_t evap_mm_per_tick);
 
+    // WATER-17 — boot-settle mode: lifts the live-play per-tick water init/sim caps for the
+    // duration of the server BOOT water settle so the settle can complete its init work and
+    // drain the flood transient. Boot-only; live play is untouched. See
+    // WaterSystem::SetBootSettleMode for the full rationale.
+    void SetWaterBootSettleMode(bool on);
+
+    // WATER-17 — loaded-boot water pause: a session booted from a save must not advance
+    // water during Boot (the restored mid-flow state is authoritative). See
+    // WaterSystem::SetBootPaused.
+    void SetWaterBootPaused(bool on);
+
+    // WATER-17 — the rotating water sim-window cursor: evolution-relevant sim state,
+    // persisted with the world and restored on load. See WaterSystem::GetSimWindowCursor.
+    [[nodiscard]] std::size_t GetWaterSimWindowCursor() const;
+    void SetWaterSimWindowCursor(std::size_t cursor);
+
     // Spec 009 Phase 2 — PLAYER-FACING terraform: carve (fill=false) or fill (fill=true) a
     // sphere of radius_m into the voxel terrain at world_pos, remesh + rebuild colliders, and
     // couple the water bed (dig drains, fill dams). Deterministic + persisted (edits sdf_data).

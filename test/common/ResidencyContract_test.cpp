@@ -98,8 +98,13 @@ TEST(ResidencyContract, IsResidentSignatureIsPureOfKey) {
 TEST(ResidencyContract, HashScopeDerivesFromPartition) {
     using luminumbra::core::kChunkFieldResidency;
 
-    // The historical exclusion set, verbatim — the Render-classified subset of
-    // the table must equal EXACTLY these 14 names (order-insensitive).
+    // The exclusion set — the Render-classified subset of the table must equal
+    // EXACTLY these 16 names (order-insensitive). History: the original 14 were the
+    // hand-maintained kRenderMeshHashExcludedFields; WATER-17 (Bump A, 2026-07-05)
+    // deliberately added water_mesh_generated + water_mesh_dirty_ticks — meshing
+    // bookkeeping mutated by the render-side mesh pipeline, whose hashing made the
+    // save/load water round-trip impossible (the loaded-boot remesh flips them while
+    // the water sim is paused).
     const std::set<std::string> legacy_excluded = {
         "mesh_vertices", "mesh_indices",
         "water_mesh_vertices", "water_mesh_indices",
@@ -108,6 +113,7 @@ TEST(ResidencyContract, HashScopeDerivesFromPartition) {
         "mesh_version", "water_mesh_version",
         "pending_mesh_ready", "pending_mesh_failed",
         "current_lod", "pending_lod",
+        "water_mesh_generated", "water_mesh_dirty_ticks",
     };
 
     std::set<std::string> derived_excluded;
@@ -126,7 +132,7 @@ TEST(ResidencyContract, HashScopeDerivesFromPartition) {
     // Load-bearing hashed fields stay Sim.
     for (const char* sim_field : {"state", "state_value", "sdf_data", "heightmap_data",
                                   "material_data", "has_collision", "water_depth_mm",
-                                  "water_bed_mm", "has_water_sim"}) {
+                                  "water_bed_mm", "water_edge_flux", "has_water_sim"}) {
         bool found = false;
         for (const auto& entry : kChunkFieldResidency) {
             if (std::string(entry.field) == sim_field) {

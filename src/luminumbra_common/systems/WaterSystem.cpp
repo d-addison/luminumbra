@@ -283,6 +283,10 @@ Vec3 WaterSystem::get_camera_position(entt::registry& registry) const {
 void WaterSystem::update(entt::registry& registry, const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& active_chunks) {
     m_active_chunks = &active_chunks;
     if (m_active_chunks->empty()) return;
+    // WATER-17: a session booted from a save pauses water for the whole Boot (see
+    // SetBootPaused) — no init, no wake/sleep mutation, no stepping. The loaded
+    // mid-flow water state stays bit-exact until live ticks resume it.
+    if (m_boot_paused) return;
 
     // --- ADAPTIVE WATER GRID SYSTEM INTEGRATION ---
     Vec3 camera_position = get_camera_position(registry);
@@ -344,7 +348,10 @@ void WaterSystem::update(entt::registry& registry, const std::unordered_map<Chun
         if (!chunk_ptr || chunk_ptr->has_water_sim.load()) {
             continue;
         }
-        if (static_cast<int>(to_init.size()) >= MAX_WATER_INITS_PER_TICK) {
+        // WATER-17 boot-settle mode: no init cap — seed the ENTIRE pending backlog this
+        // call so the boot settle can reach its fixed point (see SetBootSettleMode).
+        if (!m_boot_settle_mode &&
+            static_cast<int>(to_init.size()) >= MAX_WATER_INITS_PER_TICK) {
             break;  // same cap as the old water_inits_this_tick counter
         }
         to_init.push_back(chunk_ptr.get());
@@ -443,8 +450,28 @@ void WaterSystem::update(entt::registry& registry, const std::unordered_map<Chun
     // blocked behind the streaming flood"), so most of its ~16ms was QUEUE WAIT, not work. Inline pays only
     // the (now small) compute and skips the wait. Each chunk writes only its own arrays -> byte-identical
     // to the parallel version -> world_hash unchanged (no re-pin).
-    for (std::size_t i = 0; i < to_init.size(); ++i) {
-        seed_chunk_water(to_init[i], terrain_seed[i]);
+    //
+    // WATER-17 boot-settle mode: the bulk backlog (thousands of chunks, mostly coarse-LOD so
+    // the heightmap fast path doesn't apply and each pays the full sampler) IS worth the
+    // parallel path — at boot the queue is post-residency-settle idle, so the head-of-line
+    // hazard above does not apply. Each chunk writes only its own arrays from read-only
+    // worldgen queries (the streamer generates chunks on these same workers), so parallel is
+    // byte-identical to sequential — the ORDER chunks are seeded in never changes the bits.
+    if (m_boot_settle_mode && to_init.size() > 8 && m_job_system) {
+        std::vector<Job> seed_jobs;
+        seed_jobs.reserve(to_init.size());
+        for (std::size_t i = 0; i < to_init.size(); ++i) {
+            Chunk* cp = to_init[i];
+            const std::vector<float>* terrain = &terrain_seed[i];
+            seed_jobs.emplace_back([&seed_chunk_water, cp, terrain]() {
+                seed_chunk_water(cp, *terrain);
+            });
+        }
+        m_job_system->wait(m_job_system->dispatch_batch(seed_jobs));
+    } else {
+        for (std::size_t i = 0; i < to_init.size(); ++i) {
+            seed_chunk_water(to_init[i], terrain_seed[i]);
+        }
     }
 
     for (auto entity : source_view) {
@@ -475,6 +502,16 @@ void WaterSystem::update(entt::registry& registry, const std::unordered_map<Chun
     }
 
     // --- Step 2: Wake up sleeping chunks that are adjacent to active ones (propagation) ---
+    // WATER-17: wake propagation is TWO-PHASE — decide against the PRE-PASS sleep
+    // snapshot, then apply. The old single pass woke chunks in unordered_map
+    // iteration order while READING the flags it was mutating, so a multi-hop wake
+    // cascade within one tick depended on the map's insertion history — which
+    // differs between a progressively-streamed session and a save-adopted one
+    // (run==replay held, save/load and host!=peer did not: the heavy oracle's
+    // resim leg diverged at its first tick on exactly this). Deferred application
+    // makes the pass order-independent; a cascade now propagates one neighbour
+    // hop per tick, deterministically.
+    std::vector<Chunk*> chunks_to_wake;
     for (const auto& active_chunk : *m_active_chunks) {
         const auto& chunk_ptr = active_chunk.second;
         if (!chunk_ptr) {
@@ -488,14 +525,18 @@ void WaterSystem::update(entt::registry& registry, const std::unordered_map<Chun
                 IVec3 neighbor_coords = self_coords + offset;
                 auto it = m_active_chunks->find(Chunk::calculate_id(neighbor_coords));
                 if (it != m_active_chunks->end() && it->second && !it->second->is_water_sleeping.load(std::memory_order_relaxed)) {
-                    // WAKE UP: A neighbor is active, so this chunk must also become active.
-                    chunk_ptr->is_water_sleeping.store(false, std::memory_order_relaxed);
-                    break; 
+                    // WAKE UP (deferred): a neighbor is active per the pre-pass state.
+                    chunks_to_wake.push_back(chunk_ptr.get());
+                    break;
                 }
             }
         }
     }
-    
+    for (Chunk* chunk : chunks_to_wake) {
+        chunk->is_water_sleeping.store(false, std::memory_order_relaxed);
+    }
+
+
     // --- Step 3: Collect only the active chunks for simulation ---
     std::vector<Chunk*> chunks_to_sim;
     chunks_to_sim.reserve(m_active_chunks->size());
@@ -521,7 +562,10 @@ void WaterSystem::update(entt::registry& registry, const std::unordered_map<Chun
     // sims, but no single tick blocks on hundreds of chunks. The un-simulated chunks stay awake and are
     // picked up by the rotation next tick. Cursor evolution is a pure function of the active-set size
     // sequence -> run==replay / host==peer identical (verified by the WaterDeterminism gate).
-    if (chunks_to_sim.size() > MAX_WATER_SIMS_PER_TICK) {
+    // WATER-17 boot-settle mode: no rotating window — sim EVERY awake chunk each call so
+    // ticks_below_threshold advances every settle iteration and the sleep threshold (120
+    // calm ticks) is reachable within a bounded settle (see SetBootSettleMode).
+    if (!m_boot_settle_mode && chunks_to_sim.size() > MAX_WATER_SIMS_PER_TICK) {
         std::sort(chunks_to_sim.begin(), chunks_to_sim.end(),
                   [](const Chunk* a, const Chunk* b) { return a->get_id() < b->get_id(); });
         const std::size_t total = chunks_to_sim.size();

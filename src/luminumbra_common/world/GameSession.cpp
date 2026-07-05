@@ -728,6 +728,8 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     // --- Load Metadata from world_info.json ---
     std::ifstream metadata_file(metadataPath);
     nlohmann::json metadata_json;
+    // WATER-17: restored after the world systems exist (see below). Old saves -> 0.
+    std::size_t water_sim_cursor = 0;
     try {
         metadata_json = nlohmann::json::parse(metadata_file);
         m_metadata.name = metadata_json.value("name", "Unnamed World");
@@ -747,6 +749,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
                 spawn_json.value("y", 0.0f),
                 spawn_json.value("z", 0.0f));
         }
+        water_sim_cursor = metadata_json.value("waterSimCursor", std::size_t{0});
     } catch (const nlohmann::json::parse_error& e) {
         LUMINUMBRA_CORE_ERROR("Failed to parse world metadata file '{}': {}", metadataPath, e.what());
         return false;
@@ -818,6 +821,12 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     }
     InitializeScentField(m_metadata.spawnPoint);
 
+    // WATER-17: restore the rotating water sim-window cursor so the loaded session
+    // resimulates the exact windows the original would from the same water state.
+    if (m_worldSystem) {
+        m_worldSystem->SetWaterSimWindowCursor(water_sim_cursor);
+    }
+
     LUMINUMBRA_CORE_INFO("World loaded successfully: {}", m_metadata.name);
     return true;
 }
@@ -842,7 +851,13 @@ bool GameSession::SaveWorld() {
             {"x", m_metadata.spawnPoint.x},
             {"y", m_metadata.spawnPoint.y},
             {"z", m_metadata.spawnPoint.z}
-        }}
+        }},
+        // WATER-17: the rotating water sim-window cursor is evolution-relevant sim
+        // state (which 64-chunk window sims first changes subsequent depths when more
+        // chunks are awake than the per-tick cap). Persist it so a loaded session
+        // resimulates the exact windows the original would. Saves that predate this
+        // field load as 0 (the fresh-boot value).
+        {"waterSimCursor", m_worldSystem ? m_worldSystem->GetWaterSimWindowCursor() : std::size_t{0}}
     };
 
     file << std::setw(4) << metadata_json << std::endl;

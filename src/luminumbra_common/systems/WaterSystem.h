@@ -108,6 +108,36 @@ public:
         m_evap_mm_per_tick = evap_mm_per_tick;
     }
 
+    // WATER-17 boot-settle mode. The per-tick init/sim caps exist to bound LIVE-play frame
+    // cost; during the server BOOT water settle they make the fixed point unreachable:
+    // init drains at MAX_WATER_INITS_PER_TICK=6 while the calm check exits early
+    // (fresh-seeded chunks read asleep), and the MAX_WATER_SIMS_PER_TICK=64 rotating window
+    // advances each awake chunk's ticks_below_threshold only once per rotation — with ~2900
+    // awake chunks that is one sleep-counter step per ~45 ticks, x120 needed, >> any sane
+    // settle cap (measured: the loaded heavy-oracle session exits its 400-cap with ALL 5433
+    // water chunks still awake). Boot mode lifts BOTH caps (init ALL pending in parallel,
+    // sim ALL awake chunks) so settle converges; loading-phase wall time is the only cost.
+    // Set ONLY around the Boot settle loop — live-play behaviour is byte-identical.
+    void SetBootSettleMode(bool on) { m_boot_settle_mode = on; }
+
+    // WATER-17 loaded-boot water pause: a session booted FROM A SAVE must not advance
+    // water during Boot at all — the restored state (depths, sleep flags, counters) IS
+    // the authoritative mid-flow state, and the water network flows perpetually (wet/dry
+    // boundary cells limit-cycle and wake propagation re-wakes their neighbours —
+    // measured: awake GROWS past 2500 of 5433 even after 3000 full-set settle
+    // iterations), so any boot-side stepping advances the loaded session past the
+    // original's saved state and the water sub-hash can never round-trip. Paused,
+    // update() is a no-op; live ticks resume from the exact loaded state.
+    void SetBootPaused(bool on) { m_boot_paused = on; }
+
+    // WATER-17: the rotating sim-window cursor is EVOLUTION-RELEVANT sim state whenever
+    // more chunks are awake than MAX_WATER_SIMS_PER_TICK (which 64-chunk window sims
+    // first changes subsequent depths). It is persisted with the world (world_info.json
+    // waterSimCursor) and restored on load so a loaded session resimulates the exact
+    // same windows the original would from the same state. Not itself hashed.
+    [[nodiscard]] std::size_t GetSimWindowCursor() const { return m_water_sim_cursor; }
+    void SetSimWindowCursor(std::size_t cursor) { m_water_sim_cursor = cursor; }
+
     // --- Adaptive Water Grid System ---
     
     /**
@@ -150,6 +180,11 @@ private:
     bool m_finite_hydrology = false;
     std::int32_t m_rain_mm_per_tick = 0;
     std::int32_t m_evap_mm_per_tick = 0;
+
+    // WATER-17: boot-settle mode (see SetBootSettleMode). Lifts the init/sim caps during Boot.
+    bool m_boot_settle_mode = false;
+    // WATER-17: loaded-boot water pause (see SetBootPaused). update() is a no-op while set.
+    bool m_boot_paused = false;
 
     // spec 008 follow-up (streaming-burst amortization): rotating cursor for the per-tick water-sim
     // budget. When more chunks are active than MAX_WATER_SIMS_PER_TICK, we sim a DETERMINISTIC window

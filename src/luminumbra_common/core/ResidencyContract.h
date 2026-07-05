@@ -192,17 +192,24 @@ inline constexpr ChunkFieldResidency kChunkFieldResidency[] = {
     {"water_sim_terrain_height", ResidencyClass::Sim},
     {"water_depth_mm", ResidencyClass::Sim},
     {"water_bed_mm", ResidencyClass::Sim},
+    // WATER-17/WATER-13 (Bump A): flow momentum — evolution-relevant integer sim
+    // truth, persisted + hashed (it was transient/cleared-on-load before, which made
+    // the heavy oracle's resim leg diverge).
+    {"water_edge_flux", ResidencyClass::Sim},
     {"has_water_sim", ResidencyClass::Sim},
-    // Status-quo-hashed water bookkeeping, Sim BY PRECEDENT (they are in the
-    // hash today). water_mesh_generated / water_mesh_dirty_ticks smell
-    // render-adjacent and the water section's persistence/settle design is
-    // under WATER-17 — any reclassification is a deliberate bump there.
-    {"water_mesh_generated", ResidencyClass::Sim},
+    // Water bookkeeping. WATER-17 resolved the parked question: water_mesh_generated
+    // and water_mesh_dirty_ticks are MESHING bookkeeping mutated by the (worker-order-
+    // dependent, render-side) mesh pipeline — the loaded-boot remesh flips them while
+    // the water sim itself is paused, so hashing them makes the save/load water
+    // round-trip impossible. Reclassified Render as the deliberate WATER-17 bump
+    // (Bump A). The sleep/threshold fields stay Sim: they gate which chunks the
+    // solver steps (evolution-relevant) and are only ever written by the solver.
+    {"water_mesh_generated", ResidencyClass::Render},
     {"current_water_resolution", ResidencyClass::Sim},
     {"is_water_sleeping", ResidencyClass::Sim},
     {"max_water_delta_last_tick", ResidencyClass::Sim},
     {"ticks_below_threshold", ResidencyClass::Sim},
-    {"water_mesh_dirty_ticks", ResidencyClass::Sim},
+    {"water_mesh_dirty_ticks", ResidencyClass::Render},
     {"water_state", ResidencyClass::Sim},
 };
 
