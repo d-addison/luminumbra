@@ -184,6 +184,16 @@ void LightingPass::execute(const RenderContext& ctx) {
     m_lighting_shader->setVec3("u_moonDir", ctx.moon_light_dir);
     m_lighting_shader->setFloat("u_moonIllum", ctx.moon_illumination); // Pillar A A-T04: lunar phase
     m_lighting_shader->setVec3("u_moonRadiance", ctx.moon_radiance);    // Pillar A Codex C5: dedicated moon radiance channel
+    // AC-A-001 pair lever (Wave F F10): LUMIN_MOON_WRAP_FLOOR overrides the moon
+    // wrap floor (parsed once; default 0.25 = today's bytes) so ONE build stages
+    // both ratification candidates - brighter navigable vs moodier floorless.
+    static const float s_moon_wrap_floor = [] {
+        if (const char* e = std::getenv("LUMIN_MOON_WRAP_FLOOR")) {
+            try { return std::stof(e); } catch (...) {}
+        }
+        return 0.25f;
+    }();
+    m_lighting_shader->setFloat("u_moonWrapFloor", s_moon_wrap_floor);
 
     m_lighting_shader->setFloat("u_sea_level", SEA_LEVEL);
     // T-I7 cinematic grade (BF1-style): BOLD default — lifted exposure, rich

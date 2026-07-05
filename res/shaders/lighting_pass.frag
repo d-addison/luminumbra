@@ -79,6 +79,12 @@ uniform vec3 u_moonDir;
 // Spec 015 Pillar A (A-T04): lunar illumination [0,1] -> the "two night modes". 1 = full
 // moon (bright, navigable night + crisp moon shadows); ~0 = new moon (dark, wants a torch).
 uniform float u_moonIllum = 1.0;
+// AC-A-001 (owner ratification PENDING, Wave F F10): the moon wrap FLOOR is a
+// uniform so ONE build stages both candidates — 0.25 = the current brighter
+// navigable night (the default: byte-identical), 0.0 = the moodier floorless
+// midnight. Ratification flips or keeps the default; the lever then stays for
+// photo-mode grading.
+uniform float u_moonWrapFloor = 0.25;
 // Spec 015 Pillar A (A-T04, Codex C5): the moon's OWN radiance channel — the cool key
 // colour, set from C++ (RenderContext.moon_radiance) instead of a hardcoded shader const,
 // so the moon can be calibrated/tuned independently of the sun. Default == the prior
@@ -512,7 +518,7 @@ void main() {
         // softly fill slopes + undersides so the night is NAVIGABLE, while the low
         // floor + cast-shadow term keep it clearly NIGHT (dim, directional) not a
         // flat day-bright wash.
-        float moonWrap = NdotL_moon * 0.6 + 0.25;
+        float moonWrap = NdotL_moon * 0.6 + u_moonWrapFloor;
         vec3 moonDiffuse = (Albedo / PI) * moonRadiance * moonWrap;
         // Soft, cheap specular highlight so wet/low-roughness night surfaces catch
         // a cool moon glint (sun uses the full BRDF; the moon gets a light Blinn-

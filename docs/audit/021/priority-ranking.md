@@ -789,6 +789,78 @@ SERIAL ctest lane green except the chartered `ForestPerfBudget`. Boot cost: fres
 now runs ~241 iterations (~50 s debug) — a loading-phase cost only; loaded boots skip the
 settle entirely.
 
+## Wave F record — the render band (CLOSED 2026-07-05)
+
+Wave F landed the ENTIRE remaining render band in one autonomous run — the whole-frame A/B
+harness (the campaign keystone), the RENDER-11 execution migration, live shader authoring,
+and all four Pillar B/C features — with the determinism law intact end to end: every commit
+held `--smoke` byte-identical at the Bump-A canonical `a88cfec6a916d614` (run==replay), and
+the NEW `-Mode RenderParityFrame` gate held the whole-frame A/B at **EXACT 0.0** through all
+nine feature landings. Codex (gpt-5.5 high, read-only) signed off the harness design
+GO-WITH-CHANGES; its two real findings (ShieldRT far-field update inside dispatch; a hidden
+`glfwGetTime()` in ParticlePass) were fixed before the harness was blessed.
+
+**Landed this wave (16 commits `dbb54b3b`..`3523e26f` + the F10 lever):**
+- **F1 — the in-process whole-frame A/B harness** (`dbb54b3b`, `55ab6a13`): `render_frame`
+  split into `prepare_frame()` (all CPU mutation) + `dispatch_stages()` (bit-idempotent GPU
+  dispatch over `FramePrepared`); twin-dispatch capture + `InProcessFlip` scoring; validator
+  `-Mode RenderParityFrame` demands exactly 0.0 at 3840x1581. The no-byte-exact-frame-gate
+  era is OVER — this unlocked every subsequent render feature and gates the entire M2/M3
+  port band.
+- **F2 — RENDER-11 COMPLETE** (`5ce622f7`, `8dc5e3a0`): all 23 node bodies extracted to
+  `execute_stage_*` members; the executor table + `BuildLuminumbraFrameGraph().schedule()`
+  DRIVE production dispatch (declaration == execution); drift guard extended with
+  executor-coverage. RenderBudget unregressed.
+- **F3 — spec 023 live shader authoring, crawl+walk** (`1c4f0db3`): `enumerate_shaders`
+  roster (16 shaders; the pipeline-owned post shaders joined health), F5 reload-all, the
+  once/sec watcher auto-reload, and the F10 ImGui panel with live uniform editing.
+- **F4 — GPU-14** (`a105d909`) + **RENDER-20** (`83433bcd`), both agent-implemented on
+  file-disjoint sets and orchestrator-verified: PIX/Nsight trigger seams (7/7 capture
+  tests); world-dressing bring-up moved to a background job with RNG streams preserved
+  byte-for-byte (test-pinned incl. the shared-stream property).
+- **F5 — RENDER-15 colored shadow maps** (`30c57362`): Beer-Lambert tint cascades
+  (GlassTintModel == shadow_tint.frag pinned to 8-bit exactness); the lighting multiply
+  proven on the REAL shaders (white == disabled byte-identically; a red pane reddens the
+  lit sun). Empty-glass worlds pay zero GPU.
+- **F6 — rank-69 GPU auto-exposure, FLAG-OFF** (`0e6b9090`): the first born-graph-native
+  stage; geometric-mean metering through the 017-A ring with zero blocking calls; the
+  damped servo behind `--auto-exposure-metered`. RENDER-07 ≡ ATMO-05 done at their
+  chartered default-OFF done-state.
+- **F7 — RENDER-17 froxel volumetrics** (`4abce97e`): inject/integrate kernels (uniform
+  medium == analytic Beer-Lambert within 0.004, FIRST RUN), the C-1 tint compose for
+  colored shafts, mode-1 aerial composition; mode 0 default byte-identical.
+- **F8 — RENDER-18 WBOIT glass** (`3523e26f`): commutative-sum order independence (proven
+  algebraically, exact); Beer-Lambert absorption + screen-space refraction of the pre-water
+  snapshot; looked-at capture confirms visible refracting glass.
+- **F9 — spec 022 celestial seam, Tier 1** (`0f1d4125`): sun+moon as two evaluated
+  instances of one primitive; bit-exact against the RENDER-14 primitives across a
+  700-combination sweep (memcmp-level).
+- **F10 — the AC-A-001 pair lever**: `u_moonWrapFloor` uniform (default 0.25 = today's
+  bytes; `LUMIN_MOON_WRAP_FLOOR` env) — ONE build stages both ratification candidates;
+  midnight pair + froxel dawn + metered-night captures staged for PAUSE #1.
+
+**Constraint held:** render-only end to end — zero hash movement across the wave (the smoke
+literal never moved after Bump A); every pixel-moving feature landed either byte-identical
+by default (mode/flag OFF, empty lists) or behind an explicit opt-in, with the parity gate
+as the enforcement mechanism rather than a promise.
+
+**Items of record:** RENDER-16 (TAAU history, rank 75) was already done pre-wave. The
+`-Mode InteractiveBootLeash` frame-time gate (RENDER-20's leash half) and the froxel
+temporal tier + RenderBudget mode-1 measurement are recorded follow-ups, owner-visible at
+PAUSE #1. The colored-shadow beauty pool and the centered glass-stack strip are PAUSE #1
+packet refinements (the mechanisms are gate-proven; the first staging attempts documented
+the lessons: vertical panes under a near-noon sun cast slivers, and pools land invisibly
+under forward-lit grass — stage on bare deferred-lit terrain).
+
+**Wave F is CLOSED.** Gate evidence: smokes byte-identical (debug static
+`a88cfec6a916d614` all 16 commits); RenderParityFrame EXACT 0.0 continuously; RenderHealth
+GREEN per commit (FR-A-005 provenance honored); full render ctest suites green; backlog
+190/190 valid with RENDER-07/11/15/17/18/20 + ATMO-05 + GPU-14 flipped. **PAUSE #1 (visual
+checkpoint) is OPEN** — the owner packet carries the AC-A-001 midnight pair, the froxel
+dawn scene, the OIT glass capture, the metered-exposure night shot, and the activation
+menu (auto-exposure ON/OFF, froxel default tier, AC-A-001 floor). Next: Wave G (bridges +
+hardening) starts on the ratified defaults.
+
 ## Spine-inversion register (AC-003)
 
 Exactly one deliberate inversion, justified inline at its rank:

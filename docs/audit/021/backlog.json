@@ -1279,9 +1279,10 @@
         "017-A",
         "ATMO-04"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "ReadbackDiscipline + RenderReadbackAllowlist gates (validate-engine-frontier.ps1:7305-7306) green + TimeOfDaySweep + --render-benchmark p50 within budget",
-      "rank": 69
+      "rank": 69,
+      "note": "DONE 2026-07-05 (Wave F F6 = RENDER-07, commit 0e6b9090; see that item). Landed flag-OFF pending PAUSE #1 ratification; the analytic AutoExposureForElevation curve remains the shipped default."
     },
     {
       "id": "RENDER-07",
@@ -1296,9 +1297,10 @@
         "018-E/F",
         "RENDER-01"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: ExposureMeter ctest — ring-metered exposure converges on a known-luminance offscreen frame without blocking; plus validate-engine-frontier.ps1 -Mode DeterminismAudit + WorldVisualSweep rerun",
-      "rank": 69
+      "rank": 69,
+      "note": "DONE 2026-07-05 (Wave F F6, commit 0e6b9090; = ATMO-05). GPU auto-exposure landed FLAG-OFF (the chartered done-state; activation = owner ratification at PAUSE #1): luminance_reduce.comp geometric-mean metering -> AsyncReadbackRing (zero blocking calls; FR-G-001 clean) -> damped servo (0.18 key, 0.25-4.0 clamps, 0.08 adapt) -> the auto half of SelectRenderExposure behind --auto-exposure-metered. First born-graph-native stage. Gate: AsyncReadbackRing.ExposureMeterKernelReducesConstantSceneNonBlocking."
     },
     {
       "id": "ATMO-06",
@@ -1394,9 +1396,10 @@
         "014",
         "RENDER-15"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "WorldVisualSweep rerun + validate-engine-frontier.ps1 -Mode RenderBudget + -Mode DeterminismAudit (froxel render-only)",
-      "rank": 75
+      "rank": 75,
+      "note": "DONE 2026-07-05 (Wave F F7, commit 4abce97e). Froxel volumetrics: FroxelGrid.h (160x90x64 exponential 0.5-160m), froxel_inject.comp (height-fog density + shadow-cascade sun visibility INCLUDING the C-1 tint cascade -> colored shafts, HG g=0.3) + froxel_integrate.comp (front-to-back T/L march), graph-native nodes before aerial, mode-1 compose EXTENDS the analytic aerial (u_volumetricMode; mode 0 default = byte-identical). Gates: FroxelModel anchors + FroxelUniformMediumMatchesAnalyticTransmittance (kernels == exp(-sigma d) within 0.004); RenderParityFrame EXACT 0.0. Default tier + temporal tier (quality 2) + RenderBudget mode-1 measurement = PAUSE #1 ratification items."
     },
     {
       "id": "RENDER-18",
@@ -1410,9 +1413,10 @@
         "RENDER-17",
         "014"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "WorldVisualSweep rerun + validate-engine-frontier.ps1 -Mode RenderBudget on the fixed benchmark pose",
-      "rank": 75
+      "rank": 75,
+      "note": "DONE 2026-07-05 (Wave F F8, commit 3523e26f). Weighted-blended OIT glass (015 OQ-5: WBOIT first, commutative-sum order independence; linked-list stays a measured contingency): OitModel.h McGuire-Bavoil weights, glass_oit.{vert,frag} accum/reveal MRT sharing the lighting depth, screen-space refraction of the pre-water opaque snapshot filtered by the SAME GlassTintModel Beer-Lambert as the shadow tint, glass_oit_resolve composite before the weather snapshot. Gates: OitModel.WeightFunctionMonotoneAndCompositeAlgebra (exact algebraic order-independence); empty-glass byte-identity via RenderParityFrame EXACT 0.0 + RenderHealth; looked-at capture (red pane renders as refracting translucent glass)."
     },
     {
       "id": "ATMO-07",
@@ -1440,9 +1444,10 @@
       "dependencies": [
         "RENDER-19"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: interactive-boot leash check — no post-entry main-thread frame exceeds 500 ms (debug) through the first 90 s, with trees + wildlife still present (frame-scan foliage/tree coverage unchanged); --smoke unchanged (client-only)",
-      "rank": 76
+      "rank": 76,
+      "note": "DONE 2026-07-05 (Wave F F4, commit 83433bcd, agent-implemented + orchestrator-verified). WorldDressing.{h,cpp}: all four placement loops (trees/rocks/bushes/wildlife) moved VERBATIM behind injected callbacks and run as ONE background JobSystem job (Spec13WorldScan pattern), amortized main-thread consume, drains at all three world-transition sites; capture paths run synchronously (placements byte-identical either way). RNG-stream preservation test-pinned incl. the shared-stream property (world_dressing_test 3/3). Follow-up recorded: the -Mode InteractiveBootLeash frame-time gate (the leash half of the proving signal)."
     },
     {
       "id": "WATER-17",
