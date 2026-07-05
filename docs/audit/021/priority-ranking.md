@@ -638,16 +638,19 @@ Two decisions of record:
   "fixed day/night stops" branch, which the landed A-T05 analytic exposure curve already
   provides), and building it now would force a second visual re-bless. It stays `todo` in the
   ranked band as a standalone item.
-- **AC-A-001 amended (owner-ratifiable).** The AC asked for a navigable midnight "with
-  `kMoonKeyScale` / `nightAmbient` / wrap-floor removed." An evidence-first honesty check — a
-  floor-zeroed capture — halves ground luma (84→46) and triples the near-black slope fraction
-  (6%→16%): at night the sun is below the horizon so atmospheric in-scatter ≈ 0, and — unlike
-  the daytime sun (FR-A-001, physically transmittance-coupled) — there is no physical signal
-  to replace the authored night fill; removal reintroduces the darkness the owner explicitly
-  objected to ("moon very dark"). The authored night terms are ratified as load-bearing. This
-  is the legitimate amend case (the consistent principle across the wave: **build when the
-  physics delivers a real signal, amend only when the capture proves it cannot**). Flagged for
-  owner review at this pause.
+- **AC-A-001 amended — pending owner ratification.** The AC asked for a navigable midnight
+  "with `kMoonKeyScale` / `nightAmbient` / wrap-floor removed." An evidence-first honesty
+  check (a floor-zeroed capture) split that clause into two findings. *(1) Sound:* at night the
+  sun is below the horizon so atmospheric in-scatter ≈ 0 — unlike the daytime sun (FR-A-001,
+  transmittance-coupled) there is no physical model to replace the authored night fill, so night
+  lighting is inherently authored and the moon key / ambient stay. *(2) A taste lever:* the
+  wrap-floor VALUE is the knob — floorless is moodier (luma 46, 16% near-black) yet **still
+  navigable by the AC's own ≳8 bar**, while the current floored value is brighter (luma 84, 6%)
+  per the owner's "moon very dark" (brighter-nights) intent. Both pass. The current build keeps
+  the floor; the genuine ratifiable choice for the owner is **brighter-floored [current] vs
+  moodier-floorless**. Consistent wave principle: **build when the physics delivers a real
+  signal (FR-A-001 sun), amend only when the capture shows the choice is authored taste (this
+  floor).**
 
 **Wave D close (2026-07-04): the three ranked Pillar-A items in the band (67, 68, 70) are
 done; rank 69 split out.** Wave gate held: both determinism smokes run==replay at their
@@ -656,7 +659,10 @@ construction, all changes render-only); the FR-A-001 + exposure contract gates g
 pixel pairs non-vacuous); the full SERIAL ctest lane green — **1611 of 1612 tests pass, the
 sole failure the chartered `ForestPerfBudget`**; and the visual intent verified on looked-at
 captures — noon byte-identical (mean-luma 0.414, unchanged), the golden hour reddens AND dims
-physically, night foliage de-garished, both moon modes navigable. **Paused at the wave
+physically, night foliage de-garished, both moon modes navigable. **AC-A-005 (intentional
+re-bless) disposition:** the noon lighting inputs are byte-identical, so no blessed visual
+baseline moved — no re-bless was required; the TOD-specific golden/midnight changes were
+verified on looked-at ad-hoc captures, not on pinned baselines. **Paused at the wave
 boundary for owner review** (the AC-A-001 amend surfaced above for ratification); the next
 ranked band (71+) follows.
 

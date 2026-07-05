@@ -907,8 +907,9 @@ private:
     // T-I4-DR-tod-sky-balance: continuous day->twilight->night factor derived
     // from the sun's elevation, smoothly 1 (sun high) -> 0 (sun below horizon).
     // The sky dome reads this so its brightness/tint tracks time-of-day with
-    // the SAME elevation signal that drives sun.color/ambient, instead of the
-    // clamped m_sun.intensity (which saturates to 1 while the sun is still low,
+    // the SAME elevation signal (sun_up_factor) that drives the ambient day/night
+    // blend (the direct-sun color is now transmittance-coupled — FR-A-001), instead
+    // of the clamped m_sun.intensity (which saturates to 1 while the sun is still low,
     // leaving the dusk dome stuck at full midday and the night dome bright).
     float m_skyDayFactor = 1.0f;
     // Spec 015 Pillar A (A-T05): deterministic time-of-day exposure (eye adaptation),
