@@ -1474,6 +1474,10 @@ void RenderPipeline::enumerate_shaders(
     visit("god_rays", m_god_rays_shader.get());
     visit("cloud_composite", m_cloud_composite_shader.get());
     visit("waterfall", m_waterfall_shader.get());
+    // Spec 015 C-2 (RENDER-18): the WBOIT glass chain (lazy — null until glass
+    // first appears; health reports "not initialized", which is accurate).
+    if (m_glass_oit_shader) { visit("glass_oit", m_glass_oit_shader.get()); }
+    if (m_glass_oit_resolve_shader) { visit("glass_oit_resolve", m_glass_oit_resolve_shader.get()); }
 }
 
 std::vector<RenderPipeline::ShaderHealthEntry> RenderPipeline::get_shader_health() const {
@@ -2529,6 +2533,8 @@ RenderPipeline::stage_executor_table() {
         {"opaque_snapshot", &RenderPipeline::execute_stage_opaque_snapshot},
         {"water", &RenderPipeline::execute_stage_water},
         {"waterfall", &RenderPipeline::execute_stage_waterfall},
+        {"glass_oit_accum", &RenderPipeline::execute_stage_glass_oit_accum},
+        {"glass_oit_resolve", &RenderPipeline::execute_stage_glass_oit_resolve},
         {"weather_opaque_snapshot", &RenderPipeline::execute_stage_weather_opaque_snapshot},
         {"weather_overlay", &RenderPipeline::execute_stage_weather_overlay},
         {"froxel_inject", &RenderPipeline::execute_stage_froxel_inject},
@@ -2931,6 +2937,136 @@ void RenderPipeline::execute_stage_waterfall(const Camera& camera) {
         if (blend_was) glEnable(GL_BLEND); else glDisable(GL_BLEND);
     }
 
+}
+
+void RenderPipeline::execute_stage_glass_oit_accum(const Camera& camera) {
+    // Spec 015 C-2 (RENDER-18): WBOIT accumulation — each visible pane writes its
+    // depth-weighted premultiplied color into accum (blend ONE/ONE) and its
+    // coverage into reveal (ZERO/ONE_MINUS_SRC_ALPHA -> the (1-a) product),
+    // depth-TESTED against the SHARED lighting depth (write off). Empty glass
+    // list = zero GL work (the trace slot still records).
+    record_frame_stage("glass_oit_accum");
+    if (m_glass_pane_items.empty() || m_glass_quad_vao == 0) {
+        return;
+    }
+    if (!m_glass_oit_shader) {
+        // Lazy init: shaders + the accum/reveal MRT FBO sharing the lighting depth.
+        m_glass_oit_shader = std::make_unique<Shader>(
+            (m_root_path / "res/shaders/glass_oit.vert").string().c_str(),
+            (m_root_path / "res/shaders/glass_oit.frag").string().c_str());
+        label_gl_object(GL_PROGRAM, m_glass_oit_shader ? m_glass_oit_shader->Id() : 0u, "shader.glass_oit");
+        m_glass_oit_resolve_shader = std::make_unique<Shader>(
+            (m_root_path / "res/shaders/volumetric_lighting.vert").string().c_str(),
+            (m_root_path / "res/shaders/glass_oit_resolve.frag").string().c_str());
+        label_gl_object(GL_PROGRAM, m_glass_oit_resolve_shader ? m_glass_oit_resolve_shader->Id() : 0u, "shader.glass_oit_resolve");
+
+        auto make_target = [&](GLenum ifmt, const char* name) {
+            GLuint t = 0;
+            glGenTextures(1, &t);
+            glBindTexture(GL_TEXTURE_2D, t);
+            glTexStorage2D(GL_TEXTURE_2D, 1, ifmt, m_screen_width, m_screen_height);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            label_gl_object(GL_TEXTURE, t, name);
+            return t;
+        };
+        m_oit_accum_tex = make_target(GL_RGBA16F, "oit.accum");
+        m_oit_reveal_tex = make_target(GL_R16F, "oit.reveal");
+        glGenFramebuffers(1, &m_oit_fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, m_oit_fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_oit_accum_tex, 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, m_oit_reveal_tex, 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D,
+                               m_lighting_pass->lighting_fbo().depth_texture, 0);
+        label_gl_object(GL_FRAMEBUFFER, m_oit_fbo, "oit.fbo");
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            LUMINUMBRA_CORE_ERROR("glass_oit: MRT FBO incomplete; OIT disabled");
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glDeleteFramebuffers(1, &m_oit_fbo);
+            m_oit_fbo = 0;
+            return;
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
+    if (m_oit_fbo == 0 || !m_glass_oit_shader->IsValid()) {
+        return;
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, m_oit_fbo);
+    const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+    glDrawBuffers(2, bufs);
+    glViewport(0, 0, m_screen_width, m_screen_height);
+    const GLfloat clear_accum[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    const GLfloat clear_reveal[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    glClearBufferfv(GL_COLOR, 0, clear_accum);
+    glClearBufferfv(GL_COLOR, 1, clear_reveal);
+
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
+    glDepthMask(GL_FALSE);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunci(0, GL_ONE, GL_ONE);
+    glBlendFunci(1, GL_ZERO, GL_ONE_MINUS_SRC_ALPHA);
+
+    m_glass_oit_shader->use();
+    m_glass_oit_shader->setMat4("u_view", m_frame_prepared.view);
+    m_glass_oit_shader->setMat4("u_projection", m_frame_prepared.projection);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_lighting_pass->lighting_fbo().opaque_color_texture);
+    m_glass_oit_shader->setInt("u_opaqueScene", 0);
+    m_glass_oit_shader->setVec2("u_screenSize",
+                                glm::vec2(static_cast<float>(m_screen_width),
+                                          static_cast<float>(m_screen_height)));
+    m_glass_oit_shader->setVec3("u_cameraPos", camera.Position);
+    m_glass_oit_shader->setFloat("u_refractionStrength", 0.35f);
+    glBindVertexArray(m_glass_quad_vao);
+    for (const GlassPaneItem& pane : m_glass_pane_items) {
+        m_glass_oit_shader->setMat4("u_model", pane.model);
+        m_glass_oit_shader->setVec3("u_tint", pane.tint);
+        m_glass_oit_shader->setFloat("u_thickness", pane.thickness);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+    }
+    glBindVertexArray(0);
+
+    // Restore the default blend state (per-buffer funcs revert to the global).
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDisable(GL_BLEND);
+    glEnable(GL_CULL_FACE);
+    glDepthMask(GL_TRUE);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+void RenderPipeline::execute_stage_glass_oit_resolve(const Camera& camera) {
+    (void)camera;
+    // Spec 015 C-2 (RENDER-18): the WBOIT resolve — the weighted-average glass
+    // color composited over the lit scene with coverage = 1 - reveal. Runs
+    // BEFORE the weather snapshot so god-rays/weather observe resolved glass.
+    record_frame_stage("glass_oit_resolve");
+    if (m_glass_pane_items.empty() || m_oit_fbo == 0 ||
+        !m_glass_oit_resolve_shader || !m_glass_oit_resolve_shader->IsValid() ||
+        m_screen_quad_vao == 0) {
+        return;
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
+    glViewport(0, 0, m_screen_width, m_screen_height);
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    m_glass_oit_resolve_shader->use();
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_oit_accum_tex);
+    m_glass_oit_resolve_shader->setInt("u_accum", 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, m_oit_reveal_tex);
+    m_glass_oit_resolve_shader->setInt("u_reveal", 1);
+    glBindVertexArray(m_screen_quad_vao);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glBindVertexArray(0);
+    glDisable(GL_BLEND);
+    glEnable(GL_DEPTH_TEST);
+    glActiveTexture(GL_TEXTURE0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 void RenderPipeline::execute_stage_weather_opaque_snapshot(const Camera& camera) {
@@ -3894,6 +4030,12 @@ void RenderPipeline::cleanup_gpu_resources() {
     if (m_froxel_integrate_program) { glDeleteProgram(m_froxel_integrate_program); m_froxel_integrate_program = 0; }
     if (m_froxel_scatter_tex) { glDeleteTextures(1, &m_froxel_scatter_tex); m_froxel_scatter_tex = 0; }
     if (m_froxel_integrated_tex) { glDeleteTextures(1, &m_froxel_integrated_tex); m_froxel_integrated_tex = 0; }
+    // Spec 015 C-2 (RENDER-18): the WBOIT glass chain.
+    m_glass_oit_shader.reset();
+    m_glass_oit_resolve_shader.reset();
+    if (m_oit_fbo) { glDeleteFramebuffers(1, &m_oit_fbo); m_oit_fbo = 0; }
+    if (m_oit_accum_tex) { glDeleteTextures(1, &m_oit_accum_tex); m_oit_accum_tex = 0; }
+    if (m_oit_reveal_tex) { glDeleteTextures(1, &m_oit_reveal_tex); m_oit_reveal_tex = 0; }
     // T-I5b-4 (W1): release the baked waterfall sheet geometry.
     if (m_waterfall_vao) { glDeleteVertexArrays(1, &m_waterfall_vao); m_waterfall_vao = 0; }
     if (m_waterfall_vbo) { glDeleteBuffers(1, &m_waterfall_vbo); m_waterfall_vbo = 0; }

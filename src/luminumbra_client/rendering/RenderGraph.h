@@ -232,6 +232,12 @@ inline RenderGraph BuildLuminumbraFrameGraph() {
     g.add({"water", {"lighting.opaque_color", "lighting.depth"}, {"lighting.color"}, {}, true});
     // 7-W: waterfall veils blend over the lit scene, depth-tested.
     g.add({"waterfall", {"lighting.depth"}, {"lighting.color"}, {}, true});
+    // Spec 015 C-2 (RENDER-18): WBOIT glass — panes accumulate into oit.accum/
+    // oit.reveal (depth-tested vs the shared lighting depth, refraction from the
+    // pre-water opaque snapshot), then the resolve composites over lighting.color
+    // BEFORE the weather snapshot so god-rays/weather see resolved glass.
+    g.add({"glass_oit_accum", {"lighting.depth", "lighting.opaque_color"}, {"oit.accum", "oit.reveal"}, {}, true});
+    g.add({"glass_oit_resolve", {"oit.accum", "oit.reveal"}, {"lighting.color"}, {}, true});
     // 7a: snapshot #2 (only when the weather overlay runs), then the weather overlay reads it.
     g.add({"weather_opaque_snapshot", {"lighting.color"}, {"lighting.opaque_color"}, {}, true});
     g.add({"weather_overlay", {"lighting.opaque_color"}, {"lighting.color"}, {}, false});

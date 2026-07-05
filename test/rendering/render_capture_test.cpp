@@ -39,6 +39,7 @@
 #include "rendering/GlassTintModel.h" // Spec 015 C-1 (RENDER-15): tinted transmission
 #include "rendering/FroxelGrid.h"     // Spec 015 Pillar B (RENDER-17): the froxel grid model
 #include "rendering/CelestialBodyModel.h" // Spec 022 Tier 1: the celestial-body seam
+#include "rendering/OitModel.h"           // Spec 015 C-2 (RENDER-18): WBOIT model
 
 namespace fs = std::filesystem;
 
@@ -1190,6 +1191,48 @@ TEST(FroxelModel, SliceDistributionAndWorldMappingAnchors) {
     EXPECT_FLOAT_EQ(F::DepthToTextureW(0.0f), 0.0f);
     EXPECT_FLOAT_EQ(F::DepthToTextureW(F::kFarDepth * 2.0f), 1.0f);
     EXPECT_GT(F::DepthToTextureW(10.0f), F::DepthToTextureW(5.0f));
+}
+
+// Spec 015 C-2 (RENDER-18): the WBOIT model — the depth weight's shape and the
+// composite algebra. Order independence is BY CONSTRUCTION (the accumulation is
+// a commutative sum), pinned here algebraically; the glass_oit shaders mirror
+// DepthWeight exactly.
+TEST(OitModel, WeightFunctionMonotoneAndCompositeAlgebra) {
+    namespace O = Luminumbra::Rendering::Oit;
+    // Near surfaces outweigh far ones, monotonically.
+    float prev = O::DepthWeight(0.5f, 1.0f);
+    for (float z : {2.0f, 8.0f, 30.0f, 90.0f, 300.0f}) {
+        const float w = O::DepthWeight(z, 1.0f);
+        EXPECT_LT(w, prev) << "depth weight must fall with distance (z=" << z << ")";
+        prev = w;
+    }
+    // Weight scales linearly with alpha; zero alpha contributes nothing.
+    EXPECT_FLOAT_EQ(O::DepthWeight(10.0f, 0.5f), 0.5f * O::DepthWeight(10.0f, 1.0f));
+    EXPECT_FLOAT_EQ(O::DepthWeight(10.0f, 0.0f), 0.0f);
+    // The clamps hold at the extremes.
+    EXPECT_LE(O::DepthWeight(1e6f, 1.0f), 1e-2f + 1e-6f);
+    EXPECT_LE(O::DepthWeight(1e-6f, 1.0f), 3e3f);
+    // Composite algebra: the accumulation is a SUM and reveal is a PRODUCT —
+    // both commutative, so pane order cannot change the resolve. Two panes,
+    // both orders, identical resolve inputs.
+    struct Pane { float z, a; float c; };
+    const Pane p1{3.0f, 0.85f, 0.9f}, p2{7.0f, 0.85f, 0.2f};
+    auto accumulate = [](const Pane& first, const Pane& second) {
+        const float w1 = O::DepthWeight(first.z, first.a);
+        const float w2 = O::DepthWeight(second.z, second.a);
+        const float accum_c = first.c * first.a * w1 + second.c * second.a * w2;
+        const float accum_w = first.a * w1 + second.a * w2;
+        const float reveal = (1.0f - first.a) * (1.0f - second.a);
+        return std::array<float, 3>{accum_c, accum_w, reveal};
+    };
+    const auto ab = accumulate(p1, p2);
+    const auto ba = accumulate(p2, p1);
+    EXPECT_FLOAT_EQ(ab[0], ba[0]);
+    EXPECT_FLOAT_EQ(ab[1], ba[1]);
+    EXPECT_FLOAT_EQ(ab[2], ba[2]);
+    // Coverage: no glass -> 0; a full-alpha pane -> 1.
+    EXPECT_FLOAT_EQ(O::ResolveCoverage(1.0f), 0.0f);
+    EXPECT_FLOAT_EQ(O::ResolveCoverage(0.0f), 1.0f);
 }
 
 // Spec 022 Tier 1 (Wave F F9): the celestial-body seam is PLUMBING, not math —

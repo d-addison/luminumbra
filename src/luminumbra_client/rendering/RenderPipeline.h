@@ -898,6 +898,8 @@ private:
     void execute_stage_opaque_snapshot(const Camera& camera);
     void execute_stage_water(const Camera& camera);
     void execute_stage_waterfall(const Camera& camera);
+    void execute_stage_glass_oit_accum(const Camera& camera);
+    void execute_stage_glass_oit_resolve(const Camera& camera);
     void execute_stage_weather_opaque_snapshot(const Camera& camera);
     void execute_stage_weather_overlay(const Camera& camera);
     void execute_stage_froxel_inject(const Camera& camera);
@@ -1268,6 +1270,17 @@ private:
     u32 m_froxel_integrate_program = 0;
     u32 m_froxel_scatter_tex = 0;     // rgba16f 160x90x64: rgb in-scatter, a sigma
     u32 m_froxel_integrated_tex = 0;  // rgba16f 160x90x64: rgb accumulated L, a T
+
+    // Spec 015 C-2 (RENDER-18, Wave F F8): the WBOIT glass chain — panes
+    // accumulate weighted premultiplied color (accum) + coverage product
+    // (reveal), depth-tested against the SHARED lighting depth (write off);
+    // the resolve composites the weighted average over the lit scene. Empty
+    // glass list = both stages are zero-GL no-ops. Lazy-init in the accum stage.
+    std::unique_ptr<Shader> m_glass_oit_shader;
+    std::unique_ptr<Shader> m_glass_oit_resolve_shader;
+    u32 m_oit_fbo = 0;
+    u32 m_oit_accum_tex = 0;  // RGBA16F: rgb = sum(w*a*c), a = sum(w*a)
+    u32 m_oit_reveal_tex = 0; // R16F: product of (1 - a_i)
 
     u32 m_terrainTextureArray = 0;
     // Per-material triplanar normal-map array (T-I4-7). Same layer order as the
