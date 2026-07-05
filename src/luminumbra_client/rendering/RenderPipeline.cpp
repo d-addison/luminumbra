@@ -5212,27 +5212,12 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
         }
     }
 
-    // Spec 015 Pillar A (A-T05 / FR-A-004 interim): deterministic time-of-day EXPOSURE
-    // (eye adaptation). The atmosphere model spans orders of magnitude day->night; a fixed
-    // exposure leaves night a flat crush and golden hour over-bright. This is a pure
-    // function of the (render-derived) sun elevation — zero readback, deterministic — and
-    // feeds the lighting pass via RenderContext.exposure. It is the interim that the 017
-    // async-readback GPU metering (A-T06) later replaces; photo-mode manual EV (A-T07)
-    // overrides it. Render-only; never world_hash (018 FR-E-003).
-    //
-    // Calibrated so DAY == the prior static LUMIN_GRADE exposure (1.12) -> the noon image
-    // is preserved; lift at night for a navigable moonlit scene; a gentle dip through the
-    // low-sun golden band for contrast/mood.
-    {
-        constexpr float kDayExposure    = 1.12f; // == the prior static s_grade.exposure (noon preserved)
-        constexpr float kNightExposure  = 1.75f; // lift so a moonlit night stays dim-but-navigable
-        constexpr float kGoldenExposure = 1.02f; // gentle dip through the low-sun golden band (mood/contrast)
-        const float day    = glm::smoothstep(-0.05f, 0.30f, sun_up_factor); // 1 high sun -> 0 below horizon
-        const float golden = day * (1.0f - glm::smoothstep(0.18f, 0.45f, sun_up_factor)); // peaks low-but-positive
-        float exposure = glm::mix(kNightExposure, kDayExposure, day);
-        exposure = glm::mix(exposure, kGoldenExposure, golden);
-        m_pillarA_exposure = exposure;
-    }
+    // Spec 015 Pillar A (A-T05 / FR-A-004 interim) / RENDER-14: the deterministic time-of-day
+    // EXPOSURE curve (eye adaptation) is Rendering::AutoExposureForElevation (ExposureModel.h,
+    // co-located with the manual photo EV it shares the DAY anchor with -- both == kManualExposureM0
+    // so toggling photo mode at the default lens is continuous). Pure function of the render-derived
+    // sun elevation; feeds RenderContext.exposure; the manual photo EV overrides it. Render-only.
+    m_pillarA_exposure = Rendering::AutoExposureForElevation(sun_up_factor);
 
     // T-I5a-8 (C3): advance the wind-advected cloud scroll on the same tick-
     // derived deltaTime so the dome clouds + their cast shadow drift with the wind.

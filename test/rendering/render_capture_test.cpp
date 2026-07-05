@@ -804,6 +804,25 @@ TEST(ExposureModel, ManualMultiplierMapsLensEvAndPrecedenceSelects) {
     EXPECT_GT(R::SelectRenderExposure(base, 1.02f), 0.0f);
 }
 
+// Spec 016 FR-F-001 (RENDER-14): the AUTOMATIC time-of-day exposure curve extracted to
+// ExposureModel.h (Rendering::AutoExposureForElevation). Byte-exact vs the canonical-primitive
+// rebuild (glm::smoothstep/mix with the kManualExposureM0 day anchor), plus anchors: high sun ==
+// the day anchor (photo-mode continuity), deep night lifted, the golden band dips below day. GPU-free.
+TEST(ExposureModel, AutoExposureCurveMatchesPrimitivesAndAnchors) {
+    namespace R = Luminumbra::Rendering;
+    for (float up : {-1.0f, -0.2f, -0.05f, 0.0f, 0.1f, 0.2f, 0.22f, 0.3f, 0.5f, 0.9f, 1.0f}) {
+        const float got = R::AutoExposureForElevation(up);
+        const float day = glm::smoothstep(-0.05f, 0.30f, up);
+        const float golden = day * (1.0f - glm::smoothstep(0.18f, 0.45f, up));
+        float ref = glm::mix(1.75f, R::kManualExposureM0, day);
+        ref = glm::mix(ref, 1.02f, golden);
+        EXPECT_EQ(got, ref) << "up=" << up;
+    }
+    EXPECT_FLOAT_EQ(R::AutoExposureForElevation(1.0f), R::kManualExposureM0);            // high sun == day anchor
+    EXPECT_GT(R::AutoExposureForElevation(-0.5f), R::AutoExposureForElevation(1.0f));    // night lifted above day
+    EXPECT_LT(R::AutoExposureForElevation(0.22f), R::kManualExposureM0);                 // golden band dips below day
+}
+
 // Spec 016 FR-F-001 (RENDER-14): the SEASON facet extracted from update_time_of_day
 // (TimeOfDayModel::ComputeSeason) — the SAME function the frame runs. Byte-exact extraction
 // guard: each output is asserted == the same expression rebuilt from the CANONICAL primitive

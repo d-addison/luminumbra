@@ -20,6 +20,8 @@
 
 #include <cmath>
 
+#include <glm/glm.hpp> // glm::smoothstep / glm::mix for the auto TOD exposure curve
+
 #include "luminumbra_common/game/PhotoCamera.h" // luminumbra::game::LensSettings + ExposureValue
 
 namespace Luminumbra::Rendering {
@@ -56,6 +58,24 @@ inline float ManualExposureMultiplier(const luminumbra::game::LensSettings& lens
     if (mult < kManualExposureMin) mult = kManualExposureMin;
     if (mult > kManualExposureMax) mult = kManualExposureMax;
     return mult;
+}
+
+// Spec 015 Pillar A (A-T05 / FR-A-004 interim) / spec 016 FR-F-001 (RENDER-14): the AUTOMATIC
+// time-of-day EXPOSURE curve (eye adaptation), a pure function of the render-derived sun elevation
+// (zero readback, deterministic). The atmosphere model spans orders of magnitude day->night; a
+// fixed exposure leaves night a flat crush and golden hour over-bright. DAY == kManualExposureM0
+// (1.12) so the noon image is preserved and toggling photo mode at the default lens is continuous;
+// night is lifted for a navigable moonlit scene; a gentle dip through the low-sun golden band adds
+// mood/contrast. This is the interim the 017 async-readback GPU metering later replaces; the manual
+// photo EV (SelectRenderExposure) overrides it. Render-only; never world_hash (018 FR-E-003).
+inline float AutoExposureForElevation(float sunUpFactor) {
+    constexpr float kNightExposure  = 1.75f; // lift so a moonlit night stays dim-but-navigable
+    constexpr float kGoldenExposure = 1.02f; // gentle dip through the low-sun golden band (mood/contrast)
+    const float day    = glm::smoothstep(-0.05f, 0.30f, sunUpFactor);        // 1 high sun -> 0 below horizon
+    const float golden = day * (1.0f - glm::smoothstep(0.18f, 0.45f, sunUpFactor)); // peaks low-but-positive
+    float exposure = glm::mix(kNightExposure, kManualExposureM0, day);
+    exposure = glm::mix(exposure, kGoldenExposure, golden);
+    return exposure;
 }
 
 // Precedence for the RenderContext.exposure seam: a photo-mode manual override (> 0)
