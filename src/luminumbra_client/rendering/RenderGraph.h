@@ -199,8 +199,10 @@ inline RenderGraph BuildLuminumbraFrameGraph() {
         return v;
     };
 
-    // 1. Shadow cascades. Reads terrain (external); writes the cascade depth array.
-    g.add({"shadow", {}, {"shadow.depth_array"}, {}, false});
+    // 1. Shadow cascades. Reads terrain (external); writes the cascade depth array
+    // + (spec 015 C-1, RENDER-15) the tinted-transmission cascade the glass
+    // occluder sub-pass fills (white = identity when no glass exists).
+    g.add({"shadow", {}, {"shadow.depth_array", "shadow.tint_array"}, {}, false});
     // 2. G-buffer: the deferred geometry pass writes all four attachments + depth.
     g.add({"gbuffer", {}, gbuf_all(), {}, false});
     // 2a/2b: procedural plants + experimental far-field raymarch draw into the SAME G-buffer,
@@ -216,6 +218,7 @@ inline RenderGraph BuildLuminumbraFrameGraph() {
     {
         std::vector<std::string> reads = gbuf_color;
         reads.push_back("shadow.depth_array");
+        reads.push_back("shadow.tint_array"); // spec 015 C-1: the glass transmission multiply
         reads.push_back("ssao.blur");
         g.add({"lighting", reads, {"lighting.color", "lighting.depth"}, {}, false});
     }

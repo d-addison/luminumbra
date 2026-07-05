@@ -142,6 +142,14 @@ void LightingPass::execute(const RenderContext& ctx) {
     glActiveTexture(GL_TEXTURE10);
     glBindTexture(GL_TEXTURE_2D, ctx.aether_field.id);
     m_lighting_shader->setInt("u_aetherField", 10);
+    // Spec 015 C-1 (RENDER-15): the tinted-transmission cascade at unit 11. The
+    // array is init-cleared WHITE, so with no glass the multiply is exactly 1.0
+    // (pixel-identical); u_shadowTintEnabled==0 skips the sampling entirely (the
+    // same-build A/B lever: off vs on-with-white must FLIP to exactly 0.0).
+    glActiveTexture(GL_TEXTURE11);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.shadow_tint_array.id);
+    m_lighting_shader->setInt("u_shadowTintCascades", 11);
+    m_lighting_shader->setInt("u_shadowTintEnabled", ctx.shadow_tint_array.id != 0 ? 1 : 0);
     if (ctx.aether_active && ctx.aether_extent > 0) {
         const float world_span = static_cast<float>(ctx.aether_extent) *
                                  ctx.aether_cell_size;

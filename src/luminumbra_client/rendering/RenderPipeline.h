@@ -12,6 +12,7 @@
 #include "Mesh.h"
 #include "RenderResourceRegistry.h" // Spec 016: render resource registry (value member)
 #include "RenderContext.h"          // Spec 016: pass contract (make_ssao_context returns by value)
+#include "RenderInputs.h"           // Spec 015 C-1: GlassPaneItem (the glass draw list member)
 #include "GBuffer.h"                // Spec 016: GBuffer (extracted)
 #include "ShadowMap.h"              // Spec 016: ShadowMap (extracted)
 #include "passes/SsaoData.h"        // Spec 016: SSAOData (extracted; still read here for stats)
@@ -502,6 +503,11 @@ public:
     };
     // Hot-reload every roster shader from res/shaders/ (the F5 crawl). Render-only.
     ShaderReloadReport reload_all_shaders();
+
+    // Spec 015 C-1 (RENDER-15): replace the glass-pane draw list (translucent
+    // occluders for the shadow tint cascade; RENDER-18 OIT reuses the same items).
+    // Render-only — panes never feed the sim or world_hash.
+    void set_glass_panes(std::vector<GlassPaneItem> panes) { m_glass_pane_items = std::move(panes); }
     RenderHealthSnapshot get_render_health_snapshot(bool drain_gl_errors = false) const;
     // framescan: read-only access to the G-buffer attachments for the
     // what's-in-frame scan tool. The normal/material attachment (RGBA8) carries
@@ -1215,6 +1221,12 @@ private:
 
     u32 m_screen_quad_vao = 0;
     u32 m_screen_quad_vbo = 0;
+
+    // Spec 015 C-1 (RENDER-15): the glass-pane draw list (shadow tint occluders;
+    // RENDER-18's OIT glass reuses the same items) + the shared unit-quad VAO.
+    std::vector<GlassPaneItem> m_glass_pane_items;
+    u32 m_glass_quad_vao = 0;
+    u32 m_glass_quad_vbo = 0;
 
     u32 m_terrainTextureArray = 0;
     // Per-material triplanar normal-map array (T-I4-7). Same layer order as the

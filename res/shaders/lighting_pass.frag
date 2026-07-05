@@ -48,7 +48,13 @@ vec3 decode_octahedral(vec2 encoded) {
 // Shadow and other uniforms
 uniform sampler2DArray u_shadowCascades;
 uniform mat4 u_lightSpaceMatrices[4];
-uniform vec4 u_cascadeSplits; 
+uniform vec4 u_cascadeSplits;
+// Spec 015 C-1 (RENDER-15): the tinted-transmission cascade. WHITE where no glass
+// occludes the key light, the accumulated Beer-Lambert product where it does
+// (shadow_tint.frag). u_shadowTintEnabled==0 skips the sampling entirely - the
+// same-build A/B lever (off vs on-with-white must FLIP to exactly 0.0).
+uniform sampler2DArray u_shadowTintCascades;
+uniform int u_shadowTintEnabled;
 
 // Texture and world uniforms
 uniform sampler2DArray u_terrainTextures;
@@ -294,6 +300,28 @@ float CalculateShadow(vec3 fragPos, vec3 normal, vec3 lightDir, float viewDepth)
     }
     return 1.0 - (shadow / 25.0);
 }
+// Spec 015 C-1 (RENDER-15): sample the tinted transmission at the SAME cascade
+// projection CalculateShadow uses. Out-of-range = white (no tint information),
+// matching CSM's lit convention. The standard colored-shadow-map approximation:
+// the tint applies to every receiver at the texel (a receiver BETWEEN the light
+// and the glass is also tinted - rare in practice, accepted per the 015 C-1 AC).
+vec3 SampleShadowTint(vec3 fragPos, float viewDepth) {
+    if (u_shadowTintEnabled == 0) {
+        return vec3(1.0);
+    }
+    int cascadeIndex = 0;
+    cascadeIndex += (viewDepth > u_cascadeSplits.x) ? 1 : 0;
+    cascadeIndex += (viewDepth > u_cascadeSplits.y) ? 1 : 0;
+    cascadeIndex += (viewDepth > u_cascadeSplits.z) ? 1 : 0;
+    vec4 fragPosLightSpace = u_lightSpaceMatrices[cascadeIndex] * vec4(fragPos, 1.0);
+    vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
+    projCoords = projCoords * 0.5 + 0.5;
+    if (projCoords.z > 1.0 || projCoords.x < 0.0 || projCoords.x > 1.0 ||
+        projCoords.y < 0.0 || projCoords.y > 1.0) {
+        return vec3(1.0);
+    }
+    return texture(u_shadowTintCascades, vec3(projCoords.xy, cascadeIndex)).rgb;
+}
 vec3 TriPlanar(vec3 worldPos, vec3 normal, sampler2DArray texArray, float layer, float scale) {
     vec3 relPos = worldPos - u_terrainOrigin; vec2 uv_y=relPos.xz*scale; vec2 uv_x=relPos.zy*scale; vec2 uv_z=relPos.xy*scale;
     vec3 tex_y=texture(texArray,vec3(uv_y,layer)).rgb; vec3 tex_x=texture(texArray,vec3(uv_x,layer)).rgb; vec3 tex_z=texture(texArray,vec3(uv_z,layer)).rgb;
@@ -428,8 +456,12 @@ void main() {
     // terrain shadows that drift with the wind (the CloudShadow gate asserts the
     // moving-shadow luminance delta in a fixed terrain ROI). Render-only.
     float cloud_shadow = cloudShadow(FragPos);
+    // Spec 015 C-1 (RENDER-15): tint the DIRECT key light by the glass
+    // transmission along the light ray (white = no glass = identity). Applies to
+    // whichever key the cascades hold (sun by day, the moon key at night).
+    vec3 shadowTint = SampleShadowTint(FragPos, abs(viewPos.z));
     Lo += CalculateLightContribution(L_sun, V, Normal, F0, Albedo, Metallic, a2, k, sunRadiance)
-          * shadow * (1.0 - cloud_shadow);
+          * shadow * (1.0 - cloud_shadow) * shadowTint;
 
     // I8 moonlight (owner: "there should be some brightness from the moon"):
     // a dim cool directional fill so night terrain reads as FORMED (directional

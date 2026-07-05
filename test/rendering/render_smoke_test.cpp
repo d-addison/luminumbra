@@ -1052,6 +1052,13 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
     glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D_ARRAY, shadow_arr); glUniform1i(glGetUniformLocation(lighting_program, "u_shadowCascades"), 5);
     glActiveTexture(GL_TEXTURE6); glBindTexture(GL_TEXTURE_2D_ARRAY, terrain_arr); glUniform1i(glGetUniformLocation(lighting_program, "u_terrainTextures"), 6);
     glActiveTexture(GL_TEXTURE7); glBindTexture(GL_TEXTURE_2D, caustics_tex); glUniform1i(glGetUniformLocation(lighting_program, "u_causticsTexture"), 7);
+    // Spec 015 C-1 (RENDER-15): the tint cascade sampler needs its OWN unit even
+    // when disabled — a sampler2DArray left on unit 0 (a 2D texture) is a sampler
+    // type collision that invalidates the whole draw. White 1x1x1 + enabled=0.
+    const unsigned char tint_white_px[4] = {255, 255, 255, 255};
+    GLuint tint_arr = make_array_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, tint_white_px);
+    glActiveTexture(GL_TEXTURE9); glBindTexture(GL_TEXTURE_2D_ARRAY, tint_arr); glUniform1i(glGetUniformLocation(lighting_program, "u_shadowTintCascades"), 9);
+    glUniform1i(glGetUniformLocation(lighting_program, "u_shadowTintEnabled"), 0);
 
     SetMat4Identity(lighting_program, "u_inverseView");
     for (int i = 0; i < 4; ++i) SetMat4Identity(lighting_program, ("u_lightSpaceMatrices[" + std::to_string(i) + "]").c_str());
@@ -2402,6 +2409,13 @@ TEST(RenderSmokeTest, EmissiveCalibrationMonotonic) {
     glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D_ARRAY, shadow_arr); glUniform1i(glGetUniformLocation(program, "u_shadowCascades"), 5);
     glActiveTexture(GL_TEXTURE6); glBindTexture(GL_TEXTURE_2D_ARRAY, terrain_arr); glUniform1i(glGetUniformLocation(program, "u_terrainTextures"), 6);
     glActiveTexture(GL_TEXTURE7); glBindTexture(GL_TEXTURE_2D, caustics_tex); glUniform1i(glGetUniformLocation(program, "u_causticsTexture"), 7);
+    // Spec 015 C-1 (RENDER-15): the tint cascade sampler needs its OWN unit even
+    // when disabled — a sampler2DArray left on unit 0 (a 2D texture) is a sampler
+    // type collision that invalidates the whole draw. White 1x1x1 + enabled=0.
+    const unsigned char tint_px[4] = {255, 255, 255, 255};
+    GLuint tint_arr = make_array_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, tint_px);
+    glActiveTexture(GL_TEXTURE9); glBindTexture(GL_TEXTURE_2D_ARRAY, tint_arr); glUniform1i(glGetUniformLocation(program, "u_shadowTintCascades"), 9);
+    glUniform1i(glGetUniformLocation(program, "u_shadowTintEnabled"), 0);
 
     // Scalar/vector uniforms.
     SetMat4Identity(program, "u_inverseView");
@@ -2497,6 +2511,228 @@ TEST(RenderSmokeTest, EmissiveCalibrationMonotonic) {
     out << "}\n";
 
     glDeleteTextures(1, &lut_tex);
+    glDeleteTextures(1, &terrain_arr);
+    glDeleteTextures(1, &shadow_arr);
+    glDeleteTextures(1, &caustics_tex);
+    glDeleteTextures(1, &ssao_tex);
+    glDeleteTextures(1, &g_metallic);
+    glDeleteTextures(1, &g_albedo);
+    glDeleteTextures(1, &g_norm);
+    glDeleteTextures(1, &g_pos);
+    glDeleteTextures(1, &color_tex);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteProgram(program);
+}
+
+// Spec 015 C-1 (RENDER-15, ColoredShadowGpu): the tinted-transmission chain, both
+// halves, against the REAL shaders. Half 1: shadow_tint.frag writes EXACTLY the
+// GlassTintModel transmission (T(d) = tint^d). Half 2: lighting_pass.frag's
+// SampleShadowTint multiply — a WHITE tint is byte-identical to tint-disabled
+// (the empty-world identity contract), and a RED tint reddens the lit sun.
+TEST(RenderSmokeTest, ColoredShadowTintedTransmissionColorsDirectSun) {
+    HiddenGlContext context;
+    if (!context.ready()) {
+        GTEST_SKIP() << context.error();
+    }
+
+    // ---- Half 1: shadow_tint.frag == GlassTintModel, to 8-bit exactness. ----
+    {
+        const ShaderProgramSpec tint_spec{"shadow_tint", "shadow_tint.vert", "shadow_tint.frag"};
+        GLuint tint_prog = LinkProgram(tint_spec);
+        ASSERT_NE(tint_prog, 0u);
+
+        constexpr int kTintRes = 4;
+        GLuint tfbo = 0, ttex = 0;
+        glGenFramebuffers(1, &tfbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, tfbo);
+        glGenTextures(1, &ttex);
+        glBindTexture(GL_TEXTURE_2D, ttex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, kTintRes, kTintRes, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ttex, 0);
+        ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+
+        // A fullscreen pane: unit quad scaled 4x under identity light-space.
+        const float pane[] = {
+            -1, -1, 0,   1, -1, 0,   1, 1, 0,
+            -1, -1, 0,   1,  1, 0,  -1, 1, 0,
+        };
+        GLuint pvao = 0, pvbo = 0;
+        glGenVertexArrays(1, &pvao);
+        glGenBuffers(1, &pvbo);
+        glBindVertexArray(pvao);
+        glBindBuffer(GL_ARRAY_BUFFER, pvbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(pane), pane, GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), reinterpret_cast<void*>(0));
+
+        glViewport(0, 0, kTintRes, kTintRes);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_BLEND); // single pane: the raw shader output IS the transmission
+        glUseProgram(tint_prog);
+        SetMat4Identity(tint_prog, "u_lightSpaceMatrix");
+        SetMat4Identity(tint_prog, "u_model");
+        // T(d) = tint^d — the GlassTintModel formula (its algebra is pinned by
+        // render_capture_test's ColoredShadow.BeerLambertTintModelAnchors; here the
+        // SHADER is pinned to the same expression with std::pow, no glm needed).
+        const float tint_r = 0.5f, tint_g = 0.25f, tint_b = 1.0f;
+        const float thickness = 2.0f;
+        glUniform3f(glGetUniformLocation(tint_prog, "u_tint"), tint_r, tint_g, tint_b);
+        glUniform1f(glGetUniformLocation(tint_prog, "u_thickness"), thickness);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+
+        unsigned char tpx[4] = {};
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glReadPixels(kTintRes / 2, kTintRes / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, tpx);
+        EXPECT_NEAR(tpx[0], std::pow(tint_r, thickness) * 255.0f, 1.5) << "shadow_tint.frag R drifted from GlassTintModel";
+        EXPECT_NEAR(tpx[1], std::pow(tint_g, thickness) * 255.0f, 1.5) << "shadow_tint.frag G drifted from GlassTintModel";
+        EXPECT_NEAR(tpx[2], std::pow(tint_b, thickness) * 255.0f, 1.5) << "shadow_tint.frag B drifted from GlassTintModel";
+
+        glDeleteBuffers(1, &pvbo);
+        glDeleteVertexArrays(1, &pvao);
+        glDeleteTextures(1, &ttex);
+        glDeleteFramebuffers(1, &tfbo);
+        glDeleteProgram(tint_prog);
+    }
+
+    // ---- Half 2: the lighting-pass multiply on a LIT sun fragment. ----
+    const ShaderProgramSpec spec{"lighting_pass", "lighting_pass.vert", "lighting_pass.frag"};
+    GLuint program = LinkProgram(spec);
+    ASSERT_NE(program, 0u);
+
+    constexpr int kRes = 8;
+    GLuint fbo = 0, color_tex = 0;
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glGenTextures(1, &color_tex);
+    glBindTexture(GL_TEXTURE_2D, color_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, kRes, kRes, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color_tex, 0);
+    glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+
+    auto make_tex = [&](GLenum ifmt, GLenum fmt, GLenum type, const void* data) {
+        GLuint t = 0; glGenTextures(1, &t); glBindTexture(GL_TEXTURE_2D, t);
+        glTexImage2D(GL_TEXTURE_2D, 0, ifmt, 1, 1, 0, fmt, type, data);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        return t;
+    };
+    auto make_array_tex = [&](GLenum ifmt, GLenum fmt, GLenum type, const void* data) {
+        GLuint t = 0; glGenTextures(1, &t); glBindTexture(GL_TEXTURE_2D_ARRAY, t);
+        glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, ifmt, 1, 1, 1, 0, fmt, type, data);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        return t;
+    };
+    // A grey, fully-rough, sun-facing fragment (normal +Z toward the sun below).
+    const float pos_px[3] = {0.0f, 0.0f, -3.0f};
+    GLuint g_pos = make_tex(GL_RGB16F, GL_RGB, GL_FLOAT, pos_px);
+    const unsigned char norm_px[4] = {128, 128, 0, 1}; // +Z octahedral; material 1
+    GLuint g_norm = make_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, norm_px);
+    const unsigned char albedo_px[4] = {160, 160, 160, 230}; // grey, rough
+    GLuint g_albedo = make_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, albedo_px);
+    const float metallic_px[2] = {0.0f, 1.0f};
+    GLuint g_metallic = make_tex(GL_RG16F, GL_RG, GL_FLOAT, metallic_px);
+    const float ssao_px[1] = {1.0f};
+    GLuint ssao_tex = make_tex(GL_R16F, GL_RED, GL_FLOAT, ssao_px);
+    const unsigned char caustics_px[4] = {0, 0, 0, 255};
+    GLuint caustics_tex = make_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, caustics_px);
+    const float shadow_px[1] = {1.0f}; // fully lit
+    GLuint shadow_arr = make_array_tex(GL_DEPTH_COMPONENT24, GL_DEPTH_COMPONENT, GL_FLOAT, shadow_px);
+    const unsigned char terrain_px[4] = {0, 0, 0, 255};
+    GLuint terrain_arr = make_array_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, terrain_px);
+    const unsigned char white_px[4] = {255, 255, 255, 255};
+    GLuint tint_white = make_array_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, white_px);
+    const unsigned char red_px[4] = {230, 40, 40, 255};
+    GLuint tint_red = make_array_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, red_px);
+    std::vector<float> lut(static_cast<size_t>(256) * 4 * 4, 0.0f);
+    lut[(static_cast<size_t>(1)) * 4 + 1] = 0.9f; // material 1 row 0: rough
+    lut[(static_cast<size_t>(1)) * 4 + 2] = 1.0f; // ao
+    GLuint lut_tex = 0;
+    glGenTextures(1, &lut_tex);
+    glBindTexture(GL_TEXTURE_2D, lut_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 256, 4, 0, GL_RGBA, GL_FLOAT, lut.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    const float quad[] = {
+        -1, -1, 0, 0, 0,   1, -1, 0, 1, 0,   1, 1, 0, 1, 1,
+        -1, -1, 0, 0, 0,   1,  1, 0, 1, 1,  -1, 1, 0, 0, 1,
+    };
+    GLuint vao = 0, vbo = 0;
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &vbo);
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(0));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
+
+    glViewport(0, 0, kRes, kRes);
+    glDisable(GL_DEPTH_TEST);
+    glUseProgram(program);
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, g_pos);      glUniform1i(glGetUniformLocation(program, "gPosition"), 0);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, g_norm);     glUniform1i(glGetUniformLocation(program, "gNormalMaterial"), 1);
+    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, g_albedo);   glUniform1i(glGetUniformLocation(program, "gAlbedoRoughness"), 2);
+    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, g_metallic); glUniform1i(glGetUniformLocation(program, "gMetallicAO"), 3);
+    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, ssao_tex);   glUniform1i(glGetUniformLocation(program, "u_ssao"), 4);
+    glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D_ARRAY, shadow_arr); glUniform1i(glGetUniformLocation(program, "u_shadowCascades"), 5);
+    glActiveTexture(GL_TEXTURE6); glBindTexture(GL_TEXTURE_2D_ARRAY, terrain_arr); glUniform1i(glGetUniformLocation(program, "u_terrainTextures"), 6);
+    glActiveTexture(GL_TEXTURE7); glBindTexture(GL_TEXTURE_2D, caustics_tex); glUniform1i(glGetUniformLocation(program, "u_causticsTexture"), 7);
+    glActiveTexture(GL_TEXTURE8); glBindTexture(GL_TEXTURE_2D, lut_tex);    glUniform1i(glGetUniformLocation(program, "u_materialLUT"), 8);
+    glUniform1i(glGetUniformLocation(program, "u_shadowTintCascades"), 9);
+    SetMat4Identity(program, "u_inverseView");
+    for (int i = 0; i < 4; ++i) SetMat4Identity(program, ("u_lightSpaceMatrices[" + std::to_string(i) + "]").c_str());
+    glUniform4f(glGetUniformLocation(program, "u_cascadeSplits"), 1e9f, 1e9f, 1e9f, 1e9f);
+    glUniform1f(glGetUniformLocation(program, "u_time"), 0.0f);
+    glUniform1f(glGetUniformLocation(program, "u_sea_level"), -1000.0f);
+    glUniform3f(glGetUniformLocation(program, "u_terrainOrigin"), 0, 0, 0);
+    glUniform3f(glGetUniformLocation(program, "u_viewPos"), 0, 0, 0);
+    glUniform3f(glGetUniformLocation(program, "u_skyAmbientColor"), 0.0f, 0.0f, 0.0f);
+    glUniform3f(glGetUniformLocation(program, "u_sun.direction"), 0.0f, 0.0f, 1.0f); // toward-light == +Z == the normal
+    glUniform3f(glGetUniformLocation(program, "u_sun.color"), 1.0f, 1.0f, 1.0f);
+    glUniform1i(glGetUniformLocation(program, "u_pointLightCount"), 0);
+    glUniform1f(glGetUniformLocation(program, "u_emissiveLutScale"), 8.0f);
+
+    auto render_and_read = [&](GLuint tint_tex, int enabled) {
+        glActiveTexture(GL_TEXTURE9);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, tint_tex);
+        glUniform1i(glGetUniformLocation(program, "u_shadowTintEnabled"), enabled);
+        const GLfloat clear0[4] = {0, 0, 0, 1};
+        glClearBufferfv(GL_COLOR, 0, clear0);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        std::array<unsigned char, 4> px{};
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glReadPixels(kRes / 2, kRes / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        return px;
+    };
+
+    const auto off = render_and_read(tint_white, 0);
+    const auto white_on = render_and_read(tint_white, 1);
+    const auto red_on = render_and_read(tint_red, 1);
+
+    // White tint is the exact identity: off vs on-with-white must be byte-equal
+    // (the empty-world contract behind the init-cleared-white cascade).
+    EXPECT_EQ(off, white_on) << "white tint must be byte-identical to tint-disabled";
+    // A red pane reddens the DIRECT sun: green/blue drop sharply, red barely.
+    EXPECT_GT(static_cast<int>(off[1]), static_cast<int>(red_on[1]) + 20)
+        << "red tint should suppress the green channel of the lit sun";
+    EXPECT_GT(static_cast<int>(off[2]), static_cast<int>(red_on[2]) + 20)
+        << "red tint should suppress the blue channel of the lit sun";
+    EXPECT_GT(static_cast<int>(red_on[0]) * 2, static_cast<int>(red_on[1]) + static_cast<int>(red_on[2]))
+        << "the tinted fragment should read RED-dominant";
+
+    glDeleteTextures(1, &lut_tex);
+    glDeleteTextures(1, &tint_red);
+    glDeleteTextures(1, &tint_white);
     glDeleteTextures(1, &terrain_arr);
     glDeleteTextures(1, &shadow_arr);
     glDeleteTextures(1, &caustics_tex);

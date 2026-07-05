@@ -111,9 +111,21 @@ struct WaterDrawStats {
 // a pipeline-private the terrain-submit callback does not cover). submit_terrain is
 // make_terrain_submitter(); the pass calls it ONCE PER CASCADE and returns the
 // per-cascade TerrainSubmitStats so the call site applies the exact =/+= policy.
+// Spec 015 C-1 (RENDER-15): one translucent occluder for the shadow TINT cascade —
+// a unit quad under `model` carrying the GlassTintModel unit-thickness tint.
+struct GlassPaneItem {
+    glm::mat4 model{1.0f};
+    glm::vec3 tint{1.0f};
+    float thickness = 1.0f;
+};
+
 struct ShadowPassInput {
     std::vector<glm::mat4> light_space_matrices;
     SubmitTerrainChunksFn submit_terrain;
+    // Spec 015 C-1: translucent occluders drawn into the tint cascades after the
+    // opaque depth sub-pass (empty -> the tint stays init-cleared white = identity).
+    const std::vector<GlassPaneItem>* glass_items = nullptr;
+    unsigned int glass_vao = 0; // the pipeline's shared unit-quad VAO
 };
 
 } // namespace Luminumbra::Rendering

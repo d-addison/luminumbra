@@ -151,6 +151,10 @@ bool g_request_shader_reload = false;
 bool g_shader_auto_reload = false;
 double g_shader_watch_last_poll = 0.0;
 std::unordered_map<std::string, std::filesystem::file_time_type> g_shader_watch_mtimes;
+// Spec 015 C-1 (RENDER-15): --debug-glass-pane stages three stained-glass panes
+// near spawn so the colored-shadow AC captures have a subject. Render-only.
+bool g_debug_glass_panes = false;
+bool g_glass_panes_spawned = false;
 int g_rebindCaptureAction = -1;
 
 // Short human label for a GLFW key code (for the settings controls list). Printable keys use
@@ -2713,6 +2717,8 @@ int main(int argc, char* argv[]) {
     // feature + set the fixed camera to frame it (pair with --auto-create-world/--timelapse).
     g_debug_goto = GetCommandLineOption(argc, argv, "--debug-goto", "");
     g_play_paths = HasCommandLineFlag(argc, argv, "--play-paths"); // TEMP diag: normal-play paths under a scripted scenario camera
+    // Spec 015 C-1 (RENDER-15): stage the stained-glass capture subject near spawn.
+    g_debug_glass_panes = HasCommandLineFlag(argc, argv, "--debug-glass-pane");
     g_profile_fly_seconds = static_cast<double>(GetCommandLineIntOption(argc, argv, "--profile-fly", 0)); // TEMP diag: constant-speed eye-level moving profiler (normal-play, self-exits)
     g_render_benchmark_frames = GetCommandLineIntOption(argc, argv, "--render-benchmark-frames", 120);
     g_render_benchmark_warmup = GetCommandLineIntOption(argc, argv, "--render-benchmark-warmup", 60);
@@ -9567,6 +9573,36 @@ int main(int argc, char* argv[]) {
                     ImGui::Text("water   : %5zu draws", gp.water_draws);
                 }
                 ImGui::End();
+            }
+            // Spec 015 C-1 (RENDER-15): --debug-glass-pane — stage three stained-glass
+            // panes on the terrain near spawn (one-time). Render-only capture subject.
+            if (g_debug_glass_panes && !g_glass_panes_spawned &&
+                currentState == GameState::IN_GAME && gameSession) {
+                if (auto* gws = gameSession->GetWorldSystem()) {
+                    g_glass_panes_spawned = true;
+                    std::vector<Luminumbra::Rendering::GlassPaneItem> panes;
+                    const glm::vec3 pane_tints[3] = {
+                        {0.95f, 0.25f, 0.25f}, {0.25f, 0.85f, 0.35f}, {0.30f, 0.45f, 0.95f}};
+                    for (int pi = 0; pi < 3; ++pi) {
+                        const float px = 12.0f + 5.0f * static_cast<float>(pi);
+                        const float pz = 14.0f;
+                        const float py = gws->GetTerrainHeightAt(px, pz);
+                        Luminumbra::Rendering::GlassPaneItem pane;
+                        glm::mat4 pm(1.0f);
+                        pm = glm::translate(pm, glm::vec3(px, py, pz));
+                        // Lean the panes back ~50 deg so the near-noon sun projects a
+                        // real footprint (a vertical pane under an overhead sun casts
+                        // only a sliver - the first capture attempt's lesson).
+                        pm = glm::rotate(pm, glm::radians(-50.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+                        pm = glm::scale(pm, glm::vec3(4.0f, 5.0f, 1.0f)); // 4 m wide, 5 m tall
+                        pane.model = pm;
+                        pane.tint = pane_tints[pi];
+                        pane.thickness = 1.0f;
+                        panes.push_back(pane);
+                    }
+                    renderPipeline.set_glass_panes(std::move(panes));
+                    LUMINUMBRA_CORE_INFO("Debug glass panes staged (3 stained-glass tints) near spawn");
+                }
             }
             // Spec 023 — live shader authoring (crawl F5 + walk: watcher + panel F10).
             // Render-only end to end: shaders/uniforms never feed the sim or world_hash.

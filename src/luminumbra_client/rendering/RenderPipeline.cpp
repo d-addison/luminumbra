@@ -1027,6 +1027,9 @@ RenderContext RenderPipeline::make_lighting_context(const Camera& camera) {
 
     // Group E — shadow / SSAO / caustics reads.
     ctx.shadow_depth_array = m_render_registry.adopt_texture("shadow_depth_array", m_shadow_pass->shadow_map().depth_texture_array);
+    // Spec 015 C-1 (RENDER-15): the tinted-transmission cascade (registry-owned by
+    // ShadowPass; init-cleared white so empty-glass frames multiply by exactly 1.0).
+    ctx.shadow_tint_array  = m_render_registry.adopt_texture("shadow_tint_cascades", m_shadow_pass->tint_texture_array());
     ctx.ssao_blur          = m_render_registry.adopt_texture("ssao_blur",          m_ssao_pass->ssao().ssaoColorBufferBlur);
     ctx.caustics_tex       = m_render_registry.adopt_texture("caustics_tex",       m_water_pass->black_texture());
 
@@ -2521,6 +2524,9 @@ void RenderPipeline::execute_stage_shadow(const Camera& camera) {
         ShadowPassInput shadow_input;
         shadow_input.light_space_matrices = get_light_space_matrices(camera);
         shadow_input.submit_terrain = make_terrain_submitter();
+        // Spec 015 C-1 (RENDER-15): translucent occluders for the tint cascade.
+        shadow_input.glass_items = &m_glass_pane_items;
+        shadow_input.glass_vao = m_glass_quad_vao;
         const auto shadow_stats = m_shadow_pass->execute(shadow_ctx, shadow_input);
         for (int i = 0; i < ShadowMap::CASCADE_COUNT; ++i) {
             m_last_render_pass_stats.shadow_cascade_visible_chunks[i] = shadow_stats[i].visible_chunks;
@@ -3494,6 +3500,24 @@ void RenderPipeline::init_screen_quad() {
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
     glBindVertexArray(0);
+
+    // Spec 015 C-1 (RENDER-15): the shared glass-pane unit quad — a vertical
+    // XY-plane square (x -0.5..0.5, y 0..1, z 0), positioned/sized per pane by
+    // GlassPaneItem.model. Position-only (shadow_tint.vert reads location 0).
+    const float glassQuad[] = {
+        -0.5f, 0.0f, 0.0f,   0.5f, 0.0f, 0.0f,   0.5f, 1.0f, 0.0f,
+        -0.5f, 0.0f, 0.0f,   0.5f, 1.0f, 0.0f,  -0.5f, 1.0f, 0.0f,
+    };
+    glGenVertexArrays(1, &m_glass_quad_vao);
+    glGenBuffers(1, &m_glass_quad_vbo);
+    label_gl_object(GL_VERTEX_ARRAY, m_glass_quad_vao, "glass_quad.vao");
+    label_gl_object(GL_BUFFER, m_glass_quad_vbo, "glass_quad.vbo");
+    glBindVertexArray(m_glass_quad_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, m_glass_quad_vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(glassQuad), glassQuad, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glBindVertexArray(0);
 }
 
 // --- FR-R5 TAAU resolve (render.taau, default OFF) ---
@@ -3651,6 +3675,8 @@ void RenderPipeline::cleanup_gpu_resources() {
     destroy_halfres_cloud(); // render-optimization: reduced-res sky-dome target
     if (m_screen_quad_vao) { glDeleteVertexArrays(1, &m_screen_quad_vao); m_screen_quad_vao = 0; }
     if (m_screen_quad_vbo) { glDeleteBuffers(1, &m_screen_quad_vbo); m_screen_quad_vbo = 0; }
+    if (m_glass_quad_vao) { glDeleteVertexArrays(1, &m_glass_quad_vao); m_glass_quad_vao = 0; }
+    if (m_glass_quad_vbo) { glDeleteBuffers(1, &m_glass_quad_vbo); m_glass_quad_vbo = 0; }
     // T-I5b-4 (W1): release the baked waterfall sheet geometry.
     if (m_waterfall_vao) { glDeleteVertexArrays(1, &m_waterfall_vao); m_waterfall_vao = 0; }
     if (m_waterfall_vbo) { glDeleteBuffers(1, &m_waterfall_vbo); m_waterfall_vbo = 0; }

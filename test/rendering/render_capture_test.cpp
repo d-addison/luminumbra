@@ -36,6 +36,7 @@
 #include "rendering/TimeOfDayModel.h"
 // Spec 016 FR-C (RENDER-11): the declarative frame graph under test.
 #include "rendering/RenderGraph.h"
+#include "rendering/GlassTintModel.h" // Spec 015 C-1 (RENDER-15): tinted transmission
 
 namespace fs = std::filesystem;
 
@@ -1132,6 +1133,32 @@ TEST(RenderGraph, CanonicalGraphSchedulesToAuthoredOrderAndValidatesClean) {
     EXPECT_LT(index_of("opaque_snapshot"), index_of("water"));
     EXPECT_LT(index_of("lighting"), index_of("skybox"));
     EXPECT_LT(index_of("god_rays"), index_of("final_blit"));
+    // Spec 015 C-1 (RENDER-15): the tint cascade flows shadow -> lighting.
+    EXPECT_LT(index_of("shadow"), index_of("lighting"));
+}
+
+// Spec 015 C-1 (RENDER-15): the tinted-transmission model (GlassTintModel.h) is the
+// ONE definition the shadow_tint shader mirrors (T(d) = tint^d, Beer-Lambert with
+// the unit-thickness tint as the authored coefficient). Anchor its algebra.
+TEST(ColoredShadow, BeerLambertTintModelAnchors) {
+    namespace R = Luminumbra::Rendering;
+    const glm::vec3 tint(0.9f, 0.4f, 0.1f);
+    // d=1 returns the authored unit tint exactly.
+    EXPECT_EQ(R::GlassTransmission(tint, 1.0f), tint);
+    // d=0 is identity (no glass) — the init-cleared-white cascade convention.
+    EXPECT_EQ(R::GlassTransmission(tint, 0.0f), glm::vec3(1.0f));
+    // Two stacked unit panes == one 2x-thickness pane (the multiply-blend contract
+    // the GL_DST_COLOR/GL_ZERO accumulation in the tint sub-pass relies on).
+    const glm::vec3 stacked =
+        R::GlassTransmission(tint, 1.0f) * R::GlassTransmission(tint, 1.0f);
+    const glm::vec3 twice = R::GlassTransmission(tint, 2.0f);
+    EXPECT_NEAR(stacked.r, twice.r, 1e-6f);
+    EXPECT_NEAR(stacked.g, twice.g, 1e-6f);
+    EXPECT_NEAR(stacked.b, twice.b, 1e-6f);
+    // Out-of-range inputs clamp: negative thickness -> identity; tint -> [0,1].
+    EXPECT_EQ(R::GlassTransmission(tint, -3.0f), glm::vec3(1.0f));
+    EXPECT_EQ(R::GlassTransmission(glm::vec3(2.0f, -1.0f, 0.5f), 1.0f),
+              glm::vec3(1.0f, 0.0f, 0.5f));
 }
 
 // The flagged dynamic edge: god rays sample whichever opaque snapshot executed most

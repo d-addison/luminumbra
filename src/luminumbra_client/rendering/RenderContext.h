@@ -83,6 +83,8 @@ struct RenderContext {
 
     // Group E (remaining) — shadow / SSAO / caustics reads.
     TextureHandle shadow_depth_array{};      // <- m_shadow_pass->shadow_map().depth_texture_array
+    // Spec 015 C-1 (RENDER-15): the tinted-transmission cascade (white = identity).
+    TextureHandle shadow_tint_array{};       // <- m_shadow_pass->tint_texture_array()
     TextureHandle ssao_blur{};               // <- m_ssao_pass->ssao().ssaoColorBufferBlur
     TextureHandle caustics_tex{};            // <- m_water_pass->black_texture()
 

@@ -42,10 +42,23 @@ public:
     ShadowMap& shadow_map() { return m_shadow_map; }
     const ShadowMap& shadow_map() const { return m_shadow_map; }
     const std::unique_ptr<Shader>& shader() const { return m_shadow_shader; }
+    const std::unique_ptr<Shader>& tint_shader() const { return m_tint_shader; }
+    // Spec 015 C-1 (RENDER-15): the tinted-transmission cascade array (RGBA8,
+    // CASCADE_COUNT layers). Init-cleared to WHITE, so with no glass the lighting
+    // pass multiplies by 1.0 — pixel-identical to the pre-C1 render.
+    unsigned int tint_texture_array() const { return m_tint_texture_array; }
 
 private:
     ShadowMap m_shadow_map;
     std::unique_ptr<Shader> m_shadow_shader;
+    // Spec 015 C-1: the tint cascade + its per-cascade FBO (color = tint layer,
+    // depth = the SAME opaque depth layer, depth-test on / write off) + shader.
+    std::unique_ptr<Shader> m_tint_shader;
+    unsigned int m_tint_texture_array = 0;
+    unsigned int m_tint_fbo = 0;
+    // True while the tint cascades hold non-white texels — an empty glass frame
+    // pays one clear to return to identity, then zero GPU cost until glass returns.
+    bool m_tint_dirty = false;
 };
 
 } // namespace Luminumbra::Rendering
