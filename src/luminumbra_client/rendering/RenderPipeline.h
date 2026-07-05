@@ -836,6 +836,13 @@ private:
                        const Camera& camera, float deltaTime, bool wireframe);
     void dispatch_stages(const Camera& camera);
 
+    using StageExecutorFn = void (RenderPipeline::*)(const Camera&);
+    // WAVE-F F2 (RENDER-11): node name -> extracted stage body, authored order.
+    // Coverage (every declared node maps to an executor) is enforced on every real
+    // frame by the drift guard in get_render_health_snapshot — the strongest pin:
+    // it runs in the shipping binary, not just a test fixture.
+    static const std::vector<std::pair<std::string, StageExecutorFn>>& stage_executor_table();
+
     // WAVE-F F2 (RENDER-11 execution migration): each frame-graph node's body,
     // moved VERBATIM out of the dispatch script. Every member owns its own trace
     // record, runtime guard, and GL pre/post state; each reads only FramePrepared

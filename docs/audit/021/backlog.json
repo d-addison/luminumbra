@@ -1328,9 +1328,9 @@
         "RENDER-03",
         "RENDER-01"
       ],
-      "status": "in-progress",
+      "status": "done",
       "proving_signal": "in-process A/B parity via --render-parity-finalblit/--render-parity-ssao (tools/flip_diff.py) + validate-engine-frontier.ps1 -Mode RenderBudget (no perf regression); declaration half additionally gated by render_capture_test RenderGraph.* (schedule/validate/god-rays/negative) + -Mode RenderHealth (schedule() == render_frame's real emitted trace, no drift)",
-      "note": "Wave E (2026-07-04): DECLARATION HALF LANDED (commits 8c3deb03 + 453c8e97). rendering/RenderGraph.h declares all 23 render_frame dispatch stages as nodes with named resource reads/writes + the god-rays latest-opaque-snapshot edge; a topo-scheduler + validator prove internal consistency; render_frame emits its real stage trace (record_frame_stage) and validate_render_health (the RenderHealth gate) asserts schedule() == that trace -> the declaration cannot silently drift from the shipping order. Byte-identical (no GL call moved). EXECUTION MIGRATION (scheduler DRIVES the passes, replacing the hand-scripted sequence) DEFERRED to Wave F: there is no byte-exact whole-frame gate today (server --smoke does not render; whole-frame FLIP floors at ~0.057), so migration is gated by first building the in-process old-path-vs-graph-path whole-frame A/B (extend the --render-parity-* / GPU-09 dual-render harness).",
+      "note": "DONE 2026-07-05 (Wave F F1+F2, commits dbb54b3b/55ab6a13/5ce622f7 + the c3/c4 commit). Declaration landed Wave E; EXECUTION MIGRATED: render_frame = prepare_frame (all CPU mutation) + dispatch_stages (graph-DRIVEN executor over BuildLuminumbraFrameGraph().schedule(), each node body an execute_stage_* member). Unlocked by the NEW in-process whole-frame A/B harness (capture_frame_parity / -Mode RenderParityFrame, calibrated EXACT 0.0 at 3840x1581 - dispatch is bit-idempotent per prepared frame). Drift guard extended with executor-table coverage. RenderBudget unregressed (total 3.943 vs Wave E 4.043; per-pass green).",
       "rank": 71
     },
     {

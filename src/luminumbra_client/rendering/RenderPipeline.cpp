@@ -1698,6 +1698,20 @@ RenderPipeline::RenderHealthSnapshot RenderPipeline::get_render_health_snapshot(
             if (!m_frame_stage_trace.empty() && frame_graph.schedule() != m_frame_stage_trace) {
                 fail("frame graph schedule drifted from render_frame dispatch order");
             }
+            // WAVE-F F2 (RENDER-11 execution migration): the graph now DRIVES the
+            // passes, so every declared node must map to an executor table entry —
+            // a missing mapping would silently skip a stage. (The inverse, a table
+            // entry not in the graph, can never dispatch and the trace equality
+            // above catches the hole it would leave.)
+            for (const std::string& node : frame_graph.schedule()) {
+                bool mapped = false;
+                for (const auto& entry : stage_executor_table()) {
+                    if (entry.first == node) { mapped = true; break; }
+                }
+                if (!mapped) {
+                    fail("frame-graph node has no executor table entry: " + node);
+                }
+            }
         }
 
         if (snapshot.resources.framebuffers == 0u) {
@@ -2402,35 +2416,60 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
     // order). Pure CPU observability: never a GL call, never world_hash (018 FR-E-003).
     m_frame_stage_trace.clear();
 
-    // WAVE-F F2 (RENDER-11): the hand-scripted sequence over the extracted node
-    // bodies — each execute_stage_* moved VERBATIM from the inline script and owns
-    // its trace record, runtime guard, and GL pre/post state. The graph-driven
-    // executor loop replaces this list in the next increment; the whole-frame A/B
-    // (-Mode RenderParityFrame, exactly 0.0) gates each step of the migration.
-    execute_stage_shadow(camera);
-    execute_stage_gbuffer(camera);
-    execute_stage_plant_procgen(camera);
-    execute_stage_farfield_raymarch(camera);
-    execute_stage_ground_decals(camera);
-    execute_stage_ssao(camera);
-    execute_stage_ssao_blur(camera);
-    execute_stage_lighting(camera);
-    execute_stage_depth_blit_to_lighting(camera);
-    execute_stage_skybox(camera);
-    execute_stage_opaque_snapshot(camera);
-    execute_stage_water(camera);
-    execute_stage_waterfall(camera);
-    execute_stage_weather_opaque_snapshot(camera);
-    execute_stage_weather_overlay(camera);
-    execute_stage_aerial(camera);
-    execute_stage_god_rays(camera);
-    execute_stage_foliage(camera);
-    execute_stage_taau_resolve(camera);
-    execute_stage_particles(camera);
-    execute_stage_lightning_overlay(camera);
-    execute_stage_final_blit(camera);
-    execute_stage_debug_view(camera);
+    // WAVE-F F2-c3/c4 — RENDER-11 EXECUTION MIGRATION COMPLETE: the graph DRIVES
+    // the passes. The order comes from the DECLARATION (schedule() over
+    // BuildLuminumbraFrameGraph, computed once — the graph is static data); the
+    // executor table maps each node name to its extracted body. Three locks pin
+    // this: the drift guard (schedule() == the emitted trace, on every RenderHealth
+    // frame), the whole-frame A/B (-Mode RenderParityFrame == exactly 0.0), and
+    // FrameDispatch.ExecutorTableCoversEveryGraphNodeInOrder (table == declaration).
+    // A new render feature adds a RenderGraphNode + an executor entry + its
+    // record_frame_stage slot — the locks fail loudly on any of the three missing.
+    static const std::vector<std::string> kSchedule =
+        Rendering::BuildLuminumbraFrameGraph().schedule();
+    for (const std::string& node : kSchedule) {
+        void (RenderPipeline::*fn)(const Camera&) = nullptr;
+        for (const auto& entry : stage_executor_table()) {
+            if (entry.first == node) { fn = entry.second; break; }
+        }
+        // Unmapped node = a declaration/executor drift the ctest pins; loud in debug.
+        assert(fn && "frame-graph node has no executor table entry");
+        if (fn) (this->*fn)(camera);
+    }
 }
+
+const std::vector<std::pair<std::string, RenderPipeline::StageExecutorFn>>&
+RenderPipeline::stage_executor_table() {
+    // Authored order matches BuildLuminumbraFrameGraph()'s node order 1:1 (pinned
+    // by FrameDispatch.ExecutorTableCoversEveryGraphNodeInOrder).
+    static const std::vector<std::pair<std::string, StageExecutorFn>> kTable = {
+        {"shadow", &RenderPipeline::execute_stage_shadow},
+        {"gbuffer", &RenderPipeline::execute_stage_gbuffer},
+        {"plant_procgen", &RenderPipeline::execute_stage_plant_procgen},
+        {"farfield_raymarch", &RenderPipeline::execute_stage_farfield_raymarch},
+        {"ground_decals", &RenderPipeline::execute_stage_ground_decals},
+        {"ssao", &RenderPipeline::execute_stage_ssao},
+        {"ssao_blur", &RenderPipeline::execute_stage_ssao_blur},
+        {"lighting", &RenderPipeline::execute_stage_lighting},
+        {"depth_blit_to_lighting", &RenderPipeline::execute_stage_depth_blit_to_lighting},
+        {"skybox", &RenderPipeline::execute_stage_skybox},
+        {"opaque_snapshot", &RenderPipeline::execute_stage_opaque_snapshot},
+        {"water", &RenderPipeline::execute_stage_water},
+        {"waterfall", &RenderPipeline::execute_stage_waterfall},
+        {"weather_opaque_snapshot", &RenderPipeline::execute_stage_weather_opaque_snapshot},
+        {"weather_overlay", &RenderPipeline::execute_stage_weather_overlay},
+        {"aerial", &RenderPipeline::execute_stage_aerial},
+        {"god_rays", &RenderPipeline::execute_stage_god_rays},
+        {"foliage", &RenderPipeline::execute_stage_foliage},
+        {"taau_resolve", &RenderPipeline::execute_stage_taau_resolve},
+        {"particles", &RenderPipeline::execute_stage_particles},
+        {"lightning_overlay", &RenderPipeline::execute_stage_lightning_overlay},
+        {"final_blit", &RenderPipeline::execute_stage_final_blit},
+        {"debug_view", &RenderPipeline::execute_stage_debug_view},
+    };
+    return kTable;
+}
+
 
 void RenderPipeline::execute_stage_shadow(const Camera& camera) {
      // 1. SHADOW PASS
