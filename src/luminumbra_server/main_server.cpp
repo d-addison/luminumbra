@@ -1214,10 +1214,26 @@ int RunHeavy(const ServerCliOptions& options) {
 
     const bool resim_ok = AuthoritativeStateEqual(orig_final, loaded_final);
     const bool resim_mesh_match = MeshEqual(orig_final, loaded_final);
-    const bool passed = roundtrip_ok && resim_ok &&
+    // WATER-17: the settle contract is IDEMPOTENCE — both sessions' boot settle
+    // must exit with every chunk water-initialized and every water chunk asleep
+    // (the fixed point). A non-idempotent settle is exactly the water-roundtrip
+    // hazard this oracle measures: the loaded session's settle advances water the
+    // original never ran, so the water sub-hash can never round-trip.
+    const auto& settle_orig = original.GetBootSettleStats();
+    const auto& settle_loaded = loaded.GetBootSettleStats();
+    const bool settle_ok = settle_orig.idempotent() && settle_loaded.idempotent();
+    const bool passed = roundtrip_ok && resim_ok && settle_ok &&
         pre_save_ticks.ticks_executed == options.ticks &&
         orig_resim.ticks_executed == options.heavy_resim &&
         loaded_resim.ticks_executed == options.heavy_resim;
+
+    auto SettleJson = [](const Luminumbra::Server::ServerWorldRunner::BootSettleStats& s) {
+        return nlohmann::json{
+            {"water_chunks", s.water_chunks}, {"awake", s.awake},
+            {"uninited", s.uninited}, {"iterations", s.iterations},
+            {"idempotent", s.idempotent()},
+        };
+    };
 
     nlohmann::json artifact{
         {"schema", "luminumbra.server_tick_heavy.v1"},
@@ -1236,6 +1252,9 @@ int RunHeavy(const ServerCliOptions& options) {
         {"loaded_final", HeavyHashJson(loaded_final)},
         {"resim_match", resim_ok},
         {"resim_mesh_match", resim_mesh_match},
+        {"boot_settle_original", SettleJson(settle_orig)},
+        {"boot_settle_loaded", SettleJson(settle_loaded)},
+        {"settle_idempotent", settle_ok},
         {"authoritative_sections", nlohmann::json::array({"terrain", "water", "entities"})},
         {"mesh_excluded_reason", "surface mesh is a deterministically-regenerated derived render artifact; async re-meshing across a save/load boundary reaches identical geometry via a different in-memory pending-mesh snapshot. Authoritative sim state (terrain/water/entities) round-trips exactly."},
         {"passed", passed},
@@ -1268,8 +1287,12 @@ int RunHeavy(const ServerCliOptions& options) {
     if (!passed) {
         LUMINUMBRA_CORE_ERROR(
             "Headless server HEAVY FAILED: roundtrip_match={} resim_match={} "
+            "settle_idempotent={} (orig uninited={} awake={}; loaded uninited={} awake={}) "
             "orig_save={} loaded_load={} orig_final={} loaded_final={}",
-            roundtrip_ok, resim_ok, orig_at_save.world_hash, loaded_at_load.world_hash,
+            roundtrip_ok, resim_ok, settle_ok,
+            settle_orig.uninited, settle_orig.awake,
+            settle_loaded.uninited, settle_loaded.awake,
+            orig_at_save.world_hash, loaded_at_load.world_hash,
             orig_final.world_hash, loaded_final.world_hash);
         return 1;
     }

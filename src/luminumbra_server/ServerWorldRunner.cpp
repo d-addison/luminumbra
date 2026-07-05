@@ -410,7 +410,9 @@ bool ServerWorldRunner::Boot() {
         // the 120-tick sleep threshold) or a hard cap. Early-out keeps the common case cheap.
         constexpr int kWaterSettleCap = 400;
         int calm_streak = 0;
+        int settle_iters = 0;
         for (int i = 0; i < kWaterSettleCap && calm_streak < 4; ++i) {
+            ++settle_iters;
             stream_once();
             std::size_t water_chunks = 0, awake = 0;
             for (const auto& c : ws->snapshot_streamed_chunks()) {
@@ -440,6 +442,12 @@ bool ServerWorldRunner::Boot() {
             LUMINUMBRA_CORE_INFO(
                 "Boot water settle exit: {} water-inited ({} awake), {} NOT water-inited, {} chunks total",
                 water_chunks, awake, uninited, ws->snapshot_streamed_chunks().size());
+            // WATER-17: publish the exit stats — the heavy oracle asserts idempotence
+            // (uninited == 0 && awake == 0) so save/load water can round-trip.
+            m_boot_settle.water_chunks = water_chunks;
+            m_boot_settle.awake = awake;
+            m_boot_settle.uninited = uninited;
+            m_boot_settle.iterations = settle_iters;
         }
     }
 

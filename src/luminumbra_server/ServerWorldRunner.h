@@ -115,6 +115,20 @@ public:
     // spawn-anchor streaming with collision ready around the spawn point.
     bool Boot();
 
+    // WATER-17: boot water-settle exit stats. The settle contract is IDEMPOTENCE:
+    // every streamed chunk water-initialized (uninited == 0) and every water chunk
+    // asleep (awake == 0) at exit — i.e. Boot() leaves water at its fixed point, so
+    // save -> load -> Boot() reproduces the same water state (the heavy oracle's
+    // water-roundtrip leg). Populated by Boot(); asserted by the heavy oracle.
+    struct BootSettleStats {
+        std::size_t water_chunks = 0;  // chunks with has_water_sim at exit
+        std::size_t awake = 0;         // water chunks not asleep at exit
+        std::size_t uninited = 0;      // streamed chunks never water-initialized
+        int iterations = 0;            // phase-2 settle iterations consumed
+        bool idempotent() const { return uninited == 0 && awake == 0; }
+    };
+    const BootSettleStats& GetBootSettleStats() const { return m_boot_settle; }
+
     // Runs exactly tick_count fixed 30 Hz simulation ticks (one per frame:
     // physics -> TickSimulation -> spawn-anchor streaming update -> streaming
     // quiesce). Returns the per-run report. Requires Boot() to have succeeded.
@@ -198,6 +212,7 @@ private:
     std::string ComputeAvailabilityDigest();
     bool m_booted = false;
     bool m_shutdown = false;
+    BootSettleStats m_boot_settle; // WATER-17 settle-exit stats (see getter)
 };
 
 } // namespace Luminumbra::Server
