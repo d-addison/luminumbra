@@ -666,6 +666,77 @@ verified on looked-at ad-hoc captures, not on pinned baselines. **Paused at the 
 boundary for owner review** (the AC-A-001 amend surfaced above for ratification); the next
 ranked band (71+) follows.
 
+## Wave E execution record (2026-07-04)
+
+Wave E is the **016 render-framework** band (ranks 71–73) — structural, **render-only /
+hash-NEUTRAL end to end**: both determinism smokes held byte-identical throughout, static
+`--smoke == 6f008a9f637c40b7` and moving `--smoke-moving == 0431682a3f8a8a24`, run==replay,
+because no server/sim code was touched and the headless server renders nothing.
+
+Landed this wave:
+- **RENDER-14** (rank 72, 016 FR-F, commits `9762ddac`, `1c505952`, `9b751ef4`, `5ce975dd`) —
+  **DONE.** `update_time_of_day` decomposed 270 → 201 lines (AC-008 line-drop): ~69 lines of
+  pure render-derived math (season / sun geometry / day-factors / season palette tint / moon /
+  lunar phase / auto time-of-day exposure) extracted VERBATIM into header-only pure functions in
+  `rendering/TimeOfDayModel.h` + `rendering/ExposureModel.h`. The pipeline keeps only the
+  side-effecting assembly (clock advance, LUT refresh, LUT-coupled sun.color/ambient, member
+  writes). Each facet is a mechanical byte-identical cut, pinned bit-exact against the *canonical
+  library primitives* (DM::Sin, glm::normalize/smoothstep, std::sin/cos) by 6 gtests — not a
+  re-typed copy, so a wrong-primitive swap or reassociation diverges. The load-bearing byte-fragile
+  trig asymmetry is preserved verbatim: sun direction uses UNQUALIFIED `sin`/`cos` (→ global
+  `::sin`, no `using namespace std` in the TU), moon uses `std::sin`/`std::cos` (float overload).
+- **RENDER-11** (rank 71, 016 FR-C, commits `8c3deb03` + `453c8e97`) — **DECLARATION HALF LANDED;
+  status `in-progress`.** `rendering/RenderGraph.h` promotes render_frame's hand-scripted 23-stage
+  dispatch sequence to DATA: each stage is a node declaring the named render resources it
+  reads/writes, plus the one ordering fact resource-flow can't express — the god-rays "latest
+  opaque snapshot" (snapshot #2 if the weather overlay ran, else #1) as an explicit latest-writer
+  edge. A topo-scheduler derives the order; a validator proves internal consistency
+  (no read-before-write; every latest-writer resolves). render_frame now emits its REAL stage
+  trace (`record_frame_stage` at each of the 23 slots), and `validate_render_health` (the
+  RenderHealth gate) asserts `schedule() == that trace` — so the declaration can never silently
+  drift from the shipping order. Byte-identical by construction: not one GL call moved; the only
+  render_frame change is ~23 pure-CPU string appends. Gated by `render_capture_test RenderGraph.*`
+  (4 tests: canonical schedule/validate, god-rays both branches, validator teeth, WAW/RAW) +
+  `-Mode RenderHealth` GREEN on a real 5070 Ti frame.
+- **RENDER-16** (rank 73, commits captured in the RenderBudget artifact) — **DONE.**
+  `-Mode RenderBudget` (release, 5070 Ti, forest_dense, native 3840×1600): the default-ON half-res
+  GTAO holds post-Pillar-A — **ssao 0.407 ms ≤ 0.70 budget GREEN**, skybox 1.118 ≤ 1.50 GREEN. The
+  aggregate `total` 4.043 ms > 3.33 is the PRE-EXISTING aspirational 300 fps whole-frame budget
+  (never green — git `9dab1807`/`e57fdcf0` "budget not yet met" / "RenderBudget RED gate"), the
+  same by-design-RED class as `ForestPerfBudget`, NOT a Pillar-A regression (wall 4.487 ms =
+  223 fps on the worst-case dense pose, present-bound).
+
+**The constraint that shaped RENDER-11 (recorded because it governs Wave F):** there is **no
+byte-exact whole-frame gate** on this engine. The headless server `--smoke` does not render
+(RenderPipeline is client-only), and whole-frame FLIP floors at ~0.057 run-to-run noise. So a
+blind execution rewrite of the GL-state-dense render_frame hot path — on a Frostbite fidelity
+floor — would be *unverifiable*. RENDER-14's verbatim cuts were safe because they were bit-exact
+gateable (the primitive gtests); RENDER-11's GL-state node bodies have no equivalent gate. The
+responsible v1 is therefore **declaration + validation only** (zero execution risk), with the
+execution migration charted and gate-blocked.
+
+Two items of record:
+- **RENDER-11 execution migration → Wave F.** Making the scheduler DRIVE the passes (replacing
+  the hand-scripted sequence) is deferred until an **in-process old-path-vs-graph-path whole-frame
+  A/B** exists — render the frame via both paths in one process, same frame state, `flip_diff == 0`
+  (deterministic; the `--render-parity-*` modes + GPU-09's dual-render harness already prototype
+  the same-process zero-variance FLIP). Only then can the clean pass-object stages
+  (shadow/gbuffer/ssao/lighting/skybox/water/foliage/particles/final_blit) migrate byte-safely;
+  the GL-state-dense inline stages (waterfall/cloud-composite/decals/far-field) come last.
+- **RENDER-16 WorldVisualSweep rerun DEFERRED to AC-A-001.** The visual re-bless is owner-gated
+  (the night-floor ratification) and capture-hang-blocked (RENDER-01); the AO-budget
+  re-validation that RENDER-16 exists for is done and green.
+
+**Wave E close (2026-07-04): ranks 72 + 73 done; rank 71 declaration done (execution → Wave F).**
+Wave gate held: both determinism smokes run==replay at their Wave-B baselines (hash-neutral by
+construction); `render_capture_test` model + graph suite green (11/11: RenderGraph 4 +
+TimeOfDayModel 3 + ExposureModel 3 + SunLightModel 1); `-Mode RenderHealth` green (drift guard
+exercised on a real frame); the full SERIAL ctest lane green except the chartered
+`ForestPerfBudget`. No visual re-bless required — Wave E is byte-identical framework work with no
+pixel delta. **Paused at the wave boundary for owner review.** Next: Wave F (RENDER-15 colored
+shadows + RENDER-11 execution migration + the 015 Pillar B/C render band) and the ranked band
+beyond, per the handoff.
+
 ## Spine-inversion register (AC-003)
 
 Exactly one deliberate inversion, justified inline at its rank:

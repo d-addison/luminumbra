@@ -1328,8 +1328,9 @@
     "RENDER-03",
     "RENDER-01"
    ],
-   "status": "todo",
-   "proving_signal": "in-process A/B parity via --render-parity-finalblit/--render-parity-ssao (tools/flip_diff.py) + validate-engine-frontier.ps1 -Mode RenderBudget (no perf regression)",
+   "status": "in-progress",
+   "proving_signal": "in-process A/B parity via --render-parity-finalblit/--render-parity-ssao (tools/flip_diff.py) + validate-engine-frontier.ps1 -Mode RenderBudget (no perf regression); declaration half additionally gated by render_capture_test RenderGraph.* (schedule/validate/god-rays/negative) + -Mode RenderHealth (schedule() == render_frame's real emitted trace, no drift)",
+   "note": "Wave E (2026-07-04): DECLARATION HALF LANDED (commits 8c3deb03 + 453c8e97). rendering/RenderGraph.h declares all 23 render_frame dispatch stages as nodes with named resource reads/writes + the god-rays latest-opaque-snapshot edge; a topo-scheduler + validator prove internal consistency; render_frame emits its real stage trace (record_frame_stage) and validate_render_health (the RenderHealth gate) asserts schedule() == that trace -> the declaration cannot silently drift from the shipping order. Byte-identical (no GL call moved). EXECUTION MIGRATION (scheduler DRIVES the passes, replacing the hand-scripted sequence) DEFERRED to Wave F: there is no byte-exact whole-frame gate today (server --smoke does not render; whole-frame FLIP floors at ~0.057), so migration is gated by first building the in-process old-path-vs-graph-path whole-frame A/B (extend the --render-parity-* / GPU-09 dual-render harness).",
    "rank": 71
   },
   {
@@ -1343,8 +1344,9 @@
    "dependencies": [
     "RENDER-11"
    ],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "in-process A/B parity (tools/flip_diff.py) with byte-identical intent + --smoke == 6f008a9f637c40b7 unchanged",
+   "note": "Wave E (2026-07-04): DONE (commits 9762ddac, 1c505952, 9b751ef4, 5ce975dd). update_time_of_day decomposed 270->201 lines; ~69 lines of pure render-derived math (season / sun geometry / day-factors / palette tint / moon / lunar phase / auto-exposure) extracted VERBATIM into rendering/TimeOfDayModel.h + ExposureModel.h, each pinned bit-exact against canonical library primitives by 6 gtests. Byte-fragile trig asymmetry preserved (sun unqualified ::sin, moon std::sin float overload). Static --smoke 6f008a9f637c40b7 + moving 0431682a3f8a8a24 byte-identical.",
    "rank": 72
   },
   {
@@ -1356,8 +1358,9 @@
    "effort": "S",
    "risk": "low",
    "dependencies": [],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "validate-engine-frontier.ps1 -Mode RenderBudget (per-pass GPU timings within budget on the fixed pose) + WorldVisualSweep rerun",
+   "note": "Wave E (2026-07-04): DONE. -Mode RenderBudget (release, 5070 Ti, forest_dense, native 3840x1600): the half-res GTAO holds post-Pillar-A -- ssao 0.407 ms <= 0.70 budget GREEN; skybox 1.118 <= 1.50 GREEN. The aggregate 'total' 4.043 ms > 3.33 is the PRE-EXISTING aspirational 300fps whole-frame budget (never green; git 9dab1807/e57fdcf0 'budget not yet met' / 'RenderBudget RED gate'), same by-design-RED class as ForestPerfBudget -- NOT a Pillar-A regression (wall 4.487 ms = 223 fps on the worst-case dense pose, present-bound). WorldVisualSweep rerun DEFERRED to the AC-A-001 night-floor owner ratification (the visual re-bless is owner-gated + capture-hang-blocked, RENDER-01).",
    "rank": 73
   },
   {
