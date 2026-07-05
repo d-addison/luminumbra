@@ -144,6 +144,13 @@ luminumbra::core::SystemConfig g_systemConfig;
 bool g_show_settings = false;
 bool g_paused = false;  // T032: in-game pause overlay active
 bool g_show_gpu_profiler = false;  // F3: live per-pass GPU profiler overlay
+// Spec 023 (live shader authoring): F5 = reload-all next frame (GL-thread safe);
+// F10 = the dev shader panel; the watcher is the opt-in once/sec mtime poll.
+bool g_show_shader_panel = false;
+bool g_request_shader_reload = false;
+bool g_shader_auto_reload = false;
+double g_shader_watch_last_poll = 0.0;
+std::unordered_map<std::string, std::filesystem::file_time_type> g_shader_watch_mtimes;
 int g_rebindCaptureAction = -1;
 
 // Short human label for a GLFW key code (for the settings controls list). Printable keys use
@@ -9561,6 +9568,134 @@ int main(int argc, char* argv[]) {
                 }
                 ImGui::End();
             }
+            // Spec 023 — live shader authoring (crawl F5 + walk: watcher + panel F10).
+            // Render-only end to end: shaders/uniforms never feed the sim or world_hash.
+            if (currentState == GameState::IN_GAME && g_timelapse_frames == 0) {
+                // Crawl: reload-all requested by F5 (executed here, on the GL thread).
+                if (g_request_shader_reload) {
+                    g_request_shader_reload = false;
+                    renderPipeline.reload_all_shaders();
+                }
+                // Walk (FR-023-3): opt-in once/sec mtime poll over the roster's source
+                // files; a changed file triggers that shader's rollback-safe Reload.
+                if (g_shader_auto_reload) {
+                    const double watch_now = glfwGetTime();
+                    if (watch_now - g_shader_watch_last_poll >= 1.0) {
+                        g_shader_watch_last_poll = watch_now;
+                        renderPipeline.enumerate_shaders(
+                            [&](const char* sh_name, Luminumbra::Rendering::Shader* sh) {
+                                if (!sh) return;
+                                bool changed = false;
+                                for (const std::string& p : {sh->VertexPath(), sh->FragmentPath()}) {
+                                    if (p.empty()) continue;
+                                    std::error_code ec;
+                                    const auto t = std::filesystem::last_write_time(p, ec);
+                                    if (ec) continue;
+                                    auto it = g_shader_watch_mtimes.find(p);
+                                    if (it != g_shader_watch_mtimes.end() && it->second != t) {
+                                        changed = true;
+                                    }
+                                    g_shader_watch_mtimes[p] = t;
+                                }
+                                if (changed) {
+                                    LUMINUMBRA_CORE_INFO("Shader source changed on disk -> reloading {}", sh_name);
+                                    sh->Reload();
+                                }
+                            });
+                    }
+                }
+                // Walk (FR-023-4): the dev shader panel — roster status, per-shader
+                // reload, and LIVE uniform editing via glProgramUniform (GL 4.5 DSA).
+                // Honesty note (FR-023-5): passes re-set most uniforms per draw; an
+                // edit persists only for uniforms a pass never sets (u_dev_*).
+                if (g_imgui_enabled && g_show_shader_panel) {
+                    ImGui::SetNextWindowPos(ImVec2(10.0f, 420.0f), ImGuiCond_FirstUseEver);
+                    ImGui::SetNextWindowSize(ImVec2(440.0f, 520.0f), ImGuiCond_FirstUseEver);
+                    if (ImGui::Begin("Shaders (F10)", &g_show_shader_panel)) {
+                        ImGui::TextWrapped(
+                            "Live shader authoring (spec 023): edit res/shaders/ in any editor, "
+                            "reload hot-swaps rollback-safe. Uniform edits persist only for "
+                            "uniforms a pass does not re-set per frame (u_dev_* convention).");
+                        if (ImGui::Button("Reload All (F5)")) g_request_shader_reload = true;
+                        ImGui::SameLine();
+                        ImGui::Checkbox("Auto-reload on file change", &g_shader_auto_reload);
+                        ImGui::Separator();
+                        renderPipeline.enumerate_shaders(
+                            [&](const char* sh_name, Luminumbra::Rendering::Shader* sh) {
+                                if (!sh) return;
+                                ImGui::PushID(sh_name);
+                                if (ImGui::CollapsingHeader(sh_name)) {
+                                    const bool sh_ok = sh->IsValid();
+                                    ImGui::TextColored(sh_ok ? ImVec4(0.70f, 0.85f, 0.70f, 1.0f)
+                                                             : ImVec4(1.0f, 0.45f, 0.45f, 1.0f),
+                                                       sh_ok ? "valid" : "INVALID (prior program kept)");
+                                    if (!sh->Diagnostic().empty()) {
+                                        ImGui::TextWrapped("%s", sh->Diagnostic().c_str());
+                                    }
+                                    if (ImGui::Button("Reload")) sh->Reload();
+                                    const GLuint prog = sh->Id();
+                                    GLint uniform_count = 0;
+                                    glGetProgramiv(prog, GL_ACTIVE_UNIFORMS, &uniform_count);
+                                    for (GLint u = 0; u < uniform_count; ++u) {
+                                        char uname[128];
+                                        GLsizei ulen = 0; GLint usize = 0; GLenum utype = 0;
+                                        glGetActiveUniform(prog, static_cast<GLuint>(u), sizeof(uname),
+                                                           &ulen, &usize, &utype, uname);
+                                        if (usize != 1) continue; // arrays: not editable here
+                                        const GLint loc = glGetUniformLocation(prog, uname);
+                                        if (loc < 0) continue;
+                                        ImGui::PushID(u);
+                                        const bool looks_color =
+                                            std::string_view(uname).find("olor") != std::string_view::npos;
+                                        switch (utype) {
+                                            case GL_FLOAT: {
+                                                float v = 0.0f; glGetUniformfv(prog, loc, &v);
+                                                if (ImGui::DragFloat(uname, &v, 0.01f)) glProgramUniform1f(prog, loc, v);
+                                                break;
+                                            }
+                                            case GL_FLOAT_VEC2: {
+                                                float v[2] = {}; glGetUniformfv(prog, loc, v);
+                                                if (ImGui::DragFloat2(uname, v, 0.01f)) glProgramUniform2fv(prog, loc, 1, v);
+                                                break;
+                                            }
+                                            case GL_FLOAT_VEC3: {
+                                                float v[3] = {}; glGetUniformfv(prog, loc, v);
+                                                const bool edited = looks_color
+                                                    ? ImGui::ColorEdit3(uname, v, ImGuiColorEditFlags_Float)
+                                                    : ImGui::DragFloat3(uname, v, 0.01f);
+                                                if (edited) glProgramUniform3fv(prog, loc, 1, v);
+                                                break;
+                                            }
+                                            case GL_FLOAT_VEC4: {
+                                                float v[4] = {}; glGetUniformfv(prog, loc, v);
+                                                const bool edited = looks_color
+                                                    ? ImGui::ColorEdit4(uname, v, ImGuiColorEditFlags_Float)
+                                                    : ImGui::DragFloat4(uname, v, 0.01f);
+                                                if (edited) glProgramUniform4fv(prog, loc, 1, v);
+                                                break;
+                                            }
+                                            case GL_INT: {
+                                                GLint v = 0; glGetUniformiv(prog, loc, &v);
+                                                if (ImGui::DragInt(uname, &v)) glProgramUniform1i(prog, loc, v);
+                                                break;
+                                            }
+                                            case GL_BOOL: {
+                                                GLint v = 0; glGetUniformiv(prog, loc, &v);
+                                                bool b = v != 0;
+                                                if (ImGui::Checkbox(uname, &b)) glProgramUniform1i(prog, loc, b ? 1 : 0);
+                                                break;
+                                            }
+                                            default: break; // samplers/matrices: display-only, skip
+                                        }
+                                        ImGui::PopID();
+                                    }
+                                }
+                                ImGui::PopID();
+                            });
+                    }
+                    ImGui::End();
+                }
+            }
             // Settings menu (F8 to toggle; frees the cursor). Render-only; user.* is never
             // hashed. Changes apply live and "Save" persists them to the per-user overlay.
             // The polished RML settings screen (settings.rml) is the follow-on (task #12).
@@ -10162,6 +10297,23 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
     // F3: toggle the live per-pass GPU profiler overlay.
     if (key == GLFW_KEY_F3 && action == GLFW_PRESS) {
         g_show_gpu_profiler = !g_show_gpu_profiler;
+        return;
+    }
+    // F5: spec 023 crawl — hot-reload every live shader from res/shaders/ next
+    // frame (rollback-safe per shader; a broken edit keeps the prior program).
+    if (key == GLFW_KEY_F5 && action == GLFW_PRESS) {
+        g_request_shader_reload = true;
+        return;
+    }
+    // F10: spec 023 walk — the dev shader panel (per-shader reload, auto-reload
+    // watcher toggle, live uniform editing).
+    if (key == GLFW_KEY_F10 && action == GLFW_PRESS) {
+        g_show_shader_panel = !g_show_shader_panel;
+        if (g_show_shader_panel) {
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        } else if (g_playerController) {
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        }
         return;
     }
     // F6: cycle the render-only G-buffer debug view (off -> albedo -> normal -> depth ->

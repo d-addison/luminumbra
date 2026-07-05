@@ -488,6 +488,20 @@ public:
     size_t texture_resident_bytes() const { return m_texture_residency.resident_bytes; }
     static constexpr size_t texture_resident_budget_bytes() { return kTextureResidentBudgetBytes; }
     std::vector<ShaderHealthEntry> get_shader_health() const;
+
+    // Spec 023 (live shader authoring, FR-023-1/2): the shader ROSTER — visit
+    // every live Shader the pipeline owns (name + instance; instance may be null,
+    // matching health's "not initialized"). Shader health, reload-all, the dev
+    // shader panel, and the auto-reload watcher all consume this one enumeration.
+    void enumerate_shaders(const std::function<void(const char*, Shader*)>& visit) const;
+    struct ShaderReloadReport {
+        int attempted = 0;
+        int reloaded = 0;   // swapped to a freshly compiled program
+        int kept = 0;       // Reload failed -> previous good program kept (rollback)
+        std::vector<std::string> failures; // "name: diagnostic" per kept shader
+    };
+    // Hot-reload every roster shader from res/shaders/ (the F5 crawl). Render-only.
+    ShaderReloadReport reload_all_shaders();
     RenderHealthSnapshot get_render_health_snapshot(bool drain_gl_errors = false) const;
     // framescan: read-only access to the G-buffer attachments for the
     // what's-in-frame scan tool. The normal/material attachment (RGBA8) carries

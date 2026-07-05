@@ -19,6 +19,10 @@ public:
     GLuint Id() const { return m_id; }
     const std::string& DebugName() const { return m_debug_name; }
     const std::string& Diagnostic() const { return m_diagnostic; }
+    // Spec 023 (live shader authoring): the stored source paths, exposed so the
+    // auto-reload watcher can mtime-poll them. Empty for non-file-backed programs.
+    const std::string& VertexPath() const { return m_vertex_path; }
+    const std::string& FragmentPath() const { return m_fragment_path; }
 
     // --- Spec 016 FR-D: shader-resource reflection + layout validation --------
     // The resource layout introspected from the linked program (samplers / UBO /

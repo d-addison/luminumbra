@@ -1436,9 +1436,35 @@ RenderPipeline::RuntimeRenderStats RenderPipeline::get_runtime_render_stats() co
     return stats;
 }
 
+void RenderPipeline::enumerate_shaders(
+    const std::function<void(const char*, Shader*)>& visit) const {
+    // Spec 023 (FR-023-2): THE shader roster — the single enumeration of every
+    // live Shader the pipeline owns. Shader health, reload-all, the dev shader
+    // panel, and the auto-reload watcher all consume THIS list, so the roster
+    // cannot drift between consumers by construction. A null instance is still
+    // visited (health reports "not initialized"; reload/panel skip it).
+    visit("geometry", m_gbuffer_pass->geometry_shader().get());
+    visit("lighting", m_lighting_pass->shader().get());
+    visit("skybox", m_skybox_pass->shader().get());
+    visit("shadow", m_shadow_pass->shader().get());
+    visit("ssao", m_ssao_pass->ssao().ssaoShader.get());
+    visit("ssao_blur", m_ssao_pass->ssao().blurShader.get());
+    visit("water", m_water_pass->shader().get());
+    visit("instanced_static_mesh", m_gbuffer_pass->instanced_static_mesh_shader().get());
+    visit("skinned_mesh", m_gbuffer_pass->skinned_mesh_shader().get());
+    visit("weather_overlay", m_skybox_pass->weather_shader().get());
+    if (m_particle_pass) { visit("particles", m_particle_pass->shader().get()); } // T-I5a-1
+    if (m_foliage_pass) { visit("foliage", m_foliage_pass->shader().get()); } // T-I5b-1
+    visit("aerial_perspective", m_aerial_shader.get()); // T-I5a-6
+    // Spec 023: the pipeline-owned post shaders, previously UNMONITORED by health.
+    visit("god_rays", m_god_rays_shader.get());
+    visit("cloud_composite", m_cloud_composite_shader.get());
+    visit("waterfall", m_waterfall_shader.get());
+}
+
 std::vector<RenderPipeline::ShaderHealthEntry> RenderPipeline::get_shader_health() const {
     std::vector<ShaderHealthEntry> health;
-    auto add_shader = [&health](const char* name, const std::unique_ptr<Shader>& shader) {
+    enumerate_shaders([&health](const char* name, Shader* shader) {
         ShaderHealthEntry entry;
         entry.name = name;
         entry.ok = shader && shader->IsValid();
@@ -1448,23 +1474,35 @@ std::vector<RenderPipeline::ShaderHealthEntry> RenderPipeline::get_shader_health
             entry.diagnostic = "not initialized";
         }
         health.push_back(std::move(entry));
-    };
-
-    add_shader("geometry", m_gbuffer_pass->geometry_shader());
-    add_shader("lighting", m_lighting_pass->shader());
-    add_shader("skybox", m_skybox_pass->shader());
-    add_shader("shadow", m_shadow_pass->shader());
-    add_shader("ssao", m_ssao_pass->ssao().ssaoShader);
-    add_shader("ssao_blur", m_ssao_pass->ssao().blurShader);
-    add_shader("water", m_water_pass->shader());
-    add_shader("instanced_static_mesh", m_gbuffer_pass->instanced_static_mesh_shader());
-    add_shader("skinned_mesh", m_gbuffer_pass->skinned_mesh_shader());
-    add_shader("weather_overlay", m_skybox_pass->weather_shader());
-    if (m_particle_pass) { add_shader("particles", m_particle_pass->shader()); } // T-I5a-1
-    if (m_foliage_pass) { add_shader("foliage", m_foliage_pass->shader()); } // T-I5b-1
-    add_shader("aerial_perspective", m_aerial_shader); // T-I5a-6
+    });
     health.push_back({"gpu_sdf_compute", m_gpu_sdf.compute_program != 0, m_gpu_sdf.compute_program != 0 ? "" : "not initialized"});
     return health;
+}
+
+RenderPipeline::ShaderReloadReport RenderPipeline::reload_all_shaders() {
+    // Spec 023 (FR-023-1, the crawl): hot-reload every roster shader from
+    // res/shaders/. Per-shader rollback safety is Shader::Reload's contract — a
+    // broken edit keeps the previous good program and lands in `failures` with
+    // its diagnostic; the session never breaks. Render-only; never world_hash.
+    ShaderReloadReport report;
+    enumerate_shaders([&report](const char* name, Shader* shader) {
+        if (!shader) return;
+        ++report.attempted;
+        if (shader->Reload()) {
+            ++report.reloaded;
+        } else {
+            ++report.kept;
+            report.failures.push_back(std::string(name) + ": " + shader->Diagnostic());
+        }
+    });
+    LUMINUMBRA_CORE_INFO(
+        "Shader reload-all: {} attempted, {} swapped, {} kept prior program{}",
+        report.attempted, report.reloaded, report.kept,
+        report.failures.empty() ? "" : " (see failures)");
+    for (const std::string& failure : report.failures) {
+        LUMINUMBRA_CORE_WARN("  shader kept prior program: {}", failure);
+    }
+    return report;
 }
 
 RenderPipeline::RenderResourceRegistryStats RenderPipeline::get_resource_registry_stats() const {
