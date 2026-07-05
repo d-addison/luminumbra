@@ -493,8 +493,13 @@ void main() {
         // Desaturate toward the cool moon hue (Purkinje shift): warm (dusty) albedo
         // would otherwise read daytime-yellow under the key. Pull the lit result
         // partway toward its own luma scaled by the cool moon tint.
+        // Spec 015 Pillar A (FR-A-003): the tint is a DESATURATED moon-grey, not a
+        // strongly saturated blue. u_moonRadiance is already cool-biased, so the old
+        // (0.55,0.75,1.35) target double-pulled foliage/bark to a garish electric
+        // blue-purple. A gentle cool grey (0.70,0.80,1.05) keeps the Purkinje feel
+        // (cool, slightly blue) while letting bark/foliage read as natural night tones.
         float moonLuma = dot(moonLit, vec3(0.2126, 0.7152, 0.0722));
-        moonLit = mix(moonLit, moonLuma * vec3(0.55, 0.75, 1.35), 0.55);
+        moonLit = mix(moonLit, moonLuma * vec3(0.70, 0.80, 1.05), 0.55);
         Lo += moonLit;
     }
 

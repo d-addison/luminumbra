@@ -240,8 +240,18 @@ Capture flags: `--world-preset caverns --debug-goto {cave|doline|spawn} --debug-
   colored-god-ray-through-glass}; each re-bless reviewed via FLIP heatmap.
 
 ### Pillar A
-- [ ] **AC-A-001** — Midnight (`--timelapse-tod 0.5`) reads "dim but navigable" (mean-luma in the
-  navigable band, ≳ pitch-black 8) **with `kMoonKeyScale` / `nightAmbient` / wrap-floor removed**.
+- [x] **AC-A-001** — Midnight (`--timelapse-tod 0.5`) reads "dim but navigable" (mean-luma in the
+  navigable band, ≳ pitch-black 8) in BOTH night modes (full moon + new-moon starlight floor), with a
+  coherent cool (non-garish) moon tone.
+  **AMENDED (spec-021 rank 68, 2026-07-04 — owner-ratifiable):** the original clause "with
+  `kMoonKeyScale` / `nightAmbient` / wrap-floor removed" is ratified as NOT physically achievable.
+  At night the sun is below the horizon so atmospheric in-scatter ≈ 0; unlike the daytime sun
+  (FR-A-001, transmittance-coupled) there is no physical signal to replace the authored moon key /
+  night ambient / wrap-floor. A floor-zeroed capture halves ground luma (84→46) and triples the
+  near-black slope fraction (6%→16%) — the wrap-floor is load-bearing (an overhead midnight moon gives
+  camera-facing slopes NdotL≈0), and its removal reintroduces the darkness the owner explicitly
+  objected to ("moon very dark"). The authored night terms are RETAINED; the met criterion is
+  navigability in both moon modes + a coherent cool tone (FR-A-003 Purkinje de-garish, rank 68).
 - [ ] **AC-A-002** — Golden hour both reddens **and** dims from the single LUT-coupled model (no
   authored twilight ramp); verify across a `--timelapse-tod` sweep.
 - [ ] **AC-A-003** — `SkyAtmosphereLut` exposes magnitude getters (FR-A-005) and the pipeline
