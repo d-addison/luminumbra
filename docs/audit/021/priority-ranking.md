@@ -861,6 +861,63 @@ dawn scene, the OIT glass capture, the metered-exposure night shot, and the acti
 menu (auto-exposure ON/OFF, froxel default tier, AC-A-001 floor). Next: Wave G (bridges +
 hardening) starts on the ratified defaults.
 
+## Wave G record — bridges + hardening (CLOSED 2026-07-05)
+
+Wave G landed 24 backlog items across three commits (`41390c47`, `c46e0e23`, + the close) —
+the entire bridges-and-hardening band: water evidence (W1), all seven sim->render bridges
+(R1), the three default-OFF sim couplings (S1), the instinct groundwork (I1 + INSTINCT-07),
+and the SIX-item audio cluster — then flipped `render.live_weather` + `render.aether_tap` +
+`render.snow_cover` DEFAULT-ON in one batched re-bless (R1.X). Determinism law held
+end to end: both smokes byte-identical at the Bump-A canonicals through every landing (the
+two NEW hashed config keys are default-OFF and hash-neutral by the config sub-hash's
+additive design); RenderParityFrame EXACT 0.0; RenderHealth green.
+
+**Landed:** WATER-12 (the dam gate — green first run), WATER-10 (the per-tick water-hash
+trace + the cross-build gate), WATER-14 (spec-010 docs + `-Mode SpecStatusAudit`), ATMO-15
+(6 dead shaders deleted + the ShaderInventory dead-file tripwire), ATMO-09/10 (live season
++ TIME AUTHORITY: tod = f(sim tick), legacy pacing preserved), ATMO-07/08 (the live weather
+bridge + sim-scheduled lightning through the real camera), AETHER-04/10 (the aether tap +
+glow grade), ATMO-11≡WATER-07 (weather-driven rain, integer-quantized at the boundary),
+ATMO-12 (WeatherEventAt exposed, flag-gated), ATMO-14 (SnowCoverModel), INSTINCT-13/15/12/07,
+AUDIO-05/06/07/08/09/10. Three fan-out agents (audio bus/mixer, night+reverb, instinct)
+implemented file-disjoint sets; the orchestrator owned main_client/GameSession and applied
+their wiring instructions verbatim.
+
+**First-run findings (the gates earning their keep):**
+- **WaterCrossBuild diverged at tick 1** (debug `e2e4c1d1fa39760c` vs release
+  `94e9b1b5fb101a13`) — water BEDS seed from float terrain sampling, which is legitimately
+  build-mode-dependent (the same reason world_hash itself is per-build). The charter
+  anticipated exactly this: the gate re-scoped to same-build CROSS-PROCESS (the real
+  lockstep contract) — **PASS both builds, 90 ticks identical across two OS processes** —
+  with the cross-build divergence documented at the gate.
+- **The ShaderInventory dead-file tripwire caught 5 additional dead shaders** on its first
+  run (bloom_* ×3, crystal_field_effect, screen_space_reflections — the M2 census pulled
+  forward and deleted).
+- **Ecology budgets blessed** (release, 5 runs, ×1.5 headroom): N=1000 → 3.008 ms;
+  **N=4000 → 38.511 ms (median 25.674 ms = 77% of the 33 ms tick)** — the audit's flagged
+  O(N²) opposite-role-scan data point, now measured; the chartered response is INSTINCT-09
+  (T.2) + a future spatial partition, NOT a time-based cap (the standing rule is recorded
+  at both budget sites).
+
+**R1.X re-bless:** with all three flags ON, WorldVisualSweep passed with **0/48 defect
+cells** and its semantic checks confirmed the systems live: rain+lightning in all 24 storm
+cells, clouds in the 4 up-storm cells, no clear-cell rain leak. No baseline movement needed
+(the objective critique is content-aware). PAUSE #2 storm captures (dusk bolt + dawn storm)
+delivered to the owner.
+
+**Gate evidence:** smoke `a88cfec6a916d614` + moving `71765d8cbb053d86` run==replay all
+commits; 24/24 new-suite battery (weather rain, dam, tod/season purity, snow, mixer ×16,
+environmental audio ×11, species overrides ×7, world dressing ×3); RenderParityFrame EXACT
+0.0; RenderHealth green; SpecStatusAudit + ShaderInventory + WaterCrossBuild(re-scoped) +
+EcologyTickPerf green; backlog 190/190 valid at **128/190 done**.
+
+**Items of record:** the night-bed + waterfall-roar audio assets are PLACEHOLDERS
+(AUDIO-14's ElevenLabs pipeline owns the real ones); ATMO-07's LiveWeatherBridge scenario
+gate rides the sweep's storm-cell assertions rather than a dedicated scenario (the sweep
+covers the AC); sim.hydrology_weather + sim.weather_events remain default-OFF activation-menu
+items (deliberate hash bumps). Next: Wave H (the hashed sim band — Bump B, the instinct
+behavior band → Event P, the aether arc).
+
 ## Spine-inversion register (AC-003)
 
 Exactly one deliberate inversion, justified inline at its rank:

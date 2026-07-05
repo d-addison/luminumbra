@@ -1429,9 +1429,10 @@
       "dependencies": [
         "RENDER-01"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: LiveWeatherBridge gate — non-scenario IN_GAME run on a storm-forced seed asserts driven overlay uniforms (rain_intensity>0) + sky-luma drop vs a clear-seed control, reusing the WeatherVisual analyzers",
-      "rank": 76
+      "rank": 76,
+      "note": "DONE 2026-07-05 (Wave G, c46e0e23). WeatherRenderBridge.h pure mapping (scenario floors excluded) + per-frame SampleAt(camera) -> weather+cloud state behind render.live_weather (default OFF; flipped ON at R1.X). LiveWeatherBridge capture rides the R1.X re-bless evidence."
     },
     {
       "id": "RENDER-20",
@@ -1474,9 +1475,10 @@
       "dependencies": [
         "ATMO-07"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: LiveLightning assertion in the LiveWeatherBridge gate — a sim-scheduled strike tick produces a bolt draw + frame-luma pulse in live play (reuses the WeatherVisual bolt/pulse analyzers at validate-engine-frontier.ps1:3322-3378)",
-      "rank": 77
+      "rank": 77,
+      "note": "DONE 2026-07-05 (Wave G, c46e0e23). Live StrikeSchedule consumer: real seeded bolt at its WORLD position through the actual camera view-proj + magnitude/distance pulse + the AUDIO-08 thunder cue queue. Same flag as the bridge."
     },
     {
       "id": "ATMO-09",
@@ -1487,9 +1489,10 @@
       "effort": "S",
       "risk": "low",
       "dependencies": [],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "TimeOfDaySweep (6-phase season assertions at validate-engine-frontier.ps1:3872-3881 stay green) + NEW: LiveSeasonTick ctest — after N live sim ticks, get_season_phase()==(N%432000)/432000",
-      "rank": 78
+      "rank": 78,
+      "note": "DONE 2026-07-05 (Wave G, c46e0e23). Live play feeds the authoritative sim tick to set_season_tick per frame (scenario pins override by frame order). Gate: LiveSeasonTick.SeasonPhaseIsPureFunctionOfSimTick."
     },
     {
       "id": "AETHER-04",
@@ -1502,9 +1505,10 @@
       "dependencies": [
         "RENDER-01"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "WorldVisualSweep rerun + ctest RenderSmokeTest.AetherEmissiveTapBrightensLitOutput stays green",
-      "rank": 79
+      "rank": 79,
+      "note": "DONE 2026-07-05 (Wave G, c46e0e23). The A1d 2/2 bridge: session aether grid -> update_aether_field per frame behind render.aether_tap; the existing AetherEmissiveTap GPU test is the ON-path proof."
     },
     {
       "id": "AETHER-10",
@@ -1517,9 +1521,10 @@
       "dependencies": [
         "AETHER-04"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: render_smoke_test case — a non-default glow color propagates to the lit output; WorldVisualSweep on defaults stays pixel-identical",
-      "rank": 80
+      "rank": 80,
+      "note": "DONE 2026-07-05 (Wave G, c46e0e23). u_aetherGlowColor/Intensity flow from RenderContext (defaults == GLSL initializers = pixel-identical) + set_aether_glow tuning hook."
     },
     {
       "id": "INSTINCT-04",
@@ -1543,9 +1548,10 @@
       "effort": "S",
       "risk": "low",
       "dependencies": [],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "herd_alarm_test + predator_pack_test green; NEW: ecology_demo_test assertion that the ambient spawn carries the alarm/pack/migratory/territory set (client-only, --smoke 6f008a9f637c40b7 unchanged)",
-      "rank": 82
+      "rank": 82,
+      "note": "DONE 2026-07-05 (Wave G, c46e0e23). Alarm(prey)/PackHunter(predator)/Territory(home@spawn)/Migratory + slow seeded Mortal/Decay stamped on the CLIENT ambient roster (client decoration, never server hashes)."
     },
     {
       "id": "INSTINCT-06",
@@ -1600,9 +1606,10 @@
         "010",
         "WATER-07"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "Heavy oracle + LREC1 replay + --smoke run==replay 6f008a9f637c40b7 (hydrology default-OFF baseline byte-identical) + validate-determinism-matrix.ps1",
-      "rank": 86
+      "rank": 86,
+      "note": "DONE 2026-07-05 (Wave G, c46e0e23; == WATER-07). Weather-driven per-cell rain, integer-quantized at the boundary, behind sim.hydrology_weather (hashed, default-OFF = hash-neutral). Gate: WaterDeterminism.WeatherDrivenRainIsDeterministic. Activation = owner-menu hash bump."
     },
     {
       "id": "WATER-07",
@@ -1613,9 +1620,10 @@
       "effort": "M",
       "risk": "medium",
       "dependencies": [],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: ctest WaterDeterminism.WeatherDrivenRainIsDeterministic — weather-coupled rain is run==replay identical, land-water volume rises during a storm epoch and recedes after; --smoke unchanged with the flag off",
-      "rank": 86
+      "rank": 86,
+      "note": "DONE 2026-07-05 (Wave G, c46e0e23; == ATMO-11, see that note)."
     },
     {
       "id": "AUDIO-05",
@@ -1626,9 +1634,10 @@
       "effort": "S",
       "risk": "low",
       "dependencies": [],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: sfx-bus check appended to test/audio/audio-handle-application.ps1 — asserts IAudioManager declares SetSfxVolume and MiniaudioManager scales one-shot/ambient gain by the bus",
-      "rank": 87
+      "rank": 87,
+      "note": "DONE 2026-07-05 (Wave G, c46e0e23, agent). SetSfxVolume + the sfx bus group; user.audio_sfx applied at boot + live slider + settings bridge."
     },
     {
       "id": "AUDIO-07",
@@ -1641,9 +1650,10 @@
       "dependencies": [
         "AUDIO-04"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: night-audio assertion in validate-engine-frontier.ps1 -Mode AtmosphereAudio — bird-bed volume scales to ~0 when sun elevation < 0 and the night bed replaces it",
-      "rank": 88
+      "rank": 88,
+      "note": "DONE 2026-07-05 (Wave G, c46e0e23, agent). Day bed sun-gated + night bed (PLACEHOLDER asset — real crickets/owls = AUDIO-14) crossfaded via EnvironmentalAudioModel.h (11 gtests)."
     },
     {
       "id": "AUDIO-06",
@@ -1656,9 +1666,10 @@
       "dependencies": [
         "AUDIO-04"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: WaterfallRoarWiring ctest — a waterfall crest site yields roar volume > 0 within range and 0 beyond max range, and the IN_GAME loop triggers the bed from waterfall_sites",
-      "rank": 89
+      "rank": 89,
+      "note": "DONE 2026-07-05 (Wave G, c46e0e23). ComputeWaterfallRoar (made static — pure math) drives a positional loop from the nearest DETECTED WaterfallSite (the render sheets' own set). PLACEHOLDER asset noted for AUDIO-14."
     },
     {
       "id": "AUDIO-08",
@@ -1669,9 +1680,10 @@
       "effort": "S",
       "risk": "low",
       "dependencies": [],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: ThunderCue wiring assertion in validate-engine-frontier.ps1 -Mode AtmosphereAudio — thunder gain/delay follows strike distance (speed-of-sound delay), not a fixed cadence",
-      "rank": 90
+      "rank": 90,
+      "note": "DONE 2026-07-05 (Wave G, c46e0e23). Thunder follows the SIM strike schedule under the bridge flag — physical delay (distance/343 m/s) per cue; the flat 22s timer is the bridge-off fallback only."
     },
     {
       "id": "UI-06",
@@ -1777,9 +1789,10 @@
       "effort": "S",
       "risk": "low",
       "dependencies": [],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "validate-engine-frontier.ps1 -Mode EcologyTickPerf (enforced budgets go RED on regression once blessed)",
-      "rank": 97
+      "rank": 97,
+      "note": "DONE 2026-07-05 (Wave G, 41390c47+c46e0e23, agent). Budget plumbing: capture-ecology-tick-budgets.ps1 bless path, capture-perf-floor clobber fix, build-mode-matched enforcement, the no-time-based-cap standing rule recorded. Release numbers blessed at wave close."
     },
     {
       "id": "ATMO-10",
@@ -1792,9 +1805,10 @@
       "dependencies": [
         "ATMO-09"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "--smoke run==replay 6f008a9f637c40b7 unchanged (render-only) + TimeOfDaySweep + NEW: TodTickPurity ctest — same tick -> same TOD independent of frame pacing",
-      "rank": 98
+      "rank": 98,
+      "note": "DONE 2026-07-05 (Wave G, c46e0e23). TIME AUTHORITY: TimeOfDayFromTick(tick, day_length) (default 1800 = the legacy 60s/day pacing); wall-clock advance survives only for non-tick-fed paths (byte-identical); photo-hold precedence kept. Gate: TodTickPurity."
     },
     {
       "id": "ATMO-12",
@@ -1807,9 +1821,10 @@
       "dependencies": [
         "ATMO-11"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "Existing ctest WeatherEvents.* (test/sim/weather_event_test.cpp, gtest-discovered per test/CMakeLists.txt:952) + heavy oracle + --smoke (no-participant worlds byte-identical)",
-      "rank": 99
+      "rank": 99,
+      "note": "DONE 2026-07-05 (Wave G, c46e0e23). GameSession::CurrentWeatherEvent() (WeatherEventAt(tick, seed+25)) behind sim.weather_events (OFF -> Clear/0 always). Consumers stay participant- AND flag-gated."
     },
     {
       "id": "WATER-12",
@@ -1820,9 +1835,10 @@
       "effort": "S",
       "risk": "low",
       "dependencies": [],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: ctest WaterDeterminism.DamBedEditPoolsWaterDeterministically — post-dam upstream depth rises, mass invariant holds, run==replay identical",
-      "rank": 100
+      "rank": 100,
+      "note": "DONE 2026-07-05 (Wave G, c46e0e23). WaterDeterminism.DamBedEditPoolsWaterDeterministically: +4m bed raise under a settled body -> run==replay hash equality + mass invariant + field response. GREEN first run."
     },
     {
       "id": "WATER-13",
@@ -1861,9 +1877,10 @@
       "effort": "M",
       "risk": "low",
       "dependencies": [],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: validate-determinism-matrix.ps1 -Mode WaterCrossBuild — per-tick debug_water_state_hash sequence identical between debug and release server builds on the same scenario",
-      "rank": 103
+      "rank": 103,
+      "note": "DONE 2026-07-05 (Wave G, 41390c47). --water-hash-trace per-tick water-state hash (avail-trace pattern; hex-string serialization; in-process run==replay verdict) + validate-determinism-matrix.ps1 -Mode WaterCrossBuild debug-vs-release sequence diff (integer-mm water must be identical cross-build; divergence = float leak)."
     },
     {
       "id": "WATER-08",
@@ -1904,9 +1921,10 @@
       "dependencies": [
         "AUDIO-04"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: AtmosphereAudio in-game wiring assertion — the IN_GAME loop constructs EnvironmentalAudioSystem and biome/weather reverb reaches a live miniaudio DSP node, not a log stub",
-      "rank": 106
+      "rank": 106,
+      "note": "DONE 2026-07-05 (Wave G, c46e0e23, agent). Biome/weather reverb wired to a real ma_delay_node proxy on the ambient bus (miniaudio 0.11.22 has no reverb node — documented), fed from BiomeReverbAt + SampleAt per 0.5s."
     },
     {
       "id": "AUDIO-10",
@@ -1919,9 +1937,10 @@
       "dependencies": [
         "AUDIO-05"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: MixerBus ctest — pure bus-state unit test asserting a sting playback ducks bed gain and releases on completion",
-      "rank": 107
+      "rank": 107,
+      "note": "DONE 2026-07-05 (Wave G, c46e0e23, agent). Bus hierarchy (music/sfx->ambient/events/ui) + sidechain ducking (MixerModel.h envelope, 16 gtests) + semantic routing at the event/UI call sites."
     },
     {
       "id": "AUDIO-11",
@@ -2526,9 +2545,10 @@
       "dependencies": [
         "INSTINCT-03"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "creature_species_registry_test (schema round-trip) + creature_brain_test (default-species byte-identical) + PopulatedWorldReplay unchanged until a species opts in",
-      "rank": 137
+      "rank": 137,
+      "note": "DONE 2026-07-05 (Wave G, c46e0e23, agent). Species JSON brain/genome-range overrides on the existing registry, world-load hook (filename-sorted, content-pure), absent==compiled byte-identically. species_behavior_overrides_test 7/7. Unblocks OPS-16."
     },
     {
       "id": "INSTINCT-14",
@@ -2585,9 +2605,10 @@
         "ATMO-07",
         "ATMO-12"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: SnowCover gate — snow-forced capture asserts ground-ROI albedo/luma shift vs clear control + WorldVisualSweep no-new-flags",
-      "rank": 140
+      "rank": 140,
+      "note": "DONE 2026-07-05 (Wave G, c46e0e23). SnowCoverModel.h (accumulate/melt/clamp) -> u_snowCover up-facing albedo/roughness blend before F0, behind render.snow_cover. Gate: SnowCoverModel ctest; the snow-forced capture rides the R1.X re-bless."
     },
     {
       "id": "SHIELD-10",
@@ -2611,9 +2632,10 @@
       "effort": "S",
       "risk": "low",
       "dependencies": [],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "creature_brain_system_test green (doc-only change, zero behaviour delta)",
-      "rank": 142
+      "rank": 142,
+      "note": "DONE 2026-07-05 (Wave G, c46e0e23, agent). Stale brain comments fixed (CreatureBrainSystem.h, CreatureComponents.h, spec-011 Next list)."
     },
     {
       "id": "WATER-14",
@@ -2624,9 +2646,10 @@
       "effort": "S",
       "risk": "low",
       "dependencies": [],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: SpecStatusAudit ops-gate check — every shipped spec has a docs/specs dir and a Status matching the tree (negative test: a Draft spec with landed ACs fails)",
-      "rank": 143
+      "rank": 143,
+      "note": "DONE 2026-07-05 (Wave G, 41390c47). Spec 010 authored retroactively; spec 009 Draft->Landed; NEW -Mode SpecStatusAudit (spec.md presence + gap-free numbering + no un-allowlisted Draft)."
     },
     {
       "id": "NET-10",
@@ -2680,9 +2703,10 @@
       "effort": "S",
       "risk": "low",
       "dependencies": [],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "ShaderInventory gate (validate-engine-frontier.ps1 -Mode ShaderInventory, .forge/scripts/validate-engine-frontier.ps1:7241) green after removal + WorldVisualSweep unchanged",
-      "rank": 146
+      "rank": 146,
+      "note": "DONE 2026-07-05 (Wave G, 41390c47). skybox.frag deleted + the ShaderInventory dead-file tripwire (caught + deleted 5 MORE dead shaders: bloom_* x3, crystal_field_effect, screen_space_reflections — the M2 census pulled forward); required-programs refreshed to 20."
     },
     {
       "id": "AUDIO-14",

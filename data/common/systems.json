@@ -1,5 +1,5 @@
-{
-  "_comment": "SystemConfig registry (§1a). DEFAULT / all-off baseline: every system OFF so the canonical world_hash (d950a6afc12a5cdc) and visual baselines stay byte-identical. Spec: .forge/specs/system-config/spec.md. sim.* may change sim state (hashed when enabled); render.* is render-only (never hashed). systems.game.json is the intended-ON profile.",
+﻿{
+  "_comment": "SystemConfig registry (Â§1a). DEFAULT / all-off baseline: every system OFF so the canonical world_hash (d950a6afc12a5cdc) and visual baselines stay byte-identical. Spec: .forge/specs/system-config/spec.md. sim.* may change sim state (hashed when enabled); render.* is render-only (never hashed). systems.game.json is the intended-ON profile.",
   "sim": {
     "plant_growth": { "enabled": false, "params": { "mutation_rate": 0.05 } },
     "erosion": { "enabled": false },
@@ -48,9 +48,9 @@
     "creature_spawn": { "enabled": false, "params": {
       "herd_count": 12, "predator_speed": 4.0, "prey_speed": 2.6, "initial_hunger": 0.2 } },
     "foraging_colony": { "enabled": false, "params": { "ant_count": 24, "food_amount": 1000000 } },
-    "_wave_g_comment": "Wave G R1 bridges (ATMO-07/AETHER-04/ATMO-14): default-OFF until the R1.X batched WorldVisualSweep re-bless flips them ON.",
-    "live_weather": { "enabled": false },
-    "aether_tap": { "enabled": false },
-    "snow_cover": { "enabled": false }
+    "_wave_g_comment": "Wave G R1.X (2026-07-05): live_weather/aether_tap/snow_cover flipped ON in ONE batched WorldVisualSweep re-bless - the living-atmosphere default.",
+    "live_weather": { "enabled": true },
+    "aether_tap": { "enabled": true },
+    "snow_cover": { "enabled": true }
   }
 }
