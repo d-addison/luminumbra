@@ -836,6 +836,36 @@ private:
                        const Camera& camera, float deltaTime, bool wireframe);
     void dispatch_stages(const Camera& camera);
 
+    // WAVE-F F2 (RENDER-11 execution migration): each frame-graph node's body,
+    // moved VERBATIM out of the dispatch script. Every member owns its own trace
+    // record, runtime guard, and GL pre/post state; each reads only FramePrepared
+    // + pipeline members (the dispatch-idempotence contract). The names match
+    // BuildLuminumbraFrameGraph()'s node names 1:1 — the executor table maps
+    // node name -> member and the drift guard keeps declaration/dispatch in sync.
+    void execute_stage_shadow(const Camera& camera);
+    void execute_stage_gbuffer(const Camera& camera);
+    void execute_stage_plant_procgen(const Camera& camera);
+    void execute_stage_farfield_raymarch(const Camera& camera);
+    void execute_stage_ground_decals(const Camera& camera);
+    void execute_stage_ssao(const Camera& camera);
+    void execute_stage_ssao_blur(const Camera& camera);
+    void execute_stage_lighting(const Camera& camera);
+    void execute_stage_depth_blit_to_lighting(const Camera& camera);
+    void execute_stage_skybox(const Camera& camera);
+    void execute_stage_opaque_snapshot(const Camera& camera);
+    void execute_stage_water(const Camera& camera);
+    void execute_stage_waterfall(const Camera& camera);
+    void execute_stage_weather_opaque_snapshot(const Camera& camera);
+    void execute_stage_weather_overlay(const Camera& camera);
+    void execute_stage_aerial(const Camera& camera);
+    void execute_stage_god_rays(const Camera& camera);
+    void execute_stage_foliage(const Camera& camera);
+    void execute_stage_taau_resolve(const Camera& camera);
+    void execute_stage_particles(const Camera& camera);
+    void execute_stage_lightning_overlay(const Camera& camera);
+    void execute_stage_final_blit(const Camera& camera);
+    void execute_stage_debug_view(const Camera& camera);
+
     void ensure_terrain_culling_hierarchy(const std::vector<ChunkMeshSnapshot>& renderable_chunks);
     void manage_chunk_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks, const Camera& camera);
     bool copy_terrain_mesh_payload(const ChunkMeshSnapshot& chunk, ChunkMeshPayload& payload) const;
@@ -1147,6 +1177,10 @@ private:
 
     // WAVE-F F1: the prepared per-frame state dispatch_stages reads (see prepare_frame).
     FramePrepared m_frame_prepared;
+    // WAVE-F F2: the lighting ctx built by execute_stage_lighting, reused by the
+    // opaque-snapshot and lightning-overlay stages (its fields are frame-stable —
+    // the pre-split code built it once at function scope for exactly this reuse).
+    RenderContext m_frame_lighting_ctx;
     // spec 004 CPU per-phase markers — members because they now span the
     // prepare/dispatch boundary (set in prepare_frame/dispatch_stages, read in the
     // render_frame epilogue's stats block).

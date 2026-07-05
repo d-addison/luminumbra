@@ -2371,18 +2371,12 @@ void RenderPipeline::prepare_frame(entt::registry& registry, Systems::SHIELD_Wor
 }
 
 void RenderPipeline::dispatch_stages(const Camera& camera) {
-    // WAVE-F F1: the pure GPU stage sequence over the prepared frame. The stage
-    // bodies below moved VERBATIM from the pre-split render_frame; these aliases
-    // keep them byte-identical. This function must be IDEMPOTENT per prepared
-    // frame (bit-identical pixels when run twice) — no wall-clock reads, no
-    // motion/history advances, no per-frame counters; those live in prepare_frame.
-    entt::registry& registry = *m_frame_prepared.registry;
-    const float deltaTime = m_frame_prepared.delta_time;
-    const glm::mat4& projection = m_frame_prepared.projection;
-    const glm::mat4& view = m_frame_prepared.view;
-    const auto& renderable_chunk_snapshots = m_frame_prepared.renderable_chunk_snapshots;
-    glm::vec4 frustum_planes[6];
-    std::memcpy(frustum_planes, m_frame_prepared.frustum_planes, sizeof(frustum_planes));
+    // WAVE-F F1/F2: the pure GPU stage sequence over the prepared frame. Each
+    // execute_stage_* body moved VERBATIM from the pre-split render_frame and
+    // reads only FramePrepared + pipeline members. This function must be
+    // IDEMPOTENT per prepared frame (bit-identical pixels when run twice) — no
+    // wall-clock reads, no motion/history advances, no per-frame counters in any
+    // stage; those live in prepare_frame. Gated by -Mode RenderParityFrame == 0.0.
 
     // Ensure no VAO is bound at start to prevent artifacts
     glBindVertexArray(0);
@@ -2407,6 +2401,38 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
     // each stage's slot (a conditional stage that does no GL work still holds its place in the
     // order). Pure CPU observability: never a GL call, never world_hash (018 FR-E-003).
     m_frame_stage_trace.clear();
+
+    // WAVE-F F2 (RENDER-11): the hand-scripted sequence over the extracted node
+    // bodies — each execute_stage_* moved VERBATIM from the inline script and owns
+    // its trace record, runtime guard, and GL pre/post state. The graph-driven
+    // executor loop replaces this list in the next increment; the whole-frame A/B
+    // (-Mode RenderParityFrame, exactly 0.0) gates each step of the migration.
+    execute_stage_shadow(camera);
+    execute_stage_gbuffer(camera);
+    execute_stage_plant_procgen(camera);
+    execute_stage_farfield_raymarch(camera);
+    execute_stage_ground_decals(camera);
+    execute_stage_ssao(camera);
+    execute_stage_ssao_blur(camera);
+    execute_stage_lighting(camera);
+    execute_stage_depth_blit_to_lighting(camera);
+    execute_stage_skybox(camera);
+    execute_stage_opaque_snapshot(camera);
+    execute_stage_water(camera);
+    execute_stage_waterfall(camera);
+    execute_stage_weather_opaque_snapshot(camera);
+    execute_stage_weather_overlay(camera);
+    execute_stage_aerial(camera);
+    execute_stage_god_rays(camera);
+    execute_stage_foliage(camera);
+    execute_stage_taau_resolve(camera);
+    execute_stage_particles(camera);
+    execute_stage_lightning_overlay(camera);
+    execute_stage_final_blit(camera);
+    execute_stage_debug_view(camera);
+}
+
+void RenderPipeline::execute_stage_shadow(const Camera& camera) {
      // 1. SHADOW PASS
     // Spec 016 (T10): precompute light-space matrices (pipeline-private) + the
     // terrain-submit callback at the call site; the pass submits one per cascade.
@@ -2429,6 +2455,12 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
     end_gpu_pass_timer(GpuTimerPass::Shadow);
     m_cpu_frame_shadow = std::chrono::steady_clock::now(); // spec 004
     glViewport(0, 0, m_screen_width, m_screen_height);
+}
+
+void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
+    entt::registry& registry = *m_frame_prepared.registry;
+    glm::vec4 frustum_planes[6];
+    std::memcpy(frustum_planes, m_frame_prepared.frustum_planes, sizeof(frustum_planes));
 
     // 2. GEOMETRY / G-BUFFER PASS (Spec 016-P2-T11: routed through the RenderContext seam).
     record_frame_stage("gbuffer");
@@ -2461,12 +2493,17 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
         m_last_render_pass_stats.skinned_indices_drawn += gstats.skinned_indices;
     }
     m_cpu_frame_gbuf = std::chrono::steady_clock::now(); // spec 004
+}
+
+void RenderPipeline::execute_stage_plant_procgen(const Camera& camera) {
     // 2a. I9-FOLIAGE (render.plant_procgen): draw the procedural plants into the
     // SAME G-buffer the static meshes just wrote. The combined world-space mesh
     // is baked + pushed by the client (set_plants); OFF by default, so this is a
     // no-op (zero GL work) and the render is byte-identical. Bind the G-buffer
     // FBO + its 4 draw buffers and depth-test (GL_LESS) so the plants occlude /
     // are occluded correctly, mirroring the far-field injection below.
+    // NOTE (F2): the GBuffer GPU-timer bracket spans gbuffer -> plant_procgen (it
+    // opened in execute_stage_gbuffer and closes here) — preserved verbatim.
     record_frame_stage("plant_procgen");
     if (m_plant_procgen_pass && m_plant_procgen_pass->enabled() &&
         m_plant_procgen_pass->index_count() > 0) {
@@ -2486,7 +2523,11 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
     end_gpu_pass_timer(GpuTimerPass::GBuffer);
     glBindVertexArray(0);  // Unbind after gbuffer pass
     glDisable(GL_CULL_FACE);
+}
 
+void RenderPipeline::execute_stage_farfield_raymarch(const Camera& camera) {
+    Systems::SHIELD_WorldSystem& world_system = *m_frame_prepared.world_system;
+    (void)world_system;
     // 2b. EXPERIMENTAL SHIELD-RT FAR-FIELD RAYMARCH (T-I6-A3b, flag-gated).
     // Fills the far/sky pixels the live + far-mesh geometry left unwritten: a
     // fullscreen heightfield max-mip raymarch into the SAME G-buffer, depth-tested
@@ -2525,7 +2566,9 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         end_gpu_pass_timer(GpuTimerPass::FarFieldRaymarch);
     }
+}
 
+void RenderPipeline::execute_stage_ground_decals(const Camera& camera) {
     // 2c. PHEROMONE GROUND DECALS (spec 011 FR-C, render-only sim->render mirror).
     // Additively tint the ALBEDO attachment where forager food/home scent trails
     // exist, AFTER the G-buffer is fully populated but BEFORE SSAO + lighting, so the
@@ -2553,8 +2596,12 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
         glDrawBuffers(4, gd_restore);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
+}
 
+void RenderPipeline::execute_stage_ssao(const Camera& camera) {
     // 3. SSAO PASS (Spec 016-P2-T02: routed through the RenderContext seam).
+    // (F2: the ssao/ssao_blur pair each build their own ctx — make_ssao_context is
+    // a pure projection of frame-stable pipeline state, so rebuild == the old reuse.)
     {
         RenderContext ctx = make_ssao_context(camera);
         record_frame_stage("ssao");
@@ -2563,6 +2610,12 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
         m_last_render_pass_stats.ssao_draws++;
         end_gpu_pass_timer(GpuTimerPass::Ssao);
         glBindVertexArray(0);  // Unbind after SSAO
+    }
+}
+
+void RenderPipeline::execute_stage_ssao_blur(const Camera& camera) {
+    {
+        RenderContext ctx = make_ssao_context(camera);
         record_frame_stage("ssao_blur");
         begin_gpu_pass_timer(GpuTimerPass::SsaoBlur);
         m_ssao_pass->execute_blur(ctx);
@@ -2570,26 +2623,35 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
         end_gpu_pass_timer(GpuTimerPass::SsaoBlur);
         glBindVertexArray(0);  // Unbind after SSAO blur
     }
+}
 
+void RenderPipeline::execute_stage_lighting(const Camera& camera) {
     // 4. LIGHTING PASS (Renders to m_lighting_fbo) — Spec 016-P2-T12 RenderContext seam.
     glEnable(GL_CULL_FACE);
-    // Built ONCE at function scope (NOT a {} block): the same lighting_ctx is reused
-    // by the opaque-copy (step 7) and lightning-overlay (step 8b) below — the fields
-    // they read are frame-stable, so reuse == rebuild. make_lighting_context also runs
-    // the hoisted shadow-cascade fixup (CPU-only, render-neutral) before the GPU timer.
+    // Built ONCE per dispatch and kept as m_frame_lighting_ctx: the same ctx is
+    // reused by the opaque-copy (step 7) and lightning-overlay (step 8b) stages —
+    // the fields they read are frame-stable, so reuse == rebuild (the pre-split
+    // code built it once at function scope for exactly this reuse).
+    // make_lighting_context also runs the hoisted shadow-cascade fixup (CPU-only,
+    // render-neutral) before the GPU timer.
     record_frame_stage("lighting");
-    RenderContext lighting_ctx = make_lighting_context(camera);
+    m_frame_lighting_ctx = make_lighting_context(camera);
     begin_gpu_pass_timer(GpuTimerPass::Lighting);
-    m_lighting_pass->execute(lighting_ctx);
+    m_lighting_pass->execute(m_frame_lighting_ctx);
     end_gpu_pass_timer(GpuTimerPass::Lighting);
     glBindVertexArray(0);  // Unbind after lighting pass
+}
 
+void RenderPipeline::execute_stage_depth_blit_to_lighting(const Camera& camera) {
+    (void)camera;
     // 5. COPY DEPTH TO LIGHTING FBO SO SKYBOX AND WATER SHARE THE G-BUFFER OCCLUSION
     record_frame_stage("depth_blit_to_lighting");
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_gbuffer_pass->gbuffer().fbo_id);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
     glBlitFramebuffer(0, 0, m_screen_width, m_screen_height, 0, 0, m_screen_width, m_screen_height, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+}
 
+void RenderPipeline::execute_stage_skybox(const Camera& camera) {
     // 6. SKYBOX / SKY-DOME PASS (Renders to m_lighting_fbo before transparent water blends)
     // Spec 016 (016-P1-T04): build the skybox ctx AFTER the gbuffer->lighting depth
     // blit (step 5) so the adopted handles + state match the production sequence.
@@ -2639,13 +2701,20 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
     }
     end_gpu_pass_timer(GpuTimerPass::Skybox);
     glBindVertexArray(0);  // Unbind after skybox pass
+}
 
+void RenderPipeline::execute_stage_opaque_snapshot(const Camera& camera) {
+    (void)camera;
     // 7. SNAPSHOT THE LIT OPAQUE+SKY SCENE, THEN WATER PASS BLENDS OVER IT.
     // Water keeps depth writes off for transparency. Drawing the sky first prevents
     // cloud/aurora sky pixels from overwriting water over far-depth/background
     // samples while still giving refraction a stable pre-water color source.
     record_frame_stage("opaque_snapshot");
-    m_lighting_pass->copy_lighting_color_to_opaque_texture(lighting_ctx);
+    m_lighting_pass->copy_lighting_color_to_opaque_texture(m_frame_lighting_ctx);
+}
+
+void RenderPipeline::execute_stage_water(const Camera& camera) {
+    const auto& renderable_chunk_snapshots = m_frame_prepared.renderable_chunk_snapshots;
     glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
     record_frame_stage("water");
     if (m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Water)) {
@@ -2669,6 +2738,11 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
         glBindVertexArray(0);  // Unbind after water pass
     }
 
+}
+
+void RenderPipeline::execute_stage_waterfall(const Camera& camera) {
+    const glm::mat4& projection = m_frame_prepared.projection;
+    const glm::mat4& view = m_frame_prepared.view;
     // 7-W. WATERFALL SHEETS (T-I5b-4, W1): the animated falling-sheet veil drawn
     // over each detected waterfall site. Render-only dressing on a world-
     // deterministic site set (never hashed). Drawn after water, into the lit FBO,
@@ -2739,29 +2813,39 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
         if (blend_was) glEnable(GL_BLEND); else glDisable(GL_BLEND);
     }
 
+}
+
+void RenderPipeline::execute_stage_weather_opaque_snapshot(const Camera& camera) {
+    // 7a-pre. WEATHER OVERLAY's post-water opaque snapshot (owned by SkyboxPass's
+    // stage pair): Spec 016 (016-P1-T04) relocated the snapshot here from inside
+    // SkyboxPass (a friendless pass can't call Lighting). Guarded by the SAME
+    // conditions the overlay runs under, so opaque_color_texture (also read by
+    // god-rays below) stays byte-identical to the prior behavior. (F2: the pair
+    // each compute overlay_will_run + ctx from the same frame-stable state —
+    // rebuild == the old shared block-locals.)
+    const FrameBufferObject& lighting_fbo = m_lighting_pass->lighting_fbo();
+    const bool overlay_will_run =
+        m_weather_type != WeatherType::None && m_weather_intensity > 0.0f &&
+        m_skybox_pass->weather_shader() && m_skybox_pass->weather_shader()->IsValid() &&
+        lighting_fbo.fbo_id && lighting_fbo.opaque_color_texture && m_screen_quad_vao;
+    RenderContext weather_ctx = make_skybox_context(camera);
+    record_frame_stage("weather_opaque_snapshot");
+    if (overlay_will_run) {
+        m_lighting_pass->copy_lighting_color_to_opaque_texture(weather_ctx);
+    }
+}
+
+void RenderPipeline::execute_stage_weather_overlay(const Camera& camera) {
     // 7a. WEATHER OVERLAY (owned by SkyboxPass): defer until after water so
     // screen-space rain/fog remains a full-scene composite while sky/cloud/aurora
     // still render before water.
-    // Spec 016 (016-P1-T04): the post-water opaque snapshot the overlay reads is
-    // RELOCATED here from inside SkyboxPass (a friendless pass can't call Lighting).
-    // Guarded by the SAME conditions the overlay runs under, so opaque_color_texture
-    // (also read by god-rays below) stays byte-identical to the prior behavior.
-    {
-        const FrameBufferObject& lighting_fbo = m_lighting_pass->lighting_fbo();
-        const bool overlay_will_run =
-            m_weather_type != WeatherType::None && m_weather_intensity > 0.0f &&
-            m_skybox_pass->weather_shader() && m_skybox_pass->weather_shader()->IsValid() &&
-            lighting_fbo.fbo_id && lighting_fbo.opaque_color_texture && m_screen_quad_vao;
-        RenderContext weather_ctx = make_skybox_context(camera);
-        record_frame_stage("weather_opaque_snapshot");
-        if (overlay_will_run) {
-            m_lighting_pass->copy_lighting_color_to_opaque_texture(weather_ctx);
-        }
-        record_frame_stage("weather_overlay");
-        m_skybox_pass->execute_weather_overlay(weather_ctx, camera);
-        glBindVertexArray(0);
-    }
+    RenderContext weather_ctx = make_skybox_context(camera);
+    record_frame_stage("weather_overlay");
+    m_skybox_pass->execute_weather_overlay(weather_ctx, camera);
+    glBindVertexArray(0);
+}
 
+void RenderPipeline::execute_stage_aerial(const Camera& camera) {
     // 7b. AERIAL-PERSPECTIVE PASS (T-I5a-6): analytic distance-fog in-scatter
     // over the lit scene, wiring the dormant volumetric_lighting.frag. Reads the
     // SAME sky-view/transmittance LUT the skybox uses so the fog palette stays
@@ -2774,7 +2858,9 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
         end_gpu_pass_timer(GpuTimerPass::Aerial);
         glBindVertexArray(0);
     }
+}
 
+void RenderPipeline::execute_stage_god_rays(const Camera& camera) {
     // 7b2. GOD RAYS (screen-space crepuscular rays): additive shafts fanning from the
     // sun around occluders (clouds/terrain). Only when the sun is above the horizon
     // and on screen (zero cost otherwise). Reads the post-sky opaque snapshot.
@@ -2784,6 +2870,9 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
         execute_god_rays(godray_ctx);
     }
 
+}
+
+void RenderPipeline::execute_stage_foliage(const Camera& camera) {
     // 7c. FOLIAGE PASS (T-I5b-1, F1): instanced ground-cover scatter blended
     // into the lit HDR target. Depth-tested against the scene depth (blitted into
     // the lighting FBO at step 5), so the cards occlude correctly. The scatter
@@ -2808,6 +2897,10 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
         glBindVertexArray(0);
     }
 
+}
+
+void RenderPipeline::execute_stage_taau_resolve(const Camera& camera) {
+    (void)camera;
     // FR-R5 TAAU §17: resolve the OPAQUE lit color BEFORE the transparent particle/lightning
     // composite. Transparents can't write the gbuffer motion-vector MRT, so a resolve placed
     // after them would temporally blend them along the opaque surface's motion (or zero for sky)
@@ -2821,11 +2914,14 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
         execute_taau_resolve(taau_ctx);
     }
 
+}
+
+void RenderPipeline::execute_stage_particles(const Camera& camera) {
     // 8. PARTICLE PASS (T-I5a-1): forward-lit, soft-faded transparent particles
     // blended into the lit HDR target after the skybox. Render-only motion is
-    // advanced first; the descriptor schedule (the sim-deterministic surface) is
-    // rebuilt by the scenario driver, NOT here. A no-op (zero GL draws) when no
-    // emitters exist, so all existing visual gates stay byte-stable.
+    // advanced in prepare_frame; the descriptor schedule (the sim-deterministic
+    // surface) is rebuilt by the scenario driver, NOT here. A no-op (zero GL
+    // draws) when no emitters exist, so all existing visual gates stay byte-stable.
     record_frame_stage("particles");
     if (m_particle_pass &&
         m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Particles)) {
@@ -2843,6 +2939,10 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
         glBindVertexArray(0);
     }
 
+}
+
+void RenderPipeline::execute_stage_lightning_overlay(const Camera& camera) {
+    (void)camera;
     // 8b. LIGHTNING OVERLAY (T-I5a-5, B3): the full-scene light-pulse + screen-space
     // bolt, composited over the lit terrain AND the sky (drawn after the skybox).
     // A no-op when no strike is active (zero added cost). Its transient cost is
@@ -2850,10 +2950,14 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
     // is bounded by the overlay being a single additive full-screen quad.
     record_frame_stage("lightning_overlay");
     if (m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Lightning)) {
-        m_lighting_pass->execute_lightning_overlay(lighting_ctx);
+        m_lighting_pass->execute_lightning_overlay(m_frame_lighting_ctx);
         glBindVertexArray(0);
     }
 
+}
+
+void RenderPipeline::execute_stage_final_blit(const Camera& camera) {
+    const float deltaTime = m_frame_prepared.delta_time;
     // 9. FINAL BLIT TO SCREEN (or to the offscreen preview target, Item 1).
     // Spec 016-P1-T01: routed through the RenderContext seam (FinalBlitPass) — the
     // first pass off RenderPipeline&. Byte-identical to the prior inline blit; the
@@ -2863,10 +2967,6 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
     // Spec 002 Item 1: when a preview FBO is bound, the lit scene is copied into it
     // instead of the default framebuffer (1:1 filtered blit). Default path
     // (no target) is byte-identical.
-    const GLuint draw_fbo = m_offscreen_target_active ? m_offscreen_target_fbo : 0u;
-    const u32 dst_w = m_offscreen_target_active ? m_offscreen_target_w : m_screen_width;
-    const u32 dst_h = m_offscreen_target_active ? m_offscreen_target_h : m_screen_height;
-
     record_frame_stage("final_blit");
     begin_gpu_pass_timer(GpuTimerPass::FinalBlit);
     {
@@ -2885,7 +2985,12 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
     }
     m_last_render_pass_stats.final_blits++;
     end_gpu_pass_timer(GpuTimerPass::FinalBlit);
+}
 
+void RenderPipeline::execute_stage_debug_view(const Camera& camera) {
+    const GLuint draw_fbo = m_offscreen_target_active ? m_offscreen_target_fbo : 0u;
+    const u32 dst_w = m_offscreen_target_active ? m_offscreen_target_w : m_screen_width;
+    const u32 dst_h = m_offscreen_target_active ? m_offscreen_target_h : m_screen_height;
     // Render-only debug-view OVERRIDE: when enabled, redraw the bound target (screen or
     // offscreen) with a single-channel G-buffer view, REPLACING the composited image so a
     // human/frame-scan can tell "dark night" from a lighting/geometry bug. Gated on mode !=
@@ -2897,7 +3002,6 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
         RenderContext debug_ctx = make_debug_view_context(camera);
         m_debug_view_pass->execute(debug_ctx);
     }
-
 }
 
 void RenderPipeline::update_aether_field(const std::vector<float>& cells, float world_origin_x,
