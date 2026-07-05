@@ -5043,44 +5043,32 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     const float season_wave = season.wave;
     m_seasonSunDeclination = season.sunDeclination;
 
-    float sun_angle_rad = m_timeOfDay * 2.0f * glm::pi<float>();
-    // The z component carries the seasonal declination (was a constant -0.2f).
-    // The light direction's y-down component sets the sun elevation; pushing z
-    // toward 0 RAISES the post-normalization elevation, pushing it more negative
-    // LOWERS it. A positive declination (summer) therefore nudges z toward 0
-    // (higher noon sun / longer day) and a negative one (winter) more negative
-    // (lower noon sun / shorter day). sin() of the declination gives the offset;
-    // the -0.2f baseline keeps the season-neutral (tick 0) arc EXACTLY as before.
-    const float season_tilt_z = DM::Sin(m_seasonSunDeclination) - 0.2f;
-    m_sun.direction = glm::normalize(glm::vec3(sin(sun_angle_rad), -cos(sun_angle_rad), season_tilt_z));
+    // RENDER-14: sun position + derived day-factors, extracted to Rendering::ComputeSunGeometry
+    // (TimeOfDayModel.h). sun_angle_rad + season_tilt_z stay as locals because the moon phase
+    // below reuses them. TRIG (byte-fragile): the sun direction uses UNQUALIFIED sin/cos
+    // (preserved verbatim in the model); the moon direction (below) uses std::sin/std::cos --
+    // the asymmetry is intentional and bit-exact. Season-varying declination sets the arc: a
+    // positive declination (summer) raises the noon sun, negative (winter) lowers it.
+    const Rendering::SunGeometry sun_geo = Rendering::ComputeSunGeometry(m_timeOfDay, m_seasonSunDeclination);
+    float sun_angle_rad = sun_geo.angleRad;
+    const float season_tilt_z = sun_geo.tiltZ;
+    m_sun.direction = sun_geo.direction;
 
-    float sun_up_factor = glm::dot(m_sun.direction, glm::vec3(0.0f, -1.0f, 0.0f));
-    // Sun elevation above the horizon (radians). Exposed for the season sweep so
-    // it can assert per-season sun-path bands. asin domain-clamped.
-    m_sunElevationRad = std::asin(glm::clamp(sun_up_factor, -1.0f, 1.0f));
+    float sun_up_factor = sun_geo.upFactor;
+    // Sun elevation above the horizon (radians). Exposed for the season sweep so it can assert
+    // per-season sun-path bands.
+    m_sunElevationRad = sun_geo.elevationRad;
     // A 0->1 DAY-FACTOR (not the sun magnitude any more — FR-A-001 moved the direct-sun
     // magnitude onto the physical transmittance coupling below, m_sun.color). This still
     // drives the daytime-ness blends: skybox/foliage/particle sun intensity, the water sky
     // reflection, the waterfall lit-fraction, and the ambient day/night + hue-tint mixes.
-    m_sun.intensity = glm::smoothstep(-0.1f, 0.15f, sun_up_factor);
+    m_sun.intensity = sun_geo.sunIntensity;
 
-    // T-I4-DR-tod-sky-balance: the sky dome's day/twilight/night blend is keyed
-    // off the sun's RAW elevation, not the lighting intensity above.
-    // m_sun.intensity saturates to 1 once the sun clears ~0.15 elevation, so a
-    // sun only ~11 degrees up (dusk) still drove a full-midday dome and the
-    // sub-horizon night dome stayed bright twilight-blue. This wider band keeps
-    // the zenith at full day while the sun is high but falls off across the
-    // low-sun arc, so dusk is a genuine partial-day value and night collapses to
-    // ~0. Noon (sun_up ~0.95) stays pinned at 1.0, so the noon dome and the
-    // albedo/ambient calibrations that depend on it are untouched.
-    // GOLDEN HOUR (reference-loop finding): the old (-0.05, 0.55) band collapsed the
-    // dome to ~9% brightness the instant the sun reached the horizon, so the warm
-    // low-sun scattering went black and the dome's warm post-grade (gated on
-    // dayFactor) switched OFF at dusk — day jumped straight to night, no sunset.
-    // Widen + lower the band so civil twilight stays lit and WARM: ~0.5-0.6 at the
-    // horizon, full day while the sun is up, collapsing to 0 only once the sun is
-    // well below (deep night still dark). This is what makes dawn/dusk glow.
-    m_skyDayFactor = glm::smoothstep(-0.22f, 0.34f, sun_up_factor);
+    // T-I4-DR-tod-sky-balance: the sky dome's day/twilight/night blend is keyed off the sun's
+    // RAW elevation (a WIDER band than m_sun.intensity) so civil twilight stays lit and WARM:
+    // ~0.5-0.6 at the horizon, full day while the sun is up, collapsing to 0 only once the sun
+    // is well below the horizon. This is what makes dawn/dusk glow instead of jumping to night.
+    m_skyDayFactor = sun_geo.skyDomeDayFactor;
 
     // T-I5a-6: refresh the sun-dependent sky-view LUT (no-op unless the sun moved past
     // the small threshold), sharing the SAME atmosphere the skybox + aerial pass use so

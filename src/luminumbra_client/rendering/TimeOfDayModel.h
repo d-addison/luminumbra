@@ -19,9 +19,11 @@
 // facets use std::sin/std::cos exactly as the inline code did. This per-site trig choice is
 // preserved verbatim on extraction -- swapping either would silently move pixels.
 
+#include <cmath>
 #include <cstdint>
 
 #include <glm/glm.hpp>
+#include <glm/gtc/constants.hpp>
 
 #include "luminumbra_common/core/DeterministicMath.h"
 
@@ -59,6 +61,42 @@ inline SeasonState ComputeSeason(std::uint64_t seasonTick, std::uint64_t ticksPe
     // noon arc than winter.
     const float sunDeclination = kSeasonalTiltAmplitude * wave;
     return SeasonState{phase, wave, sunDeclination};
+}
+
+// SUN GEOMETRY + derived day-factors, a pure function of (timeOfDay, sunDeclination).
+//
+// TRIG NOTE (byte-fragile — preserved verbatim from the inline code): the sun DIRECTION uses
+// UNQUALIFIED sin/cos (global ::sin/::cos from <cmath>) exactly as update_time_of_day did --
+// NOT std::sin -- whereas the moon direction (ComputeMoonGeometry) uses std::sin/std::cos. This
+// per-site choice is intentional and load-bearing; unifying it would silently move the sun path.
+// (This header has no using-directives, so unqualified sin/cos here resolves to the same global
+// ::sin overload the pipeline TU used -> the extraction is bit-for-bit identical.)
+struct SunGeometry {
+    float angleRad;         // timeOfDay * 2pi (also drives the moon phase downstream)
+    float tiltZ;            // DM::Sin(sunDeclination) - 0.2 : the light-dir z (carries the season)
+    glm::vec3 direction;    // normalized sun-travel dir; ~(0,-1,tiltZ) overhead at noon (timeOfDay 0)
+    float upFactor;         // dot(direction,(0,-1,0)) : +1 overhead, 0 horizon, <0 below
+    float elevationRad;     // asin(clamp(upFactor)) : sun elevation, domain-clamped
+    float sunIntensity;     // 0->1 DAY-FACTOR smoothstep(-0.1,0.15,upFactor): skybox/foliage/water/ambient blends
+    float skyDomeDayFactor; // sky dome day/twilight/night blend smoothstep(-0.22,0.34,upFactor): wider so twilight stays warm
+};
+
+inline SunGeometry ComputeSunGeometry(float timeOfDay, float sunDeclination) {
+    namespace DM = Luminumbra::DeterministicMath;
+    SunGeometry g;
+    g.angleRad = timeOfDay * 2.0f * glm::pi<float>();
+    // The -0.2f baseline keeps the season-neutral (declination 0) arc EXACTLY as before seasons.
+    g.tiltZ = DM::Sin(sunDeclination) - 0.2f;
+    // Unqualified sin/cos (global ::sin/::cos) — verbatim from the inline code; do NOT std::-qualify.
+    g.direction = glm::normalize(glm::vec3(sin(g.angleRad), -cos(g.angleRad), g.tiltZ));
+    g.upFactor = glm::dot(g.direction, glm::vec3(0.0f, -1.0f, 0.0f));
+    g.elevationRad = std::asin(glm::clamp(g.upFactor, -1.0f, 1.0f));
+    // A 0->1 day-factor: saturates to 1 once the sun clears ~0.15 elevation.
+    g.sunIntensity = glm::smoothstep(-0.1f, 0.15f, g.upFactor);
+    // Wider band keyed off the RAW elevation: ~0.5-0.6 at the horizon (twilight stays lit + warm),
+    // full day while the sun is up, collapsing to 0 only well below the horizon (dawn/dusk glow).
+    g.skyDomeDayFactor = glm::smoothstep(-0.22f, 0.34f, g.upFactor);
+    return g;
 }
 
 } // namespace Luminumbra::Rendering

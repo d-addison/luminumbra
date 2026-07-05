@@ -855,6 +855,55 @@ TEST(TimeOfDayModel, SeasonIsPureTickFunctionOfCanonicalPrimitives) {
     EXPECT_LT(winter.sunDeclination, -0.40f); // ~ -0.410 rad
 }
 
+// Spec 016 FR-F-001 (RENDER-14): the SUN GEOMETRY facet (TimeOfDayModel::ComputeSunGeometry) —
+// the SAME function the frame runs. Byte-exact extraction guard: every output == the same
+// expression rebuilt from the canonical primitives here — UNQUALIFIED sin/cos exactly as the
+// sun-direction site resolves them (this TU has <cmath> and no `using namespace std`, matching
+// the pipeline TU's global ::sin), glm::normalize/dot, std::asin, glm::smoothstep — so a std::
+// qualification of the sun trig, a reassociation, or a changed band constant diverges. Plus
+// code-independent noon / midnight / horizon / season anchors on the sign + saturation. GPU-free.
+TEST(TimeOfDayModel, SunGeometryMatchesCanonicalPrimitivesAndAnchors) {
+    namespace R = Luminumbra::Rendering;
+    namespace DM = Luminumbra::DeterministicMath;
+
+    for (float tod : {0.0f, 0.1f, 0.2f, 0.25f, 0.3f, 0.5f, 0.6f, 0.75f, 0.9f, 0.99f}) {
+        for (float decl : {0.0f, 0.41015237f, -0.41015237f, 0.2f, -0.15f}) {
+            const R::SunGeometry g = R::ComputeSunGeometry(tod, decl);
+            const float angle = tod * 2.0f * glm::pi<float>();
+            const float tiltZ = DM::Sin(decl) - 0.2f;
+            // UNQUALIFIED sin/cos — global ::sin, matching the sun-direction site (not a closed loop:
+            // ::sin is the library primitive, not a re-typed copy of the arithmetic).
+            const glm::vec3 dir = glm::normalize(glm::vec3(sin(angle), -cos(angle), tiltZ));
+            const float up = glm::dot(dir, glm::vec3(0.0f, -1.0f, 0.0f));
+            EXPECT_EQ(g.angleRad, angle);
+            EXPECT_EQ(g.tiltZ, tiltZ);
+            EXPECT_EQ(g.direction.x, dir.x);
+            EXPECT_EQ(g.direction.y, dir.y);
+            EXPECT_EQ(g.direction.z, dir.z);
+            EXPECT_EQ(g.upFactor, up);
+            EXPECT_EQ(g.elevationRad, std::asin(glm::clamp(up, -1.0f, 1.0f)));
+            EXPECT_EQ(g.sunIntensity, glm::smoothstep(-0.1f, 0.15f, up));
+            EXPECT_EQ(g.skyDomeDayFactor, glm::smoothstep(-0.22f, 0.34f, up));
+        }
+    }
+
+    // ANALYTICAL anchors: timeOfDay 0 is NOON (sun overhead, full day-factors); 0.5 is MIDNIGHT
+    // (sun below, day-factors 0); the season-neutral horizon sits at timeOfDay 0.25 (up ~ 0).
+    const R::SunGeometry noon = R::ComputeSunGeometry(0.0f, 0.0f);
+    EXPECT_GT(noon.upFactor, 0.97f); // ~0.981 overhead
+    EXPECT_FLOAT_EQ(noon.sunIntensity, 1.0f);
+    EXPECT_FLOAT_EQ(noon.skyDomeDayFactor, 1.0f);
+    const R::SunGeometry midnight = R::ComputeSunGeometry(0.5f, 0.0f);
+    EXPECT_LT(midnight.upFactor, -0.97f);
+    EXPECT_FLOAT_EQ(midnight.sunIntensity, 0.0f);
+    EXPECT_FLOAT_EQ(midnight.skyDomeDayFactor, 0.0f);
+    const R::SunGeometry horizon = R::ComputeSunGeometry(0.25f, 0.0f);
+    EXPECT_NEAR(horizon.upFactor, 0.0f, 0.01f);
+    // Season raises/lowers the noon arc: a summer declination lifts the noon sun above a winter one.
+    EXPECT_GT(R::ComputeSunGeometry(0.0f, 0.41015237f).upFactor,
+              R::ComputeSunGeometry(0.0f, -0.41015237f).upFactor);
+}
+
 // Spec 015 Pillar A (FR-A-001): the direct-sun magnitude is derived from the atmosphere
 // transmittance (SunLightModel::SunIrradiance) — the SAME function RenderPipeline uses to
 // set m_sun.color. This pins the contract: overhead sun preserved, low sun dims AND
