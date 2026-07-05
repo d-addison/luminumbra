@@ -38,6 +38,7 @@
 #include "rendering/RenderGraph.h"
 #include "rendering/GlassTintModel.h" // Spec 015 C-1 (RENDER-15): tinted transmission
 #include "rendering/FroxelGrid.h"     // Spec 015 Pillar B (RENDER-17): the froxel grid model
+#include "rendering/CelestialBodyModel.h" // Spec 022 Tier 1: the celestial-body seam
 
 namespace fs = std::filesystem;
 
@@ -1189,6 +1190,45 @@ TEST(FroxelModel, SliceDistributionAndWorldMappingAnchors) {
     EXPECT_FLOAT_EQ(F::DepthToTextureW(0.0f), 0.0f);
     EXPECT_FLOAT_EQ(F::DepthToTextureW(F::kFarDepth * 2.0f), 1.0f);
     EXPECT_GT(F::DepthToTextureW(10.0f), F::DepthToTextureW(5.0f));
+}
+
+// Spec 022 Tier 1 (Wave F F9): the celestial-body seam is PLUMBING, not math —
+// every state field must be BIT-EQUAL to the direct TimeOfDayModel primitive
+// calls across a tod x declination x tick sweep (the RENDER-14 technique). Any
+// drift means the seam added math of its own, which Tier 1 forbids (FR-022-2).
+TEST(CelestialBodyModel, SunMoonSeamBitExactAgainstPrimitives) {
+    namespace R = Luminumbra::Rendering;
+    constexpr std::uint64_t kLunar = 54000ull;
+    const float tods[] = {0.0f, 0.04f, 0.13f, 0.25f, 0.5f, 0.77f, 0.999f};
+    const float decls[] = {-0.41f, -0.1f, 0.0f, 0.2f, 0.41f};
+    const std::uint64_t ticks[] = {0ull, 1234ull, 27000ull, 53999ull, 999999ull};
+    const float overrides[] = {-1.0f, 0.0f, 0.5f, 1.0f};
+    for (float tod : tods) {
+        for (float decl : decls) {
+            for (std::uint64_t tick : ticks) {
+                for (float ov : overrides) {
+                    const R::CelestialFrame f =
+                        R::EvaluateCelestialBodies(tod, decl, tick, ov, kLunar);
+                    const R::SunGeometry sg = R::ComputeSunGeometry(tod, decl);
+                    // Bit-equality (memcmp): the seam may not perturb a single ULP.
+                    EXPECT_EQ(0, std::memcmp(&f.sun_geometry, &sg, sizeof(sg)));
+                    EXPECT_EQ(0, std::memcmp(&f.sun.travel_direction, &sg.direction, sizeof(glm::vec3)));
+                    EXPECT_EQ(0, std::memcmp(&f.sun.light_direction, &sg.direction, sizeof(glm::vec3)));
+                    EXPECT_EQ(f.sun.up_factor, sg.upFactor);
+                    EXPECT_EQ(f.sun.elevation_rad, sg.elevationRad);
+                    EXPECT_EQ(f.sun.day_factor, sg.sunIntensity);
+                    EXPECT_EQ(f.sun.sky_dome_day_factor, sg.skyDomeDayFactor);
+                    const R::MoonGeometry mg =
+                        R::ComputeMoonGeometry(sg.angleRad, sg.tiltZ, sg.direction);
+                    EXPECT_EQ(0, std::memcmp(&f.moon.travel_direction, &mg.direction, sizeof(glm::vec3)));
+                    EXPECT_EQ(0, std::memcmp(&f.moon.light_direction, &mg.lightDir, sizeof(glm::vec3)));
+                    EXPECT_EQ(f.moon.up_factor, mg.upFactor);
+                    EXPECT_EQ(f.moon.illumination,
+                              R::ComputeMoonIllumination(tick, ov, kLunar));
+                }
+            }
+        }
+    }
 }
 
 // The flagged dynamic edge: god rays sample whichever opaque snapshot executed most

@@ -11,6 +11,7 @@
 #include "RenderGraph.h"    // Spec 016 FR-C (RENDER-11): the declarative frame graph gated against the trace
 #include "InProcessFlip.h"  // WAVE-F F1: the deterministic in-process FLIP (capture_frame_parity)
 #include "FroxelGrid.h"     // Spec 015 Pillar B (RENDER-17): the froxel grid model
+#include "CelestialBodyModel.h" // Spec 022 Tier 1 (Wave F F9): the celestial-body seam
 #include "rendering/passes/ShieldRtFarFieldPass.h"
 #include <algorithm>
 #include <chrono> // spec 004: CPU per-phase submit cost
@@ -5692,13 +5693,20 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     const float season_wave = season.wave;
     m_seasonSunDeclination = season.sunDeclination;
 
-    // RENDER-14: sun position + derived day-factors, extracted to Rendering::ComputeSunGeometry
-    // (TimeOfDayModel.h). sun_angle_rad + season_tilt_z stay as locals because the moon phase
-    // below reuses them. TRIG (byte-fragile): the sun direction uses UNQUALIFIED sin/cos
-    // (preserved verbatim in the model); the moon direction (below) uses std::sin/std::cos --
-    // the asymmetry is intentional and bit-exact. Season-varying declination sets the arc: a
-    // positive declination (summer) raises the noon sun, negative (winter) lowers it.
-    const Rendering::SunGeometry sun_geo = Rendering::ComputeSunGeometry(m_timeOfDay, m_seasonSunDeclination);
+    // Spec 022 Tier 1 (Wave F F9): sun + moon are now two evaluated instances of the
+    // celestial-body seam (CelestialBodyModel.h), which calls the RENDER-14 primitives
+    // VERBATIM — bit-identical by construction (the SunMoonSeamBitExact gate pins it).
+    // TRIG (byte-fragile): the sun direction uses UNQUALIFIED sin/cos inside the
+    // primitive; the moon uses std::sin/std::cos — the asymmetry is intentional.
+    // The LUMIN_MOON env read (parsed once) stays here as a client-config concern.
+    static const float s_moon_env = [] {
+        if (const char* e = std::getenv("LUMIN_MOON")) { try { return std::stof(e); } catch (...) {} }
+        return -1.0f;
+    }();
+    const float moon_forced = s_moon_env >= 0.0f ? s_moon_env : m_moonIllumOverride;
+    const Rendering::CelestialFrame celestial = Rendering::EvaluateCelestialBodies(
+        m_timeOfDay, m_seasonSunDeclination, m_seasonTick, moon_forced, kTicksPerLunarCycle);
+    const Rendering::SunGeometry& sun_geo = celestial.sun_geometry;
     float sun_angle_rad = sun_geo.angleRad;
     const float season_tilt_z = sun_geo.tiltZ;
     m_sun.direction = sun_geo.direction;
@@ -5766,29 +5774,17 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     m_seasonPaletteTint = Rendering::SeasonPaletteTint(season_wave);
     m_sun.color *= m_seasonPaletteTint;
 
-    // RENDER-14: moon geometry (Rendering::ComputeMoonGeometry). The moon orbits OPPOSITE the sun;
-    // m_moonLightDir is its TOWARD-LIGHT vector (same convention as u_sun.direction), overhead at
-    // midnight so get_light_space_matrices can re-key the shadow cascade onto the moon at night.
-    // m_moonDirection (= -sun dir, the TRAVEL dir) places the disc in SkyboxPass. TRIG: the moon
-    // uses std::sin/std::cos (float), distinct from the sun's unqualified ::sin -- preserved.
-    const Rendering::MoonGeometry moon_geo =
-        Rendering::ComputeMoonGeometry(sun_angle_rad, season_tilt_z, m_sun.direction);
-    m_moonDirection = moon_geo.direction;
-    m_moonLightDir = moon_geo.lightDir;
-    m_moonUpFactor = moon_geo.upFactor;
-
-    // Spec 015 Pillar A (A-T04) / RENDER-14: LUNAR PHASE -> the "two night modes" (bright moonlit
-    // vs dark new-moon nights). The deterministic lunar-cycle math is Rendering::ComputeMoonIllumination
-    // (pure function of the tick, render-only, never world_hash); the LUMIN_MOON env read (parsed
-    // once) stays here as a client-config concern, with set_moon_illumination() as the other override.
-    {
-        static const float s_moon_env = [] {
-            if (const char* e = std::getenv("LUMIN_MOON")) { try { return std::stof(e); } catch (...) {} }
-            return -1.0f;
-        }();
-        const float forced = s_moon_env >= 0.0f ? s_moon_env : m_moonIllumOverride;
-        m_moonIllumination = Rendering::ComputeMoonIllumination(m_seasonTick, forced, kTicksPerLunarCycle);
-    }
+    // Spec 022 Tier 1: the moon instance of the celestial frame (VERBATIM
+    // ComputeMoonGeometry + ComputeMoonIllumination underneath). m_moonLightDir is
+    // its TOWARD-LIGHT vector (same convention as u_sun.direction), overhead at
+    // midnight so get_light_space_matrices can re-key the shadow cascade onto the
+    // moon at night; m_moonDirection places the disc; illumination carries the
+    // deterministic lunar phase (the "two night modes"), env/override resolved above.
+    m_moonDirection = celestial.moon.travel_direction;
+    m_moonLightDir = celestial.moon.light_direction;
+    m_moonUpFactor = celestial.moon.up_factor;
+    m_moonIllumination = celestial.moon.illumination;
+    (void)season_tilt_z; // consumed inside the seam's moon evaluation now
 
     // Ambient scales by the same PI as SUN_IRRADIANCE_SCALE (lighting_pass
     // exposure audit): these values were tuned against the pre-audit sun, so
