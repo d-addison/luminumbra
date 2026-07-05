@@ -2748,6 +2748,132 @@ TEST(RenderSmokeTest, ColoredShadowTintedTransmissionColorsDirectSun) {
     glDeleteProgram(program);
 }
 
+// Spec 015 Pillar B (RENDER-17, the FroxelGpu gate): the SHIPPED
+// froxel_inject/froxel_integrate kernels on a UNIFORM medium (constant sigma,
+// zero falloff, black lights) must integrate to the analytic Beer-Lambert
+// transmittance: T(last slice) == exp(-sigma * (FAR - NEAR)). Pins the GLSL
+// half of the grid model (the C++ half is FroxelModel.*).
+TEST(RenderSmokeTest, FroxelUniformMediumMatchesAnalyticTransmittance) {
+    HiddenGlContext context;
+    if (!context.ready()) {
+        GTEST_SKIP() << context.error();
+    }
+
+    auto compile_compute = [&](const char* rel) -> GLuint {
+        const std::string path = std::string(LUMINUMBRA_SOURCE_ROOT) + "/res/shaders/" + rel;
+        std::ifstream file(path);
+        if (!file.is_open()) { ADD_FAILURE() << "missing " << path; return 0; }
+        std::stringstream ss;
+        ss << file.rdbuf();
+        const std::string src = ss.str();
+        const char* src_c = src.c_str();
+        GLuint sh = glCreateShader(GL_COMPUTE_SHADER);
+        glShaderSource(sh, 1, &src_c, nullptr);
+        glCompileShader(sh);
+        GLint ok = 0;
+        glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+        if (!ok) {
+            char log[1024] = {};
+            glGetShaderInfoLog(sh, sizeof(log), nullptr, log);
+            ADD_FAILURE() << rel << " failed to compile:\n" << log;
+            return 0;
+        }
+        GLuint prog = glCreateProgram();
+        glAttachShader(prog, sh);
+        glLinkProgram(prog);
+        glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+        glDeleteShader(sh);
+        if (!ok) { ADD_FAILURE() << rel << " failed to link"; glDeleteProgram(prog); return 0; }
+        return prog;
+    };
+    GLuint inject = compile_compute("froxel_inject.comp");
+    GLuint integrate = compile_compute("froxel_integrate.comp");
+    ASSERT_NE(inject, 0u);
+    ASSERT_NE(integrate, 0u);
+
+    constexpr int GX = 160, GY = 90, GZ = 64;
+    constexpr float kNear = 0.5f, kFar = 160.0f;
+    auto make_volume = [&]() {
+        GLuint t = 0;
+        glGenTextures(1, &t);
+        glBindTexture(GL_TEXTURE_3D, t);
+        glTexStorage3D(GL_TEXTURE_3D, 1, GL_RGBA16F, GX, GY, GZ);
+        glBindTexture(GL_TEXTURE_3D, 0);
+        return t;
+    };
+    GLuint scatter = make_volume();
+    GLuint integrated = make_volume();
+
+    // Shadow samplers need valid array bindings even though the lights are black.
+    auto make_array = [&](GLenum ifmt, GLenum fmt, GLenum type, const void* px) {
+        GLuint t = 0;
+        glGenTextures(1, &t);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, t);
+        glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, ifmt, 1, 1, 1, 0, fmt, type, px);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        return t;
+    };
+    const float depth_px[1] = {1.0f};
+    GLuint shadow_arr = make_array(GL_DEPTH_COMPONENT24, GL_DEPTH_COMPONENT, GL_FLOAT, depth_px);
+    const unsigned char white_px[4] = {255, 255, 255, 255};
+    GLuint tint_arr = make_array(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, white_px);
+
+    constexpr float kSigma = 0.02f;
+    glUseProgram(inject);
+    glBindImageTexture(0, scatter, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA16F);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, shadow_arr);
+    glUniform1i(glGetUniformLocation(inject, "u_shadowCascades"), 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, tint_arr);
+    glUniform1i(glGetUniformLocation(inject, "u_shadowTintCascades"), 1);
+    glUniform1i(glGetUniformLocation(inject, "u_shadowTintEnabled"), 0);
+    for (int i = 0; i < 4; ++i) {
+        SetMat4Identity(inject, ("u_lightSpaceMatrices[" + std::to_string(i) + "]").c_str());
+    }
+    glUniform4f(glGetUniformLocation(inject, "u_cascadeSplits"), 1e9f, 1e9f, 1e9f, 1e9f);
+    SetMat4Identity(inject, "u_inverseView");
+    glUniform3f(glGetUniformLocation(inject, "u_cameraPos"), 0, 0, 0);
+    glUniform1f(glGetUniformLocation(inject, "u_tanHalfFovY"), 1.0f);
+    glUniform1f(glGetUniformLocation(inject, "u_aspect"), 1.0f);
+    glUniform3f(glGetUniformLocation(inject, "u_sunDirection"), 0, 1, 0);
+    glUniform3f(glGetUniformLocation(inject, "u_sunColor"), 0, 0, 0);   // lights black:
+    glUniform3f(glGetUniformLocation(inject, "u_ambientColor"), 0, 0, 0); // T is the target
+    glUniform1f(glGetUniformLocation(inject, "u_baseDensity"), kSigma);
+    glUniform1f(glGetUniformLocation(inject, "u_baseHeight"), 1e9f);   // uniform medium
+    glUniform1f(glGetUniformLocation(inject, "u_densityFalloff"), 0.0f);
+    glDispatchCompute(GX / 8, GY / 8 + 1, GZ);
+    glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+
+    glUseProgram(integrate);
+    glBindImageTexture(0, scatter, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA16F);
+    glBindImageTexture(1, integrated, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA16F);
+    glDispatchCompute(GX / 8, GY / 8 + 1, 1);
+    glMemoryBarrier(GL_TEXTURE_UPDATE_BARRIER_BIT | GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+
+    // Read one texel at the LAST slice (GL 4.5 DSA sub-image read): its alpha is
+    // the transmittance through the whole [near, far] range.
+    float texel[4] = {};
+    glGetTextureSubImage(integrated, 0, GX / 2, GY / 2, GZ - 1, 1, 1, 1,
+                         GL_RGBA, GL_FLOAT, sizeof(texel), texel);
+    const float expected_T = std::exp(-kSigma * (kFar - kNear));
+    // RGBA16F storage + 64 exponential steps: allow a small relative tolerance.
+    EXPECT_NEAR(texel[3], expected_T, 0.004f)
+        << "froxel integrate drifted from the analytic Beer-Lambert transmittance";
+    // Black lights -> zero accumulated in-scatter.
+    EXPECT_NEAR(texel[0], 0.0f, 1e-4f);
+    EXPECT_NEAR(texel[1], 0.0f, 1e-4f);
+    EXPECT_NEAR(texel[2], 0.0f, 1e-4f);
+
+    glDeleteTextures(1, &tint_arr);
+    glDeleteTextures(1, &shadow_arr);
+    glDeleteTextures(1, &integrated);
+    glDeleteTextures(1, &scatter);
+    glDeleteProgram(integrate);
+    glDeleteProgram(inject);
+}
+
 TEST(RenderSmokeTest, BasicShaderDrawsNonBlackPixels) {
     HiddenGlContext context;
     if (!context.ready()) {

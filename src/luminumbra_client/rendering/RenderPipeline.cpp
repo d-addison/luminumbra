@@ -10,6 +10,7 @@
 #include "TimeOfDayModel.h" // Spec 016 FR-F-001 (RENDER-14): pure time-of-day policy facets (ComputeSeason, ...)
 #include "RenderGraph.h"    // Spec 016 FR-C (RENDER-11): the declarative frame graph gated against the trace
 #include "InProcessFlip.h"  // WAVE-F F1: the deterministic in-process FLIP (capture_frame_parity)
+#include "FroxelGrid.h"     // Spec 015 Pillar B (RENDER-17): the froxel grid model
 #include "rendering/passes/ShieldRtFarFieldPass.h"
 #include <algorithm>
 #include <chrono> // spec 004: CPU per-phase submit cost
@@ -2529,6 +2530,8 @@ RenderPipeline::stage_executor_table() {
         {"waterfall", &RenderPipeline::execute_stage_waterfall},
         {"weather_opaque_snapshot", &RenderPipeline::execute_stage_weather_opaque_snapshot},
         {"weather_overlay", &RenderPipeline::execute_stage_weather_overlay},
+        {"froxel_inject", &RenderPipeline::execute_stage_froxel_inject},
+        {"froxel_integrate", &RenderPipeline::execute_stage_froxel_integrate},
         {"aerial", &RenderPipeline::execute_stage_aerial},
         {"god_rays", &RenderPipeline::execute_stage_god_rays},
         {"foliage", &RenderPipeline::execute_stage_foliage},
@@ -2957,6 +2960,118 @@ void RenderPipeline::execute_stage_weather_overlay(const Camera& camera) {
     record_frame_stage("weather_overlay");
     m_skybox_pass->execute_weather_overlay(weather_ctx, camera);
     glBindVertexArray(0);
+}
+
+void RenderPipeline::execute_stage_froxel_inject(const Camera& camera) {
+    // Spec 015 Pillar B (RENDER-17): per-froxel media density + in-scatter into
+    // the scatter volume, sampling the shadow depth AND the C-1 tint cascade so
+    // stained glass throws COLORED shafts (FR-B-006). Quality 0 = zero-GL no-op.
+    record_frame_stage("froxel_inject");
+    if (m_volumetric_quality <= 0) {
+        return;
+    }
+    if (m_froxel_inject_program == 0) {
+        // Lazy init: both kernels + both 3D volumes, together.
+        auto load_comp = [&](const char* rel) -> GLuint {
+            std::ifstream file(std::filesystem::path(m_root_path) / rel);
+            if (!file) {
+                LUMINUMBRA_CORE_ERROR("froxel: missing {}", rel);
+                return 0;
+            }
+            std::stringstream source;
+            source << file.rdbuf();
+            return create_compute_program(source.str().c_str());
+        };
+        m_froxel_inject_program = load_comp("res/shaders/froxel_inject.comp");
+        m_froxel_integrate_program = load_comp("res/shaders/froxel_integrate.comp");
+        if (m_froxel_inject_program == 0 || m_froxel_integrate_program == 0) {
+            LUMINUMBRA_CORE_ERROR("froxel: kernel compile failed; volumetrics disabled");
+            m_volumetric_quality = 0;
+            return;
+        }
+        label_gl_object(GL_PROGRAM, m_froxel_inject_program, "shader.froxel_inject");
+        label_gl_object(GL_PROGRAM, m_froxel_integrate_program, "shader.froxel_integrate");
+        auto make_volume = [&](const char* label) -> GLuint {
+            GLuint t = 0;
+            glGenTextures(1, &t);
+            glBindTexture(GL_TEXTURE_3D, t);
+            glTexStorage3D(GL_TEXTURE_3D, 1, GL_RGBA16F,
+                           Froxel::kGridX, Froxel::kGridY, Froxel::kGridZ);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+            label_gl_object(GL_TEXTURE, t, label);
+            glBindTexture(GL_TEXTURE_3D, 0);
+            return t;
+        };
+        m_froxel_scatter_tex = make_volume("froxel.scatter");
+        m_froxel_integrated_tex = make_volume("froxel.integrated");
+    }
+
+    const ShadowMap& sm = m_shadow_pass->shadow_map();
+    glm::vec4 splits(0.0f);
+    if (sm.cascade_splits.size() >= 5) {
+        splits = glm::vec4(sm.cascade_splits[1], sm.cascade_splits[2],
+                           sm.cascade_splits[3], sm.cascade_splits[4]);
+    }
+
+    glUseProgram(m_froxel_inject_program);
+    glBindImageTexture(0, m_froxel_scatter_tex, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA16F);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, sm.depth_texture_array);
+    glUniform1i(glGetUniformLocation(m_froxel_inject_program, "u_shadowCascades"), 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, m_shadow_pass->tint_texture_array());
+    glUniform1i(glGetUniformLocation(m_froxel_inject_program, "u_shadowTintCascades"), 1);
+    glUniform1i(glGetUniformLocation(m_froxel_inject_program, "u_shadowTintEnabled"),
+                m_shadow_pass->tint_texture_array() != 0 ? 1 : 0);
+    for (int i = 0; i < 4 && i < static_cast<int>(sm.light_space_matrices.size()); ++i) {
+        const std::string name = "u_lightSpaceMatrices[" + std::to_string(i) + "]";
+        glUniformMatrix4fv(glGetUniformLocation(m_froxel_inject_program, name.c_str()),
+                           1, GL_FALSE, &sm.light_space_matrices[i][0][0]);
+    }
+    glUniform4fv(glGetUniformLocation(m_froxel_inject_program, "u_cascadeSplits"), 1, &splits[0]);
+    const glm::mat4 inv_view = glm::inverse(camera.GetViewMatrix());
+    glUniformMatrix4fv(glGetUniformLocation(m_froxel_inject_program, "u_inverseView"),
+                       1, GL_FALSE, &inv_view[0][0]);
+    glUniform3fv(glGetUniformLocation(m_froxel_inject_program, "u_cameraPos"), 1, &camera.Position[0]);
+    glUniform1f(glGetUniformLocation(m_froxel_inject_program, "u_tanHalfFovY"),
+                std::tan(glm::radians(camera.Zoom) * 0.5f));
+    glUniform1f(glGetUniformLocation(m_froxel_inject_program, "u_aspect"),
+                static_cast<float>(m_screen_width) / static_cast<float>(m_screen_height));
+    // Toward-sun (sun-disc convention — matches the aerial pass's u_sunDirection).
+    const glm::vec3 toward_sun = -m_sun.direction;
+    glUniform3fv(glGetUniformLocation(m_froxel_inject_program, "u_sunDirection"), 1, &toward_sun[0]);
+    glUniform3fv(glGetUniformLocation(m_froxel_inject_program, "u_sunColor"), 1, &m_sun.color[0]);
+    glUniform3fv(glGetUniformLocation(m_froxel_inject_program, "u_ambientColor"), 1, &m_skyAmbientColor[0]);
+    // v1 media tuning (checkpoint-ratified): a gentle ground-hugging haze layer.
+    glUniform1f(glGetUniformLocation(m_froxel_inject_program, "u_baseDensity"), 0.012f);
+    glUniform1f(glGetUniformLocation(m_froxel_inject_program, "u_baseHeight"), 40.0f);
+    glUniform1f(glGetUniformLocation(m_froxel_inject_program, "u_densityFalloff"), 0.05f);
+
+    glDispatchCompute(Froxel::kGridX / 8, Froxel::kGridY / 8 + 1, Froxel::kGridZ);
+    glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+    glUseProgram(0);
+    glActiveTexture(GL_TEXTURE0);
+}
+
+void RenderPipeline::execute_stage_froxel_integrate(const Camera& camera) {
+    (void)camera;
+    // Spec 015 Pillar B (RENDER-17): front-to-back march of the scatter volume —
+    // per-column accumulated in-scatter L + transmittance T (FR-B-002).
+    record_frame_stage("froxel_integrate");
+    if (m_volumetric_quality <= 0 || m_froxel_integrate_program == 0) {
+        return;
+    }
+    glUseProgram(m_froxel_integrate_program);
+    glBindImageTexture(0, m_froxel_scatter_tex, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA16F);
+    glBindImageTexture(1, m_froxel_integrated_tex, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA16F);
+    glDispatchCompute(Froxel::kGridX / 8, Froxel::kGridY / 8 + 1, 1);
+    // The aerial composite samples the integrated volume as a texture.
+    glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
+    glUseProgram(0);
 }
 
 void RenderPipeline::execute_stage_aerial(const Camera& camera) {
@@ -3426,6 +3541,14 @@ void RenderPipeline::execute_aerial_pass(const RenderContext& ctx) {
     m_aerial_shader->setFloat("u_aerialMaxDistance", ctx.aerial_max_distance);
     m_aerial_shader->setFloat("u_inscatterStrength", ctx.inscatter_strength);
     m_aerial_shader->setFloat("u_atmosphereWarmth", ctx.atmosphere_warmth);
+    // Spec 015 Pillar B (RENDER-17): compose the integrated froxel volume
+    // (FR-B-004 — extends the analytic term, never replaces it). Mode 0 (the
+    // default) skips the sampling entirely: byte-identical to pre-froxel.
+    const bool froxel_on = m_volumetric_quality > 0 && m_froxel_integrated_tex != 0;
+    m_aerial_shader->setInt("u_volumetricMode", froxel_on ? 1 : 0);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_3D, froxel_on ? m_froxel_integrated_tex : 0u);
+    m_aerial_shader->setInt("u_froxelIntegrated", 3);
 
     glBindVertexArray(ctx.screen_quad_vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
@@ -3765,6 +3888,11 @@ void RenderPipeline::cleanup_gpu_resources() {
     if (m_lum_reduce_ssbo) { glDeleteBuffers(1, &m_lum_reduce_ssbo); m_lum_reduce_ssbo = 0; }
     m_exposure_ring.shutdown();
     m_metered_valid = false;
+    // Spec 015 Pillar B (RENDER-17): the froxel kernels + volumes.
+    if (m_froxel_inject_program) { glDeleteProgram(m_froxel_inject_program); m_froxel_inject_program = 0; }
+    if (m_froxel_integrate_program) { glDeleteProgram(m_froxel_integrate_program); m_froxel_integrate_program = 0; }
+    if (m_froxel_scatter_tex) { glDeleteTextures(1, &m_froxel_scatter_tex); m_froxel_scatter_tex = 0; }
+    if (m_froxel_integrated_tex) { glDeleteTextures(1, &m_froxel_integrated_tex); m_froxel_integrated_tex = 0; }
     // T-I5b-4 (W1): release the baked waterfall sheet geometry.
     if (m_waterfall_vao) { glDeleteVertexArrays(1, &m_waterfall_vao); m_waterfall_vao = 0; }
     if (m_waterfall_vbo) { glDeleteBuffers(1, &m_waterfall_vbo); m_waterfall_vbo = 0; }

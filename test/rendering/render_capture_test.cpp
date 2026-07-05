@@ -37,6 +37,7 @@
 // Spec 016 FR-C (RENDER-11): the declarative frame graph under test.
 #include "rendering/RenderGraph.h"
 #include "rendering/GlassTintModel.h" // Spec 015 C-1 (RENDER-15): tinted transmission
+#include "rendering/FroxelGrid.h"     // Spec 015 Pillar B (RENDER-17): the froxel grid model
 
 namespace fs = std::filesystem;
 
@@ -1159,6 +1160,35 @@ TEST(ColoredShadow, BeerLambertTintModelAnchors) {
     EXPECT_EQ(R::GlassTransmission(tint, -3.0f), glm::vec3(1.0f));
     EXPECT_EQ(R::GlassTransmission(glm::vec3(2.0f, -1.0f, 0.5f), 1.0f),
               glm::vec3(1.0f, 0.0f, 0.5f));
+}
+
+// Spec 015 Pillar B (RENDER-17): the froxel grid model — the exponential slice
+// distribution's anchors, monotonicity, and the depth<->slice round trip. The
+// froxel_inject/froxel_integrate GLSL kernels bake the SAME constants; these
+// anchors pin the C++ half, FroxelUniformMediumMatchesAnalyticTransmittance
+// (render_smoke_test) pins the GLSL half end to end.
+TEST(FroxelModel, SliceDistributionAndWorldMappingAnchors) {
+    namespace F = Luminumbra::Rendering::Froxel;
+    // The GLSL mirrors bake exactly these values.
+    EXPECT_EQ(F::kGridX, 160);
+    EXPECT_EQ(F::kGridY, 90);
+    EXPECT_EQ(F::kGridZ, 64);
+    EXPECT_FLOAT_EQ(F::kNearDepth, 0.5f);
+    EXPECT_FLOAT_EQ(F::kFarDepth, 160.0f);
+    // Exponential boundaries hit both ends exactly.
+    EXPECT_FLOAT_EQ(F::SliceBoundaryDepth(0), F::kNearDepth);
+    EXPECT_NEAR(F::SliceBoundaryDepth(F::kGridZ), F::kFarDepth, 1e-3f);
+    // Monotonic boundaries + the depth->slice round trip at every slice centre.
+    for (int i = 0; i < F::kGridZ; ++i) {
+        EXPECT_LT(F::SliceBoundaryDepth(i), F::SliceBoundaryDepth(i + 1));
+        const float mid =
+            0.5f * (F::SliceBoundaryDepth(i) + F::SliceBoundaryDepth(i + 1));
+        EXPECT_EQ(F::DepthToSlice(mid), i) << "slice " << i;
+    }
+    // The composite's texture-W mapping clamps and spans [0,1].
+    EXPECT_FLOAT_EQ(F::DepthToTextureW(0.0f), 0.0f);
+    EXPECT_FLOAT_EQ(F::DepthToTextureW(F::kFarDepth * 2.0f), 1.0f);
+    EXPECT_GT(F::DepthToTextureW(10.0f), F::DepthToTextureW(5.0f));
 }
 
 // The flagged dynamic edge: god rays sample whichever opaque snapshot executed most

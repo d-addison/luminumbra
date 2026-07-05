@@ -235,8 +235,15 @@ inline RenderGraph BuildLuminumbraFrameGraph() {
     // 7a: snapshot #2 (only when the weather overlay runs), then the weather overlay reads it.
     g.add({"weather_opaque_snapshot", {"lighting.color"}, {"lighting.opaque_color"}, {}, true});
     g.add({"weather_overlay", {"lighting.opaque_color"}, {"lighting.color"}, {}, false});
-    // 7b: aerial-perspective in-scatter over the lit scene.
-    g.add({"aerial", {"lighting.color", "lighting.depth"}, {"lighting.color"}, {}, true});
+    // Spec 015 Pillar B (RENDER-17, Wave F F7): the froxel media volume — inject
+    // (density + in-scatter per froxel, sampling the shadow depth AND the C-1 tint
+    // cascade for colored shafts) then front-to-back integrate. The aerial stage
+    // composes the integrated volume (FR-B-004: extends the analytic, never
+    // replaces it). Quality 0 (default) leaves both stages as zero-GL no-ops.
+    g.add({"froxel_inject", {"shadow.depth_array", "shadow.tint_array"}, {"froxel.scatter"}, {}, true});
+    g.add({"froxel_integrate", {"froxel.scatter"}, {"froxel.integrated"}, {}, true});
+    // 7b: aerial-perspective in-scatter over the lit scene (+ the froxel compose).
+    g.add({"aerial", {"lighting.color", "lighting.depth", "froxel.integrated"}, {"lighting.color"}, {}, true});
     // 7b2: god rays sample the LATEST opaque snapshot (#2 if weather ran, else #1) + composite.
     g.add({"god_rays", {"lighting.color"}, {"lighting.color"}, {"lighting.opaque_color"}, false});
     // 7c: foliage cards blend into the lit target, depth-tested.

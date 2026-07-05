@@ -51,6 +51,15 @@ uniform float u_underwater = 0.0;             // 1.0 when the camera is below a 
 uniform vec3  u_underwaterTint = vec3(0.04, 0.18, 0.26);
 uniform float u_underwaterVisibility = 26.0;  // metres to near-full murk
 
+// Spec 015 Pillar B (RENDER-17): the integrated froxel media volume — rgb = the
+// accumulated in-scatter (HDR-linear) in front of a given depth, a = the
+// transmittance to it. Mode 0 (default) skips the sampling: byte-identical to
+// the pre-froxel analytic-only render. Slice mapping mirrors FroxelGrid.h.
+uniform int u_volumetricMode = 0;
+uniform sampler3D u_froxelIntegrated;
+const float FROXEL_NEAR = 0.5;
+const float FROXEL_FAR = 160.0;
+
 const float PI = 3.14159265359;
 
 vec3 worldPositionFromDepth(vec2 uv, float depth) {
@@ -183,6 +192,28 @@ void main() {
     // Keep a hint of far terrain rather than a pure sky veil so the long view
     // still reads (Distant-Horizons style) instead of dissolving to flat sky.
     fog = min(fog, 0.94);
+
+    // Spec 015 Pillar B (RENDER-17, FR-B-004): compose the froxel media IN FRONT
+    // of the analytic haze — total = froxelL + T_froxel * analytic. The volume's
+    // W coordinate is the exponential-slice mapping of the RADIAL view distance
+    // (FroxelGrid.h DepthToTextureW).
+    if (u_volumetricMode == 1) {
+        float dClamped = clamp(dist, FROXEL_NEAR, FROXEL_FAR);
+        float w = clamp(log(dClamped / FROXEL_NEAR) / log(FROXEL_FAR / FROXEL_NEAR), 0.0, 1.0);
+        vec4 fx = texture(u_froxelIntegrated, vec3(TexCoords, w));
+        // Same display mapping the analytic in-scatter goes through (this pass
+        // composites over an already-tonemapped target).
+        vec3 fxL = fx.rgb;
+        fxL = fxL * (2.51 * fxL + 0.03) / (fxL * (2.43 * fxL + 0.59) + 0.14);
+        fxL = pow(max(fxL, vec3(0.0)), vec3(1.0 / 2.2));
+        float fxFog = clamp(1.0 - fx.a, 0.0, 1.0);
+        vec3 blended_num = inscatter * fog * fx.a + fxL * fxFog;
+        float outFog = clamp(fog * fx.a + fxFog, 0.0, 0.94);
+        if (outFog > 1e-4) {
+            inscatter = blended_num / outFog;
+        }
+        fog = outFog;
+    }
 
     // alpha = fog composites the aerial haze OVER the lit terrain.
     FragColor = vec4(inscatter, fog);

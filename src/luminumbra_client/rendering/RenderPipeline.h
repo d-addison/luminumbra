@@ -517,6 +517,13 @@ public:
     // (A-T07) overrides either. Render-only; never world_hash.
     void set_auto_exposure_metered(bool on) { m_auto_exposure_metered = on; }
     bool auto_exposure_metered() const { return m_auto_exposure_metered; }
+
+    // Spec 015 Pillar B (RENDER-17, Wave F F7): froxel volumetric quality.
+    // 0 = analytic aerial only (the default — byte-identical to pre-froxel);
+    // 1 = the froxel participating-media volume composes with the aerial.
+    // Render-only; owner-ratified default at the visual checkpoint.
+    void set_volumetric_quality(int q) { m_volumetric_quality = q; }
+    int volumetric_quality() const { return m_volumetric_quality; }
     RenderHealthSnapshot get_render_health_snapshot(bool drain_gl_errors = false) const;
     // framescan: read-only access to the G-buffer attachments for the
     // what's-in-frame scan tool. The normal/material attachment (RGBA8) carries
@@ -893,6 +900,8 @@ private:
     void execute_stage_waterfall(const Camera& camera);
     void execute_stage_weather_opaque_snapshot(const Camera& camera);
     void execute_stage_weather_overlay(const Camera& camera);
+    void execute_stage_froxel_inject(const Camera& camera);
+    void execute_stage_froxel_integrate(const Camera& camera);
     void execute_stage_aerial(const Camera& camera);
     void execute_stage_god_rays(const Camera& camera);
     void execute_stage_foliage(const Camera& camera);
@@ -1248,6 +1257,17 @@ private:
     u32 m_lum_reduce_program = 0;
     u32 m_lum_reduce_ssbo = 0;
     AsyncReadbackRing m_exposure_ring;
+
+    // Spec 015 Pillar B (RENDER-17, Wave F F7): the froxel volumetrics chain —
+    // inject (media density + in-scatter per froxel, sampling the shadow depth
+    // AND the C-1 tint cascade for colored shafts) then integrate (front-to-back
+    // per column). Lazy-init in the stages; torn down in cleanup_gpu_resources.
+    // Quality 0 (default) is a zero-GL no-op through both stages.
+    int m_volumetric_quality = 0;
+    u32 m_froxel_inject_program = 0;
+    u32 m_froxel_integrate_program = 0;
+    u32 m_froxel_scatter_tex = 0;     // rgba16f 160x90x64: rgb in-scatter, a sigma
+    u32 m_froxel_integrated_tex = 0;  // rgba16f 160x90x64: rgb accumulated L, a T
 
     u32 m_terrainTextureArray = 0;
     // Per-material triplanar normal-map array (T-I4-7). Same layer order as the
