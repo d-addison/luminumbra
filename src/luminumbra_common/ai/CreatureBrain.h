@@ -6,8 +6,10 @@
 // action's score is built from considerations over the senses, and the highest wins.
 //
 // DETERMINISM: pure function, libm-free (UtilityAI curves) -> safe on the sim path. The
-// action SET is engine-generic predator/prey behaviour; the curve TUNING constants here are
-// the natural seam to externalise to per-species game data (archetypes) later.
+// action SET is engine-generic predator/prey behaviour; the curve TUNING constants are
+// externalised through CreatureBrainParams (spec-021 INSTINCT-12): per-species game data
+// (species JSON "brain" overrides) may replace them, and the defaults reproduce the compiled
+// constants byte-for-byte.
 
 #include "UtilityAI.h"
 
@@ -52,16 +54,41 @@ inline Consideration axis(float input, CurveType curve, float m = 1.0f, float b 
 }
 }  // namespace detail
 
+// Spec-021 INSTINCT-12: the per-species IAUS CURVE/WEIGHT overrides — the externalisation
+// seam this header has always named ("the curve TUNING constants here are the natural seam to
+// externalise to per-species game data"). Every field defaults to the constant that was
+// previously an inline literal in DecideCreatureAction, so a default-constructed
+// CreatureBrainParams reproduces today's decisions BYTE-IDENTICALLY (same float values through
+// the same arithmetic; the EcologyTuning pattern). Species JSON
+// (data/common/creatures/species/*.json, key "brain") overrides these per species via
+// CreatureSpeciesRegistry; a JSON with the key absent — or matching these defaults — loads a
+// table equal to the compiled constants.
+struct CreatureBrainParams {
+    float wander_weight   = 0.20f;  // constant baseline so an idle creature still moves
+    float rest_weight     = 0.9f;   // recover when exhausted AND safe
+    float sleep_weight    = 1.0f;   // circadian deep rest (kept under flee: never sleep through a predator)
+    float hunt_weight     = 1.0f;   // predator: hungry AND prey nearby AND has stamina
+    float flee_weight     = 1.1f;   // prey: a near predator dominates everything
+    float graze_weight    = 1.0f;   // prey: hungry AND safe AND food nearby
+    // Flee threat response curve (the one non-default curve shape in the action set):
+    // Logistic(m = steepness, c = center) over threat_proximity.
+    float flee_logistic_m = 2.0f;
+    float flee_logistic_c = 0.45f;
+};
+
 // Build the IAUS action set for this creature, select the best, and return the action.
-[[nodiscard]] inline CreatureAction DecideCreatureAction(const CreatureSenses& s) {
+// `p` defaults to the compiled constants (CreatureBrainParams{}), so existing callers are
+// byte-identical; per-species data may pass a species' overrides.
+[[nodiscard]] inline CreatureAction DecideCreatureAction(const CreatureSenses& s,
+                                                         const CreatureBrainParams& p = {}) {
     using detail::axis;
     std::vector<UtilityAction> actions;
 
     // Wander — a low constant baseline so a creature with nothing pressing still moves.
-    actions.push_back({static_cast<int>(CreatureAction::Wander), 0.20f, {}});
+    actions.push_back({static_cast<int>(CreatureAction::Wander), p.wander_weight, {}});
 
     // Rest — recover when exhausted AND safe.
-    actions.push_back({static_cast<int>(CreatureAction::Rest), 0.9f,
+    actions.push_back({static_cast<int>(CreatureAction::Rest), p.rest_weight,
                        {axis(s.stamina, CurveType::InvLinear, 1.0f, 0.0f, 1.0f),     // low stamina -> high
                         axis(s.threat_proximity, CurveType::InvLinear, 1.0f, 0.0f, 1.0f)}});  // safe
 
@@ -70,23 +97,24 @@ inline Consideration axis(float input, CurveType curve, float m = 1.0f, float b 
     // (activity defaults to 1.0) scores Sleep at 0 and never sleeps -> byte-identical until a
     // creature is actually stamped circadian. Weight just under Flee (1.1) so a threat always
     // wins -- nothing sleeps through a predator.
-    actions.push_back({static_cast<int>(CreatureAction::Sleep), 1.0f,
+    actions.push_back({static_cast<int>(CreatureAction::Sleep), p.sleep_weight,
                        {axis(s.circadian_activity, CurveType::InvLinear, 1.0f, 0.0f, 1.0f),  // off-phase -> high
                         axis(s.energy, CurveType::InvLinear, 1.0f, 0.0f, 1.0f),              // tired -> high
                         axis(s.threat_proximity, CurveType::InvLinear, 1.0f, 0.0f, 1.0f)}}); // safe
 
     if (s.is_predator) {
         // Hunt — hungry AND prey nearby.
-        actions.push_back({static_cast<int>(CreatureAction::Hunt), 1.0f,
+        actions.push_back({static_cast<int>(CreatureAction::Hunt), p.hunt_weight,
                            {axis(s.hunger, CurveType::Linear),
                             axis(s.food_proximity, CurveType::Linear),
                             axis(s.stamina, CurveType::Linear)}});  // need stamina to chase
     } else {
         // Flee — a near predator dominates everything (weight + steep curve).
-        actions.push_back({static_cast<int>(CreatureAction::Flee), 1.1f,
-                           {axis(s.threat_proximity, CurveType::Logistic, 2.0f, 0.0f, 0.45f)}});
+        actions.push_back({static_cast<int>(CreatureAction::Flee), p.flee_weight,
+                           {axis(s.threat_proximity, CurveType::Logistic,
+                                 p.flee_logistic_m, 0.0f, p.flee_logistic_c)}});
         // Graze — hungry AND safe AND food nearby.
-        actions.push_back({static_cast<int>(CreatureAction::Graze), 1.0f,
+        actions.push_back({static_cast<int>(CreatureAction::Graze), p.graze_weight,
                            {axis(s.hunger, CurveType::Linear),
                             axis(s.threat_proximity, CurveType::InvLinear, 1.0f, 0.0f, 1.0f),
                             axis(s.food_proximity, CurveType::Linear)}});

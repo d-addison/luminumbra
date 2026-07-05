@@ -1,4 +1,4 @@
-#if defined(_WIN32) && !defined(NOMINMAX)
+﻿#if defined(_WIN32) && !defined(NOMINMAX)
 #define NOMINMAX
 #endif
 
@@ -35,6 +35,11 @@
 #include "audio/AudioManagerFactory.h"
 #include "audio/IAudioManager.h"
 #include "audio/NullAudioManager.h"
+#include "audio/EnvironmentalAudioSystem.h"  // AUDIO-07/09: day/night beds + biome/weather reverb
+#include "rendering/WeatherRenderBridge.h"   // ATMO-07 (R1.4): the live weather bridge
+#include "rendering/SnowCoverModel.h"        // ATMO-14 (S1.3): render-only snow cover
+#include "audio/AudioPropagationSystem.h"    // AUDIO-06: ComputeWaterfallRoar (static)
+#include "luminumbra_common/systems/AetherFieldSystem.h" // AETHER-04 (R1.6): the aether tap
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/components/PlantComponents.h"   // I9-FOLIAGE
 #include "luminumbra_common/components/CreatureComponents.h" // I9-ECO creature markers
@@ -48,6 +53,8 @@
 #include "luminumbra_common/components/MortalComponents.h"     // lifespan / natural death
 #include "luminumbra_common/components/PackHunterComponents.h" // coordinated pack hunting
 #include "luminumbra_common/components/DecayComponents.h"      // decomposition (carcass fades)
+#include "luminumbra_common/components/TerritoryComponents.h"  // INSTINCT-07: home-range homing
+#include "luminumbra_common/components/MigratoryComponents.h"  // INSTINCT-07: seasonal drive
 #include "luminumbra_common/systems/PlantGrowthSystem.h"    // I9-FOLIAGE phenotype/genome
 #include "luminumbra_common/systems/FarmingSystem.h"        // I9-FOLIAGE MakePlantFromSpecies (Phase 5A) + SpeciesRegistry
 #include "luminumbra_common/systems/PlantProcgen.h"         // I9-FOLIAGE procedural plant geometry (render-only)
@@ -110,7 +117,7 @@ std::unique_ptr<Luminumbra::Rendering::Camera> g_camera;
 std::unique_ptr<Luminumbra::Client::PlayerController> g_playerController;
 
 // g-vertical-slice spike: client-only photo-mode state + progression codex. NOT sim
-// state — neither participates in any baseline NetworkStateHash (PhotoCodex.h
+// state â€” neither participates in any baseline NetworkStateHash (PhotoCodex.h
 // documents this), so photo mode is a pure read-mostly observer. The lens is nudged
 // by the PlayerController's aperture/focus inputs; the codex keeps the best score per
 // species across the session.
@@ -128,7 +135,7 @@ luminumbra::ai::CreatureSpeciesRegistry g_creatureSpecies;
 luminumbra::game::ObjectiveSet g_objectives;
 bool g_objectivesInit = false;
 std::string g_objHudSig;
-// I9-FOLIAGE Phase 5B: farming HUD signature — caches the last-rendered seed/harvest
+// I9-FOLIAGE Phase 5B: farming HUD signature â€” caches the last-rendered seed/harvest
 // inventory + facing-crop text so the DOM is only touched when it actually changes.
 // Client-only, never hashed (reads sim state, never mutates it).
 std::string g_farmHudSig;
@@ -138,9 +145,9 @@ bool g_codexOpen = false;
 std::string g_codexSig;
 // Single client config: defaults (data/common/systems.json) overlaid by the writable
 // per-user settings file (%APPDATA%/Luminumbra/settings.json). user.* is client-only,
-// never hashed (docs/STANDARDS.md §5). Loaded once at startup (before window creation).
+// never hashed (docs/STANDARDS.md Â§5). Loaded once at startup (before window creation).
 luminumbra::core::SystemConfig g_systemConfig;
-// Settings menu (F8) — frees the cursor so the ImGui panel is clickable. While
+// Settings menu (F8) â€” frees the cursor so the ImGui panel is clickable. While
 // g_rebindCaptureAction >= 0 the next key press is captured as that action's binding.
 bool g_show_settings = false;
 bool g_paused = false;  // T032: in-game pause overlay active
@@ -158,6 +165,16 @@ bool g_debug_glass_panes = false;
 bool g_glass_panes_spawned = false;
 // Rank 69 (Wave F F6): --auto-exposure-metered opts the GPU metering servo in.
 bool g_auto_exposure_metered = false;
+// ATMO-08 (Wave G R1.5) -> AUDIO-08: thunder cues queued by the live lightning
+// consumer (strike sim tick + distance + magnitude); the audio tick drains them
+// with the physical sound delay (distance / 343 m/s). Client-only, never sim.
+struct PendingThunder {
+    std::uint64_t strike_tick = 0;
+    double fired_at_seconds = 0.0; // wall clock when the bolt rendered
+    float distance_m = 0.0f;
+    float magnitude = 0.0f;
+};
+std::vector<PendingThunder> g_pendingThunder;
 // Spec 015 Pillar B (RENDER-17): --volumetric-quality N (0 analytic-only default).
 int g_volumetric_quality = 0;
 int g_rebindCaptureAction = -1;
@@ -203,7 +220,7 @@ static std::string KeyDisplayLabel(int key) {
 }
 // host_timescale-style engine time control (Source/GMod-like). 1.0 = real time, 0 = paused,
 // <1 slow-mo, >1 fast-forward. Render/client playback rate: scales how many FIXED 30 Hz sim
-// ticks run per real frame, NOT the tick dt — so determinism + run==replay hold (tick sequence
+// ticks run per real frame, NOT the tick dt â€” so determinism + run==replay hold (tick sequence
 // unchanged; per-tick world_hash unchanged). Leveraged by the timelapse capture.
 float g_timeScale = 1.0f;
 // --timelapse capture: dump a frame sequence of the LIVE loaded world while sim-time (and,
@@ -240,7 +257,7 @@ int g_timelapse_captured = 0;
 int g_timelapse_settle = 0;
 bool g_timelapse_dig = false;       // Spec 009: progressively carve a trench mid-capture (terraform demo)
 bool g_timelapse_drain = false;     // Spec 009 money shot: anchor on a real river/lake, breach the bank, drain it
-bool g_timelapse_rain = false;      // Spec 010: finite hydrology — rain fills the land, then drain stays drained
+bool g_timelapse_rain = false;      // Spec 010: finite hydrology â€” rain fills the land, then drain stays drained
 int  g_timelapse_rain_mm = 18;      // rain rate (mm/tick) for the rain demo
 struct TimelapseDrainState { bool init = false; Luminumbra::Vec3 P{0.0f, 0.0f, 0.0f}; float dhx = 0.0f, dhz = 1.0f; float surf = 0.0f; };
 TimelapseDrainState g_drain_state;
@@ -302,7 +319,7 @@ int g_frame_scan_watchdog = 0;
 // the tree meshes (no world), so it runs on the first render-loop frame. Render-only.
 std::string g_bake_impostor_path;
 bool g_bake_impostor_done = false;
-// --survey <dir>: autonomous tour — discover POIs (waterfall/cliff/grass/lake) in the generated
+// --survey <dir>: autonomous tour â€” discover POIs (waterfall/cliff/grass/lake) in the generated
 // world, teleport+stream+settle at each, write a screenshot + frame-scan per POI. Empty = off.
 std::string g_survey_dir;
 bool g_survey_active = false;
@@ -320,11 +337,11 @@ bool g_ui_fixtures = false;                   // seed deterministic UI fixture d
 // RENDER-19 (spec 021): the spec-013 one-time world-entry flourishes (doline
 // locate + the 25-anchor enclosed-cave crystal scan + the hero call) cost
 // minutes of full-SDF probing in a debug build (est. 10-25 s release) and used
-// to run INLINE on the frame-2 main thread — the world-entry stall. They now
+// to run INLINE on the frame-2 main thread â€” the world-entry stall. They now
 // run as a batch of BACKGROUND JobSystem jobs (pure deterministic SDF reads,
 // the same sampling meshing workers already do concurrently); the main thread
 // polls the handle and creates the point-light entities when the batch lands.
-// TEARDOWN CONTRACT: the jobs hold a raw SHIELD_WorldSystem* — every world
+// TEARDOWN CONTRACT: the jobs hold a raw SHIELD_WorldSystem* â€” every world
 // transition (CreateWorld / session reset) MUST DrainSpec13WorldScan() first.
 struct Spec13WorldScan {
     const void* world = nullptr;  // identity guard: consume only for the world scanned
@@ -345,19 +362,19 @@ static void DrainSpec13WorldScan(Luminumbra::JobSystem& jobs) {
 // RENDER-20 (spec 021): the one-time world-entry DRESSING bring-up (the T-I8
 // tree/rock/bush scatter + the ambient-wildlife spawn) cost ~30 s of main-thread
 // placement loops in a debug build on the first IN_GAME frame. The placement
-// COMPUTATION (RNG-driven candidate probing over terrain/water/biome queries —
+// COMPUTATION (RNG-driven candidate probing over terrain/water/biome queries â€”
 // see WorldDressing.h) now runs as ONE background JobSystem job (the same pure,
 // thread-safe worldgen reads the meshing workers already run concurrently); the
 // main thread polls the handle and consumes the placement vectors AMORTIZED over
 // a few frames (the GL palette uploads + EnTT/physics registrations were always
 // the cheap half). Capture/scenario runs compute synchronously so frame-1
 // content is unchanged. TEARDOWN CONTRACT: the job's callbacks hold a raw
-// SHIELD_WorldSystem* — every world transition (CreateWorld / session reset)
+// SHIELD_WorldSystem* â€” every world transition (CreateWorld / session reset)
 // MUST DrainWorldDressing() first, exactly like DrainSpec13WorldScan above.
 struct WorldDressingPending {
     const void* world = nullptr;  // identity guard: consume only for the world computed
     Luminumbra::Client::WorldDressingResult result;
-    // Amortized consume cursors — each lane replays its vector strictly in order.
+    // Amortized consume cursors â€” each lane replays its vector strictly in order.
     std::size_t trees_done = 0, rocks_done = 0, bushes_done = 0, wildlife_done = 0;
     bool trees_logged = false, rocks_logged = false, bushes_logged = false;
     int creatures_spawned = 0;   // Kind::Creature consumed (the legacy wlSpawned log)
@@ -388,7 +405,7 @@ int g_ui_screenshot_settle = 0;              // frames waited before capture of 
 bool g_ui_preview_live = false;              // wait for the live diorama before capturing world_creation
 std::string g_ui_preview_weather;            // optional forced weather chip (e.g. "rain") so precip spawns
 int g_ui_preview_settle_after_ready = 0;     // post-world_ready settle frames accrued (far-LOD/foliage/particles)
-// F4 — live scenic menu backdrop: a golden-hour world rendered behind the menus (matching the
+// F4 â€” live scenic menu backdrop: a golden-hour world rendered behind the menus (matching the
 // references). Stood up at boot while staying in MAIN_MENU; the menu render branch draws it
 // under the transparent UI with a slow auto-orbit. Replaced cleanly when a real world loads.
 bool g_menu_backdrop_active = false;
@@ -398,7 +415,7 @@ float g_menu_backdrop_yaw = 30.0f;           // orbit accumulator (degrees)
 // the wheel delta here and the preview block consumes it each frame to drive
 // WorldgenPreview::zoom() when the cursor is over the #preview_pane rect.
 double g_menu_scroll_accum = 0.0;
-// F5 — thumbnail generation: capture N clean (no-UI) backdrop frames at varied yaw/time-of-day
+// F5 â€” thumbnail generation: capture N clean (no-UI) backdrop frames at varied yaw/time-of-day
 // in one window session, for use as world-select + gallery photo thumbnails. --ui-thumbs N.
 int g_ui_thumbs = 0;                          // 0 = off; else number of thumbnails to capture
 std::filesystem::path g_ui_thumbs_dir;        // output dir; each -> thumb_<i>.ppm
@@ -421,7 +438,7 @@ struct ProcgenPlantInstance {
     float effScale;
     Luminumbra::Components::PlantGenomeComponent genome;
     // Plant unification: a decoration-tier scatter plant PROMOTED to a sim PlantTag entity (on player
-    // interaction) is suppressed here so it is not double-drawn — the sim tier now owns it.
+    // interaction) is suppressed here so it is not double-drawn â€” the sim tier now owns it.
     bool suppressed = false;
 };
 std::vector<ProcgenPlantInstance> g_procgenPlants;
@@ -444,7 +461,7 @@ luminumbra::foliage::FarmingController g_farming;
 luminumbra::foliage::SpeciesRegistry g_farmSpecies;
 bool g_farmSpeciesLoaded = false;
 // Player-selected species to plant (index into g_farmSpecies.all(); V cycles it). So FarmPlant
-// isn't hard-coded to wheat — the player picks oak/wheat/etc. from the data-driven registry.
+// isn't hard-coded to wheat â€” the player picks oak/wheat/etc. from the data-driven registry.
 int g_farmSelectedSpecies = 0;
 
 // Re-bake the combined procgen plant mesh at growth `stageF` and push it to the pass. Young
@@ -507,7 +524,7 @@ void BakeProcgenPlants(Luminumbra::Rendering::PlantProcgenPass* pp, float stageF
 // Plant unification: composite the DECORATION-tier scatter (g_procgenTreeVerts cache, rebuilt by
 // BakeProcgenPlants when the scatter changes) with the SIM-tier PlantTag plants (each at its live
 // PlantGrowthComponent stage) into the single PlantProcgenPass. This is the ONE unified plant RENDER;
-// the SIM stays split — only PlantTag entities tick/persist/hash, the vast scatter is render-only.
+// the SIM stays split â€” only PlantTag entities tick/persist/hash, the vast scatter is render-only.
 // So a player-planted/promoted plant ADDS to the forest rather than replacing it. Sig-gated on
 // (scatter revision + the sim roster's ids/stages) so a settled frame is a no-op. Pure visual-only:
 // reads sim truth, never writes back into the sim / world_hash.
@@ -587,11 +604,11 @@ std::size_t RebakeAllPlants(Luminumbra::Rendering::PlantProcgenPass* pp, const e
     return ents.size();
 }
 
-// Plant unification — PROMOTION: turn the decoration-tier scatter plant nearest `aim` (within `reach`)
+// Plant unification â€” PROMOTION: turn the decoration-tier scatter plant nearest `aim` (within `reach`)
 // into a SIM-tier PlantTag entity, so the player can tend a wild forest tree into a living, growing,
 // persisting plant. The promoted plant inherits the scatter instance's genome + a grown (Mature)
 // perennial state; the scatter instance is SUPPRESSED (so it is not double-drawn) and the scatter
-// revision bumped (the caller rebuilds the scatter cache). Sim stays bounded — promotion is gated by
+// revision bumped (the caller rebuilds the scatter cache). Sim stays bounded â€” promotion is gated by
 // player interaction. Returns the new entity, or entt::null if no scatter plant is in reach.
 entt::entity PromoteNearestScatter(entt::registry& reg, const glm::vec3& aim, float reach,
                                    std::uint64_t tick) {
@@ -629,19 +646,19 @@ entt::entity PromoteNearestScatter(entt::registry& reg, const glm::vec3& aim, fl
 // Spec 012 P1: map the sun's elevation (radians, >0 above horizon) to a photographic
 // scene luminance [0,1] for photo scoring. Night (sun below horizon) is dark (~0.06);
 // low/golden-hour sun lands near the ideal (~0.5-0.7); midday is bright but not blown
-// (~0.85). CLIENT render-derived feedback ONLY — never sim / world_hash — so libm
+// (~0.85). CLIENT render-derived feedback ONLY â€” never sim / world_hash â€” so libm
 // (std::sin/std::pow) is fine here (unlike the pure photo headers, which stay libm-free).
 inline float SceneLuminanceFromSunElevation(float sun_elev_rad) {
     const float e = std::sin(sun_elev_rad);  // [-1,1], fraction of the way above horizon
     if (e <= 0.0f) {
-        // Twilight → night: a small floor that dims toward midnight (e == -1).
+        // Twilight â†’ night: a small floor that dims toward midnight (e == -1).
         return luminumbra::game::PhotoModeClamp01(0.06f + 0.10f * (1.0f + e));
     }
     return luminumbra::game::PhotoModeClamp01(0.15f + 0.70f * std::pow(e, 0.3f));
 }
 
 // g-vertical-slice spike: gather the in-frustum creature subjects for a photo-mode
-// CAPTURE. STRICTLY a read-only observer — it takes a CONST registry + CONST camera,
+// CAPTURE. STRICTLY a read-only observer â€” it takes a CONST registry + CONST camera,
 // projects each creature's world position into NDC via the camera's view*proj, and
 // derives a deterministic species/luminance proxy (R1/OQ-A: no luminance component to
 // read, so a constant scene-luminance + the predator-role species proxy; no new sim
@@ -772,22 +789,22 @@ void BakeCreatureMarkers(Luminumbra::Rendering::PlantProcgenPass* pp, entt::regi
                 col *= (1.0f - 0.7f * t);              // darken toward the soil
             }
         }
-        // Spec 011 Phase G — rest poses: a resting/sleeping creature reads as "bedded
-        // down" — the marker shrinks, SQUATS (flattens vertically), and dims, so a
+        // Spec 011 Phase G â€” rest poses: a resting/sleeping creature reads as "bedded
+        // down" â€” the marker shrinks, SQUATS (flattens vertically), and dims, so a
         // sleeping subject is visibly distinct from an awake one. This is what a behaviour
         // photo objective (spec 012 BehavioralMatch) is shot against. Render-only; the
         // action is the brain's last_action (Rest=4, Sleep=5).
         float restSquash = 1.0f;
-        if (cr.last_action == 5) {        // Sleep — most settled
+        if (cr.last_action == 5) {        // Sleep â€” most settled
             sizeMul *= 0.6f; restSquash = 0.45f; col *= 0.70f;
-        } else if (cr.last_action == 4) { // Rest — partly settled
+        } else if (cr.last_action == 4) { // Rest â€” partly settled
             sizeMul *= 0.8f; restSquash = 0.70f; col *= 0.85f;
         }
         const float rr = r * sizeMul, hh = halfH * sizeMul * restSquash;
         emitOcta(c, rr, hh, col);
     }
 
-    // Spec 011 Phase C/D — forager colony render (anchor-only, client-visual). Renders the
+    // Spec 011 Phase C/D â€” forager colony render (anchor-only, client-visual). Renders the
     // ants shuttling, the food piles, and the nest ANCHOR. All reads (TransformComponent
     // mirror, cell->world, terrain height) are render-only; nothing steers or writes sim.
     if (gs) {
@@ -815,7 +832,7 @@ void BakeCreatureMarkers(Luminumbra::Rendering::PlantProcgenPass* pp, entt::regi
             const float wy = (ws ? ws->GetTerrainHeightAt(wx, wz) : 0.0f) + 0.4f;
             emitOcta(glm::vec3(wx, wy, wz), 0.7f, 0.7f, glm::vec3(0.30f, 0.80f, 0.25f));
         }
-        // Nest ANCHOR (tan mound) at the colony's home cell — the "home" the trails radiate
+        // Nest ANCHOR (tan mound) at the colony's home cell â€” the "home" the trails radiate
         // from. Anchor-only: it is decoration, never a steering target (Option A).
         if (nestCx >= 0) {
             const float wx = gs->ScentCellToWorldX(nestCx);
@@ -824,7 +841,7 @@ void BakeCreatureMarkers(Luminumbra::Rendering::PlantProcgenPass* pp, entt::regi
             emitOcta(glm::vec3(wx, wy, wz), 1.2f, 0.9f, glm::vec3(0.55f, 0.40f, 0.25f));
         }
 
-        // Spec 013: LUMIN CRYSTALS — a tall bright shard at each cave point-light. It sits
+        // Spec 013: LUMIN CRYSTALS â€” a tall bright shard at each cave point-light. It sits
         // inside its own glow so it reads as a luminous crystal (and is the photo subject the
         // light makes visible). The PointLightComponent does the actual cave illumination.
         auto plview = reg.view<const Luminumbra::Components::PointLightComponent,
@@ -846,7 +863,7 @@ void BakeCreatureMarkers(Luminumbra::Rendering::PlantProcgenPass* pp, entt::regi
     pp->set_enabled(true);
 }
 
-// §4 sim.fire demo: draw each combustible bush as an octahedron coloured by its DETERMINISTIC
+// Â§4 sim.fire demo: draw each combustible bush as an octahedron coloured by its DETERMINISTIC
 // burn_state (green = unburnt, orange = burning, charcoal = burnt), grounded on the terrain.
 // The FireSpreadSystem (now wired into the tick) drives the colours; this just visualizes them.
 void BakeCombustibleMarkers(Luminumbra::Rendering::PlantProcgenPass* pp, entt::registry& reg,
@@ -984,7 +1001,7 @@ void BuildProcgenTreePalette(Luminumbra::Rendering::RenderPipeline& rp, const gl
         const glm::vec3 up(0, 1, 0);
         addQuad(bbLeafV, bbLeafI, {-W, cLo, 0}, {W, cLo, 0}, {W, cHi, 0}, {-W, cHi, 0}, up);     // X-facing
         addQuad(bbLeafV, bbLeafI, {0, cLo, -W}, {0, cLo, W}, {0, cHi, W}, {0, cHi, -W}, up);     // Z-facing
-        // FAR-TREE LEAVES (handover §2 #8): the two crossed quads above are VERTICAL, so an
+        // FAR-TREE LEAVES (handover Â§2 #8): the two crossed quads above are VERTICAL, so an
         // aerial / top-down view sees them edge-on and the canopy vanishes -> bare brown trunk
         // skeleton. Add a HORIZONTAL canopy "cap" over the top of the leaf band so looking DOWN
         // at a far tree still reads green leaf coverage. Up-facing normal (matches the leaf cards);
@@ -1032,7 +1049,7 @@ void BuildProcgenRockPalette(Luminumbra::Rendering::RenderPipeline& rp) {
     auto h01 = [](int a, int b) {
         // Unsigned arithmetic throughout: `a * 73856093` as signed int overflows
         // (a can exceed 29 here) which is UB the -O3/LTO release build miscompiles
-        // (debug wraps, release does not) — the root cause of a release-only hang
+        // (debug wraps, release does not) â€” the root cause of a release-only hang
         // (degenerate face -> NaN normal -> stall). Unsigned wraps deterministically.
         std::uint32_t ua = static_cast<std::uint32_t>(static_cast<std::int64_t>(a)) * 73856093u;
         std::uint32_t ub = static_cast<std::uint32_t>(static_cast<std::int64_t>(b)) * 19349663u;
@@ -1043,7 +1060,7 @@ void BuildProcgenRockPalette(Luminumbra::Rendering::RenderPipeline& rp) {
         return static_cast<float>((z >> 11) * (1.0 / 9007199254740992.0));
     };
     // FR-C2 RENDER-ONLY LOD: an octahedron hull (6 axis-extreme verts, 8 flat faces)
-    // built from the deformed icosahedron's AABB — reads as the same boulder silhouette
+    // built from the deformed icosahedron's AABB â€” reads as the same boulder silhouette
     // at distance for ~8 tris (vs 20). Used for LOD1/LOD2 so distant rocks (>140m / >320m)
     // shed geometry; LOD3 (>620m) collapses to a crossed billboard (~4 tris).
     auto buildRockHull = [](const glm::vec3& lo, const glm::vec3& hi) {
@@ -1069,7 +1086,7 @@ void BuildProcgenRockPalette(Luminumbra::Rendering::RenderPipeline& rp) {
         return Luminumbra::Rendering::MeshLoader::CreateFromArrays(v, i);
     };
     // FR-C2 far-field billboard: two crossed vertical quads spanning the boulder AABB
-    // (~4 tris) — the stone triplanar material colours them, so a distant scree field
+    // (~4 tris) â€” the stone triplanar material colours them, so a distant scree field
     // stays in budget. Mirrors the tree LOD3 cross-billboard.
     auto buildRockBillboard = [](const glm::vec3& lo, const glm::vec3& hi) {
         const float W = std::max({hi.x, -lo.x, hi.z, -lo.z, 0.2f});
@@ -1131,9 +1148,9 @@ void BuildProcgenRockPalette(Luminumbra::Rendering::RenderPipeline& rp) {
 // to the scree rocks). Each entry is a CLUSTER of 2-3 squashed, deformed
 // icospheres (overlapping lobes read as a leafy shrub), green leaf material via
 // the instanced g_buffer path (no new art). RENDER-ONLY (never hashed, no
-// world_hash impact) — mirrors BuildProcgenRockPalette exactly, including the
+// world_hash impact) â€” mirrors BuildProcgenRockPalette exactly, including the
 // unsigned-only position hash (signed int*prime overflow is release-only UB that
-// miscompiles to a NaN-normal stall — see memory procgen-hash-signed-overflow-ub).
+// miscompiles to a NaN-normal stall â€” see memory procgen-hash-signed-overflow-ub).
 int g_bushPaletteCount = 0;
 constexpr int kBushPaletteSize = 6;
 void BuildProcgenBushPalette(Luminumbra::Rendering::RenderPipeline& rp) {
@@ -1252,7 +1269,7 @@ void BuildProcgenBushPalette(Luminumbra::Rendering::RenderPipeline& rp) {
 }
 
 std::unique_ptr<Luminumbra::Client::Rml_UIManager> g_uiManager;
-// F3 — UI hot reload: watches data/ui and reloads the active document on .rml/.rcss edits
+// F3 â€” UI hot reload: watches data/ui and reloads the active document on .rml/.rcss edits
 // (opt-in via --ui-hot-reload, so the 1s filesystem poll is off during normal/gate runs).
 Luminumbra::Client::UI::UIHotReload g_uiHotReload;
 std::unique_ptr<Luminumbra::Client::WorldLoadingVisualizer> g_loading_visualizer;
@@ -1262,7 +1279,7 @@ void framebuffer_size_callback(GLFWwindow* window, int width, int height);
 void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods);
 void mouse_callback(GLFWwindow* window, double xpos, double ypos);
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset);
-// Spec 002 Item 1: menu-state scroll callback — forwards to RmlUi (so menu lists
+// Spec 002 Item 1: menu-state scroll callback â€” forwards to RmlUi (so menu lists
 // still scroll) AND accrues the wheel delta into g_menu_scroll_accum so the
 // create-world preview block can zoom the diorama when the cursor is over the pane.
 void menu_scroll_callback(GLFWwindow* window, double xoffset, double yoffset);
@@ -2097,7 +2114,7 @@ bool WriteMiniDump(EXCEPTION_POINTERS* exception_info, const std::filesystem::pa
 // left nothing to diagnose. DbgHelp resolves public/export names; the per-frame
 // `module+0xRVA` lets addr2line recover exact file:line from the binary's DWARF
 // (run .forge/scripts/symbolize-crash.ps1 on the crash file). A crash handler must
-// not itself throw — everything here is guarded and bounded.
+// not itself throw â€” everything here is guarded and bounded.
 void WriteCrashStackTrace(EXCEPTION_POINTERS* xp, const std::filesystem::path& crash_dir) {
     std::error_code ec;
     std::filesystem::create_directories(crash_dir, ec);
@@ -2125,7 +2142,7 @@ void WriteCrashStackTrace(EXCEPTION_POINTERS* xp, const std::filesystem::path& c
     SymInitialize(proc, nullptr, TRUE);
 
     if (!xp || !xp->ContextRecord) {
-        emit("(no thread context captured — cannot walk the stack)");
+        emit("(no thread context captured â€” cannot walk the stack)");
         SymCleanup(proc);
         return;
     }
@@ -2143,7 +2160,7 @@ void WriteCrashStackTrace(EXCEPTION_POINTERS* xp, const std::filesystem::path& c
     if (ctx.Rip == 0 && ctx.Rsp != 0) {
         const DWORD64 ret = *reinterpret_cast<DWORD64*>(ctx.Rsp);
         char b[160];
-        std::snprintf(b, sizeof b, "(rip==0: null call — caller return addr [rsp]=0x%llX)",
+        std::snprintf(b, sizeof b, "(rip==0: null call â€” caller return addr [rsp]=0x%llX)",
             (unsigned long long)ret);
         emit(b);
         ctx.Rip = ret;        // pretend we are in the caller
@@ -2199,7 +2216,7 @@ LONG WINAPI RuntimeUnhandledExceptionFilter(EXCEPTION_POINTERS* exception_info) 
     bool expected = false;
     if (!s_handling.compare_exchange_strong(expected, true)) {
         // A sibling thread (the same parallel fault hits every worker at once) is already
-        // writing the report. Do NOT return — that terminates the process and kills the
+        // writing the report. Do NOT return â€” that terminates the process and kills the
         // writer mid-flush (which left an empty crash file). PARK here; the writer's
         // return tears the whole process (and us) down once the report is on disk.
         for (;;) { Sleep(1000); }
@@ -2859,7 +2876,7 @@ int main(int argc, char* argv[]) {
                              g_render_parity_dir.string(), kFrameScanSettleFrames);
     }
     // WAVE-F F1: --render-parity-frame <dir>. Same boot/settle, then the in-process
-    // WHOLE-FRAME A/B — dispatch the settled prepared frame twice into twin targets,
+    // WHOLE-FRAME A/B â€” dispatch the settled prepared frame twice into twin targets,
     // FLIP in-process, demand exactly 0.0 (the RENDER-11 migration gate).
     if (const std::string rp = GetCommandLineOption(argc, argv, "--render-parity-frame", ""); !rp.empty()) {
         g_render_parity_active = true;
@@ -3022,8 +3039,8 @@ int main(int argc, char* argv[]) {
         // window clips its client area by the title bar, so on a monitor whose
         // resolution equals the pinned size a 3840x1600 decorated window yields a
         // 3840x1581 framebuffer (the 19 px title bar). Create the capture window
-        // undecorated so the client area — hence glfwGetFramebufferSize and the
-        // glReadPixels(GL_BACK) capture — equals the requested pinned size exactly.
+        // undecorated so the client area â€” hence glfwGetFramebufferSize and the
+        // glReadPixels(GL_BACK) capture â€” equals the requested pinned size exactly.
         // (At 1280x720 the decorated window fit with room to spare, so this never
         // mattered until the native-resolution capture re-bless.)
         glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
@@ -3052,7 +3069,7 @@ int main(int argc, char* argv[]) {
     // before this the swap interval was never set (driver default = uncapped). Default OFF
     // preserves the uncapped 300fps target; the settings menu flips it.
     // FR-C2: the --render-benchmark capture ALWAYS runs uncapped (swap interval 0) regardless
-    // of the persisted user vsync setting — a vsync-capped present leaves the GPU idle between
+    // of the persisted user vsync setting â€” a vsync-capped present leaves the GPU idle between
     // frames, which downclocks it and inflates every per-pass GPU timer, making the budget gate
     // unreproducible. The fixed-scenario budget must measure the saturated/boosted GPU state.
     glfwSwapInterval((!g_render_benchmark_path.empty() || g_systemConfig.user().vsync == false) ? 0 : 1);
@@ -3088,6 +3105,14 @@ int main(int argc, char* argv[]) {
     // Full control: data-drive every creature system from systems.json. All OFF by default ->
     // compiled constants -> byte-identical; enable a block + set values to tune live behaviour.
     gameSession->SetEcologyTuning(luminumbra::ai::ResolveEcologyTuning(g_systemConfig));
+    // S1.1 (ATMO-11/WATER-07): opt-in weather-driven rain (hashed sim flag; default
+    // OFF keeps the canonical baselines byte-identical — activation is a deliberate
+    // hash bump on the owner menu).
+    gameSession->SetWeatherRainEnabled(
+        g_systemConfig.enabled(luminumbra::core::SysKey::SimHydrologyWeather));
+    // S1.2 (ATMO-12): opt-in deterministic weather-event epochs (hashed sim flag).
+    gameSession->SetWeatherEventsEnabled(
+        g_systemConfig.enabled(luminumbra::core::SysKey::SimWeatherEvents));
     gameSession->SetWildlifeFoliageTuning(luminumbra::ai::ResolveWildlifeFoliageTuning(g_systemConfig));
     gameSession->SetThirstTuning(luminumbra::ai::ResolveThirstTuning(g_systemConfig));
     gameSession->SetScavengingTuning(luminumbra::ai::ResolveScavengingTuning(g_systemConfig));
@@ -3127,8 +3152,15 @@ int main(int argc, char* argv[]) {
     audioManager->Init();
     audioManager->SetMasterVolume(g_systemConfig.user().audio_master);  // apply persisted master volume
     audioManager->SetMusicVolume(g_systemConfig.user().audio_music);    // apply persisted music-bus volume
+    audioManager->SetSfxVolume(g_systemConfig.user().audio_sfx);        // AUDIO-05: apply persisted sfx-bus volume
     audioManager->LoadBank("data/audio/sfx_main.bank.json");
     audioManager->LoadBank("data/audio/music.bank.json");
+    // AUDIO-07/09: environmental audio (day/night beds + biome/weather reverb).
+    // dynamic_cast is null under --no-audio (NullAudioManager) -> the system still
+    // computes its model but plays nothing, matching central null suppression.
+    auto envAudio = std::make_unique<Luminumbra::Client::EnvironmentalAudioSystem>(
+        dynamic_cast<Luminumbra::Client::MiniaudioManager*>(audioManager.get()));
+    envAudio->ConfigureDayNightBeds("ambient_birds", "ambient_night");
 
     if (!scenario_config.no_ui) {
         g_uiManager = std::make_unique<Luminumbra::Client::Rml_UIManager>(root_path_str);
@@ -3142,7 +3174,7 @@ int main(int argc, char* argv[]) {
                 root_dir / "data" / "ui" / "fixtures" / "captures", "fixtures/captures/");
             LUMINUMBRA_CORE_INFO("UI fixtures: gallery sourcing data/ui/fixtures/captures");
         }
-        // F3 — opt-in UI hot reload: watch data/ui and reload the active document on edits.
+        // F3 â€” opt-in UI hot reload: watch data/ui and reload the active document on edits.
         if (HasCommandLineFlag(argc, argv, "--ui-hot-reload")) {
             g_uiHotReload.SetEnabled(true);
             g_uiHotReload.WatchDirectory("data/ui", "rml");
@@ -3164,7 +3196,7 @@ int main(int argc, char* argv[]) {
         scenario_config.isolation_layers, scenario_config.isolation_backdrop));
     // T-I3-9: far-LOD tile builds ride the JobSystem Normal lane.
     renderPipeline.attach_farlod_job_system(&jobSystem);
-    // spec 008 WS-4 §9: set the sky-LUT GPU flag BEFORE startup() so the one-shot precompute
+    // spec 008 WS-4 Â§9: set the sky-LUT GPU flag BEFORE startup() so the one-shot precompute
     // (init_sky_lut, inside startup) takes the GPU compute path. render.sky_lut_gpu, default OFF.
     renderPipeline.set_sky_lut_gpu_enabled(g_systemConfig.enabled(luminumbra::core::SysKey::RenderSkyLutGpu));
     // Render-optimization (cloud-raymarch-optimization): opt-in reduced-res sky-dome
@@ -3315,7 +3347,7 @@ int main(int argc, char* argv[]) {
         }
 
         // 1. Synchronously create the world systems and metadata. This is fast.
-        // RENDER-19: drain any in-flight spec-013 background scan FIRST — its jobs
+        // RENDER-19: drain any in-flight spec-013 background scan FIRST â€” its jobs
         // hold the OLD world system pointer, which CreateWorld is about to replace.
         DrainSpec13WorldScan(jobSystem);
         // RENDER-20: same contract for the world-dressing placement job.
@@ -3422,7 +3454,7 @@ int main(int argc, char* argv[]) {
     };
 
     if (g_uiManager) {
-        // Spec 002 Item 2: startup invariant — every semantic-knob spline endpoint
+        // Spec 002 Item 2: startup invariant â€” every semantic-knob spline endpoint
         // must lie within its mapped param's declared range (and splines be
         // monotone with neutral==default). A violation is a programming error in
         // the knob map, so fail loud at boot rather than ship a knob that drives a
@@ -3621,7 +3653,10 @@ int main(int argc, char* argv[]) {
             if (audioManager) audioManager->SetMasterVolume(v);
         };
         sb.GetAudioSfx = [] { return g_systemConfig.user().audio_sfx; };
-        sb.SetAudioSfx = [](float v) { g_systemConfig.user().audio_sfx = v; };
+        sb.SetAudioSfx = [&audioManager](float v) {
+            g_systemConfig.user().audio_sfx = v;
+            if (audioManager) audioManager->SetSfxVolume(v);  // AUDIO-05: applied live to the sfx bus
+        };
         sb.GetAudioMusic = [] { return g_systemConfig.user().audio_music; };
         sb.SetAudioMusic = [&audioManager](float v) {
             g_systemConfig.user().audio_music = v;
@@ -3788,7 +3823,7 @@ int main(int argc, char* argv[]) {
         glfwSetWindowShouldClose(window, true);
     }
 
-    // F4 — stand up the live scenic menu backdrop world. Synchronous so the first menu frame
+    // F4 â€” stand up the live scenic menu backdrop world. Synchronous so the first menu frame
     // already shows terrain. Skipped for automated runs that drive their own world (scenario,
     // auto-create, boot-metrics, timelapse, render-benchmark) and via --no-menu-backdrop.
     {
@@ -4104,9 +4139,9 @@ int main(int argc, char* argv[]) {
         double rb_stream_ms = 0.0;  // spec 004: this frame's streaming CPU cost
         double rb_foliage_ms = 0.0; // spec 004: this frame's foliage rebuild_instances cost
         double rb_ui_ms = 0.0;      // spec 004: this frame's UI (RmlUi + ImGui) render cost
-        double rb_render_call_ms = 0.0; // spec 004 §12: full render_frame() wall (incl. unmeasured pass CPU submit)
-        double rb_poll_ms = 0.0;        // spec 004 §12: glfwPollEvents wall (input/window message pump)
-        double rb_scatter_ms = 0.0;     // spec 004 §12: per-frame foliage chunk_scatter BUILD (terrain/biome sample per renderable chunk)
+        double rb_render_call_ms = 0.0; // spec 004 Â§12: full render_frame() wall (incl. unmeasured pass CPU submit)
+        double rb_poll_ms = 0.0;        // spec 004 Â§12: glfwPollEvents wall (input/window message pump)
+        double rb_scatter_ms = 0.0;     // spec 004 Â§12: per-frame foliage chunk_scatter BUILD (terrain/biome sample per renderable chunk)
         double rb_rebake_ms = 0.0;      // TEMP diag: per-frame RebakeAllPlants (procgen plant composite re-bake)
         // Declared at loop scope (not inside the case) so the case labels below
         // don't "jump over" an initialized local (ill-formed in a switch).
@@ -4197,6 +4232,11 @@ int main(int argc, char* argv[]) {
         // correctly (without this the listener sits at the origin and positional audio is near-silent).
         if (currentState == GameState::IN_GAME && audioManager && g_camera) {
             audioManager->SetListenerTransform(g_camera->Position, g_camera->Front, g_camera->Up);
+            // AUDIO-07: feed the sun elevation (sin; the sun vector points AWAY from
+            // the sun — same convention as the dawn/dusk cues below) + tick the
+            // day/night bed crossfade (internally throttled to 10 Hz).
+            envAudio->SetSunElevation(-renderPipeline.sun_direction().y);
+            envAudio->Update(g_camera->Position, static_cast<float>(deltaTime));
         }
         // Player FOOTSTEPS (interactive audio): when the player walks, play a footstep keyed to the
         // surface material under them (stone vs grass/soil/etc.), at a distance-based cadence so it
@@ -4260,13 +4300,30 @@ int main(int argc, char* argv[]) {
                     } else if (s_rainOn && precip < 0.08f) {
                         audioManager->StopAmbientLoop("ambient_rain"); s_rainOn = false;
                     }
-                    // Thunder during a real storm (heavy precip), spaced ~22 s apart (random distant/close).
-                    static float s_thunderTimer = 0.0f;
-                    if (precip > 0.40f) {
-                        s_thunderTimer += 0.5f;  // this branch runs once per 0.5 s tick above
-                        if (s_thunderTimer >= 22.0f) { s_thunderTimer = 0.0f; audioManager->PlayOneShot2D("thunder"); }
+                    // AUDIO-08 (Wave G): thunder now follows the SIM strike schedule when
+                    // the live-weather bridge is on — each queued strike cue fires after
+                    // its physical sound delay (distance / 343 m/s), volume by
+                    // magnitude/distance. The legacy flat 22 s timer remains ONLY as the
+                    // fallback when the bridge is off (no schedule consumer running).
+                    if (g_systemConfig.enabled(luminumbra::core::SysKey::RenderLiveWeather)) {
+                        const double now_s = glfwGetTime();
+                        for (auto it = g_pendingThunder.begin(); it != g_pendingThunder.end();) {
+                            const double delay_s = it->distance_m / 343.0; // speed of sound
+                            if (now_s - it->fired_at_seconds >= delay_s) {
+                                audioManager->PlayOneShot2D("thunder", Luminumbra::Client::BusId::Events);
+                                it = g_pendingThunder.erase(it);
+                            } else {
+                                ++it;
+                            }
+                        }
                     } else {
-                        s_thunderTimer = 0.0f;
+                        static float s_thunderTimer = 0.0f;
+                        if (precip > 0.40f) {
+                            s_thunderTimer += 0.5f;  // this branch runs once per 0.5 s tick above
+                            if (s_thunderTimer >= 22.0f) { s_thunderTimer = 0.0f; audioManager->PlayOneShot2D("thunder", Luminumbra::Client::BusId::Events); }
+                        } else {
+                            s_thunderTimer = 0.0f;
+                        }
                     }
                 }
                 // Water: a gentle stream bed when standing water is within ~14 m (a ring probe of the
@@ -4280,6 +4337,34 @@ int main(int argc, char* argv[]) {
                     }
                     if (nearWater && !s_waterOn) { audioManager->PlayAmbientLoop("ambient_stream", pc, 1.0e6f); s_waterOn = true; }
                     else if (!nearWater && s_waterOn) { audioManager->StopAmbientLoop("ambient_stream"); s_waterOn = false; }
+                    // AUDIO-06 (Wave G): waterfall ROAR — the nearest DETECTED waterfall
+                    // site within earshot drives a positional ambient loop through the
+                    // previously never-called ComputeWaterfallRoar (T-I5b-4 W1). The
+                    // detector's cached sites are the SAME set the render sheets use, so
+                    // what you hear is what you see. Pure reads; client-only.
+                    {
+                        static bool s_roarOn = false;
+                        const auto& falls = renderPipeline.waterfall_sites(*ws2);
+                        const Luminumbra::Rendering::WaterfallSite* best = nullptr;
+                        float best_d2 = 400.0f * 400.0f;
+                        for (const auto& site : falls) {
+                            const glm::vec3 d = site.crest - pc;
+                            const float d2 = glm::dot(d, d);
+                            if (d2 < best_d2) { best_d2 = d2; best = &site; }
+                        }
+                        if (best != nullptr) {
+                            const auto roar = Luminumbra::Client::AudioPropagationSystem::ComputeWaterfallRoar(
+                                best->crest, best->drop_height, pc);
+                            if (roar.audible) {
+                                if (!s_roarOn) { audioManager->PlayAmbientLoop("waterfall_roar", best->crest, 400.0f); s_roarOn = true; }
+                                audioManager->SetAmbientVolume("waterfall_roar", roar.volume);
+                            } else if (s_roarOn) {
+                                audioManager->StopAmbientLoop("waterfall_roar"); s_roarOn = false;
+                            }
+                        } else if (s_roarOn) {
+                            audioManager->StopAmbientLoop("waterfall_roar"); s_roarOn = false;
+                        }
+                    }
                 }
                 // Wind GUSTS: the wind bed never stops, but its volume breathes with the live
                 // wind-field magnitude so a gust is actually felt (calm still whispers).
@@ -4288,6 +4373,18 @@ int main(int argc, char* argv[]) {
                     const float windMag = std::sqrt(wsmp.wind.x * wsmp.wind.x + wsmp.wind.y * wsmp.wind.y);
                     const float swell = 0.5f + std::min(windMag / 6.0f, 1.0f) * 1.1f;  // [0.5 .. 1.6]
                     audioManager->SetAmbientVolume("ambient_wind", swell);
+                }
+                // AUDIO-09: biome reverb base (idempotent), then the weather reverb
+                // shift — order matters: UpdateAtmosphere layers on the last base.
+                if (auto* wsr = gameSession->GetWorldSystem()) {
+                    const auto& br = wsr->BiomeReverbAt(pc.x, pc.z);
+                    envAudio->ApplyBiomeReverb(br.preset, br.wet, br.dry, br.decay);
+                }
+                if (auto* weather3 = gameSession->GetWeatherSystem()) {
+                    const auto smp = weather3->SampleAt(Luminumbra::Vec3(pc.x, pc.y, pc.z));
+                    // WeatherSample.wind is a Vec2 in the world XZ plane: .y -> z.
+                    envAudio->UpdateAtmosphere(glm::vec3(smp.wind.x, 0.0f, smp.wind.y),
+                                               smp.precip_intensity, smp.storm_intensity);
                 }
             }
             // Occasional call from the nearest LIVE creature (<50 m) so the world has voices.
@@ -4345,7 +4442,7 @@ int main(int argc, char* argv[]) {
                 if (best != entt::null) audioManager->PlayOneShot("creature_sleep", bestPos);
                 else s_sleepTimer = 4.0f;  // none asleep nearby -> re-check sooner
             }
-            // Spec 011 Phase G — per-action audio: the nearest GRAZING creature (<20 m) emits a
+            // Spec 011 Phase G â€” per-action audio: the nearest GRAZING creature (<20 m) emits a
             // soft feed/chew every ~5 s (a drink/sip instead if it is feeding right at the water's
             // edge). last_action == Graze (CreatureAction::Graze = 1). Render-only.
             if (s_feedTimer >= 5.0f) {
@@ -4374,7 +4471,7 @@ int main(int argc, char* argv[]) {
                     s_feedTimer = 3.0f;  // nobody grazing nearby -> re-check sooner
                 }
             }
-            // Spec 011 Phase G — colony bed: a faint chitter from the nearest forager NEST (<25 m)
+            // Spec 011 Phase G â€” colony bed: a faint chitter from the nearest forager NEST (<25 m)
             // every ~5 s, so an active ant colony reads as alive. Keyed on the colony's shared home
             // cell (every ForagerComponent carries it). Render-only.
             if (s_colonyTimer >= 5.0f) {
@@ -4439,7 +4536,7 @@ int main(int argc, char* argv[]) {
                     }
                 }
             }
-            // Day/night: a soft cue as the sun crosses the horizon — brightening at dawn, settling
+            // Day/night: a soft cue as the sun crosses the horizon â€” brightening at dawn, settling
             // at dusk. Sun elevation = -sun_direction().y (the vector points away from the sun).
             // The state only flips once clearly past the horizon, so it fires once per transition.
             {
@@ -4449,8 +4546,8 @@ int main(int argc, char* argv[]) {
                 if (s_sunUp == -1) {
                     s_sunUp = up;
                 } else if (up != s_sunUp) {
-                    if (up == 1 && elev > 0.03f)       { audioManager->PlayOneShot2D("time_dawn"); audioManager->PlayMusic("music_exploration"); s_sunUp = 1; }
-                    else if (up == 0 && elev < -0.03f) { audioManager->PlayOneShot2D("time_dusk"); audioManager->PlayMusic("music_dusk"); s_sunUp = 0; }
+                    if (up == 1 && elev > 0.03f)       { audioManager->PlayOneShot2D("time_dawn", Luminumbra::Client::BusId::Events); audioManager->PlayMusic("music_exploration"); s_sunUp = 1; }
+                    else if (up == 0 && elev < -0.03f) { audioManager->PlayOneShot2D("time_dusk", Luminumbra::Client::BusId::Events); audioManager->PlayMusic("music_dusk"); s_sunUp = 0; }
                 }
             }
         }
@@ -4462,7 +4559,7 @@ int main(int argc, char* argv[]) {
             auto& freg = gameSession->GetRegistry();
             auto* fws = gameSession->GetWorldSystem();
             // RENDER-01 (spec 021): headless automation skips the spec-013 one-time
-            // flourishes entirely — captures want the world + shaders, not spelunking
+            // flourishes entirely â€” captures want the world + shaders, not spelunking
             // cues (and the crystal point lights would move visual baselines).
             // --debug-goto cave still lights its framed cave (below).
             const bool headless_automation =
@@ -4472,7 +4569,7 @@ int main(int argc, char* argv[]) {
             // RENDER-19 (spec 021): dispatch the spec-013 scans (doline locate + 25
             // cave anchors + hero call) as ONE background job batch instead of the
             // old frame-2 inline walk (6m25s main-thread in debug, est. 10-25 s
-            // release). Pure deterministic SDF reads — the same sampling the meshing
+            // release). Pure deterministic SDF reads â€” the same sampling the meshing
             // workers already run concurrently. Process-once, matching the old
             // statics' behavior. Every world transition drains the handle first
             // (DrainSpec13WorldScan), so the raw fws capture can never dangle.
@@ -4517,7 +4614,7 @@ int main(int argc, char* argv[]) {
                     "Spec-013 world scan dispatched to background jobs (doline + 25 cave anchors + hero)");
             }
 
-            // Debug suite: --debug-goto cave|doline|spawn — deterministically frame a feature so
+            // Debug suite: --debug-goto cave|doline|spawn â€” deterministically frame a feature so
             // captures (--timelapse/--frame-scan) can SEE it (the gap that blocked cave shots).
             // Sets the fixed camera; the streaming anchor follows it (far-camera bug already fixed).
             static bool s_debugGotoDone = false;
@@ -4556,12 +4653,12 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            // Spec 013: LUMIN CRYSTALS — emissive point lights that light dark caves (so you can
+            // Spec 013: LUMIN CRYSTALS â€” emissive point lights that light dark caves (so you can
             // see + photograph underground without sunlight) and double as photo subjects.
             // RENDER-19: consume the background scan when the batch lands (non-blocking
             // poll of the JobHandle counter). Dedup runs here in the ORIGINAL sequential
             // anchor order with the same 16-cap, so placement is byte-identical to the
-            // old inline walk. Client-only point lights (never hashed) — no re-pin.
+            // old inline walk. Client-only point lights (never hashed) â€” no re-pin.
             if (s_spec13Scan && s_spec13Scan->world == fws &&
                 (!s_spec13ScanHandle.counter ||
                  s_spec13ScanHandle.counter->load(std::memory_order_acquire) <= 0)) {
@@ -4576,7 +4673,7 @@ int main(int argc, char* argv[]) {
                     LUMINUMBRA_CORE_INFO("No doline found within 500m of spawn (surface breaks off or sparse).");
                 }
                 // Crystal scatter: the roof-checked enclosed caverns found near each anchor
-                // (cave bug B fix preserved — no floating crystals in open dips).
+                // (cave bug B fix preserved â€” no floating crystals in open dips).
                 constexpr float kMinSepSq = 20.0f * 20.0f;  // de-dup nearby hits
                 int placed = 0;
                 float firstX = 0.0f, firstY = 0.0f, firstZ = 0.0f;
@@ -4767,7 +4864,7 @@ int main(int argc, char* argv[]) {
                     g_world_render_data_initialized = true;
 
                     audioManager->StopMusic();
-                    audioManager->PlayOneShot2D("ui_world_loaded"); // Play a sound on completion
+                    audioManager->PlayOneShot2D("ui_world_loaded", Luminumbra::Client::BusId::Ui); // Play a sound on completion
                     // Start the constant ambient soundscape (zen atmosphere): a gentle forest-rustle
                     // bed + soft birdsong, centred at spawn with a huge radius so it stays audible as
                     // the player roams (the listener follows the player each frame). Volumes in the bank.
@@ -4775,7 +4872,8 @@ int main(int argc, char* argv[]) {
                         const auto& sp = gameSession->GetMetadata().spawnPoint;
                         const glm::vec3 ambPos(sp.x, sp.y, sp.z);
                         audioManager->PlayAmbientLoop("ambient_forest", ambPos, 1.0e6f);
-                        audioManager->PlayAmbientLoop("ambient_birds", ambPos, 1.0e6f);
+                        // AUDIO-07: the birdsong bed is now OWNED by EnvironmentalAudioSystem
+                        // (day-gated + crossfaded with the night bed) — no 24/7 birds.
                         audioManager->PlayAmbientLoop("ambient_wind", ambPos, 1.0e6f);
                     }
                     // Under the ambient bed, a soft in-game music bed picked by the time of day
@@ -4783,6 +4881,9 @@ int main(int argc, char* argv[]) {
                     // horizon crossings. PlayMusic is a no-op if that track is already playing.
                     audioManager->PlayMusic(-renderPipeline.sun_direction().y > 0.0f
                                                 ? "music_exploration" : "music_dusk");
+                    // AUDIO-07: first-feed SNAP — a midnight load starts on the night bed
+                    // instead of crossfading from the day default.
+                    envAudio->SetSunElevation(-renderPipeline.sun_direction().y);
                     if (g_loading_visualizer) {
                         g_loading_visualizer->EndVisualization();
                     }
@@ -5796,7 +5897,7 @@ int main(int argc, char* argv[]) {
                     // TEMP diag (--profile-fly): drive the player FORWARD at a constant noclip speed in
                     // normal-play mode so the SLOWFRAME logger captures a representative MOVING cost
                     // without the time-based scenario camera's teleport-under-load feedback. deltaTime is
-                    // clamped (<=50ms) so per-frame movement stays bounded even on a slow frame → no
+                    // clamped (<=50ms) so per-frame movement stays bounded even on a slow frame â†’ no
                     // teleport/active-set explosion. A slow yaw drift sweeps varied terrain (rivers/biomes).
                     // Self-exits after g_profile_fly_seconds. UpdateNoclip directly advances position
                     // (bypasses physics); streaming anchor = GetPosition() follows.
@@ -5859,7 +5960,7 @@ int main(int argc, char* argv[]) {
                     g_timelapse_settle >= kTimelapseSettleFrames) {
                     auto* ws = gameSession->GetWorldSystem();
                     if (!g_drain_state.init) {
-                        // Anchor on a real SHORELINE — deep water beside a tall DRY bank — so cutting the
+                        // Anchor on a real SHORELINE â€” deep water beside a tall DRY bank â€” so cutting the
                         // bank floods the dry side (verified by the rising inland-volume probe below).
                         Luminumbra::Vec3 wp; float tlx = 0.0f, tlz = 1.0f, wsurf = 0.0f, bank = 0.0f;
                         if (ws->debug_find_shoreline(wp, tlx, tlz, wsurf, bank)) {
@@ -5946,7 +6047,7 @@ int main(int argc, char* argv[]) {
                 _rb_stream_t0 = std::chrono::steady_clock::now(); // spec 004
                 if (gameSession->GetWorldSystem() && (g_playerController || g_camera)) {
                     // Anchor world streaming on the CAMERA (not the spawn-bound player) whenever a
-                    // fixed/scenario camera drives the view — otherwise a --cam-pos far from spawn
+                    // fixed/scenario camera drives the view â€” otherwise a --cam-pos far from spawn
                     // streams chunks around the player at spawn and the camera sees an unloaded,
                     // unlit void (the "far-camera renders black" bug). g_fixed_cam covers the
                     // capture/showcase path; the scenario smokes keep their existing behaviour.
@@ -5985,7 +6086,7 @@ int main(int argc, char* argv[]) {
                 // Grass material id; per-mesh bark/leaf texturing is a follow-up
                 // via the model-texture (skinned-UV) path.
                 // RENDER-20 (spec 021): the placement loops (trees/rocks/bushes +
-                // the ambient-wildlife herd — together ~30 s of main-thread
+                // the ambient-wildlife herd â€” together ~30 s of main-thread
                 // terrain/water/biome probing in a debug build) moved VERBATIM to
                 // WorldDressing.cpp and run as ONE background JobSystem job (the
                 // RENDER-19 Spec13WorldScan pattern): dispatch once on the first
@@ -6010,7 +6111,7 @@ int main(int argc, char* argv[]) {
                         const Luminumbra::Vec3 anchor = gameSession->GetMetadata().spawnPoint;
                         // PROGRAMMATIC TREES/ROCKS/BUSHES, NO MODEL (owner): build the
                         // procedural palettes once (into the instanced static-mesh cache)
-                        // BEFORE dispatch — GL-side + cheap, and the palette COUNTS pin
+                        // BEFORE dispatch â€” GL-side + cheap, and the palette COUNTS pin
                         // the placements' palette-index modulo. None of the builders
                         // touches the scatter frand() stream, so hoisting the rock/bush
                         // builds ahead of their loops keeps the seeded layout
@@ -6034,12 +6135,12 @@ int main(int argc, char* argv[]) {
                         // Capture/scenario/timelapse runs must see the FULL dressing in
                         // their first settled frames (visual sweep / frame-scan / thumbs
                         // capture right after scenario_ready), so they compute + consume
-                        // synchronously — the placements are byte-identical either way.
+                        // synchronously â€” the placements are byte-identical either way.
                         pending->synchronous =
                             scenario_config.active() || g_frame_scan_active || g_scene_active ||
                             g_play_paths || !g_render_benchmark_path.empty() ||
                             !g_survey_dir.empty() || g_timelapse_frames > 0 || g_ui_thumbs > 0;
-                        // One-time skinned rig load (file IO — never the slow part). The
+                        // One-time skinned rig load (file IO â€” never the slow part). The
                         // wildlife placements are only computed when the rig is usable.
                         if (interactive_play && g_creatureSpecies.size() > 0) {
                             anim::SkinnedMeshAsset masset;
@@ -6077,7 +6178,7 @@ int main(int argc, char* argv[]) {
                             pending->prey_speed = spawnCfg ? g_systemConfig.param(SP::SpawnPreySpeed, 2.6f) : 2.6f;
                             pending->init_hunger = spawnCfg ? g_systemConfig.param(SP::SpawnInitialHunger, 0.2f) : 0.2f;
                         }
-                        // The EXACT queries the inline loops made — pure, thread-safe
+                        // The EXACT queries the inline loops made â€” pure, thread-safe
                         // worldgen reads (the meshing workers run the same sampling
                         // concurrently), bound to the CURRENT world system. The drain
                         // contract (DrainWorldDressing before every world transition)
@@ -6137,8 +6238,8 @@ int main(int argc, char* argv[]) {
                         const std::size_t kRockBudget = pend.synchronous ? kNoBudget : 4000;   // <=4 frames at cap
                         const std::size_t kBushBudget = pend.synchronous ? kNoBudget : 6000;   // <=7 frames at cap
                         const std::size_t kCreatureBudget = pend.synchronous ? kNoBudget : 64; // herd is ~12
-                        // Trees: TWO instanced static-mesh entities per placement — bark
-                        // (soil/brown) + leaf (grass/green) — so the existing instanced +
+                        // Trees: TWO instanced static-mesh entities per placement â€” bark
+                        // (soil/brown) + leaf (grass/green) â€” so the existing instanced +
                         // Track-B LOD + frustum-cull path renders the vast forest cheaply.
                         // I8 full UV-texture lane: each part's bark/leaf texture is bound
                         // by GBufferPass via data/models/trees/tree_textures.json.
@@ -6187,7 +6288,7 @@ int main(int argc, char* argv[]) {
                                 sm.materialId = 1u; // Stone -> stone triplanar texture
                             }
                             // Legacy logged only when the rock palette existed (the whole
-                            // loop was skipped otherwise) — preserve that.
+                            // loop was skipped otherwise) â€” preserve that.
                             if (!pend.rocks_logged && pend.rocks_done == pend.result.rocks.size() &&
                                 g_rockPaletteCount > 0) {
                                 pend.rocks_logged = true;
@@ -6196,7 +6297,7 @@ int main(int argc, char* argv[]) {
                             }
                         }
                         // SHRUB/BUSH LAYER (spec 003 FR-A2): the undergrowth complement
-                        // of the rocks — bushes on vegetated flats/gentle slopes, rocks
+                        // of the rocks â€” bushes on vegetated flats/gentle slopes, rocks
                         // on scree (the biome vegetation gating ran in the computation).
                         {
                             std::size_t budget = kBushBudget;
@@ -6221,13 +6322,13 @@ int main(int argc, char* argv[]) {
 
                         // LIVING WORLD consume: replay the wildlife placement vector in
                         // order. Each is the grovestrider rig recolored by its species
-                        // base_color and scaled by its genome build — GameSession's
+                        // base_color and scaled by its genome build â€” GameSession's
                         // SamplePosesOnTick animates them, the CreatureBrain wanders them
                         // (grounded via a Jolt avatar like the timelapse herd), and
                         // GatherPhotoSubjects sees them so the codex fills in normal
                         // play. Water-cell candidates became capped drinking-spot
                         // WaterHoles in the computation. The EnTT emplaces + physics
-                        // avatar creation here are main-thread-only — that is why the
+                        // avatar creation here are main-thread-only â€” that is why the
                         // consume (not the computation) stays on this thread.
                         if (pend.wildlife_ok) {
                             auto* phys = gameSession->GetPhysicsSystem();
@@ -6283,6 +6384,33 @@ int main(int argc, char* argv[]) {
                                 // species can be nocturnal without a client recompile.
                                 reg.emplace<Luminumbra::Components::CircadianComponent>(e).nocturnal =
                                     sp.nocturnal ? 1u : 0u;
+                                // INSTINCT-07 (Wave G I1): the built-but-unstamped behavior
+                                // components join the CLIENT ambient roster (never feeds server
+                                // hashes — this registry is client decoration): prey herds get
+                                // ALARM vigilance (collective flee), predators get PACK-HUNTER
+                                // flank coordination; everyone claims a TERRITORY home range at
+                                // its spawn point and carries the MIGRATORY seasonal-drive slot.
+                                // Mortal/Decay lifecycle prep: a long seeded lifespan so ambient
+                                // populations turn over slowly (the calm-demo's fast lifecycle
+                                // stays demo-only).
+                                if (sp.predator) {
+                                    reg.emplace<Luminumbra::Components::PackHunterComponent>(e);
+                                } else {
+                                    reg.emplace<Luminumbra::Components::AlarmComponent>(e);
+                                }
+                                {
+                                    auto& terr_home = reg.emplace<Luminumbra::Components::TerritoryComponent>(e);
+                                    terr_home.home_x = c.position.x;
+                                    terr_home.home_z = c.position.z;
+                                    terr_home.radius = sp.predator ? 60.0f : 35.0f;
+                                    terr_home.established = 1;
+                                    reg.emplace<Luminumbra::Components::MigratoryComponent>(e);
+                                    auto& mort = reg.emplace<Luminumbra::Components::MortalComponent>(e);
+                                    const std::uint32_t jit =
+                                        static_cast<std::uint32_t>(entt::to_integral(e) * 2654435761u) % 36000u;
+                                    mort.lifespan_ticks = 108000u + jit; // ~60-80 min @30Hz ambient turnover
+                                    reg.emplace<Luminumbra::Components::DecayComponent>(e).decay_duration = 900u;
+                                }
                                 auto& pl = reg.emplace<anim::AnimationPlayerComponent>(e);
                                 pl.skeleton = &s_wildlife_skeleton;
                                 pl.clip = &s_wildlife_idle;
@@ -6296,7 +6424,7 @@ int main(int argc, char* argv[]) {
                                 ++pend.creatures_spawned;
                             }
                         }
-                        // One-shot TAIL — runs exactly once, when every lane has fully
+                        // One-shot TAIL â€” runs exactly once, when every lane has fully
                         // drained (the synchronous path reaches it on this same frame,
                         // matching the old inline block's single-frame bring-up).
                         const bool dressing_complete =
@@ -6431,8 +6559,8 @@ int main(int argc, char* argv[]) {
                                     LUMINUMBRA_CORE_INFO("Plant unification: composited {} sim plants over the scatter", simPlants);
                             }
                             // I9-ECO ecology demo: spawn a hungry predator above a row of prey, then
-                            // let the live CreatureBrain tick (GameSession) move them — predator hunts
-                            // toward, prey flee away — and render them as moving octahedron markers via
+                            // let the live CreatureBrain tick (GameSession) move them â€” predator hunts
+                            // toward, prey flee away â€” and render them as moving octahedron markers via
                             // the procgen pass (baked per-frame in the loop). Render/demo-only spawn.
                             if (g_timelapse_creatures) {
                                 // TRUE PHYSICS: each creature gets a deterministic Jolt avatar body
@@ -6574,7 +6702,7 @@ int main(int argc, char* argv[]) {
                     // The anchor position is FIXED across the whole matrix (only the
                     // camera orientation changes per cell), so the world only needs to
                     // stream ONCE. We stream for a bounded warmup, then skip the
-                    // expensive per-frame world update and just re-render — the same
+                    // expensive per-frame world update and just re-render â€” the same
                     // settled geometry is reused for every subsequent cell.
                     int sweep_stream_frames = 0;
                     deps.render_and_read =
@@ -6612,6 +6740,133 @@ int main(int argc, char* argv[]) {
                     glfwSetWindowShouldClose(window, true);
                 }
                 if (gameSession->GetWorldSystem() && g_camera) {
+                    // ATMO-09 + ATMO-10 (Wave G R1.2/R1.3): LIVE PLAY runs on the
+                    // authoritative sim tick â€” season AND time-of-day become pure
+                    // functions of it (no more frozen season-neutral tick 0; no more
+                    // wall-clock day drift). Written FIRST each frame as the default:
+                    // every scenario/scene/sweep/photo pin below runs AFTER this and
+                    // overwrites it, so all capture paths keep their exact pins.
+                    {
+                        const std::uint64_t sim_tick = gameSession->GetSimulationTickCount();
+                        renderPipeline.set_season_tick(sim_tick);
+                        renderPipeline.set_time_of_day_tick(sim_tick);
+                        // ATMO-07 (R1.4): the LIVE weather bridge â€” sample the sim
+                        // weather at the camera and drive the overlay + cloud layer
+                        // through the PURE WeatherRenderBridge mapping, behind
+                        // render.live_weather (default OFF until the R1.X re-bless).
+                        // Scenario/scene weather pins below override by frame order.
+                        if (g_systemConfig.enabled(luminumbra::core::SysKey::RenderLiveWeather)) {
+                            if (const auto* live_weather = gameSession->GetWeatherSystem()) {
+                                const Luminumbra::Vec3 cam_pos(
+                                    g_camera->Position.x, g_camera->Position.y, g_camera->Position.z);
+                                const auto wsample = live_weather->SampleAt(cam_pos);
+                                renderPipeline.set_weather_state(
+                                    Luminumbra::Rendering::WeatherBridge::BuildWeatherRenderState(wsample));
+                                renderPipeline.set_cloud_state(
+                                    Luminumbra::Rendering::WeatherBridge::BuildCloudRenderState(wsample, sim_tick));
+                            }
+                        }
+                        // ATMO-08 (R1.5): consume the sim StrikeSchedule in LIVE play — a
+                        // scheduled strike renders a real world-space bolt through the
+                        // ACTUAL camera view-proj (unlike the scenario's screen-anchored
+                        // capture aid), pulses by magnitude with distance attenuation,
+                        // and queues the thunder cue (distance + tick) for AUDIO-08.
+                        // Same flag as the weather bridge; reads the schedule, writes
+                        // nothing back (F2).
+                        if (g_systemConfig.enabled(luminumbra::core::SysKey::RenderLiveWeather)) {
+                            if (const auto* lweather = gameSession->GetWeatherSystem()) {
+                                static std::uint64_t s_last_strike_tick_done = 0;
+                                static int s_bolt_frames_left = 0;
+                                static Luminumbra::Rendering::LightningRenderState s_live_bolt;
+                                for (const auto& strike : lweather->StrikeSchedule()) {
+                                    if (strike.strike_tick > sim_tick) continue;          // not due yet
+                                    if (strike.strike_tick + 2 < sim_tick) continue;      // window passed
+                                    if (strike.strike_tick <= s_last_strike_tick_done && s_last_strike_tick_done != 0) continue;
+                                    s_last_strike_tick_done = strike.strike_tick;
+                                    auto* lws = gameSession->GetWorldSystem();
+                                    const float gy = lws ? lws->GetTerrainHeightAt(strike.world_x, strike.world_z) : 0.0f;
+                                    const auto bolt = Luminumbra::Rendering::BuildLightningBolt(
+                                        strike.world_x, gy, strike.world_z, strike.magnitude,
+                                        (static_cast<std::uint64_t>(strike.storm_salt) << 32) ^ strike.strike_tick);
+                                    int fbw = 0, fbh = 0;
+                                    glfwGetFramebufferSize(window, &fbw, &fbh);
+                                    const float aspect = (fbh > 0) ? static_cast<float>(fbw) / static_cast<float>(fbh) : 1.0f;
+                                    const glm::mat4 vp =
+                                        glm::perspective(glm::radians(g_camera->Zoom), aspect, 0.1f, 10000.0f) *
+                                        g_camera->GetViewMatrix();
+                                    s_live_bolt = {};
+                                    const auto project = [&](const glm::vec3& wp) -> glm::vec2 {
+                                        const glm::vec4 clip = vp * glm::vec4(wp, 1.0f);
+                                        if (clip.w <= 0.0f) return glm::vec2(-3.0f, -3.0f); // behind: pen-up
+                                        return glm::vec2(clip.x / clip.w, clip.y / clip.w);
+                                    };
+                                    const auto push_stroke = [&](const std::vector<glm::vec3>& stroke) {
+                                        if (!s_live_bolt.bolt_points_ndc.empty()) {
+                                            s_live_bolt.bolt_points_ndc.emplace_back(-3.0f, -3.0f); // pen-up
+                                        }
+                                        for (const glm::vec3& wp : stroke) {
+                                            s_live_bolt.bolt_points_ndc.push_back(project(wp));
+                                        }
+                                    };
+                                    push_stroke(bolt.main_channel);
+                                    for (const auto& br : bolt.branches) { push_stroke(br); }
+                                    const glm::vec3 ground(strike.world_x, gy, strike.world_z);
+                                    const float dist = glm::length(ground - g_camera->Position);
+                                    s_live_bolt.active = true;
+                                    // Magnitude-scaled flash, attenuated with distance (a far
+                                    // strike lights the sky, a near one lights the scene).
+                                    s_live_bolt.pulse_intensity =
+                                        0.22f * std::clamp(strike.magnitude, 0.2f, 1.0f) /
+                                        (1.0f + dist / 400.0f);
+                                    s_live_bolt.bolt_width_ndc = 0.010f;
+                                    s_live_bolt.bolt_glow_ndc = 0.034f;
+                                    s_live_bolt.strike_ndc = project(ground);
+                                    s_bolt_frames_left = 3; // a few frames of flash
+                                    // AUDIO-08 hook: queue the physically-delayed thunder cue.
+                                    g_pendingThunder.push_back({strike.strike_tick, glfwGetTime(),
+                                                                dist, strike.magnitude});
+                                }
+                                if (s_bolt_frames_left > 0) {
+                                    renderPipeline.set_lightning_state(s_live_bolt);
+                                    if (--s_bolt_frames_left == 0) {
+                                        s_live_bolt = {};
+                                        renderPipeline.set_lightning_state(s_live_bolt); // clear
+                                    }
+                                }
+                            }
+                        }
+                        // ATMO-14 (S1.3): render-only snow ground cover — accumulate from
+                        // live Snow-category precipitation, melt by sun elevation
+                        // (SnowCoverModel.h), behind render.snow_cover (default OFF).
+                        if (g_systemConfig.enabled(luminumbra::core::SysKey::RenderSnowCover)) {
+                            if (const auto* snow_weather = gameSession->GetWeatherSystem()) {
+                                static Luminumbra::Rendering::SnowCover::State s_snow;
+                                const auto ssample = snow_weather->SampleAt(Luminumbra::Vec3(
+                                    g_camera->Position.x, g_camera->Position.y, g_camera->Position.z));
+                                const float snowing =
+                                    (ssample.category == Luminumbra::Systems::WeatherCategory::Snow)
+                                        ? ssample.precip_intensity : 0.0f;
+                                const float sun_up = std::max(-renderPipeline.sun_direction().y, 0.0f);
+                                Luminumbra::Rendering::SnowCover::Advance(
+                                    s_snow, snowing, sun_up, static_cast<float>(deltaTime));
+                                renderPipeline.set_snow_cover(s_snow.cover01);
+                            }
+                        }
+                        // AETHER-04 (R1.6): the never-landed A1d 2/2 — upload the sim's
+                        // deterministic aether grid to the render emissive tap (one-way;
+                        // the existing AetherEmissiveTap GPU test proves the ON path),
+                        // behind render.aether_tap (default OFF until the R1.X re-bless).
+                        if (g_systemConfig.enabled(luminumbra::core::SysKey::RenderAetherTap)) {
+                            if (const auto* aether = gameSession->GetAetherFieldSystem()) {
+                                const auto& agrid = aether->grid();
+                                renderPipeline.update_aether_field(
+                                    agrid.cells(),
+                                    static_cast<float>(agrid.origin_cell_x()) * agrid.cell_size_m(),
+                                    static_cast<float>(agrid.origin_cell_z()) * agrid.cell_size_m(),
+                                    agrid.extent_cells(), agrid.cell_size_m());
+                            }
+                        }
+                    }
                     if (scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() || scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() || scenario_config.weather_visual_smoke() || scenario_config.cloud_shadow_smoke() || scenario_config.precipitation_smoke() || scenario_config.lod_seam_arrival_smoke() || scenario_config.player_view_smoke() || scenario_config.farlod_horizon_smoke() || scenario_config.skinned_mesh_visual_smoke() || scenario_config.creature_slice_smoke()) {
                         // time_of_day 0 is noon (sun elevation = cos(2*pi*t));
                         // 0.04 keeps the sun near its zenith for stable captures.
@@ -6722,7 +6977,7 @@ int main(int argc, char* argv[]) {
                             if (!s_foliage_loaded) {
                                 foliage->load_scatter_set(root_dir / "data/common/foliage/scatter_set.json");
                                 // Grass overhaul: concentrate the instance budget into a DENSE NEAR carpet
-                                // (detail-near, texture-far — the AAA approach) instead of a thin scatter
+                                // (detail-near, texture-far â€” the AAA approach) instead of a thin scatter
                                 // spread to 210 m. The global instance cap redistributes nearest-first, so a
                                 // tighter fade makes the near field a believable carpet instead of sparse
                                 // lit slivers over bare ground. RENDER-ONLY.
@@ -6731,7 +6986,7 @@ int main(int argc, char* argv[]) {
                                 s_foliage_loaded = true;
                             }
                             // spec 004: skip the foliage CPU readback (a ~5 ms sync
-                            // stall — see FoliagePass::set_readback_enabled) in
+                            // stall â€” see FoliagePass::set_readback_enabled) in
                             // scenario-LESS runs (normal play + the budget benchmark),
                             // which draw straight from the SSBO. Any active scenario
                             // (every gate, incl. FoliageInstancing's foliage_visual_smoke)
@@ -6745,15 +7000,15 @@ int main(int argc, char* argv[]) {
                             }
                             foliage->set_wind(wind_xz);
                             Luminumbra::Client::ScenarioHarness::FoliageScatterContext fol_ctx{fol_ws};
-                            const auto _rb_scatter_t0 = std::chrono::steady_clock::now(); // §12: scatter-build cost
-                            // spec 004 §12: the scatter build (a GetTerrainHeightAt + BiomeIdAt per
+                            const auto _rb_scatter_t0 = std::chrono::steady_clock::now(); // Â§12: scatter-build cost
+                            // spec 004 Â§12: the scatter build (a GetTerrainHeightAt + BiomeIdAt per
                             // renderable chunk) was the frame's BIGGEST CPU cost (~5.3 ms) yet it's a
-                            // pure function of the renderable-chunk SET — independent of camera/time.
+                            // pure function of the renderable-chunk SET â€” independent of camera/time.
                             // Cache it; rebuild only when that set changes (cheap coord-XOR signature
                             // vs the expensive per-chunk terrain sampling). rebuild_instances still runs
                             // every frame (camera LOD/fade), so foliage stays camera-responsive.
                             // Gated OFF while any scenario is active so every gate rebuilds byte-exact
-                            // (mirrors the readback gating above) — zero gate/determinism impact.
+                            // (mirrors the readback gating above) â€” zero gate/determinism impact.
                             static std::vector<Luminumbra::Rendering::FoliagePass::ChunkScatter> s_cached_scatter;
                             static std::uint64_t s_cached_scatter_sig = ~0ull;
                             const auto& fol_renderable = fol_ws->get_renderable_chunks();
@@ -6826,7 +7081,7 @@ int main(int argc, char* argv[]) {
                             const std::vector<Luminumbra::Rendering::FoliagePass::ChunkScatter>& chunk_scatter =
                                 s_cached_scatter;
                             rb_scatter_ms = std::chrono::duration<double, std::milli>(
-                                std::chrono::steady_clock::now() - _rb_scatter_t0).count(); // §12
+                                std::chrono::steady_clock::now() - _rb_scatter_t0).count(); // Â§12
                             const auto _rb_fol_t0 = std::chrono::steady_clock::now(); // spec 004
                             foliage->rebuild_instances(
                                 chunk_scatter,
@@ -6946,7 +7201,7 @@ int main(int argc, char* argv[]) {
                                 if (g_render_parity_pass == "ssao" && g_camera)
                                     parity_ok = renderPipeline.capture_ssao_parity(g_render_parity_dir, *g_camera);
                                 else if (g_render_parity_pass == "frame" && g_camera)
-                                    // WAVE-F F1: whole-frame A/B — dispatch the settled
+                                    // WAVE-F F1: whole-frame A/B â€” dispatch the settled
                                     // prepared frame twice, in-process FLIP must be 0.0.
                                     parity_ok = renderPipeline.capture_frame_parity(*g_camera, g_render_parity_dir);
                                 else
@@ -6985,7 +7240,7 @@ int main(int argc, char* argv[]) {
 
                                     // Frame-HEALTH verdict on the SAME settled frame (reuses px; render-only,
                                     // no sim). Auto-flags black/unlit/blown/NaN so a broken frame is caught
-                                    // WITHOUT a human eyeballing the PPM — the 'detect what's wrong' capability.
+                                    // WITHOUT a human eyeballing the PPM â€” the 'detect what's wrong' capability.
                                     std::vector<float> pos_rgb16f;
                                     std::vector<unsigned char> albedo_rgb8;
                                     const auto& gb_h = renderPipeline.gbuffer();
@@ -7122,7 +7377,7 @@ int main(int argc, char* argv[]) {
 
                     // --- Spec 009 Phase 2: player TERRAFORM verbs (R dig / T fill) ---
                     // Carve (R) or raise (T) the voxel terrain at the player's aim point via the
-                    // deterministic SHIELD_WorldSystem::EditTerrainVoxel — it edits sdf_data, remeshes,
+                    // deterministic SHIELD_WorldSystem::EditTerrainVoxel â€” it edits sdf_data, remeshes,
                     // rebuilds colliders, and couples the water bed so a dig DRAINS a river/lake and a
                     // fill DAMS it. Edge-triggered (one carve per press). Interactive-only guard keeps it
                     // out of scenario/gate runs, so determinism is unaffected (gates never press R/T).
@@ -7268,7 +7523,7 @@ int main(int argc, char* argv[]) {
                                 // Everything maps to sound: a newly-completed goal rings the
                                 // success chime once (edge-triggered on the completed count).
                                 static std::uint32_t s_objDoneLast = 0;
-                                if (done > s_objDoneLast && audioManager) audioManager->PlayOneShot2D("objective_complete");
+                                if (done > s_objDoneLast && audioManager) audioManager->PlayOneShot2D("objective_complete", Luminumbra::Client::BusId::Events);
                                 s_objDoneLast = done;
                                 std::string title = "All goals complete";
                                 float progress = 1.0f;
@@ -7295,7 +7550,7 @@ int main(int argc, char* argv[]) {
                                 }
                             }
                         }
-                        // I9-FOLIAGE Phase 5B: farming HUD — seed/harvest inventory + the crop the
+                        // I9-FOLIAGE Phase 5B: farming HUD â€” seed/harvest inventory + the crop the
                         // player is facing (stage + quality + a harvest hint). Shown once the player
                         // is near a crop or has farmed, so it never clutters a non-farming session.
                         // Signature-gated like the objective tracker; render-only (reads sim state).
@@ -7374,7 +7629,7 @@ int main(int argc, char* argv[]) {
                             if (g_photoMode.lens.focus_distance_m < 0.2f) g_photoMode.lens.focus_distance_m = 0.2f;
                             if (g_photoMode.lens.focus_distance_m > 200.0f) g_photoMode.lens.focus_distance_m = 200.0f;
 
-                            // Spec 012 P3: manual exposure — shutter speed + ISO nudges
+                            // Spec 012 P3: manual exposure â€” shutter speed + ISO nudges
                             // applied multiplicatively in stops. + shutter stop = FASTER
                             // (less light, shorter time); + ISO stop = higher sensitivity.
                             const float shutter_stops = g_playerController->consume_shutter_speed_nudge();
@@ -7393,7 +7648,7 @@ int main(int argc, char* argv[]) {
                             // Spec 015 Pillar A (A-T07 / spec-021 rank 67): the lens now drives
                             // the RENDER exposure. Map the (just-nudged) lens EV to an exposure
                             // multiplier and push it; it OVERRIDES the analytic TOD exposure curve
-                            // (A-T05) so stopping down darkens and opening up brightens the frame —
+                            // (A-T05) so stopping down darkens and opening up brightens the frame â€”
                             // the photographer exposes for the light. Render-only; never world_hash.
                             renderPipeline.set_exposure_override(
                                 Luminumbra::Rendering::ManualExposureMultiplier(g_photoMode.lens));
@@ -7401,7 +7656,7 @@ int main(int argc, char* argv[]) {
                             // Spec 013 FR-0.1/0.2: TIME-OF-DAY scrub (K/L) + WEATHER cycle (T).
                             // On entry, seed the scrub from the live clock and HOLD it (so the
                             // per-frame auto-advance stops); each frame push the scrubbed values to
-                            // the render pipeline. Render-only — the sim is never touched.
+                            // the render pipeline. Render-only â€” the sim is never touched.
                             if (!s_photoEnvEngaged) {
                                 s_photoEnvEngaged = true;
                                 s_photoTod = renderPipeline.get_time_of_day();
@@ -7544,7 +7799,7 @@ int main(int argc, char* argv[]) {
 
                                 // Everything maps to sound: a first-time codex fill rings the
                                 // discovery chime at the moment of capture (2D, UI-felt).
-                                if (is_discovery && audioManager) audioManager->PlayOneShot2D("discovery");
+                                if (is_discovery && audioManager) audioManager->PlayOneShot2D("discovery", Luminumbra::Client::BusId::Events);
 
                                 // Persist the framebuffer (PPM) + a verdict sidecar.
                                 std::error_code _photo_ec;
@@ -8271,7 +8526,7 @@ int main(int argc, char* argv[]) {
                                 // (nominal full-cover count) to the new ~8x denser scatter
                                 // so measured_density still lands on the biome [0,1] scale,
                                 // and keep the loose band. DELIBERATE re-bless (logged).
-                                // spec 004 re-bless (2026-06-21): the prior 32768 under-shot —
+                                // spec 004 re-bless (2026-06-21): the prior 32768 under-shot â€”
                                 // the dense flat_lands scatter emits ~70k in-ring instances, so
                                 // measured saturated at 1.0 (gate off-band 1.0 vs biome 0.3).
                                 // Calibrate so measured ~= biome_density for the real ~70k
@@ -8279,7 +8534,7 @@ int main(int argc, char* argv[]) {
                                 // chunk-churn variance (scatter can ~2.9x before the band edge).
                                 // FOLIAGE-01 re-bless (2026-07-02): the #1b-lush density default
                                 // (FoliagePass m_density_scale 1.35) + the 48/92 m carpet fade
-                                // deliberately SATURATE the 262144 instance budget in flat_lands —
+                                // deliberately SATURATE the 262144 instance budget in flat_lands â€”
                                 // measured in-ring == kMaxInstances on the first green run after the
                                 // defoliation fix. Calibrate so measured ~= biome_density (0.3) at
                                 // saturation (262144 / 0.3); the gate separately asserts a hard
@@ -8325,7 +8580,7 @@ int main(int argc, char* argv[]) {
                             }
                             // FOLIAGE-11: never end a gate run SILENT. If the analysis was not
                             // written by the tail of the run, write an explicit REFUSAL analysis
-                            // naming why — a readback-disabled run must fail loudly (its instance
+                            // naming why â€” a readback-disabled run must fail loudly (its instance
                             // probes are vacuous: play mode publishes the kMaxInstances marker),
                             // and a zero-instance scatter must fail as EMPTY (the defoliation
                             // class), not as a mysteriously missing artifact.
@@ -8538,7 +8793,7 @@ int main(int argc, char* argv[]) {
                                 station_count - 1u,
                                 static_cast<std::size_t>(progress * static_cast<double>(station_count)));
                             // Hitch tolerance: the sweep may not advance past the
-                            // first un-captured station — a frame hitch that jumps
+                            // first un-captured station â€” a frame hitch that jumps
                             // a whole window otherwise orphans that station's
                             // capture (observed: yaw_030 skipped on heavier
                             // generation). A passed-over station captures
@@ -9226,7 +9481,7 @@ int main(int argc, char* argv[]) {
             } else { // Main Menu, etc.
                 // Spec 002 Item 1: is the create-world live preview active this frame?
                 // (world_creation.rml loaded + #preview_pane present + sized). When it
-                // is, the candidate world IS the backdrop — we render ONE world (the
+                // is, the candidate world IS the backdrop â€” we render ONE world (the
                 // candidate, full-screen) and SUPPRESS the separate menu-vista backdrop,
                 // so the create screen pays for a single render with no FBO/resize churn.
                 Luminumbra::Client::Rml_UIManager::PreviewState pv;
@@ -9241,7 +9496,7 @@ int main(int argc, char* argv[]) {
                 // shows through. render_frame draws to the back buffer BEFORE the UI pass.
                 // Suppressed while the create-world preview owns the world render.
                 if (!previewActive && g_menu_backdrop_active && g_camera && gameSession && gameSession->GetWorldSystem()) {
-                    // Gentle yaw oscillation around the lit-valley heading (95°) for a living, slow
+                    // Gentle yaw oscillation around the lit-valley heading (95Â°) for a living, slow
                     // parallax that never rotates away into dark/back-lit terrain.
                     g_menu_backdrop_yaw += deltaTime;  // phase accumulator (seconds)
                     g_camera->Yaw = 95.0f + 6.0f * std::sin(g_menu_backdrop_yaw * 0.12f);
@@ -9271,7 +9526,7 @@ int main(int argc, char* argv[]) {
                         if (sig != worldgenPreviewLastSig) {
                             worldgenPreviewLastSig = sig;
                             // Wave 0.3: prove a knob/param drag actually drives a
-                            // diorama rebuild — one line per resolved candidate sig so
+                            // diorama rebuild â€” one line per resolved candidate sig so
                             // a dragged knob is visibly firing the host rebuild branch.
                             LUMINUMBRA_CORE_INFO("Worldgen preview rebuild: sig={}", sig);
                             try {
@@ -9500,7 +9755,7 @@ int main(int argc, char* argv[]) {
                 }
                 ImGui::End();
             }
-            // I9-FOLIAGE Phase 5B: minimal crop HUD — seed/harvest inventory + the farming verb hints.
+            // I9-FOLIAGE Phase 5B: minimal crop HUD â€” seed/harvest inventory + the farming verb hints.
             if (g_imgui_enabled && currentState == GameState::IN_GAME && !scenario_config.active() &&
                 g_timelapse_frames == 0) {
                 ImGui::SetNextWindowPos(ImVec2(10.0f, 92.0f), ImGuiCond_Always);
@@ -9562,7 +9817,7 @@ int main(int argc, char* argv[]) {
                 }
                 ImGui::End();
             }
-            // Spec 015 C-1 (RENDER-15): --debug-glass-pane — stage three stained-glass
+            // Spec 015 C-1 (RENDER-15): --debug-glass-pane â€” stage three stained-glass
             // panes on the terrain near spawn (one-time). Render-only capture subject.
             if (g_debug_glass_panes && !g_glass_panes_spawned &&
                 currentState == GameState::IN_GAME && gameSession) {
@@ -9596,7 +9851,7 @@ int main(int argc, char* argv[]) {
             renderPipeline.set_auto_exposure_metered(g_auto_exposure_metered);
             // Spec 015 Pillar B (RENDER-17): push the volumetrics tier.
             renderPipeline.set_volumetric_quality(g_volumetric_quality);
-            // Spec 023 — live shader authoring (crawl F5 + walk: watcher + panel F10).
+            // Spec 023 â€” live shader authoring (crawl F5 + walk: watcher + panel F10).
             // Render-only end to end: shaders/uniforms never feed the sim or world_hash.
             if (currentState == GameState::IN_GAME && g_timelapse_frames == 0) {
                 // Crawl: reload-all requested by F5 (executed here, on the GL thread).
@@ -9632,7 +9887,7 @@ int main(int argc, char* argv[]) {
                             });
                     }
                 }
-                // Walk (FR-023-4): the dev shader panel — roster status, per-shader
+                // Walk (FR-023-4): the dev shader panel â€” roster status, per-shader
                 // reload, and LIVE uniform editing via glProgramUniform (GL 4.5 DSA).
                 // Honesty note (FR-023-5): passes re-set most uniforms per draw; an
                 // edit persists only for uniforms a pass never sets (u_dev_*).
@@ -9750,7 +10005,7 @@ int main(int argc, char* argv[]) {
                     ImGui::TextDisabled("engine time: [ slower   ] faster   \\ reset");
                     ImGui::Separator();
                     {
-                        // Window mode — applied live via ApplyWindowMode (no-op on capture-pinned runs).
+                        // Window mode â€” applied live via ApplyWindowMode (no-op on capture-pinned runs).
                         const char* modes[] = {"windowed", "borderless", "fullscreen"};
                         int cur = 1;  // default borderless
                         for (int i = 0; i < 3; ++i)
@@ -9762,7 +10017,7 @@ int main(int argc, char* argv[]) {
                         }
                     }
                     {
-                        // Resolution — applied live in windowed mode (borderless/fullscreen use
+                        // Resolution â€” applied live in windowed mode (borderless/fullscreen use
                         // the monitor's resolution); suppressed on capture-pinned gate runs.
                         const char* resos[] = {"1280x720", "1920x1080", "2560x1440",
                                                "3440x1440", "3840x1600", "3840x2160"};
@@ -9791,7 +10046,9 @@ int main(int argc, char* argv[]) {
                     if (ImGui::SliderFloat("Music volume", &us.audio_music, 0.0f, 1.0f, "%.2f")) {
                         if (audioManager) audioManager->SetMusicVolume(us.audio_music);  // applied live (music bus)
                     }
-                    ImGui::TextDisabled("sfx volume saved (needs per-shot bus routing)");
+                    if (ImGui::SliderFloat("SFX volume", &us.audio_sfx, 0.0f, 1.0f, "%.2f")) {
+                        if (audioManager) audioManager->SetSfxVolume(us.audio_sfx);  // AUDIO-05: applied live (sfx bus)
+                    }
                     if (ImGui::CollapsingHeader("Controls (keyboard)")) {
                         for (const auto& def : Luminumbra::Client::kInputActionDefs) {
                             const int idx = static_cast<int>(def.action);
@@ -9816,7 +10073,7 @@ int main(int argc, char* argv[]) {
                         const bool ok = g_systemConfig.SaveUserOverlay(path);
                         LUMINUMBRA_CORE_INFO("Settings {} ({})", ok ? "saved" : "save FAILED", path);
                     }
-                    ImGui::TextDisabled("user.* — client-only, never hashed");
+                    ImGui::TextDisabled("user.* â€” client-only, never hashed");
                 }
                 ImGui::End();
             }
@@ -9900,7 +10157,7 @@ int main(int argc, char* argv[]) {
                             gameSession->GetPhysicsSystem());
                         LUMINUMBRA_CORE_INFO("Timelapse-dig: carved {} chunk(s), crater floor y={:.1f}", n, cy);
                     }
-                    // Spec 009 money shot: after a hold that shows the water body, breach the bank — step
+                    // Spec 009 money shot: after a hold that shows the water body, breach the bank â€” step
                     // a carve sphere from the water OUT along the downhill direction, cutting a channel
                     // below the waterline so the body drains through it. The fast-forward ticks below let
                     // the solver push water out each frame; the level visibly drops.
@@ -9937,7 +10194,7 @@ int main(int argc, char* argv[]) {
                         }
                     }
                     // Spec 010 FINITE HYDROLOGY demo: Act 1 turns on rain (no perpetual source) and the
-                    // land fills from rainfall — water collects in the low spots. Act 2 turns rain OFF and
+                    // land fills from rainfall â€” water collects in the low spots. Act 2 turns rain OFF and
                     // evaporation ON: the water does NOT refill (finite) and slowly recedes. The volume
                     // trace tells the story.
                     if (g_timelapse_rain && g_drain_state.init && gameSession->GetWorldSystem()) {
@@ -9946,7 +10203,7 @@ int main(int argc, char* argv[]) {
                         const int rainOff = (g_timelapse_frames * 3) / 5;  // Act 1 rains, Act 2 dries
                         if (g_timelapse_captured == rainOff) {
                             wsr->SetWaterHydrology(/*finite=*/true, /*rain=*/0, /*evap=*/2);
-                            LUMINUMBRA_CORE_INFO("Timelapse-rain: rain OFF + evaporation ON — water is finite, it recedes (no refill)");
+                            LUMINUMBRA_CORE_INFO("Timelapse-rain: rain OFF + evaporation ON â€” water is finite, it recedes (no refill)");
                         }
                         const std::int64_t vol = wsr->debug_water_volume_near(g_drain_state.P, 14.0f);
                         LUMINUMBRA_CORE_INFO("Timelapse-rain[f{}]: basin vol = {}, LAND water = {} mm-cells",
@@ -10012,7 +10269,7 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // spec 004 Phase 0 — HONEST measurement substrate. wall = max(CPU_submit,
+        // spec 004 Phase 0 â€” HONEST measurement substrate. wall = max(CPU_submit,
         // GPU_work) + present. The old benchmark summed per-pass GPU timers ONLY
         // and was blind to the CPU-submit win this spec buys; it also ran at idle
         // clock, so it now reports NVML power+clock to prove the GPU is at boost.
@@ -10040,7 +10297,7 @@ int main(int argc, char* argv[]) {
             static double rb_cpu = 0, rb_present = 0, rb_wall = 0, rb_power = 0, rb_clock = 0;
             static double rb_cpu_prep = 0, rb_cpu_shadow = 0, rb_cpu_gbuf = 0, rb_cpu_post = 0, rb_cpu_prop = 0;
             static double rb_sim = 0, rb_stream = 0, rb_foliage_rebuild = 0, rb_ui = 0;
-            static double rb_render_call = 0, rb_poll = 0, rb_scatter = 0;  // §12 unattributed-CPU localization
+            static double rb_render_call = 0, rb_poll = 0, rb_scatter = 0;  // Â§12 unattributed-CPU localization
             static bool rb_nv_ever = false;
 
             if (rb_warm < g_render_benchmark_warmup) {
@@ -10150,7 +10407,7 @@ int main(int argc, char* argv[]) {
                     "(static_prop {:.3f}) | post {:.3f} ms",
                     rb_cpu_prep / n, rb_cpu_shadow / n, rb_cpu_gbuf / n, rb_cpu_prop / n, rb_cpu_post / n);
                 {
-                    // §12 — render_frame() FULL wall captures every pass's CPU submit
+                    // Â§12 â€” render_frame() FULL wall captures every pass's CPU submit
                     // (skybox/water/foliage/lighting/aerial had no cpu_* sub-timer);
                     // poll is the window/input pump. Whatever remains after these +
                     // sim/stream/foliage-rebuild/ui is the true residual (scenario harness, etc).
@@ -10256,7 +10513,7 @@ int main(int argc, char* argv[]) {
         mark_shutdown("world_state_saved");
     }
 
-    // Drain the SHIELD-RT far-field heightfield build before the world is cleared —
+    // Drain the SHIELD-RT far-field heightfield build before the world is cleared â€”
     // its worker job reads the world by pointer (else a teardown-time use-after-free).
     renderPipeline.drain_far_field_builds();
     if (auto* world_system = gameSession->GetWorldSystem()) {
@@ -10291,11 +10548,11 @@ int main(int argc, char* argv[]) {
     } else {
         mark_shutdown("imgui_not_started");
     }
-    // RENDER-19: the spec-013 background scan holds a raw world pointer — drain
+    // RENDER-19: the spec-013 background scan holds a raw world pointer â€” drain
     // it before the session (and its world) is destroyed.
     DrainSpec13WorldScan(jobSystem);
     // RENDER-20: the world-dressing placement job likewise queries the world
-    // through its callbacks — drain it too.
+    // through its callbacks â€” drain it too.
     DrainWorldDressing(jobSystem);
     gameSession.reset();
     mark_shutdown("game_session_reset");
@@ -10310,7 +10567,7 @@ int main(int argc, char* argv[]) {
 
 void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) {
     // Rebind capture: while waiting for a key for some action, the next key press becomes
-    // its binding (Escape cancels). Intercept first so any key — even F-keys — can be bound.
+    // its binding (Escape cancels). Intercept first so any key â€” even F-keys â€” can be bound.
     if (g_rebindCaptureAction >= 0 && action == GLFW_PRESS) {
         if (key != GLFW_KEY_ESCAPE && g_rebindCaptureAction < static_cast<int>(Luminumbra::Client::kInputActionCount)) {
             const char* name = Luminumbra::Client::kInputActionDefs[g_rebindCaptureAction].name;
@@ -10330,13 +10587,13 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
         g_show_gpu_profiler = !g_show_gpu_profiler;
         return;
     }
-    // F5: spec 023 crawl — hot-reload every live shader from res/shaders/ next
+    // F5: spec 023 crawl â€” hot-reload every live shader from res/shaders/ next
     // frame (rollback-safe per shader; a broken edit keeps the prior program).
     if (key == GLFW_KEY_F5 && action == GLFW_PRESS) {
         g_request_shader_reload = true;
         return;
     }
-    // F10: spec 023 walk — the dev shader panel (per-shader reload, auto-reload
+    // F10: spec 023 walk â€” the dev shader panel (per-shader reload, auto-reload
     // watcher toggle, live uniform editing).
     if (key == GLFW_KEY_F10 && action == GLFW_PRESS) {
         g_show_shader_panel = !g_show_shader_panel;

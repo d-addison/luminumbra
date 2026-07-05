@@ -419,6 +419,14 @@ public:
     // the field inactive -> the lighting pass adds no glow (pixel-identical).
     void update_aether_field(const std::vector<float>& cells, float world_origin_x,
                              float world_origin_z, int extent, float cell_size_m);
+    // AETHER-10 (Wave G R1.7): grade the aether glow. Defaults equal the GLSL
+    // initializers (pixel-identical untouched); render-only, never world_hash.
+    void set_aether_glow(const glm::vec3& color, float intensity) {
+        m_aetherGlowColor = color;
+        m_aetherGlowIntensity = intensity;
+    }
+    // ATMO-14 (Wave G S1.3): render-only snow ground cover [0,1] (0 = untouched).
+    void set_snow_cover(float cover01) { m_snowCover = std::clamp(cover01, 0.0f, 1.0f); }
     // Reallocates ALL screen-sized render targets (G-buffer, SSAO, lighting/post
     // chain) to the new framebuffer size, preserving formats; the far-LOD path
     // and passes consume the new sizes through the shared state. A no-op when the
@@ -571,6 +579,15 @@ public:
     // Spec 013 FR-0.1: hold the day clock at its current value (photo-mode TOD scrub) so
     // update_time_of_day stops auto-advancing; set_time_of_day still moves it. Render-only.
     void set_time_of_day_hold(bool hold) { m_timeOfDayHold = hold; }
+    // ATMO-10 (Wave G R1.3): drive the day clock from the AUTHORITATIVE sim tick —
+    // tod = TimeOfDayFromTick(tick, day_length) (TimeOfDayModel.h). Called per frame
+    // from live play; suppresses that frame's wall-clock advance so TOD is a pure
+    // function of the tick (same tick -> same sun, independent of frame pacing).
+    // Precedence unchanged: the photo-mode hold wins here, and scenario/scene pins
+    // (set_time_of_day) run AFTER this in the frame, overwriting it. Paths that
+    // never call this keep the legacy wall-clock advance byte-identically.
+    void set_time_of_day_tick(std::uint64_t sim_tick);
+    void set_day_length_ticks(std::uint64_t ticks) { m_dayLengthTicks = ticks == 0 ? 1 : ticks; }
     // T-I5a-7 (C2): SEASON / celestial model. The season phase is a PURE FUNCTION
     // of the authoritative TICK COUNT (integer epoch math; DeterministicMath for
     // the sun-path trig) -- never wall-clock, never a free-running float
@@ -985,6 +1002,10 @@ private:
     float m_timeOfDay = 0.5f; // Start at sunrise
     bool  m_timeOfDayHold = false; // spec 013: freeze auto-advance for photo-mode TOD scrub
     float m_dayDurationSeconds = 60.0f;
+    // ATMO-10: tick-authority state. m_todTickDriven marks "the sim tick fed TOD this
+    // frame" so update_time_of_day skips the wall-clock advance; cleared every frame.
+    std::uint64_t m_dayLengthTicks = 1800; // == TimeOfDayModel kDefaultDayLengthTicks
+    bool m_todTickDriven = false;
 
     u32 m_screen_width = 0;
     u32 m_screen_height = 0;
@@ -1304,6 +1325,11 @@ private:
     float m_aetherFieldCellSize = 24.0f;
     int m_aetherFieldExtent = 0;
     bool m_aetherFieldActive = false;
+    // AETHER-10: the glow grade (defaults == the lighting_pass.frag initializers).
+    glm::vec3 m_aetherGlowColor{0.30f, 0.55f, 0.95f};
+    float m_aetherGlowIntensity = 2.0f;
+    // ATMO-14: render-only snow ground cover (0 = byte-identical default).
+    float m_snowCover = 0.0f;
     size_t m_terrain_texture_fallback_layers = 0;
     // Resolution the terrain albedo/normal arrays are allocated at. T-I6: raised
     // 256 -> 1024. The repo already ships full AmbientCG 2K CC0 PBR sets per material

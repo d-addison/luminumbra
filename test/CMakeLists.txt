@@ -234,6 +234,40 @@ target_link_libraries(octa_impostor_test PRIVATE
     gtest_main
 )
 
+# AUDIO-10 (spec 021): the mixer/ducking envelope math. The header under test
+# (src/luminumbra_client/audio/MixerModel.h) is a pure dependency-free header
+# (no miniaudio, no audio device, no GL) -- same shape as tree_lod_test: just
+# the include roots + gtest, safe in the default CPU lane.
+add_executable(mixer_model_test
+    audio/mixer_model_test.cpp
+)
+
+target_include_directories(mixer_model_test PRIVATE
+    ../src
+    ../src/luminumbra_client
+)
+
+target_link_libraries(mixer_model_test PRIVATE
+    gtest_main
+)
+
+# AUDIO-07/AUDIO-09 (spec 021): the day/night-soundscape gating/crossfade and
+# the biome->reverb + delay-proxy mapping math. The header under test
+# (src/luminumbra_client/audio/EnvironmentalAudioModel.h) is pure std (no
+# miniaudio, no audio device, no GL) -- same shape as tree_lod_test: just the
+# include root + gtest, safe in the default CPU lane.
+add_executable(environmental_audio_model_test
+    audio/environmental_audio_model_test.cpp
+)
+
+target_include_directories(environmental_audio_model_test PRIVATE
+    ../src
+)
+
+target_link_libraries(environmental_audio_model_test PRIVATE
+    gtest_main
+)
+
 # RENDER-20 (spec 021): world-dressing placement determinism. Compiles the
 # extracted client-side WorldDressing.cpp directly (it depends only on
 # luminumbra_common's DeterministicRng / plant-genome / creature-build headers +
@@ -912,6 +946,29 @@ target_link_libraries(world_load_bounded_test PRIVATE
     luminumbra_common
 )
 
+# Spec-021 INSTINCT-12: per-species behaviour data (IAUS "brain" overrides +
+# "genome_ranges" in the species JSON schema). Pure CPU (registry parse + brain
+# arbiter + breeding operators; no GL, no world) — pins the byte-identical-defaults
+# law: absent/default JSON resolves the compiled constants exactly, an override
+# changes the loaded table. Cloned from the world_load_bounded_test block above.
+add_executable(species_behavior_overrides_test
+    sim/species_behavior_overrides_test.cpp
+)
+
+target_compile_definitions(species_behavior_overrides_test PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+)
+
+target_include_directories(species_behavior_overrides_test PRIVATE
+    ../src
+    ../src/luminumbra_common
+)
+
+target_link_libraries(species_behavior_overrides_test PRIVATE
+    gtest_main
+    luminumbra_common
+)
+
 # perf-lane-and-ecology-tick (KDD-6 / T011): the EcologyTickPerf gate exe. A
 # standalone target (NOT folded into common_tests) so the validator gate can run
 # JUST this measurement (300 ticks x 3 roster sizes) without dragging the whole
@@ -1275,6 +1332,11 @@ set(LUMINUMBRA_GTEST_TARGETS
     # registered — the atlas-bake/shader shared source of truth had zero
     # executing coverage. GL-free pure math, safe in the default lane.
     octa_impostor_test
+    # AUDIO-10 (spec 021): mixer/ducking envelope math (CPU-only, GL-free).
+    mixer_model_test
+    # AUDIO-07/AUDIO-09 (spec 021): day/night soundscape + reverb mapping math
+    # (CPU-only, GL-free, no audio device).
+    environmental_audio_model_test
     # RENDER-20 (spec 021): world-dressing placement determinism (CPU-only).
     world_dressing_test
     render_smoke_test
@@ -1293,6 +1355,9 @@ set(LUMINUMBRA_GTEST_TARGETS
     worldgen_preview_test
     initial_world_loading_perf_test
     world_load_bounded_test
+    # INSTINCT-12 (spec 021): species JSON behaviour overrides — byte-identical
+    # defaults + override round-trip (pure CPU, default lane).
+    species_behavior_overrides_test
     runtime_world_visual_validation_test
     frontier_gates_test
     jolt_tunneling_test

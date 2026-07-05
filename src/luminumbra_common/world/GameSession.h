@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdint>
 #include <string>
@@ -19,6 +19,7 @@
 
 namespace luminumbra::ai {
     class ScentField;
+    class CreatureSpeciesRegistry;  // INSTINCT-12: per-world species definition table
 }
 
 namespace luminumbra::foliage {
@@ -37,6 +38,10 @@ namespace Luminumbra {
         class WeatherSystem;
         class AetherFieldSystem;
     }
+}
+
+namespace luminumbra::sim {
+    struct WeatherEventState; // S1.2 (ATMO-12): the epoch-schedule POD (WeatherEventSystem.h)
 }
 
 namespace Luminumbra::world {
@@ -75,11 +80,11 @@ public:
     // customPresetJson (optional): a fully-resolved preset JSON (base preset + create-world
     // customize overrides). When provided it is written into THIS world's own save dir
     // (worlds/saves/<id>/preset.json) and used for generation, so the world is self-contained and
-    // copyable — no global custom-preset files, no dangling references. worldType still records the
+    // copyable â€” no global custom-preset files, no dangling references. worldType still records the
     // base preset name (provenance + asset validation). When null, the named preset is used.
     bool CreateWorld(const std::string& name, const std::string& seed, const std::string& worldType,
                      const std::string* customPresetJson);
-    // 3-arg overload (named-preset path). Kept as a distinct overload — not a default arg — so
+    // 3-arg overload (named-preset path). Kept as a distinct overload â€” not a default arg â€” so
     // translation units compiled against the prior header still resolve a real symbol.
     bool CreateWorld(const std::string& name, const std::string& seed, const std::string& worldType) {
         return CreateWorld(name, seed, worldType, nullptr);
@@ -206,6 +211,33 @@ public:
     void SetForagingTuning(const luminumbra::ai::ForagingParams& t) { m_foragingTuning = t; }
     void SetReproductionTuning(const luminumbra::ai::ReproductionTuning& t) { m_reproductionTuning = t; }
     void SetCircadianAmplitude(float a) { m_circadianAmplitude = a; }
+    // S1.1 (ATMO-11 == WATER-07): opt-in weather-driven rain (sim.hydrology_weather).
+    // Stored pre-world; wired into the water solver at CreateWorld/LoadWorld once the
+    // weather + water systems exist. Default-OFF = null wiring = byte-identical.
+    // scale_mm: full precipitation (1.0) adds this many mm/tick to a cell.
+    void SetWeatherRainEnabled(bool enabled, std::int32_t scale_mm = 25) {
+        m_weatherRainEnabled = enabled;
+        m_weatherRainScaleMm = scale_mm;
+    }
+    // S1.2 (ATMO-12): the deterministic weather-EVENT schedule (Markov epoch windows,
+    // WeatherEventSystem.h â€” built + tested, previously consumerless) exposed on the
+    // session behind sim.weather_events (default OFF -> always Clear/0: byte-identical).
+    // Pure read: same (tick, world seed + 25) -> same state; a consumer must ALSO be a
+    // participant (the scent/plant opt-in discipline) before its behavior may change.
+    void SetWeatherEventsEnabled(bool enabled) { m_weatherEventsEnabled = enabled; }
+    [[nodiscard]] luminumbra::sim::WeatherEventState CurrentWeatherEvent() const;
+
+    // Spec-021 INSTINCT-12: the per-world SPECIES DEFINITION table, loaded at world
+    // create/load from <root>/data/common/creatures/species/*.json (filename-sorted â€” a pure
+    // function of file content, never filesystem iteration order). Each entry's behaviour
+    // blocks (IAUS "brain" overrides + "genome_ranges") default to the compiled constants,
+    // so a missing directory / absent overrides resolve byte-identically to the compiled-in
+    // behaviour. Nothing on the tick path reads this yet â€” it is the world-load seam future
+    // per-species consumption resolves through. Never null after CreateWorld/LoadWorld;
+    // null before either (callers must null-check).
+    [[nodiscard]] const luminumbra::ai::CreatureSpeciesRegistry* GetSpeciesTable() const {
+        return m_speciesTable.get();
+    }
 
     // --- Fixed-rate simulation (T-I3-4) ---
     // Advances the 30 Hz simulation clock by one variable-dt frame and runs
@@ -241,7 +273,7 @@ private:
     float m_circadianAmplitude = 1.0f;
     WorldMetadata m_metadata;
     // perf (water-perf-200fps spec Step 6): cap catch-up to 2 ticks/frame (default is 4) so a
-    // single slow frame replays at most 2 sim ticks instead of 4 — halving the worst-case
+    // single slow frame replays at most 2 sim ticks instead of 4 â€” halving the worst-case
     // TickSimulation spike. Scoped HERE (not the shared SimulationClock.h constant, which
     // SimulationClock_test pins at 4). Determinism-safe: over-cap ticks are already dropped (not
     // replayed) and the clamp NEVER fires under the fixed-dt headless oracle, so --smoke run==replay
@@ -255,6 +287,9 @@ private:
     std::unique_ptr<Systems::WeatherSystem> m_weatherSystem;
     std::unique_ptr<Systems::AetherFieldSystem> m_aetherFieldSystem;
     std::unique_ptr<luminumbra::ai::ScentField> m_scentField;
+    // INSTINCT-12: species definitions (see GetSpeciesTable). unique_ptr so this header only
+    // needs the forward declaration (the registry is header-only nlohmann-parsing code).
+    std::unique_ptr<luminumbra::ai::CreatureSpeciesRegistry> m_speciesTable;
     // Living-world substrate fields (lazily created when a participant first opts in, so a world
     // with none stays byte-identical). Anchored at the spawn point with a fixed grid extent.
     std::unique_ptr<luminumbra::foliage::SoilGrid> m_soilGrid;
@@ -268,8 +303,13 @@ private:
     std::vector<std::filesystem::path> m_requiredClientAssets;
 
     // Convert string seed to numeric seed
-    uint32_t StringToSeed(const std::string& seedStr);
+    uint32_t StringToSeed(const std::string& seedStr) const;
     void InitializeScentField(const Vec3& anchor);
+    void LoadSpeciesDefinitions();  // INSTINCT-12: fills m_speciesTable (world create + load)
+    void ApplyWeatherRainWiring();  // S1.1: wires weather->water rain when opted in
+    bool m_weatherRainEnabled = false;       // S1.1 (see SetWeatherRainEnabled)
+    std::int32_t m_weatherRainScaleMm = 25;  // S1.1: mm/tick at full precipitation
+    bool m_weatherEventsEnabled = false;     // S1.2 (see SetWeatherEventsEnabled)
     bool HasScentParticipants() const;
     bool HasPlantParticipants() const; // I9-FOLIAGE opt-in gate
     std::string m_rootPath;

@@ -77,14 +77,17 @@ public:
         return true;
     }
 
-    bool PlayOneShot(const AudioEventID& eventID, const glm::vec3&) override {
+    // NOTE: the re-stated defaults MUST match IAudioManager's (kept so callers
+    // holding a concrete NullAudioManager* keep compiling with two-arg calls).
+    bool PlayOneShot(const AudioEventID& eventID, const glm::vec3&,
+                     BusId = BusId::Sfx) override {
         ++m_play_one_shot_calls;
         m_event_ids.push_back(eventID);
         WriteTelemetry("play_one_shot");
         return true;
     }
 
-    bool PlayOneShot2D(const AudioEventID& eventID) override {
+    bool PlayOneShot2D(const AudioEventID& eventID, BusId = BusId::Sfx) override {
         ++m_play_one_shot_2d_calls;
         m_event_ids.push_back(eventID);
         WriteTelemetry("play_one_shot_2d");
@@ -106,8 +109,10 @@ public:
     void StopAmbientLoop(const AudioEventID&) override {}                           // null backend: no-op
     void SetAmbientVolume(const AudioEventID&, float) override {}                   // null backend: no-op
 
-    void SetMasterVolume(float) override {}  // null backend: no-op
-    void SetMusicVolume(float) override {}   // null backend: no-op
+    void SetMasterVolume(float) override {}       // null backend: no-op
+    void SetMusicVolume(float) override {}        // null backend: no-op
+    void SetSfxVolume(float) override {}          // null backend: no-op
+    void SetBusVolume(BusId, float) override {}   // null backend: no-op
 
     bool StopEvent(AudioEventHandle, bool = true) override {
         ++m_stop_event_calls;

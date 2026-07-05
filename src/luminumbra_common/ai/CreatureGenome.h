@@ -80,31 +80,9 @@ inline constexpr std::size_t kCreatureGeneCount = 4;
 // the GA-typical small step that drifts traits without scrambling them generation to gen.
 inline constexpr float kCreatureMutationSigmaFrac = 0.08f;
 
-// Produce an offspring genome from ONE parent (asexual: mutate a copy). Deterministic for a
-// given rng state. Reuses Evolution.h GaussianMutate + clamp.
-[[nodiscard]] inline CreatureGenome MutateOffspring(const CreatureGenome& parent,
-                                                    luminumbra::core::DeterministicRng& rng) {
-    const auto bounds = CreatureGeneBounds();
-    std::vector<GeneBound> bv(bounds.begin(), bounds.end());
-    std::vector<float> genes = CreatureGenomeToGenes(parent);
-    GaussianMutate(genes, bv, kCreatureMutationSigmaFrac, rng);
-    return CreatureGenomeFromGenes(genes);
-}
-
-// Produce an offspring genome from TWO parents (sexual: blend-crossover then mutate).
-// Deterministic for a given rng state. Reuses Evolution.h BlendCrossover + GaussianMutate.
-[[nodiscard]] inline CreatureGenome BreedOffspring(const CreatureGenome& a, const CreatureGenome& b,
-                                                   luminumbra::core::DeterministicRng& rng) {
-    const auto bounds = CreatureGeneBounds();
-    std::vector<GeneBound> bv(bounds.begin(), bounds.end());
-    std::vector<float> child = BlendCrossover(CreatureGenomeToGenes(a), CreatureGenomeToGenes(b), rng);
-    GaussianMutate(child, bv, kCreatureMutationSigmaFrac, rng);
-    return CreatureGenomeFromGenes(child);
-}
-
-// --- FR-4 SENSORY genes: kept separate from the 4-gene core so the existing breeding RNG stream is
-// byte-identical. Inheritance draws are taken AFTER BreedOffspring + the sex draw (see
-// CreatureReproductionSystem), so the core genome and child sex are unaffected. ---
+// --- FR-4 SENSORY gene count + canonical bounds (declared here, ahead of the breeding
+// operators, so SpeciesGenomeRanges below can default from them; the inheritance operator
+// BreedSensoryInto stays in the sensory section at the bottom of this header). ---
 inline constexpr std::size_t kCreatureSensoryGeneCount = 3;
 
 // Canonical inclusive bounds: a wide cone (cos ~0.2 ~= 156 deg) for prey down to a narrow cone
@@ -115,6 +93,47 @@ inline constexpr std::size_t kCreatureSensoryGeneCount = 3;
             GeneBound{6.0f, 45.0f}};  // hearing_range (m)
 }
 
+// Spec-021 INSTINCT-12: per-species GENOME-RANGE overrides. The defaults ARE the canonical
+// bounds (CreatureGeneBounds / CreatureSensoryGeneBounds — single source of truth, no literal
+// duplication), so a default-constructed SpeciesGenomeRanges clamps mutation/crossover exactly
+// as before -> byte-identical breeding. Species JSON (key "genome_ranges") narrows/widens the
+// bands per species (e.g. a slow heavy grazer vs a fast light darter) via
+// CreatureSpeciesRegistry; index order == the gene-vector encodings in this header.
+struct SpeciesGenomeRanges {
+    // core[i] bounds CreatureGenomeToGenes order: move_speed, vigilance, hunger_threshold, size_scale.
+    std::array<GeneBound, kCreatureGeneCount> core = CreatureGeneBounds();
+    // sensory[i] bounds CreatureSensoryToGenes order: vision_cos_half_fov, vision_range, hearing_range.
+    std::array<GeneBound, kCreatureSensoryGeneCount> sensory = CreatureSensoryGeneBounds();
+};
+
+// Produce an offspring genome from ONE parent (asexual: mutate a copy). Deterministic for a
+// given rng state. Reuses Evolution.h GaussianMutate + clamp. `ranges` defaults to the
+// canonical bounds -> byte-identical to the historical single-argument behaviour.
+[[nodiscard]] inline CreatureGenome MutateOffspring(const CreatureGenome& parent,
+                                                    luminumbra::core::DeterministicRng& rng,
+                                                    const SpeciesGenomeRanges& ranges = {}) {
+    std::vector<GeneBound> bv(ranges.core.begin(), ranges.core.end());
+    std::vector<float> genes = CreatureGenomeToGenes(parent);
+    GaussianMutate(genes, bv, kCreatureMutationSigmaFrac, rng);
+    return CreatureGenomeFromGenes(genes);
+}
+
+// Produce an offspring genome from TWO parents (sexual: blend-crossover then mutate).
+// Deterministic for a given rng state. Reuses Evolution.h BlendCrossover + GaussianMutate.
+// `ranges` defaults to the canonical bounds -> byte-identical to the historical behaviour.
+[[nodiscard]] inline CreatureGenome BreedOffspring(const CreatureGenome& a, const CreatureGenome& b,
+                                                   luminumbra::core::DeterministicRng& rng,
+                                                   const SpeciesGenomeRanges& ranges = {}) {
+    std::vector<GeneBound> bv(ranges.core.begin(), ranges.core.end());
+    std::vector<float> child = BlendCrossover(CreatureGenomeToGenes(a), CreatureGenomeToGenes(b), rng);
+    GaussianMutate(child, bv, kCreatureMutationSigmaFrac, rng);
+    return CreatureGenomeFromGenes(child);
+}
+
+// --- FR-4 SENSORY genes: kept separate from the 4-gene core so the existing breeding RNG stream is
+// byte-identical. Inheritance draws are taken AFTER BreedOffspring + the sex draw (see
+// CreatureReproductionSystem), so the core genome and child sex are unaffected. The count and
+// canonical bounds are declared ABOVE (before SpeciesGenomeRanges). ---
 [[nodiscard]] inline std::vector<float> CreatureSensoryToGenes(const CreatureGenome& g) {
     return {g.vision_cos_half_fov, g.vision_range, g.hearing_range};
 }
@@ -128,11 +147,12 @@ inline void ApplySensoryGenes(CreatureGenome& g, const std::vector<float>& v) {
 // Inherit the SENSORY genes (sexual blend-crossover + mutate) into an already-bred `child`, using
 // rng draws taken AFTER the core BreedOffspring + sex draw. Returns the child with its sensory genes
 // set; the core genome fields are left untouched. Deterministic for a given rng state.
+// `ranges` defaults to the canonical bounds -> byte-identical to the historical behaviour.
 [[nodiscard]] inline CreatureGenome BreedSensoryInto(CreatureGenome child, const CreatureGenome& a,
                                                      const CreatureGenome& b,
-                                                     luminumbra::core::DeterministicRng& rng) {
-    const auto bounds = CreatureSensoryGeneBounds();
-    std::vector<GeneBound> bv(bounds.begin(), bounds.end());
+                                                     luminumbra::core::DeterministicRng& rng,
+                                                     const SpeciesGenomeRanges& ranges = {}) {
+    std::vector<GeneBound> bv(ranges.sensory.begin(), ranges.sensory.end());
     std::vector<float> genes =
         BlendCrossover(CreatureSensoryToGenes(a), CreatureSensoryToGenes(b), rng);
     GaussianMutate(genes, bv, kCreatureMutationSigmaFrac, rng);

@@ -191,6 +191,122 @@ TEST(WaterDeterminism, TerraformBedEditIsDeterministicAndConserving) {
            "(pre=" << a.pre_max << "mm post=" << a.post_max << "mm)";
 }
 
+// WATER-12 (Wave G W1.1) — the DAM complement of the dig test. RAISE the integer water bed
+// (+4 m over a 24 m region) under a settled water body: the displaced water must go SOMEWHERE
+// (mass invariant), the field must respond (pool against the new dam / spread), and the whole
+// interaction must be run==replay deterministic — "terraform land to dam a river", the second
+// half of the spec-009 Phase-2 charter that only had its dig half gated.
+DigResult run_dam_pool(const std::string& root) {
+    JobSystem jobs; jobs.startup();
+    DigResult r;
+    {
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(root);
+        EXPECT_TRUE(session.CreateWorld("WaterDam", "777", "default"));
+        SHIELD_WorldSystem* world = session.GetWorldSystem();
+        auto* physics = session.GetPhysicsSystem();
+        const Vec3 spawn = session.GetMetadata().spawnPoint;
+        const Vec3 anchor(spawn.x, world->GetTerrainHeightAt(spawn.x, spawn.z) + 2.0f, spawn.z);
+        auto tick = [&]{ world->update(session.GetRegistry(), {anchor}, physics);
+                         world->wait_for_streaming_jobs();
+                         if (!world->debug_water_mass_ok()) r.mass_ok = false; };
+        for (int t = 0; t < 80; ++t) tick();             // settle a water body
+        r.pre_hash = world->debug_water_state_hash().hash;
+        r.pre_max  = world->debug_max_water_depth_mm();
+        world->EditTerrainBed(anchor, +4000, 24.0f);     // DAM: raise the bed 4 m
+        for (int t = 0; t < 80; ++t) tick();             // displaced water pools/spreads
+        r.post_hash = world->debug_water_state_hash().hash;
+        r.post_max  = world->debug_max_water_depth_mm();
+    }
+    jobs.shutdown();
+    return r;
+}
+
+TEST(WaterDeterminism, DamBedEditPoolsWaterDeterministically) {
+    const HeadlessRoot root;
+    const DigResult a = run_dam_pool(root.root_string());
+    const DigResult b = run_dam_pool(root.root_string());
+    EXPECT_TRUE(a.mass_ok) << "the integer mass invariant was VIOLATED during/after the dam edit";
+    EXPECT_EQ(a.pre_hash, b.pre_hash)   << "pre-edit water state is non-deterministic";
+    EXPECT_EQ(a.post_hash, b.post_hash) << "the dam edit is NON-DETERMINISTIC (post-edit water diverged "
+                                           "run-to-run — would desync host==peer)";
+    EXPECT_EQ(a.post_max, b.post_max)   << "post-dam max depth differs run-to-run";
+    EXPECT_NE(a.post_hash, a.pre_hash)  << "the dam edit had no effect on the water state";
+    // The water RESPONDED to the dam: raising a 4 m bed under a wet region displaces its water
+    // (mass held above), reshaping the depth field — the deepest cell changes.
+    EXPECT_NE(a.post_max, a.pre_max)
+        << "max water depth unchanged after raising a 4 m dam — the solver did not respond "
+           "(pre=" << a.pre_max << "mm post=" << a.post_max << "mm)";
+}
+
+// S1.1 (ATMO-11 == WATER-07): WEATHER-DRIVEN rain determinism. With finite hydrology +
+// the weather system wired as the rain source (per-cell PrecipitationAt, integer-
+// quantized AT THE BOUNDARY), two identical runs must produce identical per-tick
+// water-state hash sequences, and the rain must actually LAND (the rained world's
+// final state differs from an unrained control). The weather state here is the boot
+// state (this harness ticks the world system directly, not TickSimulation) — constant
+// but non-trivial precipitation, which is exactly what the quantization + coupling
+// determinism claim needs.
+struct RainResult {
+    std::vector<std::uint64_t> hashes;
+    bool mass_ok = true;
+    std::int64_t final_max = 0;
+};
+
+RainResult run_weather_rain(const std::string& root, bool wire_weather) {
+    JobSystem jobs; jobs.startup();
+    RainResult r;
+    {
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(root);
+        // The wiring must be REQUESTED pre-world (the session wires it at create,
+        // mirroring the sim.hydrology_weather production path).
+        session.SetWeatherRainEnabled(wire_weather, /*scale_mm=*/40);
+        EXPECT_TRUE(session.CreateWorld("WeatherRain", "777", "default"));
+        SHIELD_WorldSystem* world = session.GetWorldSystem();
+        auto* physics = session.GetPhysicsSystem();
+        // Finite hydrology: rain is the water source (spec 010 semantics).
+        world->SetWaterHydrology(/*finite=*/true, /*rain=*/0, /*evap=*/1);
+        const Vec3 spawn = session.GetMetadata().spawnPoint;
+        const Vec3 anchor(spawn.x, world->GetTerrainHeightAt(spawn.x, spawn.z) + 2.0f, spawn.z);
+        for (int t = 0; t < 48; ++t) {
+            // Advance the weather deterministically (a pure function of seed + tick +
+            // anchor) so storm cells/precip exist — this harness bypasses
+            // TickSimulation, which normally does this before water each tick.
+            if (auto* weather = session.GetWeatherSystem()) {
+                weather->Update(static_cast<std::uint64_t>(t), anchor,
+                                session.GetWindFieldSystem());
+            }
+            world->update(session.GetRegistry(), {anchor}, physics);
+            world->wait_for_streaming_jobs();
+            if (!world->debug_water_mass_ok()) r.mass_ok = false;
+            r.hashes.push_back(world->debug_water_state_hash().hash);
+        }
+        r.final_max = world->debug_max_water_depth_mm();
+    }
+    jobs.shutdown();
+    return r;
+}
+
+TEST(WaterDeterminism, WeatherDrivenRainIsDeterministic) {
+    const HeadlessRoot root;
+    const RainResult a = run_weather_rain(root.root_string(), true);
+    const RainResult b = run_weather_rain(root.root_string(), true);
+    const RainResult control = run_weather_rain(root.root_string(), false);
+    EXPECT_TRUE(a.mass_ok) << "mass invariant VIOLATED under weather-driven rain";
+    ASSERT_EQ(a.hashes.size(), b.hashes.size());
+    EXPECT_EQ(a.hashes, b.hashes)
+        << "weather-driven rain diverged between two identical runs — the coupling is "
+           "NON-DETERMINISTIC (float leak past the quantization boundary?)";
+    // The rain LANDED: the rained world's final water state differs from the
+    // unrained finite-hydrology control (which only evaporates).
+    ASSERT_FALSE(a.hashes.empty());
+    EXPECT_NE(a.hashes.back(), control.hashes.back())
+        << "wiring the weather rain changed NOTHING — the coupling is not landing water";
+}
+
 // Spec 009 Phase 2 — PLAYER VOXEL DIG. The headline player action: carve a sphere out of the
 // actual VOXEL terrain (not just the water bed) mid-sim, which remeshes the terrain AND drains
 // the water into the new pit. EditTerrainVoxel must edit >0 chunks, be run==replay deterministic

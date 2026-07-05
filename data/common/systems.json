@@ -32,7 +32,11 @@
       "maturity_ticks": 90, "cooldown_ticks": 300, "healthy_stamina": 0.5,
       "mate_seek_radius": 45.0, "courtship_radius": 2.6, "courtship_ticks": 90, "spawn_radius": 1.2 } },
     "foraging": { "enabled": false, "params": {
-      "deposit": 1.0, "trail_weight": 8.0, "goal_weight": 1.0 } }
+      "deposit": 1.0, "trail_weight": 8.0, "goal_weight": 1.0 } },
+    "_hydrology_weather_comment": "S1.1 (ATMO-11/WATER-07): weather-driven rain into the spec-010 hydrology (per-cell PrecipitationAt, integer-quantized). Activation implies finite hydrology semantics; a deliberate hash bump on the activation menu.",
+    "hydrology_weather": { "enabled": false },
+    "_weather_events_comment": "S1.2 (ATMO-12): the deterministic Markov weather-event epochs (WeatherEventAt, seed+25) exposed via GameSession::CurrentWeatherEvent. OFF -> always Clear/0 (byte-identical); consumers must also be participants.",
+    "weather_events": { "enabled": false }
   },
   "render": {
     "moonlight": { "enabled": false, "params": { "strength": 0.0, "color": [0.6, 0.7, 1.0] } },
@@ -43,6 +47,10 @@
     "_spawn_comment": "Client-only ambient living-world spawn (never hashed). enabled:false -> compiled defaults. Tune how many creatures/ants populate the world + their speeds.",
     "creature_spawn": { "enabled": false, "params": {
       "herd_count": 12, "predator_speed": 4.0, "prey_speed": 2.6, "initial_hunger": 0.2 } },
-    "foraging_colony": { "enabled": false, "params": { "ant_count": 24, "food_amount": 1000000 } }
+    "foraging_colony": { "enabled": false, "params": { "ant_count": 24, "food_amount": 1000000 } },
+    "_wave_g_comment": "Wave G R1 bridges (ATMO-07/AETHER-04/ATMO-14): default-OFF until the R1.X batched WorldVisualSweep re-bless flips them ON.",
+    "live_weather": { "enabled": false },
+    "aether_tap": { "enabled": false },
+    "snow_cover": { "enabled": false }
   }
 }

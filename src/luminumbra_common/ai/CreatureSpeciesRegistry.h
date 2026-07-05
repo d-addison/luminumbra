@@ -9,8 +9,15 @@
 // from the genome ranges this registry will grow.
 //
 // DETERMINISM: loading is pure file I/O and computes ids via the same FNV-1a name hash
-// the spawn sites use (Components::CreatureSpeciesId16). The registry itself touches no
-// entt registry and no world_hash — it is content metadata the client + spawners read.
+// the spawn sites use (Components::CreatureSpeciesId16). LoadFromDirectory sorts the
+// directory entries by filename before parsing, so the loaded table is a PURE FUNCTION of
+// the file CONTENT — never of filesystem iteration order. The registry itself touches no
+// entt registry and no world_hash — it is content metadata the client + spawners read;
+// the per-species behaviour blocks (spec-021 INSTINCT-12: "brain" IAUS overrides +
+// "genome_ranges") default to the compiled constants, so a world with NO species JSON —
+// or JSON that omits/matches the defaults — resolves a table byte-identical to the
+// compiled-in behaviour. Any FUTURE field the sim consumes as an integer (tick counts,
+// counts) must be parsed as an integer (get<std::uint32_t>), never via a float round-trip.
 
 #include <algorithm>
 #include <cstdint>
@@ -23,6 +30,8 @@
 #include "nlohmann/json.hpp"
 
 #include "../components/CreatureComponents.h"
+#include "CreatureBrain.h"   // CreatureBrainParams (per-species IAUS overrides)
+#include "CreatureGenome.h"  // SpeciesGenomeRanges (per-species gene bounds)
 
 namespace luminumbra::ai {
 
@@ -41,6 +50,14 @@ struct CreatureSpecies {
     // Biomes this species inhabits (by biome name, e.g. "wetland"). EMPTY = lives
     // anywhere (a generalist), so undated/legacy data still spawns everywhere.
     std::vector<std::string> biomes;
+
+    // --- Spec-021 INSTINCT-12: per-species BEHAVIOUR data. Both blocks default to the
+    // compiled constants (CreatureBrainParams{} == the DecideCreatureAction literals;
+    // SpeciesGenomeRanges{} == CreatureGeneBounds()+CreatureSensoryGeneBounds()), so a
+    // species JSON that omits them — and every legacy/shipped file — loads a table entry
+    // byte-identical to the compiled-in behaviour. ---
+    CreatureBrainParams brain;         // IAUS action weights + flee curve shape
+    SpeciesGenomeRanges genome_ranges; // mutation/crossover clamp bands per gene
 
     // The codex/spawn key — FNV-1a of `id`, identical to the value spawn sites stamp
     // onto CreatureComponent::species_id.
@@ -81,6 +98,47 @@ struct CreatureSpecies {
     }
     if (j.contains("biomes") && j.at("biomes").is_array()) {
         for (const auto& b : j.at("biomes")) if (b.is_string()) out.biomes.push_back(b.get<std::string>());
+    }
+
+    // --- Spec-021 INSTINCT-12: optional per-species behaviour overrides. Lenient like the
+    // fields above: only well-typed entries apply; anything absent/malformed keeps the
+    // compiled default, so a partial override is safe and an empty/absent block is
+    // byte-identical to no JSON at all. ---
+    if (j.contains("brain") && j.at("brain").is_object()) {
+        const nlohmann::json& b = j.at("brain");
+        auto num = [&b](const char* key, float fallback) -> float {
+            return (b.contains(key) && b.at(key).is_number()) ? b.at(key).get<float>() : fallback;
+        };
+        out.brain.wander_weight   = num("wander_weight",   out.brain.wander_weight);
+        out.brain.rest_weight     = num("rest_weight",     out.brain.rest_weight);
+        out.brain.sleep_weight    = num("sleep_weight",    out.brain.sleep_weight);
+        out.brain.hunt_weight     = num("hunt_weight",     out.brain.hunt_weight);
+        out.brain.flee_weight     = num("flee_weight",     out.brain.flee_weight);
+        out.brain.graze_weight    = num("graze_weight",    out.brain.graze_weight);
+        out.brain.flee_logistic_m = num("flee_logistic_m", out.brain.flee_logistic_m);
+        out.brain.flee_logistic_c = num("flee_logistic_c", out.brain.flee_logistic_c);
+    }
+    if (j.contains("genome_ranges") && j.at("genome_ranges").is_object()) {
+        const nlohmann::json& g = j.at("genome_ranges");
+        // A range entry is a 2-element numeric [lo, hi] array with lo <= hi; anything else
+        // (wrong type, wrong arity, inverted band) is ignored and the canonical bound holds.
+        auto bound = [&g](const char* key, GeneBound fallback) -> GeneBound {
+            if (!g.contains(key) || !g.at(key).is_array() || g.at(key).size() != 2) return fallback;
+            const nlohmann::json& r = g.at(key);
+            if (!r[0].is_number() || !r[1].is_number()) return fallback;
+            const float lo = r[0].get<float>();
+            const float hi = r[1].get<float>();
+            if (!(lo <= hi)) return fallback;  // also rejects NaN
+            return GeneBound{lo, hi};
+        };
+        // Key -> index map mirrors CreatureGenomeToGenes / CreatureSensoryToGenes order.
+        out.genome_ranges.core[0]    = bound("move_speed",          out.genome_ranges.core[0]);
+        out.genome_ranges.core[1]    = bound("vigilance",           out.genome_ranges.core[1]);
+        out.genome_ranges.core[2]    = bound("hunger_threshold",    out.genome_ranges.core[2]);
+        out.genome_ranges.core[3]    = bound("size_scale",          out.genome_ranges.core[3]);
+        out.genome_ranges.sensory[0] = bound("vision_cos_half_fov", out.genome_ranges.sensory[0]);
+        out.genome_ranges.sensory[1] = bound("vision_range",        out.genome_ranges.sensory[1]);
+        out.genome_ranges.sensory[2] = bound("hearing_range",       out.genome_ranges.sensory[2]);
     }
     return true;
 }

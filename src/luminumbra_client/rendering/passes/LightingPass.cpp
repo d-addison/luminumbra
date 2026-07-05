@@ -160,6 +160,12 @@ void LightingPass::execute(const RenderContext& ctx) {
     } else {
         m_lighting_shader->setFloat("u_aetherActive", 0.0f);
     }
+    // AETHER-10 (Wave G R1.7): the glow grade from the context — the defaults
+    // equal the GLSL initializers, so untouched contexts stay pixel-identical.
+    m_lighting_shader->setVec3("u_aetherGlowColor", ctx.aether_glow_color);
+    m_lighting_shader->setFloat("u_aetherGlowIntensity", ctx.aether_glow_intensity);
+    // ATMO-14 (S1.3): the render-only snow cover (0 default = byte-identical).
+    m_lighting_shader->setFloat("u_snowCover", ctx.snow_cover);
     glActiveTexture(GL_TEXTURE0);
     m_lighting_shader->setMat4("u_inverseView", glm::inverse(camera.GetViewMatrix()));
     m_lighting_shader->setInt("gPosition", 0);

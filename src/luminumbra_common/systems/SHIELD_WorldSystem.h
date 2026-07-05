@@ -27,6 +27,7 @@ namespace Luminumbra::Systems {
 
 class PhysicsSystem;
 class WaterSystem;
+class WeatherSystem; // S1.1: weather-driven rain passthrough
 struct TerrainGenParams {
     float base_frequency = 0.01f;
     float base_amplitude = 50.0f;
@@ -613,6 +614,11 @@ public:
     // Spec 010 — configure finite hydrology: finite removes the perpetual river source (drainable water),
     // rain_mm_per_tick adds rainfall (caller scales by weather precip), evap_mm_per_tick recedes ponds.
     void SetWaterHydrology(bool finite, std::int32_t rain_mm_per_tick, std::int32_t evap_mm_per_tick);
+
+    // S1.1 (ATMO-11/WATER-07) — wire weather-driven per-cell rain into the water solver
+    // (precipitation integer-quantized at the boundary). null = OFF, byte-identical.
+    // The session owner gates this on sim.hydrology_weather (default-OFF).
+    void SetWaterWeatherRain(const Systems::WeatherSystem* weather, std::int32_t scale_mm);
 
     // WATER-17 — boot-settle mode: lifts the live-play per-tick water init/sim caps for the
     // duration of the server BOOT water settle so the settle can complete its init work and

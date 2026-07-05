@@ -28,10 +28,12 @@
 >   path. New GameSession scent-grid↔world accessors + a per-frame cell→transform mirror + a
 >   delivery heartbeat. Client-only → no re-pin. (Proven by `foraging_test`; the colony spawns.)
 >
-> **Next:** forager **marker rendering** (mirror is ready — render the 24 ants as small markers +
-> ideally the pheromone trail as a ground overlay; render-only). Then Phase D nests for the
-> larger creatures, Phase F full arbiter polish + FR-A3 energy consequences (these move the gate
-> hash → the first real engine-frontier re-pin), and Phase G rest poses + night-quiet.
+> **Next (refreshed 2026-07-05, spec-021 INSTINCT-13):** forager **marker rendering** LANDED
+> (the ants render as markers; the original Next list was stale). Remaining slices are tracked
+> in the spec-021 backlog: Phase D server-authoritative nests + return-home steering =
+> **INSTINCT-14** (deferred behind 019 online), Phase F FR-A3 needs consequences
+> (starvation/exhaustion degrade speed/perception before death) = **INSTINCT-06** (moves the
+> gate hash → batched re-pin), and Phase G rest poses + night-quiet remains open polish.
 >
 > **Determinism fork RESOLVED — Option A (anchor-only nests), 2026-06-26:** Nests/homes are CLIENT-VISUAL ANCHORS only this sprint, NOT server-authoritative steering. Ambient creatures run client-side and are NOT in world_hash; foragers stay client-ambient (never added to the server/canonical SpawnEcologyRoster), so the scent sub-hash stays empty server-side and there are ZERO canonical world_hash bumps this sprint. Server-authoritative nests + return-home steering are DEFERRED to the multiplayer sprint. This matches the single-PC testing constraint (no two-box LAN). See the revised FR-C3 / FR-D2 / FR-E1 below.
 

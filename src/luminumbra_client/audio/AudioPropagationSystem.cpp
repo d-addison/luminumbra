@@ -158,7 +158,7 @@ AudioPropagationSystem::AmbienceBed AudioPropagationSystem::ComputeAmbienceBed(
 
 AudioPropagationSystem::WaterfallRoar AudioPropagationSystem::ComputeWaterfallRoar(
         const glm::vec3& crest_position, float drop_height,
-        const glm::vec3& listener, float max_distance) const {
+        const glm::vec3& listener, float max_distance) {
     // T-I5b-4 (W1): positional waterfall roar. Distance attenuation reuses the
     // same inverse-falloff shape as ComputeThunderCue (additive hook, not new
     // propagation). The loop volume also scales with the fall's drop height: a

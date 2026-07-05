@@ -167,4 +167,21 @@ inline float ComputeMoonIllumination(std::uint64_t seasonTick, float forcedOverr
     return LunarIllumination(seasonTick, ticksPerLunarCycle);
 }
 
+// ATMO-10 (Wave G R1.3): TIME AUTHORITY — time-of-day as a PURE FUNCTION of the
+// authoritative sim tick, retiring the wall-clock day-advance for live play. Integer
+// modulo first (exact), then one divide — the same pure-function-of-the-tick shape as
+// ComputeSeason. The default day length reproduces the legacy pacing EXACTLY:
+// m_dayDurationSeconds (60 s) at the canonical 30 Hz tick rate = 1800 ticks/day, so
+// the switch from wall-clock to tick authority is visually pacing-identical.
+// Render-only: the tick flows sim -> render one way; TOD never feeds world_hash
+// (018 FR-E-003).
+inline constexpr std::uint64_t kDefaultDayLengthTicks = 1800; // 60 s/day @ 30 Hz
+
+inline float TimeOfDayFromTick(std::uint64_t simTick, std::uint64_t dayLengthTicks) {
+    if (dayLengthTicks == 0) { dayLengthTicks = 1; }
+    const std::uint64_t tick_in_day = simTick % dayLengthTicks;
+    return static_cast<float>(
+        static_cast<double>(tick_in_day) / static_cast<double>(dayLengthTicks));
+}
+
 } // namespace Luminumbra::Rendering

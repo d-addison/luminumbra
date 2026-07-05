@@ -51,6 +51,18 @@
       "json_name": "foraging"
     },
     {
+      "enum": "SimHydrologyWeather",
+      "section": "sim",
+      "residency": "hashed",
+      "json_name": "hydrology_weather"
+    },
+    {
+      "enum": "SimWeatherEvents",
+      "section": "sim",
+      "residency": "hashed",
+      "json_name": "weather_events"
+    },
+    {
       "enum": "RenderMoonlight",
       "section": "render",
       "residency": "excluded",
@@ -97,6 +109,24 @@
       "section": "render",
       "residency": "excluded",
       "json_name": "foraging_colony"
+    },
+    {
+      "enum": "RenderLiveWeather",
+      "section": "render",
+      "residency": "excluded",
+      "json_name": "live_weather"
+    },
+    {
+      "enum": "RenderAetherTap",
+      "section": "render",
+      "residency": "excluded",
+      "json_name": "aether_tap"
+    },
+    {
+      "enum": "RenderSnowCover",
+      "section": "render",
+      "residency": "excluded",
+      "json_name": "snow_cover"
     }
   ],
   "params": [

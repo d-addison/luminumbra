@@ -104,6 +104,13 @@ struct RenderContext {
     int aether_extent = 0;                   // <- m_aetherFieldExtent
     float aether_cell_size = 0.0f;           // <- m_aetherFieldCellSize
     glm::vec2 aether_world_origin = glm::vec2(0.0f); // <- m_aetherFieldWorldOrigin
+    // AETHER-10 (Wave G R1.7): the glow grade. Defaults mirror the
+    // lighting_pass.frag GLSL initializers EXACTLY, so an untouched context is
+    // pixel-identical; a game system (or the F10 panel) can now grade the glow.
+    glm::vec3 aether_glow_color{0.30f, 0.55f, 0.95f};
+    float aether_glow_intensity = 2.0f;
+    // ATMO-14 (Wave G S1.3): render-only snow ground cover [0,1]; 0 = untouched.
+    float snow_cover = 0.0f;
 
     // Group H — light/atmosphere scalars & vectors.
     DirectionalLight sun{};                  // <- m_sun (by value)

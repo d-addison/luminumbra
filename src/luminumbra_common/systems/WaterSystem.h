@@ -9,6 +9,7 @@
 
 namespace Luminumbra { class Chunk; }
 namespace Luminumbra::Systems { class SHIELD_WorldSystem; }
+namespace Luminumbra::Systems { class WeatherSystem; } // S1.1: weather-driven rain
 namespace Luminumbra::Components { struct TransformComponent; }
 
 namespace Luminumbra::Systems {
@@ -108,6 +109,18 @@ public:
         m_evap_mm_per_tick = evap_mm_per_tick;
     }
 
+    // ATMO-11 == WATER-07 (Wave G S1.1): WEATHER-DRIVEN rain. When a WeatherSystem
+    // is wired (the session owner gates this on sim.hydrology_weather; null = OFF,
+    // byte-identical), each cell's rain becomes int(PrecipitationAt(cell)*scale+0.5)
+    // — INTEGER-QUANTIZED AT THE BOUNDARY (the only float->int crossing), then the
+    // existing mm solver. The weather state read is the one updated earlier THIS
+    // tick (the weather core runs before water in TickSimulation): a fixed 0-tick
+    // phase, deterministic — the same documented convention scent uses for wind.
+    void SetWeatherRain(const WeatherSystem* weather, std::int32_t scale_mm) {
+        m_weather_rain = weather;
+        m_weather_rain_scale_mm = scale_mm;
+    }
+
     // WATER-17 boot-settle mode. The per-tick init/sim caps exist to bound LIVE-play frame
     // cost; during the server BOOT water settle they make the fixed point unreachable:
     // init drains at MAX_WATER_INITS_PER_TICK=6 while the calm check exits early
@@ -180,6 +193,9 @@ private:
     bool m_finite_hydrology = false;
     std::int32_t m_rain_mm_per_tick = 0;
     std::int32_t m_evap_mm_per_tick = 0;
+    // ATMO-11/WATER-07: weather-driven rain (null = OFF; see SetWeatherRain).
+    const WeatherSystem* m_weather_rain = nullptr;
+    std::int32_t m_weather_rain_scale_mm = 0;
 
     // WATER-17: boot-settle mode (see SetBootSettleMode). Lifts the init/sim caps during Boot.
     bool m_boot_settle_mode = false;

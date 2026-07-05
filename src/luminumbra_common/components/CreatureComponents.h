@@ -37,11 +37,12 @@ struct CreatureComponent {
     std::uint16_t species_id = 0;
     float hunger = 0.0f;        // 0 sated .. 1 starving (grows each tick)
     float stamina = 1.0f;       // 0 exhausted .. 1 fresh (short-term exertion; recovers on Rest)
-    // Spec 011 Phase A: long-term sleep/fatigue need. 0 exhausted .. 1 rested. Drains slowly
-    // every tick (being awake costs energy), recovers on Rest (later: Sleep at a nest). Distinct
-    // from `stamina` (sprint fuel) -- energy gates the daily sleep cycle. NOT yet read by the
-    // brain's decision (Phase E/F wires circadian-gated Sleep) and NOT in world_hash, so adding
-    // it is byte-identical: a tracked need today, a decision input tomorrow.
+    // Spec 011: long-term sleep/fatigue need. 0 exhausted .. 1 rested. Drains slowly every tick
+    // (being awake costs energy), recovers on Rest and fastest on Sleep. Distinct from `stamina`
+    // (sprint fuel) -- energy gates the daily sleep cycle. Phase E LANDED: the brain reads it
+    // (CreatureSenses.energy -> the circadian-gated Sleep action), so it steers behaviour on any
+    // sleeping roster. NOT yet folded into the ecology sub-hash (EcologyHash.h reads
+    // hunger/stamina, not energy — hashing it is spec-021 INSTINCT-10).
     float energy = 1.0f;
     float move_speed = 3.0f;    // m/s cruise
     int last_action = 0;        // last CreatureAction chosen (telemetry / sub-hash)

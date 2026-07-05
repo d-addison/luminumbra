@@ -2,6 +2,7 @@
 
 #include "WaterSystem.h"
 #include "SHIELD_WorldSystem.h"
+#include "WeatherSystem.h" // S1.1 (ATMO-11/WATER-07): weather-driven per-cell rain
 #include "../world/Chunk.h"
 #include "../core/WaterComponents.h"
 #include "../components/CoreComponents.h"
@@ -111,7 +112,9 @@ int PositiveMod(int value, int divisor) {
 // order -> bit-exact host==peer / run==replay.
 void StepChunkWaterFixed(Chunk& c, SHIELD_WorldSystem& shield,
                          std::int64_t& out_src, std::int64_t& out_sink,
-                         bool finite_hydrology, std::int32_t rain_mm, std::int32_t evap_mm) {
+                         bool finite_hydrology, std::int32_t rain_mm, std::int32_t evap_mm,
+                         const WeatherSystem* weather_rain = nullptr,
+                         std::int32_t weather_scale_mm = 0) {
     const int res = GetWaterResolution(c);
     if (res <= 1) return;
     const int n = res * res;
@@ -166,6 +169,27 @@ void StepChunkWaterFixed(Chunk& c, SHIELD_WorldSystem& shield,
     if (rain_mm > 0) {
         for (int i = 0; i < n; ++i) depth[i] += rain_mm;
         out_src += static_cast<std::int64_t>(rain_mm) * n;
+    }
+    // ATMO-11 == WATER-07 (Wave G S1.1): WEATHER-DRIVEN per-cell rain. Precipitation is
+    // sampled at the cell CENTRE and integer-quantized AT THE BOUNDARY (the only
+    // float->int crossing; row-order iteration -> deterministic), then joins the mm
+    // domain like the uniform rain above. weather_rain == null (the default) touches
+    // nothing — byte-identical to pre-S1.1. The weather state is the one the weather
+    // core produced earlier THIS tick (fixed 0-tick phase, the scent/wind convention).
+    if (weather_rain != nullptr && weather_scale_mm > 0) {
+        for (int z = 0; z < res; ++z) {
+            for (int x = 0; x < res; ++x) {
+                const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
+                const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
+                const float p = weather_rain->PrecipitationAt(Vec3(wx, 0.0f, wz));
+                const std::int32_t r = static_cast<std::int32_t>(
+                    p * static_cast<float>(weather_scale_mm) + 0.5f);
+                if (r > 0) {
+                    depth[IDX(x, z)] += r;
+                    out_src += r;
+                }
+            }
+        }
     }
 
     // --- Phase 1: FLUX on +X and +Z internal edges, from the read-only surface snapshot ---
@@ -549,7 +573,10 @@ void WaterSystem::update(entt::registry& registry, const std::unordered_map<Chun
         // Spec 010: when rain is falling, keep EVERY water chunk awake — rain must land on dry, otherwise
         // sleeping, land so puddles/ponds form in the low spots (sleeping chunks are skipped and never get
         // rain). Without rain this is the normal "simulate only active chunks" fast path.
-        const bool rain_active = m_rain_mm_per_tick > 0;
+        // S1.1: weather-driven rain keeps chunks awake the same way (a storm cell may
+        // rain on any chunk even when the uniform rate is zero).
+        const bool rain_active = m_rain_mm_per_tick > 0 ||
+                                 (m_weather_rain != nullptr && m_weather_rain_scale_mm > 0);
         if (chunk_ptr->has_water_sim.load() &&
             (rain_active || !chunk_ptr->is_water_sleeping.load(std::memory_order_relaxed))) {
             chunks_to_sim.push_back(chunk_ptr.get());
@@ -595,7 +622,8 @@ void WaterSystem::update(entt::registry& registry, const std::unordered_map<Chun
     std::int64_t src_mm = 0, sink_mm = 0;
     for (Chunk* chunk : chunks_to_sim) {
         StepChunkWaterFixed(*chunk, *m_shield_system, src_mm, sink_mm,
-                            m_finite_hydrology, m_rain_mm_per_tick, m_evap_mm_per_tick);
+                            m_finite_hydrology, m_rain_mm_per_tick, m_evap_mm_per_tick,
+                            m_weather_rain, m_weather_rain_scale_mm);
     }
 
     // Cross-chunk owner-edge shared flux. Each chunk OWNS its +X (east) and +Z (north) boundary edges;

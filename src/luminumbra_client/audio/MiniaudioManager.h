@@ -1,11 +1,13 @@
 #pragma once
 #include "audio/IAudioManager.h"
+#include "audio/MixerModel.h"
 #include <miniaudio.h>
 #include <nlohmann/json.hpp>
 #include <unordered_map>
 #include <vector>
 #include <random>
 #include <array>
+#include <chrono>
 
 // Forward declaration for spatial clustering
 namespace Luminumbra::Client { class AudioSpatialCluster; }
@@ -116,13 +118,22 @@ public:
     void SetListenerTransform(const glm::vec3& position, const glm::vec3& forward, const glm::vec3& up) override;
 
     bool PlayEvent(const AudioEventID& eventID, AudioEventHandle& outHandle) override;
-    bool PlayOneShot(const AudioEventID& eventID, const glm::vec3& position) override;
-    bool PlayOneShot2D(const AudioEventID& eventID) override;
+    // NOTE: the re-stated defaults MUST match IAudioManager's (callers holding a
+    // concrete MiniaudioManager* — e.g. EnvironmentalAudioSystem — bind these).
+    bool PlayOneShot(const AudioEventID& eventID, const glm::vec3& position,
+                     BusId bus = BusId::Sfx) override;
+    bool PlayOneShot2D(const AudioEventID& eventID, BusId bus = BusId::Sfx) override;
     void PlayMusic(const AudioEventID& musicEventID) override;
     void StopMusic();
 
     void SetMasterVolume(float volume) override;
     void SetMusicVolume(float volume) override;
+    void SetSfxVolume(float volume) override;
+    void SetBusVolume(BusId bus, float volume) override;
+
+    // AUDIO-10 sidechain-duck tuning (ambient floor / attack / release; music
+    // floor 1.0 = music duck disabled). Safe to call any time; render-only.
+    void SetDuckParams(const Audio::DuckParams& params) { m_ducker.SetParams(params); }
 
     bool StopEvent(AudioEventHandle handle, bool immediate = true) override;
     bool SetEventPosition(AudioEventHandle handle, const glm::vec3& position) override;
@@ -152,18 +163,53 @@ private:
     void UpdateWindEffect();
     float CalculateOcclusion(const glm::vec3& source, const glm::vec3& listener);
 
+    // AUDIO-05/AUDIO-10 bus plumbing. GroupFor maps a BusId to the ma_sound_group
+    // playback attaches to (nullptr => engine endpoint, the pre-bus behaviour —
+    // also the graceful fallback if group init ever failed). ApplyAmbientBusGain
+    // composes the user ambient volume with the ducker's sidechain gain.
+    ma_sound_group* GroupFor(BusId bus) const;
+    void ApplyAmbientBusGain();
+
     std::string m_rootPath;
     std::unique_ptr<ma_engine> m_engine;
     std::unordered_map<AudioEventID, AudioEventDefinition> m_eventDefinitions;
-    
+
     // For controllable, active sounds
     std::unordered_map<AudioEventHandle, std::unique_ptr<ma_sound>> m_activeSounds;
     AudioEventHandle m_nextHandle = 1;
 
-    // Fire-and-forget 3D one-shots (PlayOneShot). These MUST outlive the call: miniaudio's
-    // mixing thread reads the ma_sound until it finishes, so the node has to stay alive (and be
-    // ma_sound_uninit'd, not just freed) — Update() reaps the ones that have stopped playing.
-    std::vector<std::unique_ptr<ma_sound>> m_oneShotSounds;
+    // Fire-and-forget one-shots (PlayOneShot / PlayOneShot2D). These MUST outlive the
+    // call: miniaudio's mixing thread reads the ma_sound until it finishes, so the node
+    // has to stay alive (and be ma_sound_uninit'd, not just freed) — Update() reaps the
+    // ones that have stopped playing. The bus is remembered so reaping an Events-bus
+    // voice releases the sidechain duck.
+    struct OneShotVoice {
+        std::unique_ptr<ma_sound> sound;
+        BusId bus = BusId::Sfx;
+    };
+    std::vector<OneShotVoice> m_oneShotSounds;
+
+    // AUDIO-05/AUDIO-10: the mix-bus groups. sfx hangs off the engine endpoint;
+    // ambient/events/ui are CHILDREN of sfx (so user.audio_sfx scales them all).
+    // Music keeps its existing per-sound volume path (untouched). ma_sound_group
+    // nodes live in the mixing graph: heap-owned so their addresses are stable,
+    // uninited in Shutdown AFTER all attached sounds, BEFORE the engine.
+    std::unique_ptr<ma_sound_group> m_sfxGroup;
+    std::unique_ptr<ma_sound_group> m_ambientGroup;
+    std::unique_ptr<ma_sound_group> m_eventsGroup;
+    std::unique_ptr<ma_sound_group> m_uiGroup;
+    float m_sfxVolume = 1.0f;      // user.audio_sfx
+    float m_ambientVolume = 1.0f;  // authored ambient-bus gain (pre-duck)
+    float m_eventsVolume = 1.0f;
+    float m_uiVolume = 1.0f;
+
+    // AUDIO-10 sidechain ducker (pure math, audio/MixerModel.h) — advanced with
+    // WALL-CLOCK dt in Update(); client-side presentation only, never sim.
+    Audio::MixerDucker m_ducker;
+    std::chrono::steady_clock::time_point m_lastUpdateTime{};
+    bool m_hasLastUpdateTime = false;
+    float m_lastAppliedAmbientGain = -1.0f;  // dedupe ma_sound_group_set_volume calls
+    float m_lastAppliedMusicDuckGain = -1.0f;
 
     // For music
     std::unique_ptr<ma_sound> m_currentMusic;
@@ -182,6 +228,20 @@ private:
     // Reverb/Echo effects (would need custom implementation)
     ma_delay m_echoDelay;
     bool m_echoInitialized = false;
+
+    // AUDIO-09 (spec 021 rank ~100): global reverb PROXY. miniaudio 0.11.22 has
+    // NO built-in reverb node, so SetGlobalReverb drives a single feedback
+    // delay line (ma_delay_node, core miniaudio >= 0.11) spliced between the
+    // AMBIENT bus group and its parent (ambient -> delay -> sfx -> endpoint):
+    // one attach, so the AUDIO-05/10 ambient gain + sidechain duck stay
+    // upstream and keep working unchanged. wet/dry map straight onto the
+    // node's mix; biome decay maps to a stability-capped feedback gain; the
+    // delay TIME is fixed at node init (see AudioModel::ReverbProxyFromParams
+    // for the honest limitations of the proxy). Lazily created on the first
+    // SetGlobalReverb call; requires the ambient group (no group => the proxy
+    // stays off and SetGlobalReverb just logs, the old stub behaviour).
+    ma_delay_node m_reverbNode;
+    bool m_reverbNodeInitialized = false;
     
     // For random selection in banks
     std::mt19937 m_rng;

@@ -95,10 +95,13 @@ public:
         float low_pass = 0.0f;          // [0,1] 0 = bright/near, 1 = muffled/far
         bool audible = false;           // volume above the silence floor
     };
-    WaterfallRoar ComputeWaterfallRoar(const glm::vec3& crest_position,
-                                       float drop_height,
-                                       const glm::vec3& listener,
-                                       float max_distance = 400.0f) const;
+    // STATIC (AUDIO-06): the roar is pure math over its arguments — no propagation
+    // state, no physics — so live wiring can call it without constructing the
+    // full system (whose ctor spawns worker threads).
+    static WaterfallRoar ComputeWaterfallRoar(const glm::vec3& crest_position,
+                                              float drop_height,
+                                              const glm::vec3& listener,
+                                              float max_distance = 400.0f);
 
     // Async propagation for performance
     void CalculatePropagationAsync(const glm::vec3& source, 

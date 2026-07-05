@@ -1,29 +1,29 @@
-#include "GameSession.h"
+﻿#include "GameSession.h"
 #include "../ai/InstinctSystem.h"
 #include "../ai/CreatureBrainSystem.h"
 #include "../ai/CreatureReproductionSystem.h"  // Track (a): generational evolution (+16)
-#include "../ai/LifespanSystem.h"               // §4: age/starvation death (+22)
-#include "../ai/WildlifeFoliageSystem.h"        // §4: grazing/trampling (+23)
-#include "../ai/HerdAlarmSystem.h"              // §4: collective-vigilance alarm (+26)
-#include "../ai/DecompositionSystem.h"          // §4: death -> nutrient release (+27)
-#include "../ai/CircadianSystem.h"              // §4: diurnal/nocturnal activity (+29)
-#include "../ai/TerritorySystem.h"              // §4: home territory + homing bias (+30)
-#include "../ai/PredatorPackSystem.h"           // §4: pack flanking coordination (+31)
-#include "../ai/MigrationSystem.h"              // §4: seasonal migration drive (+32)
-#include "../ai/SteeringConsumer.h"             // §4: blend bias outputs into wish (integration)
-#include "../ai/ThirstSystem.h"                 // §4: water-seeking / drinking (+33)
-#include "../ai/ScavengingSystem.h"             // §4: carcass scavenging (death -> food) (+34)
+#include "../ai/LifespanSystem.h"               // Â§4: age/starvation death (+22)
+#include "../ai/WildlifeFoliageSystem.h"        // Â§4: grazing/trampling (+23)
+#include "../ai/HerdAlarmSystem.h"              // Â§4: collective-vigilance alarm (+26)
+#include "../ai/DecompositionSystem.h"          // Â§4: death -> nutrient release (+27)
+#include "../ai/CircadianSystem.h"              // Â§4: diurnal/nocturnal activity (+29)
+#include "../ai/TerritorySystem.h"              // Â§4: home territory + homing bias (+30)
+#include "../ai/PredatorPackSystem.h"           // Â§4: pack flanking coordination (+31)
+#include "../ai/MigrationSystem.h"              // Â§4: seasonal migration drive (+32)
+#include "../ai/SteeringConsumer.h"             // Â§4: blend bias outputs into wish (integration)
+#include "../ai/ThirstSystem.h"                 // Â§4: water-seeking / drinking (+33)
+#include "../ai/ScavengingSystem.h"             // Â§4: carcass scavenging (death -> food) (+34)
 #include "../components/AlarmComponents.h"
 #include "../components/PackHunterComponents.h"
 #include "../components/MigratoryComponents.h"
 #include "../components/DecayComponents.h"
 #include "../components/CircadianComponents.h"
 #include "../components/TerritoryComponents.h"
-#include "../systems/FireSpreadSystem.h"        // §4: fire spread (+17)
-#include "../systems/SoilNutrientSystem.h"      // §4: soil nutrients (+18)
-#include "../systems/PollinationSystem.h"       // §4: cross-pollination (+19)
-#include "../systems/PlantDiseaseSystem.h"      // §4: plant disease (+20)
-#include "../systems/IrrigationSystem.h"        // §4: soil moisture (+21)
+#include "../systems/FireSpreadSystem.h"        // Â§4: fire spread (+17)
+#include "../systems/SoilNutrientSystem.h"      // Â§4: soil nutrients (+18)
+#include "../systems/PollinationSystem.h"       // Â§4: cross-pollination (+19)
+#include "../systems/PlantDiseaseSystem.h"      // Â§4: plant disease (+20)
+#include "../systems/IrrigationSystem.h"        // Â§4: soil moisture (+21)
 #include "../components/CombustionComponents.h"
 #include "../components/SoilComponents.h"
 #include "../components/IrrigationComponents.h"
@@ -34,6 +34,7 @@
 #include "../ai/PerceptionSystem.h"
 #include "../ai/ForagingSystem.h"  // FR-3: ant-trail foraging (Deneubourg double-bridge)
 #include "../systems/CropLifecycleSystem.h"  // FR-G Phase 2: germination / annual-perennial lifecycle
+#include "../ai/CreatureSpeciesRegistry.h"  // INSTINCT-12: per-world species definitions
 #include "../ai/ScentDepositSystem.h"
 #include "../ai/ScentField.h"
 #include "../ai/ScentSteeringSystem.h"
@@ -48,6 +49,7 @@
 #include "nlohmann/json.hpp" // For parsing JSON
 #include "../systems/PhysicsSystem.h"
 #include "../systems/WaterSystem.h"
+#include "../systems/WeatherEventSystem.h" // S1.2 (ATMO-12): WeatherEventAt (pure schedule)
 #include "../systems/WindFieldSystem.h"
 #include "../systems/WeatherSystem.h"
 #include "../systems/AetherFieldSystem.h"
@@ -86,7 +88,7 @@ constexpr double kScentEvaporation = 0.05;
 constexpr double kScentTauMin = 1.0e-9;
 constexpr double kScentTauMax = 1.0e6;
 // FR-2 scent wind-advection strength. 0 = OFF -> ScentField::Step skips advection. Tuned ON at 1.0
-// (advect at the TRUE wind velocity — the physically-correct semi-Lagrangian drift) so scent drifts
+// (advect at the TRUE wind velocity â€” the physically-correct semi-Lagrangian drift) so scent drifts
 // downwind and a predator can track prey up-wind. Only worlds with scent/forager participants carry a
 // scent field, so the canonical empty roster is still byte-identical (default --smoke unchanged); the
 // populated PopulatedWorldReplay gate stays run==replay (deterministic double math), so no literal re-pin.
@@ -144,6 +146,58 @@ GameSession::~GameSession() {
     // Destructor
 }
 
+// Spec-021 INSTINCT-12: load the per-world species definition table at world create/load.
+// DETERMINISM: CreatureSpeciesRegistry::LoadFromDirectory sorts the *.json entries by
+// filename before parsing, so the table is a pure function of the files' CONTENT â€” never of
+// filesystem iteration order. A missing/empty directory yields an EMPTY table, and every
+// per-species behaviour block (IAUS "brain" overrides, "genome_ranges") defaults to the
+// compiled constants, so a world with no species JSON â€” or JSON matching the defaults â€” is
+// byte-identical to the compiled-in behaviour. Nothing on the tick path consumes the table
+// yet (it is the world-load seam for per-species consumption), so this load cannot move
+// world_hash regardless of content.
+// S1.2 (ATMO-12): the deterministic weather-EVENT schedule read. OFF (the default)
+// always returns Clear/0 â€” byte-identical for every existing consumer; ON resolves
+// WeatherEventAt(tick, worldSeed + 25) (the seed-offset registry slot the backlog
+// charters). Pure function â€” no state, no RNG, no wall-clock.
+luminumbra::sim::WeatherEventState GameSession::CurrentWeatherEvent() const {
+    if (!m_weatherEventsEnabled) {
+        return luminumbra::sim::WeatherEventState{};
+    }
+    const std::uint64_t seed =
+        static_cast<std::uint64_t>(StringToSeed(m_metadata.seed)) + 25ull;
+    return luminumbra::sim::WeatherEventAt(GetSimulationTickCount(), seed);
+}
+
+// S1.1 (ATMO-11 == WATER-07): wire the weather system into the water solver's
+// per-cell rain when the owner opted in (sim.hydrology_weather -> SetWeatherRainEnabled).
+// Called from BOTH CreateWorld and LoadWorld after the systems exist. Default-OFF
+// leaves the water solver's weather pointer null â€” byte-identical to pre-S1.1.
+void GameSession::ApplyWeatherRainWiring() {
+    if (!m_worldSystem) {
+        return;
+    }
+    if (m_weatherRainEnabled && m_weatherSystem) {
+        m_worldSystem->SetWaterWeatherRain(m_weatherSystem.get(), m_weatherRainScaleMm);
+        LUMINUMBRA_CORE_INFO("Weather-driven rain WIRED (scale {} mm/tick at full precipitation)",
+                             m_weatherRainScaleMm);
+    } else {
+        m_worldSystem->SetWaterWeatherRain(nullptr, 0);
+    }
+}
+
+void GameSession::LoadSpeciesDefinitions() {
+    m_speciesTable = std::make_unique<luminumbra::ai::CreatureSpeciesRegistry>();
+    const fs::path dir = RuntimeRoot(m_rootPath) / "data" / "common" / "creatures" / "species";
+    std::vector<std::string> errors;
+    const std::size_t loaded = m_speciesTable->LoadFromDirectory(dir, errors);
+    for (const std::string& err : errors) {
+        // Content problems are warnings, not failures: a bad species file must never brick a
+        // world load (the affected species just keeps its compiled-default behaviour/absence).
+        LUMINUMBRA_CORE_WARN("Species definition load: {}", err);
+    }
+    LUMINUMBRA_CORE_INFO("Species definitions loaded: {} from {}", loaded, dir.string());
+}
+
 std::uint32_t GameSession::TickSimulation(double frame_dt) {
     const std::uint32_t ticks_executed = m_simulationClock.advance(frame_dt);
     if (ticks_executed == 0) {
@@ -156,7 +210,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
     for (std::uint32_t i = 0; i < ticks_executed; ++i) {
         const std::uint64_t current_tick = first_tick + i;
 
-        // Deterministic per-tick system order (design-decisions.md §1).
+        // Deterministic per-tick system order (design-decisions.md Â§1).
         // Remaining placeholder slots until the owning iteration-3/4 tasks
         // land:
         //   3. Field budget (iteration 4)
@@ -175,7 +229,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         // StimulusSubscriptionComponent. The canonical roster carries none, so
         // the `view.empty()` guard keeps the call BYTE-IDENTICAL to the pre-5b
         // path (nullptr context) -- world_hash stays d950a6afc12a5cdc (critique
-        // F1 / §0). When subscribers exist, the context reads the replicated
+        // F1 / Â§0). When subscribers exist, the context reads the replicated
         // weather state (one-way; weather updated on the PREVIOUS tick, slot 4)
         // and the per-tick time-of-day/season/light channels derived from the
         // tick. The engine still names no creature behavior.
@@ -258,17 +312,17 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 // 2e-mate: SEXUAL reproduction, phase A. Ready creatures (mature, well-fed,
                 // off cooldown) carrying a CreatureGenomeComponent steer toward the nearest
                 // ready OPPOSITE-SEX mate by overriding the brain's wish velocity (unless
-                // fleeing) — so the physics bridge below actually walks them together. Opt-in
+                // fleeing) â€” so the physics bridge below actually walks them together. Opt-in
                 // (genome component); no genome -> untouched.
                 luminumbra::ai::RunMateSeekingOnTick(m_registry, m_reproductionTuning);
 
-                // 2e-steer: blend the §4 bias systems' outputs (computed last tick, slot 7) into
+                // 2e-steer: blend the Â§4 bias systems' outputs (computed last tick, slot 7) into
                 // the wish velocity before the physics bridge applies it -- pack flank steer,
                 // migration drift, territory homing. Extracted to ai/SteeringConsumer.h so this
                 // integration layer is unit-tested independently of the producers.
                 luminumbra::ai::RunSteeringConsumerOnTick(m_registry);
 
-                // 2e-survival: water-seeking (THIRST) + carcass SCAVENGING — built sim
+                // 2e-survival: water-seeking (THIRST) + carcass SCAVENGING â€” built sim
                 // systems wired into the live tick. Opt-in via ThirstComponent /
                 // ScavengerComponent (+ WaterHoleComponent water sources / carcasses); a
                 // roster carrying none is a pure no-op, so the canonical NetworkStateHash
@@ -381,7 +435,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         // growth at slot 6 reading grids that only updated at slot 7 -> a 1-tick-stale env). Opt-in
         // via WaterSource/SoilFeeder; a world with none updates no grid, so the canonical roster is
         // byte-identical. The shared foliage field anchor (origin + cell size) is hoisted here so
-        // both the growth env-sampler (slot 6) and the §4 living-world systems (slot 7) share it.
+        // both the growth env-sampler (slot 6) and the Â§4 living-world systems (slot 7) share it.
         constexpr int kFoliageFieldCells = 256;     // grid extent (cells)
         constexpr float kFoliageFieldCell = 1.0f;   // metres / cell
         const float foliageOriginX = m_metadata.spawnPoint.x - kFoliageFieldCells * kFoliageFieldCell * 0.5f;
@@ -403,7 +457,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
 
         // 6. I9-FOLIAGE: deterministic plant GROWTH. Game-data opt-in (PlantTag):
         // no plants -> the system never runs and world_hash stays byte-identical
-        // (same discipline as scent). The environment is ATMOSPHERIC — moisture is
+        // (same discipline as scent). The environment is ATMOSPHERIC â€” moisture is
         // driven by the freshly-updated weather precip field (rain -> growth), so
         // growth runs AFTER weather. Integer/fixed-point + id-ordered = run==replay.
         // (temperature/light/soil coupling are follow-ups; neutral for now.)
@@ -416,7 +470,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                     // Moisture: weather precipitation (rain -> growth) + irrigation (player watering).
                     const float precip = m_weatherSystem ? m_weatherSystem->PrecipitationAt(p) : 0.0f;
                     s.moisture = luminumbra::foliage::clamp01(0.30f + precip * 0.70f);
-                    // FR-G4: fold the freshly-updated IRRIGATION grid (milli 0..1000) into moisture —
+                    // FR-G4: fold the freshly-updated IRRIGATION grid (milli 0..1000) into moisture â€”
                     // watered cells grow better (watered-beats-dry). No grid -> unchanged.
                     if (m_irrigationGrid) {
                         const int moist = luminumbra::foliage::MoistureAt(
@@ -468,7 +522,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                     const float day = 1.0f - 2.0f * noonDist;  // 0 at midnight -> 1 at noon
                     s.light = luminumbra::foliage::clamp01(0.15f + 0.85f * day);
                     // FR-G (season): a deterministic ANNUAL temperature swing folded onto the terrain
-                    // temp so growth varies across the year — colder in winter (slower growth + cold
+                    // temp so growth varies across the year â€” colder in winter (slower growth + cold
                     // stress), warmer in summer. Triangular (libm-free) over a year of kSeasonDays
                     // in-game days; tick-based -> run==replay (kSeasonSeedOffset 37 reserved, no RNG).
                     // Only opt-in plant rosters run this, so the canonical (no-plant) world is unchanged.
@@ -486,10 +540,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             luminumbra::foliage::RunPlantGrowthSystemOnTick(m_registry, current_tick, plant_env);
         }
 
-        // 7. LIVING-WORLD SYSTEMS (§4): pollination / disease / fire / wildlife-grazing / lifespan /
-        // … Each is per-entity OPT-IN via its own participant component, so a world carrying none runs
+        // 7. LIVING-WORLD SYSTEMS (Â§4): pollination / disease / fire / wildlife-grazing / lifespan /
+        // â€¦ Each is per-entity OPT-IN via its own participant component, so a world carrying none runs
         // ZERO of them and world_hash stays byte-identical (canonical NetworkStateHash baseline holds)
-        // — same discipline as plants/creatures/scent. Deterministic (id-ordered, libm-free,
+        // â€” same discipline as plants/creatures/scent. Deterministic (id-ordered, libm-free,
         // seeded-from-ints). Fixed run order for run==replay. NOTE: the soil-nutrient + irrigation
         // FIELDS now update at slot 5b (BEFORE plant growth) so growth reads fresh availability; only
         // the consumers remain here. Wind coupling (fire/pollination) drifts downwind.
@@ -698,7 +752,15 @@ bool GameSession::CreateWorld(const std::string& name, const std::string& seed, 
     
     m_metadata.spawnPoint = Vec3(spawn_x, terrain_height + kSpawnEyeHeight, spawn_z);
     InitializeScentField(m_metadata.spawnPoint);
-    
+
+    // INSTINCT-12: species definitions load once at world create (content-pure; see the helper).
+    LoadSpeciesDefinitions();
+
+    // S1.1 (ATMO-11/WATER-07): wire weather-driven rain into the water solver when the
+    // owner opted in (sim.hydrology_weather via SetWeatherRainEnabled). Default-OFF =
+    // null pointer = byte-identical.
+    ApplyWeatherRainWiring();
+
     LUMINUMBRA_CORE_INFO("World created successfully: {} (ID: {})", m_metadata.name, m_metadata.worldId);
     LUMINUMBRA_CORE_INFO("Spawn point set to ({}, {}, {}) - terrain height: {}", 
         m_metadata.spawnPoint.x, m_metadata.spawnPoint.y, m_metadata.spawnPoint.z, terrain_height);
@@ -821,11 +883,18 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     }
     InitializeScentField(m_metadata.spawnPoint);
 
+    // INSTINCT-12: species definitions load once at world load, exactly as CreateWorld does
+    // (content-pure; a loaded world resolves the same table as the created one).
+    LoadSpeciesDefinitions();
+
     // WATER-17: restore the rotating water sim-window cursor so the loaded session
     // resimulates the exact windows the original would from the same water state.
     if (m_worldSystem) {
         m_worldSystem->SetWaterSimWindowCursor(water_sim_cursor);
     }
+
+    // S1.1 (ATMO-11/WATER-07): same weather-rain wiring as CreateWorld (default-OFF = no-op).
+    ApplyWeatherRainWiring();
 
     LUMINUMBRA_CORE_INFO("World loaded successfully: {}", m_metadata.name);
     return true;
@@ -894,7 +963,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir, WorldS
     }
 
     // Quiesce in-flight generation/promotion/meshing so chunk data is stable
-    // on disk — WITHOUT publishing (SHIELD-03 inc 4): a save must never be an
+    // on disk â€” WITHOUT publishing (SHIELD-03 inc 4): a save must never be an
     // activation event. Generated chunks are already live (generation writes
     // live fields); only unpublished mesh/promotion staging stays out, which
     // the next legitimate publish point (the barrier today, the activation
@@ -1011,7 +1080,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         chunk->pending_water_mesh_indices.clear();
 
         // SHIELD-05 (spec 021): quarantine a wrong-sized SDF lattice at save
-        // ADOPTION (the persistence library itself stays byte-faithful — its
+        // ADOPTION (the persistence library itself stays byte-faithful â€” its
         // roundtrip contract is load-bearing for the corruption-corpus tests).
         // Legitimate persisted sdf_data is EMPTY (T-I3-1 coarse/band producer)
         // or the full (CHUNK+1)^3 unit-step lattice; anything else is a
@@ -1019,7 +1088,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         // polygonise paths. Clearing marks the chunk for deterministic
         // regeneration on its next build/promotion (the saved mesh stays
         // renderable meanwhile). A truncated lattice is untrustworthy, so any
-        // voxel edits inside it are already lost — regeneration from
+        // voxel edits inside it are already lost â€” regeneration from
         // seed/params is the least-bad recovery.
         {
             constexpr std::size_t kFullSdfLattice =
@@ -1028,7 +1097,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
             if (!chunk->sdf_data.empty() && chunk->sdf_data.size() != kFullSdfLattice) {
                 LUMINUMBRA_CORE_WARN(
                     "World load: chunk ({},{},{}) carries a malformed sdf_data lattice "
-                    "(size {} != {} and non-empty) — quarantined for regeneration",
+                    "(size {} != {} and non-empty) â€” quarantined for regeneration",
                     chunk->get_coords().x, chunk->get_coords().y, chunk->get_coords().z,
                     chunk->sdf_data.size(), kFullSdfLattice);
                 chunk->sdf_data.clear();
@@ -1081,7 +1150,7 @@ std::string GameSession::GenerateWorldId() {
     return ss.str();
 }
 
-uint32_t GameSession::StringToSeed(const std::string& seedStr) {
+uint32_t GameSession::StringToSeed(const std::string& seedStr) const {
     if (seedStr.empty()) {
         return std::random_device{}();
     }

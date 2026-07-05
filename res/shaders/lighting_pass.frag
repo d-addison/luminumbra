@@ -32,6 +32,9 @@ uniform float u_aetherFieldInvWorldSpan; // 1 / (extent * cell_size_m)
 uniform float u_aetherActive = 0.0;      // 0 = no field uploaded (no glow)
 uniform vec3 u_aetherGlowColor = vec3(0.30, 0.55, 0.95);
 uniform float u_aetherGlowIntensity = 2.0;
+// ATMO-14 (Wave G S1.3): render-only snow ground cover [0,1]. 0.0 (the default)
+// is byte-identical; >0 blends UP-FACING surfaces toward snow white + full rough.
+uniform float u_snowCover = 0.0;
 
 // G-Buffer decoding functions
 vec2 octWrap(vec2 v) {
@@ -429,6 +432,16 @@ void main() {
     // the G-buffer), so the lighting pass consumes the G-buffer albedo directly.
     // The legacy lighting-pass TriPlanar override has been removed; u_terrainTextures
     // is retained as a binding for compatibility but no longer sampled here.
+
+    // ATMO-14 (S1.3): SNOW COVER — blend UP-FACING surfaces toward snow (bright
+    // albedo, fully rough) by the render-only cover scalar, BEFORE F0/roughness
+    // derive from them. u_snowCover == 0 (the default) touches nothing:
+    // byte-identical. The far-water sheet (200) keeps its authored look.
+    if (u_snowCover > 0.001 && MaterialID != 200u) {
+        float snowAmt = u_snowCover * clamp(Normal.y, 0.0, 1.0);
+        Albedo = mix(Albedo, vec3(0.88, 0.91, 0.96), snowAmt);
+        Roughness = mix(Roughness, 0.95, snowAmt);
+    }
 
     vec3 V = normalize(u_viewPos - FragPos);
     vec3 F0 = mix(vec3(0.04), Albedo, Metallic);

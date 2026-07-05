@@ -1049,6 +1049,9 @@ RenderContext RenderPipeline::make_lighting_context(const Camera& camera) {
     ctx.aether_extent       = m_aetherFieldExtent;
     ctx.aether_cell_size    = m_aetherFieldCellSize;
     ctx.aether_world_origin = m_aetherFieldWorldOrigin;
+    ctx.aether_glow_color     = m_aetherGlowColor;     // AETHER-10: the glow grade
+    ctx.aether_glow_intensity = m_aetherGlowIntensity; // (defaults == GLSL consts)
+    ctx.snow_cover            = m_snowCover;           // ATMO-14: snow ground cover
 
     // Group H — light/atmosphere scalars & vectors.
     ctx.sun                = m_sun;
@@ -5818,10 +5821,14 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     // Spec 013 FR-0.1: while HELD (photo-mode time-of-day scrub), the day clock does NOT
     // auto-advance — the externally-set m_timeOfDay (via set_time_of_day) persists and the
     // sun/season below recompute from it. Render-only; never touches the sim clock.
-    if (!m_timeOfDayHold) {
+    // ATMO-10: when the sim tick drove TOD this frame (set_time_of_day_tick), the
+    // wall-clock advance is also skipped — the tick is the time authority. Paths that
+    // never feed the tick (scenarios, tests, menus) keep the legacy advance verbatim.
+    if (!m_timeOfDayHold && !m_todTickDriven) {
         m_timeOfDay += deltaTime / m_dayDurationSeconds;
         m_timeOfDay = fmod(m_timeOfDay, 1.0f);
     }
+    m_todTickDriven = false;
 
     // T-I5a-7 (C2) / RENDER-14: SEASON phase / wave / declination as a PURE FUNCTION of the
     // tick count -- integer epoch math then a single DeterministicMath trig evaluation, no
@@ -6025,6 +6032,17 @@ u32 RenderPipeline::water_caustics_texture() const {
 
 void RenderPipeline::set_time_of_day(float normalized_time) {
     m_timeOfDay = std::clamp(normalized_time, 0.0f, 1.0f);
+}
+
+void RenderPipeline::set_time_of_day_tick(std::uint64_t sim_tick) {
+    // ATMO-10: the photo-mode hold outranks the tick authority (FR-0.1 — the player
+    // is scrubbing time); scenario/scene pins outrank it by frame order (they call
+    // set_time_of_day after this). Marks the frame tick-driven either way so the
+    // wall-clock advance never fights the scrub.
+    if (!m_timeOfDayHold) {
+        m_timeOfDay = Rendering::TimeOfDayFromTick(sim_tick, m_dayLengthTicks);
+    }
+    m_todTickDriven = true;
 }
 
 void RenderPipeline::set_weather(WeatherType type, float intensity) {

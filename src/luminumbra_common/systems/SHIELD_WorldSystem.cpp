@@ -3818,6 +3818,11 @@ void SHIELD_WorldSystem::SetWaterHydrology(bool finite, std::int32_t rain_mm_per
     if (m_water_system) m_water_system->SetHydrology(finite, rain_mm_per_tick, evap_mm_per_tick);
 }
 
+// S1.1 (ATMO-11/WATER-07): weather-driven per-cell rain passthrough (null = OFF).
+void SHIELD_WorldSystem::SetWaterWeatherRain(const Systems::WeatherSystem* weather, std::int32_t scale_mm) {
+    if (m_water_system) m_water_system->SetWeatherRain(weather, scale_mm);
+}
+
 // WATER-17: boot-settle mode passthrough (lifts the live-play water caps during Boot only).
 void SHIELD_WorldSystem::SetWaterBootSettleMode(bool on) {
     if (m_water_system) m_water_system->SetBootSettleMode(on);

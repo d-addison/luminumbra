@@ -40,19 +40,22 @@ struct CreatureBrainStats {
 // unit, so this is a fractional blend that keeps flee/hunt dominant).
 inline constexpr float kHerdWeight = 0.8f;
 // How strongly herd flocking matches the group's mean heading (Reynolds alignment, the 3rd term).
-// 0 = OFF, which keeps the steer byte-identical to the cohesion+separation result (canonical roster
-// + 1v1 tests stay exact). Tuned ON (0.5, just below cohesion 0.6) so a herd converges to a common
-// heading — emergent flocking. A lone creature has no same-role neighbour -> zero steer -> 1v1
-// flee/hunt behaviour is unchanged; the canonical (empty-roster) world runs the brain as a no-op,
-// so default --smoke is byte-identical and the populated gate stays run==replay (no literal re-pin).
+// DEFAULT 0.5 — the alignment term is ON (just below cohesion 0.6) so a herd converges to a
+// common heading (emergent flocking). Setting it to 0 (via EcologyTuning / SystemConfig
+// sim.ecology) disables the term and reverts the steer to the pure cohesion+separation result.
+// A lone creature has no same-role neighbour -> zero steer -> 1v1 flee/hunt behaviour is
+// unchanged either way; the canonical (empty-roster) world runs the brain as a no-op, so the
+// default --smoke hash is independent of this weight.
 inline constexpr float kAlignmentWeight = 0.5f;
 // Predator catch reach (m) and how much catching a prey sates the predator's hunger.
 inline constexpr float kCatchRadius = 2.2f;
 inline constexpr float kCatchSatiation = 0.8f;
-// Spec 011 Phase A: energy (long-term sleep need). Drains slowly every tick (being awake costs
-// energy); Rest recovers it faster than it drains (net positive). Per-second rates (scaled by dt).
-// Energy is NOT yet read by DecideCreatureAction and NOT in world_hash, so these are byte-identical
-// to the sim trajectory today -- a tracked need until Phase E/F wires the circadian-gated Sleep.
+// Spec 011: energy (long-term sleep need). Drains slowly every tick (being awake costs energy);
+// Rest recovers it faster than it drains (net positive) and Sleep recovers it fastest. Per-second
+// rates (scaled by dt). Energy IS read by DecideCreatureAction (Phase E landed: the Sleep action's
+// "tired" consideration, circadian-gated via CreatureSenses.circadian_activity), so it steers the
+// sim trajectory of any sleeping roster. It is NOT yet folded into the ecology sub-hash
+// (EcologyHash.h reads hunger/stamina, not energy — hashing it is spec-021 INSTINCT-10).
 inline constexpr float kEnergyDrainPerSecond = 0.006f;
 inline constexpr float kEnergyRestRecover    = 0.080f;
 // Sleep recovers energy faster than Rest (deep rest at the nest/off-phase).
@@ -299,9 +302,10 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
                 herd.emplace_back(snap[hi].x, snap[hi].z);
                 herdHeadings.emplace_back(snap[hi].hx, snap[hi].hz);
             }
-            // alignment_weight default 0 (kAlignmentWeight) -> alignment is skipped and the steer is
-            // byte-identical to the cohesion+separation result; passing headings has zero effect
-            // until the weight is tuned > 0.
+            // alignment_weight defaults to kAlignmentWeight (0.5) -> the Reynolds alignment term
+            // is ACTIVE by default: the pre-tick headings passed below bias the steer toward the
+            // herd's mean heading. Tuning it to 0 (EcologyTuning / SystemConfig sim.ecology) skips
+            // alignment inside ComputeFlockSteer and reverts to the pure cohesion+separation steer.
             FlockParams fp{};
             fp.neighbor_radius   = tuning.flock_neighbor_radius;
             fp.separation_radius = tuning.flock_separation_radius;

@@ -85,12 +85,51 @@ public:
     void SetTimeOfDay(float timeNormalized); // 0.0 = midnight, 0.5 = noon
     void SetSeasonalEffects(float seasonFactor); // 0.0 = winter, 1.0 = summer
 
+    // AUDIO-07 (spec 021 rank ~93): day/night soundscape. The day bed (birdsong)
+    // is GATED by sun elevation and crossfades against a night bed (crickets/
+    // owls) over a few seconds (AudioModel::kDayNightCrossfadeTau). Once
+    // configured, THIS system owns the two beds' lifecycle (start/stop/volume
+    // via the IAudioManager ambient-loop surface) — the client must not also
+    // PlayAmbientLoop them. Unconfigured, the system leaves ambient beds alone
+    // (legacy behavior: whatever the client starts plays 24/7).
+    void ConfigureDayNightBeds(const AudioEventID& dayBed, const AudioEventID& nightBed);
+
+    // Sun-elevation INPUT seam: sinSunElevation = sin(sun elevation angle) in
+    // [-1, 1] — the vertical component of the normalized TOWARD-sun direction.
+    // Fed from OUTSIDE per frame (the client reads the render pipeline's
+    // time-of-day state, e.g. -render_pipeline.sun_direction().y, and pushes it
+    // here); the audio system deliberately never reaches into render globals.
+    // The FIRST feed snaps the crossfade to the current day/night state (no
+    // spurious dawn fade when loading a world at midnight); later feeds smooth.
+    void SetSunElevation(float sinSunElevation);
+
+    struct DayNightState {
+        bool configured = false;
+        bool has_sun_input = false;
+        float sin_sun_elevation = 1.0f;  // default full day == legacy 24/7 birdsong
+        float target_night_factor = 0.0f;
+        float night_factor = 0.0f;       // smoothed [0,1]; 0 = day, 1 = night
+        float day_weight = 1.0f;         // applied day-bed volume scale
+        float night_weight = 0.0f;       // applied night-bed volume scale
+        bool day_bed_started = false;
+        bool night_bed_started = false;
+        std::uint64_t apply_count = 0;   // bed start/stop transitions (telemetry)
+    };
+    const DayNightState& CurrentDayNight() const { return m_dayNight; }
+
     // T-I4-5: apply the active biome's reverb profile. preset is the authored
     // label (opaque to the engine); wet/dry/decay drive the audio manager's
     // global reverb. Idempotent: re-applying the same profile is a no-op so the
     // per-tick Update path does not churn the backend. The last applied profile
     // is exposed for the audio telemetry artifact (reverb block).
     void ApplyBiomeReverb(const std::string& preset, float wet, float dry, float decay);
+
+    // AUDIO-09: apply a reverb profile from an acoustic-space SIZE scalar
+    // ([0,1], 0 ~ open field, 1 ~ canyon) via the canonical monotone curve
+    // (AudioModel::BiomeReverbFromSize). Authored biomes should keep calling
+    // ApplyBiomeReverb with their biomes.json values; this is the entry point
+    // for procedural/unauthored spaces that only know a size.
+    void ApplyBiomeReverbFromSize(const std::string& preset, float size01);
 
     struct BiomeReverbState {
         bool applied = false;
@@ -147,7 +186,11 @@ private:
     
     void UpdateAmbientZones(const glm::vec3& listenerPosition);
     void UpdateWeatherAudio();
-    void UpdateTimeBasedEffects();
+    // AUDIO-07: drive the sun-gated day/night ambient-bed crossfade (replaces
+    // the old do-nothing UpdateTimeBasedEffects stub). dt is the real elapsed
+    // seconds since the last throttled tick, so the crossfade speed is
+    // frame-rate independent.
+    void UpdateDayNightBeds(const glm::vec3& listenerPosition, float dt);
     AudioEnvironment CreateEnvironmentProfile(AudioEnvironmentType type);
     
     MiniaudioManager* m_audioManager;
@@ -167,6 +210,11 @@ private:
     BiomeReverbState m_biomeReverb; // T-I4-5: last applied per-biome reverb
 
     AtmosphereAudioState m_atmosphere; // T-I5b-3: last applied atmosphere state
+
+    // AUDIO-07: day/night bed crossfade state + the two configured bed events.
+    DayNightState m_dayNight;
+    AudioEventID m_dayBedEvent;
+    AudioEventID m_nightBedEvent;
 };
 
 } // namespace Luminumbra::Client

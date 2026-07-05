@@ -1,4 +1,5 @@
 #include "EnvironmentalAudioSystem.h"
+#include "EnvironmentalAudioModel.h"
 #include "core/Log.h"
 #include <algorithm>
 
@@ -22,9 +23,14 @@ EnvironmentalAudioSystem::EnvironmentalAudioSystem(MiniaudioManager* audioManage
 EnvironmentalAudioSystem::~EnvironmentalAudioSystem() {
     // Clean up ambient zones
     for (auto& [id, zone] : m_ambientZones) {
-        if (zone->isActive) {
+        if (zone->isActive && m_audioManager) {
             m_audioManager->StopAmbientLoop(zone->soundEvent);
         }
+    }
+    // AUDIO-07: stop the day/night beds this system owns.
+    if (m_audioManager) {
+        if (m_dayNight.day_bed_started) m_audioManager->StopAmbientLoop(m_dayBedEvent);
+        if (m_dayNight.night_bed_started) m_audioManager->StopAmbientLoop(m_nightBedEvent);
     }
 }
 
@@ -34,7 +40,7 @@ void EnvironmentalAudioSystem::Update(const glm::vec3& listenerPosition, float d
     if (m_updateTimer >= UPDATE_INTERVAL) {
         UpdateAmbientZones(listenerPosition);
         UpdateWeatherAudio();
-        UpdateTimeBasedEffects();
+        UpdateDayNightBeds(listenerPosition, m_updateTimer); // AUDIO-07
         m_updateTimer = 0.0f;
     }
 }
@@ -139,6 +145,12 @@ void EnvironmentalAudioSystem::ApplyBiomeReverb(const std::string& preset, float
     }
     LUMINUMBRA_CORE_INFO("Biome reverb applied: preset={} wet={} dry={} decay={}",
                          preset, wet, dry, decay);
+}
+
+void EnvironmentalAudioSystem::ApplyBiomeReverbFromSize(const std::string& preset, float size01) {
+    // AUDIO-09: canonical monotone size->reverb curve (see EnvironmentalAudioModel.h).
+    const AudioModel::BiomeReverbParams p = AudioModel::BiomeReverbFromSize(size01);
+    ApplyBiomeReverb(preset, p.wet, p.dry, p.decay);
 }
 
 AtmosphereAudioState EnvironmentalAudioSystem::ComputeAtmosphere(
@@ -276,30 +288,64 @@ void EnvironmentalAudioSystem::UpdateWeatherAudio() {
     }
 }
 
-void EnvironmentalAudioSystem::UpdateTimeBasedEffects() {
-    // Adjust ambient volumes based on time of day
-    float nightFactor = 1.0f;
-    
-    // Dawn/dusk periods (0.2-0.3 and 0.7-0.8)
-    if (m_weatherState.timeOfDay >= 0.2f && m_weatherState.timeOfDay <= 0.3f) {
-        // Dawn - gradually increase day sounds
-        nightFactor = 1.0f - (m_weatherState.timeOfDay - 0.2f) / 0.1f;
-    } else if (m_weatherState.timeOfDay >= 0.7f && m_weatherState.timeOfDay <= 0.8f) {
-        // Dusk - gradually increase night sounds
-        nightFactor = (m_weatherState.timeOfDay - 0.7f) / 0.1f;
-    } else if (m_weatherState.timeOfDay > 0.3f && m_weatherState.timeOfDay < 0.7f) {
-        // Day time
-        nightFactor = 0.0f;
-    } else {
-        // Night time
-        nightFactor = 1.0f;
+void EnvironmentalAudioSystem::ConfigureDayNightBeds(const AudioEventID& dayBed,
+                                                     const AudioEventID& nightBed) {
+    m_dayBedEvent = dayBed;
+    m_nightBedEvent = nightBed;
+    m_dayNight.configured = true;
+    LUMINUMBRA_CORE_INFO("Day/night soundscape configured: day='{}' night='{}'",
+                         dayBed, nightBed);
+}
+
+void EnvironmentalAudioSystem::SetSunElevation(float sinSunElevation) {
+    m_dayNight.sin_sun_elevation = std::clamp(sinSunElevation, -1.0f, 1.0f);
+    if (!m_dayNight.has_sun_input) {
+        // First feed SNAPS to the current day/night state so loading a world at
+        // midnight starts on crickets, not a 2.5 s fade out of phantom birdsong.
+        m_dayNight.has_sun_input = true;
+        m_dayNight.night_factor = AudioModel::NightFactor(m_dayNight.sin_sun_elevation);
     }
-    
-    // Apply time-based audio filtering (would need audio manager extensions)
-    // This could involve:
-    // - Reducing high frequencies at night
-    // - Adding subtle reverb changes
-    // - Switching between day/night ambient loops
+}
+
+void EnvironmentalAudioSystem::UpdateDayNightBeds(const glm::vec3& listenerPosition, float dt) {
+    // AUDIO-07: sun-gated day/night ambient-bed crossfade (replaces the old
+    // do-nothing time-of-day stub: the birdsong bed used to play 24/7).
+    if (!m_dayNight.configured) return;
+
+    m_dayNight.target_night_factor = AudioModel::NightFactor(m_dayNight.sin_sun_elevation);
+    m_dayNight.night_factor = AudioModel::SmoothTowards(
+        m_dayNight.night_factor, m_dayNight.target_night_factor,
+        dt, AudioModel::kDayNightCrossfadeTau);
+    const AudioModel::DayNightWeights weights =
+        AudioModel::DayNightCrossfade(m_dayNight.night_factor);
+    m_dayNight.day_weight = weights.day;
+    m_dayNight.night_weight = weights.night;
+
+    // Null-audio (telemetry/harness) keeps the model state observable without a
+    // backend; only the bed start/stop/volume calls need a live manager.
+    if (!m_audioManager) return;
+
+    const auto driveBed = [&](const AudioEventID& bed, float weight, bool& started) {
+        if (bed.empty()) return;
+        if (weight > AudioModel::kBedSilenceFloor) {
+            if (!started) {
+                // Huge radius = effectively constant world ambience (matches the
+                // client's existing beds); the listener follows the player anyway.
+                m_audioManager->PlayAmbientLoop(bed, listenerPosition, 1.0e6f);
+                started = true;
+                ++m_dayNight.apply_count;
+                LUMINUMBRA_CORE_INFO("Day/night bed started: '{}'", bed);
+            }
+            m_audioManager->SetAmbientVolume(bed, weight);
+        } else if (started) {
+            m_audioManager->StopAmbientLoop(bed);
+            started = false;
+            ++m_dayNight.apply_count;
+            LUMINUMBRA_CORE_INFO("Day/night bed stopped: '{}'", bed);
+        }
+    };
+    driveBed(m_dayBedEvent, m_dayNight.day_weight, m_dayNight.day_bed_started);
+    driveBed(m_nightBedEvent, m_dayNight.night_weight, m_dayNight.night_bed_started);
 }
 
 AudioEnvironment EnvironmentalAudioSystem::CreateEnvironmentProfile(AudioEnvironmentType type) {

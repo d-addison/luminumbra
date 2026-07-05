@@ -40,6 +40,7 @@
 #include "rendering/FroxelGrid.h"     // Spec 015 Pillar B (RENDER-17): the froxel grid model
 #include "rendering/CelestialBodyModel.h" // Spec 022 Tier 1: the celestial-body seam
 #include "rendering/OitModel.h"           // Spec 015 C-2 (RENDER-18): WBOIT model
+#include "rendering/SnowCoverModel.h"     // ATMO-14 (S1.3): render-only snow cover
 
 namespace fs = std::filesystem;
 
@@ -1233,6 +1234,88 @@ TEST(OitModel, WeightFunctionMonotoneAndCompositeAlgebra) {
     // Coverage: no glass -> 0; a full-alpha pane -> 1.
     EXPECT_FLOAT_EQ(O::ResolveCoverage(1.0f), 0.0f);
     EXPECT_FLOAT_EQ(O::ResolveCoverage(0.0f), 1.0f);
+}
+
+// ATMO-14 (Wave G S1.3): the render-only snow-cover model — accumulates under
+// snowfall, melts under sun, clamps [0,1], and 0-input stays 0 (the byte-identical
+// default). The lighting_pass u_snowCover blend consumes exactly this scalar.
+TEST(SnowCoverModel, AccumulatesUnderSnowMeltsUnderSunAndClamps) {
+    namespace S = Luminumbra::Rendering::SnowCover;
+    S::State s;
+    // No snow, no sun: only the (slow) ambient thaw — a zero cover stays zero.
+    S::Advance(s, 0.0f, 0.0f, 60.0f);
+    EXPECT_FLOAT_EQ(s.cover01, 0.0f);
+    // Heavy snow accumulates monotonically and saturates at 1.
+    float prev = 0.0f;
+    for (int i = 0; i < 10; ++i) {
+        S::Advance(s, 1.0f, 0.0f, 20.0f);
+        EXPECT_GE(s.cover01, prev);
+        prev = s.cover01;
+    }
+    EXPECT_GT(s.cover01, 0.9f);
+    S::Advance(s, 1.0f, 0.0f, 600.0f);
+    EXPECT_FLOAT_EQ(s.cover01, 1.0f); // clamped
+    // Full sun melts it back down monotonically to bare.
+    for (int i = 0; i < 10; ++i) {
+        const float before = s.cover01;
+        S::Advance(s, 0.0f, 1.0f, 30.0f);
+        EXPECT_LE(s.cover01, before);
+    }
+    S::Advance(s, 0.0f, 1.0f, 600.0f);
+    EXPECT_FLOAT_EQ(s.cover01, 0.0f);
+    // Negative dt is defended (no time travel).
+    S::Advance(s, 1.0f, 0.0f, -5.0f);
+    EXPECT_FLOAT_EQ(s.cover01, 0.0f);
+}
+
+// ATMO-10 (Wave G R1.3): TIME AUTHORITY — time-of-day is a pure function of the
+// sim tick. Same tick -> same TOD, bit-for-bit, no matter how many times or in
+// what order it is evaluated (there is no accumulator to drift with frame
+// pacing); the default day length reproduces the legacy 60 s/day wall pacing.
+TEST(TodTickPurity, SameTickSameTodIndependentOfFramePacing) {
+    namespace R = Luminumbra::Rendering;
+    EXPECT_EQ(R::kDefaultDayLengthTicks, 1800u) << "60 s/day at 30 Hz — the legacy pacing";
+    // Anchors: tick 0 == noon (tod 0); half a day == midnight (tod 0.5); wraps.
+    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(0, 1800), 0.0f);
+    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(900, 1800), 0.5f);
+    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(1800, 1800), 0.0f);
+    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(1800ull * 1000ull + 450ull, 1800), 0.25f);
+    // Purity: evaluating out of order / repeatedly yields bit-identical values —
+    // the property a wall-clock accumulator can never have.
+    const std::uint64_t ticks[] = {7ull, 12345ull, 99999999ull, 3ull, 7ull};
+    const float first_seven = R::TimeOfDayFromTick(7, 1800);
+    for (std::uint64_t t : ticks) {
+        const float a = R::TimeOfDayFromTick(t, 1800);
+        const float b = R::TimeOfDayFromTick(t, 1800);
+        EXPECT_EQ(a, b);
+        if (t == 7ull) { EXPECT_EQ(a, first_seven); }
+        EXPECT_GE(a, 0.0f);
+        EXPECT_LT(a, 1.0f);
+    }
+    // Zero day length is defended (clamped to 1).
+    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(42, 0), 0.0f);
+}
+
+// ATMO-09 (Wave G R1.2): the LIVE season is the same pure function of the sim
+// tick the sweeps use — feeding the authoritative tick per frame yields one
+// season trajectory reproducible from the tick alone (no wall-clock, no drift).
+TEST(LiveSeasonTick, SeasonPhaseIsPureFunctionOfSimTick) {
+    namespace R = Luminumbra::Rendering;
+    constexpr std::uint64_t kCycle = 216000ull; // any cycle: purity is the subject
+    for (std::uint64_t t : {0ull, 1ull, 54000ull, 108000ull, 215999ull, 216000ull, 999999999ull}) {
+        const R::SeasonState a = R::ComputeSeason(t, kCycle);
+        const R::SeasonState b = R::ComputeSeason(t, kCycle);
+        EXPECT_EQ(a.phase, b.phase);
+        EXPECT_EQ(a.wave, b.wave);
+        EXPECT_EQ(a.sunDeclination, b.sunDeclination);
+    }
+    // The wrap is exact: one full cycle later is the same season, bit-for-bit.
+    const R::SeasonState s0 = R::ComputeSeason(1234, kCycle);
+    const R::SeasonState s1 = R::ComputeSeason(1234 + kCycle, kCycle);
+    EXPECT_EQ(s0.phase, s1.phase);
+    EXPECT_EQ(s0.wave, s1.wave);
+    // Phase 0 is the season-NEUTRAL default every pre-ATMO-09 live session sat at.
+    EXPECT_FLOAT_EQ(R::ComputeSeason(0, kCycle).wave, 0.0f);
 }
 
 // Spec 022 Tier 1 (Wave F F9): the celestial-body seam is PLUMBING, not math —

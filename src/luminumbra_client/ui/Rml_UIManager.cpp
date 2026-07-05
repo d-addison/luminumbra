@@ -420,11 +420,11 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
     auto AddClickSoundListener = [this](Rml::Element* element, LambdaEventListener::Callback callback) {
         if (element) {
             element->AddEventListener("click", new LambdaEventListener([this, cb = std::move(callback)](Rml::Event& event){
-                if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click");
+                if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click", BusId::Ui);
                 if (cb) cb(event);
             }));
             element->AddEventListener("mouseover", new LambdaEventListener([this](Rml::Event&){
-                 if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_hover");
+                 if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_hover", BusId::Ui);
             }));
         }
     };
@@ -530,7 +530,7 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
     // Customize section: expand/collapse the advanced worldgen params.
     if (auto* toggle = document->GetElementById("customize_toggle")) {
         toggle->AddEventListener("click", new LambdaEventListener([this, document](Rml::Event&) {
-            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click");
+            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click", BusId::Ui);
             auto* body = document->GetElementById("customize_body");
             const bool collapsed = body && body->IsClassSet("collapsed");
             if (body) body->SetClass("collapsed", !collapsed);
@@ -792,7 +792,7 @@ void Rml_UIManager::PopulateUserPresets(Rml::ElementDocument* document) {
         // Same behaviour as the curated chips: select + drive #world_type + re-seed the form.
         // A click on the inner delete control opens the delete-confirm modal instead.
         added->AddEventListener("click", new LambdaEventListener([this, document](Rml::Event& event) {
-            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click");
+            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click", BusId::Ui);
             Rml::Element* target = event.GetTargetElement();
             // Delete affordance: walk up looking for a data-delete before the chip's data-preset.
             for (Rml::Element* t = target; t; t = t->GetParentNode()) {
@@ -1068,7 +1068,7 @@ void Rml_UIManager::BindSettingsListeners(Rml::ElementDocument* document) {
     // Apply & Save button: flush every control then persist the overlay.
     if (auto* apply = document->GetElementById("apply_settings_btn")) {
         apply->AddEventListener("click", new LambdaEventListener([this, document](Rml::Event&) {
-            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click");
+            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click", BusId::Ui);
             for (const char* control_id : kControlIds) {
                 this->ApplySettingFromElement(document->GetElementById(control_id));
             }
@@ -1082,7 +1082,7 @@ void Rml_UIManager::BindSettingsListeners(Rml::ElementDocument* document) {
             }
         }));
         apply->AddEventListener("mouseover", new LambdaEventListener([this](Rml::Event&) {
-            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_hover");
+            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_hover", BusId::Ui);
         }));
     }
 
@@ -1092,7 +1092,7 @@ void Rml_UIManager::BindSettingsListeners(Rml::ElementDocument* document) {
     // vsync toggle: flip .on, mirror to hidden #setting_vsync, apply + save.
     if (auto* toggle = document->GetElementById("vsync_toggle")) {
         toggle->AddEventListener("click", new LambdaEventListener([this, document, persist](Rml::Event&) {
-            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click");
+            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click", BusId::Ui);
             auto* t = document->GetElementById("vsync_toggle");
             const bool now_on = !(t && t->IsClassSet("on"));
             if (t) t->SetClass("on", now_on);
@@ -1122,13 +1122,13 @@ void Rml_UIManager::BindSettingsListeners(Rml::ElementDocument* document) {
     };
     if (auto* prev = document->GetElementById("window_mode_prev")) {
         prev->AddEventListener("click", new LambdaEventListener([this, cycle_window](Rml::Event&) {
-            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click");
+            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click", BusId::Ui);
             cycle_window(-1);
         }));
     }
     if (auto* next = document->GetElementById("window_mode_next")) {
         next->AddEventListener("click", new LambdaEventListener([this, cycle_window](Rml::Event&) {
-            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click");
+            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click", BusId::Ui);
             cycle_window(+1);
         }));
     }
@@ -1139,7 +1139,7 @@ void Rml_UIManager::BindSettingsListeners(Rml::ElementDocument* document) {
     document->GetElementsByClassName(kb_rows, "keybind-rebind");
     for (Rml::Element* row : kb_rows) {
         row->AddEventListener("click", new LambdaEventListener([this, document](Rml::Event& ev) {
-            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click");
+            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click", BusId::Ui);
             Rml::Element* r = ev.GetTargetElement();
             while (r && r->GetAttribute<Rml::String>("data-action", "").empty()) r = r->GetParentNode();
             if (!r) return;

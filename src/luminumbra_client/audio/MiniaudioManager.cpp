@@ -1,4 +1,5 @@
 #include "audio/MiniaudioManager.h"
+#include "audio/EnvironmentalAudioModel.h"  // AUDIO-09: pure reverb-proxy param mapping
 #include "AudioSpatialCluster.h"
 #include "../../luminumbra_common/systems/PhysicsSystem.h"
 #include <algorithm>
@@ -25,8 +26,55 @@ bool MiniaudioManager::Init() {
         m_engine = nullptr;
         return false;
     }
+
+    // AUDIO-05/AUDIO-10: build the mix-bus group tree. sfx attaches to the engine
+    // endpoint; ambient/events/ui attach UNDER sfx so user.audio_sfx scales every
+    // non-music sound. All groups boot at volume 1.0 => the mix is byte-identical
+    // to the pre-bus graph until a bus volume moves. A group-init failure is
+    // non-fatal: GroupFor() then returns nullptr and playback attaches straight
+    // to the endpoint exactly as before.
+    auto init_group = [this](std::unique_ptr<ma_sound_group>& group,
+                             ma_sound_group* parent, const char* name) {
+        group = std::make_unique<ma_sound_group>();
+        if (ma_sound_group_init(m_engine.get(), 0, parent, group.get()) != MA_SUCCESS) {
+            LUMINUMBRA_CORE_WARN("Failed to init '{}' sound group; routing to endpoint.", name);
+            group.reset();
+        }
+    };
+    init_group(m_sfxGroup, nullptr, "sfx");
+    init_group(m_ambientGroup, m_sfxGroup.get(), "ambient");
+    init_group(m_eventsGroup, m_sfxGroup.get(), "events");
+    init_group(m_uiGroup, m_sfxGroup.get(), "ui");
+
+    m_ducker.Reset();
+    m_hasLastUpdateTime = false;
+    m_lastAppliedAmbientGain = -1.0f;
+    m_lastAppliedMusicDuckGain = -1.0f;
+
     LUMINUMBRA_CORE_INFO("Miniaudio Manager Initialized.");
     return true;
+}
+
+ma_sound_group* MiniaudioManager::GroupFor(BusId bus) const {
+    switch (bus) {
+        case BusId::Sfx:     return m_sfxGroup.get();
+        case BusId::Ambient: return m_ambientGroup.get();
+        case BusId::Events:  return m_eventsGroup.get();
+        case BusId::Ui:      return m_uiGroup.get();
+        // Master/Music playback never attaches to an sfx group; endpoint routing.
+        case BusId::Master:
+        case BusId::Music:
+        default:             return nullptr;
+    }
+}
+
+void MiniaudioManager::ApplyAmbientBusGain() {
+    if (!m_ambientGroup) return;
+    const float gain = m_ambientVolume * m_ducker.AmbientGain();
+    if (gain != m_lastAppliedAmbientGain) {
+        ma_sound_group_set_volume(m_ambientGroup.get(), gain);
+        m_lastAppliedAmbientGain = gain;
+    }
 }
 
 void MiniaudioManager::Update() {
@@ -56,16 +104,54 @@ void MiniaudioManager::Update() {
         }
     }
 
-    // Reap fire-and-forget 3D one-shots (PlayOneShot) that have finished playing.
+    // Reap fire-and-forget one-shots (PlayOneShot / PlayOneShot2D) that have finished
+    // playing. An Events-bus voice ending releases the sidechain duck (ref-counted).
     for (auto it = m_oneShotSounds.begin(); it != m_oneShotSounds.end(); ) {
-        if (!ma_sound_is_playing(it->get())) {
-            ma_sound_uninit(it->get());
+        if (!ma_sound_is_playing(it->sound.get())) {
+            if (it->bus == BusId::Events) {
+                m_ducker.OnEventEnd();
+            }
+            ma_sound_uninit(it->sound.get());
             it = m_oneShotSounds.erase(it);
         } else {
             ++it;
         }
     }
-    
+
+    // AUDIO-10 sidechain ducking: advance the envelope with WALL-CLOCK dt (client
+    // audio presentation only — never sim time) and fold the duck gain into the
+    // ambient bus (and the music bed, only when a music floor < 1 is configured).
+    {
+        const auto now = std::chrono::steady_clock::now();
+        float dt = 0.0f;
+        if (m_hasLastUpdateTime) {
+            dt = std::chrono::duration<float>(now - m_lastUpdateTime).count();
+            // Clamp a hitch/debugger pause so the envelope just saturates sanely.
+            if (dt > 0.25f) dt = 0.25f;
+            if (dt < 0.0f) dt = 0.0f;
+        }
+        m_lastUpdateTime = now;
+        m_hasLastUpdateTime = true;
+
+        m_ducker.Advance(dt);
+        ApplyAmbientBusGain();
+
+        // Optional music duck (DuckParams::music_floor_gain < 1). Off by default:
+        // MusicGain() is exactly 1.0 then, and the first pass through here caches
+        // it, so the music path is never re-scaled unless ducking music is enabled.
+        const float music_duck = m_ducker.MusicGain();
+        if (music_duck != m_lastAppliedMusicDuckGain) {
+            m_lastAppliedMusicDuckGain = music_duck;
+            if (m_currentMusic && m_ducker.params().music_floor_gain < 1.0f) {
+                const AudioEventDefinition* def = nullptr;
+                auto dit = m_eventDefinitions.find(m_currentMusicID);
+                if (dit != m_eventDefinitions.end()) def = &dit->second;
+                ma_sound_set_volume(m_currentMusic.get(),
+                                    (def ? def->volume : 1.0f) * m_musicVolume * music_duck);
+            }
+        }
+    }
+
     // Update wind effects on active sounds
     UpdateWindEffect();
 }
@@ -80,14 +166,36 @@ void MiniaudioManager::Shutdown() {
             ma_sound_uninit(sound_ptr.get());
         }
         m_activeSounds.clear();
-        for (auto& sound_ptr : m_oneShotSounds) {
-            ma_sound_uninit(sound_ptr.get());
+        for (auto& voice : m_oneShotSounds) {
+            ma_sound_uninit(voice.sound.get());
         }
         m_oneShotSounds.clear();
         for (auto& [id, sound_ptr] : m_ambientSounds) {
             ma_sound_uninit(sound_ptr.get());
         }
         m_ambientSounds.clear();
+        if (m_windSound) {
+            ma_sound_uninit(m_windSound.get());
+            m_windSound.reset();
+        }
+        // Bus groups: uninit AFTER every attached sound, BEFORE the engine.
+        auto uninit_group = [](std::unique_ptr<ma_sound_group>& group) {
+            if (group) {
+                ma_sound_group_uninit(group.get());
+                group.reset();
+            }
+        };
+        uninit_group(m_ambientGroup);
+        uninit_group(m_eventsGroup);
+        uninit_group(m_uiGroup);
+        uninit_group(m_sfxGroup);
+        // AUDIO-09: the reverb-proxy delay node dies AFTER the groups (its only
+        // input was the ambient group, already detached above), BEFORE the engine.
+        if (m_reverbNodeInitialized) {
+            ma_delay_node_uninit(&m_reverbNode, nullptr);
+            m_reverbNodeInitialized = false;
+        }
+        m_ducker.Reset();
         ma_engine_uninit(m_engine.get());
         m_engine = nullptr;
         LUMINUMBRA_CORE_ERROR("Miniaudio Manager Shutdown.");
@@ -165,7 +273,8 @@ bool MiniaudioManager::PlayEvent(const AudioEventID& eventID, AudioEventHandle& 
     uint32_t flags = MA_SOUND_FLAG_DECODE;
     if (def->is_2d) flags |= MA_SOUND_FLAG_NO_SPATIALIZATION;
 
-    if (ma_sound_init_from_file(m_engine.get(), full_path.c_str(), flags, NULL, NULL, sound.get()) != MA_SUCCESS) {
+    // Handle-based events are gameplay SFX: attach to the sfx bus (AUDIO-05).
+    if (ma_sound_init_from_file(m_engine.get(), full_path.c_str(), flags, GroupFor(BusId::Sfx), NULL, sound.get()) != MA_SUCCESS) {
         return false;
     }
 
@@ -207,7 +316,7 @@ bool MiniaudioManager::PlayEvent(const AudioEventID& eventID, AudioEventHandle& 
     return true;
 }
 
-bool MiniaudioManager::PlayOneShot2D(const AudioEventID& eventID) {
+bool MiniaudioManager::PlayOneShot2D(const AudioEventID& eventID, BusId bus) {
     if (!m_engine) return false;
     const AudioEventDefinition* def = GetEventDefinition(eventID);
     if (!def || def->files.empty()) return false;
@@ -216,11 +325,27 @@ bool MiniaudioManager::PlayOneShot2D(const AudioEventID& eventID) {
     const std::string& rel = def->files[dist(m_rng)];
     const std::string full_path = m_rootPath + rel;
 
-    ma_engine_play_sound(m_engine.get(), full_path.c_str(), nullptr);
+    // AUDIO-05/AUDIO-10: routed as a MANAGED one-shot instead of the old
+    // ma_engine_play_sound fire-and-forget so (a) the voice attaches to its bus
+    // group and (b) an Events-bus voice's end can release the sidechain duck.
+    // NO_PITCH + NO_SPATIALIZATION + volume left at the default 1.0 match the
+    // inline-sound semantics ma_engine_play_sound used (bank volume was never
+    // applied on this path), so the audible result is unchanged.
+    auto sound = std::make_unique<ma_sound>();
+    const uint32_t flags = MA_SOUND_FLAG_DECODE | MA_SOUND_FLAG_NO_PITCH | MA_SOUND_FLAG_NO_SPATIALIZATION;
+    if (ma_sound_init_from_file(m_engine.get(), full_path.c_str(), flags, GroupFor(bus), NULL, sound.get()) != MA_SUCCESS) {
+        return false;
+    }
+    ma_sound_start(sound.get());
+
+    if (bus == BusId::Events) {
+        m_ducker.OnEventStart();  // released when Update() reaps the finished voice
+    }
+    m_oneShotSounds.push_back(OneShotVoice{std::move(sound), bus});
     return true;
 }
 
-bool MiniaudioManager::PlayOneShot(const AudioEventID& eventID, const glm::vec3& position) {
+bool MiniaudioManager::PlayOneShot(const AudioEventID& eventID, const glm::vec3& position, BusId bus) {
     if (!m_engine) return false;
     const AudioEventDefinition* def = GetEventDefinition(eventID);
     if (!def || def->files.empty()) return false;
@@ -232,7 +357,9 @@ bool MiniaudioManager::PlayOneShot(const AudioEventID& eventID, const glm::vec3&
     auto sound = std::make_unique<ma_sound>();
     uint32_t flags = MA_SOUND_FLAG_DECODE;
 
-    if (ma_sound_init_from_file(m_engine.get(), full_path.c_str(), flags, NULL, NULL, sound.get()) != MA_SUCCESS) {
+    // AUDIO-05/AUDIO-10: spatial one-shots attach to their routed bus group
+    // (default sfx; Events voices sidechain-duck the ambient bus).
+    if (ma_sound_init_from_file(m_engine.get(), full_path.c_str(), flags, GroupFor(bus), NULL, sound.get()) != MA_SUCCESS) {
         return false;
     }
 
@@ -254,10 +381,14 @@ bool MiniaudioManager::PlayOneShot(const AudioEventID& eventID, const glm::vec3&
     ApplyEnvironmentalEffects(sound.get(), def);
     ma_sound_start(sound.get());
 
+    if (bus == BusId::Events) {
+        m_ducker.OnEventStart();  // released when Update() reaps the finished voice
+    }
+
     // Keep the node alive until it finishes (the mixing thread is still reading it). Update()
     // reaps stopped one-shots. Parking it here instead of a local unique_ptr fixes a
     // use-after-free: returning would have freed the ma_sound mid-playback.
-    m_oneShotSounds.push_back(std::move(sound));
+    m_oneShotSounds.push_back(OneShotVoice{std::move(sound), bus});
     return true;
 }
 
@@ -357,6 +488,45 @@ void MiniaudioManager::SetMusicVolume(float volume) {
     }
 }
 
+void MiniaudioManager::SetSfxVolume(float volume) {
+    if (volume < 0.0f) volume = 0.0f; else if (volume > 1.0f) volume = 1.0f;
+    m_sfxVolume = volume;
+    // Group volume applies live to every playing + future non-music sound
+    // (ambient/events/ui are children of this group). AUDIO-05.
+    if (m_sfxGroup) {
+        ma_sound_group_set_volume(m_sfxGroup.get(), m_sfxVolume);
+    }
+}
+
+void MiniaudioManager::SetBusVolume(BusId bus, float volume) {
+    if (volume < 0.0f) volume = 0.0f; else if (volume > 1.0f) volume = 1.0f;
+    switch (bus) {
+        case BusId::Master:
+            SetMasterVolume(volume);
+            break;
+        case BusId::Music:
+            SetMusicVolume(volume);
+            break;
+        case BusId::Sfx:
+            SetSfxVolume(volume);
+            break;
+        case BusId::Ambient:
+            m_ambientVolume = volume;
+            // Composed with the duck gain (never write the raw volume here or a
+            // mid-duck slider move would pop the bed back to full volume).
+            ApplyAmbientBusGain();
+            break;
+        case BusId::Events:
+            m_eventsVolume = volume;
+            if (m_eventsGroup) ma_sound_group_set_volume(m_eventsGroup.get(), volume);
+            break;
+        case BusId::Ui:
+            m_uiVolume = volume;
+            if (m_uiGroup) ma_sound_group_set_volume(m_uiGroup.get(), volume);
+            break;
+    }
+}
+
 bool MiniaudioManager::SetEventVolume(AudioEventHandle handle, float volume) {
     auto it = m_activeSounds.find(handle);
     if (it != m_activeSounds.end()) {
@@ -433,9 +603,10 @@ void MiniaudioManager::SetWindParameters(const glm::vec3& direction, float stren
         const std::string windPath = m_rootPath + "assets/audio/sfx/weather/wind_loop.ogg";
         m_windSound = std::make_unique<ma_sound>();
         
-        if (ma_sound_init_from_file(m_engine.get(), windPath.c_str(), 
-                                   MA_SOUND_FLAG_STREAM | MA_SOUND_FLAG_NO_SPATIALIZATION, 
-                                   NULL, NULL, m_windSound.get()) == MA_SUCCESS) {
+        // The wind bed is a looping ambience: route through the ambient bus.
+        if (ma_sound_init_from_file(m_engine.get(), windPath.c_str(),
+                                   MA_SOUND_FLAG_STREAM | MA_SOUND_FLAG_NO_SPATIALIZATION,
+                                   GroupFor(BusId::Ambient), NULL, m_windSound.get()) == MA_SUCCESS) {
             ma_sound_set_looping(m_windSound.get(), true);
             ma_sound_set_volume(m_windSound.get(), strength * 0.6f);
             ma_sound_start(m_windSound.get());
@@ -463,9 +634,59 @@ void MiniaudioManager::UpdateAudioOcclusion(AudioEventHandle handle, float occlu
 }
 
 void MiniaudioManager::SetGlobalReverb(float wet, float dry, float decay) {
-    // This would require custom reverb implementation
-    // miniaudio doesn't have built-in reverb, but you could implement it
-    LUMINUMBRA_CORE_INFO("Global reverb set - Wet: {}, Dry: {}, Decay: {}", wet, dry, decay);
+    // AUDIO-09 (spec 021): the biome/weather reverb is REAL now. miniaudio
+    // 0.11.22 (vendor FetchContent pin) has no built-in reverb DSP, so this is
+    // an HONEST PROXY: one feedback delay line (ma_delay_node) spliced between
+    // the ambient bus group and its parent. A short slap-back with feedback
+    // reads as early reflections + tail — convincing for canyon/cave/wet-air
+    // ambience, but NOT a true diffuse reverb (no allpass diffusion, and the
+    // delay TIME is fixed at init because ma_delay allocates its buffer then).
+    // wet/dry drive the node's mix; decay (pseudo-RT60 seconds from biomes.json
+    // / the weather shift) maps to a stability-capped feedback gain via the
+    // pure model (AudioModel::ReverbProxyFromParams — unit-tested CPU-only).
+    if (m_engine && !m_reverbNodeInitialized && m_ambientGroup) {
+        const ma_uint32 channels = ma_engine_get_channels(m_engine.get());
+        const ma_uint32 sampleRate = ma_engine_get_sample_rate(m_engine.get());
+        const ma_uint32 delayFrames = static_cast<ma_uint32>(
+            (AudioModel::kReverbProxyDelayMs / 1000.0f) * static_cast<float>(sampleRate));
+        ma_delay_node_config cfg = ma_delay_node_config_init(
+            channels, sampleRate, delayFrames > 0 ? delayFrames : 1, 0.0f);
+        if (ma_delay_node_init(ma_engine_get_node_graph(m_engine.get()), &cfg,
+                               nullptr, &m_reverbNode) == MA_SUCCESS) {
+            // Park the mix at the incoming params BEFORE the node goes live in
+            // the graph (no one-buffer blip of the config defaults).
+            const AudioModel::ReverbProxyParams first =
+                AudioModel::ReverbProxyFromParams(wet, dry, decay);
+            ma_delay_node_set_wet(&m_reverbNode, first.wet);
+            ma_delay_node_set_dry(&m_reverbNode, first.dry);
+            ma_delay_node_set_decay(&m_reverbNode, first.feedback);
+            // Splice: ambient group -> reverb node -> the group's former parent
+            // (sfx group, or the endpoint if sfx failed to init). ONE attach, so
+            // the AUDIO-05/10 ambient gain + sidechain duck upstream of the
+            // splice keep working unchanged.
+            ma_node* downstream = m_sfxGroup
+                ? reinterpret_cast<ma_node*>(m_sfxGroup.get())
+                : ma_engine_get_endpoint(m_engine.get());
+            ma_node_attach_output_bus(&m_reverbNode, 0, downstream, 0);
+            ma_node_attach_output_bus(m_ambientGroup.get(), 0, &m_reverbNode, 0);
+            m_reverbNodeInitialized = true;
+            LUMINUMBRA_CORE_INFO(
+                "Global reverb proxy online: delay node {} ms spliced onto the ambient bus",
+                AudioModel::kReverbProxyDelayMs);
+        } else {
+            LUMINUMBRA_CORE_WARN("Global reverb proxy: ma_delay_node_init failed; reverb params log-only.");
+        }
+    }
+    if (m_reverbNodeInitialized) {
+        const AudioModel::ReverbProxyParams p =
+            AudioModel::ReverbProxyFromParams(wet, dry, decay);
+        ma_delay_node_set_wet(&m_reverbNode, p.wet);
+        ma_delay_node_set_dry(&m_reverbNode, p.dry);
+        ma_delay_node_set_decay(&m_reverbNode, p.feedback);
+    }
+    LUMINUMBRA_CORE_INFO("Global reverb set - Wet: {}, Dry: {}, Decay: {}{}",
+                         wet, dry, decay,
+                         m_reverbNodeInitialized ? "" : " (proxy offline: log-only)");
 }
 
 void MiniaudioManager::PlayAmbientLoop(const AudioEventID& eventID, const glm::vec3& position, float radius) {
@@ -482,9 +703,10 @@ void MiniaudioManager::PlayAmbientLoop(const AudioEventID& eventID, const glm::v
     
     // Decode the (short) loop fully into memory instead of streaming: ogg streaming can fail
     // silently, and a pre-decoded buffer loops seamlessly. Log failure so a missing/!decodable
-    // ambient file is diagnosable rather than silent.
+    // ambient file is diagnosable rather than silent. Ambient beds attach to the
+    // ambient bus (child of sfx): user.audio_sfx scales them, events sidechain-duck them.
     const ma_result amb_rc = ma_sound_init_from_file(m_engine.get(), full_path.c_str(),
-                                                     MA_SOUND_FLAG_DECODE, NULL, NULL, sound.get());
+                                                     MA_SOUND_FLAG_DECODE, GroupFor(BusId::Ambient), NULL, sound.get());
     if (amb_rc != MA_SUCCESS) {
         LUMINUMBRA_CORE_WARN("PlayAmbientLoop: failed to load '{}' (ma_result {})", full_path, static_cast<int>(amb_rc));
     }
