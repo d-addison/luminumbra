@@ -512,6 +512,17 @@ public:
     // ssao_quality 0..3. memcmp==0 catches a call-site ctx mis-population. Writes a
     // ssao_parity.txt verdict under out_dir; returns false on GL/IO error or mismatch.
     bool capture_ssao_parity(const std::filesystem::path& out_dir, const Camera& camera);
+    // WAVE-F F1 (the RENDER-11 unlock): the in-process WHOLE-FRAME A/B. Re-dispatch the
+    // full 23-stage sequence TWICE over the frame prepare_frame already built
+    // (dispatch_stages is bit-idempotent per prepared frame), each leg final-blitted into
+    // its own offscreen target, then FLIP the readbacks in-process. The score is EXACTLY
+    // 0.0 or dispatch is not idempotent — the deterministic whole-frame gate this engine
+    // never had (cross-run FLIP floors at ~0.057 noise; --smoke never renders). The
+    // RENDER-11 execution migration compares old-vs-new dispatch paths through this same
+    // entry point. Writes frame_parity_{a,b}.ppm + frame_parity.json under out_dir.
+    // Returns false on GL/IO error, TAAU-on (history ping-pong breaks idempotence — Codex
+    // critique #2), or a nonzero score.
+    bool capture_frame_parity(const Camera& camera, const std::filesystem::path& out_dir);
     // Generated caustics texture id (0 when unavailable). Exposed for the
     // runtime scenario harness caustics-animation probe (T-I2-16).
     u32 water_caustics_texture() const;

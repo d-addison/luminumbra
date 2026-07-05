@@ -9,6 +9,7 @@
 #include "SunLightModel.h" // Spec 015 Pillar A (FR-A-001): SunIrradiance (transmittance-coupled sun magnitude)
 #include "TimeOfDayModel.h" // Spec 016 FR-F-001 (RENDER-14): pure time-of-day policy facets (ComputeSeason, ...)
 #include "RenderGraph.h"    // Spec 016 FR-C (RENDER-11): the declarative frame graph gated against the trace
+#include "InProcessFlip.h"  // WAVE-F F1: the deterministic in-process FLIP (capture_frame_parity)
 #include "rendering/passes/ShieldRtFarFieldPass.h"
 #include <algorithm>
 #include <chrono> // spec 004: CPU per-phase submit cost
@@ -790,6 +791,121 @@ bool RenderPipeline::capture_finalblit_parity(const std::filesystem::path& out_d
     glDeleteFramebuffers(1, &fboB);
     glDeleteTextures(1, &texA);
     glDeleteTextures(1, &texB);
+    return ok;
+}
+
+bool RenderPipeline::capture_frame_parity(const Camera& camera, const std::filesystem::path& out_dir) {
+    // WAVE-F F1: see the header contract. The normal render loop prepared (and
+    // dispatched) this frame already; the two legs below are re-dispatches of the
+    // SAME prepared frame, so any nonzero FLIP isolates a dispatch-idempotence
+    // break — and, during the RENDER-11 migration, an execution-path divergence.
+    if (!m_frame_prepared.valid) {
+        LUMINUMBRA_CORE_ERROR("capture_frame_parity: no prepared frame (render a frame first)");
+        return false;
+    }
+    if (m_taau_enabled) {
+        // TAAU's history ping-pong makes leg B consume leg A's writes (Codex
+        // critique finding 2). The parity contract requires it OFF (the default).
+        LUMINUMBRA_CORE_ERROR("capture_frame_parity: requires TAAU OFF (history ping-pong breaks dispatch idempotence)");
+        return false;
+    }
+    const GLsizei w = static_cast<GLsizei>(m_screen_width);
+    const GLsizei h = static_cast<GLsizei>(m_screen_height);
+    if (w <= 0 || h <= 0) return false;
+
+    auto make_target = [&](GLuint& fbo, GLuint& tex) {
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glGenFramebuffers(1, &fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    };
+    GLuint fboA = 0, texA = 0, fboB = 0, texB = 0;
+    make_target(fboA, texA);
+    bool ok = (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+    make_target(fboB, texB);
+    ok = ok && (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+
+    // The prepared frame was built under the NORMAL target state (Codex critique
+    // finding 5: prepare behavior keys off m_offscreen_target_active, e.g. the
+    // far-LOD skip) — only the DISPATCH legs retarget. Save + restore exactly.
+    const bool prev_active = m_offscreen_target_active;
+    const u32 prev_fbo = m_offscreen_target_fbo;
+    const u32 prev_w = m_offscreen_target_w;
+    const u32 prev_h = m_offscreen_target_h;
+    // The frame's real dispatch already recorded this frame's GPU timer ring slot;
+    // the two parity legs must not double-issue timestamp queries.
+    m_gpu_timers_suppressed = true;
+
+    set_offscreen_target(fboA, static_cast<u32>(w), static_cast<u32>(h));
+    dispatch_stages(camera);
+    set_offscreen_target(fboB, static_cast<u32>(w), static_cast<u32>(h));
+    dispatch_stages(camera);
+
+    m_gpu_timers_suppressed = false;
+    m_offscreen_target_active = prev_active;
+    m_offscreen_target_fbo = prev_fbo;
+    m_offscreen_target_w = prev_w;
+    m_offscreen_target_h = prev_h;
+
+    auto read_rgba = [&](GLuint fbo, std::vector<std::uint8_t>& px) {
+        px.assign(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4u, 0u);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    };
+    std::vector<std::uint8_t> pxA, pxB;
+    read_rgba(fboA, pxA);
+    read_rgba(fboB, pxB);
+
+    const auto flip = InProcessFlip::ComputeLumaFlip(pxA.data(), pxB.data(), w, h);
+
+    std::error_code ec;
+    std::filesystem::create_directories(out_dir, ec);
+    auto write_ppm = [&](const std::vector<std::uint8_t>& px, const std::filesystem::path& path) -> bool {
+        std::ofstream f(path, std::ios::binary | std::ios::trunc);
+        if (!f) return false;
+        f << "P6\n" << w << " " << h << "\n255\n";
+        for (std::size_t i = 0; i < px.size(); i += 4u) {
+            f.write(reinterpret_cast<const char*>(px.data() + i), 3);
+        }
+        return static_cast<bool>(f);
+    };
+    ok = ok && write_ppm(pxA, out_dir / "frame_parity_a.ppm");
+    ok = ok && write_ppm(pxB, out_dir / "frame_parity_b.ppm");
+    {
+        std::ofstream j(out_dir / "frame_parity.json", std::ios::trunc);
+        ok = ok && static_cast<bool>(j);
+        if (j) {
+            j << "{\n"
+              << "  \"schema\": \"luminumbra.render_frame_parity.v1\",\n"
+              << "  \"metric\": \"" << InProcessFlip::BackendName() << "\",\n"
+              << "  \"score\": " << flip.score << ",\n"
+              << "  \"max_error\": " << flip.max_error << ",\n"
+              << "  \"width\": " << w << ",\n"
+              << "  \"height\": " << h << ",\n"
+              << "  \"passed\": " << ((flip.score == 0.0) ? "true" : "false") << "\n"
+              << "}\n";
+        }
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fboA);
+    glDeleteFramebuffers(1, &fboB);
+    glDeleteTextures(1, &texA);
+    glDeleteTextures(1, &texB);
+
+    if (flip.score != 0.0) {
+        LUMINUMBRA_CORE_ERROR(
+            "capture_frame_parity: dispatch NOT idempotent — flip score {} (max {}) != 0.0",
+            flip.score, flip.max_error);
+        return false;
+    }
+    LUMINUMBRA_CORE_INFO("capture_frame_parity: whole-frame A/B EXACT (score 0.0, {}x{})", w, h);
     return ok;
 }
 

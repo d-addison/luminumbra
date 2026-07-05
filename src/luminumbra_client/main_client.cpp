@@ -2801,6 +2801,20 @@ int main(int argc, char* argv[]) {
         LUMINUMBRA_CORE_INFO("Render-parity (FinalBlit) armed -> {} (auto-world implied, settle {} frames)",
                              g_render_parity_dir.string(), kFrameScanSettleFrames);
     }
+    // WAVE-F F1: --render-parity-frame <dir>. Same boot/settle, then the in-process
+    // WHOLE-FRAME A/B — dispatch the settled prepared frame twice into twin targets,
+    // FLIP in-process, demand exactly 0.0 (the RENDER-11 migration gate).
+    if (const std::string rp = GetCommandLineOption(argc, argv, "--render-parity-frame", ""); !rp.empty()) {
+        g_render_parity_active = true;
+        g_render_parity_dir = std::filesystem::path(rp);
+        g_render_parity_pass = "frame";
+        g_frame_scan_active = true;
+        g_frame_scan_path = (g_render_parity_dir / "parity_scan.json").string();
+        scenario_config.auto_create_world = true;
+        scenario_config.auto_enter_world = true;
+        LUMINUMBRA_CORE_INFO("Render-parity (whole-frame) armed -> {} (auto-world implied, settle {} frames)",
+                             g_render_parity_dir.string(), kFrameScanSettleFrames);
+    }
     // Spec 016-P2-T02: --render-parity-ssao <dir>. Same boot/settle, captures the
     // SSAO ctx-mapping + seam-determinism parity gate.
     if (const std::string rp = GetCommandLineOption(argc, argv, "--render-parity-ssao", ""); !rp.empty()) {
@@ -6930,6 +6944,10 @@ int main(int argc, char* argv[]) {
                                 bool parity_ok = false;
                                 if (g_render_parity_pass == "ssao" && g_camera)
                                     parity_ok = renderPipeline.capture_ssao_parity(g_render_parity_dir, *g_camera);
+                                else if (g_render_parity_pass == "frame" && g_camera)
+                                    // WAVE-F F1: whole-frame A/B — dispatch the settled
+                                    // prepared frame twice, in-process FLIP must be 0.0.
+                                    parity_ok = renderPipeline.capture_frame_parity(*g_camera, g_render_parity_dir);
                                 else
                                     parity_ok = renderPipeline.capture_finalblit_parity(g_render_parity_dir);
                                 if (parity_ok)
