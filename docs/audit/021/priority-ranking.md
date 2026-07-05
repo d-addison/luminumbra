@@ -605,6 +605,61 @@ volumetrics/OIT pillars are unblocked on the seam. **Paused at the wave boundary
 review**; the next ranked band (67+, led by the now-unblocked 015 atmospheric pillars)
 follows.
 
+## Wave D execution record (2026-07-04)
+
+Landed this wave (commits `f54e53a6`, `24e73efa`, `f95023da` — spec 015 **Pillar A**
+atmospheric-lighting completion; the wave is **render-only / hash-NEUTRAL end to end** —
+both determinism smokes held byte-identical throughout, static `--smoke ==
+6f008a9f637c40b7` and moving `--smoke-moving == 0431682a3f8a8a24`, run==replay, since no
+server/sim code was touched and the headless server smoke loads no shaders):
+**ATMO-04 + RENDER-09** (rank 67, A-T07 — photo-mode manual EV now drives the RENDER
+exposure: the player's lens aperture/shutter/ISO → EV overrides the A-T05 analytic
+time-of-day exposure curve, so the photographer exposes for the light — stopping down
+darkens, opening up brightens; a shared `rendering/ExposureModel.h` seam owns the mapping +
+precedence so the GPU-pixel gate exercises the same code the frame uses),
+**ATMO-06** (rank 70, FR-A-001 — the direct-sun MAGNITUDE is now the atmosphere's
+transmittance toward the sun × a top-of-atmosphere solar constant, replacing the authored
+`smoothstep` intensity ramp + horizon hue mix; the golden hour now reddens AND dims from one
+physical model, AC-A-002. **Decision: BUILD, not amend** — ATMO-06 sanctioned either, but a
+doc/grep pre-check found NO owner-signed FR-A-001→hue-only relaxation, so the coupling goal
+was live/locked. A `rendering/SunLightModel.h` seam + a GPU-free contract gate pin the
+property; the solar constant is calibrated 1/t_ref so noon + all high sun (sun_up ≥ 0.25)
+stays byte-identical and only the low-sun arc changes — the answer to spec-015 OQ-2), and
+**ATMO-03 + RENDER-08** (rank 68, FR-A-003 — de-garished the moon Purkinje tint: the night
+desaturation target `vec3(0.55,0.75,1.35)` was a strongly-saturated blue mixed on top of the
+already-cool `u_moonRadiance`, double-pulling tree bark/foliage to a garish electric
+blue-purple; retargeted to a desaturated moon-grey `vec3(0.70,0.80,1.05)` so night foliage
+reads as natural cool tones. Both night modes verified navigable — full-moon ground luma ~84,
+new-moon 0.08 starlight-floor ~24. The moon_radiance seam was already fully wired).
+
+Two decisions of record:
+- **Rank 69 (ATMO-05 + RENDER-07, A-T06 GPU auto-exposure metering) is SPLIT OUT of Wave D
+  and deferred.** It is a refinement, not an AC bar — no AC requires it (FR-A-004 permits the
+  "fixed day/night stops" branch, which the landed A-T05 analytic exposure curve already
+  provides), and building it now would force a second visual re-bless. It stays `todo` in the
+  ranked band as a standalone item.
+- **AC-A-001 amended (owner-ratifiable).** The AC asked for a navigable midnight "with
+  `kMoonKeyScale` / `nightAmbient` / wrap-floor removed." An evidence-first honesty check — a
+  floor-zeroed capture — halves ground luma (84→46) and triples the near-black slope fraction
+  (6%→16%): at night the sun is below the horizon so atmospheric in-scatter ≈ 0, and — unlike
+  the daytime sun (FR-A-001, physically transmittance-coupled) — there is no physical signal
+  to replace the authored night fill; removal reintroduces the darkness the owner explicitly
+  objected to ("moon very dark"). The authored night terms are ratified as load-bearing. This
+  is the legitimate amend case (the consistent principle across the wave: **build when the
+  physics delivers a real signal, amend only when the capture proves it cannot**). Flagged for
+  owner review at this pause.
+
+**Wave D close (2026-07-04): the three ranked Pillar-A items in the band (67, 68, 70) are
+done; rank 69 split out.** Wave gate held: both determinism smokes run==replay at their
+Wave-B baselines (static `6f008a9f637c40b7`, moving `0431682a3f8a8a24` — hash-neutral by
+construction, all changes render-only); the FR-A-001 + exposure contract gates green (the GPU
+pixel pairs non-vacuous); the full SERIAL ctest lane green — **1611 of 1612 tests pass, the
+sole failure the chartered `ForestPerfBudget`**; and the visual intent verified on looked-at
+captures — noon byte-identical (mean-luma 0.414, unchanged), the golden hour reddens AND dims
+physically, night foliage de-garished, both moon modes navigable. **Paused at the wave
+boundary for owner review** (the AC-A-001 amend surfaced above for ratification); the next
+ranked band (71+) follows.
+
 ## Spine-inversion register (AC-003)
 
 Exactly one deliberate inversion, justified inline at its rank:

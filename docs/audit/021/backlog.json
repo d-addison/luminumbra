@@ -1219,7 +1219,7 @@
    "dependencies": [
     "ATMO-01"
    ],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "NEW: PhotoManualEV engine-frontier gate \u2014 an EV nudge in photo mode moves captured frame mean-luma monotonically and overrides the A-T05 TOD exposure curve",
    "rank": 67
   },
@@ -1232,7 +1232,7 @@
    "effort": "S",
    "risk": "low",
    "dependencies": [],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "NEW: PhotoManualEv test \u2014 manual EV override produces a flip_diff-measurable exposure change on an in-process capture pair at fixed TOD, while --smoke stays 6f008a9f637c40b7",
    "rank": 67
   },
@@ -1247,7 +1247,7 @@
    "dependencies": [
     "RENDER-01"
    ],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "TimeOfDaySweep night phases + WorldVisualSweep rerun + tools/flip_diff.py reviewed re-bless",
    "rank": 68
   },
@@ -1262,7 +1262,7 @@
    "dependencies": [
     "RENDER-01"
    ],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "WorldVisualSweep rerun (night cells) + --scene-config night/midnight captures with frame-health `nominal`, goldens re-blessed via tools/flip_diff.py heatmap review",
    "rank": 68
   },
@@ -1312,7 +1312,7 @@
     "ATMO-03",
     "RENDER-01"
    ],
-   "status": "todo",
+   "status": "done",
    "proving_signal": "TimeOfDaySweep (golden hour reddens AND dims, spec-015 AC-A-002) + WorldVisualSweep re-bless + tools/flip_diff.py heatmap review",
    "rank": 70
   },
