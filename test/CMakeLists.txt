@@ -234,6 +234,28 @@ target_link_libraries(octa_impostor_test PRIVATE
     gtest_main
 )
 
+# RENDER-20 (spec 021): world-dressing placement determinism. Compiles the
+# extracted client-side WorldDressing.cpp directly (it depends only on
+# luminumbra_common's DeterministicRng / plant-genome / creature-build headers +
+# glm — no GL, no entt storage, no world system) and drives it with synthetic
+# callbacks: same inputs must produce a byte-identical placement stream, and the
+# tree/rock/bush loops must share ONE sequential RNG stream (the legacy layout
+# contract that keeps the async extraction byte-equal to the old inline loops).
+add_executable(world_dressing_test
+    client/world_dressing_test.cpp
+    ../src/luminumbra_client/WorldDressing.cpp
+)
+
+target_include_directories(world_dressing_test PRIVATE
+    ../src
+    ../src/luminumbra_client
+)
+
+target_link_libraries(world_dressing_test PRIVATE
+    gtest_main
+    luminumbra_common
+)
+
 # far-field-source-unification (FR-003 / AC-003): pillar-B's first slice -- the forest
 # perf-BUDGET RED harness. OpenGL-free: it models the foliage draw load (instance /
 # draw-call / triangle counts) at a pinned 16k-tree load over the pure TreeLod.h
@@ -1253,6 +1275,8 @@ set(LUMINUMBRA_GTEST_TARGETS
     # registered — the atlas-bake/shader shared source of truth had zero
     # executing coverage. GL-free pure math, safe in the default lane.
     octa_impostor_test
+    # RENDER-20 (spec 021): world-dressing placement determinism (CPU-only).
+    world_dressing_test
     render_smoke_test
     render_capture_test
     capture_sdk_trigger_test

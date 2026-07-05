@@ -63,6 +63,7 @@
 #include "luminumbra_common/game/CodexView.h"  // pure presentation model for the codex browse screen
 #include "luminumbra_common/animation/AnimationRuntime.h"  // skinned skeleton/clip loaders for ambient wildlife
 #include "luminumbra_common/systems/CreatureProcgen.h"  // genome -> body-proportion build (procedural silhouette)
+#include "WorldDressing.h"  // RENDER-20: background world-dressing placement computation
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"  // user.* video/audio/controls settings
@@ -340,6 +341,40 @@ static void DrainSpec13WorldScan(Luminumbra::JobSystem& jobs) {
     }
     s_spec13ScanHandle = {};
     s_spec13Scan.reset();
+}
+// RENDER-20 (spec 021): the one-time world-entry DRESSING bring-up (the T-I8
+// tree/rock/bush scatter + the ambient-wildlife spawn) cost ~30 s of main-thread
+// placement loops in a debug build on the first IN_GAME frame. The placement
+// COMPUTATION (RNG-driven candidate probing over terrain/water/biome queries —
+// see WorldDressing.h) now runs as ONE background JobSystem job (the same pure,
+// thread-safe worldgen reads the meshing workers already run concurrently); the
+// main thread polls the handle and consumes the placement vectors AMORTIZED over
+// a few frames (the GL palette uploads + EnTT/physics registrations were always
+// the cheap half). Capture/scenario runs compute synchronously so frame-1
+// content is unchanged. TEARDOWN CONTRACT: the job's callbacks hold a raw
+// SHIELD_WorldSystem* — every world transition (CreateWorld / session reset)
+// MUST DrainWorldDressing() first, exactly like DrainSpec13WorldScan above.
+struct WorldDressingPending {
+    const void* world = nullptr;  // identity guard: consume only for the world computed
+    Luminumbra::Client::WorldDressingResult result;
+    // Amortized consume cursors — each lane replays its vector strictly in order.
+    std::size_t trees_done = 0, rocks_done = 0, bushes_done = 0, wildlife_done = 0;
+    bool trees_logged = false, rocks_logged = false, bushes_logged = false;
+    int creatures_spawned = 0;   // Kind::Creature consumed (the legacy wlSpawned log)
+    bool synchronous = false;    // capture/scenario: consume everything on one frame
+    bool wildlife_ok = false;    // interactive play + roster + rig loaded (gates spawn/colony/log)
+    glm::vec3 sun_toward{0.0f, 1.0f, 0.0f};  // dispatch-time sun (palette build + phototropism)
+    // render.creature_spawn values resolved at dispatch (consume-side; no RNG involved).
+    float pred_speed = 4.0f, prey_speed = 2.6f, init_hunger = 0.2f;
+};
+static std::shared_ptr<WorldDressingPending> s_worldDressing;  // null = idle/consumed
+static Luminumbra::JobHandle s_worldDressingHandle;
+static void DrainWorldDressing(Luminumbra::JobSystem& jobs) {
+    if (s_worldDressingHandle.counter) {
+        jobs.wait(s_worldDressingHandle);
+    }
+    s_worldDressingHandle = {};
+    s_worldDressing.reset();
 }
 int g_ui_screenshot_settle = 0;              // frames waited before capture of the current screen
 // HEADLESS PREVIEW-DIORAMA CAPTURE (--preview-live): for the world_creation screen, the
@@ -3283,6 +3318,8 @@ int main(int argc, char* argv[]) {
         // RENDER-19: drain any in-flight spec-013 background scan FIRST — its jobs
         // hold the OLD world system pointer, which CreateWorld is about to replace.
         DrainSpec13WorldScan(jobSystem);
+        // RENDER-20: same contract for the world-dressing placement job.
+        DrainWorldDressing(jobSystem);
         if (gameSession->CreateWorld(name, seed, worldType, customPtr)) {
             // A real world replaces the F4 menu-backdrop world; stop the menu-branch from
             // rendering with the (now game-owned) camera/world.
@@ -3773,6 +3810,8 @@ int main(int argc, char* argv[]) {
             // known-good lit composition, not a guess.
             // RENDER-19: drain any in-flight spec-013 scan before replacing the world.
             DrainSpec13WorldScan(jobSystem);
+            // RENDER-20: same contract for the world-dressing placement job.
+            DrainWorldDressing(jobSystem);
             if (gameSession->CreateWorld("Menu Vista", "424242", "mountains")) {
                 if (auto* ws = gameSession->GetWorldSystem()) {
                     renderPipeline.SetupGPUSDFIntegration(*ws);
@@ -5942,405 +5981,334 @@ int main(int argc, char* argv[]) {
                 // world is ready. RENDER-ONLY decoration on the client registry
                 // (never hashed). Places tree static-mesh instances on grassy,
                 // above-water, gentle-slope terrain around the spawn anchor with
-                // seeded jitter so the world reads forested. GetTerrainHeightAt is
-                // a pure function (valid before streaming), so trees appear on the
-                // first ready frame (incl. the visual-sweep capture). First pass
-                // uses the Grass material id; per-mesh bark/leaf texturing is a
-                // follow-up via the model-texture (skinned-UV) path.
+                // seeded jitter so the world reads forested. First pass uses the
+                // Grass material id; per-mesh bark/leaf texturing is a follow-up
+                // via the model-texture (skinned-UV) path.
+                // RENDER-20 (spec 021): the placement loops (trees/rocks/bushes +
+                // the ambient-wildlife herd — together ~30 s of main-thread
+                // terrain/water/biome probing in a debug build) moved VERBATIM to
+                // WorldDressing.cpp and run as ONE background JobSystem job (the
+                // RENDER-19 Spec13WorldScan pattern): dispatch once on the first
+                // IN_GAME frame, poll the handle non-blocking, then consume the
+                // placement vectors AMORTIZED (the GL palette uploads and the
+                // EnTT/physics registrations were always the cheap half).
+                // Capture/scenario/timelapse runs compute synchronously instead so
+                // frame-1 captures still see the full dressing (trees appear on
+                // the first ready frame, incl. the visual-sweep capture, exactly
+                // as before).
                 {
-                    static bool s_trees_scattered = false;
-                    if (!s_trees_scattered && gameSession->GetWorldSystem()) {
-                        s_trees_scattered = true;
-                        auto* ws = gameSession->GetWorldSystem();
-                        auto& reg = gameSession->GetRegistry();
+                    auto* ws = gameSession->GetWorldSystem();
+                    // The skinned wildlife rig: AnimationPlayerComponents hold POINTERS
+                    // to these, so they must outlive every spawned creature (statics,
+                    // exactly as before the extraction).
+                    namespace anim = luminumbra::animation;
+                    static anim::Skeleton s_wildlife_skeleton;
+                    static anim::AnimationClip s_wildlife_idle;
+                    static bool s_dressing_dispatched = false;  // process-once (was s_trees_scattered)
+                    if (!s_dressing_dispatched && ws) {
+                        s_dressing_dispatched = true;
                         const Luminumbra::Vec3 anchor = gameSession->GetMetadata().spawnPoint;
-                        auto terr = [&](float x, float z) { return ws->GetTerrainHeightAt(x, z); };
-                        std::uint64_t rng = 0x9E3779B97F4A7C15ull ^
-                            (static_cast<std::uint64_t>(static_cast<std::int64_t>(anchor.x)) * 0xBF58476D1CE4E5B9ull) ^
-                            (static_cast<std::uint64_t>(static_cast<std::int64_t>(anchor.z)) * 0x94D049BB133111EBull);
-                        auto frand = [&]() {
-                            rng += 0x9E3779B97F4A7C15ull;
-                            std::uint64_t z = rng;
-                            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
-                            z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
-                            z = z ^ (z >> 31);
-                            return static_cast<float>((z >> 11) * (1.0 / 9007199254740992.0));
-                        };
-                        // I8 BF1-grove tree-scatter knobs (render-only client
-                        // decoration, never hashed). The source mesh is now decimated
-                        // to ~15k tris (LOD0, was ~2.06M) by the asset processor's
-                        // --max-tris pass, so densifying is affordable. Lower base +
-                        // higher grove gain reads as clustered copses (sparse open
-                        // ground, dense stands) instead of a uniform sprinkle. The
-                        // instance VBO (GBufferPass kStaticInstanceCapacity=16384)
-                        // covers the 12000 cap. Per-cell frand() call order is
-                        // unchanged so the seeded layout stays reproducible.
-                        // VAST FOREST: the trees are a small PALETTE of procedural meshes
-                        // INSTANCED thousands of times across the whole horizon (cheap GPU
-                        // instancing + Track-B LOD + frustum cull), so we can fill the full 760m
-                        // reach densely without per-tree cost.
-                        const float kReach = 1150.0f;     // meters from spawn anchor (deep horizon)
-                        const float kCell = 13.0f;        // grid pitch
-                        const float kHeightSample = 4.0f; // slope probe radius
-                        const int   kMaxInstances = 28000; // instance cap (cheap palette instances; far = billboards)
-                        const float kGroveBase = 0.22f;   // baseline grove density (sparser open)
-                        const float kGroveGain = 0.62f;   // grove clustering gain (denser stands)
-                        const float kScaleMin = 0.8f;     // min trunk scale
-                        const float kScaleSpan = 1.4f;    // scale jitter span -> 0.8..2.2
-                        const float kSlopeMax = 5.5f;     // skip steeper than this
-                        const float reach = kReach, cell = kCell, hs = kHeightSample;
-                        int placed = 0;
-                        // I9-FOLIAGE (render.plant_procgen, OFF by default): when the flag
-                        // is on, GROW the new PROCEDURAL plants (space-colonization branch
-                        // skeleton -> tessellated bark cylinders + sun-facing leaf cards)
-                        // for a bounded subset of the SAME scatter positions and draw them
-                        // in the deferred geometry pass, instead of relying only on the
-                        // baked tree models. RENDER-ONLY, never hashed; bounded to keep it
-                        // cheap. The genome/maturity reuse the per-position seeded streams
-                        // below, so the layout stays deterministic + reproducible.
-                        // PROGRAMMATIC TREES, NO MODEL (owner): build the procedural palette once
-                        // (into the instanced static-mesh cache), then scatter instances of it.
+                        // PROGRAMMATIC TREES/ROCKS/BUSHES, NO MODEL (owner): build the
+                        // procedural palettes once (into the instanced static-mesh cache)
+                        // BEFORE dispatch — GL-side + cheap, and the palette COUNTS pin
+                        // the placements' palette-index modulo. None of the builders
+                        // touches the scatter frand() stream, so hoisting the rock/bush
+                        // builds ahead of their loops keeps the seeded layout
+                        // byte-identical to the old inline order.
                         const glm::vec3 sunToward = -glm::normalize(renderPipeline.sun_direction());
                         BuildProcgenTreePalette(renderPipeline, sunToward);
-                        const bool procgenPlants = true;
-                        // Phototropism uses the scene's REAL sun (kept for the hero/grow demo path).
-                        luminumbra::foliage::PlantEnvDir plantEnv;
-                        plantEnv.sun_dir = sunToward;
-                        plantEnv.phototropism = 0.5f;
-                        int procgenCount = 0;
-                        g_procgenPlants.clear();
-                        for (float dz = -reach; dz <= reach && placed < kMaxInstances; dz += cell) {
-                            for (float dx = -reach; dx <= reach && placed < kMaxInstances; dx += cell) {
-                                // Clustered density: a low-frequency mask makes groves
-                                // (denser stands) instead of a uniform sprinkle.
-                                const float grove = frand();
-                                if (frand() > (kGroveBase + kGroveGain * grove)) continue;
-                                const float x = anchor.x + dx + (frand() * 2.0f - 1.0f) * cell * 0.5f;
-                                const float zc = anchor.z + dz + (frand() * 2.0f - 1.0f) * cell * 0.5f;
-                                const float h = terr(x, zc);
-                                // Keep trees out of water at ANY elevation (sea + perched
-                                // lakes), not just sea level; a shoreline margin is fine.
-                                if (h < ws->WaterLevelAt(x, zc) + 1.0f) continue;
-                                // ROOFED-CAVE REJECT (cave bug A): terr()==GetTerrainHeightAt is
-                                // the analytic heightmap surface and ignores the cave SDF, so a
-                                // column whose heightmap point sits under a cavern roof would grow
-                                // a tree deep underground. Reject if SOLID terrain lies just above
-                                // the surface. DENSITY CONVENTION (FOLIAGE-01 root cause — this
-                                // probe shipped INVERTED and rejected every open column, removing
-                                // all trees): SOLID = get_density_at < 0; air = >= 0.
-                                // Render-only scatter (never hashed) -> pure SDF read, no re-pin.
-                                {
-                                    bool roofed = false;
-                                    for (float up = 1.0f; up <= 6.0f; up += 1.0f) {
-                                        if (ws->get_density_at(Luminumbra::Vec3(x, h + up, zc)) < 0.0f) {
-                                            roofed = true; break;
-                                        }
-                                    }
-                                    if (roofed) continue;
-                                }
-                                const float slope = glm::max(
-                                    glm::max(std::abs(terr(x + hs, zc) - h), std::abs(terr(x - hs, zc) - h)),
-                                    glm::max(std::abs(terr(x, zc + hs) - h), std::abs(terr(x, zc - hs) - h)));
-                                if (slope > kSlopeMax) continue; // skip steep/cliff
-                                // I8 full UV-texture lane: the tree is now 3 decimated
-                                // PARTS (trunk/branches/leaves), each with its own atlas
-                                // + UV set (the merged single-UV mesh couldn't texture
-                                // all three). Emit one static-mesh entity per part at the
-                                // SAME transform; each part's bark/leaf texture is bound
-                                // by GBufferPass via data/models/trees/tree_textures.json.
-                                // frand() order (scale then rotation) is unchanged so the
-                                // seeded layout stays reproducible.
-                                const float s = kScaleMin + frand() * kScaleSpan;
-                                const Luminumbra::Vec3 treePos(x, h, zc);
-                                const auto treeRot = glm::angleAxis(frand() * 6.2831853f, glm::vec3(0.0f, 1.0f, 0.0f));
-                                // I9-FOLIAGE: bake deterministic GENETIC + MATURITY size
-                                // variation so the grove reads as GROWN — a mix of saplings
-                                // .. mature trees from a position-seeded plant genome + age.
-                                // Uses its OWN rng stream so the frand() layout above is
-                                // unchanged. (The full sim plant pillar — genome/growth/
-                                // breeding/tick — is separate + tested; this is its visible
-                                // size cue. A render bridge for growth-over-time is a follow-up.)
-                                auto pgen = luminumbra::core::DeterministicRng::seeded(
-                                    luminumbra::foliage::kPlantSeedOffset,
-                                    static_cast<std::uint64_t>(static_cast<std::int64_t>(treePos.x)) * 0x9E3779B1ull,
-                                    static_cast<std::uint64_t>(static_cast<std::int64_t>(treePos.z)) * 0x85EBCA77ull);
-                                const auto pgenome = luminumbra::foliage::RandomGenome(pgen);
-                                const float maturity = pgen.next_unit();          // 0 sapling .. 1 mature
-                                // Bias toward mature trees so the procedural wood reads full
-                                // (fewer tiny saplings than the old baked-grove distribution).
-                                const float maturityScale = 0.5f + 0.5f * maturity;
-                                const float geneticSize =
-                                    0.7f + luminumbra::foliage::ExpressGenome(pgenome).max_scale * 0.21f; // ~0.83..1.2
-                                const float effScale = s * maturityScale * geneticSize;
-                                // PROGRAMMATIC TREES, NO MODEL: pick a palette entry (by position
-                                // hash) and spawn TWO instanced static-mesh entities at this
-                                // transform — bark (soil/brown material) + leaf (grass/green) — so
-                                // the existing instanced + Track-B LOD + frustum-cull path renders
-                                // the vast forest cheaply. No baked .lmesh anywhere.
-                                if (procgenPlants && g_treePaletteCount > 0) {
-                                    const int pidx = static_cast<int>(
-                                        (static_cast<std::uint64_t>(static_cast<std::int64_t>(treePos.x) * 73856093) ^
-                                         static_cast<std::uint64_t>(static_cast<std::int64_t>(treePos.z) * 19349663)) %
-                                        static_cast<std::uint64_t>(g_treePaletteCount));
-                                    const std::string base = "procgen://tree_" + std::to_string(pidx);
-                                    const Luminumbra::Vec3 treeScale(effScale, effScale, effScale);
-                                    auto emit = [&](const std::string& meshKey, std::uint32_t mat) {
-                                        const auto e = reg.create();
-                                        auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
-                                        tf.position = treePos;
-                                        tf.scale = treeScale;
-                                        tf.rotation = treeRot;
-                                        auto& sm = reg.emplace<Luminumbra::Components::StaticMeshComponent>(e);
-                                        sm.meshPath = meshKey;
-                                        sm.materialId = mat;
-                                    };
-                                    emit(base + kBarkMatKey, 2u);  // bark -> soil/brown material
-                                    emit(base + kLeafMatKey, 3u);  // leaf -> grass/green material
-                                    ++procgenCount;
-                                }
-                                ++placed;
-                            }
-                        }
-                        LUMINUMBRA_CORE_INFO("T-I8 trees: scattered {} tree instances", placed);
-
-                        // ROCK FORMATIONS (worldgen-richness slice 1): scatter the procedural
-                        // rock palette as instanced static meshes — DENSER on steep terrain
-                        // (scree / rocky outcrops), a sparse baseline of boulders on open
-                        // ground, and rare large sentinels. Stone material -> stone triplanar
-                        // (no new art). RENDER-ONLY (never hashed), reusing anchor/terr/frand;
-                        // the frand() stream simply continues after the trees, so the layout
-                        // stays deterministic + reproducible.
                         BuildProcgenRockPalette(renderPipeline);
-                        if (g_rockPaletteCount > 0) {
-                            const float rReach = 900.0f;   // metres from spawn anchor
-                            const float rCell = 19.0f;     // grid pitch
-                            const float rHS = 3.0f;        // slope probe radius
-                            const int   rCap = 14000;      // instance cap
-                            int rocksPlaced = 0;
-                            for (float gz = -rReach; gz <= rReach && rocksPlaced < rCap; gz += rCell) {
-                                for (float gx = -rReach; gx <= rReach && rocksPlaced < rCap; gx += rCell) {
-                                    const float rx = anchor.x + gx + (frand() - 0.5f) * rCell;
-                                    const float rz = anchor.z + gz + (frand() - 0.5f) * rCell;
-                                    const float hC = terr(rx, rz);
-                                    if (hC <= ws->WaterLevelAt(rx, rz) + 0.3f) continue; // not underwater (sea or lake)
-                                    const float sx = terr(rx + rHS, rz) - terr(rx - rHS, rz);
-                                    const float sz = terr(rx, rz + rHS) - terr(rx, rz - rHS);
-                                    const float slope = std::sqrt(sx * sx + sz * sz) / rHS;
-                                    // baseline boulders on flats; many more on slopes (scree).
-                                    const float density = 0.05f + std::min(slope * 0.9f, 0.7f);
-                                    if (frand() >= density) continue;
-                                    const int pidx = static_cast<int>(
-                                        (static_cast<std::uint64_t>(static_cast<std::int64_t>(rx) * 73856093) ^
-                                         static_cast<std::uint64_t>(static_cast<std::int64_t>(rz) * 19349663)) %
-                                        static_cast<std::uint64_t>(g_rockPaletteCount));
-                                    float s = 0.8f + frand() * 2.2f;          // small..medium
-                                    if (frand() > 0.93f) s *= 2.6f;           // rare sentinel boulders
-                                    const auto e = reg.create();
-                                    auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
-                                    tf.position = Luminumbra::Vec3(rx, hC - 0.35f * s, rz); // settle into ground
-                                    tf.scale = Luminumbra::Vec3(s, s * (0.7f + 0.5f * frand()), s);
-                                    tf.rotation = glm::angleAxis(frand() * 6.2831853f, glm::vec3(0.0f, 1.0f, 0.0f));
-                                    auto& sm = reg.emplace<Luminumbra::Components::StaticMeshComponent>(e);
-                                    sm.meshPath = "procgen://rock_" + std::to_string(pidx);
-                                    sm.materialId = 1u; // Stone -> stone triplanar texture
-                                    ++rocksPlaced;
-                                }
-                            }
-                            LUMINUMBRA_CORE_INFO("ROCKS: scattered {} rock instances", rocksPlaced);
-                        }
-
-                        // SHRUB/BUSH LAYER (spec 003 FR-A2): scatter the procedural bush
-                        // palette on flatter, vegetated ground — driven by the per-biome
-                        // vegetation density (the same signal that drives the grass scatter),
-                        // so deserts/rock stay sparse and forests/meadows fill with shrubs.
-                        // The niche is the COMPLEMENT of the rocks: bushes on flats/gentle
-                        // slopes, rocks on scree. RENDER-ONLY (never hashed); the frand()
-                        // stream continues after the rocks so the layout stays deterministic.
                         BuildProcgenBushPalette(renderPipeline);
-                        if (g_bushPaletteCount > 0) {
-                            const float bReach = 850.0f;   // metres from spawn anchor
-                            const float bCell = 8.0f;      // grid pitch (lush undergrowth, denser than trees)
-                            const float bHS = 3.0f;        // slope probe radius
-                            const int   bCap = 40000;      // instance cap
-                            int bushPlaced = 0;
-                            for (float gz = -bReach; gz <= bReach && bushPlaced < bCap; gz += bCell) {
-                                for (float gx = -bReach; gx <= bReach && bushPlaced < bCap; gx += bCell) {
-                                    const float bx = anchor.x + gx + (frand() - 0.5f) * bCell;
-                                    const float bz = anchor.z + gz + (frand() - 0.5f) * bCell;
-                                    const float hC = terr(bx, bz);
-                                    if (hC <= ws->WaterLevelAt(bx, bz) + 0.5f) continue; // not in water
-                                    const float sx = terr(bx + bHS, bz) - terr(bx - bHS, bz);
-                                    const float sz = terr(bx, bz + bHS) - terr(bx, bz - bHS);
-                                    const float slope = std::sqrt(sx * sx + sz * sz) / bHS;
-                                    if (slope > 0.85f) continue; // shrubs avoid steep/cliff (rocks own that)
-                                    // per-biome vegetation density gates cover; flats favoured.
-                                    const Luminumbra::u8 biome_id = ws->BiomeIdAt(bx, bz);
-                                    const float veg = ws->biomes_enabled()
-                                        ? ws->biome_table().vegetation_for(biome_id).density
-                                        : 0.3f;
-                                    // Undergrowth is lush on vegetated flats; falls off on slope.
-                                    const float density = std::min(1.0f, veg * 1.8f) * (1.0f - std::min(slope, 0.7f) * 0.85f);
-                                    if (frand() >= density) continue;
-                                    const int pidx = static_cast<int>(
-                                        (static_cast<std::uint64_t>(static_cast<std::int64_t>(bx) * 73856093) ^
-                                         static_cast<std::uint64_t>(static_cast<std::int64_t>(bz) * 19349663)) %
-                                        static_cast<std::uint64_t>(g_bushPaletteCount));
-                                    float s = 1.1f + frand() * 1.6f;          // small..medium shrubs
-                                    if (frand() > 0.95f) s *= 1.9f;           // rare large bush
-                                    const auto e = reg.create();
-                                    auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
-                                    tf.position = Luminumbra::Vec3(bx, hC - 0.12f * s, bz); // settle into ground
-                                    tf.scale = Luminumbra::Vec3(s, s * (0.7f + 0.4f * frand()), s);
-                                    tf.rotation = glm::angleAxis(frand() * 6.2831853f, glm::vec3(0.0f, 1.0f, 0.0f));
-                                    auto& sm = reg.emplace<Luminumbra::Components::StaticMeshComponent>(e);
-                                    sm.meshPath = "procgen://bush_" + std::to_string(pidx);
-                                    sm.materialId = 3u; // grass/green leaf material (shrub foliage)
-                                    ++bushPlaced;
-                                }
-                            }
-                            LUMINUMBRA_CORE_INFO("BUSHES: scattered {} shrub instances", bushPlaced);
-                        }
-
-                        // LIVING WORLD: ambient WILDLIFE for interactive play. The world had
-                        // no creatures in normal play (only timelapse markers / scenario rigs),
-                        // so the codex/objectives loop had nothing to photograph. Spawn a small,
-                        // species-varied herd of SKINNED, animated, grounded creatures around the
-                        // spawn anchor: each is the grovestrider rig recolored by its species
-                        // base_color and scaled by a genome size — GameSession's SamplePosesOnTick
-                        // animates them, the CreatureBrain wanders them (grounded via a Jolt
-                        // avatar like the timelapse herd), and GatherPhotoSubjects sees them so the
-                        // codex fills in normal play. Render+client-sim only; the gated headless
-                        // world_hash is the server's and is unaffected. Skipped in capture/scenario
-                        // modes (they own their own creature handling).
+                        // LIVING WORLD: ambient WILDLIFE for interactive play. The world
+                        // had no creatures in normal play (only timelapse markers /
+                        // scenario rigs), so the codex/objectives loop had nothing to
+                        // photograph. Render+client-sim only; the gated headless
+                        // world_hash is the server's and is unaffected. Skipped in
+                        // capture/scenario modes (they own their own creature handling).
                         const bool interactive_play =
                             !scenario_config.active() && !g_timelapse_creatures &&
                             (g_timelapse_frames == 0 || g_timelapse_living);
+                        auto pending = std::make_shared<WorldDressingPending>();
+                        pending->world = ws;
+                        pending->sun_toward = sunToward;
+                        // Capture/scenario/timelapse runs must see the FULL dressing in
+                        // their first settled frames (visual sweep / frame-scan / thumbs
+                        // capture right after scenario_ready), so they compute + consume
+                        // synchronously — the placements are byte-identical either way.
+                        pending->synchronous =
+                            scenario_config.active() || g_frame_scan_active || g_scene_active ||
+                            g_play_paths || !g_render_benchmark_path.empty() ||
+                            !g_survey_dir.empty() || g_timelapse_frames > 0 || g_ui_thumbs > 0;
+                        // One-time skinned rig load (file IO — never the slow part). The
+                        // wildlife placements are only computed when the rig is usable.
                         if (interactive_play && g_creatureSpecies.size() > 0) {
-                            namespace anim = luminumbra::animation;
-                            static anim::Skeleton s_wildlife_skeleton;
-                            static anim::AnimationClip s_wildlife_idle;
-                            static bool s_wildlife_loaded = false;
-                            static bool s_wildlife_ok = false;
-                            if (!s_wildlife_loaded) {
-                                s_wildlife_loaded = true;
-                                anim::SkinnedMeshAsset masset;
-                                anim::AnimClipAsset iclip;
-                                const std::filesystem::path gmesh =
-                                    root_dir / "data/models/creatures/grovestrider/grovestrider.lmesh";
-                                const std::filesystem::path gidle =
-                                    root_dir / "data/models/creatures/grovestrider/grovestrider.idle.lanim";
-                                if (anim::LoadSkinnedMeshAsset(gmesh.string(), masset) &&
-                                    anim::LoadAnimClipAsset(gidle.string(), iclip)) {
-                                    s_wildlife_skeleton = anim::BuildSkeleton(masset);
-                                    s_wildlife_idle = anim::BuildClip(iclip);
-                                    s_wildlife_ok = true;
-                                }
+                            anim::SkinnedMeshAsset masset;
+                            anim::AnimClipAsset iclip;
+                            const std::filesystem::path gmesh =
+                                root_dir / "data/models/creatures/grovestrider/grovestrider.lmesh";
+                            const std::filesystem::path gidle =
+                                root_dir / "data/models/creatures/grovestrider/grovestrider.idle.lanim";
+                            if (anim::LoadSkinnedMeshAsset(gmesh.string(), masset) &&
+                                anim::LoadAnimClipAsset(gidle.string(), iclip)) {
+                                s_wildlife_skeleton = anim::BuildSkeleton(masset);
+                                s_wildlife_idle = anim::BuildClip(iclip);
+                                pending->wildlife_ok = true;
                             }
-                            if (s_wildlife_ok) {
-                                auto* phys = gameSession->GetPhysicsSystem();
-                                auto wgen = luminumbra::core::DeterministicRng::seeded(0xFA0FA0u, 4242u, 1u);
-                                // Full control: ambient spawn count/speeds from systems.json
-                                // render.creature_spawn (client-only; compiled defaults when OFF).
-                                using SK = luminumbra::core::SysKey;
-                                using SP = luminumbra::core::SysParam;
-                                const bool spawnCfg = g_systemConfig.enabled(SK::RenderCreatureSpawn);
-                                const int kHerd = spawnCfg
-                                    ? std::max(0, static_cast<int>(g_systemConfig.param(SP::SpawnHerdCount, 12.0f)))
-                                    : 12;
-                                const float cfgPredSpeed = spawnCfg ? g_systemConfig.param(SP::SpawnPredatorSpeed, 4.0f) : 4.0f;
-                                const float cfgPreySpeed = spawnCfg ? g_systemConfig.param(SP::SpawnPreySpeed, 2.6f) : 2.6f;
-                                const float cfgInitHunger = spawnCfg ? g_systemConfig.param(SP::SpawnInitialHunger, 0.2f) : 0.2f;
-                                int wlSpawned = 0;
-                                int wlHoles = 0;
-                                for (int i = 0; i < kHerd; ++i) {
-                                    const float ang = wgen.next_unit() * 6.2831853f;
-                                    const float rad = 10.0f + wgen.next_unit() * 60.0f;
-                                    const float wx = anchor.x + std::cos(ang) * rad;
-                                    const float wz = anchor.z + std::sin(ang) * rad;
-                                    const float gy = terr(wx, wz);
-                                    if (gy <= ws->WaterLevelAt(wx, wz) + 0.3f) {
-                                        // Water cell: drop a few DRINKING SPOTS at the water so the
-                                        // wired thirst system has somewhere to steer creatures. Capped.
-                                        if (wlHoles < 3) {
-                                            const auto he = reg.create();
-                                            auto& htf = reg.emplace<Luminumbra::Components::TransformComponent>(he);
-                                            htf.position = Luminumbra::Vec3(wx, ws->WaterLevelAt(wx, wz), wz);
-                                            reg.emplace<Luminumbra::Components::WaterHoleComponent>(he).radius = 6.0f;
-                                            ++wlHoles;
-                                        }
-                                        continue;  // not in water
-                                    }
-                                    // Biome-appropriate species: pick among the species that
-                                    // inhabit the local biome (generalists included); fall back
-                                    // to the full roster if the biome lists none.
-                                    const std::string& biome_name =
-                                        ws->biome_table().name_for(ws->BiomeIdAt(wx, wz));
-                                    const luminumbra::ai::CreatureSpecies* sp_sel =
-                                        g_creatureSpecies.SelectForBiome(biome_name, static_cast<std::size_t>(i));
-                                    const auto& sp = sp_sel
-                                        ? *sp_sel
-                                        : g_creatureSpecies.all()[static_cast<std::size_t>(i) % g_creatureSpecies.size()];
-                                    const float size = 0.8f + wgen.next_unit() * 0.7f;  // overall size multiplier
-                                    // Procedural BUILD: non-uniform body proportions from sampled
-                                    // build genes give each creature a distinct silhouette
-                                    // (tall/stocky/long) from the same mesh (CreatureProcgen).
-                                    luminumbra::creature::CreatureBuildGenome bg;
-                                    bg.height = wgen.next_unit();
-                                    bg.girth  = wgen.next_unit();
-                                    bg.length = wgen.next_unit();
-                                    bg.size   = size;
-                                    const luminumbra::creature::CreatureBuild build =
-                                        luminumbra::creature::ComputeCreatureBuild(bg);
+                        }
+                        Luminumbra::Client::WorldDressingParams dparams;
+                        dparams.anchor_x = anchor.x;
+                        dparams.anchor_z = anchor.z;
+                        dparams.tree_palette_count = g_treePaletteCount;
+                        dparams.rock_palette_count = g_rockPaletteCount;
+                        dparams.bush_palette_count = g_bushPaletteCount;
+                        dparams.compute_wildlife = pending->wildlife_ok;
+                        {
+                            // Full control: ambient spawn count/speeds from systems.json
+                            // render.creature_spawn (client-only; compiled defaults when
+                            // OFF). Only the herd COUNT feeds the placement computation;
+                            // the speeds/hunger are consume-side component values.
+                            using SK = luminumbra::core::SysKey;
+                            using SP = luminumbra::core::SysParam;
+                            const bool spawnCfg = g_systemConfig.enabled(SK::RenderCreatureSpawn);
+                            dparams.herd_count = spawnCfg
+                                ? std::max(0, static_cast<int>(g_systemConfig.param(SP::SpawnHerdCount, 12.0f)))
+                                : 12;
+                            pending->pred_speed = spawnCfg ? g_systemConfig.param(SP::SpawnPredatorSpeed, 4.0f) : 4.0f;
+                            pending->prey_speed = spawnCfg ? g_systemConfig.param(SP::SpawnPreySpeed, 2.6f) : 2.6f;
+                            pending->init_hunger = spawnCfg ? g_systemConfig.param(SP::SpawnInitialHunger, 0.2f) : 0.2f;
+                        }
+                        // The EXACT queries the inline loops made — pure, thread-safe
+                        // worldgen reads (the meshing workers run the same sampling
+                        // concurrently), bound to the CURRENT world system. The drain
+                        // contract (DrainWorldDressing before every world transition)
+                        // keeps the raw ws captures from dangling.
+                        Luminumbra::Client::WorldDressingCallbacks dcbs;
+                        dcbs.terrain_height = [ws](float x, float z) { return ws->GetTerrainHeightAt(x, z); };
+                        dcbs.water_level = [ws](float x, float z) { return ws->WaterLevelAt(x, z); };
+                        dcbs.density_at = [ws](float x, float y, float z) {
+                            return ws->get_density_at(Luminumbra::Vec3(x, y, z));
+                        };
+                        dcbs.vegetation_density = [ws](float x, float z) {
+                            return ws->biomes_enabled()
+                                ? ws->biome_table().vegetation_for(ws->BiomeIdAt(x, z)).density
+                                : 0.3f;
+                        };
+                        dcbs.biome_name = [ws](float x, float z) -> std::string {
+                            return ws->biome_table().name_for(ws->BiomeIdAt(x, z));
+                        };
+                        dcbs.species_for_biome = [](const std::string& biome, std::size_t pick) -> int {
+                            // Biome-appropriate species: pick among the species that
+                            // inhabit the local biome (generalists included); fall back
+                            // to the full roster if the biome lists none.
+                            const luminumbra::ai::CreatureSpecies* sp_sel =
+                                g_creatureSpecies.SelectForBiome(biome, pick);
+                            if (!sp_sel) return static_cast<int>(pick % g_creatureSpecies.size());
+                            return static_cast<int>(sp_sel - g_creatureSpecies.all().data());
+                        };
+                        if (pending->synchronous) {
+                            pending->result = Luminumbra::Client::ComputeWorldDressing(dparams, dcbs);
+                        } else {
+                            std::vector<Luminumbra::Job> djobs;
+                            djobs.emplace_back([pending, dparams, dcbs]() {
+                                pending->result = Luminumbra::Client::ComputeWorldDressing(dparams, dcbs);
+                            });
+                            s_worldDressingHandle = jobSystem.dispatch_batch(djobs);
+                            LUMINUMBRA_CORE_INFO(
+                                "RENDER-20: world-dressing placement (trees/rocks/bushes{}) dispatched to a background job",
+                                pending->wildlife_ok ? " + wildlife" : "");
+                        }
+                        s_worldDressing = std::move(pending);
+                    }
+                    // Consume: non-blocking poll of the JobHandle counter (Spec13
+                    // pattern). Each lane replays its placement vector strictly in
+                    // order under a per-frame budget sized to clear the worst-case
+                    // caps (28000 trees / 14000 rocks / 40000 bushes / the herd) in
+                    // well under 20 frames; the synchronous path consumes everything
+                    // on this same frame, matching the old inline single-frame bring-up.
+                    if (s_worldDressing && ws && s_worldDressing->world == ws &&
+                        (!s_worldDressingHandle.counter ||
+                         s_worldDressingHandle.counter->load(std::memory_order_acquire) <= 0)) {
+                        WorldDressingPending& pend = *s_worldDressing;
+                        auto& reg = gameSession->GetRegistry();
+                        const Luminumbra::Vec3 anchor = gameSession->GetMetadata().spawnPoint;
+                        auto terr = [&](float x, float z) { return ws->GetTerrainHeightAt(x, z); };
+                        const std::size_t kNoBudget = std::numeric_limits<std::size_t>::max();
+                        const std::size_t kTreeBudget = pend.synchronous ? kNoBudget : 2000;   // <=14 frames at cap
+                        const std::size_t kRockBudget = pend.synchronous ? kNoBudget : 4000;   // <=4 frames at cap
+                        const std::size_t kBushBudget = pend.synchronous ? kNoBudget : 6000;   // <=7 frames at cap
+                        const std::size_t kCreatureBudget = pend.synchronous ? kNoBudget : 64; // herd is ~12
+                        // Trees: TWO instanced static-mesh entities per placement — bark
+                        // (soil/brown) + leaf (grass/green) — so the existing instanced +
+                        // Track-B LOD + frustum-cull path renders the vast forest cheaply.
+                        // I8 full UV-texture lane: each part's bark/leaf texture is bound
+                        // by GBufferPass via data/models/trees/tree_textures.json.
+                        {
+                            std::size_t budget = kTreeBudget;
+                            while (pend.trees_done < pend.result.trees.size() && budget-- > 0) {
+                                const auto& t = pend.result.trees[pend.trees_done++];
+                                if (t.palette_index < 0) continue;  // empty palette: counted, nothing to emit
+                                const std::string base = "procgen://tree_" + std::to_string(t.palette_index);
+                                const Luminumbra::Vec3 treeScale(t.eff_scale, t.eff_scale, t.eff_scale);
+                                auto emit = [&](const std::string& meshKey, std::uint32_t mat) {
                                     const auto e = reg.create();
                                     auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
-                                    tf.position = Luminumbra::Vec3(wx, gy + 1.2f, wz);  // settle onto ground
-                                    tf.scale = Luminumbra::Vec3(build.scale_x, build.scale_y, build.scale_z);
-                                    tf.rotation = glm::angleAxis(ang, glm::vec3(0.0f, 1.0f, 0.0f));
-                                    auto& sm = reg.emplace<Luminumbra::Components::SkinnedMeshComponent>(e);
-                                    sm.meshPath = "data/models/creatures/grovestrider/grovestrider.lmesh";
-                                    sm.materialId = 3u;
-                                    sm.tintR = sp.base_color[0];
-                                    sm.tintG = sp.base_color[1];
-                                    sm.tintB = sp.base_color[2];
-                                    auto& cr = reg.emplace<Luminumbra::Components::CreatureComponent>(e);
-                                    cr.species_id = sp.species_id();
-                                    cr.is_predator = sp.predator;
-                                    cr.hunger = cfgInitHunger;
-                                    cr.move_speed = sp.predator ? cfgPredSpeed : cfgPreySpeed;
-                                    auto& gn = reg.emplace<Luminumbra::Components::CreatureGenomeComponent>(e);
-                                    gn.move_speed = cr.move_speed;
-                                    gn.size_scale = size;
-                                    gn.female = (i % 2 == 0);
-                                    gn.age_ticks = 100u;
-                                    // Survival: every creature thirsts (seeks the drinking spots
-                                    // above); predators also scavenge carrion. Activates the wired
-                                    // Thirst/Scavenging tick systems in the living world.
-                                    auto& th = reg.emplace<Luminumbra::Components::ThirstComponent>(e);
-                                    th.thirst = 0.1f + wgen.next_unit() * 0.25f;
-                                    if (sp.predator)
-                                        reg.emplace<Luminumbra::Components::ScavengerComponent>(e);
-                                    // Spec 011: a circadian clock -> the creature sleeps in its
-                                    // off-phase (diurnal at night, nocturnal by day). The brain's
-                                    // Sleep utility reads CircadianComponent.activity. Nocturnal is
-                                    // now a per-species DATA flag (creatures/species/*.json), so a new
-                                    // species can be nocturnal without a client recompile.
-                                    reg.emplace<Luminumbra::Components::CircadianComponent>(e).nocturnal =
-                                        sp.nocturnal ? 1u : 0u;
-                                    auto& pl = reg.emplace<anim::AnimationPlayerComponent>(e);
-                                    pl.skeleton = &s_wildlife_skeleton;
-                                    pl.clip = &s_wildlife_idle;
-                                    pl.time = wgen.next_unit() * 2.0;  // staggered phase
-                                    pl.looping = true;
-                                    if (phys) {
-                                        const std::size_t idx =
-                                            phys->create_avatar_character(glm::vec3(wx, gy + 1.2f, wz));
-                                        reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
-                                    }
-                                    ++wlSpawned;
+                                    tf.position = t.position;
+                                    tf.scale = treeScale;
+                                    tf.rotation = t.rotation;
+                                    auto& sm = reg.emplace<Luminumbra::Components::StaticMeshComponent>(e);
+                                    sm.meshPath = meshKey;
+                                    sm.materialId = mat;
+                                };
+                                emit(base + kBarkMatKey, 2u);  // bark -> soil/brown material
+                                emit(base + kLeafMatKey, 3u);  // leaf -> grass/green material
+                            }
+                            if (!pend.trees_logged && pend.trees_done == pend.result.trees.size()) {
+                                pend.trees_logged = true;
+                                LUMINUMBRA_CORE_INFO("T-I8 trees: scattered {} tree instances",
+                                                     pend.result.trees.size());
+                            }
+                        }
+
+                        // ROCK FORMATIONS (worldgen-richness slice 1): stone-triplanar
+                        // instanced static meshes, denser on scree. The placement already
+                        // applied the settle-into-ground offset and squash jitter (they
+                        // were RNG draws on the shared scatter stream).
+                        {
+                            std::size_t budget = kRockBudget;
+                            while (pend.rocks_done < pend.result.rocks.size() && budget-- > 0) {
+                                const auto& r = pend.result.rocks[pend.rocks_done++];
+                                const auto e = reg.create();
+                                auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
+                                tf.position = r.position;  // settled into ground
+                                tf.scale = r.scale;
+                                tf.rotation = r.rotation;
+                                auto& sm = reg.emplace<Luminumbra::Components::StaticMeshComponent>(e);
+                                sm.meshPath = "procgen://rock_" + std::to_string(r.palette_index);
+                                sm.materialId = 1u; // Stone -> stone triplanar texture
+                            }
+                            // Legacy logged only when the rock palette existed (the whole
+                            // loop was skipped otherwise) — preserve that.
+                            if (!pend.rocks_logged && pend.rocks_done == pend.result.rocks.size() &&
+                                g_rockPaletteCount > 0) {
+                                pend.rocks_logged = true;
+                                LUMINUMBRA_CORE_INFO("ROCKS: scattered {} rock instances",
+                                                     pend.result.rocks.size());
+                            }
+                        }
+                        // SHRUB/BUSH LAYER (spec 003 FR-A2): the undergrowth complement
+                        // of the rocks — bushes on vegetated flats/gentle slopes, rocks
+                        // on scree (the biome vegetation gating ran in the computation).
+                        {
+                            std::size_t budget = kBushBudget;
+                            while (pend.bushes_done < pend.result.bushes.size() && budget-- > 0) {
+                                const auto& b = pend.result.bushes[pend.bushes_done++];
+                                const auto e = reg.create();
+                                auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
+                                tf.position = b.position;  // settled into ground
+                                tf.scale = b.scale;
+                                tf.rotation = b.rotation;
+                                auto& sm = reg.emplace<Luminumbra::Components::StaticMeshComponent>(e);
+                                sm.meshPath = "procgen://bush_" + std::to_string(b.palette_index);
+                                sm.materialId = 3u; // grass/green leaf material (shrub foliage)
+                            }
+                            if (!pend.bushes_logged && pend.bushes_done == pend.result.bushes.size() &&
+                                g_bushPaletteCount > 0) {
+                                pend.bushes_logged = true;
+                                LUMINUMBRA_CORE_INFO("BUSHES: scattered {} shrub instances",
+                                                     pend.result.bushes.size());
+                            }
+                        }
+
+                        // LIVING WORLD consume: replay the wildlife placement vector in
+                        // order. Each is the grovestrider rig recolored by its species
+                        // base_color and scaled by its genome build — GameSession's
+                        // SamplePosesOnTick animates them, the CreatureBrain wanders them
+                        // (grounded via a Jolt avatar like the timelapse herd), and
+                        // GatherPhotoSubjects sees them so the codex fills in normal
+                        // play. Water-cell candidates became capped drinking-spot
+                        // WaterHoles in the computation. The EnTT emplaces + physics
+                        // avatar creation here are main-thread-only — that is why the
+                        // consume (not the computation) stays on this thread.
+                        if (pend.wildlife_ok) {
+                            auto* phys = gameSession->GetPhysicsSystem();
+                            std::size_t budget = kCreatureBudget;
+                            while (pend.wildlife_done < pend.result.wildlife.size() && budget-- > 0) {
+                                const auto& c = pend.result.wildlife[pend.wildlife_done++];
+                                if (c.kind == Luminumbra::Client::CreaturePlacement::Kind::WaterHole) {
+                                    // A DRINKING SPOT at the water so the wired thirst
+                                    // system has somewhere to steer creatures.
+                                    const auto he = reg.create();
+                                    auto& htf = reg.emplace<Luminumbra::Components::TransformComponent>(he);
+                                    htf.position = c.position;
+                                    reg.emplace<Luminumbra::Components::WaterHoleComponent>(he).radius = 6.0f;
+                                    continue;
                                 }
+                                const auto& roster = g_creatureSpecies.all();
+                                if (c.species_index < 0 ||
+                                    static_cast<std::size_t>(c.species_index) >= roster.size())
+                                    continue;  // defensive: the roster never changes mid-session
+                                const auto& sp = roster[static_cast<std::size_t>(c.species_index)];
+                                const auto e = reg.create();
+                                auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
+                                tf.position = c.position;  // settle onto ground (gy + 1.2)
+                                tf.scale = Luminumbra::Vec3(c.build_scale.x, c.build_scale.y, c.build_scale.z);
+                                tf.rotation = glm::angleAxis(c.yaw, glm::vec3(0.0f, 1.0f, 0.0f));
+                                auto& sm = reg.emplace<Luminumbra::Components::SkinnedMeshComponent>(e);
+                                sm.meshPath = "data/models/creatures/grovestrider/grovestrider.lmesh";
+                                sm.materialId = 3u;
+                                sm.tintR = sp.base_color[0];
+                                sm.tintG = sp.base_color[1];
+                                sm.tintB = sp.base_color[2];
+                                auto& cr = reg.emplace<Luminumbra::Components::CreatureComponent>(e);
+                                cr.species_id = sp.species_id();
+                                cr.is_predator = sp.predator;
+                                cr.hunger = pend.init_hunger;
+                                cr.move_speed = sp.predator ? pend.pred_speed : pend.prey_speed;
+                                auto& gn = reg.emplace<Luminumbra::Components::CreatureGenomeComponent>(e);
+                                gn.move_speed = cr.move_speed;
+                                gn.size_scale = c.size;
+                                gn.female = c.female;
+                                gn.age_ticks = 100u;
+                                // Survival: every creature thirsts (seeks the drinking spots
+                                // above); predators also scavenge carrion. Activates the wired
+                                // Thirst/Scavenging tick systems in the living world.
+                                auto& th = reg.emplace<Luminumbra::Components::ThirstComponent>(e);
+                                th.thirst = c.thirst;
+                                if (sp.predator)
+                                    reg.emplace<Luminumbra::Components::ScavengerComponent>(e);
+                                // Spec 011: a circadian clock -> the creature sleeps in its
+                                // off-phase (diurnal at night, nocturnal by day). The brain's
+                                // Sleep utility reads CircadianComponent.activity. Nocturnal is
+                                // now a per-species DATA flag (creatures/species/*.json), so a new
+                                // species can be nocturnal without a client recompile.
+                                reg.emplace<Luminumbra::Components::CircadianComponent>(e).nocturnal =
+                                    sp.nocturnal ? 1u : 0u;
+                                auto& pl = reg.emplace<anim::AnimationPlayerComponent>(e);
+                                pl.skeleton = &s_wildlife_skeleton;
+                                pl.clip = &s_wildlife_idle;
+                                pl.time = c.anim_phase * 2.0;  // staggered phase
+                                pl.looping = true;
+                                if (phys) {
+                                    const std::size_t idx = phys->create_avatar_character(
+                                        glm::vec3(c.position.x, c.position.y, c.position.z));
+                                    reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
+                                }
+                                ++pend.creatures_spawned;
+                            }
+                        }
+                        // One-shot TAIL — runs exactly once, when every lane has fully
+                        // drained (the synchronous path reaches it on this same frame,
+                        // matching the old inline block's single-frame bring-up).
+                        const bool dressing_complete =
+                            pend.trees_done == pend.result.trees.size() &&
+                            pend.rocks_done == pend.result.rocks.size() &&
+                            pend.bushes_done == pend.result.bushes.size() &&
+                            pend.wildlife_done == pend.result.wildlife.size();
+                        if (dressing_complete) {
+                            if (pend.wildlife_ok) {
                                 LUMINUMBRA_CORE_INFO(
                                     "Living world: spawned {} skinned, species-varied ambient creatures around spawn",
-                                    wlSpawned);
+                                    pend.creatures_spawned);
                                 // Spec 011: a forager COLONY -- a nest + ants that shuttle to food,
                                 // laying pheromone trails. The wired-but-dormant ForagingSystem (slot
                                 // 2c, Deneubourg double-bridge) ticks once ForagerComponents exist, so
@@ -6389,183 +6357,194 @@ int main(int argc, char* argv[]) {
                                                          nestCx, nestCz, antCount);
                                 }
                             }
-                        }
 
-                        // Growth showcase: a cluster of bigger HERO plants right in front of the
-                        // fixed grow-mode camera, so the foreground is dominated by plants visibly
-                        // growing (the scattered grove alone reads as distant background).
-                        if ((g_timelapse_grow || g_timelapse_season) && procgenPlants) {
-                            const glm::vec3 heroOffsets[] = {
-                                {-5.0f, 0.0f, 9.0f}, {0.0f, 0.0f, 12.0f}, {5.0f, 0.0f, 8.0f},
-                                {-2.5f, 0.0f, 6.0f}, {2.5f, 0.0f, 6.5f}};
-                            auto hgen = luminumbra::core::DeterministicRng::seeded(
-                                luminumbra::foliage::kPlantSeedOffset, 7777u, 1u);
-                            for (const glm::vec3& off : heroOffsets) {
-                                const float hx = anchor.x + off.x, hz = anchor.z + off.z;
-                                ProcgenPlantInstance inst;
-                                inst.worldPos = glm::vec3(hx, terr(hx, hz), hz);
-                                inst.rot = glm::angleAxis(hgen.next_unit() * 6.2831853f,
-                                                          glm::vec3(0.0f, 1.0f, 0.0f));
-                                inst.effScale = 2.4f + hgen.next_unit() * 1.0f;  // big hero trees
-                                inst.genome = luminumbra::foliage::RandomGenome(hgen);
-                                g_procgenPlants.push_back(inst);
-                            }
-                        }
-                        // I9-FOLIAGE Phase 4: SIM plant seeding for the REAL-growth showcase. Spawn a
-                        // hero cluster of LIVE PlantTag plants (data-driven species via the Phase 5A
-                        // MakePlantFromSpecies) into the SESSION registry, so the deterministic
-                        // PlantGrowthSystem advances them Seed->Fruiting each tick and BakeSimPlants
-                        // renders their TRUE stage. Under time-scale they visibly grow on capture.
-                        if (g_timelapse_simgrow) {
-                            luminumbra::foliage::SpeciesRegistry species;
-                            std::vector<std::string> sperr;
-                            species.LoadFromDirectory(root_dir / "data/common/foliage/species", sperr);
-                            const char* picks[] = {"wheat", "oak", "wheat", "oak", "wheat"};
-                            const glm::vec3 simOffsets[] = {
-                                {-5.0f, 0.0f, 9.0f}, {0.0f, 0.0f, 12.0f}, {5.0f, 0.0f, 8.0f},
-                                {-2.5f, 0.0f, 6.0f}, {2.5f, 0.0f, 6.5f}};
-                            auto sgen = luminumbra::core::DeterministicRng::seeded(
-                                luminumbra::foliage::kPlantSeedOffset, 4242u, 7u);
-                            int seeded = 0;
-                            for (std::size_t i = 0; i < 5; ++i) {
-                                const auto* tmpl = species.Find(picks[i]);
-                                if (!tmpl) continue;
-                                const float hx = anchor.x + simOffsets[i].x, hz = anchor.z + simOffsets[i].z;
-                                luminumbra::foliage::MakePlantFromSpecies(
-                                    reg, Luminumbra::Vec3(hx, terr(hx, hz), hz), *tmpl, sgen, 0);
-                                ++seeded;
-                            }
-                            LUMINUMBRA_CORE_INFO("I9-FOLIAGE Phase 4: seeded {} SIM plants (real growth tick)", seeded);
-                        }
-                        // Plant unification: build the DECORATION scatter cache first (BakeProcgenPlants
-                        // -> g_procgenTreeVerts), then composite the SIM-tier PlantTag plants on top via
-                        // RebakeAllPlants (one pass, both tiers). Player-planted/promoted plants ADD to
-                        // the forest rather than replacing it. OFF/empty -> pass disabled. Growth +
-                        // promotion re-bakes happen per-frame in the loop (sig-gated, so cheap).
-                        g_procgenSunDir = plantEnv.sun_dir;
-                        if (auto* pp = renderPipeline.plant_procgen()) {
-                            if (procgenPlants) {
-                                BakeProcgenPlants(pp, g_procgenStageF);  // build + cache the scatter
-                                LUMINUMBRA_CORE_INFO("I9-FOLIAGE: {} procedural scatter plants (stage {:.1f})",
-                                                     g_procgenPlants.size(), g_procgenStageF);
-                            } else {
-                                pp->set_enabled(false);
-                            }
-                            const std::size_t simPlants = RebakeAllPlants(pp, reg, g_procgenSunDir, g_season);
-                            if (simPlants > 0)
-                                LUMINUMBRA_CORE_INFO("Plant unification: composited {} sim plants over the scatter", simPlants);
-                        }
-                        // I9-ECO ecology demo: spawn a hungry predator above a row of prey, then
-                        // let the live CreatureBrain tick (GameSession) move them — predator hunts
-                        // toward, prey flee away — and render them as moving octahedron markers via
-                        // the procgen pass (baked per-frame in the loop). Render/demo-only spawn.
-                        if (g_timelapse_creatures) {
-                            // TRUE PHYSICS: each creature gets a deterministic Jolt avatar body
-                            // (CreaturePhysicsComponent). Spawn a little ABOVE the terrain so it
-                            // drops and settles on the surface; the brain's wish velocity then
-                            // drives it across the heightfield (gravity / collision / slopes).
-                            auto* phys = gameSession->GetPhysicsSystem();
-                            int preyIdx = 0;  // alternate founder sexes so a herd can pair up
-                            auto mkCreature = [&](float ox, float oz, bool predator, float hunger) {
-                                const float cx = anchor.x + ox, cz = anchor.z + oz;
-                                const float cy = terr(cx, cz) + 1.5f;  // capsule centre above ground
-                                const auto e = reg.create();
-                                auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
-                                tf.position = Luminumbra::Vec3(cx, cy, cz);
-                                auto& cr = reg.emplace<Luminumbra::Components::CreatureComponent>(e);
-                                cr.is_predator = predator;
-                                cr.species_id = Luminumbra::Components::CreatureSpeciesId16(
-                                    predator ? "ridgeback_stalker" : "grovestrider");
-                                cr.hunger = hunger;
-                                // The predator is a bit faster than the herd so it can run down a
-                                // straggler (otherwise equal flee/hunt speeds never close the gap).
-                                cr.move_speed = predator ? 4.2f : 3.0f;
-                                if (predator)
-                                    reg.emplace<Luminumbra::Components::PackHunterComponent>(e);  // flank coordination
-                                // Track (a): give PREY a heritable genome so well-fed,
-                                // healthy, mature prey reproduce (CreatureReproductionSystem,
-                                // GameSession slot 2e-evo) and selection becomes visible over
-                                // the timelapse. move_speed mirrors the CreatureComponent so
-                                // behaviour is unchanged until traits drift in offspring.
-                                // Offspring are created mid-sim WITHOUT a Jolt avatar body, so
-                                // they fall back to the brain's direct X/Z integration (the
-                                // CreatureBrainSystem path when no CreaturePhysicsComponent).
-                                if (!predator) {
-                                    auto& gn = reg.emplace<
-                                        Luminumbra::Components::CreatureGenomeComponent>(e);
-                                    gn.move_speed = cr.move_speed;
-                                    gn.female = (preyIdx++ % 2 == 0);  // alternate M/F so pairs form
-                                    reg.emplace<Luminumbra::Components::AlarmComponent>(e);  // herd vigilance
-                                    // Calm (evolution) demo: start the founders WELL-FED + near
-                                    // maturity so they court early and generations appear within
-                                    // the clip (markers are tinted by generation).
-                                    if (g_timelapse_calm) {
-                                        cr.hunger = 0.05f;
-                                        cr.stamina = 1.0f;
-                                        gn.age_ticks = 80u;  // just under kReproMaturityTicks (90)
-                                    }
+                            // I9-FOLIAGE: the procedural-plant render bridge for the
+                            // hero/grow demo paths. Legacy cleared the scatter list before
+                            // its loop; the loop no longer populates it (only the hero
+                            // blocks below do), so the clear moved here unchanged in effect.
+                            const bool procgenPlants = true;
+                            g_procgenPlants.clear();
+                            // Growth showcase: a cluster of bigger HERO plants right in front of the
+                            // fixed grow-mode camera, so the foreground is dominated by plants visibly
+                            // growing (the scattered grove alone reads as distant background).
+                            if ((g_timelapse_grow || g_timelapse_season) && procgenPlants) {
+                                const glm::vec3 heroOffsets[] = {
+                                    {-5.0f, 0.0f, 9.0f}, {0.0f, 0.0f, 12.0f}, {5.0f, 0.0f, 8.0f},
+                                    {-2.5f, 0.0f, 6.0f}, {2.5f, 0.0f, 6.5f}};
+                                auto hgen = luminumbra::core::DeterministicRng::seeded(
+                                    luminumbra::foliage::kPlantSeedOffset, 7777u, 1u);
+                                for (const glm::vec3& off : heroOffsets) {
+                                    const float hx = anchor.x + off.x, hz = anchor.z + off.z;
+                                    ProcgenPlantInstance inst;
+                                    inst.worldPos = glm::vec3(hx, terr(hx, hz), hz);
+                                    inst.rot = glm::angleAxis(hgen.next_unit() * 6.2831853f,
+                                                              glm::vec3(0.0f, 1.0f, 0.0f));
+                                    inst.effScale = 2.4f + hgen.next_unit() * 1.0f;  // big hero trees
+                                    inst.genome = luminumbra::foliage::RandomGenome(hgen);
+                                    g_procgenPlants.push_back(inst);
                                 }
-                                // Full LIFE CYCLE (calm demo): creatures age and die of old age
-                                // (LifespanSystem), then decompose to nothing (DecompositionSystem) --
-                                // so the population self-bounds (birth -> life -> death -> decay)
-                                // instead of growing without limit. Seeded lifespan per creature.
-                                if (g_timelapse_calm) {
-                                    auto& mort = reg.emplace<Luminumbra::Components::MortalComponent>(e);
-                                    const std::uint32_t jit =
-                                        static_cast<std::uint32_t>(entt::to_integral(e) * 2654435761u) % 240u;
-                                    mort.lifespan_ticks = 420u + jit;   // ~14-22s @30Hz
-                                    auto& dec = reg.emplace<Luminumbra::Components::DecayComponent>(e);
-                                    dec.decay_duration = 120u;          // carcass fades over ~4s after death
-                                }
-                                if (phys) {
-                                    const std::size_t idx =
-                                        phys->create_avatar_character(glm::vec3(cx, cy, cz));
-                                    reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
-                                }
-                            };
-                            if (g_timelapse_calm) {
-                                // Calm grazing herd, NO predator: prey graze (hunger falls),
-                                // stay healthy, and reproduce over generations -> a visible
-                                // population-growth / trait-drift evolution demo.
-                                for (int i = 0; i < 6; ++i)
-                                    mkCreature(-9.0f + static_cast<float>(i) * 3.6f, 0.0f,
-                                               /*predator*/ false, /*hunger*/ 0.05f);
-                                LUMINUMBRA_CORE_INFO("I9-EVO: spawned 6 grazing founders (no predator) for the evolution timelapse");
-                            } else {
-                                // A PACK of 3 predators flanks the herd (PredatorPackSystem +
-                                // the 2e-steer consumer surround the prey from different angles).
-                                mkCreature(-6.0f, 9.0f, /*predator*/ true, /*hunger*/ 0.95f);
-                                mkCreature(0.0f, 10.0f, /*predator*/ true, /*hunger*/ 0.95f);
-                                mkCreature(6.0f, 9.0f, /*predator*/ true, /*hunger*/ 0.95f);
-                                for (int i = 0; i < 7; ++i)
-                                    mkCreature(-7.0f + static_cast<float>(i) * 2.4f, -2.0f,
-                                               /*predator*/ false, /*hunger*/ 0.3f);
-                                LUMINUMBRA_CORE_INFO("I9-ECO: spawned a 3-predator PACK + 7 prey for the ecology timelapse");
                             }
-                        }
-                        // sim.fire DEMO: a dry patch of combustible bushes with the centre alight.
-                        // The wired FireSpreadSystem advances the burn each tick (green -> orange
-                        // -> charcoal); BakeCombustibleMarkers visualizes the deterministic state.
-                        if (g_timelapse_fire) {
-                            const int N = 24;
-                            const float sp = 2.0f;
-                            const float x0 = anchor.x - N * sp * 0.5f, z0 = anchor.z - N * sp * 0.5f;
-                            for (int iz = 0; iz < N; ++iz)
-                                for (int ix = 0; ix < N; ++ix) {
-                                    const float cx = x0 + ix * sp, cz = z0 + iz * sp;
+                            // I9-FOLIAGE Phase 4: SIM plant seeding for the REAL-growth showcase. Spawn a
+                            // hero cluster of LIVE PlantTag plants (data-driven species via the Phase 5A
+                            // MakePlantFromSpecies) into the SESSION registry, so the deterministic
+                            // PlantGrowthSystem advances them Seed->Fruiting each tick and BakeSimPlants
+                            // renders their TRUE stage. Under time-scale they visibly grow on capture.
+                            if (g_timelapse_simgrow) {
+                                luminumbra::foliage::SpeciesRegistry species;
+                                std::vector<std::string> sperr;
+                                species.LoadFromDirectory(root_dir / "data/common/foliage/species", sperr);
+                                const char* picks[] = {"wheat", "oak", "wheat", "oak", "wheat"};
+                                const glm::vec3 simOffsets[] = {
+                                    {-5.0f, 0.0f, 9.0f}, {0.0f, 0.0f, 12.0f}, {5.0f, 0.0f, 8.0f},
+                                    {-2.5f, 0.0f, 6.0f}, {2.5f, 0.0f, 6.5f}};
+                                auto sgen = luminumbra::core::DeterministicRng::seeded(
+                                    luminumbra::foliage::kPlantSeedOffset, 4242u, 7u);
+                                int seeded = 0;
+                                for (std::size_t i = 0; i < 5; ++i) {
+                                    const auto* tmpl = species.Find(picks[i]);
+                                    if (!tmpl) continue;
+                                    const float hx = anchor.x + simOffsets[i].x, hz = anchor.z + simOffsets[i].z;
+                                    luminumbra::foliage::MakePlantFromSpecies(
+                                        reg, Luminumbra::Vec3(hx, terr(hx, hz), hz), *tmpl, sgen, 0);
+                                    ++seeded;
+                                }
+                                LUMINUMBRA_CORE_INFO("I9-FOLIAGE Phase 4: seeded {} SIM plants (real growth tick)", seeded);
+                            }
+                            // Plant unification: build the DECORATION scatter cache first (BakeProcgenPlants
+                            // -> g_procgenTreeVerts), then composite the SIM-tier PlantTag plants on top via
+                            // RebakeAllPlants (one pass, both tiers). Player-planted/promoted plants ADD to
+                            // the forest rather than replacing it. OFF/empty -> pass disabled. Growth +
+                            // promotion re-bakes happen per-frame in the loop (sig-gated, so cheap).
+                            // Phototropism uses the scene's REAL sun, captured at dispatch time
+                            // (the same value the tree palette was built with).
+                            g_procgenSunDir = pend.sun_toward;
+                            if (auto* pp = renderPipeline.plant_procgen()) {
+                                if (procgenPlants) {
+                                    BakeProcgenPlants(pp, g_procgenStageF);  // build + cache the scatter
+                                    LUMINUMBRA_CORE_INFO("I9-FOLIAGE: {} procedural scatter plants (stage {:.1f})",
+                                                         g_procgenPlants.size(), g_procgenStageF);
+                                } else {
+                                    pp->set_enabled(false);
+                                }
+                                const std::size_t simPlants = RebakeAllPlants(pp, reg, g_procgenSunDir, g_season);
+                                if (simPlants > 0)
+                                    LUMINUMBRA_CORE_INFO("Plant unification: composited {} sim plants over the scatter", simPlants);
+                            }
+                            // I9-ECO ecology demo: spawn a hungry predator above a row of prey, then
+                            // let the live CreatureBrain tick (GameSession) move them — predator hunts
+                            // toward, prey flee away — and render them as moving octahedron markers via
+                            // the procgen pass (baked per-frame in the loop). Render/demo-only spawn.
+                            if (g_timelapse_creatures) {
+                                // TRUE PHYSICS: each creature gets a deterministic Jolt avatar body
+                                // (CreaturePhysicsComponent). Spawn a little ABOVE the terrain so it
+                                // drops and settles on the surface; the brain's wish velocity then
+                                // drives it across the heightfield (gravity / collision / slopes).
+                                auto* phys = gameSession->GetPhysicsSystem();
+                                int preyIdx = 0;  // alternate founder sexes so a herd can pair up
+                                auto mkCreature = [&](float ox, float oz, bool predator, float hunger) {
+                                    const float cx = anchor.x + ox, cz = anchor.z + oz;
+                                    const float cy = terr(cx, cz) + 1.5f;  // capsule centre above ground
                                     const auto e = reg.create();
                                     auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
-                                    tf.position = Luminumbra::Vec3(cx, terr(cx, cz), cz);
-                                    auto& cb = reg.emplace<Luminumbra::Components::CombustibleComponent>(e);
-                                    cb.fuel_milli = 1000;
-                                    cb.moisture_milli = 0;       // bone dry -> spreads readily
-                                    cb.ignition_radius = 3.0f;   // reaches orthogonal + diagonal neighbours
-                                    if (ix >= N / 2 - 1 && ix <= N / 2 && iz >= N / 2 - 1 && iz <= N / 2) {
-                                        cb.set_state(Luminumbra::Components::BurnState::Burning);
-                                        cb.burn_ticks_remaining = 160u;  // burns long enough to ignite outward
+                                    tf.position = Luminumbra::Vec3(cx, cy, cz);
+                                    auto& cr = reg.emplace<Luminumbra::Components::CreatureComponent>(e);
+                                    cr.is_predator = predator;
+                                    cr.species_id = Luminumbra::Components::CreatureSpeciesId16(
+                                        predator ? "ridgeback_stalker" : "grovestrider");
+                                    cr.hunger = hunger;
+                                    // The predator is a bit faster than the herd so it can run down a
+                                    // straggler (otherwise equal flee/hunt speeds never close the gap).
+                                    cr.move_speed = predator ? 4.2f : 3.0f;
+                                    if (predator)
+                                        reg.emplace<Luminumbra::Components::PackHunterComponent>(e);  // flank coordination
+                                    // Track (a): give PREY a heritable genome so well-fed,
+                                    // healthy, mature prey reproduce (CreatureReproductionSystem,
+                                    // GameSession slot 2e-evo) and selection becomes visible over
+                                    // the timelapse. move_speed mirrors the CreatureComponent so
+                                    // behaviour is unchanged until traits drift in offspring.
+                                    // Offspring are created mid-sim WITHOUT a Jolt avatar body, so
+                                    // they fall back to the brain's direct X/Z integration (the
+                                    // CreatureBrainSystem path when no CreaturePhysicsComponent).
+                                    if (!predator) {
+                                        auto& gn = reg.emplace<
+                                            Luminumbra::Components::CreatureGenomeComponent>(e);
+                                        gn.move_speed = cr.move_speed;
+                                        gn.female = (preyIdx++ % 2 == 0);  // alternate M/F so pairs form
+                                        reg.emplace<Luminumbra::Components::AlarmComponent>(e);  // herd vigilance
+                                        // Calm (evolution) demo: start the founders WELL-FED + near
+                                        // maturity so they court early and generations appear within
+                                        // the clip (markers are tinted by generation).
+                                        if (g_timelapse_calm) {
+                                            cr.hunger = 0.05f;
+                                            cr.stamina = 1.0f;
+                                            gn.age_ticks = 80u;  // just under kReproMaturityTicks (90)
+                                        }
                                     }
+                                    // Full LIFE CYCLE (calm demo): creatures age and die of old age
+                                    // (LifespanSystem), then decompose to nothing (DecompositionSystem) --
+                                    // so the population self-bounds (birth -> life -> death -> decay)
+                                    // instead of growing without limit. Seeded lifespan per creature.
+                                    if (g_timelapse_calm) {
+                                        auto& mort = reg.emplace<Luminumbra::Components::MortalComponent>(e);
+                                        const std::uint32_t jit =
+                                            static_cast<std::uint32_t>(entt::to_integral(e) * 2654435761u) % 240u;
+                                        mort.lifespan_ticks = 420u + jit;   // ~14-22s @30Hz
+                                        auto& dec = reg.emplace<Luminumbra::Components::DecayComponent>(e);
+                                        dec.decay_duration = 120u;          // carcass fades over ~4s after death
+                                    }
+                                    if (phys) {
+                                        const std::size_t idx =
+                                            phys->create_avatar_character(glm::vec3(cx, cy, cz));
+                                        reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
+                                    }
+                                };
+                                if (g_timelapse_calm) {
+                                    // Calm grazing herd, NO predator: prey graze (hunger falls),
+                                    // stay healthy, and reproduce over generations -> a visible
+                                    // population-growth / trait-drift evolution demo.
+                                    for (int i = 0; i < 6; ++i)
+                                        mkCreature(-9.0f + static_cast<float>(i) * 3.6f, 0.0f,
+                                                   /*predator*/ false, /*hunger*/ 0.05f);
+                                    LUMINUMBRA_CORE_INFO("I9-EVO: spawned 6 grazing founders (no predator) for the evolution timelapse");
+                                } else {
+                                    // A PACK of 3 predators flanks the herd (PredatorPackSystem +
+                                    // the 2e-steer consumer surround the prey from different angles).
+                                    mkCreature(-6.0f, 9.0f, /*predator*/ true, /*hunger*/ 0.95f);
+                                    mkCreature(0.0f, 10.0f, /*predator*/ true, /*hunger*/ 0.95f);
+                                    mkCreature(6.0f, 9.0f, /*predator*/ true, /*hunger*/ 0.95f);
+                                    for (int i = 0; i < 7; ++i)
+                                        mkCreature(-7.0f + static_cast<float>(i) * 2.4f, -2.0f,
+                                                   /*predator*/ false, /*hunger*/ 0.3f);
+                                    LUMINUMBRA_CORE_INFO("I9-ECO: spawned a 3-predator PACK + 7 prey for the ecology timelapse");
                                 }
-                            LUMINUMBRA_CORE_INFO("sim.fire: spawned {}x{} combustible patch, centre alight", N, N);
+                            }
+                            // sim.fire DEMO: a dry patch of combustible bushes with the centre alight.
+                            // The wired FireSpreadSystem advances the burn each tick (green -> orange
+                            // -> charcoal); BakeCombustibleMarkers visualizes the deterministic state.
+                            if (g_timelapse_fire) {
+                                const int N = 24;
+                                const float sp = 2.0f;
+                                const float x0 = anchor.x - N * sp * 0.5f, z0 = anchor.z - N * sp * 0.5f;
+                                for (int iz = 0; iz < N; ++iz)
+                                    for (int ix = 0; ix < N; ++ix) {
+                                        const float cx = x0 + ix * sp, cz = z0 + iz * sp;
+                                        const auto e = reg.create();
+                                        auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
+                                        tf.position = Luminumbra::Vec3(cx, terr(cx, cz), cz);
+                                        auto& cb = reg.emplace<Luminumbra::Components::CombustibleComponent>(e);
+                                        cb.fuel_milli = 1000;
+                                        cb.moisture_milli = 0;       // bone dry -> spreads readily
+                                        cb.ignition_radius = 3.0f;   // reaches orthogonal + diagonal neighbours
+                                        if (ix >= N / 2 - 1 && ix <= N / 2 && iz >= N / 2 - 1 && iz <= N / 2) {
+                                            cb.set_state(Luminumbra::Components::BurnState::Burning);
+                                            cb.burn_ticks_remaining = 160u;  // burns long enough to ignite outward
+                                        }
+                                    }
+                                LUMINUMBRA_CORE_INFO("sim.fire: spawned {}x{} combustible patch, centre alight", N, N);
+                            }
+                            // Fully consumed: release the pending result (idle again).
+                            s_worldDressing.reset();
+                            s_worldDressingHandle = {};
                         }
                     }
                 }
@@ -10315,6 +10294,9 @@ int main(int argc, char* argv[]) {
     // RENDER-19: the spec-013 background scan holds a raw world pointer — drain
     // it before the session (and its world) is destroyed.
     DrainSpec13WorldScan(jobSystem);
+    // RENDER-20: the world-dressing placement job likewise queries the world
+    // through its callbacks — drain it too.
+    DrainWorldDressing(jobSystem);
     gameSession.reset();
     mark_shutdown("game_session_reset");
     jobSystem.shutdown();

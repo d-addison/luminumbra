@@ -56,6 +56,9 @@ set(CLIENT_INTERNAL_SOURCES
     # World (client-side)
     ${CMAKE_CURRENT_LIST_DIR}/world/WorldgenOverride.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/WorldgenPreview.cpp
+    # RENDER-20: world-dressing placement computation (extracted from main_client's
+    # first-IN_GAME-frame scatter/wildlife bring-up; runs on a background job).
+    ${CMAKE_CURRENT_LIST_DIR}/WorldDressing.cpp
 
     # UI
     ${CMAKE_CURRENT_LIST_DIR}/ui/Rml_Interfaces.cpp
