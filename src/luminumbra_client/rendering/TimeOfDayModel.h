@@ -99,4 +99,72 @@ inline SunGeometry ComputeSunGeometry(float timeOfDay, float sunDeclination) {
     return g;
 }
 
+// SEASON PALETTE tint: a small luminance-preserving hue shift that gives the biome palette a
+// per-season feel. WINTER (wave < 0) leans WARM, SUMMER (wave > 0) leans COOL, reinforcing the
+// seasonal sun path. Luminance-normalized so it rotates HUE only -- the calibrated noon
+// luminance the LodGround/RenderHealth baselines depend on does not move. Render-only.
+inline glm::vec3 SeasonPaletteTint(float seasonWave) {
+    constexpr float kSeasonTintStrength = 0.06f; // +/- per-channel hue swing
+    glm::vec3 tint(1.0f - kSeasonTintStrength * seasonWave,
+                   1.0f,
+                   1.0f + kSeasonTintStrength * seasonWave);
+    // Preserve luminance: renormalize the tint so it only rotates hue. (Luma weights kept as a
+    // verbatim manual sum -- do NOT refactor to a dot(), which would reassociate the adds.)
+    const float tint_lum =
+        tint.r * 0.2126f +
+        tint.g * 0.7152f +
+        tint.b * 0.0722f;
+    if (tint_lum > 1e-6f) {
+        tint /= tint_lum;
+    }
+    return tint;
+}
+
+// MOON GEOMETRY: the moon orbits OPPOSITE the sun. lightDir is the moon's TOWARD-LIGHT vector in
+// the same convention the lighting pass uses for the sun; it is overhead (0,-1,tiltZ) at midnight
+// (sun angle PI) -- exactly when the sun is below the horizon -- so it can re-key the shadow
+// cascade onto the moon at night. direction (= -sunDirection) is the moon TRAVEL dir for the disc.
+//
+// TRIG NOTE: the moon uses std::sin/std::cos (the FLOAT overload), distinct from the sun's
+// unqualified ::sin (see ComputeSunGeometry) -- preserved verbatim from the inline code.
+struct MoonGeometry {
+    glm::vec3 direction; // -sunDirection (moon travel dir, for placing the disc)
+    glm::vec3 lightDir;  // toward-moon-light dir; overhead at midnight
+    float upFactor;      // dot(lightDir,(0,-1,0)) : >0 when the moon is up
+};
+
+inline MoonGeometry ComputeMoonGeometry(float sunAngleRad, float sunTiltZ, const glm::vec3& sunDirection) {
+    MoonGeometry m;
+    m.direction = -sunDirection;
+    m.lightDir = glm::normalize(glm::vec3(-std::sin(sunAngleRad),
+                                          std::cos(sunAngleRad),
+                                          sunTiltZ));
+    m.upFactor = glm::dot(m.lightDir, glm::vec3(0.0f, -1.0f, 0.0f));
+    return m;
+}
+
+// Starlight floor: a new moon is dark but never pitch-zero (a deep new-moon night wants a torch).
+inline constexpr float kNewMoonFloor = 0.08f;
+
+// LUNAR PHASE illumination as a pure function of the tick -> the "two night modes" (bright moonlit
+// vs dark new-moon nights). Deterministic lunar cycle: 1 (full) -> kNewMoonFloor (new) -> 1.
+inline float LunarIllumination(std::uint64_t seasonTick, std::uint64_t ticksPerLunarCycle) {
+    const std::uint64_t tick_in_lunar = seasonTick % ticksPerLunarCycle;
+    const float lunar_t = static_cast<float>(
+        static_cast<double>(tick_in_lunar) / static_cast<double>(ticksPerLunarCycle));
+    const float full = 0.5f + 0.5f * std::cos(lunar_t * 2.0f * glm::pi<float>()); // 1 full -> 0 new -> 1
+    return glm::mix(kNewMoonFloor, 1.0f, full);
+}
+
+// Resolve the moon illumination: a forced override (>= 0, from LUMIN_MOON or set_moon_illumination)
+// wins, clamped to [0,1]; otherwise the deterministic lunar cycle. The env read stays in the
+// pipeline (a client-config concern); this is the pure selection + math.
+inline float ComputeMoonIllumination(std::uint64_t seasonTick, float forcedOverride,
+                                     std::uint64_t ticksPerLunarCycle) {
+    if (forcedOverride >= 0.0f) {
+        return glm::clamp(forcedOverride, 0.0f, 1.0f);
+    }
+    return LunarIllumination(seasonTick, ticksPerLunarCycle);
+}
+
 } // namespace Luminumbra::Rendering

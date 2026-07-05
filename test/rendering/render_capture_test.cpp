@@ -904,6 +904,74 @@ TEST(TimeOfDayModel, SunGeometryMatchesCanonicalPrimitivesAndAnchors) {
               R::ComputeSunGeometry(0.0f, -0.41015237f).upFactor);
 }
 
+// Spec 016 FR-F-001 (RENDER-14): the MOON + SEASON-PALETTE facets extracted from
+// update_time_of_day. Byte-exact guards: each output == the same expression rebuilt from the
+// canonical primitives here — season tint via the VERBATIM manual luma sum (not a dot()); the
+// moon via std::sin/std::cos (the FLOAT overload, distinct from the sun's ::sin); the lunar cycle
+// via std::cos — so a reassociation or a wrong trig/overload diverges. Plus code-independent
+// anchors: winter-warm/summer-cool + luma preserved; moon overhead at midnight; full vs new-moon
+// illumination; override precedence + clamp. GPU-free.
+TEST(TimeOfDayModel, MoonAndSeasonPaletteMatchCanonicalPrimitivesAndAnchors) {
+    namespace R = Luminumbra::Rendering;
+    namespace DM = Luminumbra::DeterministicMath;
+    auto luma = [](const glm::vec3& c) { return c.r * 0.2126f + c.g * 0.7152f + c.b * 0.0722f; };
+    constexpr std::uint64_t kLunar = 54000ull; // == RenderPipeline::kTicksPerLunarCycle (30 min @ 30 Hz)
+
+    // SEASON PALETTE tint: bit-exact vs the verbatim construction + manual luma normalize.
+    for (float wave : {-1.0f, -0.5f, 0.0f, 0.3f, 1.0f}) {
+        const glm::vec3 t = R::SeasonPaletteTint(wave);
+        constexpr float k = 0.06f;
+        glm::vec3 ref(1.0f - k * wave, 1.0f, 1.0f + k * wave);
+        const float lum = ref.r * 0.2126f + ref.g * 0.7152f + ref.b * 0.0722f;
+        if (lum > 1e-6f) ref /= lum;
+        EXPECT_EQ(t.r, ref.r) << "wave=" << wave;
+        EXPECT_EQ(t.g, ref.g) << "wave=" << wave;
+        EXPECT_EQ(t.b, ref.b) << "wave=" << wave;
+        EXPECT_NEAR(luma(t), 1.0f, 1e-5f); // luminance preserved -> ~1 after normalization
+    }
+    EXPECT_GT(R::SeasonPaletteTint(-1.0f).r, R::SeasonPaletteTint(-1.0f).b); // winter warm (R>B)
+    EXPECT_LT(R::SeasonPaletteTint(1.0f).r,  R::SeasonPaletteTint(1.0f).b);  // summer cool (B>R)
+    EXPECT_FLOAT_EQ(R::SeasonPaletteTint(0.0f).r, R::SeasonPaletteTint(0.0f).b); // neutral at wave 0
+
+    // MOON GEOMETRY: bit-exact vs the std::sin/std::cos (FLOAT overload) rebuild.
+    for (float tod : {0.0f, 0.25f, 0.5f, 0.75f}) {
+        for (float decl : {0.0f, 0.41015237f, -0.41015237f}) {
+            const R::SunGeometry sg = R::ComputeSunGeometry(tod, decl);
+            const R::MoonGeometry mg = R::ComputeMoonGeometry(sg.angleRad, sg.tiltZ, sg.direction);
+            const glm::vec3 ldir = glm::normalize(glm::vec3(-std::sin(sg.angleRad),
+                                                            std::cos(sg.angleRad), sg.tiltZ));
+            EXPECT_EQ(mg.direction.x, -sg.direction.x);
+            EXPECT_EQ(mg.direction.y, -sg.direction.y);
+            EXPECT_EQ(mg.direction.z, -sg.direction.z);
+            EXPECT_EQ(mg.lightDir.x, ldir.x);
+            EXPECT_EQ(mg.lightDir.y, ldir.y);
+            EXPECT_EQ(mg.lightDir.z, ldir.z);
+            EXPECT_EQ(mg.upFactor, glm::dot(ldir, glm::vec3(0.0f, -1.0f, 0.0f)));
+        }
+    }
+    { // the moon is OVERHEAD at midnight (sun below the horizon) — high moon up-factor at tod 0.5.
+        const R::SunGeometry sg = R::ComputeSunGeometry(0.5f, 0.0f);
+        const R::MoonGeometry mg = R::ComputeMoonGeometry(sg.angleRad, sg.tiltZ, sg.direction);
+        EXPECT_GT(mg.upFactor, 0.97f);
+    }
+
+    // LUNAR illumination: bit-exact vs the std::cos rebuild; full at tick 0, floor at half-cycle.
+    for (std::uint64_t t : {0ull, 1ull, 13500ull, 27000ull, 40500ull, 53999ull, 54000ull, 123456ull}) {
+        const float got = R::LunarIllumination(t, kLunar);
+        const std::uint64_t til = t % kLunar;
+        const float lt = static_cast<float>(static_cast<double>(til) / static_cast<double>(kLunar));
+        const float full = 0.5f + 0.5f * std::cos(lt * 2.0f * glm::pi<float>());
+        EXPECT_EQ(got, glm::mix(R::kNewMoonFloor, 1.0f, full)) << "tick=" << t;
+    }
+    EXPECT_FLOAT_EQ(R::LunarIllumination(0, kLunar), 1.0f);                          // tick 0 = full moon
+    EXPECT_NEAR(R::LunarIllumination(kLunar / 2, kLunar), R::kNewMoonFloor, 1e-5f);  // half = new moon
+    // Override precedence + clamp (ComputeMoonIllumination): a forced >= 0 wins, clamped to [0,1].
+    EXPECT_FLOAT_EQ(R::ComputeMoonIllumination(0, 0.42f, kLunar), 0.42f);
+    EXPECT_FLOAT_EQ(R::ComputeMoonIllumination(0, 5.0f,  kLunar), 1.0f);            // clamped high
+    EXPECT_FLOAT_EQ(R::ComputeMoonIllumination(0, -1.0f, kLunar),
+                    R::LunarIllumination(0, kLunar));                                // <0 falls back to cycle
+}
+
 // Spec 015 Pillar A (FR-A-001): the direct-sun magnitude is derived from the atmosphere
 // transmittance (SunLightModel::SunIrradiance) — the SAME function RenderPipeline uses to
 // set m_sun.color. This pins the contract: overhead sun preserved, low sun dims AND

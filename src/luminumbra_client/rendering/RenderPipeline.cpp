@@ -5110,62 +5110,35 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     // calibrated noon luminance the LodGround/RenderHealth baselines depend on.
     // Render-only. (season_wave: +1 summer -> R down/B up; -1 winter -> R up/B
     // down.)
-    constexpr float kSeasonTintStrength = 0.06f; // +/- per-channel hue swing
-    m_seasonPaletteTint = glm::vec3(
-        1.0f - kSeasonTintStrength * season_wave,
-        1.0f,
-        1.0f + kSeasonTintStrength * season_wave);
-    {
-        // Preserve luminance: renormalize the tint so it only rotates hue.
-        const float tint_lum =
-            m_seasonPaletteTint.r * 0.2126f +
-            m_seasonPaletteTint.g * 0.7152f +
-            m_seasonPaletteTint.b * 0.0722f;
-        if (tint_lum > 1e-6f) {
-            m_seasonPaletteTint /= tint_lum;
-        }
-    }
+    // T-I5a-7 (C2) / RENDER-14: SEASON PALETTE tint (Rendering::SeasonPaletteTint) -- a small
+    // luminance-preserving hue shift (WINTER warm, SUMMER cool) applied to the sun color (and the
+    // ambient below). Luminance-normalized so it rotates HUE only; the calibrated noon luminance
+    // the LodGround/RenderHealth baselines depend on does not move. Render-only.
+    m_seasonPaletteTint = Rendering::SeasonPaletteTint(season_wave);
     m_sun.color *= m_seasonPaletteTint;
 
-    m_moonDirection = -m_sun.direction;
-    // moon-shadows (owner: "moon not seemingly to cast light and thus shadows at
-    // night causing it to be very dark"): the moon now casts a real directional
-    // key + cast shadows at night, not just a flat fill. m_moonLightDir is the
-    // moon's TOWARD-LIGHT vector in the SAME convention the lighting pass uses for
-    // u_sun.direction (used directly as the L vector, and as the cascade light
-    // direction at night). The moon orbits OPPOSITE the sun: the sun toward-light
-    // form is normalize(vec3(sin(a), -cos(a), tilt)); the moon at angle a+PI is
-    // normalize(vec3(-sin(a), cos(a), tilt)), which is overhead (0,-1,tilt) at
-    // midnight (a=PI) — exactly when the sun is below the horizon. It is uploaded
-    // as u_moonDir (LightingPass.cpp) and consumed by get_light_space_matrices to
-    // re-key the single shadow cascade onto the moon while the sun is down.
-    // m_moonDirection above (the moon TRAVEL dir) is left untouched: SkyboxPass
-    // still uses it to place the moon disc.
-    m_moonLightDir = glm::normalize(glm::vec3(-std::sin(sun_angle_rad),
-                                              std::cos(sun_angle_rad),
-                                              season_tilt_z));
-    m_moonUpFactor = glm::dot(m_moonLightDir, glm::vec3(0.0f, -1.0f, 0.0f));
+    // RENDER-14: moon geometry (Rendering::ComputeMoonGeometry). The moon orbits OPPOSITE the sun;
+    // m_moonLightDir is its TOWARD-LIGHT vector (same convention as u_sun.direction), overhead at
+    // midnight so get_light_space_matrices can re-key the shadow cascade onto the moon at night.
+    // m_moonDirection (= -sun dir, the TRAVEL dir) places the disc in SkyboxPass. TRIG: the moon
+    // uses std::sin/std::cos (float), distinct from the sun's unqualified ::sin -- preserved.
+    const Rendering::MoonGeometry moon_geo =
+        Rendering::ComputeMoonGeometry(sun_angle_rad, season_tilt_z, m_sun.direction);
+    m_moonDirection = moon_geo.direction;
+    m_moonLightDir = moon_geo.lightDir;
+    m_moonUpFactor = moon_geo.upFactor;
 
-    // Spec 015 Pillar A (A-T04): LUNAR PHASE -> the "two night modes" (DayZ-style: bright
-    // moonlit nights vs dark new-moon nights). A deterministic lunar cycle from the tick
-    // (pure function, like the season; render-only, never world_hash) sets the moon's
-    // illuminating power. LUMIN_MOON (parsed once) or set_moon_illumination() forces a value.
+    // Spec 015 Pillar A (A-T04) / RENDER-14: LUNAR PHASE -> the "two night modes" (bright moonlit
+    // vs dark new-moon nights). The deterministic lunar-cycle math is Rendering::ComputeMoonIllumination
+    // (pure function of the tick, render-only, never world_hash); the LUMIN_MOON env read (parsed
+    // once) stays here as a client-config concern, with set_moon_illumination() as the other override.
     {
         static const float s_moon_env = [] {
             if (const char* e = std::getenv("LUMIN_MOON")) { try { return std::stof(e); } catch (...) {} }
             return -1.0f;
         }();
         const float forced = s_moon_env >= 0.0f ? s_moon_env : m_moonIllumOverride;
-        if (forced >= 0.0f) {
-            m_moonIllumination = glm::clamp(forced, 0.0f, 1.0f);
-        } else {
-            const std::uint64_t tick_in_lunar = m_seasonTick % kTicksPerLunarCycle;
-            const float lunar_t = static_cast<float>(
-                static_cast<double>(tick_in_lunar) / static_cast<double>(kTicksPerLunarCycle));
-            const float full = 0.5f + 0.5f * std::cos(lunar_t * 2.0f * glm::pi<float>()); // 1 full -> 0 new -> 1
-            constexpr float kNewMoonFloor = 0.08f; // starlight floor; new moon is dark, never pitch-zero
-            m_moonIllumination = glm::mix(kNewMoonFloor, 1.0f, full);
-        }
+        m_moonIllumination = Rendering::ComputeMoonIllumination(m_seasonTick, forced, kTicksPerLunarCycle);
     }
 
     // Ambient scales by the same PI as SUN_IRRADIANCE_SCALE (lighting_pass
