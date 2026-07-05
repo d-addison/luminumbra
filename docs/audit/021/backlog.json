@@ -1375,9 +1375,10 @@
         "RENDER-12",
         "RENDER-01"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "WorldVisualSweep rerun + tools/flip_diff.py heatmap review (intentional tint change) + validate-engine-frontier.ps1 -Mode DeterminismAudit",
-      "rank": 74
+      "rank": 74,
+      "note": "DONE 2026-07-05 (Wave F F5, commit 30c57362). 015 C-1 colored shadow maps through the 016 pass/resource contract: registry-owned shadow_tint_cascades (RGBA8 x4, border/init WHITE = identity) + tint FBO sharing the opaque cascade depth; glass panes multiply-blend Beer-Lambert transmission (T(d)=tint^d, GlassTintModel.h == shadow_tint.frag pinned to 8-bit exactness); lighting_pass SampleShadowTint multiplies the DIRECT key. Empty-glass world pays zero GPU (dirty-flag). Gates: ColoredShadow model anchors + the end-to-end GPU chain test (white==disabled byte-identical; red pane reddens the lit sun); RenderParityFrame EXACT 0.0; smokes byte-identical. Looked-at AC-C1-001 beauty shot staged at the F10 checkpoint (panes must sit on bare DEFERRED-lit terrain - grass cards are forward-lit and mask the pools)."
     },
     {
       "id": "RENDER-17",
@@ -2728,9 +2729,10 @@
       "dependencies": [
         "GPU-06"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: RenderCaptureSdkTrigger.NsightTriggerLive / PixTriggerLive - with the respective SDK present a capture request returns capture_started=true and a capture file exists; both still report not-linked and emit the MarkerOnly fallback headless (mirrors GPU-06's RenderDoc injected-API pattern)",
-      "rank": 78
+      "rank": 78,
+      "note": "DONE 2026-07-05 (Wave F F4, agent-implemented + orchestrator-verified). PIX + Nsight trigger legs on the GPU-06 CaptureHooks under the detection-only discipline; per-backend honest availability; test seams for both; RenderCaptureSdkTrigger.{PixTriggerLive,NsightTriggerLive,FallbackWhenAbsent} green (7/7 capture tests). PIX real capture requires the DX12 backend (spec 014 M5) - stated in code."
     }
   ]
 }

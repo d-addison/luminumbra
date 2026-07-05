@@ -324,6 +324,30 @@ else()
     target_link_libraries(render_capture_test PRIVATE OpenGL::GL)
 endif()
 
+# GPU-14 (spec 021 rank 78): the PIX + Nsight trigger legs, driven through the
+# CaptureHooks test seams against injected api doubles. CaptureHooks.cpp is
+# GL-free (module detection + function pointers only), so unlike
+# render_capture_test this target needs no glfw/glad/OpenGL link.
+add_executable(capture_sdk_trigger_test
+    rendering/capture_sdk_trigger_test.cpp
+    ../src/luminumbra_client/rendering/CaptureHooks.cpp
+)
+
+target_compile_definitions(capture_sdk_trigger_test PRIVATE
+    LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts"
+)
+
+target_include_directories(capture_sdk_trigger_test PRIVATE
+    ../src
+    ../src/luminumbra_client
+    ../vendor
+)
+
+target_link_libraries(capture_sdk_trigger_test PRIVATE
+    gtest_main
+    luminumbra_common
+)
+
 # RENDER-12/GPU-12 (spec 016 FR-B): the registry OWNED-resource contract against
 # a real hidden GL context — frame-boundary survival, resize re-attach, destroy.
 add_executable(registry_ownership_test
@@ -1231,6 +1255,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     octa_impostor_test
     render_smoke_test
     render_capture_test
+    capture_sdk_trigger_test
     async_readback_ring_test
     dual_backend_flip_test
     registry_ownership_test

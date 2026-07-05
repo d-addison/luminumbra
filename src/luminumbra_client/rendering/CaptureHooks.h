@@ -38,19 +38,26 @@ CaptureResult BuildCaptureReadyMarker(const CaptureRequest& request);
 // RenderDoc the module is absent and the calls fall back to the marker path. A
 // real .rdc is only produced when the app runs under RenderDoc.
 //
-// PIX and Nsight are NOT linked (their programmatic in-app triggers need the
-// heavyweight PIX runtime / NGFX injection SDK) -- IsCaptureSdkAvailable reports
-// false for them honestly rather than silently claiming support. Tracked as a
-// follow-up (see the backlog Nsight/PIX SDK item).
+// GPU-14 (spec 021 rank 78) adds the PIX and Nsight trigger legs with the same
+// discipline. Neither SDK is vendored, so their entry-point surfaces are the
+// minimal locally-declared structs below (not pix3.h / the NGFX SDK), and
+// detection is GetModuleHandle on the ALREADY-injected module only -- nothing
+// is ever LoadLibrary'd uninvited. IsCaptureSdkAvailable reports each backend
+// honestly: true only when that backend's Begin/End bracket can actually run.
 // -----------------------------------------------------------------------------
 
 // An in-progress frame capture bracket. active == a real SDK capture was started;
 // otherwise the caller should emit the marker (BuildCaptureReadyMarker) instead.
 struct FrameCaptureSession {
     bool active = false;
-    std::string backend;      // "RenderDoc" when an SDK started it, else the requested backend name
+    std::string backend;      // the SDK name when an SDK started it, else the requested backend name
     std::string marker;       // the capture-ready marker (always populated)
     std::string diagnostic;
+    // GPU-14: which SDK's End must close this bracket (MarkerOnly when !active).
+    CaptureBackend sdk_backend = CaptureBackend::MarkerOnly;
+    // GPU-14: the capture target handed to the SDK at Begin. PIX reports no path
+    // back at End (unlike RenderDoc's GetCapture), so this is its only record.
+    std::string requested_capture_file;
 };
 
 struct FrameCaptureResult {
@@ -76,12 +83,55 @@ FrameCaptureSession BeginFrameCapture(const CaptureRequest& request,
 // marker-only result with capture_started == false).
 FrameCaptureResult EndFrameCapture(FrameCaptureSession& session);
 
+// -----------------------------------------------------------------------------
+// GPU-14: minimal locally-declared PIX / Nsight trigger surfaces. These are OUR
+// declarations (the SDK headers are not vendored), shared with the tests so the
+// injected doubles match the exact ABI the production code calls through.
+// -----------------------------------------------------------------------------
+
+// Minimal local mirror of pix3.h's PIXCaptureParameters GPU-capture member.
+// Only GpuCaptureParameters.FileName is read under PIX_CAPTURE_GPU; the pad
+// keeps this at least as large as the SDK union so the callee never reads past
+// our storage.
+struct PixCaptureParameters {
+    const wchar_t* gpu_capture_file_name = nullptr;
+    unsigned long long reserved_pad[8] = {};
+};
+
+// WinPixGpuCapturer.dll programmatic-capture entry points (PIXBeginCapture2 /
+// PIXEndCapture), spelled with plain types so this header stays windows.h-free:
+// HRESULT -> long, DWORD -> unsigned long, BOOL -> int. The only Windows target
+// is x64, which has a single calling convention (WINAPI is a no-op there).
+// PIX GPU capture targets D3D: on today's GL client the trigger seam + module
+// detection handshake is what is wired and tested; a real .wpix capture needs
+// the DX12 backend (spec 014 M5).
+struct PixCaptureApi {
+    long (*BeginCapture)(unsigned long flags, const PixCaptureParameters* params) = nullptr;
+    long (*EndCapture)(int discard) = nullptr;
+};
+
+// The Nsight trigger bracket shape (there is no public in-process ABI to
+// mirror: the injected interception layer exports no documented programmatic
+// trigger -- that needs the NGFX Injection SDK, not vendored). The real leg is
+// module detection only; this struct is what the test seam injects and what a
+// future NGFX wire-up fills in. Returns 1 on success (RenderDoc's convention).
+struct NsightCaptureApi {
+    unsigned int (*BeginCapture)() = nullptr;
+    unsigned int (*EndCapture)() = nullptr;
+};
+
 namespace detail {
 // Test seam (GPU-06): inject a fake RENDERDOC_API_1_x_x* (passed as void* so the
 // public header stays free of the RenderDoc header) so the capture integration
 // logic runs against a double, exercising the exact production Begin/End code
 // path without a real RenderDoc DLL. Pass nullptr to reset to real loading.
 void SetRenderDocApiForTesting(void* renderdoc_api);
+// Test seams (GPU-14), cloning the RenderDoc one: inject a fake PixCaptureApi*
+// / NsightCaptureApi* (as void*, matching the seam shape above) so the full
+// Begin/End bracket runs against a double without either SDK installed. Pass
+// nullptr to reset to real module detection.
+void SetPixApiForTesting(void* pix_api);
+void SetNsightApiForTesting(void* nsight_api);
 } // namespace detail
 
 } // namespace Luminumbra::Rendering
