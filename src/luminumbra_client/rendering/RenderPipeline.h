@@ -508,6 +508,15 @@ public:
     // occluders for the shadow tint cascade; RENDER-18 OIT reuses the same items).
     // Render-only — panes never feed the sim or world_hash.
     void set_glass_panes(std::vector<GlassPaneItem> panes) { m_glass_pane_items = std::move(panes); }
+
+    // Rank 69 (RENDER-07/ATMO-05, Wave F F6): GPU auto-exposure metering. OFF by
+    // default — the analytic AutoExposureForElevation curve stays the auto source
+    // (FR-A-004 is satisfied by it); ON routes the mean-log-luminance readback
+    // (luminance_meter stage -> AsyncReadbackRing -> the damped servo in
+    // prepare_frame) into the auto half of SelectRenderExposure. Manual photo EV
+    // (A-T07) overrides either. Render-only; never world_hash.
+    void set_auto_exposure_metered(bool on) { m_auto_exposure_metered = on; }
+    bool auto_exposure_metered() const { return m_auto_exposure_metered; }
     RenderHealthSnapshot get_render_health_snapshot(bool drain_gl_errors = false) const;
     // framescan: read-only access to the G-buffer attachments for the
     // what's-in-frame scan tool. The normal/material attachment (RGBA8) carries
@@ -888,6 +897,7 @@ private:
     void execute_stage_god_rays(const Camera& camera);
     void execute_stage_foliage(const Camera& camera);
     void execute_stage_taau_resolve(const Camera& camera);
+    void execute_stage_luminance_meter(const Camera& camera);
     void execute_stage_particles(const Camera& camera);
     void execute_stage_lightning_overlay(const Camera& camera);
     void execute_stage_final_blit(const Camera& camera);
@@ -1227,6 +1237,17 @@ private:
     std::vector<GlassPaneItem> m_glass_pane_items;
     u32 m_glass_quad_vao = 0;
     u32 m_glass_quad_vbo = 0;
+
+    // Rank 69 (Wave F F6): the GPU auto-exposure meter — a 1-workgroup compute
+    // reduce of lighting.color into a 1-float SSBO, ring-copied out and consumed
+    // by the damped servo in prepare_frame (stale-safe, never blocks). Lazy-init
+    // inside the stage; torn down in cleanup_gpu_resources.
+    bool m_auto_exposure_metered = false;
+    float m_metered_exposure = 1.0f;
+    bool m_metered_valid = false;
+    u32 m_lum_reduce_program = 0;
+    u32 m_lum_reduce_ssbo = 0;
+    AsyncReadbackRing m_exposure_ring;
 
     u32 m_terrainTextureArray = 0;
     // Per-material triplanar normal-map array (T-I4-7). Same layer order as the

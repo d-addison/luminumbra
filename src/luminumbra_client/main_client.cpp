@@ -155,6 +155,8 @@ std::unordered_map<std::string, std::filesystem::file_time_type> g_shader_watch_
 // near spawn so the colored-shadow AC captures have a subject. Render-only.
 bool g_debug_glass_panes = false;
 bool g_glass_panes_spawned = false;
+// Rank 69 (Wave F F6): --auto-exposure-metered opts the GPU metering servo in.
+bool g_auto_exposure_metered = false;
 int g_rebindCaptureAction = -1;
 
 // Short human label for a GLFW key code (for the settings controls list). Printable keys use
@@ -2719,6 +2721,9 @@ int main(int argc, char* argv[]) {
     g_play_paths = HasCommandLineFlag(argc, argv, "--play-paths"); // TEMP diag: normal-play paths under a scripted scenario camera
     // Spec 015 C-1 (RENDER-15): stage the stained-glass capture subject near spawn.
     g_debug_glass_panes = HasCommandLineFlag(argc, argv, "--debug-glass-pane");
+    // Rank 69 (Wave F F6): opt-in GPU auto-exposure metering (checkpoint strip +
+    // owner ratification lever; the analytic curve stays the shipped default).
+    g_auto_exposure_metered = HasCommandLineFlag(argc, argv, "--auto-exposure-metered");
     g_profile_fly_seconds = static_cast<double>(GetCommandLineIntOption(argc, argv, "--profile-fly", 0)); // TEMP diag: constant-speed eye-level moving profiler (normal-play, self-exits)
     g_render_benchmark_frames = GetCommandLineIntOption(argc, argv, "--render-benchmark-frames", 120);
     g_render_benchmark_warmup = GetCommandLineIntOption(argc, argv, "--render-benchmark-warmup", 60);
@@ -9604,6 +9609,8 @@ int main(int argc, char* argv[]) {
                     LUMINUMBRA_CORE_INFO("Debug glass panes staged (3 stained-glass tints) near spawn");
                 }
             }
+            // Rank 69 (Wave F F6): push the metering opt-in (idempotent per frame).
+            renderPipeline.set_auto_exposure_metered(g_auto_exposure_metered);
             // Spec 023 — live shader authoring (crawl F5 + walk: watcher + panel F10).
             // Render-only end to end: shaders/uniforms never feed the sim or world_hash.
             if (currentState == GameState::IN_GAME && g_timelapse_frames == 0) {

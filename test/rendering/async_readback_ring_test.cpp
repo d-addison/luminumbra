@@ -16,6 +16,8 @@
 
 #include <cstdint>
 #include <cstring>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -268,6 +270,95 @@ TEST(AsyncReadbackRing, EnsureIsIdempotent) {
     EXPECT_TRUE(ring.ensure(512, 2));
     EXPECT_EQ(ring.depth(), 3);
     EXPECT_GE(ring.slot_bytes(), 512u);
+}
+
+// Rank 69 (RENDER-07/ATMO-05, Wave F F6) — the ExposureMeter gate: the SHIPPED
+// res/shaders/luminance_reduce.comp kernel, on a constant-luminance input,
+// reduces to that exact luminance (the geometric mean of a constant is the
+// constant), and the value round-trips through the ring WITHOUT any blocking
+// call (bounded zero-timeout polls only — the FR-A-001 contract the metering
+// servo relies on).
+TEST(AsyncReadbackRing, ExposureMeterKernelReducesConstantSceneNonBlocking) {
+    HiddenGlContext ctx;
+    if (!ctx.ready()) {
+        GTEST_SKIP() << "no GL context: " << ctx.error();
+    }
+
+    // Compile the shipped kernel from source root.
+    const std::string comp_path =
+        std::string(LUMINUMBRA_SOURCE_ROOT) + "/res/shaders/luminance_reduce.comp";
+    std::ifstream file(comp_path);
+    ASSERT_TRUE(file.is_open()) << "missing " << comp_path;
+    std::stringstream source;
+    source << file.rdbuf();
+    const std::string src_str = source.str();
+    const char* src_c = src_str.c_str();
+    GLuint shader = glCreateShader(GL_COMPUTE_SHADER);
+    glShaderSource(shader, 1, &src_c, nullptr);
+    glCompileShader(shader);
+    GLint ok = 0;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+    char info_log[1024] = {};
+    if (!ok) glGetShaderInfoLog(shader, sizeof(info_log), nullptr, info_log);
+    ASSERT_TRUE(ok) << "luminance_reduce.comp failed to compile:\n" << info_log;
+    GLuint program = glCreateProgram();
+    glAttachShader(program, shader);
+    glLinkProgram(program);
+    glGetProgramiv(program, GL_LINK_STATUS, &ok);
+    ASSERT_TRUE(ok) << "luminance_reduce.comp failed to link";
+    glDeleteShader(shader);
+
+    // A constant mid-grey scene: every sample's luminance == dot(c, Rec709) == c.
+    constexpr float kGrey = 0.5f;
+    GLuint scene = 0;
+    glGenTextures(1, &scene);
+    glBindTexture(GL_TEXTURE_2D, scene);
+    std::vector<float> texels(static_cast<std::size_t>(64) * 64 * 4, kGrey);
+    for (std::size_t i = 3; i < texels.size(); i += 4) texels[i] = 1.0f;
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, 64, 64, 0, GL_RGBA, GL_FLOAT, texels.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    GLuint ssbo = 0;
+    glGenBuffers(1, &ssbo);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(float), nullptr, GL_DYNAMIC_COPY);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+
+    glUseProgram(program);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, scene);
+    glUniform1i(glGetUniformLocation(program, "u_scene"), 0);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, ssbo);
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+
+    AsyncReadbackRing ring;
+    ASSERT_TRUE(ring.ensure(sizeof(float), 3));
+    ASSERT_TRUE(ring.begin());
+    ring.copy_region(ssbo, 0, 0, sizeof(float));
+    ring.submit(); // returns immediately (FR-A-001)
+
+    // Bounded NON-blocking poll loop (no glFinish, no client waits).
+    bool ready = false;
+    for (int i = 0; i < 10000 && !ready; ++i) {
+        ready = ring.poll();
+    }
+    ASSERT_TRUE(ready) << "the metering readback never completed non-blockingly";
+    const void* p = nullptr;
+    std::size_t n = 0;
+    ASSERT_TRUE(ring.consume(&p, &n));
+    ASSERT_GE(n, sizeof(float));
+    float measured = 0.0f;
+    std::memcpy(&measured, p, sizeof(float));
+    // Rec.709 luma of constant grey == the grey; geometric mean of a constant ==
+    // the constant. RGBA16F storage + log/exp round-trip: allow a small epsilon.
+    EXPECT_NEAR(measured, kGrey, 0.005f)
+        << "the reduce kernel drifted from the geometric-mean-luminance contract";
+
+    glDeleteBuffers(1, &ssbo);
+    glDeleteTextures(1, &scene);
+    glDeleteProgram(program);
 }
 
 } // namespace

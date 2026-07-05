@@ -243,6 +243,10 @@ inline RenderGraph BuildLuminumbraFrameGraph() {
     g.add({"foliage", {"lighting.depth"}, {"lighting.color"}, {}, true});
     // TAAU resolve of the opaque lit color before the transparent particle/lightning composite.
     g.add({"taau_resolve", {"lighting.color"}, {"lighting.color"}, {}, true});
+    // Rank 69 (Wave F F6): mean-log-luminance meter of the resolved lit scene ->
+    // the AsyncReadbackRing (consumed next prepare_frame). The first BORN-graph-
+    // native stage: it exists as a node + executor entry, never in a hand script.
+    g.add({"luminance_meter", {"lighting.color"}, {"exposure.meter"}, {}, true});
     // 8 / 8b: particles then lightning composite over the lit target.
     g.add({"particles", {"lighting.depth"}, {"lighting.color"}, {}, true});
     g.add({"lightning_overlay", {"lighting.color"}, {"lighting.color"}, {}, true});

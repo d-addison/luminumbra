@@ -83,6 +83,10 @@ inline bool AABBFrustumCulled(const glm::vec3& minp, const glm::vec3& maxp, cons
 
 namespace Luminumbra::Rendering {
 
+// Fwd decl: defined in the GPU-SDF section far below; reused by the rank-69
+// luminance meter (Wave F F6).
+GLuint create_compute_program(const char* compute_source);
+
 namespace {
 
 constexpr bool kEnableExperimentalGpuSdfIntegration = false;
@@ -1050,9 +1054,14 @@ RenderContext RenderPipeline::make_lighting_context(const Camera& camera) {
     ctx.moon_light_dir     = m_moonLightDir;
     ctx.moon_illumination  = m_moonIllumination; // Spec 015 Pillar A (A-T04): lunar phase / two night modes
     ctx.moon_radiance      = m_moonRadiance;     // Spec 015 Pillar A (Codex C5): the moon's dedicated radiance channel
-    // Spec 015 Pillar A: photo-mode manual EV (A-T07) OVERRIDES the analytic TOD curve
-    // (A-T05); the -1 sentinel (photo mode inactive) selects the TOD exposure.
-    ctx.exposure           = SelectRenderExposure(m_exposureOverride, m_pillarA_exposure);
+    // Spec 015 Pillar A: photo-mode manual EV (A-T07) OVERRIDES the auto exposure;
+    // the -1 sentinel (photo mode inactive) selects it. Rank 69 (A-T06): with
+    // metering ON and a first readback consumed, the ring-fed damped servo IS the
+    // auto source; otherwise the analytic TOD curve (A-T05/FR-A-004) remains.
+    const float auto_exposure = (m_auto_exposure_metered && m_metered_valid)
+                                    ? m_metered_exposure
+                                    : m_pillarA_exposure;
+    ctx.exposure           = SelectRenderExposure(m_exposureOverride, auto_exposure);
     ctx.emissive_lut_scale = kEmissiveLutScale;
     ctx.point_lights       = &m_point_lights_this_frame;
     ctx.cloud_state        = m_cloud_state;
@@ -2311,6 +2320,27 @@ void RenderPipeline::prepare_frame(entt::registry& registry, Systems::SHIELD_Wor
     m_wall_clock_time = static_cast<float>(glfwGetTime());
 
     update_time_of_day(deltaTime);
+
+    // Rank 69 (Wave F F6): consume the newest COMPLETED luminance readback (never
+    // blocks; a stale N-frame-old value is the contract) and advance the damped
+    // exposure servo toward the mid-grey key. Flag OFF -> the analytic
+    // AutoExposureForElevation curve stays the auto source (FR-A-004).
+    if (m_auto_exposure_metered && m_exposure_ring.initialized()) {
+        const void* p = nullptr;
+        std::size_t n = 0;
+        if (m_exposure_ring.consume(&p, &n) && n >= sizeof(float)) {
+            constexpr float kMeterKey = 0.18f;        // mid-grey target
+            constexpr float kMeterMinExposure = 0.25f; // stop clamps (servo bounds)
+            constexpr float kMeterMaxExposure = 4.0f;
+            constexpr float kMeterAdaptRate = 0.08f;  // eye-adaptation damping
+            float avg = *static_cast<const float*>(p);
+            avg = std::clamp(avg, 1e-4f, 64.0f);
+            const float target =
+                std::clamp(kMeterKey / avg, kMeterMinExposure, kMeterMaxExposure);
+            m_metered_exposure += (target - m_metered_exposure) * kMeterAdaptRate;
+            m_metered_valid = true;
+        }
+    }
     gather_lights(registry, camera.Position);
     // Underwater detection: the aerial pass becomes a murky-water volume when the
     // camera sits below the local water surface (sea OR a perched lake).
@@ -2503,6 +2533,7 @@ RenderPipeline::stage_executor_table() {
         {"god_rays", &RenderPipeline::execute_stage_god_rays},
         {"foliage", &RenderPipeline::execute_stage_foliage},
         {"taau_resolve", &RenderPipeline::execute_stage_taau_resolve},
+        {"luminance_meter", &RenderPipeline::execute_stage_luminance_meter},
         {"particles", &RenderPipeline::execute_stage_particles},
         {"lightning_overlay", &RenderPipeline::execute_stage_lightning_overlay},
         {"final_blit", &RenderPipeline::execute_stage_final_blit},
@@ -2997,6 +3028,58 @@ void RenderPipeline::execute_stage_taau_resolve(const Camera& camera) {
         execute_taau_resolve(taau_ctx);
     }
 
+}
+
+void RenderPipeline::execute_stage_luminance_meter(const Camera& camera) {
+    (void)camera;
+    // Rank 69 (RENDER-07/ATMO-05, Wave F F6): mean-log-luminance of the resolved
+    // lit scene -> a 1-float SSBO -> the AsyncReadbackRing. Submit-only here (the
+    // damped servo consumes in prepare_frame, stale-safe, never blocking). Flag
+    // OFF (the default) is a zero-GL no-op; the trace slot is still recorded.
+    // Dispatch-idempotent: re-running recomputes the SAME value into the SSBO and
+    // ring-submits again — pixels are untouched (nothing samples the SSBO this
+    // frame), so the whole-frame A/B stays exact with the flag ON or OFF.
+    record_frame_stage("luminance_meter");
+    if (!m_auto_exposure_metered) {
+        return;
+    }
+    if (m_lum_reduce_program == 0) {
+        // Lazy init: compile the reduce kernel + the 1-float SSBO on first use.
+        std::ifstream file(std::filesystem::path(m_root_path) / "res/shaders/luminance_reduce.comp");
+        if (!file) {
+            LUMINUMBRA_CORE_ERROR("luminance_meter: missing res/shaders/luminance_reduce.comp");
+            m_auto_exposure_metered = false;
+            return;
+        }
+        std::stringstream source;
+        source << file.rdbuf();
+        m_lum_reduce_program = create_compute_program(source.str().c_str());
+        if (m_lum_reduce_program == 0) {
+            LUMINUMBRA_CORE_ERROR("luminance_meter: compute compile failed; metering disabled");
+            m_auto_exposure_metered = false;
+            return;
+        }
+        label_gl_object(GL_PROGRAM, m_lum_reduce_program, "shader.luminance_reduce");
+        glGenBuffers(1, &m_lum_reduce_ssbo);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_lum_reduce_ssbo);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(float), nullptr, GL_DYNAMIC_COPY);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+        label_gl_object(GL_BUFFER, m_lum_reduce_ssbo, "luminance_reduce.ssbo");
+    }
+    glUseProgram(m_lum_reduce_program);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_lighting_pass->lighting_fbo().color_texture);
+    glUniform1i(glGetUniformLocation(m_lum_reduce_program, "u_scene"), 0);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_lum_reduce_ssbo);
+    glDispatchCompute(1, 1, 1);
+    // The ring's GPU->GPU copy must observe the SSBO write.
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, 0);
+    glUseProgram(0);
+    if (m_exposure_ring.ensure(sizeof(float), 3) && m_exposure_ring.begin()) {
+        m_exposure_ring.copy_region(m_lum_reduce_ssbo, 0, 0, sizeof(float));
+        m_exposure_ring.submit();
+    }
 }
 
 void RenderPipeline::execute_stage_particles(const Camera& camera) {
@@ -3677,6 +3760,11 @@ void RenderPipeline::cleanup_gpu_resources() {
     if (m_screen_quad_vbo) { glDeleteBuffers(1, &m_screen_quad_vbo); m_screen_quad_vbo = 0; }
     if (m_glass_quad_vao) { glDeleteVertexArrays(1, &m_glass_quad_vao); m_glass_quad_vao = 0; }
     if (m_glass_quad_vbo) { glDeleteBuffers(1, &m_glass_quad_vbo); m_glass_quad_vbo = 0; }
+    // Rank 69 (Wave F F6): the auto-exposure meter kernel + SSBO + readback ring.
+    if (m_lum_reduce_program) { glDeleteProgram(m_lum_reduce_program); m_lum_reduce_program = 0; }
+    if (m_lum_reduce_ssbo) { glDeleteBuffers(1, &m_lum_reduce_ssbo); m_lum_reduce_ssbo = 0; }
+    m_exposure_ring.shutdown();
+    m_metered_valid = false;
     // T-I5b-4 (W1): release the baked waterfall sheet geometry.
     if (m_waterfall_vao) { glDeleteVertexArrays(1, &m_waterfall_vao); m_waterfall_vao = 0; }
     if (m_waterfall_vbo) { glDeleteBuffers(1, &m_waterfall_vbo); m_waterfall_vbo = 0; }
