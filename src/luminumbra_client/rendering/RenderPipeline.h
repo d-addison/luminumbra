@@ -473,6 +473,11 @@ public:
     const MeshUploadFrameStats& get_last_mesh_upload_stats() const { return m_last_mesh_upload_stats; }
     const RenderPassFrameStats& get_last_render_pass_stats() const { return m_last_render_pass_stats; }
     const std::vector<RenderPassMetadata>& get_last_render_pass_metadata() const { return m_last_render_pass_metadata; }
+    // RENDER-11 (016 FR-C): the ORDERED stage ids render_frame actually dispatched last frame --
+    // the runtime golden the declarative RenderGraph (BuildLuminumbraFrameGraph) is gated against
+    // (schedule() == this), so the declaration can never silently drift from the shipping order.
+    // Render-only observability; never hashed (the server never renders).
+    const std::vector<std::string>& frame_stage_trace() const { return m_frame_stage_trace; }
     RuntimeRenderStats get_runtime_render_stats() const;
     RenderResourceRegistryStats get_resource_registry_stats() const;
     // Texture-array residency layer lookup by name (T-I4-6). Returns the
@@ -858,6 +863,10 @@ private:
     void finish_gpu_pass_timer_frame();
 
     void refresh_render_pass_metadata();
+    // RENDER-11: append a stage id to m_frame_stage_trace as render_frame dispatches it. Pure CPU
+    // append (no GL, never hashed); called unconditionally at each stage's authored slot so the
+    // trace is the full canonical order regardless of which conditional stages did GL work.
+    void record_frame_stage(const char* name) { m_frame_stage_trace.emplace_back(name); }
 
     std::vector<glm::mat4> get_light_space_matrices(const Camera& camera);
 
@@ -1101,6 +1110,7 @@ private:
     MeshUploadFrameStats m_last_mesh_upload_stats;
     RenderPassFrameStats m_last_render_pass_stats;
     std::vector<RenderPassMetadata> m_last_render_pass_metadata;
+    std::vector<std::string> m_frame_stage_trace; // RENDER-11 (016 FR-C): last frame's dispatch order
 
     u32 m_screen_quad_vao = 0;
     u32 m_screen_quad_vbo = 0;

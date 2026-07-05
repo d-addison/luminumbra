@@ -8,6 +8,7 @@
 #include "ExposureModel.h" // Spec 015 Pillar A (A-T07): SelectRenderExposure (manual EV precedence)
 #include "SunLightModel.h" // Spec 015 Pillar A (FR-A-001): SunIrradiance (transmittance-coupled sun magnitude)
 #include "TimeOfDayModel.h" // Spec 016 FR-F-001 (RENDER-14): pure time-of-day policy facets (ComputeSeason, ...)
+#include "RenderGraph.h"    // Spec 016 FR-C (RENDER-11): the declarative frame graph gated against the trace
 #include "rendering/passes/ShieldRtFarFieldPass.h"
 #include <algorithm>
 #include <chrono> // spec 004: CPU per-phase submit cost
@@ -1565,6 +1566,23 @@ RenderPipeline::RenderHealthSnapshot RenderPipeline::get_render_health_snapshot(
             }
         }
 
+        // RENDER-11 (016 FR-C): the declarative frame graph must stay a faithful mirror of
+        // render_frame's real dispatch order. ALWAYS assert the declaration is internally
+        // consistent (no read-before-write; the god-rays latest-opaque-snapshot edge resolves);
+        // and once a frame has actually dispatched, assert the graph's schedule EQUALS the real
+        // emitted stage trace -- so the declaration can never silently drift from the shipping
+        // sequence (a stage added/moved/removed in render_frame without updating the graph fails
+        // here). Pure CPU; render-neutral; never hashed.
+        {
+            const Rendering::RenderGraph frame_graph = Rendering::BuildLuminumbraFrameGraph();
+            for (const std::string& violation : frame_graph.validate()) {
+                fail("frame graph declaration inconsistent: " + violation);
+            }
+            if (!m_frame_stage_trace.empty() && frame_graph.schedule() != m_frame_stage_trace) {
+                fail("frame graph schedule drifted from render_frame dispatch order");
+            }
+        }
+
         if (snapshot.resources.framebuffers == 0u) {
             fail("resource registry has no framebuffers while started");
         }
@@ -2178,9 +2196,17 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     std::memcpy(frustum_planes, m_frustumCache.planes, sizeof(frustum_planes));
 
     const auto _cpu_prep = std::chrono::steady_clock::now(); // spec 004
+    // RENDER-11 (016 FR-C): reset the frame-graph stage trace, then record each stage id as it
+    // dispatches. This is render_frame's REAL dispatch order -- the golden the declarative
+    // RenderGraph (BuildLuminumbraFrameGraph) is gated against (schedule() == this trace), so the
+    // declaration can never silently drift from the shipping sequence. Emitted unconditionally at
+    // each stage's slot (a conditional stage that does no GL work still holds its place in the
+    // order). Pure CPU observability: never a GL call, never world_hash (018 FR-E-003).
+    m_frame_stage_trace.clear();
      // 1. SHADOW PASS
     // Spec 016 (T10): precompute light-space matrices (pipeline-private) + the
     // terrain-submit callback at the call site; the pass submits one per cascade.
+    record_frame_stage("shadow");
     begin_gpu_pass_timer(GpuTimerPass::Shadow);
     {
         RenderContext shadow_ctx;
@@ -2201,6 +2227,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     glViewport(0, 0, m_screen_width, m_screen_height);
 
     // 2. GEOMETRY / G-BUFFER PASS (Spec 016-P2-T11: routed through the RenderContext seam).
+    record_frame_stage("gbuffer");
     begin_gpu_pass_timer(GpuTimerPass::GBuffer);
     {
         RenderContext gbuffer_ctx = make_gbuffer_context(camera, frustum_planes);
@@ -2236,6 +2263,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // no-op (zero GL work) and the render is byte-identical. Bind the G-buffer
     // FBO + its 4 draw buffers and depth-test (GL_LESS) so the plants occlude /
     // are occluded correctly, mirroring the far-field injection below.
+    record_frame_stage("plant_procgen");
     if (m_plant_procgen_pass && m_plant_procgen_pass->enabled() &&
         m_plant_procgen_pass->index_count() > 0) {
         glBindFramebuffer(GL_FRAMEBUFFER, m_gbuffer_pass->gbuffer().fbo_id);
@@ -2260,6 +2288,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // fullscreen heightfield max-mip raymarch into the SAME G-buffer, depth-tested
     // (GL_LESS) against the mesh depth so it only wins where nothing is closer.
     // OFF by default (compile flag + runtime opt-in); render is unchanged then.
+    record_frame_stage("farfield_raymarch");
     if (kEnableExperimentalFarFieldGpuRaymarching && m_far_field_runtime_requested &&
         m_shieldrt_far_pass && m_shieldrt_far_pass->ready() &&
         m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::FarField)) {
@@ -2299,6 +2328,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // trails are AO-darkened and lit as ground detail. Determinism-neutral: reads the
     // one-way ScentFieldRenderMirror, never the sim. No-op (zero draws) until a valid,
     // non-empty mirror is uploaded (default-OFF), so the render stays byte-identical.
+    record_frame_stage("ground_decals");
     if (m_ground_decal_pass && m_ground_decal_pass->active()) {
         glBindFramebuffer(GL_FRAMEBUFFER, m_gbuffer_pass->gbuffer().fbo_id);
         const GLenum gd_bufs[1] = {GL_COLOR_ATTACHMENT2};  // albedo only
@@ -2323,11 +2353,13 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // 3. SSAO PASS (Spec 016-P2-T02: routed through the RenderContext seam).
     {
         RenderContext ctx = make_ssao_context(camera);
+        record_frame_stage("ssao");
         begin_gpu_pass_timer(GpuTimerPass::Ssao);
         m_ssao_pass->execute_ssao(ctx);
         m_last_render_pass_stats.ssao_draws++;
         end_gpu_pass_timer(GpuTimerPass::Ssao);
         glBindVertexArray(0);  // Unbind after SSAO
+        record_frame_stage("ssao_blur");
         begin_gpu_pass_timer(GpuTimerPass::SsaoBlur);
         m_ssao_pass->execute_blur(ctx);
         m_last_render_pass_stats.ssao_blur_draws++;
@@ -2341,6 +2373,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // by the opaque-copy (step 7) and lightning-overlay (step 8b) below — the fields
     // they read are frame-stable, so reuse == rebuild. make_lighting_context also runs
     // the hoisted shadow-cascade fixup (CPU-only, render-neutral) before the GPU timer.
+    record_frame_stage("lighting");
     RenderContext lighting_ctx = make_lighting_context(camera);
     begin_gpu_pass_timer(GpuTimerPass::Lighting);
     m_lighting_pass->execute(lighting_ctx);
@@ -2348,6 +2381,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     glBindVertexArray(0);  // Unbind after lighting pass
 
     // 5. COPY DEPTH TO LIGHTING FBO SO SKYBOX AND WATER SHARE THE G-BUFFER OCCLUSION
+    record_frame_stage("depth_blit_to_lighting");
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_gbuffer_pass->gbuffer().fbo_id);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
     glBlitFramebuffer(0, 0, m_screen_width, m_screen_height, 0, 0, m_screen_width, m_screen_height, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
@@ -2355,6 +2389,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // 6. SKYBOX / SKY-DOME PASS (Renders to m_lighting_fbo before transparent water blends)
     // Spec 016 (016-P1-T04): build the skybox ctx AFTER the gbuffer->lighting depth
     // blit (step 5) so the adopted handles + state match the production sequence.
+    record_frame_stage("skybox");
     begin_gpu_pass_timer(GpuTimerPass::Skybox);
     RenderContext skybox_ctx = make_skybox_context(camera);
     if (m_cloud_quality > 0 && m_halfres_cloud.fbo &&
@@ -2405,8 +2440,10 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // Water keeps depth writes off for transparency. Drawing the sky first prevents
     // cloud/aurora sky pixels from overwriting water over far-depth/background
     // samples while still giving refraction a stable pre-water color source.
+    record_frame_stage("opaque_snapshot");
     m_lighting_pass->copy_lighting_color_to_opaque_texture(lighting_ctx);
     glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
+    record_frame_stage("water");
     if (m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Water)) {
         // Spec 016 (T16): build the water draw list from m_water_render_data in
         // chunk order (byte-stable) + the ctx, then run the seam.
@@ -2434,6 +2471,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // as a translucent double-sided veil (depth-test on, depth-write off, blend on
     // so it layers over the scene + each other). A no-op (zero draws) when no
     // sites were baked, so existing visual gates stay byte-stable.
+    record_frame_stage("waterfall");
     if (m_waterfall_geometry_built && m_waterfall_vao != 0 &&
         !m_waterfall_sheet_sites.empty() &&
         m_waterfall_shader && m_waterfall_shader->IsValid()) {
@@ -2508,9 +2546,11 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
             m_skybox_pass->weather_shader() && m_skybox_pass->weather_shader()->IsValid() &&
             lighting_fbo.fbo_id && lighting_fbo.opaque_color_texture && m_screen_quad_vao;
         RenderContext weather_ctx = make_skybox_context(camera);
+        record_frame_stage("weather_opaque_snapshot");
         if (overlay_will_run) {
             m_lighting_pass->copy_lighting_color_to_opaque_texture(weather_ctx);
         }
+        record_frame_stage("weather_overlay");
         m_skybox_pass->execute_weather_overlay(weather_ctx, camera);
         glBindVertexArray(0);
     }
@@ -2519,6 +2559,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // over the lit scene, wiring the dormant volumetric_lighting.frag. Reads the
     // SAME sky-view/transmittance LUT the skybox uses so the fog palette stays
     // coherent with the sky (warm pinks/oranges at low sun). Budget ≤ 0.3 ms.
+    record_frame_stage("aerial");
     if (m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Aerial)) {
         RenderContext aerial_ctx = make_aerial_context(camera);
         begin_gpu_pass_timer(GpuTimerPass::Aerial);
@@ -2531,6 +2572,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // sun around occluders (clouds/terrain). Only when the sun is above the horizon
     // and on screen (zero cost otherwise). Reads the post-sky opaque snapshot.
     {
+        record_frame_stage("god_rays");
         RenderContext godray_ctx = make_god_rays_context(camera);
         execute_god_rays(godray_ctx);
     }
@@ -2542,6 +2584,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // placement hash + the A2 wind bridge) BEFORE this; here we only draw. A
     // no-op (zero GL draws) when foliage is disabled / empty, so all existing
     // visual gates stay byte-stable. RENDER-ONLY (one-way, never feeds the sim).
+    record_frame_stage("foliage");
     if (m_foliage_pass &&
         m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Foliage)) {
         RenderContext foliage_ctx = make_foliage_context(camera);
@@ -2565,6 +2608,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // particles + lightning composite fresh on the stable resolved image. Flag-gated (render.taau);
     // OFF -> no-op. (Pre-§17 this ran just before the blit; moving it up is render-only, gate-neutral
     // when TAAU is OFF, which is the default and what every visual gate runs with.)
+    record_frame_stage("taau_resolve");
     if (m_taau_enabled) {
         RenderContext taau_ctx = make_taau_context();
         execute_taau_resolve(taau_ctx);
@@ -2575,6 +2619,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // advanced first; the descriptor schedule (the sim-deterministic surface) is
     // rebuilt by the scenario driver, NOT here. A no-op (zero GL draws) when no
     // emitters exist, so all existing visual gates stay byte-stable.
+    record_frame_stage("particles");
     if (m_particle_pass &&
         m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Particles)) {
         m_particle_pass->update(deltaTime);
@@ -2596,6 +2641,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // A no-op when no strike is active (zero added cost). Its transient cost is
     // captured by the FinalBlit-adjacent timing; the PerfRegression budget (≤ 0.5 ms)
     // is bounded by the overlay being a single additive full-screen quad.
+    record_frame_stage("lightning_overlay");
     if (m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Lightning)) {
         m_lighting_pass->execute_lightning_overlay(lighting_ctx);
         glBindVertexArray(0);
@@ -2614,6 +2660,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     const u32 dst_w = m_offscreen_target_active ? m_offscreen_target_w : m_screen_width;
     const u32 dst_h = m_offscreen_target_active ? m_offscreen_target_h : m_screen_height;
 
+    record_frame_stage("final_blit");
     begin_gpu_pass_timer(GpuTimerPass::FinalBlit);
     {
         RenderContext ctx;
@@ -2636,6 +2683,7 @@ void RenderPipeline::render_frame(entt::registry& registry, Systems::SHIELD_Worl
     // offscreen) with a single-channel G-buffer view, REPLACING the composited image so a
     // human/frame-scan can tell "dark night" from a lighting/geometry bug. Gated on mode !=
     // None so the default path is byte-identical. Diagnostic; never touches sim/world_hash.
+    record_frame_stage("debug_view");
     if (m_debug_view_pass && m_debug_view_pass->mode() != DebugViewPass::None) {
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw_fbo);
         glViewport(0, 0, static_cast<GLsizei>(dst_w), static_cast<GLsizei>(dst_h));
