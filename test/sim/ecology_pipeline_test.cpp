@@ -178,33 +178,46 @@ TEST(ScentHunt, PredatorTracksPreyUpwind) {
 }
 
 // INSTINCT-06 (Wave H I2.2): starvation DEGRADES, then KILLS, then the carcass
-// DECAYS. A lone mortal herbivore with no food: as hunger crosses the 0.85
+// DECAYS. A lone mortal creature with no food: as hunger crosses the 0.85
 // degradation band its effective speed (|wish|) measurably drops below cruise;
 // at hunger 1.0 the LifespanSystem marks it dead + eaten; the DecayComponent
-// then progresses the carcass. Deterministic run==replay.
+// then progresses the carcass. Deterministic run==replay. (Subject is a lone
+// predator — see the fixture comment for why prey can't sample this since the
+// Wave H graze arbiter.)
 TEST(EcologyPipeline, StarvationDegradesThenKills) {
     auto run = [] {
         entt::registry r;
-        // A predator far away gives the herbivore something to flee (sustained
-        // movement, so |wish| is non-zero and measurable).
-        const auto threat = r.create();
-        r.emplace<Comp::TransformComponent>(threat).position = Luminumbra::Vec3(30.0f, 0.0f, 0.0f);
-        auto& tc = r.emplace<Comp::CreatureComponent>(threat);
-        tc.is_predator = true; tc.hunger = 0.0f; tc.move_speed = 0.0f; // inert threat
+        // Subject: a LONE PREDATOR with no prey. Why a predator and not the
+        // herbivore this test originally used? Since the Wave H arbiter (INSTINCT-04/
+        // 05), a starving PREY correctly Grazes ambient plants (food_proximity is a
+        // hardcoded 0.6 for prey) rather than moving — a zero-velocity action, so the
+        // starving-band |wish| sample was vacuous. A predator with no prey has
+        // food_proximity 0, so Hunt/Graze score ~0 and Wander (the constant baseline)
+        // wins at every hunger — giving a sustained, measurable |wish| that isolates
+        // the pure INSTINCT-06 locomotion degradation (starve_degrade), which is
+        // exactly what this test verifies. LifespanSystem's starvation death (hunger
+        // >= 1.0 -> dead + eaten) is role-agnostic, so the die+carcass arc is intact.
         const auto e = r.create();
         r.emplace<Comp::TransformComponent>(e).position = Luminumbra::Vec3(0.0f, 0.0f, 0.0f);
         auto& cr = r.emplace<Comp::CreatureComponent>(e);
-        cr.is_predator = false;
+        cr.is_predator = true;
         cr.hunger = 0.80f;      // just below the degradation band
         cr.move_speed = 3.0f;
+        cr.stamina = 1.0f;      // full (see the zero move-drain tuning below)
         r.emplace<Comp::MortalComponent>(e).lifespan_ticks = 1000000u; // starvation, not old age
         r.emplace<Comp::DecayComponent>(e).decay_duration = 60u;
+
+        // Zero stamina move-drain so the wanderer never tires into Rest (a
+        // zero-velocity action) before it starves — the test measures starvation
+        // degradation of speed, not stamina dynamics. Every other tuning is default.
+        luminumbra::ai::EcologyTuning tuning;
+        tuning.stamina_move_drain = 0.0f;
 
         constexpr float dt = 1.0f / 30.0f;
         float healthy_speed = -1.0f, starving_speed = -1.0f;
         std::uint64_t death_tick = 0;
         for (std::uint64_t t = 0; t < 4000 && death_tick == 0; ++t) {
-            luminumbra::ai::RunCreatureBrainSystemOnTick(r, dt);
+            luminumbra::ai::RunCreatureBrainSystemOnTick(r, dt, tuning);
             luminumbra::ai::RunLifespanOnTick(r, t);
             luminumbra::ai::RunDecompositionOnTick(r, t);
             const auto& c = r.get<Comp::CreatureComponent>(e);
@@ -217,7 +230,7 @@ TEST(EcologyPipeline, StarvationDegradesThenKills) {
                                r.get<Comp::CreatureComponent>(e).eaten);
     };
     const auto [healthy, starving, death_tick, eaten] = run();
-    ASSERT_GT(healthy, 0.0f) << "the herbivore never moved while healthy (vacuous)";
+    ASSERT_GT(healthy, 0.0f) << "the creature never moved while healthy (vacuous)";
     ASSERT_GT(starving, 0.0f) << "no starving-band movement sample captured (vacuous)";
     EXPECT_LT(starving, healthy * 0.75f)
         << "sustained starvation did not degrade effective speed (healthy=" << healthy
