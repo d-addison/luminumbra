@@ -12,6 +12,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -303,10 +304,17 @@ TEST(UtilityHardening, LoneWandererWishIsCruiseSpeed) {
 }
 
 // Flee/hunt sprint at 1.5x cruise. A hungry predator hunting nearby prey moves
-// at 1.5*move_speed (the wish-velocity scale contract).
+// at 1.5*move_speed, THEN scaled by INSTINCT-06's starvation degradation (a
+// starving animal is genuinely weaker — CreatureBrainSystem.h "needs have
+// consequences, FR-A3"). Because the hunt hunger (0.95) sits inside the 0.85-1.0
+// degradation band, we recover and assert the pure 1.5x sprint MULTIPLIER by
+// dividing out the known starve_degrade — so this verifies the sprint contract
+// the test name asserts, independent of the (separately tested) starvation
+// weakening. starve_degrade formula mirrors CreatureBrainSystem.h:200-201.
 TEST(UtilityHardening, HuntWishIsOnePointFiveCruise) {
     entt::registry r;
-    const auto pred = spawn(r, 0.0f, 0.0f, /*predator=*/true, /*hunger=*/0.95f);
+    constexpr float kHunger = 0.95f;
+    const auto pred = spawn(r, 0.0f, 0.0f, /*predator=*/true, /*hunger=*/kHunger);
     r.get<Comp::CreatureComponent>(pred).move_speed = 2.0f;
     // prey placed beyond catch reach so the predator chases rather than eating.
     spawn(r, 8.0f, 0.0f, /*predator=*/false);
@@ -314,7 +322,11 @@ TEST(UtilityHardening, HuntWishIsOnePointFiveCruise) {
     const auto& c = r.get<Comp::CreatureComponent>(pred);
     ASSERT_EQ(c.last_action, static_cast<int>(CreatureAction::Hunt));
     const float wishLen = std::sqrt(c.wish_x * c.wish_x + c.wish_z * c.wish_z);
-    EXPECT_NEAR(wishLen, 2.0f * 1.5f, 1e-3f) << "hunt should sprint at 1.5x cruise";
+    const float starve01 = std::clamp((kHunger - 0.85f) / 0.15f, 0.0f, 1.0f);
+    const float starve_degrade = 1.0f - 0.5f * starve01;   // 0.667 at hunger 0.95
+    const float sprintMult = wishLen / (2.0f * starve_degrade);
+    EXPECT_NEAR(sprintMult, 1.5f, 1e-3f)
+        << "hunt should sprint at 1.5x cruise (starvation-degraded per INSTINCT-06)";
 }
 
 // DIRECTION: prey flees AWAY from a predator on +x (moves toward -x), single tick.
