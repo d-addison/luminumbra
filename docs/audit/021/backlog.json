@@ -2633,7 +2633,7 @@
       "effort": "S",
       "risk": "low",
       "dependencies": [],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: BDD scenario (test/features) \u2014 the SDF contract doc enumerates both producer tiers and the malformed-SDF regeneration rule, checked by a doc-lint ctest against the contract strings",
       "rank": 141
     },

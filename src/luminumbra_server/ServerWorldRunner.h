@@ -94,8 +94,9 @@ struct ServerTickReport {
     double simulated_seconds = 0.0;
     double wall_seconds = 0.0;
     // Spec 017-D: main-thread blocking-wait instrumentation. Time the main thread spends
-    // BLOCKED in the per-tick wait_for_streaming_jobs() barrier (ServerWorldRunner :489) —
-    // the latency the activation queue (017-B) targets. Percentiles over the per-tick
+    // BLOCKED in the per-tick streaming barrier — since 017-B this is activate_due()
+    // (ServerWorldRunner.cpp:613), which replaced the old per-tick wait_for_streaming_jobs()
+    // drain; it is the latency the activation queue targets. Percentiles over the per-tick
     // samples (ms). Observability only; never feeds world_hash (wall-clock, like wall_seconds).
     double main_wait_p50_ms = 0.0;
     double main_wait_p95_ms = 0.0;

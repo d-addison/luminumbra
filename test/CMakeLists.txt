@@ -1507,6 +1507,28 @@ else()
     message(WARNING "No python with Pillow found: TimelapseSelftest will NOT be registered.")
 endif()
 
+# SHIELD-10 (spec 021): SDF-contract doc-lint. Assert docs/shield/sdf-contract.md
+# enumerates both producer tiers + the malformed-SDF regeneration rule, checked against
+# the contract strings quoted in test/features/sdf-contract.feature. Stdlib-only checker,
+# so any python3 from the shared candidate list works (probe a trivial import).
+set(_sdf_python "")
+foreach(_cand ${_vc_candidates})
+    execute_process(COMMAND "${_cand}" -c "import re,sys,pathlib"
+        RESULT_VARIABLE _sdf_rc OUTPUT_QUIET ERROR_QUIET)
+    if(_sdf_rc EQUAL 0)
+        set(_sdf_python "${_cand}")
+        break()
+    endif()
+endforeach()
+if(_sdf_python)
+    add_test(NAME SdfContractDocLint
+        COMMAND "${_sdf_python}" ${CMAKE_SOURCE_DIR}/tools/check_sdf_contract_doc.py)
+    set_tests_properties(SdfContractDocLint PROPERTIES LABELS "docs;shield" TIMEOUT 60)
+    message(STATUS "SdfContractDocLint registered using python: ${_sdf_python}")
+else()
+    message(WARNING "No python found: SdfContractDocLint (SHIELD SDF contract doc-lint) will NOT be registered.")
+endif()
+
 set(LUMINUMBRA_TEST_BASELINE_BUILD_PRESET "${CMAKE_BUILD_TYPE}")
 string(TOLOWER "${LUMINUMBRA_TEST_BASELINE_BUILD_PRESET}" LUMINUMBRA_TEST_BASELINE_BUILD_PRESET)
 if(LUMINUMBRA_TEST_BASELINE_BUILD_PRESET STREQUAL "")

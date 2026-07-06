@@ -116,6 +116,41 @@ Material selection is separate from the density contract. Mesh generation may
 classify material from world position and terrain height after the surface has
 been extracted.
 
+## Two Producer Tiers
+
+A chunk's `Chunk::sdf_data` is produced at one of two tiers, selected by the
+meshing **sample step** the chunk needs (SHIELD-04). The meshing promotion lane
+and every SDF producer must agree on which tier a chunk is in from its
+`sdf_data` size alone:
+
+- **Tier 1 — full unit-step lattice ("sim truth").**
+  `sdf_data.size() == kFullSdfLattice` (`(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) *
+  (CHUNK_SIZE_Z + 1)`, the padded grid defined above). This is the full-resolution
+  field a unit-step (`step == 1`) Marching Cubes polygonise reads, and the only
+  tier that carries interior detail (caves, player edits). CPU generation, the GPU
+  callback, and a well-formed save all produce this shape.
+- **Tier 2 — coarse heightmap-only (surface-band).** For a coarse meshing step
+  (`step > 1`) a chunk is meshed directly from the terrain heightmap by
+  `SHIELD_WorldSystem::GenerateCoarseHeightfieldTerrain` (sampling
+  `GetTerrainHeightAtCoarse`), and its `sdf_data` is left **empty** — no interior
+  SDF lattice is generated. A coarse chunk therefore re-derives its surface from
+  the heightmap and does not carry caves or edits at distance; promoting it to a
+  unit-step mesh requires (re)generating the full Tier-1 field first.
+
+### Malformed SDF — regeneration rule
+
+A `sdf_data` that is **non-empty but not exactly `kFullSdfLattice`** is treated as
+**malformed** (e.g. a wrong-version or truncated save). Before a unit-step
+polygonise — which assumes the full padded lattice and would otherwise read out of
+bounds — the promotion lane **clears the malformed field and regenerates** the full
+Tier-1 SDF. The three states are exhaustive and distinguishable by size alone:
+
+| `sdf_data` state | tier | meshing |
+| --- | --- | --- |
+| `size() == kFullSdfLattice` | Tier 1 (full lattice) | unit-step Marching Cubes |
+| `empty()` | Tier 2 (coarse) | heightmap-only coarse mesher |
+| non-empty, `size() != kFullSdfLattice` | malformed | cleared + regenerated to Tier 1 |
+
 ## GPU SDF Callback Contract
 
 `SHIELD_WorldSystem::SetGPUSDFCallback` may install a producer with this shape:
