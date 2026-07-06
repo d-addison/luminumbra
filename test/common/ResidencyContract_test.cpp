@@ -99,12 +99,17 @@ TEST(ResidencyContract, HashScopeDerivesFromPartition) {
     using luminumbra::core::kChunkFieldResidency;
 
     // The exclusion set — the Render-classified subset of the table must equal
-    // EXACTLY these 16 names (order-insensitive). History: the original 14 were the
+    // EXACTLY these 19 names (order-insensitive). History: the original 14 were the
     // hand-maintained kRenderMeshHashExcludedFields; WATER-17 (Bump A, 2026-07-05)
     // deliberately added water_mesh_generated + water_mesh_dirty_ticks — meshing
     // bookkeeping mutated by the render-side mesh pipeline, whose hashing made the
     // save/load water round-trip impossible (the loaded-boot remesh flips them while
-    // the water sim is paused).
+    // the water sim is paused). WATER-08 (Bump B, 2026-07-05) then reclassified the
+    // three water FLOAT MIRRORS — water_level_data, water_flow_data,
+    // water_sim_terrain_height — to Render ("float mirrors = Render, mm = the only
+    // water sim truth"): they are render-side derived views and must not feed
+    // world_hash. This literal records that deliberate, reviewed hash-scope move (the
+    // canonical baselines already carry it — the Bump B commit re-pinned them).
     const std::set<std::string> legacy_excluded = {
         "mesh_vertices", "mesh_indices",
         "water_mesh_vertices", "water_mesh_indices",
@@ -114,6 +119,8 @@ TEST(ResidencyContract, HashScopeDerivesFromPartition) {
         "pending_mesh_ready", "pending_mesh_failed",
         "current_lod", "pending_lod",
         "water_mesh_generated", "water_mesh_dirty_ticks",
+        // WATER-08 Bump B (2026-07-05): the water float mirrors, now Render.
+        "water_level_data", "water_flow_data", "water_sim_terrain_height",
     };
 
     std::set<std::string> derived_excluded;
