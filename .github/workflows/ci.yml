@@ -36,6 +36,7 @@ jobs:
           sudo apt-get install -y \
             build-essential \
             cmake \
+            ninja-build \
             libgl1-mesa-dev \
             libglu1-mesa-dev \
             pkg-config \
@@ -44,19 +45,22 @@ jobs:
       - name: Cache vendor build artifacts
         uses: actions/cache@v4
         with:
-          path: build/vendor
+          path: build/release/vendor
           key: ${{ runner.os }}-vendor-${{ hashFiles('CMakeLists.txt', 'cmake/**/*.cmake', 'vendor/**') }}
           restore-keys: |
             ${{ runner.os }}-vendor-
 
+      # One canonical tree (spec 020 OQ-1): build through the CMakePresets.json `release`
+      # preset -> build/release. Never `cmake -S . -B build` (the retired root tree); the
+      # BuildTreeStrict preflight refuses a concurrent root build/ tree.
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        run: cmake --preset release
 
       - name: Build
-        run: cmake --build build --config Release --parallel
+        run: cmake --build --preset release
 
       - name: Test
-        run: ctest --test-dir build -C Release --output-on-failure
+        run: ctest --preset release --output-on-failure
 
   forge-verify:
     name: Forge verify

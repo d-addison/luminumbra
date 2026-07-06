@@ -172,9 +172,11 @@ Per `test/features/TDD-LOCK.md` and `docs/TDD.md`:
 
 ## 8. Build & toolchain
 
-- **Two build trees — build the one you test:** `cmake --build build` → `build/bin` (main); the
-  engine-frontier gates use `cmake --build --preset debug` → `build/debug`. Building the wrong tree
-  runs stale code.
+- **One canonical tree — always build through a preset:** `cmake --build --preset debug` →
+  `build/debug` (the tree the engine-frontier gates read); `--preset release` → `build/release`, etc.
+  Do **not** configure the legacy root `build/` tree (`cmake -B build`) — a second configured tree
+  lets a gate build one tree and read another (stale code). The `validate-build-tree.ps1 -Strict`
+  preflight (the `BuildTreeStrict` gate) hard-fails on a concurrent root `build/CMakeCache.txt`.
 - **PATH hygiene (Windows):** prepend `C:\msys64\ucrt64\bin` to PATH for every build/ctest/validator
   call — KiCad/mingw64 on PATH ahead of ucrt64 causes silent `cc1plus` failures.
 - **Presets:** `debug`, `debug-asan`, `release` (`CMakePresets.json`), warnings-as-errors ON.

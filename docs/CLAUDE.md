@@ -9,20 +9,19 @@ Luminumbra is a voxel-based game engine ("The Quantum Engine") designed to creat
 ## Build Commands
 
 ```bash
-# Configure build (from project root)
-cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+# Configure + build through a preset (from project root) -- the single canonical tree.
+# Do NOT `cmake -B build` (the retired root tree): a second configured tree lets a gate
+# build one and read the other, and the BuildTreeStrict preflight hard-fails on it.
+cmake --preset debug          # or: --preset release, --preset debug-asan
+cmake --build --preset debug
 
-# Build the project
-cmake --build build
+# Run tests (serial -- parallel ctest -j yields false failures)
+ctest --preset debug --output-on-failure
+# Or a specific test by name filter
+ctest --preset debug -R WorldGeneration --output-on-failure
 
-# Run tests
-cd build && ctest
-# Or run specific test
-./build/bin/world_generation_test
-
-# Main executable
-./build/bin/luminumbra_client_app
+# Main executable (under the preset tree, not build/bin)
+./build/debug/bin/luminumbra_client_app
 ```
 
 ## Core Systems Overview

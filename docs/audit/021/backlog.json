@@ -2424,7 +2424,7 @@
       "dependencies": [
         "OPS-04"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: frontier BuildTreeStrict gate \u2014 validate-build-tree.ps1 -Strict exits 0 in the gate lifecycle and hard-fails on a concurrent root build/CMakeCache.txt",
       "rank": 130
     },
