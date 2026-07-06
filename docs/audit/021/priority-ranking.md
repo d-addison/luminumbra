@@ -918,6 +918,63 @@ covers the AC); sim.hydrology_weather + sim.weather_events remain default-OFF ac
 items (deliberate hash bumps). Next: Wave H (the hashed sim band — Bump B, the instinct
 behavior band → Event P, the aether arc).
 
+## Wave H record — the hashed sim band: Bump B + the instinct behavior band → Event P (CLOSED 2026-07-06)
+
+Wave H landed the campaign's LAST planned engineering hash event and the live instinct
+band — 8 items across 7 commits (`bfa9cea3` → `3e54328a`): **W2/Bump B** (WATER-08
+mm-domain reroutes; float mirrors → Render; the second and FINAL deliberate canonical
+move — the ledger's remaining bumps are all owner-menu activations), **T.1** WATER-11
+live-water waterfall response, and the **I2/I3 instinct band** (the LIVE feeding loop,
+starvation-degrades-before-kill, vertebrate scent hunting, Drink/Forage in the IAUS
+arbiter, then ecology hash v2 + the real world seed in ONE lockstep commit) closing as
+**Event P**. CANONICAL BASELINES (Bump B): DEBUG static `a66ab4d049ba9228` / moving
+`a91098d71d742567`; RELEASE static `045f7c2f0645bcce` / moving `85c0842944f86563`;
+populated golden `d281053b8de4b891` (ecology hash v2).
+
+**Landed:** WATER-08 (rank 104, Bump B commit `bfa9cea3`), WATER-11 (105, `ab3746b4`),
+INSTINCT-04 (81, `4cdce2f7`), INSTINCT-06 (83, `ad831122`), INSTINCT-08 (84,
+`4c72ed6d`), INSTINCT-05 (85, `0a4308a2`), INSTINCT-10+11 (96, `3e54328a` — the
+lockstep triple: EcologyHash v1→v2 folding energy/circadian/thirst/sensory
+genes/species_id, the gtest Snapshot mirror, and `m_worldSeed` into
+RunMatingResolveOnTick, empty-roster "" preserved by assertion).
+
+**Event P evidence bundle (re-run to completion 2026-07-06 after the prior session
+ended with the runner mid-flight; every leg green):**
+- Determinism matrix: **26/26 cells PASS** — worker counts {1,2,4} × {static, moving},
+  worker-agreement, multiprocess one-box, fast/slow throttle seeds {1337, 424242} ×
+  {static, moving}, replay axis, across BOTH build trees at their own canonicals
+  (debug `a66ab4d049ba9228`/`a91098d71d742567`, release
+  `045f7c2f0645bcce`/`85c0842944f86563`), run==replay in every cell.
+- Heavy oracle (HeadlessServerTickHeavy): PASS — tick→save→load→resim, authoritative
+  terrain/water/entities round-trip AND resim identical.
+- LREC1: ReplayRoundtrip PASS + ReplayDivergence PASS (the corrupted-checkpoint
+  negative oracle still catches).
+- Lockstep: LockstepLoopback PASS + LockstepFaultInjection PASS (deliberate divergence
+  halts + dumps a valid LREC1 repro).
+- ReplicationSmoke PASS; PopulatedWorldReplay PASS at the ecology-v2 golden
+  `d281053b8de4b891`.
+- **Ecology budgets blessed** (release, 5 runs × 300 ticks, ×1.5 headroom, committed
+  with this record): N=256 → 0.241 ms obs / 0.362 budget; N=1000 → 2.005 / 3.008;
+  **N=4000 → 25.674 obs (p99 30.50) / 38.511 budget — 77% of the 33 ms tick**, the
+  measured O(N²) opposite-role scan; the chartered response remains INSTINCT-09 (T.2)
+  + a spatial partition, NEVER a time-based cap (rule recorded at both budget sites).
+
+**Standing lessons minted this wave (recorded in auto-memory):** water grids live on
+the 2.5D column's y=0 chunk (probe at y≈0.5; terrain<0 lookups miss); river sink cells
+swallow same-tick injections (stage injection tests on dug pits); never two concurrent
+ninja builds; fan-out agents never build and never touch main_client/GameSession (the
+orchestrator owns those seams); the additive opt-in component pattern is the template
+for every remaining sim item.
+
+**Items of record:** INSTINCT-05 landed hash-neutral because no server roster thirsts —
+the THIRSTING-roster populated transition is an activation-menu item (D10); Forage's
+`food_availability` sensing is unwired until fed (D6); the species JSON
+`brain`/`genome_ranges` blocks ship empty on the 10 shipped species (D11). **Close:**
+backlog 190/190 valid at **136/190 done** at wave close (the A1 aether arc opened
+immediately after — AETHER-05's spec 024 is the next record's business). Next: the A1
+aether completion arc (spec 024, seed +38 re-chartered), then Waves I–K modernization
+M0–M6 per the campaign plan.
+
 ## Spine-inversion register (AC-003)
 
 Exactly one deliberate inversion, justified inline at its rank:
