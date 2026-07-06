@@ -620,6 +620,17 @@ public:
     // The session owner gates this on sim.hydrology_weather (default-OFF).
     void SetWaterWeatherRain(const Systems::WeatherSystem* weather, std::int32_t scale_mm);
 
+    // W2.1 diagnostics passthrough (never hashed): source entities seen by the
+    // injection loop / total mm injected — localizes a do-nothing spring.
+    std::int64_t debug_water_sources_seen() const;
+    std::int64_t debug_water_source_injected_mm() const;
+    // W2.1 diagnostics: does the chunk containing this world position carry a
+    // complete live water grid (the injection precondition)?
+    bool debug_water_grid_at(float world_x, float world_z) const;
+    // W2.1 diagnostics: the coords of the first N gridded chunks (id-sorted) —
+    // ground truth for where the water grids actually live.
+    std::vector<IVec3> debug_water_grid_chunk_coords(std::size_t max_count) const;
+
     // WATER-17 — boot-settle mode: lifts the live-play per-tick water init/sim caps for the
     // duration of the server BOOT water settle so the settle can complete its init work and
     // drain the flood transient. Boot-only; live play is untouched. See

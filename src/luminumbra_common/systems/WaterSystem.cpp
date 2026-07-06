@@ -501,8 +501,19 @@ void WaterSystem::update(entt::registry& registry, const std::unordered_map<Chun
     for (auto entity : source_view) {
         auto& transform = source_view.get<const Components::TransformComponent>(entity);
         auto& source = source_view.get<const Components::WaterSourceComponent>(entity);
+        ++m_debug_sources_seen; // W2.1 diagnostics
         IVec3 chunk_coords = SHIELD_WorldSystem::world_to_chunk_coords(transform.position);
         auto it = m_active_chunks->find(Chunk::calculate_id(chunk_coords));
+        // W2.1 FINDING (empirical): water grids live on the 2.5D COLUMN's y=0
+        // chunk, but a spring standing on sub-sea-level terrain (river beds carve
+        // below 0) resolves to the y=-1 chunk and silently no-ops. Fall back to
+        // the column's y=0 chunk when the direct chunk carries no water sim.
+        if (it == m_active_chunks->end() || !it->second ||
+            !it->second->has_water_sim.load(std::memory_order_relaxed)) {
+            IVec3 col = chunk_coords;
+            col.y = 0;
+            it = m_active_chunks->find(Chunk::calculate_id(col));
+        }
         if (it != m_active_chunks->end() && it->second) {
             Chunk& chunk = *it->second;
             const int resolution = GetWaterResolution(chunk);
@@ -517,8 +528,22 @@ void WaterSystem::update(entt::registry& registry, const std::unordered_map<Chun
             float cell_area = (static_cast<float>(CHUNK_SIZE_X) / static_cast<float>(resolution))
                 * (static_cast<float>(CHUNK_SIZE_Z) / static_cast<float>(resolution));
             float water_added = source.flow_rate * SECONDS_PER_TICK / cell_area;
-            if (water_added > 0.0f) {
-                chunk.water_level_data[index] += water_added;
+            // W2.1 (WATER-08, Wave H): the injection routes through the INTEGER mm
+            // domain — the hashed sim truth — quantized ONCE at this boundary
+            // (metres -> mm, round-half-up); the float mirror regenerates FROM mm
+            // (surface = bed + depth, the same one-way formula the solver uses).
+            // The old code added metres into the float mirror directly, a
+            // sim-relevant float mutation the mm solver never saw.
+            const std::int32_t add_mm =
+                static_cast<std::int32_t>(water_added * 1000.0f + 0.5f);
+            if (add_mm > 0 && index < static_cast<int>(chunk.water_depth_mm.size())) {
+                chunk.water_depth_mm[index] += add_mm;
+                m_debug_source_injected_mm += add_mm; // W2.1 diagnostics
+                if (index < static_cast<int>(chunk.water_level_data.size()) &&
+                    index < static_cast<int>(chunk.water_bed_mm.size())) {
+                    chunk.water_level_data[index] = static_cast<float>(
+                        chunk.water_bed_mm[index] + chunk.water_depth_mm[index]) / 1000.0f;
+                }
                 // WAKE UP: An internal event occurred in this chunk.
                 chunk.is_water_sleeping.store(false, std::memory_order_relaxed);
             }
@@ -849,10 +874,26 @@ void WaterSystem::apply_displacement(const Vec3& world_pos, f32 volume) {
                     * (static_cast<float>(CHUNK_SIZE_Z) / static_cast<float>(target_resolution));
                 const float base_height_delta = volume / target_cell_area;
                 int index = final_sim_z * target_resolution + final_sim_x;
-                target_chunk.water_level_data[index] += (base_height_delta / total_cells) * falloff;
-
-                // WAKE UP: An external event disturbed this chunk.
-                target_chunk.is_water_sleeping.store(false, std::memory_order_relaxed);
+                // W2.2 (WATER-08): the displacement routes through the INTEGER mm
+                // domain, quantized ONCE at this boundary (round-half-away); depth
+                // clamps at zero (no negative water); the float mirror regenerates
+                // FROM mm (one-way — the old code added metres into the mirror
+                // directly, a sim-relevant float mutation the mm solver never saw).
+                // A sub-half-mm splash quantizes to 0 and disturbs nothing.
+                const float add_m = (base_height_delta / total_cells) * falloff;
+                const std::int32_t add_mm = static_cast<std::int32_t>(
+                    add_m * 1000.0f + (add_m >= 0.0f ? 0.5f : -0.5f));
+                if (add_mm != 0 && index < static_cast<int>(target_chunk.water_depth_mm.size())) {
+                    std::int32_t& d = target_chunk.water_depth_mm[index];
+                    d = std::max(0, d + add_mm);
+                    if (index < static_cast<int>(target_chunk.water_level_data.size()) &&
+                        index < static_cast<int>(target_chunk.water_bed_mm.size())) {
+                        target_chunk.water_level_data[index] = static_cast<float>(
+                            target_chunk.water_bed_mm[index] + d) / 1000.0f;
+                    }
+                    // WAKE UP: An external event disturbed this chunk.
+                    target_chunk.is_water_sleeping.store(false, std::memory_order_relaxed);
+                }
             }
         }
     }
@@ -938,6 +979,14 @@ void WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
     const bool can_interpolate = current_resolution > 1
         && old_water_levels.size() >= GetWaterCellCount(current_resolution)
         && old_flow_data.size() >= GetWaterCellCount(current_resolution);
+    // W2.2 (WATER-08, Wave H): the HASHED depth interpolates NATIVELY in the mm
+    // domain from the OLD mm truth — integer bilinear with 1/256 fixed-point
+    // weights — killing the old float->mm feedback (the mirror was interpolated
+    // in float, then mm re-derived from it via lround, so the Render-class float
+    // mirror sat on the sim-truth path). The mirror now regenerates FROM mm.
+    std::vector<std::int32_t> old_depth_mm = chunk.water_depth_mm;
+    const bool can_interpolate_mm = can_interpolate
+        && old_depth_mm.size() >= GetWaterCellCount(current_resolution);
     
     // Resize arrays
     const size_t new_sim_size = new_resolution * new_resolution;
@@ -998,11 +1047,12 @@ void WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
         }
     }
     
-    // Spec 009: resize + re-seed the fixed-point mm arrays (the HASHED sim state) to the new
-    // resolution — otherwise StepChunkWaterFixed's size-guard bails and the chunk's water FREEZES
-    // (the camera-near LOD-up made the mm arrays mismatch -> rivers rendered dry near the player).
-    // bed = terrain (mm); depth = the just-resampled float surface mirror minus terrain (mm, >=0);
-    // flux reset. Deterministic (pure function of terrain + the resampled surface).
+    // Spec 009 / W2.2 (WATER-08): resize + re-seed the fixed-point mm arrays (the HASHED sim
+    // state) to the new resolution — otherwise StepChunkWaterFixed's size-guard bails and the
+    // chunk's water FREEZES. bed = terrain (mm, resampled); depth = INTEGER BILINEAR of the OLD
+    // depth_mm (1/256 fixed-point weights — pure integer, no float on the sim-truth path); the
+    // float surface mirror then regenerates FROM mm (one-way), replacing the old
+    // interpolate-float-then-lround feedback. Flux reset. Deterministic.
     // NOTE: water resolution is camera-driven, so the hashed mm state is camera-dependent — fine for
     // single-player/run==replay, but TRUE host==peer needs a camera-independent sim resolution
     // (decouple sim grid from visual LOD) — spec 009 NFR-DET / Phase 3 architectural follow-up.
@@ -1014,8 +1064,38 @@ void WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
             const int idx = z * new_resolution + x;
             const float terr = chunk.water_sim_terrain_height[idx];
             chunk.water_bed_mm[idx] = static_cast<std::int32_t>(std::lround(terr * static_cast<float>(MM_PER_M)));
-            const long d = std::lround((chunk.water_level_data[idx] - terr) * static_cast<float>(MM_PER_M));
-            chunk.water_depth_mm[idx] = d > 0 ? static_cast<std::int32_t>(d) : 0;
+            if (can_interpolate_mm) {
+                // Fixed-point bilinear over the OLD mm depths. Weights quantize the
+                // fractional position to 1/256; the +32768 is round-half-up of the
+                // 16-bit weight product. Integer end to end.
+                const float old_x = (new_resolution > 1)
+                    ? (x / static_cast<float>(new_resolution - 1)) * (current_resolution - 1) : 0.0f;
+                const float old_z = (new_resolution > 1)
+                    ? (z / static_cast<float>(new_resolution - 1)) * (current_resolution - 1) : 0.0f;
+                const int x0 = static_cast<int>(std::floor(old_x));
+                const int z0 = static_cast<int>(std::floor(old_z));
+                const int x1 = std::min(x0 + 1, current_resolution - 1);
+                const int z1 = std::min(z0 + 1, current_resolution - 1);
+                const std::int64_t fxq = static_cast<std::int64_t>(std::lround((old_x - x0) * 256.0f));
+                const std::int64_t fzq = static_cast<std::int64_t>(std::lround((old_z - z0) * 256.0f));
+                const std::int64_t d00 = old_depth_mm[z0 * current_resolution + x0];
+                const std::int64_t d10 = old_depth_mm[z0 * current_resolution + x1];
+                const std::int64_t d01 = old_depth_mm[z1 * current_resolution + x0];
+                const std::int64_t d11 = old_depth_mm[z1 * current_resolution + x1];
+                const std::int64_t num =
+                    (256 - fxq) * (256 - fzq) * d00 + fxq * (256 - fzq) * d10 +
+                    (256 - fxq) * fzq * d01 + fxq * fzq * d11 + 32768;
+                const std::int64_t d = num >> 16;
+                chunk.water_depth_mm[idx] = d > 0 ? static_cast<std::int32_t>(d) : 0;
+            } else {
+                // No old mm truth (fresh/legacy chunk): fall back to the resampled
+                // float surface minus terrain — the pre-W2.2 seeding, unchanged.
+                const long d = std::lround((chunk.water_level_data[idx] - terr) * static_cast<float>(MM_PER_M));
+                chunk.water_depth_mm[idx] = d > 0 ? static_cast<std::int32_t>(d) : 0;
+            }
+            // The mirror regenerates FROM mm (one-way): surface = bed + depth.
+            chunk.water_level_data[idx] = static_cast<float>(
+                chunk.water_bed_mm[idx] + chunk.water_depth_mm[idx]) / static_cast<float>(MM_PER_M);
         }
     }
 

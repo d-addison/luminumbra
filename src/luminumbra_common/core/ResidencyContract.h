@@ -186,10 +186,17 @@ inline constexpr ChunkFieldResidency kChunkFieldResidency[] = {
     {"pending_lod", ResidencyClass::Render},
     // Collision (built from the heightmap; hashed).
     {"has_collision", ResidencyClass::Sim},
-    // Water sim state (spec 009 authoritative fixed-point + mirrors).
-    {"water_level_data", ResidencyClass::Sim},
-    {"water_flow_data", ResidencyClass::Sim},
-    {"water_sim_terrain_height", ResidencyClass::Sim},
+    // Water sim state. W2.3 (WATER-08, Bump B, 2026-07-05): the FIXED-POINT mm
+    // arrays are the ONLY water sim truth; the float surface/flow mirrors and the
+    // float terrain cache are one-way DERIVED render state (every writer now
+    // regenerates them FROM mm — source injection, displacement, resize, and the
+    // solver's own mirror update), so hashing them was double-counting derived
+    // bytes and coupling the hash to float derivation. Reclassified Render as the
+    // deliberate Bump B. max_water_delta_last_tick stays Sim: it is written from
+    // the integer mm delta and gates the sleep bookkeeping (evolution-relevant).
+    {"water_level_data", ResidencyClass::Render},
+    {"water_flow_data", ResidencyClass::Render},
+    {"water_sim_terrain_height", ResidencyClass::Render},
     {"water_depth_mm", ResidencyClass::Sim},
     {"water_bed_mm", ResidencyClass::Sim},
     // WATER-17/WATER-13 (Bump A): flow momentum — evolution-relevant integer sim

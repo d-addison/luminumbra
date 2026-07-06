@@ -121,6 +121,10 @@ public:
         m_weather_rain_scale_mm = scale_mm;
     }
 
+    // W2.1 diagnostics (see the members): sources seen / mm injected this session.
+    [[nodiscard]] std::int64_t debug_sources_seen() const { return m_debug_sources_seen; }
+    [[nodiscard]] std::int64_t debug_source_injected_mm() const { return m_debug_source_injected_mm; }
+
     // WATER-17 boot-settle mode. The per-tick init/sim caps exist to bound LIVE-play frame
     // cost; during the server BOOT water settle they make the fixed point unreachable:
     // init drains at MAX_WATER_INITS_PER_TICK=6 while the calm check exits early
@@ -196,6 +200,11 @@ private:
     // ATMO-11/WATER-07: weather-driven rain (null = OFF; see SetWeatherRain).
     const WeatherSystem* m_weather_rain = nullptr;
     std::int32_t m_weather_rain_scale_mm = 0;
+    // W2.1 diagnostics (never hashed): source entities seen by the injection loop
+    // + total mm actually injected. Localizes "the spring did nothing" between
+    // the entity/view/chunk-lookup half and the mm-write half.
+    std::int64_t m_debug_sources_seen = 0;
+    std::int64_t m_debug_source_injected_mm = 0;
 
     // WATER-17: boot-settle mode (see SetBootSettleMode). Lifts the init/sim caps during Boot.
     bool m_boot_settle_mode = false;

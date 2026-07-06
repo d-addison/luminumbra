@@ -3823,6 +3823,39 @@ void SHIELD_WorldSystem::SetWaterWeatherRain(const Systems::WeatherSystem* weath
     if (m_water_system) m_water_system->SetWeatherRain(weather, scale_mm);
 }
 
+// W2.1 diagnostics passthrough.
+std::int64_t SHIELD_WorldSystem::debug_water_sources_seen() const {
+    return m_water_system ? m_water_system->debug_sources_seen() : 0;
+}
+std::int64_t SHIELD_WorldSystem::debug_water_source_injected_mm() const {
+    return m_water_system ? m_water_system->debug_source_injected_mm() : 0;
+}
+std::vector<IVec3> SHIELD_WorldSystem::debug_water_grid_chunk_coords(std::size_t max_count) const {
+    std::vector<std::pair<ChunkID, IVec3>> found;
+    for (const auto& [id, c] : m_streaming_state.chunks) {
+        if (c && c->has_water_sim.load(std::memory_order_relaxed)) {
+            found.emplace_back(id, c->get_coords());
+        }
+    }
+    std::sort(found.begin(), found.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::vector<IVec3> out;
+    for (std::size_t i = 0; i < found.size() && i < max_count; ++i) out.push_back(found[i].second);
+    return out;
+}
+
+bool SHIELD_WorldSystem::debug_water_grid_at(float world_x, float world_z) const {
+    // Mirrors the injection loop's precondition (has_water_sim + complete FLOAT
+    // grid). EMPIRICAL ground truth (the W2.1 staging hunt): water grids live on
+    // the 2.5D COLUMN's y=0 chunk regardless of the terrain sign — probe there.
+    const IVec3 cc = world_to_chunk_coords(Vec3(world_x, 0.5f, world_z));
+    const std::shared_ptr<Chunk> c = find_streamed_chunk(cc);
+    if (!c || !c->has_water_sim.load(std::memory_order_relaxed)) return false;
+    const int res = c->current_water_resolution.load(std::memory_order_relaxed);
+    return res > 1 &&
+           static_cast<int>(c->water_level_data.size()) == res * res;
+}
+
 // WATER-17: boot-settle mode passthrough (lifts the live-play water caps during Boot only).
 void SHIELD_WorldSystem::SetWaterBootSettleMode(bool on) {
     if (m_water_system) m_water_system->SetBootSettleMode(on);

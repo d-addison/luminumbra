@@ -10,12 +10,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <iostream>
 #include <string>
 #include <vector>
 
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/core/WaterComponents.h"      // W2.1: WaterSourceComponent
+#include "luminumbra_common/components/CoreComponents.h" // W2.1: TransformComponent
 
 namespace fs = std::filesystem;
 
@@ -305,6 +308,101 @@ TEST(WaterDeterminism, WeatherDrivenRainIsDeterministic) {
     ASSERT_FALSE(a.hashes.empty());
     EXPECT_NE(a.hashes.back(), control.hashes.back())
         << "wiring the weather rain changed NOTHING — the coupling is not landing water";
+}
+
+// W2.1 (WATER-08, Wave H): SOURCE INJECTION routes through the fixed-point mm domain.
+// The proof leans on Bump B: the water hash covers ONLY the mm truth (the float
+// mirrors are Render-classified) — so if the WaterSourceComponent injection still
+// wrote only the float mirror (the pre-W2.1 bug), the sourced world's hash would
+// EQUAL the control's and this test would fail. Deterministic: two sourced runs match.
+struct SourceResult {
+    std::vector<std::uint64_t> hashes;
+    bool mass_ok = true;
+    bool found_water = false;
+    std::int64_t sources_seen = 0;
+    std::int64_t injected_mm = 0;
+};
+
+SourceResult run_with_source(const std::string& root, bool add_source) {
+    JobSystem jobs; jobs.startup();
+    SourceResult r;
+    {
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(root);
+        EXPECT_TRUE(session.CreateWorld("WaterSrc", "777", "default"));
+        SHIELD_WorldSystem* world = session.GetWorldSystem();
+        auto* physics = session.GetPhysicsSystem();
+        const Vec3 spawn = session.GetMetadata().spawnPoint;
+        const Vec3 anchor(spawn.x, world->GetTerrainHeightAt(spawn.x, spawn.z) + 2.0f, spawn.z);
+        auto tick = [&]{ world->update(session.GetRegistry(), {anchor}, physics);
+                         world->wait_for_streaming_jobs();
+                         if (!world->debug_water_mass_ok()) r.mass_ok = false; };
+        for (int t = 0; t < 24; ++t) tick(); // let the spawn area's water grids init
+        // STAGING (empirically derived — three failed attempts taught this):
+        // sources inject ONLY into gridded chunks, and a spring dropped in the
+        // river's SINK band is clamped back to equilibrium within the same tick
+        // (Phase-0 boundary conditions — zero post-tick trace, hash-invisible).
+        // So: find a GRIDDED position (any wet cell qualifies), DIG A PIT a few
+        // metres off the wet cell in BOTH runs (dug pits verifiably hold water —
+        // the dig gate), and spring INTO the pit only in the sourced run. The
+        // pit is not a sink; the spring's water accumulates there.
+        // The gridded (river) chunks sit ~128-176 m from spawn in this preset
+        // (empirical: chunk x = +-8..11) — scan chunk-granular out to +-12 chunks.
+        float wet_x = spawn.x, wet_z = spawn.z;
+        for (int gz = -12; gz <= 12 && !r.found_water; ++gz) {
+            for (int gx = -12; gx <= 12 && !r.found_water; ++gx) {
+                const float px = spawn.x + static_cast<float>(gx) * 16.0f;
+                const float pz = spawn.z + static_cast<float>(gz) * 16.0f;
+                if (world->debug_water_grid_at(px, pz)) {
+                    wet_x = px; wet_z = pz; r.found_water = true;
+                }
+            }
+        }
+        const Vec3 pit(wet_x + 6.0f, 0.0f, wet_z + 6.0f);
+        world->EditTerrainBed(pit, -4000, 5.0f); // both runs dig the same pit
+        if (add_source) {
+            auto& reg = session.GetRegistry();
+            const auto e = reg.create();
+            auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
+            tf.position = Vec3(pit.x, world->GetTerrainHeightAt(pit.x, pit.z), pit.z);
+            auto& src = reg.emplace<Luminumbra::Components::WaterSourceComponent>(e);
+            src.flow_rate = 40.0f; // strong spring: >= 1 mm/cell/tick after quantization
+        }
+        for (int t = 0; t < 24; ++t) {
+            tick();
+            r.hashes.push_back(world->debug_water_state_hash().hash);
+        }
+        r.sources_seen = world->debug_water_sources_seen();
+        r.injected_mm = world->debug_water_source_injected_mm();
+    }
+    jobs.shutdown();
+    return r;
+}
+
+TEST(WaterDeterminism, SourceInjectionRoutesThroughFixedPoint) {
+    const HeadlessRoot root;
+    const SourceResult a = run_with_source(root.root_string(), true);
+    const SourceResult b = run_with_source(root.root_string(), true);
+    const SourceResult control = run_with_source(root.root_string(), false);
+    ASSERT_TRUE(a.found_water)
+        << "no GRIDDED chunk within 80 m of spawn (vacuous test; widen the scan)";
+    EXPECT_TRUE(a.mass_ok);
+    ASSERT_EQ(a.hashes.size(), b.hashes.size());
+    EXPECT_EQ(a.hashes, b.hashes)
+        << "source injection is NON-DETERMINISTIC across identical runs";
+    ASSERT_FALSE(a.hashes.empty());
+    // Bisect diagnostics: the loop must SEE the springs, and mm must LAND.
+    EXPECT_GT(a.sources_seen, 0)
+        << "the injection loop never saw the source entities (view/registry wiring)";
+    EXPECT_GT(a.injected_mm, 0)
+        << "sources seen (" << a.sources_seen << ") but ZERO mm injected — the chunk "
+           "lookup / grid guard / quantization is eating the spring";
+    // Compare the FULL sequences: even if a sink eventually re-equilibrates the
+    // body, SOME post-tick state along the way must differ once mm water landed.
+    EXPECT_NE(a.hashes, control.hashes)
+        << "the WaterSourceComponent injection did not reach the HASHED mm truth at "
+           "ANY tick — it is writing the float mirror only (the pre-W2.1 bug)";
 }
 
 // Spec 009 Phase 2 — PLAYER VOXEL DIG. The headline player action: carve a sphere out of the

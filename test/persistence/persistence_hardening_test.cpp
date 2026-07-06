@@ -469,6 +469,20 @@ TEST(WaterSubHash, CoversFixedPointState) {
             << "water-mesh bookkeeping must NOT move the water sub-hash (WATER-17)";
         EXPECT_NE(s.mesh, s0.mesh) << "it localizes under mesh instead";
     }
+    // W2.3 (WATER-08, Bump B): the float mirrors are one-way DERIVED from mm —
+    // mutating them must NOT move the water section (or any section).
+    {
+        WorldStreamingState w;
+        auto c = AddRichChunk(w, IVec3(0, 0, 0), ChunkState::Ready, 1u);
+        c->water_level_data[0] += 0.5f;
+        c->water_flow_data[0].y -= 0.25f;
+        c->water_sim_terrain_height[0] += 0.125f;
+        const WorldStreamingStateSubHashes s = ComputeWorldStreamingStateSubHashes(w);
+        EXPECT_EQ(s.water, s0.water)
+            << "the float mirrors must NOT move the water sub-hash (Bump B)";
+        EXPECT_EQ(s.mesh, s0.mesh);
+        EXPECT_EQ(s.terrain, s0.terrain);
+    }
 }
 
 // WATER-13 (folded into the WATER-17 Bump A): the save/load flow-momentum
@@ -907,12 +921,30 @@ TEST(PersistenceHardening, EachPersistedFieldMutationMovesHash) {
         c->mesh_version.store(c->mesh_version.load() + 1u, std::memory_order_release);
         EXPECT_EQ(service.world_hash(w), base_hash) << "render mesh_version must NOT be in the determinism hash";
     }
-    // water flow (SIM TRUTH — must still move the hash)
+    // W2.3 (WATER-08, Bump B): the float mirrors are one-way DERIVED render state
+    // (every writer regenerates them FROM the mm truth) — mutating them must NOT
+    // move the determinism hash. The mm arrays below are the hashed sim truth.
     {
         WorldStreamingState w;
         auto c = AddRichChunk(w, IVec3(0, 0, 0), ChunkState::Ready, 1u);
         c->water_flow_data[0].x += 0.5f;
-        EXPECT_NE(service.world_hash(w), base_hash) << "water flow change not reflected in hash";
+        EXPECT_EQ(service.world_hash(w), base_hash)
+            << "water_flow_data (float mirror) must NOT be in the determinism hash (Bump B)";
+    }
+    {
+        WorldStreamingState w;
+        auto c = AddRichChunk(w, IVec3(0, 0, 0), ChunkState::Ready, 1u);
+        c->water_level_data[0] += 0.25f;
+        EXPECT_EQ(service.world_hash(w), base_hash)
+            << "water_level_data (float mirror) must NOT be in the determinism hash (Bump B)";
+    }
+    // W2.3 (Bump B): the mm DEPTH is the sim truth — it must move the hash.
+    {
+        WorldStreamingState w;
+        auto c = AddRichChunk(w, IVec3(0, 0, 0), ChunkState::Ready, 1u);
+        c->water_depth_mm[0] += 25;
+        EXPECT_NE(service.world_hash(w), base_hash)
+            << "water_depth_mm change not reflected in hash (the fixed-point truth)";
     }
     // WATER-17/WATER-13 (Bump A): flow momentum is SIM TRUTH — must move the hash.
     {

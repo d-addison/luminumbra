@@ -920,17 +920,17 @@ WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(const WorldStre
             {"water_mesh_dirty_ticks", full.at("water_mesh_dirty_ticks")},
         });
 
-        // Water: simulation level/flow fields + water state flags. WATER-09 (folded
-        // into the WATER-17 Bump A): the AUTHORITATIVE fixed-point state (depth/bed
-        // mm + edge flux) is IN the water group — previously only the float mirrors
-        // were, so a fixed-point desync was invisible to water sub-hash localization.
+        // Water: the AUTHORITATIVE fixed-point sim state + solver bookkeeping.
+        // WATER-09 (Bump A) put depth/bed mm + edge flux IN the group; W2.3
+        // (WATER-08, Bump B, 2026-07-05) DROPS the float mirrors
+        // (water_level_data / water_flow_data / water_sim_terrain_height): every
+        // writer now regenerates them one-way FROM mm, so they are derived render
+        // state — hashing them double-counted the same truth through float
+        // derivation. The mm arrays + flags are the complete hashed water truth.
         water_array.push_back(nlohmann::json{
             {"chunk_id", full.at("chunk_id")},
             {"water_depth_mm", full.at("water_depth_mm")},
             {"water_bed_mm", full.at("water_bed_mm")},
-            {"water_level_data", full.at("water_level_data")},
-            {"water_flow_data", full.at("water_flow_data")},
-            {"water_sim_terrain_height", full.at("water_sim_terrain_height")},
             {"water_edge_flux", full.at("water_edge_flux")},
             {"has_water_sim", full.at("has_water_sim")},
             {"current_water_resolution", full.at("current_water_resolution")},
