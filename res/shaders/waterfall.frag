@@ -33,6 +33,10 @@ uniform vec3  u_sun_color; // tint for the lit froth (defaults handled by caller
 // gate (which never sets it) renders byte-identically; the live pipeline sets it from the
 // time-of-day sun intensity so the fall darkens at dusk/night. RENDER-ONLY.
 uniform vec3  u_scene_light = vec3(1.0);
+// WATER-11 (Wave H T.1): the LIVE upstream water factor [0,1] — 1 = the full
+// authored sheet; ->0 = upstream dammed/drained, the veil thins out. Default 1
+// keeps the standalone WaterfallVisual gate (which never sets it) byte-stable.
+uniform float u_live_factor = 1.0;
 
 // Cheap hash + value noise for the procedural flow turbulence.
 float hash21(vec2 p) {
@@ -102,6 +106,10 @@ void main() {
     // (scene exposure), so keep the veil clearly VISIBLE as falling water — a solid floor so it
     // reads against the cliff instead of vanishing, denser at the foam/streaks.
     float alpha = clamp(0.66 + streaks * 0.30 + foam * 0.30, 0.66, 0.97);
+
+    // WATER-11: a starving fall thins toward transparent (the CPU side skips the
+    // draw entirely below 0.02, so this only shades partially-starved sheets).
+    alpha *= clamp(u_live_factor, 0.0, 1.0);
 
     o_frag_color = vec4(lit, alpha);
 }

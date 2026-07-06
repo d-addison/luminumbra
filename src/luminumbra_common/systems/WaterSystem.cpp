@@ -939,6 +939,11 @@ int WaterSystem::EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, fl
             c.water_mesh_dirty_ticks = 0;
         }
     }
+    // WATER-11: a bed edit that touched cells advances the WATER EPOCH so the
+    // render-side waterfall survey re-runs once (bounded) against the new terrain.
+    if (edited_total > 0) {
+        ++m_water_epoch;
+    }
     return edited_total;
 }
 

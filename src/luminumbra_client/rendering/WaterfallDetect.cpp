@@ -351,6 +351,7 @@ WaterfallDetectKey MakeWaterfallDetectKey(
     key.lattice_step_milli = quant_mm(params.lattice_step);
     key.min_drop_milli = quant_mm(params.min_drop);
     key.min_steepness_milli = quant_mm(params.min_steepness);
+    key.water_epoch = world.water_epoch(); // WATER-11: terraform edits re-key
     return key;
 }
 
@@ -361,6 +362,7 @@ std::size_t WaterfallSiteCache::KeyHash::operator()(const WaterfallDetectKey& k)
     fnv1a(h, &k.lattice_step_milli, sizeof(k.lattice_step_milli));
     fnv1a(h, &k.min_drop_milli, sizeof(k.min_drop_milli));
     fnv1a(h, &k.min_steepness_milli, sizeof(k.min_steepness_milli));
+    fnv1a(h, &k.water_epoch, sizeof(k.water_epoch)); // WATER-11
     return static_cast<std::size_t>(h);
 }
 
@@ -372,9 +374,31 @@ const std::vector<WaterfallSite>& WaterfallSiteCache::sites_for(
     if (it != m_cache.end()) {
         return it->second;
     }
+    // WATER-11: epoch changes create new entries; keep the cache BOUNDED so a
+    // terraform-happy session doesn't accumulate stale surveys (each holds a
+    // full site vector). Dropping all entries on overflow is fine — the next
+    // query recomputes exactly one survey.
+    if (m_cache.size() >= 8) {
+        m_cache.clear();
+    }
     auto [inserted, ok] = m_cache.emplace(key, DetectWaterfalls(world, params));
     (void)ok;
     return inserted->second;
+}
+
+// WATER-11: the live upstream water factor (see the header contract).
+float LiveWaterFactorAt(const Luminumbra::Systems::SHIELD_WorldSystem& world,
+                        const WaterfallSite& site, float full_depth) {
+    // "Unknown" (no streamed grid at the crest) must read NEUTRAL, not
+    // extinguished — distant sites keep their authored sheets.
+    if (!world.debug_water_grid_at(site.crest.x, site.crest.z)) {
+        return 1.0f;
+    }
+    const float surface = world.live_water_surface_at(site.crest.x, site.crest.z);
+    const float terrain = world.GetTerrainHeightAt(site.crest.x, site.crest.z);
+    const float depth = surface - terrain;
+    if (full_depth <= 1e-4f) return depth > 0.0f ? 1.0f : 0.0f;
+    return std::clamp(depth / full_depth, 0.0f, 1.0f);
 }
 
 } // namespace Luminumbra::Rendering

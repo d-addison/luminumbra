@@ -125,6 +125,12 @@ public:
     [[nodiscard]] std::int64_t debug_sources_seen() const { return m_debug_sources_seen; }
     [[nodiscard]] std::int64_t debug_source_injected_mm() const { return m_debug_source_injected_mm; }
 
+    // WATER-11 (Wave H T.1): the WATER EPOCH — incremented by every terraform bed
+    // edit that touched cells. Render-side consumers (the waterfall site cache)
+    // fold it into their keys so a dammed river triggers ONE bounded re-survey
+    // instead of per-frame re-detection. Deterministic (driven by sim edits).
+    [[nodiscard]] std::uint64_t water_epoch() const { return m_water_epoch; }
+
     // WATER-17 boot-settle mode. The per-tick init/sim caps exist to bound LIVE-play frame
     // cost; during the server BOOT water settle they make the fixed point unreachable:
     // init drains at MAX_WATER_INITS_PER_TICK=6 while the calm check exits early
@@ -205,6 +211,7 @@ private:
     // the entity/view/chunk-lookup half and the mm-write half.
     std::int64_t m_debug_sources_seen = 0;
     std::int64_t m_debug_source_injected_mm = 0;
+    std::uint64_t m_water_epoch = 0; // WATER-11 (see water_epoch())
 
     // WATER-17: boot-settle mode (see SetBootSettleMode). Lifts the init/sim caps during Boot.
     bool m_boot_settle_mode = false;

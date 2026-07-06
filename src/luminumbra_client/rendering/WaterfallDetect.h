@@ -98,12 +98,17 @@ struct WaterfallDetectKey {
     int lattice_step_milli = 0;
     int min_drop_milli = 0;
     int min_steepness_milli = 0;
+    // WATER-11: terraform bed edits advance the sim's water epoch; folding it
+    // here makes a dammed/dug river trigger ONE bounded re-survey (a new cache
+    // entry) instead of per-frame re-detection or a stale-forever site set.
+    std::uint64_t water_epoch = 0;
 
     bool operator==(const WaterfallDetectKey& o) const {
         return seed == o.seed && half_extent == o.half_extent &&
                lattice_step_milli == o.lattice_step_milli &&
                min_drop_milli == o.min_drop_milli &&
-               min_steepness_milli == o.min_steepness_milli;
+               min_steepness_milli == o.min_steepness_milli &&
+               water_epoch == o.water_epoch;
     }
 };
 
@@ -118,6 +123,16 @@ std::vector<WaterfallSite> DetectWaterfalls(
 // FNV-1a hash of the quantized site fields, order-preserving. The determinism
 // surface the WaterfallVisual gate asserts (same seed -> same hash).
 uint64_t HashWaterfallSites(const std::vector<WaterfallSite>& sites);
+
+// WATER-11: the LIVE upstream water factor for a site, [0,1]. Reads the live
+// water surface at the CREST (the render float mirror, one-way derived from the
+// mm truth — legal post-Bump-B): 1 = a healthy sheet (water depth at the crest
+// >= full_depth), 0 = upstream dammed/drained (the sheet extinguishes). Returns
+// 1 (neutral) when the crest's chunk carries no live grid — an UNSTREAMED site
+// is unknown, not extinguished. Pure; render-only.
+float LiveWaterFactorAt(const Luminumbra::Systems::SHIELD_WorldSystem& world,
+                        const WaterfallSite& site,
+                        float full_depth = 0.25f);
 
 // Per-world cache: detection is computed once per (seed, window) and reused for
 // every subsequent query (camera/frame independent — critique F5). Render-side,

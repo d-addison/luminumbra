@@ -631,6 +631,15 @@ public:
     // ground truth for where the water grids actually live.
     std::vector<IVec3> debug_water_grid_chunk_coords(std::size_t max_count) const;
 
+    // WATER-11 (Wave H T.1): the water epoch (terraform bed edits increment it) —
+    // folded into the waterfall site-cache key for bounded re-surveys.
+    std::uint64_t water_epoch() const;
+    // WATER-11: the LIVE water surface at a world position from the render float
+    // mirror (one-way derived from the mm truth — legal post-Bump-B), read off
+    // the 2.5D column's y=0 chunk. Returns terrain height when no grid/cell is
+    // live (i.e. "no standing live water here").
+    float live_water_surface_at(float world_x, float world_z) const;
+
     // WATER-17 — boot-settle mode: lifts the live-play per-tick water init/sim caps for the
     // duration of the server BOOT water settle so the settle can complete its init work and
     // drain the flood transient. Boot-only; live play is untouched. See

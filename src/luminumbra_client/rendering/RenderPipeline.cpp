@@ -2924,6 +2924,19 @@ void RenderPipeline::execute_stage_waterfall(const Camera& camera) {
         glBindVertexArray(m_waterfall_vao);
         for (std::size_t i = 0; i < m_waterfall_sheet_sites.size(); ++i) {
             const WaterfallSite& s = m_waterfall_sheet_sites[i];
+            // WATER-11 (Wave H T.1): the LIVE upstream water scales the sheet —
+            // a dammed/drained crest extinguishes its fall. Reads the live float
+            // mirror (one-way from mm, legal post-Bump-B); stable within the
+            // frame (the sim ticks outside render_frame), so dispatch stays
+            // bit-idempotent. Unstreamed crests read neutral 1.0.
+            float live = 1.0f;
+            if (m_frame_prepared.world_system != nullptr) {
+                live = Rendering::LiveWaterFactorAt(*m_frame_prepared.world_system, s);
+            }
+            if (live < 0.02f) {
+                continue; // extinguished: no sheet, no plunge pool
+            }
+            m_waterfall_shader->setFloat("u_live_factor", live);
             m_waterfall_shader->setFloat("u_crest_y", s.crest.y);
             m_waterfall_shader->setFloat("u_foot_y", s.foot.y);
             // 12 verts/site: the vertical sheet (0..5) + the horizontal plunge-pool quad (6..11).

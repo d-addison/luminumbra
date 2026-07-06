@@ -3844,6 +3844,26 @@ std::vector<IVec3> SHIELD_WorldSystem::debug_water_grid_chunk_coords(std::size_t
     return out;
 }
 
+// WATER-11: epoch passthrough (0 when no water system).
+std::uint64_t SHIELD_WorldSystem::water_epoch() const {
+    return m_water_system ? m_water_system->water_epoch() : 0;
+}
+
+// WATER-11: live water surface from the float mirror on the y=0 column chunk.
+float SHIELD_WorldSystem::live_water_surface_at(float world_x, float world_z) const {
+    const float terrain = GetTerrainHeightAt(world_x, world_z);
+    const IVec3 cc = world_to_chunk_coords(Vec3(world_x, 0.5f, world_z));
+    const std::shared_ptr<Chunk> c = find_streamed_chunk(cc);
+    if (!c || !c->has_water_sim.load(std::memory_order_relaxed)) return terrain;
+    const int res = c->current_water_resolution.load(std::memory_order_relaxed);
+    if (res <= 1 || static_cast<int>(c->water_level_data.size()) != res * res) return terrain;
+    const float lx = world_x - static_cast<float>(cc.x * CHUNK_SIZE_X);
+    const float lz = world_z - static_cast<float>(cc.z * CHUNK_SIZE_Z);
+    const int sx = std::clamp(static_cast<int>((lx / CHUNK_SIZE_X) * res), 0, res - 1);
+    const int sz = std::clamp(static_cast<int>((lz / CHUNK_SIZE_Z) * res), 0, res - 1);
+    return c->water_level_data[sz * res + sx];
+}
+
 bool SHIELD_WorldSystem::debug_water_grid_at(float world_x, float world_z) const {
     // Mirrors the injection loop's precondition (has_water_sim + complete FLOAT
     // grid). EMPIRICAL ground truth (the W2.1 staging hunt): water grids live on

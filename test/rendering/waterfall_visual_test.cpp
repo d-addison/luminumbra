@@ -1,6 +1,6 @@
-// T-I5b-4 (W1): WaterfallVisual gate.
+﻿// T-I5b-4 (W1): WaterfallVisual gate.
 //
-// Two assertions, both required by design-decisions §5 / critique F5:
+// Two assertions, both required by design-decisions Â§5 / critique F5:
 //   (1) DETERMINISM: waterfall SITE DETECTION is a pure function of the
 //       generated world. We build the shipped mountains world (rivers enabled)
 //       at the fixed atlas seed, run DetectWaterfalls TWICE, and assert the
@@ -481,4 +481,119 @@ TEST(WaterfallVisualTest, SiteDetectionDeterministicAndDressed) {
               << " foam=" << stats.foam_pixels
               << " spray=" << stats.spray_pixels
               << (capture_written ? "" : (" [GL skipped: " + gl_skip_reason + "]")) << "\n";
+}
+
+
+// ============================================================================
+// WATER-11 (Wave H T.1): LIVE-WATER waterfall response.
+// A LIVE session (real GameSession + streamed water grids): find live standing
+// water at a gridded crest, assert the live factor reads WET; then dig the
+// crest bed 8 m down (diverting the flow - the water epoch advances, the site
+// cache re-keys) and assert the factor EXTINGUISHES. The whole scenario runs
+// TWICE and must produce identical readings (run==replay for the live-water
+// render response). CPU-only: no GL needed.
+// ============================================================================
+#include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/world/GameSession.h"
+
+namespace {
+
+struct LiveWaterRun {
+    bool found = false;
+    float factor_wet = -1.0f;
+    float factor_dammed = -1.0f;
+    std::uint64_t epoch_before = 0;
+    std::uint64_t epoch_after = 0;
+    Luminumbra::Rendering::WaterfallDetectKey key_before;
+    Luminumbra::Rendering::WaterfallDetectKey key_after;
+};
+
+LiveWaterRun RunLiveWaterScenario(const std::string& root) {
+    LiveWaterRun r;
+    Luminumbra::JobSystem jobs;
+    jobs.startup();
+    {
+        Luminumbra::world::GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(root);
+        EXPECT_TRUE(session.CreateWorld("WfLive", "777", "default"));
+        SHIELD_WorldSystem* world = session.GetWorldSystem();
+        auto* physics = session.GetPhysicsSystem();
+        const Vec3 spawn = session.GetMetadata().spawnPoint;
+        const Vec3 anchor(spawn.x, world->GetTerrainHeightAt(spawn.x, spawn.z) + 2.0f, spawn.z);
+        auto tick = [&] {
+            world->update(session.GetRegistry(), {anchor}, physics);
+            world->wait_for_streaming_jobs();
+        };
+        for (int t = 0; t < 24; ++t) tick();
+
+        // Find LIVE standing water on a gridded chunk (the y=0 column probe).
+        float cx = spawn.x, cz = spawn.z;
+        for (int gz = -12; gz <= 12 && !r.found; ++gz) {
+            for (int gx = -12; gx <= 12 && !r.found; ++gx) {
+                const float px = spawn.x + static_cast<float>(gx) * 16.0f;
+                const float pz = spawn.z + static_cast<float>(gz) * 16.0f;
+                if (!world->debug_water_grid_at(px, pz)) continue;
+                if (world->live_water_surface_at(px, pz) >
+                    world->GetTerrainHeightAt(px, pz) + 0.10f) {
+                    cx = px; cz = pz; r.found = true;
+                }
+            }
+        }
+        if (r.found) {
+            WaterfallSite site;
+            site.crest = glm::vec3(cx, world->GetTerrainHeightAt(cx, cz), cz);
+            site.foot = site.crest - glm::vec3(0.0f, 4.0f, 0.0f);
+            site.drop_height = 4.0f;
+
+            r.factor_wet = Luminumbra::Rendering::LiveWaterFactorAt(*world, site);
+            r.epoch_before = world->water_epoch();
+            r.key_before = MakeWaterfallDetectKey(*world, WaterfallDetectParams{});
+
+            // DIG the crest bed 8 m down: the surface (bed+depth) falls far below
+            // the voxel terrain -> the fall starves. The epoch must advance.
+            world->EditTerrainBed(Vec3(cx, 0.0f, cz), -8000, 6.0f);
+            for (int t = 0; t < 8; ++t) tick();
+
+            r.factor_dammed = Luminumbra::Rendering::LiveWaterFactorAt(*world, site);
+            r.epoch_after = world->water_epoch();
+            r.key_after = MakeWaterfallDetectKey(*world, WaterfallDetectParams{});
+        }
+    }
+    jobs.shutdown();
+    return r;
+}
+
+} // namespace
+
+TEST(WaterfallLiveWater, DammingUpstreamExtinguishesSiteDeterministically) {
+    // Temp root (the WaterDeterminism HeadlessRoot pattern): the session writes
+    // its throwaway world saves OUTSIDE the repo.
+    const fs::path tmp = fs::temp_directory_path() / "luminumbra_waterfall_live_test";
+    fs::remove_all(tmp);
+    fs::create_directories(tmp / "worlds" / "atlas" / "presets");
+    fs::create_directories(tmp / "data" / "common");
+    fs::copy_file(SourceRoot() / "worlds" / "atlas" / "presets" / "default.json",
+                  tmp / "worlds" / "atlas" / "presets" / "default.json");
+    std::error_code ec;
+    fs::copy_file(SourceRoot() / "data" / "common" / "biomes.json",
+                  tmp / "data" / "common" / "biomes.json", ec);
+    const std::string root = tmp.string() +
+        std::string(1, static_cast<char>(fs::path::preferred_separator));
+    const LiveWaterRun a = RunLiveWaterScenario(root);
+    const LiveWaterRun b = RunLiveWaterScenario(root);
+    ASSERT_TRUE(a.found)
+        << "no LIVE standing water on a gridded chunk within 192 m of spawn (vacuous)";
+    EXPECT_GT(a.factor_wet, 0.5f)
+        << "live factor should read WET at live standing water (got " << a.factor_wet << ")";
+    EXPECT_LT(a.factor_dammed, 0.02f)
+        << "digging the crest away did not extinguish the fall (got " << a.factor_dammed << ")";
+    EXPECT_GT(a.epoch_after, a.epoch_before)
+        << "the terraform bed edit did not advance the water epoch";
+    EXPECT_FALSE(a.key_after == a.key_before)
+        << "the site-cache key did not re-key on the epoch change";
+    // run==replay for the whole live-water response.
+    EXPECT_EQ(a.factor_wet, b.factor_wet);
+    EXPECT_EQ(a.factor_dammed, b.factor_dammed);
+    EXPECT_EQ(a.epoch_after, b.epoch_after);
 }
