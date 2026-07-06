@@ -12,6 +12,8 @@
 #include <entt/entt.hpp>
 
 #include "ai/CreatureBrainSystem.h"
+#include "ai/WildlifeFoliageSystem.h"   // INSTINCT-04: the live feeding loop
+#include "systems/FarmingSystem.h"      // MakePlantFromSpecies (the sim wiring point)
 #include "ai/CreatureReproductionSystem.h"
 #include "ai/HerdAlarmSystem.h"
 #include "ai/LifespanSystem.h"
@@ -115,6 +117,63 @@ std::vector<float> RunPipeline(int ticks) {
 // The whole composed ecology stack is byte-exact run == replay over a long horizon.
 TEST(EcologyPipeline, DeterministicOverManyTicks) {
     EXPECT_EQ(RunPipeline(400), RunPipeline(400));
+}
+
+// INSTINCT-04 (Wave H I2.1): the LIVE feeding loop. Real plants (the
+// MakePlantFromSpecies wiring point) now carry GrazeableComponent, so a hungry
+// herd standing on a patch DRAWS DOWN its standing biomass and sates its hunger
+// through kFeedPerGraze — the previously wired-but-dormant WildlifeFoliageSystem
+// running against real participants. Deterministic run==replay.
+TEST(EcologyPipeline, GrazeDepletesLiveBiomass) {
+    auto build_and_run = [](int ticks) {
+        entt::registry r;
+        // Real plants via the single sim wiring point (samples a genome, stamps
+        // lifecycle + pollination + soil + NOW grazeable).
+        luminumbra::foliage::SpeciesTemplate tmpl;
+        tmpl.id = "meadow_grass";
+        tmpl.gene_lo.fill(0.30f);
+        tmpl.gene_hi.fill(0.70f);
+        auto rng = luminumbra::core::DeterministicRng::seeded(101u, 2024u, 3u);
+        std::vector<entt::entity> plants;
+        for (int i = 0; i < 6; ++i) {
+            plants.push_back(luminumbra::foliage::MakePlantFromSpecies(
+                r, Luminumbra::Vec3(static_cast<float>(i) * 1.5f, 0.0f, 0.0f), tmpl, rng, 0u));
+        }
+        // The wiring-point contract: a real plant IS grazeable.
+        for (auto p : plants) {
+            EXPECT_TRUE(r.all_of<Comp::GrazeableComponent>(p))
+                << "MakePlantFromSpecies must emplace GrazeableComponent (INSTINCT-04)";
+        }
+        // A hungry herd standing right on the patch (no movement needed).
+        std::vector<entt::entity> herd;
+        for (int i = 0; i < 4; ++i) {
+            const auto e = r.create();
+            auto& tf = r.emplace<Comp::TransformComponent>(e);
+            tf.position = Luminumbra::Vec3(static_cast<float>(i) * 1.5f, 0.0f, 0.5f);
+            auto& cr = r.emplace<Comp::CreatureComponent>(e);
+            cr.is_predator = false;
+            cr.hunger = 0.85f;
+            herd.push_back(e);
+        }
+        for (int t = 0; t < ticks; ++t) {
+            luminumbra::ai::RunWildlifeFoliageOnTick(r, static_cast<std::uint64_t>(t));
+        }
+        float biomass = 0.0f, hunger = 0.0f;
+        for (auto p : plants) biomass += r.get<Comp::GrazeableComponent>(p).biomass;
+        for (auto e : herd) hunger += r.get<Comp::CreatureComponent>(e).hunger;
+        return std::pair<float, float>(biomass, hunger);
+    };
+    const auto [biomass_after, hunger_after] = build_and_run(120);
+    // 6 full plants started at 6.0 total; 4 hungry grazers started at 3.4 total.
+    EXPECT_LT(biomass_after, 6.0f - 0.5f)
+        << "the herd did not measurably draw down the standing biomass";
+    EXPECT_LT(hunger_after, 3.4f - 0.5f)
+        << "grazing did not sate the herd's hunger (kFeedPerGraze not applied)";
+    EXPECT_GT(biomass_after, 0.0f);
+    // Determinism: the whole feeding loop is byte-exact run == replay.
+    const auto again = build_and_run(120);
+    EXPECT_EQ(biomass_after, again.first);
+    EXPECT_EQ(hunger_after, again.second);
 }
 
 // Sanity: the pipeline is actually DOING something (so the determinism check isn't trivially

@@ -1535,9 +1535,10 @@
       "effort": "M",
       "risk": "medium",
       "dependencies": [],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: EcologyPipeline.GrazeDepletesLiveBiomass ctest — a grazing herd measurably draws down GrazeableComponent biomass and its hunger falls; PopulatedWorldReplay re-pinned once with the extended roster",
-      "rank": 81
+      "rank": 81,
+      "note": "DONE 2026-07-05 (Wave H I2.1). MakePlantFromSpecies emplaces GrazeableComponent (the additive opt-in stack) -> the participant-gated WildlifeFoliageSystem runs live in every planted world. Gate: EcologyPipeline.GrazeDepletesLiveBiomass (biomass down + hunger sated + run==replay). Canonical smoke unchanged; PopulatedWorldReplay roster extended with --planted-roster, golden re-pinned 4e8947548a7a9f1a -> 46ed639f2a33c949."
     },
     {
       "id": "INSTINCT-07",
@@ -1891,9 +1892,10 @@
       "effort": "M",
       "risk": "medium",
       "dependencies": [],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "--smoke run==replay with ONE deliberate re-blessed world_hash bump + ctest WaterDeterminism.* + persistence gate test/persistence/world-persistence-roundtrip.ps1",
-      "rank": 104
+      "rank": 104,
+      "note": "DONE 2026-07-05 (Wave H W2, bfa9cea3, BUMP B). All water writers route through the integer mm truth: source injection quantized at the boundary (+ the y=0 COLUMN fallback fixing sub-sea-level springs silently no-oping), apply_displacement mm-routed, ResizeSimulationGrid interpolates depth natively in mm (1/256 integer bilinear) with the mirror regenerated FROM mm. Float mirrors reclassified Render + dropped from the water sub-hash. New canonicals: debug a66ab4d049ba9228/a91098d71d742567, release 045f7c2f0645bcce/85c0842944f86563, populated 4e8947548a7a9f1a. Full evidence bundle green (26-cell matrix, heavy oracle resim, LREC1, lockstep, cross-process water, 1684/1685 lane). Gate: WaterDeterminism.SourceInjectionRoutesThroughFixedPoint."
     },
     {
       "id": "WATER-11",
@@ -1906,9 +1908,10 @@
       "dependencies": [
         "WATER-08"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: ctest WaterfallLiveWaterGate — damming the upstream channel via EditTerrainBed extinguishes the site's dressing deterministically; WaterfallVisualTest stays green",
-      "rank": 105
+      "rank": 105,
+      "note": "DONE 2026-07-05 (Wave H T.1, post-Bump-B). Water epoch (terraform edits) folded into WaterfallDetectKey (bounded re-survey, cache capped 8); live_water_surface_at reads the float mirror off the y=0 column; LiveWaterFactorAt scales/skips the per-site sheet draw (u_live_factor, gate-default-stable). Gate: WaterfallLiveWater.DammingUpstreamExtinguishesSiteDeterministically (green first run)."
     },
     {
       "id": "AUDIO-09",

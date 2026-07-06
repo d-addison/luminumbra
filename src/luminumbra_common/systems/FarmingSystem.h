@@ -10,6 +10,7 @@
 #include "../components/CropLifecycleComponents.h" // CropLifecycleComponent (perennial/lifespan stamp)
 #include "../components/PollinationComponents.h"    // PollinationTag/Component — cross-pollination opt-in
 #include "../components/SoilComponents.h"            // SoilFeederComponent — soil-nutrient draw opt-in
+#include "../components/GrazeableComponent.h"        // INSTINCT-04: edible-by-herbivores opt-in
 #include "PlantGrowthSystem.h" // ExpressGenome, BreedPlants, Comp alias, namespace
 #include "../foliage/SpeciesRegistry.h" // SpeciesTemplate, SampleGenome, SpeciesId16
 #include "../core/DeterministicRng.h"
@@ -64,6 +65,12 @@ inline entt::entity MakePlantFromSpecies(entt::registry& reg, const ::Luminumbra
     // back into suitability) — the player must rotate / fertilise. Additive: no feeders -> the soil
     // tick is a no-op and the grid is never touched, so the canonical world_hash is unchanged.
     reg.emplace<Comp::SoilFeederComponent>(e);
+    // INSTINCT-04 (Wave H I2.1): grazeable opt-in — a real plant is EDIBLE. Nearby
+    // herbivores draw its biomass down and sate hunger through kFeedPerGraze
+    // (WildlifeFoliageSystem, previously wired-but-dormant: nothing emplaced this);
+    // left alone it regrows. Same additive discipline: no plants (the canonical
+    // smoke) = byte-identical; planted worlds re-pin the populated golden once.
+    reg.emplace<Comp::GrazeableComponent>(e);
     return e;
 }
 
