@@ -23,6 +23,7 @@
   KEY(SimForaging, Sim, "sim", "foraging", hashed) \
   KEY(SimHydrologyWeather, Sim, "sim", "hydrology_weather", hashed) \
   KEY(SimWeatherEvents, Sim, "sim", "weather_events", hashed) \
+  KEY(SimAetherState, Sim, "sim", "aether_state", hashed) \
   KEY(RenderMoonlight, Render, "render", "moonlight", excluded) \
   KEY(RenderTreeWind, Render, "render", "tree_wind", excluded) \
   KEY(RenderPlantProcgen, Render, "render", "plant_procgen", excluded) \

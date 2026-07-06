@@ -468,6 +468,7 @@ nlohmann::json SmokeRunJson(const SmokeRunResult& run) {
             {"wind", run.sub_hashes.wind},
             {"weather", run.sub_hashes.weather},
             {"aether", run.sub_hashes.aether},
+            {"aether_state", run.sub_hashes.aether_state},
             {"scents", run.scent_hash},
             {"ecology", run.ecology_hash},
             {"plants", run.plant_hash},
@@ -515,6 +516,7 @@ int RunSmoke(const ServerCliOptions& options) {
         first.sub_hashes.wind == replay.sub_hashes.wind &&
         first.sub_hashes.weather == replay.sub_hashes.weather &&
         first.sub_hashes.aether == replay.sub_hashes.aether &&
+        first.sub_hashes.aether_state == replay.sub_hashes.aether_state &&
         first.scent_hash == replay.scent_hash &&
         first.ecology_hash == replay.ecology_hash &&
         first.plant_hash == replay.plant_hash;
@@ -573,6 +575,7 @@ int RunSmoke(const ServerCliOptions& options) {
             {"wind", first.sub_hashes.wind},
             {"weather", first.sub_hashes.weather},
             {"aether", first.sub_hashes.aether},
+            {"aether_state", first.sub_hashes.aether_state},
             {"scents", first.scent_hash},
             {"ecology", first.ecology_hash},
         }},
@@ -584,6 +587,7 @@ int RunSmoke(const ServerCliOptions& options) {
             {"wind", replay.sub_hashes.wind},
             {"weather", replay.sub_hashes.weather},
             {"aether", replay.sub_hashes.aether},
+            {"aether_state", replay.sub_hashes.aether_state},
             {"scents", replay.scent_hash},
             {"ecology", replay.ecology_hash},
         }},
@@ -1198,6 +1202,7 @@ nlohmann::json HeavyHashJson(const HeavyHashes& h) {
             {"wind", h.sub.wind},
             {"weather", h.sub.weather},
             {"aether", h.sub.aether},
+            {"aether_state", h.sub.aether_state},
             {"scents", h.scent_hash},
         }},
     };

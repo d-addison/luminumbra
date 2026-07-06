@@ -1988,9 +1988,10 @@
       "dependencies": [
         "AETHER-05"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: ctest AetherEmitterDeterminism \u2014 emitter-driven field bit-identical run==replay and deposits decay over ticks; plus heavy oracle --smoke + LREC1 replay re-bless",
-      "rank": 110
+      "rank": 110,
+      "notes": "2026-07-06: keystone landed. EnergyFieldState (fields/): world-anchored sparse pages, uint16 256-raw/unit, sealed 64x64 window, pinned integer kernel (truncating outflow residue-in-source, exponential shift decay exact-zero, cadence 8), sequential catch-up, save-epoch rebase. sim.aether_state OFF; aether_state:v1: folds into the EXISTING |aether: slot + state-only sub_hashes.aether_state for heavy/LREC1 (Codex finding A); heavy oracle section list gained aether_state. Smokes byte-identical all 4 (debug a66ab4d049ba9228/a91098d71d742567, release 045f7c2f0645bcce/85c0842944f86563). AetherEmitterDeterminism 11 tests green."
     },
     {
       "id": "AETHER-07",
@@ -2003,9 +2004,10 @@
       "dependencies": [
         "AETHER-06"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: ctest AetherScriptBinding \u2014 Lua get_aetheric_value returns SampleAether at the entity position in a fixture session",
-      "rank": 111
+      "rank": 111,
+      "notes": "2026-07-06: FieldEmitterComponent (zero-default, channel-as-data) + header-only GatherFieldEmitterDeposits (id-sorted, Chebyshev >>-falloff) + the engine FIRST live sol2 VM: world.sample_energy_field + bare-global alias, no Lua stdlib, manifest + C++ baseline + ps1 gate all updated together; game alias scripts/common/api/aetheric_field.lua. sol2 v3.3.0 needs -Wno-template-body on GCC 15 (confined to LuaState.cpp). AetherScriptBinding green; LuaApiManifestGate green."
     },
     {
       "id": "AETHER-11",
@@ -2019,9 +2021,10 @@
         "AETHER-04",
         "AETHER-06"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "WorldVisualSweep rerun + NEW render_smoke_test assertion \u2014 material emissive output scales monotonically with the bound field value",
-      "rank": 111
+      "rank": 111,
+      "notes": "2026-07-06: u_aetherMaterialModulation default 0.0 through RenderContext/RenderPipeline/LightingPass/lighting_pass.frag \u2014 crystalGlow *= (1 + aetherLocal * mod); exactly 1.0 at default = pixel-identical (RenderParityFrame 0.0). NEW RenderSmokeTest.AetherMaterialModulationMonotonic (inert halves + monotonic half)."
     },
     {
       "id": "AETHER-12",
@@ -2035,9 +2038,10 @@
         "AETHER-06",
         "AETHER-07"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: ctest AetherStimulusDeterminism \u2014 stimulus values deterministic across runs; ecology sub-hash unchanged with the feature OFF",
-      "rank": 111
+      "rank": 111,
+      "notes": "2026-07-06: StimulusChannel::Aether=5 append-only (count 6, name+Sample cases, aether_level sentinel like ambient_light); GameSession fills from the stateful layer when ON else re-derivable ambience (prior-tick read, slot-order rule). PhotoScoring aether_glow BONUS axis (kwAetherGlow=0.10, base four weights untouched -> zero-input totals bit-identical). AetherStimulusDeterminism + photo byte-neutral/monotonic tests green."
     },
     {
       "id": "AETHER-08",
@@ -2051,9 +2055,10 @@
         "AETHER-05",
         "AETHER-06"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: ctest AetherDualChannelDeterminism \u2014 both channels bit-stable run==replay; plus heavy oracle --smoke + LREC1 replay re-bless",
-      "rank": 112
+      "rank": 112,
+      "notes": "2026-07-06: channel B (polarity) = channel 1 of the SAME EnergyFieldState under the SAME flag, 2 channels from day one so aether_state:v1: covers polarity from first activation (no v2). RG32F dual tap update_aether_field_dual + u_aetherPolarityActive-gated glow tint (default OFF = pixel-identical; single-channel path falls back to R32F). AetherDualChannelDeterminism green (channel symmetry, sub-hash coverage, dual save/resume)."
     },
     {
       "id": "GPU-07",

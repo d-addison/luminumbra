@@ -53,6 +53,9 @@
 #include "../systems/WindFieldSystem.h"
 #include "../systems/WeatherSystem.h"
 #include "../systems/AetherFieldSystem.h"
+#include "../fields/EnergyFieldState.h"  // spec 024 (AETHER-06): stateful energy layer
+#include "../systems/FieldEmitterSystem.h"  // spec 024 (AETHER-07): emitter deposit gather
+#include <cmath>                          // std::floor (energy-layer anchor quantization)
 #include "../core/Log.h"
 #include "../persistence/WorldSaveService.h"
 #include "../persistence/PlantPersistence.h"  // Phase 3B: plant save/load projection
@@ -240,6 +243,29 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             stimulus_context.tick = current_tick;
             stimulus_context.sample_position = m_metadata.spawnPoint;
             stimulus_context.weather = m_weatherSystem.get();
+            // AETHER-12 (FR-024-7): the composite energy environment. Prefer the
+            // STATEFUL layer when sim.aether_state is ON (gameplay deposits are the
+            // truth creatures react to): the cell at the sample position, quantized
+            // by the shared 24 m grid identity and normalized by the PINNED
+            // fields::kEnergyRawPerUnit (1 gameplay unit == full stimulus; the
+            // channel clamps [0, 1]). Else the re-derivable ambience, whose
+            // emission is already [0, 1] by construction (identity pin -- the same
+            // scalar the render emissive tap consumes). Both reads are one-way
+            // PRIOR-tick state (the fields update later this tick at slot 5/5a),
+            // mirroring the weather slot-order rule above. Neither system present
+            // -> the -1 sentinel -> the channel's deterministic neutral 0.
+            if (m_energyFieldState) {
+                const int stim_cell_x = static_cast<int>(
+                    std::floor(m_metadata.spawnPoint.x / Systems::kAetherCellSizeM));
+                const int stim_cell_z = static_cast<int>(
+                    std::floor(m_metadata.spawnPoint.z / Systems::kAetherCellSizeM));
+                stimulus_context.aether_level =
+                    static_cast<float>(m_energyFieldState->at_cell(stim_cell_x, stim_cell_z)) /
+                    static_cast<float>(luminumbra::fields::kEnergyRawPerUnit);
+            } else if (m_aetherFieldSystem) {
+                stimulus_context.aether_level =
+                    m_aetherFieldSystem->SampleAether(m_metadata.spawnPoint);
+            }
             const luminumbra::ai::StimulusChannelRegistry stimulus_registry(stimulus_context);
             luminumbra::ai::RunInstinctSystemOnTick(m_registry, current_tick, &stimulus_registry);
         }
@@ -446,6 +472,25 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         // and resim agree on the field at every checkpoint.
         if (m_aetherFieldSystem) {
             m_aetherFieldSystem->Update(current_tick, m_metadata.spawnPoint, m_windFieldSystem.get());
+        }
+
+        // 5a. Spec 024 (AETHER-06): the STATEFUL energy layer ticks directly
+        // after the re-derivable field, anchored on the SAME replicated anchor
+        // quantized by the shared 24 m cell size (never camera state). Null
+        // unless sim.aether_state opted in — the canonical world skips this
+        // block entirely (byte-identical). Deposits are queued by emitters
+        // (AETHER-07) right below; Tick applies them sorted.
+        if (m_energyFieldState) {
+            const int anchor_cx = static_cast<int>(
+                std::floor(m_metadata.spawnPoint.x / Systems::kAetherCellSizeM));
+            const int anchor_cz = static_cast<int>(
+                std::floor(m_metadata.spawnPoint.z / Systems::kAetherCellSizeM));
+            m_energyFieldState->SetAnchorCell(anchor_cx, anchor_cz);
+            // AETHER-07: gather this tick's FieldEmitterComponent deposits
+            // (id-sorted, two-phase) into the layer before it ticks.
+            // Participant-gated: no emitter component, no deposits, no bytes.
+            Systems::GatherFieldEmitterDeposits(m_registry, *m_energyFieldState);
+            m_energyFieldState->Tick(current_tick);
         }
 
         // 5b. FR-G4 (Phase 1): the soil-nutrient + irrigation-moisture FIELDS update BEFORE plant
@@ -762,6 +807,10 @@ bool GameSession::CreateWorld(const std::string& name, const std::string& seed, 
     m_aetherFieldSystem = std::make_unique<Systems::AetherFieldSystem>(world_seed);
     LUMINUMBRA_CORE_INFO("Aether field system initialized.");
 
+    // Spec 024 (AETHER-06): the stateful energy layer, constructed ONLY when
+    // sim.aether_state opted in (default OFF -> null -> byte-identical).
+    InitializeEnergyFieldState();
+
     // Calculate appropriate spawn point based on actual terrain height
     float spawn_x = 8.0f;
     float spawn_z = 8.0f;
@@ -891,6 +940,28 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     // as wind/weather).
     m_aetherFieldSystem = std::make_unique<Systems::AetherFieldSystem>(world_seed);
 
+    // Spec 024 (AETHER-06): unlike the re-derivable trio above, the stateful
+    // energy layer is AUTHORITATIVE state — when enabled, a persisted record
+    // restores it (epoch-rebased onto the loaded tick base of 0); an absent
+    // record is all-zeros by contract. OFF -> null -> byte-identical.
+    InitializeEnergyFieldState();
+    if (m_energyFieldState) {
+        const std::string recordPath = worldPath + "/aether_state.efs";
+        std::ifstream recordFile(recordPath);
+        if (recordFile) {
+            std::ostringstream recordBytes;
+            recordBytes << recordFile.rdbuf();
+            if (m_energyFieldState->DeserializeRecord(recordBytes.str(), 0)) {
+                LUMINUMBRA_CORE_INFO("Aether state record restored ({} pages).",
+                                     m_energyFieldState->page_count());
+            } else {
+                LUMINUMBRA_CORE_WARN(
+                    "Aether state record UNREADABLE at {} - starting all-zero.",
+                    recordPath);
+            }
+        }
+    }
+
     // Legacy saves without a persisted spawnPoint: derive it from terrain
     // height exactly like CreateWorld does (pure function of seed/params).
     if (!metadata_json.contains("spawnPoint")) {
@@ -1007,6 +1078,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir, WorldS
         // No dirty CHUNKS. Without an existing snapshot this keeps a save-less, no-plant world
         // byte-for-byte (no chunks/ dir created); a planted world still persists its plants here.
         Persistence::WorldSaveService::save_plant_entities(plant_snapshot, save_dir, nullptr);
+        SaveEnergyFieldRecord(save_dir);
         if (report) {
             *report = result;
         }
@@ -1040,6 +1112,10 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir, WorldS
     if (!Persistence::WorldSaveService::save_plant_entities(plant_snapshot, save_dir, &errors)) {
         ok = false;
     }
+
+    // Spec 024 (AETHER-06): persist the stateful energy layer alongside (null/
+    // all-zero layer -> no file -> byte-identical; the plant discipline).
+    SaveEnergyFieldRecord(save_dir);
 
     for (const std::string& error : errors) {
         LUMINUMBRA_CORE_ERROR("World state save failed: {}", error);
@@ -1146,6 +1222,27 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         } else {
             for (const std::string& e : plant_errors)
                 LUMINUMBRA_CORE_ERROR("Plant state load failed: {}", e);
+        }
+    }
+
+    // Spec 024 (AETHER-06): restore the stateful energy layer's record (a
+    // missing file is a clean miss == all zeros by contract). Epoch-rebased
+    // onto the loaded session's tick stream (FR-024-4).
+    if (m_energyFieldState) {
+        const fs::path recordPath = save_dir / "aether_state.efs";
+        std::ifstream recordFile(recordPath);
+        if (recordFile) {
+            std::ostringstream recordBytes;
+            recordBytes << recordFile.rdbuf();
+            if (m_energyFieldState->DeserializeRecord(recordBytes.str(),
+                                                      GetSimulationTickCount())) {
+                LUMINUMBRA_CORE_INFO("Aether state record restored ({} pages).",
+                                     m_energyFieldState->page_count());
+            } else {
+                LUMINUMBRA_CORE_WARN(
+                    "Aether state record UNREADABLE at {} - starting all-zero.",
+                    recordPath.string());
+            }
         }
     }
 
@@ -1263,6 +1360,47 @@ std::string GameSession::ComputeScentSubHash() const {
 bool GameSession::HasPlantParticipants() const {
     auto plants = m_registry.view<const Luminumbra::Components::PlantTag>();
     return plants.begin() != plants.end();
+}
+
+void GameSession::InitializeEnergyFieldState() {
+    if (!m_aetherStateEnabled) {
+        m_energyFieldState.reset();
+        return;
+    }
+    // AETHER-08 (spec 024 FR-024-8): TWO channels from day one — channel 0 =
+    // energy, channel 1 = Lumin/Umbra polarity — so the aether_state:v1:
+    // sub-hash covers polarity from its first activation and never needs a v2
+    // for it. Emitters address channels as data (FieldEmitterComponent.channel).
+    m_energyFieldState =
+        std::make_unique<luminumbra::fields::EnergyFieldState>(/*channels=*/2);
+    LUMINUMBRA_CORE_INFO("Energy field state layer initialized (sim.aether_state ON, 2 channels).");
+}
+
+void GameSession::SaveEnergyFieldRecord(const std::filesystem::path& save_dir) {
+    if (!m_energyFieldState || m_energyFieldState->page_count() == 0 ||
+        save_dir.empty()) {
+        return;  // null/all-zero layer -> no file -> byte-identical saves
+    }
+    const std::string record =
+        m_energyFieldState->SerializeRecord(GetSimulationTickCount());
+    std::ofstream file(save_dir / "aether_state.efs", std::ios::trunc);
+    if (!file.is_open()) {
+        LUMINUMBRA_CORE_ERROR("Failed to write aether state record under {}",
+                              save_dir.string());
+        return;
+    }
+    file << record;
+}
+
+std::string GameSession::ComputeAetherStateSubHash() const {
+    if (!m_energyFieldState) {
+        return {};
+    }
+    const std::string bytes = m_energyFieldState->CanonicalBytes();
+    if (bytes.empty()) {
+        return {};  // all-zero == absent (the scent/plant empty-neutral contract)
+    }
+    return Persistence::StableChecksum(bytes);
 }
 
 std::string GameSession::ComputePlantSubHash() const {

@@ -63,12 +63,26 @@ std::string WeatherSubHash(world::GameSession* session) {
 // T-I6-A1 world_hash bump #4: the aether sub-hash from the session's Aether
 // scalar field, or empty when none exists (defensive; the headless runner always
 // constructs one on world create/load).
+//
+// Spec 024 (AETHER-06, FR-024-3): when the STATEFUL energy layer is active and
+// nonzero, its aether_state:v1: sub-hash folds into THIS EXISTING slot (the
+// composite becomes StableChecksum(rederivable + "|state:" + state)) rather
+// than adding an 8th ComposeWorldHash term — a new term literal would move the
+// canonical composite even while empty (the |plants: precedent), violating the
+// zero-re-pin charter. Default OFF -> the state hash is empty -> this function
+// returns the re-derivable value byte-identically. Activation (the owner-menu
+// bump) moves this slot with NO further code change.
 std::string AetherSubHash(world::GameSession* session) {
     if (!session) {
         return {};
     }
     const Systems::AetherFieldSystem* aether = session->GetAetherFieldSystem();
-    return aether ? aether->ComputeAetherSubHash() : std::string();
+    std::string rederivable = aether ? aether->ComputeAetherSubHash() : std::string();
+    const std::string state = session->ComputeAetherStateSubHash();
+    if (state.empty()) {
+        return rederivable;
+    }
+    return Persistence::StableChecksum(rederivable + "|state:" + state);
 }
 
 // T-I7-ECO-RENDER: scent/stigmergy sub-hash from the session-owned ecology
@@ -793,6 +807,11 @@ Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHash
     // scalar field (not chunk-derived). Present + stable for the
     // AetherFieldDeterminism gate and the desync-localization oracle.
     sub.aether = AetherSubHash(m_session.get());
+    // Spec 024 (AETHER-06): the STATE-ONLY stateful-layer sub-hash — the heavy
+    // oracle's authoritative-compare slot when sim.aether_state is ON (Codex
+    // finding A). Always empty on the default (OFF) world.
+    sub.aether_state =
+        m_session ? m_session->ComputeAetherStateSubHash() : std::string();
     return sub;
 }
 
@@ -838,6 +857,9 @@ void ServerWorldRunner::ComputeWorldHashAndSubHashes(
     out_sub.wind = wind_hash;
     out_sub.weather = weather_hash;
     out_sub.aether = aether_hash;
+    // Spec 024 (AETHER-06): state-only slot for LREC1 checkpoint localization
+    // (always empty on the default OFF world).
+    out_sub.aether_state = m_session->ComputeAetherStateSubHash();
 }
 
 std::size_t ServerWorldRunner::SaveFullSnapshot() {

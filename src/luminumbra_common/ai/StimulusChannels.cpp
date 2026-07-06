@@ -53,6 +53,8 @@ const char* StimulusChannelName(StimulusChannel channel) noexcept {
         return "season";
     case StimulusChannel::LightLevel:
         return "light_level";
+    case StimulusChannel::Aether:
+        return "aether";
     }
     return "unknown";
 }
@@ -117,6 +119,20 @@ float StimulusChannelRegistry::SampleLightLevel() const noexcept {
     return Clamp01(light);
 }
 
+float StimulusChannelRegistry::SampleAether() const noexcept {
+    // Composite energy environment [0, 1] (spec 024 AETHER-12). The caller
+    // supplies the already-sampled scalar (the stateful layer when
+    // sim.aether_state is ON, else the re-derivable ambience); the registry
+    // never reads a field system itself. Unset (< 0) is the deterministic
+    // neutral 0.0 -- aether has NO tick-derived fallback (see the aether_level
+    // contract in the header: no sample supplied means no energy). Clamped so
+    // an over-unity sample (a saturated stateful cell) stays a bounded stimulus.
+    if (m_context.aether_level < 0.0f) {
+        return 0.0f;
+    }
+    return Clamp01(m_context.aether_level);
+}
+
 float StimulusChannelRegistry::Sample(StimulusChannel channel) const noexcept {
     switch (channel) {
     case StimulusChannel::Weather:
@@ -129,6 +145,8 @@ float StimulusChannelRegistry::Sample(StimulusChannel channel) const noexcept {
         return SampleSeason();
     case StimulusChannel::LightLevel:
         return SampleLightLevel();
+    case StimulusChannel::Aether:
+        return SampleAether();
     }
     return 0.0f;
 }

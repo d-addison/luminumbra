@@ -10,6 +10,7 @@ set(COMMON_SOURCES
 
     # Fields
     ${CMAKE_CURRENT_LIST_DIR}/fields/ScalarFieldDiffusion.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/fields/EnergyFieldState.cpp
 
     # Animation
     ${CMAKE_CURRENT_LIST_DIR}/animation/AnimationRuntime.cpp

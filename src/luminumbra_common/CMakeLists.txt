@@ -76,6 +76,18 @@ else()
     set_source_files_properties(world/GameSession.cpp PROPERTIES COMPILE_OPTIONS "-O1")
 endif()
 
+# Spec 024 (AETHER-07): scripting/LuaState.cpp is the ONE TU that includes sol2
+# (v3.3.0; the pimpl keeps <sol/sol.hpp> out of every other TU). GCC 15's
+# stricter template-body checking rejects an upstream sol2 3.3.0 bug —
+# optional<T&>::emplace calls a nonexistent this->construct — even though that
+# member is never instantiated. Downgrade the diagnostic for just this file
+# (older GCC silently ignores unknown -Wno-* flags; the MSVC arm never sees it —
+# the build is GCC/MinGW today, mirroring the GameSession.cpp per-file pin above).
+if(NOT MSVC)
+    set_source_files_properties(scripting/LuaState.cpp PROPERTIES
+        COMPILE_OPTIONS "-Wno-template-body")
+endif()
+
 target_include_directories(luminumbra_common PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_SOURCE_DIR}/vendor/spdlog/include"

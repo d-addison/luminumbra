@@ -40,8 +40,12 @@ enum class StimulusChannel : std::uint8_t {
     TimeOfDay = 2,    // day fraction stimulus: 0 at night, 1 at midday [0, 1]
     Season = 3,       // season phase stimulus: spring/autumn ~0.5, summer 1, winter 0
     LightLevel = 4,   // ambient light level [0, 1] (0 dark, 1 full daylight)
+    Aether = 5,       // composite energy environment [0, 1] (spec 024 AETHER-12):
+                      // the stateful layer when sim.aether_state is ON, else the
+                      // re-derivable ambience. The CALLER supplies the
+                      // already-sampled scalar via StimulusContext::aether_level.
 };
-inline constexpr int kStimulusChannelCount = 5;
+inline constexpr int kStimulusChannelCount = 6;
 const char* StimulusChannelName(StimulusChannel channel) noexcept;
 
 // PINNED day-cycle period (ticks). A day-of-the-engine is one cycle of the
@@ -77,6 +81,19 @@ struct StimulusContext {
     // caller has no light system it leaves this < 0 and the LightLevel channel
     // derives a deterministic day/night curve from the tick instead.
     float ambient_light = -1.0f;
+    // Spec 024 (AETHER-12): composite energy-environment level [0, 1] at the
+    // sample position. Same contract as ambient_light: the CALLER supplies the
+    // already-sampled scalar and the registry never touches a field system --
+    // the stateful EnergyFieldState cell (normalized by the pinned
+    // fields::kEnergyRawPerUnit, so 1 gameplay unit == full stimulus) when
+    // sim.aether_state is ON, else the re-derivable AetherFieldSystem ambience
+    // (its emission is already [0, 1] by construction; identity pin). When < 0
+    // the Aether channel returns the deterministic neutral 0.0 -- NOT a
+    // tick-derived curve like LightLevel: aether is WORLD state (seed+anchor
+    // ambience or gameplay deposits), never a function of the tick alone, so a
+    // synthetic fallback would invent energy that does not exist in the world
+    // and diverge from the field truth. "No sample supplied" means "no energy".
+    float aether_level = -1.0f;
 };
 
 // The stimulus-channel registry. Stateless beyond the bound context: it is a
@@ -101,6 +118,7 @@ private:
     [[nodiscard]] float SampleTimeOfDay() const noexcept;
     [[nodiscard]] float SampleSeason() const noexcept;
     [[nodiscard]] float SampleLightLevel() const noexcept;
+    [[nodiscard]] float SampleAether() const noexcept;
 
     StimulusContext m_context;
 };

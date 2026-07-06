@@ -1209,12 +1209,15 @@ add_executable(frontier_gates_test
     ai/scent_deposit_system_test.cpp
     ai/ecology_demo_test.cpp
     ai/stimulus_channel_gate_test.cpp
+    ai/aether_stimulus_test.cpp
     ai/perception_scent_hardening_test.cpp
     ai/utility_instinct_hardening_test.cpp
     ai/flocking_evolution_hardening_test.cpp
     scripting/lua_api_manifest_gate_test.cpp
     scripting/lua_sandbox_escape_test.cpp
+    scripting/aether_script_binding_test.cpp
     fields/scalar_field_diffusion_gate_test.cpp
+    fields/energy_field_state_test.cpp
     persistence/world_save_service_test.cpp
     persistence/plant_persistence_test.cpp
     persistence/world_save_region_format_test.cpp

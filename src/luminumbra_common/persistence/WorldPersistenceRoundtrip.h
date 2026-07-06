@@ -127,6 +127,14 @@ struct WorldStreamingStateSubHashes {
     // AetherFieldSystem::ComputeAetherSubHash(). Empty when no field exists
     // (e.g. the persistence fixtures, which never construct one).
     std::string aether;
+    // Spec 024 (AETHER-06): the STATE-ONLY aether_state:v1: sub-hash
+    // (GameSession::ComputeAetherStateSubHash). Codex finding A: the folded
+    // |aether: composite embeds the tick-dependent re-derivable half, which the
+    // heavy oracle recompute-and-excludes -- so the AUTHORITATIVE stateful
+    // layer needs its own named slot for save/load + resim comparison (and
+    // LREC1 localization) when sim.aether_state is ON. Empty when the layer is
+    // off/absent/all-zero (the default world: always empty, byte-identical).
+    std::string aether_state;
 };
 
 // Computes the chunk-derived per-system sub-hashes (terrain/mesh/water). Pure

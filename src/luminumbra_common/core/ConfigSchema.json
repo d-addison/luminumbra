@@ -63,6 +63,12 @@
       "json_name": "weather_events"
     },
     {
+      "enum": "SimAetherState",
+      "section": "sim",
+      "residency": "hashed",
+      "json_name": "aether_state"
+    },
+    {
       "enum": "RenderMoonlight",
       "section": "render",
       "residency": "excluded",

@@ -36,7 +36,9 @@
     "_hydrology_weather_comment": "S1.1 (ATMO-11/WATER-07): weather-driven rain into the spec-010 hydrology (per-cell PrecipitationAt, integer-quantized). Activation implies finite hydrology semantics; a deliberate hash bump on the activation menu.",
     "hydrology_weather": { "enabled": false },
     "_weather_events_comment": "S1.2 (ATMO-12): the deterministic Markov weather-event epochs (WeatherEventAt, seed+25) exposed via GameSession::CurrentWeatherEvent. OFF -> always Clear/0 (byte-identical); consumers must also be participants.",
-    "weather_events": { "enabled": false }
+    "weather_events": { "enabled": false },
+    "_aether_state_comment": "Spec 024 (AETHER-06): the STATEFUL energy-field layer (world-anchored sparse pages, integer kernel, aether_state:v1: sub-hash folded into the |aether: slot). OFF -> no allocation, no tick work, zero hash bytes, saves unchanged (byte-identical). Activation is a deliberate hash bump on the owner menu.",
+    "aether_state": { "enabled": false }
   },
   "render": {
     "moonlight": { "enabled": false, "params": { "strength": 0.0, "color": [0.6, 0.7, 1.0] } },

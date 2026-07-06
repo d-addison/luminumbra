@@ -21,6 +21,7 @@ $RequiredEntries = @(
     [pscustomobject]@{ module = "simulation"; name = "subscribe"; qualified = "simulation.subscribe" },
     [pscustomobject]@{ module = "time"; name = "delta_seconds"; qualified = "time.delta_seconds" },
     [pscustomobject]@{ module = "world"; name = "get_block"; qualified = "world.get_block" },
+    [pscustomobject]@{ module = "world"; name = "sample_energy_field"; qualified = "world.sample_energy_field" },
     [pscustomobject]@{ module = "world"; name = "set_block"; qualified = "world.set_block" }
 )
 

@@ -3113,6 +3113,11 @@ int main(int argc, char* argv[]) {
     // S1.2 (ATMO-12): opt-in deterministic weather-event epochs (hashed sim flag).
     gameSession->SetWeatherEventsEnabled(
         g_systemConfig.enabled(luminumbra::core::SysKey::SimWeatherEvents));
+    // Spec 024 (AETHER-06): opt-in STATEFUL energy-field layer (hashed sim flag;
+    // default OFF keeps the canonical baselines byte-identical — activation is a
+    // deliberate hash bump on the owner menu).
+    gameSession->SetAetherStateEnabled(
+        g_systemConfig.enabled(luminumbra::core::SysKey::SimAetherState));
     gameSession->SetWildlifeFoliageTuning(luminumbra::ai::ResolveWildlifeFoliageTuning(g_systemConfig));
     gameSession->SetThirstTuning(luminumbra::ai::ResolveThirstTuning(g_systemConfig));
     gameSession->SetScavengingTuning(luminumbra::ai::ResolveScavengingTuning(g_systemConfig));

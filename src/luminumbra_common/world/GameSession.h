@@ -17,6 +17,10 @@
 #include "../ai/ForagingSystem.h"           // ai::ForagingParams
 #include "../ai/CreatureReproductionSystem.h"  // ai::ReproductionTuning
 
+namespace luminumbra::fields {
+    class EnergyFieldState;  // spec 024 (AETHER-06): the stateful energy layer
+}
+
 namespace luminumbra::ai {
     class ScentField;
     class CreatureSpeciesRegistry;  // INSTINCT-12: per-world species definition table
@@ -227,6 +231,25 @@ public:
     void SetWeatherEventsEnabled(bool enabled) { m_weatherEventsEnabled = enabled; }
     [[nodiscard]] luminumbra::sim::WeatherEventState CurrentWeatherEvent() const;
 
+    // Spec 024 (AETHER-06): the STATEFUL energy-field layer (sim.aether_state,
+    // default OFF). Stored pre-world; the layer is constructed at CreateWorld/
+    // LoadWorld ONLY when enabled — OFF means no allocation, no tick work, zero
+    // sub-hash bytes, saves unchanged (byte-identical by construction). The
+    // layer is world-anchored sparse-page truth (the re-derivable
+    // AetherFieldSystem above is the ambience half; this one holds
+    // gameplay-caused deposits). Ticked in TickSimulation directly after the
+    // re-derivable field, anchored on the SAME replicated stream anchor.
+    void SetAetherStateEnabled(bool enabled) { m_aetherStateEnabled = enabled; }
+    [[nodiscard]] bool AetherStateEnabled() const { return m_aetherStateEnabled; }
+    luminumbra::fields::EnergyFieldState* GetEnergyFieldState() { return m_energyFieldState.get(); }
+    const luminumbra::fields::EnergyFieldState* GetEnergyFieldState() const { return m_energyFieldState.get(); }
+    // The aether_state:v1: additive sub-hash (StableChecksum over the layer's
+    // canonical bytes), or EMPTY when the layer is off/absent/all-zero — the
+    // scent/plant empty-neutral contract. The runner folds a nonempty value
+    // into the |aether: world_hash slot (FR-024-3) and surfaces it as its own
+    // named diagnostic for the heavy oracle's authoritative compare.
+    [[nodiscard]] std::string ComputeAetherStateSubHash() const;
+
     // Spec-021 INSTINCT-12: the per-world SPECIES DEFINITION table, loaded at world
     // create/load from <root>/data/common/creatures/species/*.json (filename-sorted â€” a pure
     // function of file content, never filesystem iteration order). Each entry's behaviour
@@ -286,6 +309,12 @@ private:
     std::unique_ptr<Systems::WindFieldSystem> m_windFieldSystem;
     std::unique_ptr<Systems::WeatherSystem> m_weatherSystem;
     std::unique_ptr<Systems::AetherFieldSystem> m_aetherFieldSystem;
+    // Spec 024 (AETHER-06): the stateful energy layer. Null unless
+    // sim.aether_state was enabled BEFORE CreateWorld/LoadWorld (default OFF —
+    // null — byte-identical). unique_ptr so this header only needs the
+    // forward declaration.
+    std::unique_ptr<luminumbra::fields::EnergyFieldState> m_energyFieldState;
+    bool m_aetherStateEnabled = false;
     std::unique_ptr<luminumbra::ai::ScentField> m_scentField;
     // INSTINCT-12: species definitions (see GetSpeciesTable). unique_ptr so this header only
     // needs the forward declaration (the registry is header-only nlohmann-parsing code).
@@ -305,6 +334,13 @@ private:
     // Convert string seed to numeric seed
     uint32_t StringToSeed(const std::string& seedStr) const;
     void InitializeScentField(const Vec3& anchor);
+    // Spec 024 (AETHER-06): construct the stateful energy layer iff
+    // m_aetherStateEnabled (called at CreateWorld/LoadWorld after the
+    // re-derivable aether system exists). OFF -> stays null -> byte-identical.
+    void InitializeEnergyFieldState();
+    // Persist the layer's record beside the chunk save (null/all-zero -> no
+    // file). Serialize normalizes, which is state-idempotent at save time.
+    void SaveEnergyFieldRecord(const std::filesystem::path& save_dir);
     void LoadSpeciesDefinitions();  // INSTINCT-12: fills m_speciesTable (world create + load)
     void ApplyWeatherRainWiring();  // S1.1: wires weather->water rain when opted in
     bool m_weatherRainEnabled = false;       // S1.1 (see SetWeatherRainEnabled)

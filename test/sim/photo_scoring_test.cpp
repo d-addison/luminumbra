@@ -202,4 +202,64 @@ TEST(PhotoScoring, RunEqualsReplay) {
     EXPECT_EQ(a.total, b.total);
 }
 
+// ---- AETHER_GLOW (spec 024 AETHER-12) ----
+
+// Zero aether input (the default) contributes NOTHING: aether_glow is exactly 0
+// and the total is BIT-IDENTICAL to the legacy four-axis weighted sum -- the
+// byte-neutral proof that every pre-aether caller/shot scores unchanged.
+TEST(PhotoScoring, ZeroAetherIsByteNeutral) {
+    using luminumbra::photo::Clamp01;
+    using luminumbra::photo::kwComposition;
+    using luminumbra::photo::kwFocus;
+    using luminumbra::photo::kwLighting;
+    using luminumbra::photo::kwRarity;
+
+    const PhotoShot shot = oneSubject(kThird, kThird); // aether left at default 0
+    const PhotoScore sc = ScorePhoto(shot);
+    EXPECT_EQ(sc.aether_glow, 0.0f);
+    // Recompute the PRE-AETHER total formula from the returned axes: the new
+    // bonus term must have added exactly +0.0f (bit equality, not tolerance).
+    const float legacy_total = Clamp01(kwComposition * sc.composition +
+                                       kwLighting    * sc.lighting +
+                                       kwFocus       * sc.focus +
+                                       kwRarity      * sc.rarity);
+    EXPECT_EQ(sc.total, legacy_total);
+
+    // An EXPLICIT zero scores identically to the default (the field is inert at 0).
+    PhotoShot explicit_zero = shot;
+    explicit_zero.aether = 0.0f;
+    const PhotoScore sz = ScorePhoto(explicit_zero);
+    EXPECT_EQ(sz.aether_glow, sc.aether_glow);
+    EXPECT_EQ(sz.total, sc.total);
+}
+
+// A rising aether level lifts aether_glow MONOTONICALLY (non-decreasing) and
+// never lowers the total: more energy in frame is never a penalty. Bounded
+// [0,1] throughout, including an over-unity input (clamped, still monotone).
+TEST(PhotoScoring, AetherGlowMonotonicNonDecreasing) {
+    const float levels[] = {0.0f, 0.15f, 0.40f, 0.75f, 1.0f, 1.8f};
+    float prev_glow = -1.0f;
+    float prev_total = -1.0f;
+    for (const float level : levels) {
+        PhotoShot shot = oneSubject(kThird, kThird);
+        shot.aether = level;
+        const PhotoScore sc = ScorePhoto(shot);
+        EXPECT_GE(sc.aether_glow, prev_glow) << "level=" << level;
+        EXPECT_GE(sc.total, prev_total) << "level=" << level;
+        EXPECT_GE(sc.aether_glow, 0.0f);
+        EXPECT_LE(sc.aether_glow, 1.0f);
+        EXPECT_LE(sc.total, 1.0f);
+        prev_glow = sc.aether_glow;
+        prev_total = sc.total;
+    }
+
+    // And a glowing frame strictly beats the same frame with no energy on the
+    // axis (the bonus actually reaches the score, not just non-decreasing).
+    PhotoShot dark = oneSubject(kThird, kThird);
+    PhotoShot glow = dark;
+    glow.aether = 0.8f;
+    EXPECT_GT(ScorePhoto(glow).aether_glow, ScorePhoto(dark).aether_glow);
+    EXPECT_GT(ScorePhoto(glow).total, ScorePhoto(dark).total);
+}
+
 } // namespace

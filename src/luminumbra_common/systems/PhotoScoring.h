@@ -3,7 +3,10 @@
 // Track game.photo_scoring — a PURE, DETERMINISTIC capture-composition scorer.
 // This is the de-risked CORE of the photography game loop (pillar G): given the
 // subjects framed in a shot + the camera's exposure/focus, produce a 0..1 score
-// across four axes (composition, lighting, focus, rarity) and a weighted total.
+// across five axes (composition, lighting, focus, rarity, aether_glow) and a
+// weighted total. The aether_glow axis (spec 024 AETHER-12) is a BONUS on top
+// of the base four: its input defaults to 0 so pre-aether shots score
+// byte-identically.
 //
 // SCOPE. NO render, NO camera, NO GL, NO entt. It operates on plain value structs
 // so it can be unit-tested in isolation and later fed by whatever capture pipeline
@@ -60,6 +63,13 @@ struct PhotoShot {
     std::vector<PhotoSubject> subjects;
     float exposure = 0.5f;
     float focus    = 1.0f;
+    // Spec 024 (AETHER-12): sampled energy-field level in frame [0,1]. The
+    // CALLER supplies the already-sampled composite (the stateful layer when
+    // sim.aether_state is ON, else the re-derivable ambience -- the same scalar
+    // contract StimulusContext::aether_level carries; the scorer never touches
+    // a field system). Default 0 == no energy in frame == ZERO aether_glow
+    // contribution, so existing callers/tests are byte-unchanged.
+    float aether = 0.0f;
 };
 
 // The graded result. Each axis is clamped [0,1]; total is the weighted sum of the
@@ -69,6 +79,7 @@ struct PhotoScore {
     float lighting    = 0.0f;
     float focus       = 0.0f;
     float rarity      = 0.0f;
+    float aether_glow = 0.0f; // AETHER-12 bonus axis; 0 whenever shot.aether is 0
     float total       = 0.0f;
 };
 
@@ -105,6 +116,12 @@ inline constexpr float kwComposition = 0.34f;
 inline constexpr float kwLighting    = 0.30f;
 inline constexpr float kwFocus       = 0.20f;
 inline constexpr float kwRarity      = 0.16f;
+
+// AETHER-12: aether_glow BONUS weight. Deliberately NOT folded into the base
+// four weights (which still sum to 1.0): with shot.aether == 0 the bonus term
+// is exactly +0.0f and the total is BYTE-IDENTICAL to the pre-aether rubric,
+// while a glowing frame can lift the total (still clamped [0,1]).
+inline constexpr float kwAetherGlow  = 0.10f;
 
 // ---------------------------------------------------------------------------
 // Small pure helpers (float +-*/ only — no libm).
@@ -293,8 +310,23 @@ inline float ScoreRarity(const PhotoShot& shot) {
 }
 
 // ---------------------------------------------------------------------------
-// ScorePhoto. The public entry point: compute the four axes, then a clamped
-// weighted total. Pure + deterministic; an empty shot is a defined all-zero score.
+// AETHER_GLOW (spec 024 AETHER-12). Reward capturing energy phenomena: a pure,
+// LINEAR monotonic map of the caller-sampled energy level in frame. Kept linear
+// (a single clamp, no falloff shaping) so the monotonic non-decreasing property
+// is trivially provable and a zero input contributes EXACTLY zero. An empty
+// shot stays the defined all-zero score (the gating rule above): with no
+// subject framed there is nothing for the glow to illuminate. Returns [0,1].
+// ---------------------------------------------------------------------------
+inline float ScoreAetherGlow(const PhotoShot& shot) {
+    if (shot.subjects.empty()) return 0.0f;
+    return Clamp01(shot.aether);
+}
+
+// ---------------------------------------------------------------------------
+// ScorePhoto. The public entry point: compute the five axes, then a clamped
+// weighted total. Pure + deterministic; an empty shot is a defined all-zero
+// score. The aether_glow bonus term is exactly +0.0f when shot.aether is 0, so
+// pre-aether inputs produce a bit-identical total (byte-neutral by default).
 // ---------------------------------------------------------------------------
 inline PhotoScore ScorePhoto(const PhotoShot& shot) {
     PhotoScore out;
@@ -306,11 +338,13 @@ inline PhotoScore ScorePhoto(const PhotoShot& shot) {
     out.lighting    = ScoreLighting(shot);
     out.focus       = ScoreFocus(shot);
     out.rarity      = ScoreRarity(shot);
+    out.aether_glow = ScoreAetherGlow(shot);
 
     out.total = Clamp01(kwComposition * out.composition +
                         kwLighting    * out.lighting +
                         kwFocus       * out.focus +
-                        kwRarity      * out.rarity);
+                        kwRarity      * out.rarity +
+                        kwAetherGlow  * out.aether_glow);
     return out;
 }
 

@@ -85,6 +85,7 @@ const LuaApiManifest& GetLuaApiManifest() {
             {"simulation", "subscribe", "function", "simulation.subscribe(topic: string, callback: function)", "Register a script callback for a simulation event topic."},
             {"time", "delta_seconds", "function", "time.delta_seconds() -> number", "Return the fixed simulation step for the current script tick."},
             {"world", "get_block", "function", "world.get_block(x: integer, y: integer, z: integer) -> integer", "Read a block id from the active world."},
+            {"world", "sample_energy_field", "function", "world.sample_energy_field(x: number, y: number, z: number) -> number", "Read-only sample of the stateful energy field at a world position, in gameplay units; 0 when the layer is absent. Also exposed as the bare global sample_energy_field (spec 024 FR-024-5)."},
             {"world", "set_block", "function", "world.set_block(x: integer, y: integer, z: integer, block_id: integer)", "Queue a block write in the active world."},
         },
     };
@@ -144,6 +145,7 @@ bool LuaApiManifestMeetsBaseline(const LuaApiManifest& manifest) {
         {"simulation", "subscribe"},
         {"time", "delta_seconds"},
         {"world", "get_block"},
+        {"world", "sample_energy_field"},
         {"world", "set_block"},
     };
 
