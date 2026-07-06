@@ -13,6 +13,7 @@
 #include "CreatureBrain.h"
 #include "Flocking.h"
 #include "SpatialGrid.h"
+#include "ScentField.h"  // INSTINCT-08: in-brain scent tracking (GradientSteer)
 
 #include "../components/AlarmComponents.h"
 #include "../components/CircadianComponents.h"
@@ -92,8 +93,27 @@ struct EcologyTuning {
 
 // Advance every CreatureComponent by one fixed tick. Pure function of registry state + dt + tuning.
 // `tuning` defaults to the compiled constants, so existing callers/tests are byte-identical.
+// INSTINCT-08: world XZ -> scent-grid cell (floor toward -inf; mirrors the
+// ScentSteeringSystem::WorldToCell used on the LocomotionIntent path).
+inline int WorldToScentCell(float world, float origin, float cell_size) {
+    const float v = (world - origin) / cell_size;
+    int c = static_cast<int>(v);
+    if (v < static_cast<float>(c)) --c;
+    return c;
+}
+
+// INSTINCT-08 (Wave H I2.3): OPTIONAL scent-tracking inputs. When a ScentField is
+// supplied, a PREDATOR with no directly-perceived target steers UP the prey-scent
+// gradient (channel 0) instead of wandering blind — the vertebrate half of the
+// stigmergy substrate on the BRAIN path (the ant/GOAP path uses ScentSteering's
+// LocomotionIntent, which ambient creatures never carry). Default nullptr keeps
+// every existing call byte-identical.
 inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, float dt,
-                                                       const EcologyTuning& tuning = {}) {
+                                                       const EcologyTuning& tuning = {},
+                                                       const ScentField* scent = nullptr,
+                                                       float scent_origin_x = 0.0f,
+                                                       float scent_origin_z = 0.0f,
+                                                       float scent_cell_size = 0.0f) {
     CreatureBrainStats stats;
     auto view = reg.view<Comp::CreatureComponent, Comp::TransformComponent>();
 
@@ -209,6 +229,27 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
                 tz = o.z;
                 te = o.e;
                 found = true;
+            }
+        }
+
+        // INSTINCT-08 (Wave H I2.3): SCENT TRACKING. A predator with NO directly-
+        // perceived prey follows the prey-scent gradient (channel 0) up-wind-trail:
+        // the tracked point is a fixed stride along the Weber-normalized gradient
+        // direction, at a nominal outside-catch distance so the arbiter picks Hunt
+        // and the pursuit code closes on it. Cold/absent trails (confidence 0)
+        // leave the creature exactly as before — and a null field (every existing
+        // caller) is byte-identical by construction.
+        if (scent != nullptr && cr.is_predator && !found && scent_cell_size > 0.0f) {
+            const int cx = WorldToScentCell(sx, scent_origin_x, scent_cell_size);
+            const int cz = WorldToScentCell(sz, scent_origin_z, scent_cell_size);
+            float gdx = 0.0f, gdz = 0.0f;
+            const float conf = scent->GradientSteer(/*ch=*/0, cx, cz, /*sign=*/+1.0f,
+                                                    /*floor=*/1e-4f, /*k=*/0.05f, gdx, gdz);
+            if (conf > 0.0f) {
+                tx = sx + gdx * 12.0f;   // a stride up the gradient
+                tz = sz + gdz * 12.0f;
+                bestDist = 20.0f;        // nominal "smelled, not seen" distance
+                found = true;            // te stays null: nothing to catch yet
             }
         }
 

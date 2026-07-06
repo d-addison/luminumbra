@@ -14,6 +14,9 @@
 #include "ai/CreatureBrainSystem.h"
 #include "ai/WildlifeFoliageSystem.h"   // INSTINCT-04: the live feeding loop
 #include "systems/FarmingSystem.h"      // MakePlantFromSpecies (the sim wiring point)
+#include "ai/ScentField.h"              // INSTINCT-08: the stigmergy substrate
+#include "ai/ScentDepositSystem.h"      // INSTINCT-08: prey deposits
+#include "components/InstinctComponents.h" // SensableComponent
 #include "ai/CreatureReproductionSystem.h"
 #include "ai/HerdAlarmSystem.h"
 #include "ai/LifespanSystem.h"
@@ -117,6 +120,61 @@ std::vector<float> RunPipeline(int ticks) {
 // The whole composed ecology stack is byte-exact run == replay over a long horizon.
 TEST(EcologyPipeline, DeterministicOverManyTicks) {
     EXPECT_EQ(RunPipeline(400), RunPipeline(400));
+}
+
+// INSTINCT-08 (Wave H I2.3): SCENT HUNTING. With wind advection ON, a predator
+// whose sensory genome CANNOT directly perceive distant prey (short vision +
+// hearing) closes on it along the wind-advected prey-scent gradient — the
+// vertebrate stigmergy loop on the brain path. Deterministic run==replay.
+TEST(ScentHunt, PredatorTracksPreyUpwind) {
+    auto run = [] {
+        constexpr float kCell = 2.0f;
+        constexpr int kGrid = 96;
+        luminumbra::ai::ScentField field(kGrid, kGrid, /*channels=*/2);
+        entt::registry r;
+        const float ox = -kCell * kGrid * 0.5f, oz = -kCell * kGrid * 0.5f;
+        // Stationary prey UPWIND, depositing scent on channel 0.
+        const auto prey = r.create();
+        r.emplace<Comp::TransformComponent>(prey).position = Luminumbra::Vec3(40.0f, 0.0f, 0.0f);
+        auto& pc = r.emplace<Comp::CreatureComponent>(prey);
+        pc.is_predator = false; pc.move_speed = 0.0f; pc.hunger = 0.0f;
+        auto& sn = r.emplace<Comp::SensableComponent>(prey);
+        sn.scent_channel = 0;
+        sn.scent_deposit = 1.0f;
+        // A hungry predator DOWNWIND with senses too short to see/hear the prey.
+        const auto pred = r.create();
+        r.emplace<Comp::TransformComponent>(pred).position = Luminumbra::Vec3(0.0f, 0.0f, 0.0f);
+        auto& dc = r.emplace<Comp::CreatureComponent>(pred);
+        dc.is_predator = true; dc.hunger = 0.7f; dc.move_speed = 3.0f;
+        auto& gn = r.emplace<Comp::CreatureGenomeComponent>(pred);
+        gn.vision_range = 10.0f;   // prey at 40 m: invisible
+        gn.hearing_range = 8.0f;   //             : inaudible
+        constexpr float dt = 1.0f / 30.0f;
+        float dist_start = 40.0f, dist_end = 40.0f;
+        for (int t = 0; t < 600; ++t) {
+            luminumbra::ai::RunScentDepositOnTick(r, field, ox, oz, kCell);
+            // Wind blows the scent FROM the prey TOWARD the predator (-X), laying
+            // the advected trail the predator climbs.
+            field.Step(/*diffusion=*/0.10, /*iters=*/1, /*evaporation=*/0.01,
+                       /*wind_cx=*/-0.4, /*wind_cz=*/0.0);
+            luminumbra::ai::RunCreatureBrainSystemOnTick(r, dt, {}, &field, ox, oz, kCell);
+            const auto& tp = r.get<Comp::TransformComponent>(pred).position;
+            const auto& yp = r.get<Comp::TransformComponent>(prey).position;
+            const float dx = yp.x - tp.x, dz = yp.z - tp.z;
+            const float d = std::sqrt(dx * dx + dz * dz);
+            if (t == 0) dist_start = d;
+            dist_end = d;
+        }
+        return std::pair<float, float>(dist_start, dist_end);
+    };
+    const auto [d0, d1] = run();
+    EXPECT_LT(d1, d0 - 10.0f)
+        << "the predator did not close on the prey along the scent gradient (start "
+        << d0 << " m, end " << d1 << " m)";
+    // run==replay: the scent-tracking loop is byte-exact.
+    const auto again = run();
+    EXPECT_EQ(d0, again.first);
+    EXPECT_EQ(d1, again.second);
 }
 
 // INSTINCT-06 (Wave H I2.2): starvation DEGRADES, then KILLS, then the carcass

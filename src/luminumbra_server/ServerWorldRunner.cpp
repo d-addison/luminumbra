@@ -19,6 +19,7 @@
 #include "luminumbra_common/components/MortalComponents.h"
 #include "luminumbra_common/components/PackHunterComponents.h"
 #include "luminumbra_common/components/TerritoryComponents.h"
+#include "luminumbra_common/components/InstinctComponents.h" // INSTINCT-08: SensableComponent (prey scent)
 #include "luminumbra_common/core/Log.h"
 #include "luminumbra_common/core/Profiler.h"
 #include "luminumbra_common/ecs/EntitySnapshot.h"
@@ -158,6 +159,14 @@ void SpawnEcologyRoster(entt::registry& r, const Vec3& anchor) {
         r.emplace<Comp::MigratoryComponent>(e);
         r.emplace<Comp::TerritoryComponent>(e);
         r.emplace<Comp::TerritoryBiasComponent>(e);
+        // INSTINCT-08 (Wave H I2.3): prey DEPOSIT scent (channel 0) so predators
+        // can track them by smell when out of direct perception. Adding a scent
+        // participant activates the deposit tick -> the populated golden re-pins
+        // (the chartered I2 refresh); the canonical smoke has no roster and is
+        // untouched.
+        auto& sn = r.emplace<Comp::SensableComponent>(e);
+        sn.scent_channel = 0;
+        sn.scent_deposit = 0.5f;
     };
     pred(-6.0f, 9.0f); pred(6.0f, 9.0f);
     for (int i = 0; i < 6; ++i) prey(-7.0f + i * 2.4f, -2.0f);

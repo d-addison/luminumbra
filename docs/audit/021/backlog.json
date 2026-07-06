@@ -1577,9 +1577,10 @@
       "effort": "M",
       "risk": "medium",
       "dependencies": [],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: ScentHunt.PredatorTracksPreyUpwind ctest — with wind advection ON, a predator outside direct perception range closes on prey along the advected scent gradient; PopulatedWorldReplay re-pinned (scents sub-hash becomes non-empty)",
-      "rank": 84
+      "rank": 84,
+      "note": "DONE 2026-07-05 (Wave H I2.3). Prey deposit scent (SensableComponent ch0 on the ecology roster); the brain takes optional scent inputs (default nullptr = byte-identical) and a predator with no direct target pursues the GradientSteer direction. Gate: ScentHunt.PredatorTracksPreyUpwind (wind ON, closes >10m, run==replay). Populated golden -> 65e98071e693e5b2."
     },
     {
       "id": "INSTINCT-05",
