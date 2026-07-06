@@ -236,8 +236,8 @@ ride on it instead of fighting it.
 
 ## Verification (end-to-end)
 
-1. Build both trees (prepend `C:\msys64\ucrt64\bin`); client+server build clean at every conversion
-   step.
+1. Build the canonical preset tree (`cmake --build --preset debug`, prepend
+   `C:\msys64\ucrt64\bin`); client+server build clean at every conversion step.
 2. `--smoke == 6f008a9f637c40b7`, run==replay, after every conversion (render-only).
 3. FLIP-diff each converted pass against its pre-conversion golden (`tools/flip_diff.py`) — must stay
    within threshold (no intentional re-bless; the image must not move).

@@ -2744,7 +2744,7 @@
       "effort": "S",
       "risk": "low",
       "dependencies": [],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: engine-frontier Sections doc-lint \u2014 an Assert-Contains-style negative check fails while 'build both trees' text remains in docs/specs/016-,018-,019-*/spec.md",
       "rank": 146
     },

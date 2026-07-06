@@ -431,7 +431,7 @@ Anchored files:
 
 ## Verification (end-to-end)
 
-1. Build both trees (prepend `C:\msys64\ucrt64\bin`): `cmake --build build` (`build/bin`) and
+1. Build the canonical preset tree (prepend `C:\msys64\ucrt64\bin`):
    `cmake --build --preset debug` (`build/debug`). Record which binary each result came from
    (NFR-003).
 2. `luminumbra_server_app --smoke == 6f008a9f637c40b7`, run==replay; `--smoke-moving` run==replay —

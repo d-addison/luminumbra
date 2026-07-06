@@ -111,7 +111,7 @@ wrong artifact.
   CTest manifest) shall carry a sidecar/embedded **manifest** with: `build_preset`, `git_sha`,
   `exe_hash` (hash of the binary that produced it), `shader_hash` (hash of the shader cache/sources
   used), `scenario` (capture flags / test name), and `timestamp`. This generalizes the existing
-  per-artifact `build_preset` labeling (`test/CMakeLists.txt:998-1007`) into a full provenance record.
+  per-artifact `build_preset` labeling (`test/CMakeLists.txt:1510-1547`) into a full provenance record.
 - **FR-A-005 — Visual/perf gates compare manifest to the running binary.** The visual-parity gate
   (`tools/flip_diff.py` + `tools/golden_update.py`, spec 015 NFR-003) and the perf gate
   (`--render-benchmark`) shall, before comparing or blessing, assert that the candidate artifact's
@@ -120,10 +120,10 @@ wrong artifact.
   "bless wrong images / pass against stale binaries."
 - **FR-A-006 — Tiered, enumerable manual GPU/perf tests.** The currently-excluded/conditional tests
   shall be a **named, discoverable tier**, not invisible. Concretely: `ForestPerfBudget`
-  (`test/CMakeLists.txt:892`, label `manual;perf;budget`), `ShieldRtSpike` (`:904`,
-  `manual;perf;spike`), `ShieldRtTracerProfileGpu` (`:913`, `manual;perf;gpu`), the far-field GPU
-  parity family (`:920/:927/:934`, `manual;perf;gpu`), and the python-conditional `VisualCritiqueFlags`
-  (`:970`) / `TimelapseSelftest` (`:990`) gates shall each be enumerable via a single documented tier
+  (`test/CMakeLists.txt:1404`, label `manual;perf;budget`), `ShieldRtSpike` (`:1416`,
+  `manual;perf;spike`), `ShieldRtTracerProfileGpu` (`:1425`, `manual;perf;gpu`), the far-field GPU
+  parity family (`:1432/:1439/:1446`, `manual;perf;gpu`), and the python-conditional `VisualCritiqueFlags`
+  (`:1482`) / `TimelapseSelftest` (`:1502`) gates shall each be enumerable via a single documented tier
   command (e.g. `ctest --preset $BuildPreset -L manual --show-only`) and reported (count of
   registered-vs-skipped) by the gate, so a conditionally-unregistered test is **visibly missing**, not
   silently absent.
@@ -202,7 +202,7 @@ wrong artifact.
   tree (`cmake --build --preset $BuildPreset` / `ctest --preset $BuildPreset`). The Bash tool is
   sandboxed (no GPU client, no compiler) and must not be assumed for build/gate steps.
 - **NFR-005 — No silent test loss.** The tiering (FR-A-006) must make a conditionally-unregistered
-  test (e.g. `VisualCritiqueFlags` when no numpy is found, `test/CMakeLists.txt:974-976`) **report as
+  test (e.g. `VisualCritiqueFlags` when no numpy is found, `test/CMakeLists.txt:1487`) **report as
   missing**, not vanish. The gate must surface registered-vs-expected tier counts.
 - **NFR-006 — De-risks specs 014 and 015.** Both 014 (`docs/specs/014-rhi-vulkan-dx12-migration/spec.md`)
   and 015 (`:344`) currently instruct building both trees. This spec's Group A is a prerequisite that
@@ -306,7 +306,7 @@ should land first because every B verification run depends on knowing which bina
   invalidate a bless).
 - **OQ-3 (blocks FR-B-001 codegen toolchain)** — What generates the config headers: a build-time
   Python/CMake codegen step (matches the existing python-conditional CTest pattern,
-  `test/CMakeLists.txt:946-996`) or `constexpr`/X-macro C++ metaprogramming (no external generator,
+  `test/CMakeLists.txt:1458-1508`) or `constexpr`/X-macro C++ metaprogramming (no external generator,
   but harder to emit the shared shader header from)? The shared-header requirement (FR-B-007) leans
   toward an explicit codegen step.
 - **OQ-4 (FR-B-003 enforcement site)** — Is the schema-default-vs-owning-constant cross-check a

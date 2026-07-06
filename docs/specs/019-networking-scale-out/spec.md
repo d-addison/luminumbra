@@ -227,8 +227,8 @@ current tree (see **Key files**). "Replace"/"retire" means the listed current be
 
 ## Acceptance Criteria
 
-Each names a measurable signal / test command. Build both trees with `C:\msys64\ucrt64\bin`
-prepended (toolchain-PATH gotcha). Criteria are split into **runnable today** (regression guards) and
+Each names a measurable signal / test command. Build the canonical preset tree
+(`cmake --build --preset debug`) with `C:\msys64\ucrt64\bin` prepended (toolchain-PATH gotcha). Criteria are split into **runnable today** (regression guards) and
 **new gates this spec introduces** (to-be-built; command named even where the harness is new).
 
 ### Cross-cutting (regression — runnable today)
@@ -383,7 +383,8 @@ prepended (toolchain-PATH gotcha). Criteria are split into **runnable today** (r
   (NFR-001 cross-ref).
 
 ## Verification (end-to-end)
-1. Build both trees (prepend `C:\msys64\ucrt64\bin`); `luminumbra_server_app --smoke` byte-identical
+1. Build the canonical preset tree (`cmake --build --preset debug`, prepend
+   `C:\msys64\ucrt64\bin`); `luminumbra_server_app --smoke` byte-identical
    (`6f008a9f637c40b7`), run==replay, after every group.
 2. `ctest -R Replication` green (existing suite, regression); `ReplicationScale` promoted to required.
 3. Group D: grep confirms the `WSAEWOULDBLOCK`-spin is gone; unit test forces would-block → no spin,
