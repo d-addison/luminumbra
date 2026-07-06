@@ -975,6 +975,47 @@ immediately after — AETHER-05's spec 024 is the next record's business). Next:
 aether completion arc (spec 024, seed +38 re-chartered), then Waves I–K modernization
 M0–M6 per the campaign plan.
 
+## A1 aether arc + Wave-H red-fixes (record, 2026-07-06)
+
+The A1 aether completion arc landed after Wave H (default-OFF behind `sim.aether_state`;
+seed +38; NO canonical moved — byte-identical by construction, RenderParityFrame 0.0):
+AETHER-06/07/12 + AETHER-08 sim core (`aca7e56e`), AETHER-11 + AETHER-08 render taps
+(`16ed59ee`). The first full serial gtest lane since the instinct band then surfaced 3
+PRE-EXISTING reds (proven not-A1 by an exact-bit match to INSTINCT-06's shipped
+`starve_degrade`); the shipped behavior was kept (owner-delegated) and the tests corrected
+test-only: ResidencyContract Bump-B water-mirror scope (`a23d6799`), HuntWish 1.5× sprint
+recovery (`236316c1`), Starvation lone-predator fixture (`36222b8b`). **Close: 142/190 done
+at HEAD `36222b8b`.** Lesson: a validator-bundle pass != a full gtest lane — run serial
+`ctest` after every sim band.
+
+## Wave I record — M0 hygiene on-ramp (Waves I–K GPU campaign) (2026-07-06)
+
+M0 is the hygiene on-ramp that protects every gate run in the GPU modernization band
+(M1–M6) from stale binaries and drifted docs. 4 items, 4 commits (`a7baee98` → `f46c813b`);
+**zero sim/hash impact — no canonical baseline moved.** Write-gate-first throughout (each
+gate seen RED before its fix, GREEN after).
+
+- **OPS-05** (rank 130, `a7baee98`) — retired the root `build/` tree; flipped the Test-Build
+  preflight to `validate-build-tree.ps1 -Strict` (a concurrent root `build/CMakeCache.txt`
+  is now a HARD FAIL); rewrote STANDARDS.md §8 + docs/CLAUDE.md + ci.yml to one canonical
+  preset tree. NEW frontier gate **BuildTreeStrict** (proves -Strict passes clean AND
+  refuses a synthesized root cache; try/finally cleanup; runs in -Mode All).
+- **OPS-06** (146, `9e46e96e`) — corrected "Build both trees" → one-canonical-tree in specs
+  016/018/019 (:239/:434/:230/:386); refreshed spec 020's drifted test/CMakeLists.txt
+  citations. NEW **Assert-Absent** helper + a Test-Sections negative doc-lint.
+- **NET-10** (144, `4e2834de`) — stated the lockstep oracle/replay/small-co-op demotion
+  scope in LockstepSession.h; re-pointed networking-scale-architecture.md anchors
+  (:227-228→:276-277, :300-303→:349-352). NEW frontier gate **NetDemotionDocGrep**
+  (durable content-grep + a line-anchor tripwire).
+- **SHIELD-10** (141, `f46c813b`) — refreshed docs/shield/sdf-contract.md with the two
+  producer tiers (full unit-step lattice vs coarse heightmap-only) + the malformed-SDF
+  regeneration rule; fixed a stale ServerWorldRunner.h ref (`:489` → activate_due at
+  ServerWorldRunner.cpp:613, per 017-B). NEW ctest **SdfContractDocLint** (#1722) +
+  test/features/sdf-contract.feature.
+
+**Close: 146/190 done.** Next: M1 — the render-scale seam (GPU-P09) with FOLIAGE-05 early
+(retires the ForestPerfBudget chartered RED so the lane is 100% green from M1 on).
+
 ## Spine-inversion register (AC-003)
 
 Exactly one deliberate inversion, justified inline at its rank:
