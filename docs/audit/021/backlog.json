@@ -2674,7 +2674,7 @@
       "effort": "S",
       "risk": "low",
       "dependencies": [],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: NetDemotionDocGrep check \u2014 grep asserts LockstepSession.h states the oracle/replay/small-co-op scope and the arch-doc line anchors match the tree (spec 019 AC-B-001)",
       "rank": 144
     },

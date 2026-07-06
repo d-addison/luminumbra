@@ -254,9 +254,9 @@ cap route to the replication path.
   20-32? assumed no → lockstep stays oracle/replay/small-co-op permanently).
 - **Current implementation is strictly 2-peer / ONE remote.** `LockstepConfig` hard-codes
   `local_client_id = 0` / `peer_client_id = 1` with the comment "v1 scope: <= 2"
-  (`LockstepSession.h:227-228`); the class doc says it "Drives one end of a 2-peer (<=2
-  clients, ONE remote) ... session" (`:300-303`). Raising the cap from 2 to 4 is future work
-  under OQ-1, not a present capability.
+  (`LockstepSession.h:276-277`); the class doc says it "Drives one end of a 2-peer (<=2
+  clients, ONE remote) ... session" and states the oracle/replay/small-co-op scope
+  (`:349-352`). Raising the cap from 2 to 4 is future work under OQ-1, not a present capability.
 - **Any count above the documented cap routes to server-authoritative delta replication**, not
   to a wider lockstep session.
 
