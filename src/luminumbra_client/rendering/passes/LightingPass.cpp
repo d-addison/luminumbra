@@ -164,6 +164,13 @@ void LightingPass::execute(const RenderContext& ctx) {
     // equal the GLSL initializers, so untouched contexts stay pixel-identical.
     m_lighting_shader->setVec3("u_aetherGlowColor", ctx.aether_glow_color);
     m_lighting_shader->setFloat("u_aetherGlowIntensity", ctx.aether_glow_intensity);
+    // AETHER-11 (spec 024 FR-024-6): emissive modulation — 0.0 default is a
+    // multiply by exactly 1.0, so untouched contexts stay pixel-identical.
+    m_lighting_shader->setFloat("u_aetherMaterialModulation", ctx.aether_material_modulation);
+    // AETHER-08 (FR-024-8): polarity tint gate — 0.0 keeps the glow color
+    // untouched (the single-channel/no-upload default).
+    m_lighting_shader->setFloat("u_aetherPolarityActive",
+                                ctx.aether_polarity_active ? 1.0f : 0.0f);
     // ATMO-14 (S1.3): the render-only snow cover (0 default = byte-identical).
     m_lighting_shader->setFloat("u_snowCover", ctx.snow_cover);
     glActiveTexture(GL_TEXTURE0);

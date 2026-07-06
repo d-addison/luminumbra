@@ -963,11 +963,18 @@ std::array<float, 3> DecodeOctahedral(float ex, float ey) {
 // The sun is placed overhead-ish toward the +Z plate (NdotL ~ 0.85) so the
 // representative diffuse term dominates without a specular singularity.
 struct LitNoonResult { float r = 0, g = 0, b = 0; };
+// AETHER-11 (spec 024 FR-024-6) additions, both defaulted so every existing
+// caller renders byte-identically: emissive_intensity_norm > 0 authors that
+// normalized emissive value into the LUT's row 2 for the plate's material
+// (id 1), lighting the crystal-glow path; aether_material_modulation drives
+// u_aetherMaterialModulation (0.0 == the GLSL default == multiply by 1.0).
 LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
                                        const std::array<float, 3>& albedo_linear,
                                        float roughness,
                                        const fs::path& dump_ppm = {},
-                                       float aether_field_value = -1.0f) {
+                                       float aether_field_value = -1.0f,
+                                       float emissive_intensity_norm = 0.0f,
+                                       float aether_material_modulation = 0.0f) {
     // 64x64 so the optional swatch dump is a reviewable PNG; the mean is the
     // same regardless of resolution (flat fragment).
     constexpr int kRes = 64;
@@ -1074,10 +1081,18 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
     glUniform3f(glGetUniformLocation(lighting_program, "u_sun.color"), 1.0f, 0.95f, 0.85f);
     glUniform1i(glGetUniformLocation(lighting_program, "u_pointLightCount"), 0);
     glUniform1f(glGetUniformLocation(lighting_program, "u_emissiveLutScale"), kEmissiveLutScale);
+    // AETHER-11: 0.0 mirrors the GLSL default (multiply by exactly 1.0).
+    glUniform1f(glGetUniformLocation(lighting_program, "u_aetherMaterialModulation"),
+                aether_material_modulation);
 
     // Empty material LUT (material 1 has no emission row -> glow path skipped).
     // I8: 4 rows to match the production LUT height (all zeros -> emissive 0).
     std::vector<float> lut(static_cast<size_t>(256) * 4 * 4, 0.0f);
+    if (emissive_intensity_norm > 0.0f) {
+        // AETHER-11: author the plate's emissive (row 2, material id 1, R) so
+        // the crystal-glow path lights up for the modulation assertions.
+        lut[(static_cast<size_t>(2) * 256 + 1) * 4 + 0] = emissive_intensity_norm;
+    }
     GLuint lut_tex = 0;
     glGenTextures(1, &lut_tex);
     glActiveTexture(GL_TEXTURE8);
@@ -2296,6 +2311,61 @@ TEST(RenderSmokeTest, AetherEmissiveTapBrightensLitOutput) {
     EXPECT_NEAR(zero.r, base.r, 1.0e-4f);
     EXPECT_NEAR(zero.g, base.g, 1.0e-4f);
     EXPECT_NEAR(zero.b, base.b, 1.0e-4f);
+
+    glDeleteProgram(program);
+}
+
+// AETHER-11 (spec 024 FR-024-6): u_aetherMaterialModulation.
+//
+// The local aether scales emissive MATERIALS by (1 + aether * modulation).
+// Contract halves: (1) modulation 0.0 (the default) and modulation-with-no-
+// field are BOTH byte-identical to the untouched baseline (a multiply by
+// exactly 1.0 — the RenderParityFrame guarantee in miniature); (2) with an
+// active field on an emissive plate, on-screen luminance is MONOTONIC
+// non-decreasing in the modulation value.
+TEST(RenderSmokeTest, AetherMaterialModulationMonotonic) {
+    HiddenGlContext context;
+    if (!context.ready()) {
+        GTEST_SKIP() << context.error();
+    }
+    const ShaderProgramSpec spec{"lighting_pass", "lighting_pass.vert", "lighting_pass.frag"};
+    GLuint program = LinkProgram(spec);
+    ASSERT_NE(program, 0u);
+
+    const std::array<float, 3> albedo{0.2f, 0.2f, 0.2f};
+    constexpr float kField = 0.6f;      // active uniform aether field value
+    constexpr float kEmissive = 0.25f;  // normalized LUT row-2 value (-> intensity 2.0)
+
+    // Pixel-identical half: no field -> aetherLocal 0 -> modulation is inert.
+    const LitNoonResult plain = LitChainNoonOnscreenSrgb(program, albedo, 1.0f);
+    const LitNoonResult mod_no_field =
+        LitChainNoonOnscreenSrgb(program, albedo, 1.0f, {}, -1.0f, 0.0f, 3.0f);
+    EXPECT_NEAR(mod_no_field.r, plain.r, 1.0e-4f);
+    EXPECT_NEAR(mod_no_field.g, plain.g, 1.0e-4f);
+    EXPECT_NEAR(mod_no_field.b, plain.b, 1.0e-4f);
+
+    // Monotonic half: emissive plate + active field, rising modulation.
+    const LitNoonResult m0 =
+        LitChainNoonOnscreenSrgb(program, albedo, 1.0f, {}, kField, kEmissive, 0.0f);
+    const LitNoonResult m1 =
+        LitChainNoonOnscreenSrgb(program, albedo, 1.0f, {}, kField, kEmissive, 0.75f);
+    const LitNoonResult m2 =
+        LitChainNoonOnscreenSrgb(program, albedo, 1.0f, {}, kField, kEmissive, 2.0f);
+    const float l0 = m0.r + m0.g + m0.b;
+    const float l1 = m1.r + m1.g + m1.b;
+    const float l2 = m2.r + m2.g + m2.b;
+    EXPECT_GT(l1, l0 + 0.005f) << "modulation 0.75 did not brighten the emissive plate";
+    EXPECT_GT(l2, l1 + 0.005f) << "modulation 2.0 not monotonic past 0.75";
+
+    // Modulation with an active field but a NON-emissive plate is inert too
+    // (crystalGlow == 0 -> the multiply has nothing to scale).
+    const LitNoonResult glow_only_a =
+        LitChainNoonOnscreenSrgb(program, albedo, 1.0f, {}, kField, 0.0f, 0.0f);
+    const LitNoonResult glow_only_b =
+        LitChainNoonOnscreenSrgb(program, albedo, 1.0f, {}, kField, 0.0f, 3.0f);
+    EXPECT_NEAR(glow_only_b.r, glow_only_a.r, 1.0e-4f);
+    EXPECT_NEAR(glow_only_b.g, glow_only_a.g, 1.0e-4f);
+    EXPECT_NEAR(glow_only_b.b, glow_only_a.b, 1.0e-4f);
 
     glDeleteProgram(program);
 }

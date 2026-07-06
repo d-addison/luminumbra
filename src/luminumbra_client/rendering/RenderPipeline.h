@@ -419,11 +419,26 @@ public:
     // the field inactive -> the lighting pass adds no glow (pixel-identical).
     void update_aether_field(const std::vector<float>& cells, float world_origin_x,
                              float world_origin_z, int extent, float cell_size_m);
+    // AETHER-08 (spec 024 FR-024-8): the RG32F dual tap — R = energy, G =
+    // Lumin/Umbra polarity [-1, 1]. Polarity tints the glow ONLY while a dual
+    // upload is live; single-channel uploads (and no uploads) keep the glow
+    // color untouched (pixel-identical).
+    void update_aether_field_dual(const std::vector<float>& energy_cells,
+                                  const std::vector<float>& polarity_cells,
+                                  float world_origin_x, float world_origin_z,
+                                  int extent, float cell_size_m);
     // AETHER-10 (Wave G R1.7): grade the aether glow. Defaults equal the GLSL
     // initializers (pixel-identical untouched); render-only, never world_hash.
     void set_aether_glow(const glm::vec3& color, float intensity) {
         m_aetherGlowColor = color;
         m_aetherGlowIntensity = intensity;
+    }
+    // AETHER-11 (spec 024 FR-024-6): emissive-material modulation by the local
+    // aether field — emissive output scales by (1 + aether * modulation).
+    // Default 0.0 == multiply by exactly 1.0 == pixel-identical even with an
+    // active field tap; render-only, never world_hash.
+    void set_aether_material_modulation(float modulation) {
+        m_aetherMaterialModulation = std::max(0.0f, modulation);
     }
     // ATMO-14 (Wave G S1.3): render-only snow ground cover [0,1] (0 = untouched).
     void set_snow_cover(float cover01) { m_snowCover = std::clamp(cover01, 0.0f, 1.0f); }
@@ -1328,6 +1343,9 @@ private:
     // AETHER-10: the glow grade (defaults == the lighting_pass.frag initializers).
     glm::vec3 m_aetherGlowColor{0.30f, 0.55f, 0.95f};
     float m_aetherGlowIntensity = 2.0f;
+    float m_aetherMaterialModulation = 0.0f;  // AETHER-11: 0 = pixel-identical
+    bool m_aetherPolarityActive = false;      // AETHER-08: dual-tap live?
+    bool m_aetherFieldTextureIsDual = false;  // AETHER-08: current alloc format
     // ATMO-14: render-only snow ground cover (0 = byte-identical default).
     float m_snowCover = 0.0f;
     size_t m_terrain_texture_fallback_layers = 0;

@@ -32,6 +32,19 @@ uniform float u_aetherFieldInvWorldSpan; // 1 / (extent * cell_size_m)
 uniform float u_aetherActive = 0.0;      // 0 = no field uploaded (no glow)
 uniform vec3 u_aetherGlowColor = vec3(0.30, 0.55, 0.95);
 uniform float u_aetherGlowIntensity = 2.0;
+// AETHER-11 (spec 024 FR-024-6): emissive-MATERIAL modulation by the local
+// aether — crystalGlow scales by (1 + aether * modulation). Default 0.0 is a
+// multiply by exactly 1.0, so the untouched path is pixel-identical even with
+// an active field tap; luminance is monotonic non-decreasing in the uniform.
+uniform float u_aetherMaterialModulation = 0.0;
+// AETHER-08 (spec 024 FR-024-8): Lumin/Umbra polarity tint. When the RG32F
+// dual tap is live (u_aetherPolarityActive = 1), the field's G channel in
+// [-1, 1] mixes the glow color toward the matching pole by |polarity|.
+// Default 0.0 (single-channel/no upload) leaves the glow color untouched —
+// pixel-identical by construction.
+uniform float u_aetherPolarityActive = 0.0;
+uniform vec3 u_aetherPolarityColorPos = vec3(0.95, 0.85, 0.55); // Lumin pole
+uniform vec3 u_aetherPolarityColorNeg = vec3(0.45, 0.30, 0.85); // Umbra pole
 // ATMO-14 (Wave G S1.3): render-only snow ground cover [0,1]. 0.0 (the default)
 // is byte-identical; >0 blends UP-FACING surfaces toward snow white + full rough.
 uniform float u_snowCover = 0.0;
@@ -626,13 +639,30 @@ void main() {
     // an additive glow. uv outside [0,1] (beyond the streamed grid) contributes
     // nothing. Fully gated by u_aetherActive so the default path is unchanged.
     vec3 aetherGlow = vec3(0.0);
+    float aetherLocal = 0.0; // AETHER-11: hoisted for the material modulation below
     if (u_aetherActive > 0.5) {
         vec2 auv = (FragPos.xz - u_aetherFieldWorldOrigin) * u_aetherFieldInvWorldSpan;
         if (auv.x >= 0.0 && auv.x <= 1.0 && auv.y >= 0.0 && auv.y <= 1.0) {
             float aether = max(0.0, texture(u_aetherField, auv).r);
-            aetherGlow = aether * u_aetherGlowColor * u_aetherGlowIntensity;
+            aetherLocal = aether;
+            // AETHER-08: polarity tint (dual RG32F tap only). Inactive -> the
+            // glow color passes through untouched (pixel-identical).
+            vec3 glowColor = u_aetherGlowColor;
+            if (u_aetherPolarityActive > 0.5) {
+                float pol = clamp(texture(u_aetherField, auv).g, -1.0, 1.0);
+                vec3 pole = pol >= 0.0 ? u_aetherPolarityColorPos : u_aetherPolarityColorNeg;
+                glowColor = mix(glowColor, pole, abs(pol));
+            }
+            aetherGlow = aether * glowColor * u_aetherGlowIntensity;
         }
     }
+
+    // AETHER-11 (spec 024 FR-024-6): the local aether modulates emissive
+    // MATERIALS (the crystal glow) multiplicatively. Modulation 0.0 (default)
+    // multiplies by exactly 1.0 -> pixel-identical; increasing it can only
+    // raise the emissive term (aetherLocal >= 0), so the probe luminance is
+    // monotonic non-decreasing (the RenderSmokeTest contract).
+    crystalGlow *= (1.0 + aetherLocal * u_aetherMaterialModulation);
 
     // --- Final Color Composition ---
     // I7.1-PBR: split the flat sky ambient into energy-conserving diffuse +

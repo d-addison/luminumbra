@@ -1046,11 +1046,13 @@ RenderContext RenderPipeline::make_lighting_context(const Camera& camera) {
     // Group G — aether field.
     ctx.aether_field        = m_render_registry.adopt_texture("aether_field", m_aetherFieldTexture);
     ctx.aether_active       = m_aetherFieldActive;
+    ctx.aether_polarity_active = m_aetherPolarityActive;  // AETHER-08
     ctx.aether_extent       = m_aetherFieldExtent;
     ctx.aether_cell_size    = m_aetherFieldCellSize;
     ctx.aether_world_origin = m_aetherFieldWorldOrigin;
     ctx.aether_glow_color     = m_aetherGlowColor;     // AETHER-10: the glow grade
     ctx.aether_glow_intensity = m_aetherGlowIntensity; // (defaults == GLSL consts)
+    ctx.aether_material_modulation = m_aetherMaterialModulation; // AETHER-11 (0 = identical)
     ctx.snow_cover            = m_snowCover;           // ATMO-14: snow ground cover
 
     // Group H — light/atmosphere scalars & vectors.
@@ -3447,7 +3449,8 @@ void RenderPipeline::update_aether_field(const std::vector<float>& cells, float 
         m_aetherFieldActive = false;
         return;
     }
-    if (m_aetherFieldTexture == 0 || m_aetherFieldExtent != extent) {
+    if (m_aetherFieldTexture == 0 || m_aetherFieldExtent != extent ||
+        m_aetherFieldTextureIsDual) {  // AETHER-08: fall back from an RG32F alloc
         if (m_aetherFieldTexture != 0) {
             glDeleteTextures(1, &m_aetherFieldTexture);
             m_aetherFieldTexture = 0;
@@ -3460,6 +3463,7 @@ void RenderPipeline::update_aether_field(const std::vector<float>& cells, float 
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         m_aetherFieldExtent = extent;
+        m_aetherFieldTextureIsDual = false;
     }
     glBindTexture(GL_TEXTURE_2D, m_aetherFieldTexture);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, extent, extent, GL_RED, GL_FLOAT, cells.data());
@@ -3467,6 +3471,56 @@ void RenderPipeline::update_aether_field(const std::vector<float>& cells, float 
     m_aetherFieldWorldOrigin = glm::vec2(world_origin_x, world_origin_z);
     m_aetherFieldCellSize = cell_size_m;
     m_aetherFieldActive = true;
+    m_aetherPolarityActive = false;  // single-channel upload: no polarity tint
+}
+
+void RenderPipeline::update_aether_field_dual(const std::vector<float>& energy_cells,
+                                              const std::vector<float>& polarity_cells,
+                                              float world_origin_x, float world_origin_z,
+                                              int extent, float cell_size_m) {
+    // AETHER-08 (spec 024 FR-024-8): the RG32F dual tap — R = energy (same
+    // semantics as the single-channel tap), G = Lumin/Umbra polarity in
+    // [-1, 1], consumed by the lighting pass ONLY when the polarity flag is
+    // active (default OFF -> the glow color is untouched -> pixel-identical).
+    // One-way sim->render bridge, exactly like the single-channel path.
+    const std::size_t n =
+        static_cast<std::size_t>(extent) * static_cast<std::size_t>(extent);
+    if (extent <= 0 || energy_cells.size() != n || polarity_cells.size() != n) {
+        m_aetherFieldActive = false;
+        m_aetherPolarityActive = false;
+        return;
+    }
+    // The RG32F allocation replaces any single-channel texture (and vice
+    // versa: the R32F path above reallocates on extent change only, so switch
+    // formats explicitly here).
+    if (m_aetherFieldTexture == 0 || m_aetherFieldExtent != extent ||
+        !m_aetherFieldTextureIsDual) {
+        if (m_aetherFieldTexture != 0) {
+            glDeleteTextures(1, &m_aetherFieldTexture);
+            m_aetherFieldTexture = 0;
+        }
+        glGenTextures(1, &m_aetherFieldTexture);
+        glBindTexture(GL_TEXTURE_2D, m_aetherFieldTexture);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RG32F, extent, extent, 0, GL_RG, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        m_aetherFieldExtent = extent;
+        m_aetherFieldTextureIsDual = true;
+    }
+    std::vector<float> interleaved(n * 2);
+    for (std::size_t i = 0; i < n; ++i) {
+        interleaved[i * 2 + 0] = energy_cells[i];
+        interleaved[i * 2 + 1] = polarity_cells[i];
+    }
+    glBindTexture(GL_TEXTURE_2D, m_aetherFieldTexture);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, extent, extent, GL_RG, GL_FLOAT, interleaved.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+    m_aetherFieldWorldOrigin = glm::vec2(world_origin_x, world_origin_z);
+    m_aetherFieldCellSize = cell_size_m;
+    m_aetherFieldActive = true;
+    m_aetherPolarityActive = true;
 }
 
 void RenderPipeline::on_resize(u32 new_width, u32 new_height) {

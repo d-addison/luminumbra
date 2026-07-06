@@ -101,6 +101,10 @@ struct RenderContext {
     // Group G — aether field (Lighting).
     TextureHandle aether_field{};            // <- m_aetherFieldTexture
     bool aether_active = false;              // <- m_aetherFieldActive
+    // AETHER-08 (spec 024 FR-024-8): a dual RG32F upload is live — the glow
+    // color mixes toward the polarity poles. false = untouched glow color
+    // (pixel-identical), including for every single-channel upload.
+    bool aether_polarity_active = false;     // <- m_aetherPolarityActive
     int aether_extent = 0;                   // <- m_aetherFieldExtent
     float aether_cell_size = 0.0f;           // <- m_aetherFieldCellSize
     glm::vec2 aether_world_origin = glm::vec2(0.0f); // <- m_aetherFieldWorldOrigin
@@ -109,6 +113,9 @@ struct RenderContext {
     // pixel-identical; a game system (or the F10 panel) can now grade the glow.
     glm::vec3 aether_glow_color{0.30f, 0.55f, 0.95f};
     float aether_glow_intensity = 2.0f;
+    // AETHER-11 (spec 024 FR-024-6): emissive materials scale by
+    // (1 + aether * modulation). 0.0 = multiply by exactly 1.0 = pixel-identical.
+    float aether_material_modulation = 0.0f;
     // ATMO-14 (Wave G S1.3): render-only snow ground cover [0,1]; 0 = untouched.
     float snow_cover = 0.0f;
 
