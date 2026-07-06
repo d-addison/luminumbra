@@ -56,4 +56,44 @@ TEST(CreatureBrain, Deterministic) {
     EXPECT_EQ(DecideCreatureAction(s), DecideCreatureAction(s));
 }
 
+// ---------------------------------------------------------------------------
+// INSTINCT-05 (Wave H I2.4): Drink/Forage join the IAUS arbiter.
+// ---------------------------------------------------------------------------
+
+TEST(CreatureBrain, DrinkWinsWhenParchedSafeNearWater) {
+    CreatureSenses s = prey(/*hunger*/ 0.2f, /*threat*/ 0.05f, /*food*/ 0.1f, /*stamina*/ 0.9f);
+    s.thirst = 0.95f;
+    s.water_proximity = 0.9f;
+    EXPECT_EQ(DecideCreatureAction(s), CreatureAction::Drink);
+}
+
+// THE ADVERSARIAL FIXTURE the charter names: a parched creature at the water's
+// edge STILL flees a near predator — the whole point of moving thirst from the
+// out-of-band additive blend (which pulled fleeing creatures toward water) into
+// the arbiter, where Flee's weight + steep logistic dominate.
+TEST(CreatureBrain, FleeStillDominatesDrink) {
+    CreatureSenses s = prey(/*hunger*/ 0.2f, /*threat*/ 0.95f, /*food*/ 0.1f, /*stamina*/ 0.9f);
+    s.thirst = 1.0f;
+    s.water_proximity = 1.0f;
+    EXPECT_EQ(DecideCreatureAction(s), CreatureAction::Flee);
+}
+
+TEST(CreatureBrain, PredatorDrinksToo) {
+    CreatureSenses s;
+    s.is_predator = true;
+    s.hunger = 0.1f;          // not worth hunting
+    s.food_proximity = 0.0f;  // no prey anyway
+    s.stamina = 0.9f;
+    s.thirst = 0.9f;
+    s.water_proximity = 0.85f;
+    EXPECT_EQ(DecideCreatureAction(s), CreatureAction::Drink);
+}
+
+// The zero-defaults contract: senses WITHOUT thirst/water/availability decide
+// exactly as the pre-INSTINCT-05 brain (every earlier fixture above re-proves
+// this; this one pins the pathological all-zero case to Wander, not Drink).
+TEST(CreatureBrain, DefaultSensesNeverPickTheNewActions) {
+    EXPECT_EQ(DecideCreatureAction(prey(0.15f, 0.05f, 0.1f, 0.9f)), CreatureAction::Wander);
+}
+
 }  // namespace

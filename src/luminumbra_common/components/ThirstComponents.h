@@ -32,6 +32,11 @@ struct ThirstComponent {
     float wish_z = 0.0f;
     // 1 while the creature is within a water hole's radius and actively drinking; else 0.
     std::uint8_t drinking = 0;
+    // INSTINCT-05 (Wave H I2.4): nearness of the nearest known water hole in [0,1]
+    // (1 = at it, 0 = none within the sensing horizon). Written by RunThirstOnTick;
+    // read by the brain's Drink utility so thirst competes INSIDE the arbiter
+    // instead of the old out-of-band additive wish blend.
+    float water_proximity = 0.0f;
 };
 
 // A WATER SOURCE the thirst system steers creatures toward. Any entity carrying this plus a

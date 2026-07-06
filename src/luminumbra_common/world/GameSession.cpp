@@ -345,10 +345,18 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                     auto sv = m_registry.view<Luminumbra::Components::CreatureComponent>();
                     for (auto e : sv) {
                         auto& cr = sv.get<Luminumbra::Components::CreatureComponent>(e);
-                        if (const auto* th =
-                                m_registry.try_get<Luminumbra::Components::ThirstComponent>(e)) {
-                            cr.wish_x += th->wish_x;
-                            cr.wish_z += th->wish_z;
+                        // INSTINCT-05: the thirst pull applies ONLY when the arbiter
+                        // actually chose Drink — the old unconditional blend let a
+                        // FLEEING creature be simultaneously steered toward water
+                        // (the charter's exact defect). Thirst now competes inside
+                        // DecideCreatureAction; this blend is its motor output.
+                        if (cr.last_action ==
+                            static_cast<int>(luminumbra::ai::CreatureAction::Drink)) {
+                            if (const auto* th =
+                                    m_registry.try_get<Luminumbra::Components::ThirstComponent>(e)) {
+                                cr.wish_x += th->wish_x;
+                                cr.wish_z += th->wish_z;
+                            }
                         }
                         if (const auto* scv =
                                 m_registry.try_get<Luminumbra::Components::ScavengerComponent>(e)) {

@@ -17,6 +17,7 @@
 
 #include "../components/AlarmComponents.h"
 #include "../components/CircadianComponents.h"
+#include "../components/ThirstComponents.h"  // INSTINCT-05: thirst joins the arbiter
 #include "../components/CoreComponents.h"
 #include "../components/CreatureComponents.h"
 #include "../core/DeterministicMath.h"
@@ -272,6 +273,15 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
         // Circadian off-phase drives Sleep. Absent component -> activity stays 1.0 (always
         // active) -> Sleep utility 0 -> byte-identical to a world with no circadian creatures.
         if (const auto* cc = reg.try_get<Comp::CircadianComponent>(e)) s.circadian_activity = cc->activity;
+        // INSTINCT-05: thirst joins the arbiter. Absent ThirstComponent -> both stay 0
+        // -> Drink utility 0 -> byte-identical. The values are LAST tick's (the thirst
+        // system runs after the brain in the session order) — the same fixed 1-tick
+        // phase convention scent uses for wind.
+        const auto* th = reg.try_get<Comp::ThirstComponent>(e);
+        if (th != nullptr) {
+            s.thirst = th->thirst;
+            s.water_proximity = th->water_proximity;
+        }
         const float nearNorm = found ? (1.0f - utility_clamp01(bestDist / 30.0f)) : 0.0f;
         if (cr.is_predator) {
             s.food_proximity = nearNorm;
@@ -318,6 +328,17 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
                 // fast. Stamina recovers too. The per-tick drain below still applies (net recover).
                 cr.stamina = utility_clamp01(cr.stamina + tuning.stamina_rest_recover * dt);
                 cr.energy  = utility_clamp01(cr.energy + tuning.energy_sleep_recover * dt);
+                break;
+            case CreatureAction::Drink:
+                // INSTINCT-05: the arbiter chose water — head along the thirst system's
+                // cached direction toward the nearest hole (drinking itself happens in
+                // RunThirstOnTick once inside the radius). No component -> stay put.
+                if (th != nullptr) { dirx = th->wish_x; dirz = th->wish_z; }
+                break;
+            case CreatureAction::Forage:
+                // INSTINCT-05 seam: food-seeking movement arrives with availability
+                // sensing; until then Forage never wins (availability defaults 0) and
+                // this arm is unreachable — a deterministic stay-put if forced.
                 break;
         }
 

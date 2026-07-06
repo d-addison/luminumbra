@@ -153,10 +153,11 @@ inline ThirstStats RunThirstOnTick(entt::registry& reg, float dt, const ThirstTu
             }
         }
 
-        // Default: not steering, not drinking.
+        // Default: not steering, not drinking, no water known.
         th.wish_x = 0.0f;
         th.wish_z = 0.0f;
         th.drinking = 0;
+        th.water_proximity = 0.0f;
 
         if (!have_nearest) {
             // No water in the world: the creature still gets thirsty, but has nowhere to go.
@@ -164,6 +165,9 @@ inline ThirstStats RunThirstOnTick(entt::registry& reg, float dt, const ThirstTu
         }
 
         const float dist = dm::Sqrt(best_d2);
+        // INSTINCT-05: nearness for the arbiter's Drink utility — 1 at the hole,
+        // fading to 0 at the 40 m sensing horizon.
+        th.water_proximity = ThirstClamp01(1.0f - dist / 40.0f);
 
         if (dist <= best_radius) {
             // In range of the nearest hole: drink. Thirst falls (clamped >= 0). No wish — it

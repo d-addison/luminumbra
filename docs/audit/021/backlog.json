@@ -1593,9 +1593,10 @@
       "dependencies": [
         "INSTINCT-04"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "creature_brain_test (new action-selection fixtures for Drink/Forage) + PopulatedWorldReplay re-pin as one deliberate hash transition",
-      "rank": 85
+      "rank": 85,
+      "note": "DONE 2026-07-05 (Wave H I2.4). Drink=6/Forage=7 appended; thirst/water_proximity/food_availability in CreatureSenses (zero-defaults = byte-identical); the unconditional GameSession thirst blend now gates on last_action==Drink. Fixtures incl. the adversarial FleeStillDominatesDrink. Canonical AND populated hashes both unchanged (no sim roster thirsts yet - the deliberate transition arrives with a thirsting roster)."
     },
     {
       "id": "ATMO-11",

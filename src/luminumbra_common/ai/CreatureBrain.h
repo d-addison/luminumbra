@@ -30,6 +30,12 @@ struct CreatureSenses {
     // it never sleeps and its decisions are byte-identical to before this field existed.
     float circadian_activity = 1.0f;
     bool is_predator = false;      // role
+    // INSTINCT-05 (Wave H I2.4): the needs the arbiter was missing. All default to
+    // values that score their actions at ZERO, so a creature without the matching
+    // components decides byte-identically to the pre-INSTINCT-05 brain.
+    float thirst = 0.0f;           // 0 quenched .. 1 parched (ThirstComponent)
+    float water_proximity = 0.0f;  // 0 none known .. 1 at the water hole
+    float food_availability = 0.0f; // 0 none known .. 1 abundant (the Forage seam)
 };
 
 // Canonical action ids (also the IAUS tie-break order).
@@ -40,6 +46,9 @@ enum class CreatureAction : int {
     Hunt = 3,    // predator: chase prey
     Rest = 4,    // recover stamina
     Sleep = 5,   // Spec 011: deep rest at the off-phase of the day (circadian-gated); recovers energy
+    // INSTINCT-05 (append-only — the enum is the tie-break order; existing ids never move):
+    Drink = 6,   // walk to / drink at the nearest water hole (thirst, IN the arbiter now)
+    Forage = 7,  // seek food that is not adjacent (the food_availability seam)
 };
 
 namespace detail {
@@ -74,6 +83,10 @@ struct CreatureBrainParams {
     // Logistic(m = steepness, c = center) over threat_proximity.
     float flee_logistic_m = 2.0f;
     float flee_logistic_c = 0.45f;
+    // INSTINCT-05: Drink sits UNDER Flee (1.1) so a threatened creature never
+    // detours to water (the out-of-band blend's exact defect); Forage under Graze.
+    float drink_weight  = 1.0f;
+    float forage_weight = 0.8f;
 };
 
 // Build the IAUS action set for this creature, select the best, and return the action.
@@ -102,6 +115,14 @@ struct CreatureBrainParams {
                         axis(s.energy, CurveType::InvLinear, 1.0f, 0.0f, 1.0f),              // tired -> high
                         axis(s.threat_proximity, CurveType::InvLinear, 1.0f, 0.0f, 1.0f)}}); // safe
 
+    // INSTINCT-05: Drink — parched AND water known AND safe (both roles thirst).
+    // Every axis defaults to 0 in CreatureSenses, so a creature with no
+    // ThirstComponent scores Drink 0 and decides byte-identically to before.
+    actions.push_back({static_cast<int>(CreatureAction::Drink), p.drink_weight,
+                       {axis(s.thirst, CurveType::Linear),
+                        axis(s.water_proximity, CurveType::Linear),
+                        axis(s.threat_proximity, CurveType::InvLinear, 1.0f, 0.0f, 1.0f)}});
+
     if (s.is_predator) {
         // Hunt — hungry AND prey nearby.
         actions.push_back({static_cast<int>(CreatureAction::Hunt), p.hunt_weight,
@@ -118,6 +139,14 @@ struct CreatureBrainParams {
                            {axis(s.hunger, CurveType::Linear),
                             axis(s.threat_proximity, CurveType::InvLinear, 1.0f, 0.0f, 1.0f),
                             axis(s.food_proximity, CurveType::Linear)}});
+        // INSTINCT-05: Forage — hungry AND food KNOWN-but-not-adjacent AND safe.
+        // food_availability defaults 0 (nothing wires it yet), so Forage scores 0
+        // and the action set is byte-identical until availability sensing lands —
+        // this is the arbiter SEAM the charter asks for.
+        actions.push_back({static_cast<int>(CreatureAction::Forage), p.forage_weight,
+                           {axis(s.hunger, CurveType::Linear),
+                            axis(s.food_availability, CurveType::Linear),
+                            axis(s.threat_proximity, CurveType::InvLinear, 1.0f, 0.0f, 1.0f)}});
     }
 
     const int id = SelectAction(actions);
