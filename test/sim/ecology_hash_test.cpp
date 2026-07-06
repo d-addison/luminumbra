@@ -32,6 +32,8 @@
 #include "components/CreatureComponents.h"
 #include "components/AlarmComponents.h"
 #include "components/PackHunterComponents.h"
+#include "components/ThirstComponents.h"     // INSTINCT-10 v2 coverage
+#include "components/CircadianComponents.h"  // INSTINCT-10 v2 coverage
 #include "persistence/WorldPersistenceRoundtrip.h"
 
 namespace {
@@ -71,6 +73,47 @@ TEST(EcologyHash, DeterministicAcrossIdenticalRosters) {
     const std::string hb = luminumbra::ai::ComputeEcologySubHash(b);
     EXPECT_FALSE(ha.empty());
     EXPECT_EQ(ha, hb);
+}
+
+// INSTINCT-10 (Wave H I3): v2 FIELD COVERAGE — every newly-folded field moves the
+// hash when mutated (divergence in it is no longer invisible to the oracle), and
+// the version literal itself distinguishes v2 from any v1-projected roster.
+TEST(EcologyHash, V2CoversEnergySpeciesSensoryThirstCircadian) {
+    const auto base_hash = [] {
+        entt::registry r;
+        PopulateRoster(r);
+        return luminumbra::ai::ComputeEcologySubHash(r);
+    }();
+    // Helper: rebuild the SAME roster, apply one mutation to the FIRST creature
+    // (id-ordered), and expect the hash to move.
+    auto mutated = [&](auto&& mutate) {
+        entt::registry r;
+        PopulateRoster(r);
+        std::vector<entt::entity> es;
+        for (auto e : r.view<Comp::CreatureComponent>()) es.push_back(e);
+        std::sort(es.begin(), es.end(), [](entt::entity a, entt::entity b) {
+            return entt::to_integral(a) < entt::to_integral(b);
+        });
+        mutate(r, es.front());
+        return luminumbra::ai::ComputeEcologySubHash(r);
+    };
+    EXPECT_NE(base_hash, mutated([](entt::registry& r, entt::entity e) {
+        r.get<Comp::CreatureComponent>(e).energy = 0.123f;
+    })) << "energy must move the v2 hash";
+    EXPECT_NE(base_hash, mutated([](entt::registry& r, entt::entity e) {
+        r.get<Comp::CreatureComponent>(e).species_id = 777;
+    })) << "species_id must move the v2 hash";
+    EXPECT_NE(base_hash, mutated([](entt::registry& r, entt::entity e) {
+        auto* gn = r.try_get<Comp::CreatureGenomeComponent>(e);
+        if (gn == nullptr) gn = &r.emplace<Comp::CreatureGenomeComponent>(e);
+        gn->vision_range = 55.5f;
+    })) << "sensory genes must move the v2 hash";
+    EXPECT_NE(base_hash, mutated([](entt::registry& r, entt::entity e) {
+        r.emplace<Comp::ThirstComponent>(e).thirst = 0.42f;
+    })) << "thirst must move the v2 hash";
+    EXPECT_NE(base_hash, mutated([](entt::registry& r, entt::entity e) {
+        r.emplace<Comp::CircadianComponent>(e).activity = 0.17f;
+    })) << "circadian activity must move the v2 hash";
 }
 
 // T009 / additivity: an empty roster hashes to the EMPTY string (neutral value).

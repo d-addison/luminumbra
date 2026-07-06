@@ -137,6 +137,37 @@ TEST(CreatureReproduction, OffspringGenomeBlendsParents) {
     EXPECT_LT(childSpeed, 6.0f + 1.0f);  // blended between parents (+ small mutation)
 }
 
+// INSTINCT-11 (Wave H I3): the WORLD SEED feeds the per-birth RNG. Same-seed
+// worlds reproduce byte-identically; DIFFERENT seeds diverge (offspring genomes
+// were previously identical across worlds with the same entity ids + ticks,
+// because GameSession passed world_seed 0).
+TEST(CreatureReproduction, WorldSeedDrivesOffspringGenomes) {
+    auto run = [](std::uint64_t world_seed) {
+        entt::registry r;
+        auto f = spawnMate(r, 0.0f, 0.0f, true);
+        auto m = spawnMate(r, 1.0f, 0.0f, false);
+        r.get<Comp::CreatureGenomeComponent>(f).move_speed = 2.0f;
+        r.get<Comp::CreatureGenomeComponent>(m).move_speed = 6.0f;
+        for (std::uint32_t t = 0; t < kCourtshipTicks + 2; ++t)
+            RunMatingResolveOnTick(r, t, world_seed);
+        std::vector<float> out;
+        for (auto e : r.view<Comp::CreatureGenomeComponent>()) {
+            const auto& gn = r.get<Comp::CreatureGenomeComponent>(e);
+            if (gn.generation == 1u) {
+                out.insert(out.end(), {gn.move_speed, gn.vision_range, gn.hearing_range,
+                                       gn.vision_cos_half_fov});
+            }
+        }
+        return out;
+    };
+    const auto seed_a1 = run(424242ull);
+    const auto seed_a2 = run(424242ull);
+    const auto seed_b = run(999999ull);
+    ASSERT_FALSE(seed_a1.empty()) << "no offspring born (vacuous)";
+    EXPECT_EQ(seed_a1, seed_a2) << "same-seed worlds must reproduce identically";
+    EXPECT_NE(seed_a1, seed_b) << "different world seeds must diverge offspring genomes";
+}
+
 // run == replay: identical setup + ticks -> identical population + genomes.
 TEST(CreatureReproduction, Deterministic) {
     auto run = [] {

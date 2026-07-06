@@ -405,8 +405,13 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 // (id-ordered, libm-free, RNG seeded from offset 16 + parent ids + tick).
                 // Per-entity opt-in (genome component): no genome / no creatures -> nothing
                 // created, so the canonical NetworkStateHash baseline stays byte-identical.
+                // INSTINCT-11 (Wave H I3): the REAL world seed feeds the per-birth RNG —
+                // previously 0ull, so offspring genomes were identical across worlds
+                // with the same entity ids and ticks. Same-seed worlds reproduce
+                // identically; different seeds diverge (the reproduction test pins both).
                 const auto repro = luminumbra::ai::RunMatingResolveOnTick(
-                    m_registry, current_tick, /*world_seed*/ 0ull, m_reproductionTuning);
+                    m_registry, current_tick,
+                    static_cast<std::uint64_t>(StringToSeed(m_metadata.seed)), m_reproductionTuning);
                 if (repro.born > 0) {
                     LUMINUMBRA_CORE_INFO("I9-EVO: {} offspring born (sexual) at tick {}", repro.born, current_tick);
                 }

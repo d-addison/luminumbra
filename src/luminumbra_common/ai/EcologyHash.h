@@ -39,6 +39,8 @@
 #include "components/CreatureComponents.h"
 #include "components/AlarmComponents.h"
 #include "components/PackHunterComponents.h"
+#include "components/ThirstComponents.h"     // INSTINCT-10 v2: thirst state
+#include "components/CircadianComponents.h"  // INSTINCT-10 v2: circadian activity
 #include "persistence/WorldPersistenceRoundtrip.h" // Persistence::StableChecksum
 
 namespace luminumbra::ai {
@@ -64,16 +66,25 @@ inline std::string ComputeEcologySubHash(const entt::registry& registry) {
     // float precision (17 sig digits) so no projected bit is lost before the
     // StableChecksum folds it. Per-component presence is encoded so a creature
     // with a genome and one without are unambiguously distinguished.
+    // INSTINCT-10 (Wave H I3): sub-hash v2 — energy, species_id, the heritable
+    // SENSORY genes, thirst, and circadian activity join the projection.
+    // Divergence in any of these was previously invisible to the oracle until it
+    // flipped an action; now it localizes under `ecology` directly. The version
+    // literal flips v1 -> v2 (one deliberate populated-golden transition); the
+    // empty roster still returns "" (additivity-neutral, canonical untouched).
     std::ostringstream bytes;
-    bytes << "ecology:v1:" << es.size() << ':' << std::setprecision(17);
+    bytes << "ecology:v2:" << es.size() << ':' << std::setprecision(17);
     for (auto e : es) {
         const auto& tf = registry.get<Comp::TransformComponent>(e);
         const auto& cr = registry.get<Comp::CreatureComponent>(e);
         bytes << tf.position.x << ',' << tf.position.y << ',' << tf.position.z << ','
               << cr.wish_x << ',' << cr.wish_z << ',' << cr.hunger << ','
-              << cr.stamina << ',' << static_cast<int>(cr.eaten);
+              << cr.stamina << ',' << static_cast<int>(cr.eaten) << ','
+              << cr.energy << ',' << cr.species_id;
         if (const auto* gn = registry.try_get<Comp::CreatureGenomeComponent>(e)) {
-            bytes << ",g:" << gn->move_speed << ',' << gn->generation << ',' << gn->age_ticks;
+            bytes << ",g:" << gn->move_speed << ',' << gn->generation << ',' << gn->age_ticks
+                  << ',' << gn->vision_range << ',' << gn->hearing_range << ','
+                  << gn->vision_cos_half_fov;
         }
         if (const auto* al = registry.try_get<Comp::AlarmComponent>(e)) {
             bytes << ",a:" << al->level;
@@ -81,6 +92,12 @@ inline std::string ComputeEcologySubHash(const entt::registry& registry) {
         if (const auto* pk = registry.try_get<Comp::PackHunterComponent>(e)) {
             bytes << ",p:" << pk->coord_x << ',' << pk->coord_z << ','
                   << static_cast<int>(pk->in_pack);
+        }
+        if (const auto* th = registry.try_get<Comp::ThirstComponent>(e)) {
+            bytes << ",t:" << th->thirst << ',' << static_cast<int>(th->drinking);
+        }
+        if (const auto* cc = registry.try_get<Comp::CircadianComponent>(e)) {
+            bytes << ",c:" << cc->activity << ',' << static_cast<int>(cc->nocturnal);
         }
         bytes << ';';
     }

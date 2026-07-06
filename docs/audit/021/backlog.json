@@ -1765,9 +1765,10 @@
       "effort": "M",
       "risk": "medium",
       "dependencies": [],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "ecology_hash_test (field-coverage assertions) + PopulatedWorldReplay golden re-pinned once + --smoke 6f008a9f637c40b7 unchanged (empty-roster neutrality)",
-      "rank": 96
+      "rank": 96,
+      "note": "DONE 2026-07-05 (Wave H I3, one lockstep commit with INSTINCT-11). EcologyHash v2: energy/species_id/sensory genes/thirst/circadian folded, version literal flipped, empty roster stays neutral. Gate: EcologyHash.V2CoversEnergySpeciesSensoryThirstCircadian. Populated golden -> d281053b8de4b891 (one batched transition)."
     },
     {
       "id": "INSTINCT-11",
@@ -1780,9 +1781,10 @@
       "dependencies": [
         "INSTINCT-10"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "creature_reproduction_test (same-seed reproducibility + cross-seed divergence case) + PopulatedWorldReplay re-pin",
-      "rank": 96
+      "rank": 96,
+      "note": "DONE 2026-07-05 (Wave H I3, with INSTINCT-10). GameSession passes StringToSeed(m_metadata.seed) into RunMatingResolveOnTick (was 0ull). Gate: CreatureReproduction.WorldSeedDrivesOffspringGenomes (same-seed identical, cross-seed divergent)."
     },
     {
       "id": "INSTINCT-15",
