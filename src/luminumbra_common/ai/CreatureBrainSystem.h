@@ -170,6 +170,15 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
             if (hh > 1e-4f) { faceX = snap[selfIdx].hx / hh; faceZ = snap[selfIdx].hz / hh; }
         }
 
+        // INSTINCT-06 (Wave H I2.2): SUSTAINED STARVATION DEGRADES before the
+        // LifespanSystem death at hunger 1.0 — effective speed falls toward 0.5x
+        // and the sensory ranges shrink alike as hunger crosses 0.85 -> 1.0
+        // (needs have consequences, FR-A3). Stateless: a pure function of the
+        // CURRENT hunger, so no new hashed state; a well-fed creature multiplies
+        // by exactly 1.0f (IEEE identity) and stays byte-identical.
+        const float starve01 = utility_clamp01((cr.hunger - 0.85f) / 0.15f);
+        const float starve_degrade = 1.0f - 0.5f * starve01;
+
         // Nearest LIVE opposite-role creature: prey -> nearest predator (threat); predator ->
         // nearest live prey (food). Carcasses are skipped so a predator moves on to live prey.
         float bestDist = 1.0e9f, tx = sx, tz = sz;
@@ -180,9 +189,10 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
             const float dx = o.x - sx, dz = o.z - sz;
             const float d = dm::Sqrt(dx * dx + dz * dz);
             if (sg != nullptr) {
-                // Perceivable? hearing (omnidirectional within range) OR vision (cone within range).
-                bool sensed = (d <= sg->hearing_range);
-                if (!sensed && d <= sg->vision_range) {
+                // Perceivable? hearing (omnidirectional within range) OR vision (cone
+                // within range). INSTINCT-06: both ranges shrink under starvation.
+                bool sensed = (d <= sg->hearing_range * starve_degrade);
+                if (!sensed && d <= sg->vision_range * starve_degrade) {
                     if (faceX == 0.0f && faceZ == 0.0f) {
                         sensed = true;  // no prior heading (stationary) -> vision omnidirectional in range
                     } else if (d > 1e-4f) {
@@ -323,9 +333,10 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
         cr.wish_z = 0.0f;
         if (len > 1.0e-5f) {
             const float inv = 1.0f / len;
-            const float speed = (act == CreatureAction::Flee || act == CreatureAction::Hunt)
-                                    ? cr.move_speed * 1.5f
-                                    : cr.move_speed;
+            // INSTINCT-06: the starving move at up to half pace (sprint included).
+            const float speed = ((act == CreatureAction::Flee || act == CreatureAction::Hunt)
+                                     ? cr.move_speed * 1.5f
+                                     : cr.move_speed) * starve_degrade;
             cr.wish_x = adirx * inv * speed;
             cr.wish_z = adirz * inv * speed;
             cr.stamina = utility_clamp01(cr.stamina - tuning.stamina_move_drain * dt);  // moving tires

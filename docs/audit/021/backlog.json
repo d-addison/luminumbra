@@ -1563,9 +1563,10 @@
       "effort": "M",
       "risk": "medium",
       "dependencies": [],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "lifespan_test + NEW: EcologyPipeline.StarvationDegradesThenKills ctest — sustained max hunger reduces effective speed then marks the creature dead and its carcass decays",
-      "rank": 83
+      "rank": 83,
+      "note": "DONE 2026-07-05 (Wave H I2.2). Stateless starvation degradation in the brain (hunger 0.85->1.0 ramps speed+senses to 0.5x, IEEE-identity for the well-fed) ahead of the existing LifespanSystem death; ambient Mortal/Decay stamps landed with INSTINCT-07. Gate: EcologyPipeline.StarvationDegradesThenKills. Populated golden re-pinned 46ed639f2a33c949 -> 7210ab8ef09e30a5; canonical unchanged."
     },
     {
       "id": "INSTINCT-08",

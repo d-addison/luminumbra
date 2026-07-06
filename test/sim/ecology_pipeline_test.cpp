@@ -119,6 +119,60 @@ TEST(EcologyPipeline, DeterministicOverManyTicks) {
     EXPECT_EQ(RunPipeline(400), RunPipeline(400));
 }
 
+// INSTINCT-06 (Wave H I2.2): starvation DEGRADES, then KILLS, then the carcass
+// DECAYS. A lone mortal herbivore with no food: as hunger crosses the 0.85
+// degradation band its effective speed (|wish|) measurably drops below cruise;
+// at hunger 1.0 the LifespanSystem marks it dead + eaten; the DecayComponent
+// then progresses the carcass. Deterministic run==replay.
+TEST(EcologyPipeline, StarvationDegradesThenKills) {
+    auto run = [] {
+        entt::registry r;
+        // A predator far away gives the herbivore something to flee (sustained
+        // movement, so |wish| is non-zero and measurable).
+        const auto threat = r.create();
+        r.emplace<Comp::TransformComponent>(threat).position = Luminumbra::Vec3(30.0f, 0.0f, 0.0f);
+        auto& tc = r.emplace<Comp::CreatureComponent>(threat);
+        tc.is_predator = true; tc.hunger = 0.0f; tc.move_speed = 0.0f; // inert threat
+        const auto e = r.create();
+        r.emplace<Comp::TransformComponent>(e).position = Luminumbra::Vec3(0.0f, 0.0f, 0.0f);
+        auto& cr = r.emplace<Comp::CreatureComponent>(e);
+        cr.is_predator = false;
+        cr.hunger = 0.80f;      // just below the degradation band
+        cr.move_speed = 3.0f;
+        r.emplace<Comp::MortalComponent>(e).lifespan_ticks = 1000000u; // starvation, not old age
+        r.emplace<Comp::DecayComponent>(e).decay_duration = 60u;
+
+        constexpr float dt = 1.0f / 30.0f;
+        float healthy_speed = -1.0f, starving_speed = -1.0f;
+        std::uint64_t death_tick = 0;
+        for (std::uint64_t t = 0; t < 4000 && death_tick == 0; ++t) {
+            luminumbra::ai::RunCreatureBrainSystemOnTick(r, dt);
+            luminumbra::ai::RunLifespanOnTick(r, t);
+            luminumbra::ai::RunDecompositionOnTick(r, t);
+            const auto& c = r.get<Comp::CreatureComponent>(e);
+            const float sp = std::sqrt(c.wish_x * c.wish_x + c.wish_z * c.wish_z);
+            if (healthy_speed < 0.0f && c.hunger < 0.85f && sp > 0.1f) healthy_speed = sp;
+            if (c.hunger > 0.97f && c.hunger < 1.0f && sp > 0.1f) starving_speed = sp;
+            if (r.get<Comp::MortalComponent>(e).dead != 0) death_tick = t;
+        }
+        return std::make_tuple(healthy_speed, starving_speed, death_tick,
+                               r.get<Comp::CreatureComponent>(e).eaten);
+    };
+    const auto [healthy, starving, death_tick, eaten] = run();
+    ASSERT_GT(healthy, 0.0f) << "the herbivore never moved while healthy (vacuous)";
+    ASSERT_GT(starving, 0.0f) << "no starving-band movement sample captured (vacuous)";
+    EXPECT_LT(starving, healthy * 0.75f)
+        << "sustained starvation did not degrade effective speed (healthy=" << healthy
+        << " starving=" << starving << ")";
+    EXPECT_GT(death_tick, 0u) << "max hunger never killed the creature";
+    EXPECT_TRUE(eaten) << "death did not mark the carcass inert (the carcass seam)";
+    // run==replay for the whole degrade->die arc.
+    const auto again = run();
+    EXPECT_EQ(healthy, std::get<0>(again));
+    EXPECT_EQ(starving, std::get<1>(again));
+    EXPECT_EQ(death_tick, std::get<2>(again));
+}
+
 // INSTINCT-04 (Wave H I2.1): the LIVE feeding loop. Real plants (the
 // MakePlantFromSpecies wiring point) now carry GrazeableComponent, so a hungry
 // herd standing on a patch DRAWS DOWN its standing biomass and sates its hunger
