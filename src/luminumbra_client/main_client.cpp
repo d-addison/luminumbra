@@ -3214,6 +3214,11 @@ int main(int argc, char* argv[]) {
     // spec 008 WS-4 Â§9: set the sky-LUT GPU flag BEFORE startup() so the one-shot precompute
     // (init_sky_lut, inside startup) takes the GPU compute path. render.sky_lut_gpu, default OFF.
     renderPipeline.set_sky_lut_gpu_enabled(g_systemConfig.enabled(luminumbra::core::SysKey::RenderSkyLutGpu));
+    // GPU-P09 (Phase 3): seed the internal render scale from the persisted user setting BEFORE
+    // startup() so the scaled G-buffer/lighting/SSAO intermediates are sized on the first frame.
+    // The LUMIN_RENDER_SCALE env knob still WINS (startup() applies it after this), preserving
+    // the A/B capture path. Default 1.0 = byte-identical (internal==output).
+    renderPipeline.set_render_scale(g_systemConfig.user().render_scale);
     // Render-optimization (cloud-raymarch-optimization): opt-in reduced-res sky-dome
     // quality knob, matching the existing LUMIN_* render-tuning idiom. Unset -> 0
     // (full, byte-identical legacy path). 1 = half (1/2 per axis), 2 = quarter.

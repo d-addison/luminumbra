@@ -450,6 +450,14 @@ public:
     // targets were actually rebuilt (T-I4-DR-window-modes).
     void on_resize(u32 new_width, u32 new_height);
 
+    // GPU-P09 (Phase 3): set the internal render scale (SystemConfig user.render_scale).
+    // Clamped to [0.5, 1.0]; 1.0 is byte-identical (internal==output). Call BEFORE startup()
+    // to seed the default -- the LUMIN_RENDER_SCALE env knob still WINS (startup applies it
+    // after this, for the A/B capture path). Also safe at runtime (a settings change): when
+    // already started it reallocates the scaled intermediates like on_resize (the output-res
+    // TAAU/backbuffer targets are untouched -- only the internal extent moved).
+    void set_render_scale(float scale);
+
     // Spec 002 Item 1 (ADDITIVE offscreen render-target redirect for the
     // create-world live preview diorama). When an offscreen target is set, the
     // FINAL BLIT of render_frame writes its lit color into the given FBO (color

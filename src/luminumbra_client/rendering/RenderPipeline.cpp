@@ -645,11 +645,19 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
     // internal extent and the taau/final-blit sampler upscales to output.
     if (const char* e = std::getenv("LUMIN_RENDER_SCALE"); e && e[0]) {
         const float s = std::strtof(e, nullptr);
-        if (s >= 0.5f && s <= 1.0f) m_render_scale = s;
+        // The env knob WINS over the config-seeded set_render_scale() for any PARSEABLE value:
+        // clamp into [0.5,1.0] to match set_render_scale's clamp (so config=0.5 + env=2.0 -> 1.0,
+        // not a leaked 0.5). strtof returns 0.0 on garbage -> `s > 0.0f` rejects unparseable input.
+        if (s > 0.0f) m_render_scale = std::clamp(s, 0.5f, 1.0f);
     }
     // Internal (scaled) render extent = round(output * scale); at 1.0, lround(N*1.0f)==N.
     m_internal_width = static_cast<u32>(std::lround(m_screen_width * m_render_scale));
     m_internal_height = static_cast<u32>(std::lround(m_screen_height * m_render_scale));
+    // GPU-P09: log the resolved scale so the active render resolution is observable (which of
+    // user.render_scale / LUMIN_RENDER_SCALE won, and the internal extent the scene renders at).
+    LUMINUMBRA_CORE_INFO("GPU-P09 render_scale {} -> internal {}x{} (output {}x{})",
+                         m_render_scale, m_internal_width, m_internal_height,
+                         m_screen_width, m_screen_height);
     m_root_path = root_path;
 
     try {
@@ -3589,6 +3597,37 @@ void RenderPipeline::on_resize(u32 new_width, u32 new_height) {
     m_frustumCache.valid = false;
     ++m_resize_generation;
     LUMINUMBRA_CORE_INFO("RenderPipeline resized targets to {}x{} (resize generation {})", new_width, new_height, m_resize_generation);
+}
+
+void RenderPipeline::set_render_scale(float scale) {
+    // GPU-P09 (Phase 3): config-driven internal render scale. Clamp to the SAME [0.5, 1.0]
+    // band startup()'s LUMIN_RENDER_SCALE env knob uses. BEFORE startup (m_started == false)
+    // this only seeds m_render_scale -- startup() then sizes m_internal_* from it, and its env
+    // check overrides for an A/B (env WINS by running AFTER this). AFTER startup this
+    // reallocates the scaled intermediates exactly as on_resize does (the output-res
+    // TAAU/backbuffer targets are untouched -- only the internal extent moved). At scale 1.0
+    // this is a no-op (internal==output), byte-identical.
+    const float clamped = std::clamp(scale, 0.5f, 1.0f);
+    if (clamped == m_render_scale) return;
+    m_render_scale = clamped;
+    if (!m_started) return; // startup() will size the internal extent from m_render_scale
+    m_internal_width = static_cast<u32>(std::lround(m_screen_width * m_render_scale));
+    m_internal_height = static_cast<u32>(std::lround(m_screen_height * m_render_scale));
+    m_lighting_pass->destroy_lighting_fbo(m_render_registry);
+    m_lighting_pass->init_lighting_fbo(m_render_registry, m_internal_width, m_internal_height);
+    m_gbuffer_pass->destroy_gbuffer(m_render_registry);
+    m_gbuffer_pass->init_gbuffer(m_render_registry, m_internal_width, m_internal_height);
+    m_ssao_pass->destroy_ssao(m_render_registry);
+    m_ssao_pass->init_ssao(m_render_registry, m_internal_width, m_internal_height);
+    // The output-res TAAU history buffers keep their size (output is unchanged), but their
+    // CONTENT is now stale -- it was resolved at the previous internal scale, so its motion
+    // vectors / reprojection no longer match. Invalidate it so the next resolve restarts fresh
+    // instead of blending the previous scale's history (Codex review, runtime scale-change).
+    m_taau_history_valid = false;
+    m_frustumCache.valid = false;
+    ++m_resize_generation;
+    LUMINUMBRA_CORE_INFO("RenderPipeline render_scale -> {} (internal {}x{})",
+                         m_render_scale, m_internal_width, m_internal_height);
 }
 
 void RenderPipeline::set_offscreen_target(u32 fbo, u32 fbo_w, u32 fbo_h) {
