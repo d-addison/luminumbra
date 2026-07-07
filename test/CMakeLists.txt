@@ -129,6 +129,7 @@ add_executable(common_tests
     common/ReplicationProtocol_test.cpp
     common/ReplicationEndpoint_test.cpp
     common/config_constant_drift_test.cpp
+    common/config_hot_reload_rollback_test.cpp
     common/LockstepSession_test.cpp
     common/LockstepBackpressure_test.cpp
     common/ReplayStream_test.cpp
@@ -1300,6 +1301,23 @@ target_link_libraries(audio_prune_guard_test PRIVATE
     glm
 )
 
+# AUDIO-11 follow-up: occlusion read-back onto ma_sound volume. Pure test of the
+# ComputeFinalVolume helper; includes MiniaudioManager.h so needs miniaudio + nlohmann_json.
+add_executable(audio_volume_readback_test
+    audio/audio_volume_readback_test.cpp
+)
+target_include_directories(audio_volume_readback_test PRIVATE
+    ../src
+    ../src/luminumbra_client
+)
+target_link_libraries(audio_volume_readback_test PRIVATE
+    gtest_main
+    luminumbra_common
+    miniaudio
+    nlohmann_json
+    glm
+)
+
 # T-I6 capture-native re-bless: resolution-relative gate-threshold scaling unit
 # tests (core/CaptureScale.h is dependency-free, so this needs no GL/common libs).
 add_executable(capture_scale_test
@@ -1409,6 +1427,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     jolt_tunneling_test
     audio_occlusion_test
     audio_prune_guard_test
+    audio_volume_readback_test
     capture_scale_test
     isolation_config_test
 )
@@ -1450,6 +1469,25 @@ add_test(NAME ForestPerfBudget COMMAND forest_perf_budget_test)
 set_tests_properties(ForestPerfBudget PROPERTIES
     LABELS "manual;perf;budget"
     TIMEOUT 300)
+
+# NET-07: over-the-wire N=32 replication soak (real TCP loopback, 32 client threads,
+# ~10s wall-clock, freezes net_soak.v1). MANUAL-tier — excluded from the default gtest
+# lane (never gate the default lane on socket/wall-clock timing).
+#   run: ctest -L manual -R NetSoak --output-on-failure
+add_executable(net_soak_over_the_wire_test
+    net/net_soak_over_the_wire_test.cpp
+)
+target_compile_definitions(net_soak_over_the_wire_test PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+    LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts")
+target_include_directories(net_soak_over_the_wire_test PRIVATE
+    ../src
+    ../src/luminumbra_common)
+target_link_libraries(net_soak_over_the_wire_test PRIVATE
+    gtest_main
+    luminumbra_common)
+add_test(NAME NetSoak COMMAND net_soak_over_the_wire_test)
+set_tests_properties(NetSoak PROPERTIES LABELS "manual;net;soak" TIMEOUT 120)
 
 # T-I4-15: register the spike benchmark under the "manual" label. It is
 # evidence-only (not a required gate) and its Debug runtime (~25s, and can exceed

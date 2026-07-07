@@ -155,7 +155,52 @@ public:
     void SetPhysicsSystem(::Luminumbra::Systems::PhysicsSystem* physics_system);
     void EnableSpatialClustering(bool enabled) { m_spatial_clustering_enabled = enabled; }
     bool IsSpatialClusteringEnabled() const { return m_spatial_clustering_enabled; }
-    
+
+    // AUDIO-11 read-back ceiling: geometry occlusion never scales a voice below
+    // this fraction of its base gain (0.7 => a FULLY blocked sound keeps 30% of
+    // its loudness, so it stays localizable rather than vanishing). Matches the
+    // legacy UpdateAudioOcclusion() 0.7 factor so the two occlusion paths agree.
+    static constexpr float kOcclusionMaxAttenuation = 0.7f;
+
+    // AUDIO-11 pure, device-free final-volume fold (the read-back of the spatial
+    // cluster's computed occlusion onto a voice's linear volume):
+    //   base               authored per-voice gain (def->volume, post env mult)
+    //   busGain            extra per-voice gain NOT already on the bus group node
+    //                      (1.0 in the live path — the sfx/ambient/events/ui group
+    //                      already carries the user bus gain)
+    //   spatialAttenuation distance/LOD attenuation scalar in [0,1] (1.0 in the
+    //                      live path — miniaudio's spatializer already applies the
+    //                      distance falloff at the voice; passing 1 avoids double
+    //                      applying it)
+    //   occlusion01        0..1 blockage from the physics raycast (0 = clear line
+    //                      of sight, 1 = fully blocked)
+    // Monotonic DECREASING in occlusion; at occlusion 0 the result is exactly
+    // base*busGain*spatialAttenuation (i.e. unchanged from the pre-read-back
+    // behaviour); the result is clamped to [0, base*busGain]. static + inlined in
+    // the header so it unit-tests with no audio device and no link to miniaudio.
+    static float ComputeFinalVolume(float base, float busGain,
+                                    float spatialAttenuation, float occlusion01) {
+        // Clamp inputs to sane ranges: gains are non-negative; the distance
+        // attenuation and the occlusion fraction each live in [0,1].
+        if (base < 0.0f) base = 0.0f;
+        if (busGain < 0.0f) busGain = 0.0f;
+        if (spatialAttenuation < 0.0f) spatialAttenuation = 0.0f;
+        else if (spatialAttenuation > 1.0f) spatialAttenuation = 1.0f;
+        if (occlusion01 < 0.0f) occlusion01 = 0.0f;
+        else if (occlusion01 > 1.0f) occlusion01 = 1.0f;
+
+        const float ceiling = base * busGain;  // loudest achievable gain
+        // occlusion 0 => factor 1.0 (unchanged); occlusion 1 => factor 1 - 0.7.
+        const float occlusionFactor = 1.0f - occlusion01 * kOcclusionMaxAttenuation;
+        float volume = ceiling * spatialAttenuation * occlusionFactor;
+
+        // Belt-and-suspenders bound (already implied by the input clamps): a
+        // voice is never louder than base*busGain, never below silence.
+        if (volume < 0.0f) volume = 0.0f;
+        else if (volume > ceiling) volume = ceiling;
+        return volume;
+    }
+
 private:
     ma_result LoadSoundResource(const std::string& path, ma_sound* sound, uint32_t flags);
     const AudioEventDefinition* GetEventDefinition(const AudioEventID& eventID);
@@ -177,6 +222,14 @@ private:
     // For controllable, active sounds
     std::unordered_map<AudioEventHandle, std::unique_ptr<ma_sound>> m_activeSounds;
     AudioEventHandle m_nextHandle = 1;
+
+    // AUDIO-11: authored (pre-occlusion) volume per active 3D voice. Update()
+    // re-derives each voice's live volume from this base every frame, so the
+    // physics-occlusion read-back is IDEMPOTENT — it never compounds frame to
+    // frame. Populated for 3D voices in PlayEvent, kept in sync by the volume
+    // setters, erased when the voice stops (Update() reap / immediate StopEvent).
+    // 2D/UI voices (NO_SPATIALIZATION) are never occluded, so they are not tracked.
+    std::unordered_map<AudioEventHandle, float> m_soundBaseVolume;
 
     // Fire-and-forget one-shots (PlayOneShot / PlayOneShot2D). These MUST outlive the
     // call: miniaudio's mixing thread reads the ma_sound until it finishes, so the node

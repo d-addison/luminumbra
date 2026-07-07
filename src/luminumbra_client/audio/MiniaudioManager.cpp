@@ -96,11 +96,39 @@ void MiniaudioManager::Update() {
             if (m_spatial_clustering_enabled && m_spatial_cluster) {
                 m_spatial_cluster->RemoveAudioSource(it->first);
             }
-            
+
+            m_soundBaseVolume.erase(it->first);  // AUDIO-11: drop the occlusion base
             ma_sound_uninit(it->second.get());
             it = m_activeSounds.erase(it);
         } else {
             ++it;
+        }
+    }
+
+    // AUDIO-11 read-back: make the occlusion the spatial cluster computed AUDIBLE.
+    // For every active 3D voice we captured a base volume for, ask the cluster how
+    // blocked its source->listener path is (physics raycast through world geometry;
+    // 0 when there is no physics system or the line of sight is clear) and fold
+    // that into the voice's volume via the pure ComputeFinalVolume helper. base is
+    // the authored, pre-occlusion gain, so re-deriving from it every frame is
+    // idempotent (never compounds). busGain/spatialAttenuation = 1: the bus group
+    // node already carries the user SFX gain and miniaudio's spatializer already
+    // applies the distance falloff, so passing 1 here avoids double-applying them.
+    // occlusion 0 => volume == base => byte-identical to the pre-AUDIO-11 mix.
+    if (m_spatial_clustering_enabled && m_spatial_cluster && !m_soundBaseVolume.empty()) {
+        const ma_vec3f ma_listener = ma_engine_listener_get_position(m_engine.get(), 0);
+        const glm::vec3 listener_pos(ma_listener.x, ma_listener.y, ma_listener.z);
+        for (const auto& [handle, base] : m_soundBaseVolume) {
+            auto sit = m_activeSounds.find(handle);
+            if (sit == m_activeSounds.end()) continue;  // reaped/stopped this frame
+            const ma_vec3f ma_src = ma_sound_get_position(sit->second.get());
+            const glm::vec3 source_pos(ma_src.x, ma_src.y, ma_src.z);
+            const float occlusion = m_spatial_cluster->QueryOcclusion(source_pos, listener_pos);
+            const float volume = ComputeFinalVolume(base, 1.0f, 1.0f, occlusion);
+            // Skip redundant identical writes (the common occlusion==0 steady state).
+            if (ma_sound_get_volume(sit->second.get()) != volume) {
+                ma_sound_set_volume(sit->second.get(), volume);
+            }
         }
     }
 
@@ -312,7 +340,16 @@ bool MiniaudioManager::PlayEvent(const AudioEventID& eventID, AudioEventHandle& 
         glm::vec3 default_position(0.0f);
         m_spatial_cluster->AddAudioSource(outHandle, default_position, def->volume, def->min_distance, def->max_distance);
     }
-    
+
+    // AUDIO-11: remember the authored (post env-mult) volume for 3D voices so
+    // Update()'s occlusion read-back can re-derive their live volume without
+    // compounding. Tracked independently of m_spatial_clustering_enabled so the
+    // base survives a later EnableSpatialClustering(true). 2D voices are never
+    // occluded and are intentionally not tracked.
+    if (!def->is_2d) {
+        m_soundBaseVolume[outHandle] = ma_sound_get_volume(m_activeSounds[outHandle].get());
+    }
+
     return true;
 }
 
@@ -450,6 +487,7 @@ bool MiniaudioManager::StopEvent(AudioEventHandle handle, bool immediate) {
         if (immediate) {
             ma_sound_uninit(it->second.get());
             m_activeSounds.erase(it);
+            m_soundBaseVolume.erase(handle);  // AUDIO-11: drop the occlusion base
         }
         return true;
     }
@@ -536,6 +574,12 @@ bool MiniaudioManager::SetEventVolume(AudioEventHandle handle, float volume) {
             m_spatial_cluster->UpdateSourceVolume(handle, volume);
         }
 
+        // AUDIO-11: rebase the occlusion read-back on the caller's new volume (only
+        // for tracked 3D voices) so Update() re-occludes THIS value next frame
+        // instead of clobbering it back to the old base.
+        auto bit = m_soundBaseVolume.find(handle);
+        if (bit != m_soundBaseVolume.end()) bit->second = volume;
+
         return true;
     }
     return false;
@@ -552,6 +596,10 @@ bool MiniaudioManager::SetEventParameter(AudioEventHandle handle, const AudioPar
         if (m_spatial_clustering_enabled && m_spatial_cluster) {
             m_spatial_cluster->UpdateSourceVolume(handle, value);
         }
+        // AUDIO-11: rebase the occlusion read-back on the caller's new volume so
+        // Update() re-occludes it rather than clobbering it (tracked 3D voices only).
+        auto bit = m_soundBaseVolume.find(handle);
+        if (bit != m_soundBaseVolume.end()) bit->second = value;
         return true;
     }
 
