@@ -53,7 +53,12 @@ void main() {
 
     gPosition = vViewPos;
     gNormalMaterial = vec4(encode_octahedral(worldN) * 0.5 + 0.5, 0.0, u_materialId);
-    gAlbedoRoughness = vec4(alb.rgb, 0.9);   // foliage: rough, non-metallic
+    // The impostor atlas is baked sRGB-encoded (ImpostorBake oAlbedo = pow(col,1/2.2))
+    // into a plain GL_RGBA8 target, so the sampled value is display-space. The deferred
+    // G-buffer albedo is LINEAR (the near-mesh path uses a GL_SRGB8_ALPHA8 array that
+    // auto-linearizes), so writing the atlas value verbatim over-brightened far impostor
+    // trees ~2x (owner-reported "white filter on trees"). Linearize on read to match.
+    gAlbedoRoughness = vec4(pow(alb.rgb, vec3(2.2)), 0.9);   // foliage: rough, non-metallic
     gMetallicAO = vec2(0.0, 1.0);
     gMotionVector = vec2(0.0);
 }

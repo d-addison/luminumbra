@@ -217,7 +217,7 @@ void LightingPass::execute(const RenderContext& ctx) {
         float exposure, saturation, contrast, wr, wg, wb;
     };
     static const Grade s_grade = [] {
-        Grade g{1.12f, 1.13f, 1.32f, 1.06f, 1.0f, 0.92f}; // richer sat + punchier contrast (de-wash noon)
+        Grade g{1.12f, 1.30f, 1.42f, 1.06f, 1.0f, 0.92f}; // richer sat + punchier contrast (de-wash noon; owner "white filter" pass 2026-07-07)
         if (const char* env = std::getenv("LUMIN_GRADE")) {
             std::sscanf(env, "%f,%f,%f,%f,%f,%f", &g.exposure, &g.saturation,
                         &g.contrast, &g.wr, &g.wg, &g.wb);

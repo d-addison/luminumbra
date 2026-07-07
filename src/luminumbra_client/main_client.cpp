@@ -313,6 +313,10 @@ static constexpr int kFrameScanSettleFrames = 90; // let chunks stream + atmosph
 // IN_GAME and completed the scan within this many render-loop frames (boot + stream +
 // settle is normally ~500-700), abort with a clear error instead of looping forever.
 static constexpr int kFrameScanWatchdogFrames = 4000;
+// DIAGNOSTIC-only: LUMIN_FRAME_SCAN_SETTLE overrides the settle so a headless capture
+// can wait for the world to FULLY stream/bake (default preserves the deterministic 90
+// the gates rely on; the 4000-frame watchdog leaves ample headroom).
+int g_frame_scan_settle_target = kFrameScanSettleFrames;
 int g_frame_scan_watchdog = 0;
 // --bake-tree-impostor <out.ppm>: Wave-3 far-field impostor atlas bake. Renders the static tree parts
 // from the hemi-octahedral view directions into an atlas (+ coverage JSON) and exits. Needs only GL +
@@ -2888,6 +2892,12 @@ int main(int argc, char* argv[]) {
         scenario_config.auto_enter_world = true;
         LUMINUMBRA_CORE_INFO("Render-parity (whole-frame) armed -> {} (auto-world implied, settle {} frames)",
                              g_render_parity_dir.string(), kFrameScanSettleFrames);
+    }
+    // DIAGNOSTIC-only settle override (see g_frame_scan_settle_target): let a fully-loaded
+    // capture wait past the gate's 90-frame default. Gates never set this env.
+    if (const char* settle_env = std::getenv("LUMIN_FRAME_SCAN_SETTLE")) {
+        const int v = std::atoi(settle_env);
+        if (v > 0) g_frame_scan_settle_target = v;
     }
     // Spec 016-P2-T02: --render-parity-ssao <dir>. Same boot/settle, captures the
     // SSAO ctx-mapping + seam-determinism parity gate.
@@ -7196,7 +7206,7 @@ int main(int argc, char* argv[]) {
                             g_camera->updateCameraVectors();
                         }
                         renderPipeline.set_time_of_day(0.04f); // fixed near-noon (lit terrain)
-                        if (g_frame_scan_settle < kFrameScanSettleFrames) {
+                        if (g_frame_scan_settle < g_frame_scan_settle_target) {
                             ++g_frame_scan_settle; // let chunks stream + atmosphere settle
                         } else {
                             // Spec 016 render gate: capture FinalBlit in-process A/B parity on the
