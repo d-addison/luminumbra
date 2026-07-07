@@ -1959,7 +1959,7 @@
       "effort": "M",
       "risk": "medium",
       "dependencies": [],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: AudioOcclusion ctest \u2014 a source behind solid terrain (physics raycast blocked) computes lower gain than an equal-distance line-of-sight source",
       "rank": 108
     },
@@ -2305,7 +2305,7 @@
       "dependencies": [
         "NET-05"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "ReplicationScale (extended: a delta-ON 32-client run stays within QueueDepthP95/SnapshotAgeP95/per-client-bytes budgets and every client converges to the authoritative set)",
       "rank": 122
     },
@@ -2366,7 +2366,7 @@
       "dependencies": [
         "NET-07"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: ReplicationBackpressurePolicy ctest \u2014 a saturated client is throttled (ThrottledFrames > 0) while the other clients keep receiving on-cadence snapshots (no shared-fate stall, spec 019 AC-D-002)",
       "rank": 126
     },
@@ -2454,7 +2454,7 @@
       "dependencies": [
         "OPS-02"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: ctest ConfigOwnerDriftCheck \u2014 deliberately drifting one Eco* schema default vs its owning-system constant turns the check RED; the current tree is GREEN",
       "rank": 132
     },
@@ -2689,7 +2689,7 @@
       "dependencies": [
         "AUDIO-04"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: all-banks extension of the AudioBankIntegrity ctest \u2014 every bank left under data/audio is loaded-and-valid or explicitly retired; orphan headers removed with the build/ctest suite green",
       "rank": 145
     },
