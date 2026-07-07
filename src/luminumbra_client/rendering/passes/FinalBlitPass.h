@@ -31,8 +31,11 @@ public:
         glBindFramebuffer(GL_READ_FRAMEBUFFER, ctx.lit_scene.id);
 
         const GLuint draw_fbo = ctx.dest_fbo().id;
-        const GLsizei src_w = static_cast<GLsizei>(ctx.screen_width);
-        const GLsizei src_h = static_cast<GLsizei>(ctx.screen_height);
+        // GPU-P09: the source lit_scene is the INTERNAL (scaled) extent; blitting it to the
+        // output/preview dest with GL_LINEAR is the render-scale upscale. At scale 1.0
+        // internal==screen so this is the byte-identical 1:1 blit as before.
+        const GLsizei src_w = static_cast<GLsizei>(ctx.internal_w());
+        const GLsizei src_h = static_cast<GLsizei>(ctx.internal_h());
         const GLsizei dst_w = static_cast<GLsizei>(ctx.dest_width());
         const GLsizei dst_h = static_cast<GLsizei>(ctx.dest_height());
 

@@ -639,9 +639,15 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
     m_started = false;
     m_screen_width = screen_width;
     m_screen_height = screen_height;
-    // GPU-P09: internal (scaled) render extent. Pinned to output until Phase B reads
-    // user.render_scale; at m_render_scale==1.0, lround(N*1.0f)==N so this is exactly
-    // the output size and the scaled targets below allocate byte-identically to before.
+    // GPU-P09: render-scale knob. m_render_scale defaults to user.render_scale (wired via
+    // set_render_scale before startup); LUMIN_RENDER_SCALE overrides for an A/B. Clamped to
+    // [0.5, 1.0] -- 1.0 is byte-identical (internal==output); < 1.0 renders the scene at the
+    // internal extent and the taau/final-blit sampler upscales to output.
+    if (const char* e = std::getenv("LUMIN_RENDER_SCALE"); e && e[0]) {
+        const float s = std::strtof(e, nullptr);
+        if (s >= 0.5f && s <= 1.0f) m_render_scale = s;
+    }
+    // Internal (scaled) render extent = round(output * scale); at 1.0, lround(N*1.0f)==N.
     m_internal_width = static_cast<u32>(std::lround(m_screen_width * m_render_scale));
     m_internal_height = static_cast<u32>(std::lround(m_screen_height * m_render_scale));
     m_root_path = root_path;
@@ -2805,7 +2811,10 @@ void RenderPipeline::execute_stage_depth_blit_to_lighting(const Camera& camera) 
     record_frame_stage("depth_blit_to_lighting");
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_gbuffer_pass->gbuffer().fbo_id);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
-    glBlitFramebuffer(0, 0, m_screen_width, m_screen_height, 0, 0, m_screen_width, m_screen_height, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+    // GPU-P09: both G-buffer and lighting are internal-sized; copy the internal depth rect
+    // (a screen-sized rect would leave the internal depth garbage at scale<1.0 -> the skybox
+    // depth-mask fails and the sky goes dark). At scale 1.0 internal==screen (byte-identical).
+    glBlitFramebuffer(0, 0, m_internal_width, m_internal_height, 0, 0, m_internal_width, m_internal_height, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
 }
 
 void RenderPipeline::execute_stage_skybox(const Camera& camera) {
