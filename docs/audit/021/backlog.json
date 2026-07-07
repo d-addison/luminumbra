@@ -2321,7 +2321,7 @@
         "NET-05",
         "020"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: NetSoak gate \u2014 validate-engine-frontier.ps1 -Mode NetSoak asserts a luminumbra.net_soak.v1 artifact with expected_clients=32 and passed=true",
       "rank": 123
     },
@@ -2469,7 +2469,7 @@
       "dependencies": [
         "OPS-07"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: ctest ConfigHotReloadRollback \u2014 a schema-invalid config reload preserves the previous applied state without crash; grep shows the mirrored constant authored once in the generated header",
       "rank": 132
     },
