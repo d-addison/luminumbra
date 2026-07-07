@@ -2351,7 +2351,7 @@
       "dependencies": [
         "NET-08"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: GnsMultiConnect ctest \u2014 one listen port accepts N concurrent connections and each fans out via AddClient (spec 019 AC-F-001)",
       "rank": 125
     },
