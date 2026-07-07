@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "InstinctPlanner.h"
+#include "PerceptionSubstrate.h"
 #include "StimulusChannels.h"
 #include "../components/CoreComponents.h"
 #include "../components/InstinctComponents.h"
@@ -38,7 +39,8 @@ struct OpportunitySource {
 InstinctSystemTickStats RunInstinctSystemOnTick(
     entt::registry& registry,
     std::uint64_t tick,
-    const StimulusChannelRegistry* stimulus) {
+    const StimulusChannelRegistry* stimulus,
+    bool use_perception_substrate) {
     using Luminumbra::Components::ActionPlanComponent;
     using Luminumbra::Components::InstinctAgentComponent;
     using Luminumbra::Components::NeedsComponent;
@@ -69,6 +71,30 @@ InstinctSystemTickStats RunInstinctSystemOnTick(
                          [](const OpportunitySource& lhs, const OpportunitySource& rhs) {
                              return lhs.component->id < rhs.component->id;
                          });
+    }
+
+    // INSTINCT-09 (additive, default OFF): build the shared perception substrate
+    // ONCE per tick from the id-sorted opportunities. Each source's ordinal is its
+    // index in `opportunities`, so a per-agent query returns the perceived set in
+    // that same id order — the substrate reproduces the inline gather exactly. The
+    // field is only built when the flag is set, so the default path allocates
+    // nothing new and stays byte-identical.
+    PerceptionField perception_field;
+    if (use_perception_substrate) {
+        std::vector<PerceptionSourceInput> sources;
+        sources.reserve(opportunities.size());
+        for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(opportunities.size()); ++i) {
+            const OpportunitySource& src = opportunities[i];
+            PerceptionSourceInput in;
+            in.index = i;
+            in.has_position = src.has_position;
+            in.x = src.position[0];
+            in.y = src.position[1];
+            in.z = src.position[2];
+            in.radius = src.component->radius;
+            sources.push_back(in);
+        }
+        perception_field.Build(sources);
     }
 
     auto agent_view = registry.view<InstinctAgentComponent, NeedsComponent>();
@@ -130,18 +156,12 @@ InstinctSystemTickStats RunInstinctSystemOnTick(
         std::vector<entt::entity> candidate_entities;
         request.opportunities.reserve(opportunities.size());
         candidate_entities.reserve(opportunities.size());
-        for (const OpportunitySource& source : opportunities) {
+
+        // Emit one opportunity into the planner request. Shared by the inline and
+        // substrate gathers so both build byte-identical planner input (same
+        // fields, same distance, same candidate-entity bookkeeping).
+        auto emit_opportunity = [&](const OpportunitySource& source, double distance) {
             const OpportunityComponent& component = *source.component;
-            double distance = 0.0;
-            if (agent_transform != nullptr && source.has_position) {
-                const double dx = static_cast<double>(agent_transform->position.x) - source.position[0];
-                const double dy = static_cast<double>(agent_transform->position.y) - source.position[1];
-                const double dz = static_cast<double>(agent_transform->position.z) - source.position[2];
-                distance = Round4(std::sqrt(dx * dx + dy * dy + dz * dz));
-                if (component.radius > 0.0f && distance > static_cast<double>(component.radius)) {
-                    continue;
-                }
-            }
             InstinctOpportunity opportunity;
             opportunity.id = component.id;
             opportunity.action = component.action;
@@ -155,6 +175,41 @@ InstinctSystemTickStats RunInstinctSystemOnTick(
             request.opportunities.push_back(opportunity);
             candidate_entities.push_back(source.entity);
             ++stats.opportunities_considered;
+        };
+
+        if (use_perception_substrate) {
+            // INSTINCT-09 additive path: the shared substrate returns the perceived
+            // opportunity set (id-ordered, radius-gated) equivalent to the inline
+            // scan below. The perceiver has a position only when it carries a
+            // TransformComponent, matching the inline `agent_transform != nullptr`
+            // guard; positionless perceivers perceive every opportunity at dist 0.
+            PerceptionQueryInput query;
+            query.has_position = (agent_transform != nullptr);
+            if (agent_transform != nullptr) {
+                query.x = agent_transform->position.x;
+                query.y = agent_transform->position.y;
+                query.z = agent_transform->position.z;
+            }
+            PerceptionSnapshot snapshot;
+            perception_field.Query(query, snapshot);
+            for (const PerceivedSource& perceived : snapshot.perceived) {
+                emit_opportunity(opportunities[perceived.index], perceived.distance);
+            }
+        } else {
+            for (const OpportunitySource& source : opportunities) {
+                const OpportunityComponent& component = *source.component;
+                double distance = 0.0;
+                if (agent_transform != nullptr && source.has_position) {
+                    const double dx = static_cast<double>(agent_transform->position.x) - source.position[0];
+                    const double dy = static_cast<double>(agent_transform->position.y) - source.position[1];
+                    const double dz = static_cast<double>(agent_transform->position.z) - source.position[2];
+                    distance = Round4(std::sqrt(dx * dx + dy * dy + dz * dz));
+                    if (component.radius > 0.0f && distance > static_cast<double>(component.radius)) {
+                        continue;
+                    }
+                }
+                emit_opportunity(source, distance);
+            }
         }
 
         agent.current_plan = PlanInstincts(request);

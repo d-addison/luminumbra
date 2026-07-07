@@ -1,8 +1,9 @@
 #include "AudioSpatialCluster.h"
-#include "MiniaudioManager.h"
 #include "core/Log.h"
 #include "../../luminumbra_common/systems/PhysicsSystem.h"
 #include <algorithm>
+#include <cfloat>   // FLT_MAX (BuildClusters) — was transitively pulled in via the
+                    // (now-removed) MiniaudioManager.h include; make it explicit.
 #include <cmath>
 
 namespace Luminumbra::Client {
@@ -324,7 +325,11 @@ float AudioSpatialCluster::CalculateFullAttenuation(const AudioSource& source, c
     float distance = glm::distance(source.position, listener_pos);
     float attenuation = CalculateDistanceAttenuation(source, distance);
     
-    if (include_occlusion && m_occlusion_enabled && m_raycast_callback) {
+    // AUDIO-11: apply occlusion whenever we have SOME occlusion source — a real
+    // physics system (raycast against world geometry) OR the mockable callback.
+    // When no physics system is set this is byte-identical to the old gate (the
+    // callback term is unchanged), so the distance-only fallback is preserved.
+    if (include_occlusion && m_occlusion_enabled && (m_physics_system || m_raycast_callback)) {
         float occlusion = CalculateOcclusion(source.position, listener_pos);
         attenuation *= (1.0f - occlusion * 0.8f); // Reduce volume by up to 80% when occluded
     }
@@ -414,14 +419,27 @@ void AudioSpatialCluster::CalculateBatchedOcclusion(const std::vector<AudioSourc
     }
 }
 
-float AudioSpatialCluster::CalculateOcclusion(const glm::vec3& source_pos, const glm::vec3& listener_pos) {
+float AudioSpatialCluster::CalculateOcclusion(const glm::vec3& source_pos, const glm::vec3& listener_pos) const {
+    // AUDIO-11: real geometry occlusion. When a physics system is present, cast a
+    // ray through the world from the source to the listener; solid geometry in the
+    // path muffles the sound. PhysicsSystem::calculate_audio_occlusion returns 0.0
+    // for a clear line of sight and rises toward ~0.95 as blockage/material
+    // absorption grows (it fires the primary + offset rays and clamps the result),
+    // which is exactly the 0..1 occlusion scalar this function contracts to.
+    if (m_physics_system) {
+        return m_physics_system->calculate_audio_occlusion(source_pos, listener_pos);
+    }
+
+    // Fallback (no physics system): the pre-existing mockable raycast-callback
+    // seam. Kept BYTE-IDENTICAL — same ray direction, same hit_distance/total ratio
+    // — so worlds without a physics system behave exactly as before.
     if (!m_raycast_callback) return 0.0f;
-    
+
     float hit_distance;
     bool hit = m_raycast_callback(listener_pos, source_pos, hit_distance);
-    
+
     if (!hit) return 0.0f;
-    
+
     float total_distance = glm::distance(listener_pos, source_pos);
     return hit_distance / total_distance;
 }

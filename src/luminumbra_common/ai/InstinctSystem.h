@@ -45,9 +45,20 @@ struct InstinctSystemTickStats {
 // `stimulus` is OPTIONAL: when null (default), no stimulus-channel work runs and
 // the planner tick path is byte-identical to the pre-T-I5b-2 behavior. When non-
 // null, ONLY entities carrying a StimulusSubscriptionComponent sample channels.
+//
+// INSTINCT-09: `use_perception_substrate` is an ADDITIVE opt-in (default FALSE).
+// When false, the per-agent opportunity gather runs the original inline scan and
+// this tick path is byte-identical. When true, the gather routes through the
+// shared PerceptionField (PerceptionSubstrate.h) — a spatially-bucketed scan that
+// produces the SAME distance-gated opportunity set in the SAME id order (proven
+// equivalent by test/ai/perception_substrate_test.cpp), so the resulting plan is
+// unchanged. The flag exists so the shared substrate can be exercised without
+// touching the default sim trajectory; world_hash is untouched either way (the
+// canonical roster carries no InstinctAgentComponent).
 InstinctSystemTickStats RunInstinctSystemOnTick(
     entt::registry& registry,
     std::uint64_t tick,
-    const StimulusChannelRegistry* stimulus = nullptr);
+    const StimulusChannelRegistry* stimulus = nullptr,
+    bool use_perception_substrate = false);
 
 } // namespace luminumbra::ai

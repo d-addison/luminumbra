@@ -145,6 +145,7 @@ add_executable(common_tests
     common/replication_hardening_test.cpp
     common/replication_scale_test.cpp
     common/lockstep_replay_hardening_test.cpp
+    net/single_port_accept_test.cpp
     common/world_streaming_hardening_test.cpp
     common/HydraulicErosion_test.cpp
     common/WorldStreamingState_test.cpp
@@ -1205,6 +1206,7 @@ add_executable(frontier_gates_test
     ai/creature_divergence_test.cpp
     ai/awareness_test.cpp
     ai/perception_system_test.cpp
+    ai/perception_substrate_test.cpp
     ai/scent_steering_system_test.cpp
     ai/scent_deposit_system_test.cpp
     ai/ecology_demo_test.cpp
@@ -1253,6 +1255,24 @@ target_include_directories(jolt_tunneling_test PRIVATE
 )
 
 target_link_libraries(jolt_tunneling_test PRIVATE
+    gtest_main
+    luminumbra_common
+)
+
+# AUDIO-11: real physics-raycast audio occlusion. Compiles AudioSpatialCluster.cpp
+# directly (now decoupled from miniaudio) + links luminumbra_common for the Jolt
+# PhysicsSystem::calculate_audio_occlusion raycast; no client/GL link needed.
+add_executable(audio_occlusion_test
+    audio/audio_occlusion_test.cpp
+    ../src/luminumbra_client/audio/AudioSpatialCluster.cpp
+)
+target_include_directories(audio_occlusion_test PRIVATE
+    ../src
+    ../src/luminumbra_client
+    ../src/luminumbra_common
+    ../include
+)
+target_link_libraries(audio_occlusion_test PRIVATE
     gtest_main
     luminumbra_common
 )
@@ -1364,6 +1384,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     runtime_world_visual_validation_test
     frontier_gates_test
     jolt_tunneling_test
+    audio_occlusion_test
     capture_scale_test
     isolation_config_test
 )

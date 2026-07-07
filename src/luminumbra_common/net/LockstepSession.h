@@ -155,6 +155,24 @@ public:
     virtual void Close() = 0;
 };
 
+// --- Single-listen-socket connection acceptor (NET-11 dedicated-server shape) --------
+// A server that hosts N players on ONE port needs ONE listen socket that accepts N
+// incoming connections, fanning EACH into its own transport (which the caller then
+// registers via ReplicationServer::AddClient with a distinct client id). This is the
+// real dedicated-server accept shape, replacing the old "one port per client, one
+// connection per Listen()" scheme. The concrete impl is TcpListener; the seam is
+// abstract so the test/gate (and a future GNS/Steam listener) share it.
+class IConnectionAcceptor {
+public:
+    virtual ~IConnectionAcceptor() = default;
+
+    // Non-blocking: accepts ONE pending inbound connection and returns a transport
+    // owning JUST that connection, or nullptr if none is pending right now (the caller
+    // polls each tick). A returned transport is independent of every other accepted one
+    // and of the listen socket -- closing/destroying it never touches the listener.
+    virtual std::unique_ptr<ILockstepTransport> AcceptOne() = 0;
+};
+
 // In-process loopback: a pair of transports sharing two byte-queues (A->B, B->A). No
 // sockets. Created via MakeLoopbackPair so the two ends share the same backing queues.
 class LoopbackTransport final : public ILockstepTransport {
@@ -250,6 +268,12 @@ public:
     // Client: connect to host:port (blocking up to timeout_ms).
     bool Connect(const std::string& host, std::uint16_t port, int timeout_ms = 10000);
 
+    // NET-11: wraps an already-accepted connection socket (handed out by TcpListener's
+    // single-listen-socket fan-out) as a ready transport -- adopts the socket, sets it
+    // non-blocking, and owns ONLY that connection (no listen socket). Returns nullptr if
+    // `sock` is invalid. `sock` is a native SOCKET cast to intptr_t (-1 = none).
+    static std::unique_ptr<TcpTransport> FromAcceptedSocket(std::intptr_t sock);
+
     bool SendFrame(const std::vector<std::uint8_t>& frame,
                    FrameDelivery delivery = FrameDelivery::Reliable) override;
     bool TryReceiveFrame(std::vector<std::uint8_t>& out) override;
@@ -265,6 +289,46 @@ private:
     bool m_peer_closed = false;
     std::vector<std::uint8_t> m_recv_buffer; // accumulates partial frames
     OutboundByteQueue m_send_q; // bounded outbound queue (Spec 019 FR-D; no busy-spin)
+};
+
+// Real TCP acceptor (NET-11): ONE listen socket, N accepted connections -- the actual
+// dedicated-server shape. Bind+listen ONCE on a single port with a backlog for N pending
+// clients, then AcceptOne() each into its OWN TcpTransport (which the caller registers
+// via ReplicationServer::AddClient with a distinct id). This REPLACES the old
+// one-port-per-client scheme where every client needed its own TcpTransport::Listen on a
+// separate base_port+K port. The listen socket is non-blocking so AcceptOne never stalls
+// the server tick; AcceptOneBlocking waits (select-bounded) for the next connection for a
+// startup/test accept loop. winsock2 under _WIN32; a portable stub otherwise (the seam
+// compiles cross-platform, POSIX impl is a later additive change -- identical seam).
+class TcpListener final : public IConnectionAcceptor {
+public:
+    TcpListener();
+    ~TcpListener() override;
+
+    TcpListener(const TcpListener&) = delete;
+    TcpListener& operator=(const TcpListener&) = delete;
+
+    // Bind+listen on `port` (0 = OS-assigned ephemeral; read back via port()), with a
+    // backlog sized for the expected concurrent client count. Returns false on failure.
+    bool Listen(std::uint16_t port, int backlog = 32);
+
+    // Non-blocking: accepts ONE pending connection into its own transport, or nullptr if
+    // none is pending right now. Returned as the IConnectionAcceptor base.
+    std::unique_ptr<ILockstepTransport> AcceptOne() override;
+
+    // Blocks (bounded by timeout_ms via select) for the next inbound connection, then
+    // accepts it. Returns nullptr on timeout / error. Convenience for accept loops/tests.
+    std::unique_ptr<TcpTransport> AcceptOneBlocking(int timeout_ms);
+
+    [[nodiscard]] bool IsListening() const { return m_listen_socket >= 0; }
+    // The actual bound port (host byte order). Meaningful after a successful Listen(),
+    // including when Listen(0) picked an ephemeral port.
+    [[nodiscard]] std::uint16_t port() const { return m_port; }
+    void Close();
+
+private:
+    std::intptr_t m_listen_socket = -1; // SOCKET (winsock) / fd; -1 = none
+    std::uint16_t m_port = 0;           // actual bound port (host byte order)
 };
 
 // --- Session configuration ---------------------------------------------------------

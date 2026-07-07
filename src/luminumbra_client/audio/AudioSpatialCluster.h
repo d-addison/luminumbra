@@ -91,6 +91,16 @@ public:
     void CalculateBatchedOcclusion(const std::vector<AudioSource*>& sources, const glm::vec3& listener_pos);
     void SetPhysicsRaycastCallback(std::function<bool(const glm::vec3&, const glm::vec3&, float&)> callback);
     void SetPhysicsSystem(::Luminumbra::Systems::PhysicsSystem* physics_system) { m_physics_system = physics_system; }
+
+    // AUDIO-11: public, read-only occlusion query (0 = clear line of sight,
+    // rising toward ~1 = fully blocked). When a physics system is set it casts a
+    // ray through the world geometry (real occlusion); otherwise it uses the
+    // mockable raycast callback; with neither it returns 0. Thin wrapper over the
+    // internal CalculateOcclusion — exists so tests/diagnostics can probe a
+    // source->listener pair without driving the whole Update() pipeline.
+    float QueryOcclusion(const glm::vec3& source_pos, const glm::vec3& listener_pos) const {
+        return CalculateOcclusion(source_pos, listener_pos);
+    }
     
     // Performance tuning
     void SetMaxAudioSources(int max_sources) { m_max_audio_sources = max_sources; }
@@ -126,7 +136,7 @@ private:
     // Occlusion system
     std::function<bool(const glm::vec3&, const glm::vec3&, float&)> m_raycast_callback;
     ::Luminumbra::Systems::PhysicsSystem* m_physics_system = nullptr;
-    float CalculateOcclusion(const glm::vec3& source_pos, const glm::vec3& listener_pos);
+    float CalculateOcclusion(const glm::vec3& source_pos, const glm::vec3& listener_pos) const;
     float CalculateDistanceAttenuation(const AudioSource& source, float distance);
     float CalculateFullAttenuation(const AudioSource& source, const glm::vec3& listener_pos, bool include_occlusion, bool include_doppler, bool include_reverb);
     

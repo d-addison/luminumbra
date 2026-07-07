@@ -4247,6 +4247,13 @@ int main(int argc, char* argv[]) {
         // correctly (without this the listener sits at the origin and positional audio is near-silent).
         if (currentState == GameState::IN_GAME && audioManager && g_camera) {
             audioManager->SetListenerTransform(g_camera->Position, g_camera->Front, g_camera->Up);
+            // AUDIO-11: point the audio-occlusion raycaster at the LIVE physics world so
+            // geometry between a sound and the listener muffles it (real raycasts, not the
+            // distance-only stub). Re-set each frame -> correct across world (re)load/unload;
+            // nullptr when there is no physics -> occlusion falls back to distance-only.
+            if (auto* mam = dynamic_cast<Luminumbra::Client::MiniaudioManager*>(audioManager.get())) {
+                mam->SetPhysicsSystem(gameSession ? gameSession->GetPhysicsSystem() : nullptr);
+            }
             // AUDIO-07: feed the sun elevation (sin; the sun vector points AWAY from
             // the sun — same convention as the dawn/dusk cues below) + tick the
             // day/night bed crossfade (internally throttled to 10 Hz).

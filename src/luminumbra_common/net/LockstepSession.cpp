@@ -438,6 +438,81 @@ void TcpTransport::Close() {
     if (m_listen_socket >= 0) { ::closesocket(static_cast<SOCKET>(m_listen_socket)); m_listen_socket = -1; }
 }
 
+// --- NET-11: single-listen-socket fan-out (TcpTransport::FromAcceptedSocket + TcpListener)
+std::unique_ptr<TcpTransport> TcpTransport::FromAcceptedSocket(std::intptr_t sock) {
+    if (sock < 0) return nullptr;
+    auto t = std::make_unique<TcpTransport>();
+    t->m_socket = sock;
+    // Windows does not reliably inherit non-blocking from the listen socket; set it here
+    // so the accepted transport behaves exactly like a Connect()/Listen()-produced one.
+    u_long nonblock = 1;
+    ::ioctlsocket(static_cast<SOCKET>(sock), FIONBIO, &nonblock);
+    return t;
+}
+
+TcpListener::TcpListener() {
+    WSADATA wsa;
+    ::WSAStartup(MAKEWORD(2, 2), &wsa);
+}
+
+TcpListener::~TcpListener() {
+    Close();
+    ::WSACleanup();
+}
+
+bool TcpListener::Listen(std::uint16_t port, int backlog) {
+    m_listen_socket = static_cast<std::intptr_t>(::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
+    if (m_listen_socket < 0) return false;
+    BOOL reuse = TRUE;
+    ::setsockopt(static_cast<SOCKET>(m_listen_socket), SOL_SOCKET, SO_REUSEADDR,
+                 reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = ::htons(port);
+    if (::bind(static_cast<SOCKET>(m_listen_socket), reinterpret_cast<sockaddr*>(&addr),
+               sizeof(addr)) != 0) { Close(); return false; }
+    if (::listen(static_cast<SOCKET>(m_listen_socket), backlog) != 0) { Close(); return false; }
+    // Read back the actual bound port (Listen(0) => OS-assigned ephemeral) in HOST order.
+    sockaddr_in bound{};
+    int bound_len = static_cast<int>(sizeof(bound));
+    if (::getsockname(static_cast<SOCKET>(m_listen_socket),
+                      reinterpret_cast<sockaddr*>(&bound), &bound_len) == 0) {
+        m_port = ::ntohs(bound.sin_port);
+    } else {
+        m_port = port;
+    }
+    // Non-blocking listen socket so AcceptOne never blocks the server tick.
+    u_long nonblock = 1;
+    ::ioctlsocket(static_cast<SOCKET>(m_listen_socket), FIONBIO, &nonblock);
+    return true;
+}
+
+std::unique_ptr<ILockstepTransport> TcpListener::AcceptOne() {
+    if (m_listen_socket < 0) return nullptr;
+    const std::intptr_t sock = static_cast<std::intptr_t>(
+        ::accept(static_cast<SOCKET>(m_listen_socket), nullptr, nullptr));
+    if (sock < 0) return nullptr; // WSAEWOULDBLOCK (nothing pending) or error -> none now
+    return TcpTransport::FromAcceptedSocket(sock);
+}
+
+std::unique_ptr<TcpTransport> TcpListener::AcceptOneBlocking(int timeout_ms) {
+    if (m_listen_socket < 0) return nullptr;
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(static_cast<SOCKET>(m_listen_socket), &rfds);
+    timeval tv{timeout_ms / 1000, (timeout_ms % 1000) * 1000};
+    if (::select(0, &rfds, nullptr, nullptr, &tv) <= 0) return nullptr; // timeout/error
+    const std::intptr_t sock = static_cast<std::intptr_t>(
+        ::accept(static_cast<SOCKET>(m_listen_socket), nullptr, nullptr));
+    if (sock < 0) return nullptr;
+    return TcpTransport::FromAcceptedSocket(sock);
+}
+
+void TcpListener::Close() {
+    if (m_listen_socket >= 0) { ::closesocket(static_cast<SOCKET>(m_listen_socket)); m_listen_socket = -1; }
+}
+
 #else // !_WIN32 -- portable stub (the seam compiles; POSIX impl is a later additive change)
 
 TcpTransport::TcpTransport() = default;
@@ -450,6 +525,14 @@ bool TcpTransport::IsPeerConnected() const { return false; }
 void TcpTransport::Close() {}
 bool TcpTransport::PumpRecv() { return false; }
 int TcpTransport::FlushSendNonBlocking() { return 0; }
+std::unique_ptr<TcpTransport> TcpTransport::FromAcceptedSocket(std::intptr_t) { return nullptr; }
+
+TcpListener::TcpListener() = default;
+TcpListener::~TcpListener() { Close(); }
+bool TcpListener::Listen(std::uint16_t, int) { return false; }
+std::unique_ptr<ILockstepTransport> TcpListener::AcceptOne() { return nullptr; }
+std::unique_ptr<TcpTransport> TcpListener::AcceptOneBlocking(int) { return nullptr; }
+void TcpListener::Close() {}
 
 #endif // _WIN32
 
