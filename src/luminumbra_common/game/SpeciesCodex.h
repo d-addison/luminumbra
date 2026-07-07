@@ -131,7 +131,7 @@ inline SpeciesRegistry MakeDefaultSpeciesRegistry() {
     SpeciesRegistry reg;
     // habitat tags are game-defined opaque ids here (e.g. 0=meadow,1=forest,2=cavern,
     // 3=alpine). Listed deliberately out of id order to exercise the sorted insert.
-    reg.Register(SpeciesInfo{ 3, "Glimmer Moth",    2, 1, /*nocturnal*/ true  });
+    reg.Register(SpeciesInfo{ 3, "Dusk Moth",       2, 1, /*nocturnal*/ true  });
     reg.Register(SpeciesInfo{ 1, "Meadow Sparrow",  0, 0, /*nocturnal*/ false });
     reg.Register(SpeciesInfo{ 5, "Cavern Wisp",     3, 2, /*nocturnal*/ true  });
     reg.Register(SpeciesInfo{ 2, "Forest Hare",     1, 1, /*nocturnal*/ false });

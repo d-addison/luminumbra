@@ -6567,11 +6567,12 @@ SkinnedMeshVisualTarget SpawnSkinnedMeshVisualEntity(
 
     // Choose the avatar mesh/skeleton/clip. count==1 (the GATE) uses the engine's
     // 2-joint wave TEST RIG, byte-identical to the original. count>=2 (the manual
-    // SHOWCASE) uses the rigged GROVESTRIDER CHARACTER + its idle clip, so the row
+    // SHOWCASE) uses the data-named rigged showcase character + its idle clip, so the row
     // reads as real figures, not abstract test rigs.
     anim::Skeleton* use_skeleton = nullptr;
     anim::AnimationClip* use_clip = nullptr;
     std::string use_mesh_path;
+    std::string showcase_label = "showcase"; // OPS-16: data-driven row label (multi-rig showcase)
 
     if (n <= 1) {
         std::error_code ec;
@@ -6599,14 +6600,32 @@ SkinnedMeshVisualTarget SpawnSkinnedMeshVisualEntity(
         use_clip = &g_skinned_test_clip;
         use_mesh_path = target.mesh_path;
     } else {
-        // SHOWCASE: the grovestrider character mesh + idle clip from game data.
-        // Function-local statics persist for the program lifetime (the player
-        // components hold pointers into them), same lifetime guarantee as the
-        // g_skinned_test_* globals.
+        // SHOWCASE (row count >= 2): the skinned character mesh + idle clip named by game
+        // DATA (OPS-16 -- the engine source carries no game-content nouns; the model paths +
+        // row label live in data/common/scenario/skinned_showcase_model.json). Function-local
+        // statics persist for the program lifetime (the player components hold pointers into
+        // them), same lifetime guarantee as the g_skinned_test_* globals.
         static anim::Skeleton s_showcase_skeleton;
         static anim::AnimationClip s_showcase_clip;
-        const std::filesystem::path gmesh = root_dir / "data/models/creatures/grovestrider/grovestrider.lmesh";
-        const std::filesystem::path gclip = root_dir / "data/models/creatures/grovestrider/grovestrider.idle.lanim";
+        std::string mesh_rel, clip_rel;
+        {
+            std::ifstream in(root_dir / "data/common/scenario/skinned_showcase_model.json");
+            if (in.is_open()) {
+                try {
+                    nlohmann::json j;
+                    in >> j;
+                    mesh_rel = j.value("mesh", std::string{});
+                    clip_rel = j.value("clip", std::string{});
+                    showcase_label = j.value("label", showcase_label);
+                } catch (...) { /* malformed -> handled by the empty-path guard below */ }
+            }
+        }
+        if (mesh_rel.empty() || clip_rel.empty()) {
+            target.failure_reason = "showcase_model_config_missing";
+            return target;
+        }
+        const std::filesystem::path gmesh = root_dir / mesh_rel;
+        const std::filesystem::path gclip = root_dir / clip_rel;
         anim::SkinnedMeshAsset mesh_asset;
         anim::AnimClipAsset clip_asset;
         if (!anim::LoadSkinnedMeshAsset(gmesh.string(), mesh_asset) ||
@@ -6679,7 +6698,7 @@ SkinnedMeshVisualTarget SpawnSkinnedMeshVisualEntity(
     target.spawned = true;
     LUMINUMBRA_CORE_INFO(
         "skinned_mesh_visual_smoke: spawned {} avatar(s) [{}] centred at ({:.1f}, {:.1f}, {:.1f})",
-        n, (n <= 1 ? "test-rig" : "grovestrider"),
+        n, (n <= 1 ? "test-rig" : showcase_label.c_str()),
         target.mesh_position.x, target.mesh_position.y, target.mesh_position.z);
     return target;
 }
@@ -7231,7 +7250,7 @@ CreatureSliceScene SpawnCreatureSliceScene(
         }
         // T-I5b-2 (E1): OPTIONAL ecology stimulus subscriptions (game-data opt-in).
         // Only archetypes whose slice declares a `stimulus_subscriptions` block
-        // react to the environment; the default grovestrider carries none, so its
+        // react to the environment; the default archetype carries none, so its
         // planner path (and the CreatureSlice gate) is unchanged. Each entry maps a
         // named channel onto a need with a gain; the engine names no channel-to-need
         // semantics -- the archetype does. Unknown channel names are skipped.
