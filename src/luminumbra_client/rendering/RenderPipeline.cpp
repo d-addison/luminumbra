@@ -2589,7 +2589,7 @@ void RenderPipeline::execute_stage_shadow(const Camera& camera) {
     }
     end_gpu_pass_timer(GpuTimerPass::Shadow);
     m_cpu_frame_shadow = std::chrono::steady_clock::now(); // spec 004
-    glViewport(0, 0, m_screen_width, m_screen_height);
+    glViewport(0, 0, m_internal_width, m_internal_height); // GPU-P09: scene renders at internal res
 }
 
 void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
@@ -2646,7 +2646,7 @@ void RenderPipeline::execute_stage_plant_procgen(const Camera& camera) {
         const GLenum pp_bufs[4] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1,
                                    GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3};
         glDrawBuffers(4, pp_bufs);
-        glViewport(0, 0, m_screen_width, m_screen_height);
+        glViewport(0, 0, m_internal_width, m_internal_height); // GPU-P09: into internal G-buffer
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(GL_LESS);
         glDepthMask(GL_TRUE);
@@ -2689,7 +2689,7 @@ void RenderPipeline::execute_stage_farfield_raymarch(const Camera& camera) {
         const GLenum ff_bufs[4] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1,
                                    GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3};
         glDrawBuffers(4, ff_bufs);
-        glViewport(0, 0, m_screen_width, m_screen_height);
+        glViewport(0, 0, m_internal_width, m_internal_height); // GPU-P09: into internal G-buffer
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(GL_LESS);
         glDepthMask(GL_TRUE);
@@ -2715,7 +2715,7 @@ void RenderPipeline::execute_stage_ground_decals(const Camera& camera) {
         glBindFramebuffer(GL_FRAMEBUFFER, m_gbuffer_pass->gbuffer().fbo_id);
         const GLenum gd_bufs[1] = {GL_COLOR_ATTACHMENT2};  // albedo only
         glDrawBuffers(1, gd_bufs);
-        glViewport(0, 0, m_screen_width, m_screen_height);
+        glViewport(0, 0, m_internal_width, m_internal_height); // GPU-P09: into internal G-buffer
         glDisable(GL_DEPTH_TEST);
         glDepthMask(GL_FALSE);
         glDisable(GL_CULL_FACE);
@@ -2814,7 +2814,7 @@ void RenderPipeline::execute_stage_skybox(const Camera& camera) {
         // (b) Depth-masked upsample composite -> lighting FBO (full res). Writes the
         //     bilinear-upsampled sky only where the scene depth is the far plane.
         glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
-        glViewport(0, 0, m_screen_width, m_screen_height);
+        glViewport(0, 0, m_internal_width, m_internal_height); // GPU-P09: into internal lighting FBO
         glDisable(GL_DEPTH_TEST);
         glDepthMask(GL_FALSE);
         m_cloud_composite_shader->use();
@@ -2889,7 +2889,7 @@ void RenderPipeline::execute_stage_waterfall(const Camera& camera) {
         !m_waterfall_sheet_sites.empty() &&
         m_waterfall_shader && m_waterfall_shader->IsValid()) {
         glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
-        glViewport(0, 0, m_screen_width, m_screen_height);
+        glViewport(0, 0, m_internal_width, m_internal_height); // GPU-P09: into internal lighting FBO
 
         // Save GL state we toggle so it is restored exactly afterwards.
         const GLboolean blend_was = glIsEnabled(GL_BLEND);
@@ -3073,7 +3073,7 @@ void RenderPipeline::execute_stage_glass_oit_resolve(const Camera& camera) {
         return;
     }
     glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
-    glViewport(0, 0, m_screen_width, m_screen_height);
+    glViewport(0, 0, m_internal_width, m_internal_height); // GPU-P09: into internal lighting FBO
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
