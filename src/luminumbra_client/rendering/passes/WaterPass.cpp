@@ -139,7 +139,7 @@ void WaterPass::generate_caustics(const RenderContext& ctx) {
 
     glEnable(GL_DEPTH_TEST);
     glBindFramebuffer(GL_FRAMEBUFFER, ctx.lit_scene.id);
-    glViewport(0, 0, ctx.screen_width, ctx.screen_height);
+    glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // GPU-P09: water composite into the internal scene
 }
 
 WaterDrawStats WaterPass::execute(const RenderContext& ctx, const WaterPassInput& input, const Camera& camera) {

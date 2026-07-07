@@ -115,7 +115,7 @@ void LightingPass::copy_lighting_color_to_opaque_texture(const RenderContext& ct
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_lighting_fbo.fbo_id);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glBindTexture(GL_TEXTURE_2D, m_lighting_fbo.opaque_color_texture);
-    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, ctx.screen_width, ctx.screen_height);
+    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, ctx.internal_w(), ctx.internal_h()); // GPU-P09: internal-sized lit color
     glBindTexture(GL_TEXTURE_2D, 0);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 }
@@ -123,7 +123,7 @@ void LightingPass::copy_lighting_color_to_opaque_texture(const RenderContext& ct
 void LightingPass::execute(const RenderContext& ctx) {
     const Camera& camera = *ctx.camera;
     glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_fbo.fbo_id);
-    glViewport(0, 0, ctx.screen_width, ctx.screen_height);
+    glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // GPU-P09: deferred lighting into the internal FBO
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     m_lighting_shader->use();
     glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_position.id);    // View-space position
@@ -315,8 +315,8 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
     if (!lit.active || lit.pulse_intensity <= 0.0f) {
         return; // zero-cost OFF path (no strike this frame)
     }
-    const int w = static_cast<int>(ctx.screen_width);
-    const int h = static_cast<int>(ctx.screen_height);
+    const int w = static_cast<int>(ctx.internal_w()); // GPU-P09: overlay scratch at internal res
+    const int h = static_cast<int>(ctx.internal_h());
     if (w <= 0 || h <= 0 || !m_lighting_fbo.fbo_id || !m_lighting_fbo.color_texture) {
         return;
     }

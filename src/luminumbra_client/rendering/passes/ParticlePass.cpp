@@ -629,7 +629,7 @@ std::size_t ParticlePass::execute(const RenderContext& ctx, const Camera& camera
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, ctx.lit_scene.id);
-    glViewport(0, 0, ctx.screen_width, ctx.screen_height);
+    glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // GPU-P09: particles into the internal scene
 
     // Transparent particles: test against scene depth but do not write depth,
     // and blend additively into the HDR lighting target.

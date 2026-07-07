@@ -897,7 +897,7 @@ std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera)
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, ctx.lit_scene.id);
-    glViewport(0, 0, ctx.screen_width, ctx.screen_height);
+    glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // GPU-P09: forward foliage into the internal scene
 
     // Opaque-ish ground cover: depth test AND write against the scene depth so
     // the cards occlude correctly, alpha-tested in the frag shader. Blend on for

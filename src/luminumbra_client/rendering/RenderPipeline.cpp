@@ -2712,7 +2712,7 @@ void RenderPipeline::execute_stage_farfield_raymarch(const Camera& camera) {
         // can sample scene depth for the far-pixel early-out without a feedback loop on
         // the depth attachment it writes via gl_FragDepth.
         m_shieldrt_far_pass->capture_scene_depth(
-            m_gbuffer_pass->gbuffer().fbo_id, m_screen_width, m_screen_height);
+            m_gbuffer_pass->gbuffer().fbo_id, m_internal_width, m_internal_height); // GPU-P09: copy the internal G-buffer depth
         glBindFramebuffer(GL_FRAMEBUFFER, m_gbuffer_pass->gbuffer().fbo_id);
         const GLenum ff_bufs[4] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1,
                                    GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3};
@@ -2724,7 +2724,7 @@ void RenderPipeline::execute_stage_farfield_raymarch(const Camera& camera) {
         glDisable(GL_CULL_FACE);
         m_shieldrt_far_pass->render(
             ff_view, ff_view_proj, ff_inv_vp, ff_normal_view, camera.Position,
-            glm::vec2(static_cast<float>(m_screen_width), static_cast<float>(m_screen_height)),
+            glm::vec2(static_cast<float>(m_internal_width), static_cast<float>(m_internal_height)), // GPU-P09: internal viewport for gl_FragCoord/u_viewport
             camera.GetFarPlane());
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         end_gpu_pass_timer(GpuTimerPass::FarFieldRaymarch);
@@ -2863,6 +2863,7 @@ void RenderPipeline::execute_stage_skybox(const Camera& camera) {
         if (blend_was) glEnable(GL_BLEND);
     } else {
         glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
+        glViewport(0, 0, m_internal_width, m_internal_height); // GPU-P09: skybox must not inherit a stale (screen) viewport
         m_skybox_pass->execute(skybox_ctx, camera, false);
     }
     end_gpu_pass_timer(GpuTimerPass::Skybox);
