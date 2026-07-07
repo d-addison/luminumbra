@@ -686,8 +686,8 @@ std::size_t ParticlePass::execute(const RenderContext& ctx, const Camera& camera
     // live glfwGetTime() read — dispatch must be bit-idempotent per prepared frame.
     m_shader->setFloat("u_time", ctx.time_seconds);
     m_shader->setVec2("u_screenSize",
-                      glm::vec2(static_cast<float>(ctx.screen_width),
-                                static_cast<float>(ctx.screen_height)));
+                      glm::vec2(static_cast<float>(ctx.internal_w()),
+                                static_cast<float>(ctx.internal_h()))); // GPU-P09: internal scene extent
     m_shader->setFloat("u_nearPlane", camera.GetNearPlane());
     m_shader->setFloat("u_farPlane", camera.GetFarPlane());
 

@@ -253,7 +253,7 @@ void LightingPass::execute(const RenderContext& ctx) {
             camera.GetNearPlane(), camera.GetFarPlane());
         m_lighting_shader->setMat4("u_projection", cave_proj);
         m_lighting_shader->setVec2("u_screenSize",
-            glm::vec2(ctx.screen_width, ctx.screen_height));
+            glm::vec2(ctx.internal_w(), ctx.internal_h())); // GPU-P09: cave AO marches the internal G-buffer
 
         struct CaveAO { float enabled, maxDist, floor, thickness; int steps; };
         static const CaveAO s_caveAO = [] {

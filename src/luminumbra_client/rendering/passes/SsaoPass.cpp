@@ -153,9 +153,10 @@ void SsaoPass::execute_ssao(const RenderContext& ctx) {
     if (halfres) glViewport(0, 0, static_cast<GLsizei>(m_ssao.halfW), static_cast<GLsizei>(m_ssao.halfH));
     glClear(GL_COLOR_BUFFER_BIT);
     const glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)ctx.screen_width / (float)ctx.screen_height, camera.GetNearPlane(), camera.GetFarPlane());
-    // gPosition is FULL-res; the march metric uses the full screen size regardless of
-    // the (possibly half-res) output viewport.
-    const glm::vec2 screen_size(ctx.screen_width, ctx.screen_height);
+    // GPU-P09: the G-buffer position/normal are the INTERNAL (scaled) extent, so the AO
+    // march metric + noise tiling must use the internal size (at scale 1.0 internal==screen,
+    // byte-identical). The half-res GTAO sub-scaling composes on top of this.
+    const glm::vec2 screen_size(ctx.internal_w(), ctx.internal_h());
 
     if (quality > 0 && m_ssao.gtaoShader && m_ssao.gtaoShader->IsValid()) {
         // Render-optimization (ssao-gtao): XeGTAO horizon-slice AO. Reads the SAME
@@ -190,7 +191,7 @@ void SsaoPass::execute_ssao(const RenderContext& ctx) {
     glBindVertexArray(ctx.screen_quad_vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
-    if (halfres) glViewport(0, 0, static_cast<GLsizei>(ctx.screen_width), static_cast<GLsizei>(ctx.screen_height));
+    if (halfres) glViewport(0, 0, static_cast<GLsizei>(ctx.internal_w()), static_cast<GLsizei>(ctx.internal_h())); // GPU-P09: internal extent
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
@@ -200,7 +201,7 @@ void SsaoPass::execute_blur(const RenderContext& ctx) {
     if (ctx.ssao_quality == 3 && m_ssao.halfFBO != 0 &&
         m_ssao.upsampleShader && m_ssao.upsampleShader->IsValid()) {
         glBindFramebuffer(GL_FRAMEBUFFER, m_ssao.blurFBO);
-        glViewport(0, 0, static_cast<GLsizei>(ctx.screen_width), static_cast<GLsizei>(ctx.screen_height));
+        glViewport(0, 0, static_cast<GLsizei>(ctx.internal_w()), static_cast<GLsizei>(ctx.internal_h())); // GPU-P09: internal extent
         glClear(GL_COLOR_BUFFER_BIT);
         m_ssao.upsampleShader->use();
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m_ssao.halfTex);

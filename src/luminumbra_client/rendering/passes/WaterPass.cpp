@@ -169,7 +169,7 @@ WaterDrawStats WaterPass::execute(const RenderContext& ctx, const WaterPassInput
 
     // Set scene and material properties (as before)
     m_water_shader->setVec3("u_camera_pos", camera.Position);
-    m_water_shader->setVec2("u_screen_size", glm::vec2(ctx.screen_width, ctx.screen_height));
+    m_water_shader->setVec2("u_screen_size", glm::vec2(ctx.internal_w(), ctx.internal_h())); // GPU-P09: samples the internal scene
     m_water_shader->setFloat("u_time", ctx.time_seconds);
     m_water_shader->setVec3("u_sun_direction", ctx.sun.direction);
     m_water_shader->setVec3("u_sun_color", ctx.sun.color);
