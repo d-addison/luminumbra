@@ -1024,6 +1024,16 @@ private:
 
     u32 m_screen_width = 0;
     u32 m_screen_height = 0;
+
+    // GPU-P09 render-scale seam. The scene is rendered at m_internal_* (= output x
+    // m_render_scale) into the scaled G-buffer/lighting/SSAO intermediates, then upscaled
+    // to output (m_screen_*) for post/UI/backbuffer; the shadow atlas, TAAU history and
+    // the backbuffer stay at output res. m_render_scale is pinned at 1.0 until Phase B
+    // wires user.render_scale -- at 1.0 m_internal_* == m_screen_* (lround(N*1.0f) == N)
+    // so the pipeline is byte-identical to the pre-seam renderer.
+    float m_render_scale = 1.0f;
+    u32 m_internal_width = 0;
+    u32 m_internal_height = 0;
     // Spec 016 (Group K): one glfwGetTime() snapshot per frame (set at render_frame
     // top), fed to RenderContext.time_seconds for every converted pass.
     float m_wall_clock_time = 0.0f;

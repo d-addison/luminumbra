@@ -639,18 +639,24 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
     m_started = false;
     m_screen_width = screen_width;
     m_screen_height = screen_height;
+    // GPU-P09: internal (scaled) render extent. Pinned to output until Phase B reads
+    // user.render_scale; at m_render_scale==1.0, lround(N*1.0f)==N so this is exactly
+    // the output size and the scaled targets below allocate byte-identically to before.
+    m_internal_width = static_cast<u32>(std::lround(m_screen_width * m_render_scale));
+    m_internal_height = static_cast<u32>(std::lround(m_screen_height * m_render_scale));
     m_root_path = root_path;
 
     try {
         set_default_shadow_cascade_splits(m_shadow_pass->shadow_map());
 
         init_shaders();
-        m_lighting_pass->init_lighting_fbo(m_render_registry, screen_width, screen_height);
-        m_gbuffer_pass->init_gbuffer(m_render_registry, screen_width, screen_height);
+        // SCALED intermediates render at internal res (== output at scale 1.0).
+        m_lighting_pass->init_lighting_fbo(m_render_registry, m_internal_width, m_internal_height);
+        m_gbuffer_pass->init_gbuffer(m_render_registry, m_internal_width, m_internal_height);
         m_shadow_pass->init_shadow_map(m_render_registry);
-        m_ssao_pass->init_ssao(m_render_registry, screen_width, screen_height);
+        m_ssao_pass->init_ssao(m_render_registry, m_internal_width, m_internal_height);
         init_screen_quad();
-        init_taau(screen_width, screen_height); // FR-R5 TAAU history/FBO (used only when render.taau on)
+        init_taau(screen_width, screen_height); // OUTPUT res: TAAU history/backbuffer stay at output
         init_halfres_cloud(); // no-op unless cloud quality was set > 0 before startup
         m_skybox_pass->init_geometry();
         m_particle_pass->init_buffers(); // T-I5a-1: persistent-mapped instance pool
@@ -3527,20 +3533,24 @@ void RenderPipeline::on_resize(u32 new_width, u32 new_height) {
     if (new_width == 0 || new_height == 0 || (new_width == m_screen_width && new_height == m_screen_height)) return;
     m_screen_width = new_width;
     m_screen_height = new_height;
+    // GPU-P09: recompute the internal (scaled) extent from the new output size.
+    m_internal_width = static_cast<u32>(std::lround(m_screen_width * m_render_scale));
+    m_internal_height = static_cast<u32>(std::lround(m_screen_height * m_render_scale));
     // Reallocate the screen-sized targets, preserving formats (each init_*
     // rebuilds with the same internal formats it used at startup). The shadow
     // map is a fixed-resolution cascade array and the water caustics texture is
     // a fixed-resolution offscreen target, so neither resizes here; the water /
     // skybox / far-LOD passes read the resized G-buffer and lighting targets
     // through the shared pipeline state and pick up the new size automatically.
+    // SCALED intermediates reallocate at internal res (== output at scale 1.0).
     m_lighting_pass->destroy_lighting_fbo(m_render_registry);
-    m_lighting_pass->init_lighting_fbo(m_render_registry, new_width, new_height);
+    m_lighting_pass->init_lighting_fbo(m_render_registry, m_internal_width, m_internal_height);
     m_gbuffer_pass->destroy_gbuffer(m_render_registry);
-    m_gbuffer_pass->init_gbuffer(m_render_registry, new_width, new_height);
+    m_gbuffer_pass->init_gbuffer(m_render_registry, m_internal_width, m_internal_height);
     m_ssao_pass->destroy_ssao(m_render_registry);
-    m_ssao_pass->init_ssao(m_render_registry, new_width, new_height);
+    m_ssao_pass->init_ssao(m_render_registry, m_internal_width, m_internal_height);
     destroy_taau();
-    init_taau(new_width, new_height); // FR-R5 TAAU history invalidated on resize
+    init_taau(new_width, new_height); // OUTPUT res: TAAU history invalidated on resize, stays output
     init_halfres_cloud(); // re-size the reduced-res sky-dome target (no-op at quality 0)
     m_frustumCache.valid = false;
     ++m_resize_generation;
