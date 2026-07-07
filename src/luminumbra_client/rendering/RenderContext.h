@@ -36,9 +36,19 @@ struct RenderContext {
     const Camera* camera = nullptr;
     float delta_time = 0.0f;
 
-    // Backbuffer / screen geometry.
+    // Backbuffer / screen geometry (== OUTPUT extent).
     u32 screen_width = 0;
     u32 screen_height = 0;
+
+    // GPU-P09 render-scale seam: the internal (scaled) render extent the scaled scene
+    // passes render at (== screen_* at render_scale 1.0). Passes that render into the
+    // scaled G-buffer / lighting intermediates (aerial, god-rays) viewport at internal_*;
+    // the taau resolve reads internal (u_texel = 1/internal) but writes output. Falls back
+    // to screen_* when a builder leaves it 0 (an output-res pass).
+    u32 internal_width = 0;
+    u32 internal_height = 0;
+    u32 internal_w() const { return internal_width != 0 ? internal_width : screen_width; }
+    u32 internal_h() const { return internal_height != 0 ? internal_height : screen_height; }
 
     // Offscreen-target state (Spec 002 Item 1 preview path). When active the
     // final image is written to offscreen_fbo at offscreen_w/h instead of the

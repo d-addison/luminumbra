@@ -770,6 +770,8 @@ bool RenderPipeline::capture_finalblit_parity(const std::filesystem::path& out_d
     RenderContext ctx;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
+    ctx.internal_width = m_internal_width;   // GPU-P09
+    ctx.internal_height = m_internal_height;
     ctx.offscreen_active = true; // route both blits to a chosen offscreen target
     ctx.offscreen_w = m_screen_width;
     ctx.offscreen_h = m_screen_height;
@@ -929,6 +931,8 @@ RenderContext RenderPipeline::make_ssao_context(const Camera& camera) {
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
+    ctx.internal_width = m_internal_width;   // GPU-P09
+    ctx.internal_height = m_internal_height;
     ctx.registry = &m_render_registry;
     ctx.screen_quad_vao = m_screen_quad_vao;
     ctx.ssao_quality = m_ssao_quality;
@@ -945,6 +949,8 @@ RenderContext RenderPipeline::make_debug_view_context(const Camera& camera) {
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
+    ctx.internal_width = m_internal_width;   // GPU-P09
+    ctx.internal_height = m_internal_height;
     ctx.registry = &m_render_registry;
     const GBuffer& gb = m_gbuffer_pass->gbuffer();
     ctx.gbuffer_position = m_render_registry.adopt_texture("gbuffer_position", gb.position_texture);
@@ -962,6 +968,8 @@ RenderContext RenderPipeline::make_ground_decal_context(const Camera& camera) {
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
+    ctx.internal_width = m_internal_width;   // GPU-P09
+    ctx.internal_height = m_internal_height;
     ctx.registry = &m_render_registry;
     ctx.gbuffer_position = m_render_registry.adopt_texture(
         "gbuffer_position", m_gbuffer_pass->gbuffer().position_texture);
@@ -975,6 +983,8 @@ RenderContext RenderPipeline::make_plant_context() {
     ctx.registry = &m_render_registry;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
+    ctx.internal_width = m_internal_width;   // GPU-P09
+    ctx.internal_height = m_internal_height;
     ctx.time_seconds = m_wall_clock_time;
     return ctx;
 }
@@ -986,6 +996,8 @@ RenderContext RenderPipeline::make_particle_context(const Camera& camera) {
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
+    ctx.internal_width = m_internal_width;   // GPU-P09
+    ctx.internal_height = m_internal_height;
     ctx.registry = &m_render_registry;
     ctx.sun = m_sun;
     ctx.sky_ambient_color = m_skyAmbientColor;
@@ -1005,6 +1017,8 @@ RenderContext RenderPipeline::make_foliage_context(const Camera& camera) {
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
+    ctx.internal_width = m_internal_width;   // GPU-P09
+    ctx.internal_height = m_internal_height;
     ctx.registry = &m_render_registry;
     ctx.time_seconds = m_wall_clock_time;
     ctx.sun = m_sun;
@@ -1027,6 +1041,8 @@ RenderContext RenderPipeline::make_lighting_context(const Camera& camera) {
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
+    ctx.internal_width = m_internal_width;   // GPU-P09
+    ctx.internal_height = m_internal_height;
     ctx.registry = &m_render_registry;
     ctx.screen_quad_vao = m_screen_quad_vao;
 
@@ -1112,6 +1128,8 @@ RenderContext RenderPipeline::make_skybox_context(const Camera& camera) {
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
+    ctx.internal_width = m_internal_width;   // GPU-P09
+    ctx.internal_height = m_internal_height;
     ctx.registry = &m_render_registry;
     ctx.screen_quad_vao = m_screen_quad_vao;
     ctx.time_seconds = m_wall_clock_time;
@@ -1154,6 +1172,8 @@ RenderContext RenderPipeline::make_water_context(const Camera& camera) {
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
+    ctx.internal_width = m_internal_width;   // GPU-P09
+    ctx.internal_height = m_internal_height;
     ctx.registry = &m_render_registry;
     ctx.screen_quad_vao = m_screen_quad_vao;
     ctx.time_seconds = m_wall_clock_time;
@@ -1172,6 +1192,8 @@ RenderContext RenderPipeline::make_gbuffer_context(const Camera& camera, const g
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
+    ctx.internal_width = m_internal_width;   // GPU-P09
+    ctx.internal_height = m_internal_height;
     ctx.registry = &m_render_registry;
     ctx.time_seconds = m_wall_clock_time;
     ctx.taau_jitter_ndc = m_taau_jitter_ndc;
@@ -2988,7 +3010,7 @@ void RenderPipeline::execute_stage_glass_oit_accum(const Camera& camera) {
             GLuint t = 0;
             glGenTextures(1, &t);
             glBindTexture(GL_TEXTURE_2D, t);
-            glTexStorage2D(GL_TEXTURE_2D, 1, ifmt, m_screen_width, m_screen_height);
+            glTexStorage2D(GL_TEXTURE_2D, 1, ifmt, m_internal_width, m_internal_height); // GPU-P09: match internal lighting depth
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
             label_gl_object(GL_TEXTURE, t, name);
@@ -3019,7 +3041,7 @@ void RenderPipeline::execute_stage_glass_oit_accum(const Camera& camera) {
     glBindFramebuffer(GL_FRAMEBUFFER, m_oit_fbo);
     const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
     glDrawBuffers(2, bufs);
-    glViewport(0, 0, m_screen_width, m_screen_height);
+    glViewport(0, 0, m_internal_width, m_internal_height); // GPU-P09: OIT composites into internal scene
     const GLfloat clear_accum[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     const GLfloat clear_reveal[4] = {1.0f, 1.0f, 1.0f, 1.0f};
     glClearBufferfv(GL_COLOR, 0, clear_accum);
@@ -3417,6 +3439,8 @@ void RenderPipeline::execute_stage_final_blit(const Camera& camera) {
         ctx.delta_time = deltaTime;
         ctx.screen_width = m_screen_width;
         ctx.screen_height = m_screen_height;
+        ctx.internal_width = m_internal_width;   // GPU-P09
+        ctx.internal_height = m_internal_height;
         ctx.offscreen_active = m_offscreen_target_active;
         ctx.offscreen_fbo = m_offscreen_target_fbo;
         ctx.offscreen_w = m_offscreen_target_w;
@@ -3681,6 +3705,8 @@ RenderContext RenderPipeline::make_aerial_context(const Camera& camera) {
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
+    ctx.internal_width = m_internal_width;   // GPU-P09
+    ctx.internal_height = m_internal_height;
     ctx.registry = &m_render_registry;
     ctx.screen_quad_vao = m_screen_quad_vao;
     ctx.sun = m_sun;
@@ -3729,7 +3755,7 @@ void RenderPipeline::execute_aerial_pass(const RenderContext& ctx) {
     const Camera& camera = *ctx.camera;
 
     glBindFramebuffer(GL_FRAMEBUFFER, lit_fbo);
-    glViewport(0, 0, ctx.screen_width, ctx.screen_height);
+    glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // GPU-P09: aerial into internal lit FBO
     const GLboolean depth_was_enabled = glIsEnabled(GL_DEPTH_TEST);
     glDisable(GL_DEPTH_TEST);
     const GLboolean blend_was_enabled = glIsEnabled(GL_BLEND);
@@ -3785,6 +3811,8 @@ RenderContext RenderPipeline::make_god_rays_context(const Camera& camera) {
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
+    ctx.internal_width = m_internal_width;   // GPU-P09
+    ctx.internal_height = m_internal_height;
     ctx.registry = &m_render_registry;
     ctx.screen_quad_vao = m_screen_quad_vao;
     ctx.lit_scene = m_render_registry.adopt_fbo("lit_scene", m_lighting_pass->lighting_fbo().fbo_id);
@@ -3829,7 +3857,7 @@ void RenderPipeline::execute_god_rays(const RenderContext& ctx) {
     const GLuint opaque_tex = ctx.opaque_scene.id;
     if (sun_visible > 0.002f && lit_fbo && opaque_tex) {
         glBindFramebuffer(GL_FRAMEBUFFER, lit_fbo);
-        glViewport(0, 0, ctx.screen_width, ctx.screen_height);
+        glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // GPU-P09: god-rays into internal lit FBO
         const GLboolean depth_was = glIsEnabled(GL_DEPTH_TEST);
         glDisable(GL_DEPTH_TEST);
         const GLboolean blend_was = glIsEnabled(GL_BLEND);
@@ -3996,6 +4024,8 @@ RenderContext RenderPipeline::make_taau_context() {
     RenderContext ctx;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
+    ctx.internal_width = m_internal_width;   // GPU-P09
+    ctx.internal_height = m_internal_height;
     ctx.registry = &m_render_registry;
     ctx.screen_quad_vao = m_screen_quad_vao;
     const FrameBufferObject& lfbo = m_lighting_pass->lighting_fbo();
@@ -4035,7 +4065,7 @@ void RenderPipeline::execute_taau_resolve(const RenderContext& ctx) {
     m_taau_shader->setInt("u_current", 0);
     m_taau_shader->setInt("u_history", 1);
     m_taau_shader->setInt("u_motion", 2);
-    m_taau_shader->setVec2("u_texel", glm::vec2(1.0f / (float)ctx.screen_width, 1.0f / (float)ctx.screen_height));
+    m_taau_shader->setVec2("u_texel", glm::vec2(1.0f / (float)ctx.internal_w(), 1.0f / (float)ctx.internal_h())); // GPU-P09: neighborhood steps by internal texels (u_current is internal-sized)
     m_taau_shader->setFloat("u_blend", 0.9f);
     m_taau_shader->setFloat("u_sharpness", 0.4f);  // recover TAA temporal-blur softness
     m_taau_shader->setInt("u_history_valid", m_taau_history_valid ? 1 : 0);
