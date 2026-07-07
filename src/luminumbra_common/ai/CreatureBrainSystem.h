@@ -111,8 +111,9 @@ inline int WorldToScentCell(float world, float origin, float cell_size) {
 // LocomotionIntent, which ambient creatures never carry). Default nullptr keeps
 // every existing call byte-identical.
 //
-// INSTINCT-09 FOLLOW-UP: `use_perception_substrate` is an ADDITIVE opt-in (default
-// FALSE). When false, the per-creature nearest-target scan runs the original inline
+// INSTINCT-09 (retirement 2026-07-07): `use_perception_substrate` now DEFAULTS TRUE —
+// the shared substrate is the CANONICAL path; false selects the retained inline scan
+// (the byte-identical regression reference). When false, the per-creature nearest-target scan runs the original inline
 // snapshot loop and the tick is byte-identical. When true, that scan routes through
 // the SHARED PerceptionField (PerceptionSubstrate.h) — a deterministic, id-ordered
 // neighbour scan built once per tick over the opposite-role live-target set — and
@@ -126,7 +127,7 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
                                                        float scent_origin_x = 0.0f,
                                                        float scent_origin_z = 0.0f,
                                                        float scent_cell_size = 0.0f,
-                                                       bool use_perception_substrate = false) {
+                                                       bool use_perception_substrate = true) {
     CreatureBrainStats stats;
     auto view = reg.view<Comp::CreatureComponent, Comp::TransformComponent>();
 

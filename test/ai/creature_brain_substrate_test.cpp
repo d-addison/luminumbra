@@ -145,19 +145,21 @@ TEST(CreatureBrainSubstrate, SubstrateFlagIsBehaviorPreserving) {
 // The flag defaults OFF: the default-argument call must bind the inline path, i.e. be
 // identical to an explicit use_perception_substrate=false call. (ON == OFF is proven
 // separately above; here we pin that the DEFAULT resolves to the OFF path.)
-TEST(CreatureBrainSubstrate, FlagDefaultsOff) {
+// INSTINCT-09 retirement: the flag now DEFAULTS TRUE (substrate is the canonical path),
+// so the default call must remain byte-identical to the retained explicit inline path.
+TEST(CreatureBrainSubstrate, DefaultSubstrateByteIdenticalToInline) {
     entt::registry default_reg;
     entt::registry explicit_off_reg;
     BuildRoster(default_reg);
     BuildRoster(explicit_off_reg);
 
     for (int t = 0; t < 30; ++t) {
-        RunCreatureBrainSystemOnTick(default_reg, kDt);  // all defaults -> flag defaults OFF
+        RunCreatureBrainSystemOnTick(default_reg, kDt);  // all defaults -> flag now defaults TRUE (substrate)
         RunCreatureBrainSystemOnTick(explicit_off_reg, kDt, {}, nullptr, 0.0f, 0.0f, 0.0f,
-                                     /*use_perception_substrate=*/false);
+                                     /*use_perception_substrate=*/false);  // retained inline reference
     }
     EXPECT_EQ(CaptureState(default_reg), CaptureState(explicit_off_reg))
-        << "the default call must bind use_perception_substrate=false (the inline path)";
+        << "the default (now substrate) call must be byte-identical to the retained inline path";
 }
 
 // The substrate path is itself deterministic: identical roster + ticks -> identical state.
