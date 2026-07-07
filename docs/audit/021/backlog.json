@@ -2499,7 +2499,7 @@
       "dependencies": [
         "FOLIAGE-03"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "NEW: ForestPerfBudget-green \u2014 the 16k-tree model WITH the impostor-atlas LOD3 path passes the tri+draw budgets and -Mode FarFieldForestBudget asserts over_budget.any == false",
       "rank": 133
     },

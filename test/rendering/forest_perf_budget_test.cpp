@@ -1,10 +1,11 @@
 // far-field-source-unification (FR-003 / AC-003) + perf-lane-and-ecology-tick
 // FR-001 forest scenario: the forest PERF-BUDGET harness.
 //
-// This is pillar-B's FIRST slice per the spec: a RED budget gate that captures the
-// foliage geometry draw load (instance count, draw calls, foliage triangles/frame)
-// at a PINNED 16k-tree load and FAILS at today's load -- BEFORE octahedral impostors
-// (Wave 3) exist. It is the harness impostors must flip GREEN; it is intended RED now.
+// This is pillar-B's forest geometry PERF-BUDGET harness: it captures the foliage
+// geometry draw load (instance count, draw calls, foliage triangles/frame) at a PINNED
+// 16k-tree load. It was RED before octahedral impostors (Wave 3); FOLIAGE-05 re-tasks it
+// GREEN now that impostors landed + default-ON, modeling the far-field billboard fold and
+// asserting the impostor-ON load holds its (re-blessed) regression budget.
 //
 // SHARED, not duplicated: the GPU FRAME-MS forest scenario already lives in the
 // release `initial_world_loading_perf_test` "forest" benchmark gated by -Mode
@@ -22,12 +23,11 @@
 // group, split every kStaticInstanceCapacity=16384 instances) WITHOUT a GL context.
 // Nothing here touches the sim / world_hash path.
 //
-// RED-by-design: with today's geometry (no LOD3 hemi-octa impostor atlas folding the
-// far field into a shared cross-billboard, no per-frame static-instance dirty cache),
-// the 16k-tree visible-triangle total at the pinned camera EXCEEDS the budget. The
-// budget assertions therefore FAIL today on purpose; the artifact is still emitted so
-// the validator (-Mode FarFieldForestBudget) and Wave-3 impostors can read the numbers
-// and certify "done" only when draw-calls/triangles drop under budget with impostors ON.
+// GREEN with impostors (FOLIAGE-05): the model folds the far field (d >= 200 m) into
+// octa-impostor billboards exactly as GBufferPass does, so the impostor-ON 16k load holds
+// the re-blessed regression budget. If the far-field fold regresses the total ~doubles
+// (~52.7M -> ~99.4M) and the gate goes RED again. The artifact is always emitted so the
+// validator (-Mode FarFieldForestBudget) reads the numbers and asserts over_budget.any == false.
 
 #include "luminumbra_client/rendering/TreeLod.h"
 
@@ -82,6 +82,10 @@ constexpr std::uint64_t kLod0TrisPerTree = 12000;
 // Per-LOD fraction of the LOD0 triangle budget, matching tree_lod_test's
 // asset_processor --emit-lods budgets (LOD1 ~ 1/2, LOD2 ~ 1/6, LOD3 cross-billboard).
 const double kLodTriFrac[kTreeLodCount] = {1.0, 0.5, 1.0 / 6.0, 6.0 / 12000.0};
+// With octa impostors ON (the landed default), a LOD3 tree's 3 parts fold into ONE
+// camera-facing billboard quad (GBufferPass.cpp:545-553) -- two triangles per tree,
+// drawn as a single shared instanced draw for the whole far field.
+constexpr std::uint64_t kImpostorTrisPerTree = 2;
 
 // GBufferPass batches instanced static meshes into one glDrawElementsInstanced per
 // (mesh-part x LOD-variant) group, splitting a group every kStaticInstanceCapacity
@@ -89,22 +93,26 @@ const double kLodTriFrac[kTreeLodCount] = {1.0, 0.5, 1.0 / 6.0, 6.0 / 12000.0};
 // matches the production batcher.
 constexpr int kStaticInstanceCapacity = 16384;
 
-// --- BUDGETS (the RED gate) ------------------------------------------------------
+// --- BUDGETS (the GREEN impostor-regression gate) --------------------------------
 //
-// These are the geometry ceilings the far field must hold at the 16k load. Today's
-// load (no impostor atlas, no dirty cache) EXCEEDS them -> the gate is RED by design.
-// They are deliberately tight enough that the current all-real-geometry far field
-// fails, and loose enough that a LOD3 hemi-octa impostor far field (Wave 3) can pass.
+// FOLIAGE-05: octa impostors landed + default-ON (FOLIAGE-03), so the far field
+// (d >= 200 m) folds into single billboards and the model above reflects it. These
+// ceilings are a REGRESSION tripwire the impostor-ON 16k stand must hold -- NOT the old
+// aspirational target.
 //
-//  * Triangle budget: a vast 16k-tree forest must stay well under ~12M visible tris/
-//    frame for the far field to fit a 300fps target alongside terrain/sky/water. With
-//    NO impostors, even distance-LOD'd, 16k trees blow past this (see the emitted
-//    number); with a LOD3 impostor atlas folding the bulk of the stand into a few
-//    quads, it drops under.
-//  * Draw-call budget: the static-mesh foliage far field must batch into a small,
-//    fixed number of instanced draws. Today the distant trees still issue real
-//    per-part instanced draws; a shared impostor atlas collapses them.
-constexpr std::uint64_t kFoliageTriBudgetPerFrame = 12'000'000ull;
+//  * Triangle budget = 60M. The impostor-ON geometry load is ~52.7M tris/frame,
+//    DOMINATED by the near/mid field (~5.8k trees at LOD0/LOD1 that must stay real
+//    geometry -- impostors only replace the far field; popping forbids impostoring the
+//    near field). The old 12M was an aspirational far-field-only figure impostors alone
+//    can NOT reach, and it does not track real cost anyway: forest gbuffer cost is
+//    fill/OVERDRAW-bound, not triangle-bound (TreeLod.h:39-44), and the real per-frame
+//    frame-ms floor is guarded by -Mode PerfFloor's "forest" scenario, not this geometry
+//    proxy. 60M sits above the 52.7M impostor-ON load and well below the ~99.4M the load
+//    reverts to if the far-field impostor fold regresses -> a broken impostor path trips
+//    this gate RED again.
+//  * Draw-call budget = 24. The far field collapses into ONE shared impostor draw and
+//    the near/mid field batches by (part x LOD); impostor-ON load is ~7 draws.
+constexpr std::uint64_t kFoliageTriBudgetPerFrame = 60'000'000ull;
 constexpr int kFoliageDrawCallBudgetPerFrame = 24;
 
 // Deterministic phyllotaxis ("sunflower") forest: trees spread across a disc so the
@@ -144,20 +152,42 @@ struct ForestBudgetResult {
 };
 
 // Model the per-frame foliage draw load for the pinned forest under the production
-// LOD selection + GBufferPass batching, with NO impostor atlas / dirty cache (today).
-ForestBudgetResult MeasureForestLoad(int n, float spacing, const TreeLodConfig& cfg) {
+// LOD selection + GBufferPass batching. When `impostors` is true (the landed default,
+// FOLIAGE-03), the far field folds into octa-impostor billboards exactly as GBufferPass
+// does: LOD3 kicks in at 200 m and every LOD3 tree collapses into a single shared
+// billboard draw. When false, this reproduces the pre-impostor all-real-geometry load.
+ForestBudgetResult MeasureForestLoad(int n, float spacing, const TreeLodConfig& baseCfg,
+                                     bool impostors) {
     ForestBudgetResult out;
     out.tree_count = n;
 
+    // Mirror GBufferPass.cpp:500-503: with octa impostors ON the LOD3 cheap-billboard
+    // threshold moves from 620 m in to 200 m so the impostor actually replaces the
+    // far-field stand (the wide 620 m cross-billboard added overdraw and was kept far).
+    TreeLodConfig cfg = baseCfg;
+    if (impostors && cfg.enabled) {
+        cfg.lod3Distance = 200.0f;
+    }
+
     const std::vector<float> distances = BuildForestDistances(n, spacing);
 
-    // Per (LOD bucket) instance tally. Today every tree -- including the far field --
-    // still emits kPartsPerTree real instanced parts at its selected LOD; LOD3 here is
-    // the cross-billboard placeholder, NOT a shared impostor atlas. The draw-call model
-    // groups by (part-index x LOD) since GBufferPass keys batches on mesh+variant path.
+    // Per (part x LOD) instance tally for the REAL-geometry near/mid field; LOD3 trees
+    // (with impostors) are pulled out into a single shared impostor draw. The draw-call
+    // model groups by (part-index x LOD) since GBufferPass keys batches on mesh+variant.
     std::map<int, std::uint64_t> instances_per_group;  // group key -> instance count
+    std::uint64_t impostor_instances = 0;              // far-field billboards (1 per tree)
     for (float d : distances) {
         const int lod = SelectTreeLod(d, cfg);
+        if (impostors && lod == 3) {
+            // GBufferPass.cpp:545-553: all 3 tree parts at LOD3 fold into ONE camera-
+            // facing octa-impostor billboard per tree (one quad, ~2 tris), collected
+            // and drawn as a single shared instanced draw for the whole far field.
+            out.instances_by_lod[lod] += 1;
+            out.total_instances += 1;
+            out.foliage_tris += kImpostorTrisPerTree;
+            ++impostor_instances;
+            continue;
+        }
         out.instances_by_lod[lod] += static_cast<std::uint64_t>(kPartsPerTree);
         out.total_instances += static_cast<std::uint64_t>(kPartsPerTree);
         out.foliage_tris += static_cast<std::uint64_t>(
@@ -169,13 +199,20 @@ ForestBudgetResult MeasureForestLoad(int n, float spacing, const TreeLodConfig& 
         }
     }
 
-    // Draw calls: one instanced draw per group, split every kStaticInstanceCapacity.
+    // Draw calls: one instanced draw per (part x LOD) group for the near/mid real
+    // geometry, plus (with impostors) one shared far-field impostor draw -- each split
+    // every kStaticInstanceCapacity instances.
     int draw_calls = 0;
     for (const auto& [key, count] : instances_per_group) {
         (void)key;
         if (count == 0) continue;
         draw_calls += static_cast<int>(
             (count + static_cast<std::uint64_t>(kStaticInstanceCapacity) - 1) /
+            static_cast<std::uint64_t>(kStaticInstanceCapacity));
+    }
+    if (impostor_instances > 0) {
+        draw_calls += static_cast<int>(
+            (impostor_instances + static_cast<std::uint64_t>(kStaticInstanceCapacity) - 1) /
             static_cast<std::uint64_t>(kStaticInstanceCapacity));
     }
     out.draw_calls = draw_calls;
@@ -234,38 +271,39 @@ TreeLodConfig ProductionConfig() {
     return TreeLodConfig{};
 }
 
-// FR-003 / AC-003: the RED budget gate. At the pinned 16k load the foliage triangle
-// total EXCEEDS the per-frame budget today (no impostor atlas), so this test FAILS by
-// design. The artifact is emitted first so the numbers are always available, then the
-// budget is asserted (the failing assertion is the RED signal Wave-3 impostors flip).
-TEST(ForestPerfBudget, RedAt16kTreeLoad) {
+// FOLIAGE-05: the GREEN impostor-regression gate. With octa impostors default-ON the
+// far field folds into billboards and the impostor-ON 16k load holds the re-blessed
+// budget. The artifact is emitted first (for the -Mode FarFieldForestBudget validator),
+// then the budget is asserted GREEN; a regressed far-field fold trips it RED again.
+TEST(ForestPerfBudget, GreenAt16kTreeLoadWithImpostors) {
     const TreeLodConfig cfg = ProductionConfig();
     const ForestBudgetResult r =
-        MeasureForestLoad(kPinnedTreeCount, kPinnedSpacingM, cfg);
+        MeasureForestLoad(kPinnedTreeCount, kPinnedSpacingM, cfg, /*impostors=*/true);
 
     const bool tri_over = r.foliage_tris > kFoliageTriBudgetPerFrame;
     const bool draw_over = r.draw_calls > kFoliageDrawCallBudgetPerFrame;
 
-    // Always emit the measured numbers (for the validator + Wave-3 certification),
-    // independent of the budget verdict below.
+    // Always emit the measured numbers (for the validator), independent of the verdict.
     EmitArtifact(r, tri_over, draw_over);
 
-    // Non-vacuity: the harness must have exercised the real pinned load (all parts
-    // counted, a positive triangle total spread across LOD buckets). If this trips,
-    // the budget verdict below is meaningless.
-    ASSERT_EQ(r.total_instances,
-              static_cast<std::uint64_t>(kPinnedTreeCount) * kPartsPerTree);
+    // Non-vacuity: every tree is accounted for exactly once -- near/mid trees as 3 real
+    // parts, far-field trees as 1 folded impostor -- and the far field ACTUALLY folded
+    // (the impostor fold is the lever that makes this GREEN; if it stops the budget bites).
+    const std::uint64_t real_trees =
+        (r.instances_by_lod[0] + r.instances_by_lod[1] + r.instances_by_lod[2]) / kPartsPerTree;
+    const std::uint64_t impostor_trees = r.instances_by_lod[3];
+    ASSERT_EQ(real_trees + impostor_trees, static_cast<std::uint64_t>(kPinnedTreeCount));
     ASSERT_GT(r.foliage_tris, 0u);
     ASSERT_GT(r.instances_by_lod[0], 0u) << "near field must keep full-res LOD0 trees";
+    ASSERT_GT(r.instances_by_lod[3], 0u)
+        << "far field must fold into octa impostors (the GREEN lever)";
 
-    // The RED budget. With today's far field (no LOD3 impostor atlas, no dirty cache)
-    // the 16k load is over the triangle budget -> these EXPECTs FAIL on purpose. They
-    // become the GREEN target for Wave-3 octahedral impostors.
+    // The GREEN budget. With impostors ON the impostor-ON load holds these ceilings; a
+    // regressed far-field fold (~52.7M -> ~99.4M tris) trips the triangle EXPECT RED.
     EXPECT_LE(r.foliage_tris, kFoliageTriBudgetPerFrame)
         << "16k-tree foliage triangle load " << r.foliage_tris
-        << " exceeds the per-frame budget " << kFoliageTriBudgetPerFrame
-        << " (RED until LOD3 hemi-octa impostors land -- far-field-source-unification "
-           "FR-004 / AC-003)";
+        << " exceeds the impostor-ON per-frame budget " << kFoliageTriBudgetPerFrame
+        << " -- the far-field octa-impostor fold may have regressed (FOLIAGE-05)";
     EXPECT_LE(r.draw_calls, kFoliageDrawCallBudgetPerFrame)
         << "16k-tree foliage draw-call load " << r.draw_calls
         << " exceeds the per-frame budget " << kFoliageDrawCallBudgetPerFrame;
@@ -278,7 +316,7 @@ TEST(ForestPerfBudget, RedAt16kTreeLoad) {
 TEST(ForestPerfBudget, ArtifactIsEmittedAndWellFormed) {
     const TreeLodConfig cfg = ProductionConfig();
     const ForestBudgetResult r =
-        MeasureForestLoad(kPinnedTreeCount, kPinnedSpacingM, cfg);
+        MeasureForestLoad(kPinnedTreeCount, kPinnedSpacingM, cfg, /*impostors=*/true);
     EmitArtifact(r, r.foliage_tris > kFoliageTriBudgetPerFrame,
                  r.draw_calls > kFoliageDrawCallBudgetPerFrame);
 
@@ -302,9 +340,9 @@ TEST(ForestPerfBudget, DisablingLodCannotReduceLoad) {
     off.enabled = false;
 
     const ForestBudgetResult lodOn =
-        MeasureForestLoad(kPinnedTreeCount, kPinnedSpacingM, on);
+        MeasureForestLoad(kPinnedTreeCount, kPinnedSpacingM, on, /*impostors=*/true);
     const ForestBudgetResult lodOff =
-        MeasureForestLoad(kPinnedTreeCount, kPinnedSpacingM, off);
+        MeasureForestLoad(kPinnedTreeCount, kPinnedSpacingM, off, /*impostors=*/true);
 
     EXPECT_GE(lodOff.foliage_tris, lodOn.foliage_tris)
         << "LOD-off (all LOD0) must never draw fewer triangles than LOD-on";
