@@ -148,6 +148,7 @@ add_executable(common_tests
     common/replication_scale_test.cpp
     common/lockstep_replay_hardening_test.cpp
     net/single_port_accept_test.cpp
+    net/single_port_host_client_integration_test.cpp
     common/world_streaming_hardening_test.cpp
     common/HydraulicErosion_test.cpp
     common/WorldStreamingState_test.cpp

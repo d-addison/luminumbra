@@ -2963,11 +2963,6 @@ int RunNetHost(const ServerCliOptions& options) {
     }
 
     const std::uint32_t expected_clients = ExpectedNetworkClients(options);
-    std::uint16_t last_accept_port = 0;
-    if (!ResolveNetworkClientPort(options.port, expected_clients, last_accept_port)) {
-        LUMINUMBRA_CORE_ERROR("net-host: cannot map {} client(s) from base port {}", expected_clients, options.port);
-        return 2;
-    }
 
     Luminumbra::Server::ServerWorldRunnerConfig config = RunnerConfigFrom(options);
     config.world_id.clear();
@@ -2978,8 +2973,18 @@ int RunNetHost(const ServerCliOptions& options) {
         config.avatar_count = required_avatars; // avatar ids 1..N are controlled by remote clients
     }
     LUMINUMBRA_CORE_INFO(
-        "Net HOST: preset={} seed={} avatars={} ticks={} clients={} -- accepting TCP ports {}..{}",
-        options.preset, options.seed, config.avatar_count, options.ticks, expected_clients, options.port, last_accept_port);
+        "Net HOST: preset={} seed={} avatars={} ticks={} clients={} -- accepting {} client(s) on ONE TCP port {}",
+        options.preset, options.seed, config.avatar_count, options.ticks, expected_clients, expected_clients, options.port);
+
+    // NET-11 (FR-F-003): ONE listen socket fans N client connections into distinct AddClient
+    // slots. Bind+listen BEFORE runner.Boot() (world-gen is ~15s) so a client that dials in
+    // during boot lands in the listen backlog (its Hello buffered on the socket) and is accepted
+    // once the world is ready -- the client's short connect-retry must not race the slow boot.
+    Luminumbra::Net::TcpListener listener;
+    if (!listener.Listen(options.port, /*backlog=*/static_cast<int>(expected_clients) + 1)) {
+        LUMINUMBRA_CORE_ERROR("net-host: could not open the listen socket on port {}", options.port);
+        return 1;
+    }
 
     Luminumbra::Server::ServerWorldRunner runner(std::move(config));
     if (!runner.Boot()) {
@@ -2992,31 +2997,97 @@ int RunNetHost(const ServerCliOptions& options) {
     std::vector<std::uint32_t> client_ids;
     transports.reserve(expected_clients);
     client_ids.reserve(expected_clients);
-    for (std::uint32_t client_id = 1; client_id <= expected_clients; ++client_id) {
-        std::uint16_t client_port = 0;
-        if (!ResolveNetworkClientPort(options.port, client_id, client_port)) {
-            LUMINUMBRA_CORE_ERROR("net-host: cannot map client {} from base port {}", client_id, options.port);
-            for (auto& accepted : transports) {
-                accepted->Close();
-            }
-            return 2;
-        }
-        auto transport = std::make_unique<Luminumbra::Net::TcpTransport>();
-        LUMINUMBRA_CORE_INFO("net-host: waiting for client {} over TCP on port {}...", client_id, client_port);
-        if (!transport->Listen(client_port, /*timeout_ms=*/30000)) {
+
+    // Each accepted connection's FIRST frame is its Hello, which carries the client id: it is
+    // read PRE-AddClient (below) so the slot id comes from the HANDSHAKE, not the accept order.
+    // The Hello's trailing usercmd frames stay buffered in the same transport for PumpInbound.
+    const std::uint64_t seed_num = std::strtoull(options.seed.c_str(), nullptr, 10);
+    for (std::uint32_t accepted = 0; accepted < expected_clients; ++accepted) {
+        LUMINUMBRA_CORE_INFO(
+            "net-host: waiting for client {}/{} over TCP on port {}...",
+            accepted + 1, expected_clients, options.port);
+        std::unique_ptr<Luminumbra::Net::TcpTransport> transport =
+            listener.AcceptOneBlocking(/*timeout_ms=*/30000);
+        if (!transport) {
             LUMINUMBRA_CORE_ERROR(
-                "net-host: listen/accept failed for client {} on port {} (timed out waiting for a client?)",
-                client_id, client_port);
-            for (auto& accepted : transports) {
-                accepted->Close();
-            }
+                "net-host: accept failed on port {} after {} of {} client(s) (timed out waiting for a client?)",
+                options.port, accepted, expected_clients);
+            for (auto& t : transports) t->Close();
+            listener.Close();
             return 1;
         }
+        // Read the client's Hello (its first frame) to learn its declared id. Bounded poll --
+        // a real loopback/LAN socket delivers asynchronously; a peer that never says Hello (or
+        // drops) is a REJECT, never a hang.
+        Luminumbra::Net::HelloMsg hello;
+        bool got_hello = false;
+        std::vector<std::uint8_t> frame;
+        const auto hello_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (std::chrono::steady_clock::now() < hello_deadline) {
+            if (transport->TryReceiveFrame(frame)) {
+                if (!Luminumbra::Net::DecodeHello(frame, hello)) {
+                    LUMINUMBRA_CORE_ERROR("net-host: an accepted client's first frame was not a valid Hello");
+                    for (auto& t : transports) t->Close();
+                    transport->Close();
+                    listener.Close();
+                    return 1;
+                }
+                got_hello = true;
+                break;
+            }
+            if (!transport->IsPeerConnected()) break; // peer left before saying Hello
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        if (!got_hello) {
+            LUMINUMBRA_CORE_ERROR(
+                "net-host: never received a Hello from an accepted client on port {}", options.port);
+            for (auto& t : transports) t->Close();
+            transport->Close();
+            listener.Close();
+            return 1;
+        }
+        // Reject a mis-paired client LOUDLY (a mismatched world would silently desync), mirroring
+        // the lockstep handshake's protocol/seed/preset discipline.
+        if (hello.protocol_version != Luminumbra::Net::kLockstepProtocolVersion) {
+            LUMINUMBRA_CORE_ERROR("net-host: client protocol mismatch (host {} != client {})",
+                                  Luminumbra::Net::kLockstepProtocolVersion, hello.protocol_version);
+            for (auto& t : transports) t->Close();
+            transport->Close();
+            listener.Close();
+            return 1;
+        }
+        if (hello.seed != seed_num || hello.preset != options.preset) {
+            LUMINUMBRA_CORE_ERROR(
+                "net-host: client world mismatch (seed host {} != client {}; preset host '{}' != client '{}')",
+                seed_num, hello.seed, options.preset, hello.preset);
+            for (auto& t : transports) t->Close();
+            transport->Close();
+            listener.Close();
+            return 1;
+        }
+        // The slot id is now DECLARED by the client (was the loop index), so validate it lands in
+        // the server's avatar-slot range [1, expected_clients] -- restoring the invariant the old
+        // loop-index scheme guaranteed. This keeps every downstream index by client_id
+        // (initial_x_by_client, avatar mapping) in bounds, and rejects a bogus slot claim (0 = the
+        // host's own reserved id) LOUDLY rather than corrupting a neighbour's slot.
+        if (hello.client_id == 0u || hello.client_id > expected_clients) {
+            LUMINUMBRA_CORE_ERROR(
+                "net-host: client declared out-of-range id {} (expected 1..{})",
+                hello.client_id, expected_clients);
+            for (auto& t : transports) t->Close();
+            transport->Close();
+            listener.Close();
+            return 1;
+        }
+        const std::uint32_t client_id = hello.client_id;
         server.AddClient(client_id, transport.get());
         client_ids.push_back(client_id);
         transports.push_back(std::move(transport));
+        LUMINUMBRA_CORE_INFO("net-host: client id {} joined on port {} ({}/{}).",
+                             client_id, options.port, accepted + 1, expected_clients);
     }
-    LUMINUMBRA_CORE_INFO("net-host: {} client(s) connected over TCP.", transports.size());
+    listener.Close(); // all expected clients accepted; the listen socket is no longer needed
+    LUMINUMBRA_CORE_INFO("net-host: {} client(s) connected over TCP (single-port fan-out).", transports.size());
 
     server.SetAoiChunkRadius(/*chunk_radius=*/3, /*chunk_size_mm=*/Luminumbra::CHUNK_SIZE_X * 1000);
 
@@ -3085,11 +3156,10 @@ int RunNetHost(const ServerCliOptions& options) {
 
 int RunNetJoin(const ServerCliOptions& options) {
     const std::uint32_t player_id = LocalNetworkPlayerId(options);
-    std::uint16_t connect_port = 0;
-    if (!ResolveNetworkClientPort(options.port, player_id, connect_port)) {
-        LUMINUMBRA_CORE_ERROR("net-join: cannot map player id {} from base port {}", player_id, options.port);
-        return 2;
-    }
+    // NET-11 (FR-F-003): connect to the host's SINGLE listen port (the dedicated-server shape),
+    // NOT a per-client base_port+K-1 port. Our server-side slot id is DECLARED in the Hello below,
+    // so the host fans this connection into slot `player_id` regardless of accept order.
+    const std::uint16_t connect_port = options.port;
 
     LUMINUMBRA_CORE_INFO(
         "Net JOIN: player {} connecting to {}:{} ...",
@@ -3098,6 +3168,21 @@ int RunNetJoin(const ServerCliOptions& options) {
     if (!transport.Connect(options.host, connect_port, /*timeout_ms=*/30000)) {
         LUMINUMBRA_CORE_ERROR("net-join: could not connect to {}:{}", options.host, connect_port);
         return 1;
+    }
+    // Send our Hello FIRST (before any usercmd) so the host reads our declared id and validates
+    // the shared world (protocol/seed/preset). Same wire form as the lockstep handshake Hello;
+    // the host consumes exactly this one frame pre-AddClient, then the usercmd stream follows.
+    {
+        Luminumbra::Net::HelloMsg hello;
+        hello.seed = std::strtoull(options.seed.c_str(), nullptr, 10);
+        hello.preset = options.preset;
+        hello.tick_rate_hz = 30;
+        hello.client_id = player_id;
+        if (!transport.SendFrame(Luminumbra::Net::EncodeHello(hello))) {
+            LUMINUMBRA_CORE_ERROR("net-join: failed to send Hello to {}:{}", options.host, connect_port);
+            transport.Close();
+            return 1;
+        }
     }
     LUMINUMBRA_CORE_INFO("net-join: player {} connected over TCP.", player_id);
 
