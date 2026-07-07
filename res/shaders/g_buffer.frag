@@ -39,6 +39,21 @@ uniform sampler2DArray u_terrainNormals;    // tangent-space (OpenGL) normal map
 uniform sampler2DArray u_terrainRoughness;
 uniform int u_terrainRoughnessValid;
 
+// GPU-P09 render-scale mip bias (RENDER-ONLY). When the scene renders at a reduced
+// internal resolution (render_scale < 1.0) the implicit-derivative LOD picks a
+// coarser mip, so material textures read blurry after upscale. A negative bias of
+// log2(render_scale) restores near-native sharpness. The uniform defaults to 0.0
+// and the client sets exactly log2(1.0)==0.0 at render_scale 1.0, so the
+// `!= 0.0` guard below takes the VERBATIM original texture() path there — the
+// scale-1.0 output is byte-identical to the pre-P09 build by construction (the
+// whole-frame A/B gate proves dispatch determinism, not equivalence, so the no-op
+// must hold structurally). Only material arrays (mipmapped) are biased; the NEAREST
+// material LUT is not.
+uniform float u_lodBias = 0.0;
+vec4 sampleBias(sampler2DArray s, vec3 uvw) {
+    return u_lodBias != 0.0 ? texture(s, uvw, u_lodBias) : texture(s, uvw);
+}
+
 // View rotation (mat3 of the camera view matrix). The normal-mapped normal is
 // perturbed in world space then rotated into view space here, so the G-buffer
 // keeps storing a VIEW-SPACE octahedral normal (lighting pass unchanged).
@@ -157,9 +172,9 @@ vec3 triplanar_albedo(vec3 worldPos, vec3 weights, float layer, float scale) {
     vec2 uv_x = worldPos.zy * scale;
     vec2 uv_y = worldPos.xz * scale;
     vec2 uv_z = worldPos.xy * scale;
-    vec3 cx = texture(u_terrainTextures, vec3(uv_x, layer)).rgb;
-    vec3 cy = texture(u_terrainTextures, vec3(uv_y, layer)).rgb;
-    vec3 cz = texture(u_terrainTextures, vec3(uv_z, layer)).rgb;
+    vec3 cx = sampleBias(u_terrainTextures, vec3(uv_x, layer)).rgb;
+    vec3 cy = sampleBias(u_terrainTextures, vec3(uv_y, layer)).rgb;
+    vec3 cz = sampleBias(u_terrainTextures, vec3(uv_z, layer)).rgb;
     vec3 sharp = cx * weights.x + cy * weights.y + cz * weights.z;
     // Mip-blurred base for the unsharp mask (mean-preserving high-freq boost).
     // Track the fragment's ACTUAL mip and keep the blur a fixed number of mips
@@ -170,7 +185,10 @@ vec3 triplanar_albedo(vec3 worldPos, vec3 weights, float layer, float scale) {
     // detail survives to the horizon. Mean-preserving (unsharp), so the calibration
     // luminance is unchanged near camera.
     float baseLod = max(textureQueryLod(u_terrainTextures, uv_y).y, 0.0);
-    float blurLod = baseLod + kDetailBlurLod;
+    // Keep the unsharp separation constant relative to the (possibly biased) sharp
+    // sample: +u_lodBias is added last so the original subexpression is preserved
+    // verbatim (x + 0.0 == x at render_scale 1.0).
+    float blurLod = baseLod + kDetailBlurLod + u_lodBias;
     vec3 bx = textureLod(u_terrainTextures, vec3(uv_x, layer), blurLod).rgb;
     vec3 by = textureLod(u_terrainTextures, vec3(uv_y, layer), blurLod).rgb;
     vec3 bz = textureLod(u_terrainTextures, vec3(uv_z, layer), blurLod).rgb;
@@ -185,9 +203,9 @@ vec3 triplanar_normal(vec3 worldPos, vec3 geomN, vec3 weights, float layer, floa
     vec2 uv_x = worldPos.zy * scale;
     vec2 uv_y = worldPos.xz * scale;
     vec2 uv_z = worldPos.xy * scale;
-    vec3 nx = texture(u_terrainNormals, vec3(uv_x, layer)).xyz * 2.0 - 1.0;
-    vec3 ny = texture(u_terrainNormals, vec3(uv_y, layer)).xyz * 2.0 - 1.0;
-    vec3 nz = texture(u_terrainNormals, vec3(uv_z, layer)).xyz * 2.0 - 1.0;
+    vec3 nx = sampleBias(u_terrainNormals, vec3(uv_x, layer)).xyz * 2.0 - 1.0;
+    vec3 ny = sampleBias(u_terrainNormals, vec3(uv_y, layer)).xyz * 2.0 - 1.0;
+    vec3 nz = sampleBias(u_terrainNormals, vec3(uv_z, layer)).xyz * 2.0 - 1.0;
     // Whiteout blend: add the geometric normal into the z of each tangent-space
     // sample, swizzle into world axes, then weight-blend.
     vec3 wx = vec3(nx.xy + geomN.zy, abs(nx.z) * geomN.x);
@@ -205,9 +223,9 @@ float triplanar_roughness(vec3 worldPos, vec3 weights, float layer, float scale)
     vec2 uv_x = worldPos.zy * scale;
     vec2 uv_y = worldPos.xz * scale;
     vec2 uv_z = worldPos.xy * scale;
-    float rx = texture(u_terrainRoughness, vec3(uv_x, layer)).r;
-    float ry = texture(u_terrainRoughness, vec3(uv_y, layer)).r;
-    float rz = texture(u_terrainRoughness, vec3(uv_z, layer)).r;
+    float rx = sampleBias(u_terrainRoughness, vec3(uv_x, layer)).r;
+    float ry = sampleBias(u_terrainRoughness, vec3(uv_y, layer)).r;
+    float rz = sampleBias(u_terrainRoughness, vec3(uv_z, layer)).r;
     // Rock-speckle fix (render-only): the AmbientCG roughness plates carry a sparse
     // scatter of near-zero (near-mirror) texels. At the noon sun those collapse GGX
     // a2 -> ~0 and spike a pinpoint white specular highlight = the BRIGHT SPECKS on
@@ -299,7 +317,7 @@ void main()
         // tangent-derivative-free approximation (UV-space normal map, applied in
         // world space via the geometric normal as the z axis).
         // I8: also the static-model lane (tree bark/leaf) — same UV sampling.
-        albedo = texture(u_skinnedTextures, vec3(fs_in.UV, float(u_skinnedAlbedoLayer))).rgb * u_albedo_tint;
+        albedo = sampleBias(u_skinnedTextures, vec3(fs_in.UV, float(u_skinnedAlbedoLayer))).rgb * u_albedo_tint;
         // I8 leaf cutout: the source leaf textures are RGB leaf-cards on a BLACK
         // background (no alpha), so key the cutout off luminance — the black inter-
         // leaf gaps are discarded, leaving the lit leaf shapes. NOTE: the array is
@@ -311,7 +329,7 @@ void main()
             if (leafLuma < 0.025) discard;
         }
         if (u_skinnedNormalLayer >= 0) {
-            vec3 tn = texture(u_skinnedTextures, vec3(fs_in.UV, float(u_skinnedNormalLayer))).xyz * 2.0 - 1.0;
+            vec3 tn = sampleBias(u_skinnedTextures, vec3(fs_in.UV, float(u_skinnedNormalLayer))).xyz * 2.0 - 1.0;
             // Build an ad-hoc tangent basis from the geometric world normal so
             // the tangent-space perturbation maps into world space.
             vec3 up = abs(worldN.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);

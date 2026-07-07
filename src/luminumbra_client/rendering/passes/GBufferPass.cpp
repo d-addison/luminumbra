@@ -295,6 +295,11 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
     m_geometry_shader->setVec2("u_inv_screen_size",
         glm::vec2(1.0f / (float)ctx.screen_width, 1.0f / (float)ctx.screen_height));
     m_geometry_shader->setVec2("u_jitter_ndc", taau_jit);
+    // GPU-P09: LOD mip bias = log2(render_scale) so material textures stay sharp when
+    // the scene renders at a reduced internal resolution. internal_w()==screen_width at
+    // render_scale 1.0 -> exactly log2(1.0)==0.0 -> the shader takes its unbiased path.
+    m_geometry_shader->setFloat("u_lodBias",
+        ctx.screen_width > 0u ? std::log2((float)ctx.internal_w() / (float)ctx.screen_width) : 0.0f);
     // View rotation: triplanar normal mapping (T-I4-7) perturbs the normal in
     // world space then rotates it into view space for the octahedral G-buffer.
     m_geometry_shader->setMat3("u_normalViewMatrix", glm::mat3(view));
@@ -449,6 +454,8 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     m_instanced_static_mesh_shader->setVec2("u_inv_screen_size",
         glm::vec2(1.0f / (float)ctx.screen_width, 1.0f / (float)ctx.screen_height));
     m_instanced_static_mesh_shader->setVec2("u_jitter_ndc", static_taau_jit);
+    m_instanced_static_mesh_shader->setFloat("u_lodBias", // GPU-P09 render-scale mip bias
+        ctx.screen_width > 0u ? std::log2((float)ctx.internal_w() / (float)ctx.screen_width) : 0.0f);
     m_instanced_static_mesh_shader->setMat3("u_normalViewMatrix", glm::mat3(static_view));
     // Triplanar terrain arrays + LUT (T-I4-7): a static mesh tagged with a
     // textured material id (e.g. grass props) reuses the terrain triplanar path.
@@ -713,6 +720,8 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
     m_skinned_mesh_shader->setVec2("u_inv_screen_size",
         glm::vec2(1.0f / (float)ctx.screen_width, 1.0f / (float)ctx.screen_height));
     m_skinned_mesh_shader->setVec2("u_jitter_ndc", skinned_taau_jit);
+    m_skinned_mesh_shader->setFloat("u_lodBias", // GPU-P09 render-scale mip bias
+        ctx.screen_width > 0u ? std::log2((float)ctx.internal_w() / (float)ctx.screen_width) : 0.0f);
     m_skinned_mesh_shader->setMat3("u_normalViewMatrix", glm::mat3(skinned_view));
     // Triplanar terrain arrays + LUT (T-I4-7).
     glActiveTexture(GL_TEXTURE0);
