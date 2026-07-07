@@ -2544,7 +2544,7 @@
       "dependencies": [
         "INSTINCT-08"
       ],
-      "status": "todo",
+      "status": "done",
       "proving_signal": "perception_system_test + creature_brain_system_test + PopulatedWorldReplay run==replay + ReplicationSmoke (its GOAP-NPCs-approach-water assertion at validate-engine-frontier.ps1:4898 must stay green)",
       "rank": 136
     },
