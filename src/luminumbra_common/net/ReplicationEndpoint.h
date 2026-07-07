@@ -90,6 +90,23 @@ public:
     void SetDeltaCompression(bool on) { m_delta = on; }
     [[nodiscard]] bool delta_compression() const { return m_delta; }
 
+    // spec-019 FR-D-002/003: OUTBOUND BACKPRESSURE POLICY. Default-OFF (like delta + AOI):
+    // while off, BroadcastSnapshot is byte-identical to the pre-policy send path (the canonical
+    // baselines + every existing backpressure/soak test hold, and ThrottledFrames stays 0).
+    // When ON, a client whose per-client outbound queue crosses the high-water mark is
+    // ESCALATED rather than piled onto:
+    //   (1) THROTTLE  -- stop producing new snapshots for it (space the cadence), bumping
+    //       ThrottledFrames, while still draining whatever is already queued;
+    //   (2) KEYFRAME  -- if it stays behind, drop its piled delta backlog and resync it with a
+    //       single FULL snapshot (delta_from_seq==0) it can apply standalone, not more deltas;
+    //   (3) DISCONNECT -- if it never drains past the deadline, kick it (Close + remove from the
+    //       client set) and enqueue its avatar despawn so surviving clients are unaffected.
+    // The 20-32 player session ENABLES this on the server send path (docs/networking-scale-
+    // architecture.md), exactly as it enables delta compression. Thresholds are named + tunable
+    // (kThrottleHighWaterMark etc.); their exact values await NET-07 soak calibration.
+    void SetBackpressurePolicy(bool on) { m_backpressure_policy = on; }
+    [[nodiscard]] bool backpressure_policy() const { return m_backpressure_policy; }
+
     // Builds a SnapshotMsg from the authoritative entity set and sends it to every
     // connected client (each its own monotonically increasing seq + acked_usercmd_
     // tick). When AOI is enabled the per-client `entities` is filtered to that
@@ -135,6 +152,19 @@ public:
     [[nodiscard]] std::uint32_t QueueDepthP95() const;
     [[nodiscard]] std::uint32_t SnapshotAgeP95() const;
 
+    // spec-019 FR-D-002: cumulative FORCED KEYFRAMES the backpressure policy sent to this client
+    // (each replaces a piled delta backlog with one standalone full resync frame). 0 while the
+    // policy is off or the client keeps up.
+    [[nodiscard]] std::uint64_t ForcedKeyframes(std::uint32_t client_id) const;
+
+    // spec-019 FR-D-003: client ids the backpressure policy DISCONNECTED during the most recent
+    // BroadcastSnapshot (hopeless peers that never drained past the deadline). Consume this
+    // exactly like PruneDisconnectedClients' return -- despawn/free the player's server-side
+    // state. Empty when the policy is off or nobody was dropped.
+    [[nodiscard]] const std::vector<std::uint32_t>& DisconnectedClientsLastBroadcast() const {
+        return m_disconnected_this_broadcast;
+    }
+
 private:
     struct ClientLink {
         ILockstepTransport* transport = nullptr;
@@ -154,15 +184,31 @@ private:
         std::deque<std::vector<std::uint8_t>> outbound;
         std::uint32_t peak_queue_depth = 0;
         std::uint64_t dropped_frames = 0;
-        // Cumulative throttle events. The throttle POLICY is FR-D (separate track: throttle a
-        // backed-up client's snapshot cadence); this field is the metric FR-D increments. 0
-        // until that policy lands, so the soak gate's getter is present + stable meanwhile.
+        // spec-019 FR-D backpressure-policy state + metrics (active only when
+        // m_backpressure_policy). throttled_frames: broadcasts whose new snapshot was SKIPPED to
+        // space this client's cadence. forced_keyframes: full resync frames sent to it.
+        // backed_up / over_hwm_streak: the escalation state machine -- backed_up latches when the
+        // queue crosses the high-water mark and clears once it fully drains (hysteresis); the
+        // streak counts consecutive backed-up broadcasts and drives keyframe -> disconnect.
         std::uint64_t throttled_frames = 0;
+        std::uint64_t forced_keyframes = 0;
+        bool backed_up = false;
+        int over_hwm_streak = 0;
     };
     std::map<std::uint32_t, ClientLink> m_clients; // ordered -> deterministic broadcast order
     bool m_delta = false;                          // delta-vs-acked compression (off = full snapshots)
+    bool m_backpressure_policy = false;            // FR-D policy default-OFF (byte-identical fast path)
     static constexpr std::size_t kServerHistoryCap = 256; // bound per-client baseline retention
     static constexpr std::size_t kOutboundQueueCap = 256; // bound per-client unflushed send backlog (FR-E)
+    // FR-D-002/003 policy thresholds. PLACEHOLDER values: sane, named, and tunable in ONE place;
+    // the real numbers come from the NET-07 32-client soak p95 (follow-up calibration). The
+    // MECHANISM -- not the constants -- is the deliverable. HWM/low-water give the enter/leave
+    // hysteresis; the streaks are counted in consecutive backed-up broadcasts.
+    static constexpr std::uint32_t kThrottleHighWaterMark = 32;   // queue depth that starts throttling
+    static constexpr std::uint32_t kBackpressureLowWaterMark = 0; // fully drained -> leave backed-up state
+    static constexpr int kKeyframeResyncStreak = 4;    // backed-up broadcasts -> force a full keyframe
+    static constexpr int kDisconnectDeadlineStreak = 16; // backed-up broadcasts w/o draining -> disconnect
+    std::vector<std::uint32_t> m_disconnected_this_broadcast; // FR-D drops from the last broadcast
     std::int64_t m_aoi_radius_mm = 0;              // 0 = mm-radius AOI disabled (full set)
     int m_aoi_chunk_radius = -1;                   // < 0 = chunk AOI disabled
     std::int64_t m_aoi_chunk_size_mm = 0;          // chunk edge length (mm) for chunk AOI

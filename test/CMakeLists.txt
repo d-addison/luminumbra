@@ -128,6 +128,7 @@ add_executable(common_tests
     common/PlayerAvatar_test.cpp
     common/ReplicationProtocol_test.cpp
     common/ReplicationEndpoint_test.cpp
+    common/config_constant_drift_test.cpp
     common/LockstepSession_test.cpp
     common/LockstepBackpressure_test.cpp
     common/ReplayStream_test.cpp
@@ -1207,6 +1208,7 @@ add_executable(frontier_gates_test
     ai/awareness_test.cpp
     ai/perception_system_test.cpp
     ai/perception_substrate_test.cpp
+    ai/creature_brain_substrate_test.cpp
     ai/scent_steering_system_test.cpp
     ai/scent_deposit_system_test.cpp
     ai/ecology_demo_test.cpp
@@ -1275,6 +1277,27 @@ target_include_directories(audio_occlusion_test PRIVATE
 target_link_libraries(audio_occlusion_test PRIVATE
     gtest_main
     luminumbra_common
+)
+
+# AUDIO-12: prune guard — compile-sentinel that the SURVIVING audio headers still build
+# (fails if anything leans on a deleted orphan) + asserts the 7 retired bank manifests are
+# gone. Includes MiniaudioManager.h so needs the miniaudio + nlohmann_json link interface.
+add_executable(audio_prune_guard_test
+    audio/audio_prune_guard_test.cpp
+)
+target_compile_definitions(audio_prune_guard_test PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+)
+target_include_directories(audio_prune_guard_test PRIVATE
+    ../src
+    ../src/luminumbra_client
+)
+target_link_libraries(audio_prune_guard_test PRIVATE
+    gtest_main
+    luminumbra_common
+    miniaudio
+    nlohmann_json
+    glm
 )
 
 # T-I6 capture-native re-bless: resolution-relative gate-threshold scaling unit
@@ -1385,6 +1408,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     frontier_gates_test
     jolt_tunneling_test
     audio_occlusion_test
+    audio_prune_guard_test
     capture_scale_test
     isolation_config_test
 )

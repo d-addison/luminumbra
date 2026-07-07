@@ -43,6 +43,10 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
                                           const std::vector<std::uint32_t>& removed_ids) {
     m_last_broadcast_total_bytes = 0;
     m_last_broadcast_max_client_bytes = 0;
+    m_disconnected_this_broadcast.clear();
+    // spec-019 FR-D-003: hopeless clients the policy decided to drop this broadcast. Collected
+    // in-loop (so the broadcast iterator stays valid) and erased after the loop.
+    std::vector<std::uint32_t> to_disconnect;
 
     // T-I6 polish: PRUNE-INTO-TICK. Merge the caller's explicit despawns (e.g. a
     // spent arrow) with the pending leaver despawns enqueued by
@@ -76,6 +80,56 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
 
     for (auto& [client_id, link] : m_clients) {
         if (!link.transport) continue;
+
+        // spec-019 FR-D-002/003: OUTBOUND BACKPRESSURE POLICY (default-OFF -> this whole block is
+        // skipped and the send path below is byte-identical to the pre-policy code). Assess the
+        // client's LIVE queue depth BEFORE producing anything: a backed-up client is escalated
+        // (throttle -> keyframe -> disconnect) instead of having another frame piled on. backed_up
+        // latches at the high-water mark and clears only once the queue fully drains (hysteresis).
+        bool force_keyframe = false;
+        if (m_backpressure_policy) {
+            const std::uint32_t depth = static_cast<std::uint32_t>(link.outbound.size());
+            if (!link.backed_up && depth >= kThrottleHighWaterMark) {
+                link.backed_up = true;
+                link.over_hwm_streak = 0;
+            } else if (link.backed_up && depth <= kBackpressureLowWaterMark) {
+                link.backed_up = false;
+                link.over_hwm_streak = 0;
+            }
+            if (link.backed_up) {
+                ++link.over_hwm_streak;
+                if (link.over_hwm_streak >= kDisconnectDeadlineStreak) {
+                    // (3) DISCONNECT the hopeless: never drained past the deadline. Signal the peer
+                    // (Close) and mark for server-side removal after the loop. On loopback the
+                    // server's own IsPeerConnected() would stay true, so the POLICY -- not
+                    // PruneDisconnectedClients -- owns this drop.
+                    link.transport->Close();
+                    to_disconnect.push_back(client_id);
+                    continue;
+                }
+                if (link.over_hwm_streak == kKeyframeResyncStreak) {
+                    // (2) DROP TO KEYFRAME: discard the piled (undeliverable) delta backlog -- it is
+                    // superseded by a single full resync frame -- and fall through to build that
+                    // frame as a FULL snapshot (force_keyframe below).
+                    link.dropped_frames += link.outbound.size();
+                    link.outbound.clear();
+                    force_keyframe = true;
+                } else {
+                    // (1) THROTTLE: skip producing a new snapshot to space this client's cadence;
+                    // still try to drain what is queued. Freezing next_snapshot_seq here (nothing
+                    // was sent) is deliberate -- SnapshotAge must not climb on frames we withheld.
+                    ++link.throttled_frames;
+                    while (!link.outbound.empty() &&
+                           link.transport->SendFrame(link.outbound.front(), FrameDelivery::Unreliable)) {
+                        link.outbound.pop_front();
+                    }
+                    const std::uint32_t d = static_cast<std::uint32_t>(link.outbound.size());
+                    if (d > link.peak_queue_depth) link.peak_queue_depth = d;
+                    continue;
+                }
+            }
+        }
+
         SnapshotMsg snap;
         snap.server_tick = server_tick;
         snap.snapshot_seq = link.next_snapshot_seq++;
@@ -136,7 +190,20 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
         // the next baseline. With no usable acked baseline yet we send a full snapshot
         // (delta_from_seq == 0). Off -> wire-identical to P3.0.
         SnapshotMsg outgoing;
-        if (m_delta) {
+        if (force_keyframe) {
+            // FR-D-002: forced FULL keyframe (delta_from_seq==0) resyncs a persistently-behind
+            // client -- a standalone frame it can apply without any baseline. Retain it as the new
+            // delta baseline so normal delta-vs-acked resumes once the client catches up.
+            outgoing = snap;
+            outgoing.delta_from_seq = 0;
+            if (m_delta) {
+                link.sent_history[snap.snapshot_seq] = snap;
+                while (link.sent_history.size() > kServerHistoryCap) {
+                    link.sent_history.erase(link.sent_history.begin());
+                }
+            }
+            ++link.forced_keyframes;
+        } else if (m_delta) {
             const std::uint32_t acked = link.inbound.acked_snapshot_seq();
             const auto base_it = (acked != 0) ? link.sent_history.find(acked)
                                               : link.sent_history.end();
@@ -193,6 +260,16 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
         } else {
             ++it;
         }
+    }
+
+    // spec-019 FR-D-003: finalize policy disconnects AFTER the decay pass, so a freshly-dropped
+    // client's avatar-despawn gets the FULL kRemovalRepeatBroadcasts repeats (not decremented
+    // this tick). Removing the client here (not in-loop) kept the broadcast iterator valid; the
+    // caller reads DisconnectedClientsLastBroadcast() to free the player's server-side state.
+    for (std::uint32_t id : to_disconnect) {
+        m_pending_removed_ids[id] = kRemovalRepeatBroadcasts;
+        m_disconnected_this_broadcast.push_back(id);
+        m_clients.erase(id);
     }
 }
 
@@ -269,6 +346,11 @@ std::uint64_t ReplicationServer::DroppedFrames(std::uint32_t client_id) const {
 std::uint64_t ReplicationServer::ThrottledFrames(std::uint32_t client_id) const {
     const auto it = m_clients.find(client_id);
     return it == m_clients.end() ? 0u : it->second.throttled_frames;
+}
+
+std::uint64_t ReplicationServer::ForcedKeyframes(std::uint32_t client_id) const {
+    const auto it = m_clients.find(client_id);
+    return it == m_clients.end() ? 0u : it->second.forced_keyframes;
 }
 
 std::uint32_t ReplicationServer::QueueDepthP95() const {

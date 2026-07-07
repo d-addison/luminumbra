@@ -14,6 +14,7 @@
 #include "Flocking.h"
 #include "SpatialGrid.h"
 #include "ScentField.h"  // INSTINCT-08: in-brain scent tracking (GradientSteer)
+#include "PerceptionSubstrate.h"  // INSTINCT-09 FOLLOW-UP: shared neighbour-scan substrate (opt-in)
 
 #include "../components/AlarmComponents.h"
 #include "../components/CircadianComponents.h"
@@ -109,12 +110,23 @@ inline int WorldToScentCell(float world, float origin, float cell_size) {
 // stigmergy substrate on the BRAIN path (the ant/GOAP path uses ScentSteering's
 // LocomotionIntent, which ambient creatures never carry). Default nullptr keeps
 // every existing call byte-identical.
+//
+// INSTINCT-09 FOLLOW-UP: `use_perception_substrate` is an ADDITIVE opt-in (default
+// FALSE). When false, the per-creature nearest-target scan runs the original inline
+// snapshot loop and the tick is byte-identical. When true, that scan routes through
+// the SHARED PerceptionField (PerceptionSubstrate.h) — a deterministic, id-ordered
+// neighbour scan built once per tick over the opposite-role live-target set — and
+// the per-creature considerTarget re-applies the EXACT sensory gate, so the chosen
+// target (and thus every downstream decision/movement) is UNCHANGED. The flag exists
+// so the shared substrate can be exercised without touching the default sim
+// trajectory (proven equivalent by test/ai/creature_brain_substrate_test.cpp).
 inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, float dt,
                                                        const EcologyTuning& tuning = {},
                                                        const ScentField* scent = nullptr,
                                                        float scent_origin_x = 0.0f,
                                                        float scent_origin_z = 0.0f,
-                                                       float scent_cell_size = 0.0f) {
+                                                       float scent_cell_size = 0.0f,
+                                                       bool use_perception_substrate = false) {
     CreatureBrainStats stats;
     auto view = reg.view<Comp::CreatureComponent, Comp::TransformComponent>();
 
@@ -163,6 +175,40 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
     }
     std::vector<std::uint32_t> herdHits;  // reused query scratch buffer across creatures
 
+    // INSTINCT-09 FOLLOW-UP (additive, default OFF): build the SHARED PerceptionField over the
+    // creatures' TARGET set ONCE per tick — one field of live PREDATORS (queried by prey looking
+    // for threats) and one of live PREY (queried by predators looking for food). Each source's
+    // ordinal is its snapshot index, and `snap` is id-sorted, so a per-creature Query returns the
+    // perceived set in ascending index == id order — exactly the order the inline scan visits it,
+    // so the first-wins nearest tie-break matches. Carcasses are excluded at Build (the inline
+    // scan skips o.eaten); self is auto-excluded (self is same-role, so it never lands in the
+    // OPPOSITE-role field it queries). Sources are UNGATED (radius 0): the per-PERCEIVER sense
+    // gate (genome hearing/vision cone + starvation shrink; genome-less = unbounded range) is NOT
+    // expressible as a per-source radius, so the field returns the full opposite-role candidate
+    // set and the per-creature considerTarget re-applies the EXACT inline gate. Built only when
+    // the flag is set, so the default path allocates nothing and stays byte-identical.
+    PerceptionField predTargetField;  // live predators — queried by PREY
+    PerceptionField preyTargetField;  // live prey — queried by PREDATORS
+    PerceptionSnapshot targetSnapshot;  // reused per-creature query buffer (Query clears it)
+    if (use_perception_substrate) {
+        std::vector<PerceptionSourceInput> predSources, preySources;
+        predSources.reserve(snap.size());
+        preySources.reserve(snap.size());
+        for (std::uint32_t i = 0; i < snap.size(); ++i) {
+            const Snap& o = snap[i];
+            if (o.eaten) continue;  // carcasses are not live targets (inline scan skips o.eaten)
+            PerceptionSourceInput in;
+            in.index = i;            // ordinal == snapshot index (id-sorted) -> id-ordered query
+            in.has_position = true;
+            in.x = o.x;
+            in.z = o.z;              // y stays 0 -> the 3-D metric collapses to the XZ scan's plane
+            in.radius = 0.0f;        // ungated: considerTarget applies the per-perceiver gate
+            (o.predator ? predSources : preySources).push_back(in);
+        }
+        predTargetField.Build(predSources);
+        preyTargetField.Build(preySources);
+    }
+
     for (std::size_t selfIdx = 0; selfIdx < ents.size(); ++selfIdx) {
         const entt::entity e = ents[selfIdx];
         auto& tf = view.get<Comp::TransformComponent>(e);
@@ -205,8 +251,12 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
         float bestDist = 1.0e9f, tx = sx, tz = sz;
         bool found = false;
         entt::entity te = entt::null;
-        for (const Snap& o : snap) {
-            if (o.e == e || o.predator == cr.is_predator || o.eaten) continue;
+        // Per-candidate sensory gate + first-wins nearest-keep, factored so the inline snapshot
+        // scan (default) and the INSTINCT-09 substrate path apply the IDENTICAL gate (genome
+        // hearing/vision cone, starvation shrink) and selection over the SAME id-ordered candidate
+        // set — the two paths are equivalent. `o` is already known to be a LIVE opposite-role
+        // creature (the inline filter / the field's Build partition guarantee it).
+        auto considerTarget = [&](const Snap& o) {
             const float dx = o.x - sx, dz = o.z - sz;
             const float d = dm::Sqrt(dx * dx + dz * dz);
             if (sg != nullptr) {
@@ -222,7 +272,7 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
                         sensed = true;  // target coincident with self
                     }
                 }
-                if (!sensed) continue;
+                if (!sensed) return;
             }
             if (d < bestDist) {
                 bestDist = d;
@@ -230,6 +280,29 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
                 tz = o.z;
                 te = o.e;
                 found = true;
+            }
+        };
+        if (use_perception_substrate) {
+            // INSTINCT-09 FOLLOW-UP (additive, default OFF): the shared substrate returns the
+            // OPPOSITE-role live-target set (self, same-role and carcasses pre-excluded at Build)
+            // in id order — the same set/order the inline scan below visits after its
+            // `o.e==e || same-role || eaten` skip. The field is UNGATED, so considerTarget
+            // re-applies the EXACT per-perceiver sensory gate above; bestDist/tx/tz/te/found are
+            // byte-identical to the inline scan. Predators query the PREY field, prey the PREDATOR
+            // field (opposite role — note this is the INVERSE of the same-role flocking grids).
+            const PerceptionField& targetField = cr.is_predator ? preyTargetField : predTargetField;
+            PerceptionQueryInput tq;
+            tq.has_position = true;
+            tq.x = sx;
+            tq.z = sz;  // y stays 0 -> the substrate's 3-D metric collapses onto the XZ scan plane
+            targetField.Query(tq, targetSnapshot);
+            for (const PerceivedSource& ps : targetSnapshot.perceived) {
+                considerTarget(snap[ps.index]);
+            }
+        } else {
+            for (const Snap& o : snap) {
+                if (o.e == e || o.predator == cr.is_predator || o.eaten) continue;
+                considerTarget(o);
             }
         }
 

@@ -608,4 +608,65 @@ TEST(ReplicationMetrics, P95AcrossClientsForSoakGate) {
     EXPECT_EQ(server.QueueDepthP95(), 0u);  // loopback accepted everything
 }
 
+// spec-019 FR-D-002/003: OUTBOUND BACKPRESSURE POLICY. With the policy ENABLED, a client whose
+// transport never drains is escalated in ORDER -- first THROTTLED (cadence spaced, ThrottledFrames
+// climbs), then dropped to a full KEYFRAME to resync (ForcedKeyframes climbs) instead of piling
+// deltas, then DISCONNECTED once it never drains past the deadline -- while a healthy loopback peer
+// sharing the exact same broadcasts is NEVER throttled or keyframed and keeps receiving snapshots
+// (the byte-identical fast path). Deterministic + headless: the loop advances until each stage is
+// observed rather than asserting fixed broadcast counts, so it survives the NET-07 recalibration of
+// the (placeholder) thresholds -- it proves the SEQUENCE the policy must produce, not the tuning.
+TEST(ReplicationBackpressurePolicy, ThrottleThenKeyframeThenDisconnectWhileHealthyPeerUntouched) {
+    auto healthy_pair = MakeLoopbackPair();
+    BlockedSendTransport blocked; // never accepts a send -> its queue only ever grows
+
+    ReplicationServer server;
+    server.SetBackpressurePolicy(true);
+    ASSERT_TRUE(server.backpressure_policy());
+    const std::uint32_t healthy_id = 1;
+    const std::uint32_t slow_id = 2;
+    server.AddClient(healthy_id, healthy_pair.first.get());
+    server.AddClient(slow_id, &blocked);
+    ReplicationClient healthy(healthy_id, healthy_pair.second.get());
+
+    const std::vector<ReplEntityState> entities = {MakeEntity(healthy_id, 0, 0, 0),
+                                                   MakeEntity(slow_id, 1000, 0, 0)};
+
+    constexpr int kMaxBroadcasts = 500; // ample headroom over the escalation streaks
+    std::uint64_t tick = 0;
+    auto drive_until = [&](auto pred) {
+        for (int i = 0; i < kMaxBroadcasts && !pred(); ++i) {
+            server.BroadcastSnapshot(++tick, entities);
+            healthy.PumpInbound(); // healthy peer drains + acks -> stays caught up
+            server.PumpInbound();
+        }
+        return pred();
+    };
+
+    // Stage 1: THROTTLE trips before any keyframe or disconnect.
+    ASSERT_TRUE(drive_until([&] { return server.ThrottledFrames(slow_id) > 0; }))
+        << "slow client never tripped throttle";
+    EXPECT_EQ(server.ForcedKeyframes(slow_id), 0u) << "keyframe fired before throttle";
+    EXPECT_TRUE(server.has_client(slow_id)) << "disconnected before keyframe";
+
+    // Stage 2: KEYFRAME -- the persistently-behind client is dropped to a full resync frame.
+    ASSERT_TRUE(drive_until([&] { return server.ForcedKeyframes(slow_id) > 0; }))
+        << "slow client never got a resync keyframe";
+    EXPECT_TRUE(server.has_client(slow_id)) << "disconnected before the deadline";
+
+    // Stage 3: DISCONNECT -- past the deadline the hopeless client is kicked and surfaced.
+    ASSERT_TRUE(drive_until([&] { return !server.has_client(slow_id); }))
+        << "hopeless client never disconnected past the deadline";
+    const auto& dropped = server.DisconnectedClientsLastBroadcast();
+    EXPECT_NE(std::find(dropped.begin(), dropped.end(), slow_id), dropped.end())
+        << "disconnect not reported to the caller";
+
+    // The HEALTHY peer rode the entire escalation untouched (byte-identical fast path).
+    EXPECT_EQ(server.ThrottledFrames(healthy_id), 0u);
+    EXPECT_EQ(server.ForcedKeyframes(healthy_id), 0u);
+    EXPECT_EQ(server.OutboundQueueDepth(healthy_id), 0u);
+    EXPECT_TRUE(server.has_client(healthy_id));
+    EXPECT_TRUE(healthy.has_snapshot());
+}
+
 } // namespace
