@@ -157,6 +157,30 @@ FarLodSdfSnapshot AuthoritativeSdfSnapshot(const IVec3& coords, u32 revision) {
     return snapshot;
 }
 
+void FillFlatSdf(FarLodSdfSnapshot& snapshot, int surface_y = 12) {
+    for (int z = 0; z <= Luminumbra::CHUNK_SIZE_Z; ++z) {
+        for (int y = 0; y <= Luminumbra::CHUNK_SIZE_Y; ++y) {
+            for (int x = 0; x <= Luminumbra::CHUNK_SIZE_X; ++x) {
+                snapshot.sdf_data[FullSdfIndex(x, y, z)] = static_cast<float>(y - surface_y);
+            }
+        }
+    }
+}
+
+void AddCompleteFlatSdfHalo(FarLodTile& tile, const IVec3& center) {
+    std::string error;
+    for (int z_offset = -1; z_offset <= 1; ++z_offset) {
+        for (int x_offset = -1; x_offset <= 1; ++x_offset) {
+            FarLodSdfSnapshot snapshot = AuthoritativeSdfSnapshot(
+                IVec3(center.x + x_offset, center.y, center.z + z_offset), 1u);
+            FillFlatSdf(snapshot);
+            snapshot.source_kind = FarLodBrickSourceKind::RegenerableCache;
+            ASSERT_EQ(ReduceChunkSdfIntoFarTile(tile, snapshot, &error), FarLodSdfReduceResult::Inserted)
+                << error;
+        }
+    }
+}
+
 std::size_t ReducedSdfIndex(FarLodTier tier, int x, int y, int z) {
     const std::size_t side = FarLodSdfBrickSamplesPerSide(tier);
     const int step = FarLodSampleStepMeters(tier);
@@ -338,14 +362,10 @@ TEST(FarLodSdfMesher, AuthoritativeBricksChangeF1AndF2Geometry) {
     for (const FarLodTier tier : {FarLodTier::F1, FarLodTier::F2}) {
         FarLodTile pristine = BuildPristineFarLodTile(world, tier, 0, 0, params_hash);
         FarLodTile edited = pristine;
-        FarLodSdfSnapshot snapshot = AuthoritativeSdfSnapshot(IVec3(3, 0, 5), 1u);
-        for (int z = 0; z <= Luminumbra::CHUNK_SIZE_Z; ++z) {
-            for (int y = 0; y <= Luminumbra::CHUNK_SIZE_Y; ++y) {
-                for (int x = 0; x <= Luminumbra::CHUNK_SIZE_X; ++x) {
-                    snapshot.sdf_data[FullSdfIndex(x, y, z)] = static_cast<float>(y - 12);
-                }
-            }
-        }
+        const IVec3 center(3, 0, 5);
+        AddCompleteFlatSdfHalo(edited, center);
+        FarLodSdfSnapshot snapshot = AuthoritativeSdfSnapshot(center, 2u);
+        FillFlatSdf(snapshot);
         // This cavity reaches aligned F1/F2 lattice points while leaving the
         // height-only background unchanged.
         for (int z = 4; z <= 12; z += 4) {
@@ -357,7 +377,7 @@ TEST(FarLodSdfMesher, AuthoritativeBricksChangeF1AndF2Geometry) {
         }
 
         std::string error;
-        ASSERT_EQ(ReduceChunkSdfIntoFarTile(edited, snapshot, &error), FarLodSdfReduceResult::Inserted)
+        ASSERT_EQ(ReduceChunkSdfIntoFarTile(edited, snapshot, &error), FarLodSdfReduceResult::Replaced)
             << error;
 
         FarLodRegionMesh pristine_mesh;
@@ -365,10 +385,59 @@ TEST(FarLodSdfMesher, AuthoritativeBricksChangeF1AndF2Geometry) {
         Luminumbra::World::MarchingCubes::GenerateFarLodRegionMesh(pristine, pristine_mesh);
         Luminumbra::World::MarchingCubes::GenerateFarLodRegionMesh(edited, edited_mesh);
 
+        FarLodRegionMesh repeat_mesh;
+        Luminumbra::World::MarchingCubes::GenerateFarLodRegionMesh(edited, repeat_mesh);
+
         EXPECT_NE(HashMeshBytes(pristine_mesh), HashMeshBytes(edited_mesh));
+        EXPECT_EQ(HashMeshBytes(edited_mesh), HashMeshBytes(repeat_mesh));
         EXPECT_TRUE(std::any_of(edited_mesh.vertices.begin(), edited_mesh.vertices.end(),
             [](const Luminumbra::VoxelVertex& vertex) { return vertex.position.y < 10.0f; }));
     }
+}
+
+TEST(FarLodSdfMesher, IncompleteHaloAndMismatchedSharedFacesFailClosed) {
+    const TerrainGenParams params = FlatSdfFixtureParams();
+    const SHIELD_WorldSystem world(nullptr, nullptr, params, kFixtureSeed);
+    const u64 params_hash = ComputeTerrainParamsHash(params, kFixtureSeed);
+    const IVec3 center(3, 0, 5);
+
+    FarLodTile incomplete = BuildPristineFarLodTile(world, FarLodTier::F1, 0, 0, params_hash);
+    FarLodSdfSnapshot single = AuthoritativeSdfSnapshot(center, 1u);
+    FillFlatSdf(single);
+    std::string error;
+    ASSERT_EQ(ReduceChunkSdfIntoFarTile(incomplete, single, &error), FarLodSdfReduceResult::Inserted)
+        << error;
+    FarLodRegionMesh incomplete_mesh;
+    const auto incomplete_stats = Luminumbra::World::MarchingCubes::GenerateFarLodRegionMesh(
+        incomplete, incomplete_mesh);
+    EXPECT_TRUE(incomplete_mesh.vertices.empty());
+    EXPECT_TRUE(incomplete_mesh.indices.empty());
+    EXPECT_EQ(incomplete_stats.triangles, 0u);
+
+    FarLodTile mismatched = BuildPristineFarLodTile(world, FarLodTier::F1, 0, 0, params_hash);
+    AddCompleteFlatSdfHalo(mismatched, center);
+    FarLodSdfSnapshot authoritative = AuthoritativeSdfSnapshot(center, 2u);
+    FillFlatSdf(authoritative);
+    ASSERT_EQ(ReduceChunkSdfIntoFarTile(mismatched, authoritative, &error), FarLodSdfReduceResult::Replaced)
+        << error;
+
+    const auto right = std::find_if(mismatched.sdf_bricks.begin(), mismatched.sdf_bricks.end(),
+        [](const FarLodSdfBrickDescriptor& brick) {
+            return brick.local_chunk_x == 4u && brick.local_chunk_z == 5u && brick.chunk_y == 0;
+        });
+    ASSERT_NE(right, mismatched.sdf_bricks.end());
+    const std::size_t right_index = static_cast<std::size_t>(right - mismatched.sdf_bricks.begin());
+    const u32 side = FarLodSdfBrickSamplesPerSide(mismatched.tier);
+    mismatched.sdf_density_q[right_index * FarLodSdfBrickSampleCount(mismatched.tier)] =
+        QuantizeFarLodSdf(-11.0f); // differs from the shared x=16 face value (-12)
+    ASSERT_EQ(side, 5u);
+
+    FarLodRegionMesh mismatched_mesh;
+    const auto mismatched_stats = Luminumbra::World::MarchingCubes::GenerateFarLodRegionMesh(
+        mismatched, mismatched_mesh);
+    EXPECT_TRUE(mismatched_mesh.vertices.empty());
+    EXPECT_TRUE(mismatched_mesh.indices.empty());
+    EXPECT_EQ(mismatched_stats.triangles, 0u);
 }
 
 TEST(FarLodStoreTest, RejectsMalformedSdfAndKeepsExistingBrick) {
@@ -933,8 +1002,12 @@ TEST(FarLodRegionMesher, FixtureRegionMeshIsDeterministic) {
     const FarLodTile tile_f2 = BuildPristineFarLodTile(world, FarLodTier::F2, 0, 0, params_hash);
     FarLodRegionMesh mesh_f2;
     const auto stats_f2 = Luminumbra::World::MarchingCubes::GenerateFarLodRegionMesh(tile_f2, mesh_f2);
+    FarLodRegionMesh mesh_f2_repeat;
+    Luminumbra::World::MarchingCubes::GenerateFarLodRegionMesh(tile_f2, mesh_f2_repeat);
     EXPECT_EQ(stats_f2.skirt_quads, 256u);
     EXPECT_EQ(mesh_f2.vertices.size(), 65u * 65u + 256u * 4u);
+    EXPECT_EQ(HashMeshBytes(mesh_f2), HashMeshBytes(mesh_f2_repeat))
+        << "zero-brick F2 mesh bytes must remain deterministic";
 }
 
 TEST(FarLodRegionMesher, AdjacentRegionsShareBorderVertexPositions) {

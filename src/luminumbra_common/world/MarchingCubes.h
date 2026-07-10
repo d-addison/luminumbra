@@ -105,9 +105,11 @@ namespace Luminumbra::World::MarchingCubes {
     /**
      * @brief Hybrid far-LOD region mesher. Tiles without SDF bricks retain the
      * original byte-stable whole-region heightfield path. A tile with aligned
-     * SDF bricks promotes their horizontal chunk columns plus a one-column
-     * halo to three-dimensional Marching Cubes; remaining cells stay on the
-     * heightfield path, so the two representations never own the same cell.
+     * SDF bricks promotes an authoritative column only when its supplied
+     * one-column halo is a complete, matching brick stack; remaining cells
+     * stay on the heightfield path, so the two representations never own the
+     * same cell. Malformed, incomplete, or mismatched brick streams fail
+     * closed and leave the output mesh empty.
      * Vertex positions are region-local in X/Z and absolute in Y; VoxelVertex
      * layout is untouched (28 bytes). Tile border samples are shared with
      * adjacent regions, and the perimeter skirt masks tier-boundary cracks.
