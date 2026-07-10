@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -29,6 +30,7 @@ using Luminumbra::Chunk;
 using Luminumbra::IVec3;
 using Luminumbra::MaterialType;
 using Luminumbra::u16;
+using Luminumbra::i16;
 using Luminumbra::u32;
 using Luminumbra::u64;
 using Luminumbra::Vec3;
@@ -133,6 +135,33 @@ void CarveAlignedResidentSdfCavity(Chunk& chunk, int step) {
     }
 }
 
+std::size_t FullSdfIndex(int x, int y, int z) {
+    const std::size_t side_x = static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X) + 1u;
+    const std::size_t side_y = static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_Y) + 1u;
+    return static_cast<std::size_t>(x) + static_cast<std::size_t>(y) * side_x +
+        static_cast<std::size_t>(z) * side_x * side_y;
+}
+
+FarLodSdfSnapshot AuthoritativeSdfSnapshot(const IVec3& coords, u32 revision) {
+    const std::size_t side_x = static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X) + 1u;
+    const std::size_t side_y = static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_Y) + 1u;
+    const std::size_t side_z = static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_Z) + 1u;
+    FarLodSdfSnapshot snapshot;
+    snapshot.coords = coords;
+    snapshot.revision = revision;
+    snapshot.source_kind = FarLodBrickSourceKind::Authoritative;
+    snapshot.sdf_data.assign(side_x * side_y * side_z, -2.0f);
+    snapshot.material_data.assign(snapshot.sdf_data.size(), 17u);
+    return snapshot;
+}
+
+std::size_t ReducedSdfIndex(FarLodTier tier, int x, int y, int z) {
+    const std::size_t side = FarLodSdfBrickSamplesPerSide(tier);
+    const int step = FarLodSampleStepMeters(tier);
+    return static_cast<std::size_t>(x / step) + static_cast<std::size_t>(y / step) * side +
+        static_cast<std::size_t>(z / step) * side * side;
+}
+
 } // namespace
 
 TEST(MarchingCubesAuthoritativeSdf, CoarseStep2UsesResidentLattice) {
@@ -212,6 +241,62 @@ TEST(FarLodStoreTest, HeightQuantizationRoundTripsWithinHalfStep) {
     // Extremes clamp instead of wrapping.
     EXPECT_EQ(QuantizeFarLodHeight(-1.0e6f), 0u);
     EXPECT_EQ(QuantizeFarLodHeight(1.0e6f), 65535u);
+}
+
+TEST(FarLodStoreTest, SdfQuantizationPreservesSignsAndReservesInvalidSentinel) {
+    EXPECT_EQ(QuantizeFarLodSdf(-0.0001f), -1);
+    EXPECT_EQ(QuantizeFarLodSdf(0.0001f), 1);
+    EXPECT_EQ(QuantizeFarLodSdf(0.0f), 0);
+    EXPECT_EQ(QuantizeFarLodSdf(-1.0e6f), -32767);
+    EXPECT_EQ(QuantizeFarLodSdf(1.0e6f), 32767);
+    EXPECT_NE(QuantizeFarLodSdf(-1.0e6f), kFarLodSdfInvalid);
+    EXPECT_NEAR(DequantizeFarLodSdf(static_cast<i16>(-384)), -1.5f, 0.0f);
+}
+
+TEST(FarLodStoreTest, ReducesAuthoritativeLatticeByAlignedDecimation) {
+    const TerrainGenParams params = FixtureParams();
+    const SHIELD_WorldSystem world(nullptr, nullptr, params, kFixtureSeed);
+    const u64 params_hash = ComputeTerrainParamsHash(params, kFixtureSeed);
+    FarLodSdfSnapshot snapshot = AuthoritativeSdfSnapshot(IVec3(3, 2, 5), 7u);
+    snapshot.sdf_data[FullSdfIndex(4, 8, 12)] = 1.25f;
+    snapshot.material_data[FullSdfIndex(4, 8, 12)] = 91u;
+
+    FarLodTile f1 = BuildPristineFarLodTile(world, FarLodTier::F1, 0, 0, params_hash);
+    std::string error;
+    EXPECT_EQ(ReduceChunkSdfIntoFarTile(f1, snapshot, &error), FarLodSdfReduceResult::Inserted) << error;
+    ASSERT_EQ(f1.sdf_bricks.size(), 1u);
+    EXPECT_EQ(f1.sdf_bricks.front().local_chunk_x, 3u);
+    EXPECT_EQ(f1.sdf_bricks.front().local_chunk_z, 5u);
+    EXPECT_EQ(f1.sdf_bricks.front().chunk_y, 2);
+    EXPECT_EQ(f1.sdf_bricks.front().revision, 7u);
+    const std::size_t f1_index = ReducedSdfIndex(FarLodTier::F1, 4, 8, 12);
+    EXPECT_EQ(f1.sdf_density_q[f1_index], QuantizeFarLodSdf(1.25f));
+    EXPECT_EQ(f1.sdf_material[f1_index], 91u);
+
+    FarLodTile f2 = BuildPristineFarLodTile(world, FarLodTier::F2, 0, 0, params_hash);
+    snapshot.sdf_data[FullSdfIndex(8, 8, 8)] = 0.5f;
+    snapshot.material_data[FullSdfIndex(8, 8, 8)] = 44u;
+    EXPECT_EQ(ReduceChunkSdfIntoFarTile(f2, snapshot, &error), FarLodSdfReduceResult::Inserted) << error;
+    const std::size_t f2_index = ReducedSdfIndex(FarLodTier::F2, 8, 8, 8);
+    EXPECT_EQ(f2.sdf_density_q[f2_index], QuantizeFarLodSdf(0.5f));
+    EXPECT_EQ(f2.sdf_material[f2_index], 44u);
+}
+
+TEST(FarLodStoreTest, RejectsMalformedSdfAndKeepsExistingBrick) {
+    const TerrainGenParams params = FixtureParams();
+    const SHIELD_WorldSystem world(nullptr, nullptr, params, kFixtureSeed);
+    const u64 params_hash = ComputeTerrainParamsHash(params, kFixtureSeed);
+    FarLodTile tile = BuildPristineFarLodTile(world, FarLodTier::F1, 0, 0, params_hash);
+    FarLodSdfSnapshot snapshot = AuthoritativeSdfSnapshot(IVec3(0, 1, 0), 1u);
+    std::string error;
+    ASSERT_EQ(ReduceChunkSdfIntoFarTile(tile, snapshot, &error), FarLodSdfReduceResult::Inserted);
+    const u64 before = ComputeFarLodTileHash(tile);
+
+    snapshot.revision = 2u;
+    snapshot.sdf_data[0] = std::numeric_limits<float>::quiet_NaN();
+    EXPECT_EQ(ReduceChunkSdfIntoFarTile(tile, snapshot, &error), FarLodSdfReduceResult::Error);
+    EXPECT_FALSE(error.empty());
+    EXPECT_EQ(ComputeFarLodTileHash(tile), before);
 }
 
 TEST(FarLodStoreTest, TierGeometryMatchesPinnedNumbers) {
@@ -344,6 +429,35 @@ TEST(FarLodStoreTest, TilePersistenceRoundTripsThroughLmr1Container) {
     FarLodTile miss;
     EXPECT_FALSE(store.load_tile(FarLodTier::F2, -1, 2, params_hash, miss, &errors));
     EXPECT_TRUE(errors.empty());
+}
+
+TEST(FarLodStoreTest, AuthoritativeSdfBrickSurvivesPersistenceAndParamsMismatch) {
+    const TerrainGenParams params = FixtureParams();
+    const SHIELD_WorldSystem world(nullptr, nullptr, params, kFixtureSeed);
+    const u64 params_hash = ComputeTerrainParamsHash(params, kFixtureSeed);
+    const u64 other_params_hash = ComputeTerrainParamsHash(params, kFixtureSeed + 11);
+    FarLodTile tile = BuildPristineFarLodTile(world, FarLodTier::F1, 0, 0, params_hash);
+    FarLodSdfSnapshot snapshot = AuthoritativeSdfSnapshot(IVec3(4, -2, 7), 19u);
+    snapshot.sdf_data[FullSdfIndex(8, 8, 8)] = 0.75f;
+    std::string reduction_error;
+    ASSERT_EQ(ReduceChunkSdfIntoFarTile(tile, snapshot, &reduction_error), FarLodSdfReduceResult::Inserted)
+        << reduction_error;
+
+    TempSaveDir save_dir("sdf_roundtrip");
+    const FarLodStore store(save_dir.path);
+    std::vector<std::string> errors;
+    ASSERT_TRUE(store.save_tile(tile, &errors));
+    ASSERT_TRUE(errors.empty());
+
+    FarLodTile loaded;
+    ASSERT_TRUE(store.load_tile(FarLodTier::F1, 0, 0, other_params_hash, loaded, &errors));
+    EXPECT_TRUE(errors.empty());
+    ASSERT_EQ(loaded.sdf_bricks.size(), 1u);
+    EXPECT_EQ(loaded.sdf_bricks.front().source_kind, FarLodBrickSourceKind::Authoritative);
+    EXPECT_EQ(loaded.sdf_bricks.front().revision, 19u);
+    EXPECT_EQ(loaded.sdf_density_q, tile.sdf_density_q);
+    EXPECT_EQ(loaded.sdf_material, tile.sdf_material);
+    EXPECT_EQ(ComputeFarLodTileHash(loaded), ComputeFarLodTileHash(tile));
 }
 
 TEST(FarLodStoreTest, PristineCacheMissesOnParamsHashMismatchEditedLoadsAnyway) {

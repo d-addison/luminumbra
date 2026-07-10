@@ -15,9 +15,9 @@
 // Pristine tiles are built analytically from GetTerrainHeightAt + the same
 // surface material classification the coarse chunk mesher uses - a pure
 // function of (seed, params) with a deterministic fnv1a64 tile hash. They are
-// a regenerable cache keyed (seed, params_hash, tier, region). Edited tiles
-// are authoritative: built by downsampling edited chunks' 17x17
-// heightmap_data and never regenerated from noise.
+// a regenerable cache keyed (seed, params_hash, tier, region). Authoritative
+// far data is stored as aligned, decimated full-SDF bricks; height-only edits
+// are retained solely as a named legacy migration path.
 //
 // Persistence: tiles ride the LMR1 region container alongside chunk records
 // (<save_dir>/chunks/region/r.<rx>.<rz>.lmr) as lod_level 1/2 records; the
@@ -26,6 +26,7 @@
 #include "Chunk.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -59,12 +60,54 @@ constexpr u32 FarLodSamplesPerSide(FarLodTier tier) {
 constexpr float kFarLodHeightQuantMin = -2048.0f;
 constexpr float kFarLodHeightQuantScale = 16.0f;
 
+// Far SDF payload quantization. -32768 is deliberately reserved as an
+// on-disk corruption sentinel; valid source density always preserves its sign.
+constexpr float kFarLodSdfQuantScale = 256.0f;
+constexpr i16 kFarLodSdfInvalid = static_cast<i16>(-32768);
+
+i16 QuantizeFarLodSdf(float density);
+float DequantizeFarLodSdf(i16 density_q);
+
 u16 QuantizeFarLodHeight(float world_height);
 float DequantizeFarLodHeight(u16 height_q);
 
 // Per-sample flag bits.
 constexpr u8 kFarLodSampleFlagWater = 0x01;  // water at or above the sample
 constexpr u8 kFarLodSampleFlagEdited = 0x02; // sample rebuilt from edited chunk data
+
+enum class FarLodBrickSourceKind : u8 {
+    RegenerableCache = 0,
+    Authoritative = 1,
+};
+
+// Wire fields are intentionally represented separately so persistence never
+// depends on native struct padding. Descriptors are sorted by (z, x, y).
+struct FarLodSdfBrickDescriptor {
+    u8 local_chunk_x = 0;
+    u8 local_chunk_z = 0;
+    FarLodBrickSourceKind source_kind = FarLodBrickSourceKind::Authoritative;
+    u8 reserved = 0;
+    i32 chunk_y = 0;
+    u32 revision = 0;
+    u32 payload_crc32 = 0;
+};
+
+// An owned full-lattice snapshot. Far workers consume this value instead of a
+// mutable Chunk, so reduction cannot race an edit or eviction.
+struct FarLodSdfSnapshot {
+    IVec3 coords{};
+    u32 revision = 0;
+    FarLodBrickSourceKind source_kind = FarLodBrickSourceKind::Authoritative;
+    std::vector<f32> sdf_data;
+    std::vector<u8> material_data;
+};
+
+enum class FarLodSdfReduceResult : u8 {
+    Inserted,
+    Replaced,
+    Unchanged,
+    Error,
+};
 
 // One far-LOD region tile. Sample arrays are row-major
 // (index = x + z * samples_per_side), x/z in sample-grid units; world
@@ -79,14 +122,40 @@ struct FarLodTile {
     // authoritative and never regenerated).
     u64 params_hash = 0;
     bool edited = false;
+    // Legacy height-only edited samples are retained only to migrate old
+    // records. New authority is always represented by a full SDF brick.
+    bool legacy_surface_authority = false;
     std::vector<u16> height_q;
     std::vector<u8> material;
     std::vector<u8> flags;
+
+    // Flat, sorted streams. Every descriptor owns exactly
+    // FarLodSdfBrickSampleCount(tier) consecutive density/material samples.
+    std::vector<FarLodSdfBrickDescriptor> sdf_bricks;
+    std::vector<i16> sdf_density_q;
+    std::vector<u8> sdf_material;
 
     std::size_t sample_count() const {
         return static_cast<std::size_t>(samples_per_side) * samples_per_side;
     }
 };
+
+constexpr u32 FarLodSdfBrickSamplesPerSide(FarLodTier tier) {
+    return static_cast<u32>(CHUNK_SIZE_X / FarLodSampleStepMeters(tier)) + 1u;
+}
+
+constexpr std::size_t FarLodSdfBrickSampleCount(FarLodTier tier) {
+    const std::size_t side = FarLodSdfBrickSamplesPerSide(tier);
+    return side * side * side;
+}
+
+// Decimates a full 17^3 lattice at the aligned far-tier stride and upserts the
+// corresponding brick. Material data is optional; an absent full material
+// lattice is encoded as 0xff. Heightmap-only input is never accepted.
+FarLodSdfReduceResult ReduceChunkSdfIntoFarTile(
+    FarLodTile& tile,
+    const FarLodSdfSnapshot& snapshot,
+    std::string* error = nullptr);
 
 // Region mesh output (consumed by MarchingCubes::GenerateFarLodRegionMesh and
 // the far render path). Vertex positions are region-local in X/Z (relative to
@@ -118,10 +187,9 @@ FarLodTile BuildPristineFarLodTile(
     i32 rz,
     u64 params_hash);
 
-// Downsamples a chunk's 17x17 heightmap_data into the covering tile samples
-// (the chunk's 16 m footprint aligns exactly with the 4 m / 8 m sample
-// lattices). When mark_edited is set the touched samples and the tile itself
-// are flagged edited (authoritative). Returns the number of samples written;
+// Legacy migration helper: downsamples a chunk's 17x17 heightmap_data into
+// the covering tile samples. New authoritative far data must use
+// ReduceChunkSdfIntoFarTile instead. Returns the number of samples written;
 // 0 when the chunk lies outside the tile's region or carries no heightmap.
 std::size_t ApplyChunkHeightmapToFarLodTile(
     FarLodTile& tile,
