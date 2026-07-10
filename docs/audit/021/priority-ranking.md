@@ -1016,6 +1016,38 @@ gate seen RED before its fix, GREEN after).
 **Close: 146/190 done.** Next: M1 — the render-scale seam (GPU-P09) with FOLIAGE-05 early
 (retires the ForestPerfBudget chartered RED so the lane is 100% green from M1 on).
 
+## M1 render-scale closure record — GPU-P09/GPU-07 (2026-07-10)
+
+The internal-render-scale seam is complete and machine-gated. The viewport/extent seam landed
+first; `4bdc0c53` added `log2(render_scale)` material-sampler LOD bias, and `f0419ee3` wired
+`user.render_scale` with `LUMIN_RENDER_SCALE` retaining override precedence. The closure adds an
+in-process three-dispatch `UpscaleSeamParity` harness: native reference, scale-1 seam, and scale
+0.67 upscaled to the same output extent. The scale-1 leg is EXACT 0.0; the clean RTX 5070 Ti
+calibration measured 0.0112331 and the checked-in 0.0141 threshold carries approximately 25%
+driver headroom while remaining far below the preregistered 0.08 ceiling. The final rerun measured
+0.0112254 at 2573x1059 -> 3840x1581, with frame health nominal (80.6% G-buffer coverage, no
+black/blown/unlit verdict). `RenderParityFrame` remains EXACT 0.0. Both GPU-P09 and GPU-07 close;
+**158/190 done**. Next: verification/operability reconciliation, then SHIELD-08 visual fidelity.
+
+## Wave-2 verification/operability record (partial, 2026-07-10)
+
+- The stale `NetworkedSession` bare streamed-chunk pin was reproduced in three independent
+  90-tick runs (`354be8d009c08703` each; host==client at every cadence, zero GL errors, clean
+  disconnect), re-pinned, and the official gate rerun passed.
+- **AUDIO-13** closed with the living audio/event/bus documentation refresh and a new
+  `AudioBankIntegrity.PillarDocLoadedEventContractResolves` gate; all six audio/manifest tests
+  passed.
+- **OPS-15** closed with the canonical one-page harness index plus the expanded operator guide;
+  frontier `Files` mode now asserts every chartered flag and passed.
+- Recursive `CONFIGURE_DEPENDS` scans over generated runtime data/assets were replaced by a
+  checked-in 172-file authored-data manifest, configure-time-only source-asset discovery, and
+  `RuntimeDataManifestDrift`. The immediate no-op build dropped from 104-303 seconds observed
+  during audit to 0.2 seconds.
+- **OPS-09** implementation exists (nightly wrapper + `ScheduledGateRun` report validator) but
+  remains open until a real dated report contains every required stage green.
+
+**Close: 160/190 done.** Next: finish the OPS-09 proving run, then SHIELD-08.
+
 ## Spine-inversion register (AC-003)
 
 Exactly one deliberate inversion, justified inline at its rank:

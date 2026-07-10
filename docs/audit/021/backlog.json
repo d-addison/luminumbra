@@ -2064,16 +2064,16 @@
       "id": "GPU-07",
       "pillar": "gpu",
       "spec": "014",
-      "summary": "DLSS input-contract gaps: no internal-render-scale seam exists (TAAU is native-res TAA and default-OFF) and the exposure slot is a sentinel-0 placeholder pending 015 A-T05/T06, while motion vectors (RG16F@COLOR_ATTACHMENT4) and Halton jitter are verified present.",
-      "evidence": "res/shaders/taau_resolve.frag:2, src/luminumbra_client/rendering/RenderPipeline.h:1001, src/luminumbra_client/rendering/RenderContext.h:150, src/luminumbra_client/rendering/passes/GBufferPass.cpp:155, src/luminumbra_client/rendering/RenderPipeline.cpp:2105",
+      "summary": "DLSS internal-render-scale input contract closed: registry-owned G-buffer/lighting/SSAO intermediates render at a clamped 0.5-1.0 internal extent, FinalBlit upscales to output, scaled material samplers receive LOD bias, config is wired with env override precedence, and the native-vs-0.67 in-process parity gate is calibrated.",
+      "evidence": "src/luminumbra_client/rendering/RenderPipeline.cpp:940, src/luminumbra_client/rendering/RenderPipeline.cpp:3780, src/luminumbra_client/main_client.cpp:2896, .forge/scripts/validate-engine-frontier.ps1:6976",
       "effort": "L",
       "risk": "medium",
       "dependencies": [
         "016",
         "015"
       ],
-      "status": "todo",
-      "proving_signal": "NEW: UpscaleSeamParityGpu ctest \u2014 renders a fixed scene at 0.67x internal scale with TAAU-upscale enabled; asserts frame-health nominal verdict + flip_diff vs native-res golden under the calibrated (~0.08) threshold; scale=1.0 path byte-identical",
+      "status": "done",
+      "proving_signal": "UpscaleSeamParity explicit GPU gate: fixed scene at 0.67 internal scale has nominal frame health and in-process luma-FLIP 0.0112254 <= calibrated 0.0141; scale-1 seam is exactly 0.0. RenderParityFrame remains exactly 0.0.",
       "rank": 113
     },
     {
@@ -2081,15 +2081,15 @@
       "pillar": "gpu",
       "spec": "014",
       "summary": "Internal-render-scale seam \u2014 the missing DLSS precondition: registry-owned scaled allocation of the G-Buffer/lighting chain, texture mip bias, viewport/UV plumbing, and TAAU upgraded to actually upsample (its shader header already names itself the upsampling hook); scale=1.0 stays byte-identical.",
-      "evidence": "res/shaders/taau_resolve.frag:2; src/luminumbra_client/rendering/RenderPipeline.h:1001; docs/audit/021/pillar-gpu.md:23",
+      "evidence": "src/luminumbra_client/rendering/RenderPipeline.cpp:940; src/luminumbra_client/rendering/RenderPipeline.cpp:3780; src/luminumbra_client/rendering/passes/GBufferPass.cpp:301; .forge/scripts/validate-engine-frontier.ps1:6976",
       "effort": "L",
       "risk": "medium",
       "dependencies": [
         "GPU-04",
         "GPU-12"
       ],
-      "status": "todo",
-      "proving_signal": "Existing (auditor GPU-07): UpscaleSeamParityGpu ctest \u2014 fixed scene at 0.67x internal scale with TAAU-upscale enabled passes frame-health nominal + flip_diff vs native golden under the calibrated (~0.08) threshold; scale=1.0 path byte-identical",
+      "status": "done",
+      "proving_signal": "UpscaleSeamParity explicit GPU gate: native and scale-1 seam are byte-identical; scale-0.67 upscales 2573x1059 -> 3840x1581 with nominal frame health and luma-FLIP 0.0112254 <= calibrated 0.0141.",
       "rank": 113
     },
     {
@@ -2697,15 +2697,15 @@
       "id": "AUDIO-13",
       "pillar": "audio",
       "spec": "new",
-      "summary": "Refresh docs/AUDIO-everything-maps-to-sound.md (missing sleep/feed/drink/colony SFX, day/night music beds, live music bus) and record the volume-bus memory correction (music applies live; SFX still does not).",
-      "evidence": "docs/AUDIO-everything-maps-to-sound.md:49, src/luminumbra_client/main_client.cpp:4230, src/luminumbra_client/main_client.cpp:3517",
+      "summary": "Audio pillar documentation refreshed for sleep/feed/drink/colony SFX, day/night environmental beds, and live volume buses; the current implementation applies both music and SFX buses live, correcting the stale SFX-persist-only memory.",
+      "evidence": "docs/AUDIO-everything-maps-to-sound.md:37, docs/AUDIO-everything-maps-to-sound.md:67, test/audio/AudioBankIntegrity_test.cpp:189",
       "effort": "S",
       "risk": "low",
       "dependencies": [
         "AUDIO-04"
       ],
-      "status": "todo",
-      "proving_signal": "NEW: doc-sync assertion in the AudioBankIntegrity ctest \u2014 every event id named in the pillar doc exists in a loaded bank",
+      "status": "done",
+      "proving_signal": "AudioBankIntegrity.PillarDocLoadedEventContractResolves: every loaded-event id in the marked pillar-doc contract resolves in sfx_main/music; full AudioBankIntegrity suite green.",
       "rank": 145
     },
     {
@@ -2753,12 +2753,12 @@
       "pillar": "buildtestops",
       "spec": "new",
       "summary": "Author the harness operator doc: one page enumerating the 18-flag (8 server + 10 client) headless surface (server --smoke/--smoke-moving/--record/--replay/--ticks/--avatars/--avail-trace/--replicate/--artifact; client --frame-scan/--scene-config/--ui-screenshot/--render-benchmark/--play-paths/--survey/--worldgen-graph/--timelapse/--no-audio/--crash-dir), the gate each feeds, and the FLIP noise rule (in-process same-frame only; cross-run noise ~0.057 exceeds flip_diff.py's 0.05 default threshold).",
-      "evidence": "src/luminumbra_server/main_server.cpp:242-322, src/luminumbra_client/main_client.cpp:2754-2807, tools/flip_diff.py:38-45",
+      "evidence": "docs/operability/harness.md:1, docs/HARNESS-operator-guide.md:1, .forge/scripts/validate-engine-frontier.ps1:231",
       "effort": "S",
       "risk": "low",
       "dependencies": [],
-      "status": "todo",
-      "proving_signal": "NEW: frontier Files-mode doc check \u2014 Assert-FileExists docs/operability/harness.md plus Assert-Contains for every shipped harness flag",
+      "status": "done",
+      "proving_signal": "Frontier Files mode: docs/operability/harness.md exists and contains every chartered server/client harness flag plus the in-process FLIP noise rule.",
       "rank": 146
     },
     {

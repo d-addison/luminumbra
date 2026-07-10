@@ -590,6 +590,14 @@ public:
     // Returns false on GL/IO error, TAAU-on (history ping-pong breaks idempotence — Codex
     // critique #2), or a nonzero score.
     bool capture_frame_parity(const Camera& camera, const std::filesystem::path& out_dir);
+    // GPU-P09/GPU-07 closure gate: render the same prepared frame at native scale twice
+    // (the scale-1 seam must be bit-exact), then at 0.67 internal scale and compare the
+    // upscaled output against the native reference with the in-process FLIP metric.
+    // The method restores the caller's render scale and offscreen target before returning.
+    // Writes upscale_seam_{reference,scale1,scale067}.ppm and
+    // upscale_seam_parity.json under out_dir. TAAU must be disabled.
+    bool capture_upscale_seam_parity(const Camera& camera,
+                                     const std::filesystem::path& out_dir);
     // Generated caustics texture id (0 when unavailable). Exposed for the
     // runtime scenario harness caustics-animation probe (T-I2-16).
     u32 water_caustics_texture() const;

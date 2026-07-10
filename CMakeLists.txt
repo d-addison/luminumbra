@@ -146,8 +146,21 @@ add_subdirectory(tools)
 set(DATA_SOURCE_DIR ${CMAKE_SOURCE_DIR}/data)
 set(DATA_OUTPUT_DIR ${CMAKE_BINARY_DIR}/data)
 
-file(GLOB_RECURSE DATA_SOURCE_FILES CONFIGURE_DEPENDS "${DATA_SOURCE_DIR}/*")
-list(FILTER DATA_SOURCE_FILES EXCLUDE REGEX "\\.lmesh$")
+# The broad CONFIGURE_DEPENDS glob used to traverse generated captures and processed
+# model outputs on every Ninja invocation. Keep an explicit authored-input manifest
+# instead; copy_directory still mirrors the complete runtime tree when an authored
+# input changes, while untracked/generated trees no longer tax every no-op build.
+include(${CMAKE_SOURCE_DIR}/cmake/runtime_data_manifest.cmake)
+set(DATA_SOURCE_FILES)
+foreach(DATA_RELATIVE_PATH IN LISTS LUMINUMBRA_RUNTIME_DATA_MANIFEST)
+    set(DATA_ABSOLUTE_PATH "${DATA_SOURCE_DIR}/${DATA_RELATIVE_PATH}")
+    if(NOT EXISTS "${DATA_ABSOLUTE_PATH}")
+        message(FATAL_ERROR
+            "Runtime-data manifest entry is missing: data/${DATA_RELATIVE_PATH}. "
+            "Run tools/check_runtime_data_manifest.py after data-file changes.")
+    endif()
+    list(APPEND DATA_SOURCE_FILES "${DATA_ABSOLUTE_PATH}")
+endforeach()
 set(COPY_DATA_STAMP "${CMAKE_BINARY_DIR}/copy_data.stamp")
 
 add_custom_command(
@@ -162,11 +175,13 @@ add_custom_command(
 
 add_custom_target(copy_data ALL DEPENDS "${COPY_DATA_STAMP}")
 
-# 3. Find all source mesh assets in a way that reconfigures when assets change.
+# 3. Find source mesh assets at configure time. New source assets require an explicit
+# CMake reconfigure; avoiding CONFIGURE_DEPENDS prevents a recursive assets/ scan on
+# every no-op build while still allowing untracked work-in-progress .glb inputs.
 set(ASSET_SOURCE_DIR ${CMAKE_SOURCE_DIR}/assets)
 set(ASSET_OUTPUT_DIR ${DATA_OUTPUT_DIR})
 
-file(GLOB_RECURSE SOURCE_ASSETS CONFIGURE_DEPENDS "${ASSET_SOURCE_DIR}/*.glb")
+file(GLOB_RECURSE SOURCE_ASSETS "${ASSET_SOURCE_DIR}/*.glb")
 
 # 4. Loop through each found asset and create a custom command to process it.
 set(PROCESSED_ASSETS)

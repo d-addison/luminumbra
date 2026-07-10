@@ -37,6 +37,9 @@ dead. This is a game-feel gate, not a nice-to-have.
   `LoadBank`). The other banks (creatures/environment/weather/…) reference hundreds of
   not-yet-generated files and are **not loaded** — add new events to `sfx_main` (or load a
   new focused bank) rather than relying on those.
+- **Volume buses:** persisted master/music/SFX volumes are applied at boot. Music volume
+  applies live to the current track; SFX volume also applies live now via the `sfx` group,
+  scaling one-shots, spatial events, ambient beds, and UI under the non-music bus.
 - **Generation pipeline (ElevenLabs):** `tools/audio/sfx_manifest.json` (the source of
   truth for prompts + output paths) + `tools/audio/generate_sfx.ps1`. Run with the key in
   the environment ONLY (never commit it):
@@ -49,7 +52,8 @@ dead. This is a game-feel gate, not a nice-to-have.
 ## Wired today (commits on `feat/polyglot-audit-roadmap`)
 Footsteps (grass/stone/**soil/sand/water/crystal** by surface material), **camera shutter**
 (on capture), UI click + world-loaded chime, **menu music**, constant ambient bed (**forest
-rustle + birdsong + wind**), **rain** (reactive to `WeatherSystem::PrecipitationAt`),
+rustle + birdsong + wind**) with day/night environmental beds (`ambient_birds`/`ambient_night`),
+**rain** (reactive to `WeatherSystem::PrecipitationAt`),
 **thunder** (during heavy storms), **water** (when standing water is within ~14 m), and
 **creature calls** (nearest live creature, ~every 11 s). **Farming verbs** (plant/water/
 fertilize/harvest, at the aim point on success). **Terraform** (dig sample picked by the
@@ -63,6 +67,16 @@ breathes with the live wind-field magnitude via `IAudioManager::SetAmbientVolume
 promotion** (a wild plant becoming a tended crop plays `farm_plant`). **RmlUi menu buttons**
 already play `ui_button_click`/`ui_button_hover` (verified — the manager holds the audio
 pointer and every interactive control routes through it).
+**Creature state/action SFX**: nearby sleeping creatures play `creature_sleep`, grazing
+creatures play `creature_feed` or `creature_drink` at water's edge, and active forager nests
+play `creature_colony`; all four events are in the loaded `sfx_main` bank.
+
+<!-- loaded-event-contract:start -->
+The currently loaded-bank additions documented by this refresh are `ambient_birds`,
+`ambient_night`, `creature_sleep`, `creature_feed`, `creature_drink`, and `creature_colony`.
+The `AudioBankIntegrity.PillarDocLoadedEventContractResolves` gate keeps this list synchronized
+with the loaded bank set.
+<!-- loaded-event-contract:end -->
 
 > **Engine fix (2026-06-25):** wiring creature footsteps surfaced a latent use-after-free —
 > `MiniaudioManager::PlayOneShot` (3D) parked its `ma_sound` in a *local* `unique_ptr` that

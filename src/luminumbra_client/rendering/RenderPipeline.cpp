@@ -937,6 +937,186 @@ bool RenderPipeline::capture_frame_parity(const Camera& camera, const std::files
     return ok;
 }
 
+bool RenderPipeline::capture_upscale_seam_parity(
+    const Camera& camera, const std::filesystem::path& out_dir) {
+    // GPU-P09/GPU-07: compare three dispatches over ONE prepared frame/context:
+    //   reference: native scale 1.0
+    //   leg 1:     the same scale-1 seam again (must be bit-exact)
+    //   leg 2:     scale 0.67, upscaled by FinalBlit to the same output extent
+    // Keeping all three in-process removes the ~0.057 cross-run capture noise floor.
+    if (!m_frame_prepared.valid) {
+        LUMINUMBRA_CORE_ERROR(
+            "capture_upscale_seam_parity: no prepared frame (render a frame first)");
+        return false;
+    }
+    if (m_taau_enabled) {
+        LUMINUMBRA_CORE_ERROR(
+            "capture_upscale_seam_parity: requires TAAU OFF (history ping-pong invalidates parity)");
+        return false;
+    }
+
+    constexpr float kReducedScale = 0.67f;
+    // Clean RTX 5070 Ti calibration (2026-07-10): 0.0112331374322083 at
+    // 3840x1581 -> 2573x1059. Add ~25% headroom for driver-level raster variance
+    // while remaining far below the preregistered 0.08 hard ceiling.
+    constexpr double kUpscaleSeamLeg2Threshold = 0.0141;
+    const GLsizei w = static_cast<GLsizei>(m_screen_width);
+    const GLsizei h = static_cast<GLsizei>(m_screen_height);
+    if (w <= 0 || h <= 0) return false;
+
+    auto make_target = [&](GLuint& fbo, GLuint& tex) {
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glGenFramebuffers(1, &fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glFramebufferTexture2D(
+            GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    };
+    auto read_rgba = [&](GLuint fbo, std::vector<std::uint8_t>& px) {
+        px.assign(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4u, 0u);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    };
+    auto write_ppm = [&](const std::vector<std::uint8_t>& px,
+                         const std::filesystem::path& path) -> bool {
+        std::ofstream f(path, std::ios::binary | std::ios::trunc);
+        if (!f) return false;
+        f << "P6\n" << w << " " << h << "\n255\n";
+        for (std::size_t i = 0; i < px.size(); i += 4u) {
+            f.write(reinterpret_cast<const char*>(px.data() + i), 3);
+        }
+        return static_cast<bool>(f);
+    };
+
+    GLuint fbo_reference = 0, tex_reference = 0;
+    GLuint fbo_scale1 = 0, tex_scale1 = 0;
+    GLuint fbo_scale067 = 0, tex_scale067 = 0;
+    make_target(fbo_reference, tex_reference);
+    bool ok = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    make_target(fbo_scale1, tex_scale1);
+    ok = ok && glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    make_target(fbo_scale067, tex_scale067);
+    ok = ok && glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+
+    const float previous_scale = m_render_scale;
+    const bool previous_target_active = m_offscreen_target_active;
+    const u32 previous_target_fbo = m_offscreen_target_fbo;
+    const u32 previous_target_w = m_offscreen_target_w;
+    const u32 previous_target_h = m_offscreen_target_h;
+    const bool previous_timer_suppression = m_gpu_timers_suppressed;
+
+    m_gpu_timers_suppressed = true;
+    set_render_scale(1.0f);
+    const u32 native_internal_w = m_internal_width;
+    const u32 native_internal_h = m_internal_height;
+    set_offscreen_target(fbo_reference, static_cast<u32>(w), static_cast<u32>(h));
+    dispatch_stages(camera);
+    set_offscreen_target(fbo_scale1, static_cast<u32>(w), static_cast<u32>(h));
+    dispatch_stages(camera);
+
+    set_render_scale(kReducedScale);
+    const u32 reduced_internal_w = m_internal_width;
+    const u32 reduced_internal_h = m_internal_height;
+    set_offscreen_target(fbo_scale067, static_cast<u32>(w), static_cast<u32>(h));
+    dispatch_stages(camera);
+
+    std::vector<std::uint8_t> px_reference, px_scale1, px_scale067;
+    read_rgba(fbo_reference, px_reference);
+    read_rgba(fbo_scale1, px_scale1);
+    read_rgba(fbo_scale067, px_scale067);
+
+    // Restore production state even though the headless harness exits after capture.
+    set_render_scale(previous_scale);
+    m_offscreen_target_active = previous_target_active;
+    m_offscreen_target_fbo = previous_target_fbo;
+    m_offscreen_target_w = previous_target_w;
+    m_offscreen_target_h = previous_target_h;
+    // set_render_scale() rebuilt the scaled G-buffer/lighting/SSAO targets. Re-dispatch
+    // once at the restored production scale so the frame-scan that follows this capture
+    // observes populated attachments rather than the freshly allocated empty targets.
+    dispatch_stages(camera);
+    m_gpu_timers_suppressed = previous_timer_suppression;
+
+    const auto leg1 = InProcessFlip::ComputeLumaFlip(
+        px_reference.data(), px_scale1.data(), w, h);
+    const auto leg2 = InProcessFlip::ComputeLumaFlip(
+        px_reference.data(), px_scale067.data(), w, h);
+    const bool leg1_passed = leg1.score == 0.0;
+    const bool leg2_passed = leg2.score <= kUpscaleSeamLeg2Threshold;
+
+    std::error_code ec;
+    std::filesystem::create_directories(out_dir, ec);
+    ok = ok && !ec;
+    ok = ok && write_ppm(px_reference, out_dir / "upscale_seam_reference.ppm");
+    ok = ok && write_ppm(px_scale1, out_dir / "upscale_seam_scale1.ppm");
+    ok = ok && write_ppm(px_scale067, out_dir / "upscale_seam_scale067.ppm");
+    {
+        nlohmann::json report = {
+            {"schema", "luminumbra.upscale_seam_parity.v1"},
+            {"metric", InProcessFlip::BackendName()},
+            {"output_width", w},
+            {"output_height", h},
+            {"reference", {
+                {"scale", 1.0},
+                {"internal_width", native_internal_w},
+                {"internal_height", native_internal_h}
+            }},
+            {"leg1", {
+                {"scale", 1.0},
+                {"score", leg1.score},
+                {"max_error", leg1.max_error},
+                {"threshold", 0.0},
+                {"passed", leg1_passed}
+            }},
+            {"leg2", {
+                {"scale", kReducedScale},
+                {"internal_width", reduced_internal_w},
+                {"internal_height", reduced_internal_h},
+                {"score", leg2.score},
+                {"max_error", leg2.max_error},
+                {"threshold", kUpscaleSeamLeg2Threshold},
+                {"passed", leg2_passed}
+            }},
+            {"restored_scale", previous_scale},
+            {"passed", leg1_passed && leg2_passed}
+        };
+        std::ofstream j(out_dir / "upscale_seam_parity.json", std::ios::trunc);
+        ok = ok && static_cast<bool>(j);
+        if (j) j << report.dump(2) << '\n';
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo_reference);
+    glDeleteFramebuffers(1, &fbo_scale1);
+    glDeleteFramebuffers(1, &fbo_scale067);
+    glDeleteTextures(1, &tex_reference);
+    glDeleteTextures(1, &tex_scale1);
+    glDeleteTextures(1, &tex_scale067);
+
+    if (!leg1_passed) {
+        LUMINUMBRA_CORE_ERROR(
+            "capture_upscale_seam_parity: scale-1 seam NOT exact — score {} (max {})",
+            leg1.score, leg1.max_error);
+    }
+    if (!leg2_passed) {
+        LUMINUMBRA_CORE_ERROR(
+            "capture_upscale_seam_parity: scale-0.67 score {} exceeds threshold {}",
+            leg2.score, kUpscaleSeamLeg2Threshold);
+    }
+    if (leg1_passed && leg2_passed) {
+        LUMINUMBRA_CORE_INFO(
+            "capture_upscale_seam_parity: scale-1 EXACT; scale-0.67 score {} <= {} ({}x{} -> {}x{})",
+            leg2.score, kUpscaleSeamLeg2Threshold,
+            reduced_internal_w, reduced_internal_h, w, h);
+    }
+    return ok && leg1_passed && leg2_passed;
+}
+
 // Spec 016 (016-P2-T02): the SSAO pass contract, built from pipeline state. Used
 // by both the render_frame call site and capture_ssao_parity so the gated ctx is
 // byte-identical to the production ctx.

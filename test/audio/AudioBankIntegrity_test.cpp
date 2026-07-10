@@ -185,3 +185,41 @@ TEST(AudioBankIntegrity, EverySpeciesHasACallEvent) {
     }
     EXPECT_GE(species_checked, 5u) << "species registry scan found suspiciously few species";
 }
+
+TEST(AudioBankIntegrity, PillarDocLoadedEventContractResolves) {
+    const fs::path doc_path = kRoot / "docs" / "AUDIO-everything-maps-to-sound.md";
+    std::ifstream input(doc_path);
+    ASSERT_TRUE(input.is_open()) << "cannot open " << doc_path.string();
+    const std::string text((std::istreambuf_iterator<char>(input)),
+                           std::istreambuf_iterator<char>());
+
+    constexpr const char* kStart = "<!-- loaded-event-contract:start -->";
+    constexpr const char* kEnd = "<!-- loaded-event-contract:end -->";
+    const std::size_t start = text.find(kStart);
+    const std::size_t end = text.find(kEnd);
+    ASSERT_NE(start, std::string::npos) << "pillar doc is missing " << kStart;
+    ASSERT_NE(end, std::string::npos) << "pillar doc is missing " << kEnd;
+    ASSERT_LT(start, end);
+
+    const std::string contract = text.substr(start, end - start);
+    static const std::regex kBacktickEvent(R"(`([a-z][a-z0-9_]+)`)" );
+    const std::set<std::string> loaded = LoadedEventIds();
+    std::set<std::string> documented;
+    std::vector<std::string> unresolved;
+    for (auto it = std::sregex_iterator(contract.begin(), contract.end(), kBacktickEvent);
+         it != std::sregex_iterator(); ++it) {
+        const std::string id = (*it)[1].str();
+        documented.insert(id);
+        if (loaded.count(id) == 0u) unresolved.push_back(id);
+    }
+
+    EXPECT_GE(documented.size(), 6u)
+        << "loaded-event contract unexpectedly names too few events";
+    EXPECT_TRUE(unresolved.empty())
+        << "pillar doc names event ids absent from loaded banks: "
+        << [&unresolved] {
+               std::string joined;
+               for (const auto& id : unresolved) joined += "\n  " + id;
+               return joined;
+           }();
+}

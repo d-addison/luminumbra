@@ -2893,6 +2893,20 @@ int main(int argc, char* argv[]) {
         LUMINUMBRA_CORE_INFO("Render-parity (whole-frame) armed -> {} (auto-world implied, settle {} frames)",
                              g_render_parity_dir.string(), kFrameScanSettleFrames);
     }
+    // GPU-P09/GPU-07: native scale-1 reference vs exact scale-1 seam and the
+    // scale-0.67 upscaled output, all in one process/context to avoid capture noise.
+    if (const std::string rp = GetCommandLineOption(argc, argv, "--upscale-seam-parity", ""); !rp.empty()) {
+        g_render_parity_active = true;
+        g_render_parity_dir = std::filesystem::path(rp);
+        g_render_parity_pass = "upscale_seam";
+        g_frame_scan_active = true;
+        g_frame_scan_path = (g_render_parity_dir / "parity_scan.json").string();
+        scenario_config.auto_create_world = true;
+        scenario_config.auto_enter_world = true;
+        LUMINUMBRA_CORE_INFO(
+            "Upscale-seam parity armed -> {} (auto-world implied, settle {} frames)",
+            g_render_parity_dir.string(), kFrameScanSettleFrames);
+    }
     // DIAGNOSTIC-only settle override (see g_frame_scan_settle_target): let a fully-loaded
     // capture wait past the gate's 90-frame default. Gates never set this env.
     if (const char* settle_env = std::getenv("LUMIN_FRAME_SCAN_SETTLE")) {
@@ -7227,6 +7241,9 @@ int main(int argc, char* argv[]) {
                                 bool parity_ok = false;
                                 if (g_render_parity_pass == "ssao" && g_camera)
                                     parity_ok = renderPipeline.capture_ssao_parity(g_render_parity_dir, *g_camera);
+                                else if (g_render_parity_pass == "upscale_seam" && g_camera)
+                                    parity_ok = renderPipeline.capture_upscale_seam_parity(
+                                        *g_camera, g_render_parity_dir);
                                 else if (g_render_parity_pass == "frame" && g_camera)
                                     // WAVE-F F1: whole-frame A/B â€” dispatch the settled
                                     // prepared frame twice, in-process FLIP must be 0.0.
