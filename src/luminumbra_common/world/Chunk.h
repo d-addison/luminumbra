@@ -3,6 +3,7 @@
 #include "../../../include/luminumbra/core/Types.h"
 #include <atomic>
 #include <cstdint>
+#include <limits>
 #include <mutex>
 #include <vector>
 #include "core/Log.h"
@@ -51,7 +52,11 @@ public:
     void mark_voxel_data_dirty() {
         m_sdf_provenance.store(static_cast<u8>(ChunkSdfProvenance::LoadedOrEdited),
                                std::memory_order_release);
-        m_voxel_revision.fetch_add(1u, std::memory_order_acq_rel);
+        u32 revision = m_voxel_revision.load(std::memory_order_acquire);
+        while (revision != std::numeric_limits<u32>::max() &&
+               !m_voxel_revision.compare_exchange_weak(
+                   revision, revision + 1u,
+                   std::memory_order_acq_rel, std::memory_order_acquire)) {}
         m_voxel_data_dirty.store(true, std::memory_order_release);
     }
     void clear_voxel_data_dirty() { m_voxel_data_dirty.store(false, std::memory_order_release); }
@@ -59,10 +64,15 @@ public:
     void mark_sdf_generated_current_params() {
         m_sdf_provenance.store(static_cast<u8>(ChunkSdfProvenance::GeneratedCurrentParams),
                                std::memory_order_release);
+        m_voxel_revision.store(0u, std::memory_order_release);
+        m_voxel_data_dirty.store(false, std::memory_order_release);
     }
     void mark_sdf_loaded_or_edited() {
         m_sdf_provenance.store(static_cast<u8>(ChunkSdfProvenance::LoadedOrEdited),
                                std::memory_order_release);
+        u32 expected = 0u;
+        m_voxel_revision.compare_exchange_strong(
+            expected, 1u, std::memory_order_acq_rel, std::memory_order_acquire);
     }
     ChunkSdfProvenance sdf_provenance() const {
         return static_cast<ChunkSdfProvenance>(m_sdf_provenance.load(std::memory_order_acquire));

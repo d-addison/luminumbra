@@ -5136,7 +5136,9 @@ std::shared_ptr<const FarLodSdfSnapshot> SHIELD_WorldSystem::capture_far_lod_sdf
     // owned value vectors below, never a Chunk or a borrowed vector span.
     for (const auto& [id, chunk] : m_streaming_state.chunks) {
         (void)id;
-        if (!chunk || chunk->sdf_data.size() != kFullSdfLatticeSize) {
+        if (!chunk || chunk->sdf_data.size() != kFullSdfLatticeSize ||
+            (!chunk->material_data.empty() &&
+             chunk->material_data.size() != kFullSdfLatticeSize)) {
             continue;
         }
         const IVec3& coords = chunk->get_coords();

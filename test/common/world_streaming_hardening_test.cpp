@@ -55,6 +55,7 @@ namespace fs = std::filesystem;
 
 using Luminumbra::Chunk;
 using Luminumbra::ChunkID;
+using Luminumbra::ChunkSdfProvenance;
 using Luminumbra::ChunkState;
 using Luminumbra::IVec3;
 using Luminumbra::u8;
@@ -659,6 +660,102 @@ TEST(StreamingHardening, FarLodSnapshotOwnsBytesAndRejectsStaleLiveData) {
     EXPECT_EQ(entry.sdf_data.front(), -1.0f);
     EXPECT_EQ(entry.material_data.front(), 7u);
     EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*captured));
+}
+
+TEST(StreamingHardening, ChunkSdfProvenanceRevisionLifecycleIsSticky) {
+    Chunk chunk(IVec3(0, 0, 0));
+    EXPECT_EQ(chunk.sdf_provenance(), ChunkSdfProvenance::GeneratedCurrentParams);
+    EXPECT_EQ(chunk.voxel_revision(), 0u);
+    EXPECT_FALSE(chunk.is_voxel_data_dirty());
+
+    chunk.mark_voxel_data_dirty();
+    EXPECT_EQ(chunk.sdf_provenance(), ChunkSdfProvenance::LoadedOrEdited);
+    EXPECT_EQ(chunk.voxel_revision(), 1u);
+    EXPECT_TRUE(chunk.is_voxel_data_dirty());
+    chunk.clear_voxel_data_dirty();
+    EXPECT_EQ(chunk.sdf_provenance(), ChunkSdfProvenance::LoadedOrEdited);
+    EXPECT_EQ(chunk.voxel_revision(), 1u);
+    EXPECT_FALSE(chunk.is_voxel_data_dirty());
+    chunk.mark_voxel_data_dirty();
+    EXPECT_EQ(chunk.voxel_revision(), 2u);
+
+    chunk.mark_sdf_generated_current_params();
+    EXPECT_EQ(chunk.sdf_provenance(), ChunkSdfProvenance::GeneratedCurrentParams);
+    EXPECT_EQ(chunk.voxel_revision(), 0u);
+    EXPECT_FALSE(chunk.is_voxel_data_dirty());
+    chunk.mark_sdf_loaded_or_edited();
+    EXPECT_EQ(chunk.sdf_provenance(), ChunkSdfProvenance::LoadedOrEdited);
+    EXPECT_EQ(chunk.voxel_revision(), 1u);
+    EXPECT_FALSE(chunk.is_voxel_data_dirty());
+}
+
+TEST(StreamingHardening, ChunkRecordEditedFlagRestoresOnlyDurableAuthority) {
+    Persistence::WorldSaveService service;
+    std::vector<std::string> errors;
+
+    TempSaveDir pristine_dir("pristine_provenance");
+    WorldStreamingState pristine;
+    auto pristine_chunk = pristine.get_or_create_chunk(IVec3(0, 0, 0));
+    pristine_chunk->sdf_data = {-1.0f, 1.0f};
+    pristine_chunk->mark_sdf_generated_current_params();
+    ASSERT_TRUE(service.save_world(pristine, pristine_dir.path, &errors));
+    WorldStreamingState pristine_loaded;
+    ASSERT_TRUE(service.load_world(pristine_loaded, pristine_dir.path, errors));
+    ASSERT_EQ(pristine_loaded.size(), 1u);
+    EXPECT_EQ(pristine_loaded.snapshot_chunks().front()->sdf_provenance(),
+        ChunkSdfProvenance::GeneratedCurrentParams);
+    EXPECT_EQ(pristine_loaded.snapshot_chunks().front()->voxel_revision(), 0u);
+
+    TempSaveDir edited_dir("edited_provenance");
+    WorldStreamingState edited;
+    auto edited_chunk = edited.get_or_create_chunk(IVec3(0, 0, 0));
+    edited_chunk->sdf_data = {-2.0f, 2.0f};
+    edited_chunk->mark_voxel_data_dirty();
+    errors.clear();
+    ASSERT_TRUE(service.save_world(edited, edited_dir.path, &errors));
+    edited_chunk->clear_voxel_data_dirty();
+    EXPECT_EQ(edited_chunk->sdf_provenance(), ChunkSdfProvenance::LoadedOrEdited);
+    WorldStreamingState edited_loaded;
+    ASSERT_TRUE(service.load_world(edited_loaded, edited_dir.path, errors));
+    ASSERT_EQ(edited_loaded.size(), 1u);
+    EXPECT_EQ(edited_loaded.snapshot_chunks().front()->sdf_provenance(),
+        ChunkSdfProvenance::LoadedOrEdited);
+    EXPECT_EQ(edited_loaded.snapshot_chunks().front()->voxel_revision(), 1u);
+}
+
+TEST(StreamingHardening, FarLodSnapshotFiltersAndOrdersNegativeRegionWithHalo) {
+    const TerrainGenParams params = FixtureParams();
+    SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
+    const std::size_t full_lattice =
+        static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
+        static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_Y + 1) *
+        static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_Z + 1);
+    const auto adopt = [&](const IVec3& coords, bool material, bool malformed_sdf, bool malformed_material) {
+        auto chunk = std::make_shared<Chunk>(coords);
+        chunk->sdf_data.assign(malformed_sdf ? 3u : full_lattice, static_cast<float>(coords.y));
+        if (material) {
+            chunk->material_data.assign(malformed_material ? 3u : full_lattice,
+                static_cast<u8>(coords.y + 8));
+        }
+        EXPECT_TRUE(world.adopt_streamed_chunk(chunk));
+    };
+    adopt(IVec3(-33, 2, -33), true, false, false); // negative halo
+    adopt(IVec3(-32, 1, -32), false, false, false);
+    adopt(IVec3(-32, -1, -32), true, false, false);
+    adopt(IVec3(0, 0, 0), true, false, false);       // positive halo
+    adopt(IVec3(1, 0, 0), true, false, false);       // outside halo
+    adopt(IVec3(-31, 0, -31), true, true, false);    // malformed SDF
+    adopt(IVec3(-30, 0, -30), true, false, true);    // malformed material
+
+    const auto snapshot = world.capture_far_lod_sdf_snapshot(-1, -1);
+    ASSERT_TRUE(snapshot);
+    ASSERT_EQ(snapshot->entries.size(), 4u);
+    EXPECT_EQ(snapshot->entries[0].coords, IVec3(-33, 2, -33));
+    EXPECT_EQ(snapshot->entries[1].coords, IVec3(-32, -1, -32));
+    EXPECT_EQ(snapshot->entries[2].coords, IVec3(-32, 1, -32));
+    EXPECT_EQ(snapshot->entries[3].coords, IVec3(0, 0, 0));
+    EXPECT_TRUE(snapshot->entries[2].material_data.empty());
+    EXPECT_EQ(snapshot->entries[1].material_data.size(), full_lattice);
 }
 
 TEST(StreamingHardening, PristineTileBuildIsDeterministic) {

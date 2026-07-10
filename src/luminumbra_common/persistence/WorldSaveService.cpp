@@ -288,9 +288,13 @@ std::shared_ptr<Chunk> DecodeChunkRecord(
         AddError(errors, "chunk record id does not match its payload: " + path.string());
         return nullptr;
     }
-    // Save-dirty is transient; all restored SDFs are authoritative inputs to
-    // far-LOD reduction even when an earlier save cleared that bit.
-    chunks.front()->mark_sdf_loaded_or_edited();
+    // Save-dirty is transient, but the container's sticky edited flag is the
+    // durable authority bit. Pristine cached chunks stay regenerable.
+    if ((record.flags & kRecordFlagEdited) != 0u) {
+        chunks.front()->mark_sdf_loaded_or_edited();
+    } else {
+        chunks.front()->mark_sdf_generated_current_params();
+    }
     return chunks.front();
 }
 
